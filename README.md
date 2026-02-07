@@ -61,6 +61,53 @@ print(result.objective)  # 0.5
 print(result.x)          # {"x": 0.5, "y": 0.5, "z": 0.0}
 ```
 
+## Roadmap
+
+The project follows a 4-phase plan. Phase 1 is currently in progress.
+
+### Phase 1: Working Solver (current)
+
+| Task | Status | Description |
+|------|--------|-------------|
+| T0 Architectural spike | Done | Rust-JAX GPU batch latency validation |
+| T1 Cargo workspace | Done | discopt-core + discopt-python, maturin builds |
+| T2 Expression IR | Done | Rust expression graph + PyO3 bindings |
+| T3 .nl parser | Done | AMPL .nl file parser in Rust |
+| T4 JAX DAG compiler | Done | Expression-to-JAX compilation |
+| T5 McCormick relaxations | Done | 19 convex/concave relaxation functions |
+| T6 Relaxation compiler | Done | jit+vmap compatible relaxation compilation |
+| T7 HiGHS LP wrapper | Done | LP solver with warm-start support |
+| T8 NLP evaluator | Done | JIT-compiled grad/Hessian/Jacobian via JAX |
+| T9 cyipopt NLP wrapper | Done | Ipopt interface for continuous relaxations |
+| T10 CI/CD | Done | GitHub Actions, ruff, mypy, cargo |
+| T11 B&B tree | Done | Rust node pool, branching, pruning |
+| T12 Batch dispatch | Done | Zero-copy Rust-Python array transfer |
+| T13 FBBT/presolve | Done | Interval arithmetic, probing, Big-M simplification |
+| T14 Solver orchestrator | Done | End-to-end Model.solve() via B&B |
+| T9a Rust Ipopt (ripopt) | In progress | Translating Ipopt's IPM to pure Rust |
+| T15 MINLPLib validation | Not started | Validate against 24 known optima |
+| T16 Phase 1 gate | Not started | All Phase 1 criteria pass |
+
+### Phase 2: GPU + Differentiability
+
+- GPU-batched interior point method (dense Cholesky, vmap)
+- Batch relaxation evaluator with GPU acceleration
+- Multi-start primal heuristics
+- OBBT + advanced presolve
+- Differentiable solving (custom_jvp, implicit differentiation)
+- Replace cyipopt with Rust Ipopt in solver loop
+
+### Phase 3: Competitive Performance
+
+- Piecewise McCormick + alphaBB relaxations
+- Cutting planes (RLT, outer approximation)
+- GNN-based branching policy
+
+### Phase 4: Polish + Release
+
+- Documentation + example notebooks
+- Release engineering (`pip install discopt`)
+
 ## Building
 
 Requires Rust 1.84+, Python 3.10+, and Ipopt.
