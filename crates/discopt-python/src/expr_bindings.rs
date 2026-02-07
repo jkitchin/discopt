@@ -20,6 +20,13 @@ pub struct PyModelRepr {
     inner: ModelRepr,
 }
 
+impl PyModelRepr {
+    /// Create a PyModelRepr from a Rust ModelRepr (crate-internal).
+    pub(crate) fn from_model_repr(model: ModelRepr) -> Self {
+        Self { inner: model }
+    }
+}
+
 #[pymethods]
 impl PyModelRepr {
     /// Number of expression nodes in the arena.

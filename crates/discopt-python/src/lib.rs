@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 
 mod batch;
 mod expr_bindings;
+mod nl_bindings;
 
 /// Returns the discopt version.
 #[pyfunction]
@@ -16,5 +17,7 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<batch::PyBatchDispatcher>()?;
     m.add_class::<expr_bindings::PyModelRepr>()?;
     m.add_function(wrap_pyfunction!(expr_bindings::model_to_repr, m)?)?;
+    m.add_function(wrap_pyfunction!(nl_bindings::parse_nl_file, m)?)?;
+    m.add_function(wrap_pyfunction!(nl_bindings::parse_nl_string, m)?)?;
     Ok(())
 }
