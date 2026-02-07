@@ -13,3 +13,25 @@ manifest-path = "crates/discopt-python/Cargo.toml"
 python-source = "python"
 module-name = "discopt._rust"
 features = ["pyo3/extension-module"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
+timeout = 300
+markers = [
+    "smoke: quick sanity tests",
+    "slow: long-running tests",
+    "gpu: requires GPU",
+]

@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Rust
+/target/
+/spike/target/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Environments
+.env
+.venv/

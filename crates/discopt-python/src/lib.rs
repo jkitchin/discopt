@@ -1,5 +1,8 @@
 use pyo3::prelude::*;
 
+mod batch;
+mod expr_bindings;
+
 /// Returns the discopt version.
 #[pyfunction]
 fn version() -> &'static str {
@@ -10,5 +13,8 @@ fn version() -> &'static str {
 #[pymodule]
 fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
+    m.add_class::<batch::PyBatchDispatcher>()?;
+    m.add_class::<expr_bindings::PyModelRepr>()?;
+    m.add_function(wrap_pyfunction!(expr_bindings::model_to_repr, m)?)?;
     Ok(())
 }

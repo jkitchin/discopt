@@ -3,6 +3,9 @@
 //! This crate provides the Branch-and-Bound engine, expression IR,
 //! and preprocessing for the discopt MINLP solver.
 
+pub mod expr;
+pub mod bnb;
+
 /// Returns the version string.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
