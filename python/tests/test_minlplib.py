@@ -97,7 +97,13 @@ ALL_INSTANCES: list[NLInstance] = [
     NLInstance("ex1221", 7.66718007, 5, True, False),
     NLInstance("ex1225", 31.0, 8, True, False),
     NLInstance("ex1226", -17.0, 5, True, False),
-    # --- st_e series ---
+    # --- st_e series: simple test instances from BARON book ---
+    NLInstance("st_e01", -6.66666667, 2, False, False),  # QCP, linear obj + bilinear constraint
+    NLInstance("st_e02", 201.15933410, 3, False, False),  # QCP, quadratic constraints
+    NLInstance("st_e06", 0.0, 3, False, False),  # NLP, polynomial constraint
+    NLInstance("st_e07", -400.0, 10, False, False),  # QCP, linear obj + quadratic constraints
+    NLInstance("st_e08", 0.74178196, 2, False, False),  # QCP, linear obj + quadratic constraints
+    NLInstance("st_e09", -0.50, 2, False, False),  # QCQP, quadratic obj + quadratic constraint
     NLInstance("st_e13", 2.0, 2, True, False),
     NLInstance("st_e15", 7.66718007, 5, True, False),
     NLInstance("st_e27", 2.0, 4, True, False),
@@ -152,6 +158,7 @@ ALL_INSTANCES: list[NLInstance] = [
     NLInstance("nvs10", -310.80, 2, False, True),
     NLInstance("nvs11", -431.0, 3, False, True),
     NLInstance("nvs12", -481.20, 4, False, True),
+    NLInstance("nvs13", -585.20, 5, False, True),
     NLInstance(
         "nvs14",
         -40358.15477,
@@ -164,6 +171,10 @@ ALL_INSTANCES: list[NLInstance] = [
     ),
     NLInstance("nvs15", 1.0, 3, False, True),
     NLInstance("nvs16", 0.70312500, 2, False, True),
+    NLInstance("nvs17", -1100.40, 7, False, True),
+    NLInstance("nvs18", -778.40, 6, False, True),
+    NLInstance("nvs19", -1098.40, 8, False, True),
+    NLInstance("nvs23", -1125.20, 9, False, True, time_limit=180.0, max_nodes=200_000),
     NLInstance(
         "nvs21",
         -5.68478250,
@@ -473,15 +484,15 @@ class TestMINLPLibGate:
 class TestInstanceCount:
     """Verify we have enough instances for meaningful validation."""
 
-    def test_at_least_25_instances(self) -> None:
-        assert len(INSTANCES) >= 25, (
-            f"Only {len(INSTANCES)} instances available, need >= 25. "
+    def test_at_least_30_instances(self) -> None:
+        assert len(INSTANCES) >= 30, (
+            f"Only {len(INSTANCES)} instances available, need >= 30. "
             f"Available: {[inst.name for inst in INSTANCES]}"
         )
 
-    def test_at_least_20_solvable(self) -> None:
-        assert len(SOLVABLE_INSTANCES) >= 20, (
-            f"Only {len(SOLVABLE_INSTANCES)} solvable instances, need >= 20. "
+    def test_at_least_30_solvable(self) -> None:
+        assert len(SOLVABLE_INSTANCES) >= 30, (
+            f"Only {len(SOLVABLE_INSTANCES)} solvable instances, need >= 30. "
             f"Solvable: {[inst.name for inst in SOLVABLE_INSTANCES]}"
         )
 
@@ -489,4 +500,4 @@ class TestInstanceCount:
         assert len(MINLP_INSTANCES) >= 20, (
             f"Need >= 20 MINLP instances, have {len(MINLP_INSTANCES)}"
         )
-        assert len(NLP_INSTANCES) >= 3, f"Need >= 3 NLP instances, have {len(NLP_INSTANCES)}"
+        assert len(NLP_INSTANCES) >= 8, f"Need >= 8 NLP instances, have {len(NLP_INSTANCES)}"
