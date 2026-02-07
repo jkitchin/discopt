@@ -28,3 +28,15 @@ class LPResult:
     basis: Optional[object] = None
     iterations: int = 0
     wall_time: float = 0.0
+
+
+@dataclass
+class NLPResult:
+    """Result of solving a nonlinear program."""
+
+    status: SolveStatus
+    x: Optional[np.ndarray] = None
+    objective: Optional[float] = None
+    multipliers: Optional[np.ndarray] = None  # constraint multipliers
+    iterations: int = 0
+    wall_time: float = 0.0

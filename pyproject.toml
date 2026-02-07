@@ -1,0 +1,15 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "discopt"
+version = "0.1.0"
+description = "Hybrid MINLP solver combining Rust and JAX"
+requires-python = ">=3.10"
+
+[tool.maturin]
+manifest-path = "crates/discopt-python/Cargo.toml"
+python-source = "python"
+module-name = "discopt._rust"
+features = ["pyo3/extension-module"]

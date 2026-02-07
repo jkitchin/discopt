@@ -1,0 +1,15 @@
+[workspace]
+members = ["crates/discopt-core", "crates/discopt-python"]
+exclude = ["spike"]  # spike has its own Cargo.toml
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/discopt-org/discopt"
+
+[workspace.dependencies]
+pyo3 = { version = "0.23", features = ["extension-module"] }
+numpy = "0.23"
+# ripopt = { path = "../ripopt" }  # uncomment when ripopt repo is ready
