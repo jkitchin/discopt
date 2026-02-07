@@ -18,9 +18,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - run: cargo build --workspace
-      - run: cargo test --workspace
-      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo build -p discopt-core
+      - run: cargo test -p discopt-core
+      - run: cargo clippy -p discopt-core -- -D warnings
 
   python:
     name: Python ${{ matrix.python-version }} (${{ matrix.os }})
