@@ -47,7 +47,7 @@ jobs:
           python -m venv .venv
           source .venv/bin/activate
           pip install maturin
-          pip install jax jaxlib numpy scipy highspy cyipopt pytest ruff mypy
+          pip install jax jaxlib numpy scipy highspy cyipopt pytest pytest-timeout ruff mypy
           cd crates/discopt-python && maturin develop && cd ../..
       - name: Lint
         run: |
