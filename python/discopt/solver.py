@@ -21,7 +21,6 @@ from jaxminlp_api.core import (
     Model,
     SolveResult,
     VarType,
-    _IndicatorConstraint,
 )
 
 from discopt._jax.nlp_evaluator import NLPEvaluator
@@ -216,9 +215,6 @@ def solve_model(
             ub_clipped = np.clip(node_ub, -100.0, 100.0)
             x0 = 0.5 * (lb_clipped + ub_clipped)
 
-            # Temporarily override evaluator variable bounds for this node
-            original_lb = evaluator._model._variables.copy()
-
             # Solve NLP with node-specific bounds
             t_jax_start = time.perf_counter()
             nlp_result = _solve_node_nlp(
@@ -247,7 +243,7 @@ def solve_model(
         # Import results back to Rust tree
         t_rust_start = time.perf_counter()
         tree.import_results(result_ids, result_lbs, result_sols, result_feas)
-        proc_stats = tree.process_evaluated()
+        tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
 
         iteration += 1
