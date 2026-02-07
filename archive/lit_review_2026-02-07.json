@@ -1,0 +1,176 @@
+{
+  "generated_at": "2026-02-07T01:25:41.077227",
+  "period_start": "2026-01-24",
+  "period_end": "2026-02-07",
+  "total_papers_scanned": 5,
+  "summary": {
+    "critical": 1,
+    "high": 3,
+    "medium": 0,
+    "low": 0
+  },
+  "action_items": [
+    "[CRITICAL] Review: \"Tighter McCormick Relaxations via Affine Arithmetic for Spatial Branch-and-Bound\" (components: bound_tightening, branching, global_optimization, relaxation, software)",
+    "[HIGH] Review: \"GPU-Accelerated Branch-and-Bound for Mixed-Integer Nonlinear Programs\" (components: branching, global_optimization, software)",
+    "[HIGH] Review: \"Improved Cutting Planes for Quadratically Constrained Programs via Perspective Reformulation\" (components: cutting_planes, global_optimization, relaxation, software)",
+    "[HIGH] Review: \"Learning Branching Heuristics for MINLP via Graph Neural Networks\" (components: branching, global_optimization, software)"
+  ],
+  "component_summary": {
+    "bound_tightening": [
+      "Tighter McCormick Relaxations via Affine Arithmetic for Spatial Branch-and-Bound"
+    ],
+    "branching": [
+      "Tighter McCormick Relaxations via Affine Arithmetic for Spatial Branch-and-Bound",
+      "GPU-Accelerated Branch-and-Bound for Mixed-Integer Nonlinear Programs",
+      "Learning Branching Heuristics for MINLP via Graph Neural Networks"
+    ],
+    "global_optimization": [
+      "Tighter McCormick Relaxations via Affine Arithmetic for Spatial Branch-and-Bound",
+      "GPU-Accelerated Branch-and-Bound for Mixed-Integer Nonlinear Programs",
+      "Improved Cutting Planes for Quadratically Constrained Programs via Perspective Reformulation",
+      "Learning Branching Heuristics for MINLP via Graph Neural Networks"
+    ],
+    "relaxation": [
+      "Tighter McCormick Relaxations via Affine Arithmetic for Spatial Branch-and-Bound",
+      "Improved Cutting Planes for Quadratically Constrained Programs via Perspective Reformulation"
+    ],
+    "software": [
+      "Tighter McCormick Relaxations via Affine Arithmetic for Spatial Branch-and-Bound",
+      "GPU-Accelerated Branch-and-Bound for Mixed-Integer Nonlinear Programs",
+      "Improved Cutting Planes for Quadratically Constrained Programs via Perspective Reformulation",
+      "Learning Branching Heuristics for MINLP via Graph Neural Networks"
+    ],
+    "cutting_planes": [
+      "Improved Cutting Planes for Quadratically Constrained Programs via Perspective Reformulation"
+    ]
+  },
+  "papers": [
+    {
+      "title": "Tighter McCormick Relaxations via Affine Arithmetic for Spatial Branch-and-Bound",
+      "authors": [
+        "Smith, A.",
+        "Jones, B."
+      ],
+      "url": "https://arxiv.org/abs/2601.99999",
+      "arxiv_id": "2601.99999",
+      "doi": null,
+      "published": "2026-01-30",
+      "relevance": "critical",
+      "relevance_score": 0.85,
+      "matched_components": [
+        "bound_tightening",
+        "branching",
+        "global_optimization",
+        "relaxation",
+        "software"
+      ],
+      "matched_keywords": [
+        "affine arithmetic",
+        "baron",
+        "branch-and-bound",
+        "convex envelope",
+        "interval arithmetic",
+        "mccormick",
+        "minlp",
+        "minlplib",
+        "spatial branch"
+      ],
+      "summary": null,
+      "implementation_notes": null,
+      "priority_phase": null
+    },
+    {
+      "title": "GPU-Accelerated Branch-and-Bound for Mixed-Integer Nonlinear Programs",
+      "authors": [
+        "Chen, X.",
+        "Wang, Y."
+      ],
+      "url": "https://arxiv.org/abs/2601.88888",
+      "arxiv_id": "2601.88888",
+      "doi": null,
+      "published": "2026-02-01",
+      "relevance": "high",
+      "relevance_score": 0.6,
+      "matched_components": [
+        "branching",
+        "global_optimization",
+        "software"
+      ],
+      "matched_keywords": [
+        "baron",
+        "benchmark",
+        "branch-and-bound",
+        "minlp",
+        "mixed-integer nonlinear",
+        "pooling problem",
+        "scip",
+        "spatial branch"
+      ],
+      "summary": null,
+      "implementation_notes": null,
+      "priority_phase": null
+    },
+    {
+      "title": "Improved Cutting Planes for Quadratically Constrained Programs via Perspective Reformulation",
+      "authors": [
+        "Garcia, M.",
+        "Brown, T."
+      ],
+      "url": "https://arxiv.org/abs/2602.33333",
+      "arxiv_id": "2602.33333",
+      "doi": null,
+      "published": "2026-02-04",
+      "relevance": "high",
+      "relevance_score": 0.55,
+      "matched_components": [
+        "cutting_planes",
+        "global_optimization",
+        "relaxation",
+        "software"
+      ],
+      "matched_keywords": [
+        "baron",
+        "benchmark",
+        "cutting plane",
+        "miqcqp",
+        "qcqp",
+        "quadratically constrained",
+        "rlt"
+      ],
+      "summary": null,
+      "implementation_notes": null,
+      "priority_phase": null
+    },
+    {
+      "title": "Learning Branching Heuristics for MINLP via Graph Neural Networks",
+      "authors": [
+        "Kim, D.",
+        "Patel, R."
+      ],
+      "url": "https://arxiv.org/abs/2602.11111",
+      "arxiv_id": "2602.11111",
+      "doi": null,
+      "published": "2026-02-03",
+      "relevance": "high",
+      "relevance_score": 0.5,
+      "matched_components": [
+        "branching",
+        "global_optimization",
+        "software"
+      ],
+      "matched_keywords": [
+        "branch-and-bound",
+        "minlp",
+        "minlplib",
+        "nonconvex",
+        "reliability branching",
+        "scip",
+        "spatial branch",
+        "strong branching"
+      ],
+      "summary": null,
+      "implementation_notes": null,
+      "priority_phase": null
+    }
+  ]
+}
