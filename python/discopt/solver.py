@@ -225,6 +225,42 @@ def solve_model(
     else:
         print("Using Ipopt (via cyipopt)")
 
+    # --- Problem classification: dispatch LP/QP to specialized solvers ---
+    # Skip LP/QP classification for .nl models: extract_lp_data/extract_qp_data
+    # rely on the DAG expression structure which .nl models don't have.
+    if not _has_nl_repr(model):
+        try:
+            from discopt._jax.problem_classifier import ProblemClass, classify_problem
+
+            problem_class = classify_problem(model)
+        except Exception:
+            problem_class = None
+
+        if problem_class == ProblemClass.LP:
+            return _solve_lp(model, t_start)
+        elif problem_class == ProblemClass.QP:
+            return _solve_qp(model, t_start)
+        elif problem_class == ProblemClass.MILP:
+            return _solve_milp_bb(
+                model,
+                time_limit,
+                gap_tolerance,
+                batch_size,
+                strategy,
+                max_nodes,
+                t_start,
+            )
+        elif problem_class == ProblemClass.MIQP:
+            return _solve_miqp_bb(
+                model,
+                time_limit,
+                gap_tolerance,
+                batch_size,
+                strategy,
+                max_nodes,
+                t_start,
+            )
+
     # --- Pure continuous: solve directly with NLP, no B&B needed ---
     if _is_pure_continuous(model):
         return _solve_continuous(model, time_limit, ipopt_options, t_start, nlp_solver)
@@ -310,7 +346,7 @@ def solve_model(
 
         # Solve NLP relaxation for each node in the batch
         t_jax_start = time.perf_counter()
-        if nlp_solver == "ipm" and n_batch > 1:
+        if nlp_solver == "ipm" and n_batch > 1 and hasattr(evaluator, "_obj_fn"):
             result_ids, result_lbs, result_sols, result_feas = _solve_batch_ipm(
                 evaluator,
                 batch_lb,
@@ -490,7 +526,7 @@ def _solve_continuous(
         nlp_result = solve_nlp_ripopt(
             evaluator, x0, constraint_bounds=constraint_bounds, options=opts
         )
-    elif nlp_solver == "ipm":
+    elif nlp_solver == "ipm" and hasattr(evaluator, "_obj_fn"):
         from discopt._jax.ipm import solve_nlp_ipm
 
         nlp_result = solve_nlp_ipm(evaluator, x0, constraint_bounds=constraint_bounds, options=opts)
@@ -541,6 +577,12 @@ def _solve_node_nlp(
     if nlp_solver == "ripopt":
         return _solve_node_nlp_ripopt(evaluator, x0, node_lb, node_ub, constraint_bounds, options)
     if nlp_solver == "ipm":
+        # JAX IPM requires JAX-compiled _obj_fn/_cons_fn; fall back to ipopt
+        # for non-JAX evaluators (e.g. NLPEvaluatorFromNl from .nl files).
+        if not hasattr(evaluator, "_obj_fn"):
+            return _solve_node_nlp_ipopt(
+                evaluator, x0, node_lb, node_ub, constraint_bounds, options
+            )
         return _solve_node_nlp_ipm(evaluator, x0, node_lb, node_ub, constraint_bounds, options)
     return _solve_node_nlp_ipopt(evaluator, x0, node_lb, node_ub, constraint_bounds, options)
 
@@ -754,4 +796,367 @@ def _solve_node_nlp_ipopt(
         status=status,
         x=np.asarray(x),
         objective=float(info["obj_val"]),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Specialized LP/QP solvers
+# ---------------------------------------------------------------------------
+
+
+def _solve_lp(model: Model, t_start: float) -> SolveResult:
+    """Solve an LP using the pure-JAX LP IPM (no NLP evaluator needed)."""
+    from discopt._jax.lp_ipm import lp_ipm_solve
+    from discopt._jax.problem_classifier import extract_lp_data
+
+    t_jax_start = time.perf_counter()
+    lp_data = extract_lp_data(model)
+    state = lp_ipm_solve(lp_data.c, lp_data.A_eq, lp_data.b_eq, lp_data.x_l, lp_data.x_u)
+    jax_time = time.perf_counter() - t_jax_start
+    wall_time = time.perf_counter() - t_start
+
+    n_orig = sum(v.size for v in model._variables)
+    x_flat = np.asarray(state.x[:n_orig])
+    obj_val = float(state.obj) + lp_data.obj_const
+
+    conv = int(state.converged)
+    if conv in (1, 2):
+        status = "optimal"
+    elif conv == 3:
+        status = "iteration_limit"
+    else:
+        status = "error"
+
+    return SolveResult(
+        status=status,
+        objective=obj_val,
+        bound=obj_val if status == "optimal" else None,
+        gap=0.0 if status == "optimal" else None,
+        x=_unpack_solution(model, x_flat),
+        wall_time=wall_time,
+        node_count=0,
+        rust_time=0.0,
+        jax_time=jax_time,
+        python_time=wall_time - jax_time,
+    )
+
+
+def _solve_qp(model: Model, t_start: float) -> SolveResult:
+    """Solve a QP using the pure-JAX QP IPM."""
+    from discopt._jax.problem_classifier import extract_qp_data
+    from discopt._jax.qp_ipm import qp_ipm_solve
+
+    t_jax_start = time.perf_counter()
+    qp_data = extract_qp_data(model)
+    state = qp_ipm_solve(
+        qp_data.Q,
+        qp_data.c,
+        qp_data.A_eq,
+        qp_data.b_eq,
+        qp_data.x_l,
+        qp_data.x_u,
+    )
+    jax_time = time.perf_counter() - t_jax_start
+    wall_time = time.perf_counter() - t_start
+
+    n_orig = sum(v.size for v in model._variables)
+    x_flat = np.asarray(state.x[:n_orig])
+    obj_val = float(state.obj) + qp_data.obj_const
+
+    conv = int(state.converged)
+    if conv in (1, 2):
+        status = "optimal"
+    elif conv == 3:
+        status = "iteration_limit"
+    else:
+        status = "error"
+
+    return SolveResult(
+        status=status,
+        objective=obj_val,
+        bound=obj_val if status == "optimal" else None,
+        gap=0.0 if status == "optimal" else None,
+        x=_unpack_solution(model, x_flat),
+        wall_time=wall_time,
+        node_count=0,
+        rust_time=0.0,
+        jax_time=jax_time,
+        python_time=wall_time - jax_time,
+    )
+
+
+def _solve_milp_bb(
+    model: Model,
+    time_limit: float,
+    gap_tolerance: float,
+    batch_size: int,
+    strategy: str,
+    max_nodes: int,
+    t_start: float,
+) -> SolveResult:
+    """Solve a MILP via B&B with LP relaxation solves at each node."""
+    import jax.numpy as jnp
+
+    from discopt._jax.lp_ipm import lp_ipm_solve
+    from discopt._jax.problem_classifier import extract_lp_data
+
+    rust_time = 0.0
+    jax_time = 0.0
+
+    t_jax_start = time.perf_counter()
+    lp_data = extract_lp_data(model)
+    jax_time += time.perf_counter() - t_jax_start
+
+    n_vars, lb, ub, int_offsets, int_sizes = _extract_variable_info(model)
+    n_orig = sum(v.size for v in model._variables)
+
+    t_rust_start = time.perf_counter()
+    tree = PyTreeManager(n_vars, lb.tolist(), ub.tolist(), int_offsets, int_sizes, strategy)
+    tree.initialize()
+    rust_time += time.perf_counter() - t_rust_start
+
+    iteration = 0
+    while True:
+        elapsed = time.perf_counter() - t_start
+        if elapsed >= time_limit:
+            break
+
+        t_rust_start = time.perf_counter()
+        batch_lb, batch_ub, batch_ids = tree.export_batch(batch_size)
+        rust_time += time.perf_counter() - t_rust_start
+
+        n_batch = len(batch_ids)
+        if n_batch == 0:
+            break
+
+        t_jax_start = time.perf_counter()
+        result_ids = np.array(batch_ids, dtype=np.int64)
+        result_lbs = np.empty(n_batch, dtype=np.float64)
+        result_sols = np.empty((n_batch, n_vars), dtype=np.float64)
+        result_feas = np.zeros(n_batch, dtype=bool)
+
+        for i in range(n_batch):
+            node_lb = np.array(batch_lb[i])
+            node_ub = np.array(batch_ub[i])
+
+            x_l_node = jnp.array(node_lb, dtype=jnp.float64)
+            x_u_node = jnp.array(node_ub, dtype=jnp.float64)
+
+            n_slack = lp_data.x_l.shape[0] - n_orig
+            x_l_full = jnp.concatenate([x_l_node, jnp.zeros(n_slack)])
+            x_u_full = jnp.concatenate([x_u_node, jnp.full(n_slack, 1e20)])
+
+            try:
+                state = lp_ipm_solve(lp_data.c, lp_data.A_eq, lp_data.b_eq, x_l_full, x_u_full)
+                conv = int(state.converged)
+                if conv in (1, 2, 3):
+                    result_lbs[i] = float(state.obj) + lp_data.obj_const
+                    result_sols[i] = np.asarray(state.x[:n_vars])
+                else:
+                    result_lbs[i] = 1e30
+                    lb_c = np.clip(node_lb, -100, 100)
+                    ub_c = np.clip(node_ub, -100, 100)
+                    result_sols[i] = 0.5 * (lb_c + ub_c)
+            except Exception:
+                result_lbs[i] = 1e30
+                lb_c = np.clip(node_lb, -100, 100)
+                ub_c = np.clip(node_ub, -100, 100)
+                result_sols[i] = 0.5 * (lb_c + ub_c)
+
+        jax_time += time.perf_counter() - t_jax_start
+
+        t_rust_start = time.perf_counter()
+        tree.import_results(result_ids, result_lbs, result_sols, result_feas)
+        tree.process_evaluated()
+        rust_time += time.perf_counter() - t_rust_start
+
+        iteration += 1
+        if tree.is_finished():
+            break
+        if tree.gap() <= gap_tolerance:
+            break
+        stats = tree.stats()
+        if stats["total_nodes"] >= max_nodes:
+            break
+
+    wall_time = time.perf_counter() - t_start
+    python_time = wall_time - rust_time - jax_time
+    stats = tree.stats()
+    incumbent = tree.incumbent()
+
+    if incumbent is not None:
+        sol_array, obj_val = incumbent
+        if obj_val >= 1e20:
+            incumbent = None
+
+    if incumbent is not None:
+        sol_flat = np.array(sol_array)
+        x_dict = _unpack_solution(model, sol_flat)
+        if tree.gap() <= gap_tolerance or tree.is_finished():
+            status = "optimal"
+        else:
+            status = "feasible"
+    else:
+        x_dict = None
+        obj_val = None
+        if stats["total_nodes"] >= max_nodes:
+            status = "node_limit"
+        elif wall_time >= time_limit:
+            status = "time_limit"
+        else:
+            status = "infeasible"
+
+    return SolveResult(
+        status=status,
+        objective=obj_val,
+        bound=stats["global_lower_bound"],
+        gap=stats["gap"],
+        x=x_dict,
+        wall_time=wall_time,
+        node_count=stats["total_nodes"],
+        rust_time=rust_time,
+        jax_time=jax_time,
+        python_time=python_time,
+    )
+
+
+def _solve_miqp_bb(
+    model: Model,
+    time_limit: float,
+    gap_tolerance: float,
+    batch_size: int,
+    strategy: str,
+    max_nodes: int,
+    t_start: float,
+) -> SolveResult:
+    """Solve a MIQP via B&B with QP relaxation solves at each node."""
+    import jax.numpy as jnp
+
+    from discopt._jax.problem_classifier import extract_qp_data
+    from discopt._jax.qp_ipm import qp_ipm_solve
+
+    rust_time = 0.0
+    jax_time = 0.0
+
+    t_jax_start = time.perf_counter()
+    qp_data = extract_qp_data(model)
+    jax_time += time.perf_counter() - t_jax_start
+
+    n_vars, lb, ub, int_offsets, int_sizes = _extract_variable_info(model)
+    n_orig = sum(v.size for v in model._variables)
+
+    t_rust_start = time.perf_counter()
+    tree = PyTreeManager(n_vars, lb.tolist(), ub.tolist(), int_offsets, int_sizes, strategy)
+    tree.initialize()
+    rust_time += time.perf_counter() - t_rust_start
+
+    iteration = 0
+    while True:
+        elapsed = time.perf_counter() - t_start
+        if elapsed >= time_limit:
+            break
+
+        t_rust_start = time.perf_counter()
+        batch_lb, batch_ub, batch_ids = tree.export_batch(batch_size)
+        rust_time += time.perf_counter() - t_rust_start
+
+        n_batch = len(batch_ids)
+        if n_batch == 0:
+            break
+
+        t_jax_start = time.perf_counter()
+        result_ids = np.array(batch_ids, dtype=np.int64)
+        result_lbs = np.empty(n_batch, dtype=np.float64)
+        result_sols = np.empty((n_batch, n_vars), dtype=np.float64)
+        result_feas = np.zeros(n_batch, dtype=bool)
+
+        for i in range(n_batch):
+            node_lb = np.array(batch_lb[i])
+            node_ub = np.array(batch_ub[i])
+
+            x_l_node = jnp.array(node_lb, dtype=jnp.float64)
+            x_u_node = jnp.array(node_ub, dtype=jnp.float64)
+
+            n_slack = qp_data.x_l.shape[0] - n_orig
+            x_l_full = jnp.concatenate([x_l_node, jnp.zeros(n_slack)])
+            x_u_full = jnp.concatenate([x_u_node, jnp.full(n_slack, 1e20)])
+
+            try:
+                state = qp_ipm_solve(
+                    qp_data.Q,
+                    qp_data.c,
+                    qp_data.A_eq,
+                    qp_data.b_eq,
+                    x_l_full,
+                    x_u_full,
+                )
+                conv = int(state.converged)
+                if conv in (1, 2, 3):
+                    result_lbs[i] = float(state.obj) + qp_data.obj_const
+                    result_sols[i] = np.asarray(state.x[:n_vars])
+                else:
+                    result_lbs[i] = 1e30
+                    lb_c = np.clip(node_lb, -100, 100)
+                    ub_c = np.clip(node_ub, -100, 100)
+                    result_sols[i] = 0.5 * (lb_c + ub_c)
+            except Exception:
+                result_lbs[i] = 1e30
+                lb_c = np.clip(node_lb, -100, 100)
+                ub_c = np.clip(node_ub, -100, 100)
+                result_sols[i] = 0.5 * (lb_c + ub_c)
+
+        jax_time += time.perf_counter() - t_jax_start
+
+        t_rust_start = time.perf_counter()
+        tree.import_results(result_ids, result_lbs, result_sols, result_feas)
+        tree.process_evaluated()
+        rust_time += time.perf_counter() - t_rust_start
+
+        iteration += 1
+        if tree.is_finished():
+            break
+        if tree.gap() <= gap_tolerance:
+            break
+        stats = tree.stats()
+        if stats["total_nodes"] >= max_nodes:
+            break
+
+    wall_time = time.perf_counter() - t_start
+    python_time = wall_time - rust_time - jax_time
+    stats = tree.stats()
+    incumbent = tree.incumbent()
+
+    if incumbent is not None:
+        sol_array, obj_val = incumbent
+        if obj_val >= 1e20:
+            incumbent = None
+
+    if incumbent is not None:
+        sol_flat = np.array(sol_array)
+        x_dict = _unpack_solution(model, sol_flat)
+        if tree.gap() <= gap_tolerance or tree.is_finished():
+            status = "optimal"
+        else:
+            status = "feasible"
+    else:
+        x_dict = None
+        obj_val = None
+        if stats["total_nodes"] >= max_nodes:
+            status = "node_limit"
+        elif wall_time >= time_limit:
+            status = "time_limit"
+        else:
+            status = "infeasible"
+
+    return SolveResult(
+        status=status,
+        objective=obj_val,
+        bound=stats["global_lower_bound"],
+        gap=stats["gap"],
+        x=x_dict,
+        wall_time=wall_time,
+        node_count=stats["total_nodes"],
+        rust_time=rust_time,
+        jax_time=jax_time,
+        python_time=python_time,
     )
