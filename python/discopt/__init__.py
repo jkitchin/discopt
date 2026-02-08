@@ -1,4 +1,31 @@
-"""discopt - Discrete optimization with JAX."""
+"""
+discopt -- Mixed-Integer Nonlinear Programming with JAX and Rust.
+
+A hybrid MINLP solver combining a Rust backend (LP solving, Branch & Bound tree
+management), JAX (automatic differentiation, NLP relaxations, GPU acceleration),
+and Python orchestration.
+
+Quick Start
+-----------
+>>> import discopt
+>>> m = discopt.Model("example")
+>>> x = m.continuous("x", shape=(2,), lb=0, ub=10)
+>>> y = m.binary("y")
+>>> m.minimize(x[0] + 2 * x[1] + 5 * y)
+>>> m.subject_to(x[0] + x[1] >= 3)
+>>> result = m.solve()
+
+Submodules
+----------
+modeling
+    Model building API: Model, Variable, Expression, Constraint, math functions.
+solver
+    Solve orchestrator: Branch & Bound with NLP relaxations.
+solvers
+    NLP solver backends: ripopt (Rust IPM), pure-JAX IPM (vmap batch), cyipopt (Ipopt).
+"""
+
+__version__ = "0.1.0"
 
 from discopt.modeling import (
     Constraint as Constraint,
@@ -14,6 +41,9 @@ from discopt.modeling import (
 )
 from discopt.modeling import (
     SolveResult as SolveResult,
+)
+from discopt.modeling import (
+    Variable as Variable,
 )
 from discopt.modeling import (
     VarType as VarType,

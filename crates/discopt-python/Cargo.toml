@@ -12,5 +12,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 discopt-core = { path = "../discopt-core" }
+ripopt.workspace = true
 pyo3.workspace = true
 numpy.workspace = true

@@ -11,6 +11,11 @@ build/
 /target/
 /spike/target/
 
+# Caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
 # IDE
 .vscode/
 .idea/

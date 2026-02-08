@@ -67,7 +67,7 @@ class NLPEvaluator:
         # Compile gradient (jax.grad of scalar objective)
         self._grad_fn = jax.jit(jax.grad(obj_fn))
 
-        # Compile Hessian
+        # Compile Hessian (objective only)
         self._hess_fn = jax.jit(jax.hessian(obj_fn))
 
         # Compile constraints
@@ -96,6 +96,28 @@ class NLPEvaluator:
             self._constraint_fns = []
             self._cons_fn = None
             self._jac_fn = None
+
+        # Compile Lagrangian Hessian: obj_factor * ∇²f(x) + Σᵢ λᵢ ∇²gᵢ(x)
+        cons_fn = self._cons_fn
+
+        def lagrangian(x, obj_factor, lam):
+            L = obj_factor * obj_fn(x)
+            if cons_fn is not None:
+                L = L + jnp.dot(lam, cons_fn(x))
+            return L
+
+        self._lagrangian_hess_fn = jax.jit(jax.hessian(lagrangian, argnums=0))
+
+    def evaluate_lagrangian_hessian(
+        self, x: np.ndarray, obj_factor: float, lambda_: np.ndarray
+    ) -> np.ndarray:
+        """Evaluate Hessian of the Lagrangian at x.
+
+        H = obj_factor * ∇²f(x) + Σᵢ λᵢ ∇²gᵢ(x)
+        """
+        x_jax = jnp.array(x, dtype=jnp.float64)
+        lam = jnp.array(lambda_, dtype=jnp.float64)
+        return np.asarray(self._lagrangian_hess_fn(x_jax, obj_factor, lam))
 
     def evaluate_objective(self, x: np.ndarray) -> float:
         """Evaluate objective at x. Returns scalar."""

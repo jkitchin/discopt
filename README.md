@@ -13,7 +13,10 @@ A hybrid Mixed-Integer Nonlinear Programming (MINLP) solver combining a Rust bac
 Model.solve()  -->  Python orchestrator  -->  Rust TreeManager (B&B engine)
                         |                          |
                   JAX NLPEvaluator           Node pool / branching / pruning
-                  cyipopt (Ipopt)            Zero-copy numpy arrays (PyO3)
+                  NLP backends:              Zero-copy numpy arrays (PyO3)
+                    ripopt  (Rust IPM, PyO3)
+                    ipm     (pure-JAX, vmap batch)  [default]
+                    cyipopt (Ipopt)
 ```
 
 **Rust backend** (`crates/discopt-core`): Expression IR, Branch & Bound tree (node pool, branching, pruning), .nl file parser, FBBT/presolve (interval arithmetic, probing, Big-M simplification).
@@ -22,7 +25,9 @@ Model.solve()  -->  Python orchestrator  -->  Rust TreeManager (B&B engine)
 
 **JAX layer** (`python/discopt/_jax`): DAG compiler mapping modeling expressions to JAX primitives, JIT-compiled NLP evaluator (objective, gradient, Hessian, constraint Jacobian), McCormick convex/concave relaxations (19 functions), and a relaxation compiler with vmap support.
 
-**Solver wrappers** (`python/discopt/solvers`): HiGHS LP wrapper with warm-start support, cyipopt NLP wrapper for Ipopt.
+**Solver wrappers** (`python/discopt/solvers`): ripopt (Rust IPM via PyO3), cyipopt NLP wrapper for Ipopt, HiGHS LP wrapper with warm-start support.
+
+**CUTEst interface** (`python/discopt/interfaces/cutest.py`): PyCUTEst-based evaluator for NLP benchmarking against the CUTEst test set.
 
 **Orchestrator** (`python/discopt/solver.py`): End-to-end `Model.solve()` connecting all components. At each B&B node: solve continuous NLP relaxation with tightened bounds, prune infeasible nodes, fathom integer-feasible solutions, branch on most fractional variable.
 
@@ -51,7 +56,10 @@ Model.solve()  -->  Python orchestrator  -->  Rust TreeManager (B&B engine)
 | alphaBB Underestimators        | Complete | 25 Python                 |
 | Cutting Planes (RLT/OA)       | Complete | 40 Python                 |
 | GNN Branching Policy           | Complete | 21 Python                 |
-| **Total**                      |          | **140 Rust + 714 Python** |
+| Pure-JAX IPM                   | Complete | 36 Python                 |
+| ripopt Integration (PyO3)      | Complete | (in solver tests)         |
+| CUTEst Interface               | Complete | 22 Python                 |
+| **Total**                      |          | **140 Rust + 772 Python** |
 
 ## Quick Start
 
@@ -75,7 +83,7 @@ print(result.x)          # {"x": 0.5, "y": 0.5, "z": 0.0}
 
 ## Roadmap
 
-The project follows a 4-phase plan. Phase 1 is complete; Phase 2 is in progress.
+The project follows a 4-phase plan. Phases 1-3 are complete; Phase 4 is in progress.
 
 ### Phase 1: Working Solver (complete)
 
@@ -124,10 +132,14 @@ The project follows a 4-phase plan. Phase 1 is complete; Phase 2 is in progress.
 | GNN branching policy                 | Done        | Bipartite graph GNN, strong branching data collection   |
 | Solver integration                   | Done        | partitions, branching_policy, cutting_planes parameters |
 
-### Phase 4: Polish + Release
+### Phase 4: Polish + Release (in progress)
 
-- Documentation + example notebooks
-- Release engineering (`pip install discopt`)
+| Task                                 | Status      | Description                                             |
+|--------------------------------------|-------------|---------------------------------------------------------|
+| ripopt integration (PyO3)            | Done        | Rust IPM solver via PyO3 bindings (`nlp_solver="ripopt"`) |
+| CUTEst interface                     | Done        | PyCUTEst evaluator for NLP benchmarking                 |
+| Documentation + example notebooks    | In progress | Quickstart, advanced features, IPM comparison notebooks |
+| Release engineering                  | In progress | `pip install discopt`, pyproject.toml, packaging        |
 
 ## Building
 
@@ -137,7 +149,10 @@ Requires Rust 1.84+, Python 3.10+, and Ipopt.
 # Install Ipopt (macOS)
 brew install ipopt
 
-# Build Rust-Python bindings
+# Clone ripopt alongside discopt (path dependency at ../ripopt)
+git clone <ripopt-repo-url> ../ripopt
+
+# Build Rust-Python bindings (includes ripopt PyO3 bindings)
 cd crates/discopt-python && maturin develop && cd ../..
 
 # Run tests

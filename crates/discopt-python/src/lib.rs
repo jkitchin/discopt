@@ -4,6 +4,7 @@ mod batch;
 mod bnb_bindings;
 mod expr_bindings;
 mod nl_bindings;
+mod ripopt_bindings;
 
 /// Returns the discopt version.
 #[pyfunction]
@@ -21,5 +22,6 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(expr_bindings::model_to_repr, m)?)?;
     m.add_function(wrap_pyfunction!(nl_bindings::parse_nl_file, m)?)?;
     m.add_function(wrap_pyfunction!(nl_bindings::parse_nl_string, m)?)?;
+    m.add_function(wrap_pyfunction!(ripopt_bindings::solve_ripopt, m)?)?;
     Ok(())
 }

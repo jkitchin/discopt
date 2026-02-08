@@ -205,6 +205,7 @@ class CUTEstBenchmarkRunner:
         """Run a single solver on a single CUTEst problem."""
         dispatch = {
             "discopt_ipopt": self._run_discopt_ipopt,
+            "discopt_ripopt": self._run_discopt_ripopt,
             "discopt_ipm": self._run_discopt_ipm,
             "scipy": self._run_scipy,
             "ipopt_standalone": self._run_ipopt_standalone,
@@ -266,6 +267,56 @@ class CUTEstBenchmarkRunner:
             return SolveResult(
                 instance=problem_name,
                 solver="discopt_ipopt",
+                status=SolveStatus.ERROR,
+                wall_time=float("inf"),
+            )
+
+    def _run_discopt_ripopt(self, problem_name: str) -> SolveResult:
+        """Solve via discopt's ripopt (Rust IPM) backend using NLPEvaluatorFromCUTEst."""
+        try:
+            from discopt.interfaces.cutest import load_cutest_problem
+            from discopt.solvers.nlp_ripopt import solve_nlp
+
+            prob = load_cutest_problem(problem_name, sif_params=self.config.sif_params)
+            evaluator = prob.to_evaluator()
+
+            constraint_bounds = None
+            if prob.m > 0:
+                cl = prob.cl
+                cu = prob.cu
+                constraint_bounds = list(zip(cl.tolist(), cu.tolist(), strict=False))
+
+            opts = {"print_level": 0, "max_iter": 3000, "tol": 1e-7}
+
+            t0 = time.perf_counter()
+            nlp_result = solve_nlp(
+                evaluator, prob.x0, constraint_bounds=constraint_bounds, options=opts
+            )
+            wall_time = time.perf_counter() - t0
+
+            from discopt.solvers import SolveStatus as DiscoptStatus
+
+            status_map = {
+                DiscoptStatus.OPTIMAL: SolveStatus.OPTIMAL,
+                DiscoptStatus.INFEASIBLE: SolveStatus.INFEASIBLE,
+                DiscoptStatus.UNBOUNDED: SolveStatus.UNBOUNDED,
+                DiscoptStatus.ITERATION_LIMIT: SolveStatus.TIME_LIMIT,
+                DiscoptStatus.TIME_LIMIT: SolveStatus.TIME_LIMIT,
+                DiscoptStatus.ERROR: SolveStatus.ERROR,
+            }
+
+            prob.close()
+            return SolveResult(
+                instance=problem_name,
+                solver="discopt_ripopt",
+                status=status_map.get(nlp_result.status, SolveStatus.ERROR),
+                objective=nlp_result.objective,
+                wall_time=wall_time,
+            )
+        except Exception:
+            return SolveResult(
+                instance=problem_name,
+                solver="discopt_ripopt",
                 status=SolveStatus.ERROR,
                 wall_time=float("inf"),
             )

@@ -166,38 +166,64 @@ def solve_model(
     """
     Solve a Model via NLP-based spatial Branch & Bound.
 
-    At each B&B node:
-      1. Solve continuous NLP relaxation with node-tightened bounds
-      2. Optionally generate OA cutting planes at the relaxation solution
-      3. If infeasible -> prune
-      4. If integer-feasible -> fathom, update incumbent
-      5. Otherwise -> branch on most fractional integer variable
+    At each B&B node the solver: (1) solves a continuous NLP relaxation
+    with node-tightened bounds, (2) optionally generates OA cutting planes,
+    (3) prunes if infeasible, (4) fathoms and updates incumbent if
+    integer-feasible, or (5) branches on the most fractional integer variable.
 
-    Args:
-        model: A Model with objective and constraints set.
-        time_limit: Wall-clock time limit in seconds.
-        gap_tolerance: Relative optimality gap tolerance for termination.
-        threads: Number of CPU threads (currently unused, reserved).
-        gpu: Enable GPU for JAX (currently CPU-only on macOS).
-        deterministic: Ensure deterministic results.
-        batch_size: Number of nodes to export per iteration (serial=1).
-        strategy: Node selection ("best_first" or "depth_first").
-        max_nodes: Maximum number of B&B nodes before stopping.
-        ipopt_options: Options dict passed to cyipopt.
-        nlp_solver: NLP solver backend ("ipopt" or "ipm").
-        cutting_planes: Enable OA cut generation after NLP relaxation solves.
-        partitions: Number of piecewise McCormick partitions (0=standard,
-            k>0=k partitions for tighter relaxations).
-        branching_policy: Variable selection policy ("fractional" or "gnn").
-            "fractional" uses most-fractional branching (default, handled by Rust).
-            "gnn" runs GNN scoring as a future hook; actual branching still done by Rust.
+    This function is called by :meth:`Model.solve` and is not typically
+    invoked directly.
 
-    Returns:
-        SolveResult with solution, statistics, and profiling times.
+    Parameters
+    ----------
+    model : Model
+        A Model with objective and constraints set.
+    time_limit : float, default 3600.0
+        Wall-clock time limit in seconds.
+    gap_tolerance : float, default 1e-4
+        Relative optimality gap tolerance for termination.
+    threads : int, default 1
+        Number of CPU threads (reserved for future use).
+    gpu : bool, default True
+        Enable GPU for JAX (currently CPU-only on macOS).
+    deterministic : bool, default True
+        Ensure deterministic results.
+    batch_size : int, default 16
+        Number of B&B nodes to export per iteration.
+    strategy : str, default "best_first"
+        Node selection strategy: ``"best_first"`` or ``"depth_first"``.
+    max_nodes : int, default 100_000
+        Maximum number of B&B nodes before stopping.
+    ipopt_options : dict, optional
+        Options passed to cyipopt (only used when ``nlp_solver="ipopt"``).
+    nlp_solver : str, default "ipm"
+        NLP solver backend: ``"ripopt"`` (Rust IPM via PyO3),
+        ``"ipopt"`` (cyipopt), or ``"ipm"`` (pure-JAX IPM).
+    cutting_planes : bool, default False
+        Enable outer-approximation cut generation after NLP relaxation solves.
+    partitions : int, default 0
+        Number of piecewise McCormick partitions (0 = standard convex
+        relaxation, k > 0 = k partitions for tighter relaxations).
+    branching_policy : str, default "fractional"
+        Variable selection: ``"fractional"`` (most-fractional, default)
+        or ``"gnn"`` (GNN scoring hook; Rust handles actual branching).
+
+    Returns
+    -------
+    SolveResult
+        Contains solution values, objective, gap, node count, and
+        per-layer profiling times (Rust, JAX, Python).
     """
     t_start = time.perf_counter()
     rust_time = 0.0
     jax_time = 0.0
+
+    if nlp_solver == "ripopt":
+        print("Using ripopt (Rust interior point method)")
+    elif nlp_solver == "ipm":
+        print("Using discopt IPM (pure-JAX interior point method)")
+    else:
+        print("Using Ipopt (via cyipopt)")
 
     # --- Pure continuous: solve directly with NLP, no B&B needed ---
     if _is_pure_continuous(model):
@@ -458,7 +484,13 @@ def _solve_continuous(
             constraint_bounds = list(zip(cl_list, cu_list))
 
     t_jax_start = time.perf_counter()
-    if nlp_solver == "ipm":
+    if nlp_solver == "ripopt":
+        from discopt.solvers.nlp_ripopt import solve_nlp as solve_nlp_ripopt
+
+        nlp_result = solve_nlp_ripopt(
+            evaluator, x0, constraint_bounds=constraint_bounds, options=opts
+        )
+    elif nlp_solver == "ipm":
         from discopt._jax.ipm import solve_nlp_ipm
 
         nlp_result = solve_nlp_ipm(evaluator, x0, constraint_bounds=constraint_bounds, options=opts)
@@ -506,9 +538,49 @@ def _solve_node_nlp(
     We override variable bounds to use the node-specific bounds
     rather than the global bounds.
     """
+    if nlp_solver == "ripopt":
+        return _solve_node_nlp_ripopt(evaluator, x0, node_lb, node_ub, constraint_bounds, options)
     if nlp_solver == "ipm":
         return _solve_node_nlp_ipm(evaluator, x0, node_lb, node_ub, constraint_bounds, options)
     return _solve_node_nlp_ipopt(evaluator, x0, node_lb, node_ub, constraint_bounds, options)
+
+
+def _solve_node_nlp_ripopt(
+    evaluator: NLPEvaluator,
+    x0: np.ndarray,
+    node_lb: np.ndarray,
+    node_ub: np.ndarray,
+    constraint_bounds: Optional[list[tuple[float, float]]],
+    options: dict,
+):
+    """Solve node NLP with ripopt (Rust IPM)."""
+    from discopt.solvers import NLPResult
+    from discopt.solvers.nlp_ripopt import solve_nlp as solve_nlp_ripopt
+
+    class _BoundOverride:
+        """Thin proxy that overrides variable_bounds on the evaluator."""
+
+        def __init__(self, ev, lb, ub):
+            self._ev = ev
+            self._lb = lb
+            self._ub = ub
+
+        def __getattr__(self, name):
+            if name == "variable_bounds":
+                return (self._lb, self._ub)
+            return getattr(self._ev, name)
+
+    proxy = _BoundOverride(evaluator, node_lb, node_ub)
+
+    try:
+        return solve_nlp_ripopt(
+            proxy,
+            x0,
+            constraint_bounds=constraint_bounds,
+            options=options,
+        )
+    except Exception:
+        return NLPResult(status=SolveStatus.ERROR, x=x0, objective=1e30)
 
 
 def _solve_node_nlp_ipm(

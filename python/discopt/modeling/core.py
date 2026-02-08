@@ -45,6 +45,19 @@ builtins_sum = _builtins.sum
 
 
 class VarType(Enum):
+    """
+    Variable domain type.
+
+    Attributes
+    ----------
+    CONTINUOUS : str
+        Real-valued variable (default bounds: ``[-1e20, 1e20]``).
+    BINARY : str
+        Binary variable restricted to ``{0, 1}``.
+    INTEGER : str
+        General integer variable (default bounds: ``[0, 1e6]``).
+    """
+
     CONTINUOUS = "continuous"
     BINARY = "binary"
     INTEGER = "integer"
@@ -62,13 +75,23 @@ class VarType(Enum):
 
 class Expression:
     """
-    Base class for all mathematical expressions in a JaxMINLP model.
+    Base class for all mathematical expressions in a discopt model.
 
-    Supports standard arithmetic (+, -, *, /, **), comparison operators
-    (<=, >=, ==) that produce Constraint objects, and mathematical
-    functions via the jm namespace (dm.exp, dm.log, dm.sin, etc.).
+    Supports standard arithmetic (``+``, ``-``, ``*``, ``/``, ``**``),
+    comparison operators (``<=``, ``>=``, ``==``) that produce
+    :class:`Constraint` objects, and mathematical functions via the
+    ``discopt.modeling`` namespace (``dm.exp``, ``dm.log``, ``dm.sin``, etc.).
 
-    Expressions are lazy — they build a DAG, not compute values.
+    Expressions are lazy -- they build a directed acyclic graph (DAG) that
+    is later compiled to a JAX-traceable function for evaluation and autodiff,
+    and to a Rust-side expression graph for structure detection.
+
+    Notes
+    -----
+    Do not instantiate ``Expression`` directly. Expressions are created by
+    declaring variables with :meth:`Model.continuous`, :meth:`Model.binary`,
+    or :meth:`Model.integer`, and then combining them with arithmetic
+    operators and math functions.
     """
 
     def __add__(self, other):
@@ -155,8 +178,21 @@ class Variable(Expression):
     """
     A decision variable in the optimization problem.
 
-    Variables are created through Model.continuous(), Model.binary(),
-    or Model.integer() — not directly.
+    Variables are created through :meth:`Model.continuous`,
+    :meth:`Model.binary`, or :meth:`Model.integer` -- not directly.
+
+    Attributes
+    ----------
+    name : str
+        Unique variable name within the model.
+    var_type : VarType
+        One of CONTINUOUS, BINARY, or INTEGER.
+    shape : tuple of int
+        Shape of the variable (``()`` for scalar).
+    lb : numpy.ndarray
+        Element-wise lower bounds.
+    ub : numpy.ndarray
+        Element-wise upper bounds.
     """
 
     def __init__(
@@ -279,62 +315,202 @@ def _wrap(x) -> Expression:
 
 
 def exp(x: Union[Expression, float]) -> Expression:
-    """Exponential function."""
+    """
+    Exponential function.
+
+    Parameters
+    ----------
+    x : Expression or float
+        Input expression.
+
+    Returns
+    -------
+    Expression
+        Expression representing ``e**x``.
+    """
     return FunctionCall("exp", _wrap(x))
 
 
 def log(x: Union[Expression, float]) -> Expression:
-    """Natural logarithm."""
+    """
+    Natural logarithm.
+
+    Parameters
+    ----------
+    x : Expression or float
+        Input expression (must be positive at evaluation).
+
+    Returns
+    -------
+    Expression
+        Expression representing ``ln(x)``.
+    """
     return FunctionCall("log", _wrap(x))
 
 
 def log2(x: Union[Expression, float]) -> Expression:
-    """Base-2 logarithm."""
+    """
+    Base-2 logarithm.
+
+    Parameters
+    ----------
+    x : Expression or float
+        Input expression (must be positive at evaluation).
+
+    Returns
+    -------
+    Expression
+    """
     return FunctionCall("log2", _wrap(x))
 
 
 def log10(x: Union[Expression, float]) -> Expression:
-    """Base-10 logarithm."""
+    """
+    Base-10 logarithm.
+
+    Parameters
+    ----------
+    x : Expression or float
+        Input expression (must be positive at evaluation).
+
+    Returns
+    -------
+    Expression
+    """
     return FunctionCall("log10", _wrap(x))
 
 
 def sqrt(x: Union[Expression, float]) -> Expression:
-    """Square root."""
+    """
+    Square root.
+
+    Parameters
+    ----------
+    x : Expression or float
+        Input expression (must be non-negative at evaluation).
+
+    Returns
+    -------
+    Expression
+    """
     return FunctionCall("sqrt", _wrap(x))
 
 
 def sin(x: Union[Expression, float]) -> Expression:
-    """Sine."""
+    """
+    Sine.
+
+    Parameters
+    ----------
+    x : Expression or float
+        Input expression (radians).
+
+    Returns
+    -------
+    Expression
+    """
     return FunctionCall("sin", _wrap(x))
 
 
 def cos(x: Union[Expression, float]) -> Expression:
-    """Cosine."""
+    """
+    Cosine.
+
+    Parameters
+    ----------
+    x : Expression or float
+        Input expression (radians).
+
+    Returns
+    -------
+    Expression
+    """
     return FunctionCall("cos", _wrap(x))
 
 
 def tan(x: Union[Expression, float]) -> Expression:
-    """Tangent."""
+    """
+    Tangent.
+
+    Parameters
+    ----------
+    x : Expression or float
+        Input expression (radians).
+
+    Returns
+    -------
+    Expression
+    """
     return FunctionCall("tan", _wrap(x))
 
 
 def abs_(x: Union[Expression, float]) -> Expression:
-    """Absolute value (use dm.abs_ to avoid shadowing builtins)."""
+    """
+    Absolute value.
+
+    Exported as ``dm.abs`` in the ``discopt.modeling`` namespace.
+
+    Parameters
+    ----------
+    x : Expression or float
+        Input expression.
+
+    Returns
+    -------
+    Expression
+    """
     return FunctionCall("abs", _wrap(x))
 
 
 def sign(x: Union[Expression, float]) -> Expression:
-    """Sign function."""
+    """
+    Sign function: returns -1, 0, or +1.
+
+    Parameters
+    ----------
+    x : Expression or float
+        Input expression.
+
+    Returns
+    -------
+    Expression
+    """
     return FunctionCall("sign", _wrap(x))
 
 
 def minimum(x: Union[Expression, float], y: Union[Expression, float]) -> Expression:
-    """Element-wise minimum."""
+    """
+    Element-wise minimum of two expressions.
+
+    Parameters
+    ----------
+    x : Expression or float
+        First operand.
+    y : Expression or float
+        Second operand.
+
+    Returns
+    -------
+    Expression
+    """
     return FunctionCall("min", _wrap(x), _wrap(y))
 
 
 def maximum(x: Union[Expression, float], y: Union[Expression, float]) -> Expression:
-    """Element-wise maximum."""
+    """
+    Element-wise maximum of two expressions.
+
+    Parameters
+    ----------
+    x : Expression or float
+        First operand.
+    y : Expression or float
+        Second operand.
+
+    Returns
+    -------
+    Expression
+    """
     return FunctionCall("max", _wrap(x), _wrap(y))
 
 
@@ -350,12 +526,29 @@ def sum(
     axis: Optional[int] = None,
 ) -> Expression:
     """
-    Summation.
+    Summation over expressions.
 
-    Three calling patterns:
-        dm.sum(x)                      # sum all elements of array variable x
-        dm.sum(x, axis=0)              # sum along axis
-        dm.sum(lambda i: cost[i]*x[i], over=range(n))  # indexed sum
+    Supports three calling patterns:
+
+    Parameters
+    ----------
+    x : Expression, list of Expression, or callable
+        Expression to sum, list of terms, or a callable ``f(i)`` returning
+        an expression for each index ``i`` in *over*.
+    over : sequence, optional
+        Index set for indexed summation (requires *x* to be callable).
+    axis : int, optional
+        Axis along which to sum (for array expressions).
+
+    Returns
+    -------
+    Expression
+
+    Examples
+    --------
+    >>> dm.sum(x)                                  # sum all elements
+    >>> dm.sum(x, axis=0)                          # sum along axis 0
+    >>> dm.sum(lambda i: cost[i] * x[i], over=range(n))  # indexed sum
     """
     if over is not None and callable(x):
         # Indexed summation: dm.sum(lambda i: expr(i), over=index_set)
@@ -368,7 +561,21 @@ def sum(
 
 
 def prod(x: Union[Expression, list, Callable], *, over: Optional[Sequence] = None) -> Expression:
-    """Product — analogous to sum."""
+    """
+    Product over expressions, analogous to :func:`sum`.
+
+    Parameters
+    ----------
+    x : Expression, list of Expression, or callable
+        Expression to multiply, list of terms, or a callable ``f(i)``
+        returning an expression for each index ``i`` in *over*.
+    over : sequence, optional
+        Index set for indexed product (requires *x* to be callable).
+
+    Returns
+    -------
+    Expression
+    """
     if over is not None and callable(x):
         terms = [_wrap(x(i)) for i in over]
         result = terms[0]
@@ -379,7 +586,20 @@ def prod(x: Union[Expression, list, Callable], *, over: Optional[Sequence] = Non
 
 
 def norm(x: Expression, ord: int = 2) -> Expression:
-    """Vector norm."""
+    """
+    Vector norm.
+
+    Parameters
+    ----------
+    x : Expression
+        Input vector expression.
+    ord : int, default 2
+        Norm order (e.g. 1 for L1-norm, 2 for L2-norm).
+
+    Returns
+    -------
+    Expression
+    """
     return FunctionCall(f"norm{ord}", _wrap(x))
 
 
@@ -399,13 +619,28 @@ class Constraint:
     """
     A single constraint in the model.
 
-    Internally stored as: body sense rhs
-    where body is an Expression and rhs is 0.0 (normalized form).
+    Internally stored in normalized form: ``body sense rhs`` where *body* is
+    an :class:`Expression` and *rhs* is ``0.0``.
 
-    Created via comparison operators on Expressions:
-        x[0] + x[1] <= 10
-        dm.exp(x[2]) == 1.0
-        A @ x >= b
+    Constraints are created via comparison operators on expressions, not
+    directly:
+
+    Examples
+    --------
+    >>> x[0] + x[1] <= 10
+    >>> dm.exp(x[2]) == 1.0
+    >>> A @ x >= b
+
+    Attributes
+    ----------
+    body : Expression
+        Left-hand side expression (normalized so that rhs == 0).
+    sense : str
+        One of ``"<="``, ``">="``, ``"=="``.
+    rhs : float
+        Right-hand side value (always 0.0 in normalized form).
+    name : str or None
+        Optional name for debugging and explanation.
     """
 
     body: Expression
@@ -453,19 +688,28 @@ class Objective:
 
 class Parameter(Expression):
     """
-    A parameter — a value that is fixed during a single solve
-    but can change between solves (for parametric studies, sensitivity
-    analysis, or differentiating through the solve).
+    A parameter -- a value fixed during a single solve but changeable between solves.
 
-    Unlike constants, parameters are tracked in the expression DAG
-    so that JAX can differentiate the optimal objective w.r.t. them.
+    Unlike constants, parameters are tracked in the expression DAG so that
+    JAX can differentiate the optimal objective with respect to them via
+    implicit differentiation through KKT conditions.
 
-    Example:
-        price = m.parameter("price", value=50.0)
-        m.minimize(price * x[0] + cost * x[1])
+    Parameters are created through :meth:`Model.parameter`, not directly.
 
-        result = m.solve()
-        sensitivity = result.gradient(price)  # d(obj*)/d(price) via implicit diff
+    Attributes
+    ----------
+    name : str
+        Parameter name.
+    value : numpy.ndarray
+        Current parameter value.
+    shape : tuple of int
+        Shape of the parameter.
+
+    Examples
+    --------
+    >>> price = m.parameter("price", value=50.0)
+    >>> m.minimize(price * x[0] + cost * x[1])
+    >>> result = m.solve()
     """
 
     def __init__(self, name: str, value: Union[float, np.ndarray], model: "Model"):
@@ -486,17 +730,38 @@ class Parameter(Expression):
 @dataclass
 class SolveResult:
     """
-    Result of solving a JaxMINLP model.
+    Result returned by :meth:`Model.solve`.
 
-    Provides solution values, solve statistics, explanation,
-    and sensitivity analysis (for models with Parameters).
+    Attributes
+    ----------
+    status : str
+        Termination status. One of ``"optimal"``, ``"feasible"``,
+        ``"infeasible"``, ``"time_limit"``, ``"node_limit"``.
+    objective : float or None
+        Best objective value found (None if infeasible).
+    bound : float or None
+        Best dual (lower) bound.
+    gap : float or None
+        Relative optimality gap ``(objective - bound) / |objective|``.
+    x : dict of str to numpy.ndarray, or None
+        Variable values keyed by name. None if no feasible solution found.
+    wall_time : float
+        Total wall-clock solve time in seconds.
+    node_count : int
+        Number of Branch & Bound nodes explored.
+    rust_time : float
+        Time spent in the Rust backend (B&B tree management).
+    jax_time : float
+        Time spent in JAX (NLP evaluations, autodiff).
+    python_time : float
+        Time spent in Python orchestration.
     """
 
-    status: str  # optimal, feasible, infeasible, ...
-    objective: Optional[float] = None  # Optimal objective value
-    bound: Optional[float] = None  # Best dual bound
-    gap: Optional[float] = None  # Relative optimality gap
-    x: Optional[dict[str, np.ndarray]] = None  # Variable values by name
+    status: str
+    objective: Optional[float] = None
+    bound: Optional[float] = None
+    gap: Optional[float] = None
+    x: Optional[dict[str, np.ndarray]] = None
     wall_time: float = 0.0
     node_count: int = 0
 
@@ -510,13 +775,30 @@ class SolveResult:
     _model: Optional["Model"] = None
 
     def value(self, var: Variable) -> np.ndarray:
-        """Get the optimal value of a variable."""
+        """
+        Get the optimal value of a variable.
+
+        Parameters
+        ----------
+        var : Variable
+            A variable from the solved model.
+
+        Returns
+        -------
+        numpy.ndarray
+            Optimal value, with the same shape as the variable.
+
+        Raises
+        ------
+        ValueError
+            If no feasible solution is available.
+        """
         if self.x is None:
             raise ValueError("No solution available")
         return self.x[var.name]
 
     def explain(self) -> str:
-        """Get LLM-generated explanation of the solve."""
+        """Get a human-readable explanation of the solve result."""
         if self._explanation:
             return self._explanation
         return (
@@ -530,7 +812,21 @@ class SolveResult:
         Sensitivity of optimal objective w.r.t. a parameter.
 
         Uses implicit differentiation through KKT conditions.
-        Requires the model to have been solved with sensitivity=True.
+
+        Parameters
+        ----------
+        param : Parameter
+            A parameter from the solved model.
+
+        Returns
+        -------
+        numpy.ndarray
+            Gradient ``d(obj*)/d(param)``.
+
+        Raises
+        ------
+        NotImplementedError
+            Sensitivity analysis is a Phase 3 feature.
         """
         raise NotImplementedError("Sensitivity analysis requires JAX backend (Phase 3 feature)")
 
@@ -550,28 +846,25 @@ class Model:
     """
     A Mixed-Integer Nonlinear Program.
 
-    Usage:
-        m = dm.Model("my_problem")
+    The central object for formulating and solving optimization problems.
+    Build a model by declaring variables, setting an objective, adding
+    constraints, and calling :meth:`solve`.
 
-        # Variables
-        x = m.continuous("x", shape=(3,), lb=0, ub=10)
-        y = m.binary("y", shape=(2,))
-        n = m.integer("n", lb=0, ub=100)
+    Parameters
+    ----------
+    name : str, default "model"
+        Descriptive name for the model.
 
-        # Parameters (for sensitivity analysis)
-        price = m.parameter("price", value=50.0)
-
-        # Objective
-        m.minimize(price * dm.sum(x) + dm.sum(fixed_cost * y))
-
-        # Constraints
-        m.subject_to(A @ x <= b, name="capacity")
-        m.subject_to(x[0] * x[1] <= 50 * y[0], name="bilinear")
-        m.subject_to(dm.exp(x[2]) + x[0] == 5.0, name="nonlinear_eq")
-
-        # Solve
-        result = m.solve()
-        print(result.value(x))
+    Examples
+    --------
+    >>> import discopt.modeling as dm
+    >>> m = dm.Model("my_problem")
+    >>> x = m.continuous("x", shape=(3,), lb=0, ub=10)
+    >>> y = m.binary("y", shape=(2,))
+    >>> m.minimize(cost @ x + fixed_cost @ y)
+    >>> m.subject_to(A @ x <= b, name="capacity")
+    >>> result = m.solve()
+    >>> result.value(x)
     """
 
     def __init__(self, name: str = "model"):
@@ -593,19 +886,27 @@ class Model:
         """
         Create continuous decision variable(s).
 
-        Args:
-            name: Variable name (must be unique in model)
-            shape: Scalar () or tuple for array variables
-            lb: Lower bound (scalar or array matching shape)
-            ub: Upper bound (scalar or array matching shape)
+        Parameters
+        ----------
+        name : str
+            Variable name (must be unique in the model).
+        shape : int or tuple of int, default ()
+            Scalar ``()`` or tuple for array variables.
+        lb : float or numpy.ndarray, default -1e20
+            Lower bound (scalar broadcast to *shape*, or array matching *shape*).
+        ub : float or numpy.ndarray, default 1e20
+            Upper bound (scalar broadcast to *shape*, or array matching *shape*).
 
-        Returns:
-            Variable expression that can be used in objectives and constraints
+        Returns
+        -------
+        Variable
+            Expression that can be used in objectives and constraints.
 
-        Examples:
-            x = m.continuous("x")                    # scalar, unbounded
-            flow = m.continuous("flow", shape=(5,), lb=0)  # 5-vector, non-negative
-            X = m.continuous("X", shape=(3, 4), lb=0, ub=1)  # 3x4 matrix
+        Examples
+        --------
+        >>> x = m.continuous("x")                           # scalar, unbounded
+        >>> flow = m.continuous("flow", shape=(5,), lb=0)   # 5-vector, non-negative
+        >>> X = m.continuous("X", shape=(3, 4), lb=0, ub=1) # 3x4 matrix
         """
         if isinstance(shape, int):
             shape = (shape,)
@@ -622,9 +923,22 @@ class Model:
         """
         Create binary (0/1) decision variable(s).
 
-        Examples:
-            use = m.binary("use")                   # single binary
-            active = m.binary("active", shape=(5,)) # 5 binary indicators
+        Parameters
+        ----------
+        name : str
+            Variable name (must be unique in the model).
+        shape : int or tuple of int, default ()
+            Scalar ``()`` or tuple for array variables.
+
+        Returns
+        -------
+        Variable
+            Binary variable with bounds ``[0, 1]``.
+
+        Examples
+        --------
+        >>> use = m.binary("use")                    # single binary
+        >>> active = m.binary("active", shape=(5,))  # 5 binary indicators
         """
         if isinstance(shape, int):
             shape = (shape,)
@@ -643,9 +957,26 @@ class Model:
         """
         Create general integer decision variable(s).
 
-        Examples:
-            n = m.integer("n_units", lb=0, ub=10)
-            batch = m.integer("batch", shape=(3,), lb=1, ub=100)
+        Parameters
+        ----------
+        name : str
+            Variable name (must be unique in the model).
+        shape : int or tuple of int, default ()
+            Scalar ``()`` or tuple for array variables.
+        lb : float or numpy.ndarray, default 0
+            Lower bound.
+        ub : float or numpy.ndarray, default 1e6
+            Upper bound.
+
+        Returns
+        -------
+        Variable
+            Integer-valued variable.
+
+        Examples
+        --------
+        >>> n = m.integer("n_units", lb=0, ub=10)
+        >>> batch = m.integer("batch", shape=(3,), lb=1, ub=100)
         """
         if isinstance(shape, int):
             shape = (shape,)
@@ -663,12 +994,24 @@ class Model:
         Create a parameter for parametric optimization / sensitivity.
 
         Parameters are fixed during a solve but tracked in the expression
-        DAG for differentiation. Use for: prices, demands, specifications
-        that you want to do sensitivity analysis on.
+        DAG for differentiation via implicit diff through KKT conditions.
 
-        Examples:
-            price = m.parameter("price", value=50.0)
-            demand = m.parameter("demand", value=np.array([100, 200, 150]))
+        Parameters
+        ----------
+        name : str
+            Parameter name (must be unique in the model).
+        value : float or numpy.ndarray
+            Current parameter value.
+
+        Returns
+        -------
+        Parameter
+            Parameter expression usable in objectives and constraints.
+
+        Examples
+        --------
+        >>> price = m.parameter("price", value=50.0)
+        >>> demand = m.parameter("demand", value=np.array([100, 200, 150]))
         """
         self._check_name(name)
         param = Parameter(name, value, self)
@@ -681,12 +1024,15 @@ class Model:
         """
         Set the objective to minimize.
 
-        Args:
-            expr: Expression to minimize
+        Parameters
+        ----------
+        expr : Expression
+            Expression to minimize.
 
-        Examples:
-            m.minimize(cost @ x)
-            m.minimize(dm.sum(lambda i: c[i] * x[i], over=range(n)))
+        Examples
+        --------
+        >>> m.minimize(cost @ x)
+        >>> m.minimize(dm.sum(lambda i: c[i] * x[i], over=range(n)))
         """
         self._objective = Objective(_wrap(expr), ObjectiveSense.MINIMIZE)
 
@@ -694,8 +1040,14 @@ class Model:
         """
         Set the objective to maximize.
 
-        Examples:
-            m.maximize(profit @ x - dm.sum(penalty * y))
+        Parameters
+        ----------
+        expr : Expression
+            Expression to maximize.
+
+        Examples
+        --------
+        >>> m.maximize(profit @ x - dm.sum(penalty * y))
         """
         self._objective = Objective(_wrap(expr), ObjectiveSense.MAXIMIZE)
 
@@ -709,19 +1061,22 @@ class Model:
         """
         Add constraint(s) to the model.
 
-        Constraints are created by comparison operators on expressions:
-            m.subject_to(x[0] + x[1] <= 10)           # inequality
-            m.subject_to(dm.exp(x[0]) == 1.0)          # equality
-            m.subject_to(A @ x <= b)                    # vectorized
-            m.subject_to(A @ x <= b, name="capacity")   # named
+        Parameters
+        ----------
+        constraint : Constraint or list of Constraint
+            Constraint(s) created by comparison operators (``<=``, ``>=``,
+            ``==``) on expressions.
+        name : str, optional
+            Name for the constraint(s). Named constraints enable better
+            debugging and LLM-generated explanations.
 
-        Indexed constraints:
-            m.subject_to([
-                x[i] + x[i+1] <= limits[i]
-                for i in range(n-1)
-            ], name="adjacent_limits")
-
-        Named constraints enable better LLM explanations and debugging.
+        Examples
+        --------
+        >>> m.subject_to(x[0] + x[1] <= 10)
+        >>> m.subject_to(dm.exp(x[0]) == 1.0)
+        >>> m.subject_to(A @ x <= b, name="capacity")
+        >>> m.subject_to([x[i] + x[i+1] <= limits[i] for i in range(n-1)],
+        ...              name="adjacent_limits")
         """
         if isinstance(constraint, list):
             for k, c in enumerate(constraint):
@@ -746,18 +1101,24 @@ class Model:
         name: Optional[str] = None,
     ):
         """
-        Indicator (if-then) constraint.
+        Add indicator (if-then) constraint.
 
-        If indicator == 1, then all then_constraints must hold.
-        If indicator == 0, then_constraints are relaxed.
+        If ``indicator == 1``, all *then_constraints* must hold.
+        If ``indicator == 0``, the constraints are relaxed.
+        Avoids manual big-M formulation.
 
-        This avoids manual big-M formulation.
+        Parameters
+        ----------
+        indicator : Variable
+            A binary variable.
+        then_constraints : list of Constraint
+            Constraints that must hold when the indicator is active.
+        name : str, optional
+            Base name for the constraint group.
 
-        Examples:
-            m.if_then(y[0], [
-                x[0] >= 10,
-                x[1] <= 50,
-            ], name="unit0_active")
+        Examples
+        --------
+        >>> m.if_then(y[0], [x[0] >= 10, x[1] <= 50], name="unit0_active")
         """
         for k, c in enumerate(then_constraints):
             c.name = f"{name}_then_{k}" if name else None
@@ -777,15 +1138,24 @@ class Model:
         name: Optional[str] = None,
     ):
         """
-        Disjunctive constraint (GDP).
+        Add disjunctive constraint (Generalized Disjunctive Programming).
 
         Exactly one group of constraints must hold.
 
-        Examples:
-            m.either_or([
-                [x[0] <= 5, x[1] >= 10],   # mode A
-                [x[0] >= 15, x[1] <= 3],   # mode B
-            ], name="operating_mode")
+        Parameters
+        ----------
+        disjuncts : list of list of Constraint
+            Each inner list is a disjunct -- a group of constraints that
+            must all hold together.
+        name : str, optional
+            Name for the disjunction.
+
+        Examples
+        --------
+        >>> m.either_or([
+        ...     [x[0] <= 5, x[1] >= 10],   # mode A
+        ...     [x[0] >= 15, x[1] <= 3],   # mode B
+        ... ], name="operating_mode")
         """
         self._constraints.append(
             _DisjunctiveConstraint(
@@ -797,11 +1167,29 @@ class Model:
     # ── Special ordered sets ──
 
     def sos1(self, variables: list[Variable], name: Optional[str] = None):
-        """SOS Type 1: at most one variable in the set can be nonzero."""
+        """
+        Add SOS Type 1 constraint: at most one variable can be nonzero.
+
+        Parameters
+        ----------
+        variables : list of Variable
+            Variables in the special ordered set.
+        name : str, optional
+            Constraint name.
+        """
         self._constraints.append(_SOSConstraint(1, variables, name))
 
     def sos2(self, variables: list[Variable], name: Optional[str] = None):
-        """SOS Type 2: at most two adjacent variables can be nonzero."""
+        """
+        Add SOS Type 2 constraint: at most two adjacent variables can be nonzero.
+
+        Parameters
+        ----------
+        variables : list of Variable
+            Variables in the special ordered set (order matters).
+        name : str, optional
+            Constraint name.
+        """
         self._constraints.append(_SOSConstraint(2, variables, name))
 
     # ── Solve ──
@@ -823,23 +1211,46 @@ class Model:
         """
         Solve the model.
 
-        Args:
-            time_limit: Wall-clock time limit in seconds
-            gap_tolerance: Relative optimality gap tolerance
-            threads: Number of CPU threads for Rust components
-            gpu: Enable GPU acceleration for JAX components
-            llm: Enable LLM explanation of results
-            sensitivity: Compute sensitivities w.r.t. Parameters
-            stream: Return iterator of SolveUpdate instead of final result
-            deterministic: Ensure reproducible results across runs
-            partitions: Number of piecewise McCormick partitions (0=standard,
-                k>0=k partitions for tighter relaxations)
-            branching_policy: Variable selection policy ("fractional" or "gnn").
-                "fractional" uses most-fractional branching (default).
-                "gnn" runs GNN scoring as a future hook; Rust handles actual branching.
+        For pure-continuous models, solves the NLP directly. For models with
+        integer/binary variables, uses NLP-based spatial Branch & Bound.
 
-        Returns:
-            SolveResult (or Iterator[SolveUpdate] if stream=True)
+        Parameters
+        ----------
+        time_limit : float, default 3600
+            Wall-clock time limit in seconds.
+        gap_tolerance : float, default 1e-4
+            Relative optimality gap tolerance for termination.
+        threads : int, default 1
+            Number of CPU threads for Rust components.
+        gpu : bool, default True
+            Enable GPU acceleration for JAX components.
+        llm : bool, default False
+            Enable LLM explanation of results.
+        sensitivity : bool, default False
+            Compute sensitivities w.r.t. Parameters.
+        stream : bool, default False
+            If True, return an iterator of :class:`SolveUpdate` instead of
+            the final result.
+        deterministic : bool, default True
+            Ensure reproducible results across runs.
+        partitions : int, default 0
+            Number of piecewise McCormick partitions (0 = standard convex
+            relaxation, k > 0 = k partitions for tighter relaxations).
+        branching_policy : str, default "fractional"
+            Variable selection policy: ``"fractional"`` (most-fractional)
+            or ``"gnn"`` (GNN scoring, future hook).
+        **kwargs
+            Additional keyword arguments passed to the solver backend.
+
+        Returns
+        -------
+        SolveResult or Iterator[SolveUpdate]
+            Solve result, or a streaming iterator if ``stream=True``.
+
+        Raises
+        ------
+        ValueError
+            If the model fails validation (no objective, duplicate names, etc.).
         """
         self.validate()
 
@@ -872,12 +1283,11 @@ class Model:
         """
         Validate model consistency.
 
-        Checks:
-        - Objective is set
-        - All variable names are unique
-        - Variable bounds are consistent (lb <= ub)
-        - Binary variables have lb=0, ub=1
-        - No circular references in expression DAG
+        Raises
+        ------
+        ValueError
+            If the objective is not set, variable names are not unique,
+            or variable bounds are inconsistent (lb > ub).
         """
         if self._objective is None:
             raise ValueError("No objective set. Call m.minimize() or m.maximize().")
@@ -911,7 +1321,15 @@ class Model:
         return len(self._constraints)
 
     def summary(self) -> str:
-        """Human-readable model summary."""
+        """
+        Return a human-readable model summary.
+
+        Returns
+        -------
+        str
+            Multi-line string with variable counts, constraint count,
+            objective sense, and parameter count.
+        """
         lines = [
             f"Model: {self.name}",
             f"  Variables: {self.num_variables} "
@@ -963,7 +1381,26 @@ class _SOSConstraint:
 
 @dataclass
 class SolveUpdate:
-    """Intermediate update from streaming solve."""
+    """
+    Intermediate update yielded during a streaming solve.
+
+    Attributes
+    ----------
+    elapsed : float
+        Wall-clock time since solve start (seconds).
+    incumbent : float or None
+        Best feasible objective found so far.
+    lower_bound : float
+        Current global lower bound.
+    gap : float or None
+        Current relative optimality gap.
+    node_count : int
+        Total B&B nodes explored so far.
+    open_nodes : int
+        Number of open (unexplored) nodes.
+    message : str or None
+        LLM commentary if ``llm=True`` was passed to :meth:`Model.solve`.
+    """
 
     elapsed: float
     incumbent: Optional[float]
@@ -971,7 +1408,7 @@ class SolveUpdate:
     gap: Optional[float]
     node_count: int
     open_nodes: int
-    message: Optional[str] = None  # LLM commentary if llm=True
+    message: Optional[str] = None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -981,20 +1418,24 @@ class SolveUpdate:
 
 def from_pyomo(pyomo_model) -> Model:
     """
-    Import a Pyomo ConcreteModel as a JaxMINLP model.
+    Import a Pyomo ConcreteModel as a discopt Model.
 
-    Supports: Var, Constraint, Objective, Param, Set.
-    GDP (Disjunct/Disjunction) is mapped to dm.either_or.
+    Supports Var, Constraint, Objective, Param, Set.
+    GDP (Disjunct/Disjunction) is mapped to :meth:`Model.either_or`.
 
-    Example:
-        import pyomo.environ as pyo
-        import discopt
+    Parameters
+    ----------
+    pyomo_model : pyomo.environ.ConcreteModel
+        A fully constructed Pyomo model.
 
-        pyo_model = pyo.ConcreteModel()
-        # ... build Pyomo model ...
+    Returns
+    -------
+    Model
 
-        jm_model = dm.from_pyomo(pyo_model)
-        result = jm_model.solve(gpu=True)
+    Raises
+    ------
+    NotImplementedError
+        Pyomo import is a Phase 4 feature.
     """
     raise NotImplementedError("Pyomo import requires pyomo bridge (Phase 4)")
 
@@ -1003,11 +1444,24 @@ def from_nl(path: str) -> Model:
     """
     Import a model from AMPL .nl format.
 
-    Uses the Rust .nl parser for speed.
+    Uses the Rust .nl parser for speed. Variables, bounds, constraints,
+    and objective are extracted from the binary .nl representation.
 
-    Example:
-        model = dm.from_nl("problem.nl")
-        result = model.solve()
+    Parameters
+    ----------
+    path : str
+        Path to the ``.nl`` file.
+
+    Returns
+    -------
+    Model
+        A Model ready to solve. The NLP evaluation is delegated to the
+        Rust backend (``NLPEvaluatorFromNl``).
+
+    Examples
+    --------
+    >>> model = dm.from_nl("problem.nl")
+    >>> result = model.solve()
     """
     from discopt._rust import parse_nl_file
 
@@ -1059,8 +1513,19 @@ def from_gams(path: str) -> Model:
     """
     Import a model from GAMS .gms format.
 
-    Example:
-        model = dm.from_gams("problem.gms")
+    Parameters
+    ----------
+    path : str
+        Path to the ``.gms`` file.
+
+    Returns
+    -------
+    Model
+
+    Raises
+    ------
+    NotImplementedError
+        GAMS import is a Phase 1 feature.
     """
     raise NotImplementedError("GAMS import requires Rust parser (Phase 1)")
 
@@ -1073,31 +1538,39 @@ def from_description(
     explain: bool = True,
 ) -> Model:
     """
-    Create a model from a natural language description using LLM.
+    Create a model from a natural language description using an LLM.
 
-    The LLM generates a JaxMINLP model via function calling
-    (not free-form code generation), ensuring type safety.
+    The LLM generates a discopt Model via function calling (not free-form
+    code generation), ensuring type safety.
 
-    Args:
-        description: Natural language problem description
-        data: Dict of named data arrays (DataFrames, numpy arrays, dicts)
-        llm_model: LLM model to use for formulation
-        validate: Validate the generated model before returning
-        explain: Print LLM's explanation of the formulation
+    Parameters
+    ----------
+    description : str
+        Natural language problem description.
+    data : dict, optional
+        Named data arrays (DataFrames, numpy arrays, dicts) available
+        to the formulation agent.
+    llm_model : str, default "claude-sonnet-4-20250514"
+        LLM model to use for formulation.
+    validate : bool, default True
+        Validate the generated model before returning.
+    explain : bool, default True
+        Print the LLM's explanation of the formulation.
 
-    Example:
-        model = dm.from_description(
-            "Minimize total shipping cost from 3 warehouses to 5 customers. "
-            "Each warehouse has limited supply. Each customer's demand must be met. "
-            "We must decide which warehouses to open (fixed cost) and how much "
-            "to ship on each route.",
-            data={
-                "supply": [100, 150, 200],
-                "demand": [80, 60, 70, 40, 50],
-                "shipping_cost": cost_matrix,    # 3x5 array
-                "fixed_cost": [500, 600, 450],
-            },
-        )
-        result = model.solve()
+    Returns
+    -------
+    Model
+
+    Raises
+    ------
+    NotImplementedError
+        LLM formulation is a Phase 2 feature.
+
+    Examples
+    --------
+    >>> model = dm.from_description(
+    ...     "Minimize total shipping cost from 3 warehouses to 5 customers.",
+    ...     data={"supply": [100, 150, 200], "demand": [80, 60, 70, 40, 50]},
+    ... )
     """
     raise NotImplementedError("LLM formulation requires LLM integration (Phase 2)")

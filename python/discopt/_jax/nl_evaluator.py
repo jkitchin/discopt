@@ -91,6 +91,46 @@ class NLPEvaluatorFromNl:
             hess = -hess
         return hess
 
+    def evaluate_lagrangian_hessian(
+        self, x: np.ndarray, obj_factor: float, lambda_: np.ndarray
+    ) -> np.ndarray:
+        """Evaluate Hessian of the Lagrangian via finite differences.
+
+        H = obj_factor * ∇²f(x) + Σᵢ λᵢ ∇²gᵢ(x)
+        """
+        x = np.asarray(x, dtype=np.float64)
+        n = len(x)
+        hess = np.empty((n, n), dtype=np.float64)
+        eps = self._eps
+        sign = -1.0 if self._negate else 1.0
+
+        def _lagrangian(xp):
+            val = obj_factor * sign * self._nl_repr.evaluate_objective(xp)
+            for k in range(self._n_constraints):
+                val += lambda_[k] * self._nl_repr.evaluate_constraint(k, xp)
+            return val
+
+        for i in range(n):
+            for j in range(i, n):
+                x_pp = x.copy()
+                x_pm = x.copy()
+                x_mp = x.copy()
+                x_mm = x.copy()
+                x_pp[i] += eps
+                x_pp[j] += eps
+                x_pm[i] += eps
+                x_pm[j] -= eps
+                x_mp[i] -= eps
+                x_mp[j] += eps
+                x_mm[i] -= eps
+                x_mm[j] -= eps
+                h = (
+                    _lagrangian(x_pp) - _lagrangian(x_pm) - _lagrangian(x_mp) + _lagrangian(x_mm)
+                ) / (4.0 * eps * eps)
+                hess[i, j] = h
+                hess[j, i] = h
+        return hess
+
     def evaluate_constraints(self, x: np.ndarray) -> np.ndarray:
         """Evaluate all constraint bodies at x. Returns (m,) array."""
         if self._n_constraints == 0:

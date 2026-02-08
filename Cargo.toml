@@ -12,4 +12,4 @@ repository = "https://github.com/discopt-org/discopt"
 [workspace.dependencies]
 pyo3 = { version = "0.23", features = ["extension-module"] }
 numpy = "0.23"
-# ripopt = { path = "../ripopt" }  # uncomment when ripopt repo is ready
+ripopt = { path = "../ripopt" }

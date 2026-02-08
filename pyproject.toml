@@ -7,9 +7,40 @@ name = "discopt"
 version = "0.1.0"
 description = "Hybrid MINLP solver combining Rust and JAX"
 requires-python = ">=3.10"
+authors = [{name = "John Kitchin"}]
+license = {text = "MIT"}
+readme = "README.md"
+keywords = ["optimization", "MINLP", "branch-and-bound", "nonlinear", "solver", "JAX"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Typing :: Typed",
+]
+dependencies = [
+    "jax>=0.4",
+    "jaxlib>=0.4",
+    "numpy>=1.24",
+    "scipy>=1.10",
+]
+
+[project.urls]
+Homepage = "https://github.com/jkitchin/discopt"
+Repository = "https://github.com/jkitchin/discopt"
+Documentation = "https://github.com/jkitchin/discopt#readme"
+Issues = "https://github.com/jkitchin/discopt/issues"
 
 [project.optional-dependencies]
+ipopt = ["cyipopt>=1.4"]
+highs = ["highspy"]
 cutest = ["pycutest>=1.8.0"]
+dev = ["pytest", "pytest-timeout", "pytest-cov", "ruff", "mypy"]
 
 [tool.maturin]
 manifest-path = "crates/discopt-python/Cargo.toml"
