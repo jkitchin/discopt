@@ -32,6 +32,7 @@ Model.solve()  -->  Python orchestrator  -->  Rust TreeManager (B&B engine)
 | B&B Tree (Rust) | Complete | 33 Rust |
 | .nl Parser (Rust) | Complete | 34 Rust + 17 Python |
 | FBBT/Presolve (Rust) | Complete | 45 Rust |
+| OBBT Bound Tightening | Complete | 13 Rust + 26 Python |
 | JAX DAG Compiler | Complete | 70 Python |
 | McCormick Relaxations | Complete | 88 Python |
 | Relaxation Compiler | Complete | 33 Python |
@@ -40,7 +41,9 @@ Model.solve()  -->  Python orchestrator  -->  Rust TreeManager (B&B engine)
 | cyipopt NLP Wrapper | Complete | 24 Python |
 | Batch Dispatch | Complete | 34 Python |
 | Solver Orchestrator | Complete | 32 Python |
-| **Total** | | **127 Rust + 403 Python** |
+| Batch Relaxation Evaluator | Complete | 26 Python |
+| Differentiable Solving | Complete | 25 Python |
+| **Total** | | **140 Rust + 501 Python** |
 
 ## Quick Start
 
@@ -64,9 +67,9 @@ print(result.x)          # {"x": 0.5, "y": 0.5, "z": 0.0}
 
 ## Roadmap
 
-The project follows a 4-phase plan. Phase 1 is currently in progress.
+The project follows a 4-phase plan. Phase 1 is complete; Phase 2 is in progress.
 
-### Phase 1: Working Solver (current)
+### Phase 1: Working Solver (complete)
 
 | Task | Status | Description |
 |------|--------|-------------|
@@ -85,18 +88,21 @@ The project follows a 4-phase plan. Phase 1 is currently in progress.
 | T12 Batch dispatch | Done | Zero-copy Rust-Python array transfer |
 | T13 FBBT/presolve | Done | Interval arithmetic, probing, Big-M simplification |
 | T14 Solver orchestrator | Done | End-to-end Model.solve() via B&B |
+| T15 MINLPLib validation | Done | 34 solvable instances, zero incorrect |
+| T16 Phase 1 gate | Done | All criteria pass |
 | T9a Rust Ipopt (ripopt) | In progress | Translating Ipopt's IPM to pure Rust |
-| T15 MINLPLib validation | Not started | Validate against 24 known optima |
-| T16 Phase 1 gate | Not started | All Phase 1 criteria pass |
 
-### Phase 2: GPU + Differentiability
+### Phase 2: GPU + Differentiability (current)
 
-- GPU-batched interior point method (dense Cholesky, vmap)
-- Batch relaxation evaluator with GPU acceleration
-- Multi-start primal heuristics
-- OBBT + advanced presolve
-- Differentiable solving (custom_jvp, implicit differentiation)
-- Replace cyipopt with Rust Ipopt in solver loop
+| Task | Status | Description |
+|------|--------|-------------|
+| T19 Batch relaxation evaluator | Done | jax.vmap-based batch McCormick evaluation |
+| T21 OBBT bound tightening | Done | LP-based bound tightening with HiGHS warm-start |
+| T22 Differentiable solving (Level 1) | Done | custom_jvp + envelope theorem for parameter sensitivity |
+| T17 GPU-batched IPM | Not started | Dense Cholesky, vmap-compatible Rust Ipopt |
+| T20 Multi-start heuristics | Not started | vmap over multiple NLP starts |
+| T23 Differentiable solving (Level 3) | Not started | Implicit differentiation at active set |
+| T24 GPU IPM in solver loop | Not started | Replace cyipopt with GPU-batched IPM |
 
 ### Phase 3: Competitive Performance
 

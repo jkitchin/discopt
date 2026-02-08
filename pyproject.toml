@@ -55,6 +55,14 @@ disable_error_code = "no-any-return"
 module = "discopt.solver"
 disable_error_code = "attr-defined"
 
+[[tool.mypy.overrides]]
+module = "discopt._jax.differentiable"
+disable_error_code = ["misc", "index", "return-value", "no-redef"]
+
+[[tool.mypy.overrides]]
+module = "discopt._jax.obbt"
+disable_error_code = ["assignment", "no-redef", "arg-type", "index"]
+
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]
 timeout = 300

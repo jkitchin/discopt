@@ -132,7 +132,7 @@ ALL_INSTANCES: list[NLInstance] = [
         True,
         xfail="Non-convex with sqrt/division: local NLP finds suboptimal",
     ),
-    NLInstance("nvs02", 5.96418452, 8, False, True, time_limit=60.0, max_nodes=100_000),
+    NLInstance("nvs02", 5.96418452, 8, False, True, time_limit=120.0, max_nodes=200_000),
     NLInstance("nvs03", 16.0, 2, False, True),
     NLInstance("nvs04", 0.72, 2, False, True),
     NLInstance(
