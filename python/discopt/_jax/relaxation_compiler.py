@@ -32,6 +32,14 @@ from discopt._jax.mccormick import (
     relax_sub,
     relax_tan,
 )
+from discopt._jax.piecewise_mccormick import (
+    piecewise_mccormick_bilinear,
+    piecewise_relax_cos,
+    piecewise_relax_exp,
+    piecewise_relax_log,
+    piecewise_relax_sin,
+    piecewise_relax_sqrt,
+)
 
 # Import expression types from the modeling API
 from discopt.modeling.core import (
@@ -68,12 +76,19 @@ def _get_constant_value(expr: Expression):
     return jnp.array(expr.value)
 
 
-def _compile_relax_node(expr: Expression, model: Model) -> Callable:
+def _compile_relax_node(expr: Expression, model: Model, partitions: int = 0) -> Callable:
     """
     Recursively compile an Expression node into a relaxation function.
 
     Each returned function takes (x_cv, x_cc, lb, ub) and returns (cv, cc)
     where cv is a convex underestimator and cc is a concave overestimator.
+
+    Args:
+        expr: Expression node to compile.
+        model: Model containing variable definitions.
+        partitions: If > 0, use piecewise McCormick relaxations with this
+            many partitions for supported operations (bilinear, exp, log,
+            sqrt, sin, cos). If 0, use standard McCormick.
     """
 
     if isinstance(expr, Constant):
@@ -113,8 +128,8 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
         return fn
 
     if isinstance(expr, BinaryOp):
-        left_fn = _compile_relax_node(expr.left, model)
-        right_fn = _compile_relax_node(expr.right, model)
+        left_fn = _compile_relax_node(expr.left, model, partitions)
+        right_fn = _compile_relax_node(expr.right, model, partitions)
         op = expr.op
 
         if op == "+":
@@ -163,6 +178,20 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
 
             # General bilinear: use cv/cc as bounds for McCormick envelopes,
             # but also try to propagate tighter variable-level bounds.
+            if partitions > 0:
+                _k = partitions
+
+                def fn(x_cv, x_cc, lb, ub, _pw_k=_k):
+                    cv_l, cc_l = left_fn(x_cv, x_cc, lb, ub)
+                    cv_r, cc_r = right_fn(x_cv, x_cc, lb, ub)
+                    mid_l = 0.5 * (cv_l + cc_l)
+                    mid_r = 0.5 * (cv_r + cc_r)
+                    return piecewise_mccormick_bilinear(
+                        mid_l, mid_r, cv_l, cc_l, cv_r, cc_r, k=_pw_k
+                    )
+
+                return fn
+
             def fn(x_cv, x_cc, lb, ub):
                 cv_l, cc_l = left_fn(x_cv, x_cc, lb, ub)
                 cv_r, cc_r = right_fn(x_cv, x_cc, lb, ub)
@@ -231,7 +260,7 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
         raise ValueError(f"Unknown binary operator: {op!r}")
 
     if isinstance(expr, UnaryOp):
-        operand_fn = _compile_relax_node(expr.operand, model)
+        operand_fn = _compile_relax_node(expr.operand, model, partitions)
         op = expr.op
 
         if op == "neg":
@@ -254,8 +283,17 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
         raise ValueError(f"Unknown unary operator: {op!r}")
 
     if isinstance(expr, FunctionCall):
-        arg_fns = [_compile_relax_node(a, model) for a in expr.args]
+        arg_fns = [_compile_relax_node(a, model, partitions) for a in expr.args]
         name = expr.func_name
+
+        # Piecewise-capable univariate operations
+        _piecewise_relax = {
+            "exp": piecewise_relax_exp,
+            "log": piecewise_relax_log,
+            "sqrt": piecewise_relax_sqrt,
+            "sin": piecewise_relax_sin,
+            "cos": piecewise_relax_cos,
+        }
 
         _univariate_relax = {
             "exp": relax_exp,
@@ -268,6 +306,18 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
             "tan": relax_tan,
             "abs": relax_abs,
         }
+
+        if partitions > 0 and name in _piecewise_relax:
+            pw_fn = _piecewise_relax[name]
+            a_fn = arg_fns[0]
+            _k = partitions
+
+            def fn(x_cv, x_cc, lb, ub, _pw_fn=pw_fn, _a_fn=a_fn, _pw_k=_k):
+                cv_a, cc_a = _a_fn(x_cv, x_cc, lb, ub)
+                mid = 0.5 * (cv_a + cc_a)
+                return _pw_fn(mid, cv_a, cc_a, k=_pw_k)
+
+            return fn
 
         if name in _univariate_relax:
             relax_fn = _univariate_relax[name]
@@ -321,7 +371,7 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
         raise ValueError(f"Unknown function: {name!r}")
 
     if isinstance(expr, IndexExpression):
-        base_fn = _compile_relax_node(expr.base, model)
+        base_fn = _compile_relax_node(expr.base, model, partitions)
         idx = expr.index
 
         def fn(x_cv, x_cc, lb, ub, _idx=idx):
@@ -331,7 +381,7 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
         return fn
 
     if isinstance(expr, SumExpression):
-        operand_fn = _compile_relax_node(expr.operand, model)
+        operand_fn = _compile_relax_node(expr.operand, model, partitions)
         axis = expr.axis
 
         def fn(x_cv, x_cc, lb, ub, _axis=axis):
@@ -341,7 +391,7 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
         return fn
 
     if isinstance(expr, SumOverExpression):
-        term_fns = [_compile_relax_node(t, model) for t in expr.terms]
+        term_fns = [_compile_relax_node(t, model, partitions) for t in expr.terms]
 
         def fn(x_cv, x_cc, lb, ub):
             cv_acc, cc_acc = term_fns[0](x_cv, x_cc, lb, ub)
@@ -356,13 +406,16 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
     raise TypeError(f"Unhandled expression type: {type(expr).__name__}")
 
 
-def compile_relaxation(expr: Expression, model: Model) -> Callable:
+def compile_relaxation(expr: Expression, model: Model, partitions: int = 0) -> Callable:
     """
     Compile an Expression into a McCormick relaxation function.
 
     Args:
         expr: Expression to relax
         model: Model containing variable definitions
+        partitions: If > 0, use piecewise McCormick relaxations with this
+            many partitions for supported operations (bilinear, exp, log,
+            sqrt, sin, cos). If 0 (default), use standard McCormick.
 
     Returns:
         A function f(x_cv, x_cc, lb, ub) -> (cv, cc) where:
@@ -375,16 +428,18 @@ def compile_relaxation(expr: Expression, model: Model) -> Callable:
 
         The function is compatible with jax.jit and jax.vmap.
     """
-    return _compile_relax_node(expr, model)
+    return _compile_relax_node(expr, model, partitions)
 
 
-def compile_objective_relaxation(model: Model) -> Callable:
+def compile_objective_relaxation(model: Model, partitions: int = 0) -> Callable:
     """Compile relaxation of the model's objective."""
     if model._objective is None:
         raise ValueError("Model has no objective set.")
-    return compile_relaxation(model._objective.expression, model)
+    return compile_relaxation(model._objective.expression, model, partitions)
 
 
-def compile_constraint_relaxation(constraint: Constraint, model: Model) -> Callable:
+def compile_constraint_relaxation(
+    constraint: Constraint, model: Model, partitions: int = 0
+) -> Callable:
     """Compile relaxation of a constraint body."""
-    return compile_relaxation(constraint.body, model)
+    return compile_relaxation(constraint.body, model, partitions)

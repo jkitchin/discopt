@@ -28,26 +28,26 @@ Model.solve()  -->  Python orchestrator  -->  Rust TreeManager (B&B engine)
 
 ## Current Status
 
-| Component | Status | Tests |
-|-----------|--------|-------|
-| Expression IR (Rust) | Complete | 48 Rust + 40 Python |
-| B&B Tree (Rust) | Complete | 33 Rust |
-| .nl Parser (Rust) | Complete | 34 Rust + 17 Python |
-| FBBT/Presolve (Rust) | Complete | 45 Rust |
-| OBBT Bound Tightening | Complete | 13 Rust + 26 Python |
-| JAX DAG Compiler | Complete | 70 Python |
-| McCormick Relaxations | Complete | 88 Python |
-| Relaxation Compiler | Complete | 33 Python |
-| NLP Evaluator (JAX) | Complete | 45 Python |
-| HiGHS LP Wrapper | Complete | 20 Python |
-| cyipopt NLP Wrapper | Complete | 24 Python |
-| Batch Dispatch | Complete | 34 Python |
-| Solver Orchestrator | Complete | 39 Python |
-| Batch Relaxation Evaluator | Complete | 26 Python |
-| Differentiable Solving (L1+L3) | Complete | 46 Python |
-| Multi-start Heuristics | Complete | 28 Python |
-| Benchmark Runner | Complete | 28 Python |
-| **Total** | | **140 Rust + 585 Python** |
+| Component                      | Status   | Tests                     |
+|--------------------------------|----------|---------------------------|
+| Expression IR (Rust)           | Complete | 48 Rust + 40 Python       |
+| B&B Tree (Rust)                | Complete | 33 Rust                   |
+| .nl Parser (Rust)              | Complete | 34 Rust + 17 Python       |
+| FBBT/Presolve (Rust)           | Complete | 45 Rust                   |
+| OBBT Bound Tightening          | Complete | 13 Rust + 26 Python       |
+| JAX DAG Compiler               | Complete | 70 Python                 |
+| McCormick Relaxations          | Complete | 88 Python                 |
+| Relaxation Compiler            | Complete | 33 Python                 |
+| NLP Evaluator (JAX)            | Complete | 45 Python                 |
+| HiGHS LP Wrapper               | Complete | 20 Python                 |
+| cyipopt NLP Wrapper            | Complete | 24 Python                 |
+| Batch Dispatch                 | Complete | 34 Python                 |
+| Solver Orchestrator            | Complete | 32 Python                 |
+| Batch Relaxation Evaluator     | Complete | 26 Python                 |
+| Differentiable Solving (L1+L3) | Complete | 46 Python                 |
+| Multi-start Heuristics         | Complete | 28 Python                 |
+| Benchmark Runner               | Complete | 28 Python                 |
+| **Total**                      |          | **140 Rust + 578 Python** |
 
 ## Quick Start
 
@@ -75,39 +75,40 @@ The project follows a 4-phase plan. Phase 1 is complete; Phase 2 is in progress.
 
 ### Phase 1: Working Solver (complete)
 
-| Task | Status | Description |
-|------|--------|-------------|
-| T0 Architectural spike | Done | Rust-JAX GPU batch latency validation |
-| T1 Cargo workspace | Done | discopt-core + discopt-python, maturin builds |
-| T2 Expression IR | Done | Rust expression graph + PyO3 bindings |
-| T3 .nl parser | Done | AMPL .nl file parser in Rust |
-| T4 JAX DAG compiler | Done | Expression-to-JAX compilation |
-| T5 McCormick relaxations | Done | 19 convex/concave relaxation functions |
-| T6 Relaxation compiler | Done | jit+vmap compatible relaxation compilation |
-| T7 HiGHS LP wrapper | Done | LP solver with warm-start support |
-| T8 NLP evaluator | Done | JIT-compiled grad/Hessian/Jacobian via JAX |
-| T9 cyipopt NLP wrapper | Done | Ipopt interface for continuous relaxations |
-| T10 CI/CD | Done | GitHub Actions, ruff, mypy, cargo |
-| T11 B&B tree | Done | Rust node pool, branching, pruning |
-| T12 Batch dispatch | Done | Zero-copy Rust-Python array transfer |
-| T13 FBBT/presolve | Done | Interval arithmetic, probing, Big-M simplification |
-| T14 Solver orchestrator | Done | End-to-end Model.solve() via B&B |
-| T15 MINLPLib validation | Done | 34 solvable instances, zero incorrect |
-| T16 Phase 1 gate | Done | All criteria pass |
-| T9a Rust Ipopt (ripopt) | Superseded | Replaced by T17 pure-JAX IPM |
+| Task                     | Status      | Description                                        |
+|--------------------------|-------------|----------------------------------------------------|
+| T0 Architectural spike   | Done        | Rust-JAX GPU batch latency validation              |
+| T1 Cargo workspace       | Done        | discopt-core + discopt-python, maturin builds      |
+| T2 Expression IR         | Done        | Rust expression graph + PyO3 bindings              |
+| T3 .nl parser            | Done        | AMPL .nl file parser in Rust                       |
+| T4 JAX DAG compiler      | Done        | Expression-to-JAX compilation                      |
+| T5 McCormick relaxations | Done        | 19 convex/concave relaxation functions             |
+| T6 Relaxation compiler   | Done        | jit+vmap compatible relaxation compilation         |
+| T7 HiGHS LP wrapper      | Done        | LP solver with warm-start support                  |
+| T8 NLP evaluator         | Done        | JIT-compiled grad/Hessian/Jacobian via JAX         |
+| T9 cyipopt NLP wrapper   | Done        | Ipopt interface for continuous relaxations         |
+| T10 CI/CD                | Done        | GitHub Actions, ruff, mypy, cargo                  |
+| T11 B&B tree             | Done        | Rust node pool, branching, pruning                 |
+| T12 Batch dispatch       | Done        | Zero-copy Rust-Python array transfer               |
+| T13 FBBT/presolve        | Done        | Interval arithmetic, probing, Big-M simplification |
+| T14 Solver orchestrator  | Done        | End-to-end Model.solve() via B&B                   |
+| T15 MINLPLib validation  | Done        | 34 solvable instances, zero incorrect              |
+| T16 Phase 1 gate         | Done        | All criteria pass                                  |
+| T9a Rust Ipopt (ripopt)  | In progress | Translating Ipopt's IPM to pure Rust               |
+|                          |             |                                                    |
 
-### Phase 2: GPU + Differentiability (complete)
+### Phase 2: GPU + Differentiability (current)
 
-| Task | Status | Description |
-|------|--------|-------------|
-| T19 Batch relaxation evaluator | Done | jax.vmap-based batch McCormick evaluation |
-| T21 OBBT bound tightening | Done | LP-based bound tightening with HiGHS warm-start |
-| T22 Differentiable solving (Level 1) | Done | custom_jvp + envelope theorem for parameter sensitivity |
-| T20 Multi-start heuristics | Done | Multi-start NLP solving + feasibility pump |
-| T23 Differentiable solving (Level 3) | Done | Implicit differentiation at active set via KKT |
-| T25 Benchmark runner | Done | Performance metrics, batch scaling, JSON export |
-| T17 GPU-batched IPM | Done | Pure-JAX IPM solver with augmented KKT, vmap batch solving |
-| T24 GPU IPM in solver loop | Done | Batch IPM in B&B loop, ipm default backend |
+| Task                                 | Status      | Description                                             |
+|--------------------------------------|-------------|---------------------------------------------------------|
+| T19 Batch relaxation evaluator       | Done        | jax.vmap-based batch McCormick evaluation               |
+| T21 OBBT bound tightening            | Done        | LP-based bound tightening with HiGHS warm-start         |
+| T22 Differentiable solving (Level 1) | Done        | custom_jvp + envelope theorem for parameter sensitivity |
+| T20 Multi-start heuristics           | Done        | Multi-start NLP solving + feasibility pump              |
+| T23 Differentiable solving (Level 3) | Done        | Implicit differentiation at active set via KKT          |
+| T25 Benchmark runner                 | Done        | Performance metrics, batch scaling, JSON export         |
+| T17 GPU-batched IPM                  | Not started | Dense Cholesky, vmap-compatible Rust Ipopt              |
+| T24 GPU IPM in solver loop           | Not started | Replace cyipopt with GPU-batched IPM                    |
 
 ### Phase 3: Competitive Performance
 

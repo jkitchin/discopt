@@ -159,15 +159,17 @@ def solve_model(
     max_nodes: int = 100_000,
     ipopt_options: Optional[dict] = None,
     nlp_solver: str = "ipm",
+    cutting_planes: bool = False,
 ) -> SolveResult:
     """
     Solve a Model via NLP-based spatial Branch & Bound.
 
     At each B&B node:
       1. Solve continuous NLP relaxation with node-tightened bounds
-      2. If infeasible -> prune
-      3. If integer-feasible -> fathom, update incumbent
-      4. Otherwise -> branch on most fractional integer variable
+      2. Optionally generate OA cutting planes at the relaxation solution
+      3. If infeasible -> prune
+      4. If integer-feasible -> fathom, update incumbent
+      5. Otherwise -> branch on most fractional integer variable
 
     Args:
         model: A Model with objective and constraints set.
@@ -181,6 +183,7 @@ def solve_model(
         max_nodes: Maximum number of B&B nodes before stopping.
         ipopt_options: Options dict passed to cyipopt.
         nlp_solver: NLP solver backend ("ipopt" or "ipm").
+        cutting_planes: Enable OA cut generation after NLP relaxation solves.
 
     Returns:
         SolveResult with solution, statistics, and profiling times.
@@ -230,11 +233,31 @@ def solve_model(
         g_l_jax = jnp.array(cl_list, dtype=jnp.float64)
         g_u_jax = jnp.array(cu_list, dtype=jnp.float64)
 
+    # --- Prepare cut generation if enabled ---
+    _generate_cuts = None
+    _bilinear_terms = None
+    _constraint_senses = None
+    if cutting_planes:
+        from discopt._jax.cutting_planes import (
+            detect_bilinear_terms,
+            generate_cuts_at_node,
+        )
+
+        _generate_cuts = generate_cuts_at_node
+        _bilinear_terms = detect_bilinear_terms(model)
+        if _has_nl_repr(model):
+            _constraint_senses = list(model._nl_constraint_senses)
+        else:
+            _constraint_senses = [c.sense for c in model._constraints if isinstance(c, Constraint)]
+
     # --- Default Ipopt options ---
     opts = dict(ipopt_options) if ipopt_options else {}
     opts.setdefault("print_level", 0)
     opts.setdefault("max_iter", 3000)
     opts.setdefault("tol", 1e-7)
+
+    # --- Accumulated OA cuts across iterations ---
+    oa_cuts = []
 
     # --- B&B loop ---
     iteration = 0
@@ -306,6 +329,23 @@ def solve_model(
                     result_sols[i] = x0
                     result_feas[i] = False
         jax_time += time.perf_counter() - t_jax_start
+
+        # --- Optional cut generation (OA for violated constraints + RLT) ---
+        if cutting_planes and _generate_cuts is not None:
+            for i in range(n_batch):
+                if result_lbs[i] < 1e20:  # skip infeasible nodes
+                    node_lb_i = np.array(batch_lb[i])
+                    node_ub_i = np.array(batch_ub[i])
+                    new_cuts = _generate_cuts(
+                        evaluator,
+                        model,
+                        result_sols[i],
+                        node_lb_i,
+                        node_ub_i,
+                        constraint_senses=_constraint_senses,
+                        bilinear_terms=_bilinear_terms,
+                    )
+                    oa_cuts.extend(new_cuts)
 
         # Import results back to Rust tree
         t_rust_start = time.perf_counter()

@@ -8,6 +8,9 @@ version = "0.1.0"
 description = "Hybrid MINLP solver combining Rust and JAX"
 requires-python = ">=3.10"
 
+[project.optional-dependencies]
+cutest = ["pycutest>=1.8.0"]
+
 [tool.maturin]
 manifest-path = "crates/discopt-python/Cargo.toml"
 python-source = "python"
