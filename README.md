@@ -42,8 +42,10 @@ Model.solve()  -->  Python orchestrator  -->  Rust TreeManager (B&B engine)
 | Batch Dispatch | Complete | 34 Python |
 | Solver Orchestrator | Complete | 32 Python |
 | Batch Relaxation Evaluator | Complete | 26 Python |
-| Differentiable Solving | Complete | 25 Python |
-| **Total** | | **140 Rust + 501 Python** |
+| Differentiable Solving (L1+L3) | Complete | 46 Python |
+| Multi-start Heuristics | Complete | 28 Python |
+| Benchmark Runner | Complete | 28 Python |
+| **Total** | | **140 Rust + 578 Python** |
 
 ## Quick Start
 
@@ -99,9 +101,10 @@ The project follows a 4-phase plan. Phase 1 is complete; Phase 2 is in progress.
 | T19 Batch relaxation evaluator | Done | jax.vmap-based batch McCormick evaluation |
 | T21 OBBT bound tightening | Done | LP-based bound tightening with HiGHS warm-start |
 | T22 Differentiable solving (Level 1) | Done | custom_jvp + envelope theorem for parameter sensitivity |
+| T20 Multi-start heuristics | Done | Multi-start NLP solving + feasibility pump |
+| T23 Differentiable solving (Level 3) | Done | Implicit differentiation at active set via KKT |
+| T25 Benchmark runner | Done | Performance metrics, batch scaling, JSON export |
 | T17 GPU-batched IPM | Not started | Dense Cholesky, vmap-compatible Rust Ipopt |
-| T20 Multi-start heuristics | Not started | vmap over multiple NLP starts |
-| T23 Differentiable solving (Level 3) | Not started | Implicit differentiation at active set |
 | T24 GPU IPM in solver loop | Not started | Replace cyipopt with GPU-batched IPM |
 
 ### Phase 3: Competitive Performance

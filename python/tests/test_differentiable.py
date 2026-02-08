@@ -16,13 +16,18 @@ import numpy as np
 import pytest
 from discopt._jax.differentiable import (
     DiffSolveResult,
+    DiffSolveResultL3,
+    _compile_parametric_constraint,
     _compile_parametric_objective,
     _flatten_params,
     _make_jax_differentiable_solve,
     _param_total_size,
+    _perturbation_gradient,
     differentiable_solve,
+    differentiable_solve_l3,
+    find_active_set,
 )
-from discopt.modeling.core import Constant
+from discopt.modeling.core import Constant, Constraint
 
 # ──────────────────────────────────────────────────────────
 # TestParametricCompiler
@@ -485,3 +490,424 @@ class TestComposability:
         grad = grad_fn(p_flat)
         # obj* = p, dloss/dp = 2 * 1 = 2
         assert float(grad[0]) == pytest.approx(2.0, abs=0.5)
+
+
+# ──────────────────────────────────────────────────────────
+# TestActiveSetFinder (L3)
+# ──────────────────────────────────────────────────────────
+
+
+class TestActiveSetFinder:
+    """Test active set identification at the solution point."""
+
+    def test_active_inequality_at_boundary(self):
+        """x >= b where x* = b should have an active constraint."""
+        m = dm.Model("active_ineq")
+        b = m.parameter("b", value=2.0)
+        x = m.continuous("x", lb=0, ub=10)
+        m.minimize(x)
+        m.subject_to(x >= b)
+
+        constraint_fns = [
+            _compile_parametric_constraint(c, m)
+            for c in m._constraints
+            if isinstance(c, Constraint)
+        ]
+        p_flat = _flatten_params(m)
+        # x* = 2.0 (the active constraint boundary)
+        x_star = jnp.array([2.0])
+
+        active_cons, active_bounds = find_active_set(x_star, m, constraint_fns, p_flat)
+        assert len(active_cons) > 0
+
+    def test_active_equality_constraint(self):
+        """Equality constraint should always be active at feasible point."""
+        m = dm.Model("active_eq")
+        p = m.parameter("p", value=3.0)
+        x = m.continuous("x", lb=0, ub=10)
+        m.minimize(x**2)
+        m.subject_to(x == p)
+
+        constraint_fns = [
+            _compile_parametric_constraint(c, m)
+            for c in m._constraints
+            if isinstance(c, Constraint)
+        ]
+        p_flat = _flatten_params(m)
+        x_star = jnp.array([3.0])
+
+        active_cons, _ = find_active_set(x_star, m, constraint_fns, p_flat)
+        assert 0 in active_cons
+
+    def test_no_active_constraints_interior(self):
+        """Interior point has no active inequality constraints."""
+        m = dm.Model("interior")
+        m.parameter("p", value=1.0)
+        x = m.continuous("x", lb=0, ub=10)
+        m.minimize((x - 5.0) ** 2)
+        m.subject_to(x <= 8.0)
+
+        constraint_fns = [
+            _compile_parametric_constraint(c, m)
+            for c in m._constraints
+            if isinstance(c, Constraint)
+        ]
+        p_flat = _flatten_params(m)
+        x_star = jnp.array([5.0])  # interior point
+
+        active_cons, active_bounds = find_active_set(x_star, m, constraint_fns, p_flat)
+        assert len(active_cons) == 0
+        assert len(active_bounds) == 0
+
+    def test_active_variable_bounds(self):
+        """Variable at its lower bound should be detected."""
+        m = dm.Model("active_bound")
+        m.parameter("p", value=1.0)
+        x = m.continuous("x", lb=0, ub=10)
+        m.minimize(x)
+
+        constraint_fns = []
+        p_flat = _flatten_params(m)
+        x_star = jnp.array([0.0])  # at lower bound
+
+        _, active_bounds = find_active_set(x_star, m, constraint_fns, p_flat)
+        assert 0 in active_bounds
+
+    def test_tolerance_parameter(self):
+        """Tight tolerance should not flag slightly inactive constraints."""
+        m = dm.Model("tol_test")
+        m.parameter("p", value=1.0)
+        x = m.continuous("x", lb=0, ub=10)
+        m.minimize(x**2)
+        m.subject_to(x <= 5.0)
+
+        constraint_fns = [
+            _compile_parametric_constraint(c, m)
+            for c in m._constraints
+            if isinstance(c, Constraint)
+        ]
+        p_flat = _flatten_params(m)
+        # x = 4.99 => constraint body = 4.99 - 5 = -0.01, inactive with tight tol
+        x_star = jnp.array([4.99])
+
+        active_tight, _ = find_active_set(x_star, m, constraint_fns, p_flat, tol=1e-3)
+        assert len(active_tight) == 0
+
+        # With loose tolerance, it should be active
+        active_loose, _ = find_active_set(x_star, m, constraint_fns, p_flat, tol=0.02)
+        assert len(active_loose) > 0
+
+
+# ──────────────────────────────────────────────────────────
+# TestImplicitDifferentiation (L3)
+# ──────────────────────────────────────────────────────────
+
+
+class TestImplicitDifferentiation:
+    """Test implicit differentiation via KKT system."""
+
+    def test_unconstrained_quadratic(self):
+        """min (x - p)^2, unconstrained: x* = p, dx/dp = 1, dobj/dp = 0."""
+        m = dm.Model("imp_unconstrained")
+        p = m.parameter("p", value=3.0)
+        x = m.continuous("x", lb=-10, ub=10)
+        m.minimize((x - p) ** 2)
+
+        result = differentiable_solve_l3(m)
+        assert result.status == "optimal"
+        assert result.objective == pytest.approx(0.0, abs=1e-4)
+
+        # L3 implicit gradient: dobj/dp = 0 (since obj = 0 at optimum)
+        grad_l3 = result.implicit_gradient(p)
+        assert float(grad_l3) == pytest.approx(0.0, abs=1e-3)
+
+        # dx/dp = 1.0 (x* = p)
+        sens = result.sensitivity_matrix()
+        assert sens is not None
+        assert float(sens[0, 0]) == pytest.approx(1.0, abs=1e-2)
+
+    def test_constrained_active(self):
+        """min x^2 s.t. x >= p. At optimum x* = p, dobj/dp = 2p."""
+        m = dm.Model("imp_constrained")
+        p = m.parameter("p", value=2.0)
+        x = m.continuous("x", lb=-10, ub=10)
+        m.minimize(x**2)
+        m.subject_to(x >= p)
+
+        result = differentiable_solve_l3(m)
+        assert result.status == "optimal"
+        assert result.objective == pytest.approx(4.0, abs=1e-3)
+
+        # L3: dobj/dp = 2*x* = 2*p = 4.0
+        grad_l3 = result.implicit_gradient(p)
+        assert float(grad_l3) == pytest.approx(4.0, abs=0.1)
+
+    def test_multiple_parameters(self):
+        """min (x - a)^2 + (y - b)^2, unconstrained.
+
+        x* = a, y* = b. dobj/da = 0, dobj/db = 0.
+        dx/da = 1, dx/db = 0, dy/da = 0, dy/db = 1.
+        """
+        m = dm.Model("imp_multi")
+        a = m.parameter("a", value=2.0)
+        b = m.parameter("b", value=3.0)
+        x = m.continuous("x", lb=-10, ub=10)
+        y = m.continuous("y", lb=-10, ub=10)
+        m.minimize((x - a) ** 2 + (y - b) ** 2)
+
+        result = differentiable_solve_l3(m)
+        assert result.status == "optimal"
+        assert result.objective == pytest.approx(0.0, abs=1e-4)
+
+        grad_a = result.implicit_gradient(a)
+        grad_b = result.implicit_gradient(b)
+        assert float(grad_a) == pytest.approx(0.0, abs=1e-3)
+        assert float(grad_b) == pytest.approx(0.0, abs=1e-3)
+
+        sens = result.sensitivity_matrix()
+        assert sens is not None
+        assert sens.shape == (2, 2)
+        # dx/da = 1, dx/db = 0
+        assert float(sens[0, 0]) == pytest.approx(1.0, abs=1e-2)
+        assert float(sens[0, 1]) == pytest.approx(0.0, abs=1e-2)
+        # dy/da = 0, dy/db = 1
+        assert float(sens[1, 0]) == pytest.approx(0.0, abs=1e-2)
+        assert float(sens[1, 1]) == pytest.approx(1.0, abs=1e-2)
+
+    def test_l3_agrees_with_l1(self):
+        """On well-conditioned problems, L3 and L1 should agree."""
+        m = dm.Model("l3_vs_l1")
+        p = m.parameter("p", value=3.0)
+        x = m.continuous("x", lb=1, ub=5)
+        m.minimize(p * x)
+
+        result = differentiable_solve_l3(m)
+        l1_grad = float(result.gradient(p))
+        l3_grad = float(result.implicit_gradient(p))
+
+        # Both should give dobj/dp = x* = 1.0
+        assert l1_grad == pytest.approx(1.0, abs=1e-2)
+        assert l3_grad == pytest.approx(1.0, abs=1e-2)
+
+    def test_l3_vs_finite_difference(self):
+        """L3 gradient should match finite difference."""
+
+        def make_model(p_val):
+            m = dm.Model("l3_fd")
+            p = m.parameter("p", value=p_val)
+            x = m.continuous("x", lb=0, ub=100)
+            m.minimize(x**2 + p * x)
+            return m, p
+
+        m, p = make_model(-4.0)
+        result = differentiable_solve_l3(m)
+        l3_grad = float(result.implicit_gradient(p))
+
+        # Finite difference
+        eps = 1e-5
+        m_plus, _ = make_model(-4.0 + eps)
+        r_plus = differentiable_solve(m_plus)
+        m_minus, _ = make_model(-4.0 - eps)
+        r_minus = differentiable_solve(m_minus)
+        fd_grad = (r_plus.objective - r_minus.objective) / (2 * eps)
+
+        assert l3_grad == pytest.approx(fd_grad, rel=1e-2)
+
+
+# ──────────────────────────────────────────────────────────
+# TestDifferentiableSolveL3 (L3)
+# ──────────────────────────────────────────────────────────
+
+
+class TestDifferentiableSolveL3:
+    """Test the full differentiable_solve_l3 function."""
+
+    def test_basic_parametric_lp(self):
+        """min p*x s.t. x >= 1. obj* = p, dobj/dp = 1."""
+        m = dm.Model("l3_lp")
+        p = m.parameter("price", value=3.0)
+        x = m.continuous("x", lb=1, ub=5)
+        m.minimize(p * x)
+
+        result = differentiable_solve_l3(m)
+        assert isinstance(result, DiffSolveResultL3)
+        assert result.status == "optimal"
+        assert result.objective == pytest.approx(3.0, abs=1e-3)
+
+    def test_parametric_quadratic(self):
+        """min (x - p)^2, x in [-10, 10]. obj* = 0 for all p in range."""
+        m = dm.Model("l3_quad")
+        p = m.parameter("p", value=5.0)
+        x = m.continuous("x", lb=-10, ub=10)
+        m.minimize((x - p) ** 2)
+
+        result = differentiable_solve_l3(m)
+        assert result.objective == pytest.approx(0.0, abs=1e-4)
+
+        grad = result.implicit_gradient(p)
+        assert float(grad) == pytest.approx(0.0, abs=1e-3)
+
+    def test_parametric_nlp_active_constraint(self):
+        """min x^2 s.t. x >= p. x* = p, obj* = p^2, dobj/dp = 2p."""
+        m = dm.Model("l3_nlp")
+        p = m.parameter("p", value=3.0)
+        x = m.continuous("x", lb=-10, ub=10)
+        m.minimize(x**2)
+        m.subject_to(x >= p)
+
+        result = differentiable_solve_l3(m)
+        assert result.objective == pytest.approx(9.0, abs=1e-2)
+
+        l1_grad = result.gradient(p)
+        l3_grad = result.implicit_gradient(p)
+        # Both should give dobj/dp = 2*p = 6.0
+        assert float(l1_grad) == pytest.approx(6.0, abs=0.2)
+        assert float(l3_grad) == pytest.approx(6.0, abs=0.2)
+
+    def test_both_gradients_available(self):
+        """Both .gradient() and .implicit_gradient() should work."""
+        m = dm.Model("l3_both")
+        p = m.parameter("p", value=2.0)
+        x = m.continuous("x", lb=-10, ub=10)
+        m.minimize((x - p) ** 2)
+
+        result = differentiable_solve_l3(m)
+        g1 = result.gradient(p)
+        g3 = result.implicit_gradient(p)
+        sens = result.sensitivity_matrix()
+
+        # All should be accessible
+        assert g1 is not None
+        assert g3 is not None
+        assert sens is not None
+
+    def test_repr(self):
+        """Test string representation."""
+        m = dm.Model("l3_repr")
+        m.parameter("p", value=1.0)
+        x = m.continuous("x", lb=0, ub=10)
+        m.minimize(x)
+
+        result = differentiable_solve_l3(m)
+        r = repr(result)
+        assert "DiffSolveResultL3" in r
+        assert "l3=ok" in r
+
+
+# ──────────────────────────────────────────────────────────
+# TestPerturbationSmoothing (L3)
+# ──────────────────────────────────────────────────────────
+
+
+class TestPerturbationSmoothing:
+    """Test fallback perturbation smoothing for ill-conditioned KKT."""
+
+    def test_perturbation_gradient_finite(self):
+        """Perturbation-based gradient should return finite values."""
+        m = dm.Model("perturb")
+        p = m.parameter("p", value=3.0)
+        x = m.continuous("x", lb=1, ub=5)
+        m.minimize(p * x)
+
+        p_flat = _flatten_params(m)
+        grad = _perturbation_gradient(m, p_flat, ipopt_options=None)
+        assert np.all(np.isfinite(grad))
+        # dobj/dp = x* = 1
+        assert float(grad[0]) == pytest.approx(1.0, abs=1e-2)
+
+    def test_perturbation_matches_analytic(self):
+        """Perturbation gradient should match analytic gradient."""
+        m = dm.Model("perturb_match")
+        p = m.parameter("p", value=-4.0)
+        x = m.continuous("x", lb=0, ub=100)
+        m.minimize(x**2 + p * x)
+
+        # Analytic: x* = -p/2 = 2, obj* = -4. dobj/dp = x* = 2.
+        p_flat = _flatten_params(m)
+        grad = _perturbation_gradient(m, p_flat, ipopt_options=None)
+        assert float(grad[0]) == pytest.approx(2.0, abs=0.1)
+
+    def test_perturbation_multi_param(self):
+        """Perturbation with multiple parameters."""
+        m = dm.Model("perturb_multi")
+        a = m.parameter("a", value=1.0)
+        b = m.parameter("b", value=3.0)
+        x1 = m.continuous("x1", lb=0, ub=5)
+        x2 = m.continuous("x2", lb=0, ub=5)
+        m.minimize(a * x1 + b * x2)
+        m.subject_to(x1 + x2 >= 1)
+
+        p_flat = _flatten_params(m)
+        grad = _perturbation_gradient(m, p_flat, ipopt_options=None)
+        assert np.all(np.isfinite(grad))
+        # For a < b: x1* = 1, x2* = 0. dobj/da = 1, dobj/db = 0
+        assert float(grad[0]) == pytest.approx(1.0, abs=1e-2)
+        assert float(grad[1]) == pytest.approx(0.0, abs=1e-2)
+
+
+# ──────────────────────────────────────────────────────────
+# TestL3VsL1Comparison (L3)
+# ──────────────────────────────────────────────────────────
+
+
+class TestL3VsL1Comparison:
+    """Compare L3 and L1 gradients on various problems."""
+
+    def test_agree_on_well_conditioned(self):
+        """L3 and L1 should agree on well-conditioned problems."""
+        m = dm.Model("l3_l1_agree")
+        p = m.parameter("p", value=-4.0)
+        x = m.continuous("x", lb=0, ub=100)
+        m.minimize(x**2 + p * x)
+
+        result = differentiable_solve_l3(m)
+        l1 = float(result.gradient(p))
+        l3 = float(result.implicit_gradient(p))
+
+        # Both should give dobj/dp = x* = 2.0
+        assert l1 == pytest.approx(l3, abs=0.2)
+        assert l1 == pytest.approx(2.0, abs=0.1)
+
+    def test_l3_closer_to_fd(self):
+        """On constrained problems, L3 should be at least as close to FD as L1."""
+
+        def make_model(p_val):
+            m = dm.Model("l3_fd_compare")
+            p = m.parameter("p", value=p_val)
+            x = m.continuous("x", lb=-10, ub=10)
+            m.minimize(x**2)
+            m.subject_to(x >= p)
+            return m, p
+
+        m, p = make_model(2.0)
+        result = differentiable_solve_l3(m)
+        l1 = float(result.gradient(p))
+        l3 = float(result.implicit_gradient(p))
+
+        # Finite difference
+        eps = 1e-5
+        m_plus, _ = make_model(2.0 + eps)
+        r_plus = differentiable_solve(m_plus)
+        m_minus, _ = make_model(2.0 - eps)
+        r_minus = differentiable_solve(m_minus)
+        fd = (r_plus.objective - r_minus.objective) / (2 * eps)
+
+        # L3 should be close to FD
+        assert l3 == pytest.approx(fd, rel=0.05)
+        # L3 error should be <= L1 error (or at most slightly worse)
+        assert abs(l3 - fd) <= abs(l1 - fd) + 0.5
+
+    def test_sensitivity_matrix_shape(self):
+        """Sensitivity matrix should have shape (n_vars, n_params)."""
+        m = dm.Model("l3_sens_shape")
+        m.parameter("a", value=1.0)
+        m.parameter("b", value=2.0)
+        x1 = m.continuous("x1", lb=0, ub=10)
+        x2 = m.continuous("x2", lb=0, ub=10)
+        m.minimize(m._parameters[0] * x1 + m._parameters[1] * x2)
+        m.subject_to(x1 + x2 >= 1)
+
+        result = differentiable_solve_l3(m)
+        sens = result.sensitivity_matrix()
+        assert sens is not None
+        assert sens.shape == (2, 2)
