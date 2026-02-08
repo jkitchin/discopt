@@ -15,6 +15,11 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: jkitchin/ripopt
+          path: ../ripopt
+          token: ${{ secrets.RIPOPT_TOKEN }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -27,6 +32,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: jkitchin/ripopt
+          path: ../ripopt
+          token: ${{ secrets.RIPOPT_TOKEN }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
