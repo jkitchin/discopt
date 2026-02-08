@@ -162,4 +162,4 @@ JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 pytest python/tests/ -v
 
 ## License
 
-MIT
+[Eclipse Public License 2.0 (EPL-2.0)](LICENSE)
