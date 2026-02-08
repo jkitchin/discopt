@@ -299,3 +299,221 @@ def generate_ci_summary(
         summary["regressions"] = None
 
     return summary
+
+
+# ─────────────────────────────────────────────────────────────
+# CUTEst Performance Profile Generation
+# ─────────────────────────────────────────────────────────────
+
+
+def generate_cutest_report(
+    benchmark: BenchmarkResults,
+    known_optima: Optional[dict[str, float]] = None,
+    output_path: Optional[Path] = None,
+) -> str:
+    """
+    Generate a CUTEst-specific benchmark report with performance profiles.
+
+    Includes:
+    - Summary table with solve rates per solver
+    - Dolan-Moré performance profiles (text-based)
+    - Results stratified by problem class (unconstrained / bound / general)
+    - Shifted geometric mean time ratios
+    """
+    from benchmarks.metrics import performance_profile
+
+    lines = []
+    solvers = benchmark.get_solvers()
+    instances = benchmark.get_instances()
+
+    # ── Header ──
+    lines.append(f"# CUTEst Benchmark Report: {benchmark.suite}")
+    lines.append("")
+    lines.append(f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"**Instances:** {len(instances)}")
+    lines.append(f"**Solvers:** {', '.join(solvers)}")
+    lines.append("")
+
+    # ── Summary Table ──
+    lines.append("## Summary")
+    lines.append("")
+    lines.append("| Metric | " + " | ".join(solvers) + " |")
+    lines.append("|--------|" + "|".join(["--------"] * len(solvers)) + "|")
+
+    # Solve count
+    row = "| **Solved** |"
+    for s in solvers:
+        row += f" {solved_count(benchmark.get_results(s))} / {len(instances)} |"
+    lines.append(row)
+
+    # Solve rate
+    row = "| **Solve rate** |"
+    for s in solvers:
+        rate = solved_count(benchmark.get_results(s)) / max(len(instances), 1)
+        row += f" {rate:.1%} |"
+    lines.append(row)
+
+    # Geometric mean time
+    row = "| **Geom. mean time (s)** |"
+    for s in solvers:
+        results = benchmark.get_results(s)
+        times = [r.wall_time for r in results if r.is_solved]
+        gm = shifted_geometric_mean(times)
+        row += f" {gm:.3f} |"
+    lines.append(row)
+
+    # Incorrect count
+    if known_optima:
+        row = "| **Incorrect** |"
+        for s in solvers:
+            ic = incorrect_count(benchmark.get_results(s), known_optima)
+            marker = "FAIL" if ic > 0 else "OK"
+            row += f" {marker} ({ic}) |"
+        lines.append(row)
+    lines.append("")
+
+    # ── Pairwise Comparisons ──
+    if len(solvers) >= 2:
+        lines.append("## Pairwise Comparisons")
+        lines.append("")
+        lines.append(
+            "| Solver A | Solver B | Geom. Mean Ratio | A Faster | B Faster | Common |"
+        )
+        lines.append(
+            "|----------|----------|------------------|----------|----------|--------|"
+        )
+
+        for i, sa in enumerate(solvers):
+            for sb in solvers[i + 1 :]:
+                ra = benchmark.get_results(sa)
+                rb = benchmark.get_results(sb)
+                ratio = geometric_mean_ratio(ra, rb)
+
+                ta = {r.instance: r.wall_time for r in ra if r.is_solved}
+                tb = {r.instance: r.wall_time for r in rb if r.is_solved}
+                common = set(ta.keys()) & set(tb.keys())
+                a_faster = sum(1 for inst in common if ta[inst] < tb[inst])
+                b_faster = sum(1 for inst in common if ta[inst] > tb[inst])
+
+                ratio_str = f"{ratio:.3f}x" if ratio < 100 else ">100x"
+                lines.append(
+                    f"| {sa} | {sb} | {ratio_str} | {a_faster} | {b_faster} | {len(common)} |"
+                )
+        lines.append("")
+
+    # ── Stratified by Problem Class ──
+    classes: dict[str, list[str]] = {}
+    for name, info in benchmark.instance_info.items():
+        pc = info.problem_class
+        if pc not in classes:
+            classes[pc] = []
+        classes[pc].append(name)
+
+    if classes:
+        lines.append("## Results by Problem Class")
+        lines.append("")
+        lines.append(
+            "| Class | Instances | " + " | ".join(f"{s} solved" for s in solvers) + " |"
+        )
+        lines.append(
+            "|-------|-----------|" + "|".join(["--------"] * len(solvers)) + "|"
+        )
+
+        for pc in sorted(classes.keys()):
+            pc_instances = set(classes[pc])
+            row = f"| {pc} | {len(pc_instances)} |"
+            for s in solvers:
+                s_solved = sum(
+                    1
+                    for r in benchmark.get_results(s)
+                    if r.is_solved and r.instance in pc_instances
+                )
+                row += f" {s_solved} |"
+            lines.append(row)
+        lines.append("")
+
+    # ── Performance Profile (text-based) ──
+    profiles = performance_profile(benchmark, tau_max=100.0, tau_steps=20)
+    if profiles:
+        lines.append("## Performance Profile (Dolan-Moré)")
+        lines.append("")
+        lines.append(
+            "Fraction of problems solved within factor tau of the best solver."
+        )
+        lines.append("")
+
+        # Table format
+        first_solver = next(iter(profiles))
+        tau_values = profiles[first_solver][0]
+        header = "| tau |"
+        sep = "|-----|"
+        for s in profiles:
+            header += f" {s} |"
+            sep += "--------|"
+        lines.append(header)
+        lines.append(sep)
+
+        for j, tau in enumerate(tau_values):
+            row = f"| {tau:.1f} |"
+            for s in profiles:
+                frac = profiles[s][1][j]
+                row += f" {frac:.2f} |"
+            lines.append(row)
+        lines.append("")
+
+    report = "\n".join(lines)
+
+    if output_path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(report)
+        print(f"CUTEst report written to: {output_path}")
+
+    return report
+
+
+def generate_cutest_performance_profile_data(
+    benchmark: BenchmarkResults,
+) -> dict[str, dict]:
+    """
+    Generate performance profile data for CUTEst results in JSON-serializable format.
+
+    Returns dict with:
+      - "profiles": {solver: {"tau": [...], "fraction": [...]}}
+      - "stratified": {class: {solver: {"solved": int, "total": int, "geomean": float}}}
+    """
+    from benchmarks.metrics import performance_profile
+
+    profiles = performance_profile(benchmark, tau_max=100.0, tau_steps=100)
+
+    result = {"profiles": {}, "stratified": {}}
+
+    for solver, (tau, frac) in profiles.items():
+        result["profiles"][solver] = {
+            "tau": tau.tolist(),
+            "fraction": frac.tolist(),
+        }
+
+    # Stratified results
+    classes: dict[str, list[str]] = {}
+    for name, info in benchmark.instance_info.items():
+        pc = info.problem_class
+        if pc not in classes:
+            classes[pc] = []
+        classes[pc].append(name)
+
+    for pc, pc_instances in classes.items():
+        pc_set = set(pc_instances)
+        result["stratified"][pc] = {}
+        for solver in benchmark.get_solvers():
+            solver_results = benchmark.get_results(solver)
+            pc_results = [r for r in solver_results if r.instance in pc_set]
+            pc_solved = [r for r in pc_results if r.is_solved]
+            times = [r.wall_time for r in pc_solved]
+
+            result["stratified"][pc][solver] = {
+                "solved": len(pc_solved),
+                "total": len(pc_results),
+                "geomean_time": shifted_geometric_mean(times),
+            }
+
+    return result

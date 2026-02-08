@@ -1,0 +1,102 @@
+# CUTEst Benchmark Suite Definitions
+#
+# Suites for validating discopt's NLP solver against CUTEst test problems.
+# CUTEst classification codes:
+#   Objective:   N=none, C=constant, L=linear, Q=quadratic, S=sum-of-squares, O=other
+#   Constraints: U=unconstrained, X=fixed-vars, B=bound, N=network, L=linear, Q=quadratic, O=other
+#
+# Requires: pip install discopt[cutest]
+
+[general]
+source = "cutest"
+default_solvers = ["discopt_ipopt", "ipopt_standalone"]
+num_runs = 1
+
+# ─────────────────────────────────────────────────────────────
+# Small unconstrained problems (~50 problems)
+# Good for basic NLP solver validation
+# ─────────────────────────────────────────────────────────────
+[suites.cutest_small_unconstrained]
+description = "Small unconstrained CUTEst problems (≤100 vars)"
+classification_objective = ["Q", "S", "O"]
+classification_constraints = ["U"]
+max_variables = 100
+time_limit_seconds = 60
+
+# ─────────────────────────────────────────────────────────────
+# Bound-constrained problems
+# Tests box-constraint handling in NLP solver
+# ─────────────────────────────────────────────────────────────
+[suites.cutest_bound_constrained]
+description = "Bound-constrained CUTEst problems (≤500 vars)"
+classification_constraints = ["B"]
+max_variables = 500
+time_limit_seconds = 300
+
+# ─────────────────────────────────────────────────────────────
+# General NLP (linearly + nonlinearly constrained)
+# Core test set for constraint handling quality
+# ─────────────────────────────────────────────────────────────
+[suites.cutest_general_nlp]
+description = "General constrained NLP problems (≤500 vars)"
+classification_constraints = ["L", "Q", "O"]
+max_variables = 500
+time_limit_seconds = 600
+
+# ─────────────────────────────────────────────────────────────
+# Large-scale problems (variable-dimension)
+# Tests scalability of NLP solve
+# ─────────────────────────────────────────────────────────────
+[suites.cutest_large_scale]
+description = "Large-scale variable-dimension CUTEst problems"
+variable_dimension = true
+sif_params = { N = 1000 }
+time_limit_seconds = 3600
+
+# ─────────────────────────────────────────────────────────────
+# Quadratic programming subset
+# Should be solvable to high accuracy
+# ─────────────────────────────────────────────────────────────
+[suites.cutest_quadratic]
+description = "Quadratic objective CUTEst problems"
+classification_objective = ["Q"]
+max_variables = 200
+time_limit_seconds = 120
+
+# ─────────────────────────────────────────────────────────────
+# Sum-of-squares (least-squares) problems
+# Common structure in parameter estimation
+# ─────────────────────────────────────────────────────────────
+[suites.cutest_sum_of_squares]
+description = "Sum-of-squares CUTEst problems"
+classification_objective = ["S"]
+max_variables = 200
+time_limit_seconds = 120
+
+# ─────────────────────────────────────────────────────────────
+# Smoke test: small curated subset for CI
+# ─────────────────────────────────────────────────────────────
+[suites.cutest_smoke]
+description = "Quick CUTEst smoke test (10 well-known problems)"
+problem_names = [
+    "ROSENBR",     # Rosenbrock 2D, unconstrained
+    "BEALE",       # Beale, unconstrained
+    "BROWNAL",     # Brown almost-linear, unconstrained
+    "DENSCHNA",    # Dennis-Schnabel, unconstrained
+    "HILBERTA",    # Hilbert, unconstrained
+    "HS035",       # Hock-Schittkowski 35, bound-constrained
+    "HS071",       # Hock-Schittkowski 71, general constrained
+    "HS100",       # Hock-Schittkowski 100, general constrained
+    "HS106",       # Hock-Schittkowski 106, constrained
+    "PENALTY1",    # Penalty I, unconstrained
+]
+time_limit_seconds = 60
+
+# ─────────────────────────────────────────────────────────────
+# Known optima for smoke test problems (for correctness validation)
+# ─────────────────────────────────────────────────────────────
+[known_optima]
+ROSENBR = 0.0
+BEALE = 0.0
+HS035 = 0.1111111
+HS071 = 17.0140173

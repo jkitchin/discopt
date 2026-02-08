@@ -71,6 +71,10 @@ module = "discopt._jax.primal_heuristics"
 disable_error_code = ["no-any-return"]
 
 [[tool.mypy.overrides]]
+module = "discopt.interfaces.cutest"
+disable_error_code = ["no-any-return", "attr-defined", "return-value", "assignment"]
+
+[[tool.mypy.overrides]]
 module = "discopt.benchmarks.runner"
 disable_error_code = ["assignment"]
 
@@ -82,4 +86,5 @@ markers = [
     "slow: long-running tests",
     "gpu: requires GPU",
     "correctness: correctness validation tests",
+    "cutest: requires pycutest and CUTEst installation",
 ]
