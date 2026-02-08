@@ -12,7 +12,7 @@ The .nl format written here follows the AMPL .nl specification:
 
 Usage:
     python scripts/cutest_to_nl.py                    # Convert all curated problems
-    python scripts/cutest_to_nl.py --problems ROSENBR HS035
+    python scripts/cutest_to_nl.py --problems ROSENBR HS35
     python scripts/cutest_to_nl.py --output-dir /path/to/output
 
 Output files are cached in python/tests/data/cutest_nl/ by default.
@@ -49,26 +49,26 @@ CURATED_PROBLEMS = [
     "HAIRY",  # 2 vars
     "MEXHAT",  # 2 vars
     # Bound-constrained
-    "HS035",  # 3 vars
-    "HS036",  # 3 vars
-    "HS038",  # 4 vars
+    "HS35",  # 3 vars
+    "HS36",  # 3 vars
+    "HS38",  # 4 vars
     "CAMEL6",  # 2 vars
     "ALLINIT",  # 4 vars
     # Linearly constrained
-    "HS021",  # 2 vars, 1 constraint
-    "HS024",  # 2 vars, 3 constraints
-    "HS028",  # 3 vars, 1 constraint
-    "HS048",  # 5 vars, 2 constraints
-    "HS049",  # 5 vars, 2 constraints
-    "HS050",  # 5 vars, 3 constraints
-    "HS051",  # 5 vars, 3 constraints
-    "HS052",  # 5 vars, 3 constraints
+    "HS21",  # 2 vars, 1 constraint
+    "HS24",  # 2 vars, 3 constraints
+    "HS28",  # 3 vars, 1 constraint
+    "HS48",  # 5 vars, 2 constraints
+    "HS49",  # 5 vars, 2 constraints
+    "HS50",  # 5 vars, 3 constraints
+    "HS51",  # 5 vars, 3 constraints
+    "HS52",  # 5 vars, 3 constraints
     # General nonlinearly constrained
-    "HS071",  # 4 vars, 2 constraints
-    "HS078",  # 5 vars, 3 constraints
-    "HS079",  # 5 vars, 3 constraints
-    "HS080",  # 5 vars, 3 constraints
-    "HS081",  # 5 vars, 3 constraints
+    "HS71",  # 4 vars, 2 constraints
+    "HS78",  # 5 vars, 3 constraints
+    "HS79",  # 5 vars, 3 constraints
+    "HS80",  # 5 vars, 3 constraints
+    "HS81",  # 5 vars, 3 constraints
     "HS100",  # 7 vars, 4 constraints
     "HS106",  # 8 vars, 6 constraints
     "HS108",  # 9 vars, 13 constraints

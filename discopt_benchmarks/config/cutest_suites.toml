@@ -84,8 +84,8 @@ problem_names = [
     "BROWNAL",     # Brown almost-linear, unconstrained
     "DENSCHNA",    # Dennis-Schnabel, unconstrained
     "HILBERTA",    # Hilbert, unconstrained
-    "HS035",       # Hock-Schittkowski 35, bound-constrained
-    "HS071",       # Hock-Schittkowski 71, general constrained
+    "HS35",        # Hock-Schittkowski 35, bound-constrained
+    "HS71",        # Hock-Schittkowski 71, general constrained
     "HS100",       # Hock-Schittkowski 100, general constrained
     "HS106",       # Hock-Schittkowski 106, constrained
     "PENALTY1",    # Penalty I, unconstrained
@@ -98,5 +98,5 @@ time_limit_seconds = 60
 [known_optima]
 ROSENBR = 0.0
 BEALE = 0.0
-HS035 = 0.1111111
-HS071 = 17.0140173
+HS35 = 0.1111111
+HS71 = 17.0140173

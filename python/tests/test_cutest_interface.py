@@ -26,8 +26,10 @@ def _check_pycutest_available():
     try:
         import pycutest  # noqa: F401
 
+        # Verify CUTEst is actually usable (env vars set, libraries found)
+        pycutest.find_problems()
         return True
-    except ImportError:
+    except (ImportError, RuntimeError):
         return False
 
 
@@ -82,11 +84,14 @@ def _make_mock_cutest_problem(n=2, m=0, name="MOCK"):
     mock_prob.ihess = MagicMock(side_effect=hess_fn)
 
     # Constraints (empty for unconstrained)
-    mock_prob.cons = MagicMock(return_value=np.empty(0))
-    mock_prob.jac = MagicMock(return_value=np.empty((0, n)))
+    # cons(x) returns c; cons(x, gradient=True) returns (c, J)
+    def cons_fn(x, gradient=False):
+        c = np.empty(0)
+        if gradient:
+            return c, np.empty((0, n))
+        return c
 
-    # Classification
-    mock_prob.getinfo = MagicMock(return_value={"classification": "OUR2-AN-2-0"})
+    mock_prob.cons = MagicMock(side_effect=cons_fn)
 
     return mock_prob
 
@@ -203,6 +208,18 @@ class TestCUTEstProblemInfo:
         self.mock_prob = _make_mock_cutest_problem(n=2, m=0)
         self.mock_pycutest = MagicMock()
         self.mock_pycutest.import_problem = MagicMock(return_value=self.mock_prob)
+        self.mock_pycutest.problem_properties = MagicMock(
+            return_value={
+                "objective": "other",
+                "constraints": "unconstrained",
+                "regular": True,
+                "degree": 2,
+                "origin": "academic",
+                "internal": False,
+                "n": 2,
+                "m": 0,
+            }
+        )
 
     def test_classification_parsing(self):
         with patch.dict(sys.modules, {"pycutest": self.mock_pycutest}):
@@ -217,8 +234,8 @@ class TestCUTEstProblemInfo:
             assert info.name == "MOCK"
             assert info.n == 2
             assert info.m == 0
-            assert info.objective_type == "other"  # "O" code
-            assert info.constraint_type == "unconstrained"  # "U" code
+            assert info.objective_type == "other"
+            assert info.constraint_type == "unconstrained"
             prob.close()
 
     def test_repr(self):
@@ -361,10 +378,10 @@ class TestCUTEstIntegration:
         prob.close()
 
     def test_constrained_problem(self):
-        """Test a constrained CUTEst problem (HS071)."""
+        """Test a constrained CUTEst problem (HS71)."""
         from discopt.interfaces.cutest import load_cutest_problem
 
-        prob = load_cutest_problem("HS071")
+        prob = load_cutest_problem("HS71")
         assert prob.n == 4
         assert prob.m > 0
 
@@ -399,6 +416,7 @@ class TestCUTEstIntegration:
     def test_list_problems(self):
         from discopt.interfaces.cutest import list_cutest_problems
 
+        # Single-letter code 'U' should be mapped to 'unconstrained'
         problems = list_cutest_problems(constraints="U", max_n=5)
         assert len(problems) > 0
         assert "ROSENBR" in problems

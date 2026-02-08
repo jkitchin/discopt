@@ -24,7 +24,8 @@ try:
     import pycutest  # type: ignore[import-untyped]
 
     _HAS_PYCUTEST = True
-except ImportError:
+except (ImportError, RuntimeError):
+    # RuntimeError is raised by pycutest when CUTEst env vars are not set
     _HAS_PYCUTEST = False
 
 
@@ -39,21 +40,22 @@ def _require_pycutest() -> None:
         )
 
 
-# CUTEst classification codes for filtering
+# CUTEst classification codes mapped to pycutest filter strings.
+# pycutest.find_problems() expects these full string values.
 _OBJECTIVE_TYPES = {
     "N": "none",
     "C": "constant",
     "L": "linear",
     "Q": "quadratic",
-    "S": "sum_of_squares",
+    "S": "sum of squares",
     "O": "other",
 }
 
 _CONSTRAINT_TYPES = {
     "U": "unconstrained",
-    "X": "fixed_variables",
-    "B": "bound_constrained",
-    "N": "linear_network",
+    "X": "fixed variables",
+    "B": "bounds",
+    "N": "network",
     "L": "linear",
     "Q": "quadratic",
     "O": "other",
@@ -166,40 +168,28 @@ class CUTEstProblem:
         return self._info
 
     def _extract_info(self) -> CUTEstProblemInfo:
-        """Parse CUTEst classification string into structured metadata."""
-        props = self._problem.getinfo()
-        classification = props.get("classification", "")
+        """Extract metadata using pycutest.problem_properties()."""
+        props = pycutest.problem_properties(self._name)
 
-        # Classification format: OBJ-CON-REG-D-V  e.g. "OUR2-AN-2-0"
-        parts = classification.split("-") if classification else []
-        obj_code = parts[0][0] if len(parts) > 0 and len(parts[0]) > 0 else "O"
-        con_code = parts[0][1] if len(parts) > 0 and len(parts[0]) > 1 else "U"
-        regularity = parts[0][2] if len(parts) > 0 and len(parts[0]) > 2 else "R"
+        # problem_properties returns full strings like 'sum of squares', 'unconstrained'
+        obj_type = props.get("objective", "other")
+        con_type = props.get("constraints", "unconstrained")
+        regular = props.get("regular", True)
+        degree = props.get("degree", 2)
 
-        # Degree of derivatives provided
-        degree = 2
-        if len(parts) > 0 and len(parts[0]) > 3:
-            try:
-                degree = int(parts[0][3])
-            except ValueError:
-                pass
+        # Variable-dimension problems have userN=True
+        is_variable_dim = props.get("n", self.n) != self.n
 
-        # Variable dimension flag
-        is_variable_dim = False
-        if len(parts) >= 4:
-            try:
-                n_str = parts[2]
-                is_variable_dim = n_str == "V" or n_str.startswith("V")
-            except (ValueError, IndexError):
-                pass
+        # Build a classification string from the properties
+        classification = f"{obj_type}/{con_type}/d={degree}"
 
         return CUTEstProblemInfo(
             name=self._name,
             n=self.n,
             m=self.m,
-            objective_type=_OBJECTIVE_TYPES.get(obj_code, "other"),
-            constraint_type=_CONSTRAINT_TYPES.get(con_code, "other"),
-            regularity=regularity,
+            objective_type=obj_type,
+            constraint_type=con_type,
+            regularity="R" if regular else "I",
             degree=degree,
             is_variable_dimension=is_variable_dim,
             classification=classification,
@@ -312,7 +302,7 @@ class NLPEvaluatorFromCUTEst:
         if self._n_constraints == 0:
             return np.empty((0, self._n_variables), dtype=np.float64)
         x = np.asarray(x, dtype=np.float64)
-        J = self._p.jac(x)
+        _, J = self._p.cons(x, gradient=True)
         return np.asarray(J, dtype=np.float64)
 
     def evaluate_sparse_hessian(
@@ -399,8 +389,10 @@ def list_cutest_problems(
     List available CUTEst problems matching filter criteria.
 
     Args:
-        objective: Filter by objective type code (N/C/L/Q/S/O) or None for any.
-        constraints: Filter by constraint type code (U/X/B/N/L/Q/O) or None for any.
+        objective: Filter by objective type — either a single-letter CUTEst code
+            (N/C/L/Q/S/O) or a pycutest string (e.g. "quadratic", "sum of squares").
+        constraints: Filter by constraint type — either a single-letter CUTEst code
+            (U/X/B/N/L/Q/O) or a pycutest string (e.g. "unconstrained", "bounds").
         regular: If True, only regular problems; if False, only irregular.
         max_n: Maximum number of variables (None = no limit).
         max_m: Maximum number of constraints (None = no limit).
@@ -411,8 +403,15 @@ def list_cutest_problems(
     """
     _require_pycutest()
 
+    # pycutest.find_problems() expects full strings like 'unconstrained',
+    # not CUTEst single-letter codes like 'U'. Map codes to strings.
+    if objective is not None and len(objective) == 1:
+        objective = _OBJECTIVE_TYPES.get(objective, objective)
+    if constraints is not None and len(constraints) == 1:
+        constraints = _CONSTRAINT_TYPES.get(constraints, constraints)
+
     # Build the classification filter for pycutest.find_problems()
-    kwargs = {}
+    kwargs: dict[str, str | bool] = {}
     if objective is not None:
         kwargs["objective"] = objective
     if constraints is not None:
@@ -453,7 +452,7 @@ def load_cutest_problem(
     Load a CUTEst problem by name.
 
     Args:
-        name: CUTEst problem name (e.g., "ROSENBR", "HS035").
+        name: CUTEst problem name (e.g., "ROSENBR", "HS35").
         sif_params: Optional SIF parameters for variable-dimension problems.
 
     Returns:
