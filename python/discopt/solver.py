@@ -158,12 +158,13 @@ def solve_model(
     strategy: str = "best_first",
     max_nodes: int = 100_000,
     ipopt_options: Optional[dict] = None,
+    nlp_solver: str = "ipopt",
 ) -> SolveResult:
     """
     Solve a Model via NLP-based spatial Branch & Bound.
 
     At each B&B node:
-      1. Solve continuous NLP relaxation (Ipopt) with node-tightened bounds
+      1. Solve continuous NLP relaxation with node-tightened bounds
       2. If infeasible -> prune
       3. If integer-feasible -> fathom, update incumbent
       4. Otherwise -> branch on most fractional integer variable
@@ -179,6 +180,7 @@ def solve_model(
         strategy: Node selection ("best_first" or "depth_first").
         max_nodes: Maximum number of B&B nodes before stopping.
         ipopt_options: Options dict passed to cyipopt.
+        nlp_solver: NLP solver backend ("ipopt" or "ipm").
 
     Returns:
         SolveResult with solution, statistics, and profiling times.
@@ -189,7 +191,7 @@ def solve_model(
 
     # --- Pure continuous: solve directly with NLP, no B&B needed ---
     if _is_pure_continuous(model):
-        return _solve_continuous(model, time_limit, ipopt_options, t_start)
+        return _solve_continuous(model, time_limit, ipopt_options, t_start, nlp_solver)
 
     # --- Extract variable info ---
     n_vars, lb, ub, int_offsets, int_sizes = _extract_variable_info(model)
@@ -266,6 +268,7 @@ def solve_model(
                 node_ub,
                 constraint_bounds,
                 opts,
+                nlp_solver=nlp_solver,
             )
             jax_time += time.perf_counter() - t_jax_start
 
@@ -355,8 +358,9 @@ def _solve_continuous(
     time_limit: float,
     ipopt_options: Optional[dict],
     t_start: float,
+    nlp_solver: str = "ipopt",
 ) -> SolveResult:
-    """Solve a purely continuous model directly with Ipopt (no B&B)."""
+    """Solve a purely continuous model directly with NLP solver (no B&B)."""
     t_jax_start = time.perf_counter()
     evaluator = _make_evaluator(model)
     jax_time = time.perf_counter() - t_jax_start
@@ -377,7 +381,12 @@ def _solve_continuous(
             constraint_bounds = list(zip(cl_list, cu_list))
 
     t_jax_start = time.perf_counter()
-    nlp_result = solve_nlp(evaluator, x0, constraint_bounds=constraint_bounds, options=opts)
+    if nlp_solver == "ipm":
+        from discopt._jax.ipm import solve_nlp_ipm
+
+        nlp_result = solve_nlp_ipm(evaluator, x0, constraint_bounds=constraint_bounds, options=opts)
+    else:
+        nlp_result = solve_nlp(evaluator, x0, constraint_bounds=constraint_bounds, options=opts)
     jax_time += time.perf_counter() - t_jax_start
 
     wall_time = time.perf_counter() - t_start
@@ -413,12 +422,78 @@ def _solve_node_nlp(
     node_ub: np.ndarray,
     constraint_bounds: Optional[list[tuple[float, float]]],
     options: dict,
+    nlp_solver: str = "ipopt",
 ):
     """Solve the NLP relaxation at a single B&B node with tightened bounds.
 
-    We override cyipopt's variable bounds to use the node-specific bounds
+    We override variable bounds to use the node-specific bounds
     rather than the global bounds.
     """
+    if nlp_solver == "ipm":
+        return _solve_node_nlp_ipm(evaluator, x0, node_lb, node_ub, constraint_bounds, options)
+    return _solve_node_nlp_ipopt(evaluator, x0, node_lb, node_ub, constraint_bounds, options)
+
+
+def _solve_node_nlp_ipm(
+    evaluator: NLPEvaluator,
+    x0: np.ndarray,
+    node_lb: np.ndarray,
+    node_ub: np.ndarray,
+    constraint_bounds: Optional[list[tuple[float, float]]],
+    options: dict,
+):
+    """Solve node NLP with the pure-JAX IPM."""
+    import jax.numpy as jnp
+
+    from discopt._jax.ipm import IPMOptions, ipm_solve
+    from discopt.solvers import NLPResult
+
+    obj_fn = evaluator._obj_fn
+    m = evaluator.n_constraints
+    con_fn = evaluator._cons_fn if m > 0 else None
+
+    x0_jax = jnp.array(x0, dtype=jnp.float64)
+    x_l = jnp.array(node_lb, dtype=jnp.float64)
+    x_u = jnp.array(node_ub, dtype=jnp.float64)
+
+    if constraint_bounds is not None:
+        g_l = jnp.array([b[0] for b in constraint_bounds], dtype=jnp.float64)
+        g_u = jnp.array([b[1] for b in constraint_bounds], dtype=jnp.float64)
+    else:
+        g_l = None
+        g_u = None
+
+    ipm_opts = IPMOptions(max_iter=int(options.get("max_iter", 200)))
+
+    try:
+        state = ipm_solve(obj_fn, con_fn, x0_jax, x_l, x_u, g_l, g_u, ipm_opts)
+    except Exception:
+        return NLPResult(status=SolveStatus.ERROR, x=x0, objective=1e30)
+
+    conv = int(state.converged)
+    if conv in (1, 2):
+        status = SolveStatus.OPTIMAL
+    elif conv == 3:
+        status = SolveStatus.ITERATION_LIMIT
+    else:
+        status = SolveStatus.ERROR
+
+    return NLPResult(
+        status=status,
+        x=np.asarray(state.x),
+        objective=float(state.obj),
+    )
+
+
+def _solve_node_nlp_ipopt(
+    evaluator: NLPEvaluator,
+    x0: np.ndarray,
+    node_lb: np.ndarray,
+    node_ub: np.ndarray,
+    constraint_bounds: Optional[list[tuple[float, float]]],
+    options: dict,
+):
+    """Solve node NLP with cyipopt (Ipopt)."""
     try:
         import cyipopt
     except ImportError:
