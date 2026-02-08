@@ -54,6 +54,14 @@ def solve_nlp(
     m = evaluator.n_constraints
     lb, ub = evaluator.variable_bounds
 
+    # Convert large-magnitude bounds to ±inf. CUTEst and other sources use
+    # finite sentinels (e.g. ±1e20) for "no bound". Ipopt handles this via
+    # nlp_lower_bound_inf/nlp_upper_bound_inf; we replicate that here so
+    # ripopt's barrier method doesn't create terms for non-existent bounds.
+    bound_inf = 1e19
+    lb = np.where(lb <= -bound_inf, -np.inf, lb).astype(np.float64)
+    ub = np.where(ub >= bound_inf, np.inf, ub).astype(np.float64)
+
     # Constraint bounds
     if constraint_bounds is not None:
         g_l = np.array([b[0] for b in constraint_bounds], dtype=np.float64)
@@ -66,12 +74,17 @@ def solve_nlp(
         g_l = np.empty(0, dtype=np.float64)
         g_u = np.empty(0, dtype=np.float64)
 
+    # Also convert constraint bound sentinels
+    if len(g_l) > 0:
+        g_l = np.where(g_l <= -bound_inf, -np.inf, g_l).astype(np.float64)
+        g_u = np.where(g_u >= bound_inf, np.inf, g_u).astype(np.float64)
+
     t0 = time.perf_counter()
     result = solve_ripopt(
         evaluator,
         x0.astype(np.float64),
-        lb.astype(np.float64),
-        ub.astype(np.float64),
+        lb,
+        ub,
         g_l,
         g_u,
         opts,

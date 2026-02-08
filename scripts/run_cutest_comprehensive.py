@@ -147,23 +147,16 @@ def run_benchmark(problem_names, label="benchmark"):
             row["ipopt_obj"] = None
 
         # --- Ripopt ---
+        # Note: SIGALRM can't be used with ripopt (Rust panics on signal
+        # interrupting a callback). Use max_iter to limit runtime instead.
         try:
-            signal.signal(signal.SIGALRM, _timeout_handler)
-            signal.alarm(int(WALL_TIME_LIMIT))
             t0 = time.perf_counter()
             r_ripopt = solve_with_ripopt(prob, evaluator)
             t_ripopt = time.perf_counter() - t0
-            signal.alarm(0)
             row["ripopt_status"] = r_ripopt.status.value
             row["ripopt_time"] = t_ripopt
             row["ripopt_obj"] = r_ripopt.objective
-        except TimeoutError:
-            signal.alarm(0)
-            row["ripopt_status"] = "time_limit"
-            row["ripopt_time"] = WALL_TIME_LIMIT
-            row["ripopt_obj"] = None
         except Exception:
-            signal.alarm(0)
             row["ripopt_status"] = "ERROR"
             row["ripopt_time"] = float("inf")
             row["ripopt_obj"] = None
