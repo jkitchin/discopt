@@ -127,6 +127,66 @@ def _infer_constraint_bounds(model: Model):
     return cl_list, cu_list
 
 
+def _generate_starting_points(node_lb, node_ub, n_random=2):
+    """Generate diverse starting points for multi-start NLP at root node."""
+    lb_clipped = np.clip(node_lb, -100.0, 100.0)
+    ub_clipped = np.clip(node_ub, -100.0, 100.0)
+    span = ub_clipped - lb_clipped
+
+    points = [
+        0.5 * (lb_clipped + ub_clipped),  # midpoint
+        lb_clipped + 0.25 * span,  # lower-quarter
+        lb_clipped + 0.75 * span,  # upper-quarter
+    ]
+
+    rng = np.random.RandomState(42)
+    for _ in range(n_random):
+        points.append(lb_clipped + rng.uniform(size=lb_clipped.shape) * span)
+
+    return points
+
+
+def _solve_root_node_multistart(
+    evaluator,
+    node_lb,
+    node_ub,
+    constraint_bounds,
+    options,
+    nlp_solver,
+    n_random=2,
+):
+    """Solve root NLP relaxation from multiple starting points.
+
+    On nonconvex problems, different starting points can converge to
+    different local minima. Multi-start at the root increases the
+    chance of finding the global optimum for the initial bound/incumbent.
+    """
+    starting_points = _generate_starting_points(node_lb, node_ub, n_random=n_random)
+
+    best_result = None
+    best_obj = np.inf
+
+    for x0 in starting_points:
+        nlp_result = _solve_node_nlp(
+            evaluator,
+            x0,
+            node_lb,
+            node_ub,
+            constraint_bounds,
+            options,
+            nlp_solver=nlp_solver,
+        )
+        if nlp_result.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
+            if nlp_result.objective < best_obj:
+                best_obj = nlp_result.objective
+                best_result = nlp_result
+
+    if best_result is not None:
+        return best_result
+    # All failed — return the last result
+    return nlp_result
+
+
 def _unpack_solution(model: Model, x_flat: np.ndarray):
     """Convert flat solution vector to {var_name: array} dict."""
     result = {}
@@ -365,37 +425,43 @@ def solve_model(
             result_feas = np.empty(n_batch, dtype=bool)
 
             for i in range(n_batch):
-                node_id = int(batch_ids[i])
                 node_lb = np.array(batch_lb[i])
                 node_ub = np.array(batch_ub[i])
 
-                lb_clipped = np.clip(node_lb, -100.0, 100.0)
-                ub_clipped = np.clip(node_ub, -100.0, 100.0)
-                x0 = 0.5 * (lb_clipped + ub_clipped)
+                if iteration == 0:
+                    nlp_result = _solve_root_node_multistart(
+                        evaluator,
+                        node_lb,
+                        node_ub,
+                        constraint_bounds,
+                        opts,
+                        nlp_solver,
+                    )
+                else:
+                    lb_clipped = np.clip(node_lb, -100.0, 100.0)
+                    ub_clipped = np.clip(node_ub, -100.0, 100.0)
+                    x0 = 0.5 * (lb_clipped + ub_clipped)
+                    nlp_result = _solve_node_nlp(
+                        evaluator,
+                        x0,
+                        node_lb,
+                        node_ub,
+                        constraint_bounds,
+                        opts,
+                        nlp_solver=nlp_solver,
+                    )
 
-                nlp_result = _solve_node_nlp(
-                    evaluator,
-                    x0,
-                    node_lb,
-                    node_ub,
-                    constraint_bounds,
-                    opts,
-                    nlp_solver=nlp_solver,
-                )
+                result_ids[i] = int(batch_ids[i])
 
-                result_ids[i] = node_id
-
-                if nlp_result.status == SolveStatus.INFEASIBLE:
-                    result_lbs[i] = 1e30
-                    result_sols[i] = x0
-                    result_feas[i] = False
-                elif nlp_result.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
+                if nlp_result.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
                     result_lbs[i] = nlp_result.objective
                     result_sols[i] = nlp_result.x
                     result_feas[i] = False
                 else:
                     result_lbs[i] = 1e30
-                    result_sols[i] = x0
+                    lb_clipped = np.clip(node_lb, -100.0, 100.0)
+                    ub_clipped = np.clip(node_ub, -100.0, 100.0)
+                    result_sols[i] = 0.5 * (lb_clipped + ub_clipped)
                     result_feas[i] = False
         jax_time += time.perf_counter() - t_jax_start
 
