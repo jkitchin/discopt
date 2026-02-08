@@ -9,7 +9,18 @@ repository:
 sphinx:
   extra_extensions:
     - sphinxcontrib.bibtex
+    - autoapi.extension
   config:
     bibtex_bibfiles: ["references.bib"]
     bibtex_reference_style: author_year
     bibtex_default_style: plain
+    autoapi_dirs: ["../python/discopt"]
+    autoapi_type: "python"
+    autoapi_ignore: ["**/tests/**", "**/_rust*"]
+    autoapi_options:
+      - members
+      - undoc-members
+      - show-inheritance
+      - show-module-summary
+    autoapi_keep_files: false
+    autoapi_add_toctree_entry: false

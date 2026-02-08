@@ -3,6 +3,8 @@
 //! This crate provides the Branch-and-Bound engine, expression IR,
 //! and preprocessing for the discopt MINLP solver.
 
+#![deny(missing_docs)]
+
 pub mod expr;
 pub mod bnb;
 pub mod nl_parser;

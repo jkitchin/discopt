@@ -16,7 +16,7 @@ use super::fbbt::Interval;
 // Linear row extraction
 // ─────────────────────────────────────────────────────────────
 
-/// A linear constraint row: sum(coeffs[i] * x[var_indices[i]]) sense rhs.
+/// A linear constraint row: `sum(coeffs[i] * x[var_indices[i]]) sense rhs`.
 #[derive(Debug, Clone)]
 pub struct LinearRow {
     /// Variable indices (into the flat variable vector).

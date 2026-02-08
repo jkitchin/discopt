@@ -1,3 +1,10 @@
+//! PyO3 bindings for the discopt MINLP solver.
+//!
+//! Provides Python-accessible wrappers for the Rust B&B tree manager,
+//! expression IR, batch dispatch, .nl parser, and ripopt IPM solver.
+
+#![deny(missing_docs)]
+
 use pyo3::prelude::*;
 
 mod batch;

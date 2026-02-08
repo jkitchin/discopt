@@ -12,12 +12,14 @@ use std::f64::consts::PI;
 // Interval type
 // ─────────────────────────────────────────────────────────────
 
-/// A closed interval [lo, hi].
+/// A closed interval `[lo, hi]`.
 ///
 /// An interval with `lo > hi` is empty, representing infeasibility.
 #[derive(Debug, Clone, Copy)]
 pub struct Interval {
+    /// Lower bound of the interval.
     pub lo: f64,
+    /// Upper bound of the interval.
     pub hi: f64,
 }
 
@@ -35,7 +37,7 @@ impl Interval {
         }
     }
 
-    /// A point interval [v, v].
+    /// A point interval `[v, v]`.
     pub fn point(v: f64) -> Self {
         Self { lo: v, hi: v }
     }
@@ -76,17 +78,17 @@ impl Interval {
 // Interval arithmetic
 // ─────────────────────────────────────────────────────────────
 
-/// [a,b] + [c,d] = [a+c, b+d]
+/// `[a,b] + [c,d] = [a+c, b+d]`
 pub fn interval_add(a: &Interval, b: &Interval) -> Interval {
     Interval::new(a.lo + b.lo, a.hi + b.hi)
 }
 
-/// [a,b] - [c,d] = [a-d, b-c]
+/// `[a,b] - [c,d] = [a-d, b-c]`
 pub fn interval_sub(a: &Interval, b: &Interval) -> Interval {
     Interval::new(a.lo - b.hi, a.hi - b.lo)
 }
 
-/// [a,b] * [c,d] using all four endpoint products.
+/// `[a,b] * [c,d]` using all four endpoint products.
 pub fn interval_mul(a: &Interval, b: &Interval) -> Interval {
     let p1 = a.lo * b.lo;
     let p2 = a.lo * b.hi;
@@ -98,7 +100,7 @@ pub fn interval_mul(a: &Interval, b: &Interval) -> Interval {
     )
 }
 
-/// [a,b] / [c,d] with division-by-zero handling.
+/// `[a,b] / [c,d]` with division-by-zero handling.
 pub fn interval_div(a: &Interval, b: &Interval) -> Interval {
     if b.lo <= 0.0 && b.hi >= 0.0 {
         // Denominator contains zero — result is the entire real line.
@@ -109,7 +111,7 @@ pub fn interval_div(a: &Interval, b: &Interval) -> Interval {
     }
 }
 
-/// [a,b]^n for integer exponent.
+/// `[a,b]^n` for integer exponent.
 pub fn interval_pow_int(base: &Interval, n: i64) -> Interval {
     if n == 0 {
         return Interval::point(1.0);
@@ -138,7 +140,7 @@ pub fn interval_pow_int(base: &Interval, n: i64) -> Interval {
     }
 }
 
-/// [a,b]^[c,d] for general power.
+/// `[a,b]^[c,d]` for general power.
 pub fn interval_pow(base: &Interval, exp: &Interval) -> Interval {
     // If exponent is a point and integer, use int version.
     if (exp.hi - exp.lo).abs() < 1e-12 {
@@ -164,12 +166,12 @@ pub fn interval_pow(base: &Interval, exp: &Interval) -> Interval {
     Interval::new(lo, hi)
 }
 
-/// neg([a,b]) = [-b, -a]
+/// `neg([a,b]) = [-b, -a]`
 pub fn interval_neg(a: &Interval) -> Interval {
     Interval::new(-a.hi, -a.lo)
 }
 
-/// abs([a,b])
+/// `abs([a,b])`
 pub fn interval_abs(a: &Interval) -> Interval {
     if a.lo >= 0.0 {
         *a
@@ -180,12 +182,12 @@ pub fn interval_abs(a: &Interval) -> Interval {
     }
 }
 
-/// exp([a,b]) = [exp(a), exp(b)]
+/// `exp([a,b]) = [exp(a), exp(b)]`
 pub fn interval_exp(a: &Interval) -> Interval {
     Interval::new(a.lo.exp(), a.hi.exp())
 }
 
-/// log([a,b]) = [log(max(a, eps)), log(b)]
+/// `log([a,b]) = [log(max(a, eps)), log(b)]`
 pub fn interval_log(a: &Interval) -> Interval {
     let lo = a.lo.max(f64::MIN_POSITIVE);
     if a.hi <= 0.0 {
@@ -194,7 +196,7 @@ pub fn interval_log(a: &Interval) -> Interval {
     Interval::new(lo.ln(), a.hi.ln())
 }
 
-/// log2([a,b])
+/// `log2([a,b])`
 pub fn interval_log2(a: &Interval) -> Interval {
     let lo = a.lo.max(f64::MIN_POSITIVE);
     if a.hi <= 0.0 {
@@ -203,7 +205,7 @@ pub fn interval_log2(a: &Interval) -> Interval {
     Interval::new(lo.log2(), a.hi.log2())
 }
 
-/// log10([a,b])
+/// `log10([a,b])`
 pub fn interval_log10(a: &Interval) -> Interval {
     let lo = a.lo.max(f64::MIN_POSITIVE);
     if a.hi <= 0.0 {
@@ -212,7 +214,7 @@ pub fn interval_log10(a: &Interval) -> Interval {
     Interval::new(lo.log10(), a.hi.log10())
 }
 
-/// sqrt([a,b]) = [sqrt(max(a,0)), sqrt(b)]
+/// `sqrt([a,b]) = [sqrt(max(a,0)), sqrt(b)]`
 pub fn interval_sqrt(a: &Interval) -> Interval {
     if a.hi < 0.0 {
         return Interval::empty();
@@ -220,7 +222,7 @@ pub fn interval_sqrt(a: &Interval) -> Interval {
     Interval::new(a.lo.max(0.0).sqrt(), a.hi.sqrt())
 }
 
-/// sin([a,b]) with periodicity handling.
+/// `sin([a,b])` with periodicity handling.
 pub fn interval_sin(a: &Interval) -> Interval {
     if a.width() >= 2.0 * PI {
         return Interval::new(-1.0, 1.0);
@@ -248,7 +250,7 @@ pub fn interval_sin(a: &Interval) -> Interval {
     Interval::new(min_val, max_val)
 }
 
-/// cos([a,b]) with periodicity handling.
+/// `cos([a,b])` with periodicity handling.
 pub fn interval_cos(a: &Interval) -> Interval {
     // cos(x) = sin(x + pi/2)
     interval_sin(&Interval::new(a.lo + PI / 2.0, a.hi + PI / 2.0))

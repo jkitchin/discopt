@@ -14,6 +14,12 @@ parts:
     chapters:
       - file: notebooks/ipm_vs_ipopt
       - file: notebooks/batch_ipm_vs_ipopt
+  - caption: Applications
+    chapters:
+      - file: notebooks/decision_focused_learning
+  - caption: API Reference
+    chapters:
+      - file: api
   - caption: Appendix
     chapters:
       - file: references

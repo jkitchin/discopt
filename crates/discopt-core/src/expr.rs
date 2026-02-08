@@ -24,36 +24,57 @@ impl fmt::Display for ExprId {
 /// Binary arithmetic operators.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
+    /// Addition (`left + right`).
     Add,
+    /// Subtraction (`left - right`).
     Sub,
+    /// Multiplication (`left * right`).
     Mul,
+    /// Division (`left / right`).
     Div,
+    /// Exponentiation (`left ^ right`).
     Pow,
 }
 
 /// Unary operators.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnOp {
+    /// Arithmetic negation (`-x`).
     Neg,
+    /// Absolute value (`|x|`).
     Abs,
 }
 
 /// Named mathematical functions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MathFunc {
+    /// Exponential function (`e^x`).
     Exp,
+    /// Natural logarithm (`ln(x)`).
     Log,
+    /// Base-2 logarithm.
     Log2,
+    /// Base-10 logarithm.
     Log10,
+    /// Square root.
     Sqrt,
+    /// Sine.
     Sin,
+    /// Cosine.
     Cos,
+    /// Tangent.
     Tan,
+    /// Absolute value.
     Abs,
+    /// Sign function (-1, 0, or 1).
     Sign,
+    /// Minimum of arguments.
     Min,
+    /// Maximum of arguments.
     Max,
+    /// Product of arguments.
     Prod,
+    /// L2 norm.
     Norm2,
 }
 
@@ -75,50 +96,71 @@ pub enum ExprNode {
     ConstantArray(Vec<f64>, Vec<usize>),
     /// Decision variable.
     Variable {
+        /// Variable name.
         name: String,
+        /// Index in the variables list.
         index: usize,
+        /// Total number of scalar elements.
         size: usize,
+        /// Shape of the variable (empty for scalars).
         shape: Vec<usize>,
     },
     /// Parameter (fixed per solve, differentiable).
     Parameter {
+        /// Parameter name.
         name: String,
+        /// Flat parameter values.
         value: Vec<f64>,
+        /// Shape of the parameter (empty for scalars).
         shape: Vec<usize>,
     },
     /// Binary arithmetic: left op right.
     BinaryOp {
+        /// The binary operator.
         op: BinOp,
+        /// Left operand.
         left: ExprId,
+        /// Right operand.
         right: ExprId,
     },
     /// Unary operation.
     UnaryOp {
+        /// The unary operator.
         op: UnOp,
+        /// The operand expression.
         operand: ExprId,
     },
     /// Named function call (exp, log, sin, ...).
     FunctionCall {
+        /// The mathematical function.
         func: MathFunc,
+        /// Function arguments.
         args: Vec<ExprId>,
     },
     /// Indexing into an array expression.
     Index {
+        /// The base array expression.
         base: ExprId,
+        /// The index specification.
         index: IndexSpec,
     },
     /// Matrix multiply: left @ right.
     MatMul {
+        /// Left matrix operand.
         left: ExprId,
+        /// Right matrix operand.
         right: ExprId,
     },
     /// Sum over an expression (optionally along an axis).
     Sum {
+        /// The expression to sum.
         operand: ExprId,
+        /// Optional axis to sum along (`None` for full reduction).
         axis: Option<usize>,
     },
     /// Sum of a list of terms.
     SumOver {
+        /// The terms to sum.
         terms: Vec<ExprId>,
     },
 }
@@ -187,55 +229,78 @@ impl ExprArena {
 /// Optimization direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ObjectiveSense {
+    /// Minimize the objective function.
     Minimize,
+    /// Maximize the objective function.
     Maximize,
 }
 
 /// Constraint comparison sense.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConstraintSense {
+    /// Less-than-or-equal (`<=`).
     Le,
+    /// Equality (`==`).
     Eq,
+    /// Greater-than-or-equal (`>=`).
     Ge,
 }
 
 /// Variable domain type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VarType {
+    /// Real-valued continuous variable.
     Continuous,
+    /// Binary variable (0 or 1).
     Binary,
+    /// General integer variable.
     Integer,
 }
 
 /// Metadata for one decision variable block.
 #[derive(Debug, Clone)]
 pub struct VarInfo {
+    /// Variable name.
     pub name: String,
+    /// Domain type (continuous, binary, or integer).
     pub var_type: VarType,
     /// Position in the flat variable vector.
     pub offset: usize,
+    /// Total number of scalar elements.
     pub size: usize,
+    /// Shape of the variable (empty for scalars).
     pub shape: Vec<usize>,
+    /// Element-wise lower bounds.
     pub lb: Vec<f64>,
+    /// Element-wise upper bounds.
     pub ub: Vec<f64>,
 }
 
 /// A single constraint: body sense rhs.
 #[derive(Debug, Clone)]
 pub struct ConstraintRepr {
+    /// Expression for the constraint left-hand side.
     pub body: ExprId,
+    /// Comparison sense (<=, ==, >=).
     pub sense: ConstraintSense,
+    /// Right-hand side constant.
     pub rhs: f64,
+    /// Optional constraint name.
     pub name: Option<String>,
 }
 
 /// Complete model representation in Rust.
 #[derive(Debug, Clone)]
 pub struct ModelRepr {
+    /// Expression arena holding all nodes.
     pub arena: ExprArena,
+    /// Root expression id for the objective function.
     pub objective: ExprId,
+    /// Minimize or maximize.
     pub objective_sense: ObjectiveSense,
+    /// List of constraints.
     pub constraints: Vec<ConstraintRepr>,
+    /// Variable metadata blocks.
     pub variables: Vec<VarInfo>,
     /// Total number of scalar variables (sum of all var sizes).
     pub n_vars: usize,
