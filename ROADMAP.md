@@ -28,32 +28,33 @@ discopt followed a 4-phase development plan. Phases 1-3 are complete; Phase 4 (p
 
 ## Phase 2: GPU + Differentiability (complete)
 
-| Task                                 | Status      | Description                                             |
-|--------------------------------------|-------------|---------------------------------------------------------|
-| T19 Batch relaxation evaluator       | Done        | jax.vmap-based batch McCormick evaluation               |
-| T21 OBBT bound tightening            | Done        | LP-based bound tightening with HiGHS warm-start         |
-| T22 Differentiable solving (Level 1) | Done        | custom_jvp + envelope theorem for parameter sensitivity |
-| T20 Multi-start heuristics           | Done        | Multi-start NLP solving + feasibility pump              |
-| T23 Differentiable solving (Level 3) | Done        | Implicit differentiation at active set via KKT          |
-| T25 Benchmark runner                 | Done        | Performance metrics, batch scaling, JSON export         |
-| T17 GPU-batched IPM                  | Done        | Pure-JAX IPM solver with augmented KKT, vmap batch solving |
-| T24 GPU IPM in solver loop           | Done        | Batch IPM in B&B loop, ipm default backend              |
+| Task                                 | Status | Description                                                |
+|--------------------------------------|--------|------------------------------------------------------------|
+| T19 Batch relaxation evaluator       | Done   | jax.vmap-based batch McCormick evaluation                  |
+| T21 OBBT bound tightening            | Done   | LP-based bound tightening with HiGHS warm-start            |
+| T22 Differentiable solving (Level 1) | Done   | custom_jvp + envelope theorem for parameter sensitivity    |
+| T20 Multi-start heuristics           | Done   | Multi-start NLP solving + feasibility pump                 |
+| T23 Differentiable solving (Level 3) | Done   | Implicit differentiation at active set via KKT             |
+| T25 Benchmark runner                 | Done   | Performance metrics, batch scaling, JSON export            |
+| T17 GPU-batched IPM                  | Done   | Pure-JAX IPM solver with augmented KKT, vmap batch solving |
+| T24 GPU IPM in solver loop           | Done   | Batch IPM in B&B loop, ipm default backend                 |
 
 ## Phase 3: Competitive Performance (complete)
 
-| Task                                 | Status      | Description                                             |
-|--------------------------------------|-------------|---------------------------------------------------------|
-| Piecewise McCormick                  | Done        | k-partition domain splitting, O(1/k^2) convergence     |
-| alphaBB underestimators              | Done        | Hessian-based convexification (Adjiman/Floudas 1998)    |
-| Cutting planes (RLT/OA)             | Done        | Bilinear RLT cuts, gradient OA, separation oracles      |
-| GNN branching policy                 | Done        | Bipartite graph GNN, strong branching data collection   |
-| Solver integration                   | Done        | partitions, branching_policy, cutting_planes parameters |
+| Task                    | Status | Description                                             |
+|-------------------------|--------|---------------------------------------------------------|
+| Piecewise McCormick     | Done   | k-partition domain splitting, O(1/k^2) convergence      |
+| alphaBB underestimators | Done   | Hessian-based convexification (Adjiman/Floudas 1998)    |
+| Cutting planes (RLT/OA) | Done   | Bilinear RLT cuts, gradient OA, separation oracles      |
+| GNN branching policy    | Done   | Bipartite graph GNN, strong branching data collection   |
+| Solver integration      | Done   | partitions, branching_policy, cutting_planes parameters |
+|                         |        |                                                         |
 
 ## Phase 4: Polish + Release (in progress)
 
-| Task                                 | Status      | Description                                             |
-|--------------------------------------|-------------|---------------------------------------------------------|
-| ripopt integration (PyO3)            | Done        | Rust IPM solver via PyO3 bindings (`nlp_solver="ripopt"`) |
-| CUTEst interface                     | Done        | PyCUTEst evaluator for NLP benchmarking                 |
-| Documentation + example notebooks    | In progress | Quickstart, advanced features, IPM comparison notebooks |
-| Release engineering                  | In progress | `pip install discopt`, pyproject.toml, packaging        |
+| Task                              | Status      | Description                                               |
+|-----------------------------------|-------------|-----------------------------------------------------------|
+| ripopt integration (PyO3)         | Done        | Rust IPM solver via PyO3 bindings (`nlp_solver="ripopt"`) |
+| CUTEst interface                  | Done        | PyCUTEst evaluator for NLP benchmarking                   |
+| Documentation + example notebooks | In progress | Quickstart, advanced features, IPM comparison notebooks   |
+| Release engineering               | In progress | `pip install discopt`, pyproject.toml, packaging          |

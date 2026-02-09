@@ -1,0 +1,140 @@
+{
+  "timestamp": "2026-02-08T20:39:23.411572",
+  "gate": "phase3",
+  "time_limit": 120.0,
+  "max_nodes": 200000,
+  "total_instances": 0,
+  "solved": 0,
+  "solved_30var": 0,
+  "solved_50var": 0,
+  "solved_100var": 0,
+  "incorrect_count": 0,
+  "median_nodes_per_second": 0.0,
+  "median_rust_overhead": null,
+  "criteria_passed": 3,
+  "criteria_failed": 4,
+  "criteria_unmeasurable": 7,
+  "instances": [],
+  "feature_results": [
+    {
+      "feature": "piecewise_mccormick",
+      "test_name": "exp_gap_reduction",
+      "passed": true,
+      "value": 0.9337230553910588,
+      "target": 0.6,
+      "notes": "std_gap=0.9990, pw_gap=0.0662, k=4"
+    },
+    {
+      "feature": "piecewise_mccormick",
+      "test_name": "log_gap_reduction",
+      "passed": true,
+      "value": 0.9186494093623297,
+      "target": 0.6,
+      "notes": "std_gap=0.2540, pw_gap=0.0207, k=4"
+    },
+    {
+      "feature": "piecewise_mccormick",
+      "test_name": "square_gap_reduction",
+      "passed": true,
+      "value": 0.9375,
+      "target": 0.6,
+      "notes": "std_gap=2.6640, pw_gap=0.1665, k=4"
+    },
+    {
+      "feature": "alphabb",
+      "test_name": "rosenbrock_soundness",
+      "passed": true,
+      "value": 0.0,
+      "target": 0.0,
+      "notes": "0/1000 violations"
+    },
+    {
+      "feature": "alphabb",
+      "test_name": "gershgorin_soundness",
+      "passed": true,
+      "value": 0.0,
+      "target": 0.0,
+      "notes": "0/500 cv violations (Gershgorin)"
+    },
+    {
+      "feature": "cutting_planes",
+      "test_name": "cut_pool_basic",
+      "passed": true,
+      "value": 3.0,
+      "target": 3.0,
+      "notes": "pool_size=3, A_shape=(3, 3)"
+    },
+    {
+      "feature": "cutting_planes",
+      "test_name": "cut_dedup",
+      "passed": true,
+      "value": 3.0,
+      "target": 3.0,
+      "notes": "After adding dupes: 3 cuts (expected 3)"
+    },
+    {
+      "feature": "cutting_planes",
+      "test_name": "cut_age_purge",
+      "passed": true,
+      "value": 0.0,
+      "target": null,
+      "notes": "After 20 age + purge(15): 0 cuts remain"
+    },
+    {
+      "feature": "cutting_planes",
+      "test_name": "oa_cut_generation",
+      "passed": false,
+      "value": 0.0,
+      "target": 1.0,
+      "notes": "Error: 'Model' object has no attribute 'add_variable'"
+    },
+    {
+      "feature": "gnn_branching",
+      "test_name": "inference_latency",
+      "passed": true,
+      "value": 0.049329999601468444,
+      "target": 0.1,
+      "notes": "0.0493 ms per inference (100 trials)"
+    },
+    {
+      "feature": "gnn_branching",
+      "test_name": "valid_scores",
+      "passed": true,
+      "value": 5.0,
+      "target": 5.0,
+      "notes": "scores shape=(5,), all finite=True"
+    },
+    {
+      "feature": "gnn_branching",
+      "test_name": "strong_branching_collection",
+      "passed": false,
+      "value": null,
+      "target": null,
+      "notes": "Error: 'Model' object has no attribute 'add_variable'"
+    },
+    {
+      "feature": "iterative_ipm",
+      "test_name": "pcg_accuracy",
+      "passed": true,
+      "value": 0.0,
+      "target": 1e-08,
+      "notes": "PCG error=0.00e+00, converged=True"
+    },
+    {
+      "feature": "iterative_ipm",
+      "test_name": "lineax_available",
+      "passed": false,
+      "value": 0.0,
+      "target": 1.0,
+      "notes": "Error: IterativeKKTSolver.__init__() got an unexpected keyword argument 'method'"
+    },
+    {
+      "feature": "test_suite",
+      "test_name": "full_pytest",
+      "passed": false,
+      "value": 571.0,
+      "target": null,
+      "notes": "571 passed, 1 failed, 0 errors"
+    }
+  ]
+}

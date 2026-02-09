@@ -13,6 +13,7 @@ import time
 from typing import Optional
 
 import numpy as np
+from scipy.optimize import minimize as scipy_minimize
 
 from discopt._jax.nlp_evaluator import NLPEvaluator
 from discopt._rust import PyTreeManager
@@ -158,6 +159,88 @@ def _make_evaluator(model: Model):
 
         return NLPEvaluatorFromNl(model)
     return NLPEvaluator(model)
+
+
+def _estimate_alpha_fd(evaluator, lb, ub, n_samples=30):
+    """Estimate alphaBB convexification parameters via finite-difference Hessians.
+
+    Samples random points in [lb, ub], computes the FD Hessian at each,
+    finds the most negative eigenvalue, and returns alpha = max(0, -lambda_min/2 * 1.5 + 1e-6).
+    """
+    n = len(lb)
+    rng = np.random.RandomState(123)
+
+    # Clip infinite bounds for sampling
+    lb_clip = np.clip(lb, -1e4, 1e4)
+    ub_clip = np.clip(ub, -1e4, 1e4)
+    span = ub_clip - lb_clip
+    # Avoid zero-width dimensions
+    span = np.maximum(span, 1e-8)
+
+    eps = 1e-6
+    global_min_eig = 0.0
+
+    for _ in range(n_samples):
+        x = lb_clip + rng.uniform(size=n) * span
+        # Central-difference Hessian
+        hess = np.empty((n, n), dtype=np.float64)
+        for i in range(n):
+            for j in range(i, n):
+                x_pp = x.copy()
+                x_pm = x.copy()
+                x_mp = x.copy()
+                x_mm = x.copy()
+                x_pp[i] += eps
+                x_pp[j] += eps
+                x_pm[i] += eps
+                x_pm[j] -= eps
+                x_mp[i] -= eps
+                x_mp[j] += eps
+                x_mm[i] -= eps
+                x_mm[j] -= eps
+                fpp = evaluator.evaluate_objective(x_pp)
+                fpm = evaluator.evaluate_objective(x_pm)
+                fmp = evaluator.evaluate_objective(x_mp)
+                fmm = evaluator.evaluate_objective(x_mm)
+                h = (fpp - fpm - fmp + fmm) / (4.0 * eps * eps)
+                hess[i, j] = h
+                hess[j, i] = h
+        eigs = np.linalg.eigvalsh(hess)
+        global_min_eig = min(global_min_eig, float(eigs[0]))
+
+    alpha_scalar = max(0.0, -global_min_eig / 2.0 * 1.5 + 1e-6)
+    return np.full(n, alpha_scalar)
+
+
+def _compute_alphabb_bound(evaluator, node_lb, node_ub, alpha):
+    """Compute a valid lower bound by minimizing the alphaBB underestimator.
+
+    L(x) = f(x) - sum_i alpha_i * (x_i - lb_i) * (ub_i - x_i)
+
+    Returns the minimum of L over [node_lb, node_ub], or -inf on failure.
+    """
+
+    def underestimator(x):
+        f_val = evaluator.evaluate_objective(x)
+        perturbation = np.sum(alpha * (x - node_lb) * (node_ub - x))
+        return f_val - perturbation
+
+    # Multiple starting points for robustness
+    lb_clip = np.clip(node_lb, -1e4, 1e4)
+    ub_clip = np.clip(node_ub, -1e4, 1e4)
+    mid = 0.5 * (lb_clip + ub_clip)
+    bounds = list(zip(node_lb, node_ub))
+
+    best_val = np.inf
+    for x0 in [mid, lb_clip + 0.25 * (ub_clip - lb_clip), lb_clip + 0.75 * (ub_clip - lb_clip)]:
+        try:
+            result = scipy_minimize(underestimator, x0, method="L-BFGS-B", bounds=bounds)
+            if result.fun < best_val:
+                best_val = result.fun
+        except Exception:
+            continue
+
+    return best_val if np.isfinite(best_val) else -np.inf
 
 
 def _infer_nl_constraint_bounds(model: Model):
@@ -591,6 +674,16 @@ def solve_model(
     # --- Augmented constraint function with cuts (updated each iteration) ---
     _augmented_evaluator = None
 
+    # --- AlphaBB convexification for nonconvex .nl models ---
+    _alphabb_alpha = None
+    _use_alphabb = False
+    if _has_nl_repr(model) and n_vars <= 50:
+        try:
+            _alphabb_alpha = _estimate_alpha_fd(evaluator, lb, ub, n_samples=30)
+            _use_alphabb = bool(np.any(_alphabb_alpha > 1e-8))
+        except Exception:
+            pass
+
     # --- B&B loop ---
     iteration = 0
     while True:
@@ -637,6 +730,19 @@ def solve_model(
                 _active_gl,
                 _active_gu,
             )
+            # Tighten lower bounds with alphaBB underestimator
+            if _use_alphabb:
+                for i in range(n_batch):
+                    if result_lbs[i] < 1e20:
+                        try:
+                            node_lb_i = np.array(batch_lb[i])
+                            node_ub_i = np.array(batch_ub[i])
+                            relax_lb = _compute_alphabb_bound(
+                                evaluator, node_lb_i, node_ub_i, _alphabb_alpha
+                            )
+                            result_lbs[i] = max(result_lbs[i], relax_lb)
+                        except Exception:
+                            pass
         else:
             result_ids = np.empty(n_batch, dtype=np.int64)
             result_lbs = np.empty(n_batch, dtype=np.float64)
@@ -684,7 +790,16 @@ def solve_model(
                 result_ids[i] = int(batch_ids[i])
 
                 if nlp_result.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
-                    result_lbs[i] = nlp_result.objective
+                    nlp_lb = nlp_result.objective
+                    if _use_alphabb:
+                        try:
+                            relax_lb = _compute_alphabb_bound(
+                                evaluator, node_lb, node_ub, _alphabb_alpha
+                            )
+                            nlp_lb = max(nlp_lb, relax_lb)
+                        except Exception:
+                            pass
+                    result_lbs[i] = nlp_lb
                     result_sols[i] = nlp_result.x
                     result_feas[i] = False
                 else:

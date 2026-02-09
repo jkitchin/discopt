@@ -121,3 +121,12 @@ See [ROADMAP.md](ROADMAP.md) for the full development roadmap and task history.
 ## License
 
 [Eclipse Public License 2.0 (EPL-2.0)](LICENSE)
+
+## Tasks
+
+- [ ] Performance benchmarks (timing, solution success)
+  - [ ] Across LP, QP, MIP, MILP, MIQP, MINLP
+    - [ ] Pure Jax version
+    - [ ] ripopt version
+- [ ] Add sparsity for large scale problems
+- [ ] OptiLitBot to scan literature for new papers that are relevant
