@@ -131,7 +131,7 @@ class TestSparsityDetection:
         # Each row should have exactly one nonzero
         jac = pattern.jacobian_sparsity.toarray()
         for i in range(10):
-            assert jac[i, i] is True
+            assert bool(jac[i, i])
             row_nnz = np.sum(jac[i, :])
             assert row_nnz == 1
 
@@ -148,9 +148,9 @@ class TestSparsityDetection:
         for i in range(1, 9):
             row_nnz = int(np.sum(jac[i, :]))
             assert row_nnz == 3, f"Row {i} has {row_nnz} nonzeros, expected 3"
-            assert jac[i, i - 1] is True
-            assert jac[i, i] is True
-            assert jac[i, i + 1] is True
+            assert bool(jac[i, i - 1])
+            assert bool(jac[i, i])
+            assert bool(jac[i, i + 1])
 
     def test_dense_jacobian_pattern(self):
         """Dense model should have all-ones Jacobian pattern."""
@@ -175,9 +175,9 @@ class TestSparsityDetection:
         for i in range(4):
             for j in range(12):
                 if j < 4:
-                    assert jac[i, j] is True
+                    assert bool(jac[i, j])
                 else:
-                    assert jac[i, j] is False, f"Row {i}, col {j} should be zero"
+                    assert not bool(jac[i, j]), f"Row {i}, col {j} should be zero"
 
     def test_nonlinear_sparse_jacobian(self):
         """Nonlinear sparse model should detect correct incidence."""
@@ -189,18 +189,18 @@ class TestSparsityDetection:
 
         jac = pattern.jacobian_sparsity.toarray()
         # Constraint 0: x[0]*x[1] => columns 0, 1
-        assert jac[0, 0] is True
-        assert jac[0, 1] is True
-        assert jac[0, 2] is False
+        assert bool(jac[0, 0])
+        assert bool(jac[0, 1])
+        assert not bool(jac[0, 2])
 
         # Constraint 1: exp(x[2]) => column 2 only
-        assert jac[1, 2] is True
-        assert jac[1, 0] is False
+        assert bool(jac[1, 2])
+        assert not bool(jac[1, 0])
 
         # Constraint 2: x[3] + x[4] => columns 3, 4
-        assert jac[2, 3] is True
-        assert jac[2, 4] is True
-        assert jac[2, 0] is False
+        assert bool(jac[2, 3])
+        assert bool(jac[2, 4])
+        assert not bool(jac[2, 0])
 
     def test_nonlinear_hessian_pairs(self):
         """Nonlinear sparse model should detect Hessian interactions."""
@@ -209,12 +209,12 @@ class TestSparsityDetection:
 
         hess = pattern.hessian_sparsity.toarray()
         # x[0]*x[1] creates bilinear term => H[0,1] and H[1,0]
-        assert hess[0, 1] is True
-        assert hess[1, 0] is True
+        assert bool(hess[0, 1])
+        assert bool(hess[1, 0])
         # x[0]**2 in objective => H[0,0]
-        assert hess[0, 0] is True
+        assert bool(hess[0, 0])
         # x[2]**2 in objective => H[2,2]
-        assert hess[2, 2] is True
+        assert bool(hess[2, 2])
 
     def test_density_calculation(self):
         """Density should be computed correctly."""
@@ -667,11 +667,11 @@ class TestEdgeCases:
 
         # Constraint 0: x[0]+x[1], constraint 1: x[2]
         jac = pattern.jacobian_sparsity.toarray()
-        assert jac[0, 0] is True
-        assert jac[0, 1] is True
-        assert jac[0, 2] is False
-        assert jac[1, 2] is True
-        assert jac[1, 0] is False
+        assert bool(jac[0, 0])
+        assert bool(jac[0, 1])
+        assert not bool(jac[0, 2])
+        assert bool(jac[1, 2])
+        assert not bool(jac[1, 0])
 
     def test_model_with_sum_expression(self):
         """SumExpression should be handled correctly."""

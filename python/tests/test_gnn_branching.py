@@ -24,7 +24,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from discopt.modeling.core import Model
+
+equinox = pytest.importorskip("equinox", reason="equinox not installed")
+pytest.importorskip("optax", reason="optax not installed")
+
+from discopt.modeling.core import Model  # noqa: E402
 
 # ─────────────────────────────────────────────────────────────
 # Fixtures

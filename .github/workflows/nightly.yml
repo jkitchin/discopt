@@ -50,7 +50,7 @@ jobs:
           python -m venv .venv
           source .venv/bin/activate
           pip install maturin
-          pip install jax jaxlib numpy scipy highspy cyipopt pytest pytest-timeout "ruff==0.14.6" mypy
+          pip install jax jaxlib numpy scipy highspy cyipopt pytest pytest-timeout "ruff==0.14.6" mypy equinox optax
           maturin develop
       - name: Lint
         run: |

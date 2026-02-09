@@ -380,7 +380,7 @@ def should_use_sparse(
         return False
     if pattern.n_cons == 0:
         return False
-    return pattern.jacobian_density < density_threshold
+    return bool(pattern.jacobian_density < density_threshold)
 
 
 def detect_and_color(
