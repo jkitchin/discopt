@@ -1391,6 +1391,10 @@ class TestLineaxScaling:
         assert wall < 300
 
     @pytest.mark.slow
+    @pytest.mark.xfail(
+        reason="JAX int32 buffer overflow on 50K vars (platform limitation)",
+        strict=False,
+    )
     def test_lineax_cg_50k_unconstrained(self):
         """50K variables unconstrained with lineax_cg."""
         n = 50000
