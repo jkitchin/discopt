@@ -148,6 +148,62 @@ class NLPEvaluator:
         x_jax = jnp.array(x, dtype=jnp.float64)
         return np.asarray(self._jac_fn(x_jax))
 
+    def evaluate_sparse_jacobian(self, x: np.ndarray):
+        """Evaluate Jacobian as a sparse CSC matrix using compressed JVPs.
+
+        Uses sparsity detection and graph coloring to evaluate the Jacobian
+        in O(p) JVPs where p is the chromatic number (typically 5-20).
+        Falls back to dense evaluation if sparsity infrastructure is unavailable.
+
+        Returns:
+            scipy.sparse.csc_matrix of shape (m, n), or dense (m, n) ndarray
+            if sparse evaluation is not applicable.
+        """
+        if self._cons_fn is None:
+            import scipy.sparse as sp
+
+            return sp.csc_matrix((0, self._n_variables), dtype=np.float64)
+
+        # Lazy-initialize sparse infrastructure
+        if not hasattr(self, "_sparse_jac_fn"):
+            self._sparse_jac_fn = None
+            self._sparse_pattern = None
+            try:
+                from discopt._jax.sparse_jacobian import make_sparse_jac_fn
+                from discopt._jax.sparsity import (
+                    compute_coloring,
+                    detect_sparsity_dag,
+                    make_seed_matrix,
+                    should_use_sparse,
+                )
+
+                pattern = detect_sparsity_dag(self._model)
+                self._sparse_pattern = pattern
+                if should_use_sparse(pattern):
+                    colors, n_colors = compute_coloring(pattern)
+                    seed = make_seed_matrix(colors, n_colors, pattern.n_vars)
+                    self._sparse_jac_fn = make_sparse_jac_fn(self._cons_fn, pattern, colors, seed)
+            except Exception:
+                pass
+
+        if self._sparse_jac_fn is not None:
+            return self._sparse_jac_fn(x)
+
+        # Fallback to dense
+        return self.evaluate_jacobian(x)
+
+    @property
+    def sparsity_pattern(self):
+        """Lazily compute and return the sparsity pattern for this model."""
+        if not hasattr(self, "_sparse_pattern") or self._sparse_pattern is None:
+            try:
+                from discopt._jax.sparsity import detect_sparsity_dag
+
+                self._sparse_pattern = detect_sparsity_dag(self._model)
+            except Exception:
+                self._sparse_pattern = None
+        return self._sparse_pattern
+
     @property
     def n_variables(self) -> int:
         """Total number of variables (flat)."""

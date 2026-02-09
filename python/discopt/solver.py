@@ -412,6 +412,7 @@ def solve_model(
     max_nodes: int = 100_000,
     ipopt_options: Optional[dict] = None,
     nlp_solver: str = "ipm",
+    sparse: Optional[bool] = None,
     cutting_planes: bool = False,
     partitions: int = 0,
     branching_policy: str = "fractional",
@@ -451,7 +452,11 @@ def solve_model(
         Options passed to cyipopt (only used when ``nlp_solver="ipopt"``).
     nlp_solver : str, default "ipm"
         NLP solver backend: ``"ripopt"`` (Rust IPM via PyO3),
-        ``"ipopt"`` (cyipopt), or ``"ipm"`` (pure-JAX IPM).
+        ``"ipopt"`` (cyipopt), ``"ipm"`` (pure-JAX IPM), or
+        ``"sparse_ipm"`` (sparse KKT + scipy direct solve).
+    sparse : bool or None, default None
+        Force sparse (True) or dense (False) Jacobian evaluation.
+        If None, auto-selects based on problem size and density.
     cutting_planes : bool, default False
         Enable outer-approximation cut generation after NLP relaxation solves.
     partitions : int, default 0
@@ -473,6 +478,8 @@ def solve_model(
 
     if nlp_solver == "ripopt":
         print("Using ripopt (Rust interior point method)")
+    elif nlp_solver == "sparse_ipm":
+        print("Using sparse IPM (scipy direct solve)")
     elif nlp_solver == "ipm":
         print("Using discopt IPM (pure-JAX interior point method)")
     else:
@@ -821,6 +828,30 @@ def _solve_continuous(
 
         nlp_result = solve_nlp_ripopt(
             evaluator, x0, constraint_bounds=constraint_bounds, options=opts
+        )
+    elif nlp_solver == "sparse_ipm" and hasattr(evaluator, "_obj_fn"):
+        from discopt._jax.sparse_ipm import solve_nlp_sparse_ipm
+
+        # Build sparse Jacobian function if beneficial
+        sparse_jac_fn = None
+        if not _has_nl_repr(model):
+            try:
+                from discopt._jax.sparsity import detect_and_color
+
+                result = detect_and_color(model)
+                if result is not None:
+                    from discopt._jax.sparse_jacobian import make_sparse_jac_fn
+
+                    pattern, colors, n_colors, seed = result
+                    sparse_jac_fn = make_sparse_jac_fn(evaluator._cons_fn, pattern, colors, seed)
+            except Exception:
+                pass
+        nlp_result = solve_nlp_sparse_ipm(
+            evaluator,
+            x0,
+            constraint_bounds=constraint_bounds,
+            options=opts,
+            sparse_jac_fn=sparse_jac_fn,
         )
     elif nlp_solver == "ipm" and hasattr(evaluator, "_obj_fn"):
         from discopt._jax.ipm import solve_nlp_ipm

@@ -40,7 +40,10 @@ Issues = "https://github.com/jkitchin/discopt/issues"
 ipopt = ["cyipopt>=1.4"]
 highs = ["highspy"]
 cutest = ["pycutest>=1.8.0"]
+llm = ["litellm>=1.0"]
+gnn = ["equinox>=0.10", "optax>=0.1"]
 dev = ["pytest", "pytest-timeout", "pytest-cov", "ruff", "mypy"]
+all = ["discopt[ipopt,highs,cutest,llm,gnn]"]
 
 [tool.maturin]
 manifest-path = "crates/discopt-python/Cargo.toml"
