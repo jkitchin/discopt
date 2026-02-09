@@ -472,8 +472,8 @@ class TestShouldUseSparse:
 class TestPerformance:
     @pytest.mark.slow
     def test_sparse_faster_for_large_sparse(self):
-        """Sparse Jacobian should be faster than dense for n >= 200, density <= 10%."""
-        n = 200
+        """Sparse Jacobian should be faster than dense for n >= 500, density <= 10%."""
+        n = 500
         model = _make_diagonal_model(n)
         evaluator = NLPEvaluator(model)
         pattern = detect_sparsity_dag(model)

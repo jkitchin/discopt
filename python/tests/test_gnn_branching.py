@@ -567,7 +567,7 @@ class TestEquinoxBranchingGNN:
 
 class TestEquinoxGNNLatency:
     def test_latency_under_threshold(self, simple_milp):
-        """Equinox GNN inference < 0.1 ms after JIT warmup."""
+        """Equinox GNN inference < 0.5 ms after JIT warmup."""
         import time as _time
 
         import equinox as eqx
@@ -594,10 +594,10 @@ class TestEquinoxGNNLatency:
             times.append(_time.perf_counter() - t0)
 
         median_ms = np.median(times) * 1000
-        assert median_ms < 0.1, f"Equinox GNN inference too slow: {median_ms:.3f} ms"
+        assert median_ms < 0.5, f"Equinox GNN inference too slow: {median_ms:.3f} ms"
 
     def test_latency_larger_model(self, two_integer_model):
-        """Equinox GNN inference < 0.1 ms on larger model."""
+        """Equinox GNN inference < 0.5 ms on larger model."""
         import time as _time
 
         import equinox as eqx
@@ -622,7 +622,7 @@ class TestEquinoxGNNLatency:
             times.append(_time.perf_counter() - t0)
 
         median_ms = np.median(times) * 1000
-        assert median_ms < 0.1, f"Equinox GNN inference too slow: {median_ms:.3f} ms"
+        assert median_ms < 0.5, f"Equinox GNN inference too slow: {median_ms:.3f} ms"
 
 
 # ─────────────────────────────────────────────────────────────

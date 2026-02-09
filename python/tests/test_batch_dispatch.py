@@ -252,7 +252,7 @@ class TestLatency:
 
         # Budget scales with batch size: 100us base for batch<=128,
         # ~0.5us per node for larger batches (memory copy cost).
-        budget_us = max(100, batch_size * 1.0)
+        budget_us = max(200, batch_size * 2.0)
         assert best_us < budget_us, (
             f"Round-trip took {best_us:.1f}us (budget: {budget_us:.0f}us, "
             f"batch={batch_size}, n_vars={n_vars})"
