@@ -313,19 +313,19 @@ def collect_strong_branching_data(
             )
 
             # Score: product of improvements (Gasse et al.)
-            left_lb = (
-                left_result.objective
+            left_obj: float = (
+                float(left_result.objective)
                 if left_result.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT)
                 else 1e30
             )
-            right_lb = (
-                right_result.objective
+            right_obj: float = (
+                float(right_result.objective)
                 if right_result.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT)
                 else 1e30
             )
 
-            d_left = max(0.0, left_lb - parent_lb)
-            d_right = max(0.0, right_lb - parent_lb)
+            d_left = max(0.0, left_obj - parent_lb)
+            d_right = max(0.0, right_obj - parent_lb)
             # Score = product (Gasse et al. use this weighting)
             score = (1e-6 + d_left) * (1e-6 + d_right)
             sb_scores[var_idx] = score
