@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -47,6 +48,11 @@ INTEGRALITY_TOL = 1e-5
 class ProblemGraph:
     """Bipartite graph representation for GNN branching.
 
+    Registered as a JAX pytree so that it can be passed through
+    ``jax.jit`` and ``eqx.filter_jit``. The arrays (var_features,
+    con_features, edge_indices) are pytree leaves; the ints (n_vars,
+    n_cons) are auxiliary (static) data.
+
     Attributes:
         var_features: (n_vars, 7) array of variable node features.
             Columns: [value, lb, ub, is_integer, fractionality,
@@ -65,6 +71,23 @@ class ProblemGraph:
     edge_indices: jnp.ndarray  # (2, n_edges)
     n_vars: int
     n_cons: int
+
+
+def _problem_graph_flatten(g):
+    """Flatten ProblemGraph for JAX pytree registration."""
+    children = (g.var_features, g.con_features, g.edge_indices)
+    aux_data = (g.n_vars, g.n_cons)
+    return children, aux_data
+
+
+def _problem_graph_unflatten(aux_data, children):
+    """Unflatten ProblemGraph from JAX pytree."""
+    var_features, con_features, edge_indices = children
+    n_vars, n_cons = aux_data
+    return ProblemGraph(var_features, con_features, edge_indices, n_vars, n_cons)
+
+
+jax.tree_util.register_pytree_node(ProblemGraph, _problem_graph_flatten, _problem_graph_unflatten)
 
 
 def _collect_variable_indices(expr: Expression, model: Model) -> set[int]:

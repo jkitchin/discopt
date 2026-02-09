@@ -1,4 +1,4 @@
-"""Tests for RLT and Outer Approximation cutting planes.
+"""Tests for RLT, Outer Approximation, Lift-and-Project cutting planes and CutPool.
 
 Validates:
   - LinearCut structure and representation
@@ -6,6 +6,9 @@ Validates:
   - OA cuts: tangent hyperplane validity for convex/nonlinear constraints
   - Separation: only violated cuts are returned
   - Integration with NLPEvaluator
+  - CutPool: add/remove/purge/duplicate detection
+  - Lift-and-project: valid separating hyperplane on small MIPs
+  - Integration: solve_model with cutting_planes=True
 """
 
 from __future__ import annotations
@@ -24,9 +27,11 @@ import numpy as np
 import pytest
 from discopt._jax.cutting_planes import (
     BilinearTerm,
+    CutPool,
     LinearCut,
     detect_bilinear_terms,
     generate_cuts_at_node,
+    generate_lift_and_project_cut,
     generate_oa_cut,
     generate_oa_cuts_from_evaluator,
     generate_objective_oa_cut,
@@ -638,3 +643,385 @@ class TestCombinedCutGeneration:
             bilinear_terms=bilinear_terms,
         )
         assert len(cuts) >= 1
+
+
+# ===================================================================
+# CutPool tests
+# ===================================================================
+
+
+class TestCutPool:
+    """Test CutPool add/remove/purge/deduplication."""
+
+    def test_empty_pool(self):
+        pool = CutPool()
+        assert len(pool) == 0
+        assert pool.cuts == []
+        A, b, senses = pool.to_constraint_arrays()
+        assert A.shape[0] == 0
+        assert b.shape[0] == 0
+        assert senses == []
+
+    def test_add_single_cut(self):
+        pool = CutPool()
+        cut = LinearCut(np.array([1.0, 2.0]), rhs=3.0, sense="<=")
+        assert pool.add(cut) is True
+        assert len(pool) == 1
+
+    def test_add_duplicate_rejected(self):
+        pool = CutPool()
+        cut = LinearCut(np.array([1.0, 2.0]), rhs=3.0, sense="<=")
+        assert pool.add(cut) is True
+        assert pool.add(cut) is False
+        assert len(pool) == 1
+
+    def test_add_many(self):
+        pool = CutPool()
+        cuts = [
+            LinearCut(np.array([1.0, 0.0]), rhs=1.0, sense="<="),
+            LinearCut(np.array([0.0, 1.0]), rhs=2.0, sense="<="),
+            LinearCut(np.array([1.0, 0.0]), rhs=1.0, sense="<="),  # dup
+        ]
+        added = pool.add_many(cuts)
+        assert added == 2
+        assert len(pool) == 2
+
+    def test_get_active_cuts_violated(self):
+        pool = CutPool()
+        # Cut: x[0] + x[1] <= 3
+        pool.add(LinearCut(np.array([1.0, 1.0]), rhs=3.0, sense="<="))
+        # Cut: x[0] <= 1
+        pool.add(LinearCut(np.array([1.0, 0.0]), rhs=1.0, sense="<="))
+
+        # x = [2, 2]: first cut violated (4 > 3), second violated (2 > 1)
+        active = pool.get_active_cuts(np.array([2.0, 2.0]))
+        assert len(active) == 2
+
+    def test_get_active_cuts_none_violated(self):
+        pool = CutPool()
+        pool.add(LinearCut(np.array([1.0, 1.0]), rhs=10.0, sense="<="))
+        active = pool.get_active_cuts(np.array([1.0, 1.0]))
+        assert len(active) == 0
+
+    def test_age_and_purge(self):
+        pool = CutPool()
+        # Binding cut at x = [1, 1]
+        pool.add(LinearCut(np.array([1.0, 1.0]), rhs=2.0, sense="<="))
+        # Non-binding cut at x = [1, 1]
+        pool.add(LinearCut(np.array([1.0, 0.0]), rhs=10.0, sense="<="))
+
+        x = np.array([1.0, 1.0])
+        # Age multiple times to make the non-binding cut stale
+        for _ in range(12):
+            pool.age_cuts(x)
+
+        pool.purge_inactive(max_age=10)
+        # Non-binding cut should be purged
+        assert len(pool) == 1
+        assert pool.cuts[0].rhs == 2.0
+
+    def test_max_cuts_triggers_purge(self):
+        pool = CutPool(max_cuts=5, purge_fraction=0.4)
+        for i in range(6):
+            pool.add(LinearCut(np.array([float(i), 0.0]), rhs=float(i), sense="<="))
+        # Should have purged some (max_cuts=5, added 6)
+        assert len(pool) <= 5
+
+    def test_to_constraint_arrays(self):
+        pool = CutPool()
+        pool.add(LinearCut(np.array([1.0, 2.0]), rhs=3.0, sense="<="))
+        pool.add(LinearCut(np.array([4.0, 5.0]), rhs=6.0, sense=">="))
+
+        A, b, senses = pool.to_constraint_arrays()
+        assert A.shape == (2, 2)
+        assert b.shape == (2,)
+        np.testing.assert_allclose(A[0], [1.0, 2.0])
+        np.testing.assert_allclose(A[1], [4.0, 5.0])
+        np.testing.assert_allclose(b, [3.0, 6.0])
+        assert senses == ["<=", ">="]
+
+    def test_different_sense_not_duplicate(self):
+        pool = CutPool()
+        pool.add(LinearCut(np.array([1.0, 2.0]), rhs=3.0, sense="<="))
+        pool.add(LinearCut(np.array([1.0, 2.0]), rhs=3.0, sense=">="))
+        assert len(pool) == 2
+
+    def test_nearly_identical_coeffs_deduplicated(self):
+        """Cuts with coefficients differing by < 1e-8 should be deduplicated."""
+        pool = CutPool()
+        pool.add(LinearCut(np.array([1.0, 2.0]), rhs=3.0, sense="<="))
+        pool.add(LinearCut(np.array([1.0 + 1e-10, 2.0 - 1e-10]), rhs=3.0, sense="<="))
+        assert len(pool) == 1
+
+
+# ===================================================================
+# Lift-and-Project cuts
+# ===================================================================
+
+
+class TestLiftAndProject:
+    """Test lift-and-project cut generation for fractional binary variables."""
+
+    def test_no_cut_for_integer_value(self):
+        """Should return None when variable is already integral."""
+        x = np.array([0.0, 1.0, 0.5])
+        A = np.array([[1.0, 1.0, 0.0]])
+        b = np.array([1.5])
+        lb = np.zeros(3)
+        ub = np.ones(3)
+        # x[0] = 0 is integral => no cut
+        assert generate_lift_and_project_cut(x, A, b, lb, ub, 0) is None
+        # x[1] = 1 is integral => no cut
+        assert generate_lift_and_project_cut(x, A, b, lb, ub, 1) is None
+
+    def test_cut_for_fractional_value_with_opposite_signs(self):
+        """Should return a cut when constraints have opposite-sign a_j."""
+        x = np.array([0.5, 0.3, 0.8])
+        # Row 0: a_j = 1 > 0, Row 1: a_j = -1 < 0 => can combine
+        A = np.array([[1.0, 1.0, 1.0], [-1.0, 0.0, 1.0]])
+        b = np.array([1.6, 0.4])  # slacks: 0.0 and 0.1
+        lb = np.zeros(3)
+        ub = np.ones(3)
+        cut = generate_lift_and_project_cut(x, A, b, lb, ub, 0)
+        assert cut is not None
+        assert isinstance(cut, LinearCut)
+
+    def test_cut_from_violated_constraint(self):
+        """A violated constraint row should be returned as a cut."""
+        x = np.array([0.5, 0.7])
+        A = np.array([[1.0, 1.0]])
+        b = np.array([1.0])  # slack = -0.2 (violated)
+        lb = np.zeros(2)
+        ub = np.ones(2)
+        cut = generate_lift_and_project_cut(x, A, b, lb, ub, 0)
+        assert cut is not None
+        # Cut should be violated at x_sol
+        assert is_cut_violated(cut, x)
+
+    def test_cut_valid_at_integer_points(self):
+        """Disjunctive cut must be valid at all LP-feasible integer points."""
+        # Two constraints with opposite a_j signs
+        x = np.array([0.5, 0.7, 0.3])
+        A = np.array(
+            [
+                [1.0, 1.0, 1.0],  # a_j = 1 > 0
+                [-1.0, 0.5, 0.5],  # a_j = -1 < 0
+            ]
+        )
+        b = np.array([1.5, 0.3])
+        lb = np.zeros(3)
+        ub = np.ones(3)
+        cut = generate_lift_and_project_cut(x, A, b, lb, ub, 0)
+        if cut is None:
+            pytest.skip("No cut generated for this instance")
+
+        # Check all eight binary corners
+        for x0 in [0.0, 1.0]:
+            for x1 in [0.0, 1.0]:
+                for x2 in [0.0, 1.0]:
+                    corner = np.array([x0, x1, x2])
+                    if np.all(A @ corner <= b + 1e-8):
+                        lhs = float(np.dot(cut.coeffs, corner))
+                        assert lhs <= cut.rhs + 1e-6, (
+                            f"Cut invalid at ({x0},{x1},{x2}): {lhs:.6f} > {cut.rhs:.6f}"
+                        )
+
+    def test_no_constraints_returns_none(self):
+        """With no constraints, cannot derive a valid global cut."""
+        x = np.array([0.3, 0.7])
+        cut = generate_lift_and_project_cut(x, None, None, np.zeros(2), np.ones(2), 0)
+        assert cut is None
+
+    def test_opposite_sign_rows_produce_cut(self):
+        """Combining rows with positive and negative a_j eliminates x[j]."""
+        x = np.array([0.5, 0.6])
+        # Row 0: x[0] + x[1] <= 1.0 (a_j = 1 > 0, slack = -0.1, violated)
+        # Row 1: -x[0] + x[1] <= 0.2 (a_j = -1 < 0, slack = 0.1 - 0.6 = -0.3)
+        A = np.array([[1.0, 1.0], [-1.0, 1.0]])
+        b = np.array([1.0, 0.2])
+        lb = np.zeros(2)
+        ub = np.ones(2)
+        cut = generate_lift_and_project_cut(x, A, b, lb, ub, 0)
+        assert cut is not None
+        assert cut.sense == "<="
+
+    def test_convex_combination_validity(self):
+        """Cut formed from convex combination of rows must be valid everywhere."""
+        x = np.array([0.5, 0.8])
+        A = np.array([[1.0, 1.0], [-1.0, 2.0]])
+        b = np.array([1.2, 1.0])
+        lb = np.zeros(2)
+        ub = np.ones(2)
+        cut = generate_lift_and_project_cut(x, A, b, lb, ub, 0)
+        if cut is None:
+            pytest.skip("No cut generated")
+        # Since the cut is a convex combination of valid constraints,
+        # it must be valid at all feasible points
+        for x0 in np.linspace(0, 1, 5):
+            for x1 in np.linspace(0, 1, 5):
+                pt = np.array([x0, x1])
+                if np.all(A @ pt <= b + 1e-8):
+                    lhs = float(np.dot(cut.coeffs, pt))
+                    assert lhs <= cut.rhs + 1e-6
+
+
+# ===================================================================
+# AugmentedEvaluator tests
+# ===================================================================
+
+
+class TestAugmentedEvaluator:
+    """Test the _AugmentedEvaluator wrapper for injecting cuts into NLP."""
+
+    def _make_evaluator_and_pool(self):
+        from discopt._jax.nlp_evaluator import NLPEvaluator
+        from discopt.modeling.core import Model
+
+        m = Model("augtest")
+        x = m.continuous("x", shape=(2,), lb=-5.0, ub=5.0)
+        m.minimize(x[0] ** 2 + x[1] ** 2)
+        m.subject_to(x[0] + x[1] >= 1, name="sum_lb")
+        evaluator = NLPEvaluator(m)
+
+        pool = CutPool()
+        # Add cut: x[0] <= 3
+        pool.add(LinearCut(np.array([1.0, 0.0]), rhs=3.0, sense="<="))
+        # Add cut: x[1] >= -2 => -x[1] <= 2
+        pool.add(LinearCut(np.array([0.0, 1.0]), rhs=-2.0, sense=">="))
+
+        return evaluator, pool
+
+    def test_n_constraints_augmented(self):
+        from discopt.solver import _AugmentedEvaluator
+
+        evaluator, pool = self._make_evaluator_and_pool()
+        aug = _AugmentedEvaluator(evaluator, pool)
+        assert aug.n_constraints == evaluator.n_constraints + 2
+
+    def test_evaluate_constraints_shape(self):
+        from discopt.solver import _AugmentedEvaluator
+
+        evaluator, pool = self._make_evaluator_and_pool()
+        aug = _AugmentedEvaluator(evaluator, pool)
+        x = np.array([1.0, 1.0])
+        cons = aug.evaluate_constraints(x)
+        assert cons.shape == (3,)  # 1 original + 2 cuts
+
+    def test_evaluate_jacobian_shape(self):
+        from discopt.solver import _AugmentedEvaluator
+
+        evaluator, pool = self._make_evaluator_and_pool()
+        aug = _AugmentedEvaluator(evaluator, pool)
+        x = np.array([1.0, 1.0])
+        jac = aug.evaluate_jacobian(x)
+        assert jac.shape == (3, 2)
+
+    def test_objective_unchanged(self):
+        from discopt.solver import _AugmentedEvaluator
+
+        evaluator, pool = self._make_evaluator_and_pool()
+        aug = _AugmentedEvaluator(evaluator, pool)
+        x = np.array([1.5, 2.0])
+        assert abs(aug.evaluate_objective(x) - evaluator.evaluate_objective(x)) < 1e-10
+
+    def test_gradient_unchanged(self):
+        from discopt.solver import _AugmentedEvaluator
+
+        evaluator, pool = self._make_evaluator_and_pool()
+        aug = _AugmentedEvaluator(evaluator, pool)
+        x = np.array([1.5, 2.0])
+        np.testing.assert_allclose(
+            aug.evaluate_gradient(x), evaluator.evaluate_gradient(x), atol=1e-10
+        )
+
+    def test_augmented_constraint_bounds(self):
+        from discopt.solver import _AugmentedEvaluator
+
+        evaluator, pool = self._make_evaluator_and_pool()
+        aug = _AugmentedEvaluator(evaluator, pool)
+        original_bounds = [(0.0, 1e20)]
+        new_bounds = aug.get_augmented_constraint_bounds(original_bounds)
+        assert len(new_bounds) == 3
+        assert new_bounds[0] == (0.0, 1e20)
+        assert new_bounds[1] == (-1e20, 0.0)
+        assert new_bounds[2] == (-1e20, 0.0)
+
+    def test_augmented_jax_constraint_fn(self):
+        from discopt.solver import _AugmentedEvaluator
+
+        evaluator, pool = self._make_evaluator_and_pool()
+        aug = _AugmentedEvaluator(evaluator, pool)
+        cons_fn = aug._cons_fn
+        assert cons_fn is not None
+        x_jax = jnp.array([2.0, 1.0])
+        result = cons_fn(x_jax)
+        assert result.shape == (3,)
+
+    def test_empty_pool_passthrough(self):
+        from discopt.solver import _AugmentedEvaluator
+
+        evaluator, _ = self._make_evaluator_and_pool()
+        empty_pool = CutPool()
+        aug = _AugmentedEvaluator(evaluator, empty_pool)
+        assert aug.n_constraints == evaluator.n_constraints
+        x = np.array([1.0, 1.0])
+        np.testing.assert_allclose(
+            aug.evaluate_constraints(x),
+            evaluator.evaluate_constraints(x),
+            atol=1e-10,
+        )
+
+
+# ===================================================================
+# Integration: solve_model with cutting_planes=True
+# ===================================================================
+
+
+class TestSolverCutIntegration:
+    """Integration tests: solve_model with cutting_planes=True."""
+
+    def test_simple_minlp_with_cuts(self):
+        """A simple MINLP should solve correctly with cuts enabled."""
+        from discopt.modeling.core import Model
+
+        m = Model("minlp_cuts")
+        x = m.continuous("x", lb=0.0, ub=5.0)
+        y = m.binary("y")
+        m.minimize(x + 2 * y)
+        m.subject_to(x + y >= 1.5, name="c1")
+
+        result = m.solve(cutting_planes=True, max_nodes=200)
+        assert result.status in ("optimal", "feasible")
+        assert result.objective is not None
+
+    def test_bilinear_minlp_with_cuts(self):
+        """Bilinear MINLP should solve with OA + RLT cuts."""
+        from discopt.modeling.core import Model
+
+        m = Model("bilinear_minlp")
+        x = m.continuous("x", lb=0.0, ub=3.0)
+        y = m.binary("y")
+        m.minimize(x**2 + 3 * y)
+        m.subject_to(x + y >= 1, name="c1")
+        m.subject_to(x * y <= 2, name="bilinear")
+
+        result = m.solve(cutting_planes=True, max_nodes=500)
+        assert result.status in ("optimal", "feasible")
+
+    def test_cuts_do_not_cut_off_optimum(self):
+        """Cuts should not invalidate the correct optimum."""
+        from discopt.modeling.core import Model
+
+        # Known optimal: x=0.5, y=1, obj = 0.5 + 2 = 2.5
+        m = Model("correctness")
+        x = m.continuous("x", lb=0.0, ub=5.0)
+        y = m.binary("y")
+        m.minimize(x + 2 * y)
+        m.subject_to(x + y >= 1.5, name="c1")
+
+        result_with = m.solve(cutting_planes=True, max_nodes=200)
+        result_without = m.solve(cutting_planes=False, max_nodes=200)
+
+        if result_with.status == "optimal" and result_without.status == "optimal":
+            # Objectives should match (cuts should not change optimum)
+            assert abs(result_with.objective - result_without.objective) < 0.1

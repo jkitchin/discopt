@@ -26,6 +26,126 @@ from discopt.solvers import SolveStatus
 from discopt.solvers.nlp_ipopt import solve_nlp
 
 
+class _AugmentedEvaluator:
+    """Wraps an NLPEvaluator with additional linear cut constraints.
+
+    When cuts are injected, the constraint function becomes:
+        [original_constraints; A_cut @ x - b_cut]
+    where each cut a^T x <= b becomes a^T x - b <= 0 (upper bounded by 0).
+    For >= cuts, a^T x >= b becomes b - a^T x <= 0 (negated).
+    """
+
+    def __init__(self, evaluator, cut_pool):
+        self._ev = evaluator
+        self._cut_pool = cut_pool
+        A, b, senses = cut_pool.to_constraint_arrays()
+        self._n_cuts = A.shape[0]
+        if self._n_cuts > 0:
+            # Normalize: convert all cuts to <= form (a^T x - rhs <= 0)
+            self._A = A.copy()
+            self._b = b.copy()
+            for k in range(self._n_cuts):
+                if senses[k] == ">=":
+                    self._A[k] = -self._A[k]
+                    self._b[k] = -self._b[k]
+                # "==" treated as <= (conservative)
+        else:
+            self._A = None
+            self._b = None
+
+    @property
+    def n_constraints(self):
+        return self._ev.n_constraints + self._n_cuts
+
+    @property
+    def n_variables(self):
+        return self._ev.n_variables
+
+    @property
+    def variable_bounds(self):
+        return self._ev.variable_bounds
+
+    def evaluate_objective(self, x):
+        return self._ev.evaluate_objective(x)
+
+    def evaluate_gradient(self, x):
+        return self._ev.evaluate_gradient(x)
+
+    def evaluate_hessian(self, x):
+        return self._ev.evaluate_hessian(x)
+
+    def evaluate_constraints(self, x):
+        orig = self._ev.evaluate_constraints(x)
+        if self._n_cuts == 0:
+            return orig
+        cut_vals = self._A @ x - self._b
+        return np.concatenate([orig, cut_vals])
+
+    def evaluate_jacobian(self, x):
+        orig = self._ev.evaluate_jacobian(x)
+        if self._n_cuts == 0:
+            return orig
+        return np.vstack([orig, self._A])
+
+    def evaluate_lagrangian_hessian(self, x, obj_factor, lambda_):
+        # Cut constraints are linear so their Hessian contribution is zero
+        m_orig = self._ev.n_constraints
+        return self._ev.evaluate_lagrangian_hessian(x, obj_factor, lambda_[:m_orig])
+
+    def get_augmented_constraint_bounds(self, original_bounds):
+        """Return constraint bounds extended with cut bounds (all <= 0)."""
+        if self._n_cuts == 0:
+            return original_bounds
+        if original_bounds is None:
+            original_bounds = []
+        cut_bounds = [(-1e20, 0.0)] * self._n_cuts
+        return list(original_bounds) + cut_bounds
+
+    def get_augmented_jax_bounds(self, g_l_jax, g_u_jax):
+        """Return JAX constraint bound arrays extended with cut bounds."""
+        import jax.numpy as jnp
+
+        if self._n_cuts == 0:
+            return g_l_jax, g_u_jax
+        cut_gl = jnp.full(self._n_cuts, -1e20, dtype=jnp.float64)
+        cut_gu = jnp.zeros(self._n_cuts, dtype=jnp.float64)
+        if g_l_jax is not None:
+            new_gl = jnp.concatenate([g_l_jax, cut_gl])
+            new_gu = jnp.concatenate([g_u_jax, cut_gu])
+        else:
+            new_gl = cut_gl
+            new_gu = cut_gu
+        return new_gl, new_gu
+
+    @property
+    def _obj_fn(self):
+        return self._ev._obj_fn
+
+    @property
+    def _cons_fn(self):
+        if self._n_cuts == 0:
+            return self._ev._cons_fn
+
+        import jax.numpy as jnp
+
+        orig_cons_fn = self._ev._cons_fn
+        A_jax = jnp.array(self._A, dtype=jnp.float64)
+        b_jax = jnp.array(self._b, dtype=jnp.float64)
+
+        if orig_cons_fn is not None:
+
+            def augmented_con(x):
+                orig = orig_cons_fn(x)
+                cut_vals = A_jax @ x - b_jax
+                return jnp.concatenate([orig, cut_vals])
+        else:
+
+            def augmented_con(x):
+                return A_jax @ x - b_jax
+
+        return augmented_con
+
+
 def _has_nl_repr(model: Model) -> bool:
     """Check if model was loaded from a .nl file."""
     return hasattr(model, "_nl_repr") and model._nl_repr is not None
@@ -439,14 +559,17 @@ def solve_model(
     _generate_cuts = None
     _bilinear_terms = None
     _constraint_senses = None
+    _cut_pool = None
     if cutting_planes:
         from discopt._jax.cutting_planes import (
+            CutPool,
             detect_bilinear_terms,
             generate_cuts_at_node,
         )
 
         _generate_cuts = generate_cuts_at_node
         _bilinear_terms = detect_bilinear_terms(model)
+        _cut_pool = CutPool(max_cuts=500)
         if _has_nl_repr(model):
             _constraint_senses = list(model._nl_constraint_senses)
         else:
@@ -458,8 +581,8 @@ def solve_model(
     opts.setdefault("max_iter", 3000)
     opts.setdefault("tol", 1e-7)
 
-    # --- Accumulated OA cuts across iterations ---
-    oa_cuts = []
+    # --- Augmented constraint function with cuts (updated each iteration) ---
+    _augmented_evaluator = None
 
     # --- B&B loop ---
     iteration = 0
@@ -479,18 +602,33 @@ def solve_model(
 
         # Solve NLP relaxation for each node in the batch
         t_jax_start = time.perf_counter()
+
+        # Use augmented evaluator with cuts if available
+        _active_evaluator = evaluator
+        _active_cb = constraint_bounds
+        _active_gl = g_l_jax
+        _active_gu = g_u_jax
+        if _cut_pool is not None and len(_cut_pool) > 0:
+            _augmented_evaluator = _AugmentedEvaluator(evaluator, _cut_pool)
+            _active_evaluator = _augmented_evaluator
+            _active_cb = _augmented_evaluator.get_augmented_constraint_bounds(constraint_bounds)
+            if nlp_solver == "ipm" and hasattr(evaluator, "_obj_fn"):
+                _active_gl, _active_gu = _augmented_evaluator.get_augmented_jax_bounds(
+                    g_l_jax, g_u_jax
+                )
+
         _use_ipm_batch = nlp_solver == "ipm" and hasattr(evaluator, "_obj_fn")
         if _use_ipm_batch and n_batch > 1:
             result_ids, result_lbs, result_sols, result_feas = _solve_batch_ipm(
-                evaluator,
+                _active_evaluator,
                 batch_lb,
                 batch_ub,
                 batch_ids,
                 n_vars,
-                constraint_bounds,
+                _active_cb,
                 opts,
-                g_l_jax,
-                g_u_jax,
+                _active_gl,
+                _active_gu,
             )
         else:
             result_ids = np.empty(n_batch, dtype=np.int64)
@@ -505,20 +643,20 @@ def solve_model(
                 if iteration == 0:
                     if _use_ipm_batch:
                         nlp_result = _solve_root_node_multistart_ipm(
-                            evaluator,
+                            _active_evaluator,
                             node_lb,
                             node_ub,
-                            constraint_bounds,
-                            g_l_jax,
-                            g_u_jax,
+                            _active_cb,
+                            _active_gl,
+                            _active_gu,
                             opts,
                         )
                     else:
                         nlp_result = _solve_root_node_multistart(
-                            evaluator,
+                            _active_evaluator,
                             node_lb,
                             node_ub,
-                            constraint_bounds,
+                            _active_cb,
                             opts,
                             nlp_solver,
                         )
@@ -527,11 +665,11 @@ def solve_model(
                     ub_clipped = np.clip(node_ub, -100.0, 100.0)
                     x0 = 0.5 * (lb_clipped + ub_clipped)
                     nlp_result = _solve_node_nlp(
-                        evaluator,
+                        _active_evaluator,
                         x0,
                         node_lb,
                         node_ub,
-                        constraint_bounds,
+                        _active_cb,
                         opts,
                         nlp_solver=nlp_solver,
                     )
@@ -550,7 +688,11 @@ def solve_model(
                     result_feas[i] = False
         jax_time += time.perf_counter() - t_jax_start
 
-        # --- Optional GNN branching suggestion (future hook) ---
+        # --- Optional GNN branching scoring (advisory) ---
+        # GNN computes variable scores at each node. Currently advisory
+        # only: actual branching is done by Rust's most-fractional policy
+        # inside process_evaluated(). Full GNN-driven branching requires
+        # extending the Rust TreeManager with a set_branch_variable() method.
         if branching_policy == "gnn" and not _has_nl_repr(model):
             from discopt._jax.gnn_policy import select_branch_variable_gnn
             from discopt._jax.problem_graph import build_graph
@@ -562,8 +704,8 @@ def solve_model(
                     graph = build_graph(model, result_sols[i], node_lb_i, node_ub_i)
                     select_branch_variable_gnn(graph, params=None)
 
-        # --- Optional cut generation (OA for violated constraints + RLT) ---
-        if cutting_planes and _generate_cuts is not None:
+        # --- Optional cut generation (OA + RLT + lift-and-project) ---
+        if cutting_planes and _generate_cuts is not None and _cut_pool is not None:
             for i in range(n_batch):
                 if result_lbs[i] < 1e20:  # skip infeasible nodes
                     node_lb_i = np.array(batch_lb[i])
@@ -577,7 +719,10 @@ def solve_model(
                         constraint_senses=_constraint_senses,
                         bilinear_terms=_bilinear_terms,
                     )
-                    oa_cuts.extend(new_cuts)
+                    _cut_pool.add_many(new_cuts)
+                    # Age and purge stale cuts
+                    _cut_pool.age_cuts(result_sols[i])
+            _cut_pool.purge_inactive(max_age=15)
 
         # Import results back to Rust tree
         t_rust_start = time.perf_counter()

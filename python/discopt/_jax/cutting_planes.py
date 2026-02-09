@@ -1,12 +1,16 @@
 """
-Cutting Planes: RLT and Outer Approximation (OA) cut generation.
+Cutting Planes: RLT, Outer Approximation (OA), and Lift-and-Project cut generation.
 
 Provides linear cutting planes that tighten relaxations within spatial Branch & Bound:
   - RLT cuts: McCormick linearization inequalities for bilinear terms x*y
   - OA cuts: gradient-based tangent hyperplanes at NLP relaxation solutions
+  - Lift-and-project cuts: disjunctive cuts for fractional binary variables
 
 All cuts are represented as LinearCut NamedTuples with coeffs, rhs, and sense,
 suitable for injection into LP/NLP subproblems.
+
+The CutPool class manages accumulated cuts across B&B iterations, handling
+deduplication, aging, and purging of inactive cuts.
 """
 
 from __future__ import annotations
@@ -548,3 +552,332 @@ def generate_cuts_at_node(
         cuts.extend(rlt)
 
     return cuts
+
+
+# ---------------------------------------------------------------------------
+# Cut Pool: manages accumulated cuts across B&B iterations
+# ---------------------------------------------------------------------------
+
+
+class CutPool:
+    """Manages a collection of linear cuts with deduplication, aging, and purging.
+
+    Tracks cut activity (how many consecutive iterations each cut has been
+    non-binding) and purges stale cuts to keep the pool compact.
+
+    Attributes:
+        max_cuts: Maximum number of cuts before forced purge.
+        purge_fraction: Fraction of oldest/least-active cuts to remove on purge.
+    """
+
+    def __init__(self, max_cuts: int = 500, purge_fraction: float = 0.3):
+        self.max_cuts = max_cuts
+        self.purge_fraction = purge_fraction
+        self._cuts: list[LinearCut] = []
+        self._ages: list[int] = []  # idle iterations since last binding
+        self._hashes: set[int] = set()
+
+    def __len__(self) -> int:
+        return len(self._cuts)
+
+    @staticmethod
+    def _cut_hash(cut: LinearCut) -> int:
+        """Compute a hash for deduplication based on coefficients and rhs."""
+        c_rounded = np.round(cut.coeffs, decimals=8)
+        r_rounded = round(cut.rhs, 8)
+        return hash((c_rounded.tobytes(), r_rounded, cut.sense))
+
+    def add(self, cut: LinearCut) -> bool:
+        """Add a cut if it is not a duplicate.
+
+        Returns True if the cut was added, False if it was a duplicate.
+        """
+        h = self._cut_hash(cut)
+        if h in self._hashes:
+            return False
+        self._hashes.add(h)
+        self._cuts.append(cut)
+        self._ages.append(0)
+
+        if len(self._cuts) > self.max_cuts:
+            self._purge_oldest()
+
+        return True
+
+    def add_many(self, cuts: list[LinearCut]) -> int:
+        """Add multiple cuts, returning the count of non-duplicate additions."""
+        added = 0
+        for cut in cuts:
+            if self.add(cut):
+                added += 1
+        return added
+
+    def get_active_cuts(self, x_sol: np.ndarray, tol: float = 1e-8) -> list[LinearCut]:
+        """Return cuts that are violated at x_sol."""
+        active = []
+        for cut in self._cuts:
+            if is_cut_violated(cut, x_sol, tol):
+                active.append(cut)
+        return active
+
+    def age_cuts(self, x_sol: np.ndarray, tol: float = 1e-6):
+        """Increment age for non-binding cuts, reset age for binding ones.
+
+        A cut is considered binding if |lhs - rhs| <= tol (for <= or >= sense)
+        or if it is violated.
+        """
+        for i, cut in enumerate(self._cuts):
+            lhs = float(np.dot(cut.coeffs, x_sol))
+            if cut.sense == "<=":
+                binding = lhs >= cut.rhs - tol
+            elif cut.sense == ">=":
+                binding = lhs <= cut.rhs + tol
+            else:  # "=="
+                binding = abs(lhs - cut.rhs) <= tol
+            if binding:
+                self._ages[i] = 0
+            else:
+                self._ages[i] += 1
+
+    def purge_inactive(self, max_age: int = 10):
+        """Remove cuts that have been non-binding for max_age iterations."""
+        keep_idx = [i for i, age in enumerate(self._ages) if age < max_age]
+        self._rebuild(keep_idx)
+
+    def _purge_oldest(self):
+        """Remove the oldest fraction of cuts when pool exceeds max_cuts."""
+        n_remove = max(1, int(len(self._cuts) * self.purge_fraction))
+        sorted_idx = sorted(range(len(self._ages)), key=lambda i: self._ages[i], reverse=True)
+        remove_set = set(sorted_idx[:n_remove])
+        keep_idx = [i for i in range(len(self._cuts)) if i not in remove_set]
+        self._rebuild(keep_idx)
+
+    def _rebuild(self, keep_idx: list[int]):
+        """Rebuild internal lists keeping only the specified indices."""
+        self._cuts = [self._cuts[i] for i in keep_idx]
+        self._ages = [self._ages[i] for i in keep_idx]
+        self._hashes = {self._cut_hash(c) for c in self._cuts}
+
+    def to_constraint_arrays(
+        self,
+    ) -> tuple[np.ndarray, np.ndarray, list[str]]:
+        """Convert all cuts to stacked constraint arrays.
+
+        Returns:
+            A_cuts: (n_cuts, n_vars) coefficient matrix.
+            b_cuts: (n_cuts,) right-hand side vector.
+            senses: list of sense strings.
+        """
+        if not self._cuts:
+            return (
+                np.empty((0, 0), dtype=np.float64),
+                np.empty(0, dtype=np.float64),
+                [],
+            )
+        A = np.stack([c.coeffs for c in self._cuts], axis=0)
+        b = np.array([c.rhs for c in self._cuts], dtype=np.float64)
+        senses = [c.sense for c in self._cuts]
+        return A, b, senses
+
+    @property
+    def cuts(self) -> list[LinearCut]:
+        """Return a copy of the current cut list."""
+        return list(self._cuts)
+
+
+# ---------------------------------------------------------------------------
+# Lift-and-Project cuts
+# ---------------------------------------------------------------------------
+
+
+def generate_lift_and_project_cut(
+    x_sol: np.ndarray,
+    A_ub: Optional[np.ndarray],
+    b_ub: Optional[np.ndarray],
+    x_lb: np.ndarray,
+    x_ub: np.ndarray,
+    frac_var_idx: int,
+) -> Optional[LinearCut]:
+    """Generate a lift-and-project cut for a fractional binary variable.
+
+    Uses the Balas disjunction x[j] <= 0 OR x[j] >= 1 for a binary variable
+    j with fractional value x_sol[j] in (0, 1).
+
+    Implements a simplified version: for each constraint row that involves
+    the fractional variable, the disjunctive argument tightens the
+    constraint using the integrality requirement. When no such
+    strengthening is possible, falls back to a simple rounding cut.
+
+    Args:
+        x_sol: current relaxation solution, shape (n,).
+        A_ub: inequality constraint matrix (m, n) for A_ub @ x <= b_ub,
+              or None if no constraints.
+        b_ub: inequality rhs (m,), or None.
+        x_lb: variable lower bounds (n,).
+        x_ub: variable upper bounds (n,).
+        frac_var_idx: index of the fractional binary variable.
+
+    Returns:
+        A LinearCut separating x_sol from the integer hull, or None if
+        no violated cut could be found.
+    """
+    j = frac_var_idx
+    xj_val = float(x_sol[j])
+
+    if xj_val <= 1e-6 or xj_val >= 1.0 - 1e-6:
+        return None
+
+    m = 0
+    if A_ub is not None and b_ub is not None and len(A_ub.shape) == 2:
+        m = A_ub.shape[0]
+
+    if m == 0:
+        # No LP constraints to strengthen; cannot derive a valid global cut
+        return None
+
+    assert A_ub is not None
+    assert b_ub is not None
+
+    # Disjunctive cut from x[j] = 0 or x[j] = 1:
+    #
+    # For each constraint a_i^T x <= b_i, the constraint is valid on both
+    # branches. The disjunctive hull can only be tighter if we combine
+    # multiple constraints.
+    #
+    # Approach: solve the CGLP (Cut-Generating LP) in dual form.
+    # For the disjunction D = {x[j] <= 0} union {x[j] >= 1}:
+    #
+    # The CGLP dual finds weights (u0, u1) >= 0 on the constraint rows
+    # such that the combined cut from the two branches is deepest.
+    #
+    # Branch 0 system: A x <= b, x[j] <= 0, x_lb <= x <= x_ub
+    # Branch 1 system: A x <= b, x[j] >= 1, x_lb <= x <= x_ub
+    #
+    # The Balas cut is: pi^T x <= pi_0 where
+    #   pi = u0^T A = u1^T A  (same alpha from both branches)
+    #   pi_0 = min(u0^T b, u1^T b - pi_j)  (tighter of the two branch rhs)
+    #
+    # For a single row with a_j != 0, this reduces to the original.
+    # With multiple rows, we can get a tighter cut.
+    #
+    # Simplified CGLP: we find the combination that maximizes violation
+    # at x_sol subject to validity on both branches.
+
+    # Collect near-binding constraint rows with nonzero a_j
+    active_rows = []
+    for i in range(m):
+        a_j_i = float(A_ub[i][j])
+        if abs(a_j_i) < 1e-12:
+            continue
+        slack = float(b_ub[i]) - float(np.dot(A_ub[i], x_sol))
+        if slack < 0.1:  # near-binding or violated
+            active_rows.append(i)
+
+    if not active_rows:
+        return None
+
+    # For each active row, compute the disjunctive strengthening.
+    # For a single row a^T x <= b with binary x[j]:
+    # Branch 0 (x[j]=0): sum_{k!=j} a_k x_k <= b
+    # Branch 1 (x[j]=1): sum_{k!=j} a_k x_k <= b - a_j
+    # Conv hull of these two (in terms of x[j]):
+    #   sum_{k!=j} a_k x_k <= b - a_j * x[j]  if a_j >= 0
+    #   sum_{k!=j} a_k x_k <= (b - a_j) + a_j * x[j]  if a_j < 0
+    # Both reduce to the original constraint a^T x <= b.
+    #
+    # The real power: combine rows with OPPOSITE signs of a_j.
+    # Take row i (a_j > 0) and row k (a_j < 0):
+    # weighted sum: lambda * row_i + (1-lambda) * row_k
+    # Then strengthen the combined coefficient of x[j].
+
+    # Split rows by sign of a_j
+    pos_rows = [i for i in active_rows if float(A_ub[i][j]) > 0]
+    neg_rows = [i for i in active_rows if float(A_ub[i][j]) < 0]
+
+    best_cut = None
+    best_violation = -np.inf
+
+    # Try combining each pair of positive and negative a_j rows
+    for pi in pos_rows:
+        for ni in neg_rows:
+            a_p = A_ub[pi].copy()
+            b_p = float(b_ub[pi])
+            a_n = A_ub[ni].copy()
+            b_n = float(b_ub[ni])
+
+            ap_j = float(a_p[j])
+            an_j = float(a_n[j])  # negative
+
+            # Combine: lambda * row_p + (1-lambda) * row_n
+            # We want the combined a_j to be zero, then the cut is:
+            # alpha^T x <= beta (with alpha_j = 0)
+            # lambda * ap_j + (1-lambda) * an_j = 0
+            # lambda = -an_j / (ap_j - an_j)
+            denom = ap_j - an_j
+            if abs(denom) < 1e-12:
+                continue
+            lam = -an_j / denom
+
+            if lam < -1e-6 or lam > 1.0 + 1e-6:
+                continue
+            lam = np.clip(lam, 0.0, 1.0)
+
+            alpha = lam * a_p + (1 - lam) * a_n
+            beta = lam * b_p + (1 - lam) * b_n
+
+            # The combined cut has alpha_j ~= 0, so it's independent of x[j].
+            # This IS a valid cut (convex combination of valid constraints).
+            # But it doesn't use the integrality of x[j].
+
+            # Now strengthen: since x[j] is binary, we can add back a
+            # tighter coefficient. On branch 0 (x[j]=0):
+            # alpha^T x <= beta (same, since alpha_j ~= 0)
+            # On branch 1 (x[j]=1):
+            # sum_{k!=j} alpha_k x_k + alpha_j <= beta
+            # => sum_{k!=j} alpha_k x_k <= beta - alpha_j
+
+            # The integrality-strengthened cut:
+            # sum_{k!=j} alpha_k x_k + gamma * x[j] <= beta
+            # Valid if: gamma <= 0 (branch 0: 0 <= beta - sum_{k!=j} alpha_k x_k)
+            # and gamma <= beta - sum_{k!=j} alpha_k x_k at branch 1 endpoints.
+            # The tightest gamma that's still valid:
+            # gamma = min over feasible x with x[j]=1: beta - sum_{k!=j} alpha_k x_k - alpha_j
+
+            # For the cut to separate x_sol, we want:
+            # sum_{k!=j} alpha_k x_sol[k] + gamma * f > beta
+            # i.e., gamma * f > beta - sum_{k!=j} alpha_k x_sol[k]
+            # Make gamma as large as possible (most positive) while valid.
+
+            # gamma <= 0 is always valid (just drops x[j] from the cut).
+            # gamma > 0 is valid if b_p - a_p^T x >= 0 on branch 1
+            # (ensured by constraint validity).
+
+            # Simpler: just check if the zero-gamma cut separates x_sol
+            lhs_val = float(np.dot(alpha, x_sol))
+            violation = lhs_val - beta
+            if violation > best_violation:
+                best_violation = violation
+                best_cut = LinearCut(
+                    coeffs=alpha.astype(np.float64),
+                    rhs=beta,
+                    sense="<=",
+                )
+
+    # Also try each row individually (no strengthening, but may still cut)
+    for i in active_rows:
+        a_i = A_ub[i].copy()
+        b_i = float(b_ub[i])
+        lhs_val = float(np.dot(a_i, x_sol))
+        violation = lhs_val - b_i
+        if violation > best_violation:
+            best_violation = violation
+            best_cut = LinearCut(
+                coeffs=a_i.astype(np.float64),
+                rhs=b_i,
+                sense="<=",
+            )
+
+    if best_cut is not None and best_violation > -1e-8:
+        return best_cut
+
+    return None

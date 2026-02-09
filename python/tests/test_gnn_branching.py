@@ -465,3 +465,513 @@ class TestStrongBranching:
 
         assert len(result.results) == 3
         assert call_count == 6  # 3 candidates * 2 children each
+
+
+# ─────────────────────────────────────────────────────────────
+# Equinox BranchingGNN tests (gnn_branching module)
+# ─────────────────────────────────────────────────────────────
+
+
+class TestEquinoxBranchingGNN:
+    """Tests for the Equinox-based BranchingGNN model."""
+
+    def test_construction_default(self):
+        from discopt._jax.gnn_branching import BranchingGNN
+
+        gnn = BranchingGNN(key=jax.random.PRNGKey(0))
+        assert gnn.hidden_dim == 64
+        assert gnn.n_rounds == 2
+
+    def test_construction_custom(self):
+        from discopt._jax.gnn_branching import BranchingGNN
+
+        gnn = BranchingGNN(hidden_dim=32, n_rounds=3, key=jax.random.PRNGKey(1))
+        assert gnn.hidden_dim == 32
+        assert gnn.n_rounds == 3
+        assert len(gnn.msg_v2c) == 3
+        assert len(gnn.msg_c2v) == 3
+
+    def test_forward_shape(self, simple_milp):
+        from discopt._jax.gnn_branching import BranchingGNN
+        from discopt._jax.problem_graph import build_graph
+
+        gnn = BranchingGNN(hidden_dim=16, key=jax.random.PRNGKey(2))
+        solution = np.array([0.5, 0.5])
+        graph = build_graph(simple_milp, solution)
+        scores = gnn(graph)
+        assert scores.shape == (2,)
+        assert scores.dtype == jnp.float64
+
+    def test_forward_shape_larger(self, two_integer_model):
+        from discopt._jax.gnn_branching import BranchingGNN
+        from discopt._jax.problem_graph import build_graph
+
+        gnn = BranchingGNN(hidden_dim=16, key=jax.random.PRNGKey(3))
+        solution = np.array([2.0, 1.5, 0.5])
+        graph = build_graph(two_integer_model, solution)
+        scores = gnn(graph)
+        assert scores.shape == (3,)
+
+    def test_jit_compatible(self, simple_milp):
+        import equinox as eqx
+        from discopt._jax.gnn_branching import BranchingGNN
+        from discopt._jax.problem_graph import build_graph
+
+        gnn = BranchingGNN(hidden_dim=16, key=jax.random.PRNGKey(4))
+        solution = np.array([0.5, 0.5])
+        graph = build_graph(simple_milp, solution)
+
+        jit_gnn = eqx.filter_jit(gnn)
+        scores_jit = jit_gnn(graph)
+        scores_raw = gnn(graph)
+        np.testing.assert_allclose(np.asarray(scores_jit), np.asarray(scores_raw), atol=1e-12)
+
+    def test_different_seeds_different_outputs(self, simple_milp):
+        from discopt._jax.gnn_branching import BranchingGNN
+        from discopt._jax.problem_graph import build_graph
+
+        gnn1 = BranchingGNN(hidden_dim=16, key=jax.random.PRNGKey(0))
+        gnn2 = BranchingGNN(hidden_dim=16, key=jax.random.PRNGKey(999))
+        solution = np.array([0.5, 0.5])
+        graph = build_graph(simple_milp, solution)
+        s1 = np.asarray(gnn1(graph))
+        s2 = np.asarray(gnn2(graph))
+        assert not np.allclose(s1, s2, atol=1e-6)
+
+    def test_no_constraints_model(self):
+        from discopt._jax.gnn_branching import BranchingGNN
+        from discopt._jax.problem_graph import build_graph
+
+        m = Model("unconstrained_eqx")
+        m.continuous("x", lb=0, ub=1)
+        m.binary("y")
+        m.minimize(m._variables[0] + m._variables[1])
+
+        gnn = BranchingGNN(hidden_dim=16, key=jax.random.PRNGKey(5))
+        solution = np.array([0.5, 0.5])
+        graph = build_graph(m, solution)
+        assert graph.n_cons == 0
+        scores = gnn(graph)
+        assert scores.shape == (2,)
+        assert jnp.all(jnp.isfinite(scores))
+
+
+# ─────────────────────────────────────────────────────────────
+# Equinox GNN inference latency tests
+# ─────────────────────────────────────────────────────────────
+
+
+class TestEquinoxGNNLatency:
+    def test_latency_under_threshold(self, simple_milp):
+        """Equinox GNN inference < 0.1 ms after JIT warmup."""
+        import time as _time
+
+        import equinox as eqx
+        from discopt._jax.gnn_branching import BranchingGNN
+        from discopt._jax.problem_graph import build_graph
+
+        gnn = BranchingGNN(hidden_dim=16, n_rounds=2, key=jax.random.PRNGKey(10))
+        solution = np.array([0.5, 0.5])
+        graph = build_graph(simple_milp, solution)
+
+        jit_gnn = eqx.filter_jit(gnn)
+
+        # Warmup
+        for _ in range(5):
+            out = jit_gnn(graph)
+            jax.block_until_ready(out)
+
+        # Measure
+        times = []
+        for _ in range(50):
+            t0 = _time.perf_counter()
+            out = jit_gnn(graph)
+            jax.block_until_ready(out)
+            times.append(_time.perf_counter() - t0)
+
+        median_ms = np.median(times) * 1000
+        assert median_ms < 0.1, f"Equinox GNN inference too slow: {median_ms:.3f} ms"
+
+    def test_latency_larger_model(self, two_integer_model):
+        """Equinox GNN inference < 0.1 ms on larger model."""
+        import time as _time
+
+        import equinox as eqx
+        from discopt._jax.gnn_branching import BranchingGNN
+        from discopt._jax.problem_graph import build_graph
+
+        gnn = BranchingGNN(hidden_dim=64, n_rounds=2, key=jax.random.PRNGKey(11))
+        solution = np.array([2.0, 1.5, 0.5])
+        graph = build_graph(two_integer_model, solution)
+
+        jit_gnn = eqx.filter_jit(gnn)
+
+        for _ in range(5):
+            out = jit_gnn(graph)
+            jax.block_until_ready(out)
+
+        times = []
+        for _ in range(50):
+            t0 = _time.perf_counter()
+            out = jit_gnn(graph)
+            jax.block_until_ready(out)
+            times.append(_time.perf_counter() - t0)
+
+        median_ms = np.median(times) * 1000
+        assert median_ms < 0.1, f"Equinox GNN inference too slow: {median_ms:.3f} ms"
+
+
+# ─────────────────────────────────────────────────────────────
+# Fractional variable detection tests
+# ─────────────────────────────────────────────────────────────
+
+
+class TestFractionalVarDetection:
+    def test_all_integral(self):
+        from discopt._jax.gnn_branching import _get_fractional_integer_vars
+
+        solution = np.array([1.0, 2.0, 0.0, 1.0])
+        result = _get_fractional_integer_vars(solution, [2, 3], [1, 1])
+        assert result == []
+
+    def test_one_fractional(self):
+        from discopt._jax.gnn_branching import _get_fractional_integer_vars
+
+        solution = np.array([1.0, 2.0, 0.5, 1.0])
+        result = _get_fractional_integer_vars(solution, [2, 3], [1, 1])
+        assert result == [2]
+
+    def test_multiple_fractional(self):
+        from discopt._jax.gnn_branching import _get_fractional_integer_vars
+
+        solution = np.array([1.0, 2.0, 0.3, 0.7])
+        result = _get_fractional_integer_vars(solution, [2, 3], [1, 1])
+        assert 2 in result
+        assert 3 in result
+
+    def test_near_integer_excluded(self):
+        from discopt._jax.gnn_branching import _get_fractional_integer_vars
+
+        solution = np.array([1.0, 2.0, 0.999999, 0.000001])
+        result = _get_fractional_integer_vars(solution, [2, 3], [1, 1])
+        assert result == []
+
+    def test_array_variable_group(self):
+        from discopt._jax.gnn_branching import _get_fractional_integer_vars
+
+        # One group of 3 binary vars starting at offset 0
+        solution = np.array([0.5, 0.8, 0.2, 3.0])
+        result = _get_fractional_integer_vars(solution, [0], [3])
+        assert 0 in result  # 0.5
+        assert 1 in result  # 0.8
+        assert 2 in result  # 0.2
+
+
+# ─────────────────────────────────────────────────────────────
+# Strong branching data collection (model-level) tests
+# ─────────────────────────────────────────────────────────────
+
+
+class TestCollectStrongBranching:
+    def test_produces_training_pairs(self):
+        """collect_strong_branching_data returns pairs for MINLP."""
+        from discopt._jax.gnn_branching import collect_strong_branching_data
+        from discopt._jax.problem_graph import ProblemGraph
+
+        m = Model("sb_test")
+        x = m.continuous("x", lb=0, ub=5)
+        y = m.binary("y")
+        m.minimize(x**2 + y)
+        m.subject_to(x + y >= 1)
+
+        data = collect_strong_branching_data(m, max_nodes=10)
+        assert len(data) >= 1
+
+        for graph, best_var in data:
+            assert isinstance(graph, ProblemGraph)
+            assert isinstance(best_var, int)
+            assert 0 <= best_var < graph.n_vars
+
+    def test_best_var_is_integer(self):
+        """Strong branching should always select an integer variable."""
+        from discopt._jax.gnn_branching import collect_strong_branching_data
+
+        m = Model("sb_int_check")
+        x = m.continuous("x", lb=0, ub=5)
+        y = m.binary("y")
+        m.minimize(x**2 + y)
+        m.subject_to(x + y >= 1)
+
+        data = collect_strong_branching_data(m, max_nodes=5)
+        for graph, best_var in data:
+            is_int = float(graph.var_features[best_var, 3])
+            assert is_int > 0.5, f"Best var {best_var} not integer"
+
+
+# ─────────────────────────────────────────────────────────────
+# Imitation learning training tests
+# ─────────────────────────────────────────────────────────────
+
+
+class TestImitationLearning:
+    def test_loss_decreases(self):
+        """Loss should decrease over training epochs."""
+        from discopt._jax.gnn_branching import (
+            BranchingGNN,
+            collect_strong_branching_data,
+            train_branching_gnn,
+        )
+
+        # Model with many binaries and coupling constraints so that NLP
+        # relaxation produces multiple fractional candidates per node
+        m = Model("il_test")
+        y = m.binary("y", shape=(6,))
+        x = m.continuous("x", lb=0, ub=10)
+        m.minimize(
+            x**2 + 1.5 * y[0] + 2.5 * y[1] + 0.5 * y[2] + 3.0 * y[3] + 1.0 * y[4] + 4.0 * y[5]
+        )
+        m.subject_to(y[0] + y[1] + y[2] >= 1.5)
+        m.subject_to(y[3] + y[4] + y[5] >= 1.5)
+        m.subject_to(y[0] + y[3] <= 1.2)
+        m.subject_to(y[1] + y[4] <= 1.3)
+        m.subject_to(y[2] + y[5] <= 1.1)
+        m.subject_to(x + y[0] + y[1] >= 2)
+
+        data = collect_strong_branching_data(m, max_nodes=30)
+        # Filter to pairs with >= 2 candidates for nontrivial training
+        import jax.numpy as jnp
+
+        data = [
+            (g, v)
+            for g, v in data
+            if int(jnp.sum((g.var_features[:, 3] > 0.5) & (g.var_features[:, 4] > 0.0))) >= 2
+        ]
+        if len(data) < 2:
+            pytest.skip("Not enough training data with multiple candidates")
+
+        gnn = BranchingGNN(hidden_dim=16, n_rounds=2, key=jax.random.PRNGKey(42))
+        trained_gnn, loss_history = train_branching_gnn(
+            data,
+            gnn,
+            n_epochs=20,
+            lr=1e-3,
+        )
+        assert len(loss_history) == 20
+        assert loss_history[-1] < loss_history[0], (
+            f"Loss did not decrease: {loss_history[0]:.4f} -> {loss_history[-1]:.4f}"
+        )
+
+    def test_empty_data(self):
+        """Training with empty data returns unchanged model and empty history."""
+        from discopt._jax.gnn_branching import BranchingGNN, train_branching_gnn
+
+        gnn = BranchingGNN(hidden_dim=16, key=jax.random.PRNGKey(42))
+        trained_gnn, loss_history = train_branching_gnn([], gnn, n_epochs=10)
+        assert len(loss_history) == 0
+
+    def test_trained_model_produces_finite_scores(self):
+        """Trained GNN should produce finite scores."""
+        from discopt._jax.gnn_branching import (
+            BranchingGNN,
+            collect_strong_branching_data,
+            train_branching_gnn,
+        )
+        from discopt._jax.problem_graph import build_graph
+
+        m = Model("il_scores")
+        x = m.continuous("x", lb=0, ub=5)
+        y = m.binary("y")
+        m.minimize(x**2 + y)
+        m.subject_to(x + y >= 1)
+
+        data = collect_strong_branching_data(m, max_nodes=5)
+        if len(data) < 1:
+            pytest.skip("Not enough training data")
+
+        gnn = BranchingGNN(hidden_dim=16, n_rounds=2, key=jax.random.PRNGKey(42))
+        trained_gnn, _ = train_branching_gnn(data, gnn, n_epochs=5, lr=1e-3)
+
+        solution = np.array([1.0, 0.3])
+        graph = build_graph(m, solution)
+        scores = trained_gnn(graph)
+        assert scores.shape == (2,)
+        assert jnp.all(jnp.isfinite(scores))
+
+
+# ─────────────────────────────────────────────────────────────
+# GNNBranchingPolicy tests
+# ─────────────────────────────────────────────────────────────
+
+
+class TestGNNBranchingPolicy:
+    def test_fallback_most_fractional(self):
+        """Untrained policy falls back to most-fractional."""
+        from discopt._jax.gnn_branching import GNNBranchingPolicy
+
+        m = Model("policy_test")
+        m.continuous("x", lb=0, ub=5)
+        m.binary("y")
+        m.minimize(m._variables[0] + m._variables[1])
+        m.subject_to(m._variables[0] + m._variables[1] >= 1)
+
+        policy = GNNBranchingPolicy(m, hidden_dim=16, seed=0)
+        # y (index 1) is the only integer variable
+        solution = np.array([1.0, 0.3])
+        node_lb = np.array([0.0, 0.0])
+        node_ub = np.array([5.0, 1.0])
+
+        var_idx = policy.select(solution, node_lb, node_ub)
+        assert var_idx == 1  # y is the only candidate
+
+    def test_returns_none_all_integral(self):
+        """Returns None when all integer vars are integral."""
+        from discopt._jax.gnn_branching import GNNBranchingPolicy
+
+        m = Model("policy_none")
+        m.continuous("x", lb=0, ub=5)
+        m.binary("y")
+        m.minimize(m._variables[0] + m._variables[1])
+
+        policy = GNNBranchingPolicy(m, hidden_dim=16, seed=0)
+        solution = np.array([1.0, 1.0])  # y=1.0 integral
+        node_lb = np.array([0.0, 0.0])
+        node_ub = np.array([5.0, 1.0])
+
+        var_idx = policy.select(solution, node_lb, node_ub)
+        assert var_idx is None
+
+    def test_train_sets_trained_flag(self):
+        """Training sets the _trained flag."""
+        from discopt._jax.gnn_branching import GNNBranchingPolicy
+
+        m = Model("policy_train")
+        x = m.continuous("x", lb=0, ub=5)
+        y = m.binary("y")
+        m.minimize(x**2 + y)
+        m.subject_to(x + y >= 1)
+
+        policy = GNNBranchingPolicy(m, hidden_dim=16, seed=0)
+        assert not policy._trained
+
+        policy.train(max_nodes=5, n_epochs=5, lr=1e-3)
+        assert policy._trained
+
+    def test_train_and_select_uses_gnn(self):
+        """After training, select should use GNN scores."""
+        from discopt._jax.gnn_branching import GNNBranchingPolicy
+
+        m = Model("policy_gnn_select")
+        x = m.continuous("x", lb=0, ub=5)
+        y = m.binary("y")
+        m.minimize(x**2 + y)
+        m.subject_to(x + y >= 1)
+
+        policy = GNNBranchingPolicy(m, hidden_dim=16, seed=0)
+        policy.train(max_nodes=5, n_epochs=5, lr=1e-3)
+
+        solution = np.array([1.0, 0.3])
+        node_lb = np.array([0.0, 0.0])
+        node_ub = np.array([5.0, 1.0])
+        var_idx = policy.select(solution, node_lb, node_ub)
+        # Should select y (index 1, the only integer variable)
+        assert var_idx == 1
+
+    def test_inference_latency_method(self):
+        """Policy latency measurement works and is sub-millisecond."""
+        from discopt._jax.gnn_branching import GNNBranchingPolicy
+
+        m = Model("policy_latency")
+        m.continuous("x", lb=0, ub=5)
+        m.binary("y")
+        m.minimize(m._variables[0] + m._variables[1])
+
+        policy = GNNBranchingPolicy(m, hidden_dim=16, seed=0)
+        solution = np.array([1.0, 0.3])
+        node_lb = np.array([0.0, 0.0])
+        node_ub = np.array([5.0, 1.0])
+
+        latency = policy.inference_latency(
+            solution,
+            node_lb,
+            node_ub,
+            n_warmup=3,
+            n_measure=10,
+        )
+        assert latency > 0
+        assert latency < 0.001, f"Latency too high: {latency * 1000:.3f} ms"
+
+
+# ─────────────────────────────────────────────────────────────
+# Solver integration tests
+# ─────────────────────────────────────────────────────────────
+
+
+class TestSolverGNNIntegration:
+    def test_solve_with_gnn_policy(self):
+        """branching_policy='gnn' should produce a correct result."""
+        m = Model("solver_gnn")
+        x = m.continuous("x", lb=0, ub=5)
+        y = m.binary("y")
+        m.minimize(x**2 + y)
+        m.subject_to(x + y >= 1)
+
+        result = m.solve(branching_policy="gnn", max_nodes=1000)
+        assert result.status in ("optimal", "feasible")
+
+    def test_solve_gnn_vs_fractional_same_answer(self):
+        """GNN and fractional policies should give same optimal value."""
+        m = Model("solver_compare")
+        x = m.continuous("x", lb=0, ub=5)
+        y = m.binary("y")
+        m.minimize(x**2 + y)
+        m.subject_to(x + y >= 1)
+
+        result_frac = m.solve(branching_policy="fractional", max_nodes=1000)
+        result_gnn = m.solve(branching_policy="gnn", max_nodes=1000)
+
+        if result_frac.status == "optimal" and result_gnn.status == "optimal":
+            np.testing.assert_allclose(
+                result_gnn.objective,
+                result_frac.objective,
+                atol=1e-2,
+            )
+
+
+# ─────────────────────────────────────────────────────────────
+# Variable-size graph handling
+# ─────────────────────────────────────────────────────────────
+
+
+class TestEquinoxVariableSizeGraphs:
+    def test_different_problem_sizes(self, simple_milp, two_integer_model):
+        """Same GNN instance handles different-size problems."""
+        from discopt._jax.gnn_branching import BranchingGNN
+        from discopt._jax.problem_graph import build_graph
+
+        gnn = BranchingGNN(hidden_dim=16, n_rounds=2, key=jax.random.PRNGKey(20))
+
+        sol1 = np.array([0.5, 0.5])
+        g1 = build_graph(simple_milp, sol1)
+        s1 = gnn(g1)
+        assert s1.shape == (2,)
+
+        sol2 = np.array([2.0, 1.5, 0.5])
+        g2 = build_graph(two_integer_model, sol2)
+        s2 = gnn(g2)
+        assert s2.shape == (3,)
+
+    def test_single_variable_model(self):
+        """GNN works with a single-variable model."""
+        from discopt._jax.gnn_branching import BranchingGNN
+        from discopt._jax.problem_graph import build_graph
+
+        m = Model("single_eqx")
+        m.binary("y")
+        m.minimize(m._variables[0])
+
+        gnn = BranchingGNN(hidden_dim=16, n_rounds=2, key=jax.random.PRNGKey(21))
+        sol = np.array([0.5])
+        g = build_graph(m, sol)
+        assert g.n_vars == 1
+        scores = gnn(g)
+        assert scores.shape == (1,)
