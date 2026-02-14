@@ -606,13 +606,11 @@ def lp_ipm_solve(
     # m=0 dispatch — trivial bound-clamping, no need to JIT
     if b.shape[0] == 0:
         pd = _make_problem_data(c, A, b, x_l, x_u)
-        result: LPIPMState = _solve_unconstrained(pd, opts)
-        return result
+        return _solve_unconstrained(pd, opts)  # type: ignore[no-any-return]
 
-    result_jit: LPIPMState = _lp_ipm_solve_jit(
+    return _lp_ipm_solve_jit(  # type: ignore[no-any-return]
         c, A, b, x_l, x_u, opts.tol, opts.max_iter, opts.tau_min, opts.bound_push
     )
-    return result_jit
 
 
 def lp_ipm_solve_batch(

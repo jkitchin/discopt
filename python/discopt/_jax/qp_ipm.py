@@ -596,10 +596,9 @@ def qp_ipm_solve(
     x_l = jnp.asarray(x_l, dtype=jnp.float64)
     x_u = jnp.asarray(x_u, dtype=jnp.float64)
 
-    result: QPIPMState = _qp_ipm_solve_jit(
+    return _qp_ipm_solve_jit(  # type: ignore[no-any-return]
         Q, c, A, b, x_l, x_u, opts.tol, opts.max_iter, opts.tau_min, opts.bound_push
     )
-    return result
 
 
 def qp_ipm_solve_batch(
