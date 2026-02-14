@@ -1,6 +1,19 @@
 format: jb-book
 root: intro
 parts:
+  - caption: "Tutorials \u2014 Problem Classes"
+    chapters:
+      - file: notebooks/tutorial_lp
+      - file: notebooks/tutorial_qp
+      - file: notebooks/tutorial_milp
+      - file: notebooks/tutorial_miqp
+      - file: notebooks/tutorial_minlp
+  - caption: "Tutorials \u2014 Solver Backends"
+    chapters:
+      - file: notebooks/tutorial_solver_jax_ipm
+      - file: notebooks/tutorial_solver_ripopt
+      - file: notebooks/tutorial_solver_cyipopt
+      - file: notebooks/tutorial_solver_selection
   - caption: Tutorials
     chapters:
       - file: notebooks/quickstart

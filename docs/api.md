@@ -1,9 +1,9 @@
 # API Reference
 
-Auto-generated from docstrings. See the source code for full details.
+Auto-generated from docstrings via [sphinx-autoapi](https://sphinx-autoapi.readthedocs.io/).
 
 ```{toctree}
 :maxdepth: 2
 
-autoapi/index
+autoapi/discopt/index
 ```
