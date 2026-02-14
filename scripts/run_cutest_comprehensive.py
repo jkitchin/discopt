@@ -15,21 +15,13 @@ Usage:
 
 from __future__ import annotations
 
+import multiprocessing
 import os
-import signal
 import sys
 import time
+from pathlib import Path
 
 import numpy as np
-
-
-class TimeoutError(Exception):
-    pass
-
-
-def _timeout_handler(signum, frame):
-    raise TimeoutError("Wall time limit exceeded")
-
 
 # Set JAX to CPU + float64
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -69,12 +61,62 @@ def solve_with_ripopt(prob, evaluator):
         evaluator,
         prob.x0,
         constraint_bounds=constraint_bounds,
-        options={"print_level": 0, "max_iter": 3000, "tol": 1e-7},
+        options={"print_level": 0, "max_iter": 3000, "tol": 1e-7, "max_wall_time": 55.0},
     )
 
 
 # Wall-time limit per solver per problem (seconds)
 WALL_TIME_LIMIT = 60.0
+
+# Load-time limit (compiling Fortran + loading can be slow for large problems)
+LOAD_TIME_LIMIT = 120.0
+
+
+def _solve_worker(solver_name, problem_name, queue):
+    """Worker that runs a solver in a subprocess and puts results on a queue."""
+    try:
+        from discopt.interfaces.cutest import load_cutest_problem
+
+        prob = load_cutest_problem(problem_name)
+        evaluator = prob.to_evaluator()
+        if solver_name == "ipopt":
+            solver_fn = solve_with_discopt_ipopt
+        else:
+            solver_fn = solve_with_ripopt
+        t0 = time.perf_counter()
+        result = solver_fn(prob, evaluator)
+        elapsed = time.perf_counter() - t0
+        prob.close()
+        queue.put(("ok", result.status.value, elapsed, result.objective))
+    except Exception as e:
+        queue.put(("error", str(e)))
+
+
+def _run_solver_with_timeout(solver_name, problem_name, timeout):
+    """Run a solver in a subprocess with a hard wall-time limit.
+
+    Returns (status, time, objective).
+    """
+    ctx = multiprocessing.get_context("fork")
+    queue = ctx.Queue()
+    proc = ctx.Process(target=_solve_worker, args=(solver_name, problem_name, queue))
+    proc.start()
+    proc.join(timeout=timeout)
+
+    if proc.is_alive():
+        proc.kill()
+        proc.join(timeout=5)
+        return "time_limit", timeout, None
+
+    if not queue.empty():
+        msg = queue.get_nowait()
+        if msg[0] == "ok":
+            _, status, elapsed, obj = msg
+            return status, elapsed, obj
+        else:
+            return "ERROR", float("inf"), None
+
+    return "ERROR", float("inf"), None
 
 
 def run_benchmark(problem_names, label="benchmark"):
@@ -103,11 +145,12 @@ def run_benchmark(problem_names, label="benchmark"):
     for i, name in enumerate(problem_names, 1):
         row = {"name": name, "n": 0, "m": 0}
 
+        # Load the problem in the main process (for dimension info)
         try:
             prob = load_cutest_problem(name)
-            evaluator = prob.to_evaluator()
             row["n"] = prob.n
             row["m"] = prob.m
+            prob.to_evaluator()  # validate loadable
         except Exception:
             row["ipopt_status"] = "LOAD_ERR"
             row["ripopt_status"] = "LOAD_ERR"
@@ -124,42 +167,17 @@ def run_benchmark(problem_names, label="benchmark"):
             )
             continue
 
-        # --- Ipopt ---
-        try:
-            signal.signal(signal.SIGALRM, _timeout_handler)
-            signal.alarm(int(WALL_TIME_LIMIT))
-            t0 = time.perf_counter()
-            r_ipopt = solve_with_discopt_ipopt(prob, evaluator)
-            t_ipopt = time.perf_counter() - t0
-            signal.alarm(0)
-            row["ipopt_status"] = r_ipopt.status.value
-            row["ipopt_time"] = t_ipopt
-            row["ipopt_obj"] = r_ipopt.objective
-        except TimeoutError:
-            signal.alarm(0)
-            row["ipopt_status"] = "time_limit"
-            row["ipopt_time"] = WALL_TIME_LIMIT
-            row["ipopt_obj"] = None
-        except Exception:
-            signal.alarm(0)
-            row["ipopt_status"] = "ERROR"
-            row["ipopt_time"] = float("inf")
-            row["ipopt_obj"] = None
+        # --- Ipopt (with timeout) ---
+        status, elapsed, obj = _run_solver_with_timeout("ipopt", name, WALL_TIME_LIMIT)
+        row["ipopt_status"] = status
+        row["ipopt_time"] = elapsed
+        row["ipopt_obj"] = obj
 
-        # --- Ripopt ---
-        # Note: SIGALRM can't be used with ripopt (Rust panics on signal
-        # interrupting a callback). Use max_iter to limit runtime instead.
-        try:
-            t0 = time.perf_counter()
-            r_ripopt = solve_with_ripopt(prob, evaluator)
-            t_ripopt = time.perf_counter() - t0
-            row["ripopt_status"] = r_ripopt.status.value
-            row["ripopt_time"] = t_ripopt
-            row["ripopt_obj"] = r_ripopt.objective
-        except Exception:
-            row["ripopt_status"] = "ERROR"
-            row["ripopt_time"] = float("inf")
-            row["ripopt_obj"] = None
+        # --- Ripopt (with timeout) ---
+        status, elapsed, obj = _run_solver_with_timeout("ripopt", name, WALL_TIME_LIMIT)
+        row["ripopt_status"] = status
+        row["ripopt_time"] = elapsed
+        row["ripopt_obj"] = obj
 
         prob.close()
         results.append(row)
@@ -240,7 +258,7 @@ def print_summary(results, label=""):
         for r in common_solved:
             if r["ipopt_obj"] is not None and r["ripopt_obj"] is not None:
                 diff = abs(r["ipopt_obj"] - r["ripopt_obj"])
-                tol = 1e-4 + 1e-3 * max(abs(r["ipopt_obj"]), abs(r["ripopt_obj"]))
+                tol = max(1e-4, 1e-3 * max(abs(r["ipopt_obj"]), abs(r["ripopt_obj"])))
                 if diff > tol:
                     disagree += 1
                     print(
@@ -313,6 +331,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--smoke", action="store_true", help="Run smoke test only (10 problems)")
     parser.add_argument("--problems", nargs="*", help="Specific problem names to run")
+    parser.add_argument("--output", type=str, default=None, help="Save results JSON to this path")
     args = parser.parse_args()
 
     if args.smoke:
@@ -340,3 +359,26 @@ if __name__ == "__main__":
     print(f"Found {len(problem_names)} problems")
     results = run_benchmark(problem_names, label=label)
     print_summary(results, label=label)
+
+    if args.output:
+        import json
+        from datetime import datetime, timezone
+
+        # Sanitize for JSON (replace inf/None)
+        def _sanitize(v):
+            if v is None:
+                return None
+            if isinstance(v, float) and (v == float("inf") or v != v):
+                return None
+            return v
+
+        out = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "label": label,
+            "max_n": args.max_n,
+            "max_m": args.max_m,
+            "n_problems": len(results),
+            "results": [{k: _sanitize(v) for k, v in r.items()} for r in results],
+        }
+        Path(args.output).write_text(json.dumps(out, indent=2) + "\n")
+        print(f"\nResults saved to {args.output}")

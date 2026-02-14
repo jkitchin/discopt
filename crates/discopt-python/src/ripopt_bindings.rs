@@ -268,6 +268,33 @@ pub fn solve_ripopt(
     if let Some(val) = options.get_item("constr_viol_tol")? {
         opts.constr_viol_tol = val.extract::<f64>()?;
     }
+    if let Some(val) = options.get_item("max_wall_time")? {
+        opts.max_wall_time = val.extract::<f64>()?;
+    }
+    if let Some(val) = options.get_item("warm_start")? {
+        opts.warm_start = val.extract::<bool>()?;
+    }
+    if let Some(val) = options.get_item("bound_push")? {
+        opts.bound_push = val.extract::<f64>()?;
+    }
+    if let Some(val) = options.get_item("kappa")? {
+        opts.kappa = val.extract::<f64>()?;
+    }
+    if let Some(val) = options.get_item("dual_inf_tol")? {
+        opts.dual_inf_tol = val.extract::<f64>()?;
+    }
+    if let Some(val) = options.get_item("compl_inf_tol")? {
+        opts.compl_inf_tol = val.extract::<f64>()?;
+    }
+    if let Some(val) = options.get_item("acceptable_constr_viol_tol")? {
+        opts.acceptable_constr_viol_tol = val.extract::<f64>()?;
+    }
+    if let Some(val) = options.get_item("acceptable_dual_inf_tol")? {
+        opts.acceptable_dual_inf_tol = val.extract::<f64>()?;
+    }
+    if let Some(val) = options.get_item("acceptable_compl_inf_tol")? {
+        opts.acceptable_compl_inf_tol = val.extract::<f64>()?;
+    }
 
     // Release the GIL for the main solve loop — callbacks re-acquire it
     let result = py.allow_threads(|| ripopt::solve(&problem, &opts));

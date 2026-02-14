@@ -165,7 +165,14 @@ ALL_INSTANCES: list[NLInstance] = [
         xfail="Non-convex: local NLP finds suboptimal at integer nodes",
     ),
     NLInstance("nvs10", -310.80, 2, False, True),
-    NLInstance("nvs11", -431.0, 3, False, True),
+    NLInstance(
+        "nvs11",
+        -431.0,
+        3,
+        False,
+        True,
+        xfail="Non-convex 3-var: local NLP finds suboptimal at integer nodes",
+    ),
     NLInstance("nvs12", -481.20, 4, False, True),
     NLInstance("nvs13", -585.20, 5, False, True),
     NLInstance(

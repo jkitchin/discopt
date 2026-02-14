@@ -27,5 +27,8 @@ build/
 .env
 .venv/
 
+# Benchmark results (timestamped output from make benchmarks)
+/results/
+
 # Jupyter Book
 docs/_build/
