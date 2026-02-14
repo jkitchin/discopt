@@ -113,6 +113,10 @@ disable_error_code = ["no-any-return", "attr-defined", "return-value", "assignme
 module = "discopt.benchmarks.runner"
 disable_error_code = ["assignment"]
 
+[[tool.mypy.overrides]]
+module = "discopt._jax.ipm_callbacks"
+disable_error_code = ["assignment", "misc", "union-attr", "operator", "arg-type"]
+
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]
 timeout = 300

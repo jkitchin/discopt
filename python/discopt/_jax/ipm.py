@@ -48,6 +48,17 @@ class IPMOptions(NamedTuple):
     max_ls_iter: int = 40
     eta_phi: float = 1e-4
     nu_init: float = 10.0
+    # Filter line search parameters (Ipopt defaults)
+    gamma_theta: float = 1e-5  # filter theta margin
+    gamma_phi: float = 1e-5  # filter phi margin
+    s_phi: float = 2.3  # switching condition phi exponent
+    s_theta: float = 1.1  # switching condition theta exponent
+    delta_switch: float = 1.0  # switching condition multiplier
+    theta_max_fact: float = 1e4  # theta_max = fact * max(1, theta_0)
+    theta_min_fact: float = 1e-4  # theta_min = fact * max(1, theta_0)
+    mu_linear_decrease: float = 0.2  # monotone mu linear factor
+    mu_superlinear_power: float = 1.5  # monotone mu superlinear exponent
+    barrier_tol_factor: float = 10.0  # mu decreased when error < factor*mu
     least_squares_mult_init: bool = False
     constr_mult_init_max: float = 1000.0
     predictor_corrector: bool = True  # Mehrotra predictor-corrector steps
