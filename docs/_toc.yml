@@ -22,6 +22,7 @@ parts:
   - caption: Advanced Features
     chapters:
       - file: notebooks/advanced_features
+      - file: notebooks/solver_internals
       - file: notebooks/sensitivity_analysis
       - file: notebooks/llm_integration
       - file: llm_features
