@@ -31,7 +31,7 @@ citecolor=blue,filecolor=blue,menucolor=blue,urlcolor=blue]{hyperref}
 
 \section{Abstract}
 \label{org-abstract}
-We present discopt, a hybrid Rust/JAX/Python solver for mixed-integer nonlinear programming (MINLP) problems, together with ripopt, a faithful Rust translation of Ipopt's interior point algorithm. The system makes five contributions: (1) differentiable MINLP solving via implicit differentiation of the KKT system, enabling decision-focused learning through nonconvex optimization layers; (2) batched node evaluation using \texttt{jax.vmap} for data-parallel branch-and-bound; (3) a pure-JAX interior point method with Mehrotra predictor-corrector steps and Ipopt-style filter line search that is JIT-compilable and vmappable; (4) ripopt, a memory-safe Rust IPM with zero C/Fortran dependencies that implements Ipopt's numerical hardening through a source-level translation; and (5) a compositional relaxation compiler supporting McCormick, $\alpha$ BB, piecewise McCormick, and ICNN-learned relaxations. All three NLP backends (pure-JAX IPM, ripopt, Ipopt) produce identical optimal solutions on a suite of 9 NLP and 24 MINLP benchmark problems with zero incorrect results. On a decision-focused learning task, differentiating through the solver achieves 36\% regret reduction versus two-stage predict-then-optimize. The algebraic coefficient extraction path provides 17--226$\times$ speedups for LP and QP subproblems. Source code is available under EPL-2.0 license (discopt and ripopt).
+We present discopt, a hybrid Rust/JAX/Python solver for mixed-integer nonlinear programming (MINLP) problems, together with ripopt, a faithful Rust translation of Ipopt's interior point algorithm. The system makes five contributions: (1) differentiable MINLP solving via implicit differentiation of the KKT system, enabling decision-focused learning through nonconvex optimization layers; (2) batched node evaluation using \texttt{jax.vmap} for data-parallel branch-and-bound; (3) a pure-JAX interior point method with Mehrotra predictor-corrector steps and Ipopt-style filter line search that is JIT-compilable and vmappable; (4) ripopt, a memory-safe Rust IPM with zero C/Fortran dependencies that implements Ipopt's numerical hardening through a source-level translation; and (5) a compositional relaxation compiler supporting McCormick, $\alpha$ BB, piecewise McCormick, specialized envelopes, and ICNN-learned relaxations. The solver includes an expression DAG convexity detector that enables adaptive dispatch (skipping relaxation overhead for convex problems), per-constraint outer approximation cuts, reliability branching with pseudocost tracking and LP-based strong branching, and OBBT with incumbent cutoff for progressive bound tightening. All three NLP backends (pure-JAX IPM, ripopt, Ipopt) produce identical optimal solutions on a suite of 9 NLP and 24 MINLP benchmark problems with zero incorrect results. On a decision-focused learning task, differentiating through the solver achieves 36\% regret reduction versus two-stage predict-then-optimize. The algebraic coefficient extraction path provides 17--226$\times$ speedups for LP and QP subproblems. Source code is available under EPL-2.0 license (discopt and ripopt).
 
 
 \section{Introduction}
@@ -199,8 +199,29 @@ The DAG compiler walks the expression tree and produces pure JAX functions compa
 
 \subsection{Rust Backend}
 \label{org-rust-backend}
-The Rust backend (\texttt{discopt-core} and \texttt{discopt-python} crates) provides three components:
+The Rust backend (\texttt{discopt-core} and \texttt{discopt-python} crates) provides three components: (1) an expression IR that mirrors the Python DAG, (2) a B\&B tree manager with node pool, branching, and pseudocost tracking, and (3) presolve routines including FBBT, probing, and simplification. All Rust data structures are exposed to Python via PyO3 bindings \cite{pyo3} with zero-copy numpy array transfer.
 
+\subsubsection{Reliability Branching}
+\label{org-reliability-branching}
+Variable selection in B\&B significantly impacts solver performance. discopt implements reliability branching \cite{Achterberg2005}, which combines pseudocost branching with strong branching in a hybrid scheme.
+
+After each branching decision, the Rust \texttt{TreeManager} records the bound improvement per unit of variable change (pseudocost) for both up and down branches. Running averages are maintained per variable. When selecting a branching variable, the algorithm examines all fractional integer variables and:
+
+\begin{enumerate}
+\item For variables with $\ge \eta_{\text{rel}}$ (default 8) pseudocost observations: scores are computed as the product $(10^{-6} + d_i^-)(10^{-6} + d_i^+)$ where $d_i^{\pm}$ are the pseudocost estimates for down/up branching.
+\item For variables with $< \eta_{\text{rel}}$ observations: Python-side strong branching via LP relaxation solves with HiGHS \cite{Huangfu2018}. For each candidate, two LP subproblems are constructed by linearizing the NLP at the current solution (gradient as objective, Jacobian-based constraint linearization), one with the variable's upper bound fixed to $\lfloor x_i \rfloor$ (down) and one with the lower bound fixed to $\lceil x_i \rceil$ (up). The resulting LP bound improvements determine the score.
+\item Branch hints are passed from Python back to the Rust \texttt{TreeManager} via \texttt{set\_branch\_hints()}, where they override the default most-fractional selection.
+\end{enumerate}
+
+As the tree matures and pseudocost observations accumulate, the algorithm naturally transitions from expensive strong branching to cheap pseudocost branching, achieving near-optimal variable selection at amortized low cost.
+
+\subsubsection{OBBT with Incumbent Cutoff}
+\label{org-obbt-incumbent-cutoff}
+Optimality-based bound tightening (OBBT) \cite{Gleixner2017} solves LP relaxations to find the tightest possible bounds on each variable: $\underline{x}_i = \min_{x} x_i$ and $\overline{x}_i = \max_{x} x_i$ subject to the model's linear constraints and variable bounds.
+
+When an incumbent solution with objective value $z^*$ is known, discopt adds the constraint $c^T x \le z^*$ (using linear objective coefficients) to the OBBT LPs. This often dramatically tightens bounds because many variable values become infeasible when the objective must improve upon the incumbent. For maximization problems, the constraint is negated: $-c^T x \le -z^*$.
+
+OBBT is invoked periodically during B\&B whenever a new incumbent is found and the problem has $\le 200$ variables. Each LP is solved with HiGHS using warm-starting from the previous LP's basis, keeping the per-variable LP solve cost low. Tightened bounds propagate to all open nodes, potentially enabling additional pruning and tighter relaxations at subsequent nodes.
 
 \section{NLP Solver Backends}
 \label{org-nlp-solver-backends}
@@ -406,6 +427,44 @@ bilinear $xy$ & varies & varies & >30\% \\
 \caption{Piecewise McCormick gap reduction with $k=8$ partitions.}
 \label{tab-piecewise}
 \end{table}
+
+\subsection{Convexity Detection}
+\label{org-convexity-detection}
+An expression DAG convexity detector classifies each subexpression as \textsc{affine}, \textsc{convex}, \textsc{concave}, or \textsc{unknown} using standard composition rules from convex analysis \cite{Boyd2004}. The key rules are:
+
+\begin{itemize}
+\item Constants, variables, and parameters are \textsc{affine}.
+\item Sum of two \textsc{convex} (resp.~\textsc{concave}) expressions preserves curvature; \textsc{convex} + \textsc{concave} yields \textsc{unknown}.
+\item A positive constant times a \textsc{convex} expression is \textsc{convex}; a negative constant flips curvature.
+\item $\exp(\text{convex})$ is \textsc{convex} (composition with nondecreasing convex outer function).
+\item $\log(\text{concave})$ is \textsc{concave} (composition with nondecreasing concave outer function).
+\item $x^{2k}$ (even integer power of affine) is \textsc{convex}; $x^p$ for $p > 1$ on nonneg domain is \textsc{convex}; $x^p$ for $0 < p < 1$ on nonneg domain is \textsc{concave}.
+\item Bilinear terms $x \cdot y$ are \textsc{unknown}.
+\end{itemize}
+
+Results are cached on expression IDs for efficiency. The detector runs in time linear in the DAG size and provides three downstream optimizations:
+
+\begin{enumerate}
+\item \textbf{Adaptive solver dispatch (E2):} When the entire model is classified as convex (convex objective for minimization, all constraints convex), the solver skips $\alpha$BB convexification and McCormick relaxation compilation entirely. NLP solutions are directly valid lower bounds, eliminating relaxation overhead.
+
+\item \textbf{Per-constraint OA cuts (E3):} In a nonconvex problem, individual constraints may still be convex. The convexity mask enables outer approximation cuts \cite{Duran1986} on a per-constraint basis: tangent hyperplanes are globally valid underestimators for convex constraints, even when the overall problem is nonconvex. This replaces the earlier approach that only generated OA for affine (linear) constraints.
+
+\item \textbf{Constraint classification:} A constraint $g(x) \le 0$ is convex when $g$ is \textsc{convex}; $g(x) \ge 0$ is convex when $g$ is \textsc{concave}; $g(x) = 0$ is convex only when $g$ is \textsc{affine}. The model-level classification checks the objective and all constraints simultaneously.
+\end{enumerate}
+
+\subsection{Specialized Envelopes}
+\label{org-specialized-envelopes}
+Standard McCormick relaxations compose relaxations through the expression tree, which can introduce composition error: outer functions see the relaxation of inner functions rather than the original function. Specialized envelopes compute exact convex/concave envelopes directly for common operations, bypassing this composition gap.
+
+discopt provides the following envelope functions:
+\begin{itemize}
+\item \texttt{relax\_power\_int($x, l, u, p$)}: exact envelope for $x^p$ with integer $p$. For even $p$, the function is convex everywhere, so the convex envelope is $x^p$ itself and the concave envelope is the secant line. For odd $p \ge 3$, convexity/concavity depends on sign: convex on $[0, \infty)$, concave on $(-\infty, 0]$, and for mixed-sign domains a tangent line construction provides tight bounds.
+\item \texttt{relax\_exp\_tight($x, l, u$)}: convex envelope $= \exp(x)$, concave envelope $= $ secant line from $(l, e^l)$ to $(u, e^u)$.
+\item \texttt{relax\_log\_tight($x, l, u$)}: concave envelope $= \log(x)$, convex envelope $= $ secant line.
+\item \texttt{relax\_exp\_bilinear}, \texttt{relax\_log\_sum}, \texttt{relax\_trilinear}, \texttt{relax\_signomial}: envelopes for composite operations.
+\end{itemize}
+
+The relaxation compiler automatically selects specialized envelopes when the expression matches a known pattern---for example, when $x^p$ is encountered and $x$ is a variable (or indexed variable) with known bounds, \texttt{relax\_power\_int} is used with the actual variable bounds from the B\&B node rather than propagated interval bounds. This provides tighter relaxations because the envelope is exact for the monomial, whereas McCormick composition of $(x^2)^2$ for $x^4$ introduces two layers of relaxation error.
 
 \subsection{Learned Relaxations via ICNN}
 \label{org-learned-relaxations-via-icnn}
@@ -617,10 +676,18 @@ Table \ref{tab-piecewise} reports piecewise McCormick gap reduction. Additionall
 \label{org-discussion}
 discopt demonstrates that a modern, multi-language MINLP solver can provide capabilities absent from existing monolithic solvers: differentiability, batch evaluation, and memory safety. Several limitations and directions for future work deserve discussion.
 
+\textbf{Convexity detection and adaptive dispatch.} The expression DAG convexity detector implements the Disciplined Convex Programming (DCP) composition rules \cite{Boyd2004}, covering the operations supported by the modeling API. When a model is fully convex, the solver bypasses $\alpha$BB convexification and McCormick relaxation compilation, relying instead on the NLP solution as a valid lower bound. For partially convex models, per-constraint classification enables outer approximation cuts on convex constraints while leaving nonconvex constraints to be handled by spatial branching. The current detector is conservative: expressions not covered by the composition rules are classified as \textsc{unknown} even if they happen to be convex, and the detector does not exploit second-order information (Hessian positive-semidefiniteness checks) for numerical verification.
+
+\textbf{Branching and bound tightening.} Reliability branching \cite{Achterberg2005} with LP-based strong branching provides a practical variable selection scheme that approaches full strong branching quality at amortized low cost. The pseudocost tracking in Rust provides per-variable observation counts that trigger strong branching only for unreliable variables. OBBT with incumbent cutoff \cite{Gleixner2017} progressively tightens variable bounds throughout the tree, with each bound improvement propagating to all open nodes. The combination of reliability branching and incumbent-based OBBT addresses two of the key algorithmic gaps relative to BARON \cite{Tawarmalani2005}.
+
+\textbf{Specialized envelopes versus compositional relaxations.} The envelope functions for power, exponential, and logarithmic operations provide exact convex/concave envelopes, avoiding the composition error inherent in McCormick's recursive approach. The relaxation compiler automatically detects when a specialized envelope is applicable and routes accordingly. Extending the envelope library to cover trigonometric functions (sin, cos on bounded intervals) and general signomial terms ($\prod x_i^{a_i}$) is straightforward and would improve relaxation quality on engineering design problems.
+
+\textbf{Limitations.} The solver's performance on large-scale problems ($n > 1000$) is limited by the dense linear algebra in the pure-JAX IPM; the sparse IPM variant using lineax iterative solvers partially addresses this but lacks the numerical robustness of direct factorization methods. The GNN branching model currently runs with random weights; training on problem-specific data would improve variable selection. Head-to-head benchmarking against BARON on MINLPLib instances remains future work pending license acquisition.
+
 
 \section{Conclusion}
 \label{org-conclusion}
-We have presented discopt, a hybrid Rust/JAX/Python MINLP solver that bridges the gap between classical mathematical programming and modern differentiable programming. The solver provides three interchangeable NLP backends---a pure-JAX IPM, ripopt (a memory-safe Rust translation of Ipopt), and Ipopt via cyipopt---all producing identical results on benchmark problems. The differentiable solving capability enables decision-focused learning through nonconvex optimization, achieving 36\% regret reduction on resource allocation tasks. The compositional relaxation compiler achieves 91--94\% gap reduction via piecewise McCormick, and the algebraic coefficient extraction path provides 17--226$\times$ speedups for structured subproblems. ripopt eliminates the Fortran/C++ dependency chain while preserving Ipopt's numerical robustness.
+We have presented discopt, a hybrid Rust/JAX/Python MINLP solver that bridges the gap between classical mathematical programming and modern differentiable programming. The solver provides three interchangeable NLP backends---a pure-JAX IPM, ripopt (a memory-safe Rust translation of Ipopt), and Ipopt via cyipopt---all producing identical results on benchmark problems. The differentiable solving capability enables decision-focused learning through nonconvex optimization, achieving 36\% regret reduction on resource allocation tasks. The compositional relaxation compiler achieves 91--94\% gap reduction via piecewise McCormick, and specialized envelopes for power, exponential, and logarithmic operations provide exact convex/concave envelopes that avoid compositional relaxation error. An expression DAG convexity detector enables adaptive solver dispatch (skipping relaxation overhead for convex problems) and per-constraint outer approximation cuts. Reliability branching with pseudocost tracking and LP-based strong branching provides near-optimal variable selection, while OBBT with incumbent cutoff progressively tightens bounds throughout the search tree. The algebraic coefficient extraction path provides 17--226$\times$ speedups for structured subproblems. ripopt eliminates the Fortran/C++ dependency chain while preserving Ipopt's numerical robustness.
 
 
 The system is open-source: discopt and ripopt are available under the EPL-2.0 License.
