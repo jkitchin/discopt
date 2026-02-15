@@ -552,6 +552,78 @@ def _compile_relax_node(
 
             return fn
 
+        # Envelope-based relaxations (use actual variable bounds when possible)
+        _envelope_relax = {"asinh", "acosh", "atanh", "erf", "log1p"}
+        if name in _envelope_relax and len(expr.args) == 1:
+            arg = expr.args[0]
+            if isinstance(arg, (Variable, IndexExpression)):
+                from discopt._jax.envelopes import (
+                    relax_acosh,
+                    relax_asinh,
+                    relax_atanh,
+                    relax_erf,
+                    relax_log1p,
+                )
+
+                _env_fns = {
+                    "asinh": relax_asinh,
+                    "acosh": relax_acosh,
+                    "atanh": relax_atanh,
+                    "erf": relax_erf,
+                    "log1p": relax_log1p,
+                }
+                _env_fn = _env_fns[name]
+
+                if isinstance(arg, Variable) and arg.size == 1:
+                    vi = _compute_var_offset(arg, model)
+
+                    def fn(x_cv, x_cc, lb, ub, _vi=vi, _ef=_env_fn):
+                        return _ef(x_cv[_vi], lb[_vi], ub[_vi])
+
+                    return fn
+                elif isinstance(arg, IndexExpression) and isinstance(arg.base, Variable):
+                    base_off = _compute_var_offset(arg.base, model)
+                    idx = arg.index
+                    flat_idx = (
+                        base_off + idx
+                        if isinstance(idx, int)
+                        else base_off + idx[0]
+                        if isinstance(idx, tuple) and len(idx) == 1
+                        else None
+                    )
+                    if flat_idx is not None:
+
+                        def fn(x_cv, x_cc, lb, ub, _fi=flat_idx, _ef=_env_fn):
+                            return _ef(x_cv[_fi], lb[_fi], ub[_fi])
+
+                        return fn
+
+            # Fallback: use envelopes with propagated bounds
+            from discopt._jax.envelopes import (
+                relax_acosh,
+                relax_asinh,
+                relax_atanh,
+                relax_erf,
+                relax_log1p,
+            )
+
+            _env_fns_fb = {
+                "asinh": relax_asinh,
+                "acosh": relax_acosh,
+                "atanh": relax_atanh,
+                "erf": relax_erf,
+                "log1p": relax_log1p,
+            }
+            _env_fn_fb = _env_fns_fb[name]
+            a_fn = arg_fns[0]
+
+            def fn(x_cv, x_cc, lb, ub, _ef=_env_fn_fb, _a_fn=a_fn):
+                cv_a, cc_a = _a_fn(x_cv, x_cc, lb, ub)
+                mid = 0.5 * (cv_a + cc_a)
+                return _ef(mid, cv_a, cc_a)
+
+            return fn
+
         if name == "sign":
             a_fn = arg_fns[0]
 

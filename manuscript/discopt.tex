@@ -223,6 +223,14 @@ When an incumbent solution with objective value $z^*$ is known, discopt adds the
 
 OBBT is invoked periodically during B\&B whenever a new incumbent is found and the problem has $\le 200$ variables. Each LP is solved with HiGHS using warm-starting from the previous LP's basis, keeping the per-variable LP solve cost low. Tightened bounds propagate to all open nodes, potentially enabling additional pruning and tighter relaxations at subsequent nodes.
 
+\subsubsection{FBBT with Incumbent Cutoff}
+\label{org-fbbt-incumbent-cutoff}
+Feasibility-based bound tightening (FBBT) \cite{Belotti2009,Ryoo1996} propagates bound information through the expression DAG without solving auxiliary optimization problems, making it much cheaper than OBBT. Each constraint $g(x) \le 0$ induces range implications: if a variable's contribution to $g$ exceeds the slack, its domain can be tightened.
+
+When an incumbent with objective value $z^*$ is available, discopt adds the cutoff constraint $f(x) \le z^*$ to the FBBT propagation. This is implemented in the Rust \texttt{fbbt\_with\_cutoff} function, which takes the expression IR, current variable bounds, and the incumbent objective. The cutoff often triggers cascading domain reductions: if reducing one variable's range via the objective cutoff renders a constraint infeasible for extreme values of another variable, that variable's bounds tighten as well.
+
+FBBT with incumbent cutoff runs at every B\&B node (before the NLP relaxation solve), while OBBT is reserved for periodic invocation when a new incumbent is found. The combination provides complementary bound tightening: FBBT is fast but conservative; OBBT is expensive but finds the tightest LP-based bounds.
+
 \section{NLP Solver Backends}
 \label{org-nlp-solver-backends}
 discopt supports three interchangeable NLP solver backends, selectable via \texttt{Model.solve(nlp\_solver}...)=. All three implement the same interface: given an objective function $f(x)$, constraints $g(x)$, variable bounds $x_l \le x \le x_u$, and constraint bounds $g_l \le g(x) \le g_u$, find $x^*$ that minimizes $f$ subject to all constraints.
@@ -464,6 +472,32 @@ discopt provides the following envelope functions:
 \item \texttt{relax\_exp\_bilinear}, \texttt{relax\_log\_sum}, \texttt{relax\_trilinear}, \texttt{relax\_signomial}: envelopes for composite operations.
 \end{itemize}
 
+\paragraph{Tight trigonometric envelopes.}
+For $\sin(x)$ on a bounded interval $[l, u]$, the relaxation quality depends on the curvature regime \cite{Locatelli2014}. \texttt{relax\_sin\_tight} identifies three cases:
+\begin{itemize}
+\item \emph{Concave regime} ($\sin'' < 0$, interval within $[2k\pi, (2k+1)\pi]$): cv $=$ secant, cc $= \sin(x)$.
+\item \emph{Convex regime} ($\sin'' > 0$, interval within $[(2k-1)\pi, 2k\pi]$): cv $= \sin(x)$, cc $=$ secant.
+\item \emph{Mixed or wide} ($\ge 2\pi$): falls back to $[-1, 1]$.
+\end{itemize}
+\texttt{relax\_cos\_tight} delegates via $\cos(x) = \sin(x + \pi/2)$. The compiler auto-dispatches these when the argument is a plain variable with known bounds.
+
+\paragraph{Multivariate signomial envelopes.}
+For signomial terms $\prod_{i=1}^n x_i^{a_i}$ with positive variables, \texttt{relax\_signomial\_multi} decomposes the product via logarithms \cite{Maranas1997}:
+$\prod x_i^{a_i} = \exp\!\bigl(\sum a_i \log x_i\bigr)$.
+Each $\log x_i$ is relaxed using tight log envelopes (concave), scaled by the exponent (sign-aware), summed, and composed with \texttt{exp} (convex). The compiler detects products of $\text{Variable}^{\text{Constant}}$ terms and routes to this envelope when all lower bounds are positive.
+
+\paragraph{Additional univariate envelopes.}
+The envelope library also provides relaxations for six additional operations, each exploiting known curvature properties:
+\begin{itemize}
+\item \texttt{relax\_asinh}: $\operatorname{asinh}''(x) = -x/(1+x^2)^{3/2}$; concave on $[0,\infty)$, convex on $(-\infty,0]$.
+\item \texttt{relax\_acosh}: concave on $[1,\infty)$.
+\item \texttt{relax\_atanh}: $\operatorname{atanh}''(x) = 2x/(1-x^2)^2$; convex on $[0,1)$, concave on $(-1,0]$.
+\item \texttt{relax\_erf}: $\operatorname{erf}''(x) = -\frac{4x}{\sqrt{\pi}} e^{-x^2}$; convex on $(-\infty,0]$, concave on $[0,\infty)$.
+\item \texttt{relax\_log1p}: $\log(1+x)$ is concave on $(-1,\infty)$; numerically stable near $x=0$.
+\item \texttt{relax\_reciprocal}: $1/x$ is convex on $(0,\infty)$, concave on $(-\infty,0)$.
+\end{itemize}
+For each, the convex regime uses function-value underestimator and secant overestimator, and vice versa for the concave regime. Mixed-sign domains use conservative min/max combinations.
+
 The relaxation compiler automatically selects specialized envelopes when the expression matches a known pattern---for example, when $x^p$ is encountered and $x$ is a variable (or indexed variable) with known bounds, \texttt{relax\_power\_int} is used with the actual variable bounds from the B\&B node rather than propagated interval bounds. This provides tighter relaxations because the envelope is exact for the monomial, whereas McCormick composition of $(x^2)^2$ for $x^4$ introduces two layers of relaxation error.
 
 \subsection{Learned Relaxations via ICNN}
@@ -680,14 +714,14 @@ discopt demonstrates that a modern, multi-language MINLP solver can provide capa
 
 \textbf{Branching and bound tightening.} Reliability branching \cite{Achterberg2005} with LP-based strong branching provides a practical variable selection scheme that approaches full strong branching quality at amortized low cost. The pseudocost tracking in Rust provides per-variable observation counts that trigger strong branching only for unreliable variables. OBBT with incumbent cutoff \cite{Gleixner2017} progressively tightens variable bounds throughout the tree, with each bound improvement propagating to all open nodes. The combination of reliability branching and incumbent-based OBBT addresses two of the key algorithmic gaps relative to BARON \cite{Tawarmalani2005}.
 
-\textbf{Specialized envelopes versus compositional relaxations.} The envelope functions for power, exponential, and logarithmic operations provide exact convex/concave envelopes, avoiding the composition error inherent in McCormick's recursive approach. The relaxation compiler automatically detects when a specialized envelope is applicable and routes accordingly. Extending the envelope library to cover trigonometric functions (sin, cos on bounded intervals) and general signomial terms ($\prod x_i^{a_i}$) is straightforward and would improve relaxation quality on engineering design problems.
+\textbf{Specialized envelopes versus compositional relaxations.} The envelope functions for power, exponential, logarithmic, trigonometric, and signomial operations provide exact convex/concave envelopes, avoiding the composition error inherent in McCormick's recursive approach. The relaxation compiler automatically detects when a specialized envelope is applicable and routes accordingly. Recent additions include regime-aware $\sin$/$\cos$ envelopes \cite{Locatelli2014}, multivariate signomial relaxations via logarithmic decomposition \cite{Maranas1997}, and envelopes for $\operatorname{asinh}$, $\operatorname{acosh}$, $\operatorname{atanh}$, $\operatorname{erf}$, $\log(1+x)$, and $1/x$ that exploit known curvature properties.
 
 \textbf{Limitations.} The solver's performance on large-scale problems ($n > 1000$) is limited by the dense linear algebra in the pure-JAX IPM; the sparse IPM variant using lineax iterative solvers partially addresses this but lacks the numerical robustness of direct factorization methods. The GNN branching model currently runs with random weights; training on problem-specific data would improve variable selection. Head-to-head benchmarking against BARON on MINLPLib instances remains future work pending license acquisition.
 
 
 \section{Conclusion}
 \label{org-conclusion}
-We have presented discopt, a hybrid Rust/JAX/Python MINLP solver that bridges the gap between classical mathematical programming and modern differentiable programming. The solver provides three interchangeable NLP backends---a pure-JAX IPM, ripopt (a memory-safe Rust translation of Ipopt), and Ipopt via cyipopt---all producing identical results on benchmark problems. The differentiable solving capability enables decision-focused learning through nonconvex optimization, achieving 36\% regret reduction on resource allocation tasks. The compositional relaxation compiler achieves 91--94\% gap reduction via piecewise McCormick, and specialized envelopes for power, exponential, and logarithmic operations provide exact convex/concave envelopes that avoid compositional relaxation error. An expression DAG convexity detector enables adaptive solver dispatch (skipping relaxation overhead for convex problems) and per-constraint outer approximation cuts. Reliability branching with pseudocost tracking and LP-based strong branching provides near-optimal variable selection, while OBBT with incumbent cutoff progressively tightens bounds throughout the search tree. The algebraic coefficient extraction path provides 17--226$\times$ speedups for structured subproblems. ripopt eliminates the Fortran/C++ dependency chain while preserving Ipopt's numerical robustness.
+We have presented discopt, a hybrid Rust/JAX/Python MINLP solver that bridges the gap between classical mathematical programming and modern differentiable programming. The solver provides three interchangeable NLP backends---a pure-JAX IPM, ripopt (a memory-safe Rust translation of Ipopt), and Ipopt via cyipopt---all producing identical results on benchmark problems. The differentiable solving capability enables decision-focused learning through nonconvex optimization, achieving 36\% regret reduction on resource allocation tasks. The compositional relaxation compiler achieves 91--94\% gap reduction via piecewise McCormick, and specialized envelopes for power, exponential, logarithmic, trigonometric, signomial, and inverse-hyperbolic operations provide exact convex/concave envelopes that avoid compositional relaxation error. An expression DAG convexity detector enables adaptive solver dispatch (skipping relaxation overhead for convex problems) and per-constraint outer approximation cuts. Reliability branching with pseudocost tracking and LP-based strong branching provides near-optimal variable selection, while OBBT with incumbent cutoff progressively tightens bounds throughout the search tree. The algebraic coefficient extraction path provides 17--226$\times$ speedups for structured subproblems. ripopt eliminates the Fortran/C++ dependency chain while preserving Ipopt's numerical robustness.
 
 
 The system is open-source: discopt and ripopt are available under the EPL-2.0 License.

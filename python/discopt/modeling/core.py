@@ -444,6 +444,31 @@ def tan(x: Union[Expression, float]) -> Expression:
     return FunctionCall("tan", _wrap(x))
 
 
+def asinh(x: Union[Expression, float]) -> Expression:
+    """Inverse hyperbolic sine."""
+    return FunctionCall("asinh", _wrap(x))
+
+
+def acosh(x: Union[Expression, float]) -> Expression:
+    """Inverse hyperbolic cosine (x >= 1)."""
+    return FunctionCall("acosh", _wrap(x))
+
+
+def atanh(x: Union[Expression, float]) -> Expression:
+    """Inverse hyperbolic tangent (-1 < x < 1)."""
+    return FunctionCall("atanh", _wrap(x))
+
+
+def erf(x: Union[Expression, float]) -> Expression:
+    """Gauss error function."""
+    return FunctionCall("erf", _wrap(x))
+
+
+def log1p(x: Union[Expression, float]) -> Expression:
+    """Numerically stable log(1 + x) (x > -1)."""
+    return FunctionCall("log1p", _wrap(x))
+
+
 def abs_(x: Union[Expression, float]) -> Expression:
     """
     Absolute value.

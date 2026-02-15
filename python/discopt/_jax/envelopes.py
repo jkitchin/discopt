@@ -390,6 +390,154 @@ def relax_cos_tight(x, lb, ub):
 # ---------------------------------------------------------------------------
 
 
+def relax_asinh(x, lb, ub):
+    """Tight envelope for asinh(x) on [lb, ub].
+
+    asinh''(x) = -x/(1+x^2)^{3/2}, so:
+    - x >= 0 (lb >= 0): concave, cv = secant, cc = asinh(x)
+    - x <= 0 (ub <= 0): convex, cv = asinh(x), cc = secant
+    - mixed: conservative bounds
+
+    Returns (cv, cc).
+    """
+    f_val = jnp.arcsinh(x)
+    sec = _secant(jnp.arcsinh, x, lb, ub)
+
+    # Concave regime (lb >= 0): cv = secant, cc = f
+    concave_cv, concave_cc = sec, f_val
+    # Convex regime (ub <= 0): cv = f, cc = secant
+    convex_cv, convex_cc = f_val, sec
+    # Mixed: conservative bounds
+    mixed_cv = jnp.minimum(f_val, sec)
+    mixed_cc = jnp.maximum(f_val, sec)
+
+    is_concave = lb >= 0.0
+    is_convex = ub <= 0.0
+
+    cv = jnp.where(is_convex, convex_cv, jnp.where(is_concave, concave_cv, mixed_cv))
+    cc = jnp.where(is_convex, convex_cc, jnp.where(is_concave, concave_cc, mixed_cc))
+    return cv, cc
+
+
+def relax_acosh(x, lb, ub):
+    """Tight envelope for acosh(x) on [lb, ub] where lb >= 1.
+
+    acosh is concave on [1, inf), so cc = acosh(x) and cv = secant.
+
+    Returns (cv, cc).
+    """
+    safe_lb = jnp.maximum(lb, 1.0)
+    safe_x = jnp.maximum(x, 1.0)
+    cc = jnp.acosh(safe_x)
+    cv = _secant(jnp.acosh, safe_x, safe_lb, ub)
+    return cv, cc
+
+
+def relax_atanh(x, lb, ub):
+    """Tight envelope for atanh(x) on [lb, ub] where -1 < lb, ub < 1.
+
+    atanh''(x) = 2x/(1-x^2)^2, so:
+    - x >= 0 (lb >= 0): convex, cv = atanh(x), cc = secant
+    - x <= 0 (ub <= 0): concave, cv = secant, cc = atanh(x)
+    - mixed: conservative bounds
+
+    Returns (cv, cc).
+    """
+    safe_lb = jnp.maximum(lb, -1.0 + 1e-10)
+    safe_ub = jnp.minimum(ub, 1.0 - 1e-10)
+    safe_x = jnp.clip(x, safe_lb, safe_ub)
+
+    f_val = jnp.arctanh(safe_x)
+    sec = _secant(jnp.arctanh, safe_x, safe_lb, safe_ub)
+
+    # Convex regime (lb >= 0): cv = f, cc = secant
+    convex_cv, convex_cc = f_val, sec
+    # Concave regime (ub <= 0): cv = secant, cc = f
+    concave_cv, concave_cc = sec, f_val
+    # Mixed
+    mixed_cv = jnp.minimum(f_val, sec)
+    mixed_cc = jnp.maximum(f_val, sec)
+
+    is_convex = lb >= 0.0
+    is_concave = ub <= 0.0
+
+    cv = jnp.where(is_convex, convex_cv, jnp.where(is_concave, concave_cv, mixed_cv))
+    cc = jnp.where(is_convex, convex_cc, jnp.where(is_concave, concave_cc, mixed_cc))
+    return cv, cc
+
+
+def relax_erf(x, lb, ub):
+    """Tight envelope for erf(x) on [lb, ub].
+
+    erf is convex on (-inf, 0] and concave on [0, inf), with inflection at 0.
+    - x <= 0: convex, cv = erf(x), cc = secant
+    - x >= 0: concave, cv = secant, cc = erf(x)
+    - mixed: conservative bounds
+
+    Returns (cv, cc).
+    """
+    from jax.scipy.special import erf
+
+    f_val = erf(x)
+    sec = _secant(erf, x, lb, ub)
+
+    # Convex regime (ub <= 0): cv = f, cc = secant
+    convex_cv, convex_cc = f_val, sec
+    # Concave regime (lb >= 0): cv = secant, cc = f
+    concave_cv, concave_cc = sec, f_val
+    # Mixed
+    mixed_cv = jnp.minimum(f_val, sec)
+    mixed_cc = jnp.maximum(f_val, sec)
+
+    is_convex = ub <= 0.0
+    is_concave = lb >= 0.0
+
+    cv = jnp.where(is_convex, convex_cv, jnp.where(is_concave, concave_cv, mixed_cv))
+    cc = jnp.where(is_convex, convex_cc, jnp.where(is_concave, concave_cc, mixed_cc))
+    return cv, cc
+
+
+def relax_log1p(x, lb, ub):
+    """Tight envelope for log(1+x) on [lb, ub] where lb > -1.
+
+    log(1+x) is concave on (-1, inf), so cc = log(1+x) and cv = secant.
+
+    Returns (cv, cc).
+    """
+    safe_lb = jnp.maximum(lb, -1.0 + 1e-15)
+
+    cc = jnp.log1p(x)
+    cv = _secant(jnp.log1p, x, safe_lb, ub)
+    return cv, cc
+
+
+def relax_reciprocal(x, lb, ub):
+    """Tight envelope for 1/x on [lb, ub] where bounds exclude zero.
+
+    (1/x)'' = 2/x^3, so:
+    - x > 0 (lb > 0): convex, cv = 1/x, cc = secant
+    - x < 0 (ub < 0): concave, cv = secant, cc = 1/x
+
+    Returns (cv, cc).
+    """
+
+    def recip(t):
+        return 1.0 / t
+
+    f_val = recip(x)
+    sec = _secant(recip, x, lb, ub)
+
+    # Positive domain: convex
+    pos_cv, pos_cc = f_val, sec
+    # Negative domain: concave
+    neg_cv, neg_cc = sec, f_val
+
+    is_pos = lb > 0.0
+    cv = jnp.where(is_pos, pos_cv, neg_cv)
+    cc = jnp.where(is_pos, pos_cc, neg_cc)
+    return cv, cc
+
+
 def relax_signomial_multi(xs, lbs, ubs, exponents):
     """Relaxation of prod(x_i^{a_i}) via logarithmic decomposition.
 

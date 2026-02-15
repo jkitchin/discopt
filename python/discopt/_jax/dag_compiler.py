@@ -140,6 +140,11 @@ def _compile_node(expr: Expression, model: Model) -> Callable:
             "asin": jnp.arcsin,
             "acos": jnp.arccos,
             "tanh": jnp.tanh,
+            "asinh": jnp.arcsinh,
+            "acosh": jnp.arccosh,
+            "atanh": jnp.arctanh,
+            "erf": lambda x: __import__("jax").scipy.special.erf(x),
+            "log1p": jnp.log1p,
             "abs": jnp.abs,
             "sign": jnp.sign,
         }
