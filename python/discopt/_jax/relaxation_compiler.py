@@ -85,6 +85,68 @@ def _get_constant_value(expr: Expression):
     return jnp.array(expr.value)
 
 
+def _try_extract_signomial_factors(
+    expr: Expression, model: Model
+) -> list[tuple[int, float]] | None:
+    """Try to decompose a multiplication tree into signomial factors.
+
+    Walks a tree of BinaryOp("*") nodes and collects (var_offset, exponent)
+    pairs where each leaf is Variable^Constant (or just Variable, i.e. ^1).
+
+    Returns None if the tree contains non-signomial terms (e.g., general
+    expressions, constants, or non-variable bases).
+    """
+    factors: list[tuple[int, float]] = []
+
+    def _collect(e: Expression) -> bool:
+        if isinstance(e, BinaryOp) and e.op == "*":
+            return _collect(e.left) and _collect(e.right)
+        if isinstance(e, BinaryOp) and e.op == "**":
+            if isinstance(e.right, Constant):
+                exp_val = float(e.right.value)
+                base = e.left
+                if isinstance(base, Variable) and base.size == 1:
+                    offset = _compute_var_offset(base, model)
+                    factors.append((offset, exp_val))
+                    return True
+                if isinstance(base, IndexExpression) and isinstance(base.base, Variable):
+                    base_off = _compute_var_offset(base.base, model)
+                    idx = base.index
+                    flat_idx = (
+                        base_off + idx
+                        if isinstance(idx, int)
+                        else base_off + idx[0]
+                        if isinstance(idx, tuple) and len(idx) == 1
+                        else None
+                    )
+                    if flat_idx is not None:
+                        factors.append((flat_idx, exp_val))
+                        return True
+            return False
+        if isinstance(e, Variable) and e.size == 1:
+            offset = _compute_var_offset(e, model)
+            factors.append((offset, 1.0))
+            return True
+        if isinstance(e, IndexExpression) and isinstance(e.base, Variable):
+            base_off = _compute_var_offset(e.base, model)
+            idx = e.index
+            flat_idx = (
+                base_off + idx
+                if isinstance(idx, int)
+                else base_off + idx[0]
+                if isinstance(idx, tuple) and len(idx) == 1
+                else None
+            )
+            if flat_idx is not None:
+                factors.append((flat_idx, 1.0))
+                return True
+        return False
+
+    if _collect(expr):
+        return factors if len(factors) >= 2 else None
+    return None
+
+
 def _compile_relax_node(
     expr: Expression,
     model: Model,
@@ -193,6 +255,36 @@ def _compile_relax_node(
                     new_cv = jnp.where(pos, _c * cv_l, _c * cc_l)
                     new_cc = jnp.where(pos, _c * cc_l, _c * cv_l)
                     return new_cv, new_cc
+
+                return fn
+
+            # Signomial pattern detection: product of Variable^Constant terms
+            # When all factors are x_i^{a_i} with positive lower bounds,
+            # dispatch to relax_signomial_multi for tighter relaxation.
+            sig_factors = _try_extract_signomial_factors(expr, model)
+            if sig_factors is not None:
+                from discopt._jax.envelopes import relax_signomial_multi
+
+                _offsets = np.array([f[0] for f in sig_factors])
+                _exps = np.array([f[1] for f in sig_factors], dtype=np.float64)
+
+                def fn(x_cv, x_cc, lb, ub, _offs=_offsets, _exps=_exps):
+                    xs = x_cv[_offs]
+                    var_lbs = lb[_offs]
+                    var_ubs = ub[_offs]
+                    # Only use signomial when all lower bounds are positive
+                    all_pos = jnp.all(var_lbs > 0)
+                    cv_sig, cc_sig = relax_signomial_multi(xs, var_lbs, var_ubs, jnp.array(_exps))
+                    # Fallback: bilinear
+                    cv_l, cc_l = left_fn(x_cv, x_cc, lb, ub)
+                    cv_r, cc_r = right_fn(x_cv, x_cc, lb, ub)
+                    mid_l = 0.5 * (cv_l + cc_l)
+                    mid_r = 0.5 * (cv_r + cc_r)
+                    cv_bl, cc_bl = relax_bilinear(mid_l, mid_r, cv_l, cc_l, cv_r, cc_r)
+                    return (
+                        jnp.where(all_pos, cv_sig, cv_bl),
+                        jnp.where(all_pos, cc_sig, cc_bl),
+                    )
 
                 return fn
 
@@ -377,6 +469,38 @@ def _compile_relax_node(
                     return _lr(mid, cv_child, cc_child, true_val)
 
                 return fn
+
+        # Tight sin/cos dispatch when argument is a plain variable
+        if name in ("sin", "cos") and len(expr.args) == 1:
+            arg = expr.args[0]
+            if isinstance(arg, (Variable, IndexExpression)):
+                from discopt._jax.envelopes import relax_cos_tight, relax_sin_tight
+
+                _tight_fn = relax_sin_tight if name == "sin" else relax_cos_tight
+
+                if isinstance(arg, Variable) and arg.size == 1:
+                    vi = _compute_var_offset(arg, model)
+
+                    def fn(x_cv, x_cc, lb, ub, _vi=vi, _tf=_tight_fn):
+                        return _tf(x_cv[_vi], lb[_vi], ub[_vi])
+
+                    return fn
+                elif isinstance(arg, IndexExpression) and isinstance(arg.base, Variable):
+                    base_off = _compute_var_offset(arg.base, model)
+                    idx = arg.index
+                    flat_idx = (
+                        base_off + idx
+                        if isinstance(idx, int)
+                        else base_off + idx[0]
+                        if isinstance(idx, tuple) and len(idx) == 1
+                        else None
+                    )
+                    if flat_idx is not None:
+
+                        def fn(x_cv, x_cc, lb, ub, _fi=flat_idx, _tf=_tight_fn):
+                            return _tf(x_cv[_fi], lb[_fi], ub[_fi])
+
+                        return fn
 
         # Piecewise-capable univariate operations
         _piecewise_relax = {

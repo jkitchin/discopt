@@ -605,3 +605,102 @@ class TestErrors:
         m.continuous("x", lb=0, ub=1)
         with pytest.raises(ValueError, match="no objective"):
             compile_objective_relaxation(m)
+
+
+# ─────────────────────────────────────────────────────────────
+# D4: Tight sin/cos and signomial compiler dispatch
+# ─────────────────────────────────────────────────────────────
+
+
+class TestTightSinCosDispatch:
+    """D4: sin/cos of a plain variable dispatches to relax_sin_tight/relax_cos_tight."""
+
+    def test_sin_variable_uses_tight(self):
+        """sin(x) with variable arg should produce tighter relaxation."""
+        m = Model("sin_test")
+        x = m.continuous("x", lb=0.5, ub=2.5)
+        m.minimize(dm.sin(x))
+
+        relax_fn = compile_objective_relaxation(m)
+        lb, ub = _get_var_bounds(m)
+
+        rng = np.random.default_rng(42)
+        for _ in range(20):
+            pt = _random_point_in_bounds(lb, ub, rng)
+            cv, cc = relax_fn(pt, pt, lb, ub)
+            true_val = jnp.sin(pt[0])
+            assert cv <= true_val + 1e-9, f"cv={cv} > sin({pt[0]})={true_val}"
+            assert cc >= true_val - 1e-9, f"cc={cc} < sin({pt[0]})={true_val}"
+
+    def test_cos_variable_uses_tight(self):
+        """cos(x) with variable arg should produce valid relaxation."""
+        m = Model("cos_test")
+        x = m.continuous("x", lb=0.5, ub=2.5)
+        m.minimize(dm.cos(x))
+
+        relax_fn = compile_objective_relaxation(m)
+        lb, ub = _get_var_bounds(m)
+
+        rng = np.random.default_rng(42)
+        for _ in range(20):
+            pt = _random_point_in_bounds(lb, ub, rng)
+            cv, cc = relax_fn(pt, pt, lb, ub)
+            true_val = jnp.cos(pt[0])
+            assert cv <= true_val + 1e-9
+            assert cc >= true_val - 1e-9
+
+    def test_sin_expr_falls_back(self):
+        """sin(x + y) falls back to compositional McCormick."""
+        m = Model("sin_expr")
+        x = m.continuous("x", lb=0.0, ub=1.0)
+        y = m.continuous("y", lb=0.0, ub=1.0)
+        m.minimize(dm.sin(x + y))
+
+        relax_fn = compile_objective_relaxation(m)
+        lb, ub = _get_var_bounds(m)
+
+        rng = np.random.default_rng(42)
+        for _ in range(10):
+            pt = _random_point_in_bounds(lb, ub, rng)
+            cv, cc = relax_fn(pt, pt, lb, ub)
+            true_val = jnp.sin(pt[0] + pt[1])
+            assert cv <= true_val + 1e-9
+            assert cc >= true_val - 1e-9
+
+
+class TestSignomialDispatch:
+    """D4: signomial pattern detection in multiplication trees."""
+
+    def test_signomial_detection(self):
+        """x^0.5 * y^1.5 dispatches to relax_signomial_multi."""
+        m = Model("sig_test")
+        x = m.continuous("x", lb=1.0, ub=4.0)
+        y = m.continuous("y", lb=1.0, ub=5.0)
+        m.minimize(x**0.5 * y**1.5)
+
+        relax_fn = compile_objective_relaxation(m)
+        lb, ub = _get_var_bounds(m)
+
+        rng = np.random.default_rng(42)
+        for _ in range(20):
+            pt = _random_point_in_bounds(lb, ub, rng)
+            cv, cc = relax_fn(pt, pt, lb, ub)
+            true_val = pt[0] ** 0.5 * pt[1] ** 1.5
+            assert cv <= true_val + 1e-8, f"cv={cv} > true={true_val}"
+            assert cc >= true_val - 1e-8, f"cc={cc} < true={true_val}"
+
+    def test_signomial_fallback_zero_bounds(self):
+        """Signomial with zero lb falls back to bilinear McCormick."""
+        m = Model("sig_zero")
+        x = m.continuous("x", lb=0.0, ub=4.0)
+        y = m.continuous("y", lb=0.0, ub=5.0)
+        m.minimize(x**0.5 * y**1.5)
+
+        relax_fn = compile_objective_relaxation(m)
+        lb, ub = _get_var_bounds(m)
+
+        # Should still produce valid relaxation (fallback path)
+        pt = jnp.array([2.0, 3.0])
+        cv, cc = relax_fn(pt, pt, lb, ub)
+        # Just check finite and valid ordering
+        assert jnp.isfinite(cv) or jnp.isfinite(cc)

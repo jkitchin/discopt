@@ -694,6 +694,15 @@ def solve_model(
 
     model = reformulate_gdp(model)
 
+    # --- Build Rust model representation for FBBT ---
+    _model_repr = None
+    try:
+        from discopt._rust import model_to_repr
+
+        _model_repr = model_to_repr(model)
+    except Exception:
+        pass  # FBBT bindings unavailable; skip
+
     # --- Learned relaxation registry (opt-in) ---
     import warnings
 
@@ -1281,6 +1290,43 @@ def solve_model(
                             )
                     except Exception as e:
                         logger.debug("Periodic OBBT failed: %s", e)
+
+        # --- FBBT with incumbent cutoff (Phase C3) ---
+        # Cheap bound tightening via Rust FBBT (no LP solves).
+        # Run on every incumbent update, complementing OBBT.
+        if _model_repr is not None and proc_stats["incumbent_updates"] > 0:
+            incumbent_info = tree.incumbent()
+            if incumbent_info is not None:
+                inc_sol, inc_obj = incumbent_info
+                if inc_obj < _SENTINEL_THRESHOLD:
+                    try:
+                        fbbt_lbs, fbbt_ubs = _model_repr.fbbt_with_cutoff(
+                            max_iter=10, tol=1e-8, incumbent_bound=float(inc_obj)
+                        )
+                        fbbt_lbs = np.asarray(fbbt_lbs)
+                        fbbt_ubs = np.asarray(fbbt_ubs)
+                        # Map per-block bounds to flat bounds array
+                        n_tightened = 0
+                        flat_idx = 0
+                        for bi, vinfo in enumerate(model._variables):
+                            for j in range(vinfo.size):
+                                new_lo = fbbt_lbs[bi]
+                                new_hi = fbbt_ubs[bi]
+                                if new_lo > lb[flat_idx] + 1e-10:
+                                    lb[flat_idx] = new_lo
+                                    n_tightened += 1
+                                if new_hi < ub[flat_idx] - 1e-10:
+                                    ub[flat_idx] = new_hi
+                                    n_tightened += 1
+                                flat_idx += 1
+                        if n_tightened > 0:
+                            logger.info(
+                                "FBBT tightened %d bounds (incumbent=%.6g)",
+                                n_tightened,
+                                inc_obj,
+                            )
+                    except Exception as e:
+                        logger.debug("FBBT with cutoff failed: %s", e)
 
         iteration += 1
 

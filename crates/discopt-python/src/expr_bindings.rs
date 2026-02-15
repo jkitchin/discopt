@@ -291,6 +291,50 @@ impl PyModelRepr {
         self.inner
             .evaluate_expr(self.inner.constraints[i].body, x_arr.as_slice().unwrap())
     }
+
+    /// Run FBBT (Feasibility-Based Bound Tightening) on the model.
+    ///
+    /// Returns (lower_bounds, upper_bounds) as numpy arrays, one element per
+    /// variable block (not per scalar variable).
+    fn fbbt(
+        &self,
+        py: Python<'_>,
+        max_iter: usize,
+        tol: f64,
+    ) -> PyResult<(PyObject, PyObject)> {
+        use discopt_core::presolve::fbbt::fbbt;
+        let bounds = fbbt(&self.inner, max_iter, tol);
+        let lbs: Vec<f64> = bounds.iter().map(|b| b.lo).collect();
+        let ubs: Vec<f64> = bounds.iter().map(|b| b.hi).collect();
+        let lb_arr = numpy::PyArray1::from_vec(py, lbs);
+        let ub_arr = numpy::PyArray1::from_vec(py, ubs);
+        Ok((lb_arr.into_any().unbind(), ub_arr.into_any().unbind()))
+    }
+
+    /// Run FBBT with an optional incumbent cutoff bound.
+    ///
+    /// When `incumbent_bound` is provided, an additional synthetic constraint
+    /// is injected: `objective <= bound` (minimize) or `objective >= bound`
+    /// (maximize), allowing tighter bounds without LP solves.
+    ///
+    /// Returns (lower_bounds, upper_bounds) as numpy arrays, one element per
+    /// variable block.
+    #[pyo3(signature = (max_iter, tol, incumbent_bound=None))]
+    fn fbbt_with_cutoff(
+        &self,
+        py: Python<'_>,
+        max_iter: usize,
+        tol: f64,
+        incumbent_bound: Option<f64>,
+    ) -> PyResult<(PyObject, PyObject)> {
+        use discopt_core::presolve::fbbt::fbbt_with_cutoff;
+        let bounds = fbbt_with_cutoff(&self.inner, max_iter, tol, incumbent_bound);
+        let lbs: Vec<f64> = bounds.iter().map(|b| b.lo).collect();
+        let ubs: Vec<f64> = bounds.iter().map(|b| b.hi).collect();
+        let lb_arr = numpy::PyArray1::from_vec(py, lbs);
+        let ub_arr = numpy::PyArray1::from_vec(py, ubs);
+        Ok((lb_arr.into_any().unbind(), ub_arr.into_any().unbind()))
+    }
 }
 
 // ─────────────────────────────────────────────────────────────

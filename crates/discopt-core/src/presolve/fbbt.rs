@@ -4,7 +4,7 @@
 //! through the expression DAG to tighten variable bounds.
 
 use crate::expr::{
-    BinOp, ConstraintSense, ExprArena, ExprId, ExprNode, MathFunc, ModelRepr, UnOp,
+    BinOp, ConstraintSense, ExprArena, ExprId, ExprNode, MathFunc, ModelRepr, ObjectiveSense, UnOp,
 };
 use std::f64::consts::PI;
 
@@ -665,6 +665,103 @@ impl ExprArena {
 // ─────────────────────────────────────────────────────────────
 // Fixed-point FBBT
 // ─────────────────────────────────────────────────────────────
+
+/// Run FBBT to fixed-point on a model with an optional incumbent cutoff.
+///
+/// When `incumbent_bound` is `Some(bound)`, an additional synthetic constraint
+/// is injected: `objective <= bound` (for minimize) or `objective >= bound`
+/// (for maximize). This allows FBBT to exploit incumbent information for
+/// tighter bounds without LP solves.
+///
+/// Returns tightened variable bounds (indexed by variable index, not offset).
+pub fn fbbt_with_cutoff(
+    model: &ModelRepr,
+    max_iter: usize,
+    tol: f64,
+    incumbent_bound: Option<f64>,
+) -> Vec<Interval> {
+    let n_vars = model.variables.len();
+    let mut var_bounds: Vec<Interval> = model
+        .variables
+        .iter()
+        .map(|v| {
+            Interval::new(
+                v.lb.first().copied().unwrap_or(f64::NEG_INFINITY),
+                v.ub.first().copied().unwrap_or(f64::INFINITY),
+            )
+        })
+        .collect();
+
+    // Determine the objective cutoff constraint (if any).
+    let obj_cutoff: Option<(ExprId, Interval)> = incumbent_bound.map(|bound| {
+        let output_bound = match model.objective_sense {
+            ObjectiveSense::Minimize => Interval::new(f64::NEG_INFINITY, bound),
+            ObjectiveSense::Maximize => Interval::new(bound, f64::INFINITY),
+        };
+        (model.objective, output_bound)
+    });
+
+    for _ in 0..max_iter {
+        let old_bounds = var_bounds.clone();
+
+        for constr in &model.constraints {
+            let node_bounds = forward_propagate(&model.arena, constr.body, &var_bounds);
+
+            let output_bound = match constr.sense {
+                ConstraintSense::Le => Interval::new(f64::NEG_INFINITY, constr.rhs),
+                ConstraintSense::Ge => Interval::new(constr.rhs, f64::INFINITY),
+                ConstraintSense::Eq => Interval::point(constr.rhs),
+            };
+
+            let body_bound = node_bounds[constr.body.0];
+            if body_bound.intersect(&output_bound).is_empty() {
+                for b in &mut var_bounds {
+                    *b = Interval::empty();
+                }
+                return var_bounds;
+            }
+
+            backward_propagate(
+                &model.arena,
+                constr.body,
+                output_bound,
+                &node_bounds,
+                &mut var_bounds,
+            );
+        }
+
+        // Propagate the objective cutoff constraint.
+        if let Some((obj_expr, ref cutoff_bound)) = obj_cutoff {
+            let node_bounds = forward_propagate(&model.arena, obj_expr, &var_bounds);
+            let obj_bound = node_bounds[obj_expr.0];
+            if obj_bound.intersect(cutoff_bound).is_empty() {
+                for b in &mut var_bounds {
+                    *b = Interval::empty();
+                }
+                return var_bounds;
+            }
+            backward_propagate(
+                &model.arena,
+                obj_expr,
+                *cutoff_bound,
+                &node_bounds,
+                &mut var_bounds,
+            );
+        }
+
+        let mut max_change = 0.0_f64;
+        for i in 0..n_vars {
+            let dlo = (var_bounds[i].lo - old_bounds[i].lo).abs();
+            let dhi = (var_bounds[i].hi - old_bounds[i].hi).abs();
+            max_change = max_change.max(dlo).max(dhi);
+        }
+        if max_change < tol {
+            break;
+        }
+    }
+
+    var_bounds
+}
 
 /// Run FBBT to fixed-point on a model.
 ///
@@ -1365,5 +1462,139 @@ mod tests {
             assert!((b.lo - 0.0).abs() < 1e-10);
             assert!((b.hi - 15.0).abs() < 1e-10);
         }
+    }
+
+    // -- fbbt_with_cutoff tests --
+
+    #[test]
+    fn test_fbbt_with_cutoff_basic_tightening() {
+        // min x s.t. x + y <= 10, x in [0,100], y in [0,100]
+        // With cutoff=7: objective x <= 7
+        // => x in [0, 7], y in [0, 10]
+        let model = make_linear_model();
+        let bounds = fbbt_with_cutoff(&model, 10, 1e-8, Some(7.0));
+        assert!((bounds[0].lo - 0.0).abs() < 1e-10);
+        assert!((bounds[0].hi - 7.0).abs() < 1e-10);
+        assert!((bounds[1].lo - 0.0).abs() < 1e-10);
+        assert!((bounds[1].hi - 10.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_fbbt_with_cutoff_none_matches_fbbt() {
+        // None cutoff should match plain fbbt
+        let model = make_linear_model();
+        let bounds_plain = fbbt(&model, 10, 1e-8);
+        let bounds_cutoff = fbbt_with_cutoff(&model, 10, 1e-8, None);
+        for (a, b) in bounds_plain.iter().zip(bounds_cutoff.iter()) {
+            assert!((a.lo - b.lo).abs() < 1e-14);
+            assert!((a.hi - b.hi).abs() < 1e-14);
+        }
+    }
+
+    #[test]
+    fn test_fbbt_with_cutoff_infeasibility() {
+        // min x s.t. x + y <= 10, x >= 0, y >= 0
+        // With cutoff=-1 (x <= -1), infeasible since x >= 0
+        let model = make_linear_model();
+        let bounds = fbbt_with_cutoff(&model, 10, 1e-8, Some(-1.0));
+        for b in &bounds {
+            assert!(b.is_empty(), "Expected infeasible (empty bounds)");
+        }
+    }
+
+    #[test]
+    fn test_fbbt_with_cutoff_maximize() {
+        // max x s.t. x + y <= 10, x in [0,100], y in [0,100]
+        // With cutoff=3: objective x >= 3 => x in [3, 10]
+        let mut arena = ExprArena::new();
+        let x = arena.add(ExprNode::Variable {
+            name: "x".into(),
+            index: 0,
+            size: 1,
+            shape: vec![],
+        });
+        let y = arena.add(ExprNode::Variable {
+            name: "y".into(),
+            index: 1,
+            size: 1,
+            shape: vec![],
+        });
+        let sum = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Add,
+            left: x,
+            right: y,
+        });
+        let model = ModelRepr {
+            arena,
+            objective: ExprId(0), // x
+            objective_sense: ObjectiveSense::Maximize,
+            constraints: vec![ConstraintRepr {
+                body: sum,
+                sense: ConstraintSense::Le,
+                rhs: 10.0,
+                name: Some("c1".into()),
+            }],
+            variables: vec![
+                VarInfo {
+                    name: "x".into(),
+                    var_type: VarType::Continuous,
+                    offset: 0,
+                    size: 1,
+                    shape: vec![],
+                    lb: vec![0.0],
+                    ub: vec![100.0],
+                },
+                VarInfo {
+                    name: "y".into(),
+                    var_type: VarType::Continuous,
+                    offset: 1,
+                    size: 1,
+                    shape: vec![],
+                    lb: vec![0.0],
+                    ub: vec![100.0],
+                },
+            ],
+            n_vars: 2,
+        };
+        let bounds = fbbt_with_cutoff(&model, 10, 1e-8, Some(3.0));
+        assert!((bounds[0].lo - 3.0).abs() < 1e-10);
+        assert!((bounds[0].hi - 10.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_fbbt_with_cutoff_nonlinear_obj() {
+        // min exp(x) s.t. x in [-10, 10]
+        // With cutoff=e^2 (~7.389): exp(x) <= e^2 => x <= 2
+        let mut arena = ExprArena::new();
+        let x = arena.add(ExprNode::Variable {
+            name: "x".into(),
+            index: 0,
+            size: 1,
+            shape: vec![],
+        });
+        let exp_x = arena.add(ExprNode::FunctionCall {
+            func: MathFunc::Exp,
+            args: vec![x],
+        });
+        let model = ModelRepr {
+            arena,
+            objective: exp_x,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![],
+            variables: vec![VarInfo {
+                name: "x".into(),
+                var_type: VarType::Continuous,
+                offset: 0,
+                size: 1,
+                shape: vec![],
+                lb: vec![-10.0],
+                ub: vec![10.0],
+            }],
+            n_vars: 1,
+        };
+        let cutoff = 2.0_f64.exp(); // e^2
+        let bounds = fbbt_with_cutoff(&model, 10, 1e-8, Some(cutoff));
+        assert!((bounds[0].lo - (-10.0)).abs() < 1e-8);
+        assert!((bounds[0].hi - 2.0).abs() < 1e-8);
     }
 }

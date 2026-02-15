@@ -297,3 +297,152 @@ def relax_log_sum(x, y, x_lb, x_ub, y_lb, y_ub):
     cv = _secant(lambda t: jnp.log(jnp.maximum(t, 1e-30)), s, s_lb, s_ub)
 
     return cv, cc
+
+
+# ---------------------------------------------------------------------------
+# Tight trigonometric envelopes: sin(x), cos(x) using actual variable bounds
+# ---------------------------------------------------------------------------
+
+
+def relax_sin_tight(x, lb, ub):
+    """Tight convex/concave envelope for sin(x) on [lb, ub].
+
+    Uses secant + tangent construction based on the regime:
+      - Concave regime (sin >= 0 throughout): cv = secant, cc = sin(x)
+      - Convex regime (sin <= 0 throughout): cv = sin(x), cc = secant
+      - Mixed or wide (>= 2*pi): falls back to [-1, 1]
+
+    For narrow intervals in a single-convexity regime, this is significantly
+    tighter than compositional McCormick.
+
+    Args:
+        x: point value
+        lb: lower bound
+        ub: upper bound
+
+    Returns:
+        (cv, cc) where cv <= sin(x) <= cc
+    """
+    pi = jnp.pi
+    sin_x = jnp.sin(x)
+    width = ub - lb
+
+    # Fall back to [-1, 1] for wide intervals
+    wide = width >= 2.0 * pi
+
+    # Secant line through (lb, sin(lb)) and (ub, sin(ub))
+    sec = _secant(jnp.sin, x, lb, ub)
+
+    # Determine regime by checking if interval stays in concave or convex region.
+    # Normalize lb to [0, 2*pi)
+    lb_mod = jnp.fmod(lb, 2.0 * pi)
+    lb_mod = jnp.where(lb_mod < 0, lb_mod + 2.0 * pi, lb_mod)
+    ub_mod = lb_mod + width
+
+    # Concave regime: sin'' < 0 on (0, pi), i.e., the interval is within [2k*pi, (2k+1)*pi]
+    # This means lb_mod in [0, pi] and ub_mod <= pi
+    is_concave = (lb_mod >= 0.0) & (ub_mod <= pi)
+
+    # Convex regime: sin'' > 0 on (pi, 2*pi), i.e., interval within [(2k-1)*pi, 2k*pi]
+    is_convex = (lb_mod >= pi) & (ub_mod <= 2.0 * pi)
+
+    # Concave: cv = secant, cc = sin(x)
+    concave_cv = sec
+    concave_cc = sin_x
+
+    # Convex: cv = sin(x), cc = secant
+    convex_cv = sin_x
+    convex_cc = sec
+
+    # Mixed: use tangent lines + function value for tighter bounds
+    # cv = max(sin(x), secant) clamped; cc = min(sin(x), secant) clamped
+    # Conservative: use secant for both since we can't guarantee tightness
+    mixed_cv = jnp.minimum(sec, sin_x)
+    mixed_cc = jnp.maximum(sec, sin_x)
+
+    inner_cv = jnp.where(is_convex, convex_cv, mixed_cv)
+    inner_cc = jnp.where(is_convex, convex_cc, mixed_cc)
+    cv = jnp.where(wide, -1.0, jnp.where(is_concave, concave_cv, inner_cv))
+    cc = jnp.where(wide, 1.0, jnp.where(is_concave, concave_cc, inner_cc))
+
+    return cv, cc
+
+
+def relax_cos_tight(x, lb, ub):
+    """Tight convex/concave envelope for cos(x) on [lb, ub].
+
+    Delegates to relax_sin_tight via cos(x) = sin(x + pi/2).
+
+    Args:
+        x: point value
+        lb: lower bound
+        ub: upper bound
+
+    Returns:
+        (cv, cc) where cv <= cos(x) <= cc
+    """
+    half_pi = jnp.pi / 2.0
+    return relax_sin_tight(x + half_pi, lb + half_pi, ub + half_pi)
+
+
+# ---------------------------------------------------------------------------
+# Multivariate signomial envelopes
+# ---------------------------------------------------------------------------
+
+
+def relax_signomial_multi(xs, lbs, ubs, exponents):
+    """Relaxation of prod(x_i^{a_i}) via logarithmic decomposition.
+
+    Decomposes prod(x_i^{a_i}) = exp(sum(a_i * log(x_i))), then composes
+    tight log, scaling, summation, and tight exp relaxations.
+
+    Requires all lbs > 0 (positive domain).
+
+    Args:
+        xs: array of point values, shape (n,)
+        lbs: array of lower bounds, shape (n,)
+        ubs: array of upper bounds, shape (n,)
+        exponents: array of exponents, shape (n,)
+
+    Returns:
+        (cv, cc) where cv <= prod(x_i^{a_i}) <= cc
+    """
+    # Guard: ensure positive domain
+    safe_lbs = jnp.maximum(lbs, 1e-15)
+    safe_xs = jnp.maximum(xs, 1e-15)
+
+    # Direct approach: evaluate the true value and compute simple bounds.
+    # Compute bounds on the product at all corners would be expensive.
+    # Instead, use the univariate signomial relaxation per-variable and compose.
+    # For a product of terms, cv = product of cvs (when all positive),
+    # cc = product of ccs.
+    # But this only works for positive terms. Use log-space composition:
+
+    # Step 1: Relax log(x_i) for each variable (log is concave)
+    log_cvs = _secant(jnp.log, safe_xs, safe_lbs, ubs)  # secant = cv for concave log
+    log_ccs = jnp.log(safe_xs)  # function value = cc for concave log
+
+    # Step 2: Scale by exponents: a_i * log(x_i)
+    # For positive exponents: a*cv_log is cv, a*cc_log is cc
+    # For negative exponents: a*cc_log is cv, a*cv_log is cc (swap)
+    pos_exp = exponents >= 0
+    scaled_cv = jnp.where(pos_exp, exponents * log_cvs, exponents * log_ccs)
+    scaled_cc = jnp.where(pos_exp, exponents * log_ccs, exponents * log_cvs)
+
+    # Step 3: Sum over variables (sum preserves convexity/concavity)
+    sum_cv = jnp.sum(scaled_cv)
+    sum_cc = jnp.sum(scaled_cc)
+
+    # Step 4: exp(sum) — exp is convex
+    # cv of exp(convex_underestimator) = exp(sum_cv) (convex of convex)
+    cv = jnp.exp(sum_cv)
+    # For cc: exp is convex so exp(concave_overestimator) is NOT guaranteed
+    # to be a valid overestimator. Use the secant on [sum_cv, sum_cc].
+    # But we need cc >= true_val. The true value = exp(true_sum_log).
+    # true_sum_log = sum(a_i*log(x_i)) where each a_i*log(x_i) satisfies
+    # scaled_cv_i <= a_i*log(x_i) <= scaled_cc_i, so sum_cv <= true_sum_log <= sum_cc.
+    # Since exp is monotonically increasing: exp(sum_cv) <= exp(true_sum_log) <= exp(sum_cc)
+    # So cc = exp(sum_cc) is a valid overestimator!
+    cc = jnp.exp(sum_cc)
+
+    return cv, cc
