@@ -938,7 +938,7 @@ class TestSIPOPTFeatures:
         x_approx = result.approximate_resolve([(p, 3.5)])
         assert "x" in x_approx
         # x*(p=3.5) ≈ 3.5 (first-order exact for this linear sensitivity)
-        assert float(x_approx["x"]) == pytest.approx(3.5, abs=1e-2)
+        assert float(np.asarray(x_approx["x"]).flat[0]) == pytest.approx(3.5, abs=1e-2)
 
     def test_approximate_resolve_constrained(self):
         """min x^2 s.t. x >= p => x*=p. Verify linear approximation."""
@@ -954,7 +954,7 @@ class TestSIPOPTFeatures:
         # Approximate resolve at p=2.1
         x_approx = result.approximate_resolve([(p, 2.1)])
         # x*(2.1) ≈ 2.0 + dx/dp * 0.1 = 2.0 + 1.0 * 0.1 = 2.1
-        assert float(x_approx["x"]) == pytest.approx(2.1, abs=0.05)
+        assert float(np.asarray(x_approx["x"]).flat[0]) == pytest.approx(2.1, abs=0.05)
 
     def test_approximate_resolve_accuracy(self):
         """Small dp gives error O(dp^2) confirming first-order accuracy."""
@@ -973,8 +973,8 @@ class TestSIPOPTFeatures:
         x_approx_small = result.approximate_resolve([(p, 2.0 + dp_small)])
 
         # True values: x*(p) = p
-        err_large = abs(float(x_approx_large["x"]) - (2.0 + dp_large))
-        err_small = abs(float(x_approx_small["x"]) - (2.0 + dp_small))
+        err_large = abs(float(np.asarray(x_approx_large["x"]).flat[0]) - (2.0 + dp_large))
+        err_small = abs(float(np.asarray(x_approx_small["x"]).flat[0]) - (2.0 + dp_small))
 
         # For this linear problem, errors should be near-zero
         assert err_large < 1e-3
@@ -1098,11 +1098,11 @@ class TestSIPOPTFeatures:
         sens = result.sensitivity_matrix()
         val = result.value(x)
 
-        assert float(g1) == pytest.approx(2.0, abs=0.1)
-        assert float(g3) == pytest.approx(2.0, abs=0.1)
+        assert float(np.asarray(g1).flat[0]) == pytest.approx(2.0, abs=0.1)
+        assert float(np.asarray(g3).flat[0]) == pytest.approx(2.0, abs=0.1)
         assert sens is not None
         assert sens.shape == (1, 1)
-        assert float(val) == pytest.approx(2.0, abs=0.1)
+        assert float(np.asarray(val).flat[0]) == pytest.approx(2.0, abs=0.1)
 
     def test_implicit_differentiate_returns_sensitivity_info(self):
         """implicit_differentiate should return SensitivityInfo NamedTuple."""
