@@ -6,7 +6,7 @@ pub mod pool;
 pub mod tree_manager;
 
 // Re-export primary public types for convenience.
-pub use branching::{BranchDecision, VarBranchInfo};
+pub use branching::{BranchDecision, Pseudocosts, VarBranchInfo};
 pub use node::{Node, NodeId, NodeStatus};
 pub use pool::{NodePool, SelectionStrategy};
 pub use tree_manager::{ExportBatch, NodeResult, ProcessingStats, TreeManager, TreeStats};

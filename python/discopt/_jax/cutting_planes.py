@@ -348,11 +348,12 @@ def separate_oa_cuts(
     x_sol: np.ndarray,
     constraint_senses: Optional[list[str]] = None,
     tol: float = 1e-8,
+    convex_mask: Optional[list[bool]] = None,
 ) -> list[LinearCut]:
     """Generate OA cuts only for violated constraints at x_sol.
 
-    WARNING: These cuts are only globally valid if all constraints are convex.
-    For non-convex constraints, use separate_oa_cuts_from_relaxation() instead.
+    WARNING: These cuts are only globally valid if the constraint is convex.
+    Use ``convex_mask`` to restrict OA generation to known-convex constraints.
 
     A constraint g_k(x) <= 0 is violated if g_k(x_sol) > tol.
     Only violated constraints produce cuts.
@@ -362,6 +363,9 @@ def separate_oa_cuts(
         x_sol: solution point, shape (n,).
         constraint_senses: list of senses. If None, all are "<=".
         tol: violation tolerance.
+        convex_mask: Per-constraint boolean list. If provided, only constraints
+            where ``convex_mask[k]`` is True are considered for OA cuts.
+            If None, all constraints are eligible (original behaviour).
 
     Returns:
         List of LinearCut objects for violated constraints.
@@ -378,6 +382,10 @@ def separate_oa_cuts(
 
     cuts = []
     for k in range(m):
+        # Skip non-convex constraints when a mask is provided
+        if convex_mask is not None and not convex_mask[k]:
+            continue
+
         g_k = float(cons_vals[k])
         sense = constraint_senses[k]
         violated = False
@@ -514,6 +522,7 @@ def generate_cuts_at_node(
     bilinear_terms: list[BilinearTerm] | None = None,
     tol: float = 1e-8,
     oa_enabled: bool = True,
+    convex_constraint_mask: list[bool] | None = None,
 ) -> list[LinearCut]:
     """Generate all applicable cuts at a B&B node solution.
 
@@ -538,6 +547,10 @@ def generate_cuts_at_node(
             valid when all constraints are convex.  For non-convex problems, set
             this to False to avoid cutting off feasible integer points.  RLT cuts
             are always generated regardless of this flag.
+        convex_constraint_mask: Per-constraint convexity flags. If provided,
+            OA cuts are generated only for constraints where the mask is True.
+            If None and oa_enabled is True, OA cuts are generated for all
+            constraints (original behaviour).
 
     Returns:
         List of LinearCut objects (OA + RLT).
@@ -546,7 +559,13 @@ def generate_cuts_at_node(
 
     # OA cuts for violated constraints (only valid for convex constraints)
     if oa_enabled:
-        oa = separate_oa_cuts(evaluator, x_sol, constraint_senses, tol)
+        oa = separate_oa_cuts(
+            evaluator,
+            x_sol,
+            constraint_senses,
+            tol,
+            convex_mask=convex_constraint_mask,
+        )
         cuts.extend(oa)
 
     # RLT cuts for bilinear terms using current node bounds

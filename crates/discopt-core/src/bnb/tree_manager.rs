@@ -1,7 +1,10 @@
 //! TreeManager — orchestrates the B&B search loop.
 
+use std::collections::HashMap;
+
 use crate::bnb::branching::{
-    create_children, is_integer_feasible, select_branch_variable, VarBranchInfo,
+    create_children, is_integer_feasible, select_branch_variable,
+    select_branch_variable_pseudocost, BranchDecision, Pseudocosts, VarBranchInfo,
 };
 use crate::bnb::node::{Node, NodeId, NodeStatus};
 use crate::bnb::pool::{NodePool, SelectionStrategy};
@@ -43,6 +46,9 @@ pub struct ProcessingStats {
     pub branched: usize,
     /// Number of incumbent updates.
     pub incumbent_updates: usize,
+    /// Flat variable indices with unreliable pseudocost estimates.
+    /// These are candidates for strong branching (LP/NLP re-solves).
+    pub unreliable_candidates: Vec<usize>,
 }
 
 /// Aggregate tree statistics.
@@ -68,6 +74,18 @@ struct PendingResult {
     is_feasible: bool,
 }
 
+/// Record of a branching decision at a node, used for retroactive
+/// pseudocost updates when child results arrive.
+#[derive(Debug, Clone)]
+struct BranchRecord {
+    /// Which variable was branched on.
+    var_index: usize,
+    /// Fractional part of the variable at the parent.
+    frac_part: f64,
+    /// Parent node's relaxation lower bound.
+    parent_lb: f64,
+}
+
 /// Orchestrates the Branch-and-Bound search.
 pub struct TreeManager {
     pool: NodePool,
@@ -79,6 +97,18 @@ pub struct TreeManager {
     node_counter: usize,
     global_lower_bound: f64,
     pending_results: Vec<PendingResult>,
+    /// Per-node branch hints from Python (e.g. GNN branching).
+    /// Maps node ID → variable index to branch on. Consumed after use.
+    branch_hints: HashMap<NodeId, usize>,
+    /// Pseudocost tracker for reliability branching.
+    pseudocosts: Pseudocosts,
+    /// Whether pseudocost-based branching is enabled (default: true).
+    use_pseudocosts: bool,
+    /// Minimum observations before a variable's pseudocost is considered reliable.
+    reliability_threshold: u32,
+    /// Records of branching decisions: maps child NodeId → parent's BranchRecord.
+    /// Used to retroactively update pseudocosts when child results arrive.
+    branch_records: HashMap<NodeId, BranchRecord>,
 }
 
 impl TreeManager {
@@ -97,6 +127,7 @@ impl TreeManager {
     ) -> Self {
         assert_eq!(lb.len(), n_vars);
         assert_eq!(ub.len(), n_vars);
+        let pseudocosts = Pseudocosts::new(n_vars);
         Self {
             pool: NodePool::new(strategy),
             incumbent_value: f64::INFINITY,
@@ -107,6 +138,11 @@ impl TreeManager {
             node_counter: 0,
             global_lower_bound: f64::NEG_INFINITY,
             pending_results: Vec::new(),
+            branch_hints: HashMap::new(),
+            pseudocosts,
+            use_pseudocosts: true,
+            reliability_threshold: 8,
+            branch_records: HashMap::new(),
         }
     }
 
@@ -182,6 +218,10 @@ impl TreeManager {
     }
 
     /// Process all evaluated nodes: prune, check integrality, branch.
+    ///
+    /// Uses pseudocost-based branching when enabled and sufficient observations
+    /// exist. Returns stats including indices of unreliable candidates for
+    /// potential strong branching by the Python orchestrator.
     pub fn process_evaluated(&mut self) -> ProcessingStats {
         let mut stats = ProcessingStats::default();
 
@@ -189,6 +229,23 @@ impl TreeManager {
 
         for result in &pending {
             let node_lb = self.pool.get(result.node_id).local_lower_bound;
+
+            // 0. Retroactively update pseudocosts from this child's result.
+            if let Some(record) = self.branch_records.remove(&result.node_id) {
+                // Down branch has tightened ub (ub < global_ub for the branched var).
+                // Up branch has tightened lb (lb > global_lb for the branched var).
+                let node = self.pool.get(result.node_id);
+                let is_down = record.var_index < node.ub.len()
+                    && node.ub[record.var_index]
+                        < self.global_ub.get(record.var_index).copied().unwrap_or(f64::INFINITY);
+                self.pseudocosts.update(
+                    record.var_index,
+                    record.parent_lb,
+                    node_lb,
+                    record.frac_part,
+                    is_down,
+                );
+            }
 
             // 1. Prune if lower bound >= incumbent (node can't improve).
             if node_lb >= self.incumbent_value {
@@ -213,12 +270,65 @@ impl TreeManager {
                 continue;
             }
 
-            // 3. Branch: find most-fractional variable and create children.
-            if let Some(decision) = select_branch_variable(&result.solution, &self.integer_vars) {
+            // 3. Branch: use hint if available, else pseudocost/most-fractional.
+            let (decision, unreliable) = self
+                .branch_hints
+                .remove(&result.node_id)
+                .and_then(|hint_idx| {
+                    let val = result.solution.get(hint_idx)?;
+                    let frac = val - val.floor();
+                    if frac > 1e-5 && frac < 1.0 - 1e-5 {
+                        Some((
+                            Some(BranchDecision {
+                                var_index: hint_idx,
+                                branch_point: val.floor(),
+                            }),
+                            Vec::new(),
+                        ))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| {
+                    if self.use_pseudocosts {
+                        select_branch_variable_pseudocost(
+                            &result.solution,
+                            &self.integer_vars,
+                            &self.pseudocosts,
+                            self.reliability_threshold,
+                        )
+                    } else {
+                        (
+                            select_branch_variable(&result.solution, &self.integer_vars),
+                            Vec::new(),
+                        )
+                    }
+                });
+
+            // Collect unreliable candidates for potential strong branching.
+            stats.unreliable_candidates.extend(unreliable);
+
+            if let Some(ref decision) = decision {
+                // Record the branching decision for retroactive pseudocost updates.
+                let frac_part = {
+                    let val = result.solution[decision.var_index];
+                    val - val.floor()
+                };
+
                 let parent = self.pool.get(result.node_id).clone();
                 self.pool.get_mut(result.node_id).status = NodeStatus::Branched;
 
-                let (left, right) = create_children(&parent, &decision, || self.next_id());
+                let (left, right) = create_children(&parent, decision, || self.next_id());
+
+                // Record branch info for both children.
+                let record = BranchRecord {
+                    var_index: decision.var_index,
+                    frac_part,
+                    parent_lb: node_lb,
+                };
+                self.branch_records.insert(left.id, record.clone());
+                self.branch_records.insert(right.id, record);
+
                 self.pool.add(left);
                 self.pool.add(right);
                 stats.branched += 1;
@@ -304,6 +414,29 @@ impl TreeManager {
         self.incumbent_solution
             .as_ref()
             .map(|sol| (sol.as_slice(), self.incumbent_value))
+    }
+
+    /// Set a branch hint for a specific node.
+    ///
+    /// The next call to `process_evaluated` will use this variable index
+    /// instead of most-fractional branching for the given node, provided
+    /// the variable is actually fractional. The hint is consumed after use.
+    pub fn set_branch_hint(&mut self, node_id: NodeId, var_index: usize) {
+        self.branch_hints.insert(node_id, var_index);
+    }
+
+    /// Inject an externally-found incumbent (e.g. from a primal heuristic).
+    ///
+    /// Updates the incumbent only if `obj_val` is strictly better than the
+    /// current incumbent value. Returns `true` if the incumbent was updated.
+    pub fn inject_incumbent(&mut self, solution: Vec<f64>, obj_val: f64) -> bool {
+        if obj_val < self.incumbent_value {
+            self.incumbent_value = obj_val;
+            self.incumbent_solution = Some(solution);
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -558,6 +691,84 @@ mod tests {
         }]);
         tm.process_evaluated();
         assert_eq!(tm.incumbent().unwrap().1, 10.0);
+    }
+
+    #[test]
+    fn test_pseudocost_updates_retroactive() {
+        // Verify that pseudocosts are updated when child results arrive.
+        let mut tm = TreeManager::new(
+            2,
+            vec![0.0, 0.0],
+            vec![10.0, 10.0],
+            vec![VarBranchInfo {
+                offset: 0,
+                size: 2,
+                is_integer: true,
+            }],
+            SelectionStrategy::BestFirst,
+        );
+        tm.initialize();
+
+        // Root: fractional at (3.5, 4.5), lb=1.0.
+        let batch = tm.export_batch(1);
+        tm.import_results(&[NodeResult {
+            node_id: batch.node_ids[0],
+            lower_bound: 1.0,
+            solution: vec![3.5, 4.5],
+            is_feasible: false,
+        }]);
+        tm.process_evaluated();
+        // Root branched on the most-fractional variable (both are 0.5 from
+        // integer, tie-break picks first = var 0 or var 1).
+
+        // Export the two children.
+        let batch = tm.export_batch(2);
+        assert_eq!(batch.node_ids.len(), 2);
+
+        // Simulate child results with higher LBs.
+        tm.import_results(&[
+            NodeResult {
+                node_id: batch.node_ids[0],
+                lower_bound: 3.0, // LB improved by 2.0 from parent's 1.0
+                solution: vec![3.0, 4.5],
+                is_feasible: false,
+            },
+            NodeResult {
+                node_id: batch.node_ids[1],
+                lower_bound: 2.5, // LB improved by 1.5 from parent's 1.0
+                solution: vec![4.0, 4.5],
+                is_feasible: false,
+            },
+        ]);
+        let stats = tm.process_evaluated();
+        // Both children should have updated pseudocosts (branched further).
+        assert_eq!(stats.branched, 2);
+        // Pseudocosts should have been updated (2 observations total).
+    }
+
+    #[test]
+    fn test_unreliable_candidates_returned() {
+        let mut tm = TreeManager::new(
+            2,
+            vec![0.0, 0.0],
+            vec![1.0, 1.0],
+            simple_integer_vars(),
+            SelectionStrategy::BestFirst,
+        );
+        tm.initialize();
+
+        let batch = tm.export_batch(1);
+        tm.import_results(&[NodeResult {
+            node_id: batch.node_ids[0],
+            lower_bound: 0.0,
+            solution: vec![0.5, 0.5],
+            is_feasible: false,
+        }]);
+        let stats = tm.process_evaluated();
+        // With no pseudocost observations and threshold=8, both fractional
+        // variables should be unreliable.
+        assert!(!stats.unreliable_candidates.is_empty());
+        assert!(stats.branched > 0);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use discopt_core::bnb::{NodeResult, SelectionStrategy, TreeManager, VarBranchInfo};
+use discopt_core::bnb::{NodeId, NodeResult, SelectionStrategy, TreeManager, VarBranchInfo};
 
 /// Python wrapper around the Rust TreeManager for B&B search.
 #[pyclass]
@@ -203,7 +203,8 @@ impl PyTreeManager {
 
     /// Process all evaluated nodes: prune, check integrality, branch.
     ///
-    /// Returns a dict with {pruned, fathomed, branched, incumbent_updates}.
+    /// Returns a dict with {pruned, fathomed, branched, incumbent_updates,
+    /// unreliable_candidates}.
     fn process_evaluated<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let stats = self.inner.process_evaluated();
         let dict = PyDict::new(py);
@@ -211,6 +212,15 @@ impl PyTreeManager {
         dict.set_item("fathomed", stats.fathomed)?;
         dict.set_item("branched", stats.branched)?;
         dict.set_item("incumbent_updates", stats.incumbent_updates)?;
+        let unreliable: Vec<i64> = stats
+            .unreliable_candidates
+            .iter()
+            .map(|&x| x as i64)
+            .collect();
+        dict.set_item(
+            "unreliable_candidates",
+            PyArray1::from_vec(py, unreliable),
+        )?;
         Ok(dict)
     }
 
@@ -249,6 +259,40 @@ impl PyTreeManager {
             let arr = PyArray1::from_vec(py, sol.to_vec());
             (arr, val)
         })
+    }
+
+    /// Inject an externally-found incumbent (e.g. from a primal heuristic).
+    ///
+    /// Updates the incumbent only if obj_val improves on the current best.
+    /// Returns True if the incumbent was updated.
+    fn inject_incumbent(
+        &mut self,
+        solution: PyReadonlyArray1<f64>,
+        obj_val: f64,
+    ) -> bool {
+        let sol_vec = solution.as_slice().unwrap().to_vec();
+        self.inner.inject_incumbent(sol_vec, obj_val)
+    }
+
+    /// Set a branch hint for the next branching decision.
+    ///
+    /// When set, process_evaluated() will branch on the hinted variable
+    /// index instead of using most-fractional branching. The hint is
+    /// consumed after use (one-shot).
+    fn set_branch_hints(
+        &mut self,
+        node_ids: PyReadonlyArray1<i64>,
+        var_indices: PyReadonlyArray1<i64>,
+    ) -> PyResult<()> {
+        let ids = node_ids.as_slice().unwrap();
+        let vars = var_indices.as_slice().unwrap();
+        for (&nid, &vid) in ids.iter().zip(vars.iter()) {
+            self.inner.set_branch_hint(
+                NodeId(nid as usize),
+                vid as usize,
+            );
+        }
+        Ok(())
     }
 
 }

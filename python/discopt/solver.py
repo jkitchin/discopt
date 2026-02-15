@@ -524,9 +524,12 @@ def solve_model(
         Falls back to standard McCormick for unsupported operations.
     mccormick_bounds : str, default "none"
         McCormick relaxation lower-bounding strategy:
-        ``"nlp"`` solves a convex NLP over the relaxation (valid bounds),
+        ``"auto"`` selects ``"nlp"`` when a JAX objective is
+        available, ``"none"`` otherwise,
+        ``"nlp"`` solves a convex NLP over the McCormick relaxation
+        (gives valid lower bounds for pruning),
         ``"midpoint"`` evaluates the convex underestimator at midpoint
-        (heuristic, not a valid global lower bound),
+        (heuristic, not a valid global lower bound — use with caution),
         ``"none"`` disables (default).
 
     Returns
@@ -685,10 +688,55 @@ def solve_model(
         _constraint_senses = [c.sense for c in model._constraints if isinstance(c, Constraint)]
 
     # OA cuts are tangent hyperplanes — only globally valid for convex
-    # constraints.  The general MINLP B&B loop handles non-convex problems
-    # (LP/QP/MILP/MIQP are dispatched above), so disable OA here and rely
-    # on RLT cuts which are always valid for bilinear terms.
+    # constraints. Enable OA selectively for constraints detected as
+    # affine (linear body), which are always convex regardless of the
+    # overall problem structure.
     _oa_enabled = False
+    _convex_constraint_mask = None
+    if cutting_planes and model._constraints:
+        from discopt.modeling.core import BinaryOp, Constant, UnaryOp, Variable
+
+        def _is_affine(expr) -> bool:
+            """Check if an expression is affine (linear + constant)."""
+            if expr is None:
+                return True
+            if isinstance(expr, (int, float)):
+                return True
+            if isinstance(expr, Constant):
+                return True
+            if isinstance(expr, Variable):
+                return True  # Variable is affine
+            if isinstance(expr, BinaryOp):
+                if expr.op in ("+", "-"):
+                    return _is_affine(expr.left) and _is_affine(expr.right)
+                if expr.op == "*":
+                    # linear * const or const * linear
+                    l_const = isinstance(expr.left, (int, float, Constant))
+                    r_const = isinstance(expr.right, (int, float, Constant))
+                    if l_const:
+                        return _is_affine(expr.right)
+                    if r_const:
+                        return _is_affine(expr.left)
+                    return False
+                if expr.op == "/":
+                    # x / const is affine
+                    return isinstance(expr.right, (int, float, Constant)) and _is_affine(expr.left)
+                return False
+            if isinstance(expr, UnaryOp):
+                if expr.op == "neg":
+                    return _is_affine(expr.operand)
+                return False
+            return False
+
+        mask = []
+        for c in model._constraints:
+            if isinstance(c, Constraint):
+                mask.append(_is_affine(c.body))
+            else:
+                mask.append(False)
+        if any(mask):
+            _oa_enabled = True
+            _convex_constraint_mask = mask
 
     # --- Default Ipopt options ---
     opts = dict(ipopt_options) if ipopt_options else {}
@@ -723,7 +771,10 @@ def solve_model(
 
     if _mc_mode == "auto":
         if model._objective is not None:
-            _mc_mode = "midpoint"
+            # "nlp" mode solves a convex relaxation NLP for valid lower bounds.
+            # "midpoint" is a heuristic (not a valid bound) and can cause
+            # incorrect pruning — do not use it for bound tightening.
+            _mc_mode = "nlp"
         else:
             _mc_mode = "none"
 
@@ -764,6 +815,10 @@ def solve_model(
             logger.debug("McCormick relaxation setup failed: %s", e)
             _mc_obj_eval = None
             _mc_obj_relax_fn = None
+
+    # --- Feasibility pump at root ---
+    # Try to find an integer-feasible incumbent before B&B starts.
+    _fp_ran = False
 
     # --- B&B loop ---
     iteration = 0
@@ -972,21 +1027,29 @@ def solve_model(
                     result_feas[i] = False
         jax_time += time.perf_counter() - t_jax_start
 
-        # --- Optional GNN branching scoring (advisory) ---
-        # GNN computes variable scores at each node. Currently advisory
-        # only: actual branching is done by Rust's most-fractional policy
-        # inside process_evaluated(). Full GNN-driven branching requires
-        # extending the Rust TreeManager with a set_branch_variable() method.
+        # --- Optional GNN branching scoring ---
+        # GNN computes variable scores and passes hints to Rust TreeManager,
+        # which uses them instead of most-fractional branching.
         if branching_policy == "gnn":
             from discopt._jax.gnn_policy import select_branch_variable_gnn
             from discopt._jax.problem_graph import build_graph
 
+            hint_node_ids = []
+            hint_var_indices = []
             for i in range(n_batch):
                 if result_lbs[i] < _SENTINEL_THRESHOLD:
                     node_lb_i = np.array(batch_lb[i])
                     node_ub_i = np.array(batch_ub[i])
                     graph = build_graph(model, result_sols[i], node_lb_i, node_ub_i)
-                    select_branch_variable_gnn(graph, params=None)
+                    var_idx = select_branch_variable_gnn(graph, params=None)
+                    if var_idx is not None:
+                        hint_node_ids.append(int(batch_ids[i]))
+                        hint_var_indices.append(var_idx)
+            if hint_node_ids:
+                tree.set_branch_hints(
+                    np.array(hint_node_ids, dtype=np.int64),
+                    np.array(hint_var_indices, dtype=np.int64),
+                )
 
         # --- Optional cut generation (OA + RLT + lift-and-project) ---
         if cutting_planes and _generate_cuts is not None and _cut_pool is not None:
@@ -1003,11 +1066,35 @@ def solve_model(
                         constraint_senses=_constraint_senses,
                         bilinear_terms=_bilinear_terms,
                         oa_enabled=_oa_enabled,
+                        convex_constraint_mask=_convex_constraint_mask,
                     )
                     _cut_pool.add_many(new_cuts)
                     # Age and purge stale cuts
                     _cut_pool.age_cuts(result_sols[i])
             _cut_pool.purge_inactive(max_age=15)
+
+        # --- Feasibility pump after root node ---
+        if iteration == 0 and not _fp_ran:
+            _fp_ran = True
+            # Find the best relaxation solution from this batch
+            best_root_idx = None
+            best_root_obj = np.inf
+            for i in range(n_batch):
+                if result_lbs[i] < _SENTINEL_THRESHOLD and result_lbs[i] < best_root_obj:
+                    best_root_obj = result_lbs[i]
+                    best_root_idx = i
+            if best_root_idx is not None:
+                try:
+                    from discopt._jax.primal_heuristics import feasibility_pump
+
+                    fp_sol = feasibility_pump(model, result_sols[best_root_idx], max_rounds=5)
+                    if fp_sol is not None:
+                        fp_obj = float(evaluator.evaluate_objective(fp_sol))
+                        if np.isfinite(fp_obj) and fp_obj < _SENTINEL_THRESHOLD:
+                            tree.inject_incumbent(fp_sol, fp_obj)
+                            logger.info("Feasibility pump found incumbent: obj=%.6g", fp_obj)
+                except Exception as e:
+                    logger.debug("Feasibility pump failed: %s", e)
 
         # Import results back to Rust tree
         t_rust_start = time.perf_counter()
