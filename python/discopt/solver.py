@@ -822,56 +822,25 @@ def solve_model(
         _cut_pool = CutPool(max_cuts=500)
         _constraint_senses = [c.sense for c in model._constraints if isinstance(c, Constraint)]
 
-    # OA cuts are tangent hyperplanes — only globally valid for convex
-    # constraints. Enable OA selectively for constraints detected as
-    # affine (linear body), which are always convex regardless of the
-    # overall problem structure.
+    # --- Convexity detection (Phase E) ---
+    # Use the expression DAG convexity detector to:
+    # (E2) Skip relaxation overhead for fully convex subproblems
+    # (E3) Enable OA cuts per-constraint (not just for affine constraints)
+    _model_is_convex = False
     _oa_enabled = False
     _convex_constraint_mask = None
-    if cutting_planes and model._constraints:
-        from discopt.modeling.core import BinaryOp, Constant, UnaryOp, Variable
+    try:
+        from discopt._jax.convexity import classify_model as _classify_model
 
-        def _is_affine(expr) -> bool:
-            """Check if an expression is affine (linear + constant)."""
-            if expr is None:
-                return True
-            if isinstance(expr, (int, float)):
-                return True
-            if isinstance(expr, Constant):
-                return True
-            if isinstance(expr, Variable):
-                return True  # Variable is affine
-            if isinstance(expr, BinaryOp):
-                if expr.op in ("+", "-"):
-                    return _is_affine(expr.left) and _is_affine(expr.right)
-                if expr.op == "*":
-                    # linear * const or const * linear
-                    l_const = isinstance(expr.left, (int, float, Constant))
-                    r_const = isinstance(expr.right, (int, float, Constant))
-                    if l_const:
-                        return _is_affine(expr.right)
-                    if r_const:
-                        return _is_affine(expr.left)
-                    return False
-                if expr.op == "/":
-                    # x / const is affine
-                    return isinstance(expr.right, (int, float, Constant)) and _is_affine(expr.left)
-                return False
-            if isinstance(expr, UnaryOp):
-                if expr.op == "neg":
-                    return _is_affine(expr.operand)
-                return False
-            return False
-
-        mask = []
-        for c in model._constraints:
-            if isinstance(c, Constraint):
-                mask.append(_is_affine(c.body))
-            else:
-                mask.append(False)
-        if any(mask):
+        _model_is_convex, _convex_constraint_mask = _classify_model(model)
+        if _model_is_convex:
+            logger.info("Model detected as convex — NLP solutions are valid lower bounds")
+        if cutting_planes and any(_convex_constraint_mask):
             _oa_enabled = True
-            _convex_constraint_mask = mask
+    except Exception as exc:
+        logger.debug("Convexity detection failed: %s", exc)
+        if cutting_planes and model._constraints:
+            _convex_constraint_mask = [False] * len(model._constraints)
 
     # --- Default Ipopt options ---
     opts = dict(ipopt_options) if ipopt_options else {}
@@ -883,9 +852,10 @@ def solve_model(
     _augmented_evaluator = None
 
     # --- AlphaBB convexification for nonconvex models ---
+    # (E2) Skip alphaBB entirely for convex models — NLP gives valid bounds.
     _alphabb_alpha = None
     _use_alphabb = False
-    if n_vars <= 50:
+    if n_vars <= 50 and not _model_is_convex:
         if hasattr(evaluator, "_obj_fn"):
             # JAX-native path: uses jax.hessian + jax.vmap (10-100x faster)
             try:
@@ -905,7 +875,11 @@ def solve_model(
     _mc_mode = mccormick_bounds
 
     if _mc_mode == "auto":
-        if model._objective is not None:
+        if _model_is_convex:
+            # (E2) For convex models, NLP relaxation already gives valid
+            # lower bounds — no need for McCormick relaxation overhead.
+            _mc_mode = "none"
+        elif model._objective is not None:
             # "nlp" mode solves a convex relaxation NLP for valid lower bounds.
             # "midpoint" is a heuristic (not a valid bound) and can cause
             # incorrect pruning — do not use it for bound tightening.
