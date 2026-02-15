@@ -225,6 +225,110 @@ def _extract_linear_constraints(
     return A_ub, b_ub, A_eq, b_eq, n_vars
 
 
+def _extract_linear_objective(
+    model: Model,
+    n_vars: int,
+) -> Optional[np.ndarray]:
+    """Extract linear objective coefficients, or None if nonlinear."""
+    if model._objective is None:
+        return None
+    from discopt.modeling.core import (
+        BinaryOp,
+        Constant,
+        Expression,
+        IndexExpression,
+        Parameter,
+        SumExpression,
+        SumOverExpression,
+        UnaryOp,
+        Variable,
+    )
+
+    def _compute_var_offset(var: Variable) -> int:
+        offset = 0
+        for v in model._variables[: var._index]:
+            offset += v.size
+        return offset
+
+    def _extract(expr: Expression) -> Optional[tuple[dict[int, float], float]]:
+        if isinstance(expr, Constant):
+            return {}, float(np.sum(expr.value))
+        if isinstance(expr, Variable):
+            offset = _compute_var_offset(expr)
+            if expr.size == 1:
+                return {offset: 1.0}, 0.0
+            return None
+        if isinstance(expr, Parameter):
+            return {}, float(np.sum(expr.value))
+        if isinstance(expr, BinaryOp):
+            if expr.op == "+":
+                le = _extract(expr.left)
+                ri = _extract(expr.right)
+                if le is None or ri is None:
+                    return None
+                merged = dict(le[0])
+                for k, v in ri[0].items():
+                    merged[k] = merged.get(k, 0.0) + v
+                return merged, le[1] + ri[1]
+            if expr.op == "-":
+                le = _extract(expr.left)
+                ri = _extract(expr.right)
+                if le is None or ri is None:
+                    return None
+                merged = dict(le[0])
+                for k, v in ri[0].items():
+                    merged[k] = merged.get(k, 0.0) - v
+                return merged, le[1] - ri[1]
+            if expr.op == "*":
+                le = _extract(expr.left)
+                ri = _extract(expr.right)
+                if le is None or ri is None:
+                    return None
+                if not le[0]:
+                    return {k: v * le[1] for k, v in ri[0].items()}, le[1] * ri[1]
+                if not ri[0]:
+                    return {k: v * ri[1] for k, v in le[0].items()}, le[1] * ri[1]
+                return None
+            return None
+        if isinstance(expr, UnaryOp) and expr.op == "neg":
+            inner = _extract(expr.operand)
+            if inner is None:
+                return None
+            return {k: -v for k, v in inner[0].items()}, -inner[1]
+        if isinstance(expr, IndexExpression) and isinstance(expr.base, Variable):
+            base_offset = _compute_var_offset(expr.base)
+            idx = expr.index
+            if isinstance(idx, int):
+                return {base_offset + idx: 1.0}, 0.0
+            if isinstance(idx, tuple) and len(idx) == 1:
+                return {base_offset + idx[0]: 1.0}, 0.0
+            return None
+        if isinstance(expr, SumExpression):
+            return _extract(expr.operand)
+        if isinstance(expr, SumOverExpression):
+            merged: dict[int, float] = {}
+            total = 0.0
+            for t in expr.terms:
+                r = _extract(t)
+                if r is None:
+                    return None
+                total += r[1]
+                for k, v in r[0].items():
+                    merged[k] = merged.get(k, 0.0) + v
+            return merged, total
+        return None
+
+    result = _extract(model._objective.expression)
+    if result is None:
+        return None
+    coeffs, _offset = result
+    c = np.zeros(n_vars, dtype=np.float64)
+    for idx, coeff in coeffs.items():
+        if idx < n_vars:
+            c[idx] = coeff
+    return c
+
+
 def _get_var_bounds(
     model: Model,
 ) -> tuple[np.ndarray, np.ndarray]:
@@ -245,6 +349,7 @@ def run_obbt(
     ub: Optional[np.ndarray] = None,
     min_width: float = 1e-6,
     time_limit_per_lp: Optional[float] = None,
+    incumbent_cutoff: Optional[float] = None,
 ) -> ObbtResult:
     """Run OBBT to tighten variable bounds.
 
@@ -252,12 +357,20 @@ def run_obbt(
     (min and max) subject to the model's linear constraints to find
     the tightest possible bounds.
 
+    When ``incumbent_cutoff`` is provided, the constraint ``f(x) <= z*``
+    is added (using the objective's linear coefficients), which can
+    dramatically tighten bounds by excluding regions that cannot improve
+    on the incumbent.
+
     Args:
         model: The optimization model.
         lb: Initial lower bounds. If None, uses model variable bounds.
         ub: Initial upper bounds. If None, uses model variable bounds.
         min_width: Skip variables whose bound width is below this threshold.
         time_limit_per_lp: Time limit per LP solve in seconds.
+        incumbent_cutoff: If provided, adds ``c'x <= incumbent_cutoff``
+            as an additional inequality constraint (using linear objective
+            coefficients). Only effective when the objective is linear.
 
     Returns:
         ObbtResult with tightened bounds and statistics.
@@ -274,6 +387,27 @@ def run_obbt(
 
     n_vars = len(lb)
     A_ub, b_ub, A_eq, b_eq, _ = _extract_linear_constraints(model)
+
+    # --- Add incumbent cutoff constraint: c'x <= z* ---
+    if incumbent_cutoff is not None and model._objective is not None:
+        from discopt.modeling.core import ObjectiveSense
+
+        obj_coeffs = _extract_linear_objective(model, n_vars)
+        if obj_coeffs is not None:
+            # For maximization, negate: max c'x equiv min -c'x,
+            # so c'x >= z* becomes -c'x <= -z*
+            if model._objective.sense == ObjectiveSense.MAXIMIZE:
+                cutoff_row = -obj_coeffs.reshape(1, -1)
+                cutoff_rhs = np.array([-incumbent_cutoff])
+            else:
+                cutoff_row = obj_coeffs.reshape(1, -1)
+                cutoff_rhs = np.array([incumbent_cutoff])
+            if A_ub is not None and b_ub is not None:
+                A_ub = np.vstack([A_ub, cutoff_row])
+                b_ub = np.concatenate([b_ub, cutoff_rhs])
+            else:
+                A_ub = cutoff_row
+                b_ub = cutoff_rhs
 
     if A_ub is None and A_eq is None:
         return ObbtResult(

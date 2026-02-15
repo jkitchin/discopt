@@ -1276,8 +1276,37 @@ def solve_model(
         # Import results back to Rust tree
         t_rust_start = time.perf_counter()
         tree.import_results(result_ids, result_lbs, result_sols, result_feas)
-        tree.process_evaluated()
+        proc_stats = tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
+
+        # --- Periodic OBBT with incumbent cutoff (Phase C) ---
+        # When a new incumbent is found and bounds are still wide,
+        # re-run OBBT with the incumbent objective as a cutoff.
+        if proc_stats["incumbent_updates"] > 0 and n_vars <= 200:
+            incumbent_info = tree.incumbent()
+            if incumbent_info is not None:
+                inc_sol, inc_obj = incumbent_info
+                if inc_obj < _SENTINEL_THRESHOLD:
+                    try:
+                        from discopt._jax.obbt import run_obbt
+
+                        obbt_result = run_obbt(
+                            model,
+                            lb=np.array(lb),
+                            ub=np.array(ub),
+                            incumbent_cutoff=float(inc_obj),
+                            time_limit_per_lp=0.1,
+                        )
+                        if obbt_result.n_tightened > 0:
+                            lb = obbt_result.tightened_lb
+                            ub = obbt_result.tightened_ub
+                            logger.info(
+                                "OBBT tightened %d bounds (incumbent=%.6g)",
+                                obbt_result.n_tightened,
+                                inc_obj,
+                            )
+                    except Exception as e:
+                        logger.debug("Periodic OBBT failed: %s", e)
 
         iteration += 1
 

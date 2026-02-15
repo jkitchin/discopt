@@ -2,7 +2,8 @@
 Convex Envelopes for Composite Operations.
 
 Provides relaxation functions for trilinear products (x*y*z), fractional
-expressions (x/y), and signomial terms (x^a for non-integer a).
+expressions (x/y), signomial terms (x^a for non-integer a), and
+specialized tight envelopes for exp, log, and power functions.
 
 All functions return (cv, cc) tuples where cv <= f(x) <= cc, are pure JAX,
 and are compatible with jax.jit, jax.grad, and jax.vmap.
@@ -135,5 +136,164 @@ def relax_signomial(x, lb, ub, a):
 
     cv = jnp.where(is_concave, concave_cv, convex_cv)
     cc = jnp.where(is_concave, concave_cc, convex_cc)
+
+    return cv, cc
+
+
+# ---------------------------------------------------------------------------
+# Tight envelopes for exp(x), log(x) — exact convex/concave envelopes
+# ---------------------------------------------------------------------------
+
+
+def relax_exp_tight(x, lb, ub):
+    """Tight convex envelope for exp(x) on [lb, ub].
+
+    exp is globally convex, so cv = exp(x) (exact). The concave
+    overestimator is the secant through (lb, exp(lb)) and (ub, exp(ub)).
+
+    This is equivalent to the standard McCormick relaxation for exp,
+    but provided here for consistency with the envelope API.
+
+    Returns (cv, cc).
+    """
+    cv = jnp.exp(x)
+    cc = _secant(jnp.exp, x, lb, ub)
+    return cv, cc
+
+
+def relax_log_tight(x, lb, ub):
+    """Tight concave envelope for log(x) on [lb, ub] (lb > 0).
+
+    log is globally concave, so cc = log(x) (exact). The convex
+    underestimator is the secant through (lb, log(lb)) and (ub, log(ub)).
+
+    Returns (cv, cc).
+    """
+    cc = jnp.log(x)
+    cv = _secant(jnp.log, x, lb, ub)
+    return cv, cc
+
+
+# ---------------------------------------------------------------------------
+# Integer power envelopes: x^p for integer p
+# ---------------------------------------------------------------------------
+
+
+def relax_power_int(x, lb, ub, p):
+    """Tight envelope for x^p where p is a positive integer on [lb, ub].
+
+    - p even: x^p is convex on all of R.
+      cv = x^p, cc = secant.
+    - p odd, lb >= 0: x^p is convex.
+      cv = x^p, cc = secant.
+    - p odd, ub <= 0: x^p is concave.
+      cv = secant, cc = x^p.
+    - p odd, lb < 0 < ub: x^p is convex-concave (inflection at 0).
+      cv = tangent at lb for x<0, function for x>=0, clamped by secant.
+      cc = tangent at ub for x>0, function for x<=0, clamped by secant.
+
+    Args:
+        x: point value
+        lb: lower bound
+        ub: upper bound
+        p: positive integer exponent
+
+    Returns:
+        (cv, cc) where cv <= x^p <= cc
+    """
+
+    def f(t):
+        return t**p
+
+    f_val = f(x)
+    sec_val = _secant(f, x, lb, ub)
+
+    # Even power: always convex
+    even_cv = f_val
+    even_cc = sec_val
+
+    # Odd power, lb >= 0: convex
+    odd_pos_cv = f_val
+    odd_pos_cc = sec_val
+
+    # Odd power, ub <= 0: concave
+    odd_neg_cv = sec_val
+    odd_neg_cc = f_val
+
+    # Odd power, mixed sign: tangent line underestimator from lb
+    # For convex-concave with inflection at 0:
+    # Tangent at lb: f'(lb) = p * lb^(p-1), tangent: f(lb) + f'(lb)(x - lb)
+    # Tangent at ub: f'(ub) = p * ub^(p-1), tangent: f(ub) + f'(ub)(x - ub)
+    f_lb = lb**p
+    f_ub = ub**p
+    fp_lb = p * lb ** (p - 1)
+    fp_ub = p * ub ** (p - 1)
+
+    tangent_lb = f_lb + fp_lb * (x - lb)
+    tangent_ub = f_ub + fp_ub * (x - ub)
+
+    # cv: max(tangent_at_lb, secant) for x < 0, f(x) for x >= 0
+    odd_mixed_cv = jnp.where(x >= 0, f_val, jnp.maximum(tangent_lb, sec_val))
+    odd_mixed_cv = jnp.minimum(odd_mixed_cv, f_val)  # must be <= f(x)
+    # cc: min(tangent_at_ub, secant) for x > 0, f(x) for x <= 0
+    odd_mixed_cc = jnp.where(x <= 0, f_val, jnp.minimum(tangent_ub, sec_val))
+    odd_mixed_cc = jnp.maximum(odd_mixed_cc, f_val)  # must be >= f(x)
+
+    is_even = (p % 2) == 0
+    is_pos = lb >= 0
+    is_neg = ub <= 0
+
+    cv = jnp.where(
+        is_even,
+        even_cv,
+        jnp.where(is_pos, odd_pos_cv, jnp.where(is_neg, odd_neg_cv, odd_mixed_cv)),
+    )
+    cc = jnp.where(
+        is_even,
+        even_cc,
+        jnp.where(is_pos, odd_pos_cc, jnp.where(is_neg, odd_neg_cc, odd_mixed_cc)),
+    )
+
+    return cv, cc
+
+
+# ---------------------------------------------------------------------------
+# Exp-log compositions
+# ---------------------------------------------------------------------------
+
+
+def relax_exp_bilinear(x, y, x_lb, x_ub, y_lb, y_ub):
+    """Relaxation of exp(x) * y via composition.
+
+    Decomposes as bilinear(exp(x), y) where exp(x) bounds are computed
+    from x bounds.
+
+    Returns (cv, cc).
+    """
+    exp_x = jnp.exp(x)
+    exp_lb = jnp.exp(x_lb)
+    exp_ub = jnp.exp(x_ub)
+    return relax_bilinear(exp_x, y, exp_lb, exp_ub, y_lb, y_ub)
+
+
+def relax_log_sum(x, y, x_lb, x_ub, y_lb, y_ub):
+    """Relaxation of log(x + y) on [x_lb, x_ub] x [y_lb, y_ub].
+
+    log(x+y) is concave in (x, y) jointly, so cc = log(x+y) and
+    cv = secant plane (linearization).
+
+    Uses the gradient-based secant: cv = log(x0+y0) + (1/(x0+y0))*(x+y-x0-y0)
+    evaluated at the midpoint of the bounds.
+
+    Returns (cv, cc).
+    """
+    s = x + y
+    s_lb = x_lb + y_lb
+    s_ub = x_ub + y_ub
+    # Ensure positive domain
+    s_lb = jnp.maximum(s_lb, 1e-30)
+
+    cc = jnp.log(jnp.maximum(s, 1e-30))
+    cv = _secant(lambda t: jnp.log(jnp.maximum(t, 1e-30)), s, s_lb, s_ub)
 
     return cv, cc

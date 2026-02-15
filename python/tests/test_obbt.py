@@ -420,3 +420,69 @@ class TestObbtEdgeCases:
 
         result = run_obbt(m)
         assert np.isclose(result.tightened_ub[0], 10.0, atol=1e-6)
+
+
+# ─────────────────────────────────────────────────────────────
+# Test 9: Incumbent cutoff (Phase C)
+# ─────────────────────────────────────────────────────────────
+
+
+class TestObbtIncumbentCutoff:
+    def test_cutoff_tightens_bounds(self):
+        """Incumbent cutoff should tighten bounds beyond standard OBBT."""
+        m = Model("cutoff")
+        x = m.continuous("x", lb=0, ub=100)
+        y = m.continuous("y", lb=0, ub=100)
+        m.minimize(x + y)
+        m.subject_to(x + y >= 5)
+
+        # Without cutoff: x in [0, 100], y in [0, 100]
+        r1 = run_obbt(m)
+        # With cutoff z*=20: x+y <= 20
+        r2 = run_obbt(m, incumbent_cutoff=20.0)
+
+        # With cutoff, ub should be tightened
+        assert r2.tightened_ub[0] <= 20.0 + 1e-6
+        assert r2.tightened_ub[1] <= 20.0 + 1e-6
+        # More tightened than without cutoff
+        assert r2.n_tightened >= r1.n_tightened
+
+    def test_cutoff_preserves_soundness(self):
+        """Cutoff-tightened bounds must contain all points with obj <= z*."""
+        m = Model("sound")
+        x = m.continuous("x", lb=0, ub=50)
+        y = m.continuous("y", lb=0, ub=50)
+        m.minimize(2 * x + 3 * y)
+        m.subject_to(x + y <= 30)
+        m.subject_to(x >= 5)
+
+        cutoff = 40.0  # 2x + 3y <= 40
+        result = run_obbt(m, incumbent_cutoff=cutoff)
+
+        # All feasible points with obj <= 40 must be inside bounds
+        # x=5, y=10 -> obj=40 (boundary)
+        assert 5.0 >= result.tightened_lb[0] - 1e-6
+        assert 10.0 <= result.tightened_ub[1] + 1e-6
+
+    def test_cutoff_no_effect_when_loose(self):
+        """A very loose cutoff should not affect bounds."""
+        m = Model("loose")
+        x = m.continuous("x", lb=0, ub=10)
+        m.minimize(x)
+        m.subject_to(x <= 5)
+
+        r_no = run_obbt(m)
+        r_yes = run_obbt(m, incumbent_cutoff=1000.0)
+
+        np.testing.assert_allclose(r_no.tightened_ub, r_yes.tightened_ub, atol=1e-6)
+
+    def test_cutoff_nonlinear_objective_ignored(self):
+        """Nonlinear objectives should be gracefully skipped."""
+        m = Model("nonlin")
+        x = m.continuous("x", lb=0, ub=10)
+        m.minimize(x**2)
+        m.subject_to(x <= 5)
+
+        # Should not crash, just skip cutoff
+        result = run_obbt(m, incumbent_cutoff=25.0)
+        assert result.tightened_ub[0] <= 5.0 + 1e-6

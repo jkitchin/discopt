@@ -1003,3 +1003,97 @@ class TestRootGapReduction:
         assert reduction > 0.3, (
             f"bilinear gap reduction only {float(reduction):.1%}, expected > 30%"
         )
+
+
+# ===================================================================
+# Phase D: Specialized envelope tests
+# ===================================================================
+
+
+class TestPowerIntEnvelope:
+    """Tests for relax_power_int from envelopes.py."""
+
+    def test_even_power_convex(self):
+        """x^2 is convex — cv = x^2, cc >= x^2."""
+        from discopt._jax.envelopes import relax_power_int
+
+        x = jnp.linspace(-2.0, 2.0, 20)
+        cv, cc = jax.vmap(lambda xi: relax_power_int(xi, -2.0, 2.0, 2))(x)
+        true_val = x**2
+        assert jnp.all(cv <= true_val + 1e-10)
+        assert jnp.all(cc >= true_val - 1e-10)
+
+    def test_odd_power_positive(self):
+        """x^3 on [1, 5] — convex region."""
+        from discopt._jax.envelopes import relax_power_int
+
+        x = jnp.linspace(1.0, 5.0, 20)
+        cv, cc = jax.vmap(lambda xi: relax_power_int(xi, 1.0, 5.0, 3))(x)
+        true_val = x**3
+        assert jnp.all(cv <= true_val + 1e-10)
+        assert jnp.all(cc >= true_val - 1e-10)
+
+    def test_odd_power_negative(self):
+        """x^3 on [-5, -1] — concave region."""
+        from discopt._jax.envelopes import relax_power_int
+
+        x = jnp.linspace(-5.0, -1.0, 20)
+        cv, cc = jax.vmap(lambda xi: relax_power_int(xi, -5.0, -1.0, 3))(x)
+        true_val = x**3
+        assert jnp.all(cv <= true_val + 1e-10)
+        assert jnp.all(cc >= true_val - 1e-10)
+
+    def test_odd_power_mixed(self):
+        """x^3 on [-2, 3] — mixed convex/concave."""
+        from discopt._jax.envelopes import relax_power_int
+
+        x = jnp.linspace(-2.0, 3.0, 50)
+        cv, cc = jax.vmap(lambda xi: relax_power_int(xi, -2.0, 3.0, 3))(x)
+        true_val = x**3
+        assert jnp.all(cv <= true_val + 1e-8)
+        assert jnp.all(cc >= true_val - 1e-8)
+
+    def test_x4_convex(self):
+        """x^4 on [-3, 3] — even, always convex."""
+        from discopt._jax.envelopes import relax_power_int
+
+        x = jnp.linspace(-3.0, 3.0, 30)
+        cv, cc = jax.vmap(lambda xi: relax_power_int(xi, -3.0, 3.0, 4))(x)
+        true_val = x**4
+        assert jnp.all(cv <= true_val + 1e-8)
+        assert jnp.all(cc >= true_val - 1e-8)
+
+    def test_jit_compatible(self):
+        from discopt._jax.envelopes import relax_power_int
+
+        f = jax.jit(lambda x: relax_power_int(x, -2.0, 2.0, 3))
+        cv, cc = f(jnp.float64(1.0))
+        assert jnp.isfinite(cv) and jnp.isfinite(cc)
+
+
+class TestExpBilinearEnvelope:
+    """Tests for relax_exp_bilinear."""
+
+    def test_soundness(self):
+        from discopt._jax.envelopes import relax_exp_bilinear
+
+        x = jnp.linspace(-1.0, 2.0, 20)
+        y = jnp.linspace(0.5, 3.0, 20)
+        cv, cc = jax.vmap(lambda xi, yi: relax_exp_bilinear(xi, yi, -1.0, 2.0, 0.5, 3.0))(x, y)
+        true_val = jnp.exp(x) * y
+        assert jnp.all(cv <= true_val + 1e-8)
+        assert jnp.all(cc >= true_val - 1e-8)
+
+
+class TestLogSumEnvelope:
+    """Tests for relax_log_sum."""
+
+    def test_soundness(self):
+        from discopt._jax.envelopes import relax_log_sum
+
+        x = jnp.linspace(1.0, 5.0, 20)
+        y = jnp.linspace(1.0, 5.0, 20)
+        cv, cc = jax.vmap(lambda xi, yi: relax_log_sum(xi, yi, 1.0, 5.0, 1.0, 5.0))(x, y)
+        true_val = jnp.log(x + y)
+        assert jnp.all(cv <= true_val + 1e-8)
+        assert jnp.all(cc >= true_val - 1e-8)

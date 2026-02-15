@@ -265,12 +265,41 @@ def _compile_relax_node(
             return fn
 
         if op == "**":
-            # Integer power: use relax_pow
+            # Integer power: use tight envelope when base is a plain variable
             if _is_constant_expr(expr.right):
                 n_val = expr.right.value
                 n_int = int(n_val)
                 if np.isclose(float(n_val), float(n_int)):
+                    # Check if the base is a plain variable for tight bounds
+                    if isinstance(expr.left, (Variable, IndexExpression)):
+                        from discopt._jax.envelopes import relax_power_int
 
+                        if isinstance(expr.left, Variable) and expr.left.size == 1:
+                            vi = _compute_var_offset(expr.left, model)
+
+                            def fn(x_cv, x_cc, lb, ub, _n=n_int, _vi=vi):
+                                return relax_power_int(x_cv[_vi], lb[_vi], ub[_vi], _n)
+
+                            return fn
+                        elif isinstance(expr.left, IndexExpression):
+                            if isinstance(expr.left.base, Variable):
+                                base_off = _compute_var_offset(expr.left.base, model)
+                                idx = expr.left.index
+                                flat_idx = (
+                                    base_off + idx
+                                    if isinstance(idx, int)
+                                    else base_off + idx[0]
+                                    if isinstance(idx, tuple) and len(idx) == 1
+                                    else None
+                                )
+                                if flat_idx is not None:
+
+                                    def fn(x_cv, x_cc, lb, ub, _n=n_int, _fi=flat_idx):
+                                        return relax_power_int(x_cv[_fi], lb[_fi], ub[_fi], _n)
+
+                                    return fn
+
+                    # Fallback: compositional McCormick
                     def fn(x_cv, x_cc, lb, ub, _n=n_int):
                         cv_l, cc_l = left_fn(x_cv, x_cc, lb, ub)
                         mid = 0.5 * (cv_l + cc_l)
