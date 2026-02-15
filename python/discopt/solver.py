@@ -636,6 +636,7 @@ def solve_model(
     branching_policy: str = "fractional",
     use_learned_relaxations: bool = False,
     mccormick_bounds: str = "none",
+    gdp_method: str = "big-m",
 ) -> SolveResult:
     """
     Solve a Model via NLP-based spatial Branch & Bound.
@@ -696,6 +697,9 @@ def solve_model(
         ``"midpoint"`` evaluates the convex underestimator at midpoint
         (heuristic, not a valid global lower bound — use with caution),
         ``"none"`` disables (default).
+    gdp_method : str, default "big-m"
+        Reformulation method for disjunctive constraints:
+        ``"big-m"`` (default) or ``"hull"`` (convex hull).
 
     Returns
     -------
@@ -722,7 +726,7 @@ def solve_model(
     # --- GDP reformulation: convert indicator/disjunctive/SOS to standard MINLP ---
     from discopt._jax.gdp_reformulate import reformulate_gdp
 
-    model = reformulate_gdp(model)
+    model = reformulate_gdp(model, method=gdp_method)
 
     # --- Build Rust model representation for FBBT ---
     _model_repr = None

@@ -58,6 +58,13 @@ If no model is given, ask the user to paste their model code or provide a file p
    - `A @ x` -> $Ax$
    - `x ** 2` -> $x^2$
    - `x * y` (bilinear) -> $x \cdot y$
+   - `m.implies(y1, y2)` -> $y_1 \Rightarrow y_2$ (equivalently $y_1 \leq y_2$)
+   - `m.iff(y1, y2)` -> $y_1 \Leftrightarrow y_2$ (equivalently $y_1 = y_2$)
+   - `m.at_least(k, [y...])` -> $\sum_i y_i \geq k$
+   - `m.at_most(k, [y...])` -> $\sum_i y_i \leq k$
+   - `m.exactly(k, [y...])` -> $\sum_i y_i = k$
+   - `m.if_then(y, [...])` -> $y = 1 \Rightarrow g(x) \leq 0$ (GDP indicator)
+   - `m.either_or([[...],[...]])` -> disjunction $\bigvee_k D_k$ (GDP disjunctive)
 
 5. **Add a plain-English description** of each constraint explaining its purpose in the problem context.
 

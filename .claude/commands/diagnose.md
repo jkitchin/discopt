@@ -45,6 +45,7 @@ If no result is given, ask the user to paste their `SolveResult` output or descr
 - Suggest `branching_policy="fractional"` if not already set
 - For large gaps, the root relaxation may be weak -- recommend reformulation
 - Consider `gap_tolerance=0.01` if 1% gap is acceptable
+- If the model uses GDP constraints (if_then, either_or), suggest `gdp_method="hull"` for tighter relaxations
 
 ### If gap is large (> 10%) even with `status == "optimal"`:
 - The gap_tolerance was set too loose

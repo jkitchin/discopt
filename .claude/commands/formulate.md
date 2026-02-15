@@ -60,7 +60,13 @@ If no description is given, ask the user to describe their optimization problem.
    - Use `dm.minimum(a, b)` / `dm.maximum(a, b)` for element-wise min/max
    - Use `m.if_then(y, [constraints], name=...)` instead of manual big-M formulations
    - Use `m.either_or([[...], [...]], name=...)` for disjunctive constraints
+   - Use `m.implies(y1, y2, name=...)` for logical implication (y1=1 => y2=1)
+   - Use `m.at_least(k, [y1, y2, ...], name=...)` for cardinality lower bounds
+   - Use `m.at_most(k, [y1, y2, ...], name=...)` for cardinality upper bounds
+   - Use `m.exactly(k, [y1, y2, ...], name=...)` for exact cardinality
+   - Use `m.iff(y1, y2, name=...)` for logical equivalence (y1=1 <=> y2=1)
    - Use `m.sos1(vars)` / `m.sos2(vars)` for special ordered sets
+   - Use `m.solve(gdp_method="hull")` for tighter GDP relaxations (default is "big-m")
    - Use `m.parameter("name", value=...)` for data that may change (sensitivity analysis)
    - Use numpy arrays and `@` for matrix operations
 

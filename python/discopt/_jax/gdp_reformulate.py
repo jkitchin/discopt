@@ -32,14 +32,18 @@ from discopt.modeling.core import (
 _DEFAULT_BIG_M = 1e4
 
 
-def reformulate_gdp(model: Model) -> Model:
-    """Replace GDP constraints with standard MINLP constraints via big-M.
+def reformulate_gdp(model: Model, method: str = "big-m") -> Model:
+    """Replace GDP constraints with standard MINLP constraints.
 
     Parameters
     ----------
     model : Model
         Input model potentially containing indicator, disjunctive, or SOS
         constraints.
+    method : str, default "big-m"
+        Reformulation method for disjunctive constraints:
+        ``"big-m"`` (default) or ``"hull"`` (convex hull).
+        Indicator and SOS constraints always use big-M regardless.
 
     Returns
     -------
@@ -83,7 +87,10 @@ def reformulate_gdp(model: Model) -> Model:
             new_cons = _reformulate_indicator(c, new_model)
             new_model._constraints.extend(new_cons)
         elif isinstance(c, _DisjunctiveConstraint):
-            new_vars, new_cons = _reformulate_disjunction(c, new_model, _add_aux_binary)
+            if method == "hull":
+                new_vars, new_cons = _reformulate_disjunction_hull(c, new_model, _add_aux_binary)
+            else:
+                new_vars, new_cons = _reformulate_disjunction(c, new_model, _add_aux_binary)
             new_model._constraints.extend(new_cons)
         elif isinstance(c, _SOSConstraint):
             new_cons = _reformulate_sos(c, new_model, _add_aux_binary)
@@ -423,6 +430,457 @@ def _reformulate_disjunction(
                 )
 
     return new_vars, new_cons
+
+
+# ── Hull reformulation ──
+
+
+def _reformulate_disjunction_hull(
+    dc: _DisjunctiveConstraint,
+    model: Model,
+    add_aux_binary,
+    eps: float = 1e-8,
+) -> tuple[list[Variable], list[Constraint]]:
+    """Reformulate a disjunction via convex hull relaxation.
+
+    For each original variable x_j appearing in the disjunction, creates
+    disaggregated copies v_{j,k} for each disjunct k, with:
+
+    - Selector binaries y_k with sum(y_k) == 1
+    - Aggregation: x_j == sum_k(v_{j,k})
+    - Bound linking: dlb_k * y_k <= v_{j,k} <= dub_k * y_k
+    - Linear constraints: substitute x -> v_k, multiply RHS by y_k
+    - Nonlinear constraints: perspective form with clamped y_k
+
+    Parameters
+    ----------
+    dc : _DisjunctiveConstraint
+        The disjunction to reformulate.
+    model : Model
+        Model with variable bound information.
+    add_aux_binary : callable
+        Factory for creating auxiliary binary variables.
+    eps : float
+        Small positive constant for clamping y_k in perspective functions.
+
+    Returns
+    -------
+    tuple of (list[Variable], list[Constraint])
+        New variables and constraints.
+    """
+    n_disjuncts = len(dc.disjuncts)
+    new_vars: list[Variable] = []
+    new_cons: list[Constraint] = []
+    prefix = dc.name or "anon"
+
+    # --- Selector binaries y_k with sum == 1 ---
+    selectors: list[Variable] = []
+    for k in range(n_disjuncts):
+        y_k = add_aux_binary(f"hull_{prefix}_{k}")
+        selectors.append(y_k)
+        new_vars.append(y_k)
+
+    if n_disjuncts == 1:
+        sum_sel = selectors[0]
+    else:
+        sum_sel = selectors[0]
+        for k in range(1, n_disjuncts):
+            sum_sel = sum_sel + selectors[k]
+
+    new_cons.append(
+        Constraint(
+            body=sum_sel - _wrap(1.0),
+            sense="==",
+            rhs=0.0,
+            name=f"_hull_select_{prefix}",
+        )
+    )
+
+    # --- Collect all variables across all disjuncts ---
+    all_vars: dict[str, Variable] = {}
+    for disjunct in dc.disjuncts:
+        for con in disjunct:
+            all_vars.update(_collect_variables(con.body))
+
+    # --- Per-disjunct bounds and disaggregated variables ---
+    # disjunct_bounds[k][var_name] = (dlb, dub)
+    disjunct_bounds: list[dict[str, tuple[float, float]]] = []
+    for k, disjunct in enumerate(dc.disjuncts):
+        db = _extract_disjunct_bounds(disjunct, model)
+        # Fill in global bounds for variables not constrained in this disjunct
+        for vname, var in all_vars.items():
+            if vname not in db:
+                db[vname] = (float(np.min(var.lb)), float(np.max(var.ub)))
+        disjunct_bounds.append(db)
+
+    # disagg[k][var_name] = disaggregated Variable v_{j,k}
+    disagg: list[dict[str, Variable]] = []
+    for k in range(n_disjuncts):
+        disagg_k: dict[str, Variable] = {}
+        for vname, var in all_vars.items():
+            dlb, dub = disjunct_bounds[k][vname]
+            # Disaggregated bounds: [min(dlb, 0), max(dub, 0)]
+            v_lb = min(dlb, 0.0)
+            v_ub = max(dub, 0.0)
+            v_jk = Variable(
+                f"_hull_{prefix}_v_{vname}_{k}",
+                VarType.CONTINUOUS,
+                var.shape,
+                v_lb,
+                v_ub,
+                model,
+            )
+            disagg_k[vname] = v_jk
+            new_vars.append(v_jk)
+            model._variables.append(v_jk)
+        disagg.append(disagg_k)
+
+    # --- Aggregation: x_j == sum_k(v_{j,k}) ---
+    for vname, var in all_vars.items():
+        agg_expr: Expression = disagg[0][vname]
+        for k in range(1, n_disjuncts):
+            agg_expr = agg_expr + disagg[k][vname]
+        new_cons.append(
+            Constraint(
+                body=var - agg_expr,
+                sense="==",
+                rhs=0.0,
+                name=f"_hull_agg_{prefix}_{vname}",
+            )
+        )
+
+    # --- Bound linking: dlb * y_k <= v_{j,k} <= dub * y_k ---
+    for k in range(n_disjuncts):
+        y_k = selectors[k]
+        for vname in all_vars:
+            dlb, dub = disjunct_bounds[k][vname]
+            v_jk = disagg[k][vname]
+            # v_{j,k} <= dub * y_k  =>  v_{j,k} - dub * y_k <= 0
+            new_cons.append(
+                Constraint(
+                    body=v_jk - _wrap(dub) * y_k,
+                    sense="<=",
+                    rhs=0.0,
+                    name=f"_hull_ub_{prefix}_{vname}_{k}",
+                )
+            )
+            # v_{j,k} >= dlb * y_k  =>  v_{j,k} - dlb * y_k >= 0
+            new_cons.append(
+                Constraint(
+                    body=v_jk - _wrap(dlb) * y_k,
+                    sense=">=",
+                    rhs=0.0,
+                    name=f"_hull_lb_{prefix}_{vname}_{k}",
+                )
+            )
+
+    # --- Constraint reformulation per disjunct ---
+    for k, disjunct in enumerate(dc.disjuncts):
+        y_k = selectors[k]
+
+        for j, con in enumerate(disjunct):
+            cname = f"_hull_{prefix}_d{k}_c{j}"
+
+            if _is_linear(con.body):
+                # Linear f(x) = a^T x + b: hull gives a^T v_k + b * y_k
+                # Substitute vars -> disagg vars and scale constants by y_k
+                hull_body = _hull_linear_substitute(
+                    con.body, {vname: disagg[k][vname] for vname in all_vars}, y_k
+                )
+                rhs_expr = _wrap(con.rhs) * y_k
+            else:
+                # Nonlinear: perspective form with clamped y_k
+                # f(v_k / y_clamp) * y_clamp where y_clamp = y_k + eps
+                y_clamp = y_k + _wrap(eps)
+                persp_map = {vname: disagg[k][vname] / y_clamp for vname in all_vars}
+                subst_body = _substitute_vars(con.body, persp_map)
+                hull_body = subst_body * y_clamp
+                rhs_expr = _wrap(con.rhs) * y_k
+
+            if con.sense == "<=":
+                new_cons.append(
+                    Constraint(
+                        body=hull_body - rhs_expr,
+                        sense="<=",
+                        rhs=0.0,
+                        name=cname,
+                    )
+                )
+            elif con.sense == ">=":
+                new_cons.append(
+                    Constraint(
+                        body=hull_body - rhs_expr,
+                        sense=">=",
+                        rhs=0.0,
+                        name=cname,
+                    )
+                )
+            elif con.sense == "==":
+                new_cons.append(
+                    Constraint(
+                        body=hull_body - rhs_expr,
+                        sense="<=",
+                        rhs=0.0,
+                        name=f"{cname}_le",
+                    )
+                )
+                new_cons.append(
+                    Constraint(
+                        body=hull_body - rhs_expr,
+                        sense=">=",
+                        rhs=0.0,
+                        name=f"{cname}_ge",
+                    )
+                )
+
+    return new_vars, new_cons
+
+
+def _hull_linear_substitute(
+    expr: Expression,
+    var_map: dict[str, Expression],
+    y_k: Expression,
+) -> Expression:
+    """Substitute variables and scale constants by y_k for hull linear reform.
+
+    For a linear expression ``a*x + b``, returns ``a*v_k + b*y_k`` where
+    ``v_k`` is the disaggregated variable from *var_map*.
+    """
+    if isinstance(expr, Variable):
+        return var_map.get(expr.name, expr)
+    if isinstance(expr, Constant):
+        result: Expression = expr * y_k
+        return result
+    if isinstance(expr, IndexExpression):
+        if isinstance(expr.base, Variable) and expr.base.name in var_map:
+            new_base = var_map[expr.base.name]
+            return IndexExpression(new_base, expr.index)
+        return expr
+    if isinstance(expr, BinaryOp):
+        if expr.op in ("+", "-"):
+            new_left = _hull_linear_substitute(expr.left, var_map, y_k)
+            new_right = _hull_linear_substitute(expr.right, var_map, y_k)
+            return BinaryOp(expr.op, new_left, new_right)
+        if expr.op == "*":
+            # For linear expressions, one side must be a constant
+            if isinstance(expr.left, Constant):
+                # const * linear_expr → const * hull_substitute(linear_expr)
+                new_right = _hull_linear_substitute(expr.right, var_map, y_k)
+                return BinaryOp("*", expr.left, new_right)
+            if isinstance(expr.right, Constant):
+                new_left = _hull_linear_substitute(expr.left, var_map, y_k)
+                return BinaryOp("*", new_left, expr.right)
+        if expr.op == "/":
+            if isinstance(expr.right, Constant):
+                new_left = _hull_linear_substitute(expr.left, var_map, y_k)
+                return BinaryOp("/", new_left, expr.right)
+    if isinstance(expr, UnaryOp):
+        if expr.op in ("neg", "-"):
+            new_operand = _hull_linear_substitute(expr.operand, var_map, y_k)
+            return UnaryOp(expr.op, new_operand)
+    # Fallback
+    return _substitute_vars(expr, var_map)
+
+
+# ── Hull reformulation helpers ──
+
+
+def _collect_variables(expr: Expression) -> dict[str, Variable]:
+    """Walk expression DAG and return Variable nodes keyed by name.
+
+    Variables are deduplicated by name (Variable is not hashable due to
+    ``__eq__`` returning a Constraint).
+    """
+    found: dict[str, Variable] = {}
+
+    def _walk(e: Expression) -> None:
+        if isinstance(e, Variable):
+            found[e.name] = e
+        elif isinstance(e, IndexExpression):
+            if isinstance(e.base, Variable):
+                found[e.base.name] = e.base
+            else:
+                _walk(e.base)
+        elif isinstance(e, BinaryOp):
+            _walk(e.left)
+            _walk(e.right)
+        elif isinstance(e, UnaryOp):
+            _walk(e.operand)
+        elif isinstance(e, FunctionCall):
+            for arg in e.args:
+                _walk(arg)
+
+    _walk(expr)
+    return found
+
+
+def _is_linear(expr: Expression) -> bool:
+    """Check if expression is linear in its variables (conservative).
+
+    Returns True only for expressions involving +, -, and * where at least
+    one operand of every multiplication is a constant. Returns False for
+    any nonlinear operation (**, FunctionCall, bilinear terms).
+    False negatives are safe (they cause fallback to perspective functions).
+    """
+    if isinstance(expr, (Variable, Constant)):
+        return True
+    if isinstance(expr, IndexExpression):
+        return True
+    if isinstance(expr, UnaryOp):
+        if expr.op in ("neg", "-"):
+            return _is_linear(expr.operand)
+        return False
+    if isinstance(expr, BinaryOp):
+        if expr.op in ("+", "-"):
+            return _is_linear(expr.left) and _is_linear(expr.right)
+        if expr.op == "*":
+            # Linear only if at least one side is a constant
+            if isinstance(expr.left, Constant) or isinstance(expr.right, Constant):
+                return _is_linear(expr.left) and _is_linear(expr.right)
+            return False
+        if expr.op == "/":
+            # x / constant is linear
+            if isinstance(expr.right, Constant):
+                return _is_linear(expr.left)
+            return False
+        # ** is always nonlinear
+        return False
+    if isinstance(expr, FunctionCall):
+        return False
+    return False
+
+
+def _substitute_vars(
+    expr: Expression,
+    var_map: dict[str, Expression],
+) -> Expression:
+    """Return a copy of *expr* with variables renamed per *var_map*.
+
+    *var_map* maps variable **names** to replacement expressions.
+    Nodes not in the map are returned unchanged.
+    """
+    if isinstance(expr, Variable):
+        return var_map.get(expr.name, expr)
+    if isinstance(expr, IndexExpression):
+        if isinstance(expr.base, Variable) and expr.base.name in var_map:
+            new_base = var_map[expr.base.name]
+            return IndexExpression(new_base, expr.index)
+        new_base = _substitute_vars(expr.base, var_map)
+        if new_base is expr.base:
+            return expr
+        return IndexExpression(new_base, expr.index)
+    if isinstance(expr, BinaryOp):
+        new_left = _substitute_vars(expr.left, var_map)
+        new_right = _substitute_vars(expr.right, var_map)
+        if new_left is expr.left and new_right is expr.right:
+            return expr
+        return BinaryOp(expr.op, new_left, new_right)
+    if isinstance(expr, UnaryOp):
+        new_operand = _substitute_vars(expr.operand, var_map)
+        if new_operand is expr.operand:
+            return expr
+        return UnaryOp(expr.op, new_operand)
+    if isinstance(expr, FunctionCall):
+        new_args = tuple(_substitute_vars(a, var_map) for a in expr.args)
+        if all(n is o for n, o in zip(new_args, expr.args)):
+            return expr
+        return FunctionCall(expr.func_name, *new_args)
+    # Constant or unknown — pass through
+    return expr
+
+
+def _extract_disjunct_bounds(
+    disjunct: list[Constraint],
+    model: Model,
+) -> dict[str, tuple[float, float]]:
+    """Extract per-variable bounds implied by simple constraints in a disjunct.
+
+    Scans for single-variable bound patterns (``x <= c``, ``x >= c``,
+    ``x == c``) and returns the tightest implied bounds, starting from the
+    variable's global bounds.
+
+    Parameters
+    ----------
+    disjunct : list[Constraint]
+        Constraints in one arm of a disjunction.
+    model : Model
+        Model with global variable bound information.
+
+    Returns
+    -------
+    dict[str, tuple[float, float]]
+        Mapping from variable name to (lb, ub).
+    """
+    bounds: dict[str, list[float]] = {}
+
+    def _init_var(v: Variable) -> None:
+        if v.name not in bounds:
+            bounds[v.name] = [float(np.min(v.lb)), float(np.max(v.ub))]
+
+    for con in disjunct:
+        # Identify single-variable body, possibly with constant offset
+        body = con.body
+        var: Variable | None = None
+        offset = 0.0  # effective constraint: var (sense) rhs - offset
+
+        if isinstance(body, Variable):
+            var = body
+        elif isinstance(body, IndexExpression) and isinstance(body.base, Variable):
+            var = body.base
+        elif isinstance(body, BinaryOp) and body.op == "-":
+            # Pattern: var - const <= 0  =>  var <= const
+            if isinstance(body.left, Variable) and isinstance(body.right, Constant):
+                var = body.left
+                offset = -float(body.right.value)
+            elif isinstance(body.left, (Variable, IndexExpression)):
+                lvar = body.left if isinstance(body.left, Variable) else None
+                if lvar is None and isinstance(body.left, IndexExpression):
+                    lvar = body.left.base if isinstance(body.left.base, Variable) else None
+                if lvar is not None and isinstance(body.right, Constant):
+                    var = lvar
+                    offset = -float(body.right.value)
+            # Pattern: const - var <= 0  =>  var >= const
+            elif isinstance(body.left, Constant) and isinstance(body.right, Variable):
+                var = body.right
+                # const - var (sense) 0  =>  -var (sense) -const  =>  var (flip) const
+                # We handle this by negating and flipping sense below
+                offset = float(body.left.value)
+                # For "const - var <= 0" => var >= const
+                # For "const - var >= 0" => var <= const
+                _init_var(var)
+                effective_rhs = offset  # the constant value
+                if con.sense == "<=":
+                    # const - var <= 0 => var >= const
+                    bounds[var.name][0] = max(bounds[var.name][0], effective_rhs)
+                elif con.sense == ">=":
+                    # const - var >= 0 => var <= const
+                    bounds[var.name][1] = min(bounds[var.name][1], effective_rhs)
+                elif con.sense == "==":
+                    bounds[var.name][0] = max(bounds[var.name][0], effective_rhs)
+                    bounds[var.name][1] = min(bounds[var.name][1], effective_rhs)
+                continue
+        elif isinstance(body, BinaryOp) and body.op == "+":
+            # Pattern: var + const <= 0  =>  var <= -const
+            if isinstance(body.left, Variable) and isinstance(body.right, Constant):
+                var = body.left
+                offset = float(body.right.value)
+
+        if var is None:
+            continue
+
+        # effective: var (sense) rhs - offset
+        rhs = con.rhs - offset
+        _init_var(var)
+
+        if con.sense == "<=":
+            bounds[var.name][1] = min(bounds[var.name][1], rhs)
+        elif con.sense == ">=":
+            bounds[var.name][0] = max(bounds[var.name][0], rhs)
+        elif con.sense == "==":
+            bounds[var.name][0] = max(bounds[var.name][0], rhs)
+            bounds[var.name][1] = min(bounds[var.name][1], rhs)
+
+    return {name: (lb_ub[0], lb_ub[1]) for name, lb_ub in bounds.items()}
 
 
 # ── SOS constraint reformulation ──

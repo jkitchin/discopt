@@ -1259,6 +1259,60 @@ class Model:
         """
         self._constraints.append(_SOSConstraint(2, variables, name))
 
+    # ── Logical propositions ──
+
+    @staticmethod
+    def _validate_binaries(variables, method_name: str):
+        """Check that all entries are binary variables (Variable or IndexExpression)."""
+        for v in variables:
+            if isinstance(v, IndexExpression):
+                base = v.base
+                if not isinstance(base, Variable):
+                    raise TypeError(
+                        f"{method_name}() requires binary variables, "
+                        f"got IndexExpression with non-Variable base"
+                    )
+                if base.var_type != VarType.BINARY:
+                    raise ValueError(
+                        f"{method_name}() requires binary variables, "
+                        f"but '{base.name}' has type {base.var_type.name}"
+                    )
+            elif isinstance(v, Variable):
+                if v.var_type != VarType.BINARY:
+                    raise ValueError(
+                        f"{method_name}() requires binary variables, "
+                        f"but '{v.name}' has type {v.var_type.name}"
+                    )
+            else:
+                raise TypeError(
+                    f"{method_name}() requires Variable or IndexExpression, got {type(v).__name__}"
+                )
+
+    def at_least(self, k: int, binaries: list, name: Optional[str] = None):
+        """Add constraint: at least *k* of the binary variables must be 1."""
+        self._validate_binaries(binaries, "at_least")
+        self.subject_to(sum(binaries) >= k, name=name)
+
+    def at_most(self, k: int, binaries: list, name: Optional[str] = None):
+        """Add constraint: at most *k* of the binary variables can be 1."""
+        self._validate_binaries(binaries, "at_most")
+        self.subject_to(sum(binaries) <= k, name=name)
+
+    def exactly(self, k: int, binaries: list, name: Optional[str] = None):
+        """Add constraint: exactly *k* of the binary variables must be 1."""
+        self._validate_binaries(binaries, "exactly")
+        self.subject_to(sum(binaries) == k, name=name)
+
+    def implies(self, y1, y2, name: Optional[str] = None):
+        """Add implication constraint: y1 = 1 implies y2 = 1."""
+        self._validate_binaries([y1, y2], "implies")
+        self.subject_to(y1 <= y2, name=name)
+
+    def iff(self, y1, y2, name: Optional[str] = None):
+        """Add equivalence constraint: y1 = 1 if and only if y2 = 1."""
+        self._validate_binaries([y1, y2], "iff")
+        self.subject_to(y1 == y2, name=name)
+
     # ── Solve ──
 
     def solve(

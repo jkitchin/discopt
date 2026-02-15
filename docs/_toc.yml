@@ -8,6 +8,7 @@ parts:
       - file: notebooks/tutorial_milp
       - file: notebooks/tutorial_miqp
       - file: notebooks/tutorial_minlp
+      - file: notebooks/tutorial_gdp
   - caption: "Tutorials \u2014 Solver Backends"
     chapters:
       - file: notebooks/tutorial_solver_jax_ipm

@@ -9,8 +9,12 @@ import numpy as np
 import pytest
 from discopt._jax.gdp_reformulate import (
     _bound_expression,
+    _collect_variables,
     _compute_big_m,
+    _extract_disjunct_bounds,
+    _is_linear,
     _reformulate_indicator,
+    _substitute_vars,
     reformulate_gdp,
 )
 from discopt.modeling.core import (
@@ -532,3 +536,391 @@ class TestReformulationCorrectness:
         le_cons = [c for c in new_m._constraints if c.sense == "<="]
         # 5 ub + 1 sum + 6 nonadj = 12 LE constraints
         assert len(le_cons) == 12
+
+
+# ── Hull reformulation helpers ──
+
+
+class TestHullHelpers:
+    """Tests for hull reformulation helper functions."""
+
+    # -- _collect_variables --
+
+    def test_collect_variables_simple(self):
+        m = dm.Model("t")
+        x = m.continuous("x", lb=0, ub=10)
+        y = m.continuous("y", lb=0, ub=10)
+        expr = x + y * 2
+        result = _collect_variables(expr)
+        assert set(result.keys()) == {"x", "y"}
+        assert result["x"] is x
+        assert result["y"] is y
+
+    def test_collect_variables_nested(self):
+        m = dm.Model("t")
+        x = m.continuous("x", lb=0, ub=10)
+        y = m.continuous("y", lb=0, ub=10)
+        z = m.continuous("z", lb=0, ub=10)
+        expr = dm.exp(x) + y**2 - z
+        result = _collect_variables(expr)
+        assert set(result.keys()) == {"x", "y", "z"}
+
+    def test_collect_variables_constant_only(self):
+        from discopt.modeling.core import Constant
+
+        expr = Constant(5.0)
+        result = _collect_variables(expr)
+        assert result == {}
+
+    def test_collect_variables_index_expr(self):
+        m = dm.Model("t")
+        x = m.continuous("x", shape=(3,), lb=0, ub=10)
+        expr = x[0] + x[1]
+        result = _collect_variables(expr)
+        # Both index expressions refer to the same base variable x
+        assert set(result.keys()) == {"x"}
+        assert result["x"] is x
+
+    # -- _is_linear --
+
+    def test_is_linear_true(self):
+        m = dm.Model("t")
+        x = m.continuous("x", lb=0, ub=10)
+        y = m.continuous("y", lb=0, ub=10)
+        expr = 2 * x + 3 * y - 5
+        assert _is_linear(expr) is True
+
+    def test_is_linear_false_bilinear(self):
+        m = dm.Model("t")
+        x = m.continuous("x", lb=0, ub=10)
+        y = m.continuous("y", lb=0, ub=10)
+        expr = x * y
+        assert _is_linear(expr) is False
+
+    def test_is_linear_false_nonlinear(self):
+        m = dm.Model("t")
+        x = m.continuous("x", lb=0, ub=10)
+        expr = dm.exp(x)
+        assert _is_linear(expr) is False
+
+    # -- _substitute_vars --
+
+    def test_substitute_vars_simple(self):
+        m = dm.Model("t")
+        x = m.continuous("x", lb=0, ub=10)
+        v = m.continuous("v", lb=0, ub=10)
+        expr = x + dm.core.Constant(3.0)
+        result = _substitute_vars(expr, {"x": v})
+        # The left child of the addition should now be v
+        assert isinstance(result, dm.core.BinaryOp)
+        assert result.left is v
+
+    def test_substitute_vars_preserves_constants(self):
+        c = dm.core.Constant(42.0)
+        result = _substitute_vars(c, {"x": dm.core.Constant(0.0)})
+        assert result is c  # identity — unchanged
+
+    # -- _extract_disjunct_bounds --
+
+    def test_extract_disjunct_bounds_simple(self):
+        m = dm.Model("t")
+        x = m.continuous("x", lb=0, ub=10)
+        disjunct = [
+            Constraint(body=x, sense="<=", rhs=5.0),
+            Constraint(body=x, sense=">=", rhs=2.0),
+        ]
+        result = _extract_disjunct_bounds(disjunct, m)
+        assert result["x"] == (2.0, 5.0)
+
+    def test_extract_disjunct_bounds_tightens_global(self):
+        m = dm.Model("t")
+        x = m.continuous("x", lb=-100, ub=100)
+        disjunct = [Constraint(body=x, sense="<=", rhs=3.0)]
+        result = _extract_disjunct_bounds(disjunct, m)
+        assert result["x"] == (-100.0, 3.0)
+
+
+# ── Logical propositions ──
+
+
+class TestLogicalPropositions:
+    def test_at_least(self):
+        m = dm.Model("at_least")
+        y = [m.binary(f"y{i}") for i in range(3)]
+        m.minimize(sum(y))
+        m.at_least(2, y)
+        r = m.solve()
+        assert r.status == "optimal"
+        active = sum(int(np.round(r.x[v.name])) for v in y)
+        assert active >= 2
+
+    def test_at_most(self):
+        m = dm.Model("at_most")
+        y = [m.binary(f"y{i}") for i in range(3)]
+        m.maximize(sum(y))
+        m.at_most(1, y)
+        r = m.solve()
+        assert r.status == "optimal"
+        active = sum(int(np.round(r.x[v.name])) for v in y)
+        assert active <= 1
+
+    def test_exactly(self):
+        m = dm.Model("exactly")
+        y = [m.binary(f"y{i}") for i in range(4)]
+        m.minimize(sum(y))
+        m.exactly(2, y)
+        r = m.solve()
+        assert r.status == "optimal"
+        active = sum(int(np.round(r.x[v.name])) for v in y)
+        assert active == 2
+
+    def test_implies(self):
+        m = dm.Model("implies")
+        x = m.continuous("x", lb=0, ub=10)
+        y1 = m.binary("y1")
+        y2 = m.binary("y2")
+        # Force y1=1 via constraint, then implies should force y2=1
+        m.minimize(x)
+        m.subject_to(y1 >= 1)
+        m.implies(y1, y2)
+        r = m.solve()
+        assert r.status == "optimal"
+        assert r.x["y1"] == pytest.approx(1.0, abs=1e-3)
+        assert r.x["y2"] == pytest.approx(1.0, abs=1e-3)
+
+    def test_iff(self):
+        m = dm.Model("iff")
+        x = m.continuous("x", lb=0, ub=10)
+        y1 = m.binary("y1")
+        y2 = m.binary("y2")
+        m.minimize(x)
+        m.subject_to(y1 >= 1)
+        m.iff(y1, y2)
+        r = m.solve()
+        assert r.status == "optimal"
+        assert r.x["y1"] == pytest.approx(1.0, abs=1e-3)
+        assert r.x["y2"] == pytest.approx(1.0, abs=1e-3)
+
+    def test_implies_chain(self):
+        m = dm.Model("chain")
+        x = m.continuous("x", lb=0, ub=10)
+        y1 = m.binary("y1")
+        y2 = m.binary("y2")
+        y3 = m.binary("y3")
+        m.minimize(x)
+        m.subject_to(y1 >= 1)
+        m.implies(y1, y2)
+        m.implies(y2, y3)
+        r = m.solve()
+        assert r.status == "optimal"
+        assert r.x["y1"] == pytest.approx(1.0, abs=1e-3)
+        assert r.x["y3"] == pytest.approx(1.0, abs=1e-3)
+
+    def test_at_least_validates_binary(self):
+        m = dm.Model("val")
+        x = m.continuous("x", lb=0, ub=1)
+        m.minimize(x)
+        with pytest.raises(ValueError, match="requires binary"):
+            m.at_least(1, [x])
+
+    def test_implies_validates_binary(self):
+        m = dm.Model("val")
+        y = m.binary("y")
+        z = m.integer("z", lb=0, ub=1)
+        m.minimize(y)
+        with pytest.raises(ValueError, match="requires binary"):
+            m.implies(y, z)
+
+    def test_at_least_with_indexed_binary(self):
+        m = dm.Model("idx")
+        y = m.binary("y", shape=(3,))
+        m.minimize(sum(y[i] for i in range(3)))
+        m.at_least(1, [y[0], y[1], y[2]])
+        r = m.solve()
+        assert r.status == "optimal"
+        active = sum(int(np.round(r.x["y"][i])) for i in range(3))
+        assert active >= 1
+
+
+# ── Hull reformulation tests ──
+
+
+class TestHullReformulation:
+    """Tests for convex hull reformulation of disjunctions."""
+
+    def test_hull_two_disjuncts_structure(self):
+        """Verify disaggregated vars, aggregation, bound linking, selector."""
+        m = dm.Model("hull2")
+        x = m.continuous("x", lb=0, ub=10)
+        m.minimize(x)
+        m.either_or([[x <= 3], [x >= 7]], name="modes")
+
+        new_m = reformulate_gdp(m, method="hull")
+        assert all(isinstance(c, Constraint) for c in new_m._constraints)
+
+        orig_var_ids = {id(v) for v in m._variables}
+        aux_vars = [v for v in new_m._variables if id(v) not in orig_var_ids]
+        # 2 selectors + 2 disaggregated (1 var * 2 disjuncts)
+        assert len(aux_vars) == 4
+
+        # Selector sum == 1
+        eq_cons = [c for c in new_m._constraints if c.sense == "=="]
+        assert len(eq_cons) >= 1  # selector + aggregation
+
+        # Bound linking: 2 disjuncts * 1 var * 2 (ub + lb) = 4
+        hull_ub = [c for c in new_m._constraints if c.name and "_hull_ub_" in c.name]
+        hull_lb = [c for c in new_m._constraints if c.name and "_hull_lb_" in c.name]
+        assert len(hull_ub) == 2
+        assert len(hull_lb) == 2
+
+    def test_hull_three_disjuncts(self):
+        """3 disjuncts with 2 variables => 6 disaggregated variables."""
+        m = dm.Model("hull3")
+        x = m.continuous("x", lb=0, ub=30)
+        y = m.continuous("y", lb=0, ub=30)
+        m.minimize(x + y)
+        m.either_or(
+            [[x <= 5, y <= 5], [x >= 10, y >= 10], [x >= 25]],
+            name="tri",
+        )
+
+        new_m = reformulate_gdp(m, method="hull")
+        orig_var_ids = {id(v) for v in m._variables}
+        aux_vars = [v for v in new_m._variables if id(v) not in orig_var_ids]
+        # 3 selectors + disagg: disjuncts 0 and 1 have x,y; disjunct 2 has x
+        # _collect_variables scans all disjuncts, so all 3 get both x and y
+        n_selectors = 3
+        n_disagg = 2 * 3  # 2 vars * 3 disjuncts
+        assert len(aux_vars) == n_selectors + n_disagg
+
+    def test_hull_linear_constraint(self):
+        """Linear constraints produce perspective-form constraints."""
+        m = dm.Model("hull_lin")
+        x = m.continuous("x", lb=0, ub=10)
+        m.minimize(x)
+        m.either_or([[x <= 3], [x >= 7]], name="lin")
+
+        new_m = reformulate_gdp(m, method="hull")
+        # Constraint names with _hull_lin_d should exist (one per disjunct)
+        d_cons = [c for c in new_m._constraints if c.name and "_hull_lin_d" in c.name]
+        assert len(d_cons) == 2
+
+    def test_hull_vs_bigm_tighter_relaxation(self):
+        """Hull should produce tighter or equal relaxation compared to big-M.
+
+        Build either_or([[x<=3],[x>=7]]) with x in [0,10], minimize x.
+        Both methods should give optimal x=0, but hull reformulation has
+        more structural constraints (disaggregated vars + bound linking).
+        """
+        # Big-M version
+        m_bm = dm.Model("bigm")
+        x_bm = m_bm.continuous("x", lb=0, ub=10)
+        m_bm.minimize(x_bm)
+        m_bm.either_or([[x_bm <= 3], [x_bm >= 7]], name="d")
+        r_bm = m_bm.solve()
+
+        # Hull version
+        m_hull = dm.Model("hull")
+        x_hull = m_hull.continuous("x", lb=0, ub=10)
+        m_hull.minimize(x_hull)
+        m_hull.either_or([[x_hull <= 3], [x_hull >= 7]], name="d")
+        r_hull = m_hull.solve(gdp_method="hull")
+
+        # Both should find optimal
+        assert r_bm.status == "optimal"
+        assert r_hull.status == "optimal"
+        # Both should find x=0 (first disjunct)
+        assert r_bm.objective == pytest.approx(0.0, abs=0.1)
+        assert r_hull.objective == pytest.approx(0.0, abs=0.1)
+
+        # Hull has more variables (disaggregated)
+        m_hull_ref = reformulate_gdp(m_hull, method="hull")
+        m_bm_ref = reformulate_gdp(m_bm, method="big-m")
+        assert len(m_hull_ref._variables) > len(m_bm_ref._variables)
+
+    def test_hull_solve_correct_objective(self):
+        """MINLP with both methods should give matching objectives."""
+        m = dm.Model("hull_obj")
+        x = m.continuous("x", lb=0, ub=20)
+        y = m.binary("y_int")
+        m.minimize(x + 5 * y)
+        m.either_or([[x <= 5], [x >= 15]], name="d")
+        m.subject_to(x >= 1)
+
+        r_bm = m.solve(gdp_method="big-m")
+        r_hull = m.solve(gdp_method="hull")
+        assert r_bm.status == "optimal"
+        assert r_hull.status == "optimal"
+        assert r_bm.objective == pytest.approx(r_hull.objective, abs=0.5)
+
+    def test_hull_nonlinear_constraint(self):
+        """x**2 <= 5 in disjunct => perspective form, correct solve."""
+        m = dm.Model("hull_nl")
+        x = m.continuous("x", lb=-5, ub=5)
+        m.minimize(x)
+        # Disjunct 0: x**2 <= 5 (nonlinear), Disjunct 1: x >= 3
+        m.either_or(
+            [
+                [Constraint(body=x**2 - dm.core.Constant(5.0), sense="<=", rhs=0.0)],
+                [x >= 3],
+            ],
+            name="nl",
+        )
+
+        r = m.solve(gdp_method="hull")
+        assert r.status == "optimal"
+        # First disjunct allows x in [-sqrt(5), sqrt(5)] ~ [-2.24, 2.24]
+        # min x => x ~ -2.24
+        assert r.x["x"] == pytest.approx(-np.sqrt(5), abs=0.5)
+
+    def test_hull_method_parameter_endtoend(self):
+        """m.solve(gdp_method='hull') works end-to-end."""
+        m = dm.Model("e2e")
+        x = m.continuous("x", lb=0, ub=10)
+        m.minimize(x)
+        m.either_or([[x <= 3], [x >= 7]], name="d")
+
+        r = m.solve(gdp_method="hull")
+        assert r.status == "optimal"
+        assert r.objective == pytest.approx(0.0, abs=0.1)
+
+    def test_hull_no_gdp_passthrough(self):
+        """No GDP constraints => original model returned unchanged."""
+        m = dm.Model("no_gdp")
+        x = m.continuous("x", lb=0, ub=10)
+        m.minimize(x)
+        m.subject_to(x >= 1)
+
+        result = reformulate_gdp(m, method="hull")
+        assert result is m
+
+    def test_hull_overlapping_disjuncts(self):
+        """[[x<=5],[x>=3]] with overlapping feasible regions."""
+        m = dm.Model("overlap")
+        x = m.continuous("x", lb=0, ub=10)
+        m.minimize(x)
+        m.either_or([[x <= 5], [x >= 3]], name="ov")
+
+        r = m.solve(gdp_method="hull")
+        assert r.status == "optimal"
+        # First disjunct: x in [0,5], min x=0
+        assert r.objective == pytest.approx(0.0, abs=0.1)
+
+    def test_hull_disjunct_local_bounds(self):
+        """Verify disaggregated variable gets disjunct-local bounds."""
+        m = dm.Model("local_bds")
+        x = m.continuous("x", lb=0, ub=10)
+        m.minimize(x)
+        # Disjunct 0: x <= 3, disjunct 1: x >= 7
+        m.either_or([[x <= 3], [x >= 7]], name="bd")
+
+        new_m = reformulate_gdp(m, method="hull")
+        # Find disaggregated variables
+        disagg_vars = [v for v in new_m._variables if v.name.startswith("_hull_bd_v_x_")]
+        assert len(disagg_vars) == 2
+        # Disjunct 0 (x<=3): dlb=0, dub=3 => v bounds [0, 3]
+        v0 = [v for v in disagg_vars if v.name.endswith("_0")][0]
+        assert float(v0.ub) == pytest.approx(3.0)
+        # Disjunct 1 (x>=7): dlb=7, dub=10 => v bounds [0, 10]
+        v1 = [v for v in disagg_vars if v.name.endswith("_1")][0]
+        assert float(v1.ub) == pytest.approx(10.0)

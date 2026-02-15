@@ -137,6 +137,9 @@ The discopt modeling API:
 - set_objective(sense, expression): Set objective ("minimize" or "maximize")
 - add_constraint(expression, sense, rhs, name): Add a constraint
 - add_if_then(indicator, constraints, name): Add indicator constraint
+- add_either_or(disjuncts, name): Add disjunctive constraint (exactly one group holds)
+- add_implies(y1, y2, name): Add logical implication y1 => y2 for binary variables
+- add_at_least(k, binaries, name): At least k of the listed binaries must be 1
 
 Guidelines:
 - Use descriptive variable names that match the problem domain
@@ -144,6 +147,8 @@ Guidelines:
 - Set tight, meaningful bounds on all variables
 - Use binary variables for discrete choices (build/don't build, select/don't select)
 - Use indicator constraints (add_if_then) instead of big-M when possible
+- Use add_either_or for mode selection or disjunctive operating regions
+- Use add_implies for precedence or prerequisite relationships between decisions
 - Prefer vectorized operations for indexed sets"""
 
 FORMULATE_USER = """\

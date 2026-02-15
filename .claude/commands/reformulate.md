@@ -48,6 +48,16 @@ If no model is given, ask the user to paste their model code or provide a file p
 - Look for `max(x, y)` or `min(x, y)` that could use epigraph/hypograph reformulation
 - Look for disjunctions expressed as big-M that should use `m.either_or()`
 
+### GDP Reformulation Strategy
+- If the model uses `m.if_then()` or `m.either_or()`, it contains GDP (Generalized Disjunctive Programming) constraints
+- By default, discopt uses big-M reformulation (`gdp_method="big-m"`)
+- Suggest `m.solve(gdp_method="hull")` for tighter convex relaxations, especially when:
+  - The B&B tree is large (many nodes explored)
+  - The root relaxation gap is wide
+  - The model has many disjunctive constraints
+- Hull reformation adds auxiliary variables but produces significantly tighter LP relaxations
+- For models with `m.implies()` or `m.iff()`, these are linearized directly and are unaffected by `gdp_method`
+
 ### Redundant Constraints
 - Check for constraints implied by variable bounds
 - Check for dominated constraints (one constraint strictly implies another)

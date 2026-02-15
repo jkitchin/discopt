@@ -60,6 +60,11 @@ If no model code is given, ask the user to paste their model code or provide a f
 |---------|-------|------|------|------|
 | `m.if_then(y, [...])` | GDP `Disjunct` + `Disjunction` | `x$(y.l=1) =l= ...` or indicator | Conditional via complementarity | Indicator via `MOI.Indicator` |
 | `m.either_or([[...],[...]])` | `Disjunction` | Disjunctive programming | `complements` | Disjunction via custom |
+| `m.implies(y1, y2)` | `y1 <= y2` | `y1 =l= y2;` | `y1 <= y2` | `@constraint(m, y1 <= y2)` |
+| `m.at_least(k, [y...])` | `sum(y) >= k` | `sum(I, y(I)) =g= k;` | `sum{i in I} y[i] >= k` | `@constraint(m, sum(y) >= k)` |
+| `m.at_most(k, [y...])` | `sum(y) <= k` | `sum(I, y(I)) =l= k;` | `sum{i in I} y[i] <= k` | `@constraint(m, sum(y) <= k)` |
+| `m.exactly(k, [y...])` | `sum(y) == k` | `sum(I, y(I)) =e= k;` | `sum{i in I} y[i] = k` | `@constraint(m, sum(y) == k)` |
+| `m.iff(y1, y2)` | `y1 == y2` | `y1 =e= y2;` | `y1 = y2` | `@constraint(m, y1 == y2)` |
 
 3. **Produce the translated code** with:
    - Comments explaining the mapping for non-obvious translations

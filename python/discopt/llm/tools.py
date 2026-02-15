@@ -258,6 +258,103 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_either_or",
+            "description": (
+                "Add a disjunctive constraint: exactly one group of constraints "
+                "must hold. Each group is a list of constraints."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "disjuncts": {
+                        "type": "array",
+                        "items": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "lhs": {"type": "string"},
+                                    "sense": {
+                                        "type": "string",
+                                        "enum": ["<=", "==", ">="],
+                                    },
+                                    "rhs": {"type": "string"},
+                                },
+                                "required": ["lhs", "sense", "rhs"],
+                            },
+                        },
+                        "description": (
+                            "List of disjunct groups. Each group is a list of "
+                            "constraints that must hold together."
+                        ),
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Descriptive name for the disjunction.",
+                    },
+                },
+                "required": ["disjuncts", "name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_implies",
+            "description": (
+                "Add a logical implication: y1 = 1 implies y2 = 1. Both must be binary variables."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "y1": {
+                        "type": "string",
+                        "description": "Name of the antecedent binary variable.",
+                    },
+                    "y2": {
+                        "type": "string",
+                        "description": "Name of the consequent binary variable.",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Descriptive name for the implication.",
+                    },
+                },
+                "required": ["y1", "y2", "name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_at_least",
+            "description": (
+                "Add a cardinality constraint: at least k of the given binary variables must be 1."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "k": {
+                        "type": "integer",
+                        "description": "Minimum number of binaries that must be 1.",
+                    },
+                    "binaries": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Names of binary variables.",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "Descriptive name for the constraint.",
+                    },
+                },
+                "required": ["k", "binaries", "name"],
+            },
+        },
+    },
 ]
 
 
@@ -401,6 +498,50 @@ class ModelBuilder:
 
         self.model.if_then(indicator, constraints, name=args.get("name"))
         return f"Added indicator constraint '{args.get('name')}'"
+
+    def _handle_add_either_or(self, args: dict) -> str:
+        if self.model is None:
+            return "Error: call create_model first"
+        disjuncts = []
+        for group in args["disjuncts"]:
+            constraints = []
+            for c in group:
+                lhs = self._eval_expression(c["lhs"])
+                rhs = self._eval_expression(c["rhs"])
+                sense = c["sense"]
+                if sense == "<=":
+                    constraints.append(lhs <= rhs)
+                elif sense == ">=":
+                    constraints.append(lhs >= rhs)
+                elif sense == "==":
+                    constraints.append(lhs == rhs)
+            disjuncts.append(constraints)
+        self.model.either_or(disjuncts, name=args.get("name"))
+        return f"Added disjunctive constraint '{args.get('name')}'"
+
+    def _handle_add_implies(self, args: dict) -> str:
+        if self.model is None:
+            return "Error: call create_model first"
+        y1 = self._namespace.get(args["y1"])
+        if y1 is None:
+            return f"Error: variable '{args['y1']}' not found"
+        y2 = self._namespace.get(args["y2"])
+        if y2 is None:
+            return f"Error: variable '{args['y2']}' not found"
+        self.model.implies(y1, y2, name=args.get("name"))
+        return f"Added implication '{args.get('name')}': {args['y1']} => {args['y2']}"
+
+    def _handle_add_at_least(self, args: dict) -> str:
+        if self.model is None:
+            return "Error: call create_model first"
+        binaries = []
+        for name in args["binaries"]:
+            var = self._namespace.get(name)
+            if var is None:
+                return f"Error: variable '{name}' not found"
+            binaries.append(var)
+        self.model.at_least(args["k"], binaries, name=args.get("name"))
+        return f"Added at_least({args['k']}) constraint '{args.get('name')}'"
 
     def _eval_expression(self, expr_str: str) -> Any:
         """Safely evaluate an expression string in the model namespace.
