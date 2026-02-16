@@ -620,6 +620,8 @@ def extract_lp_data_algebraic(model: Model) -> LPData:
 
     Raises _NotLinearError if the model is not linear.
     """
+    from discopt.modeling.core import ObjectiveSense
+
     n_orig = sum(v.size for v in model._variables)
     assert model._objective is not None
     obj_expr = model._objective.expression
@@ -628,6 +630,11 @@ def extract_lp_data_algebraic(model: Model) -> LPData:
 
     A_eq, b_eq, x_l, x_u, n_slack = _extract_constraints_algebraic(model, n_orig)
     c_full = np.concatenate([c, np.zeros(n_slack, dtype=np.float64)])
+
+    # Handle objective sense: negate for maximization
+    if model._objective.sense == ObjectiveSense.MAXIMIZE:
+        c_full = -c_full
+        obj_const = -obj_const
 
     return LPData(
         c=jnp.asarray(c_full),  # type: ignore[arg-type]
@@ -647,6 +654,8 @@ def extract_qp_data_algebraic(model: Model) -> QPData:
 
     Raises _NotQuadraticError if the objective is not quadratic.
     """
+    from discopt.modeling.core import ObjectiveSense
+
     n_orig = sum(v.size for v in model._variables)
     assert model._objective is not None
     obj_expr = model._objective.expression
@@ -663,6 +672,12 @@ def extract_qp_data_algebraic(model: Model) -> QPData:
     else:
         Q_full = Q
         c_full = c_vec
+
+    # Handle objective sense: negate for maximization
+    if model._objective.sense == ObjectiveSense.MAXIMIZE:
+        Q_full = -Q_full
+        c_full = -c_full
+        obj_const = -obj_const
 
     return QPData(
         Q=jnp.asarray(Q_full),  # type: ignore[arg-type]

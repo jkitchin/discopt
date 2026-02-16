@@ -1592,6 +1592,13 @@ def solve_model(
         sol_flat = np.array(sol_array)
         x_dict = _unpack_solution(model, sol_flat)
 
+        # Negate objective back for maximization (B&B tree tracks minimization)
+        from discopt.modeling.core import ObjectiveSense
+
+        assert model._objective is not None
+        if model._objective.sense == ObjectiveSense.MAXIMIZE:
+            obj_val = -obj_val
+
         if tree.gap() <= gap_tolerance or tree.is_finished():
             status = "optimal"
         else:
@@ -1606,10 +1613,18 @@ def solve_model(
         else:
             status = "infeasible"
 
+    from discopt.modeling.core import ObjectiveSense
+
+    # Negate bound back for maximization
+    bound_val = stats["global_lower_bound"]
+    assert model._objective is not None
+    if bound_val is not None and model._objective.sense == ObjectiveSense.MAXIMIZE:
+        bound_val = -bound_val
+
     return SolveResult(
         status=status,
         objective=obj_val,
-        bound=stats["global_lower_bound"],
+        bound=bound_val,
         gap=stats["gap"],
         x=x_dict,
         wall_time=wall_time,
@@ -2026,9 +2041,16 @@ def _solve_lp(model: Model, t_start: float) -> SolveResult:
     jax_time = time.perf_counter() - t_jax_start
     wall_time = time.perf_counter() - t_start
 
+    from discopt.modeling.core import ObjectiveSense
+
     n_orig = sum(v.size for v in model._variables)
     x_flat = np.asarray(state.x[:n_orig])
     obj_val = float(state.obj) + lp_data.obj_const
+
+    # Negate objective back for maximization (LP solver always minimizes)
+    assert model._objective is not None
+    if model._objective.sense == ObjectiveSense.MAXIMIZE:
+        obj_val = -obj_val
 
     conv = int(state.converged)
     if conv in (1, 2):
@@ -2070,9 +2092,16 @@ def _solve_qp(model: Model, t_start: float) -> SolveResult:
     jax_time = time.perf_counter() - t_jax_start
     wall_time = time.perf_counter() - t_start
 
+    from discopt.modeling.core import ObjectiveSense
+
     n_orig = sum(v.size for v in model._variables)
     x_flat = np.asarray(state.x[:n_orig])
     obj_val = float(state.obj) + qp_data.obj_const
+
+    # Negate objective back for maximization (QP solver always minimizes)
+    assert model._objective is not None
+    if model._objective.sense == ObjectiveSense.MAXIMIZE:
+        obj_val = -obj_val
 
     conv = int(state.converged)
     if conv in (1, 2):
@@ -2242,6 +2271,14 @@ def _solve_milp_bb(
     if incumbent is not None:
         sol_flat = np.array(sol_array)
         x_dict = _unpack_solution(model, sol_flat)
+
+        # Negate objective back for maximization (B&B tree tracks minimization)
+        from discopt.modeling.core import ObjectiveSense
+
+        assert model._objective is not None
+        if model._objective.sense == ObjectiveSense.MAXIMIZE:
+            obj_val = -obj_val
+
         if tree.gap() <= gap_tolerance or tree.is_finished():
             status = "optimal"
         else:
@@ -2256,10 +2293,18 @@ def _solve_milp_bb(
         else:
             status = "infeasible"
 
+    from discopt.modeling.core import ObjectiveSense
+
+    # Negate bound back for maximization
+    bound_val = stats["global_lower_bound"]
+    assert model._objective is not None
+    if bound_val is not None and model._objective.sense == ObjectiveSense.MAXIMIZE:
+        bound_val = -bound_val
+
     return SolveResult(
         status=status,
         objective=obj_val,
-        bound=stats["global_lower_bound"],
+        bound=bound_val,
         gap=stats["gap"],
         x=x_dict,
         wall_time=wall_time,
@@ -2430,6 +2475,14 @@ def _solve_miqp_bb(
     if incumbent is not None:
         sol_flat = np.array(sol_array)
         x_dict = _unpack_solution(model, sol_flat)
+
+        # Negate objective back for maximization (B&B tree tracks minimization)
+        from discopt.modeling.core import ObjectiveSense
+
+        assert model._objective is not None
+        if model._objective.sense == ObjectiveSense.MAXIMIZE:
+            obj_val = -obj_val
+
         if tree.gap() <= gap_tolerance or tree.is_finished():
             status = "optimal"
         else:
@@ -2444,10 +2497,18 @@ def _solve_miqp_bb(
         else:
             status = "infeasible"
 
+    from discopt.modeling.core import ObjectiveSense
+
+    # Negate bound back for maximization
+    bound_val = stats["global_lower_bound"]
+    assert model._objective is not None
+    if bound_val is not None and model._objective.sense == ObjectiveSense.MAXIMIZE:
+        bound_val = -bound_val
+
     return SolveResult(
         status=status,
         objective=obj_val,
-        bound=stats["global_lower_bound"],
+        bound=bound_val,
         gap=stats["gap"],
         x=x_dict,
         wall_time=wall_time,
