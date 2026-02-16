@@ -132,6 +132,21 @@ Tutorial notebooks are available in the `notebooks/` directory:
 
 Full documentation is built with Jupyter Book: `jupyter-book build docs/`
 
+## Project Statistics
+
+*Last updated: 2026-02-16*
+
+| Category | Count |
+|----------|-------|
+| **Python source** (`python/discopt/`) | 65 files, ~27,200 lines |
+| **Rust source** (`crates/`) | 19 files, ~10,700 lines |
+| **Test code** (`python/tests/`) | 41 files, ~24,500 lines |
+| **Total source + tests** | 125 files, ~62,400 lines |
+| **Python tests** | 1,510+ |
+| **Rust tests** | 141 |
+| **Tutorial notebooks** (`docs/notebooks/`) | 21 |
+| **Git commits** | 99 |
+
 ## Development History
 
 See [ROADMAP.md](ROADMAP.md) for the full development roadmap and task history.
