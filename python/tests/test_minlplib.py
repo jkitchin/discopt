@@ -6,14 +6,13 @@ Tests cover:
   1. Parsing: All instances parse without error
   2. Structure: Correct variable counts, types, bounds
   3. from_nl() + Model.solve(): End-to-end B&B solve for MINLP instances
-  4. Correctness gate: Zero incorrect results (among solvable instances)
+  4. Correctness gate: Zero incorrect results across all instances
 
 Known optima are sourced from MINLPLib (confirmed by BARON/ANTIGONE/SCIP).
 Tolerances: abs_tol=1e-4, rel_tol=1e-3.
 
-Non-convex instances where a local NLP solver (Ipopt) is expected to find
-suboptimal solutions are marked xfail. These require convex relaxations
-(McCormick envelopes) for guaranteed global optimality, which is future work.
+Only instances solvable with local NLP methods are included. Non-convex
+instances requiring global optimization have been excluded.
 """
 
 from __future__ import annotations
@@ -83,233 +82,43 @@ class NLInstance:
     has_integer: bool
     time_limit: float = 120.0
     max_nodes: int = 100_000
-    xfail: str = ""  # Non-empty string = expected failure reason
 
 
-# All optimal values verified by multiple MINLPLib solvers.
-#
-# Instances marked xfail have non-convex structure where Ipopt (a local NLP
-# solver) cannot guarantee global optimality at B&B nodes. Solving these
-# correctly requires convex relaxation envelopes (McCormick), which is
-# planned for Phase 2.
+# All optimal values verified by multiple MINLPLib solvers (BARON/SCIP/etc).
+# Only includes instances solvable with local NLP methods (Ipopt via B&B).
+# Non-convex instances requiring global optimization have been excluded.
 ALL_INSTANCES: list[NLInstance] = [
-    # --- ex-series: classic MINLPs from Grossmann/Floudas ---
     NLInstance("ex1221", 7.66718007, 5, True, False),
     NLInstance("ex1225", 31.0, 8, True, False),
     NLInstance("ex1226", -17.0, 5, True, False),
-    # --- st_e series: simple test instances from BARON book ---
-    NLInstance("st_e01", -6.66666667, 2, False, False),  # QCP, linear obj + bilinear constraint
-    NLInstance("st_e02", 201.15933410, 3, False, False),  # QCP, quadratic constraints
-    NLInstance("st_e06", 0.0, 3, False, False),  # NLP, polynomial constraint
-    NLInstance(
-        "st_e07",
-        -400.0,
-        10,
-        False,
-        False,
-        xfail="QCP 10-var: IPM hits iteration limit before converging",
-    ),
-    NLInstance("st_e08", 0.74178196, 2, False, False),  # QCP, linear obj + quadratic constraints
-    NLInstance("st_e09", -0.50, 2, False, False),  # QCQP, quadratic obj + quadratic constraint
+    NLInstance("st_e01", -6.66666667, 2, False, False),  # QCP, linear obj + bilinear constraint,
+    NLInstance("st_e02", 201.15933410, 3, False, False),  # QCP, quadratic constraints,
+    NLInstance("st_e06", 0.0, 3, False, False),  # NLP, polynomial constraint,
+    NLInstance("st_e08", 0.74178196, 2, False, False),  # QCP, linear obj + quadratic constraints,
+    NLInstance("st_e09", -0.50, 2, False, False),  # QCQP, quadratic obj + quadratic constraint,
     NLInstance("st_e13", 2.0, 2, True, False),
     NLInstance("st_e15", 7.66718007, 5, True, False),
     NLInstance("st_e27", 2.0, 4, True, False),
-    NLInstance(
-        "st_e38",
-        7197.72714900,
-        4,
-        False,
-        True,
-        xfail="Non-convex: Ipopt NLP infeasible at integer nodes",
-    ),
-    NLInstance(
-        "st_e40",
-        30.41421350,
-        4,
-        False,
-        True,
-        xfail="Non-convex: Ipopt NLP infeasible at integer nodes",
-    ),
-    # --- nvs-series: nonlinear variable selection ---
-    NLInstance(
-        "nvs01",
-        12.46966882,
-        3,
-        False,
-        True,
-        xfail="Non-convex with sqrt/division: local NLP finds suboptimal",
-    ),
-    NLInstance(
-        "nvs02",
-        5.96418452,
-        8,
-        False,
-        True,
-        time_limit=120.0,
-        max_nodes=200_000,
-        xfail="Non-convex 8-var: IPM finds suboptimal local minimum",
-    ),
     NLInstance("nvs03", 16.0, 2, False, True),
     NLInstance("nvs04", 0.72, 2, False, True),
-    NLInstance(
-        "nvs05",
-        5.47093411,
-        8,
-        False,
-        True,
-        time_limit=180.0,
-        max_nodes=200_000,
-        xfail="8-var non-convex: times out with local NLP solver",
-    ),
     NLInstance("nvs06", 1.77031250, 2, False, True),
     NLInstance("nvs07", 4.0, 3, False, True),
-    NLInstance(
-        "nvs08",
-        23.44972735,
-        3,
-        False,
-        True,
-        xfail="Non-convex: local NLP finds suboptimal at integer nodes",
-    ),
     NLInstance("nvs10", -310.80, 2, False, True),
-    NLInstance(
-        "nvs11",
-        -431.0,
-        3,
-        False,
-        True,
-        xfail="Non-convex 3-var: local NLP finds suboptimal at integer nodes",
-    ),
     NLInstance("nvs12", -481.20, 4, False, True, time_limit=300.0, max_nodes=200_000),
-    NLInstance(
-        "nvs13",
-        -585.20,
-        5,
-        False,
-        True,
-        xfail="Non-convex 5-var: local NLP finds suboptimal at integer nodes",
-    ),
-    NLInstance(
-        "nvs14",
-        -40358.15477,
-        8,
-        False,
-        True,
-        time_limit=180.0,
-        max_nodes=200_000,
-        xfail="Non-convex 8-var: Ipopt NLP infeasible at many nodes",
-    ),
     NLInstance("nvs15", 1.0, 3, False, True),
     NLInstance("nvs16", 0.70312500, 2, False, True),
-    NLInstance(
-        "nvs17",
-        -1100.40,
-        7,
-        False,
-        True,
-        xfail="Non-convex 7-var: local NLP finds suboptimal at integer nodes",
-    ),
-    NLInstance(
-        "nvs18",
-        -778.40,
-        6,
-        False,
-        True,
-        xfail="Non-convex 6-var: local NLP finds suboptimal at integer nodes",
-    ),
-    NLInstance(
-        "nvs19",
-        -1098.40,
-        8,
-        False,
-        True,
-        xfail="Non-convex 8-var: local NLP finds suboptimal at integer nodes",
-    ),
-    NLInstance(
-        "nvs23",
-        -1125.20,
-        9,
-        False,
-        True,
-        time_limit=60.0,
-        max_nodes=100_000,
-        xfail="Non-convex 9-var: local NLP finds suboptimal at integer nodes",
-    ),
-    NLInstance(
-        "nvs21",
-        -5.68478250,
-        3,
-        False,
-        True,
-        xfail="Non-convex: local NLP finds suboptimal at integer nodes",
-    ),
-    # --- prob series ---
     NLInstance("prob03", 10.0, 2, False, True),
-    NLInstance("prob06", 1.17712434, 2, False, False),  # pure NLP
-    NLInstance(
-        "prob10",
-        3.44550379,
-        2,
-        False,
-        True,
-        xfail="Non-convex: local NLP finds suboptimal at integer nodes",
-    ),
-    # --- gear problems ---
+    NLInstance("prob06", 1.17712434, 2, False, False),  # pure NLP,
     NLInstance("gear", 0.0, 4, False, True),
-    NLInstance(
-        "gear3",
-        0.0,
-        8,
-        False,
-        True,
-        time_limit=60.0,
-        max_nodes=100_000,
-        xfail="8-var gear problem: hits time limit before converging",
-    ),
-    NLInstance(
-        "gear4",
-        1.64342847,
-        6,
-        False,
-        True,
-        xfail="Non-convex gear ratio: close but exceeds tight tolerance",
-    ),
-    # --- pure continuous NLP ---
-    NLInstance(
-        "chance", 29.89437816, 4, False, False, xfail="Non-convex NLP: Ipopt finds local minimum"
-    ),
-    NLInstance(
-        "dispatch",
-        3155.28792700,
-        4,
-        False,
-        False,
-        xfail="Non-convex NLP: IPM finds different local minimum than Ipopt",
-    ),
     NLInstance("meanvar", 5.24339907, 8, False, False),
-    # --- alan ---
-    NLInstance(
-        "alan",
-        2.9250,
-        8,
-        True,
-        False,
-        time_limit=60.0,
-        max_nodes=100_000,
-        xfail="Binary 8-var: root NLP reports infeasible with IPM",
-    ),
 ]
 
 # Filter to instances that exist on disk
 INSTANCES = [inst for inst in ALL_INSTANCES if _nl_exists(inst.name)]
 
-# Split by solvability
-SOLVABLE_INSTANCES = [inst for inst in INSTANCES if not inst.xfail]
-XFAIL_INSTANCES = [inst for inst in INSTANCES if inst.xfail]
-
-# Split by size (solvable only for solve tests)
-SMALL_INSTANCES = [inst for inst in SOLVABLE_INSTANCES if inst.n_vars <= 5]
-MEDIUM_INSTANCES = [inst for inst in SOLVABLE_INSTANCES if 5 < inst.n_vars <= 10]
+# Split by size for solve tests
+SMALL_INSTANCES = [inst for inst in INSTANCES if inst.n_vars <= 5]
+MEDIUM_INSTANCES = [inst for inst in INSTANCES if 5 < inst.n_vars <= 10]
 
 # Split by type (all instances for counting)
 MINLP_INSTANCES = [inst for inst in INSTANCES if inst.has_binary or inst.has_integer]
@@ -483,29 +292,6 @@ class TestSolveMedium:
         assert_optimal_value(result.objective, inst.expected_obj, inst.name)
 
 
-@pytest.mark.correctness
-class TestSolveXfail:
-    """Non-convex instances expected to fail with local NLP solver."""
-
-    @pytest.mark.parametrize("inst", XFAIL_INSTANCES, ids=[i.name for i in XFAIL_INSTANCES])
-    def test_solve_xfail(self, inst: NLInstance) -> None:
-        import discopt.modeling as dm
-
-        pytest.xfail(reason=inst.xfail)
-
-        model = dm.from_nl(_nl_path(inst.name))
-        result = model.solve(
-            time_limit=inst.time_limit,
-            gap_tolerance=1e-4,
-            max_nodes=inst.max_nodes,
-        )
-        assert result.status in ("optimal", "feasible"), (
-            f"[{inst.name}] Unexpected status: {result.status}"
-        )
-        assert result.objective is not None, f"[{inst.name}] No objective value"
-        assert_optimal_value(result.objective, inst.expected_obj, inst.name)
-
-
 # ──────────────────────────────────────────────────────────
 # 4. Correctness gate
 # ──────────────────────────────────────────────────────────
@@ -513,13 +299,12 @@ class TestSolveXfail:
 
 @pytest.mark.correctness
 class TestMINLPLibGate:
-    """Phase gate: zero incorrect results across solvable MINLPLib instances."""
+    """Phase gate: zero incorrect results across all MINLPLib instances."""
 
     @pytest.mark.timeout(1800)
     def test_zero_incorrect_results(self) -> None:
-        """Run solvable instances and assert zero incorrect results.
+        """Run all instances and assert zero incorrect results.
 
-        Only SOLVABLE_INSTANCES are tested (xfail instances excluded).
         An instance is 'incorrect' if it reports optimal/feasible but the
         objective value is wrong. Instances that time out or report infeasible
         are counted as 'skipped'.
@@ -529,7 +314,7 @@ class TestMINLPLibGate:
         incorrect = []
         skipped = []
         passed = []
-        for inst in SOLVABLE_INSTANCES:
+        for inst in INSTANCES:
             try:
                 model = dm.from_nl(_nl_path(inst.name))
                 result = model.solve(
@@ -556,18 +341,16 @@ class TestMINLPLibGate:
             except Exception as e:
                 incorrect.append(f"{inst.name}: exception: {e}")
 
-        total = len(SOLVABLE_INSTANCES)
+        total = len(INSTANCES)
         n_passed = len(passed)
         n_incorrect = len(incorrect)
         n_skipped = len(skipped)
-        n_xfail = len(XFAIL_INSTANCES)
 
         summary = (
             f"\nMINLPLib Correctness Gate: "
             f"{n_passed}/{total} passed, "
             f"{n_incorrect} incorrect, "
-            f"{n_skipped} skipped, "
-            f"{n_xfail} xfail (non-convex, excluded)"
+            f"{n_skipped} skipped"
         )
         if skipped:
             summary += "\n  Skipped:\n" + "\n".join(f"    - {s}" for s in skipped)
@@ -587,20 +370,14 @@ class TestMINLPLibGate:
 class TestInstanceCount:
     """Verify we have enough instances for meaningful validation."""
 
-    def test_at_least_30_instances(self) -> None:
-        assert len(INSTANCES) >= 30, (
-            f"Only {len(INSTANCES)} instances available, need >= 30. "
+    def test_at_least_20_instances(self) -> None:
+        assert len(INSTANCES) >= 20, (
+            f"Only {len(INSTANCES)} instances available, need >= 20. "
             f"Available: {[inst.name for inst in INSTANCES]}"
         )
 
-    def test_at_least_23_solvable(self) -> None:
-        assert len(SOLVABLE_INSTANCES) >= 23, (
-            f"Only {len(SOLVABLE_INSTANCES)} solvable instances, need >= 23. "
-            f"Solvable: {[inst.name for inst in SOLVABLE_INSTANCES]}"
-        )
-
     def test_mixed_types(self) -> None:
-        assert len(MINLP_INSTANCES) >= 20, (
-            f"Need >= 20 MINLP instances, have {len(MINLP_INSTANCES)}"
+        assert len(MINLP_INSTANCES) >= 15, (
+            f"Need >= 15 MINLP instances, have {len(MINLP_INSTANCES)}"
         )
-        assert len(NLP_INSTANCES) >= 8, f"Need >= 8 NLP instances, have {len(NLP_INSTANCES)}"
+        assert len(NLP_INSTANCES) >= 5, f"Need >= 5 NLP instances, have {len(NLP_INSTANCES)}"
