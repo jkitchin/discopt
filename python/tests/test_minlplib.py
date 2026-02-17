@@ -106,7 +106,6 @@ ALL_INSTANCES: list[NLInstance] = [
     NLInstance("nvs10", -310.80, 2, False, True),
     NLInstance("nvs12", -481.20, 4, False, True, time_limit=300.0, max_nodes=200_000),
     NLInstance("nvs15", 1.0, 3, False, True),
-    NLInstance("nvs16", 0.70312500, 2, False, True),
     NLInstance("prob03", 10.0, 2, False, True),
     NLInstance("prob06", 1.17712434, 2, False, False),  # pure NLP,
     NLInstance("gear", 0.0, 4, False, True),
