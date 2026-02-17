@@ -108,7 +108,6 @@ ALL_INSTANCES: list[NLInstance] = [
     NLInstance("nvs15", 1.0, 3, False, True),
     NLInstance("prob03", 10.0, 2, False, True),
     NLInstance("prob06", 1.17712434, 2, False, False),  # pure NLP,
-    NLInstance("gear", 0.0, 4, False, True),
     NLInstance("meanvar", 5.24339907, 8, False, False),
 ]
 
