@@ -1,0 +1,42 @@
+# Instance-to-problem-class mapping
+# Classes: lp, qp, convex_nlp, nonconvex_nlp, milp, miqp, convex_minlp, nonconvex_minlp
+
+[instances]
+# NLP instances (continuous, nonlinear)
+ex1221 = "nonconvex_nlp"
+ex1225 = "nonconvex_nlp"
+ex1226 = "nonconvex_nlp"
+st_e13 = "nonconvex_nlp"
+st_e15 = "nonconvex_nlp"
+st_e27 = "nonconvex_nlp"
+st_e38 = "nonconvex_nlp"
+st_e40 = "nonconvex_nlp"
+prob03 = "nonconvex_nlp"
+prob06 = "nonconvex_nlp"
+prob10 = "nonconvex_nlp"
+
+# MINLP instances (mixed-integer, nonlinear)
+nvs01 = "nonconvex_minlp"
+nvs02 = "nonconvex_minlp"
+nvs03 = "nonconvex_minlp"
+nvs04 = "nonconvex_minlp"
+nvs05 = "nonconvex_minlp"
+nvs06 = "nonconvex_minlp"
+nvs07 = "nonconvex_minlp"
+nvs08 = "nonconvex_minlp"
+nvs10 = "nonconvex_minlp"
+nvs11 = "nonconvex_minlp"
+nvs12 = "nonconvex_minlp"
+nvs14 = "nonconvex_minlp"
+nvs15 = "nonconvex_minlp"
+nvs16 = "nonconvex_minlp"
+nvs21 = "nonconvex_minlp"
+
+# MILP/QP instances
+gear = "milp"
+gear3 = "milp"
+gear4 = "milp"
+chance = "nonconvex_minlp"
+dispatch = "nonconvex_minlp"
+meanvar = "qp"
+alan = "nonconvex_minlp"

@@ -70,11 +70,28 @@ def main():
         "--ci", action="store_true",
         help="CI mode: compact JSON output for pipeline integration"
     )
+    parser.add_argument(
+        "--save-baseline", action="store_true",
+        help="Save current results as baseline for future regression detection"
+    )
+    parser.add_argument(
+        "--compare-baseline", action="store_true",
+        help="Compare against saved baseline (auto-detected if available)"
+    )
+    parser.add_argument(
+        "--history", action="store_true",
+        help="Print historical trend table for the suite"
+    )
 
     args = parser.parse_args()
 
     if args.list_suites:
         _list_suites()
+        return
+
+    if args.history:
+        from utils.history import print_trend
+        print_trend(args.suite)
         return
 
     if args.gate:
@@ -87,17 +104,22 @@ def main():
 def _list_suites():
     """List available benchmark suites."""
     suites = {
-        "smoke":       "Quick sanity check (10 instances, 60s limit)",
-        "phase1":      "Phase 1 validation (small instances, ≤10 vars)",
-        "phase2":      "Phase 2 validation (medium instances, ≤50 vars)",
-        "phase3":      "Phase 3 validation (large instances, ≤100 vars)",
-        "full":        "Complete MINLPLib (~1700 instances)",
-        "comparison":  "Head-to-head solver comparison (curated set)",
-        "nightly":     "Nightly CI regression suite (100 instances)",
-        "lp_netlib":   "Rust LP solver vs Netlib",
-        "nlp_cutest":  "Hybrid NLP solver vs CUTEst",
-        "pooling":     "GPU-amenable pooling problems",
-        "gpu_scaling":  "GPU batching scalability measurement",
+        "smoke":         "Quick sanity check (10 instances, 60s limit)",
+        "phase1":        "Phase 1 validation (small instances, ≤10 vars)",
+        "phase2":        "Phase 2 validation (medium instances, ≤50 vars)",
+        "phase3":        "Phase 3 validation (large instances, ≤100 vars)",
+        "full":          "Complete MINLPLib (~1700 instances)",
+        "comparison":    "Head-to-head solver comparison (curated set)",
+        "nightly":       "Nightly CI regression suite (100 instances)",
+        "global_opt":    "Global optimality verification (known optima)",
+        "lp":            "Pure LP instances",
+        "qp":            "Quadratic programming instances",
+        "convex_nlp":    "Convex NLP instances",
+        "nonconvex_nlp": "Non-convex NLP instances",
+        "lp_netlib":     "Rust LP solver vs Netlib",
+        "nlp_cutest":    "Hybrid NLP solver vs CUTEst",
+        "pooling":       "GPU-amenable pooling problems",
+        "gpu_scaling":   "GPU batching scalability measurement",
     }
     print("\nAvailable benchmark suites:\n")
     for name, desc in suites.items():
@@ -202,22 +224,90 @@ def _run_benchmark(args):
     output_path = Path(args.output) if args.output else None
     runner.save_results(output_path)
 
-    # Print summary
+    # Print summary table
     results = runner.results
+    from benchmarks.metrics import (
+        final_gap_stats,
+        incorrect_count,
+        proved_optimal_count,
+        shifted_geometric_mean,
+        solved_count,
+    )
+
+    n_instances = len(results.get_instances())
+    print(f"\nSuite: {args.suite} ({n_instances} instances, {time_limit}s limit)")
+    print("-" * 70)
+    print(f"{'Solver':<15s} {'Solved':>8s} {'Proved':>8s} {'Incorrect':>10s} "
+          f"{'SGM(s)':>10s} {'Med Gap':>10s}")
+    print("-" * 70)
     for solver_name in results.get_solvers():
         solver_results = results.get_results(solver_name)
-        from benchmarks.metrics import incorrect_count, solved_count
         n_solved = solved_count(solver_results)
+        n_proved = proved_optimal_count(solver_results)
         n_incorrect = incorrect_count(solver_results, known_optima)
-        print(f"\n{solver_name}: {n_solved}/{len(solver_results)} solved, "
-              f"{n_incorrect} incorrect")
+        times = [r.wall_time for r in solver_results if r.is_solved]
+        sgm = shifted_geometric_mean(times)
+        gap_stats = final_gap_stats(solver_results)
+        med_gap = gap_stats["median"]
+
+        sgm_str = f"{sgm:.2f}" if sgm < 1e6 else "inf"
+        gap_str = f"{med_gap:.2%}" if med_gap == med_gap else "N/A"
+        solved_str = f"{n_solved}/{n_instances}"
+        proved_str = f"{n_proved}/{n_instances}"
+        print(
+            f"{solver_name:<15s} {solved_str:>8s} {proved_str:>8s}"
+            f" {n_incorrect:>10d} {sgm_str:>10s} {gap_str:>10s}"
+        )
+    print("-" * 70)
+
+    # Append to history
+    try:
+        from utils.history import append_to_history
+        history_path = append_to_history(args.suite, results)
+        print(f"History updated: {history_path}")
+    except Exception:
+        pass
+
+    # Save baseline if requested
+    if args.save_baseline:
+        baseline_dir = Path("reports/baselines")
+        baseline_dir.mkdir(parents=True, exist_ok=True)
+        baseline_path = baseline_dir / f"{args.suite}_baseline.json"
+        results.save(baseline_path)
+        print(f"Baseline saved: {baseline_path}")
+
+    # Compare against baseline
+    baseline_path_for_compare = None
+    if args.compare_baseline or args.baseline:
+        if args.baseline:
+            baseline_path_for_compare = Path(args.baseline)
+        else:
+            candidate = Path("reports/baselines") / f"{args.suite}_baseline.json"
+            if candidate.exists():
+                baseline_path_for_compare = candidate
+
+    if baseline_path_for_compare and baseline_path_for_compare.exists():
+        from benchmarks.metrics import BenchmarkResults, detect_regressions
+        baseline = BenchmarkResults.load(baseline_path_for_compare)
+        for solver_name in results.get_solvers():
+            alerts = detect_regressions(
+                results.get_results(solver_name),
+                baseline.get_results(solver_name),
+            )
+            if alerts:
+                print(f"\nRegressions vs baseline ({solver_name}):")
+                for alert in alerts:
+                    severity = alert["severity"].upper()
+                    print(f"  [{severity}] {alert['message']}")
+            else:
+                print(f"\nNo regressions vs baseline ({solver_name})")
 
     # Generate report if requested
     if args.report:
         try:
-            from utils.reporting import generate_markdown_report
+            from utils.reporting import generate_report
             report_path = Path("reports") / f"{args.suite}_report.md"
-            generate_markdown_report(results, report_path)
+            generate_report(results, known_optima=known_optima, output_path=report_path)
             print(f"\nReport: {report_path}")
         except ImportError:
             print("\nReport generation requires utils.reporting module")
@@ -262,6 +352,21 @@ def _load_solver_config(solver_name: str) -> dict | None:
     """Load solver configuration from TOML config."""
     config = _load_toml_config()
     return config.get("solvers", {}).get(solver_name)
+
+
+def _load_instance_classes() -> dict[str, str]:
+    """Load instance classification from config/instance_classes.toml."""
+    try:
+        import tomllib
+    except ImportError:
+        import tomli as tomllib
+
+    config_path = Path(__file__).parent / "config" / "instance_classes.toml"
+    if not config_path.exists():
+        return {}
+    with open(config_path, "rb") as f:
+        data = tomllib.load(f)
+    return data.get("instances", {})
 
 
 def _load_minlplib_instances(
@@ -311,6 +416,9 @@ def _load_minlplib_instances(
         "alan": 2.9250,
     }
 
+    # Load instance classifications
+    instance_classes = _load_instance_classes()
+
     # Find .nl files
     project_root = Path(__file__).parent.parent
     nl_dirs = [
@@ -330,6 +438,16 @@ def _load_minlplib_instances(
     # Apply suite filters
     max_vars = suite_config.get("max_variables", 10000) if suite_config else 10000
     max_instances = suite_config.get("max_instances", 10000) if suite_config else 10000
+    problem_class_filter = suite_config.get("problem_class") if suite_config else None
+    instance_list_inline = suite_config.get("instance_list_inline") if suite_config else None
+
+    # If inline instance list specified, only use those
+    if instance_list_inline:
+        filtered = {}
+        for name in instance_list_inline:
+            if name in found_instances:
+                filtered[name] = found_instances[name]
+        found_instances = filtered
 
     instances = []
     for name, nl_path in sorted(found_instances.items()):
@@ -346,11 +464,19 @@ def _load_minlplib_instances(
         if n_vars > max_vars:
             continue
 
+        # Determine problem class
+        prob_class = instance_classes.get(name, "unknown")
+
+        # Filter by problem class if specified
+        if problem_class_filter and prob_class != problem_class_filter:
+            continue
+
         instances.append(InstanceInfo(
             name=name,
             num_variables=n_vars,
             num_constraints=n_cons,
             best_known_objective=known_optima_map.get(name),
+            problem_class=prob_class,
             source="minlplib",
         ))
 

@@ -159,17 +159,41 @@ class BenchmarkRunner:
                         )
 
                 self.results.add_result(best_result)
-                status_char = "✓" if best_result.is_solved else "✗"
+
+                # Status icon
+                if best_result.is_solved:
+                    icon = "✓"
+                elif best_result.is_feasible:
+                    icon = "~"
+                elif best_result.status == SolveStatus.ERROR:
+                    icon = "!"
+                else:
+                    icon = "✗"
+
                 time_str = (
-                    f"{best_result.wall_time:.1f}s"
+                    f"{best_result.wall_time:.2f}s"
                     if best_result.wall_time < float("inf")
                     else "TL"
                 )
-                print(
-                    f"  {status_char} {instance_name:40s} {time_str:>10s} "
-                    f"nodes={best_result.node_count:>8d}  "
-                    f"[{completed}/{total}]"
-                )
+
+                # Objective and gap info
+                obj_str = ""
+                if best_result.objective is not None:
+                    obj_str = f"obj={best_result.objective:.4g}"
+                gap_str = ""
+                gap = best_result.relative_gap
+                if gap is not None:
+                    gap_str = f"gap={gap:.1%}"
+
+                parts = [f"  {icon} {instance_name:30s}"]
+                if obj_str:
+                    parts.append(f"{obj_str:>16s}")
+                if gap_str:
+                    parts.append(f"{gap_str:>10s}")
+                parts.append(f"{time_str:>10s}")
+                parts.append(f"nodes={best_result.node_count:>6d}")
+                parts.append(f"[{completed}/{total}]")
+                print("  ".join(parts))
 
     def _run_single(
         self,
@@ -194,6 +218,7 @@ class BenchmarkRunner:
 
         Uses the Python API directly, capturing layer profiling data.
         """
+        start_time = time.monotonic()
         try:
             import discopt.modeling as dm
 
@@ -214,13 +239,13 @@ class BenchmarkRunner:
             time_limit = opts.pop("time_limit", self.config.time_limit)
             gap_tol = opts.pop("gap_tolerance", 1e-4)
             max_nodes = opts.pop("max_nodes", 100_000)
-            gpu = opts.pop("gpu", False)
+            opts.pop("gpu", None)  # legacy option, ignored
 
             result = model.solve(
                 time_limit=time_limit,
                 gap_tolerance=gap_tol,
                 max_nodes=max_nodes,
-                gpu=gpu,
+                **opts,
             )
 
             # Map discopt status to benchmark status
@@ -251,12 +276,14 @@ class BenchmarkRunner:
                 jax_time_fraction=jax_frac,
                 python_time_fraction=py_frac,
             )
-        except Exception:
+        except Exception as e:
+            elapsed = time.monotonic() - start_time
+            print(f"  ERROR {instance}: {e}")
             return SolveResult(
                 instance=instance,
                 solver=solver.name,
                 status=SolveStatus.ERROR,
-                wall_time=float("inf"),
+                wall_time=elapsed,
             )
 
     def _find_nl_file(self, instance: str) -> str | None:
