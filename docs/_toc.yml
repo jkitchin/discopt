@@ -32,6 +32,7 @@ parts:
       - file: notebooks/ipm_vs_ipopt
       - file: notebooks/batch_ipm_vs_ipopt
       - file: notebooks/benchmarks_by_class
+      - file: notebooks/benchmark_dashboard
   - caption: Applications
     chapters:
       - file: notebooks/decision_focused_learning

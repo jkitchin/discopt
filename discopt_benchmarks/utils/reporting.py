@@ -18,14 +18,20 @@ from benchmarks.metrics import (
     BenchmarkResults,
     GateCriterionResult,
     SolveResult,
+    bound_quality_rate,
     evaluate_phase_gate,
+    final_gap_stats,
     gpu_vs_cpu_speedup,
     incorrect_count,
+    iteration_stats,
     layer_profiling_summary,
+    proved_optimal_count,
+    proved_optimal_rate,
     root_gap_analysis,
     shifted_geometric_mean,
     solved_count,
     solved_count_by_size,
+    speedup_table,
     geometric_mean_ratio,
 )
 
@@ -120,6 +126,77 @@ def generate_report(
             lines.append(
                 f"| vs {s} | {ratio_str} | {jax_faster} | {other_faster} | {len(common)} |"
             )
+        lines.append("")
+
+    # ── Global Optimality ──
+    if known_optima:
+        lines.append("## Global Optimality")
+        lines.append("")
+        lines.append("| Metric | " + " | ".join(solvers) + " |")
+        lines.append("|--------|" + "|".join(["--------"] * len(solvers)) + "|")
+
+        row = "| Proved optimal |"
+        for s in solvers:
+            row += f" {proved_optimal_count(benchmark.get_results(s))} |"
+        lines.append(row)
+
+        row = "| Proved optimal rate |"
+        for s in solvers:
+            rate = proved_optimal_rate(benchmark.get_results(s), known_optima)
+            row += f" {rate:.1%} |"
+        lines.append(row)
+
+        for label, key in [("Mean final gap", "mean"), ("Median final gap", "median")]:
+            row = f"| {label} |"
+            for s in solvers:
+                stats = final_gap_stats(benchmark.get_results(s))
+                val = stats[key]
+                val_str = f"{val:.2%}" if not np.isnan(val) else "N/A"
+                row += f" {val_str} |"
+            lines.append(row)
+
+        row = "| Bound quality rate |"
+        for s in solvers:
+            bqr = bound_quality_rate(benchmark.get_results(s), known_optima)
+            row += f" {bqr:.1%} |"
+        lines.append(row)
+
+        lines.append("")
+
+    # ── Per-Class Breakdown ──
+    classes: dict[str, list[str]] = {}
+    for name, info in benchmark.instance_info.items():
+        pc = info.problem_class
+        if pc and pc != "unknown":
+            if pc not in classes:
+                classes[pc] = []
+            classes[pc].append(name)
+
+    if classes:
+        lines.append("## Results by Problem Class")
+        lines.append("")
+        lines.append(
+            "| Class | Instances | "
+            + " | ".join(f"{s} solved" for s in solvers)
+            + " |"
+        )
+        lines.append(
+            "|-------|-----------|"
+            + "|".join(["--------"] * len(solvers))
+            + "|"
+        )
+
+        for pc in sorted(classes.keys()):
+            pc_set = set(classes[pc])
+            row = f"| {pc} | {len(pc_set)} |"
+            for s in solvers:
+                s_solved = sum(
+                    1
+                    for r in benchmark.get_results(s)
+                    if r.is_solved and r.instance in pc_set
+                )
+                row += f" {s_solved}/{len(pc_set)} |"
+            lines.append(row)
         lines.append("")
 
     # ── Root Gap Analysis ──
@@ -517,3 +594,211 @@ def generate_cutest_performance_profile_data(
             }
 
     return result
+
+
+# ─────────────────────────────────────────────────────────────
+# Per-Category Benchmark Report
+# ─────────────────────────────────────────────────────────────
+
+
+def generate_category_report(
+    benchmark: BenchmarkResults,
+    category: str,
+    level: str = "smoke",
+    known_optima: Optional[dict[str, float]] = None,
+    output_path: Optional[Path] = None,
+) -> str:
+    """Generate a markdown report for a single category benchmark run.
+
+    Includes summary table, speedup matrix, correctness validation,
+    per-problem detail, and gap analysis (for global_opt).
+    """
+    lines = []
+    solvers = benchmark.get_solvers()
+    instances = benchmark.get_instances()
+
+    # ── Header ──
+    lines.append(
+        f"# Category Benchmark: {category.upper()} ({level})"
+    )
+    lines.append("")
+    lines.append(
+        f"**Generated:** "
+        f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+    lines.append(f"**Category:** {category}")
+    lines.append(f"**Level:** {level}")
+    lines.append(f"**Instances:** {len(instances)}")
+    lines.append(f"**Solvers:** {', '.join(solvers)}")
+    lines.append("")
+
+    # ── Summary Table ──
+    lines.append("## Summary")
+    lines.append("")
+    header = "| Metric |"
+    sep = "|--------|"
+    for s in solvers:
+        header += f" {s} |"
+        sep += "--------|"
+    lines.append(header)
+    lines.append(sep)
+
+    # Solved count
+    row = "| **Solved** |"
+    for s in solvers:
+        n = solved_count(benchmark.get_results(s))
+        row += f" {n}/{len(instances)} |"
+    lines.append(row)
+
+    # Incorrect count
+    if known_optima:
+        row = "| **Incorrect** |"
+        for s in solvers:
+            ic = incorrect_count(
+                benchmark.get_results(s), known_optima
+            )
+            marker = "FAIL" if ic > 0 else "OK"
+            row += f" {marker} ({ic}) |"
+        lines.append(row)
+
+    # SGM time
+    row = "| **SGM time (s)** |"
+    for s in solvers:
+        results = benchmark.get_results(s)
+        times = [r.wall_time for r in results if r.is_solved]
+        gm = shifted_geometric_mean(times)
+        gm_str = f"{gm:.3f}" if gm < 1e6 else "inf"
+        row += f" {gm_str} |"
+    lines.append(row)
+
+    # Median iterations
+    row = "| **Med. iterations** |"
+    for s in solvers:
+        istats = iteration_stats(benchmark.get_results(s))
+        med = istats["median"]
+        med_str = f"{med:.0f}" if not np.isnan(med) else "N/A"
+        row += f" {med_str} |"
+    lines.append(row)
+
+    lines.append("")
+
+    # ── Speedup Matrix ──
+    if len(solvers) >= 2:
+        lines.append("## Speedup Matrix (SGM ratio)")
+        lines.append("")
+        lines.append(
+            "Values < 1.0 mean the row solver is faster "
+            "than the column solver."
+        )
+        lines.append("")
+        header = "| |"
+        sep = "|---|"
+        for s in solvers:
+            header += f" {s} |"
+            sep += "---|"
+        lines.append(header)
+        lines.append(sep)
+
+        table = speedup_table(benchmark)
+        for sa in solvers:
+            row = f"| **{sa}** |"
+            for sb in solvers:
+                ratio = table.get((sa, sb), float("nan"))
+                if sa == sb:
+                    row += " — |"
+                elif ratio < 100:
+                    row += f" {ratio:.2f}x |"
+                else:
+                    row += " >100x |"
+            lines.append(row)
+        lines.append("")
+
+    # ── Correctness Validation ──
+    if known_optima:
+        lines.append("## Correctness Validation")
+        lines.append("")
+        total_incorrect = 0
+        for s in solvers:
+            ic = incorrect_count(
+                benchmark.get_results(s), known_optima
+            )
+            total_incorrect += ic
+        if total_incorrect == 0:
+            lines.append(
+                "All solvers produced correct results "
+                "(0 incorrect across all solvers)."
+            )
+        else:
+            lines.append(
+                f"**WARNING:** {total_incorrect} incorrect "
+                f"result(s) detected!"
+            )
+        lines.append("")
+
+    # ── Per-Problem Detail ──
+    lines.append("## Per-Problem Results")
+    lines.append("")
+    header = "| Instance |"
+    sep = "|----------|"
+    for s in solvers:
+        header += f" {s} status | {s} time | {s} obj |"
+        sep += "---|---|---|"
+    lines.append(header)
+    lines.append(sep)
+
+    for inst in instances:
+        row = f"| {inst} |"
+        for s in solvers:
+            results = benchmark.get_results(s)
+            match = [r for r in results if r.instance == inst]
+            if match:
+                r = match[0]
+                st = r.status.value[:3].upper()
+                t = (
+                    f"{r.wall_time:.2f}s"
+                    if r.wall_time < float("inf")
+                    else "TL"
+                )
+                obj = (
+                    f"{r.objective:.4g}"
+                    if r.objective is not None
+                    else "—"
+                )
+                row += f" {st} | {t} | {obj} |"
+            else:
+                row += " — | — | — |"
+        lines.append(row)
+    lines.append("")
+
+    # ── Gap Analysis (global_opt only) ──
+    if category == "global_opt" and known_optima:
+        lines.append("## Gap Analysis")
+        lines.append("")
+        for s in solvers:
+            results = benchmark.get_results(s)
+            n_proved = proved_optimal_count(results)
+            gap_stats = final_gap_stats(results)
+            bqr = bound_quality_rate(results, known_optima)
+            lines.append(f"### {s}")
+            lines.append(f"- Proved optimal: {n_proved}")
+            mean_g = gap_stats["mean"]
+            med_g = gap_stats["median"]
+            lines.append(
+                f"- Mean gap: "
+                f"{'N/A' if np.isnan(mean_g) else f'{mean_g:.4%}'}"
+            )
+            lines.append(
+                f"- Median gap: "
+                f"{'N/A' if np.isnan(med_g) else f'{med_g:.4%}'}"
+            )
+            lines.append(f"- Bound quality rate: {bqr:.1%}")
+            lines.append("")
+
+    report = "\n".join(lines)
+
+    if output_path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(report)
+        print(f"Category report written to: {output_path}")
+
+    return report

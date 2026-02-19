@@ -60,6 +60,9 @@ class SolveResult:
     nlp_time: float = 0.0
     lp_time: float = 0.0
 
+    # Iteration count (NLP solver iterations or B&B iterations)
+    iterations: int = 0
+
     @property
     def is_solved(self) -> bool:
         return self.status == SolveStatus.OPTIMAL
@@ -220,6 +223,79 @@ def incorrect_count(
                 f"diff={abs(r.objective - ref):.2e}"
             )
     return count
+
+
+def proved_optimal_count(
+    results: list[SolveResult],
+    gap_tolerance: float = 1e-4,
+) -> int:
+    """Instances with OPTIMAL status and relative gap within tolerance."""
+    count = 0
+    for r in results:
+        if r.status != SolveStatus.OPTIMAL:
+            continue
+        gap = r.relative_gap
+        if gap is not None and gap <= gap_tolerance:
+            count += 1
+        elif gap is None and r.is_solved:
+            # No bound info but solver claims optimal
+            count += 1
+    return count
+
+
+def proved_optimal_rate(
+    results: list[SolveResult],
+    known_optima: dict[str, float],
+    gap_tolerance: float = 1e-4,
+) -> float:
+    """Fraction of instances with known optima that are proved optimal."""
+    with_known = [r for r in results if r.instance in known_optima]
+    if not with_known:
+        return 0.0
+    return proved_optimal_count(with_known, gap_tolerance) / len(with_known)
+
+
+def final_gap_stats(
+    results: list[SolveResult],
+) -> dict[str, float]:
+    """Mean and median final relative gap across solved/feasible instances."""
+    gaps = []
+    for r in results:
+        gap = r.relative_gap
+        if gap is not None and r.is_feasible:
+            gaps.append(gap)
+    if not gaps:
+        return {"mean": float("nan"), "median": float("nan"), "count": 0}
+    arr = np.array(gaps)
+    return {
+        "mean": float(np.mean(arr)),
+        "median": float(np.median(arr)),
+        "min": float(np.min(arr)),
+        "max": float(np.max(arr)),
+        "count": len(gaps),
+    }
+
+
+def bound_quality_rate(
+    results: list[SolveResult],
+    known_optima: dict[str, float],
+    threshold: float = 0.99,
+) -> float:
+    """Fraction of instances where final bound >= threshold * known optimum."""
+    valid = 0
+    total = 0
+    for r in results:
+        if r.instance not in known_optima or r.bound is None:
+            continue
+        opt = known_optima[r.instance]
+        total += 1
+        # For minimization: bound should be close to (or above) optimum
+        if abs(opt) < 1e-10:
+            if abs(r.bound - opt) < 1e-6:
+                valid += 1
+        elif r.bound >= threshold * opt:
+            valid += 1
+    return valid / max(total, 1)
 
 
 def shifted_geometric_mean(
@@ -461,6 +537,54 @@ def problem_classes_beating(
             beating.append(pc)
 
     return beating
+
+
+def speedup_table(
+    benchmark: BenchmarkResults,
+    shift: float = 1.0,
+) -> dict[tuple[str, str], float]:
+    """Pairwise SGM speedup ratios between all solvers.
+
+    Returns dict mapping (solver_a, solver_b) -> SGM(a) / SGM(b).
+    Ratio < 1.0 means solver_a is faster.
+    """
+    solvers = benchmark.get_solvers()
+    table = {}
+    for sa in solvers:
+        for sb in solvers:
+            if sa == sb:
+                table[(sa, sb)] = 1.0
+            else:
+                ratio = geometric_mean_ratio(
+                    benchmark.get_results(sa),
+                    benchmark.get_results(sb),
+                    shift=shift,
+                )
+                table[(sa, sb)] = ratio
+    return table
+
+
+def iteration_stats(
+    results: list[SolveResult],
+) -> dict[str, float]:
+    """Mean and median iteration counts for solved instances."""
+    iters = [r.iterations for r in results if r.is_solved and r.iterations > 0]
+    if not iters:
+        return {
+            "mean": float("nan"),
+            "median": float("nan"),
+            "min": 0,
+            "max": 0,
+            "count": 0,
+        }
+    arr = np.array(iters)
+    return {
+        "mean": float(np.mean(arr)),
+        "median": float(np.median(arr)),
+        "min": int(np.min(arr)),
+        "max": int(np.max(arr)),
+        "count": len(iters),
+    }
 
 
 # ─────────────────────────────────────────────────────────────

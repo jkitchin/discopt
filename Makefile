@@ -58,7 +58,10 @@ CUTEST_ENV      := $(CUTEST_PREFIX)/env.sh
 .PHONY: all benchmarks build test lint clean help \
         bench-notebook bench-smoke bench-phase3-gate bench-tests \
         bench-cutest bench-cutest-smoke setup-cutest check-cutest \
-        docs docs-open notebooks
+        docs docs-open notebooks \
+        bench-lp-smoke bench-qp-smoke bench-milp-smoke bench-miqp-smoke bench-minlp-smoke bench-global-smoke \
+        bench-lp-full bench-qp-full bench-milp-full bench-miqp-full bench-minlp-full bench-global-full \
+        bench-smoke-all bench-full-all bench-all
 
 all: benchmarks
 
@@ -80,6 +83,23 @@ help:
 	@echo "  make docs               Build Jupyter Book documentation"
 	@echo "  make docs-open          Build and open Jupyter Book in browser"
 	@echo "  make clean              Remove build artifacts"
+	@echo ""
+	@echo "Per-category benchmarks:"
+	@echo "  make bench-lp-smoke     LP smoke benchmarks"
+	@echo "  make bench-qp-smoke     QP smoke benchmarks"
+	@echo "  make bench-milp-smoke   MILP smoke benchmarks"
+	@echo "  make bench-miqp-smoke   MIQP smoke benchmarks"
+	@echo "  make bench-minlp-smoke  MINLP smoke benchmarks"
+	@echo "  make bench-global-smoke Global opt smoke benchmarks"
+	@echo "  make bench-lp-full      LP full benchmarks"
+	@echo "  make bench-qp-full      QP full benchmarks"
+	@echo "  make bench-milp-full    MILP full benchmarks"
+	@echo "  make bench-miqp-full    MIQP full benchmarks"
+	@echo "  make bench-minlp-full   MINLP full benchmarks"
+	@echo "  make bench-global-full  Global opt full benchmarks"
+	@echo "  make bench-smoke-all    All smoke benchmarks"
+	@echo "  make bench-full-all     All full benchmarks"
+	@echo "  make bench-all          All benchmarks (smoke + full)"
 	@echo ""
 	@echo "Results are saved to results/ with timestamps."
 	@echo ""
@@ -283,6 +303,84 @@ docs:
 docs-open: docs
 	@echo "==> Opening Jupyter Book in browser..."
 	open docs/_build/html/index.html
+
+# --- Per-Category Benchmarks --------------------------------------------------
+
+bench-lp-smoke: build | $(RESULTS_DIR)
+	@echo "==> Running LP smoke benchmarks..."
+	$(PYTHON) discopt_benchmarks/run_category_benchmarks.py \
+		--category lp --level smoke --report --html \
+		--output $(RESULTS_DIR)/lp_smoke_$(TS)
+	@echo "==> LP smoke benchmark complete"
+
+bench-qp-smoke: build | $(RESULTS_DIR)
+	@echo "==> Running QP smoke benchmarks..."
+	$(PYTHON) discopt_benchmarks/run_category_benchmarks.py \
+		--category qp --level smoke --report --html \
+		--output $(RESULTS_DIR)/qp_smoke_$(TS)
+
+bench-milp-smoke: build | $(RESULTS_DIR)
+	@echo "==> Running MILP smoke benchmarks..."
+	$(PYTHON) discopt_benchmarks/run_category_benchmarks.py \
+		--category milp --level smoke --report --html \
+		--output $(RESULTS_DIR)/milp_smoke_$(TS)
+
+bench-miqp-smoke: build | $(RESULTS_DIR)
+	@echo "==> Running MIQP smoke benchmarks..."
+	$(PYTHON) discopt_benchmarks/run_category_benchmarks.py \
+		--category miqp --level smoke --report --html \
+		--output $(RESULTS_DIR)/miqp_smoke_$(TS)
+
+bench-minlp-smoke: build | $(RESULTS_DIR)
+	@echo "==> Running MINLP smoke benchmarks..."
+	$(PYTHON) discopt_benchmarks/run_category_benchmarks.py \
+		--category minlp --level smoke --report --html \
+		--output $(RESULTS_DIR)/minlp_smoke_$(TS)
+
+bench-global-smoke: build | $(RESULTS_DIR)
+	@echo "==> Running global opt smoke benchmarks..."
+	$(PYTHON) discopt_benchmarks/run_category_benchmarks.py \
+		--category global_opt --level smoke --report --html \
+		--output $(RESULTS_DIR)/global_smoke_$(TS)
+
+bench-lp-full: build | $(RESULTS_DIR)
+	$(PYTHON) discopt_benchmarks/run_category_benchmarks.py \
+		--category lp --level full --report --html \
+		--output $(RESULTS_DIR)/lp_full_$(TS)
+
+bench-qp-full: build | $(RESULTS_DIR)
+	$(PYTHON) discopt_benchmarks/run_category_benchmarks.py \
+		--category qp --level full --report --html \
+		--output $(RESULTS_DIR)/qp_full_$(TS)
+
+bench-milp-full: build | $(RESULTS_DIR)
+	$(PYTHON) discopt_benchmarks/run_category_benchmarks.py \
+		--category milp --level full --report --html \
+		--output $(RESULTS_DIR)/milp_full_$(TS)
+
+bench-miqp-full: build | $(RESULTS_DIR)
+	$(PYTHON) discopt_benchmarks/run_category_benchmarks.py \
+		--category miqp --level full --report --html \
+		--output $(RESULTS_DIR)/miqp_full_$(TS)
+
+bench-minlp-full: build | $(RESULTS_DIR)
+	$(PYTHON) discopt_benchmarks/run_category_benchmarks.py \
+		--category minlp --level full --report --html \
+		--output $(RESULTS_DIR)/minlp_full_$(TS)
+
+bench-global-full: build | $(RESULTS_DIR)
+	$(PYTHON) discopt_benchmarks/run_category_benchmarks.py \
+		--category global_opt --level full --report --html \
+		--output $(RESULTS_DIR)/global_full_$(TS)
+
+bench-smoke-all: bench-lp-smoke bench-qp-smoke bench-milp-smoke bench-miqp-smoke bench-minlp-smoke bench-global-smoke
+	@echo "==> All smoke benchmarks complete"
+
+bench-full-all: bench-lp-full bench-qp-full bench-milp-full bench-miqp-full bench-minlp-full bench-global-full
+	@echo "==> All full benchmarks complete"
+
+bench-all: bench-smoke-all bench-full-all
+	@echo "==> All benchmarks complete"
 
 # --- Clean --------------------------------------------------------------------
 

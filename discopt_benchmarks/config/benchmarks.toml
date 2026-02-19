@@ -96,6 +96,40 @@ min_nodes_expected = 1000
 max_variables = 50
 time_limit_seconds = 3600
 
+[suites.global_opt]
+description = "Global optimality verification (instances with known optima)"
+sources = ["minlplib"]
+instance_list_inline = [
+  "ex1221", "ex1225", "ex1226",
+  "nvs01", "nvs03", "nvs04", "nvs06", "nvs07", "nvs08",
+  "gear", "gear3", "gear4", "alan", "dispatch",
+]
+time_limit_seconds = 120
+
+[suites.lp]
+description = "Pure LP instances"
+sources = ["minlplib"]
+problem_class = "lp"
+time_limit_seconds = 60
+
+[suites.qp]
+description = "Quadratic programming instances"
+sources = ["minlplib"]
+problem_class = "qp"
+time_limit_seconds = 120
+
+[suites.convex_nlp]
+description = "Convex NLP instances"
+sources = ["minlplib"]
+problem_class = "convex_nlp"
+time_limit_seconds = 300
+
+[suites.nonconvex_nlp]
+description = "Non-convex NLP instances"
+sources = ["minlplib"]
+problem_class = "nonconvex_nlp"
+time_limit_seconds = 600
+
 # ─────────────────────────────────────────────────────────────
 # PHASE GATE CRITERIA
 # These are the automated go/no-go checks at each phase boundary.
@@ -155,15 +189,80 @@ description = "Release gate (Month 48)"
 # SOLVER CONFIGURATIONS
 # ─────────────────────────────────────────────────────────────
 
+# Per-category benchmark suites
+[suites.lp_smoke]
+description = "LP smoke tests"
+max_instances = 5
+time_limit_seconds = 60
+
+[suites.lp_full]
+description = "LP full benchmark"
+max_instances = 20
+time_limit_seconds = 300
+
+[suites.qp_smoke]
+description = "QP smoke tests"
+max_instances = 5
+time_limit_seconds = 60
+
+[suites.qp_full]
+description = "QP full benchmark"
+max_instances = 20
+time_limit_seconds = 300
+
+[suites.milp_smoke]
+description = "MILP smoke tests"
+max_instances = 5
+time_limit_seconds = 120
+
+[suites.milp_full]
+description = "MILP full benchmark"
+max_instances = 20
+time_limit_seconds = 600
+
+[suites.miqp_smoke]
+description = "MIQP smoke tests"
+max_instances = 5
+time_limit_seconds = 120
+
+[suites.miqp_full]
+description = "MIQP full benchmark"
+max_instances = 15
+time_limit_seconds = 600
+
+[suites.minlp_smoke]
+description = "MINLP smoke tests"
+max_instances = 5
+time_limit_seconds = 120
+
+[suites.minlp_full]
+description = "MINLP full benchmark"
+max_instances = 30
+time_limit_seconds = 600
+
+[suites.global_opt_smoke]
+description = "Global optimization smoke tests"
+max_instances = 5
+time_limit_seconds = 120
+
+[suites.global_opt_full]
+description = "Global optimization full benchmark"
+max_instances = 20
+time_limit_seconds = 600
+
+# ─────────────────────────────────────────────────────────────
+# SOLVER CONFIGURATIONS
+# ─────────────────────────────────────────────────────────────
+
 [solvers.discopt]
 command = "discopt"
 type = "internal"
-options = { threads = 1, gpu = true }
+options = { threads = 1 }
 
 [solvers.discopt_cpu]
 command = "discopt"
 type = "internal"
-options = { threads = 1, gpu = false }
+options = { threads = 1 }
 
 [solvers.baron]
 command = "baron"
