@@ -20,6 +20,7 @@ A hybrid Mixed-Integer Nonlinear Programming (MINLP) solver combining a Rust bac
 - **Primal heuristics** -- multi-start NLP, feasibility pump
 - **Differentiable optimization** -- parameter sensitivity via envelope theorem and KKT implicit differentiation
 - **.nl file import** -- read AMPL-format models via Rust parser
+- **Dynamic optimization** -- DAE collocation (Radau/Legendre) and finite differences for optimal control, parameter estimation, and PDE-constrained optimization
 - **CUTEst interface** -- NLP benchmarking against the CUTEst test set
 - **LLM integration** (optional) -- conversational model building, diagnostics, and reformulation suggestions
 - **1650+ tests** -- 141 Rust + 1510+ Python
@@ -128,6 +129,7 @@ Tutorial notebooks are available in `docs/notebooks/`:
 - **Advanced Features** -- relaxations, presolve, cutting planes, branching policies
 - **IPM vs Ipopt** -- backend comparison
 - **Batch IPM** -- vmap-batched interior-point solving
+- **Dynamic Optimization** -- DAE collocation for optimal control, parameter estimation, and PDEs
 - **Decision-Focused Learning** -- differentiable optimization in ML pipelines
 
 Full documentation is built with Jupyter Book: `jupyter-book build docs/`

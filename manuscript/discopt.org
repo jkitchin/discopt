@@ -132,6 +132,14 @@ result = m.solve()
 
 The API supports continuous, binary, and integer variables; parameters (for sensitivity analysis and decision-focused learning); generalized disjunctive programming (GDP) constraints with automatic big-M reformulation; and standard mathematical functions (=exp=, =log=, =sin=, =cos=, =sqrt=, =abs=, and matrix operations).
 
+** Dynamic Optimization via DAE Collocation
+
+The =discopt.dae= module extends the modeling API to dynamic optimization problems by transcribing ODE/DAE systems into algebraic NLP constraints using orthogonal collocation on finite elements cite:&Biegler2010,Cuthrell1987. A =DAEBuilder= class provides a high-level interface: users declare state, algebraic, and control variables, supply an ODE/DAE right-hand side as a Python callable that builds discopt expressions, and call =discretize()= to generate all collocation and continuity constraints automatically.
+
+The module supports both Radau IIA and Gauss-Legendre collocation schemes with 1--5 collocation points per element. First-order ODEs, second-order ODEs (with automatic state augmentation for velocity coupling), and index-1 DAEs (algebraic constraints enforced at collocation points) are supported. Piecewise-constant control variables and integral objectives via quadrature are included for optimal control problems. A finite-difference backend (=FDBuilder=) provides backward, forward, and central Euler stencils as a simpler alternative.
+
+This transcription approach requires no changes to the existing DAG compiler, JAX backend, or solver infrastructure---the collocation constraints are standard algebraic expressions built from existing operators. For a 30-element, 3-point Radau discretization of a single-state ODE, the exponential decay solution matches =exp(-t)= to within $10^{-4}$ absolute error.
+
 ** JAX DAG Compiler
 
 The DAG compiler walks the expression tree and produces pure JAX functions compatible with =jax.jit=, =jax.grad=, and =jax.vmap=. Each expression node type (=Variable=, =Constant=, =BinaryOp=, =FunctionCall=, etc.) maps to a corresponding JAX operation. The compiler handles:
@@ -463,7 +471,7 @@ discopt demonstrates that a modern, multi-language MINLP solver can provide capa
 
 *Comparison with existing solvers.* discopt is not intended to replace BARON or SCIP on their core strength---solving large-scale MINLP to global optimality via decades-tuned sparse algorithms. Rather, discopt targets a complementary niche: problems where differentiability, batch solving, or Python-native modeling are primary requirements. The multi-backend architecture means users can start with the pure-JAX IPM for rapid prototyping and differentiable workflows, then switch to ripopt or Ipopt for production performance.
 
-*Future work.* Key directions include: (1) GPU-accelerated batch IPM via JAX's XLA backend when GPU support matures; (2) extending ripopt with sparse linear algebra to compete with Ipopt on large problems; (3) deeper integration of learned relaxations with online training during the B&B search; and (4) exploiting the differentiable solver for bilevel optimization and meta-learning of solver parameters.
+*Future work.* Key directions include: (1) GPU-accelerated batch IPM via JAX's XLA backend when GPU support matures; (2) extending ripopt with sparse linear algebra to compete with Ipopt on large problems; (3) deeper integration of learned relaxations with online training during the B&B search; (4) exploiting the differentiable solver for bilevel optimization and meta-learning of solver parameters; and (5) extending the DAE collocation module to higher-index DAEs, adaptive mesh refinement, and multi-stage optimal control with path constraints.
 
 * Conclusion
 
