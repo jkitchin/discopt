@@ -1,0 +1,2 @@
+{"timestamp": "2026-02-19T07:58:37.867702", "git_sha": "a8d4546", "suite": "smoke", "total_instances": 10, "solved_count": 7, "mean_time": 2.9993132347591938, "mean_gap": Infinity, "median_gap": 0.0}
+{"timestamp": "2026-02-19T08:19:12.065385", "git_sha": "a8d4546", "suite": "smoke", "total_instances": 10, "solved_count": 0, "mean_time": Infinity, "mean_gap": NaN, "median_gap": NaN}
