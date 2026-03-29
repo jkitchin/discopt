@@ -33,6 +33,8 @@ from discopt.modeling.examples import example_simple_minlp
 # Tolerances
 # ──────────────────────────────────────────────────────────
 
+pytestmark = pytest.mark.slow
+
 ABS_TOL = 1e-4
 REL_TOL = 1e-3
 INTEGRALITY_TOL = 1e-5

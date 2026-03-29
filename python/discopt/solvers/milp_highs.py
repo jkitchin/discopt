@@ -101,11 +101,10 @@ def solve_milp(
     # ---- integrality ---------------------------------------------------------
     if integrality is not None:
         int_arr = np.asarray(integrality, dtype=np.int32)
-        lp.integrality_ = np.where(
-            int_arr == 1,
-            int(highspy.HighsVarType.kInteger),
-            int(highspy.HighsVarType.kContinuous),
-        ).tolist()
+        lp.integrality_ = [
+            highspy.HighsVarType.kInteger if v else highspy.HighsVarType.kContinuous
+            for v in (int_arr == 1).tolist()
+        ]
 
     # ---- create solver -------------------------------------------------------
     h = highspy.Highs()

@@ -153,7 +153,7 @@ def solve_gdpopt_loa(
             break
 
         x_master = master_result.x[:n_vars]
-        LB = max(LB, master_result.objective or -1e20)
+        LB = max(LB, master_result.objective if master_result.objective is not None else -1e20)
 
         # b. Fix integers to master values, solve NLP subproblem
         sub_lb = lb.copy()
@@ -254,12 +254,19 @@ def _solve_nlp_relaxation(evaluator, lb, ub, nlp_solver: str) -> np.ndarray | No
 
 def _solve_nlp_subproblem(evaluator, sub_lb, sub_ub, nlp_solver: str) -> np.ndarray | None:
     """Solve NLP subproblem with fixed integer bounds."""
-    lb_clip = np.clip(sub_lb, -1e8, 1e8)
-    ub_clip = np.clip(sub_ub, -1e8, 1e8)
-    x0 = 0.5 * (lb_clip + ub_clip)
+    # IPM log-barriers require strict lb < x < ub; relax fixed vars by tiny slack
+    ipm_lb = sub_lb.copy()
+    ipm_ub = sub_ub.copy()
+    fixed = ipm_lb == ipm_ub
+    ipm_lb[fixed] -= 1e-8
+    ipm_ub[fixed] += 1e-8
+
+    lb_clip = np.clip(ipm_lb, -1e8, 1e8)
+    ub_clip = np.clip(ipm_ub, -1e8, 1e8)
+    x0 = np.clip(0.5 * (lb_clip + ub_clip), sub_lb, sub_ub)
 
     # Create a bounds-overriding evaluator proxy
-    proxy = _BoundsProxy(evaluator, sub_lb, sub_ub)
+    proxy = _BoundsProxy(evaluator, ipm_lb, ipm_ub)
 
     try:
         if nlp_solver == "ipm" and hasattr(evaluator, "_obj_fn"):
@@ -301,6 +308,18 @@ class _BoundsProxy:
     @property
     def variable_bounds(self):
         return self._lb, self._ub
+
+    @property
+    def _model(self):
+        return self._eval._model
+
+    @property
+    def _obj_fn(self):
+        return self._eval._obj_fn
+
+    @property
+    def _cons_fn(self):
+        return self._eval._cons_fn
 
     def evaluate_objective(self, x):
         return self._eval.evaluate_objective(x)

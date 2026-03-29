@@ -155,6 +155,7 @@ class TestCollocationMatrix:
 # ─────────────────────────────────────────────────────────────
 
 
+@pytest.mark.slow
 class TestCollocationODE:
     def test_exponential_decay(self):
         """dx/dt = -x, x(0)=1. Exact: exp(-t)."""
@@ -307,6 +308,7 @@ class TestCollocationODE:
 # ─────────────────────────────────────────────────────────────
 
 
+@pytest.mark.slow
 class TestFiniteDifference:
     def test_backward_euler_exp_decay(self):
         """Backward Euler for dx/dt = -x should converge with O(h) accuracy."""
@@ -409,6 +411,7 @@ class TestFiniteDifference:
 # ─────────────────────────────────────────────────────────────
 
 
+@pytest.mark.slow
 class TestSecondOrder:
     def test_harmonic_oscillator(self):
         """d²x/dt² = -x, x(0)=1, x'(0)=0. Exact: cos(t)."""
@@ -474,6 +477,7 @@ class TestSecondOrder:
         assert abs(x_vals[-1]) < abs(x_vals[0])
 
 
+@pytest.mark.slow
 class TestDAE:
     def test_index1_algebraic_constraint(self):
         """dx/dt = -x + z, 0 = x^2 - z. So z = x^2, dx/dt = -x + x^2."""
@@ -510,6 +514,7 @@ class TestDAE:
 # ─────────────────────────────────────────────────────────────
 
 
+@pytest.mark.slow
 class TestOptimalControl:
     def test_minimum_energy(self):
         """dx/dt = -x + u, minimize integral(u^2). Transfer x: 1 -> ~0."""
@@ -535,6 +540,7 @@ class TestOptimalControl:
         assert abs(x_vals[-1]) < 0.5  # should be near 0
 
 
+@pytest.mark.slow
 class TestIntegral:
     def test_integral_of_constant(self):
         """integral(1) over [0, T] should equal T."""
@@ -579,6 +585,7 @@ class TestIntegral:
         np.testing.assert_allclose(result.objective, T**2 / 2, atol=1e-4)
 
 
+@pytest.mark.slow
 class TestMethodOfLines:
     def test_heat_equation(self):
         """1D heat equation du/dt = alpha * d²u/dz², verify decay."""
@@ -628,6 +635,7 @@ class TestMethodOfLines:
 # ─────────────────────────────────────────────────────────────
 
 
+@pytest.mark.slow
 class TestPublicAPI:
     def test_imports(self):
         from discopt.dae import (

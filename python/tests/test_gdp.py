@@ -338,6 +338,7 @@ class TestSOSReformulation:
 # ── End-to-end solve tests ──
 
 
+@pytest.mark.slow
 class TestEndToEndSolve:
     def test_indicator_solve_active(self):
         """If y=1 then x <= 5; minimize x+y => should set y=0, x at lower bound."""

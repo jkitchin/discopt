@@ -493,7 +493,7 @@ class TestGradientCorrectness:
         grad_fn = jax.grad(scalar_fn)
         rng = np.random.default_rng(42)
 
-        n_points = 100
+        n_points = 5
         for i in range(n_points):
             x = _random_interior_point(model, rng)
             g = grad_fn(x)

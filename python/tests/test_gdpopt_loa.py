@@ -14,7 +14,7 @@ try:
 except ImportError:
     HAS_HIGHS = False
 
-pytestmark = pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
+pytestmark = [pytest.mark.slow, pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")]
 
 
 class TestGDPoptLOA:
