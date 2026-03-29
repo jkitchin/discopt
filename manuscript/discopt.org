@@ -11,7 +11,7 @@
 
 * Abstract
 
-We present discopt, a hybrid Rust/JAX/Python solver for mixed-integer nonlinear programming (MINLP) problems, together with ripopt, a faithful Rust translation of Ipopt's interior point algorithm. The system makes five contributions: (1) differentiable MINLP solving via implicit differentiation of the KKT system, enabling decision-focused learning through nonconvex optimization layers; (2) batched node evaluation using =jax.vmap= for data-parallel branch-and-bound; (3) a pure-JAX interior point method with Mehrotra predictor-corrector steps and Ipopt-style filter line search that is JIT-compilable and vmappable; (4) ripopt, a memory-safe Rust IPM with zero C/Fortran dependencies that implements Ipopt's numerical hardening through a source-level translation; and (5) a compositional relaxation compiler supporting McCormick, \alpha BB, piecewise McCormick, and ICNN-learned relaxations. All three NLP backends (pure-JAX IPM, ripopt, Ipopt) produce identical optimal solutions on a suite of 9 NLP and 24 MINLP benchmark problems with zero incorrect results. On a decision-focused learning task, differentiating through the solver achieves 36% regret reduction versus two-stage predict-then-optimize. The algebraic coefficient extraction path provides 17--226\times speedups for LP and QP subproblems. Source code is available under EPL-2.0 license (discopt and ripopt).
+We present discopt, a hybrid Rust/JAX/Python solver for mixed-integer nonlinear programming (MINLP) problems, together with ripopt, a faithful Rust translation of Ipopt's interior point algorithm. The system makes five contributions: (1) differentiable MINLP solving via implicit differentiation of the KKT system, enabling decision-focused learning through nonconvex optimization layers; (2) batched node evaluation using =jax.vmap= for data-parallel branch-and-bound; (3) a pure-JAX interior point method with Mehrotra predictor-corrector steps and Ipopt-style filter line search that is JIT-compilable and vmappable; (4) ripopt, a memory-safe Rust IPM with zero C/Fortran dependencies that implements Ipopt's numerical hardening through a source-level translation; (5) a compositional relaxation compiler supporting McCormick, \alpha BB, piecewise McCormick, and ICNN-learned relaxations; and (6) a neural network embedding module that formulates trained feedforward networks as algebraic MINLP constraints via full-space, big-M, and reduced-space strategies, enabling optimization over ML surrogates. All three NLP backends (pure-JAX IPM, ripopt, Ipopt) produce identical optimal solutions on a suite of 9 NLP and 24 MINLP benchmark problems with zero incorrect results. On a decision-focused learning task, differentiating through the solver achieves 36% regret reduction versus two-stage predict-then-optimize. The algebraic coefficient extraction path provides 17--226\times speedups for LP and QP subproblems. Source code is available under EPL-2.0 license (discopt and ripopt).
 
 * Introduction
 
@@ -31,9 +31,10 @@ This paper describes discopt and ripopt, which together address these three gaps
 2. *Batched node evaluation* using =jax.vmap= over NLP relaxation solves at B&B nodes, with warm-starting from parent solutions (\S 4.1).
 3. *Pure-JAX interior point method* with Mehrotra predictor-corrector cite:&Mehrotra1992, Cholesky-based inertia correction, Ipopt-style filter line search cite:&Wachter2006, and carry-based =jax.lax.while_loop= for JIT cache reuse (\S 4.1).
 4. *ripopt*: a source-level C++ \to Rust translation of Ipopt's core IPM algorithm, producing a standalone memory-safe NLP solver with a clean =NlpProblem= trait interface (\S 4.2).
-5. *Compositional relaxation framework* with 19 McCormick relaxation functions cite:&McCormick1976;&Tsoukalas2014, \alpha BB underestimators cite:&Androulakis1995;&Adjiman1998, piecewise McCormick with adaptive partitioning cite:&Castro2015 achieving 91--94% gap reduction, and ICNN-learned relaxations cite:&Amos2017icnn (\S 5).
+5. *Compositional relaxation framework* with 21 McCormick relaxation functions cite:&McCormick1976;&Tsoukalas2014, \alpha BB underestimators cite:&Androulakis1995;&Adjiman1998, piecewise McCormick with adaptive partitioning cite:&Castro2015 achieving 91--94% gap reduction, and ICNN-learned relaxations cite:&Amos2017icnn (\S 5).
+6. *Neural network embedding* that formulates trained feedforward networks (ReLU, sigmoid, tanh, softplus) as MINLP constraints via big-M, full-space, and reduced-space strategies, with interval arithmetic bound propagation and ONNX model import cite:&Ceccon2022;&Anderson2020 (\S 3.4).
 
-The remainder of this paper is organized as follows. Section 2 reviews background and related work. Section 3 describes the discopt architecture. Section 4 presents the three NLP solver backends. Section 5 details the convex relaxation framework. Section 6 covers differentiable optimization. Section 7 reports computational experiments. Section 8 discusses limitations and future work, and Section 9 concludes.
+The remainder of this paper is organized as follows. Section 2 reviews background and related work. Section 3 describes the discopt architecture, including the modeling API, DAE collocation, neural network embedding, and compiler infrastructure. Section 4 presents the three NLP solver backends. Section 5 details the convex relaxation framework. Section 6 covers differentiable optimization. Section 7 reports computational experiments. Section 8 discusses limitations and future work, and Section 9 concludes.
 
 * Background and Related Work
 
@@ -73,15 +74,16 @@ Table ref:tab-gaps summarizes the capabilities of existing systems versus discop
 
 #+NAME: tab-gaps
 #+CAPTION: Comparison of discopt with existing optimization frameworks. DFL = decision-focused learning.
-| Feature                  | BARON | SCIP    | Bonmin | cvxpylayers  | discopt |
-|--------------------------+-------+---------+--------+--------------+---------|
-| Nonconvex MINLP          | Yes   | Yes     | Yes    | No           | Yes     |
-| Differentiable solve     | No    | No      | No     | Yes (convex) | Yes     |
-| Batched node evaluation  | No    | No      | No     | N/A          | Yes     |
-| Memory-safe solver       | No    | No      | No     | N/A          | Yes     |
-| Zero C/Fortran deps      | No    | No      | No     | Yes          | Yes     |
-| DFL through MINLP        | No    | No      | No     | No           | Yes     |
-| Compositional relaxation | Yes   | Partial | No     | N/A          | Yes     |
+| Feature                  | BARON | SCIP    | Bonmin | cvxpylayers  | OMLT    | discopt |
+|--------------------------+-------+---------+--------+--------------+---------+---------|
+| Nonconvex MINLP          | Yes   | Yes     | Yes    | No           | Via Pyomo | Yes   |
+| Differentiable solve     | No    | No      | No     | Yes (convex) | No      | Yes     |
+| Batched node evaluation  | No    | No      | No     | N/A          | No      | Yes     |
+| Memory-safe solver       | No    | No      | No     | N/A          | No      | Yes     |
+| Zero C/Fortran deps      | No    | No      | No     | Yes          | No      | Yes     |
+| DFL through MINLP        | No    | No      | No     | No           | No      | Yes     |
+| Compositional relaxation | Yes   | Partial | No     | N/A          | No      | Yes     |
+| NN embedding in MINLP    | No    | No      | No     | No           | Yes     | Yes     |
 
 * The discopt Architecture
 
@@ -130,7 +132,7 @@ m.subject_to(dm.sum(y) <= k, name="cardinality")
 result = m.solve()
 #+END_SRC
 
-The API supports continuous, binary, and integer variables; parameters (for sensitivity analysis and decision-focused learning); generalized disjunctive programming (GDP) constraints with automatic big-M reformulation; and standard mathematical functions (=exp=, =log=, =sin=, =cos=, =sqrt=, =abs=, and matrix operations).
+The API supports continuous, binary, and integer variables; parameters (for sensitivity analysis and decision-focused learning); generalized disjunctive programming (GDP) constraints with big-M, multiple big-M (MBM), and convex hull reformulations; =BooleanVar= with propositional logic operators (=&=, =|=, =~=, =.implies()=, =.equivalent_to()=) and CNF-to-linear conversion; nested disjunctions for hierarchical process design; and standard mathematical functions (=exp=, =log=, =sin=, =cos=, =sqrt=, =abs=, =tanh=, =sigmoid=, =softplus=, and matrix operations).
 
 ** Dynamic Optimization via DAE Collocation
 
@@ -139,6 +141,33 @@ The =discopt.dae= module extends the modeling API to dynamic optimization proble
 The module supports both Radau IIA and Gauss-Legendre collocation schemes with 1--5 collocation points per element. First-order ODEs, second-order ODEs (with automatic state augmentation for velocity coupling), and index-1 DAEs (algebraic constraints enforced at collocation points) are supported. Piecewise-constant control variables and integral objectives via quadrature are included for optimal control problems. A finite-difference backend (=FDBuilder=) provides backward, forward, and central Euler stencils as a simpler alternative.
 
 This transcription approach requires no changes to the existing DAG compiler, JAX backend, or solver infrastructure---the collocation constraints are standard algebraic expressions built from existing operators. For a 30-element, 3-point Radau discretization of a single-state ODE, the exponential decay solution matches =exp(-t)= to within $10^{-4}$ absolute error.
+
+** Neural Network Embedding
+
+The =discopt.nn= module embeds trained feedforward neural networks as algebraic constraints in MINLP models, enabling optimization over machine learning surrogates with global optimality guarantees. This follows the approach of OMLT cite:&Ceccon2022, adapted to discopt's expression DAG, JAX automatic differentiation, and McCormick relaxation framework.
+
+An =NNFormulation= builder (following the same pattern as =DAEBuilder=) takes an existing =Model=, a =NetworkDefinition= describing the trained network's weights, biases, and activation functions, and a formulation strategy, then adds all necessary variables and constraints:
+
+#+BEGIN_SRC python
+from discopt.nn import NNFormulation, NetworkDefinition, DenseLayer, Activation
+
+net = NetworkDefinition([
+    DenseLayer(W1, b1, Activation.RELU),
+    DenseLayer(W2, b2, Activation.LINEAR),
+], input_bounds=(lb, ub))
+
+nn = NNFormulation(model, net, strategy="relu_bigm")
+nn.formulate()
+model.minimize(dm.sum(nn.outputs))
+#+END_SRC
+
+Three formulation strategies are provided:
+
+- *Full-space*: Explicit pre-activation ($\hat{z}$) and post-activation ($z$) variables for each neuron, with affine constraints $\hat{z} = Wx + b$ and activation constraints $z = \sigma(\hat{z})$. Supports smooth activations (sigmoid, tanh, softplus) that integrate directly with JAX autodiff and McCormick relaxations for spatial B&B.
+- *ReLU big-M* cite:&Anderson2020: For networks with ReLU activations, introduces binary variables $q_j$ and linear big-M constraints: $z \ge 0$, $z \ge \hat{z}$, $z \le u \cdot q$, $z \le \hat{z} - l(1-q)$, where $l, u$ are pre-activation bounds from interval arithmetic. Neurons with bounds that are always positive (or always negative) are detected and simplified to avoid unnecessary binary variables.
+- *Reduced-space*: Builds a single nested expression with no intermediate variables, suitable for small networks.
+
+Interval arithmetic bound propagation through the network layers computes tight big-M constants by splitting weight matrices into positive and negative parts. An ONNX reader (=load_onnx=) imports trained models from scikit-learn, PyTorch, and Keras via the ONNX interchange format.
 
 ** JAX DAG Compiler
 
@@ -290,7 +319,7 @@ The quality of convex relaxations at B&B nodes directly determines solver effici
 
 ** McCormick Relaxation Compiler
 
-The relaxation compiler implements 19 univariate and bivariate McCormick relaxation functions cite:&McCormick1976;&Tsoukalas2014 covering all operations supported by the modeling API: bilinear products, addition, subtraction, negation, division, power, =exp=, square, =abs=, =sqrt=, =log=, =log2=, =log10=, =sin=, =cos=, =tan=, =sign=, =min=, and =max=.
+The relaxation compiler implements 21 univariate and bivariate McCormick relaxation functions cite:&McCormick1976;&Tsoukalas2014 covering all operations supported by the modeling API: bilinear products, addition, subtraction, negation, division, power, =exp=, square, =abs=, =sqrt=, =log=, =log2=, =log10=, =sin=, =cos=, =tan=, =sigmoid=, =softplus=, =sign=, =min=, and =max=.
 
 Each function maps interval bounds $[x_l, x_u]$ and convex/concave enclosures $(cv, cc)$ of the argument to tighter enclosures of the result. The compiler produces pure =jax.numpy= functions compatible with =jax.jit= and =jax.vmap=, enabling batch relaxation evaluation over multiple B&B nodes.
 
@@ -471,11 +500,11 @@ discopt demonstrates that a modern, multi-language MINLP solver can provide capa
 
 *Comparison with existing solvers.* discopt is not intended to replace BARON or SCIP on their core strength---solving large-scale MINLP to global optimality via decades-tuned sparse algorithms. Rather, discopt targets a complementary niche: problems where differentiability, batch solving, or Python-native modeling are primary requirements. The multi-backend architecture means users can start with the pure-JAX IPM for rapid prototyping and differentiable workflows, then switch to ripopt or Ipopt for production performance.
 
-*Future work.* Key directions include: (1) GPU-accelerated batch IPM via JAX's XLA backend when GPU support matures; (2) extending ripopt with sparse linear algebra to compete with Ipopt on large problems; (3) deeper integration of learned relaxations with online training during the B&B search; (4) exploiting the differentiable solver for bilevel optimization and meta-learning of solver parameters; and (5) extending the DAE collocation module to higher-index DAEs, adaptive mesh refinement, and multi-stage optimal control with path constraints.
+*Future work.* Key directions include: (1) GPU-accelerated batch IPM via JAX's XLA backend when GPU support matures; (2) extending ripopt with sparse linear algebra to compete with Ipopt on large problems; (3) deeper integration of learned relaxations with online training during the B&B search; (4) exploiting the differentiable solver for bilevel optimization and meta-learning of solver parameters; (5) extending the DAE collocation module to higher-index DAEs, adaptive mesh refinement, and multi-stage optimal control with path constraints; and (6) extending the neural network embedding to convolutional layers, residual connections, gradient-boosted tree models, and LP-based bound tightening (OBBT) for tighter big-M constants.
 
 * Conclusion
 
-We have presented discopt, a hybrid Rust/JAX/Python MINLP solver that bridges the gap between classical mathematical programming and modern differentiable programming. The solver provides three interchangeable NLP backends---a pure-JAX IPM, ripopt (a memory-safe Rust translation of Ipopt), and Ipopt via cyipopt---all producing identical results on benchmark problems. The differentiable solving capability enables decision-focused learning through nonconvex optimization, achieving 36% regret reduction on resource allocation tasks. The compositional relaxation compiler achieves 91--94% gap reduction via piecewise McCormick, and the algebraic coefficient extraction path provides 17--226\times speedups for structured subproblems. ripopt eliminates the Fortran/C++ dependency chain while preserving Ipopt's numerical robustness.
+We have presented discopt, a hybrid Rust/JAX/Python MINLP solver that bridges the gap between classical mathematical programming and modern differentiable programming. The solver provides three interchangeable NLP backends---a pure-JAX IPM, ripopt (a memory-safe Rust translation of Ipopt), and Ipopt via cyipopt---all producing identical results on benchmark problems. The differentiable solving capability enables decision-focused learning through nonconvex optimization, achieving 36% regret reduction on resource allocation tasks. The compositional relaxation compiler achieves 91--94% gap reduction via piecewise McCormick, and the algebraic coefficient extraction path provides 17--226\times speedups for structured subproblems. The neural network embedding module enables optimization over trained ML surrogates by formulating feedforward networks as MINLP constraints with big-M, full-space, and reduced-space strategies. ripopt eliminates the Fortran/C++ dependency chain while preserving Ipopt's numerical robustness.
 
 The system is open-source: discopt and ripopt are available under the EPL-2.0 License.
 
