@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "discopt"
-version = "0.2.0"
+version = "0.2.1"
 description = "Hybrid MINLP solver combining Rust and JAX"
 requires-python = ">=3.10"
 authors = [{name = "John Kitchin"}]
@@ -58,6 +58,12 @@ manifest-path = "crates/discopt-python/Cargo.toml"
 python-source = "python"
 module-name = "discopt._rust"
 features = ["pyo3/extension-module"]
+include = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "crates/**/*.rs",
+    "crates/**/*.toml",
+]
 
 [tool.ruff]
 line-length = 100
