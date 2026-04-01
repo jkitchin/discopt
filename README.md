@@ -3,7 +3,7 @@
 [![CI](https://github.com/jkitchin/discopt/actions/workflows/ci.yml/badge.svg)](https://github.com/jkitchin/discopt/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/jkitchin/discopt/graph/badge.svg?token=B3Y6LAtox9)](https://codecov.io/gh/jkitchin/discopt)
 
-![discopt](https://raw.githubusercontent.com/jkitchin/discopt/main/discopt.png)
+![discopt]([https://raw.githubusercontent.com/jkitchin/discopt/main/discopt.png](https://github.com/jkitchin/discopt/blob/main/discopt.png?raw=true))
 
 A hybrid Mixed-Integer Nonlinear Programming (MINLP) solver combining a Rust backend, JAX automatic differentiation, and Python orchestration. Solves MINLP problems via NLP-based spatial Branch and Bound with JIT-compiled objective/gradient/Hessian evaluation.
 
