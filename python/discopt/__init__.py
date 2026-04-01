@@ -25,7 +25,7 @@ solvers
     NLP solver backends: ripopt (Rust IPM), pure-JAX IPM (vmap batch), cyipopt (Ipopt).
 """
 
-__version__ = "0.2.0"
+__version__ = "0.2.4"
 
 from discopt.callbacks import (
     CallbackContext as CallbackContext,
