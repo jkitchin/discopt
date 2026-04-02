@@ -211,13 +211,21 @@ def _extract_penalties(expr, unc_map: dict):
 
 def _soc_penalty(decision_expr, unc: EllipsoidalUncertaintySet):
     """Build  ρ * ||Σ^{1/2} @ decision_expr||₂."""
-    from discopt.modeling.core import BinaryOp, Constant, FunctionCall, MatMulExpression
+    from discopt.modeling.core import (
+        BinaryOp,
+        Constant,
+        FunctionCall,
+        MatMulExpression,
+        SumExpression,
+    )
 
     Sigma_sqrt = Constant(unc.Sigma_sqrt)
     scaled = MatMulExpression(Sigma_sqrt, decision_expr)
     # ||scaled||₂ = sqrt(sum(scaled * scaled))
-    # BinaryOp("*", ...) is element-wise multiplication; FunctionCall("*",...) is not valid.
-    inner = FunctionCall("sum", BinaryOp("*", scaled, scaled))
+    # BinaryOp("*", ...) is element-wise multiplication.
+    # Use SumExpression (not FunctionCall("sum",...)) so the DAG compiler
+    # can handle it via jnp.sum.
+    inner = SumExpression(BinaryOp("*", scaled, scaled), axis=None)
     norm2 = FunctionCall("sqrt", inner)
     return BinaryOp("*", Constant(np.array(unc.rho)), norm2)
 

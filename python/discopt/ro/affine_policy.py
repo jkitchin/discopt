@@ -265,8 +265,18 @@ class AffineDecisionRule:
             n_p = len(nominal_flat) if nominal.ndim > 0 else 1
 
             for j in range(n_p):
-                # Policy column Y_j (same shape as y)
-                Y_col = m.continuous(f"{pfx}_Y{col_idx}", shape=y.shape, lb=-1e20, ub=1e20)
+                # Policy column Y_j (same shape as y).  Bounds are derived
+                # from the recourse variable range: Y_j * xi_j must keep the
+                # affine expression within the recourse variable's bounds, so
+                # |Y_j| <= (ub - lb) is a safe upper bound on the magnitude.
+                bound_diff = np.asarray(y_ub) - np.asarray(y_lb)
+                y_range = float(np.max(bound_diff)) if np.all(np.isfinite(bound_diff)) else 1e8
+                Y_col = m.continuous(
+                    f"{pfx}_Y{col_idx}",
+                    shape=y.shape,
+                    lb=-y_range,
+                    ub=y_range,
+                )
                 self._Y_cols.append(Y_col)
 
                 # Perturbation ξⱼ = pⱼ - p̄ⱼ
