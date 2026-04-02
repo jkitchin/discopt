@@ -84,6 +84,7 @@ Table ref:tab-gaps summarizes the capabilities of existing systems versus discop
 | DFL through MINLP        | No    | No      | No     | No           | No      | Yes     |
 | Compositional relaxation | Yes   | Partial | No     | N/A          | No      | Yes     |
 | NN embedding in MINLP    | No    | No      | No     | No           | Yes     | Yes     |
+| Robust counterpart API   | No    | No      | No     | No           | No      | Yes     |
 
 * The discopt Architecture
 
@@ -168,6 +169,68 @@ Three formulation strategies are provided:
 - *Reduced-space*: Builds a single nested expression with no intermediate variables, suitable for small networks.
 
 Interval arithmetic bound propagation through the network layers computes tight big-M constants by splitting weight matrices into positive and negative parts. An ONNX reader (=load_onnx=) imports trained models from scikit-learn, PyTorch, and Keras via the ONNX interchange format.
+
+** Robust Optimization Module
+
+The =discopt.ro= module converts a nominal model with uncertain parameters into a deterministic *robust counterpart* that is feasible for every realization of the uncertainty within a prescribed set.  Following the classical framework of Ben-Tal and Nemirovski cite:&BenTal1999,BenTal2009, robust optimization replaces the original problem
+
+#+BEGIN_EXAMPLE
+  min_x  f(x, p)     s.t. g_i(x, p) ≤ 0  for all p ∈ U
+#+END_EXAMPLE
+
+with a deterministic equivalent that encodes the worst-case constraint tightening analytically.
+
+*** Uncertainty Sets
+
+Three standard uncertainty set families are supported:
+
+- *Box* ($L_\infty$ ball) $\mathcal{U} = \{p : |p_j - \bar{p}_j| \le \delta_j\}$: the worst-case maximisation of an affine function $c^\top p$ over the box is $\bar{c}^\top p + \sum_j \delta_j |c_j|$ --- a separable 1-norm penalty.  When $p$ appears only as an additive RHS term, this collapses to a single bound substitution $p \leftarrow \bar{p} \pm \delta$.
+- *Ellipsoidal* $\mathcal{U} = \{p : \|\Sigma^{-1/2}(p-\bar{p})\|_2 \le \rho\}$: the worst-case is $\bar{a}^\top p + \rho \|\Sigma^{1/2} a(x)\|_2$, a second-order cone (SOC) penalty cite:&BenTal1999.
+- *Polyhedral* $\mathcal{U} = \{p : A\xi \le b,\; \xi = p-\bar{p}\}$: the support function is evaluated by LP duality, introducing auxiliary dual variables $\lambda \ge 0$ satisfying $A^\top \lambda = a(x)$ and adding $b^\top \lambda$ to the constraint cite:&BertsimasSim2004.
+
+The *budget-of-uncertainty* set (Bertsimas--Sim cite:&BertsimasSim2004) is provided as a convenience constructor:
+
+$$\mathcal{U}_\Gamma = \left\{p : |p_j - \bar{p}_j| \le \delta_j,\; \sum_j \frac{|p_j - \bar{p}_j|}{\delta_j} \le \Gamma \right\}$$
+
+The budget $\Gamma \in [0, k]$ interpolates between the nominal solution ($\Gamma = 0$) and full box robustness ($\Gamma = k$), controlling the trade-off between solution cost and protection level.
+
+*** Implementation: Sign-Tracking Substitution
+
+The reformulation traverses the expression DAG while tracking the *effective sign* of each uncertain parameter at each node.  At a subtraction node $a - p$, the parameter $p$ acquires sign $-1$; at a negation node $-p$, the sign flips.  Multiplication by a non-negative constant preserves the sign; multiplication by a negative constant flips it.  This sign determines whether the worst-case value is the upper or lower component bound:
+
+#+BEGIN_EXAMPLE
+  sign > 0 and maximize ⟹ use upper bound  (p̄ + δ)
+  sign < 0 and maximize ⟹ use lower bound  (p̄ − δ)
+#+END_EXAMPLE
+
+This is correct for all affine occurrences of uncertain parameters.  Bilinear terms ($p \cdot x$ where both are free) require additional auxiliary variables and are flagged with a diagnostic message.
+
+The =RobustCounterpart= class follows the same builder pattern as =NNFormulation=:
+
+#+BEGIN_SRC python
+from discopt.ro import BoxUncertaintySet, RobustCounterpart
+
+m = dm.Model("production")
+x = m.continuous("x", shape=(3,), lb=0)
+c = m.parameter("c", value=[10.0, 15.0, 8.0])
+d = m.parameter("d", value=100.0)
+
+m.minimize(dm.sum(c * x))
+m.subject_to(dm.sum(x) >= d, name="demand")
+
+rc = RobustCounterpart(m, [
+    BoxUncertaintySet(c, delta=0.10 * c.value),   # costs ± 10%
+    BoxUncertaintySet(d, delta=0.05 * d.value),   # demand ± 5%
+])
+rc.formulate()          # modifies m in-place; m is now deterministic
+result = m.solve()
+#+END_SRC
+
+After =formulate()=, the model contains no uncertain parameters: each has been replaced by its worst-case constant.  The reformulated model is a standard MINLP that can be solved by any of discopt's solver backends.
+
+*** Correctness Guarantee
+
+For the additive/affine uncertainty case, the sign-tracking substitution produces an exact robust counterpart: the reformulated constraints hold for all $p \in \mathcal{U}$ if and only if they hold after substituting the worst-case constants.  This follows directly from the LP duality arguments in cite:&BenTal1999.  The implementation verifies this via structural tests that confirm (1) no uncertain parameters remain in the reformulated DAG, and (2) the embedded worst-case constants match the analytically derived values.
 
 ** JAX DAG Compiler
 
@@ -512,7 +575,7 @@ discopt demonstrates that a modern, multi-language MINLP solver can provide capa
 
 *Command-line interface and literature monitoring.* discopt provides a command-line interface (=discopt=) installable via =pip=, with subcommands for searching arXiv and OpenAlex APIs and writing structured reports. These subcommands output JSON, enabling integration with scripting workflows and CI pipelines. A companion "discoptbot" agent uses the CLI to periodically scan for new publications relevant to the solver's algorithmic components (spatial B&B, McCormick relaxations, GNN branching, GPU-accelerated IPM), score them by relevance, and produce structured literature reports. This automated monitoring helps maintain awareness of algorithmic advances that could inform future solver development.
 
-*Future work.* Key directions include: (1) GPU-accelerated batch IPM via JAX's XLA backend when GPU support matures; (2) extending ripopt with sparse linear algebra to compete with Ipopt on large problems; (3) deeper integration of learned relaxations with online training during the B&B search; (4) exploiting the differentiable solver for bilevel optimization and meta-learning of solver parameters; (5) extending the DAE collocation module to higher-index DAEs, adaptive mesh refinement, and multi-stage optimal control with path constraints; and (6) extending the neural network embedding to convolutional layers, residual connections, gradient-boosted tree models, and LP-based bound tightening (OBBT) for tighter big-M constants.
+*Future work.* Key directions include: (1) GPU-accelerated batch IPM via JAX's XLA backend when GPU support matures; (2) extending ripopt with sparse linear algebra to compete with Ipopt on large problems; (3) deeper integration of learned relaxations with online training during the B&B search; (4) exploiting the differentiable solver for bilevel optimization and meta-learning of solver parameters; (5) extending the DAE collocation module to higher-index DAEs, adaptive mesh refinement, and multi-stage optimal control with path constraints; (6) extending the neural network embedding to convolutional layers, residual connections, gradient-boosted tree models, and LP-based bound tightening (OBBT) for tighter big-M constants; and (7) extending the robust optimization module to *adjustable robust counterparts* cite:&BenTalGoryashko2004 with affine decision rules for recourse variables, bilinear coefficient uncertainty via auxiliary variable linearisation, and distributionally robust optimization via moment-based ambiguity sets.
 
 * Conclusion
 

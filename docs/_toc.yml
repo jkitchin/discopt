@@ -10,6 +10,7 @@ parts:
       - file: notebooks/tutorial_minlp
       - file: notebooks/tutorial_gdp
       - file: notebooks/tutorial_dae
+      - file: notebooks/tutorial_robust
   - caption: "Tutorials \u2014 Solver Backends"
     chapters:
       - file: notebooks/tutorial_oa
