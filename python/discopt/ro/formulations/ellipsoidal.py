@@ -146,8 +146,6 @@ def _extract_penalties(expr, unc_map: dict):
         UnaryOp,
     )
 
-    penalties: list = []
-
     if isinstance(expr, Parameter) and expr.name in unc_map:
         unc = unc_map[expr.name]
         return Constant(unc.parameter.value), []

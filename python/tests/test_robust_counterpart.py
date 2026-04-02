@@ -18,11 +18,8 @@ import os
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
-import numpy as np
-import pytest
-
 import discopt.modeling as dm
-from discopt.modeling.core import BinaryOp, Constant, Parameter
+import numpy as np
 from discopt.ro import (
     BoxUncertaintySet,
     EllipsoidalUncertaintySet,
@@ -30,7 +27,6 @@ from discopt.ro import (
     RobustCounterpart,
     budget_uncertainty_set,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -181,7 +177,7 @@ class TestBoxReformulationValues:
         x = m.continuous("x", lb=0)
         d = m.parameter("d", value=5.0)
         m.minimize(x)
-        m.subject_to(x >= d, name="demand")   # stored: d - x <= 0
+        m.subject_to(x >= d, name="demand")  # stored: d - x <= 0
 
         rc = RobustCounterpart(m, BoxUncertaintySet(d, delta=1.0))
         rc.formulate()
@@ -218,14 +214,10 @@ class TestBoxReformulationValues:
         # Verify the robust constants: c_wc = 11, d_wc = 5.5
         obj_consts = _collect_constants(m_rob._objective.expression)
         flat_obj = np.concatenate([np.atleast_1d(v) for v in obj_consts])
-        assert np.any(np.isclose(flat_obj, 11.0)), (
-            f"Expected robust cost 11.0; got {flat_obj}"
-        )
+        assert np.any(np.isclose(flat_obj, 11.0)), f"Expected robust cost 11.0; got {flat_obj}"
         con_consts = _collect_constants(m_rob._constraints[0].body)
         flat_con = np.concatenate([np.atleast_1d(v) for v in con_consts])
-        assert np.any(np.isclose(flat_con, 5.5)), (
-            f"Expected robust demand 5.5; got {flat_con}"
-        )
+        assert np.any(np.isclose(flat_con, 5.5)), f"Expected robust demand 5.5; got {flat_con}"
 
     def test_vector_parameter(self):
         """Vector cost parameter: each component uses its own δ."""
@@ -313,7 +305,6 @@ class TestPolyhedralReformulationStructure:
         m.minimize(x)
         m.subject_to(x >= d)
 
-        k = 1
         A = np.array([[1.0], [-1.0]])
         b = np.array([1.0, 1.0])  # |ξ| ≤ 1  →  d ∈ [4, 6]
         unc = PolyhedralUncertaintySet(d, A=A, b=b)

@@ -67,6 +67,8 @@ References
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 
 
@@ -140,8 +142,8 @@ class AffineDecisionRule:
 
     def __init__(
         self,
-        recourse_var,                        # type: Variable
-        uncertain_params,                    # type: Parameter | list[Parameter]
+        recourse_var: Any,
+        uncertain_params: Any,
         prefix: str = "adr",
     ) -> None:
         from discopt.modeling.core import Parameter, Variable
@@ -171,10 +173,10 @@ class AffineDecisionRule:
         self._prefix = prefix
         self._model = recourse_var.model
 
-        self._y0 = None
-        self._Y_cols: list = []          # list of Variable
-        self._perturbations: list = []   # list of Expression (ξⱼ = pⱼ - p̄ⱼ)
-        self._affine_expr = None
+        self._y0: Any = None
+        self._Y_cols: list = []
+        self._perturbations: list = []
+        self._affine_expr: Any = None
         self._applied = False
 
     # ── Properties (available after apply()) ─────────────────────────────────
@@ -210,9 +212,7 @@ class AffineDecisionRule:
     @property
     def n_policy_columns(self) -> int:
         """Total number of scalar uncertain parameter components."""
-        return sum(
-            max(1, int(np.prod(p.value.shape))) for p in self._uncertain_params
-        )
+        return sum(max(1, int(np.prod(p.value.shape))) for p in self._uncertain_params)
 
     # ── Main method ──────────────────────────────────────────────────────────
 
@@ -238,9 +238,9 @@ class AffineDecisionRule:
         from discopt.modeling.core import (
             BinaryOp,
             Constant,
+            Constraint,
             IndexExpression,
             Objective,
-            Constraint,
         )
 
         m = self._model
@@ -248,11 +248,15 @@ class AffineDecisionRule:
         pfx = self._prefix
 
         # ── 1. Create intercept y₀ ────────────────────────────────────────────
-        y0 = m.continuous(f"{pfx}_intercept", shape=y.shape, lb=-1e20, ub=1e20)
+        # Inherit bounds from the original recourse variable: y₀ represents
+        # the baseline value of y when all perturbations are zero.
+        y_lb = y.lb if hasattr(y, "lb") and y.lb is not None else -1e20
+        y_ub = y.ub if hasattr(y, "ub") and y.ub is not None else 1e20
+        y0 = m.continuous(f"{pfx}_intercept", shape=y.shape, lb=y_lb, ub=y_ub)
         self._y0 = y0
 
         # ── 2. Build affine expression ────────────────────────────────────────
-        affine_expr = y0  # start with the intercept
+        affine_expr: Any = y0  # start with the intercept
 
         col_idx = 0
         for p in self._uncertain_params:
@@ -262,9 +266,7 @@ class AffineDecisionRule:
 
             for j in range(n_p):
                 # Policy column Y_j (same shape as y)
-                Y_col = m.continuous(
-                    f"{pfx}_Y{col_idx}", shape=y.shape, lb=-1e20, ub=1e20
-                )
+                Y_col = m.continuous(f"{pfx}_Y{col_idx}", shape=y.shape, lb=-1e20, ub=1e20)
                 self._Y_cols.append(Y_col)
 
                 # Perturbation ξⱼ = pⱼ - p̄ⱼ
@@ -287,8 +289,14 @@ class AffineDecisionRule:
         self._affine_expr = affine_expr
 
         # ── 3. Substitute y → affine_expr in all constraints and objective ───
+        # Only plain Constraint objects carry .body / .sense / .rhs; other
+        # types (_IndicatorConstraint, _DisjunctiveConstraint, _SOSConstraint,
+        # _LogicalConstraint) are passed through unchanged.
         new_constraints = []
         for con in m._constraints:
+            if not isinstance(con, Constraint):
+                new_constraints.append(con)
+                continue
             new_body = _substitute_var(con.body, y, affine_expr)
             new_constraints.append(
                 Constraint(body=new_body, sense=con.sense, rhs=con.rhs, name=con.name)
@@ -390,14 +398,10 @@ def _substitute_var(expr, old_var, new_expr):
         return FunctionCall(expr.func_name, *new_args)
 
     if isinstance(expr, SumExpression):
-        return SumExpression(
-            _substitute_var(expr.operand, old_var, new_expr), expr.axis
-        )
+        return SumExpression(_substitute_var(expr.operand, old_var, new_expr), expr.axis)
 
     if isinstance(expr, SumOverExpression):
-        return SumOverExpression(
-            [_substitute_var(t, old_var, new_expr) for t in expr.terms]
-        )
+        return SumOverExpression([_substitute_var(t, old_var, new_expr) for t in expr.terms])
 
     # Parameter and unknown nodes pass through unchanged.
     return expr

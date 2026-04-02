@@ -25,13 +25,11 @@ import os
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
+import discopt.modeling as dm
 import numpy as np
 import pytest
-
-import discopt.modeling as dm
-from discopt.modeling.core import BinaryOp, Constant, Parameter, Variable
+from discopt.modeling.core import BinaryOp, Constant, Parameter
 from discopt.ro import AffineDecisionRule, BoxUncertaintySet, RobustCounterpart
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -404,8 +402,8 @@ class TestPerturbationStructure:
     def test_multiple_params_total_perturbations(self):
         m = dm.Model()
         y = m.continuous("y", lb=0)
-        d = m.parameter("d", value=5.0)       # 1 scalar
-        c = m.parameter("c", value=[1.0, 2.0]) # 2 scalars
+        d = m.parameter("d", value=5.0)  # 1 scalar
+        c = m.parameter("c", value=[1.0, 2.0])  # 2 scalars
         m.minimize(y)
         m.subject_to(y >= d)
         adr = AffineDecisionRule(y, uncertain_params=[d, c])
@@ -527,8 +525,6 @@ class TestADRWithRobustCounterpart:
         """With box uncertainty δ=10 on demand d=50, the robust constraint
         (x + y₀ + Y₀*(d-50) ≥ d) after RobustCounterpart should embed the
         worst-case d = 50+10 = 60 as a constant."""
-        from discopt.modeling.core import Constant
-
         m = dm.Model()
         x = m.continuous("x", lb=0)
         y = m.continuous("y", lb=0)
@@ -543,9 +539,16 @@ class TestADRWithRobustCounterpart:
 
         def _all_constants(expr) -> list:
             from discopt.modeling.core import (
-                BinaryOp, Constant, FunctionCall, IndexExpression,
-                MatMulExpression, SumExpression, SumOverExpression, UnaryOp,
+                BinaryOp,
+                Constant,
+                FunctionCall,
+                IndexExpression,
+                MatMulExpression,
+                SumExpression,
+                SumOverExpression,
+                UnaryOp,
             )
+
             if isinstance(expr, Constant):
                 return [float(np.sum(expr.value))]
             if isinstance(expr, (BinaryOp, MatMulExpression)):
@@ -582,7 +585,7 @@ class TestADRWithRobustCounterpart:
         m = dm.Model()
         x = m.continuous("x", lb=0)
         y = m.continuous("y", lb=0)
-        c = m.parameter("c", value=3.0)   # uncertain production cost
+        c = m.parameter("c", value=3.0)  # uncertain production cost
         d = m.parameter("d", value=20.0)  # uncertain demand
 
         m.minimize(c * x + 2 * y)
@@ -594,7 +597,9 @@ class TestADRWithRobustCounterpart:
 
         assert len(adr.policy_columns) == 2  # one per uncertain scalar param
 
-        rc = RobustCounterpart(m, [BoxUncertaintySet(c, delta=0.5), BoxUncertaintySet(d, delta=5.0)])
+        rc = RobustCounterpart(
+            m, [BoxUncertaintySet(c, delta=0.5), BoxUncertaintySet(d, delta=5.0)]
+        )
         rc.formulate()
 
         # All uncertain params eliminated

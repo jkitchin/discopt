@@ -15,10 +15,9 @@ import os
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
+import discopt.modeling as dm
 import numpy as np
 import pytest
-
-import discopt.modeling as dm
 from discopt.ro import (
     BoxUncertaintySet,
     EllipsoidalUncertaintySet,
@@ -26,7 +25,6 @@ from discopt.ro import (
     RobustCounterpart,
     budget_uncertainty_set,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

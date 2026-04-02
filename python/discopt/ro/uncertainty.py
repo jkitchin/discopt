@@ -46,9 +46,7 @@ class UncertaintySet:
         from discopt.modeling.core import Parameter
 
         if not isinstance(parameter, Parameter):
-            raise TypeError(
-                f"expected a discopt Parameter, got {type(parameter).__name__}"
-            )
+            raise TypeError(f"expected a discopt Parameter, got {type(parameter).__name__}")
         self.parameter = parameter
 
     # Subclasses override these properties to expose set geometry.
@@ -106,12 +104,12 @@ class BoxUncertaintySet(UncertaintySet):
     @property
     def lower(self) -> np.ndarray:
         """Component-wise lower bound on the parameter."""
-        return self.parameter.value - self.delta
+        return np.asarray(self.parameter.value - self.delta)
 
     @property
     def upper(self) -> np.ndarray:
         """Component-wise upper bound on the parameter."""
-        return self.parameter.value + self.delta
+        return np.asarray(self.parameter.value + self.delta)
 
 
 class EllipsoidalUncertaintySet(UncertaintySet):
@@ -165,9 +163,7 @@ class EllipsoidalUncertaintySet(UncertaintySet):
         else:
             self.Sigma = np.asarray(Sigma, dtype=np.float64)
             if self.Sigma.shape != (k, k):
-                raise ValueError(
-                    f"Sigma must be ({k},{k}), got {self.Sigma.shape}"
-                )
+                raise ValueError(f"Sigma must be ({k},{k}), got {self.Sigma.shape}")
         # Precompute Sigma^{1/2} via Cholesky (falls back to eig for PSD).
         try:
             self._Sigma_sqrt = np.linalg.cholesky(self.Sigma + 1e-14 * np.eye(k))
@@ -213,21 +209,24 @@ class PolyhedralUncertaintySet(UncertaintySet):
     >>> unc = PolyhedralUncertaintySet(cost, A=A_matrix, b=b_vec)
     """
 
+    _delta: np.ndarray | None
+    _gamma: float | None
+    _is_budget: bool
+
     def __init__(self, parameter, A, b) -> None:  # type: ignore[no-untyped-def]
         super().__init__(parameter)
         A = np.asarray(A, dtype=np.float64)
         b = np.asarray(b, dtype=np.float64)
         k = int(np.prod(parameter.value.shape)) if parameter.value.ndim > 0 else 1
         if A.ndim != 2 or A.shape[1] != k:
-            raise ValueError(
-                f"A must have shape (m, {k}), got {A.shape}"
-            )
+            raise ValueError(f"A must have shape (m, {k}), got {A.shape}")
         if b.shape != (A.shape[0],):
-            raise ValueError(
-                f"b must have shape ({A.shape[0]},), got {b.shape}"
-            )
+            raise ValueError(f"b must have shape ({A.shape[0]},), got {b.shape}")
         self.A = A
         self.b = b
+        self._delta = None
+        self._gamma = None
+        self._is_budget = False
 
     @property
     def kind(self) -> str:
