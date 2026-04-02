@@ -11,6 +11,7 @@ parts:
       - file: notebooks/tutorial_gdp
       - file: notebooks/tutorial_dae
       - file: notebooks/tutorial_robust
+      - file: notebooks/robust_adjustable
   - caption: "Tutorials \u2014 Solver Backends"
     chapters:
       - file: notebooks/tutorial_oa

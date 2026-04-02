@@ -56,6 +56,7 @@ Ben-Tal, A., El Ghaoui, L., Nemirovski, A. (2009). *Robust Optimization*.
 Princeton University Press.
 """
 
+from discopt.ro.affine_policy import AffineDecisionRule
 from discopt.ro.counterpart import RobustCounterpart
 from discopt.ro.uncertainty import (
     BoxUncertaintySet,
@@ -66,6 +67,7 @@ from discopt.ro.uncertainty import (
 )
 
 __all__ = [
+    "AffineDecisionRule",
     "BoxUncertaintySet",
     "EllipsoidalUncertaintySet",
     "PolyhedralUncertaintySet",

@@ -85,6 +85,7 @@ Table ref:tab-gaps summarizes the capabilities of existing systems versus discop
 | Compositional relaxation | Yes   | Partial | No     | N/A          | No      | Yes     |
 | NN embedding in MINLP    | No    | No      | No     | No           | Yes     | Yes     |
 | Robust counterpart API   | No    | No      | No     | No           | No      | Yes     |
+| Adjustable RO (ADR)      | No    | No      | No     | No           | No      | Yes     |
 
 * The discopt Architecture
 
@@ -231,6 +232,32 @@ After =formulate()=, the model contains no uncertain parameters: each has been r
 *** Correctness Guarantee
 
 For the additive/affine uncertainty case, the sign-tracking substitution produces an exact robust counterpart: the reformulated constraints hold for all $p \in \mathcal{U}$ if and only if they hold after substituting the worst-case constants.  This follows directly from the LP duality arguments in cite:&BenTal1999.  The implementation verifies this via structural tests that confirm (1) no uncertain parameters remain in the reformulated DAG, and (2) the embedded worst-case constants match the analytically derived values.
+
+*** Adjustable Robust Optimization via Affine Decision Rules
+
+Static robust optimization requires all decisions to be fixed before the uncertain parameters are revealed.  When some decisions can be deferred until after (partial) observation of the uncertainty, adjustable robust optimization (ARO) cite:&BenTalGoryashko2004 provides a less conservative solution.
+
+The two-stage framework partitions variables into *here-and-now* decisions $x$ (chosen before observing $\xi$) and *wait-and-see* recourse variables $y(\xi)$ (chosen after).  Optimising over arbitrary functions $y(\cdot)$ is generally intractable (the problem is semi-infinite), so discopt adopts **affine decision rules** (also called linear decision rules) cite:&BenTalGoryashko2004,Chen2009:
+
+$$y(\xi) = y_0 + \sum_{j=1}^{n_\xi} Y_j \cdot \xi_j, \quad \xi_j = p_j - \bar{p}_j$$
+
+where $y_0$ and $\{Y_j\}$ are new ordinary decision variables representing the intercept and policy matrix columns.  Bertsimas and Goyal cite:&Bertsimas2010 establish that for LP problems with right-hand-side uncertainty, affine rules are *optimal* --- no other measurable recourse policy achieves a lower cost; for uncertain constraint matrices they are an inner approximation.
+
+The =AffineDecisionRule= class implements this substitution as a pre-processing step compatible with the existing =RobustCounterpart=:
+
+#+BEGIN_SRC python
+from discopt.ro import AffineDecisionRule, BoxUncertaintySet, RobustCounterpart
+
+# Stage 1: substitute recourse variable y with y₀ + Y₀·(d - d̄)
+adr = AffineDecisionRule(y, uncertain_params=d)
+adr.apply()          # retires y; adds y₀, Y₀ to model._variables
+
+# Stage 2: static robust counterpart handles remaining ξ terms
+rc = RobustCounterpart(m, BoxUncertaintySet(d, delta=20.0))
+rc.formulate()       # fully deterministic; optimise over (x, y₀, Y₀)
+#+END_SRC
+
+The DAG substitution walks every constraint and objective node, replacing Variable nodes that match the recourse variable with the affine expression via identity comparison ($O(|V| + |E|)$ in the DAG size).  After substitution the recourse variable is retired from the model's variable list and remaining variables are renumbered.  A call to =AffineDecisionRule.apply()= followed by =RobustCounterpart.formulate()= leaves the model fully deterministic with (1) no recourse variables, (2) no uncertain parameters, and (3) new intercept and policy-column variables in their place.
 
 ** JAX DAG Compiler
 
@@ -575,7 +602,7 @@ discopt demonstrates that a modern, multi-language MINLP solver can provide capa
 
 *Command-line interface and literature monitoring.* discopt provides a command-line interface (=discopt=) installable via =pip=, with subcommands for searching arXiv and OpenAlex APIs and writing structured reports. These subcommands output JSON, enabling integration with scripting workflows and CI pipelines. A companion "discoptbot" agent uses the CLI to periodically scan for new publications relevant to the solver's algorithmic components (spatial B&B, McCormick relaxations, GNN branching, GPU-accelerated IPM), score them by relevance, and produce structured literature reports. This automated monitoring helps maintain awareness of algorithmic advances that could inform future solver development.
 
-*Future work.* Key directions include: (1) GPU-accelerated batch IPM via JAX's XLA backend when GPU support matures; (2) extending ripopt with sparse linear algebra to compete with Ipopt on large problems; (3) deeper integration of learned relaxations with online training during the B&B search; (4) exploiting the differentiable solver for bilevel optimization and meta-learning of solver parameters; (5) extending the DAE collocation module to higher-index DAEs, adaptive mesh refinement, and multi-stage optimal control with path constraints; (6) extending the neural network embedding to convolutional layers, residual connections, gradient-boosted tree models, and LP-based bound tightening (OBBT) for tighter big-M constants; and (7) extending the robust optimization module to *adjustable robust counterparts* cite:&BenTalGoryashko2004 with affine decision rules for recourse variables, bilinear coefficient uncertainty via auxiliary variable linearisation, and distributionally robust optimization via moment-based ambiguity sets.
+*Future work.* Key directions include: (1) GPU-accelerated batch IPM via JAX's XLA backend when GPU support matures; (2) extending ripopt with sparse linear algebra to compete with Ipopt on large problems; (3) deeper integration of learned relaxations with online training during the B&B search; (4) exploiting the differentiable solver for bilevel optimization and meta-learning of solver parameters; (5) extending the DAE collocation module to higher-index DAEs, adaptive mesh refinement, and multi-stage optimal control with path constraints; (6) extending the neural network embedding to convolutional layers, residual connections, gradient-boosted tree models, and LP-based bound tightening (OBBT) for tighter big-M constants; and (7) extending the robust optimization module beyond the current affine decision rules to bilinear coefficient uncertainty (via LP dual auxiliary variables), polynomial or piecewise-linear recourse policies, and distributionally robust optimization via moment-based or Wasserstein ambiguity sets cite:&BenTalGoryashko2004,Bertsimas2010.
 
 * Conclusion
 
