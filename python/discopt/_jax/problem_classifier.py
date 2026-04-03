@@ -607,7 +607,7 @@ def _extract_constraints_algebraic(model: Model, n_orig: int):
 
     x_l_orig, x_u_orig = _get_variable_bounds(model)
     x_l = np.concatenate([x_l_orig, np.zeros(n_slack, dtype=np.float64)])
-    x_u = np.concatenate([x_u_orig, np.full(n_slack, 1e20, dtype=np.float64)])
+    x_u = np.concatenate([x_u_orig, np.full(n_slack, np.inf, dtype=np.float64)])
 
     return A_eq, b_eq, x_l, x_u, n_slack
 
@@ -779,7 +779,7 @@ def _extract_lp_data_from_repr(model: Model) -> LPData:
     x_l_orig, x_u_orig = _get_variable_bounds(model)
     c_full = np.concatenate([c, np.zeros(n_slack, dtype=np.float64)])
     x_l = np.concatenate([x_l_orig, np.zeros(n_slack, dtype=np.float64)])
-    x_u = np.concatenate([x_u_orig, np.full(n_slack, 1e20, dtype=np.float64)])
+    x_u = np.concatenate([x_u_orig, np.full(n_slack, np.inf, dtype=np.float64)])
 
     obj_sense = repr_.objective_sense
     if obj_sense == "maximize":
@@ -980,7 +980,7 @@ def _extract_lp_data_autodiff(model: Model) -> LPData:
     x_l_orig, x_u_orig = _get_variable_bounds(model)
     c_full = jnp.concatenate([c, jnp.zeros(n_slack)])
     x_l = jnp.concatenate([x_l_orig, jnp.zeros(n_slack)])
-    x_u = jnp.concatenate([x_u_orig, jnp.full(n_slack, 1e20)])
+    x_u = jnp.concatenate([x_u_orig, jnp.full(n_slack, jnp.inf)])
 
     return LPData(
         c=c_full,

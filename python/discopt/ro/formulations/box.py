@@ -249,17 +249,6 @@ class BoxRobustFormulation:
             return
         maximize_obj_wc = obj.sense == ObjectiveSense.MINIMIZE
         new_expr, aux_cons = _robustify_expr(obj.expression, maximize=maximize_obj_wc)
-        # Add a tiny quadratic regularization (1e-8 * sum(t_j^2)) to ensure
-        # the problem is classified as NLP, not LP.  The LP IPM has a known
-        # convergence issue with the absolute-value constraint structure.
-        # The regularization is small enough to not affect the optimal value
-        # at solver tolerance.
-        if aux_idx > 0:
-            reg = Constant(np.array(1e-8))
-            for v in m._variables:
-                if v.name.startswith(self._prefix + "_abs"):
-                    new_expr = BinaryOp("+", new_expr, BinaryOp("*", reg, BinaryOp("*", v, v)))
-
         m._objective = Objective(expression=new_expr, sense=obj.sense)
         m._constraints.extend(aux_cons)
 

@@ -114,6 +114,11 @@ def _make_problem_data(c, A, b, x_l, x_u):
     m = b.shape[0]
     has_lb = (x_l >= -_INF).astype(jnp.float64)
     has_ub = (x_u <= _INF).astype(jnp.float64)
+    # Clamp infinite bounds to safe finite values so that arithmetic
+    # inside jax.jit (which evaluates both branches of jnp.where)
+    # never produces inf - x = inf, avoiding inf * 0 = NaN downstream.
+    x_l = jnp.where(has_lb > 0.5, x_l, -_INF)
+    x_u = jnp.where(has_ub > 0.5, x_u, _INF)
     return LPProblemData(
         c=c,
         A=A,
@@ -235,8 +240,8 @@ def _initialize_state(pd, opts):
         opts.bound_push,
     )
 
-    s_l = jnp.maximum(x - pd.x_l, _SLACK_FLOOR) * pd.has_lb
-    s_u = jnp.maximum(pd.x_u - x, _SLACK_FLOOR) * pd.has_ub
+    s_l = jnp.where(pd.has_lb > 0.5, jnp.maximum(x - pd.x_l, _SLACK_FLOOR), 0.0)
+    s_u = jnp.where(pd.has_ub > 0.5, jnp.maximum(pd.x_u - x, _SLACK_FLOOR), 0.0)
     z_l = jnp.where(
         pd.has_lb > 0.5,
         mu / jnp.maximum(s_l, _SLACK_FLOOR),
@@ -329,10 +334,14 @@ def _iteration_body(carry: LPCarry, tol: float, max_iter: int, tau_min: float) -
     z_l, z_u = state.z_l, state.z_u
     tau = jnp.maximum(1.0 - mu, tau_min)
 
-    s_l = jnp.maximum(x - pd.x_l, _SLACK_FLOOR) * pd.has_lb
-    s_u = jnp.maximum(pd.x_u - x, _SLACK_FLOOR) * pd.has_ub
+    s_l = jnp.where(pd.has_lb > 0.5, jnp.maximum(x - pd.x_l, _SLACK_FLOOR), 0.0)
+    s_u = jnp.where(pd.has_ub > 0.5, jnp.maximum(pd.x_u - x, _SLACK_FLOOR), 0.0)
 
-    Sig = pd.has_lb * z_l / jnp.maximum(s_l, _EPS) + pd.has_ub * z_u / jnp.maximum(s_u, _EPS) + _EPS
+    Sig = (
+        jnp.where(pd.has_lb > 0.5, z_l / jnp.maximum(s_l, _EPS), 0.0)
+        + jnp.where(pd.has_ub > 0.5, z_u / jnp.maximum(s_u, _EPS), 0.0)
+        + _EPS
+    )
     Sig_inv = 1.0 / jnp.maximum(Sig, _EPS)
 
     r_dual = c - z_l + z_u - A.T @ y

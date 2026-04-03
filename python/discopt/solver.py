@@ -2601,7 +2601,7 @@ def _solve_milp_bb(
             xl_arr = jnp.array(batch_lb, dtype=jnp.float64)
             xu_arr = jnp.array(batch_ub, dtype=jnp.float64)
             slack_l = jnp.zeros((n_batch, n_slack), dtype=jnp.float64)
-            slack_u = jnp.full((n_batch, n_slack), 1e20, dtype=jnp.float64)
+            slack_u = jnp.full((n_batch, n_slack), jnp.inf, dtype=jnp.float64)
             xl_full = jnp.concatenate([xl_arr, slack_l], axis=1)
             xu_full = jnp.concatenate([xu_arr, slack_u], axis=1)
 
@@ -2654,7 +2654,7 @@ def _solve_milp_bb(
                 x_u_node = jnp.array(node_ub, dtype=jnp.float64)
 
                 x_l_full = jnp.concatenate([x_l_node, jnp.zeros(n_slack)])
-                x_u_full = jnp.concatenate([x_u_node, jnp.full(n_slack, 1e20)])
+                x_u_full = jnp.concatenate([x_u_node, jnp.full(n_slack, jnp.inf)])
 
                 try:
                     state = lp_ipm_solve(lp_data.c, lp_data.A_eq, lp_data.b_eq, x_l_full, x_u_full)
@@ -2809,7 +2809,7 @@ def _solve_miqp_bb(
             xl_arr = jnp.array(batch_lb, dtype=jnp.float64)
             xu_arr = jnp.array(batch_ub, dtype=jnp.float64)
             slack_l = jnp.zeros((n_batch, n_slack), dtype=jnp.float64)
-            slack_u = jnp.full((n_batch, n_slack), 1e20, dtype=jnp.float64)
+            slack_u = jnp.full((n_batch, n_slack), jnp.inf, dtype=jnp.float64)
             xl_full = jnp.concatenate([xl_arr, slack_l], axis=1)
             xu_full = jnp.concatenate([xu_arr, slack_u], axis=1)
 
@@ -2869,7 +2869,7 @@ def _solve_miqp_bb(
                 x_u_node = jnp.array(node_ub, dtype=jnp.float64)
 
                 x_l_full = jnp.concatenate([x_l_node, jnp.zeros(n_slack)])
-                x_u_full = jnp.concatenate([x_u_node, jnp.full(n_slack, 1e20)])
+                x_u_full = jnp.concatenate([x_u_node, jnp.full(n_slack, jnp.inf)])
 
                 try:
                     state = qp_ipm_solve(
