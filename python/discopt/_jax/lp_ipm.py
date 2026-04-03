@@ -112,8 +112,8 @@ def _make_problem_data(c, A, b, x_l, x_u):
     """Build LPProblemData with bound masks."""
     n = c.shape[0]
     m = b.shape[0]
-    has_lb = (x_l >= -_INF).astype(jnp.float64)
-    has_ub = (x_u <= _INF).astype(jnp.float64)
+    has_lb = (x_l > -_INF).astype(jnp.float64)
+    has_ub = (x_u < _INF).astype(jnp.float64)
     # Clamp infinite bounds to safe finite values so that arithmetic
     # inside jax.jit (which evaluates both branches of jnp.where)
     # never produces inf - x = inf, avoiding inf * 0 = NaN downstream.

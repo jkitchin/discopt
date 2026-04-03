@@ -201,8 +201,8 @@ def _update_mu(
 def _make_problem_data(x_l, x_u, g_l, g_u) -> IPMProblemData:
     n = x_l.shape[0]
     m = g_l.shape[0]
-    has_lb = (x_l >= -_INF).astype(jnp.float64)
-    has_ub = (x_u <= _INF).astype(jnp.float64)
+    has_lb = (x_l > -_INF).astype(jnp.float64)
+    has_ub = (x_u < _INF).astype(jnp.float64)
     has_g_lb = (g_l > -_INF).astype(jnp.float64)
     has_g_ub = (g_u < _INF).astype(jnp.float64)
     is_eq = (has_g_lb * has_g_ub * (jnp.abs(g_u - g_l) < 1e-12)).astype(jnp.float64)

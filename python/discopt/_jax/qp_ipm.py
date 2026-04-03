@@ -104,8 +104,8 @@ def _make_problem_data(Q, c, A, b, x_l, x_u) -> QPProblemData:
     """Build QPProblemData with bound masks."""
     n = c.shape[0]
     m = b.shape[0]
-    has_lb = (x_l >= -_INF).astype(jnp.float64)
-    has_ub = (x_u <= _INF).astype(jnp.float64)
+    has_lb = (x_l > -_INF).astype(jnp.float64)
+    has_ub = (x_u < _INF).astype(jnp.float64)
     return QPProblemData(
         Q=Q,
         c=c,

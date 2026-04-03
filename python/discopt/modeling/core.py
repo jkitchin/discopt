@@ -51,7 +51,7 @@ class VarType(Enum):
     Attributes
     ----------
     CONTINUOUS : str
-        Real-valued variable (default bounds: ``[-1e20, 1e20]``).
+        Real-valued variable (default bounds: ``[-9.999e19, 9.999e19]``).
     BINARY : str
         Binary variable restricted to ``{0, 1}``.
     INTEGER : str
@@ -1010,8 +1010,8 @@ class Model:
         self,
         name: str,
         shape: Union[int, tuple[int, ...]] = (),
-        lb: Union[float, np.ndarray] = -1e20,
-        ub: Union[float, np.ndarray] = 1e20,
+        lb: Union[float, np.ndarray] = -9.999e19,
+        ub: Union[float, np.ndarray] = 9.999e19,
     ) -> Variable:
         """
         Create continuous decision variable(s).
@@ -1022,9 +1022,9 @@ class Model:
             Variable name (must be unique in the model).
         shape : int or tuple of int, default ()
             Scalar ``()`` or tuple for array variables.
-        lb : float or numpy.ndarray, default -1e20
+        lb : float or numpy.ndarray, default -9.999e19
             Lower bound (scalar broadcast to *shape*, or array matching *shape*).
-        ub : float or numpy.ndarray, default 1e20
+        ub : float or numpy.ndarray, default 9.999e19
             Upper bound (scalar broadcast to *shape*, or array matching *shape*).
 
         Returns
