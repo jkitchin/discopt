@@ -488,24 +488,24 @@ def _iteration_body(carry: LPCarry, tol: float, max_iter: int, tau_min: float) -
     z_u_new = jnp.maximum(z_u + alpha_d * dz_u, _EPS) * pd.has_ub
     y_new = y + alpha_d * dy
 
-    # --- Stationarity-based z recovery at active bounds ---
-    s_l_new = jnp.maximum(x_new - pd.x_l, _SLACK_FLOOR) * pd.has_lb
-    s_u_new = jnp.maximum(pd.x_u - x_new, _SLACK_FLOOR) * pd.has_ub
-    grad_stat = c - A.T @ y_new
-    z_u_stat = jnp.maximum(-(grad_stat - z_l_new), _EPS)
-    z_l_stat = jnp.maximum(grad_stat + z_u_new, _EPS)
-    at_ub = pd.has_ub * (s_u_new <= _SLACK_FLOOR * 2.0).astype(jnp.float64)
-    at_lb = pd.has_lb * (s_l_new <= _SLACK_FLOOR * 2.0).astype(jnp.float64)
-    both = at_lb * at_ub
-    at_lb = at_lb * (1.0 - both)
-    at_ub = at_ub * (1.0 - both)
-    z_u_new = jnp.where(at_ub > 0.5, z_u_stat, z_u_new)
-    z_l_new = jnp.where(at_lb > 0.5, z_l_stat, z_l_new)
+    # Recompute slacks from updated x (without stationarity-based z recovery,
+    # which breaks the z*s = mu complementarity invariant).
+    s_l_new = jnp.where(pd.has_lb > 0.5, jnp.maximum(x_new - pd.x_l, _SLACK_FLOOR), 0.0)
+    s_u_new = jnp.where(pd.has_ub > 0.5, jnp.maximum(pd.x_u - x_new, _SLACK_FLOOR), 0.0)
 
-    # --- Update barrier parameter ---
+    # --- Update barrier parameter (with error gate) ---
     compl = jnp.sum(pd.has_lb * z_l_new * s_l_new) + jnp.sum(pd.has_ub * z_u_new * s_u_new)
-    mu_new = compl / jnp.maximum(n_pairs, 1.0)
-    mu_new = jnp.minimum(mu_new, mu)
+    mu_candidate = compl / jnp.maximum(n_pairs, 1.0)
+    # Only decrease mu when current residuals are small relative to mu
+    # (prevents premature decrease that ill-conditions the KKT system).
+    r_dual_chk = c - z_l_new + z_u_new - A.T @ y_new
+    r_prim_chk = A @ x_new - b
+    barrier_err = jnp.maximum(
+        jnp.max(jnp.abs(r_prim_chk)) / (1.0 + jnp.max(jnp.abs(b))),
+        jnp.max(jnp.abs(r_dual_chk)) / (1.0 + jnp.max(jnp.abs(c))),
+    )
+    may_decrease = barrier_err < 10.0 * mu
+    mu_new = jnp.where(may_decrease, jnp.minimum(mu_candidate, mu), mu)
     mu_new = jnp.maximum(mu_new, _EPS)
 
     # --- Check convergence ---
@@ -612,14 +612,34 @@ def lp_ipm_solve(
     x_l = jnp.asarray(x_l, dtype=jnp.float64)
     x_u = jnp.asarray(x_u, dtype=jnp.float64)
 
+    # --- Problem scaling for improved conditioning ---
+    from discopt._jax.scaling import compute_lp_scaling, scale_lp, unscale_lp_solution
+
+    factors = compute_lp_scaling(c, A)
+    c, A, b = scale_lp(c, A, b, factors)
+
     # m=0 dispatch — trivial bound-clamping, no need to JIT
     if b.shape[0] == 0:
         pd = _make_problem_data(c, A, b, x_l, x_u)
-        return _solve_unconstrained(pd, opts)  # type: ignore[no-any-return]
+        state = _solve_unconstrained(pd, opts)
+        if factors.applied:
+            x_us, y_us, zl_us, zu_us = unscale_lp_solution(
+                state.x, state.y, state.z_l, state.z_u, factors
+            )
+            state = state._replace(x=x_us, y=y_us, z_l=zl_us, z_u=zu_us)
+        return state  # type: ignore[no-any-return]
 
-    return _lp_ipm_solve_jit(  # type: ignore[no-any-return]
+    state = _lp_ipm_solve_jit(
         c, A, b, x_l, x_u, opts.tol, opts.max_iter, opts.tau_min, opts.bound_push
     )
+    if factors.applied:
+        x_us, y_us, zl_us, zu_us = unscale_lp_solution(
+            state.x, state.y, state.z_l, state.z_u, factors
+        )
+        state = state._replace(x=x_us, y=y_us, z_l=zl_us, z_u=zu_us)
+        # Recompute objective on original scale
+        state = state._replace(obj=jnp.dot(jnp.asarray(c / factors.obj_scale), state.x))
+    return state  # type: ignore[no-any-return]
 
 
 def lp_ipm_solve_batch(

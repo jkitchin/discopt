@@ -459,31 +459,27 @@ def _iteration_body(carry: QPCarry, tol: float, max_iter: int, tau_min: float) -
     z_u_new = jnp.maximum(z_u + alpha_d * dz_u, _EPS) * pd.has_ub
     y_new = y + alpha_d * dy if m > 0 else y
 
-    # =====================================================================
-    # Stationarity-based z recovery at active bounds
-    # =====================================================================
+    # Recompute slacks from updated x (without stationarity-based z recovery,
+    # which breaks the z*s = mu complementarity invariant).
     s_l_new = jnp.maximum(x_new - pd.x_l, _SLACK_FLOOR) * pd.has_lb
     s_u_new = jnp.maximum(pd.x_u - x_new, _SLACK_FLOOR) * pd.has_ub
 
-    grad_stat = Q @ x_new + c
-    if m > 0:
-        grad_stat = grad_stat - A.T @ y_new
-    z_u_stat = jnp.maximum(-(grad_stat - z_l_new), _EPS)
-    z_l_stat = jnp.maximum(grad_stat + z_u_new, _EPS)
-    at_ub = pd.has_ub * (s_u_new <= _SLACK_FLOOR * 2.0).astype(jnp.float64)
-    at_lb = pd.has_lb * (s_l_new <= _SLACK_FLOOR * 2.0).astype(jnp.float64)
-    both = at_lb * at_ub
-    at_lb = at_lb * (1.0 - both)
-    at_ub = at_ub * (1.0 - both)
-    z_u_new = jnp.where(at_ub > 0.5, z_u_stat, z_u_new)
-    z_l_new = jnp.where(at_lb > 0.5, z_l_stat, z_l_new)
-
     # =====================================================================
-    # Update barrier parameter
+    # Update barrier parameter (with error gate)
     # =====================================================================
     compl = jnp.sum(pd.has_lb * z_l_new * s_l_new) + jnp.sum(pd.has_ub * z_u_new * s_u_new)
-    mu_new = compl / jnp.maximum(n_pairs, 1.0)
-    mu_new = jnp.minimum(mu_new, mu)
+    mu_candidate = compl / jnp.maximum(n_pairs, 1.0)
+    r_dual_chk = Q @ x_new + c - z_l_new + z_u_new
+    if m > 0:
+        r_dual_chk = r_dual_chk - A.T @ y_new
+        r_prim_chk = A @ x_new - b
+        prim_err = jnp.max(jnp.abs(r_prim_chk)) / (1.0 + jnp.max(jnp.abs(b)))
+    else:
+        prim_err = jnp.array(0.0)
+    dual_err = jnp.max(jnp.abs(r_dual_chk)) / (1.0 + jnp.max(jnp.abs(c)))
+    barrier_err = jnp.maximum(prim_err, dual_err)
+    may_decrease = barrier_err < 10.0 * mu
+    mu_new = jnp.where(may_decrease, jnp.minimum(mu_candidate, mu), mu)
     mu_new = jnp.maximum(mu_new, _EPS)
 
     # =====================================================================
