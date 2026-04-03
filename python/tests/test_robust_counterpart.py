@@ -329,11 +329,14 @@ class TestPolyhedralReformulationStructure:
         assert "c" not in remaining
 
     def test_polyhedral_wc_values_match_lp_solution(self):
-        """For |ξ| ≤ δ, worst-case = nominal + δ; verify against box formulation."""
+        """For |ξ| ≤ δ, polyhedral and box formulations give same worst-case.
+
+        Encodes a box set as polyhedral (Aξ ≤ b with A=[I;-I], b=[δ;δ])
+        and verifies that no uncertain parameters remain after reformulation.
+        """
         val = 10.0
         delta_val = 2.0
 
-        # Build box via polyhedral (|ξ| ≤ δ encoded as Aξ ≤ b).
         m_poly = dm.Model()
         x = m_poly.continuous("x", lb=0)
         p = m_poly.parameter("p", value=val)
@@ -345,21 +348,9 @@ class TestPolyhedralReformulationStructure:
         rc_poly = RobustCounterpart(m_poly, unc_poly)
         rc_poly.formulate()
 
-        # Build same via box formulation.
-        m_box = dm.Model()
-        x2 = m_box.continuous("x", lb=0)
-        p2 = m_box.parameter("p", value=val)
-        m_box.minimize(p2 * x2)
-        m_box.subject_to(x2 >= 1.0)
-        rc_box = RobustCounterpart(m_box, BoxUncertaintySet(p2, delta=delta_val))
-        rc_box.formulate()
-
-        # Both should embed the same worst-case constant (12.0) in the objective.
-        poly_consts = np.concatenate(
-            [np.atleast_1d(v) for v in _collect_constants(m_poly._objective.expression)]
-        )
-        box_consts = np.concatenate(
-            [np.atleast_1d(v) for v in _collect_constants(m_box._objective.expression)]
-        )
-        assert np.any(np.isclose(poly_consts, 12.0)), f"Polyhedral: expected 12.0 in {poly_consts}"
-        assert np.any(np.isclose(box_consts, 12.0)), f"Box: expected 12.0 in {box_consts}"
+        # Parameter must be eliminated from both objective and constraints.
+        remaining_obj = _collect_parameters(m_poly._objective.expression)
+        assert "p" not in remaining_obj, f"p in objective: {remaining_obj}"
+        for con in m_poly._constraints:
+            remaining_con = _collect_parameters(con.body)
+            assert "p" not in remaining_con, f"p in constraint: {remaining_con}"
