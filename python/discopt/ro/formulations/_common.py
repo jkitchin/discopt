@@ -192,6 +192,55 @@ def sign_tracking_substitute(
     return expr
 
 
+def substitute_param(expr, param_name: str, replacement):
+    """Replace every occurrence of ``Parameter(param_name)`` with *replacement*.
+
+    This is the parameter analogue of ``_substitute_var`` in affine_policy.py.
+    Used by the coefficient-extraction approach for bilinear robust reformulation.
+    """
+    from discopt.modeling.core import (
+        BinaryOp,
+        Constant,
+        FunctionCall,
+        IndexExpression,
+        MatMulExpression,
+        Parameter,
+        SumExpression,
+        SumOverExpression,
+        UnaryOp,
+    )
+
+    if isinstance(expr, Parameter):
+        return replacement if expr.name == param_name else expr
+    if isinstance(expr, Constant):
+        return expr
+    if isinstance(expr, BinaryOp):
+        return BinaryOp(
+            expr.op,
+            substitute_param(expr.left, param_name, replacement),
+            substitute_param(expr.right, param_name, replacement),
+        )
+    if isinstance(expr, UnaryOp):
+        return UnaryOp(expr.op, substitute_param(expr.operand, param_name, replacement))
+    if isinstance(expr, MatMulExpression):
+        return MatMulExpression(
+            substitute_param(expr.left, param_name, replacement),
+            substitute_param(expr.right, param_name, replacement),
+        )
+    if isinstance(expr, FunctionCall):
+        return FunctionCall(
+            expr.func_name,
+            *[substitute_param(a, param_name, replacement) for a in expr.args],
+        )
+    if isinstance(expr, IndexExpression):
+        return IndexExpression(substitute_param(expr.base, param_name, replacement), expr.index)
+    if isinstance(expr, SumExpression):
+        return SumExpression(substitute_param(expr.operand, param_name, replacement), expr.axis)
+    if isinstance(expr, SumOverExpression):
+        return SumOverExpression([substitute_param(t, param_name, replacement) for t in expr.terms])
+    return expr
+
+
 def _contains_uncertain_param(expr, param_names: set[str]) -> bool:
     """Check whether *expr* contains any Parameter whose name is in *param_names*."""
     from discopt.modeling.core import (
