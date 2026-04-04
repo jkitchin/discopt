@@ -1,0 +1,30 @@
+#+TITLE: Crucible Wiki Index
+#+DATE: [2026-04-04 Sat]
+#+STARTUP: overview
+
+Auto-generated index of the Crucible knowledge base.
+1 articles, 4 concepts, 0 sources, 0 links.
+
+* Articles by Type
+
+** Methods (1)
+
+- [[file:.crucible/wiki/methods/nonlinear-branch-and-bound.org][Nonlinear Branch and Bound (NLP-BB)]] /draft/
+
+* Articles by Concept
+
+** Branch-And-Bound (1)
+
+- [[file:.crucible/wiki/methods/nonlinear-branch-and-bound.org][Nonlinear Branch and Bound (NLP-BB)]] [method]
+
+** Convex-Optimization (1)
+
+- [[file:.crucible/wiki/methods/nonlinear-branch-and-bound.org][Nonlinear Branch and Bound (NLP-BB)]] [method]
+
+** Minlp (1)
+
+- [[file:.crucible/wiki/methods/nonlinear-branch-and-bound.org][Nonlinear Branch and Bound (NLP-BB)]] [method]
+
+** Nlp-Bb (1)
+
+- [[file:.crucible/wiki/methods/nonlinear-branch-and-bound.org][Nonlinear Branch and Bound (NLP-BB)]] [method]

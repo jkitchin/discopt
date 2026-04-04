@@ -839,6 +839,14 @@ class SolveResult:
     convex_fast_path : bool
         True if the problem was detected as convex and solved with a
         single NLP call (no Branch & Bound), guaranteeing global optimality.
+    nlp_bb : bool
+        True if the problem was solved using nonlinear Branch & Bound
+        (NLP-BB), where continuous NLP subproblems are solved at each
+        node with discrete variables fixed via bound tightening.
+    gap_certified : bool
+        True if the reported optimality gap is mathematically certified.
+        False when NLP-BB is used on a nonconvex problem (heuristic mode),
+        where the NLP objective is not a valid lower bound.
     """
 
     status: str
@@ -856,6 +864,10 @@ class SolveResult:
 
     # Convex fast path indicator
     convex_fast_path: bool = False
+
+    # NLP-BB indicator and gap certification
+    nlp_bb: bool = False
+    gap_certified: bool = True
 
     # LLM explanation (populated if llm=True)
     _explanation: Optional[str] = None
@@ -1723,6 +1735,7 @@ class Model:
         branching_policy: str = "fractional",
         initial_solution: Optional[dict] = None,
         skip_convex_check: bool = False,
+        nlp_bb: Optional[bool] = None,
         lazy_constraints: Optional[Callable] = None,
         incumbent_callback: Optional[Callable] = None,
         node_callback: Optional[Callable] = None,
@@ -1768,6 +1781,11 @@ class Model:
             If True, skip automatic convexity detection for continuous
             problems. When False (default), convex NLPs are solved with
             a single NLP call (no B&B), guaranteeing global optimality.
+        nlp_bb : bool or None, default None
+            Nonlinear Branch & Bound mode. When ``None`` (default),
+            auto-selects NLP-BB for convex MINLPs and spatial B&B
+            otherwise. When ``True``, forces NLP-BB (heuristic mode if
+            nonconvex). When ``False``, forces spatial B&B.
         lazy_constraints : callable, optional
             Lazy constraint callback. Called at integer-feasible nodes.
             Should accept ``(ctx, model)`` and return a list of
@@ -1835,6 +1853,7 @@ class Model:
             branching_policy=branching_policy,
             initial_point=_x0_flat,
             skip_convex_check=skip_convex_check,
+            nlp_bb=nlp_bb,
             lazy_constraints=lazy_constraints,
             incumbent_callback=incumbent_callback,
             node_callback=node_callback,

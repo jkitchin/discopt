@@ -287,6 +287,12 @@ pub fn create_children(
     // Warm-start: pass parent's stored solution to children.
     let parent_sol = parent.parent_solution.clone();
 
+    // Inherit parent's lower bound: the child's feasible region is a subset
+    // of the parent's, so the parent's lower bound is valid for the child.
+    // This prevents the global lower bound from dropping to -inf when
+    // unsolved children enter the pool.
+    let inherited_lb = parent.local_lower_bound;
+
     // Left child: x_i <= floor(val)
     let mut left_ub = parent.ub.clone();
     left_ub[idx] = bp; // bp is already floor(val)
@@ -296,7 +302,7 @@ pub fn create_children(
         depth: parent.depth + 1,
         lb: parent.lb.clone(),
         ub: left_ub,
-        local_lower_bound: f64::NEG_INFINITY,
+        local_lower_bound: inherited_lb,
         status: NodeStatus::Pending,
         parent_solution: parent_sol.clone(),
     };
@@ -310,7 +316,7 @@ pub fn create_children(
         depth: parent.depth + 1,
         lb: right_lb,
         ub: parent.ub.clone(),
-        local_lower_bound: f64::NEG_INFINITY,
+        local_lower_bound: inherited_lb,
         status: NodeStatus::Pending,
         parent_solution: parent_sol,
     };

@@ -395,7 +395,11 @@ impl TreeManager {
             return f64::INFINITY;
         }
         let denom = self.incumbent_value.abs().max(1.0);
-        (self.incumbent_value - self.global_lower_bound) / denom
+        let raw = (self.incumbent_value - self.global_lower_bound) / denom;
+        // Clamp to zero: a negative gap means the bound exceeds the
+        // incumbent due to numerical noise or suboptimal NLP solves.
+        // Don't report it as closed; keep exploring.
+        raw.max(0.0)
     }
 
     /// Get aggregate tree statistics.

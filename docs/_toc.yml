@@ -34,6 +34,7 @@ parts:
       - file: notebooks/llm_integration
       - file: notebooks/warm_start
       - file: notebooks/convex_fast_path
+      - file: notebooks/nlp_bb
       - file: notebooks/export_formats
       - file: notebooks/callbacks
   - caption: Solver Backends

@@ -1,0 +1,390 @@
+#+TITLE: NLP-BB (Juniper-style Nonlinear Branch-and-Bound) for discopt
+#+AUTHOR: John Kitchin
+#+DATE: 2026-04-04
+
+* Motivation
+
+A colleague suggested that a fast, batchable NLP solver (like discopt's JAX IPM)
+is a natural fit for nonlinear Branch-and-Bound (NLP-BB). The idea: for a MINLP
+whose continuous relaxation is convex, branch only on discrete variables and
+solve the resulting NLP subproblems at each node with the discrete decisions
+fixed. These subproblems are parametric NLPs that can be batched and
+warm-started. This approach was implemented for Julia in
+[[https://github.com/lanl-ansi/juniper.jl][Juniper.jl]] and reportedly works
+surprisingly well, without needing an external MIP solver.
+
+This document investigates where NLP-BB fits in discopt's architecture and what
+it would take to implement.
+
+* The NLP-BB Algorithm
+
+Standard spatial B&B (what discopt currently does) solves convex relaxations
+(McCormick envelopes, alphaBB underestimators) at each node to produce lower
+bounds, then branches on fractional integer variables. NLP-BB takes a different
+approach:
+
+1. At each node, fix (or tighten) discrete variable bounds based on branching decisions.
+2. Solve the *original* continuous NLP with those fixed/tightened bounds.
+3. For convex problems, the NLP objective at each node is a valid lower bound.
+4. Prune nodes whose NLP objective exceeds the incumbent.
+5. Fathom nodes where all discrete variables are integer-feasible.
+
+The key advantages:
+- No relaxation gap from McCormick/alphaBB approximations.
+- Fewer B&B nodes needed (tighter bounds per node).
+- Node NLPs share structure and can be solved in batch via =jax.vmap=.
+- Warm-starting from parent solutions speeds up each NLP solve.
+- No external MIP solver dependency.
+
+The limitation: the NLP objective is only a valid lower bound when the continuous
+relaxation is convex. For nonconvex problems, NLP-BB can still find good feasible
+solutions (as a heuristic), but the optimality gap cannot be certified.
+
+* Infrastructure Assessment
+
+The remarkable finding is that discopt already has approximately 90% of the
+infrastructure NLP-BB requires. No Rust changes are needed. The implementation
+amounts to a simplified variant of the existing B&B loop that removes complexity
+rather than adding it.
+
+** What Already Exists
+
+*** Rust B&B Tree (=crates/discopt-core/src/bnb/=)
+
+The =TreeManager= branches on integer variables and tightens bounds at child
+nodes. For binary variables, =create_children()= in =branching.rs:273-319=
+already sets =lb=ub= in the children, effectively fixing the variable. The tree
+exports batches of pending nodes with their bounds and parent solutions via
+=export_batch()=, imports NLP results via =import_results()=, and handles
+pruning/fathoming/branching in =process_evaluated()=. All of this works
+unchanged for NLP-BB.
+
+*** Batch NLP Solving (=python/discopt/_jax/ipm.py=)
+
+The =solve_nlp_batch()= function uses =jax.vmap= to solve multiple NLPs in a
+single fused XLA kernel. The existing =_solve_batch_ipm()= orchestrator in
+=solver.py:2121-2241= already handles batching node solves with multistart,
+warm-starting from parent solutions, and selecting the best converged result per
+node. NLP-BB reuses this directly.
+
+*** Warm-Starting
+
+Each =Node= in the Rust tree stores =parent_solution: Option<Vec<f64>>=, and
+=export_batch()= returns these alongside node bounds. The Python orchestrator
+already pipes warm-starts to the batch IPM solver. For NLP-BB on convex
+problems, warm-starting from the parent NLP solution is particularly effective
+because the child NLP differs from the parent only in one tightened bound.
+
+*** Convexity Detection (=python/discopt/_jax/convexity.py=)
+
+The =classify_model()= function walks the expression DAG and classifies
+curvature using standard composition rules (convex, concave, affine, unknown).
+It is already called in =solver.py:1155-1158= to set =_model_is_convex=, which
+controls multistart strategy and lower bound computation. NLP-BB uses this as a
+gate to determine whether gap certification is possible.
+
+*** NLP Evaluator (=python/discopt/_jax/nlp_evaluator.py=)
+
+The =NLPEvaluator= compiles the model's objective, gradient, Hessian,
+constraints, and Jacobian to JIT'd JAX functions. It provides the callback
+interface used by all NLP solvers (cyipopt, ripopt, JAX IPM). NLP-BB reuses it
+without modification.
+
+** What NLP-BB Does NOT Need
+
+The following components of the spatial B&B loop can be skipped entirely in
+NLP-BB mode, which is where the simplification comes from:
+
+- McCormick relaxation compilation and evaluation (=relaxation_compiler.py=, =mccormick_nlp.py=, =batch_evaluator.py=)
+- alphaBB underestimator construction and evaluation (=alphabb.py=)
+- Strong branching on LP relaxations (the NLP solves provide pseudocost data directly)
+- OBBT/FBBT bound tightening (optional, can still help but not required)
+- Multistart at child nodes for convex problems (unique optimum)
+
+* Proposed Implementation
+
+** Step 1: Automatic Selection with Manual Override
+
+The solver should select NLP-BB automatically for convex MINLPs. The information
+needed is already computed: =classify_problem()= identifies MINLPs at
+=solver.py:1017-1024=, and =classify_model()= detects convexity at
+=solver.py:1155-1158=. The dispatch logic becomes:
+
+#+begin_example
+problem_class = classify_problem(model)
+is_convex, _ = classify_model(model)
+
+if problem_class is MINLP and is_convex:
+    return _solve_nlp_bb(...)     # automatic: convex MINLP -> NLP-BB
+#+end_example
+
+This goes in the dispatch block around line 1056, after LP/QP/MILP/MIQP
+classification but before the general MINLP spatial B&B.
+
+For manual control, add =nlp_bb: Optional[bool] = None= to =solve_model()=:
+- =None= (default): auto-select (NLP-BB for convex MINLPs, spatial B&B otherwise)
+- =True=: force NLP-BB (runs in heuristic mode if nonconvex, with a warning)
+- =False=: force spatial B&B even for convex MINLPs
+
+Also expose through =Model.solve(nlp_bb=True)= for the user-facing API.
+
+** Step 2: Implement =_solve_nlp_bb()=
+
+A new function of approximately 150 lines in =solver.py=. This is a simplified
+version of the main MINLP B&B loop (lines 1288-1850) that strips out relaxation
+overhead. The core loop:
+
+#+begin_example
+1. Convexity gate: classify_model(). If nonconvex, warn and enter heuristic mode.
+2. Create NLPEvaluator via _make_evaluator(model).
+3. Create Rust TreeManager (same initialization as existing B&B).
+4. Loop:
+   a. tree.export_batch(batch_size)  ->  node bounds + warm-starts
+   b. _solve_batch_ipm(evaluator, ..., multistart=False)  ->  NLP objectives + solutions
+   c. tree.import_results(...)
+   d. tree.process_evaluated()  ->  prune / fathom / branch
+   e. Check termination (gap, node limit, time limit)
+5. Return SolveResult with gap_certified flag.
+#+end_example
+
+Key differences from the spatial B&B loop:
+- No McCormick or alphaBB lower bounding passes.
+- No strong branching (pseudocosts come from NLP solves directly).
+- =multistart=False= for convex problems (single warm-started solve suffices).
+- NLP objective IS the lower bound when the model is convex.
+- For nonconvex (heuristic mode): NLP objective used for feasibility only, gap reported as uncertified.
+
+** Step 3: Convexity Handling
+
+Three modes of operation:
+
+1. *Convex (auto-detected)*: =classify_model()= returns convex. NLP-BB selected automatically with certified optimality gap. This is the default path for convex MINLPs.
+2. *Forced NLP-BB on convex model*: User passes =nlp_bb=True= and model is convex, or =skip_convex_check=True=. Same behavior, explicit user intent.
+3. *Forced NLP-BB on nonconvex model*: User passes =nlp_bb=True= but model is nonconvex. Log a warning, run NLP-BB as a feasibility heuristic, report =gap_certified=False=. This matches Juniper.jl's behavior on nonconvex problems: it finds good solutions quickly but cannot certify optimality.
+
+When =nlp_bb=None= (default) and the model is nonconvex, the solver falls
+through to spatial B&B as before, so existing behavior is unchanged.
+
+** Step 4: Add =gap_certified= to =SolveResult=
+
+Add an optional =gap_certified: bool = True= field to the =SolveResult=
+dataclass in =modeling/core.py= so users can programmatically check whether the
+reported gap is trustworthy.
+
+** Step 5: Tests
+
+New test file =python/tests/test_nlp_bb.py=:
+
+- Convex MINLP with binary variables: verify optimal solution, gap=0.
+- Convex MIQP: verify result matches existing MIQP solver.
+- Nonconvex MINLP with =nlp_bb=True=: verify warning and =gap_certified=False=.
+- Node count comparison vs spatial B&B on a convex MINLP.
+- Batch size edge cases.
+
+** Step 6: Documentation
+
+Add a notebook =docs/notebooks/nlp_bb.ipynb= demonstrating the NLP-BB mode on a
+convex MINLP, comparing with spatial B&B on the same problem (solution quality
+and node counts).
+
+* Example: NLP-BB vs Spatial B&B Comparison
+
+The following example shows the intended usage on a convex MINLP (facility
+activation problem). The continuous relaxation is convex because the objective is
+a sum of convex quadratics and linear terms, and all constraints are linear.
+
+** Problem Formulation
+
+A company must decide which of $k$ facilities to activate (binary $y_i$) and how
+much capacity $x_i$ to allocate to each active facility. Operating costs follow
+an exponential model (economies of scale saturate at high capacity):
+
+\begin{align}
+\min_{x,y} \quad & \sum_{i=1}^{k} \left( c_i \, y_i + e^{\alpha_i x_i} \right) \\
+\text{s.t.} \quad & \sum_{i=1}^{k} x_i \geq D \quad \text{(demand)} \\
+& x_i \leq M \, y_i \quad \forall\, i \quad \text{(linking)} \\
+& x_i \geq 0, \quad y_i \in \{0,1\}
+\end{align}
+
+This is a convex MINLP: $e^{\alpha x}$ is convex for $\alpha > 0$, fixed costs
+are linear, and all constraints are linear. The nonlinearity prevents dispatch to
+specialized MIQP solvers, making it the right problem class for NLP-BB.
+
+** Code: Spatial B&B (current default for nonconvex MINLPs)
+
+#+begin_src python
+import os
+os.environ["JAX_PLATFORMS"] = "cpu"
+os.environ["JAX_ENABLE_X64"] = "1"
+
+import numpy as np
+import discopt.modeling as dm
+
+k = 5
+fixed_costs = np.array([5.0, 8.0, 6.0, 7.0, 4.0])
+alphas = np.array([0.3, 0.25, 0.35, 0.28, 0.32])
+M = 8.0    # big-M capacity bound
+D = 10.0   # total demand
+
+m = dm.Model("exp_facility")
+y = m.binary("activate", shape=(k,))
+x = m.continuous("capacity", shape=(k,), lb=0, ub=M)
+
+# Convex objective: fixed costs + exponential operating costs
+obj = 0
+for i in range(k):
+    obj = obj + fixed_costs[i] * y[i] + dm.exp(alphas[i] * x[i])
+m.minimize(obj)
+
+# Demand constraint
+total_cap = 0
+for i in range(k):
+    total_cap = total_cap + x[i]
+m.subject_to(total_cap >= D)
+
+# Linking constraints: capacity only if activated
+for i in range(k):
+    m.subject_to(x[i] <= M * y[i])
+
+# Force spatial B&B (skip automatic NLP-BB selection)
+result_spatial = m.solve(nlp_bb=False)
+
+print("=== Spatial B&B ===")
+print(f"Status:     {result_spatial.status}")
+print(f"Objective:  {result_spatial.objective:.4f}")
+print(f"Gap:        {result_spatial.gap}")
+print(f"Nodes:      {result_spatial.node_count}")
+print(f"Wall time:  {result_spatial.wall_time:.3f}s")
+print(f"Activated:  {result_spatial.x['activate']}")
+print(f"Capacities: {np.round(result_spatial.x['capacity'], 3)}")
+#+end_src
+
+** Code: NLP-BB (automatic for convex MINLPs)
+
+#+begin_src python
+# NLP-BB is selected automatically for convex MINLPs,
+# but we can also request it explicitly.
+result_nlpbb = m.solve(nlp_bb=True)
+
+print("=== NLP-BB ===")
+print(f"Status:     {result_nlpbb.status}")
+print(f"Objective:  {result_nlpbb.objective:.4f}")
+print(f"Gap:        {result_nlpbb.gap}")
+print(f"Nodes:      {result_nlpbb.node_count}")
+print(f"Wall time:  {result_nlpbb.wall_time:.3f}s")
+print(f"Activated:  {result_nlpbb.x['activate']}")
+print(f"Capacities: {np.round(result_nlpbb.x['capacity'], 3)}")
+#+end_src
+
+** Code: Side-by-side comparison
+
+#+begin_src python
+print(f"{'Metric':<20} {'Spatial B&B':>12} {'NLP-BB':>12}")
+print("-" * 46)
+print(f"{'Objective':<20} {result_spatial.objective:>12.4f} {result_nlpbb.objective:>12.4f}")
+print(f"{'Gap':<20} {result_spatial.gap:>12.2e} {result_nlpbb.gap:>12.2e}")
+print(f"{'Nodes explored':<20} {result_spatial.node_count:>12d} {result_nlpbb.node_count:>12d}")
+print(f"{'Wall time (s)':<20} {result_spatial.wall_time:>12.3f} {result_nlpbb.wall_time:>12.3f}")
+
+obj_match = abs(result_spatial.objective - result_nlpbb.objective) < 1e-4
+print(f"\nSame optimum: {obj_match}")
+#+end_src
+
+** Expected Behavior
+
+Both solvers should find the same optimal solution (this is a convex MINLP, so
+the global optimum is unique). The key differences to observe:
+
+- *Node count*: NLP-BB should explore fewer nodes because each node NLP gives
+  the exact continuous optimum for that discrete fixing, not a McCormick
+  relaxation lower bound. Tighter bounds mean more aggressive pruning.
+- *Per-node overhead*: Spatial B&B compiles McCormick relaxations, evaluates
+  alphaBB underestimators, and may run OBBT. NLP-BB skips all of this.
+- *Wall time*: For convex MINLPs, NLP-BB should be faster overall (fewer nodes,
+  less per-node work, same batch IPM infrastructure).
+
+** Default Behavior (automatic selection)
+
+With the proposed implementation, calling =m.solve()= without any flags on this
+convex MINLP would automatically select NLP-BB:
+
+#+begin_src python
+# The solver detects convexity and routes to NLP-BB automatically.
+# No nlp_bb flag needed.
+result = m.solve()
+
+print(f"Status:    {result.status}")
+print(f"Objective: {result.objective:.4f}")
+print(f"Nodes:     {result.node_count}")
+#+end_src
+
+To force spatial B&B (for benchmarking or debugging), pass =nlp_bb=False=.
+
+* Files to Modify
+
+| File                                | Change                                        |
+|-------------------------------------+-----------------------------------------------|
+| =python/discopt/solver.py=          | Add =nlp_bb= param, implement =_solve_nlp_bb= |
+| =python/discopt/modeling/core.py=   | Add =gap_certified= to =SolveResult=          |
+| =python/tests/test_nlp_bb.py=       | New test file                                 |
+| =docs/notebooks/nlp_bb.ipynb=       | New tutorial notebook                         |
+| =docs/_toc.yml=                     | Add notebook entry                            |
+| =ROADMAP.md=                        | Add NLP-BB entry under Phase 6                |
+
+No changes to Rust code, JAX evaluator, or IPM solver.
+
+* Files Reused Without Changes
+
+| File                                              | Reused Component                                      |
+|---------------------------------------------------+-------------------------------------------------------|
+| =crates/discopt-core/src/bnb/tree_manager.rs=     | TreeManager, export/import/process cycle               |
+| =crates/discopt-core/src/bnb/branching.rs=        | create_children (already fixes binaries via bounds)    |
+| =python/discopt/_jax/ipm.py=                      | solve_nlp_batch (vmap'd batch IPM)                     |
+| =python/discopt/_jax/nlp_evaluator.py=            | NLPEvaluator (JIT'd obj/grad/hess/cons/jac)           |
+| =python/discopt/_jax/convexity.py=                | classify_model for convexity gate                      |
+
+* Future Extensions
+
+These are natural follow-on improvements, not part of the initial implementation.
+
+** Reduced Parametric NLP
+
+Use the parametric DAG compiler in =differentiable.py= to eliminate fixed
+discrete variables from the NLP entirely. When a binary is fixed at 0 or 1, the
+NLP has fewer variables, which means faster solves. Currently the IPM respects
+=lb=ub= bounds but still carries those variables through the linear algebra.
+
+** Depth-First Diving
+
+NLP-BB benefits from reaching feasible solutions quickly to establish a good
+incumbent for pruning. A "dive" mode that prioritizes depth-first exploration
+along a single branch would find integer-feasible solutions sooner.
+
+** Feasibility Rounding
+
+After the root NLP solve, round discrete variables to their nearest integer
+values and solve the reduced NLP. This is a cheap way to find an initial
+incumbent before starting tree exploration.
+
+** Hybrid Mode for Nonconvex Problems
+
+For nonconvex MINLPs, run NLP-BB for upper bounds (good feasible solutions) and
+periodic McCormick relaxation solves for certified lower bounds on selected
+nodes. This combines the feasibility-finding strength of NLP-BB with the
+bound-certification capability of spatial B&B.
+
+** Outer Approximation Cuts
+
+For convex MINLPs, OA cuts from NLP solutions at integer-feasible nodes can
+further tighten the relaxation. This is the approach of Bonmin's B-OA algorithm
+and could reduce node counts further.
+
+* Summary
+
+NLP-BB fits naturally into discopt because the architecture was designed around
+batch NLP solving at B&B nodes. The Rust tree, batch IPM, warm-starting, and
+convexity detection all compose directly into an NLP-BB implementation. The
+result is a new solver mode (=model.solve(nlp_bb=True)=) that adds approximately
+150 lines of Python orchestration, reuses all existing infrastructure, and
+provides an alternative B&B strategy that is simpler and potentially faster for
+convex MINLPs.

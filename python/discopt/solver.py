@@ -322,6 +322,114 @@ def _check_constraint_feasibility(evaluator, x, cl_list, cu_list, tol=1e-4):
     return max_viol <= tol
 
 
+def _tighten_node_bounds(evaluator, node_lb, node_ub, cl_list, cu_list, max_rounds=3):
+    """Constraint-based bound tightening (FBBT) for a single B&B node.
+
+    Uses the constraint Jacobian to propagate implied variable bounds.
+    For linear constraints (e.g., x_i <= M * y_i with y_i fixed), this
+    is exact and eliminates degenerate variable bounds that cause IPM
+    convergence failures.
+
+    Parameters
+    ----------
+    evaluator : NLPEvaluator
+        Provides evaluate_constraints and evaluate_jacobian.
+    node_lb, node_ub : np.ndarray
+        Variable bounds at this node.
+    cl_list, cu_list : list[float]
+        Constraint bounds.
+    max_rounds : int
+        Maximum propagation rounds.
+
+    Returns
+    -------
+    lb, ub : np.ndarray
+        Tightened variable bounds.
+    """
+    if evaluator.n_constraints == 0 or not cl_list:
+        return node_lb.copy(), node_ub.copy()
+
+    lb = node_lb.copy()
+    ub = node_ub.copy()
+    n = len(lb)
+    m = len(cl_list)
+    cu = np.array(cu_list, dtype=np.float64)
+    cl = np.array(cl_list, dtype=np.float64)
+
+    for _ in range(max_rounds):
+        changed = False
+        # Evaluate Jacobian at midpoint of current bounds
+        mid = np.clip(lb, -_SPC, _SPC)
+        span = np.clip(ub, -_SPC, _SPC) - mid
+        mid = mid + 0.5 * span
+        try:
+            J = evaluator.evaluate_jacobian(mid)  # (m, n)
+            g = evaluator.evaluate_constraints(mid)  # (m,)
+        except Exception:
+            break
+
+        for j in range(m):
+            # For constraint g_j(x) <= cu_j:
+            # Linear approx: g_j(mid) + J[j,:] @ (x - mid) <= cu_j
+            # To find max x_i, set other vars to MINIMIZE g (most room):
+            #   J[j,k] > 0 → use lb[k];  J[j,k] < 0 → use ub[k]
+            if cu[j] < 1e19:
+                for i in range(n):
+                    if abs(J[j, i]) < 1e-12 or lb[i] == ub[i]:
+                        continue
+                    residual = cu[j] - g[j]
+                    for k in range(n):
+                        if k == i:
+                            continue
+                        if J[j, k] > 0:
+                            residual -= J[j, k] * (lb[k] - mid[k])
+                        else:
+                            residual -= J[j, k] * (ub[k] - mid[k])
+                    # J[j,i] * (x_i - mid_i) <= residual
+                    if J[j, i] > 1e-12:
+                        new_ub = mid[i] + residual / J[j, i]
+                        if new_ub < ub[i] - 1e-10:
+                            ub[i] = max(lb[i], new_ub)
+                            changed = True
+                    elif J[j, i] < -1e-12:
+                        new_lb = mid[i] + residual / J[j, i]
+                        if new_lb > lb[i] + 1e-10:
+                            lb[i] = min(ub[i], new_lb)
+                            changed = True
+
+            # For constraint g_j(x) >= cl_j:
+            # To find min x_i, set other vars to MAXIMIZE g (most room):
+            #   J[j,k] > 0 → use ub[k];  J[j,k] < 0 → use lb[k]
+            if cl[j] > -1e19:
+                for i in range(n):
+                    if abs(J[j, i]) < 1e-12 or lb[i] == ub[i]:
+                        continue
+                    residual = cl[j] - g[j]
+                    for k in range(n):
+                        if k == i:
+                            continue
+                        if J[j, k] > 0:
+                            residual -= J[j, k] * (ub[k] - mid[k])
+                        else:
+                            residual -= J[j, k] * (lb[k] - mid[k])
+                    # J[j,i] * (x_i - mid_i) >= residual
+                    if J[j, i] > 1e-12:
+                        new_lb = mid[i] + residual / J[j, i]
+                        if new_lb > lb[i] + 1e-10:
+                            lb[i] = min(ub[i], new_lb)
+                            changed = True
+                    elif J[j, i] < -1e-12:
+                        new_ub = mid[i] + residual / J[j, i]
+                        if new_ub < ub[i] - 1e-10:
+                            ub[i] = max(lb[i], new_ub)
+                            changed = True
+
+        if not changed:
+            break
+
+    return lb, ub
+
+
 def _infer_constraint_bounds(model: Model):
     """Infer (cl, cu) arrays from model constraint senses.
 
@@ -840,6 +948,7 @@ def solve_model(
     gdp_method: str = "big-m",
     initial_point: Optional[np.ndarray] = None,
     skip_convex_check: bool = False,
+    nlp_bb: Optional[bool] = None,
     lazy_constraints=None,
     incumbent_callback=None,
     node_callback=None,
@@ -1014,6 +1123,24 @@ def solve_model(
     else:
         logger.info("Using Ipopt (via cyipopt)")
 
+    # --- Explicit NLP-BB override: bypass specialized solvers ---
+    if nlp_bb is True and not _is_pure_continuous(model):
+        return _solve_nlp_bb(
+            model,
+            time_limit,
+            gap_tolerance,
+            batch_size,
+            strategy,
+            max_nodes,
+            t_start,
+            nlp_solver,
+            skip_convex_check=skip_convex_check,
+            initial_point=initial_point,
+            lazy_constraints=lazy_constraints,
+            incumbent_callback=incumbent_callback,
+            node_callback=node_callback,
+        )
+
     # --- Problem classification: dispatch LP/QP to specialized solvers ---
     try:
         from discopt._jax.problem_classifier import ProblemClass, classify_problem
@@ -1086,6 +1213,36 @@ def solve_model(
             nlp_solver,
             initial_point=initial_point,
         )
+
+    # --- NLP-BB auto-select for convex MINLPs (nlp_bb=None) ---
+    # Placed after problem classifier so MILP/MIQP use their specialized
+    # (faster) solvers. Only genuinely nonlinear convex MINLPs reach here.
+    # Also skip when lazy constraints are provided (they need the cut pool
+    # infrastructure from the full spatial B&B loop).
+    if nlp_bb is None and lazy_constraints is None:
+        try:
+            from discopt._jax.convexity import classify_model as _cls_conv
+
+            _is_conv, _ = _cls_conv(model)
+            if _is_conv:
+                logger.info("Convex MINLP detected, using NLP-BB (nonlinear Branch and Bound)")
+                return _solve_nlp_bb(
+                    model,
+                    time_limit,
+                    gap_tolerance,
+                    batch_size,
+                    strategy,
+                    max_nodes,
+                    t_start,
+                    nlp_solver,
+                    skip_convex_check=skip_convex_check,
+                    initial_point=initial_point,
+                    lazy_constraints=lazy_constraints,
+                    incumbent_callback=incumbent_callback,
+                    node_callback=node_callback,
+                )
+        except Exception:
+            pass
 
     # --- Extract variable info ---
     n_vars, lb, ub, int_offsets, int_sizes = _extract_variable_info(model)
@@ -1299,6 +1456,15 @@ def solve_model(
         if n_batch == 0:
             break
 
+        # Tighten node bounds via constraint propagation (FBBT).
+        if cl_list:
+            for i in range(n_batch):
+                node_lb_i = np.array(batch_lb[i])
+                node_ub_i = np.array(batch_ub[i])
+                t_lb, t_ub = _tighten_node_bounds(evaluator, node_lb_i, node_ub_i, cl_list, cu_list)
+                batch_lb[i] = t_lb.tolist()
+                batch_ub[i] = t_ub.tolist()
+
         # Solve NLP relaxation for each node in the batch
         t_jax_start = time.perf_counter()
 
@@ -1331,7 +1497,11 @@ def solve_model(
                 batch_psols=batch_psols,
                 multistart=not _model_is_convex,
             )
-            # Constraint feasibility post-check for batch IPM results
+            # Constraint feasibility post-check for batch IPM results.
+            # When the IPM solution violates constraints (e.g. due to hitting
+            # the iteration limit), mark the node as infeasible (SENTINEL).
+            # This prevents the invalid solution from becoming the incumbent
+            # and causes the Rust tree to prune the node.
             if cl_list:
                 for i in range(n_batch):
                     if result_lbs[i] < _SENTINEL_THRESHOLD:
@@ -1581,9 +1751,7 @@ def solve_model(
                         if not sol_is_int_feas:
                             nlp_lb = convex_lb
 
-                    # Constraint feasibility post-check: reject NLP solutions
-                    # that violate constraints (the Rust B&B tree only checks
-                    # integrality, not constraint satisfaction).
+                    # Constraint feasibility post-check
                     if cl_list and not _check_constraint_feasibility(
                         _active_evaluator, nlp_result.x, cl_list, cu_list
                     ):
@@ -2000,6 +2168,414 @@ def _solve_continuous(
     )
 
 
+def _solve_nlp_bb(
+    model: Model,
+    time_limit: float,
+    gap_tolerance: float,
+    batch_size: int,
+    strategy: str,
+    max_nodes: int,
+    t_start: float,
+    nlp_solver: str,
+    skip_convex_check: bool = False,
+    initial_point: Optional[np.ndarray] = None,
+    lazy_constraints=None,
+    incumbent_callback=None,
+    node_callback=None,
+) -> SolveResult:
+    """Solve a MINLP via nonlinear Branch & Bound (NLP-BB).
+
+    Instead of solving convex relaxations (McCormick/alphaBB) at each node,
+    NLP-BB solves the original continuous NLP with discrete variables fixed
+    via bound tightening.  For convex MINLPs, the NLP objective at each node
+    is a valid lower bound, giving certified optimality gaps without any
+    relaxation overhead.
+
+    For nonconvex problems the NLP objective is NOT a valid lower bound;
+    the solver runs in heuristic mode and reports gap_certified=False.
+    """
+    import jax.numpy as jnp
+
+    from discopt._jax.gdp_reformulate import reformulate_gdp
+    from discopt.modeling.core import ObjectiveSense
+
+    model = reformulate_gdp(model, method="big-m")
+
+    rust_time = 0.0
+    jax_time = 0.0
+
+    # --- Convexity gate ---
+    _gap_certified = True
+    try:
+        from discopt._jax.convexity import classify_model as _classify_model
+
+        _model_is_convex, _ = _classify_model(model)
+    except Exception:
+        _model_is_convex = False
+
+    if not _model_is_convex and not skip_convex_check:
+        logger.warning(
+            "NLP-BB on nonconvex model: running in heuristic mode "
+            "(gap not certified). Pass skip_convex_check=True to suppress."
+        )
+        _gap_certified = False
+
+    # --- Extract variable info and create tree ---
+    n_vars, lb, ub, int_offsets, int_sizes = _extract_variable_info(model)
+
+    t_rust_start = time.perf_counter()
+    tree = PyTreeManager(
+        n_vars,
+        lb.tolist(),
+        ub.tolist(),
+        int_offsets,
+        int_sizes,
+        strategy,
+    )
+    tree.initialize()
+    rust_time += time.perf_counter() - t_rust_start
+
+    # --- Compile NLP evaluator ---
+    t_jax_start = time.perf_counter()
+    evaluator = _make_evaluator(model)
+    jax_time += time.perf_counter() - t_jax_start
+
+    # --- Infer constraint bounds ---
+    cl_list, cu_list = _infer_constraint_bounds(model)
+    constraint_bounds = list(zip(cl_list, cu_list)) if cl_list else None
+
+    g_l_jax = None
+    g_u_jax = None
+    if nlp_solver == "ipm" and cl_list:
+        g_l_jax = jnp.array(cl_list, dtype=jnp.float64)
+        g_u_jax = jnp.array(cu_list, dtype=jnp.float64)
+
+    opts: dict = {}
+    opts.setdefault("print_level", 0)
+    opts.setdefault("max_iter", 3000)
+    opts.setdefault("tol", 1e-7)
+
+    # --- Warm-start: inject user-provided initial solution as incumbent ---
+    if initial_point is not None:
+        ws_obj = float(evaluator.evaluate_objective(initial_point))
+        ws_int_feas = True
+        for off, sz in zip(int_offsets, int_sizes):
+            for j in range(off, off + sz):
+                if abs(initial_point[j] - round(initial_point[j])) > 1e-5:
+                    ws_int_feas = False
+                    break
+            if not ws_int_feas:
+                break
+        if ws_int_feas and np.isfinite(ws_obj) and ws_obj < _SENTINEL_THRESHOLD:
+            ws_con_feas = not cl_list or _check_constraint_feasibility(
+                evaluator, initial_point, cl_list, cu_list
+            )
+            if ws_con_feas:
+                tree.inject_incumbent(initial_point, ws_obj)
+                logger.info("NLP-BB warm-start incumbent: obj=%.6g", ws_obj)
+
+    # --- Feasibility pump flag ---
+    _fp_ran = False
+
+    # --- NLP-BB loop ---
+    _use_ipm_batch = nlp_solver == "ipm" and hasattr(evaluator, "_obj_fn")
+    iteration = 0
+    while True:
+        elapsed = time.perf_counter() - t_start
+        if elapsed >= time_limit:
+            break
+
+        # Export batch from Rust tree
+        t_rust_start = time.perf_counter()
+        batch_lb, batch_ub, batch_ids, batch_psols = tree.export_batch(batch_size)
+        rust_time += time.perf_counter() - t_rust_start
+
+        n_batch = len(batch_ids)
+        if n_batch == 0:
+            break
+
+        # Tighten node bounds via constraint propagation (FBBT).
+        # This resolves degenerate bounds (e.g., x <= M*y with y fixed at 0)
+        # that cause IPM convergence failures.
+        if cl_list:
+            for i in range(n_batch):
+                node_lb_i = np.array(batch_lb[i])
+                node_ub_i = np.array(batch_ub[i])
+                t_lb, t_ub = _tighten_node_bounds(evaluator, node_lb_i, node_ub_i, cl_list, cu_list)
+                batch_lb[i] = t_lb.tolist()
+                batch_ub[i] = t_ub.tolist()
+
+        # Solve NLP at each node (no relaxation, no multistart for convex)
+        t_jax_start = time.perf_counter()
+
+        if _use_ipm_batch and n_batch > 1:
+            result_ids, result_lbs, result_sols, result_feas = _solve_batch_ipm(
+                evaluator,
+                batch_lb,
+                batch_ub,
+                batch_ids,
+                n_vars,
+                constraint_bounds,
+                opts,
+                g_l_jax,
+                g_u_jax,
+                batch_psols=batch_psols,
+                multistart=not _model_is_convex,
+            )
+            # Constraint feasibility post-check
+            if cl_list:
+                for i in range(n_batch):
+                    if result_lbs[i] < _SENTINEL_THRESHOLD:
+                        if not _check_constraint_feasibility(
+                            evaluator, result_sols[i], cl_list, cu_list
+                        ):
+                            result_lbs[i] = _INFEASIBILITY_SENTINEL
+            # For nonconvex: NLP objective is NOT a valid lower bound.
+            # Keep it for integer-feasible nodes (incumbent candidates),
+            # but reset to -inf for others so we don't prune incorrectly.
+            if not _model_is_convex:
+                for i in range(n_batch):
+                    if result_lbs[i] < _SENTINEL_THRESHOLD:
+                        sol_is_int_feas = True
+                        for off, sz in zip(int_offsets, int_sizes):
+                            for j in range(off, off + sz):
+                                frac = abs(result_sols[i, j] - round(result_sols[i, j]))
+                                if frac > 1e-5:
+                                    sol_is_int_feas = False
+                                    break
+                            if not sol_is_int_feas:
+                                break
+                        if not sol_is_int_feas:
+                            result_lbs[i] = -np.inf
+        else:
+            # Serial fallback (batch_size=1 or non-IPM solver)
+            result_ids = np.empty(n_batch, dtype=np.int64)
+            result_lbs = np.empty(n_batch, dtype=np.float64)
+            result_sols = np.empty((n_batch, n_vars), dtype=np.float64)
+            result_feas = np.empty(n_batch, dtype=bool)
+
+            for i in range(n_batch):
+                node_lb = np.array(batch_lb[i])
+                node_ub = np.array(batch_ub[i])
+
+                if iteration == 0 and _use_ipm_batch:
+                    n_random = 2 if _model_is_convex else 5
+                    nlp_result = _solve_root_node_multistart_ipm(
+                        evaluator,
+                        node_lb,
+                        node_ub,
+                        constraint_bounds,
+                        g_l_jax,
+                        g_u_jax,
+                        opts,
+                        n_random=n_random,
+                    )
+                elif iteration == 0:
+                    nlp_result = _solve_root_node_multistart(
+                        evaluator,
+                        node_lb,
+                        node_ub,
+                        constraint_bounds,
+                        opts,
+                        nlp_solver,
+                    )
+                else:
+                    psol_i = np.array(batch_psols[i])
+                    if not np.any(np.isnan(psol_i)):
+                        x0 = np.clip(psol_i, node_lb, node_ub)
+                    else:
+                        lb_c = np.clip(node_lb, -_SPC, _SPC)
+                        ub_c = np.clip(node_ub, -_SPC, _SPC)
+                        x0 = 0.5 * (lb_c + ub_c)
+                    nlp_result = _solve_node_nlp(
+                        evaluator,
+                        x0,
+                        node_lb,
+                        node_ub,
+                        constraint_bounds,
+                        opts,
+                        nlp_solver=nlp_solver,
+                    )
+
+                result_ids[i] = int(batch_ids[i])
+                if nlp_result.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
+                    nlp_lb = nlp_result.objective
+                    # Constraint feasibility check
+                    if cl_list and not _check_constraint_feasibility(
+                        evaluator, nlp_result.x, cl_list, cu_list
+                    ):
+                        nlp_lb = _INFEASIBILITY_SENTINEL
+                    # For nonconvex: reset non-integer-feasible to -inf
+                    elif not _model_is_convex:
+                        sol_is_int_feas = True
+                        for off, sz in zip(int_offsets, int_sizes):
+                            for j in range(off, off + sz):
+                                frac = abs(nlp_result.x[j] - round(nlp_result.x[j]))
+                                if frac > 1e-5:
+                                    sol_is_int_feas = False
+                                    break
+                            if not sol_is_int_feas:
+                                break
+                        if not sol_is_int_feas:
+                            nlp_lb = -np.inf
+                    result_lbs[i] = nlp_lb
+                    result_sols[i] = nlp_result.x
+                    result_feas[i] = False
+                else:
+                    result_lbs[i] = _INFEASIBILITY_SENTINEL
+                    lb_c = np.clip(node_lb, -_SPC, _SPC)
+                    ub_c = np.clip(node_ub, -_SPC, _SPC)
+                    result_sols[i] = 0.5 * (lb_c + ub_c)
+                    result_feas[i] = False
+
+        jax_time += time.perf_counter() - t_jax_start
+
+        # --- Feasibility pump after root node ---
+        if iteration == 0 and not _fp_ran:
+            _fp_ran = True
+            best_root_idx = None
+            best_root_obj = np.inf
+            for i in range(n_batch):
+                if result_lbs[i] < _SENTINEL_THRESHOLD and result_lbs[i] < best_root_obj:
+                    best_root_obj = result_lbs[i]
+                    best_root_idx = i
+            if best_root_idx is not None:
+                try:
+                    from discopt._jax.primal_heuristics import feasibility_pump
+
+                    fp_sol = feasibility_pump(model, result_sols[best_root_idx], max_rounds=5)
+                    if fp_sol is not None:
+                        fp_obj = float(evaluator.evaluate_objective(fp_sol))
+                        fp_feas = not cl_list or _check_constraint_feasibility(
+                            evaluator, fp_sol, cl_list, cu_list
+                        )
+                        if np.isfinite(fp_obj) and fp_obj < _SENTINEL_THRESHOLD and fp_feas:
+                            tree.inject_incumbent(fp_sol, fp_obj)
+                            logger.info("NLP-BB feasibility pump incumbent: obj=%.6g", fp_obj)
+                except Exception as e:
+                    logger.debug("Feasibility pump failed: %s", e)
+
+        # --- User callbacks ---
+        if lazy_constraints is not None or incumbent_callback is not None:
+            _invoke_pre_import_callbacks(
+                model=model,
+                tree=tree,
+                t_start=t_start,
+                result_ids=result_ids,
+                result_lbs=result_lbs,
+                result_sols=result_sols,
+                result_feas=result_feas,
+                n_batch=n_batch,
+                int_offsets=int_offsets,
+                int_sizes=int_sizes,
+                n_vars=n_vars,
+                lazy_constraints=lazy_constraints,
+                incumbent_callback=incumbent_callback,
+                _cut_pool=None,
+            )
+
+        # Import results back to Rust tree
+        t_rust_start = time.perf_counter()
+        tree.import_results(result_ids, result_lbs, result_sols, result_feas)
+        tree.process_evaluated()
+        rust_time += time.perf_counter() - t_rust_start
+
+        # --- Node callback ---
+        if node_callback is not None:
+            try:
+                stats_snap = tree.stats()
+                incumbent_info_cb = tree.incumbent()
+                inc_obj_cb = None
+                if incumbent_info_cb is not None:
+                    _, inc_obj_cb = incumbent_info_cb
+                    if inc_obj_cb >= _SENTINEL_THRESHOLD:
+                        inc_obj_cb = None
+                best_idx = 0
+                for i in range(n_batch):
+                    if result_lbs[i] < result_lbs[best_idx]:
+                        best_idx = i
+                from discopt.callbacks import CallbackContext
+
+                ctx = CallbackContext(
+                    node_count=stats_snap["total_nodes"],
+                    incumbent_obj=inc_obj_cb,
+                    best_bound=stats_snap.get("global_lower_bound", -np.inf),
+                    gap=stats_snap.get("gap"),
+                    elapsed_time=time.perf_counter() - t_start,
+                    x_relaxation=result_sols[best_idx].copy(),
+                    node_bound=float(result_lbs[best_idx]),
+                )
+                node_callback(ctx, model)
+            except Exception as e:
+                logger.warning("Node callback raised an exception: %s", e)
+
+        iteration += 1
+
+        # Check termination
+        if tree.is_finished():
+            break
+        if tree.gap() <= gap_tolerance:
+            break
+        stats = tree.stats()
+        if stats["total_nodes"] >= max_nodes:
+            break
+
+    # --- Build result ---
+    wall_time = time.perf_counter() - t_start
+    python_time = wall_time - rust_time - jax_time
+
+    stats = tree.stats()
+    incumbent = tree.incumbent()
+
+    if incumbent is not None:
+        sol_array, obj_val = incumbent
+        if obj_val >= _SENTINEL_THRESHOLD:
+            incumbent = None
+
+    if incumbent is not None:
+        sol_flat = np.array(sol_array)
+        x_dict = _unpack_solution(model, sol_flat)
+
+        assert model._objective is not None
+        if model._objective.sense == ObjectiveSense.MAXIMIZE:
+            obj_val = -obj_val
+
+        if tree.gap() <= gap_tolerance or tree.is_finished():
+            status = "optimal"
+        else:
+            status = "feasible"
+    else:
+        x_dict = None
+        obj_val = None
+        if stats["total_nodes"] >= max_nodes:
+            status = "node_limit"
+        elif wall_time >= time_limit:
+            status = "time_limit"
+        else:
+            status = "infeasible"
+
+    # Negate bound back for maximization
+    bound_val = stats["global_lower_bound"]
+    assert model._objective is not None
+    if bound_val is not None and model._objective.sense == ObjectiveSense.MAXIMIZE:
+        bound_val = -bound_val
+
+    return SolveResult(
+        status=status,
+        objective=obj_val,
+        bound=bound_val,
+        gap=stats["gap"],
+        x=x_dict,
+        wall_time=wall_time,
+        node_count=stats["total_nodes"],
+        rust_time=rust_time,
+        jax_time=jax_time,
+        python_time=python_time,
+        nlp_bb=True,
+        gap_certified=_gap_certified,
+    )
+
+
 def _solve_node_nlp(
     evaluator: NLPEvaluator,
     x0: np.ndarray,
@@ -2213,7 +2789,10 @@ def _solve_batch_ipm(
         obj_vals = obj_vals.reshape(n_batch, n_starts)
         x_vals = x_vals.reshape(n_batch, n_starts, n_vars)
 
-        # Require convergence AND finite objective
+        # Accept converged (1=optimal, 2=acceptable) and iteration-limit (3)
+        # solutions. Constraint feasibility is checked separately in the
+        # caller; iteration-limit solutions that violate constraints are
+        # handled there (not pruned, but given a conservative lower bound).
         feasible_mask = ((converged == 1) | (converged == 2) | (converged == 3)) & np.isfinite(
             obj_vals
         )
@@ -2221,19 +2800,19 @@ def _solve_batch_ipm(
         best_per_node = np.argmin(masked_obj, axis=1)  # (n_batch,)
 
         result_obj = np.array([obj_vals[i, best_per_node[i]] for i in range(n_batch)])
-        result_x = np.array([x_vals[i, best_per_node[i]] for i in range(n_batch)])
+        result_x = np.array([x_vals[i, best_per_node[i]] for i in range(n_batch)], dtype=np.float64)
         any_feasible = np.any(feasible_mask, axis=1)
         result_lbs = np.asarray(
             np.where(any_feasible, result_obj, _INFEASIBILITY_SENTINEL), dtype=np.float64
         )
-        result_sols = result_x
+        result_sols = result_x  # already writable np.array
     else:
         conv_mask = (converged == 1) | (converged == 2) | (converged == 3)
         result_lbs = np.asarray(
             np.where(conv_mask & np.isfinite(obj_vals), obj_vals, _INFEASIBILITY_SENTINEL),
             dtype=np.float64,
         )
-        result_sols = x_vals
+        result_sols = np.array(x_vals, dtype=np.float64)  # writable copy
 
     result_ids = np.array(batch_ids, dtype=np.int64)
     result_feas = np.zeros(n_batch, dtype=bool)  # Let Rust check integrality
