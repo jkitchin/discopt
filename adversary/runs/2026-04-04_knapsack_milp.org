@@ -1,0 +1,35 @@
+#+TITLE: Adversary Run: 0-1 Knapsack MILP
+#+DATE: 2026-04-04
+
+* Problem
+:PROPERTIES:
+:SOURCE: Martello & Toth, "Knapsack Problems" (adapted 5-item instance)
+:CLASS: MILP
+:KNOWN_OPTIMAL: 14.0
+:N_VARIABLES: 5
+:N_CONSTRAINTS: 1
+:END:
+
+5-item 0-1 knapsack: values=[4,5,3,4,2], weights=[3,4,2,3,1], capacity=10.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:END:
+
+| Backend | Objective | Rel Error | Wall Time | Nodes | Status  |
+|---------+-----------+-----------+-----------+-------+---------|
+| ipm     | 14.0      | 1.80e-09  | 0.499s    |     5 | optimal |
+| ipopt   | 14.0      | 1.80e-09  | 0.002s    |     5 | optimal |
+| ripopt  | 14.0      | 1.80e-09  | 0.002s    |     5 | optimal |
+
+All backends find the correct optimum. Selection: items 1,2,3,5
+(weight=10, value=14), confirmed by brute-force enumeration.
+
+* Performance Comparison
+
+All backends report identical results (MILP fast path). No regression.
+
+* Verdict
+
+PASS.

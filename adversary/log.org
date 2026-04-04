@@ -1,0 +1,67 @@
+#+TITLE: Adversary Agent Problem Log
+#+STARTUP: overview
+
+This file tracks all problems tested by the adversary agent. Each entry
+records the problem class, source, result, and a link to the full run report.
+
+Maintain a balanced distribution across problem classes:
+LP, QP, MILP, MIQP, convex NLP, nonconvex NLP, convex MINLP, nonconvex MINLP
+
+* Problem Index
+
+** [2026-04-04] Hock-Schittkowski 71 (nonconvex NLP) - PASS
+:PROPERTIES:
+:SOURCE: Hock & Schittkowski, LNEMS 187, 1981, Problem 71
+:KNOWN_OPTIMAL: 17.0140173
+:DISCOPT_OBJECTIVE: 17.014017289162915
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-04-04_hs071.org]]
+:END:
+
+** [2026-04-04] Wyndor Glass (LP) - PASS
+:PROPERTIES:
+:SOURCE: Hillier & Lieberman, "Introduction to Operations Research", 10th ed., Ch. 3
+:KNOWN_OPTIMAL: 21.0
+:DISCOPT_OBJECTIVE: 20.999999979739
+:IPM_TIME: 0.312
+:IPOPT_TIME: 0.000
+:RIPOPT_TIME: 0.000
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-04-04_wyndor_glass_lp.org]]
+:END:
+
+** [2026-04-04] Markowitz 3-Asset Portfolio (QP) - FAIL
+:PROPERTIES:
+:SOURCE: Markowitz (1952); Cornuejols & Tutuncu, "Optimization Methods in Finance"
+:KNOWN_OPTIMAL: 0.038
+:DISCOPT_OBJECTIVE: 0.032143 (incorrect, drops cross-terms)
+:IPM_TIME: 0.155
+:IPOPT_TIME: 0.001
+:RIPOPT_TIME: 0.001
+:VERDICT: SOLVER_BUG
+:REPORT: [[file:runs/2026-04-04_markowitz_qp.org]]
+:END:
+
+** [2026-04-04] 0-1 Knapsack (MILP) - PASS
+:PROPERTIES:
+:SOURCE: Martello & Toth, "Knapsack Problems" (adapted)
+:KNOWN_OPTIMAL: 14.0
+:DISCOPT_OBJECTIVE: 14.0
+:IPM_TIME: 0.499
+:IPOPT_TIME: 0.002
+:RIPOPT_TIME: 0.002
+:VERDICT: PASS
+:REPORT: [[file:runs/2026-04-04_knapsack_milp.org]]
+:END:
+
+** [2026-04-04] Hock-Schittkowski 35 (convex NLP) - FAIL
+:PROPERTIES:
+:SOURCE: Hock & Schittkowski, LNEMS 187, 1981, Problem 35
+:KNOWN_OPTIMAL: 0.111111
+:DISCOPT_OBJECTIVE: -3.45 (incorrect, drops cross-terms)
+:IPM_TIME: 0.053
+:IPOPT_TIME: 0.001
+:RIPOPT_TIME: 0.001
+:VERDICT: SOLVER_BUG
+:REPORT: [[file:runs/2026-04-04_hs035_convex_nlp.org]]
+:END:

@@ -306,3 +306,84 @@ class TestQPEquality:
         # With equality x0+x1+x2=3 and x0-x1<=1,
         # optimal is x0=x1=x2=1 (satisfies both)
         np.testing.assert_allclose(result.value(x), [1.0, 1.0, 1.0], atol=1e-4)
+
+
+# ---------------------------------------------------------------------------
+# 9. Cross-term (off-diagonal Hessian) correctness
+# ---------------------------------------------------------------------------
+class TestCrossTermObjective:
+    """Verify that QP cross-terms (x_i * x_j) are handled correctly.
+
+    Regression tests for the HiGHS Hessian format bug where off-diagonal
+    entries were dropped due to upper-vs-lower triangle mismatch.
+    """
+
+    def test_2var_cross_term_objective_value(self):
+        """min x^2 + x*y + y^2 s.t. x+y=1 => obj = 0.75 at x=y=0.5."""
+        m = dm.Model("cross_2var")
+        x = m.continuous("x", lb=0, ub=10)
+        y = m.continuous("y", lb=0, ub=10)
+        m.minimize(x**2 + x * y + y**2)
+        m.subject_to(x + y == 1)
+        result = m.solve()
+
+        assert result.status == "optimal"
+        xv = float(result.value(x))
+        yv = float(result.value(y))
+        actual = xv**2 + xv * yv + yv**2
+        np.testing.assert_allclose(result.objective, actual, atol=1e-6)
+        np.testing.assert_allclose(result.objective, 0.75, atol=1e-5)
+
+    def test_3var_portfolio_cross_terms(self):
+        """Markowitz portfolio: reported obj must match w^T S w."""
+        S = np.array([[0.04, 0.006, 0.002], [0.006, 0.09, 0.018], [0.002, 0.018, 0.16]])
+        mu = np.array([0.08, 0.10, 0.12])
+
+        m = dm.Model("portfolio")
+        w1 = m.continuous("w1", lb=0, ub=1)
+        w2 = m.continuous("w2", lb=0, ub=1)
+        w3 = m.continuous("w3", lb=0, ub=1)
+        m.minimize(
+            S[0, 0] * w1 * w1
+            + 2 * S[0, 1] * w1 * w2
+            + 2 * S[0, 2] * w1 * w3
+            + S[1, 1] * w2 * w2
+            + 2 * S[1, 2] * w2 * w3
+            + S[2, 2] * w3 * w3
+        )
+        m.subject_to(w1 + w2 + w3 == 1)
+        m.subject_to(mu[0] * w1 + mu[1] * w2 + mu[2] * w3 >= 0.10)
+        result = m.solve()
+
+        assert result.status == "optimal"
+        w = np.array([float(result.value(w1)), float(result.value(w2)), float(result.value(w3))])
+        actual_var = w @ S @ w
+        np.testing.assert_allclose(result.objective, actual_var, atol=1e-6)
+
+    def test_hs035_cross_terms(self):
+        """HS035: obj with cross-terms must match known optimal 1/9."""
+        m = dm.Model("hs035")
+        x1 = m.continuous("x1", lb=0, ub=10)
+        x2 = m.continuous("x2", lb=0, ub=10)
+        x3 = m.continuous("x3", lb=0, ub=10)
+        m.minimize(
+            9 - 8 * x1 - 6 * x2 - 4 * x3 + 2 * x1**2 + 2 * x2**2 + x3**2 + 2 * x1 * x2 + 2 * x1 * x3
+        )
+        m.subject_to(x1 + x2 + 2 * x3 <= 3)
+        result = m.solve()
+
+        assert result.status == "optimal"
+        xv = [float(result.value(x1)), float(result.value(x2)), float(result.value(x3))]
+        actual = (
+            9
+            - 8 * xv[0]
+            - 6 * xv[1]
+            - 4 * xv[2]
+            + 2 * xv[0] ** 2
+            + 2 * xv[1] ** 2
+            + xv[2] ** 2
+            + 2 * xv[0] * xv[1]
+            + 2 * xv[0] * xv[2]
+        )
+        np.testing.assert_allclose(result.objective, actual, atol=1e-5)
+        np.testing.assert_allclose(result.objective, 1.0 / 9.0, atol=1e-4)

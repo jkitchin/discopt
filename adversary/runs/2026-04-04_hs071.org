@@ -1,0 +1,44 @@
+#+TITLE: Adversary Run: Hock-Schittkowski Problem 71
+#+DATE: 2026-04-04
+
+* Problem
+:PROPERTIES:
+:SOURCE: Hock & Schittkowski, "Test Examples for Nonlinear Programming Codes", LNEMS 187, 1981, Problem 71
+:CLASS: nonconvex NLP
+:KNOWN_OPTIMAL: 17.0140173
+:N_VARIABLES: 4
+:N_CONSTRAINTS: 2
+:END:
+
+\begin{align}
+\min_{x} \quad & x_1 x_4 (x_1 + x_2 + x_3) + x_3 \\
+\text{s.t.} \quad & x_1 x_2 x_3 x_4 \geq 25 \\
+& x_1^2 + x_2^2 + x_3^2 + x_4^2 = 40 \\
+& 1 \leq x_i \leq 5, \quad i = 1, \ldots, 4
+\end{align}
+
+The objective is nonconvex (products of variables). The inequality constraint
+is also nonconvex (product of four variables). The equality constraint is a
+sphere, making the feasible region nonconvex overall.
+
+* Results
+:PROPERTIES:
+:STATUS: PASS
+:DISCOPT_OBJECTIVE: 17.014017289162915
+:RELATIVE_ERROR: 6.37e-10
+:WALL_TIME: 0.94
+:NODE_COUNT: 0
+:END:
+
+discopt solved HS071 to optimality via the convex fast path (single NLP call,
+no Branch and Bound needed since the problem has no integer variables). The
+solution matches the known optimum to 10 significant digits.
+
+The solution point x* = (1.0000, 4.7430, 3.8211, 1.3794) satisfies both
+constraints: the product x1*x2*x3*x4 = 25.000 (active at the bound) and
+the sum of squares = 40.000 (equality satisfied exactly).
+
+* Verdict
+
+PASS. discopt finds the correct global optimum for HS071 with relative error
+6.4e-10, well within the 1e-3 acceptance threshold.

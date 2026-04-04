@@ -33,19 +33,19 @@ _STATUS_MAP = {
 }
 
 
-def _extract_upper_triangle(Q: np.ndarray):
-    """Extract upper-triangular entries from a symmetric Q matrix.
+def _extract_lower_triangle(Q: np.ndarray):
+    """Extract lower-triangular entries from a symmetric Q matrix.
 
-    HiGHS expects the Hessian in upper-triangular sparse format.
-    Returns (row_indices, col_indices, values) for non-zero entries
-    where row <= col.
+    HiGHS expects the Hessian in lower-triangular CSC sparse format
+    (row >= col). Returns (row_indices, col_indices, values) for
+    non-zero entries where row >= col.
     """
     n = Q.shape[0]
     rows = []
     cols = []
     vals = []
-    for i in range(n):
-        for j in range(i, n):
+    for j in range(n):
+        for i in range(j, n):
             val = Q[i, j]
             if abs(val) > 1e-15:
                 rows.append(i)
@@ -164,7 +164,7 @@ def solve_qp(
     h.passModel(lp)
 
     # ---- pass Hessian (quadratic objective) ----------------------------------
-    q_rows, q_cols, q_vals = _extract_upper_triangle(Q_arr)
+    q_rows, q_cols, q_vals = _extract_lower_triangle(Q_arr)
     if len(q_vals) > 0:
         # Build column-compressed upper-triangular Hessian.
         # HiGHS expects start array of length dim+1 with column pointers.

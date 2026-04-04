@@ -3,6 +3,8 @@
 Usage:
     discopt about
     discopt test
+    discopt lit-scan [topic ...]
+    discopt adversary [-n COUNT] [topic ...]
     discopt search-arxiv "query" [--max-results 20] [--start-date 2026-01-01]
     discopt search-openalex "query" [--from-date ...] [--to-date ...] [--per-page 20]
     discopt write-report <output-path>
@@ -284,6 +286,42 @@ def _cmd_about(_args):
         print(f"    {name}: {ver}")
 
 
+def _run_claude_command(slash_command: str, args_str: str = ""):
+    """Invoke a Claude Code slash command via the claude CLI."""
+    import shutil
+    import subprocess
+
+    claude_bin = shutil.which("claude")
+    if claude_bin is None:
+        print(
+            "Error: 'claude' CLI not found on PATH.\nInstall Claude Code: https://claude.ai/code",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    prompt = f"/{slash_command}"
+    if args_str:
+        prompt = f"{prompt} {args_str}"
+
+    subprocess.run([claude_bin, "-p", prompt], check=False)
+
+
+def _cmd_lit_scan(args):
+    """Run the discoptbot literature scanner."""
+    topic = " ".join(args.topic) if args.topic else ""
+    _run_claude_command("discoptbot", topic)
+
+
+def _cmd_adversary(args):
+    """Run the adversary solver correctness agent."""
+    parts = []
+    if args.count != 1:
+        parts.append(str(args.count))
+    if args.topic:
+        parts.extend(args.topic)
+    _run_claude_command("adversary", " ".join(parts))
+
+
 def _cmd_test(_args):
     """Run a quick smoke test to verify the installation works."""
     errors = []
@@ -397,6 +435,37 @@ def main():
     p_wr = subparsers.add_parser("write-report", help="Write stdin to a file")
     p_wr.add_argument("output_path", help="Output file path")
     p_wr.set_defaults(func=_cmd_write_report)
+
+    # lit-scan (Claude-powered literature scanner)
+    p_lit = subparsers.add_parser(
+        "lit-scan",
+        help="Search recent literature for papers relevant to discopt",
+    )
+    p_lit.add_argument(
+        "topic",
+        nargs="*",
+        help="Optional topic focus (e.g., 'McCormick relaxations')",
+    )
+    p_lit.set_defaults(func=_cmd_lit_scan)
+
+    # adversary (Claude-powered solver correctness testing)
+    p_adv = subparsers.add_parser(
+        "adversary",
+        help="Test discopt against benchmark problems with known solutions",
+    )
+    p_adv.add_argument(
+        "-n",
+        "--count",
+        type=int,
+        default=1,
+        help="Number of problems to test (default: 1)",
+    )
+    p_adv.add_argument(
+        "topic",
+        nargs="*",
+        help="Optional problem class focus (e.g., 'MINLP', 'convex NLP')",
+    )
+    p_adv.set_defaults(func=_cmd_adversary)
 
     args = parser.parse_args()
     args.func(args)

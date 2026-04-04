@@ -1,0 +1,49 @@
+#+TITLE: Adversary Run: Hock-Schittkowski Problem 35
+#+DATE: 2026-04-04
+
+* Problem
+:PROPERTIES:
+:SOURCE: Hock & Schittkowski, LNEMS 187, 1981, Problem 35
+:CLASS: convex NLP
+:KNOWN_OPTIMAL: 0.111111 (1/9)
+:N_VARIABLES: 3
+:N_CONSTRAINTS: 1
+:END:
+
+\begin{align}
+\min \quad & 9 - 8x_1 - 6x_2 - 4x_3 + 2x_1^2 + 2x_2^2 + x_3^2 + 2x_1 x_2 + 2x_1 x_3 \\
+\text{s.t.} \quad & x_1 + x_2 + 2x_3 \leq 3 \\
+& x_i \geq 0
+\end{align}
+
+* Results
+:PROPERTIES:
+:STATUS: FAIL
+:END:
+
+| Backend | Objective | Rel Error | Wall Time | Nodes | Status  |
+|---------+-----------+-----------+-----------+-------+---------|
+| ipm     | -3.45     | 3.56e+00  | 0.053s    |     0 | optimal |
+| ipopt   | -3.45     | 3.56e+00  | 0.001s    |     0 | optimal |
+| ripopt  | -3.45     | 3.56e+00  | 0.001s    |     0 | optimal |
+
+Same root cause as the Markowitz QP: the QP problem classifier drops
+cross-terms (x1*x2, x1*x3). The diagonal-only objective at the solution
+point [1.55, 1.05, 0.2] is -3.45, matching exactly. The full objective
+at the same point is 0.425.
+
+* Cross-Validation
+
+Direct numpy evaluation of the full objective at discopt's solution gives
+0.425, not -3.45. The discrepancy equals exactly the sum of the dropped
+cross-terms: 2*1.55*1.05 + 2*1.55*0.2 = 3.875.
+
+* Performance Comparison
+
+All backends report identical results (QP fast path). No regression.
+
+* Verdict
+
+SOLVER_BUG. Same root cause as the Markowitz QP: the QP problem classifier
+drops off-diagonal Hessian entries (cross-terms) when extracting the
+quadratic form from the expression DAG.
