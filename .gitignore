@@ -61,5 +61,11 @@ manuscript/*.toc
 # Claude Code
 .claude/
 
+# Crucible knowledge base
+.crucible/
+
+# Adversary test runs
+adversary/
+
 # Jupyter Book
 docs/_build/
