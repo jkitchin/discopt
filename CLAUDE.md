@@ -98,3 +98,17 @@ Optional LLM-powered features using litellm as a universal adapter (100+ provide
 - **ruff** line-length is 100 chars, targeting Python 3.10+. Pinned to v0.14.6 across pre-commit and CI.
 - **Coverage** must stay ≥85%.
 - Tests have a 300-second default timeout (configurable in `pyproject.toml`).
+
+<!-- crucible-project -->
+## Crucible Knowledge Base
+
+This project has a Crucible knowledge base in `.crucible/`.
+Use the `crucible` CLI to ingest sources, search, and maintain the wiki.
+
+Layout: `.crucible/sources/` (primary sources), `.crucible/wiki/` (distilled articles),
+`.crucible/crucible.db` (graph database).
+
+Conventions: org-mode with scimax, org-ref citations, narrative prose.
+The LLM maintains the wiki; manual edits are the exception.
+Run `crucible help all` for the full CLI reference.
+<!-- crucible-project -->
