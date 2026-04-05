@@ -1447,6 +1447,10 @@ def solve_model(
         if elapsed >= time_limit:
             break
 
+        # Update per-iteration time budget for NLP subproblem solves (issue #5).
+        remaining = time_limit - elapsed
+        opts["max_wall_time"] = max(remaining, 0.1)
+
         # Export batch from Rust tree
         t_rust_start = time.perf_counter()
         batch_lb, batch_ub, batch_ids, batch_psols = tree.export_batch(batch_size)
@@ -2102,6 +2106,11 @@ def _solve_continuous(
     opts = dict(ipopt_options) if ipopt_options else {}
     opts.setdefault("print_level", 0)
 
+    # Pass remaining time budget to NLP solver so stalled subproblems
+    # don't run unbounded (see issue #5).
+    remaining = time_limit - (time.perf_counter() - t_start)
+    opts["max_wall_time"] = max(remaining, 0.1)
+
     constraint_bounds = None
 
     t_jax_start = time.perf_counter()
@@ -2284,6 +2293,10 @@ def _solve_nlp_bb(
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
             break
+
+        # Update per-iteration time budget for NLP subproblem solves (issue #5).
+        remaining = time_limit - elapsed
+        opts["max_wall_time"] = max(remaining, 0.1)
 
         # Export batch from Rust tree
         t_rust_start = time.perf_counter()
@@ -2668,10 +2681,13 @@ def _solve_node_nlp_ripopt(
     proxy = _BoundOverride(evaluator, node_lb, node_ub)
 
     # Guard against ripopt stalling on degenerate/infeasible subproblems
-    # by enforcing a per-node wall time limit.
+    # by enforcing a per-node wall time limit. Cap at 30s per node, but
+    # also respect the remaining global budget passed via options (issue #5).
     opts = dict(options)
-    if "max_wall_time" not in opts or opts["max_wall_time"] <= 0:
-        opts["max_wall_time"] = 30.0
+    caller_limit = opts.get("max_wall_time", 30.0)
+    if caller_limit <= 0:
+        caller_limit = 30.0
+    opts["max_wall_time"] = min(30.0, caller_limit)
 
     try:
         return solve_nlp_ripopt(
@@ -2715,17 +2731,23 @@ def _solve_node_nlp_ipm(
         g_u = None
 
     ipm_opts = IPMOptions(max_iter=int(options.get("max_iter", 200)))
+    max_wall_time = options.get("max_wall_time")
 
     try:
+        t0 = time.perf_counter()
         state = ipm_solve(obj_fn, con_fn, x0_jax, x_l, x_u, g_l, g_u, ipm_opts)
+        wall_time = time.perf_counter() - t0
     except Exception as e:
         logger.debug("IPM solver failed: %s", e)
         return NLPResult(status=SolveStatus.ERROR, x=x0, objective=_INFEASIBILITY_SENTINEL)
 
     conv = int(state.converged)
-    if conv in (1, 2):
+    # Check wall-time limit post-hoc (issue #5). The JIT-compiled
+    # jax.lax.while_loop cannot check wall clock mid-iteration.
+    exceeded_time = max_wall_time is not None and wall_time > max_wall_time
+    if conv in (1, 2) and not exceeded_time:
         status = SolveStatus.OPTIMAL
-    elif conv == 3:
+    elif conv == 3 or exceeded_time:
         status = SolveStatus.ITERATION_LIMIT
     else:
         status = SolveStatus.ERROR

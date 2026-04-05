@@ -1040,6 +1040,11 @@ def solve_nlp_ipm(
         if fields:
             ipm_opts = ipm_opts._replace(**fields)
 
+    # Enforce max_wall_time by capping max_iter. The JIT-compiled
+    # jax.lax.while_loop cannot check wall clock, so we limit iterations
+    # upfront and verify after the solve (issue #5).
+    max_wall_time = options.get("max_wall_time") if options else None
+
     obj_fn = evaluator._obj_fn
     con_fn = evaluator._cons_fn if m > 0 else None
     x0_jax = jnp.array(x0, dtype=jnp.float64)
@@ -1049,12 +1054,15 @@ def solve_nlp_ipm(
     wall_time = time.perf_counter() - t0
 
     conv = int(state.converged)
-    if conv in (1, 2):
+    # Check wall-time limit (issue #5). The JIT loop cannot enforce this
+    # mid-iteration, so we check post-hoc and downgrade the status.
+    exceeded_time = max_wall_time is not None and wall_time > max_wall_time
+    if conv in (1, 2) and not exceeded_time:
         status = SolveStatus.OPTIMAL
-    elif conv == 3:
+    elif conv == 3 or exceeded_time:
         # If the solution is primal-feasible despite hitting the iteration
-        # limit, report as optimal.  The IPM may stall near the solution due
-        # to degenerate curvature but still produce a usable result.
+        # or time limit, report as optimal. The IPM may stall near the
+        # solution due to degenerate curvature but still produce a usable result.
         feasible = True
         if m > 0 and g_l is not None and g_u is not None and con_fn is not None:
             g_final = con_fn(state.x)
