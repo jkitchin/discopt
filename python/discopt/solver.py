@@ -2590,6 +2590,43 @@ def _solve_node_nlp(
     We override variable bounds to use the node-specific bounds
     rather than the global bounds.
     """
+    # Pre-screen: detect trivially infeasible nodes by evaluating constraints
+    # at the midpoint. When the feasible region is very narrow (most variables
+    # pinned) and constraints are violated, NLP solvers like ripopt can stall
+    # for thousands of iterations instead of quickly returning infeasible.
+    if constraint_bounds is not None and evaluator.n_constraints > 0:
+        from discopt.solvers import NLPResult
+
+        x_mid = np.clip(x0, node_lb, node_ub)
+        span = node_ub - node_lb
+        n_pinned = np.sum(span < 1e-10)
+        if n_pinned >= len(span) - 1:
+            # Nearly all variables pinned: evaluate constraints at midpoint
+            try:
+                g = evaluator.evaluate_constraints(x_mid)
+                infeasible = False
+                for k, (cl, cu) in enumerate(constraint_bounds):
+                    if g[k] < cl - 1e-6 or g[k] > cu + 1e-6:
+                        infeasible = True
+                        break
+                if infeasible:
+                    # Verify at the bounds midpoint too
+                    x_check = 0.5 * (node_lb + node_ub)
+                    g2 = evaluator.evaluate_constraints(x_check)
+                    still_infeasible = False
+                    for k, (cl, cu) in enumerate(constraint_bounds):
+                        if g2[k] < cl - 1e-6 or g2[k] > cu + 1e-6:
+                            still_infeasible = True
+                            break
+                    if still_infeasible:
+                        return NLPResult(
+                            status=SolveStatus.INFEASIBLE,
+                            x=x_mid,
+                            objective=_INFEASIBILITY_SENTINEL,
+                        )
+            except Exception:
+                pass  # If evaluation fails, fall through to NLP solver
+
     if nlp_solver == "ripopt":
         return _solve_node_nlp_ripopt(evaluator, x0, node_lb, node_ub, constraint_bounds, options)
     if nlp_solver == "ipm":
@@ -2630,12 +2667,18 @@ def _solve_node_nlp_ripopt(
 
     proxy = _BoundOverride(evaluator, node_lb, node_ub)
 
+    # Guard against ripopt stalling on degenerate/infeasible subproblems
+    # by enforcing a per-node wall time limit.
+    opts = dict(options)
+    if "max_wall_time" not in opts or opts["max_wall_time"] <= 0:
+        opts["max_wall_time"] = 30.0
+
     try:
         return solve_nlp_ripopt(
             proxy,
             x0,
             constraint_bounds=constraint_bounds,
-            options=options,
+            options=opts,
         )
     except Exception as e:
         logger.debug("ripopt solver failed: %s", e)
