@@ -193,15 +193,22 @@ def solve_nlp(
     )
 
     # cyipopt requires native Python types (rejects numpy scalars).
+    # Some options (e.g. max_wall_time) may not exist in older Ipopt versions.
+    import logging as _logging
+
     import numpy as _np
 
+    _logger = _logging.getLogger(__name__)
     for key, value in opts.items():
-        if isinstance(value, (_np.floating, float)):
-            problem.add_option(key, float(value))
-        elif isinstance(value, (_np.integer, int)):
-            problem.add_option(key, int(value))
-        else:
-            problem.add_option(key, value)
+        try:
+            if isinstance(value, (_np.floating, float)):
+                problem.add_option(key, float(value))
+            elif isinstance(value, (_np.integer, int)):
+                problem.add_option(key, int(value))
+            else:
+                problem.add_option(key, value)
+        except TypeError:
+            _logger.debug("Ipopt option '%s' not accepted, skipping", key)
 
     t0 = time.perf_counter()
     x, info = problem.solve(x0.astype(np.float64))
