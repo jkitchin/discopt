@@ -356,6 +356,23 @@ def _tighten_node_bounds(evaluator, node_lb, node_ub, cl_list, cu_list, max_roun
     cu = np.array(cu_list, dtype=np.float64)
     cl = np.array(cl_list, dtype=np.float64)
 
+    # Detect which constraints are linear by checking if the Jacobian
+    # changes between two distinct evaluation points.  FBBT via Jacobian
+    # linearization is only sound for linear constraints; applying it to
+    # nonlinear constraints (e.g. x^1.5) can over-tighten and exclude
+    # feasible regions, causing false infeasibility (issue #6).
+    try:
+        pt_a = np.clip(lb + 0.25 * (ub - lb), -_SPC, _SPC)
+        pt_b = np.clip(lb + 0.75 * (ub - lb), -_SPC, _SPC)
+        J_a = evaluator.evaluate_jacobian(pt_a)
+        J_b = evaluator.evaluate_jacobian(pt_b)
+        is_linear = np.all(np.abs(J_a - J_b) < 1e-8, axis=1)  # (m,) bool
+    except Exception:
+        return lb, ub  # can't determine linearity, skip FBBT
+
+    if not np.any(is_linear):
+        return lb, ub  # no linear constraints to tighten
+
     for _ in range(max_rounds):
         changed = False
         # Evaluate Jacobian at midpoint of current bounds
@@ -369,6 +386,8 @@ def _tighten_node_bounds(evaluator, node_lb, node_ub, cl_list, cu_list, max_roun
             break
 
         for j in range(m):
+            if not is_linear[j]:
+                continue
             # For constraint g_j(x) <= cu_j:
             # Linear approx: g_j(mid) + J[j,:] @ (x - mid) <= cu_j
             # To find max x_i, set other vars to MINIMIZE g (most room):
