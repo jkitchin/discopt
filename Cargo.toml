@@ -11,4 +11,4 @@ repository = "https://github.com/discopt-org/discopt"
 [workspace.dependencies]
 pyo3 = { version = "0.23", features = ["extension-module"] }
 numpy = "0.23"
-ripopt = "0.6.0"
+ripopt = "0.6.1"
