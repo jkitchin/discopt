@@ -160,6 +160,99 @@ class NLPEvaluatorFromNl:
             jac[:, j] = (cp - cm) / (2.0 * eps)
         return jac
 
+    def has_sparse_structure(self) -> bool:
+        """True if numeric probing detected useful sparsity."""
+        self._ensure_coo_cache()
+        return self._use_sparse
+
+    def jacobian_structure(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return Jacobian sparsity as COO (rows, cols) arrays."""
+        self._ensure_coo_cache()
+        return (self._jac_rows, self._jac_cols)
+
+    def hessian_structure(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return lower-triangle Hessian sparsity as COO (rows, cols) arrays."""
+        self._ensure_coo_cache()
+        return (self._hess_rows, self._hess_cols)
+
+    def evaluate_jacobian_values(self, x: np.ndarray) -> np.ndarray:
+        """Return Jacobian values as 1-D array matching jacobian_structure order."""
+        self._ensure_coo_cache()
+        jac = self.evaluate_jacobian(x)
+        return jac[self._jac_rows, self._jac_cols].astype(np.float64)
+
+    def evaluate_hessian_values(
+        self, x: np.ndarray, obj_factor: float, lambda_: np.ndarray
+    ) -> np.ndarray:
+        """Return Lagrangian Hessian values as 1-D array matching hessian_structure."""
+        self._ensure_coo_cache()
+        h = self.evaluate_lagrangian_hessian(x, obj_factor, lambda_)
+        return h[self._hess_rows, self._hess_cols].astype(np.float64)
+
+    def _ensure_coo_cache(self) -> None:
+        """Lazily detect sparsity via numeric probing and cache COO indices."""
+        if hasattr(self, "_jac_rows"):
+            return
+
+        n = self._n_variables
+        m = self._n_constraints
+        lb, ub = self.variable_bounds
+
+        # Clamp bounds for sampling
+        lb_safe = np.where(np.isfinite(lb), lb, -10.0)
+        ub_safe = np.where(np.isfinite(ub), ub, 10.0)
+
+        rng = np.random.RandomState(42)
+        n_probes = 3
+        threshold = 1e-10
+
+        jac_nonzero = np.zeros((m, n), dtype=bool)
+        hess_nonzero = np.zeros((n, n), dtype=bool)
+
+        for _ in range(n_probes):
+            x_probe = lb_safe + rng.rand(n) * (ub_safe - lb_safe)
+            if m > 0:
+                jac = self.evaluate_jacobian(x_probe)
+                jac_nonzero |= np.abs(jac) > threshold
+            lam = rng.randn(m) if m > 0 else np.array([], dtype=np.float64)
+            hess = self.evaluate_lagrangian_hessian(x_probe, 1.0, lam)
+            hess_nonzero |= np.abs(hess) > threshold
+
+        # Make Hessian pattern symmetric
+        hess_nonzero = hess_nonzero | hess_nonzero.T
+
+        # Decide whether sparsity is worth exploiting
+        jac_nnz = int(jac_nonzero.sum())
+        hess_nnz = int(hess_nonzero.sum())
+        jac_total = m * n if m > 0 else 1
+        hess_total = n * n if n > 0 else 1
+        jac_density = jac_nnz / jac_total
+        hess_density = hess_nnz / hess_total
+        self._use_sparse = n >= 50 and (jac_density < 0.15 or hess_density < 0.15)
+
+        if self._use_sparse:
+            if m > 0:
+                jac_r, jac_c = np.where(jac_nonzero)
+                self._jac_rows = jac_r.astype(np.intp)
+                self._jac_cols = jac_c.astype(np.intp)
+            else:
+                self._jac_rows = np.array([], dtype=np.intp)
+                self._jac_cols = np.array([], dtype=np.intp)
+            hess_r, hess_c = np.where(hess_nonzero)
+            lower_mask = hess_r >= hess_c
+            self._hess_rows = hess_r[lower_mask].astype(np.intp)
+            self._hess_cols = hess_c[lower_mask].astype(np.intp)
+        else:
+            # Dense fallback
+            if m > 0:
+                rows, cols = np.meshgrid(np.arange(m), np.arange(n), indexing="ij")
+                self._jac_rows = rows.flatten().astype(np.intp)
+                self._jac_cols = cols.flatten().astype(np.intp)
+            else:
+                self._jac_rows = np.array([], dtype=np.intp)
+                self._jac_cols = np.array([], dtype=np.intp)
+            self._hess_rows, self._hess_cols = np.tril_indices(n)
+
     @property
     def n_variables(self) -> int:
         """Total number of variables (flat)."""

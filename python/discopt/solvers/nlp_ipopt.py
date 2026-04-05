@@ -52,6 +52,9 @@ class _IpoptCallbacks:
         self._ev = evaluator
         self._n = evaluator.n_variables
         self._m = evaluator.n_constraints
+        self._use_sparse = (
+            hasattr(evaluator, "has_sparse_structure") and evaluator.has_sparse_structure()
+        )
 
     def objective(self, x: np.ndarray) -> float:
         return self._ev.evaluate_objective(x)
@@ -63,16 +66,22 @@ class _IpoptCallbacks:
         return self._ev.evaluate_constraints(x)
 
     def jacobian(self, x: np.ndarray) -> np.ndarray:
+        if self._use_sparse:
+            return self._ev.evaluate_jacobian_values(x)
         # cyipopt wants the Jacobian flattened in the order given by jacobianstructure
         jac = self._ev.evaluate_jacobian(x)
         return jac.flatten()
 
     def jacobianstructure(self) -> tuple[np.ndarray, np.ndarray]:
+        if self._use_sparse:
+            return self._ev.jacobian_structure()
         # Dense structure: all (row, col) pairs
         rows, cols = np.meshgrid(np.arange(self._m), np.arange(self._n), indexing="ij")
         return (rows.flatten(), cols.flatten())
 
     def hessian(self, x: np.ndarray, lagrange: np.ndarray, obj_factor: float) -> np.ndarray:
+        if self._use_sparse:
+            return self._ev.evaluate_hessian_values(x, obj_factor, lagrange)
         # Hessian of the Lagrangian = obj_factor * H_obj + sum(lagrange[i] * H_c[i])
         if hasattr(self._ev, "evaluate_lagrangian_hessian"):
             h = self._ev.evaluate_lagrangian_hessian(x, obj_factor, lagrange)
@@ -84,6 +93,8 @@ class _IpoptCallbacks:
         return h[rows, cols]
 
     def hessianstructure(self) -> tuple[np.ndarray, np.ndarray]:
+        if self._use_sparse:
+            return self._ev.hessian_structure()
         # Lower triangle (including diagonal)
         rows, cols = np.tril_indices(self._n)
         return (rows, cols)

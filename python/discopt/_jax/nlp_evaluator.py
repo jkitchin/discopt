@@ -18,6 +18,45 @@ from discopt._jax.dag_compiler import compile_constraint, compile_objective
 from discopt.modeling.core import Constraint, Model, ObjectiveSense
 
 
+def validate_sparse_values(evaluator, x: np.ndarray, atol: float = 1e-8) -> bool:
+    """Check that sparse COO values agree with dense evaluation.
+
+    Computes both dense and sparse Jacobian/Hessian at x and verifies that
+    the sparse values match the dense values at the declared positions.
+
+    Returns True if validation passes, False otherwise.
+    """
+    import logging
+
+    logger = logging.getLogger("discopt.sparse")
+    ok = True
+
+    # Validate Jacobian
+    if evaluator.n_constraints > 0:
+        jac_dense = evaluator.evaluate_jacobian(x)
+        rows, cols = evaluator.jacobian_structure()
+        sparse_vals = evaluator.evaluate_jacobian_values(x)
+        dense_at_pos = jac_dense[rows, cols]
+        if not np.allclose(sparse_vals, dense_at_pos, atol=atol):
+            max_err = float(np.max(np.abs(sparse_vals - dense_at_pos)))
+            logger.warning("Sparse Jacobian validation failed (max err=%.2e)", max_err)
+            ok = False
+
+    # Validate Hessian
+    m = evaluator.n_constraints
+    lam = np.ones(m, dtype=np.float64)
+    hess_dense = evaluator.evaluate_lagrangian_hessian(x, 1.0, lam)
+    rows, cols = evaluator.hessian_structure()
+    sparse_vals = evaluator.evaluate_hessian_values(x, 1.0, lam)
+    dense_at_pos = hess_dense[rows, cols]
+    if not np.allclose(sparse_vals, dense_at_pos, atol=atol):
+        max_err = float(np.max(np.abs(sparse_vals - dense_at_pos)))
+        logger.warning("Sparse Hessian validation failed (max err=%.2e)", max_err)
+        ok = False
+
+    return ok
+
+
 class NLPEvaluator:
     """
     JAX-based NLP evaluation layer providing JIT-compiled callbacks.
@@ -203,6 +242,97 @@ class NLPEvaluator:
             except Exception:
                 self._sparse_pattern = None
         return self._sparse_pattern
+
+    def has_sparse_structure(self) -> bool:
+        """True if this evaluator provides sparse COO structure.
+
+        Uses the DAG sparsity detector and the should_use_sparse threshold
+        (density < 15%, n >= 50) to decide.
+        """
+        if not hasattr(self, "_use_sparse"):
+            self._use_sparse = False
+            pattern = self.sparsity_pattern
+            if pattern is not None:
+                try:
+                    from discopt._jax.sparsity import should_use_sparse
+
+                    self._use_sparse = should_use_sparse(pattern)
+                except Exception:
+                    pass
+        return self._use_sparse
+
+    def jacobian_structure(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return Jacobian sparsity as COO (rows, cols) arrays.
+
+        When sparse structure is available, returns only nonzero positions.
+        Otherwise returns dense (all m*n positions).
+        """
+        self._ensure_coo_cache()
+        return (self._jac_rows, self._jac_cols)
+
+    def hessian_structure(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return lower-triangle Hessian sparsity as COO (rows, cols) arrays.
+
+        When sparse structure is available, returns only nonzero lower-triangle
+        positions. Otherwise returns all lower-triangle positions.
+        """
+        self._ensure_coo_cache()
+        return (self._hess_rows, self._hess_cols)
+
+    def evaluate_jacobian_values(self, x: np.ndarray) -> np.ndarray:
+        """Return Jacobian values as 1-D array matching jacobian_structure order."""
+        self._ensure_coo_cache()
+        if self.has_sparse_structure() and self._jac_fn is not None:
+            # Use sparse evaluation and extract at COO positions
+            jac_sparse = self.evaluate_sparse_jacobian(x)
+            import scipy.sparse as sp
+
+            if sp.issparse(jac_sparse):
+                jac_dense = jac_sparse.toarray()
+            else:
+                jac_dense = np.asarray(jac_sparse)
+            return jac_dense[self._jac_rows, self._jac_cols].astype(np.float64)
+        # Dense path: flatten full Jacobian
+        jac = self.evaluate_jacobian(x)
+        return jac[self._jac_rows, self._jac_cols].astype(np.float64)
+
+    def evaluate_hessian_values(
+        self, x: np.ndarray, obj_factor: float, lambda_: np.ndarray
+    ) -> np.ndarray:
+        """Return Lagrangian Hessian values as 1-D array matching hessian_structure order."""
+        self._ensure_coo_cache()
+        h = self.evaluate_lagrangian_hessian(x, obj_factor, lambda_)
+        return h[self._hess_rows, self._hess_cols].astype(np.float64)
+
+    def _ensure_coo_cache(self) -> None:
+        """Lazily compute and cache COO index arrays for Jacobian and Hessian."""
+        if hasattr(self, "_jac_rows"):
+            return
+
+        n = self._n_variables
+        m = self._n_constraints
+
+        if self.has_sparse_structure():
+            pattern = self.sparsity_pattern
+            # Jacobian: convert CSR boolean to COO indices
+            jac_coo = pattern.jacobian_sparsity.tocoo()
+            self._jac_rows = jac_coo.row.astype(np.intp)
+            self._jac_cols = jac_coo.col.astype(np.intp)
+            # Hessian: extract lower triangle from symmetric pattern
+            hess_coo = pattern.hessian_sparsity.tocoo()
+            lower_mask = hess_coo.row >= hess_coo.col
+            self._hess_rows = hess_coo.row[lower_mask].astype(np.intp)
+            self._hess_cols = hess_coo.col[lower_mask].astype(np.intp)
+        else:
+            # Dense fallback
+            if m > 0:
+                rows, cols = np.meshgrid(np.arange(m), np.arange(n), indexing="ij")
+                self._jac_rows = rows.flatten().astype(np.intp)
+                self._jac_cols = cols.flatten().astype(np.intp)
+            else:
+                self._jac_rows = np.array([], dtype=np.intp)
+                self._jac_cols = np.array([], dtype=np.intp)
+            self._hess_rows, self._hess_cols = np.tril_indices(n)
 
     @property
     def n_variables(self) -> int:

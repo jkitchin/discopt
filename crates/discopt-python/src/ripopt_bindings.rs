@@ -11,6 +11,9 @@ use pyo3::types::PyDict;
 ///
 /// Each callback acquires the GIL and calls back into the Python evaluator.
 /// Bounds, structure, and initial point are cached as Rust-owned data.
+/// When the evaluator provides sparse COO structure (via `has_sparse_structure`),
+/// uses `evaluate_jacobian_values` / `evaluate_hessian_values` for efficient
+/// value extraction. Otherwise falls back to dense evaluation.
 struct PyNlpProblem {
     evaluator: PyObject,
     n: usize,
@@ -20,12 +23,15 @@ struct PyNlpProblem {
     g_l: Vec<f64>,
     g_u: Vec<f64>,
     x0: Vec<f64>,
-    /// Cached Jacobian sparsity: (rows, cols) — dense pattern
+    /// Cached Jacobian sparsity: COO (rows, cols)
     jac_rows: Vec<usize>,
     jac_cols: Vec<usize>,
-    /// Cached Hessian sparsity: (rows, cols) — lower triangle dense pattern
+    /// Cached Hessian sparsity: COO (rows, cols), lower triangle
     hess_rows: Vec<usize>,
     hess_cols: Vec<usize>,
+    /// Whether to use sparse value callbacks
+    use_sparse_jac: bool,
+    use_sparse_hess: bool,
 }
 
 impl ripopt::NlpProblem for PyNlpProblem {
@@ -107,19 +113,33 @@ impl ripopt::NlpProblem for PyNlpProblem {
         }
         Python::with_gil(|py| {
             let x_py = PyArray1::from_slice(py, x);
-            let result = self
-                .evaluator
-                .call_method1(py, "evaluate_jacobian", (x_py,))
-                .expect("evaluate_jacobian failed");
-            let arr: PyReadonlyArray1<f64> = result
-                .call_method0(py, "flatten")
-                .expect("flatten failed")
-                .bind(py)
-                .extract()
-                .expect("jacobian not ndarray");
-            let slice = arr.as_slice().expect("jacobian not contiguous");
-            // Dense Jacobian flattened row-major: values in same order as structure
-            values.copy_from_slice(slice);
+            if self.use_sparse_jac {
+                // Sparse path: evaluator returns 1-D values in COO order
+                let result = self
+                    .evaluator
+                    .call_method1(py, "evaluate_jacobian_values", (x_py,))
+                    .expect("evaluate_jacobian_values failed");
+                let arr: PyReadonlyArray1<f64> = result
+                    .bind(py)
+                    .extract()
+                    .expect("jacobian_values not ndarray");
+                let slice = arr.as_slice().expect("jacobian_values not contiguous");
+                values.copy_from_slice(slice);
+            } else {
+                // Dense path: flatten (m, n) Jacobian row-major
+                let result = self
+                    .evaluator
+                    .call_method1(py, "evaluate_jacobian", (x_py,))
+                    .expect("evaluate_jacobian failed");
+                let arr: PyReadonlyArray1<f64> = result
+                    .call_method0(py, "flatten")
+                    .expect("flatten failed")
+                    .bind(py)
+                    .extract()
+                    .expect("jacobian not ndarray");
+                let slice = arr.as_slice().expect("jacobian not contiguous");
+                values.copy_from_slice(slice);
+            }
         })
     }
 
@@ -132,30 +152,47 @@ impl ripopt::NlpProblem for PyNlpProblem {
             let x_py = PyArray1::from_slice(py, x);
             let lambda_py = PyArray1::from_slice(py, lambda);
 
-            let result = self
-                .evaluator
-                .call_method1(
-                    py,
-                    "evaluate_lagrangian_hessian",
-                    (x_py, obj_factor, lambda_py),
-                )
-                .expect("evaluate_lagrangian_hessian failed");
+            if self.use_sparse_hess {
+                // Sparse path: evaluator returns 1-D values in COO order
+                let result = self
+                    .evaluator
+                    .call_method1(
+                        py,
+                        "evaluate_hessian_values",
+                        (x_py, obj_factor, lambda_py),
+                    )
+                    .expect("evaluate_hessian_values failed");
+                let arr: PyReadonlyArray1<f64> = result
+                    .bind(py)
+                    .extract()
+                    .expect("hessian_values not ndarray");
+                let slice = arr.as_slice().expect("hessian_values not contiguous");
+                values.copy_from_slice(slice);
+            } else {
+                // Dense path: extract lower triangle from (n, n) array
+                let result = self
+                    .evaluator
+                    .call_method1(
+                        py,
+                        "evaluate_lagrangian_hessian",
+                        (x_py, obj_factor, lambda_py),
+                    )
+                    .expect("evaluate_lagrangian_hessian failed");
 
-            // Result is (n, n) dense array. Extract lower triangle values
-            // matching hessian_structure order (row-major lower triangle).
-            let flat: PyReadonlyArray1<f64> = result
-                .call_method0(py, "flatten")
-                .expect("flatten failed")
-                .bind(py)
-                .extract()
-                .expect("hessian not ndarray");
-            let data = flat.as_slice().expect("hessian not contiguous");
-            let n = self.n;
-            let mut idx = 0;
-            for i in 0..n {
-                for j in 0..=i {
-                    values[idx] = data[i * n + j];
-                    idx += 1;
+                let flat: PyReadonlyArray1<f64> = result
+                    .call_method0(py, "flatten")
+                    .expect("flatten failed")
+                    .bind(py)
+                    .extract()
+                    .expect("hessian not ndarray");
+                let data = flat.as_slice().expect("hessian not contiguous");
+                let n = self.n;
+                let mut idx = 0;
+                for i in 0..n {
+                    for j in 0..=i {
+                        values[idx] = data[i * n + j];
+                        idx += 1;
+                    }
                 }
             }
         })
@@ -209,26 +246,65 @@ pub fn solve_ripopt(
     let n = x0_vec.len();
     let m = g_l_vec.len();
 
-    // Build dense Jacobian structure (m x n, row-major)
-    let mut jac_rows = Vec::with_capacity(m * n);
-    let mut jac_cols = Vec::with_capacity(m * n);
-    for i in 0..m {
-        for j in 0..n {
-            jac_rows.push(i);
-            jac_cols.push(j);
-        }
-    }
+    // Check if evaluator provides sparse COO structure
+    let use_sparse = evaluator
+        .call_method0(py, "has_sparse_structure")
+        .ok()
+        .and_then(|r| r.extract::<bool>(py).ok())
+        .unwrap_or(false);
 
-    // Build dense lower-triangle Hessian structure
-    let hess_nnz = n * (n + 1) / 2;
-    let mut hess_rows = Vec::with_capacity(hess_nnz);
-    let mut hess_cols = Vec::with_capacity(hess_nnz);
-    for i in 0..n {
-        for j in 0..=i {
-            hess_rows.push(i);
-            hess_cols.push(j);
+    let (jac_rows, jac_cols, use_sparse_jac) = if use_sparse && m > 0 {
+        let structure = evaluator
+            .call_method0(py, "jacobian_structure")
+            .expect("jacobian_structure failed");
+        let tuple = structure.bind(py).downcast::<pyo3::types::PyTuple>()
+            .expect("jacobian_structure must return tuple");
+        let rows: Vec<usize> = tuple
+            .get_item(0).expect("missing rows")
+            .extract().expect("rows not array of int");
+        let cols: Vec<usize> = tuple
+            .get_item(1).expect("missing cols")
+            .extract().expect("cols not array of int");
+        (rows, cols, true)
+    } else {
+        // Dense fallback: all m*n entries, row-major
+        let mut rows = Vec::with_capacity(m * n);
+        let mut cols = Vec::with_capacity(m * n);
+        for i in 0..m {
+            for j in 0..n {
+                rows.push(i);
+                cols.push(j);
+            }
         }
-    }
+        (rows, cols, false)
+    };
+
+    let (hess_rows, hess_cols, use_sparse_hess) = if use_sparse {
+        let structure = evaluator
+            .call_method0(py, "hessian_structure")
+            .expect("hessian_structure failed");
+        let tuple = structure.bind(py).downcast::<pyo3::types::PyTuple>()
+            .expect("hessian_structure must return tuple");
+        let rows: Vec<usize> = tuple
+            .get_item(0).expect("missing rows")
+            .extract().expect("rows not array of int");
+        let cols: Vec<usize> = tuple
+            .get_item(1).expect("missing cols")
+            .extract().expect("cols not array of int");
+        (rows, cols, true)
+    } else {
+        // Dense fallback: full lower triangle
+        let hess_nnz = n * (n + 1) / 2;
+        let mut rows = Vec::with_capacity(hess_nnz);
+        let mut cols = Vec::with_capacity(hess_nnz);
+        for i in 0..n {
+            for j in 0..=i {
+                rows.push(i);
+                cols.push(j);
+            }
+        }
+        (rows, cols, false)
+    };
 
     let problem = PyNlpProblem {
         evaluator,
@@ -243,6 +319,8 @@ pub fn solve_ripopt(
         jac_cols,
         hess_rows,
         hess_cols,
+        use_sparse_jac,
+        use_sparse_hess,
     };
 
     // Build SolverOptions from the Python dict

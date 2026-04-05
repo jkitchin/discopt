@@ -363,6 +363,63 @@ class NLPEvaluatorFromCUTEst:
             np.asarray(coo.col, dtype=np.int32),
         )
 
+    def has_sparse_structure(self) -> bool:
+        """CUTEst always provides sparse structure."""
+        return True
+
+    def jacobian_structure(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return fixed Jacobian sparsity as COO (rows, cols)."""
+        self._ensure_coo_cache()
+        return (self._jac_rows, self._jac_cols)
+
+    def hessian_structure(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return fixed lower-triangle Hessian sparsity as COO (rows, cols)."""
+        self._ensure_coo_cache()
+        return (self._hess_rows, self._hess_cols)
+
+    def evaluate_jacobian_values(self, x: np.ndarray) -> np.ndarray:
+        """Return Jacobian values as 1-D array matching jacobian_structure order."""
+        self._ensure_coo_cache()
+        if self._n_constraints == 0:
+            return np.array([], dtype=np.float64)
+        # Evaluate dense and extract at cached positions
+        J = self.evaluate_jacobian(x)
+        return J[self._jac_rows, self._jac_cols].astype(np.float64)
+
+    def evaluate_hessian_values(
+        self, x: np.ndarray, obj_factor: float, lambda_: np.ndarray
+    ) -> np.ndarray:
+        """Return Lagrangian Hessian values as 1-D array matching hessian_structure."""
+        self._ensure_coo_cache()
+        H = self.evaluate_lagrangian_hessian(x, obj_factor, lambda_)
+        return H[self._hess_rows, self._hess_cols].astype(np.float64)
+
+    def _ensure_coo_cache(self) -> None:
+        """Lazily probe and cache fixed COO structure from PyCUTEst."""
+        if hasattr(self, "_jac_rows"):
+            return
+        x0 = self._prob.x0
+        m = self._n_constraints
+
+        # Jacobian structure: probe at x0
+        if m > 0:
+            vals, rows, cols = self.evaluate_sparse_jacobian(x0)
+            self._jac_rows = np.asarray(rows, dtype=np.intp)
+            self._jac_cols = np.asarray(cols, dtype=np.intp)
+        else:
+            self._jac_rows = np.array([], dtype=np.intp)
+            self._jac_cols = np.array([], dtype=np.intp)
+
+        # Hessian structure: probe at x0 with zero multipliers
+        lam = np.ones(m, dtype=np.float64) if m > 0 else None
+        vals, rows, cols = self.evaluate_sparse_hessian(x0, v=lam)
+        rows = np.asarray(rows, dtype=np.intp)
+        cols = np.asarray(cols, dtype=np.intp)
+        # Keep only lower triangle
+        lower_mask = rows >= cols
+        self._hess_rows = rows[lower_mask]
+        self._hess_cols = cols[lower_mask]
+
     @property
     def n_variables(self) -> int:
         """Total number of variables."""
