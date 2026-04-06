@@ -1982,6 +1982,53 @@ class Model:
 
         return to_lp(self, path)
 
+    def to_gams(
+        self,
+        path: Union[str, None] = None,
+        model_type: Union[str, None] = None,
+    ) -> Union[str, None]:
+        """Export the model to GAMS (.gms) format.
+
+        Supports all model types including MINLP with nonlinear expressions.
+
+        Parameters
+        ----------
+        path : str, optional
+            File path to write. If ``None``, return the GAMS string.
+        model_type : str, optional
+            GAMS model type (LP, MIP, NLP, MINLP, etc.).
+            Auto-detected from variable types and expression structure if not given.
+
+        Returns
+        -------
+        str or None
+            GAMS string if *path* is ``None``, otherwise ``None``.
+        """
+        from discopt.export.gams import to_gams
+
+        return to_gams(self, path, model_type)
+
+    def to_nl(self, path: Union[str, None] = None) -> Union[str, None]:
+        """Export the model to AMPL .nl text format.
+
+        Supports all model types including MINLP with nonlinear expressions.
+        Produces text-mode .nl files compatible with AMPL-compatible solvers
+        (Ipopt, BARON, Couenne, SCIP) and the discopt Rust .nl parser.
+
+        Parameters
+        ----------
+        path : str, optional
+            File path to write. If ``None``, return the .nl string.
+
+        Returns
+        -------
+        str or None
+            .nl string if *path* is ``None``, otherwise ``None``.
+        """
+        from discopt.export.nl import to_nl
+
+        return to_nl(self, path)
+
     def _check_name(self, name: str):
         """Ensure variable/parameter name is unique."""
         existing = {v.name for v in self._variables} | {p.name for p in self._parameters}
@@ -2386,6 +2433,13 @@ def from_gams(path: str) -> Model:
     """
     Import a model from GAMS .gms format.
 
+    Parses GAMS source text and builds a discopt Model.  Supports the
+    MINLP subset: Sets, Scalars, Parameters, Tables, Variables
+    (positive/binary/integer/free), Equations with ``=e=``/``=l=``/``=g=``,
+    bounds (``.lo``/``.up``/``.fx``), ``sum``/``prod`` over indexed domains,
+    and nonlinear functions (``exp``, ``log``, ``sin``, ``cos``, ``sqrt``,
+    ``power``, ``sqr``, ...).
+
     Parameters
     ----------
     path : str
@@ -2395,12 +2449,15 @@ def from_gams(path: str) -> Model:
     -------
     Model
 
-    Raises
-    ------
-    NotImplementedError
-        GAMS import is a Phase 1 feature.
+    Examples
+    --------
+    >>> model = dm.from_gams("process_synthesis.gms")
+    >>> result = model.solve()
     """
-    raise NotImplementedError("GAMS import requires Rust parser (Phase 1)")
+    from discopt.modeling.gams_parser import parse_gams_file
+
+    result: Model = parse_gams_file(path)
+    return result
 
 
 def from_description(

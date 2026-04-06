@@ -20,7 +20,9 @@ Examples
 >>> m.to_lp("example.lp")
 """
 
+from discopt.export.gams import to_gams
 from discopt.export.lp import to_lp
 from discopt.export.mps import to_mps
+from discopt.export.nl import to_nl
 
-__all__ = ["to_mps", "to_lp"]
+__all__ = ["to_mps", "to_lp", "to_gams", "to_nl"]
