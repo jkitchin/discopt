@@ -230,6 +230,93 @@ class TestGamsImportNonlinear:
         assert float(var_map["x2"].ub) == 10.0
 
 
+# ── Dollar condition tests ─────────────────────────────────────
+
+
+DOLLAR_SUM_GMS = textwrap.dedent("""\
+    Sets
+        i / i1, i2, i3 /
+        j / j1, j2, j3 / ;
+
+    Parameter connected(i,j) /
+        i1.j1 1, i1.j2 1,
+        i2.j2 1, i2.j3 1,
+        i3.j3 1 / ;
+
+    Positive Variables x(i,j) ;
+    Free Variable z ;
+
+    Equations obj_def, flow(i) ;
+
+    obj_def.. z =e= sum((i,j)$connected(i,j), x(i,j)) ;
+    flow(i).. sum(j$connected(i,j), x(i,j)) =l= 10 ;
+
+    Model dollar_test / all / ;
+    Solve dollar_test using LP minimizing z ;
+""")
+
+DOLLAR_EQDEF_GMS = textwrap.dedent("""\
+    Sets i / 1*5 / ;
+
+    Parameter active(i) / 1 1, 2 1, 3 0, 4 1, 5 0 / ;
+
+    Positive Variables x(i) ;
+    Free Variable z ;
+
+    Equations obj_def, limit(i) ;
+
+    obj_def.. z =e= sum(i, x(i)) ;
+    limit(i)$active(i).. x(i) =l= 10 ;
+
+    Model cond_test / all / ;
+    Solve cond_test using LP minimizing z ;
+""")
+
+DOLLAR_BOUNDS_GMS = textwrap.dedent("""\
+    Sets i / a, b, c / ;
+
+    Parameter has_cap(i) / a 1, b 0, c 1 / ;
+
+    Positive Variables x(i) ;
+    Free Variable z ;
+
+    x.up(i)$has_cap(i) = 5 ;
+
+    Equations obj_def ;
+    obj_def.. z =e= sum(i, x(i)) ;
+
+    Model bnd_test / all / ;
+    Solve bnd_test using LP minimizing z ;
+""")
+
+
+class TestGamsDollarConditions:
+    def test_dollar_in_sum(self):
+        """sum((i,j)$connected(i,j), x(i,j)) should only sum over connected pairs."""
+        m = parse_gams(DOLLAR_SUM_GMS)
+        # connected has 5 entries, so objective should have 5 terms
+        assert m._objective is not None
+        # flow(i) constraints: i1 has 2 connections, i2 has 2, i3 has 1
+        assert len(m._constraints) == 3
+
+    def test_dollar_on_equation_def(self):
+        """limit(i)$active(i).. should only generate constraints where active(i)=1."""
+        m = parse_gams(DOLLAR_EQDEF_GMS)
+        # active = {1:1, 2:1, 3:0, 4:1, 5:0} -> 3 constraints (for i=1,2,4)
+        assert len(m._constraints) == 3
+
+    def test_dollar_on_bounds(self):
+        """x.up(i)$has_cap(i) = 5 should only set bounds where has_cap=1."""
+        m = parse_gams(DOLLAR_BOUNDS_GMS)
+        var_map = {v.name: v for v in m._variables}
+        x = var_map["x"]
+        # a has cap (ub=5), b no cap (ub=default), c has cap (ub=5)
+        assert float(x.ub[0]) == 5.0  # a
+        assert float(x.ub[2]) == 5.0  # c
+        # b should retain default positive variable upper bound (very large)
+        assert float(x.ub[1]) > 1e10
+
+
 # ── Export tests ───────────────────────────────────────────────
 
 

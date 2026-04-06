@@ -1176,9 +1176,15 @@ class _ModelBuilder:
                         indices.append(env[idx.name])
                     else:
                         return None
+                pdata = self.param_values[expr.name]
+                # Try tuple key first, then bare string for 1D params
                 key = tuple(indices) if len(indices) > 1 else (indices[0],)
-                val = self.param_values[expr.name].get(key, 0.0)
-                return float(val)
+                if key in pdata:
+                    return float(pdata[key])
+                # 1D params may use bare string keys
+                if len(indices) == 1 and indices[0] in pdata:
+                    return float(pdata[indices[0]])
+                return 0.0  # missing entry → false/zero
             return None
         # For other expressions, try constant evaluation
         return self._eval_const_expr(expr)
@@ -1263,10 +1269,22 @@ class _ModelBuilder:
                     env = {}
                     for dn, val in zip(domain, combo):
                         env[dn] = val
+                    # Evaluate dollar condition on equation definition
+                    if eqdef.dollar_cond is not None:
+                        cond_val = self._eval_const_expr(eqdef.dollar_cond)
+                        if cond_val is None:
+                            cond_val = self._eval_dollar_cond(eqdef.dollar_cond, env)
+                        if cond_val is not None and cond_val == 0.0:
+                            continue
                     lhs_expr = self._build_expr(eqdef.lhs, env)
                     rhs_expr = self._build_expr(eqdef.rhs, env)
                     self._add_constraint(m, lhs_expr, eqdef.sense, rhs_expr, eqdef.name)
             else:
+                # Scalar equation — dollar condition on scalar is unusual but handle it
+                if eqdef.dollar_cond is not None:
+                    cond_val = self._eval_const_expr(eqdef.dollar_cond)
+                    if cond_val is not None and cond_val == 0.0:
+                        continue
                 lhs_expr = self._build_expr(eqdef.lhs, {})
                 rhs_expr = self._build_expr(eqdef.rhs, {})
                 # Check if this equation defines the objective
@@ -1646,6 +1664,14 @@ class _ModelBuilder:
                                 index_sets.append(v)
                                 break
                 for combo in itertools.product(*index_sets):
+                    # Evaluate dollar condition on bound assignment
+                    if b.dollar_cond is not None:
+                        env = {}
+                        for dn, elem in zip(b.domain, combo):
+                            env[dn] = elem
+                        cond_val = self._eval_dollar_cond(b.dollar_cond, env)
+                        if cond_val is not None and cond_val == 0.0:
+                            continue
                     idx = []
                     for dim, elem in enumerate(combo):
                         idx.append(self._element_index(b.var_name, elem, dim))
