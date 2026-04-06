@@ -713,8 +713,6 @@ class _Parser:
         kw = self._cur_kw()
         if kw in self._VARTYPE_KW:
             var_type = kw
-            if var_type == "positive":
-                var_type = "positive"
             self._advance()
         # optional 'variable'/'variables' keyword
         if self._cur_kw() in self._VAR_KW:
@@ -1155,6 +1153,36 @@ class _ModelBuilder:
             return float(len(elems))
         return None
 
+    def _eval_dollar_cond(self, expr, env: dict) -> float | None:
+        """Evaluate a dollar condition with loop index substitution.
+
+        Returns 1.0 (true) or 0.0 (false) if evaluable, None otherwise.
+        Handles common patterns like set membership checks.
+        """
+        if isinstance(expr, ExprRef):
+            name = expr.name
+            if name in env:
+                return 1.0  # index variable exists → true
+            # Check if it's a set used as a membership test
+            if name in self.set_elements:
+                return 1.0
+            return None
+        if isinstance(expr, ExprIndex):
+            # e.g., connected(i,j) — look up in parameter data
+            if expr.name in self.param_values:
+                indices = []
+                for idx in expr.indices:
+                    if isinstance(idx, ExprRef) and idx.name in env:
+                        indices.append(env[idx.name])
+                    else:
+                        return None
+                key = tuple(indices) if len(indices) > 1 else (indices[0],)
+                val = self.param_values[expr.name].get(key, 0.0)
+                return float(val)
+            return None
+        # For other expressions, try constant evaluation
+        return self._eval_const_expr(expr)
+
     def _create_variables(self, m):
         for name, gv in self.p.variables.items():
             shape = self._domain_shape(gv.domain)
@@ -1381,8 +1409,15 @@ class _ModelBuilder:
             return dm.Constant(float(len(elems)))
 
         if isinstance(ast_node, ExprOrd):
-            # ord() in a loop context — needs env
-            return dm.Constant(1.0)  # placeholder
+            # ord(i) returns the 1-based ordinal position of element i in its set
+            sname = ast_node.set_name
+            if sname in env:
+                elem_val = env[sname]
+                # find which set this belongs to and get position
+                for set_name, elems in self.set_elements.items():
+                    if elem_val in elems:
+                        return dm.Constant(float(elems.index(elem_val) + 1))
+            return dm.Constant(1.0)
 
         raise GamsParseError(f"Unknown AST node: {type(ast_node)}")
 
@@ -1475,6 +1510,14 @@ class _ModelBuilder:
             new_env = dict(env)
             for iname, val in zip(index_names, combo):
                 new_env[iname] = val
+            # Evaluate dollar condition — skip this combination if false
+            if node.dollar_cond is not None:
+                cond_val = self._eval_const_expr(node.dollar_cond)
+                if cond_val is None:
+                    # Try evaluating with env substitution
+                    cond_val = self._eval_dollar_cond(node.dollar_cond, new_env)
+                if cond_val is not None and cond_val == 0.0:
+                    continue
             term = self._build_expr(node.body, new_env)
             term = self._ensure_expr(term)
             terms.append(term)
@@ -1510,6 +1553,12 @@ class _ModelBuilder:
             new_env = dict(env)
             for iname, val in zip(index_names, combo):
                 new_env[iname] = val
+            if node.dollar_cond is not None:
+                cond_val = self._eval_const_expr(node.dollar_cond)
+                if cond_val is None:
+                    cond_val = self._eval_dollar_cond(node.dollar_cond, new_env)
+                if cond_val is not None and cond_val == 0.0:
+                    continue
             term = self._build_expr(node.body, new_env)
             term = self._ensure_expr(term)
             terms.append(term)
@@ -1670,7 +1719,18 @@ def parse_gams_file(path: str):
     Returns
     -------
     discopt.modeling.core.Model
+
+    Raises
+    ------
+    FileNotFoundError
+        If the file does not exist.
+    GamsParseError
+        If the GAMS source cannot be parsed.
     """
+    import os
+
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"GAMS file not found: {path}")
     with open(path) as f:
         source = f.read()
     return parse_gams(source)

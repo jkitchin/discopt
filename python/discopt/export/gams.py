@@ -128,13 +128,14 @@ class _GamsWriter:
                 groups["binary"].append(var)
             elif var.var_type == VarType.INTEGER:
                 groups["integer"].append(var)
-            elif var.shape and np.all(var.lb >= 0):
+            elif np.all(np.asarray(var.lb) >= 0) and np.any(np.asarray(var.lb) < 1e18):
                 groups["positive"].append(var)
             else:
                 groups["free"].append(var)
 
-        # Add synthetic obj_var to free group
-        groups["free"].insert(0, None)  # placeholder for obj_var
+        # Add synthetic obj_var only if model has an objective
+        if self.model._objective is not None:
+            groups["free"].insert(0, None)  # placeholder for obj_var
 
         type_kw = {
             "free": "Free Variables",
@@ -177,7 +178,7 @@ class _GamsWriter:
                 # Check if bounds are uniform
                 if lb_arr.size > 0 and np.all(lb_arr == lb_arr.flat[0]):
                     lb_val = float(lb_arr.flat[0])
-                    if lb_val > -1e18 and lb_val != 0.0:
+                    if lb_val > -1e18:
                         if var.name in self._var_sets:
                             dom = ", ".join(s[0] for s in self._var_sets[var.name])
                             lines.append(f"{var.name}.lo({dom}) = {lb_val};")
@@ -333,9 +334,13 @@ class _GamsWriter:
         if isinstance(expr, IndexExpression):
             base = self._expr_to_gams(expr.base)
             if isinstance(expr.index, tuple):
-                idx_str = ", ".join(str(i + 1) for i in expr.index)
-            else:
+                idx_str = ", ".join(
+                    str(i + 1) if isinstance(i, int) else self._expr_to_gams(i) for i in expr.index
+                )
+            elif isinstance(expr.index, int):
                 idx_str = str(expr.index + 1)  # GAMS is 1-based
+            else:
+                idx_str = self._expr_to_gams(expr.index)
             return f"{base}({idx_str})"
 
         if isinstance(expr, BinaryOp):
@@ -354,6 +359,17 @@ class _GamsWriter:
             return f"{expr.op}({operand})"
 
         if isinstance(expr, FunctionCall):
+            fn = expr.func_name.lower()
+            # Decompose functions GAMS doesn't have natively
+            if fn == "log1p":
+                inner = self._expr_to_gams(expr.args[0])
+                return f"log(1 + {inner})"
+            if fn == "softplus":
+                inner = self._expr_to_gams(expr.args[0])
+                return f"log(1 + exp({inner}))"
+            if fn == "log2":
+                inner = self._expr_to_gams(expr.args[0])
+                return f"(log({inner}) / log(2))"
             gams_fn = self._FUNC_MAP.get(expr.func_name, expr.func_name)
             args_str = ", ".join(self._expr_to_gams(a) for a in expr.args)
             return f"{gams_fn}({args_str})"

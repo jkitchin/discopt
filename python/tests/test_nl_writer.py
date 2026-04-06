@@ -214,10 +214,16 @@ class TestNLWriterRoundTrip:
         nl_path = tmp_path / "test.nl"
         m.to_nl(str(nl_path))
 
-        # Parse back with Rust parser
+        # Parse back with Rust parser and verify semantics
         nl_repr = parse_nl_file(str(nl_path))
         assert nl_repr.n_vars == 2
         assert nl_repr.n_constraints == 1
+        assert nl_repr.objective_sense == "minimize"
+        # Verify variable bounds
+        assert nl_repr.var_lb(0) == [0.0]
+        assert nl_repr.var_ub(0) == [10.0]
+        assert nl_repr.var_lb(1) == [0.0]
+        assert nl_repr.var_ub(1) == [5.0]
 
     def test_roundtrip_nonlinear(self, has_rust_parser, tmp_path):
         if not has_rust_parser:
@@ -235,3 +241,44 @@ class TestNLWriterRoundTrip:
 
         nl_repr = parse_nl_file(str(nl_path))
         assert nl_repr.n_vars == 1
+
+    def test_roundtrip_minlp(self, has_rust_parser, tmp_path):
+        if not has_rust_parser:
+            pytest.skip("Rust .nl parser not available")
+
+        from discopt._rust import parse_nl_file
+
+        m = dm.Model("rt_minlp")
+        x = m.continuous("x", lb=0, ub=5)
+        y = m.binary("y")
+        m.minimize(dm.exp(x) + 3 * y)
+        m.subject_to(x <= 5 * y)
+
+        nl_path = tmp_path / "test.nl"
+        m.to_nl(str(nl_path))
+
+        nl_repr = parse_nl_file(str(nl_path))
+        assert nl_repr.n_vars == 2
+        assert nl_repr.n_constraints == 1
+        assert nl_repr.objective_sense == "minimize"
+
+
+class TestNLWriterMaximize:
+    def test_maximize_sense(self):
+        m = dm.Model("max_test")
+        x = m.continuous("x", lb=0, ub=10)
+        m.maximize(x)
+
+        nl = m.to_nl()
+        assert "O0 1" in nl  # sense=1 means maximize
+
+
+class TestNLWriterNestedFunctions:
+    def test_nested_exp_log(self):
+        m = dm.Model("nested")
+        x = m.continuous("x", lb=0.1, ub=5)
+        m.minimize(dm.exp(dm.log(x)))
+
+        nl = m.to_nl()
+        assert "o46" in nl  # exp
+        assert "o45" in nl  # log

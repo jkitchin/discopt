@@ -112,7 +112,6 @@ _FUNC_OPCODES: dict[str, int] = {
     "sqrt": _OP_SQRT,
     "sin": _OP_SIN,
     "cos": _OP_COS,
-    "tan": _OP_SIN,  # tan = sin/cos, handled specially
     "asin": _OP_ASIN,
     "acos": _OP_ACOS,
     "atan": _OP_ATAN,

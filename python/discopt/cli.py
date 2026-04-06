@@ -427,24 +427,27 @@ def _cmd_convert(args):
 
     import discopt.modeling as dm
 
-    # Import
-    if in_ext == ".gms":
-        model = dm.from_gams(in_path)
-    elif in_ext == ".nl":
-        model = dm.from_nl(in_path)
-    else:
-        print(f"Error: unsupported input format '{in_ext}'", file=sys.stderr)
-        sys.exit(1)
+    try:
+        # Import
+        if in_ext == ".gms":
+            model = dm.from_gams(in_path)
+        else:
+            model = dm.from_nl(in_path)
 
-    # Export
-    if out_ext == ".gms":
-        model.to_gams(out_path)
-    elif out_ext == ".nl":
-        model.to_nl(out_path)
-    elif out_ext == ".mps":
-        model.to_mps(out_path)
-    elif out_ext == ".lp":
-        model.to_lp(out_path)
+        # Export
+        exporters = {
+            ".gms": lambda: model.to_gams(out_path),
+            ".nl": lambda: model.to_nl(out_path),
+            ".mps": lambda: model.to_mps(out_path),
+            ".lp": lambda: model.to_lp(out_path),
+        }
+        exporters[out_ext]()
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error during conversion: {e}", file=sys.stderr)
+        sys.exit(1)
 
     print(f"Converted {in_path} -> {out_path}")
 

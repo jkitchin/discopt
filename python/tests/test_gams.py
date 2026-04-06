@@ -289,10 +289,28 @@ class TestGamsRoundTrip:
 
         gms_text = m1.to_gams()
         assert gms_text is not None
-        # The exported .gms has obj_var as a new variable, so structure differs
-        # but we can still re-parse it
+        m2 = parse_gams(gms_text)
+        # Verify structural preservation
+        assert m2._objective is not None
+        assert m2._objective.sense.value == "minimize"
+        assert len(m2._constraints) >= 1
+        # Original model has 2 vars; exported adds obj_var -> 3
+        assert len(m2._variables) >= 2
+
+    def test_export_import_minlp(self):
+        """Round-trip a MINLP model and verify var types preserved."""
+        m1 = dm.Model("rt_minlp")
+        x = m1.continuous("x", lb=0, ub=5)
+        y = m1.binary("y")
+        m1.minimize(dm.exp(x) + 3 * y)
+        m1.subject_to(x <= 5 * y)
+
+        gms_text = m1.to_gams()
         m2 = parse_gams(gms_text)
         assert m2._objective is not None
+        var_types = {v.var_type for v in m2._variables}
+        assert dm.VarType.BINARY in var_types
+        assert dm.VarType.CONTINUOUS in var_types
 
 
 # ── gamspy validation tests (optional, requires gamspy) ────────
