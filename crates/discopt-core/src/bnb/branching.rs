@@ -324,6 +324,111 @@ pub fn create_children(
     (left, right)
 }
 
+/// Create two child nodes by spatial bisection on a continuous variable.
+///
+/// Left child: x_i <= midpoint.  Right child: x_i >= midpoint.
+/// Unlike integer branching, there is no +1 gap between children.
+pub fn create_children_spatial(
+    parent: &Node,
+    decision: &BranchDecision,
+    mut next_id: impl FnMut() -> NodeId,
+) -> (Node, Node) {
+    let idx = decision.var_index;
+    let bp = decision.branch_point; // midpoint
+
+    let parent_sol = parent.parent_solution.clone();
+    let inherited_lb = parent.local_lower_bound;
+
+    // Left child: x_i <= midpoint
+    let mut left_ub = parent.ub.clone();
+    left_ub[idx] = bp;
+    let left = Node {
+        id: next_id(),
+        parent: Some(parent.id),
+        depth: parent.depth + 1,
+        lb: parent.lb.clone(),
+        ub: left_ub,
+        local_lower_bound: inherited_lb,
+        status: NodeStatus::Pending,
+        parent_solution: parent_sol.clone(),
+    };
+
+    // Right child: x_i >= midpoint (no gap)
+    let mut right_lb = parent.lb.clone();
+    right_lb[idx] = bp;
+    let right = Node {
+        id: next_id(),
+        parent: Some(parent.id),
+        depth: parent.depth + 1,
+        lb: right_lb,
+        ub: parent.ub.clone(),
+        local_lower_bound: inherited_lb,
+        status: NodeStatus::Pending,
+        parent_solution: parent_sol,
+    };
+
+    (left, right)
+}
+
+/// Minimum relative domain width for a continuous variable to be eligible
+/// for spatial branching.  Prevents infinite bisection.
+const SPATIAL_MIN_WIDTH: f64 = 1e-6;
+
+/// Select a continuous variable for spatial branching (longest-edge bisection).
+///
+/// Picks the variable with the widest domain relative to its global range.
+/// Only considers variables whose current domain width exceeds
+/// [`SPATIAL_MIN_WIDTH`] times the global width.
+pub fn select_spatial_branch_variable(
+    node_lb: &[f64],
+    node_ub: &[f64],
+    global_lb: &[f64],
+    global_ub: &[f64],
+    integer_vars: &[VarBranchInfo],
+) -> Option<BranchDecision> {
+    let n = node_lb.len();
+    let mut best_idx: Option<usize> = None;
+    let mut best_width = 0.0_f64;
+
+    // Build a quick lookup of which flat indices are integer variables.
+    let mut is_int = vec![false; n];
+    for var in integer_vars {
+        for i in 0..var.size {
+            let idx = var.offset + i;
+            if idx < n {
+                is_int[idx] = true;
+            }
+        }
+    }
+
+    for idx in 0..n {
+        if is_int[idx] {
+            continue;
+        }
+        let width = node_ub[idx] - node_lb[idx];
+        let global_width = global_ub[idx] - global_lb[idx];
+        if global_width < 1e-15 {
+            continue; // Fixed variable, skip.
+        }
+        let relative_width = width / global_width;
+        if relative_width < SPATIAL_MIN_WIDTH {
+            continue; // Domain already very tight.
+        }
+        if width > best_width {
+            best_width = width;
+            best_idx = Some(idx);
+        }
+    }
+
+    best_idx.map(|idx| {
+        let mid = 0.5 * (node_lb[idx] + node_ub[idx]);
+        BranchDecision {
+            var_index: idx,
+            branch_point: mid,
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

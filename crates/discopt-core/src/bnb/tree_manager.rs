@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 
 use crate::bnb::branching::{
-    create_children, is_integer_feasible, select_branch_variable,
-    select_branch_variable_pseudocost, BranchDecision, Pseudocosts, VarBranchInfo,
+    create_children, create_children_spatial, is_integer_feasible, select_branch_variable,
+    select_branch_variable_pseudocost, select_spatial_branch_variable, BranchDecision, Pseudocosts,
+    VarBranchInfo,
 };
 use crate::bnb::node::{Node, NodeId, NodeStatus};
 use crate::bnb::pool::{NodePool, SelectionStrategy};
@@ -109,6 +110,11 @@ pub struct TreeManager {
     /// Records of branching decisions: maps child NodeId → parent's BranchRecord.
     /// Used to retroactively update pseudocosts when child results arrive.
     branch_records: HashMap<NodeId, BranchRecord>,
+    /// When true, integer-feasible nodes are NOT fathomed; instead, spatial
+    /// branching on continuous variables continues.  Required for nonconvex
+    /// MINLPs where the NLP local optimum at an integer-feasible node may
+    /// not be the global optimum of the continuous subproblem.
+    nonconvex: bool,
 }
 
 impl TreeManager {
@@ -143,7 +149,14 @@ impl TreeManager {
             use_pseudocosts: true,
             reliability_threshold: 8,
             branch_records: HashMap::new(),
+            nonconvex: false,
         }
+    }
+
+    /// Enable nonconvex mode: integer-feasible nodes continue spatial
+    /// branching on continuous variables instead of being fathomed.
+    pub fn set_nonconvex(&mut self, nonconvex: bool) {
+        self.nonconvex = nonconvex;
     }
 
     /// Allocate a fresh NodeId.
@@ -259,15 +272,27 @@ impl TreeManager {
                 result.is_feasible || is_integer_feasible(&result.solution, &self.integer_vars);
 
             if int_feasible {
-                self.pool.get_mut(result.node_id).status = NodeStatus::Fathomed;
-                stats.fathomed += 1;
+                if self.nonconvex {
+                    // Nonconvex mode: node_lb holds the convex RELAXATION
+                    // bound (not the NLP objective).  The Python side has
+                    // already injected the NLP objective as an incumbent
+                    // candidate via inject_incumbent().  Do NOT update the
+                    // incumbent from node_lb here.
+                    // Fall through to branching (step 3) to spatially branch
+                    // on continuous variables.
+                } else {
+                    // Convex mode: NLP local optimum = global optimum for the
+                    // continuous subproblem.  Fathom the node.
+                    self.pool.get_mut(result.node_id).status = NodeStatus::Fathomed;
+                    stats.fathomed += 1;
 
-                if node_lb < self.incumbent_value {
-                    self.incumbent_value = node_lb;
-                    self.incumbent_solution = Some(result.solution.clone());
-                    stats.incumbent_updates += 1;
+                    if node_lb < self.incumbent_value {
+                        self.incumbent_value = node_lb;
+                        self.incumbent_solution = Some(result.solution.clone());
+                        stats.incumbent_updates += 1;
+                    }
+                    continue;
                 }
-                continue;
             }
 
             // 3. Branch: use hint if available, else pseudocost/most-fractional.
@@ -332,6 +357,32 @@ impl TreeManager {
                 self.pool.add(left);
                 self.pool.add(right);
                 stats.branched += 1;
+            } else if self.nonconvex && int_feasible {
+                // No fractional integer variable, but nonconvex mode: try
+                // spatial branching on continuous variables.
+                let node = self.pool.get(result.node_id);
+                let spatial = select_spatial_branch_variable(
+                    &node.lb,
+                    &node.ub,
+                    &self.global_lb,
+                    &self.global_ub,
+                    &self.integer_vars,
+                );
+                if let Some(ref spatial_decision) = spatial {
+                    let parent = self.pool.get(result.node_id).clone();
+                    self.pool.get_mut(result.node_id).status = NodeStatus::Branched;
+
+                    let (left, right) =
+                        create_children_spatial(&parent, spatial_decision, || self.next_id());
+
+                    self.pool.add(left);
+                    self.pool.add(right);
+                    stats.branched += 1;
+                } else {
+                    // All continuous domains are tight; fathom.
+                    self.pool.get_mut(result.node_id).status = NodeStatus::Fathomed;
+                    stats.fathomed += 1;
+                }
             } else {
                 // No fractional variable found — treat as fathomed.
                 self.pool.get_mut(result.node_id).status = NodeStatus::Fathomed;

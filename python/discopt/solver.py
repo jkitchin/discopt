@@ -1383,6 +1383,12 @@ def solve_model(
         if cutting_planes and model._constraints:
             _convex_constraint_mask = [False] * len(model._constraints)
 
+    # Enable nonconvex spatial branching so integer-feasible nodes are not
+    # prematurely fathomed.  The NLP local optimum at such a node may not
+    # be the global optimum of the continuous subproblem.
+    if not _model_is_convex:
+        tree.set_nonconvex(True)
+
     # --- Default Ipopt options ---
     opts = dict(ipopt_options) if ipopt_options else {}
     opts.setdefault("print_level", 0)
@@ -1584,10 +1590,11 @@ def solve_model(
                                 int(batch_ids[i]),
                             )
             # For nonconvex problems, NLP objective is NOT a valid lower
-            # bound (local minima can exceed the global optimum). Reset
-            # non-integer-feasible nodes to -inf so only convex bounds are
-            # used. Keep NLP objective for integer-feasible nodes (the Rust
-            # tree uses result_lbs for incumbent values).
+            # bound (local minima can exceed the global optimum).  Reset ALL
+            # non-sentinel nodes to -inf so only convex relaxation bounds are
+            # used.  For integer-feasible nodes, inject the NLP solution as
+            # an incumbent candidate via tree.inject_incumbent() and let the
+            # Rust tree continue spatial branching on continuous variables.
             _int_feas_mask = np.zeros(n_batch, dtype=bool)
             if not _model_is_convex:
                 _nlp_obj_backup = result_lbs.copy()
@@ -1602,12 +1609,18 @@ def solve_model(
                             if not sol_is_int_feas:
                                 break
                         _int_feas_mask[i] = sol_is_int_feas
-                        if not sol_is_int_feas:
-                            result_lbs[i] = -np.inf
+                        if sol_is_int_feas:
+                            # Inject NLP solution as incumbent candidate.
+                            # The Rust tree will update its incumbent if this
+                            # objective improves on the current best.
+                            tree.inject_incumbent(result_sols[i].copy(), float(_nlp_obj_backup[i]))
+                        # Reset ALL nonconvex nodes to -inf; convex bounds
+                        # computed below will provide valid lower bounds.
+                        result_lbs[i] = -np.inf
             # Tighten lower bounds with alphaBB underestimator
             if _use_alphabb:
                 for i in range(n_batch):
-                    if result_lbs[i] < _SENTINEL_THRESHOLD and not _int_feas_mask[i]:
+                    if result_lbs[i] < _SENTINEL_THRESHOLD:
                         try:
                             node_lb_i = np.array(batch_lb[i])
                             node_ub_i = np.array(batch_ub[i])
@@ -1664,11 +1677,7 @@ def solve_model(
                         mc_lbs = None
                     if mc_lbs is not None:
                         for i in range(n_batch):
-                            if (
-                                result_lbs[i] < _SENTINEL_THRESHOLD
-                                and np.isfinite(mc_lbs[i])
-                                and not _int_feas_mask[i]
-                            ):
+                            if result_lbs[i] < _SENTINEL_THRESHOLD and np.isfinite(mc_lbs[i]):
                                 result_lbs[i] = max(result_lbs[i], float(mc_lbs[i]))
                 except (ValueError, ArithmeticError, RuntimeError) as e:
                     logger.debug("Batch McCormick bound failed: %s", e)

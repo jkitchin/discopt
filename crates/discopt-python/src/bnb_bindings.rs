@@ -274,6 +274,15 @@ impl PyTreeManager {
         self.inner.inject_incumbent(sol_vec, obj_val)
     }
 
+    /// Enable nonconvex spatial branching mode.
+    ///
+    /// When enabled, integer-feasible nodes are NOT fathomed.  Instead,
+    /// spatial branching on continuous variables continues to close the gap
+    /// between the convex relaxation bound and the NLP incumbent.
+    fn set_nonconvex(&mut self, nonconvex: bool) {
+        self.inner.set_nonconvex(nonconvex);
+    }
+
     /// Score branching candidates for a solution vector.
     ///
     /// Returns (var_indices, frac_parts, obs_counts, scores) as four arrays.
