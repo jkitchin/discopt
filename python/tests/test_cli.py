@@ -497,3 +497,77 @@ class TestSmokeTest:
                 # at minimum, it should run without crashing
                 output = capsys.readouterr().out
                 assert "checks passed" in output or exc_info.value.code in (0, 1)
+
+
+class TestConvert:
+    """Tests for the ``discopt convert`` subcommand."""
+
+    def _write_gms(self, path):
+        """Write a minimal GAMS file for testing."""
+        path.write_text(
+            "Free Variables x, obj ;\n"
+            "Equations eq1 ;\n"
+            "eq1.. obj =e= x ;\n"
+            "Model m / all / ;\n"
+            "Solve m using NLP minimizing obj ;\n"
+        )
+
+    def test_gms_to_nl(self, tmp_path, capsys):
+        gms_path = tmp_path / "test.gms"
+        nl_path = tmp_path / "test.nl"
+        self._write_gms(gms_path)
+
+        sys.argv = ["discopt", "convert", str(gms_path), str(nl_path)]
+        main()
+        output = capsys.readouterr().out
+        assert "Converted" in output
+        assert nl_path.exists()
+        content = nl_path.read_text()
+        assert content.startswith("g3")
+
+    def test_gms_to_gms(self, tmp_path, capsys):
+        gms_path = tmp_path / "input.gms"
+        out_path = tmp_path / "output.gms"
+        self._write_gms(gms_path)
+
+        sys.argv = ["discopt", "convert", str(gms_path), str(out_path)]
+        main()
+        assert out_path.exists()
+        content = out_path.read_text()
+        assert "Solve" in content
+
+    def test_unsupported_input(self, tmp_path, capsys):
+        bad_in = tmp_path / "model.xyz"
+        bad_in.write_text("dummy")
+        out = tmp_path / "out.gms"
+
+        sys.argv = ["discopt", "convert", str(bad_in), str(out)]
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "unsupported input format" in err
+
+    def test_unsupported_output(self, tmp_path, capsys):
+        gms_path = tmp_path / "test.gms"
+        self._write_gms(gms_path)
+        bad_out = tmp_path / "out.xyz"
+
+        sys.argv = ["discopt", "convert", str(gms_path), str(bad_out)]
+        with pytest.raises(SystemExit) as exc_info:
+            main()
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "unsupported output format" in err
+
+    def test_convert_args_parsing(self):
+        import argparse as ap
+
+        parser = ap.ArgumentParser()
+        subparsers = parser.add_subparsers(dest="command")
+        p_conv = subparsers.add_parser("convert")
+        p_conv.add_argument("input")
+        p_conv.add_argument("output")
+        args = parser.parse_args(["convert", "in.gms", "out.nl"])
+        assert args.input == "in.gms"
+        assert args.output == "out.nl"

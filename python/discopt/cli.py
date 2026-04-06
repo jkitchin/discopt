@@ -3,6 +3,7 @@
 Usage:
     discopt about
     discopt test
+    discopt convert input.gms output.nl
     discopt lit-scan [topic ...]
     discopt adversary [-n COUNT] [topic ...]
     discopt search-arxiv "query" [--max-results 20] [--start-date 2026-01-01]
@@ -396,6 +397,58 @@ def _cmd_test(_args):
         sys.exit(1)
 
 
+_IMPORT_EXTS = {".gms", ".nl"}
+_EXPORT_EXTS = {".gms", ".nl", ".mps", ".lp"}
+
+
+def _cmd_convert(args):
+    """Convert between optimization model file formats."""
+    in_path = args.input
+    out_path = args.output
+
+    in_ext = os.path.splitext(in_path)[1].lower()
+    out_ext = os.path.splitext(out_path)[1].lower()
+
+    if in_ext not in _IMPORT_EXTS:
+        print(
+            f"Error: unsupported input format '{in_ext}'. "
+            f"Supported: {', '.join(sorted(_IMPORT_EXTS))}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if out_ext not in _EXPORT_EXTS:
+        print(
+            f"Error: unsupported output format '{out_ext}'. "
+            f"Supported: {', '.join(sorted(_EXPORT_EXTS))}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    import discopt.modeling as dm
+
+    # Import
+    if in_ext == ".gms":
+        model = dm.from_gams(in_path)
+    elif in_ext == ".nl":
+        model = dm.from_nl(in_path)
+    else:
+        print(f"Error: unsupported input format '{in_ext}'", file=sys.stderr)
+        sys.exit(1)
+
+    # Export
+    if out_ext == ".gms":
+        model.to_gams(out_path)
+    elif out_ext == ".nl":
+        model.to_nl(out_path)
+    elif out_ext == ".mps":
+        model.to_mps(out_path)
+    elif out_ext == ".lp":
+        model.to_lp(out_path)
+
+    print(f"Converted {in_path} -> {out_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="discopt", description="discopt CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -407,6 +460,15 @@ def main():
     # test
     p_test = subparsers.add_parser("test", help="Run smoke tests to verify installation")
     p_test.set_defaults(func=_cmd_test)
+
+    # convert
+    p_conv = subparsers.add_parser(
+        "convert",
+        help="Convert between model formats (.gms, .nl, .mps, .lp)",
+    )
+    p_conv.add_argument("input", help="Input file path (.gms or .nl)")
+    p_conv.add_argument("output", help="Output file path (.gms, .nl, .mps, or .lp)")
+    p_conv.set_defaults(func=_cmd_convert)
 
     # search-arxiv
     p_arxiv = subparsers.add_parser("search-arxiv", help="Search arXiv API")
