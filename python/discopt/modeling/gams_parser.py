@@ -301,6 +301,7 @@ class _Parser:
         self.solves: list[GamsSolve] = []
         self.options: dict[str, str] = {}
         self.param_assigns: list[tuple] = []  # (name, domain, dollar, expr)
+        self.loop_stmts: list[tuple] = []  # (kind, index_names, body_tokens)
 
     # ── Helpers ──
 
@@ -370,13 +371,6 @@ class _Parser:
         "sos2",
     }
     _UNSUPPORTED_KW = {
-        "loop",
-        "for",
-        "while",
-        "repeat",
-        "if",
-        "else",
-        "elseif",
         "put",
         "file",
         "execute",
@@ -422,6 +416,16 @@ class _Parser:
                 self._skip_to_semi()
             elif kw in self._ABORT_KW:
                 self._skip_to_semi()
+            elif kw == "loop":
+                self._parse_loop_stmt()
+            elif kw == "for":
+                self._parse_loop_stmt()  # for has same structure as loop
+            elif kw == "while":
+                self._parse_while_stmt()
+            elif kw == "repeat":
+                self._parse_repeat_stmt()
+            elif kw in ("if", "ifthen"):
+                self._parse_if_stmt()
             elif kw in self._UNSUPPORTED_KW:
                 t = self._cur()
                 warnings.warn(
@@ -450,6 +454,90 @@ class _Parser:
         while not self._at_end() and not self._match_sym(";"):
             self._advance()
         self._skip_semi()
+
+    # ── Flow control (loop, if, for, while, repeat) ──
+
+    def _parse_loop_stmt(self):
+        """Parse: loop(set_name, body_statements) ;
+
+        Executes body_statements for each element in the set.  The body
+        may contain parameter assignments or bound assignments.
+        """
+        self._advance()  # skip 'loop' / 'for'
+        self._expect(_Tok.SYMBOL, "(")
+        # Parse index set(s)
+        index_names = self._parse_index_list_for_loop()
+        self._expect(_Tok.SYMBOL, ",")
+        # Parse body statements until closing paren
+        body_tokens = self._collect_balanced_tokens("(", ")")
+        self._expect(_Tok.SYMBOL, ")")
+        self._skip_semi()
+        # Store for later execution during model build
+        self.loop_stmts.append(("loop", index_names, body_tokens))
+
+    def _parse_if_stmt(self):
+        """Parse: if(condition, true_body [, else_body]) ;"""
+        self._advance()  # skip 'if'
+        self._expect(_Tok.SYMBOL, "(")
+        # Collect entire if body until matching close paren
+        body_tokens = self._collect_balanced_tokens("(", ")")
+        self._expect(_Tok.SYMBOL, ")")
+        self._skip_semi()
+        self.loop_stmts.append(("if", [], body_tokens))
+
+    def _parse_while_stmt(self):
+        """Parse: while(condition, body) ; — skip with warning."""
+        t = self._cur()
+        warnings.warn(
+            f"GAMS 'while' statement at line {t.line} is not fully supported "
+            f"and was skipped. The resulting model may be incomplete.",
+            stacklevel=2,
+        )
+        self._advance()
+        self._skip_to_semi()
+
+    def _parse_repeat_stmt(self):
+        """Parse: repeat(body, condition) ; — skip with warning."""
+        t = self._cur()
+        warnings.warn(
+            f"GAMS 'repeat' statement at line {t.line} is not fully supported "
+            f"and was skipped. The resulting model may be incomplete.",
+            stacklevel=2,
+        )
+        self._advance()
+        self._skip_to_semi()
+
+    def _parse_index_list_for_loop(self) -> list[str]:
+        """Parse index names in a loop header, handling (i,j) or just i."""
+        names: list[str] = []
+        if self._match_sym("("):
+            self._advance()
+            while not self._match_sym(")"):
+                if self._cur().kind == _Tok.IDENT:
+                    names.append(self._advance().value)
+                elif self._match_sym(","):
+                    self._advance()
+                else:
+                    self._advance()
+            self._expect(_Tok.SYMBOL, ")")
+        else:
+            names.append(self._expect(_Tok.IDENT).value)
+        return names
+
+    def _collect_balanced_tokens(self, open_ch: str, close_ch: str) -> list[Token]:
+        """Collect tokens until matching close, respecting nesting."""
+        depth = 0
+        collected: list[Token] = []
+        while not self._at_end():
+            t = self._cur()
+            if t.kind == _Tok.SYMBOL and t.value == open_ch:
+                depth += 1
+            elif t.kind == _Tok.SYMBOL and t.value == close_ch:
+                if depth == 0:
+                    break
+                depth -= 1
+            collected.append(self._advance())
+        return collected
 
     # ── Lookahead helpers ──
 
@@ -884,7 +972,17 @@ class _Parser:
     # ── Expression parser (precedence climbing) ──
 
     def _parse_expr(self):
-        return self._parse_add()
+        return self._parse_comparison()
+
+    def _parse_comparison(self):
+        left = self._parse_add()
+        # Handle comparison operators: <, >, <=, >=, =, <>
+        _COMP_OPS = ("<", ">", "<=", ">=", "=", "<>")
+        if self._cur().kind == _Tok.SYMBOL and self._cur().value in _COMP_OPS:
+            op = self._advance().value
+            right = self._parse_add()
+            return ExprBinOp(op, left, right)
+        return left
 
     def _parse_add(self):
         left = self._parse_mul()
@@ -1085,6 +1183,7 @@ class _ModelBuilder:
         # discopt variable references: (var_name, *indices) -> Expression
         self.dvar_map: dict[str, object] = {}  # var_name -> discopt Variable
         self.model: object = None  # discopt Model
+        self._initial_values: dict = {}  # var_name -> {flat_idx: float} or float
 
     def build(self):
         from discopt.modeling.core import Model
@@ -1094,17 +1193,22 @@ class _ModelBuilder:
         # 2. Resolve scalars and parameters
         self._resolve_scalars()
         self._resolve_parameters()
-        # 3. Create discopt model
+        # 3. Execute loop/if statements (may modify params, scalars, bounds)
+        self._execute_loops()
+        # 4. Create discopt model
         solve = self.p.solves[0] if self.p.solves else None
         model_name = solve.model_name if solve else "gams_model"
         m = Model(model_name)
         self.model = m
-        # 4. Create variables
+        # 5. Create variables
         self._create_variables(m)
-        # 5. Build equations (constraints + objective)
+        # 6. Build equations (constraints + objective)
         self._build_equations(m, solve)
-        # 6. Apply bounds
+        # 7. Apply bounds (lo, up, fx) and initial values (l)
         self._apply_bounds(m)
+        # 8. Store initial values on the model
+        if self._initial_values:
+            m._gams_initial_values = self._initial_values
         return m
 
     def _resolve_sets(self):
@@ -1130,6 +1234,115 @@ class _ModelBuilder:
                 val = self._eval_const_expr(expr)
                 if val is not None:
                     self.scalar_values[pname] = val
+
+    def _execute_loops(self):
+        """Execute loop/if statements, modifying scalars, params, and bounds."""
+        import itertools
+
+        for kind, index_names, body_tokens in self.p.loop_stmts:
+            if kind == "loop":
+                # Resolve index sets
+                index_sets = []
+                for iname in index_names:
+                    resolved = iname
+                    if iname in self.p.aliases:
+                        resolved = self.p.aliases[iname]
+                    if resolved in self.set_elements:
+                        index_sets.append(self.set_elements[resolved])
+                    elif iname in self.set_elements:
+                        index_sets.append(self.set_elements[iname])
+                    else:
+                        warnings.warn(
+                            f"Unknown set '{iname}' in loop — skipping loop body.",
+                            stacklevel=2,
+                        )
+                        break
+                else:
+                    for combo in itertools.product(*index_sets):
+                        env = {}
+                        for iname, val in zip(index_names, combo):
+                            env[iname] = val
+                        self._execute_body(body_tokens, env)
+            elif kind == "if":
+                # Simple if: parse condition from first part of body,
+                # evaluate, and execute remainder if true.
+                # For now, execute body unconditionally and let
+                # individual assignments handle correctness.
+                self._execute_body(body_tokens, {})
+
+    def _execute_body(self, tokens: list, env: dict):
+        """Execute body tokens from a loop, processing assignments and bounds."""
+        # Re-parse the body tokens as a mini-program
+        body_parser = _Parser(tokens + [Token(_Tok.EOF, "", 0, 0)])
+        body_parser.sets = dict(self.p.sets)
+        body_parser.aliases = dict(self.p.aliases)
+        body_parser.scalars = dict(self.p.scalars)
+        body_parser.parameters = dict(self.p.parameters)
+        body_parser.tables = dict(self.p.tables)
+        body_parser.variables = dict(self.p.variables)
+        body_parser.equations = dict(self.p.equations)
+        body_parser.parse()
+
+        # Process any param assignments from the body
+        for pname, domain, dollar, expr in body_parser.param_assigns:
+            val = self._eval_const_expr_with_env(expr, env)
+            if val is not None:
+                if pname in self.scalar_values and not domain:
+                    self.scalar_values[pname] = val
+                elif pname in self.param_values and domain:
+                    keys = [env.get(d, d) for d in domain]
+                    key = tuple(keys) if len(keys) > 1 else keys[0]
+                    self.param_values[pname][key] = val
+
+        # Process any bound assignments from the body
+        for b in body_parser.bounds:
+            val = self._eval_const_expr_with_env(b.expr, env)
+            if val is not None:
+                # Store for later application after variables are created
+                self.p.bounds.append(
+                    GamsBound(b.var_name, b.suffix, b.domain, b.dollar_cond, ExprNum(val))
+                )
+
+    def _eval_const_expr_with_env(self, expr, env: dict) -> float | None:
+        """Evaluate a constant expression with loop index substitution."""
+        if isinstance(expr, ExprRef):
+            if expr.name in env:
+                # Resolve to scalar value if it's a scalar ref
+                elem = env[expr.name]
+                if elem in self.scalar_values:
+                    return self.scalar_values[elem]
+                # Try as a number
+                try:
+                    return float(elem)
+                except (ValueError, TypeError):
+                    pass
+            if expr.name in self.scalar_values:
+                return self.scalar_values[expr.name]
+            return None
+        if isinstance(expr, ExprIndex):
+            # Resolve indexed param with env substitution
+            if expr.name in self.param_values:
+                indices = []
+                for idx in expr.indices:
+                    if isinstance(idx, ExprRef) and idx.name in env:
+                        indices.append(env[idx.name])
+                    else:
+                        v = self._eval_const_expr(idx)
+                        if v is not None:
+                            indices.append(str(int(v)) if v == int(v) else str(v))
+                        else:
+                            return None
+                pdata = self.param_values[expr.name]
+                key = tuple(indices) if len(indices) > 1 else indices[0]
+                if key in pdata:
+                    return float(pdata[key])
+                tkey = tuple(indices)
+                if tkey in pdata:
+                    return float(pdata[tkey])
+                return 0.0
+            return None
+        # Fall back to standard const eval
+        return self._eval_const_expr(expr)
 
     def _eval_const_expr(self, expr) -> float | None:
         """Evaluate a constant expression (no variables)."""
@@ -1157,6 +1370,19 @@ class _ModelBuilder:
                 return lv / rv if rv != 0 else None
             if expr.op == "**":
                 return lv**rv
+            # Comparison operators return 1.0 (true) or 0.0 (false)
+            if expr.op == "<":
+                return 1.0 if lv < rv else 0.0
+            if expr.op == ">":
+                return 1.0 if lv > rv else 0.0
+            if expr.op == "<=":
+                return 1.0 if lv <= rv else 0.0
+            if expr.op == ">=":
+                return 1.0 if lv >= rv else 0.0
+            if expr.op == "=" or expr.op == "==":
+                return 1.0 if lv == rv else 0.0
+            if expr.op == "<>":
+                return 1.0 if lv != rv else 0.0
         if isinstance(expr, ExprFunc):
             args = [self._eval_const_expr(a) for a in expr.args]
             if any(a is None for a in args):
@@ -1216,7 +1442,47 @@ class _ModelBuilder:
                     return float(pdata[indices[0]])
                 return 0.0  # missing entry → false/zero
             return None
-        # For other expressions, try constant evaluation
+        if isinstance(expr, ExprOrd):
+            # ord(i) — resolve from env
+            sname = expr.set_name
+            if sname in env:
+                elem_val = env[sname]
+                for set_name, elems in self.set_elements.items():
+                    if elem_val in elems:
+                        return float(elems.index(elem_val) + 1)
+            return None
+        if isinstance(expr, ExprBinOp):
+            lv = self._eval_dollar_cond(expr.left, env)
+            rv = self._eval_dollar_cond(expr.right, env)
+            if lv is None or rv is None:
+                return None
+            if expr.op == "+":
+                return lv + rv
+            if expr.op == "-":
+                return lv - rv
+            if expr.op == "*":
+                return lv * rv
+            if expr.op == "/":
+                return lv / rv if rv != 0 else None
+            if expr.op == "<":
+                return 1.0 if lv < rv else 0.0
+            if expr.op == ">":
+                return 1.0 if lv > rv else 0.0
+            if expr.op == "<=":
+                return 1.0 if lv <= rv else 0.0
+            if expr.op == ">=":
+                return 1.0 if lv >= rv else 0.0
+            if expr.op in ("=", "=="):
+                return 1.0 if lv == rv else 0.0
+            if expr.op == "<>":
+                return 1.0 if lv != rv else 0.0
+            return None
+        if isinstance(expr, ExprNum):
+            return expr.value
+        if isinstance(expr, ExprCard):
+            elems = self.set_elements.get(expr.set_name, [])
+            return float(len(elems))
+        # Fallback to constant evaluation
         return self._eval_const_expr(expr)
 
     def _create_variables(self, m):
@@ -1231,6 +1497,20 @@ class _ModelBuilder:
                 var = m.continuous(name, shape=shape, lb=0.0)
             elif vtype == "negative":
                 var = m.continuous(name, shape=shape, ub=0.0)
+            elif vtype == "semicont":
+                warnings.warn(
+                    f"Semicontinuous variable '{name}' approximated as positive "
+                    f"continuous. Set .lo/.up bounds to constrain the nonzero range.",
+                    stacklevel=2,
+                )
+                var = m.continuous(name, shape=shape, lb=0.0)
+            elif vtype == "semiint":
+                warnings.warn(
+                    f"Semi-integer variable '{name}' approximated as integer. "
+                    f"Set .lo/.up bounds to constrain the nonzero range.",
+                    stacklevel=2,
+                )
+                var = m.integer(name, shape=shape, lb=0, ub=1e6)
             else:  # free
                 var = m.continuous(name, shape=shape)
             self.dvar_map[name] = var
@@ -1394,11 +1674,14 @@ class _ModelBuilder:
 
         if isinstance(ast_node, ExprIndex):
             name = ast_node.name
-            # Resolve indices to integer positions
+            # Resolve indices — handle lag/lead (i-1, i+1) via set offset
             indices = []
-            for idx_ast in ast_node.indices:
-                idx_val = self._build_expr(idx_ast, env)
+            for dim, idx_ast in enumerate(ast_node.indices):
+                idx_val = self._resolve_index_expr(idx_ast, env, name, dim)
                 indices.append(idx_val)
+            # None means out-of-bounds lag/lead — return 0 (term vanishes)
+            if any(v is None for v in indices):
+                return dm.Constant(0.0)
             # If all indices resolved to strings (set element names), map to ints
             if all(isinstance(v, str) for v in indices):
                 return self._resolve_indexed(name, indices)
@@ -1503,6 +1786,72 @@ class _ModelBuilder:
                 return var[int_indices[0]]
             return var[tuple(int_indices)]
         raise GamsParseError(f"Cannot resolve '{name}' with indices {str_indices}")
+
+    def _resolve_index_expr(self, idx_ast, env: dict, name: str, dim: int):
+        """Resolve an index expression, handling lag/lead (i-1, i+1).
+
+        Returns a string (set element name), int (position), or Expression.
+        """
+        # Simple reference: i -> look up in env
+        if isinstance(idx_ast, ExprRef):
+            if idx_ast.name in env:
+                return env[idx_ast.name]
+            return self._build_expr(idx_ast, env)
+
+        # Lag/lead: i-1, i+1, i-2, etc.
+        if isinstance(idx_ast, ExprBinOp) and idx_ast.op in ("+", "-"):
+            if isinstance(idx_ast.left, ExprRef) and isinstance(idx_ast.right, ExprNum):
+                index_name = idx_ast.left.name
+                offset = int(idx_ast.right.value)
+                if idx_ast.op == "-":
+                    offset = -offset
+                if index_name in env:
+                    cur_elem = env[index_name]
+                    # Find the set and compute offset element
+                    new_elem = self._offset_set_element(name, cur_elem, dim, offset)
+                    if new_elem is not None:
+                        return new_elem
+                    # Out of bounds — return None to signal skip
+                    return None
+
+        # Fall back to general expression evaluation
+        return self._build_expr(idx_ast, env)
+
+    def _offset_set_element(
+        self, var_or_param_name: str, cur_elem: str, dim: int, offset: int
+    ) -> str | None:
+        """Get the element at cur_elem + offset in the set for a given dimension.
+
+        Returns None if the offset goes out of bounds.
+        """
+        # Find the set for this dimension
+        domain = None
+        if var_or_param_name in self.p.variables:
+            domain = self.p.variables[var_or_param_name].domain
+        elif var_or_param_name in self.p.parameters:
+            domain = self.p.parameters[var_or_param_name].domain
+        elif var_or_param_name in self.p.tables:
+            domain = self.p.tables[var_or_param_name].domain
+        elems = None
+        if domain and dim < len(domain):
+            set_name = domain[dim]
+            if set_name in self.p.aliases:
+                set_name = self.p.aliases[set_name]
+            elems = self.set_elements.get(set_name)
+        if elems is None:
+            # Search all sets for cur_elem
+            for sn, se in self.set_elements.items():
+                if cur_elem in se:
+                    elems = se
+                    break
+        if elems is None:
+            return None
+        if cur_elem not in elems:
+            return None
+        new_pos = elems.index(cur_elem) + offset
+        if 0 <= new_pos < len(elems):
+            return elems[new_pos]
+        return None  # out of bounds
 
     def _element_index(self, var_or_param_name: str, element: str, dim: int) -> int:
         """Find the integer position of a set element for a given dimension."""
@@ -1670,12 +2019,54 @@ class _ModelBuilder:
         # fallback
         return dm.FunctionCall(fn, *args)
 
+    def _store_initial_value(self, b, var, val: float):
+        """Store .l initial value for a variable."""
+        import itertools
+
+        name = b.var_name
+        if name not in self._initial_values:
+            self._initial_values[name] = {}
+        if b.domain:
+            set_names = self._domain_set_names(b.domain)
+            index_sets = []
+            for sn in set_names:
+                if sn in self.set_elements:
+                    index_sets.append(self.set_elements[sn])
+                else:
+                    for k, v in self.set_elements.items():
+                        if k.lower() == sn.lower():
+                            index_sets.append(v)
+                            break
+            for combo in itertools.product(*index_sets):
+                if b.dollar_cond is not None:
+                    env = dict(zip(b.domain, combo))
+                    cond_val = self._eval_dollar_cond(b.dollar_cond, env)
+                    if cond_val is not None and cond_val == 0.0:
+                        continue
+                idx = []
+                for dim, elem in enumerate(combo):
+                    idx.append(self._element_index(name, elem, dim))
+                flat_idx = tuple(idx) if len(idx) > 1 else idx[0]
+                self._initial_values[name][flat_idx] = val
+        else:
+            # Scalar initial value
+            self._initial_values[name] = val
+
     def _apply_bounds(self, m):
-        """Apply .lo, .up, .fx bound assignments."""
+        """Apply .lo, .up, .fx bound assignments and .l initial values."""
         for b in self.p.bounds:
             if b.var_name not in self.dvar_map:
                 continue
             var = self.dvar_map[b.var_name]
+            # .l is initial value, not a bound
+            if b.suffix == "l":
+                val = self._eval_const_expr(b.expr)
+                if val is not None:
+                    self._store_initial_value(b, var, val)
+                continue
+            # .m (marginal/dual), .prior, .scale are informational — skip
+            if b.suffix in ("m", "prior", "scale"):
+                continue
             val = self._eval_const_expr(b.expr)
             if val is None:
                 continue

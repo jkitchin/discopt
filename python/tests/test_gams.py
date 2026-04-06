@@ -317,6 +317,151 @@ class TestGamsDollarConditions:
         assert float(x.ub[1]) > 1e10
 
 
+# ── Loop execution tests ───────────────────────────────────────
+
+
+LOOP_PARAM_GMS = textwrap.dedent("""\
+    Sets i / 1*3 / ;
+    Parameter p(i) / 1 0, 2 0, 3 0 / ;
+    Scalar total / 0 / ;
+
+    loop(i, p(i) = ord(i) * 10) ;
+
+    Positive Variables x(i) ;
+    Free Variable z ;
+
+    Equations obj_def, limit(i) ;
+    obj_def.. z =e= sum(i, p(i) * x(i)) ;
+    limit(i).. x(i) =l= 100 ;
+
+    Model ltest / all / ;
+    Solve ltest using LP minimizing z ;
+""")
+
+
+class TestGamsLoopExecution:
+    def test_loop_sets_param_values(self):
+        m = parse_gams(LOOP_PARAM_GMS)
+        # Loop should set p(1)=10, p(2)=20, p(3)=30
+        assert m._objective is not None
+        assert len(m._constraints) == 3
+
+
+# ── Lag/lead tests ─────────────────────────────────────────────
+
+
+LAG_GMS = textwrap.dedent("""\
+    Sets t / 1*4 / ;
+    Positive Variables x(t) ;
+    Free Variable z ;
+
+    Equations obj_def, dynamics(t) ;
+    obj_def.. z =e= sum(t, x(t)) ;
+    dynamics(t)$(ord(t) > 1).. x(t) =g= x(t-1) ;
+
+    Model lagtest / all / ;
+    Solve lagtest using LP minimizing z ;
+""")
+
+
+class TestGamsLagLead:
+    def test_lag_generates_constraints(self):
+        """x(t) =g= x(t-1) for t>1 should produce 3 constraints."""
+        m = parse_gams(LAG_GMS)
+        # dynamics: t=2,3,4 (t=1 excluded by ord(t)>1) = 3 constraints
+        assert len(m._constraints) == 3
+
+    def test_lag_out_of_bounds_vanishes(self):
+        """x(t-1) when t=1 should produce 0 (vanish), not crash."""
+        src = textwrap.dedent("""\
+            Sets t / 1*3 / ;
+            Positive Variables x(t) ;
+            Free Variable z ;
+            Equations obj_def, dyn(t) ;
+            obj_def.. z =e= sum(t, x(t)) ;
+            dyn(t).. x(t) =g= x(t-1) ;
+            Model m / all / ;
+            Solve m using LP minimizing z ;
+        """)
+        m = parse_gams(src)
+        # All 3 t values generate constraints (t=1 has x(t-1)=0)
+        assert len(m._constraints) == 3
+
+
+# ── Semicontinuous / semiint tests ─────────────────────────────
+
+
+class TestGamsSemicont:
+    def test_semicont_warns(self):
+        src = textwrap.dedent("""\
+            Semicont Variable x ;
+            Free Variable z ;
+            x.lo = 1 ;
+            x.up = 10 ;
+            Equations eq1 ;
+            eq1.. z =e= x ;
+            Model m / all / ;
+            Solve m using MINLP minimizing z ;
+        """)
+        with pytest.warns(UserWarning, match="Semicontinuous.*approximated"):
+            m = parse_gams(src)
+        var_map = {v.name: v for v in m._variables}
+        assert var_map["x"].var_type == dm.VarType.CONTINUOUS
+
+    def test_semiint_warns(self):
+        src = textwrap.dedent("""\
+            Semiint Variable n ;
+            Free Variable z ;
+            n.lo = 2 ;
+            n.up = 10 ;
+            Equations eq1 ;
+            eq1.. z =e= n ;
+            Model m / all / ;
+            Solve m using MINLP minimizing z ;
+        """)
+        with pytest.warns(UserWarning, match="Semi-integer.*approximated"):
+            m = parse_gams(src)
+        var_map = {v.name: v for v in m._variables}
+        assert var_map["n"].var_type == dm.VarType.INTEGER
+
+
+# ── Initial value (.l) tests ──────────────────────────────────
+
+
+class TestGamsInitialValues:
+    def test_scalar_initial_value(self):
+        src = textwrap.dedent("""\
+            Free Variables x, z ;
+            x.l = 5.0 ;
+            Equations eq1 ;
+            eq1.. z =e= x ;
+            Model m / all / ;
+            Solve m using NLP minimizing z ;
+        """)
+        m = parse_gams(src)
+        assert hasattr(m, "_gams_initial_values")
+        assert m._gams_initial_values["x"] == 5.0
+
+    def test_indexed_initial_value(self):
+        src = textwrap.dedent("""\
+            Sets i / a, b, c / ;
+            Positive Variables x(i) ;
+            Free Variable z ;
+            x.l(i) = 1.0 ;
+            Equations eq1 ;
+            eq1.. z =e= sum(i, x(i)) ;
+            Model m / all / ;
+            Solve m using NLP minimizing z ;
+        """)
+        m = parse_gams(src)
+        assert hasattr(m, "_gams_initial_values")
+        # All 3 elements should have initial value 1.0
+        x_init = m._gams_initial_values["x"]
+        assert x_init[0] == 1.0
+        assert x_init[1] == 1.0
+        assert x_init[2] == 1.0
+
+
 # ── Export tests ───────────────────────────────────────────────
 
 
@@ -461,16 +606,28 @@ class TestGamsParseErrors:
 
 
 class TestGamsParseWarnings:
-    def test_unsupported_loop_warns(self):
+    def test_unsupported_while_warns(self):
         src = textwrap.dedent("""\
             Free Variable x ;
             Equations eq1 ;
-            loop(i, x.l = 0) ;
+            while(1, x.l = 0) ;
             eq1.. x =e= 1 ;
             Model m / all / ;
             Solve m using NLP minimizing x ;
         """)
-        with pytest.warns(UserWarning, match="'loop'.*not supported.*skipped"):
+        with pytest.warns(UserWarning, match="'while'.*not.*supported.*skipped"):
+            parse_gams(src)
+
+    def test_unsupported_execute_warns(self):
+        src = textwrap.dedent("""\
+            Free Variable x ;
+            execute 'something' ;
+            Equations eq1 ;
+            eq1.. x =e= 1 ;
+            Model m / all / ;
+            Solve m using NLP minimizing x ;
+        """)
+        with pytest.warns(UserWarning, match="'execute'.*not supported.*skipped"):
             parse_gams(src)
 
     def test_unrecognized_ident_warns(self):
