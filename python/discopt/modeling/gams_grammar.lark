@@ -1,0 +1,204 @@
+// GAMS (.gms) grammar for MINLP models -- Lark EBNF
+// Targets: Sets, Scalars, Parameters, Tables, Variables,
+//          Equations, Model, Solve, bounds, dollar conditions,
+//          nonlinear expressions (exp, log, sin, cos, sqrt, power, ...).
+
+start: statement*
+
+// ── Top-level statements ──────────────────────────────────────
+?statement: set_decl
+          | alias_decl
+          | scalar_decl
+          | parameter_decl
+          | table_decl
+          | variable_decl
+          | equation_decl
+          | equation_def
+          | bound_assign
+          | param_assign
+          | model_decl
+          | solve_stmt
+          | option_stmt
+          | display_stmt
+          | abort_stmt
+          | COMMENT
+
+// ── Sets ──────────────────────────────────────────────────────
+set_decl: SET_KW set_item ("," set_item)* ";"
+set_item: IDENT set_description? domain? "/" set_elements "/"
+
+set_elements: set_element ("," set_element)*
+set_element: IDENT (".." IDENT)?       // alias pair  a..b
+           | IDENT "*" IDENT           // range:  1*10  or  i1*i5
+           | IDENT
+
+set_description: ESCAPED_STRING
+
+// ── Alias ─────────────────────────────────────────────────────
+alias_decl: ALIAS_KW "(" IDENT "," IDENT ("," IDENT)* ")" ";"
+
+// ── Scalars ───────────────────────────────────────────────────
+scalar_decl: SCALAR_KW scalar_item ("," scalar_item)* ";"
+scalar_item: IDENT text_desc? ("/" NUMBER "/")?
+
+// ── Parameters ────────────────────────────────────────────────
+parameter_decl: PARAM_KW param_item ("," param_item)* ";"
+param_item: IDENT domain? text_desc? ("/" param_data_list "/")?
+
+param_data_list: param_data_entry ("," param_data_entry)*
+param_data_entry: set_key+ NUMBER
+
+set_key: IDENT | NUMBER_LITERAL
+
+// ── Tables ────────────────────────────────────────────────────
+table_decl: TABLE_KW IDENT domain? text_desc? NEWLINE table_header NEWLINE table_rows ";"
+table_header: IDENT+
+table_rows: table_row (NEWLINE table_row)*
+table_row: IDENT NUMBER+
+
+// ── Variables ─────────────────────────────────────────────────
+variable_decl: var_type_kw VARIABLE_KW? var_item ("," var_item)* ";"
+             | VARIABLE_KW var_item ("," var_item)* ";"
+var_item: IDENT domain? text_desc?
+
+// ── Equations ─────────────────────────────────────────────────
+equation_decl: EQUATION_KW eq_item ("," eq_item)* ";"
+eq_item: IDENT domain? text_desc?
+
+equation_def: IDENT domain? dollar_cond? ".." expr eq_sense expr ";"
+
+eq_sense: "=e=" -> eq_equal
+        | "=l=" -> eq_leq
+        | "=g=" -> eq_geq
+
+// ── Bounds / suffix assignments ───────────────────────────────
+bound_assign: IDENT "." SUFFIX domain? dollar_cond? "=" expr ";"
+
+SUFFIX: "lo" | "up" | "fx" | "l" | "m" | "prior" | "scale"
+
+// ── Parameter assignment ──────────────────────────────────────
+param_assign: IDENT domain? dollar_cond? "=" expr ";"
+
+// ── Model ─────────────────────────────────────────────────────
+model_decl: MODEL_KW IDENT text_desc? "/" model_eq_list "/" ";"
+model_eq_list: "all"i -> model_all
+             | IDENT ("," IDENT)*
+
+// ── Solve ─────────────────────────────────────────────────────
+solve_stmt: SOLVE_KW IDENT USING_KW model_type sense_kw IDENT ";"
+
+model_type: "lp"i | "mip"i | "nlp"i | "dnlp"i | "minlp"i
+          | "miqcp"i | "rmip"i | "rminlp"i | "rmiqcp"i | "qcp"i
+          | "mcp"i | "cns"i | "mpec"i | "emp"i
+
+sense_kw: "minimizing"i -> minimize
+        | "maximizing"i -> maximize
+
+// ── Option ────────────────────────────────────────────────────
+option_stmt: OPTION_KW IDENT "=" (IDENT | NUMBER) ";"
+
+// ── Display / Abort ───────────────────────────────────────────
+display_stmt: DISPLAY_KW display_items ";"
+display_items: display_item ("," display_item)*
+display_item: IDENT ("." SUFFIX)?
+
+abort_stmt: ABORT_KW expr ";"
+
+// ── Expressions ───────────────────────────────────────────────
+?expr: or_expr
+?or_expr: and_expr ("or"i and_expr)*
+?and_expr: not_expr ("and"i not_expr)*
+?not_expr: "not"i comp_expr -> not_op
+         | comp_expr
+?comp_expr: add_expr (COMP_OP add_expr)?
+?add_expr: mul_expr (("+"|"-") mul_expr)*
+?mul_expr: unary_expr (("*"|"/") unary_expr)*
+?unary_expr: "-" power_expr -> neg
+           | "+" power_expr -> pos
+           | power_expr
+?power_expr: atom ("**" unary_expr)?
+
+?atom: NUMBER                          -> number_lit
+     | IDENT domain                    -> indexed_ref
+     | IDENT "(" arg_list ")"          -> func_call
+     | IDENT                           -> name_ref
+     | "(" expr ")"                    -> grouped
+     | sum_expr
+     | prod_expr
+     | smin_expr
+     | smax_expr
+     | card_expr
+     | ord_expr
+
+// ── Indexed operations ────────────────────────────────────────
+sum_expr: "sum"i "(" index_list dollar_cond? "," expr ")"
+prod_expr: "prod"i "(" index_list dollar_cond? "," expr ")"
+smin_expr: "smin"i "(" index_list dollar_cond? "," expr ")"
+smax_expr: "smax"i "(" index_list dollar_cond? "," expr ")"
+
+card_expr: "card"i "(" IDENT ")"
+ord_expr: "ord"i "(" IDENT ")"
+
+index_list: IDENT ("," IDENT)*
+          | "(" IDENT ("," IDENT)* ")"
+
+// ── Dollar conditions ─────────────────────────────────────────
+dollar_cond: "$" "(" expr ")"
+           | "$" atom
+
+// ── Domains ───────────────────────────────────────────────────
+domain: "(" domain_elem ("," domain_elem)* ")"
+domain_elem: IDENT
+
+// ── Function call args ────────────────────────────────────────
+arg_list: expr ("," expr)*
+
+// ── Misc descriptive text ─────────────────────────────────────
+text_desc: ESCAPED_STRING
+
+// ── Variable type keywords ────────────────────────────────────
+var_type_kw: "positive"i    -> var_positive
+           | "negative"i    -> var_negative
+           | "free"i        -> var_free
+           | "binary"i      -> var_binary
+           | "integer"i     -> var_integer
+           | "semicont"i    -> var_semicont
+           | "semiint"i     -> var_semiint
+           | "sos1"i        -> var_sos1
+           | "sos2"i        -> var_sos2
+
+// ── Comparison operators ──────────────────────────────────────
+COMP_OP: "<=" | ">=" | "<>" | "<" | ">" | "="
+
+// ── Keywords (case-insensitive matching via terminals) ─────────
+SET_KW: /[Ss][Ee][Tt][Ss]?/
+SCALAR_KW: /[Ss][Cc][Aa][Ll][Aa][Rr][Ss]?/
+PARAM_KW: /[Pp][Aa][Rr][Aa][Mm][Ee][Tt][Ee][Rr][Ss]?/
+TABLE_KW: /[Tt][Aa][Bb][Ll][Ee]/
+VARIABLE_KW: /[Vv][Aa][Rr][Ii][Aa][Bb][Ll][Ee][Ss]?/
+EQUATION_KW: /[Ee][Qq][Uu][Aa][Tt][Ii][Oo][Nn][Ss]?/
+MODEL_KW: /[Mm][Oo][Dd][Ee][Ll]/
+SOLVE_KW: /[Ss][Oo][Ll][Vv][Ee]/
+USING_KW: /[Uu][Ss][Ii][Nn][Gg]/
+OPTION_KW: /[Oo][Pp][Tt][Ii][Oo][Nn]/
+DISPLAY_KW: /[Dd][Ii][Ss][Pp][Ll][Aa][Yy]/
+ABORT_KW: /[Aa][Bb][Oo][Rr][Tt]/
+ALIAS_KW: /[Aa][Ll][Ii][Aa][Ss]/
+
+// ── Terminals ─────────────────────────────────────────────────
+IDENT: /[A-Za-z_][A-Za-z0-9_]*/
+NUMBER: /[+-]?(\d+\.?\d*|\.\d+)([Ee][+-]?\d+)?/
+NUMBER_LITERAL: NUMBER
+
+// ── Comments & whitespace ─────────────────────────────────────
+COMMENT: /\*[^\n]*/
+       | /\$[^\n]*/
+
+NEWLINE: /\r?\n/
+
+%import common.ESCAPED_STRING
+%import common.WS_INLINE
+
+%ignore WS_INLINE
+%ignore NEWLINE
+%ignore COMMENT
