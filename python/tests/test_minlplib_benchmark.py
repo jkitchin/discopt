@@ -156,6 +156,9 @@ def test_minlplib_optimality(name, expected, nlp_solver, cutting_planes):
 )
 def test_minlplib_performance(name, expected, nlp_solver, cutting_planes, capsys):
     """Solve and report wall time + node count (always passes if optimal)."""
+    if name == "fuel":
+        pytest.skip("fuel: too slow for CI (nonconvex MINLP, 300s time limit exceeds timeout)")
+
     r = _solve(name, nlp_solver, cutting_planes)
 
     # Print summary for collection with `pytest -s`
