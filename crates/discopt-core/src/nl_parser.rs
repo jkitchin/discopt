@@ -1224,9 +1224,9 @@ mod tests {
         // O0: minimize, exp(x) + log(y)
         s.push_str("O0 0\n");
         s.push_str("o0\n");         // add
-        s.push_str("o46\n");        // exp
+        s.push_str("o44\n");        // exp
         s.push_str("v0\n");         // x
-        s.push_str("o45\n");        // log
+        s.push_str("o43\n");        // log
         s.push_str("v1\n");         // y
         // C0: linear constraint (nl part = 0)
         s.push_str("C0\n");
@@ -1791,9 +1791,9 @@ mod tests {
         // O0: sin(x) + cos(y)
         s.push_str("O0 0\n");
         s.push_str("o0\n");
-        s.push_str("o39\n");        // sin
+        s.push_str("o41\n");        // sin
         s.push_str("v0\n");
-        s.push_str("o38\n");        // cos
+        s.push_str("o46\n");        // cos
         s.push_str("v1\n");
         s.push_str("b\n");
         s.push_str("3\n");
@@ -1822,7 +1822,7 @@ mod tests {
         s.push_str(" 0 0\n");
         s.push_str(" 0 0 0 0 0\n");
         s.push_str("O0 0\n");
-        s.push_str("o40\n");        // sqrt
+        s.push_str("o39\n");        // sqrt
         s.push_str("v0\n");
         s.push_str("b\n");
         s.push_str("2 0\n");        // x >= 0
@@ -1905,7 +1905,7 @@ mod tests {
         s.push_str(" 0 0\n");
         s.push_str(" 0 0 0 0 0\n");
         s.push_str("O0 0\n");
-        s.push_str("o47\n");        // log10
+        s.push_str("o42\n");        // log10
         s.push_str("v0\n");
         s.push_str("b\n");
         s.push_str("2 0.001\n");
@@ -1932,7 +1932,7 @@ mod tests {
         s.push_str(" 0 0\n");
         s.push_str(" 0 0 0 0 0\n");
         s.push_str("O0 0\n");
-        s.push_str("o46\n");        // exp
+        s.push_str("o44\n");        // exp
         s.push_str("o0\n");         // add
         s.push_str("o5\n");         // pow
         s.push_str("v0\n");         // x

@@ -67,7 +67,7 @@ def _nonlinear_nl():
     """min exp(x) + log(y)  s.t. x + y <= 5"""
     return (
         "g3 1 1 0\n 2 1 1 0 0\n 0 1\n 0 0\n 0 2 0\n 0 0 0 1\n 0 0\n"
-        " 2 0\n 0 0\n 0 0 0 0 0\nO0 0\no0\no46\nv0\no45\nv1\n"
+        " 2 0\n 0 0\n 0 0 0 0 0\nO0 0\no0\no44\nv0\no43\nv1\n"
         "C0\nn0\nx2\n0 1\n1 1\nr\n1 5\nb\n0 0.1 10\n0 0.1 10\nk1\n1\n"
         "J0 2\n0 1\n1 1\n"
     )
@@ -77,7 +77,7 @@ def _trig_nl():
     """min sin(x) + cos(y)"""
     return (
         "g3 1 1 0\n 2 0 1 0 0\n 0 1\n 0 0\n 0 2 0\n 0 0 0 1\n 0 0\n"
-        " 0 0\n 0 0\n 0 0 0 0 0\nO0 0\no0\no39\nv0\no38\nv1\n"
+        " 0 0\n 0 0\n 0 0 0 0 0\nO0 0\no0\no41\nv0\no46\nv1\n"
         "b\n3\n3\n"
     )
 
@@ -86,7 +86,7 @@ def _atan_nl():
     """min atan(x)"""
     return (
         "g3 1 1 0\n 1 0 1 0 0\n 0 1\n 0 0\n 0 1 0\n 0 0 0 1\n 0 0\n"
-        " 0 0\n 0 0\n 0 0 0 0 0\nO0 0\no37\nv0\nb\n3\n"
+        " 0 0\n 0 0\n 0 0 0 0 0\nO0 0\no49\nv0\nb\n3\n"
     )
 
 
@@ -94,7 +94,7 @@ def _sinh_nl():
     """min sinh(x)"""
     return (
         "g3 1 1 0\n 1 0 1 0 0\n 0 1\n 0 0\n 0 1 0\n 0 0 0 1\n 0 0\n"
-        " 0 0\n 0 0\n 0 0 0 0 0\nO0 0\no41\nv0\nb\n3\n"
+        " 0 0\n 0 0\n 0 0 0 0 0\nO0 0\no40\nv0\nb\n3\n"
     )
 
 
@@ -102,7 +102,7 @@ def _tanh_nl():
     """min tanh(x)"""
     return (
         "g3 1 1 0\n 1 0 1 0 0\n 0 1\n 0 0\n 0 1 0\n 0 0 0 1\n 0 0\n"
-        " 0 0\n 0 0\n 0 0 0 0 0\nO0 0\no51\nv0\nb\n3\n"
+        " 0 0\n 0 0\n 0 0 0 0 0\nO0 0\no37\nv0\nb\n3\n"
     )
 
 
@@ -110,7 +110,7 @@ def _asin_nl():
     """min asin(x)"""
     return (
         "g3 1 1 0\n 1 0 1 0 0\n 0 1\n 0 0\n 0 1 0\n 0 0 0 1\n 0 0\n"
-        " 0 0\n 0 0\n 0 0 0 0 0\nO0 0\no42\nv0\nb\n0 -1 1\n"
+        " 0 0\n 0 0\n 0 0 0 0 0\nO0 0\no51\nv0\nb\n0 -1 1\n"
     )
 
 
