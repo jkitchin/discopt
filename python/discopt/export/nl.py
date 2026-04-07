@@ -89,20 +89,24 @@ _OP_CEIL = 14
 _OP_ABS = 15
 _OP_NEG = 16
 
-# Math functions
-_OP_ATAN = 37
-_OP_COS = 38
-_OP_SIN = 39
-_OP_SQRT = 40
-_OP_SINH = 41
-_OP_ASIN = 42
-_OP_SUMLIST = 43
-_OP_LOG = 45
-_OP_EXP = 46
-_OP_LOG10 = 47
-_OP_COSH = 49
-_OP_TANH = 51
+# Math functions (Gay, "Writing .nl Files", 2005, Table 4)
+_OP_TANH = 37
+_OP_TAN = 38
+_OP_SQRT = 39
+_OP_SINH = 40
+_OP_SIN = 41
+_OP_LOG10 = 42
+_OP_LOG = 43
+_OP_EXP = 44
+_OP_COSH = 45
+_OP_COS = 46
+_OP_ATANH = 47
+_OP_ATAN = 49
+_OP_ASINH = 50
+_OP_ASIN = 51
+_OP_ACOSH = 52
 _OP_ACOS = 53
+_OP_SUMLIST = 54
 
 # Function name -> opcode mapping
 _FUNC_OPCODES: dict[str, int] = {

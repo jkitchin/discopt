@@ -353,113 +353,125 @@ fn parse_opcode(
                 operand,
             }))
         }
-        // Math functions (unary)
+        // ── Unary operators (class 1) ──
+        // Opcode table from Gay, "Writing .nl Files", 2005, Table 4.
         37 => {
-            // o37: atan
+            // o37: tanh
             let arg = parse_expr(reader, arena, var_nodes)?;
             Ok(arena.add(ExprNode::FunctionCall {
-                func: MathFunc::Atan,
+                func: MathFunc::Tanh,
                 args: vec![arg],
             }))
         }
         38 => {
-            // o38: cos
+            // o38: tan
             let arg = parse_expr(reader, arena, var_nodes)?;
             Ok(arena.add(ExprNode::FunctionCall {
-                func: MathFunc::Cos,
+                func: MathFunc::Tan,
                 args: vec![arg],
             }))
         }
         39 => {
-            // o39: sin
-            let arg = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::FunctionCall {
-                func: MathFunc::Sin,
-                args: vec![arg],
-            }))
-        }
-        40 => {
-            // o40: sqrt
+            // o39: sqrt
             let arg = parse_expr(reader, arena, var_nodes)?;
             Ok(arena.add(ExprNode::FunctionCall {
                 func: MathFunc::Sqrt,
                 args: vec![arg],
             }))
         }
-        41 => {
-            // o41: sinh
+        40 => {
+            // o40: sinh
             let arg = parse_expr(reader, arena, var_nodes)?;
             Ok(arena.add(ExprNode::FunctionCall {
                 func: MathFunc::Sinh,
                 args: vec![arg],
             }))
         }
+        41 => {
+            // o41: sin
+            let arg = parse_expr(reader, arena, var_nodes)?;
+            Ok(arena.add(ExprNode::FunctionCall {
+                func: MathFunc::Sin,
+                args: vec![arg],
+            }))
+        }
         42 => {
-            // o42: asin
-            let arg = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::FunctionCall {
-                func: MathFunc::Asin,
-                args: vec![arg],
-            }))
-        }
-        43 | 54 => {
-            // o43: sum of n args  /  o54: sumlist of n args
-            // Next line is the count.
-            let count_line = reader.next_line()?;
-            let count = parse_usize(count_line.trim())?;
-            let mut terms = Vec::with_capacity(count);
-            for _ in 0..count {
-                terms.push(parse_expr(reader, arena, var_nodes)?);
-            }
-            Ok(arena.add(ExprNode::SumOver { terms }))
-        }
-        44 => {
-            // o44: trunc/intdiv — approximate as Div
-            let left = parse_expr(reader, arena, var_nodes)?;
-            let right = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::BinaryOp {
-                op: BinOp::Div,
-                left,
-                right,
-            }))
-        }
-        45 => {
-            // o45: log (natural log)
-            let arg = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::FunctionCall {
-                func: MathFunc::Log,
-                args: vec![arg],
-            }))
-        }
-        46 => {
-            // o46: exp
-            let arg = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::FunctionCall {
-                func: MathFunc::Exp,
-                args: vec![arg],
-            }))
-        }
-        47 => {
-            // o47: log10
+            // o42: log10
             let arg = parse_expr(reader, arena, var_nodes)?;
             Ok(arena.add(ExprNode::FunctionCall {
                 func: MathFunc::Log10,
                 args: vec![arg],
             }))
         }
-        49 => {
-            // o49: cosh
+        43 => {
+            // o43: log (natural)
+            let arg = parse_expr(reader, arena, var_nodes)?;
+            Ok(arena.add(ExprNode::FunctionCall {
+                func: MathFunc::Log,
+                args: vec![arg],
+            }))
+        }
+        44 => {
+            // o44: exp
+            let arg = parse_expr(reader, arena, var_nodes)?;
+            Ok(arena.add(ExprNode::FunctionCall {
+                func: MathFunc::Exp,
+                args: vec![arg],
+            }))
+        }
+        45 => {
+            // o45: cosh
             let arg = parse_expr(reader, arena, var_nodes)?;
             Ok(arena.add(ExprNode::FunctionCall {
                 func: MathFunc::Cosh,
                 args: vec![arg],
             }))
         }
-        51 => {
-            // o51: tanh
+        46 => {
+            // o46: cos
             let arg = parse_expr(reader, arena, var_nodes)?;
             Ok(arena.add(ExprNode::FunctionCall {
-                func: MathFunc::Tanh,
+                func: MathFunc::Cos,
+                args: vec![arg],
+            }))
+        }
+        47 => {
+            // o47: atanh — approximate as atan (no MathFunc::Atanh)
+            let arg = parse_expr(reader, arena, var_nodes)?;
+            Ok(arena.add(ExprNode::FunctionCall {
+                func: MathFunc::Atan,
+                args: vec![arg],
+            }))
+        }
+        49 => {
+            // o49: atan
+            let arg = parse_expr(reader, arena, var_nodes)?;
+            Ok(arena.add(ExprNode::FunctionCall {
+                func: MathFunc::Atan,
+                args: vec![arg],
+            }))
+        }
+        50 => {
+            // o50: asinh — approximate as asin (no MathFunc::Asinh)
+            let arg = parse_expr(reader, arena, var_nodes)?;
+            Ok(arena.add(ExprNode::FunctionCall {
+                func: MathFunc::Asin,
+                args: vec![arg],
+            }))
+        }
+        51 => {
+            // o51: asin
+            let arg = parse_expr(reader, arena, var_nodes)?;
+            Ok(arena.add(ExprNode::FunctionCall {
+                func: MathFunc::Asin,
+                args: vec![arg],
+            }))
+        }
+        52 => {
+            // o52: acosh — approximate as acos (no MathFunc::Acosh)
+            let arg = parse_expr(reader, arena, var_nodes)?;
+            Ok(arena.add(ExprNode::FunctionCall {
+                func: MathFunc::Acos,
                 args: vec![arg],
             }))
         }
@@ -470,6 +482,42 @@ fn parse_opcode(
                 func: MathFunc::Acos,
                 args: vec![arg],
             }))
+        }
+        // ── N-ary operators (class 3) ──
+        54 => {
+            // o54: sum of n args
+            let count_line = reader.next_line()?;
+            let count = parse_usize(count_line.trim())?;
+            let mut terms = Vec::with_capacity(count);
+            for _ in 0..count {
+                terms.push(parse_expr(reader, arena, var_nodes)?);
+            }
+            Ok(arena.add(ExprNode::SumOver { terms }))
+        }
+        // ── Binary operators (class 2) ──
+        55 => {
+            // o55: intdiv — approximate as Div
+            let left = parse_expr(reader, arena, var_nodes)?;
+            let right = parse_expr(reader, arena, var_nodes)?;
+            Ok(arena.add(ExprNode::BinaryOp {
+                op: BinOp::Div,
+                left,
+                right,
+            }))
+        }
+        57 => {
+            // o57: round (binary: round left to right decimal places)
+            // Approximate as identity (return left operand)
+            let left = parse_expr(reader, arena, var_nodes)?;
+            let _right = parse_expr(reader, arena, var_nodes)?;
+            Ok(left)
+        }
+        58 => {
+            // o58: trunc (binary: truncate left to right decimal places)
+            // Approximate as identity (return left operand)
+            let left = parse_expr(reader, arena, var_nodes)?;
+            let _right = parse_expr(reader, arena, var_nodes)?;
+            Ok(left)
         }
         13 => {
             // o13: floor — not in IR, approximate as identity

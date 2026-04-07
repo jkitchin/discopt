@@ -68,7 +68,7 @@ class TestNLWriterNonlinear:
         m.minimize(dm.exp(x))
 
         nl = m.to_nl()
-        assert "o46" in nl  # exp opcode
+        assert "o44" in nl  # exp opcode
 
     def test_log_function(self):
         m = dm.Model("log_test")
@@ -76,7 +76,7 @@ class TestNLWriterNonlinear:
         m.minimize(dm.log(x))
 
         nl = m.to_nl()
-        assert "o45" in nl  # log opcode
+        assert "o43" in nl  # log opcode
 
     def test_trig_functions(self):
         m = dm.Model("trig")
@@ -84,8 +84,8 @@ class TestNLWriterNonlinear:
         m.minimize(dm.sin(x) + dm.cos(x))
 
         nl = m.to_nl()
-        assert "o39" in nl  # sin opcode
-        assert "o38" in nl  # cos opcode
+        assert "o41" in nl  # sin opcode
+        assert "o46" in nl  # cos opcode
 
     def test_sqrt(self):
         m = dm.Model("sqrt_test")
@@ -93,7 +93,7 @@ class TestNLWriterNonlinear:
         m.minimize(dm.sqrt(x))
 
         nl = m.to_nl()
-        assert "o40" in nl  # sqrt opcode
+        assert "o39" in nl  # sqrt opcode
 
     def test_power(self):
         m = dm.Model("power_test")
@@ -151,7 +151,7 @@ class TestNLWriterMINLP:
 
         nl = m.to_nl()
         assert nl is not None
-        assert "o46" in nl  # exp opcode
+        assert "o44" in nl  # exp opcode
         lines = nl.split("\n")
         assert "1 0 0 0 0" in lines[6]  # 1 binary
 
@@ -280,5 +280,5 @@ class TestNLWriterNestedFunctions:
         m.minimize(dm.exp(dm.log(x)))
 
         nl = m.to_nl()
-        assert "o46" in nl  # exp
-        assert "o45" in nl  # log
+        assert "o44" in nl  # exp
+        assert "o43" in nl  # log
