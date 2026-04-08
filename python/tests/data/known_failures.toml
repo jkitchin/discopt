@@ -1,0 +1,24 @@
+# MINLPTests.jl known solver gaps.
+#
+# Track problems where discopt does not yet converge due to missing features or
+# known algorithmic limitations. "Wrong objective" (solver claims optimal but
+# returns the wrong value) is NEVER allowed here — those are blocker bugs that
+# must be fixed, not silenced.
+#
+# Allowed categories: "no_convergence" | "time_limit" | "numerical_error"
+#
+# Format:
+#   [minlptests."<problem_id>/<mode>"]
+#   category = "no_convergence"
+#   issue    = <GitHub issue number>
+#   note     = "human-readable explanation"
+
+[minlptests."nlp_006_010/primary"]
+category = "no_convergence"
+issue    = 0
+note     = "user-defined function via JuMP.register() has no dm equivalent"
+
+[minlptests."nlp_mi_006_010/primary"]
+category = "no_convergence"
+issue    = 0
+note     = "user-defined function via JuMP.register() has no dm equivalent"

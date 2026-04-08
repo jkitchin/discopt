@@ -19,6 +19,9 @@ _SOLVER_MAP: dict[str, list[str]] = {
     "miqp": ["ipm", "ripopt", "ipopt"],
     "minlp": ["ipm", "ripopt", "ipopt"],
     "global_opt": ["ipm", "ripopt", "ipopt"],
+    "nlp_convex": ["ipm", "ripopt", "ipopt"],
+    "nlp_nonconvex": ["ipm", "ripopt", "ipopt"],
+    "minlp_nonconvex": ["ipm", "ripopt", "ipopt"],
 }
 
 
@@ -73,7 +76,17 @@ def get_applicable_solvers(category: str) -> list[str]:
 
 def get_all_categories() -> list[str]:
     """Return all available categories."""
-    return ["lp", "qp", "milp", "miqp", "minlp", "global_opt"]
+    return [
+        "lp",
+        "qp",
+        "milp",
+        "miqp",
+        "minlp",
+        "global_opt",
+        "nlp_convex",
+        "nlp_nonconvex",
+        "minlp_nonconvex",
+    ]
 
 
 _LOADED = False
@@ -89,5 +102,6 @@ def _ensure_loaded():
     import benchmarks.problems.lp_problems  # noqa: F401
     import benchmarks.problems.milp_problems  # noqa: F401
     import benchmarks.problems.minlp_problems  # noqa: F401
+    import benchmarks.problems.minlptests_problems  # noqa: F401
     import benchmarks.problems.miqp_problems  # noqa: F401
     import benchmarks.problems.qp_problems  # noqa: F401
