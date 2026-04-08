@@ -59,7 +59,6 @@ def _xfail_if_known(problem_id: str, mode: str = "primary") -> None:
     )
     pytest.xfail(
         reason=(f"{category} (issue #{entry.get('issue', '?')}): {entry.get('note', '')}"),
-        strict=False,
     )
 
 

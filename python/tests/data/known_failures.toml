@@ -22,3 +22,84 @@ note     = "user-defined function via JuMP.register() has no dm equivalent"
 category = "no_convergence"
 issue    = 4
 note     = "user-defined function via JuMP.register() has no dm equivalent"
+
+# ── Maximize sign bug (issue #6) ─────────────────────────────────────────────
+# _solve_continuous returns nlp_result.objective without negating for maximize.
+# All pure-continuous maximize problems are affected.
+
+[minlptests."nlp_cvx_101_012/primary"]
+category = "numerical_error"
+issue    = 6
+note     = "maximize: _solve_continuous returns negated objective (sign bug)"
+
+[minlptests."nlp_cvx_102_012/primary"]
+category = "numerical_error"
+issue    = 6
+note     = "maximize: _solve_continuous returns negated objective (sign bug)"
+
+[minlptests."nlp_cvx_109_010/primary"]
+category = "numerical_error"
+issue    = 6
+note     = "maximize: _solve_continuous returns negated objective (sign bug)"
+
+[minlptests."nlp_cvx_109_011/primary"]
+category = "numerical_error"
+issue    = 6
+note     = "maximize: _solve_continuous returns negated objective (sign bug)"
+
+[minlptests."nlp_cvx_109_012/primary"]
+category = "numerical_error"
+issue    = 6
+note     = "maximize: _solve_continuous returns negated objective (sign bug)"
+
+[minlptests."nlp_cvx_205_010/primary"]
+category = "numerical_error"
+issue    = 6
+note     = "maximize: _solve_continuous returns negated objective (sign bug)"
+
+[minlptests."nlp_cvx_206_010/primary"]
+category = "numerical_error"
+issue    = 6
+note     = "maximize: _solve_continuous returns negated objective (sign bug)"
+
+[minlptests."nlp_003_010/primary"]
+category = "numerical_error"
+issue    = 6
+note     = "maximize: _solve_continuous returns negated objective (sign bug)"
+
+[minlptests."nlp_003_011/primary"]
+category = "numerical_error"
+issue    = 6
+note     = "maximize: _solve_continuous returns negated objective (sign bug)"
+
+[minlptests."nlp_003_012/primary"]
+category = "numerical_error"
+issue    = 6
+note     = "maximize: _solve_continuous returns negated objective (sign bug)"
+
+[minlptests."nlp_003_013/primary"]
+category = "numerical_error"
+issue    = 6
+note     = "maximize: _solve_continuous returns negated objective (sign bug)"
+
+[minlptests."nlp_003_014/primary"]
+category = "numerical_error"
+issue    = 6
+note     = "maximize: _solve_continuous returns negated objective (sign bug)"
+
+[minlptests."nlp_003_015/primary"]
+category = "numerical_error"
+issue    = 6
+note     = "maximize: _solve_continuous returns negated objective (sign bug)"
+
+[minlptests."nlp_003_016/primary"]
+category = "numerical_error"
+issue    = 6
+note     = "maximize: _solve_continuous returns negated objective (sign bug)"
+
+# ── NaN on division + integer (issue #7) ─────────────────────────────────────
+
+[minlptests."nlp_mi_005_010/primary"]
+category = "numerical_error"
+issue    = 7
+note     = "division constraints (1/x form) produce NaN when x integer lb=0; crashes B&B"
