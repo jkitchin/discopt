@@ -891,17 +891,22 @@ def _make_iteration_body(obj_fn, con_fn, pd, opts):
         new_iter = state.iteration + 1
         at_max = new_iter >= opts.max_iter
 
-        # Stagnation: if both Newton and steepest descent have been failing
-        # for many iterations, AND both primal and dual feasibility hold,
-        # accept as converged.  Without the dual check, the solver can
-        # accept suboptimal KKT points (issue #12: ex1223a obj=4.733).
-        stagnation = new_stall >= 20
-        stag_conv = (
-            stagnation & (primal_inf <= opts.acceptable_tol) & (dual_inf <= opts.acceptable_tol)
-        )
+        # Stagnation: if step size has been tiny for several consecutive
+        # iterations AND we are primal feasible, the primal solution cannot
+        # improve further — exit early rather than burning more iterations.
+        # Near-bound problems legitimately have one or two tiny steps, so
+        # require >= 5 consecutive stalls before concluding we are stuck.
+        # If primal is not yet feasible, wait the full 20 iterations.
+        #   - Primal + dual feasible  → code 2 (acceptable)
+        #   - Primal feasible only    → code 4 (feasible, dual stalled)
+        #   - Neither feasible        → code 4 after 20 stalls
+        primal_ok = primal_inf <= opts.acceptable_tol
+        dual_ok = dual_inf <= opts.acceptable_tol
+        stagnation = ((new_stall >= 5) & primal_ok) | (new_stall >= 20)
+        stag_conv = stagnation & primal_ok & dual_ok
         # Stalled but not dual-feasible: report as code 4 so B&B can
         # handle it differently from genuine acceptable convergence.
-        stag_stalled = stagnation & (~stag_conv)
+        stag_stalled = stagnation & primal_ok & (~dual_ok)
 
         # Infeasibility detection: if constraint violation has not
         # decreased for many consecutive iterations while mu is small,
