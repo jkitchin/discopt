@@ -15,10 +15,10 @@
 
 [minlptests."nlp_006_010/primary"]
 category = "no_convergence"
-issue    = 0
+issue    = 4
 note     = "user-defined function via JuMP.register() has no dm equivalent"
 
 [minlptests."nlp_mi_006_010/primary"]
 category = "no_convergence"
-issue    = 0
+issue    = 4
 note     = "user-defined function via JuMP.register() has no dm equivalent"
