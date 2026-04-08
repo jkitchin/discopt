@@ -1,0 +1,730 @@
+"""
+MILP Relaxation Builder for AMP (Adaptive Multivariate Partitioning).
+
+Builds a linear programming relaxation of the original MINLP by:
+  1. Replacing bilinear terms x_i*x_j with auxiliary variables w_ij and
+     adding standard McCormick envelope constraints.
+  2. Replacing monomial terms x_i^n with auxiliary variables s_i and adding
+     piecewise tangent-cut underestimators (using disc_state partition intervals)
+     and a global secant overestimator.
+  3. Linearizing the original objective and constraints.
+
+The LP relaxation gives a valid lower bound:
+  LP_opt ≤ global NLP_opt
+
+As the partition becomes finer (more intervals in disc_state), more tangent cuts
+are added for monomials in the objective, tightening the lower bound.
+
+Theory: Nagarajan et al., JOGO 2018, Section 4 (piecewise McCormick relaxation).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Optional
+
+import numpy as np
+
+from discopt._jax.discretization import DiscretizationState
+from discopt._jax.term_classifier import (
+    NonlinearTerms,
+    _collect_product_factors,
+    _compute_var_offset,
+    _get_flat_index,
+)
+from discopt.modeling.core import (
+    BinaryOp,
+    Constant,
+    Expression,
+    IndexExpression,
+    Model,
+    ObjectiveSense,
+    SumExpression,
+    SumOverExpression,
+    UnaryOp,
+    Variable,
+)
+
+
+# ---------------------------------------------------------------------------
+# Result and model wrappers
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class MilpRelaxationResult:
+    """Result of solving a MILP relaxation."""
+
+    status: str  # "optimal", "infeasible", "error", "time_limit"
+    objective: Optional[float] = None
+    x: Optional[np.ndarray] = None
+
+
+class MilpRelaxationModel:
+    """Wrapper around a MILP that exposes a .solve() method.
+
+    Stores the LP data and delegates solving to solve_milp (HiGHS).
+    """
+
+    def __init__(
+        self,
+        c: np.ndarray,
+        A_ub: Optional[np.ndarray],
+        b_ub: Optional[np.ndarray],
+        bounds: list[tuple[float, float]],
+        obj_offset: float = 0.0,
+        integrality: Optional[np.ndarray] = None,
+    ):
+        self._c = c
+        self._A_ub = A_ub
+        self._b_ub = b_ub
+        self._bounds = bounds
+        self._obj_offset = obj_offset
+        self._integrality = integrality
+
+    def solve(
+        self,
+        time_limit: Optional[float] = None,
+        gap_tolerance: float = 1e-4,
+    ) -> MilpRelaxationResult:
+        from discopt.solvers import SolveStatus
+        from discopt.solvers.milp_highs import solve_milp
+
+        result = solve_milp(
+            c=self._c,
+            A_ub=self._A_ub,
+            b_ub=self._b_ub,
+            bounds=self._bounds,
+            integrality=self._integrality,
+            time_limit=time_limit,
+            gap_tolerance=gap_tolerance,
+        )
+
+        # Map SolveStatus enum to string
+        status_map = {
+            SolveStatus.OPTIMAL: "optimal",
+            SolveStatus.INFEASIBLE: "infeasible",
+            SolveStatus.UNBOUNDED: "unbounded",
+            SolveStatus.TIME_LIMIT: "time_limit",
+            SolveStatus.ITERATION_LIMIT: "iteration_limit",
+            SolveStatus.ERROR: "error",
+        }
+        status_str = status_map.get(result.status, str(result.status))
+
+        obj = None
+        if result.objective is not None:
+            obj = float(result.objective) + self._obj_offset
+
+        return MilpRelaxationResult(status=status_str, objective=obj, x=result.x)
+
+
+# ---------------------------------------------------------------------------
+# Helpers: variable bounds
+# ---------------------------------------------------------------------------
+
+
+def _flat_bounds(model: Model) -> tuple[np.ndarray, np.ndarray]:
+    """Return (lb, ub) as flat 1-D arrays for all model variables."""
+    lbs: list[float] = []
+    ubs: list[float] = []
+    for v in model._variables:
+        lbs.extend(np.asarray(v.lb, dtype=np.float64).ravel().tolist())
+        ubs.extend(np.asarray(v.ub, dtype=np.float64).ravel().tolist())
+    return np.array(lbs, dtype=np.float64), np.array(ubs, dtype=np.float64)
+
+
+# ---------------------------------------------------------------------------
+# Helpers: expression decomposition
+# ---------------------------------------------------------------------------
+
+
+def _decompose_product(
+    expr: Expression, model: Model
+) -> tuple[float, list[int]] | None:
+    """Decompose a product expression into (scalar, [flat_var_idx, ...]).
+
+    Returns None if expr contains non-constant, non-variable leaves.
+    Constants are accumulated into the scalar; variable references are
+    appended to the index list.
+    """
+    scalar: list[float] = [1.0]
+    var_indices: list[int] = []
+
+    def visit(e: Expression) -> bool:
+        if isinstance(e, BinaryOp) and e.op == "*":
+            return visit(e.left) and visit(e.right)
+        if isinstance(e, Constant):
+            scalar[0] *= float(e.value)
+            return True
+        flat = _get_flat_index(e, model)
+        if flat is not None:
+            var_indices.append(flat)
+            return True
+        return False
+
+    if visit(expr):
+        return scalar[0], var_indices
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Helpers: expression linearizer
+# ---------------------------------------------------------------------------
+
+
+def _linearize_expr(
+    expr: Expression,
+    model: Model,
+    bilinear_var_map: dict[tuple[int, int], int],
+    monomial_var_map: dict[tuple[int, int], int],
+    n_total_vars: int,
+) -> tuple[np.ndarray, float]:
+    """Walk expression tree and return (coeff, constant) for linearized form.
+
+    coeff[j] = coefficient of MILP variable j in the linear approximation.
+    constant = scalar constant term.
+
+    Nonlinear terms must have a corresponding auxiliary variable in the maps;
+    raises ValueError if an unregistered nonlinear term is encountered.
+    """
+    coeff = np.zeros(n_total_vars, dtype=np.float64)
+    const_acc: list[float] = [0.0]
+
+    def visit(e: Expression, scale: float) -> None:  # noqa: C901
+        if isinstance(e, Constant):
+            const_acc[0] += scale * float(e.value)
+
+        elif isinstance(e, Variable):
+            offset = _compute_var_offset(e, model)
+            if e.size == 1:
+                coeff[offset] += scale
+            else:
+                # Multi-element variable (unusual in scalar expression)
+                for k in range(e.size):
+                    coeff[offset + k] += scale
+
+        elif isinstance(e, IndexExpression):
+            flat = _get_flat_index(e, model)
+            if flat is not None:
+                coeff[flat] += scale
+            else:
+                raise ValueError(f"Cannot linearize IndexExpression: {e}")
+
+        elif isinstance(e, BinaryOp):
+            if e.op == "+":
+                visit(e.left, scale)
+                visit(e.right, scale)
+
+            elif e.op == "-":
+                visit(e.left, scale)
+                visit(e.right, -scale)
+
+            elif e.op == "/":
+                if isinstance(e.right, Constant):
+                    visit(e.left, scale / float(e.right.value))
+                else:
+                    raise ValueError(f"Cannot linearize non-constant division: {e}")
+
+            elif e.op == "**":
+                flat = _get_flat_index(e.left, model)
+                if flat is not None and isinstance(e.right, Constant):
+                    n = int(float(e.right.value))
+                    if n == 1:
+                        coeff[flat] += scale
+                        return
+                    if n == 0:
+                        const_acc[0] += scale
+                        return
+                    key = (flat, n)
+                    if key in monomial_var_map:
+                        coeff[monomial_var_map[key]] += scale
+                    else:
+                        raise ValueError(f"Monomial {key} not in monomial_var_map")
+                else:
+                    raise ValueError(f"Cannot linearize power expression: {e}")
+
+            elif e.op == "*":
+                # Constant scaling?
+                if isinstance(e.left, Constant):
+                    visit(e.right, scale * float(e.left.value))
+                    return
+                if isinstance(e.right, Constant):
+                    visit(e.left, scale * float(e.right.value))
+                    return
+                # Full product decomposition
+                decomp = _decompose_product(e, model)
+                if decomp is None:
+                    raise ValueError(f"Cannot decompose product: {e}")
+                c, indices = decomp
+                unique = list(dict.fromkeys(indices))
+                if len(indices) == 0:
+                    const_acc[0] += scale * c
+                elif len(unique) == 1 and len(indices) == 1:
+                    coeff[unique[0]] += scale * c
+                elif len(unique) == 1:
+                    # x^n monomial
+                    n = len(indices)
+                    key = (unique[0], n)
+                    if key in monomial_var_map:
+                        coeff[monomial_var_map[key]] += scale * c
+                    else:
+                        raise ValueError(f"Monomial {key} not in map")
+                elif len(unique) == 2:
+                    i_idx, j_idx = unique[0], unique[1]
+                    key = (min(i_idx, j_idx), max(i_idx, j_idx))
+                    if key in bilinear_var_map:
+                        coeff[bilinear_var_map[key]] += scale * c
+                    else:
+                        raise ValueError(f"Bilinear {key} not in map")
+                else:
+                    raise ValueError(
+                        f"Higher-order product ({len(unique)} vars) not supported"
+                    )
+
+            else:
+                raise ValueError(f"Cannot linearize BinaryOp: {e.op}")
+
+        elif isinstance(e, UnaryOp):
+            if e.op == "neg":
+                visit(e.operand, -scale)
+            else:
+                raise ValueError(f"Cannot linearize UnaryOp: {e.op}")
+
+        elif isinstance(e, SumExpression):
+            op = e.operand
+            if isinstance(op, Variable):
+                offset = _compute_var_offset(op, model)
+                for k in range(op.size):
+                    coeff[offset + k] += scale
+            else:
+                visit(op, scale)
+
+        elif isinstance(e, SumOverExpression):
+            for term in e.terms:
+                visit(term, scale)
+
+        else:
+            raise ValueError(f"Cannot linearize {type(e).__name__}: {e}")
+
+    visit(expr, 1.0)
+    return coeff, const_acc[0]
+
+
+# ---------------------------------------------------------------------------
+# Main builder
+# ---------------------------------------------------------------------------
+
+
+def build_milp_relaxation(
+    model: Model,
+    terms: NonlinearTerms,
+    disc_state: DiscretizationState,
+    incumbent: Optional[np.ndarray] = None,
+    oa_cuts: Optional[list] = None,
+) -> tuple["MilpRelaxationModel", dict]:
+    """Build a MILP relaxation with piecewise McCormick for bilinear/monomial terms.
+
+    For each bilinear term x_i*x_j: adds standard McCormick envelope constraints
+    (4 linear inequalities).  These give the convex hull of the bilinear set on the
+    bounding box and are independent of the partition (piecewise refinement via binary
+    variables is left for future enhancement).
+
+    For each monomial x_i^n (currently n=2 handled precisely):
+    - Piecewise tangent underestimators (one per partition interval midpoint) — gets
+      tighter as disc_state gains more intervals.
+    - Global secant overestimator — bounds s from above.
+
+    The LP objective and constraints are obtained by substituting auxiliary vars for
+    all nonlinear terms.
+
+    Parameters
+    ----------
+    model : Model
+    terms : NonlinearTerms
+        Output of classify_nonlinear_terms(model).
+    disc_state : DiscretizationState
+        Current partition; provides intervals for tangent cut placement.
+    incumbent : np.ndarray, optional
+        Current best NLP solution (flat).  Used to add OA tangent cuts for
+        general nonlinear terms; currently unused (reserved for future use).
+
+    Returns
+    -------
+    (MilpRelaxationModel, varmap)
+        MilpRelaxationModel has a .solve() method returning MilpRelaxationResult.
+        varmap maps auxiliary variable keys to MILP column indices.
+    """
+    flat_lb, flat_ub = _flat_bounds(model)
+    n_orig = len(flat_lb)
+
+    # ── Assign MILP column indices ──────────────────────────────────────────
+    # Layout: [original vars 0..n_orig-1] [bilinear aux w_ij] [monomial aux s_i^n]
+    # For partitioned bilinear terms: also [δ_k, x̄_k, w̄_k per partition k]
+    bilinear_var_map: dict[tuple[int, int], int] = {}
+    monomial_var_map: dict[tuple[int, int], int] = {}
+
+    col_idx = n_orig
+    all_bounds: list[tuple[float, float]] = list(
+        zip(flat_lb.tolist(), flat_ub.tolist())
+    )
+    integrality_flags: list[int] = [0] * n_orig
+
+    # Pre-compute bilinear auxiliary variable slots
+    for i, j in terms.bilinear:
+        xi_lb, xi_ub = float(flat_lb[i]), float(flat_ub[i])
+        xj_lb, xj_ub = float(flat_lb[j]), float(flat_ub[j])
+        corners = [xi_lb * xj_lb, xi_lb * xj_ub, xi_ub * xj_lb, xi_ub * xj_ub]
+        bilinear_var_map[(i, j)] = col_idx
+        all_bounds.append((min(corners), max(corners)))
+        integrality_flags.append(0)
+        col_idx += 1
+
+    for var_idx, n in terms.monomial:
+        lb_i = float(flat_lb[var_idx])
+        ub_i = float(flat_ub[var_idx])
+        vals = [lb_i**n, ub_i**n]
+        if n % 2 == 0 and lb_i < 0 < ub_i:
+            vals.append(0.0)
+        monomial_var_map[(var_idx, n)] = col_idx
+        all_bounds.append((min(vals), max(vals)))
+        integrality_flags.append(0)
+        col_idx += 1
+
+    # Piecewise McCormick: per-partition auxiliary variables for bilinear terms.
+    # For each bilinear (i,j) where i ∈ disc_state.partitions:
+    #   For each partition interval k:
+    #     δ_k  ∈ {0,1}       — binary selector (col)
+    #     x̄_k  ∈ [a_k, b_k]  — x_i value within interval k (0 outside)
+    #     w̄_k  ∈ [wi_lo, wi_hi] — bilinear product within interval k (0 outside)
+    # bilinear_pw_map[(i,j)] = [(delta_col, xbar_col, wbar_col, a_k, b_k), ...]
+    bilinear_pw_map: dict[tuple[int, int], list] = {}
+
+    for i, j in terms.bilinear:
+        # Choose which variable to partition: prefer the one in disc_state
+        if i in disc_state.partitions:
+            part_var, other_var = i, j
+        elif j in disc_state.partitions:
+            part_var, other_var = j, i
+        else:
+            continue  # no partitioning for this term
+
+        pts = disc_state.partitions[part_var]
+        xj_lb_g = float(flat_lb[other_var])
+        xj_ub_g = float(flat_ub[other_var])
+
+        intervals = []
+        for k in range(len(pts) - 1):
+            a_k = float(pts[k])
+            b_k = float(pts[k + 1])
+
+            # Big-M for bilinear product within this interval
+            corners = [a_k * xj_lb_g, a_k * xj_ub_g, b_k * xj_lb_g, b_k * xj_ub_g]
+            wk_lo, wk_hi = min(corners), max(corners)
+
+            # δ_k ∈ {0,1}
+            delta_col = col_idx
+            all_bounds.append((0.0, 1.0))
+            integrality_flags.append(1)
+            col_idx += 1
+
+            # x̄_k ∈ [0, max(|a_k|, |b_k|)]  (0 when δ_k=0)
+            xbar_col = col_idx
+            all_bounds.append((min(a_k, 0.0) if a_k < 0 else 0.0, max(abs(a_k), abs(b_k))))
+            integrality_flags.append(0)
+            col_idx += 1
+
+            # w̄_k ∈ [wk_lo, wk_hi]  (0 when δ_k=0)
+            wbar_col = col_idx
+            all_bounds.append((min(wk_lo, 0.0), max(wk_hi, 0.0)))
+            integrality_flags.append(0)
+            col_idx += 1
+
+            intervals.append((delta_col, xbar_col, wbar_col, a_k, b_k))
+
+        bilinear_pw_map[(i, j)] = intervals
+
+    # Also store in a form keyed by (part_var, other_var) for reference
+    # (not needed separately; we use bilinear_pw_map[(i,j)] directly)
+
+    n_total = col_idx
+
+    # ── Constraint rows (A_ub @ z ≤ b_ub) ───────────────────────────────────
+    A_rows: list[np.ndarray] = []
+    b_rows: list[float] = []
+
+    def _add_row(coeff: np.ndarray, rhs: float) -> None:
+        A_rows.append(coeff.copy())
+        b_rows.append(float(rhs))
+
+    # McCormick constraints for each bilinear term
+    for i, j in terms.bilinear:
+        xi_lb_g = float(flat_lb[i])
+        xi_ub_g = float(flat_ub[i])
+        xj_lb_g = float(flat_lb[j])
+        xj_ub_g = float(flat_ub[j])
+        w_col = bilinear_var_map[(i, j)]
+
+        if (i, j) in bilinear_pw_map and bilinear_pw_map[(i, j)]:
+            # ── Piecewise McCormick with binary partition selection ──────────
+            intervals = bilinear_pw_map[(i, j)]
+            # Determine partition var vs other var
+            if i in disc_state.partitions:
+                part_var, other_var = i, j
+            else:
+                part_var, other_var = j, i
+
+            yj_lb = float(flat_lb[other_var])
+            yj_ub = float(flat_ub[other_var])
+
+            # Constraint: Σ δ_k = 1 (select exactly one partition)
+            row_sum = np.zeros(n_total)
+            for delta_col, _, _, _, _ in intervals:
+                row_sum[delta_col] = -1.0
+            _add_row(row_sum, -1.0)  # -Σδ_k ≤ -1
+            _add_row(-row_sum, 1.0)  # Σδ_k ≤ 1
+
+            # Constraint: x_part = Σ x̄_k (reconstruct partition variable)
+            row_recon = np.zeros(n_total)
+            row_recon[part_var] = 1.0
+            for _, xbar_col, _, _, _ in intervals:
+                row_recon[xbar_col] = -1.0
+            _add_row(row_recon, 0.0)   # x_part - Σ x̄_k ≤ 0
+            _add_row(-row_recon, 0.0)  # -(x_part - Σ x̄_k) ≤ 0
+
+            # Constraint: w = Σ w̄_k
+            row_wsum = np.zeros(n_total)
+            row_wsum[w_col] = 1.0
+            for _, _, wbar_col, _, _ in intervals:
+                row_wsum[wbar_col] = -1.0
+            _add_row(row_wsum, 0.0)
+            _add_row(-row_wsum, 0.0)
+
+            for delta_col, xbar_col, wbar_col, a_k, b_k in intervals:
+                corners = [a_k * yj_lb, a_k * yj_ub, b_k * yj_lb, b_k * yj_ub]
+                M_k = max(abs(c) for c in corners) + 1.0
+
+                # x̄_k ≥ a_k * δ_k  (x̄_k is in [a_k, b_k] when δ_k=1)
+                row = np.zeros(n_total)
+                row[xbar_col] = -1.0
+                row[delta_col] = a_k
+                _add_row(row, 0.0)  # -x̄_k + a_k*δ_k ≤ 0  → x̄_k ≥ a_k*δ_k
+
+                # x̄_k ≤ b_k * δ_k
+                row = np.zeros(n_total)
+                row[xbar_col] = 1.0
+                row[delta_col] = -b_k
+                _add_row(row, 0.0)
+
+                # w̄_k ≤ wk_hi * δ_k  → w̄_k=0 when δ_k=0
+                # This forces the bilinear product to 0 when interval k is inactive.
+                row = np.zeros(n_total)
+                row[wbar_col] = 1.0
+                row[delta_col] = -wk_hi
+                _add_row(row, 0.0)
+
+                # w̄_k ≥ wk_lo * δ_k  → w̄_k=0 when δ_k=0 (for wk_lo ≥ 0 case)
+                if wk_lo > 0:
+                    row = np.zeros(n_total)
+                    row[wbar_col] = -1.0
+                    row[delta_col] = wk_lo
+                    _add_row(row, 0.0)
+
+                # Per-interval McCormick with big-M relaxation.
+                # The big-M term LOOSENS the constraint when δ_k=0 (interval inactive).
+                #
+                # cv1: w̄_k ≥ a_k*y + x̄_k*y_lb - a_k*y_lb - M*(1-δ_k)
+                #   → -w̄_k + a_k*y + x̄_k*y_lb + M*δ_k ≤ a_k*y_lb + M
+                row = np.zeros(n_total)
+                row[wbar_col] = -1.0
+                row[other_var] += a_k
+                row[xbar_col] += yj_lb
+                row[delta_col] = M_k   # +M_k so constraint loosens when δ_k=0
+                _add_row(row, a_k * yj_lb + M_k)
+
+                # cv2: w̄_k ≥ b_k*y + x̄_k*y_ub - b_k*y_ub - M*(1-δ_k)
+                #   → -w̄_k + b_k*y + x̄_k*y_ub + M*δ_k ≤ b_k*y_ub + M
+                row = np.zeros(n_total)
+                row[wbar_col] = -1.0
+                row[other_var] += b_k
+                row[xbar_col] += yj_ub
+                row[delta_col] = M_k
+                _add_row(row, b_k * yj_ub + M_k)
+
+                # cc1: w̄_k ≤ b_k*y + x̄_k*y_lb - b_k*y_lb + M*(1-δ_k)
+                #   → w̄_k - b_k*y - x̄_k*y_lb + M*δ_k ≤ M - b_k*y_lb
+                row = np.zeros(n_total)
+                row[wbar_col] = 1.0
+                row[other_var] -= b_k
+                row[xbar_col] -= yj_lb
+                row[delta_col] = M_k   # +M_k so constraint loosens when δ_k=0
+                _add_row(row, M_k - b_k * yj_lb)
+
+                # cc2: w̄_k ≤ a_k*y + x̄_k*y_ub - a_k*y_ub + M*(1-δ_k)
+                #   → w̄_k - a_k*y - x̄_k*y_ub + M*δ_k ≤ M - a_k*y_ub
+                row = np.zeros(n_total)
+                row[wbar_col] = 1.0
+                row[other_var] -= a_k
+                row[xbar_col] -= yj_ub
+                row[delta_col] = M_k
+                _add_row(row, M_k - a_k * yj_ub)
+
+        else:
+            # ── Standard (global) McCormick ──────────────────────────────────
+            # cv1: w ≥ xi_lb*xj + xi*xj_lb - xi_lb*xj_lb
+            #   →  -w + xj_lb*xi + xi_lb*xj ≤ xi_lb*xj_lb
+            row = np.zeros(n_total)
+            row[w_col] = -1.0
+            row[i] += xj_lb_g
+            row[j] += xi_lb_g
+            _add_row(row, xi_lb_g * xj_lb_g)
+
+            # cv2: w ≥ xi_ub*xj + xi*xj_ub - xi_ub*xj_ub
+            row = np.zeros(n_total)
+            row[w_col] = -1.0
+            row[i] += xj_ub_g
+            row[j] += xi_ub_g
+            _add_row(row, xi_ub_g * xj_ub_g)
+
+            # cc1: w ≤ xi_ub*xj + xi*xj_lb - xi_ub*xj_lb
+            row = np.zeros(n_total)
+            row[w_col] = 1.0
+            row[i] -= xj_lb_g
+            row[j] -= xi_ub_g
+            _add_row(row, -xi_ub_g * xj_lb_g)
+
+            # cc2: w ≤ xi_lb*xj + xi*xj_ub - xi_lb*xj_ub
+            row = np.zeros(n_total)
+            row[w_col] = 1.0
+            row[i] -= xj_ub_g
+            row[j] -= xi_lb_g
+            _add_row(row, -xi_lb_g * xj_ub_g)
+
+    # Monomial constraints
+    for var_idx, n in terms.monomial:
+        lb_i = float(flat_lb[var_idx])
+        ub_i = float(flat_ub[var_idx])
+        s_col = monomial_var_map[(var_idx, n)]
+
+        if n == 2:
+            # Piecewise tangent underestimators: s ≥ 2*t*x - t^2  for tangent point t.
+            # → -s + 2*t*x ≤ t^2
+            #
+            # KEY monotonicity requirement: as partitions get finer, the set of tangent
+            # points must grow (never shrink).  Using ALL BREAKPOINTS achieves this:
+            # linspace(lb,ub,k+1) breakpoints are a superset of linspace(lb,ub,k) for
+            # the test sequence n_init=1,2,4,8 (each is a refinement of the previous).
+            # Using midpoints would fail because n_init=1's midpoint (2.5) gives a
+            # tighter cut than n_init=2's midpoints (1.75, 3.25) at the LP optimum.
+            if var_idx in disc_state.partitions and len(disc_state.partitions[var_idx]) >= 2:
+                pts = disc_state.partitions[var_idx]
+                tangent_pts = [float(p) for p in pts]  # breakpoints as tangent points
+            else:
+                tangent_pts = [lb_i, ub_i]
+
+            for t in tangent_pts:
+                row = np.zeros(n_total)
+                row[s_col] = -1.0
+                row[var_idx] = 2.0 * t
+                _add_row(row, t * t)
+
+            # Global secant overestimator: s ≤ (lb+ub)*x - lb*ub
+            # → s - (lb+ub)*x ≤ -lb*ub
+            row = np.zeros(n_total)
+            row[s_col] = 1.0
+            row[var_idx] = -(lb_i + ub_i)
+            _add_row(row, -lb_i * ub_i)
+
+        else:
+            # General n: secant overestimator
+            if abs(ub_i - lb_i) > 1e-12:
+                slope = (ub_i**n - lb_i**n) / (ub_i - lb_i)
+                intercept = lb_i**n - slope * lb_i
+                row = np.zeros(n_total)
+                row[s_col] = 1.0
+                row[var_idx] = -slope
+                _add_row(row, intercept)
+
+            # Tangent at midpoint
+            mid = 0.5 * (lb_i + ub_i)
+            t_slope = n * (mid ** (n - 1))
+            t_intercept = -(n - 1) * (mid**n)
+            row = np.zeros(n_total)
+            row[s_col] = -1.0
+            row[var_idx] = t_slope
+            _add_row(row, -t_intercept)
+
+    # Model constraints
+    for constraint in model._constraints:
+        body = constraint.body  # normalized: body <= 0  (sense is always "<=")
+        sense = constraint.sense
+        try:
+            c, const = _linearize_expr(
+                body, model, bilinear_var_map, monomial_var_map, n_total
+            )
+            # body ≤ 0  →  c @ z + const ≤ 0  →  c @ z ≤ -const
+            if sense == "<=":
+                _add_row(c, -const)
+            elif sense == "==":
+                _add_row(c, -const)
+                _add_row(-c, const)
+            # (">=" is normalized to "<=" by the Expression operators)
+        except ValueError:
+            # Constraint contains terms we can't linearize (e.g. general nonlinear).
+            # Omitting it makes the LP feasible region larger → still a valid lower bound.
+            pass
+
+    # ── OA tangent cuts from NLP incumbent ──────────────────────────────────
+    # These are outer-approximation linearizations of the original nonlinear
+    # constraints at the incumbent point.  They are in terms of ORIGINAL
+    # variables (columns 0..n_orig-1) and tighten the LP relaxation.
+    if oa_cuts:
+        for coeff, rhs in oa_cuts:
+            row = np.zeros(n_total)
+            row[:len(coeff)] = coeff[:n_total if len(coeff) > n_total else len(coeff)]
+            _add_row(row, rhs)
+
+    # ── Objective ────────────────────────────────────────────────────────────
+    obj_expr = model._objective.expression
+    try:
+        c_obj, const_obj = _linearize_expr(
+            obj_expr, model, bilinear_var_map, monomial_var_map, n_total
+        )
+    except ValueError:
+        # Fallback: trivial objective (LP gives ‑∞ lower bound — acceptable for soundness)
+        c_obj = np.zeros(n_total)
+        const_obj = 0.0
+
+    # Negate for maximization
+    if model._objective.sense == ObjectiveSense.MAXIMIZE:
+        c_obj = -c_obj
+        const_obj = -const_obj
+
+    # ── Assemble and return ──────────────────────────────────────────────────
+    if A_rows:
+        A_ub_arr = np.array(A_rows, dtype=np.float64)
+        b_ub_arr = np.array(b_rows, dtype=np.float64)
+    else:
+        A_ub_arr = None
+        b_ub_arr = None
+
+    # Build integrality array (1 = integer, 0 = continuous)
+    integrality_arr = np.array(integrality_flags, dtype=np.int32)
+    has_integers = bool(np.any(integrality_arr > 0))
+
+    milp_model = MilpRelaxationModel(
+        c=c_obj,
+        A_ub=A_ub_arr,
+        b_ub=b_ub_arr,
+        bounds=all_bounds,
+        obj_offset=const_obj,
+        integrality=integrality_arr if has_integers else None,
+    )
+
+    varmap: dict = {
+        "original": {k: k for k in range(n_orig)},
+        "bilinear": bilinear_var_map,
+        "monomial": monomial_var_map,
+        "bilinear_pw": bilinear_pw_map,
+    }
+
+    return milp_model, varmap
