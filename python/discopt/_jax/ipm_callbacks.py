@@ -1006,6 +1006,8 @@ def ipm_solve_callbacks(
         alpha_primal=jnp.array(alpha_p, dtype=jnp.float64),
         delta_w_last=delta_w_last,
         stall_count=jnp.array(stall_count, dtype=jnp.int32),
+        primal_inf_prev=jnp.array(0.0, dtype=jnp.float64),
+        infeas_count=jnp.array(0, dtype=jnp.int32),
     )
 
 

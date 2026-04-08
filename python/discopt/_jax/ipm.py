@@ -80,12 +80,14 @@ class IPMState(NamedTuple):
     mu: jnp.ndarray  # scalar barrier parameter
     nu: jnp.ndarray  # scalar merit penalty
     iteration: jnp.ndarray  # scalar int
-    converged: jnp.ndarray  # 0=running,1=optimal,2=acceptable,3=max_iter
+    converged: jnp.ndarray  # 0=running,1=optimal,2=acceptable,3=max_iter,4=stalled,5=infeasible
     obj: jnp.ndarray  # scalar objective
     consecutive_acceptable: jnp.ndarray  # int counter
     alpha_primal: jnp.ndarray  # last primal step size
     delta_w_last: jnp.ndarray  # last regularization
     stall_count: jnp.ndarray  # consecutive iterations with tiny alpha
+    primal_inf_prev: jnp.ndarray  # previous iteration's primal infeasibility
+    infeas_count: jnp.ndarray  # consecutive iters with non-decreasing infeasibility
 
 
 class IPMProblemData(NamedTuple):
@@ -302,6 +304,8 @@ def _initialize_state(obj_fn, con_fn, x0, pd, opts):
         alpha_primal=jnp.array(1.0, dtype=jnp.float64),
         delta_w_last=jnp.array(0.0, dtype=jnp.float64),
         stall_count=jnp.array(0, dtype=jnp.int32),
+        primal_inf_prev=jnp.array(1e20, dtype=jnp.float64),
+        infeas_count=jnp.array(0, dtype=jnp.int32),
     )
 
 
@@ -378,13 +382,13 @@ def _make_iteration_body(obj_fn, con_fn, pd, opts):
             #     Use slack from the closer bound
 
             # Compute slack from each bound.
-            # Use mu as the floor (not _EPS) so that infeasible constraints
-            # get D ≈ mu instead of D ≈ 0.  With D ≈ 0 the condensed KKT
-            # treats a violated constraint as equality, trapping the solver
-            # at the minimum on the constraint surface instead of the true
-            # optimum.  The mu floor shrinks with the barrier, gradually
-            # hardening the constraint as the solver converges.
-            slack_floor = jnp.maximum(mu, _EPS)
+            # Use a fixed small floor so that violated constraints retain
+            # a meaningful Newton correction direction.  Previously this
+            # used max(mu, _EPS), but that made D ≈ mu for violated
+            # constraints, effectively softening them and causing
+            # convergence to wrong local minima on quadratic constraints
+            # (see issue #12: ex1223a suboptimal, fuel false infeasible).
+            slack_floor = _SLACK_FLOOR
             s_from_lb = jnp.maximum(g - pd.g_l, slack_floor)  # g - g_l
             s_from_ub = jnp.maximum(pd.g_u - g, slack_floor)  # g_u - g
 
@@ -887,17 +891,37 @@ def _make_iteration_body(obj_fn, con_fn, pd, opts):
         new_iter = state.iteration + 1
         at_max = new_iter >= opts.max_iter
 
-        # Stagnation convergence: if both Newton line search and steepest
-        # descent have been failing for many iterations, and the primal
-        # solution is feasible, accept as converged.  This handles cases
-        # where the IPM reaches the correct primal solution but can't
-        # certify optimality via KKT (degenerate Hessian near bounds).
+        # Stagnation: if both Newton and steepest descent have been failing
+        # for many iterations, AND both primal and dual feasibility hold,
+        # accept as converged.  Without the dual check, the solver can
+        # accept suboptimal KKT points (issue #12: ex1223a obj=4.733).
         stagnation = new_stall >= 20
-        stag_conv = stagnation & (primal_inf <= opts.acceptable_tol)
+        stag_conv = (
+            stagnation & (primal_inf <= opts.acceptable_tol) & (dual_inf <= opts.acceptable_tol)
+        )
+        # Stalled but not dual-feasible: report as code 4 so B&B can
+        # handle it differently from genuine acceptable convergence.
+        stag_stalled = stagnation & (~stag_conv)
+
+        # Infeasibility detection: if constraint violation has not
+        # decreased for many consecutive iterations while mu is small,
+        # the subproblem is likely infeasible.  Early termination saves
+        # iterations that would otherwise be wasted (issue #12: fuel).
+        infeas_improving = primal_inf < state.primal_inf_prev * 0.99
+        new_infeas_count = jnp.where(
+            infeas_improving,
+            jnp.int32(0),
+            state.infeas_count + 1,
+        )
+        infeas_detected = (
+            (new_infeas_count >= 30) & (primal_inf > opts.acceptable_tol) & (mu < 1e-4)
+        )
 
         code = jnp.where(optimal, jnp.int32(1), jnp.int32(0))
         code = jnp.where((code == 0) & acc_conv, jnp.int32(2), code)
         code = jnp.where((code == 0) & stag_conv, jnp.int32(2), code)
+        code = jnp.where((code == 0) & stag_stalled, jnp.int32(4), code)
+        code = jnp.where((code == 0) & infeas_detected, jnp.int32(5), code)
         code = jnp.where((code == 0) & at_max, jnp.int32(3), code)
 
         return IPMState(
@@ -914,6 +938,8 @@ def _make_iteration_body(obj_fn, con_fn, pd, opts):
             alpha_primal=alpha_p,
             delta_w_last=final_dw,
             stall_count=new_stall,
+            primal_inf_prev=primal_inf,
+            infeas_count=new_infeas_count,
         )
 
     return body
@@ -1059,18 +1085,15 @@ def solve_nlp_ipm(
     exceeded_time = max_wall_time is not None and wall_time > max_wall_time
     if conv in (1, 2) and not exceeded_time:
         status = SolveStatus.OPTIMAL
+    elif conv == 4:
+        # Stalled: primal feasible but dual not certified (issue #12).
+        # Report as iteration limit so B&B doesn't trust the objective.
+        status = SolveStatus.ITERATION_LIMIT
+    elif conv == 5:
+        # Infeasibility detected (issue #12).
+        status = SolveStatus.INFEASIBLE
     elif conv == 3 or exceeded_time:
-        # If the solution is primal-feasible despite hitting the iteration
-        # or time limit, report as optimal. The IPM may stall near the
-        # solution due to degenerate curvature but still produce a usable result.
-        feasible = True
-        if m > 0 and g_l is not None and g_u is not None and con_fn is not None:
-            g_final = con_fn(state.x)
-            viol = float(
-                _constraint_violation(g_final, g_l, g_u, jnp.ones_like(g_l), jnp.ones_like(g_u))
-            )
-            feasible = viol < 1e-6
-        status = SolveStatus.OPTIMAL if feasible else SolveStatus.ITERATION_LIMIT
+        status = SolveStatus.ITERATION_LIMIT
     else:
         status = SolveStatus.ERROR
 

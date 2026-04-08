@@ -590,8 +590,9 @@ def _solve_root_node_multistart_ipm(
     obj_vals = np.asarray(state.obj)  # (n_starts,)
     x_vals = np.asarray(state.x)  # (n_starts, n_vars)
 
-    # Mask: converged == 1 (optimal), 2 (acceptable), or 3 (iter limit)
-    feasible_mask = (converged == 1) | (converged == 2) | (converged == 3)
+    # Mask: converged == 1 (optimal), 2 (acceptable), 3 (iter limit), or 4 (stalled).
+    # Code 5 (infeasible) is excluded.
+    feasible_mask = (converged == 1) | (converged == 2) | (converged == 3) | (converged == 4)
 
     if np.any(feasible_mask):
         # Among feasible, pick the one with lowest objective
@@ -1818,7 +1819,8 @@ def solve_model(
                         sol_is_int_feas = True
                         for off, sz in zip(int_offsets, int_sizes):
                             for j in range(off, off + sz):
-                                if abs(nlp_result.x[j] - round(nlp_result.x[j])) > 1e-5:
+                                xj = nlp_result.x[j]
+                                if not np.isfinite(xj) or abs(xj - round(xj)) > 1e-5:
                                     sol_is_int_feas = False
                                     break
                             if not sol_is_int_feas:
@@ -2494,8 +2496,8 @@ def _solve_nlp_bb(
                         sol_is_int_feas = True
                         for off, sz in zip(int_offsets, int_sizes):
                             for j in range(off, off + sz):
-                                frac = abs(nlp_result.x[j] - round(nlp_result.x[j]))
-                                if frac > 1e-5:
+                                xj = nlp_result.x[j]
+                                if not np.isfinite(xj) or abs(xj - round(xj)) > 1e-5:
                                     sol_is_int_feas = False
                                     break
                             if not sol_is_int_feas:
@@ -2818,7 +2820,9 @@ def _solve_node_nlp_ipm(
     exceeded_time = max_wall_time is not None and wall_time > max_wall_time
     if conv in (1, 2) and not exceeded_time:
         status = SolveStatus.OPTIMAL
-    elif conv == 3 or exceeded_time:
+    elif conv == 5:
+        status = SolveStatus.INFEASIBLE
+    elif conv in (3, 4) or exceeded_time:
         status = SolveStatus.ITERATION_LIMIT
     else:
         status = SolveStatus.ERROR
@@ -2925,13 +2929,14 @@ def _solve_batch_ipm(
         obj_vals = obj_vals.reshape(n_batch, n_starts)
         x_vals = x_vals.reshape(n_batch, n_starts, n_vars)
 
-        # Accept converged (1=optimal, 2=acceptable) and iteration-limit (3)
-        # solutions. Constraint feasibility is checked separately in the
-        # caller; iteration-limit solutions that violate constraints are
-        # handled there (not pruned, but given a conservative lower bound).
-        feasible_mask = ((converged == 1) | (converged == 2) | (converged == 3)) & np.isfinite(
-            obj_vals
-        )
+        # Accept converged (1=optimal, 2=acceptable), iteration-limit (3),
+        # and stalled (4) solutions. Code 5 (infeasible) is excluded.
+        # Constraint feasibility is checked separately in the caller;
+        # iteration-limit solutions that violate constraints are handled
+        # there (not pruned, but given a conservative lower bound).
+        feasible_mask = (
+            (converged == 1) | (converged == 2) | (converged == 3) | (converged == 4)
+        ) & np.isfinite(obj_vals)
         masked_obj = np.where(feasible_mask, obj_vals, np.inf)
         best_per_node = np.argmin(masked_obj, axis=1)  # (n_batch,)
 
@@ -2943,7 +2948,7 @@ def _solve_batch_ipm(
         )
         result_sols = result_x  # already writable np.array
     else:
-        conv_mask = (converged == 1) | (converged == 2) | (converged == 3)
+        conv_mask = (converged == 1) | (converged == 2) | (converged == 3) | (converged == 4)
         result_lbs = np.asarray(
             np.where(conv_mask & np.isfinite(obj_vals), obj_vals, _INFEASIBILITY_SENTINEL),
             dtype=np.float64,
