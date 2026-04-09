@@ -1044,6 +1044,19 @@ class Model:
         Variable
             Expression that can be used in objectives and constraints.
 
+        .. warning::
+
+            NLP solvers (ipm, ipopt, ripopt) use interior-point barrier methods
+            that require finite, reasonably-sized bounds.  The defaults
+            (±9.999×10¹⁹) exceed the safe threshold (~10¹⁵) and will cause
+            NaN objectives or ``iteration_limit`` status.  Always supply
+            explicit ``lb``/``ub`` when the problem has a known feasible range::
+
+                x = m.continuous("x", lb=-100, ub=100)   # good
+                x = m.continuous("x")                     # risky for NLP solvers
+
+            A ``UserWarning`` is raised at solve time when bounds exceed 10¹⁵.
+
         Examples
         --------
         >>> x = m.continuous("x")                           # scalar, unbounded
