@@ -20,12 +20,15 @@ Theory: Nagarajan et al., JOGO 2018, Section 4 (piecewise McCormick relaxation).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Union
 
 import numpy as np
+import scipy.sparse as sp
 
 from discopt._jax.discretization import DiscretizationState
+from discopt._jax.model_utils import flat_variable_bounds
 from discopt._jax.term_classifier import (
     NonlinearTerms,
     _collect_product_factors,
@@ -42,8 +45,11 @@ from discopt.modeling.core import (
     SumExpression,
     SumOverExpression,
     UnaryOp,
+    VarType,
     Variable,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +75,7 @@ class MilpRelaxationModel:
     def __init__(
         self,
         c: np.ndarray,
-        A_ub: Optional[np.ndarray],
+        A_ub: Optional[Union[np.ndarray, sp.spmatrix]],
         b_ub: Optional[np.ndarray],
         bounds: list[tuple[float, float]],
         obj_offset: float = 0.0,
@@ -123,14 +129,21 @@ class MilpRelaxationModel:
 # ---------------------------------------------------------------------------
 
 
-def _flat_bounds(model: Model) -> tuple[np.ndarray, np.ndarray]:
-    """Return (lb, ub) as flat 1-D arrays for all model variables."""
-    lbs: list[float] = []
-    ubs: list[float] = []
-    for v in model._variables:
-        lbs.extend(np.asarray(v.lb, dtype=np.float64).ravel().tolist())
-        ubs.extend(np.asarray(v.ub, dtype=np.float64).ravel().tolist())
-    return np.array(lbs, dtype=np.float64), np.array(ubs, dtype=np.float64)
+def _piecewise_product_bounds(
+    a_k: float,
+    b_k: float,
+    y_lb: float,
+    y_ub: float,
+) -> tuple[list[float], float, float]:
+    """Return interval corner products and their min/max values."""
+    corners = [a_k * y_lb, a_k * y_ub, b_k * y_lb, b_k * y_ub]
+    return corners, min(corners), max(corners)
+
+
+def _compute_piecewise_big_m(corners: list[float]) -> float:
+    """Scale Big-M with the interval magnitude instead of adding a flat constant."""
+    max_corner = max(abs(float(c)) for c in corners)
+    return max_corner * (1.0 + 1e-4) + 1e-2
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +283,10 @@ def _linearize_expr(
                     else:
                         raise ValueError(f"Monomial {key} not in map")
                 elif len(unique) == 2:
+                    if len(unique) != len(indices):
+                        raise ValueError(
+                            "Mixed repeated-factor products are not supported"
+                        )
                     i_idx, j_idx = unique[0], unique[1]
                     key = (min(i_idx, j_idx), max(i_idx, j_idx))
                     if key in bilinear_var_map:
@@ -354,7 +371,7 @@ def build_milp_relaxation(
         MilpRelaxationModel has a .solve() method returning MilpRelaxationResult.
         varmap maps auxiliary variable keys to MILP column indices.
     """
-    flat_lb, flat_ub = _flat_bounds(model)
+    flat_lb, flat_ub = flat_variable_bounds(model)
     n_orig = len(flat_lb)
 
     # ── Assign MILP column indices ──────────────────────────────────────────
@@ -367,7 +384,10 @@ def build_milp_relaxation(
     all_bounds: list[tuple[float, float]] = list(
         zip(flat_lb.tolist(), flat_ub.tolist())
     )
-    integrality_flags: list[int] = [0] * n_orig
+    integrality_flags: list[int] = []
+    for v in model._variables:
+        flag = 1 if v.var_type in (VarType.BINARY, VarType.INTEGER) else 0
+        integrality_flags.extend([flag] * v.size)
 
     # Pre-compute bilinear auxiliary variable slots
     for i, j in terms.bilinear:
@@ -418,8 +438,12 @@ def build_milp_relaxation(
             b_k = float(pts[k + 1])
 
             # Big-M for bilinear product within this interval
-            corners = [a_k * xj_lb_g, a_k * xj_ub_g, b_k * xj_lb_g, b_k * xj_ub_g]
-            wk_lo, wk_hi = min(corners), max(corners)
+            _, wk_lo, wk_hi = _piecewise_product_bounds(
+                a_k,
+                b_k,
+                xj_lb_g,
+                xj_ub_g,
+            )
 
             # δ_k ∈ {0,1}
             delta_col = col_idx
@@ -429,7 +453,7 @@ def build_milp_relaxation(
 
             # x̄_k ∈ [0, max(|a_k|, |b_k|)]  (0 when δ_k=0)
             xbar_col = col_idx
-            all_bounds.append((min(a_k, 0.0) if a_k < 0 else 0.0, max(abs(a_k), abs(b_k))))
+            all_bounds.append((min(a_k, 0.0), max(abs(a_k), abs(b_k))))
             integrality_flags.append(0)
             col_idx += 1
 
@@ -449,11 +473,19 @@ def build_milp_relaxation(
     n_total = col_idx
 
     # ── Constraint rows (A_ub @ z ≤ b_ub) ───────────────────────────────────
-    A_rows: list[np.ndarray] = []
+    A_data: list[float] = []
+    A_row_indices: list[int] = []
+    A_col_indices: list[int] = []
     b_rows: list[float] = []
 
     def _add_row(coeff: np.ndarray, rhs: float) -> None:
-        A_rows.append(coeff.copy())
+        coeff_arr = np.asarray(coeff, dtype=np.float64).ravel()
+        row_idx = len(b_rows)
+        nz = np.flatnonzero(coeff_arr)
+        if nz.size:
+            A_row_indices.extend([row_idx] * int(nz.size))
+            A_col_indices.extend(nz.tolist())
+            A_data.extend(coeff_arr[nz].tolist())
         b_rows.append(float(rhs))
 
     # McCormick constraints for each bilinear term
@@ -500,8 +532,13 @@ def build_milp_relaxation(
             _add_row(-row_wsum, 0.0)
 
             for delta_col, xbar_col, wbar_col, a_k, b_k in intervals:
-                corners = [a_k * yj_lb, a_k * yj_ub, b_k * yj_lb, b_k * yj_ub]
-                M_k = max(abs(c) for c in corners) + 1.0
+                corners, wk_lo, wk_hi = _piecewise_product_bounds(
+                    a_k,
+                    b_k,
+                    yj_lb,
+                    yj_ub,
+                )
+                M_k = _compute_piecewise_big_m(corners)
 
                 # x̄_k ≥ a_k * δ_k  (x̄_k is in [a_k, b_k] when δ_k=1)
                 row = np.zeros(n_total)
@@ -668,10 +705,10 @@ def build_milp_relaxation(
                 _add_row(c, -const)
                 _add_row(-c, const)
             # (">=" is normalized to "<=" by the Expression operators)
-        except ValueError:
+        except ValueError as err:
             # Constraint contains terms we can't linearize (e.g. general nonlinear).
             # Omitting it makes the LP feasible region larger → still a valid lower bound.
-            pass
+            logger.debug("AMP: omitting constraint (cannot linearize): %s", err)
 
     # ── OA tangent cuts from NLP incumbent ──────────────────────────────────
     # These are outer-approximation linearizations of the original nonlinear
@@ -700,8 +737,12 @@ def build_milp_relaxation(
         const_obj = -const_obj
 
     # ── Assemble and return ──────────────────────────────────────────────────
-    if A_rows:
-        A_ub_arr = np.array(A_rows, dtype=np.float64)
+    if b_rows:
+        A_ub_arr = sp.csr_matrix(
+            (A_data, (A_row_indices, A_col_indices)),
+            shape=(len(b_rows), n_total),
+            dtype=np.float64,
+        )
         b_ub_arr = np.array(b_rows, dtype=np.float64)
     else:
         A_ub_arr = None
