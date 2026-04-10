@@ -554,7 +554,12 @@ def _solve_root_node_multistart_ipm(
     """
     import jax.numpy as jnp
 
-    from discopt._jax.ipm import IPMOptions, solve_nlp_batch
+    from discopt._jax.ipm import (
+        IPMOptions,
+        _jax_feasibility_restoration,
+        ipm_solve,
+        solve_nlp_batch,
+    )
     from discopt.solvers import NLPResult
 
     starting_points = _generate_starting_points(node_lb, node_ub, n_random=n_random)
@@ -591,8 +596,11 @@ def _solve_root_node_multistart_ipm(
     x_vals = np.asarray(state.x)  # (n_starts, n_vars)
 
     # Mask: converged == 1 (optimal), 2 (acceptable), 3 (iter limit), or 4 (stalled).
-    # Code 5 (infeasible) is excluded.
-    feasible_mask = (converged == 1) | (converged == 2) | (converged == 3) | (converged == 4)
+    # Code 5 (infeasible) is excluded. NaN objectives are also excluded —
+    # they indicate IPM divergence (e.g. log of negative argument).
+    feasible_mask = (
+        (converged == 1) | (converged == 2) | (converged == 3) | (converged == 4)
+    ) & np.isfinite(obj_vals)
 
     if np.any(feasible_mask):
         # Among feasible, pick the one with lowest objective
@@ -604,7 +612,45 @@ def _solve_root_node_multistart_ipm(
             objective=float(obj_vals[best_idx]),
         )
     else:
-        # All failed
+        # All starts infeasible or NaN — attempt feasibility restoration.
+        if con_fn is not None and g_l_jax is not None:
+            xl_jax = jnp.array(node_lb, dtype=jnp.float64)
+            xu_jax = jnp.array(node_ub, dtype=jnp.float64)
+            for i in range(n_starts):
+                if converged[i] == 5:
+                    try:
+                        x_restored, rest_ok = _jax_feasibility_restoration(
+                            con_fn,
+                            jnp.asarray(x_vals[i]),
+                            xl_jax,
+                            xu_jax,
+                            g_l_jax,
+                            g_u_jax,
+                            ipm_opts,
+                        )
+                    except Exception:
+                        continue
+                    if rest_ok:
+                        try:
+                            state_i = ipm_solve(
+                                obj_fn,
+                                con_fn,
+                                x_restored,
+                                xl_jax,
+                                xu_jax,
+                                g_l_jax,
+                                g_u_jax,
+                                ipm_opts,
+                            )
+                        except Exception:
+                            continue
+                        conv_i = int(state_i.converged)
+                        if conv_i in (1, 2, 3, 4):
+                            return NLPResult(
+                                status=SolveStatus.OPTIMAL,
+                                x=np.asarray(state_i.x),
+                                objective=float(state_i.obj),
+                            )
         return NLPResult(
             status=SolveStatus.ERROR,
             x=x_vals[0],
@@ -631,7 +677,12 @@ def _solve_node_multistart_ipm(
     """
     import jax.numpy as jnp
 
-    from discopt._jax.ipm import IPMOptions, solve_nlp_batch
+    from discopt._jax.ipm import (
+        IPMOptions,
+        _jax_feasibility_restoration,
+        ipm_solve,
+        solve_nlp_batch,
+    )
     from discopt.solvers import NLPResult
 
     n_vars = len(node_lb)
@@ -675,7 +726,7 @@ def _solve_node_multistart_ipm(
     obj_vals = np.asarray(state.obj)
     x_vals = np.asarray(state.x)
 
-    feasible_mask = (converged == 1) | (converged == 2) | (converged == 3)
+    feasible_mask = ((converged == 1) | (converged == 2) | (converged == 3)) & np.isfinite(obj_vals)
 
     if np.any(feasible_mask):
         masked_obj = np.where(feasible_mask, obj_vals, np.inf)
@@ -686,6 +737,45 @@ def _solve_node_multistart_ipm(
             objective=float(obj_vals[best_idx]),
         )
     else:
+        # All starts infeasible — attempt feasibility restoration.
+        if con_fn is not None and g_l_jax is not None:
+            xl_jax = jnp.array(node_lb, dtype=jnp.float64)
+            xu_jax = jnp.array(node_ub, dtype=jnp.float64)
+            for i in range(n_starts):
+                if converged[i] == 5:
+                    try:
+                        x_restored, rest_ok = _jax_feasibility_restoration(
+                            con_fn,
+                            jnp.asarray(x_vals[i]),
+                            xl_jax,
+                            xu_jax,
+                            g_l_jax,
+                            g_u_jax,
+                            ipm_opts,
+                        )
+                    except Exception:
+                        continue
+                    if rest_ok:
+                        try:
+                            state_i = ipm_solve(
+                                obj_fn,
+                                con_fn,
+                                x_restored,
+                                xl_jax,
+                                xu_jax,
+                                g_l_jax,
+                                g_u_jax,
+                                ipm_opts,
+                            )
+                        except Exception:
+                            continue
+                        conv_i = int(state_i.converged)
+                        if conv_i in (1, 2, 3):
+                            return NLPResult(
+                                status=SolveStatus.OPTIMAL,
+                                x=np.asarray(state_i.x),
+                                objective=float(state_i.obj),
+                            )
         return NLPResult(
             status=SolveStatus.ERROR,
             x=x_vals[0],
@@ -1568,7 +1658,7 @@ def solve_model(
                 _active_gl,
                 _active_gu,
                 batch_psols=batch_psols,
-                multistart=not _model_is_convex,
+                multistart=True,  # IPM needs multistart even for convex models
             )
             # Constraint feasibility post-check for batch IPM results.
             # When the IPM solution violates constraints (e.g. due to hitting
@@ -1731,7 +1821,7 @@ def solve_model(
                         lb_clipped = np.clip(node_lb, -_SPC, _SPC)
                         ub_clipped = np.clip(node_ub, -_SPC, _SPC)
                         x0 = 0.5 * (lb_clipped + ub_clipped)
-                    if not _model_is_convex and _use_ipm_batch:
+                    if _use_ipm_batch:
                         nlp_result = _solve_node_multistart_ipm(
                             _active_evaluator,
                             x0,
@@ -1837,6 +1927,10 @@ def solve_model(
                             "Node %d: NLP solution violates constraints, marking infeasible",
                             int(batch_ids[i]),
                         )
+                    # Guard: NaN lower bounds corrupt the Rust B&B tree
+                    # (NaN comparisons always return False in IEEE 754).
+                    if not np.isfinite(nlp_lb):
+                        nlp_lb = _INFEASIBILITY_SENTINEL
                     result_lbs[i] = nlp_lb
                     result_sols[i] = nlp_result.x
                     result_feas[i] = False
@@ -2414,7 +2508,7 @@ def _solve_nlp_bb(
                 g_l_jax,
                 g_u_jax,
                 batch_psols=batch_psols,
-                multistart=not _model_is_convex,
+                multistart=True,  # IPM needs multistart even for convex models
             )
             # Constraint feasibility post-check
             if cl_list:
@@ -2512,6 +2606,9 @@ def _solve_nlp_bb(
                                 break
                         if not sol_is_int_feas:
                             nlp_lb = -np.inf
+                    # Guard: NaN lower bounds corrupt the Rust B&B tree.
+                    if not np.isfinite(nlp_lb):
+                        nlp_lb = _INFEASIBILITY_SENTINEL
                     result_lbs[i] = nlp_lb
                     result_sols[i] = nlp_result.x
                     result_feas[i] = False
@@ -2823,8 +2920,55 @@ def _solve_node_nlp_ipm(
         return NLPResult(status=SolveStatus.ERROR, x=x0, objective=_INFEASIBILITY_SENTINEL)
 
     conv = int(state.converged)
+
+    obj_val = float(state.obj)
+    x_sol = np.asarray(state.x)
+    needs_recovery = conv == 5 or not np.isfinite(obj_val) or np.any(~np.isfinite(x_sol))
+
+    # Feasibility restoration: when the IPM declares infeasible or diverges
+    # to NaN, try to find a feasible point via restoration, then re-solve.
+    if needs_recovery and con_fn is not None and g_l is not None and g_u is not None:
+        from discopt._jax.ipm import _jax_feasibility_restoration
+
+        x_rest_start = x0_jax if np.any(~np.isfinite(x_sol)) else state.x
+        for _rest_attempt in range(3):
+            try:
+                x_restored, rest_ok = _jax_feasibility_restoration(
+                    con_fn,
+                    x_rest_start,
+                    x_l,
+                    x_u,
+                    g_l,
+                    g_u,
+                    ipm_opts,
+                )
+            except Exception:
+                break
+            if not rest_ok:
+                break
+            try:
+                state = ipm_solve(
+                    obj_fn,
+                    con_fn,
+                    x_restored,
+                    x_l,
+                    x_u,
+                    g_l,
+                    g_u,
+                    ipm_opts,
+                )
+            except Exception:
+                break
+            conv = int(state.converged)
+            obj_val = float(state.obj)
+            x_sol = np.asarray(state.x)
+            if conv != 5 and np.isfinite(obj_val) and np.all(np.isfinite(x_sol)):
+                break
+            x_rest_start = x0_jax if np.any(~np.isfinite(x_sol)) else state.x
+
     # Check wall-time limit post-hoc (issue #5). The JIT-compiled
     # jax.lax.while_loop cannot check wall clock mid-iteration.
+    wall_time = time.perf_counter() - t0
     exceeded_time = max_wall_time is not None and wall_time > max_wall_time
     if conv in (1, 2) and not exceeded_time:
         status = SolveStatus.OPTIMAL
@@ -2835,10 +2979,18 @@ def _solve_node_nlp_ipm(
     else:
         status = SolveStatus.ERROR
 
+    # Final NaN guard — if restoration also failed, mark as error.
+    if not np.isfinite(obj_val) or np.any(~np.isfinite(x_sol)):
+        return NLPResult(
+            status=SolveStatus.ERROR,
+            x=x0,
+            objective=_INFEASIBILITY_SENTINEL,
+        )
+
     return NLPResult(
         status=status,
-        x=np.asarray(state.x),
-        objective=float(state.obj),
+        x=x_sol,
+        objective=obj_val,
     )
 
 
@@ -2863,7 +3015,12 @@ def _solve_batch_ipm(
     """
     import jax.numpy as jnp
 
-    from discopt._jax.ipm import IPMOptions, solve_nlp_batch
+    from discopt._jax.ipm import (
+        IPMOptions,
+        _jax_feasibility_restoration,
+        ipm_solve,
+        solve_nlp_batch,
+    )
 
     n_batch = len(batch_ids)
     obj_fn = evaluator._obj_fn
@@ -2957,11 +3114,51 @@ def _solve_batch_ipm(
         result_sols = result_x  # already writable np.array
     else:
         conv_mask = (converged == 1) | (converged == 2) | (converged == 3) | (converged == 4)
+        ok_mask = conv_mask & np.isfinite(obj_vals)
         result_lbs = np.asarray(
-            np.where(conv_mask & np.isfinite(obj_vals), obj_vals, _INFEASIBILITY_SENTINEL),
+            np.where(ok_mask, obj_vals, _INFEASIBILITY_SENTINEL),
             dtype=np.float64,
         )
         result_sols = np.array(x_vals, dtype=np.float64)  # writable copy
+
+        # Restoration: for failed nodes (NaN or code 5), try to recover
+        # a feasible point via restoration and re-solve individually.
+        failed_indices = np.where(~ok_mask)[0]
+        if len(failed_indices) > 0 and con_fn is not None and g_l_jax is not None:
+            for idx in failed_indices:
+                x_start = x0_batch[idx] if not np.all(np.isfinite(x_vals[idx])) else x_vals[idx]
+                try:
+                    x_restored, rest_ok = _jax_feasibility_restoration(
+                        con_fn,
+                        x_start,
+                        xl_batch[idx] if xl_batch.ndim == 2 else xl_batch,
+                        xu_batch[idx] if xu_batch.ndim == 2 else xu_batch,
+                        g_l_jax,
+                        g_u_jax,
+                        ipm_opts,
+                    )
+                except Exception:
+                    continue
+                if rest_ok:
+                    try:
+                        state_i = ipm_solve(
+                            obj_fn,
+                            con_fn,
+                            x_restored,
+                            xl_batch[idx] if xl_batch.ndim == 2 else xl_batch,
+                            xu_batch[idx] if xu_batch.ndim == 2 else xu_batch,
+                            g_l_jax,
+                            g_u_jax,
+                            ipm_opts,
+                        )
+                    except Exception:
+                        continue
+                    conv_i = int(state_i.converged)
+                    obj_i = float(state_i.obj)
+                    x_i = np.asarray(state_i.x)
+                    if conv_i in (1, 2, 3, 4) and np.isfinite(obj_i) and np.all(np.isfinite(x_i)):
+                        result_lbs[idx] = obj_i
+                        result_sols[idx] = x_i
 
     result_ids = np.array(batch_ids, dtype=np.int64)
     result_feas = np.zeros(n_batch, dtype=bool)  # Let Rust check integrality

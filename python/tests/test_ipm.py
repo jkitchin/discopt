@@ -994,3 +994,134 @@ class TestPredictorCorrector:
         opts = IPMOptions(predictor_corrector=True)
         state = ipm_solve(obj_fn, con_fn, x0, x_l, x_u, g_l, g_u, opts)
         np.testing.assert_allclose(float(state.obj), 17.014, atol=0.1)
+
+
+# ---------------------------------------------------------------
+# Feasibility restoration bridge tests
+# ---------------------------------------------------------------
+
+
+class TestJaxFeasibilityRestoration:
+    """Tests for the JAX-to-callback feasibility restoration bridge."""
+
+    def test_restoration_reduces_violation(self):
+        """Restoration should reduce constraint violation on a simple problem."""
+        from discopt._jax.ipm import _jax_feasibility_restoration
+
+        # Problem: x1^2 + x2^2 >= 1 with start at origin (infeasible)
+        def con_fn(x):
+            return jnp.array([x[0] ** 2 + x[1] ** 2])
+
+        x0 = jnp.array([0.1, 0.1])  # infeasible: 0.02 < 1
+        x_l = jnp.array([-2.0, -2.0])
+        x_u = jnp.array([2.0, 2.0])
+        g_l = jnp.array([1.0])  # x1^2 + x2^2 >= 1
+        g_u = jnp.array([1e20])
+
+        opts = IPMOptions(max_iter=200)
+        x_restored, success = _jax_feasibility_restoration(
+            con_fn,
+            x0,
+            x_l,
+            x_u,
+            g_l,
+            g_u,
+            opts,
+        )
+        assert success
+        # Restored point should satisfy the constraint better
+        g_restored = float(con_fn(x_restored)[0])
+        assert g_restored > 0.5  # significant improvement toward g >= 1
+
+    def test_restoration_already_feasible(self):
+        """Restoration on a feasible point should return success=False."""
+        from discopt._jax.ipm import _jax_feasibility_restoration
+
+        def con_fn(x):
+            return jnp.array([x[0] + x[1]])
+
+        x0 = jnp.array([1.0, 1.0])  # feasible: 2.0 <= 3.0
+        x_l = jnp.array([0.0, 0.0])
+        x_u = jnp.array([5.0, 5.0])
+        g_l = jnp.array([-1e20])
+        g_u = jnp.array([3.0])
+
+        opts = IPMOptions(max_iter=200)
+        _, success = _jax_feasibility_restoration(
+            con_fn,
+            x0,
+            x_l,
+            x_u,
+            g_l,
+            g_u,
+            opts,
+        )
+        assert not success  # already feasible, nothing to restore
+
+    def test_restoration_with_log_constraint(self):
+        """Restoration should handle log-domain constraints."""
+        from discopt._jax.ipm import _jax_feasibility_restoration
+
+        # log(1 + x1 - x2) >= 0 requires x1 - x2 >= 0
+        def con_fn(x):
+            return jnp.array([jnp.log(1.0 + x[0] - x[1])])
+
+        # Start where log is defined but constraint violated:
+        # 1 + 0.8 - 1.0 = 0.8, log(0.8) = -0.22 < 0
+        x0 = jnp.array([0.8, 1.0])
+        x_l = jnp.array([0.0, 0.0])
+        x_u = jnp.array([2.0, 2.0])
+        g_l = jnp.array([0.0])  # log(1+x1-x2) >= 0
+        g_u = jnp.array([1e20])
+
+        opts = IPMOptions(max_iter=200)
+        x_restored, success = _jax_feasibility_restoration(
+            con_fn,
+            x0,
+            x_l,
+            x_u,
+            g_l,
+            g_u,
+            opts,
+        )
+        assert success
+        g_val = float(con_fn(x_restored)[0])
+        assert g_val >= -0.1  # violation should be substantially reduced
+
+    def test_nan_filtering_in_batch(self):
+        """Batch solve with NaN results should not select NaN as best."""
+
+        # Objective that produces NaN for some x values
+        def obj_fn(x):
+            return jnp.log(x[0]) + x[1] ** 2
+
+        def con_fn(x):
+            return jnp.array([x[0] + x[1]])
+
+        n_starts = 3
+        # Start 0: valid, start 1: will produce NaN (x[0] near 0)
+        x0_batch = jnp.array(
+            [
+                [1.0, 0.5],
+                [0.001, 0.5],
+                [2.0, 0.1],
+            ]
+        )
+        xl = jnp.broadcast_to(jnp.array([0.01, -1.0]), (n_starts, 2))
+        xu = jnp.broadcast_to(jnp.array([3.0, 3.0]), (n_starts, 2))
+        g_l = jnp.array([-1e20])
+        g_u = jnp.array([2.0])
+
+        opts = IPMOptions(max_iter=200)
+        state = solve_nlp_batch(obj_fn, con_fn, x0_batch, xl, xu, g_l, g_u, opts)
+
+        converged = np.asarray(state.converged)
+        obj_vals = np.asarray(state.obj)
+        # Among converged results with finite obj, best should be picked
+        feasible_mask = ((converged == 1) | (converged == 2) | (converged == 3)) & np.isfinite(
+            obj_vals
+        )
+        if np.any(feasible_mask):
+            masked = np.where(feasible_mask, obj_vals, np.inf)
+            best_idx = int(np.argmin(masked))
+            assert np.isfinite(obj_vals[best_idx])

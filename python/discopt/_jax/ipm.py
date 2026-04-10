@@ -1052,6 +1052,62 @@ def ipm_solve(
 
 
 # ---------------------------------------------------------------------------
+# Feasibility restoration bridge (JAX -> callback-based restoration)
+# ---------------------------------------------------------------------------
+
+
+def _jax_feasibility_restoration(
+    con_fn: Callable,
+    x_current: jnp.ndarray,
+    x_l: jnp.ndarray,
+    x_u: jnp.ndarray,
+    g_l: jnp.ndarray,
+    g_u: jnp.ndarray,
+    opts: IPMOptions,
+) -> tuple[jnp.ndarray, bool]:
+    """Bridge JAX functions to the callback-based feasibility restoration.
+
+    When the pure-JAX IPM declares a subproblem infeasible (code 5), this
+    function wraps the JAX constraint function into numpy callbacks and
+    invokes the softplus-smoothed restoration from ``ipm_callbacks``.
+
+    Returns (x_restored, success) where success means violation decreased
+    by at least 10%.
+    """
+    import numpy as np
+
+    # Lazy import to avoid circular dependency (ipm_callbacks imports from ipm)
+    from discopt._jax.ipm_callbacks import _feasibility_restoration
+
+    # Wrap JAX functions as numpy callbacks
+    def con_np(x):
+        return np.asarray(con_fn(jnp.asarray(x, dtype=jnp.float64)), dtype=np.float64)
+
+    jac_jax = jax.jacobian(con_fn)
+
+    def jac_np(x):
+        return np.asarray(jac_jax(jnp.asarray(x, dtype=jnp.float64)), dtype=np.float64)
+
+    # Compute constraint bound masks (same logic as _make_problem_data)
+    has_g_lb = (jnp.asarray(g_l) > -_INF + 1).astype(jnp.float64)
+    has_g_ub = (jnp.asarray(g_u) < _INF - 1).astype(jnp.float64)
+
+    x_restored_np, success = _feasibility_restoration(
+        con_np,
+        jac_np,
+        np.asarray(x_current, dtype=np.float64),
+        np.asarray(x_l, dtype=np.float64),
+        np.asarray(x_u, dtype=np.float64),
+        np.asarray(g_l, dtype=np.float64),
+        np.asarray(g_u, dtype=np.float64),
+        np.asarray(has_g_lb, dtype=np.float64),
+        np.asarray(has_g_ub, dtype=np.float64),
+        opts,
+    )
+    return jnp.asarray(x_restored_np, dtype=jnp.float64), bool(success)
+
+
+# ---------------------------------------------------------------------------
 # Layer 2: NLPEvaluator wrapper
 # ---------------------------------------------------------------------------
 
@@ -1126,6 +1182,40 @@ def solve_nlp_ipm(
     wall_time = time.perf_counter() - t0
 
     conv = int(state.converged)
+
+    # Feasibility restoration: when the IPM declares infeasible (code 5),
+    # try to find a feasible point via the softplus-smoothed restoration
+    # subproblem, then re-solve from the restored point.
+    if conv == 5 and con_fn is not None and g_l is not None and g_u is not None:
+        x_rest_start = state.x
+        for _rest_attempt in range(3):
+            x_restored, rest_ok = _jax_feasibility_restoration(
+                con_fn,
+                x_rest_start,
+                x_l,
+                x_u,
+                g_l,
+                g_u,
+                ipm_opts,
+            )
+            if not rest_ok:
+                break
+            state = ipm_solve(
+                obj_fn,
+                con_fn,
+                x_restored,
+                x_l,
+                x_u,
+                g_l,
+                g_u,
+                ipm_opts,
+            )
+            conv = int(state.converged)
+            if conv != 5:
+                break
+            x_rest_start = state.x
+        wall_time = time.perf_counter() - t0
+
     # Check wall-time limit (issue #5). The JIT loop cannot enforce this
     # mid-iteration, so we check post-hoc and downgrade the status.
     exceeded_time = max_wall_time is not None and wall_time > max_wall_time
