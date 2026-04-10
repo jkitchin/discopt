@@ -284,6 +284,30 @@ def _solve_nlp_subproblem(evaluator, sub_lb, sub_ub, nlp_solver: str) -> np.ndar
 
         if result.status == SolveStatus.OPTIMAL and result.x is not None:
             return np.asarray(result.x, dtype=np.float64)
+
+        # Accept ITERATION_LIMIT if the solution is primal-feasible.
+        # The IPM may fail to certify dual optimality (e.g. on LPs or
+        # near-degenerate NLPs) while still finding the correct primal
+        # solution.  Any feasible point is a valid LOA upper bound.
+        if result.status == SolveStatus.ITERATION_LIMIT and result.x is not None:
+            x_sol = np.asarray(result.x, dtype=np.float64)
+            atol = 1e-6
+            if np.all(x_sol >= sub_lb - atol) and np.all(x_sol <= sub_ub + atol):
+                feas = True
+                if evaluator.n_constraints > 0:
+                    g_val = evaluator.evaluate_constraints(x_sol)
+                    model = getattr(evaluator, "_model", None)
+                    if model is None:
+                        model = proxy._eval._model
+                    from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
+
+                    c_lb, c_ub = _infer_constraint_bounds(model)
+                    for ci in range(len(c_lb)):
+                        if g_val[ci] < c_lb[ci] - atol or g_val[ci] > c_ub[ci] + atol:
+                            feas = False
+                            break
+                if feas:
+                    return x_sol
     except Exception:
         pass
     return None

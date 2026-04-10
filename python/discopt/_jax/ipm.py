@@ -352,6 +352,9 @@ def _make_iteration_body(obj_fn, con_fn, pd, opts):
         else:
             H = jax.hessian(obj_fn)(x)
 
+        # Detect LP: zero Lagrangian Hessian → no curvature from objective
+        is_lp = jnp.max(jnp.abs(H)) < 1e-12
+
         # Variable bound slacks and Sigma
         # Use _SLACK_FLOOR to prevent oscillation when x is at a bound
         sx_l = jnp.maximum(x - pd.x_l, _SLACK_FLOOR) * pd.has_lb
@@ -627,16 +630,24 @@ def _make_iteration_body(obj_fn, con_fn, pd, opts):
 
             # Step 3: Corrector with centering + cross-product correction
             sigma_mu = sigma * mu
+            # For LPs: use mu (not sigma*mu) as the centering target.
+            # sigma≈0 for LPs (affine step drives complementarity to zero),
+            # which makes the corrector direction identical to the affine
+            # (mu=0) direction — pointing straight to the bound and causing
+            # oscillation.  Using mu preserves centering on the central path.
+            center_mu = jnp.where(is_lp, mu, sigma_mu)
 
             # Cross-product correction: dSx * dZ / sx (second-order term)
+            # Skip for LPs since we're not using the affine predictor
             cross_x = pd.has_lb * dx_aff * dz_l_aff / jnp.maximum(sx_l, _SLACK_FLOOR)
             cross_x = cross_x - pd.has_ub * (-dx_aff) * dz_u_aff / jnp.maximum(sx_u, _SLACK_FLOOR)
+            cross_x = jnp.where(is_lp, 0.0, cross_x)
 
-            rhs_x_corr = rhs_x_base + sigma_mu * inv_sx_l - sigma_mu * inv_sx_u
+            rhs_x_corr = rhs_x_base + center_mu * inv_sx_l - center_mu * inv_sx_u
             rhs_x_corr = rhs_x_corr - cross_x
             if m > 0:
                 rhs_x_corr = rhs_x_corr - J.T @ y
-                rhs_y_corr = rhs_y_base + sigma_mu * inv_z_s_ub - sigma_mu * inv_z_s_lb
+                rhs_y_corr = rhs_y_base + center_mu * inv_z_s_ub - center_mu * inv_z_s_lb
             else:
                 rhs_y_corr = jnp.zeros(0, dtype=jnp.float64)
 
@@ -646,9 +657,12 @@ def _make_iteration_body(obj_fn, con_fn, pd, opts):
             dx, dy, _ = _solve_kkt(final_dw)
 
         # --- Recover bound dual steps ---
-        # Target complementarity: sigma*mu for PC, mu for standard
+        # Target complementarity: sigma*mu for PC, mu for standard.
+        # For LPs (is_lp), disable predictor-corrector — the affine step
+        # drives sigma near zero which makes centering too aggressive,
+        # and monotone mu handles the decrease schedule instead.
         if opts.predictor_corrector and n > 0:
-            mu_target = sigma_mu
+            mu_target = jnp.where(is_lp, mu, sigma_mu)
         else:
             mu_target = mu
         # dz_l = (mu_target - z_l*(sx_l + dx)) / sx_l
@@ -735,14 +749,23 @@ def _make_iteration_body(obj_fn, con_fn, pd, opts):
             alpha, _ = carry
             return (alpha * 0.5, alpha * 0.5)
 
-        alpha_ls, _ = jax.lax.while_loop(_ls_cond, _ls_body, (alpha_x, alpha_x))
+        alpha_ls_merit, _ = jax.lax.while_loop(_ls_cond, _ls_body, (alpha_x, alpha_x))
+
+        # For bound-only LPs: skip line search, accept full FTB step.
+        # The barrier objective is strictly convex (log-barrier Hessian is
+        # positive definite), so the Newton step is always a descent
+        # direction and the FTB rule prevents leaving the feasible region.
+        # For constrained LPs and NLPs: use the l1 merit line search.
+        skip_ls = is_lp & (m == 0)
+        alpha_ls = jnp.where(skip_ls, alpha_x, alpha_ls_merit)
 
         # --- Stall detection and recovery ---
         # When the line search fails for consecutive iterations, the Newton
         # direction is not a descent direction for the l1 merit (Maratos
         # effect near active bounds with degenerate curvature).  Recover by
         # taking a projected steepest-descent step on the objective.
-        ls_failed = alpha_ls < 1e-14
+        # For bound-only LPs with skipped line search, stalls don't apply.
+        ls_failed = (~skip_ls) & (alpha_ls < 1e-14)
         new_stall = jnp.where(ls_failed, state.stall_count + 1, jnp.int32(0))
         do_recovery = new_stall >= 3
 
@@ -804,6 +827,16 @@ def _make_iteration_body(obj_fn, con_fn, pd, opts):
         z_l_new = jnp.maximum(state.z_l + alpha_d * dz_l, _EPS) * pd.has_lb
         z_u_new = jnp.maximum(state.z_u + alpha_d * dz_u, _EPS) * pd.has_ub
 
+        # For LPs: reset z from centrality z = mu/s after the step.
+        # Separate primal/dual step sizes cause z*s ≠ mu, pushing the
+        # iterate off the central path and creating 2-cycle oscillations.
+        sx_l_step = jnp.maximum(x_new - pd.x_l, _SLACK_FLOOR) * pd.has_lb
+        sx_u_step = jnp.maximum(pd.x_u - x_new, _SLACK_FLOOR) * pd.has_ub
+        z_l_central = jnp.where(pd.has_lb > 0.5, mu / jnp.maximum(sx_l_step, _SLACK_FLOOR), 0.0)
+        z_u_central = jnp.where(pd.has_ub > 0.5, mu / jnp.maximum(sx_u_step, _SLACK_FLOOR), 0.0)
+        z_l_new = jnp.where(is_lp, z_l_central, z_l_new)
+        z_u_new = jnp.where(is_lp, z_u_central, z_u_new)
+
         if m > 0:
             y_new = y + alpha_d * dy
             # For inequality (≤) constraints, the multiplier y = z_s ≥ 0.
@@ -862,10 +895,6 @@ def _make_iteration_body(obj_fn, con_fn, pd, opts):
         else:
             mu_new = jnp.minimum(mu_candidate, mu)
         mu_new = jnp.maximum(mu_new, opts.mu_min)
-
-        # On recovery: don't bump mu — the steepest descent step alone
-        # provides progress.  Bumping mu would prevent the KKT convergence
-        # check from being satisfied even when x is at the optimum.
 
         # --- Check convergence ---
         grad_f_new = grad_fn(x_new)
@@ -927,9 +956,12 @@ def _make_iteration_body(obj_fn, con_fn, pd, opts):
             jnp.int32(0),
             state.infeas_count + 1,
         )
-        infeas_detected = (
-            (new_infeas_count >= 30) & (primal_inf > opts.acceptable_tol) & (mu < 1e-4)
-        )
+        # Only declare infeasible when primal violation is substantial
+        # (> 1e-3).  Small violations (e.g. 1e-4) may still converge
+        # with more iterations — especially for problems with many
+        # constraints where convergence is slow.  False infeasibility
+        # declarations are worse than extra iterations.
+        infeas_detected = (new_infeas_count >= 30) & (primal_inf > 1e-3) & (mu < 1e-4)
 
         code = jnp.where(optimal, jnp.int32(1), jnp.int32(0))
         code = jnp.where((code == 0) & acc_conv, jnp.int32(2), code)
@@ -1097,17 +1129,45 @@ def solve_nlp_ipm(
     # Check wall-time limit (issue #5). The JIT loop cannot enforce this
     # mid-iteration, so we check post-hoc and downgrade the status.
     exceeded_time = max_wall_time is not None and wall_time > max_wall_time
+    n = evaluator.n_variables
     if conv in (1, 2) and not exceeded_time:
         status = SolveStatus.OPTIMAL
-    elif conv == 4:
-        # Stalled: primal feasible but dual not certified (issue #12).
-        # Report as iteration limit so B&B doesn't trust the objective.
-        status = SolveStatus.ITERATION_LIMIT
     elif conv == 5:
-        # Infeasibility detected (issue #12).
         status = SolveStatus.INFEASIBLE
-    elif conv == 3 or exceeded_time:
+    elif conv in (3, 4) or exceeded_time:
+        # Code 3: max iterations. Code 4: primal feasible, dual stalled.
+        # Attempt to recover bound multipliers from stationarity.
         status = SolveStatus.ITERATION_LIMIT
+        x_sol = np.asarray(state.x)
+        atol_bound = max(ipm_opts.acceptable_tol, 1e-6)
+        primal_feas: bool = bool(
+            np.all(x_sol >= lb - atol_bound) and np.all(x_sol <= ub + atol_bound)
+        )
+        if m > 0 and primal_feas and con_fn is not None:
+            g_val = np.asarray(con_fn(state.x))
+            g_l_np = np.asarray(g_l) if g_l is not None else np.full(m, -np.inf)
+            g_u_np = np.asarray(g_u) if g_u is not None else np.full(m, np.inf)
+            if np.any(g_val < g_l_np - atol_bound) or np.any(g_val > g_u_np + atol_bound):
+                primal_feas = False
+        if primal_feas:
+            grad_f_sol = np.asarray(jax.grad(obj_fn)(state.x))
+            if m > 0 and con_fn is not None:
+                J_sol = np.asarray(jax.jacobian(con_fn)(state.x))
+                grad_L_sol = grad_f_sol + J_sol.T @ np.asarray(state.y)
+            else:
+                grad_L_sol = grad_f_sol.copy()
+            z_l_recov = np.zeros(n)
+            z_u_recov = np.zeros(n)
+            for i in range(n):
+                at_lb = (x_sol[i] - lb[i]) < atol_bound
+                at_ub = (ub[i] - x_sol[i]) < atol_bound
+                if at_lb and not at_ub:
+                    z_l_recov[i] = max(grad_L_sol[i], 0.0)
+                elif at_ub and not at_lb:
+                    z_u_recov[i] = max(-grad_L_sol[i], 0.0)
+            resid = grad_L_sol - z_l_recov + z_u_recov
+            if float(np.max(np.abs(resid))) <= atol_bound:
+                status = SolveStatus.OPTIMAL
     else:
         status = SolveStatus.ERROR
 
