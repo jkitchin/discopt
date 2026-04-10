@@ -32,6 +32,8 @@ Model.solve()  -->  Python orchestrator  -->  Rust TreeManager (B&B engine)
 
 **Orchestrator** (`python/discopt/solver.py`): End-to-end `Model.solve()` connecting all components. At each B&B node: solve continuous NLP relaxation with the interior-point method {cite:p}`Nocedal2006`, prune infeasible nodes, fathom integer-feasible solutions, branch on most fractional variable.
 
+**Parameter estimation & MBDoE** (`python/discopt/estimate.py`, `python/discopt/doe/`): Model-based parameter estimation via weighted least-squares NLP, and optimal design of experiments using Fisher Information Matrix analysis {cite:p}`Wang2022,Franceschini2008`. Key advantage: exact sensitivity Jacobians via JAX autodiff (no finite differences). Includes sequential DoE loop, identifiability analysis, and design space exploration with D/A/E/ME-optimality criteria {cite:p}`Atkinson2007`.
+
 ## Quick Start
 
 ```python
@@ -50,6 +52,47 @@ result = m.solve()
 print(result.status)     # "optimal"
 print(result.objective)  # 0.5
 print(result.x)          # {"x": 0.5, "y": 0.5, "z": 0.0}
+```
+
+## Parameter Estimation & Design of Experiments
+
+discopt includes model-based parameter estimation and optimal experimental design,
+using exact JAX autodiff for Fisher Information Matrix computation.
+
+```python
+from discopt.estimate import Experiment, ExperimentModel, estimate_parameters
+from discopt.doe import compute_fim, optimal_experiment, DesignCriterion
+import discopt.modeling as dm
+import numpy as np
+
+# Define an experiment: y = k * x
+class MyExperiment(Experiment):
+    def create_model(self, **kwargs):
+        m = dm.Model("exp")
+        k = m.continuous("k", lb=0.01, ub=20)
+        x = m.continuous("x", lb=0.1, ub=10)
+        return ExperimentModel(
+            model=m,
+            unknown_parameters={"k": k},
+            design_inputs={"x": x},
+            responses={"y": k * x},
+            measurement_error={"y": 0.1},
+        )
+
+# Estimate k from data
+exp = MyExperiment()
+data = {"y": 6.0}  # observed at some x
+result = estimate_parameters(exp, data)
+print(result.parameters)  # {"k": ...}
+print(result.confidence_intervals)
+
+# Find optimal measurement location (D-optimal)
+design = optimal_experiment(
+    exp, param_values={"k": 2.0},
+    design_bounds={"x": (0.5, 10.0)},
+    criterion=DesignCriterion.D_OPTIMAL,
+)
+print(design.summary())
 ```
 
 ## NLP Backend Comparison

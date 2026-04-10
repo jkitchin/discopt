@@ -48,6 +48,7 @@ parts:
     chapters:
       - file: notebooks/nn_embedding
       - file: notebooks/decision_focused_learning
+      - file: notebooks/estimation_and_doe
       - file: notebooks/tutorial_estimation
       - file: notebooks/tutorial_doe
   - caption: API Reference
