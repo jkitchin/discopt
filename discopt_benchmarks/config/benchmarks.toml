@@ -250,6 +250,40 @@ description = "Global optimization full benchmark"
 max_instances = 20
 time_limit_seconds = 600
 
+# ── MINLPTests.jl standardized suites ─────────────────────────────────────
+# Problems translated from https://github.com/jump-dev/MINLPTests.jl (MIT).
+# Correctness tests: python/tests/test_minlptests.py
+# Phase gate: minlptests_nlp_cvx_pass_rate added at phase 2.
+
+[suites.minlptests_smoke]
+description = "MINLPTests.jl smoke (one instance per category)"
+sources = ["minlptests"]
+instance_list = [
+    "minlptests_nlp_cvx_101_010",
+    "minlptests_nlp_cvx_107_010",
+    "minlptests_nlp_003_010",
+    "minlptests_nlp_mi_005_010",
+]
+time_limit_seconds = 60
+
+[suites.minlptests_nlp_cvx]
+description = "MINLPTests.jl convex NLP suite (all registered nlp_convex instances)"
+sources = ["minlptests"]
+problem_class = "nlp_convex"
+time_limit_seconds = 60
+
+[suites.minlptests_nlp]
+description = "MINLPTests.jl nonconvex NLP suite (all registered nlp_nonconvex instances)"
+sources = ["minlptests"]
+problem_class = "nlp_nonconvex"
+time_limit_seconds = 120
+
+[suites.minlptests_mi]
+description = "MINLPTests.jl MINLP suite (all registered minlp_nonconvex instances)"
+sources = ["minlptests"]
+problem_class = "minlp_nonconvex"
+time_limit_seconds = 300
+
 # ─────────────────────────────────────────────────────────────
 # SOLVER CONFIGURATIONS
 # ─────────────────────────────────────────────────────────────

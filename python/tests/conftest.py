@@ -11,3 +11,4 @@ os.environ["JAX_ENABLE_X64"] = "1"
 def pytest_configure(config):
     """Register custom markers."""
     config.addinivalue_line("markers", "correctness: Known-optimum correctness validation")
+    config.addinivalue_line("markers", "minlptests: MINLPTests.jl standardized NLP/MINLP problems")

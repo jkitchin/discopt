@@ -1,0 +1,260 @@
+# MINLPTests.jl known solver gaps.
+#
+# Track problems where discopt does not yet converge due to missing features or
+# known algorithmic limitations. "Wrong objective" (solver claims optimal but
+# returns the wrong value) is NEVER allowed here — those are blocker bugs that
+# must be fixed, not silenced.
+#
+# Allowed categories: "no_convergence" | "time_limit" | "numerical_error"
+#
+# Format:
+#   [minlptests."<problem_id>/<mode>"]
+#   category = "no_convergence"
+#   issue    = <GitHub issue number>
+#   note     = "human-readable explanation"
+
+[minlptests."nlp_006_010/primary"]
+category = "no_convergence"
+issue    = 4
+note     = "user-defined function via JuMP.register() has no dm equivalent"
+
+[minlptests."nlp_mi_006_010/primary"]
+category = "no_convergence"
+issue    = 4
+note     = "user-defined function via JuMP.register() has no dm equivalent"
+
+# ── Maximize sign bug (issue #6 / jkitchin/discopt#28) ──────────────────────
+# RESOLVED: Fixed in f6d15a5 ("Fix maximize objective sign in solver and QP
+# extractor"). All 14 entries removed after rebase confirmed they now pass.
+
+# ── NaN on division + integer (issue #7) ─────────────────────────────────────
+
+[minlptests."nlp_mi_005_010/primary"]
+category = "numerical_error"
+issue    = 7
+note     = "division constraints (1/x form) produce NaN when x integer lb=0; crashes B&B"
+
+# ── IPM iteration_limit on unbounded variables ───────────────────────────────
+# Variables without explicit bounds get lb=-1e20,ub=1e20 which causes the IPM
+# to hit iteration_limit. All 501_011 (sqrt-constraint) variants are affected,
+# plus several problems with unbounded continuous variables.
+
+[minlptests."nlp_cvx_001_010/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: unbounded vars (LP with default bounds)"
+
+[minlptests."nlp_cvx_002_010/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: unbounded vars (LP with default bounds)"
+
+[minlptests."nlp_cvx_102_014/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: unbounded vars"
+
+[minlptests."nlp_cvx_103_012/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: unbounded vars"
+
+[minlptests."nlp_cvx_103_013/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: unbounded vars"
+
+[minlptests."nlp_cvx_104_010/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: unbounded vars"
+
+[minlptests."nlp_cvx_105_012/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: unbounded vars (exp/log constraints)"
+
+[minlptests."nlp_cvx_108_010/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: nonlinear constraint intersection"
+
+[minlptests."nlp_cvx_108_013/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: nonlinear constraint intersection"
+
+[minlptests."nlp_cvx_202_012/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: 3D paraboloid, unbounded vars"
+
+[minlptests."nlp_cvx_202_013/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: 3D paraboloid, unbounded vars"
+
+[minlptests."nlp_cvx_203_010/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: SOC + quadratic, unbounded vars"
+
+[minlptests."nlp_cvx_501_011_1d/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: sqrt-constraint sphere (all 501_011 affected)"
+
+[minlptests."nlp_cvx_501_011_2d/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: sqrt-constraint sphere"
+
+[minlptests."nlp_cvx_501_011_3d/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: sqrt-constraint sphere"
+
+[minlptests."nlp_cvx_501_011_4d/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: sqrt-constraint sphere"
+
+[minlptests."nlp_cvx_501_011_5d/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: sqrt-constraint sphere"
+
+[minlptests."nlp_cvx_501_011_6d/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: sqrt-constraint sphere"
+
+[minlptests."nlp_cvx_501_011_7d/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: sqrt-constraint sphere"
+
+[minlptests."nlp_cvx_501_011_8d/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: sqrt-constraint sphere"
+
+[minlptests."nlp_cvx_501_011_9d/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: sqrt-constraint sphere"
+
+[minlptests."nlp_cvx_501_011_10d/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: sqrt-constraint sphere"
+
+[minlptests."nlp_cvx_501_011_11d/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: sqrt-constraint sphere"
+
+[minlptests."nlp_cvx_501_011_12d/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: sqrt-constraint sphere"
+
+[minlptests."nlp_cvx_501_011_13d/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: sqrt-constraint sphere"
+
+[minlptests."nlp_cvx_501_011_14d/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: sqrt-constraint sphere"
+
+[minlptests."nlp_cvx_501_011_15d/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: sqrt-constraint sphere"
+
+[minlptests."nlp_cvx_501_011_16d/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: sqrt-constraint sphere"
+
+[minlptests."nlp_cvx_501_011_17d/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: sqrt-constraint sphere"
+
+[minlptests."nlp_cvx_501_011_18d/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: sqrt-constraint sphere"
+
+[minlptests."nlp_cvx_501_011_19d/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: sqrt-constraint sphere"
+
+[minlptests."nlp_cvx_501_011_20d/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: sqrt-constraint sphere"
+
+# ── IPM iteration_limit on nonconvex NLP ─────────────────────────────────────
+
+[minlptests."nlp_004_010/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: unbounded y,z with tan/abs objective"
+
+[minlptests."nlp_009_010/primary"]
+category = "no_convergence"
+issue    = 32
+note     = "iteration_limit: min/max smoothing with unbounded x"
+
+# ── False infeasible ─────────────────────────────────────────────────────────
+
+[minlptests."nlp_cvx_105_011/primary"]
+category = "numerical_error"
+issue    = 33
+note     = "false infeasible: feasible exp/log problem incorrectly declared infeasible"
+
+# ── Convex fast path not firing ──────────────────────────────────────────────
+# These problems solve correctly but the convex_fast_path flag is False,
+# failing the is_convex assertion in the test.
+
+[minlptests."nlp_cvx_001_011/primary"]
+category = "no_convergence"
+issue    = 34
+note     = "convex_fast_path=False: LP not detected as convex"
+
+[minlptests."nlp_cvx_108_011/primary"]
+category = "no_convergence"
+issue    = 34
+note     = "convex_fast_path=False: nonlinear constraint intersection"
+
+[minlptests."nlp_cvx_108_012/primary"]
+category = "no_convergence"
+issue    = 34
+note     = "convex_fast_path=False: nonlinear constraint intersection"
+
+[minlptests."nlp_cvx_204_010/primary"]
+category = "no_convergence"
+issue    = 34
+note     = "convex_fast_path=False: rotated SOC with x^2/z"
+
+[minlptests."nlp_cvx_205_010/primary"]
+category = "no_convergence"
+issue    = 34
+note     = "convex_fast_path=False: exponential cone"
+
+[minlptests."nlp_cvx_206_010/primary"]
+category = "no_convergence"
+issue    = 34
+note     = "convex_fast_path=False: power cone"
+
+# ── Infeasibility detection ──────────────────────────────────────────────────
+
+[minlptests."nlp_007_010/primary"]
+category = "no_convergence"
+issue    = 35
+note     = "iteration_limit instead of infeasible: y=exp(x), x=y^2 system"
