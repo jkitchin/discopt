@@ -873,6 +873,9 @@ class SolveResult:
     _explanation: Optional[str] = None
     _model: Optional["Model"] = None
 
+    # Sensitivity cache (populated lazily by .gradient())
+    _sensitivity: Optional[np.ndarray] = None
+
     def value(self, var: Variable) -> np.ndarray:
         """
         Get the optimal value of a variable.
@@ -948,11 +951,15 @@ class SolveResult:
         )
         return validate_explanation(text)
 
-    def gradient(self, param: Parameter) -> np.ndarray:
+    def gradient(self, param: Parameter) -> Union[float, np.ndarray]:
         """
         Sensitivity of optimal objective w.r.t. a parameter.
 
-        Uses implicit differentiation through KKT conditions.
+        Uses the envelope theorem: for ``min_x f(x; p) s.t. g(x; p) <= 0``,
+        the sensitivity is ``d(obj*)/dp = dL/dp |_{x*, λ*}`` where L is the
+        Lagrangian and λ* are the optimal dual variables.
+
+        Computed lazily on first call and cached for subsequent calls.
 
         Parameters
         ----------
@@ -961,15 +968,45 @@ class SolveResult:
 
         Returns
         -------
-        numpy.ndarray
-            Gradient ``d(obj*)/d(param)``.
+        float or numpy.ndarray
+            Gradient ``d(obj*)/d(param)``, scalar for scalar parameters.
 
         Raises
         ------
-        NotImplementedError
-            Sensitivity analysis is a Phase 3 feature.
+        ValueError
+            If the model has integer/binary variables, no model reference
+            is attached, or no parameters exist.
         """
-        raise NotImplementedError("Sensitivity analysis requires JAX backend (Phase 3 feature)")
+        if self._model is None:
+            raise ValueError(
+                "No model attached to this SolveResult. "
+                "gradient() requires the model reference (set by Model.solve())."
+            )
+        if not self._model._parameters:
+            raise ValueError("Model has no parameters. Nothing to differentiate.")
+
+        # Check all variables are continuous
+        for v in self._model._variables:
+            if v.var_type != VarType.CONTINUOUS:
+                raise ValueError(
+                    "gradient() only supports continuous models. "
+                    f"Variable '{v.name}' is {v.var_type.value}."
+                )
+
+        # Lazy computation: compute sensitivity from existing solution
+        if self._sensitivity is None:
+            from discopt._jax.differentiable import _compute_sensitivity_at_solution
+
+            self._sensitivity = _compute_sensitivity_at_solution(self._model, self.x)
+
+        # Extract the slice for this parameter
+        from discopt._jax.differentiable import _get_param_slice
+
+        start, end = _get_param_slice(param, self._model)
+        grad_flat = self._sensitivity[start:end]
+        if param.shape == () or (end - start) == 1:
+            return float(grad_flat[0])
+        return grad_flat.reshape(param.shape)
 
     def __repr__(self):
         return (

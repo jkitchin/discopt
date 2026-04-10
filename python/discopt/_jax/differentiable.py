@@ -445,6 +445,82 @@ def differentiable_solve(
     )
 
 
+def _compute_sensitivity_at_solution(
+    model: Model,
+    x_dict: dict[str, np.ndarray],
+    *,
+    nlp_solver: str = "ipm",
+    solver_options: Optional[dict] = None,
+) -> np.ndarray:
+    """Compute parameter sensitivity from an existing solution.
+
+    Re-solves the NLP warm-started from the known solution to obtain
+    dual variables, then applies the envelope theorem.
+
+    Args:
+        model: A continuous Model with parameters.
+        x_dict: Variable values at the solution (from SolveResult.x).
+        nlp_solver: NLP backend: ``"ipm"`` (default) or ``"ipopt"``.
+        solver_options: Options dict passed to the NLP solver.
+
+    Returns:
+        1-D array of sensitivities d(obj*)/dp for all parameters.
+    """
+    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt.solvers import SolveStatus
+
+    evaluator = NLPEvaluator(model)
+    opts = dict(solver_options or {})
+    opts.setdefault("print_level", 0)
+
+    # Build initial point from the existing solution
+    x0_parts = []
+    for v in model._variables:
+        val = np.asarray(x_dict[v.name], dtype=np.float64).ravel()
+        x0_parts.append(val)
+    x0 = np.concatenate(x0_parts)
+
+    nlp_result = _dispatch_nlp_solve(nlp_solver, evaluator, x0, opts)
+
+    if nlp_result.status != SolveStatus.OPTIMAL:
+        # Fall back to ipopt if ipm didn't converge
+        if nlp_solver == "ipm":
+            try:
+                nlp_result = _dispatch_nlp_solve("ipopt", evaluator, x0, opts)
+            except Exception:
+                pass
+        if nlp_result.status != SolveStatus.OPTIMAL:
+            raise RuntimeError(f"Sensitivity NLP solve did not converge: {nlp_result.status.value}")
+
+    x_star = nlp_result.x
+    multipliers = nlp_result.multipliers
+
+    # Envelope theorem: dL/dp at (x*, lambda*, p)
+    obj_fn = _compile_parametric_objective(model)
+    constraint_fns = []
+    for c in model._constraints:
+        if isinstance(c, Constraint):
+            constraint_fns.append(_compile_parametric_constraint(c, model))
+
+    p_flat = _flatten_params(model)
+    x_star_jax = jnp.array(x_star, dtype=jnp.float64)
+
+    if multipliers is not None and len(constraint_fns) > 0:
+        mults = jnp.array(multipliers, dtype=jnp.float64)
+
+        def lagrangian_p(p_flat_arg):
+            obj_val = obj_fn(x_star_jax, p_flat_arg)
+            con_vals = jnp.array([cf(x_star_jax, p_flat_arg) for cf in constraint_fns])
+            return obj_val + jnp.dot(mults, con_vals)
+    else:
+
+        def lagrangian_p(p_flat_arg):
+            return obj_fn(x_star_jax, p_flat_arg)
+
+    grad_lagrangian_p = jax.grad(lagrangian_p)
+    return np.asarray(grad_lagrangian_p(p_flat))
+
+
 class DiffSolveResult:
     """Result of a differentiable solve with parameter sensitivity support."""
 

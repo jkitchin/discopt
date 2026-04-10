@@ -76,6 +76,18 @@ from discopt.modeling.examples import (
     example_simple_minlp as example_simple_minlp,
 )
 
+# Lazy imports for optional modules (avoid import overhead at startup)
+
+
+def estimate_parameters(*args, **kwargs):
+    """Estimate unknown parameters from experimental data.
+
+    See :func:`discopt.estimate.estimate_parameters` for full documentation.
+    """
+    from discopt.estimate import estimate_parameters as _ep
+
+    return _ep(*args, **kwargs)
+
 
 def chat(llm_model: str | None = None, verbose: bool = True):
     """Start an interactive LLM-powered model building session.

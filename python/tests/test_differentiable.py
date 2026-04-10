@@ -1136,3 +1136,79 @@ class TestSIPOPTFeatures:
         assert info.dx_dp.shape == (1, 1)
         assert info.n_vars == 1
         assert info.H_xp is not None
+
+
+# ──────────────────────────────────────────────────────────
+# TestSolveResultGradient
+# ──────────────────────────────────────────────────────────
+
+
+class TestSolveResultGradient:
+    """Test SolveResult.gradient() lazy sensitivity computation."""
+
+    def test_gradient_quadratic_at_optimum(self):
+        """min (x - p)^2: x*=p, obj*=0, d(obj*)/dp = 0."""
+        m = dm.Model()
+        p = m.parameter("p", value=2.0)
+        x = m.continuous("x", lb=-10, ub=10)
+        m.minimize((x - p) ** 2)
+        result = m.solve()
+        assert result.gradient(p) == pytest.approx(0.0, abs=1e-4)
+
+    def test_gradient_linear_objective(self):
+        """min p*x s.t. x >= 1: x*=1, obj*=p, d(obj*)/dp = 1."""
+        m = dm.Model()
+        p = m.parameter("p", value=3.0)
+        x = m.continuous("x", lb=1, ub=10)
+        m.minimize(p * x)
+        result = m.solve()
+        assert result.gradient(p) == pytest.approx(1.0, abs=1e-3)
+
+    def test_gradient_cached_on_second_call(self):
+        """Second call to gradient() uses cached sensitivity."""
+        m = dm.Model()
+        p = m.parameter("p", value=3.0)
+        x = m.continuous("x", lb=1, ub=10)
+        m.minimize(p * x)
+        result = m.solve()
+        g1 = result.gradient(p)
+        # _sensitivity should now be cached
+        assert result._sensitivity is not None
+        g2 = result.gradient(p)
+        assert g1 == pytest.approx(g2)
+
+    def test_gradient_raises_for_binary_model(self):
+        """gradient() raises ValueError for models with integer variables."""
+        m = dm.Model()
+        m.parameter("p", value=1.0)
+        y = m.binary("y")
+        m.minimize(y)
+        result = m.solve()
+        with pytest.raises(ValueError, match="continuous"):
+            result.gradient(m._parameters[0])
+
+    def test_gradient_raises_no_parameters(self):
+        """gradient() raises ValueError when model has no parameters."""
+        m = dm.Model()
+        x = m.continuous("x", lb=0, ub=10)
+        m.minimize(x)
+        result = m.solve()
+        from discopt.modeling.core import Parameter
+
+        dummy_param = Parameter("dummy", 1.0, m)
+        with pytest.raises(ValueError, match="no parameters"):
+            result.gradient(dummy_param)
+
+    def test_gradient_multiple_parameters(self):
+        """min c1*x1 + c2*x2 s.t. x1+x2>=1: d(obj*)/dc1=x1*, d(obj*)/dc2=x2*."""
+        m = dm.Model()
+        c1 = m.parameter("c1", value=1.0)
+        c2 = m.parameter("c2", value=3.0)
+        x1 = m.continuous("x1", lb=0, ub=5)
+        x2 = m.continuous("x2", lb=0, ub=5)
+        m.minimize(c1 * x1 + c2 * x2)
+        m.subject_to(x1 + x2 >= 1)
+        result = m.solve()
+        # c1 < c2, so x1*=1, x2*=0
+        assert result.gradient(c1) == pytest.approx(1.0, abs=1e-2)
+        assert result.gradient(c2) == pytest.approx(0.0, abs=1e-2)
