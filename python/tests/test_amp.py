@@ -1077,6 +1077,59 @@ class TestCurrentCodeWeaknesses:
         assert (1.0, 1.0) in rounded  # floor on the second variable
         assert (2.0, 2.0) in rounded  # ceil on the first variable
 
+    def test_best_nlp_candidate_chooses_lowest_feasible_objective(self, monkeypatch):
+        """Integer rounding fallback should keep the best feasible NLP candidate."""
+        from discopt.solvers import amp as amp_mod
+
+        m = Model("best_candidate")
+        m.integer("y", lb=0, ub=2)
+
+        candidates = [
+            np.array([0.0], dtype=np.float64),
+            np.array([1.0], dtype=np.float64),
+            np.array([2.0], dtype=np.float64),
+        ]
+        objectives = {0.0: 4.0, 1.0: 1.5, 2.0: 3.0}
+
+        monkeypatch.setattr(
+            amp_mod,
+            "_integer_rounding_candidates",
+            lambda x0, model: [cand.copy() for cand in candidates],
+        )
+        monkeypatch.setattr(
+            amp_mod,
+            "_build_fixed_integer_bounds",
+            lambda x0, model, flat_lb, flat_ub: (flat_lb.copy(), flat_ub.copy()),
+        )
+        monkeypatch.setattr(
+            amp_mod,
+            "_solve_nlp_subproblem",
+            lambda evaluator, x0, lb, ub, nlp_solver: (
+                x0.copy(),
+                objectives[float(x0[0])],
+            ),
+        )
+        monkeypatch.setattr(
+            amp_mod,
+            "_check_constraints_with_evaluator",
+            lambda evaluator, x, lb_g, ub_g: True,
+        )
+
+        best_x, best_obj = amp_mod._solve_best_nlp_candidate(
+            np.array([0.3], dtype=np.float64),
+            m,
+            evaluator=object(),
+            flat_lb=np.array([0.0], dtype=np.float64),
+            flat_ub=np.array([2.0], dtype=np.float64),
+            constraint_lb=np.array([], dtype=np.float64),
+            constraint_ub=np.array([], dtype=np.float64),
+            nlp_solver="ipm",
+        )
+
+        assert best_x is not None
+        assert float(best_x[0]) == pytest.approx(1.0)
+        assert best_obj == pytest.approx(1.5)
+
     def test_oa_cut_recovery_drops_oldest_half(self, monkeypatch):
         """OA recovery should retry with the oldest half of cuts removed."""
         from discopt._jax.milp_relaxation import MilpRelaxationResult
@@ -1119,6 +1172,31 @@ class TestCurrentCodeWeaknesses:
         assert call_sizes == [4, 2]
         assert kept_cuts == [("c3", 3), ("c4", 4)]
         assert result.status == "optimal"
+
+    def test_amp_max_iter_without_gap_certificate_returns_feasible(self):
+        """An incumbent without a certified gap should not be labeled optimal."""
+        m = _make_nlp1()
+
+        result = m.solve(solver="amp", max_iter=1, time_limit=30)
+
+        assert result.status == "feasible"
+        assert result.gap_certified is False
+        assert result.objective is not None
+        assert result.gap is not None
+        assert result.gap > 1e-3
+
+    def test_partition_convergence_without_gap_is_not_certified(self, monkeypatch):
+        """Forced partition convergence should still return a non-certified incumbent."""
+        import discopt._jax.discretization as disc_mod
+
+        monkeypatch.setattr(disc_mod, "check_partition_convergence", lambda state: True)
+
+        m = _make_nlp1()
+        result = m.solve(solver="amp", rel_gap=1e-6, time_limit=30)
+
+        assert result.status == "feasible"
+        assert result.gap_certified is False
+        assert result.objective is not None
 
     def test_spatial_bnb_bilinear_global_correctness(self):
         """Existing spatial B&B should solve nlp1 to global optimum.

@@ -214,6 +214,49 @@ def _build_fixed_integer_bounds(
     return nlp_lb, nlp_ub
 
 
+def _solve_best_nlp_candidate(
+    x0: np.ndarray,
+    model: Model,
+    evaluator,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+    constraint_lb: np.ndarray,
+    constraint_ub: np.ndarray,
+    nlp_solver: str,
+) -> tuple[Optional[np.ndarray], Optional[float]]:
+    """Return the best feasible NLP candidate across the integer-rounding set."""
+    best_x: Optional[np.ndarray] = None
+    best_obj: Optional[float] = None
+
+    for x0_nlp in _integer_rounding_candidates(x0, model):
+        nlp_lb, nlp_ub = _build_fixed_integer_bounds(
+            x0_nlp, model, flat_lb, flat_ub
+        )
+        cand_x, cand_obj = _solve_nlp_subproblem(
+            evaluator,
+            x0_nlp,
+            nlp_lb,
+            nlp_ub,
+            nlp_solver,
+        )
+        if cand_x is None or cand_obj is None:
+            continue
+        if not _check_constraints_with_evaluator(
+            evaluator,
+            cand_x,
+            constraint_lb,
+            constraint_ub,
+        ):
+            continue
+
+        cand_obj_min = float(cand_obj)
+        if best_obj is None or cand_obj_min < best_obj:
+            best_x = cand_x
+            best_obj = cand_obj_min
+
+    return best_x, best_obj
+
+
 def _solve_milp_with_oa_recovery(
     model: Model,
     terms,
@@ -485,35 +528,18 @@ def solve_amp(
         else:
             x0 = 0.5 * (flat_lb + flat_ub)
 
-        x_nlp = None
-        obj_nlp = None
-        obj_nlp_min = None
-        for x0_nlp in _integer_rounding_candidates(x0, model):
-            nlp_lb, nlp_ub = _build_fixed_integer_bounds(
-                x0_nlp, model, flat_lb, flat_ub
-            )
-            cand_x, cand_obj = _solve_nlp_subproblem(
-                evaluator,
-                x0_nlp,
-                nlp_lb,
-                nlp_ub,
-                nlp_solver,
-            )
-            if cand_x is None or cand_obj is None:
-                continue
-            if not _check_constraints_with_evaluator(
-                evaluator,
-                cand_x,
-                constraint_lb,
-                constraint_ub,
-            ):
-                continue
-            x_nlp = cand_x
-            obj_nlp = cand_obj
-            obj_nlp_min = float(cand_obj)
-            break
+        x_nlp, obj_nlp_min = _solve_best_nlp_candidate(
+            x0,
+            model,
+            evaluator,
+            flat_lb,
+            flat_ub,
+            constraint_lb,
+            constraint_ub,
+            nlp_solver,
+        )
 
-        if x_nlp is not None and obj_nlp is not None and obj_nlp_min is not None:
+        if x_nlp is not None and obj_nlp_min is not None:
             # Verify feasibility and update UB in the canonical minimization space.
             if obj_nlp_min < UB:
                 UB = obj_nlp_min
@@ -635,7 +661,7 @@ def solve_amp(
         # Check partition convergence
         if check_partition_convergence(disc_state):
             logger.info("AMP: partition convergence at iteration %d", iteration)
-            gap_certified = UB < np.inf and LB > -np.inf
+            gap_certified = False
             break
 
     # ── Build final result ───────────────────────────────────────────────────
@@ -651,10 +677,12 @@ def solve_amp(
         abs_gap_final = UB - LB if LB > -np.inf else None
         rel_gap_final = _compute_relative_gap(abs_gap_final, UB)
 
-        if elapsed >= time_limit:
-            status = "time_limit" if not gap_certified else "optimal"
-        else:
+        if gap_certified:
             status = "optimal"
+        elif elapsed >= time_limit:
+            status = "time_limit"
+        else:
+            status = "feasible"
 
         return SolveResult(
             status=status,
