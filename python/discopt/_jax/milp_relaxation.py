@@ -496,6 +496,8 @@ def build_milp_relaxation(
             lambda_cols: list[int] = []
             alpha_cols: list[int] = []
             theta_cols: list[int] = []
+            # theta = lambda * y can be zero whenever lambda = 0, so 0 must lie in
+            # the explicit theta bounds even if y does not cross zero.
             theta_lb = min(0.0, xj_lb_g, xj_ub_g)
             theta_ub = max(0.0, xj_lb_g, xj_ub_g)
 

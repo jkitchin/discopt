@@ -28,6 +28,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from discopt._jax.milp_relaxation import _normalize_convhull_formulation
 from discopt._jax.model_utils import flat_variable_bounds
 from discopt.modeling.core import Model, ObjectiveSense, SolveResult, VarType
 
@@ -393,24 +394,6 @@ def _normalize_partition_method(
     )
 
 
-def _normalize_convhull_formulation(formulation: str) -> str:
-    """Normalize bilinear convex-hull mode names accepted by the AMP interface."""
-    aliases = {
-        "disaggregated": "disaggregated",
-        "piecewise": "disaggregated",
-        "sos2": "sos2",
-        "facet": "facet",
-        "lambda": "sos2",
-    }
-    try:
-        return aliases[formulation]
-    except KeyError as err:
-        raise ValueError(
-            f"Unsupported convhull_formulation: {formulation!r}. "
-            "Choose from 'disaggregated', 'sos2', 'facet', or 'lambda'."
-        ) from err
-
-
 def _compute_relative_gap(
     abs_gap: Optional[float],
     upper_bound: float,
@@ -483,7 +466,9 @@ def solve_amp(
     disc_var_pick : int | str, optional
         Alpine-style alias for partition selection:
         0/``"all"`` → max_cover, 1 → min_vertex_cover, 2 → auto,
-        3 → adaptive weighted cover.
+        3 → adaptive weighted cover. This intentionally collapses Alpine's
+        separate `disc_var_pick_algo` and `disc_var_pick` options into one
+        user-facing control.
     partition_scaling_factor : float
         Width scaling used by adaptive partition refinement.
     disc_add_partition_method : str

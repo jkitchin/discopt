@@ -210,8 +210,8 @@ def _greedy_vertex_cover(
                 score = float(count)
             else:
                 dist = abs(float(weights.get(v, 0.0)))
-                penalty = 1.0 / max(dist, 1e-6)
-                score = float(count) / penalty
+                weight = max(dist, 1e-6)
+                score = float(count) * weight
 
             if score > best_score:
                 best_score = score

@@ -828,14 +828,22 @@ class TestMilpRelaxation:
         assert len(info["theta_cols"]) == 3
 
     def test_sos2_and_facet_convhull_match_on_simple_bilinear_relaxation(self):
-        """SOS2 and facet λ-linking should give the same bound on a simple problem."""
+        """SOS2 and facet λ-linking should dominate the disaggregated relaxation."""
         m = Model("lambda_compare")
         x = m.continuous("x", lb=0, ub=2, shape=(2,))
         m.subject_to(x[0] * x[1] >= 1.0)
         m.minimize(x[0] + x[1])
 
         terms = self.classify(m)
-        state = self.init_partitions([0], lb=[0.0], ub=[2.0], n_init=2)
+        state = self.init_partitions([0], lb=[0.0], ub=[2.0], n_init=4)
+
+        disagg_model, _ = self.build_milp(
+            m,
+            terms,
+            state,
+            incumbent=None,
+            convhull_formulation="disaggregated",
+        )
 
         sos2_model, _ = self.build_milp(
             m,
@@ -852,14 +860,19 @@ class TestMilpRelaxation:
             convhull_formulation="facet",
         )
 
+        disagg_result = disagg_model.solve()
         sos2_result = sos2_model.solve()
         facet_result = facet_model.solve()
 
+        assert disagg_result.status == "optimal"
         assert sos2_result.status == "optimal"
         assert facet_result.status == "optimal"
+        assert disagg_result.objective is not None
         assert sos2_result.objective is not None
         assert facet_result.objective is not None
         assert sos2_result.objective == pytest.approx(facet_result.objective, abs=1e-6)
+        assert sos2_result.objective >= disagg_result.objective - 1e-6
+        assert facet_result.objective >= disagg_result.objective - 1e-6
         assert sos2_result.objective <= 2.0 + 1e-6
 
     def test_invalid_convhull_formulation_raises(self):
@@ -1019,6 +1032,23 @@ class TestAmpEndToEnd:
         assert result.gap_certified is True
         assert result.objective is not None
         assert abs(result.objective - 1.0) <= 1e-3
+        assert result.bound is not None
+        assert result.bound >= result.objective - 1e-6
+
+    def test_maximize_with_integer_variables(self):
+        """Maximize should work when integer rounding and fixed NLP bounds interact."""
+        m = Model("max_bin")
+        x = m.continuous("x", lb=0, ub=2)
+        y = m.binary("y")
+        m.subject_to(x <= 2 * y)
+        m.maximize(x * y)
+
+        result = m.solve(solver="amp", rel_gap=1e-3, time_limit=60)
+
+        assert result.status == "optimal"
+        assert result.gap_certified is True
+        assert result.objective is not None
+        assert abs(result.objective - 2.0) <= 1e-3
         assert result.bound is not None
         assert result.bound >= result.objective - 1e-6
 
@@ -1396,6 +1426,71 @@ class TestCurrentCodeWeaknesses:
         assert result.status == "feasible"
         assert result.gap_certified is False
         assert result.objective is not None
+
+    def test_adaptive_partition_selection_path_runs_inside_amp(self, monkeypatch):
+        """AMP should re-pick partition variables when adaptive selection is enabled."""
+        import discopt._jax.discretization as disc_mod
+        import discopt._jax.partition_selection as part_mod
+
+        adaptive_distances = []
+        refined_var_sets = []
+        orig_pick = part_mod.pick_partition_vars
+
+        def fake_pick(terms, method="auto", distance=None):
+            if method == "adaptive_vertex_cover" and distance is None:
+                return [0]
+            if method == "adaptive_vertex_cover":
+                adaptive_distances.append(dict(distance or {}))
+                return [1]
+            return orig_pick(terms, method=method, distance=distance)
+
+        def fake_add_adaptive_partition(state, solution, var_indices, lb, ub):
+            del solution, lb, ub
+            refined_var_sets.append(list(var_indices))
+            return state
+
+        monkeypatch.setattr(part_mod, "pick_partition_vars", fake_pick)
+        monkeypatch.setattr(disc_mod, "add_adaptive_partition", fake_add_adaptive_partition)
+        monkeypatch.setattr(disc_mod, "check_partition_convergence", lambda state: True)
+
+        m = _make_nlp1()
+        result = m.solve(
+            solver="amp",
+            disc_var_pick="adaptive",
+            rel_gap=1e-6,
+            time_limit=30,
+        )
+
+        assert adaptive_distances
+        assert refined_var_sets == [[1]]
+        assert result.status == "feasible"
+        assert result.gap_certified is False
+
+    def test_uniform_partition_refinement_path_runs_inside_amp(self, monkeypatch):
+        """AMP should call the uniform refinement branch when requested."""
+        import discopt._jax.discretization as disc_mod
+
+        uniform_calls = []
+
+        def fake_add_uniform_partition(state, _solution, var_indices, lb, ub):
+            del _solution, lb, ub
+            uniform_calls.append(list(var_indices))
+            return state
+
+        monkeypatch.setattr(disc_mod, "add_uniform_partition", fake_add_uniform_partition)
+        monkeypatch.setattr(disc_mod, "check_partition_convergence", lambda state: True)
+
+        m = _make_nlp1()
+        result = m.solve(
+            solver="amp",
+            disc_add_partition_method="uniform",
+            rel_gap=1e-6,
+            time_limit=30,
+        )
+
+        assert uniform_calls
+        assert result.status == "feasible"
+        assert result.gap_certified is False
 
     def test_spatial_bnb_bilinear_global_correctness(self):
         """Existing spatial B&B should solve nlp1 to global optimum.
