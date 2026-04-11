@@ -113,15 +113,10 @@ def _solve(name: str, nlp_solver: str, cutting_planes: bool) -> Result:
 )
 def test_minlplib_optimality(name, expected, nlp_solver, cutting_planes):
     """Solve MINLPLib instance and check objective matches known optimum."""
-    # Skip known-bad combinations:
-    # - fuel: nonconvex MINLP where all NLP solvers find suboptimal local
-    #   minima at B&B nodes, yielding objectives far from the global optimum.
-    # - ex1223a + ipm: the JAX IPM converges to a suboptimal local minimum
-    #   on this nonconvex problem (ripopt and ipopt find the global optimum).
+    # fuel: nonconvex MINLP where all NLP solvers find suboptimal local
+    # minima at B&B nodes, yielding objectives far from the global optimum.
     if name == "fuel":
         pytest.skip("fuel: B&B with local NLP solvers cannot find global optimum")
-    if nlp_solver == "ipm" and name == "ex1223a":
-        pytest.skip("ipm finds suboptimal local minimum on ex1223a")
 
     r = _solve(name, nlp_solver, cutting_planes)
 

@@ -62,6 +62,8 @@ class IPMOptions(NamedTuple):
     least_squares_mult_init: bool = False
     constr_mult_init_max: float = 1000.0
     predictor_corrector: bool = True  # Mehrotra predictor-corrector steps
+    max_soc: int = 4  # Max second-order correction iterations (0 = disabled)
+    kappa_soc: float = 0.99  # Continue SOC if theta_trial <= kappa_soc * theta_prev
     linear_solver: str = "dense"  # "dense", "pcg", "lineax_cg", "lineax_gmres"
     pcg_tol: float = 1e-10
     pcg_max_iter: int = 1000
@@ -656,6 +658,12 @@ def _make_iteration_body(obj_fn, con_fn, pd, opts):
             # Standard step (single Newton direction with centering)
             dx, dy, _ = _solve_kkt(final_dw)
 
+        # Capture the rx that produced dx, for SOC re-solve
+        if opts.predictor_corrector and n > 0:
+            rx_for_soc = rhs_x_corr
+        else:
+            rx_for_soc = rhs_x
+
         # --- Recover bound dual steps ---
         # Target complementarity: sigma*mu for PC, mu for standard.
         # For LPs (is_lp), disable predictor-corrector — the affine step
@@ -758,6 +766,179 @@ def _make_iteration_body(obj_fn, con_fn, pd, opts):
         # For constrained LPs and NLPs: use the l1 merit line search.
         skip_ls = is_lp & (m == 0)
         alpha_ls = jnp.where(skip_ls, alpha_x, alpha_ls_merit)
+
+        # --- Second-order correction (SOC) for Maratos effect ---
+        # When the full FTB step is rejected and constraint violation
+        # increased at the trial point, the rejection is likely due to
+        # the Maratos effect on nonconvex problems with curved constraints.
+        # SOC re-solves the KKT system with the constraint residual at
+        # the trial point, producing a corrected direction that maintains
+        # the second-order objective reduction while reducing violation.
+        if m > 0 and opts.max_soc > 0:
+            theta_curr = _total_violation(g, pd.g_l, pd.g_u, pd.has_g_lb, pd.has_g_ub)
+
+            # Evaluate constraints at the full FTB trial point
+            x_ftb = x + alpha_x * dx
+            x_ftb = jnp.where(
+                pd.has_lb > 0.5,
+                jnp.maximum(x_ftb, pd.x_l + _SLACK_FLOOR),
+                x_ftb,
+            )
+            x_ftb = jnp.where(
+                pd.has_ub > 0.5,
+                jnp.minimum(x_ftb, pd.x_u - _SLACK_FLOOR),
+                x_ftb,
+            )
+            g_ftb = con_fn(x_ftb)
+            theta_ftb = _total_violation(g_ftb, pd.g_l, pd.g_u, pd.has_g_lb, pd.has_g_ub)
+
+            # Trigger: line search rejected most of the step AND
+            # constraint violation increased (Maratos condition) AND
+            # the objective improved at the trial point. The last
+            # condition ensures this is truly the Maratos effect (good
+            # objective step rejected due to temporary violation increase)
+            # rather than a genuinely bad step during the infeasible phase.
+            obj_ftb = obj_fn(x_ftb)
+            soc_trigger = (
+                (~skip_ls)
+                & (alpha_ls < 0.1 * alpha_x)
+                & (theta_ftb >= theta_curr)
+                & (obj_ftb < obj_fn(x))
+            )
+
+            ineq_soc = 1.0 - pd.is_eq  # reuse for SOC RHS
+
+            def _build_soc_rhs_y(c_trial):
+                """Build constraint RHS for SOC using constraints at trial."""
+                s_soc_lb = jnp.maximum(c_trial - pd.g_l, _SLACK_FLOOR)
+                s_soc_ub = jnp.maximum(pd.g_u - c_trial, _SLACK_FLOOR)
+                rhs_eq_soc = pd.is_eq * (-(c_trial - pd.g_l))
+                rhs_ub_soc = (
+                    pd.has_g_ub * ineq_soc * (pd.g_u - c_trial - s_soc_ub) + mu * inv_z_s_ub
+                )
+                rhs_lb_soc = (
+                    pd.has_g_lb * ineq_soc * (c_trial - pd.g_l - s_soc_lb) + mu * inv_z_s_lb
+                )
+                return rhs_eq_soc + rhs_ub_soc - rhs_lb_soc
+
+            # SOC loop state: (dx_s, dy_s, alpha_s, c_soc, theta_prev,
+            #                   count, accepted)
+            soc_init = (
+                dx,  # dx_soc
+                dy,  # dy_soc
+                alpha_x,  # alpha_soc
+                g_ftb,  # c_soc (constraints at trial)
+                theta_ftb,  # theta_prev
+                jnp.int32(0),  # count
+                jnp.bool_(False),  # accepted
+            )
+
+            def _soc_cond(carry):
+                _, _, _, _, _, count, accepted = carry
+                return (~accepted) & (count < opts.max_soc)
+
+            def _soc_body(carry):
+                _, _, _, c_prev, theta_prev, count, _ = carry
+
+                # Build SOC RHS and re-solve KKT
+                rhs_y_soc = _build_soc_rhs_y(c_prev)
+                dx_s, dy_s, _ = _solve_kkt(final_dw, rx=rx_for_soc, ry=rhs_y_soc)
+
+                # FTB step for SOC direction
+                alpha_s = jnp.array(1.0)
+                alpha_s = jnp.minimum(
+                    alpha_s,
+                    _fraction_to_boundary(
+                        jnp.where(pd.has_lb > 0.5, sx_l, 1.0),
+                        jnp.where(pd.has_lb > 0.5, dx_s, 0.0),
+                        tau,
+                    ),
+                )
+                alpha_s = jnp.minimum(
+                    alpha_s,
+                    _fraction_to_boundary(
+                        jnp.where(pd.has_ub > 0.5, sx_u, 1.0),
+                        jnp.where(pd.has_ub > 0.5, -dx_s, 0.0),
+                        tau,
+                    ),
+                )
+
+                # Evaluate SOC trial point
+                x_trial = x + alpha_s * dx_s
+                x_trial = jnp.where(
+                    pd.has_lb > 0.5,
+                    jnp.maximum(x_trial, pd.x_l + _SLACK_FLOOR),
+                    x_trial,
+                )
+                x_trial = jnp.where(
+                    pd.has_ub > 0.5,
+                    jnp.minimum(x_trial, pd.x_u - _SLACK_FLOOR),
+                    x_trial,
+                )
+                g_trial = con_fn(x_trial)
+                theta_trial = _total_violation(g_trial, pd.g_l, pd.g_u, pd.has_g_lb, pd.has_g_ub)
+
+                # Test l1 merit Armijo condition
+                phi_trial = obj_fn(x_trial) + new_nu * theta_trial
+                dphi_soc = jnp.dot(grad_f, dx_s) - new_nu * theta_curr
+                armijo_ok = phi_trial <= phi_0 + opts.eta_phi * alpha_s * dphi_soc
+
+                # Accumulate constraint residual for next SOC iteration
+                c_next = c_prev + alpha_s * g_trial
+
+                # Continue only if theta is improving (kappa_soc check)
+                can_continue = theta_trial <= opts.kappa_soc * theta_prev
+                new_count = jnp.where(
+                    can_continue | armijo_ok,
+                    count + 1,
+                    jnp.int32(opts.max_soc),
+                )
+
+                return (dx_s, dy_s, alpha_s, c_next, theta_trial, new_count, armijo_ok)
+
+            (dx_soc, dy_soc, alpha_soc, _, _, _, soc_accepted) = jax.lax.while_loop(
+                _soc_cond, _soc_body, soc_init
+            )
+
+            # Use SOC direction if triggered, accepted, AND it provides a
+            # substantially larger step than the rejected one (>10x).
+            # This prevents SOC from replacing a reasonable backtracked step
+            # with a direction that happens to pass Armijo but leads to a
+            # worse basin (matching ipm_callbacks.py:695 safeguard).
+            use_soc = soc_trigger & soc_accepted & (alpha_soc > alpha_ls * 10.0)
+            dx = jnp.where(use_soc, dx_soc, dx)
+            dy = jnp.where(use_soc, dy_soc, dy)
+            alpha_ls = jnp.where(use_soc, alpha_soc, alpha_ls)
+
+            # Recompute bound dual steps for the SOC direction
+            dz_l_soc = pd.has_lb * (
+                (mu_target - state.z_l * (sx_l + dx_soc)) / jnp.maximum(sx_l, _SLACK_FLOOR)
+            )
+            dz_u_soc = pd.has_ub * (
+                (mu_target - state.z_u * (sx_u - dx_soc)) / jnp.maximum(sx_u, _SLACK_FLOOR)
+            )
+            dz_l = jnp.where(use_soc, dz_l_soc, dz_l)
+            dz_u = jnp.where(use_soc, dz_u_soc, dz_u)
+
+            # Recompute dual FTB for SOC
+            alpha_z_soc = jnp.array(1.0)
+            alpha_z_soc = jnp.minimum(
+                alpha_z_soc,
+                _fraction_to_boundary(
+                    jnp.where(pd.has_lb > 0.5, state.z_l, 1.0),
+                    jnp.where(pd.has_lb > 0.5, dz_l_soc, 0.0),
+                    tau,
+                ),
+            )
+            alpha_z_soc = jnp.minimum(
+                alpha_z_soc,
+                _fraction_to_boundary(
+                    jnp.where(pd.has_ub > 0.5, state.z_u, 1.0),
+                    jnp.where(pd.has_ub > 0.5, dz_u_soc, 0.0),
+                    tau,
+                ),
+            )
+            alpha_z = jnp.where(use_soc, alpha_z_soc, alpha_z)
 
         # --- Stall detection and recovery ---
         # When the line search fails for consecutive iterations, the Newton

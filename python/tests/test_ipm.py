@@ -997,6 +997,144 @@ class TestPredictorCorrector:
 
 
 # ---------------------------------------------------------------
+# Second-order correction (SOC) tests
+# ---------------------------------------------------------------
+
+
+class TestSecondOrderCorrection:
+    """Test SOC prevents Maratos effect on nonconvex constrained problems."""
+
+    def test_soc_options_defaults(self):
+        """IPMOptions should have SOC fields with correct defaults."""
+        opts = IPMOptions()
+        assert opts.max_soc == 4
+        assert opts.kappa_soc == 0.99
+
+    def test_soc_constrained_quadratic(self):
+        """SOC should converge on a quadratic-constrained problem.
+
+        min (x1-2)^2 + (x2-1)^2  subject to  x1^2 + x2^2 = 2
+        Optimal on circle closest to (2,1): x ≈ (1.265, 0.632), obj ≈ 0.675.
+        """
+
+        def obj(x):
+            return (x[0] - 2.0) ** 2 + (x[1] - 1.0) ** 2
+
+        def con(x):
+            return jnp.array([x[0] ** 2 + x[1] ** 2])
+
+        x0 = jnp.array([1.2, 0.5])
+        xl = jnp.array([-3.0, -3.0])
+        xu = jnp.array([3.0, 3.0])
+        gl = jnp.array([2.0])
+        gu = jnp.array([2.0])
+
+        # With SOC
+        state_soc = ipm_solve(obj, con, x0, xl, xu, gl, gu, IPMOptions(max_soc=4))
+        assert int(state_soc.converged) in (1, 2)
+        np.testing.assert_allclose(float(state_soc.obj), 0.6754, atol=1e-2)
+
+        # Without SOC — should also converge (this problem is mild)
+        state_no = ipm_solve(obj, con, x0, xl, xu, gl, gu, IPMOptions(max_soc=0))
+        assert int(state_no.converged) in (1, 2)
+        np.testing.assert_allclose(float(state_no.obj), 0.6754, atol=1e-2)
+
+    def test_soc_no_regression_hs071(self):
+        """SOC should not regress HS071 (compare with and without)."""
+
+        def obj(x):
+            return x[0] * x[3] * (x[0] + x[1] + x[2]) + x[2]
+
+        def con(x):
+            return jnp.array(
+                [
+                    x[0] * x[1] * x[2] * x[3],
+                    x[0] ** 2 + x[1] ** 2 + x[2] ** 2 + x[3] ** 2,
+                ]
+            )
+
+        x0 = jnp.array([1.0, 5.0, 5.0, 1.0])
+        xl = jnp.array([1.0, 1.0, 1.0, 1.0])
+        xu = jnp.array([5.0, 5.0, 5.0, 5.0])
+        gl = jnp.array([25.0, 40.0])
+        gu = jnp.array([1e20, 40.0])
+
+        s_soc = ipm_solve(
+            obj,
+            con,
+            x0,
+            xl,
+            xu,
+            gl,
+            gu,
+            IPMOptions(max_soc=4, max_iter=500, tol=1e-6),
+        )
+        s_no = ipm_solve(
+            obj,
+            con,
+            x0,
+            xl,
+            xu,
+            gl,
+            gu,
+            IPMOptions(max_soc=0, max_iter=500, tol=1e-6),
+        )
+        # SOC should not produce a worse objective than without SOC
+        np.testing.assert_allclose(float(s_soc.obj), float(s_no.obj), atol=0.5)
+
+    def test_soc_unconstrained_noop(self):
+        """SOC block should not affect unconstrained problems."""
+
+        def obj(x):
+            return (x[0] - 1.0) ** 2 + (x[1] + 2.0) ** 2
+
+        x0 = jnp.array([0.0, 0.0])
+        xl = jnp.array([-10.0, -10.0])
+        xu = jnp.array([10.0, 10.0])
+
+        state_soc = ipm_solve(obj, None, x0, xl, xu, options=IPMOptions(max_soc=4))
+        state_no = ipm_solve(obj, None, x0, xl, xu, options=IPMOptions(max_soc=0))
+        assert int(state_soc.converged) in (1, 2)
+        np.testing.assert_allclose(float(state_soc.obj), float(state_no.obj), atol=1e-6)
+
+    def test_soc_quadratic_equality(self):
+        """SOC on a problem with two quadratic equality constraints.
+
+        min x1 + x2 + x3
+        s.t. x1^2 + x2^2 = 1
+             x2^2 + x3^2 = 1
+             0 <= x <= 2
+        """
+
+        def obj(x):
+            return x[0] + x[1] + x[2]
+
+        def con(x):
+            return jnp.array([x[0] ** 2 + x[1] ** 2, x[1] ** 2 + x[2] ** 2])
+
+        x0 = jnp.array([0.5, 0.5, 0.5])
+        xl = jnp.array([0.0, 0.0, 0.0])
+        xu = jnp.array([2.0, 2.0, 2.0])
+        gl = jnp.array([1.0, 1.0])
+        gu = jnp.array([1.0, 1.0])
+
+        state = ipm_solve(
+            obj,
+            con,
+            x0,
+            xl,
+            xu,
+            gl,
+            gu,
+            IPMOptions(max_soc=4, max_iter=500),
+        )
+        assert int(state.converged) in (1, 2)
+        # Both constraints active at the solution
+        g_sol = float(con(state.x)[0])
+        np.testing.assert_allclose(g_sol, 1.0, atol=1e-3)
+
+
+# ---------------------------------------------------------------
 # Feasibility restoration bridge tests
 # ---------------------------------------------------------------
 
