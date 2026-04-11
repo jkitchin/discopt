@@ -81,9 +81,7 @@ def _solve_nlp_subproblem(
         else:
             from discopt.solvers.nlp_ipopt import solve_nlp
 
-            result = solve_nlp(
-                evaluator, x0_clipped, options={"print_level": 0, "max_iter": 300}
-            )
+            result = solve_nlp(evaluator, x0_clipped, options={"print_level": 0, "max_iter": 300})
 
         from discopt.solvers import SolveStatus
 
@@ -95,9 +93,7 @@ def _solve_nlp_subproblem(
     return None, None
 
 
-def _check_integer_feasible(
-    x: np.ndarray, model: Model, int_tol: float = 1e-5
-) -> bool:
+def _check_integer_feasible(x: np.ndarray, model: Model, int_tol: float = 1e-5) -> bool:
     """Return True if all integer/binary variables satisfy integrality."""
     offset = 0
     for v in model._variables:
@@ -139,11 +135,11 @@ def _integer_rounding_candidates(
                     int(np.ceil(clipped)),
                 ):
                     if lo_i <= hi_i:
-                        cand = min(max(raw, lo_i), hi_i)
+                        cand_int = min(max(raw, lo_i), hi_i)
                     else:
-                        cand = int(round(clipped))
-                    if cand not in options:
-                        options.append(cand)
+                        cand_int = int(round(clipped))
+                    if cand_int not in options:
+                        options.append(cand_int)
 
                 integer_entries.append((idx, options))
         offset += v.size
@@ -230,9 +226,7 @@ def _solve_best_nlp_candidate(
     best_obj: Optional[float] = None
 
     for x0_nlp in _integer_rounding_candidates(x0, model):
-        nlp_lb, nlp_ub = _build_fixed_integer_bounds(
-            x0_nlp, model, flat_lb, flat_ub
-        )
+        nlp_lb, nlp_ub = _build_fixed_integer_bounds(x0_nlp, model, flat_lb, flat_ub)
         cand_x, cand_obj = _solve_nlp_subproblem(
             evaluator,
             x0_nlp,
@@ -389,8 +383,7 @@ def _normalize_partition_method(
         return "adaptive_vertex_cover"
 
     raise ValueError(
-        f"Unsupported disc_var_pick integer: {disc_var_pick!r}. "
-        "Choose from 0, 1, 2, or 3."
+        f"Unsupported disc_var_pick integer: {disc_var_pick!r}. Choose from 0, 1, 2, or 3."
     )
 
 
@@ -505,9 +498,7 @@ def solve_amp(
     if partition_scaling_factor <= 1.0:
         raise ValueError("partition_scaling_factor must be > 1.0")
     if disc_add_partition_method not in {"adaptive", "uniform"}:
-        raise ValueError(
-            "disc_add_partition_method must be 'adaptive' or 'uniform'"
-        )
+        raise ValueError("disc_add_partition_method must be 'adaptive' or 'uniform'")
 
     partition_mode = _normalize_partition_method(partition_method, disc_var_pick)
     convhull_mode = _normalize_convhull_formulation(convhull_formulation)
@@ -674,11 +665,7 @@ def solve_amp(
 
                     _x_orig = x_nlp[:n_orig]
                     if evaluator.n_constraints > 0:
-                        _senses = [
-                            c.sense
-                            for c in model._constraints
-                            if isinstance(c, Constraint)
-                        ]
+                        _senses = [c.sense for c in model._constraints if isinstance(c, Constraint)]
                         cuts = generate_oa_cuts_from_evaluator(
                             evaluator, _x_orig, constraint_senses=_senses
                         )
@@ -766,8 +753,7 @@ def solve_amp(
             and milp_result.x is not None
         ):
             distances = {
-                i: abs(float(incumbent[i]) - float(x0[i]))
-                for i in terms.partition_candidates
+                i: abs(float(incumbent[i]) - float(x0[i])) for i in terms.partition_candidates
             }
             adaptive_vars = pick_partition_vars(
                 terms,

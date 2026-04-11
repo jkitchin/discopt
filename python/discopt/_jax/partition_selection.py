@@ -129,11 +129,7 @@ def _solve_vertex_cover_milp(
         heavy = 1.0 if not positive else 1.0 / min(positive)
         c = np.array(
             [
-                (
-                    heavy
-                    if abs(float(weights.get(v, 0.0))) <= 1e-6
-                    else 1.0 / abs(float(weights[v]))
-                )
+                (heavy if abs(float(weights.get(v, 0.0))) <= 1e-6 else 1.0 / abs(float(weights[v])))
                 for v in candidates
             ],
             dtype=np.float64,
@@ -158,9 +154,7 @@ def _solve_vertex_cover_milp(
             nonzero_cols = np.array(
                 [i for i in range(n) if A_le[row_idx, i] != 0.0], dtype=np.int32
             )
-            vals = np.array(
-                [A_le[row_idx, i] for i in nonzero_cols], dtype=np.float64
-            )
+            vals = np.array([A_le[row_idx, i] for i in nonzero_cols], dtype=np.float64)
             h.addRow(-np.inf, float(b_le[row_idx]), len(nonzero_cols), nonzero_cols, vals)
 
         h.run()

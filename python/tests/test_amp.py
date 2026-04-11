@@ -31,18 +31,12 @@ import os
 os.environ["JAX_PLATFORMS"] = "cpu"
 os.environ["JAX_ENABLE_X64"] = "1"
 
+import discopt.modeling as dm
 import numpy as np
 import pytest
-
-import discopt.modeling as dm
 from discopt.modeling.core import (
-    BinaryOp,
-    Constant,
-    FunctionCall,
-    IndexExpression,
     Model,
     SolveResult,
-    Variable,
 )
 
 # ---------------------------------------------------------------------------
@@ -126,6 +120,7 @@ class TestTermClassifier:
             NonlinearTerms,
             classify_nonlinear_terms,
         )
+
         self.classify = classify_nonlinear_terms
         self.NonlinearTerms = NonlinearTerms
 
@@ -263,8 +258,7 @@ class TestPartitionSelection:
         bilinear = bilinear or []
         trilinear = trilinear or []
         monomial = monomial or []
-        candidates = list({v for t in bilinear + trilinear for v in t}
-                         | {v for v, _ in monomial})
+        candidates = list({v for t in bilinear + trilinear for v in t} | {v for v, _ in monomial})
         incidence: dict[int, set[int]] = {}
         for idx, t in enumerate(bilinear + trilinear):
             for v in t:
@@ -319,7 +313,6 @@ class TestPartitionSelection:
         # 20 variables in a star — hub is var 0
         terms = self._make_terms(bilinear=[(0, i) for i in range(1, 20)])
         auto = self.pick(terms, method="auto")
-        mvc = self.pick(terms, method="min_vertex_cover")
         # Both should cover all terms
         for t in terms.bilinear:
             assert any(v in auto for v in t), f"term {t} not covered"
@@ -358,10 +351,7 @@ class TestPartitionSelection:
     def test_adaptive_vertex_cover_uses_distance_weights(self):
         """Adaptive cover should favor high-distance variables on large graphs."""
         terms = self._make_terms(bilinear=[(i, i + 1) for i in range(16)])
-        distance = {
-            i: (10.0 if i % 2 == 0 else 1e-3)
-            for i in terms.partition_candidates
-        }
+        distance = {i: (10.0 if i % 2 == 0 else 1e-3) for i in terms.partition_candidates}
 
         selected = self.pick(
             terms,
@@ -534,7 +524,6 @@ class TestMcCormickSoundness:
     def test_standard_mccormick_bilinear_valid(self):
         """cv ≤ x*y ≤ cc at 500 random points — core soundness test."""
         import jax.numpy as jnp
-
         from discopt._jax.mccormick import relax_bilinear
 
         x_lb, x_ub, y_lb, y_ub = 1.0, 4.0, 1.0, 4.0
@@ -556,7 +545,6 @@ class TestMcCormickSoundness:
     def test_piecewise_mccormick_bilinear_valid(self):
         """Piecewise McCormick is still a valid relaxation (cv ≤ x*y ≤ cc)."""
         import jax.numpy as jnp
-
         from discopt._jax.piecewise_mccormick import piecewise_mccormick_bilinear
 
         x_lb, x_ub, y_lb, y_ub = 0.0, 10.0, 0.0, 10.0
@@ -583,7 +571,6 @@ class TestMcCormickSoundness:
         Piecewise must be strictly tighter.
         """
         import jax.numpy as jnp
-
         from discopt._jax.mccormick import relax_bilinear
         from discopt._jax.piecewise_mccormick import piecewise_mccormick_bilinear
 
@@ -610,9 +597,7 @@ class TestMcCormickSoundness:
         gap_std = float(cc_std - cv_std)
         gap_pw = float(cc_pw - cv_pw)
 
-        assert gap_pw < gap_std, (
-            f"Piecewise gap {gap_pw:.4f} must be < standard gap {gap_std:.4f}"
-        )
+        assert gap_pw < gap_std, f"Piecewise gap {gap_pw:.4f} must be < standard gap {gap_std:.4f}"
         # Also verify piecewise is still sound
         w_true = x * y
         assert float(cv_pw) <= w_true + 1e-9
@@ -624,7 +609,6 @@ class TestMcCormickSoundness:
         Theoretical bound: max gap ≤ (domain_width / k)².
         """
         import jax.numpy as jnp
-
         from discopt._jax.piecewise_mccormick import piecewise_mccormick_bilinear
 
         x_lb, x_ub, y_lb, y_ub = 0.0, 10.0, 0.0, 10.0
@@ -650,10 +634,9 @@ class TestMcCormickSoundness:
         This test SHOULD PASS — it documents existing behavior as a baseline.
         The AMP implementation will add solution-adaptive refinement separately.
         """
-        from discopt._jax.piecewise_mccormick import _partition_bounds
-
         # Same call twice → identical result (no solution context)
         import jax.numpy as jnp
+        from discopt._jax.piecewise_mccormick import _partition_bounds
 
         lbs1, ubs1 = _partition_bounds(jnp.float64(0.0), jnp.float64(10.0), 4)
         lbs2, ubs2 = _partition_bounds(jnp.float64(0.0), jnp.float64(10.0), 4)
@@ -741,7 +724,7 @@ class TestMilpRelaxation:
         # Lower bounds must be non-decreasing with finer partitions
         for i in range(len(lbs) - 1):
             assert lbs[i] <= lbs[i + 1] + 1e-6, (
-                f"LBs must be non-decreasing: lbs[{i}]={lbs[i]:.4f} > lbs[{i+1}]={lbs[i+1]:.4f}"
+                f"LBs must be non-decreasing: lbs[{i}]={lbs[i]:.4f} > lbs[{i + 1}]={lbs[i + 1]:.4f}"
             )
 
     def test_milp_relaxation_feasible_when_problem_feasible(self):
@@ -755,7 +738,6 @@ class TestMilpRelaxation:
     def test_piecewise_interval_rows_use_interval_specific_bounds(self):
         """Piecewise product rows must use the current interval's wk_hi, not a stale value."""
         import scipy.sparse as sp
-
         from discopt._jax.discretization import DiscretizationState
         from discopt._jax.term_classifier import classify_nonlinear_terms
 
@@ -927,9 +909,9 @@ class TestAmpPhase1Helpers:
 # ===========================================================================
 
 # Known global optima (from Alpine.jl test suite + standard references)
-NLP1_OPTIMUM = 58.38368   # Alpine nlp1
+NLP1_OPTIMUM = 58.38368  # Alpine nlp1
 CIRCLE_OPTIMUM = 1.41421356  # √2
-NLP3_OPTIMUM = 7049.247898   # Alpine nlp3
+NLP3_OPTIMUM = 7049.247898  # Alpine nlp3
 
 
 class TestAmpEndToEnd:
@@ -941,7 +923,6 @@ class TestAmpEndToEnd:
     @pytest.mark.smoke
     def test_nlp1_bilinear_global_optimum(self):
         """nlp1: bilinear MINLP solved to global optimum ≈ 58.38368."""
-        from discopt.modeling.core import SolveResult
 
         m = _make_nlp1()
         result = m.solve(solver="amp", rel_gap=1e-3, time_limit=60)
@@ -999,7 +980,7 @@ class TestAmpEndToEnd:
         """min x²  s.t. x ≥ 1: AMP should certify global optimum = 1."""
         m = Model("quad")
         x = m.continuous("x", lb=1, ub=10)
-        m.minimize(x ** 2)
+        m.minimize(x**2)
         result = m.solve(solver="amp", rel_gap=1e-4, time_limit=30)
         assert result.status == "optimal"
         assert result.objective is not None
@@ -1007,10 +988,10 @@ class TestAmpEndToEnd:
 
     @pytest.mark.smoke
     def test_zero_upper_bound_reports_no_relative_gap(self):
-        """Relative gap should be left undefined when the incumbent objective is numerically zero."""
+        """Relative gap should stay undefined when the incumbent objective is near zero."""
         m = Model("zero_gap")
         x = m.continuous("x", lb=-1, ub=1)
-        m.minimize(x ** 2)
+        m.minimize(x**2)
 
         result = m.solve(solver="amp", rel_gap=1e-4, time_limit=30)
 
@@ -1084,7 +1065,7 @@ class TestAmpConvergenceProperties:
         assert len(lbs) >= 2, "Should have at least 2 iterations"
         for i in range(len(lbs) - 1):
             assert lbs[i] <= lbs[i + 1] + 1e-8, (
-                f"LB decreased at iteration {i}: {lbs[i]:.6f} > {lbs[i+1]:.6f}"
+                f"LB decreased at iteration {i}: {lbs[i]:.6f} > {lbs[i + 1]:.6f}"
             )
 
     @pytest.mark.smoke
@@ -1102,9 +1083,7 @@ class TestAmpConvergenceProperties:
         for j in range(len(finite_ubs) - 1):
             i1, u1 = finite_ubs[j]
             i2, u2 = finite_ubs[j + 1]
-            assert u2 <= u1 + 1e-8, (
-                f"UB increased at iteration {i2}: {u1:.6f} → {u2:.6f}"
-            )
+            assert u2 <= u1 + 1e-8, f"UB increased at iteration {i2}: {u1:.6f} → {u2:.6f}"
 
     @pytest.mark.smoke
     def test_gap_certified_after_convergence(self):
@@ -1129,9 +1108,7 @@ class TestAmpConvergenceProperties:
         )
         if result.status == "optimal":
             # If gap-terminated, should be well before max_iter
-            assert len(iters) < 100, (
-                "Should terminate before max_iter=100 when gap closes"
-            )
+            assert len(iters) < 100, "Should terminate before max_iter=100 when gap closes"
 
     @pytest.mark.smoke
     def test_time_limit_respected(self):
@@ -1205,7 +1182,6 @@ class TestCurrentCodeWeaknesses:
 
     def test_solve_model_forwards_alpine_amp_aliases(self, monkeypatch):
         """solve_model should pass Alpine-style AMP aliases through to solve_amp."""
-        from discopt.modeling.core import SolveResult
         from discopt.solver import solve_model
         from discopt.solvers import amp as amp_mod
 
@@ -1247,7 +1223,7 @@ class TestCurrentCodeWeaknesses:
         from discopt.solvers import amp as amp_mod
 
         m = Model("rounding")
-        y = m.integer("y", lb=0, ub=3, shape=(2,))
+        m.integer("y", lb=0, ub=3, shape=(2,))
         x0 = np.array([1.49, 1.51], dtype=np.float64)
 
         candidates = amp_mod._integer_rounding_candidates(x0, m)
@@ -1524,7 +1500,7 @@ class TestCurrentCodeWeaknesses:
         """x² is convex — should solve to x=0 globally even without AMP."""
         m = Model("quad_convex")
         x = m.continuous("x", lb=-3, ub=3)
-        m.minimize(x ** 2)
+        m.minimize(x**2)
         result = m.solve()
         assert result.objective is not None
         assert abs(result.objective) < 1e-4, (

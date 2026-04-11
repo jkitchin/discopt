@@ -184,11 +184,12 @@ def classify_nonlinear_terms(model: Model) -> NonlinearTerms:
                 result.term_incidence.setdefault(v, set()).add(term_idx)
 
     def _record_trilinear(i: int, j: int, k: int) -> None:
-        key = tuple(sorted([i, j, k]))
+        a, b, c = sorted((i, j, k))
+        key = (a, b, c)
         if key not in seen_trilinear:
             seen_trilinear.add(key)
             term_idx = len(result.bilinear) + len(result.trilinear)
-            result.trilinear.append(key)  # type: ignore[arg-type]
+            result.trilinear.append(key)
             for v in key:
                 result.term_incidence.setdefault(v, set()).add(term_idx)
 

@@ -168,9 +168,7 @@ def _normalize_convhull_formulation(formulation: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _decompose_product(
-    expr: Expression, model: Model
-) -> tuple[float, list[int]] | None:
+def _decompose_product(expr: Expression, model: Model) -> tuple[float, list[int]] | None:
     """Decompose a product expression into (scalar, [flat_var_idx, ...]).
 
     Returns None if expr contains non-constant, non-variable leaves.
@@ -301,9 +299,7 @@ def _linearize_expr(
                         raise ValueError(f"Monomial {key} not in map")
                 elif len(unique) == 2:
                     if len(unique) != len(indices):
-                        raise ValueError(
-                            "Mixed repeated-factor products are not supported"
-                        )
+                        raise ValueError("Mixed repeated-factor products are not supported")
                     i_idx, j_idx = unique[0], unique[1]
                     key = (min(i_idx, j_idx), max(i_idx, j_idx))
                     if key in bilinear_var_map:
@@ -311,9 +307,7 @@ def _linearize_expr(
                     else:
                         raise ValueError(f"Bilinear {key} not in map")
                 else:
-                    raise ValueError(
-                        f"Higher-order product ({len(unique)} vars) not supported"
-                    )
+                    raise ValueError(f"Higher-order product ({len(unique)} vars) not supported")
 
             else:
                 raise ValueError(f"Cannot linearize BinaryOp: {e.op}")
@@ -404,9 +398,7 @@ def build_milp_relaxation(
     monomial_var_map: dict[tuple[int, int], int] = {}
 
     col_idx = n_orig
-    all_bounds: list[tuple[float, float]] = list(
-        zip(flat_lb.tolist(), flat_ub.tolist())
-    )
+    all_bounds: list[tuple[float, float]] = list(zip(flat_lb.tolist(), flat_ub.tolist()))
     integrality_flags: list[int] = []
     for v in model._variables:
         flag = 1 if v.var_type in (VarType.BINARY, VarType.INTEGER) else 0
@@ -678,7 +670,7 @@ def build_milp_relaxation(
             row_recon[part_var] = 1.0
             for _, xbar_col, _, _, _ in intervals:
                 row_recon[xbar_col] = -1.0
-            _add_row(row_recon, 0.0)   # x_part - Σ x̄_k ≤ 0
+            _add_row(row_recon, 0.0)  # x_part - Σ x̄_k ≤ 0
             _add_row(-row_recon, 0.0)  # -(x_part - Σ x̄_k) ≤ 0
 
             # Constraint: w = Σ w̄_k
@@ -733,7 +725,7 @@ def build_milp_relaxation(
                 row[wbar_col] = -1.0
                 row[other_var] += a_k
                 row[xbar_col] += yj_lb
-                row[delta_col] = M_k   # +M_k so constraint loosens when δ_k=0
+                row[delta_col] = M_k  # +M_k so constraint loosens when δ_k=0
                 _add_row(row, a_k * yj_lb + M_k)
 
                 # cv2: w̄_k ≥ b_k*y + x̄_k*y_ub - b_k*y_ub - M*(1-δ_k)
@@ -751,7 +743,7 @@ def build_milp_relaxation(
                 row[wbar_col] = 1.0
                 row[other_var] -= b_k
                 row[xbar_col] -= yj_lb
-                row[delta_col] = M_k   # +M_k so constraint loosens when δ_k=0
+                row[delta_col] = M_k  # +M_k so constraint loosens when δ_k=0
                 _add_row(row, M_k - b_k * yj_lb)
 
                 # cc2: w̄_k ≤ a_k*y + x̄_k*y_ub - a_k*y_ub + M*(1-δ_k)
@@ -853,9 +845,7 @@ def build_milp_relaxation(
         body = constraint.body  # normalized: body <= 0  (sense is always "<=")
         sense = constraint.sense
         try:
-            c, const = _linearize_expr(
-                body, model, bilinear_var_map, monomial_var_map, n_total
-            )
+            c, const = _linearize_expr(body, model, bilinear_var_map, monomial_var_map, n_total)
             # body ≤ 0  →  c @ z + const ≤ 0  →  c @ z ≤ -const
             if sense == "<=":
                 _add_row(c, -const)
@@ -875,10 +865,11 @@ def build_milp_relaxation(
     if oa_cuts:
         for coeff, rhs in oa_cuts:
             row = np.zeros(n_total)
-            row[:len(coeff)] = coeff[:n_total if len(coeff) > n_total else len(coeff)]
+            row[: len(coeff)] = coeff[: n_total if len(coeff) > n_total else len(coeff)]
             _add_row(row, rhs)
 
     # ── Objective ────────────────────────────────────────────────────────────
+    assert model._objective is not None
     obj_expr = model._objective.expression
     try:
         c_obj, const_obj = _linearize_expr(
