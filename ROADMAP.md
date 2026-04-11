@@ -1,6 +1,6 @@
 # Development Roadmap
 
-discopt followed a 4-phase development plan. Phases 1-3 are complete; Phase 4 (polish and release) is in progress.
+discopt followed a 4-phase development plan. Phases 1-4 are complete. Phases 5-7 track future extensions.
 
 ## Phase 1: Working Solver (complete)
 
@@ -50,13 +50,13 @@ discopt followed a 4-phase development plan. Phases 1-3 are complete; Phase 4 (p
 | Solver integration      | Done   | partitions, branching_policy, cutting_planes parameters |
 |                         |        |                                                         |
 
-## Phase 4: Polish + Release (in progress)
+## Phase 4: Polish + Release (nearly complete)
 
 | Task                              | Status      | Description                                               |
 |-----------------------------------|-------------|-----------------------------------------------------------|
 | ripopt integration (PyO3)         | Done        | Rust IPM solver via PyO3 bindings (`nlp_solver="ripopt"`) |
 | CUTEst interface                  | Done        | PyCUTEst evaluator for NLP benchmarking                   |
-| Documentation + example notebooks | In progress | Quickstart, advanced features, IPM comparison notebooks   |
+| Documentation + example notebooks | Done        | 36 notebooks, Jupyter Book site, 2 benign warnings remain |
 | Release engineering               | Done        | Published on PyPI, maturin build, CI auto-publish on tags |
 
 ## Phase 5: Problem Class Coverage
@@ -69,7 +69,7 @@ New problem types to make discopt competitive across the full optimization lands
 | Semidefinite programming (SDP)    | Planned | Matrix variables, PSD cone constraint, MOSEK/SCS backend                     |
 | Conic programming (general)       | Planned | Exponential cone, power cone for entropy/GP formulations                     |
 | Stochastic programming            | Planned | Two-stage/multi-stage recourse, scenario trees, chance constraints, SAA/CVaR |
-| Robust optimization               | Planned | Box/ellipsoidal/polyhedral uncertainty sets, adjustable robust counterparts  |
+| Robust optimization               | Done    | Box/ellipsoidal/polyhedral uncertainty sets, adjustable robust counterparts  |
 | Multi-objective optimization      | Planned | Epsilon-constraint, NBI, Chebyshev scalarization, ParetoFront object        |
 | Bilevel optimization              | Planned | KKT reformulation to MPEC, cutting plane methods                             |
 | Complementarity problems (MPEC)   | Planned | Scholtes relaxation, penalty methods for equilibrium constraints             |
@@ -90,11 +90,11 @@ New problem types to make discopt competitive across the full optimization lands
 | Task                              | Status  | Description                                                                  |
 |-----------------------------------|---------|------------------------------------------------------------------------------|
 | Set and index abstractions        | Planned | Named sets, indexed variables/constraints, set algebra for sparse models     |
-| Piecewise-linear functions        | Planned | SOS2, incremental, logarithmic PWL formulations as modeling primitives       |
-| Native indicator constraints      | Planned | Direct indicator support avoiding big-M when backend supports it             |
-| Warm-starting API                 | Planned | Initial feasible solutions via `m.solve(initial_solution=...)`, solution pools |
-| Export formats (MPS/LP/OSiL)      | Planned | Interoperability with Gurobi, CPLEX, MOSEK, BARON, NEOS                     |
-| Callback and cut generation API   | Planned | User-defined lazy constraints, cutting planes, incumbent callbacks in B&B    |
+| Piecewise-linear functions        | Done    | SOS2 constraints in modeling API                                             |
+| Native indicator constraints      | Done    | `_IndicatorConstraint` class in modeling API                                 |
+| Warm-starting API                 | Done    | `m.solve(initial_solution=...)` with validation                              |
+| Export formats (MPS/LP)           | Done    | `to_mps()`, `to_lp()` in `discopt.export`, GAMS writer                      |
+| Callback and cut generation API   | Done    | Lazy constraint, incumbent, and node callbacks in B&B                        |
 | Infeasibility analysis (IIS)      | Planned | Algorithmic irreducible infeasible subsystem computation                     |
-| Pyomo import                      | Planned | `from_pyomo()` converter for Var, Constraint, Objective, GDP constructs      |
-| GAMS import                       | Planned | `from_gams()` reader for .gms scalar models                                 |
+| Pyomo import                      | Done    | `from_pyomo()` converter for Var, Constraint, Objective, GDP constructs      |
+| GAMS import                       | Done    | `from_gams()` reader for .gms scalar models                                 |
