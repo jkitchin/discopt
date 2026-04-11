@@ -1239,12 +1239,19 @@ def solve_model(
         amp_kwargs = {}
         for key in (
             "rel_gap",
+            "abs_tol",
             "max_iter",
             "n_init_partitions",
             "partition_method",
             "iteration_callback",
             "milp_time_limit",
             "milp_gap_tolerance",
+            "apply_partitioning",
+            "disc_var_pick",
+            "partition_scaling_factor",
+            "disc_add_partition_method",
+            "disc_abs_width_tol",
+            "convhull_formulation",
         ):
             if key in kwargs:
                 amp_kwargs[key] = kwargs.pop(key)

@@ -54,6 +54,8 @@ def initialize_partitions(
     lb: list[float],
     ub: list[float],
     n_init: int = 2,
+    scaling_factor: float = 10.0,
+    abs_width_tol: float = 1e-3,
 ) -> DiscretizationState:
     """Create n_init uniform intervals for each partition variable.
 
@@ -68,6 +70,10 @@ def initialize_partitions(
     n_init : int, default 2
         Number of initial intervals per variable.  n_init=2 gives 3 breakpoints:
         [lb, midpoint, ub].
+    scaling_factor : float, default 10.0
+        Refinement ratio stored on the returned state.
+    abs_width_tol : float, default 1e-3
+        Convergence tolerance stored on the returned state.
 
     Returns
     -------
@@ -77,7 +83,11 @@ def initialize_partitions(
     partitions: dict[int, np.ndarray] = {}
     for k, v_idx in enumerate(var_indices):
         partitions[v_idx] = np.linspace(float(lb[k]), float(ub[k]), n_init + 1)
-    return DiscretizationState(partitions=partitions)
+    return DiscretizationState(
+        partitions=partitions,
+        scaling_factor=float(scaling_factor),
+        abs_width_tol=float(abs_width_tol),
+    )
 
 
 def add_adaptive_partition(
@@ -158,6 +168,41 @@ def add_adaptive_partition(
         if candidates:
             merged = np.sort(np.unique(np.concatenate([pts, candidates])))
             new_partitions[v_idx] = merged
+
+    return DiscretizationState(
+        partitions=new_partitions,
+        scaling_factor=state.scaling_factor,
+        abs_width_tol=state.abs_width_tol,
+    )
+
+
+def add_uniform_partition(
+    state: DiscretizationState,
+    solution: dict[int, float],
+    var_indices: list[int],
+    lb: list[float],
+    ub: list[float],
+) -> DiscretizationState:
+    """Uniformly refine every current interval for the selected variables.
+
+    Unlike adaptive refinement, this does not use the current solution value.
+    Each interval is split at its midpoint, preserving all existing breakpoints.
+    """
+    del solution  # uniform refinement is solution-agnostic
+
+    new_partitions = {k: v.copy() for k, v in state.partitions.items()}
+
+    for k, v_idx in enumerate(var_indices):
+        if v_idx not in new_partitions:
+            new_partitions[v_idx] = np.linspace(float(lb[k]), float(ub[k]), 3)
+
+        pts = new_partitions[v_idx]
+        if len(pts) < 2:
+            continue
+
+        mids = 0.5 * (pts[:-1] + pts[1:])
+        merged = np.sort(np.unique(np.concatenate([pts, mids])))
+        new_partitions[v_idx] = merged
 
     return DiscretizationState(
         partitions=new_partitions,

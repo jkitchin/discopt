@@ -267,6 +267,7 @@ def _solve_milp_with_oa_recovery(
     oa_cuts: Optional[list],
     time_limit: Optional[float],
     gap_tolerance: float,
+    convhull_formulation: str,
 ):
     """Retry MILP solves after dropping the oldest half of OA cuts on infeasibility."""
     from discopt._jax.milp_relaxation import build_milp_relaxation
@@ -283,6 +284,7 @@ def _solve_milp_with_oa_recovery(
             disc_state,
             incumbent,
             oa_cuts=active_oa_cuts,
+            convhull_formulation=convhull_formulation,
         )
         milp_result = milp_model.solve(
             time_limit=time_limit,
@@ -351,6 +353,64 @@ def _default_milp_time_limit(
     return min(iter_budget * 3, remaining * 0.8, 60.0)
 
 
+def _normalize_partition_method(
+    partition_method: str,
+    disc_var_pick: int | str | None,
+) -> str:
+    """Resolve public AMP aliases to the internal partition-selection strategy."""
+    if disc_var_pick is None:
+        return partition_method
+
+    if isinstance(disc_var_pick, str):
+        aliases = {
+            "all": "max_cover",
+            "max_cover": "max_cover",
+            "min_vertex_cover": "min_vertex_cover",
+            "auto": "auto",
+            "adaptive": "adaptive_vertex_cover",
+            "adaptive_vertex_cover": "adaptive_vertex_cover",
+        }
+        if disc_var_pick not in aliases:
+            raise ValueError(
+                f"Unsupported disc_var_pick string: {disc_var_pick!r}. "
+                "Choose from 'all', 'max_cover', 'min_vertex_cover', "
+                "'auto', or 'adaptive_vertex_cover'."
+            )
+        return aliases[disc_var_pick]
+
+    if disc_var_pick == 0:
+        return "max_cover"
+    if disc_var_pick == 1:
+        return "min_vertex_cover"
+    if disc_var_pick == 2:
+        return "auto"
+    if disc_var_pick == 3:
+        return "adaptive_vertex_cover"
+
+    raise ValueError(
+        f"Unsupported disc_var_pick integer: {disc_var_pick!r}. "
+        "Choose from 0, 1, 2, or 3."
+    )
+
+
+def _normalize_convhull_formulation(formulation: str) -> str:
+    """Normalize bilinear convex-hull mode names accepted by the AMP interface."""
+    aliases = {
+        "disaggregated": "disaggregated",
+        "piecewise": "disaggregated",
+        "sos2": "sos2",
+        "facet": "facet",
+        "lambda": "sos2",
+    }
+    try:
+        return aliases[formulation]
+    except KeyError as err:
+        raise ValueError(
+            f"Unsupported convhull_formulation: {formulation!r}. "
+            "Choose from 'disaggregated', 'sos2', 'facet', or 'lambda'."
+        ) from err
+
+
 def _compute_relative_gap(
     abs_gap: Optional[float],
     upper_bound: float,
@@ -385,6 +445,12 @@ def solve_amp(
     iteration_callback: Optional[Callable] = None,
     milp_time_limit: Optional[float] = None,
     milp_gap_tolerance: Optional[float] = None,
+    apply_partitioning: bool = True,
+    disc_var_pick: int | str | None = None,
+    partition_scaling_factor: float = 10.0,
+    disc_add_partition_method: str = "adaptive",
+    disc_abs_width_tol: float = 1e-3,
+    convhull_formulation: str = "disaggregated",
 ) -> SolveResult:
     """Solve MINLP globally using Adaptive Multivariate Partitioning (AMP).
 
@@ -412,6 +478,21 @@ def solve_amp(
         Per-MILP-call time limit (defaults to remaining time).
     milp_gap_tolerance : float
         MILP solver gap tolerance (default 1e-4).
+    apply_partitioning : bool
+        If False, solve a single relaxation/NLP pass without adaptive refinement.
+    disc_var_pick : int | str, optional
+        Alpine-style alias for partition selection:
+        0/``"all"`` → max_cover, 1 → min_vertex_cover, 2 → auto,
+        3 → adaptive weighted cover.
+    partition_scaling_factor : float
+        Width scaling used by adaptive partition refinement.
+    disc_add_partition_method : str
+        Refinement update rule: ``"adaptive"`` or ``"uniform"``.
+    disc_abs_width_tol : float
+        Absolute partition-width convergence tolerance.
+    convhull_formulation : str
+        Piecewise bilinear formulation: ``"disaggregated"``, ``"sos2"``,
+        ``"facet"``, or ``"lambda"`` (alias for ``"sos2"``).
 
     Returns
     -------
@@ -422,6 +503,7 @@ def solve_amp(
 
     from discopt._jax.discretization import (
         add_adaptive_partition,
+        add_uniform_partition,
         check_partition_convergence,
         initialize_partitions,
     )
@@ -432,6 +514,18 @@ def solve_amp(
 
     assert model._objective is not None
     maximize = model._objective.sense == ObjectiveSense.MAXIMIZE
+    part_lbs: list[float] = []
+    part_ubs: list[float] = []
+
+    if partition_scaling_factor <= 1.0:
+        raise ValueError("partition_scaling_factor must be > 1.0")
+    if disc_add_partition_method not in {"adaptive", "uniform"}:
+        raise ValueError(
+            "disc_add_partition_method must be 'adaptive' or 'uniform'"
+        )
+
+    partition_mode = _normalize_partition_method(partition_method, disc_var_pick)
+    convhull_mode = _normalize_convhull_formulation(convhull_formulation)
 
     def _to_minimization_space(value: float) -> float:
         return -float(value) if maximize else float(value)
@@ -455,27 +549,40 @@ def solve_amp(
     )
 
     # ── Select partition variables ───────────────────────────────────────────
-    part_vars = pick_partition_vars(terms, method=partition_method)
+    if apply_partitioning:
+        part_vars = pick_partition_vars(terms, method=partition_mode)
+    else:
+        part_vars = []
 
     # If no bilinear/multilinear terms, still partition monomial variables
     # to add tangent cuts at more points and tighten the lower bound.
-    if not part_vars and terms.monomial:
+    if apply_partitioning and not part_vars and terms.monomial:
         part_vars = sorted(set(var_idx for var_idx, _ in terms.monomial))
         logger.info("AMP: no bilinear terms; partitioning %d monomial vars", len(part_vars))
+    elif not apply_partitioning:
+        logger.info("AMP: partitioning disabled; running a single fixed relaxation pass")
     else:
-        logger.info("AMP: partitioning %d variables via %s", len(part_vars), partition_method)
+        logger.info("AMP: partitioning %d variables via %s", len(part_vars), partition_mode)
 
     # ── Initialize partitions ────────────────────────────────────────────────
     if part_vars:
         part_lbs = [float(flat_lb[i]) for i in part_vars]
         part_ubs = [float(flat_ub[i]) for i in part_vars]
         disc_state = initialize_partitions(
-            part_vars, lb=part_lbs, ub=part_ubs, n_init=n_init_partitions
+            part_vars,
+            lb=part_lbs,
+            ub=part_ubs,
+            n_init=n_init_partitions,
+            scaling_factor=partition_scaling_factor,
+            abs_width_tol=disc_abs_width_tol,
         )
     else:
         from discopt._jax.discretization import DiscretizationState
 
-        disc_state = DiscretizationState()
+        disc_state = DiscretizationState(
+            scaling_factor=partition_scaling_factor,
+            abs_width_tol=disc_abs_width_tol,
+        )
 
     LB = -np.inf
     UB = np.inf
@@ -498,7 +605,10 @@ def solve_amp(
 
         # ── Step 1: Solve MILP relaxation → lower bound ──────────────────────
         # MILP gap tolerance: no tighter than needed for overall convergence.
-        _milp_gap_tol = milp_gap_tolerance if milp_gap_tolerance is not None else min(rel_gap / 2, 1e-3)
+        if milp_gap_tolerance is not None:
+            _milp_gap_tol = milp_gap_tolerance
+        else:
+            _milp_gap_tol = min(rel_gap / 2, 1e-3)
 
         try:
             milp_result, varmap, active_oa_cuts = _solve_milp_with_oa_recovery(
@@ -509,6 +619,7 @@ def solve_amp(
                 oa_cuts=oa_cuts,
                 time_limit=milp_tl,
                 gap_tolerance=_milp_gap_tol,
+                convhull_formulation=convhull_mode,
             )
             oa_cuts = active_oa_cuts
         except Exception as e:
@@ -516,11 +627,18 @@ def solve_amp(
             break
 
         if milp_result.status in ("infeasible", "error"):
-            logger.info("AMP: MILP infeasible/error at iteration %d, status=%s", iteration, milp_result.status)
+            logger.info(
+                "AMP: MILP infeasible/error at iteration %d, status=%s",
+                iteration,
+                milp_result.status,
+            )
             if LB == -np.inf:
                 # Problem may be infeasible
                 if iteration == 1:
-                    return SolveResult(status="infeasible", wall_time=time.perf_counter() - t_start)
+                    return SolveResult(
+                        status="infeasible",
+                        wall_time=time.perf_counter() - t_start,
+                    )
             break
 
         if milp_result.objective is not None:
@@ -657,6 +775,43 @@ def solve_amp(
                 gap_certified = False  # no lower bound from partitioning
             break
 
+        if (
+            partition_mode == "adaptive_vertex_cover"
+            and incumbent is not None
+            and milp_result.x is not None
+        ):
+            distances = {
+                i: abs(float(incumbent[i]) - float(x0[i]))
+                for i in terms.partition_candidates
+            }
+            adaptive_vars = pick_partition_vars(
+                terms,
+                method="adaptive_vertex_cover",
+                distance=distances,
+            )
+            if adaptive_vars and set(adaptive_vars) != set(part_vars):
+                logger.info(
+                    "AMP: updating adaptive partition set from %d to %d variables",
+                    len(part_vars),
+                    len(adaptive_vars),
+                )
+                new_vars = [i for i in adaptive_vars if i not in disc_state.partitions]
+                if new_vars:
+                    new_lbs = [float(flat_lb[i]) for i in new_vars]
+                    new_ubs = [float(flat_ub[i]) for i in new_vars]
+                    init_state = initialize_partitions(
+                        new_vars,
+                        lb=new_lbs,
+                        ub=new_ubs,
+                        n_init=n_init_partitions,
+                        scaling_factor=partition_scaling_factor,
+                        abs_width_tol=disc_abs_width_tol,
+                    )
+                    disc_state.partitions.update(init_state.partitions)
+                part_vars = adaptive_vars
+                part_lbs = [float(flat_lb[i]) for i in part_vars]
+                part_ubs = [float(flat_ub[i]) for i in part_vars]
+
         # Use MILP solution (original vars) as the refinement point
         refine_solution: dict[int, float] = {}
         if milp_result.x is not None:
@@ -664,9 +819,22 @@ def solve_amp(
             for i in part_vars:
                 refine_solution[i] = float(x_orig[i])
 
-        disc_state = add_adaptive_partition(
-            disc_state, refine_solution, part_vars, part_lbs, part_ubs
-        )
+        if disc_add_partition_method == "uniform":
+            disc_state = add_uniform_partition(
+                disc_state,
+                refine_solution,
+                part_vars,
+                part_lbs,
+                part_ubs,
+            )
+        else:
+            disc_state = add_adaptive_partition(
+                disc_state,
+                refine_solution,
+                part_vars,
+                part_lbs,
+                part_ubs,
+            )
 
         # Check partition convergence
         if check_partition_convergence(disc_state):

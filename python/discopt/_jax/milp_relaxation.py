@@ -21,7 +21,7 @@ Theory: Nagarajan et al., JOGO 2018, Section 4 (piecewise McCormick relaxation).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, Union
 
 import numpy as np
@@ -31,7 +31,6 @@ from discopt._jax.discretization import DiscretizationState
 from discopt._jax.model_utils import flat_variable_bounds
 from discopt._jax.term_classifier import (
     NonlinearTerms,
-    _collect_product_factors,
     _compute_var_offset,
     _get_flat_index,
 )
@@ -45,8 +44,8 @@ from discopt.modeling.core import (
     SumExpression,
     SumOverExpression,
     UnaryOp,
-    VarType,
     Variable,
+    VarType,
 )
 
 logger = logging.getLogger(__name__)
@@ -144,6 +143,24 @@ def _compute_piecewise_big_m(corners: list[float]) -> float:
     """Scale Big-M with the interval magnitude instead of adding a flat constant."""
     max_corner = max(abs(float(c)) for c in corners)
     return max_corner * (1.0 + 1e-4) + max(1e-6, 1e-4 * max_corner)
+
+
+def _normalize_convhull_formulation(formulation: str) -> str:
+    """Normalize accepted bilinear convex-hull mode names."""
+    aliases = {
+        "disaggregated": "disaggregated",
+        "piecewise": "disaggregated",
+        "sos2": "sos2",
+        "facet": "facet",
+        "lambda": "sos2",
+    }
+    try:
+        return aliases[formulation]
+    except KeyError as err:
+        raise ValueError(
+            f"Unsupported convhull_formulation: {formulation!r}. "
+            "Choose from 'disaggregated', 'sos2', 'facet', or 'lambda'."
+        ) from err
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +355,7 @@ def build_milp_relaxation(
     disc_state: DiscretizationState,
     incumbent: Optional[np.ndarray] = None,
     oa_cuts: Optional[list] = None,
+    convhull_formulation: str = "disaggregated",
 ) -> tuple["MilpRelaxationModel", dict]:
     """Build a MILP relaxation with piecewise McCormick for bilinear/monomial terms.
 
@@ -364,6 +382,10 @@ def build_milp_relaxation(
     incumbent : np.ndarray, optional
         Current best NLP solution (flat).  Used to add OA tangent cuts for
         general nonlinear terms; currently unused (reserved for future use).
+    convhull_formulation : str, default "disaggregated"
+        Piecewise bilinear formulation. ``"disaggregated"`` keeps the existing
+        xbar/wbar construction; ``"sos2"`` and ``"facet"`` use a λ-based
+        convex-hull reformulation similar to Alpine.jl.
 
     Returns
     -------
@@ -373,6 +395,7 @@ def build_milp_relaxation(
     """
     flat_lb, flat_ub = flat_variable_bounds(model)
     n_orig = len(flat_lb)
+    convhull_mode = _normalize_convhull_formulation(convhull_formulation)
 
     # ── Assign MILP column indices ──────────────────────────────────────────
     # Layout: [original vars 0..n_orig-1] [bilinear aux w_ij] [monomial aux s_i^n]
@@ -418,6 +441,7 @@ def build_milp_relaxation(
     #     w̄_k  ∈ [wi_lo, wi_hi] — bilinear product within interval k (0 outside)
     # bilinear_pw_map[(i,j)] = [(delta_col, xbar_col, wbar_col, a_k, b_k), ...]
     bilinear_pw_map: dict[tuple[int, int], list] = {}
+    bilinear_lambda_map: dict[tuple[int, int], dict] = {}
 
     for i, j in terms.bilinear:
         # Choose which variable to partition: prefer the one in disc_state
@@ -432,40 +456,76 @@ def build_milp_relaxation(
         xj_lb_g = float(flat_lb[other_var])
         xj_ub_g = float(flat_ub[other_var])
 
-        intervals = []
-        for k in range(len(pts) - 1):
-            a_k = float(pts[k])
-            b_k = float(pts[k + 1])
+        if convhull_mode == "disaggregated":
+            intervals = []
+            for k in range(len(pts) - 1):
+                a_k = float(pts[k])
+                b_k = float(pts[k + 1])
 
-            # Big-M for bilinear product within this interval
-            _, wk_lo, wk_hi = _piecewise_product_bounds(
-                a_k,
-                b_k,
-                xj_lb_g,
-                xj_ub_g,
-            )
+                # Big-M for bilinear product within this interval
+                _, wk_lo, wk_hi = _piecewise_product_bounds(
+                    a_k,
+                    b_k,
+                    xj_lb_g,
+                    xj_ub_g,
+                )
 
-            # δ_k ∈ {0,1}
-            delta_col = col_idx
-            all_bounds.append((0.0, 1.0))
-            integrality_flags.append(1)
-            col_idx += 1
+                # δ_k ∈ {0,1}
+                delta_col = col_idx
+                all_bounds.append((0.0, 1.0))
+                integrality_flags.append(1)
+                col_idx += 1
 
-            # x̄_k ∈ [0, max(|a_k|, |b_k|)]  (0 when δ_k=0)
-            xbar_col = col_idx
-            all_bounds.append((min(a_k, 0.0), max(abs(a_k), abs(b_k))))
-            integrality_flags.append(0)
-            col_idx += 1
+                # x̄_k ∈ [0, max(|a_k|, |b_k|)]  (0 when δ_k=0)
+                xbar_col = col_idx
+                all_bounds.append((min(a_k, 0.0), max(abs(a_k), abs(b_k))))
+                integrality_flags.append(0)
+                col_idx += 1
 
-            # w̄_k ∈ [wk_lo, wk_hi]  (0 when δ_k=0)
-            wbar_col = col_idx
-            all_bounds.append((min(wk_lo, 0.0), max(wk_hi, 0.0)))
-            integrality_flags.append(0)
-            col_idx += 1
+                # w̄_k ∈ [wk_lo, wk_hi]  (0 when δ_k=0)
+                wbar_col = col_idx
+                all_bounds.append((min(wk_lo, 0.0), max(wk_hi, 0.0)))
+                integrality_flags.append(0)
+                col_idx += 1
 
-            intervals.append((delta_col, xbar_col, wbar_col, a_k, b_k))
+                intervals.append((delta_col, xbar_col, wbar_col, a_k, b_k))
 
-        bilinear_pw_map[(i, j)] = intervals
+            bilinear_pw_map[(i, j)] = intervals
+        else:
+            breakpoints = [float(p) for p in pts]
+            lambda_cols: list[int] = []
+            alpha_cols: list[int] = []
+            theta_cols: list[int] = []
+            theta_lb = min(0.0, xj_lb_g, xj_ub_g)
+            theta_ub = max(0.0, xj_lb_g, xj_ub_g)
+
+            for _ in breakpoints:
+                lambda_cols.append(col_idx)
+                all_bounds.append((0.0, 1.0))
+                integrality_flags.append(0)
+                col_idx += 1
+
+            for _ in range(len(breakpoints) - 1):
+                alpha_cols.append(col_idx)
+                all_bounds.append((0.0, 1.0))
+                integrality_flags.append(1)
+                col_idx += 1
+
+            for _ in breakpoints:
+                theta_cols.append(col_idx)
+                all_bounds.append((theta_lb, theta_ub))
+                integrality_flags.append(0)
+                col_idx += 1
+
+            bilinear_lambda_map[(i, j)] = {
+                "part_var": part_var,
+                "other_var": other_var,
+                "breakpoints": breakpoints,
+                "lambda_cols": lambda_cols,
+                "alpha_cols": alpha_cols,
+                "theta_cols": theta_cols,
+                "mode": convhull_mode,
+            }
 
     # Also store in a form keyed by (part_var, other_var) for reference
     # (not needed separately; we use bilinear_pw_map[(i,j)] directly)
@@ -496,7 +556,103 @@ def build_milp_relaxation(
         xj_ub_g = float(flat_ub[j])
         w_col = bilinear_var_map[(i, j)]
 
-        if (i, j) in bilinear_pw_map and bilinear_pw_map[(i, j)]:
+        if (i, j) in bilinear_lambda_map:
+            lambda_info = bilinear_lambda_map[(i, j)]
+            part_var = int(lambda_info["part_var"])
+            other_var = int(lambda_info["other_var"])
+            breakpoints = list(lambda_info["breakpoints"])
+            lambda_cols = list(lambda_info["lambda_cols"])
+            alpha_cols = list(lambda_info["alpha_cols"])
+            theta_cols = list(lambda_info["theta_cols"])
+            mode = str(lambda_info["mode"])
+            yj_lb = float(flat_lb[other_var])
+            yj_ub = float(flat_ub[other_var])
+
+            row_sum_lambda = np.zeros(n_total)
+            for lambda_col in lambda_cols:
+                row_sum_lambda[lambda_col] = -1.0
+            _add_row(row_sum_lambda, -1.0)
+            _add_row(-row_sum_lambda, 1.0)
+
+            row_sum_alpha = np.zeros(n_total)
+            for alpha_col in alpha_cols:
+                row_sum_alpha[alpha_col] = -1.0
+            _add_row(row_sum_alpha, -1.0)
+            _add_row(-row_sum_alpha, 1.0)
+
+            row_x = np.zeros(n_total)
+            row_x[part_var] = 1.0
+            for p_j, lambda_col in zip(breakpoints, lambda_cols):
+                row_x[lambda_col] -= float(p_j)
+            _add_row(row_x, 0.0)
+            _add_row(-row_x, 0.0)
+
+            row_y = np.zeros(n_total)
+            row_y[other_var] = 1.0
+            for theta_col in theta_cols:
+                row_y[theta_col] -= 1.0
+            _add_row(row_y, 0.0)
+            _add_row(-row_y, 0.0)
+
+            row_w = np.zeros(n_total)
+            row_w[w_col] = 1.0
+            for p_j, theta_col in zip(breakpoints, theta_cols):
+                row_w[theta_col] -= float(p_j)
+            _add_row(row_w, 0.0)
+            _add_row(-row_w, 0.0)
+
+            if mode == "sos2":
+                for idx, lambda_col in enumerate(lambda_cols):
+                    row = np.zeros(n_total)
+                    row[lambda_col] = 1.0
+                    if idx == 0:
+                        row[alpha_cols[0]] = -1.0
+                    elif idx == len(lambda_cols) - 1:
+                        row[alpha_cols[-1]] = -1.0
+                    else:
+                        row[alpha_cols[idx - 1]] = -1.0
+                        row[alpha_cols[idx]] = -1.0
+                    _add_row(row, 0.0)
+            else:
+                for idx in range(len(alpha_cols) - 1):
+                    row = np.zeros(n_total)
+                    for alpha_col in alpha_cols[: idx + 1]:
+                        row[alpha_col] -= 1.0
+                    for lambda_col in lambda_cols[: idx + 1]:
+                        row[lambda_col] += 1.0
+                    _add_row(row, 0.0)
+
+                    row = np.zeros(n_total)
+                    for alpha_col in alpha_cols[: idx + 1]:
+                        row[alpha_col] += 1.0
+                    for lambda_col in lambda_cols[: idx + 2]:
+                        row[lambda_col] -= 1.0
+                    _add_row(row, 0.0)
+
+            for lambda_col, theta_col in zip(lambda_cols, theta_cols):
+                row = np.zeros(n_total)
+                row[theta_col] = -1.0
+                row[lambda_col] = yj_lb
+                _add_row(row, 0.0)
+
+                row = np.zeros(n_total)
+                row[theta_col] = -1.0
+                row[other_var] = 1.0
+                row[lambda_col] = yj_ub
+                _add_row(row, yj_ub)
+
+                row = np.zeros(n_total)
+                row[theta_col] = 1.0
+                row[other_var] = -1.0
+                row[lambda_col] = -yj_lb
+                _add_row(row, -yj_lb)
+
+                row = np.zeros(n_total)
+                row[theta_col] = 1.0
+                row[lambda_col] = -yj_ub
+                _add_row(row, 0.0)
+
+        elif (i, j) in bilinear_pw_map and bilinear_pw_map[(i, j)]:
             # ── Piecewise McCormick with binary partition selection ──────────
             intervals = bilinear_pw_map[(i, j)]
             # Determine partition var vs other var
@@ -766,6 +922,8 @@ def build_milp_relaxation(
         "bilinear": bilinear_var_map,
         "monomial": monomial_var_map,
         "bilinear_pw": bilinear_pw_map,
+        "bilinear_lambda": bilinear_lambda_map,
+        "convhull_formulation": convhull_mode,
     }
 
     return milp_model, varmap

@@ -355,6 +355,25 @@ class TestPartitionSelection:
 
         assert set(selected) == {0}
 
+    def test_adaptive_vertex_cover_uses_distance_weights(self):
+        """Adaptive cover should favor high-distance variables on large graphs."""
+        terms = self._make_terms(bilinear=[(i, i + 1) for i in range(16)])
+        distance = {
+            i: (10.0 if i % 2 == 0 else 1e-3)
+            for i in terms.partition_candidates
+        }
+
+        selected = self.pick(
+            terms,
+            method="adaptive_vertex_cover",
+            distance=distance,
+        )
+
+        assert selected
+        assert all(v % 2 == 0 for v in selected)
+        for t in terms.bilinear:
+            assert any(v in selected for v in t), f"term {t} not covered"
+
 
 # ===========================================================================
 # Section 3: Discretization State Management
@@ -379,6 +398,7 @@ class TestDiscretizationState:
         from discopt._jax.discretization import (  # noqa: F401
             DiscretizationState,
             add_adaptive_partition,
+            add_uniform_partition,
             check_partition_convergence,
             initialize_partitions,
         )
@@ -386,6 +406,7 @@ class TestDiscretizationState:
         self.DiscretizationState = DiscretizationState
         self.initialize_partitions = initialize_partitions
         self.add_adaptive_partition = add_adaptive_partition
+        self.add_uniform_partition = add_uniform_partition
         self.check_partition_convergence = check_partition_convergence
 
     def test_initialize_correct_breakpoints(self):
@@ -451,6 +472,15 @@ class TestDiscretizationState:
         assert pts[-1] == pytest.approx(1.0)
         # Strictly sorted
         assert all(pts[i] < pts[i + 1] for i in range(len(pts) - 1))
+
+    def test_uniform_refinement_splits_every_interval(self):
+        """Uniform refinement should bisect each current interval."""
+        state = self.initialize_partitions([0], lb=[0.0], ub=[4.0], n_init=2)
+        state2 = self.add_uniform_partition(state, {}, [0], [0.0], [4.0])
+        np.testing.assert_allclose(
+            state2.partitions[0],
+            np.array([0.0, 1.0, 2.0, 3.0, 4.0]),
+        )
 
     def test_convergence_check_fine_partitions(self):
         """check_partition_convergence returns True when all widths < abs_width_tol."""
@@ -776,6 +806,77 @@ class TestMilpRelaxation:
         assert result.x is not None
         assert abs(float(result.x[1]) - round(float(result.x[1]))) <= 1e-8
 
+    def test_lambda_convhull_builds_expected_auxiliaries(self):
+        """The λ-convex-hull formulation should expose lambda, alpha, and theta blocks."""
+        m = _make_nlp1()
+        terms = self.classify(m)
+        state = self.init_partitions([0], lb=[1.0], ub=[4.0], n_init=2)
+
+        _, varmap = self.build_milp(
+            m,
+            terms,
+            state,
+            incumbent=None,
+            convhull_formulation="sos2",
+        )
+
+        info = varmap["bilinear_lambda"][(0, 1)]
+        assert varmap["convhull_formulation"] == "sos2"
+        assert info["breakpoints"] == [1.0, 2.5, 4.0]
+        assert len(info["lambda_cols"]) == 3
+        assert len(info["alpha_cols"]) == 2
+        assert len(info["theta_cols"]) == 3
+
+    def test_sos2_and_facet_convhull_match_on_simple_bilinear_relaxation(self):
+        """SOS2 and facet λ-linking should give the same bound on a simple problem."""
+        m = Model("lambda_compare")
+        x = m.continuous("x", lb=0, ub=2, shape=(2,))
+        m.subject_to(x[0] * x[1] >= 1.0)
+        m.minimize(x[0] + x[1])
+
+        terms = self.classify(m)
+        state = self.init_partitions([0], lb=[0.0], ub=[2.0], n_init=2)
+
+        sos2_model, _ = self.build_milp(
+            m,
+            terms,
+            state,
+            incumbent=None,
+            convhull_formulation="sos2",
+        )
+        facet_model, _ = self.build_milp(
+            m,
+            terms,
+            state,
+            incumbent=None,
+            convhull_formulation="facet",
+        )
+
+        sos2_result = sos2_model.solve()
+        facet_result = facet_model.solve()
+
+        assert sos2_result.status == "optimal"
+        assert facet_result.status == "optimal"
+        assert sos2_result.objective is not None
+        assert facet_result.objective is not None
+        assert sos2_result.objective == pytest.approx(facet_result.objective, abs=1e-6)
+        assert sos2_result.objective <= 2.0 + 1e-6
+
+    def test_invalid_convhull_formulation_raises(self):
+        """Unsupported convex-hull mode names should fail fast."""
+        m = _make_nlp1()
+        terms = self.classify(m)
+        state = self.init_partitions([0], lb=[1.0], ub=[4.0], n_init=2)
+
+        with pytest.raises(ValueError, match="Unsupported convhull_formulation"):
+            self.build_milp(
+                m,
+                terms,
+                state,
+                incumbent=None,
+                convhull_formulation="bogus",
+            )
+
 
 class TestAmpPhase1Helpers:
     """Fast regression tests for Phase 1 helper behavior."""
@@ -1072,6 +1173,45 @@ class TestCurrentCodeWeaknesses:
 
         assert "solver" in inspect.signature(solve_model).parameters
 
+    def test_solve_model_forwards_alpine_amp_aliases(self, monkeypatch):
+        """solve_model should pass Alpine-style AMP aliases through to solve_amp."""
+        from discopt.modeling.core import SolveResult
+        from discopt.solver import solve_model
+        from discopt.solvers import amp as amp_mod
+
+        captured = {}
+
+        def fake_solve_amp(model, **kwargs):
+            del model
+            captured.update(kwargs)
+            return SolveResult(status="infeasible", wall_time=0.0)
+
+        monkeypatch.setattr(amp_mod, "solve_amp", fake_solve_amp)
+
+        m = Model("alias_forwarding")
+        x = m.continuous("x", lb=0, ub=1)
+        m.minimize(x)
+
+        solve_model(
+            m,
+            solver="amp",
+            gap_tolerance=1e-3,
+            apply_partitioning=False,
+            disc_var_pick=1,
+            partition_scaling_factor=7.0,
+            disc_add_partition_method="uniform",
+            disc_abs_width_tol=1e-2,
+            convhull_formulation="sos2",
+        )
+
+        assert captured["rel_gap"] == pytest.approx(1e-3)
+        assert captured["apply_partitioning"] is False
+        assert captured["disc_var_pick"] == 1
+        assert captured["partition_scaling_factor"] == pytest.approx(7.0)
+        assert captured["disc_add_partition_method"] == "uniform"
+        assert captured["disc_abs_width_tol"] == pytest.approx(1e-2)
+        assert captured["convhull_formulation"] == "sos2"
+
     def test_integer_rounding_candidates_include_floor_and_ceil(self):
         """Nearest-integer rounding fallback must try floor and ceil alternatives."""
         from discopt.solvers import amp as amp_mod
@@ -1198,7 +1338,15 @@ class TestCurrentCodeWeaknesses:
                     x=np.zeros(1, dtype=np.float64),
                 )
 
-        def fake_build(model, terms, disc_state, incumbent, oa_cuts=None):
+        def fake_build(
+            model,
+            terms,
+            disc_state,
+            incumbent,
+            oa_cuts=None,
+            convhull_formulation="disaggregated",
+        ):
+            assert convhull_formulation == "disaggregated"
             size = len(oa_cuts or [])
             call_sizes.append(size)
             status = "infeasible" if size >= 4 else "optimal"
@@ -1217,6 +1365,7 @@ class TestCurrentCodeWeaknesses:
             oa_cuts=[("c1", 1), ("c2", 2), ("c3", 3), ("c4", 4)],
             time_limit=1.0,
             gap_tolerance=1e-4,
+            convhull_formulation="disaggregated",
         )
 
         assert call_sizes == [4, 2]
