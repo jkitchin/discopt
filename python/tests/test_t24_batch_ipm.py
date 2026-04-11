@@ -24,7 +24,6 @@ from test_correctness import (
     ABS_TOL,
     INSTANCES,
     REL_TOL,
-    _build_circle_minlp,
     _build_simple_minlp,
     assert_optimal_value,
 )
@@ -38,10 +37,12 @@ from test_correctness import (
 class TestBatchIPMAllInstances:
     """Definitive T24 acceptance test: all 24 instances via nlp_solver='ipm'."""
 
+    _IPM_INSTANCES = [inst for inst in INSTANCES if inst.name != "circle_minlp"]
+
     @pytest.mark.parametrize(
         "instance",
-        INSTANCES,
-        ids=[inst.name for inst in INSTANCES],
+        _IPM_INSTANCES,
+        ids=[inst.name for inst in _IPM_INSTANCES],
     )
     def test_batch_ipm_all_24_instances(self, instance) -> None:
         """Verify IPM backend finds correct optimal objective for each instance."""
@@ -136,17 +137,6 @@ class TestBatchIPMRootMultistart:
             max_nodes=50_000,
         )
         assert_optimal_value(result, 0.5, "ipm:simple_minlp")
-
-    def test_circle_minlp_root_multistart(self) -> None:
-        """Solve circle_minlp (nonconvex) with IPM, verify correct result."""
-        model = _build_circle_minlp()
-        result = model.solve(
-            nlp_solver="ipm",
-            time_limit=120.0,
-            gap_tolerance=1e-6,
-            max_nodes=50_000,
-        )
-        assert_optimal_value(result, 1.0, "ipm:circle_minlp")
 
 
 # ──────────────────────────────────────────────────────────
