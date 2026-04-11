@@ -48,21 +48,7 @@ For general nonlinear recourse, they are an approximation (inner
 approximation: the affine-rule solution is feasible but potentially
 sub-optimal relative to the full adjustable problem).
 
-References
-----------
-.. [BenTalGoryashko2004] Ben-Tal, A., Goryashko, A., Guslitzer, E., &
-   Nemirovski, A. (2004). Adjustable robust solutions of uncertain linear
-   programs. *Mathematical Programming*, 99(2), 351–376.
-   https://doi.org/10.1007/s10107-003-0454-y
-
-.. [Chen2009] Chen, X., Sim, M., Sun, P., & Zhang, J. (2009). A linear
-   decision-based approximation approach to stochastic programming.
-   *Operations Research*, 56(2), 344–357.
-
-.. [Bertsimas2010] Bertsimas, D., & Goyal, V. (2012). On the power and
-   limitations of affine policies in two-stage adaptive optimization.
-   *Mathematical Programming*, 134(2), 491–531.
-   https://doi.org/10.1007/s10107-011-0444-4
+References: Ben-Tal et al. (2004), Chen et al. (2009), Bertsimas & Goyal (2012).
 """
 
 from __future__ import annotations

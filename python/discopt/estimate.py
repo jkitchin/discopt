@@ -132,11 +132,11 @@ class Experiment:
     """
 
     def create_model(self, **kwargs) -> ExperimentModel:
-        """Build the experiment model.
+        r"""Build the experiment model.
 
         Parameters
         ----------
-        **kwargs
+        \*\*kwargs
             Keyword arguments, typically initial guesses for parameters
             or fixed design conditions.
 

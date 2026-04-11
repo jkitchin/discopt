@@ -19,14 +19,8 @@ Three standard families are supported:
   Includes the budget-of-uncertainty (Bertsimas & Sim) as a special case.
   Leads to LP dual auxiliary variables in the reformulation.
 
-References
-----------
-.. [BN1999] Ben-Tal, A., Nemirovski, A. (1999). Robust solutions of uncertain
-   linear programs. *Operations Research Letters*, 25(1), 1–13.
-.. [BertsimasSim2004] Bertsimas, D., Sim, M. (2004). The price of robustness.
-   *Operations Research*, 52(1), 35–53.
-.. [BenTal2009] Ben-Tal, A., El Ghaoui, L., Nemirovski, A. (2009).
-   *Robust Optimization*. Princeton University Press.
+References: Ben-Tal & Nemirovski (1999), Bertsimas & Sim (2004),
+Ben-Tal, El Ghaoui & Nemirovski (2009).
 """
 
 from __future__ import annotations

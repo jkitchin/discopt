@@ -190,8 +190,3 @@ The full API is auto-generated from docstrings. Key entry points:
 | Mixed-integer designs | Not supported | Native MINLP |
 | Implicit differentiation | Not available | Envelope theorem |
 
-## References
-
-```{bibliography}
-:filter: docname in docnames
-```

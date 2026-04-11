@@ -13,10 +13,8 @@ sphinx:
   config:
     bibtex_bibfiles: ["references.bib"]
     bibtex_reference_style: author_year
-    bibtex_default_style: plain
     autoapi_dirs: ["../python/discopt"]
-    autoapi_type: "python"
-    autoapi_ignore: ["**/tests/**", "**/_rust*"]
+    autoapi_ignore: ["**/tests/**", "**/_rust*", "**/modeling/examples.py"]
     autoapi_options:
       - members
       - undoc-members
@@ -24,3 +22,4 @@ sphinx:
       - show-module-summary
     autoapi_keep_files: false
     autoapi_add_toctree_entry: false
+    suppress_warnings: ["etoc.toctree", "myst.header"]

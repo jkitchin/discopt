@@ -67,7 +67,7 @@ def get_completion(
     timeout: float = 30.0,
     **kwargs,
 ) -> str:
-    """Get a completion from the configured LLM provider.
+    r"""Get a completion from the configured LLM provider.
 
     Thin convenience wrapper around :func:`discopt.llm.provider.complete`.
 
@@ -84,7 +84,7 @@ def get_completion(
         Sampling temperature.
     timeout : float, default 30.0
         Request timeout in seconds.
-    **kwargs
+    \*\*kwargs
         Additional arguments passed to litellm.
 
     Returns

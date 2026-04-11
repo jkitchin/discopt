@@ -57,7 +57,7 @@ discopt followed a 4-phase development plan. Phases 1-3 are complete; Phase 4 (p
 | ripopt integration (PyO3)         | Done        | Rust IPM solver via PyO3 bindings (`nlp_solver="ripopt"`) |
 | CUTEst interface                  | Done        | PyCUTEst evaluator for NLP benchmarking                   |
 | Documentation + example notebooks | In progress | Quickstart, advanced features, IPM comparison notebooks   |
-| Release engineering               | In progress | `pip install discopt`, pyproject.toml, packaging          |
+| Release engineering               | Done        | Published on PyPI, maturin build, CI auto-publish on tags |
 
 ## Phase 5: Problem Class Coverage
 

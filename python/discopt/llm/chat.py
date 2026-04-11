@@ -120,11 +120,11 @@ class ChatSession:
         return "Reached maximum conversation turns. Please try again."
 
     def solve(self, **kwargs) -> Any:
-        """Solve the current model directly.
+        r"""Solve the current model directly.
 
         Parameters
         ----------
-        **kwargs
+        \*\*kwargs
             Arguments passed to ``Model.solve()``.
 
         Returns

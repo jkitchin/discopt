@@ -72,7 +72,7 @@ class ExplorationResult:
         ax=None,
         **kwargs,
     ):
-        """Plot 2D heatmap of a design criterion.
+        r"""Plot 2D heatmap of a design criterion.
 
         Requires exactly two design variables.
 
@@ -82,7 +82,7 @@ class ExplorationResult:
             Metric key to plot.
         ax : matplotlib.axes.Axes, optional
             Axes to plot on. Creates new figure if None.
-        **kwargs
+        \*\*kwargs
             Passed to ``ax.pcolormesh``.
 
         Returns

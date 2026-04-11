@@ -83,23 +83,18 @@ def solve_lp(
 ) -> LPResult:
     """Solve a linear program using HiGHS.
 
-    Minimizes  c^T x  subject to:
-        A_ub @ x <= b_ub   (if provided)
-        A_eq @ x == b_eq   (if provided)
-        bounds[i][0] <= x[i] <= bounds[i][1]  (if provided)
+    Minimizes ``c^T x`` subject to ``A_ub @ x <= b_ub`` (if provided),
+    ``A_eq @ x == b_eq`` (if provided), and
+    ``bounds[i][0] <= x[i] <= bounds[i][1]`` (if provided).
 
     Args:
         c: Objective coefficients, shape (n,).
-        A_ub: Inequality constraint matrix (m_ub, n), dense or sparse. None if
-            no inequality constraints.
+        A_ub: Inequality constraint matrix (m_ub, n), dense or sparse. None if no inequalities.
         b_ub: Inequality right-hand side (m_ub,). Required if A_ub is given.
-        A_eq: Equality constraint matrix (m_eq, n), dense or sparse. None if
-            no equality constraints.
+        A_eq: Equality constraint matrix (m_eq, n), dense or sparse. None if no equalities.
         b_eq: Equality right-hand side (m_eq,). Required if A_eq is given.
-        bounds: Per-variable (lower, upper) bounds. Defaults to (0, +inf) for
-            each variable when None.
-        warm_basis: A ``HighsBasis`` object from a previous ``LPResult.basis``
-            to warm-start the solve.
+        bounds: Per-variable (lower, upper) bounds. Defaults to (0, +inf) when None.
+        warm_basis: ``HighsBasis`` from a previous ``LPResult.basis`` for warm-starting.
         time_limit: Wall-clock time limit in seconds, or None for no limit.
 
     Returns:

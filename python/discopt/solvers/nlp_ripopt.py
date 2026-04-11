@@ -39,9 +39,8 @@ def solve_nlp(
     Args:
         evaluator: NLPEvaluator (or compatible) providing evaluation callbacks.
         x0: Initial point (n,).
-        constraint_bounds: List of (cl, cu) for each constraint.
-                          If None, inferred from model constraints.
-        options: Solver options dict (max_iter, tol, print_level, etc.)
+        constraint_bounds: List of (cl, cu) per constraint. None to infer from model.
+        options: Solver options dict (max_iter, tol, print_level, etc.).
 
     Returns:
         NLPResult with solution.

@@ -460,10 +460,8 @@ def list_cutest_problems(
     List available CUTEst problems matching filter criteria.
 
     Args:
-        objective: Filter by objective type — either a single-letter CUTEst code
-            (N/C/L/Q/S/O) or a pycutest string (e.g. "quadratic", "sum of squares").
-        constraints: Filter by constraint type — either a single-letter CUTEst code
-            (U/X/B/N/L/Q/O) or a pycutest string (e.g. "unconstrained", "bounds").
+        objective: Objective type filter (N/C/L/Q/S/O or e.g. "quadratic").
+        constraints: Constraint type filter (U/X/B/N/L/Q/O or e.g. "unconstrained").
         regular: If True, only regular problems; if False, only irregular.
         max_n: Maximum number of variables (None = no limit).
         max_m: Maximum number of constraints (None = no limit).

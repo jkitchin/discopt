@@ -40,7 +40,7 @@ def complete(
     timeout: float = 30.0,
     **kwargs,
 ) -> str:
-    """Send a completion request via litellm.
+    r"""Send a completion request via litellm.
 
     Parameters
     ----------
@@ -54,7 +54,7 @@ def complete(
         Sampling temperature (0 = deterministic).
     timeout : float, default 30.0
         Request timeout in seconds.
-    **kwargs
+    \*\*kwargs
         Additional arguments forwarded to ``litellm.completion()``.
 
     Returns
@@ -105,7 +105,7 @@ def complete_with_tools(
     timeout: float = 60.0,
     **kwargs,
 ) -> Any:
-    """Send a completion request with tool calling via litellm.
+    r"""Send a completion request with tool calling via litellm.
 
     Parameters
     ----------
@@ -121,7 +121,7 @@ def complete_with_tools(
         Sampling temperature.
     timeout : float, default 60.0
         Request timeout in seconds.
-    **kwargs
+    \*\*kwargs
         Additional arguments forwarded to ``litellm.completion()``.
 
     Returns

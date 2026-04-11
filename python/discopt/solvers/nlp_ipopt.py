@@ -143,13 +143,10 @@ def solve_nlp(
     Solve an NLP using cyipopt with JAX-compiled callbacks.
 
     Args:
-        evaluator: NLPEvaluator providing objective/gradient/Hessian/constraint/Jacobian
-        x0: Initial point (n,)
-        constraint_bounds: List of (cl, cu) for each constraint.
-                          For <= constraints: (-inf, 0.0)
-                          For == constraints: (0.0, 0.0)
-                          If None, inferred from model constraints.
-        options: Ipopt options dict (e.g., {'max_iter': 1000, 'tol': 1e-8})
+        evaluator: NLPEvaluator providing objective/gradient/Hessian/constraint/Jacobian.
+        x0: Initial point (n,).
+        constraint_bounds: List of (cl, cu) per constraint. None to infer from model.
+        options: Ipopt options dict (e.g., {'max_iter': 1000, 'tol': 1e-8}).
 
     Returns:
         NLPResult with solution
@@ -240,8 +237,7 @@ def solve_nlp_from_model(
 
     Args:
         model: A Model with objective and constraints set.
-        x0: Initial point (n,). If None, uses midpoint of variable bounds
-            (clipped to [-100, 100] to avoid extreme values).
+        x0: Initial point (n,). If None, uses midpoint of bounds clipped to [-100, 100].
         options: Ipopt options dict.
 
     Returns:

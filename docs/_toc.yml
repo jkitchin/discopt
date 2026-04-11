@@ -32,6 +32,7 @@ parts:
       - file: notebooks/solver_internals
       - file: notebooks/sensitivity_analysis
       - file: notebooks/llm_integration
+      - file: llm_features
       - file: notebooks/warm_start
       - file: notebooks/convex_fast_path
       - file: notebooks/nlp_bb
@@ -51,6 +52,7 @@ parts:
       - file: notebooks/estimation_and_doe
       - file: notebooks/tutorial_estimation
       - file: notebooks/tutorial_doe
+      - file: notebooks/doe-implementation-plan
   - caption: API Reference
     chapters:
       - file: api

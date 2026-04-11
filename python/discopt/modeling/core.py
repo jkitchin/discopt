@@ -1791,7 +1791,7 @@ class Model:
         node_callback: Optional[Callable] = None,
         **kwargs,
     ) -> Union[SolveResult, Iterator["SolveUpdate"]]:
-        """
+        r"""
         Solve the model.
 
         For pure-continuous models, solves the NLP directly. For models with
@@ -1849,7 +1849,7 @@ class Model:
         node_callback : callable, optional
             Node callback. Called after each batch of nodes is processed.
             Should accept ``(ctx, model)`` and return ``None``.
-        **kwargs
+        \*\*kwargs
             Additional keyword arguments passed to the solver backend.
 
         Returns
