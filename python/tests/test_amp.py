@@ -786,10 +786,20 @@ class TestAmpPhase1Helpers:
 
         corners = [-25000.0, 10000.0, 5000.0, 30000.0]
         big_m = _compute_piecewise_big_m(corners)
-        expected = 30000.0 * (1.0 + 1e-4) + 1e-2
+        expected = 30000.0 * (1.0 + 1e-4) + 3.0
 
         assert big_m == pytest.approx(expected)
         assert big_m > 30000.0
+
+    def test_piecewise_big_m_keeps_small_intervals_tight(self):
+        """The Big-M floor should not dominate near-zero product intervals."""
+        from discopt._jax.milp_relaxation import _compute_piecewise_big_m
+
+        corners = [0.0, 0.0, 0.01, 0.01]
+        big_m = _compute_piecewise_big_m(corners)
+
+        assert big_m == pytest.approx(0.010002)
+        assert big_m < 0.011
 
 
 # ===========================================================================
@@ -1129,6 +1139,46 @@ class TestCurrentCodeWeaknesses:
         assert best_x is not None
         assert float(best_x[0]) == pytest.approx(1.0)
         assert best_obj == pytest.approx(1.5)
+
+    def test_best_nlp_candidate_rejects_noninteger_nlp_return(self, monkeypatch):
+        """NLP candidates that violate integrality should be discarded."""
+        from discopt.solvers import amp as amp_mod
+
+        m = Model("noninteger_candidate")
+        m.integer("y", lb=0, ub=2)
+
+        monkeypatch.setattr(
+            amp_mod,
+            "_integer_rounding_candidates",
+            lambda x0, model: [np.array([1.0], dtype=np.float64)],
+        )
+        monkeypatch.setattr(
+            amp_mod,
+            "_build_fixed_integer_bounds",
+            lambda x0, model, flat_lb, flat_ub: (flat_lb.copy(), flat_ub.copy()),
+        )
+        monkeypatch.setattr(
+            amp_mod,
+            "_solve_nlp_subproblem",
+            lambda evaluator, x0, lb, ub, nlp_solver: (
+                np.array([1.5], dtype=np.float64),
+                1.0,
+            ),
+        )
+
+        best_x, best_obj = amp_mod._solve_best_nlp_candidate(
+            np.array([1.0], dtype=np.float64),
+            m,
+            evaluator=object(),
+            flat_lb=np.array([0.0], dtype=np.float64),
+            flat_ub=np.array([2.0], dtype=np.float64),
+            constraint_lb=np.array([], dtype=np.float64),
+            constraint_ub=np.array([], dtype=np.float64),
+            nlp_solver="ipm",
+        )
+
+        assert best_x is None
+        assert best_obj is None
 
     def test_oa_cut_recovery_drops_oldest_half(self, monkeypatch):
         """OA recovery should retry with the oldest half of cuts removed."""

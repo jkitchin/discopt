@@ -143,7 +143,7 @@ def _piecewise_product_bounds(
 def _compute_piecewise_big_m(corners: list[float]) -> float:
     """Scale Big-M with the interval magnitude instead of adding a flat constant."""
     max_corner = max(abs(float(c)) for c in corners)
-    return max_corner * (1.0 + 1e-4) + 1e-2
+    return max_corner * (1.0 + 1e-4) + max(1e-6, 1e-4 * max_corner)
 
 
 # ---------------------------------------------------------------------------

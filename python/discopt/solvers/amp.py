@@ -241,6 +241,8 @@ def _solve_best_nlp_candidate(
         )
         if cand_x is None or cand_obj is None:
             continue
+        if not _check_integer_feasible(cand_x, model):
+            continue
         if not _check_constraints_with_evaluator(
             evaluator,
             cand_x,
@@ -270,7 +272,11 @@ def _solve_milp_with_oa_recovery(
     from discopt._jax.milp_relaxation import build_milp_relaxation
 
     active_oa_cuts = list(oa_cuts or [])
-    while True:
+    max_retries = max(1, len(active_oa_cuts).bit_length() + 1)
+    milp_result = None
+    varmap = None
+
+    for _retry in range(max_retries):
         milp_model, varmap = build_milp_relaxation(
             model,
             terms,
@@ -292,6 +298,10 @@ def _solve_milp_with_oa_recovery(
             drop_count,
         )
         active_oa_cuts = active_oa_cuts[drop_count:]
+
+    assert milp_result is not None
+    assert varmap is not None
+    return milp_result, varmap, active_oa_cuts
 
 
 def _check_constraints(x: np.ndarray, model: Model, tol: float = 1e-4) -> bool:
