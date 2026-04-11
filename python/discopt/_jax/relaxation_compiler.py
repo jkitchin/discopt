@@ -401,7 +401,73 @@ def _compile_relax_node(
 
                     return fn
 
+            # Constant fractional exponent with tight envelope
+            if _is_constant_expr(expr.right):
+                alpha = float(expr.right.value)
+                if 0.0 < alpha < 1.0:
+                    # x^alpha is CONCAVE for 0 < alpha < 1, x > 0.
+                    # Concave envelope = x^alpha (the function itself).
+                    # Convex envelope = secant: f(a) + (f(b)-f(a))/(b-a)*(x-a).
+                    _alpha = alpha
+
+                    def fn(x_cv, x_cc, lb, ub, _a=_alpha):
+                        cv_l, cc_l = left_fn(x_cv, x_cc, lb, ub)
+                        # Clamp to positive to avoid NaN in power
+                        cv_l = jnp.maximum(cv_l, 1e-30)
+                        cc_l = jnp.maximum(cc_l, 1e-30)
+                        # Concave overestimator: f(x) = x^alpha (tight)
+                        cc_out = cc_l**_a
+                        # Convex underestimator: secant line between bounds
+                        fa = cv_l**_a
+                        fb = cc_l**_a
+                        slope = (fb - fa) / jnp.maximum(cc_l - cv_l, 1e-30)
+                        mid = 0.5 * (cv_l + cc_l)
+                        cv_out = fa + slope * (mid - cv_l)
+                        return cv_out, cc_out
+
+                    return fn
+                elif alpha > 1.0 and not np.isclose(alpha, round(alpha)):
+                    # x^alpha is CONVEX for alpha > 1, x > 0.
+                    # Convex envelope = x^alpha (the function itself).
+                    # Concave envelope = secant line.
+                    _alpha = alpha
+
+                    def fn(x_cv, x_cc, lb, ub, _a=_alpha):
+                        cv_l, cc_l = left_fn(x_cv, x_cc, lb, ub)
+                        cv_l = jnp.maximum(cv_l, 1e-30)
+                        cc_l = jnp.maximum(cc_l, 1e-30)
+                        # Convex underestimator: f(x) = x^alpha (tight)
+                        cv_out = cv_l**_a
+                        # Concave overestimator: secant line
+                        fa = cv_l**_a
+                        fb = cc_l**_a
+                        slope = (fb - fa) / jnp.maximum(cc_l - cv_l, 1e-30)
+                        mid = 0.5 * (cv_l + cc_l)
+                        cc_out = fa + slope * (mid - cv_l)
+                        return cv_out, cc_out
+
+                    return fn
+
             # General case: x^y = exp(y * log(x))
+            # Use piecewise operations when partitions > 0.
+            if partitions > 0:
+                _k = partitions
+
+                def fn(x_cv, x_cc, lb, ub, _pw_k=_k):
+                    cv_l, cc_l = left_fn(x_cv, x_cc, lb, ub)
+                    cv_r, cc_r = right_fn(x_cv, x_cc, lb, ub)
+                    mid_l = 0.5 * (cv_l + cc_l)
+                    mid_r = 0.5 * (cv_r + cc_r)
+                    log_cv, log_cc = piecewise_relax_log(mid_l, cv_l, cc_l, k=_pw_k)
+                    mid_log = 0.5 * (log_cv + log_cc)
+                    prod_cv, prod_cc = piecewise_mccormick_bilinear(
+                        mid_r, mid_log, cv_r, cc_r, log_cv, log_cc, k=_pw_k
+                    )
+                    mid_prod = 0.5 * (prod_cv + prod_cc)
+                    return piecewise_relax_exp(mid_prod, prod_cv, prod_cc, k=_pw_k)
+
+                return fn
+
             def fn(x_cv, x_cc, lb, ub):
                 cv_l, cc_l = left_fn(x_cv, x_cc, lb, ub)
                 cv_r, cc_r = right_fn(x_cv, x_cc, lb, ub)

@@ -42,6 +42,9 @@ def relax_bilinear(x, y, x_lb, x_ub, y_lb, y_ub):
     """McCormick relaxation of x*y given bounds on x and y.
 
     Returns (cv, cc) where cv <= x*y <= cc.
+    When both factors are non-negative (x_lb >= 0, y_lb >= 0), the
+    product is non-negative — the underestimator is clamped to the
+    implied lower bound x_lb * y_lb.
     """
     # Convex underestimator: max of two affine underestimators
     cv1 = x_lb * y + x * y_lb - x_lb * y_lb
@@ -52,6 +55,12 @@ def relax_bilinear(x, y, x_lb, x_ub, y_lb, y_ub):
     cc1 = x_ub * y + x * y_lb - x_ub * y_lb
     cc2 = x_lb * y + x * y_ub - x_lb * y_ub
     cc = jnp.minimum(cc1, cc2)
+
+    # When both factors are non-negative, the product x*y >= x_lb*y_lb.
+    # The standard McCormick underestimator can dip below this implied
+    # bound at interior points; clamping tightens the relaxation.
+    both_nonneg = (x_lb >= 0.0) & (y_lb >= 0.0)
+    cv = jnp.where(both_nonneg, jnp.maximum(cv, x_lb * y_lb), cv)
 
     return cv, cc
 
