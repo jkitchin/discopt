@@ -22,4 +22,7 @@ sphinx:
       - show-module-summary
     autoapi_keep_files: false
     autoapi_add_toctree_entry: false
-    suppress_warnings: ["etoc.toctree", "myst.header"]
+    suppress_warnings:
+      - etoc.toctree
+      - myst.header
+      - autoapi.python_import_resolution

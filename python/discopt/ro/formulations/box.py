@@ -2,8 +2,8 @@
 
 Mathematical Background
 -----------------------
-For a constraint body expression g(x, p) <= 0 with box uncertainty
-{p : |p_j - p_bar_j| <= delta_j}, the robust counterpart requires:
+For a constraint body expression ``g(x, p) <= 0`` with box uncertainty
+``{p : |p_j - p_bar_j| <= delta_j}``, the robust counterpart requires::
 
     max_{p in U} g(x, p) <= 0
 
@@ -13,11 +13,12 @@ worst-case value depends on the sign of the coefficient (sign-tracking).
 When g contains *bilinear* terms (decision variable * uncertain parameter),
 as arises from affine decision rules, the coefficient of p involves decision
 variables whose sign is not known a priori.  In this case the correct
-reformulation uses absolute-value linearization:
+reformulation uses absolute-value linearization::
 
     max_{|xi|<=delta} coeff(x) * xi = delta * |coeff(x)|
 
-The absolute value is linearized via auxiliary variables:
+The absolute value is linearized via auxiliary variables::
+
     |coeff| <= t,  with  coeff <= t  and  -coeff <= t,  t >= 0.
 """
 

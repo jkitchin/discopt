@@ -105,13 +105,10 @@ class SensitivityResult:
     ) -> str:
         """Return a formatted table of dx*/dp sensitivities.
 
-        Args:
-            var_names:   Variable labels (length n). Defaults to x0, x1, …
-            param_names: Parameter labels (length n_params). Defaults to
-                         parameter names from the model.
-
-        Returns:
-            Multi-line string table.
+        :param var_names: Variable labels (length n). Defaults to ``x0, x1, ...``.
+        :param param_names: Parameter labels (length ``n_params``). Defaults to
+            parameter names from the model.
+        :returns: Multi-line string table.
         """
         n, n_p = self.dx_dp.shape
         if var_names is None:

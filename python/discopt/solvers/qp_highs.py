@@ -1,6 +1,6 @@
 """HiGHS QP/MIQP solver wrapper.
 
-Solves quadratic programs of the form:
+Solves quadratic programs of the form::
 
     min  0.5 * x^T Q x + c^T x
     s.t. A_ub @ x <= b_ub
@@ -8,7 +8,7 @@ Solves quadratic programs of the form:
          lb <= x <= ub
          x[i] integer where integrality[i] == 1
 
-Uses the HiGHS QP solver via `passHessian()` for the quadratic objective.
+Uses the HiGHS QP solver via ``passHessian()`` for the quadratic objective.
 """
 
 from __future__ import annotations
@@ -119,6 +119,15 @@ def solve_qp(
     else:
         col_lower = np.full(n, -inf, dtype=np.float64)
         col_upper = np.full(n, inf, dtype=np.float64)
+
+    # Bounds with magnitude ~1e19 fall just below HiGHS's internal infinity
+    # threshold (~1e20) but are large enough to cause barrier ill-conditioning
+    # and false-optimal results on convex QPs. Translate anything beyond the
+    # discopt "very large" threshold to HiGHS infinity so unbounded variables
+    # are treated as truly unbounded.
+    _FINITE_BOUND_THRESHOLD = 1e15
+    col_lower = np.where(col_lower <= -_FINITE_BOUND_THRESHOLD, -inf, col_lower)
+    col_upper = np.where(col_upper >= _FINITE_BOUND_THRESHOLD, inf, col_upper)
 
     # ---- build constraint matrix ---------------------------------------------
     row_lower, row_upper, csc, m = _build_constraint_matrix(A_ub, b_ub, A_eq, b_eq, n)

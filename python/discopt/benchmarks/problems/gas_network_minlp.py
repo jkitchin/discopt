@@ -1,7 +1,7 @@
 """
 Synthetic gas network MINLP benchmark for discopt vs GAMS comparison.
 
-Topology (8 nodes, 6 pipes, 2 compressor stations):
+Topology (8 nodes, 6 pipes, 2 compressor stations)::
 
     s1 --pipe0--> n1 --[CS1]--> n2 --pipe2--\\
                                               n5 --pipe4--> d1
@@ -12,12 +12,13 @@ specified mass flow rates at minimum delivery pressures. Node n5 is a
 mixing/splitting junction. Compressor stations CS1 and CS2 each have a
 binary on/off decision variable.
 
-MINLP structure:
-  - 2 binary variables  (compressor on/off)
-  - ~15 continuous vars  (pressures, flows, compression ratios)
-  - Nonconvex constraints: Weymouth pressure-drop (f^2 = C*(p_in^2 - p_out^2))
-  - Nonconvex objective:  compressor power (w * (beta^kappa - 1))
-  - Big-M coupling:       flow and ratio linked to on/off binaries
+MINLP structure::
+
+    - 2 binary variables  (compressor on/off)
+    - ~15 continuous vars  (pressures, flows, compression ratios)
+    - Nonconvex constraints: Weymouth pressure-drop (f^2 = C*(p_in^2 - p_out^2))
+    - Nonconvex objective:  compressor power (w * (beta^kappa - 1))
+    - Big-M coupling:       flow and ratio linked to on/off binaries
 
 Expected optimal: both compressors on, equal flow split (~35 kg/s each),
 total cost ~3.07 MW. Single-compressor solutions cost ~9.4 MW.

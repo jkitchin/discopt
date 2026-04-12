@@ -2257,6 +2257,16 @@ def _solve_continuous(
     initial_point: Optional[np.ndarray] = None,
 ) -> SolveResult:
     """Solve a purely continuous model directly with NLP solver (no B&B)."""
+    # Single-NLP solves need reliable KKT convergence. The pure-JAX IPM's
+    # acceptable-tolerance check only covers bound complementarity, so on
+    # problems with unbounded variables and inequality constraints it can
+    # terminate at a non-KKT point and report OPTIMAL (false optimality).
+    # B&B subproblems tolerate this because the tree catches it, but single
+    # solves don't, so promote the default ipm -> ipopt here. Users who
+    # explicitly requested ipm/ripopt/sparse_ipm still get what they asked for.
+    if nlp_solver == "ipm":
+        nlp_solver = "ipopt"
+
     t_jax_start = time.perf_counter()
     evaluator = _make_evaluator(model)
     jax_time = time.perf_counter() - t_jax_start
@@ -2269,6 +2279,22 @@ def _solve_continuous(
         logger.info("Using warm-start point for continuous NLP")
     else:
         x0 = 0.5 * (lb_clipped + ub_clipped)
+        # Variables that are effectively unbounded on both sides collapse
+        # to midpoint 0 above. Zero is a stationary point of periodic
+        # functions (sin, cos) and other even functions, so single-start
+        # local NLP gets stuck at a local max (e.g. cos(0) = 1). Nudge
+        # unbounded coordinates to 0.5 so first-order methods can pick a
+        # descent direction and escape the pathological start.
+        fully_unbounded = (lb <= -_BOUND_WARN_THRESHOLD) & (ub >= _BOUND_WARN_THRESHOLD)
+        x0 = np.where(fully_unbounded, 0.5, x0)
+        # On problems with one-sided large bounds (e.g. x >= 1e-5 with no
+        # upper bound), the midpoint of the clipped [-_SPC, _SPC] range
+        # lands at ~50, which sends exp/log NLPs into overflow territory
+        # and crashes ipopt. Tighten the starting-point range to keep
+        # initial iterates in a numerically safe zone while still
+        # respecting actual bounds.
+        _X0_CLIP = 10.0
+        x0 = np.clip(x0, np.maximum(lb, -_X0_CLIP), np.minimum(ub, _X0_CLIP))
 
     opts = dict(ipopt_options) if ipopt_options else {}
     opts.setdefault("print_level", 0)
@@ -3410,7 +3436,7 @@ def _solve_qp_highs(
         if model._objective.sense == ObjectiveSense.MAXIMIZE:
             obj_val = -obj_val
 
-        return SolveResult(
+        sr = SolveResult(
             status="optimal",
             objective=obj_val,
             bound=obj_val,
@@ -3422,6 +3448,11 @@ def _solve_qp_highs(
             jax_time=0.0,
             python_time=wall_time,
         )
+        # A detected QP with PSD Q is a convex problem solved directly without
+        # B&B -- semantically the same as the convex NLP fast path.
+        if integrality is None:
+            sr.convex_fast_path = True
+        return sr
     elif result.status == SolveStatus.INFEASIBLE:
         return SolveResult(status="infeasible", wall_time=wall_time)
     elif result.status == SolveStatus.TIME_LIMIT:
@@ -3467,7 +3498,7 @@ def _solve_qp_jax(model: Model, t_start: float) -> SolveResult:
     else:
         status = "error"
 
-    return SolveResult(
+    sr = SolveResult(
         status=status,
         objective=obj_val,
         bound=obj_val if status == "optimal" else None,
@@ -3479,6 +3510,9 @@ def _solve_qp_jax(model: Model, t_start: float) -> SolveResult:
         jax_time=jax_time,
         python_time=wall_time - jax_time,
     )
+    # QP dispatch only reaches this function for detected convex QPs.
+    sr.convex_fast_path = True
+    return sr
 
 
 def _solve_milp_bb(

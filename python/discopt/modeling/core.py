@@ -3,12 +3,14 @@ discopt Modeling API
 
 A clean, expressive Python API for formulating Mixed-Integer Nonlinear Programs.
 Designed for:
-  - Readability: models look like the math
-  - JAX compatibility: expressions are traceable and JIT-compilable
-  - Rust interop: expression graphs map to the Rust DAG for structure detection
-  - LLM integration: the API doubles as the tool-calling schema for the formulation agent
 
-Example:
+- Readability: models look like the math
+- JAX compatibility: expressions are traceable and JIT-compilable
+- Rust interop: expression graphs map to the Rust DAG for structure detection
+- LLM integration: the API doubles as the tool-calling schema for the formulation agent
+
+Example::
+
     import discopt.modeling as dm
 
     m = dm.Model("blending")

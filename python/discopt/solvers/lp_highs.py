@@ -139,6 +139,15 @@ def solve_lp(
         col_lower = np.zeros(n, dtype=np.float64)
         col_upper = np.full(n, inf, dtype=np.float64)
 
+    # Very large finite bounds (~1e19) fall just below HiGHS's internal
+    # infinity threshold (~1e20) and can cause numerical issues. Translate
+    # anything beyond the discopt "very large" threshold to HiGHS infinity
+    # so unbounded variables are handled via the same code path as truly
+    # unbounded ones.
+    _FINITE_BOUND_THRESHOLD = 1e15
+    col_lower = np.where(col_lower <= -_FINITE_BOUND_THRESHOLD, -inf, col_lower)
+    col_upper = np.where(col_upper >= _FINITE_BOUND_THRESHOLD, inf, col_upper)
+
     # ---- build constraint matrix ---------------------------------------------
     row_lower, row_upper, csc, m = _build_constraint_matrix(A_ub, b_ub, A_eq, b_eq, n)
 

@@ -322,6 +322,28 @@ def _dispatch_nlp_solve(nlp_solver: str, evaluator, x0, options: dict):
         raise ValueError(f"Unknown nlp_solver: {nlp_solver!r}. Use 'ipm' or 'ipopt'.")
 
 
+def _safe_x0(evaluator) -> np.ndarray:
+    """Compute a safe initial point for NLP solves.
+
+    Mirrors the logic in solver._solve_continuous:
+    - clip bounds to [-_SPC, _SPC] for midpoint
+    - for fully unbounded variables, use 0.5 (not 0) so we don't start at
+      a cos/sin stationary point
+    - clip final x0 to [-10, 10] respecting bounds so exp/log NLPs with
+      one-sided bounds don't get a starting point that overflows
+    """
+    from discopt.constants import STARTING_POINT_CLIP
+
+    lb, ub = evaluator.variable_bounds
+    lb_clipped = np.clip(lb, -STARTING_POINT_CLIP, STARTING_POINT_CLIP)
+    ub_clipped = np.clip(ub, -STARTING_POINT_CLIP, STARTING_POINT_CLIP)
+    x0 = 0.5 * (lb_clipped + ub_clipped)
+    fully_unbounded = (lb <= -1e15) & (ub >= 1e15)
+    x0 = np.where(fully_unbounded, 0.5, x0)
+    x0 = np.clip(x0, np.maximum(lb, -10.0), np.minimum(ub, 10.0))
+    return x0
+
+
 # ---------------------------------------------------------------------------
 # Differentiable solve
 # ---------------------------------------------------------------------------
@@ -331,7 +353,7 @@ def differentiable_solve(
     model: Model,
     ipopt_options: Optional[dict] = None,
     *,
-    nlp_solver: str = "ipm",
+    nlp_solver: str = "ipopt",
     solver_options: Optional[dict] = None,
 ) -> "DiffSolveResult":
     """Solve a continuous model and return a result with parameter sensitivities.
@@ -373,10 +395,7 @@ def differentiable_solve(
 
     # Solve the NLP
     evaluator = NLPEvaluator(model)
-    lb, ub = evaluator.variable_bounds
-    lb_clipped = np.clip(lb, -100.0, 100.0)
-    ub_clipped = np.clip(ub, -100.0, 100.0)
-    x0 = 0.5 * (lb_clipped + ub_clipped)
+    x0 = _safe_x0(evaluator)
 
     opts.setdefault("print_level", 0)
 
@@ -1253,7 +1272,7 @@ def differentiable_solve_l3(
     ipopt_options: Optional[dict] = None,
     active_tol: float = 1e-3,
     *,
-    nlp_solver: str = "ipm",
+    nlp_solver: str = "ipopt",
     solver_options: Optional[dict] = None,
 ) -> DiffSolveResultL3:
     """Solve a continuous model with L3 implicit differentiation sensitivities.
@@ -1290,10 +1309,7 @@ def differentiable_solve_l3(
 
     # Solve the NLP
     evaluator = NLPEvaluator(model)
-    lb, ub = evaluator.variable_bounds
-    lb_clipped = np.clip(lb, -100.0, 100.0)
-    ub_clipped = np.clip(ub, -100.0, 100.0)
-    x0 = 0.5 * (lb_clipped + ub_clipped)
+    x0 = _safe_x0(evaluator)
 
     opts.setdefault("print_level", 0)
 
