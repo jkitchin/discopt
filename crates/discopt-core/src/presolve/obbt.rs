@@ -9,8 +9,8 @@
 //! - OBBT result types
 //! - Filtering logic to skip variables unlikely to benefit
 
-use crate::expr::{BinOp, ConstraintSense, ExprArena, ExprId, ExprNode, ModelRepr, UnOp};
 use super::fbbt::Interval;
+use crate::expr::{BinOp, ConstraintSense, ExprArena, ExprId, ExprNode, ModelRepr, UnOp};
 
 // ─────────────────────────────────────────────────────────────
 // Linear row extraction
@@ -36,10 +36,7 @@ pub struct LinearRow {
 /// Returns `Some((coeffs_map, offset))` where `coeffs_map` maps
 /// variable index -> coefficient. Returns `None` if the expression
 /// is not linear.
-fn extract_linear_coeffs(
-    arena: &ExprArena,
-    id: ExprId,
-) -> Option<(Vec<(usize, f64)>, f64)> {
+fn extract_linear_coeffs(arena: &ExprArena, id: ExprId) -> Option<(Vec<(usize, f64)>, f64)> {
     match arena.get(id) {
         ExprNode::Constant(v) => Some((vec![], *v)),
         ExprNode::ConstantArray(data, _) => {
@@ -232,18 +229,12 @@ pub struct ObbtResult {
 ///
 /// Filters out variables with already-tight bounds (width < tol)
 /// and fixed variables.
-pub fn obbt_candidates(
-    var_bounds: &[Interval],
-    min_width: f64,
-) -> Vec<usize> {
+pub fn obbt_candidates(var_bounds: &[Interval], min_width: f64) -> Vec<usize> {
     var_bounds
         .iter()
         .enumerate()
         .filter(|(_, b)| {
-            !b.is_empty()
-                && b.width() > min_width
-                && b.lo.is_finite()
-                && b.hi.is_finite()
+            !b.is_empty() && b.width() > min_width && b.lo.is_finite() && b.hi.is_finite()
         })
         .map(|(i, _)| i)
         .collect()
@@ -482,7 +473,7 @@ mod tests {
     fn test_obbt_candidates() {
         let bounds = vec![
             Interval::new(0.0, 100.0),
-            Interval::new(5.0, 5.0),       // Fixed
+            Interval::new(5.0, 5.0), // Fixed
             Interval::new(0.0, 50.0),
             Interval::new(f64::NEG_INFINITY, f64::INFINITY), // Infinite
         ];
@@ -493,10 +484,7 @@ mod tests {
 
     #[test]
     fn test_apply_obbt_bounds_tightens() {
-        let mut bounds = vec![
-            Interval::new(0.0, 100.0),
-            Interval::new(0.0, 100.0),
-        ];
+        let mut bounds = vec![Interval::new(0.0, 100.0), Interval::new(0.0, 100.0)];
         let candidates = vec![0, 1];
         let lb_results = vec![Some(5.0), Some(2.0)];
         let ub_results = vec![Some(80.0), Some(50.0)];
@@ -511,9 +499,7 @@ mod tests {
 
     #[test]
     fn test_apply_obbt_bounds_no_tightening() {
-        let mut bounds = vec![
-            Interval::new(5.0, 80.0),
-        ];
+        let mut bounds = vec![Interval::new(5.0, 80.0)];
         let candidates = vec![0];
         // LP results are looser than current bounds
         let lb_results = vec![Some(3.0)];

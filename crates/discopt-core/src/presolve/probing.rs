@@ -3,8 +3,8 @@
 //! For each binary variable, temporarily fix it to 0 and 1, run FBBT,
 //! and use the results to detect fixings, tightened bounds, and implications.
 
-use crate::expr::{ModelRepr, VarType};
 use super::fbbt::{fbbt, Interval};
+use crate::expr::{ModelRepr, VarType};
 
 /// Result of probing all binary variables.
 #[derive(Debug, Clone)]
@@ -153,9 +153,9 @@ fn make_probing_model(model: &ModelRepr, var_bounds: &[Interval]) -> ModelRepr {
 
 #[cfg(test)]
 mod tests {
+    use super::super::fbbt::Interval;
     use super::*;
     use crate::expr::*;
-    use super::super::fbbt::Interval;
 
     #[test]
     fn test_probing_fixes_binary_var() {

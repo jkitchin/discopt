@@ -79,10 +79,7 @@ impl PyTreeManager {
             .collect();
 
         let tm = TreeManager::new(n_vars, lb, ub, integer_vars, sel_strategy);
-        Ok(Self {
-            inner: tm,
-            n_vars,
-        })
+        Ok(Self { inner: tm, n_vars })
     }
 
     /// Initialize the tree with the root node.
@@ -217,10 +214,7 @@ impl PyTreeManager {
             .iter()
             .map(|&x| x as i64)
             .collect();
-        dict.set_item(
-            "unreliable_candidates",
-            PyArray1::from_vec(py, unreliable),
-        )?;
+        dict.set_item("unreliable_candidates", PyArray1::from_vec(py, unreliable))?;
         Ok(dict)
     }
 
@@ -251,10 +245,7 @@ impl PyTreeManager {
     /// Get the current incumbent solution, if any.
     ///
     /// Returns (solution_array, objective_value) or None.
-    fn incumbent<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> Option<(Bound<'py, PyArray1<f64>>, f64)> {
+    fn incumbent<'py>(&self, py: Python<'py>) -> Option<(Bound<'py, PyArray1<f64>>, f64)> {
         self.inner.incumbent().map(|(sol, val)| {
             let arr = PyArray1::from_vec(py, sol.to_vec());
             (arr, val)
@@ -265,11 +256,7 @@ impl PyTreeManager {
     ///
     /// Updates the incumbent only if obj_val improves on the current best.
     /// Returns True if the incumbent was updated.
-    fn inject_incumbent(
-        &mut self,
-        solution: PyReadonlyArray1<f64>,
-        obj_val: f64,
-    ) -> bool {
+    fn inject_incumbent(&mut self, solution: PyReadonlyArray1<f64>, obj_val: f64) -> bool {
         let sol_vec = solution.as_slice().unwrap().to_vec();
         self.inner.inject_incumbent(sol_vec, obj_val)
     }
@@ -337,12 +324,9 @@ impl PyTreeManager {
         let ids = node_ids.as_slice().unwrap();
         let vars = var_indices.as_slice().unwrap();
         for (&nid, &vid) in ids.iter().zip(vars.iter()) {
-            self.inner.set_branch_hint(
-                NodeId(nid as usize),
-                vid as usize,
-            );
+            self.inner
+                .set_branch_hint(NodeId(nid as usize), vid as usize);
         }
         Ok(())
     }
-
 }

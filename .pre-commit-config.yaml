@@ -14,3 +14,11 @@ repos:
         files: ^python/discopt/
         additional_dependencies: [numpy, jax]
         args: [--ignore-missing-imports]
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --
+        language: system
+        types: [rust]
+        pass_filenames: true

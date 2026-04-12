@@ -209,7 +209,9 @@ impl PyBatchDispatcher {
     fn get_result(&self, py: Python<'_>, node_id: usize) -> Option<(f64, PyObject, bool)> {
         for (nid, res) in &self.results {
             if *nid == node_id {
-                let sol = PyArray1::from_vec(py, res.solution.clone()).into_any().unbind();
+                let sol = PyArray1::from_vec(py, res.solution.clone())
+                    .into_any()
+                    .unbind();
                 return Some((res.lower_bound, sol, res.feasible));
             }
         }
@@ -225,7 +227,9 @@ mod tests {
     fn test_add_node() {
         pyo3::prepare_freethreaded_python();
         let mut dispatcher = PyBatchDispatcher::new(3).unwrap();
-        let id = dispatcher.add_node(vec![0.0, 0.0, 0.0], vec![1.0, 1.0, 1.0]).unwrap();
+        let id = dispatcher
+            .add_node(vec![0.0, 0.0, 0.0], vec![1.0, 1.0, 1.0])
+            .unwrap();
         assert_eq!(id, 0);
         assert_eq!(dispatcher.pending_count(), 1);
     }

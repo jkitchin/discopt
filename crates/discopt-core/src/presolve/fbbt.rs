@@ -94,10 +94,7 @@ pub fn interval_mul(a: &Interval, b: &Interval) -> Interval {
     let p2 = a.lo * b.hi;
     let p3 = a.hi * b.lo;
     let p4 = a.hi * b.hi;
-    Interval::new(
-        p1.min(p2).min(p3).min(p4),
-        p1.max(p2).max(p3).max(p4),
-    )
+    Interval::new(p1.min(p2).min(p3).min(p4), p1.max(p2).max(p3).max(p4))
 }
 
 /// `[a,b] / [c,d]` with division-by-zero handling.

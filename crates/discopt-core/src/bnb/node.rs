@@ -68,13 +68,7 @@ mod tests {
 
     #[test]
     fn test_node_creation() {
-        let node = Node::new(
-            NodeId(0),
-            None,
-            0,
-            vec![0.0, 0.0],
-            vec![1.0, 1.0],
-        );
+        let node = Node::new(NodeId(0), None, 0, vec![0.0, 0.0], vec![1.0, 1.0]);
         assert_eq!(node.id, NodeId(0));
         assert_eq!(node.parent, None);
         assert_eq!(node.depth, 0);

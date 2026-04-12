@@ -17,9 +17,8 @@ use crate::expr_bindings::PyModelRepr;
 ///     PyModelRepr wrapping the parsed model.
 #[pyfunction]
 pub fn parse_nl_file(path: &str) -> PyResult<PyModelRepr> {
-    let model = nl_parser::parse_nl_file(path).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{e}"))
-    })?;
+    let model = nl_parser::parse_nl_file(path)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{e}")))?;
     Ok(PyModelRepr::from_model_repr(model))
 }
 
@@ -32,8 +31,7 @@ pub fn parse_nl_file(path: &str) -> PyResult<PyModelRepr> {
 ///     PyModelRepr wrapping the parsed model.
 #[pyfunction]
 pub fn parse_nl_string(content: &str) -> PyResult<PyModelRepr> {
-    let model = nl_parser::parse_nl(content).map_err(|e| {
-        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{e}"))
-    })?;
+    let model = nl_parser::parse_nl(content)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{e}")))?;
     Ok(PyModelRepr::from_model_repr(model))
 }

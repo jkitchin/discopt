@@ -172,8 +172,16 @@ fn parse_header(reader: &mut LineReader<'_>) -> Result<NlHeader, NlParseError> {
     // Line 2: n_nonlinear_constraints n_nonlinear_objectives
     let l2 = reader.next_line()?;
     let t2 = split_ws(l2);
-    let n_nonlinear_constraints = if !t2.is_empty() { parse_usize(t2[0])? } else { 0 };
-    let n_nonlinear_objectives = if t2.len() >= 2 { parse_usize(t2[1])? } else { 0 };
+    let n_nonlinear_constraints = if !t2.is_empty() {
+        parse_usize(t2[0])?
+    } else {
+        0
+    };
+    let n_nonlinear_objectives = if t2.len() >= 2 {
+        parse_usize(t2[1])?
+    } else {
+        0
+    };
 
     // Line 3: network constraints (ignored)
     let _l3 = reader.next_line()?;
@@ -181,9 +189,21 @@ fn parse_header(reader: &mut LineReader<'_>) -> Result<NlHeader, NlParseError> {
     // Line 4: nonlinear var counts
     let l4 = reader.next_line()?;
     let t4 = split_ws(l4);
-    let n_nl_vars_in_cons = if !t4.is_empty() { parse_usize(t4[0])? } else { 0 };
-    let n_nl_vars_in_objs = if t4.len() >= 2 { parse_usize(t4[1])? } else { 0 };
-    let n_nl_vars_in_both = if t4.len() >= 3 { parse_usize(t4[2])? } else { 0 };
+    let n_nl_vars_in_cons = if !t4.is_empty() {
+        parse_usize(t4[0])?
+    } else {
+        0
+    };
+    let n_nl_vars_in_objs = if t4.len() >= 2 {
+        parse_usize(t4[1])?
+    } else {
+        0
+    };
+    let n_nl_vars_in_both = if t4.len() >= 3 {
+        parse_usize(t4[2])?
+    } else {
+        0
+    };
 
     // Line 5: flags (ignored)
     let _l5 = reader.next_line()?;
@@ -191,17 +211,45 @@ fn parse_header(reader: &mut LineReader<'_>) -> Result<NlHeader, NlParseError> {
     // Line 6: discrete vars — can be 2, 3, or 5 values
     let l6 = reader.next_line()?;
     let t6 = split_ws(l6);
-    let n_linear_binary_vars = if !t6.is_empty() { parse_usize(t6[0])? } else { 0 };
-    let n_linear_integer_vars = if t6.len() >= 2 { parse_usize(t6[1])? } else { 0 };
-    let n_nl_integer_vars_in_both = if t6.len() >= 3 { parse_usize(t6[2])? } else { 0 };
-    let n_nl_integer_vars_in_cons = if t6.len() >= 4 { parse_usize(t6[3])? } else { 0 };
-    let n_nl_integer_vars_in_objs = if t6.len() >= 5 { parse_usize(t6[4])? } else { 0 };
+    let n_linear_binary_vars = if !t6.is_empty() {
+        parse_usize(t6[0])?
+    } else {
+        0
+    };
+    let n_linear_integer_vars = if t6.len() >= 2 {
+        parse_usize(t6[1])?
+    } else {
+        0
+    };
+    let n_nl_integer_vars_in_both = if t6.len() >= 3 {
+        parse_usize(t6[2])?
+    } else {
+        0
+    };
+    let n_nl_integer_vars_in_cons = if t6.len() >= 4 {
+        parse_usize(t6[3])?
+    } else {
+        0
+    };
+    let n_nl_integer_vars_in_objs = if t6.len() >= 5 {
+        parse_usize(t6[4])?
+    } else {
+        0
+    };
 
     // Line 7: sparsity
     let l7 = reader.next_line()?;
     let t7 = split_ws(l7);
-    let n_nonzeros_jacobian = if !t7.is_empty() { parse_usize(t7[0])? } else { 0 };
-    let n_nonzeros_obj_gradient = if t7.len() >= 2 { parse_usize(t7[1])? } else { 0 };
+    let n_nonzeros_jacobian = if !t7.is_empty() {
+        parse_usize(t7[0])?
+    } else {
+        0
+    };
+    let n_nonzeros_obj_gradient = if t7.len() >= 2 {
+        parse_usize(t7[1])?
+    } else {
+        0
+    };
 
     // Line 8: max name lengths (ignored)
     let _l8 = reader.next_line()?;
@@ -209,11 +257,31 @@ fn parse_header(reader: &mut LineReader<'_>) -> Result<NlHeader, NlParseError> {
     // Line 9: common expressions
     let l9 = reader.next_line()?;
     let t9 = split_ws(l9);
-    let n_common_exprs_b_c = if !t9.is_empty() { parse_usize(t9[0])? } else { 0 };
-    let n_common_exprs_c1 = if t9.len() >= 2 { parse_usize(t9[1])? } else { 0 };
-    let n_common_exprs_o1 = if t9.len() >= 3 { parse_usize(t9[2])? } else { 0 };
-    let n_common_exprs_c2 = if t9.len() >= 4 { parse_usize(t9[3])? } else { 0 };
-    let n_common_exprs_o2 = if t9.len() >= 5 { parse_usize(t9[4])? } else { 0 };
+    let n_common_exprs_b_c = if !t9.is_empty() {
+        parse_usize(t9[0])?
+    } else {
+        0
+    };
+    let n_common_exprs_c1 = if t9.len() >= 2 {
+        parse_usize(t9[1])?
+    } else {
+        0
+    };
+    let n_common_exprs_o1 = if t9.len() >= 3 {
+        parse_usize(t9[2])?
+    } else {
+        0
+    };
+    let n_common_exprs_c2 = if t9.len() >= 4 {
+        parse_usize(t9[3])?
+    } else {
+        0
+    };
+    let n_common_exprs_o2 = if t9.len() >= 5 {
+        parse_usize(t9[4])?
+    } else {
+        0
+    };
 
     Ok(NlHeader {
         n_vars,
@@ -625,11 +693,19 @@ pub fn parse_nl(content: &str) -> Result<ModelRepr, NlParseError> {
     let n_discrete = header.n_linear_binary_vars + header.n_linear_integer_vars;
     if n_discrete > 0 && n_vars >= n_discrete {
         let start_binary = n_vars - n_discrete;
-        for vt in var_types.iter_mut().skip(start_binary).take(header.n_linear_binary_vars) {
+        for vt in var_types
+            .iter_mut()
+            .skip(start_binary)
+            .take(header.n_linear_binary_vars)
+        {
             *vt = VarType::Binary;
         }
         let start_integer = start_binary + header.n_linear_binary_vars;
-        for vt in var_types.iter_mut().skip(start_integer).take(header.n_linear_integer_vars) {
+        for vt in var_types
+            .iter_mut()
+            .skip(start_integer)
+            .take(header.n_linear_integer_vars)
+        {
             *vt = VarType::Integer;
         }
     }
@@ -1117,15 +1193,15 @@ mod tests {
         let mut s = String::new();
         s.push_str("g3 1 1 0\n");
         s.push_str(" 2 1 1 0 0\n"); // n_vars=2, n_cons=1, n_obj=1
-        s.push_str(" 0 0\n");       // nonlinear: 0 cons, 0 obj
-        s.push_str(" 0 0 0\n");     // network
-        s.push_str(" 0 0 0\n");     // nl var counts
-        s.push_str(" 0 0 0 1\n");   // flags
-        s.push_str(" 0 0\n");       // discrete vars
-        s.push_str(" 2 2\n");       // nnz jacobian=2, nnz gradient=2
-        s.push_str(" 0 0\n");       // max name lengths
+        s.push_str(" 0 0\n"); // nonlinear: 0 cons, 0 obj
+        s.push_str(" 0 0 0\n"); // network
+        s.push_str(" 0 0 0\n"); // nl var counts
+        s.push_str(" 0 0 0 1\n"); // flags
+        s.push_str(" 0 0\n"); // discrete vars
+        s.push_str(" 2 2\n"); // nnz jacobian=2, nnz gradient=2
+        s.push_str(" 0 0\n"); // max name lengths
         s.push_str(" 0 0 0 0 0\n"); // common expressions
-        // O0: minimize, expression = 0 (linear part in G)
+                                    // O0: minimize, expression = 0 (linear part in G)
         s.push_str("O0 0\n");
         s.push_str("n0\n");
         // C0: constraint expression = 0 (linear part in J)
@@ -1162,9 +1238,9 @@ mod tests {
         let mut s = String::new();
         s.push_str("g3 1 1 0\n");
         s.push_str(" 2 1 1 0 0\n");
-        s.push_str(" 1 1\n");       // 1 nonlinear constraint, 1 nonlinear objective
+        s.push_str(" 1 1\n"); // 1 nonlinear constraint, 1 nonlinear objective
         s.push_str(" 0 0\n");
-        s.push_str(" 2 2 2\n");     // 2 nl vars in cons, 2 in objs, 2 in both
+        s.push_str(" 2 2 2\n"); // 2 nl vars in cons, 2 in objs, 2 in both
         s.push_str(" 0 0 0 1\n");
         s.push_str(" 0 0\n");
         s.push_str(" 0 0\n");
@@ -1172,14 +1248,14 @@ mod tests {
         s.push_str(" 0 0 0 0 0\n");
         // O0: minimize, x^2 + y^2
         s.push_str("O0 0\n");
-        s.push_str("o0\n");         // add
-        s.push_str("o5\n");         // pow
-        s.push_str("v0\n");         // x
-        s.push_str("n2\n");         // 2
-        s.push_str("o5\n");         // pow
-        s.push_str("v1\n");         // y
-        s.push_str("n2\n");         // 2
-        // C0: nonlinear part of constraint = 0 (pure linear)
+        s.push_str("o0\n"); // add
+        s.push_str("o5\n"); // pow
+        s.push_str("v0\n"); // x
+        s.push_str("n2\n"); // 2
+        s.push_str("o5\n"); // pow
+        s.push_str("v1\n"); // y
+        s.push_str("n2\n"); // 2
+                            // C0: nonlinear part of constraint = 0 (pure linear)
         s.push_str("C0\n");
         s.push_str("n0\n");
         // x
@@ -1213,9 +1289,9 @@ mod tests {
         let mut s = String::new();
         s.push_str("g3 1 1 0\n");
         s.push_str(" 2 1 1 0 0\n");
-        s.push_str(" 0 1\n");       // 0 nonlinear constraints, 1 nonlinear objective
+        s.push_str(" 0 1\n"); // 0 nonlinear constraints, 1 nonlinear objective
         s.push_str(" 0 0\n");
-        s.push_str(" 0 2 0\n");     // 0 nl vars in cons, 2 in objs
+        s.push_str(" 0 2 0\n"); // 0 nl vars in cons, 2 in objs
         s.push_str(" 0 0 0 1\n");
         s.push_str(" 0 0\n");
         s.push_str(" 2 0\n");
@@ -1223,12 +1299,12 @@ mod tests {
         s.push_str(" 0 0 0 0 0\n");
         // O0: minimize, exp(x) + log(y)
         s.push_str("O0 0\n");
-        s.push_str("o0\n");         // add
-        s.push_str("o44\n");        // exp
-        s.push_str("v0\n");         // x
-        s.push_str("o43\n");        // log
-        s.push_str("v1\n");         // y
-        // C0: linear constraint (nl part = 0)
+        s.push_str("o0\n"); // add
+        s.push_str("o44\n"); // exp
+        s.push_str("v0\n"); // x
+        s.push_str("o43\n"); // log
+        s.push_str("v1\n"); // y
+                            // C0: linear constraint (nl part = 0)
         s.push_str("C0\n");
         s.push_str("n0\n");
         // x
@@ -1264,8 +1340,8 @@ mod tests {
         s.push_str(" 0 0 0\n");
         s.push_str(" 0 0 0\n");
         s.push_str(" 0 0 0 1\n");
-        s.push_str(" 1 1\n");       // 1 binary, 1 integer (linear)
-        s.push_str(" 3 3\n");       // nnz
+        s.push_str(" 1 1\n"); // 1 binary, 1 integer (linear)
+        s.push_str(" 3 3\n"); // nnz
         s.push_str(" 0 0\n");
         s.push_str(" 0 0 0 0 0\n");
         // O0: minimize, linear
@@ -1286,19 +1362,19 @@ mod tests {
         // Variable order: z (continuous), x (binary), y (integer)
         // because linear discrete vars go at the end
         s.push_str("b\n");
-        s.push_str("0 0 10\n");    // z continuous
-        s.push_str("0 0 1\n");     // x binary
-        s.push_str("0 0 5\n");     // y integer
-        // k
+        s.push_str("0 0 10\n"); // z continuous
+        s.push_str("0 0 1\n"); // x binary
+        s.push_str("0 0 5\n"); // y integer
+                               // k
         s.push_str("k2\n");
         s.push_str("1\n");
         s.push_str("2\n");
         // J0: 3*z + 1*x + 2*y
         s.push_str("J0 3\n");
-        s.push_str("0 3\n");       // z
-        s.push_str("1 1\n");       // x
-        s.push_str("2 2\n");       // y
-        // G0: same as J0
+        s.push_str("0 3\n"); // z
+        s.push_str("1 1\n"); // x
+        s.push_str("2 2\n"); // y
+                             // G0: same as J0
         s.push_str("G0 3\n");
         s.push_str("0 3\n");
         s.push_str("1 1\n");
@@ -1328,10 +1404,10 @@ mod tests {
         s.push_str("0 0\n");
         s.push_str("1 0\n");
         s.push_str("r\n");
-        s.push_str("4 5\n");        // equality: body == 5
+        s.push_str("4 5\n"); // equality: body == 5
         s.push_str("b\n");
-        s.push_str("2 0\n");        // x >= 0
-        s.push_str("2 0\n");        // y >= 0
+        s.push_str("2 0\n"); // x >= 0
+        s.push_str("2 0\n"); // y >= 0
         s.push_str("k1\n");
         s.push_str("1\n");
         s.push_str("J0 2\n");
@@ -1365,7 +1441,7 @@ mod tests {
         s.push_str("0 1\n");
         s.push_str("1 1\n");
         s.push_str("r\n");
-        s.push_str("0 2 8\n");      // range: 2 <= body <= 8
+        s.push_str("0 2 8\n"); // range: 2 <= body <= 8
         s.push_str("b\n");
         s.push_str("0 0 10\n");
         s.push_str("0 0 10\n");
@@ -1393,7 +1469,7 @@ mod tests {
         s.push_str(" 2 2\n");
         s.push_str(" 0 0\n");
         s.push_str(" 0 0 0 0 0\n");
-        s.push_str("O0 1\n");       // 1 = maximize
+        s.push_str("O0 1\n"); // 1 = maximize
         s.push_str("n0\n");
         s.push_str("C0\n");
         s.push_str("n0\n");
@@ -1421,7 +1497,7 @@ mod tests {
         let mut s = String::new();
         s.push_str("g3 1 1 0\n");
         s.push_str(" 4 0 1 0 0\n"); // 4 vars, 0 constraints
-        s.push_str(" 0 1\n");       // 1 nonlinear objective
+        s.push_str(" 0 1\n"); // 1 nonlinear objective
         s.push_str(" 0 0\n");
         s.push_str(" 0 4 0\n");
         s.push_str(" 0 0 0 1\n");
@@ -1431,8 +1507,8 @@ mod tests {
         s.push_str(" 0 0 0 0 0\n");
         // O0: sum of x_i^2 using o54 (sumlist)
         s.push_str("O0 0\n");
-        s.push_str("o54\n");        // sumlist
-        s.push_str("4\n");          // 4 terms
+        s.push_str("o54\n"); // sumlist
+        s.push_str("4\n"); // 4 terms
         s.push_str("o5\n");
         s.push_str("v0\n");
         s.push_str("n2\n");
@@ -1651,9 +1727,8 @@ mod tests {
             ("maximize", maximize_nl),
             ("sumlist", sumlist_nl),
         ] {
-            let model = parse_nl(&nl_fn()).unwrap_or_else(|e| {
-                panic!("failed to parse {name}: {e}")
-            });
+            let model =
+                parse_nl(&nl_fn()).unwrap_or_else(|e| panic!("failed to parse {name}: {e}"));
             assert_eq!(
                 model.n_vars,
                 model.variables.len(),
@@ -1705,10 +1780,10 @@ mod tests {
         s.push_str(" 0 0\n");
         s.push_str(" 0 0 0 0 0\n");
         s.push_str("O0 0\n");
-        s.push_str("o16\n");        // unary neg
-        s.push_str("v0\n");         // -x
+        s.push_str("o16\n"); // unary neg
+        s.push_str("v0\n"); // -x
         s.push_str("b\n");
-        s.push_str("3\n");          // free
+        s.push_str("3\n"); // free
         let model = parse_nl(&s).unwrap();
         // -x at x=5 should be -5
         let val = model.evaluate_objective(&[5.0]);
@@ -1732,7 +1807,7 @@ mod tests {
         s.push_str(" 0 0 0 0 0\n");
         // O0: x * y
         s.push_str("O0 0\n");
-        s.push_str("o2\n");         // multiply
+        s.push_str("o2\n"); // multiply
         s.push_str("v0\n");
         s.push_str("v1\n");
         s.push_str("b\n");
@@ -1761,7 +1836,7 @@ mod tests {
         s.push_str(" 0 0 0 0 0\n");
         // O0: x / y
         s.push_str("O0 0\n");
-        s.push_str("o3\n");         // divide
+        s.push_str("o3\n"); // divide
         s.push_str("v0\n");
         s.push_str("v1\n");
         s.push_str("b\n");
@@ -1791,9 +1866,9 @@ mod tests {
         // O0: sin(x) + cos(y)
         s.push_str("O0 0\n");
         s.push_str("o0\n");
-        s.push_str("o41\n");        // sin
+        s.push_str("o41\n"); // sin
         s.push_str("v0\n");
-        s.push_str("o46\n");        // cos
+        s.push_str("o46\n"); // cos
         s.push_str("v1\n");
         s.push_str("b\n");
         s.push_str("3\n");
@@ -1822,10 +1897,10 @@ mod tests {
         s.push_str(" 0 0\n");
         s.push_str(" 0 0 0 0 0\n");
         s.push_str("O0 0\n");
-        s.push_str("o39\n");        // sqrt
+        s.push_str("o39\n"); // sqrt
         s.push_str("v0\n");
         s.push_str("b\n");
-        s.push_str("2 0\n");        // x >= 0
+        s.push_str("2 0\n"); // x >= 0
         let model = parse_nl(&s).unwrap();
         // sqrt(9) = 3
         let val = model.evaluate_objective(&[9.0]);
@@ -1850,8 +1925,8 @@ mod tests {
         s.push_str("O0 0\n");
         s.push_str("n0\n");
         s.push_str("b\n");
-        s.push_str("4 3.14\n");     // x fixed at 3.14
-        s.push_str("1 100\n");      // y <= 100 (upper bound only)
+        s.push_str("4 3.14\n"); // x fixed at 3.14
+        s.push_str("1 100\n"); // y <= 100 (upper bound only)
         s.push_str("G0 1\n");
         s.push_str("0 1\n");
         let model = parse_nl(&s).unwrap();
@@ -1905,7 +1980,7 @@ mod tests {
         s.push_str(" 0 0\n");
         s.push_str(" 0 0 0 0 0\n");
         s.push_str("O0 0\n");
-        s.push_str("o42\n");        // log10
+        s.push_str("o42\n"); // log10
         s.push_str("v0\n");
         s.push_str("b\n");
         s.push_str("2 0.001\n");
@@ -1932,19 +2007,22 @@ mod tests {
         s.push_str(" 0 0\n");
         s.push_str(" 0 0 0 0 0\n");
         s.push_str("O0 0\n");
-        s.push_str("o44\n");        // exp
-        s.push_str("o0\n");         // add
-        s.push_str("o5\n");         // pow
-        s.push_str("v0\n");         // x
-        s.push_str("n2\n");         // 2
-        s.push_str("v1\n");         // y
+        s.push_str("o44\n"); // exp
+        s.push_str("o0\n"); // add
+        s.push_str("o5\n"); // pow
+        s.push_str("v0\n"); // x
+        s.push_str("n2\n"); // 2
+        s.push_str("v1\n"); // y
         s.push_str("b\n");
         s.push_str("3\n");
         s.push_str("3\n");
         let model = parse_nl(&s).unwrap();
         let val = model.evaluate_objective(&[1.0, 2.0]);
         let expected = (3.0_f64).exp();
-        assert!((val - expected).abs() < 1e-10, "expected {expected}, got {val}");
+        assert!(
+            (val - expected).abs() < 1e-10,
+            "expected {expected}, got {val}"
+        );
     }
 
     // ─── Test: multiple constraints ───────────────────────
@@ -1973,8 +2051,8 @@ mod tests {
         s.push_str("0 0\n");
         s.push_str("1 0\n");
         s.push_str("r\n");
-        s.push_str("1 10\n");       // c0: body <= 10
-        s.push_str("2 -2\n");       // c1: body >= -2
+        s.push_str("1 10\n"); // c0: body <= 10
+        s.push_str("2 -2\n"); // c1: body >= -2
         s.push_str("b\n");
         s.push_str("3\n");
         s.push_str("3\n");
@@ -2056,7 +2134,7 @@ mod tests {
         s.push_str(" 0 0 0 0 0\n");
         // O0: x - y
         s.push_str("O0 0\n");
-        s.push_str("o1\n");         // subtract
+        s.push_str("o1\n"); // subtract
         s.push_str("v0\n");
         s.push_str("v1\n");
         s.push_str("b\n");

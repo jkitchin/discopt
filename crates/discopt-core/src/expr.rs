@@ -374,7 +374,11 @@ impl ModelBuilder {
         lb: Vec<f64>,
         ub: Vec<f64>,
     ) -> usize {
-        let size: usize = if shape.is_empty() { 1 } else { shape.iter().product() };
+        let size: usize = if shape.is_empty() {
+            1
+        } else {
+            shape.iter().product()
+        };
         let offset = self.n_vars;
         let block_idx = self.variables.len();
 
@@ -848,9 +852,7 @@ impl ExprArena {
                     self.collect_var_indices_inner(*t, out);
                 }
             }
-            ExprNode::Constant(_)
-            | ExprNode::ConstantArray(_, _)
-            | ExprNode::Parameter { .. } => {}
+            ExprNode::Constant(_) | ExprNode::ConstantArray(_, _) | ExprNode::Parameter { .. } => {}
         }
     }
 }
@@ -878,9 +880,7 @@ impl ExprArena {
                     f64::NAN
                 }
             }
-            ExprNode::Variable {
-                size, shape, ..
-            } => {
+            ExprNode::Variable { size, shape, .. } => {
                 if *size == 1 {
                     // Scalar variable — compute the flat offset.
                     let offset = self.var_offset(id);
@@ -969,7 +969,7 @@ impl ExprArena {
                         };
                         a0.max(a1)
                     }
-                    MathFunc::Prod => a0, // single-arg prod is identity
+                    MathFunc::Prod => a0,  // single-arg prod is identity
                     MathFunc::Norm2 => a0, // single-arg norm2 is abs
                 }
             }
@@ -1005,9 +1005,7 @@ impl ExprArena {
                 // Sum all elements of the operand.
                 self.evaluate_sum_all(*operand, x)
             }
-            ExprNode::SumOver { terms } => {
-                terms.iter().map(|t| self.evaluate(*t, x)).sum()
-            }
+            ExprNode::SumOver { terms } => terms.iter().map(|t| self.evaluate(*t, x)).sum(),
         }
     }
 
@@ -1024,7 +1022,10 @@ impl ExprArena {
             let mut vars: Vec<(usize, usize)> = Vec::new();
             let mut seen = std::collections::HashSet::new();
             for node in &self.nodes {
-                if let ExprNode::Variable { index: idx, size, .. } = node {
+                if let ExprNode::Variable {
+                    index: idx, size, ..
+                } = node
+                {
                     if seen.insert(*idx) {
                         vars.push((*idx, *size));
                     }
@@ -1173,47 +1174,57 @@ impl ModelRepr {
                     MathFunc::Tanh => a0.tanh(),
                     MathFunc::Abs => a0.abs(),
                     MathFunc::Sign => {
-                        if a0 > 0.0 { 1.0 } else if a0 < 0.0 { -1.0 } else { 0.0 }
+                        if a0 > 0.0 {
+                            1.0
+                        } else if a0 < 0.0 {
+                            -1.0
+                        } else {
+                            0.0
+                        }
                     }
                     MathFunc::Min => {
-                        let a1 = if args.len() > 1 { self.evaluate_node(args[1], x) } else { f64::NAN };
+                        let a1 = if args.len() > 1 {
+                            self.evaluate_node(args[1], x)
+                        } else {
+                            f64::NAN
+                        };
                         a0.min(a1)
                     }
                     MathFunc::Max => {
-                        let a1 = if args.len() > 1 { self.evaluate_node(args[1], x) } else { f64::NAN };
+                        let a1 = if args.len() > 1 {
+                            self.evaluate_node(args[1], x)
+                        } else {
+                            f64::NAN
+                        };
                         a0.max(a1)
                     }
                     MathFunc::Prod => a0,
                     MathFunc::Norm2 => a0,
                 }
             }
-            ExprNode::Index { base, index } => {
-                match self.arena.get(*base) {
-                    ExprNode::Variable { index: var_idx, shape, .. } => {
-                        let offset = self.variables[*var_idx].offset;
-                        let flat = index_spec_to_flat(index, shape);
-                        x[offset + flat]
-                    }
-                    ExprNode::ConstantArray(data, shape) => {
-                        let flat = index_spec_to_flat(index, shape);
-                        data[flat]
-                    }
-                    ExprNode::Parameter { value, shape, .. } => {
-                        let flat = index_spec_to_flat(index, shape);
-                        value[flat]
-                    }
-                    _ => f64::NAN,
+            ExprNode::Index { base, index } => match self.arena.get(*base) {
+                ExprNode::Variable {
+                    index: var_idx,
+                    shape,
+                    ..
+                } => {
+                    let offset = self.variables[*var_idx].offset;
+                    let flat = index_spec_to_flat(index, shape);
+                    x[offset + flat]
                 }
-            }
-            ExprNode::MatMul { left, right } => {
-                self.evaluate_matmul(*left, *right, x)
-            }
-            ExprNode::Sum { operand, .. } => {
-                self.evaluate_sum_all(*operand, x)
-            }
-            ExprNode::SumOver { terms } => {
-                terms.iter().map(|t| self.evaluate_node(*t, x)).sum()
-            }
+                ExprNode::ConstantArray(data, shape) => {
+                    let flat = index_spec_to_flat(index, shape);
+                    data[flat]
+                }
+                ExprNode::Parameter { value, shape, .. } => {
+                    let flat = index_spec_to_flat(index, shape);
+                    value[flat]
+                }
+                _ => f64::NAN,
+            },
+            ExprNode::MatMul { left, right } => self.evaluate_matmul(*left, *right, x),
+            ExprNode::Sum { operand, .. } => self.evaluate_sum_all(*operand, x),
+            ExprNode::SumOver { terms } => terms.iter().map(|t| self.evaluate_node(*t, x)).sum(),
         }
     }
 

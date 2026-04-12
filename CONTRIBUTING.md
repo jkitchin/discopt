@@ -75,6 +75,14 @@ pre-commit install
 4. Run `ruff check` and `ruff format` before committing.
 5. Keep commits focused; use descriptive commit messages.
 6. Open a PR against `main` with a clear description.
+7. Add a one-line entry to the `## [Unreleased]` section of `CHANGELOG.md` under the appropriate group (Added / Changed / Fixed / etc.).
+
+## Releasing
+
+Releases are cut by following [`RELEASE.md`](RELEASE.md), which is the
+authoritative checklist for tests, documentation, manuscript, changelog,
+version bump, tagging, and PyPI publication. Tagging `vX.Y.Z` triggers
+`.github/workflows/release.yml`, which builds wheels and publishes to PyPI.
 
 ## Project Structure
 

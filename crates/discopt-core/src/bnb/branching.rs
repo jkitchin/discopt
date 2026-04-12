@@ -474,8 +474,16 @@ mod tests {
         // x0 continuous=0.5, x1 integer=0.7
         let solution = vec![0.5, 0.7];
         let vars = vec![
-            VarBranchInfo { offset: 0, size: 1, is_integer: false },
-            VarBranchInfo { offset: 1, size: 1, is_integer: true },
+            VarBranchInfo {
+                offset: 0,
+                size: 1,
+                is_integer: false,
+            },
+            VarBranchInfo {
+                offset: 1,
+                size: 1,
+                is_integer: true,
+            },
         ];
         let decision = select_branch_variable(&solution, &vars).unwrap();
         assert_eq!(decision.var_index, 1); // only x1 is integer
@@ -528,13 +536,7 @@ mod tests {
 
     #[test]
     fn test_create_children_bounds() {
-        let parent = Node::new(
-            NodeId(0),
-            None,
-            0,
-            vec![0.0, 0.0],
-            vec![10.0, 10.0],
-        );
+        let parent = Node::new(NodeId(0), None, 0, vec![0.0, 0.0], vec![10.0, 10.0]);
         let decision = BranchDecision {
             var_index: 0,
             branch_point: 3.0, // branching x0 at floor(3.7) = 3
@@ -653,8 +655,7 @@ mod tests {
         pc.update(2, 0.0, 10.0, 0.5, true); // per-unit = 20.0
         pc.update(2, 0.0, 10.0, 0.5, false); // per-unit = 20.0
 
-        let (decision, _unreliable) =
-            select_branch_variable_pseudocost(&solution, &vars, &pc, 8);
+        let (decision, _unreliable) = select_branch_variable_pseudocost(&solution, &vars, &pc, 8);
         let d = decision.unwrap();
         assert_eq!(d.var_index, 2); // var 2 has highest score
         assert_eq!(d.branch_point, 0.0);
@@ -669,8 +670,7 @@ mod tests {
             is_integer: true,
         }];
         let pc = Pseudocosts::new(2); // no observations
-        let (_decision, unreliable) =
-            select_branch_variable_pseudocost(&solution, &vars, &pc, 8);
+        let (_decision, unreliable) = select_branch_variable_pseudocost(&solution, &vars, &pc, 8);
         // Both variables have 0 observations < 8 threshold → unreliable.
         assert_eq!(unreliable.len(), 2);
         assert!(unreliable.contains(&0));

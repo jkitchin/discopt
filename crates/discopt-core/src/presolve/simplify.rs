@@ -1,10 +1,8 @@
 //! Model simplification: Big-M strengthening, integer bound tightening,
 //! and redundant constraint removal.
 
-use crate::expr::{
-    BinOp, ConstraintSense, ExprArena, ExprId, ExprNode, ModelRepr, UnOp, VarType,
-};
 use super::fbbt::{forward_propagate, Interval};
+use crate::expr::{BinOp, ConstraintSense, ExprArena, ExprId, ExprNode, ModelRepr, UnOp, VarType};
 
 /// Result of simplification.
 #[derive(Debug, Clone)]
@@ -92,9 +90,7 @@ pub fn simplify(model: &ModelRepr, var_bounds: &mut [Interval]) -> SimplifyResul
         let redundant = match constr.sense {
             ConstraintSense::Le => body_interval.hi <= constr.rhs,
             ConstraintSense::Ge => body_interval.lo >= constr.rhs,
-            ConstraintSense::Eq => {
-                body_interval.lo >= constr.rhs && body_interval.hi <= constr.rhs
-            }
+            ConstraintSense::Eq => body_interval.lo >= constr.rhs && body_interval.hi <= constr.rhs,
         };
 
         if redundant {
@@ -249,9 +245,9 @@ fn get_binary_var_index(
 
 #[cfg(test)]
 mod tests {
+    use super::super::fbbt::Interval;
     use super::*;
     use crate::expr::*;
-    use super::super::fbbt::Interval;
 
     #[test]
     fn test_integer_bound_tightening() {

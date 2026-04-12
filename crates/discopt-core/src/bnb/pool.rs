@@ -100,11 +100,7 @@ impl NodePool {
     /// If the node is Pending, it is added to the open set.
     pub fn add(&mut self, node: Node) -> NodeId {
         let id = node.id;
-        assert_eq!(
-            id.0,
-            self.nodes.len(),
-            "Node ID must match insertion order"
-        );
+        assert_eq!(id.0, self.nodes.len(), "Node ID must match insertion order");
         if node.status == NodeStatus::Pending {
             self.open.push(HeapEntry {
                 node_id: id,

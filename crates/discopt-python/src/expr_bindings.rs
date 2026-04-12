@@ -64,7 +64,11 @@ impl PyModelRepr {
 
     /// Variable names.
     fn var_names(&self) -> Vec<String> {
-        self.inner.variables.iter().map(|v| v.name.clone()).collect()
+        self.inner
+            .variables
+            .iter()
+            .map(|v| v.name.clone())
+            .collect()
     }
 
     /// Variable types as strings.
@@ -170,7 +174,12 @@ impl PyModelRepr {
                 dict.set_item("value", data.clone())?;
                 dict.set_item("shape", shape.clone())?;
             }
-            ExprNode::Variable { name, index, size, shape } => {
+            ExprNode::Variable {
+                name,
+                index,
+                size,
+                shape,
+            } => {
                 dict.set_item("type", "variable")?;
                 dict.set_item("name", name.clone())?;
                 dict.set_item("index", *index)?;
@@ -185,48 +194,57 @@ impl PyModelRepr {
             }
             ExprNode::BinaryOp { op, left, right } => {
                 dict.set_item("type", "binary_op")?;
-                dict.set_item("op", match op {
-                    BinOp::Add => "+",
-                    BinOp::Sub => "-",
-                    BinOp::Mul => "*",
-                    BinOp::Div => "/",
-                    BinOp::Pow => "**",
-                })?;
+                dict.set_item(
+                    "op",
+                    match op {
+                        BinOp::Add => "+",
+                        BinOp::Sub => "-",
+                        BinOp::Mul => "*",
+                        BinOp::Div => "/",
+                        BinOp::Pow => "**",
+                    },
+                )?;
                 dict.set_item("left", left.0)?;
                 dict.set_item("right", right.0)?;
             }
             ExprNode::UnaryOp { op, operand } => {
                 dict.set_item("type", "unary_op")?;
-                dict.set_item("op", match op {
-                    UnOp::Neg => "neg",
-                    UnOp::Abs => "abs",
-                })?;
+                dict.set_item(
+                    "op",
+                    match op {
+                        UnOp::Neg => "neg",
+                        UnOp::Abs => "abs",
+                    },
+                )?;
                 dict.set_item("arg", operand.0)?;
             }
             ExprNode::FunctionCall { func, args } => {
                 dict.set_item("type", "function_call")?;
-                dict.set_item("func", match func {
-                    MathFunc::Exp => "exp",
-                    MathFunc::Log => "log",
-                    MathFunc::Log2 => "log2",
-                    MathFunc::Log10 => "log10",
-                    MathFunc::Sqrt => "sqrt",
-                    MathFunc::Sin => "sin",
-                    MathFunc::Cos => "cos",
-                    MathFunc::Tan => "tan",
-                    MathFunc::Atan => "atan",
-                    MathFunc::Sinh => "sinh",
-                    MathFunc::Cosh => "cosh",
-                    MathFunc::Asin => "asin",
-                    MathFunc::Acos => "acos",
-                    MathFunc::Tanh => "tanh",
-                    MathFunc::Abs => "abs",
-                    MathFunc::Sign => "sign",
-                    MathFunc::Min => "min",
-                    MathFunc::Max => "max",
-                    MathFunc::Prod => "prod",
-                    MathFunc::Norm2 => "norm2",
-                })?;
+                dict.set_item(
+                    "func",
+                    match func {
+                        MathFunc::Exp => "exp",
+                        MathFunc::Log => "log",
+                        MathFunc::Log2 => "log2",
+                        MathFunc::Log10 => "log10",
+                        MathFunc::Sqrt => "sqrt",
+                        MathFunc::Sin => "sin",
+                        MathFunc::Cos => "cos",
+                        MathFunc::Tan => "tan",
+                        MathFunc::Atan => "atan",
+                        MathFunc::Sinh => "sinh",
+                        MathFunc::Cosh => "cosh",
+                        MathFunc::Asin => "asin",
+                        MathFunc::Acos => "acos",
+                        MathFunc::Tanh => "tanh",
+                        MathFunc::Abs => "abs",
+                        MathFunc::Sign => "sign",
+                        MathFunc::Min => "min",
+                        MathFunc::Max => "max",
+                        MathFunc::Prod => "prod",
+                        MathFunc::Norm2 => "norm2",
+                    },
+                )?;
                 let arg_indices: Vec<usize> = args.iter().map(|a| a.0).collect();
                 dict.set_item("args", arg_indices)?;
             }
@@ -281,8 +299,7 @@ impl PyModelRepr {
     /// Evaluate the objective at a given point x.
     fn evaluate_objective(&self, x: numpy::PyReadonlyArray1<f64>) -> f64 {
         let x_arr = x.as_array();
-        self.inner
-            .evaluate_objective(x_arr.as_slice().unwrap())
+        self.inner.evaluate_objective(x_arr.as_slice().unwrap())
     }
 
     /// Evaluate constraint body at a given point x.
@@ -296,12 +313,7 @@ impl PyModelRepr {
     ///
     /// Returns (lower_bounds, upper_bounds) as numpy arrays, one element per
     /// variable block (not per scalar variable).
-    fn fbbt(
-        &self,
-        py: Python<'_>,
-        max_iter: usize,
-        tol: f64,
-    ) -> PyResult<(PyObject, PyObject)> {
+    fn fbbt(&self, py: Python<'_>, max_iter: usize, tol: f64) -> PyResult<(PyObject, PyObject)> {
         use discopt_core::presolve::fbbt::fbbt;
         let bounds = fbbt(&self.inner, max_iter, tol);
         let lbs: Vec<f64> = bounds.iter().map(|b| b.lo).collect();
@@ -354,19 +366,34 @@ pub fn model_to_repr(
 ) -> PyResult<PyModelRepr> {
     // Determine whether we're in hybrid mode (builder provided) or pure-expression mode.
     // Clone (not take) from builder so it can be reused across multiple calls.
-    let (mut arena, mut variables, mut constraints, builder_objective, builder_sense, n_vars_init, builder_var_expr_ids) =
-        if let Some(b) = builder {
-            let a = b.inner.arena.clone();
-            let v = b.inner.variables.clone();
-            let c = b.inner.constraints.clone();
-            let obj = b.inner.objective;
-            let sense = b.inner.objective_sense;
-            let nv = b.inner.n_vars;
-            let ve = b.inner.var_expr_ids.clone();
-            (a, v, c, obj, Some(sense), nv, ve)
-        } else {
-            (ExprArena::new(), Vec::new(), Vec::new(), None, None, 0usize, Vec::new())
-        };
+    let (
+        mut arena,
+        mut variables,
+        mut constraints,
+        builder_objective,
+        builder_sense,
+        n_vars_init,
+        builder_var_expr_ids,
+    ) = if let Some(b) = builder {
+        let a = b.inner.arena.clone();
+        let v = b.inner.variables.clone();
+        let c = b.inner.constraints.clone();
+        let obj = b.inner.objective;
+        let sense = b.inner.objective_sense;
+        let nv = b.inner.n_vars;
+        let ve = b.inner.var_expr_ids.clone();
+        (a, v, c, obj, Some(sense), nv, ve)
+    } else {
+        (
+            ExprArena::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            0usize,
+            Vec::new(),
+        )
+    };
 
     // Build variable info from model._variables for the expression path.
     let py_vars = model.getattr("_variables")?;
@@ -457,11 +484,7 @@ pub fn model_to_repr(
         let value = extract_flat_f64(&value_obj)?;
         let shape: Vec<usize> = py_param.getattr("shape")?.extract()?;
 
-        let expr_id = arena.add(ExprNode::Parameter {
-            name,
-            value,
-            shape,
-        });
+        let expr_id = arena.add(ExprNode::Parameter { name, value, shape });
         let py_id = py_param.as_ptr() as isize;
         param_expr_ids.insert(py_id, expr_id);
     }
@@ -839,7 +862,8 @@ impl PyModelBuilder {
     ) -> PyResult<()> {
         let os = parse_objective_sense(sense)?;
         let c_vec: Vec<f64> = c.as_array().iter().copied().collect();
-        self.inner.set_linear_objective(&c_vec, var_idx, constant, os);
+        self.inner
+            .set_linear_objective(&c_vec, var_idx, constant, os);
         Ok(())
     }
 

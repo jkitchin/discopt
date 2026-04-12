@@ -75,10 +75,8 @@ impl ripopt::NlpProblem for PyNlpProblem {
                 .evaluator
                 .call_method1(py, "evaluate_gradient", (x_py,))
                 .expect("evaluate_gradient failed");
-            let arr: PyReadonlyArray1<f64> = result
-                .bind(py)
-                .extract()
-                .expect("gradient not ndarray");
+            let arr: PyReadonlyArray1<f64> =
+                result.bind(py).extract().expect("gradient not ndarray");
             let slice = arr.as_slice().expect("gradient not contiguous");
             grad.copy_from_slice(slice);
         })
@@ -94,10 +92,8 @@ impl ripopt::NlpProblem for PyNlpProblem {
                 .evaluator
                 .call_method1(py, "evaluate_constraints", (x_py,))
                 .expect("evaluate_constraints failed");
-            let arr: PyReadonlyArray1<f64> = result
-                .bind(py)
-                .extract()
-                .expect("constraints not ndarray");
+            let arr: PyReadonlyArray1<f64> =
+                result.bind(py).extract().expect("constraints not ndarray");
             let slice = arr.as_slice().expect("constraints not contiguous");
             g.copy_from_slice(slice);
         })
@@ -156,11 +152,7 @@ impl ripopt::NlpProblem for PyNlpProblem {
                 // Sparse path: evaluator returns 1-D values in COO order
                 let result = self
                     .evaluator
-                    .call_method1(
-                        py,
-                        "evaluate_hessian_values",
-                        (x_py, obj_factor, lambda_py),
-                    )
+                    .call_method1(py, "evaluate_hessian_values", (x_py, obj_factor, lambda_py))
                     .expect("evaluate_hessian_values failed");
                 let arr: PyReadonlyArray1<f64> = result
                     .bind(py)
@@ -257,14 +249,20 @@ pub fn solve_ripopt(
         let structure = evaluator
             .call_method0(py, "jacobian_structure")
             .expect("jacobian_structure failed");
-        let tuple = structure.bind(py).downcast::<pyo3::types::PyTuple>()
+        let tuple = structure
+            .bind(py)
+            .downcast::<pyo3::types::PyTuple>()
             .expect("jacobian_structure must return tuple");
         let rows: Vec<usize> = tuple
-            .get_item(0).expect("missing rows")
-            .extract().expect("rows not array of int");
+            .get_item(0)
+            .expect("missing rows")
+            .extract()
+            .expect("rows not array of int");
         let cols: Vec<usize> = tuple
-            .get_item(1).expect("missing cols")
-            .extract().expect("cols not array of int");
+            .get_item(1)
+            .expect("missing cols")
+            .extract()
+            .expect("cols not array of int");
         (rows, cols, true)
     } else {
         // Dense fallback: all m*n entries, row-major
@@ -283,14 +281,20 @@ pub fn solve_ripopt(
         let structure = evaluator
             .call_method0(py, "hessian_structure")
             .expect("hessian_structure failed");
-        let tuple = structure.bind(py).downcast::<pyo3::types::PyTuple>()
+        let tuple = structure
+            .bind(py)
+            .downcast::<pyo3::types::PyTuple>()
             .expect("hessian_structure must return tuple");
         let rows: Vec<usize> = tuple
-            .get_item(0).expect("missing rows")
-            .extract().expect("rows not array of int");
+            .get_item(0)
+            .expect("missing rows")
+            .extract()
+            .expect("rows not array of int");
         let cols: Vec<usize> = tuple
-            .get_item(1).expect("missing cols")
-            .extract().expect("cols not array of int");
+            .get_item(1)
+            .expect("missing cols")
+            .extract()
+            .expect("cols not array of int");
         (rows, cols, true)
     } else {
         // Dense fallback: full lower triangle
