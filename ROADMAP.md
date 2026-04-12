@@ -56,7 +56,7 @@ discopt followed a 4-phase development plan. Phases 1-4 are complete. Phases 5-7
 |-----------------------------------|-------------|-----------------------------------------------------------|
 | ripopt integration (PyO3)         | Done        | Rust IPM solver via PyO3 bindings (`nlp_solver="ripopt"`) |
 | CUTEst interface                  | Done        | PyCUTEst evaluator for NLP benchmarking                   |
-| Documentation + example notebooks | Done        | 36 notebooks, Jupyter Book site, 2 benign warnings remain |
+| Documentation + example notebooks | Done        | 37 notebooks, Jupyter Book site builds with zero warnings |
 | Release engineering               | Done        | Published on PyPI, maturin build, CI auto-publish on tags |
 
 ## Phase 5: Problem Class Coverage
