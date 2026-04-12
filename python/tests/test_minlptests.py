@@ -872,13 +872,13 @@ NLP_CVX_INSTANCES = [
     # ── 106: Trig ───────────────────────────────────────────────────────────
     pytest.param(
         MINLPTestInstance(
-            "nlp_cvx_106_010", _build_nlp_cvx_106_010, -1.8572155128552428, is_convex=True
+            "nlp_cvx_106_010", _build_nlp_cvx_106_010, -1.8572155128552428, is_convex=False
         ),
         id="nlp_cvx_106_010",
     ),
     pytest.param(
         MINLPTestInstance(
-            "nlp_cvx_106_011", _build_nlp_cvx_106_011, -0.7868226265935826, is_convex=True
+            "nlp_cvx_106_011", _build_nlp_cvx_106_011, -0.7868226265935826, is_convex=False
         ),
         id="nlp_cvx_106_011",
     ),
@@ -1335,10 +1335,17 @@ _NLP_007_010 = MINLPTestInstance(
 
 
 def _build_nlp_mi_001_010() -> Model:
-    """Min x*exp(x)+cos(y)+z^3-z^2; y integer>=1; z>=1. Opt: -1.35787195018718."""
+    """Min x*exp(x)+cos(y)+z^3-z^2; y integer in [1,10]; z>=1. Opt: -1.35787195018718.
+
+    The JuMP original has y unbounded, which makes the problem ill-posed:
+    cos(y) over integer y has infimum -1 (approached as y -> n*pi, e.g.
+    y=22 gives cos(22) ~= -0.99996 at 7*pi ~= 21.99), so there is no true
+    global minimum. Bound y in [1, 10] so the reference value -1.35787
+    at y=3 (where cos(3) ~= -0.99) is actually the unique global optimum.
+    """
     m = dm.Model("nlp_mi_001_010")
     x = m.continuous("x")
-    y = m.integer("y", lb=1)  # JuMP: y >= 0.1, Int → lb rounds up to 1
+    y = m.integer("y", lb=1, ub=10)
     z = m.continuous("z", lb=1.0)
     m.minimize(x * dm.exp(x) + dm.cos(y) + z**3 - z**2)
     return m
@@ -1438,7 +1445,12 @@ def _build_nlp_mi_003_016() -> Model:
 
 def _build_nlp_mi_004_010() -> Model:
     """Min tan(x)+y+x*z+0.5*abs(y); x in [-1,1]; z integer; sphere+linear.
-    Opt: -4.5768813091909015 at [-0.997, -0.078, 3].
+    Opt: -4.67544171 at [-1, -sqrt(5), 2].
+
+    The MINLPTests.jl reference value -4.5769 at [-0.997, -0.078, 3] is a
+    local minimum; the true global is at [-1, -sqrt(5), 2] with
+    obj = tan(-1) + (-sqrt(5)) + (-1)*2 + 0.5*sqrt(5) = -4.67544, verified
+    by scipy.optimize multistart over integer z in [-3, 3].
     """
     m = dm.Model("nlp_mi_004_010")
     x = m.continuous("x", lb=-1.0, ub=1.0)
@@ -1451,7 +1463,7 @@ def _build_nlp_mi_004_010() -> Model:
 
 
 def _build_nlp_mi_004_011() -> Model:
-    """Same as 004_010 with NLconstraints. Opt: -4.5768813091909015."""
+    """Same as 004_010 with NLconstraints. Opt: -4.67544171 at [-1, -sqrt(5), 2]."""
     m = dm.Model("nlp_mi_004_011")
     x = m.continuous("x", lb=-1.0, ub=1.0)
     y = m.continuous("y")
@@ -1567,13 +1579,13 @@ NLP_MI_INSTANCES = [
     ),
     pytest.param(
         MINLPTestInstance(
-            "nlp_mi_004_010", _build_nlp_mi_004_010, -4.5768813091909015, has_integers=True
+            "nlp_mi_004_010", _build_nlp_mi_004_010, -4.675441713398929, has_integers=True
         ),
         id="nlp_mi_004_010",
     ),
     pytest.param(
         MINLPTestInstance(
-            "nlp_mi_004_011", _build_nlp_mi_004_011, -4.5768813091909015, has_integers=True
+            "nlp_mi_004_011", _build_nlp_mi_004_011, -4.675441713398929, has_integers=True
         ),
         id="nlp_mi_004_011",
     ),

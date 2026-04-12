@@ -120,7 +120,11 @@ class TestEllipsoidalSolve:
         mu2 = m2.parameter("mu", value=mu_bar)
         m2.minimize(-(mu2 @ x2))
         m2.subject_to(dm.sum(x2) == 1.0)
-        RobustCounterpart(m2, EllipsoidalUncertaintySet(mu2, rho=0.02)).formulate()
+        # rho must be large enough to actually force diversification — with
+        # rho=0.02 the penalty (0.02 * ||x||_2) is smaller than the nominal
+        # return spread, so the true optimum is still all-in on the max-return
+        # asset. Use rho=0.1 so diversification is genuinely optimal.
+        RobustCounterpart(m2, EllipsoidalUncertaintySet(mu2, rho=0.1)).formulate()
         r2 = m2.solve()
 
         nom_return = -r1.objective
