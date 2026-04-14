@@ -30,8 +30,12 @@ build/
 .venv/
 
 # Coverage artifacts
+.coverage
 coverage.xml
 coverage.svg
+
+# Scratch / reference materials
+/ref/
 
 # Benchmark results and reports
 /results/
