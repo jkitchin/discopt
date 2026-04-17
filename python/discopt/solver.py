@@ -1143,6 +1143,7 @@ def solve_model(
     lazy_constraints=None,
     incumbent_callback=None,
     node_callback=None,
+    use_highs_milp: bool = True,
     **kwargs,
 ) -> SolveResult:
     """
@@ -1352,6 +1353,10 @@ def solve_model(
         elif problem_class == ProblemClass.QP:
             return _solve_qp(model, t_start)
         elif problem_class == ProblemClass.MILP:
+            if use_highs_milp:
+                highs_result = _solve_milp_highs(model, t_start, time_limit, gap_tolerance)
+                if highs_result is not None:
+                    return highs_result
             return _solve_milp_bb(
                 model,
                 time_limit,
@@ -3314,6 +3319,58 @@ def _solve_node_nlp_ipopt(
 # ---------------------------------------------------------------------------
 
 
+def _decompose_eq_slack_form(
+    A_eq_full: np.ndarray,
+    b_eq_full: np.ndarray,
+    n_orig: int,
+    n_slack: int,
+) -> tuple[
+    Optional[np.ndarray],
+    Optional[np.ndarray],
+    Optional[np.ndarray],
+    Optional[np.ndarray],
+]:
+    """Reconstruct (A_ub, b_ub, A_eq, b_eq) from an equality-plus-slack form.
+
+    `extract_lp_data` / `extract_qp_data` convert inequalities to equalities
+    with non-negative slacks. Rows whose slack column is nonzero are the
+    original inequalities; rows with no slack are true equalities. This
+    helper projects back to inequality/equality form over the original
+    variables so HiGHS LP/MILP/QP solvers can consume it.
+    """
+    if A_eq_full.shape[0] == 0:
+        return None, None, None, None
+
+    eq_rows: list[np.ndarray] = []
+    eq_rhs: list[float] = []
+    ub_rows: list[np.ndarray] = []
+    ub_rhs: list[float] = []
+
+    for i in range(A_eq_full.shape[0]):
+        slack_part = A_eq_full[i, n_orig:]
+        has_slack = n_slack > 0 and np.any(np.abs(slack_part) > 1e-15)
+        if has_slack:
+            slack_idx = np.argmax(np.abs(slack_part))
+            slack_coef = slack_part[slack_idx]
+            orig_row = A_eq_full[i, :n_orig]
+            rhs = b_eq_full[i]
+            if slack_coef > 0:
+                ub_rows.append(orig_row)
+                ub_rhs.append(rhs)
+            else:
+                ub_rows.append(-orig_row)
+                ub_rhs.append(-rhs)
+        else:
+            eq_rows.append(A_eq_full[i, :n_orig])
+            eq_rhs.append(b_eq_full[i])
+
+    A_ub = np.array(ub_rows, dtype=np.float64) if ub_rows else None
+    b_ub = np.array(ub_rhs, dtype=np.float64) if ub_rows else None
+    A_eq = np.array(eq_rows, dtype=np.float64) if eq_rows else None
+    b_eq = np.array(eq_rhs, dtype=np.float64) if eq_rows else None
+    return A_ub, b_ub, A_eq, b_eq
+
+
 def _solve_lp(model: Model, t_start: float) -> SolveResult:
     """Solve an LP using the pure-JAX LP IPM (no NLP evaluator needed)."""
     from discopt._jax.lp_ipm import lp_ipm_solve
@@ -3392,49 +3449,11 @@ def _solve_qp_highs(
         )
     )
 
-    # Extract constraint matrices from the equality-form representation.
-    # extract_qp_data converts inequalities to equalities with slacks,
-    # so we reconstruct inequality/equality constraints.
     n_total = qp_data.A_eq.shape[1] if qp_data.A_eq.shape[0] > 0 else n_orig
     n_slack = n_total - n_orig
     A_eq_full = np.asarray(qp_data.A_eq)
     b_eq_full = np.asarray(qp_data.b_eq)
-
-    A_ub = None
-    b_ub = None
-    A_eq = None
-    b_eq = None
-
-    if A_eq_full.shape[0] > 0:
-        eq_rows = []
-        eq_rhs = []
-        ub_rows = []
-        ub_rhs = []
-
-        for i in range(A_eq_full.shape[0]):
-            slack_part = A_eq_full[i, n_orig:]
-            has_slack = np.any(np.abs(slack_part) > 1e-15)
-            if has_slack and n_slack > 0:
-                slack_idx = np.argmax(np.abs(slack_part))
-                slack_coef = slack_part[slack_idx]
-                orig_row = A_eq_full[i, :n_orig]
-                rhs = b_eq_full[i]
-                if slack_coef > 0:
-                    ub_rows.append(orig_row)
-                    ub_rhs.append(rhs)
-                else:
-                    ub_rows.append(-orig_row)
-                    ub_rhs.append(-rhs)
-            else:
-                eq_rows.append(A_eq_full[i, :n_orig])
-                eq_rhs.append(b_eq_full[i])
-
-        if ub_rows:
-            A_ub = np.array(ub_rows, dtype=np.float64)
-            b_ub = np.array(ub_rhs, dtype=np.float64)
-        if eq_rows:
-            A_eq = np.array(eq_rows, dtype=np.float64)
-            b_eq = np.array(eq_rhs, dtype=np.float64)
+    A_ub, b_ub, A_eq, b_eq = _decompose_eq_slack_form(A_eq_full, b_eq_full, n_orig, n_slack)
 
     # Build integrality array for MIQP
     integrality = None
@@ -3500,6 +3519,94 @@ def _solve_qp_highs(
         return SolveResult(status="infeasible", wall_time=wall_time)
     elif result.status == SolveStatus.TIME_LIMIT:
         return SolveResult(status="time_limit", wall_time=wall_time)
+
+    return None
+
+
+def _solve_milp_highs(
+    model: Model,
+    t_start: float,
+    time_limit: float | None = None,
+    gap_tolerance: float = 1e-4,
+) -> SolveResult | None:
+    """Solve a MILP using HiGHS MIP. Returns None if HiGHS is unavailable."""
+    try:
+        from discopt.solvers.milp_highs import solve_milp as _highs_solve_milp
+    except ImportError:
+        return None
+
+    from discopt._jax.problem_classifier import extract_lp_data
+    from discopt.modeling.core import ObjectiveSense
+    from discopt.solvers import SolveStatus
+
+    lp_data = extract_lp_data(model)
+    n_orig = sum(v.size for v in model._variables)
+
+    bounds = list(
+        zip(
+            np.asarray(lp_data.x_l[:n_orig]).tolist(),
+            np.asarray(lp_data.x_u[:n_orig]).tolist(),
+        )
+    )
+
+    n_total = lp_data.A_eq.shape[1] if lp_data.A_eq.shape[0] > 0 else n_orig
+    n_slack = n_total - n_orig
+    A_eq_full = np.asarray(lp_data.A_eq)
+    b_eq_full = np.asarray(lp_data.b_eq)
+    A_ub, b_ub, A_eq, b_eq = _decompose_eq_slack_form(A_eq_full, b_eq_full, n_orig, n_slack)
+
+    int_arr = np.zeros(n_orig, dtype=np.int32)
+    offset = 0
+    for v in model._variables:
+        if v.var_type in (VarType.BINARY, VarType.INTEGER):
+            int_arr[offset : offset + v.size] = 1
+        offset += v.size
+
+    c_orig = np.asarray(lp_data.c[:n_orig])
+
+    try:
+        result = _highs_solve_milp(
+            c=c_orig,
+            A_ub=A_ub,
+            b_ub=b_ub,
+            A_eq=A_eq,
+            b_eq=b_eq,
+            bounds=bounds,
+            integrality=int_arr,
+            time_limit=time_limit,
+            gap_tolerance=gap_tolerance,
+        )
+    except Exception as e:
+        logger.debug("HiGHS MILP solve failed: %s", e)
+        return None
+
+    wall_time = time.perf_counter() - t_start
+
+    assert model._objective is not None
+    sense = model._objective.sense
+
+    if result.status == SolveStatus.OPTIMAL:
+        assert result.x is not None and result.objective is not None
+        x_flat = result.x[:n_orig]
+        obj_val = result.objective + lp_data.obj_const
+        if sense == ObjectiveSense.MAXIMIZE:
+            obj_val = -obj_val
+        return SolveResult(
+            status="optimal",
+            objective=obj_val,
+            bound=obj_val,
+            gap=result.gap if result.gap is not None else 0.0,
+            x=_unpack_solution(model, x_flat),
+            wall_time=wall_time,
+            node_count=result.node_count,
+            rust_time=0.0,
+            jax_time=0.0,
+            python_time=wall_time,
+        )
+    elif result.status == SolveStatus.INFEASIBLE:
+        return SolveResult(status="infeasible", wall_time=wall_time, node_count=result.node_count)
+    elif result.status == SolveStatus.TIME_LIMIT:
+        return SolveResult(status="time_limit", wall_time=wall_time, node_count=result.node_count)
 
     return None
 

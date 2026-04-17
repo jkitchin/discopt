@@ -456,6 +456,70 @@ class TestSolverDispatch:
         assert abs(result.objective - 2.0) < 0.5
 
 
+class TestMILPDispatch:
+    """Regression tests for MILP dispatch (issue #36).
+
+    Before #36, ProblemClass.MILP always routed to _solve_milp_bb, which
+    has no primal heuristic and timed out on moderate big-M formulations
+    (e.g. a 5x3 disjunctive jobshop). The default path now goes through
+    HiGHS MIP, with the pure-JAX B&B available via use_highs_milp=False.
+    """
+
+    @staticmethod
+    def _build_jobshop(n_jobs: int, n_machines: int):
+        import numpy as np
+
+        rng = np.random.default_rng(0)
+        proc = rng.integers(1, 5, size=(n_jobs, n_machines)).astype(float)
+        M = float(proc.sum())
+
+        m = dm.Model(f"jobshop_{n_jobs}x{n_machines}")
+        s = m.continuous("start", shape=(n_jobs, n_machines), lb=0, ub=M)
+        C = m.continuous("makespan", lb=0, ub=M)
+        n_pairs = n_jobs * (n_jobs - 1) // 2
+        z = m.binary("order", shape=(n_pairs * n_machines,))
+        m.minimize(C)
+        for i in range(n_jobs):
+            for k in range(n_machines):
+                m.subject_to(C >= s[i, k] + float(proc[i, k]))
+        pi = 0
+        for i in range(n_jobs):
+            for j in range(i + 1, n_jobs):
+                for k in range(n_machines):
+                    idx = pi * n_machines + k
+                    m.subject_to(s[i, k] + float(proc[i, k]) <= s[j, k] + M * (1 - z[idx]))
+                    m.subject_to(s[j, k] + float(proc[j, k]) <= s[i, k] + M * z[idx])
+                pi += 1
+        return m
+
+    def test_jobshop_5x3_optimal_under_time_limit(self):
+        """Issue #36 reproducer: 5x3 jobshop must solve quickly via HiGHS."""
+        m = self._build_jobshop(5, 3)
+        result = m.solve(time_limit=30)
+        assert result.status == "optimal"
+        assert result.objective is not None
+        assert result.wall_time < 30.0
+
+    def test_use_highs_milp_false_routes_to_bb(self):
+        """Opting out of HiGHS must route through _solve_milp_bb."""
+        m = self._build_jobshop(3, 3)
+        result = m.solve(time_limit=60, use_highs_milp=False)
+        assert result.status == "optimal"
+        # _solve_milp_bb explores B&B nodes; HiGHS wrapper records HiGHS
+        # MIP nodes but the JAX B&B path produces many more for this
+        # formulation because there is no primal heuristic.
+        assert result.node_count > 0
+
+    def test_default_path_uses_highs(self):
+        """Default dispatch should hit HiGHS MIP (fast, few nodes)."""
+        m = self._build_jobshop(3, 3)
+        result = m.solve(time_limit=30)
+        assert result.status == "optimal"
+        # HiGHS presolves and cuts aggressively on this 3x3 instance --
+        # a generous bound that would fail for the JAX B&B fallback.
+        assert result.node_count < 200
+
+
 # ---------------------------------------------------------------
 # 8. Unified Differentiable Solve Tests
 # ---------------------------------------------------------------
