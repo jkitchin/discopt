@@ -22,7 +22,7 @@ Ceccon, Siirola, Misener (2020), "SUSPECT: MINLP special structure
 
 from __future__ import annotations
 
-from .certificate import certify_convex
+from .certificate import certify_convex, refresh_convex_mask
 from .lattice import Curvature
 from .rules import classify_constraint, classify_expr, classify_model
 
@@ -32,4 +32,5 @@ __all__ = [
     "classify_constraint",
     "classify_expr",
     "classify_model",
+    "refresh_convex_mask",
 ]

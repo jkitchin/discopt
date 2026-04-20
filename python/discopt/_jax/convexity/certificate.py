@@ -33,9 +33,10 @@ from typing import Optional
 
 import numpy as np
 
-from discopt.modeling.core import Expression, Model
+from discopt.modeling.core import Constraint, Expression, Model
 
 from .eigenvalue import gershgorin_lambda_max, gershgorin_lambda_min
+from .interval import Interval
 from .interval_ad import interval_hessian
 from .lattice import Curvature
 
@@ -91,4 +92,82 @@ def certify_convex(
     return None
 
 
-__all__ = ["certify_convex"]
+def refresh_convex_mask(
+    model: Model,
+    root_mask: list[bool],
+    node_lb: np.ndarray,
+    node_ub: np.ndarray,
+) -> list[bool]:
+    """Re-run the certificate against a B&B node's tightened bounds.
+
+    For every constraint already proven convex at the root, the entry
+    stays ``True`` (the node box is a subset of the root box and
+    soundness propagates). For every constraint still ``False``, the
+    certificate is consulted on the node box; when it proves the body
+    convex in the sense implied by the constraint direction, the entry
+    flips to ``True``.
+
+    Returns a new list without mutating ``root_mask``. Falls back to
+    returning the original mask unchanged if ``model`` or the bounds
+    are shape-incompatible — the caller must remain functional even
+    when the refresh cannot run.
+
+    This function only ever tightens the mask. It never flips a
+    ``True`` entry to ``False``, preserving the soundness invariant
+    required by the solver's OA-cut and αBB-skip gates.
+    """
+    n_vars = sum(v.size for v in model._variables)
+    if len(node_lb) != n_vars or len(node_ub) != n_vars:
+        return list(root_mask)
+
+    # Skip work when nothing can change — every slot is already True,
+    # or there are no constraints at all.
+    if not root_mask or all(root_mask):
+        return list(root_mask)
+
+    # Build the per-variable box from the node's flat bounds.
+    box: dict = {}
+    offset = 0
+    for v in model._variables:
+        size = v.size
+        shape = v.shape if v.shape else (1,)
+        lb_slice = np.asarray(node_lb[offset : offset + size], dtype=np.float64)
+        ub_slice = np.asarray(node_ub[offset : offset + size], dtype=np.float64)
+        try:
+            box[v] = Interval(lb_slice.reshape(shape), ub_slice.reshape(shape))
+        except ValueError:
+            # lb > ub somewhere — the node is infeasible; return the
+            # root mask unchanged. The caller will discover the
+            # infeasibility via its own channels.
+            return list(root_mask)
+        offset += size
+
+    refreshed = list(root_mask)
+    constraint_index = 0
+    for c in model._constraints:
+        if not isinstance(c, Constraint):
+            constraint_index += 1
+            continue
+        if refreshed[constraint_index]:
+            constraint_index += 1
+            continue
+        try:
+            cert = certify_convex(c.body, model, box=box)
+        except Exception:
+            cert = None
+        if cert is None:
+            constraint_index += 1
+            continue
+        if c.sense == "<=" and cert == Curvature.CONVEX:
+            refreshed[constraint_index] = True
+        elif c.sense == ">=" and cert == Curvature.CONCAVE:
+            refreshed[constraint_index] = True
+        elif c.sense == "==" and cert == Curvature.CONVEX and cert == Curvature.CONCAVE:
+            # Equality requires affine; the certificate doesn't return
+            # AFFINE, so no tightening is possible here.
+            pass
+        constraint_index += 1
+    return refreshed
+
+
+__all__ = ["certify_convex", "refresh_convex_mask"]

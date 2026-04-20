@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 from scipy.optimize import minimize as scipy_minimize
@@ -1533,6 +1533,18 @@ def solve_model(
         if cutting_planes and model._constraints:
             _convex_constraint_mask = [False] * len(model._constraints)
 
+    # Per-node certificate refresh imported lazily so the main
+    # classification import above stays the single-point-of-truth for
+    # "convexity is available at all". ``None`` disables per-node
+    # refresh below (the root mask is then used verbatim).
+    _refresh_mask: Any = None
+    try:
+        from discopt._jax.convexity import refresh_convex_mask as _refresh_mask_import
+
+        _refresh_mask = _refresh_mask_import
+    except Exception:
+        pass
+
     # Enable nonconvex spatial branching so integer-feasible nodes are not
     # prematurely fathomed.  The NLP local optimum at such a node may not
     # be the global optimum of the continuous subproblem.
@@ -2073,6 +2085,32 @@ def solve_model(
                 if result_lbs[i] < _SENTINEL_THRESHOLD:  # skip infeasible nodes
                     node_lb_i = np.array(batch_lb[i])
                     node_ub_i = np.array(batch_ub[i])
+                    # Refresh the convex-constraint mask on this node's
+                    # tightened box: a constraint UNKNOWN at the root
+                    # may be provably convex on the subtree. The
+                    # refresh only flips False -> True (soundness
+                    # preserved) and is skipped when every root entry
+                    # is already True (nothing to tighten).
+                    node_mask = _convex_constraint_mask
+                    node_oa_enabled = _oa_enabled
+                    if (
+                        _refresh_mask is not None
+                        and _convex_constraint_mask is not None
+                        and not all(_convex_constraint_mask)
+                    ):
+                        try:
+                            node_mask = _refresh_mask(
+                                model, _convex_constraint_mask, node_lb_i, node_ub_i
+                            )
+                        except Exception as exc:
+                            logger.debug("Per-node convexity refresh failed: %s", exc)
+                            node_mask = _convex_constraint_mask
+                        if (
+                            node_mask is not _convex_constraint_mask
+                            and node_mask is not None
+                            and any(node_mask)
+                        ):
+                            node_oa_enabled = True
                     new_cuts = _generate_cuts(
                         evaluator,
                         model,
@@ -2081,8 +2119,8 @@ def solve_model(
                         node_ub_i,
                         constraint_senses=_constraint_senses,
                         bilinear_terms=_bilinear_terms,
-                        oa_enabled=_oa_enabled,
-                        convex_constraint_mask=_convex_constraint_mask,
+                        oa_enabled=node_oa_enabled,
+                        convex_constraint_mask=node_mask,
                     )
                     _cut_pool.add_many(new_cuts)
                     # Age and purge stale cuts
