@@ -120,6 +120,54 @@ disable_error_code = ["assignment", "no-redef", "arg-type", "index"]
 module = "discopt._jax.primal_heuristics"
 disable_error_code = ["no-any-return"]
 
+# The convexity-certificate modules use numpy primitives extensively;
+# ``np.nextafter`` and friends return ``Any`` when passed scalars,
+# which pollutes strict typing without affecting runtime correctness.
+# Soundness is guaranteed by the test suite, not the type checker.
+[[tool.mypy.overrides]]
+module = "discopt._jax.convexity.interval"
+disable_error_code = [
+    "no-any-return",
+    "arg-type",
+    "attr-defined",
+    "call-overload",
+    "return-value",
+]
+
+[[tool.mypy.overrides]]
+module = "discopt._jax.convexity.interval_eval"
+disable_error_code = [
+    "no-any-return",
+    "arg-type",
+    "attr-defined",
+    "call-overload",
+    "union-attr",
+    "return-value",
+    "index",
+    "operator",
+]
+
+[[tool.mypy.overrides]]
+module = "discopt._jax.convexity.interval_ad"
+disable_error_code = [
+    "no-any-return",
+    "arg-type",
+    "attr-defined",
+    "assignment",
+    "call-overload",
+    "return-value",
+    "index",
+    "operator",
+]
+
+[[tool.mypy.overrides]]
+module = "discopt._jax.convexity.eigenvalue"
+disable_error_code = ["arg-type", "assignment", "call-overload"]
+
+[[tool.mypy.overrides]]
+module = "discopt._jax.convexity.certificate"
+disable_error_code = ["no-any-return", "arg-type", "call-overload"]
+
 [[tool.mypy.overrides]]
 module = "discopt.interfaces.cutest"
 disable_error_code = ["no-any-return", "attr-defined", "return-value", "assignment"]

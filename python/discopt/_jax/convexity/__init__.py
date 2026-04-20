@@ -22,11 +22,13 @@ Ceccon, Siirola, Misener (2020), "SUSPECT: MINLP special structure
 
 from __future__ import annotations
 
+from .certificate import certify_convex
 from .lattice import Curvature
 from .rules import classify_constraint, classify_expr, classify_model
 
 __all__ = [
     "Curvature",
+    "certify_convex",
     "classify_constraint",
     "classify_expr",
     "classify_model",
