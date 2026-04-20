@@ -35,6 +35,7 @@ parts:
       - file: llm_features
       - file: notebooks/warm_start
       - file: notebooks/convex_fast_path
+      - file: notebooks/convexity_detection
       - file: notebooks/nlp_bb
       - file: notebooks/export_formats
       - file: notebooks/callbacks
