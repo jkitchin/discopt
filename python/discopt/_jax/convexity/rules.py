@@ -98,6 +98,46 @@ from .lattice import (
     sign_reciprocal,
     unary_atom_profile,
 )
+from .linear_context import LinearContext, build_linear_context, extract_affine
+
+_LINEAR_CONTEXT_KEY = "__linear_context__"
+
+
+def _get_linear_context(cache: dict) -> Optional[LinearContext]:
+    """Return the cached linear context, if one was stashed."""
+    return cache.get(_LINEAR_CONTEXT_KEY) if cache else None
+
+
+def _refine_sign(
+    expr: Expression,
+    model: Optional[Model],
+    cache: dict,
+    current_sign: Sign,
+) -> Sign:
+    """Tighten ``current_sign`` using the model's linear relaxation.
+
+    Applied at composition sites where the outer atom has a
+    restricted domain (``log``, ``sqrt``, ``1/x``, fractional
+    powers). Only affine arguments are handled — nonlinear arguments
+    would need a general interval walker and are left at their
+    syntactic sign. The refinement is monotone: it never loses
+    strength (a STRICT ``current_sign`` is returned unchanged), and
+    is sound because ``LinearContext.affine_range`` is a proven
+    enclosure over the intersection of the box and the linear
+    relaxation.
+    """
+    if is_strict(current_sign):
+        return current_sign
+    ctx = _get_linear_context(cache)
+    if ctx is None or model is None:
+        return current_sign
+    aff = extract_affine(expr, model, ctx.n_vars)
+    if aff is None:
+        return current_sign
+    coeffs, const = aff
+    lo, hi = ctx.affine_range(coeffs, const)
+    return sign_from_bounds(lo, hi)
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Public API
@@ -324,12 +364,15 @@ def _classify_division(
     # sign alone) would be UNSOUND: e.g., 1/(1 + exp(-x)) has positive
     # denominator but convex inner, so the composite is neither convex
     # nor concave.
-    if _is_scalar_const(expr.left) and is_strict(right.sign):
+    right_sign = right.sign
+    if _is_scalar_const(expr.left) and not is_strict(right_sign):
+        right_sign = _refine_sign(expr.right, model, cache, right_sign)
+    if _is_scalar_const(expr.left) and is_strict(right_sign):
         c = _scalar_value(expr.left)
-        recip_curv = Curvature.CONVEX if is_pos(right.sign) else Curvature.CONCAVE
+        recip_curv = Curvature.CONVEX if is_pos(right_sign) else Curvature.CONCAVE
         recip_mono = Monotonicity.NONINC
         composed = compose(recip_curv, recip_mono, right.curvature)
-        recip_sign = sign_reciprocal(right.sign)
+        recip_sign = sign_reciprocal(right_sign)
         if c == 0:
             return ExprInfo(Curvature.AFFINE, Sign.ZERO)
         c_sign = 1 if c > 0 else -1
@@ -358,6 +401,14 @@ def _classify_power(
     n = _scalar_value(expr.right)
     n_int = int(n)
     is_int = np.isclose(n, float(n_int))
+
+    # Tighten base sign when it's needed for a conclusive verdict:
+    # fractional exponents and negative exponents both require the
+    # base to lie in a known half-line.
+    if not is_strict(base.sign) and (
+        (is_int and n_int < 0) or (not is_int and (n < 0 or 0 < n < 1 or n > 1))
+    ):
+        base = ExprInfo(base.curvature, _refine_sign(expr.left, model, cache, base.sign))
 
     # Trivial exponents.
     if np.isclose(n, 0.0):
@@ -441,12 +492,18 @@ def _classify_function_call(expr: FunctionCall, model: Optional[Model], cache: d
         return ExprInfo(Curvature.UNKNOWN, Sign.UNKNOWN)
 
     arg_info = classify_expr_info(expr.args[0], model, cache)
-    profile: Optional[AtomProfile] = unary_atom_profile(name, arg_info.sign)
+    arg_sign = arg_info.sign
+    # Restricted-domain atoms need a strict sign proof on the argument
+    # to license the DCP rule. Tighten via the linear relaxation when
+    # the syntactic sign alone is too weak.
+    if name in ("log", "log2", "log10", "sqrt") and not is_strict(arg_sign):
+        arg_sign = _refine_sign(expr.args[0], model, cache, arg_sign)
+    profile: Optional[AtomProfile] = unary_atom_profile(name, arg_sign)
     if profile is None:
-        return ExprInfo(Curvature.UNKNOWN, _function_result_sign(name, arg_info.sign))
+        return ExprInfo(Curvature.UNKNOWN, _function_result_sign(name, arg_sign))
 
     curv = compose(profile.curvature, profile.monotonicity, arg_info.curvature)
-    return ExprInfo(curv, _function_result_sign(name, arg_info.sign))
+    return ExprInfo(curv, _function_result_sign(name, arg_sign))
 
 
 def _function_result_sign(name: str, arg_sign: Sign) -> Sign:
@@ -604,6 +661,9 @@ def classify_model(model: Model, *, use_certificate: bool = False) -> tuple[bool
     soundness invariant.
     """
     cache: dict = {}
+    ctx = build_linear_context(model)
+    if ctx is not None:
+        cache[_LINEAR_CONTEXT_KEY] = ctx
 
     obj_convex = True
     if model._objective is not None:
