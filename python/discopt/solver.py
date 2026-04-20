@@ -1386,7 +1386,12 @@ def solve_model(
         try:
             from discopt._jax.convexity import classify_model as _classify_convexity
 
-            is_convex, _ = _classify_convexity(model)
+            # use_certificate=True enables the sound interval-Hessian
+            # fallback for constraints/objective the syntactic walker
+            # leaves unproven — tightens UNKNOWN to CONVEX when provable
+            # on the root box, enabling the single-NLP fast path for
+            # models whose convexity isn't visible at the DAG level.
+            is_convex, _ = _classify_convexity(model, use_certificate=True)
             if is_convex:
                 logger.info(
                     "Convex NLP detected — solving with single NLP (global optimality guaranteed)"
@@ -1424,7 +1429,7 @@ def solve_model(
         try:
             from discopt._jax.convexity import classify_model as _cls_conv
 
-            _is_conv, _ = _cls_conv(model)
+            _is_conv, _ = _cls_conv(model, use_certificate=True)
             if _is_conv:
                 logger.info("Convex MINLP detected, using NLP-BB (nonlinear Branch and Bound)")
                 return _solve_nlp_bb(
@@ -1512,7 +1517,13 @@ def solve_model(
     try:
         from discopt._jax.convexity import classify_model as _classify_model
 
-        _model_is_convex, _convex_constraint_mask = _classify_model(model)
+        # use_certificate consults the sound interval-Hessian fallback
+        # for constraints the syntactic walker leaves unproven. Tightens
+        # _convex_constraint_mask entries to True when the certificate
+        # proves convexity on the root box — enabling OA cuts and the
+        # αBB skip below for structurally-convex problems whose
+        # convexity the DCP walker alone cannot recognise.
+        _model_is_convex, _convex_constraint_mask = _classify_model(model, use_certificate=True)
         if _model_is_convex:
             logger.info("Model detected as convex — NLP solutions are valid lower bounds")
         if cutting_planes and any(_convex_constraint_mask):
@@ -2467,7 +2478,7 @@ def _solve_nlp_bb(
     try:
         from discopt._jax.convexity import classify_model as _classify_model
 
-        _model_is_convex, _ = _classify_model(model)
+        _model_is_convex, _ = _classify_model(model, use_certificate=True)
     except Exception:
         _model_is_convex = False
 

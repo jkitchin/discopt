@@ -545,29 +545,63 @@ def classify_constraint(
     constraint: Constraint,
     model: Optional[Model] = None,
     _cache: Optional[dict] = None,
+    *,
+    use_certificate: bool = False,
 ) -> bool:
-    """Return True when ``constraint`` defines a convex feasible set."""
+    """Return True when ``constraint`` defines a convex feasible set.
+
+    When ``use_certificate`` is set and the syntactic walker fails to
+    prove convexity, :func:`~.certificate.certify_convex` is consulted
+    as a sound numerical fallback on the root variable box. The
+    certificate never contradicts a syntactic CONVEX/CONCAVE verdict —
+    it only tightens UNKNOWN cases.
+    """
     if _cache is None:
         _cache = {}
 
     curv = classify_expr(constraint.body, model, _cache)
 
-    if constraint.sense == "<=":
+    syntactic = _constraint_convex_from_curvature(curv, constraint.sense)
+    if syntactic or not use_certificate or model is None:
+        return syntactic
+
+    # Fall back to the sound numerical certificate.
+    try:
+        from .certificate import certify_convex
+
+        cert = certify_convex(constraint.body, model)
+    except Exception:
+        return syntactic
+    if cert is None:
+        return syntactic
+    return _constraint_convex_from_curvature(cert, constraint.sense)
+
+
+def _constraint_convex_from_curvature(curv: Curvature, sense: str) -> bool:
+    """Decide constraint convexity given a body curvature and sense."""
+    if sense == "<=":
         return curv in (Curvature.CONVEX, Curvature.AFFINE)
-    if constraint.sense == ">=":
+    if sense == ">=":
         return curv in (Curvature.CONCAVE, Curvature.AFFINE)
-    if constraint.sense == "==":
+    if sense == "==":
         return curv == Curvature.AFFINE
     return False
 
 
-def classify_model(model: Model) -> tuple[bool, list[bool]]:
+def classify_model(model: Model, *, use_certificate: bool = False) -> tuple[bool, list[bool]]:
     """Classify a model's convexity.
 
     Returns ``(is_convex, per_constraint_mask)``. ``max f`` is treated
     as ``min -f``, so a maximization objective is "convex" (in the
     global sense — the overall problem is convex) when its body is
     concave or affine.
+
+    When ``use_certificate`` is set, the sound interval-Hessian
+    certificate (:func:`~.certificate.certify_convex`) is consulted
+    whenever the syntactic walker leaves a constraint or the objective
+    unproven. The certificate only tightens UNKNOWN verdicts; it never
+    overrides an already-proven CONVEX/CONCAVE, preserving the
+    soundness invariant.
     """
     cache: dict = {}
 
@@ -578,14 +612,26 @@ def classify_model(model: Model) -> tuple[bool, list[bool]]:
         obj_curv = classify_expr(model._objective.expression, model, cache)
         if model._objective.sense == ObjectiveSense.MINIMIZE:
             obj_convex = obj_curv in (Curvature.CONVEX, Curvature.AFFINE)
+            need_curv_for_obj = Curvature.CONVEX
         else:
             obj_convex = obj_curv in (Curvature.CONCAVE, Curvature.AFFINE)
+            need_curv_for_obj = Curvature.CONCAVE
+
+        if not obj_convex and use_certificate:
+            try:
+                from .certificate import certify_convex
+
+                cert = certify_convex(model._objective.expression, model)
+            except Exception:
+                cert = None
+            if cert == need_curv_for_obj:
+                obj_convex = True
 
     constraint_mask: list[bool] = []
     all_convex = obj_convex
     for c in model._constraints:
         if isinstance(c, Constraint):
-            is_cvx = classify_constraint(c, model, cache)
+            is_cvx = classify_constraint(c, model, cache, use_certificate=use_certificate)
             constraint_mask.append(is_cvx)
             if not is_cvx:
                 all_convex = False
