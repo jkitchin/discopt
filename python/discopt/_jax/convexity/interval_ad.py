@@ -118,6 +118,12 @@ def _unit_grad(n: int, slot: int) -> Interval:
 def _outer(a: Interval, b: Interval) -> Interval:
     """Interval outer product ``a ⊗ b`` with outward rounding.
 
+    When an operand contains unbounded entries (flowing from an
+    unsupported-atom abstention), the corner products can hit
+    ``0 * inf = NaN``. NaN is sound here: downstream Gershgorin
+    already refuses to certify when Hessian entries are non-finite.
+    The ``errstate`` below merely suppresses the runtime warning.
+
     When ``a is b`` the result is ``a aᵀ``, which is symmetric PSD for
     every concrete ``a`` — a property the generic corner-product
     enclosure does not preserve. The self-outer-product specialisation
@@ -130,10 +136,11 @@ def _outer(a: Interval, b: Interval) -> Interval:
     a_hi = a.hi[:, None]
     b_lo = b.lo[None, :]
     b_hi = b.hi[None, :]
-    p1 = a_lo * b_lo
-    p2 = a_lo * b_hi
-    p3 = a_hi * b_lo
-    p4 = a_hi * b_hi
+    with np.errstate(invalid="ignore"):
+        p1 = a_lo * b_lo
+        p2 = a_lo * b_hi
+        p3 = a_hi * b_lo
+        p4 = a_hi * b_hi
     lo = np.minimum(np.minimum(p1, p2), np.minimum(p3, p4))
     hi = np.maximum(np.maximum(p1, p2), np.maximum(p3, p4))
     if a is b:
