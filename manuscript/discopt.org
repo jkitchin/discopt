@@ -3,9 +3,10 @@
 #+DATE: 2026-02-14
 #+OPTIONS: toc:nil 
 #+LATEX_CLASS: article
-#+LATEX_CLASS_OPTIONS: [12pt,preprint]
+#+LATEX_CLASS_OPTIONS: [12pt]
 #+LATEX_HEADER: \usepackage{amsmath,amssymb,algorithm,algpseudocode}
 #+LATEX_HEADER: \usepackage{booktabs,multirow,graphicx}
+#+LATEX_HEADER: \PassOptionsToPackage{version=4}{mhchem}
 
 #+PROPERTY: header-args :eval never
 
@@ -62,7 +63,7 @@ Ipopt cite:&Wachter2006 is the most widely used open-source NLP solver, implemen
 
 Sensitivity analysis of NLP solutions with respect to problem parameters is well-established cite:&Fiacco1983. Pirnay et al. cite:&Pirnay2012 implemented the sIPOPT framework within Ipopt for efficient parametric sensitivity computation by reusing the KKT factorization.
 
-** Differentiable Optimization
+** Differentiable Optimization: Prior Work
 
 The idea of differentiating through an optimization solver to enable end-to-end learning has received significant recent attention. Amos and Kolter cite:&Amos2017 introduced OptNet for differentiating through quadratic programs. Agrawal et al. cite:&Agrawal2019 extended this to general convex programs via cvxpylayers. Elmachtoub and Grigas cite:&Elmachtoub2022 formalized the "smart predict, then optimize" framework, and Wilder et al. cite:&Wilder2019 and Mandi et al. cite:&Mandi2020 developed methods for combinatorial optimization with decision-focused learning.
 
@@ -138,11 +139,7 @@ The API supports continuous, binary, and integer variables; parameters (for sens
 
 ** Dynamic Optimization via DAE Collocation
 
-The =discopt.dae= module extends the modeling API to dynamic optimization problems by transcribing ODE/DAE systems into algebraic NLP constraints using orthogonal collocation on finite elements cite:&Biegler2010,Cuthrell1987. A =DAEBuilder= class provides a high-level interface: users declare state, algebraic, and control variables, supply an ODE/DAE right-hand side as a Python callable that builds discopt expressions, and call =discretize()= to generate all collocation and continuity constraints automatically.
-
-The module supports both Radau IIA and Gauss-Legendre collocation schemes with 1--5 collocation points per element. First-order ODEs, second-order ODEs (with automatic state augmentation for velocity coupling), and index-1 DAEs (algebraic constraints enforced at collocation points) are supported. Piecewise-constant control variables and integral objectives via quadrature are included for optimal control problems. A finite-difference backend (=FDBuilder=) provides backward, forward, and central Euler stencils as a simpler alternative.
-
-This transcription approach requires no changes to the existing DAG compiler, JAX backend, or solver infrastructure---the collocation constraints are standard algebraic expressions built from existing operators. For a 30-element, 3-point Radau discretization of a single-state ODE, the exponential decay solution matches =exp(-t)= to within $10^{-4}$ absolute error.
+The =discopt.dae= module extends the modeling API to dynamic optimization problems by transcribing ODE/DAE systems into algebraic NLP constraints using orthogonal collocation on finite elements cite:&Biegler2010;&Cuthrell1987. Users declare state, algebraic, and control variables, supply an ODE/DAE right-hand side as a Python callable that builds discopt expressions, and call =discretize()= to generate all collocation and continuity constraints automatically. Radau IIA and Gauss-Legendre schemes with 1--5 points per element, second-order ODEs via state augmentation, index-1 DAEs, piecewise-constant controls, and integral objectives are all supported. The transcription is covered in detail in the Dynamic Optimization section (ref:sec-dyn); parameter estimation and model-based design of experiments for dynamic systems are built on the same machinery (ref:sec-estimate, ref:sec-doe).
 
 ** Neural Network Embedding
 
@@ -166,17 +163,17 @@ model.minimize(dm.sum(nn.outputs))
 Three formulation strategies are provided:
 
 - *Full-space*: Explicit pre-activation ($\hat{z}$) and post-activation ($z$) variables for each neuron, with affine constraints $\hat{z} = Wx + b$ and activation constraints $z = \sigma(\hat{z})$. Supports smooth activations (sigmoid, tanh, softplus) that integrate directly with JAX autodiff and McCormick relaxations for spatial B&B.
-- *ReLU big-M* cite:&Anderson2020: For networks with ReLU activations, introduces binary variables $q_j$ and linear big-M constraints: $z \ge 0$, $z \ge \hat{z}$, $z \le u \cdot q$, $z \le \hat{z} - l(1-q)$, where $l, u$ are pre-activation bounds from interval arithmetic. Neurons with bounds that are always positive (or always negative) are detected and simplified to avoid unnecessary binary variables.
+- *ReLU big-M* cite:&Anderson2020. For networks with ReLU activations, introduces binary variables $q_j$ and linear big-M constraints: $z \ge 0$, $z \ge \hat{z}$, $z \le u \cdot q$, $z \le \hat{z} - l(1-q)$, where $l, u$ are pre-activation bounds from interval arithmetic. Neurons with bounds that are always positive (or always negative) are detected and simplified to avoid unnecessary binary variables.
 - *Reduced-space*: Builds a single nested expression with no intermediate variables, suitable for small networks.
 
 Interval arithmetic bound propagation through the network layers computes tight big-M constants by splitting weight matrices into positive and negative parts. An ONNX reader (=load_onnx=) imports trained models from scikit-learn, PyTorch, and Keras via the ONNX interchange format.
 
 ** Robust Optimization Module
 
-The =discopt.ro= module converts a nominal model with uncertain parameters into a deterministic *robust counterpart* that is feasible for every realization of the uncertainty within a prescribed set.  Following the classical framework of Ben-Tal and Nemirovski cite:&BenTal1999,BenTal2009, robust optimization replaces the original problem
+The =discopt.ro= module converts a nominal model with uncertain parameters into a deterministic *robust counterpart* that is feasible for every realization of the uncertainty within a prescribed set.  Following the classical framework of Ben-Tal and Nemirovski cite:&BenTal1999;&BenTal2009, robust optimization replaces the original problem
 
 #+BEGIN_EXAMPLE
-  min_x  f(x, p)     s.t. g_i(x, p) ≤ 0  for all p ∈ U
+  min_x  f(x, p)     s.t. g_i(x, p) <= 0  for all p in U
 #+END_EXAMPLE
 
 with a deterministic equivalent that encodes the worst-case constraint tightening analytically.
@@ -200,8 +197,8 @@ The budget $\Gamma \in [0, k]$ interpolates between the nominal solution ($\Gamm
 The box reformulation uses two strategies depending on the structure of the expression DAG.  When uncertain parameters appear with constant (known-sign) coefficients, the reformulation traverses the DAG while tracking the *effective sign* of each uncertain parameter at each node.  At a subtraction node $a - p$, the parameter $p$ acquires sign $-1$; at a negation node $-p$, the sign flips.  Multiplication by a non-negative constant preserves the sign; multiplication by a negative constant flips it.  This sign determines whether the worst-case value is the upper or lower component bound:
 
 #+BEGIN_EXAMPLE
-  sign > 0 and maximize ⟹ use upper bound  (p̄ + δ)
-  sign < 0 and maximize ⟹ use lower bound  (p̄ − δ)
+  sign > 0 and maximize  =>  use upper bound  (pbar + delta)
+  sign < 0 and maximize  =>  use lower bound  (pbar - delta)
 #+END_EXAMPLE
 
 When the expression contains *bilinear* terms ($p \cdot x$ where both are free), as arises from affine decision rules, the coefficient of $p$ involves decision variables whose sign is not known a priori.  In this case the reformulation extracts the per-component coefficient of each uncertain parameter and applies absolute-value linearization: the worst-case of $\mathrm{coeff}(x) \cdot \xi$ over $|\xi| \le \delta$ is $\delta \cdot |\mathrm{coeff}(x)|$, where the absolute value is linearized via auxiliary variables $t \ge 0$ satisfying $\mathrm{coeff}(x) \le t$ and $-\mathrm{coeff}(x) \le t$.  The implementation automatically detects the presence of bilinear terms and selects the appropriate strategy.
@@ -239,7 +236,7 @@ For the additive/affine uncertainty case, both reformulation strategies produce 
 
 Static robust optimization requires all decisions to be fixed before the uncertain parameters are revealed.  When some decisions can be deferred until after (partial) observation of the uncertainty, adjustable robust optimization (ARO) cite:&BenTalGoryashko2004 provides a less conservative solution.
 
-The two-stage framework partitions variables into *here-and-now* decisions $x$ (chosen before observing $\xi$) and *wait-and-see* recourse variables $y(\xi)$ (chosen after).  Optimising over arbitrary functions $y(\cdot)$ is generally intractable (the problem is semi-infinite), so discopt adopts **affine decision rules** (also called linear decision rules) cite:&BenTalGoryashko2004,Chen2009:
+The two-stage framework partitions variables into *here-and-now* decisions $x$ (chosen before observing $\xi$) and *wait-and-see* recourse variables $y(\xi)$ (chosen after).  Optimising over arbitrary functions $y(\cdot)$ is generally intractable (the problem is semi-infinite), so discopt adopts **affine decision rules** (also called linear decision rules) cite:&BenTalGoryashko2004;&Chen2009.
 
 $$y(\xi) = y_0 + \sum_{j=1}^{n_\xi} Y_j \cdot \xi_j, \quad \xi_j = p_j - \bar{p}_j$$
 
@@ -250,13 +247,13 @@ The =AffineDecisionRule= class implements this substitution as a pre-processing 
 #+BEGIN_SRC python
 from discopt.ro import AffineDecisionRule, BoxUncertaintySet, RobustCounterpart
 
-# Stage 1: substitute recourse variable y with y₀ + Y₀·(d - d̄)
+# Stage 1: substitute recourse variable y with y0 + Y0 * (d - dbar)
 adr = AffineDecisionRule(y, uncertain_params=d)
-adr.apply()          # retires y; adds y₀, Y₀ to model._variables
+adr.apply()          # retires y; adds y0, Y0 to model._variables
 
-# Stage 2: static robust counterpart handles remaining ξ terms
+# Stage 2: static robust counterpart handles remaining xi terms
 rc = RobustCounterpart(m, BoxUncertaintySet(d, delta=20.0))
-rc.formulate()       # fully deterministic; optimise over (x, y₀, Y₀)
+rc.formulate()       # fully deterministic; optimise over (x, y0, Y0)
 #+END_SRC
 
 The DAG substitution walks every constraint and objective node, replacing Variable nodes that match the recourse variable with the affine expression via identity comparison ($O(|V| + |E|)$ in the DAG size).  After substitution the recourse variable is retired from the model's variable list and remaining variables are renumbered.  In addition, =apply()= automatically enforces robust feasibility of the recourse variable bounds: if the original variable $y$ had bounds $[l, u]$, the constraints $y_0 + \sum_j Y_j \xi_j \le u$ and $y_0 + \sum_j Y_j \xi_j \ge l$ are added to the model, ensuring that the affine rule respects the original domain for all realizations of $\xi$.  The subsequent =RobustCounterpart.formulate()= call handles the bilinear $Y_j \cdot \xi_j$ terms in these bound constraints via coefficient extraction and absolute-value linearization.
@@ -417,7 +414,7 @@ The relaxation compiler implements 21 univariate and bivariate McCormick relaxat
 
 Each function maps interval bounds $[x_l, x_u]$ and convex/concave enclosures $(cv, cc)$ of the argument to tighter enclosures of the result. The compiler produces pure =jax.numpy= functions compatible with =jax.jit= and =jax.vmap=, enabling batch relaxation evaluation over multiple B&B nodes.
 
-** \alpha BB Underestimators
+** @@latex:\texorpdfstring{$\alpha$}{alpha}@@ BB Underestimators
 
 For general twice-differentiable functions where McCormick relaxations are loose, the \alpha BB method cite:&Androulakis1995;&Adjiman1998 adds a separable quadratic perturbation:
 
@@ -513,6 +510,108 @@ On a resource allocation task with 3 activities, 5 features, and risk-averse obj
 
 On a mean-variance portfolio optimization task with 3 assets and nonlinear interactions, DFL similarly achieves lower regret and higher utility than the two-stage approach.
 
+* Dynamic Optimization
+  :PROPERTIES:
+  :CUSTOM_ID: sec-dyn
+  :END:
+#+LATEX: \label{sec-dyn}
+
+Dynamic optimization problems (optimal control, trajectory optimization, nonlinear model predictive control) are solved in discopt by transcribing ODE/DAE systems into algebraic NLP constraints using orthogonal collocation on finite elements cite:&Biegler2010;&Cuthrell1987. The =discopt.dae= module provides a =DAEBuilder= high-level interface: users declare state, algebraic, and control variables, supply an ODE/DAE right-hand side as a Python callable that builds discopt expressions, and call =discretize()= to generate all collocation and continuity constraints automatically.
+
+Given a dynamic system $\dot{x} = f(x, z, u, t; \theta)$ with algebraic variables $z$ satisfying $0 = h(x, z, u, t; \theta)$, each finite element $[t_k, t_{k+1}]$ of length $h_k$ is transcribed by placing $K$ collocation points $\tau_j \in (0, 1]$, introducing stage variables $x_{k,j}$, $z_{k,j}$, and enforcing
+
+\begin{align}
+\sum_{l=0}^{K} \dot{\ell}_l(\tau_j) \, x_{k,l} &= h_k \, f(x_{k,j}, z_{k,j}, u_k, t_{k,j}; \theta), \quad j = 1, \dots, K, \\
+0 &= h(x_{k,j}, z_{k,j}, u_k, t_{k,j}; \theta), \\
+x_{k+1,0} &= \sum_{l=0}^{K} \ell_l(1) \, x_{k,l},
+\end{align}
+
+where $\ell_l$ are Lagrange basis polynomials on the collocation nodes. Radau IIA (1--5 points) and Gauss-Legendre schemes are supported, along with automatic state augmentation for second-order ODEs and index-1 DAEs with algebraic constraints enforced at each collocation point. Piecewise-constant controls $u_k$ and integral objectives $\int L(x, u, t)\,dt$ via Gauss quadrature cover standard optimal-control formulations. A finite-difference backend (=FDBuilder=) provides backward, forward, and central Euler stencils as a simpler alternative for users who prefer explicit time-stepping.
+
+This transcription approach requires no changes to the existing DAG compiler, JAX backend, or solver infrastructure: the collocation constraints are standard algebraic expressions built from existing operators, so they inherit JIT compilation, =jax.vmap= batching, and the differentiable-solve machinery of the Differentiable Optimization section without special-casing. For a 30-element, 3-point Radau discretization of $\dot{x} = -x$ with $x(0) = 1$, the solution matches =exp(-t)= to within $10^{-4}$ absolute error on $[0, 10]$. The vectorized collocation evaluator (introduced in a recent NMPC-oriented perf update) computes stage-residuals for all elements and collocation points in a single JAX-batched kernel, eliminating Python-level loops over the horizon.
+
+Because collocation reduces a dynamic problem to a structured sparse NLP, the same transcription machinery supports dynamic parameter estimation (Section ref:sec-estimate) and dynamic experiment design (Section ref:sec-doe): the parameter vector $\theta$ enters $f, h$ as an ordinary unknown, and the FIM through the dynamics is computed by the same JAX autodiff used for gradients.
+
+* Parameter Estimation
+  :PROPERTIES:
+  :CUSTOM_ID: sec-estimate
+  :END:
+#+LATEX: \label{sec-estimate}
+
+The =discopt.estimate= module estimates unknown model parameters from experimental data using weighted nonlinear least squares (equivalently, Gaussian-noise maximum likelihood) cite:&Bard1974. Given responses $y_i$ with measurement standard deviations $\sigma_i$, the estimation problem is
+
+\begin{equation}
+\hat{\theta} = \arg\min_{\theta \in \Theta} \sum_{i=1}^{N} \left( \frac{y_i^{\mathrm{obs}} - y_i^{\mathrm{model}}(\theta; d_i)}{\sigma_i} \right)^2,
+\end{equation}
+
+where $d_i$ are design conditions (sampling times, input concentrations, etc.) for observation $i$, $\Theta$ is a parameter box, and $y_i^{\mathrm{model}}$ is any discopt expression, including one produced by the DAE transcription of Section ref:sec-dyn. Because the objective is an ordinary discopt expression, estimation reuses the full NLP stack: the pure-JAX IPM, ripopt, or cyipopt.
+
+Users declare an =Experiment= by subclassing a thin interface and providing =create_model(**kwargs)= returning an =ExperimentModel= that tags which variables are unknown parameters, which are design inputs, which expressions are responses, and the per-response measurement error. The same =Experiment= object is reused across estimation, FIM computation, and optimal experimental design, ensuring the three share a single source of truth.
+
+#+BEGIN_SRC python
+from discopt.estimate import Experiment, ExperimentModel, estimate_parameters
+
+class ArrheniusExperiment(Experiment):
+    def create_model(self, **kwargs):
+        m = dm.Model("arrhenius")
+        A  = m.continuous("A",  lb=1e3,  ub=1e8)
+        Ea = m.continuous("Ea", lb=1e4,  ub=1e5)
+        T  = m.continuous("T",  lb=300,  ub=500)
+        k  = A * dm.exp(-Ea / (8.314 * T))
+        return ExperimentModel(
+            model=m,
+            unknown_parameters={"A": A, "Ea": Ea},
+            design_inputs={"T": T},
+            responses={"k": k},
+            measurement_error={"k": 0.05},
+        )
+
+result = estimate_parameters(ArrheniusExperiment(), data, initial_guess={"A": 1e6, "Ea": 5e4})
+print(result.summary())  # parameters, standard errors, 95% CIs, FIM det and cond
+#+END_SRC
+
+The =EstimationResult= reports point estimates, the asymptotic covariance $\Sigma_\theta \approx (J^\top \Sigma^{-1} J)^{-1}$ where $J = \partial y^{\mathrm{model}} / \partial \theta$, standard errors, confidence intervals via Student's $t$ with $N - p$ degrees of freedom, and the correlation matrix. The Jacobian $J$ is computed by =jax.jacobian= on the parametric DAG-compiled response functions, giving exact sensitivities (no finite-difference noise) at negligible overhead relative to the estimation solve. For dynamic models, the collocation transcription of Section ref:sec-dyn makes $y^{\mathrm{model}}(\theta; d)$ a standard algebraic expression, so the same autodiff pipeline applies without special support for ODE sensitivity equations.
+
+* Model-Based Design of Experiments
+  :PROPERTIES:
+  :CUSTOM_ID: sec-doe
+  :END:
+#+LATEX: \label{sec-doe}
+
+Model-based design of experiments (MBDoE) selects experimental conditions $d$ that maximize information content of the resulting data, quantified by the Fisher Information Matrix (FIM) $M(\theta, d) = J(\theta, d)^\top \Sigma^{-1} J(\theta, d)$, where $J = \partial y^{\mathrm{model}} / \partial \theta$ cite:&Franceschini2008;&Bard1974. The =discopt.doe= module implements MBDoE on the same =Experiment= interface used for estimation (Section ref:sec-estimate), so the model, responses, and measurement errors are shared across the two steps of a sequential design-then-estimate loop.
+
+Compared with =Pyomo.DoE= cite:&Wang2022, discopt computes $J$ by =jax.jacobian= applied to a parametric DAG-compiled response, giving exact sensitivities in a single forward-mode autodiff pass with no finite-difference step tuning, and supports GPU / TPU acceleration when available through the JAX backend.
+
+Four optimality criteria are supported:
+
+\begin{equation}
+\text{D-optimal: } \max_d \log\det M(\theta, d), \qquad \text{A-optimal: } \min_d \operatorname{tr} M(\theta, d)^{-1},
+\end{equation}
+
+\begin{equation}
+\text{E-optimal: } \max_d \lambda_{\min}(M(\theta, d)), \qquad \text{ME-optimal: } \min_d \kappa(M(\theta, d)),
+\end{equation}
+
+evaluated with an optional prior FIM to support sequential designs. =optimal_experiment= performs a multi-start random + boundary search followed by scipy L-BFGS-B local refinement with bound constraints. =sequential_doe= alternates parameter estimation and single-experiment design over multiple rounds, updating the prior FIM with each round's contribution.
+
+*Batch / parallel MBDoE.* When the laboratory can run multiple experiments in parallel (several reactors, wells, or robots), designing them one at a time wastes information. Because the experiments are independent, the Fisher information is additive,
+
+\begin{equation}
+M_{\mathrm{total}}(d_1, \dots, d_N) = \sum_{i=1}^{N} J(\theta, d_i)^\top \Sigma^{-1} J(\theta, d_i) + M_{\mathrm{prior}},
+\end{equation}
+
+and the joint D-optimal batch design maximises $\log\det M_{\mathrm{total}}$ over the stacked design vector $(d_1, \dots, d_N)$. This joint-FIM formulation follows cite:&Galvanin2007; a modern framework for robust, uncertainty-aware parallel MBDoE is given in cite:&Sandrin2025. For an alternative route via parallel Bayesian optimization with Gaussian-process surrogates rather than FIM, see cite:&Gonzalez2023.
+
+The =batch_optimal_experiment= function exposes three strategies:
+
+- *Greedy* (default). Pick one design via =optimal_experiment=, fold its FIM into the running prior, repeat. Cheap (N calls to the single-experiment search) and incremental, but myopic: each pick is locally optimal given the previously committed ones and is not guaranteed to recover the joint optimum on nonlinear experiments.
+- *Joint*. Stack the $N$ design vectors into $z \in \mathbb{R}^{N d}$ and optimize the joint criterion directly via scipy L-BFGS-B with a multi-start seeding over random and quantile-structured stacks. Recovers the Galvanin cite:&Galvanin2007 joint optimum up to local-solver convergence; on a two-parameter linear-Gaussian toy ($y = a x + b$, $x \in [0, 1]$) it reliably places $N = 2$ experiments at the boundary support $\{0, 1\}$ where greedy can miss depending on its first pick. Cost scales as $N \times d$ solver dimensions with repeated JAX autodiff passes, so it is slower than greedy for large $N$ but equal or better in information content.
+- *Penalized*. Greedy with a normalized minimum-distance filter between successive picks, useful when the criterion is locally flat and the experimenter wants spatial diversity in the batch.
+
+All three strategies are also exposed as a =batch_strategy= option on =sequential_doe= via the =experiments_per_round= keyword, so a batched closed-loop campaign (Estimate $\rightarrow$ Design batch of $N$ $\rightarrow$ Run $N$ experiments $\rightarrow$ Estimate ...) is a single function call. The FIM prior accumulated across rounds ensures the batch criterion evaluated at each round reflects all previously collected data.
+
+Out of scope in the current implementation and left to future work: robust / expected-information designs $\mathbb{E}_\theta[M]$ under parameter uncertainty in the spirit of cite:&Sandrin2025, mixed-integer batch designs selecting $N$ from a discrete candidate pool (naturally expressed in the core MINLP framework), and end-to-end JAX autograd through the joint batch objective.
+
 * Computational Experiments
 
 ** NLP Backend Comparison
@@ -606,7 +705,7 @@ discopt demonstrates that a modern, multi-language MINLP solver can provide capa
 
 *Command-line interface and literature monitoring.* discopt provides a command-line interface (=discopt=) installable via =pip=, with subcommands for searching arXiv and OpenAlex APIs and writing structured reports. These subcommands output JSON, enabling integration with scripting workflows and CI pipelines. A companion "discoptbot" agent uses the CLI to periodically scan for new publications relevant to the solver's algorithmic components (spatial B&B, McCormick relaxations, GNN branching, GPU-accelerated IPM), score them by relevance, and produce structured literature reports. This automated monitoring helps maintain awareness of algorithmic advances that could inform future solver development.
 
-*Future work.* Key directions include: (1) GPU-accelerated batch IPM via JAX's XLA backend when GPU support matures; (2) extending ripopt with sparse linear algebra to compete with Ipopt on large problems; (3) deeper integration of learned relaxations with online training during the B&B search; (4) exploiting the differentiable solver for bilevel optimization and meta-learning of solver parameters; (5) extending the DAE collocation module to higher-index DAEs, adaptive mesh refinement, and multi-stage optimal control with path constraints; (6) extending the neural network embedding to convolutional layers, residual connections, gradient-boosted tree models, and LP-based bound tightening (OBBT) for tighter big-M constants; and (7) extending the robust optimization module beyond the current affine decision rules to bilinear coefficient uncertainty (via LP dual auxiliary variables), polynomial or piecewise-linear recourse policies, and distributionally robust optimization via moment-based or Wasserstein ambiguity sets cite:&BenTalGoryashko2004,Bertsimas2010.
+*Future work.* Key directions include: (1) GPU-accelerated batch IPM via JAX's XLA backend when GPU support matures; (2) extending ripopt with sparse linear algebra to compete with Ipopt on large problems; (3) deeper integration of learned relaxations with online training during the B&B search; (4) exploiting the differentiable solver for bilevel optimization and meta-learning of solver parameters; (5) extending the DAE collocation module to higher-index DAEs, adaptive mesh refinement, and multi-stage optimal control with path constraints; (6) extending the neural network embedding to convolutional layers, residual connections, gradient-boosted tree models, and LP-based bound tightening (OBBT) for tighter big-M constants; and (7) extending the robust optimization module beyond the current affine decision rules to bilinear coefficient uncertainty (via LP dual auxiliary variables), polynomial or piecewise-linear recourse policies, and distributionally robust optimization via moment-based or Wasserstein ambiguity sets cite:&BenTalGoryashko2004;&Bertsimas2010.
 
 * Conclusion
 
