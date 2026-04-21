@@ -176,6 +176,16 @@ def classify_expr_info(
         return _cache[eid]  # type: ignore[no-any-return]
 
     info = _classify_impl(expr, model, _cache)
+    # Whole-expression quadratic fallback: when the recursive walker
+    # leaves a polynomial at UNKNOWN (e.g., because an intermediate
+    # bilinear node defeats local reasoning), the full quadratic form
+    # may still classify via eigendecomposition of a symmetrised Q.
+    if info.curvature == Curvature.UNKNOWN and model is not None:
+        from .patterns import quadratic_curvature
+
+        qc = quadratic_curvature(expr, model)
+        if qc is not None and qc != Curvature.UNKNOWN:
+            info = ExprInfo(qc, info.sign)
     _cache[eid] = info
     return info
 
@@ -309,7 +319,7 @@ def _classify_binary(expr: BinaryOp, model: Optional[Model], cache: dict) -> Exp
         )
 
     if expr.op == "*":
-        return _classify_product(expr, left, right)
+        return _classify_product(expr, left, right, model, cache)
 
     if expr.op == "/":
         return _classify_division(expr, left, right, model, cache)
@@ -320,7 +330,13 @@ def _classify_binary(expr: BinaryOp, model: Optional[Model], cache: dict) -> Exp
     return ExprInfo(Curvature.UNKNOWN, Sign.UNKNOWN)
 
 
-def _classify_product(expr: BinaryOp, left: ExprInfo, right: ExprInfo) -> ExprInfo:
+def _classify_product(
+    expr: BinaryOp,
+    left: ExprInfo,
+    right: ExprInfo,
+    model: Optional[Model],
+    cache: dict,
+) -> ExprInfo:
     """Classify ``a * b`` with sign-aware curvature."""
     prod_sign = sign_mul(left.sign, right.sign)
 
@@ -333,6 +349,15 @@ def _classify_product(expr: BinaryOp, left: ExprInfo, right: ExprInfo) -> ExprIn
         val = _scalar_value(expr.right)
         s = 0 if val == 0 else (1 if val > 0 else -1)
         return ExprInfo(scale(left.curvature, s), prod_sign)
+
+    # Special product patterns: perspective of exp and weighted
+    # geometric mean. See :mod:`patterns` for the preconditions.
+    if model is not None:
+        from .patterns import classify_product_pattern
+
+        special = classify_product_pattern(expr, model, classify_expr, cache)
+        if special is not None:
+            return ExprInfo(special, prod_sign)
 
     # Bilinear / general product: curvature is UNKNOWN even when both
     # factors share a sign (consider x*y on the positive orthant, whose
@@ -380,6 +405,14 @@ def _classify_division(
             scale(composed, c_sign),
             sign_mul(sign_from_value(c), recip_sign),
         )
+
+    # Quadratic-over-affine with positive denominator (quad-over-linear).
+    if model is not None:
+        from .patterns import classify_division_pattern
+
+        special = classify_division_pattern(expr, model, classify_expr, cache)
+        if special is not None:
+            return ExprInfo(special, Sign.NONNEG)
 
     # General quotient — no sound curvature verdict.
     return ExprInfo(Curvature.UNKNOWN, sign_mul(left.sign, sign_reciprocal(right.sign)))
@@ -499,6 +532,16 @@ def _classify_function_call(expr: FunctionCall, model: Optional[Model], cache: d
     if name in ("log", "log2", "log10", "sqrt") and not is_strict(arg_sign):
         arg_sign = _refine_sign(expr.args[0], model, cache, arg_sign)
     profile: Optional[AtomProfile] = unary_atom_profile(name, arg_sign)
+
+    # sqrt(x'Qx) with Q PSD is a norm — convex even though the inner
+    # quadratic is convex (concave∘convex would fail DCP composition).
+    if name == "sqrt" and model is not None:
+        from .patterns import classify_sqrt_pattern
+
+        special = classify_sqrt_pattern(expr.args[0], model)
+        if special == Curvature.CONVEX:
+            return ExprInfo(Curvature.CONVEX, Sign.NONNEG)
+
     if profile is None:
         return ExprInfo(Curvature.UNKNOWN, _function_result_sign(name, arg_sign))
 
@@ -619,7 +662,25 @@ def classify_constraint(
     curv = classify_expr(constraint.body, model, _cache)
 
     syntactic = _constraint_convex_from_curvature(curv, constraint.sense)
-    if syntactic or not use_certificate or model is None:
+    if syntactic:
+        return True
+    if model is None:
+        return False
+
+    # Structural fallback: recognise quadratic-over-affine epigraphs
+    # (the MINLPTests ``nlp_cvx_108_*`` family) directly at the
+    # constraint level — their convexity is provable from a
+    # rearrangement that the expression-level walker cannot see.
+    try:
+        from .patterns import classify_fractional_epigraph_constraint
+
+        frac = classify_fractional_epigraph_constraint(constraint, model)
+    except Exception:
+        frac = None
+    if frac is True:
+        return True
+
+    if not use_certificate:
         return syntactic
 
     # Fall back to the sound numerical certificate.

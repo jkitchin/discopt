@@ -1067,6 +1067,13 @@ NLP_CVX_INSTANCES = [
 ]
 
 
+# Mapping from problem_id to MINLPTestInstance for lookup by id. Unwraps the
+# pytest.param wrappers used above for parametrization.
+MINLPTESTS_CVX_BY_ID: dict[str, MINLPTestInstance] = {
+    p.values[0].problem_id: p.values[0] for p in NLP_CVX_INSTANCES
+}
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # NLP: Nonconvex NLP problems (nlp directory, 17 problems)
 # ═════════════════════════════════════════════════════════════════════════════

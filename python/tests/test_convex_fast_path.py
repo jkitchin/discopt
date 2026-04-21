@@ -7,7 +7,9 @@ nonconvex or integer problems correctly fall back to the standard solver.
 
 import discopt.modeling as dm
 import numpy as np
+import pytest
 from discopt.modeling.core import Model
+from test_minlptests import MINLPTESTS_CVX_BY_ID
 
 
 class TestConvexFastPathDetection:
@@ -222,3 +224,65 @@ class TestConvexFastPathConstraints:
         result = m.solve()
         assert result.convex_fast_path is True
         assert result.status == "optimal"
+
+
+class TestTranslatedLPRegressions:
+    """Translated convex LPs from MINLPTests must take the convex fast path."""
+
+    @pytest.mark.parametrize(
+        "problem_id",
+        [
+            "nlp_cvx_001_010",
+            "nlp_cvx_002_010",
+        ],
+    )
+    @pytest.mark.parametrize("solver_name", [None, "amp"], ids=["default", "amp"])
+    def test_translated_lp_uses_convex_fast_path(self, problem_id, solver_name):
+        instance = MINLPTESTS_CVX_BY_ID[problem_id]
+        m = instance.build_fn()
+        solve_kwargs = {"time_limit": 60.0, "gap_tolerance": 1e-6}
+        if solver_name == "amp":
+            solve_kwargs["solver"] = "amp"
+            solve_kwargs["nlp_solver"] = "ipm"
+
+        result = m.solve(**solve_kwargs)
+
+        assert result.status == "optimal"
+        assert result.convex_fast_path is True
+        assert result.objective is not None
+        tol = 1e-6 + 1e-4 * abs(instance.expected_obj)
+        assert abs(result.objective - instance.expected_obj) <= tol
+
+
+class TestTranslatedSpecialConvexRegressions:
+    """Translated convex forms beyond LP/QP must take the convex fast path."""
+
+    @pytest.mark.parametrize(
+        "problem_id",
+        [
+            "nlp_cvx_108_010",
+            "nlp_cvx_108_011",
+            "nlp_cvx_108_012",
+            "nlp_cvx_108_013",
+            "nlp_cvx_203_010",
+            "nlp_cvx_204_010",
+            "nlp_cvx_205_010",
+            "nlp_cvx_206_010",
+        ],
+    )
+    @pytest.mark.parametrize("solver_name", [None, "amp"], ids=["default", "amp"])
+    def test_translated_special_convex_uses_fast_path(self, problem_id, solver_name):
+        instance = MINLPTESTS_CVX_BY_ID[problem_id]
+        m = instance.build_fn()
+        solve_kwargs = {"time_limit": 60.0, "gap_tolerance": 1e-6}
+        if solver_name == "amp":
+            solve_kwargs["solver"] = "amp"
+            solve_kwargs["nlp_solver"] = "ipm"
+
+        result = m.solve(**solve_kwargs)
+
+        assert result.status in ("optimal", "feasible")
+        assert result.convex_fast_path is True
+        assert result.objective is not None
+        tol = 1e-6 + 1e-4 * abs(instance.expected_obj)
+        assert abs(result.objective - instance.expected_obj) <= tol

@@ -98,10 +98,16 @@ class TestCompositionTraps:
         x = m.continuous("x", lb=-5, ub=5)
         assert classify_expr(dm.log(dm.exp(x)), m) == Curvature.UNKNOWN
 
-    def test_sqrt_of_convex_is_unknown(self):
+    def test_sqrt_of_psd_quadratic_is_convex(self):
+        """sqrt of a PSD quadratic form is a norm, hence convex.
+
+        ``sqrt(x^2) = |x|``; the norm recogniser in :mod:`patterns`
+        proves convexity directly even though the naive
+        concave-of-convex DCP composition fails.
+        """
         m = Model("t")
         x = m.continuous("x", lb=-5, ub=5)
-        assert classify_expr(dm.sqrt(x**2), m) == Curvature.UNKNOWN
+        assert classify_expr(dm.sqrt(x**2), m) == Curvature.CONVEX
 
 
 # ──────────────────────────────────────────────────────────────────────
