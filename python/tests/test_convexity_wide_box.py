@@ -39,6 +39,7 @@ from discopt._jax.convexity import (
     certify_convex,
     classify_constraint,
     classify_expr,
+    classify_model,
 )
 from discopt.modeling.core import Model
 
@@ -110,19 +111,67 @@ class TestWideBoxStructuralRecognizers:
         assert classify_expr(expr, m) == Curvature.CONCAVE
 
     def test_fractional_epigraph_constraint_convex_on_wide_box(self):
-        # nlp_cvx_108-style rearrangement: y * (d*x + e) + (a*x^2 + b*x + c) <= 0
+        # nlp_cvx_108-style rearrangement: (d*x + e) * (-y) + q(x) <= 0
         # with (d*x + e) strictly positive on the box. Convex iff
-        # a*e^2 - b*d*e + c*d^2 >= 0.
+        # a*e^2 - b*d*e + c*d^2 >= 0 (Schur complement of q(x)/L(x)).
         m = Model("frac_epi_wide")
         x = m.continuous("x", lb=-WIDE, ub=WIDE)
         y = m.continuous("y", lb=-WIDE, ub=WIDE)
-        # Coefficients chosen so (2*x + (2*WIDE + 1)) > 0 on [-WIDE, WIDE].
         d = 2.0
-        e = 2.0 * WIDE + 1.0
-        # q(x) = x^2, so (a, b, c0) = (1, 0, 0) and a*e^2 - b*d*e + c0*d^2 = e^2 >= 0.
-        con = (d * x + e) * (-y) + x * x <= 0  # arranges to y >= x^2 / (d*x+e)
-        m.subject_to(con)
+        e = 2.0 * WIDE + 1.0  # ensures d*x + e > 0 on [-WIDE, WIDE]
+        # q(x) = x^2, so discriminant = e^2 >= 0 -> convex.
+        m.subject_to((d * x + e) * (-y) + x * x <= 0)
         assert classify_constraint(m._constraints[0], m) is True
+
+    def test_fractional_epigraph_not_convex_when_discriminant_negative(self):
+        """Negative branch of the Schur-complement check.
+
+        q(x) = x^2 - 10, L(x) = x + 1 on x in [0.1, 10]. Discriminant
+        a*e^2 - b*d*e + c*d^2 = 1 + 0 + (-10) = -9 < 0, so y = q(x)/L(x)
+        is NOT convex on this box and the detector must refuse to
+        classify the constraint as convex. Complements the positive
+        case above; without it we would not be exercising the
+        discriminant comparison at all.
+        """
+        m = Model("frac_epi_neg_disc")
+        x = m.continuous("x", lb=0.1, ub=10.0)
+        y = m.continuous("y", lb=-10.0, ub=10.0)
+        m.subject_to((x + 1.0) * (-y) + x * x - 10.0 <= 0)
+        assert classify_constraint(m._constraints[0], m) is False
+
+    def test_exp_perspective_with_mismatched_denominator_is_unknown(self):
+        """Negative case for the perspective-of-exp recogniser.
+
+        y * exp(x / z) with z != y is NOT the perspective of exp
+        (which requires the outer scale and the inner denominator to
+        be the *same* expression). The pattern matcher must decline
+        rather than promote it to CONVEX.
+        """
+        m = Model("persp_mismatch_wide")
+        x = m.continuous("x", lb=-WIDE, ub=WIDE)
+        y = m.continuous("y", lb=1.0e-3, ub=1.0e6)
+        z = m.continuous("z", lb=1.0e-3, ub=1.0e6)
+        assert classify_expr(y * dm.exp(x / z), m) == Curvature.UNKNOWN
+
+    def test_classify_model_wide_box_multi_convex_constraints(self):
+        """Model-level gate: classify_model returns (True, all-True) on
+        a wide-box model with several structurally convex constraints.
+
+        The solver's convex fast-path gate reads this tuple; the
+        per-expression tests above are necessary but not sufficient if
+        any aggregation step in ``classify_model`` regressed.
+        """
+        m = Model("multi_cvx_wide")
+        a = m.continuous("a", lb=-WIDE, ub=WIDE)
+        b = m.continuous("b", lb=-WIDE, ub=WIDE)
+        t = m.continuous("t", lb=0.0, ub=WIDE)
+        m.minimize(t)
+        m.subject_to(a * a + b * b + a * b <= t)  # PSD quadratic (cross term)
+        m.subject_to(dm.sqrt(a * a + b * b) <= t)  # norm
+
+        is_convex, mask = classify_model(m)
+        assert is_convex is True
+        assert mask == [True, True]
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -159,15 +208,19 @@ class TestWideBoxCertificateAbstainsAsDocumented:
         assert verdict is None
 
     def test_quadratic_over_linear_certificate_abstains_on_wide_box(self):
+        # Hessian of x^2/y is
+        #   [[2/y,        -2x/y^2],
+        #    [-2x/y^2,     2x^2/y^3]]
+        # On x in [-WIDE, WIDE], y in [1e-3, WIDE] the off-diagonal and
+        # H[1,1] entries span many orders of magnitude; Gershgorin's
+        # lambda_min goes sharply negative and the certificate abstains.
         m = Model("qol_cert_wide")
         x = m.continuous("x", lb=-WIDE, ub=WIDE)
         y = m.continuous("y", lb=1.0e-3, ub=WIDE)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
             verdict = certify_convex((x * x) / y, m)
-        # The certificate is allowed to succeed or abstain; what we do
-        # NOT allow is a contradiction (CONCAVE). Soundness first.
-        assert verdict in (Curvature.CONVEX, None)
+        assert verdict is None
 
     def test_structural_layer_strictly_stronger_than_certificate_on_perspective(self):
         """On the exp-perspective shape under wide bounds, the
@@ -246,3 +299,46 @@ class TestWideBoxSolverIntegration:
         result = m.solve(time_limit=60.0)
         assert result.status == "optimal"
         assert result.convex_fast_path is True
+
+    def test_quadratic_over_linear_solves_via_convex_fast_path(self):
+        # Minimise x^2 / y + y on a wide box; structural recogniser is
+        # what gates the fast path here (certificate abstains — see
+        # TestWideBoxCertificateAbstainsAsDocumented).
+        m = Model("qol_solver_wide")
+        x = m.continuous("x", lb=-1.0e6, ub=1.0e6)
+        y = m.continuous("y", lb=1.0e-2, ub=1.0e6)
+        m.minimize((x * x) / y + y)
+        result = m.solve(time_limit=60.0)
+        assert result.status == "optimal"
+        assert result.convex_fast_path is True
+
+    def test_fractional_epigraph_solves_via_convex_fast_path(self):
+        # Minimise y s.t. (x+1) * (-y) + x^2 + 1 <= 0  (i.e. y >= (x^2+1)/(x+1)).
+        # Analytic optimum at x = sqrt(2) - 1, y = 2*sqrt(2) - 2 ≈ 0.8284.
+        m = Model("frac_epi_solver_wide")
+        W = 1.0e4
+        x = m.continuous("x", lb=0.0, ub=W)
+        y = m.continuous("y", lb=0.0, ub=W)
+        m.minimize(y)
+        m.subject_to((x + 1.0) * (-y) + x * x + 1.0 <= 0)
+        result = m.solve(time_limit=60.0)
+        assert result.status == "optimal"
+        assert result.convex_fast_path is True
+        assert abs(result.objective - (2.0 * (2.0**0.5) - 2.0)) <= 1.0e-4
+
+    def test_bilinear_feasibility_does_not_take_convex_fast_path(self):
+        """Negative control: a genuinely nonconvex bilinear constraint
+        must NOT be promoted to the convex fast path by any wide-box
+        code path. Ensures the structural recognisers haven't
+        accidentally widened to over-accept.
+        """
+        m = Model("bilinear_solver_nonconvex")
+        u = m.continuous("u", lb=0.1, ub=10.0)
+        v = m.continuous("v", lb=0.1, ub=10.0)
+        m.minimize(u + v)
+        m.subject_to(u * v >= 5.0)  # nonconvex feasible region
+        result = m.solve(time_limit=60.0)
+        assert result.status == "optimal"
+        assert result.convex_fast_path is False
+        # Analytic optimum: u = v = sqrt(5), objective 2*sqrt(5) ≈ 4.472.
+        assert abs(result.objective - (2.0 * (5.0**0.5))) <= 1.0e-4
