@@ -1231,6 +1231,35 @@ def solve_model(
             stacklevel=2,
         )
 
+    # --- AMP (Adaptive Multivariate Partitioning) global solver ---
+    _solver = kwargs.pop("solver", None)
+    if _solver == "amp":
+        from discopt.solvers.amp import solve_amp
+
+        amp_kwargs = {}
+        for key in (
+            "rel_gap",
+            "max_iter",
+            "n_init_partitions",
+            "partition_method",
+            "iteration_callback",
+            "milp_time_limit",
+            "milp_gap_tolerance",
+        ):
+            if key in kwargs:
+                amp_kwargs[key] = kwargs.pop(key)
+
+        # rel_gap defaults to gap_tolerance if not separately provided
+        if "rel_gap" not in amp_kwargs:
+            amp_kwargs["rel_gap"] = gap_tolerance
+
+        return solve_amp(
+            model,
+            time_limit=time_limit,
+            nlp_solver=nlp_solver,
+            **amp_kwargs,
+        )
+
     # --- OA decomposition: general-purpose Outer Approximation ---
     if gdp_method == "oa":
         from discopt.solvers.oa import solve_oa
