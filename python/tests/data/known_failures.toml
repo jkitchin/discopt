@@ -39,16 +39,6 @@ note     = "division constraints (1/x form) produce NaN when x integer lb=0; cra
 # to hit iteration_limit. All 501_011 (sqrt-constraint) variants are affected,
 # plus several problems with unbounded continuous variables.
 
-[minlptests."nlp_cvx_001_010/primary"]
-category = "no_convergence"
-issue    = 32
-note     = "iteration_limit: unbounded vars (LP with default bounds)"
-
-[minlptests."nlp_cvx_002_010/primary"]
-category = "no_convergence"
-issue    = 32
-note     = "iteration_limit: unbounded vars (LP with default bounds)"
-
 [minlptests."nlp_cvx_102_014/primary"]
 category = "no_convergence"
 issue    = 32
@@ -74,16 +64,6 @@ category = "no_convergence"
 issue    = 32
 note     = "iteration_limit: unbounded vars (exp/log constraints)"
 
-[minlptests."nlp_cvx_108_010/primary"]
-category = "no_convergence"
-issue    = 32
-note     = "iteration_limit: nonlinear constraint intersection"
-
-[minlptests."nlp_cvx_108_013/primary"]
-category = "no_convergence"
-issue    = 32
-note     = "iteration_limit: nonlinear constraint intersection"
-
 [minlptests."nlp_cvx_202_012/primary"]
 category = "no_convergence"
 issue    = 32
@@ -93,11 +73,6 @@ note     = "iteration_limit: 3D paraboloid, unbounded vars"
 category = "no_convergence"
 issue    = 32
 note     = "iteration_limit: 3D paraboloid, unbounded vars"
-
-[minlptests."nlp_cvx_203_010/primary"]
-category = "no_convergence"
-issue    = 32
-note     = "iteration_limit: SOC + quadratic, unbounded vars"
 
 [minlptests."nlp_cvx_501_011_1d/primary"]
 category = "no_convergence"
@@ -217,40 +192,6 @@ note     = "iteration_limit: min/max smoothing with unbounded x"
 category = "numerical_error"
 issue    = 33
 note     = "false infeasible: feasible exp/log problem incorrectly declared infeasible"
-
-# ── Convex fast path not firing ──────────────────────────────────────────────
-# These problems solve correctly but the convex_fast_path flag is False,
-# failing the is_convex assertion in the test.
-
-[minlptests."nlp_cvx_001_011/primary"]
-category = "no_convergence"
-issue    = 34
-note     = "convex_fast_path=False: LP not detected as convex"
-
-[minlptests."nlp_cvx_108_011/primary"]
-category = "no_convergence"
-issue    = 34
-note     = "convex_fast_path=False: nonlinear constraint intersection"
-
-[minlptests."nlp_cvx_108_012/primary"]
-category = "no_convergence"
-issue    = 34
-note     = "convex_fast_path=False: nonlinear constraint intersection"
-
-[minlptests."nlp_cvx_204_010/primary"]
-category = "no_convergence"
-issue    = 34
-note     = "convex_fast_path=False: rotated SOC with x^2/z"
-
-[minlptests."nlp_cvx_205_010/primary"]
-category = "no_convergence"
-issue    = 34
-note     = "convex_fast_path=False: exponential cone"
-
-[minlptests."nlp_cvx_206_010/primary"]
-category = "no_convergence"
-issue    = 34
-note     = "convex_fast_path=False: power cone"
 
 # ── Infeasibility detection ──────────────────────────────────────────────────
 
