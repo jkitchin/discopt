@@ -3,6 +3,7 @@
 [![PyPI](https://img.shields.io/pypi/v/discopt)](https://pypi.org/project/discopt/)
 [![CI](https://github.com/jkitchin/discopt/actions/workflows/ci.yml/badge.svg)](https://github.com/jkitchin/discopt/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/jkitchin/discopt/graph/badge.svg?token=B3Y6LAtox9)](https://codecov.io/gh/jkitchin/discopt)
+[![DOI](https://zenodo.org/badge/1151864770.svg)](https://zenodo.org/badge/latestdoi/1151864770)
 
 [![discopt](https://github.com/jkitchin/discopt/blob/main/discopt.png?raw=true)](https://github.com/jkitchin/discopt/blob/main/discopt.png?raw=true)
 

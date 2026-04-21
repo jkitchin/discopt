@@ -88,6 +88,7 @@ directly; always re-export from org.
 
 - [ ] `pyproject.toml` -- bump `version = "X.Y.Z"`.
 - [ ] `python/discopt/__init__.py` -- bump `__version__ = "X.Y.Z"`.
+- [ ] `CITATION.cff` -- bump `version: X.Y.Z` to match the tag. (`.zenodo.json` carries no version; Zenodo derives it from the git tag when the GitHub release is archived.)
 - [ ] Grep for hard-coded version strings that might have been missed:
   `rg -n '\bA\.B\.C\b' --glob '!CHANGELOG.md' --glob '!docs/_build' --glob '!target'`
   (substitute the previous version `A.B.C`).

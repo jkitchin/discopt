@@ -1,0 +1,31 @@
+{
+  "title": "discopt: a hybrid MINLP solver combining Rust, JAX, and Python",
+  "description": "discopt is a hybrid Mixed-Integer Nonlinear Programming (MINLP) solver combining a Rust backend (LP solving, branch-and-bound tree management), JAX (automatic differentiation, NLP relaxations, GPU acceleration), and Python orchestration. It supports spatial branch-and-bound, McCormick relaxations, neural-network embedding, generalized disjunctive programming, and multiple NLP backends (pure-JAX IPM, ripopt, cyipopt).",
+  "upload_type": "software",
+  "license": "EPL-2.0",
+  "access_right": "open",
+  "creators": [
+    {
+      "name": "Kitchin, John R.",
+      "affiliation": "Carnegie Mellon University",
+      "orcid": "0000-0003-2625-9232"
+    }
+  ],
+  "keywords": [
+    "optimization",
+    "MINLP",
+    "branch-and-bound",
+    "nonlinear programming",
+    "JAX",
+    "Rust",
+    "mixed-integer",
+    "convex relaxation"
+  ],
+  "related_identifiers": [
+    {
+      "relation": "isSupplementTo",
+      "identifier": "https://github.com/jkitchin/discopt",
+      "resource_type": "software"
+    }
+  ]
+}
