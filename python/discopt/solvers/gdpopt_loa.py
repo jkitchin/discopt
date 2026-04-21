@@ -345,6 +345,14 @@ class _BoundsProxy:
     def _cons_fn(self):
         return self._eval._cons_fn
 
+    @property
+    def _source_constraints(self):
+        return self._eval._source_constraints
+
+    @property
+    def _constraint_flat_sizes(self):
+        return self._eval._constraint_flat_sizes
+
     def evaluate_objective(self, x):
         return self._eval.evaluate_objective(x)
 
