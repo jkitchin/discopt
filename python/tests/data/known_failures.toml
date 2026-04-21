@@ -74,16 +74,6 @@ category = "no_convergence"
 issue    = 32
 note     = "iteration_limit: unbounded vars (exp/log constraints)"
 
-[minlptests."nlp_cvx_108_010/primary"]
-category = "no_convergence"
-issue    = 32
-note     = "iteration_limit: nonlinear constraint intersection"
-
-[minlptests."nlp_cvx_108_013/primary"]
-category = "no_convergence"
-issue    = 32
-note     = "iteration_limit: nonlinear constraint intersection"
-
 [minlptests."nlp_cvx_202_012/primary"]
 category = "no_convergence"
 issue    = 32
@@ -93,11 +83,6 @@ note     = "iteration_limit: 3D paraboloid, unbounded vars"
 category = "no_convergence"
 issue    = 32
 note     = "iteration_limit: 3D paraboloid, unbounded vars"
-
-[minlptests."nlp_cvx_203_010/primary"]
-category = "no_convergence"
-issue    = 32
-note     = "iteration_limit: SOC + quadratic, unbounded vars"
 
 [minlptests."nlp_cvx_501_011_1d/primary"]
 category = "no_convergence"
@@ -221,36 +206,6 @@ note     = "false infeasible: feasible exp/log problem incorrectly declared infe
 # ── Convex fast path not firing ──────────────────────────────────────────────
 # These problems solve correctly but the convex_fast_path flag is False,
 # failing the is_convex assertion in the test.
-
-[minlptests."nlp_cvx_001_011/primary"]
-category = "no_convergence"
-issue    = 34
-note     = "convex_fast_path=False: LP not detected as convex"
-
-[minlptests."nlp_cvx_108_011/primary"]
-category = "no_convergence"
-issue    = 34
-note     = "convex_fast_path=False: nonlinear constraint intersection"
-
-[minlptests."nlp_cvx_108_012/primary"]
-category = "no_convergence"
-issue    = 34
-note     = "convex_fast_path=False: nonlinear constraint intersection"
-
-[minlptests."nlp_cvx_204_010/primary"]
-category = "no_convergence"
-issue    = 34
-note     = "convex_fast_path=False: rotated SOC with x^2/z"
-
-[minlptests."nlp_cvx_205_010/primary"]
-category = "no_convergence"
-issue    = 34
-note     = "convex_fast_path=False: exponential cone"
-
-[minlptests."nlp_cvx_206_010/primary"]
-category = "no_convergence"
-issue    = 34
-note     = "convex_fast_path=False: power cone"
 
 # ── Infeasibility detection ──────────────────────────────────────────────────
 

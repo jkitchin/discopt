@@ -7,7 +7,18 @@ nonconvex or integer problems correctly fall back to the standard solver.
 
 import discopt.modeling as dm
 import numpy as np
+import pytest
 from discopt.modeling.core import Model
+from test_minlptests import NLP_CVX_INSTANCES
+
+
+def _unwrap_minlptests_case(case):
+    return case.values[0] if hasattr(case, "values") else case
+
+
+MINLPTESTS_CVX_BY_ID = {
+    instance.problem_id: instance for instance in map(_unwrap_minlptests_case, NLP_CVX_INSTANCES)
+}
 
 
 class TestConvexFastPathDetection:
@@ -195,6 +206,58 @@ class TestConvexFastPathConstraints:
         result = m.solve()
         assert result.convex_fast_path is True
         assert result.status == "optimal"
+
+
+class TestTranslatedLPRegressions:
+    """Regression tests for translated convex LPs that previously missed the fast path."""
+
+    @pytest.mark.parametrize(
+        "problem_id",
+        [
+            "nlp_cvx_001_010",
+            "nlp_cvx_002_010",
+        ],
+    )
+    def test_translated_lp_uses_convex_fast_path(self, problem_id):
+        instance = MINLPTESTS_CVX_BY_ID[problem_id]
+        m = instance.build_fn()
+
+        result = m.solve(time_limit=60.0, gap_tolerance=1e-6)
+
+        assert result.status == "optimal"
+        assert result.convex_fast_path is True
+        assert result.objective is not None
+        tol = 1e-6 + 1e-4 * abs(instance.expected_obj)
+        assert abs(result.objective - instance.expected_obj) <= tol
+
+
+class TestTranslatedSpecialConvexRegressions:
+    """Regression tests for translated convex forms beyond LP/QP detection."""
+
+    @pytest.mark.parametrize(
+        "problem_id",
+        [
+            "nlp_cvx_108_010",
+            "nlp_cvx_108_011",
+            "nlp_cvx_108_012",
+            "nlp_cvx_108_013",
+            "nlp_cvx_203_010",
+            "nlp_cvx_204_010",
+            "nlp_cvx_205_010",
+            "nlp_cvx_206_010",
+        ],
+    )
+    def test_translated_special_convex_uses_fast_path(self, problem_id):
+        instance = MINLPTESTS_CVX_BY_ID[problem_id]
+        m = instance.build_fn()
+
+        result = m.solve(time_limit=60.0, gap_tolerance=1e-6)
+
+        assert result.status in ("optimal", "feasible")
+        assert result.convex_fast_path is True
+        assert result.objective is not None
+        tol = 1e-6 + 1e-4 * abs(instance.expected_obj)
+        assert abs(result.objective - instance.expected_obj) <= tol
 
     def test_nonlinear_equality_blocks_fast_path(self):
         """Nonlinear equality constraints are not convex."""

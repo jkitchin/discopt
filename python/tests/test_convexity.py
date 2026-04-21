@@ -1,6 +1,7 @@
 """Tests for convexity detection (Phase E1)."""
 
 import discopt.modeling as dm
+import pytest
 from discopt._jax.convexity import (
     Curvature,
     classify_constraint,
@@ -8,6 +9,16 @@ from discopt._jax.convexity import (
     classify_model,
 )
 from discopt.modeling.core import Constant, Model
+from test_minlptests import NLP_CVX_INSTANCES
+
+
+def _unwrap_minlptests_case(case):
+    return case.values[0] if hasattr(case, "values") else case
+
+
+MINLPTESTS_CVX_BY_ID = {
+    instance.problem_id: instance for instance in map(_unwrap_minlptests_case, NLP_CVX_INSTANCES)
+}
 
 
 class TestLeafExpressions:
@@ -237,6 +248,69 @@ class TestUnknownExpressions:
         x = m.continuous("x", lb=0, ub=10)
         y = m.continuous("y", lb=1, ub=10)
         assert classify_expr(x / y, m) == Curvature.UNKNOWN
+
+
+class TestSpecialConvexPatterns:
+    """Regression tests for convex patterns beyond basic DCP composition."""
+
+    def test_bilinear_upper_bound_is_not_treated_as_quadratic_over_linear(self):
+        m = Model("bilinear_upper_bound")
+        x = m.continuous("x", lb=0.1, ub=10)
+        y = m.continuous("y", lb=0.1, ub=10)
+        m.minimize(x + y)
+        m.subject_to(x * y <= 5)
+
+        is_convex, mask = classify_model(m)
+
+        assert is_convex is False
+        assert mask == [False]
+
+    def test_psd_quadratic_form_with_cross_term_is_convex(self):
+        instance = MINLPTESTS_CVX_BY_ID["nlp_cvx_108_010"]
+        m = instance.build_fn()
+        assert classify_constraint(m._constraints[0], m) is True
+
+    def test_norm_constraint_is_convex(self):
+        instance = MINLPTESTS_CVX_BY_ID["nlp_cvx_203_010"]
+        m = instance.build_fn()
+        assert classify_constraint(m._constraints[0], m) is True
+
+    def test_quadratic_over_linear_is_convex(self):
+        instance = MINLPTESTS_CVX_BY_ID["nlp_cvx_204_010"]
+        m = instance.build_fn()
+        assert classify_constraint(m._constraints[0], m) is True
+
+    def test_exp_perspective_is_convex(self):
+        instance = MINLPTESTS_CVX_BY_ID["nlp_cvx_205_010"]
+        m = instance.build_fn()
+        assert classify_constraint(m._constraints[0], m) is True
+        assert classify_constraint(m._constraints[1], m) is True
+
+    def test_weighted_geometric_mean_constraints_are_convex(self):
+        instance = MINLPTESTS_CVX_BY_ID["nlp_cvx_206_010"]
+        m = instance.build_fn()
+        assert classify_constraint(m._constraints[0], m) is True
+        assert classify_constraint(m._constraints[1], m) is True
+
+    @pytest.mark.parametrize(
+        "problem_id",
+        [
+            "nlp_cvx_108_010",
+            "nlp_cvx_108_011",
+            "nlp_cvx_108_012",
+            "nlp_cvx_108_013",
+            "nlp_cvx_203_010",
+            "nlp_cvx_204_010",
+            "nlp_cvx_205_010",
+            "nlp_cvx_206_010",
+        ],
+    )
+    def test_translated_convex_cases_are_classified_convex(self, problem_id):
+        instance = MINLPTESTS_CVX_BY_ID[problem_id]
+        m = instance.build_fn()
+        is_convex, mask = classify_model(m)
+        assert is_convex is True
+        assert all(mask)
 
 
 class TestConstraintConvexity:

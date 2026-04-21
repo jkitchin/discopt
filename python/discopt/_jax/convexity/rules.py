@@ -60,6 +60,10 @@ from typing import Optional
 
 import numpy as np
 
+from discopt._jax.problem_classifier import (
+    _extract_linear_coefficients,
+    _extract_quadratic_coefficients,
+)
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -137,6 +141,377 @@ def _refine_sign(
     coeffs, const = aff
     lo, hi = ctx.affine_range(coeffs, const)
     return sign_from_bounds(lo, hi)
+
+
+def _is_nonneg_domain(expr: Expression, model: Optional[Model], cache: dict) -> bool:
+    """True when ``expr`` is provably nonnegative on the current box."""
+    sign = classify_expr_info(expr, model, cache).sign
+    if model is not None and not is_nonneg(sign):
+        sign = _refine_sign(expr, model, cache, sign)
+    return is_nonneg(sign)
+
+
+def _has_positive_lower_bound(expr: Expression, model: Optional[Model], cache: dict) -> bool:
+    """True when ``expr`` is provably strictly positive on the current box."""
+    sign = classify_expr_info(expr, model, cache).sign
+    if model is not None and not is_pos(sign):
+        sign = _refine_sign(expr, model, cache, sign)
+    return is_pos(sign)
+
+
+def _same_expr(lhs: Expression, rhs: Expression) -> bool:
+    """Best-effort structural equality for small pattern checks."""
+    if lhs is rhs:
+        return True
+    if type(lhs) is not type(rhs):
+        return False
+
+    if isinstance(lhs, Constant):
+        return bool(np.array_equal(lhs.value, rhs.value))
+    if isinstance(lhs, Parameter):
+        return lhs.name == rhs.name and bool(np.array_equal(lhs.value, rhs.value))
+    if isinstance(lhs, Variable):
+        return lhs.name == rhs.name
+    if isinstance(lhs, IndexExpression):
+        return lhs.index == rhs.index and _same_expr(lhs.base, rhs.base)
+    if isinstance(lhs, UnaryOp):
+        return lhs.op == rhs.op and _same_expr(lhs.operand, rhs.operand)
+    if isinstance(lhs, BinaryOp):
+        return (
+            lhs.op == rhs.op
+            and _same_expr(lhs.left, rhs.left)
+            and _same_expr(lhs.right, rhs.right)
+        )
+    if isinstance(lhs, FunctionCall):
+        return lhs.func_name == rhs.func_name and len(lhs.args) == len(rhs.args) and all(
+            _same_expr(a, b) for a, b in zip(lhs.args, rhs.args)
+        )
+    if isinstance(lhs, SumExpression):
+        return _same_expr(lhs.operand, rhs.operand)
+    if isinstance(lhs, SumOverExpression):
+        return len(lhs.terms) == len(rhs.terms) and all(
+            _same_expr(a, b) for a, b in zip(lhs.terms, rhs.terms)
+        )
+    return False
+
+
+def _total_scalar_variables(model: Model) -> int:
+    return sum(int(v.size) for v in model._variables)
+
+
+def _scalar_var_offset(model: Model, target: Variable) -> Optional[int]:
+    offset = 0
+    for var in model._variables:
+        if var is target:
+            return offset
+        offset += int(var.size)
+    return None
+
+
+def _quadratic_data(
+    expr: Expression,
+    model: Model,
+) -> Optional[tuple[np.ndarray, np.ndarray, float]]:
+    """Extract scalar quadratic data or return ``None``."""
+    try:
+        Q, c, const = _extract_quadratic_coefficients(expr, model, _total_scalar_variables(model))
+    except Exception:
+        return None
+    return 0.5 * (Q + Q.T), c, float(const)
+
+
+def _is_homogeneous_psd_quadratic(expr: Expression, model: Model) -> bool:
+    """Check if ``expr`` is ``x'Qx`` with PSD ``Q`` and no affine offset."""
+    data = _quadratic_data(expr, model)
+    if data is None:
+        return False
+    Q, c, const = data
+    if not np.allclose(c, 0.0, atol=1e-10):
+        return False
+    if abs(const) > 1e-10:
+        return False
+    eigvals = np.linalg.eigvalsh(Q)
+    return float(np.min(eigvals)) >= -1e-10
+
+
+def _flatten_product(expr: Expression, out: list[Expression]) -> None:
+    if isinstance(expr, BinaryOp) and expr.op == "*":
+        _flatten_product(expr.left, out)
+        _flatten_product(expr.right, out)
+        return
+    out.append(expr)
+
+
+def _extract_power_factor(expr: Expression) -> Optional[tuple[Expression, float]]:
+    if isinstance(expr, BinaryOp) and expr.op == "**":
+        if isinstance(expr.right, (Constant, Parameter)):
+            exponent_val = np.asarray(expr.right.value)
+            if exponent_val.ndim == 0:
+                return expr.left, float(exponent_val)
+        return None
+    return expr, 1.0
+
+
+def _flatten_sum_terms(
+    expr: Expression, scale: float, out: list[tuple[float, Expression]]
+) -> None:
+    if isinstance(expr, BinaryOp) and expr.op == "+":
+        _flatten_sum_terms(expr.left, scale, out)
+        _flatten_sum_terms(expr.right, scale, out)
+        return
+    if isinstance(expr, BinaryOp) and expr.op == "-":
+        _flatten_sum_terms(expr.left, scale, out)
+        _flatten_sum_terms(expr.right, -scale, out)
+        return
+    if isinstance(expr, UnaryOp) and expr.op == "neg":
+        _flatten_sum_terms(expr.operand, -scale, out)
+        return
+    out.append((scale, expr))
+
+
+def _contains_var(expr: Expression, target: Variable) -> bool:
+    if isinstance(expr, Variable):
+        return expr is target or expr.name == target.name
+    if isinstance(expr, IndexExpression):
+        return isinstance(expr.base, Variable) and (
+            expr.base is target or expr.base.name == target.name
+        )
+    if isinstance(expr, BinaryOp):
+        return _contains_var(expr.left, target) or _contains_var(expr.right, target)
+    if isinstance(expr, UnaryOp):
+        return _contains_var(expr.operand, target)
+    if isinstance(expr, FunctionCall):
+        return any(_contains_var(arg, target) for arg in expr.args)
+    if isinstance(expr, SumExpression):
+        return _contains_var(expr.operand, target)
+    if isinstance(expr, SumOverExpression):
+        return any(_contains_var(term, target) for term in expr.terms)
+    return False
+
+
+def _constant_expr(value: float) -> Constant:
+    return Constant(np.array(float(value), dtype=np.float64))
+
+
+def _add_expr(lhs: Optional[Expression], rhs: Expression) -> Expression:
+    if lhs is None:
+        return rhs
+    return BinaryOp("+", lhs, rhs)
+
+
+def _scale_expr(expr: Expression, scale: float) -> Expression:
+    if abs(scale - 1.0) <= 1e-12:
+        return expr
+    if abs(scale + 1.0) <= 1e-12:
+        return UnaryOp("neg", expr)
+    return BinaryOp("*", _constant_expr(scale), expr)
+
+
+def _extract_linear_factor(expr: Expression, target: Variable) -> Optional[Expression]:
+    if isinstance(expr, Variable) and (expr is target or expr.name == target.name):
+        return _constant_expr(1.0)
+    if isinstance(expr, IndexExpression):
+        if isinstance(expr.base, Variable) and (
+            expr.base is target or expr.base.name == target.name
+        ):
+            return _constant_expr(1.0)
+        return None
+    if isinstance(expr, UnaryOp) and expr.op == "neg":
+        inner = _extract_linear_factor(expr.operand, target)
+        return None if inner is None else UnaryOp("neg", inner)
+    if isinstance(expr, BinaryOp) and expr.op == "*":
+        left_has = _contains_var(expr.left, target)
+        right_has = _contains_var(expr.right, target)
+        if left_has and right_has:
+            return None
+        if left_has:
+            inner = _extract_linear_factor(expr.left, target)
+            return None if inner is None else BinaryOp("*", inner, expr.right)
+        if right_has:
+            inner = _extract_linear_factor(expr.right, target)
+            return None if inner is None else BinaryOp("*", expr.left, inner)
+    return None
+
+
+def _affine_range_1d(alpha: float, beta: float, lb: float, ub: float) -> tuple[float, float]:
+    if alpha >= 0.0:
+        lo = alpha * lb + beta if np.isfinite(lb) else (-np.inf if alpha > 0.0 else beta)
+        hi = alpha * ub + beta if np.isfinite(ub) else (np.inf if alpha > 0.0 else beta)
+    else:
+        lo = alpha * ub + beta if np.isfinite(ub) else -np.inf
+        hi = alpha * lb + beta if np.isfinite(lb) else np.inf
+    return float(lo), float(hi)
+
+
+def _classify_fractional_epigraph_constraint(
+    constraint: Constraint,
+    model: Optional[Model],
+) -> Optional[bool]:
+    """Detect scalar epigraph/hypograph constraints for quadratic-over-affine forms."""
+    if model is None or constraint.sense != "<=":
+        return None
+
+    scalar_targets = [v for v in model._variables if v.size == 1]
+    if len(scalar_targets) != 2:
+        return None
+
+    n_vars = _total_scalar_variables(model)
+    for target in scalar_targets:
+        terms: list[tuple[float, Expression]] = []
+        _flatten_sum_terms(constraint.body, 1.0, terms)
+
+        coeff_expr: Optional[Expression] = None
+        remainder_expr: Optional[Expression] = None
+        valid = True
+        for scale_factor, term in terms:
+            factor = _extract_linear_factor(term, target)
+            if factor is None:
+                if _contains_var(term, target):
+                    valid = False
+                    break
+                remainder_expr = _add_expr(remainder_expr, _scale_expr(term, scale_factor))
+                continue
+            coeff_expr = _add_expr(coeff_expr, _scale_expr(factor, scale_factor))
+
+        if not valid or coeff_expr is None or remainder_expr is None:
+            continue
+
+        try:
+            coeff_vec, coeff_const = _extract_linear_coefficients(coeff_expr, model, n_vars)
+        except Exception:
+            continue
+
+        nonzero_coeff = np.flatnonzero(np.abs(coeff_vec) > 1e-10)
+        target_idx = _scalar_var_offset(model, target)
+        if target_idx is None or target_idx in nonzero_coeff or len(nonzero_coeff) != 1:
+            continue
+        other_idx = int(nonzero_coeff[0])
+
+        data = _quadratic_data(remainder_expr, model)
+        if data is None:
+            continue
+        Q, c, const = data
+        remainder_support = set(np.flatnonzero(np.abs(np.diag(Q)) > 1e-10))
+        remainder_support |= set(np.flatnonzero(np.abs(c) > 1e-10))
+        if remainder_support - {other_idx}:
+            continue
+        mask = np.arange(Q.shape[0]) != other_idx
+        if np.any(np.abs(Q[mask, :]) > 1e-10):
+            continue
+        if np.any(np.abs(Q[:, mask]) > 1e-10):
+            continue
+
+        other_var = None
+        running = 0
+        for var in model._variables:
+            if running == other_idx and var.size == 1:
+                other_var = var
+                break
+            running += var.size
+        if other_var is None:
+            continue
+
+        a = 0.5 * float(Q[other_idx, other_idx])
+        b = float(c[other_idx])
+        c0 = float(const)
+        d = float(coeff_vec[other_idx])
+        e = float(coeff_const)
+        if abs(a) <= 1e-10:
+            continue
+
+        lb = float(other_var.lb)
+        ub = float(other_var.ub)
+        coeff_lo, coeff_hi = _affine_range_1d(d, e, lb, ub)
+        curvature_numerator = a * e * e - b * d * e + c0 * d * d
+
+        if coeff_hi < -1e-10:
+            return curvature_numerator >= -1e-10
+        if coeff_lo > 1e-10:
+            return curvature_numerator <= 1e-10
+
+    return None
+
+
+def _classify_product_special(
+    expr: BinaryOp,
+    model: Optional[Model],
+    cache: dict,
+) -> Optional[ExprInfo]:
+    if model is None:
+        return None
+
+    for scale_expr, exp_expr in ((expr.left, expr.right), (expr.right, expr.left)):
+        scale_info = classify_expr_info(scale_expr, model, cache)
+        if (
+            scale_info.curvature == Curvature.AFFINE
+            and _has_positive_lower_bound(scale_expr, model, cache)
+            and isinstance(exp_expr, FunctionCall)
+            and exp_expr.func_name == "exp"
+            and len(exp_expr.args) == 1
+        ):
+            inner = exp_expr.args[0]
+            if isinstance(inner, BinaryOp) and inner.op == "/":
+                numerator = classify_expr_info(inner.left, model, cache)
+                denominator = classify_expr_info(inner.right, model, cache)
+                if (
+                    _same_expr(scale_expr, inner.right)
+                    and numerator.curvature == Curvature.AFFINE
+                    and denominator.curvature == Curvature.AFFINE
+                ):
+                    return ExprInfo(Curvature.CONVEX, Sign.POS)
+
+    factors: list[Expression] = []
+    _flatten_product(expr, factors)
+    if len(factors) < 2:
+        return None
+
+    parsed: list[tuple[Expression, float]] = []
+    for factor in factors:
+        extracted = _extract_power_factor(factor)
+        if extracted is None:
+            return None
+        base, exponent = extracted
+        if exponent < -1e-10 or exponent > 1.0 + 1e-10:
+            return None
+        if classify_expr_info(base, model, cache).curvature != Curvature.AFFINE:
+            return None
+        if not _is_nonneg_domain(base, model, cache):
+            return None
+        parsed.append((base, exponent))
+
+    if abs(sum(exponent for _, exponent in parsed) - 1.0) <= 1e-10:
+        return ExprInfo(Curvature.CONCAVE, Sign.NONNEG)
+    return None
+
+
+def _classify_division_special(
+    expr: BinaryOp,
+    model: Optional[Model],
+    cache: dict,
+) -> Optional[ExprInfo]:
+    if model is None:
+        return None
+    if classify_expr_info(expr.right, model, cache).curvature != Curvature.AFFINE:
+        return None
+    if not _has_positive_lower_bound(expr.right, model, cache):
+        return None
+    if _is_homogeneous_psd_quadratic(expr.left, model):
+        return ExprInfo(Curvature.CONVEX, Sign.NONNEG)
+    return None
+
+
+def _classify_function_special(
+    expr: FunctionCall,
+    model: Optional[Model],
+    cache: dict,
+) -> Optional[ExprInfo]:
+    del cache
+    if model is None:
+        return None
+    if expr.func_name == "sqrt" and len(expr.args) == 1:
+        if _is_homogeneous_psd_quadratic(expr.args[0], model):
+            return ExprInfo(Curvature.CONVEX, Sign.NONNEG)
+    return None
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -309,7 +684,7 @@ def _classify_binary(expr: BinaryOp, model: Optional[Model], cache: dict) -> Exp
         )
 
     if expr.op == "*":
-        return _classify_product(expr, left, right)
+        return _classify_product(expr, left, right, model, cache)
 
     if expr.op == "/":
         return _classify_division(expr, left, right, model, cache)
@@ -320,7 +695,13 @@ def _classify_binary(expr: BinaryOp, model: Optional[Model], cache: dict) -> Exp
     return ExprInfo(Curvature.UNKNOWN, Sign.UNKNOWN)
 
 
-def _classify_product(expr: BinaryOp, left: ExprInfo, right: ExprInfo) -> ExprInfo:
+def _classify_product(
+    expr: BinaryOp,
+    left: ExprInfo,
+    right: ExprInfo,
+    model: Optional[Model],
+    cache: dict,
+) -> ExprInfo:
     """Classify ``a * b`` with sign-aware curvature."""
     prod_sign = sign_mul(left.sign, right.sign)
 
@@ -333,6 +714,10 @@ def _classify_product(expr: BinaryOp, left: ExprInfo, right: ExprInfo) -> ExprIn
         val = _scalar_value(expr.right)
         s = 0 if val == 0 else (1 if val > 0 else -1)
         return ExprInfo(scale(left.curvature, s), prod_sign)
+
+    special = _classify_product_special(expr, model, cache)
+    if special is not None:
+        return special
 
     # Bilinear / general product: curvature is UNKNOWN even when both
     # factors share a sign (consider x*y on the positive orthant, whose
@@ -356,6 +741,10 @@ def _classify_division(
         s = 1 if val > 0 else -1
         inv_sign = Sign.POS if val > 0 else Sign.NEG
         return ExprInfo(scale(left.curvature, s), sign_mul(left.sign, inv_sign))
+
+    special = _classify_division_special(expr, model, cache)
+    if special is not None:
+        return special
 
     # Reciprocal with constant numerator and strictly-signed denominator.
     # 1/u is convex + nonincreasing on u>0; concave + nonincreasing on
@@ -487,6 +876,10 @@ def _classify_function_call(expr: FunctionCall, model: Optional[Model], cache: d
         return _classify_nary_max(expr, model, cache)
     if name == "min" and len(expr.args) >= 2:
         return _classify_nary_min(expr, model, cache)
+
+    special = _classify_function_special(expr, model, cache)
+    if special is not None:
+        return special
 
     if len(expr.args) != 1:
         return ExprInfo(Curvature.UNKNOWN, Sign.UNKNOWN)
@@ -620,7 +1013,16 @@ def classify_constraint(
 
     syntactic = _constraint_convex_from_curvature(curv, constraint.sense)
     if syntactic or not use_certificate or model is None:
+        if syntactic:
+            return syntactic
+        special = _classify_fractional_epigraph_constraint(constraint, model)
+        if special is not None:
+            return special
         return syntactic
+
+    special = _classify_fractional_epigraph_constraint(constraint, model)
+    if special is not None:
+        return special
 
     # Fall back to the sound numerical certificate.
     try:
