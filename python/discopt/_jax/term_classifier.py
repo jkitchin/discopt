@@ -237,23 +237,23 @@ def classify_nonlinear_terms(model: Model) -> NonlinearTerms:
                 if factors is not None:
                     unique_vars = list(dict.fromkeys(factors))  # preserve order, remove dups
                     n_unique = len(unique_vars)
+                    counts = {v: factors.count(v) for v in unique_vars}
                     if n_unique == 1:
                         # x * x = x^2 → monomial
-                        _record_monomial(unique_vars[0], factors.count(unique_vars[0]))
+                        _record_monomial(unique_vars[0], counts[unique_vars[0]])
                         return
-                    elif n_unique == 2:
-                        # Check if any var appears twice → monomial
-                        counts = {v: factors.count(v) for v in unique_vars}
-                        if any(c >= 2 for c in counts.values()):
-                            for v, c in counts.items():
-                                if c >= 2:
-                                    _record_monomial(v, c)
-                            # The other var is a separate multiplier — treat whole as bilinear-like
-                            # e.g. x^2 * y: still bilinear between (x_squared, y)
-                            # For simplicity, record as bilinear
-                            _record_bilinear(unique_vars[0], unique_vars[1])
-                        else:
-                            _record_bilinear(unique_vars[0], unique_vars[1])
+                    if any(c >= 2 for c in counts.values()):
+                        # Mixed repeated-factor products such as x*x*y are not
+                        # represented correctly by the current bilinear/trilinear
+                        # relaxation pipeline. Keep the whole product in general_nl
+                        # and recurse so nested pure monomials like x*x are still
+                        # discovered on their own subexpressions.
+                        result.general_nl.append(expr)
+                        _classify_node(expr.left)
+                        _classify_node(expr.right)
+                        return
+                    if n_unique == 2:
+                        _record_bilinear(unique_vars[0], unique_vars[1])
                         return
                     elif n_unique == 3:
                         _record_trilinear(unique_vars[0], unique_vars[1], unique_vars[2])

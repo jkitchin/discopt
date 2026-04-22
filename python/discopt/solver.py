@@ -1143,6 +1143,7 @@ def solve_model(
     lazy_constraints=None,
     incumbent_callback=None,
     node_callback=None,
+    solver: Optional[str] = None,
     use_highs_milp: bool = True,
     **kwargs,
 ) -> SolveResult:
@@ -1208,6 +1209,9 @@ def solve_model(
     gdp_method : str, default "big-m"
         Reformulation method for disjunctive constraints:
         ``"big-m"`` (default) or ``"hull"`` (convex hull).
+    solver : str or None, default None
+        Optional global-solver selector. Use ``"amp"`` to dispatch to
+        Adaptive Multivariate Partitioning instead of branch-and-bound.
 
     Returns
     -------
@@ -1232,7 +1236,7 @@ def solve_model(
         )
 
     # --- AMP (Adaptive Multivariate Partitioning) global solver ---
-    _solver = kwargs.pop("solver", None)
+    _solver = solver if solver is not None else kwargs.pop("solver", None)
     if _solver == "amp":
         from discopt.solvers.amp import solve_amp
 

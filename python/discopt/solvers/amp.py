@@ -24,6 +24,8 @@ from __future__ import annotations
 import itertools
 import logging
 import time
+from functools import lru_cache
+from importlib.util import find_spec
 from typing import Callable, Optional
 
 import numpy as np
@@ -41,6 +43,12 @@ _DEFAULT_MAX_OA_CUTS = 128
 # ---------------------------------------------------------------------------
 
 
+@lru_cache(maxsize=1)
+def _has_cyipopt() -> bool:
+    """Return True when cyipopt is importable in the active environment."""
+    return find_spec("cyipopt") is not None
+
+
 def _build_x_dict(x_flat: np.ndarray, model: Model) -> dict:
     """Convert flat solution vector to {var_name: array} dict."""
     result = {}
@@ -56,32 +64,47 @@ def _extract_orig_solution(x_milp: np.ndarray, n_orig: int) -> np.ndarray:
     return x_milp[:n_orig]
 
 
+def _remaining_wall_time(deadline: Optional[float]) -> Optional[float]:
+    """Return seconds remaining until a deadline, or None when uncapped."""
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.perf_counter())
+
+
 def _solve_nlp_subproblem(
     evaluator,
     x0: np.ndarray,
     lb: np.ndarray,
     ub: np.ndarray,
     nlp_solver: str = "ipm",
+    time_limit: Optional[float] = None,
 ) -> tuple[Optional[np.ndarray], Optional[float]]:
     """Solve the NLP relaxation with given bounds.
 
     Returns (x_opt, obj_val) or (None, None) on failure.
     """
+    if time_limit is not None and time_limit <= 0.0:
+        return None, None
     try:
         lb_clip = np.clip(lb, -1e8, 1e8)
         ub_clip = np.clip(ub, -1e8, 1e8)
         x0_clipped = np.clip(x0, lb_clip, ub_clip)
+        solver_options = {"print_level": 0, "max_iter": 300}
+        if time_limit is not None:
+            solver_options["max_wall_time"] = max(time_limit, 0.05)
 
-        if nlp_solver == "ipm" and hasattr(evaluator, "_obj_fn"):
+        prefer_ipopt = nlp_solver == "ipm" and time_limit is not None and _has_cyipopt()
+
+        if nlp_solver == "ipm" and hasattr(evaluator, "_obj_fn") and not prefer_ipopt:
             from discopt._jax.ipm import solve_nlp_ipm
 
-            result = solve_nlp_ipm(
-                evaluator, x0_clipped, options={"print_level": 0, "max_iter": 300}
-            )
+            result = solve_nlp_ipm(evaluator, x0_clipped, options=solver_options)
         else:
             from discopt.solvers.nlp_ipopt import solve_nlp
 
-            result = solve_nlp(evaluator, x0_clipped, options={"print_level": 0, "max_iter": 300})
+            if time_limit is not None:
+                solver_options["max_cpu_time"] = max(time_limit, 0.05)
+            result = solve_nlp(evaluator, x0_clipped, options=solver_options)
 
         from discopt.solvers import SolveStatus
 
@@ -220,20 +243,34 @@ def _solve_best_nlp_candidate(
     constraint_lb: np.ndarray,
     constraint_ub: np.ndarray,
     nlp_solver: str,
+    deadline: Optional[float] = None,
 ) -> tuple[Optional[np.ndarray], Optional[float]]:
     """Return the best feasible NLP candidate across the integer-rounding set."""
     best_x: Optional[np.ndarray] = None
     best_obj: Optional[float] = None
 
     for x0_nlp in _integer_rounding_candidates(x0, model):
+        remaining = _remaining_wall_time(deadline)
+        if remaining is not None and remaining <= 0.0:
+            break
         nlp_lb, nlp_ub = _build_fixed_integer_bounds(x0_nlp, model, flat_lb, flat_ub)
-        cand_x, cand_obj = _solve_nlp_subproblem(
-            evaluator,
-            x0_nlp,
-            nlp_lb,
-            nlp_ub,
-            nlp_solver,
-        )
+        if remaining is None:
+            cand_x, cand_obj = _solve_nlp_subproblem(
+                evaluator,
+                x0_nlp,
+                nlp_lb,
+                nlp_ub,
+                nlp_solver,
+            )
+        else:
+            cand_x, cand_obj = _solve_nlp_subproblem(
+                evaluator,
+                x0_nlp,
+                nlp_lb,
+                nlp_ub,
+                nlp_solver,
+                time_limit=remaining,
+            )
         if cand_x is None or cand_obj is None:
             continue
         if not _check_integer_feasible(cand_x, model):
@@ -513,6 +550,7 @@ def solve_amp(
     flat_lb, flat_ub = flat_variable_bounds(model)
     evaluator = NLPEvaluator(model)
     constraint_lb, constraint_ub = _infer_constraint_bounds(model)
+    deadline = t_start + time_limit
 
     # ── Classify nonlinear terms ─────────────────────────────────────────────
     terms = classify_nonlinear_terms(model)
@@ -641,6 +679,7 @@ def solve_amp(
             constraint_lb,
             constraint_ub,
             nlp_solver,
+            deadline=deadline,
         )
 
         if x_nlp is not None and obj_nlp_min is not None:
