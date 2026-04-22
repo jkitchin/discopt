@@ -26,7 +26,7 @@ import logging
 import time
 from functools import lru_cache
 from importlib.util import find_spec
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 
@@ -64,6 +64,37 @@ def _extract_orig_solution(x_milp: np.ndarray, n_orig: int) -> np.ndarray:
     return x_milp[:n_orig]
 
 
+def _snapshot_variable_bounds(model: Model) -> list[tuple[Any, np.ndarray, np.ndarray]]:
+    """Capture model variable bounds so temporary overrides can be restored."""
+    saved_bounds: list[tuple[Any, np.ndarray, np.ndarray]] = []
+    for var in model._variables:
+        saved_bounds.append(
+            (
+                var,
+                np.array(var.lb, dtype=np.float64, copy=True),
+                np.array(var.ub, dtype=np.float64, copy=True),
+            )
+        )
+    return saved_bounds
+
+
+def _restore_variable_bounds(saved_bounds: list[tuple[Any, np.ndarray, np.ndarray]]) -> None:
+    """Restore variable bounds previously returned by _snapshot_variable_bounds()."""
+    for var, orig_lb, orig_ub in saved_bounds:
+        var.lb = orig_lb
+        var.ub = orig_ub
+
+
+def _apply_flat_bounds_to_model(model: Model, lb: np.ndarray, ub: np.ndarray) -> None:
+    """Apply flat bound arrays to model variables in-place."""
+    offset = 0
+    for var in model._variables:
+        size = var.size
+        var.lb = np.asarray(lb[offset : offset + size], dtype=np.float64).reshape(var.shape).copy()
+        var.ub = np.asarray(ub[offset : offset + size], dtype=np.float64).reshape(var.shape).copy()
+        offset += size
+
+
 def _remaining_wall_time(deadline: Optional[float]) -> Optional[float]:
     """Return seconds remaining until a deadline, or None when uncapped."""
     if deadline is None:
@@ -94,17 +125,23 @@ def _solve_nlp_subproblem(
             solver_options["max_wall_time"] = max(time_limit, 0.05)
 
         prefer_ipopt = nlp_solver == "ipm" and time_limit is not None and _has_cyipopt()
+        model = evaluator._model
+        saved_bounds = _snapshot_variable_bounds(model)
+        _apply_flat_bounds_to_model(model, lb, ub)
 
-        if nlp_solver == "ipm" and hasattr(evaluator, "_obj_fn") and not prefer_ipopt:
-            from discopt._jax.ipm import solve_nlp_ipm
+        try:
+            if nlp_solver == "ipm" and hasattr(evaluator, "_obj_fn") and not prefer_ipopt:
+                from discopt._jax.ipm import solve_nlp_ipm
 
-            result = solve_nlp_ipm(evaluator, x0_clipped, options=solver_options)
-        else:
-            from discopt.solvers.nlp_ipopt import solve_nlp
+                result = solve_nlp_ipm(evaluator, x0_clipped, options=solver_options)
+            else:
+                from discopt.solvers.nlp_ipopt import solve_nlp
 
-            if time_limit is not None:
-                solver_options["max_cpu_time"] = max(time_limit, 0.05)
-            result = solve_nlp(evaluator, x0_clipped, options=solver_options)
+                if time_limit is not None:
+                    solver_options["max_cpu_time"] = max(time_limit, 0.05)
+                result = solve_nlp(evaluator, x0_clipped, options=solver_options)
+        finally:
+            _restore_variable_bounds(saved_bounds)
 
         from discopt.solvers import SolveStatus
 

@@ -1286,6 +1286,56 @@ class TestCurrentCodeWeaknesses:
         assert float(best_x[0]) == pytest.approx(1.0)
         assert best_obj == pytest.approx(1.5)
 
+    def test_nlp_subproblem_applies_and_restores_fixed_bounds(self, monkeypatch):
+        """AMP must solve the NLP at the fixed candidate bounds, then restore them."""
+        import discopt._jax.ipm as ipm_mod
+        from discopt.solvers import NLPResult, SolveStatus
+        from discopt.solvers import amp as amp_mod
+
+        m = Model("fixed_nlp_bounds")
+        x = m.continuous("x", lb=0.0, ub=2.0)
+        y = m.binary("y")
+        m.subject_to(x >= y)
+        m.minimize(x + y)
+
+        class FakeEvaluator:
+            def __init__(self, model):
+                self._model = model
+                self._obj_fn = object()
+
+            def evaluate_objective(self, x_flat):
+                return float(np.sum(x_flat))
+
+        def fake_solve_nlp_ipm(evaluator, x0, options):
+            del x0, options
+            x_var, y_var = evaluator._model._variables
+            assert np.asarray(x_var.lb).item() == pytest.approx(0.25)
+            assert np.asarray(x_var.ub).item() == pytest.approx(0.75)
+            assert np.asarray(y_var.lb).item() == pytest.approx(1.0)
+            assert np.asarray(y_var.ub).item() == pytest.approx(1.0)
+            return NLPResult(
+                status=SolveStatus.OPTIMAL,
+                x=np.array([0.5, 1.0], dtype=np.float64),
+            )
+
+        monkeypatch.setattr(ipm_mod, "solve_nlp_ipm", fake_solve_nlp_ipm)
+
+        x_opt, obj = amp_mod._solve_nlp_subproblem(
+            FakeEvaluator(m),
+            x0=np.array([1.2, 0.2], dtype=np.float64),
+            lb=np.array([0.25, 1.0], dtype=np.float64),
+            ub=np.array([0.75, 1.0], dtype=np.float64),
+            nlp_solver="ipm",
+        )
+
+        assert x_opt is not None
+        assert np.allclose(x_opt, np.array([0.5, 1.0], dtype=np.float64))
+        assert obj == pytest.approx(1.5)
+        assert np.asarray(x.lb).item() == pytest.approx(0.0)
+        assert np.asarray(x.ub).item() == pytest.approx(2.0)
+        assert np.asarray(y.lb).item() == pytest.approx(0.0)
+        assert np.asarray(y.ub).item() == pytest.approx(1.0)
+
     def test_best_nlp_candidate_rejects_noninteger_nlp_return(self, monkeypatch):
         """NLP candidates that violate integrality should be discarded."""
         from discopt.solvers import amp as amp_mod
