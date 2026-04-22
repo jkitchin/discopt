@@ -89,7 +89,7 @@ def _solve_nlp_subproblem(
         lb_clip = np.clip(lb, -1e8, 1e8)
         ub_clip = np.clip(ub, -1e8, 1e8)
         x0_clipped = np.clip(x0, lb_clip, ub_clip)
-        solver_options = {"print_level": 0, "max_iter": 300}
+        solver_options: dict[str, float | int] = {"print_level": 0, "max_iter": 300}
         if time_limit is not None:
             solver_options["max_wall_time"] = max(time_limit, 0.05)
 
