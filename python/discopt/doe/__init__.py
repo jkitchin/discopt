@@ -23,6 +23,16 @@ from discopt.doe.design import (
     batch_optimal_experiment,
     optimal_experiment,
 )
+from discopt.doe.discrimination import (
+    DiscriminationCriterion,
+    DiscriminationDesignResult,
+    discriminate_compound,
+    discriminate_design,
+)
+from discopt.doe.discrimination_sequential import (
+    DiscriminationRound,
+    sequential_discrimination,
+)
 from discopt.doe.exploration import (
     ExplorationResult,
     explore_design_space,
@@ -32,6 +42,12 @@ from discopt.doe.fim import (
     IdentifiabilityResult,
     check_identifiability,
     compute_fim,
+)
+from discopt.doe.selection import (
+    ModelSelectionResult,
+    likelihood_ratio_test,
+    model_selection,
+    vuong_test,
 )
 from discopt.doe.sequential import (
     DoERound,
@@ -43,14 +59,24 @@ __all__ = [
     "BatchStrategy",
     "DesignCriterion",
     "DesignResult",
+    "DiscriminationCriterion",
+    "DiscriminationDesignResult",
+    "DiscriminationRound",
+    "DoERound",
     "ExplorationResult",
     "FIMResult",
     "IdentifiabilityResult",
+    "ModelSelectionResult",
     "batch_optimal_experiment",
     "check_identifiability",
     "compute_fim",
+    "discriminate_compound",
+    "discriminate_design",
     "explore_design_space",
+    "likelihood_ratio_test",
+    "model_selection",
     "optimal_experiment",
-    "DoERound",
+    "sequential_discrimination",
     "sequential_doe",
+    "vuong_test",
 ]
