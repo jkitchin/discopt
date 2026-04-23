@@ -54,6 +54,7 @@ parts:
       - file: notebooks/tutorial_estimation
       - file: notebooks/tutorial_doe
       - file: notebooks/tutorial_batch_doe
+      - file: notebooks/identifiability-estimability
       - file: notebooks/doe-implementation-plan
   - caption: API Reference
     chapters:

@@ -244,6 +244,7 @@ def estimate_parameters(
     data: dict[str, Union[float, np.ndarray]],
     *,
     initial_guess: dict[str, float] | None = None,
+    fixed_parameters: dict[str, float] | None = None,
     solver_options: dict | None = None,
 ) -> EstimationResult:
     """Estimate unknown parameters from experimental data.
@@ -253,6 +254,10 @@ def estimate_parameters(
     .. math::
 
         \\min_{\\theta} \\sum_i \\left(\\frac{y_i^{obs} - y_i^{model}(\\theta)}{\\sigma_i}\\right)^2
+
+    The returned ``objective`` is this sum, which equals the *deviance*
+    (2 x negative log-likelihood, up to a constant) under Gaussian noise.
+    Profile likelihood and chi-square-based tests use this convention.
 
     Parameters
     ----------
@@ -264,6 +269,13 @@ def estimate_parameters(
     initial_guess : dict[str, float], optional
         Starting values for unknown parameters. Passed as kwargs to
         ``experiment.create_model()``.
+    fixed_parameters : dict[str, float], optional
+        Parameters to hold fixed during the estimation. After
+        ``create_model``, the variable's lower and upper bounds are both
+        set to the supplied value so the solver cannot move it. Used
+        internally by :func:`discopt.doe.profile_likelihood` and useful
+        standalone for sub-model fits and one-at-a-time sensitivity
+        studies.
     solver_options : dict, optional
         Options passed to the solver.
 
@@ -276,9 +288,28 @@ def estimate_parameters(
     ------
     ValueError
         If data keys don't match response names, or if the solve fails.
+    KeyError
+        If a name in ``fixed_parameters`` is not an unknown parameter.
     """
     kwargs = dict(initial_guess or {})
+    if fixed_parameters:
+        # Fixed values take precedence over initial guesses for the same
+        # parameter, so create_model starts at the fixed value.
+        kwargs.update({k: float(v) for k, v in fixed_parameters.items()})
     em = experiment.create_model(**kwargs)
+
+    if fixed_parameters:
+        for name, value in fixed_parameters.items():
+            if name not in em.unknown_parameters:
+                raise KeyError(
+                    f"{name!r} is not an unknown parameter (known: {list(em.unknown_parameters)})"
+                )
+            var = em.unknown_parameters[name]
+            val_arr = np.asarray(float(value), dtype=np.float64)
+            if var.shape:
+                val_arr = np.full(var.shape, val_arr)
+            var.lb = val_arr
+            var.ub = val_arr
 
     # Validate data keys match responses
     resp_keys = set(em.responses.keys())

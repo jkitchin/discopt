@@ -190,65 +190,9 @@ def compute_fim(
     )
 
 
-def check_identifiability(
-    experiment: Experiment,
-    param_values: dict[str, float],
-    design_values: dict[str, float] | None = None,
-    *,
-    tol: float = 1e-6,
-) -> "IdentifiabilityResult":
-    """Check if parameters are structurally identifiable.
-
-    Computes the FIM and checks its rank. A full-rank FIM indicates
-    all parameters can be estimated independently from the data.
-
-    Parameters
-    ----------
-    experiment : Experiment
-        Experiment definition.
-    param_values : dict[str, float]
-        Nominal parameter values.
-    design_values : dict[str, float], optional
-        Design input values.
-    tol : float, default 1e-6
-        Tolerance for determining near-zero singular values.
-
-    Returns
-    -------
-    IdentifiabilityResult
-        Identifiability assessment.
-    """
-    fim_result = compute_fim(experiment, param_values, design_values)
-    fim = fim_result.fim
-    n_params = len(fim_result.parameter_names)
-
-    # SVD for robust rank computation
-    singular_values = np.linalg.svd(fim, compute_uv=False)
-    rank = int(np.sum(singular_values > tol * singular_values[0]))
-
-    # Identify problematic parameters (near-zero singular directions)
-    _, _, Vt = np.linalg.svd(fim)
-    problematic = []
-    for i in range(rank, n_params):
-        # The i-th right singular vector corresponds to an unidentifiable direction
-        direction = Vt[i]
-        # Find which parameter has the largest component
-        max_idx = int(np.argmax(np.abs(direction)))
-        problematic.append(fim_result.parameter_names[max_idx])
-
-    return IdentifiabilityResult(
-        is_identifiable=(rank == n_params),
-        fim_rank=rank,
-        n_parameters=n_params,
-        problematic_parameters=problematic,
-        condition_number=fim_result.me_optimal,
-        fim_result=fim_result,
-    )
-
-
 @dataclass
 class IdentifiabilityResult:
-    """Result of identifiability analysis.
+    """Minimal identifiability assessment (backwards-compatible).
 
     Attributes
     ----------
@@ -259,7 +203,7 @@ class IdentifiabilityResult:
     n_parameters : int
         Total number of unknown parameters.
     problematic_parameters : list[str]
-        Parameters that are not identifiable (in unidentifiable directions).
+        Parameters with the largest component in the null directions.
     condition_number : float
         Condition number of the FIM.
     fim_result : FIMResult
@@ -272,6 +216,379 @@ class IdentifiabilityResult:
     problematic_parameters: list[str]
     condition_number: float
     fim_result: FIMResult
+
+
+@dataclass
+class IdentifiabilityDiagnostics:
+    """Full Belsley/Gutenkunst identifiability diagnostic bundle.
+
+    Returned by :func:`diagnose_identifiability`. Superset of
+    :class:`IdentifiabilityResult`; includes everything needed to apply
+    the regression-diagnostic rules of Belsley, Kuh & Welsch (1980) and
+    the sloppy-model spectrum of Gutenkunst et al. (2007).
+
+    Scaling conventions
+    -------------------
+    - ``singular_values``, ``condition_indices``, ``variance_decomposition``,
+      ``vif``: computed on the *unit-column-length* scaled Jacobian (each
+      column divided by its 2-norm). This is the Belsley convention; no
+      mean-centering since there is no intercept in a sensitivity Jacobian.
+    - ``log_eigenvalue_spectrum``, ``normalized_log_spectrum``,
+      ``standard_errors``, ``correlation_matrix``: computed on the physical
+      FIM = J^T Sigma^-1 J (unscaled).
+
+    Notes
+    -----
+    Yao ranking and condition indices are *not* invariant under
+    reparameterization (e.g. theta -> log theta). Profile likelihood is.
+    If the condition number is large, try a log-scale reparameterization
+    before concluding non-identifiability.
+
+    Attributes
+    ----------
+    is_identifiable : bool
+        True if all parameters are identifiable (FIM is full rank).
+    fim_rank : int
+        Numerical rank of the FIM.
+    n_parameters : int
+        Total number of unknown parameters.
+    condition_number : float
+        Condition number of the FIM (physical, unscaled).
+    fim_result : FIMResult
+        Underlying FIM computation result.
+    singular_values : numpy.ndarray
+        Singular values of the scaled Jacobian, descending.
+    condition_indices : numpy.ndarray
+        Belsley condition indices eta_k = sigma_max / sigma_k.
+    vif : dict[str, float]
+        Variance inflation factor per parameter; ``nan`` if undefined.
+    variance_decomposition : numpy.ndarray
+        Belsley pi_{jk}, shape ``(n_params, n_params)``. Rows sum to 1.
+    correlation_matrix : numpy.ndarray
+        Parameter correlation from FIM^-1 (pseudoinverse if singular).
+        Entries touching a null direction are ``nan``.
+    log_eigenvalue_spectrum : numpy.ndarray
+        log10 of FIM eigenvalues, sorted descending.
+    normalized_log_spectrum : numpy.ndarray
+        log10(lambda_k / lambda_max); the Gutenkunst sloppy-model form.
+    null_space : list[dict[str, float]]
+        One entry per null direction (sigma_k < tol). Each entry maps
+        parameter name to the (sign-normalized) coefficient in the
+        right singular vector.
+    standard_errors : dict[str, float]
+        sqrt(diag(FIM^-1)); ``nan`` for parameters without identifiability.
+    warnings : list[str]
+        Human-readable flags for problematic diagnostics.
+    problematic_parameters : list[str]
+        Parameters with the largest component in a null direction
+        (one per null direction; for backwards compatibility with
+        :class:`IdentifiabilityResult`).
+    """
+
+    is_identifiable: bool
+    fim_rank: int
+    n_parameters: int
+    condition_number: float
+    fim_result: FIMResult
+    singular_values: np.ndarray
+    condition_indices: np.ndarray
+    vif: dict[str, float]
+    variance_decomposition: np.ndarray
+    correlation_matrix: np.ndarray
+    log_eigenvalue_spectrum: np.ndarray
+    normalized_log_spectrum: np.ndarray
+    null_space: list[dict[str, float]]
+    standard_errors: dict[str, float]
+    warnings: list[str]
+    problematic_parameters: list[str]
+
+
+def diagnose_identifiability(
+    experiment: Experiment,
+    param_values: dict[str, float] | None = None,
+    design_values: dict[str, float] | None = None,
+    *,
+    tol: float | None = None,
+    estimation_result=None,
+) -> IdentifiabilityDiagnostics:
+    """Full identifiability diagnostics (Belsley + Gutenkunst).
+
+    Computes the FIM and the scaled sensitivity Jacobian, then returns
+    condition indices, variance-inflation factors, variance-decomposition
+    proportions, the correlation matrix, the sloppy-model eigenvalue
+    spectrum, and a null-space report.
+
+    The function replaces :func:`check_identifiability` for new code;
+    ``check_identifiability`` is kept as a thin wrapper.
+
+    Parameters
+    ----------
+    experiment : Experiment
+        Experiment definition.
+    param_values : dict[str, float], optional
+        Nominal parameter values (typically a fitted estimate). Either
+        this or ``estimation_result`` must be supplied. If both are
+        supplied, ``param_values`` wins.
+    design_values : dict[str, float], optional
+        Design input values.
+    tol : float, optional
+        Relative tolerance on singular values for the rank decision.
+        Defaults to the LAPACK convention
+        ``max(n_rows, n_params) * eps``.
+    estimation_result : EstimationResult, optional
+        A fit produced by :func:`discopt.estimate.estimate_parameters`.
+        When supplied, its ``parameters`` dict is used as the nominal
+        point. Convenience for the common pattern
+        ``diagnose_identifiability(exp, estimation_result=res)``.
+
+    Returns
+    -------
+    IdentifiabilityDiagnostics
+        Full diagnostic bundle.
+    """
+    if param_values is None:
+        if estimation_result is None:
+            raise TypeError(
+                "diagnose_identifiability requires either param_values or estimation_result"
+            )
+        param_values = dict(estimation_result.parameters)
+    fim_result = compute_fim(experiment, param_values, design_values)
+    return _diagnostics_from_fim_result(fim_result, tol=tol)
+
+
+def _diagnostics_from_fim_result(
+    fim_result: FIMResult,
+    *,
+    tol: float | None = None,
+) -> IdentifiabilityDiagnostics:
+    """Build diagnostics from an existing FIMResult.
+
+    Factored out so both :func:`diagnose_identifiability` and
+    :func:`check_identifiability` can use the same linear-algebra path.
+    """
+    fim = np.asarray(fim_result.fim, dtype=np.float64)
+    jac = np.asarray(fim_result.jacobian, dtype=np.float64)
+    names = list(fim_result.parameter_names)
+    n_params = len(names)
+
+    # Scaled Jacobian: unit-column-length. Columns with zero norm (a
+    # parameter with no sensitivity) get a zero column; they will be
+    # flagged as non-identifiable by the singular-value test below.
+    col_norms = np.linalg.norm(jac, axis=0)
+    safe_norms = np.where(col_norms > 0, col_norms, 1.0)
+    J_s = jac / safe_norms
+    J_s[:, col_norms == 0] = 0.0
+
+    n_rows = max(J_s.shape[0], 1)
+    if tol is None:
+        tol = max(n_rows, n_params) * np.finfo(np.float64).eps
+
+    # SVD of the scaled Jacobian.
+    if J_s.shape[0] == 0:
+        sv = np.zeros(n_params)
+        Vt = np.eye(n_params)
+    else:
+        _, sv_raw, Vt = np.linalg.svd(J_s, full_matrices=False)
+        sv = np.concatenate([sv_raw, np.zeros(n_params - sv_raw.size)])
+        if Vt.shape[0] < n_params:
+            # Pad Vt with orthogonal completion rows for missing directions
+            extra = np.eye(n_params)[Vt.shape[0] :]
+            Vt = np.vstack([Vt, extra])
+
+    sv_max = sv[0] if sv.size and sv[0] > 0 else 0.0
+    if sv_max > 0:
+        rank = int(np.sum(sv > tol * sv_max))
+    else:
+        rank = 0
+
+    # Condition indices: sigma_max / sigma_k (infinity for null directions).
+    with np.errstate(divide="ignore"):
+        condition_indices = np.where(sv > 0, sv_max / np.maximum(sv, np.finfo(float).tiny), np.inf)
+    if sv_max == 0:
+        condition_indices = np.full(n_params, np.inf)
+
+    # Belsley variance-decomposition proportions.
+    # phi_{j,k} = V_{j,k}^2 / sigma_k^2 ; pi_{j,k} = phi_{j,k} / sum_k phi_{j,k}
+    V = Vt.T  # columns are right singular vectors
+    sv_sq = np.where(sv > 0, sv**2, np.finfo(float).tiny)
+    phi = (V**2) / sv_sq[np.newaxis, :]
+    row_sums = phi.sum(axis=1, keepdims=True)
+    row_sums = np.where(row_sums > 0, row_sums, 1.0)
+    vdp = phi / row_sums
+
+    # VIF via the inverse of the correlation matrix of the unit-column-
+    # length Jacobian: VIF_j = [C^-1]_{jj}.
+    if J_s.shape[0] > 0:
+        C = J_s.T @ J_s  # = correlation matrix since columns are unit length
+    else:
+        C = np.zeros((n_params, n_params))
+    try:
+        C_inv = np.linalg.inv(C)
+        vif_array = np.diag(C_inv)
+    except np.linalg.LinAlgError:
+        C_inv = np.linalg.pinv(C)
+        vif_array = np.diag(C_inv)
+
+    # Parameters whose direction is deficient → VIF is effectively infinite.
+    # Detect by checking whether each parameter's axis vector lies
+    # (almost) in the span of null singular vectors.
+    null_indices = np.where(sv <= tol * max(sv_max, np.finfo(float).tiny))[0]
+    null_directions = V[:, null_indices] if null_indices.size else np.zeros((n_params, 0))
+    if null_directions.size:
+        projections = np.sum(null_directions**2, axis=1)  # per parameter
+        vif_array = np.where(projections > 0.01, np.inf, vif_array)
+    vif = {names[j]: float(vif_array[j]) for j in range(n_params)}
+
+    # FIM-based correlation matrix and standard errors.
+    try:
+        fim_inv = np.linalg.inv(fim)
+        singular_fim = False
+    except np.linalg.LinAlgError:
+        fim_inv = np.linalg.pinv(fim)
+        singular_fim = True
+
+    diag = np.diag(fim_inv)
+    se_array = np.where(diag >= 0, np.sqrt(np.clip(diag, 0.0, None)), np.nan)
+    if singular_fim and null_directions.size:
+        # Parameters with large null-direction projection have no
+        # meaningful standard error or correlation.
+        projections = np.sum(null_directions**2, axis=1)
+        mask = projections > 0.01
+        se_array = np.where(mask, np.nan, se_array)
+    standard_errors = {names[j]: float(se_array[j]) for j in range(n_params)}
+
+    # Correlation matrix.
+    with np.errstate(invalid="ignore", divide="ignore"):
+        d = np.sqrt(np.clip(np.diag(fim_inv), 0.0, None))
+        safe_d = np.where(d > 0, d, np.nan)
+        corr = fim_inv / np.outer(safe_d, safe_d)
+    if singular_fim and null_directions.size:
+        projections = np.sum(null_directions**2, axis=1)
+        affected = projections > 0.01
+        corr[affected, :] = np.nan
+        corr[:, affected] = np.nan
+
+    # Eigenvalue spectrum of the physical FIM.
+    eigvals = np.linalg.eigvalsh(fim)
+    eigvals = np.sort(eigvals)[::-1]  # descending
+    eig_max = eigvals[0] if eigvals.size and eigvals[0] > 0 else 0.0
+    if eig_max > 0:
+        clipped = np.clip(eigvals, eig_max * np.finfo(float).eps, None)
+        log_spectrum = np.log10(clipped)
+        normalized_log = np.log10(clipped / eig_max)
+    else:
+        log_spectrum = np.full(n_params, -np.inf)
+        normalized_log = np.full(n_params, -np.inf)
+
+    # Null-space report.
+    null_space: list[dict[str, float]] = []
+    problematic: list[str] = []
+    for idx in null_indices:
+        direction = V[:, idx].copy()
+        # Sign normalization: largest-magnitude entry positive.
+        max_mag = int(np.argmax(np.abs(direction)))
+        if direction[max_mag] < 0:
+            direction = -direction
+        null_space.append({names[j]: float(direction[j]) for j in range(n_params)})
+        problematic.append(names[max_mag])
+
+    # Warnings.
+    warnings_out: list[str] = []
+    for k in range(n_params):
+        eta = condition_indices[k]
+        if eta > 30:
+            warnings_out.append(
+                f"serious collinearity: condition index eta_{k + 1} = {eta:.3g} > 30"
+            )
+        elif eta > 10 and not np.isinf(eta):
+            warnings_out.append(f"mild collinearity: condition index eta_{k + 1} = {eta:.3g} > 10")
+    for name, v in vif.items():
+        if np.isfinite(v) and v > 10:
+            warnings_out.append(f"VIF[{name}] = {v:.3g} > 10")
+        elif np.isinf(v):
+            warnings_out.append(f"VIF[{name}] is infinite (parameter lies in a null direction)")
+    # Correlation warnings on finite entries only.
+    for i in range(n_params):
+        for j in range(i + 1, n_params):
+            rho = corr[i, j]
+            if np.isfinite(rho) and abs(rho) > 0.95:
+                warnings_out.append(f"|rho[{names[i]},{names[j]}]| = {abs(rho):.3g} > 0.95")
+
+    return IdentifiabilityDiagnostics(
+        is_identifiable=(rank == n_params),
+        fim_rank=rank,
+        n_parameters=n_params,
+        condition_number=fim_result.me_optimal,
+        fim_result=fim_result,
+        singular_values=sv,
+        condition_indices=condition_indices,
+        vif=vif,
+        variance_decomposition=vdp,
+        correlation_matrix=corr,
+        log_eigenvalue_spectrum=log_spectrum,
+        normalized_log_spectrum=normalized_log,
+        null_space=null_space,
+        standard_errors=standard_errors,
+        warnings=warnings_out,
+        problematic_parameters=problematic,
+    )
+
+
+def check_identifiability(
+    experiment: Experiment,
+    param_values: dict[str, float],
+    design_values: dict[str, float] | None = None,
+    *,
+    tol: float = 1e-6,
+) -> IdentifiabilityResult:
+    """Minimal identifiability check (backwards-compatible).
+
+    Computes the FIM and reports its rank plus a representative
+    problematic parameter per null direction. For the full Belsley /
+    Gutenkunst diagnostic toolkit, use :func:`diagnose_identifiability`.
+
+    Parameters
+    ----------
+    experiment : Experiment
+        Experiment definition.
+    param_values : dict[str, float]
+        Nominal parameter values.
+    design_values : dict[str, float], optional
+        Design input values.
+    tol : float, default 1e-6
+        Absolute-like tolerance (scaled by the top singular value of FIM)
+        used to decide the rank. Kept for backwards compatibility.
+
+    Returns
+    -------
+    IdentifiabilityResult
+        Minimal identifiability assessment.
+    """
+    fim_result = compute_fim(experiment, param_values, design_values)
+    fim = fim_result.fim
+    n_params = len(fim_result.parameter_names)
+
+    singular_values = np.linalg.svd(fim, compute_uv=False)
+    if singular_values.size and singular_values[0] > 0:
+        rank = int(np.sum(singular_values > tol * singular_values[0]))
+    else:
+        rank = 0
+
+    _, _, Vt = np.linalg.svd(fim)
+    problematic: list[str] = []
+    for i in range(rank, n_params):
+        direction = Vt[i]
+        max_idx = int(np.argmax(np.abs(direction)))
+        problematic.append(fim_result.parameter_names[max_idx])
+
+    return IdentifiabilityResult(
+        is_identifiable=(rank == n_params),
+        fim_rank=rank,
+        n_parameters=n_params,
+        problematic_parameters=problematic,
+        condition_number=fim_result.me_optimal,
+        fim_result=fim_result,
+    )
 
 
 # ─────────────────────────────────────────────────────────────
