@@ -1179,6 +1179,7 @@ def solve_model(
     lazy_constraints=None,
     incumbent_callback=None,
     node_callback=None,
+    solver: Optional[str] = None,
     use_highs_milp: bool = True,
     **kwargs,
 ) -> SolveResult:
@@ -1244,6 +1245,9 @@ def solve_model(
     gdp_method : str, default "big-m"
         Reformulation method for disjunctive constraints:
         ``"big-m"`` (default) or ``"hull"`` (convex hull).
+    solver : str or None, default None
+        Optional global-solver selector. Use ``"amp"`` to dispatch to
+        Adaptive Multivariate Partitioning instead of branch-and-bound.
 
     Returns
     -------
@@ -1265,6 +1269,80 @@ def solve_model(
             "JAX_ENABLE_X64=1 *before* importing JAX for full solver precision.  "
             "Results may be inaccurate.",
             stacklevel=2,
+        )
+
+    # --- AMP (Adaptive Multivariate Partitioning) global solver ---
+    _solver = solver if solver is not None else kwargs.pop("solver", None)
+    if _solver == "amp":
+        import warnings
+
+        from discopt.solvers.amp import solve_amp
+
+        amp_kwargs = {}
+        amp_option_keys = (
+            "rel_gap",
+            "abs_tol",
+            "max_iter",
+            "n_init_partitions",
+            "partition_method",
+            "iteration_callback",
+            "milp_time_limit",
+            "milp_gap_tolerance",
+            "apply_partitioning",
+            "disc_var_pick",
+            "partition_scaling_factor",
+            "disc_add_partition_method",
+            "disc_abs_width_tol",
+            "convhull_formulation",
+        )
+        for key in amp_option_keys:
+            if key in kwargs:
+                amp_kwargs[key] = kwargs.pop(key)
+
+        ignored_amp_options = []
+
+        def _note_ignored(name: str, should_warn: bool) -> None:
+            if should_warn:
+                ignored_amp_options.append(name)
+
+        _note_ignored("threads", threads != 1)
+        _note_ignored("deterministic", deterministic is not True)
+        _note_ignored("batch_size", batch_size != 16)
+        _note_ignored("strategy", strategy != "best_first")
+        _note_ignored("max_nodes", max_nodes != 100_000)
+        _note_ignored("ipopt_options", ipopt_options is not None)
+        _note_ignored("sparse", sparse is not None)
+        _note_ignored("cutting_planes", cutting_planes is not False)
+        _note_ignored("partitions", partitions != 0)
+        _note_ignored("branching_policy", branching_policy != "fractional")
+        _note_ignored("use_learned_relaxations", use_learned_relaxations is not False)
+        _note_ignored("mccormick_bounds", mccormick_bounds != "auto")
+        _note_ignored("gdp_method", gdp_method != "big-m")
+        _note_ignored("initial_point", initial_point is not None)
+        _note_ignored("nlp_bb", nlp_bb is not None)
+        _note_ignored("lazy_constraints", lazy_constraints is not None)
+        _note_ignored("incumbent_callback", incumbent_callback is not None)
+        _note_ignored("node_callback", node_callback is not None)
+        _note_ignored("use_highs_milp", use_highs_milp is not True)
+        if kwargs:
+            ignored_amp_options.extend(sorted(kwargs))
+        if ignored_amp_options:
+            warnings.warn(
+                "AMP ignores solve_model options: "
+                + ", ".join(sorted(dict.fromkeys(ignored_amp_options))),
+                stacklevel=2,
+            )
+
+        # rel_gap defaults to gap_tolerance if not separately provided
+        if "rel_gap" not in amp_kwargs:
+            amp_kwargs["rel_gap"] = gap_tolerance
+
+        return solve_amp(
+            model,
+            time_limit=time_limit,
+            nlp_solver=nlp_solver,
+            skip_convex_check=skip_convex_check,
+            **amp_kwargs,
         )
 
     # --- OA decomposition: general-purpose Outer Approximation ---

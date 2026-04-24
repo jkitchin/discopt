@@ -245,6 +245,7 @@ def generate_oa_cuts_from_evaluator(
     evaluator,
     x_sol: np.ndarray,
     constraint_senses: Optional[list[str]] = None,
+    convex_mask: Optional[list[bool]] = None,
 ) -> list[LinearCut]:
     """Generate OA cuts for all constraints using an NLPEvaluator.
 
@@ -257,6 +258,8 @@ def generate_oa_cuts_from_evaluator(
         x_sol: solution point at which to linearize, shape (n,).
         constraint_senses: list of senses for each constraint. If None,
             all constraints are assumed to be "<=".
+        convex_mask: Per-constraint boolean list. If provided, only constraints
+            where ``convex_mask[k]`` is True are linearized.
 
     Returns:
         List of LinearCut objects, one per constraint.
@@ -273,6 +276,8 @@ def generate_oa_cuts_from_evaluator(
 
     cuts = []
     for k in range(m):
+        if convex_mask is not None and not convex_mask[k]:
+            continue
         grad_k = jac[k, :]
         g_k = float(cons_vals[k])
         sense = constraint_senses[k]

@@ -56,6 +56,7 @@ Ceccon, Siirola, Misener (2020), "SUSPECT," TOP.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -763,9 +764,69 @@ def classify_model(model: Model, *, use_certificate: bool = False) -> tuple[bool
     return all_convex, constraint_mask
 
 
+@dataclass(frozen=True)
+class OACutConvexity:
+    """Convexity information relevant to globally valid OA cuts."""
+
+    objective_is_convex: bool
+    constraint_mask: list[bool]
+
+
+def classify_oa_cut_convexity(model: Model, *, use_certificate: bool = False) -> OACutConvexity:
+    """Return the convexity information needed to generate sound OA cuts.
+
+    Unlike :func:`classify_model`, the per-constraint mask is retained
+    even when the objective is non-convex, so evaluator-based OA cuts
+    can still be generated on the convex constraints of a model whose
+    objective prevents full convex classification.
+    """
+    cache: dict = {}
+    ctx = build_linear_context(model)
+    if ctx is not None:
+        cache[_LINEAR_CONTEXT_KEY] = ctx
+
+    obj_convex = True
+    if model._objective is not None:
+        from discopt.modeling.core import ObjectiveSense
+
+        obj_curv = classify_expr(model._objective.expression, model, cache)
+        if model._objective.sense == ObjectiveSense.MINIMIZE:
+            obj_convex = obj_curv in (Curvature.CONVEX, Curvature.AFFINE)
+            need_curv_for_obj = Curvature.CONVEX
+        else:
+            obj_convex = obj_curv in (Curvature.CONCAVE, Curvature.AFFINE)
+            need_curv_for_obj = Curvature.CONCAVE
+
+        if not obj_convex and use_certificate:
+            try:
+                from .certificate import certify_convex
+
+                cert = certify_convex(model._objective.expression, model)
+            except Exception:
+                cert = None
+            if cert == need_curv_for_obj:
+                obj_convex = True
+
+    constraint_mask: list[bool] = []
+    for c in model._constraints:
+        if isinstance(c, Constraint):
+            constraint_mask.append(
+                classify_constraint(c, model, cache, use_certificate=use_certificate)
+            )
+        else:
+            constraint_mask.append(False)
+
+    return OACutConvexity(
+        objective_is_convex=obj_convex,
+        constraint_mask=constraint_mask,
+    )
+
+
 __all__ = [
+    "OACutConvexity",
     "classify_expr",
     "classify_expr_info",
     "classify_constraint",
     "classify_model",
+    "classify_oa_cut_convexity",
 ]

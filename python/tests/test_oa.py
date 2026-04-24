@@ -140,6 +140,33 @@ class TestOANonConvex:
         assert result.status in ("optimal", "feasible")
         assert result.objective is not None
 
+    def test_nonconvex_objective_skips_objective_oa_cuts(self, monkeypatch):
+        """A nonconvex objective must not produce OA objective cuts or certified bounds."""
+        from discopt._jax import cutting_planes
+
+        calls = []
+        real_generate = cutting_planes.generate_objective_oa_cut
+
+        def wrapped_generate(*args, **kwargs):
+            calls.append((args, kwargs))
+            return real_generate(*args, **kwargs)
+
+        monkeypatch.setattr(cutting_planes, "generate_objective_oa_cut", wrapped_generate)
+
+        m = dm.Model("oa_nonconvex_objective")
+        x = m.continuous("x", lb=0, ub=2)
+        y = m.binary("y")
+        m.subject_to(x <= 1 + y)
+        m.minimize(-(x * y))
+
+        result = _solve_oa(m, max_nodes=6)
+
+        assert calls == []
+        assert result.status == "feasible"
+        assert result.objective is not None
+        assert result.bound is None
+        assert result.gap is None
+
 
 # ── Edge Cases ────────────────────────────────────────────────
 
