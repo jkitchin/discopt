@@ -22,6 +22,7 @@ Key composition rules implemented:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
 
@@ -51,6 +52,14 @@ class Curvature(Enum):
     CONVEX = "convex"
     CONCAVE = "concave"
     UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class OACutConvexity:
+    """Convexity information relevant to globally valid OA cuts."""
+
+    objective_is_convex: bool
+    constraint_mask: list[bool]
 
 
 def _combine_sum(a: Curvature, b: Curvature) -> Curvature:
@@ -363,17 +372,10 @@ def classify_constraint(
     return False
 
 
-def classify_model(model: Model) -> tuple[bool, list[bool]]:
-    """Classify a model's convexity.
-
-    Returns:
-        (is_convex, constraint_convexity_mask)
-        - is_convex: True if objective is convex and all constraints are convex
-        - constraint_convexity_mask: per-constraint convexity flags
-    """
+def classify_oa_cut_convexity(model: Model) -> OACutConvexity:
+    """Return the convexity information needed to generate sound OA cuts."""
     cache: dict = {}
 
-    # Check objective
     obj_convex = True
     if model._objective is not None:
         from discopt.modeling.core import ObjectiveSense
@@ -385,17 +387,28 @@ def classify_model(model: Model) -> tuple[bool, list[bool]]:
             # Maximize f  ≡ Minimize -f; convex if f is concave
             obj_convex = obj_curv in (Curvature.CONCAVE, Curvature.AFFINE)
 
-    # Check constraints
     constraint_mask = []
-    all_convex = obj_convex
     for c in model._constraints:
         if isinstance(c, Constraint):
-            is_cvx = classify_constraint(c, model, cache)
-            constraint_mask.append(is_cvx)
-            if not is_cvx:
-                all_convex = False
+            constraint_mask.append(classify_constraint(c, model, cache))
         else:
             constraint_mask.append(False)
-            all_convex = False
 
-    return all_convex, constraint_mask
+    return OACutConvexity(
+        objective_is_convex=obj_convex,
+        constraint_mask=constraint_mask,
+    )
+
+
+def classify_model(model: Model) -> tuple[bool, list[bool]]:
+    """Classify a model's convexity.
+
+    Returns:
+        (is_convex, constraint_convexity_mask)
+        - is_convex: True if objective is convex and all constraints are convex
+        - constraint_convexity_mask: per-constraint convexity flags
+    """
+    oa_convexity = classify_oa_cut_convexity(model)
+    all_convex = oa_convexity.objective_is_convex and all(oa_convexity.constraint_mask)
+
+    return all_convex, oa_convexity.constraint_mask

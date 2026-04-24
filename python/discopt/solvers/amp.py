@@ -559,6 +559,7 @@ def solve_amp(
         check_partition_convergence,
         initialize_partitions,
     )
+    from discopt._jax.convexity import classify_oa_cut_convexity
     from discopt._jax.nlp_evaluator import NLPEvaluator
     from discopt._jax.partition_selection import pick_partition_vars
     from discopt._jax.term_classifier import classify_nonlinear_terms
@@ -588,6 +589,13 @@ def solve_amp(
     evaluator = NLPEvaluator(model)
     constraint_lb, constraint_ub = _infer_constraint_bounds(model)
     deadline = t_start + time_limit
+    oa_convexity = classify_oa_cut_convexity(model)
+    if evaluator.n_constraints > 0 and not all(oa_convexity.constraint_mask):
+        logger.warning(
+            "AMP: generating OA cuts only for %d of %d constraints classified convex",
+            sum(1 for is_convex in oa_convexity.constraint_mask if is_convex),
+            len(oa_convexity.constraint_mask),
+        )
 
     # ── Classify nonlinear terms ─────────────────────────────────────────────
     terms = classify_nonlinear_terms(model)
@@ -743,7 +751,10 @@ def solve_amp(
                     if evaluator.n_constraints > 0:
                         _senses = [c.sense for c in model._constraints if isinstance(c, Constraint)]
                         cuts = generate_oa_cuts_from_evaluator(
-                            evaluator, _x_orig, constraint_senses=_senses
+                            evaluator,
+                            _x_orig,
+                            constraint_senses=_senses,
+                            convex_mask=oa_convexity.constraint_mask,
                         )
                         for cut in cuts:
                             if np.linalg.norm(cut.coeffs) < 1e-12:
