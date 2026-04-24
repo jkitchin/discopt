@@ -1,33 +1,18 @@
 #!/usr/bin/env bash
-# Install discopt Claude Code skills (slash commands).
+# Legacy wrapper around `discopt install-skills`.
 #
-# Creates .claude/commands/ in the repo root and symlinks each skill file
-# so that Claude Code picks them up as /command-name slash commands.
+# Skills and agents now live inside the Python package at
+# python/discopt/skills/ and ship with the wheel, so downstream users
+# can install them via `discopt install-skills`. This script forwards
+# to that CLI with --project-scope so existing users of
+# `bash claude-skills/install.sh` keep getting the project-local
+# behavior they had before.
 #
 # Usage:
-#   bash claude-skills/install.sh
+#   bash claude-skills/install.sh           # copy into ./.claude/
+#   bash claude-skills/install.sh --dev     # symlink instead of copy
+#   bash claude-skills/install.sh --force   # overwrite existing
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SRC_DIR="$REPO_ROOT/claude-skills/commands"
-DEST_DIR="$REPO_ROOT/.claude/commands"
-
-mkdir -p "$DEST_DIR"
-
-count=0
-for src in "$SRC_DIR"/*.md; do
-    name="$(basename "$src")"
-    dest="$DEST_DIR/$name"
-    if [ -L "$dest" ] || [ -e "$dest" ]; then
-        echo "  skip  $name (already exists)"
-    else
-        ln -s "$src" "$dest"
-        echo "  link  $name"
-        count=$((count + 1))
-    fi
-done
-
-echo ""
-echo "Installed $count skill(s) into .claude/commands/"
-echo "Available as slash commands: $(ls "$SRC_DIR"/*.md | xargs -I{} basename {} .md | paste -sd', ' -)"
+exec discopt install-skills --project-scope "$@"

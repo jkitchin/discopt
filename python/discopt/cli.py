@@ -4,6 +4,7 @@ Usage:
     discopt about
     discopt test
     discopt convert input.gms output.nl
+    discopt install-skills [--project-scope] [--dev] [--force]
     discopt lit-scan [topic ...]
     discopt adversary [-n COUNT] [topic ...]
     discopt search-arxiv "query" [--max-results 20] [--start-date 2026-01-01]
@@ -16,10 +17,12 @@ import importlib.metadata
 import json
 import os
 import platform
+import shutil
 import sys
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 
 def search_arxiv(query: str, max_results: int = 20) -> list[dict]:
@@ -452,6 +455,67 @@ def _cmd_convert(args):
     print(f"Converted {in_path} -> {out_path}")
 
 
+def _cmd_install_skills(args):
+    """Install packaged Claude Code skills/agents into the user's .claude/ tree.
+
+    Defaults to ``~/.claude/`` (user scope). Use ``--project-scope`` to
+    target the current directory's ``./.claude/`` instead. Copies files by
+    default; ``--dev`` symlinks them instead so edits to package data show
+    up live (useful with ``pip install -e``).
+    """
+    from discopt.skills import iter_agents, iter_commands
+
+    if args.project_scope:
+        base = Path.cwd() / ".claude"
+    else:
+        base = Path.home() / ".claude"
+
+    dest_commands = base / "commands"
+    dest_agents = base / "agents"
+    dest_commands.mkdir(parents=True, exist_ok=True)
+    dest_agents.mkdir(parents=True, exist_ok=True)
+
+    def _install_one(src, dest_dir, verb_counts):
+        dest = dest_dir / src.name
+        exists = dest.exists() or dest.is_symlink()
+        if exists and not args.force:
+            print(f"  skip  {src.name} (already exists)")
+            verb_counts["skip"] += 1
+            return
+        if exists:
+            if dest.is_symlink() or dest.is_file():
+                dest.unlink()
+            else:
+                shutil.rmtree(dest)
+        # ``Traversable`` exposes a filesystem path for most real-world
+        # installs; ``importlib.resources.as_file`` would materialize a
+        # temp copy for zipapps, but we explicitly want the *source* path
+        # for --dev symlinks. Resolve via str() -> Path.
+        src_path = Path(str(src))
+        if args.dev:
+            dest.symlink_to(src_path)
+            print(f"  link  {src.name}")
+            verb_counts["link"] += 1
+        else:
+            shutil.copy2(src_path, dest)
+            print(f"  copy  {src.name}")
+            verb_counts["copy"] += 1
+
+    verb_counts = {"copy": 0, "link": 0, "skip": 0}
+    n_commands = 0
+    for src in iter_commands():
+        _install_one(src, dest_commands, verb_counts)
+        n_commands += 1
+    n_agents = 0
+    for src in iter_agents():
+        _install_one(src, dest_agents, verb_counts)
+        n_agents += 1
+
+    print(f"\nInstalled {n_commands} command(s) and {n_agents} agent(s) into {base}")
+    if verb_counts["skip"]:
+        print(f"  {verb_counts['skip']} already existed; pass --force to overwrite.")
+
+
 def main():
     parser = argparse.ArgumentParser(prog="discopt", description="discopt CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -531,6 +595,28 @@ def main():
         help="Optional problem class focus (e.g., 'MINLP', 'convex NLP')",
     )
     p_adv.set_defaults(func=_cmd_adversary)
+
+    # install-skills
+    p_skills = subparsers.add_parser(
+        "install-skills",
+        help="Install packaged Claude Code slash commands and agents into ~/.claude/",
+    )
+    p_skills.add_argument(
+        "--project-scope",
+        action="store_true",
+        help="Install into ./.claude/ (current project) instead of ~/.claude/.",
+    )
+    p_skills.add_argument(
+        "--dev",
+        action="store_true",
+        help="Symlink package files instead of copying (for in-place edits).",
+    )
+    p_skills.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing files at the destination.",
+    )
+    p_skills.set_defaults(func=_cmd_install_skills)
 
     args = parser.parse_args()
     args.func(args)
