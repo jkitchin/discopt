@@ -112,6 +112,31 @@ class TestGDPoptLOA:
         assert result.status in ("optimal", "feasible")
         assert result.objective == pytest.approx(0.0, abs=1e-2)
 
+    def test_nonconvex_objective_skips_objective_oa_cuts(self, monkeypatch):
+        """LOA must not generate objective OA cuts for a nonconvex objective."""
+        import discopt.modeling as dm
+        from discopt._jax import cutting_planes
+
+        calls = []
+        real_generate = cutting_planes.generate_objective_oa_cut
+
+        def wrapped_generate(*args, **kwargs):
+            calls.append((args, kwargs))
+            return real_generate(*args, **kwargs)
+
+        monkeypatch.setattr(cutting_planes, "generate_objective_oa_cut", wrapped_generate)
+
+        m = dm.Model("loa_nonconvex_objective")
+        x = m.continuous("x", lb=0, ub=2)
+        m.either_or([[x <= 1], [x >= 2]], name="choice")
+        m.minimize(-(x**2))
+
+        result = m.solve(time_limit=60, gdp_method="loa", max_nodes=6)
+
+        assert calls == []
+        assert result.bound is None
+        assert result.gap is None
+
 
 class TestMILPHiGHS:
     def test_simple_milp(self):

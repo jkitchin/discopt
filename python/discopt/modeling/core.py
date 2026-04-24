@@ -818,8 +818,9 @@ class SolveResult:
     Attributes
     ----------
     status : str
-        Termination status. One of ``"optimal"``, ``"feasible"``,
-        ``"infeasible"``, ``"time_limit"``, ``"node_limit"``.
+        Termination status. Typical values are ``"optimal"``, ``"feasible"``,
+        ``"infeasible"``, ``"time_limit"``, ``"node_limit"``,
+        ``"iteration_limit"``, and ``"error"``.
     objective : float or None
         Best objective value found (None if infeasible).
     bound : float or None
@@ -1791,6 +1792,7 @@ class Model:
         lazy_constraints: Optional[Callable] = None,
         incumbent_callback: Optional[Callable] = None,
         node_callback: Optional[Callable] = None,
+        solver: Optional[str] = None,
         **kwargs,
     ) -> Union[SolveResult, Iterator["SolveUpdate"]]:
         r"""
@@ -1894,6 +1896,9 @@ class Model:
             )
 
         from discopt.solver import solve_model
+
+        if solver is not None:
+            kwargs["solver"] = solver
 
         result = solve_model(
             self,

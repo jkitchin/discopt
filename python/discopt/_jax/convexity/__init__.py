@@ -24,13 +24,21 @@ from __future__ import annotations
 
 from .certificate import certify_convex, refresh_convex_mask
 from .lattice import Curvature
-from .rules import classify_constraint, classify_expr, classify_model
+from .rules import (
+    OACutConvexity,
+    classify_constraint,
+    classify_expr,
+    classify_model,
+    classify_oa_cut_convexity,
+)
 
 __all__ = [
     "Curvature",
+    "OACutConvexity",
     "certify_convex",
     "classify_constraint",
     "classify_expr",
     "classify_model",
+    "classify_oa_cut_convexity",
     "refresh_convex_mask",
 ]
