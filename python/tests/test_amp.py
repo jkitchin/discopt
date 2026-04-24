@@ -1670,6 +1670,67 @@ class TestCurrentCodeWeaknesses:
         assert result.gap_certified is False
         assert result.objective is not None
 
+    def test_no_incumbent_after_search_returns_iteration_limit(self, monkeypatch):
+        """Exhausting AMP without an incumbent is not a proof of infeasibility."""
+        from discopt._jax.milp_relaxation import MilpRelaxationResult
+        from discopt.solvers import amp as amp_mod
+
+        m = Model("amp_no_incumbent")
+        x = m.continuous("x", lb=0, ub=1)
+        m.minimize(x)
+
+        monkeypatch.setattr(
+            amp_mod,
+            "_solve_milp_with_oa_recovery",
+            lambda **kwargs: (
+                MilpRelaxationResult(
+                    status="optimal",
+                    objective=0.0,
+                    x=np.array([0.0], dtype=np.float64),
+                ),
+                {},
+                [],
+            ),
+        )
+        monkeypatch.setattr(
+            amp_mod,
+            "_solve_best_nlp_candidate",
+            lambda *args, **kwargs: (None, None),
+        )
+
+        result = m.solve(solver="amp", max_iter=1, time_limit=30)
+
+        assert result.status == "iteration_limit"
+        assert result.objective is None
+        assert result.bound == pytest.approx(0.0)
+        assert result.gap_certified is False
+
+    def test_first_iteration_milp_error_is_not_reported_as_infeasible(self, monkeypatch):
+        """MILP solve errors should surface as errors, not mathematical infeasibility."""
+        from discopt._jax.milp_relaxation import MilpRelaxationResult
+        from discopt.solvers import amp as amp_mod
+
+        m = Model("amp_milp_error")
+        x = m.continuous("x", lb=0, ub=1)
+        m.minimize(x)
+
+        monkeypatch.setattr(
+            amp_mod,
+            "_solve_milp_with_oa_recovery",
+            lambda **kwargs: (
+                MilpRelaxationResult(status="error", objective=None, x=None),
+                {},
+                [],
+            ),
+        )
+
+        result = m.solve(solver="amp", max_iter=1, time_limit=30)
+
+        assert result.status == "error"
+        assert result.objective is None
+        assert result.bound is None
+        assert result.gap_certified is False
+
     def test_adaptive_partition_selection_path_runs_inside_amp(self, monkeypatch):
         """AMP should re-pick partition variables when adaptive selection is enabled."""
         import discopt._jax.discretization as disc_mod
@@ -1741,6 +1802,7 @@ class TestCurrentCodeWeaknesses:
         If this fails: existing spatial B&B cannot certify global optimality
         on bilinear problems (needs AMP's MILP-based lower bound).
         """
+        pytest.importorskip("cyipopt")
         m = _make_nlp1()
         result = m.solve(time_limit=60, gap_tolerance=1e-3)
         assert result.objective is not None, "Spatial B&B failed to find any solution"

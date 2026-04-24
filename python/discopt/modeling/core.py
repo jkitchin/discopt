@@ -818,8 +818,9 @@ class SolveResult:
     Attributes
     ----------
     status : str
-        Termination status. One of ``"optimal"``, ``"feasible"``,
-        ``"infeasible"``, ``"time_limit"``, ``"node_limit"``.
+        Termination status. Typical values are ``"optimal"``, ``"feasible"``,
+        ``"infeasible"``, ``"time_limit"``, ``"node_limit"``,
+        ``"iteration_limit"``, and ``"error"``.
     objective : float or None
         Best objective value found (None if infeasible).
     bound : float or None

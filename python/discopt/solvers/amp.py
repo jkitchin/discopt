@@ -648,11 +648,13 @@ def solve_amp(
     incumbent = None
     gap_certified = False
     oa_cuts: list = []  # accumulated OA linearizations from NLP incumbents
+    termination_reason = "iteration_limit"
 
     for iteration in range(1, max_iter + 1):
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
             logger.info("AMP: time limit reached at iteration %d", iteration)
+            termination_reason = "time_limit"
             break
 
         remaining = time_limit - elapsed
@@ -683,21 +685,20 @@ def solve_amp(
             oa_cuts = active_oa_cuts
         except Exception as e:
             logger.warning("AMP: MILP build/solve failed at iteration %d: %s", iteration, e)
+            termination_reason = "error"
             break
 
-        if milp_result.status in ("infeasible", "error"):
+        if milp_result.status == "error":
+            logger.info("AMP: MILP error at iteration %d", iteration)
+            termination_reason = "error"
+            break
+
+        if milp_result.status == "infeasible":
             logger.info(
-                "AMP: MILP infeasible/error at iteration %d, status=%s",
+                "AMP: MILP infeasible at iteration %d",
                 iteration,
-                milp_result.status,
             )
-            if LB == -np.inf:
-                # Problem may be infeasible
-                if iteration == 1:
-                    return SolveResult(
-                        status="infeasible",
-                        wall_time=time.perf_counter() - t_start,
-                    )
+            termination_reason = "infeasible"
             break
 
         if milp_result.objective is not None:
@@ -904,9 +905,18 @@ def solve_amp(
     elapsed = time.perf_counter() - t_start
 
     if UB >= np.inf and LB == -np.inf:
+        if termination_reason == "infeasible":
+            status = "infeasible"
+        elif termination_reason == "time_limit":
+            status = "time_limit"
+        elif termination_reason == "error":
+            status = "error"
+        else:
+            status = "iteration_limit"
         return SolveResult(
-            status="infeasible",
+            status=status,
             wall_time=elapsed,
+            gap_certified=False,
         )
 
     if incumbent is not None:
@@ -931,10 +941,14 @@ def solve_amp(
         )
 
     # No feasible solution found
-    if elapsed >= time_limit:
-        status = "time_limit"
-    else:
+    if termination_reason == "infeasible":
         status = "infeasible"
+    elif termination_reason == "time_limit" or elapsed >= time_limit:
+        status = "time_limit"
+    elif termination_reason == "error":
+        status = "error"
+    else:
+        status = "iteration_limit"
 
     return SolveResult(
         status=status,
