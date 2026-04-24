@@ -1,0 +1,176 @@
+#+TITLE: Robust Optimization: Decision-Making Under Set-Based Uncertainty
+#+FILETAGS: :concept:robust:uncertainty:optimization:ro:
+#+PROPERTY: ARTICLE_TYPE concept
+#+PROPERTY: SOURCE_KEYS ben-tal-nemirovski-1998 ben-tal-2004 bertsimas-sim-2004 gorissen-2015 ben-tal-2009
+
+* Robust Optimization: Decision-Making Under Set-Based Uncertainty
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: ben-tal-nemirovski-1998 ben-tal-2004 bertsimas-sim-2004 gorissen-2015 ben-tal-2009
+:STATUS: draft
+:CREATED: 2026-04-24
+:END:
+
+Robust optimization (RO) is the tractable antidote to parametric
+uncertainty in mathematical programs. Rather than estimating a probability
+distribution and optimizing expected value (stochastic programming), RO
+assumes the uncertain parameters lie within a prescribed *set*
+and insists that the solution be feasible for /every/ realization in that
+set. The resulting *robust counterpart* is a deterministic optimization
+problem --- often tractable --- whose solution is immune to uncertainty
+confined to the declared set citep:ben-tal-nemirovski-1998
+citep:ben-tal-2009.
+
+** Problem Statement
+
+A nominal problem
+
+  min  c(x)    s.t.  g(x, p) <= 0  for all p in U
+
+where U is the uncertainty set. The constraint must hold for every
+p in U, giving worst-case feasibility. The /robust counterpart/
+replaces the "for all" with finitely many deterministic constraints
+derived via LP/cone duality, which is what makes RO tractable.
+
+Three geometry choices for U cover nearly every practical use:
+
+- *Box* (1-norm): each component varies independently in a symmetric
+  interval, p in [p_bar - delta, p_bar + delta]. Worst case is separable
+  and additive.
+- *Ellipsoidal* (2-norm): p lies in an ellipsoid parameterized by shape
+  matrix Sigma and radius rho. Captures correlation and leads to SOCP-like
+  counterparts citep:ben-tal-nemirovski-1998.
+- *Polyhedral*: p satisfies A*xi <= b on the perturbation vector xi.
+  Includes the Bertsimas-Sim *budget* set as a special case, where at
+  most Gamma components perturb simultaneously citep:bertsimas-sim-2004.
+
+** The Robust Counterpart
+
+For a linear uncertain constraint a(xi)^T x <= b with a(xi) = a_bar + P*xi
+and xi in U, the worst-case is the support function of U:
+
+  max_{xi in U} (P*xi)^T x <= b - a_bar^T x.
+
+- *Box U*: becomes ||P^T x||_1 <= b - a_bar^T x (1-norm, solvable as LP).
+- *Ellipsoidal U*: becomes rho * ||Sigma^{1/2} P^T x||_2 <= b - a_bar^T x
+  (SOCP).
+- *Polyhedral U*: LP duality turns the inner max into linear constraints
+  in new dual variables; the counterpart stays LP.
+- *Budget U* with Gamma: LP counterpart, sorting-based tightening.
+
+This is the key tractability result: the counterpart is of the same class
+as the nominal problem, one step up the cone hierarchy (LP -> SOCP for
+ellipsoidal uncertainty only).
+
+** The Conservatism Dial
+
+The size of the uncertainty set trades nominal optimality against
+robustness:
+
+- Set too small: solution is non-robust; perturbations outside the set
+  produce infeasibility in reality.
+- Set too large: solution is over-conservative; needlessly expensive.
+
+Sizing choices:
+
+- Empirical: set width = k * sigma_empirical with safety factor k from
+  data.
+- Engineering specification: e.g., ±5% measurement tolerance.
+- Probabilistic guarantees (approximate): Bertsimas-Sim budget Gamma =
+  sigma * sqrt(n * ln(1/epsilon)) yields ~(1-epsilon) feasibility under
+  sub-Gaussian perturbations citep:bertsimas-sim-2004.
+
+Always stress-test: plot robust objective vs. set size, look for the
+knee. Extremely set-sensitive objectives indicate a fragile model.
+
+** Static vs. Adjustable Robust Optimization
+
+Static RO assumes the entire decision x is made before any uncertainty
+is observed. For sequential problems (two-stage, multi-period), this is
+overly conservative because the second-stage decisions can adapt to the
+realized uncertainty.
+
+Adjustable Robust Optimization (ARO) lets second-stage decisions be
+functions of the realized uncertainty citep:ben-tal-2004. Because
+general adaptive policies are intractable, ARO restricts the policy
+class:
+
+- *Affine Decision Rules (ADR)*: z(xi) = Z_0 + Z_1 * xi, where Z_0 and
+  Z_1 are first-stage decisions. Tractable for linear problems.
+- *Segregated ADR*: different affine rules on pieces of U.
+- *Finite adaptability*: a finite set of "contingency plans" from which
+  to pick post-realization.
+
+ADR is the workhorse of applied ARO. It recovers most of the gap between
+static-robust and fully-adjustable solutions at a modest increase in
+problem size.
+
+** What Robust Cannot Help With
+
+- *Distributional information beyond a set*: if you have a distribution
+  over xi, stochastic programming or distributionally robust optimization
+  (DRO) is sharper. RO is the right tool when the distribution is
+  unknown or the decision-maker insists on set-based worst-case
+  guarantees.
+- *Adaptive learning*: RO is offline; it does not update as realizations
+  accumulate. Use online methods or sequential RO/DRO.
+- *Model-structure uncertainty*: RO handles uncertain parameters within
+  a fixed model. For rival model structures, see [[file:../methods/model-discrimination.org][model discrimination]].
+
+** Relevance for discopt
+
+~discopt.ro~ implements all three uncertainty-set geometries plus budget
+as a polyhedral special case:
+
+- ~BoxUncertaintySet(parameter, deviation)~ --- symmetric interval per
+  component.
+- ~EllipsoidalUncertaintySet(parameter, sigma, radius)~ --- Mahalanobis
+  ellipsoid.
+- ~PolyhedralUncertaintySet(parameter, A, b)~ --- arbitrary polyhedron.
+- ~budget_uncertainty_set(parameter, delta, gamma)~ --- Bertsimas-Sim.
+
+The main workflow:
+
+  1. Build nominal Model with ~Model.parameter()~ for each uncertain
+     quantity.
+  2. Wrap parameters in uncertainty sets.
+  3. Call ~RobustCounterpart(model, sets).formulate()~, which mutates
+     the Model in place by adding dual variables and worst-case
+     constraints.
+  4. Solve the deterministic counterpart with ~Model.solve()~.
+
+Two-stage problems with affine recourse use ~AffineDecisionRule(name,
+shape, uncertainty_parameters)~; the ADR object exposes an
+~.expression()~ that plugs into subsequent constraints. The
+~formulations/~ subdirectory holds per-set counterpart construction code:
+~box.py~, ~ellipsoidal.py~, ~polyhedral.py~, ~_common.py~.
+
+** Practical Guidance
+
+Gorissen et al. (2015) citep:gorissen-2015 distill a decade of RO
+practice into concrete rules:
+
+- Prefer box over ellipsoidal unless correlation information is
+  high-quality.
+- Use budget sets for combinatorial "at most Gamma failures" scenarios.
+- Do not mix robust and stochastic constraints in the same problem
+  without care --- the semantics diverge.
+- Always sanity-check with a worst-case simulation on the robust
+  solution.
+
+** Literature Anchors
+
+- Ben-Tal, Nemirovski, /Robust Convex Optimization/, Math. Oper. Res. 23
+  (1998) --- foundational citep:ben-tal-nemirovski-1998.
+- Ben-Tal, Goryashko, Guslitzer, Nemirovski, /Adjustable robust
+  solutions of uncertain linear programs/, Math. Prog. 99 (2004) --- ADR
+  citep:ben-tal-2004.
+- Bertsimas, Sim, /The price of robustness/, Oper. Res. 52 (2004) ---
+  budget sets citep:bertsimas-sim-2004.
+- Gorissen, Yanikoglu, den Hertog, /A practical guide to robust
+  optimization/, Omega 53 (2015) --- practitioner survey
+  citep:gorissen-2015.
+- Ben-Tal, El Ghaoui, Nemirovski, /Robust Optimization/, Princeton
+  (2009) --- comprehensive monograph citep:ben-tal-2009.
+- Bertsimas, den Hertog, /Robust and Adaptive Optimization/, Dynamic
+  Ideas (2022) --- recent textbook.

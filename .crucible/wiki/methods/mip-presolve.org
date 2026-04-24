@@ -1,0 +1,220 @@
+#+TITLE: MIP Presolve
+#+FILETAGS: :method:presolve:mip:fbbt:probing:clique:symmetry:
+
+* MIP Presolve
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: achterberg2020presolve andersen-andersen-1995 savelsbergh1994 gamrath-scip-presolve-2015 papilo-2023 gemander-2020 hoen-veripb-2024 liu-l2p-2024
+:STATUS: active
+:CREATED: 2026-04-21
+:UPDATED: 2026-04-21
+:END:
+
+Presolve, as implemented in [[file:../concepts/scip-solver.org][SCIP]] and [[file:../concepts/highs-solver.org][HiGHS]], is the fixpoint application of
+a battery of /reductions/ — each a
+sound simplification of the MIP — executed before branch-and-cut begins.
+Reductions eliminate redundant variables and constraints, tighten
+coefficients, fix variables by dual or primal dominance, substitute
+implied-free variables, extract cliques and implications, and detect
+symmetry. Modern commercial solvers attribute an order-of-magnitude speedup
+to presolve: the 2020 survey by citet:achterberg2020presolve reports that
+disabling presolve on MIPLIB benchmarks slows a state-of-the-art solver by a
+shifted geometric mean of **10.7×**, and presolve typically removes
+40-60% of rows, columns, and nonzeros. Because presolve runs once at the
+root (and then in more limited form during tree search), its performance
+benefit comes from /catching every applicable reduction/, not from inner-loop
+speed — which is why the SCIP portfolio contains more than twenty distinct
+reductions.
+
+** The Canonical Survey
+
+citet:achterberg2020presolve, drawing on decades of CPLEX and Gurobi
+development, is the reference work. It catalogs the reductions, explains why
+presolve is iterated to fixpoint (each reduction can enable others),
+analyzes the /dual validity/ conditions under which a reduction may cut off
+optimal solutions, and reports empirical findings on MIPLIB 2010/2017.
+Novel contributions include two-row bound tightening (which combines two
+constraints via FBBT to derive bounds no single constraint can produce) and
+conic-dual reductions. The paper also carefully distinguishes *primal*
+reductions (which preserve every feasible solution) from *dual* reductions
+(which may discard feasible but suboptimal solutions based on objective
+reasoning).
+
+** Host Placement for discopt
+
+All MIP presolve reductions are **Suggested host: Rust**. They sit in tight
+inner loops over sparse nonzero data, run to fixpoint, and must integrate
+with discopt's existing FBBT/OBBT/probing code in
+=crates/discopt-core/src/presolve/=. There are two deliberate exceptions
+called out below — frontier-batched FBBT and frontier-batched
+McCormick/αBB coefficient recomputation — where **Warp** is the better
+host because the workload shifts from "one model, tight loop" to "a
+thousand subproblem models, sparse scatter with atomics." OBBT
+orchestration (one LP solve per tightened bound) stays **Python** as a thin
+driver calling the HiGHS backend in Rust.
+
+** The Reductions
+
+Paths verified against =scipopt/scip= (=master=, =src/scip/=) and
+=ERGO-Code/HiGHS= (=highs/presolve/=, =highs/mip/=).
+
+- **Singleton row/column elimination** — a row with a single nonzero
+  becomes a variable bound; a column with a single nonzero in an equality
+  substitutes out (free singleton) or fixes by duality. SCIP:
+  =presol_trivial.c=. HiGHS: =HPresolve::singletonRow/Col=. Reference:
+  citet:andersen-andersen-1995; citet:achterberg2020presolve §3.1.
+- **Dual fixing** — if a column's coefficients are uniformly signed and
+  the objective sign agrees, fix the variable to the appropriate bound
+  without losing optimality. SCIP: =prop_dualfix.c=. Reference:
+  citet:achterberg2020presolve §3.2; citet:gamrath-scip-presolve-2015.
+- **Dominated columns** — column $j$ dominates $k$ when flow can shift
+  from $k$ into $j$ while weakly improving the objective and respecting all
+  rows; the dominated column fixes to a bound. SCIP: =presol_domcol.c=.
+  HiGHS: =HPresolve::detectDominatedCol=.
+- **Parallel / dominated rows** — hash-based detection of proportional row
+  vectors; collapse to the tighter activity bound. SCIP: =presol_redvub.c=.
+  HiGHS: =HPresolve::detectParallelRow=.
+- **Coefficient tightening** — using activity bounds, coefficients of
+  integer variables in inequalities can be reduced, strengthening the LP
+  relaxation (Crowder-Johnson-Padberg). SCIP: =SCIPtightenCoefs= inside
+  =cons_linear.c=, =cons_knapsack.c=. HiGHS:
+  =HPresolve::strengthenInequalities=. Reference: citet:savelsbergh1994;
+  citet:achterberg2020presolve §4.3.
+- **Implied free variables / substitution** — a continuous variable with
+  bounds implied by a single equality can be eliminated. SCIP:
+  =presol_implint.c= and aggregation in =cons_linear.c=. HiGHS:
+  =HPresolve::aggregator=.
+- **Probing** — tentatively fix a binary to 0 and to 1, propagate, and
+  record implications, tightened bounds, and common global fixings. SCIP:
+  =prop_probing.c=. HiGHS: =HPresolve::runProbing= → =HighsImplications=.
+  Reference: citet:savelsbergh1994; citet:achterberg2020presolve §7.
+  Parallel two-column extension: citet:gamrath-twocol-2024.
+- **Clique merging / clique table** — pairwise "at most one of
+  $\{x, y\}$" implications form a conflict graph; maximal cliques become
+  set-packing constraints and feed cut separation. SCIP: =sepa_clique.c=,
+  =heur_clique.c=, clique table in =scip/implics.c=. HiGHS:
+  =HighsCliqueTable.cpp=. Reference: Atamtürk, Nemhauser & Savelsbergh,
+  /Oper. Res. Letters/ 28:31-42, 2000.
+- **Implications / implied bounds** — store entailments
+  $x_i = v \Rightarrow x_j \in [l', u']$ from probing or constraint
+  analysis; reused by propagation and cut generation. SCIP:
+  =presol_implics.c=, =prop_vbounds.c=. HiGHS: =HighsImplications.cpp=.
+- **Aggregator** — Gaussian-style variable elimination using linear
+  equalities, respecting integrality. SCIP: =cons_linear.c= aggregation,
+  =presol_sparsify.c=. HiGHS: =HPresolve::aggregator=,
+  =::equalityRowAddition=.
+- **Dual substitution** — LP dual feasibility forces a variable to a
+  bound or marks a constraint redundant at optimum. SCIP:
+  =presol_dualinfer.c=, =presol_dualcomp.c=.
+- **Stuffing / dual aggregation** — singleton or structured continuous
+  variables with favorable dual sign absorb slack from adjacent rows. SCIP:
+  =presol_stuffing.c=, =presol_dualagg.c=.
+- **Connected-component decomposition** — if the constraint graph splits
+  into independent blocks, solve each separately. SCIP: =cons_components.c=.
+  HiGHS: =PresolveComponent.cpp=. (Rust detection; Python orchestrates
+  independent subsolves.)
+- **Two-row bound tightening** — FBBT over pairs of rows, using hashing to
+  make $O(n^2)$ pair enumeration tractable. SCIP: =presol_tworowbnd.c=.
+  HiGHS: two-row logic in =HPresolve.cpp=. Reference:
+  citet:achterberg2020presolve §4.4; citet:gemander-2020.
+- **Sparsify** — add a multiple of one row to another to cancel nonzeros,
+  reducing matrix density. SCIP: =presol_sparsify.c=, =presol_dualsparsify.c=.
+  HiGHS: =HPresolve::sparsify=.
+- **Symmetry detection and orbital fixing** — build a colored-graph
+  automorphism representation, detect orbits with bliss/nauty, fix by
+  orbital branching or add orbitope/symresack constraints. SCIP:
+  =symmetry.c=, =symmetry_orbital.c=, =cons_orbitope*.c=, =cons_symresack.c=.
+  HiGHS: =HighsSymmetry.cpp=. Reference: Margot, "Symmetry in integer
+  linear programming," in /50 Years of Integer Programming/, 2010;
+  Pfetsch & Rehn, /Math. Prog. Comp./ 11:733-801, 2019. Rust with a
+  bliss/nauty C-binding is the practical path.
+
+** Warp Opportunity: Batched Frontier FBBT
+
+Root presolve is inherently serial per instance and belongs in Rust. The
+interesting GPU case is during tree search, when discopt's B&B holds a
+frontier of thousands of open subproblems that share the same sparse
+constraint /structure/ but differ only in their variable-bound vectors.
+Running FBBT at every node is expensive serially, but is a textbook Warp
+kernel: launch one thread per (subproblem × row), scatter-update bound
+tightenings with atomics across subproblems, iterate to fixpoint. This is
+distinct from what JAX does well — it is irregular sparse scatter with
+atomics, not dense tensor algebra. Primary reference for FBBT:
+citet:belotti2012 §3.4; the frontier-batched variant is novel and is
+discopt's architectural win over HiGHS and SCIP. The same argument applies
+to **batched McCormick / αBB coefficient recomputation** across a
+frontier — each subproblem shares the operator DAG but needs fresh
+envelope coefficients when bounds change; a Warp kernel launching one
+thread per (node × nonlinear operator) fits natively.
+
+** MINLP-Specific Presolve
+
+Beyond linear reductions, nonlinear presolve adds structure detection and
+bound tightening over the expression DAG — directly relevant to discopt's
+JAX DAG.
+
+- citet:vigerske2018 describes SCIP's expression DAG, =cons_nonlinear.c=,
+  FBBT, OBBT via =prop_obbt.c= and =prop_nlobbt.c=, and reverse propagation
+  through elementary operators.
+- citet:belotti2012 /Acta Numerica/ 22:1-131 is the canonical survey:
+  FBBT, OBBT, convex/concave envelopes, spatial B&B.
+- citet:puranik2017 focuses on domain reduction for nonlinear problems:
+  FBBT, OBBT, reduced-cost tightening, probing, duality-based tightening.
+- citet:gleixner2017 three OBBT enhancements — filtering, Lagrangian
+  variable bounds, and warm-starting — directly applicable to discopt's
+  =obbt.rs=.
+
+** Licensing
+
+- **SCIP**: Apache-2.0 since v8.1 / SOS 9.0 citep:bolusani-scip9-2024.
+  Permits commercial reuse with NOTICE preservation.
+- **HiGHS**: MIT throughout. Permissive, retention of copyright only.
+- **PaPILO** (=scipopt/papilo=): **LGPLv3**. A close translation into
+  discopt would impose LGPL linking on the Rust crate. *Avoid* PaPILO as a
+  source to copy from; use its published design
+  (citet:papilo-2023) and the paper-level descriptions instead.
+
+Algorithms are not copyrightable in the US (Baker v. Selden; 17 USC
+§102(b)); only source expression is. Safe pattern for discopt:
+reimplement from citet:achterberg2020presolve, citet:gamrath-scip-presolve-2015,
+citet:gemander-2020, and the primary papers; cross-check behavior against
+SCIP/HiGHS on shared instances; preserve license notices + upstream
+filename mapping in any module that is a close port.
+
+** Recent Developments (2022-2026)
+
+- citet:papilo-2023 — solver-independent parallel presolve with
+  transaction-based conflict resolution and exact-arithmetic support.
+  Template for a rayon-parallelized presolve loop in discopt.
+- citet:gemander-2020 — hashing scheme that makes $O(n^2)$ two-row
+  presolve tractable.
+- citet:gamrath-twocol-2024 — parallel two-column probing.
+- citet:hoen-veripb-2024 — pseudo-Boolean proof logging (VeriPB) for
+  presolve, aligning with discopt's "correctness is non-negotiable"
+  invariant.
+- citet:liu-l2p-2024 — ICLR 2024; supervised learning predicts which
+  presolvers to run for how long on a per-instance basis. Natural fit for
+  discopt's LLM/ML layer.
+
+** Port-Order Recommendation for discopt
+
+discopt already has FBBT, OBBT, and single-variable probing in
+=crates/discopt-core/src/presolve/{fbbt,obbt,probing,simplify}.rs=. The
+highest-value additions, all **Rust** unless noted:
+
+1. **Coefficient tightening** — cheap, strong LP-bound impact.
+2. **Clique table + clique merging** — foundational for binary-heavy
+   MINLPs and for [[file:../concepts/big-m-formulations.org][big-M formulations]] in =python/discopt/nn/formulations/=.
+3. **Dominated columns / parallel rows.**
+4. **Aggregator / implied-free substitution.**
+5. **Connected-component decomposition** — Rust detection, Python
+   orchestrates independent subsolves.
+6. **Two-row bound tightening** — once single-row FBBT is saturated.
+7. *(Stretch)* **Frontier-batched FBBT in Warp** — activates when
+   discopt propagates at every node, not only at root.
+8. *(Stretch)* **Frontier-batched McCormick/αBB recomputation in Warp** —
+   pairs with [[file:spatial-branch-and-bound.org][spatial branch and bound]] on the JAX DAG.
+
+Symmetry detection and sparsify are valuable but heavier engineering lifts
+(bliss/nauty binding, dense LA over sparse matrices) and should follow the
+core reductions.

@@ -1,0 +1,70 @@
+#+TITLE: Profile Likelihood Identifiability Analysis
+#+FILETAGS: :method:identifiability:practical:profile-likelihood:nlp:
+
+* Profile Likelihood Identifiability Analysis
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: raue2009-profile kreutz2013-profile kreutz2012-prediction stapor2018-pesto frohlich2014-uncertainty venzon1988-profile
+:STATUS: draft
+:CREATED: 2026-04-22
+:END:
+
+Profile likelihood analysis was introduced into the identifiability literature by citet:raue2009-profile as the definitive non-asymptotic diagnostic of [[file:../concepts/identifiability-analysis.org][practical identifiability]]. The method fixes one parameter at a grid of values, reoptimizes all remaining parameters to minimize the negative log-likelihood, and traces the resulting one-dimensional curve. Its shape directly distinguishes the three failure modes the [[file:../concepts/fisher-information-matrix.org][Fisher information matrix]] cannot disambiguate: flat curves indicate structural non-identifiability, one-sided unbounded curves indicate practical non-identifiability, and curves that rise above a likelihood-ratio threshold on both sides yield a finite confidence interval. The approach is invariant under reparameterization, handles non-Gaussian and asymmetric posteriors, and requires no assumption beyond the likelihood itself. It has become a default reporting standard in the systems-biology parameter-estimation community and is implemented in dMod, D2D, and pyPESTO citep:stapor2018-pesto.
+
+** Algorithm
+
+Let \ell(\theta) be the negative log-likelihood and \hat\theta the MLE. The profile likelihood of parameter \theta_i is defined by partial minimization:
+
+#+begin_src
+PL_i(c) = min_{\theta_{-i}} \ell(\theta_i = c, \theta_{-i}).
+#+end_src
+
+The standard algorithm (citet:venzon1988-profile with systems-biology refinements by citet:raue2009-profile and citet:kreutz2013-profile) traces PL_i by walking outward from \hat\theta in both directions:
+
+1. Choose a step \Delta c in \theta_i. Step size is adapted so that the increase in PL is approximately constant (typically targeting an increment of 0.1–0.5 log-units).
+2. Re-solve the constrained NLP at \theta_i = c with warm-start \hat\theta_{-i}.
+3. Continue until PL_i exceeds the threshold \ell(\hat\theta) + \chi^2_{1, 1-\alpha}/2 (giving a 1-\alpha confidence bound) or until a user-set maximum is hit.
+4. Repeat in the opposite direction.
+
+The confidence interval is the union of \theta_i values with PL_i below the threshold. An interval that is finite on both sides gives a standard CI; an interval that runs to the parameter bound on one or both sides is the profile-likelihood signature of practical or structural non-identifiability.
+
+** Diagnosing the Failure Modes
+
+The three profile shapes give an unambiguous diagnostic:
+
+| Profile shape                     | Diagnosis                       | Cure                                              |
+|-----------------------------------+---------------------------------+---------------------------------------------------|
+| Flat over the whole profile       | Structural non-identifiability  | Reparameterize (use COMBOS-style combinations)    |
+| Rises on one side only            | Practical non-identifiability   | [[file:../concepts/model-based-doe.org][MBDoE]]: redesign the experiment                |
+| Rises on both sides above threshold | Identifiable                   | Report the CI                                     |
+| Multimodal                        | Multiple local optima           | Global optimization; inspect data for outliers    |
+
+citet:raue2009-profile emphasized that the FIM cannot distinguish the first two cases — both produce rank deficiency or near-rank deficiency — and that the profile-likelihood shape is the cheapest reliable diagnostic. Later work citet:kreutz2012-prediction extended profile likelihoods from parameters to /predictions/: profile the likelihood over a fixed prediction value to get a prediction CI that correctly accounts for parameter uncertainty even in non-identifiable regimes.
+
+** Asymmetric and Non-Asymptotic CIs
+
+Unlike FIM-based Wald intervals, profile-likelihood intervals need not be symmetric about \hat\theta and remain valid when the posterior is asymmetric, skewed, or bounded. This is particularly valuable near the edge of the feasible set, where many biological and engineering parameters live (reaction rates positive, volume fractions in [0,1]). The invariance to reparameterization matters in practice: profiling \theta and profiling \log \theta give profiles related by the same change of variables, so the reported CI is unambiguous. FIM-based CIs are only approximately consistent under reparameterization.
+
+** Relation to Sloppy Models and FIM
+
+Profile likelihood and the [[file:../concepts/fisher-information-matrix.org][FIM]] view are complementary. The FIM at \hat\theta is the local second-order approximation of -\ell; its inverse is the Wald-CI covariance. The profile likelihood is the exact negative log-likelihood along a ridge in parameter space and is therefore a finite, non-local, non-Gaussian refinement. [[file:../concepts/sloppy-models.org][Sloppy models]] have profile likelihoods that are shallow but bounded along the sloppy directions; exactly non-identifiable models have flat profile likelihoods along null directions. The profile therefore /continuously/ interpolates between the identifiable, sloppy, and non-identifiable regimes that the FIM spectrum can only describe categorically.
+
+** Implementation Considerations
+
+Three implementation choices matter:
+
+1. *Warm-starting.* Re-optimizing from scratch at each grid point is prohibitive. Instead, use the previous grid point's \hat\theta_{-i}^{(k-1)} as the initial guess at \theta_i = c_k; convergence is typically reached in a few Newton iterations.
+2. *Adaptive step size.* Steps should be small in curvature-dominated regions of the profile and large in flat regions. The standard rule is to solve \Delta PL \approx constant, which requires a correction after each step.
+3. *Constrained-NLP solver.* Any efficient constrained NLP (Ipopt, SNOPT, knitro) works; modern implementations such as pyPESTO delegate this to AMICI + Ipopt with analytical gradients.
+
+The computational unit is a single constrained NLP solve per grid point per parameter. For a model with p parameters and K grid points per profile the total cost is 2pK NLP solves — directly matched to discopt's NLP solver ([[file:../concepts/ipopt-solver.org][Ipopt]]).
+
+** Profile Likelihood in discopt.doe
+
+Profile likelihood is the identifiability method that maps most naturally onto discopt. The ingredients required — a constrained NLP with the parameter fixed, a smooth log-likelihood, sensitivities for warm-start gradients — are exactly what discopt already provides. An implementation sketch:
+
+1. User builds a discopt.Model for the parameter-estimation problem with free parameters \theta.
+2. discopt.doe.profile_likelihood(model, theta_i, grid) fixes \theta_i = c and calls Model.solve() at each grid value, reusing the previous solution as a warm start.
+3. Threshold at \chi^2_{1, 1-\alpha}/2 above \ell(\hat\theta) gives the CI; profile shape gives the structural/practical diagnosis.
+
+The approach is a handful of lines of orchestration on top of existing solvers and produces intervals that are strictly more trustworthy than Wald CIs. It belongs in any identifiability layer for discopt.doe; see [[file:identifiability-software.org][Identifiability software landscape]] for context on what to wrap versus reimplement.

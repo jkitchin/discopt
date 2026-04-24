@@ -1,0 +1,45 @@
+#+TITLE: Feasibility Pump
+#+FILETAGS: :method:feasibility-pump:heuristic:minlp:primal-heuristic:
+
+* Feasibility Pump
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: fischetti2005 bonami2009 dambrosio2012 belotti2017
+:STATUS: reviewed
+:CREATED: 2026-04-04
+:UPDATED: 2026-04-16
+:END:
+
+The feasibility pump is a primal heuristic designed to find integer-feasible solutions quickly, without requiring the full machinery of a branch-and-bound tree search. Its core idea is elegantly simple: alternate between two projections, one onto the set of continuously feasible solutions and one onto the set of integer points, until the two projections coincide at a single feasible solution. The method was introduced by citet:fischetti2005 for mixed-integer linear programs, extended to convex MINLPs by citet:bonami2009, and generalized to nonconvex MINLPs by citet:dambrosio2012 through a portfolio of pump variants run in parallel.
+
+** The Original MIP Feasibility Pump
+
+citet:fischetti2005 observed that finding any feasible solution to a MIP is itself NP-hard, yet practical solvers spend most of their effort on proving optimality rather than feasibility. The feasibility pump addresses this imbalance by focusing exclusively on finding a feasible integer point as fast as possible, setting aside objective function considerations entirely.
+
+The algorithm proceeds as follows. Given the LP relaxation solution x*, the pump rounds each integer-constrained variable to its nearest integer value, producing a candidate integer point x_hat. It then solves an LP that minimizes the L1 distance to x_hat, subject to the original LP constraints, yielding a new continuously feasible point x*. If x* happens to be integer-feasible, the pump terminates successfully. Otherwise, the procedure rounds again and repeats. The key insight is that each LP solve is inexpensive (a warm-started simplex iteration) and the sequence of rounded points typically converges within a handful of iterations.
+
+Cycling is the main failure mode: the pump may oscillate between a small set of rounded points without converging. citet:fischetti2005 detect cycling by maintaining a hash of previously visited rounded points and, upon detecting a repeat, applying a random perturbation that flips a subset of the integer variables. This simple anti-cycling mechanism makes the procedure robust in practice. Computational experiments on MIPLIB instances showed that the feasibility pump finds a feasible solution for the vast majority of instances, often in under a second, making it an effective complement to tree-based methods (see [[file:spatial-branch-and-bound.org][spatial branch and bound]]).
+
+** Extension to Convex MINLP
+
+citet:bonami2009 extended the feasibility pump to mixed-integer nonlinear programs with convex continuous relaxations. The conceptual framework remains the same, two alternating projections, but the linear programming projection is replaced by a nonlinear programming projection. At each iteration, instead of solving an LP to find the closest continuously feasible point to the rounded integer target, the pump solves a convex NLP that minimizes distance to x_hat over the nonlinear feasible region. The rounding step is unchanged: integer-constrained variables are simply mapped to their nearest integer values.
+
+This extension introduces a significant computational cost increase, since each projection requires solving a full NLP rather than a simple LP. In practice, however, the NLP solves can be warm-started from the previous iteration's solution, and interior-point methods (see [[file:interior-point-methods.org][interior point methods]]) handle these projections efficiently. citet:bonami2009 implemented the MINLP feasibility pump within the Bonmin solver citep:bonami2008, where it serves as one of several heuristic strategies available at the root node. Their experiments demonstrated that the pump finds feasible solutions for a large fraction of convex MINLP instances in the MINLPLib benchmark set, often providing incumbents that the tree search would take many nodes to discover on its own.
+
+** A Storm of Pumps for Nonconvex MINLP
+
+The feasibility pump faces a fundamental difficulty when applied to nonconvex MINLPs: the continuous relaxation is itself nonconvex, so the NLP projection step may converge to a local optimum that is far from the rounded target, or may fail to converge at all. citet:dambrosio2012 addressed this challenge not by designing a single "best" pump variant, but by proposing a diverse portfolio of feasibility pump configurations and running them in parallel, a strategy they call a "storm" of feasibility pumps.
+
+The variants differ primarily in how the projection step handles nonconvexity. Some minimize a penalty function that combines distance-to-rounding with constraint violation, allowing the projection to trade off feasibility of the continuous relaxation against proximity to the integer target. Others minimize constraint violation directly, seeking a point that is nearly feasible for the nonlinear constraints while staying close to integer values. The different objective functions in the projection step cause the pump variants to explore different regions of the search space, so running them concurrently increases the probability that at least one variant finds a good feasible solution.
+
+citet:dambrosio2012 tested the storm approach on nonconvex instances from MINLPLib and found that the portfolio strategy is substantially more robust than any individual pump variant. The best feasible solution found across all pump runs is kept as the incumbent, providing a strong starting bound for the subsequent [[file:spatial-branch-and-bound.org][spatial branch-and-bound]] search. The storm concept also parallelizes naturally: each pump variant is independent and can run on a separate core, making it well suited to modern multi-core architectures.
+
+** Three-Ideas Pump in Couenne
+
+citet:belotti2017 built directly on the storm results to engineer the feasibility pump shipped in [[file:../concepts/couenne-solver.org][Couenne]]. Their three contributions are: (1) a /hierarchy of integer-recovery procedures/ that tries cheap rounding of MILP-relaxation solutions before resorting to full MINLP projections, amortizing effort across a pump run; (2) a /generalized distance function/ that penalizes nonlinear constraint violation rather than only integer rounding distance, so the LP step drifts toward points that are simultaneously close to integrality and to the nonlinear feasible region; and (3) /per-iteration linearization refresh/, which inserts new McCormick-style cuts for currently violated nonconvex atoms at every pump iteration so the sequence of LPs tightens monotonically. The combination improved both feasibility-find rate and incumbent quality on MINLPLib and is an important part of Couenne's primal-heuristic layer.
+
+** Role in Branch and Bound
+
+The feasibility pump is typically deployed at the root node of the [[file:spatial-branch-and-bound.org][spatial branch-and-bound]] tree, before the branching process begins. A good incumbent obtained early has a compounding effect on solver performance: it enables aggressive pruning of subproblems whose relaxation bounds exceed the incumbent value, potentially eliminating large portions of the search tree from the very first iterations. Without an early incumbent, the solver must explore many nodes before it can begin pruning, leading to much larger trees and longer solve times.
+
+In discopt, the feasibility pump runs after the root node NLP relaxation solve. If the relaxation solution is not already integer-feasible, the pump attempts to find a nearby feasible integer point that can serve as the initial incumbent for warm-starting the branch-and-bound tree. This integration follows the standard practice in modern MINLP solvers such as Bonmin citep:bonami2008 and SCIP citep:bestuzheva2025, where primal heuristics are a critical component of the overall algorithmic portfolio.

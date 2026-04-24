@@ -1,0 +1,72 @@
+#+TITLE: Disjunctive Cuts for Nonconvex MINLP
+#+FILETAGS: :method:disjunctive-cuts:cgl:couenne:nonconvex:minlp:
+
+* Disjunctive Cuts for Nonconvex MINLP
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: belotti2012 belotti2009
+:STATUS: draft
+:CREATED: 2026-04-16
+:END:
+
+Disjunctive cuts are valid linear inequalities derived from a disjunction
+(a union of polyhedra) that the feasible region must satisfy. In MILP,
+generating disjunctive cuts from a simple /x_i ≤ 0 OR x_i ≥ 1/ disjunction
+via Balas's cut-generating LP (CGLP) is a classical technique that unified
+Gomory, lift-and-project, and intersection cuts. citet:belotti2012 adapts
+this machinery to nonconvex MINLP, targeting disjunctions that arise from
+spatial branching (x ≤ m OR x ≥ m, where m is some interior split point of a
+continuous variable) as well as from integrality.
+
+** Setting
+
+After auxiliary-variable reformulation (see [[file:auxiliary-variable-reformulation.org][auxiliary variable reformulation]]), the feasible region of a
+nonconvex MINLP can be written as the intersection of a polyhedron P (from
+McCormick envelopes and the linear constraints) with a set of nonconvex
+"simple" relations (/w = x y/, /w = x^2/, /w = exp(x)/, etc.). At a given
+node, one has a fractional or relaxation-infeasible LP solution x* and a
+branching disjunction /D_1 ∨ D_2/ induced by either an integer variable or
+a spatial split on a continuous one.
+
+** Cut-generating LP
+
+Let P_1 = P ∩ D_1 and P_2 = P ∩ D_2. Any inequality /α^T x ≤ β/ valid for
+both P_1 and P_2 is valid for the MINLP. citet:belotti2012 derives an
+explicit CGLP that, for a given x*, computes the deepest such cut
+(largest α^T x* − β) over a normalization cone. Because the auxiliary
+reformulation keeps each nonconvex atom bounded by its McCormick envelope,
+the CGLP remains linear even though the underlying problem is nonconvex.
+
+The resulting cut is added to the LP relaxation at the current node (and
+optionally inherited by descendants), tightening the outer approximation.
+
+** When it helps
+
+- At the root, a few disjunctive cuts lifted from the strongest integer
+  fractional variable, or from the widest-gap continuous variable, can
+  close a meaningful fraction of the root gap.
+- At deeper nodes, the technique is more useful on problems where McCormick
+  envelopes are slack and where spatial branching alone converges slowly.
+- As in MILP, generating too many disjunctive cuts is counterproductive,
+  because each additional cut inflates the LP basis; Couenne caps the cut
+  pool and evicts low-efficacy cuts.
+
+** Relationship to other Couenne components
+
+- Complements [[file:bound-tightening.org][FBBT and OBBT]] by providing /globally/ valid inequalities
+  that bound-tightening cannot produce.
+- Uses the same auxiliary-variable layer as [[file:mccormick-relaxations.org][McCormick relaxations]].
+- Generated cuts are passed to the Cgl cut manager (from COIN-OR) and
+  mixed with standard MILP cuts at each node.
+
+** See also
+
+- [[file:../concepts/couenne-solver.org][Couenne]]
+- [[file:auxiliary-variable-reformulation.org][auxiliary variable reformulation]]
+- [[file:spatial-branch-and-bound.org][spatial branch-and-bound]]
+
+** References
+
+- citep:belotti2012 -- disjunctive cuts for nonconvex MINLP (IMA book chapter)
+- citep:belotti2009 -- primary Couenne algorithmic paper where the
+  disjunctive-cut component is integrated with FBBT/OBBT and spatial B&B.

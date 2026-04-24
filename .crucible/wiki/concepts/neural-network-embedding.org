@@ -1,0 +1,138 @@
+#+TITLE: Neural Network Embedding in Optimization
+#+FILETAGS: :concept:neural-network:milp:surrogate-model:omlt:relu:big-m:convex-hull:bound-tightening:
+#+CROSS_LINKS: big-m-formulations generalized-disjunctive-programming
+
+* Neural Network Embedding in Optimization
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: anderson2020 anderson-etal-2020 grimstad2019 grimstad-andersson-2019 fischetti2018 fischetti-jo-2018
+:STATUS: active
+:CREATED: 2026-04-04
+:UPDATED: 2026-04-05
+:END:
+
+Neural network embedding represents trained neural networks as explicit
+algebraic constraints within mathematical optimization models. A neural
+network trained on simulation or experimental data becomes a set of
+constraints in an MILP or MINLP, and the optimizer finds inputs that
+minimize or maximize the network's predicted output subject to additional
+engineering constraints. This paradigm is central to surrogate-based
+optimization, where evaluating the true objective (e.g., a CFD simulation)
+is too expensive for direct use in branch-and-bound.
+
+** Foundational Work: Deep NNs as MILP Constraints
+
+citet:fischetti-jo-2018 provided one of the earliest systematic treatments
+of encoding deep neural networks with ReLU activations as mixed-integer
+linear constraints. Their formulation introduces a binary indicator
+variable z_j for each ReLU neuron j: when z_j = 1 the neuron is active
+(output equals the pre-activation value), and when z_j = 0 the neuron is
+inactive (output is zero). The constraints take the standard big-M form
+(see [[file:big-m-formulations.org][big-M formulations]]):
+
+\begin{align}
+\hat{x}_j &\geq 0, \\
+\hat{x}_j &\geq W_j x + b_j, \\
+\hat{x}_j &\leq M_j^+ z_j, \\
+\hat{x}_j &\leq (W_j x + b_j) - M_j^-(1 - z_j),
+\end{align}
+
+where M_j^+ and M_j^- are upper and lower bounds on the pre-activation
+value of neuron j. citet:fischetti-jo-2018 observed that even modestly
+sized networks (a few hundred neurons) produce MILPs with many binary
+variables, and proposed bound tightening techniques to improve
+tractability. Their work established the NN-as-constraints paradigm that
+subsequent papers refined.
+
+** ReLU Networks as MILP Surrogates
+
+citet:grimstad-andersson-2019 studied the practical aspects of using
+trained ReLU networks as surrogate models within MILP optimization,
+focusing on chemical engineering applications. Their key contributions
+address the gap between theoretical formulation and computational
+tractability. They demonstrated that small-to-medium networks (on the
+order of tens of neurons per layer) are tractable as MILP surrogates, but
+solution times grow rapidly with network size. The number of binary
+variables equals the total number of ReLU neurons in the network, so a
+network with L hidden layers of width w introduces L * w binary variables.
+
+A critical finding of citep:grimstad-andersson-2019 is that bound
+tightening procedures specific to NN-embedded MILPs are essential for
+practical performance. They propagate bounds layer by layer through the
+network, computing interval arithmetic bounds on each neuron's
+pre-activation value. This is analogous to feasibility-based bound
+tightening (FBBT) on an expression DAG, where tighter bounds on
+intermediate nodes reduce the feasible region of the LP relaxation. With
+good bounds, many big-M values shrink dramatically, and some neurons can
+be fixed as permanently active or permanently inactive, eliminating the
+corresponding binary variables entirely.
+
+** Strong Formulations via Convex Hulls
+
+The standard big-M formulation for ReLU neurons yields weak LP
+relaxations, which means the branch-and-bound tree can grow
+exponentially. citet:anderson-etal-2020 addressed this by developing
+ideal (convex hull) MIP formulations that exploit the piecewise-linear
+structure of ReLU networks. Their central result is that the convex hull
+of the graph of a single ReLU neuron, intersected with input and output
+bound constraints, can be described by a polynomial number of linear
+inequalities.
+
+This is a significant strengthening compared to the big-M approach. Where
+the big-M formulation uses four constraints per neuron (as above), the
+ideal formulation provides the tightest possible LP relaxation for each
+neuron individually. citet:anderson-etal-2020 also developed a
+polynomial-time separation oracle for the resulting cutting planes, making
+it practical to use within a branch-and-cut framework. Their
+computational experiments on neural network verification problems showed
+orders-of-magnitude speedups compared to naive big-M formulations.
+
+The connection to [[file:generalized-disjunctive-programming.org][generalized disjunctive programming]] (GDP) is
+worth noting: a ReLU neuron is naturally a two-term disjunction (active
+vs. inactive), and the ideal formulation of citet:anderson-etal-2020 is
+essentially the convex hull relaxation of that disjunction. GDP theory
+predicts that convex hull formulations are tighter than big-M
+formulations, and the NN embedding literature confirms this dramatically
+in practice.
+
+** Bound Tightening for Networks
+
+The quality of any NN-embedded MIP depends critically on the tightness of
+pre-activation bounds at each neuron. All three foundational papers
+emphasize this point. Layer-by-layer interval arithmetic propagation
+computes, for each neuron, the range of possible pre-activation values
+given the bounds on the network's inputs. These bounds determine the big-M
+constants and, consequently, the strength of the LP relaxation.
+
+Optimization-based bound tightening (OBBT) can produce tighter bounds
+than interval arithmetic by solving LP relaxations to compute each
+neuron's minimum and maximum pre-activation value. This is more expensive
+(one LP per bound per neuron) but can dramatically reduce the big-M
+values. In practice, a combination of cheap interval arithmetic for an
+initial pass followed by selective OBBT on neurons with large bound ranges
+provides a good tradeoff citep:grimstad-andersson-2019.
+
+** Implementation in discopt
+
+discopt's =nn= module (=python/discopt/nn/=) implements neural network
+embedding with three formulation strategies. =FullSpaceFormulation=
+handles networks with smooth activations (sigmoid, tanh) by introducing
+explicit variables for every neuron and constraining them with the
+activation function, yielding an NLP or MINLP. =ReluBigMFormulation=
+encodes ReLU networks via the big-M MILP formulation described above,
+introducing binary variables for each ReLU neuron as in
+citep:fischetti-jo-2018. =ReducedSpaceFormulation= avoids auxiliary
+variables by nesting the network's computation as a single composite
+expression, which is compact but produces dense derivatives.
+
+The =bounds= module (=python/discopt/nn/bounds.py=) implements interval
+arithmetic propagation through network layers, computing pre-activation
+bounds that feed into the big-M constants of =ReluBigMFormulation=.
+Tighter bounds from this propagation directly improve solve performance,
+as emphasized by citep:grimstad-andersson-2019. The ONNX reader
+(=python/discopt/nn/readers/onnx_reader.py=) loads pretrained models from
+standard ML frameworks, bridging the gap between training (in PyTorch,
+TensorFlow, etc.) and optimization.
+
+** bibliographystyle:unsrt
+** bibliography:../../references.bib

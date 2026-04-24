@@ -1,0 +1,43 @@
+#+TITLE: Convexity Detection
+#+FILETAGS: :concept:convexity:dcp:classification:optimization:
+
+* Convexity Detection
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: adjiman1998 grant2006
+:STATUS: draft
+:CREATED: 2026-04-04
+:END:
+
+Convexity detection determines whether an optimization problem (or individual
+functions within it) is convex, enabling the solver to select appropriate
+algorithms. Convex problems can be solved to global optimality by local methods
+(interior point, NLP-BB), while nonconvex problems require spatial branch and
+bound with convex relaxations.
+
+** Disciplined Convex Programming (DCP)
+
+DCP applies composition rules to the expression DAG to verify convexity. Each
+elementary function is classified as convex, concave, affine, or unknown, and
+composition rules determine the convexity of composite expressions. For example,
+exp(affine) is convex, sum of convex functions is convex, and the maximum of
+convex functions is convex. DCP is conservative: it may classify a convex
+function as "unknown" if the composition rules cannot verify convexity, but it
+never misclassifies a nonconvex function as convex.
+
+** Eigenvalue-Based Detection
+
+For twice-differentiable functions, convexity can be verified by checking that
+the Hessian is positive semidefinite everywhere on the domain. This is the
+approach used in the alphaBB framework citep:adjiman1998, where the minimum eigenvalue
+of the Hessian determines how much diagonal perturbation is needed to ensure
+convexity. If the minimum eigenvalue is non-negative, the function is already
+convex.
+
+** Implementation in discopt
+
+discopt implements DCP-style convexity detection on the expression DAG,
+recognizing patterns like exp(affine), sum_of_convex, x**2, and others. When the
+model is detected as convex, the solver auto-selects NLP-BB (which requires
+convexity for valid lower bounds). When convexity cannot be verified, spatial B&B
+with convex relaxations is used instead.

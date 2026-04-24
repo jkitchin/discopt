@@ -1,0 +1,158 @@
+#+TITLE: Spatial Branch and Bound
+#+FILETAGS: :spatial-branch-and-bound:minlp:nonconvex:global:method:
+#+PROPERTY: ARTICLE_TYPE method
+#+PROPERTY: SOURCE_KEYS smith-pantelides-1999 smith1999 tawarmalani2005 belotti2009 horst1996 ryoo1996
+
+* Spatial Branch and Bound
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: smith-pantelides-1999 smith1999 tawarmalani2005 belotti2009 horst1996 ryoo1996
+:STATUS: active
+:CREATED: 2026-04-04
+:UPDATED: 2026-04-05
+:END:
+
+Spatial branch and bound is the dominant algorithm for deterministic global
+optimization of nonconvex MINLPs. The foundational formulation of the method
+for mixed-integer nonlinear problems was presented by
+cite:smith-pantelides-1999, who combined a symbolic reformulation strategy
+with systematic domain partitioning over both continuous and integer
+variables. Earlier work on deterministic global optimization
+citep:horst1996 had established branch-and-bound as a general framework,
+but the Smith and Pantelides contribution was among the first to unify
+factorable reformulation, convex relaxation construction, and spatial
+branching into a single coherent algorithm for MINLPs.
+
+** Spatial Branching versus Integer Branching
+
+Traditional branch and bound for mixed-integer linear or convex programs
+branches exclusively on integer variables: each node in the search tree
+fixes or restricts the domain of a discrete variable, and the continuous
+relaxation at each node is solved to provide bounds. For nonconvex
+problems, however, this is insufficient because the continuous relaxation
+itself may be nonconvex, so solving it does not yield a valid lower bound.
+
+Spatial branching addresses this by also partitioning the domains of
+continuous variables citep:smith-pantelides-1999. When a node's relaxation
+is loose (the gap between relaxation value and incumbent is large), the
+algorithm selects a continuous variable whose current domain contributes
+most to the relaxation error and bisects (or otherwise partitions) that
+domain. Each child node inherits tighter bounds on the branching variable,
+which in turn produces a tighter convex relaxation. This interleaving of
+integer branching and continuous-domain partitioning is what distinguishes
+spatial B&B from classical MIP branch and bound. The variable selection
+strategies that guide this process are discussed further in
+[[file:branch-variable-selection.org][branch variable selection]].
+
+** Symbolic Reformulation and Factorable Decomposition
+
+A central contribution of cite:smith-pantelides-1999 is the symbolic
+reformulation step that precedes relaxation construction. Given a general
+nonconvex MINLP, the algorithm decomposes every nonlinear expression into a
+sequence of elementary operations (addition, multiplication, division,
+univariate functions) by introducing auxiliary variables. This is the
+factorable decomposition originally proposed by McCormick
+citep:mccormick1976, but Smith and Pantelides formalized it as a
+preprocessing pass operating on the expression directed acyclic graph (DAG).
+
+The reformulated problem contains only simple nonconvex terms (bilinear
+products, univariate concave or convex functions, fractional terms), each of
+which has a known convex envelope or tight convex relaxation. The expression
+DAG representation is also the foundation for automatic differentiation and
+interval arithmetic bound propagation in modern solvers. In discopt, this
+decomposition is performed on the Rust-side expression IR before the JAX
+relaxation compiler constructs the node relaxations.
+
+** Convex Relaxation at Each Node
+
+At every node of the search tree, the algorithm constructs and solves a
+convex relaxation of the original problem restricted to the current
+subdomain. Because the symbolic reformulation has reduced the problem to
+elementary nonconvex operations, the relaxation is built term by term:
+bilinear products are relaxed via
+[[file:mccormick-relaxations.org][McCormick envelopes]]
+citep:mccormick1976,smith-pantelides-1999, univariate nonconvex functions
+are relaxed using secant lines and convex envelopes, and general twice-
+differentiable terms can be handled by
+[[file:alphabb-underestimators.org][alphaBB underestimators]]
+citep:androulakis1995. The theory of
+[[file:../concepts/convex-relaxations.org][convex relaxations]] for global
+optimization provides the mathematical foundation for these constructions.
+
+The optimal value of the convex relaxation at a node provides a valid lower
+bound on the original problem over that subdomain. If this lower bound
+exceeds the best known upper bound (the incumbent feasible solution), the
+node is fathomed (pruned). If the relaxation solution happens to be feasible
+for the original problem, it may update the incumbent. Otherwise, the node
+is branched further citep:smith-pantelides-1999,tawarmalani2005.
+
+** Integration with Bound Tightening
+
+Smith and Pantelides recognized that the quality of convex relaxations
+depends critically on the tightness of variable bounds at each node
+citep:smith-pantelides-1999. Their algorithm incorporates range reduction
+(bound tightening) as an integral component of the node processing
+strategy, not merely as an optional preprocessing step.
+
+[[file:bound-tightening.org][Bound tightening]] takes two principal forms
+in modern spatial B&B implementations. Feasibility-based bound tightening
+(FBBT) propagates constraints through the expression DAG using interval
+arithmetic to contract variable domains without solving any optimization
+subproblems citep:belotti2009. Optimality-based bound tightening (OBBT)
+solves auxiliary LP or convex relaxations to determine the tightest possible
+bounds on individual variables consistent with the relaxed feasible region
+citep:ryoo1996. Both techniques can dramatically shrink the domain at a
+node, which in turn tightens the McCormick envelopes and other relaxations,
+often enabling aggressive pruning. In discopt, FBBT is implemented in the
+Rust core via forward-backward propagation on the expression DAG, while
+OBBT leverages the HiGHS LP solver.
+
+** Convergence to the Global Optimum
+
+Spatial B&B converges to an epsilon-globally optimal solution in finite time
+for problems with bounded variable domains and continuous objective and
+constraint functions, provided the convex relaxations satisfy a key
+property: they must become exact (the relaxation gap must vanish) as the
+subdomain shrinks to a point citep:smith-pantelides-1999,tawarmalani2005.
+McCormick envelopes for bilinear terms satisfy this requirement because the
+width of the relaxation is proportional to the product of the variable
+ranges, which goes to zero under successive bisection. Similarly, alphaBB
+underestimators converge to the original function as the domain diameter
+shrinks citep:androulakis1995.
+
+The convergence argument proceeds as follows. At each iteration, the
+algorithm either prunes a node (tightening the global lower bound) or
+branches (creating children with strictly smaller domains). Because the
+domain is bounded and the relaxation error vanishes with domain diameter,
+the global lower bound must eventually reach within epsilon of the true
+optimal value. The finite-convergence guarantee requires that branching
+rules ensure no variable domain remains unbisected indefinitely, a
+condition satisfied by standard longest-edge or maximum-violation branching
+strategies citep:horst1996.
+
+** Implementation in discopt
+
+discopt implements spatial B&B as its primary algorithm for nonconvex
+MINLPs, following the general framework of cite:smith-pantelides-1999. The
+Rust B&B tree (TreeManager) manages the search tree, node selection, and
+bound management. Python orchestration in solver.py dispatches convex
+relaxation construction and NLP subproblem solving to JAX (batched IPM,
+McCormick relaxations, alphaBB underestimators) or to external NLP solvers
+(Ipopt, ripopt). FBBT is implemented in the Rust core via expression DAG
+propagation, and the factorable decomposition that Smith and Pantelides
+formalized is performed on the Rust-side expression IR before the JAX
+relaxation compiler builds node relaxations.
+
+** Relationship to Other Methods
+
+Spatial B&B is the nonconvex counterpart of
+[[file:nonlinear-branch-and-bound.org][NLP-BB]] (which handles convex
+MINLPs) and is the algorithmic framework used by competing solvers BARON
+citep:tawarmalani2005, Couenne citep:belotti2009, and SCIP. It differs from
+[[file:outer-approximation.org][outer approximation]] in that OA is a
+decomposition method (alternating NLP/MILP subproblems) while spatial B&B
+solves relaxations at every tree node. The key innovations of
+cite:smith-pantelides-1999 relative to earlier global optimization
+literature were the integration of symbolic reformulation with the B&B
+tree, enabling automatic construction of relaxations for general factorable
+MINLPs rather than requiring problem-specific relaxation derivations.

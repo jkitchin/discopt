@@ -1,0 +1,159 @@
+#+TITLE: Model Discrimination: Rival-Model Experimental Design and Selection
+#+FILETAGS: :method:doe:discrimination:model-selection:identification:
+#+PROPERTY: ARTICLE_TYPE method
+#+PROPERTY: SOURCE_KEYS hunter-reiner-1965 buzzi-ferraris-1983 box-hill-1967 atkinson-bogacka-1998 olofsson-2019 mavrotas-2009 wilks-1938 vuong-1989
+
+* Model Discrimination: Rival-Model Experimental Design and Selection
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: hunter-reiner-1965 buzzi-ferraris-1983 box-hill-1967 atkinson-bogacka-1998 olofsson-2019 mavrotas-2009 wilks-1938 vuong-1989
+:STATUS: draft
+:CREATED: 2026-04-24
+:END:
+
+Model discrimination is the twin problem of parameter estimation: rather
+than refining parameters of a single model, it designs experiments that
+maximally distinguish between several rival model structures and then
+picks the best post-experiment. Both halves are classical in chemical
+engineering (kinetic mechanism discrimination) and are supported in
+~discopt.doe~ through the ~discrimination~, ~discrimination_sequential~,
+and ~selection~ submodules.
+
+** Problem Statement
+
+Given M candidate models {M_i} each with parameter vector theta_i fitted
+to initial data, an experimental-design question asks: /what next
+experiment d will most separate the model predictions?/ Post-experiment,
+a selection question asks: /which model best fits the data?/ Both are
+answered in *prediction space* so the candidates need not share parameter
+names or counts citep:buzzi-ferraris-1983.
+
+For each model i, discopt evaluates the prediction
+  y_i(d) = f_i(theta_hat_i, d)
+and its prediction covariance
+  V_i(d) = J_i(d) * FIM_i^{-1} * J_i(d)^T
+where J_i is the Jacobian of f_i with respect to theta_i at the current
+estimate. Discrimination criteria are functions of {y_i, V_i}.
+
+** Five Discrimination Criteria (Pre-Experiment)
+
+*** Hunter-Reiner (HR, 1965)
+
+The original bi-model criterion citep:hunter-reiner-1965:
+
+  HR(d) = (y_1(d) - y_2(d))^T * Sigma_y^{-1} * (y_1(d) - y_2(d))
+
+where Sigma_y is the measurement-noise covariance. Maximize HR to find
+the design where the two predictions differ the most (noise-weighted).
+*Ignores prediction uncertainty*, so can propose designs in regions where
+both predictions are poorly known.
+
+*** Buzzi-Ferraris-Forzatti (BF, 1983) --- discopt's default
+
+Multiresponse, handles M >= 2, normalizes by both measurement noise and
+prediction-variance covariances citep:buzzi-ferraris-1983:
+
+  BF(d) = sum_{i<j} (y_i - y_j)^T * (V_i + V_j + 2*Sigma_y)^{-1} * (y_i - y_j).
+
+The V_i + V_j term downweights designs where predictions *look* different
+only because both models are uncertain there. The factor 2*Sigma_y
+accounts for the measurement noise on the observed response. This is
+discopt's default for its multi-model robustness and theoretical
+cleanness.
+
+*** Jensen-Rényi divergence (JR, Olofsson et al. 2019)
+
+A symmetric, information-theoretic divergence on the per-model Gaussian
+predictives N(y_i, V_i + Sigma_y) citep:olofsson-2019. Satisfies the
+triangle-inequality-like properties expected of a metric and scales
+naturally to M >= 2 models. Preferred over HR/BF when the predictive
+distributions are strongly non-overlapping.
+
+*** Mutual information (MI, Lindley 1956)
+
+The Bayesian-optimal information gain about the model index M given a
+future observation y at design d:
+
+  MI(d) = I(M; y | d) = H(M) - H(M | y, d).
+
+Estimated by nested Monte Carlo on the per-model Gaussian predictives
+(Foster et al. 2019). Computationally heaviest; theoretically tightest.
+Reserved for problems where the MC cost is tolerable.
+
+*** DT-compound (Atkinson-Bogacka-Bogacki 1998)
+
+When you care about *both* discrimination and parameter precision of the
+eventually-selected model citep:atkinson-bogacka-1998:
+
+  DT(d) = alpha * log det(FIM_pooled(d)) + (1-alpha) * BF(d)
+
+The weight alpha tunes between D-optimal precision and BF
+discrimination. Typical use: continue refining the surviving model once
+discrimination is near-decided.
+
+** Sequential Discrimination
+
+Closed-loop version:
+
+  1. Fit every model on initial data to get theta_hat_i and FIM_i.
+  2. Compute model weights w_i (e.g., posterior from likelihood +
+     prior, or Akaike weights).
+  3. Design the next experiment maximizing the chosen discrimination
+     criterion (optionally weight-aware).
+  4. Run it, update {theta_hat_i, FIM_i, w_i}.
+  5. Stop when max w_i exceeds a threshold (e.g. 0.95) or a budget is
+     spent.
+
+discopt implements this as ~sequential_discrimination~, which mirrors
+~sequential_doe~ but operates on a dictionary of experiments.
+
+** Post-Experiment Selection
+
+After data collection, rank the fitted models. ~discopt.doe.selection~
+derives every metric in one line from the estimator's /deviance/
+~D(theta_hat) = -2 log L(theta_hat)~ up to a constant under Gaussian
+noise, where ~EstimationResult.objective~ stores D directly.
+
+| Method   | Formula                                                                 |
+|----------+-------------------------------------------------------------------------|
+| AIC      | ~2*p + D~                                                               |
+| AICc     | ~AIC + 2*p*(p+1)/(n - p - 1)~                                           |
+| BIC      | ~p*log(n) + D~                                                          |
+| LRT G^2  | ~D_nested - D_full~ on ~df = p_full - p_nested~ (requires nesting)      |
+| Vuong z  | Per-observation log-likelihood ratios; for non-nested pairs             |
+
+AIC/BIC trade off differently: BIC penalizes complexity harder (log n
+vs. 2), so favors simpler models as n grows. AICc is the small-sample
+correction and is usually the tie-breaker for n < 40. The LRT is exact
+for nested pairs under chi-square asymptotics; Vuong is the non-nested
+analog citep:vuong-1989.
+
+Akaike weights
+  w_i = exp(-0.5*(AIC_i - AIC_min)) / sum_j exp(-0.5*(AIC_j - AIC_min))
+give a probabilistic interpretation of the ranking that sequential
+discrimination uses as model weights in step 2.
+
+** Connection to Other Tools
+
+Discrimination feeds into [[file:../concepts/model-based-doe.org][model-based DoE]] when the question is which
+experiment to run next; it feeds out of [[file:parameter-estimability.org][parameter estimability]] and
+[[file:algebraic-model-identifiability.org][algebraic identifiability]] when the question is whether individual
+models can even be fit. The /prediction-space/ operating regime means
+discrimination works on models with completely different parameterizations
+--- the information lives in the outputs, not the theta coordinates.
+
+** Relevance for discopt
+
+- Pre-experiment: ~discriminate_design(experiments, param_estimates,
+  design_bounds, criterion)~ returns a ~DiscriminationDesignResult~ with
+  the optimal design, per-model FIMs, and predictions.
+- Sequential: ~sequential_discrimination(...)~ returns a history of
+  ~DiscriminationRound~ objects and supports arbitrary run-experiment
+  callbacks.
+- Post-experiment: ~model_selection({"name": EstimationResult, ...},
+  method="aic")~ returns a ~ModelSelectionResult~ with scores, weights,
+  and the best model. ~likelihood_ratio_test~ and ~vuong_test~ are
+  provided for nested and non-nested pairwise comparisons.
+
+All five criteria are exposed via the ~DiscriminationCriterion~ enum;
+BF is the default.

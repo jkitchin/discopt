@@ -1,0 +1,176 @@
+#+TITLE: Convex MINLP Solvers
+#+FILETAGS: :concept:solver:convex:minlp:outer-approximation:cutting-planes:bonmin:shot:
+#+PROPERTY: ARTICLE_TYPE concept
+#+PROPERTY: SOURCE_KEYS bonami2008 kronqvist2019 kronqvist2020 kronqvist2016 lundell2022 westerlund1995 kelley1960
+
+* Convex MINLP Solvers
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: bonami2008 kronqvist2019 kronqvist2020 kronqvist2016 lundell2022 westerlund1995 kelley1960
+:STATUS: active
+:CREATED: 2026-04-05
+:UPDATED: 2026-04-05
+:END:
+
+Convex mixed-integer nonlinear programming (MINLP) occupies a distinctive
+position in the optimization landscape: the problems are NP-hard due to
+integrality requirements, yet the continuous relaxations are tractable convex
+programs. This convexity structure enables a family of decomposition algorithms
+that alternate between solving continuous NLP subproblems and discrete MILP
+master problems, with rigorous convergence guarantees that do not extend to the
+nonconvex case. The present article surveys the principal algorithmic approaches
+and the solvers that implement them.
+
+** Foundations: Kelley's Cutting Plane Method
+
+The theoretical root of all polyhedral outer approximation methods for convex
+MINLP is citep:kelley1960, which introduced the cutting plane method for
+continuous convex programs. The idea is to approximate the convex feasible set by
+an intersection of half-spaces (supporting hyperplanes), solve the resulting
+linear program over this polyhedral outer approximation, and then refine the
+approximation by adding a new supporting hyperplane at the LP solution point
+where the most violated convex constraint is linearized. Because the feasible set
+is convex, every supporting hyperplane is a valid inequality, and no feasible
+point is cut off. The sequence of LP solutions converges finitely to the optimum
+of the original convex program.
+
+Kelley's method provides the conceptual template for
+[[file:../methods/outer-approximation.org][outer approximation]] in the
+mixed-integer setting: replace the LP relaxation with an MILP, and replace or
+supplement the LP-based linearization strategy with NLP-derived gradient
+information.
+
+** Extended Cutting Plane (ECP)
+
+citet:westerlund1995 extended Kelley's cutting plane idea directly to convex
+MINLP. The extended cutting plane (ECP) method treats integer and continuous
+variables simultaneously: at each iteration it solves a single MILP over the
+accumulated linearizations, identifies the most violated nonlinear constraint at
+the MILP solution, and adds a linearization of that constraint at the solution
+point. No NLP subproblem is ever solved, which makes ECP particularly simple to
+implement since it requires only an MILP solver.
+
+The simplicity comes at a cost. Because linearizations are generated at MILP
+solution points, which may lie far from the boundary of the nonlinear feasible
+set, the cuts tend to be loose. ECP therefore typically requires more iterations
+to converge than methods that generate cuts at NLP optima or on the constraint
+boundary. Nevertheless, ECP became the algorithmic basis of the alpha-ECP solver
+and one of the two core cut generation strategies in SHOT
+citep:lundell2022.
+
+** Extended Supporting Hyperplane (ESH) and SHOT
+
+citet:kronqvist2016 introduced the extended supporting hyperplane (ESH) algorithm
+to address the looseness of ECP cuts without incurring the expense of full NLP
+subproblem solves. Given a point that violates a nonlinear constraint, ESH
+projects it onto the constraint boundary and generates a supporting hyperplane
+there. The resulting linearizations are tighter than those of ECP (because the
+linearization point lies on the nonlinear boundary rather than at a potentially
+distant MILP solution) while being cheaper than OA cuts (because a projection is
+less expensive than solving a full NLP). ESH can therefore be understood as
+interpolating between the cheap-but-loose cuts of ECP and the
+expensive-but-tight cuts of classical OA. The algorithm retains finite
+convergence for convex MINLPs.
+
+The SHOT solver (Supporting Hyperplane Optimization Toolkit) citep:lundell2022
+unifies ESH and ECP within a single-tree branch-and-bound framework. On the dual
+(lower bounding) side, SHOT constructs a polyhedral outer approximation using
+linearizations from both ESH and ECP, adding them as lazy constraints during the
+MILP tree search via callbacks. On the primal (upper bounding) side, it employs
+NLP solves at integer-feasible nodes and rounding heuristics. SHOT interfaces
+with CPLEX, Gurobi, or Cbc as the underlying MILP engine and is accessible
+through GAMS, AMPL, Pyomo, and JuMP.
+
+Computational results in citep:lundell2022 show SHOT competitive with or faster
+than Bonmin, DICOPT, and other dedicated convex MINLP solvers on standard
+benchmark libraries. The single-tree design avoids the overhead of re-solving
+MILP master problems from scratch at each iteration, which is a significant
+practical advantage over multi-tree OA implementations.
+
+** Bonmin: An Open-Source Algorithmic Framework
+
+Bonmin (Basic Open-source Nonlinear Mixed INteger programming) citep:bonami2008
+provides a modular framework for convex MINLP within the COIN-OR ecosystem. It
+implements five algorithmic variants:
+
+- B-BB: NLP-based branch and bound (see [[file:../methods/nonlinear-branch-and-bound.org][nonlinear branch and bound]]), solving the continuous NLP relaxation at each tree node using [[file:../methods/interior-point-methods.org][interior point methods]] via Ipopt.
+- B-OA: Classical outer approximation following the Duran-Grossmann formulation, solving NLP subproblems at integer-feasible nodes and accumulating linearizations.
+- B-QG: The LP/NLP-based branch and bound of Quesada and Grossmann, integrating OA into a single branch-and-bound tree.
+- B-Hyb: A hybrid that uses B-BB as the tree search strategy while generating OA cuts opportunistically at integer-feasible nodes.
+- B-ECP: Extended cutting plane within branch and bound, following citep:westerlund1995.
+
+The computational study in citep:bonami2008 found that B-Hyb and B-OA tend to
+perform best overall across a test collection of convex MINLP instances, while
+B-BB is the most robust option for difficult problems where the MILP master
+problem becomes expensive. Bonmin builds on Ipopt for NLP solves, Cbc for MILP
+solves, and the CoinUtils infrastructure, making it fully open-source and widely
+adopted in academic and industrial settings.
+
+** Regularized and Quadratic Outer Approximation
+
+A well-known weakness of standard OA is that the MILP master problem can propose
+integer combinations far from the current incumbent, leading to NLP subproblems
+that are difficult to solve or infeasible. citet:kronqvist2020 proposed two
+enhancements that address this issue while retaining finite convergence
+guarantees.
+
+Regularized OA adds a trust-region-like penalty term to the MILP master problem
+objective that discourages large steps in integer space. The penalty keeps the
+next trial point close to the incumbent, producing more tractable NLP subproblems
+and often reducing the total number of OA iterations.
+
+Quadratic OA uses second-order information from the NLP subproblem, specifically
+the Lagrangian Hessian, to construct a quadratic (rather than purely linear)
+outer approximation. The resulting MIQP master problem provides a more faithful
+local model of the nonlinear feasible set, leading to better integer predictions.
+This approach connects outer approximation to
+[[file:../methods/interior-point-methods.org][interior point methods]], which
+routinely compute second-order information as part of the Newton step.
+
+Computational experiments on 109 test problems in citep:kronqvist2020 showed
+significant improvements from both techniques, with regularized OA being
+particularly effective at reducing total solve time across the benchmark set.
+
+** Solver Comparison and Practical Guidance
+
+citet:kronqvist2019 conducted an extensive computational comparison of 16 solvers
+for convex MINLP, including BARON, ANTIGONE, Bonmin (all five variants), Couenne,
+DICOPT, KNITRO, SCIP, and SHOT. The benchmark used a collection of convex MINLP
+instances and measured both solution quality and computational time. The study
+analyzed how solver performance varies with problem characteristics such as
+discrete density (the fraction of integer variables), degree of nonlinearity, and
+problem size.
+
+Key findings from the comparison include the following. BARON and SHOT emerged as
+strong performers across the full test set. BARON showed particular strength on
+problems with low discrete density, where the continuous relaxation provides
+substantial information. NLP-based branch and bound (B-BB in Bonmin) proved most
+robust on problems where the MILP master problem is expensive relative to the NLP
+subproblems. The single-tree approaches (B-QG in Bonmin, SHOT) generally
+outperformed multi-tree OA on problems requiring many iterations. The performance
+profiles and statistical analysis in citep:kronqvist2019 provide practitioners
+with concrete guidance for solver selection based on problem structure.
+
+For the discopt project, the methodology in citep:kronqvist2019 is directly
+relevant to the benchmarking framework in =discopt_benchmarks/=, which compares
+discopt against BARON, Couenne, SCIP, and HiGHS using similar metrics and
+performance profiles.
+
+** Relationship to Other Methods
+
+The convex MINLP solver landscape connects to several related algorithmic
+families. [[file:../methods/outer-approximation.org][Outer approximation]]
+provides the theoretical foundation for ECP, ESH, and the OA variants in Bonmin
+and DICOPT. [[file:../methods/nonlinear-branch-and-bound.org][Nonlinear branch
+and bound]] is the alternative paradigm that avoids MILP master problems entirely,
+instead solving NLP relaxations at every tree node; Bonmin's B-BB mode implements
+this approach. [[file:../methods/interior-point-methods.org][Interior point
+methods]], particularly Ipopt, serve as the NLP engine in virtually all convex
+MINLP solvers, providing both primal solutions and the gradient or Hessian
+information needed for linearization.
+
+For nonconvex MINLPs, the convexity assumptions underlying these algorithms
+break down: linearizations at NLP solutions may cut off the global optimum. Global
+solvers like BARON and Couenne use spatial branch and bound with convex
+relaxations to handle nonconvexity, a fundamentally different approach from the
+decomposition-based methods described here.

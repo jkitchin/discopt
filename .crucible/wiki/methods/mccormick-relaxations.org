@@ -1,0 +1,132 @@
+#+TITLE: McCormick Relaxations
+#+FILETAGS: :mccormick:relaxation:convex:factorable:global-optimization:envelopes:
+#+PROPERTY: ARTICLE_TYPE method
+#+PROPERTY: SOURCE_KEYS mccormick1976 mccormick-1976 alkhayyal1983 scott2011 tsoukalas2014 mitsos2009
+
+* McCormick Relaxations
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: mccormick1976 mccormick-1976 alkhayyal1983 scott2011 tsoukalas2014 mitsos2009
+:STATUS: revised
+:CREATED: 2026-04-04
+:REVISED: 2026-04-05
+:END:
+
+McCormick relaxations are the most widely used technique for constructing convex
+and concave relaxations of nonconvex functions in deterministic global
+optimization. Introduced by citep:mccormick1976, the approach provides a
+computable procedure for obtaining convex underestimating programs for factorable
+nonconvex optimization problems. The method recursively propagates convex
+underestimators and concave overestimators through the computational graph
+(expression DAG) of a factorable function, building relaxations for each
+intermediate operation from the relaxations of its inputs.
+
+** Factorable Functions and Their Significance
+
+The central concept in cite:mccormick1976 is the class of factorable functions. A
+function is factorable if it can be expressed as a finite recursive composition of
+binary sums and products of univariate functions. This definition encompasses
+essentially every function that can be represented on a computer, since arithmetic
+operations, transcendental functions (exp, log, sin, cos), and powers are all
+elementary univariate or binary operations. The extraordinary breadth of the
+factorable function class is what gives McCormick relaxations their near-universal
+applicability in global optimization. Any factorable program can be decomposed
+into a sequence of intermediate variables, each defined by a single elementary
+operation, forming an expression DAG (see [[file:../concepts/expression-dag-and-ad.org][Expression DAG and AD]]).
+
+** Relaxation by Recursive Composition
+
+For each elementary operation in the factorable decomposition, McCormick derives
+convex and concave envelopes (the tightest possible convex underestimator and
+concave overestimator) over a bounded domain. The key insight is that if convex
+and concave relaxations are known for the inputs to an elementary operation, then
+relaxations for the output can be computed using the composition rules. For
+univariate operations like exp(x), the convex envelope is the function itself
+(since exp is convex) and the concave envelope is the secant line connecting the
+bound endpoints. For concave univariate functions like log(x), the roles are
+reversed: the function itself serves as the concave envelope, and a supporting
+tangent line provides the convex envelope. By composing these element-wise
+relaxations through the expression tree, one obtains a convex relaxation of the
+original nonconvex program without needing to analyze the global structure of the
+function.
+
+** Bilinear McCormick Envelopes
+
+For a bilinear term w = xy with x in [x_L, x_U] and y in [y_L, y_U], the
+McCormick envelope provides four linear inequalities that define the convex hull
+of the set {(x, y, w) : w = xy, x in [x_L, x_U], y in [y_L, y_U]}. These four
+inequalities are:
+
+- w >= x_L y + y_L x - x_L y_L
+- w >= x_U y + y_U x - x_U y_U
+- w <= x_U y + y_L x - x_U y_L
+- w <= x_L y + y_U x - x_L y_U
+
+This is the tightest possible convex relaxation for bilinear terms over a box
+domain citep:alkhayyal1983. The envelope tightens as the variable bounds narrow
+(for instance, during spatial branch-and-bound node processing), and becomes exact
+when any variable is fixed to a single value. The quality of the relaxation
+therefore depends directly on the quality of the variable bounds, which motivates
+the use of [[file:../methods/bound-tightening.org][bound tightening]] techniques
+such as FBBT and OBBT.
+
+** Role in Spatial Branch-and-Bound
+
+McCormick relaxations serve as the lower bounding mechanism in
+[[file:../methods/spatial-branch-and-bound.org][spatial branch-and-bound]]
+algorithms. At each node of the search tree, the nonconvex program is replaced by
+its McCormick relaxation, yielding a convex problem whose optimal value provides a
+valid lower bound on the original problem over that subdomain. Regions where this
+lower bound exceeds the best known upper bound (incumbent) can be pruned, since no
+improving solution can exist there. As the branch-and-bound algorithm subdivides
+the domain, the variable bounds tighten and the McCormick envelopes become
+progressively sharper, eventually converging to the true function values. This
+scheme is the backbone of modern deterministic global optimization solvers such as
+[[file:../concepts/baron-solver.org][BARON]] citep:sahinidis1996.
+
+** Generalized McCormick Relaxations
+
+citet:scott2011 extended McCormick relaxations via subgradient propagation. Rather
+than introducing auxiliary variables for each intermediate operation in the
+factorable decomposition, generalized McCormick propagates convex and concave
+relaxation values together with their subgradients directly through the
+composition. This produces tighter relaxations because the auxiliary variable
+decomposition introduces excess freedom that loosens the relaxation. The
+subgradient information also enables the use of bundle-type methods for solving
+the relaxed problems. citet:tsoukalas2014 further extended this framework to
+multivariate outer functions without requiring a univariate decomposition,
+broadening the class of operations for which tight relaxations are available.
+
+** McCormick Relaxations of Algorithms
+
+citet:mitsos2009 extended McCormick relaxations beyond closed-form expressions to
+algorithmic functions, including iterative procedures, ODE integrators, and
+fixed-point iterations. By propagating relaxation arithmetic (interval bounds plus
+convex/concave estimators) through the steps of an algorithm, one obtains valid
+convex relaxations of the algorithm's output as a function of its inputs. This
+extension enables global optimization of simulation-based and equation-free
+models, which cannot be expressed as explicit factorable functions but can
+nonetheless be evaluated algorithmically.
+
+** Comparison with alphaBB Underestimators
+
+An alternative approach to constructing convex relaxations is the
+[[file:../methods/alphabb-underestimators.org][alphaBB method]]
+citep:androulakis1995, which adds a scaled quadratic perturbation to enforce
+convexity. While alphaBB relaxations are simpler to construct (they do not require
+decomposition into elementary operations), McCormick relaxations are generally
+tighter because they exploit the structure of each individual operation. The
+tightness advantage of McCormick relaxations becomes more pronounced for problems
+with many intermediate operations and tight variable bounds.
+
+** Implementation in discopt
+
+discopt implements McCormick relaxations in the JAX backend
+(=python/discopt/_jax/mccormick_nlp.py=). The expression DAG is compiled into JAX
+operations that propagate interval bounds and McCormick relaxation values
+simultaneously. JAX's automatic differentiation then provides exact gradients of
+the relaxation with respect to the original variables, enabling efficient
+solution of the relaxed subproblems via interior-point methods (see
+[[file:../methods/interior-point-methods.org][Interior Point Methods]]). The
+relaxations are used as lower bounding problems at spatial B&B nodes, solved via
+the JAX IPM or as midpoint evaluations.

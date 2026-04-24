@@ -1,0 +1,81 @@
+#+TITLE: Debugging and Troubleshooting discopt
+#+FILETAGS: :debugging:troubleshooting:discopt:solver:convergence:
+#+PROPERTY: ARTICLE_TYPE method
+#+PROPERTY: SOURCE_KEYS
+
+* Debugging and Troubleshooting discopt
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS:
+:STATUS: draft
+:CREATED: 2026-04-05
+:END:
+
+This article documents the failure modes, diagnostic techniques, and fixes encountered during the development and adversarial testing of the discopt solver. The failure modes described here arise from the interaction of multiple subsystems (FBBT, NLP subproblem solvers, the branch-and-bound loop, and JAX compilation), and many of them are subtle enough that the solver reports a plausible but incorrect result rather than an obvious crash. The article is organized by failure mode, with each section describing symptoms, root cause, and the fix that was applied.
+
+** False Infeasibility from FBBT Over-Tightening
+
+The constraint-based [[file:bound-tightening.org][bound tightening]] (FBBT) implemented in =_tighten_node_bounds= uses a Jacobian linearization to propagate implied variable bounds at each node of the [[file:spatial-branch-and-bound.org][spatial branch-and-bound]] tree. For a linear constraint such as x_i <= M * y_i with y_i fixed to 0, this linearization is exact: the Jacobian is constant, and propagation correctly implies x_i = 0. However, for nonlinear constraints involving terms like x^{1.5}, exp(x), or log(x), the Jacobian varies across the domain, and treating it as constant introduces an unsound linear approximation. Over multiple propagation rounds this approximation compounds, progressively collapsing variable bounds toward a single point that may lie outside the actual feasible region. The result is that the solver declares the node (and sometimes the entire problem) infeasible when a feasible solution exists.
+
+The symptom is distinctive: the solver reports =status="infeasible"= on a problem that is known to be feasible, and inspection of the branch-and-bound log shows that all nodes are pruned as infeasible at iteration 0, before any NLP subproblem is solved. The diagnostic is to print the lower and upper bounds before and after =_tighten_node_bounds= and check whether any variable's interval collapses to an empty or near-empty range.
+
+The fix (issue #6) detects which constraints are truly linear by evaluating the Jacobian at two distinct points within the current bounds and checking whether the rows change. If the Jacobian row for constraint j is identical (within tolerance 1e-8) at both evaluation points, that constraint is classified as linear and FBBT is applied. Otherwise the constraint is skipped. This detection is performed once per call to =_tighten_node_bounds= and adds negligible cost relative to the propagation loop. The relevant code evaluates the Jacobian at the 25th and 75th percentile of the current bound interval, computes the absolute difference per row, and sets an =is_linear= boolean mask that gates all subsequent propagation.
+
+** NLP Subproblem Stalls Without Time Limits
+
+Before the fix for issue #5, the =max_wall_time= parameter was never propagated from the top-level solve call to the individual NLP subproblem solvers. This meant that a single stalled ipopt or ripopt call could block the branch-and-bound loop indefinitely, making the solver appear to hang even though the overall time limit had long expired. The problem was particularly acute for degenerate subproblems arising from big-M constraints with fixed binary variables, where the [[file:interior-point-methods.org][interior point method]] can cycle without making progress.
+
+The fix computes the remaining time budget as =remaining = time_limit - (time.perf_counter() - t_start)= and sets =opts["max_wall_time"] = max(remaining, 0.1)= before dispatching each NLP call. This applies to =_solve_continuous= (the pure-NLP path), both branch-and-bound loops (spatial B&B and NLP-BB), and =_solve_node_nlp_ripopt= (which additionally caps the per-node limit at min(30 seconds, remaining) to prevent any single node from consuming too large a share of the budget).
+
+The JAX IPM presents a special case because it uses =jax.lax.while_loop=, which is compiled to XLA and cannot check wall-clock time mid-iteration. The workaround implemented in =solve_nlp_ipm= is to check elapsed time post-hoc after the loop completes. If the wall time exceeds the limit, the status is downgraded from =OPTIMAL= to =ITERATION_LIMIT= unless the solution is primal-feasible (constraint violation below 1e-6), in which case the solver accepts it as optimal on the grounds that the IPM may have stalled near the solution due to degenerate curvature while still producing a usable result.
+
+** ripopt Convergence Gate on Corrupted Dual Variables
+
+Issue #8 exposed a subtle interaction between ripopt's convergence gate and its dual variable computation. ripopt maintains two sets of bound multipliers: the iterative z values that are updated at each IPM iteration, and z_opt values that are computed analytically from the KKT conditions at the current primal-dual point. In well-conditioned problems these two sets agree. However, in degenerate subproblems (particularly those arising from fixed binary variables in MINLP nodes) the iterative z multipliers can diverge to large values while z_opt remains correct and small. The convergence gate was checking the iterative z values, so it would report a large dual infeasibility (du_u on the order of 1e2) and refuse to declare convergence even though the primal solution was optimal and the analytically computed duals confirmed this.
+
+The symptom is that every branch-and-bound node hits the maximum iteration count (typically 3000) and the diagnostic output shows =du_u=1e2= but =du=0=, indicating that the primal and constraint duals are converged but the bound duals are not. A useful diagnostic is to solve the same subproblem with both ipopt and ripopt: if ipopt finds the optimal in a few iterations but ripopt hits max_iter, corrupted iterative duals are the likely cause.
+
+The fix, introduced in ripopt 0.6.1, adds a z_opt fallback to the convergence gate. When the iterative z check fails but z_opt satisfies the convergence tolerance, the solver accepts the solution. This eliminates the stall without weakening the convergence criterion for well-conditioned problems.
+
+** Degenerate Subproblems from Big-M Constraints
+
+When binary variables are fixed during branching (for example, y=0 in the constraint x <= M*y), the feasible region for the associated continuous variables can collapse to a single point or a very small neighborhood. Interior point solvers are poorly suited to such degenerate geometries because their barrier function requires a strictly interior starting point, which may not exist when the feasible region is essentially a face of the original polytope.
+
+The pre-screening logic in =_solve_node_nlp= detects trivially infeasible nodes before invoking the full NLP solver. When most variables are pinned (lower bound equals upper bound), the function evaluates all constraints at the midpoint of the remaining free variables. If any constraint is violated beyond tolerance (1e-6) at this point and also at a second check point (the bounds midpoint), the node is declared infeasible without calling the NLP solver. This avoids wasting time on subproblems that are trivially empty.
+
+FBBT also helps with big-M degeneracy by propagating the implications of fixed binary variables. When y=0 is fixed and the constraint x <= M*y is present, FBBT propagates M*y = 0 and tightens x's upper bound to 0, which (combined with x >= 0) pins x to zero. This propagation happens before the NLP solver is invoked and can simplify the subproblem significantly.
+
+** Cross-Term Handling in Objectives
+
+Adversary testing runs on problems like HS035 and Markowitz QP revealed that bilinear cross-terms (x_i * x_j with i != j) were sometimes silently dropped during expression compilation. When a cross-term is dropped, the objective landscape changes, and the solver finds a different optimum that is optimal for the simplified (incorrect) problem but suboptimal or infeasible for the original. The failure is silent in the sense that the solver reports =status="optimal"= with a clean convergence, but the objective value does not match the known optimal.
+
+Subsequent testing on HS076 and the quadratic knapsack problem confirmed that cross-terms are handled correctly in the current codebase. The diagnostic for this class of bug is to evaluate the objective function at the known optimal point using the evaluator's =evaluate_objective= method and compare the result against the expected objective value. If the evaluator returns a different value, the expression DAG has lost a term. A more systematic check is to compare the evaluator's gradient at a generic point against a finite-difference approximation; a missing cross-term will show up as a discrepancy in the partial derivatives with respect to the involved variables.
+
+** JAX Precision Issues
+
+JAX defaults to 32-bit floating point arithmetic unless the environment variable =JAX_ENABLE_X64=1= is set before the library is imported. In 32-bit mode, constraint satisfaction checks that use tolerances on the order of 1e-6 become unreliable because float32 has only about 7 decimal digits of precision, and accumulated rounding in gradient and Hessian computations can produce errors on the order of 1e-4 or worse. Convergence tests in the IPM are similarly affected: the solver may declare convergence prematurely (because the residuals appear small due to rounding) or fail to converge (because progress stalls at the float32 noise floor).
+
+discopt checks whether 64-bit mode is enabled at import time and issues a warning if it is not. The recommended practice is to set the environment variable at the top of any script or in the shell profile before any JAX import occurs. Setting it after JAX has been imported has no effect because JAX configures its default dtype at import time.
+
+** Using discopt's LLM Diagnosis Module
+
+The =llm/diagnosis.py= module provides automated analysis of solve results, particularly for infeasible models. The =diagnose_infeasibility= function takes a model and a =SolveResult= with =status="infeasible"= and performs a multi-step analysis: it computes constraint violations at the best available point, analyzes variable bounds for empty or near-fixed domains, and builds a structured diagnostic report. If litellm is available (installed via =pip install discopt[llm]=), the report is passed to an LLM for interpretation, which can identify the most likely conflicting constraint subset and suggest minimal relaxations to restore feasibility.
+
+The safety invariant is that LLM outputs never affect solver math. The LLM generates explanatory text and suggestions, but all formulations produced through the LLM pipeline pass through =validate()= before being accepted. If litellm is unavailable, the module degrades gracefully and returns the structured report without LLM interpretation. No solver capability requires the LLM module; it is purely an optional diagnostic and explanation layer.
+
+** General Diagnostic Workflow
+
+When a discopt solve produces unexpected results, a systematic diagnostic workflow helps isolate the failure mode. The recommended sequence begins with inspecting the solve status and objective value to determine whether the solver claims success, infeasibility, or a limit. If the status is optimal, verify constraint satisfaction at the returned solution by evaluating all constraints and checking that violations are within tolerance. A mismatch between the reported status and actual feasibility indicates a convergence gate or tolerance issue.
+
+The next step is to compare backends. discopt supports multiple NLP solvers for its subproblems (the JAX IPM, ipopt via cyipopt, and ripopt), and running the same problem with different backends can reveal whether the issue is in a specific solver or in the modeling layer. If one backend succeeds and another fails, the problem is likely a solver-specific numerical issue. If all backends fail, the problem is more likely in the model formulation or the evaluator.
+
+Testing with relaxed binary variables (replacing integers with continuous relaxations) isolates whether the failure is in the NLP subproblem or in the branching logic. If the continuous relaxation solves correctly but the integer problem fails, the issue is likely in bound propagation, branching, or the handling of fixed variables in subproblems.
+
+Checking FBBT bounds at failing nodes reveals whether over-tightening is causing false infeasibility. Toggling between =nlp_bb=True= (NLP-based branch-and-bound) and =nlp_bb=False= (spatial branch-and-bound) tests whether the failure is specific to one B&B strategy. Finally, reducing the problem to the smallest failing subproblem (by fixing variables or removing constraints) produces a minimal reproducing case that is much easier to debug.
+
+** Cross-References
+
+- [[file:spatial-branch-and-bound.org][Spatial Branch-and-Bound]]: the top-level algorithm whose nodes produce the subproblems discussed here
+- [[file:bound-tightening.org][Bound Tightening (FBBT and OBBT)]]: the FBBT over-tightening issue is a specific failure mode of the technique described there
+- [[file:interior-point-methods.org][Interior Point Methods]]: the IPM convergence and degeneracy issues discussed in several sections above
+- [[file:nonlinear-branch-and-bound.org][Nonlinear Branch-and-Bound]]: the NLP-BB strategy that serves as an alternative to spatial B&B

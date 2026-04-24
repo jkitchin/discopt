@@ -1,0 +1,132 @@
+#+TITLE: HiGHS Solver
+#+FILETAGS: :concept:highs:solver:lp:mip:simplex:ipm:pdlp:
+
+* HiGHS Solver
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: huangfu-hall-2018 galabova-hall-2020 schork-gondzio-2020 achterberg2020presolve highs-github
+:STATUS: active
+:CREATED: 2026-04-21
+:UPDATED: 2026-04-21
+:END:
+
+HiGHS is an open-source, MIT-licensed LP/MIP/QP solver developed primarily at
+the University of Edinburgh. It pairs a modern parallel dual revised simplex
+implementation citep:huangfu-hall-2018 with an interior-point method
+citep:schork-gondzio-2020, a PDLP first-order LP solver, an active-set QP
+solver, and a full branch-and-cut MIP engine with extensive presolve
+citep:achterberg2020presolve. For discopt, HiGHS is both the default LP
+backend called from Rust and the single most important /reference
+implementation/ to study when deciding which MIP components to port, because
+its permissive license makes source-level adaptation straightforward.
+
+** License and Source Layout
+
+HiGHS is distributed under the **MIT license** (verified in =LICENSE.txt= at
+the repository root, =ERGO-Code/HiGHS=). This permits unlimited use,
+modification, and redistribution, including line-by-line ports into Rust,
+subject only to retention of the copyright notice. Algorithms themselves are
+not copyrightable (US: Baker v. Selden, 17 USC §102(b)); only the specific
+source expression is. The safe integration pattern for discopt is therefore:
+re-implement from the papers where possible, cross-check against HiGHS
+outputs on shared instances, and preserve the MIT notice + upstream filename
+mapping in any module that is a close port. Two vendored sub-projects
+(=highs/pdlp/cupdlp/= and =highs/ipm/basiclu/=) carry their own compatible
+licenses that should be tracked separately.
+
+The source tree concentrates logic in a small number of large files rather
+than SCIP's plugin-per-reduction style. Key locations:
+
+- =highs/simplex/HEkkDual*.cpp= — dual revised simplex with hypersparse
+  FTRAN/BTRAN, dual steepest-edge pricing, and parallel CHUZR.
+- =highs/simplex/HEkkPrimal.cpp= — primal revised simplex with Devex/steepest edge.
+- =highs/ipm/IpxWrapper.cpp= + vendored =basiclu/= — Mehrotra predictor-corrector
+  interior-point method with basis-preconditioned LU.
+- =highs/pdlp/= — first-order primal-dual LP (cuPDLP-C) with optional CUDA kernels.
+- =highs/qpsolver/= — active-set QP solver (Feldmeier, PhD thesis, Edinburgh 2022).
+- =highs/presolve/HPresolve.cpp= — all LP/MIP presolve reductions in one file
+  (see [[file:../methods/mip-presolve.org][MIP presolve]]).
+- =highs/mip/HighsPrimalHeuristics.cpp= + =HighsFeasibilityJump.cpp= — MIP
+  primal heuristics (see [[file:../methods/mip-primal-heuristics.org][MIP primal heuristics]]).
+- =highs/mip/HighsSearch.cpp=, =HighsSeparation.cpp=, =HighsPseudocost.cpp=,
+  =HighsCliqueTable.cpp=, =HighsImplications.cpp=, =HighsConflictPool.cpp=
+  — branch-and-cut search, cut families, pseudocost branching, clique table,
+  implication graph, conflict pool.
+
+** The Parallel Dual Revised Simplex
+
+The defining algorithmic contribution of HiGHS is the parallel dual revised
+simplex of citet:huangfu-hall-2018. Classical dual simplex is sequential at
+the level of CHUZR (choose-row) because the leaving variable depends on the
+current basis. Huangfu and Hall observed that, given a good candidate pool,
+multiple CHUZR trials can be carried out speculatively and then reconciled
+through a limited-recourse rollback scheme, yielding real wall-clock speedups
+on large LPs despite the inherent sequentiality of the Bartels-Golub update.
+The implementation uses hypersparse FTRAN/BTRAN to exploit the sparsity of
+right-hand-side vectors after update, dual steepest-edge pricing for
+robustness, and a bundle mechanism that amortizes pricing work over multiple
+iterations. The associated earlier paper citep:huangfu-hall-2018 introduced
+the novel update techniques that make the parallel scheme numerically stable
+in single precision.
+
+The idiot crash of citet:galabova-hall-2020 — a quadratic-penalty warm-start
+that solves a sequence of unconstrained convex programs — provides a fast
+initial basis for dense real-world LPs and was the basis of HiGHS's strong
+performance on the Mittelmann LP benchmark set. For discopt, the idiot crash
+is a candidate for Rust reimplementation as a HiGHS-compatible warm-start
+generator in =crates/discopt-core/src/lp/=.
+
+** Interior Point and First-Order Methods
+
+The HiGHS IPM uses a Mehrotra predictor-corrector with basis-preconditioned
+LU factorization citep:schork-gondzio-2020. Crossover to a simplex basis
+follows the Bixby-Saltzman scheme. The PDLP path (added in HiGHS 1.7, March
+2024) wraps cuPDLP-C, a primal-dual hybrid gradient solver with optional CUDA
+kernels; this is directly relevant to GitHub issue #37's proposal to
+integrate MPAX citep:mpax-2024, since cuPDLP-C and MPAX target the same
+first-order LP regime but use different host stacks (C/CUDA vs.
+JAX). discopt's choice between them is architectural: MPAX plugs into the
+JAX DAG and supports =vmap=/=grad= through LP solves; cuPDLP-C does not.
+
+** MIP Branch-and-Cut
+
+The MIP engine, written primarily by Leona Gottwald, follows the post-2000
+canon: reliability pseudocost branching
+citep:achterberg2020presolve,achterberg2009, best-estimate node selection,
+and a full Chvátal-Gomory cut family (Gomory mixed-integer, mixed-integer
+rounding, mod-k, implied-bound, clique, flow-cover) in
+=HighsSeparation.cpp= and =HighsTableauSeparator.cpp=. The primal heuristic
+portfolio includes the LP-free Feasibility Jump of
+citet:luteberget-sartor-2023 (see [[file:../methods/feasibility-jump.org][feasibility jump]]), RENS, RINS,
+feasibility pump, central rounding, randomized rounding, shifting, and
+ZI-round citep:wallace-ziround-2010. Conflict analysis is integrated through
+=HighsConflictPool=. Presolve shares infrastructure with LP presolve and
+adds MIP-specific probing, coefficient tightening, and clique merging (see
+[[file:../methods/mip-presolve.org][MIP presolve]]).
+
+** Role in discopt
+
+HiGHS is already discopt's default LP solver (=python/discopt/solvers/=);
+issue #37 asks whether its primal heuristics and presolve reductions should
+be ported into Rust alongside the existing FBBT/OBBT code in
+=crates/discopt-core/src/presolve/=. The present literature review
+(see [[file:../methods/mip-primal-heuristics.org][MIP primal heuristics]] and [[file:../methods/mip-presolve.org][MIP presolve]]) classifies each
+component by suggested host language (Rust | Python | JAX | Warp) so the
+porting effort can be prioritized. Three themes emerge: (1) tight per-node
+heuristics (rounding, diving, shifting, shift-and-propagate) and all
+presolve reductions belong in Rust; (2) coarse LNS heuristics (RINS, RENS,
+feasibility pump) belong in Python, orchestrating recursive =Model.solve()=
+calls; (3) Feasibility Jump is an outlier whose per-variable score loop
+maps cleanly onto JAX =vmap= or NVIDIA Warp kernels, giving discopt a
+GPU-batched feasibility engine that HiGHS's CPU-only implementation
+structurally cannot match.
+
+** Recent Activity
+
+HiGHS releases in 2024-2025 added PDLP integration (1.7), GPU cuPDLP (1.10),
+and a new HiPDLP IPM wrapper based on citet:schork-gondzio-2020 follow-up
+work. The first HiGHS workshop was held at Edinburgh in June 2024 with a
+second in June 2025. No single definitive HiGHS paper has yet been
+published; citep:huangfu-hall-2018 remains the canonical citation, with
+component papers cited individually for the IPM, idiot crash, QP solver,
+and MIP engine.

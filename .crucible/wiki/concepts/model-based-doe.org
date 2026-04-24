@@ -1,0 +1,65 @@
+#+TITLE: Model-Based Design of Experiments (MBDoE)
+#+FILETAGS: :concept:doe:mbdoe:optimal-design:identifiability:
+
+* Model-Based Design of Experiments (MBDoE)
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: franceschini-macchietto-2008 asprey-macchietto-2002 pukelsheim1993-optimal galvanin2009-backoff galvanin2009-online fedorov1972-theory
+:STATUS: draft
+:CREATED: 2026-04-22
+:END:
+
+Model-based design of experiments (MBDoE) uses a candidate model of the system to choose the next experiment so as to maximize information content. It is the optimization-theoretic counterpart of classical DoE: instead of a fixed D-optimal screening matrix, MBDoE delivers a sequence of experiments tailored to the nonlinear model at the current parameter estimate, and the objective is typically a scalar functional of the [[file:fisher-information-matrix.org][Fisher information matrix]] F(\theta, \xi) where \xi is the experimental design (inputs, sampling times, initial conditions, set of candidate runs). citet:franceschini-macchietto-2008 is the canonical chemical-engineering review; citet:pukelsheim1993-optimal and citet:fedorov1972-theory are the statistical references.
+
+MBDoE is the natural downstream action when [[file:identifiability-analysis.org][identifiability analysis]] flags practically non-identifiable parameters: rather than accepting poor estimates, design an experiment that reduces their variance.
+
+** Design Objectives
+
+Two families of MBDoE objectives dominate, and they answer different questions.
+
+*Parameter-precision design* minimizes a functional of F^{-1} with the goal of tightening parameter confidence intervals. The alphabetic criteria — D (maximize \det F), A (minimize \mathrm{tr}(F^{-1})), E (maximize \lambda_\min F), ME (minimize condition number) — apply directly. Pick D for scale invariance, E or ME when identifiability of the worst direction matters, A when average variance is the operational quantity. See [[file:fisher-information-matrix.org][Fisher information matrix]] for definitions.
+
+*Model-discrimination design* chooses experiments that maximize the expected difference between competing candidate models. T-optimality (Atkinson-Fedorov) uses the sum of squared prediction differences; the Buzzi-Ferraris and Manenti criterion augments this with a noise-normalization. citet:asprey-macchietto-2002 extended the framework to multi-response dynamic systems in the chemical-engineering setting. Discrimination and precision objectives are frequently combined with weights.
+
+Other criteria — I- and G-optimality for prediction variance, V-optimal for calibration, DT-optimal hybrids — are reviewed in citet:franceschini-macchietto-2008.
+
+** Sequential and Online Redesign
+
+Because F depends on \theta, optimality requires a current estimate; the natural workflow is therefore sequential.
+
+1. Initial design based on prior \theta^{(0)} (or a Bayesian-robust criterion).
+2. Run experiment; update \hat\theta by maximum likelihood.
+3. Recompute F(\hat\theta, \xi) and optimize the design of the next experiment.
+4. Check stopping criterion (parameter CIs below target, discrimination achieved).
+
+citet:galvanin2009-online developed /online/ redesign: re-optimizing mid-experiment whenever parameter updates suggest better sampling times are now available. citet:galvanin2009-backoff introduced a *backoff* strategy that treats \theta as uncertain in its own right and designs against a pessimistic region of parameter space, so that the optimal design remains informative if the current estimate is off. Bayesian MBDoE uses an integrated posterior \int \phi(F(\theta)) p(\theta | y) d\theta rather than plugging in \hat\theta.
+
+** Combinatorial Design and MINLP
+
+MBDoE becomes a [[file:../methods/structural-identifiability.org][structural]] MINLP whenever experimental choices are discrete. Typical cases:
+
+- *Experiment selection.* Given M candidate runs, pick N to maximize \det F. Binary variables z_i \in \{0, 1\} and F(\xi) = \sum_i z_i J_i^T \Sigma^{-1} J_i turn the problem into a small MINLP. Exchange algorithms (Fedorov, modified Fedorov, DETMAX) are the classical heuristics; modern solvers can handle the exact problem for moderate M. This is the natural MBDoE entry point for discopt.
+- *Sampling-time selection.* Continuous-time ODE models with a fixed budget of K samples per run require choosing K times from an interval — a continuous problem, but typically solved over a discretization that again introduces binaries.
+- *Structural choices.* Which of several possible outputs to measure; which of several candidate inputs to perturb; which of several candidate runs to perform in parallel. All map to binary decisions on top of the continuous design.
+
+For nonlinear models the \det F(\xi) objective is non-convex; global solvers such as [[file:baron-solver.org][BARON]] or spatial branch-and-bound in discopt are appropriate when small gaps matter, while exchange-type heuristics are usually enough for practical screens.
+
+** Relation to Classical DoE
+
+Classical factorial, central-composite, and response-surface designs are special cases of MBDoE in which the assumed model is linear in parameters, so F is constant across \theta, the criterion is typically D-optimal, and the design is a small combinatorial exercise tabulated for common factor counts. Libraries such as pyDOE3 cover this regime. MBDoE generalizes by allowing F to depend on \theta, which is the defining feature when the model is nonlinear.
+
+** Identifiability-Driven DoE
+
+When identifiability analysis flags specific parameters, MBDoE can target them directly: rather than D-optimal on the full F, minimize the partial variance (F^{-1})_{ii} or the partial condition number restricted to the flagged subspace. Equivalently, use c^T F^{-1} c for a direction c that picks out the ill-identified parameter combination. citet:bandara2009-oed and the profile-likelihood community have shown that a single well-chosen experiment can turn a one-sided unbounded profile into a bounded one, closing the practical non-identifiability in a way that generic D-optimality does not guarantee.
+
+** MBDoE in discopt.doe
+
+discopt's MINLP and NLP primitives cover every computational step of MBDoE for algebraic models:
+
+- Jacobians J via JAX autodiff on the expression DAG.
+- F and its scalar functionals as smooth functions of the design variables.
+- \det F, \lambda_\min F, and condition number expressed either directly (for small F) or via auxiliary eigenvalue constraints.
+- Binary experiment selection handled by discopt's MINLP layer; continuous input/time selection by NLP.
+- Sequential updating by re-solving with the new \hat\theta.
+
+The design choices that most affect a discopt.doe implementation are the treatment of \det F (direct for small F, log-det for numerical stability, or SDP-relaxation for large F), and whether to use full MINLP or exchange heuristics by default for experiment selection. A practical default is to expose D-, A-, and E-optimal criteria over a user-supplied candidate set with a small MINLP for N-of-M selection, and to escalate to a continuous NLP over sampling times or inputs when requested.

@@ -67,8 +67,12 @@ manuscript/discopt.tex
 # Claude Code
 .claude/
 
-# Crucible knowledge base
-.crucible/
+# Crucible knowledge base: track the wiki and bib, exclude generated /
+# copyrighted / transient artifacts.
+.crucible/crucible.db
+.crucible/references.bib.lock
+.crucible/sources/external/
+.crucible/wiki/viz.html
 
 # Adversary test runs
 adversary/

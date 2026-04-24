@@ -1,0 +1,54 @@
+#+TITLE: Structural Identifiability Methods
+#+FILETAGS: :method:identifiability:structural:differential-algebra:observability:
+
+* Structural Identifiability Methods
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: bellu2007-daisy pohjanpalo1978 walter-lecourtier1982 chis2011-genssi ligon2018-genssi2 vajda1989-similarity tunali-tarn-1987 villaverde2016-strike-goldd diazseoane2023-sgd4 hong2019-sian sedoglavic2002 ljung-glad-1994 meshkat2014-combos dong2023-structuralid-jl reybarreiro2023-benchmark chis2011-comparison
+:STATUS: draft
+:CREATED: 2026-04-22
+:END:
+
+Structural identifiability analysis tests whether, under the idealization of noise-free continuous-time measurement of the specified outputs, the parameters of a model are uniquely determined. It is a property of the model alone and is logically prior to any data-driven [[file:../concepts/identifiability-analysis.org][practical identifiability]] analysis. Five algorithmic families dominate the literature: differential algebra, Taylor series, generating series / Lie derivatives, the observability-rank / similarity-transformation approach, and input–output elimination. citet:chis2011-comparison and the more recent benchmark of citet:reybarreiro2023-benchmark evaluate these head-to-head across standard test models.
+
+** Differential Algebra (DAISY, COMBOS)
+
+The differential-algebra approach, tracing to Ritt and developed in the identifiability context by citet:ljung-glad-1994 and the Padova group, rewrites the ODE and its output map as an /input–output/ polynomial relation among the measured variables and their time derivatives. The coefficients of this relation are rational functions of the parameters and form the /exhaustive summary/: two parameter vectors yield the same measurements if and only if they yield the same exhaustive summary. Global identifiability is then a question about injectivity of the summary map, tested by solving the polynomial system with Gröbner-basis or characteristic-set techniques.
+
+DAISY citep:bellu2007-daisy is the canonical implementation, built on Ritt's characteristic-set algorithm in REDUCE; it gives global identifiability verdicts for rational ODE systems including initial conditions. COMBOS citep:meshkat2014-combos extends the approach to extracting identifiable /combinations/ when some parameters are individually non-identifiable: if only the product k_1 k_2 is determined, COMBOS returns that fact as an explicit symbolic answer, suggesting the reparameterization. Cost scales poorly — Gröbner-basis computation is worst-case doubly exponential — so both tools hit practical limits around a dozen parameters for generic models.
+
+** Taylor Series (Pohjanpalo)
+
+The oldest approach, due to citet:pohjanpalo1978, expands each output y(t) in a Taylor series about the initial time. Each series coefficient is a polynomial in the parameters and initial conditions, so identifiability reduces to injectivity of the coefficient map. A finite number of derivatives suffices for rational systems in principle, but there is no practical bound on how many: implementations typically stop when the Jacobian of the accumulated coefficients reaches full rank. The method is conceptually simple, works for any smooth nonlinear ODE, and has no modern canonical toolbox — sympy-based hand-rolled implementations are common. Its practical role today is as a local-identifiability screen before investing in heavier symbolic machinery.
+
+** Generating Series / Lie Derivatives (GenSSI)
+
+citet:walter-lecourtier1982 showed that expanding outputs along the ODE vector fields via iterated Lie derivatives yields coefficient series that typically reach full rank with fewer terms than the Taylor expansion. The series coefficients are arranged in an /identifiability tableau/ — effectively the Jacobian of accumulated coefficients with respect to parameters — whose rank test gives local identifiability and whose polynomial inversion gives global identifiability. GenSSI citep:chis2011-genssi,ligon2018-genssi2 is the MATLAB reference implementation; the 2.0 version handles multi-experiment SBML models. In the benchmark of citet:chis2011-comparison, generating-series was the best all-round compromise between cost and the class of models it handled, and it remains a standard teaching example.
+
+** Observability Rank and Similarity Transformation (STRIKE-GOLDD)
+
+Treating parameters as constant states \dot\theta = 0 and appending them to the state vector turns identifiability into an /observability/ question. The Hermann-Krener observability rank condition — rank of the observability matrix built from iterated Lie derivatives of the output map along the extended vector field — is sufficient for local identifiability. Global identifiability follows from the local-state-isomorphism theorem of citet:vajda1989-similarity, which uses similarity transformations to test whether distinct parameter vectors can produce indistinguishable systems. citet:tunali-tarn-1987 gave the first general sufficient conditions, and the approach matured into the STRIKE-GOLDD toolbox of citet:villaverde2016-strike-goldd, with version 4 citep:diazseoane2023-sgd4 adding a user-friendly interface, full FISPO (Full Input-State-Parameter Observability) analysis, and decomposition strategies (ORC-DF) that let it handle models an order of magnitude larger than DAISY. STRIKE-GOLDD's scope is the broadest of the current tools: nonlinear ODE with inputs, unknown initial conditions, and rational or some non-polynomial nonlinearities.
+
+citet:sedoglavic2002 introduced a /probabilistic/ polynomial-time algorithm for local observability by evaluating the observability matrix at random points over a large prime field; correctness is probabilistic but the cost is modest. This randomization trick is the key ingredient in modern tools such as SIAN.
+
+** Modern Probabilistic-Global Tools (SIAN, StructuralIdentifiability.jl)
+
+SIAN citep:hong2019-sian combines the Taylor-coefficient approach with probabilistic-global Gröbner computation over large prime fields. It gives a probabilistic-global verdict — correct with overwhelming probability — at cost comparable to or better than DAISY, and it scales to models that are out of reach for fully symbolic approaches. StructuralIdentifiability.jl citep:dong2023-structuralid-jl is the Julia implementation in the SciML ecosystem; it integrates with ModelingToolkit.jl, handles both local and global analysis with probabilistic guarantees, and is the most practical option for Python users today via PyJulia or juliacall bridges.
+
+** Input-Output Elimination (Ljung-Glad)
+
+citet:ljung-glad-1994 specialized the differential-algebra approach to models with inputs u(t), eliminating states to produce a minimal polynomial relation F(u, y, \dot u, \dot y, \ldots ; \theta) = 0. The coefficients of F form the exhaustive summary; injectivity of the coefficient map again gives global identifiability. The approach is the theoretical foundation of DAISY and several commercial control-identification tools; it is not usually invoked directly today but underlies much of the rest.
+
+** Practical Guidance for Selection
+
+citet:reybarreiro2023-benchmark ran the current tools across 21 standard models and found no universal winner. Operational guidance:
+
+- /Small to medium rational ODE, need global answer:/ SIAN or StructuralIdentifiability.jl first; DAISY as a symbolic-exact cross-check.
+- /Want identifiable-combination reparameterization:/ COMBOS.
+- /Large or nonpolynomial models:/ STRIKE-GOLDD 4.0 with FISPO / ORC-DF decomposition.
+- /Just need local rank test:/ Sedoglavic's probabilistic algorithm, or sympy-based Lie-derivative rank.
+- /Algebraic (non-ODE) model:/ none of the above is needed; the Jacobian-rank test of [[file:algebraic-model-identifiability.org][algebraic model identifiability]] is complete.
+
+** Relation to discopt
+
+discopt's native modelling target is algebraic rather than dynamic, and for algebraic models full structural identifiability reduces to column rank of \partial h / \partial \theta over the design — a problem discopt already solves. For users with dynamic models the recommended path is delegation: build the ODE in ModelingToolkit.jl, call StructuralIdentifiability.jl via juliacall, and surface the verdict inside discopt.doe. See [[file:identifiability-software.org][Identifiability software landscape]] for the integration options.

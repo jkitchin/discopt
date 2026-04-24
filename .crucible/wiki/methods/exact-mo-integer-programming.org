@@ -1,0 +1,135 @@
+#+TITLE: Exact Multiobjective Integer and Mixed-Integer Programming
+#+FILETAGS: :method:multiobjective:milp:minlp:integer:exact:
+#+PROPERTY: ARTICLE_TYPE method
+#+PROPERTY: SOURCE_KEYS teghem-2008 mavrotas-2009 ehrgott-2005 ehrgott-2011 sitarz-2008
+
+* Exact Multiobjective Integer and Mixed-Integer Programming
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: teghem-2008 mavrotas-2009 ehrgott-2005 ehrgott-2011 sitarz-2008
+:STATUS: draft
+:CREATED: 2026-04-24
+:END:
+
+Multi-objective integer (MOILP) and mixed-integer (MOMILP, MOMINLP)
+programming extends the exact [[file:scalarization-methods.org][scalarization machinery]] to problems with
+discrete variables. The resulting subproblems are themselves NP-hard
+(MILP) or globally-nonconvex-MINLP-hard, but the outer-loop /exactness/
+is preserved --- each point returned is certified Pareto-optimal, and
+finite-termination is possible in principle.
+
+** Structure of the Efficient Set
+
+For a MOILP with bounded feasible region, the set of efficient solutions
+is finite (at most exponential in the number of integer variables), and
+its image under F is the /nondominated set/ Y^N. Unlike the convex MOP
+case where Y^N is a connected (k-1)-dimensional manifold, Y^N for MOILP
+is a finite collection of isolated points, possibly with large gaps
+citep:teghem-2008 citep:ehrgott-2005.
+
+Two classical taxonomies:
+
+- /Supported vs. unsupported/ efficient points. Supported points are
+  those recoverable by weighted sum (they lie on the convex hull of
+  Y^N); unsupported points sit in the interior of the dominance cone
+  of the convex hull and require ε-constraint or Tchebycheff methods.
+  A large fraction of Y^N is typically unsupported in MOILP, which is
+  exactly why weighted-sum-only enumeration misses most of the
+  nondominated set citep:ehrgott-2005.
+- /Extreme vs. non-extreme/: efficient vertices of the continuous
+  relaxation vs. interior points that happen to be integer-feasible.
+
+** ε-Constraint Enumeration (AUGMECON)
+
+citet:mavrotas-2009 popularized /AUGMECON/ for exact enumeration of the
+nondominated set of MOMILP: fix an objective to minimize, impose upper
+bounds on the others via slack-augmented ε-constraints, and sweep the
+epsilons on a grid. Each subproblem is a standard MILP that any COTS
+solver (Gurobi, CPLEX, SCIP, HiGHS) handles. AUGMECON2 (Mavrotas &
+Florios 2013) adds early termination when a grid cell is infeasible and
+lexicographic refinement to guarantee strict Pareto optimality.
+
+AUGMECON is the de-facto default for MOMILP in practice, including in
+energy-systems optimization (e.g., calliope/pyomo-based capacity-expansion
+models), supply-chain and scheduling applications, and sustainability
+trade-off studies.
+
+** Two-Phase and Boxed Methods
+
+For bi-objective problems, more specialized schemes exploit geometry:
+
+- /Two-phase method/ (Ulungu & Teghem): Phase 1 enumerates all
+  supported efficient points via weighted sum with varying weights;
+  Phase 2 searches between consecutive supported points for unsupported
+  efficients using weighted Tchebycheff or ε-constraint subproblems
+  citep:teghem-2008.
+- /ε-constraint "box" or "rectangle" methods/: partition the search
+  region in objective space into rectangles defined by adjacent
+  nondominated points, solve one MILP per rectangle, recursively
+  subdivide. Used in modern bi-objective MIP frameworks; scales to k = 3
+  with careful bookkeeping but not beyond.
+
+** Multi-Objective Branch-and-Bound
+
+Instead of solving many single-objective MILPs, /multi-objective
+branch-and-bound/ maintains vector bounds at each node and prunes by
+vector dominance. A node can be pruned if its LP relaxation's entire
+image is dominated by the incumbent Pareto set. Branching rules and
+lower-bound sets (typically a subset of the lower image of the LP
+relaxation) are domain-specific, and no single algorithm has become
+universal. Recent work in /criteria-space search/ branches in objective
+space (rather than decision space), enumerating box regions until none
+remain.
+
+** Multi-Objective MINLP
+
+MOMINLP combines integer variables with nonlinear (possibly nonconvex)
+objectives or constraints, so the Pareto set is a finite union of
+lower-dimensional efficient arcs rather than isolated points
+citep:ehrgott-2011. Exact methods here are much less mature:
+
+- Scalarization via [[file:scalarization-methods.org][AUGMECON / weighted Tchebycheff / NBI]] reduces to a
+  sequence of MINLP subproblems, each of which requires [[file:spatial-branch-and-bound.org][spatial branch
+  and bound]] for global optimality (e.g., BARON, SCIP, Couenne, or
+  discopt).
+- Outer-approximation / decomposition methods for convex MOMINLP follow
+  [[file:outer-approximation.org][outer approximation]] algorithms at the subproblem level.
+- citet:ehrgott-2011 gives a polynomial approximation algorithm for
+  convex MOMINLP that bounds the hypervolume error of the returned
+  front, using an adaptive refinement of the weighted-sum / ε-constraint
+  sweep.
+- General nonconvex MOMINLP is an open research area; a common
+  fallback is to run AUGMECON with a MINLP solver like BARON as the
+  subproblem oracle.
+
+** Postoptimal / Sensitivity Analysis
+
+citet:sitarz-2008 develops postoptimal analysis for multicriteria linear
+programming, generalizing single-objective sensitivity to vector-valued
+ranges in which a given extreme efficient point remains efficient. This
+matters for discopt-style workflows where an optimal Pareto point is
+computed once and the DM asks, "how much can coefficient c_ij change
+before the trade-off shifts?" --- analogous questions for MOMILP and
+MOMINLP are mostly open.
+
+** Available Software
+
+- *pymoo* citep:blank-deb-2020: AUGMECON implementation for small MOMILP;
+  primarily an EMO library.
+- *GAMS* + AUGMECON macros: traditional route; robust but heavy.
+- *pyomo* + *multiobjective* extension: ε-constraint, weighted sum, and
+  Tchebycheff wrappers over pyomo's solver interfaces.
+- *Gurobi multi-objective API* (Gurobi 9+): native hierarchical and
+  blended objectives for MILP. Does not enumerate the Pareto front;
+  returns the lexicographic or weighted optimum.
+
+** Relevance for discopt
+
+discopt's architecture is well-suited to be an AUGMECON / NBI /
+Tchebycheff /subproblem solver/: the Python modeling API accepts
+additional ε-constraints and scalarized objectives naturally, and the
+B&B + [[file:../concepts/convex-relaxations.org][convex relaxation]] machinery provides global optimality certificates
+on each subproblem. A native ~ParetoFront~ API --- AUGMECON loop,
+Tchebycheff sweep, adaptive bi-objective sampling, and front export ---
+is listed under Phase 5 of the project roadmap; the surveys distilled
+here form the literature basis for that implementation.

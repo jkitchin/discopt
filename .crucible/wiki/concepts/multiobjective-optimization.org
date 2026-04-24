@@ -1,0 +1,114 @@
+#+TITLE: Multiobjective Optimization: Pareto Optimality and Problem Structure
+#+FILETAGS: :concept:multiobjective:pareto:optimization:
+#+PROPERTY: ARTICLE_TYPE concept
+#+PROPERTY: SOURCE_KEYS miettinen-1999 ehrgott-2005 marler-arora-2004 emmerich-deutz-2018 deb-2002
+
+* Multiobjective Optimization: Pareto Optimality and Problem Structure
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: miettinen-1999 ehrgott-2005 marler-arora-2004 emmerich-deutz-2018 deb-2002
+:STATUS: draft
+:CREATED: 2026-04-24
+:END:
+
+A multiobjective optimization problem (MOP) has the form
+
+  min  F(x) = (f_1(x), f_2(x), ..., f_k(x))    subject to  x in X,
+
+with k >= 2 conflicting objectives. Unlike single-objective optimization,
+there is in general no point that minimizes every f_i simultaneously;
+improving one objective worsens at least one other. The solution concept
+is therefore replaced: instead of a single optimum one seeks the set of
+Pareto-optimal trade-offs citep:miettinen-1999 citep:ehrgott-2005.
+
+** Dominance and Pareto Optimality
+
+For objective vectors a, b in R^k, a /dominates/ b (written a ≺ b) if
+a_i <= b_i for all i and a_j < b_j for some j. A feasible point x* is
+/Pareto optimal/ (equivalently, /efficient/ or /nondominated/) if no
+other feasible x yields F(x) ≺ F(x*). The image of the Pareto set in
+objective space is the /Pareto front/.
+
+Refinements: /weak Pareto optimality/ requires only strict improvement in
+all objectives to dominate, and /proper Pareto optimality/
+(Geoffrion, Kuhn-Tucker) excludes solutions with unbounded trade-off
+ratios between objectives citep:miettinen-1999. In convex MOPs proper and
+regular Pareto optimality coincide under mild regularity. In nonconvex
+MOPs --- including almost all multi-objective MINLPs --- proper efficiency
+is strictly stronger, and some scalarizations (notably the unweighted
+weighted sum) generate only properly efficient points and therefore miss
+parts of the nonconvex Pareto front citep:marler-arora-2004.
+
+** Ideal, Nadir, and Utopian Points
+
+Three reference points parameterize the objective space:
+
+- /Ideal point/ z* with z*_i = min_{x in X} f_i(x), computed by solving k
+  single-objective problems. It is almost never feasible in the MOP.
+- /Nadir point/ z^N with z^N_i = max over the Pareto set of f_i(x). Unlike
+  the ideal, the nadir is expensive to compute exactly for k >= 3, and
+  standard payoff-table estimates can be loose or misleading
+  citep:miettinen-1999.
+- /Utopian point/ z** = z* - epsilon e, a strictly dominating shift used
+  by reference-point and achievement scalarizing methods
+  citep:wierzbicki-2000.
+
+Ideal and nadir define the range (z^N - z*) used for objective
+normalization, which is essential before applying any scalarization:
+unscaled weights are meaningless when objectives have different units or
+magnitudes citep:marler-arora-2004 citep:messac-2003.
+
+** Classification of Solution Approaches
+
+Multiobjective methods are traditionally classified by /when/ the decision
+maker (DM) expresses preferences citep:miettinen-1999:
+
+1. /No-preference methods/ --- return a single compromise point (e.g.,
+   the point closest to the ideal in some norm).
+2. /A priori methods/ --- DM specifies preferences (weights, goals,
+   lexicographic order) before solving; a scalarized problem is solved
+   once.
+3. /A posteriori methods/ --- compute an approximation of the entire
+   Pareto front, then let the DM select. Covered by [[file:../methods/scalarization-methods.org][scalarization]]
+   sweeps, [[file:../methods/normal-boundary-intersection.org][normal boundary intersection]], and [[file:../methods/evolutionary-multiobjective.org][evolutionary]] methods.
+4. /Interactive methods/ --- iterate between computation and preference
+   elicitation, progressively narrowing the region of interest
+   citep:miettinen-1999 citep:wierzbicki-2000 citep:miettinen-2008-pse.
+
+A second, algorithmic, axis is /deterministic versus stochastic/:
+scalarization with classical NLP/MILP solvers produces Pareto-optimal
+points with optimality certificates; population-based evolutionary
+algorithms sample the front stochastically and give no certificate, but
+scale far better in k (number of objectives) and handle nonconvex,
+nondifferentiable, black-box f_i citep:deb-2002 citep:emmerich-deutz-2018.
+
+** Many-Objective Optimization
+
+For k >= 4, commonly called /many-objective/ optimization, the fraction of
+randomly sampled points that are mutually nondominated tends to 1, which
+cripples dominance-based selection in evolutionary algorithms and makes
+the Pareto front hard to visualize or present to a DM. Remedies include
+decomposition into scalar subproblems citep:zhang-li-2007, reference-point
+based selection citep:deb-jain-2014, and indicator-based selection
+citep:zitzler-kunzli-2004. See [[file:../methods/evolutionary-multiobjective.org][evolutionary multiobjective]].
+
+** Mixed-Integer and Nonconvex Structure
+
+Combining multiple objectives with mixed-integer or nonconvex constraints
+compounds the theoretical and computational difficulties. The Pareto set
+of a multi-objective MILP is a finite but potentially exponential union of
+faces of the LP relaxation polytope; for multi-objective MINLP it may be
+disconnected, contain isolated points, and require spatial branching on
+both x and a scalarization parameter citep:ehrgott-2011. Exact methods
+and current practice are summarized in [[file:../methods/exact-mo-integer-programming.org][exact multiobjective integer
+programming]].
+
+** Context in discopt
+
+discopt currently exposes only a single-objective interface through
+~Model.minimize~ / ~Model.maximize~, so multi-objective problems are
+handled today by user-level scalarization sweeps (weighted sum,
+ε-constraint, weighted Tchebycheff) that repeatedly invoke the
+single-objective solver. Adding ~ParetoFront~, ε-constraint automation,
+and Chebyshev/NBI parameter sweeps is listed under Phase 5 of the project
+roadmap.

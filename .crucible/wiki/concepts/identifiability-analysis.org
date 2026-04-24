@@ -1,0 +1,52 @@
+#+TITLE: Parameter Identifiability Analysis
+#+FILETAGS: :concept:identifiability:parameter-estimation:doe:uncertainty:
+
+* Parameter Identifiability Analysis
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: villaverde2019-observability miao2011-identifiability chis2011-comparison raue2009-profile reybarreiro2023-benchmark
+:STATUS: draft
+:CREATED: 2026-04-22
+:END:
+
+Parameter identifiability asks whether the parameters of a model can be uniquely determined from measurements of its outputs. It is the prerequisite for any meaningful parameter estimation: if two distinct parameter vectors produce indistinguishable predictions, no amount of data or computation can separate them, and reported point estimates and confidence intervals become meaningless. Identifiability analysis is therefore the natural upstream companion to [[file:model-based-doe.org][model-based design of experiments]] and the downstream validator of regression results. citet:miao2011-identifiability and citet:villaverde2019-observability are the canonical surveys bridging the control-theoretic and systems-biology literatures.
+
+** Structural versus Practical Identifiability
+
+Two distinct questions hide under the single word "identifiability," and conflating them is the most common source of confusion.
+
+*Structural* identifiability is a property of the model alone, assessed under the idealization of noise-free, continuous-time measurement of the designated outputs over an arbitrary horizon. A parameter \theta_i is structurally identifiable if the output-to-parameter map is injective in \theta_i; it is /globally/ identifiable when the map is injective on the whole parameter space and only /locally/ identifiable when injectivity holds in a neighborhood. Structural non-identifiability signals a defect in the model itself — for example, two rate constants that only ever appear as a product — and cannot be cured by more data. The algorithmic families for testing structural identifiability — differential algebra, Taylor series, generating series, observability rank, input–output elimination — are surveyed in [[file:../methods/structural-identifiability.org][Structural identifiability methods]]; their empirical comparison across 21 benchmark models is given in citet:reybarreiro2023-benchmark.
+
+*Practical* identifiability asks the engineering question: given the actual data, the actual noise level, and the actual experimental design, can each parameter be estimated with finite variance and bounded confidence interval? A structurally identifiable parameter can still be practically non-identifiable when the available data fail to excite it. The canonical diagnostics are the [[file:fisher-information-matrix.org][Fisher information matrix]] (asymptotic covariance and its eigenstructure), the [[file:../methods/profile-likelihood-identifiability.org][profile likelihood]] of citet:raue2009-profile (non-asymptotic and reparameterization-invariant), the Bayesian posterior, and geometric diagnostics such as the [[file:sloppy-models.org][sloppy-model]] Hessian spectrum.
+
+** Local versus Global
+
+Orthogonal to the structural/practical axis is the local/global distinction. Local identifiability is a rank condition on a linearization (the sensitivity Jacobian, the observability matrix, or the Hessian at the optimum) and is cheap to check. Global identifiability is a statement about the whole parameter space and is both harder to prove and more informative. For linear-in-parameters (algebraic) models the two coincide because the Jacobian is constant; for nonlinear ODE models they genuinely differ, and modern tools such as SIAN citep:hong2019-sian and StructuralIdentifiability.jl citep:dong2023-structuralid-jl aim for probabilistic-global guarantees while keeping cost tractable.
+
+** Algebraic versus Dynamic Models
+
+Much of the identifiability literature targets ODE and DAE systems in systems biology and control. In contrast, mathematical-programming tools like discopt natively handle /algebraic/ models y = h(x, \theta) — regression, thermodynamic property correlations, reaction-network steady-states, surrogate models, neural networks embedded as constraints. For this class structural identifiability collapses to injectivity of h(\cdot, \theta) at a fixed design and, locally, to full column rank of \partial h / \partial \theta over the design points. This is exactly the regression-diagnostics regime of citet:belsley1980-regression: condition indices, variance-decomposition proportions, VIFs. See [[file:../methods/algebraic-model-identifiability.org][Algebraic model identifiability]] for the Jacobian-rank recipe, which is the most directly applicable identifiability test for a MINLP tool.
+
+** Consequences of Non-Identifiability
+
+Non-identifiability has concrete costs:
+
+- *Infinite confidence intervals.* FIM becomes rank-deficient; its inverse does not exist; linearized standard errors are infinite along the null directions.
+- *Unstable optimizers.* The likelihood surface has flat valleys. Newton steps are ill-conditioned and take large uncontrolled moves along sloppy directions.
+- *Misleading estimates.* Any point on a flat valley is a local optimum; reported estimates reflect solver starting points rather than data.
+- *Wrong uncertainty for predictions.* Prediction intervals computed from a rank-deficient covariance can be either over- or under-confident depending on how the prediction projects onto the null space.
+
+The cure depends on the cause. Structural non-identifiability is cured by reparameterization or model reduction — replacing pairs of redundant parameters by their identifiable combinations (citet:meshkat2014-combos computes these symbolically). Practical non-identifiability is cured by a better experiment, which is precisely the [[file:model-based-doe.org][MBDoE]] loop, or by [[file:../methods/parameter-estimability.org][estimability-ranked subset selection]] that fixes the least-informative parameters at nominal values citep:yao2003-estimability.
+
+** Workflow
+
+A typical identifiability-aware parameter-estimation workflow:
+
+1. /Before fitting./ Run a structural check on the model symbolically (StructuralIdentifiability.jl, SIAN, or — for algebraic models — sympy-based Jacobian rank) to confirm that the problem is well-posed in principle.
+2. /At the nominal estimate./ Compute the FIM (or its algebraic-model surrogate J^T \Sigma^{-1} J) at the current best \hat\theta; inspect eigenvalues, condition number, correlation matrix. Flag parameters with large variance or collinearity index above 10–15 citep:brun2001-collinearity.
+3. /Non-asymptotic validation./ Run profile likelihoods for each suspect parameter; distinguish flat (structural) from one-sided infinite (practical) plateaus.
+4. /Act./ Either redesign the experiment (MBDoE), reparameterize the model, or estimate a ranked subset.
+
+** Connection to discopt.doe
+
+Profile-likelihood confidence intervals, FIM-based D/A/E-optimal experiment selection, and estimability-ranked subset choice are all NLP or MINLP problems that map directly onto discopt primitives. The practical case for an identifiability layer in discopt.doe is that the tool already has the Jacobians, bounds, and solvers needed; wiring them together gives a user-facing "which parameters are identifiable?" answer without adding new numerical infrastructure. See [[file:../methods/identifiability-software.org][Identifiability software landscape]] for integration options and [[file:../methods/algebraic-model-identifiability.org][Algebraic model identifiability]] for the recommended first-class feature.

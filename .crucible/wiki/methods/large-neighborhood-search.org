@@ -1,0 +1,168 @@
+#+TITLE: Large Neighborhood Search for MIP
+#+FILETAGS: :method:lns:rins:rens:dins:local-branching:crossover:proximity:alns:
+
+* Large Neighborhood Search for MIP
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: fischetti-lodi-2003 danna2005rins berthold-rens-2014 ghosh2007dins rothberg-crossover-2007 fischetti-monaci-proximity-2014 chmiela-learn-schedule-2021
+:STATUS: active
+:CREATED: 2026-04-21
+:UPDATED: 2026-04-21
+:END:
+
+Large Neighborhood Search (LNS), as implemented in [[file:../concepts/scip-solver.org][SCIP]] and [[file:../concepts/highs-solver.org][HiGHS]], is
+the family of primal heuristics that construct a /restricted sub-MIP/ by fixing or constraining a subset of the
+original variables, then call the MIP solver recursively on the restricted
+model with a small resource budget (node limit, time limit, stall limit). If
+the sub-MIP finds an improving solution, it becomes the new incumbent;
+otherwise the heuristic returns empty-handed and the tree search continues.
+LNS heuristics are the workhorses of modern MIP — on the MIPLIB benchmark,
+solutions found by LNS dominate the final incumbent pool on most instances.
+They share a common cost structure (one sub-MIP solve per call) and differ
+only in the /rule/ used to pick which variables to fix.
+
+** Why LNS Belongs in Python for discopt
+
+Every LNS heuristic's inner iteration is a full sub-MIP solve — typically
+tens of milliseconds to many seconds of compute. Whatever happens in the
+surrounding orchestration — building the restricted model, adding a distance
+constraint, invoking the recursive =Model.solve()= — is microseconds of
+Python overhead at most. The rubric is unambiguous: **every LNS heuristic
+is Suggested host: Python**. What matters for porting is exposing a
+=Model.clone()= + =Model.fix_variable()= + =Model.add_distance_constraint()=
+API in discopt's modeling layer, so that each LNS variant becomes a ~100-
+line Python module that constructs a restricted model and recurses. The
+heavy lifting — LP solving, branching, propagation — happens in Rust on
+the way down, not in the Python orchestrator.
+
+The one caveat is the /controller/ heuristic (ALNS or the newer Scheduler)
+that decides /which/ LNS variant to call and with /what/ parameters. Its
+compute is a bandit update or a learned scheduler — trivial relative to the
+arms it invokes. It, too, belongs in Python.
+
+** The Canonical LNS Family
+
+*** RINS — Relaxation Induced Neighborhood Search
+
+citet:danna2005rins observed that when the LP relaxation and the current
+incumbent /agree/ on a subset of integer variables, those variables are
+likely to be correct in the optimal solution as well. RINS fixes exactly
+those agreeing variables and solves a sub-MIP on the rest. SCIP:
+=heur_rins.c=. HiGHS: =HighsPrimalHeuristics::RINS()=. RINS is one of the
+single most effective LNS heuristics in practice and appears first in most
+benchmarks.
+
+*** RENS — Relaxation Enforced Neighborhood Search
+
+citet:berthold-rens-2014 noticed that when a variable's LP value is already
+integer-valued, it does not need to be rounded — it can simply be fixed.
+RENS fixes all integer-valued LP variables and bounds the fractional ones to
+the two rounding neighbors, yielding a small sub-MIP that represents the
+/optimal rounding/ of the relaxation. SCIP: =heur_rens.c=. HiGHS:
+=HighsPrimalHeuristics::RENS()=. On relaxation solutions with many
+already-integer values (typical for set-covering and fixed-charge network
+flow), RENS finds a feasible incumbent almost immediately.
+
+*** DINS — Distance-Induced Neighborhood Search
+
+citet:ghosh2007dins combined RINS with a local-branching-style distance
+constraint: fix a subset of variables agreeing between LP and incumbent, and
+additionally require that the Hamming distance from the incumbent stays
+below a threshold. SCIP: =heur_dins.c=. The distance constraint is a
+single linear inequality, so the sub-MIP remains compact.
+
+*** Local branching
+
+citet:fischetti-lodi-2003 introduced local branching as a generic
+neighborhood operator: given incumbent $\bar{x}$, add the constraint
+$\Delta(x, \bar{x}) \le k$ where $\Delta$ is a Hamming-like distance on the
+0-1 variables, then solve the restricted MIP. Branching on this distance
+inside the recursive solve yields a "right branch" (close to $\bar{x}$) and
+a "left branch" (at least $k+1$ away) which can be searched alternately.
+SCIP: =heur_localbranching.c=. This is the earliest LNS heuristic and its
+distance-constraint mechanism is the template for DINS and proximity search.
+
+*** Crossover and Mutation
+
+citet:rothberg-crossover-2007 adapted evolutionary operators to the MIP
+setting. Given a pool of incumbent solutions, *crossover* fixes variables
+that agree across two or more solutions and solves a sub-MIP on the
+disagreeing ones; *mutation* randomly fixes a subset of integers in the
+incumbent and re-optimizes the rest. SCIP: =heur_crossover.c=,
+=heur_mutation.c=. These are the heuristics that power SCIP's solution
+polishing phase once an incumbent is available.
+
+*** Proximity Search
+
+citet:fischetti-monaci-proximity-2014 proposed replacing the original
+objective with a distance-to-incumbent objective, subject to the constraint
+that the true objective improves by at least a small amount. The resulting
+sub-MIP searches for solutions that are both improving and close to the
+current incumbent — often finding improvements that local branching
+(which rejects equal-quality solutions) would miss. SCIP:
+=heur_proximity.c=.
+
+*** GINS — Graph-Induced Neighborhood Search
+
+GINS (Maher et al., in Berthold & Hendel) selects a connected component in
+the variable-constraint bipartite graph around a seed variable and fixes
+everything outside that component. The fix is structural rather than
+relaxation-induced, which makes GINS useful on problems where the LP gives
+little guidance. SCIP: =heur_gins.c=.
+
+*** Other LNS Variants
+
+- **Trust region** (=heur_trustregion.c=) — Maher, for Benders decomposition
+  (SCIP 9 release paper, citet:bolusani-scip9-2024).
+- **LP face** (=heur_lpface.c=) — fixes variables active on the optimal LP
+  face.
+- **Completesol** (=heur_completesol.c=) — given a partial user solution,
+  solve a sub-MIP for the rest.
+- **OFINS** (=heur_ofins.c=) — objective-function-induced neighborhood
+  search, used in reoptimization.
+
+** ALNS and the SCIP Scheduler
+
+citet:chmiela-learn-schedule-2021 showed that selecting /which/ LNS variant
+to call at /which/ node can itself be learned. SCIP's =heur_alns.c=
+implements a classical multi-armed-bandit controller over RENS, RINS, DINS,
+mutation, crossover, proximity, zeroobj, and trust region, updating arm
+weights based on observed solution improvements. The successor
+=heur_scheduler.c= (SCIP 8+, replacing ALNS by default in SCIP 9) integrates
+a learned policy that schedules both LNS arms and diving arms in a single
+framework. The controller itself is pure Python-level logic — a weight
+update and an arm choice per call. For discopt, implementing ALNS requires
+only (1) a common interface for LNS arms (each a Python function
+=(model, incumbent, budget) -> Optional[Solution]=) and (2) a bandit
+controller that updates arm weights from solve outcomes.
+
+** Port-Order Recommendation
+
+Given discopt's stack, the practical port order within the LNS family is:
+
+1. **RENS and RINS first** — highest benchmark impact, simplest API
+   requirements (=Model.clone()= + =Model.fix_variable()=).
+2. **Local branching** — adds the distance-constraint API that DINS and
+   proximity search depend on.
+3. **DINS and proximity search** — build on the same API.
+4. **Crossover and mutation** — require an incumbent pool, which discopt's
+   =SolveResult= already tracks.
+5. **GINS** — requires the variable-constraint bipartite graph, which
+   discopt's expression DAG already exposes (see
+   [[file:../concepts/expression-dag-and-ad.org][expression DAG and AD]]).
+6. **ALNS / Scheduler controller** — a thin coordinator over the above.
+
+Every step is Python orchestration; none requires Rust changes beyond the
+clone/restrict/recurse API surface that the first port establishes.
+
+** Role in discopt
+
+LNS heuristics are the primary mechanism by which an early incumbent is
+turned into an /optimal/ incumbent. Once discopt's B&B tree is producing
+feasible solutions from the feasibility pump (see
+[[file:feasibility-pump.org][feasibility pump]]) and from rounding / shifting heuristics (see
+[[file:mip-primal-heuristics.org][MIP primal heuristics]]), LNS takes over to polish the incumbent by local
+refinement. The compounding effect on primal-dual gap closure is large: on
+structured MIPLIB instances, the difference between "has LNS" and "no LNS"
+is often a factor of 2-5 in final gap after a fixed time limit, even when
+the LP bound and branching strategy are held constant.

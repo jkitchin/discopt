@@ -1,0 +1,180 @@
+#+TITLE: Nonlinear Programming Fundamentals
+#+FILETAGS: :nlp:kkt:newton:optimization:
+#+PROPERTY: ARTICLE_TYPE concept
+#+PROPERTY: SOURCE_KEYS nocedal-wright-2006
+
+* Nonlinear Programming Fundamentals
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: nocedal-wright-2006
+:STATUS: active
+:CREATED: 2026-04-05
+:END:
+
+Nonlinear programming (NLP) is the foundation on which all continuous and
+mixed-integer nonlinear optimization rests. The general NLP asks for a vector x
+that minimizes a smooth objective f(x) subject to equality constraints c_E(x) = 0
+and inequality constraints c_I(x) >= 0, where some or all of f, c_E, and c_I may
+be nonlinear. The theory and algorithms for solving NLPs are developed in depth
+by cite:nocedal-wright-2006, whose treatment provides the conceptual backbone
+for the solvers used throughout discopt.
+
+** Optimality Conditions and the KKT System
+
+The first-order necessary conditions for a constrained optimum are the
+Karush-Kuhn-Tucker (KKT) conditions. At a local minimizer x*, there must exist
+multiplier vectors lambda (for equalities) and mu (for inequalities) satisfying
+four conditions: stationarity (the gradient of the Lagrangian vanishes), primal
+feasibility (all constraints are satisfied), dual feasibility (inequality
+multipliers are non-negative), and complementary slackness (each inequality
+multiplier times its corresponding constraint value is zero)
+citep:nocedal-wright-2006. The Lagrangian function L(x, lambda, mu) = f(x) -
+lambda^T c_E(x) - mu^T c_I(x) collects the objective and constraints into a
+single expression whose stationary points characterize constrained optima.
+
+The KKT conditions are necessary only when a constraint qualification (CQ) holds
+at the solution. The most common CQ is the Linear Independence Constraint
+Qualification (LICQ), which requires that the gradients of the active constraints
+are linearly independent at x*. A weaker but still useful condition is the
+Mangasarian-Fromovitz Constraint Qualification (MFCQ). When no CQ holds, the
+multipliers may not exist or may not be unique, and solvers can exhibit
+pathological behavior such as cycling or failure to converge
+citep:nocedal-wright-2006. In MINLP practice, degenerate constraint
+qualifications arise frequently at nodes where fixing integer variables
+introduces redundant or conflicting bound constraints, making CQ awareness
+important for solver robustness.
+
+Second-order sufficient conditions strengthen the first-order KKT conditions by
+requiring that the Hessian of the Lagrangian is positive definite on the null
+space of the active constraint Jacobian. When both first- and second-order
+conditions hold, x* is a strict local minimizer. The distinction between
+necessary and sufficient conditions is not merely theoretical: interior point
+solvers exploit second-order information (via the Hessian of the Lagrangian) to
+achieve fast local convergence, and the inertia of the KKT matrix directly
+reflects whether the second-order conditions are satisfied
+citep:nocedal-wright-2006.
+
+** Newton's Method for Optimization
+
+Newton's method is the algorithmic workhorse underlying virtually all modern NLP
+solvers. For unconstrained minimization, Newton's method applies the iteration
+x_{k+1} = x_k - H_k^{-1} g_k, where H_k is the Hessian of f at x_k and g_k is
+the gradient. Each step minimizes a local quadratic model of the objective,
+yielding quadratic convergence near a solution where the Hessian is positive
+definite citep:nocedal-wright-2006.
+
+For constrained problems, Newton's method is applied to the KKT system rather
+than to the objective alone. The resulting iteration simultaneously updates
+primal variables and dual multipliers by solving a linear system whose
+coefficient matrix is the KKT matrix. This is sometimes called the
+Sequential Quadratic Programming (SQP) approach when the Newton step is
+interpreted as solving a quadratic subproblem with linearized constraints. The
+primal-dual formulation used in interior point methods (see
+[[file:../methods/interior-point-methods.org][Interior Point Methods]]) is
+another manifestation of Newton's method applied to a perturbed KKT system
+citep:nocedal-wright-2006.
+
+The practical challenge with Newton's method is that the pure Newton step may not
+decrease the objective or maintain feasibility far from the solution. Two
+families of globalization strategies address this: line search methods and trust
+region methods.
+
+** Line Search Methods
+
+A line search method computes a Newton (or Newton-like) direction p_k and then
+selects a step length alpha_k > 0 along that direction. The step length is
+chosen to satisfy conditions ensuring sufficient decrease in a merit function.
+The Armijo condition requires that the merit function decrease by at least a
+fraction of the directional derivative, while the Wolfe conditions add a
+curvature condition ensuring the step is not too short. Backtracking line search
+is the simplest implementation: start with alpha = 1 (the full Newton step) and
+reduce alpha by a fixed factor until the Armijo condition is satisfied
+citep:nocedal-wright-2006.
+
+For constrained problems, the merit function must balance objective reduction
+against constraint satisfaction. Classical approaches use an exact penalty
+function (L1 penalty of constraint violation added to the objective), but this
+requires selecting a penalty parameter. The filter line search used by
+[[file:ipopt-solver.org][Ipopt]] citep:waechter-biegler-2006 avoids this issue
+by maintaining a filter of non-dominated (objective, infeasibility) pairs, a
+significant practical improvement described in the Ipopt article.
+
+** Trust Region Methods
+
+Trust region methods take a different approach to globalization. Instead of
+computing a direction and then choosing a step length, a trust region method
+defines a region around the current iterate (typically a ball of radius delta_k)
+within which the quadratic model is trusted, and solves the subproblem of
+minimizing the model subject to staying within the trust region. If the model
+prediction agrees well with the actual function decrease, the trust region radius
+is expanded; if the agreement is poor, the radius is contracted and the step may
+be rejected citep:nocedal-wright-2006.
+
+Trust region methods have stronger theoretical convergence properties than line
+search methods in some settings, and they handle indefinite Hessians naturally
+(the trust region constraint bounds the step even when the Hessian has negative
+eigenvalues). However, the subproblem is more expensive to solve than a line
+search step, and implementation is more complex. In the NLP solvers most commonly
+used for MINLP (particularly Ipopt), line search methods dominate, though trust
+region ideas appear in the SQP solvers sometimes used as alternatives
+citep:nocedal-wright-2006.
+
+** Quasi-Newton Methods
+
+When second derivatives are unavailable or expensive to compute, quasi-Newton
+methods approximate the Hessian using only gradient information accumulated over
+previous iterations. The BFGS update is the most successful quasi-Newton formula:
+it maintains a positive definite approximation to the Hessian and updates it at
+each step using the secant equation. The limited-memory variant L-BFGS stores
+only a small number of vector pairs rather than the full dense matrix, making it
+practical for large-scale problems citep:nocedal-wright-2006.
+
+In discopt, exact Hessians are available through JAX automatic differentiation,
+so quasi-Newton approximations are not the default. However, when the Hessian
+computation is prohibitively expensive (for instance, with very large neural
+network embeddings), L-BFGS provides a viable fallback that trades convergence
+speed for reduced per-iteration cost.
+
+** Connection to Interior Point Methods
+
+Interior point methods, described in detail in the
+[[file:../methods/interior-point-methods.org][interior point methods article]],
+are fundamentally an application of Newton's method to a parameterized KKT
+system. The logarithmic barrier function converts inequality constraints into a
+smooth penalty, and the resulting barrier KKT system is solved by Newton
+iterations (the primal-dual step). As the barrier parameter decreases toward
+zero, the barrier KKT system approaches the original KKT system, and the
+solution of the barrier problem converges to the constrained optimum
+citep:nocedal-wright-2006.
+
+The line search and trust region globalization strategies discussed above apply
+directly to the barrier subproblems. Ipopt uses a filter line search to
+globalize the primal-dual Newton steps, while other solvers use penalty-based
+merit functions. The convergence theory for these methods builds on the same
+KKT foundations: the barrier parameter reduction schedule must be chosen so that
+the iterates track the central path (the curve of barrier KKT points
+parameterized by the barrier parameter) without jumping to regions where the
+Newton model is inaccurate citep:nocedal-wright-2006.
+
+** Relevance to Convexity and Global Optimization
+
+The NLP theory in cite:nocedal-wright-2006 is fundamentally local: Newton's
+method converges to a local minimizer, and the KKT conditions characterize local
+optima. For convex problems, every local minimizer is a global minimizer, so
+local NLP solvers suffice. The
+[[file:convexity-detection.org][convexity detection]] machinery in discopt
+determines whether this favorable situation holds.
+
+When the problem is nonconvex, local NLP solvers can only find local optima, and
+global optimization requires additional machinery: branch and bound to partition
+the search space, convex relaxations to provide lower bounds, and bound
+tightening to accelerate convergence. The NLP solvers at each branch-and-bound
+node still use the Newton-based algorithms described here, but they solve
+relaxed subproblems whose solutions bound (rather than equal) the global optimum.
+
+** See Also
+
+- [[file:../methods/interior-point-methods.org][Interior Point Methods for NLP]] for the barrier method and primal-dual IPM details
+- [[file:ipopt-solver.org][Ipopt Solver]] for the specific filter line-search IPM used in discopt
+- [[file:convexity-detection.org][Convexity Detection]] for how discopt decides whether local NLP methods yield global solutions
+- [[file:expression-dag-and-ad.org][Expression DAG and AD]] for how JAX computes the exact derivatives that Newton's method requires

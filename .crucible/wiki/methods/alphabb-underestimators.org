@@ -1,0 +1,45 @@
+#+TITLE: AlphaBB Underestimators
+#+FILETAGS: :method:alphabb:convex-relaxation:global-optimization:underestimator:
+
+* AlphaBB Underestimators
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: androulakis-maranas-floudas-1995 adjiman-1998 maranas-floudas-1994
+:STATUS: revised
+:CREATED: 2026-04-04
+:REVISED: 2026-04-05
+:END:
+
+The alphaBB method is one of the most widely used techniques for constructing convex underestimators of nonconvex functions within [[file:../methods/spatial-branch-and-bound.org][spatial branch and bound]]. The core idea is to add a diagonal quadratic perturbation to a nonconvex function, shifting the Hessian eigenvalues just enough to guarantee positive semidefiniteness over the entire domain. This produces a valid [[file:../concepts/convex-relaxations.org][convex relaxation]] that can be minimized to obtain lower bounds in each node of the B&B tree.
+
+** The Original Maranas-Floudas Formulation
+
+The convex underestimator construction underlying alphaBB was first introduced by citet:maranas-floudas-1994 in the context of finding global minimum potential energy conformations of small molecules. For a twice-differentiable function f(x) defined over a box domain [x^L, x^U], they proposed adding a quadratic term scaled by the magnitude of the most negative eigenvalue of the Hessian. Specifically, if lambda_min denotes the smallest eigenvalue of the Hessian of f over the entire domain, setting alpha = max(0, -lambda_min / 2) and forming
+
+L(x) = f(x) + alpha * sum_i (x_i - x_i^L) * (x_i - x_i^U)
+
+yields a function whose Hessian is positive semidefinite everywhere on the box cite:maranas-floudas-1994. The key insight is that the added term (x_i - x_i^L)(x_i - x_i^U) is non-positive on the box, so L(x) <= f(x) for all x in the domain. At the same time, the term vanishes at every vertex of the box, meaning L agrees with f at those points. Although developed for molecular conformation problems, the underestimator construction is entirely general and applies to any twice-differentiable function over a bounded domain.
+
+** Algorithmic Refinements by Androulakis, Maranas, and Floudas
+
+citet:androulakis-maranas-floudas-1995 elevated the underestimator construction into a complete global optimization algorithm, naming it alphaBB. Their formulation generalizes the original approach by allowing variable-specific perturbation parameters: instead of a single scalar alpha, one chooses a vector of parameters alpha_i, each large enough to convexify the function in the corresponding coordinate direction. The alphaBB underestimator thus takes the form
+
+L(x) = f(x) + sum_i alpha_i * (x_i - x_i^L) * (x_i - x_i^U)
+
+where the alpha_i are chosen so that the Hessian of L is positive semidefinite for all x in the box cite:androulakis-maranas-floudas-1995. The simplest sufficient condition sets each alpha_i to at least half the magnitude of the most negative eigenvalue of the Hessian of f over the domain.
+
+The paper embedded this underestimator within a spatial branch-and-bound framework. At each node, the convex underestimator provides a valid lower bound by solving a convex NLP. Branching bisects the box domain, and as subdomains shrink, the perturbation terms decrease (because the products (x_i - x_i^L)(x_i - x_i^U) shrink quadratically with the domain width), causing the underestimator to converge to the original function. This guarantees finite epsilon-convergence to the global optimum. The method handles general constrained nonconvex problems by constructing separate underestimators for the objective and each constraint function.
+
+** Extension to General NLPs by Adjiman et al.
+
+citet:adjiman-1998 provided the complete theoretical framework for applying alphaBB to general twice-differentiable NLPs with both equality and inequality constraints. A central contribution of their work was developing tighter methods for choosing the alpha parameters. The original approach requires computing (or bounding) the minimum eigenvalue of the Hessian over the entire box, which can be expensive and often overly conservative. Adjiman et al. introduced scaled and shifted Gershgorin circle estimates that bound the minimum eigenvalue of the Hessian without solving a full eigenvalue problem cite:adjiman-1998.
+
+The Gershgorin circle theorem provides intervals that contain the eigenvalues of a matrix based on its diagonal entries and off-diagonal row sums. By applying appropriate scaling and shifting transformations to the Hessian before computing Gershgorin bounds, tighter estimates of the minimum eigenvalue are obtained, which in turn produce smaller alpha values. Smaller alpha values mean the quadratic perturbation is less aggressive, so the underestimator stays closer to the original function. This tightness directly translates to stronger lower bounds in the B&B tree, reducing the number of nodes explored and accelerating convergence. The theoretical analysis also established conditions under which the alphaBB relaxation is exact in the limit as domain diameter goes to zero, confirming the convergence properties needed for a complete global optimization algorithm.
+
+** Properties of the AlphaBB Underestimator
+
+The alphaBB underestimator satisfies three fundamental properties that make it suitable for use within [[file:../methods/spatial-branch-and-bound.org][spatial branch and bound]]. First, it is convex over the domain by construction, since the alpha parameters are chosen to ensure positive semidefiniteness of the Hessian. Second, it underestimates f everywhere on the box, because each term (x_i - x_i^L)(x_i - x_i^U) is non-positive on [x_i^L, x_i^U]. Third, it agrees with f at every vertex of the box, where each factor (x_i - x_i^L) or (x_i - x_i^U) vanishes. This vertex-exactness property is what ensures the relaxation becomes arbitrarily tight as spatial branching subdivides the domain into smaller boxes, providing the convergence guarantee of the overall algorithm.
+
+** Relationship to McCormick Relaxations
+
+AlphaBB and [[file:../methods/mccormick-relaxations.org][McCormick relaxations]] represent complementary approaches to constructing [[file:../concepts/convex-relaxations.org][convex relaxations]] for nonconvex functions. McCormick relaxations are compositional: they propagate convex and concave envelopes through the DAG structure of the expression, handling each elementary operation individually. AlphaBB is monolithic: it treats the entire function as a black box, requiring only access to function values and Hessian information, not the internal computational structure. McCormick relaxations do not require twice-differentiability and can handle a wider class of operations, while alphaBB requires the function to be twice continuously differentiable. In practice, McCormick relaxations tend to be tighter for functions whose DAG structure exposes favorable decomposition, while alphaBB provides a reliable fallback for arbitrary smooth functions where compositional structure is unavailable or unhelpful. discopt implements both approaches and can deploy them together within spatial B&B, selecting the most appropriate relaxation strategy for each subexpression.

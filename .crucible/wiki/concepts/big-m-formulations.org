@@ -1,0 +1,47 @@
+#+TITLE: Big-M Formulations
+#+FILETAGS: :concept:big-m:milp:disjunction:formulation:
+
+* Big-M Formulations
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: vielma2015 balas1998
+:STATUS: draft
+:CREATED: 2026-04-04
+:END:
+
+Big-M formulations encode logical disjunctions as linear constraints using a
+large constant M and binary indicator variables. Given a disjunction "either
+constraint g(x) <= 0 holds or it doesn't", the big-M formulation writes
+g(x) <= M*(1-y) where y is a binary variable: when y=1, the constraint is
+enforced; when y=0, the right-hand side becomes M, effectively deactivating the
+constraint citep:vielma2015.
+
+** Formulation Strength
+
+The choice of M directly affects the LP relaxation strength. A tight M (close to
+the actual maximum of g(x) over the feasible domain) produces a strong relaxation,
+while an overly large M produces a weak relaxation with a large integrality gap.
+citet:vielma2015 provides a hierarchy of formulation strength: convex hull
+formulations (ideal) >= extended formulations (strong) >= big-M formulations
+(potentially weak) >= LP relaxation.
+
+Computing tight M values is itself an optimization problem (essentially OBBT on
+the constraint function). In practice, bound tightening procedures are critical
+for deriving good big-M values.
+
+** Application to Neural Network Embedding
+
+Big-M formulations are central to embedding ReLU neural networks in MILP models.
+A ReLU activation y = max(0, x) is encoded as: y >= x, y >= 0, y <= x - L*(1-z),
+y <= U*z, where z is a binary variable indicating whether the neuron is active,
+and L, U are bounds on the pre-activation input x. The tightness of L and U
+(computed via bound propagation through network layers) directly determines the
+LP relaxation quality. discopt's nn module (ReluBigMFormulation) implements this
+encoding.
+
+** Alternatives
+
+Convex hull formulations provide tighter relaxations than big-M but introduce
+more variables and constraints. Generalized Disjunctive Programming (GDP)
+provides a modeling framework that can automatically select between big-M and
+convex hull reformulations based on problem structure.

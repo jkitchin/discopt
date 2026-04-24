@@ -1,0 +1,65 @@
+#+TITLE: Identifiability for Algebraic and Regression Models
+#+FILETAGS: :method:identifiability:algebraic:regression:collinearity:jacobian-rank:
+
+* Identifiability for Algebraic and Regression Models
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: belsley1980-regression draper-smith-1998 montgomery-peck-vining-2012 chu-hahn-2007-subset yao2003-estimability
+:STATUS: draft
+:CREATED: 2026-04-22
+:END:
+
+Most of the identifiability literature targets ODE and DAE systems in systems biology and control. Mathematical-programming tools like discopt, however, natively handle /algebraic/ models: regression functions, thermodynamic property correlations, steady-state mass and energy balances, surrogate models, reaction-network equilibria, neural networks embedded as constraints. For this class the identifiability question has a dramatically simpler answer than in the dynamic case — it reduces to the column rank and conditioning of the Jacobian matrix \partial h / \partial \theta evaluated over the experimental design. The diagnostics are well-established in the statistics and regression literature (citet:belsley1980-regression is the canonical reference), require only linear algebra on top of autodiff-generated sensitivities, and are the most directly usable identifiability test for a tool like discopt.
+
+** Model Class
+
+Consider a model y = h(x, \theta) + \epsilon where h is a smooth algebraic map, x is a design point, \theta is the parameter vector, and \epsilon is mean-zero noise with covariance \Sigma. Given design points \{x_i\}_{i=1}^N, stack the predictions into a residual vector r(\theta) = y - h(X, \theta) and the sensitivity into the Jacobian J \in R^{NM \times p} with J_{(i,k),j} = \partial h_k / \partial \theta_j evaluated at x_i. This is the setting of every nonlinear least-squares fit.
+
+** Local Structural Identifiability: Jacobian Rank
+
+At a candidate parameter estimate \hat\theta, local structural identifiability is exactly the condition that J has full column rank — equivalently, that the Gauss-Newton Hessian J^T \Sigma^{-1} J is positive definite, which is the [[file:../concepts/fisher-information-matrix.org][FIM]] at that point. For linear-in-parameters models J is constant so the local condition is /global/: rank deficiency of J unambiguously signals that some parameter combination is unconstrained by the data. Three equivalent tests:
+
+1. *Rank-revealing QR.* Compute QR(J) with column pivoting; the numerical rank is the number of diagonal entries of R above a tolerance.
+2. *SVD.* Compute the singular values \sigma_1 \geq \ldots \geq \sigma_p; numerical rank is the number of \sigma_i above \sigma_1 \cdot \epsilon_{mach} \cdot \max(N, p) (standard rank tolerance).
+3. *Null-space inspection.* If rank < p, the trailing columns of V (from SVD) span the non-identifiable parameter combinations. Reporting these combinations is the algebraic analogue of COMBOS.
+
+For nonlinear h the rank test is local: the Jacobian rank can jump at special parameter values. In practice, sampling a few random points in a region of interest and checking rank at each gives a reliable practical test, and if the model is polynomial or rational, symbolic rank evaluation in sympy is tractable for small p.
+
+** Practical Identifiability: Condition-Index and VIF
+
+Full column rank is not enough: near-rank-deficiency produces practical non-identifiability. citet:belsley1980-regression introduced the condition-index / variance-decomposition-proportion (VDP) framework that remains the statistical standard.
+
+- /Condition indices./ Scale the columns of J to unit length, compute singular values \sigma_i, and report the indices \eta_i = \sigma_1 / \sigma_i. Rule-of-thumb thresholds: \eta_i > 10 indicates mild collinearity; \eta_i > 30 indicates serious collinearity.
+- /Variance-decomposition proportions./ For each parameter, decompose its variance contribution across the singular components. If more than half of the variance of two or more parameters is concentrated in the same high-\eta component, those parameters are collinear.
+- /Variance inflation factor./ VIF_j = 1 / (1 - R_j^2) where R_j^2 is the R^2 from regressing column j of J on the others. VIF_j > 10 flags a collinear column.
+
+These diagnostics give not just a yes/no verdict but an /attribution/ — which specific parameters participate in which ill-conditioned combination — that drives model reformulation. They are implemented out-of-the-box in statsmodels and R.
+
+** Parameter-Combination Non-Identifiability
+
+When only combinations of parameters are identifiable, the null space of J at \hat\theta gives them explicitly. If v \in R^p is a right singular vector with \sigma(v) \approx 0, then a shift \theta \to \theta + \alpha v does not change predictions to leading order; the model is invariant under translation in the v direction. The algebraic analogue of the COMBOS output (which uses differential algebra for ODE models) is therefore a simple SVD on J plus a step of sympy symbolic manipulation on the near-null vectors. In many engineering models the non-identifiable combinations have immediate physical interpretation — a ratio of rate constants, a lumped pre-exponential factor — and reparameterizing the model in terms of these combinations resolves the issue.
+
+** Connection to Sensitivity-Based Estimability
+
+The parameter-estimability methods of [[file:parameter-estimability.org][Yao, Brun, and Chu-Hahn]] apply directly to algebraic models with the sensitivity matrix Z = \Sigma^{-1/2} J. Orthogonalization ranking, collinearity index \gamma_K, and D-optimal subset selection all become small linear-algebra computations. In fact the algebraic-model setting is where these methods originated (chemical-engineering kinetics), and they remain the method of choice for models with dozens of parameters where profile likelihood is overkill.
+
+** Connection to Optimal Experimental Design
+
+For algebraic models the [[file:../concepts/fisher-information-matrix.org][FIM]] is F(\xi) = J(\xi)^T \Sigma^{-1} J(\xi) where \xi is the experimental design. Alphabetic criteria (D, A, E, ME) are functions of F with no dependence on \theta — F is constant — so [[file:../concepts/model-based-doe.org][MBDoE]] for linear algebraic models is a classical DoE problem solvable by factorial, central-composite, or D-optimal exchange algorithms. For nonlinear algebraic models F depends on \theta and MBDoE becomes sequential, but the analysis remains linear-algebraic at each step.
+
+** Workflow for discopt.doe
+
+The recommended discopt.doe identifiability workflow for algebraic models is:
+
+1. *Build.* User defines a discopt.Model with free parameters \theta and a residual block r(\theta) against data.
+2. *Compute J.* JAX autodiff on the expression DAG yields the sensitivity Jacobian at the candidate \hat\theta in one sweep (forward mode if p < NM, adjoint if p > NM). Scaling: divide each column by the working scale of the corresponding parameter.
+3. *Rank and condition.* SVD of the scaled J. Report rank, condition number, condition indices, and VIFs.
+4. *Null-space report.* Right singular vectors associated with small singular values give non-identifiable parameter combinations; inspect for physical meaning and suggest reparameterization.
+5. *Estimability ranking.* Yao-style orthogonalization ranking gives a prioritized subset; optional Chu-Hahn D-optimal subset selection gives the exact answer.
+6. *Profile likelihood on survivors.* The flagged identifiable subset is then profiled using [[file:profile-likelihood-identifiability.org][profile likelihood]] to produce finite-sample CIs.
+
+This pipeline is entirely within discopt's existing capability — Jacobians, linear algebra, NLPs, MINLPs — and gives a full identifiability report for algebraic models without any new numerical infrastructure. It is the natural first-class feature for an identifiability layer in discopt.doe.
+
+** Caveats
+
+The algebraic-model setting is more forgiving than the ODE setting but has its own pitfalls. /Bound-active parameters/ can appear practically non-identifiable but are actually constrained; check active sets before interpreting rank. /Parameter-dependent error covariance/ (heteroscedastic noise) must be incorporated in \Sigma; ignoring it biases the FIM. /Discrete outputs/ require a generalized-linear-model treatment — the FIM is still J^T W J but with W from the GLM weight, not the noise covariance. These are standard corrections in the regression-diagnostics literature citep:draper-smith-1998,montgomery-peck-vining-2012.

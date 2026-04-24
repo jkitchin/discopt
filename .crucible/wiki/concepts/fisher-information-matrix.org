@@ -1,0 +1,71 @@
+#+TITLE: Fisher Information Matrix and Cramer-Rao Lower Bound
+#+FILETAGS: :concept:fim:cramer-rao:identifiability:doe:covariance:
+
+* Fisher Information Matrix and Cramer-Rao Lower Bound
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: walter1997-identification pukelsheim1993-optimal franceschini-macchietto-2008 rodriguez-fernandez-2006
+:STATUS: draft
+:CREATED: 2026-04-22
+:END:
+
+The Fisher Information Matrix (FIM) is the central object connecting [[file:identifiability-analysis.org][parameter identifiability]], uncertainty quantification, and [[file:model-based-doe.org][model-based experiment design]]. For a parametric statistical model with log-likelihood \ell(\theta | y), the FIM is
+
+#+begin_src
+F(\theta) = -E[\partial^2 \ell / \partial \theta \partial \theta^T] = E[(\partial \ell / \partial \theta)(\partial \ell / \partial \theta)^T].
+#+end_src
+
+For the common case of a deterministic model y = h(x, \theta) + \epsilon with Gaussian noise \epsilon \sim N(0, \Sigma), the FIM collapses to the sandwich form
+
+#+begin_src
+F(\theta) = J(\theta)^T \Sigma^{-1} J(\theta),
+#+end_src
+
+where J = \partial h / \partial \theta is the sensitivity Jacobian of the /modelled/ outputs with respect to the parameters, evaluated at the design points. This form is the one actually implemented in practice. It is linear-algebraic, requires only forward-mode autodiff of the model, and drops out of any least-squares fit.
+
+** Cramer-Rao Lower Bound
+
+The Cramer–Rao inequality bounds the covariance of any unbiased estimator:
+
+#+begin_src
+Cov(\hat\theta) \succeq F(\theta)^{-1}.
+#+end_src
+
+Asymptotically, maximum-likelihood estimators attain this bound, so F^{-1} is the default proxy for parameter covariance. Eigenvectors of F point along the parameter directions that the experiment informs most strongly; eigenvalues measure how sharply those directions are constrained; the condition number \lambda_\max / \lambda_\min measures the dynamic range of the ill-conditioning. A rank deficiency of F immediately implies structural non-identifiability: the null space of F is a set of directions along which the likelihood is perfectly flat.
+
+** Alphabetic Optimality Criteria
+
+Casting experiment design as an optimization over inputs, sampling times, or initial conditions uses a scalar functional of F. The classical criteria due to Wald, Kiefer, and Fedorov, codified by citet:pukelsheim1993-optimal, are:
+
+- *D-optimal:* maximize \det F — minimizes the volume of the joint confidence ellipsoid. Invariant under parameter scaling; usually the default.
+- *A-optimal:* minimize \mathrm{tr}(F^{-1}) — minimizes the average parameter variance; not scale-invariant but easy to interpret.
+- *E-optimal:* maximize \lambda_\min(F) — strengthens the worst-informed direction; directly targets identifiability.
+- *ME / modified-E:* minimize \lambda_\max(F)/\lambda_\min(F) — minimizes condition number; most identifiability-relevant.
+- *I-optimal and G-optimal:* minimize average or maximum /prediction/ variance rather than parameter variance; appropriate when the downstream use is prediction.
+
+In the systems-engineering DoE literature these appear as the "alphabetic criteria" and are reviewed in depth by citet:franceschini-macchietto-2008.
+
+** Correlation Matrix and Parameter Coupling
+
+The parameter correlation matrix derived from F^{-1} exposes couplings that eigenvalue inspection can miss: two parameters may be individually well-constrained yet perfectly correlated, so that only their ratio is identifiable. Off-diagonals near \pm 1 flag this. The condition-index / variance-decomposition-proportion diagnostics of citet:belsley1980-regression are the regression-model analogue and give a principled way to attribute ill-conditioning to specific parameter groups; see [[file:../methods/algebraic-model-identifiability.org][Algebraic model identifiability]].
+
+** Practical Cautions
+
+The FIM view has well-known blind spots.
+
+- *Local and asymptotic.* F is evaluated at \hat\theta and its inverse approximates covariance under a Gaussian-posterior assumption. Non-Gaussian, multimodal, or boundary-dominated posteriors are misrepresented. citet:raue2009-profile introduced [[file:../methods/profile-likelihood-identifiability.org][profile likelihood]] specifically to avoid this failure mode.
+- *Bias to Jacobian magnitude, not informativeness per se.* The FIM scales with J^T J; scaling a parameter or output changes the apparent informativeness. Preconditioning by the prior covariance or by parameter working scales is standard practice.
+- *Silence on sloppiness.* Many models exhibit a geometric phenomenon in which F eigenvalues span 10 or more decades along parameter-combination directions that have no physical meaning. This is the subject of [[file:sloppy-models.org][sloppy models]].
+- *Numerical conditioning.* For rank-deficient F the inverse does not exist; use the pseudoinverse or an SVD-based diagnostic rather than blindly inverting. The rank itself is a practical identifiability test.
+
+** Computing the FIM
+
+Three implementation routes dominate:
+
+1. *Autodiff on the forward model.* For algebraic models, forward-mode AD on h(x, \theta) gives J at machine precision in one sweep per parameter. This is the natural route for discopt, which already carries an expression-DAG autodiff layer (see [[file:expression-dag-and-ad.org][Expression DAG and AD]]).
+2. *Sensitivity equations for ODE models.* Co-integrate the forward ODE with its parameter sensitivities \partial x / \partial \theta; propagate through the output map h. Tools such as AMICI generate and compile these efficiently.
+3. *Adjoint sensitivity for expensive models.* When the number of outputs is much smaller than the number of parameters, adjoint AD is cheaper than forward AD. Most ODE-sensitivity packages provide both.
+
+** FIM in discopt.doe
+
+A discopt.doe implementation of FIM-based identifiability needs three ingredients that the project already has: a Jacobian of the model outputs with respect to parameters (JAX autodiff on the expression DAG), a noise-covariance specification (user-supplied), and an optimization layer that takes \det, \mathrm{tr}(\cdot^{-1}), or \lambda_\min as its objective. Binary experiment selection — picking N of M candidate runs — lifts this to an MINLP that is natively expressible in discopt. See [[file:model-based-doe.org][MBDoE]] and [[file:../methods/identifiability-software.org][Identifiability software landscape]].

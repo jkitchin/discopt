@@ -1,0 +1,50 @@
+#+TITLE: Convex Relaxations for Global Optimization
+#+FILETAGS: :concept:convex-relaxation:global-optimization:envelopes:rlt:
+
+* Convex Relaxations for Global Optimization
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: tawarmalani2002 sherali1990 liberti2003
+:STATUS: draft
+:CREATED: 2026-04-04
+:END:
+
+Convex relaxations are the theoretical foundation of deterministic global
+optimization. A convex relaxation of a nonconvex optimization problem replaces
+the nonconvex feasible set and/or objective with convex approximations that
+contain the original feasible set (outer approximation) and underestimate the
+original objective. The optimal value of the relaxation provides a valid lower
+bound on the original problem's global optimum.
+
+** Convex Envelopes
+
+The convex envelope of a function f over a domain D is the tightest convex
+underestimator: the pointwise supremum of all affine functions that underestimate
+f on D. Computing convex envelopes analytically is possible for several important
+function classes citep:tawarmalani2002, including bilinear terms (McCormick envelope),
+univariate convex/concave functions (trivial: the function itself or the secant),
+and univariate monomials of any degree citep:liberti2003. For general nonlinear
+functions, the convex envelope is typically not available in closed form, and
+constructive relaxation methods (McCormick, alphaBB) provide valid but potentially
+non-tight underestimators.
+
+** Reformulation-Linearization Technique (RLT)
+
+RLT citep:sherali1990 constructs a hierarchy of progressively tighter LP
+relaxations for problems with polynomial and multiplicative structure. At level
+d, RLT multiplies each constraint by all products of d bound factors (x_i -
+x_i^L and x_i^U - x_i) and linearizes the resulting polynomial terms by
+introducing new variables. Level 1 RLT for bilinear terms produces the
+McCormick envelope. Higher levels produce tighter relaxations at the cost of
+exponentially more variables and constraints. BARON uses RLT internally to
+strengthen its LP relaxations.
+
+** Hierarchy of Relaxation Methods
+
+The main relaxation approaches for nonconvex MINLP, ordered roughly from
+tightest to loosest, are: convex envelopes (when available, exact) > McCormick
+relaxations (compositional, DAG-based) > alphaBB underestimators (Hessian-based)
+> LP relaxation (linear constraints only). In practice, solvers combine multiple
+techniques: BARON uses convex envelopes, RLT, and McCormick; Couenne uses
+McCormick and cutting planes; discopt uses McCormick relaxations and alphaBB
+underestimators.

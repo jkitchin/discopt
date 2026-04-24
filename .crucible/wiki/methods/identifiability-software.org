@@ -1,0 +1,76 @@
+#+TITLE: Identifiability Software Landscape
+#+FILETAGS: :method:identifiability:software:tools:integration:
+
+* Identifiability Software Landscape
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: bellu2007-daisy meshkat2014-combos chis2011-genssi ligon2018-genssi2 villaverde2016-strike-goldd diazseoane2023-sgd4 hong2019-sian dong2023-structuralid-jl stapor2018-pesto raue2009-profile reybarreiro2023-benchmark
+:STATUS: draft
+:CREATED: 2026-04-22
+:END:
+
+Practical identifiability analysis is covered by a surprisingly fragmented tool ecosystem: mature packages for every major method exist, but they are spread across REDUCE, Maple, MATLAB, Julia, Python, and R. This article surveys the landscape with a specific eye to what is callable from Python — the relevant concern for integration into discopt.doe. citet:reybarreiro2023-benchmark compared 13 tools across 21 models and is the current benchmark reference; citet:chis2011-comparison is the older methodological comparison.
+
+** Structural Identifiability Tools
+
+| Tool | Language | Scope | Python access | Notes |
+|------+----------+-------+---------------+-------|
+| *DAISY* citep:bellu2007-daisy | REDUCE | Global, rational ODE | Subprocess | Legacy; still widely used for cross-check |
+| *COMBOS* citep:meshkat2014-combos | PHP/Maxima (web) | Identifiable combinations | HTTP | Returns symbolic reparameterization |
+| *GenSSI 2.0* citep:ligon2018-genssi2 | MATLAB | Local and global | MATLAB engine | SBML input; multi-experiment |
+| *STRIKE-GOLDD 4.0* citep:diazseoane2023-sgd4 | MATLAB | Local, FISPO, ORC-DF | MATLAB engine | Broadest model class; best for large models |
+| *SIAN* citep:hong2019-sian | Maple / Julia | Probabilistic global | PyJulia (via Julia port) | Randomized; scales better than DAISY |
+| *StructuralIdentifiability.jl* citep:dong2023-structuralid-jl | Julia | Local and global, probabilistic | juliacall / PyJulia | Best Python-accessible global tool |
+| *Web-based SIA* | Maple (cloud) | Global | HTTP | No local install required |
+| *Sedoglavic probabilistic* | Maple | Local | No | Fast local rank test |
+
+The practical choice for a Python-embedded workflow is *StructuralIdentifiability.jl* via juliacall: mature, maintained in the SciML ecosystem, handles both local and global analysis with probabilistic guarantees, and integrates with ModelingToolkit.jl for model specification. SIAN.jl is the alternative. The MATLAB tools (STRIKE-GOLDD, GenSSI) remain the most capable for very large or non-polynomial models but are awkward to wrap.
+
+** Practical Identifiability Tools
+
+| Tool | Language | Methods | Python access |
+|------+----------+---------+---------------|
+| *PESTO* citep:stapor2018-pesto | MATLAB | Profile likelihood, FIM, MCMC | MATLAB engine |
+| *pyPESTO* | Python | Profile likelihood, FIM, optimization | *Native* |
+| *AMICI* | C++ with Python bindings | ODE sensitivities, adjoint | *Native* |
+| *dMod / D2D* citep:raue2009-profile | R / MATLAB | Profile likelihood | Subprocess |
+| *FME* (R) | R | Collinearity index, sensitivity | rpy2 |
+| *lmfit* | Python | Covariance + F-test profile | *Native* |
+| *emcee, numpyro, PyMC* | Python | Bayesian posterior | *Native* |
+| *SALib* | Python | Global sensitivity (Sobol, Morris, FAST) | *Native* |
+
+pyPESTO is the de-facto standard for Python-based practical identifiability analysis in systems biology: it combines AMICI sensitivities with profile-likelihood and FIM diagnostics in a single interface. For purely algebraic models, lmfit or a hand-rolled SVD on top of JAX autodiff is simpler.
+
+** Integration Options for discopt.doe
+
+Three integration postures, in increasing order of commitment:
+
+1. *Direct reimplementation* (recommended for algebraic models). The [[file:algebraic-model-identifiability.org][algebraic-model identifiability]] pipeline — Jacobian rank, condition index, VDP, collinearity index, estimability ranking — is a few hundred lines of numpy/JAX on top of discopt's existing expression-DAG autodiff. No external dependencies; ships as part of discopt.doe. This covers the large majority of discopt users whose models are algebraic.
+
+2. *Profile likelihood as native feature* (recommended). Profile likelihood maps directly onto discopt's NLP capability: each grid point is a constrained NLP that the existing solver handles. A =discopt.doe.profile_likelihood(model, theta_i, grid)= helper is roughly a hundred lines of warm-starting orchestration and produces intervals strictly better than Wald CIs. This belongs in discopt.doe.
+
+3. *Delegate to StructuralIdentifiability.jl for ODE models* (recommended for the ODE case). Python users with dynamic models should be pointed at the Julia tool via juliacall. A thin discopt.doe.structural_id(model) wrapper can ingest a symbolic representation of the model, serialize it as a ModelingToolkit system, and return the Julia verdict. Keeps discopt's scope narrow (no new ODE infrastructure) while giving users a one-call path to the state of the art.
+
+Not recommended: wrapping DAISY or STRIKE-GOLDD. Both are MATLAB or REDUCE-based, have awkward installation, and are superseded by StructuralIdentifiability.jl for Python users.
+
+** Benchmark-Informed Recommendations
+
+citet:reybarreiro2023-benchmark found that no single tool wins across all models:
+
+- For small polynomial ODE models with global verdicts required: SIAN or StructuralIdentifiability.jl.
+- For identifiable-combination reparameterization: COMBOS (symbolic-exact).
+- For large ODE models, non-polynomial terms, unknown initial conditions: STRIKE-GOLDD 4.0 with FISPO.
+- For algebraic regression models: rank-revealing QR / SVD / VIF suffices; none of the above is needed.
+
+A discopt.doe.identifiability module should ship the algebraic-model pipeline by default, delegate to StructuralIdentifiability.jl on demand for ODE models, and expose profile likelihood as a native feature across both cases.
+
+** See Also
+
+- [[file:../concepts/identifiability-analysis.org][Parameter identifiability analysis]] — conceptual overview
+- [[file:../concepts/fisher-information-matrix.org][Fisher information matrix]] — the central mathematical object
+- [[file:../concepts/sloppy-models.org][Sloppy models]] — geometric view of non-identifiability
+- [[file:structural-identifiability.org][Structural identifiability methods]] — algorithmic families
+- [[file:profile-likelihood-identifiability.org][Profile likelihood identifiability]] — method details
+- [[file:parameter-estimability.org][Parameter estimability]] — subset selection
+- [[file:algebraic-model-identifiability.org][Algebraic model identifiability]] — the discopt-native case
+- [[file:../concepts/model-based-doe.org][MBDoE]] — the downstream action when non-identifiability is diagnosed

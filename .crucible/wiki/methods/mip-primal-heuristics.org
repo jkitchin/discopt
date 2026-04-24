@@ -1,0 +1,193 @@
+#+TITLE: MIP Primal Heuristics
+#+FILETAGS: :method:primal-heuristic:mip:rounding:diving:shift-and-propagate:
+
+* MIP Primal Heuristics
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: berthold-thesis-2014 berthold-hendel-2015 wallace-ziround-2010 witzig-conflict-diving-2021 bolusani-scip9-2024
+:STATUS: active
+:CREATED: 2026-04-21
+:UPDATED: 2026-04-21
+:END:
+
+Primal heuristics, as implemented in [[file:../concepts/scip-solver.org][SCIP]] and [[file:../concepts/highs-solver.org][HiGHS]], are algorithms
+whose sole job is to produce feasible integer solutions for a MIP as early
+and as often as possible during branch-and-cut. They do not affect correctness (an MIP solver is sound
+without them) but they have an enormous effect on performance: an early
+incumbent enables aggressive dual-bound pruning, and the quality of the
+incumbent determines how tight the primal-dual gap closes before time limits
+trigger. Modern MIP solvers run a portfolio of dozens of heuristics, each
+specialized to a particular structural situation, coordinated by a scheduler
+that learns which to call where citep:chmiela-learn-schedule-2021. This
+article surveys the portfolio as implemented in SCIP and HiGHS, groups
+heuristics by family, and records for each one a *suggested host language*
+(Rust | Python | JAX | Warp) for reimplementation in discopt.
+
+** The Host-Placement Rubric
+
+discopt has four plausible implementation targets, each with a distinct
+performance envelope:
+
+- **Rust** — the right home for any heuristic that runs many times per
+  B&B node, touches the LP basis or propagation queue, or is a tight loop
+  over sparse integer arithmetic. Rust wins because it avoids Python call
+  overhead, allows cache-friendly sparse data layouts, and sits in-process
+  with discopt's existing FBBT/propagation code in
+  =crates/discopt-core/src/presolve/=.
+- **Python** — the right home for coarse-grained heuristics whose inner
+  iteration solves a full sub-MIP or sub-NLP, because the per-iteration cost
+  dwarfs any language-boundary overhead. All Large-Neighborhood-Search
+  heuristics live here (see [[file:large-neighborhood-search.org][large neighborhood search]]), as does the
+  [[file:feasibility-pump.org][feasibility pump]], Undercover citep:berthold-gleixner-undercover-2014,
+  and sub-NLP.
+- **JAX** — the right home for per-variable score updates that vectorize
+  cleanly across a dense variable vector and benefit from =vmap= over
+  restart replicas. The canonical case is [[file:feasibility-jump.org][feasibility jump]]
+  citep:luteberget-sartor-2023, whose Lagrangian score update is a sparse
+  matrix-vector product with a discrete argmin.
+- **Warp** — the right home for heuristics expressed as *lots of small
+  irregular problems in parallel* with scatter/atomics — e.g., running
+  per-variable score updates across thousands of subproblem replicas, or
+  propagating FBBT across an open B&B frontier. Warp's CPU backend is
+  comparable to Rust; its differentiator is one kernel source that scales
+  from CPU to GPU citep:nvidia-warp-2026.
+
+** Rounding Heuristics
+
+The simplest family: given a fractional LP solution $x^*$, round each
+integer-constrained variable to a nearby integer value and check whether the
+result is feasible.
+
+- **Simple rounding** (=heur_simplerounding.c= in SCIP; part of HiGHS
+  =shifting()=) rounds each fractional variable to the unique side where no
+  row lock is violated, skipping any variable whose rounding would break a
+  constraint. Reference: citet:berthold-thesis-2014 §4.1. **Host: Rust.**
+- **Rounding with row-activity repair** (=heur_rounding.c=) iteratively
+  rounds the most-fractional variable toward fewer locks, updates row
+  activities, and repairs violations. Same reference. **Host: Rust.**
+- **ZI-round** (=heur_zirounding.c=; =HPresolve::ziRound= in HiGHS) rounds
+  each integer variable to the nearest integer that minimizes the
+  "zero-integer" fractionality measure, using slack bounds to shift without
+  violating rows. Reference: citet:wallace-ziround-2010. **Host: Rust.**
+- **Shifting and intshifting** (=heur_shifting.c=, =heur_intshifting.c=)
+  round and shift continuous variables to repair constraints. **Host: Rust.**
+- **Octane** (=heur_octane.c=) searches vertices of the unit octahedron for
+  0/1 LPs (Balas, Ceria, Dawande, Margot & Pataki, /Math. Programming/
+  86:281-314, 2001). **Host: Rust.**
+- **Randomized rounding** (=heur_randrounding.c=; HiGHS
+  =randomizedRounding()=) rounds $x^*_j$ up with probability
+  $x^*_j - \lfloor x^*_j \rfloor$, else down; repeats with different seeds.
+  Reference: Raghavan & Thompson, /Combinatorica/ 7:365-374, 1987. **Host: Rust**
+  on CPU; **Warp** for a GPU kernel that launches thousands of random-seed
+  replicas in parallel, scoring by violation and returning the best.
+
+All rounding heuristics are cheap (O(n) per call) but together they cover a
+large fraction of easy MIPs — especially knapsack-like and
+setcover-structured instances.
+
+** Shift-and-Propagate
+
+citet:berthold-hendel-2015 introduced shift-and-propagate as a pre-root
+heuristic that lies between pure rounding and a full dive. It shifts
+variables one at a time toward their rounded values, propagating domain
+changes via the solver's FBBT engine after each shift. This allows the
+heuristic to detect infeasibility early and repair violations that pure
+rounding cannot. SCIP implements it in =heur_shiftandpropagate.c=;
+HiGHS does not have a standalone shift-and-propagate module but the
+functionality is folded into =shifting()= plus =HighsDomain= propagation.
+**Host: Rust** — requires direct access to the propagation queue and
+domain object, so it must live next to discopt's FBBT in
+=crates/discopt-core/=.
+
+** Diving Heuristics
+
+A "dive" simulates a depth-first descent through the B&B tree: at each
+level, select a fractional variable, fix it to one of its rounded values,
+re-solve the LP from a warm-started basis, propagate domain changes, and
+recurse. If the LP becomes infeasible or the dive hits a dead end, backtrack
+one level and try the other rounding. All diving heuristics share this
+machinery and differ only in the *score* used to pick the variable and the
+direction to round. SCIP implements more than a dozen variants, all in
+=heur_*diving.c=:
+
+- **coefdiving** — min number of locks in the rounding direction.
+- **fracdiving** — nearest-integer fractionality.
+- **pscostdiving**, **objpscostdiving** — pseudocost-weighted scores.
+- **guideddiving** — bias toward an existing incumbent.
+- **veclendiving** — score based on objective coefficient change per
+  constraint hit.
+- **linesearchdiving**, **rootsoldiving**, **actconsdiving**,
+  **intdiving**, **indicatordiving** — specialized variants.
+- **farkasdiving**, **conflictdiving**, **distributiondiving** — score
+  using infeasibility analysis or a Farkas-style dual argument
+  citep:witzig-conflict-diving-2021.
+- **nlpdiving** — each level solves an NLP relaxation (for convex MINLP).
+- **adaptivediving** — multi-armed bandit over the above.
+
+**Host: Rust** for all diving heuristics whose inner work is LP+propagation
+(the majority). **Python** for nlpdiving, whose inner work is a full NLP
+solve via the existing cyipopt wrapper. **Python** for the
+adaptivediving bandit controller — the controller's compute is trivial
+relative to its arms. Diving is essentially free to implement once the B&B
+LP/propagation stack is already in place, because it reuses the same
+machinery.
+
+Key references: citet:berthold-thesis-2014 §4.3 for the family;
+citet:witzig-conflict-diving-2021 for farkas/conflict variants;
+Pryor & Chinneck, /Computers & OR/ 38:1190-1201, 2011 for distribution diving.
+
+** Specialized and Feasibility Heuristics
+
+- **Feasibility pump** (=heur_feaspump.c=; HiGHS =feasibilityPump()=)
+  alternates LP projection and rounding. Already covered in
+  [[file:feasibility-pump.org][feasibility pump]]. **Host: Python.**
+- **Feasibility jump** (=heur_feasjump.c=, new in SCIP 9; HiGHS
+  =HighsFeasibilityJump.cpp=) is an LP-free Lagrangian local search. See
+  [[file:feasibility-jump.org][feasibility jump]] for detail. **Host: JAX** (batched restarts) or **Warp**
+  (sparse scatter with atomics).
+- **Undercover** (=heur_undercover.c=) fixes a minimum vertex cover of the
+  nonlinearity graph, reducing an MINLP to an LP/MILP subproblem
+  citep:berthold-gleixner-undercover-2014. **Host: Python**; the
+  nonlinearity DAG it reasons over maps cleanly onto discopt's JAX DAG.
+- **Sub-NLP** (=heur_subnlp.c=) rounds integers and solves the residual NLP
+  with Ipopt. **Host: Python** (reuse cyipopt).
+- **Multistart** (=heur_multistart.c=) random NLP starts. **Host: Python**
+  driver with a **JAX** inner kernel for parallel start evaluation.
+- **MPEC** (=heur_mpec.c=) Schewe & Schmidt, /Math. Programming
+  Computation/ 11:95-118, 2019, DOI:10.1007/s12532-018-0141-x. **Host: Python.**
+- **DKS** (=heur_dks.c=, new in SCIP 9) knapsack-style diving. **Host: Rust.**
+- **Post-processing local search** — =heur_oneopt.c=, =heur_twoopt.c=,
+  =heur_locks.c= — tight swap loops on the incumbent. **Host: Rust.**
+
+** Port-Order Recommendation for discopt
+
+Ranked by payoff-to-effort ratio:
+
+1. **JAX prototypes** (high novelty, high leverage given discopt's stack):
+   Feasibility Jump, Multistart inner kernel. These let discopt offer a
+   GPU-batched feasibility engine that SCIP and HiGHS structurally cannot
+   match.
+2. **Pure Rust, no recursion** (each a ~200-line module): simple rounding,
+   ZI-round, shifting, octane, trivial, zeroobj, oneopt, twoopt, locks,
+   bound.
+3. **Rust with propagation hooks**: shift-and-propagate, fixandinfer, all
+   diving arms, DKS — gated on exposing the FBBT engine as a reusable
+   Rust API.
+4. **Python orchestrators** (see [[file:large-neighborhood-search.org][large-neighborhood search]]): RENS, RINS,
+   DINS, crossover, mutation, local branching, proximity, feasibility pump,
+   undercover, sub-NLP, multistart driver, MPEC, ALNS/scheduler.
+5. **MINLP-specific where discopt wins**: Undercover (reuse JAX DAG),
+   sub-NLP (reuse cyipopt), multistart (JAX =vmap=). These are where
+   Rust+JAX architecturally beats C-SCIP.
+
+** Licensing
+
+SCIP relicensed from ZIB Academic to **Apache-2.0** with SCIP 8.1 (Nov 2023)
+and SOS 9.0 (Feb 2024, citet:bolusani-scip9-2024). HiGHS is **MIT**
+throughout. Both permit source-level adaptation with copyright-notice
+preservation. Algorithms themselves are not copyrightable (US: Baker v.
+Selden, 17 USC §102(b)); discopt's safe pattern is to reimplement from the
+papers, cross-check against the reference solvers on shared instances, and
+preserve licenses + upstream filename mapping in any module that is a close
+port. Avoid line-by-line copies from PaPILO (=scipopt/papilo=, LGPLv3),
+which would contaminate discopt's Rust crate with LGPL linking constraints.
