@@ -118,6 +118,7 @@ def _solve_vertex_cover_milp(
                 A[row_idx, var_to_col[v]] = 1.0
 
     # Objective: minimize sum(y) or a weighted cover objective.
+    c: np.ndarray
     if weights is None:
         c = np.ones(n, dtype=np.float64)
     else:
@@ -144,6 +145,7 @@ def _solve_vertex_cover_milp(
 
         h = highspy.Highs()
         h.silent()
+        h.setOptionValue("time_limit", 30.0)
 
         # Add binary variables (y_v ∈ {0,1} for each candidate)
         for i in range(n):
@@ -158,15 +160,21 @@ def _solve_vertex_cover_milp(
             h.addRow(-np.inf, float(b_le[row_idx]), len(nonzero_cols), nonzero_cols, vals)
 
         h.run()
+        model_status = h.getModelStatus()
+        if model_status != highspy.HighsModelStatus.kOptimal:
+            greedy = _greedy_vertex_cover(candidates, valid_terms, weights=weights)
+            return greedy if greedy else list(dict.fromkeys(candidates))
 
         sol = h.getSolution()
         y = np.array(sol.col_value[:n])
         selected = [candidates[i] for i in range(n) if y[i] > 0.5]
+        selected_set = set(selected)
 
         # Verify coverage (fallback to max_cover if something went wrong)
         for term in valid_terms:
-            if not any(v in set(selected) for v in term):
-                return list(dict.fromkeys(candidates))  # max_cover fallback
+            if not any(v in selected_set for v in term):
+                greedy = _greedy_vertex_cover(candidates, valid_terms, weights=weights)
+                return greedy if greedy else list(dict.fromkeys(candidates))
 
         return selected
 

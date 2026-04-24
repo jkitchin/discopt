@@ -164,6 +164,10 @@ def add_adaptive_partition(
             candidates.append(new1)
         if new2 > p_lo + eps and new2 < p_hi - eps and abs(new2 - new1) > eps:
             candidates.append(new2)
+        if not candidates:
+            midpoint = 0.5 * (p_lo + p_hi)
+            if midpoint > p_lo + eps and midpoint < p_hi - eps:
+                candidates.append(midpoint)
 
         if candidates:
             merged = np.sort(np.unique(np.concatenate([pts, candidates])))

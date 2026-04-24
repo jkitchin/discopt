@@ -79,6 +79,7 @@ class MilpRelaxationModel:
         bounds: list[tuple[float, float]],
         obj_offset: float = 0.0,
         integrality: Optional[np.ndarray] = None,
+        objective_bound_valid: bool = True,
     ):
         self._c = c
         self._A_ub = A_ub
@@ -86,6 +87,7 @@ class MilpRelaxationModel:
         self._bounds = bounds
         self._obj_offset = obj_offset
         self._integrality = integrality
+        self._objective_bound_valid = objective_bound_valid
 
     def solve(
         self,
@@ -117,7 +119,7 @@ class MilpRelaxationModel:
         status_str = status_map.get(result.status, str(result.status))
 
         obj = None
-        if result.objective is not None:
+        if result.objective is not None and self._objective_bound_valid:
             obj = float(result.objective) + self._obj_offset
 
         return MilpRelaxationResult(status=status_str, objective=obj, x=result.x)
@@ -163,6 +165,28 @@ def _normalize_convhull_formulation(formulation: str) -> str:
         ) from err
 
 
+def _choose_trilinear_pair(
+    term: tuple[int, int, int],
+    partitioned_vars: set[int],
+) -> tuple[tuple[int, int], int]:
+    """Choose a deterministic trilinear decomposition pair.
+
+    Prefer a pair that already uses partitioned original variables so the
+    existing piecewise bilinear machinery can tighten one stage of the lifted
+    relaxation.
+    """
+    i, j, k = tuple(sorted(term))
+    candidates = [((i, j), k), ((i, k), j), ((j, k), i)]
+    candidates.sort()
+    return max(
+        candidates,
+        key=lambda item: (
+            sum(v in partitioned_vars for v in item[0]),
+            item[0][0] in partitioned_vars or item[0][1] in partitioned_vars,
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Helpers: expression decomposition
 # ---------------------------------------------------------------------------
@@ -204,6 +228,7 @@ def _linearize_expr(
     expr: Expression,
     model: Model,
     bilinear_var_map: dict[tuple[int, int], int],
+    trilinear_var_map: dict[tuple[int, int, int], int],
     monomial_var_map: dict[tuple[int, int], int],
     n_total_vars: int,
 ) -> tuple[np.ndarray, float]:
@@ -306,6 +331,15 @@ def _linearize_expr(
                         coeff[bilinear_var_map[key]] += scale * c
                     else:
                         raise ValueError(f"Bilinear {key} not in map")
+                elif len(unique) == 3:
+                    if len(unique) != len(indices):
+                        raise ValueError("Mixed repeated-factor products are not supported")
+                    ordered = sorted(unique)
+                    tri_key = (ordered[0], ordered[1], ordered[2])
+                    if tri_key in trilinear_var_map:
+                        coeff[trilinear_var_map[tri_key]] += scale * c
+                    else:
+                        raise ValueError(f"Trilinear {tri_key} not in map")
                 else:
                     raise ValueError(f"Higher-order product ({len(unique)} vars) not supported")
 
@@ -392,9 +426,9 @@ def build_milp_relaxation(
     convhull_mode = _normalize_convhull_formulation(convhull_formulation)
 
     # ── Assign MILP column indices ──────────────────────────────────────────
-    # Layout: [original vars 0..n_orig-1] [bilinear aux w_ij] [monomial aux s_i^n]
-    # For partitioned bilinear terms: also [δ_k, x̄_k, w̄_k per partition k]
     bilinear_var_map: dict[tuple[int, int], int] = {}
+    trilinear_var_map: dict[tuple[int, int, int], int] = {}
+    trilinear_stage_map: dict[tuple[int, int, int], dict[str, object]] = {}
     monomial_var_map: dict[tuple[int, int], int] = {}
 
     col_idx = n_orig
@@ -404,15 +438,50 @@ def build_milp_relaxation(
         flag = 1 if v.var_type in (VarType.BINARY, VarType.INTEGER) else 0
         integrality_flags.extend([flag] * v.size)
 
-    # Pre-compute bilinear auxiliary variable slots
-    for i, j in terms.bilinear:
-        xi_lb, xi_ub = float(flat_lb[i]), float(flat_ub[i])
-        xj_lb, xj_ub = float(flat_lb[j]), float(flat_ub[j])
-        corners = [xi_lb * xj_lb, xi_lb * xj_ub, xi_ub * xj_lb, xi_ub * xj_ub]
-        bilinear_var_map[(i, j)] = col_idx
+    bilinear_relation_map: dict[tuple[int, int], int] = {}
+
+    def _ensure_bilinear_aux(lhs_col: int, rhs_col: int) -> int:
+        nonlocal col_idx
+        key = (min(lhs_col, rhs_col), max(lhs_col, rhs_col))
+        if key in bilinear_relation_map:
+            return bilinear_relation_map[key]
+
+        lhs_lb, lhs_ub = all_bounds[key[0]]
+        rhs_lb, rhs_ub = all_bounds[key[1]]
+        corners = [
+            lhs_lb * rhs_lb,
+            lhs_lb * rhs_ub,
+            lhs_ub * rhs_lb,
+            lhs_ub * rhs_ub,
+        ]
+        bilinear_relation_map[key] = col_idx
         all_bounds.append((min(corners), max(corners)))
         integrality_flags.append(0)
         col_idx += 1
+        return bilinear_relation_map[key]
+
+    original_bilinear_keys = sorted({(min(i, j), max(i, j)) for i, j in terms.bilinear})
+    for key in original_bilinear_keys:
+        bilinear_var_map[key] = _ensure_bilinear_aux(*key)
+
+    partitioned_vars = set(disc_state.partitions)
+    trilinear_terms: list[tuple[int, int, int]] = []
+    for term in terms.trilinear:
+        ordered = tuple(sorted(term))
+        if ordered not in trilinear_terms:
+            trilinear_terms.append(ordered)
+
+    for term in sorted(trilinear_terms):
+        pair, remaining = _choose_trilinear_pair(term, partitioned_vars)
+        pair_col = _ensure_bilinear_aux(*pair)
+        final_col = _ensure_bilinear_aux(pair_col, remaining)
+        trilinear_var_map[term] = final_col
+        trilinear_stage_map[term] = {
+            "pair": pair,
+            "pair_col": pair_col,
+            "remaining_var": remaining,
+            "product_col": final_col,
+        }
 
     for var_idx, n in terms.monomial:
         lb_i = float(flat_lb[var_idx])
@@ -425,56 +494,45 @@ def build_milp_relaxation(
         integrality_flags.append(0)
         col_idx += 1
 
-    # Piecewise McCormick: per-partition auxiliary variables for bilinear terms.
-    # For each bilinear (i,j) where i ∈ disc_state.partitions:
-    #   For each partition interval k:
-    #     δ_k  ∈ {0,1}       — binary selector (col)
-    #     x̄_k  ∈ [a_k, b_k]  — x_i value within interval k (0 outside)
-    #     w̄_k  ∈ [wi_lo, wi_hi] — bilinear product within interval k (0 outside)
-    # bilinear_pw_map[(i,j)] = [(delta_col, xbar_col, wbar_col, a_k, b_k), ...]
     bilinear_pw_map: dict[tuple[int, int], list] = {}
     bilinear_lambda_map: dict[tuple[int, int], dict] = {}
 
-    for i, j in terms.bilinear:
-        # Choose which variable to partition: prefer the one in disc_state
-        if i in disc_state.partitions:
-            part_var, other_var = i, j
-        elif j in disc_state.partitions:
-            part_var, other_var = j, i
+    for (lhs_col, rhs_col), _w_col in bilinear_relation_map.items():
+        part_var: Optional[int] = None
+        if lhs_col < n_orig and lhs_col in disc_state.partitions:
+            part_var = lhs_col
+            other_var = rhs_col
+        elif rhs_col < n_orig and rhs_col in disc_state.partitions:
+            part_var = rhs_col
+            other_var = lhs_col
         else:
-            continue  # no partitioning for this term
+            continue
 
         pts = disc_state.partitions[part_var]
-        xj_lb_g = float(flat_lb[other_var])
-        xj_ub_g = float(flat_ub[other_var])
+        other_lb, other_ub = all_bounds[other_var]
 
         if convhull_mode == "disaggregated":
             intervals = []
             for k in range(len(pts) - 1):
                 a_k = float(pts[k])
                 b_k = float(pts[k + 1])
-
-                # Big-M for bilinear product within this interval
                 _, wk_lo, wk_hi = _piecewise_product_bounds(
                     a_k,
                     b_k,
-                    xj_lb_g,
-                    xj_ub_g,
+                    float(other_lb),
+                    float(other_ub),
                 )
 
-                # δ_k ∈ {0,1}
                 delta_col = col_idx
                 all_bounds.append((0.0, 1.0))
                 integrality_flags.append(1)
                 col_idx += 1
 
-                # x̄_k ∈ [0, max(|a_k|, |b_k|)]  (0 when δ_k=0)
                 xbar_col = col_idx
                 all_bounds.append((min(a_k, 0.0), max(abs(a_k), abs(b_k))))
                 integrality_flags.append(0)
                 col_idx += 1
 
-                # w̄_k ∈ [wk_lo, wk_hi]  (0 when δ_k=0)
                 wbar_col = col_idx
                 all_bounds.append((min(wk_lo, 0.0), max(wk_hi, 0.0)))
                 integrality_flags.append(0)
@@ -482,16 +540,14 @@ def build_milp_relaxation(
 
                 intervals.append((delta_col, xbar_col, wbar_col, a_k, b_k))
 
-            bilinear_pw_map[(i, j)] = intervals
+            bilinear_pw_map[(lhs_col, rhs_col)] = intervals
         else:
             breakpoints = [float(p) for p in pts]
             lambda_cols: list[int] = []
             alpha_cols: list[int] = []
             theta_cols: list[int] = []
-            # theta = lambda * y can be zero whenever lambda = 0, so 0 must lie in
-            # the explicit theta bounds even if y does not cross zero.
-            theta_lb = min(0.0, xj_lb_g, xj_ub_g)
-            theta_ub = max(0.0, xj_lb_g, xj_ub_g)
+            theta_lb = min(0.0, float(other_lb), float(other_ub))
+            theta_ub = max(0.0, float(other_lb), float(other_ub))
 
             for _ in breakpoints:
                 lambda_cols.append(col_idx)
@@ -511,7 +567,7 @@ def build_milp_relaxation(
                 integrality_flags.append(0)
                 col_idx += 1
 
-            bilinear_lambda_map[(i, j)] = {
+            bilinear_lambda_map[(lhs_col, rhs_col)] = {
                 "part_var": part_var,
                 "other_var": other_var,
                 "breakpoints": breakpoints,
@@ -520,9 +576,6 @@ def build_milp_relaxation(
                 "theta_cols": theta_cols,
                 "mode": convhull_mode,
             }
-
-    # Also store in a form keyed by (part_var, other_var) for reference
-    # (not needed separately; we use bilinear_pw_map[(i,j)] directly)
 
     n_total = col_idx
 
@@ -542,13 +595,10 @@ def build_milp_relaxation(
             A_data.extend(coeff_arr[nz].tolist())
         b_rows.append(float(rhs))
 
-    # McCormick constraints for each bilinear term
-    for i, j in terms.bilinear:
-        xi_lb_g = float(flat_lb[i])
-        xi_ub_g = float(flat_ub[i])
-        xj_lb_g = float(flat_lb[j])
-        xj_ub_g = float(flat_ub[j])
-        w_col = bilinear_var_map[(i, j)]
+    # McCormick constraints for each lifted bilinear relation
+    for (i, j), w_col in bilinear_relation_map.items():
+        xi_lb_g, xi_ub_g = [float(v) for v in all_bounds[i]]
+        xj_lb_g, xj_ub_g = [float(v) for v in all_bounds[j]]
 
         if (i, j) in bilinear_lambda_map:
             lambda_info = bilinear_lambda_map[(i, j)]
@@ -559,8 +609,7 @@ def build_milp_relaxation(
             alpha_cols = list(lambda_info["alpha_cols"])
             theta_cols = list(lambda_info["theta_cols"])
             mode = str(lambda_info["mode"])
-            yj_lb = float(flat_lb[other_var])
-            yj_ub = float(flat_ub[other_var])
+            yj_lb, yj_ub = [float(v) for v in all_bounds[other_var]]
 
             row_sum_lambda = np.zeros(n_total)
             for lambda_col in lambda_cols:
@@ -650,13 +699,12 @@ def build_milp_relaxation(
             # ── Piecewise McCormick with binary partition selection ──────────
             intervals = bilinear_pw_map[(i, j)]
             # Determine partition var vs other var
-            if i in disc_state.partitions:
+            if i < n_orig and i in disc_state.partitions:
                 part_var, other_var = i, j
             else:
                 part_var, other_var = j, i
 
-            yj_lb = float(flat_lb[other_var])
-            yj_ub = float(flat_ub[other_var])
+            yj_lb, yj_ub = [float(v) for v in all_bounds[other_var]]
 
             # Constraint: Σ δ_k = 1 (select exactly one partition)
             row_sum = np.zeros(n_total)
@@ -709,12 +757,11 @@ def build_milp_relaxation(
                 row[delta_col] = -wk_hi
                 _add_row(row, 0.0)
 
-                # w̄_k ≥ wk_lo * δ_k  → w̄_k=0 when δ_k=0 (for wk_lo ≥ 0 case)
-                if wk_lo > 0:
-                    row = np.zeros(n_total)
-                    row[wbar_col] = -1.0
-                    row[delta_col] = wk_lo
-                    _add_row(row, 0.0)
+                # w̄_k ≥ wk_lo * δ_k  → w̄_k=0 when δ_k=0
+                row = np.zeros(n_total)
+                row[wbar_col] = -1.0
+                row[delta_col] = wk_lo
+                _add_row(row, 0.0)
 
                 # Per-interval McCormick with big-M relaxation.
                 # The big-M term LOOSENS the constraint when δ_k=0 (interval inactive).
@@ -845,7 +892,14 @@ def build_milp_relaxation(
         body = constraint.body  # normalized: body <= 0  (sense is always "<=")
         sense = constraint.sense
         try:
-            c, const = _linearize_expr(body, model, bilinear_var_map, monomial_var_map, n_total)
+            c, const = _linearize_expr(
+                body,
+                model,
+                bilinear_var_map,
+                trilinear_var_map,
+                monomial_var_map,
+                n_total,
+            )
             # body ≤ 0  →  c @ z + const ≤ 0  →  c @ z ≤ -const
             if sense == "<=":
                 _add_row(c, -const)
@@ -856,7 +910,12 @@ def build_milp_relaxation(
         except ValueError as err:
             # Constraint contains terms we can't linearize (e.g. general nonlinear).
             # Omitting it makes the LP feasible region larger → still a valid lower bound.
-            logger.debug("AMP: omitting constraint (cannot linearize): %s", err)
+            logger.warning(
+                "AMP: omitting constraint %s from the MILP relaxation because it cannot "
+                "be linearized safely: %s",
+                constraint.name or "<unnamed>",
+                err,
+            )
 
     # ── OA tangent cuts from NLP incumbent ──────────────────────────────────
     # These are outer-approximation linearizations of the original nonlinear
@@ -873,12 +932,20 @@ def build_milp_relaxation(
     obj_expr = model._objective.expression
     try:
         c_obj, const_obj = _linearize_expr(
-            obj_expr, model, bilinear_var_map, monomial_var_map, n_total
+            obj_expr,
+            model,
+            bilinear_var_map,
+            trilinear_var_map,
+            monomial_var_map,
+            n_total,
         )
+        objective_bound_valid = True
     except ValueError:
-        # Fallback: trivial objective (LP gives ‑∞ lower bound — acceptable for soundness)
+        # Keep a feasibility objective so the relaxation can still produce a point,
+        # but do not treat the LP value as a sound global bound.
         c_obj = np.zeros(n_total)
         const_obj = 0.0
+        objective_bound_valid = False
 
     # Negate for maximization
     if model._objective.sense == ObjectiveSense.MAXIMIZE:
@@ -908,11 +975,14 @@ def build_milp_relaxation(
         bounds=all_bounds,
         obj_offset=const_obj,
         integrality=integrality_arr if has_integers else None,
+        objective_bound_valid=objective_bound_valid,
     )
 
     varmap: dict = {
         "original": {k: k for k in range(n_orig)},
         "bilinear": bilinear_var_map,
+        "trilinear": trilinear_var_map,
+        "trilinear_stages": trilinear_stage_map,
         "monomial": monomial_var_map,
         "bilinear_pw": bilinear_pw_map,
         "bilinear_lambda": bilinear_lambda_map,
