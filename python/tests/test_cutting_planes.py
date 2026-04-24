@@ -309,6 +309,29 @@ class TestOACutsFromEvaluator:
         np.testing.assert_allclose(cut.coeffs, [2.0, 4.0, -1.0], atol=1e-6)
         assert abs(cut.rhs - 5.0) < 1e-6
 
+    def test_convex_mask_filters_nonconvex_constraints(self):
+        """The convex mask should suppress OA cuts for nonconvex constraint rows."""
+        from discopt._jax.nlp_evaluator import NLPEvaluator
+        from discopt.modeling.core import Model
+
+        m = Model("test_oa_mask")
+        x = m.continuous("x", shape=(2,), lb=-2.0, ub=2.0)
+        m.minimize(x[0] + x[1])
+        m.subject_to(x[0] + x[1] <= 1.0, name="linear")
+        m.subject_to(x[0] * x[1] <= 0.25, name="bilinear")
+        evaluator = NLPEvaluator(m)
+
+        cuts = generate_oa_cuts_from_evaluator(
+            evaluator,
+            np.array([0.5, 0.5]),
+            constraint_senses=["<=", "<="],
+            convex_mask=[True, False],
+        )
+
+        assert len(cuts) == 1
+        np.testing.assert_allclose(cuts[0].coeffs, [1.0, 1.0], atol=1e-6)
+        assert cuts[0].sense == "<="
+
 
 class TestOASeparation:
     """Test that OA separation returns only violated cuts."""
@@ -335,6 +358,29 @@ class TestOASeparation:
         x_sol = np.array([1.0, 1.0])  # x0^2+x1^2 = 2 > 1, violated
         cuts = separate_oa_cuts(evaluator, x_sol, constraint_senses=["<="])
         assert len(cuts) == 1
+        assert cuts[0].sense == "<="
+
+    def test_convex_mask_skips_nonconvex_violations(self):
+        """Separation should ignore violated rows that are marked nonconvex."""
+        from discopt._jax.nlp_evaluator import NLPEvaluator
+        from discopt.modeling.core import Model
+
+        m = Model("test_sep_mask")
+        x = m.continuous("x", shape=(2,), lb=-2.0, ub=2.0)
+        m.minimize(x[0] + x[1])
+        m.subject_to(x[0] ** 2 + x[1] ** 2 <= 1.0, name="circle")
+        m.subject_to(x[0] * x[1] <= 0.25, name="bilinear")
+        evaluator = NLPEvaluator(m)
+
+        cuts = separate_oa_cuts(
+            evaluator,
+            np.array([1.0, 1.0]),
+            constraint_senses=["<=", "<="],
+            convex_mask=[True, False],
+        )
+
+        assert len(cuts) == 1
+        np.testing.assert_allclose(cuts[0].coeffs, [2.0, 2.0], atol=1e-6)
         assert cuts[0].sense == "<="
 
 

@@ -68,6 +68,15 @@ def _make_circle() -> Model:
     return m
 
 
+def _make_trilinear_cover() -> Model:
+    """Simple trilinear problem with a known AM-GM optimum of 3."""
+    m = Model("trilinear_cover")
+    x = m.continuous("x", lb=0, ub=2, shape=(3,))
+    m.subject_to(x[0] * x[1] * x[2] >= 1.0)
+    m.minimize(x[0] + x[1] + x[2])
+    return m
+
+
 def _build_nlp3() -> Model:
     """Alpine nlp3: 8-variable multilinear industrial process.
 
@@ -348,6 +357,42 @@ class TestPartitionSelection:
 
         assert set(selected) == {0}
 
+    def test_min_vertex_cover_falls_back_when_highs_status_is_not_optimal(self, monkeypatch):
+        """A non-optimal HiGHS status should fall back to the greedy cover."""
+        import highspy
+
+        terms = self._make_terms(bilinear=[(0, 1), (0, 2), (0, 3), (0, 4)])
+        options = {}
+
+        class FakeHighs:
+            def silent(self):
+                return None
+
+            def setOptionValue(self, name, value):
+                options[name] = value
+
+            def addBinary(self, obj):
+                return obj
+
+            def addRow(self, *args):
+                return args
+
+            def run(self):
+                return None
+
+            def getModelStatus(self):
+                return highspy.HighsModelStatus.kTimeLimit
+
+            def getSolution(self):
+                raise AssertionError("solution should not be read after a non-optimal status")
+
+        monkeypatch.setattr(highspy, "Highs", FakeHighs)
+
+        selected = self.pick(terms, method="min_vertex_cover")
+
+        assert set(selected) == {0}
+        assert options["time_limit"] == pytest.approx(30.0)
+
     def test_adaptive_vertex_cover_uses_distance_weights(self):
         """Adaptive cover should favor high-distance variables on large graphs."""
         terms = self._make_terms(bilinear=[(i, i + 1) for i in range(16)])
@@ -462,6 +507,22 @@ class TestDiscretizationState:
         assert pts[-1] == pytest.approx(1.0)
         # Strictly sorted
         assert all(pts[i] < pts[i + 1] for i in range(len(pts) - 1))
+
+    def test_adaptive_refinement_bisects_when_centered_candidates_hit_interval_edges(self):
+        """If centered refinement would add only edge points, fall back to the midpoint."""
+        state = self.initialize_partitions(
+            [0],
+            lb=[0.0],
+            ub=[1.0],
+            n_init=1,
+            scaling_factor=2.0,
+        )
+
+        state2 = self.add_adaptive_partition(state, {0: 0.5}, [0], [0.0], [1.0])
+
+        pts = state2.partitions[0]
+        assert len(pts) == 3
+        np.testing.assert_allclose(pts, np.array([0.0, 0.5, 1.0]))
 
     def test_uniform_refinement_splits_every_interval(self):
         """Uniform refinement should bisect each current interval."""
@@ -872,6 +933,72 @@ class TestMilpRelaxation:
                 convhull_formulation="bogus",
             )
 
+    def test_trilinear_milp_builds_nested_auxiliaries(self):
+        """Trilinear terms should be modeled through explicit lifted auxiliaries."""
+        m = _make_trilinear_cover()
+        terms = self.classify(m)
+        state = self.init_partitions([0, 1, 2], lb=[0.0, 0.0, 0.0], ub=[2.0, 2.0, 2.0], n_init=2)
+
+        milp_model, varmap = self.build_milp(m, terms, state, incumbent=None)
+        result = milp_model.solve()
+
+        assert (0, 1, 2) in varmap["trilinear"]
+        stage = varmap["trilinear_stages"][(0, 1, 2)]
+        assert stage["product_col"] == varmap["trilinear"][(0, 1, 2)]
+        assert result.status == "optimal"
+        assert result.objective is not None
+        assert 0.0 < result.objective <= 3.0 + 1e-6
+
+    def test_unsupported_objective_returns_no_relaxation_bound(self):
+        """Unsupported nonlinear objectives should not be reported as valid lower bounds."""
+        m = Model("unsupported_objective")
+        x = m.continuous("x", lb=0, ub=2, shape=(2,))
+        m.subject_to(x[0] + x[1] >= 1.0)
+        m.minimize((x[0] * x[0]) * x[1])
+
+        terms = self.classify(m)
+        state = self.init_partitions([0], lb=[0.0], ub=[2.0], n_init=2)
+
+        milp_model, _ = self.build_milp(m, terms, state, incumbent=None)
+        result = milp_model.solve()
+
+        assert result.status == "optimal"
+        assert result.objective is None
+        assert result.x is not None
+
+    def test_piecewise_interval_rows_force_inactive_wbar_to_zero_with_negative_bounds(self):
+        """Disaggregated intervals must include the lower δ-forcing row even when wk_lo < 0."""
+        import scipy.sparse as sp
+        from discopt._jax.discretization import DiscretizationState
+        from discopt._jax.term_classifier import classify_nonlinear_terms
+
+        m = Model("piecewise_sign_straddle")
+        x = m.continuous("x", lb=0, ub=2)
+        y = m.continuous("y", lb=-1, ub=1)
+        m.minimize(x * y)
+
+        terms = classify_nonlinear_terms(m)
+        state = DiscretizationState(partitions={0: np.array([0.0, 1.0, 2.0])})
+        milp_model, varmap = self.build_milp(m, terms, state, incumbent=None)
+
+        assert sp.issparse(milp_model._A_ub)
+        A_csr = milp_model._A_ub.tocsr()
+        b_ub = np.asarray(milp_model._b_ub, dtype=np.float64)
+
+        for delta_col, _, wbar_col, a_k, b_k in varmap["bilinear_pw"][(0, 1)]:
+            wk_lo = min(a_k * -1.0, a_k * 1.0, b_k * -1.0, b_k * 1.0)
+            assert wk_lo < 0.0
+            matched = False
+            for row_idx in range(A_csr.shape[0]):
+                row = A_csr.getrow(row_idx)
+                if row.nnz != 2 or abs(b_ub[row_idx]) > 1e-12:
+                    continue
+                coeffs = dict(zip(row.indices.tolist(), row.data.tolist()))
+                if coeffs.get(wbar_col) == -1.0 and coeffs.get(delta_col) == wk_lo:
+                    matched = True
+                    break
+            assert matched, f"missing inactive-interval lower row for [{a_k}, {b_k}]"
+
 
 class TestAmpPhase1Helpers:
     """Fast regression tests for Phase 1 helper behavior."""
@@ -929,27 +1056,30 @@ class TestAmpEndToEnd:
         assert result.status == "optimal", f"Expected optimal, got {result.status}"
         assert result.gap_certified is True, "Gap must be certified for AMP"
         assert result.objective is not None
-        assert abs(result.objective - NLP1_OPTIMUM) <= 0.15, (
+        assert abs(result.objective - NLP1_OPTIMUM) <= 0.06, (
             f"Objective {result.objective:.5f} too far from {NLP1_OPTIMUM}"
         )
 
     @pytest.mark.smoke
     def test_circle_bilinear_global_optimum(self):
-        """circle: x₀²+x₁²≥2 minimized to global optimum √2."""
+        """circle: recover the best known objective without a false certificate."""
         m = _make_circle()
         result = m.solve(solver="amp", rel_gap=1e-4, time_limit=60)
-        assert result.status == "optimal"
-        assert result.gap_certified is True
+        assert result.status in ("optimal", "feasible", "time_limit")
         assert result.objective is not None
         assert abs(result.objective - CIRCLE_OPTIMUM) <= 1e-3, (
             f"Objective {result.objective:.6f} too far from √2={CIRCLE_OPTIMUM}"
         )
+        if result.status == "optimal":
+            assert result.gap_certified is True
+        else:
+            assert result.gap_certified is False
 
     @pytest.mark.slow
     @pytest.mark.timeout(300)
     @pytest.mark.xfail(
         reason="nlp3 MILP exceeds test budget; tracked in #24",
-        strict=False,
+        strict=True,
     )
     def test_nlp3_multilinear_global_optimum(self):
         """nlp3: 8-variable multilinear industrial problem."""
@@ -974,6 +1104,69 @@ class TestAmpEndToEnd:
         assert result.objective is not None
         # x[0]*x[1]≥4-y: optimal at x[0]=x[1]=2, y=0 → obj=8 or similar
         assert result.objective >= 0
+
+    @pytest.mark.smoke
+    def test_trilinear_global_optimum(self):
+        """AMP should solve a simple trilinear cover problem after lifting."""
+        m = _make_trilinear_cover()
+        result = m.solve(solver="amp", rel_gap=2e-2, time_limit=20)
+
+        assert result.status in ("optimal", "feasible", "time_limit")
+        assert result.objective is not None
+        assert abs(result.objective - 3.0) <= 0.1
+
+    def test_nonconvex_constraint_oa_cuts_respect_convexity_mask(self, monkeypatch):
+        """Nonconvex constraint rows must be excluded from evaluator OA cuts."""
+        from discopt._jax import cutting_planes
+
+        recorded_masks = []
+        real_generate = cutting_planes.generate_oa_cuts_from_evaluator
+
+        def wrapped_generate(*args, **kwargs):
+            convex_mask = kwargs.get("convex_mask")
+            if convex_mask is not None:
+                recorded_masks.append(list(convex_mask))
+            return real_generate(*args, **kwargs)
+
+        monkeypatch.setattr(cutting_planes, "generate_oa_cuts_from_evaluator", wrapped_generate)
+
+        m = Model("amp_nonconvex_constraint_mask")
+        x = m.continuous("x", lb=0, ub=2)
+        y = m.binary("y")
+        m.subject_to(x**2 - 4 * y - 1 <= 0)
+        m.subject_to(x**2 - x + y >= 0)
+        m.minimize(x + y)
+
+        result = m.solve(solver="amp", max_iter=1, rel_gap=1e-3, time_limit=30)
+
+        assert result.status in ("optimal", "feasible", "time_limit")
+        assert recorded_masks
+        assert all(mask == [True, False] for mask in recorded_masks)
+
+    def test_unsupported_objective_disables_certified_bound(self, monkeypatch):
+        """AMP must not report a certified lower bound when the objective is not linearizable."""
+        from discopt.solvers import amp as amp_solver
+
+        m = Model("amp_unsupported_objective")
+        x = m.continuous("x", lb=0, ub=2, shape=(2,))
+        y = m.binary("y")
+        m.subject_to(x[0] >= 1 - y)
+        m.minimize((x[0] * x[0]) * x[1] + y)
+
+        feasible_x = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+        monkeypatch.setattr(
+            amp_solver,
+            "_solve_best_nlp_candidate",
+            lambda *args, **kwargs: (feasible_x.copy(), 0.0),
+        )
+
+        result = m.solve(solver="amp", rel_gap=1e-3, max_iter=2, time_limit=10)
+
+        assert result.status == "feasible"
+        assert result.objective == pytest.approx(0.0)
+        assert result.bound is None
+        assert result.gap is None
+        assert result.gap_certified is False
 
     @pytest.mark.smoke
     def test_pure_quadratic_convex(self):
@@ -1032,6 +1225,30 @@ class TestAmpEndToEnd:
         assert abs(result.objective - 2.0) <= 1e-3
         assert result.bound is not None
         assert result.bound >= result.objective - 1e-6
+
+    def test_amp_solver_warns_on_ignored_options(self):
+        """Routing through solve_model should warn when AMP ignores B&B-only options."""
+        m = Model("amp_warning")
+        x = m.continuous("x", lb=-1, ub=1)
+        m.minimize(x**2)
+
+        with pytest.warns(
+            UserWarning,
+            match=(
+                "AMP ignores solve_model options: "
+                ".*cutting_planes.*incumbent_callback.*mccormick_bounds.*node_callback"
+            ),
+        ):
+            result = m.solve(
+                solver="amp",
+                time_limit=10,
+                cutting_planes=True,
+                mccormick_bounds="tight",
+                incumbent_callback=lambda *_: True,
+                node_callback=lambda *_: None,
+            )
+
+        assert result.objective is not None
 
 
 # ===========================================================================
