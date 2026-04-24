@@ -77,6 +77,14 @@ def _make_trilinear_cover() -> Model:
     return m
 
 
+def _make_convex_quadratic() -> Model:
+    """Small convex model that AMP should certify globally."""
+    m = Model("convex_quadratic")
+    x = m.continuous("x", lb=1, ub=10)
+    m.minimize(x**2)
+    return m
+
+
 def _build_nlp3() -> Model:
     """Alpine nlp3: 8-variable multilinear industrial process.
 
@@ -1065,15 +1073,14 @@ class TestAmpEndToEnd:
         """circle: recover the best known objective without a false certificate."""
         m = _make_circle()
         result = m.solve(solver="amp", rel_gap=1e-4, time_limit=60)
-        assert result.status in ("optimal", "feasible", "time_limit")
+        assert result.status == "feasible"
         assert result.objective is not None
         assert abs(result.objective - CIRCLE_OPTIMUM) <= 1e-3, (
             f"Objective {result.objective:.6f} too far from √2={CIRCLE_OPTIMUM}"
         )
-        if result.status == "optimal":
-            assert result.gap_certified is True
-        else:
-            assert result.gap_certified is False
+        # The circle constraint is a nonconvex superlevel set, so evaluator OA
+        # cuts must be skipped and AMP should not certify the relaxation gap.
+        assert result.gap_certified is False
 
     @pytest.mark.slow
     @pytest.mark.timeout(300)
@@ -1171,9 +1178,7 @@ class TestAmpEndToEnd:
     @pytest.mark.smoke
     def test_pure_quadratic_convex(self):
         """min x²  s.t. x ≥ 1: AMP should certify global optimum = 1."""
-        m = Model("quad")
-        x = m.continuous("x", lb=1, ub=10)
-        m.minimize(x**2)
+        m = _make_convex_quadratic()
         result = m.solve(solver="amp", rel_gap=1e-4, time_limit=30)
         assert result.status == "optimal"
         assert result.objective is not None
@@ -1305,16 +1310,15 @@ class TestAmpConvergenceProperties:
     @pytest.mark.smoke
     def test_gap_certified_after_convergence(self):
         """gap_certified must be True after AMP converges by gap criterion."""
-        m = _make_circle()
+        m = _make_convex_quadratic()
         result = m.solve(solver="amp", rel_gap=0.05, time_limit=30)
-        # If we converged by gap criterion, gap_certified must be True
-        if result.status == "optimal":
-            assert result.gap_certified is True
+        assert result.status == "optimal"
+        assert result.gap_certified is True
 
     @pytest.mark.smoke
     def test_early_termination_when_gap_closes(self):
         """AMP should terminate before max_iter when gap closes."""
-        m = _make_circle()
+        m = _make_convex_quadratic()
         iters = []
 
         def cb(info):
@@ -1323,9 +1327,9 @@ class TestAmpConvergenceProperties:
         result = m.solve(
             solver="amp", rel_gap=0.5, max_iter=100, iteration_callback=cb, time_limit=30
         )
-        if result.status == "optimal":
-            # If gap-terminated, should be well before max_iter
-            assert len(iters) < 100, "Should terminate before max_iter=100 when gap closes"
+        assert result.status == "optimal"
+        assert result.gap_certified is True
+        assert len(iters) < 100, "Should terminate before max_iter=100 when gap closes"
 
     @pytest.mark.smoke
     def test_time_limit_respected(self):
