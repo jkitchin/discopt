@@ -28,6 +28,14 @@ import numpy as np
 
 from discopt.estimate import Experiment, ExperimentModel
 
+# A parameter axis whose squared projection onto the null-space basis
+# exceeds this value is treated as lying *in* the null space — VIF is
+# reported as infinite and the FIM-based standard error / correlations
+# are masked to NaN. 1% captures "effectively unidentifiable" while
+# avoiding spurious flagging from round-off in the right singular
+# vectors.
+_NULL_PROJECTION_THRESHOLD = 0.01
+
 
 @dataclass
 class FIMResult:
@@ -391,8 +399,17 @@ def _diagnostics_from_fim_result(
         _, sv_raw, Vt = np.linalg.svd(J_s, full_matrices=False)
         sv = np.concatenate([sv_raw, np.zeros(n_params - sv_raw.size)])
         if Vt.shape[0] < n_params:
-            # Pad Vt with orthogonal completion rows for missing directions
-            extra = np.eye(n_params)[Vt.shape[0] :]
+            # When J_s has fewer rows than columns, SVD returns only
+            # rank-m right singular vectors. Complete them to an
+            # orthonormal basis of R^{n_params}. A full-mode QR of V
+            # (n_params × m) yields Q of shape (n_params, n_params)
+            # whose first m columns match V's column space and whose
+            # remaining n_params - m columns are an orthonormal basis
+            # for the orthogonal complement — the true null space.
+            # Using standard-basis rows directly would generally not be
+            # orthogonal to the existing Vt.
+            Q, _ = np.linalg.qr(Vt.T, mode="complete")
+            extra = Q[:, Vt.shape[0] :].T
             Vt = np.vstack([Vt, extra])
 
     sv_max = sv[0] if sv.size and sv[0] > 0 else 0.0
@@ -435,8 +452,12 @@ def _diagnostics_from_fim_result(
     null_indices = np.where(sv <= tol * max(sv_max, np.finfo(float).tiny))[0]
     null_directions = V[:, null_indices] if null_indices.size else np.zeros((n_params, 0))
     if null_directions.size:
-        projections = np.sum(null_directions**2, axis=1)  # per parameter
-        vif_array = np.where(projections > 0.01, np.inf, vif_array)
+        null_projections = np.sum(null_directions**2, axis=1)  # per parameter
+    else:
+        null_projections = np.zeros(n_params)
+    in_null = null_projections > _NULL_PROJECTION_THRESHOLD
+    if null_directions.size:
+        vif_array = np.where(in_null, np.inf, vif_array)
     vif = {names[j]: float(vif_array[j]) for j in range(n_params)}
 
     # FIM-based correlation matrix and standard errors.
@@ -452,9 +473,7 @@ def _diagnostics_from_fim_result(
     if singular_fim and null_directions.size:
         # Parameters with large null-direction projection have no
         # meaningful standard error or correlation.
-        projections = np.sum(null_directions**2, axis=1)
-        mask = projections > 0.01
-        se_array = np.where(mask, np.nan, se_array)
+        se_array = np.where(in_null, np.nan, se_array)
     standard_errors = {names[j]: float(se_array[j]) for j in range(n_params)}
 
     # Correlation matrix.
@@ -463,10 +482,8 @@ def _diagnostics_from_fim_result(
         safe_d = np.where(d > 0, d, np.nan)
         corr = fim_inv / np.outer(safe_d, safe_d)
     if singular_fim and null_directions.size:
-        projections = np.sum(null_directions**2, axis=1)
-        affected = projections > 0.01
-        corr[affected, :] = np.nan
-        corr[:, affected] = np.nan
+        corr[in_null, :] = np.nan
+        corr[:, in_null] = np.nan
 
     # Eigenvalue spectrum of the physical FIM.
     eigvals = np.linalg.eigvalsh(fim)

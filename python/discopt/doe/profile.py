@@ -330,13 +330,16 @@ def _profile_direction(
                 fixed_parameters={name: proposal},
             )
             new_obj = float(res.objective)
-        except Exception as exc:  # pragma: no cover - solver failures
-            # One retry with halved step.
+        except (RuntimeError, ValueError, np.linalg.LinAlgError) as exc:  # pragma: no cover
+            # Treat solver-layer failures (ipopt convergence issues,
+            # invalid bounds, numerical breakdown) as retryable with a
+            # halved step. Programming errors (KeyError, TypeError) are
+            # allowed to propagate so bugs surface immediately.
             step = step / 2.0
             if step < 1e-12 * max(abs(theta_hat), 1.0):
                 warnings_out.append(
-                    f"profile direction {direction:+d} abandoned after NLP "
-                    f"failure near theta={proposal:.6g}: {exc}"
+                    f"profile direction {direction:+d} abandoned near "
+                    f"theta={proposal:.6g} after {type(exc).__name__}: {exc}"
                 )
                 break
             continue

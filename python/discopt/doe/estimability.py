@@ -120,6 +120,7 @@ def estimability_rank(
     cutoff: float = 0.04,
     parameter_scales: dict[str, float] | None = None,
     noise_covariance: np.ndarray | None = None,
+    _cache: tuple[np.ndarray, list[str]] | None = None,
 ) -> EstimabilityResult:
     """Rank parameters by estimability (Yao et al. 2003).
 
@@ -152,9 +153,12 @@ def estimability_rank(
     EstimabilityResult
         Ranking, projected norms, recommended subset, collinearity index.
     """
-    Z, names = _scaled_sensitivity(
-        experiment, param_values, design_values, parameter_scales, noise_covariance
-    )
+    if _cache is not None:
+        Z, names = _cache
+    else:
+        Z, names = _scaled_sensitivity(
+            experiment, param_values, design_values, parameter_scales, noise_covariance
+        )
     n_params = len(names)
     if n_params == 0:
         return EstimabilityResult([], np.zeros(0), [], 1.0, [])
@@ -176,6 +180,7 @@ def estimability_rank(
             design_values,
             parameter_scales=parameter_scales,
             noise_covariance=noise_covariance,
+            _cache=(Z, names),
         )
         if recommended
         else float("inf")
@@ -198,6 +203,7 @@ def collinearity_index(
     *,
     parameter_scales: dict[str, float] | None = None,
     noise_covariance: np.ndarray | None = None,
+    _cache: tuple[np.ndarray, list[str]] | None = None,
 ) -> float:
     """Brun-Reichert-Kuensch collinearity index for a parameter subset.
 
@@ -209,7 +215,8 @@ def collinearity_index(
     Parameters
     ----------
     subset : list[str]
-        Parameter names to include.
+        Parameter names to include. Duplicates and unknown names raise
+        ``ValueError``.
     Other parameters
         See :func:`estimability_rank`.
 
@@ -217,10 +224,24 @@ def collinearity_index(
     -------
     float
         The collinearity index. ``inf`` if Z_K is rank-deficient.
+
+    Raises
+    ------
+    ValueError
+        If ``subset`` contains duplicate or unrecognized parameter names.
     """
-    Z, names = _scaled_sensitivity(
-        experiment, param_values, design_values, parameter_scales, noise_covariance
-    )
+    if _cache is not None:
+        Z, names = _cache
+    else:
+        Z, names = _scaled_sensitivity(
+            experiment, param_values, design_values, parameter_scales, noise_covariance
+        )
+    duplicates = sorted({n for n in subset if subset.count(n) > 1})
+    if duplicates:
+        raise ValueError(f"subset contains duplicate parameter names: {duplicates}")
+    unknown = [n for n in subset if n not in names]
+    if unknown:
+        raise ValueError(f"subset contains names not in parameter_names {names}: {unknown}")
     idx = [names.index(name) for name in subset]
     Z_K = Z[:, idx]
     if Z_K.size == 0:
@@ -276,12 +297,38 @@ def d_optimal_subset(
     -------
     list[str]
         Selected parameter names.
+
+    Raises
+    ------
+    ValueError
+        If ``k <= 0``, ``k > n_parameters``, or ``method`` is unknown.
+    RuntimeError
+        If ``method="enumerate"`` and no subset has positive determinant
+        (Z is rank-deficient at rank < k).
+    NotImplementedError
+        If ``method="minlp"`` — see the method list above.
     """
+    # Fail fast on invalid method/k before computing the Jacobian.
+    if method not in ("auto", "enumerate", "greedy", "minlp"):
+        raise ValueError(
+            f"Unknown method {method!r}. Use 'auto', 'enumerate', 'greedy', or 'minlp'."
+        )
+    if method == "minlp":
+        raise NotImplementedError(
+            "d_optimal_subset(method='minlp') is reserved for a future release. "
+            "The algebraic log-det of a binary-masked Gram matrix is not a "
+            "clean MINLP nonlinearity; Chu & Hahn's combinatorial B&B is a "
+            "better fit and will be added as a separate implementation. "
+            "Use method='enumerate' (exact, p<=20) or method='greedy' (approx)."
+        )
+    if k <= 0:
+        raise ValueError(f"k must be in (0, n_parameters], got {k}")
+
     Z, names = _scaled_sensitivity(
         experiment, param_values, design_values, parameter_scales, noise_covariance
     )
     p = len(names)
-    if not 0 < k <= p:
+    if k > p:
         raise ValueError(f"k must be in (0, {p}], got {k}")
 
     chosen_method = method
@@ -290,35 +337,41 @@ def d_optimal_subset(
 
     if chosen_method == "enumerate":
         return _dopt_enumerate(Z, names, k)
-    if chosen_method == "greedy":
-        res = estimability_rank(
-            experiment,
-            param_values,
-            design_values,
-            parameter_scales=parameter_scales,
-            noise_covariance=noise_covariance,
-        )
-        return res.ranking[:k]
-    if chosen_method == "minlp":
-        raise NotImplementedError(
-            "d_optimal_subset(method='minlp') is reserved for a future release. "
-            "The algebraic log-det of a binary-masked Gram matrix is not a "
-            "clean MINLP nonlinearity; Chu & Hahn's combinatorial B&B is a "
-            "better fit and will be added as a separate implementation. "
-            "Use method='enumerate' (exact, p<=20) or method='greedy' (approx)."
-        )
-    raise ValueError(f"Unknown method {method!r}. Use 'auto', 'enumerate', 'greedy', or 'minlp'.")
+    # greedy
+    res = estimability_rank(
+        experiment,
+        param_values,
+        design_values,
+        parameter_scales=parameter_scales,
+        noise_covariance=noise_covariance,
+        _cache=(Z, names),
+    )
+    return res.ranking[:k]
 
 
 def _dopt_enumerate(Z: np.ndarray, names: list[str], k: int) -> list[str]:
-    """Exact D-optimal subset by enumeration."""
+    """Exact D-optimal subset by enumeration.
+
+    Raises
+    ------
+    RuntimeError
+        If no size-``k`` subset has a positive-determinant Gram matrix,
+        i.e. the Brun-scaled sensitivity matrix Z has rank strictly
+        less than ``k`` so no joint estimate is possible.
+    """
     p = len(names)
     best_logdet = -np.inf
-    best_subset: tuple[int, ...] = tuple(range(k))
+    best_subset: tuple[int, ...] | None = None
     for S in combinations(range(p), k):
         Z_S = Z[:, list(S)]
         sign, logabsdet = np.linalg.slogdet(Z_S.T @ Z_S)
         if sign > 0 and logabsdet > best_logdet:
             best_logdet = logabsdet
             best_subset = S
+    if best_subset is None:
+        raise RuntimeError(
+            f"No size-{k} subset has a positive-determinant Gram matrix; "
+            f"the scaled sensitivity matrix has rank < {k}. Try a smaller k "
+            "or run diagnose_identifiability to locate the null directions."
+        )
     return [names[i] for i in best_subset]
