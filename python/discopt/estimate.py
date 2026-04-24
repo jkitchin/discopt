@@ -332,9 +332,12 @@ def estimate_parameters(
             residual_terms.append(((y_obs.item() - y_model) / sigma) ** 2)
             n_obs += 1
         else:
-            # Should not happen for scalar responses — treat as single value
-            residual_terms.append(((float(y_obs.flat[0]) - y_model) / sigma) ** 2)
-            n_obs += 1
+            # Repeated observations of the same response (e.g. accumulated
+            # by sequential_doe across rounds). Each element is an
+            # independent measurement and contributes its own residual.
+            for val in y_obs.flat:
+                residual_terms.append(((float(val) - y_model) / sigma) ** 2)
+                n_obs += 1
 
     if not residual_terms:
         raise ValueError("No data matched any response names")
@@ -355,8 +358,18 @@ def estimate_parameters(
         val = result.value(var)
         params[name] = float(np.asarray(val).flat[0])
 
-    # Compute FIM at the solution for covariance estimation
-    fim = _compute_estimation_fim(em, result)
+    # Compute FIM at the solution for covariance estimation. Per-response
+    # replication counts come from the observed data so that repeated
+    # measurements (e.g. accumulated across sequential_doe rounds)
+    # contribute proportionally.
+    n_reps = np.array(
+        [
+            max(int(np.atleast_1d(np.asarray(data[name])).size), 1) if name in data else 0
+            for name in em.response_names
+        ],
+        dtype=np.float64,
+    )
+    fim = _compute_estimation_fim(em, result, n_reps=n_reps)
 
     # Covariance = FIM^{-1} (with regularization for near-singular FIM)
     try:
@@ -379,11 +392,17 @@ def estimate_parameters(
 def _compute_estimation_fim(
     em: ExperimentModel,
     result: dm.SolveResult,
+    n_reps: np.ndarray | None = None,
 ) -> np.ndarray:
     """Compute Fisher Information Matrix at the estimation solution.
 
     Uses JAX autodiff to compute the Jacobian dy/dθ, then:
-    FIM = J^T Σ^{-1} J
+    FIM = J^T (N Σ^{-1}) J
+
+    where N is a diagonal matrix of per-response replication counts
+    (ones by default). When the caller has observed the same response
+    multiple times under the same design, ``n_reps`` scales the
+    information contribution proportionally.
 
     For estimation, the unknown parameters are Variables, so the Jacobian
     is computed w.r.t. the variable values (not model Parameters).
@@ -441,9 +460,17 @@ def _compute_estimation_fim(
 
     # Measurement covariance (diagonal)
     sigma = np.array([em.measurement_error[name] for name in em.response_names])
-    Sigma_inv = np.diag(1.0 / sigma**2)
+    weights = 1.0 / sigma**2
+    if n_reps is not None:
+        n_reps = np.asarray(n_reps, dtype=np.float64)
+        if n_reps.shape != weights.shape:
+            raise ValueError(
+                f"n_reps shape {n_reps.shape} does not match n_responses {weights.shape}"
+            )
+        weights = weights * n_reps
+    W = np.diag(weights)
 
-    # FIM = J^T Σ^{-1} J
-    fim = np.asarray(J.T @ Sigma_inv @ J)
+    # FIM = J^T (N Σ^{-1}) J
+    fim = np.asarray(J.T @ W @ J)
 
     return fim
