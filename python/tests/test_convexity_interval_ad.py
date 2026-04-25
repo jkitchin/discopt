@@ -13,6 +13,8 @@ Griewank, Walther (2008), *Evaluating Derivatives*, §3.
 
 from __future__ import annotations
 
+import warnings
+
 import discopt.modeling as dm
 import jax
 import jax.numpy as jnp
@@ -167,6 +169,20 @@ class TestMultiVariableHessians:
         x = m.continuous("x", lb=-0.5, ub=1.0)
         y = m.continuous("y", lb=-0.5, ub=1.0)
         _assert_hess_contains_pointwise(dm.exp(x * y), m)
+
+    def test_wide_exp_bilinear_abstention_is_quiet(self):
+        """Non-finite interval Hessian entries should not emit RuntimeWarning."""
+        m = Model("t")
+        x = m.continuous("x", lb=-1000.0, ub=1000.0)
+        y = m.continuous("y", lb=-1000.0, ub=1000.0)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            ad = interval_hessian(dm.exp(x * y), m)
+
+        assert np.any(~np.isfinite(np.asarray(ad.hess.lo))) or np.any(
+            ~np.isfinite(np.asarray(ad.hess.hi))
+        )
 
     def test_quadratic_form(self):
         """``x^2 + 4 x y + 3 y^2`` — classic indefinite quadratic."""
