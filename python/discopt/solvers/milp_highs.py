@@ -114,14 +114,25 @@ def solve_milp(
     if time_limit is not None:
         h.setOptionValue("time_limit", float(time_limit))
 
-    h.passModel(lp)
-    h.run()
+    pass_status = h.passModel(lp)
+    if pass_status != highspy.HighsStatus.kOk:
+        return MILPResult(status=SolveStatus.ERROR)
+
+    run_status = h.run()
 
     model_status = h.getModelStatus()
     status = _STATUS_MAP.get(model_status, SolveStatus.ERROR)
 
-    _, wall_time = h.getInfoValue("run_time")
-    _, node_count = h.getInfoValue("mip_node_count")
+    wall_time = 0.0
+    node_count = 0
+    if run_status == highspy.HighsStatus.kOk and status != SolveStatus.ERROR:
+        run_time_status, run_time_value = h.getInfoValue("run_time")
+        if run_time_status == highspy.HighsStatus.kOk and run_time_value is not None:
+            wall_time = float(run_time_value)
+
+        node_status, node_value = h.getInfoValue("mip_node_count")
+        if node_status == highspy.HighsStatus.kOk and node_value is not None:
+            node_count = int(node_value)
 
     if status == SolveStatus.OPTIMAL:
         sol = h.getSolution()

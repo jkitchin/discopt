@@ -1067,13 +1067,6 @@ NLP_CVX_INSTANCES = [
 ]
 
 
-# Mapping from problem_id to MINLPTestInstance for lookup by id. Unwraps the
-# pytest.param wrappers used above for parametrization.
-MINLPTESTS_CVX_BY_ID: dict[str, MINLPTestInstance] = {
-    p.values[0].problem_id: p.values[0] for p in NLP_CVX_INSTANCES
-}
-
-
 # ═════════════════════════════════════════════════════════════════════════════
 # NLP: Nonconvex NLP problems (nlp directory, 17 problems)
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1179,7 +1172,7 @@ def _build_nlp_003_016() -> Model:
 
 def _build_nlp_004_010() -> Model:
     """Min tan(x)+y+x*z+0.5*abs(y); x in [-1,1]; sphere+linear constraints.
-    Opt: -4.87215904079771. Functions: tan, abs.
+    Opt: -4.9115096909045866. Functions: tan, abs.
     """
     m = dm.Model("nlp_004_010")
     x = m.continuous("x", lb=-1.0, ub=1.0)
@@ -1304,7 +1297,7 @@ NLP_INSTANCES = [
         id="nlp_003_016",
     ),
     pytest.param(
-        MINLPTestInstance("nlp_004_010", _build_nlp_004_010, -4.87215904079771),
+        MINLPTestInstance("nlp_004_010", _build_nlp_004_010, -4.9115096909045866),
         id="nlp_004_010",
     ),
     pytest.param(

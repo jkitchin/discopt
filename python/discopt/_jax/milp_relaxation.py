@@ -28,6 +28,7 @@ import numpy as np
 import scipy.sparse as sp
 
 from discopt._jax.discretization import DiscretizationState
+from discopt._jax.embedding import EmbeddingMap, build_embedding_map
 from discopt._jax.model_utils import flat_variable_bounds
 from discopt._jax.term_classifier import (
     NonlinearTerms,
@@ -165,15 +166,79 @@ def _normalize_convhull_formulation(formulation: str) -> str:
         ) from err
 
 
+def _sorted_unique_points(points: list[float]) -> list[float]:
+    """Return sorted points with near-duplicates removed."""
+    unique: list[float] = []
+    for point in sorted(float(p) for p in points):
+        if not unique or abs(point - unique[-1]) > 1e-12:
+            unique.append(point)
+    return unique
+
+
+def _power_tangent_line(t: float, n: int) -> tuple[float, float]:
+    """Return slope/intercept for the tangent to x**n at x=t."""
+    slope = float(n * (t ** (n - 1)))
+    intercept = float((t**n) - slope * t)
+    return slope, intercept
+
+
+def _power_secant_line(lb: float, ub: float, n: int) -> tuple[float, float]:
+    """Return slope/intercept for the secant through (lb, lb**n) and (ub, ub**n)."""
+    if abs(ub - lb) <= 1e-12:
+        return 0.0, float(lb**n)
+    slope = float((ub**n - lb**n) / (ub - lb))
+    intercept = float(lb**n - slope * lb)
+    return slope, intercept
+
+
+def _monomial_breakpoints(
+    var_idx: int,
+    lb_i: float,
+    ub_i: float,
+    disc_state: DiscretizationState,
+) -> list[float]:
+    """Return refinement-aware monomial cut points, including zero when needed."""
+    if var_idx in disc_state.partitions and len(disc_state.partitions[var_idx]) >= 2:
+        points = [float(p) for p in disc_state.partitions[var_idx]]
+    else:
+        points = [lb_i, ub_i]
+    if lb_i < 0.0 < ub_i:
+        points.append(0.0)
+    return _sorted_unique_points(points)
+
+
+def _odd_mixed_tangent_is_valid(
+    t: float,
+    lb: float,
+    ub: float,
+    n: int,
+    kind: str,
+) -> bool:
+    """Check whether the tangent at t is a global under/over-estimator on [lb, ub]."""
+    slope, intercept = _power_tangent_line(t, n)
+    critical_points = [lb, ub, t]
+    mirrored = -t
+    if lb <= mirrored <= ub:
+        critical_points.append(mirrored)
+
+    diffs = [float(x**n - (slope * x + intercept)) for x in _sorted_unique_points(critical_points)]
+    tol = 1e-10
+    if kind == "under":
+        return all(diff >= -tol for diff in diffs)
+    if kind == "over":
+        return all(diff <= tol for diff in diffs)
+    raise ValueError(f"Unknown tangent validity kind: {kind}")
+
+
 def _choose_trilinear_pair(
     term: tuple[int, int, int],
     partitioned_vars: set[int],
 ) -> tuple[tuple[int, int], int]:
     """Choose a deterministic trilinear decomposition pair.
 
-    Prefer a pair that already uses partitioned original variables so the
-    existing piecewise bilinear machinery can tighten one stage of the lifted
-    relaxation.
+    Prefer a pair that includes as many currently partitioned original variables as
+    possible so the first or second lifted bilinear term can reuse the stronger
+    piecewise relaxation machinery already present for bilinear terms.
     """
     i, j, k = tuple(sorted(term))
     candidates = [((i, j), k), ((i, k), j), ((j, k), i)]
@@ -384,6 +449,9 @@ def build_milp_relaxation(
     incumbent: Optional[np.ndarray] = None,
     oa_cuts: Optional[list] = None,
     convhull_formulation: str = "disaggregated",
+    convhull_ebd: bool = False,
+    convhull_ebd_encoding: str = "gray",
+    bound_override: Optional[tuple[np.ndarray, np.ndarray]] = None,
 ) -> tuple["MilpRelaxationModel", dict]:
     """Build a MILP relaxation with piecewise McCormick for bilinear/monomial terms.
 
@@ -414,6 +482,13 @@ def build_milp_relaxation(
         Piecewise bilinear formulation. ``"disaggregated"`` keeps the existing
         xbar/wbar construction; ``"sos2"`` and ``"facet"`` use a λ-based
         convex-hull reformulation similar to Alpine.jl.
+    convhull_ebd : bool, default False
+        Replace SOS2 interval binaries with a logarithmic embedded encoding.
+        Only supported with ``convhull_formulation="sos2"`` or ``"lambda"``.
+    convhull_ebd_encoding : str, default "gray"
+        Embedded encoding scheme. ``"gray"`` is the Alpine-style default and
+        the only option that remains SOS2-compatible for arbitrary partition
+        counts. ``"binary"`` is only valid for two partitions.
 
     Returns
     -------
@@ -421,11 +496,21 @@ def build_milp_relaxation(
         MilpRelaxationModel has a .solve() method returning MilpRelaxationResult.
         varmap maps auxiliary variable keys to MILP column indices.
     """
-    flat_lb, flat_ub = flat_variable_bounds(model)
+    if bound_override is None:
+        flat_lb, flat_ub = flat_variable_bounds(model)
+    else:
+        flat_lb = np.asarray(bound_override[0], dtype=np.float64)
+        flat_ub = np.asarray(bound_override[1], dtype=np.float64)
     n_orig = len(flat_lb)
     convhull_mode = _normalize_convhull_formulation(convhull_formulation)
+    if convhull_ebd and convhull_mode != "sos2":
+        raise ValueError(
+            "convhull_ebd is only supported with convhull_formulation='sos2' or its 'lambda' alias."
+        )
 
     # ── Assign MILP column indices ──────────────────────────────────────────
+    # Original variables keep columns 0..n_orig-1. Additional columns are created
+    # for lifted bilinear, trilinear, and monomial terms plus any piecewise binaries.
     bilinear_var_map: dict[tuple[int, int], int] = {}
     trilinear_var_map: dict[tuple[int, int, int], int] = {}
     trilinear_stage_map: dict[tuple[int, int, int], dict[str, object]] = {}
@@ -467,10 +552,10 @@ def build_milp_relaxation(
     partitioned_vars = set(disc_state.partitions)
     trilinear_terms: list[tuple[int, int, int]] = []
     for term in terms.trilinear:
-        i0, i1, i2 = sorted(term)
-        ordered: tuple[int, int, int] = (i0, i1, i2)
-        if ordered not in trilinear_terms:
-            trilinear_terms.append(ordered)
+        ordered = sorted(term)
+        canonical = (ordered[0], ordered[1], ordered[2])
+        if canonical not in trilinear_terms:
+            trilinear_terms.append(canonical)
 
     for term in sorted(trilinear_terms):
         pair, remaining = _choose_trilinear_pair(term, partitioned_vars)
@@ -547,6 +632,8 @@ def build_milp_relaxation(
             lambda_cols: list[int] = []
             alpha_cols: list[int] = []
             theta_cols: list[int] = []
+            embedding_cols: list[int] = []
+            embedding_info: Optional[EmbeddingMap] = None
             theta_lb = min(0.0, float(other_lb), float(other_ub))
             theta_ub = max(0.0, float(other_lb), float(other_ub))
 
@@ -556,11 +643,22 @@ def build_milp_relaxation(
                 integrality_flags.append(0)
                 col_idx += 1
 
-            for _ in range(len(breakpoints) - 1):
-                alpha_cols.append(col_idx)
-                all_bounds.append((0.0, 1.0))
-                integrality_flags.append(1)
-                col_idx += 1
+            if convhull_mode == "sos2" and convhull_ebd and len(breakpoints) > 2:
+                embedding_info = build_embedding_map(
+                    len(breakpoints),
+                    encoding=convhull_ebd_encoding,
+                )
+                for _ in range(embedding_info["bit_count"]):
+                    embedding_cols.append(col_idx)
+                    all_bounds.append((0.0, 1.0))
+                    integrality_flags.append(1)
+                    col_idx += 1
+            else:
+                for _ in range(len(breakpoints) - 1):
+                    alpha_cols.append(col_idx)
+                    all_bounds.append((0.0, 1.0))
+                    integrality_flags.append(1)
+                    col_idx += 1
 
             for _ in breakpoints:
                 theta_cols.append(col_idx)
@@ -575,6 +673,8 @@ def build_milp_relaxation(
                 "lambda_cols": lambda_cols,
                 "alpha_cols": alpha_cols,
                 "theta_cols": theta_cols,
+                "embedding_cols": embedding_cols,
+                "embedding_info": embedding_info,
                 "mode": convhull_mode,
             }
 
@@ -609,6 +709,8 @@ def build_milp_relaxation(
             lambda_cols = list(lambda_info["lambda_cols"])
             alpha_cols = list(lambda_info["alpha_cols"])
             theta_cols = list(lambda_info["theta_cols"])
+            embedding_cols = list(lambda_info.get("embedding_cols", []))
+            embedding_info = lambda_info.get("embedding_info")
             mode = str(lambda_info["mode"])
             yj_lb, yj_ub = [float(v) for v in all_bounds[other_var]]
 
@@ -618,11 +720,12 @@ def build_milp_relaxation(
             _add_row(row_sum_lambda, -1.0)
             _add_row(-row_sum_lambda, 1.0)
 
-            row_sum_alpha = np.zeros(n_total)
-            for alpha_col in alpha_cols:
-                row_sum_alpha[alpha_col] = -1.0
-            _add_row(row_sum_alpha, -1.0)
-            _add_row(-row_sum_alpha, 1.0)
+            if alpha_cols:
+                row_sum_alpha = np.zeros(n_total)
+                for alpha_col in alpha_cols:
+                    row_sum_alpha[alpha_col] = -1.0
+                _add_row(row_sum_alpha, -1.0)
+                _add_row(-row_sum_alpha, 1.0)
 
             row_x = np.zeros(n_total)
             row_x[part_var] = 1.0
@@ -646,6 +749,28 @@ def build_milp_relaxation(
             _add_row(-row_w, 0.0)
 
             if mode == "sos2":
+                assert alpha_cols or embedding_cols, (
+                    "Expected either alpha or embedding columns for SOS2 linking"
+                )
+
+            if mode == "sos2" and embedding_info is not None:
+                for bit_col, positive_set, negative_set in zip(
+                    embedding_cols,
+                    embedding_info["positive_sets"],
+                    embedding_info["negative_sets"],
+                ):
+                    row = np.zeros(n_total)
+                    for lambda_idx in positive_set:
+                        row[lambda_cols[lambda_idx]] = 1.0
+                    row[bit_col] = -1.0
+                    _add_row(row, 0.0)
+
+                    row = np.zeros(n_total)
+                    for lambda_idx in negative_set:
+                        row[lambda_cols[lambda_idx]] = 1.0
+                    row[bit_col] = 1.0
+                    _add_row(row, 1.0)
+            elif mode == "sos2":
                 for idx, lambda_col in enumerate(lambda_cols):
                     row = np.zeros(n_total)
                     row[lambda_col] = 1.0
@@ -699,7 +824,6 @@ def build_milp_relaxation(
         elif (i, j) in bilinear_pw_map and bilinear_pw_map[(i, j)]:
             # ── Piecewise McCormick with binary partition selection ──────────
             intervals = bilinear_pw_map[(i, j)]
-            # Determine partition var vs other var
             if i < n_orig and i in disc_state.partitions:
                 part_var, other_var = i, j
             else:
@@ -758,11 +882,12 @@ def build_milp_relaxation(
                 row[delta_col] = -wk_hi
                 _add_row(row, 0.0)
 
-                # w̄_k ≥ wk_lo * δ_k  → w̄_k=0 when δ_k=0
-                row = np.zeros(n_total)
-                row[wbar_col] = -1.0
-                row[delta_col] = wk_lo
-                _add_row(row, 0.0)
+                # w̄_k ≥ wk_lo * δ_k  → w̄_k=0 when δ_k=0 (for wk_lo ≥ 0 case)
+                if wk_lo > 0:
+                    row = np.zeros(n_total)
+                    row[wbar_col] = -1.0
+                    row[delta_col] = wk_lo
+                    _add_row(row, 0.0)
 
                 # Per-interval McCormick with big-M relaxation.
                 # The big-M term LOOSENS the constraint when δ_k=0 (interval inactive).
@@ -839,54 +964,57 @@ def build_milp_relaxation(
         lb_i = float(flat_lb[var_idx])
         ub_i = float(flat_ub[var_idx])
         s_col = monomial_var_map[(var_idx, n)]
+        breakpoints = _monomial_breakpoints(var_idx, lb_i, ub_i, disc_state)
 
-        if n == 2:
-            # Piecewise tangent underestimators: s ≥ 2*t*x - t^2  for tangent point t.
-            # → -s + 2*t*x ≤ t^2
-            #
-            # KEY monotonicity requirement: as partitions get finer, the set of tangent
-            # points must grow (never shrink).  Using ALL BREAKPOINTS achieves this:
-            # linspace(lb,ub,k+1) breakpoints are a superset of linspace(lb,ub,k) for
-            # the test sequence n_init=1,2,4,8 (each is a refinement of the previous).
-            # Using midpoints would fail because n_init=1's midpoint (2.5) gives a
-            # tighter cut than n_init=2's midpoints (1.75, 3.25) at the LP optimum.
-            if var_idx in disc_state.partitions and len(disc_state.partitions[var_idx]) >= 2:
-                pts = disc_state.partitions[var_idx]
-                tangent_pts = [float(p) for p in pts]  # breakpoints as tangent points
-            else:
-                tangent_pts = [lb_i, ub_i]
-
-            for t in tangent_pts:
-                row = np.zeros(n_total)
-                row[s_col] = -1.0
-                row[var_idx] = 2.0 * t
-                _add_row(row, t * t)
-
-            # Global secant overestimator: s ≤ (lb+ub)*x - lb*ub
-            # → s - (lb+ub)*x ≤ -lb*ub
-            row = np.zeros(n_total)
-            row[s_col] = 1.0
-            row[var_idx] = -(lb_i + ub_i)
-            _add_row(row, -lb_i * ub_i)
-
-        else:
-            # General n: secant overestimator
-            if abs(ub_i - lb_i) > 1e-12:
-                slope = (ub_i**n - lb_i**n) / (ub_i - lb_i)
-                intercept = lb_i**n - slope * lb_i
-                row = np.zeros(n_total)
-                row[s_col] = 1.0
-                row[var_idx] = -slope
-                _add_row(row, intercept)
-
-            # Tangent at midpoint
-            mid = 0.5 * (lb_i + ub_i)
-            t_slope = n * (mid ** (n - 1))
-            t_intercept = -(n - 1) * (mid**n)
+        def _add_under_tangent(t: float) -> None:
+            slope, intercept = _power_tangent_line(t, n)
             row = np.zeros(n_total)
             row[s_col] = -1.0
-            row[var_idx] = t_slope
-            _add_row(row, -t_intercept)
+            row[var_idx] = slope
+            _add_row(row, -intercept)
+
+        def _add_over_tangent(t: float) -> None:
+            slope, intercept = _power_tangent_line(t, n)
+            row = np.zeros(n_total)
+            row[s_col] = 1.0
+            row[var_idx] = -slope
+            _add_row(row, intercept)
+
+        def _add_under_secant(a: float, b: float) -> None:
+            slope, intercept = _power_secant_line(a, b, n)
+            row = np.zeros(n_total)
+            row[s_col] = -1.0
+            row[var_idx] = slope
+            _add_row(row, -intercept)
+
+        def _add_over_secant(a: float, b: float) -> None:
+            slope, intercept = _power_secant_line(a, b, n)
+            row = np.zeros(n_total)
+            row[s_col] = 1.0
+            row[var_idx] = -slope
+            _add_row(row, intercept)
+
+        if n % 2 == 0 or lb_i >= 0.0:
+            # Convex on the full domain: tangents underestimate and the secant
+            # overestimates. Using all breakpoints makes the relaxation tighten
+            # monotonically as the partition is refined.
+            for t in breakpoints:
+                _add_under_tangent(t)
+            _add_over_secant(lb_i, ub_i)
+        elif ub_i <= 0.0:
+            # Concave on the full domain: the secant underestimates and tangents
+            # overestimate.
+            _add_under_secant(lb_i, ub_i)
+            for t in breakpoints:
+                _add_over_tangent(t)
+        else:
+            # Mixed-sign odd powers change curvature at zero. Keep only tangents that
+            # are globally valid on the current box so the relaxation remains sound.
+            for t in breakpoints:
+                if _odd_mixed_tangent_is_valid(t, lb_i, ub_i, n, "under"):
+                    _add_under_tangent(t)
+                if _odd_mixed_tangent_is_valid(t, lb_i, ub_i, n, "over"):
+                    _add_over_tangent(t)
 
     # Model constraints
     for constraint in model._constraints:
@@ -911,12 +1039,7 @@ def build_milp_relaxation(
         except ValueError as err:
             # Constraint contains terms we can't linearize (e.g. general nonlinear).
             # Omitting it makes the LP feasible region larger → still a valid lower bound.
-            logger.warning(
-                "AMP: omitting constraint %s from the MILP relaxation because it cannot "
-                "be linearized safely: %s",
-                constraint.name or "<unnamed>",
-                err,
-            )
+            logger.debug("AMP: omitting constraint (cannot linearize): %s", err)
 
     # ── OA tangent cuts from NLP incumbent ──────────────────────────────────
     # These are outer-approximation linearizations of the original nonlinear
@@ -943,10 +1066,11 @@ def build_milp_relaxation(
         objective_bound_valid = True
     except ValueError:
         # Keep a feasibility objective so the relaxation can still produce a point,
-        # but do not treat the LP value as a sound global bound.
+        # but do not treat the resulting LP value as a sound global bound.
         c_obj = np.zeros(n_total)
         const_obj = 0.0
         objective_bound_valid = False
+        logger.debug("AMP: objective is not linearizable; MILP relaxation bound is unavailable")
 
     # Negate for maximization
     if model._objective.sense == ObjectiveSense.MAXIMIZE:
@@ -988,6 +1112,8 @@ def build_milp_relaxation(
         "bilinear_pw": bilinear_pw_map,
         "bilinear_lambda": bilinear_lambda_map,
         "convhull_formulation": convhull_mode,
+        "convhull_ebd": convhull_ebd,
+        "convhull_ebd_encoding": convhull_ebd_encoding,
     }
 
     return milp_model, varmap
