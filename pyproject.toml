@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "discopt"
-version = "0.2.6"
+version = "0.3.0"
 description = "Hybrid MINLP solver combining Rust and JAX"
 requires-python = ">=3.10"
 authors = [{name = "John Kitchin"}]
