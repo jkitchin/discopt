@@ -1614,6 +1614,21 @@ INFEASIBLE_INSTANCES = [
     MINLPTestInstance("nlp_mi_007_020", _build_nlp_mi_007_020, 0.0, expected_status="infeasible"),
 ]
 
+
+def _unwrap_minlptests_case(case):
+    return case.values[0] if hasattr(case, "values") else case
+
+
+MINLPTESTS_CVX_BY_ID = {
+    instance.problem_id: instance for instance in map(_unwrap_minlptests_case, NLP_CVX_INSTANCES)
+}
+MINLPTESTS_NLP_BY_ID = {
+    instance.problem_id: instance for instance in map(_unwrap_minlptests_case, NLP_INSTANCES)
+}
+MINLPTESTS_MI_BY_ID = {
+    instance.problem_id: instance for instance in map(_unwrap_minlptests_case, NLP_MI_INSTANCES)
+}
+
 # ── xfail registrations: nlp_006_010 and nlp_mi_006_010 ─────────────────
 # These use JuMP.register() user-defined functions which have no discopt
 # equivalent. They are tracked in known_failures.toml and skipped here.
