@@ -28,14 +28,17 @@ State-of-the-art MINLP solvers---BARON cite:&Tawarmalani2005, Couenne, SCIP cite
 
 This paper describes discopt and ripopt, which together address these three gaps. The contributions are:
 
-1. *Differentiable MINLP* via two mechanisms: the envelope theorem (Level 1) for fast objective sensitivity, and implicit differentiation of the KKT system (Level 3) for full primal--dual sensitivity matrices, enabling decision-focused learning through nonconvex solvers (\S 6).
-2. *Batched node evaluation* using =jax.vmap= over NLP relaxation solves at B&B nodes, with warm-starting from parent solutions (\S 4.1).
-3. *Pure-JAX interior point method* with Mehrotra predictor-corrector cite:&Mehrotra1992, Cholesky-based inertia correction, Ipopt-style filter line search cite:&Wachter2006, and carry-based =jax.lax.while_loop= for JIT cache reuse (\S 4.1).
-4. *ripopt*: a source-level C++ \to Rust translation of Ipopt's core IPM algorithm, producing a standalone memory-safe NLP solver with a clean =NlpProblem= trait interface (\S 4.2).
-5. *Compositional relaxation framework* with 21 McCormick relaxation functions cite:&McCormick1976;&Tsoukalas2014, \alpha BB underestimators cite:&Androulakis1995;&Adjiman1998, piecewise McCormick with adaptive partitioning cite:&Castro2015 achieving 91--94% gap reduction, and ICNN-learned relaxations cite:&Amos2017icnn (\S 5).
-6. *Neural network embedding* that formulates trained feedforward networks (ReLU, sigmoid, tanh, softplus) as MINLP constraints via big-M, full-space, and reduced-space strategies, with interval arithmetic bound propagation and ONNX model import cite:&Ceccon2022;&Anderson2020 (\S 3.4).
+1. *Differentiable MINLP* via two mechanisms: the envelope theorem (Level 1) for fast objective sensitivity, and implicit differentiation of the KKT system (Level 3) for full primal--dual sensitivity matrices, enabling decision-focused learning through nonconvex solvers.
+2. *Batched node evaluation* using =jax.vmap= over NLP relaxation solves at B&B nodes, with warm-starting from parent solutions.
+3. *Pure-JAX interior point method* with Mehrotra predictor-corrector cite:&Mehrotra1992, Cholesky-based inertia correction, Ipopt-style filter line search cite:&Wachter2006, and carry-based =jax.lax.while_loop= for JIT cache reuse.
+4. *ripopt*: a source-level C++ \to Rust translation of Ipopt's core IPM algorithm, producing a standalone memory-safe NLP solver with a clean =NlpProblem= trait interface.
+5. *Compositional relaxation framework* with 21 McCormick relaxation functions cite:&McCormick1976;&Tsoukalas2014, \alpha BB underestimators cite:&Androulakis1995;&Adjiman1998, piecewise McCormick with adaptive partitioning cite:&Castro2015 achieving 91--94% gap reduction, ICNN-learned relaxations cite:&Amos2017icnn, and a sound DCP/SUSPECT-style structural convexity certifier cite:&GrantBoydYe2006;&Ceccon2020 that routes certified-convex models to a single-solve fast path.
+6. *Neural network embedding* that formulates trained feedforward networks (ReLU, sigmoid, tanh, softplus) as MINLP constraints via big-M, full-space, and reduced-space strategies, with interval arithmetic bound propagation and ONNX model import cite:&Ceccon2022;&Anderson2020.
+7. *Adaptive Multivariate Partitioning* cite:&Nagarajan2016;&Nagarajan2019, a complementary global MINLP solver that iterates piecewise-McCormick MILP relaxations with adaptive partition refinement, with the soundness guarantee $LB_k \le f^* \le UB_k$ at every iteration.
+8. *Model-based design of experiments* under =discopt.doe=: D / A / E / ME-optimal designs on a shared =Experiment= interface, batch / parallel MBDoE cite:&Galvanin2007;&Sandrin2025, identifiability and estimability diagnostics including profile likelihood cite:&Raue2009 and the Yao orthogonalisation cite:&Yao2003 / Brun collinearity index cite:&Brun2001, and a five-criterion model-discrimination loop covering Hunter--Reiner cite:&Hunter1965, Buzzi-Ferraris--Forzatti cite:&BuzziFerraris1984, Jensen--R{\'e}nyi cite:&Olofsson2019, Lindley mutual information cite:&Lindley1956;&Foster2019, and DT-compound cite:&Atkinson1998 designs.
+9. *Multi-objective optimisation* under =discopt.mo=: scalarisation-based Pareto front tracing via weighted sum, AUGMECON2 $\varepsilon$-constraint cite:&Mavrotas2009, weighted Tchebycheff, NBI cite:&DasDennis1998, and NNC cite:&Messac2003, with hypervolume / IGD / spread / $\varepsilon$-indicator quality metrics cite:&ZitzlerThiele1998;&Bosman2003 and full inheritance of the MINLP / differentiable / global-solver stack on every scalarised subproblem.
 
-The remainder of this paper is organized as follows. Section 2 reviews background and related work. Section 3 describes the discopt architecture, including the modeling API, DAE collocation, neural network embedding, and compiler infrastructure. Section 4 presents the three NLP solver backends. Section 5 details the convex relaxation framework. Section 6 covers differentiable optimization. Section 7 reports computational experiments. Section 8 discusses limitations and future work, and Section 9 concludes.
+The remainder of this paper is organised as follows. Section ref:sec-arch describes the discopt architecture, including the modelling API, DAE collocation, neural network embedding, and compiler infrastructure. Section ref:sec-nlp-backends presents the three NLP solver backends. Section ref:sec-relax details the convex relaxation framework, including the structural convexity certifier of Section ref:sec-convexity. Section ref:sec-amp introduces the AMP global solver. Section ref:sec-diff covers differentiable optimisation. Section ref:sec-dyn discusses dynamic optimisation, Section ref:sec-estimate parameter estimation, Section ref:sec-doe model-based design of experiments (with identifiability / estimability / discrimination diagnostics), and Section ref:sec-mo multi-objective optimisation. Section 10 reports computational experiments. Section 11 discusses limitations and future work, and Section 12 concludes.
 
 * Background and Related Work
 
@@ -89,6 +92,10 @@ Table ref:tab-gaps summarizes the capabilities of existing systems versus discop
 | Adjustable RO (ADR)      | No    | No      | No     | No           | No      | Yes     |
 
 * The discopt Architecture
+  :PROPERTIES:
+  :CUSTOM_ID: sec-arch
+  :END:
+#+LATEX: \label{sec-arch}
 
 ** System Overview
 
@@ -280,6 +287,11 @@ The Rust backend (=discopt-core= and =discopt-python= crates) provides three com
 *Presolve.* Feasibility-based bound tightening (FBBT) and probing propagate domain reductions through the expression graph. A =.nl= file parser enables importing problems from the MINLPLib benchmark library cite:&Bussieck2003.
 
 * NLP Solver Backends
+  :PROPERTIES:
+  :CUSTOM_ID: sec-nlp-backends
+  :END:
+
+#+LATEX: \label{sec-nlp-backends}
 
 discopt supports three interchangeable NLP solver backends, selectable via =Model.solve(nlp_solver=...)=. All three implement the same interface: given an objective function $f(x)$, constraints $g(x)$, variable bounds $x_l \le x \le x_u$, and constraint bounds $g_l \le g(x) \le g_u$, find $x^*$ that minimizes $f$ subject to all constraints.
 
@@ -405,6 +417,10 @@ Because ripopt is a source-level translation of Ipopt (EPL-2.0), it is distribut
 The third backend uses the industry-standard Ipopt solver cite:&Wachter2006 via cyipopt Python bindings. This serves as the correctness reference: any discrepancy between the pure-JAX IPM or ripopt and Ipopt on a well-conditioned problem indicates a bug in the former. Ipopt's advantage is its mature sparse linear algebra (MUMPS, MA27/MA57) which scales better on large, sparse problems ($n > 1000$). Its disadvantage is the Fortran/C++ dependency chain and inability to batch or differentiate through the solve.
 
 * Convex Relaxation Framework
+  :PROPERTIES:
+  :CUSTOM_ID: sec-relax
+  :END:
+#+LATEX: \label{sec-relax}
 
 The quality of convex relaxations at B&B nodes directly determines solver efficiency. discopt provides a compositional relaxation compiler that walks the expression DAG and produces JIT-compatible relaxation functions.
 
@@ -415,6 +431,10 @@ The relaxation compiler implements 21 univariate and bivariate McCormick relaxat
 Each function maps interval bounds $[x_l, x_u]$ and convex/concave enclosures $(cv, cc)$ of the argument to tighter enclosures of the result. The compiler produces pure =jax.numpy= functions compatible with =jax.jit= and =jax.vmap=, enabling batch relaxation evaluation over multiple B&B nodes.
 
 ** @@latex:\texorpdfstring{$\alpha$}{alpha}@@ BB Underestimators
+   :PROPERTIES:
+   :CUSTOM_ID: sec-alphabb
+   :END:
+#+LATEX: \label{sec-alphabb}
 
 For general twice-differentiable functions where McCormick relaxations are loose, the \alpha BB method cite:&Androulakis1995;&Adjiman1998 adds a separable quadratic perturbation:
 
@@ -450,7 +470,53 @@ As an experimental feature, discopt supports learned convex relaxations using in
 
 A =LearnedRelaxationRegistry= provides per-operation wrappers with automatic fallback to standard McCormick for unsupported operations. In testing, ICNN relaxations achieve approximately 10% gap reduction beyond standard McCormick, with the potential for 30%+ with more extensive training.
 
+** Structural Convexity Certification
+   :PROPERTIES:
+   :CUSTOM_ID: sec-convexity
+   :END:
+#+LATEX: \label{sec-convexity}
+
+Many problems written in unconstrained nonlinear form are in fact convex --- a sum of squares, a log-sum-exp, an exponential cone, or an affine function with a convex regulariser --- but the modelling layer cannot exploit that structure unless it is *proved*. discopt ships a sound convexity detector under =discopt._jax.convexity=, inspired by the disciplined convex programming (DCP) framework of Grant, Boyd and Ye cite:&GrantBoydYe2006 and the SUSPECT special-structure detector of Ceccon, Siirola and Misener cite:&Ceccon2020.
+
+The detector classifies each (sub)expression by curvature (CONVEX, CONCAVE, AFFINE, or UNKNOWN) using two complementary, *sound* methods. The syntactic walker (=rules.py=) implements DCP composition rules: an affine combination of convex expressions with non-negative weights is convex; a non-decreasing convex function of a convex expression is convex; and so on. When the syntactic walker abstains, the box-local certificate (=certificate.py=) closes the gap by computing a sound interval enclosure of the Hessian over the variable box via interval automatic differentiation (=interval_ad.py=) and a sound lower bound on the minimum eigenvalue across that enclosure (=eigenvalue.py=, with both a Gershgorin disc bound and a tighter Schur-complement bound for arrow-structured Hessians); a non-negative lower eigenvalue bound proves convexity by the second-order sufficient condition cite:&Adjiman1998. Symmetrically, a non-positive upper bound proves concavity. Any other outcome returns a conservative abstention --- the certificate never claims nonconvexity, and never loosens a verdict from the syntactic walker.
+
+Three downstream consumers benefit from a CONVEX verdict:
+
+- *Convex fast path.* A model whose objective and all constraints certify CONVEX (or AFFINE) is routed to a single NLP solve with =SolveResult.convex_fast_path = True=, skipping spatial branch and bound entirely. For pure convex QPs this dispatches to HiGHS or to the JAX IPM with a quadratic cost, with the same status semantics as the general MINLP solve. Soundness of the certificate guarantees that the single NLP optimum is the global optimum.
+- *Tighter $\alpha$BB.* When the eigenvalue method (Section ref:sec-alphabb) is supported by a CONVEX certificate, the perturbation $\alpha$ can be set to zero on the certified terms, reducing relaxation gap.
+- *Multi-objective scalarization* (Section [[#sec-mo]]) inherits the same convex fast path on each subproblem when the scalarised model certifies convex, e.g. weighted-sum on a sum of certified-convex objectives with non-negative weights.
+
+The detector is conservative by design: it underclaims rather than overclaims. Every CONVEX or CONCAVE verdict is a mathematical proof, never a heuristic; sampling-based methods that could produce false positives are not used.
+
+* Adaptive Multivariate Partitioning (AMP)
+  :PROPERTIES:
+  :CUSTOM_ID: sec-amp
+  :END:
+#+LATEX: \label{sec-amp}
+
+In addition to the spatial branch and bound described in earlier sections, discopt provides AMP --- a complementary global MINLP solver based on the Adaptive Multivariate Partitioning algorithm of Nagarajan and co-workers cite:&Nagarajan2016;&Nagarajan2019, also known as the algorithm behind the Alpine solver. AMP is selected with =Model.solve(method="amp")= and is preferred when the bilinear / multilinear structure of the problem benefits from refined piecewise relaxations rather than from binary branching.
+
+Where sBB enumerates a binary tree of variable-bound subregions, AMP iterates a single tightening loop on the *partitioning* of the continuous-variable domain. At iteration $k$ the algorithm performs three steps:
+
+1. Build a piecewise-McCormick MILP relaxation of the original MINLP using the current partition $\mathcal{P}^{(k)}$ of each branched variable, solve it to optimality, and obtain a lower bound $LB_k$ together with a candidate point $\hat x^{(k)}$.
+2. Fix each branched variable's interval assignment from $\hat x^{(k)}$ and solve the remaining continuous NLP to local optimality, obtaining an upper bound $UB_k$ if feasible.
+3. If $(UB_k - LB_k) / |UB_k| \le \varepsilon$, certify global optimality and stop. Otherwise refine $\mathcal{P}^{(k)}$ by splitting the partition cell containing $\hat x^{(k)}$ along its longest edge, increment $k$, and repeat.
+
+Soundness is maintained at every iteration by the McCormick guarantee on the MILP relaxation:
+
+\begin{equation}
+LB_k \;\le\; \min_{x \in \mathcal X^{\mathrm{MINLP}}} f(x) \;\le\; UB_k \quad \text{for all } k,
+\end{equation}
+
+so termination at the first $k$ with closed gap is a certified $\varepsilon$-optimal solution. The MILP-relaxation construction is shared with the convex-hull / Big-M formulation work used elsewhere in discopt and is implemented in =discopt._jax.milp_relaxation=. The MILP itself is solved by HiGHS through the existing solver dispatch (Section ref:sec-nlp-backends), and the NLP subproblem by any of the three NLP backends (default ripopt; cyipopt is selected automatically when available).
+
+Compared with the default sBB, AMP trades branching combinatorics for relaxation tightness: the MILP at each iteration is larger (one binary per partition cell per branched variable) but the tree is shallow because partitions, not subregions, are refined. On problems where the optimum lives on a few active partition cells --- pooling problems, water-network synthesis, generalised disjunctive programs with bilinear terms --- AMP closes the gap in tens of iterations where sBB would explore thousands of nodes. The algorithm exposes hyperparameters =rel_gap=, =max_iter=, =time_limit=, =initial_partitions=, and =refinement_strategy= (=longest-edge=, default; =equal-bisection=; =adaptive=) on =Model.solve=.
+
 * Differentiable Optimization
+  :PROPERTIES:
+  :CUSTOM_ID: sec-diff
+  :END:
+#+LATEX: \label{sec-diff}
 
 A distinguishing feature of discopt is the ability to differentiate through the optimization solve with respect to problem parameters. This enables decision-focused learning cite:&Elmachtoub2022 where the model parameters (e.g., cost coefficients) are learned end-to-end from decision outcomes rather than prediction accuracy.
 
@@ -610,7 +676,65 @@ The =batch_optimal_experiment= function exposes three strategies:
 
 All three strategies are also exposed as a =batch_strategy= option on =sequential_doe= via the =experiments_per_round= keyword, so a batched closed-loop campaign (Estimate $\rightarrow$ Design batch of $N$ $\rightarrow$ Run $N$ experiments $\rightarrow$ Estimate ...) is a single function call. The FIM prior accumulated across rounds ensures the batch criterion evaluated at each round reflects all previously collected data.
 
-Out of scope in the current implementation and left to future work: robust / expected-information designs $\mathbb{E}_\theta[M]$ under parameter uncertainty in the spirit of cite:&Sandrin2025, mixed-integer batch designs selecting $N$ from a discrete candidate pool (naturally expressed in the core MINLP framework), and end-to-end JAX autograd through the joint batch objective.
+** Identifiability and Estimability Diagnostics
+   :PROPERTIES:
+   :CUSTOM_ID: sec-identifiability
+   :END:
+#+LATEX: \label{sec-identifiability}
+
+Optimal-design criteria assume the model parameters are identifiable in the first place. When the data $\{y_i\}$ and the response Jacobian $J = \partial y^{\mathrm{model}} / \partial \theta$ admit linear dependence between columns of $J$ at the candidate $\hat\theta$, the FIM is rank-deficient or near-singular and individual standard errors blow up even though the model fit is excellent. The =discopt.doe= module addresses this with three complementary diagnostics, all built on the same DAG-compiled Jacobian used for FIM evaluation.
+
+*Structural identifiability.* =compute_fim= returns the noise-weighted FIM and =check_identifiability= reports its numerical rank and null-space directions. A rank-deficient FIM means that any linear combination of parameters in the null space leaves $y^{\mathrm{model}}$ unchanged, i.e. those combinations are mathematically unidentifiable from the response model regardless of how much data is collected.
+
+*Estimability ranking.* For practically identifiable subsets of an over-parameterised model we implement the orthogonalisation algorithm of Yao et al. cite:&Yao2003 in =estimability_rank=, which iteratively selects the parameter whose scaled sensitivity column has the largest residual norm after Gram--Schmidt orthogonalisation against the previously selected columns. The complementary collinearity index $\gamma_K$ of Brun, Reichert and K{\"u}nsch cite:&Brun2001 (=collinearity_index=) measures the worst conditioning of any subset of size $K$: $\gamma_K = 1 / \min_{\|\beta\|=1} \|Z_K \beta\|$ on the Brun-scaled sensitivity matrix $Z = \Sigma^{-1/2} J \, \mathrm{diag}(s_\theta)$, with the rule of thumb $\gamma_K \le 10$ for a practically identifiable subset. =d_optimal_subset= dispatches between exact enumeration (small $p$) and the greedy Yao ranking (larger $p$) following cite:&ChuHahn2007.
+
+*Profile likelihood.* For each parameter $\theta_j$ in turn, =profile_likelihood= steps $\theta_j$ outward from the global estimate $\hat\theta_j$, re-solves the estimation problem with $\theta_j$ fixed at each step, and tabulates the deviance
+
+\begin{equation}
+\Delta D(\theta_j) = D(\theta_j; \hat\theta_{-j}^*) - D(\hat\theta) \quad \text{vs.} \quad \chi^2_{1, 1-\alpha},
+\end{equation}
+
+following Raue et al. cite:&Raue2009. The intersection of the profile with the $\chi^2_{1, 0.95}$ threshold gives a likelihood-ratio confidence interval that, unlike the asymptotic Wald interval, *retains its meaning when the FIM is ill-conditioned*: a profile that fails to cross the threshold in one or both directions diagnoses *practical non-identifiability* in that parameter; a flat profile signals *structural non-identifiability*. The deviance convention is fixed throughout (no factor of $\tfrac{1}{2}$), so the threshold is read directly against =result.objective=.
+
+** Model Discrimination and Selection
+   :PROPERTIES:
+   :CUSTOM_ID: sec-discrimination
+   :END:
+#+LATEX: \label{sec-discrimination}
+
+Once an experiment campaign has produced data that fits a chosen model, the natural next question is whether a *different* model would explain the data equally well, or whether competing mechanistic hypotheses can be told apart by additional designs. discopt provides a model-discrimination MBDoE module under =discopt.doe.discrimination= and =discopt.doe.selection=, operating in *prediction space*: only $\hat y_i(d)$ and the prediction covariance $V_i = J_i \, M_i^{-1} J_i^\top$ from each candidate model cross model boundaries, so candidates may have entirely different parameter sets without any name alignment.
+
+Five discrimination criteria are exposed via the =DiscriminationCriterion= enum:
+
+- *HR* --- Hunter--Reiner cite:&Hunter1965, the squared difference of point predictions weighted by inverse measurement variance, $\Phi_{\mathrm{HR}}(d) = \sum_{i<j} (\hat y_i - \hat y_j)^\top \Sigma^{-1} (\hat y_i - \hat y_j)$. Cheap; pairwise; ignores prediction uncertainty.
+- *BF* --- Buzzi-Ferraris--Forzatti--Emig--Hofmann cite:&BuzziFerraris1984, *the default*, generalising HR to multiresponse models by replacing $\Sigma$ with $\Sigma + V_i + V_j$, so designs that put predictions far apart are penalised when the predictions are themselves uncertain.
+- *JR* --- Jensen--R{\'e}nyi divergence between Gaussian predictives $\mathcal{N}(\hat y_i, \Sigma + V_i)$ following Olofsson, Deisenroth and Misener cite:&Olofsson2019. Symmetric, naturally handles $M > 2$ candidates.
+- *MI* --- mutual information $I(M; y \mid d)$ between the model index and a future observation, estimated by nested Monte Carlo over the Gaussian predictives in the spirit of Lindley cite:&Lindley1956 and Foster et al. cite:&Foster2019.
+- *DT* --- the DT-compound criterion of Atkinson, Bogacka and Bogacki cite:&Atkinson1998, $(1 - \lambda) \Phi_{\mathrm{precision}}(M_p) + \lambda \Phi_{\mathrm{discrimination}}$, balancing parameter precision (any of the optimality criteria of Section ref:sec-doe applied to the *preferred* model) against between-model separation. Useful when one model is provisionally preferred but the experimenter wants both to refine it and to keep its rivals in the picture.
+
+The =discriminate_design= entry point picks one design under any of these criteria; =sequential_discrimination= alternates design with parameter re-estimation and updates a running posterior $p(M_k \mid \mathcal{D})$ over the candidate set via Akaike weights cite:&Akaike1974 or Bayes-factor approximation, terminating either at a posterior threshold (e.g. $\max_k p(M_k \mid \mathcal{D}) > 0.95$) or at a fixed budget of rounds. =model_selection= performs final-round selection by AIC / AIC$_c$ / BIC / cross-validation given the accumulated data.
+
+* Multi-Objective Optimization
+  :PROPERTIES:
+  :CUSTOM_ID: sec-mo
+  :END:
+#+LATEX: \label{sec-mo}
+
+Many engineering problems trade off two or more conflicting objectives --- cost vs. recovery, throughput vs. selectivity, capital vs. operating expense --- and admit no single best solution but a *Pareto front* of mutually non-dominated alternatives. The =discopt.mo= module provides a scalarisation-based interface for tracing this front cite:&Miettinen1999;&Ehrgott2005. The design choice is deliberate: each scalarised subproblem is an ordinary discopt =Model=, so it inherits the full MINLP infrastructure --- discrete variables, structural convexity certification (Section ref:sec-convexity), spatial branch and bound, AMP global solving, the differentiable-solve API of Section ref:sec-diff, and the McCormick / piecewise-McCormick / $\alpha$BB relaxations. No separate evolutionary or surrogate-based MO machinery is needed.
+
+Given $K$ objectives $f_1, \dots, f_K$ and a feasible set $\mathcal X$, a point $x^* \in \mathcal X$ is *Pareto-optimal* if no $x \in \mathcal X$ satisfies $f_k(x) \le f_k(x^*)$ for all $k$ with strict inequality for at least one $k$. The five scalarisations exposed by =discopt.mo= are:
+
+- *Weighted sum* (=weighted_sum=). Minimise $\sum_k w_k g_k(x)$ over a grid of non-negative weights summing to one, with $g_k = (f_k - z^*_k) / (z^N_k - z^*_k)$ if =normalize=True= (the default), where $z^*$ is the ideal point and $z^N$ the nadir point computed from the per-objective payoff table. Weighted sums are computationally cheap and recover the full convex Pareto front, but cannot reach points on a non-convex region of the front regardless of weight choice.
+- *Augmented $\varepsilon$-constraint (AUGMECON2)* (=augmecon2=). Minimise $f_1(x) - \delta \sum_{k \ge 2} s_k$ subject to $f_k(x) + s_k = \varepsilon_k$, $s_k \ge 0$ for $k \ge 2$, sweeping $\varepsilon_k$ over a grid in $[z^*_k, z^N_k]$ following Mavrotas cite:&Mavrotas2009. The slack variables $s_k$ together with the small augmentation $\delta$ guarantee that every solution returned is properly Pareto-optimal (no weakly-dominated points), and AUGMECON2's *bypass coefficient* skips $\varepsilon$ grid points that the previous slacks have already shown to be redundant, sharply reducing the number of subproblems on dense grids.
+- *Weighted Tchebycheff* (=weighted_tchebycheff=). Minimise $\max_k w_k (f_k(x) - z^*_k)$ via an epigraph reformulation $\min t$ s.t. $w_k(f_k - z^*_k) \le t$. Recovers all Pareto-optimal points (convex *and* non-convex regions), at the cost of a non-smooth max that becomes a single auxiliary variable plus $K$ inequality constraints in the model.
+- *Normal Boundary Intersection (NBI)* (=nbi=). Following Das and Dennis cite:&DasDennis1998, parameterise the front by points on the convex hull of the per-objective anchors and project orthogonally toward the lower-left, producing a uniform spread along the Pareto surface for problems where uniformly-spaced weights produce clustered solutions.
+- *Normalised Normal Constraint (NNC)* (=nnc=). The complementary scheme of Messac, Ismail-Yahaya and Mattson cite:&Messac2003, which slides a hyperplane normal across the normalised utopia line, yielding well-spread fronts on smooth bi- and tri-objective problems.
+
+The =ParetoFront= container collects the resulting non-dominated points along with their objective values and original-space variable assignments; =filter_nondominated= post-processes any candidate set into the Pareto subset.
+
+For comparing two front approximations, =discopt.mo.indicators= provides four standard quality measures cite:&ZitzlerThiele1998;&Bosman2003 --- the *hypervolume* (exact 2-D and 3-D Lebesgue measure of the dominated region behind a reference point, Monte-Carlo for $K \ge 4$), the *inverted generational distance* (mean distance from a reference front to the approximation, capturing both convergence and spread in one number), the *spread* (coefficient of variation of consecutive point distances in objective space, lower is more uniform), and the additive *epsilon indicator* $I_\varepsilon(A, B) = \min \varepsilon$ such that $A \preceq_\varepsilon B$ in the dominance order. All indicators internally convert to the all-minimise convention using the per-objective senses stored on the front, so results are sense-invariant.
+
+Out of scope in the current release and left to future work: evolutionary MO algorithms (NSGA-II, MOEA/D), Bayesian MO acquisition functions over Gaussian-process surrogates, and interactive / preference-articulation methods that elicit the decision-maker's value function during the search rather than offering a static front.
 
 * Computational Experiments
 
