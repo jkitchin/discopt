@@ -2652,7 +2652,7 @@ def _solve_continuous(
         status=status,
         objective=obj_val,
         bound=obj_val if status == "optimal" else None,
-        gap=_optimal_relative_gap(obj_val) if status == "optimal" else None,
+        gap=_optimal_relative_gap(obj_val) if status == "optimal" and obj_val is not None else None,
         x=x_dict,
         wall_time=wall_time,
         node_count=0,

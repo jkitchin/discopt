@@ -440,7 +440,11 @@ def tighten_nonlinear_bounds(
             applied_rules.append(rule.name)
             n_tightened += n_changed
 
-    return tightened_lb, tightened_ub, NonlinearBoundTighteningStats(
-        n_tightened=n_tightened,
-        applied_rules=tuple(applied_rules),
+    return (
+        tightened_lb,
+        tightened_ub,
+        NonlinearBoundTighteningStats(
+            n_tightened=n_tightened,
+            applied_rules=tuple(applied_rules),
+        ),
     )

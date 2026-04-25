@@ -1231,8 +1231,7 @@ def solve_amp(
                 rel_g = _compute_relative_gap(abs_gap, UB)
                 if rel_g is None:
                     logger.info(
-                        "AMP iter %d: LB=%.6g, UB=%.6g, abs_gap=%.6g "
-                        "(relative gap undefined)",
+                        "AMP iter %d: LB=%.6g, UB=%.6g, abs_gap=%.6g (relative gap undefined)",
                         iteration,
                         display_lb,
                         display_ub,
@@ -1346,9 +1345,7 @@ def solve_amp(
 
     if incumbent is not None:
         raw_abs_gap_final = UB - LB if LB > -np.inf else None
-        bound_is_trustworthy = (
-            raw_abs_gap_final is None or raw_abs_gap_final >= -abs_tol
-        )
+        bound_is_trustworthy = raw_abs_gap_final is None or raw_abs_gap_final >= -abs_tol
         if not bound_is_trustworthy and raw_abs_gap_final is not None:
             logger.warning(
                 "AMP: final bound ordering invalid (LB=%.6g, UB=%.6g); omitting bound and gap",
@@ -1367,11 +1364,7 @@ def solve_amp(
         return SolveResult(
             status=status,
             objective=_from_minimization_space(UB),
-            bound=(
-                _from_minimization_space(LB)
-                if LB > -np.inf and bound_is_trustworthy
-                else None
-            ),
+            bound=(_from_minimization_space(LB) if LB > -np.inf and bound_is_trustworthy else None),
             gap=float(rel_gap_final) if rel_gap_final is not None else None,
             x=_build_x_dict(incumbent, model),
             wall_time=elapsed,
