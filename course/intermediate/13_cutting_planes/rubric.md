@@ -1,7 +1,7 @@
 # Rubric — Lesson 13
 
 ## Exercises (70)
-- E1 (15): Cut verified — (a) holds at every integer point of $[0,5]^2$ that satisfies the original constraints; (b) violated by LP optimum (LHS $\approx 7$ vs RHS 6); (c) re-solved LP with cut returns a smaller objective.
+- E1 (15): Cut verified — (a) $x_1 + x_2 \le 4$ holds at every integer point of $[0,5]^2$ that satisfies the original constraints (in particular at $(3,1)$ where $3+1=4$ ✓); (b) violated by LP optimum (LHS $\approx 4.6 > 4$); (c) re-solved LP with cut returns objective $\le 4$.
 - E2 (15) Plot shows separation visually.
 - E3 (15) MIR applied; node savings reported.
 - E4 (10) cuts vs no-cuts speedup measured.

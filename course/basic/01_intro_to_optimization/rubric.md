@@ -29,8 +29,8 @@
 ### Exercise 5 — Read the solver result (15 pts)
 - (4) Reports status, objective, iteration/node count, wall time for the diet LP.
 - (5) Constructs an *infeasible* variant (e.g., $b_3 = 10^{12}$); solver returns `INFEASIBLE`.
-- (5) Constructs an *unbounded* variant (e.g., drop bounds + minimize $-\sum x$); solver returns `UNBOUNDED`.
-- (1) Briefly notes that "unexpectedly unbounded" usually means a missing bound.
+- (5) Constructs a *practically-unbounded* variant (drop cost, minimize $-\sum x$ with loose `ub`); reports that the optimum pegs to the bound.
+- (1) Briefly notes that "optimum at a default bound" usually means a missing bound.
 
 ## Writing (30)
 

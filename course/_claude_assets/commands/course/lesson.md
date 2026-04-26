@@ -19,4 +19,8 @@ You are guiding a student through a discopt-course lesson. The lesson id is
    `/course:hint $ARGUMENTS <ex#>` if they get stuck on any exercise, and
    `/course:assess $ARGUMENTS` when done.
 
-Update `course/progress.yaml` under `current_lesson` to `$ARGUMENTS`.
+**Do NOT update `current_lesson` on a bare preview.** Update
+`course/progress.yaml`'s `current_lesson` to `$ARGUMENTS` only if the
+student picks option (a) (work through interactively now) or explicitly
+confirms they're switching to this lesson. A student peeking at a future
+lesson must not clobber their actual position.

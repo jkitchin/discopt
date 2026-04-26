@@ -5,16 +5,16 @@ student:
   name: ""
   started: null  # ISO date set on first lesson
 
-scores:
-  # Each lesson lands here as: <track>/<id>: { exercises: 0-70, writing: 0-30, total: 0-100, attempts: int, last_assessed: ISO }
-  # Example:
-  # basic/01_intro_to_optimization:
-  #   exercises: 60
-  #   writing: 24
-  #   total: 84
-  #   attempts: 1
-  #   last_assessed: 2026-04-26
-  {}
+# Per-lesson scores. Append entries under this key as `<track>/<id>:`.
+# Example:
+#   basic/01_intro_to_optimization:
+#     exercises: 60
+#     writing: 24
+#     total: 84
+#     attempts: 1
+#     hints_used: 0
+#     last_assessed: 2026-04-26
+scores: null  # set to {} on first write; do NOT use inline {} here
 
 current_lesson: basic/01_intro_to_optimization
 
