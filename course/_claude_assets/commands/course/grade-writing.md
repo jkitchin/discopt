@@ -22,5 +22,10 @@ Otherwise, score it on:
   `docs/references.bib`; flag invented or unverifiable keys explicitly)
 - engagement with the prompt
 
-Write the writing-only score into `course/progress.yaml` under
-`scores.<lesson>.writing` and recompute `total`.
+**Preserve the exercises score.** Read the existing
+`scores.<lesson>` block first. Update only the `writing` field. Recompute
+`total = exercises + writing` ONLY if `exercises` is already set; if
+`exercises` is unset, write `total: null` and leave a note that the student
+should run `/course:assess <lesson>` before the writing total is meaningful.
+
+Append `last_assessed_writing: <ISO date>`.

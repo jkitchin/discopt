@@ -7,7 +7,7 @@
 - E2 (15): backtracking implemented; backtracking-iter count reported.
 - E3 (15): BFGS works; B → H_true on quadratic.
 - E4 (10): Cauchy point implemented; $\Delta$ adaptation visible.
-- E5 (15): GD escapes; Newton/BFGS behavior explained.
+- E5 (15): the response correctly identifies that $f = x^2 - y^2$ has no minimum (saddle + unbounded along $\pm y$); GD diverges to $-\infty$ from a non-axis start; Newton stalls/oscillates on the indefinite Hessian; BFGS behaviour traced to its initial $B_0$.
 
 ## Writing (30)
 
