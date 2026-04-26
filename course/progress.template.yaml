@@ -1,0 +1,22 @@
+# Student progress file. Copy to course/progress.yaml on first /course:progress.
+# Claude reads/writes this file when grading lessons.
+
+student:
+  name: ""
+  started: null  # ISO date set on first lesson
+
+scores:
+  # Each lesson lands here as: <track>/<id>: { exercises: 0-70, writing: 0-30, total: 0-100, attempts: int, last_assessed: ISO }
+  # Example:
+  # basic/01_intro_to_optimization:
+  #   exercises: 60
+  #   writing: 24
+  #   total: 84
+  #   attempts: 1
+  #   last_assessed: 2026-04-26
+  {}
+
+current_lesson: basic/01_intro_to_optimization
+
+notes: |
+  # Free-text notes the student writes (or Claude appends after a session).
