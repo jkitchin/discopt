@@ -9,6 +9,7 @@ jax.vmap.
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Callable, Optional
 
 import jax.numpy as jnp
@@ -85,6 +86,61 @@ def _is_constant_expr(expr: Expression) -> bool:
 def _get_constant_value(expr: Expression):
     """Get the numeric value from a Constant expression."""
     return jnp.array(expr.value)
+
+
+def _resolve_scalar_var_offset(expr: Expression, model: Model) -> int | None:
+    """Resolve a scalar Variable or scalar-IndexExpression to its flat offset.
+
+    Returns the flat offset into the x vector if ``expr`` is a scalar
+    ``Variable`` or an ``IndexExpression`` over a ``Variable`` that resolves
+    to a single scalar component. Returns ``None`` otherwise.
+    """
+    if isinstance(expr, Variable) and expr.size == 1:
+        return _compute_var_offset(expr, model)
+    if isinstance(expr, IndexExpression) and isinstance(expr.base, Variable):
+        base_off = _compute_var_offset(expr.base, model)
+        idx = expr.index
+        if isinstance(idx, int):
+            return base_off + idx
+        if isinstance(idx, tuple) and len(idx) == 1 and isinstance(idx[0], int):
+            return base_off + idx[0]
+    return None
+
+
+def _try_extract_trilinear_chain(expr: Expression, model: Model) -> tuple[int, int, int] | None:
+    """Detect a 3-distinct-variable trilinear chain ``v_a * v_b * v_c``.
+
+    Recognizes both left- and right-associative parsings:
+      * ``Mul(Mul(v_a, v_b), v_c)``
+      * ``Mul(v_a, Mul(v_b, v_c))``
+
+    Each leaf must be a scalar ``Variable`` (or scalar ``IndexExpression``).
+    The three resolved flat offsets must be pairwise distinct (so squared or
+    cubed terms fall through to other handlers).
+
+    Returns ``(off_a, off_b, off_c)`` on match, else ``None``.
+    """
+    if not (isinstance(expr, BinaryOp) and expr.op == "*"):
+        return None
+
+    inner, outer = None, None
+    if isinstance(expr.left, BinaryOp) and expr.left.op == "*":
+        inner, outer = expr.left, expr.right
+    elif isinstance(expr.right, BinaryOp) and expr.right.op == "*":
+        inner, outer = expr.right, expr.left
+    else:
+        return None
+
+    a = _resolve_scalar_var_offset(inner.left, model)
+    b = _resolve_scalar_var_offset(inner.right, model)
+    c = _resolve_scalar_var_offset(outer, model)
+    if a is None or b is None or c is None:
+        return None
+    # Pairwise distinct — repeated-variable cases (x*x*y, etc.) belong to
+    # the signomial / power handlers.
+    if a == b or a == c or b == c:
+        return None
+    return (a, b, c)
 
 
 def _try_extract_signomial_factors(
@@ -257,6 +313,50 @@ def _compile_relax_node(
                     new_cv = jnp.where(pos, _c * cv_l, _c * cc_l)
                     new_cc = jnp.where(pos, _c * cc_l, _c * cv_l)
                     return new_cv, new_cc
+
+                return fn
+
+            # Trilinear pattern detection: x*y*z over 3 distinct scalar
+            # Variables. Routes to permutation-symmetric nested McCormick
+            # (relax_trilinear_exact) which is strictly tighter than the
+            # default single-ordering bilinear chain. Validity requires
+            # finite box bounds at runtime; otherwise the dispatch falls
+            # through to the bilinear path via `jnp.where`.
+            #
+            # Opt-out: setting DISCOPT_TRILINEAR=nested in the environment
+            # skips this dispatch and uses the original nested-bilinear
+            # path. This is for debug / parity testing only and is not a
+            # public API.
+            _trilinear_disabled = os.environ.get("DISCOPT_TRILINEAR") == "nested"
+            tri_offsets = None if _trilinear_disabled else _try_extract_trilinear_chain(expr, model)
+            if tri_offsets is not None:
+                from discopt._jax.envelopes import relax_trilinear_exact
+
+                _ti, _tj, _tk = tri_offsets
+
+                def fn(x_cv, x_cc, lb, ub, _i=_ti, _j=_tj, _k=_tk):
+                    # Use compositional bounds (x_cv / x_cc) the same way
+                    # the bilinear path does. For Variable leaves these
+                    # collapse to the point value at feasible-point
+                    # evaluation, and to the box [lb, ub] when computing
+                    # the LP relaxation at a B&B node.
+                    x_lb_, x_ub_ = x_cv[_i], x_cc[_i]
+                    y_lb_, y_ub_ = x_cv[_j], x_cc[_j]
+                    z_lb_, z_ub_ = x_cv[_k], x_cc[_k]
+                    xv = 0.5 * (x_lb_ + x_ub_)
+                    yv = 0.5 * (y_lb_ + y_ub_)
+                    zv = 0.5 * (z_lb_ + z_ub_)
+                    return relax_trilinear_exact(
+                        xv,
+                        yv,
+                        zv,
+                        x_lb_,
+                        x_ub_,
+                        y_lb_,
+                        y_ub_,
+                        z_lb_,
+                        z_ub_,
+                    )
 
                 return fn
 
