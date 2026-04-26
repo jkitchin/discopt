@@ -1,4 +1,4 @@
-# Rubric — Lesson 26
+# Rubric — Lesson 27
 
 ## Exercises (70)
 - E1 (20) imitation dataset + classifier + accuracy.

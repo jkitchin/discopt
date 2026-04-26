@@ -42,8 +42,8 @@ primary literature backing it (full BibTeX entries in `docs/references.bib`).
 | 23 | Generalized disjunctive programming| Raman1994, Grossmann2013, Trespalacios2015|
 | 24 | Neural-net-embedded MINLP          | Fischetti2018, Anderson2020, Ceccon2022   |
 | 25 | Robust optimization                | BenTal2009, BertsimasSim2004              |
-| 26 | Machine learning for optimization  | Bengio2021, Gasse2019                     |
-| 27 | Differentiable optimization        | Amos2017, Agrawal2019                     |
+| 26 | Differentiable optimization        | Amos2017, Agrawal2019                     |
+| 27 | Machine learning for optimization  | Bengio2021, Gasse2019                     |
 | 28 | Bilevel and complementarity        | Dempe2002, LuoPangRalph1996               |
 | 29 | Reformulations and symmetry        | Liberti2012, Margot2010                   |
 | 30 | Capstone (advanced)                | mixed                                     |

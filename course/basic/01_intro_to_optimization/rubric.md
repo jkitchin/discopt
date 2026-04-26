@@ -9,10 +9,10 @@
 - (3) Justification names a specific structural feature.
 - (3) Subtle cases noted (e.g., (a) is a convex SDP/SOCP, not LP).
 
-### Exercise 2 — Diet with extras (15 pts)
-- (5) Four food variables + binary indicators.
-- (5) "≥ 2 foods" constraint via $\sum z_i \ge 2$ with $x_i \le M z_i$.
-- (3) Solves to optimal, prints purchased foods + cost.
+### Exercise 2 — Diet with eggs (15 pts)
+- (6) Four continuous food variables with $0 \le x_i \le 8$ (per-food cap).
+- (5) Cost vector and nutrient matrix correctly extended to 4 foods.
+- (2) Solver returns `OPTIMAL`; prints purchased quantities and cost.
 - (2) Numerical answer matches reference within 1e-3.
 
 ### Exercise 3 — LP relaxation gap (15 pts)
@@ -26,10 +26,11 @@
 - (5) Six distinct local minima recovered after deduplication.
 - (5) Two global minima identified at $f^\star \approx -1.0316$.
 
-### Exercise 5 — Read the log (15 pts)
-- (5) Primal residual = constraint violation.
-- (5) Dual residual = ‖∇L‖.
-- (5) Complementary slackness = $\lambda_i g_i(x) = 0$.
+### Exercise 5 — Read the solver result (15 pts)
+- (4) Reports status, objective, iteration/node count, wall time for the diet LP.
+- (5) Constructs an *infeasible* variant (e.g., $b_3 = 10^{12}$); solver returns `INFEASIBLE`.
+- (5) Constructs an *unbounded* variant (e.g., drop bounds + minimize $-\sum x$); solver returns `UNBOUNDED`.
+- (1) Briefly notes that "unexpectedly unbounded" usually means a missing bound.
 
 ## Writing (30 pts)
 

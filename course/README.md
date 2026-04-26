@@ -100,3 +100,14 @@ python course/_build/nbgen.py
 
 This rewrites every `reading.ipynb` and `exercises.ipynb`. Edit the `.py`
 modules — not the JSON — and rebuild.
+
+## Course-API shim
+
+The lesson code cells use a slightly-friendlier façade
+(`m.add_variable / .add_variables / .add_constraint / .is_convex / .solve`
+with kwargs like `mode`, `verbose`, `x0`) that maps onto the real `discopt`
+API (`m.continuous / .binary / .integer / .subject_to / .solve`). The shim
+lives in `course/_compat.py`; `nbgen.py` auto-injects a loader cell at the
+top of every notebook so the shim is installed before the lesson code runs.
+You can remove the shim when comfortable working directly with the real
+`discopt.modeling.core.Model` API.

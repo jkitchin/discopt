@@ -1,4 +1,4 @@
-# Writing assignment — Lesson 26
+# Writing assignment — Lesson 27
 
 In ~700 words, *steelman* and then *critique* the claim "ML will eventually
 replace handcrafted heuristics in MILP solvers." Use {cite:p}`Bengio2021,Gasse2019`.
