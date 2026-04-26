@@ -6,7 +6,7 @@
 - E1 (15): tight $M$ derived; linearization correct; tested.
 - E2 (15): both formulations correct; LP gap and node count compared (disagg ≪ agg).
 - E3 (15): LP solved; integer solution; matches MILP.
-- E4 (15): SOS2 set correct; piecewise approximation 2.25 at x=1.5.
+- E4 (15): SOS2 set correct; piecewise approximation $0.5\cdot 1 + 0.5\cdot 4 = 2.5$ at $x=1.5$ (linear interpolation between consecutive break points).
 - E5 (10): identifies loose $M$ and missing convex-hull tightening.
 
 ## Writing (30) — 10/10/5/5 as standard.

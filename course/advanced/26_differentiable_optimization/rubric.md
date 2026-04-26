@@ -1,4 +1,4 @@
-# Rubric — Lesson 27
+# Rubric — Lesson 26
 
 ## Exercises (70)
 - E1 (15) implicit gradient matches analytical.
