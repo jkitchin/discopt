@@ -17,7 +17,9 @@ import numpy as np
 from scipy.optimize import minimize as scipy_minimize
 
 from discopt._jax.alphabb import estimate_alpha as _estimate_alpha_jax
+from discopt._jax.model_utils import flat_variable_bounds
 from discopt._jax.nlp_evaluator import NLPEvaluator
+from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
 from discopt._rust import PyTreeManager
 from discopt.constants import INFEASIBILITY_SENTINEL as _INFEASIBILITY_SENTINEL
 from discopt.constants import SENTINEL_THRESHOLD as _SENTINEL_THRESHOLD
@@ -377,11 +379,12 @@ def _tighten_node_bounds(evaluator, node_lb, node_ub, cl_list, cu_list, max_roun
     lb, ub : np.ndarray
         Tightened variable bounds.
     """
-    if evaluator.n_constraints == 0 or not cl_list:
-        return node_lb.copy(), node_ub.copy()
-
     lb = node_lb.copy()
     ub = node_ub.copy()
+
+    if evaluator.n_constraints == 0 or not cl_list:
+        return _apply_nonlinear_tightening(evaluator._model, lb, ub)
+
     n = len(lb)
     m = len(cl_list)
     cu = np.array(cu_list, dtype=np.float64)
@@ -399,13 +402,20 @@ def _tighten_node_bounds(evaluator, node_lb, node_ub, cl_list, cu_list, max_roun
         J_b = evaluator.evaluate_jacobian(pt_b)
         is_linear = np.all(np.abs(J_a - J_b) < 1e-8, axis=1)  # (m,) bool
     except Exception:
-        return lb, ub  # can't determine linearity, skip FBBT
+        return _apply_nonlinear_tightening(evaluator._model, lb, ub)
 
     if not np.any(is_linear):
-        return lb, ub  # no linear constraints to tighten
+        return _apply_nonlinear_tightening(evaluator._model, lb, ub)
 
     for _ in range(max_rounds):
         changed = False
+
+        tightened_lb, tightened_ub = _apply_nonlinear_tightening(evaluator._model, lb, ub)
+        if np.any(np.abs(tightened_lb - lb) > 1e-12) or np.any(np.abs(tightened_ub - ub) > 1e-12):
+            lb = tightened_lb
+            ub = tightened_ub
+            changed = True
+
         # Evaluate Jacobian at midpoint of current bounds
         mid = np.clip(lb, -_SPC, _SPC)
         span = np.clip(ub, -_SPC, _SPC) - mid
@@ -478,6 +488,21 @@ def _tighten_node_bounds(evaluator, node_lb, node_ub, cl_list, cu_list, max_roun
             break
 
     return lb, ub
+
+
+def _apply_nonlinear_tightening(
+    model: Model,
+    lb: np.ndarray,
+    ub: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Apply opportunistic nonlinear bound tightening without aborting node processing."""
+    try:
+        tightened_lb, tightened_ub, _ = tighten_nonlinear_bounds(model, lb, ub)
+    except Exception as exc:
+        logger.debug("Skipping nonlinear tightening after error: %s", exc)
+        return lb, ub
+
+    return tightened_lb, tightened_ub
 
 
 def _infer_constraint_bounds(model: Model, evaluator=None):
@@ -1115,18 +1140,17 @@ def _strong_branch_lp(
 _BOUND_WARN_THRESHOLD = 1e15
 
 
-def _check_finite_bounds(model: Model) -> None:
-    """Warn if any variable has very large or infinite bounds.
-
-    Interior point methods use barrier terms that require reasonably sized
-    bounds. Bounds beyond 1e15 cause numerical difficulties (NaN gradients,
-    ill-conditioned KKT systems) and the solver silently produces NaN
-    objectives or reports iteration_limit. This check warns users early.
-    """
-    bad_vars = []
+def _format_bad_bound_entries(
+    model: Model,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> list[str]:
+    """Return human-readable entries for scalar variables with problematic bounds."""
+    bad_vars: list[str] = []
+    offset = 0
     for v in model._variables:
-        lb_flat = v.lb.flatten()
-        ub_flat = v.ub.flatten()
+        lb_flat = np.asarray(flat_lb[offset : offset + v.size], dtype=np.float64)
+        ub_flat = np.asarray(flat_ub[offset : offset + v.size], dtype=np.float64)
         for j in range(v.size):
             lo, hi = float(lb_flat[j]), float(ub_flat[j])
             if (
@@ -1137,12 +1161,46 @@ def _check_finite_bounds(model: Model) -> None:
             ):
                 name = v.name if v.size == 1 else f"{v.name}[{j}]"
                 bad_vars.append(f"{name} (lb={lo:.2g}, ub={hi:.2g})")
+        offset += v.size
+    return bad_vars
+
+
+def _check_finite_bounds(model: Model) -> None:
+    """Warn if any variable still has very large or infinite bounds after cheap tightening.
+
+    Interior point methods use barrier terms that require reasonably sized
+    bounds. Bounds beyond 1e15 cause numerical difficulties (NaN gradients,
+    ill-conditioned KKT systems) and the solver silently produces NaN
+    objectives or reports iteration_limit. This check first applies the
+    lightweight nonlinear tightening rules used elsewhere in discopt and only
+    warns if large bounds remain afterward.
+    """
+    raw_lb, raw_ub = flat_variable_bounds(model)
+    raw_bad_vars = _format_bad_bound_entries(model, raw_lb, raw_ub)
+    if not raw_bad_vars:
+        return
+
+    tightened_lb = raw_lb
+    tightened_ub = raw_ub
+    tightening_note = ""
+    try:
+        tightened_lb, tightened_ub, bt_stats = tighten_nonlinear_bounds(model, raw_lb, raw_ub)
+        if bt_stats.n_tightened > 0:
+            tightening_note = (
+                f" Nonlinear tightening adjusted {bt_stats.n_tightened} bounds"
+                f" via {', '.join(bt_stats.applied_rules)}."
+            )
+    except Exception as exc:
+        logger.debug("Skipping nonlinear tightening before large-bound warning: %s", exc)
+
+    bad_vars = _format_bad_bound_entries(model, tightened_lb, tightened_ub)
     if bad_vars:
         import warnings
 
         warnings.warn(
-            f"Variables with very large or infinite bounds: "
+            f"Variables with very large or infinite bounds after nonlinear tightening: "
             f"{', '.join(bad_vars[:5])}. "
+            f"{tightening_note} "
             f"NLP solvers may fail (NaN, iteration_limit) when bounds "
             f"exceed ~1e15. Add tighter explicit bounds, e.g. "
             f"m.continuous('x', lb=0, ub=1000).",

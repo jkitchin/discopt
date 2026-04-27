@@ -32,6 +32,7 @@ import numpy as np
 
 from discopt._jax.milp_relaxation import _normalize_convhull_formulation
 from discopt._jax.model_utils import flat_variable_bounds
+from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
 from discopt.modeling.core import Model, ObjectiveSense, SolveResult, VarType
 
 logger = logging.getLogger(__name__)
@@ -617,6 +618,17 @@ def solve_amp(
 
     n_orig = sum(v.size for v in model._variables)
     flat_lb, flat_ub = flat_variable_bounds(model)
+    tightened_lb, tightened_ub, nonlinear_bt_stats = tighten_nonlinear_bounds(
+        model, flat_lb, flat_ub
+    )
+    if nonlinear_bt_stats.n_tightened > 0:
+        flat_lb = tightened_lb
+        flat_ub = tightened_ub
+        logger.info(
+            "AMP: nonlinear bound tightening adjusted %d bounds via %s",
+            nonlinear_bt_stats.n_tightened,
+            ", ".join(nonlinear_bt_stats.applied_rules),
+        )
     evaluator = NLPEvaluator(model)
     constraint_lb, constraint_ub = _infer_constraint_bounds(model)
     deadline = t_start + time_limit
