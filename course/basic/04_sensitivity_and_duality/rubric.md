@@ -5,8 +5,8 @@
 ## Exercises (70)
 - E1 (15): Dual stated correctly; primal/dual objectives match.
 - E2 (15): Plot piecewise linear; basis-change corners identified.
-- E3 (10): Reduced-cost story explains the optimum.
-- E4 (15): Genuinely degenerate LP; multiple bases shown.
+- E3 (10): finite-difference shadow prices computed; dual feasibility and equal-objective conditions verified within 1e-4.
+- E4 (15): Genuinely degenerate 2D LP; non-smooth perturbation behaviour exhibited.
 - E5 (15): Dual certificate constructed and verified.
 
 ## Writing (30)
