@@ -621,6 +621,16 @@ def solve_amp(
     tightened_lb, tightened_ub, nonlinear_bt_stats = tighten_nonlinear_bounds(
         model, flat_lb, flat_ub
     )
+    if nonlinear_bt_stats.infeasible:
+        logger.info(
+            "AMP: nonlinear bound tightening proved infeasibility: %s",
+            nonlinear_bt_stats.infeasibility_reason,
+        )
+        return SolveResult(
+            status="infeasible",
+            wall_time=time.perf_counter() - t_start,
+            gap_certified=True,
+        )
     if nonlinear_bt_stats.n_tightened > 0:
         flat_lb = tightened_lb
         flat_ub = tightened_ub

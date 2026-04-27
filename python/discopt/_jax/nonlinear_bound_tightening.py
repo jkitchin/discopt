@@ -9,7 +9,7 @@ future rules can be added without changing solver-side plumbing.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import NoReturn, Optional, Sequence
 
 import numpy as np
 
@@ -79,6 +79,12 @@ class NonlinearBoundTighteningStats:
 
     n_tightened: int
     applied_rules: tuple[str, ...]
+    infeasible: bool = False
+    infeasibility_reason: Optional[str] = None
+
+
+class NonlinearBoundTighteningInfeasible(ValueError):
+    """Raised internally when a sound tightening rule proves infeasibility."""
 
 
 class NonlinearBoundTighteningRule:
@@ -188,6 +194,17 @@ def _apply_integrality(
     return lb, ub
 
 
+def _constraint_label(constraint) -> str:
+    name = getattr(constraint, "name", None)
+    return str(name) if name else repr(constraint)
+
+
+def _prove_infeasible(rule_name: str, constraint, reason: str) -> NoReturn:
+    raise NonlinearBoundTighteningInfeasible(
+        f"{rule_name} proved infeasibility for {_constraint_label(constraint)}: {reason}"
+    )
+
+
 def _tighten_affine_argument_interval(
     tightened_lb: np.ndarray,
     tightened_ub: np.ndarray,
@@ -227,6 +244,11 @@ def _tighten_affine_argument_interval(
     if new_lb <= new_ub:
         tightened_lb[flat_idx] = new_lb
         tightened_ub[flat_idx] = new_ub
+        return
+
+    raise NonlinearBoundTighteningInfeasible(
+        f"tightened interval is empty for flat variable {flat_idx}: [{new_lb}, {new_ub}]"
+    )
 
 
 def _flatten_sum(expr, scale: float, out: list[tuple[float, object]]) -> None:
@@ -324,7 +346,7 @@ class SumOfSquaresUpperBoundRule(NonlinearBoundTighteningRule):
         tightened_ub = flat_ub.copy()
 
         for constraint in model._constraints:
-            if getattr(constraint, "sense", None) != "<=":
+            if getattr(constraint, "sense", None) not in ("<=", "=="):
                 continue
 
             terms: list[tuple[float, object]] = []
@@ -354,7 +376,14 @@ class SumOfSquaresUpperBoundRule(NonlinearBoundTighteningRule):
             if not matches_pattern or not square_coeffs:
                 continue
 
-            rhs = max(0.0, -constant_term)
+            rhs = -constant_term
+            if rhs < -1e-12:
+                _prove_infeasible(
+                    self.name,
+                    constraint,
+                    "nonnegative sum of squares has a negative upper bound",
+                )
+            rhs = max(0.0, rhs)
             for flat_idx, coeff in square_coeffs.items():
                 if coeff <= 0.0:
                     continue
@@ -374,6 +403,12 @@ class SumOfSquaresUpperBoundRule(NonlinearBoundTighteningRule):
                 if new_lb <= new_ub:
                     tightened_lb[flat_idx] = new_lb
                     tightened_ub[flat_idx] = new_ub
+                else:
+                    _prove_infeasible(
+                        self.name,
+                        constraint,
+                        f"required interval for flat variable {flat_idx} is empty",
+                    )
 
         return tightened_lb, tightened_ub
 
@@ -422,7 +457,7 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
         tightened_ub = flat_ub.copy()
 
         for constraint in model._constraints:
-            if getattr(constraint, "sense", None) != "<=":
+            if getattr(constraint, "sense", None) not in ("<=", "=="):
                 continue
 
             terms: list[tuple[float, object]] = []
@@ -477,6 +512,13 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
                 )
 
             total_min = float(sum(min_contribs.values()))
+            if constant_term + total_min > 1e-12:
+                _prove_infeasible(
+                    self.name,
+                    constraint,
+                    "minimum separable quadratic activity exceeds the upper bound",
+                )
+
             for flat_idx, (a, b) in coeffs.items():
                 rhs = -constant_term - (total_min - min_contribs[flat_idx])
                 if not np.isfinite(rhs):
@@ -490,7 +532,11 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
                     float(tightened_ub[flat_idx]),
                 )
                 if interval is None:
-                    continue
+                    _prove_infeasible(
+                        self.name,
+                        constraint,
+                        f"required interval for flat variable {flat_idx} is empty",
+                    )
 
                 new_lb, new_ub = interval
                 var_type = metadata.flat_var_types[flat_idx]
@@ -504,6 +550,12 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
                 if new_lb <= new_ub:
                     tightened_lb[flat_idx] = new_lb
                     tightened_ub[flat_idx] = new_ub
+                else:
+                    _prove_infeasible(
+                        self.name,
+                        constraint,
+                        f"required interval for flat variable {flat_idx} is empty",
+                    )
 
         return tightened_lb, tightened_ub
 
@@ -514,6 +566,32 @@ def _safe_exp(value: float) -> float:
     if value < -745.0:
         return 0.0
     return float(np.exp(value))
+
+
+def _monotone_function_value(func_name: str, value: float) -> float:
+    if func_name == "exp":
+        return _safe_exp(value)
+    if func_name == "log":
+        if value <= 0.0:
+            return -float("inf")
+        return float(np.log(value))
+    if func_name == "log2":
+        if value <= 0.0:
+            return -float("inf")
+        return float(np.log2(value))
+    if func_name == "log10":
+        if value <= 0.0:
+            return -float("inf")
+        return float(np.log10(value))
+    if func_name == "log1p":
+        if value <= -1.0:
+            return -float("inf")
+        return float(np.log1p(value))
+    if func_name == "sqrt":
+        if value < 0.0:
+            return float("nan")
+        return float(np.sqrt(value))
+    raise ValueError(f"Unsupported monotone function: {func_name}")
 
 
 def _inverse_monotone_upper(func_name: str, rhs: float) -> Optional[float]:
@@ -617,7 +695,7 @@ class MonotoneFunctionBoundsRule(NonlinearBoundTighteningRule):
         tightened_ub = flat_ub.copy()
 
         for constraint in model._constraints:
-            if getattr(constraint, "sense", None) != "<=":
+            if getattr(constraint, "sense", None) not in ("<=", "=="):
                 continue
 
             terms: list[tuple[float, object]] = []
@@ -649,12 +727,41 @@ class MonotoneFunctionBoundsRule(NonlinearBoundTighteningRule):
             domain_lb, domain_ub = _MONOTONE_DOMAINS[func_name]
             arg_lb = domain_lb
             arg_ub = domain_ub
+            arg_endpoint_a = arg_coeff * float(tightened_lb[flat_idx]) + arg_offset
+            arg_endpoint_b = arg_coeff * float(tightened_ub[flat_idx]) + arg_offset
+            current_arg_lb = min(arg_endpoint_a, arg_endpoint_b)
+            current_arg_ub = max(arg_endpoint_a, arg_endpoint_b)
+            if domain_lb is not None:
+                current_arg_lb = max(current_arg_lb, domain_lb)
+            if domain_ub is not None:
+                current_arg_ub = min(current_arg_ub, domain_ub)
+            if current_arg_lb > current_arg_ub + 1e-12:
+                _prove_infeasible(
+                    self.name,
+                    constraint,
+                    f"{func_name} argument domain is empty on the current box",
+                )
+
+            func_min = _monotone_function_value(func_name, current_arg_lb)
+            func_max = _monotone_function_value(func_name, current_arg_ub)
             rhs = -constant_term / func_coeff
             if func_coeff > 0.0:
+                if rhs < func_min - 1e-12:
+                    _prove_infeasible(
+                        self.name,
+                        constraint,
+                        f"{func_name}(argument) cannot be <= {rhs}",
+                    )
                 upper = _inverse_monotone_upper(func_name, rhs)
                 if upper is not None:
                     arg_ub = upper if arg_ub is None else min(arg_ub, upper)
             else:
+                if rhs > func_max + 1e-12:
+                    _prove_infeasible(
+                        self.name,
+                        constraint,
+                        f"{func_name}(argument) cannot be >= {rhs}",
+                    )
                 lower = _inverse_monotone_lower(func_name, rhs)
                 if lower is not None:
                     arg_lb = lower if arg_lb is None else max(arg_lb, lower)
@@ -724,7 +831,7 @@ class ReciprocalBoundsRule(NonlinearBoundTighteningRule):
         max_val = max(vals)
         if rhs >= max_val - 1e-12:
             return None, None
-        if rhs < min_val - 1e-12 or abs(rhs) <= 1e-12:
+        if rhs < min_val - 1e-12:
             return None, None
 
         threshold = numerator / rhs
@@ -743,7 +850,7 @@ class ReciprocalBoundsRule(NonlinearBoundTighteningRule):
         tightened_ub = flat_ub.copy()
 
         for constraint in model._constraints:
-            if getattr(constraint, "sense", None) != "<=":
+            if getattr(constraint, "sense", None) not in ("<=", "=="):
                 continue
 
             terms: list[tuple[float, object]] = []
@@ -776,9 +883,18 @@ class ReciprocalBoundsRule(NonlinearBoundTighteningRule):
             if arg_lo <= 0.0 <= arg_hi:
                 continue
 
+            rhs = -constant_term
+            vals = (numerator / arg_lo, numerator / arg_hi)
+            if rhs < min(vals) - 1e-12:
+                _prove_infeasible(
+                    self.name,
+                    constraint,
+                    "reciprocal activity exceeds the upper bound on the sign-stable box",
+                )
+
             arg_lb, arg_ub = self._argument_interval_for_leq(
                 numerator,
-                -constant_term,
+                rhs,
                 arg_lo,
                 arg_hi,
             )
@@ -817,13 +933,58 @@ def tighten_nonlinear_bounds(
 
     applied_rules: list[str] = []
     n_tightened = 0
+    empty_initial = np.flatnonzero(tightened_lb > tightened_ub + 1e-12)
+    if empty_initial.size > 0:
+        first_idx = int(empty_initial[0])
+        return (
+            tightened_lb,
+            tightened_ub,
+            NonlinearBoundTighteningStats(
+                n_tightened=0,
+                applied_rules=(),
+                infeasible=True,
+                infeasibility_reason=f"initial interval is empty for flat variable {first_idx}",
+            ),
+        )
 
     for rule in rules:
         prev_lb = tightened_lb.copy()
         prev_ub = tightened_ub.copy()
-        cand_lb, cand_ub = rule.tighten(model, prev_lb, prev_ub, metadata)
-        tightened_lb = np.maximum(prev_lb, np.asarray(cand_lb, dtype=np.float64))
-        tightened_ub = np.minimum(prev_ub, np.asarray(cand_ub, dtype=np.float64))
+        try:
+            cand_lb, cand_ub = rule.tighten(model, prev_lb, prev_ub, metadata)
+        except NonlinearBoundTighteningInfeasible as exc:
+            applied_rules.append(rule.name)
+            return (
+                prev_lb,
+                prev_ub,
+                NonlinearBoundTighteningStats(
+                    n_tightened=n_tightened,
+                    applied_rules=tuple(applied_rules),
+                    infeasible=True,
+                    infeasibility_reason=str(exc),
+                ),
+            )
+
+        cand_lb_arr = np.asarray(cand_lb, dtype=np.float64)
+        cand_ub_arr = np.asarray(cand_ub, dtype=np.float64)
+        empty_indices = np.flatnonzero(cand_lb_arr > cand_ub_arr + 1e-12)
+        if empty_indices.size > 0:
+            applied_rules.append(rule.name)
+            first_idx = int(empty_indices[0])
+            return (
+                prev_lb,
+                prev_ub,
+                NonlinearBoundTighteningStats(
+                    n_tightened=n_tightened,
+                    applied_rules=tuple(applied_rules),
+                    infeasible=True,
+                    infeasibility_reason=(
+                        f"{rule.name} returned an empty interval for flat variable {first_idx}"
+                    ),
+                ),
+            )
+        tightened_lb = np.maximum(prev_lb, cand_lb_arr)
+        tightened_ub = np.minimum(prev_ub, cand_ub_arr)
 
         n_changed = int(
             np.count_nonzero(np.abs(tightened_lb - prev_lb) > 1e-12)

@@ -1690,6 +1690,62 @@ class TestCurrentCodeWeaknesses:
         assert tightened_ub[2] == pytest.approx(1.0)
         assert "reciprocal_bounds" in stats.applied_rules
 
+    def test_nonlinear_bound_tightening_reports_quadratic_contradiction(self):
+        """A rule proof of infeasibility should be reported explicitly."""
+        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+
+        m = Model("bt_quadratic_contradiction")
+        x = m.continuous("x", lb=-10.0, ub=10.0)
+        m.subject_to(x**2 == -1.0)
+        m.minimize(x * 0.0)
+
+        tightened_lb, tightened_ub, stats = tighten_nonlinear_bounds(
+            m,
+            np.array([-10.0], dtype=np.float64),
+            np.array([10.0], dtype=np.float64),
+        )
+
+        assert stats.infeasible is True
+        assert "sum_of_squares_upper_bound" in stats.applied_rules
+        assert "negative upper bound" in (stats.infeasibility_reason or "")
+        assert tightened_lb[0] == pytest.approx(-10.0)
+        assert tightened_ub[0] == pytest.approx(10.0)
+
+    def test_nonlinear_bound_tightening_reports_monotone_domain_contradiction(self):
+        """Domain/range contradictions should not be encoded as invalid boxes."""
+        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+
+        sqrt_model = Model("bt_sqrt_contradiction")
+        sqrt_x = sqrt_model.continuous("x", lb=0.0, ub=10.0)
+        sqrt_model.subject_to(dm.sqrt(sqrt_x) <= -1.0)
+        sqrt_model.minimize(sqrt_x * 0.0)
+
+        tightened_lb, tightened_ub, stats = tighten_nonlinear_bounds(
+            sqrt_model,
+            np.array([0.0], dtype=np.float64),
+            np.array([10.0], dtype=np.float64),
+        )
+
+        assert stats.infeasible is True
+        assert "monotone_function_bounds" in stats.applied_rules
+        assert "sqrt(argument) cannot be <=" in (stats.infeasibility_reason or "")
+        assert tightened_lb[0] == pytest.approx(0.0)
+        assert tightened_ub[0] == pytest.approx(10.0)
+
+        exp_model = Model("bt_exp_contradiction")
+        exp_x = exp_model.continuous("x", lb=-10.0, ub=10.0)
+        exp_model.subject_to(dm.exp(exp_x) <= -1.0)
+        exp_model.minimize(exp_x * 0.0)
+
+        _, _, exp_stats = tighten_nonlinear_bounds(
+            exp_model,
+            np.array([-10.0], dtype=np.float64),
+            np.array([10.0], dtype=np.float64),
+        )
+
+        assert exp_stats.infeasible is True
+        assert "exp(argument) cannot be <=" in (exp_stats.infeasibility_reason or "")
+
     def test_nonlinear_bound_tightening_accepts_custom_rules(self):
         """The shared registry should accept external sound rule objects."""
         from discopt._jax.nonlinear_bound_tightening import (
@@ -1772,6 +1828,54 @@ class TestCurrentCodeWeaknesses:
 
         assert tightened_ub[0] == pytest.approx(np.log(10.0))
         assert tightened_lb[1] == pytest.approx(np.e)
+
+    def test_solver_fbbt_reports_nonlinear_infeasibility_status(self):
+        """The FBBT entry point should expose proven nonlinear infeasibility."""
+        from discopt._jax.nlp_evaluator import NLPEvaluator
+        from discopt.solver import _infer_constraint_bounds, _tighten_node_bounds_with_status
+
+        m = Model("nonlinear_fbbt_contradiction")
+        x = m.continuous("x", lb=-10.0, ub=10.0)
+        m.subject_to(x**2 == -1.0)
+        m.minimize(x * 0.0)
+
+        evaluator = NLPEvaluator(m)
+        cl, cu = _infer_constraint_bounds(m)
+        tightened_lb, tightened_ub, infeasible = _tighten_node_bounds_with_status(
+            evaluator,
+            np.array([-10.0], dtype=np.float64),
+            np.array([10.0], dtype=np.float64),
+            cl,
+            cu,
+        )
+
+        assert infeasible is True
+        assert tightened_lb[0] == pytest.approx(-10.0)
+        assert tightened_ub[0] == pytest.approx(10.0)
+
+    def test_solver_returns_infeasible_for_nonlinear_tightening_contradiction(self):
+        """The main solver should consume root nonlinear infeasibility proofs."""
+        m = Model("solver_contradiction")
+        x = m.continuous("x", lb=-10.0, ub=10.0)
+        m.subject_to(x**2 == -1.0)
+        m.minimize(x)
+
+        result = m.solve(skip_convex_check=True, time_limit=5)
+
+        assert result.status == "infeasible"
+        assert result.x is None
+
+    def test_amp_returns_infeasible_for_nonlinear_tightening_contradiction(self):
+        """AMP should stop before MILP/NLP solves when tightening proves infeasibility."""
+        m = Model("amp_contradiction")
+        x = m.continuous("x", lb=0.0, ub=10.0)
+        m.subject_to(dm.sqrt(x) <= -1.0)
+        m.minimize(x)
+
+        result = m.solve(solver="amp", skip_convex_check=True, max_iter=1, time_limit=5)
+
+        assert result.status == "infeasible"
+        assert result.x is None
 
     def test_amp_uses_nonlinear_tightened_partition_bounds(self, monkeypatch):
         """AMP should initialize partitions from the tightened nonlinear box."""
