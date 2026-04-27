@@ -4,8 +4,9 @@
 
 1. **Pick your project** (A, B, C above) and justify (~200 words).
 2. **Design** (~500 words): math, algorithm, implementation choices.
-3. **Implementation** (~300 words): how you plugged into `discopt`'s
-   callback API; pitfalls.
+3. **Implementation** (~300 words): which route you took to inject your
+   method (forked Rust backend, post-hoc analysis with warm starts, or
+   offline cut generation), why, and the pitfalls you hit.
 4. **Benchmarks** (~600 words): instances, settings, timings, gaps,
    confidence intervals. At least 5 instances.
 5. **Discussion** (~400 words): when does your method help? When does it
