@@ -4,7 +4,7 @@
 
 ## Computational deliverable (60)
 - (15) Project well-specified; design justified.
-- (20) Implementation correct: runs, plugs into `discopt`, no crashes.
+- (20) Implementation correct: runs end-to-end via the chosen route (fork / post-hoc / offline), no crashes.
 - (15) Benchmarks: ≥ 5 instances, timings + gaps, CIs.
 - (10) Code quality, reproducibility (seed, instance versions).
 
