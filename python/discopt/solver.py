@@ -17,7 +17,9 @@ import numpy as np
 from scipy.optimize import minimize as scipy_minimize
 
 from discopt._jax.alphabb import estimate_alpha as _estimate_alpha_jax
+from discopt._jax.model_utils import flat_variable_bounds
 from discopt._jax.nlp_evaluator import NLPEvaluator
+from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
 from discopt._rust import PyTreeManager
 from discopt.constants import INFEASIBILITY_SENTINEL as _INFEASIBILITY_SENTINEL
 from discopt.constants import SENTINEL_THRESHOLD as _SENTINEL_THRESHOLD
@@ -353,7 +355,7 @@ def _check_constraint_feasibility(evaluator, x, cl_list, cu_list, tol=1e-4):
     return max_viol <= tol
 
 
-def _tighten_node_bounds(evaluator, node_lb, node_ub, cl_list, cu_list, max_rounds=3):
+def _tighten_node_bounds_with_status(evaluator, node_lb, node_ub, cl_list, cu_list, max_rounds=3):
     """Constraint-based bound tightening (FBBT) for a single B&B node.
 
     Uses the constraint Jacobian to propagate implied variable bounds.
@@ -376,12 +378,15 @@ def _tighten_node_bounds(evaluator, node_lb, node_ub, cl_list, cu_list, max_roun
     -------
     lb, ub : np.ndarray
         Tightened variable bounds.
+    infeasible : bool
+        True if nonlinear tightening proved the node infeasible.
     """
-    if evaluator.n_constraints == 0 or not cl_list:
-        return node_lb.copy(), node_ub.copy()
-
     lb = node_lb.copy()
     ub = node_ub.copy()
+
+    if evaluator.n_constraints == 0 or not cl_list:
+        return _apply_nonlinear_tightening_with_status(evaluator._model, lb, ub)
+
     n = len(lb)
     m = len(cl_list)
     cu = np.array(cu_list, dtype=np.float64)
@@ -399,13 +404,24 @@ def _tighten_node_bounds(evaluator, node_lb, node_ub, cl_list, cu_list, max_roun
         J_b = evaluator.evaluate_jacobian(pt_b)
         is_linear = np.all(np.abs(J_a - J_b) < 1e-8, axis=1)  # (m,) bool
     except Exception:
-        return lb, ub  # can't determine linearity, skip FBBT
+        return _apply_nonlinear_tightening_with_status(evaluator._model, lb, ub)
 
     if not np.any(is_linear):
-        return lb, ub  # no linear constraints to tighten
+        return _apply_nonlinear_tightening_with_status(evaluator._model, lb, ub)
 
     for _ in range(max_rounds):
         changed = False
+
+        tightened_lb, tightened_ub, infeasible = _apply_nonlinear_tightening_with_status(
+            evaluator._model, lb, ub
+        )
+        if infeasible:
+            return tightened_lb, tightened_ub, True
+        if np.any(np.abs(tightened_lb - lb) > 1e-12) or np.any(np.abs(tightened_ub - ub) > 1e-12):
+            lb = tightened_lb
+            ub = tightened_ub
+            changed = True
+
         # Evaluate Jacobian at midpoint of current bounds
         mid = np.clip(lb, -_SPC, _SPC)
         span = np.clip(ub, -_SPC, _SPC) - mid
@@ -477,7 +493,44 @@ def _tighten_node_bounds(evaluator, node_lb, node_ub, cl_list, cu_list, max_roun
         if not changed:
             break
 
+    return lb, ub, False
+
+
+def _tighten_node_bounds(evaluator, node_lb, node_ub, cl_list, cu_list, max_rounds=3):
+    """Constraint-based bound tightening without the infeasibility status."""
+    lb, ub, _infeasible = _tighten_node_bounds_with_status(
+        evaluator, node_lb, node_ub, cl_list, cu_list, max_rounds=max_rounds
+    )
     return lb, ub
+
+
+def _apply_nonlinear_tightening_with_status(
+    model: Model,
+    lb: np.ndarray,
+    ub: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, bool]:
+    """Apply opportunistic nonlinear bound tightening without aborting node processing."""
+    try:
+        tightened_lb, tightened_ub, stats = tighten_nonlinear_bounds(model, lb, ub)
+    except Exception as exc:
+        logger.debug("Skipping nonlinear tightening after error: %s", exc)
+        return lb, ub, False
+
+    if stats.infeasible:
+        logger.debug("Nonlinear tightening proved infeasibility: %s", stats.infeasibility_reason)
+        return lb, ub, True
+
+    return tightened_lb, tightened_ub, False
+
+
+def _apply_nonlinear_tightening(
+    model: Model,
+    lb: np.ndarray,
+    ub: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Apply opportunistic nonlinear bound tightening without the infeasibility status."""
+    tightened_lb, tightened_ub, _infeasible = _apply_nonlinear_tightening_with_status(model, lb, ub)
+    return tightened_lb, tightened_ub
 
 
 def _infer_constraint_bounds(model: Model, evaluator=None):
@@ -1115,18 +1168,17 @@ def _strong_branch_lp(
 _BOUND_WARN_THRESHOLD = 1e15
 
 
-def _check_finite_bounds(model: Model) -> None:
-    """Warn if any variable has very large or infinite bounds.
-
-    Interior point methods use barrier terms that require reasonably sized
-    bounds. Bounds beyond 1e15 cause numerical difficulties (NaN gradients,
-    ill-conditioned KKT systems) and the solver silently produces NaN
-    objectives or reports iteration_limit. This check warns users early.
-    """
-    bad_vars = []
+def _format_bad_bound_entries(
+    model: Model,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> list[str]:
+    """Return human-readable entries for scalar variables with problematic bounds."""
+    bad_vars: list[str] = []
+    offset = 0
     for v in model._variables:
-        lb_flat = v.lb.flatten()
-        ub_flat = v.ub.flatten()
+        lb_flat = np.asarray(flat_lb[offset : offset + v.size], dtype=np.float64)
+        ub_flat = np.asarray(flat_ub[offset : offset + v.size], dtype=np.float64)
         for j in range(v.size):
             lo, hi = float(lb_flat[j]), float(ub_flat[j])
             if (
@@ -1137,17 +1189,68 @@ def _check_finite_bounds(model: Model) -> None:
             ):
                 name = v.name if v.size == 1 else f"{v.name}[{j}]"
                 bad_vars.append(f"{name} (lb={lo:.2g}, ub={hi:.2g})")
+        offset += v.size
+    return bad_vars
+
+
+def _check_finite_bounds(model: Model) -> None:
+    """Warn if any variable has very large or infinite declared bounds.
+
+    Interior point methods use barrier terms that require reasonably sized
+    bounds. Bounds beyond 1e15 cause numerical difficulties (NaN gradients,
+    ill-conditioned KKT systems) and the solver silently produces NaN
+    objectives or reports iteration_limit. Nonlinear tightening is consumed by
+    some solver paths, but this warning remains conservative because not every
+    path applies the tightened box to the actual NLP solve.
+    """
+    raw_lb, raw_ub = flat_variable_bounds(model)
+    raw_bad_vars = _format_bad_bound_entries(model, raw_lb, raw_ub)
+    if not raw_bad_vars:
+        return
+
+    tightening_note = ""
+    try:
+        _tightened_lb, _tightened_ub, bt_stats = tighten_nonlinear_bounds(model, raw_lb, raw_ub)
+        if bt_stats.infeasible:
+            logger.info(
+                "Nonlinear tightening proved infeasibility before large-bound warning: %s",
+                bt_stats.infeasibility_reason,
+            )
+            return
+        if bt_stats.n_tightened > 0:
+            tightening_note = (
+                f" Nonlinear tightening can adjust {bt_stats.n_tightened} bounds"
+                f" via {', '.join(bt_stats.applied_rules)}."
+            )
+    except Exception as exc:
+        logger.debug("Skipping nonlinear tightening before large-bound warning: %s", exc)
+
+    bad_vars = raw_bad_vars
     if bad_vars:
         import warnings
 
         warnings.warn(
-            f"Variables with very large or infinite bounds: "
+            f"Variables with very large or infinite declared bounds: "
             f"{', '.join(bad_vars[:5])}. "
+            f"{tightening_note} "
             f"NLP solvers may fail (NaN, iteration_limit) when bounds "
             f"exceed ~1e15. Add tighter explicit bounds, e.g. "
             f"m.continuous('x', lb=0, ub=1000).",
             stacklevel=3,
         )
+
+
+def _detect_nonlinear_bound_infeasibility(model: Model) -> Optional[str]:
+    """Return a nonlinear bound-tightening infeasibility proof when available."""
+    flat_lb, flat_ub = flat_variable_bounds(model)
+    try:
+        _tightened_lb, _tightened_ub, stats = tighten_nonlinear_bounds(model, flat_lb, flat_ub)
+    except Exception as exc:
+        logger.debug("Skipping nonlinear infeasibility precheck after error: %s", exc)
+        return None
+    if stats.infeasible:
+        return stats.infeasibility_reason or "nonlinear bound tightening proved infeasibility"
+    return None
 
 
 def _is_pure_continuous(model: Model) -> bool:
@@ -1433,6 +1536,16 @@ def solve_model(
     # All solver paths (LP IPM, QP IPM, NLP) use barrier methods that
     # struggle with bounds beyond ~1e15. Check once before any dispatch.
     _check_finite_bounds(model)
+    nonlinear_infeasibility = _detect_nonlinear_bound_infeasibility(model)
+    if nonlinear_infeasibility is not None:
+        logger.info(
+            "Nonlinear bound tightening proved model infeasible: %s", nonlinear_infeasibility
+        )
+        return SolveResult(
+            status="infeasible",
+            wall_time=time.perf_counter() - t_start,
+            gap_certified=True,
+        )
 
     # --- Explicit NLP-BB override: bypass specialized solvers ---
     if nlp_bb is True and not _is_pure_continuous(model):
@@ -1805,11 +1918,17 @@ def solve_model(
             break
 
         # Tighten node bounds via constraint propagation (FBBT).
+        node_infeasible_mask = np.zeros(n_batch, dtype=bool)
         if cl_list:
             for i in range(n_batch):
                 node_lb_i = np.array(batch_lb[i])
                 node_ub_i = np.array(batch_ub[i])
-                t_lb, t_ub = _tighten_node_bounds(evaluator, node_lb_i, node_ub_i, cl_list, cu_list)
+                t_lb, t_ub, node_infeasible = _tighten_node_bounds_with_status(
+                    evaluator, node_lb_i, node_ub_i, cl_list, cu_list
+                )
+                if node_infeasible:
+                    node_infeasible_mask[i] = True
+                    continue
                 batch_lb[i] = t_lb.tolist()
                 batch_ub[i] = t_ub.tolist()
 
@@ -2127,6 +2246,12 @@ def solve_model(
                     result_sols[i] = 0.5 * (lb_clipped + ub_clipped)
                     result_feas[i] = False
         jax_time += time.perf_counter() - t_jax_start
+
+        if np.any(node_infeasible_mask):
+            for idx in np.flatnonzero(node_infeasible_mask):
+                i = int(idx)
+                result_lbs[i] = _INFEASIBILITY_SENTINEL
+                result_feas[i] = False
 
         # --- Optional GNN branching scoring ---
         # GNN computes variable scores and passes hints to Rust TreeManager,
@@ -2723,11 +2848,17 @@ def _solve_nlp_bb(
         # Tighten node bounds via constraint propagation (FBBT).
         # This resolves degenerate bounds (e.g., x <= M*y with y fixed at 0)
         # that cause IPM convergence failures.
+        node_infeasible_mask = np.zeros(n_batch, dtype=bool)
         if cl_list:
             for i in range(n_batch):
                 node_lb_i = np.array(batch_lb[i])
                 node_ub_i = np.array(batch_ub[i])
-                t_lb, t_ub = _tighten_node_bounds(evaluator, node_lb_i, node_ub_i, cl_list, cu_list)
+                t_lb, t_ub, node_infeasible = _tighten_node_bounds_with_status(
+                    evaluator, node_lb_i, node_ub_i, cl_list, cu_list
+                )
+                if node_infeasible:
+                    node_infeasible_mask[i] = True
+                    continue
                 batch_lb[i] = t_lb.tolist()
                 batch_ub[i] = t_ub.tolist()
 
@@ -2861,6 +2992,12 @@ def _solve_nlp_bb(
                     result_feas[i] = False
 
         jax_time += time.perf_counter() - t_jax_start
+
+        if np.any(node_infeasible_mask):
+            for idx in np.flatnonzero(node_infeasible_mask):
+                i = int(idx)
+                result_lbs[i] = _INFEASIBILITY_SENTINEL
+                result_feas[i] = False
 
         # --- Feasibility pump after root node ---
         if iteration == 0 and not _fp_ran:
