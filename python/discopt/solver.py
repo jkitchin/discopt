@@ -1194,25 +1194,23 @@ def _format_bad_bound_entries(
 
 
 def _check_finite_bounds(model: Model) -> None:
-    """Warn if any variable still has very large or infinite bounds after cheap tightening.
+    """Warn if any variable has very large or infinite declared bounds.
 
     Interior point methods use barrier terms that require reasonably sized
     bounds. Bounds beyond 1e15 cause numerical difficulties (NaN gradients,
     ill-conditioned KKT systems) and the solver silently produces NaN
-    objectives or reports iteration_limit. This check first applies the
-    lightweight nonlinear tightening rules used elsewhere in discopt and only
-    warns if large bounds remain afterward.
+    objectives or reports iteration_limit. Nonlinear tightening is consumed by
+    some solver paths, but this warning remains conservative because not every
+    path applies the tightened box to the actual NLP solve.
     """
     raw_lb, raw_ub = flat_variable_bounds(model)
     raw_bad_vars = _format_bad_bound_entries(model, raw_lb, raw_ub)
     if not raw_bad_vars:
         return
 
-    tightened_lb = raw_lb
-    tightened_ub = raw_ub
     tightening_note = ""
     try:
-        tightened_lb, tightened_ub, bt_stats = tighten_nonlinear_bounds(model, raw_lb, raw_ub)
+        _tightened_lb, _tightened_ub, bt_stats = tighten_nonlinear_bounds(model, raw_lb, raw_ub)
         if bt_stats.infeasible:
             logger.info(
                 "Nonlinear tightening proved infeasibility before large-bound warning: %s",
@@ -1221,18 +1219,18 @@ def _check_finite_bounds(model: Model) -> None:
             return
         if bt_stats.n_tightened > 0:
             tightening_note = (
-                f" Nonlinear tightening adjusted {bt_stats.n_tightened} bounds"
+                f" Nonlinear tightening can adjust {bt_stats.n_tightened} bounds"
                 f" via {', '.join(bt_stats.applied_rules)}."
             )
     except Exception as exc:
         logger.debug("Skipping nonlinear tightening before large-bound warning: %s", exc)
 
-    bad_vars = _format_bad_bound_entries(model, tightened_lb, tightened_ub)
+    bad_vars = raw_bad_vars
     if bad_vars:
         import warnings
 
         warnings.warn(
-            f"Variables with very large or infinite bounds after nonlinear tightening: "
+            f"Variables with very large or infinite declared bounds: "
             f"{', '.join(bad_vars[:5])}. "
             f"{tightening_note} "
             f"NLP solvers may fail (NaN, iteration_limit) when bounds "

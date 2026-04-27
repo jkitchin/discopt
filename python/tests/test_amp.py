@@ -27,6 +27,7 @@ Sections:
 from __future__ import annotations
 
 import os
+import warnings
 
 os.environ["JAX_PLATFORMS"] = "cpu"
 os.environ["JAX_ENABLE_X64"] = "1"
@@ -1864,6 +1865,23 @@ class TestCurrentCodeWeaknesses:
 
         assert result.status == "infeasible"
         assert result.x is None
+
+    def test_large_bound_warning_uses_declared_bounds_even_when_rules_tighten(self):
+        """A warning should not be suppressed unless solve paths use the tightened box."""
+        from discopt.solver import _check_finite_bounds
+
+        m = Model("large_bound_warning")
+        x = m.continuous("x", lb=-1e20, ub=1e20)
+        m.subject_to(x**2 <= 4.0)
+        m.minimize(x)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _check_finite_bounds(m)
+
+        messages = [str(w.message) for w in caught]
+        assert any("very large or infinite declared bounds" in msg for msg in messages)
+        assert any("Nonlinear tightening can adjust" in msg for msg in messages)
 
     def test_amp_returns_infeasible_for_nonlinear_tightening_contradiction(self):
         """AMP should stop before MILP/NLP solves when tightening proves infeasibility."""

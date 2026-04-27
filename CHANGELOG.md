@@ -16,6 +16,9 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- Large-bound warnings now remain conservative when nonlinear tightening can
+  infer a smaller box but that tightened box is not applied to every solve path.
+
 ## [0.3.0] - 2026-04-24
 
 This release skips the never-tagged `0.2.6` and folds its draft entries into `0.3.0` along with the post-`0.2.6` feature and infrastructure work.
