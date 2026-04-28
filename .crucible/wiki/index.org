@@ -1,0 +1,1267 @@
+#+TITLE: Crucible Wiki Index
+#+DATE: [2026-04-24 Fri]
+#+STARTUP: overview
+
+Auto-generated index of the Crucible knowledge base.
+56 articles, 177 concepts, 271 sources, 262 links.
+
+* Articles by Type
+
+** Concepts (24)
+
+- [[file:concepts/baron-solver.org][BARON Solver]] /draft/
+- [[file:concepts/big-m-formulations.org][Big-M Formulations]] /draft/
+- [[file:concepts/convex-minlp-solvers.org][Convex MINLP Solvers]] /draft/
+- [[file:concepts/convex-relaxations.org][Convex Relaxations for Global Optimization]] /draft/
+- [[file:concepts/convexity-detection.org][Convexity Detection]] /draft/
+- [[file:concepts/couenne-solver.org][Couenne Solver]] /draft/
+- [[file:index.org][Crucible Wiki Index]] /draft/
+- [[file:concepts/expression-dag-and-ad.org][Expression DAG and Automatic Differentiation]] /draft/
+- [[file:concepts/fisher-information-matrix.org][Fisher Information Matrix and Cramer-Rao Lower Bound]] /draft/
+- [[file:concepts/generalized-disjunctive-programming.org][Generalized Disjunctive Programming]] /draft/
+- [[file:concepts/highs-solver.org][HiGHS Solver]] /draft/
+- [[file:concepts/ipopt-solver.org][Ipopt: Interior Point Optimizer]] /draft/
+- [[file:concepts/llm-optimization.org][Large Language Models for Mathematical Optimization]] /draft/
+- [[file:concepts/minlp-survey.org][MINLP Problem Class and Surveys]] /draft/
+- [[file:concepts/mpax-solver.org][MPAX Solver]] /draft/
+- [[file:concepts/model-based-doe.org][Model-Based Design of Experiments (MBDoE)]] /draft/
+- [[file:concepts/multiobjective-optimization.org][Multiobjective Optimization: Pareto Optimality and Problem Structure]] /draft/
+- [[file:concepts/neural-network-embedding.org][Neural Network Embedding in Optimization]] /draft/
+- [[file:concepts/nonlinear-programming.org][Nonlinear Programming Fundamentals]] /draft/
+- [[file:concepts/identifiability-analysis.org][Parameter Identifiability Analysis]] /draft/
+- [[file:concepts/performance-indicators-mo.org][Performance Indicators for Pareto Front Approximations]] /draft/
+- [[file:concepts/robust-optimization.org][Robust Optimization: Decision-Making Under Set-Based Uncertainty]] /draft/
+- [[file:concepts/scip-solver.org][SCIP Solver]] /draft/
+- [[file:concepts/sloppy-models.org][Sloppy Models]] /draft/
+
+** Methods (32)
+
+- [[file:methods/adaptive-multivariate-partitioning.org][Adaptive Multivariate Partitioning (AMP) for Global MINLP]] /draft/
+- [[file:methods/alphabb-underestimators.org][AlphaBB Underestimators]] /draft/
+- [[file:methods/auxiliary-variable-reformulation.org][Auxiliary Variable Reformulation]] /draft/
+- [[file:methods/bayesian-multiobjective.org][Bayesian Multiobjective Optimization]] /draft/
+- [[file:methods/bound-tightening.org][Bound Tightening (FBBT and OBBT)]] /draft/
+- [[file:methods/branch-variable-selection.org][Branch Variable Selection]] /draft/
+- [[file:methods/debugging-discopt.org][Debugging and Troubleshooting discopt]] /draft/
+- [[file:methods/disjunctive-cuts-minlp.org][Disjunctive Cuts for Nonconvex MINLP]] /draft/
+- [[file:methods/evolutionary-multiobjective.org][Evolutionary Algorithms for Multiobjective Optimization]] /draft/
+- [[file:methods/exact-mo-integer-programming.org][Exact Multiobjective Integer and Mixed-Integer Programming]] /draft/
+- [[file:methods/feasibility-jump.org][Feasibility Jump]] /draft/
+- [[file:methods/feasibility-pump.org][Feasibility Pump]] /draft/
+- [[file:methods/first-order-mip-heuristics.org][First-Order and GPU MIP Heuristics]] /draft/
+- [[file:methods/identifiability-software.org][Identifiability Software Landscape]] /draft/
+- [[file:methods/algebraic-model-identifiability.org][Identifiability for Algebraic and Regression Models]] /draft/
+- [[file:methods/interactive-multiobjective.org][Interactive Multiobjective Optimization]] /draft/
+- [[file:methods/interior-point-methods.org][Interior Point Methods for NLP]] /draft/
+- [[file:methods/large-neighborhood-search.org][Large Neighborhood Search for MIP]] /draft/
+- [[file:methods/learning-based-mip-heuristics.org][Learning-Based MIP Heuristics]] /draft/
+- [[file:methods/mip-presolve.org][MIP Presolve]] /draft/
+- [[file:methods/mip-primal-heuristics.org][MIP Primal Heuristics]] /draft/
+- [[file:methods/matheuristics.org][Matheuristics]] /draft/
+- [[file:methods/mccormick-relaxations.org][McCormick Relaxations]] /draft/
+- [[file:methods/model-discrimination.org][Model Discrimination: Rival-Model Experimental Design and Selection]] /draft/
+- [[file:methods/nonlinear-branch-and-bound.org][Nonlinear Branch and Bound (NLP-BB)]] /draft/
+- [[file:methods/normal-boundary-intersection.org][Normal Boundary Intersection and Normal Constraint Methods]] /draft/
+- [[file:methods/outer-approximation.org][Outer Approximation for MINLP]] /draft/
+- [[file:methods/parameter-estimability.org][Parameter Estimability and Subset Selection]] /draft/
+- [[file:methods/profile-likelihood-identifiability.org][Profile Likelihood Identifiability Analysis]] /draft/
+- [[file:methods/scalarization-methods.org][Scalarization Methods for Multiobjective Optimization]] /draft/
+- [[file:methods/spatial-branch-and-bound.org][Spatial Branch and Bound]] /draft/
+- [[file:methods/structural-identifiability.org][Structural Identifiability Methods]] /draft/
+
+* Articles by Concept
+
+** Admm (1)
+
+- [[file:methods/first-order-mip-heuristics.org][First-Order and GPU MIP Heuristics]] [method]
+
+** Algebraic (1)
+
+- [[file:methods/algebraic-model-identifiability.org][Identifiability for Algebraic and Regression Models]] [method]
+
+** Alns (1)
+
+- [[file:methods/large-neighborhood-search.org][Large Neighborhood Search for MIP]] [method]
+
+** Alphabb (1)
+
+- [[file:methods/alphabb-underestimators.org][AlphaBB Underestimators]] [method]
+
+** Amp (1)
+
+- [[file:methods/adaptive-multivariate-partitioning.org][Adaptive Multivariate Partitioning (AMP) for Global MINLP]] [method]
+
+** Automatic-Differentiation (1)
+
+- [[file:concepts/expression-dag-and-ad.org][Expression DAG and Automatic Differentiation]] [concept]
+
+** Auxiliary-Variables (1)
+
+- [[file:methods/auxiliary-variable-reformulation.org][Auxiliary Variable Reformulation]] [method]
+
+** Baron (2)
+
+- [[file:methods/auxiliary-variable-reformulation.org][Auxiliary Variable Reformulation]] [method]
+- [[file:concepts/baron-solver.org][BARON Solver]] [concept]
+
+** Barrier (1)
+
+- [[file:methods/interior-point-methods.org][Interior Point Methods for NLP]] [method]
+
+** Barrier-Method (1)
+
+- [[file:methods/interior-point-methods.org][Interior Point Methods for NLP]] [method]
+
+** Bayesian (1)
+
+- [[file:methods/bayesian-multiobjective.org][Bayesian Multiobjective Optimization]] [method]
+
+** Benchmark (3)
+
+- [[file:concepts/baron-solver.org][BARON Solver]] [concept]
+- [[file:concepts/couenne-solver.org][Couenne Solver]] [concept]
+- [[file:concepts/scip-solver.org][SCIP Solver]] [concept]
+
+** Big-M (3)
+
+- [[file:concepts/big-m-formulations.org][Big-M Formulations]] [concept]
+- [[file:concepts/generalized-disjunctive-programming.org][Generalized Disjunctive Programming]] [concept]
+- [[file:concepts/neural-network-embedding.org][Neural Network Embedding in Optimization]] [concept]
+
+** Bilinear (1)
+
+- [[file:methods/adaptive-multivariate-partitioning.org][Adaptive Multivariate Partitioning (AMP) for Global MINLP]] [method]
+
+** Bonmin (1)
+
+- [[file:concepts/convex-minlp-solvers.org][Convex MINLP Solvers]] [concept]
+
+** Bound-Tightening (2)
+
+- [[file:methods/bound-tightening.org][Bound Tightening (FBBT and OBBT)]] [method]
+- [[file:concepts/neural-network-embedding.org][Neural Network Embedding in Optimization]] [concept]
+
+** Branch-And-Bound (2)
+
+- [[file:methods/branch-variable-selection.org][Branch Variable Selection]] [method]
+- [[file:methods/nonlinear-branch-and-bound.org][Nonlinear Branch and Bound (NLP-BB)]] [method]
+
+** Branching (1)
+
+- [[file:methods/branch-variable-selection.org][Branch Variable Selection]] [method]
+
+** Cgl (1)
+
+- [[file:methods/disjunctive-cuts-minlp.org][Disjunctive Cuts for Nonconvex MINLP]] [method]
+
+** Classification (2)
+
+- [[file:concepts/convexity-detection.org][Convexity Detection]] [concept]
+- [[file:concepts/minlp-survey.org][MINLP Problem Class and Surveys]] [concept]
+
+** Clique (1)
+
+- [[file:methods/mip-presolve.org][MIP Presolve]] [method]
+
+** Coin-Or (1)
+
+- [[file:concepts/couenne-solver.org][Couenne Solver]] [concept]
+
+** Collinearity (1)
+
+- [[file:methods/algebraic-model-identifiability.org][Identifiability for Algebraic and Regression Models]] [method]
+
+** Combinatorial-Benders (1)
+
+- [[file:methods/matheuristics.org][Matheuristics]] [method]
+
+** Computational-Graph (1)
+
+- [[file:concepts/expression-dag-and-ad.org][Expression DAG and Automatic Differentiation]] [concept]
+
+** Constraint-Programming (1)
+
+- [[file:concepts/scip-solver.org][SCIP Solver]] [concept]
+
+** Convergence (1)
+
+- [[file:methods/debugging-discopt.org][Debugging and Troubleshooting discopt]] [method]
+
+** Convex (3)
+
+- [[file:concepts/convex-minlp-solvers.org][Convex MINLP Solvers]] [concept]
+- [[file:methods/mccormick-relaxations.org][McCormick Relaxations]] [method]
+- [[file:methods/outer-approximation.org][Outer Approximation for MINLP]] [method]
+
+** Convex-Hull (2)
+
+- [[file:concepts/generalized-disjunctive-programming.org][Generalized Disjunctive Programming]] [concept]
+- [[file:concepts/neural-network-embedding.org][Neural Network Embedding in Optimization]] [concept]
+
+** Convex-Optimization (2)
+
+- [[file:methods/nonlinear-branch-and-bound.org][Nonlinear Branch and Bound (NLP-BB)]] [method]
+- [[file:methods/outer-approximation.org][Outer Approximation for MINLP]] [method]
+
+** Convex-Relaxation (3)
+
+- [[file:methods/alphabb-underestimators.org][AlphaBB Underestimators]] [method]
+- [[file:concepts/convex-relaxations.org][Convex Relaxations for Global Optimization]] [concept]
+- [[file:methods/mccormick-relaxations.org][McCormick Relaxations]] [method]
+
+** Convexity (1)
+
+- [[file:concepts/convexity-detection.org][Convexity Detection]] [concept]
+
+** Couenne (3)
+
+- [[file:methods/auxiliary-variable-reformulation.org][Auxiliary Variable Reformulation]] [method]
+- [[file:concepts/couenne-solver.org][Couenne Solver]] [concept]
+- [[file:methods/disjunctive-cuts-minlp.org][Disjunctive Cuts for Nonconvex MINLP]] [method]
+
+** Covariance (1)
+
+- [[file:concepts/fisher-information-matrix.org][Fisher Information Matrix and Cramer-Rao Lower Bound]] [concept]
+
+** Cpsat (1)
+
+- [[file:methods/matheuristics.org][Matheuristics]] [method]
+
+** Cramer-Rao (1)
+
+- [[file:concepts/fisher-information-matrix.org][Fisher Information Matrix and Cramer-Rao Lower Bound]] [concept]
+
+** Crossover (1)
+
+- [[file:methods/large-neighborhood-search.org][Large Neighborhood Search for MIP]] [method]
+
+** Cupdlp (1)
+
+- [[file:methods/first-order-mip-heuristics.org][First-Order and GPU MIP Heuristics]] [method]
+
+** Cutting-Planes (2)
+
+- [[file:concepts/convex-minlp-solvers.org][Convex MINLP Solvers]] [concept]
+- [[file:methods/outer-approximation.org][Outer Approximation for MINLP]] [method]
+
+** Dcp (1)
+
+- [[file:concepts/convexity-detection.org][Convexity Detection]] [concept]
+
+** Debugging (1)
+
+- [[file:methods/debugging-discopt.org][Debugging and Troubleshooting discopt]] [method]
+
+** Decomposition (1)
+
+- [[file:methods/outer-approximation.org][Outer Approximation for MINLP]] [method]
+
+** Diagnosis (1)
+
+- [[file:concepts/llm-optimization.org][Large Language Models for Mathematical Optimization]] [concept]
+
+** Differential-Algebra (1)
+
+- [[file:methods/structural-identifiability.org][Structural Identifiability Methods]] [method]
+
+** Dins (1)
+
+- [[file:methods/large-neighborhood-search.org][Large Neighborhood Search for MIP]] [method]
+
+** Discopt (1)
+
+- [[file:methods/debugging-discopt.org][Debugging and Troubleshooting discopt]] [method]
+
+** Discrimination (1)
+
+- [[file:methods/model-discrimination.org][Model Discrimination: Rival-Model Experimental Design and Selection]] [method]
+
+** Disjunction (2)
+
+- [[file:concepts/big-m-formulations.org][Big-M Formulations]] [concept]
+- [[file:concepts/generalized-disjunctive-programming.org][Generalized Disjunctive Programming]] [concept]
+
+** Disjunctive-Cuts (1)
+
+- [[file:methods/disjunctive-cuts-minlp.org][Disjunctive Cuts for Nonconvex MINLP]] [method]
+
+** Diving (1)
+
+- [[file:methods/mip-primal-heuristics.org][MIP Primal Heuristics]] [method]
+
+** Doe (4)
+
+- [[file:concepts/fisher-information-matrix.org][Fisher Information Matrix and Cramer-Rao Lower Bound]] [concept]
+- [[file:methods/model-discrimination.org][Model Discrimination: Rival-Model Experimental Design and Selection]] [method]
+- [[file:concepts/model-based-doe.org][Model-Based Design of Experiments (MBDoE)]] [concept]
+- [[file:concepts/identifiability-analysis.org][Parameter Identifiability Analysis]] [concept]
+
+** Domain-Reduction (1)
+
+- [[file:methods/bound-tightening.org][Bound Tightening (FBBT and OBBT)]] [method]
+
+** Ehvi (1)
+
+- [[file:methods/bayesian-multiobjective.org][Bayesian Multiobjective Optimization]] [method]
+
+** Envelopes (2)
+
+- [[file:concepts/convex-relaxations.org][Convex Relaxations for Global Optimization]] [concept]
+- [[file:methods/mccormick-relaxations.org][McCormick Relaxations]] [method]
+
+** Epsilon-Constraint (1)
+
+- [[file:methods/scalarization-methods.org][Scalarization Methods for Multiobjective Optimization]] [method]
+
+** Estimability (1)
+
+- [[file:methods/parameter-estimability.org][Parameter Estimability and Subset Selection]] [method]
+
+** Evolutionary (1)
+
+- [[file:methods/evolutionary-multiobjective.org][Evolutionary Algorithms for Multiobjective Optimization]] [method]
+
+** Exact (1)
+
+- [[file:methods/exact-mo-integer-programming.org][Exact Multiobjective Integer and Mixed-Integer Programming]] [method]
+
+** Expression-Dag (1)
+
+- [[file:concepts/expression-dag-and-ad.org][Expression DAG and Automatic Differentiation]] [concept]
+
+** Factorable (2)
+
+- [[file:methods/auxiliary-variable-reformulation.org][Auxiliary Variable Reformulation]] [method]
+- [[file:methods/mccormick-relaxations.org][McCormick Relaxations]] [method]
+
+** Fbbt (2)
+
+- [[file:methods/bound-tightening.org][Bound Tightening (FBBT and OBBT)]] [method]
+- [[file:methods/mip-presolve.org][MIP Presolve]] [method]
+
+** Feasibility-Jump (1)
+
+- [[file:methods/feasibility-jump.org][Feasibility Jump]] [method]
+
+** Feasibility-Pump (1)
+
+- [[file:methods/feasibility-pump.org][Feasibility Pump]] [method]
+
+** Filter-Line-Search (1)
+
+- [[file:concepts/ipopt-solver.org][Ipopt: Interior Point Optimizer]] [concept]
+
+** Fim (1)
+
+- [[file:concepts/fisher-information-matrix.org][Fisher Information Matrix and Cramer-Rao Lower Bound]] [concept]
+
+** First-Order (2)
+
+- [[file:methods/first-order-mip-heuristics.org][First-Order and GPU MIP Heuristics]] [method]
+- [[file:concepts/mpax-solver.org][MPAX Solver]] [concept]
+
+** Formulation (2)
+
+- [[file:concepts/big-m-formulations.org][Big-M Formulations]] [concept]
+- [[file:concepts/llm-optimization.org][Large Language Models for Mathematical Optimization]] [concept]
+
+** Gdp (1)
+
+- [[file:concepts/generalized-disjunctive-programming.org][Generalized Disjunctive Programming]] [concept]
+
+** Geometry (1)
+
+- [[file:concepts/sloppy-models.org][Sloppy Models]] [concept]
+
+** Global (1)
+
+- [[file:methods/spatial-branch-and-bound.org][Spatial Branch and Bound]] [method]
+
+** Global-Optimization (8)
+
+- [[file:methods/adaptive-multivariate-partitioning.org][Adaptive Multivariate Partitioning (AMP) for Global MINLP]] [method]
+- [[file:methods/alphabb-underestimators.org][AlphaBB Underestimators]] [method]
+- [[file:concepts/baron-solver.org][BARON Solver]] [concept]
+- [[file:methods/bound-tightening.org][Bound Tightening (FBBT and OBBT)]] [method]
+- [[file:concepts/convex-relaxations.org][Convex Relaxations for Global Optimization]] [concept]
+- [[file:concepts/couenne-solver.org][Couenne Solver]] [concept]
+- [[file:methods/mccormick-relaxations.org][McCormick Relaxations]] [method]
+- [[file:methods/spatial-branch-and-bound.org][Spatial Branch and Bound]] [method]
+
+** Gnn (2)
+
+- [[file:methods/branch-variable-selection.org][Branch Variable Selection]] [method]
+- [[file:methods/learning-based-mip-heuristics.org][Learning-Based MIP Heuristics]] [method]
+
+** Gpu (2)
+
+- [[file:methods/first-order-mip-heuristics.org][First-Order and GPU MIP Heuristics]] [method]
+- [[file:concepts/mpax-solver.org][MPAX Solver]] [concept]
+
+** Heuristic (1)
+
+- [[file:methods/feasibility-pump.org][Feasibility Pump]] [method]
+
+** Highs (1)
+
+- [[file:concepts/highs-solver.org][HiGHS Solver]] [concept]
+
+** Hypervolume (2)
+
+- [[file:methods/bayesian-multiobjective.org][Bayesian Multiobjective Optimization]] [method]
+- [[file:concepts/performance-indicators-mo.org][Performance Indicators for Pareto Front Approximations]] [concept]
+
+** Identifiability (9)
+
+- [[file:concepts/fisher-information-matrix.org][Fisher Information Matrix and Cramer-Rao Lower Bound]] [concept]
+- [[file:methods/identifiability-software.org][Identifiability Software Landscape]] [method]
+- [[file:methods/algebraic-model-identifiability.org][Identifiability for Algebraic and Regression Models]] [method]
+- [[file:concepts/model-based-doe.org][Model-Based Design of Experiments (MBDoE)]] [concept]
+- [[file:methods/parameter-estimability.org][Parameter Estimability and Subset Selection]] [method]
+- [[file:concepts/identifiability-analysis.org][Parameter Identifiability Analysis]] [concept]
+- [[file:methods/profile-likelihood-identifiability.org][Profile Likelihood Identifiability Analysis]] [method]
+- [[file:concepts/sloppy-models.org][Sloppy Models]] [concept]
+- [[file:methods/structural-identifiability.org][Structural Identifiability Methods]] [method]
+
+** Identification (1)
+
+- [[file:methods/model-discrimination.org][Model Discrimination: Rival-Model Experimental Design and Selection]] [method]
+
+** Indicator (1)
+
+- [[file:concepts/performance-indicators-mo.org][Performance Indicators for Pareto Front Approximations]] [concept]
+
+** Integer (1)
+
+- [[file:methods/exact-mo-integer-programming.org][Exact Multiobjective Integer and Mixed-Integer Programming]] [method]
+
+** Integration (1)
+
+- [[file:methods/identifiability-software.org][Identifiability Software Landscape]] [method]
+
+** Interactive (1)
+
+- [[file:methods/interactive-multiobjective.org][Interactive Multiobjective Optimization]] [method]
+
+** Interior-Point (2)
+
+- [[file:methods/interior-point-methods.org][Interior Point Methods for NLP]] [method]
+- [[file:concepts/ipopt-solver.org][Ipopt: Interior Point Optimizer]] [concept]
+
+** Ipm (2)
+
+- [[file:concepts/highs-solver.org][HiGHS Solver]] [concept]
+- [[file:methods/interior-point-methods.org][Interior Point Methods for NLP]] [method]
+
+** Ipopt (1)
+
+- [[file:concepts/ipopt-solver.org][Ipopt: Interior Point Optimizer]] [concept]
+
+** Jacobian-Rank (1)
+
+- [[file:methods/algebraic-model-identifiability.org][Identifiability for Algebraic and Regression Models]] [method]
+
+** Jax (3)
+
+- [[file:concepts/expression-dag-and-ad.org][Expression DAG and Automatic Differentiation]] [concept]
+- [[file:methods/feasibility-jump.org][Feasibility Jump]] [method]
+- [[file:concepts/mpax-solver.org][MPAX Solver]] [concept]
+
+** Kernel-Search (1)
+
+- [[file:methods/matheuristics.org][Matheuristics]] [method]
+
+** Kkt (1)
+
+- [[file:concepts/nonlinear-programming.org][Nonlinear Programming Fundamentals]] [concept]
+
+** Lagrangian (1)
+
+- [[file:methods/feasibility-jump.org][Feasibility Jump]] [method]
+
+** Llm (1)
+
+- [[file:concepts/llm-optimization.org][Large Language Models for Mathematical Optimization]] [concept]
+
+** Lns (1)
+
+- [[file:methods/large-neighborhood-search.org][Large Neighborhood Search for MIP]] [method]
+
+** Local-Branching (1)
+
+- [[file:methods/large-neighborhood-search.org][Large Neighborhood Search for MIP]] [method]
+
+** Logic-Based (1)
+
+- [[file:concepts/generalized-disjunctive-programming.org][Generalized Disjunctive Programming]] [concept]
+
+** Lp (2)
+
+- [[file:concepts/highs-solver.org][HiGHS Solver]] [concept]
+- [[file:concepts/mpax-solver.org][MPAX Solver]] [concept]
+
+** Lp-Free (1)
+
+- [[file:methods/feasibility-jump.org][Feasibility Jump]] [method]
+
+** Machine-Learning (2)
+
+- [[file:methods/branch-variable-selection.org][Branch Variable Selection]] [method]
+- [[file:methods/learning-based-mip-heuristics.org][Learning-Based MIP Heuristics]] [method]
+
+** Matheuristic (2)
+
+- [[file:methods/first-order-mip-heuristics.org][First-Order and GPU MIP Heuristics]] [method]
+- [[file:methods/matheuristics.org][Matheuristics]] [method]
+
+** Mbdoe (1)
+
+- [[file:concepts/model-based-doe.org][Model-Based Design of Experiments (MBDoE)]] [concept]
+
+** Mccormick (1)
+
+- [[file:methods/mccormick-relaxations.org][McCormick Relaxations]] [method]
+
+** Metric (1)
+
+- [[file:concepts/performance-indicators-mo.org][Performance Indicators for Pareto Front Approximations]] [concept]
+
+** Milp (3)
+
+- [[file:concepts/big-m-formulations.org][Big-M Formulations]] [concept]
+- [[file:methods/exact-mo-integer-programming.org][Exact Multiobjective Integer and Mixed-Integer Programming]] [method]
+- [[file:concepts/neural-network-embedding.org][Neural Network Embedding in Optimization]] [concept]
+
+** Milp-Relaxation (1)
+
+- [[file:methods/adaptive-multivariate-partitioning.org][Adaptive Multivariate Partitioning (AMP) for Global MINLP]] [method]
+
+** Minlp (14)
+
+- [[file:methods/adaptive-multivariate-partitioning.org][Adaptive Multivariate Partitioning (AMP) for Global MINLP]] [method]
+- [[file:methods/auxiliary-variable-reformulation.org][Auxiliary Variable Reformulation]] [method]
+- [[file:concepts/baron-solver.org][BARON Solver]] [concept]
+- [[file:concepts/convex-minlp-solvers.org][Convex MINLP Solvers]] [concept]
+- [[file:concepts/couenne-solver.org][Couenne Solver]] [concept]
+- [[file:methods/disjunctive-cuts-minlp.org][Disjunctive Cuts for Nonconvex MINLP]] [method]
+- [[file:methods/exact-mo-integer-programming.org][Exact Multiobjective Integer and Mixed-Integer Programming]] [method]
+- [[file:methods/feasibility-pump.org][Feasibility Pump]] [method]
+- [[file:concepts/generalized-disjunctive-programming.org][Generalized Disjunctive Programming]] [concept]
+- [[file:concepts/minlp-survey.org][MINLP Problem Class and Surveys]] [concept]
+- [[file:methods/nonlinear-branch-and-bound.org][Nonlinear Branch and Bound (NLP-BB)]] [method]
+- [[file:methods/outer-approximation.org][Outer Approximation for MINLP]] [method]
+- [[file:concepts/scip-solver.org][SCIP Solver]] [concept]
+- [[file:methods/spatial-branch-and-bound.org][Spatial Branch and Bound]] [method]
+
+** Mip (6)
+
+- [[file:methods/feasibility-jump.org][Feasibility Jump]] [method]
+- [[file:concepts/highs-solver.org][HiGHS Solver]] [concept]
+- [[file:methods/learning-based-mip-heuristics.org][Learning-Based MIP Heuristics]] [method]
+- [[file:methods/mip-presolve.org][MIP Presolve]] [method]
+- [[file:methods/mip-primal-heuristics.org][MIP Primal Heuristics]] [method]
+- [[file:methods/matheuristics.org][Matheuristics]] [method]
+
+** Model-Selection (1)
+
+- [[file:methods/model-discrimination.org][Model Discrimination: Rival-Model Experimental Design and Selection]] [method]
+
+** Moead (1)
+
+- [[file:methods/evolutionary-multiobjective.org][Evolutionary Algorithms for Multiobjective Optimization]] [method]
+
+** Mpax (2)
+
+- [[file:methods/first-order-mip-heuristics.org][First-Order and GPU MIP Heuristics]] [method]
+- [[file:concepts/mpax-solver.org][MPAX Solver]] [concept]
+
+** Multiobjective (8)
+
+- [[file:methods/bayesian-multiobjective.org][Bayesian Multiobjective Optimization]] [method]
+- [[file:methods/evolutionary-multiobjective.org][Evolutionary Algorithms for Multiobjective Optimization]] [method]
+- [[file:methods/exact-mo-integer-programming.org][Exact Multiobjective Integer and Mixed-Integer Programming]] [method]
+- [[file:methods/interactive-multiobjective.org][Interactive Multiobjective Optimization]] [method]
+- [[file:concepts/multiobjective-optimization.org][Multiobjective Optimization: Pareto Optimality and Problem Structure]] [concept]
+- [[file:methods/normal-boundary-intersection.org][Normal Boundary Intersection and Normal Constraint Methods]] [method]
+- [[file:concepts/performance-indicators-mo.org][Performance Indicators for Pareto Front Approximations]] [concept]
+- [[file:methods/scalarization-methods.org][Scalarization Methods for Multiobjective Optimization]] [method]
+
+** Natural-Language (1)
+
+- [[file:concepts/llm-optimization.org][Large Language Models for Mathematical Optimization]] [concept]
+
+** Nbi (1)
+
+- [[file:methods/normal-boundary-intersection.org][Normal Boundary Intersection and Normal Constraint Methods]] [method]
+
+** Neural-Diving (1)
+
+- [[file:methods/learning-based-mip-heuristics.org][Learning-Based MIP Heuristics]] [method]
+
+** Neural-Lns (1)
+
+- [[file:methods/learning-based-mip-heuristics.org][Learning-Based MIP Heuristics]] [method]
+
+** Neural-Network (1)
+
+- [[file:concepts/neural-network-embedding.org][Neural Network Embedding in Optimization]] [concept]
+
+** Newton (1)
+
+- [[file:concepts/nonlinear-programming.org][Nonlinear Programming Fundamentals]] [concept]
+
+** Nimbus (1)
+
+- [[file:methods/interactive-multiobjective.org][Interactive Multiobjective Optimization]] [method]
+
+** Nlp (4)
+
+- [[file:methods/interior-point-methods.org][Interior Point Methods for NLP]] [method]
+- [[file:concepts/ipopt-solver.org][Ipopt: Interior Point Optimizer]] [concept]
+- [[file:concepts/nonlinear-programming.org][Nonlinear Programming Fundamentals]] [concept]
+- [[file:methods/profile-likelihood-identifiability.org][Profile Likelihood Identifiability Analysis]] [method]
+
+** Nlp-Bb (1)
+
+- [[file:methods/nonlinear-branch-and-bound.org][Nonlinear Branch and Bound (NLP-BB)]] [method]
+
+** Nonconvex (2)
+
+- [[file:methods/disjunctive-cuts-minlp.org][Disjunctive Cuts for Nonconvex MINLP]] [method]
+- [[file:methods/spatial-branch-and-bound.org][Spatial Branch and Bound]] [method]
+
+** Normal-Constraint (1)
+
+- [[file:methods/normal-boundary-intersection.org][Normal Boundary Intersection and Normal Constraint Methods]] [method]
+
+** Nsga (1)
+
+- [[file:methods/evolutionary-multiobjective.org][Evolutionary Algorithms for Multiobjective Optimization]] [method]
+
+** Obbt (1)
+
+- [[file:methods/bound-tightening.org][Bound Tightening (FBBT and OBBT)]] [method]
+
+** Observability (1)
+
+- [[file:methods/structural-identifiability.org][Structural Identifiability Methods]] [method]
+
+** Omlt (1)
+
+- [[file:concepts/neural-network-embedding.org][Neural Network Embedding in Optimization]] [concept]
+
+** Optimal-Design (1)
+
+- [[file:concepts/model-based-doe.org][Model-Based Design of Experiments (MBDoE)]] [concept]
+
+** Optimization (7)
+
+- [[file:concepts/convexity-detection.org][Convexity Detection]] [concept]
+- [[file:methods/interior-point-methods.org][Interior Point Methods for NLP]] [method]
+- [[file:concepts/llm-optimization.org][Large Language Models for Mathematical Optimization]] [concept]
+- [[file:concepts/minlp-survey.org][MINLP Problem Class and Surveys]] [concept]
+- [[file:concepts/multiobjective-optimization.org][Multiobjective Optimization: Pareto Optimality and Problem Structure]] [concept]
+- [[file:concepts/nonlinear-programming.org][Nonlinear Programming Fundamentals]] [concept]
+- [[file:concepts/robust-optimization.org][Robust Optimization: Decision-Making Under Set-Based Uncertainty]] [concept]
+
+** Outer-Approximation (2)
+
+- [[file:concepts/convex-minlp-solvers.org][Convex MINLP Solvers]] [concept]
+- [[file:methods/outer-approximation.org][Outer Approximation for MINLP]] [method]
+
+** Parameter-Estimation (1)
+
+- [[file:concepts/identifiability-analysis.org][Parameter Identifiability Analysis]] [concept]
+
+** Pareto (1)
+
+- [[file:concepts/multiobjective-optimization.org][Multiobjective Optimization: Pareto Optimality and Problem Structure]] [concept]
+
+** Pareto-Generation (1)
+
+- [[file:methods/normal-boundary-intersection.org][Normal Boundary Intersection and Normal Constraint Methods]] [method]
+
+** Pdlp (3)
+
+- [[file:methods/first-order-mip-heuristics.org][First-Order and GPU MIP Heuristics]] [method]
+- [[file:concepts/highs-solver.org][HiGHS Solver]] [concept]
+- [[file:concepts/mpax-solver.org][MPAX Solver]] [concept]
+
+** Practical (1)
+
+- [[file:methods/profile-likelihood-identifiability.org][Profile Likelihood Identifiability Analysis]] [method]
+
+** Predict-And-Search (1)
+
+- [[file:methods/learning-based-mip-heuristics.org][Learning-Based MIP Heuristics]] [method]
+
+** Predictor-Corrector (1)
+
+- [[file:methods/interior-point-methods.org][Interior Point Methods for NLP]] [method]
+
+** Presolve (1)
+
+- [[file:methods/mip-presolve.org][MIP Presolve]] [method]
+
+** Primal-Dual (1)
+
+- [[file:methods/interior-point-methods.org][Interior Point Methods for NLP]] [method]
+
+** Primal-Heuristic (5)
+
+- [[file:methods/feasibility-jump.org][Feasibility Jump]] [method]
+- [[file:methods/feasibility-pump.org][Feasibility Pump]] [method]
+- [[file:methods/learning-based-mip-heuristics.org][Learning-Based MIP Heuristics]] [method]
+- [[file:methods/mip-primal-heuristics.org][MIP Primal Heuristics]] [method]
+- [[file:methods/matheuristics.org][Matheuristics]] [method]
+
+** Probing (1)
+
+- [[file:methods/mip-presolve.org][MIP Presolve]] [method]
+
+** Profile-Likelihood (1)
+
+- [[file:methods/profile-likelihood-identifiability.org][Profile Likelihood Identifiability Analysis]] [method]
+
+** Proximity (1)
+
+- [[file:methods/large-neighborhood-search.org][Large Neighborhood Search for MIP]] [method]
+
+** Reference-Point (1)
+
+- [[file:methods/interactive-multiobjective.org][Interactive Multiobjective Optimization]] [method]
+
+** Reformulation (1)
+
+- [[file:methods/auxiliary-variable-reformulation.org][Auxiliary Variable Reformulation]] [method]
+
+** Regression (1)
+
+- [[file:methods/algebraic-model-identifiability.org][Identifiability for Algebraic and Regression Models]] [method]
+
+** Relax-And-Fix (1)
+
+- [[file:methods/matheuristics.org][Matheuristics]] [method]
+
+** Relaxation (1)
+
+- [[file:methods/mccormick-relaxations.org][McCormick Relaxations]] [method]
+
+** Relu (1)
+
+- [[file:concepts/neural-network-embedding.org][Neural Network Embedding in Optimization]] [concept]
+
+** Rens (1)
+
+- [[file:methods/large-neighborhood-search.org][Large Neighborhood Search for MIP]] [method]
+
+** Rins (1)
+
+- [[file:methods/large-neighborhood-search.org][Large Neighborhood Search for MIP]] [method]
+
+** Rlt (1)
+
+- [[file:concepts/convex-relaxations.org][Convex Relaxations for Global Optimization]] [concept]
+
+** Ro (1)
+
+- [[file:concepts/robust-optimization.org][Robust Optimization: Decision-Making Under Set-Based Uncertainty]] [concept]
+
+** Robust (1)
+
+- [[file:concepts/robust-optimization.org][Robust Optimization: Decision-Making Under Set-Based Uncertainty]] [concept]
+
+** Rounding (1)
+
+- [[file:methods/mip-primal-heuristics.org][MIP Primal Heuristics]] [method]
+
+** Scalarization (1)
+
+- [[file:methods/scalarization-methods.org][Scalarization Methods for Multiobjective Optimization]] [method]
+
+** Scip (1)
+
+- [[file:concepts/scip-solver.org][SCIP Solver]] [concept]
+
+** Sensitivity (2)
+
+- [[file:methods/parameter-estimability.org][Parameter Estimability and Subset Selection]] [method]
+- [[file:concepts/sloppy-models.org][Sloppy Models]] [concept]
+
+** Shift-And-Propagate (1)
+
+- [[file:methods/mip-primal-heuristics.org][MIP Primal Heuristics]] [method]
+
+** Shot (1)
+
+- [[file:concepts/convex-minlp-solvers.org][Convex MINLP Solvers]] [concept]
+
+** Simplex (1)
+
+- [[file:concepts/highs-solver.org][HiGHS Solver]] [concept]
+
+** Sloppy-Models (1)
+
+- [[file:concepts/sloppy-models.org][Sloppy Models]] [concept]
+
+** Software (1)
+
+- [[file:methods/identifiability-software.org][Identifiability Software Landscape]] [method]
+
+** Solver (7)
+
+- [[file:concepts/baron-solver.org][BARON Solver]] [concept]
+- [[file:concepts/convex-minlp-solvers.org][Convex MINLP Solvers]] [concept]
+- [[file:concepts/couenne-solver.org][Couenne Solver]] [concept]
+- [[file:methods/debugging-discopt.org][Debugging and Troubleshooting discopt]] [method]
+- [[file:concepts/highs-solver.org][HiGHS Solver]] [concept]
+- [[file:concepts/ipopt-solver.org][Ipopt: Interior Point Optimizer]] [concept]
+- [[file:concepts/scip-solver.org][SCIP Solver]] [concept]
+
+** Spatial-Branch-And-Bound (1)
+
+- [[file:methods/spatial-branch-and-bound.org][Spatial Branch and Bound]] [method]
+
+** Spatial-Branching (1)
+
+- [[file:concepts/scip-solver.org][SCIP Solver]] [concept]
+
+** Spea (1)
+
+- [[file:methods/evolutionary-multiobjective.org][Evolutionary Algorithms for Multiobjective Optimization]] [method]
+
+** Structural (1)
+
+- [[file:methods/structural-identifiability.org][Structural Identifiability Methods]] [method]
+
+** Subset-Selection (1)
+
+- [[file:methods/parameter-estimability.org][Parameter Estimability and Subset Selection]] [method]
+
+** Surrogate (1)
+
+- [[file:methods/bayesian-multiobjective.org][Bayesian Multiobjective Optimization]] [method]
+
+** Surrogate-Model (1)
+
+- [[file:concepts/neural-network-embedding.org][Neural Network Embedding in Optimization]] [concept]
+
+** Survey (1)
+
+- [[file:concepts/minlp-survey.org][MINLP Problem Class and Surveys]] [concept]
+
+** Symmetry (1)
+
+- [[file:methods/mip-presolve.org][MIP Presolve]] [method]
+
+** Tchebycheff (1)
+
+- [[file:methods/scalarization-methods.org][Scalarization Methods for Multiobjective Optimization]] [method]
+
+** Tools (1)
+
+- [[file:methods/identifiability-software.org][Identifiability Software Landscape]] [method]
+
+** Troubleshooting (1)
+
+- [[file:methods/debugging-discopt.org][Debugging and Troubleshooting discopt]] [method]
+
+** Uncertainty (2)
+
+- [[file:concepts/identifiability-analysis.org][Parameter Identifiability Analysis]] [concept]
+- [[file:concepts/robust-optimization.org][Robust Optimization: Decision-Making Under Set-Based Uncertainty]] [concept]
+
+** Underestimator (1)
+
+- [[file:methods/alphabb-underestimators.org][AlphaBB Underestimators]] [method]
+
+** Warp (1)
+
+- [[file:methods/feasibility-jump.org][Feasibility Jump]] [method]
+
+** Weighted-Sum (1)
+
+- [[file:methods/scalarization-methods.org][Scalarization Methods for Multiobjective Optimization]] [method]
+
+* Sources
+
+- [pdf] Designs for discriminating between two rival models (shareable)
+- [pdf] A new sequential experimental design procedure for discriminating among rival models (shareable)
+- [pdf] Discrimination among mechanistic models (shareable)
+- [pdf] {D-} and {T-optimum} designs for the kinetics of a reversible chemical reaction (shareable)
+- [pdf] Design of experiments for model discrimination hybridising analytical and data-driven approaches (shareable)
+- [pdf] The large-sample distribution of the likelihood ratio for testing composite hypotheses (shareable)
+- [pdf] Likelihood ratio tests for model selection and non-nested hypotheses (shareable)
+- [pdf] Robust convex optimization (shareable)
+- [pdf] Adjustable robust solutions of uncertain linear programs (shareable)
+- [pdf] The price of robustness (shareable)
+- [pdf] A practical guide to robust optimization (shareable)
+- [pdf] Robust Optimization (shareable)
+- [other] Tightening {McCormick} relaxations for nonlinear programs via dynamic multivariate partitioning (shareable)
+- [pdf] An adaptive, multivariate partitioning algorithm for global optimization of nonconvex programs (shareable)
+- [pdf] Normalized multiparametric disaggregation: an efficient relaxation for mixed-integer bilinear problems (shareable)
+- [pdf] Logic-based outer approximation for globally optimal synthesis of process networks (shareable)
+- [pdf] An outer-approximation algorithm for a class of mixed-integer nonlinear programs (shareable)
+- [pdf] Review of nonlinear mixed-integer and disjunctive programming techniques (shareable)
+- [pdf] A symbolic reformulation/spatial branch-and-bound algorithm for the global optimisation of nonconvex {MINLPs} (shareable)
+- [pdf] Numerical Optimization (shareable)
+- [pdf] Computability of global solutions to factorable nonconvex programs: {Part I} -- Convex underestimating problems (shareable)
+- [pdf] \(\alpha\){BB}: A global optimization method for general constrained nonconvex problems (shareable)
+- [pdf] A global optimization method, \(\alpha\){BB}, for general twice-differentiable constrained {NLPs} -- {I}. {Theoretical} advances (shareable)
+- [pdf] Global minimum potential energy conformations of small molecules (shareable)
+- [pdf] Convex extensions and envelopes of lower semi-continuous functions (shareable)
+- [pdf] Convexification and Global Optimization in Continuous and Mixed-Integer Nonlinear Programming: Theory, Algorithms, Software, and Applications (shareable)
+- [pdf] Global optimization of mixed-integer nonlinear programs: A theoretical and computational study (shareable)
+- [pdf] Solving continuous and discrete nonlinear programs with {BARON} (shareable)
+- [pdf] {ANTIGONE}: Algorithms for coNTinuous / Integer Global Optimization of Nonlinear Equations (shareable)
+- [pdf] Global optimization of nonconvex problems with multilinear intermediates (shareable)
+- [pdf] Domain reduction techniques for global {NLP} and {MINLP} optimization (shareable)
+- [pdf] A review and comparison of solvers for convex {MINLP} (shareable)
+- [pdf] Global optimization of mixed-integer nonlinear programs with {SCIP} 8 (shareable)
+- [pdf] Modelling and computational techniques for logic based integer programming (shareable)
+- [pdf] Systematic modeling of discrete-continuous optimization models through generalized disjunctive programming (shareable)
+- [pdf] Logic-based {MINLP} algorithms for the optimal synthesis of process networks (shareable)
+- [pdf] On the implementation of an interior-point filter line-search algorithm for large-scale nonlinear programming (shareable)
+- [pdf] Nonlinear programming without a penalty function (shareable)
+- [pdf] The cutting-plane method for solving convex programs (shareable)
+- [pdf] An extended cutting plane method for solving convex {MINLP} problems (shareable)
+- [pdf] An algorithmic framework for convex mixed integer nonlinear programs (shareable)
+- [pdf] The extended supporting hyperplane algorithm for convex mixed-integer nonlinear programming (shareable)
+- [pdf] Using regularization and second order information in outer approximation for convex {MINLP} (shareable)
+- [pdf] The supporting hyperplane optimization toolkit for convex {MINLP} (shareable)
+- [pdf] Disjunctive programming: Properties of the convex hull of feasible points (shareable)
+- [pdf] Strong mixed-integer programming formulations for trained neural networks (shareable)
+- [pdf] {ReLU} networks as surrogate models in mixed-integer linear programs (shareable)
+- [pdf] Deep neural networks and mixed integer linear optimization (shareable)
+- [pdf] {OptiChat}: Bridging Optimization Models and Practitioners with Large Language Models (shareable)
+  https://arxiv.org/abs/2501.08406
+- [pdf] Diagnosing Infeasible Optimization Problems Using Large Language Models (shareable)
+  https://arxiv.org/abs/2308.12923
+- [pdf] {OptiMUS}: Scalable Optimization Modeling with {(MI)LP} Solvers and Large Language Models (shareable)
+  https://arxiv.org/abs/2402.10172
+- [pdf] Autoformulation of Mathematical Optimization Models Using {LLMs} (shareable)
+  https://arxiv.org/abs/2411.01679
+- [pdf] {LM4OPT}: Unveiling the Potential of Large Language Models in Formulating Mathematical Optimization Problems (shareable)
+  https://arxiv.org/abs/2403.01342
+- [pdf] {ORLM}: A Customizable Framework in Training Large Models for Optimization (shareable)
+  https://arxiv.org/abs/2405.17743
+- [pdf] {LLMOPT}: Learning to Define and Solve General Optimization Problems from Scratch (shareable)
+  https://arxiv.org/abs/2410.13213
+- [pdf] Toward Autocorrection of Chemical Process Flowsheets Using Large Language Models (shareable)
+- [pdf] Generative Artificial Intelligence in Chemical Engineering (shareable)
+- [pdf] A Survey of Optimization Modeling Meets {LLMs}: Progress and Future Directions (shareable)
+  https://arxiv.org/abs/2508.10047
+- [pdf] A Survey on Mathematical Reasoning and Optimization with Large Language Models (shareable)
+  https://arxiv.org/abs/2503.17726
+- [pdf] Multi-Objective Infeasibility Diagnosis for Routing Problems Using Large Language Models (shareable)
+  https://arxiv.org/abs/2508.03406
+- [pdf] {LLM}-guided Chemical Process Optimization (shareable)
+  https://arxiv.org/abs/2506.20921
+- [other] Couenne: a user's manual (shareable)
+  https://www.coin-or.org/Couenne/couenne-user-manual.pdf
+- [other] Couenne GitHub repository (coin-or/Couenne) (shareable)
+  https://github.com/coin-or/Couenne
+- [pdf] Bound reduction using pairs of linear inequalities (shareable)
+  https://link.springer.com/article/10.1007/s10898-012-9848-9
+- [pdf] Presolve Reductions in Mixed Integer Programming (shareable)
+  https://pubsonline.informs.org/doi/10.1287/ijoc.2018.0857
+- [pdf] Heuristic algorithms in global MINLP solvers (shareable)
+  https://opus4.kobv.de/opus4-zib/frontdoor/index/index/docId/5293
+- [pdf] RENS: the optimal rounding (shareable)
+- [pdf] Exploring relaxation induced neighborhoods to improve {MIP} solutions (shareable)
+- [pdf] {DINS}, a {MIP} improvement heuristic (shareable)
+- [pdf] Local branching (shareable)
+- [pdf] An evolutionary algorithm for polishing mixed integer programming solutions (shareable)
+- [pdf] Proximity search for 0--1 mixed-integer convex programming (shareable)
+- [pdf] Shift-and-Propagate (shareable)
+- [pdf] Feasibility Jump: an {LP}-free Lagrangian {MIP} heuristic (shareable)
+- [pdf] {ZI} round, a {MIP} rounding heuristic (shareable)
+- [pdf] Preprocessing and probing techniques for mixed integer programming problems (shareable)
+- [pdf] Presolving in linear programming (shareable)
+- [pdf] Parallelizing the dual revised simplex method (shareable)
+- [pdf] The ``Idiot'' crash quadratic penalty algorithm for linear programming and its application to linearizations of quadratic assignment problems (shareable)
+- [pdf] Implementation of an interior point method with basis preconditioning (shareable)
+- [other] The {SCIP} Optimization Suite 9.0 (shareable)
+  https://arxiv.org/abs/2402.17702
+- [pdf] {PaPILO}: A Parallel Presolving Library for Integer and Linear Optimization with Multiprecision Support (shareable)
+  https://arxiv.org/abs/2206.10709
+- [pdf] Two-row and two-column mixed-integer presolve using hashing-based pairing methods (shareable)
+- [pdf] {SCIP} presolving (shareable)
+- [pdf] Undercover: a primal {MINLP} heuristic exploring a largest sub-{MIP} (shareable)
+- [pdf] Computational aspects of infeasibility analysis in mixed integer programming (shareable)
+- [pdf] Learning to schedule heuristics in branch and bound (shareable)
+  https://arxiv.org/abs/2103.10294
+- [pdf] {L2P-MIP}: Learning to Presolve for Mixed Integer Programming (shareable)
+  https://openreview.net/forum?id=McfYbKnpT8
+- [other] {NVIDIA Warp}: A {Python} framework for high-performance simulation and graphics code on {CPUs} and {GPUs} (shareable)
+  https://github.com/NVIDIA/warp
+- [other] {MPAX}: A {JAX}-native first-order {LP} solver (shareable)
+  https://github.com/MIT-Lu-Lab/MPAX
+- [other] {HiGHS}: High-performance parallel linear optimization software (shareable)
+  https://github.com/ERGO-Code/HiGHS
+- [other] {SCIP}: Solving Constraint Integer Programs (shareable)
+  https://github.com/scipopt/scip
+- [pdf] Certifying {MIP}-Based Presolve Reductions for 0-1 Integer Linear Programs (shareable)
+  https://arxiv.org/abs/2401.09277
+- [pdf] Serial and Parallel Two-Column Probing for Mixed-Integer Programming (shareable)
+  https://arxiv.org/abs/2408.16927
+- [pdf] Solving Mixed Integer Programs Using Neural Networks (shareable)
+  https://arxiv.org/abs/2012.13349
+- [other] Learning a Large Neighborhood Search Algorithm for Mixed Integer Programs (shareable)
+  https://arxiv.org/abs/2107.10201
+- [pdf] Learning Large Neighborhood Search Policy for Integer Programming (shareable)
+  https://proceedings.neurips.cc/paper/2021/hash/fc9e62695def29ccdb9eb3fed5b4c8c5-Abstract.html
+- [pdf] A {GNN}-Guided Predict-and-Search Framework for Mixed-Integer Linear Programming (shareable)
+  https://arxiv.org/abs/2302.05636
+- [other] Matheuristics (shareable)
+- [pdf] Combinatorial {Benders}' Cuts for Mixed-Integer Linear Programming (shareable)
+- [pdf] A fix-and-optimize approach for the multi-level capacitated lot sizing problem (shareable)
+- [pdf] Kernel search: a general heuristic for the multi-dimensional knapsack problem (shareable)
+- [pdf] A simple effective heuristic for embedded mixed-integer quadratic programming (shareable)
+- [pdf] Practical Large-Scale Linear Programming using Primal-Dual Hybrid Gradient (shareable)
+  https://arxiv.org/abs/2106.04756
+- [other] {cuPDLP.jl}: A {GPU} Implementation of Restarted Primal-Dual Hybrid Gradient for Linear Programming in {Julia} (shareable)
+  https://arxiv.org/abs/2311.12180
+- [other] Google {OR}-Tools {CP}-{SAT} Solver (shareable)
+  https://developers.google.com/optimization/cp/cp_solver
+- [other] Exact Combinatorial Optimization with Graph Convolutional Neural Networks (shareable)
+  https://arxiv.org/abs/1906.01629
+- [pdf] Searching Large Neighborhoods for Integer Linear Programs with Contrastive Learning (shareable)
+  https://arxiv.org/abs/2302.01578
+- [pdf] Production Planning by Mixed Integer Programming (shareable)
+- [pdf] Observability and Structural Identifiability of Nonlinear Biological Systems (shareable)
+- [pdf] On Identifiability of Nonlinear ODE Models and Applications in Viral Dynamics (shareable)
+- [pdf] Structural Identifiability of Systems Biology Models: A Critical Comparison of Methods (shareable)
+- [pdf] Benchmarking tools for a priori identifiability analysis (shareable)
+- [pdf] {DAISY}: A new software tool to test global identifiability of biological and physiological systems (shareable)
+- [pdf] On Finding and Using Identifiable Parameter Combinations in Nonlinear Dynamic Systems Biology Models and {COMBOS}: A Novel Web Implementation (shareable)
+- [pdf] System identifiability based on the power series expansion of the solution (shareable)
+- [pdf] Unidentifiable compartmental models: what to do? (shareable)
+- [pdf] {GenSSI}: a software toolbox for structural identifiability analysis of biological models (shareable)
+- [pdf] {GenSSI 2.0}: multi-experiment structural identifiability analysis of {SBML} models (shareable)
+- [pdf] Similarity transformation approach to identifiability analysis of nonlinear compartmental models (shareable)
+- [pdf] New results for identifiability of nonlinear systems (shareable)
+- [pdf] Structural Identifiability of Dynamic Systems Biology Models (shareable)
+- [pdf] {STRIKE-GOLDD} 4.0: user-friendly, efficient analysis of structural identifiability and observability (shareable)
+- [pdf] {SIAN}: software for structural identifiability analysis of {ODE} models (shareable)
+- [pdf] Differential Elimination for Dynamical Models via Projections with Applications to Structural Identifiability (shareable)
+- [pdf] A probabilistic algorithm to test local algebraic observability in polynomial time (shareable)
+- [pdf] On global identifiability for arbitrary model parametrisations (shareable)
+- [pdf] Structural and practical identifiability analysis of partially observed dynamical models by exploiting the profile likelihood (shareable)
+- [pdf] Profile likelihood in systems biology (shareable)
+- [pdf] Likelihood-based observability analysis and confidence intervals for predictions of dynamic models (shareable)
+- [pdf] A Method for Computing Profile-Likelihood-Based Confidence Intervals (shareable)
+- [pdf] {PESTO}: Parameter {EST}imation {TO}olbox (shareable)
+- [other] Uncertainty analysis for non-identifiable dynamical systems: Profile likelihoods, bootstrapping and more (shareable)
+- [pdf] Universally Sloppy Parameter Sensitivities in Systems Biology Models (shareable)
+- [pdf] Sloppy-model universality class and the Vandermonde matrix (shareable)
+- [pdf] Geometry of nonlinear least squares with applications to sloppy models and optimization (shareable)
+- [pdf] Perspective: Sloppiness and emergent theories in physics, biology, and beyond (shareable)
+- [pdf] Practical identifiability analysis of large environmental simulation models (shareable)
+- [pdf] Modeling Ethylene/Butene Copolymerization with Multisite Catalysts: Parameter Estimability and Experimental Design (shareable)
+- [pdf] Parameter set selection for estimation of nonlinear dynamic systems (shareable)
+- [pdf] Generalization of a parameter set selection procedure based on orthogonal projections and the {D}-optimality criterion (shareable)
+- [pdf] Selection of optimal parameter set using estimability analysis and {MSE}-based model-selection criterion (shareable)
+- [pdf] Model-based design of experiments for parameter precision: State of the art (shareable)
+- [pdf] On the Design of Optimally Informative Dynamic Experiments for Model Discrimination in Multiresponse Nonlinear Situations (shareable)
+- [pdf] A backoff strategy for model-based experiment design under parametric uncertainty (shareable)
+- [pdf] Online Model-Based Redesign of Experiments for Parameter Estimation in Dynamic Systems (shareable)
+- [pdf] Optimal Design of Experiments (shareable)
+- [pdf] Theory of Optimal Experiments (shareable)
+- [pdf] Identification of Parametric Models from Experimental Data (shareable)
+- [pdf] Regression Diagnostics: Identifying Influential Data and Sources of Collinearity (shareable)
+- [pdf] Applied Regression Analysis (shareable)
+- [pdf] Introduction to Linear Regression Analysis (shareable)
+- [pdf] A hybrid approach for efficient and robust parameter estimation in biochemical pathways (shareable)
+- [pdf] Optimal Experimental Design for Parameter Estimation of a Cell Signaling Model (shareable)
+- [pdf] A fast and elitist multiobjective genetic algorithm: {NSGA-II} (shareable)
+- [pdf] An evolutionary many-objective optimization algorithm using reference-point-based nondominated sorting approach, {Part I}: {Solving} problems with box constraints (shareable)
+- [pdf] {MOEA/D}: {A} multiobjective evolutionary algorithm based on decomposition (shareable)
+- [pdf] Normal-boundary intersection: {A} new method for generating the {Pareto} surface in nonlinear multicriteria optimization problems (shareable)
+- [pdf] Nonlinear Multiobjective Optimization (shareable)
+- [pdf] Multicriteria Optimization (shareable)
+- [pdf] An approximation algorithm for convex multi-objective programming problems (shareable)
+- [pdf] Survey of multi-objective optimization methods for engineering (shareable)
+- [pdf] The normalized normal constraint method for generating the {Pareto} frontier (shareable)
+- [pdf] On a bicriterion formulation of the problems of integrated system identification and system optimization (shareable)
+- [pdf] Effective implementation of the $\varepsilon$-constraint method in multi-objective mathematical programming problems (shareable)
+- [pdf] Multiobjective evolutionary algorithms: {A} comparative case study and the strength {Pareto} approach (shareable)
+- [pdf] Comparison of multiobjective evolutionary algorithms: {Empirical} results (shareable)
+- [pdf] An interactive weighted {Tchebycheff} procedure for multiple objective programming (shareable)
+- [pdf] {ParEGO}: {A} hybrid algorithm with on-line landscape approximation for expensive multiobjective optimization problems (shareable)
+- [pdf] A tutorial on multiobjective optimization: {Fundamentals} and evolutionary methods (shareable)
+- [pdf] Adaptive weighted-sum method for bi-objective optimization: {Pareto} front generation (shareable)
+- [other] Indicator-based selection in multiobjective search (shareable)
+- [pdf] Pymoo: {Multi-objective} optimization in {Python} (shareable)
+- [pdf] {PlatEMO}: {A} {MATLAB} platform for evolutionary multi-objective optimization (shareable)
+- [pdf] A survey of multiobjective evolutionary algorithms based on decomposition (shareable)
+- [pdf] Approximating the nondominated front using the {Pareto} archived evolution strategy (shareable)
+- [other] Reference point methodology (shareable)
+- [other] Why use interactive multi-objective optimization in chemical process design? (shareable)
+- [pdf] Postoptimal analysis in multicriteria linear programming (shareable)
+- [other] Multi-objective integer linear programming (shareable)
+- [web] Couenne (Wikipedia) (external)
+  https://en.wikipedia.org/wiki/Couenne
+- [web] Extending a CIP framework to solve MIQCPs (external)
+  https://link.springer.com/chapter/10.1007/978-1-4614-1927-3_15
+- [web] A storm of feasibility pumps for nonconvex MINLP (external)
+  https://link.springer.com/article/10.1007/s10107-012-0608-x
+- [web] On convex relaxations of quadrilinear terms (external)
+  https://link.springer.com/article/10.1007/s10898-009-9484-1
+- [web] Feasibility-based bounds tightening via fixed points (external)
+  https://link.springer.com/chapter/10.1007/978-3-642-17458-2_7
+- [web] Three ideas for a feasibility pump for nonconvex MINLP (external)
+  https://link.springer.com/article/10.1007/s11590-016-1046-0
+- [web] Bound reduction using pairs of linear inequalities (external)
+  https://link.springer.com/article/10.1007/s10898-012-9848-9
+- [web] Disjunctive cuts for non-convex MINLP (external)
+  https://link.springer.com/chapter/10.1007/978-1-4614-1927-3_5
+- [web] Couenne user manual (external)
+  https://www.coin-or.org/Couenne/couenne-user-manual.pdf
+- [web] Couenne GitHub repository (external)
+  https://github.com/coin-or/Couenne
+- [web] COIN-OR Couenne project page (external)
+  https://www.coin-or.org/Couenne/
+- [web] MINLP.org - Mixed Integer Nonlinear Programming (external)
+  https://www.minlp.org/
+- [web] MINLPLib - Mixed-Integer and Continuous Nonlinear Programming Library (external)
+  https://www.minlplib.org/
+- [web] Balas 1998 - Disjunctive Programming (external)
+  https://doi.org/10.1016/s0166-218x(98)00136-x
+- [web] Fischetti & Jo 2018 - Deep Neural Networks and MILP (external)
+  https://doi.org/10.1007/s10601-018-9285-6
+- [web] Boukouvala, Misener & Floudas 2016 - MINLP and CDFO Advances (external)
+  https://doi.org/10.1016/j.ejor.2015.12.018
+- [web] Burer & Letchford 2012 - Nonconvex MINLP Survey (external)
+  https://doi.org/10.1016/j.sorms.2012.08.001
+- [web] Grant, Boyd & Ye 2006 - Disciplined Convex Programming (external)
+  https://doi.org/10.1007/0-387-30528-9_7
+- [web] Bestuzheva et al. 2023 - SCIP Optimization Suite 8.0 (external)
+  https://doi.org/10.1145/3585516
+- [web] Kilinc & Sahinidis 2018 - BARON Integrality Exploitation (external)
+  https://doi.org/10.1080/10556788.2017.1350178
+- [web] Belotti et al. 2013 - Mixed-Integer Nonlinear Optimization (Acta Numerica) (external)
+  https://doi.org/10.1017/S0962492913000032
+- [web] Achterberg 2009 - SCIP Framework (external)
+  https://doi.org/10.1007/s12532-008-0001-1
+- [web] Vigerske & Gleixner 2018 - SCIP for MINLP (external)
+  https://doi.org/10.1080/10556788.2017.1335312
+- [web] Sahinidis 1996 - BARON Solver (external)
+  https://doi.org/10.1007/BF00138693
+- [web] Grimstad & Andersson 2019 - ReLU Networks as Surrogates in MILP (external)
+  https://doi.org/10.1016/j.compchemeng.2019.106580
+- [web] Anderson et al. 2020 - Strong MIP Formulations for Neural Networks (external)
+  https://doi.org/10.1007/s10107-020-01474-5
+- [web] Vielma 2015 - MIP Formulation Techniques (external)
+  https://doi.org/10.1137/130915303
+- [web] Baydin et al. 2018 - Automatic Differentiation in ML Survey (external)
+  https://jmlr.org/papers/v18/17-468.html
+- [web] Linderoth & Savelsbergh 1999 - Search Strategies for MIP (external)
+  https://doi.org/10.1287/ijoc.11.2.173
+- [web] Khalil et al. 2016 - Learning to Branch in MIP (external)
+  https://doi.org/10.1609/aaai.v30i1.10080
+- [web] Gasse et al. 2019 - GCN for Combinatorial Optimization (external)
+  https://arxiv.org/abs/1906.01629
+- [web] Achterberg, Koch & Martin 2005 - Branching Rules Revisited (external)
+  https://doi.org/10.1016/j.orl.2004.04.002
+- [web] Liberti & Pantelides 2003 - Convex Envelopes of Odd-Degree Monomials (external)
+  https://doi.org/10.1023/a:1021924706467
+- [web] Sherali & Adams 1990 - RLT Hierarchy (external)
+  https://doi.org/10.1137/0403036
+- [web] Tawarmalani & Sahinidis 2002 - Convex Extensions and Envelopes (external)
+  https://doi.org/10.1007/s10107-002-0308-z
+- [web] Grossmann & Trespalacios 2013 - GDP Framework (external)
+  https://doi.org/10.1002/aic.14088
+- [web] Turkay & Grossmann 1996 - Logic-Based MINLP for Process Networks (external)
+  https://doi.org/10.1016/0098-1354(95)00219-7
+- [web] Raman & Grossmann 1994 - Logic-Based Integer Programming (external)
+  https://doi.org/10.1016/0098-1354(93)e0010-7
+- [web] D'Ambrosio et al. 2012 - Storm of Feasibility Pumps (external)
+  https://doi.org/10.1007/s10107-012-0608-x
+- [web] Bonami et al. 2009 - Feasibility Pump for MINLP (external)
+  https://doi.org/10.1007/s10107-008-0212-2
+- [web] Fischetti, Glover & Lodi 2005 - The Feasibility Pump (external)
+  https://doi.org/10.1007/s10107-004-0570-3
+- [web] Caprara & Locatelli 2010 - Domain Reduction Strategies (external)
+  https://doi.org/10.1007/s10107-008-0263-4
+- [web] Schichl & Neumaier 2005 - Interval Analysis on DAGs (external)
+  https://doi.org/10.1007/s10898-005-0937-x
+- [web] Ryoo & Sahinidis 1996 - Branch and Reduce (external)
+  https://doi.org/10.1007/BF00138689
+- [web] Gleixner et al. 2017 - Optimization-Based Bound Tightening (external)
+  https://doi.org/10.1007/s10898-016-0450-4
+- [web] Maranas & Floudas 1994 - Convex Underestimators (external)
+  https://doi.org/10.1007/BF01096720
+- [web] Androulakis, Maranas & Floudas 1995 - AlphaBB Method (external)
+  https://doi.org/10.1007/BF01099647
+- [web] Adjiman et al. 1998 - AlphaBB for General NLPs (external)
+  https://doi.org/10.1016/S0098-1354(98)00027-1
+- [web] McCormick 1976 - Factorable Nonconvex Programs (external)
+  https://doi.org/10.1007/bf01580665
+- [web] Al-Khayyal & Falk 1983 - Biconvex Programming (external)
+  https://doi.org/10.1287/moor.8.2.273
+- [web] Scott, Stuber & Barton 2011 - Generalized McCormick (external)
+  https://doi.org/10.1007/s10898-011-9664-7
+- [web] Tsoukalas & Mitsos 2014 - Multivariate McCormick (external)
+  https://doi.org/10.1007/s10898-014-0176-0
+- [web] Mitsos, Chachuat & Barton 2009 - McCormick Relaxations of Algorithms (external)
+  https://doi.org/10.1137/080717341
+- [web] Fiacco & McCormick 1990 - SUMT (external)
+  https://doi.org/10.1137/1.9781611971316
+- [web] Nocedal & Wright 2006 - Numerical Optimization (external)
+  https://doi.org/10.1007/978-0-387-40065-5
+- [web] Mehrotra 1992 - Primal-Dual Interior Point Method (external)
+  https://doi.org/10.1137/0802028
+- [web] McCormick-Based Relaxations of Algorithms (external)
+- [web] Generalized McCormick relaxations (external)
+- [web] Mixed-integer nonlinear optimization (external)
+- [web] ANTIGONE: Algorithms for coNTinuous / Integer Global Optimization of Nonlinear Equations (external)
+- [web] Global optimization advances in Mixed-Integer Nonlinear Programming, MINLP, and Constrained Derivative-Free Optimization, CDFO (external)
+- [web] Global optimization of nonconvex problems with multilinear intermediates (external)
+- [web] Domain reduction techniques for global NLP and MINLP optimization (external)
+- [web] A review and comparison of solvers for convex MINLP (external)
+- [web] Global optimization of mixed-integer nonlinear programs with SCIP 8 (external)
+- [web] Solving continuous and discrete nonlinear programs with BARON (external)
+- [web] Computability of global solutions to factorable nonconvex programs: Part I - Convex underestimating problems (external)
+- [web] BARON: A general purpose global optimization software package (external)
+- [web] A branch-and-reduce approach to global optimization (external)
+- [web] Convex extensions and envelopes of lower semi-continuous functions (external)
+- [web] Convexification and Global Optimization in Continuous and Mixed-Integer Nonlinear Programming: Theory, Algorithms, Software, and Applications (external)
+- [web] Global optimization of mixed-integer nonlinear programs: A theoretical and computational study (external)
+- [web] Exploiting integrality in the global optimization of mixed-integer nonlinear programming problems with BARON (external)
+- [web] Waechter & Biegler 2006 - Ipopt Implementation (external)
+  https://doi.org/10.1007/s10107-004-0559-y
+- [web] Forsgren, Gill & Wright 2002 - Interior Methods for NLP (external)
+  https://doi.org/10.1137/S0036144502414942
+- [web] Horst & Tuy 1996 - Global Optimization: Deterministic Approaches (external)
+  https://doi.org/10.1007/978-3-662-03199-5
+- [web] Belotti et al. 2009 - Branching and Bounds Tightening for MINLP (external)
+  https://doi.org/10.1080/10556780903087124
+- [web] Tawarmalani & Sahinidis 2005 - Polyhedral Branch-and-Cut (external)
+  https://doi.org/10.1007/s10107-005-0581-8
+- [web] Smith & Pantelides 1999 - Spatial B&B for Nonconvex MINLPs (external)
+  https://doi.org/10.1016/s0098-1354(98)00286-5
+- [web] Kronqvist, Bernal & Grossmann 2020 - Regularized OA for Convex MINLP (external)
+  https://doi.org/10.1007/s10107-018-1356-3
+- [web] Grossmann 2002 - Review of MINLP and Disjunctive Programming (external)
+  https://doi.org/10.1023/A:1021039126272
+- [web] Lundell, Kronqvist & Westerlund 2022 - SHOT Solver (external)
+  https://doi.org/10.1007/s10898-022-01128-0
+- [web] Kronqvist, Lundell & Westerlund 2016 - Extended Supporting Hyperplane for MINLP (external)
+  https://doi.org/10.1007/s10898-015-0322-3
+- [web] Bonami et al. 2008 - Algorithmic Framework for Convex MINLP (Bonmin) (external)
+  https://doi.org/10.1016/j.disopt.2006.10.011
+- [web] Westerlund & Pettersson 1995 - Extended Cutting Plane for MINLP (external)
+  https://doi.org/10.1016/0098-1354(95)87027-X
+- [web] Kelley 1960 - Cutting Plane Method (external)
+  https://doi.org/10.1137/0108053
+- [web] Quesada & Grossmann 1992 - LP/NLP Branch and Bound (external)
+  https://doi.org/10.1016/0098-1354(92)80028-8
+- [web] Viswanathan & Grossmann 1990 - Penalty OA for MINLP (external)
+  https://doi.org/10.1016/0098-1354(90)87085-4
+- [web] Geoffrion 1972 - Generalized Benders Decomposition (external)
+  https://doi.org/10.1007/BF00934810
+- [web] Fletcher & Leyffer 1994 - Solving MINLPs by OA (external)
+  https://doi.org/10.1007/BF01581153
+- [web] Duran & Grossmann 1986 - OA Algorithm for MINLP (external)
+  https://doi.org/10.1007/BF02592064

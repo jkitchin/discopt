@@ -1,0 +1,96 @@
+#+TITLE: Nonlinear Branch and Bound (NLP-BB)
+#+FILETAGS: :method:nlp-bb:branch-and-bound:minlp:convex-optimization:
+
+* Nonlinear Branch and Bound (NLP-BB)
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: juniper-jl nlp-bb-investigation
+:STATUS: reviewed
+:CREATED: 2026-04-04
+:END:
+
+Nonlinear Branch and Bound (NLP-BB) is an algorithm for solving mixed-integer
+nonlinear programs (MINLPs) where the continuous relaxation is convex. Unlike
+spatial Branch and Bound, which solves convex relaxations (McCormick envelopes,
+alphaBB underestimators) at each tree node, NLP-BB branches only on discrete
+variables and solves the original continuous NLP subproblem at each node with
+the discrete decisions fixed via bound tightening.
+
+The method was popularized by the Juniper.jl solver developed at Los Alamos
+National Laboratory, which demonstrated that NLP-BB works surprisingly well in
+practice and eliminates the need for an external MIP solver.
+
+** Algorithm
+
+The core loop proceeds as follows. At each B&B node, discrete variable bounds
+have been tightened by branching decisions (for binary variables, the bounds
+collapse to either [0,0] or [1,1], effectively fixing the variable). The solver
+solves the resulting continuous NLP with those tightened bounds. If the model's
+continuous relaxation is convex, the NLP objective value at each node is a valid
+lower bound on the optimal value in that subtree, which enables correct pruning
+and gap certification.
+
+Branching creates two children by further tightening the bounds on a fractional
+integer variable: the left child sets the upper bound to the floor of the
+current value, and the right child sets the lower bound to the ceiling. Parent
+NLP solutions provide warm-starts for child solves.
+
+** Advantages Over Spatial B&B
+
+NLP-BB eliminates several sources of overhead present in spatial B&B. There is
+no need to compile or evaluate McCormick relaxations, alphaBB underestimators,
+or piecewise convex envelopes. Bound tightening via OBBT/FBBT is optional
+rather than required. Each node solve returns the exact continuous optimum for
+that discrete fixing, which gives tighter lower bounds and therefore more
+aggressive pruning, resulting in fewer total nodes explored.
+
+The node NLPs share identical structure (same objective, same constraints,
+different variable bounds), making them ideal candidates for batched solving.
+In discopt, =jax.vmap= over the pure-JAX interior point method solves dozens
+of node NLPs in a single fused XLA kernel, which is the primary performance
+advantage.
+
+** Convexity Requirement
+
+The NLP objective at a node is a valid lower bound only when the continuous
+relaxation is convex. For nonconvex problems, local NLP optima can exceed the
+global optimum, which would cause incorrect pruning. discopt handles this with
+three modes:
+
+- Convex (auto-detected): full NLP-BB with certified gap. This is the default
+  for convex MINLPs.
+- Convex (user-asserted): the user takes responsibility for the convexity
+  claim via =skip_convex_check=True=.
+- Nonconvex (heuristic): NLP-BB still finds good feasible solutions quickly,
+  but the gap is reported as uncertified (=gap_certified=False=).
+
+Convexity detection uses DCP composition rules applied to the expression DAG,
+recognizing patterns like =exp(affine)=, =sum_of_convex=, =x**2=, and others.
+
+** Implementation in discopt
+
+NLP-BB was implemented as a new solver mode in discopt (April 2026). It reuses
+the existing Rust B&B tree (=TreeManager=), batch JAX IPM solver
+(=solve_nlp_batch=), warm-starting infrastructure, and convexity detector with
+zero changes to Rust code. The implementation adds approximately 250 lines of
+Python orchestration in =solver.py=.
+
+The solver auto-selects NLP-BB for convex MINLPs via the =nlp_bb= parameter:
+=None= (default) enables auto-selection, =True= forces NLP-BB, and =False=
+forces spatial B&B. Auto-selection is skipped when lazy constraints are
+provided, since they require the cut pool infrastructure from the full spatial
+B&B loop.
+
+** Relationship to Other Methods
+
+NLP-BB relates to several other decomposition strategies for MINLPs. Outer
+Approximation (OA) also solves NLP subproblems with fixed integer variables,
+but alternates between NLP and MIP master problems. Benders decomposition
+separates continuous and integer variables into subproblem and master problem.
+NLP-BB is simpler than both: it uses a single B&B tree with NLP solves at each
+node, with no master problem or iteration between formulations.
+
+For convex MINLPs, NLP-BB, OA, and Generalized Benders Decomposition all
+converge to the global optimum. NLP-BB tends to be most effective when the NLP
+subproblems are cheap relative to the tree size, which is exactly the regime
+where batched GPU solving excels.

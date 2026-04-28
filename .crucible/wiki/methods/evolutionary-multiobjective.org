@@ -1,0 +1,161 @@
+#+TITLE: Evolutionary Algorithms for Multiobjective Optimization
+#+FILETAGS: :method:multiobjective:evolutionary:nsga:moead:spea:
+#+PROPERTY: ARTICLE_TYPE method
+#+PROPERTY: SOURCE_KEYS deb-2002 deb-jain-2014 zhang-li-2007 zitzler-thiele-1999 zitzler-kunzli-2004 knowles-corne-2000 trivedi-2017 emmerich-deutz-2018 blank-deb-2020 tian-2017
+
+* Evolutionary Algorithms for Multiobjective Optimization
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: deb-2002 deb-jain-2014 zhang-li-2007 zitzler-thiele-1999 zitzler-kunzli-2004 knowles-corne-2000 trivedi-2017 emmerich-deutz-2018 blank-deb-2020 tian-2017
+:STATUS: draft
+:CREATED: 2026-04-24
+:END:
+
+Multiobjective evolutionary algorithms (MOEAs) evolve a /population/ of
+candidate solutions toward the Pareto front in a single run, approximating
+the entire front rather than one point at a time. They are the dominant
+class for black-box MOPs, problems where gradients are unavailable,
+problems with discrete variables handled by genetic operators, and for
+benchmarking against exact scalarization methods. The field is broadly
+divided into /dominance-based/, /decomposition-based/, and
+/indicator-based/ lineages citep:emmerich-deutz-2018.
+
+** Dominance-Based MOEAs
+
+*** NSGA-II
+
+citet:deb-2002 defined the reference dominance-based MOEA. Each generation:
+
+1. /Fast nondominated sorting/ ranks the combined parent+offspring
+   population into Pareto fronts F_1, F_2, ..., F_k in O(M N^2) time
+   (M objectives, N individuals).
+2. /Crowding distance/ within each front measures the L1 spacing to
+   immediate neighbors in objective space, preferring individuals in
+   less-populated regions.
+3. Elitist replacement: fill the next population by filling fronts in
+   order, breaking ties in the last admitted front by crowding distance.
+
+NSGA-II's simplicity, O(M N^2) per generation cost, and constraint
+handling via tournament selection on a constrained-dominance relation
+made it the default MOEA for k = 2, 3 objectives for over a decade
+citep:deb-2002. Its signature failure mode is /loss of selection
+pressure at many objectives/: once the population is all mutually
+nondominated (common for k >= 4), crowding distance is the only signal
+and convergence stalls.
+
+*** SPEA2 and Indicator-Based Variants
+
+citet:zitzler-thiele-1999 introduced SPEA (Strength Pareto EA), which
+assigns a /strength/ to each individual (number of others it dominates)
+and fitness equal to the sum of strengths of dominators. SPEA2 (Zitzler
+et al. 2001, commonly cited from the TIK technical report) added density
+estimation by k-th nearest neighbor in objective space. SPEA2 is more
+robust on nonconvex fronts than NSGA-II but computationally heavier.
+
+/Indicator-based EA/ (IBEA) citep:zitzler-kunzli-2004 generalizes this:
+pick any dominance-compliant indicator I (e.g., hypervolume loss or
+binary epsilon), and define fitness as the summed indicator contribution
+of each individual. IBEA gives a principled path to many-objective
+optimization --- the indicator itself encodes what "better" means when
+pure dominance is not discriminative --- and motivates the
+hypervolume-based SMS-EMOA and HypE algorithms. See
+[[file:../concepts/performance-indicators-mo.org][performance indicators]] for indicator definitions.
+
+*** PAES
+
+citet:knowles-corne-2000 proposed PAES (Pareto Archived Evolution
+Strategy), a minimalist (1+1)-ES that maintains an archive of
+nondominated solutions and accepts offspring via a grid-based crowding
+heuristic. PAES is mostly of historical interest but its /external
+archive/ idea underlies nearly every modern MOEA and Bayesian
+multi-objective method.
+
+** Decomposition-Based MOEAs
+
+*** MOEA/D
+
+citet:zhang-li-2007 decomposes the MOP into N scalar subproblems using a
+chosen [[file:scalarization-methods.org][scalarization]] (typically weighted Tchebycheff or penalty-based
+boundary intersection) with N direction vectors that cover the objective
+space. Each individual in the population owns one subproblem and its
+neighborhood (the B nearest directions). Genetic operators combine
+solutions only with neighbors; each offspring is evaluated on all
+neighborhood subproblems and replaces the incumbent where it improves
+the scalarized objective.
+
+Key properties citep:zhang-li-2007 citep:trivedi-2017:
+
+- Constant per-individual cost O(B) rather than O(N^2) dominance sort;
+  scales to large populations.
+- Explicit parameter control: the weight vectors determine coverage,
+  which can be uniform (simplex-lattice) or tailored to a DM.
+- Naturally many-objective: decomposition sidesteps the dominance
+  degeneracy of NSGA-II.
+- Sensitive to weight-vector / population-size coupling (structured
+  lattices required for k >= 3) and to reference-point estimation.
+
+MOEA/D spawned a large family (MOEA/D-DE, MOEA/D-DRA, MOEA/D-M2M);
+citet:trivedi-2017 is the canonical survey.
+
+*** NSGA-III
+
+citet:deb-jain-2014 combined the dominance structure of NSGA-II with
+decomposition-style /reference points/ for many-objective problems. The
+algorithm keeps NSGA-II's nondominated-sorting selection but, within
+the last admitted front, selects individuals to preserve association
+with a set of user-supplied or simplex-generated reference directions.
+NSGA-III is the current reference algorithm for 3--15 objectives in the
+pymoo / PlatEMO ecosystem citep:blank-deb-2020 citep:tian-2017.
+
+** Indicator-Based MOEAs
+
+Hypervolume-driven selection (SMS-EMOA, HypE) computes each individual's
+/hypervolume contribution/ and removes the least-contributing individual
+in environmental selection. In the limit of infinite population, the
+optimal distribution is the one that maximizes hypervolume on the true
+front citep:zitzler-kunzli-2004. Cost scales with hypervolume
+computation (exponential in k); approximations (HypE's Monte-Carlo
+hypervolume) extend these methods to many-objective problems.
+
+** Constraint Handling
+
+Three dominant approaches citep:deb-2002 citep:emmerich-deutz-2018:
+
+1. /Constrained dominance/ (Deb): a feasible point dominates any
+   infeasible one; among infeasibles, the one with smaller constraint
+   violation dominates. Simple and fits dominance-based MOEAs.
+2. /Penalty functions/: add a weighted sum of violations to each
+   objective. Sensitive to penalty tuning.
+3. /Repair operators/: project infeasible solutions onto the feasible
+   region. Problem-specific.
+
+For MINLP-style constraints, none of these is competitive with
+scalarization + a real MINLP solver in terms of solution quality or
+certificate strength; MOEAs are the tool of choice when the problem is
+black-box or when only a fast Pareto-front approximation is required.
+
+** Software Ecosystem
+
+- *pymoo* citep:blank-deb-2020: Python library with NSGA-II/III, MOEA/D,
+  R-NSGA, AGE-MOEA, indicators, test problems, and decomposition helpers.
+  Standard choice for Python workflows.
+- *PlatEMO* citep:tian-2017: MATLAB platform with >100 MOEAs, >50 test
+  problems, and a GUI. Standard for algorithm benchmarking in the EMO
+  community.
+- *DEAP*, *Platypus*, *inspyred*: general evolutionary frameworks with
+  MOEA support, lower coupling and more flexibility than pymoo but
+  fewer canned MOEAs.
+
+** When to Use MOEAs with discopt
+
+Evolutionary methods and exact MINLP are complementary rather than
+competing:
+
+- Use MOEAs directly when objectives or constraints are black-box,
+  expensive to evaluate, or nonsmooth.
+- Use MOEAs as a /warm start/ provider: pymoo's NSGA-II output gives
+  initial points and range estimates (z*, z^N) for an exact
+  scalarization sweep using discopt.
+- Use discopt as the /subproblem solver/ inside a decomposition-style
+  framework: each MOEA/D scalar subproblem is a standard
+  [[file:../concepts/minlp-survey.org][MINLP]] and inherits discopt's optimality certificates.

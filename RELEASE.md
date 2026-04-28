@@ -10,7 +10,7 @@ For each release, fill in:
 - `vX.Y.Z` -- the target version
 - `vA.B.C` -- the previous released version
 
-The next planned release is **`v0.2.6`** (patch on top of `v0.2.5`).
+The next planned release is **`v0.3.0`** (minor bump on top of `v0.2.5`; skips the never-tagged `v0.2.6`).
 
 ---
 
@@ -57,10 +57,33 @@ The manuscript source of truth is `manuscript/discopt.org` (org-mode). The
 directly; always re-export from org.
 
 - [ ] `manuscript/discopt.org` reviewed -- narrative covers any new features in this release.
-- [ ] Re-export `discopt.org` -> `discopt.pdf` in one step with:
-      `scimax export manuscript/discopt.org --format pdf`
-      (This re-runs the org export and compiles the .tex to a fresh .pdf. You can also use `C-c C-e l p` from inside Emacs / scimax if you prefer.)
-- [ ] Confirm no LaTeX warnings about undefined references or missing citations in the export output.
+- [ ] Re-export `discopt.org` -> `discopt.pdf` from the shell using the `scimax` CLI
+      (the `scimax-vscode` CLI; verify it is on `PATH` with `scimax --help`):
+
+      ```bash
+      scimax export manuscript/discopt.org --format pdf
+      ```
+
+      Full CLI signature:
+      ```
+      scimax export <file.org> [--format html|latex|pdf] [--exporter <id>] [--output <path>] [--json]
+      ```
+
+      Notes:
+      - `--format pdf` runs the org-mode LaTeX export *and* compiles the `.tex` to a
+        fresh `.pdf` in a single step.
+      - `--format latex` stops at the `.tex` (useful for inspecting before
+        compilation, or for arXiv tarball preparation in the last item below).
+      - `--output <path>` overrides the default output location (defaults to the
+        source file's directory; e.g. `manuscript/discopt.pdf`).
+      - `--json` emits structured output including any export warnings/errors;
+        useful in CI but not required for a manual release.
+      - `--list-exporters` shows custom exporters; the discopt manuscript uses the
+        default LaTeX exporter (no `--exporter` flag needed).
+      - The `C-c C-e l p` keybinding from inside Emacs / scimax produces the same
+        result if you prefer the interactive workflow.
+- [ ] Confirm no LaTeX warnings about undefined references or missing citations in
+      the export output. Re-run with `--json` if you want machine-readable warnings.
 - [ ] Re-execute manuscript notebooks against current code:
   - [ ] `manuscript/benchmark_lp_qp_speedup.ipynb`
   - [ ] `manuscript/minlplib_smoke_test.ipynb`

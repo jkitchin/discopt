@@ -1,0 +1,141 @@
+#+TITLE: Branch Variable Selection
+#+FILETAGS: :method:branching:branch-and-bound:machine-learning:gnn:
+
+* Branch Variable Selection
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: achterberg2005 khalil2016 gasse2019 linderoth1999
+:STATUS: active
+:CREATED: 2026-04-04
+:UPDATED: 2026-04-05
+:END:
+
+Branch variable selection determines which variable to branch on at each node of
+the [[file:spatial-branch-and-bound.org][spatial branch-and-bound]] tree. The
+choice significantly affects tree size and total solve time. Good branching
+creates child nodes with tight relaxations that can be pruned early, while poor
+branching leads to exponential tree growth. The systematic computational study
+of citet:linderoth1999 established the empirical baselines against which
+subsequent branching strategies are measured, comparing best-first, depth-first,
+and hybrid node selection policies alongside most-fractional and
+maximum-infeasibility variable selection rules.
+
+** Classical Strategies
+
+Most-fractional branching selects the integer variable whose LP relaxation value
+is closest to 0.5 (most fractional). This is simple but often performs poorly
+because fractionality does not directly predict dual bound improvement
+citep:linderoth1999. Maximum-infeasibility branching, which selects the variable
+furthest from integrality, shares this weakness: neither heuristic accounts for
+the downstream effect of the branching decision on dual bound progress.
+
+Strong branching evaluates each candidate variable by tentatively solving the
+LP relaxations of both child nodes, then selects the variable that maximizes the
+minimum dual bound improvement. Strong branching produces the smallest trees but
+is expensive: it solves 2k LP relaxations per branching decision (k candidates).
+
+Pseudocost branching estimates dual bound improvement from historical data:
+after a variable has been branched on, the observed dual bound change per unit
+of fractionality is recorded as the pseudocost. Future branching decisions use
+pseudocosts to predict improvement without solving trial LPs. Pseudocosts are
+cheap but unreliable early in the search when few observations are available.
+
+** Search Strategies and Node Selection
+
+citet:linderoth1999 provided a comprehensive computational study of how node
+selection interacts with branching strategy in mixed-integer programming. Their
+experiments showed that best-first search minimizes the number of nodes explored
+but suffers from memory growth proportional to the open node list, while
+depth-first search uses minimal memory and finds feasible solutions quickly but
+explores many unnecessary nodes. The hybrid strategies they evaluated, such as
+diving with periodic best-first restarts, offered practical compromises. These
+results demonstrated that branching variable selection and node selection are
+tightly coupled: the effectiveness of a branching rule depends on the search
+strategy, and vice versa. Modern solvers, including SCIP, implement adaptive
+hybrid strategies informed by this foundational work.
+
+** Reliability Branching
+
+citet:achterberg2005 introduced reliability branching, which unifies strong
+branching and pseudocost branching into a single adaptive framework. A
+reliability parameter eta_rel controls the transition: any variable whose
+pseudocosts have been initialized from fewer than eta_rel strong branching
+evaluations is re-evaluated using strong branching; all others use their
+accumulated pseudocosts. When eta_rel is zero, the method reduces to pure
+pseudocost branching; as eta_rel grows large, it approaches full strong
+branching.
+
+The key insight of citet:achterberg2005 is that pseudocosts become reliable
+after a modest number of observations (typically 4 to 8), so most variables
+need strong branching evaluation only at the first few nodes where they appear
+as candidates. Their computational experiments on the MIPLIB benchmark
+library showed that reliability branching achieves node counts close to those
+of strong branching (often within 10-20%) while requiring far less
+computational effort per node. The total solve time is substantially lower
+because the expensive LP solves are concentrated in the early phase of the
+search, after which pseudocosts carry the branching decisions at negligible
+cost. Reliability branching is the default branching strategy in SCIP and has
+become the standard in most modern MIP and MINLP solvers.
+
+** Machine Learning for Branching
+
+The computational expense of strong branching, combined with the observation
+that it produces near-optimal branching decisions, motivates the use of machine
+learning to approximate the strong branching oracle.
+
+*** Supervised Learning with Hand-Crafted Features
+
+citet:khalil2016 pioneered the use of supervised learning to imitate strong
+branching decisions. Their approach collects training data by running a solver
+with full strong branching on a set of training instances, recording the LP
+relaxation state (constraint matrix structure, objective coefficients, variable
+bounds, LP solution values, pseudocosts, and other hand-crafted features) along
+with the strong branching variable choice at each node. A classifier is trained
+on these feature-label pairs and deployed at inference time to predict the
+branching variable without solving trial LPs. citet:khalil2016 demonstrated
+that the learned policy achieves tree sizes comparable to strong branching while
+being significantly faster, establishing that branching policies can be
+effectively learned from data. A practical advantage of this approach is that
+the classifier generalizes across instances from the same problem family,
+amortizing the cost of strong branching data collection.
+
+*** Graph Convolutional Networks
+
+citet:gasse2019 advanced the learning-to-branch paradigm by replacing
+hand-crafted features with a graph convolutional neural network (GCN) that
+operates directly on the bipartite variable-constraint graph of the LP
+relaxation. In this representation, variable nodes and constraint nodes form
+the two sides of a bipartite graph, with edges weighted by constraint
+coefficients. The GCN propagates information through this graph via message
+passing, learning to extract relevant structural features automatically.
+
+The architecture of citet:gasse2019 is trained via imitation learning from
+the strong branching expert, using a cross-entropy loss over variable
+selection. Their experiments showed that the GCN approach outperforms both
+the hand-crafted feature approach of citet:khalil2016 and traditional
+heuristics (reliability branching, pseudocost branching) on several benchmark
+problem families. The GCN representation is particularly appealing because it
+is invariant to variable and constraint ordering, handles varying problem
+sizes naturally, and captures the relational structure of the LP relaxation
+that flat feature vectors miss.
+
+This GNN-based branching paradigm connects directly to
+[[file:../concepts/neural-network-embedding.org][neural network embedding]] in
+optimization: the same graph neural network architectures used for branching
+can be embedded as constraints or surrogates within MINLP models. In discopt,
+the GNN-based branching policy is available as an optional branching strategy,
+trained on problem families relevant to the user's application domain.
+
+** Implementation in discopt
+
+discopt implements several branching strategies in the Rust B&B tree manager.
+The default is reliability branching following citet:achterberg2005, with a
+configurable reliability threshold. Pseudocost initialization uses strong
+branching evaluations at early nodes, after which the accumulated pseudocosts
+guide variable selection. The optional GNN branching policy, inspired by
+citet:gasse2019, can be activated for problem families where training data is
+available, with the GCN model invoked from the Python orchestration layer
+while the Rust core manages the B&B tree structure. The interaction between
+branching strategy and node selection follows the hybrid approach recommended
+by citet:linderoth1999, combining depth-first diving with periodic best-bound
+restarts.

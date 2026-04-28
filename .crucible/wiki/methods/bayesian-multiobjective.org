@@ -1,0 +1,88 @@
+#+TITLE: Bayesian Multiobjective Optimization
+#+FILETAGS: :method:multiobjective:bayesian:surrogate:hypervolume:ehvi:
+#+PROPERTY: ARTICLE_TYPE method
+#+PROPERTY: SOURCE_KEYS knowles-2006 emmerich-deutz-2018
+
+* Bayesian Multiobjective Optimization
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: knowles-2006 emmerich-deutz-2018
+:STATUS: draft
+:CREATED: 2026-04-24
+:END:
+
+Bayesian (surrogate-assisted) multiobjective optimization targets
+/expensive/ MOPs --- each f_i(x) evaluation requires a simulation,
+physical experiment, or long-running computation, so evaluation budgets
+are on the order of 10--1000. The core idea is to fit a probabilistic
+surrogate (typically a Gaussian process per objective) and use an
+acquisition function to pick the next evaluation that maximizes expected
+progress on the Pareto front.
+
+** ParEGO
+
+citet:knowles-2006 introduced ParEGO, the first widely adopted surrogate
+MOEA. Each iteration:
+
+1. Sample a random weight vector w from the simplex.
+2. Scalarize the observed evaluations via an augmented weighted
+   Tchebycheff into a single surrogate dataset.
+3. Fit a single GP to the scalarized values.
+4. Select the next point by maximizing Expected Improvement (EI) on this
+   GP.
+
+ParEGO's elegance is that it reuses single-objective EGO/Kriging
+machinery unchanged; its weakness is that the random scalarization
+discards information across iterations and requires a fresh surrogate
+fit per iteration.
+
+** Expected Hypervolume Improvement (EHVI)
+
+Modern Bayesian multi-objective methods fit one GP per objective and use
+the /Expected Hypervolume Improvement/ acquisition function: the expected
+increase in [[file:../concepts/performance-indicators-mo.org][hypervolume]] dominated by the current Pareto front if a new
+point is observed at x, taken under the joint posterior of the GPs
+citep:emmerich-deutz-2018.
+
+EHVI variants:
+
+- /qEHVI/: batch (parallel) EHVI using inclusion-exclusion over the
+  nondominated partitioning of objective space. Widely implemented in
+  BoTorch.
+- /qNEHVI/: noisy qEHVI, robust to GP observation noise via
+  Monte-Carlo integration over the posterior; replaces qEHVI as the
+  recommended default in noisy problems.
+- /MOBO-EHVI/ with trust regions: handles high-dimensional search
+  spaces (e.g., TuRBO-based variants) where global GP fits degrade.
+
+Hypervolume-based acquisition is Pareto-compliant by construction:
+maximizing expected hypervolume gain drives the front toward
+Pareto-optimality in the limit of infinite evaluations
+citep:emmerich-deutz-2018.
+
+** Practical Use
+
+Typical application domains are chemistry/materials ("design the
+molecule", "choose the synthesis parameters"), engineering design
+("minimize mass and maximize stiffness"), and autoML ("pick
+hyperparameters trading off accuracy and inference time"). Tools in
+current use:
+
+- *BoTorch* + *Ax* (PyTorch-based): qEHVI, qNEHVI, parallel batching,
+  discrete/mixed spaces.
+- *Trieste* (TensorFlow): EHVI and decomposition-based acquisitions.
+- *scikit-optimize*, *GPyOpt*: older ParEGO/EHVI implementations.
+
+** Relevance for discopt
+
+Bayesian multi-objective optimization is complementary to discopt's
+deterministic MINLP focus:
+
+- discopt can evaluate or bound f_i(x) exactly when f_i is given
+  algebraically --- no surrogate needed. Bayesian methods matter when f_i
+  is a simulation or experiment.
+- A Bayesian outer loop could /choose experiments/ for parameters of a
+  discopt-solved inner problem, using discopt for the inner MINLP and a
+  GP surrogate for the outer design variables. This is the common
+  pattern in model-based [[file:../concepts/model-based-doe.org][design of experiments]] and would be a natural
+  integration point for a future discopt.mo module.

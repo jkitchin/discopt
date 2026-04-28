@@ -1,0 +1,104 @@
+#+TITLE: Performance Indicators for Pareto Front Approximations
+#+FILETAGS: :concept:multiobjective:indicator:hypervolume:metric:
+#+PROPERTY: ARTICLE_TYPE concept
+#+PROPERTY: SOURCE_KEYS zitzler-thiele-1999 zitzler-deb-thiele-2000 zitzler-kunzli-2004 emmerich-deutz-2018
+
+* Performance Indicators for Pareto Front Approximations
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: zitzler-thiele-1999 zitzler-deb-thiele-2000 zitzler-kunzli-2004 emmerich-deutz-2018
+:STATUS: draft
+:CREATED: 2026-04-24
+:END:
+
+Multiobjective algorithms return a finite approximation A = {F(x_1), ...,
+F(x_n)} of the Pareto front. Comparing two approximations A, B or
+reporting the quality of A requires a scalar /performance indicator/
+I(A) or I(A, B). Unlike single-objective optimization, no single indicator
+captures all desiderata --- convergence to the true front, spread along it,
+and uniformity of distribution --- so benchmark studies typically report
+several citep:zitzler-deb-thiele-2000 citep:emmerich-deutz-2018.
+
+** Dominance-Preserving Indicators
+
+An indicator I is /Pareto-compliant/ (or dominance-preserving) if
+A weakly dominates B implies I(A) is at least as good as I(B). Only
+compliant indicators can be trusted to rank approximations consistently
+with the dominance relation citep:zitzler-kunzli-2004. The two most
+widely used compliant indicators are the hypervolume and the additive
+epsilon indicator.
+
+*** Hypervolume (HV)
+
+Given a reference point r that is dominated by every point in A,
+HV(A; r) is the Lebesgue measure of the region dominated by A and
+dominating r citep:zitzler-thiele-1999. Larger HV is better. HV is
+strictly Pareto-compliant: if A strictly dominates B then HV(A) > HV(B).
+It simultaneously rewards convergence, spread, and cardinality, which
+makes it the de facto standard indicator in evolutionary multiobjective
+benchmarks. Exact computation is #P-hard in k, with the best known
+algorithms running in time O(n^{k/2} polylog n) for general k and O(n^2)
+for k = 3; in practice k <= 5 is tractable and larger k requires
+Monte-Carlo approximation citep:emmerich-deutz-2018.
+
+Hypervolume is also a decision-theoretic attainment measure: it equals
+the expected improvement of A over a uniformly-distributed goal in the
+reference box, which motivates the [[file:../methods/bayesian-multiobjective.org][expected hypervolume improvement]]
+acquisition function used in Bayesian multi-objective optimization
+citep:knowles-2006.
+
+*** Epsilon Indicator
+
+The additive (multiplicative) epsilon indicator I_epsilon(A, B) is the
+smallest epsilon such that every point in B is weakly dominated by some
+point in A shifted by epsilon (multiplied by 1 + epsilon)
+citep:zitzler-kunzli-2004. It is Pareto-compliant and cheap to compute
+(O(k n^2)), but requires two sets --- a reference set, or a pairwise
+comparison between algorithms.
+
+** Distance-Based Indicators
+
+These use a reference set P* (typically a dense approximation of the true
+front or the union of all algorithms' outputs) and measure a distance
+from A to P*.
+
+- /Generational distance/ (GD): mean distance from points in A to the
+  nearest point of P*. Measures convergence but not spread; not
+  Pareto-compliant.
+- /Inverted generational distance/ (IGD): mean distance from points in
+  P* to the nearest point of A. Rewards both convergence and coverage;
+  widely used in many-objective benchmarks alongside its Pareto-compliant
+  variant IGD^+ citep:emmerich-deutz-2018.
+- /Delta spacing/ and /spread/ metrics (Deb): measure uniformity of
+  spacing along the front citep:deb-2002.
+
+None of the pure distance indicators is Pareto-compliant in general;
+when used alone they can reward a dominated approximation if it happens
+to be uniformly spread.
+
+** Cardinality and Coverage Indicators
+
+- /Two-set coverage/ C(A, B): fraction of points in B weakly dominated
+  by some point in A citep:zitzler-thiele-1999. Asymmetric; C(A, B) = 1
+  and C(B, A) = 0 means A dominates B.
+- /Ratio of nondominated solutions/: cardinality of A after filtering
+  against a reference set.
+
+** Choosing Indicators
+
+Benchmarking practice distilled from citep:zitzler-deb-thiele-2000 and
+citep:emmerich-deutz-2018: report hypervolume for the primary ranking,
+IGD (or IGD^+) for convergence/coverage when a reference front is
+available, and epsilon or coverage for pairwise comparisons. Always state
+the reference point (for HV), the reference set (for IGD), and the
+normalization used --- these choices can flip rankings between algorithms.
+
+** Relevance for discopt
+
+Exact scalarization methods in a MINLP solver can certify Pareto
+optimality of each computed point, so the quality question reduces to
+/coverage/ and /spread/ of the scalarization grid rather than
+convergence. For populations of heuristic / surrogate-based solutions
+(e.g., [[file:../methods/bayesian-multiobjective.org][Bayesian multiobjective]] or [[file:../methods/evolutionary-multiobjective.org][evolutionary]] wrappers around
+discopt subproblems), the indicators above would be the natural quality
+gate and should be part of any future multiobjective benchmark suite.

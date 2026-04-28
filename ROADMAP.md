@@ -56,7 +56,7 @@ discopt followed a 4-phase development plan. Phases 1-4 are complete. Phases 5-7
 |-----------------------------------|-------------|-----------------------------------------------------------|
 | ripopt integration (PyO3)         | Done        | Rust IPM solver via PyO3 bindings (`nlp_solver="ripopt"`) |
 | CUTEst interface                  | Done        | PyCUTEst evaluator for NLP benchmarking                   |
-| Documentation + example notebooks | Done        | 37 notebooks, Jupyter Book site builds with zero warnings |
+| Documentation + example notebooks | Done        | 42 notebooks, Jupyter Book site builds with zero warnings |
 | Release engineering               | Done        | Published on PyPI, maturin build, CI auto-publish on tags |
 
 ## Phase 5: Problem Class Coverage
@@ -70,7 +70,7 @@ New problem types to make discopt competitive across the full optimization lands
 | Conic programming (general)       | Planned | Exponential cone, power cone for entropy/GP formulations                     |
 | Stochastic programming            | Planned | Two-stage/multi-stage recourse, scenario trees, chance constraints, SAA/CVaR |
 | Robust optimization               | Done    | Box/ellipsoidal/polyhedral uncertainty sets, adjustable robust counterparts  |
-| Multi-objective optimization      | Planned | Epsilon-constraint, NBI, Chebyshev scalarization, ParetoFront object        |
+| Multi-objective optimization      | Done    | Weighted sum, AUGMECON2 ε-constraint, weighted Tchebycheff, NBI, NNC via `discopt.mo`; hypervolume / IGD / spread / ε indicators. Evolutionary/Bayesian/interactive methods remain future work. |
 | Bilevel optimization              | Planned | KKT reformulation to MPEC, cutting plane methods                             |
 | Complementarity problems (MPEC)   | Planned | Scholtes relaxation, penalty methods for equilibrium constraints             |
 | Geometric programming             | Planned | Posynomial/signomial programs, log-transformation to convex form             |

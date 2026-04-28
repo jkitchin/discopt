@@ -1,0 +1,51 @@
+#+TITLE: Sloppy Models
+#+FILETAGS: :concept:sloppy-models:identifiability:sensitivity:geometry:
+
+* Sloppy Models
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: gutenkunst2007-sloppy transtrum2011-geometry transtrum2015-perspective waterfall2006-sloppy
+:STATUS: draft
+:CREATED: 2026-04-22
+:END:
+
+"Sloppy" models are a geometric diagnosis of [[file:identifiability-analysis.org][practical non-identifiability]] articulated by the Sethna group in a series of papers on systems-biology parameter estimation. The empirical observation is that the Hessian of the least-squares cost function — equivalently, the [[file:fisher-information-matrix.org][Fisher information matrix]] — for typical nonlinear models has eigenvalues spanning many orders of magnitude, roughly evenly spaced on a log scale, with the largest and smallest differing by six to ten decades. The few large eigenvalues correspond to "stiff" parameter combinations that data pin down tightly; the many small eigenvalues correspond to "sloppy" combinations along which the cost is essentially flat. Individual bare parameters are typically rotated mixtures of stiff and sloppy directions, so no single parameter is well-determined, yet model /predictions/ can still be tight because they project only onto stiff directions. citet:gutenkunst2007-sloppy made the universality claim across 17 systems-biology models; citet:waterfall2006-sloppy connected the phenomenon to the statistical mechanics of parameter inference; citet:transtrum2011-geometry gave the information-geometric reformulation in terms of the manifold of model predictions.
+
+** The Spectrum as a Diagnostic
+
+Plotting the logarithmic eigenvalue spectrum of the Hessian at a parameter estimate is the standard sloppy-model diagnostic. Three qualitative signatures matter:
+
+- /Gapless exponential decay/ over six or more decades — the classic sloppy signature. Conventional fitting will recover good predictions but hopeless bare-parameter estimates.
+- /Sharp gap followed by near-zero tail/ — unambiguous structural non-identifiability; the tail directions are exact null-space vectors. Reparameterize.
+- /Compact spectrum within two or three decades/ — the well-conditioned regime; classical Fisher-information inference is trustworthy.
+
+Because sloppiness is a statement about eigenvalues across logarithmic scales, the diagnostic is invariant under uniform parameter rescaling but not under non-uniform reparameterization — changing variables can trade sloppy directions for stiff ones, which is exactly why identifiable-combination reparameterization (in the style of citet:meshkat2014-combos) often produces dramatically better-conditioned estimators.
+
+** Geometry of the Prediction Manifold
+
+citet:transtrum2011-geometry recast sloppiness as the geometry of the model manifold: the image \{h(x, \theta) : \theta \in \Theta\} in data space. Sloppy directions correspond to parameter moves that trace out only short distances on the manifold; stiff directions correspond to long ones. The manifold is typically a hyper-ribbon whose widths span the same log-decades as the Hessian spectrum. This geometric picture explains two empirical facts. First, Levenberg-Marquardt optimizers stall along the thin directions because the information metric becomes degenerate at the manifold boundary; the "geodesic-acceleration" variant of citet:transtrum2011-geometry explicitly uses second-order manifold geometry to cross those regions. Second, prediction-space quantities are well-behaved even when parameter-space ones are not — the tight stiff directions dominate any projection onto experimentally relevant observables.
+
+** Relation to Identifiability Diagnostics
+
+Sloppiness and identifiability are not identical but deeply related.
+
+- /Versus structural identifiability:/ a rank-deficient FIM is a /degenerate/ special case of sloppiness in which some eigenvalues are exactly zero. Sloppiness is the generic, finite-eigenvalue cousin.
+- /Versus profile likelihood:/ sloppy directions correspond to profile likelihoods that are shallow but bounded; structurally non-identifiable directions correspond to flat profiles; practically non-identifiable directions correspond to one-sided unbounded profiles citep:raue2009-profile. The three appearances are the three cases the sloppy-eigenvalue view smears into a continuum.
+- /Versus estimability ranking:/ citet:brun2001-collinearity and citet:yao2003-estimability compute orthogonalized-sensitivity rankings that pick out the stiff subset of parameters to estimate and the sloppy subset to fix at nominal. The sloppy-model view says this subset always exists.
+
+** Consequences for Parameter Estimation
+
+Sloppiness has concrete operational implications.
+
+1. /Do not over-interpret bare-parameter point estimates./ In a sloppy model, the optimizer lands somewhere on a valley whose location depends on starting point and tolerances; reporting ten significant figures of a "best fit" is misleading.
+2. /Do report prediction uncertainty./ Because stiff directions are well-determined, predictions have meaningful uncertainty even when parameters do not. The sloppy-model prescription is to quote prediction intervals rather than parameter intervals.
+3. /Expect sensitivity-based DoE to help less than one hopes./ [[file:model-based-doe.org][MBDoE]] can raise the smallest eigenvalue a decade or two, but the log-decade-spaced structure tends to persist; a new experiment that kills one sloppy direction usually reveals the next one underneath. This is the "it takes an awful lot of data to nail down a mechanism" observation.
+4. /Consider model reduction./ Sloppy directions often signal model components that the data cannot constrain. Removing or coarse-graining them yields a smaller, better-conditioned surrogate.
+
+** Criticisms and Scope
+
+The universality claim has been contested. Apgar and coauthors showed that carefully designed experimental protocols can collapse the sloppy spectrum for at least some systems-biology models, arguing that sloppiness reflects experimental design as much as intrinsic model structure. Others have pointed out that sloppiness is less dramatic in models outside biology where parameters have well-separated physical roles (thermodynamic correlations, transport coefficients). The diagnostic itself — inspecting the log-eigenvalue spectrum of the FIM — is agnostic about the universality debate and worth running regardless.
+
+** Relevance to discopt
+
+For algebraic and MINLP models (steady-state reaction networks, surrogate models, thermodynamic correlations) the Hessian is readily available by JAX autodiff on the expression DAG. Computing its log-eigenvalue spectrum at a candidate \hat\theta is cheap, self-contained, and provides a direct visualization of practical identifiability that requires no additional infrastructure beyond what discopt already has. It makes a natural companion diagnostic to the rank-based tests in [[file:../methods/algebraic-model-identifiability.org][Algebraic model identifiability]].

@@ -11,7 +11,7 @@ Algorithm loop (per iteration k):
   1. Solve MILP relaxation → lower bound LB_k
   2. Fix continuous variables' interval assignments from MILP solution,
      solve NLP subproblem → upper bound UB_k
-  3. Check gap: if (UB_k - LB_k) / |UB_k| ≤ rel_gap → CERTIFIED OPTIMAL
+  3. Check gap: if ``(UB_k - LB_k) / abs(UB_k) ≤ rel_gap`` → CERTIFIED OPTIMAL
   4. Refine partitions adaptively around the MILP solution point
   5. Repeat until gap closed, max_iter reached, or time_limit exceeded
 
@@ -828,7 +828,7 @@ def solve_amp(
     model : Model
         A validated discopt Model.
     rel_gap : float
-        Relative gap tolerance: terminate when (UB-LB)/|UB| ≤ rel_gap.
+        Relative gap tolerance: terminate when ``(UB-LB)/abs(UB) ≤ rel_gap``.
     abs_tol : float
         Absolute gap tolerance: terminate when UB-LB ≤ abs_tol.
     time_limit : float
@@ -886,6 +886,7 @@ def solve_amp(
     """
     t_start = time.perf_counter()
 
+    from discopt._jax.convexity import classify_oa_cut_convexity
     from discopt._jax.discretization import (
         add_adaptive_partition,
         add_uniform_partition,
@@ -944,6 +945,16 @@ def solve_amp(
     tightened_lb, tightened_ub, nonlinear_bt_stats = tighten_nonlinear_bounds(
         model, flat_lb, flat_ub
     )
+    if nonlinear_bt_stats.infeasible:
+        logger.info(
+            "AMP: nonlinear bound tightening proved infeasibility: %s",
+            nonlinear_bt_stats.infeasibility_reason,
+        )
+        return SolveResult(
+            status="infeasible",
+            wall_time=time.perf_counter() - t_start,
+            gap_certified=True,
+        )
     if nonlinear_bt_stats.n_tightened > 0:
         flat_lb = tightened_lb
         flat_ub = tightened_ub
@@ -955,6 +966,13 @@ def solve_amp(
     evaluator = NLPEvaluator(model)
     constraint_lb, constraint_ub = _infer_constraint_bounds(model)
     deadline = t_start + time_limit
+    oa_convexity = classify_oa_cut_convexity(model)
+    if evaluator.n_constraints > 0 and not all(oa_convexity.constraint_mask):
+        logger.warning(
+            "AMP: generating OA cuts only for %d of %d constraints classified convex",
+            sum(1 for is_convex in oa_convexity.constraint_mask if is_convex),
+            len(oa_convexity.constraint_mask),
+        )
 
     # ── Classify nonlinear terms ─────────────────────────────────────────────
     terms = classify_nonlinear_terms(model)
@@ -1035,11 +1053,13 @@ def solve_amp(
     gap_certified = False
     oa_cuts: list = []  # accumulated OA linearizations from NLP incumbents
     mip_count = 0
+    termination_reason = "iteration_limit"
 
     for iteration in range(1, max_iter + 1):
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
             logger.info("AMP: time limit reached at iteration %d", iteration)
+            termination_reason = "time_limit"
             break
 
         remaining = time_limit - elapsed
@@ -1073,6 +1093,7 @@ def solve_amp(
             oa_cuts = active_oa_cuts
         except Exception as e:
             logger.warning("AMP: MILP build/solve failed at iteration %d: %s", iteration, e)
+            termination_reason = "error"
             break
 
         if milp_result.status in ("infeasible", "error"):
@@ -1081,6 +1102,7 @@ def solve_amp(
                 iteration,
                 milp_result.status,
             )
+            termination_reason = "error" if milp_result.status == "error" else "infeasible"
             if LB == -np.inf:
                 # Problem may be infeasible
                 if iteration == 1:
@@ -1118,11 +1140,12 @@ def solve_amp(
                             mip_count=mip_count,
                             gap_certified=False,
                         )
-                    return SolveResult(
-                        status="infeasible",
-                        wall_time=time.perf_counter() - t_start,
-                        mip_count=mip_count,
-                    )
+                    if milp_result.status == "infeasible":
+                        return SolveResult(
+                            status="infeasible",
+                            wall_time=time.perf_counter() - t_start,
+                            mip_count=mip_count,
+                        )
             break
 
         if milp_result.objective is not None:
@@ -1177,7 +1200,10 @@ def solve_amp(
                     if evaluator.n_constraints > 0:
                         _senses = [c.sense for c in model._constraints if isinstance(c, Constraint)]
                         cuts = generate_oa_cuts_from_evaluator(
-                            evaluator, _x_orig, constraint_senses=_senses
+                            evaluator,
+                            _x_orig,
+                            constraint_senses=_senses,
+                            convex_mask=oa_convexity.constraint_mask,
                         )
                         for cut in cuts:
                             if np.linalg.norm(cut.coeffs) < 1e-12:
@@ -1337,10 +1363,19 @@ def solve_amp(
     elapsed = time.perf_counter() - t_start
 
     if UB >= np.inf and LB == -np.inf:
+        if termination_reason == "infeasible":
+            status = "infeasible"
+        elif termination_reason == "time_limit":
+            status = "time_limit"
+        elif termination_reason == "error":
+            status = "error"
+        else:
+            status = "iteration_limit"
         return SolveResult(
-            status="infeasible",
+            status=status,
             wall_time=elapsed,
             mip_count=mip_count,
+            gap_certified=False,
         )
 
     if incumbent is not None:
@@ -1387,10 +1422,14 @@ def solve_amp(
             recovered.mip_count = mip_count
             return recovered
 
-    if elapsed >= time_limit:
+    if termination_reason == "time_limit" or elapsed >= time_limit:
         status = "time_limit"
-    else:
+    elif termination_reason == "error":
+        status = "error"
+    elif termination_reason == "infeasible":
         status = "infeasible"
+    else:
+        status = "iteration_limit"
 
     return SolveResult(
         status=status,

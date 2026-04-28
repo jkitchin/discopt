@@ -1,0 +1,98 @@
+#+TITLE: BARON Solver
+#+FILETAGS: :concept:baron:solver:global-optimization:minlp:benchmark:
+
+
+* BARON Solver
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: sahinidis1996 ryoo1996 tawarmalani2004 tawarmalani2005 kilinc2018 tawarmalani2002b zhang2025
+:STATUS: active
+:CREATED: 2026-04-04
+:UPDATED: 2026-04-05
+:END:
+
+BARON (Branch-And-Reduce Optimization Navigator) is the leading commercial
+solver for deterministic global optimization of nonconvex mixed-integer nonlinear
+programs (MINLPs) citep:sahinidis1996. First released in the mid-1990s, it
+remains the gold standard against which newer global solvers are measured. In the
+discopt benchmarking framework, BARON serves as the primary reference solver for
+correctness verification and performance comparison on nonconvex MINLP instances.
+
+** Branch-and-Reduce Framework
+
+BARON implements the branch-and-reduce algorithm, which augments classical
+spatial branch and bound with a "reduce" phase at every node
+citep:ryoo1996. During the reduce phase, the solver applies range reduction
+techniques, including feasibility-based bounds tightening (FBBT), optimality-based
+bounds tightening (OBBT), and probing, to contract variable domains before
+branching. This aggressive domain reduction is critical because tighter variable
+bounds feed directly into tighter [[file:convex-relaxations.org][convex relaxations]], creating a virtuous
+cycle that accelerates convergence. The combination of branching and reduction
+gives BARON its name and distinguishes it from pure branch-and-bound approaches.
+For a broader discussion of range reduction techniques see [[file:../methods/bound-tightening.org][bound tightening]].
+
+** Factorable Relaxation and RLT
+
+BARON constructs convex relaxations automatically by exploiting the factorable
+structure of nonlinear programs citep:mccormick1976. Every factorable function
+can be decomposed into a sequence of elementary operations (addition,
+multiplication, division, power, logarithm, exponential, trigonometric functions),
+and BARON introduces auxiliary variables for each intermediate expression. For
+bilinear and multilinear terms, the solver generates [[file:../methods/mccormick-relaxations.org][McCormick envelopes]]; for
+univariate functions, it constructs convex and concave envelopes
+citep:tawarmalani2002a. The Reformulation-Linearization Technique (RLT) of
+Sherali and Adams citep:sherali1990 provides additional linear relaxation
+constraints for polynomial terms by multiplying bound factors and linearizing the
+resulting products. These RLT cuts, combined with McCormick relaxations, yield LP
+relaxations whose solutions provide rigorous lower bounds at each node of the
+branch-and-bound tree.
+
+Tawarmalani and Sahinidis citep:tawarmalani2004 significantly advanced this
+relaxation framework by developing tighter convex underestimators for fractional,
+bilinear, and concave terms. Their computational study demonstrated that the
+combined effect of tight relaxations and aggressive domain reduction enabled the
+solution of challenging MINLPs that were previously intractable, marking a major
+milestone in BARON's development. The monograph citep:tawarmalani2002b provides
+the comprehensive theoretical foundation for BARON's convexification machinery.
+
+** Polyhedral Branch-and-Cut
+
+A distinctive feature of BARON's relaxation strategy is the polyhedral
+branch-and-cut approach introduced by Tawarmalani and Sahinidis
+citep:tawarmalani2005. The key insight is that when a nonlinear function can be
+decomposed into convex subexpressions (either identified automatically through
+convexity detection or supplied via modeling constructs), the relaxation
+constructor can exploit this convexity in a manner provably superior to
+developing polyhedral outer approximators for the original function. The approach
+generates supporting hyperplanes of the convex relaxation at solutions of the LP
+relaxation, progressively tightening the polyhedral approximation. This hybrid
+LP/NLP relaxation strategy balances the tightness of nonlinear relaxations with
+the computational efficiency of LP solving, and it became a central component of
+BARON's toolkit for handling problems with identifiable convex structure.
+
+** Exploiting Integrality
+
+Traditional spatial branch-and-bound solvers treated integer variables similarly
+to continuous ones, a historical weakness that Kilinc and Sahinidis
+citep:kilinc2018 addressed by introducing techniques that exploit integrality
+within BARON. Their primary contribution is the addition of mixed-integer linear
+programming (MILP) relaxations to BARON's portfolio of LP and NLP relaxations.
+By constructing MILP relaxations that respect the integrality of discrete
+variables, BARON obtains significantly tighter dual bounds and better starting
+points for primal heuristics. The paper also introduces improved branching
+strategies and domain reduction techniques specifically designed for binary and
+general integer variables. Computational experiments on the MINLPLib benchmark
+library demonstrated substantial speedups, particularly on problems with
+significant integer structure, bringing BARON's MINLP capabilities closer to the
+sophisticated integer programming techniques found in dedicated MILP solvers.
+
+** Role in discopt Benchmarking
+
+BARON is the primary benchmark competitor for discopt. The benchmarking framework
+(=discopt_benchmarks/=) uses BARON as the reference solver for correctness
+verification, comparing optimal objective values and solution quality across
+nonconvex MINLP test problems. Performance profiles and phase gate criteria
+measure discopt's progress relative to BARON's solve times and success rates.
+Understanding BARON's algorithmic machinery, from its [[file:convex-relaxations.org][convex relaxations]] and RLT
+cuts to its [[file:../methods/bound-tightening.org][bound tightening]] strategies, informs the design decisions in
+discopt's own [[file:../methods/spatial-branch-and-bound.org][spatial branch-and-bound]] implementation.

@@ -1,0 +1,164 @@
+#+TITLE: Generalized Disjunctive Programming
+#+FILETAGS: :concept:gdp:disjunction:logic-based:minlp:convex-hull:big-m:
+bibliography:../../references.bib
+
+* Generalized Disjunctive Programming
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: balas1998 raman1994 grossmann2013 turkay1996 grossmann2002
+:STATUS: updated
+:CREATED: 2026-04-04
+:UPDATED: 2026-04-05
+:END:
+
+Generalized Disjunctive Programming (GDP) is a modeling framework for
+discrete-continuous optimization that uses disjunctions and logic propositions as
+first-class modeling constructs, rather than encoding all discrete decisions
+directly as big-M constraints. The framework provides a structured intermediate
+representation between a high-level problem description and a standard MINLP
+formulation, making it possible to reason about reformulation strength and
+algorithmic exploitation of problem structure.
+
+** Foundations in Disjunctive Programming
+
+The theoretical underpinnings of GDP trace back to Balas's work on disjunctive
+programming citep:balas-1998. A disjunctive set is the union of finitely many
+polyhedra, and the central result of disjunctive programming theory is a
+characterization of the convex hull of such a set. Given a collection of
+polyhedra $P_1, P_2, \ldots, P_k$, Balas showed how to construct the convex hull
+of $P_1 \cup P_2 \cup \cdots \cup P_k$ using disaggregated variables and
+additional linear constraints. This convex hull characterization is fundamental
+because it establishes a tight LP relaxation for any optimization problem whose
+feasible region can be expressed as a union of polyhedra. The key insight is that
+the convex hull relaxation is provably at least as tight as any big-M
+formulation of the same disjunctive set, and often strictly tighter. This
+theoretical result underpins both the GDP reformulation hierarchy and the
+strength analysis of MIP formulations for problems such as neural network
+embedding (see [[file:neural-network-embedding.org][Neural Network Embedding]]).
+
+** The GDP Framework
+
+Raman and Grossmann introduced the logic-based modeling framework that became the
+precursor to GDP citep:raman-grossmann-1994. Their approach replaces ad hoc big-M
+constraints with explicit disjunctions and Boolean propositions as modeling
+primitives. A GDP model consists of four components: continuous variables $x$,
+Boolean variables $Y$, disjunctions that associate each Boolean variable with a
+set of constraints (when $Y_i$ is true, the constraints in disjunct $i$ are
+active), and logic propositions that express implications and exclusions among the
+Boolean variables (for example, "if unit $A$ is selected then unit $B$ must also
+be selected").
+
+Grossmann and Trespalacios provided the definitive treatment of GDP as a
+systematic framework for discrete-continuous optimization citep:grossmann-trespalacios-2013.
+Their formulation takes the general form:
+
+\begin{align}
+\min \quad & f(x) \\
+\text{s.t.} \quad & g(x) \leq 0 \\
+& \bigvee_{j \in D_k} \left[ \begin{array}{c} Y_{jk} \\ r_{jk}(x) \leq 0 \end{array} \right], \quad k \in K \\
+& \Omega(Y) = \text{True} \\
+& x \in \mathbb{R}^n, \quad Y \in \{\text{True}, \text{False}\}^m
+\end{align}
+
+Here each disjunction $k$ contains terms $j$ that are activated by Boolean
+variable $Y_{jk}$, and $\Omega(Y)$ collects the logic propositions. The key
+advantage over direct MINLP formulation is that the disjunctive structure is
+preserved, enabling the modeler and the solver to reason about which
+reformulation strategy is most appropriate for each disjunction independently.
+
+** Big-M vs. Convex Hull Reformulations
+
+GDP models must ultimately be converted to MINLP (or MILP in the linear case)
+for solution by standard solvers. Two principal reformulation strategies exist,
+and the choice between them is one of the central decisions in GDP-based modeling
+citep:grossmann-trespalacios-2013,grossmann-2002.
+
+The big-M reformulation replaces each disjunction with algebraic constraints of
+the form $r_{jk}(x) \leq M(1 - y_{jk})$, where $y_{jk}$ is the binary
+relaxation of $Y_{jk}$ and $M$ is a sufficiently large constant. This produces a
+compact formulation: no additional variables are introduced beyond the binaries.
+However, the LP relaxation quality depends critically on the choice of $M$. Large
+values of $M$ weaken the relaxation, leading to poor lower bounds and slow
+convergence in branch-and-bound (see [[file:big-m-formulations.org][Big-M Formulations]]). Even with
+tight $M$ values, the big-M relaxation is generally weaker than the convex hull
+relaxation.
+
+The convex hull reformulation, grounded in Balas's theory citep:balas-1998,
+introduces disaggregated variables $x^{jk}$ for each term of each disjunction,
+along with the constraints:
+
+\begin{align}
+x &= \sum_j x^{jk}, \quad x^{jk} = y_{jk} \bar{x}^{jk} \\
+r_{jk}(\bar{x}^{jk}) &\leq 0, \quad \sum_j y_{jk} = 1
+\end{align}
+
+The LP relaxation of this formulation equals the convex hull of the disjunctive
+set, providing the tightest possible relaxation obtainable from the disjunctive
+structure alone. The price is a larger formulation: the number of continuous
+variables and constraints grows with the number of disjuncts. Grossmann and
+Trespalacios showed that the reformulation strength hierarchy is: convex hull
+relaxation $\geq$ big-M relaxation, with equality only when the big-M values are
+chosen to exactly reproduce the convex hull citep:grossmann-trespalacios-2013.
+
+In practice, the choice between reformulations depends on the problem. For
+problems with few disjuncts per disjunction and well-separated feasible regions,
+the convex hull reformulation typically leads to faster overall solution times
+despite the larger formulation. For problems with many disjuncts or where tight
+$M$ values are readily available, the big-M reformulation may be preferable due
+to its compactness.
+
+** Logic-Based Solution Methods
+
+Rather than converting GDP to MINLP and applying generic solvers, GDP models can
+be solved directly using algorithms that exploit the disjunctive structure.
+Grossmann's 2002 review places these methods in context alongside the four main
+MINLP algorithms (branch and bound, outer approximation, generalized Benders
+decomposition, and extended cutting plane) citep:grossmann-2002.
+
+Logic-based outer approximation, developed by Turkay and Grossmann
+citep:turkay-grossmann-1996, extends the classical OA algorithm (see
+[[file:../methods/outer-approximation.org][Outer Approximation]]) to GDP. Instead of solving a single NLP relaxation
+and generating linearizations for all constraints, logic-based OA solves NLP
+subproblems for each active disjunction configuration and generates linearizations
+only in the reduced space of the active disjuncts. This produces tighter
+linearizations because inactive constraints (those whose disjuncts are off) do not
+contribute spurious cuts. The method was demonstrated on process network synthesis
+problems, where the disjunctions represent the selection of processing units, and
+showed faster convergence than standard OA applied to the big-M reformulation.
+
+Logic-based branch and bound operates similarly to NLP-based branch and bound
+(see [[file:../methods/nonlinear-branch-and-bound.org][Nonlinear Branch and Bound]]) but branches on Boolean variables
+rather than binary relaxations, and solves NLP relaxations that respect the
+disjunctive structure at each node. By fixing Boolean variables rather than
+binary values, the algorithm can prune infeasible disjunct combinations using
+logic inference (constraint propagation on the Boolean propositions) before
+solving any NLP, reducing the number of nodes explored.
+
+** Connection to MINLP
+
+GDP occupies a position between high-level problem formulation and low-level
+MINLP representation. Every GDP can be reformulated as an MINLP (via big-M or
+convex hull), but the reverse is not generally true: an arbitrary MINLP does not
+necessarily have an obvious disjunctive interpretation. The value of GDP lies in
+preserving the modeler's intent about the discrete structure, which enables
+stronger reformulations and more efficient algorithms.
+
+Grossmann's review citep:grossmann-2002 demonstrates that the hierarchy of MINLP
+algorithms (OA dominates GBD, which dominates LP relaxation) carries over to the
+GDP setting, with logic-based variants generally performing at least as well as
+their MINLP counterparts. The MINLP survey literature
+(see [[file:minlp-survey.org][MINLP Problem Class and Surveys]]) treats GDP as one of the
+important modeling paradigms for structured discrete-continuous problems.
+
+** Relationship to discopt
+
+discopt's modeling API supports binary variables and linear indicator constraints,
+which can express many GDP-style disjunctions via big-M formulations. The nn
+module's ReLU big-M formulation is essentially a GDP reformulation where each
+neuron's activation state is a disjunction: either the neuron is active
+($y = \max(0, x) = x$, with $x \geq 0$) or inactive ($y = 0$, with $x \leq 0$),
+formulated with big-M constraints on a binary indicator variable
+(see [[file:neural-network-embedding.org][Neural Network Embedding]]). Balas's
+convex hull theory citep:balas-1998 provides the theoretical basis for
+understanding why tighter formulations (such as the Anderson et al. ideal
+formulation) can dramatically improve solver performance on these problems.

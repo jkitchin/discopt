@@ -83,16 +83,18 @@ log "Python runner: ${PYTHON_RUNNER_LABEL}"
 log "JAX_PLATFORMS: ${JAX_PLATFORMS}"
 log "JAX_ENABLE_X64: ${JAX_ENABLE_X64}"
 
-if [[ ! -d "${ALPINE_PROJECT}" ]]; then
-  echo "Missing Alpine.jl checkout: ${ALPINE_PROJECT}" >&2
-  echo "Set ALPINE_PROJECT or place Alpine.jl next to this repo." >&2
-  exit 1
-fi
+if [[ "${RUN_ALPINE}" == "1" ]]; then
+  if [[ ! -d "${ALPINE_PROJECT}" ]]; then
+    echo "Missing Alpine.jl checkout: ${ALPINE_PROJECT}" >&2
+    echo "Set ALPINE_PROJECT or place Alpine.jl next to this repo." >&2
+    exit 1
+  fi
 
-if [[ ! -d "${MINLPTESTS_PATH}" ]]; then
-  echo "Missing MINLPTests.jl checkout: ${MINLPTESTS_PATH}" >&2
-  echo "Set MINLPTESTS_PATH or place MINLPTests.jl next to this repo." >&2
-  exit 1
+  if [[ ! -d "${MINLPTESTS_PATH}" ]]; then
+    echo "Missing MINLPTests.jl checkout: ${MINLPTESTS_PATH}" >&2
+    echo "Set MINLPTESTS_PATH or place MINLPTests.jl next to this repo." >&2
+    exit 1
+  fi
 fi
 
 COMPARISON_DISCOPT_JSON="${DISCOPT_JSON}"

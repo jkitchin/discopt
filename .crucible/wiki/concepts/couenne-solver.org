@@ -1,0 +1,156 @@
+#+TITLE: Couenne Solver
+#+FILETAGS: :concept:couenne:solver:global-optimization:minlp:coin-or:benchmark:
+
+* Couenne Solver
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: belotti2009 couenne-manual couenne-github belotti2012 belotti2013pairs belotti2017 belotti2010 cafieri2010 dambrosio2012 berthold2012 belotti2026 couenne2026
+:STATUS: reviewed
+:CREATED: 2026-04-04
+:UPDATED: 2026-04-16
+:END:
+
+Couenne (/Convex Over and Under ENvelopes for Nonlinear Estimation/) is an
+open-source global-optimization solver for nonconvex mixed-integer nonlinear
+programs, hosted as part of the COIN-OR Foundation citep:belotti2026. It
+implements spatial branch-and-bound over an auxiliary-variable convexification
+of the expression DAG, combined with feasibility- and optimality-based bound
+tightening, linearization and disjunctive cuts, and primal heuristics. The
+algorithmic foundation was laid out in citet:belotti2009; subsequent papers by
+the same group added disjunctive cuts citep:belotti2012, bound reduction from
+pairs of inequalities citep:belotti2013pairs, a specialized feasibility pump
+for nonconvex MINLP citep:belotti2017, and a fixed-point formulation of FBBT
+citep:belotti2010.
+
+Couenne is one of the three primary benchmark competitors for discopt
+(alongside BARON and SCIP) in the =discopt_benchmarks= test suite.
+
+** Authorship and Provenance
+
+The project was initiated at Carnegie Mellon and IBM Research circa 2006-2008
+by Pietro Belotti, Jon Lee, Leo Liberti, François Margot, and Andreas Wächter,
+who authored the main algorithmic paper citep:belotti2009. It is now
+maintained primarily by Pietro Belotti (Clemson → Politecnico di Milano). The
+GitHub repository citep:couenne-github lists additional contributors Timo
+Berthold, Pierre Bonami, Sonia Cafieri, Cameron Megaw, and Stefan Vigerske.
+Released under the Eclipse Public License v1.0.
+
+** Software architecture
+
+The source is ~72% C++ and is organized into citep:couenne-github:
+
+- =src/= -- expression library, linearization cut separators, branching
+  rules, bound-tightening routines, and the AMPL interface.
+- =doc/= -- the user manual citep:couenne-manual and related documents.
+- =doxydoc/= -- Doxygen API documentation.
+- =test/= -- sample instances used for regression testing.
+- =ThirdParty/= -- scripts for fetching HSL, MUMPS, ASL, LAPACK, BLAS.
+
+Input is accepted in three formats citep:couenne-manual: AMPL =.nl= via the
+AMPL Solver Library, OSiL, and GAMS (through the GAMSlinks interface).
+Options are set either on the command line or in a =couenne.opt= file. The
+solver is accessible on the NEOS server and is exposed to Julia users
+through JuMP.
+
+** COIN-OR dependencies
+
+Couenne builds on an unusually large COIN-OR stack citep:couenne-github:
+
+- =Ipopt= -- interior-point NLP solver used for root NLP and upper-bounding
+  subproblems; see [[file:ipopt-solver.org][Ipopt]].
+- =Cbc=, =Clp=, =Cgl=, =Osi=, =CoinUtils= -- LP solver and MILP branch-cut
+  machinery; Couenne's LP relaxations are solved with Clp (or optionally
+  SoPlex/CPLEX), and Cbc handles the outer MILP layer when requested.
+- =Bonmin= -- provides infrastructure for tree management and heuristics
+  that Couenne reuses.
+- External: ASL (AMPL), LAPACK/BLAS, HSL, MUMPS, and optional SCIP/SoPlex.
+
+** Algorithmic pipeline
+
+1. *Parse and build expression DAG* from the input model. Every nonlinear
+   operator is given an auxiliary variable (see [[file:../methods/auxiliary-variable-reformulation.org][auxiliary variable reformulation]]) so the
+   problem is rewritten as a system of simple atomic relations connecting
+   auxiliary variables.
+2. *Construct McCormick-style linear relaxations* around each auxiliary
+   relation, producing an LP relaxation over the enlarged variable space;
+   see [[file:../methods/mccormick-relaxations.org][McCormick relaxations]] and citet:cafieri2010 for multilinear
+   generalizations.
+3. *Tighten bounds* with FBBT (reformulated as a fixed-point LP in
+   citet:belotti2010) and selective OBBT; the pairs-of-inequalities
+   technique of citet:belotti2013pairs sits between FBBT and OBBT on the
+   cost/strength spectrum. See [[file:../methods/bound-tightening.org][bound tightening]].
+4. *Solve the root LP relaxation* and separate violated cuts: linearization
+   cuts for nonconvex auxiliaries, disjunctive cuts lifted from a
+   branching disjunction citep:belotti2012, and general Cgl cuts inherited
+   from Cbc.
+5. *Run primal heuristics* -- most importantly the nonconvex Feasibility
+   Pump citep:belotti2017,dambrosio2012 -- to obtain an incumbent early.
+6. *Branch spatially* on the variable/auxiliary pair that maximizes a
+   violation-transfer score; continuous variables are branched by midpoint
+   or strong branching, integers by standard branching rules. See
+   [[file:../methods/spatial-branch-and-bound.org][spatial branch-and-bound]].
+7. *Recurse* until the gap closes below tolerance or a limit is hit.
+
+** Distinguishing algorithmic contributions
+
+Relative to BARON citep:sahinidis1996 and SCIP citep:bestuzheva2023, Couenne's
+distinctive technical contributions are:
+
+- *Fixed-point FBBT* citep:belotti2010: reformulates the otherwise
+  potentially non-terminating constraint-propagation iteration as a single
+  LP whose solution is the exact FBBT limit point.
+- *Disjunctive cut separation for nonconvex MINLP* citep:belotti2012: adapts
+  the CGLP-based disjunctive cut from MILP to the auxiliary-variable MINLP
+  reformulation. See [[file:../methods/disjunctive-cuts-minlp.org][disjunctive cuts for nonconvex MINLP]].
+- *Pairs-of-inequalities bound reduction* citep:belotti2013pairs: a new
+  O(m^2 n^2) technique bridging single-constraint FBBT and per-variable
+  OBBT.
+- *Three-ideas feasibility pump* citep:belotti2017: a hierarchical MINLP
+  feasibility pump with nonlinear-aware distance function and per-iteration
+  linearization refresh.
+- *Violation-transfer branching*: the branching-variable selection rule
+  measures how much the McCormick gap shrinks if each candidate variable is
+  branched, as described in citet:belotti2009.
+
+** Related COIN-OR / SCIP siblings
+
+The closest algorithmic cousin is SCIP's MIQCP/MINLP extension
+citep:berthold2012,vigerske-gleixner-2018, which shares several authors with
+Couenne (Berthold, Vigerske) and adapted many of the same ideas into a
+constraint-integer-programming framework. Benchmarks across the two are
+regularly reported in the MINLP literature citep:belotti-2013.
+
+** Role in discopt benchmarking
+
+The =discopt_benchmarks= comparison suite treats Couenne as the canonical
+open-source global MINLP benchmark. It is called through the =.nl= interface
+(via AMPL or pyomo) with default options; the results of the three-solver
+comparison (discopt, Couenne, SCIP) are reported in the correctness and
+regression gates defined in =discopt_benchmarks/config/benchmarks.toml=. The
+NEOS route is also used for large instances that exceed local-machine
+resource limits.
+
+** See also
+
+- [[file:../methods/spatial-branch-and-bound.org][spatial branch-and-bound]]
+- [[file:../methods/bound-tightening.org][bound tightening (FBBT and OBBT)]]
+- [[file:../methods/mccormick-relaxations.org][McCormick relaxations]]
+- [[file:../methods/auxiliary-variable-reformulation.org][auxiliary variable reformulation]]
+- [[file:../methods/disjunctive-cuts-minlp.org][disjunctive cuts for nonconvex MINLP]]
+- [[file:../methods/feasibility-pump.org][feasibility pump]]
+- [[file:ipopt-solver.org][Ipopt]], [[file:baron-solver.org][BARON]], [[file:scip-solver.org][SCIP]]
+
+** References
+
+- citep:belotti2009 -- primary algorithmic paper
+- citep:couenne-manual -- user manual (input formats, options)
+- citep:couenne-github -- source repository
+- citep:belotti2026 -- COIN-OR project page
+- citep:couenne2026 -- Wikipedia overview
+- citep:belotti2010 -- fixed-point FBBT
+- citep:belotti2012 -- disjunctive cuts for nonconvex MINLP
+- citep:belotti2013pairs -- bound reduction via pairs of linear inequalities
+- citep:belotti2017 -- three-ideas feasibility pump
+- citep:cafieri2010 -- multilinear (quadrilinear) relaxations
+- citep:dambrosio2012 -- storm of feasibility pumps
+- citep:berthold2012 -- SCIP MIQCP counterpart

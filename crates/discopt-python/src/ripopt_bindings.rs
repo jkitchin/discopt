@@ -57,18 +57,19 @@ impl ripopt::NlpProblem for PyNlpProblem {
         x0.copy_from_slice(&self.x0);
     }
 
-    fn objective(&self, x: &[f64]) -> f64 {
+    fn objective(&self, x: &[f64], _new_x: bool, obj: &mut f64) -> bool {
         Python::with_gil(|py| {
             let x_py = PyArray1::from_slice(py, x);
             let result = self
                 .evaluator
                 .call_method1(py, "evaluate_objective", (x_py,))
                 .expect("evaluate_objective failed");
-            result.extract::<f64>(py).expect("objective not f64")
-        })
+            *obj = result.extract::<f64>(py).expect("objective not f64");
+        });
+        true
     }
 
-    fn gradient(&self, x: &[f64], grad: &mut [f64]) {
+    fn gradient(&self, x: &[f64], _new_x: bool, grad: &mut [f64]) -> bool {
         Python::with_gil(|py| {
             let x_py = PyArray1::from_slice(py, x);
             let result = self
@@ -79,12 +80,13 @@ impl ripopt::NlpProblem for PyNlpProblem {
                 result.bind(py).extract().expect("gradient not ndarray");
             let slice = arr.as_slice().expect("gradient not contiguous");
             grad.copy_from_slice(slice);
-        })
+        });
+        true
     }
 
-    fn constraints(&self, x: &[f64], g: &mut [f64]) {
+    fn constraints(&self, x: &[f64], _new_x: bool, g: &mut [f64]) -> bool {
         if self.m == 0 {
-            return;
+            return true;
         }
         Python::with_gil(|py| {
             let x_py = PyArray1::from_slice(py, x);
@@ -96,16 +98,17 @@ impl ripopt::NlpProblem for PyNlpProblem {
                 result.bind(py).extract().expect("constraints not ndarray");
             let slice = arr.as_slice().expect("constraints not contiguous");
             g.copy_from_slice(slice);
-        })
+        });
+        true
     }
 
     fn jacobian_structure(&self) -> (Vec<usize>, Vec<usize>) {
         (self.jac_rows.clone(), self.jac_cols.clone())
     }
 
-    fn jacobian_values(&self, x: &[f64], values: &mut [f64]) {
+    fn jacobian_values(&self, x: &[f64], _new_x: bool, values: &mut [f64]) -> bool {
         if self.m == 0 {
-            return;
+            return true;
         }
         Python::with_gil(|py| {
             let x_py = PyArray1::from_slice(py, x);
@@ -136,14 +139,22 @@ impl ripopt::NlpProblem for PyNlpProblem {
                 let slice = arr.as_slice().expect("jacobian not contiguous");
                 values.copy_from_slice(slice);
             }
-        })
+        });
+        true
     }
 
     fn hessian_structure(&self) -> (Vec<usize>, Vec<usize>) {
         (self.hess_rows.clone(), self.hess_cols.clone())
     }
 
-    fn hessian_values(&self, x: &[f64], obj_factor: f64, lambda: &[f64], values: &mut [f64]) {
+    fn hessian_values(
+        &self,
+        x: &[f64],
+        _new_x: bool,
+        obj_factor: f64,
+        lambda: &[f64],
+        values: &mut [f64],
+    ) -> bool {
         Python::with_gil(|py| {
             let x_py = PyArray1::from_slice(py, x);
             let lambda_py = PyArray1::from_slice(py, lambda);
@@ -187,7 +198,8 @@ impl ripopt::NlpProblem for PyNlpProblem {
                     }
                 }
             }
-        })
+        });
+        true
     }
 }
 
@@ -195,12 +207,15 @@ impl ripopt::NlpProblem for PyNlpProblem {
 fn status_to_string(status: ripopt::SolveStatus) -> &'static str {
     match status {
         ripopt::SolveStatus::Optimal => "optimal",
+        ripopt::SolveStatus::Acceptable => "acceptable",
         ripopt::SolveStatus::Infeasible => "infeasible",
         ripopt::SolveStatus::LocalInfeasibility => "local_infeasibility",
         ripopt::SolveStatus::MaxIterations => "max_iterations",
         ripopt::SolveStatus::NumericalError => "numerical_error",
         ripopt::SolveStatus::Unbounded => "unbounded",
         ripopt::SolveStatus::RestorationFailed => "restoration_failed",
+        ripopt::SolveStatus::EvaluationError => "evaluation_error",
+        ripopt::SolveStatus::UserRequestedStop => "user_requested_stop",
         ripopt::SolveStatus::InternalError => "internal_error",
     }
 }

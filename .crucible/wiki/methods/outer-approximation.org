@@ -1,0 +1,181 @@
+#+TITLE: Outer Approximation Algorithm
+#+FILETAGS: :outer-approximation:minlp:convex:decomposition:
+#+PROPERTY: ARTICLE_TYPE method
+#+PROPERTY: SOURCE_KEYS duran-grossmann-1986
+
+* Outer Approximation Algorithm
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: duran-grossmann-1986 fletcher1994 geoffrion1972 viswanathan1990 quesada1992 kelley1960 westerlund1995 bonami2008 kronqvist2016 lundell2022 grossmann2002 kronqvist2020
+:STATUS: active
+:CREATED: 2026-04-04
+:UPDATED: 2026-04-05
+:END:
+
+Outer Approximation (OA) is a decomposition algorithm for solving convex
+mixed-integer nonlinear programs (MINLPs). The core idea is to alternate between
+two subproblems: an NLP subproblem that optimizes the continuous variables for a
+fixed integer assignment, and an MILP master problem that selects the next
+integer combination by optimizing over a polyhedral outer approximation of the
+nonlinear feasible set. OA was introduced by cite:duran-grossmann-1986 for
+process synthesis problems in chemical engineering, and subsequently extended by
+cite:fletcher1994 to handle nonlinearities in integer variables and infeasible
+NLP subproblems.
+
+** The Alternating NLP/MIP Sequence
+
+The algorithm proceeds iteratively. Given an initial integer assignment, the NLP
+subproblem is solved with all nonlinear constraints active and continuous
+variables free but integer variables fixed. The NLP solution provides an upper
+bound on the MINLP optimum and yields gradient information that is used to
+construct linearizations (supporting hyperplanes) of the nonlinear constraints at
+the solution point. These linearizations are accumulated into the MILP master
+problem, which forms a linear outer approximation of the original MINLP. Solving
+the MILP master problem yields a lower bound and a new integer assignment. The
+process repeats, with the gap between upper and lower bounds closing
+monotonically at each iteration.
+
+For convex MINLPs (where the objective and constraints are convex in the
+continuous variables), the linearizations are valid outer approximations: no
+feasible point is cut off by any supporting hyperplane. This convexity property
+guarantees that the MILP lower bound is valid and that the algorithm terminates
+finitely at the global optimum cite:duran-grossmann-1986,fletcher1994.
+
+** Convergence Properties
+
+The finite convergence proof rests on two observations. First, because the set of
+feasible integer assignments is finite, the algorithm can cycle through at most
+finitely many distinct NLP subproblems. Second, the convexity of the nonlinear
+functions ensures that each linearization provides a valid (non-cutting) outer
+approximation, so the MILP master problem is a relaxation of the original MINLP
+at every iteration. The MILP lower bound is therefore non-decreasing, and since
+the upper bound is non-increasing, the gap closes to zero in finitely many steps
+cite:duran-grossmann-1986.
+
+When the NLP subproblem is infeasible for a given integer assignment, a
+feasibility subproblem is solved instead, and the resulting linearization acts as
+a "no-good" cut that excludes the current integer combination from future master
+problems. This mechanism, formalized by cite:fletcher1994, prevents the algorithm
+from revisiting infeasible assignments and is essential for finite termination.
+
+** Relation to Benders Decomposition
+
+The theoretical lineage of OA traces back to Kelley's cutting plane method for
+continuous convex programs cite:kelley1960, which approximates the feasible set
+with accumulated supporting hyperplanes and solves a sequence of LP relaxations.
+OA extends this idea to the mixed-integer setting by using NLP solutions to
+generate the linearizations.
+
+Generalized Benders Decomposition (GBD) cite:geoffrion1972 is a closely related
+decomposition that also alternates between NLP subproblems and an integer master
+problem. The fundamental difference lies in what gets linearized: GBD generates
+cuts from the dual of the NLP subproblem (linearizing the projected value
+function), while OA linearizes individual nonlinear constraints. As shown by
+citet:grossmann2002, OA produces a tighter master problem relaxation than GBD
+because constraint-level linearizations carry more information than a single
+Lagrangian dual cut. The dominance hierarchy is: OA master >= GBD master >= LP
+relaxation of the MINLP.
+
+** Extensions and Enhancements
+
+*** Equality Relaxation and Augmented Penalty
+
+The original OA algorithm requires convexity for its convergence guarantees. For
+problems with nonlinear equality constraints or nonconvex functions,
+citet:viswanathan1990 proposed two modifications. Equality relaxation (ER)
+introduces slack variables in the linearizations of equality constraints, which
+would otherwise make the MILP master infeasible. The augmented penalty (AP) adds
+a penalty term for violations of linearizations from nonconvex constraints,
+allowing the master problem to explore integer combinations that would be
+excluded by strict linear cuts. These enhancements form the OA/ER/AP algorithm
+implemented in the DICOPT solver.
+
+*** Single-Tree (LP/NLP) Approach
+
+Standard OA solves a full MILP master problem at each iteration, which can be
+expensive. citet:quesada1992 proposed integrating OA into a single
+branch-and-bound tree: instead of solving the MILP from scratch each iteration,
+an LP relaxation with accumulated OA cuts is maintained across the tree. When an
+integer-feasible node is found, the corresponding NLP is solved and new
+linearizations are added as lazy constraints to all open nodes. This single-tree
+approach avoids redundant MILP work and became the dominant implementation
+strategy in modern solvers.
+
+*** Extended Cutting Plane
+
+The extended cutting plane (ECP) method cite:westerlund1995 simplifies OA by
+eliminating the NLP subproblem entirely. At each iteration, ECP solves only the
+MILP master problem and adds a linearization at the MILP solution point (at the
+most violated nonlinear constraint). ECP requires only an MILP solver, making it
+simpler to implement, but converges more slowly because linearizations at MILP
+solutions (potentially far from the nonlinear boundary) are looser than those at
+NLP optima.
+
+*** Extended Supporting Hyperplane
+
+The extended supporting hyperplane (ESH) algorithm cite:kronqvist2016 generates
+linearizations at points on the boundary of the nonlinear feasible set by
+projecting the current MILP solution onto the nearest constraint surface. ESH
+produces tighter cuts than ECP (closer to the nonlinear boundary) while avoiding
+the full cost of an NLP solve. ESH can be viewed as interpolating between ECP
+(cheap, loose cuts) and OA (expensive, tight cuts).
+
+*** Regularization and Second-Order Information
+
+A weakness of standard OA is that the MILP master problem can propose integer
+combinations far from the current best solution, leading to difficult NLP
+subproblems. citet:kronqvist2020 address this with two techniques: regularized OA
+adds a trust-region penalty to keep integer steps small, and quadratic OA uses
+second-order information (the Lagrangian Hessian) to build MIQP master problems
+that better approximate the nonlinear landscape. Both retain finite convergence
+guarantees and reduce total solve time on benchmark collections.
+
+** Modern Implementations
+
+*** DICOPT
+
+DICOPT (DIscrete and Continuous OPTimizer), developed by Viswanathan and
+Grossmann, implements OA/ER/AP and is available through GAMS. It was one of the
+first practical MINLP solvers and remains widely used for process systems
+engineering problems cite:viswanathan1990.
+
+*** Bonmin
+
+Bonmin (Basic Open-source Nonlinear Mixed INteger programming) cite:bonami2008
+implements several OA variants within the COIN-OR framework: standard OA (B-OA),
+LP/NLP branch and bound (B-QG), NLP-based branch and bound (B-BB), a hybrid
+combining B-BB with OA cuts (B-Hyb), and ECP within branch and bound (B-ECP).
+Bonmin builds on Ipopt (NLP), Cbc (MILP), and CoinUtils. Computational
+comparisons show B-Hyb and B-OA perform best overall for convex MINLPs.
+
+*** SHOT
+
+SHOT (Supporting Hyperplane Optimization Toolkit) cite:lundell2022 combines ESH
+and ECP linearization strategies with primal heuristics in a single-tree
+framework. SHOT uses lazy constraint callbacks to add linearizations during the
+MILP tree search, avoiding repeated MILP re-solves. It interfaces with CPLEX,
+Gurobi, or Cbc as the underlying MILP solver and is available through GAMS,
+AMPL, Pyomo, and JuMP. Benchmarks show SHOT is competitive with or faster than
+Bonmin and DICOPT on many convex MINLP instances.
+
+** Relationship to Other Methods
+
+OA is one of four main algorithmic families for convex MINLP, alongside
+branch-and-bound, GBD, and ECP cite:grossmann2002. Compared to
+[[file:nonlinear-branch-and-bound.org][NLP-based branch and bound (NLP-BB)]], OA
+adds linearization cuts that reduce the number of tree nodes explored, at the
+cost of managing the polyhedral approximation and solving MILP master problems.
+NLP-BB is simpler (no MILP solver needed) and benefits from batched GPU solving,
+while OA typically explores fewer nodes due to tighter relaxations. The choice
+depends on the relative cost of NLP versus MILP solves and the tightness of the
+continuous relaxation.
+
+For nonconvex MINLPs, OA linearizations are not valid outer approximations
+because they may cut off the global optimum.
+[[file:spatial-branch-and-bound.org][Spatial branch and bound]] with
+[[file:../concepts/convex-relaxations.org][convex relaxations]] (such as
+[[file:mccormick-relaxations.org][McCormick envelopes]] or
+[[file:alphabb-underestimators.org][alphaBB underestimators]]) is required for
+global optimality guarantees in the nonconvex case. The OA/ER/AP approach in
+DICOPT provides a practical heuristic for mildly nonconvex problems by penalizing
+rather than enforcing the invalid cuts.

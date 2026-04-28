@@ -1,0 +1,48 @@
+#+TITLE: Expression DAG and Automatic Differentiation
+#+FILETAGS: :concept:expression-dag:automatic-differentiation:jax:computational-graph:
+
+* Expression DAG and Automatic Differentiation
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: baydin2018
+:STATUS: draft
+:CREATED: 2026-04-04
+:END:
+
+An expression DAG (directed acyclic graph) represents a mathematical expression
+as a computational graph where nodes are operations (addition, multiplication,
+exp, log, etc.) and edges connect operations to their inputs. This representation
+enables systematic analysis and transformation of optimization models: convex
+relaxation construction (McCormick envelope propagation), bound tightening (FBBT
+via interval arithmetic propagation), and automatic differentiation for gradient
+and Hessian computation citep:baydin2018.
+
+** Automatic Differentiation
+
+Automatic differentiation (AD) computes exact derivatives of functions expressed
+as computer programs by applying the chain rule systematically through the
+computational graph. Forward-mode AD propagates tangent vectors from inputs to
+outputs, computing directional derivatives efficiently when there are few inputs.
+Reverse-mode AD (backpropagation) propagates adjoint values from outputs to
+inputs, computing gradients efficiently when there are few outputs (the common
+case in optimization: one objective, gradients with respect to many variables)
+citep:baydin2018.
+
+** JAX Implementation in discopt
+
+discopt uses JAX as its AD engine. The modeling API (python/discopt/modeling/)
+constructs an expression DAG via operator overloading on Python objects. The JAX
+DAG compiler (python/discopt/_jax/) transforms this into JAX primitives,
+enabling jax.grad for gradients, jax.jacobian for constraint Jacobians, and
+jax.hessian for Hessians. JAX's JIT compilation and XLA backend provide GPU
+acceleration, and jax.vmap enables batched evaluation of gradients across
+multiple B&B nodes simultaneously.
+
+** The .nl Format
+
+The .nl format (used by AMPL and other modeling languages) is a standard
+serialization of expression DAGs for optimization problems. discopt's Rust core
+includes an .nl parser that reads problems in this format, enabling benchmarking
+against standard test problem libraries. The NLPEvaluatorFromNl class provides
+evaluation callbacks (objective, gradient, constraints, Jacobian) via the Rust
+backend with finite-difference derivatives.

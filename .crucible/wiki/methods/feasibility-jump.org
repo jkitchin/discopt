@@ -1,0 +1,153 @@
+#+TITLE: Feasibility Jump
+#+FILETAGS: :method:feasibility-jump:primal-heuristic:mip:lp-free:lagrangian:jax:warp:
+
+* Feasibility Jump
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: luteberget-sartor-2023 bolusani-scip9-2024 nvidia-warp-2026
+:STATUS: active
+:CREATED: 2026-04-21
+:UPDATED: 2026-04-21
+:END:
+
+Feasibility Jump (FJ) is an *LP-free Lagrangian local-search* heuristic for
+MIPs introduced by citet:luteberget-sartor-2023 and propelled to prominence
+by its first-place finish at the MIP 2022 Computational Competition. Unlike
+the [[file:feasibility-pump.org][feasibility pump]], whose inner step is a full LP projection, FJ never
+solves an LP. It starts from any integer assignment — typically the rounded
+LP relaxation, or even a random starting point — and, at each step, picks a
+single variable and sets it to the value that minimizes a weighted sum of
+constraint violations. Lagrangian-style weights on still-violated
+constraints are boosted when the search reaches a local minimum, driving
+escape moves. The algorithm converges to a feasible integer solution far
+faster than LP-based heuristics on problems where the LP relaxation itself
+is expensive, and is now shipped as =heur_feasjump.c= in [[file:../concepts/scip-solver.org][SCIP]] 9
+citep:bolusani-scip9-2024 and =HighsFeasibilityJump.cpp= in [[file:../concepts/highs-solver.org][HiGHS]].
+
+For discopt, FJ is uniquely interesting: its inner loop maps cleanly onto
+JAX =vmap= or NVIDIA Warp kernels, giving discopt the opportunity to offer a
+GPU-batched feasibility engine that CPU-only implementations in SCIP and
+HiGHS structurally cannot match.
+
+** The Algorithm
+
+Given a MIP with integer variables $x \in \mathbb{Z}^n$ and constraints
+indexed by $i$, FJ maintains:
+
+- A current integer assignment $x^k$.
+- A Lagrangian weight $w_i \ge 0$ for each constraint, initialized uniformly
+  and boosted at local minima.
+- For each integer variable $j$ and each candidate shift
+  $\delta \in \{-1, +1\}$ (or larger jumps on general-integer variables), a
+  /score/ equal to the weighted change in total constraint violation if
+  $x_j \mapsto x_j + \delta$.
+
+At each iteration:
+
+1. Compute the score $s_{j,\delta}$ for every (variable, shift) pair.
+2. Pick the pair $(j^*, \delta^*)$ with maximum score; break ties randomly.
+3. Apply the move: $x_{j^*} \mapsto x_{j^*} + \delta^*$.
+4. If no move improves feasibility (local minimum), boost weights on all
+   currently-violated constraints and continue.
+5. Terminate when all constraints are satisfied (feasible integer solution
+   found) or when a time/iteration budget is exhausted.
+
+The score computation is the workload's hot spot. For a single variable
+shift, $s_{j,\delta}$ is a sparse inner product over the rows in which $j$
+appears: $\sum_{i : a_{ij} \ne 0} w_i \cdot (\text{violation change on row } i)$.
+Computing all scores in parallel is therefore a sparse matrix-vector
+product against a violation-delta vector, followed by an argmax — exactly
+the structure that accelerator-friendly programming models excel at.
+
+** Why FJ Fits JAX and Warp
+
+Under the host-placement rubric (see [[file:mip-primal-heuristics.org][MIP primal heuristics]]), FJ is the
+single heuristic that most clearly belongs outside of Rust. Two options:
+
+*** JAX
+
+The FJ inner loop vectorizes naturally: the score vector is a dense
+function of a dense weight vector and a sparse coefficient matrix, the
+argmax is =jnp.argmax=, and the update is a scatter. Running multiple
+restart replicas in parallel is a single =vmap= over the initial-seed
+axis. On a GPU, one =vmap= launch can evaluate hundreds of restart chains
+simultaneously, dramatically increasing the probability of finding a
+feasible solution on hard instances. This matches discopt's existing JAX
+DAG machinery and reuses its sparse-AD infrastructure.
+
+*** NVIDIA Warp
+
+Warp citep:nvidia-warp-2026 is a better fit when the workload is dominated
+by /irregular scatter/ with atomics. FJ's weight update after a local
+minimum is one such operation: boost $w_i$ for every currently-violated
+constraint, then propagate the change to every variable whose score depends
+on those rows. In a Warp kernel, each thread can atomically increment
+weights and mark affected variable scores for recomputation, with no
+control-flow divergence between threads because every thread does the same
+scatter work with different indices.
+
+Warp also wins when FJ is combined with batched B&B subproblems: running
+one FJ replica per open subproblem on a GPU frontier is "lots of small
+irregular problems in parallel," which is Warp's sweet spot. The CPU
+backend (LLVM-JIT, OpenMP-parallel) is comparable to Rust; the
+differentiator is one kernel source that scales from CPU dev to GPU
+production.
+
+*** What Stays in Python
+
+The outer FJ driver — setup, restart policy, timeout management,
+incumbent bookkeeping — is Python orchestration. A sensible discopt
+layering is: (1) a JAX or Warp kernel that does one FJ move given
+(assignment, weights, constraint matrix); (2) a Python loop that calls the
+kernel, checks termination, boosts weights, and restarts. This is the same
+shape as discopt's existing JAX-backed NLP evaluator.
+
+** Relationship to the Feasibility Pump
+
+FJ and the [[file:feasibility-pump.org][feasibility pump]] are both *feasibility-finding* heuristics but
+with different cost profiles:
+
+| | Feasibility pump | Feasibility jump |
+|---+-------------------+-------------------|
+| Inner step | Full LP projection | Single variable shift |
+| Per-iteration cost | Milliseconds to seconds | Microseconds |
+| Best when | LP is cheap, rounding is informative | LP is expensive or uninformative |
+| Host in discopt | Python (orchestrates LP solves) | JAX or Warp (vectorized scores) |
+| Termination guarantee | None; may cycle | None; may plateau |
+| Introduced | 2005 citep:fischetti2005 | 2023 citep:luteberget-sartor-2023 |
+
+The two heuristics are complementary. On instances where the LP relaxation
+is tight and informative, the pump converges in a handful of iterations. On
+instances with expensive LP relaxations or flat relaxation surfaces (large
+pure-combinatorial MIPs, scheduling, nurse rostering), FJ is vastly faster.
+Modern solvers run both.
+
+** Licensing
+
+The reference FJ implementation is the single-header
+=feasibilityjump.hh= by Luteberget and Sartor, MIT-licensed, vendored into
+HiGHS at =highs/mip/feasibilityjump.hh=. SCIP's port is under SCIP's
+Apache-2.0 license. Either can be used as a reference for a Rust, JAX, or
+Warp reimplementation, subject to attribution. Because the algorithm is
+paper-described and the per-iteration math is short, a clean-room
+implementation from citet:luteberget-sartor-2023 is tractable and
+license-burden-free.
+
+** Role in discopt
+
+The recommended integration is:
+
+1. **Prototype in JAX** first — fastest path to a working implementation
+   that leverages discopt's existing JAX DAG and sparse-AD machinery.
+   Deliver as =python/discopt/heuristics/feasibility_jump.py=, called from
+   the B&B root-node heuristic stage.
+2. **Benchmark** against the HiGHS CPU implementation on MIPLIB. Target:
+   comparable feasibility-find rate at 2-5x the wall-clock throughput on a
+   single GPU.
+3. **If benchmarks warrant**, port the hot kernel to Warp for the
+   batched-frontier case, where per-subproblem FJ replicas run concurrently
+   across open B&B nodes.
+
+This is the single highest-leverage heuristic port given discopt's
+architecture: a feature HiGHS and SCIP cannot easily offer because neither
+has a JAX/Warp-compatible expression DAG.

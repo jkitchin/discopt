@@ -1,0 +1,184 @@
+#+TITLE: Matheuristics
+#+FILETAGS: :method:matheuristic:relax-and-fix:kernel-search:combinatorial-benders:cpsat:primal-heuristic:mip:
+
+* Matheuristics
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: fischetti-matheuristics-2016 codato-fischetti-2006 helber-sahling-2010 angelelli-mansini-speranza-2010 pochet-wolsey-2006 ortools-cpsat-2024
+:STATUS: active
+:CREATED: 2026-04-21
+:UPDATED: 2026-04-21
+:END:
+
+/Matheuristics/ are heuristics that use a MIP solver as a subroutine.
+citet:fischetti-matheuristics-2016 define the term in their Handbook of
+Heuristics chapter as any algorithm that "interleaves heuristic moves with
+the exact solution of auxiliary mathematical programs." Large Neighborhood
+Search (see [[file:large-neighborhood-search.org][LNS]]) is the best-known example — every LNS heuristic is
+technically a matheuristic — but the family is broader. Matheuristics
+exploit /problem structure/ that a generic MIP solver does not know about:
+a rolling time horizon in production planning, a small "core" set of
+variables in a large combinatorial problem, or a primal-dual decomposition
+of the variable set. SCIP and HiGHS largely omit these heuristics from
+their generic portfolios because they require application knowledge.
+discopt, with a Python modeling layer and a user base that hand-writes
+structured models, is well positioned to offer them as reusable modeling
+primitives.
+
+** Why discopt Should Care
+
+The classical LNS heuristics (RINS, RENS, DINS — see
+[[file:large-neighborhood-search.org][LNS]]) are /problem-agnostic/. They fix variables based on LP/incumbent
+values without looking at the model's structural metadata. Matheuristics
+do look at structure: time indices, component indices, priority orderings.
+When discopt's users hand-write a lot-sizing model, a scheduling model, or
+a process-synthesis model, the index structure is in the model — and
+matheuristics can consume it directly. This is a differentiator vs. SCIP
+and HiGHS, which see only a flattened CSR matrix by the time heuristics
+run.
+
+**Host for all matheuristics: Python.** Each iteration solves a sub-MIP
+via recursive =Model.solve()=; orchestration cost is negligible.
+
+** Relax-and-Fix (Fix-and-Optimize)
+
+The canonical time-indexed matheuristic. Given a model with a time dimension
+$t = 1, \ldots, T$, relax-and-fix partitions the time horizon into
+overlapping windows and solves each window's MIP to optimality while
+relaxing integrality outside the window. After each window solve, the
+integer variables /inside/ the window are fixed, the window shifts forward,
+and the next window is solved. The entire horizon is covered in $T/k$ solves
+where $k$ is the window size.
+
+The closely-related /fix-and-optimize/ heuristic is the reverse pass:
+starting from any feasible solution, re-optimize overlapping windows while
+fixing the rest. citet:helber-sahling-2010 apply this to multi-level
+capacitated lot sizing and report dramatic improvements over the monolithic
+MIP on instances with $T = 24$ or larger. citet:pochet-wolsey-2006 treat
+the family comprehensively in their production-planning textbook.
+
+For discopt, implementing relax-and-fix requires (1) user-declared time
+indices in the modeling API, (2) =Model.relax_integrality(subset)=, and
+(3) a scheduling layer that rolls the window forward. All of these are
+Python-level.
+
+** Kernel Search
+
+citet:angelelli-mansini-speranza-2010 proposed /kernel search/ for problems
+where the optimal solution uses only a small subset of the decision
+variables. Start by solving a restricted MIP over an initial "kernel" set
+of variables (e.g., the variables with positive LP-relaxation values). If
+the restricted MIP is feasible and its objective improves on the incumbent,
+expand the kernel by adding variables that are near-feasible at the current
+solution and re-solve. Iterate until no improvement is found.
+
+Kernel search shines on set-partitioning, set-covering, and multi-
+dimensional knapsack problems, where the number of variables is huge but
+only a few are selected at optimality. It is essentially a /column-driven/
+LNS — whereas RINS fixes variables, kernel search /excludes/ variables.
+
+For discopt, kernel search requires a =Model.restrict_variables(subset)=
+primitive. It is Python-level, lightweight, and would fit in a
+=python/discopt/heuristics/kernel_search.py= module.
+
+** Combinatorial Benders as a Primal Heuristic
+
+citet:codato-fischetti-2006 introduced combinatorial Benders cuts for MIPs
+with a decomposable structure: a master problem with binary "design"
+variables and a slave problem with continuous "operating" variables. The
+classical Benders cut is a single linear inequality derived from the
+slave's dual; the combinatorial Benders cut is a no-good on the master's
+binary assignment. Iterating "solve master, solve slave, add cut, repeat"
+converges to a feasible primal in a small number of steps on structured
+problems.
+
+As a /heuristic/ (rather than an exact decomposition), combinatorial
+Benders is useful when the master is easy and the slave is cheap. Even a
+few iterations typically produce high-quality incumbents for two-stage
+stochastic and design-operation problems — a natural fit for discopt's
+process-synthesis user base.
+
+** OR-Tools CP-SAT LNS Patterns
+
+Google's OR-Tools CP-SAT solver citep:ortools-cpsat-2024 (Apache-2.0) has
+a LNS portfolio more aggressive than SCIP's or HiGHS's. Key patterns that
+discopt can adopt verbatim:
+
+- **Scheduling-aware destroy operators**: on scheduling problems, destroy
+  contiguous time intervals (not random subsets), because the sub-MIP over
+  a contiguous interval is a much smaller scheduling problem that is
+  often trivially solvable.
+- **Variable-graph-based destroy**: destroy a connected component in the
+  variable-constraint graph around a seed variable, similar to GINS but
+  with more sophisticated seeding.
+- **Restart-and-reassign with objective stagnation**: restart the LNS
+  loop with a different random seed whenever the objective stagnates for
+  $k$ iterations, rather than running to exhaustion.
+- **Portfolio parallelism**: run multiple LNS arms in parallel threads,
+  each with a different destroy operator, and share the best incumbent.
+
+CP-SAT's Apache-2.0 license permits direct adaptation of these patterns
+into discopt's Python heuristic module. **Host: Python** orchestrators
+over the Rust sub-solver.
+
+** Proximity Search as a Matheuristic
+
+citet:fischetti-monaci-proximity-2014 (see [[file:large-neighborhood-search.org][LNS]]) is often classified as
+an LNS heuristic but is structurally a matheuristic: it modifies the
+objective function and solves an auxiliary MIP whose optimum is by
+construction close to the incumbent. Proximity search is the template for
+/objective-replacement/ matheuristics, a family that includes local
+branching (replace distance with a constraint), Rothberg's crossover
+(replace with a "consensus" objective), and combinatorial Benders (replace
+with a master-slave bifurcation).
+
+** Matheuristics for MINLP
+
+The matheuristic family extends naturally to MINLP because the
+inner-solver call can be a convex MINLP or an NLP rather than a MILP.
+citet:berthold-gleixner-undercover-2014 (Undercover, see
+[[file:mip-primal-heuristics.org][MIP primal heuristics]]) is a matheuristic in this sense: it uses a
+vertex-cover MIP to pick which variables to fix, then solves an LP/MILP
+over the residual. For discopt, the combination of matheuristics with the
+JAX DAG is particularly powerful: the matheuristic's sub-problem
+formulation can be generated symbolically from the parent DAG, ensuring
+consistency between the heuristic and the exact solver.
+
+** Port-Order Recommendation
+
+Given discopt's stack, the practical order is:
+
+1. **Relax-and-fix** — requires time-index metadata, highest benchmark
+   impact on lot-sizing and scheduling instances. Pair with a built-in
+   =@time_index= decorator in the modeling API.
+2. **Kernel search** — requires =Model.restrict_variables()=; high impact
+   on set-covering and knapsack.
+3. **CP-SAT-style scheduling destroy operators** — slot into the ALNS
+   controller as additional arms.
+4. **Combinatorial Benders** — requires master/slave decomposition
+   metadata; natural fit for process-synthesis users.
+5. **Undercover/sub-NLP family** for MINLP — reuses discopt's JAX DAG
+   and cyipopt wrapper.
+
+Each is a few hundred lines of Python and reuses the =Model.clone()=,
+=Model.fix_variable()=, =Model.add_constraint()=, and
+=Model.restrict_variables()= primitives that the core LNS port already
+establishes.
+
+** License and Reproducibility
+
+All cited matheuristic papers are paper-described with no copy-translation
+concerns. OR-Tools CP-SAT is Apache-2.0; direct source adaptation is
+license-safe. The Pochet-Wolsey textbook (citet:pochet-wolsey-2006) is a
+textbook reference only — the heuristic patterns in it are decades old and
+not copyrightable.
+
+** Role in discopt
+
+Matheuristics occupy the /structure-aware Python/ tier of discopt's
+heuristic stack. Where [[file:learning-based-mip-heuristics.org][learning-based heuristics]] learn structure from
+data and [[file:first-order-mip-heuristics.org][first-order heuristics]] exploit GPU parallelism, matheuristics
+exploit /user-declared/ structure — and discopt's modeling API is where
+users declare that structure most naturally. This article records the
+family so that future users and contributors see matheuristics as a
+first-class target rather than a hand-rolled per-instance trick.

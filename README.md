@@ -3,9 +3,12 @@
 [![PyPI](https://img.shields.io/pypi/v/discopt)](https://pypi.org/project/discopt/)
 [![CI](https://github.com/jkitchin/discopt/actions/workflows/ci.yml/badge.svg)](https://github.com/jkitchin/discopt/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/jkitchin/discopt/graph/badge.svg?token=B3Y6LAtox9)](https://codecov.io/gh/jkitchin/discopt)
-[![DOI](https://zenodo.org/badge/1151864770.svg)](https://zenodo.org/badge/latestdoi/1151864770)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19762815.svg)](https://doi.org/10.5281/zenodo.19762815)
+![PyPI Downloads](https://img.shields.io/pypi/dm/discopt.svg)
 
 [![discopt](https://github.com/jkitchin/discopt/blob/main/discopt.png?raw=true)](https://github.com/jkitchin/discopt/blob/main/discopt.png?raw=true)
+
+
 
 A hybrid Mixed-Integer Nonlinear Programming (MINLP) solver combining a Rust backend, JAX automatic differentiation, and Python orchestration. Solves MINLP problems via NLP-based spatial Branch and Bound with JIT-compiled objective/gradient/Hessian evaluation.
 
@@ -129,17 +132,30 @@ JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 pytest python/tests/ -v
 After installation, the `discopt` command is available on your PATH:
 
 ```bash
-# Search arXiv for recent papers
-discopt search-arxiv 'all:"spatial branch and bound"' --max-results 10 --start-date 2026-01-01
-
-# Search OpenAlex
-discopt search-openalex "McCormick relaxation" --from-date 2026-01-01 --to-date 2026-03-31
-
-# Write a report from stdin
-echo "report content" | discopt write-report reports/output.md
+discopt about            # Version and installation info
+discopt test             # Smoke-test the install
+discopt convert in.gms out.nl
+discopt install-skills   # Install Claude Code slash commands and agents
 ```
 
-All subcommands output structured JSON, making them suitable for scripting and integration with other tools. The `discoptbot` literature scanner skill uses these subcommands to automatically find and summarize relevant new papers from arXiv and OpenAlex.
+A separate `discopt-dev` script ships developer-only commands used from inside
+a discopt source checkout (literature scanner, adversary tester, the arXiv /
+OpenAlex search helpers and the report writer they call):
+
+```bash
+# Search arXiv for recent papers
+discopt-dev search-arxiv 'all:"spatial branch and bound"' --max-results 10 --start-date 2026-01-01
+
+# Search OpenAlex
+discopt-dev search-openalex "McCormick relaxation" --from-date 2026-01-01 --to-date 2026-03-31
+
+# Write a report from stdin
+echo "report content" | discopt-dev write-report reports/output.md
+```
+
+All `discopt-dev` search subcommands output structured JSON. The `/discoptbot`
+literature-scanner slash command uses them to automatically find and summarize
+relevant new papers from arXiv and OpenAlex.
 
 ## Documentation
 

@@ -1,0 +1,64 @@
+#+TITLE: Bound Tightening (FBBT and OBBT)
+#+FILETAGS: :method:fbbt:obbt:bound-tightening:domain-reduction:global-optimization:
+
+* Bound Tightening (FBBT and OBBT)
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: belotti2009 gleixner2017 ryoo1996 schichl2005 caprara2010 puranik2017 belotti2010 belotti2013pairs
+:STATUS: revised
+:CREATED: 2026-04-04
+:REVISED: 2026-04-16
+:END:
+
+Bound tightening, also called domain reduction, is a preprocessing and node-processing technique that narrows variable bounds throughout a [[file:spatial-branch-and-bound.org][spatial branch-and-bound]] tree. Tighter bounds lead directly to tighter convex relaxations (such as [[file:mccormick-relaxations.org][McCormick envelopes]]), which in turn yield stronger lower bounds and more aggressive pruning. citet:caprara2010 showed that for certain problem classes aggressive domain reduction can reduce the number of branch-and-bound nodes exponentially, making it one of the most impactful algorithmic components in global optimization solvers.
+
+The modern practice distinguishes two complementary families of techniques: feasibility-based bound tightening (FBBT), which is cheap and applied at every node, and optimality-based bound tightening (OBBT), which is more expensive and applied selectively. Both were codified together in the branch-and-reduce framework of citet:ryoo1996, which augments spatial branching with systematic range contraction at every node of the search tree. That framework became the algorithmic backbone of the BARON solver and is now standard in all major global optimization codes citep:belotti2009,puranik2017.
+
+** Feasibility-Based Bound Tightening (FBBT)
+
+FBBT uses constraint propagation to infer tighter variable bounds from the constraint structure alone. Given a constraint g(x) <= 0 and the current variable bounds, FBBT analyzes the algebraic form of g to deduce that some variables cannot attain certain values without violating the constraint. The theoretical foundation for FBBT on general nonlinear expressions was provided by citet:schichl2005, who formalized the technique as interval arithmetic propagation over a directed acyclic graph (DAG).
+
+The DAG representation of an expression tree enables a two-pass procedure. In the forward pass, interval arithmetic propagates input variable bounds upward through every intermediate node, computing an enclosure of each subexpression's range. In the backward pass (constraint propagation), the known output interval of the root node, typically determined by the constraint right-hand side, is pushed downward through the DAG to tighten the intervals at intermediate and leaf nodes. Because the DAG may share subexpressions across multiple constraints, this structure allows intermediate results to be computed once and reused, making the procedure efficient in practice.
+
+As a concrete example, consider the constraint x + y <= 5 with initial bounds x in [0, 10] and y in [0, 10]. The forward pass gives x + y in [0, 20]. The backward pass uses the constraint to restrict x + y to (-inf, 5], which in turn tightens x to [0, 5] and y to [0, 5].
+
+The cost of a single FBBT pass is linear in the number of DAG nodes, and the procedure can be iterated until a fixed point is reached. When the tightened bounds become inconsistent (an empty interval), the current node is infeasible and can be pruned immediately. In discopt, FBBT is implemented in the Rust core via expression DAG propagation and is applied at every node of the branch-and-bound tree.
+
+A subtle worst-case issue is that FBBT iteration need not terminate in finite time: bound shrinks can feed back through nonlinear atoms indefinitely. citet:belotti2010 resolved this by writing the FBBT fixed-point conditions as constraints of an auxiliary mathematical program and proving that the resulting program is an LP. Solving that LP delivers the exact FBBT limit in a single solve, guaranteeing termination with the tightest bounds any finite iteration could reach. This reformulation is implemented in Couenne and underpins its node-level domain reduction.
+
+** Optimality-Based Bound Tightening (OBBT)
+
+OBBT obtains tighter bounds by solving auxiliary optimization problems. For each variable x_i the solver minimizes and maximizes x_i subject to the convex relaxation of the feasible set. The optimal values of these 2n subproblems give the tightest bounds that the relaxation can certify citep:ryoo1996. Because these bounds exploit the global constraint structure rather than individual constraints in isolation, OBBT can produce significantly tighter domains than FBBT, especially for variables that participate in multiple nonlinear terms.
+
+The main drawback is cost: each OBBT round requires solving up to 2n linear or convex programs. citet:gleixner2017 addressed this with three practical enhancements implemented in SCIP. First, filtering heuristics identify variables whose bounds are unlikely to tighten, allowing the solver to skip the corresponding LP solves. Second, grouping techniques batch several bound-tightening objectives into a single LP by exploiting shared constraint structure. Third, iterative propagation interleaves OBBT rounds with FBBT so that bounds tightened by one LP solve are immediately propagated through constraints before the next solve. Together these enhancements make OBBT practical even for large-scale problems.
+
+In the branch-and-reduce framework of citet:ryoo1996, OBBT is complemented by probing techniques that tentatively fix a variable to one of its bounds and propagate the consequences. If fixing x_i = x_i^L leads to infeasibility, the solver can raise the lower bound; analogous reasoning applies to the upper bound. Probing can be viewed as a discrete analogue of OBBT that is especially effective for integer and binary variables.
+
+** Pairs-of-Inequalities Bound Reduction
+
+Sitting between cheap FBBT and expensive OBBT on the cost/strength spectrum, citet:belotti2013pairs introduced a technique that combines /pairs/ of linear inequalities from the LP relaxation to deduce tighter bounds than either constraint alone provides. For each ordered pair of inequalities, a small parametric auxiliary problem is solved to extract the strongest bound their linear combination implies. An O(m^2 n^2) algorithm makes the procedure practical inside a branch-and-bound loop. Implemented in Couenne and a companion MILP solver, the method measurably reduces root-node gap and tree size on standard benchmark libraries without the per-variable LP-solve cost of OBBT.
+
+** Interval Analysis on DAGs
+
+The work of citet:schichl2005 placed FBBT on rigorous mathematical footing by connecting it to interval analysis. On a DAG representation of a factorable program, each elementary operation (addition, multiplication, division, univariate functions) has well-known interval extension rules. Forward evaluation yields an enclosure of every subexpression, and backward propagation inverts those rules to contract the input intervals.
+
+This DAG-based perspective has two important advantages over naive application of interval arithmetic to flattened expressions. First, the DAG avoids the "dependency problem" that arises when the same variable appears multiple times in a flattened expression, because each variable node appears only once and its interval is shared. Second, the DAG structure naturally supports incremental updates: when a bound is tightened at one node, only the ancestors and descendants of that node need to be re-evaluated, rather than the entire expression.
+
+** Interaction with Relaxations and Branching
+
+The quality of bound tightening is tightly coupled to the quality of convex relaxations and the branching strategy. [[file:mccormick-relaxations.org][McCormick relaxations]] become tighter as the variable domains shrink, because the gap between the convex envelope and the original nonconvex function narrows with the domain width. This creates a virtuous cycle: tighter bounds produce tighter relaxations, which produce better lower bounds, which enable more pruning and further tightening.
+
+citet:caprara2010 analyzed this interplay theoretically and identified problem classes where domain reduction is provably effective. Their analysis shows that when the feasible region occupies a small fraction of the original variable domain, even modest fractional reductions in each variable's range compound multiplicatively across dimensions, yielding exponential reductions in the volume of the search space.
+
+In practice, the most effective strategy combines FBBT (cheap, applied at every node) with OBBT (expensive, applied at the root and selectively at deeper nodes). citet:belotti2009 documented this combination in the Couenne solver, and the same architecture is used in BARON citep:ryoo1996, SCIP citep:gleixner2017, and discopt's own [[file:spatial-branch-and-bound.org][spatial branch-and-bound]] implementation.
+
+** References
+
+- citep:ryoo1996 -- Branch-and-reduce framework (FBBT + OBBT + probing)
+- citep:schichl2005 -- Interval analysis on DAGs for FBBT
+- citep:gleixner2017 -- Three enhancements for practical OBBT
+- citep:caprara2010 -- Theoretical analysis of domain reduction effectiveness
+- citep:belotti2009 -- Branching and bounds tightening in Couenne
+- citep:belotti2010 -- FBBT as a fixed-point LP
+- citep:belotti2013pairs -- Bound reduction from pairs of linear inequalities
+- citep:puranik2017 -- Comprehensive survey of domain reduction techniques

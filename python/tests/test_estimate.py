@@ -325,3 +325,28 @@ class TestAnalyticVerification:
 
         var_analytic = sigma**2 / np.sum(x_data**2)
         np.testing.assert_allclose(result.covariance[0, 0], var_analytic, rtol=1e-3)
+
+    def test_array_observations_narrow_covariance(self):
+        """Repeated observations of the same response tighten the covariance.
+
+        Regression test: ``estimate_parameters`` used to silently drop all
+        but the first element of an array-valued observation, which stopped
+        :func:`sequential_doe` from narrowing CIs as data accumulated.
+        Under the fix, for ``y = k*x`` with ``n`` repeated measurements per
+        design point, Var(k) scales like ``1/n``.
+        """
+        x_data = np.array([1.0, 2.0, 3.0])
+        exp = SingleParamExperiment(x_data)
+
+        # Single-observation baseline: the analytic variance.
+        baseline_data = {f"y_{i}": 2.0 * x_data[i] for i in range(len(x_data))}
+        var_single = estimate_parameters(exp, baseline_data).covariance[0, 0]
+
+        # Five identical replicates per design point should give variance
+        # exactly 1/5 of the single-observation variance.
+        n_rep = 5
+        rep_data = {f"y_{i}": np.full(n_rep, 2.0 * x_data[i]) for i in range(len(x_data))}
+        result_rep = estimate_parameters(exp, rep_data)
+
+        np.testing.assert_allclose(result_rep.covariance[0, 0], var_single / n_rep, rtol=1e-3)
+        assert result_rep.n_observations == n_rep * len(x_data)

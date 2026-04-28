@@ -1164,12 +1164,12 @@ class TestAmpEndToEnd:
 
     @pytest.mark.smoke
     def test_nlp1_bilinear_global_optimum(self):
-        """nlp1: bilinear MINLP solved to global optimum ≈ 58.38368."""
+        """nlp1: AMP should recover the known incumbent without invalid OA certificates."""
 
         m = _make_nlp1()
         result = m.solve(solver="amp", rel_gap=1e-3, time_limit=60)
-        assert result.status == "optimal", f"Expected optimal, got {result.status}"
-        assert result.gap_certified is True, "Gap must be certified for AMP"
+        assert result.status in ("optimal", "feasible"), f"Unexpected status {result.status}"
+        assert result.gap_certified is (result.status == "optimal")
         assert result.objective is not None
         assert abs(result.objective - NLP1_OPTIMUM) <= 0.15, (
             f"Objective {result.objective:.5f} too far from {NLP1_OPTIMUM}"
@@ -1231,11 +1231,11 @@ class TestAmpEndToEnd:
 
     @pytest.mark.smoke
     def test_trilinear_global_optimum(self):
-        """A simple AM-GM trilinear instance should converge to the global optimum 3."""
+        """A simple AM-GM trilinear instance should recover the known incumbent."""
         m = _make_trilinear_cover()
         result = m.solve(solver="amp", rel_gap=1e-3, time_limit=60)
-        assert result.status == "optimal"
-        assert result.gap_certified is True
+        assert result.status in ("optimal", "feasible")
+        assert result.gap_certified is (result.status == "optimal")
         assert result.objective is not None
         assert abs(result.objective - 3.0) <= 1e-3
 
@@ -1720,80 +1720,183 @@ class TestCurrentCodeWeaknesses:
         """Quadratic norm constraints should clamp otherwise unbounded domains."""
         from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
 
-        m = Model("sum_of_squares_bound_tightening")
-        x = m.continuous("x", lb=-1.0, ub=1.0)
-        y = m.continuous("y")
-        z = m.integer("z", lb=-1e20, ub=1e20)
-        m.minimize(x * 0.0)
-        m.subject_to(x**2 + y**2 + z**2 <= 10.0)
+        m = Model("bt_sum_of_squares")
+        x = m.continuous("x", lb=-1e20, ub=1e20)
+        y = m.integer("y", lb=-100, ub=100)
+        m.subject_to(x**2 + y**2 <= 10.0)
+        m.minimize(x * 0.0 + y * 0.0)
 
-        flat_lb, flat_ub = flat_variable_bounds(m)
+        flat_lb = np.array([-1e20, -100.0], dtype=np.float64)
+        flat_ub = np.array([1e20, 100.0], dtype=np.float64)
         tightened_lb, tightened_ub, stats = tighten_nonlinear_bounds(m, flat_lb, flat_ub)
 
-        assert tightened_lb[1] == pytest.approx(-np.sqrt(10.0))
-        assert tightened_ub[1] == pytest.approx(np.sqrt(10.0))
-        assert tightened_lb[2] == pytest.approx(-3.0)
-        assert tightened_ub[2] == pytest.approx(3.0)
-        assert stats.applied_rules == ("sum_of_squares_upper_bound",)
+        radius = np.sqrt(10.0)
+        assert tightened_lb[0] == pytest.approx(-radius)
+        assert tightened_ub[0] == pytest.approx(radius)
+        assert tightened_lb[1] == pytest.approx(-3.0)
+        assert tightened_ub[1] == pytest.approx(3.0)
+        assert "sum_of_squares_upper_bound" in stats.applied_rules
 
-    def test_solver_fbbt_applies_nonlinear_rules_without_linear_constraints(self):
-        """The shared nonlinear tightening rules should run through solver FBBT too."""
-        from discopt._jax.nlp_evaluator import NLPEvaluator
-        from discopt.solver import _infer_constraint_bounds, _tighten_node_bounds
+    def test_tighten_separable_quadratic_bounds_infers_finite_box(self):
+        """Constraints like x + y^2 <= c should infer finite bounds for both variables."""
+        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
 
-        m = Model("nonlinear_fbbt_sum_of_squares")
-        x = m.continuous("x", lb=-1.0, ub=1.0)
-        y = m.continuous("y")
-        z = m.integer("z", lb=-1e20, ub=1e20)
+        m = Model("bt_separable_quadratic")
+        x = m.continuous("x", lb=0.0, ub=1e20)
+        y = m.continuous("y", lb=-1e20, ub=1e20)
+        m.subject_to(x + y**2 <= 4.0)
+        m.minimize(x * 0.0 + y * 0.0)
+
+        flat_lb = np.array([0.0, -1e20], dtype=np.float64)
+        flat_ub = np.array([1e20, 1e20], dtype=np.float64)
+        tightened_lb, tightened_ub, stats = tighten_nonlinear_bounds(m, flat_lb, flat_ub)
+
+        assert tightened_lb[0] == pytest.approx(0.0)
+        assert tightened_ub[0] == pytest.approx(4.0)
+        assert tightened_lb[1] == pytest.approx(-2.0)
+        assert tightened_ub[1] == pytest.approx(2.0)
+        assert "separable_quadratic_upper_bound" in stats.applied_rules
+
+    def test_tighten_monotone_function_bounds(self):
+        """Monotone unary constraints should tighten affine argument domains."""
+        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+
+        m = Model("bt_monotone_functions")
+        x = m.continuous("x", lb=-1e20, ub=1e20)
+        y = m.continuous("y", lb=0.0, ub=1e20)
+        z = m.continuous("z", lb=-1e20, ub=1e20)
+        m.subject_to(dm.exp(x) <= 100.0)
+        m.subject_to(dm.log(y) >= 2.0)
+        m.subject_to(dm.sqrt(z) <= 3.0)
+        m.minimize(x * 0.0 + y * 0.0 + z * 0.0)
+
+        tightened_lb, tightened_ub, stats = tighten_nonlinear_bounds(
+            m,
+            np.array([-1e20, 0.0, -1e20], dtype=np.float64),
+            np.array([1e20, 1e20, 1e20], dtype=np.float64),
+        )
+
+        assert tightened_ub[0] == pytest.approx(np.log(100.0))
+        assert tightened_lb[1] == pytest.approx(np.exp(2.0))
+        assert tightened_lb[2] == pytest.approx(0.0)
+        assert tightened_ub[2] == pytest.approx(9.0)
+        assert "monotone_function_bounds" in stats.applied_rules
+
+    def test_tighten_sign_stable_reciprocal_bounds(self):
+        """Reciprocal propagation should only apply on sign-stable denominator boxes."""
+        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+
+        m = Model("bt_reciprocal")
+        x = m.continuous("x", lb=0.1, ub=1e20)
+        y = m.continuous("y", lb=-1e20, ub=-0.1)
+        z = m.continuous("z", lb=-1.0, ub=1.0)
+        m.subject_to(1.0 / x <= 0.25)
+        m.subject_to(1.0 / y >= -0.25)
+        m.subject_to(1.0 / z <= 0.25)
+        m.minimize(x * 0.0 + y * 0.0 + z * 0.0)
+
+        tightened_lb, tightened_ub, stats = tighten_nonlinear_bounds(
+            m,
+            np.array([0.1, -1e20, -1.0], dtype=np.float64),
+            np.array([1e20, -0.1, 1.0], dtype=np.float64),
+        )
+
+        assert tightened_lb[0] == pytest.approx(4.0)
+        assert tightened_ub[1] == pytest.approx(-4.0)
+        assert tightened_lb[2] == pytest.approx(-1.0)
+        assert tightened_ub[2] == pytest.approx(1.0)
+        assert "reciprocal_bounds" in stats.applied_rules
+
+    def test_nonlinear_bound_tightening_reports_quadratic_contradiction(self):
+        """A rule proof of infeasibility should be reported explicitly."""
+        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+
+        m = Model("bt_quadratic_contradiction")
+        x = m.continuous("x", lb=-10.0, ub=10.0)
+        m.subject_to(x**2 == -1.0)
         m.minimize(x * 0.0)
-        m.subject_to(x**2 + y**2 + z**2 <= 10.0)
-
-        evaluator = NLPEvaluator(m)
-        flat_lb, flat_ub = flat_variable_bounds(m)
-        cl_list, cu_list = _infer_constraint_bounds(m, evaluator)
-        tightened_lb, tightened_ub = _tighten_node_bounds(
-            evaluator, flat_lb, flat_ub, cl_list, cu_list
-        )
-
-        assert tightened_lb[1] == pytest.approx(-np.sqrt(10.0))
-        assert tightened_ub[1] == pytest.approx(np.sqrt(10.0))
-        assert tightened_lb[2] == pytest.approx(-3.0)
-        assert tightened_ub[2] == pytest.approx(3.0)
-
-    def test_nonlinear_bound_tightening_accepts_custom_rules(self):
-        """The shared nonlinear tightening runner should stay open to new rules."""
-        from discopt._jax.nonlinear_bound_tightening import (
-            NonlinearBoundTighteningRule,
-            tighten_nonlinear_bounds,
-        )
-
-        class CustomClampRule(NonlinearBoundTighteningRule):
-            name = "custom_clamp"
-
-            def tighten(self, model, flat_lb, flat_ub, metadata):
-                tightened_lb = flat_lb.copy()
-                tightened_ub = flat_ub.copy()
-                tightened_lb[0] = max(tightened_lb[0], -2.0)
-                tightened_ub[0] = min(tightened_ub[0], 2.0)
-                return tightened_lb, tightened_ub
-
-        m = Model("custom_nonlinear_rule")
-        m.continuous("x", lb=-10.0, ub=10.0)
-        m.minimize(0.0)
 
         tightened_lb, tightened_ub, stats = tighten_nonlinear_bounds(
             m,
             np.array([-10.0], dtype=np.float64),
             np.array([10.0], dtype=np.float64),
-            rules=(CustomClampRule(),),
         )
 
-        assert tightened_lb[0] == pytest.approx(-2.0)
+        assert stats.infeasible is True
+        assert "sum_of_squares_upper_bound" in stats.applied_rules
+        assert "negative upper bound" in (stats.infeasibility_reason or "")
+        assert tightened_lb[0] == pytest.approx(-10.0)
+        assert tightened_ub[0] == pytest.approx(10.0)
+
+    def test_nonlinear_bound_tightening_reports_monotone_domain_contradiction(self):
+        """Domain/range contradictions should not be encoded as invalid boxes."""
+        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+
+        sqrt_model = Model("bt_sqrt_contradiction")
+        sqrt_x = sqrt_model.continuous("x", lb=0.0, ub=10.0)
+        sqrt_model.subject_to(dm.sqrt(sqrt_x) <= -1.0)
+        sqrt_model.minimize(sqrt_x * 0.0)
+
+        tightened_lb, tightened_ub, stats = tighten_nonlinear_bounds(
+            sqrt_model,
+            np.array([0.0], dtype=np.float64),
+            np.array([10.0], dtype=np.float64),
+        )
+
+        assert stats.infeasible is True
+        assert "monotone_function_bounds" in stats.applied_rules
+        assert "sqrt(argument) cannot be <=" in (stats.infeasibility_reason or "")
+        assert tightened_lb[0] == pytest.approx(0.0)
+        assert tightened_ub[0] == pytest.approx(10.0)
+
+        exp_model = Model("bt_exp_contradiction")
+        exp_x = exp_model.continuous("x", lb=-10.0, ub=10.0)
+        exp_model.subject_to(dm.exp(exp_x) <= -1.0)
+        exp_model.minimize(exp_x * 0.0)
+
+        _, _, exp_stats = tighten_nonlinear_bounds(
+            exp_model,
+            np.array([-10.0], dtype=np.float64),
+            np.array([10.0], dtype=np.float64),
+        )
+
+        assert exp_stats.infeasible is True
+        assert "exp(argument) cannot be <=" in (exp_stats.infeasibility_reason or "")
+
+    def test_nonlinear_bound_tightening_accepts_custom_rules(self):
+        """The shared registry should accept external sound rule objects."""
+        from discopt._jax.nonlinear_bound_tightening import (
+            NonlinearBoundTighteningRule,
+            tighten_nonlinear_bounds,
+        )
+
+        class ClampFirstVarRule(NonlinearBoundTighteningRule):
+            name = "custom_clamp"
+
+            def tighten(self, model, flat_lb, flat_ub, metadata):
+                del model, metadata
+                new_lb = flat_lb.copy()
+                new_ub = flat_ub.copy()
+                new_ub[0] = min(float(new_ub[0]), 2.0)
+                return new_lb, new_ub
+
+        m = Model("custom_bt")
+        x = m.continuous("x", lb=0.0, ub=10.0)
+        m.minimize(x)
+
+        tightened_lb, tightened_ub, stats = tighten_nonlinear_bounds(
+            m,
+            np.array([0.0], dtype=np.float64),
+            np.array([10.0], dtype=np.float64),
+            rules=(ClampFirstVarRule(),),
+        )
+
+        assert tightened_lb[0] == pytest.approx(0.0)
         assert tightened_ub[0] == pytest.approx(2.0)
         assert stats.applied_rules == ("custom_clamp",)
 
-    def test_tighten_separable_quadratic_bounds_infers_finite_box(self):
-        """Constraints like x + y^2 <= c should infer finite bounds for both variables."""
+    def test_minlptests_108_tightens_separable_quadratic_bounds(self):
+        """Translated MINLPTests 108 cases should benefit from shared nonlinear tightening."""
         from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
 
         instance = MINLPTESTS_CVX_BY_ID["nlp_cvx_108_010"]
@@ -1807,6 +1910,110 @@ class TestCurrentCodeWeaknesses:
         assert tightened_lb[1] == pytest.approx(0.0)
         assert tightened_ub[1] == pytest.approx(np.sqrt(2.0))
         assert "separable_quadratic_upper_bound" in stats.applied_rules
+
+    def test_solver_fbbt_applies_nonlinear_rules_without_linear_constraints(self):
+        """The shared nonlinear tightening rules should run through solver FBBT too."""
+        from discopt._jax.nlp_evaluator import NLPEvaluator
+        from discopt.solver import _infer_constraint_bounds, _tighten_node_bounds
+
+        m = Model("nonlinear_fbbt_sum_of_squares")
+        x = m.continuous("x", lb=-1e20, ub=1e20)
+        y = m.integer("y", lb=-100, ub=100)
+        m.subject_to(x**2 + y**2 <= 9.0)
+        m.minimize(x * 0.0 + y * 0.0)
+
+        evaluator = NLPEvaluator(m)
+        cl, cu = _infer_constraint_bounds(m)
+        tightened_lb, tightened_ub = _tighten_node_bounds(
+            evaluator,
+            np.array([-1e20, -100.0], dtype=np.float64),
+            np.array([1e20, 100.0], dtype=np.float64),
+            cl,
+            cu,
+        )
+
+        assert tightened_lb[0] == pytest.approx(-3.0)
+        assert tightened_ub[0] == pytest.approx(3.0)
+        assert tightened_lb[1] == pytest.approx(-3.0)
+        assert tightened_ub[1] == pytest.approx(3.0)
+
+    def test_solver_fbbt_applies_monotone_nonlinear_rules(self):
+        """Solver FBBT should reuse the shared monotone function tightening rule."""
+        from discopt._jax.nlp_evaluator import NLPEvaluator
+        from discopt.solver import _infer_constraint_bounds, _tighten_node_bounds
+
+        m = Model("nonlinear_fbbt_monotone")
+        x = m.continuous("x", lb=-1e20, ub=1e20)
+        y = m.continuous("y", lb=0.0, ub=1e20)
+        m.subject_to(dm.exp(x) <= 10.0)
+        m.subject_to(dm.log(y) >= 1.0)
+        m.minimize(x * 0.0 + y * 0.0)
+
+        evaluator = NLPEvaluator(m)
+        cl, cu = _infer_constraint_bounds(m)
+        tightened_lb, tightened_ub = _tighten_node_bounds(
+            evaluator,
+            np.array([-1e20, 0.0], dtype=np.float64),
+            np.array([1e20, 1e20], dtype=np.float64),
+            cl,
+            cu,
+        )
+
+        assert tightened_ub[0] == pytest.approx(np.log(10.0))
+        assert tightened_lb[1] == pytest.approx(np.e)
+
+    def test_solver_fbbt_reports_nonlinear_infeasibility_status(self):
+        """The FBBT entry point should expose proven nonlinear infeasibility."""
+        from discopt._jax.nlp_evaluator import NLPEvaluator
+        from discopt.solver import _infer_constraint_bounds, _tighten_node_bounds_with_status
+
+        m = Model("nonlinear_fbbt_contradiction")
+        x = m.continuous("x", lb=-10.0, ub=10.0)
+        m.subject_to(x**2 == -1.0)
+        m.minimize(x * 0.0)
+
+        evaluator = NLPEvaluator(m)
+        cl, cu = _infer_constraint_bounds(m)
+        tightened_lb, tightened_ub, infeasible = _tighten_node_bounds_with_status(
+            evaluator,
+            np.array([-10.0], dtype=np.float64),
+            np.array([10.0], dtype=np.float64),
+            cl,
+            cu,
+        )
+
+        assert infeasible is True
+        assert tightened_lb[0] == pytest.approx(-10.0)
+        assert tightened_ub[0] == pytest.approx(10.0)
+
+    def test_solver_returns_infeasible_for_nonlinear_tightening_contradiction(self):
+        """The main solver should consume root nonlinear infeasibility proofs."""
+        m = Model("solver_contradiction")
+        x = m.continuous("x", lb=-10.0, ub=10.0)
+        m.subject_to(x**2 == -1.0)
+        m.minimize(x)
+
+        result = m.solve(skip_convex_check=True, time_limit=5)
+
+        assert result.status == "infeasible"
+        assert result.x is None
+
+    def test_large_bound_warning_uses_declared_bounds_even_when_rules_tighten(self):
+        """A warning should not be suppressed unless solve paths use the tightened box."""
+        from discopt.solver import _check_finite_bounds
+
+        m = Model("large_bound_warning")
+        x = m.continuous("x", lb=-1e20, ub=1e20)
+        m.subject_to(x**2 <= 4.0)
+        m.minimize(x)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            _check_finite_bounds(m)
+
+        messages = [str(w.message) for w in caught]
+        assert any("very large or infinite declared bounds" in msg for msg in messages)
+        assert any("Nonlinear tightening can adjust" in msg for msg in messages)
 
     @pytest.mark.parametrize(
         "problem_id",
@@ -1850,34 +2057,6 @@ class TestCurrentCodeWeaknesses:
         assert result.objective is not None
         tol = 1e-6 + 1e-4 * abs(instance.expected_obj)
         assert abs(result.objective - instance.expected_obj) <= tol
-
-    def test_large_bound_warning_is_suppressed_when_nonlinear_tightening_fixes_it(self):
-        """Large raw bounds should not warn once shared tightening recovers a finite box."""
-        from discopt.solver import _check_finite_bounds
-
-        instance = MINLPTESTS_CVX_BY_ID["nlp_cvx_108_010"]
-        m = instance.build_fn()
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            _check_finite_bounds(m)
-
-        assert not any("very large or infinite bounds" in str(w.message) for w in caught)
-
-    def test_large_bound_warning_reports_post_tightening_residuals(self):
-        """The warning should describe remaining large bounds after cheap tightening."""
-        from discopt.solver import _check_finite_bounds
-
-        instance = MINLPTESTS_CVX_BY_ID["nlp_cvx_501_010_3d"]
-        m = instance.build_fn()
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            _check_finite_bounds(m)
-
-        messages = [str(w.message) for w in caught]
-        assert any("after nonlinear tightening" in message for message in messages)
-        assert any("x0" in message for message in messages)
 
     @pytest.mark.parametrize(
         "problem_id",
@@ -2060,6 +2239,167 @@ class TestCurrentCodeWeaknesses:
         tol = 1e-6 + 1e-4 * abs(instance.expected_obj)
         assert abs(result.objective - instance.expected_obj) <= tol
 
+    def test_amp_returns_infeasible_for_nonlinear_tightening_contradiction(self):
+        """AMP should stop before MILP/NLP solves when tightening proves infeasibility."""
+        m = Model("amp_contradiction")
+        x = m.continuous("x", lb=0.0, ub=10.0)
+        m.subject_to(dm.sqrt(x) <= -1.0)
+        m.minimize(x)
+
+        result = m.solve(solver="amp", skip_convex_check=True, max_iter=1, time_limit=5)
+
+        assert result.status == "infeasible"
+        assert result.x is None
+
+    def test_amp_uses_nonlinear_tightened_partition_bounds(self, monkeypatch):
+        """AMP should initialize partitions from the tightened nonlinear box."""
+        import discopt._jax.discretization as disc_mod
+        from discopt._jax.milp_relaxation import MilpRelaxationResult
+        from discopt.solvers import amp as amp_mod
+
+        captured = {}
+        real_initialize = disc_mod.initialize_partitions
+
+        def spy_initialize(part_vars, lb, ub, **kwargs):
+            captured["part_vars"] = list(part_vars)
+            captured["lb"] = list(lb)
+            captured["ub"] = list(ub)
+            return real_initialize(part_vars, lb=lb, ub=ub, **kwargs)
+
+        monkeypatch.setattr(disc_mod, "initialize_partitions", spy_initialize)
+        monkeypatch.setattr(
+            amp_mod,
+            "_solve_milp_with_oa_recovery",
+            lambda **kwargs: (
+                MilpRelaxationResult(status="error", objective=None, x=None),
+                {},
+                [],
+                1,
+            ),
+        )
+        monkeypatch.setattr(
+            amp_mod, "_recover_pure_continuous_solution", lambda *args, **kwargs: None
+        )
+        monkeypatch.setattr(
+            amp_mod,
+            "_solve_small_integer_domain_fallback",
+            lambda *args, **kwargs: (None, None),
+        )
+
+        m = Model("amp_bt_partition_bounds")
+        x = m.continuous("x", lb=-1e20, ub=1e20)
+        m.subject_to(x**2 <= 4.0)
+        m.minimize(x)
+
+        result = m.solve(solver="amp", skip_convex_check=True, max_iter=1, time_limit=30)
+
+        assert result.status == "error"
+        assert captured["part_vars"] == [0]
+        assert captured["lb"] == pytest.approx([-2.0])
+        assert captured["ub"] == pytest.approx([2.0])
+
+    def test_nonconvex_constraint_oa_cuts_respect_convexity_mask(self, monkeypatch):
+        """Nonconvex constraint rows must be excluded from evaluator OA cuts."""
+        from discopt._jax import cutting_planes
+
+        recorded_masks = []
+        real_generate = cutting_planes.generate_oa_cuts_from_evaluator
+
+        def wrapped_generate(*args, **kwargs):
+            convex_mask = kwargs.get("convex_mask")
+            if convex_mask is not None:
+                recorded_masks.append(list(convex_mask))
+            return real_generate(*args, **kwargs)
+
+        monkeypatch.setattr(cutting_planes, "generate_oa_cuts_from_evaluator", wrapped_generate)
+
+        m = Model("amp_nonconvex_constraint_mask")
+        x = m.continuous("x", lb=0, ub=2)
+        y = m.binary("y")
+        m.subject_to(x**2 - 4 * y - 1 <= 0)
+        m.subject_to(x**2 - x + y >= 0)
+        m.minimize(x + y)
+
+        result = m.solve(solver="amp", max_iter=1, rel_gap=1e-3, time_limit=30)
+
+        assert result.status in ("optimal", "feasible", "time_limit")
+        assert recorded_masks
+        assert all(mask == [True, False] for mask in recorded_masks)
+
+    def test_no_incumbent_after_search_returns_iteration_limit(self, monkeypatch):
+        """Exhausting AMP without an incumbent is not a proof of infeasibility."""
+        from discopt._jax.milp_relaxation import MilpRelaxationResult
+        from discopt.solvers import amp as amp_mod
+
+        m = Model("amp_no_incumbent")
+        x = m.continuous("x", lb=0, ub=1)
+        m.minimize(x)
+
+        monkeypatch.setattr(
+            amp_mod,
+            "_solve_milp_with_oa_recovery",
+            lambda **kwargs: (
+                MilpRelaxationResult(
+                    status="optimal",
+                    objective=0.0,
+                    x=np.array([0.0], dtype=np.float64),
+                ),
+                {},
+                [],
+                1,
+            ),
+        )
+        monkeypatch.setattr(
+            amp_mod,
+            "_solve_best_nlp_candidate",
+            lambda *args, **kwargs: (None, None),
+        )
+        monkeypatch.setattr(
+            amp_mod, "_recover_pure_continuous_solution", lambda *args, **kwargs: None
+        )
+
+        result = m.solve(solver="amp", max_iter=1, time_limit=30, skip_convex_check=True)
+
+        assert result.status == "iteration_limit"
+        assert result.objective is None
+        assert result.bound == pytest.approx(0.0)
+        assert result.gap_certified is False
+
+    def test_first_iteration_milp_error_is_not_reported_as_infeasible(self, monkeypatch):
+        """MILP solve errors should surface as errors, not mathematical infeasibility."""
+        from discopt._jax.milp_relaxation import MilpRelaxationResult
+        from discopt.solvers import amp as amp_mod
+
+        m = Model("amp_milp_error")
+        x = m.continuous("x", lb=0, ub=1)
+        m.minimize(x)
+
+        monkeypatch.setattr(
+            amp_mod,
+            "_solve_milp_with_oa_recovery",
+            lambda **kwargs: (
+                MilpRelaxationResult(status="error", objective=None, x=None),
+                {},
+                [],
+                1,
+            ),
+        )
+        monkeypatch.setattr(
+            amp_mod, "_recover_pure_continuous_solution", lambda *args, **kwargs: None
+        )
+        monkeypatch.setattr(
+            amp_mod,
+            "_solve_small_integer_domain_fallback",
+            lambda *args, **kwargs: (None, None),
+        )
+
+        result = m.solve(solver="amp", max_iter=1, time_limit=30, skip_convex_check=True)
+
+        assert result.status == "error"
+        assert result.objective is None
+        assert result.bound is None
+        assert result.gap_certified is False
+
     def test_oa_cut_recovery_drops_oldest_half(self, monkeypatch):
         """OA recovery should retry with the oldest half of cuts removed."""
         from discopt._jax.milp_relaxation import MilpRelaxationResult
@@ -2181,7 +2521,7 @@ class TestCurrentCodeWeaknesses:
             time_limit=1.0,
         )
 
-        assert result.status == "infeasible"
+        assert result.status == "error"
         assert captured["lb"] == [0.0, 0.0]
         assert captured["ub"] == [1.0, 1.0]
 

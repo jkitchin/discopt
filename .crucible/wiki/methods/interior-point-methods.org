@@ -1,0 +1,150 @@
+#+TITLE: Interior Point Methods for NLP
+#+FILETAGS: :interior-point:ipm:barrier:primal-dual:predictor-corrector:nlp:optimization:
+#+PROPERTY: ARTICLE_TYPE method
+#+PROPERTY: SOURCE_KEYS waechter2006 forsgren2002 mehrotra1992 fiacco1990 nocedal2006
+
+* Interior Point Methods for NLP
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: waechter2006 forsgren2002 mehrotra1992 fiacco1990 nocedal2006
+:STATUS: active
+:CREATED: 2026-04-04
+:UPDATED: 2026-04-05
+:END:
+
+Interior point methods (IPMs) solve nonlinear programs by following the central
+path defined by a logarithmic barrier function. The barrier function penalizes
+proximity to inequality constraint boundaries, keeping iterates strictly in the
+interior of the feasible region while gradually reducing the barrier parameter
+toward zero. IPMs are the primary NLP subproblem solvers in MINLP branch and
+bound, where thousands of related NLP relaxations must be solved efficiently
+citep:forsgren2002.
+
+** Barrier Formulation
+
+The original constrained problem min f(x) s.t. g(x) >= 0 is converted to
+an unconstrained (or equality-constrained) problem by adding barrier terms:
+min f(x) - mu * sum(log(g_i(x))), where mu > 0 is the barrier parameter.
+As mu decreases toward zero, the barrier solution converges to the constrained
+optimum. This sequential unconstrained minimization technique (SUMT) was
+introduced by citep:fiacco1990. The family of solutions parameterized by mu
+traces out the /central path/, a smooth curve through the interior of the
+feasible region that terminates at the constrained optimum.
+
+** Primal-Dual Methods
+
+Rather than solving a sequence of unconstrained barrier subproblems, modern
+IPMs work directly on the KKT system of the barrier problem. Introducing
+slack variables s >= 0 for the inequality constraints and dual multipliers
+lambda, the KKT conditions include the complementarity equation S * Lambda * e
+= mu * e, where S and Lambda are diagonal matrices of slacks and multipliers.
+Newton's method applied to this system yields the primal-dual search direction
+by solving a single symmetric linear system at each iteration. The primal-dual
+approach has better numerical properties than the primal-only barrier method
+because it simultaneously updates both primal and dual variables, allowing
+the algorithm to exploit structure in the KKT matrix citep:forsgren2002,nocedal2006.
+
+** Mehrotra's Predictor-Corrector Method
+
+The predictor-corrector scheme introduced by cite:mehrotra1992 is one of the
+most consequential algorithmic contributions to practical interior point
+methods. The key insight is that a single Newton step per iteration leaves
+performance on the table: the affine-scaling direction (the pure Newton step
+with mu = 0) provides information that can be used to choose a better centering
+parameter and to correct for the linearization error in the complementarity
+products.
+
+The method proceeds in two phases within each iteration. First, the /predictor
+step/ solves the Newton system with the right-hand side set to the current
+residuals and zero centering (mu = 0), producing an affine-scaling direction.
+This step estimates how far the iterates can move toward the boundary of the
+feasible region and how much the complementarity products will change. The
+algorithm uses the affine step length and resulting complementarity gap to
+compute an adaptive centering parameter sigma, which is typically small when
+the affine step makes good progress and larger when the affine direction is
+poor.
+
+Second, the /corrector step/ re-solves the Newton system (reusing the same
+factorization of the KKT matrix) with a modified right-hand side that
+includes both the centering term (sigma * mu * e) and a second-order correction
+for the cross-product terms that arise from the nonlinearity of the
+complementarity equation. Concretely, if delta_s and delta_lambda are the
+affine-scaling directions for slacks and multipliers, the corrector adds the
+term Delta_S * Delta_Lambda * e to the right-hand side, compensating for the
+error introduced by linearizing the bilinear complementarity condition. Because
+both the predictor and corrector steps share the same KKT matrix factorization,
+the corrector step costs only a back-substitution, which is negligible compared
+to the factorization itself cite:mehrotra1992.
+
+This two-phase approach dramatically reduces iteration counts in practice.
+Empirical results in the original paper showed that the predictor-corrector
+method often requires 20-40% fewer iterations than single-step primal-dual
+methods on LP benchmarks, while the per-iteration cost increases only
+marginally. The adaptive centering parameter selection is particularly
+effective because it automatically adjusts the balance between centering (moving
+toward the central path) and reduction (moving toward optimality) based on the
+geometry of the current iterate cite:mehrotra1992. Virtually every
+production-quality LP and QP interior point solver implemented since the early
+1990s uses Mehrotra's predictor-corrector scheme as its core iteration.
+
+** Ipopt
+
+Ipopt (Interior Point OPTimizer) citep:waechter2006 is the most widely used
+open-source NLP solver. It extends the primal-dual barrier framework to general
+nonlinear programs with a filter line-search that accepts trial points improving
+either the objective or constraint violation, eliminating the need to tune
+penalty parameters. The filter mechanism is a departure from the classical
+merit function approach and provides more robust globalization. Key
+implementation features include inertia correction of the KKT matrix (ensuring
+descent directions via modified Cholesky-like checks on the inertia of the
+symmetric indefinite system), second-order corrections for Maratos effect
+avoidance, and adaptive barrier parameter updates. Ipopt is the default NLP
+solver in Bonmin, Couenne, and one of the solver options in discopt.
+
+While Ipopt does not use Mehrotra's predictor-corrector scheme directly (it
+uses a different barrier update strategy based on the filter approach of
+cite:waechter2006), the foundational ideas of primal-dual interior point
+methods and adaptive centering that Mehrotra popularized are deeply embedded
+in its design. The overall structure of solving a symmetric KKT system at each
+iteration and managing the barrier parameter reduction follows the same
+intellectual lineage.
+
+** ripopt and JAX IPM
+
+discopt provides two additional IPM implementations that build on Mehrotra's
+predictor-corrector framework. ripopt is a Rust-native interior point solver
+accessed via PyO3 bindings that implements the predictor-corrector method
+directly, making cite:mehrotra1992 its algorithmic foundation. By implementing
+the core iteration in Rust, ripopt avoids the overhead of Python-level loops
+and achieves performance competitive with compiled solvers while remaining
+lightweight and easy to embed. The predictor-corrector structure is
+particularly well-suited to this setting because the KKT factorization (the
+expensive step) is performed once per iteration in Rust's linear algebra
+routines, and the corrector back-solve adds minimal cost.
+
+The JAX IPM is a pure-JAX implementation that enables batched solving of
+multiple NLP subproblems simultaneously via jax.vmap, exploiting GPU
+parallelism for the B&B tree. The JAX IPM shares identical structure across
+tree nodes (same objective and constraints, different bounds), making it ideal
+for vectorized execution. Both solvers inherit the primal-dual barrier
+structure and adaptive parameter management that trace back to Mehrotra's
+original contribution.
+
+** Warm-Starting
+
+Warm-starting IPMs from a previous solution is nontrivial because the barrier
+method requires iterates to be strictly interior. Starting from a boundary point
+(common when variable bounds change between parent and child B&B nodes) can
+cause numerical difficulties. Strategies include perturbing the starting point
+away from bounds, adjusting the initial barrier parameter, and using the parent's
+primal-dual solution as a starting point citep:nocedal2006. In the context of
+Mehrotra's predictor-corrector scheme, warm-starting also involves choosing an
+appropriate initial centering parameter so that the predictor step does not
+immediately drive iterates to the boundary.
+
+** See Also
+
+- [[file:../concepts/ipopt-solver.org][Ipopt Solver]] -- detailed coverage of Ipopt's filter line search, inertia correction, and implementation
+- [[file:nonlinear-branch-and-bound.org][Nonlinear Branch and Bound]] -- IPMs solve the NLP relaxations at each B&B node
+- [[file:spatial-branch-and-bound.org][Spatial Branch and Bound]] -- relies on efficient NLP solvers for lower bounding
+- [[file:bound-tightening.org][Bound Tightening]] -- OBBT requires solving many NLP/LP subproblems via IPM

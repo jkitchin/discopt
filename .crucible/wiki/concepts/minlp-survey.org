@@ -1,0 +1,47 @@
+#+TITLE: MINLP Problem Class and Surveys
+#+FILETAGS: :concept:minlp:survey:optimization:classification:
+
+* MINLP Problem Class and Surveys
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: belotti2013 grossmann2002 burer2012 boukouvala2016
+:STATUS: draft
+:CREATED: 2026-04-04
+:END:
+
+Mixed-Integer Nonlinear Programming (MINLP) combines the combinatorial difficulty
+of integer variables with the analytical complexity of nonlinear functions. MINLPs
+arise in process synthesis, network design, scheduling, engineering design, and
+increasingly in machine learning (neural network verification, optimization over
+trained models).
+
+** Problem Classification
+
+MINLPs are classified along two axes. The first is convexity: convex MINLPs have
+convex objective and constraint functions in the continuous variables, and can be
+solved to global optimality by decomposition methods (OA, GBD) or NLP-BB.
+Nonconvex MINLPs require spatial branch and bound with convex relaxations for
+global optimality guarantees citep:grossmann2002.
+
+The second axis is the type of nonlinearity: quadratic (QP, MIQP), polynomial,
+signomial (sums of products of powers), or general nonlinear (transcendental
+functions like exp, log, sin). The type of nonlinearity determines which
+relaxation techniques are most effective citep:belotti2013.
+
+** Algorithmic Landscape
+
+citet:belotti2013 provides the definitive survey of MINLP methods, covering:
+convex MINLP algorithms (outer approximation, generalized Benders, branch and
+bound, extended cutting plane), nonconvex global optimization (spatial B&B,
+convex relaxations, bound tightening), and computational aspects (software,
+benchmarks, modeling). citet:grossmann2002 provides the unified theoretical
+framework relating OA, GBD, ECP, and B&B, showing the dominance hierarchy
+OA >= GBD >= LP relaxation for convex MINLPs.
+
+** discopt's Position
+
+discopt is a hybrid MINLP solver targeting both convex and nonconvex problems.
+For convex MINLPs, it uses NLP-BB with batched JAX IPM solving. For nonconvex
+MINLPs, it uses spatial B&B with McCormick relaxations and alphaBB
+underestimators. It benchmarks against BARON (global optimization gold standard),
+SCIP (open-source spatial B&B), and Couenne (COIN-OR global optimizer).

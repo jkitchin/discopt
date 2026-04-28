@@ -1,0 +1,185 @@
+#+TITLE: First-Order and GPU MIP Heuristics
+#+FILETAGS: :method:pdlp:cupdlp:mpax:admm:first-order:gpu:matheuristic:
+
+* First-Order and GPU MIP Heuristics
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: applegate-pdlp-2021 lu-cupdlp-2023 mpax-2024 takapoui-admm-mip-2017 luteberget-sartor-2023 nvidia-warp-2026
+:STATUS: active
+:CREATED: 2026-04-21
+:UPDATED: 2026-04-21
+:END:
+
+Neither [[file:../concepts/scip-solver.org][SCIP]] nor [[file:../concepts/highs-solver.org][HiGHS]] has a first-class first-order LP backend
+integrated with their MIP primal heuristics. HiGHS added a PDLP path
+(=highs/pdlp/=) in version 1.7 but uses it as an alternative LP
+solver, not as the backbone of a GPU-batched heuristic portfolio. The
+post-2020 first-order LP literature — PDLP, cuPDLP, MPAX — is
+architecturally very well suited to hosting MIP primal heuristics on a GPU,
+and combining it with NVIDIA Warp kernels (see [[file:feasibility-jump.org][feasibility jump]] and
+[[file:mip-presolve.org][MIP presolve]]) opens an entire class of heuristics that CPU-only solvers
+cannot easily match. This article surveys the landscape and records
+discopt's plan to take advantage.
+
+** Background: First-Order LP Solvers
+
+Interior-point and simplex LP solvers dominate small-to-medium LPs but
+scale poorly to $10^7$+ nonzeros without sophisticated parallelism. First-
+order methods — gradient-style iterations that require only matrix-vector
+products — were long considered too slow and insufficiently accurate for
+practical LP, until citet:applegate-pdlp-2021 showed that a carefully
+engineered primal-dual hybrid gradient (PDHG) algorithm with restart
+heuristics, adaptive step sizes, and infeasibility detection could solve
+very large LPs in wall-clock time comparable to simplex on single
+machines, with much better scalability to GPUs.
+
+- **PDLP** (citet:applegate-pdlp-2021, NeurIPS 2021) is Google's
+  restart-and-scale PDHG implementation. Open-source, widely benchmarked.
+- **cuPDLP** (citet:lu-cupdlp-2023) is MIT-Lu-Lab's GPU-native
+  reimplementation of PDLP in Julia (and ported to C in HiGHS as
+  =highs/pdlp/cupdlp=). cuPDLP demonstrated that a single NVIDIA A100 GPU
+  can solve LPs with $10^8$+ nonzeros competitively with multi-node CPU
+  simplex.
+- **MPAX** (citet:mpax-2024) is a JAX-native port of PDLP by the same
+  MIT-Lu-Lab team. See the paired concept article [[file:../concepts/mpax-solver.org][MPAX solver]] for depth.
+  The key property for discopt: MPAX is built entirely from JAX primitives,
+  so LP solves are =vmap=-able across a batch of LP instances and
+  differentiable through implicit function theorems.
+
+** Why First-Order LP Matters for MIP Heuristics
+
+The cost profile of first-order LP is opposite to that of simplex or IPM:
+per-iteration cost is cheap (one sparse matrix-vector product), but many
+iterations may be needed and the final accuracy is looser ($10^{-4}$ to
+$10^{-6}$ relative, not $10^{-9}$). This profile is /ideal/ for a class of
+MIP primal heuristics whose inner LP solves are used for rough guidance,
+not for proving optimality bounds. The prototypical example is the
+[[file:feasibility-pump.org][feasibility pump]]: each iteration projects a rounded point onto the LP
+polytope, and the solver does not need full accuracy — a few digits are
+sufficient to guide the next rounding step. Replacing the simplex LP in the
+pump with a PDLP/cuPDLP/MPAX solve drops per-iteration cost from
+milliseconds to microseconds on large instances.
+
+More importantly, first-order LP is /batchable/ on a GPU. Running 1000
+feasibility-pump replicas with different random seeds in parallel is a
+single GPU kernel launch with MPAX, rather than 1000 sequential simplex
+solves. This matches the architectural pattern established for
+[[file:feasibility-jump.org][feasibility jump]] and for batched frontier propagation (see
+[[file:mip-presolve.org][MIP presolve]] Warp opportunities).
+
+** Concrete Heuristic Patterns
+
+*** PDLP/MPAX-Accelerated Feasibility Pump
+
+Replace the LP projection step in the [[file:feasibility-pump.org][feasibility pump]] with a
+PDLP or MPAX solve. On large MILPs, the pump throughput increases by
+orders of magnitude because each LP is now a first-order solve on a
+structure-rich problem rather than a full simplex re-solve. In JAX, the
+pump becomes =vmap(single_pump_step)= over a batch of initial rounded
+points, with each element of the batch running its own restart chain.
+**Host: Python driver + JAX/MPAX inner solver.**
+
+*** Random Rounding Portfolio on GPU
+
+Classical randomized rounding runs one seed at a time. A JAX/MPAX or Warp
+kernel can run thousands of seeds in parallel, score each by constraint
+violation after rounding, and return the best. This is cheap per-seed and
+the parallel score sweep is embarrassingly vectorizable. **Host: JAX**
+(dense path) or **Warp** (scatter/atomic path).
+
+*** GPU-Batched Feasibility Jump
+
+Already discussed in [[file:feasibility-jump.org][feasibility jump]]. PDLP/MPAX is not required (FJ is
+LP-free), but batching FJ replicas across GPU threads is in the same
+architectural lane. Combining batched FJ with MPAX-warmstarted LP
+projections gives a hybrid feasibility engine.
+
+*** ADMM Feasibility Heuristic for MIQP
+
+citet:takapoui-admm-mip-2017 proposed an ADMM-based primal heuristic for
+mixed-integer quadratic programs. The ADMM splits the problem into a
+continuous convex subproblem (solvable in closed form or via a small QP)
+and an integer rounding subproblem (one-shot projection onto the integer
+set). The iteration is a one-line update that parallelizes trivially. For
+discopt's MIQP + convex-MINLP workloads, this is a natural JAX/Warp port
+target. **Host: JAX** or **Warp** (batch over variable domains).
+
+*** Differentiable LP in Heuristic Design
+
+MPAX's differentiability enables heuristic designs that are out of reach
+for simplex-based solvers. Examples:
+
+- **Learned LP cut selection**: gradient-descend the cut-selection policy
+  against time-to-improvement, with gradients flowing through an MPAX LP
+  relaxation.
+- **Parameter estimation with embedded LP**: discopt's parameter-
+  estimation layer can back-propagate through LP constraints (parameter
+  → LP → solution → loss), making a class of inverse-problem heuristics
+  feasible.
+- **Differentiable feasibility pump**: use gradient information from the
+  MPAX LP to guide the rounding direction, not just the projection value.
+
+These are research directions rather than short-term ports, but they
+illustrate why MPAX is strategically important beyond raw throughput.
+
+*** cuOpt (NVIDIA)
+
+NVIDIA's cuOpt MIP stack (closed source; documentation only) includes
+GPU-batched primal heuristics that share the scatter-kernel pattern
+discussed here and in the Warp discussion in [[file:feasibility-jump.org][feasibility jump]]. No peer-
+reviewed paper exists at the time of writing; citations are to the
+NVIDIA documentation. cuOpt serves as a commercial proof-of-concept that
+GPU-batched MIP heuristics are viable at scale; discopt's open-source
+JAX+Warp implementation targets the same design space with a different
+license story and a more research-friendly architecture.
+
+** Host-Placement Summary
+
+| Component | Host | Rationale |
+|----------------------------+-------+-----------|
+| MPAX-pumped feasibility pump | JAX + Python | Inner LP is JAX; driver is Python. |
+| Batched random rounding | JAX or Warp | Dense SIMD vs. scatter/atomic tradeoff. |
+| Batched Feasibility Jump | JAX or Warp | See [[file:feasibility-jump.org][FJ article]]. |
+| ADMM-MIQP heuristic | JAX or Warp | Closed-form updates vectorize. |
+| Differentiable-LP heuristics | JAX + MPAX | Requires gradient through LP. |
+| cuOpt-style batched LNS | Warp | Sub-MIP-per-thread not yet viable; for rounding-family only. |
+
+OBBT orchestration (one LP per tightened bound) can use MPAX when the LP
+is large, simplex when the LP is small. The dispatcher lives in Python.
+
+** Relationship to GitHub Issue #37
+
+Issue #37 on =jkitchin/discopt= asks for MPAX integration and for porting
+SCIP/HiGHS heuristics to Rust. This article records the /second/ half of
+the answer: once MPAX is integrated, an entire category of heuristics
+becomes viable that is not reachable from Rust alone. The port plan
+records MPAX integration as Short-term, and the MPAX-based heuristic
+family (PDLP-pump, differentiable-LP heuristics, cuOpt-style batched
+rounding) as Medium-to-Long term.
+
+** License and Reproducibility
+
+- PDLP (Google): Apache-2.0.
+- cuPDLP (MIT-Lu-Lab): MIT.
+- MPAX (MIT-Lu-Lab): MIT.
+- cuOpt (NVIDIA): proprietary; documentation reference only.
+
+All three permit direct integration into discopt. The differentiability
+and =vmap=-ability of MPAX in particular make it the natural default for
+discopt's JAX-centric stack.
+
+** Role in discopt
+
+First-order and GPU heuristics are the /other/ half of discopt's
+architectural differentiation against SCIP and HiGHS. While
+[[file:learning-based-mip-heuristics.org][learning-based MIP heuristics]] exploits discopt's ML/LLM layer, this
+family exploits its JAX numerics layer and the associated GPU
+batching/differentiability. The two families are complementary: learned
+heuristics choose /what/ to do, first-order heuristics provide the /fast
+primitives/ that make many of those choices cheap to try.
+
+The short-term win is MPAX integration for the existing feasibility pump.
+The medium-term win is a batched GPU feasibility engine (FJ + random
+rounding + ADMM-MIQP) running as a Python-orchestrated pool over a JAX or
+Warp kernel. The long-term win is differentiable-LP-enabled heuristics
+that SCIP and HiGHS cannot implement without rewriting their LP backends.

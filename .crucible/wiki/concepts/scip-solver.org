@@ -1,0 +1,128 @@
+#+TITLE: SCIP Solver
+#+FILETAGS: :concept:scip:solver:minlp:constraint-programming:benchmark:spatial-branching:
+
+* SCIP Solver
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: achterberg2009 vigerske2018 gleixner2017 bestuzheva2023 bestuzheva2025
+:STATUS: active
+:CREATED: 2026-04-04
+:UPDATED: 2026-04-05
+:END:
+
+SCIP (Solving Constraint Integer Programs) is an open-source optimization
+framework that integrates constraint programming, mixed-integer programming,
+and satisfiability solving into a single branch-and-cut platform
+citep:achterberg2009. Originally designed for MIP, SCIP was later extended to
+handle nonconvex MINLPs through [[file:../methods/spatial-branch-and-bound.org][spatial branch and bound]] with convex
+relaxations citep:vigerske2018.
+
+** Constraint Handler Plugin Architecture
+
+The defining design principle of SCIP is its plugin-based architecture
+citep:achterberg2009. Rather than hardcoding algorithmic logic, SCIP delegates
+virtually all solving behavior to interchangeable plugins grouped by type:
+constraint handlers, propagators, branching rules, separators (cutting plane
+generators), presolvers, heuristics, node selectors, and event handlers. Each
+plugin type exposes a fixed callback interface, and SCIP's core loop orchestrates
+calls to registered plugins at the appropriate points during the search.
+
+Constraint handlers are the most fundamental plugin type. Each handler owns a
+particular constraint class (linear, indicator, SOS, nonlinear, etc.) and is
+responsible for four operations: domain propagation, which tightens variable
+bounds by exploiting constraint structure (see [[file:../methods/bound-tightening.org][bound tightening]]); separation,
+which generates cutting planes to strengthen the LP relaxation; enforcement,
+which checks whether a candidate solution satisfies the constraint and triggers
+branching or cutting if it does not; and presolving, which performs
+reformulations and bound reductions before the main search begins. This modular
+scheme means that adding support for an entirely new constraint class requires
+only implementing a new handler without modifying SCIP's core.
+
+The propagator plugin type complements constraint handlers by performing
+inference that spans multiple constraint types. SCIP ships with feasibility-based
+[[file:../methods/bound-tightening.org][bound tightening]] (FBBT) propagators that propagate variable bound implications
+through the constraint graph, as well as optimization-based bound tightening
+(OBBT) that solves auxiliary LP relaxations to contract variable domains
+citep:gleixner2017. Branching rules, separator plugins, and primal heuristics
+are similarly modular: users can add reliability branching variants, custom
+Gomory or intersection cuts, or specialized rounding heuristics without touching
+the rest of the solver.
+
+** Spatial Branch and Bound for MINLP
+
+Vigerske and Gleixner citep:vigerske2018 describe the extension of SCIP from a
+pure MIP solver to a global MINLP solver. The central algorithmic engine is
+[[file:../methods/spatial-branch-and-bound.org][spatial branch and bound]], which partitions the feasible region by branching on
+continuous as well as integer variables, constructing convex relaxations at each
+node to obtain dual bounds.
+
+SCIP represents nonlinear expressions through an expression graph (directed
+acyclic graph of elementary operations). At each B&B node the solver constructs
+a convex relaxation of the feasible set by replacing each nonconvex expression
+with a convex underestimator or concave overestimator. For bilinear terms, SCIP
+uses [[file:../methods/mccormick-relaxations.org][McCormick envelopes]]; for univariate concave or convex functions, it uses
+secant cuts and gradient inequalities; for products and quotients, it applies
+specialized polyhedral relaxations citep:vigerske2018. The relaxation is
+assembled into an LP (or, when some relaxations are nonlinear but convex, a
+convex NLP) and solved to produce a lower bound.
+
+Domain reduction plays a critical role in convergence. SCIP applies FBBT at
+every node (propagating bounds through the expression graph) and periodically
+invokes OBBT, which solves LP relaxations to tighten individual variable bounds
+citep:gleixner2017. Tighter bounds shrink the McCormick relaxation gap and
+often trigger additional domain propagations, creating a beneficial feedback
+loop. Branching on the continuous variable whose relaxation gap is largest
+(so-called violation-based branching) further accelerates convergence by
+directing the search toward the most nonconvex regions of the problem.
+
+** SCIP 8: Nonlinear Handler Framework
+
+SCIP 8 introduced a redesigned nonlinear constraint handling infrastructure
+citep:bestuzheva2025,bestuzheva2023. In earlier versions, each nonlinear
+constraint class (quadratic, bivariate, abspower, etc.) was managed by a
+dedicated constraint handler. SCIP 8 consolidates all nonlinear constraints into
+a single =nonlinear= constraint handler, which dispatches the work of
+relaxation, propagation, and separation to specialized /nonlinear handlers/
+(nlhdlrs). Each nlhdlr is responsible for a particular expression pattern: there
+are handlers for bilinear terms, convex and concave expressions, quotients,
+perspective reformulations, and default (McCormick-based) handling.
+
+This two-level architecture, a single constraint handler coordinating multiple
+expression-level nlhdlrs, is more flexible than the old design. When a nonlinear
+expression is encountered, the constraint handler queries all registered nlhdlrs
+for their ability to handle it; the nlhdlr that reports the tightest relaxation
+or cheapest propagation wins. New expression types can be supported by adding an
+nlhdlr without modifying the constraint handler itself.
+
+SCIP 8 also extended the repertoire of relaxation techniques.
+Reformulation-linearization technique (RLT) cuts, which multiply a linear
+constraint by a variable and relax the resulting bilinear terms, are now
+generated automatically. Intersection cuts derived from disjunctive arguments
+further tighten the relaxation. On the propagation side, SCIP 8 added reverse
+propagation for a wider set of nonlinear operations and improved the scheduling
+of OBBT calls to balance tightening effort against computational cost
+citep:bestuzheva2025.
+
+Computational experiments in citep:bestuzheva2025 compare SCIP 8 against
+[[file:../concepts/baron-solver.org][BARON]], LINDO, and Octeract on standard MINLP benchmark libraries
+(MINLPLib, GlobalLib). SCIP 8 is competitive with these commercial solvers on
+many problem classes and substantially outperforms them on instances with
+exploitable convex substructure, thanks to the nlhdlr framework's ability to
+detect and exploit convexity at the expression level.
+
+** Relevance to discopt
+
+SCIP is one of the primary benchmark competitors for discopt alongside
+[[file:../concepts/baron-solver.org][BARON]], Couenne, and [[file:../concepts/highs-solver.org][HiGHS]]. Its open-source nature and modular plugin
+design make it a particularly relevant comparison point: discopt's own
+architecture, with separate Rust-based B&B tree management and JAX-based
+relaxation evaluation, mirrors SCIP's separation of search control from
+constraint-specific logic. Understanding SCIP's algorithmic components,
+especially its relaxation construction, bound tightening schedule, and
+branching heuristics, is essential for interpreting benchmark comparison
+results. The SCIP primal heuristic portfolio (see
+[[file:../methods/mip-primal-heuristics.org][MIP primal heuristics]], [[file:../methods/large-neighborhood-search.org][large neighborhood search]], [[file:../methods/feasibility-jump.org][feasibility jump]]) and
+presolve reductions (see [[file:../methods/mip-presolve.org][MIP presolve]]) are the source of many of the
+algorithmic ideas discopt plans to port into its Rust backend, with SCIP's
+Apache-2.0 license (since SOS 9.0, 2024) permitting source-level adaptation
+with attribution.

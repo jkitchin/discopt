@@ -1,0 +1,118 @@
+#+TITLE: Normal Boundary Intersection and Normal Constraint Methods
+#+FILETAGS: :method:multiobjective:nbi:normal-constraint:pareto-generation:
+#+PROPERTY: ARTICLE_TYPE method
+#+PROPERTY: SOURCE_KEYS das-dennis-1998 messac-2003 kim-deweck-2005 marler-arora-2004
+
+* Normal Boundary Intersection and Normal Constraint Methods
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: das-dennis-1998 messac-2003 kim-deweck-2005 marler-arora-2004
+:STATUS: draft
+:CREATED: 2026-04-24
+:END:
+
+[[file:scalarization-methods.org][Classical scalarizations]] (weighted sum, ε-constraint, Tchebycheff) share
+a common failure mode: even-spaced parameter grids produce highly
+non-uniform Pareto-front samplings. Normal Boundary Intersection (NBI) and
+the Normalized Normal Constraint (NNC) method are /geometric/
+scalarizations designed specifically to produce even spacing in objective
+space, irrespective of the front's curvature.
+
+** Normal Boundary Intersection (NBI)
+
+citet:das-dennis-1998 introduced NBI as a systematic generator for the
+Pareto front of general nonlinear MOPs. The construction:
+
+1. Compute individual optima x^{(i)}* = argmin f_i(x), giving /anchor
+   points/ F(x^{(i)}*) in objective space.
+2. The convex hull of anchor points (CHIM --- convex hull of individual
+   minima) is a (k-1)-simplex. Sample points w on this simplex by convex
+   combinations w_i >= 0, sum w_i = 1.
+3. For each w, shoot a ray from the CHIM point Φ w inward along the
+   quasi-normal direction -n (e.g., -Φ 1) and solve
+
+     max_{x, t}  t     s.t.   Φ w + t n = F(x) - z*,  x in X.
+
+4. Each subproblem's solution is a Pareto-optimal point; evenly spaced w
+   on the simplex produce approximately evenly spaced points on the
+   Pareto boundary.
+
+Properties and caveats:
+
+- Works for nonconvex MOPs and locates points on concave regions of the
+  front that weighted sum misses.
+- Does not guarantee Pareto optimality in general: for nonconvex fronts,
+  the ray can intersect dominated parts of the boundary. citet:das-dennis-1998
+  gives a dominance filter as a post-processing step.
+- Requires pre-computed anchor points and normalization; ill-conditioned
+  when anchors are nearly collinear.
+- Natural fit for spatial branch-and-bound: each NBI subproblem is a
+  standard NLP/MINLP, amenable to discopt-style solvers.
+
+** Normalized Normal Constraint (NNC)
+
+citet:messac-2003 proposed the Normalized Normal Constraint method as a
+more robust geometric alternative:
+
+1. Compute and /normalize/ anchor points into a unit range via the
+   objective-space matrix L = diag(z^N - z*).
+2. Generate evenly-spaced points X^{pj} on the utopia hyperplane (CHIM).
+3. For each X^{pj}, solve
+
+     min  f_k(x)     s.t.   N_i^T (F(x) - X^{pj}) <= 0  for i = 1, ..., k-1,
+
+  where N_i are vectors from the k-th anchor to anchor i. The inequalities
+  restrict the search to a reduced feasible region whose boundary is
+  normal to the utopia hyperplane.
+
+NNC fixes two NBI weaknesses: the explicit normalization step makes the
+method scale-invariant, and the inequality (rather than equality)
+constraints give well-behaved feasible regions. The /Pareto filter/ step
+again removes any locally-dominated outputs.
+
+NNC has become the standard geometric scalarization in engineering
+design software and is widely implemented in Matlab/Python multiobjective
+toolboxes citep:marler-arora-2004.
+
+** Adaptive Weighted Sum
+
+citet:kim-deweck-2005 introduced the /adaptive weighted sum/ (AWS) for
+bi-objective problems. Rather than a fixed weight grid, AWS alternates
+between weighted-sum subproblems and a front-refinement step:
+
+1. Solve at the two anchor weights; estimate the front by a piecewise
+   linear interpolation.
+2. Identify the segment with the largest gap in objective space.
+3. Introduce additional constraints (bounds in the gap region) and
+   re-solve a weighted sum on the constrained problem.
+
+AWS recovers concave portions of the front that pure weighted sum misses
+(the added bounds play a similar geometric role as the normal-constraint
+inequalities in NNC) and achieves near-uniform spacing without requiring
+normalization. Extensions to k >= 3 objectives exist but are less clean.
+
+** When to Use Geometric Scalarizations
+
+| Goal                                     | Recommended method |
+|------------------------------------------+--------------------|
+| Uniform front coverage, smooth problems  | NBI or NNC         |
+| Nonconvex front, engineering design      | NNC                |
+| Bi-objective problems, minimal tooling   | Adaptive weighted sum |
+| Disconnected / piecewise-nonconvex front | AUGMECON           |
+|                                          |                    |
+
+All three methods compose cleanly with discopt-class MINLP solvers: each
+subproblem is a standard NLP or MINLP with extra linear constraints or a
+single extra scalar variable, introducing no new solver requirements.
+
+** Open Issues
+
+- Anchor-point computation dominates cost when individual minima are
+  expensive.
+- Normalization depends on a good nadir estimate; in MINLP the nadir can
+  be as hard as the MOP itself (see [[file:../concepts/multiobjective-optimization.org][multiobjective optimization]]).
+- k >= 4 generalizations (e.g., many-objective NBI) lose the uniform-spacing
+  guarantee because the CHIM simplex has exponentially many candidate
+  directions; decomposition-based evolutionary methods like MOEA/D often
+  scale better in high-dimensional objective space (see
+  [[file:evolutionary-multiobjective.org][evolutionary multiobjective]]).

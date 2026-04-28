@@ -1,0 +1,152 @@
+#+TITLE: Adaptive Multivariate Partitioning (AMP) for Global MINLP
+#+FILETAGS: :method:amp:global-optimization:minlp:milp-relaxation:bilinear:
+#+PROPERTY: ARTICLE_TYPE method
+#+PROPERTY: SOURCE_KEYS nagarajan-2016 nagarajan-2019 castro-2015 bergamini-2005 mccormick1976
+
+* Adaptive Multivariate Partitioning (AMP) for Global MINLP
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: nagarajan-2016 nagarajan-2019 castro-2015 bergamini-2005 mccormick1976
+:STATUS: draft
+:CREATED: 2026-04-24
+:END:
+
+Adaptive Multivariate Partitioning is a certified global-optimality
+algorithm for nonconvex MINLPs developed by Nagarajan and collaborators
+citep:nagarajan-2016 citep:nagarajan-2019. It is an alternative to
+[[file:spatial-branch-and-bound.org][spatial branch-and-bound]] that replaces the continuous-domain tree with a
+single MILP relaxation whose tightness improves iteratively via
+*partition refinement*. The method is particularly effective on
+bilinear-dense problems (pooling, blending, process synthesis).
+
+** Core Idea
+
+Bilinear terms ~x*y~ are classically relaxed by McCormick envelopes
+citep:mccormick1976, which are tight only at the box corners. AMP
+partitions the domain of each variable participating in a bilinear term
+into a small number of intervals and introduces binary indicator
+variables that select one interval per iteration. On each partition the
+McCormick envelope is much tighter, and the union across partitions is
+an exact piecewise-bilinear description --- a MILP.
+
+Starting from a coarse partition (e.g., 4 intervals per variable), AMP:
+
+  1. Solves the MILP relaxation --> valid lower bound LB_k.
+  2. Uses the MILP solution's bilinear values to locate partition
+     boundaries that would tighten the relaxation, and refines
+     adaptively.
+  3. Fixes the continuous variables' interval assignments from the MILP
+     solution and solves an NLP on the induced box --> valid upper bound
+     UB_k.
+  4. Stops if (UB_k - LB_k) / |UB_k| <= rel_gap; otherwise returns to
+     step 1 with refined partitions.
+
+Both bounds are *valid at every iteration*: LB_k <= global_opt <= UB_k.
+Early termination at a user-specified gap yields a certified
+epsilon-optimal solution.
+
+** Related Relaxation Machinery
+
+AMP builds on a lineage of piecewise-bilinear relaxations:
+
+- *Piecewise McCormick* (Bergamini et al. 2005): uniform partitions with
+  O(1/k^2) convergence citep:bergamini-2005.
+- *Multiparametric disaggregation* (Teles, Castro, Matos 2013; Kolodziej
+  et al. 2013): logarithmic number of binaries in the partition count.
+- *Normalized multiparametric disaggregation* (Castro 2016): tighter
+  relaxation with constant binary overhead citep:castro-2015.
+- *AMP*: adaptive, non-uniform partitions guided by the MILP solution
+  rather than pre-chosen boundaries.
+
+AMP's key contribution is the adaptive refinement: the MILP's optimal
+solution identifies which bilinear terms are binding at the relaxation
+optimum, and new partition boundaries are placed to invalidate that
+specific infeasibility. This yields faster gap closure than uniform
+refinement at comparable MILP sizes.
+
+** Term Classification
+
+Not every nonlinear term benefits equally from partitioning:
+
+- *Bilinear / multilinear*: prime AMP targets. Piecewise relaxation is
+  strictly tighter than McCormick.
+- *Univariate nonlinear* (exp, log, sqrt, x^n): McCormick-style
+  envelopes already nearly-tight; partitioning adds binary overhead for
+  small relaxation gain. AMP relaxes these directly without
+  partitioning.
+- *Transcendental* (sin, cos, tan): similarly outside the partitioning
+  workflow; use standard envelopes.
+
+The discopt implementation classifies each expression-DAG node and
+routes it appropriately --- see ~_jax/term_classifier.py~.
+
+** Soundness and Termination
+
+AMP is /sound/: LB_k and UB_k are always valid at every iteration. It
+is /finitely terminating/ for fixed rel_gap > 0 provided each refinement
+strictly tightens the relaxation along the active binding face (Nagarajan
+2019 Theorem 1) citep:nagarajan-2019. In practice convergence is
+geometric with adaptive refinement and linear with uniform.
+
+If the algorithm stalls (MILP solution repeats across iterations), AMP
+falls back to uniform bisection of the currently-active partitions.
+
+** Comparison with Spatial B&B
+
+| Aspect       | Spatial B&B                         | AMP                                           |
+|--------------+-------------------------------------+-----------------------------------------------|
+| Relaxation   | Convex LP per node (McCormick)      | Piecewise-bilinear MILP per iteration         |
+| Subproblem   | LP                                  | MILP (harder per call)                        |
+| Upper bound  | NLP at leaves                       | NLP with fixed partition assignment           |
+| Branching    | Continuous-domain bisection         | Partition-set refinement                      |
+| Best for     | General MINLP with mixed nonlinear  | Bilinear-dense (pooling, blending, synthesis) |
+| Parallelism  | Per-node batching (JAX vmap)        | Per-AMP-iteration (less)                      |
+
+Spatial B&B's per-node cost is small but the tree can be deep. AMP's
+per-iteration cost is large (MILP) but converges in far fewer iterations
+on bilinear-heavy problems. For benchmark-suite evidence see
+citep:nagarajan-2019 and the pooling/blending problems in Alpine.
+
+** Tuning
+
+- ~initial_partitions~: 4--8. More partitions = tighter MILP = larger
+  MILP. Adaptive refinement usually drives the effective count to ~16
+  where the binding bilinears live.
+- ~refinement_strategy~: "adaptive" is the default; fall back to
+  "uniform" only on stalled instances.
+- ~milp_solver~: HiGHS by default; Gurobi / CPLEX if licensed, for
+  faster MILP solves on large instances.
+- ~rel_gap~ / ~abs_gap~: standard. Typical production setting rel_gap =
+  1e-4; research setting 1e-6 where computational budget allows.
+
+** Relevance for discopt
+
+- ~discopt.solvers.amp.solve_amp(model, ...)~ --- standalone driver;
+  returns a standard ~SolveResult~.
+- Works on pure nonconvex MINLP problems declared through the normal
+  ~Model~ / ~Variable~ / constraint API.
+- Integrates with discopt's presolve (FBBT/OBBT at root) and shares the
+  NLP subproblem backends (Ipopt default).
+- MILP relaxation construction lives in ~_jax/milp_relaxation.py~;
+  partition management in ~_jax/discretization.py~ and
+  ~_jax/partition_selection.py~; term classification in
+  ~_jax/term_classifier.py~.
+- Not currently exposed via the auto-dispatch in ~Model.solve()~ --- it
+  is a user-selected solver. Future: ~Model.solve(solver="amp")~.
+
+** When to Reach for AMP
+
+Good candidates:
+
+- Pooling / blending problems with many bilinear mixing terms.
+- GDP-reformulated disjunctive problems that expand into bilinears.
+- Process-synthesis MINLPs with stream-composition variables.
+- Trilinear / multilinear constraints (AMP generalizes cleanly to
+  higher-order products).
+
+Weak candidates:
+
+- Transcendental-heavy NLPs (log, exp, trig) without bilinear coupling.
+- Problems where spatial B&B closes the gap quickly in any case.
+- Extremely large integer components where the MILP is itself
+  intractable.

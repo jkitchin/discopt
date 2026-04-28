@@ -1,0 +1,266 @@
+#+TITLE: Large Language Models for Mathematical Optimization
+#+FILETAGS: :llm:optimization:formulation:diagnosis:natural-language:
+#+CROSS_LINKS: neural-network-embedding big-m-formulations convex-minlp-solvers expression-dag-and-ad minlp-survey
+#+PROPERTY: ARTICLE_TYPE concept
+#+PROPERTY: SOURCE_KEYS chen-li-2025-optichat ahmaditeshnizi-2024-optimus survey-optmodeling-llm-2025
+
+* Large Language Models for Mathematical Optimization
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: chen-li-2025-optichat ahmaditeshnizi-2024-optimus survey-optmodeling-llm-2025 chen-li-2024-optichat-infeasibility autoformulation-mcts-2025 lm4opt-2024 orlm-2024 llmopt-2024 balhorn-schweidtmann-2024-flowsheet schweidtmann-2024-genai-cheme forootani-2025-survey moid-2025 llm-process-optimization-2025
+:STATUS: active
+:CREATED: 2026-04-05
+:UPDATED: 2026-04-05
+:END:
+
+** Introduction
+
+Mathematical optimization is a cornerstone of engineering decision-making,
+yet formulating and interpreting optimization models requires specialized
+expertise that many practitioners lack. A chemical engineer may understand
+their process intimately but struggle to translate operational constraints
+into mixed-integer nonlinear programs. A supply chain manager may receive
+a solver's infeasibility certificate without understanding which business
+rules conflict. This expertise gap has long limited the adoption of
+optimization tools outside specialist groups.
+
+Large language models offer a potential bridge across this gap. Their
+fluency in natural language, combined with emerging capabilities in
+mathematical reasoning, positions them as intermediaries between
+domain practitioners and optimization solvers. The vision is not for LLMs
+to replace solvers (they cannot compete with decades of algorithmic
+development in branch-and-bound or interior point methods), but rather to
+serve as translators, diagnosticians, and assistants that make optimization
+technology more accessible. As surveyed comprehensively by
+citep:survey-optmodeling-llm-2025, this intersection of LLMs and
+optimization modeling has seen rapid growth since 2023, spanning
+autoformulation, diagnosis, explanation, and solver guidance. A broader
+perspective on LLM mathematical reasoning capabilities and their
+implications for optimization is provided by citep:forootani-2025-survey.
+
+** Autoformulation: From Natural Language to Mathematical Models
+
+The most active research direction is autoformulation: automatically
+converting natural language problem descriptions into mathematical
+optimization models. The NL4Opt competition established an early
+benchmark for this task, challenging systems to extract optimization
+formulations from textual descriptions of linear and mixed-integer linear
+programs.
+
+citet:ahmaditeshnizi-2024-optimus introduced OptiMUS, a modular LLM agent
+that decomposes the autoformulation pipeline into distinct stages. The
+system first parses the natural language description to identify decision
+variables, objectives, and constraints. It then generates a mathematical
+formulation, translates it into solver code (typically Gurobi or PuLP),
+executes the solver, and evaluates the result. This modular decomposition
+is crucial for handling long problem descriptions that exceed typical LLM
+context windows, as each stage can focus on a manageable subset of the
+information.
+
+The accuracy of single-pass autoformulation remains limited, particularly
+for problems with subtle constraint interactions or non-obvious variable
+definitions. The MCTS-based autoformulation approach
+citep:autoformulation-mcts-2025 addresses this by treating formulation as
+a search problem rather than a generation problem. Each decision in the
+formulation process (defining a variable, choosing an objective form,
+specifying a constraint) becomes a node in a Monte-Carlo search tree. The
+system can explore alternative formulations, backtrack from dead ends, and
+evaluate partial formulations against consistency checks. This hierarchical
+exploration significantly improves accuracy over greedy single-pass methods.
+
+An alternative to prompting large proprietary models is fine-tuning smaller
+open-source models for optimization-specific tasks. LM4OPT
+citep:lm4opt-2024 demonstrated progressive fine-tuning of Llama-2-7b,
+building capability incrementally from simpler to more complex formulation
+tasks. The ORLM framework citep:orlm-2024 took this further with
+systematic data synthesis and instruction tuning, showing that 7B-parameter
+specialized models can outperform GPT-4 on benchmarks including NL4Opt,
+MAMO, and IndustryOR. LLMOPT citep:llmopt-2024 proposed a five-element
+universal formulation that standardizes the representation across linear,
+integer, nonlinear, and combinatorial optimization, enabling a single
+model to handle diverse problem types.
+
+Despite these advances, significant gaps remain. Most autoformulation work
+targets linear and mixed-integer linear programs. Nonlinear and
+mixed-integer nonlinear programs (see [[file:minlp-survey.org][MINLP survey]])
+present additional challenges: identifying convexity structure, choosing
+appropriate relaxations (see [[file:convex-relaxations.org][convex relaxations]]),
+and specifying nonlinear expressions correctly. The verification of
+LLM-generated formulations remains an open problem, as subtle errors in
+constraint specification can lead to models that solve without error but
+produce meaningless results.
+
+** Diagnosis and Explanation
+
+Beyond formulation, LLMs show particular promise in helping practitioners
+understand solver output and diagnose problematic models. This is the
+focus of the OptiChat line of work from Can Li's group at Purdue.
+
+The foundational work by citet:chen-li-2024-optichat-infeasibility
+demonstrated that GPT-4, augmented with solver API calls, can effectively
+diagnose infeasible optimization problems. The system extracts Irreducible
+Infeasible Subsystems (IIS) from the solver and translates the mathematical
+diagnosis into natural language explanations. An IIS is a minimal set of
+constraints that, taken together, admit no feasible solution; removing any
+single constraint from the set restores feasibility. While solvers can
+compute IIS algorithmically, the raw output (a list of constraint indices
+and mathematical expressions) is often opaque to practitioners. The LLM
+bridges this gap by explaining which business rules or physical constraints
+conflict and suggesting remediation strategies.
+
+The full OptiChat system citep:chen-li-2025-optichat extends this to a
+broader dialogue interface supporting model interpretation, sensitivity
+analysis, and counterfactual explanations. Users can ask questions like
+"What happens if I increase production capacity by 10%?" or "Why is this
+constraint binding?" and receive grounded answers that reference the actual
+model structure and solver output. The key architectural insight is that
+the LLM alone cannot answer these questions reliably; it must be augmented
+with tool calls to the solver that provide ground-truth numerical results.
+
+The MOID framework citep:moid-2025 extends infeasibility diagnosis to the
+multi-objective setting. Rather than identifying a single IIS and
+explanation, MOID generates a Pareto front of diagnostic options that trade
+off different remediation strategies. For routing problems, this might mean
+presenting options that trade off relaxing vehicle capacity constraints
+versus relaxing time window constraints. LLM agents then translate each
+Pareto-optimal diagnostic into an actionable recommendation, giving
+practitioners a menu of remediation choices rather than a single
+prescription.
+
+** LLMs as Optimization Solvers and Heuristic Designers
+
+A natural question is whether LLMs can directly solve optimization
+problems, bypassing traditional solvers entirely. The evidence to date is
+largely negative for anything beyond toy instances. LLMs lack the numerical
+precision, systematic search capabilities, and convergence guarantees that
+decades of solver development have produced. They cannot reliably perform
+the floating-point arithmetic required for interior point methods (see
+[[file:ipopt-solver.org][Ipopt]]) or maintain the dual bounds needed for
+branch-and-bound (see [[file:baron-solver.org][BARON]],
+[[file:scip-solver.org][SCIP]]).
+
+Where LLMs show more promise is in heuristic design and algorithm
+configuration. They can suggest initial feasible solutions, propose
+branching priorities, or recommend solver parameter settings based on
+problem structure. These are tasks where approximate reasoning and pattern
+matching (LLM strengths) complement the exact arithmetic and exhaustive
+search of traditional solvers. The key principle is that LLM outputs should
+inform but never override solver mathematics.
+
+** Domain-Specific Applications
+
+Chemical engineering has emerged as a particularly active domain for
+LLM-optimization integration, driven by the complexity of process models
+and the gap between process knowledge and mathematical programming
+expertise.
+
+citet:balhorn-schweidtmann-2024-flowsheet demonstrated LLM-based
+autocorrection of chemical process flowsheets. By representing flowsheets
+in SFILES (Simplified Flowsheet Input Line Entry System) notation, a
+text-based encoding of process topology, the authors enabled transformer
+models to process and correct flowsheet structures as sequences. The
+system achieves approximately 80% top-1 accuracy in identifying and
+fixing common flowsheet errors, demonstrating that LLMs can handle
+structured engineering representations beyond pure natural language.
+citet:schweidtmann-2024-genai-cheme provides a broader review of
+generative AI across chemical engineering, situating optimization
+applications within the larger landscape of molecular design, materials
+discovery, and process synthesis.
+
+More recent work on LLM-guided chemical process optimization
+citep:llm-process-optimization-2025 employs a multi-agent framework where
+specialized LLM agents handle constraint inference, model formulation, and
+optimization guidance. A key capability is autonomous constraint inference:
+the LLM agents identify implicit constraints from process descriptions and
+engineering knowledge (thermodynamic feasibility, safety limits, equipment
+ratings) that would typically require explicit specification by a domain
+expert. This moves beyond pure formulation toward a collaborative
+optimization workflow where the LLM contributes domain reasoning while the
+solver contributes mathematical rigor.
+
+** Connection to discopt
+
+The discopt solver implements several ideas from this literature in its
+optional =llm/= module (installed via =pip install discopt[llm]=). The
+module uses litellm as a universal adapter supporting over 100 LLM
+providers, with a safety invariant that LLM outputs never affect solver
+mathematics.
+
+Autoformulation is supported through =llm/tools.py=, which provides
+OpenAI-format tool definitions and a =ModelBuilder= class for structured
+=from_description()= calls. Users describe an optimization problem in
+natural language, and the LLM generates a discopt =Model= object with
+variables, constraints, and objective. The generated model passes through
+=validate()= before any solver interaction.
+
+The chat-based model building interface in =llm/chat.py= provides a
+=ChatSession= for conversational, iterative model construction, similar
+in spirit to OptiChat's dialogue approach. Users can refine their models
+through multiple rounds of conversation, adding constraints, modifying
+objectives, and exploring the solution interactively via =discopt.chat()=.
+
+Diagnosis capabilities in =llm/diagnosis.py= mirror the infeasibility
+diagnosis paradigm of citet:chen-li-2024-optichat-infeasibility. When a
+model is infeasible, the diagnosis module analyzes the solver output and
+provides natural language explanations of conflicting constraints. It also
+handles convergence analysis for models that hit iteration or time limits,
+and limit diagnosis for models that terminate prematurely.
+
+The =llm/commentary.py= module provides a =SolveCommentator= for
+streaming branch-and-bound commentary, translating the progress of the
+solver (incumbent updates, bound improvements, node counts) into narrative
+that helps users understand the solver's behavior. The =llm/reformulation.py=
+module implements auto-reformulation detection, identifying common
+modeling issues such as weak big-M values (see
+[[file:big-m-formulations.org][big-M formulations]]), symmetry, bilinear
+terms, and loose bounds, then suggesting specific improvements.
+
+All LLM-generated content in discopt is sanitized through =llm/safety.py=,
+which performs output validation, bounds clamping, and name sanitization.
+This enforces the safety invariant: explanations and suggestions flow
+from the LLM to the user, but formulations must pass validation, and LLM
+outputs never modify solver internals, tolerances, or algorithmic
+parameters directly.
+
+** Open Challenges
+
+Several fundamental challenges remain at the intersection of LLMs and
+mathematical optimization.
+
+Hallucination in constraint generation is perhaps the most critical
+concern. An LLM may generate constraints that are syntactically valid and
+even plausible-sounding but mathematically incorrect, either too tight
+(rendering feasible problems infeasible) or too loose (admitting solutions
+that violate the intended physics or business rules). Unlike hallucination
+in text generation, where errors are often obvious, constraint
+hallucination can produce models that solve successfully but yield
+meaningless results. Verification of LLM-generated formulations remains
+an open research problem; current approaches rely on test instances with
+known optimal values, but this does not scale to novel problems.
+
+Numerical precision presents a fundamental mismatch between LLM
+capabilities and optimization requirements. Optimization solvers operate
+with tolerances on the order of 1e-6 to 1e-12 (discopt uses abs=1e-6,
+rel=1e-4, integrality=1e-5), while LLMs have no reliable mechanism for
+exact arithmetic. This reinforces the design principle that LLMs should
+assist with formulation and interpretation but not with numerical
+computation.
+
+Scalability to large models is another barrier. Industrial optimization
+problems may have thousands of variables and constraints, with problem
+descriptions spanning many pages of technical documentation. Current
+autoformulation approaches struggle with this scale, as demonstrated by
+the modular decomposition strategy in OptiMUS
+citep:ahmaditeshnizi-2024-optimus. The MCTS approach
+citep:autoformulation-mcts-2025 offers a promising direction by breaking
+formulation into incremental decisions, but computational cost grows with
+problem complexity.
+
+Finally, the safety invariant (ensuring LLM outputs never affect solver
+math) must be maintained as LLM integration deepens. As systems move from
+explanation toward active participation in model building and
+reformulation, the boundary between advisory output and solver-affecting
+input becomes harder to enforce. Discopt's approach of requiring
+=validate()= on all LLM-generated models and routing all LLM output
+through safety sanitization provides a template, but the community will
+need robust verification frameworks as these tools mature.

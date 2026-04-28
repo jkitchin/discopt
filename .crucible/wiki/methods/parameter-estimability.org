@@ -1,0 +1,64 @@
+#+TITLE: Parameter Estimability and Subset Selection
+#+FILETAGS: :method:identifiability:estimability:subset-selection:sensitivity:
+
+* Parameter Estimability and Subset Selection
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: brun2001-collinearity yao2003-estimability chu-hahn-2007-subset chu-hahn-2012-d-opt wu2011-estimability miao2011-identifiability
+:STATUS: draft
+:CREATED: 2026-04-22
+:END:
+
+Estimability analysis answers a blunt engineering question: given the data and the model, which subset of parameters can be estimated reliably, and which should be fixed at nominal values? It sits between structural identifiability (yes/no, model-only) and full [[file:../concepts/identifiability-analysis.org][practical identifiability]] analysis (continuous diagnostics): it produces an /ordered ranking/ of parameters from most to least estimable together with a cut-off that splits the set. The flagship methods are the collinearity-index diagnostic of citet:brun2001-collinearity in the environmental-modelling community and the orthogonalization + D-criterion ranking of citet:yao2003-estimability in the chemical-engineering community. citet:chu-hahn-2007-subset and citet:chu-hahn-2012-d-opt generalized the latter into a unified framework. The methods are cheap, local, and data-dependent — closer to the FIM view than to differential algebra — but give an immediately actionable answer.
+
+** Orthogonalization Ranking (Yao et al.)
+
+citet:yao2003-estimability proposed a rank-revealing orthogonalization of the scaled sensitivity matrix that selects parameters greedily.
+
+1. Form the scaled sensitivity matrix Z with columns z_j = (\partial y / \partial \theta_j) \cdot (s_{\theta_j} / s_y), where s denotes working scales. Each column measures how much output the j-th parameter moves per unit parameter change, normalized by measurement scale.
+2. Rank the column with largest 2-norm first: this is the most estimable parameter.
+3. Project the remaining columns onto the orthogonal complement of the selected set: z_j^{(k)} = (I - P_k) z_j.
+4. Repeat: at step k+1, select the column with the largest projected norm.
+5. Stop when the projected norm falls below a cut-off (typically 0.04 relative to the initial maximum, or until the D-criterion stops improving).
+
+The ranking is exactly the order in which a QR-with-column-pivoting would select columns of Z, and the cut-off on the trailing projected norms is equivalent to a rank-revealing tolerance. citet:wu2011-estimability combined this with a mean-squared-error-based model-selection criterion to decide how many parameters to keep.
+
+** Collinearity Index (Brun et al.)
+
+citet:brun2001-collinearity introduced the /collinearity index/
+
+#+begin_src
+gamma_K = 1 / sqrt( min eigenvalue of tilde{Z}_K^T tilde{Z}_K ),
+#+end_src
+
+where tilde{Z}_K is the scaled-sensitivity matrix restricted to a subset K of parameters with each column renormalized to unit length. Small \gamma_K signals independent columns; large \gamma_K signals near-collinearity. The canonical rule of thumb from the environmental-modelling literature is \gamma_K \lesssim 10–15: larger values flag practical non-identifiability of that subset. Combined with a D-criterion (\det \tilde{Z}_K^T \tilde{Z}_K) the collinearity index lets one enumerate all reasonably-sized subsets and pick the largest K for which \gamma_K stays below the threshold.
+
+The Brun index and the Yao ranking are complementary: the ranking gives a cheap greedy answer, the collinearity index validates or refines it.
+
+** Generalized D-Optimality Subset Selection (Chu and Hahn)
+
+citet:chu-hahn-2007-subset argued that the Yao ranking is a heuristic relative to the D-optimal subset of size K — the subset that maximizes \det Z_K^T Z_K. For small models the exact D-optimal subset can be enumerated; for larger models they proposed a branch-and-bound with cheap lower bounds on \det that prunes most subsets without evaluation. citet:chu-hahn-2012-d-opt extended the framework to include orthogonal projections and used it to benchmark against Yao/Brun. In the typical case the three methods agree; when they disagree, the Chu–Hahn D-optimal answer is preferred as the one that maximizes the information metric the downstream user cares about.
+
+** Relation to FIM and Profile Likelihood
+
+Estimability rankings are exactly the [[file:../concepts/fisher-information-matrix.org][FIM]] view projected onto a discrete subset-selection problem: the sensitivity matrix Z is (up to noise-covariance scaling) the square root of F, and the rank-revealing decompositions above are QR and SVD surrogates for the FIM eigendecomposition. The ranking is therefore subject to the same asymptotic and Gaussian assumptions as the FIM and should be validated with [[file:profile-likelihood-identifiability.org][profile likelihood]] on the flagged parameters. An estimability screen is cheap, so the usual workflow is: rank first, then profile only the top and bottom of the ranked list.
+
+** When to Use Estimability Analysis
+
+Estimability analysis is the method of choice when:
+
+- The model is large (dozens to hundreds of parameters) and full profile-likelihood analysis is prohibitive.
+- The user is willing to fix some parameters at nominal values and estimate a well-conditioned subset; this is often the operationally realistic engineering answer.
+- A ranking of parameter importance is needed for further experimental design or model reduction.
+
+It is /not/ the right method when the goal is rigorous confidence intervals on all parameters — for that, use profile likelihood or MCMC.
+
+** Estimability in discopt.doe
+
+The Yao–Brun orthogonalization and Chu–Hahn subset-selection algorithms are a dozen lines of numpy on top of the sensitivity Jacobian, which discopt can produce by JAX autodiff on its expression DAG. Both produce immediately actionable answers — a ranked list of parameters and a recommended subset — that complement the FIM eigenvalue spectrum ([[file:../concepts/sloppy-models.org][sloppy models]]) and the profile-likelihood CIs. A discopt.doe API could expose:
+
+- =estimability_rank(model, data)= returning the ordered parameter list and projected norms (Yao).
+- =collinearity_index(model, data, subset)= returning \gamma_K (Brun).
+- =best_subset(model, data, k)= returning the D-optimal K-subset by Chu–Hahn branch-and-bound — a small MINLP that discopt's own solvers can handle natively.
+
+Together these give a fast first-pass identifiability diagnostic for models that the full structural-analysis toolchain would never digest.

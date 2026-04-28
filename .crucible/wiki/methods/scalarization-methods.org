@@ -1,0 +1,162 @@
+#+TITLE: Scalarization Methods for Multiobjective Optimization
+#+FILETAGS: :method:multiobjective:scalarization:epsilon-constraint:tchebycheff:weighted-sum:
+#+PROPERTY: ARTICLE_TYPE method
+#+PROPERTY: SOURCE_KEYS miettinen-1999 marler-arora-2004 haimes-1971 mavrotas-2009 steuer-choo-1983 wierzbicki-2000 ehrgott-2005
+
+* Scalarization Methods for Multiobjective Optimization
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: miettinen-1999 marler-arora-2004 haimes-1971 mavrotas-2009 steuer-choo-1983 wierzbicki-2000 ehrgott-2005
+:STATUS: draft
+:CREATED: 2026-04-24
+:END:
+
+A /scalarization/ replaces the vector objective F(x) = (f_1, ..., f_k) with
+a parameterized scalar objective s_θ(F(x)) so that solving
+min_x s_θ(F(x)) for varying θ produces Pareto-optimal points of the
+original MOP. The art is choosing a family {s_θ} with three properties:
+(i) every optimum of s_θ is Pareto optimal (/efficiency/), (ii) every
+Pareto-optimal point is attainable for some θ (/completeness/), and
+(iii) the parameter-to-front map is well-conditioned so that evenly
+spaced θ give an evenly distributed front
+citep:miettinen-1999 citep:marler-arora-2004 citep:ehrgott-2005.
+
+Scalarization is the workhorse of deterministic multiobjective
+optimization because each subproblem is a standard single-objective NLP,
+MILP, or MINLP that certified solvers --- including [[file:../concepts/minlp-survey.org][MINLP solvers]] like
+discopt --- can handle unchanged. The tradeoff is that sampling a
+representative front requires tens to hundreds of subproblem solves.
+
+** Weighted Sum
+
+s_w(F(x)) = sum_i w_i f_i(x),    w >= 0,  sum w_i = 1.
+
+The oldest and simplest scalarization. Every minimizer is weakly Pareto
+optimal, and strictly Pareto optimal if w > 0 componentwise. For /convex/
+MOPs (convex f_i, convex X), the weighted sum is /complete/: every
+properly Pareto-optimal point is the minimizer of some w
+citep:miettinen-1999.
+
+Two fundamental limitations in the nonconvex case
+citep:marler-arora-2004 citep:das-dennis-1998:
+
+1. Points on a concave portion of the Pareto front cannot be recovered
+   for any w >= 0 --- they are supported only by nonlinear envelopes.
+2. Even on convex fronts, uniform weight spacing yields highly non-uniform
+   front coverage: most of the weight simplex maps to a small portion of
+   the front, so entire regions are missed unless the weight grid is very
+   dense.
+
+Objectives must be normalized before weights have meaning
+citep:marler-arora-2004: a common choice is (f_i - z*_i)/(z^N_i - z*_i)
+using the ideal/nadir range.
+
+** Epsilon-Constraint Method
+
+Pick one objective f_p to minimize, move the others into constraints:
+
+  min  f_p(x)    s.t.  f_i(x) <= epsilon_i  for i ≠ p,   x in X.
+
+Introduced by citet:haimes-1971 for bicriterion problems. Every optimum
+is weakly Pareto optimal, and every Pareto-optimal point can be obtained
+by an appropriate epsilon vector, with no convexity assumption required
+citep:miettinen-1999 citep:ehrgott-2005. This is the key advantage over
+weighted sum: /ε-constraint recovers the entire Pareto front, including
+nonconvex and disconnected pieces/.
+
+The price is subproblem feasibility management (the ε-bounds can make
+subproblems infeasible), the need for a good grid of epsilon values
+(ideal: spanning [z*_i, z^N_i] for each constrained objective), and the
+distinction between weakly and strictly Pareto optimal solutions at
+boundary constraints.
+
+*** AUGMECON and AUGMECON2
+
+citet:mavrotas-2009 addresses the weak-efficiency and efficiency-check
+issues with /augmented ε-constraint/ (AUGMECON):
+
+  min  f_p(x) - delta * sum_{i ≠ p} s_i / r_i
+  s.t. f_i(x) + s_i = epsilon_i,    s_i >= 0,   x in X.
+
+The slack variables s_i make every binding constraint contribute a small
+linear penalty, guaranteeing strictly Pareto-optimal solutions, avoiding
+redundant iterations, and supporting early termination via bypass
+coefficients when a subproblem is infeasible. AUGMECON2 adds lexicographic
+refinement. Both are widely implemented in GAMS/Python and serve as the
+reference exact method for multiobjective MILP.
+
+** Weighted Tchebycheff (Chebyshev)
+
+s_{w,z*}(F(x)) = max_i w_i (f_i(x) - z*_i).
+
+citet:steuer-choo-1983 established the weighted Tchebycheff (L_∞) method
+as the theoretical complement of weighted sum: /every/ Pareto-optimal
+point of a (not necessarily convex) MOP minimizes some weighted
+Tchebycheff problem. It is thus /complete/ for nonconvex MOPs.
+
+Drawbacks: the pointwise max is nondifferentiable (standard remedy: add
+an auxiliary variable t with t >= w_i (f_i - z*_i), minimize t --- the
+resulting problem has the same tractability class as the original when
+objectives are linear or smooth), and minimizers can be weakly Pareto
+optimal. The /augmented/ weighted Tchebycheff of citet:steuer-choo-1983,
+
+  min t - rho * sum_i w_i (f_i - z*_i),
+
+with small rho > 0, restores strict Pareto optimality in a way analogous
+to AUGMECON.
+
+** Achievement Scalarizing Functions
+
+Wierzbicki's reference-point methodology citep:wierzbicki-2000 generalizes
+the weighted Tchebycheff using a DM-supplied /reference point/ z^ref
+(the goal) and an /achievement scalarizing function/
+
+  s(F; z^ref, w) = max_i w_i (f_i(x) - z^ref_i) + rho sum_i w_i (f_i(x) - z^ref_i).
+
+- If z^ref is unattainable, the optimum is the Pareto-optimal point
+  closest to z^ref in the weighted L_∞ sense.
+- If z^ref is attainable, the optimum strictly dominates z^ref in the
+  weighted sum of objectives.
+
+Achievement scalarization is the analytical core of interactive methods
+including NIMBUS citep:miettinen-2008-pse and is naturally suited to
+preference-guided search: the DM adjusts z^ref rather than numerical
+weights.
+
+** Lexicographic and Goal Programming
+
+- /Lexicographic/: rank objectives, solve in order, each subsequent
+  problem adds a constraint that higher-priority objectives stay at their
+  optimum. Produces Pareto-optimal points only under uniqueness
+  assumptions citep:miettinen-1999.
+- /Goal programming/: minimize deviations (d^+, d^-) from DM-supplied
+  goals, under weighted or lexicographic aggregation. Efficient for
+  satisficing problems but does not automatically produce Pareto-optimal
+  points unless augmented by efficiency restoration.
+
+** Choosing a Scalarization
+
+Synthesis of citep:miettinen-1999 and citep:marler-arora-2004 guidance:
+
+| Method              | Convex MOP? | Nonconvex MOP?         | Parameter meaning |
+|---------------------+-------------+------------------------+-------------------|
+| Weighted sum        | Complete    | Misses concave pieces  | Trade-off rate    |
+| ε-constraint        | Complete    | Complete               | Objective bounds  |
+| Weighted Tchebycheff| Complete    | Complete               | Direction from z* |
+| Achievement fn      | Complete    | Complete               | Reference point   |
+| Lexicographic       | Partial     | Partial                | Priority order    |
+
+For bicriterion convex problems, weighted sum is often sufficient. For
+general MOPs --- and in particular multi-objective MILP/MINLP where
+disconnected nonconvex fronts are the norm --- AUGMECON, weighted
+Tchebycheff, or [[file:normal-boundary-intersection.org][normal-boundary intersection]] / normal-constraint
+variants are the defaults.
+
+** Relevance for discopt
+
+discopt's single-objective ~Model.minimize~ interface composes directly
+with any of these scalarizations: the user writes the scalarized
+objective, optionally adds ε-constraints, and sweeps the parameter grid
+using standard Python. A native ~ParetoFront~ API with ε-constraint /
+Chebyshev sweeps and automatic ideal/nadir computation is planned for
+Phase 5 of the roadmap.

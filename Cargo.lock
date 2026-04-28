@@ -1067,9 +1067,9 @@ checksum = "a96887878f22d7bad8a3b6dc5b7440e0ada9a245242924394987b21cf2210a4c"
 
 [[package]]
 name = "ripopt"
-version = "0.6.2"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "525c58b66d2e05c6e99dc6b0598288b38d5f8cf295f5940e812a1cd5850d1c6c"
+checksum = "9dc0a384c111f7327f9ae75a18444670a8e8ed1bb3008f3825b5bf7f99d35f99"
 dependencies = [
  "env_logger",
  "faer",

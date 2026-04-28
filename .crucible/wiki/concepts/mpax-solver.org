@@ -1,0 +1,159 @@
+#+TITLE: MPAX Solver
+#+FILETAGS: :concept:mpax:lp:first-order:jax:gpu:pdlp:
+
+* MPAX Solver
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: mpax-2024 applegate-pdlp-2021 lu-cupdlp-2023
+:STATUS: active
+:CREATED: 2026-04-21
+:UPDATED: 2026-04-21
+:END:
+
+MPAX is a JAX-native first-order LP solver developed by the MIT Lu Lab
+citep:mpax-2024, designed as a drop-in replacement for simplex or interior-
+point LP solvers in settings where GPU acceleration, batched solves, or
+differentiability matter more than the last few digits of solution
+accuracy. For discopt, MPAX is the single most architecturally-aligned LP
+backend candidate because it lives natively in the same JAX compute graph
+as discopt's relaxation construction, automatic differentiation, and NLP
+evaluator.
+
+Issue #37 on the discopt repository proposes MPAX integration as a short-
+term win. This article records MPAX's design, its strengths and weaknesses
+relative to HiGHS and SCIP's LP stacks, and its role in discopt's near- and
+long-term plans.
+
+** Algorithmic Background: PDLP
+
+MPAX is a JAX port of the algorithm introduced in citet:applegate-pdlp-2021
+as **PDLP** (Primal-Dual Linear Programming), itself a carefully engineered
+instance of primal-dual hybrid gradient (PDHG) applied to LP. The core loop
+is a two-line gradient update on the primal and dual variables, wrapped in
+a suite of practical enhancements:
+
+- /Adaptive restart/ — periodically reset the iterates to accelerate
+  convergence in regions where the objective has flattened.
+- /Adaptive step size/ — line search on the primal-dual step sizes to
+  balance progress.
+- /Diagonal preconditioning/ — Ruiz-style or Pock-Chambolle scaling.
+- /Infeasibility detection/ — certificates of primal or dual infeasibility
+  from the iterate trajectory.
+
+Per-iteration cost is one sparse matrix-vector product against the
+constraint matrix and its transpose; accuracy is typically $10^{-4}$ to
+$10^{-6}$ relative, sufficient for B&B bound evaluation and for feasibility
+heuristic guidance, not sufficient for termination-proof LP bounds in
+exact-arithmetic settings.
+
+citet:lu-cupdlp-2023 demonstrated a GPU implementation (cuPDLP.jl) that
+solves LPs with $10^8$+ nonzeros competitively with multi-node CPU simplex
+on a single GPU. MPAX brings the same design to the JAX ecosystem.
+
+** Differentiators of MPAX over cuPDLP
+
+- **JAX-native**: MPAX is written entirely in JAX primitives, so the solver
+  is =jit=-compiled to XLA, =vmap=-able over batches of LP instances, and
+  in principle differentiable through the optimum via implicit function
+  theorems. cuPDLP.jl is Julia; cuPDLP-C is C/CUDA. Neither composes with
+  discopt's existing JAX DAG.
+- **Batchable**: =jax.vmap(solve_lp)= over a batch of constraint matrices
+  with the same shape runs all instances in one GPU kernel. For discopt,
+  this means a B&B frontier of thousands of subproblems sharing a
+  constraint structure but differing in bounds can be solved in a single
+  GPU call.
+- **Differentiable**: MPAX's optimum can be differentiated with respect to
+  the problem data — constraint matrix, right-hand side, objective — using
+  implicit-function-theorem-based rules. This enables gradient-based
+  hyperparameter tuning of heuristics, sensitivity analysis, and
+  parameter-estimation pipelines that embed an LP.
+
+** Strengths and Weaknesses Relative to HiGHS
+
+| Dimension | HiGHS | MPAX |
+|---------------------+--------------+-------|
+| Accuracy | $10^{-9}$+ | $10^{-4}$ to $10^{-6}$ |
+| Small LP performance | Fast (simplex) | 5-50x slower |
+| Large LP performance | Hard to scale past 1M nonzeros | Scales to $10^8$ on GPU |
+| Warm-start quality | Excellent (basis) | Poor (iterate-level only) |
+| Batchable | No | Yes (=vmap=) |
+| Differentiable | No | Yes |
+| Language | C++ | Python/JAX |
+| License | MIT | MIT |
+
+The implication is that MPAX is **not** a replacement for HiGHS — it is a
+complement. For small, highly-accurate LPs that arise in B&B bound
+evaluation, HiGHS simplex remains the correct choice. MPAX takes over in
+the regime where LPs are large (hundreds of thousands of nonzeros or more),
+where batching across many LP instances gives GPU acceleration, or where
+downstream computation needs gradients through the LP solve.
+
+** Role in discopt
+
+*** Short-term: MPAX as an opt-in LP backend
+
+Wrap MPAX behind the same interface as HiGHS in =python/discopt/solvers/=.
+Add =MPAXBackend= alongside =HiGHSBackend=. Make the choice user-selectable
+via a solver parameter. Benchmark on the existing smoke and phase1 suites
+to determine the crossover point (problem size above which MPAX wins on
+wall-clock). The HiGHS backend remains the default until that crossover is
+characterized.
+
+*** Medium-term: MPAX inside GPU-batched heuristics
+
+Once MPAX is wrapped, use it as the LP projection step inside:
+
+- The [[file:../methods/feasibility-pump.org][feasibility pump]] — see the PDLP-pump discussion in
+  [[file:../methods/first-order-mip-heuristics.org][first-order MIP heuristics]].
+- Batched random rounding with LP feasibility checks.
+- Matheuristic sub-problems where the inner LP is large but approximate
+  solutions suffice.
+
+MPAX's =vmap= support means a single GPU call can solve a whole portfolio
+of LP sub-problems — the equivalent operation on HiGHS would be
+sequential solves with Python loop overhead.
+
+*** Long-term: Differentiable-LP-enabled features
+
+The unique capability of MPAX is differentiability. Examples of long-term
+features that become feasible only with a differentiable LP backend:
+
+- **Gradient-based cut-selection policy**: learn which cuts to add at each
+  node by gradient descent on end-to-end solve time, with gradients
+  propagated through the LP relaxations each cut affects.
+- **Parameter estimation with embedded LP**: when the objective or
+  constraints depend on unknown parameters, fit the parameters by back-
+  propagating from the LP solution through MPAX to the parameters.
+- **Design-of-experiments with LP-embedded utility**: propose experiments
+  that maximize the /derivative/ of the LP optimum with respect to
+  parameters.
+
+These are research directions rather than near-term deliverables, but they
+illustrate why MPAX is a strategic choice, not merely a performance one.
+
+** License and Integration
+
+MPAX is MIT-licensed. Integration into discopt is straightforward: install
+as a dependency (optional, via =discopt[mpax]=), import in
+=python/discopt/solvers/mpax.py=, expose the same =solve_lp= interface as
+the HiGHS wrapper. No proprietary components, no build-system surprises.
+The main engineering effort is in the batching and differentiability
+layers, which are discopt-specific.
+
+** Relationship to HiGHS's cuPDLP Path
+
+HiGHS 1.7+ vendors cuPDLP-C in =highs/pdlp/cupdlp/= and exposes it through
+the standard HiGHS LP API. Users of HiGHS can already get PDLP-style
+performance on GPUs. However, HiGHS's cuPDLP integration does not expose
+=vmap=, differentiability, or JAX composition. For a CPU-only or
+performance-only integration, HiGHS's cuPDLP is sufficient. For discopt's
+long-term plans to exploit differentiability and GPU batching in
+heuristics, MPAX is the correct choice.
+
+** Related discopt Articles
+
+- [[file:../methods/first-order-mip-heuristics.org][first-order MIP heuristics]] — how MPAX enables new heuristic designs.
+- [[file:../methods/feasibility-pump.org][feasibility pump]] — the first heuristic to switch to MPAX as an inner LP.
+- [[file:../methods/feasibility-jump.org][feasibility jump]] — LP-free, but pairs with MPAX in hybrid designs.
+- [[file:highs-solver.org][HiGHS solver]] — the incumbent LP backend that MPAX complements, not
+  replaces.

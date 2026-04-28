@@ -9,13 +9,14 @@ future rules can be added without changing solver-side plumbing.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import NoReturn, Optional, Sequence
 
 import numpy as np
 
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
+    FunctionCall,
     IndexExpression,
     Model,
     UnaryOp,
@@ -28,7 +29,7 @@ _EFFECTIVE_INF = 1e19
 
 def is_effectively_finite(value: float) -> bool:
     """Return True when a bound is finite in the solver sense."""
-    return np.isfinite(value) and abs(float(value)) < _EFFECTIVE_INF
+    return bool(np.isfinite(value) and abs(float(value)) < _EFFECTIVE_INF)
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,12 @@ class NonlinearBoundTighteningStats:
 
     n_tightened: int
     applied_rules: tuple[str, ...]
+    infeasible: bool = False
+    infeasibility_reason: Optional[str] = None
+
+
+class NonlinearBoundTighteningInfeasible(ValueError):
+    """Raised internally when a sound tightening rule proves infeasibility."""
 
 
 class NonlinearBoundTighteningRule:
@@ -124,6 +131,124 @@ def _match_scaled_linear_var(
     if flat_idx is None:
         return None
     return flat_idx, scale
+
+
+def _merge_affine_matches(
+    left: tuple[Optional[int], float, float],
+    right: tuple[Optional[int], float, float],
+) -> Optional[tuple[Optional[int], float, float]]:
+    left_idx, left_coeff, left_offset = left
+    right_idx, right_coeff, right_offset = right
+    if left_idx is not None and right_idx is not None and left_idx != right_idx:
+        return None
+    flat_idx = left_idx if left_idx is not None else right_idx
+    return flat_idx, left_coeff + right_coeff, left_offset + right_offset
+
+
+def _match_affine_var(
+    expr,
+    scale: float,
+    metadata: FlatVariableMetadata,
+) -> Optional[tuple[Optional[int], float, float]]:
+    """Match an affine scalar expression a*x + b in one flat variable."""
+    const_val = _constant_value(expr)
+    if const_val is not None:
+        return None, 0.0, scale * const_val
+
+    flat_idx = metadata.scalar_flat_index(expr)
+    if flat_idx is not None:
+        return flat_idx, scale, 0.0
+
+    if isinstance(expr, UnaryOp) and expr.op == "neg":
+        return _match_affine_var(expr.operand, -scale, metadata)
+
+    if isinstance(expr, BinaryOp) and expr.op == "*":
+        left_const = _constant_value(expr.left)
+        if left_const is not None:
+            return _match_affine_var(expr.right, scale * left_const, metadata)
+        right_const = _constant_value(expr.right)
+        if right_const is not None:
+            return _match_affine_var(expr.left, scale * right_const, metadata)
+        return None
+
+    if isinstance(expr, BinaryOp) and expr.op in ("+", "-"):
+        left = _match_affine_var(expr.left, scale, metadata)
+        right_scale = scale if expr.op == "+" else -scale
+        right = _match_affine_var(expr.right, right_scale, metadata)
+        if left is None or right is None:
+            return None
+        return _merge_affine_matches(left, right)
+
+    return None
+
+
+def _apply_integrality(
+    lb: float,
+    ub: float,
+    var_type: VarType,
+) -> tuple[float, float]:
+    if var_type == VarType.BINARY:
+        return max(lb, 0.0), min(ub, 1.0)
+    if var_type == VarType.INTEGER:
+        return float(np.ceil(lb - 1e-9)), float(np.floor(ub + 1e-9))
+    return lb, ub
+
+
+def _constraint_label(constraint) -> str:
+    name = getattr(constraint, "name", None)
+    return str(name) if name else repr(constraint)
+
+
+def _prove_infeasible(rule_name: str, constraint, reason: str) -> NoReturn:
+    raise NonlinearBoundTighteningInfeasible(
+        f"{rule_name} proved infeasibility for {_constraint_label(constraint)}: {reason}"
+    )
+
+
+def _tighten_affine_argument_interval(
+    tightened_lb: np.ndarray,
+    tightened_ub: np.ndarray,
+    metadata: FlatVariableMetadata,
+    flat_idx: int,
+    coeff: float,
+    offset: float,
+    arg_lb: Optional[float] = None,
+    arg_ub: Optional[float] = None,
+) -> None:
+    """Intersect a flat variable box with L <= coeff*x + offset <= U."""
+    if abs(coeff) <= 1e-12:
+        return
+
+    new_lb = float(tightened_lb[flat_idx])
+    new_ub = float(tightened_ub[flat_idx])
+
+    if arg_lb is not None and np.isfinite(arg_lb):
+        bound = (float(arg_lb) - offset) / coeff
+        if coeff > 0.0:
+            new_lb = max(new_lb, bound)
+        else:
+            new_ub = min(new_ub, bound)
+
+    if arg_ub is not None and np.isfinite(arg_ub):
+        bound = (float(arg_ub) - offset) / coeff
+        if coeff > 0.0:
+            new_ub = min(new_ub, bound)
+        else:
+            new_lb = max(new_lb, bound)
+
+    new_lb, new_ub = _apply_integrality(
+        new_lb,
+        new_ub,
+        metadata.flat_var_types[flat_idx],
+    )
+    if new_lb <= new_ub:
+        tightened_lb[flat_idx] = new_lb
+        tightened_ub[flat_idx] = new_ub
+        return
+
+    raise NonlinearBoundTighteningInfeasible(
+        f"tightened interval is empty for flat variable {flat_idx}: [{new_lb}, {new_ub}]"
+    )
 
 
 def _flatten_sum(expr, scale: float, out: list[tuple[float, object]]) -> None:
@@ -221,7 +346,7 @@ class SumOfSquaresUpperBoundRule(NonlinearBoundTighteningRule):
         tightened_ub = flat_ub.copy()
 
         for constraint in model._constraints:
-            if getattr(constraint, "sense", None) != "<=":
+            if getattr(constraint, "sense", None) not in ("<=", "=="):
                 continue
 
             terms: list[tuple[float, object]] = []
@@ -251,7 +376,14 @@ class SumOfSquaresUpperBoundRule(NonlinearBoundTighteningRule):
             if not matches_pattern or not square_coeffs:
                 continue
 
-            rhs = max(0.0, -constant_term)
+            rhs = -constant_term
+            if rhs < -1e-12:
+                _prove_infeasible(
+                    self.name,
+                    constraint,
+                    "nonnegative sum of squares has a negative upper bound",
+                )
+            rhs = max(0.0, rhs)
             for flat_idx, coeff in square_coeffs.items():
                 if coeff <= 0.0:
                     continue
@@ -271,6 +403,12 @@ class SumOfSquaresUpperBoundRule(NonlinearBoundTighteningRule):
                 if new_lb <= new_ub:
                     tightened_lb[flat_idx] = new_lb
                     tightened_ub[flat_idx] = new_ub
+                else:
+                    _prove_infeasible(
+                        self.name,
+                        constraint,
+                        f"required interval for flat variable {flat_idx} is empty",
+                    )
 
         return tightened_lb, tightened_ub
 
@@ -319,7 +457,7 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
         tightened_ub = flat_ub.copy()
 
         for constraint in model._constraints:
-            if getattr(constraint, "sense", None) != "<=":
+            if getattr(constraint, "sense", None) not in ("<=", "=="):
                 continue
 
             terms: list[tuple[float, object]] = []
@@ -374,6 +512,13 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
                 )
 
             total_min = float(sum(min_contribs.values()))
+            if constant_term + total_min > 1e-12:
+                _prove_infeasible(
+                    self.name,
+                    constraint,
+                    "minimum separable quadratic activity exceeds the upper bound",
+                )
+
             for flat_idx, (a, b) in coeffs.items():
                 rhs = -constant_term - (total_min - min_contribs[flat_idx])
                 if not np.isfinite(rhs):
@@ -387,7 +532,11 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
                     float(tightened_ub[flat_idx]),
                 )
                 if interval is None:
-                    continue
+                    _prove_infeasible(
+                        self.name,
+                        constraint,
+                        f"required interval for flat variable {flat_idx} is empty",
+                    )
 
                 new_lb, new_ub = interval
                 var_type = metadata.flat_var_types[flat_idx]
@@ -401,11 +550,371 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
                 if new_lb <= new_ub:
                     tightened_lb[flat_idx] = new_lb
                     tightened_ub[flat_idx] = new_ub
+                else:
+                    _prove_infeasible(
+                        self.name,
+                        constraint,
+                        f"required interval for flat variable {flat_idx} is empty",
+                    )
+
+        return tightened_lb, tightened_ub
+
+
+def _safe_exp(value: float) -> float:
+    if value > 709.0:
+        return float("inf")
+    if value < -745.0:
+        return 0.0
+    return float(np.exp(value))
+
+
+def _monotone_function_value(func_name: str, value: float) -> float:
+    if func_name == "exp":
+        return _safe_exp(value)
+    if func_name == "log":
+        if value <= 0.0:
+            return -float("inf")
+        return float(np.log(value))
+    if func_name == "log2":
+        if value <= 0.0:
+            return -float("inf")
+        return float(np.log2(value))
+    if func_name == "log10":
+        if value <= 0.0:
+            return -float("inf")
+        return float(np.log10(value))
+    if func_name == "log1p":
+        if value <= -1.0:
+            return -float("inf")
+        return float(np.log1p(value))
+    if func_name == "sqrt":
+        if value < 0.0:
+            return float("nan")
+        return float(np.sqrt(value))
+    raise ValueError(f"Unsupported monotone function: {func_name}")
+
+
+def _inverse_monotone_upper(func_name: str, rhs: float) -> Optional[float]:
+    """Return U such that f(arg) <= rhs implies arg <= U."""
+    if func_name == "exp":
+        if rhs <= 0.0:
+            return None
+        return float(np.log(rhs))
+    if func_name == "log":
+        return _safe_exp(rhs)
+    if func_name == "log2":
+        return float("inf") if rhs > 1024.0 else float(2.0**rhs)
+    if func_name == "log10":
+        return float("inf") if rhs > 308.0 else float(10.0**rhs)
+    if func_name == "log1p":
+        return _safe_exp(rhs) - 1.0
+    if func_name == "sqrt":
+        if rhs < 0.0:
+            return None
+        return rhs * rhs
+    return None
+
+
+def _inverse_monotone_lower(func_name: str, rhs: float) -> Optional[float]:
+    """Return L such that f(arg) >= rhs implies arg >= L."""
+    if func_name == "exp":
+        if rhs <= 0.0:
+            return None
+        return float(np.log(rhs))
+    if func_name == "log":
+        return _safe_exp(rhs)
+    if func_name == "log2":
+        return 0.0 if rhs < -1074.0 else float(2.0**rhs)
+    if func_name == "log10":
+        return 0.0 if rhs < -324.0 else float(10.0**rhs)
+    if func_name == "log1p":
+        return _safe_exp(rhs) - 1.0
+    if func_name == "sqrt":
+        if rhs <= 0.0:
+            return None
+        return rhs * rhs
+    return None
+
+
+_MONOTONE_DOMAINS: dict[str, tuple[Optional[float], Optional[float]]] = {
+    "exp": (None, None),
+    "log": (0.0, None),
+    "log2": (0.0, None),
+    "log10": (0.0, None),
+    "log1p": (-1.0, None),
+    "sqrt": (0.0, None),
+}
+
+
+class MonotoneFunctionBoundsRule(NonlinearBoundTighteningRule):
+    """Tighten affine arguments of monotone unary function constraints."""
+
+    name = "monotone_function_bounds"
+
+    def _match_scaled_function(
+        self,
+        expr,
+        scale: float,
+        metadata: FlatVariableMetadata,
+    ) -> Optional[tuple[str, float, int, float, float]]:
+        if isinstance(expr, UnaryOp) and expr.op == "neg":
+            return self._match_scaled_function(expr.operand, -scale, metadata)
+
+        if isinstance(expr, BinaryOp) and expr.op == "*":
+            left_const = _constant_value(expr.left)
+            if left_const is not None:
+                return self._match_scaled_function(expr.right, scale * left_const, metadata)
+            right_const = _constant_value(expr.right)
+            if right_const is not None:
+                return self._match_scaled_function(expr.left, scale * right_const, metadata)
+            return None
+
+        if (
+            not isinstance(expr, FunctionCall)
+            or expr.func_name not in _MONOTONE_DOMAINS
+            or len(expr.args) != 1
+        ):
+            return None
+
+        affine_match = _match_affine_var(expr.args[0], 1.0, metadata)
+        if affine_match is None:
+            return None
+        flat_idx, arg_coeff, arg_offset = affine_match
+        if flat_idx is None or abs(arg_coeff) <= 1e-12:
+            return None
+        return expr.func_name, scale, flat_idx, arg_coeff, arg_offset
+
+    def tighten(
+        self,
+        model: Model,
+        flat_lb: np.ndarray,
+        flat_ub: np.ndarray,
+        metadata: FlatVariableMetadata,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        tightened_lb = flat_lb.copy()
+        tightened_ub = flat_ub.copy()
+
+        for constraint in model._constraints:
+            if getattr(constraint, "sense", None) not in ("<=", "=="):
+                continue
+
+            terms: list[tuple[float, object]] = []
+            _flatten_sum(constraint.body, 1.0, terms)
+
+            constant_term = 0.0
+            function_match: Optional[tuple[str, float, int, float, float]] = None
+            matches_pattern = True
+
+            for scale, term in terms:
+                const_val = _constant_value(term)
+                if const_val is not None:
+                    constant_term += scale * const_val
+                    continue
+
+                match = self._match_scaled_function(term, scale, metadata)
+                if match is None or function_match is not None:
+                    matches_pattern = False
+                    break
+                function_match = match
+
+            if not matches_pattern or function_match is None:
+                continue
+
+            func_name, func_coeff, flat_idx, arg_coeff, arg_offset = function_match
+            if abs(func_coeff) <= 1e-12:
+                continue
+
+            domain_lb, domain_ub = _MONOTONE_DOMAINS[func_name]
+            arg_lb = domain_lb
+            arg_ub = domain_ub
+            arg_endpoint_a = arg_coeff * float(tightened_lb[flat_idx]) + arg_offset
+            arg_endpoint_b = arg_coeff * float(tightened_ub[flat_idx]) + arg_offset
+            current_arg_lb = min(arg_endpoint_a, arg_endpoint_b)
+            current_arg_ub = max(arg_endpoint_a, arg_endpoint_b)
+            if domain_lb is not None:
+                current_arg_lb = max(current_arg_lb, domain_lb)
+            if domain_ub is not None:
+                current_arg_ub = min(current_arg_ub, domain_ub)
+            if current_arg_lb > current_arg_ub + 1e-12:
+                _prove_infeasible(
+                    self.name,
+                    constraint,
+                    f"{func_name} argument domain is empty on the current box",
+                )
+
+            func_min = _monotone_function_value(func_name, current_arg_lb)
+            func_max = _monotone_function_value(func_name, current_arg_ub)
+            rhs = -constant_term / func_coeff
+            if func_coeff > 0.0:
+                if rhs < func_min - 1e-12:
+                    _prove_infeasible(
+                        self.name,
+                        constraint,
+                        f"{func_name}(argument) cannot be <= {rhs}",
+                    )
+                upper = _inverse_monotone_upper(func_name, rhs)
+                if upper is not None:
+                    arg_ub = upper if arg_ub is None else min(arg_ub, upper)
+            else:
+                if rhs > func_max + 1e-12:
+                    _prove_infeasible(
+                        self.name,
+                        constraint,
+                        f"{func_name}(argument) cannot be >= {rhs}",
+                    )
+                lower = _inverse_monotone_lower(func_name, rhs)
+                if lower is not None:
+                    arg_lb = lower if arg_lb is None else max(arg_lb, lower)
+
+            _tighten_affine_argument_interval(
+                tightened_lb,
+                tightened_ub,
+                metadata,
+                flat_idx,
+                arg_coeff,
+                arg_offset,
+                arg_lb=arg_lb,
+                arg_ub=arg_ub,
+            )
+
+        return tightened_lb, tightened_ub
+
+
+class ReciprocalBoundsRule(NonlinearBoundTighteningRule):
+    """Tighten sign-stable affine denominators in simple reciprocal constraints."""
+
+    name = "reciprocal_bounds"
+
+    def _match_scaled_reciprocal(
+        self,
+        expr,
+        scale: float,
+        metadata: FlatVariableMetadata,
+    ) -> Optional[tuple[float, int, float, float]]:
+        if isinstance(expr, UnaryOp) and expr.op == "neg":
+            return self._match_scaled_reciprocal(expr.operand, -scale, metadata)
+
+        if isinstance(expr, BinaryOp) and expr.op == "*":
+            left_const = _constant_value(expr.left)
+            if left_const is not None:
+                return self._match_scaled_reciprocal(expr.right, scale * left_const, metadata)
+            right_const = _constant_value(expr.right)
+            if right_const is not None:
+                return self._match_scaled_reciprocal(expr.left, scale * right_const, metadata)
+            return None
+
+        if not isinstance(expr, BinaryOp) or expr.op != "/":
+            return None
+
+        numerator = _constant_value(expr.left)
+        if numerator is None or abs(numerator) <= 1e-12:
+            return None
+
+        denominator = _match_affine_var(expr.right, 1.0, metadata)
+        if denominator is None:
+            return None
+        flat_idx, denom_coeff, denom_offset = denominator
+        if flat_idx is None or abs(denom_coeff) <= 1e-12:
+            return None
+
+        return scale * numerator, flat_idx, denom_coeff, denom_offset
+
+    @staticmethod
+    def _argument_interval_for_leq(
+        numerator: float,
+        rhs: float,
+        arg_lo: float,
+        arg_hi: float,
+    ) -> tuple[Optional[float], Optional[float]]:
+        vals = (numerator / arg_lo, numerator / arg_hi)
+        min_val = min(vals)
+        max_val = max(vals)
+        if rhs >= max_val - 1e-12:
+            return None, None
+        if rhs < min_val - 1e-12:
+            return None, None
+
+        threshold = numerator / rhs
+        if numerator > 0.0:
+            return threshold, None
+        return None, threshold
+
+    def tighten(
+        self,
+        model: Model,
+        flat_lb: np.ndarray,
+        flat_ub: np.ndarray,
+        metadata: FlatVariableMetadata,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        tightened_lb = flat_lb.copy()
+        tightened_ub = flat_ub.copy()
+
+        for constraint in model._constraints:
+            if getattr(constraint, "sense", None) not in ("<=", "=="):
+                continue
+
+            terms: list[tuple[float, object]] = []
+            _flatten_sum(constraint.body, 1.0, terms)
+
+            constant_term = 0.0
+            reciprocal_match: Optional[tuple[float, int, float, float]] = None
+            matches_pattern = True
+
+            for scale, term in terms:
+                const_val = _constant_value(term)
+                if const_val is not None:
+                    constant_term += scale * const_val
+                    continue
+
+                match = self._match_scaled_reciprocal(term, scale, metadata)
+                if match is None or reciprocal_match is not None:
+                    matches_pattern = False
+                    break
+                reciprocal_match = match
+
+            if not matches_pattern or reciprocal_match is None:
+                continue
+
+            numerator, flat_idx, denom_coeff, denom_offset = reciprocal_match
+            arg_endpoint_a = denom_coeff * float(tightened_lb[flat_idx]) + denom_offset
+            arg_endpoint_b = denom_coeff * float(tightened_ub[flat_idx]) + denom_offset
+            arg_lo = min(arg_endpoint_a, arg_endpoint_b)
+            arg_hi = max(arg_endpoint_a, arg_endpoint_b)
+            if arg_lo <= 0.0 <= arg_hi:
+                continue
+
+            rhs = -constant_term
+            vals = (numerator / arg_lo, numerator / arg_hi)
+            if rhs < min(vals) - 1e-12:
+                _prove_infeasible(
+                    self.name,
+                    constraint,
+                    "reciprocal activity exceeds the upper bound on the sign-stable box",
+                )
+
+            arg_lb, arg_ub = self._argument_interval_for_leq(
+                numerator,
+                rhs,
+                arg_lo,
+                arg_hi,
+            )
+            _tighten_affine_argument_interval(
+                tightened_lb,
+                tightened_ub,
+                metadata,
+                flat_idx,
+                denom_coeff,
+                denom_offset,
+                arg_lb=arg_lb,
+                arg_ub=arg_ub,
+            )
 
         return tightened_lb, tightened_ub
 
 
 DEFAULT_NONLINEAR_BOUND_RULES: tuple[NonlinearBoundTighteningRule, ...] = (
+    MonotoneFunctionBoundsRule(),
+    ReciprocalBoundsRule(),
     SumOfSquaresUpperBoundRule(),
     SeparableQuadraticUpperBoundRule(),
 )
@@ -424,13 +933,58 @@ def tighten_nonlinear_bounds(
 
     applied_rules: list[str] = []
     n_tightened = 0
+    empty_initial = np.flatnonzero(tightened_lb > tightened_ub + 1e-12)
+    if empty_initial.size > 0:
+        first_idx = int(empty_initial[0])
+        return (
+            tightened_lb,
+            tightened_ub,
+            NonlinearBoundTighteningStats(
+                n_tightened=0,
+                applied_rules=(),
+                infeasible=True,
+                infeasibility_reason=f"initial interval is empty for flat variable {first_idx}",
+            ),
+        )
 
     for rule in rules:
         prev_lb = tightened_lb.copy()
         prev_ub = tightened_ub.copy()
-        cand_lb, cand_ub = rule.tighten(model, prev_lb, prev_ub, metadata)
-        tightened_lb = np.maximum(prev_lb, np.asarray(cand_lb, dtype=np.float64))
-        tightened_ub = np.minimum(prev_ub, np.asarray(cand_ub, dtype=np.float64))
+        try:
+            cand_lb, cand_ub = rule.tighten(model, prev_lb, prev_ub, metadata)
+        except NonlinearBoundTighteningInfeasible as exc:
+            applied_rules.append(rule.name)
+            return (
+                prev_lb,
+                prev_ub,
+                NonlinearBoundTighteningStats(
+                    n_tightened=n_tightened,
+                    applied_rules=tuple(applied_rules),
+                    infeasible=True,
+                    infeasibility_reason=str(exc),
+                ),
+            )
+
+        cand_lb_arr = np.asarray(cand_lb, dtype=np.float64)
+        cand_ub_arr = np.asarray(cand_ub, dtype=np.float64)
+        empty_indices = np.flatnonzero(cand_lb_arr > cand_ub_arr + 1e-12)
+        if empty_indices.size > 0:
+            applied_rules.append(rule.name)
+            first_idx = int(empty_indices[0])
+            return (
+                prev_lb,
+                prev_ub,
+                NonlinearBoundTighteningStats(
+                    n_tightened=n_tightened,
+                    applied_rules=tuple(applied_rules),
+                    infeasible=True,
+                    infeasibility_reason=(
+                        f"{rule.name} returned an empty interval for flat variable {first_idx}"
+                    ),
+                ),
+            )
+        tightened_lb = np.maximum(prev_lb, cand_lb_arr)
+        tightened_ub = np.minimum(prev_ub, cand_ub_arr)
 
         n_changed = int(
             np.count_nonzero(np.abs(tightened_lb - prev_lb) > 1e-12)

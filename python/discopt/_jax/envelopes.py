@@ -20,10 +20,16 @@ from discopt._jax.mccormick import (
 
 
 def relax_trilinear(x, y, z, x_lb, x_ub, y_lb, y_ub, z_lb, z_ub):
-    """McCormick relaxation of x*y*z via nested bilinear decomposition.
+    """Loose McCormick relaxation of x*y*z via single nested bilinear decomposition.
 
-    Decomposes as (x*y)*z (Meyer-Floudas approach). First relaxes the
-    bilinear term w = x*y, then relaxes w*z.
+    Decomposes as (x*y)*z: relaxes the bilinear term w = x*y, then relaxes
+    w*z using compositional McCormick over the [w_cv, w_cc] interval. This is
+    a sound relaxation but not the tightest available — see
+    :func:`relax_trilinear_exact`, which considers all three orderings and is
+    strictly tighter on most boxes.
+
+    Kept as a fallback / reference path for the unbounded or non-trilinear
+    cases that the exact-routing detector does not cover.
 
     Args:
         x, y, z: point values
@@ -51,6 +57,64 @@ def relax_trilinear(x, y, z, x_lb, x_ub, y_lb, y_ub, z_lb, z_ub):
     cv = jnp.minimum(cv1, cv2)
     cc = jnp.maximum(cc1, cc2)
 
+    return cv, cc
+
+
+def _nested_trilinear_one_order(a, b, c, a_lb, a_ub, b_lb, b_ub, c_lb, c_ub):
+    """Single-ordering nested bilinear: relax (a*b)*c.
+
+    Helper used by relax_trilinear_exact. Returns (cv, cc) where
+    cv <= a*b*c <= cc.
+    """
+    w_cv, w_cc = relax_bilinear(a, b, a_lb, a_ub, b_lb, b_ub)
+    corners = jnp.array([a_lb * b_lb, a_lb * b_ub, a_ub * b_lb, a_ub * b_ub])
+    w_lb = jnp.min(corners)
+    w_ub = jnp.max(corners)
+
+    cv1, cc1 = relax_bilinear(w_cv, c, w_lb, w_ub, c_lb, c_ub)
+    cv2, cc2 = relax_bilinear(w_cc, c, w_lb, w_ub, c_lb, c_ub)
+    cv = jnp.minimum(cv1, cv2)
+    cc = jnp.maximum(cc1, cc2)
+    return cv, cc
+
+
+def relax_trilinear_exact(x, y, z, x_lb, x_ub, y_lb, y_ub, z_lb, z_ub):
+    """Tighter relaxation of x*y*z: permutation-symmetric nested McCormick.
+
+    Computes convex/concave envelopes of the trilinear monomial x*y*z on a
+    box by considering all three nested-bilinear orderings — (x*y)*z,
+    (x*z)*y, (y*z)*x — and merging with the tightest valid bounds:
+    ``cv = max(cv_1, cv_2, cv_3)`` and ``cc = min(cc_1, cc_2, cc_3)``. Each
+    ordering is sound, so the merged bounds are sound and provably at least
+    as tight as any single ordering, with strict improvement on most
+    mixed-sign boxes.
+
+    This is an honest improvement over :func:`relax_trilinear` (which uses a
+    single ordering) but is *not* the literal exact convex hull of the
+    trilinear monomial described in Rikun (1997) / Meyer & Floudas (2004) /
+    Locatelli (2018), which requires additional facet families. Encoding
+    those facets is future work.
+
+    All operations are pure JAX (jit/vmap/grad compatible).
+
+    Args:
+        x, y, z: point values
+        x_lb, x_ub: bounds on x
+        y_lb, y_ub: bounds on y
+        z_lb, z_ub: bounds on z
+
+    Returns:
+        (cv, cc) where cv <= x*y*z <= cc.
+    """
+    # Order 1: (x*y)*z
+    cv1, cc1 = _nested_trilinear_one_order(x, y, z, x_lb, x_ub, y_lb, y_ub, z_lb, z_ub)
+    # Order 2: (x*z)*y
+    cv2, cc2 = _nested_trilinear_one_order(x, z, y, x_lb, x_ub, z_lb, z_ub, y_lb, y_ub)
+    # Order 3: (y*z)*x
+    cv3, cc3 = _nested_trilinear_one_order(y, z, x, y_lb, y_ub, z_lb, z_ub, x_lb, x_ub)
+
+    cv = jnp.maximum(jnp.maximum(cv1, cv2), cv3)
+    cc = jnp.minimum(jnp.minimum(cc1, cc2), cc3)
     return cv, cc
 
 

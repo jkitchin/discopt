@@ -1,0 +1,117 @@
+#+TITLE: Interactive Multiobjective Optimization
+#+FILETAGS: :method:multiobjective:interactive:reference-point:nimbus:
+#+PROPERTY: ARTICLE_TYPE method
+#+PROPERTY: SOURCE_KEYS miettinen-1999 wierzbicki-2000 miettinen-2008-pse
+
+* Interactive Multiobjective Optimization
+:PROPERTIES:
+:ARTICLE_TYPE: method
+:SOURCE_KEYS: miettinen-1999 wierzbicki-2000 miettinen-2008-pse
+:STATUS: draft
+:CREATED: 2026-04-24
+:END:
+
+Interactive multiobjective optimization alternates between /computation/
+and /preference elicitation/. The DM neither specifies full preferences
+up front nor waits for a complete Pareto-front approximation; instead
+they inspect one (or a few) Pareto-optimal candidate(s), supply local
+preference feedback, and the algorithm generates new candidates in the
+region of interest. Interactive methods are the practical method of
+choice when (i) the Pareto front is too large to enumerate, (ii) the DM
+cannot articulate full trade-off preferences a priori, or (iii) each
+subproblem solve is expensive citep:miettinen-1999.
+
+** Reference-Point Methodology
+
+citet:wierzbicki-2000 is the foundational framework. The DM supplies a
+/reference point/ z^ref (a desired aspiration level for each objective).
+The algorithm computes the Pareto-optimal point closest to z^ref in the
+achievement-function sense:
+
+  min  s(F; z^ref, w, rho)
+      = max_i w_i (f_i(x) - z^ref_i) + rho sum_i w_i (f_i(x) - z^ref_i).
+
+The DM inspects the result, adjusts z^ref (move it in the direction of
+desired improvement), and re-solves. This iterative loop converges to a
+Pareto-optimal point the DM accepts, without requiring numeric weights.
+
+Key reference-point methods:
+
+- /Reference point method/ (Wierzbicki): the basic loop above.
+- /GUESS/: DM sees one Pareto point and specifies objectives to improve
+  or relax.
+- /Light beam search/: DM specifies a reservation point and an
+  aspiration point; outputs a small sample of Pareto points between
+  them.
+- /Reference direction/ and /Pareto race/: the DM navigates along a
+  direction in objective space, generating a sequence of Pareto points
+  in real time.
+
+See citep:miettinen-1999 for a comprehensive classification.
+
+** NIMBUS
+
+citet:miettinen-2008-pse (see also Miettinen & Mäkelä 1995) introduced
+NIMBUS, the most widely-used interactive method in chemical-process and
+engineering-design applications. At each iteration the DM sees one
+Pareto-optimal candidate F(x) and classifies each objective into one of
+five categories:
+
+1. f_i should /improve/ as much as possible.
+2. f_i should /improve/ at least to a specified aspiration level z_i.
+3. f_i is /satisfactory/ and should stay put.
+4. f_i may /worsen/ up to an upper bound z_i.
+5. f_i may change /freely/.
+
+NIMBUS then builds and solves up to four scalarized subproblems that
+realize this classification (a reference-point formulation, a weighted
+Tchebycheff, a GUESS-like formulation, and an achievement function), and
+presents the resulting Pareto-optimal candidates. The DM picks one, and
+the loop continues. This richer single-iteration output helps DMs
+understand local trade-off geometry without having to enumerate the
+front.
+
+NIMBUS was formulated originally for nondifferentiable problems and is
+widely applied in chemical engineering --- paper-machine design,
+bioprocess optimization, catalyst synthesis trade-offs --- where
+objectives are evaluated by simulation and the number of affordable
+solves per iteration is small citep:miettinen-2008-pse.
+
+** Interactive Evolutionary Methods
+
+Recent work couples reference-point methodology with EMO algorithms:
+
+- /R-NSGA-II/ focuses the nondominated front generation around
+  DM-supplied reference points, giving a dense local approximation
+  rather than a uniform global one.
+- /Preference-based MOEA/D/ distorts the weight-vector distribution
+  toward the DM's region of interest.
+- /Progressive articulation of preferences/: periodic preference queries
+  during an EMO run that reshape selection pressure.
+
+These hybrids aim to retain the single-run nature of EMO while
+delivering a front concentrated where the DM cares, rather than the
+uninformative uniform coverage of classic NSGA-II.
+
+** When to Use Interactive Methods
+
+| Situation                                           | Method class         |
+|-----------------------------------------------------+----------------------|
+| Cheap subproblems, k = 2, DM wants to see the front | A posteriori scalarization |
+| Expensive subproblems, DM has rough aspirations     | Reference point / NIMBUS   |
+| Many objectives, DM cannot rank                     | Interactive EMO (R-NSGA, MOEA/D-pref) |
+| Black-box, expensive, low-budget                    | Interactive Bayesian (preference-EHVI) |
+
+Interactive methods are the most "human-in-the-loop" branch of
+multiobjective optimization and typically require GUI tooling (IND-NIMBUS,
+DESDEO) more than algorithmic sophistication.
+
+** Relevance for discopt
+
+Any interactive method reduces to repeated scalar subproblems: a
+reference-point or achievement subproblem, a weighted Tchebycheff, or an
+ε-constraint formulation. discopt's single-objective API can serve any
+of these provided the scalarized subproblem is expressible as a standard
+MINLP. A future discopt multi-objective package would naturally layer an
+interactive frontend (e.g., a Jupyter / widget-based NIMBUS or
+reference-point loop) on top of the ~ParetoFront~ scalarization engine.

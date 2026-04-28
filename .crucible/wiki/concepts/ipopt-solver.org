@@ -1,0 +1,149 @@
+#+TITLE: Ipopt: Interior Point Optimizer
+#+FILETAGS: :concept:solver:ipopt:interior-point:nlp:filter-line-search:
+#+PROPERTY: ARTICLE_TYPE concept
+#+PROPERTY: SOURCE_KEYS waechter-biegler-2006 waechter2006 fletcher-leyffer-2002 nocedal2006
+
+* Ipopt: Interior Point Optimizer
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: waechter-biegler-2006 waechter2006 fletcher-leyffer-2002 nocedal2006
+:STATUS: draft
+:CREATED: 2026-04-05
+:END:
+
+Ipopt (Interior Point OPTimizer) is the most widely used open-source solver for
+large-scale nonlinear programming. The algorithm and its implementation are
+described in detail by cite:waechter-biegler-2006. Ipopt serves as the default
+NLP subproblem solver in several MINLP frameworks, including Bonmin
+citep:bonami2008, Couenne citep:belotti2009, and discopt, where it solves the
+continuous relaxations generated at each node of the branch-and-bound tree. The
+design choices in Ipopt, particularly the filter line-search mechanism and the
+inertia correction strategy, make it unusually robust on the ill-conditioned
+subproblems that arise in MINLP contexts.
+
+** Filter Line Search vs. Merit Functions
+
+Traditional interior-point methods use a merit function (typically an L1 or
+augmented Lagrangian penalty) to judge whether a trial step makes sufficient
+progress. The difficulty is that the merit function combines the objective and
+constraint violation into a single scalar, requiring a penalty parameter that
+must be large enough to enforce feasibility but not so large that it distorts the
+objective landscape. Choosing this parameter adaptively is fragile, and poor
+choices can cause the solver to stall or reject good steps.
+
+Ipopt replaces the merit function with a filter mechanism inspired by the
+multiobjective optimization perspective of Fletcher and Leyffer
+citep:fletcher-leyffer-2002. The filter maintains a set of pairs (objective
+value, constraint violation) from previous iterates. A trial point is accepted if
+it is not "dominated" by any entry in the filter, meaning it must improve either
+the objective or the constraint violation (or both) relative to every filter
+entry. This eliminates the need to choose a penalty parameter entirely. The
+filter is augmented with a sufficient-decrease condition to prevent cycling and
+ensure global convergence.
+
+The filter approach has a practical benefit beyond theoretical elegance: it
+allows the solver to make progress on feasibility and optimality independently.
+In early iterations of a difficult problem, the solver might accept steps that
+dramatically reduce constraint violation even if the objective worsens, then
+later accept steps that improve the objective while maintaining feasibility. A
+merit function would struggle with this kind of alternating progress because the
+penalty weighting rigidly couples the two objectives.
+
+** Inertia Correction of the KKT System
+
+At each iteration, Ipopt solves a symmetric indefinite linear system (the
+primal-dual KKT system) to compute the search direction. For the step to be a
+descent direction for the barrier objective, the KKT matrix must have the correct
+inertia: exactly n positive eigenvalues (matching the number of primal variables)
+and m negative eigenvalues (matching the number of equality constraints), with no
+zero eigenvalues. When the Hessian of the Lagrangian is not sufficiently positive
+definite on the null space of the constraint Jacobian, the inertia can be wrong,
+leading to directions that are not descent directions.
+
+Ipopt detects incorrect inertia by examining the pivot signs during the symmetric
+indefinite factorization (typically performed by MA27 or MA57 from the HSL
+library, or MUMPS as an open-source alternative). When the inertia is wrong, Ipopt
+adds a multiple of the identity to the (1,1) block of the KKT matrix,
+effectively regularizing the Hessian. The regularization parameter starts small
+and increases geometrically until the correct inertia is obtained. This strategy
+is more robust than simply requiring positive definiteness of the full Hessian,
+because it preserves the structure of the KKT system and only modifies the
+minimum amount necessary to ensure a descent direction
+citep:waechter-biegler-2006.
+
+The inertia correction is particularly important for nonconvex problems, where
+the Hessian of the Lagrangian is frequently indefinite. In MINLP branch and
+bound, the continuous relaxations at different nodes can have very different
+curvature properties, so the solver must handle indefiniteness gracefully at
+every node.
+
+** Second-Order Corrections
+
+A well-known difficulty with line-search methods for constrained optimization is
+the Maratos effect: near a solution, the full Newton step can be rejected by the
+line search because it temporarily increases the constraint violation, even
+though it would produce superquadratic convergence. Ipopt addresses this with
+second-order correction (SOC) steps. After the primary search direction is
+computed and the trial point is rejected by the filter, Ipopt computes a
+correction step that accounts for the linearization error in the constraints.
+The corrected trial point typically satisfies the filter acceptance criteria,
+restoring fast local convergence citep:waechter-biegler-2006.
+
+** Adaptive Barrier Parameter Updates
+
+Rather than following a fixed schedule for reducing the barrier parameter mu,
+Ipopt uses an adaptive update strategy. The barrier parameter is decreased
+aggressively when the current barrier problem appears well-solved (measured by
+the norm of the optimality conditions for the current mu) and held steady or
+decreased conservatively otherwise. This adaptive scheme avoids the common
+failure mode of premature barrier reduction, where mu decreases faster than the
+iterates can track the central path, leading to numerical difficulties and slow
+convergence citep:waechter-biegler-2006.
+
+** Warm-Starting Considerations
+
+Warm-starting Ipopt from a previous solution is nontrivial because the barrier
+method requires strictly interior iterates. When variable bounds change between
+parent and child nodes in branch and bound, the previous solution may lie on or
+outside the new feasible boundary. Ipopt provides several mechanisms for warm
+starting: perturbing the initial point away from bounds, adjusting the initial
+barrier parameter to a larger value so the barrier terms do not dominate, and
+accepting the previous primal-dual iterate as a starting point when it remains
+feasible citep:nocedal2006. The effectiveness of warm starting is a significant
+factor in overall MINLP solve times, since branch and bound may require solving
+thousands of closely related NLP relaxations.
+
+** Implementation Choices and Robustness
+
+Several implementation details contribute to Ipopt's practical robustness.
+The solver uses a feasibility restoration phase that activates when the filter
+rejects all trial step sizes: in this phase, Ipopt temporarily minimizes
+constraint violation (ignoring the original objective) to find a point that the
+filter will accept, then resumes normal optimization. This restoration phase
+prevents the solver from declaring failure on problems where the initial point is
+far from feasible.
+
+Ipopt interfaces with external linear algebra packages through a clean
+abstraction layer, supporting HSL routines (MA27, MA57, MA77, MA86, MA97),
+MUMPS, and Pardiso. The choice of linear solver has a large effect on
+performance: HSL MA57 is generally fastest for moderate-sized problems, while
+MUMPS provides a free alternative with reasonable performance. For very large
+problems with exploitable sparsity structure, MA97 or Pardiso may be
+preferable.
+
+** Role in discopt
+
+In discopt, Ipopt is accessed through the cyipopt Python wrapper, which provides
+the callback interface that Ipopt requires (objective, gradient, constraints,
+Jacobian, and optionally Hessian evaluations). The discopt JAX compiler generates
+these callbacks automatically from the expression DAG, with JAX computing exact
+derivatives via automatic differentiation. This combination of Ipopt's robust
+NLP algorithm with JAX's exact derivatives avoids the approximation errors that
+finite-difference Hessians would introduce, particularly for the ill-conditioned
+problems encountered deep in the branch-and-bound tree.
+
+** See Also
+
+- [[file:../methods/interior-point-methods.org][Interior Point Methods for NLP]] for the general theory of barrier methods and primal-dual IPMs
+- [[file:couenne-solver.org][Couenne Solver]] and [[file:baron-solver.org][BARON Solver]] for MINLP solvers that use Ipopt as an NLP subroutine
+- [[file:../methods/nonlinear-branch-and-bound.org][Nonlinear Branch and Bound]] for the MINLP framework in which Ipopt solves relaxations
