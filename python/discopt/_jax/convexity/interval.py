@@ -210,12 +210,21 @@ class Interval:
 
 def _monotonic_nondec(x: Interval, f) -> Interval:
     """Image of ``x`` under a nondecreasing function ``f``, outward-rounded."""
-    return Interval(_round_down(f(x.lo)), _round_up(f(x.hi)))
+    # Wide boxes can intentionally overflow to unbounded enclosures. The
+    # certificate code treats non-finite endpoints as an abstention signal, so
+    # keep the interval sound without emitting benchmark-visible warnings.
+    with np.errstate(over="ignore", invalid="ignore"):
+        lo = f(x.lo)
+        hi = f(x.hi)
+    return Interval(_round_down(lo), _round_up(hi))
 
 
 def _monotonic_nonincr(x: Interval, f) -> Interval:
     """Image of ``x`` under a nonincreasing function ``f``, outward-rounded."""
-    return Interval(_round_down(f(x.hi)), _round_up(f(x.lo)))
+    with np.errstate(over="ignore", invalid="ignore"):
+        lo = f(x.hi)
+        hi = f(x.lo)
+    return Interval(_round_down(lo), _round_up(hi))
 
 
 def exp(x: Interval) -> Interval:
@@ -234,17 +243,23 @@ def log(x: Interval) -> Interval:
     if np.any(lo <= 0):
         # Replace nonpositive parts with -inf to keep the enclosure
         # sound without poisoning well-defined entries.
-        safe_lo = np.where(lo > 0, np.log(np.where(lo > 0, lo, 1.0)), -np.inf)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            safe_lo = np.where(lo > 0, np.log(np.where(lo > 0, lo, 1.0)), -np.inf)
     else:
-        safe_lo = np.log(lo)
-    return Interval(_round_down(safe_lo), _round_up(np.log(x.hi)))
+        with np.errstate(divide="ignore", invalid="ignore"):
+            safe_lo = np.log(lo)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        hi = np.log(x.hi)
+    return Interval(_round_down(safe_lo), _round_up(hi))
 
 
 def sqrt(x: Interval) -> Interval:
     """Sound enclosure of ``sqrt([lo, hi])`` on the nonneg domain."""
     lo = x.lo
-    safe_lo = np.where(lo >= 0, np.sqrt(np.where(lo >= 0, lo, 0.0)), -np.inf)
-    return Interval(_round_down(safe_lo), _round_up(np.sqrt(x.hi)))
+    with np.errstate(invalid="ignore"):
+        safe_lo = np.where(lo >= 0, np.sqrt(np.where(lo >= 0, lo, 0.0)), -np.inf)
+        hi = np.sqrt(x.hi)
+    return Interval(_round_down(safe_lo), _round_up(hi))
 
 
 def absolute(x: Interval) -> Interval:

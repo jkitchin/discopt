@@ -136,7 +136,7 @@ def _outer(a: Interval, b: Interval) -> Interval:
     a_hi = a.hi[:, None]
     b_lo = b.lo[None, :]
     b_hi = b.hi[None, :]
-    with np.errstate(invalid="ignore"):
+    with np.errstate(over="ignore", invalid="ignore"):
         p1 = a_lo * b_lo
         p2 = a_lo * b_hi
         p3 = a_hi * b_lo
@@ -165,10 +165,11 @@ def _scalar_times_array(s: Interval, arr: Interval) -> Interval:
 def _broadcast_product(s: Interval, arr: Interval) -> Interval:
     s_lo = np.asarray(s.lo)
     s_hi = np.asarray(s.hi)
-    p1 = s_lo * arr.lo
-    p2 = s_lo * arr.hi
-    p3 = s_hi * arr.lo
-    p4 = s_hi * arr.hi
+    with np.errstate(over="ignore", invalid="ignore"):
+        p1 = s_lo * arr.lo
+        p2 = s_lo * arr.hi
+        p3 = s_hi * arr.lo
+        p4 = s_hi * arr.hi
     lo = np.minimum(np.minimum(p1, p2), np.minimum(p3, p4))
     hi = np.maximum(np.maximum(p1, p2), np.maximum(p3, p4))
     return Interval(_round_down(lo), _round_up(hi))

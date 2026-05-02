@@ -13,6 +13,8 @@ Neumaier (1990), *Interval Methods for Systems of Equations*.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 from discopt._jax.convexity import interval as iv
@@ -140,6 +142,16 @@ class TestElementaryFunctions:
         out = iv.exp(a)
         xs = _sample_in(a, SAMPLES, seed=seed)
         _assert_encloses(out, np.exp(xs))
+
+    def test_exp_wide_interval_overflow_is_quiet(self):
+        """Overflow to an unbounded enclosure is an expected abstention path."""
+        a = Interval.from_bounds(-1000.0, 1000.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            out = iv.exp(a)
+
+        assert np.isfinite(out.lo)
+        assert np.isposinf(out.hi)
 
     @pytest.mark.parametrize("seed", [0, 1, 2])
     def test_log_encloses(self, seed):
