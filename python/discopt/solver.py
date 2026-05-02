@@ -1168,6 +1168,11 @@ def _strong_branch_lp(
 _BOUND_WARN_THRESHOLD = 1e15
 
 
+def _optimal_relative_gap(objective: float) -> Optional[float]:
+    """Return the relative gap for a certified optimum."""
+    return None if abs(float(objective)) <= 1e-10 else 0.0
+
+
 def _format_bad_bound_entries(
     model: Model,
     flat_lb: np.ndarray,
@@ -1391,12 +1396,15 @@ def solve_model(
             "iteration_callback",
             "milp_time_limit",
             "milp_gap_tolerance",
+            "presolve_bt",
             "apply_partitioning",
             "disc_var_pick",
             "partition_scaling_factor",
             "disc_add_partition_method",
             "disc_abs_width_tol",
             "convhull_formulation",
+            "convhull_ebd",
+            "convhull_ebd_encoding",
         )
         for key in amp_option_keys:
             if key in kwargs:
@@ -2705,7 +2713,7 @@ def _solve_continuous(
         status=status,
         objective=obj_val,
         bound=obj_val if status == "optimal" else None,
-        gap=0.0 if status == "optimal" else None,
+        gap=_optimal_relative_gap(obj_val) if status == "optimal" and obj_val is not None else None,
         x=x_dict,
         wall_time=wall_time,
         node_count=0,
@@ -3787,7 +3795,7 @@ def _solve_lp(model: Model, t_start: float, time_limit: float | None = None) -> 
         status=status,
         objective=obj_val,
         bound=obj_val if status == "optimal" else None,
-        gap=0.0 if status == "optimal" else None,
+        gap=_optimal_relative_gap(obj_val) if status == "optimal" else None,
         x=_unpack_solution(model, x_flat),
         wall_time=wall_time,
         node_count=0,
@@ -3859,7 +3867,7 @@ def _solve_lp_highs(
             status="optimal",
             objective=obj_val,
             bound=obj_val,
-            gap=0.0,
+            gap=_optimal_relative_gap(obj_val),
             x=_unpack_solution(model, np.asarray(result.x[:n_orig])),
             wall_time=wall_time,
             node_count=0,
@@ -3965,7 +3973,7 @@ def _solve_qp_highs(
             status="optimal",
             objective=obj_val,
             bound=obj_val,
-            gap=0.0,
+            gap=_optimal_relative_gap(obj_val),
             x=_unpack_solution(model, x_flat),
             wall_time=wall_time,
             node_count=result.node_count,
@@ -4115,7 +4123,7 @@ def _solve_qp_jax(model: Model, t_start: float) -> SolveResult:
         status=status,
         objective=obj_val,
         bound=obj_val if status == "optimal" else None,
-        gap=0.0 if status == "optimal" else None,
+        gap=_optimal_relative_gap(obj_val) if status == "optimal" else None,
         x=_unpack_solution(model, x_flat),
         wall_time=wall_time,
         node_count=0,

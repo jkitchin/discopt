@@ -13,6 +13,7 @@
 #   make build               # Rebuild Rust .so if sources changed
 #   make test                # Run pytest suite
 #   make lint                # Ruff lint + format check
+#   make hooks               # Install pre-commit hooks
 #   make clean               # Remove build artifacts
 #
 # Results are saved to results/ with ISO-8601 timestamps.
@@ -26,6 +27,7 @@ MATURIN     ?= maturin
 PYTEST      ?= pytest
 RUFF        ?= ruff
 JUPYTER     ?= jupyter
+PRE_COMMIT  ?= pre-commit
 
 PROJECT_DIR := $(shell pwd)
 RESULTS_DIR := $(PROJECT_DIR)/results
@@ -55,7 +57,7 @@ CUTEST_ENV      := $(CUTEST_PREFIX)/env.sh
 
 # --- Phony targets ------------------------------------------------------------
 
-.PHONY: all benchmarks build test lint clean help \
+.PHONY: all benchmarks build test lint hooks clean help \
         bench-notebook bench-smoke bench-phase3-gate bench-tests \
         bench-cutest bench-cutest-smoke setup-cutest check-cutest \
         docs docs-open notebooks \
@@ -72,6 +74,7 @@ help:
 	@echo "  make build              Rebuild Rust .so if sources changed"
 	@echo "  make test               Run full pytest suite"
 	@echo "  make lint               Ruff lint + format check"
+	@echo "  make hooks              Install pre-commit hooks"
 	@echo "  make bench-notebook     Run benchmark notebook, save HTML + JSON"
 	@echo "  make bench-smoke        Quick smoke benchmark via run_benchmarks.py"
 	@echo "  make bench-phase3-gate  Phase 3 gate validation script"
@@ -132,6 +135,11 @@ lint:
 	@echo "==> Running ruff format check..."
 	$(RUFF) format --check python/
 	@echo "==> Lint passed"
+
+hooks:
+	@echo "==> Installing pre-commit hooks..."
+	$(PRE_COMMIT) install
+	@echo "==> Hooks installed"
 
 # --- Test ---------------------------------------------------------------------
 

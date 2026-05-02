@@ -32,11 +32,20 @@ import numpy as np
 
 from discopt._jax.milp_relaxation import _normalize_convhull_formulation
 from discopt._jax.model_utils import flat_variable_bounds
-from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
-from discopt.modeling.core import Model, ObjectiveSense, SolveResult, VarType
+from discopt._jax.nonlinear_bound_tightening import (
+    is_effectively_finite,
+    tighten_nonlinear_bounds,
+)
+from discopt.modeling.core import (
+    Model,
+    ObjectiveSense,
+    SolveResult,
+    VarType,
+)
 
 logger = logging.getLogger(__name__)
 _DEFAULT_MAX_OA_CUTS = 128
+_SMALL_INT_FALLBACK_MAX_ASSIGNMENTS = 128
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +105,72 @@ def _apply_flat_bounds_to_model(model: Model, lb: np.ndarray, ub: np.ndarray) ->
         offset += size
 
 
+def _default_nlp_start(flat_lb: np.ndarray, flat_ub: np.ndarray) -> np.ndarray:
+    """Build a neutral NLP start point that behaves sensibly on semi-infinite domains."""
+    x0 = np.zeros_like(flat_lb, dtype=np.float64)
+    finite_lb = np.vectorize(is_effectively_finite)(flat_lb)
+    finite_ub = np.vectorize(is_effectively_finite)(flat_ub)
+
+    both = finite_lb & finite_ub
+    x0[both] = 0.5 * (flat_lb[both] + flat_ub[both])
+
+    only_lb = finite_lb & ~finite_ub
+    x0[only_lb] = np.maximum(flat_lb[only_lb], 0.0)
+
+    only_ub = ~finite_lb & finite_ub
+    x0[only_ub] = np.minimum(flat_ub[only_ub], 0.0)
+
+    return x0
+
+
+def _continuous_recovery_starts(
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+    initial_point: Optional[np.ndarray] = None,
+) -> list[np.ndarray]:
+    """Candidate starts for pure-continuous incumbent recovery."""
+    starts: list[np.ndarray] = []
+
+    if initial_point is not None:
+        starts.append(np.asarray(initial_point, dtype=np.float64).copy())
+
+    lb_clip = np.clip(flat_lb, -1e8, 1e8)
+    ub_clip = np.clip(flat_ub, -1e8, 1e8)
+    midpoint = 0.5 * (lb_clip + ub_clip)
+    fully_unbounded = (flat_lb <= -1e15) & (flat_ub >= 1e15)
+    midpoint = np.where(fully_unbounded, 0.5, midpoint)
+    midpoint = np.clip(
+        midpoint,
+        np.maximum(flat_lb, -10.0),
+        np.minimum(flat_ub, 10.0),
+    )
+    starts.append(midpoint)
+    starts.append(np.clip(np.zeros_like(flat_lb), flat_lb, flat_ub))
+    starts.append(np.clip(np.ones_like(flat_lb), flat_lb, flat_ub))
+
+    unique: list[np.ndarray] = []
+    seen: set[tuple[float, ...]] = set()
+    for start in starts:
+        key = tuple(float(v) for v in np.asarray(start, dtype=np.float64).ravel())
+        if key not in seen:
+            seen.add(key)
+            unique.append(np.asarray(start, dtype=np.float64))
+    return unique
+
+
+def _dedupe_candidate_points(points: list[np.ndarray]) -> list[np.ndarray]:
+    """Return candidate points with duplicates removed in insertion order."""
+    unique: list[np.ndarray] = []
+    seen: set[tuple[float, ...]] = set()
+    for point in points:
+        arr = np.asarray(point, dtype=np.float64)
+        key = tuple(float(v) for v in arr.ravel())
+        if key not in seen:
+            seen.add(key)
+            unique.append(arr)
+    return unique
+
+
 def _remaining_wall_time(deadline: Optional[float]) -> Optional[float]:
     """Return seconds remaining until a deadline, or None when uncapped."""
     if deadline is None:
@@ -121,37 +196,129 @@ def _solve_nlp_subproblem(
         lb_clip = np.clip(lb, -1e8, 1e8)
         ub_clip = np.clip(ub, -1e8, 1e8)
         x0_clipped = np.clip(x0, lb_clip, ub_clip)
-        solver_options: dict[str, float | int] = {"print_level": 0, "max_iter": 300}
-        if time_limit is not None:
-            solver_options["max_wall_time"] = max(time_limit, 0.05)
-
-        prefer_ipopt = nlp_solver == "ipm" and time_limit is not None and _has_cyipopt()
+        local_deadline = time.perf_counter() + time_limit if time_limit is not None else None
         model = evaluator._model
         saved_bounds = _snapshot_variable_bounds(model)
         _apply_flat_bounds_to_model(model, lb, ub)
-
         try:
-            if nlp_solver == "ipm" and hasattr(evaluator, "_obj_fn") and not prefer_ipopt:
-                from discopt._jax.ipm import solve_nlp_ipm
+            solver_sequence = [nlp_solver]
+            if nlp_solver == "ipm" and _has_cyipopt():
+                # The pure-JAX IPM is less robust on the tightly fixed integer
+                # subproblems used in AMP's local incumbent search. Retry with
+                # Ipopt before giving up so feasible incumbents are not missed.
+                solver_sequence.append("ipopt")
 
-                result = solve_nlp_ipm(evaluator, x0_clipped, options=solver_options)
-            else:
-                from discopt.solvers.nlp_ipopt import solve_nlp
+            result = None
+            for solver_name in solver_sequence:
+                remaining = _remaining_wall_time(local_deadline)
+                if remaining is not None and remaining <= 0.0:
+                    break
+                options: dict[str, float | int] = {"print_level": 0, "max_iter": 300}
+                if remaining is not None:
+                    options["max_wall_time"] = max(remaining, 0.05)
+                if solver_name == "ipm" and hasattr(evaluator, "_obj_fn"):
+                    from discopt._jax.ipm import solve_nlp_ipm
 
-                if time_limit is not None:
-                    solver_options["max_cpu_time"] = max(time_limit, 0.05)
-                result = solve_nlp(evaluator, x0_clipped, options=solver_options)
+                    trial = solve_nlp_ipm(
+                        evaluator,
+                        x0_clipped,
+                        options=options,
+                    )
+                else:
+                    from discopt.solvers.nlp_ipopt import solve_nlp
+
+                    if remaining is not None:
+                        options["max_cpu_time"] = max(remaining, 0.05)
+                    trial = solve_nlp(
+                        evaluator,
+                        x0_clipped,
+                        options=options,
+                    )
+                result = trial
+                from discopt.solvers import SolveStatus
+
+                if trial.status == SolveStatus.OPTIMAL:
+                    break
         finally:
             _restore_variable_bounds(saved_bounds)
 
         from discopt.solvers import SolveStatus
 
-        if result.status == SolveStatus.OPTIMAL:
+        if result is not None and result.status == SolveStatus.OPTIMAL:
             obj = float(evaluator.evaluate_objective(result.x))
             return result.x, obj
     except Exception as e:
         logger.debug("AMP NLP subproblem failed: %s", e)
     return None, None
+
+
+def _recover_pure_continuous_solution(
+    model: Model,
+    evaluator,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+    *,
+    nlp_solver: str,
+    t_start: float,
+    time_limit: float,
+    initial_point: Optional[np.ndarray] = None,
+) -> Optional[SolveResult]:
+    """Try an AMP-local NLP solve to recover a feasible incumbent.
+
+    This is a last-resort incumbent recovery path for pure continuous models
+    where AMP failed to produce any incumbent from its relaxation loop. The
+    NLP solve is treated as a local feasibility heuristic within AMP, not as
+    a global solution certificate, so successful recovery is reported as
+    ``"feasible"``.
+    """
+    remaining = max(0.0, time_limit - (time.perf_counter() - t_start))
+    if remaining <= 0.0:
+        return None
+
+    solver_sequence = [nlp_solver]
+    if nlp_solver == "ipm" and _has_cyipopt():
+        solver_sequence = ["ipopt", "ipm"]
+
+    best_x: Optional[np.ndarray] = None
+    best_obj: Optional[float] = None
+    deadline = t_start + time_limit
+
+    for x0 in _continuous_recovery_starts(flat_lb, flat_ub, initial_point):
+        remaining_opt = _remaining_wall_time(deadline)
+        if remaining_opt is not None and remaining_opt <= 0.0:
+            break
+        for solver_name in solver_sequence:
+            remaining_opt = _remaining_wall_time(deadline)
+            if remaining_opt is not None and remaining_opt <= 0.0:
+                break
+            recovered_x, recovered_obj = _solve_nlp_subproblem(
+                evaluator,
+                x0,
+                flat_lb,
+                flat_ub,
+                solver_name,
+                time_limit=remaining_opt,
+            )
+            if recovered_x is None or recovered_obj is None:
+                continue
+            if best_obj is None or recovered_obj < best_obj:
+                best_x = recovered_x
+                best_obj = recovered_obj
+
+    if best_x is None or best_obj is None:
+        return None
+
+    maximize = model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE
+    obj_val = -best_obj if maximize else best_obj
+    return SolveResult(
+        status="feasible",
+        objective=obj_val,
+        bound=None,
+        gap=None,
+        x=_build_x_dict(best_x, model),
+        wall_time=time.perf_counter() - t_start,
+        gap_certified=False,
+    )
 
 
 def _check_integer_feasible(x: np.ndarray, model: Model, int_tol: float = 1e-5) -> bool:
@@ -175,6 +342,7 @@ def _integer_rounding_candidates(
     """Generate nearest-first integer rounding candidates within variable bounds."""
     base = np.asarray(x, dtype=np.float64).copy()
     integer_entries: list[tuple[int, list[int]]] = []
+    full_domain_product = 1
 
     offset = 0
     for v in model._variables:
@@ -189,18 +357,46 @@ def _integer_rounding_candidates(
                 lo_i = int(np.ceil(lb_i - 1e-9))
                 hi_i = int(np.floor(ub_i + 1e-9))
 
-                options: list[int] = []
-                for raw in (
-                    int(round(clipped)),
-                    int(np.floor(clipped)),
-                    int(np.ceil(clipped)),
-                ):
+                if lo_i <= hi_i:
+                    domain_size = hi_i - lo_i + 1
+                    full_domain_product *= max(1, domain_size)
+                else:
+                    domain_size = max_candidates + 1
+                    full_domain_product = max_candidates + 1
+
+                if lo_i <= hi_i and full_domain_product <= max_candidates:
+                    center = min(max(int(round(clipped)), lo_i), hi_i)
+                    options = list(range(lo_i, hi_i + 1))
+                    options.sort(
+                        key=lambda value: (abs(value - clipped), abs(value - center), value)
+                    )
+                else:
+                    center = int(round(clipped))
                     if lo_i <= hi_i:
-                        cand_int = min(max(raw, lo_i), hi_i)
-                    else:
-                        cand_int = int(round(clipped))
-                    if cand_int not in options:
-                        options.append(cand_int)
+                        center = min(max(center, lo_i), hi_i)
+
+                    options = []
+                    for raw in (
+                        center,
+                        int(np.floor(clipped)),
+                        int(np.ceil(clipped)),
+                    ):
+                        if lo_i <= hi_i:
+                            cand_int = min(max(raw, lo_i), hi_i)
+                        else:
+                            cand_int = raw
+                        if cand_int not in options:
+                            options.append(cand_int)
+
+                    neighbor_radius = 2
+                    for delta in range(1, neighbor_radius + 1):
+                        for raw in (center - delta, center + delta):
+                            if lo_i <= hi_i:
+                                cand_int = min(max(raw, lo_i), hi_i)
+                            else:
+                                cand_int = raw
+                            if cand_int not in options:
+                                options.append(cand_int)
 
                 integer_entries.append((idx, options))
         offset += v.size
@@ -238,7 +434,7 @@ def _integer_rounding_candidates(
         if key not in seen:
             seen.add(key)
             deduped.append(cand)
-    return deduped
+    return deduped[:max_candidates]
 
 
 def _round_integers(x: np.ndarray, model: Model) -> np.ndarray:
@@ -264,7 +460,11 @@ def _build_fixed_integer_bounds(
             for k in range(v.size):
                 idx = offset + k
                 val = float(np.clip(x[idx], v_lb[k], v_ub[k]))
-                rounded = round(val)
+                rounded = int(round(val))
+                lo_i = int(np.ceil(v_lb[k] - 1e-9))
+                hi_i = int(np.floor(v_ub[k] + 1e-9))
+                if lo_i <= hi_i:
+                    rounded = min(max(rounded, lo_i), hi_i)
                 nlp_lb[idx] = rounded
                 nlp_ub[idx] = rounded
         offset += v.size
@@ -272,8 +472,8 @@ def _build_fixed_integer_bounds(
     return nlp_lb, nlp_ub
 
 
-def _solve_best_nlp_candidate(
-    x0: np.ndarray,
+def _select_best_nlp_candidate(
+    candidates: list[np.ndarray],
     model: Model,
     evaluator,
     flat_lb: np.ndarray,
@@ -287,28 +487,19 @@ def _solve_best_nlp_candidate(
     best_x: Optional[np.ndarray] = None
     best_obj: Optional[float] = None
 
-    for x0_nlp in _integer_rounding_candidates(x0, model):
+    for x0_nlp in candidates:
         remaining = _remaining_wall_time(deadline)
         if remaining is not None and remaining <= 0.0:
             break
         nlp_lb, nlp_ub = _build_fixed_integer_bounds(x0_nlp, model, flat_lb, flat_ub)
-        if remaining is None:
-            cand_x, cand_obj = _solve_nlp_subproblem(
-                evaluator,
-                x0_nlp,
-                nlp_lb,
-                nlp_ub,
-                nlp_solver,
-            )
-        else:
-            cand_x, cand_obj = _solve_nlp_subproblem(
-                evaluator,
-                x0_nlp,
-                nlp_lb,
-                nlp_ub,
-                nlp_solver,
-                time_limit=remaining,
-            )
+        cand_x, cand_obj = _solve_nlp_subproblem(
+            evaluator,
+            x0_nlp,
+            nlp_lb,
+            nlp_ub,
+            nlp_solver,
+            time_limit=remaining,
+        )
         if cand_x is None or cand_obj is None:
             continue
         if not _check_integer_feasible(cand_x, model):
@@ -329,6 +520,105 @@ def _solve_best_nlp_candidate(
     return best_x, best_obj
 
 
+def _solve_best_nlp_candidate(
+    x0: np.ndarray,
+    model: Model,
+    evaluator,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+    constraint_lb: np.ndarray,
+    constraint_ub: np.ndarray,
+    nlp_solver: str,
+    incumbent: Optional[np.ndarray] = None,
+    deadline: Optional[float] = None,
+) -> tuple[Optional[np.ndarray], Optional[float]]:
+    """Return the best feasible NLP candidate across the integer-rounding set."""
+    if all(v.var_type == VarType.CONTINUOUS for v in model._variables):
+        starts: list[np.ndarray] = []
+        for seed in (x0, incumbent):
+            if seed is not None:
+                starts.extend(_continuous_recovery_starts(flat_lb, flat_ub, seed))
+        candidates = _dedupe_candidate_points(starts)
+    else:
+        candidates = _integer_rounding_candidates(x0, model)
+        if incumbent is not None:
+            candidates = _dedupe_candidate_points(
+                _integer_rounding_candidates(incumbent, model) + candidates
+            )
+
+    return _select_best_nlp_candidate(
+        candidates,
+        model,
+        evaluator,
+        flat_lb,
+        flat_ub,
+        constraint_lb,
+        constraint_ub,
+        nlp_solver,
+        deadline=deadline,
+    )
+
+
+def _small_integer_domain_size(model: Model, max_assignments: int) -> Optional[int]:
+    """Return the exact integer-domain size when it is finite and small enough."""
+    total = 1
+    has_integer = False
+
+    for var in model._variables:
+        if var.var_type not in (VarType.BINARY, VarType.INTEGER):
+            continue
+        has_integer = True
+        for lb_i, ub_i in zip(
+            np.asarray(var.lb, dtype=np.float64).ravel(),
+            np.asarray(var.ub, dtype=np.float64).ravel(),
+        ):
+            if not (is_effectively_finite(float(lb_i)) and is_effectively_finite(float(ub_i))):
+                return None
+            lo_i = int(np.ceil(float(lb_i) - 1e-9))
+            hi_i = int(np.floor(float(ub_i) + 1e-9))
+            if lo_i > hi_i:
+                return 0
+            total *= hi_i - lo_i + 1
+            if total > max_assignments:
+                return None
+
+    return total if has_integer else None
+
+
+def _solve_small_integer_domain_fallback(
+    model: Model,
+    evaluator,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+    constraint_lb: np.ndarray,
+    constraint_ub: np.ndarray,
+    nlp_solver: str,
+    max_assignments: int = _SMALL_INT_FALLBACK_MAX_ASSIGNMENTS,
+    deadline: Optional[float] = None,
+) -> tuple[Optional[np.ndarray], Optional[float]]:
+    """Enumerate a small finite integer domain directly when the MILP relaxation fails."""
+    domain_size = _small_integer_domain_size(model, max_assignments)
+    if domain_size is None or domain_size == 0:
+        return None, None
+
+    base_x0 = _default_nlp_start(flat_lb, flat_ub)
+    candidates = _integer_rounding_candidates(base_x0, model, max_candidates=max_assignments)
+    if len(candidates) < domain_size:
+        return None, None
+
+    return _select_best_nlp_candidate(
+        candidates,
+        model,
+        evaluator,
+        flat_lb,
+        flat_ub,
+        constraint_lb,
+        constraint_ub,
+        nlp_solver,
+        deadline=deadline,
+    )
+
+
 def _solve_milp_with_oa_recovery(
     model: Model,
     terms,
@@ -338,6 +628,9 @@ def _solve_milp_with_oa_recovery(
     time_limit: Optional[float],
     gap_tolerance: float,
     convhull_formulation: str,
+    convhull_ebd: bool,
+    convhull_ebd_encoding: str,
+    bound_override: Optional[tuple[np.ndarray, np.ndarray]] = None,
 ):
     """Retry MILP solves after dropping the oldest half of OA cuts on infeasibility."""
     from discopt._jax.milp_relaxation import build_milp_relaxation
@@ -346,6 +639,7 @@ def _solve_milp_with_oa_recovery(
     max_retries = max(1, len(active_oa_cuts).bit_length() + 1)
     milp_result = None
     varmap = None
+    mip_solve_count = 0
 
     for _retry in range(max_retries):
         milp_model, varmap = build_milp_relaxation(
@@ -355,13 +649,17 @@ def _solve_milp_with_oa_recovery(
             incumbent,
             oa_cuts=active_oa_cuts,
             convhull_formulation=convhull_formulation,
+            convhull_ebd=convhull_ebd,
+            convhull_ebd_encoding=convhull_ebd_encoding,
+            bound_override=bound_override,
         )
         milp_result = milp_model.solve(
             time_limit=time_limit,
             gap_tolerance=gap_tolerance,
         )
+        mip_solve_count += 1
         if milp_result.status != "infeasible" or not active_oa_cuts:
-            return milp_result, varmap, active_oa_cuts
+            return milp_result, varmap, active_oa_cuts, mip_solve_count
 
         drop_count = max(1, len(active_oa_cuts) // 2)
         logger.info(
@@ -373,7 +671,7 @@ def _solve_milp_with_oa_recovery(
 
     assert milp_result is not None
     assert varmap is not None
-    return milp_result, varmap, active_oa_cuts
+    return milp_result, varmap, active_oa_cuts, mip_solve_count
 
 
 def _check_constraints(x: np.ndarray, model: Model, tol: float = 1e-4) -> bool:
@@ -462,12 +760,28 @@ def _normalize_partition_method(
     )
 
 
+def _default_obbt_time_limit_per_lp(
+    remaining: float,
+    n_orig: int,
+) -> float:
+    """Allocate a bounded per-LP budget for OBBT presolve."""
+    if not np.isfinite(remaining) or remaining <= 0.0:
+        return 0.0
+    obbt_budget = min(10.0, 0.1 * remaining)
+    return max(0.05, obbt_budget / max(1, 2 * n_orig))
+
+
 def _compute_relative_gap(
     abs_gap: Optional[float],
     upper_bound: float,
 ) -> Optional[float]:
     """Return a relative gap, or None when the upper bound is numerically zero."""
-    if abs_gap is None or not np.isfinite(upper_bound) or abs(upper_bound) <= 1e-10:
+    if (
+        abs_gap is None
+        or abs_gap < 0.0
+        or not np.isfinite(upper_bound)
+        or abs(upper_bound) <= 1e-10
+    ):
         return None
     return abs(abs_gap) / abs(upper_bound)
 
@@ -502,6 +816,9 @@ def solve_amp(
     disc_add_partition_method: str = "adaptive",
     disc_abs_width_tol: float = 1e-3,
     convhull_formulation: str = "disaggregated",
+    convhull_ebd: bool = False,
+    convhull_ebd_encoding: str = "gray",
+    presolve_bt: bool = True,
     skip_convex_check: bool = False,
 ) -> SolveResult:
     """Solve MINLP globally using Adaptive Multivariate Partitioning (AMP).
@@ -547,11 +864,25 @@ def solve_amp(
     convhull_formulation : str
         Piecewise bilinear formulation: ``"disaggregated"``, ``"sos2"``,
         ``"facet"``, or ``"lambda"`` (alias for ``"sos2"``).
+    convhull_ebd : bool
+        Replace SOS2 interval binaries with an embedded logarithmic encoding.
+    convhull_ebd_encoding : str
+        Embedded encoding scheme for the SOS2 formulation. ``"gray"`` is the
+        only option that stays SOS2-compatible for arbitrary partition counts;
+        ``"binary"`` is only valid for two partitions.
+    presolve_bt : bool
+        Run LP-based OBBT before the AMP loop to tighten variable bounds.
+    skip_convex_check : bool
+        If True, force AMP even when the model is detected as a pure
+        continuous convex problem.
 
     Returns
     -------
     SolveResult
-        With gap_certified=True if termination is by gap criterion.
+        With gap_certified=True if termination is by gap criterion. When AMP
+        has a valid incumbent but no certificate, it returns ``"feasible"``
+        together with the incumbent and any trustworthy bound information,
+        even if the wall-clock limit ended the proof search.
     """
     t_start = time.perf_counter()
 
@@ -569,6 +900,7 @@ def solve_amp(
 
     assert model._objective is not None
     maximize = model._objective.sense == ObjectiveSense.MAXIMIZE
+    pure_continuous = all(v.var_type == VarType.CONTINUOUS for v in model._variables)
     part_lbs: list[float] = []
     part_ubs: list[float] = []
 
@@ -579,39 +911,31 @@ def solve_amp(
 
     partition_mode = _normalize_partition_method(partition_method, disc_var_pick)
     convhull_mode = _normalize_convhull_formulation(convhull_formulation)
+    if convhull_ebd and convhull_mode != "sos2":
+        raise ValueError("convhull_ebd requires convhull_formulation='sos2' or the 'lambda' alias.")
 
-    # Convex pure-continuous problems are globally solved by a single NLP,
-    # so skip AMP partitioning and use the convex fast path. Soundness
-    # relies on the same interval-Hessian certificate that solve_model's
-    # default convex fast path uses (use_certificate=True).
-    all_continuous = all(v.var_type == VarType.CONTINUOUS for v in model._variables)
-    if all_continuous and not skip_convex_check:
+    if pure_continuous and not skip_convex_check:
         try:
-            from discopt._jax.convexity import classify_model
-
-            _is_convex, _ = classify_model(model, use_certificate=True)
-        except Exception as exc:
-            logger.debug("AMP convex fast-path detection failed: %s", exc)
-            _is_convex = False
-        if _is_convex:
+            from discopt._jax.convexity import classify_model as _classify_convexity
             from discopt.solver import _solve_continuous
 
-            logger.info(
-                "AMP: convex NLP detected — solving with single NLP "
-                "(global optimality guaranteed; partitioning skipped)"
-            )
-            result = _solve_continuous(
-                model,
-                time_limit,
-                ipopt_options=None,
-                t_start=t_start,
-                nlp_solver=nlp_solver,
-            )
-            result.convex_fast_path = True
-            return result
-
-    def _to_minimization_space(value: float) -> float:
-        return -float(value) if maximize else float(value)
+            is_convex, _ = _classify_convexity(model, use_certificate=True)
+            if is_convex:
+                logger.info(
+                    "AMP: convex NLP detected; solving with single NLP "
+                    "(global optimality guaranteed; partitioning skipped)"
+                )
+                result = _solve_continuous(
+                    model,
+                    time_limit,
+                    ipopt_options=None,
+                    t_start=t_start,
+                    nlp_solver=nlp_solver,
+                )
+                result.convex_fast_path = True
+                return result
+        except Exception as exc:
+            logger.debug("AMP: convex delegation check failed: %s", exc)
 
     def _from_minimization_space(value: float) -> float:
         return -float(value) if maximize else float(value)
@@ -660,6 +984,33 @@ def solve_amp(
         len(terms.general_nl),
     )
 
+    # Tighten the initial McCormick domain before selecting partition bounds.
+    if presolve_bt:
+        remaining = max(0.0, time_limit - (time.perf_counter() - t_start))
+        obbt_time_limit = _default_obbt_time_limit_per_lp(remaining, n_orig)
+        if obbt_time_limit > 0.0:
+            try:
+                from discopt._jax.obbt import run_obbt
+            except ImportError as err:
+                logger.warning("AMP: OBBT presolve unavailable; continuing without it: %s", err)
+            else:
+                obbt_result = run_obbt(
+                    model,
+                    lb=flat_lb.copy(),
+                    ub=flat_ub.copy(),
+                    time_limit_per_lp=obbt_time_limit,
+                )
+                if obbt_result.n_tightened > 0:
+                    flat_lb = obbt_result.tightened_lb
+                    flat_ub = obbt_result.tightened_ub
+                    logger.info(
+                        "AMP: OBBT tightened %d bounds in %.3fs before partitioning",
+                        obbt_result.n_tightened,
+                        obbt_result.total_lp_time,
+                    )
+        else:
+            logger.info("AMP: skipping OBBT presolve because no wall-clock budget remains")
+
     # ── Select partition variables ───────────────────────────────────────────
     if apply_partitioning:
         part_vars = pick_partition_vars(terms, method=partition_mode)
@@ -701,6 +1052,7 @@ def solve_amp(
     incumbent = None
     gap_certified = False
     oa_cuts: list = []  # accumulated OA linearizations from NLP incumbents
+    mip_count = 0
     termination_reason = "iteration_limit"
 
     for iteration in range(1, max_iter + 1):
@@ -719,13 +1071,12 @@ def solve_amp(
 
         # ── Step 1: Solve MILP relaxation → lower bound ──────────────────────
         # MILP gap tolerance: no tighter than needed for overall convergence.
-        if milp_gap_tolerance is not None:
-            _milp_gap_tol = milp_gap_tolerance
-        else:
-            _milp_gap_tol = min(rel_gap / 2, 1e-3)
+        _milp_gap_tol = (
+            milp_gap_tolerance if milp_gap_tolerance is not None else min(rel_gap / 2, 1e-3)
+        )
 
         try:
-            milp_result, varmap, active_oa_cuts = _solve_milp_with_oa_recovery(
+            milp_result, varmap, active_oa_cuts, iter_mip_count = _solve_milp_with_oa_recovery(
                 model=model,
                 terms=terms,
                 disc_state=disc_state,
@@ -734,24 +1085,67 @@ def solve_amp(
                 time_limit=milp_tl,
                 gap_tolerance=_milp_gap_tol,
                 convhull_formulation=convhull_mode,
+                convhull_ebd=convhull_ebd,
+                convhull_ebd_encoding=convhull_ebd_encoding,
+                bound_override=(flat_lb, flat_ub),
             )
+            mip_count += iter_mip_count
             oa_cuts = active_oa_cuts
         except Exception as e:
             logger.warning("AMP: MILP build/solve failed at iteration %d: %s", iteration, e)
             termination_reason = "error"
             break
 
-        if milp_result.status == "error":
-            logger.info("AMP: MILP error at iteration %d", iteration)
-            termination_reason = "error"
-            break
-
-        if milp_result.status == "infeasible":
+        if milp_result.status in ("infeasible", "error"):
             logger.info(
-                "AMP: MILP infeasible at iteration %d",
+                "AMP: MILP infeasible/error at iteration %d, status=%s",
                 iteration,
+                milp_result.status,
             )
-            termination_reason = "infeasible"
+            termination_reason = "error" if milp_result.status == "error" else "infeasible"
+            if LB == -np.inf:
+                # Problem may be infeasible
+                if iteration == 1:
+                    if pure_continuous:
+                        recovered = _recover_pure_continuous_solution(
+                            model,
+                            evaluator,
+                            flat_lb,
+                            flat_ub,
+                            nlp_solver=nlp_solver,
+                            t_start=t_start,
+                            time_limit=time_limit,
+                        )
+                        if recovered is not None:
+                            recovered.mip_count = mip_count
+                            return recovered
+                    fallback_x, fallback_obj = _solve_small_integer_domain_fallback(
+                        model,
+                        evaluator,
+                        flat_lb,
+                        flat_ub,
+                        constraint_lb,
+                        constraint_ub,
+                        nlp_solver,
+                        deadline=deadline,
+                    )
+                    if fallback_x is not None and fallback_obj is not None:
+                        return SolveResult(
+                            status="feasible",
+                            objective=_from_minimization_space(fallback_obj),
+                            bound=None,
+                            gap=None,
+                            x=_build_x_dict(fallback_x, model),
+                            wall_time=time.perf_counter() - t_start,
+                            mip_count=mip_count,
+                            gap_certified=False,
+                        )
+                    if milp_result.status == "infeasible":
+                        return SolveResult(
+                            status="infeasible",
+                            wall_time=time.perf_counter() - t_start,
+                            mip_count=mip_count,
+                        )
             break
 
         if milp_result.objective is not None:
@@ -778,6 +1172,7 @@ def solve_amp(
             constraint_lb,
             constraint_ub,
             nlp_solver,
+            incumbent=incumbent,
             deadline=deadline,
         )
 
@@ -842,44 +1237,54 @@ def solve_amp(
             )
 
         if UB < np.inf and LB > -np.inf:
-            abs_gap = UB - LB
-            rel_g = _compute_relative_gap(abs_gap, UB)
+            raw_abs_gap = UB - LB
             if maximize:
                 display_lb = _from_minimization_space(UB)
                 display_ub = _from_minimization_space(LB)
             else:
                 display_lb = LB
                 display_ub = UB
-            if rel_g is None:
-                logger.info(
-                    "AMP iter %d: LB=%.6g, UB=%.6g, abs_gap=%.6g (relative gap undefined)",
+            if raw_abs_gap < -abs_tol:
+                logger.warning(
+                    "AMP iter %d: invalid bound ordering LB=%.6g, UB=%.6g; "
+                    "skipping gap certification",
                     iteration,
                     display_lb,
                     display_ub,
-                    abs_gap,
                 )
             else:
-                logger.info(
-                    "AMP iter %d: LB=%.6g, UB=%.6g, gap=%.4g%%",
-                    iteration,
-                    display_lb,
-                    display_ub,
-                    100 * rel_g,
-                )
-            if abs_gap <= abs_tol or (rel_g is not None and rel_g <= rel_gap):
-                gap_certified = True
+                abs_gap = max(0.0, raw_abs_gap)
+                rel_g = _compute_relative_gap(abs_gap, UB)
                 if rel_g is None:
                     logger.info(
-                        "AMP: gap certified at iteration %d by absolute tolerance",
+                        "AMP iter %d: LB=%.6g, UB=%.6g, abs_gap=%.6g (relative gap undefined)",
                         iteration,
+                        display_lb,
+                        display_ub,
+                        abs_gap,
                     )
                 else:
                     logger.info(
-                        "AMP: gap certified at iteration %d (gap=%.4g%%)",
+                        "AMP iter %d: LB=%.6g, UB=%.6g, gap=%.4g%%",
                         iteration,
+                        display_lb,
+                        display_ub,
                         100 * rel_g,
                     )
-                break
+                if abs_gap <= abs_tol or (rel_g is not None and rel_g <= rel_gap):
+                    gap_certified = True
+                    if rel_g is None:
+                        logger.info(
+                            "AMP: gap certified at iteration %d by absolute tolerance",
+                            iteration,
+                        )
+                    else:
+                        logger.info(
+                            "AMP: gap certified at iteration %d (gap=%.4g%%)",
+                            iteration,
+                            100 * rel_g,
+                        )
+                    break
 
         # ── Step 4: Adaptive partition refinement ────────────────────────────
         if not part_vars:
@@ -969,37 +1374,60 @@ def solve_amp(
         return SolveResult(
             status=status,
             wall_time=elapsed,
+            mip_count=mip_count,
             gap_certified=False,
         )
 
     if incumbent is not None:
-        abs_gap_final = UB - LB if LB > -np.inf else None
-        rel_gap_final = _compute_relative_gap(abs_gap_final, UB)
+        raw_abs_gap_final = UB - LB if LB > -np.inf else None
+        bound_is_trustworthy = raw_abs_gap_final is None or raw_abs_gap_final >= -abs_tol
+        if not bound_is_trustworthy and raw_abs_gap_final is not None:
+            logger.warning(
+                "AMP: final bound ordering invalid (LB=%.6g, UB=%.6g); omitting bound and gap",
+                _from_minimization_space(LB),
+                _from_minimization_space(UB),
+            )
 
-        if gap_certified:
-            status = "optimal"
-        elif elapsed >= time_limit:
-            status = "time_limit"
-        else:
-            status = "feasible"
+        abs_gap_final = (
+            None
+            if raw_abs_gap_final is None or not bound_is_trustworthy
+            else max(0.0, raw_abs_gap_final)
+        )
+        rel_gap_final = _compute_relative_gap(abs_gap_final, UB)
+        status = "optimal" if gap_certified else "feasible"
 
         return SolveResult(
             status=status,
             objective=_from_minimization_space(UB),
-            bound=_from_minimization_space(LB) if LB > -np.inf else None,
+            bound=(_from_minimization_space(LB) if LB > -np.inf and bound_is_trustworthy else None),
             gap=float(rel_gap_final) if rel_gap_final is not None else None,
             x=_build_x_dict(incumbent, model),
             wall_time=elapsed,
+            mip_count=mip_count,
             gap_certified=gap_certified,
         )
 
     # No feasible solution found
-    if termination_reason == "infeasible":
-        status = "infeasible"
-    elif termination_reason == "time_limit" or elapsed >= time_limit:
+    if pure_continuous:
+        recovered = _recover_pure_continuous_solution(
+            model,
+            evaluator,
+            flat_lb,
+            flat_ub,
+            nlp_solver=nlp_solver,
+            t_start=t_start,
+            time_limit=time_limit,
+        )
+        if recovered is not None:
+            recovered.mip_count = mip_count
+            return recovered
+
+    if termination_reason == "time_limit" or elapsed >= time_limit:
         status = "time_limit"
     elif termination_reason == "error":
         status = "error"
+    elif termination_reason == "infeasible":
+        status = "infeasible"
     else:
         status = "iteration_limit"
 
@@ -1010,5 +1438,6 @@ def solve_amp(
         gap=None,
         x=None,
         wall_time=elapsed,
+        mip_count=mip_count,
         gap_certified=False,
     )
