@@ -284,6 +284,44 @@ def _decompose_product(expr: Expression, model: Model) -> tuple[float, list[int]
     return None
 
 
+def _collect_distinct_multilinear_products(model: Model) -> list[tuple[int, ...]]:
+    """Return distinct-variable product terms with four or more factors."""
+    terms: set[tuple[int, ...]] = set()
+
+    def visit(expr: Expression) -> None:
+        if isinstance(expr, BinaryOp):
+            if expr.op == "*":
+                decomp = _decompose_product(expr, model)
+                if decomp is not None:
+                    _, indices = decomp
+                    unique = list(dict.fromkeys(indices))
+                    if len(unique) >= 4 and len(unique) == len(indices):
+                        terms.add(tuple(sorted(unique)))
+                        return
+            visit(expr.left)
+            visit(expr.right)
+            return
+
+        if isinstance(expr, UnaryOp):
+            visit(expr.operand)
+            return
+
+        if isinstance(expr, SumExpression):
+            visit(expr.operand)
+            return
+
+        if isinstance(expr, SumOverExpression):
+            for term in expr.terms:
+                visit(term)
+
+    if model._objective is not None:
+        visit(model._objective.expression)
+    for constraint in model._constraints:
+        visit(constraint.body)
+
+    return sorted(terms)
+
+
 # ---------------------------------------------------------------------------
 # Helpers: expression linearizer
 # ---------------------------------------------------------------------------
@@ -294,6 +332,7 @@ def _linearize_expr(
     model: Model,
     bilinear_var_map: dict[tuple[int, int], int],
     trilinear_var_map: dict[tuple[int, int, int], int],
+    multilinear_var_map: dict[tuple[int, ...], int],
     monomial_var_map: dict[tuple[int, int], int],
     n_total_vars: int,
 ) -> tuple[np.ndarray, float]:
@@ -406,7 +445,13 @@ def _linearize_expr(
                     else:
                         raise ValueError(f"Trilinear {tri_key} not in map")
                 else:
-                    raise ValueError(f"Higher-order product ({len(unique)} vars) not supported")
+                    if len(unique) != len(indices):
+                        raise ValueError("Mixed repeated-factor products are not supported")
+                    multilinear_key = tuple(sorted(unique))
+                    if multilinear_key in multilinear_var_map:
+                        coeff[multilinear_var_map[multilinear_key]] += scale * c
+                    else:
+                        raise ValueError(f"Multilinear {multilinear_key} not in map")
 
             else:
                 raise ValueError(f"Cannot linearize BinaryOp: {e.op}")
@@ -514,6 +559,8 @@ def build_milp_relaxation(
     bilinear_var_map: dict[tuple[int, int], int] = {}
     trilinear_var_map: dict[tuple[int, int, int], int] = {}
     trilinear_stage_map: dict[tuple[int, int, int], dict[str, object]] = {}
+    multilinear_var_map: dict[tuple[int, ...], int] = {}
+    multilinear_stage_map: dict[tuple[int, ...], list[dict[str, int]]] = {}
     monomial_var_map: dict[tuple[int, int], int] = {}
 
     col_idx = n_orig
@@ -545,6 +592,26 @@ def build_milp_relaxation(
         col_idx += 1
         return bilinear_relation_map[key]
 
+    def _ensure_multilinear_aux(term: tuple[int, ...]) -> tuple[int, list[dict[str, int]]]:
+        ordered = tuple(sorted(term))
+        if len(ordered) < 2:
+            raise ValueError("multilinear terms require at least two variables")
+
+        stages: list[dict[str, int]] = []
+        current_col = ordered[0]
+        for rhs_col in ordered[1:]:
+            lhs_col = current_col
+            product_col = _ensure_bilinear_aux(lhs_col, rhs_col)
+            stages.append(
+                {
+                    "lhs_col": lhs_col,
+                    "rhs_col": rhs_col,
+                    "product_col": product_col,
+                }
+            )
+            current_col = product_col
+        return current_col, stages
+
     original_bilinear_keys = sorted({(min(i, j), max(i, j)) for i, j in terms.bilinear})
     for key in original_bilinear_keys:
         bilinear_var_map[key] = _ensure_bilinear_aux(*key)
@@ -568,6 +635,11 @@ def build_milp_relaxation(
             "remaining_var": remaining,
             "product_col": final_col,
         }
+
+    for multi_term in _collect_distinct_multilinear_products(model):
+        final_col, stages = _ensure_multilinear_aux(multi_term)
+        multilinear_var_map[multi_term] = final_col
+        multilinear_stage_map[multi_term] = stages
 
     for var_idx, n in terms.monomial:
         lb_i = float(flat_lb[var_idx])
@@ -1026,6 +1098,7 @@ def build_milp_relaxation(
                 model,
                 bilinear_var_map,
                 trilinear_var_map,
+                multilinear_var_map,
                 monomial_var_map,
                 n_total,
             )
@@ -1060,6 +1133,7 @@ def build_milp_relaxation(
             model,
             bilinear_var_map,
             trilinear_var_map,
+            multilinear_var_map,
             monomial_var_map,
             n_total,
         )
@@ -1108,6 +1182,8 @@ def build_milp_relaxation(
         "bilinear": bilinear_var_map,
         "trilinear": trilinear_var_map,
         "trilinear_stages": trilinear_stage_map,
+        "multilinear": multilinear_var_map,
+        "multilinear_stages": multilinear_stage_map,
         "monomial": monomial_var_map,
         "bilinear_pw": bilinear_pw_map,
         "bilinear_lambda": bilinear_lambda_map,
