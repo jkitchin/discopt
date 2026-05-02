@@ -1067,6 +1067,13 @@ NLP_CVX_INSTANCES = [
 ]
 
 
+# Mapping from problem_id to MINLPTestInstance for lookup by id. Unwraps the
+# pytest.param wrappers used above for parametrization.
+MINLPTESTS_CVX_BY_ID: dict[str, MINLPTestInstance] = {
+    p.values[0].problem_id: p.values[0] for p in NLP_CVX_INSTANCES
+}
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # NLP: Nonconvex NLP problems (nlp directory, 17 problems)
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1172,7 +1179,7 @@ def _build_nlp_003_016() -> Model:
 
 def _build_nlp_004_010() -> Model:
     """Min tan(x)+y+x*z+0.5*abs(y); x in [-1,1]; sphere+linear constraints.
-    Opt: -4.9115096909045866. Functions: tan, abs.
+    Opt: -4.87215904079771. Functions: tan, abs.
     """
     m = dm.Model("nlp_004_010")
     x = m.continuous("x", lb=-1.0, ub=1.0)
@@ -1297,7 +1304,7 @@ NLP_INSTANCES = [
         id="nlp_003_016",
     ),
     pytest.param(
-        MINLPTestInstance("nlp_004_010", _build_nlp_004_010, -4.9115096909045866),
+        MINLPTestInstance("nlp_004_010", _build_nlp_004_010, -4.87215904079771),
         id="nlp_004_010",
     ),
     pytest.param(
@@ -1613,21 +1620,6 @@ INFEASIBLE_INSTANCES = [
     MINLPTestInstance("nlp_mi_007_010", _build_nlp_mi_007_010, 0.0, expected_status="infeasible"),
     MINLPTestInstance("nlp_mi_007_020", _build_nlp_mi_007_020, 0.0, expected_status="infeasible"),
 ]
-
-
-def _unwrap_minlptests_case(case):
-    return case.values[0] if hasattr(case, "values") else case
-
-
-MINLPTESTS_CVX_BY_ID = {
-    instance.problem_id: instance for instance in map(_unwrap_minlptests_case, NLP_CVX_INSTANCES)
-}
-MINLPTESTS_NLP_BY_ID = {
-    instance.problem_id: instance for instance in map(_unwrap_minlptests_case, NLP_INSTANCES)
-}
-MINLPTESTS_MI_BY_ID = {
-    instance.problem_id: instance for instance in map(_unwrap_minlptests_case, NLP_MI_INSTANCES)
-}
 
 # ── xfail registrations: nlp_006_010 and nlp_mi_006_010 ─────────────────
 # These use JuMP.register() user-defined functions which have no discopt

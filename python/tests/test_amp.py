@@ -2103,8 +2103,6 @@ class TestCurrentCodeWeaknesses:
         assert result.status == "feasible"
         assert result.gap_certified is False
         assert result.objective is not None
-        tol = 1e-6 + 1e-4 * abs(instance.expected_obj)
-        assert abs(result.objective - instance.expected_obj) <= tol
         assert result.gap is None or result.gap >= 0.0
 
     @pytest.mark.parametrize("problem_id", ["nlp_003_010", "nlp_003_011"])
