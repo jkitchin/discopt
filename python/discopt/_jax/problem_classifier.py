@@ -904,7 +904,13 @@ def extract_lp_data(model: Model) -> LPData:
 
 
 def _extract_lp_data_autodiff(model: Model) -> LPData:
-    """Extract LP standard form using autodiff (original slow path)."""
+    """Extract LP standard form using autodiff (original slow path).
+
+    Uses ``jax.jacobian`` rather than ``jax.grad`` so that vector-valued
+    constraint bodies (DAE collocation residuals, MOL spatial residuals)
+    are handled the same way as scalar bodies: each component contributes
+    one row in the LP matrix, and inequalities get one slack per row.
+    """
     from discopt._jax.dag_compiler import compile_constraint, compile_objective
 
     n_orig = sum(v.size for v in model._variables)
@@ -918,57 +924,51 @@ def _extract_lp_data_autodiff(model: Model) -> LPData:
     # Extract constraint coefficients
     constraints = [con for con in model._constraints if isinstance(con, Constraint)]
 
-    # Separate equality and inequality constraints
-    eq_fns = []
-    eq_rhs = []
-    ineq_fns = []  # body <= 0 form
-    ineq_senses = []  # "le" or "ge"
+    # First pass: compile each constraint and probe its row count by
+    # evaluating at zero. Scalar bodies become a single row; vector bodies
+    # contribute one row per component.
+    eq_blocks: list[tuple[jnp.ndarray, jnp.ndarray]] = []  # (J, body0)
+    ineq_blocks: list[tuple[jnp.ndarray, jnp.ndarray, str]] = []  # (J, body0, sense)
 
     for con in constraints:
         con_fn = compile_constraint(con, model)
+        # Flatten any vector / matrix constraint body into a length-k vector;
+        # each component becomes its own LP row.
+        body0 = jnp.asarray(con_fn(x_zero), dtype=jnp.float64).reshape(-1)
+        jac_raw = jax.jacobian(lambda x, _f=con_fn: jnp.asarray(_f(x)).reshape(-1))(x_zero)
+        jac = jnp.asarray(jac_raw, dtype=jnp.float64).reshape(body0.shape[0], n_orig)
         if con.sense == "==":
-            eq_fns.append(con_fn)
-            # body - rhs == 0 is compiled, so rhs = 0 in compiled form
-            eq_rhs.append(0.0)
+            eq_blocks.append((jac, body0))
         elif con.sense == "<=":
-            ineq_fns.append(con_fn)
-            ineq_senses.append("le")
+            ineq_blocks.append((jac, body0, "le"))
         elif con.sense == ">=":
-            ineq_fns.append(con_fn)
-            ineq_senses.append("ge")
+            ineq_blocks.append((jac, body0, "ge"))
 
-    n_eq = len(eq_fns)
-    n_ineq = len(ineq_fns)
-    n_slack = n_ineq
+    n_eq_rows = sum(int(j.shape[0]) for j, _ in eq_blocks)
+    n_ineq_rows = sum(int(j.shape[0]) for j, _, _ in ineq_blocks)
+    n_slack = n_ineq_rows
     n_total = n_orig + n_slack
 
-    # Build equality constraint matrix for original equality constraints
-    A_rows = []
-    b_vals = []
+    A_rows: list[jnp.ndarray] = []
+    b_vals: list[float] = []
 
-    for i, fn in enumerate(eq_fns):
-        # For linear constraint, A_row = grad(con)(0)
-        a_row = jax.grad(fn)(x_zero)
-        # Constant part: fn(0) = a'*0 + const = const, so b = -const
-        const = fn(x_zero)
-        A_rows.append(jnp.concatenate([a_row, jnp.zeros(n_slack)]))
-        b_vals.append(-float(const))
+    for jac, body0 in eq_blocks:
+        for r in range(jac.shape[0]):
+            A_rows.append(jnp.concatenate([jac[r], jnp.zeros(n_slack)]))
+            b_vals.append(-float(body0[r]))
 
-    # Convert inequality constraints to equalities with slacks
-    for i, fn in enumerate(ineq_fns):
-        a_row = jax.grad(fn)(x_zero)
-        const = fn(x_zero)
-        slack_col = jnp.zeros(n_slack)
-        if ineq_senses[i] == "le":
-            # body <= 0 → body + s = 0, s >= 0
-            slack_col = slack_col.at[i].set(1.0)
-        else:
-            # body >= 0 → body - s = 0, s >= 0
-            slack_col = slack_col.at[i].set(-1.0)
-        A_rows.append(jnp.concatenate([a_row, slack_col]))
-        b_vals.append(-float(const))
+    slack_offset = 0
+    for jac, body0, sense in ineq_blocks:
+        for r in range(jac.shape[0]):
+            slack_col = jnp.zeros(n_slack)
+            sign = 1.0 if sense == "le" else -1.0
+            # body ≤ 0 → body + s = 0, s ≥ 0; body ≥ 0 → body − s = 0, s ≥ 0.
+            slack_col = slack_col.at[slack_offset].set(sign)
+            A_rows.append(jnp.concatenate([jac[r], slack_col]))
+            b_vals.append(-float(body0[r]))
+            slack_offset += 1
 
-    m_total = n_eq + n_ineq
+    m_total = n_eq_rows + n_ineq_rows
     if m_total > 0:
         A_eq = jnp.stack(A_rows)
         b_eq = jnp.array(b_vals, dtype=jnp.float64)
