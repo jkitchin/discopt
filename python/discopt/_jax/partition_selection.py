@@ -25,10 +25,11 @@ from discopt._jax.term_classifier import NonlinearTerms
 
 
 def _all_terms(terms: NonlinearTerms) -> list[tuple[int, ...]]:
-    """Flatten all nonlinear terms (bilinear + trilinear) into a single list."""
+    """Flatten product terms into a single list."""
     all_t: list[tuple[int, ...]] = []
     all_t.extend(terms.bilinear)
     all_t.extend(terms.trilinear)
+    all_t.extend(terms.multilinear)
     return all_t
 
 

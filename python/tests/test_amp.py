@@ -419,6 +419,19 @@ class TestTermClassifier:
         found = any(set(t) == {0, 1, 2} for t in terms.trilinear)
         assert found, f"Expected trilinear (0,1,2), got {terms.trilinear}"
 
+    def test_detect_higher_order_multilinear_without_pairwise_expansion(self):
+        """x[0]*x[1]*x[2]*x[3] should not create unused pairwise bilinear terms."""
+        m = Model("t")
+        x = m.continuous("x", lb=0, ub=10, shape=(4,))
+        m.minimize(x[0] * x[1] * x[2] * x[3])
+
+        terms = self.classify(m)
+
+        assert terms.bilinear == []
+        assert terms.trilinear == []
+        assert terms.multilinear == [(0, 1, 2, 3)]
+        assert set(terms.partition_candidates) == {0, 1, 2, 3}
+
     def test_mixed_bilinear_and_monomial(self):
         """nlp1: bilinear in constraint, monomial in objective."""
         m = _make_nlp1()
@@ -508,19 +521,23 @@ class TestPartitionSelection:
         self.pick = pick_partition_vars
         self.NonlinearTerms = NonlinearTerms
 
-    def _make_terms(self, bilinear=None, trilinear=None, monomial=None):
+    def _make_terms(self, bilinear=None, trilinear=None, multilinear=None, monomial=None):
         """Helper to build a NonlinearTerms stub."""
         bilinear = bilinear or []
         trilinear = trilinear or []
+        multilinear = multilinear or []
         monomial = monomial or []
-        candidates = list({v for t in bilinear + trilinear for v in t} | {v for v, _ in monomial})
+        candidates = list(
+            {v for t in bilinear + trilinear + multilinear for v in t} | {v for v, _ in monomial}
+        )
         incidence: dict[int, set[int]] = {}
-        for idx, t in enumerate(bilinear + trilinear):
+        for idx, t in enumerate(bilinear + trilinear + multilinear):
             for v in t:
                 incidence.setdefault(v, set()).add(idx)
         return self.NonlinearTerms(
             bilinear=bilinear,
             trilinear=trilinear,
+            multilinear=multilinear,
             monomial=monomial,
             general_nl=[],
             term_incidence=incidence,
@@ -582,6 +599,14 @@ class TestPartitionSelection:
         t = (0, 1, 2)
         assert any(v in selected for v in t), "trilinear term not covered"
 
+    def test_multilinear_terms_covered(self):
+        """Higher-order multilinear terms must be covered as one product term."""
+        terms = self._make_terms(multilinear=[(0, 1, 2, 3)])
+        selected = self.pick(terms, method="min_vertex_cover")
+
+        assert selected
+        assert any(v in selected for v in (0, 1, 2, 3)), "multilinear term not covered"
+
     def test_empty_terms_returns_empty(self):
         """No nonlinear terms → empty partition variable list."""
         terms = self._make_terms()
@@ -633,7 +658,7 @@ class TestAlpinePortedPartitionSelection:
 
     def _assert_terms_covered(self, terms, selected):
         selected_set = set(selected)
-        for term in terms.bilinear + terms.trilinear:
+        for term in terms.bilinear + terms.trilinear + terms.multilinear:
             assert any(v in selected_set for v in term), f"term {term} not covered"
 
     def test_castro2m2_candidates_match_alpine_source(self):
@@ -1392,6 +1417,35 @@ class TestAmpPhase4Coverage:
         assert len(varmap["multilinear_stages"][(0, 1, 2, 3)]) == 3
         assert len(varmap["multilinear_stages"][(3, 4, 5, 6)]) == 3
         assert milp_model._objective_bound_valid is True
+
+    def test_multilinear_build_avoids_unused_original_pairwise_lifts(self):
+        """A pure 4-factor product should build only the recursive product chain."""
+        m = Model("multilinear_chain_only")
+        x = m.continuous("x", lb=0.1, ub=4.0, shape=(4,))
+        m.maximize(x[0] * x[1] * x[2] * x[3])
+        terms = self.classify(m)
+        state = self.init_partitions(
+            terms.partition_candidates,
+            lb=[0.1] * 4,
+            ub=[4.0] * 4,
+            n_init=2,
+        )
+
+        _, varmap = self.build_milp(m, terms, state, incumbent=None)
+
+        stages = varmap["multilinear_stages"][(0, 1, 2, 3)]
+        chain_pairs = {tuple(sorted((stage["lhs_col"], stage["rhs_col"]))) for stage in stages}
+        unused_original_pairs = {
+            (0, 2),
+            (0, 3),
+            (1, 2),
+            (1, 3),
+            (2, 3),
+        }
+
+        assert varmap["bilinear"] == {}
+        assert set(varmap["bilinear_pw"]) == chain_pairs
+        assert not unused_original_pairs & set(varmap["bilinear_pw"])
 
     def test_alpine_multi4n_milp_relaxation_solves_with_objective_bound(self):
         """The recursive multi4N relaxation should solve with a real objective bound."""

@@ -636,7 +636,8 @@ def build_milp_relaxation(
             "product_col": final_col,
         }
 
-    for multi_term in _collect_distinct_multilinear_products(model):
+    multilinear_terms = terms.multilinear or _collect_distinct_multilinear_products(model)
+    for multi_term in multilinear_terms:
         final_col, stages = _ensure_multilinear_aux(multi_term)
         multilinear_var_map[multi_term] = final_col
         multilinear_stage_map[multi_term] = stages
