@@ -977,9 +977,10 @@ def solve_amp(
     # ── Classify nonlinear terms ─────────────────────────────────────────────
     terms = classify_nonlinear_terms(model)
     logger.info(
-        "AMP: %d bilinear, %d trilinear, %d monomial, %d general_nl terms",
+        "AMP: %d bilinear, %d trilinear, %d multilinear, %d monomial, %d general_nl terms",
         len(terms.bilinear),
         len(terms.trilinear),
+        len(terms.multilinear),
         len(terms.monomial),
         len(terms.general_nl),
     )

@@ -161,6 +161,199 @@ def _make_quartic_objective_demo() -> Model:
     return m
 
 
+def _make_alpine_multi2() -> Model:
+    """Alpine examples/MINLPs/multi.jl:multi2.
+
+    Alpine seeds Julia's RNG and documents the active upper-bound solution as
+    [0.7336635, 1.266336] with objective 0.92906489.  The translated fixture
+    fixes those generated bounds directly so the test is independent of Julia's
+    RNG implementation.
+    """
+    m = Model("alpine_multi2")
+    x0 = m.continuous("x0", lb=0.1, ub=0.7336635)
+    x1 = m.continuous("x1", lb=0.1, ub=10.0)
+    m.subject_to(x0 + x1 <= 2.0)
+    m.maximize(x0 * x1)
+    return m
+
+
+def _multi3_term(x, i: int, exprmode: int):
+    if exprmode == 1:
+        return x[i] * x[i + 1] * x[i + 2]
+    if exprmode == 2:
+        return (x[i] * x[i + 1]) * x[i + 2]
+    if exprmode == 3:
+        return x[i] * (x[i + 1] * x[i + 2])
+    raise ValueError("multi3N exprmode must be 1, 2, or 3")
+
+
+def _make_alpine_multi3n(n: int = 2, exprmode: int = 1, randomub: float = 4.0) -> Model:
+    """Alpine examples/MINLPs/multi.jl:multi3N."""
+    m = Model(f"alpine_multi3N_{n}_{exprmode}")
+    size = 1 + 2 * n
+    x = m.continuous("x", lb=0.1, ub=randomub, shape=(size,))
+
+    obj = None
+    for i in range(0, size - 1, 2):
+        term = _multi3_term(x, i, exprmode)
+        obj = term if obj is None else obj + term
+        m.subject_to(x[i] + x[i + 1] + x[i + 2] <= 3.0)
+
+    assert obj is not None
+    m.maximize(obj)
+    return m
+
+
+def _multi4_term(x, i: int, exprmode: int):
+    if exprmode == 1:
+        return x[i] * x[i + 1] * x[i + 2] * x[i + 3]
+    if exprmode == 2:
+        return (x[i] * x[i + 1]) * (x[i + 2] * x[i + 3])
+    if exprmode == 3:
+        return (x[i] * x[i + 1]) * x[i + 2] * x[i + 3]
+    if exprmode == 4:
+        return x[i] * x[i + 1] * (x[i + 2] * x[i + 3])
+    if exprmode == 5:
+        return ((x[i] * x[i + 1]) * x[i + 2]) * x[i + 3]
+    if exprmode == 6:
+        return (x[i] * x[i + 1] * x[i + 2]) * x[i + 3]
+    if exprmode == 7:
+        return x[i] * (x[i + 1] * (x[i + 2] * x[i + 3]))
+    if exprmode == 8:
+        return x[i] * (x[i + 1] * x[i + 2]) * x[i + 3]
+    if exprmode == 9:
+        return x[i] * (x[i + 1] * x[i + 2] * x[i + 3])
+    if exprmode == 10:
+        return x[i] * ((x[i + 1] * x[i + 2]) * x[i + 3])
+    if exprmode == 11:
+        return (x[i] * (x[i + 1] * x[i + 2])) * x[i + 3]
+    raise ValueError("multi4N exprmode must be in 1..11")
+
+
+def _make_alpine_multi4n(n: int = 2, exprmode: int = 1, randomub: float = 4.0) -> Model:
+    """Alpine examples/MINLPs/multi.jl:multi4N."""
+    m = Model(f"alpine_multi4N_{n}_{exprmode}")
+    size = 1 + 3 * n
+    x = m.continuous("x", lb=0.1, ub=randomub, shape=(size,))
+
+    obj = None
+    for i in range(0, size - 1, 3):
+        term = _multi4_term(x, i, exprmode)
+        obj = term if obj is None else obj + term
+        m.subject_to(x[i] + x[i + 1] + x[i + 2] + x[i + 3] <= 4.0)
+
+    assert obj is not None
+    m.maximize(obj)
+    return m
+
+
+def _make_alpine_castro2m2_partition_fixture() -> Model:
+    """Nonlinear partition skeleton from Alpine examples/MINLPs/castro.jl:castro2m2."""
+    m = Model("alpine_castro2m2_partition")
+    x = m.continuous("x", lb=0.0, ub=1e5, shape=(41,))
+    obj = m.continuous("obj", lb=0.0, ub=1e3)
+    m.minimize(obj)
+
+    for i, j, target in [
+        (27, 29, 15),
+        (27, 30, 16),
+        (28, 31, 17),
+        (28, 32, 18),
+        (27, 35, 21),
+        (28, 36, 22),
+        (13, 29, 0),
+        (13, 30, 1),
+        (14, 31, 2),
+        (14, 32, 3),
+        (13, 35, 6),
+        (14, 36, 7),
+    ]:
+        m.subject_to(x[i] * x[j] - x[target] == 0.0)
+
+    return m
+
+
+def _make_alpine_blend029_gl_partition_fixture() -> Model:
+    """Nonlinear partition skeleton from Alpine examples/MINLPs/blend.jl:blend029_gl."""
+    m = Model("alpine_blend029_gl_partition")
+    x = []
+    for i in range(48):
+        x.append(m.continuous(f"x{i + 1}", lb=0.0, ub=1.0))
+    for i in range(48, 66):
+        x.append(m.continuous(f"x{i + 1}", lb=0.0, ub=2.0))
+    for i in range(66, 102):
+        x.append(m.binary(f"x{i + 1}"))
+    m.maximize(0.0 * x[0])
+
+    exprs = [
+        (x[36] * x[54] - 0.6 * x[0] - 0.2 * x[12] + 0.2 * x[24] + 0.2 * x[27] + 0.2 * x[30], 0.04),
+        (x[39] * x[57] - 0.6 * x[3] - 0.2 * x[15] - 0.2 * x[24] + 0.7 * x[33], 0.07),
+        (x[42] * x[54] - 0.4 * x[0] - 0.4 * x[12] + 0.5 * x[24] + 0.5 * x[27] + 0.5 * x[30], 0.1),
+        (x[45] * x[57] - 0.4 * x[3] - 0.4 * x[15] - 0.5 * x[24] + 0.6 * x[33], 0.06),
+        (
+            x[37] * x[55]
+            - (x[36] * x[54] - (x[36] * x[25] + x[36] * x[28] + x[36] * x[31]))
+            - 0.6 * x[1]
+            - 0.2 * x[13],
+            0.0,
+        ),
+        (
+            x[38] * x[56]
+            - (x[37] * x[55] - (x[37] * x[26] + x[37] * x[29] + x[37] * x[32]))
+            - 0.6 * x[2]
+            - 0.2 * x[14],
+            0.0,
+        ),
+        (
+            x[40] * x[58]
+            - (x[39] * x[57] + x[36] * x[25] - x[39] * x[34])
+            - 0.6 * x[4]
+            - 0.2 * x[16],
+            0.0,
+        ),
+        (
+            x[41] * x[59]
+            - (x[40] * x[58] + x[37] * x[26] - x[40] * x[35])
+            - 0.6 * x[5]
+            - 0.2 * x[17],
+            0.0,
+        ),
+        (
+            x[43] * x[55]
+            - (x[42] * x[54] - (x[42] * x[25] + x[42] * x[28] + x[42] * x[31]))
+            - 0.4 * x[1]
+            - 0.4 * x[13],
+            0.0,
+        ),
+        (
+            x[44] * x[56]
+            - (x[43] * x[55] - (x[43] * x[26] + x[43] * x[29] + x[43] * x[32]))
+            - 0.4 * x[2]
+            - 0.4 * x[14],
+            0.0,
+        ),
+        (
+            x[46] * x[58]
+            - (x[45] * x[57] + x[42] * x[25] - x[45] * x[34])
+            - 0.4 * x[4]
+            - 0.4 * x[16],
+            0.0,
+        ),
+        (
+            x[47] * x[59]
+            - (x[46] * x[58] + x[43] * x[26] - x[46] * x[35])
+            - 0.4 * x[5]
+            - 0.4 * x[17],
+            0.0,
+        ),
+    ]
+    for expr, rhs in exprs:
+        m.subject_to(expr >= rhs)
+        m.subject_to(expr <= rhs)
+
+    return m
+
+
 # ===========================================================================
 # Section 1: Nonlinear Term Classifier
 #
@@ -225,6 +418,19 @@ class TestTermClassifier:
         assert len(terms.trilinear) >= 1
         found = any(set(t) == {0, 1, 2} for t in terms.trilinear)
         assert found, f"Expected trilinear (0,1,2), got {terms.trilinear}"
+
+    def test_detect_higher_order_multilinear_without_pairwise_expansion(self):
+        """x[0]*x[1]*x[2]*x[3] should not create unused pairwise bilinear terms."""
+        m = Model("t")
+        x = m.continuous("x", lb=0, ub=10, shape=(4,))
+        m.minimize(x[0] * x[1] * x[2] * x[3])
+
+        terms = self.classify(m)
+
+        assert terms.bilinear == []
+        assert terms.trilinear == []
+        assert terms.multilinear == [(0, 1, 2, 3)]
+        assert set(terms.partition_candidates) == {0, 1, 2, 3}
 
     def test_mixed_bilinear_and_monomial(self):
         """nlp1: bilinear in constraint, monomial in objective."""
@@ -315,19 +521,23 @@ class TestPartitionSelection:
         self.pick = pick_partition_vars
         self.NonlinearTerms = NonlinearTerms
 
-    def _make_terms(self, bilinear=None, trilinear=None, monomial=None):
+    def _make_terms(self, bilinear=None, trilinear=None, multilinear=None, monomial=None):
         """Helper to build a NonlinearTerms stub."""
         bilinear = bilinear or []
         trilinear = trilinear or []
+        multilinear = multilinear or []
         monomial = monomial or []
-        candidates = list({v for t in bilinear + trilinear for v in t} | {v for v, _ in monomial})
+        candidates = list(
+            {v for t in bilinear + trilinear + multilinear for v in t} | {v for v, _ in monomial}
+        )
         incidence: dict[int, set[int]] = {}
-        for idx, t in enumerate(bilinear + trilinear):
+        for idx, t in enumerate(bilinear + trilinear + multilinear):
             for v in t:
                 incidence.setdefault(v, set()).add(idx)
         return self.NonlinearTerms(
             bilinear=bilinear,
             trilinear=trilinear,
+            multilinear=multilinear,
             monomial=monomial,
             general_nl=[],
             term_incidence=incidence,
@@ -389,6 +599,14 @@ class TestPartitionSelection:
         t = (0, 1, 2)
         assert any(v in selected for v in t), "trilinear term not covered"
 
+    def test_multilinear_terms_covered(self):
+        """Higher-order multilinear terms must be covered as one product term."""
+        terms = self._make_terms(multilinear=[(0, 1, 2, 3)])
+        selected = self.pick(terms, method="min_vertex_cover")
+
+        assert selected
+        assert any(v in selected for v in (0, 1, 2, 3)), "multilinear term not covered"
+
     def test_empty_terms_returns_empty(self):
         """No nonlinear terms → empty partition variable list."""
         terms = self._make_terms()
@@ -425,6 +643,76 @@ class TestPartitionSelection:
         assert all(v % 2 == 0 for v in selected)
         for t in terms.bilinear:
             assert any(v in selected for v in t), f"term {t} not covered"
+
+
+class TestAlpinePortedPartitionSelection:
+    """Ports of Alpine partition-variable tests for larger named examples."""
+
+    @pytest.fixture(autouse=True)
+    def _import(self):
+        from discopt._jax.partition_selection import pick_partition_vars
+        from discopt._jax.term_classifier import classify_nonlinear_terms
+
+        self.classify = classify_nonlinear_terms
+        self.pick = pick_partition_vars
+
+    def _assert_terms_covered(self, terms, selected):
+        selected_set = set(selected)
+        for term in terms.bilinear + terms.trilinear + terms.multilinear:
+            assert any(v in selected_set for v in term), f"term {term} not covered"
+
+    def test_castro2m2_candidates_match_alpine_source(self):
+        """Alpine castro2m2 has 10 candidate discretization variables and a 4-var cover."""
+        terms = self.classify(_make_alpine_castro2m2_partition_fixture())
+
+        expected = {13, 14, 27, 28, 29, 30, 31, 32, 35, 36}
+        max_cover = self.pick(terms, method="max_cover")
+        min_cover = self.pick(terms, method="min_vertex_cover")
+
+        assert set(terms.partition_candidates) == expected
+        assert set(max_cover) == expected
+        assert len(min_cover) == 4
+        self._assert_terms_covered(terms, min_cover)
+
+    def test_blend029_gl_candidates_match_alpine_source(self):
+        """Alpine blend029_gl has 26 candidate discretization variables and a 10-var cover."""
+        terms = self.classify(_make_alpine_blend029_gl_partition_fixture())
+
+        expected = {
+            25,
+            26,
+            28,
+            29,
+            31,
+            32,
+            34,
+            35,
+            36,
+            37,
+            38,
+            39,
+            40,
+            41,
+            42,
+            43,
+            44,
+            45,
+            46,
+            47,
+            54,
+            55,
+            56,
+            57,
+            58,
+            59,
+        }
+        max_cover = self.pick(terms, method="max_cover")
+        min_cover = self.pick(terms, method="min_vertex_cover")
+
+        assert set(terms.partition_candidates) == expected
+        assert set(max_cover) == expected
+        assert len(min_cover) == 10
+        self._assert_terms_covered(terms, min_cover)
 
 
 # ===========================================================================
@@ -1088,6 +1376,95 @@ class TestAmpPhase4Coverage:
         assert result.objective is not None
         assert 0.0 < result.objective <= 3.0 + 1e-6
 
+    @pytest.mark.parametrize("exprmode", [1, 2, 3])
+    def test_alpine_multi3n_milp_builds_trilinear_auxiliaries(self, exprmode):
+        """Alpine multi3N should build one lifted trilinear objective per overlapping block."""
+        m = _make_alpine_multi3n(n=2, exprmode=exprmode)
+        terms = self.classify(m)
+        flat_lb, flat_ub = flat_variable_bounds(m)
+        state = self.init_partitions(
+            terms.partition_candidates,
+            lb=[flat_lb[i] for i in terms.partition_candidates],
+            ub=[flat_ub[i] for i in terms.partition_candidates],
+            n_init=2,
+        )
+
+        milp_model, varmap = self.build_milp(m, terms, state, incumbent=None)
+        result = milp_model.solve()
+
+        assert (0, 1, 2) in varmap["trilinear"]
+        assert (2, 3, 4) in varmap["trilinear"]
+        assert result.status == "optimal"
+        assert result.objective is not None
+
+    @pytest.mark.parametrize("exprmode", range(1, 12))
+    def test_alpine_multi4n_builds_recursive_multilinear_auxiliaries(self, exprmode):
+        """Alpine multi4N expression modes should linearize through recursive bilinear lifts."""
+        m = _make_alpine_multi4n(n=2, exprmode=exprmode)
+        terms = self.classify(m)
+        flat_lb, flat_ub = flat_variable_bounds(m)
+        state = self.init_partitions(
+            terms.partition_candidates,
+            lb=[flat_lb[i] for i in terms.partition_candidates],
+            ub=[flat_ub[i] for i in terms.partition_candidates],
+            n_init=2,
+        )
+
+        milp_model, varmap = self.build_milp(m, terms, state, incumbent=None)
+
+        assert (0, 1, 2, 3) in varmap["multilinear"]
+        assert (3, 4, 5, 6) in varmap["multilinear"]
+        assert len(varmap["multilinear_stages"][(0, 1, 2, 3)]) == 3
+        assert len(varmap["multilinear_stages"][(3, 4, 5, 6)]) == 3
+        assert milp_model._objective_bound_valid is True
+
+    def test_multilinear_build_avoids_unused_original_pairwise_lifts(self):
+        """A pure 4-factor product should build only the recursive product chain."""
+        m = Model("multilinear_chain_only")
+        x = m.continuous("x", lb=0.1, ub=4.0, shape=(4,))
+        m.maximize(x[0] * x[1] * x[2] * x[3])
+        terms = self.classify(m)
+        state = self.init_partitions(
+            terms.partition_candidates,
+            lb=[0.1] * 4,
+            ub=[4.0] * 4,
+            n_init=2,
+        )
+
+        _, varmap = self.build_milp(m, terms, state, incumbent=None)
+
+        stages = varmap["multilinear_stages"][(0, 1, 2, 3)]
+        chain_pairs = {tuple(sorted((stage["lhs_col"], stage["rhs_col"]))) for stage in stages}
+        unused_original_pairs = {
+            (0, 2),
+            (0, 3),
+            (1, 2),
+            (1, 3),
+            (2, 3),
+        }
+
+        assert varmap["bilinear"] == {}
+        assert set(varmap["bilinear_pw"]) == chain_pairs
+        assert not unused_original_pairs & set(varmap["bilinear_pw"])
+
+    def test_alpine_multi4n_milp_relaxation_solves_with_objective_bound(self):
+        """The recursive multi4N relaxation should solve with a real objective bound."""
+        m = _make_alpine_multi4n(n=2, exprmode=1)
+        terms = self.classify(m)
+        flat_lb, flat_ub = flat_variable_bounds(m)
+        state = self.init_partitions(
+            terms.partition_candidates,
+            lb=[flat_lb[i] for i in terms.partition_candidates],
+            ub=[flat_ub[i] for i in terms.partition_candidates],
+            n_init=2,
+        )
+
+        milp_model, _ = self.build_milp(m, terms, state, incumbent=None)
+        result = milp_model.solve()
+
+        assert result.status == "optimal"
+        assert result.objective is not None
+
     def test_quartic_relaxation_tightens_with_finer_partitions(self):
         """Breakpoint tangents should tighten n>2 monomial objectives as partitions refine."""
         m = _make_quartic_objective_demo()
@@ -1154,6 +1531,7 @@ class TestAmpPhase1Helpers:
 NLP1_OPTIMUM = 58.38368  # Alpine nlp1
 CIRCLE_OPTIMUM = 1.41421356  # √2
 NLP3_OPTIMUM = 7049.247898  # Alpine nlp3
+MULTI2_OPTIMUM = 0.92906489  # Alpine multi2
 
 
 class TestAmpEndToEnd:
@@ -1238,6 +1616,21 @@ class TestAmpEndToEnd:
         assert result.gap_certified is (result.status == "optimal")
         assert result.objective is not None
         assert abs(result.objective - 3.0) <= 1e-3
+
+    def test_alpine_multi2_global_optimum(self):
+        """Alpine multi2 should recover the documented incumbent objective."""
+        m = _make_alpine_multi2()
+        result = m.solve(
+            solver="amp",
+            rel_gap=1e-3,
+            max_iter=8,
+            presolve_bt=False,
+            time_limit=30,
+        )
+
+        assert result.status in ("optimal", "feasible")
+        assert result.objective is not None
+        assert abs(result.objective - MULTI2_OPTIMUM) <= 1e-3
 
     @pytest.mark.slow
     @pytest.mark.timeout(300)

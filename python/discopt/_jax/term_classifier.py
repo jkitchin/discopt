@@ -4,6 +4,7 @@ Nonlinear Term Classifier for AMP (Adaptive Multivariate Partitioning).
 Walks the expression DAG of a Model and catalogs nonlinear term structure:
   - bilinear terms:   x_i * x_j  (two distinct continuous variables)
   - trilinear terms:  x_i * x_j * x_k  (three distinct continuous variables)
+  - multilinear terms: x_i * ... * x_k (four or more distinct variables)
   - monomial terms:   x_i^n  (single variable raised to integer power n ≥ 2)
   - general_nl:       all other nonlinearities (sin, cos, exp, log, etc.)
 
@@ -55,23 +56,30 @@ class NonlinearTerms:
         The pair is always sorted (i <= j) to avoid duplicates.
     trilinear : list of (int, int, int)
         Each entry is a sorted triple of flat variable indices for x_i * x_j * x_k.
+    multilinear : list of tuple[int, ...]
+        Each entry is a sorted tuple of four or more flat variable indices for
+        a distinct-variable product.
     monomial : list of (int, int)
         Each entry is (var_idx, exponent) for x_i^n, n integer ≥ 2.
     general_nl : list of Expression
-        Nonlinear expression nodes that are neither bilinear, trilinear, nor monomial
-        (e.g., sin, cos, exp, log, sqrt, tan, abs).
+        Nonlinear expression nodes that are neither bilinear, trilinear,
+        higher-order multilinear, nor monomial (e.g., sin, cos, exp, log,
+        sqrt, tan, abs).
     term_incidence : dict[int, set[int]]
         Maps flat variable index → set of term indices (into the combined bilinear +
-        trilinear list) that the variable appears in.  Used for vertex-cover computation.
+        trilinear + multilinear list) that the variable appears in.  Used for
+        vertex-cover computation.
     partition_candidates : list[int]
-        Sorted list of flat variable indices appearing in any bilinear or trilinear term.
-        These are the candidates for domain partitioning in AMP.
+        Sorted list of flat variable indices appearing in any bilinear,
+        trilinear, or higher-order multilinear product.  These are the
+        candidates for domain partitioning in AMP.
         (Monomials are convex/treated separately; general_nl may also be candidates
         but are currently excluded from partitioning as AMP focuses on polynomial terms.)
     """
 
     bilinear: list[tuple[_VarIdx, _VarIdx]] = field(default_factory=list)
     trilinear: list[tuple[_VarIdx, _VarIdx, _VarIdx]] = field(default_factory=list)
+    multilinear: list[tuple[_VarIdx, ...]] = field(default_factory=list)
     monomial: list[tuple[_VarIdx, int]] = field(default_factory=list)
     general_nl: list[Expression] = field(default_factory=list)
     term_incidence: dict[_VarIdx, set[int]] = field(default_factory=dict)
@@ -171,13 +179,17 @@ def classify_nonlinear_terms(model: Model) -> NonlinearTerms:
     # Track seen terms to avoid duplicates
     seen_bilinear: set[tuple[int, int]] = set()
     seen_trilinear: set[tuple[int, int, int]] = set()
+    seen_multilinear: set[tuple[int, ...]] = set()
     seen_monomial: set[tuple[int, int]] = set()
+
+    def _next_product_term_idx() -> int:
+        return len(result.bilinear) + len(result.trilinear) + len(result.multilinear)
 
     def _record_bilinear(i: int, j: int) -> None:
         key = (min(i, j), max(i, j))
         if key not in seen_bilinear:
             seen_bilinear.add(key)
-            term_idx = len(result.bilinear) + len(result.trilinear)
+            term_idx = _next_product_term_idx()
             result.bilinear.append(key)
             # Update term incidence
             for v in key:
@@ -188,8 +200,19 @@ def classify_nonlinear_terms(model: Model) -> NonlinearTerms:
         key = (a, b, c)
         if key not in seen_trilinear:
             seen_trilinear.add(key)
-            term_idx = len(result.bilinear) + len(result.trilinear)
+            term_idx = _next_product_term_idx()
             result.trilinear.append(key)
+            for v in key:
+                result.term_incidence.setdefault(v, set()).add(term_idx)
+
+    def _record_multilinear(indices: list[int]) -> None:
+        key = tuple(sorted(indices))
+        if len(key) < 4:
+            raise ValueError("multilinear terms require at least four variables")
+        if key not in seen_multilinear:
+            seen_multilinear.add(key)
+            term_idx = _next_product_term_idx()
+            result.multilinear.append(key)
             for v in key:
                 result.term_incidence.setdefault(v, set()).add(term_idx)
 
@@ -259,11 +282,7 @@ def classify_nonlinear_terms(model: Model) -> NonlinearTerms:
                         _record_trilinear(unique_vars[0], unique_vars[1], unique_vars[2])
                         return
                     else:
-                        # Higher-order multilinear — decompose into bilinear pairs
-                        # (AMP handles multilinear via repeated bilinear decomposition)
-                        for ii in range(len(unique_vars)):
-                            for jj in range(ii + 1, len(unique_vars)):
-                                _record_bilinear(unique_vars[ii], unique_vars[jj])
+                        _record_multilinear(unique_vars)
                         return
                 # If product decomposition failed, recurse on children
                 _classify_node(expr.left)
@@ -331,8 +350,8 @@ def classify_nonlinear_terms(model: Model) -> NonlinearTerms:
         _classify_node(constraint.body)
 
     # ── Build partition_candidates ──
-    # Variables that appear in bilinear or trilinear terms (not just monomials,
-    # since x^2 is convex and handled by alphaBB/direct secant).
+    # Variables that appear in product terms (not just monomials, since x^2 is
+    # convex and handled by alphaBB/direct secant).
     candidates: set[int] = set()
     for i, j in result.bilinear:
         candidates.add(i)
@@ -341,6 +360,8 @@ def classify_nonlinear_terms(model: Model) -> NonlinearTerms:
         candidates.add(i)
         candidates.add(j)
         candidates.add(k)
+    for term in result.multilinear:
+        candidates.update(term)
     result.partition_candidates = sorted(candidates)
 
     return result
