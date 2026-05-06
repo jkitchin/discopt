@@ -1890,6 +1890,8 @@ class TestCurrentCodeWeaknesses:
             m,
             solver="amp",
             gap_tolerance=1e-3,
+            initial_point=np.array([0.25], dtype=np.float64),
+            use_start_as_incumbent=True,
             apply_partitioning=False,
             disc_var_pick=1,
             partition_scaling_factor=7.0,
@@ -1901,6 +1903,8 @@ class TestCurrentCodeWeaknesses:
         )
 
         assert captured["rel_gap"] == pytest.approx(1e-3)
+        assert np.allclose(captured["initial_point"], np.array([0.25], dtype=np.float64))
+        assert captured["use_start_as_incumbent"] is True
         assert captured["apply_partitioning"] is False
         assert captured["disc_var_pick"] == 1
         assert captured["partition_scaling_factor"] == pytest.approx(7.0)
@@ -2051,6 +2055,40 @@ class TestCurrentCodeWeaknesses:
         assert float(best_x[0]) == pytest.approx(1.0)
         assert best_obj == pytest.approx(1.5)
 
+    def test_best_nlp_candidate_prioritizes_incumbent_start_then_model_start_then_milp(
+        self,
+        monkeypatch,
+    ):
+        """AMP local search should try incumbent, model start, then MILP point first."""
+        from discopt.solvers import amp as amp_mod
+
+        m = Model("candidate_priority")
+        m.continuous("x", lb=0.0, ub=10.0)
+        seen_starts = []
+
+        monkeypatch.setattr(
+            amp_mod,
+            "_solve_nlp_subproblem",
+            lambda evaluator, x0, lb, ub, nlp_solver, time_limit=None: (
+                seen_starts.append(float(x0[0])) or (None, None)
+            ),
+        )
+
+        amp_mod._solve_best_nlp_candidate(
+            np.array([6.0], dtype=np.float64),
+            m,
+            evaluator=object(),
+            flat_lb=np.array([0.0], dtype=np.float64),
+            flat_ub=np.array([10.0], dtype=np.float64),
+            constraint_lb=np.array([], dtype=np.float64),
+            constraint_ub=np.array([], dtype=np.float64),
+            nlp_solver="ipm",
+            incumbent=np.array([2.0], dtype=np.float64),
+            initial_point=np.array([4.0], dtype=np.float64),
+        )
+
+        assert seen_starts[:3] == [2.0, 4.0, 6.0]
+
     def test_best_nlp_candidate_rejects_noninteger_nlp_return(self, monkeypatch):
         """NLP candidates that violate integrality should be discarded."""
         from discopt.solvers import amp as amp_mod
@@ -2090,6 +2128,42 @@ class TestCurrentCodeWeaknesses:
 
         assert best_x is None
         assert best_obj is None
+
+    def test_amp_accepts_feasible_start_as_incumbent(self, monkeypatch):
+        """A feasible model start should survive when proof search fails immediately."""
+        from discopt._jax.milp_relaxation import MilpRelaxationResult
+        from discopt.solvers import amp as amp_mod
+
+        m = Model("amp_start_incumbent")
+        x = m.continuous("x", lb=0.0, ub=2.0)
+        m.subject_to(x >= 0.25)
+        m.minimize((x - 1.0) ** 2)
+
+        monkeypatch.setattr(
+            amp_mod,
+            "_solve_milp_with_oa_recovery",
+            lambda **kwargs: (
+                MilpRelaxationResult(status="error", objective=None, x=None),
+                {},
+                [],
+                1,
+            ),
+        )
+
+        result = m.solve(
+            solver="amp",
+            initial_solution={x: 0.5},
+            use_start_as_incumbent=True,
+            skip_convex_check=True,
+            presolve_bt=False,
+            max_iter=1,
+            time_limit=30,
+        )
+
+        assert result.status == "feasible"
+        assert result.objective == pytest.approx(0.25)
+        assert result.x is not None
+        assert np.asarray(result.x["x"]).item() == pytest.approx(0.5)
 
     def test_amp_recovers_minlptests_integer_incumbent_from_small_finite_box(self):
         """AMP should recover finite-domain MINLP incumbents even from integral MILP points."""

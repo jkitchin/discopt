@@ -1830,7 +1830,8 @@ class Model:
         initial_solution : dict, optional
             Initial feasible solution mapping Variable objects to values
             (scalars, lists, or numpy arrays).  Used as a warm-start point
-            for NLP solves and as the initial incumbent in Branch & Bound.
+            for NLP solves, AMP local incumbent improvement, and as the initial
+            incumbent in Branch & Bound.
             Values are validated against variable bounds and integrality
             requirements; violations produce warnings and are corrected
             automatically (clamped / rounded).

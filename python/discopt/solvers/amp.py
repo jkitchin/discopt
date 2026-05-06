@@ -483,7 +483,7 @@ def _select_best_nlp_candidate(
     nlp_solver: str,
     deadline: Optional[float] = None,
 ) -> tuple[Optional[np.ndarray], Optional[float]]:
-    """Return the best feasible NLP candidate across the integer-rounding set."""
+    """Return the best feasible NLP candidate from a prioritized candidate list."""
     best_x: Optional[np.ndarray] = None
     best_obj: Optional[float] = None
 
@@ -530,21 +530,23 @@ def _solve_best_nlp_candidate(
     constraint_ub: np.ndarray,
     nlp_solver: str,
     incumbent: Optional[np.ndarray] = None,
+    initial_point: Optional[np.ndarray] = None,
     deadline: Optional[float] = None,
 ) -> tuple[Optional[np.ndarray], Optional[float]]:
-    """Return the best feasible NLP candidate across the integer-rounding set."""
+    """Improve the incumbent from Alpine-ordered local NLP starts."""
     if all(v.var_type == VarType.CONTINUOUS for v in model._variables):
         starts: list[np.ndarray] = []
-        for seed in (x0, incumbent):
+        for seed in (incumbent, initial_point, x0):
             if seed is not None:
-                starts.extend(_continuous_recovery_starts(flat_lb, flat_ub, seed))
+                starts.append(np.clip(np.asarray(seed, dtype=np.float64), flat_lb, flat_ub))
+        starts.extend(_continuous_recovery_starts(flat_lb, flat_ub))
         candidates = _dedupe_candidate_points(starts)
     else:
-        candidates = _integer_rounding_candidates(x0, model)
-        if incumbent is not None:
-            candidates = _dedupe_candidate_points(
-                _integer_rounding_candidates(incumbent, model) + candidates
-            )
+        candidates = []
+        for seed in (incumbent, initial_point, x0, _default_nlp_start(flat_lb, flat_ub)):
+            if seed is not None:
+                candidates.extend(_integer_rounding_candidates(seed, model))
+        candidates = _dedupe_candidate_points(candidates)
 
     return _select_best_nlp_candidate(
         candidates,
@@ -819,6 +821,8 @@ def solve_amp(
     convhull_ebd: bool = False,
     convhull_ebd_encoding: str = "gray",
     presolve_bt: bool = True,
+    initial_point: Optional[np.ndarray] = None,
+    use_start_as_incumbent: bool = False,
     skip_convex_check: bool = False,
 ) -> SolveResult:
     """Solve MINLP globally using Adaptive Multivariate Partitioning (AMP).
@@ -872,6 +876,13 @@ def solve_amp(
         ``"binary"`` is only valid for two partitions.
     presolve_bt : bool
         Run LP-based OBBT before the AMP loop to tighten variable bounds.
+    initial_point : ndarray, optional
+        Validated model start point used by AMP's local incumbent-improvement
+        phase. Candidate local NLP starts are tried as incumbent, model start,
+        MILP point, then safe fallback starts.
+    use_start_as_incumbent : bool
+        If True, accept a feasible initial point as the first incumbent before
+        the AMP bounding loop starts, matching Alpine's warm-start policy.
     skip_convex_check : bool
         If True, force AMP even when the model is detected as a pure
         continuous convex problem.
@@ -931,6 +942,7 @@ def solve_amp(
                     ipopt_options=None,
                     t_start=t_start,
                     nlp_solver=nlp_solver,
+                    initial_point=initial_point,
                 )
                 result.convex_fast_path = True
                 return result
@@ -1012,6 +1024,15 @@ def solve_amp(
         else:
             logger.info("AMP: skipping OBBT presolve because no wall-clock budget remains")
 
+    initial_point_arr: Optional[np.ndarray] = None
+    if initial_point is not None:
+        initial_point_arr = np.asarray(initial_point, dtype=np.float64).reshape(-1)
+        if initial_point_arr.size != n_orig:
+            raise ValueError(
+                f"AMP initial_point has length {initial_point_arr.size}; expected {n_orig}"
+            )
+        initial_point_arr = np.clip(initial_point_arr, flat_lb, flat_ub)
+
     # ── Select partition variables ───────────────────────────────────────────
     if apply_partitioning:
         part_vars = pick_partition_vars(terms, method=partition_mode)
@@ -1051,6 +1072,20 @@ def solve_amp(
     LB = -np.inf
     UB = np.inf
     incumbent = None
+    if (
+        use_start_as_incumbent
+        and initial_point_arr is not None
+        and _check_integer_feasible(initial_point_arr, model)
+        and _check_constraints_with_evaluator(
+            evaluator,
+            initial_point_arr,
+            constraint_lb,
+            constraint_ub,
+        )
+    ):
+        UB = float(evaluator.evaluate_objective(initial_point_arr))
+        incumbent = initial_point_arr.copy()
+        logger.info("AMP: accepted feasible initial point as incumbent")
     gap_certified = False
     oa_cuts: list = []  # accumulated OA linearizations from NLP incumbents
     mip_count = 0
@@ -1106,7 +1141,7 @@ def solve_amp(
             termination_reason = "error" if milp_result.status == "error" else "infeasible"
             if LB == -np.inf:
                 # Problem may be infeasible
-                if iteration == 1:
+                if iteration == 1 and incumbent is None:
                     if pure_continuous:
                         recovered = _recover_pure_continuous_solution(
                             model,
@@ -1116,6 +1151,7 @@ def solve_amp(
                             nlp_solver=nlp_solver,
                             t_start=t_start,
                             time_limit=time_limit,
+                            initial_point=initial_point_arr,
                         )
                         if recovered is not None:
                             recovered.mip_count = mip_count
@@ -1162,7 +1198,7 @@ def solve_amp(
             x0 = _extract_orig_solution(milp_result.x, n_orig)
             x0 = np.clip(x0, flat_lb, flat_ub)
         else:
-            x0 = 0.5 * (flat_lb + flat_ub)
+            x0 = _default_nlp_start(flat_lb, flat_ub)
 
         x_nlp, obj_nlp_min = _solve_best_nlp_candidate(
             x0,
@@ -1174,6 +1210,7 @@ def solve_amp(
             constraint_ub,
             nlp_solver,
             incumbent=incumbent,
+            initial_point=initial_point_arr,
             deadline=deadline,
         )
 
@@ -1418,6 +1455,7 @@ def solve_amp(
             nlp_solver=nlp_solver,
             t_start=t_start,
             time_limit=time_limit,
+            initial_point=initial_point_arr,
         )
         if recovered is not None:
             recovered.mip_count = mip_count
