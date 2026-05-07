@@ -54,7 +54,7 @@ def validate_initial_solution(
         If *initial_solution* is not a dict or contains non-Variable keys.
     ValueError
         If a Variable does not belong to the model, or a value has the
-        wrong shape.
+        wrong shape or non-finite entries.
     """
     if not isinstance(initial_solution, dict):
         raise TypeError(
@@ -115,6 +115,11 @@ def validate_initial_solution(
             # Bounds checking and clamping
             lb_flat = v.lb.flatten()
             ub_flat = v.ub.flatten()
+
+            if not np.all(np.isfinite(val)):
+                raise ValueError(
+                    f"Variable '{v.name}' initial_solution contains non-finite value(s)"
+                )
 
             below = val < lb_flat - tol_bounds
             above = val > ub_flat + tol_bounds

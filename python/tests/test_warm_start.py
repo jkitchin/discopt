@@ -110,6 +110,12 @@ class TestValidation:
         with pytest.raises(ValueError, match="shape"):
             validate_initial_solution(m, {x: [1.0, 2.0]})
 
+    @pytest.mark.parametrize("bad_value", [np.nan, np.inf, -np.inf])
+    def test_nonfinite_solution_raises_value_error(self, bad_value):
+        m, x, y = _make_nlp()
+        with pytest.raises(ValueError, match="non-finite"):
+            validate_initial_solution(m, {x: bad_value})
+
     def test_bounds_violation_warns_and_clamps(self):
         m, x, y = _make_nlp()
         with warnings.catch_warnings(record=True) as w:

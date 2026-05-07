@@ -1405,10 +1405,13 @@ def solve_model(
             "convhull_formulation",
             "convhull_ebd",
             "convhull_ebd_encoding",
+            "use_start_as_incumbent",
         )
         for key in amp_option_keys:
             if key in kwargs:
                 amp_kwargs[key] = kwargs.pop(key)
+        if initial_point is not None:
+            amp_kwargs["initial_point"] = initial_point
 
         ignored_amp_options = []
 
@@ -1429,7 +1432,6 @@ def solve_model(
         _note_ignored("use_learned_relaxations", use_learned_relaxations is not False)
         _note_ignored("mccormick_bounds", mccormick_bounds != "auto")
         _note_ignored("gdp_method", gdp_method != "big-m")
-        _note_ignored("initial_point", initial_point is not None)
         _note_ignored("nlp_bb", nlp_bb is not None)
         _note_ignored("lazy_constraints", lazy_constraints is not None)
         _note_ignored("incumbent_callback", incumbent_callback is not None)
