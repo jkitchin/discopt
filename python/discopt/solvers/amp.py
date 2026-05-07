@@ -171,6 +171,26 @@ def _dedupe_candidate_points(points: list[np.ndarray]) -> list[np.ndarray]:
     return unique
 
 
+def _normalize_initial_point(
+    initial_point: Optional[np.ndarray],
+    n_orig: int,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> Optional[np.ndarray]:
+    """Validate and clip an optional AMP initial point."""
+    if initial_point is None:
+        return None
+
+    initial_point_arr = np.asarray(initial_point, dtype=np.float64).reshape(-1)
+    if initial_point_arr.size != n_orig:
+        raise ValueError(
+            f"AMP initial_point has length {initial_point_arr.size}; expected {n_orig}"
+        )
+    if not np.all(np.isfinite(initial_point_arr)):
+        raise ValueError("AMP initial_point must contain only finite values")
+    return np.clip(initial_point_arr, flat_lb, flat_ub)
+
+
 def _remaining_wall_time(deadline: Optional[float]) -> Optional[float]:
     """Return seconds remaining until a deadline, or None when uncapped."""
     if deadline is None:
@@ -925,6 +945,10 @@ def solve_amp(
     if convhull_ebd and convhull_mode != "sos2":
         raise ValueError("convhull_ebd requires convhull_formulation='sos2' or the 'lambda' alias.")
 
+    n_orig = sum(v.size for v in model._variables)
+    flat_lb, flat_ub = flat_variable_bounds(model)
+    initial_point_arr = _normalize_initial_point(initial_point, n_orig, flat_lb, flat_ub)
+
     if pure_continuous and not skip_convex_check:
         try:
             from discopt._jax.convexity import classify_model as _classify_convexity
@@ -942,7 +966,7 @@ def solve_amp(
                     ipopt_options=None,
                     t_start=t_start,
                     nlp_solver=nlp_solver,
-                    initial_point=initial_point,
+                    initial_point=initial_point_arr,
                 )
                 result.convex_fast_path = True
                 return result
@@ -952,8 +976,6 @@ def solve_amp(
     def _from_minimization_space(value: float) -> float:
         return -float(value) if maximize else float(value)
 
-    n_orig = sum(v.size for v in model._variables)
-    flat_lb, flat_ub = flat_variable_bounds(model)
     tightened_lb, tightened_ub, nonlinear_bt_stats = tighten_nonlinear_bounds(
         model, flat_lb, flat_ub
     )
@@ -1024,13 +1046,7 @@ def solve_amp(
         else:
             logger.info("AMP: skipping OBBT presolve because no wall-clock budget remains")
 
-    initial_point_arr: Optional[np.ndarray] = None
-    if initial_point is not None:
-        initial_point_arr = np.asarray(initial_point, dtype=np.float64).reshape(-1)
-        if initial_point_arr.size != n_orig:
-            raise ValueError(
-                f"AMP initial_point has length {initial_point_arr.size}; expected {n_orig}"
-            )
+    if initial_point_arr is not None:
         initial_point_arr = np.clip(initial_point_arr, flat_lb, flat_ub)
 
     # ── Select partition variables ───────────────────────────────────────────
@@ -1083,9 +1099,13 @@ def solve_amp(
             constraint_ub,
         )
     ):
-        UB = float(evaluator.evaluate_objective(initial_point_arr))
-        incumbent = initial_point_arr.copy()
-        logger.info("AMP: accepted feasible initial point as incumbent")
+        initial_obj = float(evaluator.evaluate_objective(initial_point_arr))
+        if np.isfinite(initial_obj):
+            UB = initial_obj
+            incumbent = initial_point_arr.copy()
+            logger.info("AMP: accepted feasible initial point as incumbent")
+        else:
+            logger.info("AMP: feasible initial point has non-finite objective; not using incumbent")
     gap_certified = False
     oa_cuts: list = []  # accumulated OA linearizations from NLP incumbents
     mip_count = 0

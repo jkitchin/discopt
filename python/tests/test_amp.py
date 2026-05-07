@@ -2165,6 +2165,69 @@ class TestCurrentCodeWeaknesses:
         assert result.x is not None
         assert np.asarray(result.x["x"]).item() == pytest.approx(0.5)
 
+    @pytest.mark.parametrize("bad_value", [np.nan, np.inf, -np.inf])
+    def test_amp_rejects_nonfinite_direct_initial_point(self, bad_value):
+        """Direct AMP initial points must be finite before incumbent checks."""
+        from discopt.solvers import amp as amp_mod
+
+        m = Model("amp_nonfinite_start")
+        x = m.continuous("x", lb=0.0, ub=1.0)
+        m.minimize(x)
+
+        with pytest.raises(ValueError, match="finite"):
+            amp_mod.solve_amp(
+                m,
+                initial_point=np.array([bad_value], dtype=np.float64),
+                use_start_as_incumbent=True,
+                skip_convex_check=True,
+                presolve_bt=False,
+                max_iter=1,
+                time_limit=1.0,
+            )
+
+    def test_amp_does_not_accept_start_with_nonfinite_objective(self, monkeypatch):
+        """A finite start with NaN objective is not a valid AMP incumbent."""
+        import discopt._jax.nlp_evaluator as nlp_eval
+        from discopt._jax.milp_relaxation import MilpRelaxationResult
+        from discopt.solvers import amp as amp_mod
+
+        m = Model("amp_nan_objective_start")
+        x = m.continuous("x", lb=0.0, ub=1.0)
+        m.minimize(x)
+
+        monkeypatch.setattr(
+            nlp_eval.NLPEvaluator,
+            "evaluate_objective",
+            lambda self, x_flat: np.nan,
+        )
+        monkeypatch.setattr(
+            amp_mod,
+            "_solve_milp_with_oa_recovery",
+            lambda **kwargs: (
+                MilpRelaxationResult(status="error", objective=None, x=None),
+                {},
+                [],
+                1,
+            ),
+        )
+        monkeypatch.setattr(
+            amp_mod, "_recover_pure_continuous_solution", lambda *args, **kwargs: None
+        )
+
+        result = m.solve(
+            solver="amp",
+            initial_solution={x: 0.5},
+            use_start_as_incumbent=True,
+            skip_convex_check=True,
+            presolve_bt=False,
+            max_iter=1,
+            time_limit=1.0,
+        )
+
+        assert result.status == "error"
+        assert result.objective is None
+        assert result.x is None
+
     def test_amp_recovers_minlptests_integer_incumbent_from_small_finite_box(self):
         """AMP should recover finite-domain MINLP incumbents even from integral MILP points."""
         instance = MINLPTESTS_MI_BY_ID["nlp_mi_003_014"]
