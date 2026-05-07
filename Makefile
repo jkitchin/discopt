@@ -11,7 +11,10 @@
 #   make bench-cutest-smoke   # Quick CUTEst smoke (10 problems)
 #   make setup-cutest         # Install CUTEst/SIFDecode/SIF libraries
 #   make build               # Rebuild Rust .so if sources changed
-#   make test                # Run pytest suite
+#   make test                # Run fast default pytest suite
+#   make test-all            # Run full pytest suite, including opt-in tests
+#   make test-amp-fast       # Run fast AMP regression battery
+#   make test-amp-integration # Run opt-in AMP Alpine/incidence suite
 #   make lint                # Ruff lint + format check
 #   make hooks               # Install pre-commit hooks
 #   make clean               # Remove build artifacts
@@ -23,7 +26,7 @@ SHELL := /bin/bash
 # --- Configuration -----------------------------------------------------------
 
 PYTHON      ?= python
-MATURIN     ?= maturin
+MATURIN     ?= $(PYTHON) -m maturin
 PYTEST      ?= pytest
 RUFF        ?= ruff
 JUPYTER     ?= jupyter
@@ -32,7 +35,8 @@ PRE_COMMIT  ?= pre-commit
 PROJECT_DIR := $(shell pwd)
 RESULTS_DIR := $(PROJECT_DIR)/results
 NOTEBOOK    := docs/notebooks/benchmarks_by_class.ipynb
-SO_TARGET   := python/discopt/_rust.cpython-312-darwin.so
+EXT_SUFFIX  := $(shell $(PYTHON) -c "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX') or '.so')")
+SO_TARGET   := python/discopt/_rust$(EXT_SUFFIX)
 
 # Timestamp for output files
 TS := $(shell date -u +%Y-%m-%dT%H-%M-%S)
@@ -54,10 +58,11 @@ export FFLAGS  ?= -w
 CUTEST_MAX_N    ?= 100
 CUTEST_PREFIX   ?= $(HOME)/.local/cutest
 CUTEST_ENV      := $(CUTEST_PREFIX)/env.sh
+FAST_TEST_MARKERS ?= not slow and not integration and not amp_benchmark
 
 # --- Phony targets ------------------------------------------------------------
 
-.PHONY: all benchmarks build test lint hooks clean help \
+.PHONY: all benchmarks build test test-fast test-all test-amp-fast test-amp-integration lint hooks clean help \
         bench-notebook bench-smoke bench-phase3-gate bench-tests \
         bench-cutest bench-cutest-smoke setup-cutest check-cutest \
         docs docs-open notebooks \
@@ -72,7 +77,10 @@ help:
 	@echo ""
 	@echo "  make benchmarks         Full pipeline: build, lint, test, all benchmarks"
 	@echo "  make build              Rebuild Rust .so if sources changed"
-	@echo "  make test               Run full pytest suite"
+	@echo "  make test               Run fast default pytest suite"
+	@echo "  make test-all           Run full pytest suite, including opt-in tests"
+	@echo "  make test-amp-fast      Run fast AMP regression battery"
+	@echo "  make test-amp-integration Run opt-in AMP Alpine/incidence suite"
 	@echo "  make lint               Ruff lint + format check"
 	@echo "  make hooks              Install pre-commit hooks"
 	@echo "  make bench-notebook     Run benchmark notebook, save HTML + JSON"
@@ -118,8 +126,8 @@ $(SO_TARGET): $(RUST_SRCS)
 	$(MATURIN) develop --release
 	@# maturin develop may install to site-packages; copy to project dir
 	@SP=$$($(PYTHON) -c "import sysconfig; print(sysconfig.get_path('purelib'))"); \
-	if [ -f "$$SP/discopt/_rust.cpython-312-darwin.so" ]; then \
-		cp "$$SP/discopt/_rust.cpython-312-darwin.so" $(SO_TARGET); \
+	if [ -f "$$SP/discopt/_rust$(EXT_SUFFIX)" ]; then \
+		cp "$$SP/discopt/_rust$(EXT_SUFFIX)" $(SO_TARGET); \
 		echo "==> Copied .so from site-packages"; \
 	fi
 	@touch $(SO_TARGET)
@@ -143,10 +151,27 @@ hooks:
 
 # --- Test ---------------------------------------------------------------------
 
-test: build
-	@echo "==> Running pytest..."
+test-fast: build
+	@echo "==> Running fast pytest suite..."
+	$(PYTEST) python/tests/ -v --tb=short -q -m "$(FAST_TEST_MARKERS)"
+	@echo "==> Fast tests passed"
+
+test: test-fast
+
+test-all: build
+	@echo "==> Running full pytest suite..."
 	$(PYTEST) python/tests/ -v --tb=short -q
-	@echo "==> Tests passed"
+	@echo "==> Full tests passed"
+
+test-amp-fast: build
+	@echo "==> Running fast AMP regression tests..."
+	$(PYTEST) python/tests/test_amp.py -v --tb=short -q
+	@echo "==> Fast AMP tests passed"
+
+test-amp-integration: build
+	@echo "==> Running opt-in AMP Alpine/incidence tests..."
+	$(PYTEST) python/tests/test_amp_integration.py -v --tb=short -q -m "slow or integration or amp_benchmark"
+	@echo "==> AMP integration tests passed"
 
 # --- Results directory --------------------------------------------------------
 

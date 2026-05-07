@@ -1,0 +1,36 @@
+name: AMP integration
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "18 8 * * 1"
+
+jobs:
+  amp-integration:
+    name: AMP Alpine/incidence suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y coinor-libipopt-dev liblapack-dev libblas-dev gfortran
+      - name: Install Python dependencies
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install maturin
+          pip install jax jaxlib numpy scipy highspy cyipopt pytest pytest-timeout
+          maturin develop
+      - name: Run opt-in AMP integration suite
+        run: |
+          source .venv/bin/activate
+          pytest python/tests/test_amp_integration.py -v --timeout=300 -m "slow or integration or amp_benchmark or requires_cyipopt"
+        env:
+          JAX_PLATFORMS: cpu
+          JAX_ENABLE_X64: "1"

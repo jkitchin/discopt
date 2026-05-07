@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, amp]
   pull_request:
-    branches: [main]
+    branches: [main, amp]
 
 jobs:
   rust:
@@ -47,11 +47,11 @@ jobs:
         run: |
           source .venv/bin/activate
           mypy python/discopt/
-      - name: Test with coverage (fast — excludes solve and slow tests)
+      - name: Test with coverage (fast default suite)
         run: |
           source .venv/bin/activate
           pip install pytest-cov
-          pytest python/tests/ -v --timeout=120 -m "not slow" --ignore=python/tests/test_minlplib.py --ignore=python/tests/test_correctness.py --cov=discopt --cov-report=term-missing --cov-report=xml:coverage.xml
+          pytest python/tests/ -v --timeout=120 -m "not slow and not integration and not amp_benchmark" --ignore=python/tests/test_minlplib.py --ignore=python/tests/test_correctness.py --cov=discopt --cov-report=term-missing --cov-report=xml:coverage.xml
         env:
           JAX_PLATFORMS: cpu
           JAX_ENABLE_X64: "1"
@@ -60,5 +60,39 @@ jobs:
         uses: codecov/codecov-action@v5
         with:
           files: coverage.xml
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false
+
+  python-amp-coverage:
+    name: Python AMP coverage (3.12, ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install system dependencies (Ipopt)
+        run: |
+          sudo apt-get update && sudo apt-get install -y coinor-libipopt-dev liblapack-dev libblas-dev gfortran
+      - name: Install Python dependencies
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install maturin
+          pip install jax jaxlib numpy scipy highspy cyipopt pytest pytest-timeout pytest-cov "ruff==0.14.6"
+          maturin develop
+      - name: Test AMP fast battery with coverage
+        run: |
+          source .venv/bin/activate
+          pytest python/tests/test_amp.py -v --timeout=120 --cov=discopt --cov-report=term-missing --cov-report=xml:coverage-amp.xml
+        env:
+          JAX_PLATFORMS: cpu
+          JAX_ENABLE_X64: "1"
+      - name: Upload AMP coverage to Codecov
+        if: always()
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage-amp.xml
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
