@@ -51,7 +51,7 @@ jobs:
         run: |
           source .venv/bin/activate
           pip install pytest-cov
-          pytest python/tests/ -v --timeout=120 -m "not slow and not integration and not amp_benchmark" --ignore=python/tests/test_minlplib.py --ignore=python/tests/test_correctness.py --cov=discopt --cov-report=term-missing --cov-report=xml:coverage.xml
+          pytest python/tests/ -v --timeout=120 -m "not slow and not integration and not amp_benchmark and not requires_cyipopt" --ignore=python/tests/test_minlplib.py --ignore=python/tests/test_correctness.py --cov=discopt --cov-report=term-missing --cov-report=xml:coverage.xml
         env:
           JAX_PLATFORMS: cpu
           JAX_ENABLE_X64: "1"
