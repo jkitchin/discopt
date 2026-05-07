@@ -187,6 +187,9 @@ timeout = 300
 markers = [
     "smoke: quick sanity tests",
     "slow: long-running tests",
+    "integration: solver-dependent or cross-module integration tests",
+    "amp_benchmark: opt-in AMP Alpine, MINLPTests, or incidence benchmark coverage",
+    "requires_cyipopt: requires the optional cyipopt/Ipopt solver stack",
     "gpu: requires GPU",
     "correctness: correctness validation tests",
     "cutest: requires pycutest and CUTEst installation",

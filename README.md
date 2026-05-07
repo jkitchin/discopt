@@ -122,10 +122,34 @@ git clone <ripopt-repo-url> ../ripopt
 # Build Rust-Python bindings (includes ripopt PyO3 bindings)
 cd crates/discopt-python && maturin develop && cd ../..
 
-# Run tests
+# Run the fast default PR battery
 cargo test -p discopt-core
-JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 pytest python/tests/ -v
+JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 make test
 ```
+
+### AMP Test Suites
+
+Routine AMP development uses a fast default regression battery:
+
+```bash
+make test-amp-fast
+```
+
+Alpine-reference, MINLPTests, and incidence-style AMP checks are opt-in because
+they can require optional solvers and longer solve budgets:
+
+```bash
+# Uses a fresh .venv and pixi-provided solver libraries rather than a local Python env.
+pixi exec -s python=3.12 -s ipopt -s pkg-config -s c-compiler -s cxx-compiler -s gfortran -- \
+  uv venv --allow-existing .venv
+source .venv/bin/activate
+uv pip install maturin pytest pytest-timeout numpy scipy jax jaxlib highspy cyipopt
+uv pip install -e ".[dev,ipopt,highs]"
+maturin develop
+make test-amp-integration
+```
+
+The full Python test suite remains available with `make test-all`.
 
 ## Command-Line Interface
 
@@ -195,4 +219,3 @@ See [ROADMAP.md](ROADMAP.md) for the full development roadmap and task history.
 ## License
 
 [Eclipse Public License 2.0 (EPL-2.0)](LICENSE)
-
