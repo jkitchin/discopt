@@ -2002,7 +2002,12 @@ def solve_amp(
                     "part_vars": list(part_vars),
                 },
             )
-            if set(adaptive_vars) != set(part_vars):
+            if adaptive_vars or disc_var_pick_hook is not None:
+                should_update_adaptive_vars = set(adaptive_vars) != set(part_vars)
+            else:
+                should_update_adaptive_vars = False
+
+            if should_update_adaptive_vars:
                 logger.info(
                     "AMP: updating adaptive partition set from %d to %d variables",
                     len(part_vars),

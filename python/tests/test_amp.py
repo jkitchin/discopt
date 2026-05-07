@@ -547,6 +547,60 @@ def test_amp_custom_partition_hooks_run_inside_amp(monkeypatch):
     assert result.gap_certified is False
 
 
+def test_amp_adaptive_keeps_monomial_fallback_partitions(monkeypatch):
+    """Built-in adaptive selection must not erase monomial-only partitions."""
+    import discopt._jax.discretization as disc_mod
+    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    from discopt.solvers import amp as amp_mod
+
+    refined_var_sets = []
+
+    def fake_add_adaptive_partition(state, solution, var_indices, lb, ub):
+        del solution, lb, ub
+        refined_var_sets.append(list(var_indices))
+        return state
+
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_milp_with_oa_recovery",
+        lambda **kwargs: (
+            MilpRelaxationResult(
+                status="optimal",
+                objective=0.0,
+                x=np.array([0.0], dtype=np.float64),
+            ),
+            {},
+            [],
+            1,
+        ),
+    )
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_best_nlp_candidate",
+        lambda *args, **kwargs: (np.array([1.0], dtype=np.float64), 1.0),
+    )
+    monkeypatch.setattr(disc_mod, "add_adaptive_partition", fake_add_adaptive_partition)
+    monkeypatch.setattr(disc_mod, "check_partition_convergence", lambda state: True)
+
+    m = Model("monomial_only_adaptive")
+    x = m.continuous("x", lb=-2.0, ub=2.0)
+    m.minimize(x**2)
+
+    result = amp_mod.solve_amp(
+        m,
+        disc_var_pick="adaptive",
+        presolve_bt=False,
+        skip_convex_check=True,
+        rel_gap=1e-6,
+        max_iter=2,
+        time_limit=30,
+    )
+
+    assert refined_var_sets == [[0]]
+    assert result.status == "feasible"
+    assert result.gap_certified is False
+
+
 def test_partitioned_presolve_obbt_falls_back_without_incumbent(monkeypatch):
     """Alpine-style mode 2 should use LP OBBT when no feasible incumbent exists."""
     import discopt._jax.obbt as obbt_mod
