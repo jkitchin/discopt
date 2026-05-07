@@ -153,6 +153,10 @@ fn extract_linear_coeffs(arena: &ExprArena, id: ExprId) -> Option<(Vec<(usize, f
                                 return None;
                             }
                         }
+                        // Slice / mixed indices select an array of variables;
+                        // not a single scalar variable, so it isn't a linear
+                        // term we can extract here.
+                        crate::expr::IndexSpec::Multi(_) => return None,
                     };
                     Some((vec![(*var_idx + offset, 1.0)], 0.0))
                 }

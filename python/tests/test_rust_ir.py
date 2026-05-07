@@ -310,7 +310,6 @@ class TestExampleModels:
         assert repr.objective_sense == "minimize"
         # Constraints include exp() so not all are linear
 
-    @pytest.mark.skip(reason="Example 7 uses slice indexing (x[i, :]) which is Phase 2")
     def test_parametric_full(self):
         m = example_parametric()
         repr = model_to_repr(m)
@@ -424,3 +423,115 @@ class TestEdgeCases:
         val = repr.evaluate_objective(np.array([2.0]))
         expected = np.exp(2.0) + np.log(2.0) + np.sqrt(2.0)
         assert abs(val - expected) < 1e-13
+
+
+# ─────────────────────────────────────────────────────────────
+# Test: Slice indexing (x[i, :], x[:, j], x[:])
+# ─────────────────────────────────────────────────────────────
+
+
+class TestSliceIndexing:
+    """Slice indexing converts to and evaluates correctly through the Rust IR.
+
+    The flat layout is row-major (C-order); for a (2, 2) variable, ``x_flat``
+    is ``[x[0,0], x[0,1], x[1,0], x[1,1]]``.
+    """
+
+    def test_row_slice_evaluates(self):
+        m = dm.Model("row_slice")
+        x = m.continuous("x", shape=(2, 2), lb=0, ub=10)
+        m.minimize(dm.sum(x[0, :]) + 2 * dm.sum(x[1, :]))
+        repr = model_to_repr(m)
+        # (x00 + x01) + 2 * (x10 + x11) = (1+2) + 2*(3+4) = 17
+        val = repr.evaluate_objective(np.array([1.0, 2.0, 3.0, 4.0]))
+        assert abs(val - 17.0) < 1e-14
+
+    def test_column_slice_evaluates(self):
+        m = dm.Model("col_slice")
+        y = m.continuous("y", shape=(2, 2), lb=0, ub=10)
+        m.minimize(dm.sum(y[:, 0]) + 10 * dm.sum(y[:, 1]))
+        repr = model_to_repr(m)
+        # col0 = y00 + y10 = 1 + 3 = 4; col1 = y01 + y11 = 2 + 4 = 6;
+        # total = 4 + 60 = 64
+        val = repr.evaluate_objective(np.array([1.0, 2.0, 3.0, 4.0]))
+        assert abs(val - 64.0) < 1e-14
+
+    def test_full_slice_on_1d_variable(self):
+        m = dm.Model("full_slice_1d")
+        z = m.continuous("z", shape=(3,), lb=0, ub=10)
+        m.minimize(dm.sum(z[:]))
+        repr = model_to_repr(m)
+        val = repr.evaluate_objective(np.array([5.0, 6.0, 7.0]))
+        assert abs(val - 18.0) < 1e-14
+
+    def test_mixed_slice_arithmetic(self):
+        m = dm.Model("slice_arith")
+        w = m.continuous("w", shape=(2, 2), lb=0, ub=10)
+        m.minimize(dm.sum(w[0, :]) - dm.sum(w[1, :]))
+        repr = model_to_repr(m)
+        # (1+2) - (3+4) = -4
+        val = repr.evaluate_objective(np.array([1.0, 2.0, 3.0, 4.0]))
+        assert abs(val - (-4.0)) < 1e-14
+
+    def test_partial_slice_start_stop(self):
+        """``a[1:4]`` selects elements 1..4 with Python semantics."""
+        m = dm.Model("start_stop")
+        a = m.continuous("a", shape=(5,), lb=0, ub=100)
+        m.minimize(dm.sum(a[1:4]))
+        repr = model_to_repr(m)
+        val = repr.evaluate_objective(np.array([10.0, 20.0, 30.0, 40.0, 50.0]))
+        assert abs(val - (20 + 30 + 40)) < 1e-14
+
+    def test_slice_with_step(self):
+        """``a[::2]`` strides through every other element."""
+        m = dm.Model("step")
+        a = m.continuous("a", shape=(6,), lb=0, ub=100)
+        m.minimize(dm.sum(a[::2]))
+        repr = model_to_repr(m)
+        val = repr.evaluate_objective(np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]))
+        assert abs(val - (1 + 3 + 5)) < 1e-14
+
+    def test_negative_indices(self):
+        """``a[-2:]`` indexes from the end."""
+        m = dm.Model("neg_idx")
+        a = m.continuous("a", shape=(5,), lb=0, ub=100)
+        m.minimize(dm.sum(a[-2:]))
+        repr = model_to_repr(m)
+        val = repr.evaluate_objective(np.array([1.0, 2.0, 3.0, 4.0, 5.0]))
+        assert abs(val - (4 + 5)) < 1e-14
+
+    def test_reverse_step(self):
+        """``a[::-1]`` walks the array backwards (sum is order-independent)."""
+        m = dm.Model("reverse")
+        a = m.continuous("a", shape=(4,), lb=0, ub=100)
+        m.minimize(dm.sum(a[::-1]))
+        repr = model_to_repr(m)
+        val = repr.evaluate_objective(np.array([1.0, 2.0, 3.0, 4.0]))
+        assert abs(val - 10.0) < 1e-14
+
+    def test_partial_slice_2d(self):
+        """``X[i, 1:3]`` mixes scalar and partial-slice axes."""
+        m = dm.Model("partial_2d")
+        x = m.continuous("X", shape=(3, 3), lb=0, ub=100)
+        m.minimize(dm.sum(x[1, 1:3]))
+        repr = model_to_repr(m)
+        # X flat = [1..9]; X[1, 1:3] = {X[1,1], X[1,2]} = {5, 6}
+        val = repr.evaluate_objective(np.arange(1.0, 10.0))
+        assert abs(val - (5 + 6)) < 1e-14
+
+    def test_empty_slice(self):
+        """An empty slice contributes zero to a sum."""
+        m = dm.Model("empty")
+        a = m.continuous("a", shape=(4,), lb=0, ub=10)
+        m.minimize(dm.sum(a[5:5]) + 1.0)
+        repr = model_to_repr(m)
+        val = repr.evaluate_objective(np.array([1.0, 2.0, 3.0, 4.0]))
+        assert abs(val - 1.0) < 1e-14
+
+    def test_step_zero_rejected(self):
+        """A zero step is invalid (matches Python's `slice` behavior)."""
+        m = dm.Model("step_zero")
+        a = m.continuous("a", shape=(4,), lb=0, ub=10)
+        m.minimize(dm.sum(a[::0]))
+        with pytest.raises(ValueError, match="step cannot be zero"):
+            model_to_repr(m)

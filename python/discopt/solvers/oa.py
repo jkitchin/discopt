@@ -590,8 +590,11 @@ def _build_x_dict(x_flat: np.ndarray, model: Model) -> dict:
 def _compute_gap(lb: float, ub: float) -> float:
     if ub >= 1e19 or lb <= -1e19:
         return 1.0
-    denom = max(1e-10, abs(ub))
-    return (ub - lb) / denom
+    abs_gap = max(0.0, ub - lb)
+    if abs_gap <= 1e-9:
+        return 0.0
+    denom = max(abs(ub), abs(lb), 1e-10)
+    return abs_gap / denom
 
 
 # ── Main Algorithm ────────────────────────────────────────────

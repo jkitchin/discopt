@@ -90,13 +90,46 @@ pub enum MathFunc {
     Norm2,
 }
 
+/// One axis of a generalized index: either a scalar position or a slice.
+///
+/// Slices use Python semantics: `start`, `stop`, `step` may be `None` to mean
+/// "default for the direction of `step`", and negative values are interpreted
+/// relative to the axis length. A step of zero is rejected at construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexElem {
+    /// A scalar index along this axis (e.g. `i` in `x[i, :]`).
+    Scalar(usize),
+    /// A slice along this axis. `Slice { start: None, stop: None, step: None }`
+    /// represents the full slice (`:`).
+    Slice {
+        /// Inclusive start (Python-relative; negatives count from the end).
+        start: Option<isize>,
+        /// Exclusive stop.
+        stop: Option<isize>,
+        /// Stride. `None` means 1; must be non-zero.
+        step: Option<isize>,
+    },
+}
+
+impl IndexElem {
+    /// The full-axis slice (`:`).
+    pub const FULL: IndexElem = IndexElem::Slice {
+        start: None,
+        stop: None,
+        step: None,
+    };
+}
+
 /// Indexing specification for array access.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexSpec {
     /// Single scalar index: `x[i]`
     Scalar(usize),
-    /// Tuple index: `x[i, j]`
+    /// Tuple of scalar indices: `x[i, j]`
     Tuple(Vec<usize>),
+    /// Mixed scalar/slice indexing: `x[i, :]`, `x[:, j]`, etc. The result is
+    /// array-valued unless every element is `Scalar`.
+    Multi(Vec<IndexElem>),
 }
 
 /// A single node in the expression DAG.
@@ -1065,6 +1098,24 @@ impl ExprArena {
             ExprNode::ConstantArray(data, _) => data.clone(),
             ExprNode::Constant(v) => vec![*v],
             ExprNode::Parameter { value, .. } => value.clone(),
+            ExprNode::Index { base, index } => match self.get(*base) {
+                ExprNode::Variable { shape, .. } => {
+                    let offset = self.var_offset(*base);
+                    index_spec_collect_flat(index, shape)
+                        .into_iter()
+                        .map(|f| x[offset + f])
+                        .collect()
+                }
+                ExprNode::ConstantArray(data, shape) => index_spec_collect_flat(index, shape)
+                    .into_iter()
+                    .map(|f| data[f])
+                    .collect(),
+                ExprNode::Parameter { value, shape, .. } => index_spec_collect_flat(index, shape)
+                    .into_iter()
+                    .map(|f| value[f])
+                    .collect(),
+                _ => vec![self.evaluate(id, x)],
+            },
             _ => vec![self.evaluate(id, x)],
         }
     }
@@ -1077,20 +1128,140 @@ impl ExprArena {
 }
 
 /// Convert an IndexSpec to a flat index given a shape (row-major / C-order).
+///
+/// Returns 0 for index specs that contain a slice — callers that need to
+/// enumerate the selected elements should use [`index_spec_collect_flat`]
+/// instead.
 fn index_spec_to_flat(spec: &IndexSpec, shape: &[usize]) -> usize {
     match spec {
         IndexSpec::Scalar(i) => *i,
-        IndexSpec::Tuple(indices) => {
-            let mut flat = 0;
-            let mut stride = 1;
-            // Walk dimensions right-to-left, accumulating strides.
-            for (&idx, &dim) in indices.iter().rev().zip(shape.iter().rev()) {
-                flat += idx * stride;
-                stride *= dim;
+        IndexSpec::Tuple(indices) => tuple_to_flat(indices, shape),
+        IndexSpec::Multi(elems) => {
+            let mut indices: Vec<usize> = Vec::with_capacity(elems.len());
+            for elem in elems {
+                match elem {
+                    IndexElem::Scalar(i) => indices.push(*i),
+                    IndexElem::Slice { .. } => return 0,
+                }
             }
-            flat
+            tuple_to_flat(&indices, shape)
         }
     }
+}
+
+fn tuple_to_flat(indices: &[usize], shape: &[usize]) -> usize {
+    let mut flat = 0;
+    let mut stride = 1;
+    for (&idx, &dim) in indices.iter().rev().zip(shape.iter().rev()) {
+        flat += idx * stride;
+        stride *= dim;
+    }
+    flat
+}
+
+/// Enumerate the flat indices selected by an [`IndexSpec`] on an array of the
+/// given shape (row-major / C-order). Always returns at least one index;
+/// scalar specs collapse to a single-element vector. May return an empty
+/// vector for slices that select no elements (e.g. `x[5:5]`).
+pub fn index_spec_collect_flat(spec: &IndexSpec, shape: &[usize]) -> Vec<usize> {
+    match spec {
+        IndexSpec::Scalar(i) => vec![*i],
+        IndexSpec::Tuple(indices) => vec![tuple_to_flat(indices, shape)],
+        IndexSpec::Multi(elems) => {
+            let mut out: Vec<Vec<usize>> = vec![Vec::new()];
+            for (axis, elem) in elems.iter().enumerate() {
+                let dim = shape.get(axis).copied().unwrap_or(1);
+                let positions: Vec<usize> = match elem {
+                    IndexElem::Scalar(i) => vec![*i],
+                    IndexElem::Slice { start, stop, step } => {
+                        resolve_slice(*start, *stop, *step, dim)
+                    }
+                };
+                let mut next: Vec<Vec<usize>> = Vec::with_capacity(out.len() * positions.len());
+                for prefix in &out {
+                    for p in &positions {
+                        let mut v = prefix.clone();
+                        v.push(*p);
+                        next.push(v);
+                    }
+                }
+                out = next;
+            }
+            out.iter().map(|ix| tuple_to_flat(ix, shape)).collect()
+        }
+    }
+}
+
+/// Resolve a Python-style slice `(start, stop, step)` against an axis of the
+/// given length and return the selected positions.
+///
+/// Mirrors the semantics of `slice(start, stop, step).indices(length)` in
+/// CPython, including handling of `None`, negative indices, and reversed
+/// iteration when `step < 0`.
+fn resolve_slice(
+    start: Option<isize>,
+    stop: Option<isize>,
+    step: Option<isize>,
+    length: usize,
+) -> Vec<usize> {
+    let length = length as isize;
+    let step = step.unwrap_or(1);
+    if step == 0 {
+        // Rejected at construction time; treat as empty here.
+        return Vec::new();
+    }
+
+    // Default bounds depend on the direction of iteration.
+    let (lower, upper) = if step < 0 {
+        (-1_isize, length - 1)
+    } else {
+        (0_isize, length)
+    };
+
+    let mut start = match start {
+        None => {
+            if step < 0 {
+                upper
+            } else {
+                lower
+            }
+        }
+        Some(mut s) => {
+            if s < 0 {
+                s += length;
+            }
+            s.clamp(lower, upper)
+        }
+    };
+    let stop = match stop {
+        None => {
+            if step < 0 {
+                lower
+            } else {
+                upper
+            }
+        }
+        Some(mut s) => {
+            if s < 0 {
+                s += length;
+            }
+            s.clamp(lower, upper)
+        }
+    };
+
+    let mut out = Vec::new();
+    if step > 0 {
+        while start < stop {
+            out.push(start as usize);
+            start += step;
+        }
+    } else {
+        while start > stop {
+            out.push(start as usize);
+            start += step;
+        }
+    }
+    out
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1237,6 +1408,28 @@ impl ModelRepr {
             ExprNode::ConstantArray(data, _) => data.clone(),
             ExprNode::Constant(v) => vec![*v],
             ExprNode::Parameter { value, .. } => value.clone(),
+            ExprNode::Index { base, index } => match self.arena.get(*base) {
+                ExprNode::Variable {
+                    index: var_idx,
+                    shape,
+                    ..
+                } => {
+                    let offset = self.variables[*var_idx].offset;
+                    index_spec_collect_flat(index, shape)
+                        .into_iter()
+                        .map(|f| x[offset + f])
+                        .collect()
+                }
+                ExprNode::ConstantArray(data, shape) => index_spec_collect_flat(index, shape)
+                    .into_iter()
+                    .map(|f| data[f])
+                    .collect(),
+                ExprNode::Parameter { value, shape, .. } => index_spec_collect_flat(index, shape)
+                    .into_iter()
+                    .map(|f| value[f])
+                    .collect(),
+                _ => vec![self.evaluate_node(id, x)],
+            },
             _ => vec![self.evaluate_node(id, x)],
         }
     }

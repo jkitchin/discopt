@@ -4,11 +4,11 @@
 //! and exposes evaluation functions for round-trip verification.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple};
+use pyo3::types::{PyDict, PySlice, PyTuple};
 
 use discopt_core::expr::{
-    BinOp, ConstraintRepr, ConstraintSense, ExprArena, ExprId, ExprNode, IndexSpec, MathFunc,
-    ModelBuilder, ModelRepr, ObjectiveSense, UnOp, VarInfo, VarType,
+    BinOp, ConstraintRepr, ConstraintSense, ExprArena, ExprId, ExprNode, IndexElem, IndexSpec,
+    MathFunc, ModelBuilder, ModelRepr, ObjectiveSense, UnOp, VarInfo, VarType,
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -254,6 +254,20 @@ impl PyModelRepr {
                 match index {
                     IndexSpec::Scalar(i) => dict.set_item("index_spec", *i)?,
                     IndexSpec::Tuple(indices) => dict.set_item("index_spec", indices.clone())?,
+                    IndexSpec::Multi(elems) => {
+                        // Encode each axis as either an int (scalar) or a
+                        // string slice spec like ":" / "1:3" / "::2".
+                        let parts = pyo3::types::PyList::empty(py);
+                        for e in elems {
+                            match e {
+                                IndexElem::Scalar(i) => parts.append(*i)?,
+                                IndexElem::Slice { start, stop, step } => {
+                                    parts.append(format_slice(*start, *stop, *step))?
+                                }
+                            }
+                        }
+                        dict.set_item("index_spec", parts)?;
+                    }
                 }
             }
             ExprNode::MatMul { left, right } => {
@@ -927,17 +941,80 @@ fn parse_objective_sense(s: &str) -> PyResult<ObjectiveSense> {
     }
 }
 
-/// Convert a Python index (int, tuple of ints) to an IndexSpec.
+/// Convert a Python index (int, slice, or tuple of ints/slices) to an
+/// IndexSpec.
 fn convert_index_spec(obj: &Bound<'_, PyAny>) -> PyResult<IndexSpec> {
     if obj.is_instance_of::<PyTuple>() {
         let tuple: &Bound<'_, PyTuple> = obj.downcast()?;
-        let indices: Vec<usize> = tuple
-            .iter()
-            .map(|item| item.extract::<usize>())
-            .collect::<PyResult<Vec<_>>>()?;
-        Ok(IndexSpec::Tuple(indices))
+        // If every element is a plain int, keep the simple Tuple form.
+        // Otherwise (any slice present), build a Multi spec.
+        let mut all_scalar = true;
+        for item in tuple.iter() {
+            if item.is_instance_of::<PySlice>() {
+                all_scalar = false;
+                break;
+            }
+        }
+        if all_scalar {
+            let indices: Vec<usize> = tuple
+                .iter()
+                .map(|item| item.extract::<usize>())
+                .collect::<PyResult<Vec<_>>>()?;
+            return Ok(IndexSpec::Tuple(indices));
+        }
+        let mut elems: Vec<IndexElem> = Vec::with_capacity(tuple.len());
+        for item in tuple.iter() {
+            if item.is_instance_of::<PySlice>() {
+                elems.push(slice_to_index_elem(&item)?);
+            } else {
+                let i: usize = item.extract()?;
+                elems.push(IndexElem::Scalar(i));
+            }
+        }
+        Ok(IndexSpec::Multi(elems))
+    } else if obj.is_instance_of::<PySlice>() {
+        Ok(IndexSpec::Multi(vec![slice_to_index_elem(obj)?]))
     } else {
         let idx: usize = obj.extract()?;
         Ok(IndexSpec::Scalar(idx))
+    }
+}
+
+/// Convert a Python slice to an IndexElem. Supports the full Python slice
+/// protocol: `None`/missing fields become defaults, negative indices are
+/// allowed, and `step` may be negative. A step of zero is rejected with the
+/// same error Python raises (`ValueError`).
+fn slice_to_index_elem(obj: &Bound<'_, PyAny>) -> PyResult<IndexElem> {
+    let start = optional_isize(&obj.getattr("start")?)?;
+    let stop = optional_isize(&obj.getattr("stop")?)?;
+    let step = optional_isize(&obj.getattr("step")?)?;
+    if step == Some(0) {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "slice step cannot be zero",
+        ));
+    }
+    Ok(IndexElem::Slice { start, stop, step })
+}
+
+fn optional_isize(obj: &Bound<'_, PyAny>) -> PyResult<Option<isize>> {
+    if obj.is_none() {
+        Ok(None)
+    } else {
+        Ok(Some(obj.extract::<isize>()?))
+    }
+}
+
+/// Format a slice as a compact `start:stop:step` string with `None` rendered
+/// as the empty string (matching Python's repr of `slice(None, None, None)`
+/// when stringified to `:`).
+fn format_slice(start: Option<isize>, stop: Option<isize>, step: Option<isize>) -> String {
+    let s = |v: Option<isize>| match v {
+        Some(i) => i.to_string(),
+        None => String::new(),
+    };
+    if step.is_none() {
+        format!("{}:{}", s(start), s(stop))
+    } else {
+        format!("{}:{}:{}", s(start), s(stop), s(step))
     }
 }
