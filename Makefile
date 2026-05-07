@@ -58,7 +58,7 @@ export FFLAGS  ?= -w
 CUTEST_MAX_N    ?= 100
 CUTEST_PREFIX   ?= $(HOME)/.local/cutest
 CUTEST_ENV      := $(CUTEST_PREFIX)/env.sh
-FAST_TEST_MARKERS ?= not slow and not integration and not amp_benchmark and not requires_cyipopt
+FAST_TEST_MARKERS ?= not slow and not integration and not amp_benchmark
 
 # --- Phony targets ------------------------------------------------------------
 
