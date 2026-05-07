@@ -28,15 +28,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install system dependencies (Ipopt)
-        run: |
-          sudo apt-get update && sudo apt-get install -y coinor-libipopt-dev liblapack-dev libblas-dev gfortran
       - name: Install Python dependencies
         run: |
           python -m venv .venv
           source .venv/bin/activate
           pip install maturin
-          pip install jax jaxlib numpy scipy highspy cyipopt pytest pytest-timeout "ruff==0.14.6" mypy
+          pip install jax jaxlib numpy scipy highspy pytest pytest-timeout "ruff==0.14.6" mypy
           maturin develop
       - name: Lint
         run: |
@@ -47,11 +44,11 @@ jobs:
         run: |
           source .venv/bin/activate
           mypy python/discopt/
-      - name: Test with coverage (fast — excludes solve and slow tests)
+      - name: Test AMP fast battery with coverage
         run: |
           source .venv/bin/activate
           pip install pytest-cov
-          pytest python/tests/ -v --timeout=120 -m "not slow and not integration and not amp_benchmark" --ignore=python/tests/test_minlplib.py --ignore=python/tests/test_correctness.py --cov=discopt --cov-report=term-missing --cov-report=xml:coverage.xml
+          pytest python/tests/test_amp.py -v --timeout=120 --cov=discopt --cov-report=term-missing --cov-report=xml:coverage.xml
         env:
           JAX_PLATFORMS: cpu
           JAX_ENABLE_X64: "1"

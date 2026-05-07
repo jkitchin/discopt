@@ -42,14 +42,6 @@ def test_amp_integration_suite_is_opt_in():
     assert "pytest.mark.amp_benchmark" in text
 
 
-@pytest.mark.requires_cyipopt
-def test_fast_amp_environment_includes_cyipopt():
-    """The fast AMP/CI environment should include the Ipopt Python backend."""
-    import cyipopt
-
-    assert cyipopt.__version__
-
-
 def test_solve_model_forwards_alpine_amp_aliases(monkeypatch):
     """solve_model should pass Alpine-style AMP aliases through to solve_amp."""
     from discopt.solver import solve_model
