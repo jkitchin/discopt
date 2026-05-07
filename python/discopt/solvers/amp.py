@@ -800,6 +800,374 @@ def _default_obbt_time_limit_per_lp(
     return max(0.05, obbt_budget / max(1, 2 * n_orig))
 
 
+def _normalize_presolve_bt_algo(presolve_bt_algo: int | str) -> str:
+    """Resolve Alpine-style presolve OBBT mode aliases."""
+    if isinstance(presolve_bt_algo, str):
+        normalized = presolve_bt_algo.strip().lower().replace("-", "_")
+        aliases = {
+            "1": "lp",
+            "lp": "lp",
+            "obbt": "lp",
+            "lp_obbt": "lp",
+            "linear": "lp",
+            "2": "incumbent_partitioned",
+            "tmc": "incumbent_partitioned",
+            "partitioned": "incumbent_partitioned",
+            "partitioned_obbt": "incumbent_partitioned",
+            "incumbent": "incumbent_partitioned",
+            "incumbent_partitioned": "incumbent_partitioned",
+        }
+        if normalized in aliases:
+            return aliases[normalized]
+        raise ValueError(
+            f"Unsupported presolve_bt_algo: {presolve_bt_algo!r}. "
+            "Choose 1/'lp' or 2/'incumbent_partitioned'."
+        )
+
+    if presolve_bt_algo == 1:
+        return "lp"
+    if presolve_bt_algo == 2:
+        return "incumbent_partitioned"
+
+    raise ValueError(
+        f"Unsupported presolve_bt_algo: {presolve_bt_algo!r}. "
+        "Choose 1/'lp' or 2/'incumbent_partitioned'."
+    )
+
+
+def _resolve_presolve_bt_time_limits(
+    remaining: float,
+    n_orig: int,
+    presolve_bt_time_limit: Optional[float],
+    presolve_bt_mip_time_limit: Optional[float],
+) -> tuple[float, float]:
+    """Return total presolve and per-subproblem OBBT budgets.
+
+    ``presolve_bt_time_limit`` caps the whole presolve OBBT pass.  When it is
+    omitted, AMP preserves the historical default: at most 10 seconds and at
+    most 10% of remaining wall time.  ``presolve_bt_mip_time_limit`` caps each
+    LP/MILP subproblem inside that total budget.
+    """
+    if presolve_bt_time_limit is not None and presolve_bt_time_limit < 0.0:
+        raise ValueError("presolve_bt_time_limit must be non-negative")
+    if presolve_bt_mip_time_limit is not None and presolve_bt_mip_time_limit < 0.0:
+        raise ValueError("presolve_bt_mip_time_limit must be non-negative")
+    if not np.isfinite(remaining) or remaining <= 0.0:
+        return 0.0, 0.0
+
+    if presolve_bt_time_limit is None:
+        total_budget = min(10.0, 0.1 * remaining)
+        per_subproblem = _default_obbt_time_limit_per_lp(remaining, n_orig)
+    else:
+        total_budget = min(float(presolve_bt_time_limit), remaining)
+        per_subproblem = total_budget / max(1, 2 * n_orig)
+
+    if presolve_bt_mip_time_limit is not None:
+        per_subproblem = min(per_subproblem, float(presolve_bt_mip_time_limit))
+
+    return max(0.0, total_budget), max(0.0, per_subproblem)
+
+
+def _append_upper_bound_constraint(
+    A_ub,
+    b_ub: Optional[np.ndarray],
+    row: np.ndarray,
+    rhs: float,
+):
+    """Append ``row @ x <= rhs`` to dense or sparse inequality data."""
+    import scipy.sparse as sp
+
+    row_csr = sp.csr_matrix(np.asarray(row, dtype=np.float64).reshape(1, -1))
+    rhs_arr = np.array([float(rhs)], dtype=np.float64)
+    if A_ub is None or b_ub is None:
+        return row_csr, rhs_arr
+    return (
+        sp.vstack([sp.csr_matrix(A_ub), row_csr], format="csr"),
+        np.concatenate([np.asarray(b_ub, dtype=np.float64), rhs_arr]),
+    )
+
+
+def _presolve_incumbent_from_initial_point(
+    initial_point: Optional[np.ndarray],
+    model: Model,
+    evaluator,
+    constraint_lb: np.ndarray,
+    constraint_ub: np.ndarray,
+) -> tuple[Optional[np.ndarray], Optional[float]]:
+    """Return a feasible initial point and objective for incumbent-seeded presolve."""
+    if initial_point is None:
+        return None, None
+    if not _check_integer_feasible(initial_point, model):
+        return None, None
+    if not _check_constraints_with_evaluator(
+        evaluator,
+        initial_point,
+        constraint_lb,
+        constraint_ub,
+    ):
+        return None, None
+
+    obj = float(evaluator.evaluate_objective(initial_point))
+    if not np.isfinite(obj):
+        return None, None
+    return np.asarray(initial_point, dtype=np.float64).copy(), obj
+
+
+def _run_partitioned_obbt(
+    model: Model,
+    terms,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+    incumbent: np.ndarray,
+    incumbent_obj: float,
+    *,
+    partition_mode: str,
+    n_init_partitions: int,
+    partition_scaling_factor: float,
+    disc_abs_width_tol: float,
+    convhull_formulation: str,
+    convhull_ebd: bool,
+    convhull_ebd_encoding: str,
+    total_time_limit: float,
+    time_limit_per_mip: float,
+    gap_tolerance: float,
+    min_width: float = 1e-6,
+):
+    """Run incumbent-seeded OBBT on AMP's partition-aware MILP relaxation."""
+    from discopt._jax.discretization import (
+        DiscretizationState,
+        add_adaptive_partition,
+        initialize_partitions,
+    )
+    from discopt._jax.milp_relaxation import MilpRelaxationModel, build_milp_relaxation
+    from discopt._jax.obbt import ObbtResult
+    from discopt._jax.partition_selection import pick_partition_vars
+
+    n_orig = len(flat_lb)
+    part_vars = pick_partition_vars(terms, method=partition_mode)
+    if not part_vars and terms.monomial:
+        part_vars = sorted(set(var_idx for var_idx, _ in terms.monomial))
+
+    if part_vars:
+        part_lbs = [float(flat_lb[i]) for i in part_vars]
+        part_ubs = [float(flat_ub[i]) for i in part_vars]
+        base_state = initialize_partitions(
+            part_vars,
+            lb=part_lbs,
+            ub=part_ubs,
+            n_init=n_init_partitions,
+            scaling_factor=partition_scaling_factor,
+            abs_width_tol=disc_abs_width_tol,
+        )
+        solution = {i: float(incumbent[i]) for i in part_vars}
+        disc_state = add_adaptive_partition(
+            base_state,
+            solution,
+            part_vars,
+            part_lbs,
+            part_ubs,
+        )
+    else:
+        disc_state = DiscretizationState(
+            scaling_factor=partition_scaling_factor,
+            abs_width_tol=disc_abs_width_tol,
+        )
+
+    base_relaxation, _varmap = build_milp_relaxation(
+        model,
+        terms,
+        disc_state,
+        incumbent=incumbent,
+        convhull_formulation=convhull_formulation,
+        convhull_ebd=convhull_ebd,
+        convhull_ebd_encoding=convhull_ebd_encoding,
+        bound_override=(flat_lb.copy(), flat_ub.copy()),
+    )
+
+    A_ub = base_relaxation._A_ub
+    b_ub = base_relaxation._b_ub
+    if base_relaxation._objective_bound_valid:
+        cutoff_rhs = incumbent_obj - base_relaxation._obj_offset
+        cutoff_rhs += 1e-8 * max(1.0, abs(float(incumbent_obj)))
+        A_ub, b_ub = _append_upper_bound_constraint(
+            A_ub,
+            b_ub,
+            base_relaxation._c,
+            cutoff_rhs,
+        )
+    else:
+        logger.info(
+            "AMP: partitioned OBBT objective cutoff skipped because relaxation objective "
+            "is not linearizable"
+        )
+
+    tightened_lb = np.asarray(flat_lb, dtype=np.float64).copy()
+    tightened_ub = np.asarray(flat_ub, dtype=np.float64).copy()
+    bounds_list = list(base_relaxation._bounds)
+    for i in range(n_orig):
+        bounds_list[i] = (float(tightened_lb[i]), float(tightened_ub[i]))
+
+    candidates = [
+        i
+        for i in range(n_orig)
+        if (
+            tightened_ub[i] - tightened_lb[i] > min_width
+            and is_effectively_finite(float(tightened_lb[i]))
+            and is_effectively_finite(float(tightened_ub[i]))
+        )
+    ]
+
+    deadline = time.perf_counter() + total_time_limit
+    n_mip_solves = 0
+    n_tightened = 0
+    total_solve_time = 0.0
+
+    def solve_bound_objective(c: np.ndarray, remaining: float):
+        nonlocal n_mip_solves, total_solve_time
+        subproblem_limit = min(time_limit_per_mip, remaining)
+        if subproblem_limit <= 0.0:
+            return None
+        subproblem = MilpRelaxationModel(
+            c=c,
+            A_ub=A_ub,
+            b_ub=b_ub,
+            bounds=bounds_list,
+            obj_offset=0.0,
+            integrality=base_relaxation._integrality,
+            objective_bound_valid=True,
+        )
+        start = time.perf_counter()
+        result = subproblem.solve(
+            time_limit=subproblem_limit,
+            gap_tolerance=gap_tolerance,
+        )
+        total_solve_time += time.perf_counter() - start
+        n_mip_solves += 1
+        return result
+
+    for var_idx in candidates:
+        remaining = _remaining_wall_time(deadline)
+        if remaining is not None and remaining <= 0.0:
+            break
+        assert remaining is not None
+
+        c = np.zeros(len(bounds_list), dtype=np.float64)
+        c[var_idx] = 1.0
+        result = solve_bound_objective(c, remaining)
+        if result is not None and result.status == "optimal" and result.objective is not None:
+            new_lb = float(result.objective)
+            if new_lb > tightened_lb[var_idx] + 1e-8 and new_lb <= tightened_ub[var_idx] + 1e-8:
+                tightened_lb[var_idx] = new_lb
+                bounds_list[var_idx] = (float(tightened_lb[var_idx]), float(tightened_ub[var_idx]))
+                n_tightened += 1
+
+        remaining = _remaining_wall_time(deadline)
+        if remaining is not None and remaining <= 0.0:
+            break
+        assert remaining is not None
+
+        c[var_idx] = -1.0
+        result = solve_bound_objective(c, remaining)
+        if result is not None and result.status == "optimal" and result.objective is not None:
+            new_ub = -float(result.objective)
+            if new_ub < tightened_ub[var_idx] - 1e-8 and new_ub >= tightened_lb[var_idx] - 1e-8:
+                tightened_ub[var_idx] = new_ub
+                bounds_list[var_idx] = (float(tightened_lb[var_idx]), float(tightened_ub[var_idx]))
+                n_tightened += 1
+
+    return ObbtResult(
+        tightened_lb=tightened_lb,
+        tightened_ub=tightened_ub,
+        n_lp_solves=n_mip_solves,
+        n_tightened=n_tightened,
+        total_lp_time=total_solve_time,
+    )
+
+
+def _run_amp_presolve_bound_tightening(
+    model: Model,
+    terms,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+    *,
+    presolve_bt_algo: int | str,
+    remaining: float,
+    incumbent: Optional[np.ndarray],
+    incumbent_obj: Optional[float],
+    n_init_partitions: int,
+    partition_mode: str,
+    partition_scaling_factor: float,
+    disc_abs_width_tol: float,
+    convhull_formulation: str,
+    convhull_ebd: bool,
+    convhull_ebd_encoding: str,
+    milp_gap_tolerance: Optional[float],
+    presolve_bt_time_limit: Optional[float],
+    presolve_bt_mip_time_limit: Optional[float],
+) -> tuple[np.ndarray, np.ndarray, Any]:
+    """Run the configured AMP presolve OBBT mode and return tightened bounds."""
+    from discopt._jax.obbt import run_obbt
+
+    algo = _normalize_presolve_bt_algo(presolve_bt_algo)
+    n_orig = len(flat_lb)
+    total_budget, subproblem_budget = _resolve_presolve_bt_time_limits(
+        remaining,
+        n_orig,
+        presolve_bt_time_limit,
+        presolve_bt_mip_time_limit,
+    )
+    if total_budget <= 0.0 or subproblem_budget <= 0.0:
+        logger.info("AMP: skipping OBBT presolve because no wall-clock budget remains")
+        return flat_lb, flat_ub, None
+
+    if algo == "incumbent_partitioned" and (incumbent is None or incumbent_obj is None):
+        logger.info("AMP: no feasible incumbent for partitioned OBBT; falling back to LP OBBT")
+        algo = "lp"
+
+    if algo == "lp":
+        result = run_obbt(
+            model,
+            lb=flat_lb.copy(),
+            ub=flat_ub.copy(),
+            time_limit_per_lp=subproblem_budget,
+        )
+        return result.tightened_lb, result.tightened_ub, result
+
+    assert incumbent is not None
+    assert incumbent_obj is not None
+    try:
+        result = _run_partitioned_obbt(
+            model,
+            terms,
+            flat_lb,
+            flat_ub,
+            incumbent,
+            float(incumbent_obj),
+            partition_mode=partition_mode,
+            n_init_partitions=n_init_partitions,
+            partition_scaling_factor=partition_scaling_factor,
+            disc_abs_width_tol=disc_abs_width_tol,
+            convhull_formulation=convhull_formulation,
+            convhull_ebd=convhull_ebd,
+            convhull_ebd_encoding=convhull_ebd_encoding,
+            total_time_limit=total_budget,
+            time_limit_per_mip=subproblem_budget,
+            gap_tolerance=milp_gap_tolerance if milp_gap_tolerance is not None else 1e-4,
+        )
+    except Exception as err:
+        logger.warning(
+            "AMP: partitioned OBBT presolve failed; falling back to LP OBBT: %s",
+            err,
+        )
+        result = run_obbt(
+            model,
+            lb=flat_lb.copy(),
+            ub=flat_ub.copy(),
+            time_limit_per_lp=subproblem_budget,
+        )
+    return result.tightened_lb, result.tightened_ub, result
+
+
 def _compute_relative_gap(
     abs_gap: Optional[float],
     upper_bound: float,
@@ -848,6 +1216,9 @@ def solve_amp(
     convhull_ebd: bool = False,
     convhull_ebd_encoding: str = "gray",
     presolve_bt: bool = True,
+    presolve_bt_algo: int | str = 1,
+    presolve_bt_time_limit: Optional[float] = None,
+    presolve_bt_mip_time_limit: Optional[float] = None,
     initial_point: Optional[np.ndarray] = None,
     use_start_as_incumbent: bool = False,
     skip_convex_check: bool = False,
@@ -903,6 +1274,17 @@ def solve_amp(
         ``"binary"`` is only valid for two partitions.
     presolve_bt : bool
         Run LP-based OBBT before the AMP loop to tighten variable bounds.
+    presolve_bt_algo : int or str
+        Bound-tightening algorithm. ``1``/``"lp"`` keeps the cheap LP OBBT
+        baseline. ``2``/``"incumbent_partitioned"`` uses a feasible incumbent
+        to seed adaptive partitions and solves partition-aware OBBT MILPs,
+        falling back to LP OBBT when no feasible incumbent is available.
+    presolve_bt_time_limit : float, optional
+        Wall-clock cap for the whole presolve OBBT pass. If omitted, AMP keeps
+        its historical default of at most 10 seconds and at most 10% of the
+        remaining global ``time_limit``.
+    presolve_bt_mip_time_limit : float, optional
+        Per-LP/MILP cap for each OBBT subproblem inside the presolve pass.
     initial_point : ndarray, optional
         Validated model start point used by AMP's local incumbent-improvement
         phase. Candidate local NLP starts are tried as incumbent, model start,
@@ -948,9 +1330,16 @@ def solve_amp(
         raise ValueError("disc_add_partition_method must be 'adaptive' or 'uniform'")
 
     partition_mode = _normalize_partition_method(partition_method, disc_var_pick)
+    _normalize_presolve_bt_algo(presolve_bt_algo)
     convhull_mode = _normalize_convhull_formulation(convhull_formulation)
     if convhull_ebd and convhull_mode != "sos2":
         raise ValueError("convhull_ebd requires convhull_formulation='sos2' or the 'lambda' alias.")
+    _resolve_presolve_bt_time_limits(
+        remaining=time_limit,
+        n_orig=max(1, sum(v.size for v in model._variables)),
+        presolve_bt_time_limit=presolve_bt_time_limit,
+        presolve_bt_mip_time_limit=presolve_bt_mip_time_limit,
+    )
 
     n_orig = sum(v.size for v in model._variables)
     flat_lb, flat_ub = flat_variable_bounds(model)
@@ -1007,6 +1396,13 @@ def solve_amp(
     evaluator = NLPEvaluator(model)
     constraint_lb, constraint_ub = _infer_constraint_bounds(model)
     deadline = t_start + time_limit
+    presolve_incumbent, presolve_incumbent_obj = _presolve_incumbent_from_initial_point(
+        initial_point_arr,
+        model,
+        evaluator,
+        constraint_lb,
+        constraint_ub,
+    )
     oa_convexity = classify_oa_cut_convexity(model)
     if evaluator.n_constraints > 0 and not all(oa_convexity.constraint_mask):
         logger.warning(
@@ -1029,29 +1425,38 @@ def solve_amp(
     # Tighten the initial McCormick domain before selecting partition bounds.
     if presolve_bt:
         remaining = max(0.0, time_limit - (time.perf_counter() - t_start))
-        obbt_time_limit = _default_obbt_time_limit_per_lp(remaining, n_orig)
-        if obbt_time_limit > 0.0:
-            try:
-                from discopt._jax.obbt import run_obbt
-            except ImportError as err:
-                logger.warning("AMP: OBBT presolve unavailable; continuing without it: %s", err)
-            else:
-                obbt_result = run_obbt(
-                    model,
-                    lb=flat_lb.copy(),
-                    ub=flat_ub.copy(),
-                    time_limit_per_lp=obbt_time_limit,
-                )
-                if obbt_result.n_tightened > 0:
-                    flat_lb = obbt_result.tightened_lb
-                    flat_ub = obbt_result.tightened_ub
-                    logger.info(
-                        "AMP: OBBT tightened %d bounds in %.3fs before partitioning",
-                        obbt_result.n_tightened,
-                        obbt_result.total_lp_time,
-                    )
+        try:
+            tightened_lb, tightened_ub, obbt_result = _run_amp_presolve_bound_tightening(
+                model,
+                terms,
+                flat_lb,
+                flat_ub,
+                presolve_bt_algo=presolve_bt_algo,
+                remaining=remaining,
+                incumbent=presolve_incumbent,
+                incumbent_obj=presolve_incumbent_obj,
+                n_init_partitions=n_init_partitions,
+                partition_mode=partition_mode,
+                partition_scaling_factor=partition_scaling_factor,
+                disc_abs_width_tol=disc_abs_width_tol,
+                convhull_formulation=convhull_mode,
+                convhull_ebd=convhull_ebd,
+                convhull_ebd_encoding=convhull_ebd_encoding,
+                milp_gap_tolerance=milp_gap_tolerance,
+                presolve_bt_time_limit=presolve_bt_time_limit,
+                presolve_bt_mip_time_limit=presolve_bt_mip_time_limit,
+            )
+        except ImportError as err:
+            logger.warning("AMP: OBBT presolve unavailable; continuing without it: %s", err)
         else:
-            logger.info("AMP: skipping OBBT presolve because no wall-clock budget remains")
+            if obbt_result is not None and obbt_result.n_tightened > 0:
+                flat_lb = tightened_lb
+                flat_ub = tightened_ub
+                logger.info(
+                    "AMP: OBBT tightened %d bounds in %.3fs before partitioning",
+                    obbt_result.n_tightened,
+                    obbt_result.total_lp_time,
+                )
 
     if initial_point_arr is not None:
         initial_point_arr = np.clip(initial_point_arr, flat_lb, flat_ub)
