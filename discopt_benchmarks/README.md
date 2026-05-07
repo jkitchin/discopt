@@ -47,6 +47,48 @@ python run_benchmarks.py --suite comparison --solvers discopt,baron
 python run_benchmarks.py --suite phase2 --report
 ```
 
+## AMP Custom Partition Heuristics
+
+AMP benchmark runs can supply Alpine-style custom partition hooks directly to
+`Model.solve`. This keeps heuristic experiments outside solver internals:
+
+```python
+from discopt._jax.discretization import add_adaptive_partition
+
+
+def choose_partition_vars(ctx):
+    # Start from any built-in rule, then customize the returned flat indices.
+    selected = ctx["builtin_pick_partition_vars"]("adaptive_vertex_cover", ctx.get("distance"))
+    return selected[:1] or ctx["partition_candidates"][:1]
+
+
+def update_scaling(ctx):
+    return min(40.0, ctx["current_scaling_factor"] * 1.25)
+
+
+def refine_partitions(ctx):
+    return add_adaptive_partition(
+        ctx["disc_state"],
+        ctx["solution"],
+        ctx["var_indices"],
+        ctx["lb"],
+        ctx["ub"],
+    )
+
+
+result = model.solve(
+    solver="amp",
+    disc_var_pick=choose_partition_vars,
+    partition_scaling_factor_update=update_scaling,
+    disc_add_partition_method=refine_partitions,
+    time_limit=300,
+)
+```
+
+For local Alpine/incidence checks, use the repository's documented pixi plus uv
+`.venv` workflow before running `make test-amp-integration`; avoid reusing an
+uncontrolled local Python environment for those solver-dependent examples.
+
 ## Benchmark Suites
 
 | Suite       | Purpose                              | Instances | Time Limit |

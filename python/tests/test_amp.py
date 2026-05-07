@@ -238,6 +238,7 @@ def test_amp_small_helpers_cover_aliases_gaps_and_pruning():
     assert amp_mod._normalize_partition_method("auto", "all") == "max_cover"
     assert amp_mod._normalize_partition_method("auto", "adaptive") == "adaptive_vertex_cover"
     assert amp_mod._normalize_partition_method("auto", 3) == "adaptive_vertex_cover"
+    assert amp_mod._normalize_partition_method("auto", lambda ctx: [0]) == "auto"
 
     with pytest.raises(ValueError, match="Unsupported disc_var_pick string"):
         amp_mod._normalize_partition_method("auto", "missing")
@@ -433,6 +434,10 @@ def test_solve_model_forwards_alpine_amp_aliases(monkeypatch):
     x = m.continuous("x", lb=0, ub=1)
     m.minimize(x)
 
+    def update_scaling(context):
+        del context
+        return 8.0
+
     solve_model(
         m,
         solver="amp",
@@ -440,6 +445,7 @@ def test_solve_model_forwards_alpine_amp_aliases(monkeypatch):
         apply_partitioning=False,
         disc_var_pick=1,
         partition_scaling_factor=7.0,
+        partition_scaling_factor_update=update_scaling,
         disc_add_partition_method="uniform",
         disc_abs_width_tol=1e-2,
         convhull_formulation="sos2",
@@ -452,12 +458,93 @@ def test_solve_model_forwards_alpine_amp_aliases(monkeypatch):
     assert captured["apply_partitioning"] is False
     assert captured["disc_var_pick"] == 1
     assert captured["partition_scaling_factor"] == pytest.approx(7.0)
+    assert captured["partition_scaling_factor_update"] is update_scaling
     assert captured["disc_add_partition_method"] == "uniform"
     assert captured["disc_abs_width_tol"] == pytest.approx(1e-2)
     assert captured["convhull_formulation"] == "sos2"
     assert captured["presolve_bt_algo"] == 2
     assert captured["presolve_bt_time_limit"] == pytest.approx(12.0)
     assert captured["presolve_bt_mip_time_limit"] == pytest.approx(0.5)
+
+
+def test_amp_custom_partition_hooks_run_inside_amp(monkeypatch):
+    """AMP should expose callable selection, scaling, and refinement hooks."""
+    import discopt._jax.discretization as disc_mod
+    from discopt._jax.discretization import add_adaptive_partition
+    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    from discopt.solvers import amp as amp_mod
+
+    selection_stages = []
+    refinement_calls = []
+    scaling_calls = []
+
+    def custom_select(context):
+        selection_stages.append(context["stage"])
+        assert set(context["builtin_pick_partition_vars"]("max_cover")) == {0, 1}
+        if context["stage"] == "initial_selection":
+            return [0]
+        assert "distance" in context
+        return [1]
+
+    def custom_scaling(context):
+        scaling_calls.append((context["iteration"], context["current_scaling_factor"]))
+        return 12.0
+
+    def custom_refine(context):
+        refinement_calls.append(
+            (
+                context["stage"],
+                list(context["var_indices"]),
+                context["disc_state"].scaling_factor,
+            )
+        )
+        return add_adaptive_partition(
+            context["disc_state"],
+            context["solution"],
+            context["var_indices"],
+            context["lb"],
+            context["ub"],
+        )
+
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_milp_with_oa_recovery",
+        lambda **kwargs: (
+            MilpRelaxationResult(
+                status="optimal",
+                objective=0.0,
+                x=np.array([2.0, 4.0], dtype=np.float64),
+            ),
+            {},
+            [],
+            1,
+        ),
+    )
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_best_nlp_candidate",
+        lambda *args, **kwargs: (np.array([2.0, 4.0], dtype=np.float64), 1.0),
+    )
+    monkeypatch.setattr(disc_mod, "check_partition_convergence", lambda state: True)
+
+    result = amp_mod.solve_amp(
+        _make_nlp1(),
+        disc_var_pick=custom_select,
+        partition_scaling_factor=10.0,
+        partition_scaling_factor_update=custom_scaling,
+        disc_add_partition_method=custom_refine,
+        presolve_bt=False,
+        skip_convex_check=True,
+        rel_gap=1e-6,
+        max_iter=2,
+        time_limit=30,
+    )
+
+    assert selection_stages == ["initial_selection", "iteration_selection"]
+    assert scaling_calls == [(1, 10.0)]
+    assert refinement_calls == [("refinement", [1], 12.0)]
+    assert result.status == "feasible"
+    assert result.gap_certified is False
 
 
 def test_partitioned_presolve_obbt_falls_back_without_incumbent(monkeypatch):

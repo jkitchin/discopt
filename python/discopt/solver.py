@@ -1403,6 +1403,7 @@ def solve_model(
             "apply_partitioning",
             "disc_var_pick",
             "partition_scaling_factor",
+            "partition_scaling_factor_update",
             "disc_add_partition_method",
             "disc_abs_width_tol",
             "convhull_formulation",
