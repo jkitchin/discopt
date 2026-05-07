@@ -129,7 +129,9 @@ JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 make test
 
 ### AMP Test Suites
 
-Routine AMP development uses a fast default regression battery:
+Routine AMP development uses a fast default regression battery. The fast
+environment includes HiGHS and cyipopt, but excludes the longer Alpine,
+MINLPTests, and incidence-style AMP benchmark suite:
 
 ```bash
 make test-amp-fast
