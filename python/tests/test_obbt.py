@@ -14,6 +14,7 @@ from discopt._jax.obbt import (
     run_obbt,
 )
 from discopt.modeling.core import Model
+from discopt.solvers import LPResult, SolveStatus
 
 # ─────────────────────────────────────────────────────────────
 # Helpers
@@ -202,6 +203,35 @@ class TestObbtBasic:
 
         result = run_obbt(m)
         assert np.isclose(result.tightened_lb[0], 5.0, atol=1e-6)
+
+    def test_total_time_limit_stops_before_all_variables(self, monkeypatch):
+        """The total OBBT deadline should cap the full candidate loop."""
+        import discopt._jax.obbt as obbt_mod
+
+        m = Model("deadline")
+        x = m.continuous("x", lb=0, ub=100, shape=(3,))
+        m.minimize(x[0])
+        m.subject_to(x[0] + x[1] + x[2] <= 10)
+
+        clock = {"now": 100.0}
+        calls = []
+
+        monkeypatch.setattr(obbt_mod.time, "perf_counter", lambda: clock["now"])
+
+        def fake_solve_lp(*, c, time_limit=None, **kwargs):
+            del c, kwargs
+            calls.append(time_limit)
+            clock["now"] += 0.11
+            return LPResult(status=SolveStatus.OPTIMAL, objective=0.0, wall_time=0.11)
+
+        monkeypatch.setattr(obbt_mod, "solve_lp", fake_solve_lp)
+
+        result = run_obbt(m, time_limit_per_lp=1.0, total_time_limit=0.2)
+
+        assert result.n_lp_solves == 2
+        assert len(calls) == 2
+        assert np.isclose(calls[0], 0.2)
+        assert 0.0 < calls[1] < 0.1
 
 
 # ─────────────────────────────────────────────────────────────

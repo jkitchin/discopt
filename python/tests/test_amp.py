@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 os.environ["JAX_PLATFORMS"] = "cpu"
 os.environ["JAX_ENABLE_X64"] = "1"
@@ -243,9 +244,24 @@ def test_amp_small_helpers_cover_aliases_gaps_and_pruning():
     with pytest.raises(ValueError, match="Unsupported disc_var_pick integer"):
         amp_mod._normalize_partition_method("auto", 9)
 
+    assert amp_mod._normalize_presolve_bt_algo(1) == "lp"
+    assert amp_mod._normalize_presolve_bt_algo("lp_obbt") == "lp"
+    assert amp_mod._normalize_presolve_bt_algo(2) == "incumbent_partitioned"
+    assert amp_mod._normalize_presolve_bt_algo("tmc") == "incumbent_partitioned"
+    with pytest.raises(ValueError, match="Unsupported presolve_bt_algo"):
+        amp_mod._normalize_presolve_bt_algo("missing")
+
     assert amp_mod._default_milp_time_limit(remaining=10.0, iteration=1, max_iter=5) == 6.0
     assert amp_mod._default_obbt_time_limit_per_lp(remaining=-1.0, n_orig=2) == 0.0
     assert amp_mod._default_obbt_time_limit_per_lp(remaining=10.0, n_orig=2) == pytest.approx(0.25)
+    assert amp_mod._resolve_presolve_bt_time_limits(
+        remaining=100.0,
+        n_orig=2,
+        presolve_bt_time_limit=5.0,
+        presolve_bt_mip_time_limit=0.7,
+    ) == pytest.approx((5.0, 0.7))
+    with pytest.raises(ValueError, match="presolve_bt_time_limit"):
+        amp_mod._resolve_presolve_bt_time_limits(10.0, 1, -1.0, None)
     assert amp_mod._compute_relative_gap(None, 1.0) is None
     assert amp_mod._compute_relative_gap(-1.0, 1.0) is None
     assert amp_mod._compute_relative_gap(1.0, 0.0) is None
@@ -427,6 +443,9 @@ def test_solve_model_forwards_alpine_amp_aliases(monkeypatch):
         disc_add_partition_method="uniform",
         disc_abs_width_tol=1e-2,
         convhull_formulation="sos2",
+        presolve_bt_algo=2,
+        presolve_bt_time_limit=12.0,
+        presolve_bt_mip_time_limit=0.5,
     )
 
     assert captured["rel_gap"] == pytest.approx(1e-3)
@@ -436,6 +455,229 @@ def test_solve_model_forwards_alpine_amp_aliases(monkeypatch):
     assert captured["disc_add_partition_method"] == "uniform"
     assert captured["disc_abs_width_tol"] == pytest.approx(1e-2)
     assert captured["convhull_formulation"] == "sos2"
+    assert captured["presolve_bt_algo"] == 2
+    assert captured["presolve_bt_time_limit"] == pytest.approx(12.0)
+    assert captured["presolve_bt_mip_time_limit"] == pytest.approx(0.5)
+
+
+def test_partitioned_presolve_obbt_falls_back_without_incumbent(monkeypatch):
+    """Alpine-style mode 2 should use LP OBBT when no feasible incumbent exists."""
+    import discopt._jax.obbt as obbt_mod
+    from discopt._jax.obbt import ObbtResult
+    from discopt.solvers import amp as amp_mod
+
+    m = Model("partitioned_obbt_fallback")
+    x = m.continuous("x", lb=0.0, ub=1.0)
+    m.minimize(x)
+
+    calls = []
+
+    def fake_run_obbt(model, lb, ub, time_limit_per_lp, total_time_limit=None):
+        del model
+        calls.append((time_limit_per_lp, total_time_limit))
+        return ObbtResult(
+            tightened_lb=lb + 0.25,
+            tightened_ub=ub,
+            n_lp_solves=2,
+            n_tightened=1,
+            total_lp_time=0.01,
+        )
+
+    def fail_partitioned(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("partitioned OBBT should not run without an incumbent")
+
+    monkeypatch.setattr(obbt_mod, "run_obbt", fake_run_obbt)
+    monkeypatch.setattr(amp_mod, "_run_partitioned_obbt", fail_partitioned)
+
+    lb, ub, result = amp_mod._run_amp_presolve_bound_tightening(
+        m,
+        SimpleNamespace(monomial=[]),
+        np.array([0.0], dtype=np.float64),
+        np.array([1.0], dtype=np.float64),
+        presolve_bt_algo=2,
+        remaining=10.0,
+        incumbent=None,
+        incumbent_obj=None,
+        n_init_partitions=2,
+        partition_mode="auto",
+        partition_scaling_factor=10.0,
+        disc_abs_width_tol=1e-3,
+        convhull_formulation="disaggregated",
+        convhull_ebd=False,
+        convhull_ebd_encoding="gray",
+        milp_gap_tolerance=None,
+        presolve_bt_time_limit=None,
+        presolve_bt_mip_time_limit=None,
+    )
+
+    np.testing.assert_allclose(lb, np.array([0.25]))
+    np.testing.assert_allclose(ub, np.array([1.0]))
+    assert result.n_tightened == 1
+    assert len(calls) == 1
+    assert calls[0][1] is not None
+    assert 0.0 < calls[0][1] <= 1.0
+
+
+def test_partitioned_presolve_obbt_uses_feasible_initial_incumbent(monkeypatch):
+    """A feasible initial point should seed the partition-aware OBBT path."""
+    from discopt._jax.obbt import ObbtResult
+    from discopt.solvers import amp as amp_mod
+
+    m = Model("partitioned_obbt_incumbent")
+    x = m.continuous("x", lb=0.0, ub=1.0)
+    m.minimize(x)
+
+    class FakeEvaluator:
+        n_constraints = 0
+
+        def evaluate_objective(self, point):
+            return float(point[0])
+
+    incumbent, incumbent_obj = amp_mod._presolve_incumbent_from_initial_point(
+        np.array([0.4], dtype=np.float64),
+        m,
+        FakeEvaluator(),
+        np.array([], dtype=np.float64),
+        np.array([], dtype=np.float64),
+    )
+
+    captured = {}
+
+    def fake_partitioned_obbt(model, terms, flat_lb, flat_ub, incumbent, incumbent_obj, **kwargs):
+        del model, terms, kwargs
+        captured["flat_lb"] = flat_lb.copy()
+        captured["flat_ub"] = flat_ub.copy()
+        captured["incumbent"] = incumbent.copy()
+        captured["incumbent_obj"] = incumbent_obj
+        return ObbtResult(
+            tightened_lb=np.array([0.2], dtype=np.float64),
+            tightened_ub=flat_ub.copy(),
+            n_lp_solves=2,
+            n_tightened=1,
+            total_lp_time=0.02,
+        )
+
+    monkeypatch.setattr(amp_mod, "_run_partitioned_obbt", fake_partitioned_obbt)
+
+    lb, ub, result = amp_mod._run_amp_presolve_bound_tightening(
+        m,
+        SimpleNamespace(monomial=[]),
+        np.array([0.0], dtype=np.float64),
+        np.array([1.0], dtype=np.float64),
+        presolve_bt_algo="incumbent_partitioned",
+        remaining=10.0,
+        incumbent=incumbent,
+        incumbent_obj=incumbent_obj,
+        n_init_partitions=2,
+        partition_mode="auto",
+        partition_scaling_factor=10.0,
+        disc_abs_width_tol=1e-3,
+        convhull_formulation="disaggregated",
+        convhull_ebd=False,
+        convhull_ebd_encoding="gray",
+        milp_gap_tolerance=None,
+        presolve_bt_time_limit=2.0,
+        presolve_bt_mip_time_limit=0.5,
+    )
+
+    np.testing.assert_allclose(captured["incumbent"], np.array([0.4]))
+    assert captured["incumbent_obj"] == pytest.approx(0.4)
+    np.testing.assert_allclose(lb, np.array([0.2]))
+    np.testing.assert_allclose(ub, np.array([1.0]))
+    assert result.n_tightened == 1
+
+
+def test_partitioned_presolve_obbt_runs_on_bilinear_demo():
+    """The real partition-aware OBBT path should solve bounded MILP subproblems."""
+    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt.solvers import amp as amp_mod
+
+    m = _make_obbt_demo()
+    incumbent = np.array([0.5, 0.5], dtype=np.float64)
+    evaluator = NLPEvaluator(m)
+    incumbent_obj = float(evaluator.evaluate_objective(incumbent))
+    terms = classify_nonlinear_terms(m)
+
+    lb, ub, result = amp_mod._run_amp_presolve_bound_tightening(
+        m,
+        terms,
+        np.array([0.0, 0.0], dtype=np.float64),
+        np.array([10.0, 10.0], dtype=np.float64),
+        presolve_bt_algo=2,
+        remaining=5.0,
+        incumbent=incumbent,
+        incumbent_obj=incumbent_obj,
+        n_init_partitions=2,
+        partition_mode="auto",
+        partition_scaling_factor=10.0,
+        disc_abs_width_tol=1e-3,
+        convhull_formulation="disaggregated",
+        convhull_ebd=False,
+        convhull_ebd_encoding="gray",
+        milp_gap_tolerance=None,
+        presolve_bt_time_limit=1.0,
+        presolve_bt_mip_time_limit=0.2,
+    )
+
+    assert result.n_lp_solves == 4
+    assert result.n_tightened > 0
+    assert np.all(lb >= np.array([0.0, 0.0]) - 1e-9)
+    assert np.all(ub <= np.array([10.0, 10.0]) + 1e-9)
+    assert np.all(lb <= ub)
+
+
+def test_partitioned_presolve_obbt_maximize_cutoff_uses_relaxation_objective_space(
+    monkeypatch,
+):
+    """Maximization incumbents should be converted to the relaxation minimization space."""
+    import scipy.sparse as sp
+    from discopt._jax.milp_relaxation import MilpRelaxationModel, MilpRelaxationResult
+    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt.solvers import amp as amp_mod
+
+    m = _make_obbt_demo()
+    incumbent = np.array([0.5, 0.5], dtype=np.float64)
+    incumbent_obj = float(NLPEvaluator(m).evaluate_objective(incumbent))
+    terms = classify_nonlinear_terms(m)
+    captured = {}
+
+    def fake_solve(self, time_limit=None, gap_tolerance=1e-4):
+        del time_limit, gap_tolerance
+        if "cutoff_row" not in captured:
+            A_ub = self._A_ub
+            row = A_ub[-1].toarray().ravel() if sp.issparse(A_ub) else np.asarray(A_ub[-1])
+            captured["cutoff_row"] = row
+            captured["cutoff_rhs"] = float(self._b_ub[-1])
+        return MilpRelaxationResult(status="time_limit")
+
+    monkeypatch.setattr(MilpRelaxationModel, "solve", fake_solve)
+
+    amp_mod._run_partitioned_obbt(
+        m,
+        terms,
+        np.array([0.0, 0.0], dtype=np.float64),
+        np.array([10.0, 10.0], dtype=np.float64),
+        incumbent,
+        incumbent_obj,
+        partition_mode="auto",
+        n_init_partitions=2,
+        partition_scaling_factor=10.0,
+        disc_abs_width_tol=1e-3,
+        convhull_formulation="disaggregated",
+        convhull_ebd=False,
+        convhull_ebd_encoding="gray",
+        total_time_limit=1.0,
+        time_limit_per_mip=0.1,
+        gap_tolerance=1e-4,
+    )
+
+    nonzero_cutoff = captured["cutoff_row"][np.abs(captured["cutoff_row"]) > 1e-12]
+    np.testing.assert_allclose(nonzero_cutoff, np.array([-1.0]))
+    expected_rhs = -incumbent_obj + 1e-8 * max(1.0, abs(incumbent_obj))
+    assert captured["cutoff_rhs"] == pytest.approx(expected_rhs)
 
 
 def test_amp_accepts_feasible_start_as_incumbent(monkeypatch):
