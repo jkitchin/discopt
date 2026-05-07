@@ -28,12 +28,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install system dependencies (Ipopt)
+        run: |
+          sudo apt-get update && sudo apt-get install -y coinor-libipopt-dev liblapack-dev libblas-dev gfortran
       - name: Install Python dependencies
         run: |
           python -m venv .venv
           source .venv/bin/activate
           pip install maturin
-          pip install jax jaxlib numpy scipy highspy pytest pytest-timeout "ruff==0.14.6" mypy
+          pip install jax jaxlib numpy scipy highspy cyipopt pytest pytest-timeout "ruff==0.14.6" mypy
           maturin develop
       - name: Lint
         run: |

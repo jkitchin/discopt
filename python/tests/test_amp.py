@@ -42,6 +42,363 @@ def test_amp_integration_suite_is_opt_in():
     assert "pytest.mark.amp_benchmark" in text
 
 
+@pytest.mark.requires_cyipopt
+def test_fast_amp_environment_includes_working_cyipopt():
+    """The fast AMP/CI environment should include a usable Ipopt Python backend."""
+    import cyipopt  # noqa: F401
+    from discopt.solvers import SolveStatus
+    from discopt.solvers.nlp_ipopt import solve_nlp_from_model
+
+    m = Model("cyipopt_fast_smoke")
+    x = m.continuous("x", lb=-2.0, ub=2.0)
+    m.minimize((x - 0.25) ** 2)
+
+    result = solve_nlp_from_model(
+        m,
+        x0=np.array([1.5], dtype=np.float64),
+        options={"print_level": 0, "max_iter": 50},
+    )
+
+    assert result.status == SolveStatus.OPTIMAL
+    assert result.objective == pytest.approx(0.0, abs=1e-7)
+    assert float(result.x[0]) == pytest.approx(0.25, abs=1e-5)
+
+
+def test_amp_helper_defaults_cover_semifinite_domains():
+    """AMP fallback starts should stay finite on semi-infinite NLP boxes."""
+    from discopt.solvers import amp as amp_mod
+
+    lb = np.array([-1e20, 2.0, -1e20, 1.0], dtype=np.float64)
+    ub = np.array([1e20, 1e20, -3.0, 5.0], dtype=np.float64)
+
+    start = amp_mod._default_nlp_start(lb, ub)
+    np.testing.assert_allclose(start, np.array([0.0, 2.0, -3.0, 3.0]))
+
+    recovery_starts = amp_mod._continuous_recovery_starts(
+        np.array([-1e20, 2.0], dtype=np.float64),
+        np.array([1e20, 1e20], dtype=np.float64),
+        initial_point=np.array([0.5, 10.0], dtype=np.float64),
+    )
+
+    assert len(recovery_starts) == 3
+    np.testing.assert_allclose(recovery_starts[0], np.array([0.5, 10.0]))
+    np.testing.assert_allclose(recovery_starts[1], np.array([0.0, 2.0]))
+    np.testing.assert_allclose(recovery_starts[2], np.array([1.0, 2.0]))
+
+
+def test_amp_normalizes_initial_point_length_and_bounds():
+    """Initial AMP points should be length-checked and clipped to tightened bounds."""
+    from discopt.solvers import amp as amp_mod
+
+    lb = np.array([0.0, -1.0], dtype=np.float64)
+    ub = np.array([1.0, 2.0], dtype=np.float64)
+
+    clipped = amp_mod._normalize_initial_point(np.array([-3.0, 4.0]), 2, lb, ub)
+
+    np.testing.assert_allclose(clipped, np.array([0.0, 2.0]))
+    with pytest.raises(ValueError, match="expected 2"):
+        amp_mod._normalize_initial_point(np.array([1.0]), 2, lb, ub)
+
+
+def test_solve_nlp_subproblem_retries_ipopt_and_restores_bounds(monkeypatch):
+    """AMP local NLP recovery should retry Ipopt and restore temporary fixed bounds."""
+    import discopt._jax.ipm as ipm_mod
+    import discopt.solvers.nlp_ipopt as ipopt_mod
+    from discopt.solvers import NLPResult, SolveStatus
+    from discopt.solvers import amp as amp_mod
+
+    m = Model("nlp_retry")
+    x = m.continuous("x", lb=-10.0, ub=10.0)
+    m.minimize((x - 3.0) ** 2)
+    original_lb = x.lb.copy()
+    original_ub = x.ub.copy()
+
+    class FakeEvaluator:
+        _model = m
+        _obj_fn = object()
+
+        def evaluate_objective(self, x_flat):
+            return float((x_flat[0] - 3.0) ** 2)
+
+    calls = []
+
+    def fake_ipm(evaluator, x0, options):
+        del evaluator, x0, options
+        calls.append("ipm")
+        return NLPResult(status=SolveStatus.ERROR)
+
+    def fake_ipopt(evaluator, x0, options):
+        del evaluator, options
+        calls.append("ipopt")
+        return NLPResult(status=SolveStatus.OPTIMAL, x=np.array([3.0]), objective=0.0)
+
+    monkeypatch.setattr(amp_mod, "_has_cyipopt", lambda: True)
+    monkeypatch.setattr(ipm_mod, "solve_nlp_ipm", fake_ipm)
+    monkeypatch.setattr(ipopt_mod, "solve_nlp", fake_ipopt)
+
+    x_opt, obj = amp_mod._solve_nlp_subproblem(
+        FakeEvaluator(),
+        x0=np.array([99.0], dtype=np.float64),
+        lb=np.array([1.0], dtype=np.float64),
+        ub=np.array([5.0], dtype=np.float64),
+        nlp_solver="ipm",
+        time_limit=10.0,
+    )
+
+    assert calls == ["ipm", "ipopt"]
+    np.testing.assert_allclose(x_opt, np.array([3.0]))
+    assert obj == pytest.approx(0.0)
+    np.testing.assert_allclose(x.lb, original_lb)
+    np.testing.assert_allclose(x.ub, original_ub)
+
+
+def test_solve_nlp_subproblem_respects_expired_time_limit():
+    """Expired local NLP budgets should return immediately."""
+    from discopt.solvers import amp as amp_mod
+
+    x_opt, obj = amp_mod._solve_nlp_subproblem(
+        evaluator=object(),
+        x0=np.array([0.0], dtype=np.float64),
+        lb=np.array([0.0], dtype=np.float64),
+        ub=np.array([1.0], dtype=np.float64),
+        time_limit=0.0,
+    )
+
+    assert x_opt is None
+    assert obj is None
+
+
+def test_recover_pure_continuous_solution_uses_best_start_and_maximize_sign(monkeypatch):
+    """Pure-continuous recovery should keep the best local NLP start."""
+    from discopt.solvers import amp as amp_mod
+
+    m = Model("continuous_recovery")
+    x = m.continuous("x", lb=0.0, ub=2.0)
+    m.maximize(x)
+    starts = [
+        np.array([0.0], dtype=np.float64),
+        np.array([1.0], dtype=np.float64),
+        np.array([2.0], dtype=np.float64),
+    ]
+    objectives = {0.0: 5.0, 1.0: 2.0, 2.0: 4.0}
+
+    monkeypatch.setattr(
+        amp_mod,
+        "_continuous_recovery_starts",
+        lambda flat_lb, flat_ub, initial_point=None: [start.copy() for start in starts],
+    )
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_nlp_subproblem",
+        lambda evaluator, x0, lb, ub, nlp_solver, time_limit=None: (
+            x0.copy(),
+            objectives[float(x0[0])],
+        ),
+    )
+
+    result = amp_mod._recover_pure_continuous_solution(
+        m,
+        evaluator=object(),
+        flat_lb=np.array([0.0], dtype=np.float64),
+        flat_ub=np.array([2.0], dtype=np.float64),
+        nlp_solver="ipm",
+        t_start=amp_mod.time.perf_counter(),
+        time_limit=10.0,
+    )
+
+    assert result is not None
+    assert result.status == "feasible"
+    assert result.objective == pytest.approx(-2.0)
+    assert float(result.x["x"]) == pytest.approx(1.0)
+
+
+def test_small_integer_domain_size_edges():
+    """Small integer fallback should reject absent, empty, and oversized domains."""
+    from discopt.solvers import amp as amp_mod
+
+    continuous = Model("no_integer")
+    continuous.continuous("x", lb=0, ub=1)
+    assert amp_mod._small_integer_domain_size(continuous, max_assignments=4) is None
+
+    empty = Model("empty_integer_domain")
+    empty.integer("y", lb=2, ub=1)
+    assert amp_mod._small_integer_domain_size(empty, max_assignments=4) == 0
+
+    oversized = Model("oversized_integer_domain")
+    oversized.integer("z", lb=0, ub=10)
+    assert amp_mod._small_integer_domain_size(oversized, max_assignments=4) is None
+
+
+def test_amp_small_helpers_cover_aliases_gaps_and_pruning():
+    """Small AMP helpers should preserve public aliases and edge-case math."""
+    from discopt.solvers import amp as amp_mod
+
+    assert amp_mod._normalize_partition_method("auto", None) == "auto"
+    assert amp_mod._normalize_partition_method("auto", "all") == "max_cover"
+    assert amp_mod._normalize_partition_method("auto", "adaptive") == "adaptive_vertex_cover"
+    assert amp_mod._normalize_partition_method("auto", 3) == "adaptive_vertex_cover"
+
+    with pytest.raises(ValueError, match="Unsupported disc_var_pick string"):
+        amp_mod._normalize_partition_method("auto", "missing")
+    with pytest.raises(ValueError, match="Unsupported disc_var_pick integer"):
+        amp_mod._normalize_partition_method("auto", 9)
+
+    assert amp_mod._default_milp_time_limit(remaining=10.0, iteration=1, max_iter=5) == 6.0
+    assert amp_mod._default_obbt_time_limit_per_lp(remaining=-1.0, n_orig=2) == 0.0
+    assert amp_mod._default_obbt_time_limit_per_lp(remaining=10.0, n_orig=2) == pytest.approx(0.25)
+    assert amp_mod._compute_relative_gap(None, 1.0) is None
+    assert amp_mod._compute_relative_gap(-1.0, 1.0) is None
+    assert amp_mod._compute_relative_gap(1.0, 0.0) is None
+    assert amp_mod._compute_relative_gap(2.0, -4.0) == pytest.approx(0.5)
+
+    cuts = ["old", "keep1", "keep2"]
+    amp_mod._prune_oa_cuts(cuts, max_cuts=2)
+    assert cuts == ["keep1", "keep2"]
+
+
+def test_amp_constraint_helpers_cover_success_and_failure(caplog):
+    """Constraint helper failures should reject points instead of accepting them."""
+    from discopt.solvers import amp as amp_mod
+
+    no_constraints = Model("no_constraints")
+    x = no_constraints.continuous("x", lb=0, ub=1)
+    no_constraints.minimize(x)
+    assert amp_mod._check_constraints(np.array([0.5]), no_constraints)
+
+    constrained = Model("constrained_check")
+    y = constrained.continuous("y", lb=0, ub=1)
+    constrained.subject_to(y >= 0.25)
+    constrained.minimize(y)
+    assert amp_mod._check_constraints(np.array([0.5]), constrained)
+    assert not amp_mod._check_constraints(np.array([0.0]), constrained)
+
+    class BadEvaluator:
+        n_constraints = 1
+
+        def evaluate_constraints(self, x_flat):
+            del x_flat
+            raise RuntimeError("boom")
+
+    assert not amp_mod._check_constraints_with_evaluator(
+        BadEvaluator(),
+        np.array([0.0]),
+        np.array([0.0]),
+        np.array([1.0]),
+    )
+    assert "constraint evaluation failed" in caplog.text
+
+
+def test_select_best_nlp_candidate_rejects_infeasible_and_expired(monkeypatch):
+    """Candidate selection should honor deadlines and constraint feasibility."""
+    from discopt.solvers import amp as amp_mod
+
+    m = Model("candidate_constraints")
+    m.continuous("x", lb=0, ub=1)
+
+    class InfeasibleEvaluator:
+        n_constraints = 1
+
+        def evaluate_constraints(self, x_flat):
+            del x_flat
+            return np.array([2.0], dtype=np.float64)
+
+    monkeypatch.setattr(
+        amp_mod,
+        "_build_fixed_integer_bounds",
+        lambda x0, model, flat_lb, flat_ub: (flat_lb.copy(), flat_ub.copy()),
+    )
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_nlp_subproblem",
+        lambda evaluator, x0, lb, ub, nlp_solver, time_limit=None: (
+            x0.copy(),
+            0.0,
+        ),
+    )
+
+    best_x, best_obj = amp_mod._select_best_nlp_candidate(
+        [np.array([0.5], dtype=np.float64)],
+        m,
+        evaluator=InfeasibleEvaluator(),
+        flat_lb=np.array([0.0], dtype=np.float64),
+        flat_ub=np.array([1.0], dtype=np.float64),
+        constraint_lb=np.array([0.0], dtype=np.float64),
+        constraint_ub=np.array([1.0], dtype=np.float64),
+        nlp_solver="ipm",
+    )
+    assert best_x is None
+    assert best_obj is None
+
+    expired_x, expired_obj = amp_mod._select_best_nlp_candidate(
+        [np.array([0.5], dtype=np.float64)],
+        m,
+        evaluator=InfeasibleEvaluator(),
+        flat_lb=np.array([0.0], dtype=np.float64),
+        flat_ub=np.array([1.0], dtype=np.float64),
+        constraint_lb=np.array([0.0], dtype=np.float64),
+        constraint_ub=np.array([1.0], dtype=np.float64),
+        nlp_solver="ipm",
+        deadline=amp_mod.time.perf_counter() - 1.0,
+    )
+    assert expired_x is None
+    assert expired_obj is None
+
+
+def test_solve_amp_validates_public_options_before_solve():
+    """Public AMP validation should fail before expensive solver work starts."""
+    from discopt.solvers import amp as amp_mod
+
+    m = Model("amp_validation")
+    x = m.continuous("x", lb=0, ub=1)
+    m.minimize(x)
+
+    with pytest.raises(ValueError, match="partition_scaling_factor"):
+        amp_mod.solve_amp(m, partition_scaling_factor=1.0, skip_convex_check=True)
+    with pytest.raises(ValueError, match="disc_add_partition_method"):
+        amp_mod.solve_amp(m, disc_add_partition_method="bad", skip_convex_check=True)
+    with pytest.raises(ValueError, match="convhull_ebd requires"):
+        amp_mod.solve_amp(
+            m,
+            convhull_ebd=True,
+            convhull_formulation="facet",
+            skip_convex_check=True,
+        )
+
+
+def test_solve_amp_convex_model_delegates_to_continuous_solver(monkeypatch):
+    """Convex pure-continuous models should use the single-NLP fast path."""
+    import discopt._jax.convexity as convexity_mod
+    import discopt.solver as solver_mod
+    from discopt.solvers import amp as amp_mod
+
+    m = Model("convex_fast_path")
+    x = m.continuous("x", lb=0.0, ub=1.0)
+    m.minimize((x - 0.25) ** 2)
+    captured = {}
+
+    monkeypatch.setattr(convexity_mod, "classify_model", lambda model, use_certificate: (True, {}))
+
+    def fake_solve_continuous(
+        model,
+        time_limit,
+        ipopt_options,
+        t_start,
+        nlp_solver,
+        initial_point,
+    ):
+        del model, time_limit, ipopt_options, t_start, nlp_solver
+        captured["initial_point"] = initial_point.copy()
+        return SolveResult(status="optimal", objective=0.0, x={"x": np.array(0.25)})
+
+    monkeypatch.setattr(solver_mod, "_solve_continuous", fake_solve_continuous)
+
+    result = amp_mod.solve_amp(m, initial_point=np.array([2.0]), time_limit=1.0)
+
+    assert result.status == "optimal"
+    assert result.convex_fast_path is True
+    np.testing.assert_allclose(captured["initial_point"], np.array([1.0]))
+
+
 def test_solve_model_forwards_alpine_amp_aliases(monkeypatch):
     """solve_model should pass Alpine-style AMP aliases through to solve_amp."""
     from discopt.solver import solve_model
@@ -204,6 +561,34 @@ def test_integer_rounding_candidates_enumerate_small_finite_domains():
 
     assert len(candidates) == 25
     assert (3.0, 2.0) in rounded
+
+
+def test_integer_rounding_candidates_cover_continuous_and_large_domains():
+    """Rounding helpers should handle continuous models and large integer boxes."""
+    from discopt.solvers import amp as amp_mod
+
+    continuous = Model("continuous_rounding")
+    continuous.continuous("x", lb=0, ub=1)
+    base = np.array([0.25], dtype=np.float64)
+    continuous_candidates = amp_mod._integer_rounding_candidates(base, continuous)
+
+    assert len(continuous_candidates) == 1
+    np.testing.assert_allclose(continuous_candidates[0], base)
+
+    large = Model("large_integer_rounding")
+    large.integer("y", lb=0, ub=10, shape=(3,))
+    large_candidates = amp_mod._integer_rounding_candidates(
+        np.array([5.2, 5.2, 5.2], dtype=np.float64),
+        large,
+        max_candidates=4,
+    )
+
+    assert len(large_candidates) == 4
+    np.testing.assert_allclose(large_candidates[0], np.array([5.0, 5.0, 5.0]))
+    np.testing.assert_allclose(
+        amp_mod._round_integers(np.array([2.7, 3.2, 4.6]), large),
+        np.array([3.0, 3.0, 5.0]),
+    )
 
 
 def test_build_fixed_integer_bounds_clamps_to_integer_domain():
