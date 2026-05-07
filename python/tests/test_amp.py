@@ -472,9 +472,9 @@ def test_partitioned_presolve_obbt_falls_back_without_incumbent(monkeypatch):
 
     calls = []
 
-    def fake_run_obbt(model, lb, ub, time_limit_per_lp):
+    def fake_run_obbt(model, lb, ub, time_limit_per_lp, total_time_limit=None):
         del model
-        calls.append(time_limit_per_lp)
+        calls.append((time_limit_per_lp, total_time_limit))
         return ObbtResult(
             tightened_lb=lb + 0.25,
             tightened_ub=ub,
@@ -515,6 +515,8 @@ def test_partitioned_presolve_obbt_falls_back_without_incumbent(monkeypatch):
     np.testing.assert_allclose(ub, np.array([1.0]))
     assert result.n_tightened == 1
     assert len(calls) == 1
+    assert calls[0][1] is not None
+    assert 0.0 < calls[0][1] <= 1.0
 
 
 def test_partitioned_presolve_obbt_uses_feasible_initial_incumbent(monkeypatch):
@@ -624,6 +626,58 @@ def test_partitioned_presolve_obbt_runs_on_bilinear_demo():
     assert np.all(lb >= np.array([0.0, 0.0]) - 1e-9)
     assert np.all(ub <= np.array([10.0, 10.0]) + 1e-9)
     assert np.all(lb <= ub)
+
+
+def test_partitioned_presolve_obbt_maximize_cutoff_uses_relaxation_objective_space(
+    monkeypatch,
+):
+    """Maximization incumbents should be converted to the relaxation minimization space."""
+    import scipy.sparse as sp
+    from discopt._jax.milp_relaxation import MilpRelaxationModel, MilpRelaxationResult
+    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt.solvers import amp as amp_mod
+
+    m = _make_obbt_demo()
+    incumbent = np.array([0.5, 0.5], dtype=np.float64)
+    incumbent_obj = float(NLPEvaluator(m).evaluate_objective(incumbent))
+    terms = classify_nonlinear_terms(m)
+    captured = {}
+
+    def fake_solve(self, time_limit=None, gap_tolerance=1e-4):
+        del time_limit, gap_tolerance
+        if "cutoff_row" not in captured:
+            A_ub = self._A_ub
+            row = A_ub[-1].toarray().ravel() if sp.issparse(A_ub) else np.asarray(A_ub[-1])
+            captured["cutoff_row"] = row
+            captured["cutoff_rhs"] = float(self._b_ub[-1])
+        return MilpRelaxationResult(status="time_limit")
+
+    monkeypatch.setattr(MilpRelaxationModel, "solve", fake_solve)
+
+    amp_mod._run_partitioned_obbt(
+        m,
+        terms,
+        np.array([0.0, 0.0], dtype=np.float64),
+        np.array([10.0, 10.0], dtype=np.float64),
+        incumbent,
+        incumbent_obj,
+        partition_mode="auto",
+        n_init_partitions=2,
+        partition_scaling_factor=10.0,
+        disc_abs_width_tol=1e-3,
+        convhull_formulation="disaggregated",
+        convhull_ebd=False,
+        convhull_ebd_encoding="gray",
+        total_time_limit=1.0,
+        time_limit_per_mip=0.1,
+        gap_tolerance=1e-4,
+    )
+
+    nonzero_cutoff = captured["cutoff_row"][np.abs(captured["cutoff_row"]) > 1e-12]
+    np.testing.assert_allclose(nonzero_cutoff, np.array([-1.0]))
+    expected_rhs = -incumbent_obj + 1e-8 * max(1.0, abs(incumbent_obj))
+    assert captured["cutoff_rhs"] == pytest.approx(expected_rhs)
 
 
 def test_amp_accepts_feasible_start_as_incumbent(monkeypatch):

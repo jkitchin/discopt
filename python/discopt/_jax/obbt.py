@@ -10,6 +10,7 @@ Uses the HiGHS LP solver with warm-starting for efficiency.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -349,6 +350,7 @@ def run_obbt(
     ub: Optional[np.ndarray] = None,
     min_width: float = 1e-6,
     time_limit_per_lp: Optional[float] = None,
+    total_time_limit: Optional[float] = None,
     incumbent_cutoff: Optional[float] = None,
 ) -> ObbtResult:
     """Run OBBT to tighten variable bounds.
@@ -368,6 +370,7 @@ def run_obbt(
         ub: Initial upper bounds. If None, uses model variable bounds.
         min_width: Skip variables whose bound width is below this threshold.
         time_limit_per_lp: Time limit per LP solve in seconds.
+        total_time_limit: Wall-clock limit for the whole OBBT pass in seconds.
         incumbent_cutoff: If provided, adds ``c'x <= incumbent_cutoff``
             as an additional inequality constraint (using linear objective
             coefficients). Only effective when the objective is linear.
@@ -375,6 +378,9 @@ def run_obbt(
     Returns:
         ObbtResult with tightened bounds and statistics.
     """
+    if total_time_limit is not None and total_time_limit < 0.0:
+        raise ValueError("total_time_limit must be non-negative")
+
     model_lb, model_ub = _get_var_bounds(model)
     if lb is None:
         lb = model_lb.copy()
@@ -429,10 +435,30 @@ def run_obbt(
     n_tightened = 0
     total_lp_time = 0.0
     warm_basis = None
+    deadline = time.perf_counter() + total_time_limit if total_time_limit is not None else None
 
     bounds_list = [(float(lb[i]), float(ub[i])) for i in range(n_vars)]
 
+    def _remaining_time() -> Optional[float]:
+        if deadline is None:
+            return None
+        return max(0.0, deadline - time.perf_counter())
+
+    def _lp_time_limit() -> Optional[float]:
+        remaining = _remaining_time()
+        if remaining is not None and remaining <= 0.0:
+            return None
+        if remaining is None:
+            return time_limit_per_lp
+        if time_limit_per_lp is None:
+            return remaining
+        return min(time_limit_per_lp, remaining)
+
     for var_idx in candidates:
+        lp_time_limit = _lp_time_limit()
+        if lp_time_limit is None and deadline is not None:
+            break
+
         # Minimize x_i
         c = np.zeros(n_vars, dtype=np.float64)
         c[var_idx] = 1.0
@@ -445,7 +471,7 @@ def run_obbt(
             b_eq=b_eq,
             bounds=bounds_list,
             warm_basis=warm_basis,
-            time_limit=time_limit_per_lp,
+            time_limit=lp_time_limit,
         )
         n_lp_solves += 1
         total_lp_time += result.wall_time
@@ -459,6 +485,10 @@ def run_obbt(
                 n_tightened += 1
 
         # Maximize x_i (minimize -x_i)
+        lp_time_limit = _lp_time_limit()
+        if lp_time_limit is None and deadline is not None:
+            break
+
         c[var_idx] = -1.0
 
         result = solve_lp(
@@ -469,7 +499,7 @@ def run_obbt(
             b_eq=b_eq,
             bounds=bounds_list,
             warm_basis=warm_basis,
-            time_limit=time_limit_per_lp,
+            time_limit=lp_time_limit,
         )
         n_lp_solves += 1
         total_lp_time += result.wall_time

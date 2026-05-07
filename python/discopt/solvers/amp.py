@@ -987,8 +987,11 @@ def _run_partitioned_obbt(
     A_ub = base_relaxation._A_ub
     b_ub = base_relaxation._b_ub
     if base_relaxation._objective_bound_valid:
-        cutoff_rhs = incumbent_obj - base_relaxation._obj_offset
-        cutoff_rhs += 1e-8 * max(1.0, abs(float(incumbent_obj)))
+        relaxation_incumbent_obj = float(incumbent_obj)
+        if model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE:
+            relaxation_incumbent_obj = -relaxation_incumbent_obj
+        cutoff_rhs = relaxation_incumbent_obj - base_relaxation._obj_offset
+        cutoff_rhs += 1e-8 * max(1.0, abs(relaxation_incumbent_obj))
         A_ub, b_ub = _append_upper_bound_constraint(
             A_ub,
             b_ub,
@@ -1120,21 +1123,29 @@ def _run_amp_presolve_bound_tightening(
         logger.info("AMP: skipping OBBT presolve because no wall-clock budget remains")
         return flat_lb, flat_ub, None
 
+    deadline = time.perf_counter() + total_budget
+
     if algo == "incumbent_partitioned" and (incumbent is None or incumbent_obj is None):
         logger.info("AMP: no feasible incumbent for partitioned OBBT; falling back to LP OBBT")
         algo = "lp"
 
     if algo == "lp":
+        lp_budget = _remaining_wall_time(deadline)
         result = run_obbt(
             model,
             lb=flat_lb.copy(),
             ub=flat_ub.copy(),
             time_limit_per_lp=subproblem_budget,
+            total_time_limit=lp_budget,
         )
         return result.tightened_lb, result.tightened_ub, result
 
     assert incumbent is not None
     assert incumbent_obj is not None
+    partitioned_budget = _remaining_wall_time(deadline)
+    if partitioned_budget is None or partitioned_budget <= 0.0:
+        logger.info("AMP: skipping partitioned OBBT because no wall-clock budget remains")
+        return flat_lb, flat_ub, None
     try:
         result = _run_partitioned_obbt(
             model,
@@ -1150,7 +1161,7 @@ def _run_amp_presolve_bound_tightening(
             convhull_formulation=convhull_formulation,
             convhull_ebd=convhull_ebd,
             convhull_ebd_encoding=convhull_ebd_encoding,
-            total_time_limit=total_budget,
+            total_time_limit=partitioned_budget,
             time_limit_per_mip=subproblem_budget,
             gap_tolerance=milp_gap_tolerance if milp_gap_tolerance is not None else 1e-4,
         )
@@ -1159,11 +1170,13 @@ def _run_amp_presolve_bound_tightening(
             "AMP: partitioned OBBT presolve failed; falling back to LP OBBT: %s",
             err,
         )
+        lp_budget = _remaining_wall_time(deadline)
         result = run_obbt(
             model,
             lb=flat_lb.copy(),
             ub=flat_ub.copy(),
             time_limit_per_lp=subproblem_budget,
+            total_time_limit=lp_budget,
         )
     return result.tightened_lb, result.tightened_ub, result
 
