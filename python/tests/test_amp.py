@@ -2210,10 +2210,6 @@ class TestCurrentCodeWeaknesses:
                 1,
             ),
         )
-        monkeypatch.setattr(
-            amp_mod, "_recover_pure_continuous_solution", lambda *args, **kwargs: None
-        )
-
         result = m.solve(
             solver="amp",
             initial_solution={x: 0.5},

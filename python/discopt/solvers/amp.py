@@ -265,8 +265,15 @@ def _solve_nlp_subproblem(
         from discopt.solvers import SolveStatus
 
         if result is not None and result.status == SolveStatus.OPTIMAL:
-            obj = float(evaluator.evaluate_objective(result.x))
-            return result.x, obj
+            x_opt = np.asarray(result.x, dtype=np.float64)
+            if not np.all(np.isfinite(x_opt)):
+                logger.debug("AMP NLP subproblem returned a non-finite solution; rejecting it")
+                return None, None
+            obj = float(evaluator.evaluate_objective(x_opt))
+            if not np.isfinite(obj):
+                logger.debug("AMP NLP subproblem returned a non-finite objective; rejecting it")
+                return None, None
+            return x_opt, obj
     except Exception as e:
         logger.debug("AMP NLP subproblem failed: %s", e)
     return None, None
