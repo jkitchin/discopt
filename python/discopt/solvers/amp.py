@@ -37,9 +37,19 @@ from discopt._jax.nonlinear_bound_tightening import (
     tighten_nonlinear_bounds,
 )
 from discopt.modeling.core import (
+    BinaryOp,
+    Constant,
+    Expression,
+    FunctionCall,
+    IndexExpression,
+    MatMulExpression,
     Model,
     ObjectiveSense,
     SolveResult,
+    SumExpression,
+    SumOverExpression,
+    UnaryOp,
+    Variable,
     VarType,
 )
 
@@ -796,6 +806,134 @@ def _normalize_partition_var_indices(
     return normalized
 
 
+def _compute_var_offset(var: Variable, model: Model) -> int:
+    """Return a variable's start index in the flattened model vector."""
+    offset = 0
+    for existing in model._variables[: var._index]:
+        offset += existing.size
+    return offset
+
+
+def _flat_index_from_expr(expr: Expression, model: Model) -> int | None:
+    """Return the flat index for a scalar variable reference, if any."""
+    if isinstance(expr, Variable):
+        if expr.size == 1:
+            return _compute_var_offset(expr, model)
+        return None
+    if isinstance(expr, IndexExpression) and isinstance(expr.base, Variable):
+        base_off = _compute_var_offset(expr.base, model)
+        idx = expr.index
+        if isinstance(idx, int):
+            return base_off + idx
+        if isinstance(idx, tuple) and len(idx) == 1 and isinstance(idx[0], int):
+            return base_off + idx[0]
+    return None
+
+
+def _collect_product_factor_indices(expr: Expression, model: Model) -> list[int] | None:
+    """Return flat variable factors for a pure product tree, ignoring constants."""
+    indices: list[int] = []
+
+    def _visit(node: Expression) -> bool:
+        if isinstance(node, BinaryOp) and node.op == "*":
+            return _visit(node.left) and _visit(node.right)
+        flat_idx = _flat_index_from_expr(node, model)
+        if flat_idx is not None:
+            indices.append(flat_idx)
+            return True
+        return isinstance(node, Constant)
+
+    if _visit(expr) and len(indices) >= 2:
+        return indices
+    return None
+
+
+def _square_monomial_vars_in_expr(expr: Expression, model: Model) -> set[int]:
+    """Collect variables that appear as square monomial terms in an expression."""
+    square_vars: set[int] = set()
+
+    def _visit(node: Expression) -> None:
+        if isinstance(node, (Constant, Variable)):
+            return
+        if isinstance(node, IndexExpression):
+            if not isinstance(node.base, Variable):
+                _visit(node.base)
+            return
+        if isinstance(node, BinaryOp):
+            if node.op == "**":
+                flat_idx = _flat_index_from_expr(node.left, model)
+                if flat_idx is not None and isinstance(node.right, Constant):
+                    exp_val = float(node.right.value)
+                    if exp_val == 2.0:
+                        square_vars.add(flat_idx)
+                        return
+            if node.op == "*":
+                factors = _collect_product_factor_indices(node, model)
+                if factors is not None:
+                    counts = {idx: factors.count(idx) for idx in set(factors)}
+                    if len(counts) == 1 and next(iter(counts.values())) == 2:
+                        square_vars.add(next(iter(counts)))
+                        return
+            _visit(node.left)
+            _visit(node.right)
+            return
+        if isinstance(node, UnaryOp):
+            _visit(node.operand)
+            return
+        if isinstance(node, FunctionCall):
+            for arg in node.args:
+                _visit(arg)
+            return
+        if isinstance(node, MatMulExpression):
+            _visit(node.left)
+            _visit(node.right)
+            return
+        if isinstance(node, SumExpression):
+            _visit(node.operand)
+            return
+        if isinstance(node, SumOverExpression):
+            for term in node.terms:
+                _visit(term)
+
+    _visit(expr)
+    return square_vars
+
+
+def _equality_square_monomial_partition_candidates(model: Model, terms: Any) -> list[int]:
+    """Select square monomials from equality balances for AMP refinement.
+
+    Weymouth constraints have the form ``f^2 = C * (p_in^2 - p_out^2)``:
+    multiple square monomials coupled by one equality.  Partitioning those
+    variables lets the monomial tangent cuts adapt around the MILP point without
+    making every monomial in every model a partition candidate.
+    """
+    known_squares = {
+        int(var_idx) for var_idx, exp in getattr(terms, "monomial", []) if int(exp) == 2
+    }
+    if not known_squares:
+        return []
+
+    candidates: set[int] = set()
+    for constraint in model._constraints:
+        if constraint.sense != "==":
+            continue
+        square_vars = _square_monomial_vars_in_expr(constraint.body, model) & known_squares
+        if len(square_vars) >= 2:
+            candidates.update(square_vars)
+    return sorted(candidates)
+
+
+def _merge_partition_vars(selected: list[int], extra: list[int]) -> list[int]:
+    """Append extra partition variables without reordering the selected prefix."""
+    merged: list[int] = []
+    seen: set[int] = set()
+    for idx in itertools.chain(selected, extra):
+        if idx not in seen:
+            seen.add(idx)
+            merged.append(idx)
+    return merged
+
+
 def _select_partition_vars_with_hook(
     terms,
     *,
@@ -1080,6 +1218,11 @@ def _run_partitioned_obbt(
             "incumbent_objective": incumbent_obj,
         },
     )
+    if disc_var_pick_hook is None:
+        part_vars = _merge_partition_vars(
+            part_vars,
+            _equality_square_monomial_partition_candidates(model, terms),
+        )
     if not part_vars and terms.monomial:
         part_vars = sorted(set(var_idx for var_idx, _ in terms.monomial))
 
@@ -1661,6 +1804,7 @@ def solve_amp(
         initial_point_arr = np.clip(initial_point_arr, flat_lb, flat_ub)
 
     # ── Select partition variables ───────────────────────────────────────────
+    square_monomial_part_vars: list[int] = []
     if apply_partitioning:
         part_vars = _select_partition_vars_with_hook(
             terms,
@@ -1682,6 +1826,12 @@ def solve_amp(
                 "distance": None,
             },
         )
+        if disc_var_pick_hook is None:
+            square_monomial_part_vars = _equality_square_monomial_partition_candidates(
+                model,
+                terms,
+            )
+            part_vars = _merge_partition_vars(part_vars, square_monomial_part_vars)
     else:
         part_vars = []
 
@@ -1987,9 +2137,11 @@ def solve_amp(
             and incumbent is not None
             and milp_result.x is not None
         ):
-            distances = {
-                i: abs(float(incumbent[i]) - float(x0[i])) for i in terms.partition_candidates
-            }
+            distance_candidates = _merge_partition_vars(
+                list(terms.partition_candidates),
+                square_monomial_part_vars,
+            )
+            distances = {i: abs(float(incumbent[i]) - float(x0[i])) for i in distance_candidates}
             adaptive_method = (
                 "adaptive_vertex_cover" if disc_var_pick_hook is None else partition_mode
             )
@@ -2015,6 +2167,8 @@ def solve_amp(
                     "part_vars": list(part_vars),
                 },
             )
+            if disc_var_pick_hook is None:
+                adaptive_vars = _merge_partition_vars(adaptive_vars, square_monomial_part_vars)
             if adaptive_vars or disc_var_pick_hook is not None:
                 should_update_adaptive_vars = set(adaptive_vars) != set(part_vars)
             else:
