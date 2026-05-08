@@ -371,6 +371,8 @@ class TestSequentialBatch:
             assert r.data_collected is not None
             assert len(np.atleast_1d(r.data_collected["y"])) == 2
 
+    @pytest.mark.slow
+    @pytest.mark.integration
     def test_single_experiment_per_round_preserves_behavior(self):
         exp = ExpDecayExperiment()
 

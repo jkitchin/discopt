@@ -76,12 +76,16 @@ class TestLangmuirSaturatedRegime:
         }
         return exp, data, qm_true, K_true
 
+    @pytest.mark.slow
+    @pytest.mark.integration
     def test_estimate_recovers_truth(self):
         exp, data, qm_true, K_true = self._data()
         est = estimate_parameters(exp, data, initial_guess={"qm": 4.0, "K": 0.5})
         assert est.parameters["qm"] == pytest.approx(qm_true, rel=0.1)
         assert est.parameters["K"] == pytest.approx(K_true, rel=0.2)
 
+    @pytest.mark.slow
+    @pytest.mark.integration
     def test_diagnose_identifiable_in_saturated_regime(self):
         exp, data, _, _ = self._data()
         est = estimate_parameters(exp, data, initial_guess={"qm": 4.0, "K": 0.5})
@@ -91,6 +95,7 @@ class TestLangmuirSaturatedRegime:
         assert all(np.isfinite(v) for v in diag.vif.values())
 
     @pytest.mark.slow
+    @pytest.mark.integration
     def test_profile_ci_bounded_for_both(self):
         exp, data, qm_true, K_true = self._data()
         est = estimate_parameters(exp, data, initial_guess={"qm": 4.0, "K": 0.5})
@@ -189,6 +194,8 @@ class TestBatchReactorWellDesigned:
         }
         return exp, data, C0_true, k_true, Cinf_true
 
+    @pytest.mark.slow
+    @pytest.mark.integration
     def test_estimate_recovers_all_three(self):
         exp, data, C0_true, k_true, Cinf_true = self._data()
         est = estimate_parameters(exp, data, initial_guess={"C0": 4.5, "k": 0.4, "C_inf": 1.2})
@@ -196,6 +203,8 @@ class TestBatchReactorWellDesigned:
         assert est.parameters["k"] == pytest.approx(k_true, abs=0.1)
         assert est.parameters["C_inf"] == pytest.approx(Cinf_true, abs=0.2)
 
+    @pytest.mark.slow
+    @pytest.mark.integration
     def test_diagnose_identifiable(self):
         exp, data, _, _, _ = self._data()
         est = estimate_parameters(exp, data, initial_guess={"C0": 4.5, "k": 0.4, "C_inf": 1.2})
@@ -203,6 +212,8 @@ class TestBatchReactorWellDesigned:
         assert diag.is_identifiable is True
         assert diag.fim_rank == 3
 
+    @pytest.mark.slow
+    @pytest.mark.integration
     def test_yao_keeps_all_three(self):
         exp, data, _, _, _ = self._data()
         est = estimate_parameters(exp, data, initial_guess={"C0": 4.5, "k": 0.4, "C_inf": 1.2})
