@@ -685,12 +685,17 @@ def test_partitioned_presolve_obbt_uses_feasible_initial_incumbent(monkeypatch):
 
     captured = {}
 
+    def update_scaling(context):
+        del context
+        return None
+
     def fake_partitioned_obbt(model, terms, flat_lb, flat_ub, incumbent, incumbent_obj, **kwargs):
-        del model, terms, kwargs
+        del model, terms
         captured["flat_lb"] = flat_lb.copy()
         captured["flat_ub"] = flat_ub.copy()
         captured["incumbent"] = incumbent.copy()
         captured["incumbent_obj"] = incumbent_obj
+        captured["partition_scaling_factor_update"] = kwargs["partition_scaling_factor_update"]
         return ObbtResult(
             tightened_lb=np.array([0.2], dtype=np.float64),
             tightened_ub=flat_ub.copy(),
@@ -720,13 +725,96 @@ def test_partitioned_presolve_obbt_uses_feasible_initial_incumbent(monkeypatch):
         milp_gap_tolerance=None,
         presolve_bt_time_limit=2.0,
         presolve_bt_mip_time_limit=0.5,
+        partition_scaling_factor_update=update_scaling,
     )
 
     np.testing.assert_allclose(captured["incumbent"], np.array([0.4]))
     assert captured["incumbent_obj"] == pytest.approx(0.4)
+    assert captured["partition_scaling_factor_update"] is update_scaling
     np.testing.assert_allclose(lb, np.array([0.2]))
     np.testing.assert_allclose(ub, np.array([1.0]))
     assert result.n_tightened == 1
+
+
+def test_partitioned_obbt_applies_scaling_update_before_custom_refinement(monkeypatch):
+    """Partitioned OBBT should honor the scaling hook before custom refinement."""
+    import discopt._jax.milp_relaxation as milp_mod
+    from discopt.solvers import amp as amp_mod
+
+    m = _make_obbt_demo()
+    terms = SimpleNamespace(
+        partition_candidates=[0, 1],
+        bilinear=[(0, 1)],
+        trilinear=[],
+        multilinear=[],
+        monomial=[],
+    )
+    scaling_calls = []
+    refinement_calls = []
+
+    def fake_build_milp_relaxation(*args, **kwargs):
+        del args, kwargs
+        return (
+            SimpleNamespace(
+                _A_ub=np.zeros((0, 2), dtype=np.float64),
+                _b_ub=np.zeros(0, dtype=np.float64),
+                _objective_bound_valid=False,
+                _c=np.zeros(2, dtype=np.float64),
+                _obj_offset=0.0,
+                _bounds=[(0.0, 1.0), (0.0, 1.0)],
+                _integrality=np.zeros(2, dtype=np.int32),
+            ),
+            {},
+        )
+
+    def update_scaling(context):
+        scaling_calls.append(
+            (
+                context["stage"],
+                context["current_scaling_factor"],
+                context["disc_state"].scaling_factor,
+            )
+        )
+        return 14.0
+
+    def refine_partitions(context):
+        refinement_calls.append(
+            (
+                context["stage"],
+                context["partition_scaling_factor"],
+                context["disc_state"].scaling_factor,
+                list(context["var_indices"]),
+            )
+        )
+        return context["disc_state"]
+
+    monkeypatch.setattr(milp_mod, "build_milp_relaxation", fake_build_milp_relaxation)
+
+    result = amp_mod._run_partitioned_obbt(
+        m,
+        terms,
+        np.array([0.0, 0.0], dtype=np.float64),
+        np.array([1.0, 1.0], dtype=np.float64),
+        np.array([0.5, 0.5], dtype=np.float64),
+        0.25,
+        partition_mode="auto",
+        n_init_partitions=2,
+        partition_scaling_factor=10.0,
+        partition_scaling_factor_update=update_scaling,
+        disc_abs_width_tol=1e-3,
+        convhull_formulation="disaggregated",
+        convhull_ebd=False,
+        convhull_ebd_encoding="gray",
+        total_time_limit=0.0,
+        time_limit_per_mip=0.1,
+        gap_tolerance=1e-4,
+        disc_add_partition_hook=refine_partitions,
+    )
+
+    assert scaling_calls == [("presolve_obbt_refinement", 10.0, 10.0)]
+    assert refinement_calls == [("presolve_obbt_refinement", 14.0, 14.0, [0, 1])]
+    assert result.n_lp_solves == 0
+    assert result.n_tightened == 0
 
 
 def test_partitioned_presolve_obbt_runs_on_bilinear_demo():

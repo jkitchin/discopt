@@ -1046,6 +1046,7 @@ def _run_partitioned_obbt(
     total_time_limit: float,
     time_limit_per_mip: float,
     gap_tolerance: float,
+    partition_scaling_factor_update: Optional[Callable[[dict[str, Any]], Any]] = None,
     disc_var_pick_hook: Optional[Callable[[dict[str, Any]], Any]] = None,
     disc_add_partition_hook: Optional[Callable[[dict[str, Any]], Any]] = None,
     min_width: float = 1e-6,
@@ -1094,6 +1095,30 @@ def _run_partitioned_obbt(
             abs_width_tol=disc_abs_width_tol,
         )
         solution = {i: float(incumbent[i]) for i in part_vars}
+        refinement_context = {
+            "stage": "presolve_obbt_refinement",
+            "model": model,
+            "terms": terms,
+            "disc_state": base_state,
+            "solution": solution,
+            "var_indices": list(part_vars),
+            "lb": list(part_lbs),
+            "ub": list(part_ubs),
+            "flat_lb": flat_lb.copy(),
+            "flat_ub": flat_ub.copy(),
+            "partition_mode": partition_mode,
+            "partition_scaling_factor": partition_scaling_factor,
+            "incumbent": incumbent.copy(),
+            "incumbent_objective": incumbent_obj,
+        }
+        partition_scaling_factor = _apply_partition_scaling_update(
+            partition_scaling_factor_update,
+            current_scaling_factor=partition_scaling_factor,
+            context=refinement_context,
+        )
+        base_state.scaling_factor = partition_scaling_factor
+        refinement_context["partition_scaling_factor"] = partition_scaling_factor
+        refinement_context["disc_state"] = base_state
         if disc_add_partition_hook is None:
             disc_state = add_adaptive_partition(
                 base_state,
@@ -1105,22 +1130,7 @@ def _run_partitioned_obbt(
         else:
             disc_state = _apply_partition_refinement_hook(
                 disc_add_partition_hook,
-                {
-                    "stage": "presolve_obbt_refinement",
-                    "model": model,
-                    "terms": terms,
-                    "disc_state": base_state,
-                    "solution": solution,
-                    "var_indices": list(part_vars),
-                    "lb": list(part_lbs),
-                    "ub": list(part_ubs),
-                    "flat_lb": flat_lb.copy(),
-                    "flat_ub": flat_ub.copy(),
-                    "partition_mode": partition_mode,
-                    "partition_scaling_factor": partition_scaling_factor,
-                    "incumbent": incumbent.copy(),
-                    "incumbent_objective": incumbent_obj,
-                },
+                refinement_context,
             )
     else:
         disc_state = DiscretizationState(
@@ -1262,6 +1272,7 @@ def _run_amp_presolve_bound_tightening(
     milp_gap_tolerance: Optional[float],
     presolve_bt_time_limit: Optional[float],
     presolve_bt_mip_time_limit: Optional[float],
+    partition_scaling_factor_update: Optional[Callable[[dict[str, Any]], Any]] = None,
     disc_var_pick_hook: Optional[Callable[[dict[str, Any]], Any]] = None,
     disc_add_partition_hook: Optional[Callable[[dict[str, Any]], Any]] = None,
 ) -> tuple[np.ndarray, np.ndarray, Any]:
@@ -1321,6 +1332,7 @@ def _run_amp_presolve_bound_tightening(
             total_time_limit=partitioned_budget,
             time_limit_per_mip=subproblem_budget,
             gap_tolerance=milp_gap_tolerance if milp_gap_tolerance is not None else 1e-4,
+            partition_scaling_factor_update=partition_scaling_factor_update,
             disc_var_pick_hook=disc_var_pick_hook,
             disc_add_partition_hook=disc_add_partition_hook,
         )
@@ -1629,6 +1641,7 @@ def solve_amp(
                 milp_gap_tolerance=milp_gap_tolerance,
                 presolve_bt_time_limit=presolve_bt_time_limit,
                 presolve_bt_mip_time_limit=presolve_bt_mip_time_limit,
+                partition_scaling_factor_update=partition_scaling_factor_update,
                 disc_var_pick_hook=disc_var_pick_hook,
                 disc_add_partition_hook=disc_add_partition_hook,
             )
