@@ -39,6 +39,7 @@ from discopt.modeling.core import (
     BinaryOp,
     Constant,
     Expression,
+    FunctionCall,
     IndexExpression,
     Model,
     ObjectiveSense,
@@ -126,6 +127,19 @@ class MilpRelaxationModel:
         return MilpRelaxationResult(status=status_str, objective=obj, x=result.x)
 
 
+@dataclass
+class UnivariateRelaxation:
+    """Lifted outer relaxation for a supported univariate operator."""
+
+    expr_id: int
+    func_name: str
+    aux_col: int
+    arg_coeff: np.ndarray
+    arg_const: float
+    arg_lb: float
+    arg_ub: float
+
+
 # ---------------------------------------------------------------------------
 # Helpers: variable bounds
 # ---------------------------------------------------------------------------
@@ -146,6 +160,26 @@ def _compute_piecewise_big_m(corners: list[float]) -> float:
     """Scale Big-M with the interval magnitude instead of adding a flat constant."""
     max_corner = max(abs(float(c)) for c in corners)
     return max_corner * (1.0 + 1e-4) + max(1e-6, 1e-4 * max_corner)
+
+
+def _linear_expr_bounds(
+    coeff: np.ndarray,
+    const: float,
+    lb: np.ndarray,
+    ub: np.ndarray,
+) -> tuple[float, float]:
+    """Return interval bounds for an affine expression over variable bounds."""
+    lower = float(const)
+    upper = float(const)
+    for c_i, lb_i, ub_i in zip(coeff, lb, ub):
+        c = float(c_i)
+        if c >= 0.0:
+            lower += c * float(lb_i)
+            upper += c * float(ub_i)
+        else:
+            lower += c * float(ub_i)
+            upper += c * float(lb_i)
+    return lower, upper
 
 
 def _normalize_convhull_formulation(formulation: str) -> str:
@@ -313,6 +347,11 @@ def _collect_distinct_multilinear_products(model: Model) -> list[tuple[int, ...]
         if isinstance(expr, SumOverExpression):
             for term in expr.terms:
                 visit(term)
+            return
+
+        if isinstance(expr, FunctionCall):
+            for arg in expr.args:
+                visit(arg)
 
     if model._objective is not None:
         visit(model._objective.expression)
@@ -320,6 +359,256 @@ def _collect_distinct_multilinear_products(model: Model) -> list[tuple[int, ...]
         visit(constraint.body)
 
     return sorted(terms)
+
+
+def _linearize_affine_expr(expr: Expression, model: Model, n_vars: int) -> tuple[np.ndarray, float]:
+    """Linearize an affine expression over original variables.
+
+    Raises ValueError when the expression contains nonlinear structure.  This is
+    intentionally narrower than _linearize_expr because univariate operator
+    relaxations are only soundly supported here for affine arguments.
+    """
+    coeff = np.zeros(n_vars, dtype=np.float64)
+    const_acc: list[float] = [0.0]
+
+    def visit(e: Expression, scale: float) -> None:
+        if isinstance(e, Constant):
+            const_acc[0] += scale * float(e.value)
+            return
+
+        if isinstance(e, Variable):
+            offset = _compute_var_offset(e, model)
+            if e.size == 1:
+                coeff[offset] += scale
+                return
+            raise ValueError(f"Cannot use array variable as scalar affine argument: {e}")
+
+        if isinstance(e, IndexExpression):
+            flat = _get_flat_index(e, model)
+            if flat is None:
+                raise ValueError(f"Cannot linearize IndexExpression: {e}")
+            coeff[flat] += scale
+            return
+
+        if isinstance(e, UnaryOp) and e.op == "neg":
+            visit(e.operand, -scale)
+            return
+
+        if isinstance(e, BinaryOp):
+            if e.op == "+":
+                visit(e.left, scale)
+                visit(e.right, scale)
+                return
+            if e.op == "-":
+                visit(e.left, scale)
+                visit(e.right, -scale)
+                return
+            if e.op == "*":
+                if isinstance(e.left, Constant):
+                    visit(e.right, scale * float(e.left.value))
+                    return
+                if isinstance(e.right, Constant):
+                    visit(e.left, scale * float(e.right.value))
+                    return
+                raise ValueError(f"Non-affine product in univariate argument: {e}")
+            if e.op == "/":
+                if isinstance(e.right, Constant):
+                    visit(e.left, scale / float(e.right.value))
+                    return
+                raise ValueError(f"Non-affine division in univariate argument: {e}")
+            if e.op == "**":
+                if isinstance(e.right, Constant):
+                    exp = float(e.right.value)
+                    if exp == 1.0:
+                        visit(e.left, scale)
+                        return
+                    if exp == 0.0:
+                        const_acc[0] += scale
+                        return
+                raise ValueError(f"Non-affine power in univariate argument: {e}")
+
+        if isinstance(e, SumExpression):
+            op = e.operand
+            if isinstance(op, Variable):
+                offset = _compute_var_offset(op, model)
+                for k in range(op.size):
+                    coeff[offset + k] += scale
+                return
+            visit(op, scale)
+            return
+
+        if isinstance(e, SumOverExpression):
+            for term in e.terms:
+                visit(term, scale)
+            return
+
+        raise ValueError(f"Unsupported affine argument node {type(e).__name__}: {e}")
+
+    visit(expr, 1.0)
+    return coeff, const_acc[0]
+
+
+def _univariate_arg(expr: Expression) -> tuple[str, Expression] | None:
+    """Return (operator_name, argument) for supported univariate nodes."""
+    if isinstance(expr, FunctionCall) and len(expr.args) == 1:
+        name = expr.func_name
+        if name in {"sqrt", "log", "log2", "log10", "exp", "abs"}:
+            return name, expr.args[0]
+    if isinstance(expr, UnaryOp) and expr.op == "abs":
+        return "abs", expr.operand
+    return None
+
+
+def _univariate_value(func_name: str, x: float) -> float:
+    """Evaluate a supported scalar univariate function."""
+    if func_name == "sqrt":
+        return float(np.sqrt(x))
+    if func_name == "log":
+        return float(np.log(x))
+    if func_name == "log2":
+        return float(np.log2(x))
+    if func_name == "log10":
+        return float(np.log10(x))
+    if func_name == "exp":
+        return float(np.exp(x))
+    if func_name == "abs":
+        return float(abs(x))
+    raise ValueError(f"Unsupported univariate function: {func_name}")
+
+
+def _univariate_grad(func_name: str, x: float) -> float:
+    """Evaluate the first derivative of a smooth supported univariate function."""
+    if func_name == "sqrt":
+        return float(0.5 / np.sqrt(x))
+    if func_name == "log":
+        return float(1.0 / x)
+    if func_name == "log2":
+        return float(1.0 / (x * np.log(2.0)))
+    if func_name == "log10":
+        return float(1.0 / (x * np.log(10.0)))
+    if func_name == "exp":
+        return float(np.exp(x))
+    raise ValueError(f"No smooth derivative for univariate function: {func_name}")
+
+
+def _univariate_domain_ok(func_name: str, arg_lb: float, arg_ub: float) -> bool:
+    """Return True when the operator can be relaxed on the interval."""
+    if not np.isfinite(arg_lb) or not np.isfinite(arg_ub) or arg_lb > arg_ub:
+        return False
+    if func_name == "sqrt" and arg_lb < 0.0:
+        return False
+    if func_name in {"log", "log2", "log10"} and arg_lb <= 0.0:
+        return False
+    if func_name in {"sqrt", "log", "log2", "log10"}:
+        return True
+    if func_name == "exp":
+        return bool(np.isfinite(np.exp(arg_lb)) and np.isfinite(np.exp(arg_ub)))
+    if func_name == "abs":
+        return True
+    return False
+
+
+def _univariate_value_bounds(func_name: str, arg_lb: float, arg_ub: float) -> tuple[float, float]:
+    """Return finite bounds for f(x) on [arg_lb, arg_ub]."""
+    if func_name == "abs":
+        if arg_lb <= 0.0 <= arg_ub:
+            return 0.0, max(abs(arg_lb), abs(arg_ub))
+        values = [abs(arg_lb), abs(arg_ub)]
+        return min(values), max(values)
+    values = [_univariate_value(func_name, arg_lb), _univariate_value(func_name, arg_ub)]
+    return min(values), max(values)
+
+
+def _tangent_points(func_name: str, lb: float, ub: float) -> list[float]:
+    """Choose deterministic valid tangent points for smooth univariate cuts."""
+    raw_points = [lb, 0.5 * (lb + ub), ub]
+    points: list[float] = []
+    for pt in raw_points:
+        if func_name == "sqrt" and pt <= 0.0:
+            continue
+        if func_name in {"log", "log2", "log10"} and pt <= 0.0:
+            continue
+        if not np.isfinite(pt):
+            continue
+        if all(abs(pt - seen) > 1e-12 for seen in points):
+            points.append(float(pt))
+    return points
+
+
+def _collect_univariate_relaxations(
+    model: Model,
+    n_orig: int,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+    start_col: int,
+) -> tuple[list[UnivariateRelaxation], dict[int, int], list[tuple[float, float]]]:
+    """Collect supported univariate operator nodes and assign auxiliary columns."""
+    relaxations: list[UnivariateRelaxation] = []
+    var_map: dict[int, int] = {}
+    bounds: list[tuple[float, float]] = []
+    seen: set[int] = set()
+    col_idx = start_col
+
+    def maybe_add(expr: Expression) -> None:
+        nonlocal col_idx
+        expr_id = id(expr)
+        if expr_id in seen:
+            return
+        op_info = _univariate_arg(expr)
+        if op_info is None:
+            return
+        func_name, arg = op_info
+        try:
+            arg_coeff, arg_const = _linearize_affine_expr(arg, model, n_orig)
+            arg_lb, arg_ub = _linear_expr_bounds(arg_coeff, arg_const, flat_lb, flat_ub)
+        except ValueError:
+            return
+        if not _univariate_domain_ok(func_name, arg_lb, arg_ub):
+            return
+        val_lb, val_ub = _univariate_value_bounds(func_name, arg_lb, arg_ub)
+        if not np.isfinite(val_lb) or not np.isfinite(val_ub):
+            return
+        seen.add(expr_id)
+        var_map[expr_id] = col_idx
+        relaxations.append(
+            UnivariateRelaxation(
+                expr_id=expr_id,
+                func_name=func_name,
+                aux_col=col_idx,
+                arg_coeff=arg_coeff,
+                arg_const=arg_const,
+                arg_lb=float(arg_lb),
+                arg_ub=float(arg_ub),
+            )
+        )
+        bounds.append((float(val_lb), float(val_ub)))
+        col_idx += 1
+
+    def visit(expr: Expression) -> None:
+        maybe_add(expr)
+        if isinstance(expr, BinaryOp):
+            visit(expr.left)
+            visit(expr.right)
+        elif isinstance(expr, UnaryOp):
+            visit(expr.operand)
+        elif isinstance(expr, FunctionCall):
+            for arg in expr.args:
+                visit(arg)
+        elif isinstance(expr, IndexExpression):
+            if not isinstance(expr.base, Variable):
+                visit(expr.base)
+        elif isinstance(expr, SumExpression):
+            visit(expr.operand)
+        elif isinstance(expr, SumOverExpression):
+            for term in expr.terms:
+                visit(term)
+
+    if model._objective is not None:
+        visit(model._objective.expression)
+    for constraint in model._constraints:
+        visit(constraint.body)
+
+    return relaxations, var_map, bounds
 
 
 # ---------------------------------------------------------------------------
@@ -334,6 +623,7 @@ def _linearize_expr(
     trilinear_var_map: dict[tuple[int, int, int], int],
     multilinear_var_map: dict[tuple[int, ...], int],
     monomial_var_map: dict[tuple[int, int], int],
+    univariate_var_map: dict[int, int],
     n_total_vars: int,
 ) -> tuple[np.ndarray, float]:
     """Walk expression tree and return (coeff, constant) for linearized form.
@@ -366,6 +656,13 @@ def _linearize_expr(
                 coeff[flat] += scale
             else:
                 raise ValueError(f"Cannot linearize IndexExpression: {e}")
+
+        elif isinstance(e, FunctionCall):
+            aux_col = univariate_var_map.get(id(e))
+            if aux_col is not None:
+                coeff[aux_col] += scale
+            else:
+                raise ValueError(f"Cannot linearize FunctionCall: {e}")
 
         elif isinstance(e, BinaryOp):
             if e.op == "+":
@@ -459,6 +756,12 @@ def _linearize_expr(
         elif isinstance(e, UnaryOp):
             if e.op == "neg":
                 visit(e.operand, -scale)
+            elif e.op == "abs":
+                aux_col = univariate_var_map.get(id(e))
+                if aux_col is not None:
+                    coeff[aux_col] += scale
+                else:
+                    raise ValueError(f"Cannot linearize UnaryOp: {e.op}")
             else:
                 raise ValueError(f"Cannot linearize UnaryOp: {e.op}")
 
@@ -562,6 +865,7 @@ def build_milp_relaxation(
     multilinear_var_map: dict[tuple[int, ...], int] = {}
     multilinear_stage_map: dict[tuple[int, ...], list[dict[str, int]]] = {}
     monomial_var_map: dict[tuple[int, int], int] = {}
+    univariate_var_map: dict[int, int] = {}
 
     col_idx = n_orig
     all_bounds: list[tuple[float, float]] = list(zip(flat_lb.tolist(), flat_ub.tolist()))
@@ -650,6 +954,18 @@ def build_milp_relaxation(
             vals.append(0.0)
         monomial_var_map[(var_idx, n)] = col_idx
         all_bounds.append((min(vals), max(vals)))
+        integrality_flags.append(0)
+        col_idx += 1
+
+    univariate_relaxations, univariate_var_map, univariate_bounds = _collect_univariate_relaxations(
+        model,
+        n_orig,
+        flat_lb,
+        flat_ub,
+        col_idx,
+    )
+    for val_bounds in univariate_bounds:
+        all_bounds.append(val_bounds)
         integrality_flags.append(0)
         col_idx += 1
 
@@ -1089,6 +1405,79 @@ def build_milp_relaxation(
                 if _odd_mixed_tangent_is_valid(t, lb_i, ub_i, n, "over"):
                     _add_over_tangent(t)
 
+    # Supported univariate operator graph relaxations.
+    def _add_lower_line(relax: UnivariateRelaxation, slope: float, intercept: float) -> None:
+        """Add t >= slope * arg + intercept."""
+        row = np.zeros(n_total)
+        row[:n_orig] = slope * relax.arg_coeff
+        row[relax.aux_col] = -1.0
+        _add_row(row, -intercept - slope * relax.arg_const)
+
+    def _add_upper_line(relax: UnivariateRelaxation, slope: float, intercept: float) -> None:
+        """Add t <= slope * arg + intercept."""
+        row = np.zeros(n_total)
+        row[:n_orig] = -slope * relax.arg_coeff
+        row[relax.aux_col] = 1.0
+        _add_row(row, intercept + slope * relax.arg_const)
+
+    def _add_aux_equality(relax: UnivariateRelaxation, coeff: np.ndarray, rhs: float) -> None:
+        """Add equality t + coeff @ x = rhs as two inequality rows."""
+        row = np.zeros(n_total)
+        row[:n_orig] = coeff
+        row[relax.aux_col] = 1.0
+        _add_row(row, rhs)
+        _add_row(-row, -rhs)
+
+    for relax in univariate_relaxations:
+        lb_u = relax.arg_lb
+        ub_u = relax.arg_ub
+        if abs(ub_u - lb_u) <= 1e-12:
+            val = _univariate_value(relax.func_name, lb_u)
+            row = np.zeros(n_total)
+            row[relax.aux_col] = 1.0
+            _add_row(row, val)
+            _add_row(-row, -val)
+            continue
+
+        if relax.func_name == "abs":
+            if lb_u >= 0.0:
+                # t = arg
+                _add_aux_equality(relax, -relax.arg_coeff, relax.arg_const)
+            elif ub_u <= 0.0:
+                # t = -arg
+                _add_aux_equality(relax, relax.arg_coeff, -relax.arg_const)
+            else:
+                # t >= arg, t >= -arg, and t below the endpoint secant.
+                _add_lower_line(relax, 1.0, 0.0)
+                _add_lower_line(relax, -1.0, 0.0)
+                f_lb = abs(lb_u)
+                f_ub = abs(ub_u)
+                slope = (f_ub - f_lb) / (ub_u - lb_u)
+                intercept = f_lb - slope * lb_u
+                _add_upper_line(relax, slope, intercept)
+            continue
+
+        f_lb = _univariate_value(relax.func_name, lb_u)
+        f_ub = _univariate_value(relax.func_name, ub_u)
+        secant_slope = (f_ub - f_lb) / (ub_u - lb_u)
+        secant_intercept = f_lb - secant_slope * lb_u
+
+        if relax.func_name == "exp":
+            # Convex: tangents are lower bounds; secant is an upper bound.
+            for pt in _tangent_points(relax.func_name, lb_u, ub_u):
+                slope = _univariate_grad(relax.func_name, pt)
+                intercept = _univariate_value(relax.func_name, pt) - slope * pt
+                _add_lower_line(relax, slope, intercept)
+            _add_upper_line(relax, secant_slope, secant_intercept)
+        else:
+            # log/log2/log10/sqrt are concave on their supported domains:
+            # secant is a lower bound; tangents are upper bounds.
+            _add_lower_line(relax, secant_slope, secant_intercept)
+            for pt in _tangent_points(relax.func_name, lb_u, ub_u):
+                slope = _univariate_grad(relax.func_name, pt)
+                intercept = _univariate_value(relax.func_name, pt) - slope * pt
+                _add_upper_line(relax, slope, intercept)
+
     # Model constraints
     for constraint in model._constraints:
         body = constraint.body  # normalized: body <= 0  (sense is always "<=")
@@ -1101,6 +1490,7 @@ def build_milp_relaxation(
                 trilinear_var_map,
                 multilinear_var_map,
                 monomial_var_map,
+                univariate_var_map,
                 n_total,
             )
             # body ≤ 0  →  c @ z + const ≤ 0  →  c @ z ≤ -const
@@ -1136,6 +1526,7 @@ def build_milp_relaxation(
             trilinear_var_map,
             multilinear_var_map,
             monomial_var_map,
+            univariate_var_map,
             n_total,
         )
         objective_bound_valid = True
@@ -1186,6 +1577,8 @@ def build_milp_relaxation(
         "multilinear": multilinear_var_map,
         "multilinear_stages": multilinear_stage_map,
         "monomial": monomial_var_map,
+        "univariate": univariate_var_map,
+        "univariate_relaxations": univariate_relaxations,
         "bilinear_pw": bilinear_pw_map,
         "bilinear_lambda": bilinear_lambda_map,
         "convhull_formulation": convhull_mode,
