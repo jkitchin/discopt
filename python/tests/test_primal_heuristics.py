@@ -62,6 +62,8 @@ def _make_simple_minlp() -> Model:
 # ─────────────────────────────────────────────────────────────
 
 
+@pytest.mark.slow
+@pytest.mark.integration
 class TestMultiStartBasic:
     def test_finds_optimum_unconstrained(self):
         """Multi-start finds optimum of simple quadratic."""
@@ -106,6 +108,8 @@ class TestMultiStartBasic:
 # ─────────────────────────────────────────────────────────────
 
 
+@pytest.mark.slow
+@pytest.mark.integration
 class TestMultiStartMINLP:
     def test_simple_minlp(self):
         """Multi-start on simple MINLP finds a good solution."""
@@ -232,6 +236,8 @@ class TestFeasibilityPump:
 # ─────────────────────────────────────────────────────────────
 
 
+@pytest.mark.slow
+@pytest.mark.integration
 class TestMultiStartStatistics:
     def test_feasible_count(self):
         """n_feasible counts NLP-feasible solutions."""
@@ -274,6 +280,8 @@ class TestMultiStartStatistics:
 # ─────────────────────────────────────────────────────────────
 
 
+@pytest.mark.slow
+@pytest.mark.integration
 class TestMultiStartReproducibility:
     def test_same_seed_same_result(self):
         """Same seed produces same results."""
@@ -311,6 +319,8 @@ class TestMultiStartReproducibility:
 # ─────────────────────────────────────────────────────────────
 
 
+@pytest.mark.slow
+@pytest.mark.integration
 class TestMultiStartEdgeCases:
     def test_single_variable(self):
         """Works with a single continuous variable."""

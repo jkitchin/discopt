@@ -70,6 +70,8 @@ class TestWeightedSumConvex:
         assert front.hypervolume() > 0.0
 
 
+@pytest.mark.slow
+@pytest.mark.integration
 class TestEpsilonConstraintConvex:
     def test_covers_the_front(self):
         m, objs = _build_biobj_qp()
@@ -92,6 +94,8 @@ class TestEpsilonConstraintConvex:
         assert front.n >= 2
 
 
+@pytest.mark.slow
+@pytest.mark.integration
 class TestWeightedTchebycheffConvex:
     def test_front_on_analytic_curve(self):
         m, objs = _build_biobj_qp()
@@ -136,6 +140,8 @@ def _build_concave_front():
     return m, [x, y]
 
 
+@pytest.mark.slow
+@pytest.mark.integration
 class TestNonconvexFront:
     def test_weighted_sum_misses_interior(self):
         """Weighted sum should collapse to the two anchors on a concave front."""

@@ -11,10 +11,20 @@
 #   make bench-cutest-smoke   # Quick CUTEst smoke (10 problems)
 #   make setup-cutest         # Install CUTEst/SIFDecode/SIF libraries
 #   make build               # Rebuild Rust .so if sources changed
-#   make test                # Run fast default pytest suite
-#   make test-all            # Run full pytest suite, including opt-in tests
+#   make test                # PR-fast pytest suite (matches CI python-fast job)
+#   make test-all            # Full pytest suite (slow + correctness)
+#   make test-quick          # unit + smoke only (dev inner loop, target <60s)
+#   make test-slow           # only the slow-marked tests
+#   make test-correctness    # known-optima validation suite
+#   make test-modeling       # modeling layer slice (PR-fast)
+#   make test-solvers        # solver/B&B/OA slice (PR-fast)
+#   make test-amp            # AMP / DOE / discrimination slice (PR-fast)
 #   make test-amp-fast       # Run fast AMP regression battery
 #   make test-amp-integration # Run opt-in AMP Alpine/incidence suite
+#   make test-nn             # NN embedding slice (PR-fast)
+#   make test-convexity      # convexity certification slice (PR-fast)
+#   make test-jax            # JAX compiler / relaxation slice (PR-fast)
+#   make test-llm            # LLM modules slice (PR-fast)
 #   make lint                # Ruff lint + format check
 #   make hooks               # Install pre-commit hooks
 #   make clean               # Remove build artifacts
@@ -58,11 +68,13 @@ export FFLAGS  ?= -w
 CUTEST_MAX_N    ?= 100
 CUTEST_PREFIX   ?= $(HOME)/.local/cutest
 CUTEST_ENV      := $(CUTEST_PREFIX)/env.sh
-FAST_TEST_MARKERS ?= not slow and not integration and not amp_benchmark
 
 # --- Phony targets ------------------------------------------------------------
 
-.PHONY: all benchmarks build test test-fast test-all test-amp-fast test-amp-integration lint hooks clean help \
+.PHONY: all benchmarks build test test-fast test-all test-quick test-slow test-correctness \
+        test-modeling test-solvers test-amp test-amp-fast test-amp-integration \
+        test-nn test-convexity test-jax test-llm \
+        lint hooks clean help \
         bench-notebook bench-smoke bench-phase3-gate bench-tests \
         bench-cutest bench-cutest-smoke setup-cutest check-cutest \
         docs docs-open notebooks \
@@ -77,10 +89,20 @@ help:
 	@echo ""
 	@echo "  make benchmarks         Full pipeline: build, lint, test, all benchmarks"
 	@echo "  make build              Rebuild Rust .so if sources changed"
-	@echo "  make test               Run fast default pytest suite"
-	@echo "  make test-all           Run full pytest suite, including opt-in tests"
+	@echo "  make test               PR-fast pytest suite (matches CI python-fast)"
+	@echo "  make test-all           Full pytest suite (slow + correctness)"
+	@echo "  make test-quick         unit + smoke only (dev loop, target <60s)"
+	@echo "  make test-slow          Only the slow-marked tests"
+	@echo "  make test-correctness   Known-optima validation suite"
+	@echo "  make test-modeling      Modeling layer slice"
+	@echo "  make test-solvers       Solver/B&B/OA slice"
+	@echo "  make test-amp           AMP / DOE / discrimination slice"
 	@echo "  make test-amp-fast      Run fast AMP regression battery"
 	@echo "  make test-amp-integration Run opt-in AMP Alpine/incidence suite"
+	@echo "  make test-nn            NN embedding slice"
+	@echo "  make test-convexity     Convexity certification slice"
+	@echo "  make test-jax           JAX compiler / relaxation slice"
+	@echo "  make test-llm           LLM modules slice"
 	@echo "  make lint               Ruff lint + format check"
 	@echo "  make hooks              Install pre-commit hooks"
 	@echo "  make bench-notebook     Run benchmark notebook, save HTML + JSON"
@@ -150,18 +172,162 @@ hooks:
 	@echo "==> Hooks installed"
 
 # --- Test ---------------------------------------------------------------------
+#
+# Tiers (issue #68):
+#   test          - PR-fast: matches CI python-fast job. Excludes `slow`,
+#                   `correctness`, `integration`, and `amp_benchmark` while
+#                   keeping the curated `pr_correctness` subset. Target <10 min.
+#   test-all      - everything, including slow + correctness. Target ~20 min.
+#   test-quick    - unit + smoke only, dev inner loop. Target <60 s.
+#   test-slow     - only slow-marked tests (full backend cross-product etc.).
+#   test-correctness - full known-optima validation suite (test_correctness.py).
+#   test-<slice>  - subject-area slice run with the PR-fast filter applied.
 
-test-fast: build
-	@echo "==> Running fast pytest suite..."
-	$(PYTEST) python/tests/ -v --tb=short -q -m "$(FAST_TEST_MARKERS)"
-	@echo "==> Fast tests passed"
+# Common flags for the PR-fast tier (kept in sync with .github/workflows/ci.yml).
+# These exclusions keep the PR gate focused on ordinary feature tests plus the
+# curated `pr_correctness` subset. Full correctness, integration, and benchmark
+# coverage stay available through the explicit targets below.
+PYTEST_FAST_FLAGS := --timeout=120 -m "not slow and not correctness and not integration and not amp_benchmark" \
+    --ignore=python/tests/test_correctness.py
 
-test: test-fast
+PYTEST_QUICK_FLAGS := --timeout=60 -m "(unit or smoke) and not slow and not integration and not amp_benchmark"
 
+# File groups for slice targets. A test file may appear in more than one group.
+TEST_MODELING := \
+    python/tests/test_export.py \
+    python/tests/test_dag_compiler.py \
+    python/tests/test_rust_ir.py \
+    python/tests/test_fast_construction.py \
+    python/tests/test_gams.py \
+    python/tests/test_gdp.py \
+    python/tests/test_model_selection.py \
+    python/tests/test_nl_parser.py \
+    python/tests/test_nl_reconstruction.py \
+    python/tests/test_nl_writer.py
+
+TEST_SOLVERS := \
+    python/tests/test_alphabb.py \
+    python/tests/test_cutting_planes.py \
+    python/tests/test_fbbt_bindings.py \
+    python/tests/test_gdpopt_loa.py \
+    python/tests/test_ipm.py \
+    python/tests/test_ipm_callbacks.py \
+    python/tests/test_ipm_iterative.py \
+    python/tests/test_lp_highs.py \
+    python/tests/test_lp_qp_solvers.py \
+    python/tests/test_minlplib_benchmark.py \
+    python/tests/test_minlptests.py \
+    python/tests/test_nlp_bb.py \
+    python/tests/test_nlp_convergence.py \
+    python/tests/test_nlp_evaluator.py \
+    python/tests/test_nlp_ipopt.py \
+    python/tests/test_oa.py \
+    python/tests/test_obbt.py \
+    python/tests/test_orchestrator.py \
+    python/tests/test_primal_heuristics.py \
+    python/tests/test_qp_highs.py \
+    python/tests/test_sparse_ipm.py \
+    python/tests/test_t24_batch_ipm.py \
+    python/tests/test_tree.py \
+    python/tests/test_warm_start.py
+
+TEST_AMP := \
+    python/tests/test_affine_decision_rule.py \
+    python/tests/test_amp.py \
+    python/tests/test_batch_dispatch.py \
+    python/tests/test_batch_doe.py \
+    python/tests/test_batch_evaluator.py \
+    python/tests/test_discrimination_criteria.py \
+    python/tests/test_discrimination_examples.py \
+    python/tests/test_discrimination_sequential.py \
+    python/tests/test_doe.py \
+    python/tests/test_estimability.py \
+    python/tests/test_estimate.py \
+    python/tests/test_fim.py \
+    python/tests/test_identifiability.py \
+    python/tests/test_identifiability_edge_cases.py \
+    python/tests/test_robust_counterpart.py \
+    python/tests/test_robust_solve.py \
+    python/tests/test_robust_uncertainty.py \
+    python/tests/test_sequential_doe.py
+
+TEST_NN := \
+    python/tests/test_gnn_branching.py \
+    python/tests/test_learned_relaxations.py \
+    python/tests/test_nn_formulations.py
+
+TEST_CONVEXITY := \
+    python/tests/test_convex_fast_path.py \
+    python/tests/test_convexity.py \
+    python/tests/test_convexity_certificate.py \
+    python/tests/test_convexity_eigenvalue.py \
+    python/tests/test_convexity_interval.py \
+    python/tests/test_convexity_interval_ad.py \
+    python/tests/test_convexity_interval_eval.py \
+    python/tests/test_convexity_lattice.py \
+    python/tests/test_convexity_node_refresh.py \
+    python/tests/test_convexity_pathological.py \
+    python/tests/test_convexity_solver_integration.py \
+    python/tests/test_convexity_soundness.py \
+    python/tests/test_convexity_wide_box.py
+
+TEST_JAX := \
+    python/tests/test_dag_compiler.py \
+    python/tests/test_differentiable.py \
+    python/tests/test_envelopes.py \
+    python/tests/test_mccormick.py \
+    python/tests/test_mccormick_bounds.py \
+    python/tests/test_piecewise_mccormick.py \
+    python/tests/test_relaxation_compiler.py \
+    python/tests/test_sparse_coo.py \
+    python/tests/test_sparsity.py \
+    python/tests/test_trilinear_exact.py
+
+TEST_LLM := \
+    python/tests/test_llm_modules.py
+
+# PR-fast: matches python-fast CI job. This is what `make test` should mean.
+test: build
+	@echo "==> Running PR-fast pytest suite (matches CI python-fast)..."
+	$(PYTEST) python/tests/ -v --tb=short -q $(PYTEST_FAST_FLAGS)
+	@echo "==> PR-fast tests passed"
+
+test-fast: test
+
+# Full suite: every test, no exclusions. Use before releases or when triaging.
 test-all: build
-	@echo "==> Running full pytest suite..."
+	@echo "==> Running full pytest suite (slow + correctness + everything)..."
 	$(PYTEST) python/tests/ -v --tb=short -q
-	@echo "==> Full tests passed"
+	@echo "==> Full suite passed"
+
+# Dev inner loop: only unit and smoke markers. Wired by Phase 3 of issue #68;
+# may be near-empty until those markers are populated.
+test-quick: build
+	@echo "==> Running quick tests (unit + smoke)..."
+	$(PYTEST) python/tests/ -v --tb=short -q $(PYTEST_QUICK_FLAGS)
+	@echo "==> Quick tests passed"
+
+# Only the slow-marked tests (backend cross-product, big instances, ML training).
+test-slow: build
+	@echo "==> Running slow-marked tests..."
+	$(PYTEST) python/tests/ -v --tb=short -q -m "slow"
+	@echo "==> Slow tests passed"
+
+# Full known-optima validation. Heavy; not in PR gate.
+test-correctness: build
+	@echo "==> Running correctness suite (known-optima validation)..."
+	$(PYTEST) python/tests/test_correctness.py -v --tb=short -q
+	@echo "==> Correctness suite passed"
+
+# Slice targets: PR-fast filter applied within a subject area.
+test-modeling: build
+	$(PYTEST) $(TEST_MODELING) -v --tb=short -q $(PYTEST_FAST_FLAGS)
+
+test-solvers: build
+	$(PYTEST) $(TEST_SOLVERS) -v --tb=short -q $(PYTEST_FAST_FLAGS)
+
+test-amp: build
+	$(PYTEST) $(TEST_AMP) -v --tb=short -q $(PYTEST_FAST_FLAGS)
 
 test-amp-fast: build
 	@echo "==> Running fast AMP regression tests..."
@@ -172,6 +338,18 @@ test-amp-integration: build
 	@echo "==> Running opt-in AMP Alpine/incidence tests..."
 	$(PYTEST) python/tests/test_amp_integration.py -v --tb=short -q -m "slow or integration or amp_benchmark"
 	@echo "==> AMP integration tests passed"
+
+test-nn: build
+	$(PYTEST) $(TEST_NN) -v --tb=short -q $(PYTEST_FAST_FLAGS)
+
+test-convexity: build
+	$(PYTEST) $(TEST_CONVEXITY) -v --tb=short -q $(PYTEST_FAST_FLAGS)
+
+test-jax: build
+	$(PYTEST) $(TEST_JAX) -v --tb=short -q $(PYTEST_FAST_FLAGS)
+
+test-llm: build
+	$(PYTEST) $(TEST_LLM) -v --tb=short -q $(PYTEST_FAST_FLAGS)
 
 # --- Results directory --------------------------------------------------------
 
@@ -299,7 +477,7 @@ bench-cutest-smoke: build check-cutest | $(RESULTS_DIR)
 
 # --- Full pipeline ------------------------------------------------------------
 
-benchmarks: build lint test bench-notebook bench-smoke
+benchmarks: build lint test-all bench-notebook bench-smoke
 	@echo ""
 	@echo "============================================================"
 	@echo "  All benchmarks complete.  Results in: $(RESULTS_DIR)/"

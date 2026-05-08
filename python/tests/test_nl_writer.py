@@ -10,6 +10,8 @@ from __future__ import annotations
 import discopt.modeling as dm
 import pytest
 
+pytestmark = pytest.mark.unit
+
 
 class TestNLWriterLinear:
     """Test .nl export for linear models."""

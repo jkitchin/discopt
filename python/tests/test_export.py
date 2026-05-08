@@ -7,12 +7,14 @@ from pathlib import Path
 
 import discopt.modeling as dm
 import pytest
-from discopt.export import to_lp, to_mps  # noqa: I001
+from discopt.export import to_lp, to_mps
 from discopt.export._extract import (
     extract_linear_terms,
     extract_quadratic_terms,
     flatten_variables,
 )
+
+pytestmark = pytest.mark.unit
 
 # ─────────────────────────────────────────────────────────────
 # Helper: build small test models

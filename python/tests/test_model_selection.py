@@ -194,6 +194,7 @@ class TestLikelihoodRatio:
         with pytest.raises(ValueError, match="more parameters"):
             likelihood_ratio_test(est_lin, est_int)  # full has fewer params -> raises
 
+    @pytest.mark.slow
     def test_uniform_p_value_under_h0(self):
         """If we sample many datasets from the nested model, the LRT
         p-values should be approximately uniform on [0, 1]; check by a

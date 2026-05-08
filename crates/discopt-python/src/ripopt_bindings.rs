@@ -212,10 +212,11 @@ fn status_to_string(status: ripopt::SolveStatus) -> &'static str {
         ripopt::SolveStatus::LocalInfeasibility => "local_infeasibility",
         ripopt::SolveStatus::MaxIterations => "max_iterations",
         ripopt::SolveStatus::NumericalError => "numerical_error",
-        ripopt::SolveStatus::Unbounded => "unbounded",
+        ripopt::SolveStatus::DivergingIterates => "diverging_iterates",
         ripopt::SolveStatus::RestorationFailed => "restoration_failed",
         ripopt::SolveStatus::EvaluationError => "evaluation_error",
         ripopt::SolveStatus::UserRequestedStop => "user_requested_stop",
+        ripopt::SolveStatus::StopAtTinyStep => "stop_at_tiny_step",
         ripopt::SolveStatus::InternalError => "internal_error",
     }
 }

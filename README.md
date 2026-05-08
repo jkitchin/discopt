@@ -127,6 +127,10 @@ cargo test -p discopt-core
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 make test
 ```
 
+`make test` matches the PR CI gate: ordinary non-slow tests plus the
+`pr_correctness` subset. Full correctness, integration, and benchmark markers
+remain available through the explicit Make targets.
+
 ### AMP Test Suites
 
 Routine AMP development uses a fast default regression battery. The fast

@@ -580,6 +580,8 @@ def _solve_with_cyipopt(build_fn):
     return solve_nlp(evaluator, x0, constraint_bounds)
 
 
+@pytest.mark.slow
+@pytest.mark.integration
 class TestIPMMatchesCyipopt:
     """Compare IPM with cyipopt on correctness test problems."""
 

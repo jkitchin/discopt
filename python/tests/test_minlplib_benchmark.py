@@ -103,6 +103,7 @@ def _solve(name: str, nlp_solver: str, cutting_planes: bool) -> Result:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 @pytest.mark.correctness
 @pytest.mark.parametrize("cutting_planes", STRATEGIES)
 @pytest.mark.parametrize("nlp_solver", NLP_SOLVERS, ids=NLP_SOLVERS)
@@ -142,6 +143,7 @@ def test_minlplib_optimality(name, expected, nlp_solver, cutting_planes):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("cutting_planes", STRATEGIES)
 @pytest.mark.parametrize("nlp_solver", NLP_SOLVERS, ids=NLP_SOLVERS)
 @pytest.mark.parametrize(

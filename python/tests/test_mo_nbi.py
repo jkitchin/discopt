@@ -11,6 +11,8 @@ from discopt.mo import (
     normalized_normal_constraint,
 )
 
+pytestmark = [pytest.mark.slow, pytest.mark.integration]
+
 
 def _build_biobj_qp():
     m = dm.Model("biobj_qp_nbi")
