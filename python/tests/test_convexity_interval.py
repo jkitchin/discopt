@@ -20,6 +20,8 @@ import pytest
 from discopt._jax.convexity import interval as iv
 from discopt._jax.convexity.interval import Interval
 
+pytestmark = pytest.mark.unit
+
 SAMPLES = 64
 
 

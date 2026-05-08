@@ -854,6 +854,7 @@ class TestHullReformulation:
         assert r_hull.status == "optimal"
         assert r_bm.objective == pytest.approx(r_hull.objective, abs=0.5)
 
+    @pytest.mark.slow
     @pytest.mark.timeout(300)
     def test_hull_nonlinear_constraint(self):
         """x**2 <= 5 in disjunct => perspective form, correct solve."""

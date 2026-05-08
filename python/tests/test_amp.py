@@ -1098,7 +1098,7 @@ class TestAmpEndToEnd:
             f"Objective {result.objective:.3f} too far from {NLP3_OPTIMUM}"
         )
 
-    @pytest.mark.smoke
+    @pytest.mark.slow
     def test_bilinear_minlp_global(self):
         """MINLP with bilinear product + integer variable."""
         m = Model("bi_minlp")
@@ -1112,7 +1112,7 @@ class TestAmpEndToEnd:
         # x[0]*x[1]≥4-y: optimal at x[0]=x[1]=2, y=0 → obj=8 or similar
         assert result.objective >= 0
 
-    @pytest.mark.smoke
+    @pytest.mark.slow
     def test_trilinear_global_optimum(self):
         """AMP should solve a simple trilinear cover problem after lifting."""
         m = _make_trilinear_cover()
@@ -1200,6 +1200,7 @@ class TestAmpEndToEnd:
         assert abs(result.objective) <= 1e-6
         assert result.gap is None
 
+    @pytest.mark.slow
     def test_bilinear_maximize_global_optimum(self):
         """AMP must handle maximize objectives with certified bounds."""
         m = Model("max_bilinear")
@@ -1333,7 +1334,7 @@ class TestAmpConvergenceProperties:
         assert result.gap_certified is True
         assert len(iters) < 100, "Should terminate before max_iter=100 when gap closes"
 
-    @pytest.mark.smoke
+    @pytest.mark.slow
     def test_time_limit_respected(self):
         """AMP must respect the time_limit parameter."""
         import time

@@ -143,6 +143,7 @@ class TestProfileLikelihoodOptions:
         assert prof.theta_hat == est.parameters["b"]
         assert prof.objective_hat == est.objective
 
+    @pytest.mark.slow
     def test_confidence_level_monotonicity(self, linear_fit):
         """Higher confidence level -> wider interval."""
         exp, data, _, _ = linear_fit
@@ -275,6 +276,7 @@ class TestReparameterizationInvariance:
 
 
 class TestCoverageRate:
+    @pytest.mark.slow
     def test_profile_ci_covers_truth_on_linear_regression(self):
         """Across a handful of synthetic replicates, the 95% profile CI
         should cover the true slope in most of them. We use 10 seeds

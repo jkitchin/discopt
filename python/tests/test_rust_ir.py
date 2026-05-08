@@ -11,6 +11,8 @@ import discopt.modeling as dm
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.unit
+
 # Import the Rust bindings
 from discopt._rust import PyModelRepr, model_to_repr
 from discopt.modeling.examples import (

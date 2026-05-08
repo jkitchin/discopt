@@ -25,6 +25,10 @@ from discopt._jax.convexity.lattice import (
     unary_atom_profile,
 )
 
+import pytest
+
+pytestmark = pytest.mark.unit
+
 
 class TestCurvatureLattice:
     def test_negate_flips_curvature(self):

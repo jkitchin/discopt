@@ -52,6 +52,7 @@ def _assert_integer_feasible(result, int_var_names, model):
 class TestOAConvexMINLP:
     """Convex MINLP problems where OA should find the global optimum."""
 
+    @pytest.mark.slow
     def test_simple_quadratic_binary(self):
         """min x^2 + y, y in {0,1}, x + y >= 1, x in [0, 2].
 
@@ -81,6 +82,7 @@ class TestOAConvexMINLP:
         _assert_optimal(result, 0.5, abs_tol=0.05)
         _assert_integer_feasible(result, ["x3"], m)
 
+    @pytest.mark.slow
     def test_convex_with_multiple_binaries(self):
         """min (x-3)^2 + 2*y1 + 3*y2, y1+y2 <= 1, x <= 2*y1 + 4*y2.
 
@@ -123,6 +125,7 @@ class TestOAConvexMINLP:
 class TestOANonConvex:
     """Non-convex problems: OA may find local optimum, not global."""
 
+    @pytest.mark.slow
     def test_nonconvex_finds_feasible(self):
         """min -x*y_bin, x in [0,2], y_bin in {0,1}, x <= 1 + y_bin.
 

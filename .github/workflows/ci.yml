@@ -47,11 +47,11 @@ jobs:
         run: |
           source .venv/bin/activate
           mypy python/discopt/
-      - name: Test with coverage (fast — excludes solve and slow tests)
+      - name: Test with coverage (PR-fast — matches `make test`, excludes slow + correctness)
         run: |
           source .venv/bin/activate
           pip install pytest-cov
-          pytest python/tests/ -v --timeout=120 -m "not slow" --ignore=python/tests/test_minlplib.py --ignore=python/tests/test_correctness.py --cov=discopt --cov-report=term-missing --cov-report=xml:coverage.xml
+          pytest python/tests/ -v --timeout=120 -m "not slow" --ignore=python/tests/test_correctness.py --cov=discopt --cov-report=term-missing --cov-report=xml:coverage.xml
         env:
           JAX_PLATFORMS: cpu
           JAX_ENABLE_X64: "1"

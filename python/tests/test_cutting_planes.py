@@ -1014,6 +1014,7 @@ class TestSolverCutIntegration:
         assert result.status in ("optimal", "feasible")
         assert result.objective is not None
 
+    @pytest.mark.slow
     def test_bilinear_minlp_with_cuts(self):
         """Bilinear MINLP should solve with OA + RLT cuts."""
         from discopt.modeling.core import Model

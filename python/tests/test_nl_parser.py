@@ -18,6 +18,8 @@ import tempfile
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.unit
+
 # Try importing the .nl parser binding; skip all tests if unavailable.
 try:
     from discopt._rust import parse_nl_file, parse_nl_string
