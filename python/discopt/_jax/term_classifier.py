@@ -22,6 +22,7 @@ Theory references:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Any
 
 from discopt.modeling.core import (
     BinaryOp,
@@ -159,6 +160,56 @@ def _collect_product_factors(expr: Expression, model: Model) -> list[int] | None
 
 
 def classify_nonlinear_terms(model: Model) -> NonlinearTerms:
+    """Walk the model's expression DAG and catalog nonlinear term structure.
+
+    Uses the Rust expression-arena classifier for polynomial/product models when
+    available, falling back to the Python implementation for unsupported models
+    and for cases that need concrete ``general_nl`` expression objects.
+    """
+    rust_terms = _classify_nonlinear_terms_rust(model)
+    if rust_terms is not None:
+        return rust_terms
+    return _classify_nonlinear_terms_python(model)
+
+
+def _classify_nonlinear_terms_rust(model: Model) -> NonlinearTerms | None:
+    """Return Rust-classified terms when the fast path can preserve the API."""
+    try:
+        from discopt._rust import model_to_repr
+    except Exception:
+        return None
+
+    try:
+        payload = model_to_repr(model).classify_nonlinear_terms()
+    except Exception:
+        return None
+
+    # The public API exposes the actual Python expression objects for general_nl.
+    # The Rust arena sees only node ids, so keep those models on the Python path.
+    if int(payload.get("general_nl_count", 0)) != 0:
+        return None
+
+    return _terms_from_rust_payload(payload)
+
+
+def _terms_from_rust_payload(payload: dict[str, Any]) -> NonlinearTerms:
+    """Convert the PyO3 classifier payload into the public dataclass."""
+    incidence_payload = payload.get("term_incidence", {})
+    return NonlinearTerms(
+        bilinear=[(int(i), int(j)) for i, j in payload.get("bilinear", [])],
+        trilinear=[(int(i), int(j), int(k)) for i, j, k in payload.get("trilinear", [])],
+        multilinear=[tuple(int(idx) for idx in term) for term in payload.get("multilinear", [])],
+        monomial=[(int(var_idx), int(exp)) for var_idx, exp in payload.get("monomial", [])],
+        general_nl=[],
+        term_incidence={
+            int(var_idx): {int(term_idx) for term_idx in term_ids}
+            for var_idx, term_ids in incidence_payload.items()
+        },
+        partition_candidates=[int(var_idx) for var_idx in payload.get("partition_candidates", [])],
+    )
+
+
+def _classify_nonlinear_terms_python(model: Model) -> NonlinearTerms:
     """Walk the model's expression DAG and catalog nonlinear term structure.
 
     Scans all constraints and the objective.  Each unique bilinear/trilinear/monomial

@@ -361,6 +361,28 @@ impl PyModelRepr {
         let ub_arr = numpy::PyArray1::from_vec(py, ubs);
         Ok((lb_arr.into_any().unbind(), ub_arr.into_any().unbind()))
     }
+
+    /// Classify AMP nonlinear product terms using the Rust expression arena.
+    fn classify_nonlinear_terms(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let terms = discopt_core::amp::classify_nonlinear_terms(&self.inner);
+        let dict = PyDict::new(py);
+
+        dict.set_item("bilinear", terms.bilinear)?;
+        dict.set_item("trilinear", terms.trilinear)?;
+        dict.set_item("multilinear", terms.multilinear)?;
+        dict.set_item("monomial", terms.monomial)?;
+        dict.set_item("general_nl_count", terms.general_nl_count)?;
+        dict.set_item("partition_candidates", terms.partition_candidates)?;
+
+        let incidence = PyDict::new(py);
+        for (var_idx, term_ids) in terms.term_incidence {
+            let ids: Vec<usize> = term_ids.into_iter().collect();
+            incidence.set_item(var_idx, ids)?;
+        }
+        dict.set_item("term_incidence", incidence)?;
+
+        Ok(dict.into())
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
