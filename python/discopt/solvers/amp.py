@@ -750,12 +750,127 @@ def _default_milp_time_limit(
     return min(iter_budget * 3, remaining * 0.8, 60.0)
 
 
+def _validate_partition_scaling_factor(
+    value: Any,
+    option_name: str = "partition_scaling_factor",
+) -> float:
+    """Return a numeric AMP partition scaling factor."""
+    try:
+        factor = float(value)
+    except (TypeError, ValueError) as err:
+        raise ValueError(f"{option_name} must be a finite number > 1.0") from err
+    if not np.isfinite(factor) or factor <= 1.0:
+        raise ValueError(f"{option_name} must be a finite number > 1.0")
+    return factor
+
+
+def _normalize_partition_var_indices(
+    selected: Any,
+    n_orig: int,
+    *,
+    source: str,
+) -> list[int]:
+    """Validate flat variable indices returned by a custom AMP selection hook."""
+    if selected is None:
+        raise ValueError(f"{source} callable must return an iterable of flat variable indices")
+    try:
+        raw_indices = list(selected)
+    except TypeError as err:
+        raise ValueError(
+            f"{source} callable must return an iterable of flat variable indices"
+        ) from err
+
+    normalized: list[int] = []
+    seen: set[int] = set()
+    for raw_idx in raw_indices:
+        if isinstance(raw_idx, bool) or not isinstance(raw_idx, (int, np.integer)):
+            raise ValueError(f"{source} callable returned a non-integer index: {raw_idx!r}")
+        idx = int(raw_idx)
+        if idx < 0 or idx >= n_orig:
+            raise ValueError(
+                f"{source} callable returned index {idx}, outside valid range [0, {n_orig})"
+            )
+        if idx not in seen:
+            seen.add(idx)
+            normalized.append(idx)
+    return normalized
+
+
+def _select_partition_vars_with_hook(
+    terms,
+    *,
+    method: str,
+    disc_var_pick_hook: Optional[Callable[[dict[str, Any]], Any]],
+    pick_partition_vars: Callable[..., list[int]],
+    n_orig: int,
+    context: dict[str, Any],
+) -> list[int]:
+    """Select AMP partition variables through either a built-in method or user hook."""
+    if disc_var_pick_hook is None:
+        return pick_partition_vars(terms, method=method, distance=context.get("distance"))
+
+    def builtin_pick(
+        builtin_method: str = method,
+        distance: Optional[dict[int, float]] = None,
+    ) -> list[int]:
+        return pick_partition_vars(terms, method=builtin_method, distance=distance)
+
+    context = dict(context)
+    context.setdefault("partition_candidates", list(getattr(terms, "partition_candidates", [])))
+    context.setdefault("builtin_pick_partition_vars", builtin_pick)
+    return _normalize_partition_var_indices(
+        disc_var_pick_hook(context),
+        n_orig,
+        source="disc_var_pick",
+    )
+
+
+def _apply_partition_scaling_update(
+    partition_scaling_factor_update: Optional[Callable[[dict[str, Any]], Any]],
+    *,
+    current_scaling_factor: float,
+    context: dict[str, Any],
+) -> float:
+    """Apply an optional user hook that updates AMP's adaptive refinement width."""
+    if partition_scaling_factor_update is None:
+        return current_scaling_factor
+
+    hook_context = dict(context)
+    hook_context["current_scaling_factor"] = current_scaling_factor
+    updated = partition_scaling_factor_update(hook_context)
+    if updated is None:
+        return current_scaling_factor
+    return _validate_partition_scaling_factor(updated, "partition_scaling_factor_update")
+
+
+def _apply_partition_refinement_hook(
+    disc_add_partition_hook: Callable[[dict[str, Any]], Any],
+    context: dict[str, Any],
+) -> Any:
+    """Run a custom AMP partition-refinement hook and validate its state result."""
+    result = disc_add_partition_hook(dict(context))
+    if result is None:
+        result = context.get("disc_state")
+    if not (
+        hasattr(result, "partitions")
+        and hasattr(result, "scaling_factor")
+        and hasattr(result, "abs_width_tol")
+    ):
+        raise ValueError(
+            "disc_add_partition_method callable must return a DiscretizationState "
+            "or mutate context['disc_state'] in place"
+        )
+    return result
+
+
 def _normalize_partition_method(
     partition_method: str,
-    disc_var_pick: int | str | None,
+    disc_var_pick: int | str | Callable[[dict[str, Any]], Any] | None,
 ) -> str:
     """Resolve public AMP aliases to the internal partition-selection strategy."""
     if disc_var_pick is None:
+        return partition_method
+    if callable(disc_var_pick):
         return partition_method
 
     if isinstance(disc_var_pick, str):
@@ -931,6 +1046,9 @@ def _run_partitioned_obbt(
     total_time_limit: float,
     time_limit_per_mip: float,
     gap_tolerance: float,
+    partition_scaling_factor_update: Optional[Callable[[dict[str, Any]], Any]] = None,
+    disc_var_pick_hook: Optional[Callable[[dict[str, Any]], Any]] = None,
+    disc_add_partition_hook: Optional[Callable[[dict[str, Any]], Any]] = None,
     min_width: float = 1e-6,
 ):
     """Run incumbent-seeded OBBT on AMP's partition-aware MILP relaxation."""
@@ -944,7 +1062,24 @@ def _run_partitioned_obbt(
     from discopt._jax.partition_selection import pick_partition_vars
 
     n_orig = len(flat_lb)
-    part_vars = pick_partition_vars(terms, method=partition_mode)
+    part_vars = _select_partition_vars_with_hook(
+        terms,
+        method=partition_mode,
+        disc_var_pick_hook=disc_var_pick_hook,
+        pick_partition_vars=pick_partition_vars,
+        n_orig=n_orig,
+        context={
+            "stage": "presolve_obbt_selection",
+            "model": model,
+            "terms": terms,
+            "flat_lb": flat_lb.copy(),
+            "flat_ub": flat_ub.copy(),
+            "partition_mode": partition_mode,
+            "partition_scaling_factor": partition_scaling_factor,
+            "incumbent": incumbent.copy(),
+            "incumbent_objective": incumbent_obj,
+        },
+    )
     if not part_vars and terms.monomial:
         part_vars = sorted(set(var_idx for var_idx, _ in terms.monomial))
 
@@ -960,13 +1095,43 @@ def _run_partitioned_obbt(
             abs_width_tol=disc_abs_width_tol,
         )
         solution = {i: float(incumbent[i]) for i in part_vars}
-        disc_state = add_adaptive_partition(
-            base_state,
-            solution,
-            part_vars,
-            part_lbs,
-            part_ubs,
+        refinement_context = {
+            "stage": "presolve_obbt_refinement",
+            "model": model,
+            "terms": terms,
+            "disc_state": base_state,
+            "solution": solution,
+            "var_indices": list(part_vars),
+            "lb": list(part_lbs),
+            "ub": list(part_ubs),
+            "flat_lb": flat_lb.copy(),
+            "flat_ub": flat_ub.copy(),
+            "partition_mode": partition_mode,
+            "partition_scaling_factor": partition_scaling_factor,
+            "incumbent": incumbent.copy(),
+            "incumbent_objective": incumbent_obj,
+        }
+        partition_scaling_factor = _apply_partition_scaling_update(
+            partition_scaling_factor_update,
+            current_scaling_factor=partition_scaling_factor,
+            context=refinement_context,
         )
+        base_state.scaling_factor = partition_scaling_factor
+        refinement_context["partition_scaling_factor"] = partition_scaling_factor
+        refinement_context["disc_state"] = base_state
+        if disc_add_partition_hook is None:
+            disc_state = add_adaptive_partition(
+                base_state,
+                solution,
+                part_vars,
+                part_lbs,
+                part_ubs,
+            )
+        else:
+            disc_state = _apply_partition_refinement_hook(
+                disc_add_partition_hook,
+                refinement_context,
+            )
     else:
         disc_state = DiscretizationState(
             scaling_factor=partition_scaling_factor,
@@ -1107,6 +1272,9 @@ def _run_amp_presolve_bound_tightening(
     milp_gap_tolerance: Optional[float],
     presolve_bt_time_limit: Optional[float],
     presolve_bt_mip_time_limit: Optional[float],
+    partition_scaling_factor_update: Optional[Callable[[dict[str, Any]], Any]] = None,
+    disc_var_pick_hook: Optional[Callable[[dict[str, Any]], Any]] = None,
+    disc_add_partition_hook: Optional[Callable[[dict[str, Any]], Any]] = None,
 ) -> tuple[np.ndarray, np.ndarray, Any]:
     """Run the configured AMP presolve OBBT mode and return tightened bounds."""
     from discopt._jax.obbt import run_obbt
@@ -1164,6 +1332,9 @@ def _run_amp_presolve_bound_tightening(
             total_time_limit=partitioned_budget,
             time_limit_per_mip=subproblem_budget,
             gap_tolerance=milp_gap_tolerance if milp_gap_tolerance is not None else 1e-4,
+            partition_scaling_factor_update=partition_scaling_factor_update,
+            disc_var_pick_hook=disc_var_pick_hook,
+            disc_add_partition_hook=disc_add_partition_hook,
         )
     except Exception as err:
         logger.warning(
@@ -1221,9 +1392,10 @@ def solve_amp(
     milp_time_limit: Optional[float] = None,
     milp_gap_tolerance: Optional[float] = None,
     apply_partitioning: bool = True,
-    disc_var_pick: int | str | None = None,
+    disc_var_pick: int | str | Callable[[dict[str, Any]], Any] | None = None,
     partition_scaling_factor: float = 10.0,
-    disc_add_partition_method: str = "adaptive",
+    partition_scaling_factor_update: Optional[Callable[[dict[str, Any]], Any]] = None,
+    disc_add_partition_method: str | Callable[[dict[str, Any]], Any] = "adaptive",
     disc_abs_width_tol: float = 1e-3,
     convhull_formulation: str = "disaggregated",
     convhull_ebd: bool = False,
@@ -1264,16 +1436,24 @@ def solve_amp(
         MILP solver gap tolerance (default 1e-4).
     apply_partitioning : bool
         If False, solve a single relaxation/NLP pass without adaptive refinement.
-    disc_var_pick : int | str, optional
+    disc_var_pick : int, str, or callable, optional
         Alpine-style alias for partition selection:
         0/``"all"`` → max_cover, 1 → min_vertex_cover, 2 → auto,
         3 → adaptive weighted cover. This intentionally collapses Alpine's
         separate `disc_var_pick_algo` and `disc_var_pick` options into one
-        user-facing control.
+        user-facing control. A callable may also be supplied; it receives a
+        context dict and must return flat variable indices to partition.
     partition_scaling_factor : float
         Width scaling used by adaptive partition refinement.
-    disc_add_partition_method : str
-        Refinement update rule: ``"adaptive"`` or ``"uniform"``.
+    partition_scaling_factor_update : callable, optional
+        Hook called before each partition-refinement step. It receives the same
+        context dict shape as the partition hooks plus ``current_scaling_factor``
+        and may return a new finite factor greater than 1. Returning ``None``
+        keeps the current factor.
+    disc_add_partition_method : str or callable
+        Refinement update rule: ``"adaptive"`` or ``"uniform"``. A callable
+        may also be supplied; it receives a context dict and must return a
+        ``DiscretizationState`` or mutate ``context["disc_state"]`` in place.
     disc_abs_width_tol : float
         Absolute partition-width convergence tolerance.
     convhull_formulation : str
@@ -1337,9 +1517,12 @@ def solve_amp(
     part_lbs: list[float] = []
     part_ubs: list[float] = []
 
-    if partition_scaling_factor <= 1.0:
-        raise ValueError("partition_scaling_factor must be > 1.0")
-    if disc_add_partition_method not in {"adaptive", "uniform"}:
+    partition_scaling_factor = _validate_partition_scaling_factor(partition_scaling_factor)
+    disc_var_pick_hook = disc_var_pick if callable(disc_var_pick) else None
+    disc_add_partition_hook = (
+        disc_add_partition_method if callable(disc_add_partition_method) else None
+    )
+    if disc_add_partition_hook is None and disc_add_partition_method not in {"adaptive", "uniform"}:
         raise ValueError("disc_add_partition_method must be 'adaptive' or 'uniform'")
 
     partition_mode = _normalize_partition_method(partition_method, disc_var_pick)
@@ -1458,6 +1641,9 @@ def solve_amp(
                 milp_gap_tolerance=milp_gap_tolerance,
                 presolve_bt_time_limit=presolve_bt_time_limit,
                 presolve_bt_mip_time_limit=presolve_bt_mip_time_limit,
+                partition_scaling_factor_update=partition_scaling_factor_update,
+                disc_var_pick_hook=disc_var_pick_hook,
+                disc_add_partition_hook=disc_add_partition_hook,
             )
         except ImportError as err:
             logger.warning("AMP: OBBT presolve unavailable; continuing without it: %s", err)
@@ -1476,7 +1662,26 @@ def solve_amp(
 
     # ── Select partition variables ───────────────────────────────────────────
     if apply_partitioning:
-        part_vars = pick_partition_vars(terms, method=partition_mode)
+        part_vars = _select_partition_vars_with_hook(
+            terms,
+            method=partition_mode,
+            disc_var_pick_hook=disc_var_pick_hook,
+            pick_partition_vars=pick_partition_vars,
+            n_orig=n_orig,
+            context={
+                "stage": "initial_selection",
+                "model": model,
+                "terms": terms,
+                "flat_lb": flat_lb.copy(),
+                "flat_ub": flat_ub.copy(),
+                "iteration": 0,
+                "partition_mode": partition_mode,
+                "partition_scaling_factor": partition_scaling_factor,
+                "incumbent": None,
+                "milp_result": None,
+                "distance": None,
+            },
+        )
     else:
         part_vars = []
 
@@ -1488,7 +1693,8 @@ def solve_amp(
     elif not apply_partitioning:
         logger.info("AMP: partitioning disabled; running a single fixed relaxation pass")
     else:
-        logger.info("AMP: partitioning %d variables via %s", len(part_vars), partition_mode)
+        partition_label = "custom hook" if disc_var_pick_hook is not None else partition_mode
+        logger.info("AMP: partitioning %d variables via %s", len(part_vars), partition_label)
 
     # ── Initialize partitions ────────────────────────────────────────────────
     if part_vars:
@@ -1777,19 +1983,44 @@ def solve_amp(
             break
 
         if (
-            partition_mode == "adaptive_vertex_cover"
+            (partition_mode == "adaptive_vertex_cover" or disc_var_pick_hook is not None)
             and incumbent is not None
             and milp_result.x is not None
         ):
             distances = {
                 i: abs(float(incumbent[i]) - float(x0[i])) for i in terms.partition_candidates
             }
-            adaptive_vars = pick_partition_vars(
-                terms,
-                method="adaptive_vertex_cover",
-                distance=distances,
+            adaptive_method = (
+                "adaptive_vertex_cover" if disc_var_pick_hook is None else partition_mode
             )
-            if adaptive_vars and set(adaptive_vars) != set(part_vars):
+            adaptive_vars = _select_partition_vars_with_hook(
+                terms,
+                method=adaptive_method,
+                disc_var_pick_hook=disc_var_pick_hook,
+                pick_partition_vars=pick_partition_vars,
+                n_orig=n_orig,
+                context={
+                    "stage": "iteration_selection",
+                    "model": model,
+                    "terms": terms,
+                    "flat_lb": flat_lb.copy(),
+                    "flat_ub": flat_ub.copy(),
+                    "iteration": iteration,
+                    "partition_mode": partition_mode,
+                    "partition_scaling_factor": partition_scaling_factor,
+                    "incumbent": incumbent.copy(),
+                    "milp_solution": x0.copy(),
+                    "milp_result": milp_result,
+                    "distance": distances,
+                    "part_vars": list(part_vars),
+                },
+            )
+            if adaptive_vars or disc_var_pick_hook is not None:
+                should_update_adaptive_vars = set(adaptive_vars) != set(part_vars)
+            else:
+                should_update_adaptive_vars = False
+
+            if should_update_adaptive_vars:
                 logger.info(
                     "AMP: updating adaptive partition set from %d to %d variables",
                     len(part_vars),
@@ -1812,6 +2043,9 @@ def solve_amp(
                 part_lbs = [float(flat_lb[i]) for i in part_vars]
                 part_ubs = [float(flat_ub[i]) for i in part_vars]
 
+        if not part_vars:
+            break
+
         # Use MILP solution (original vars) as the refinement point
         refine_solution: dict[int, float] = {}
         if milp_result.x is not None:
@@ -1819,7 +2053,41 @@ def solve_amp(
             for i in part_vars:
                 refine_solution[i] = float(x_orig[i])
 
-        if disc_add_partition_method == "uniform":
+        refinement_context = {
+            "stage": "refinement",
+            "model": model,
+            "terms": terms,
+            "disc_state": disc_state,
+            "solution": dict(refine_solution),
+            "var_indices": list(part_vars),
+            "lb": list(part_lbs),
+            "ub": list(part_ubs),
+            "flat_lb": flat_lb.copy(),
+            "flat_ub": flat_ub.copy(),
+            "iteration": iteration,
+            "partition_mode": partition_mode,
+            "partition_scaling_factor": partition_scaling_factor,
+            "incumbent": None if incumbent is None else incumbent.copy(),
+            "milp_solution": x0.copy(),
+            "milp_result": milp_result,
+            "lower_bound": LB,
+            "upper_bound": UB,
+        }
+        partition_scaling_factor = _apply_partition_scaling_update(
+            partition_scaling_factor_update,
+            current_scaling_factor=partition_scaling_factor,
+            context=refinement_context,
+        )
+        disc_state.scaling_factor = partition_scaling_factor
+        refinement_context["partition_scaling_factor"] = partition_scaling_factor
+        refinement_context["disc_state"] = disc_state
+
+        if disc_add_partition_hook is not None:
+            disc_state = _apply_partition_refinement_hook(
+                disc_add_partition_hook,
+                refinement_context,
+            )
+        elif disc_add_partition_method == "uniform":
             disc_state = add_uniform_partition(
                 disc_state,
                 refine_solution,
