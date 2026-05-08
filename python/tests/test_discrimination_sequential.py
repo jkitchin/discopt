@@ -137,6 +137,7 @@ def _make_simulator(first: FirstOrderExp, second: SecondOrderExp, k_true: float,
 
 
 class TestSequentialDiscrimination:
+    @pytest.mark.slow
     def test_runs_to_completion(self, kinetics_setup):
         first, second, initial_data, k_true = kinetics_setup
         rng = np.random.default_rng(1)

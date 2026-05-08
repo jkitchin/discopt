@@ -406,6 +406,7 @@ class TestTrainingPipeline:
             assert jnp.allclose(cv_orig, cv_loaded, atol=1e-12)
             assert jnp.allclose(cc_orig, cc_loaded, atol=1e-12)
 
+    @pytest.mark.slow
     def test_gap_reduction_target(self):
         """Trained relaxation achieves measurable gap reduction vs McCormick.
 

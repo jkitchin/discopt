@@ -20,6 +20,8 @@ import numpy as np
 import pytest
 from discopt.modeling.gams_parser import GamsParseError, parse_gams
 
+pytestmark = pytest.mark.unit
+
 # ── Fixtures: hand-written .gms strings ────────────────────────
 
 TRANSPORT_GMS = textwrap.dedent("""\

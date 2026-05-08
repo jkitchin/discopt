@@ -718,6 +718,7 @@ class TestCollectStrongBranching:
 
 
 class TestImitationLearning:
+    @pytest.mark.slow
     def test_loss_decreases(self):
         """Loss should decrease over training epochs."""
         from discopt._jax.gnn_branching import (

@@ -635,6 +635,7 @@ class TestExecuteToolCalls:
 
 
 class TestDiagnosisInfeasibility:
+    @pytest.mark.slow
     def test_diagnose_infeasibility_basic(self):
         from discopt.llm.diagnosis import diagnose_infeasibility
 

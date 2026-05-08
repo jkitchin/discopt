@@ -92,6 +92,7 @@ class TestNlpBbConvex:
         assert result.x["y"] == pytest.approx(0.0, abs=1e-5)
         assert result.x["x"] == pytest.approx(1.0, abs=1e-4)
 
+    @pytest.mark.slow
     def test_facility_activation(self):
         m = _build_convex_minlp()
         result = m.solve(nlp_bb=True)
@@ -121,6 +122,7 @@ class TestNlpBbConvex:
         assert result.nlp_bb is True
         assert result.status == "optimal"
 
+    @pytest.mark.slow
     def test_matches_spatial_bb(self):
         """NLP-BB and spatial B&B should find the same optimum."""
         m = _build_convex_minlp()
