@@ -26,6 +26,14 @@ def _make_nlp1() -> Model:
     return m
 
 
+def _make_circle() -> Model:
+    m = Model("circle")
+    x = m.continuous("x", lb=0, ub=2, shape=(2,))
+    m.subject_to(x[0] ** 2 + x[1] ** 2 >= 2)
+    m.minimize(x[0] + x[1])
+    return m
+
+
 def _make_obbt_demo() -> Model:
     m = Model("obbt_demo")
     x = m.continuous("x", lb=0, ub=10)
@@ -40,13 +48,14 @@ def _build_relaxation_for_test(
     part_vars: list[int] | None = None,
     lbs: list[float] | None = None,
     ubs: list[float] | None = None,
+    n_init: int = 2,
 ):
     from discopt._jax.discretization import initialize_partitions
     from discopt._jax.milp_relaxation import build_milp_relaxation
     from discopt._jax.term_classifier import classify_nonlinear_terms
 
     terms = classify_nonlinear_terms(model)
-    state = initialize_partitions(part_vars or [], lb=lbs or [], ub=ubs or [], n_init=2)
+    state = initialize_partitions(part_vars or [], lb=lbs or [], ub=ubs or [], n_init=n_init)
     return build_milp_relaxation(model, terms, state, incumbent=None)
 
 
@@ -168,6 +177,35 @@ def test_weymouth_like_squares_extend_builtin_partition_selection():
     assert (3, 2) in terms.monomial
     assert set(terms.partition_candidates) == {0, 1}
     assert set(amp_mod._equality_square_monomial_partition_candidates(m, terms)) == {2, 3}
+
+
+def test_partitioned_square_secants_tighten_circle_superlevel_bound():
+    """Local square secants should close the Alpine circle MILP lower bound."""
+    m = _make_circle()
+    part_vars = [0, 1]
+    coarse_model, _ = _build_relaxation_for_test(
+        m,
+        part_vars=part_vars,
+        lbs=[0.0, 0.0],
+        ubs=[2.0, 2.0],
+        n_init=2,
+    )
+    fine_model, fine_varmap = _build_relaxation_for_test(
+        m,
+        part_vars=part_vars,
+        lbs=[0.0, 0.0],
+        ubs=[2.0, 2.0],
+        n_init=64,
+    )
+
+    coarse = coarse_model.solve()
+    fine = fine_model.solve()
+
+    assert set(fine_varmap["monomial_pw"]) == {(0, 2), (1, 2)}
+    assert coarse.objective is not None
+    assert fine.objective is not None
+    assert fine.objective >= coarse.objective + 0.05
+    assert fine.objective == pytest.approx(np.sqrt(2.0), abs=1e-4)
 
 
 def test_solve_nlp_subproblem_retries_ipopt_and_restores_bounds(monkeypatch):

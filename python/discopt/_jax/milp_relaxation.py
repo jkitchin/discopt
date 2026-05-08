@@ -5,15 +5,15 @@ Builds a linear programming relaxation of the original MINLP by:
   1. Replacing bilinear terms x_i*x_j with auxiliary variables w_ij and
      adding standard McCormick envelope constraints.
   2. Replacing monomial terms x_i^n with auxiliary variables s_i and adding
-     piecewise tangent-cut underestimators (using disc_state partition intervals)
-     and a global secant overestimator.
+     piecewise tangent-cut underestimators plus partition-activated secant
+     overestimators when the variable is discretized.
   3. Linearizing the original objective and constraints.
 
 The LP relaxation gives a valid lower bound:
   LP_opt ≤ global NLP_opt
 
-As the partition becomes finer (more intervals in disc_state), more tangent cuts
-are added for monomials in the objective, tightening the lower bound.
+As the partition becomes finer (more intervals in disc_state), more tangent and
+local secant cuts are added for monomials, tightening the lower bound.
 
 Theory: Nagarajan et al., JOGO 2018, Section 4 (piecewise McCormick relaxation).
 """
@@ -223,6 +223,11 @@ def _power_secant_line(lb: float, ub: float, n: int) -> tuple[float, float]:
     slope = float((ub**n - lb**n) / (ub - lb))
     intercept = float(lb**n - slope * lb)
     return slope, intercept
+
+
+def _power_is_convex_on_box(n: int, lb: float) -> bool:
+    """Return True when x**n is convex on the current box."""
+    return n % 2 == 0 or lb >= 0.0
 
 
 def _monomial_breakpoints(
@@ -957,6 +962,35 @@ def build_milp_relaxation(
         integrality_flags.append(0)
         col_idx += 1
 
+    monomial_pw_map: dict[tuple[int, int], list[tuple[int, float, float]]] = {}
+    for var_idx, n in terms.monomial:
+        lb_i = float(flat_lb[var_idx])
+        ub_i = float(flat_ub[var_idx])
+        if (
+            var_idx not in disc_state.partitions
+            or not _power_is_convex_on_box(n, lb_i)
+            or not np.isfinite(lb_i)
+            or not np.isfinite(ub_i)
+        ):
+            continue
+
+        breakpoints = _monomial_breakpoints(var_idx, lb_i, ub_i, disc_state)
+        if len(breakpoints) < 3:
+            continue
+
+        monomial_intervals: list[tuple[int, float, float]] = []
+        for a_k, b_k in zip(breakpoints[:-1], breakpoints[1:]):
+            if b_k <= a_k:
+                continue
+            delta_col = col_idx
+            all_bounds.append((0.0, 1.0))
+            integrality_flags.append(1)
+            col_idx += 1
+            monomial_intervals.append((delta_col, float(a_k), float(b_k)))
+
+        if monomial_intervals:
+            monomial_pw_map[(var_idx, n)] = monomial_intervals
+
     univariate_relaxations, univariate_var_map, univariate_bounds = _collect_univariate_relaxations(
         model,
         n_orig,
@@ -1348,6 +1382,47 @@ def build_milp_relaxation(
             row[j] -= xi_lb_g
             _add_row(row, -xi_lb_g * xj_ub_g)
 
+    # Binary interval selectors for partitioned convex monomial overestimators.
+    # A local secant is valid only on its own interval, so the selector links the
+    # original variable to one active interval before applying that secant.
+    for (var_idx, n), monomial_intervals in monomial_pw_map.items():
+        if not monomial_intervals:
+            continue
+        s_col = monomial_var_map[(var_idx, n)]
+        x_lb, x_ub = [float(v) for v in all_bounds[var_idx]]
+        _s_lb, s_ub = [float(v) for v in all_bounds[s_col]]
+
+        row_sum = np.zeros(n_total)
+        for delta_col, _, _ in monomial_intervals:
+            row_sum[delta_col] = -1.0
+        _add_row(row_sum, -1.0)
+        _add_row(-row_sum, 1.0)
+
+        for delta_col, a_k, b_k in monomial_intervals:
+            lower_m = max(0.0, a_k - x_lb)
+            row = np.zeros(n_total)
+            row[var_idx] = -1.0
+            row[delta_col] = lower_m
+            _add_row(row, lower_m - a_k)
+
+            upper_m = max(0.0, x_ub - b_k)
+            row = np.zeros(n_total)
+            row[var_idx] = 1.0
+            row[delta_col] = upper_m
+            _add_row(row, b_k + upper_m)
+
+            slope, intercept = _power_secant_line(a_k, b_k, n)
+            line_at_lb = slope * x_lb + intercept
+            line_at_ub = slope * x_ub + intercept
+            line_min = min(line_at_lb, line_at_ub)
+            secant_m = max(0.0, s_ub - line_min)
+
+            row = np.zeros(n_total)
+            row[s_col] = 1.0
+            row[var_idx] = -slope
+            row[delta_col] = secant_m
+            _add_row(row, intercept + secant_m)
+
     # Monomial constraints
     for var_idx, n in terms.monomial:
         lb_i = float(flat_lb[var_idx])
@@ -1383,7 +1458,7 @@ def build_milp_relaxation(
             row[var_idx] = -slope
             _add_row(row, intercept)
 
-        if n % 2 == 0 or lb_i >= 0.0:
+        if _power_is_convex_on_box(n, lb_i):
             # Convex on the full domain: tangents underestimate and the secant
             # overestimates. Using all breakpoints makes the relaxation tighten
             # monotonically as the partition is refined.
@@ -1577,6 +1652,7 @@ def build_milp_relaxation(
         "multilinear": multilinear_var_map,
         "multilinear_stages": multilinear_stage_map,
         "monomial": monomial_var_map,
+        "monomial_pw": monomial_pw_map,
         "univariate": univariate_var_map,
         "univariate_relaxations": univariate_relaxations,
         "bilinear_pw": bilinear_pw_map,

@@ -1083,6 +1083,22 @@ class TestMilpRelaxation:
                 f"MILP LB {result.objective:.6f} exceeds known global optimum √2"
             )
 
+    def test_partitioned_circle_monomial_lb_uses_local_secants(self):
+        """Partitioned square overestimators should certify the Alpine circle bound."""
+        m = _make_circle()
+        terms = self.classify(m)
+        square_vars = sorted(var_idx for var_idx, exp in terms.monomial if exp == 2)
+        state = self.init_partitions(square_vars, lb=[0.0, 0.0], ub=[2.0, 2.0], n_init=64)
+
+        milp_model, varmap = self.build_milp(m, terms, state, incumbent=None)
+        result = milp_model.solve()
+
+        assert set(varmap["monomial_pw"]) == {(0, 2), (1, 2)}
+        assert result.status == "optimal"
+        assert result.objective is not None
+        assert result.objective <= CIRCLE_OPTIMUM + 1e-4
+        assert result.objective >= CIRCLE_OPTIMUM - 1e-4
+
     def test_milp_lb_tightens_with_finer_partitions(self):
         """LB must be non-decreasing as partition count increases (key paper claim)."""
         m = _make_nlp1()
@@ -1580,11 +1596,8 @@ class TestAmpEndToEnd:
         """circle: x₀²+x₁²≥2 minimized to global optimum √2."""
         m = _make_circle()
         result = m.solve(solver="amp", rel_gap=1e-4, time_limit=60)
-        assert result.status in ("optimal", "feasible", "time_limit")
-        if result.status == "optimal":
-            assert result.gap_certified is True
-        else:
-            assert result.gap_certified is False
+        assert result.status == "optimal"
+        assert result.gap_certified is True
         assert result.objective is not None
         assert abs(result.objective - CIRCLE_OPTIMUM) <= 1e-3, (
             f"Objective {result.objective:.6f} too far from √2={CIRCLE_OPTIMUM}"
