@@ -445,6 +445,22 @@ class TestTermClassifier:
         assert len(terms.bilinear) >= 1
         assert len(terms.monomial) >= 2  # x[0]**2 and x[1]**2
 
+    def test_gas_network_weymouth_monomials_extend_amp_partition_selection(self):
+        """Gas-network square terms should be eligible for AMP partition refinement."""
+        from discopt.benchmarks.problems.gas_network_minlp import build_gas_network_minlp
+        from discopt.solvers import amp as amp_mod
+
+        m = build_gas_network_minlp()
+        terms = self.classify(m)
+        selected_square_vars = set(amp_mod._equality_square_monomial_partition_candidates(m, terms))
+        product_vars = {var_idx for term in terms.bilinear + terms.trilinear for var_idx in term}
+        for term in terms.multilinear:
+            product_vars.update(term)
+
+        assert selected_square_vars
+        assert selected_square_vars - product_vars
+        assert not selected_square_vars.issubset(set(terms.partition_candidates))
+
     def test_repeated_factor_product_is_general_nl(self):
         """Mixed repeated-factor products like x*x*y must not be misclassified as bilinear."""
         m = Model("repeat_factor")

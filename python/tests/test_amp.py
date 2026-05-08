@@ -152,6 +152,24 @@ def test_amp_normalizes_initial_point_length_and_bounds():
         amp_mod._normalize_initial_point(np.array([1.0]), 2, lb, ub)
 
 
+def test_weymouth_like_squares_extend_builtin_partition_selection():
+    """Square-balance equalities should add monomial vars without changing classifier output."""
+    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt.solvers import amp as amp_mod
+
+    m = Model("weymouth_like_candidates")
+    x = m.continuous("x", lb=0.0, ub=10.0, shape=(4,))
+    m.minimize(x[0] * x[1])
+    m.subject_to(x[2] ** 2 == 3.0 * x[3] ** 2)
+
+    terms = classify_nonlinear_terms(m)
+
+    assert (2, 2) in terms.monomial
+    assert (3, 2) in terms.monomial
+    assert set(terms.partition_candidates) == {0, 1}
+    assert set(amp_mod._equality_square_monomial_partition_candidates(m, terms)) == {2, 3}
+
+
 def test_solve_nlp_subproblem_retries_ipopt_and_restores_bounds(monkeypatch):
     """AMP local NLP recovery should retry Ipopt and restore temporary fixed bounds."""
     import discopt._jax.ipm as ipm_mod
@@ -720,6 +738,61 @@ def test_amp_adaptive_keeps_monomial_fallback_partitions(monkeypatch):
     )
 
     assert refined_var_sets == [[0]]
+    assert result.status == "feasible"
+    assert result.gap_certified is False
+
+
+def test_amp_adaptive_refines_weymouth_like_monomials(monkeypatch):
+    """Adaptive selection should keep square-balance variables when products also exist."""
+    import discopt._jax.discretization as disc_mod
+    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    from discopt.solvers import amp as amp_mod
+
+    refined_var_sets = []
+
+    def fake_add_adaptive_partition(state, solution, var_indices, lb, ub):
+        del solution, lb, ub
+        refined_var_sets.append(list(var_indices))
+        return state
+
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_milp_with_oa_recovery",
+        lambda **kwargs: (
+            MilpRelaxationResult(
+                status="optimal",
+                objective=0.0,
+                x=np.array([0.2, 0.3, 0.4, 0.4], dtype=np.float64),
+            ),
+            {},
+            [],
+            1,
+        ),
+    )
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_best_nlp_candidate",
+        lambda *args, **kwargs: (np.array([0.5, 0.5, 1.0, 1.0], dtype=np.float64), 1.0),
+    )
+    monkeypatch.setattr(disc_mod, "add_adaptive_partition", fake_add_adaptive_partition)
+    monkeypatch.setattr(disc_mod, "check_partition_convergence", lambda state: True)
+
+    m = Model("weymouth_like_adaptive")
+    x = m.continuous("x", lb=0.0, ub=2.0, shape=(4,))
+    m.minimize(x[0] * x[1])
+    m.subject_to(x[2] ** 2 == x[3] ** 2)
+
+    result = amp_mod.solve_amp(
+        m,
+        disc_var_pick="adaptive",
+        presolve_bt=False,
+        skip_convex_check=True,
+        rel_gap=1e-6,
+        max_iter=2,
+        time_limit=30,
+    )
+
+    assert refined_var_sets == [[0, 1, 2, 3]]
     assert result.status == "feasible"
     assert result.gap_certified is False
 
