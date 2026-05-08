@@ -174,8 +174,9 @@ hooks:
 # --- Test ---------------------------------------------------------------------
 #
 # Tiers (issue #68):
-#   test          - PR-fast: matches CI python-fast job. Excludes `slow` and the
-#                   correctness suite. Target <5 min.
+#   test          - PR-fast: matches CI python-fast job. Excludes `slow`,
+#                   `correctness`, `integration`, and `amp_benchmark` while
+#                   keeping the curated `pr_correctness` subset. Target <10 min.
 #   test-all      - everything, including slow + correctness. Target ~20 min.
 #   test-quick    - unit + smoke only, dev inner loop. Target <60 s.
 #   test-slow     - only slow-marked tests (full backend cross-product etc.).
@@ -183,9 +184,10 @@ hooks:
 #   test-<slice>  - subject-area slice run with the PR-fast filter applied.
 
 # Common flags for the PR-fast tier (kept in sync with .github/workflows/ci.yml).
-# `not slow` excludes the heavy backend matrix; the curated PR correctness
-# subset (test_pr_correctness.py) is not slow-marked so it still runs.
-PYTEST_FAST_FLAGS := --timeout=120 -m "not slow" \
+# These exclusions keep the PR gate focused on ordinary feature tests plus the
+# curated `pr_correctness` subset. Full correctness, integration, and benchmark
+# coverage stay available through the explicit targets below.
+PYTEST_FAST_FLAGS := --timeout=120 -m "not slow and not correctness and not integration and not amp_benchmark" \
     --ignore=python/tests/test_correctness.py
 
 PYTEST_QUICK_FLAGS := --timeout=60 -m "(unit or smoke) and not slow and not integration and not amp_benchmark"

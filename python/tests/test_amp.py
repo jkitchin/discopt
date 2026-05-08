@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -43,15 +44,39 @@ def test_amp_integration_suite_is_opt_in():
     assert "pytest.mark.amp_benchmark" in text
 
 
+def _make_dry_run(target: str) -> str:
+    repo = Path(__file__).resolve().parents[2]
+    result = subprocess.run(
+        [
+            "make",
+            "-n",
+            target,
+            "PYTHON=python",
+            "PYTEST=python -m pytest",
+            "MATURIN=python -m maturin",
+            "RUFF=python -m ruff",
+        ],
+        cwd=repo,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    return result.stdout
+
+
 def test_quick_test_tier_excludes_amp_integration_markers():
     """The quick tier must not select opt-in AMP smoke tests."""
-    makefile = Path(__file__).resolve().parents[2] / "Makefile"
-    text = makefile.read_text(encoding="utf-8")
+    output = _make_dry_run("test-quick")
 
-    assert (
-        'PYTEST_QUICK_FLAGS := --timeout=60 -m "(unit or smoke) and not slow '
-        'and not integration and not amp_benchmark"'
-    ) in text
+    assert '-m "(unit or smoke) and not slow and not integration and not amp_benchmark"' in output
+
+
+def test_pr_fast_tier_excludes_heavy_manual_markers():
+    """The PR-fast tier should keep nightly/manual markers out of make test."""
+    output = _make_dry_run("test")
+
+    assert '-m "not slow and not correctness and not integration and not amp_benchmark"' in output
+    assert "--ignore=python/tests/test_correctness.py" in output
 
 
 @pytest.mark.requires_cyipopt

@@ -86,6 +86,8 @@ def linear_fit():
     return exp, data, est
 
 
+@pytest.mark.slow
+@pytest.mark.integration
 class TestProfileLikelihoodLinear:
     def test_returns_result_type(self, linear_fit):
         exp, data, est = linear_fit
@@ -134,6 +136,8 @@ class TestProfileLikelihoodLinear:
         np.testing.assert_allclose(lo_dist, hi_dist, rtol=1e-2)
 
 
+@pytest.mark.slow
+@pytest.mark.integration
 class TestProfileLikelihoodUnidentifiable:
     def test_ab_ridge_profile_of_a(self):
         """On the a*b*x ridge: moving a without adjusting b would break
@@ -154,6 +158,8 @@ class TestProfileLikelihoodUnidentifiable:
         assert any("bound" in w or "flat" in w or "non-identifiable" in w for w in prof.warnings)
 
 
+@pytest.mark.slow
+@pytest.mark.integration
 class TestProfileAll:
     def test_loops_over_all_params(self, linear_fit):
         exp, data, est = linear_fit
@@ -175,6 +181,8 @@ class TestApiValidation:
             profile_likelihood(exp, data, "a", confidence_level=1.5)
 
 
+@pytest.mark.slow
+@pytest.mark.integration
 class TestPipelineConsistency:
     """Round-trip: estimate -> diagnose -> estimability -> profile on
     the a*b*x + c*x^2 fixture. Every tool must agree that the direction

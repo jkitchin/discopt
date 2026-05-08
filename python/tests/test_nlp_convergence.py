@@ -32,6 +32,8 @@ from discopt.modeling.core import Model, cos, exp, log, sin, sum  # noqa: E402
 from discopt.solvers import SolveStatus  # noqa: E402
 from discopt.solvers.nlp_ipopt import solve_nlp_from_model  # noqa: E402
 
+pytestmark = [pytest.mark.slow, pytest.mark.integration]
+
 # Default Ipopt options. We use limited-memory Hessian approximation because
 # the current _IpoptCallbacks.hessian only provides objective Hessian, not the
 # full Lagrangian Hessian (constraint second derivatives are missing).
