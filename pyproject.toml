@@ -45,8 +45,8 @@ nn = ["onnx>=1.14", "onnxruntime>=1.16"]
 ml = ["scikit-learn>=1.0"]
 xgboost = ["xgboost>=1.7"]
 lightgbm = ["lightgbm>=4.0"]
-gnn = ["equinox>=0.10", "optax>=0.1"]
-learned = ["equinox>=0.10", "optax>=0.1"]
+gnn = ["equinox>=0.13.8", "optax>=0.1"]
+learned = ["equinox>=0.13.8", "optax>=0.1"]
 dev = ["pytest", "pytest-timeout", "pytest-cov", "ruff", "mypy", "highspy", "pre-commit"]
 all = ["discopt[ipopt,highs,cutest,llm,gnn,nn,ml]"]
 
@@ -185,13 +185,15 @@ disable_error_code = ["assignment", "misc", "union-attr", "operator", "arg-type"
 testpaths = ["python/tests"]
 timeout = 300
 markers = [
-    "smoke: quick sanity tests",
-    "slow: long-running tests",
-    "integration: solver-dependent or cross-module integration tests",
+    "unit: pure-logic tests; no solver, no JAX trace beyond cached; <0.1 s",
+    "smoke: one solve per code path on a tiny instance; <1 s",
+    "slow: long-running tests (backend cross-product, mid-size instances, ML training)",
+    "integration: end-to-end multi-component workflows (DOE, discrimination, CUTEst)",
     "amp_benchmark: opt-in AMP Alpine, MINLPTests, or incidence benchmark coverage",
     "requires_cyipopt: requires the optional cyipopt/Ipopt solver stack",
     "gpu: requires GPU",
-    "correctness: correctness validation tests",
+    "correctness: known-optima validation tests; usually also `slow`",
+    "pr_correctness: small known-optima subset run on every PR; <30 s total",
     "cutest: requires pycutest and CUTEst installation",
 ]
 

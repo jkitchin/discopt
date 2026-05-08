@@ -95,6 +95,7 @@ class TestSimpleExpressionSoundness:
         assert cv_viol == 0, f"cv violations: {cv_viol}"
         assert cc_viol == 0, f"cc violations: {cc_viol}"
 
+    @pytest.mark.slow
     def test_bilinear_xy(self):
         m = Model("test")
         x = m.continuous("x", lb=0.5, ub=5)
@@ -109,6 +110,7 @@ class TestSimpleExpressionSoundness:
         assert cv_viol == 0, f"cv violations: {cv_viol}"
         assert cc_viol == 0, f"cc violations: {cc_viol}"
 
+    @pytest.mark.slow
     def test_exp_plus_log(self):
         m = Model("test")
         x = m.continuous("x", lb=0.1, ub=3)
@@ -123,6 +125,7 @@ class TestSimpleExpressionSoundness:
         assert cv_viol == 0, f"cv violations: {cv_viol}"
         assert cc_viol == 0, f"cc violations: {cc_viol}"
 
+    @pytest.mark.slow
     def test_x_squared(self):
         m = Model("test")
         x = m.continuous("x", lb=-3, ub=3)
@@ -300,6 +303,7 @@ class TestJitVmap:
 # ─────────────────────────────────────────────────────────────
 
 
+@pytest.mark.slow
 class TestExampleObjectives:
     def _test_example_model(self, build_fn, n_samples=5000):
         """Generic test: compile objective relaxation and verify soundness."""

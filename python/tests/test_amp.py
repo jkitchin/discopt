@@ -43,6 +43,17 @@ def test_amp_integration_suite_is_opt_in():
     assert "pytest.mark.amp_benchmark" in text
 
 
+def test_quick_test_tier_excludes_amp_integration_markers():
+    """The quick tier must not select opt-in AMP smoke tests."""
+    makefile = Path(__file__).resolve().parents[2] / "Makefile"
+    text = makefile.read_text(encoding="utf-8")
+
+    assert (
+        'PYTEST_QUICK_FLAGS := --timeout=60 -m "(unit or smoke) and not slow '
+        'and not integration and not amp_benchmark"'
+    ) in text
+
+
 @pytest.mark.requires_cyipopt
 def test_fast_amp_environment_includes_working_cyipopt():
     """The fast AMP/CI environment should include a usable Ipopt Python backend."""

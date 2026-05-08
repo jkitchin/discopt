@@ -22,10 +22,11 @@ _RIPOPT_STATUS_MAP: dict[str, SolveStatus] = {
     "local_infeasibility": SolveStatus.INFEASIBLE,
     "max_iterations": SolveStatus.ITERATION_LIMIT,
     "numerical_error": SolveStatus.ERROR,
-    "unbounded": SolveStatus.UNBOUNDED,
+    "diverging_iterates": SolveStatus.UNBOUNDED,
     "restoration_failed": SolveStatus.ERROR,
     "evaluation_error": SolveStatus.ERROR,
     "user_requested_stop": SolveStatus.ERROR,
+    "stop_at_tiny_step": SolveStatus.OPTIMAL,
     "internal_error": SolveStatus.ERROR,
 }
 

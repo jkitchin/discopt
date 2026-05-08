@@ -90,6 +90,7 @@ class TestLangmuirSaturatedRegime:
         assert diag.fim_rank == 2
         assert all(np.isfinite(v) for v in diag.vif.values())
 
+    @pytest.mark.slow
     def test_profile_ci_bounded_for_both(self):
         exp, data, qm_true, K_true = self._data()
         est = estimate_parameters(exp, data, initial_guess={"qm": 4.0, "K": 0.5})

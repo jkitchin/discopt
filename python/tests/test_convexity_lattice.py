@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from discopt._jax.convexity.lattice import (
     AtomProfile,
     Curvature,
@@ -24,6 +25,8 @@ from discopt._jax.convexity.lattice import (
     sign_reciprocal,
     unary_atom_profile,
 )
+
+pytestmark = pytest.mark.unit
 
 
 class TestCurvatureLattice:

@@ -30,22 +30,51 @@ cd crates/discopt-python && maturin develop && cd ../..
 
 ## Running Tests
 
+The Python suite is tiered so you can pick the right cost/coverage point.
+Prefer the Make targets — they pin flags consistent with CI.
+
 ```bash
 # Rust tests
 cargo test -p discopt-core
 
-# Python tests (JAX requires these env vars on macOS)
-JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 pytest python/tests/ -v
+# PR-fast (matches the python-fast CI job; ~5 min). What CI runs.
+make test
 
-# Quick smoke tests
-pytest python/tests/ -m smoke
+# Dev inner loop: unit + smoke markers only (~60 s).
+make test-quick
 
-# Skip slow tests
-pytest python/tests/ -m "not slow"
+# Subject-area slices (PR-fast filter applied within the slice).
+make test-modeling   make test-solvers   make test-amp
+make test-nn         make test-convexity make test-jax    make test-llm
 
-# With coverage (>=85% required)
+# Long tail: only slow-marked tests.
+make test-slow
+
+# Known-optima validation (heavy).
+make test-correctness
+
+# Everything (slow + correctness + every marker).
+make test-all
+
+# Coverage (>=85% required); add to any pytest invocation.
 pytest python/tests/ --cov=discopt
 ```
+
+### Marker conventions
+
+| Marker | Meaning | Runs in PR? |
+|---|---|---|
+| *(unmarked)* | Default solver/feature tests; <3 s each | yes |
+| `unit` | Pure logic; no solver, no JAX trace beyond cached; <0.1 s | yes |
+| `smoke` | One solve per code path on a tiny instance; <1 s | yes |
+| `slow` | Backend cross-product, mid-size instances, ML training | nightly |
+| `correctness` | Known-optima validation; usually also `slow` | nightly / pre-release |
+| `pr_correctness` | Curated 5-instance correctness subset; <30 s total | yes |
+| `integration` | End-to-end workflows (DOE, discrimination, CUTEst) | nightly / manual |
+
+When adding a test, default to no marker for normal feature tests; add
+`slow` if it routinely costs more than ~3 s, and `unit` or `smoke` if it
+fits the budgets above. Never weaken `correctness` checks.
 
 ## Code Style
 

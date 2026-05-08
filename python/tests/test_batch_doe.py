@@ -341,6 +341,8 @@ class TestPenalizedBatch:
 
 
 class TestSequentialBatch:
+    @pytest.mark.slow
+    @pytest.mark.integration
     def test_batched_sequential_records_batch_and_calls_runner(self):
         exp = ExpDecayExperiment()
         k_true = 0.7
