@@ -2638,14 +2638,25 @@ class TestCurrentCodeWeaknesses:
         assert result.objective is not None
         assert result.gap is None or result.gap >= 0.0
 
-    @pytest.mark.parametrize("problem_id", ["nlp_003_010", "nlp_003_011"])
-    def test_amp_omits_invalid_bound_when_objective_relaxation_is_unavailable(
+    @pytest.mark.parametrize(
+        "problem_id",
+        [
+            "nlp_003_010",
+            "nlp_003_011",
+            "nlp_mi_003_010",
+            "nlp_mi_003_011",
+        ],
+    )
+    def test_amp_reports_supported_univariate_bound_for_minlptests_cases(
         self,
         problem_id,
         caplog,
     ):
-        """Nonlinear objectives without a relaxation bound must not report fake LB/UB inversions."""
-        instance = MINLPTESTS_NLP_BY_ID[problem_id]
+        """Affine sqrt objectives with exp constraints should produce valid relaxation bounds."""
+        instances = (
+            MINLPTESTS_MI_BY_ID if problem_id.startswith("nlp_mi_") else MINLPTESTS_NLP_BY_ID
+        )
+        instance = instances[problem_id]
         m = instance.build_fn()
 
         with caplog.at_level(logging.WARNING):
@@ -2660,8 +2671,9 @@ class TestCurrentCodeWeaknesses:
         assert result.objective is not None
         tol = 1e-6 + 1e-4 * abs(instance.expected_obj)
         assert abs(result.objective - instance.expected_obj) <= tol
-        assert result.bound is None
-        assert result.gap is None
+        assert result.bound is not None
+        assert result.bound >= result.objective - 1e-6
+        assert result.gap is None or result.gap >= 0.0
         assert not any("invalid bound ordering" in record.message for record in caplog.records)
 
     def test_select_best_nlp_candidate_respects_deadline(self, monkeypatch):

@@ -35,6 +35,21 @@ def _make_obbt_demo() -> Model:
     return m
 
 
+def _build_relaxation_for_test(
+    model: Model,
+    part_vars: list[int] | None = None,
+    lbs: list[float] | None = None,
+    ubs: list[float] | None = None,
+):
+    from discopt._jax.discretization import initialize_partitions
+    from discopt._jax.milp_relaxation import build_milp_relaxation
+    from discopt._jax.term_classifier import classify_nonlinear_terms
+
+    terms = classify_nonlinear_terms(model)
+    state = initialize_partitions(part_vars or [], lb=lbs or [], ub=ubs or [], n_init=2)
+    return build_milp_relaxation(model, terms, state, incumbent=None)
+
+
 def test_amp_integration_suite_is_opt_in():
     """The Alpine/MINLPTests suite must stay out of the default marker selection."""
     text = Path(__file__).with_name("test_amp_integration.py").read_text(encoding="utf-8")
@@ -450,6 +465,78 @@ def test_solve_amp_convex_model_delegates_to_continuous_solver(monkeypatch):
     assert result.status == "optimal"
     assert result.convex_fast_path is True
     np.testing.assert_allclose(captured["initial_point"], np.array([1.0]))
+
+
+@pytest.mark.parametrize(
+    ("name", "known_min"),
+    [
+        ("sqrt", 1.0),
+        ("log", 0.0),
+        ("exp", 1.0),
+        ("abs", 0.0),
+    ],
+)
+def test_supported_univariate_objectives_return_valid_bounds(name, known_min):
+    """Supported affine univariate objectives should produce sound MILP bounds."""
+    m = Model(f"{name}_obj")
+    if name == "sqrt":
+        x = m.continuous("x", lb=0.0, ub=3.0)
+        m.minimize(dm.sqrt(x + 1.0))
+    elif name == "log":
+        x = m.continuous("x", lb=1.0, ub=4.0)
+        m.minimize(dm.log(x))
+    elif name == "exp":
+        x = m.continuous("x", lb=0.0, ub=2.0)
+        m.minimize(dm.exp(x))
+    else:
+        x = m.continuous("x", lb=-2.0, ub=3.0)
+        m.minimize(dm.abs(x))
+
+    milp_model, varmap = _build_relaxation_for_test(m)
+    result = milp_model.solve()
+
+    assert result.status == "optimal"
+    assert result.objective is not None
+    assert result.objective <= known_min + 1e-8
+    assert {r.func_name for r in varmap["univariate_relaxations"]} == {name}
+
+
+def test_supported_univariate_constraint_tightens_relaxation():
+    """Supported operator constraints should be kept instead of omitted."""
+    m = Model("exp_constraint")
+    x = m.continuous("x", lb=0.0, ub=2.0)
+    y = m.continuous("y", lb=0.0, ub=1.5)
+    m.subject_to(dm.exp(x) <= y)
+    m.minimize(-x)
+
+    milp_model, varmap = _build_relaxation_for_test(m)
+    result = milp_model.solve()
+
+    assert result.status == "optimal"
+    assert result.objective is not None
+    assert result.objective > -1.0
+    assert len(varmap["univariate_relaxations"]) == 1
+    assert varmap["univariate_relaxations"][0].func_name == "exp"
+
+
+def test_nested_univariate_objective_still_returns_no_relaxation_bound():
+    """Unsupported nested operator arguments should keep the safe no-bound behavior."""
+    m = Model("nested_sqrt")
+    x = m.continuous("x", lb=-2.0, ub=2.0)
+    m.minimize(dm.sqrt(x**2 + 1.0))
+
+    milp_model, varmap = _build_relaxation_for_test(
+        m,
+        part_vars=[0],
+        lbs=[-2.0],
+        ubs=[2.0],
+    )
+    result = milp_model.solve()
+
+    assert varmap["univariate_relaxations"] == []
+    assert result.status == "optimal"
+    assert result.objective is None
+    assert result.x is not None
 
 
 def test_solve_model_forwards_alpine_amp_aliases(monkeypatch):
