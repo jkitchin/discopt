@@ -1489,6 +1489,45 @@ def test_amp_uses_nonlinear_tightened_partition_bounds(monkeypatch):
     assert captured["ub"] == pytest.approx([2.0])
 
 
+@pytest.mark.parametrize(
+    ("kind", "lb", "ub", "expected_rule", "expected_reason"),
+    [
+        ("quadratic", -10.0, 10.0, "sum_of_squares_upper_bound", "negative upper bound"),
+        ("sqrt", 0.0, 10.0, "monotone_function_bounds", "sqrt(argument) cannot be <="),
+        ("exp", -10.0, 10.0, "monotone_function_bounds", "exp(argument) cannot be <="),
+    ],
+)
+def test_nonlinear_tightening_reports_issue_28_contradictions(
+    kind,
+    lb,
+    ub,
+    expected_rule,
+    expected_reason,
+):
+    """Issue #28 contradictions should return an explicit infeasible status."""
+    from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+
+    m = Model(f"issue_28_{kind}_contradiction")
+    x = m.continuous("x", lb=lb, ub=ub)
+    if kind == "quadratic":
+        m.subject_to(x**2 == -1.0)
+    elif kind == "sqrt":
+        m.subject_to(dm.sqrt(x) <= -1.0)
+    else:
+        m.subject_to(dm.exp(x) <= -1.0)
+    m.minimize(x * 0.0)
+
+    flat_lb = np.array([lb], dtype=np.float64)
+    flat_ub = np.array([ub], dtype=np.float64)
+    tightened_lb, tightened_ub, stats = tighten_nonlinear_bounds(m, flat_lb, flat_ub)
+
+    assert stats.infeasible is True
+    assert expected_rule in stats.applied_rules
+    assert expected_reason in (stats.infeasibility_reason or "")
+    np.testing.assert_allclose(tightened_lb, flat_lb)
+    np.testing.assert_allclose(tightened_ub, flat_ub)
+
+
 def test_oa_cut_recovery_drops_oldest_half(monkeypatch):
     """OA recovery should retry with the oldest half of cuts removed."""
     from discopt._jax.milp_relaxation import MilpRelaxationResult
