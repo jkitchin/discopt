@@ -16,6 +16,7 @@ from __future__ import annotations
 import discopt.modeling as dm
 import jax
 import jax.numpy as jnp
+import pytest
 
 # ---------------------------------------------------------------
 # 1. Problem Classifier Tests
@@ -500,6 +501,7 @@ class TestMILPDispatch:
         assert result.objective is not None
         assert result.wall_time < 30.0
 
+    @pytest.mark.slow
     def test_use_highs_milp_false_routes_to_bb(self):
         """Opting out of HiGHS must route through _solve_milp_bb."""
         m = self._build_jobshop(3, 3)
