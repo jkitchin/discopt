@@ -337,6 +337,24 @@ impl PyModelRepr {
         Ok((lb_arr.into_any().unbind(), ub_arr.into_any().unbind()))
     }
 
+    /// Eliminate continuous scalar variables uniquely determined by a
+    /// singleton equality constraint (M10 of #51).
+    ///
+    /// Returns a new `PyModelRepr` plus a stats dict with keys
+    /// `variables_fixed`, `constraints_removed`, `candidates_examined`.
+    fn eliminate_variables(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<(PyModelRepr, PyObject)> {
+        use discopt_core::presolve::eliminate::eliminate_variables;
+        let (new_model, stats) = eliminate_variables(&self.inner);
+        let dict = PyDict::new(py);
+        dict.set_item("variables_fixed", stats.variables_fixed)?;
+        dict.set_item("constraints_removed", stats.constraints_removed)?;
+        dict.set_item("candidates_examined", stats.candidates_examined)?;
+        Ok((PyModelRepr { inner: new_model }, dict.into()))
+    }
+
     /// Reformulate polynomial monomials of degree > 2 into bilinear
     /// auxiliary products (M4 of #51), and derive McCormick-style aux
     /// variable bounds from forward-interval propagation (M5).

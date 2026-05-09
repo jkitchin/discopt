@@ -8,12 +8,14 @@
 //!   redundant constraint removal.
 //! - **OBBT**: Optimality-Based Bound Tightening via LP solves.
 
+pub mod eliminate;
 pub mod fbbt;
 pub mod obbt;
 pub mod polynomial;
 pub mod probing;
 pub mod simplify;
 
+pub use eliminate::{eliminate_variables, EliminationStats};
 pub use fbbt::{backward_propagate, fbbt, fbbt_with_cutoff, forward_propagate, Interval};
 pub use obbt::{apply_obbt_bounds, extract_linear_rows, obbt_candidates, LinearRow, ObbtResult};
 pub use polynomial::{

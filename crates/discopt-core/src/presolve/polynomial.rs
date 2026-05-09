@@ -441,13 +441,8 @@ pub fn reformulate_polynomial(model: &ModelRepr) -> (ModelRepr, ReformulationSta
     let obj = out.objective;
     if let Some(poly) = try_polynomial(&out.arena, obj) {
         if poly.max_total_degree() > 2 {
-            let new_terms = build_quadratic_body(
-                &mut out,
-                &mut stats,
-                &mut var_bounds,
-                &mut aux_cache,
-                &poly,
-            );
+            let new_terms =
+                build_quadratic_body(&mut out, &mut stats, &mut var_bounds, &mut aux_cache, &poly);
             let new_body = sum_into_arena(&mut out.arena, new_terms, poly.constant);
             out.objective = new_body;
             stats.constraints_rewritten += 1;
