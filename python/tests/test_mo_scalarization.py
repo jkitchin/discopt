@@ -25,6 +25,11 @@ from discopt.mo import (
     weighted_tchebycheff,
 )
 
+# Multi-objective scalarization tests sweep alpha grids and run a real solve at
+# each grid point.  The functionality rarely regresses from typical PRs; keep
+# on the nightly slow lane.
+pytestmark = pytest.mark.slow
+
 
 def _build_biobj_qp():
     m = dm.Model("biobj_qp")

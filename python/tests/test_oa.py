@@ -102,6 +102,7 @@ class TestOAConvexMINLP:
         result = _solve_oa(m)
         _assert_optimal(result, 3.0, abs_tol=0.1)
 
+    @pytest.mark.slow
     def test_linear_objective_nonlinear_constraints(self):
         """min x + 10*y, x^2 <= 4*y, x >= 0.5, y in {0,1}.
 
@@ -143,6 +144,7 @@ class TestOANonConvex:
         assert result.status in ("optimal", "feasible")
         assert result.objective is not None
 
+    @pytest.mark.slow
     def test_nonconvex_objective_skips_objective_oa_cuts(self, monkeypatch):
         """A nonconvex objective must not produce OA objective cuts or certified bounds."""
         from discopt._jax import cutting_planes
@@ -302,6 +304,7 @@ class TestEqualityRelaxation:
 # ── Regression vs B&B ────────────────────────────────────────
 
 
+@pytest.mark.slow
 class TestOAMatchesBnB:
     """OA results should be close to B&B on shared test problems."""
 

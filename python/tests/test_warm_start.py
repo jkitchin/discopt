@@ -229,6 +229,7 @@ class TestSolveWarmStart:
         with pytest.raises(ValueError, match="not part of this model"):
             m1.solve(initial_solution={x2: 3.0})
 
+    @pytest.mark.slow
     def test_warm_start_bounds_violation_warns(self):
         """Out-of-bounds values produce a warning but solve proceeds."""
         m, x, y = _make_nlp()

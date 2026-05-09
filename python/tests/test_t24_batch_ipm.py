@@ -34,6 +34,7 @@ from test_correctness import (
 
 
 @pytest.mark.correctness
+@pytest.mark.slow
 class TestBatchIPMAllInstances:
     """Definitive T24 acceptance test: all 24 instances via nlp_solver='ipm'."""
 
@@ -72,6 +73,7 @@ _COMPARISON_INSTANCES = [
 
 
 @pytest.mark.correctness
+@pytest.mark.slow
 class TestBatchIPMMatchesIpopt:
     """Verify IPM and Ipopt produce consistent objectives."""
 
@@ -124,6 +126,7 @@ class TestBatchIPMMatchesIpopt:
 
 
 @pytest.mark.correctness
+@pytest.mark.slow
 class TestBatchIPMRootMultistart:
     """Verify batched root multistart works with IPM backend."""
 
@@ -145,6 +148,7 @@ class TestBatchIPMRootMultistart:
 
 
 @pytest.mark.correctness
+@pytest.mark.slow
 class TestBatchIPMUsesVmapPath:
     """Verify IPM uses the vmap batch path for multi-node B&B."""
 
@@ -190,6 +194,7 @@ class TestBatchIPMUsesVmapPath:
 
 
 @pytest.mark.correctness
+@pytest.mark.slow
 class TestBatchIPMContinuousDirect:
     """Verify pure continuous problems go through _solve_continuous, not B&B."""
 
@@ -212,6 +217,7 @@ class TestBatchIPMContinuousDirect:
 
 
 @pytest.mark.correctness
+@pytest.mark.slow
 class TestBatchMILPViaLP:
     """Verify MILP problems solved correctly through the LP relaxation path."""
 
@@ -242,6 +248,7 @@ class TestBatchMILPViaLP:
 
 
 @pytest.mark.correctness
+@pytest.mark.slow
 class TestBatchMIQPViaQP:
     """Verify MIQP problems solved correctly through the QP relaxation path."""
 
