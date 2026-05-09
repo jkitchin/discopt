@@ -565,9 +565,7 @@ def _run_cutoff_obbt(
             new_lo = float(part_lbs[k_pv])
             new_hi = float(part_ubs[k_pv])
             if pts is None or len(pts) < 2:
-                disc_state.partitions[v_idx] = np.linspace(
-                    new_lo, new_hi, n_init_partitions + 1
-                )
+                disc_state.partitions[v_idx] = np.linspace(new_lo, new_hi, n_init_partitions + 1)
                 continue
             clipped = np.clip(pts, new_lo, new_hi)
             merged = np.unique(np.concatenate([[new_lo], clipped, [new_hi]]))

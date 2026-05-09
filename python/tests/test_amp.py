@@ -1201,13 +1201,9 @@ class TestAmpEndToEnd:
                 obbt_with_cutoff=True,
                 obbt_time_limit=5.0,
             )
-        ignored_msgs = [
-            str(w.message) for w in caught if "AMP ignores" in str(w.message)
-        ]
+        ignored_msgs = [str(w.message) for w in caught if "AMP ignores" in str(w.message)]
         for msg in ignored_msgs:
-            assert "obbt_with_cutoff" not in msg, (
-                f"obbt_with_cutoff was reported ignored: {msg}"
-            )
+            assert "obbt_with_cutoff" not in msg, f"obbt_with_cutoff was reported ignored: {msg}"
 
     def test_cutoff_obbt_uses_current_partition_state(self, monkeypatch):
         """Cutoff OBBT must build its relaxation from the live disc_state.
@@ -1218,12 +1214,7 @@ class TestAmpEndToEnd:
         helper must pass a non-empty disc_state through to the relaxation
         builder once partitioning has taken any steps.
         """
-        from discopt.solvers import amp as amp_solver
-
         seen_partition_lengths: list[int] = []
-        real_build = amp_solver.build_milp_relaxation if hasattr(
-            amp_solver, "build_milp_relaxation"
-        ) else None
 
         from discopt._jax import milp_relaxation as milp_relax_mod
 
@@ -1232,9 +1223,7 @@ class TestAmpEndToEnd:
         def wrapped_build(model, terms, disc_state, *args, **kwargs):
             # Track only OBBT-time builds (incumbent arg None, oa_cuts arg from kwargs)
             if disc_state is not None:
-                total = sum(
-                    len(pts) for pts in disc_state.partitions.values()
-                )
+                total = sum(len(pts) for pts in disc_state.partitions.values())
                 seen_partition_lengths.append(total)
             return real_builder(model, terms, disc_state, *args, **kwargs)
 
