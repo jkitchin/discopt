@@ -834,6 +834,7 @@ class TestPerturbationSmoothing:
         grad = _perturbation_gradient(m, p_flat, ipopt_options=None)
         assert float(grad[0]) == pytest.approx(2.0, abs=0.1)
 
+    @pytest.mark.slow
     def test_perturbation_multi_param(self):
         """Perturbation with multiple parameters."""
         m = dm.Model("perturb_multi")

@@ -53,12 +53,8 @@ jobs:
         run: mypy python/discopt/
 
   python-fast:
-    name: Python fast (3.12, ubuntu, shard ${{ matrix.shard }}/4)
+    name: Python fast (3.12, ubuntu)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -91,23 +87,21 @@ jobs:
           uv pip install maturin
           uv pip install \
             jax jaxlib numpy scipy highspy cyipopt \
-            pytest pytest-timeout pytest-xdist pytest-split
+            pytest pytest-timeout pytest-xdist
           maturin develop
-      - name: Run pytest (PR-fast, parallel, shard ${{ matrix.shard }}/4)
+      - name: Run pytest (PR-fast, parallel)
         run: |
           source .venv/bin/activate
           # -n auto: parallel across runner CPUs.
           # --dist loadgroup keeps tests sharing a class on the same worker
           #   so xdist-incompatible fixtures stay serialized.
-          # --splits/--group: split the suite across N shards; xdist runs each
-          #   shard in parallel within the runner. Combined effect: ~Nx wall-time
-          #   reduction across the matrix.
+          # Coverage is intentionally dropped from the PR path — see the
+          # `python-coverage` job (nightly + label-triggered) for full coverage.
           pytest python/tests/ \
             -q --tb=short --timeout=120 \
             -m "not slow" \
             --ignore=python/tests/test_correctness.py \
             -n auto --dist loadgroup \
-            --splits 4 --group ${{ matrix.shard }} \
             --durations=20
         env:
           JAX_PLATFORMS: cpu

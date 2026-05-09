@@ -69,6 +69,7 @@ class TestOAConvexMINLP:
         result = _solve_oa(m)
         _assert_optimal(result, 1.0)
 
+    @pytest.mark.slow
     def test_simple_minlp_from_examples(self):
         """Example simple MINLP: min x1^2 + x2^2 + x3, x3 binary.
 
@@ -199,6 +200,7 @@ class TestOAEdgeCases:
         result = _solve_oa(m)
         _assert_optimal(result, 1.0, abs_tol=0.1)
 
+    @pytest.mark.slow
     def test_infeasible_model(self):
         """Infeasible MINLP: contradictory constraints."""
         m = dm.Model("infeasible")
@@ -210,6 +212,7 @@ class TestOAEdgeCases:
         result = _solve_oa(m)
         assert result.status == "infeasible"
 
+    @pytest.mark.slow
     def test_single_iteration_optimal(self):
         """NLP relaxation is already integer-feasible → immediate convergence."""
         m = dm.Model("trivial")
@@ -229,6 +232,7 @@ class TestOAEdgeCases:
 class TestOAInfeasibleNLP:
     """Tests for handling infeasible NLP subproblems."""
 
+    @pytest.mark.slow
     def test_some_assignments_infeasible(self):
         """Problem where one binary assignment makes NLP infeasible.
 

@@ -627,6 +627,7 @@ class TestFeasibilityRestoration:
         )
         assert not success  # should skip
 
+    @pytest.mark.slow
     def test_restoration_recursion_guard(self):
         """_in_restoration=True prevents nested restoration calls."""
         # Run the solver with _in_restoration=True on a problem that would
