@@ -10,7 +10,6 @@ import math
 import tempfile
 
 import pytest
-
 from discopt.benchmarks.metrics import (
     BatchMetrics,
     compute_batch_metrics,
