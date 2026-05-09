@@ -254,11 +254,14 @@ def _compute_alphabb_bound(evaluator, node_lb, node_ub, alpha):
         perturbation = np.sum(alpha * (x - node_lb) * (node_ub - x))
         return f_val - perturbation
 
-    # Multiple starting points for robustness
+    # Multiple starting points for robustness. Clip bounds to a finite range
+    # before forming start points or passing them to scipy: unbounded
+    # variables produce inf*inf or inf-inf in finite-difference gradients,
+    # propagating NaN into L-BFGS-B and silently breaking the bound.
     lb_clip = np.clip(node_lb, -1e4, 1e4)
     ub_clip = np.clip(node_ub, -1e4, 1e4)
     mid = 0.5 * (lb_clip + ub_clip)
-    bounds = list(zip(node_lb, node_ub))
+    bounds = list(zip(lb_clip, ub_clip))
 
     best_val = np.inf
     for x0 in [mid, lb_clip + 0.25 * (ub_clip - lb_clip), lb_clip + 0.75 * (ub_clip - lb_clip)]:
@@ -393,8 +396,11 @@ def _tighten_node_bounds(evaluator, node_lb, node_ub, cl_list, cu_list, max_roun
     # nonlinear constraints (e.g. x^1.5) can over-tighten and exclude
     # feasible regions, causing false infeasibility (issue #6).
     try:
-        pt_a = np.clip(lb + 0.25 * (ub - lb), -_SPC, _SPC)
-        pt_b = np.clip(lb + 0.75 * (ub - lb), -_SPC, _SPC)
+        # Clip first: unbounded vars give inf-(-inf)=NaN under unclipped subtract.
+        lb_c = np.clip(lb, -_SPC, _SPC)
+        ub_c = np.clip(ub, -_SPC, _SPC)
+        pt_a = lb_c + 0.25 * (ub_c - lb_c)
+        pt_b = lb_c + 0.75 * (ub_c - lb_c)
         J_a = evaluator.evaluate_jacobian(pt_a)
         J_b = evaluator.evaluate_jacobian(pt_b)
         is_linear = np.all(np.abs(J_a - J_b) < 1e-8, axis=1)  # (m,) bool
@@ -2142,7 +2148,8 @@ def solve_model(
                     # Use convex relaxation bound for non-integer-feasible
                     # nodes, but keep NLP objective for integer-feasible ones
                     # (the Rust tree uses result_lbs for incumbent values).
-                    if not _model_is_convex and convex_lb > -np.inf:
+                    sol_is_int_feas = False
+                    if not _model_is_convex:
                         sol_is_int_feas = True
                         for off, sz in zip(int_offsets, int_sizes):
                             for j in range(off, off + sz):
@@ -2152,18 +2159,36 @@ def solve_model(
                                     break
                             if not sol_is_int_feas:
                                 break
-                        if not sol_is_int_feas:
+                        if not sol_is_int_feas and convex_lb > -np.inf:
                             nlp_lb = convex_lb
 
                     # Constraint feasibility post-check
+                    con_feasible = True
                     if cl_list and not _check_constraint_feasibility(
                         _active_evaluator, nlp_result.x, cl_list, cu_list
                     ):
+                        con_feasible = False
                         nlp_lb = _INFEASIBILITY_SENTINEL
                         logger.debug(
                             "Node %d: NLP solution violates constraints, marking infeasible",
                             int(batch_ids[i]),
                         )
+
+                    # Inject NLP solution as incumbent candidate for nonconvex
+                    # integer-feasible nodes. The Rust tree's process_evaluated
+                    # explicitly skips auto-promotion of node_lb in nonconvex
+                    # mode (see tree_manager.rs::process_evaluated), so this
+                    # injection is required to surface feasible incumbents.
+                    # Mirrors the batch-IPM path above.
+                    if (
+                        not _model_is_convex
+                        and sol_is_int_feas
+                        and con_feasible
+                        and np.isfinite(nlp_result.objective)
+                        and nlp_result.objective < _SENTINEL_THRESHOLD
+                    ):
+                        tree.inject_incumbent(nlp_result.x.copy(), float(nlp_result.objective))
+
                     # Guard: NaN lower bounds corrupt the Rust B&B tree
                     # (NaN comparisons always return False in IEEE 754).
                     if not np.isfinite(nlp_lb):
@@ -3089,7 +3114,11 @@ def _solve_node_nlp(
         from discopt.solvers import NLPResult
 
         x_mid = np.clip(x0, node_lb, node_ub)
-        span = node_ub - node_lb
+        # Clip first: unbounded vars produce inf-(-inf)=NaN under raw subtract,
+        # which then disables this pre-screen on every node with free vars.
+        lb_c = np.clip(node_lb, -_SPC, _SPC)
+        ub_c = np.clip(node_ub, -_SPC, _SPC)
+        span = ub_c - lb_c
         n_pinned = np.sum(span < 1e-10)
         if n_pinned >= len(span) - 1:
             # Nearly all variables pinned: evaluate constraints at midpoint
@@ -3102,7 +3131,7 @@ def _solve_node_nlp(
                         break
                 if infeasible:
                     # Verify at the bounds midpoint too
-                    x_check = 0.5 * (node_lb + node_ub)
+                    x_check = 0.5 * (lb_c + ub_c)
                     g2 = evaluator.evaluate_constraints(x_check)
                     still_infeasible = False
                     for k, (cl, cu) in enumerate(constraint_bounds):
