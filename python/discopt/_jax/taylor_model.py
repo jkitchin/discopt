@@ -158,7 +158,7 @@ def from_constant(c: float, domain: tuple[float, float], degree: int) -> TaylorM
     """Constant model ``f(x) = c``."""
     coeffs = np.zeros(degree + 1)
     coeffs[0] = float(c)
-    return TaylorModel(coeffs, (0.0, 0.0), tuple(domain))
+    return TaylorModel(coeffs, (0.0, 0.0), (float(domain[0]), float(domain[1])))
 
 
 def from_variable(domain: tuple[float, float], degree: int) -> TaylorModel:
@@ -173,7 +173,7 @@ def from_variable(domain: tuple[float, float], degree: int) -> TaylorModel:
     coeffs = np.zeros(degree + 1)
     coeffs[0] = 0.5 * (a + b)
     coeffs[1] = 0.5 * (b - a)
-    return TaylorModel(coeffs, (0.0, 0.0), tuple(domain))
+    return TaylorModel(coeffs, (0.0, 0.0), (float(domain[0]), float(domain[1])))
 
 
 # ---------------------------------------------------------------------------

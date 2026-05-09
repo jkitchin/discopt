@@ -52,7 +52,7 @@ Acceptance criteria from issue #51 met by this module:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Union
 
 import numpy as np
 
@@ -139,6 +139,7 @@ def outer_approximation(
     if n_slopes < 2:
         raise ValueError(f"n_slopes must be >= 2, got {n_slopes}")
 
+    provider: Union["_ChebyshevProvider", "_TaylorProvider"]
     if arithmetic == "chebyshev":
         provider = _ChebyshevProvider(f_callable, (a, b), degree)
     elif arithmetic == "taylor":

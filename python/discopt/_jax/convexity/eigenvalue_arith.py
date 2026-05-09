@@ -96,13 +96,16 @@ class QuadraticForm:
     def evaluate(self, x: np.ndarray) -> np.ndarray:
         """Evaluate ``f(x)`` for a single point or batch of points.
 
-        For 1-D ``x`` of length ``n``, returns a scalar; for 2-D ``x`` of
-        shape ``(N, n)``, returns shape ``(N,)``.
+        For 1-D ``x`` of length ``n``, returns a 0-D ndarray; for 2-D
+        ``x`` of shape ``(N, n)``, returns shape ``(N,)``.
         """
         x = np.asarray(x, dtype=np.float64)
         if x.ndim == 1:
-            return float(x @ self.Q @ x + self.b @ x + self.c)
-        return np.einsum("ij,jk,ik->i", x, self.Q, x) + x @ self.b + self.c
+            return np.asarray(x @ self.Q @ x + self.b @ x + self.c, dtype=np.float64)
+        return np.asarray(
+            np.einsum("ij,jk,ik->i", x, self.Q, x) + x @ self.b + self.c,
+            dtype=np.float64,
+        )
 
 
 def quadratic_form_bound(qf: QuadraticForm, x_lo: np.ndarray, x_hi: np.ndarray) -> Interval:
@@ -160,7 +163,7 @@ def quadratic_form_bound(qf: QuadraticForm, x_lo: np.ndarray, x_hi: np.ndarray) 
 
     lo = _round_down(np.float64(f_at_x0 + quad_neg_min - lin_excursion))
     hi = _round_up(np.float64(f_at_x0 + quad_pos_max + lin_excursion))
-    return Interval(lo=np.float64(lo), hi=np.float64(hi))
+    return Interval(lo=np.asarray(lo, dtype=np.float64), hi=np.asarray(hi, dtype=np.float64))
 
 
 def interval_ad_quadratic_bound(qf: QuadraticForm, x_lo: np.ndarray, x_hi: np.ndarray) -> Interval:
@@ -180,16 +183,16 @@ def interval_ad_quadratic_bound(qf: QuadraticForm, x_lo: np.ndarray, x_hi: np.nd
     # Naive: evaluate Σ_ij Q_ij x_i x_j + Σ_i b_i x_i + c using interval
     # arithmetic node-by-node.
     Q = 0.5 * (qf.Q + qf.Q.T)
-    total_lo = float(qf.c)
-    total_hi = float(qf.c)
+    total_lo: np.float64 = np.float64(qf.c)
+    total_hi: np.float64 = np.float64(qf.c)
     for i in range(n):
         bi = float(qf.b[i])
         if bi >= 0:
-            total_lo = _round_down(np.float64(total_lo + bi * x_lo[i]))
-            total_hi = _round_up(np.float64(total_hi + bi * x_hi[i]))
+            total_lo = np.float64(_round_down(np.float64(total_lo + bi * x_lo[i])))
+            total_hi = np.float64(_round_up(np.float64(total_hi + bi * x_hi[i])))
         else:
-            total_lo = _round_down(np.float64(total_lo + bi * x_hi[i]))
-            total_hi = _round_up(np.float64(total_hi + bi * x_lo[i]))
+            total_lo = np.float64(_round_down(np.float64(total_lo + bi * x_hi[i])))
+            total_hi = np.float64(_round_up(np.float64(total_hi + bi * x_lo[i])))
         for j in range(n):
             Qij = float(Q[i, j])
             if Qij == 0.0:
@@ -201,12 +204,15 @@ def interval_ad_quadratic_bound(qf: QuadraticForm, x_lo: np.ndarray, x_hi: np.nd
             xij_lo = float(min(corners))
             xij_hi = float(max(corners))
             if Qij >= 0:
-                total_lo = _round_down(np.float64(total_lo + Qij * xij_lo))
-                total_hi = _round_up(np.float64(total_hi + Qij * xij_hi))
+                total_lo = np.float64(_round_down(np.float64(total_lo + Qij * xij_lo)))
+                total_hi = np.float64(_round_up(np.float64(total_hi + Qij * xij_hi)))
             else:
-                total_lo = _round_down(np.float64(total_lo + Qij * xij_hi))
-                total_hi = _round_up(np.float64(total_hi + Qij * xij_lo))
-    return Interval(lo=np.float64(total_lo), hi=np.float64(total_hi))
+                total_lo = np.float64(_round_down(np.float64(total_lo + Qij * xij_hi)))
+                total_hi = np.float64(_round_up(np.float64(total_hi + Qij * xij_lo)))
+    return Interval(
+        lo=np.asarray(total_lo, dtype=np.float64),
+        hi=np.asarray(total_hi, dtype=np.float64),
+    )
 
 
 __all__ = ["QuadraticForm", "quadratic_form_bound", "interval_ad_quadratic_bound"]

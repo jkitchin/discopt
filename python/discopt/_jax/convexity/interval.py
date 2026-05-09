@@ -40,14 +40,17 @@ Number = Union[int, float, np.ndarray]
 # ──────────────────────────────────────────────────────────────────────
 
 
-def _round_down(x: np.ndarray) -> np.ndarray:
-    """Push ``x`` one ULP toward ``-inf`` (sound lower bound)."""
-    # Zeros and finite values are nudged toward -inf; infinities are
-    # left alone (nextafter(-inf, -inf) = -inf).
+def _round_down(x: Number) -> np.ndarray:
+    """Push ``x`` one ULP toward ``-inf`` (sound lower bound).
+
+    Accepts a scalar or ndarray; returns the matching shape. Zero and
+    finite values are nudged toward -inf; infinities are left alone
+    (``nextafter(-inf, -inf) = -inf``).
+    """
     return np.nextafter(x, np.float64(-np.inf))
 
 
-def _round_up(x: np.ndarray) -> np.ndarray:
+def _round_up(x: Number) -> np.ndarray:
     """Push ``x`` one ULP toward ``+inf`` (sound upper bound)."""
     return np.nextafter(x, np.float64(np.inf))
 

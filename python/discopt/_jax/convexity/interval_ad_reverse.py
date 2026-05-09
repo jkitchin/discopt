@@ -435,11 +435,12 @@ def _propagate_sum_over(
     node: SumOverExpression, parent: Interval, tight: dict, forward: dict
 ) -> None:
     """For ``parent = Σ_i term_i``, term_j ∈ parent − Σ_{i≠j} term_i_fwd."""
-    fwds = [forward.get(id(t)) for t in node.terms]
-    if any(f is None for f in fwds):
+    fwds_opt = [forward.get(id(t)) for t in node.terms]
+    if any(f is None for f in fwds_opt):
         return
-    total_others_lo = np.float64(0.0)
-    total_others_hi = np.float64(0.0)
+    fwds: list[Interval] = [f for f in fwds_opt if f is not None]
+    total_others_lo: np.ndarray = np.asarray(np.float64(0.0))
+    total_others_hi: np.ndarray = np.asarray(np.float64(0.0))
     # Pre-aggregate the sum of all forward ranges for cheap exclusion.
     for f in fwds:
         total_others_lo = _round_down(np.float64(total_others_lo + f.lo))
@@ -512,7 +513,8 @@ def _intersect_nonneg(x: Interval) -> Optional[Interval]:
 
 def _declared_box(v: Variable, override: dict) -> Interval:
     if v in override:
-        return override[v]
+        result: Interval = override[v]
+        return result
     lb = np.asarray(v.lb, dtype=np.float64)
     ub = np.asarray(v.ub, dtype=np.float64)
     return Interval(lb, ub)

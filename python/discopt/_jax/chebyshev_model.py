@@ -165,7 +165,7 @@ def from_constant(c: float, domain: tuple[float, float], degree: int) -> Chebysh
     """Constant model ``f(x) = c``."""
     coeffs = np.zeros(degree + 1)
     coeffs[0] = float(c)
-    return ChebyshevModel(coeffs, (0.0, 0.0), tuple(domain))
+    return ChebyshevModel(coeffs, (0.0, 0.0), (float(domain[0]), float(domain[1])))
 
 
 def from_variable(domain: tuple[float, float], degree: int) -> ChebyshevModel:
@@ -179,7 +179,7 @@ def from_variable(domain: tuple[float, float], degree: int) -> ChebyshevModel:
     coeffs = np.zeros(degree + 1)
     coeffs[0] = 0.5 * (a + b)
     coeffs[1] = 0.5 * (b - a)
-    return ChebyshevModel(coeffs, (0.0, 0.0), tuple(domain))
+    return ChebyshevModel(coeffs, (0.0, 0.0), (float(domain[0]), float(domain[1])))
 
 
 # ---------------------------------------------------------------------------
