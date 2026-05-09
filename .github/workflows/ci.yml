@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel superseded runs on the same PR/branch — saves CI minutes when
+# pushes land in quick succession.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   rust:
     name: Rust
@@ -15,9 +21,31 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
       - run: cargo build -p discopt-core
       - run: cargo test -p discopt-core
       - run: cargo clippy -p discopt-core -- -D warnings
+
+  lint:
+    name: Lint + typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ruff + mypy
+        run: |
+          python -m pip install --upgrade pip
+          pip install "ruff==0.14.6" mypy
+      - name: Ruff check
+        run: ruff check python/
+      - name: Ruff format
+        run: ruff format --check python/
+      - name: Mypy
+        run: mypy python/discopt/
 
   python-fast:
     name: Python fast (3.12, ubuntu)
@@ -25,33 +53,106 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Match the workspace used by maturin so the cargo build cache hits.
+          workspaces: ". -> target"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
       - name: Install system dependencies (Ipopt)
         run: |
-          sudo apt-get update && sudo apt-get install -y coinor-libipopt-dev liblapack-dev libblas-dev gfortran
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends \
+            coinor-libipopt-dev liblapack-dev libblas-dev gfortran
+      - name: Cache uv pip wheels
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-py312-${{ hashFiles('pyproject.toml', 'Cargo.lock', '.github/workflows/ci.yml') }}
+          restore-keys: |
+            uv-${{ runner.os }}-py312-
       - name: Install Python dependencies
         run: |
           python -m venv .venv
           source .venv/bin/activate
-          pip install maturin
-          pip install jax jaxlib numpy scipy highspy cyipopt pytest pytest-timeout "ruff==0.14.6" mypy
+          uv pip install maturin
+          uv pip install \
+            jax jaxlib numpy scipy highspy cyipopt \
+            pytest pytest-timeout pytest-xdist
           maturin develop
-      - name: Lint
+      - name: Run pytest (PR-fast, parallel)
         run: |
           source .venv/bin/activate
-          ruff check python/
-          ruff format --check python/
-      - name: Type check
+          # -n auto: parallel across runner CPUs.
+          # --dist loadgroup keeps tests sharing a class on the same worker
+          #   so xdist-incompatible fixtures stay serialized.
+          # Coverage is intentionally dropped from the PR path — see the
+          # `python-coverage` job (nightly + label-triggered) for full coverage.
+          pytest python/tests/ \
+            -q --tb=short --timeout=120 \
+            -m "not slow" \
+            --ignore=python/tests/test_correctness.py \
+            -n auto --dist loadgroup \
+            --durations=20
+        env:
+          JAX_PLATFORMS: cpu
+          JAX_ENABLE_X64: "1"
+
+  python-coverage:
+    name: Python coverage (3.12, ubuntu)
+    # Run coverage on main pushes and on PRs explicitly opted in via the
+    # `coverage` label.  Keeping it off the default PR path is what gets
+    # the per-PR turnaround under 2 minutes (issue #68).
+    if: >-
+      github.event_name == 'push' ||
+      contains(github.event.pull_request.labels.*.name, 'coverage')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+      - name: Install system dependencies (Ipopt)
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends \
+            coinor-libipopt-dev liblapack-dev libblas-dev gfortran
+      - name: Cache uv pip wheels
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-py312-cov-${{ hashFiles('pyproject.toml', 'Cargo.lock', '.github/workflows/ci.yml') }}
+          restore-keys: |
+            uv-${{ runner.os }}-py312-cov-
+      - name: Install Python dependencies
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          uv pip install maturin
+          uv pip install \
+            jax jaxlib numpy scipy highspy cyipopt \
+            pytest pytest-timeout pytest-xdist pytest-cov
+          maturin develop
+      - name: Run pytest with coverage
         run: |
           source .venv/bin/activate
-          mypy python/discopt/
-      - name: Test with coverage (PR-fast — matches `make test`, excludes slow + correctness)
-        run: |
-          source .venv/bin/activate
-          pip install pytest-cov
-          pytest python/tests/ -v --timeout=120 -m "not slow" --ignore=python/tests/test_correctness.py --cov=discopt --cov-report=term-missing --cov-report=xml:coverage.xml
+          pytest python/tests/ \
+            -q --tb=short --timeout=120 \
+            -m "not slow" \
+            --ignore=python/tests/test_correctness.py \
+            -n auto --dist loadgroup \
+            --cov=discopt --cov-report=term-missing --cov-report=xml:coverage.xml
         env:
           JAX_PLATFORMS: cpu
           JAX_ENABLE_X64: "1"
