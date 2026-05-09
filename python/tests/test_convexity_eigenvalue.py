@@ -17,6 +17,7 @@ import pytest
 from discopt._jax.convexity.eigenvalue import (
     gershgorin_lambda_max,
     gershgorin_lambda_min,
+    psd_2x2_sufficient,
 )
 from discopt._jax.convexity.interval import Interval
 
@@ -147,3 +148,70 @@ class TestRandomSoundness:
         radius = 0.5 * (radius + radius.T)
         H = Interval(lo=centre - radius, hi=centre + radius)
         _assert_bounds_enclose_spectrum(H, n_samples=24, seed=seed + 100)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 2×2 sufficient PSD test
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestPsd2x2Sufficient:
+    """``psd_2x2_sufficient`` returns ``True`` only when every concrete
+    symmetric matrix in ``H`` is provably PSD by Sylvester's criterion."""
+
+    def test_pure_diagonal_psd(self):
+        H = Interval(
+            lo=np.array([[1.0, 0.0], [0.0, 2.0]]),
+            hi=np.array([[3.0, 0.0], [0.0, 5.0]]),
+        )
+        assert psd_2x2_sufficient(H) is True
+
+    def test_zero_matrix_is_psd(self):
+        H = Interval(lo=np.zeros((2, 2)), hi=np.zeros((2, 2)))
+        assert psd_2x2_sufficient(H) is True
+
+    def test_negative_diagonal_lower_bound_rejected(self):
+        H = Interval(
+            lo=np.array([[-0.1, 0.0], [0.0, 1.0]]),
+            hi=np.array([[1.0, 0.0], [0.0, 2.0]]),
+        )
+        assert psd_2x2_sufficient(H) is False
+
+    def test_indefinite_via_off_diagonal(self):
+        # Diagonals are 1, off-diagonal radius is 2 — clearly indefinite.
+        H = Interval(
+            lo=np.array([[1.0, -2.0], [-2.0, 1.0]]),
+            hi=np.array([[1.0, 2.0], [2.0, 1.0]]),
+        )
+        assert psd_2x2_sufficient(H) is False
+
+    def test_borderline_psd_passes(self):
+        # Det = 1 * 1 - 0.5^2 = 0.75 > 0, both diagonals nonneg.
+        H = Interval(
+            lo=np.array([[1.0, -0.5], [-0.5, 1.0]]),
+            hi=np.array([[1.5, 0.5], [0.5, 1.5]]),
+        )
+        assert psd_2x2_sufficient(H) is True
+
+    def test_unbounded_rejected(self):
+        H = Interval(
+            lo=np.array([[1.0, -np.inf], [-np.inf, 1.0]]),
+            hi=np.array([[2.0, np.inf], [np.inf, 2.0]]),
+        )
+        assert psd_2x2_sufficient(H) is False
+
+    def test_non_2x2_rejected(self):
+        H = Interval(lo=np.eye(3), hi=np.eye(3))
+        assert psd_2x2_sufficient(H) is False
+
+    def test_strictly_positive_definite_passes(self):
+        # H = v vᵀ + ε I with ε > 0 — strictly PD; the outward-rounded
+        # determinant test certifies it. (The exactly rank-1 case
+        # ``v vᵀ`` has det = 0 and is certified through the structural
+        # ``Rank1Factor`` path in the certificate, not through this
+        # sufficient 2×2 numerical test.)
+        v = np.array([1.0, 2.0])
+        eps = 1.0
+        H_mat = np.outer(v, v) + eps * np.eye(2)
+        H = Interval(lo=H_mat, hi=H_mat)
+        assert psd_2x2_sufficient(H) is True

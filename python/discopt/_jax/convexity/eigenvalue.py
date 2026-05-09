@@ -110,4 +110,39 @@ def gershgorin_lambda_max(H: Interval) -> float:
     return float(bounds.max())
 
 
-__all__ = ["gershgorin_lambda_min", "gershgorin_lambda_max"]
+def psd_2x2_sufficient(H: Interval) -> bool:
+    """Sufficient PSD test for a 2×2 interval Hessian.
+
+    Returns ``True`` only when every concrete symmetric matrix in
+    ``H`` is provably PSD via Sylvester's criterion: both diagonal
+    entries are nonneg, and the worst-case 2×2 determinant is nonneg
+    (``H[0,0].lo · H[1,1].lo ≥ max(|H[0,1].lo|, |H[0,1].hi|)²``). This
+    is *sufficient* — when it returns ``False`` the matrix may still
+    be PSD; the caller should fall through to Gershgorin.
+
+    The off-diagonal magnitude squared is computed with an upward
+    round, and the diagonal product with a downward round, so
+    floating-point roundoff cannot push a borderline determinant
+    incorrectly into the nonneg bucket.
+    """
+    lo = np.asarray(H.lo, dtype=np.float64)
+    hi = np.asarray(H.hi, dtype=np.float64)
+    if lo.shape != (2, 2):
+        return False
+    if not (np.all(np.isfinite(lo)) and np.all(np.isfinite(hi))):
+        return False
+    if lo[0, 0] < 0.0 or lo[1, 1] < 0.0:
+        return False
+    off = max(abs(lo[0, 1]), abs(hi[0, 1]), abs(lo[1, 0]), abs(hi[1, 0]))
+    prod = float(lo[0, 0]) * float(lo[1, 1])
+    sq = float(off) * float(off)
+    # Outward rounding is a no-op when the float product is exactly
+    # zero (no roundoff to absorb); skipping it there prevents the
+    # nextafter shift from manufacturing a spurious negative
+    # determinant on the all-zero / rank-deficient corner.
+    prod_lo = prod if prod == 0.0 else float(_round_down(np.float64(prod)))
+    sq_hi = sq if sq == 0.0 else float(_round_up(np.float64(sq)))
+    return bool(prod_lo >= sq_hi)
+
+
+__all__ = ["gershgorin_lambda_min", "gershgorin_lambda_max", "psd_2x2_sufficient"]

@@ -63,6 +63,30 @@ from .interval import Interval, _round_down, _round_up
 
 
 @dataclass(frozen=True)
+class Rank1Factor:
+    """Sound metadata: this node's Hessian is ``c · v vᵀ``.
+
+    A node carries this when its Hessian is provably rank-1 PSD (or
+    NSD, with a sign-bracketed ``c``). The certificate consults it
+    for a structural sufficient PSD test that does not depend on the
+    entry-wise tightness of the interval matrix — useful on wide
+    boxes where the off-diagonal interval blows up but the underlying
+    rank-1 structure is intact.
+
+    The ``affine_base_*`` fields are populated when the node arose
+    from squaring an expression whose Hessian is identically zero
+    (i.e. the base is affine in the variables); a downstream
+    division by an affine positive denominator combines them via the
+    perspective rule into a tighter rank-1 form.
+    """
+
+    c: Interval
+    v: Interval
+    affine_base_value: Optional[Interval] = None
+    affine_base_grad: Optional[Interval] = None
+
+
+@dataclass(frozen=True)
 class IntervalAD:
     """A scalar expression's value, gradient, and Hessian as intervals.
 
@@ -71,11 +95,19 @@ class IntervalAD:
     * ``hess``  — shape-``(n, n)`` symmetric interval enclosing
       ``∇²f(x)``. Symmetry is only enforced downstream by the
       consumer (``hess`` + ``hess.T`` / 2 if needed).
+    * ``rank1_factor`` — optional rank-1 metadata; see
+      :class:`Rank1Factor`. ``None`` for nodes without a known
+      rank-1 structure. Soundness is independent of this field —
+      it is metadata that lets the certificate dispatch a tighter
+      sufficient PSD test. Any op that does not explicitly preserve
+      the factorisation drops the field, so a stale value cannot
+      mislead.
     """
 
     value: Interval
     grad: Interval
     hess: Interval
+    rank1_factor: Optional[Rank1Factor] = None
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -373,7 +405,23 @@ def _binary(expr: BinaryOp, model: Model, box: dict, cache: dict, n: int) -> Int
             + _outer(left.grad, right.grad)
             + _outer(right.grad, left.grad)
         )
-        return IntervalAD(value=fg, grad=grad, hess=hess_terms)
+        # Rank-1 metadata for ``g * g`` (BinaryOp form of squaring)
+        # when ``g`` is affine. The cache makes ``left is right`` for
+        # any expression node that appears twice as the same instance,
+        # so this catches ``x * x`` and any ``e * e`` where the user
+        # bound ``e`` to a single Python variable. The Hessian
+        # already collapses to ``2 ∇g ∇gᵀ`` exactly here (the two
+        # ``_outer`` calls fire self-product tightening), so the
+        # metadata claim is sound.
+        rank1: Optional[Rank1Factor] = None
+        if expr.left is expr.right and _hess_is_exactly_zero(left.hess):
+            rank1 = Rank1Factor(
+                c=Interval.point(2.0),
+                v=left.grad,
+                affine_base_value=left.value,
+                affine_base_grad=left.grad,
+            )
+        return IntervalAD(value=fg, grad=grad, hess=hess_terms, rank1_factor=rank1)
 
     if expr.op == "/":
         return _division(expr, left, right, n)
@@ -393,6 +441,21 @@ def _division(expr: BinaryOp, left: IntervalAD, right: IntervalAD, n: int) -> In
     g = right.value
     if g.contains_zero().any():
         return _unbounded_triple(n)
+
+    # Rank-1 fast path: when the numerator is the square of an affine
+    # expression and the denominator is itself affine and strictly
+    # positive, the quotient's Hessian collapses to a perspective-form
+    # rank-1 matrix that the certificate can prove PSD structurally
+    # — even on wide boxes where the entry-wise interval enclosure is
+    # too loose for Gershgorin.
+    if (
+        left.rank1_factor is not None
+        and left.rank1_factor.affine_base_value is not None
+        and left.rank1_factor.affine_base_grad is not None
+        and bool(np.all(np.asarray(g.lo) > 0.0))
+        and _hess_is_exactly_zero(right.hess)
+    ):
+        return _rank1_quotient(left, right, n)
 
     # Reciprocal derivatives:
     #   (1/g)'  = -g' / g^2
@@ -420,6 +483,58 @@ def _division(expr: BinaryOp, left: IntervalAD, right: IntervalAD, n: int) -> In
         + _outer(recip_grad, left.grad)
     )
     return IntervalAD(value=fg_val, grad=fg_grad, hess=fg_hess)
+
+
+def _rank1_quotient(left: IntervalAD, right: IntervalAD, n: int) -> IntervalAD:
+    """Specialised ``g² / h`` Hessian when ``g`` and ``h`` are affine.
+
+    For affine ``g`` with gradient ``v_g`` (so ``H_g = 0``) and affine
+    ``h`` with gradient ``v_h`` (so ``H_h = 0``) and ``h > 0`` on the
+    box, the quotient ``g²/h`` has the exact pointwise Hessian
+
+        ``H = (2/h) · v vᵀ``     where  ``v = v_g − (g/h) · v_h``.
+
+    This is the perspective form: a rank-1 PSD matrix on every point
+    of the box. We emit the Hessian via ``_outer(v, v)`` with a
+    single :class:`Interval` instance so the self-product tightening
+    forces the diagonal to be nonneg, and we attach a
+    :class:`Rank1Factor` so the certificate's structural PSD test
+    fires regardless of off-diagonal interval blowup.
+    """
+    assert left.rank1_factor is not None
+    assert left.rank1_factor.affine_base_value is not None
+    assert left.rank1_factor.affine_base_grad is not None
+
+    g_val = left.rank1_factor.affine_base_value
+    v_g = left.rank1_factor.affine_base_grad
+    h = right.value
+    v_h = right.grad
+
+    # Combined rank-1 vector and coefficient. Each operand is a fresh
+    # Interval; the final combined Interval is the single instance we
+    # pass to _outer to trigger self-product tightening.
+    g_over_h = g_val / h
+    v_combined = v_g - _broadcast_product(g_over_h, v_h)
+    c_combined = Interval.point(2.0) / h
+
+    outer_vv = _outer(v_combined, v_combined)
+    hess = _broadcast_product(c_combined, outer_vv)
+
+    # Value and gradient via the standard reciprocal-product rule —
+    # tightness on those is not required for the convexity verdict
+    # but they remain sound and consistent with the generic path.
+    inv_h = Interval.point(1.0) / h
+    inv_h2 = Interval.point(1.0) / (h * h)
+    recip_grad = _broadcast_product(-inv_h2, v_h)
+    fg_val = left.value * inv_h
+    fg_grad = _broadcast_product(inv_h, left.grad) + _broadcast_product(left.value, recip_grad)
+
+    return IntervalAD(
+        value=fg_val,
+        grad=fg_grad,
+        hess=hess,
+        rank1_factor=Rank1Factor(c=c_combined, v=v_combined),
+    )
 
 
 def _power(expr: BinaryOp, base: IntervalAD, n_vars: int) -> IntervalAD:
@@ -460,6 +575,31 @@ def _power(expr: BinaryOp, base: IntervalAD, n_vars: int) -> IntervalAD:
     return _apply_exp(scaled, n_vars)
 
 
+_AFFINE_HESS_TOL = 1e-300
+
+
+def _hess_is_exactly_zero(hess: Interval) -> bool:
+    """``True`` iff every entry of the interval Hessian encloses ``0``
+    with a magnitude well below any meaningful scale.
+
+    Used to detect "affine in the variables" nodes: when the
+    algebraic ``H_g`` is identically zero, the AD walker produces
+    an interval Hessian whose entries are within a few ULPs of
+    ``0`` (subnormals from outward-rounded additions of exact
+    zeros). The tolerance ``1e-300`` is six orders of magnitude
+    above the smallest subnormal and still ~270 orders of magnitude
+    below any plausible nonzero Hessian entry, so it cannot
+    misclassify a real (even tiny) curvature term as affine.
+
+    The check is sufficient-only: a false ``False`` just causes the
+    rank-1 fast path to be skipped, falling through to the existing
+    Gershgorin path.
+    """
+    return bool(
+        np.all(np.abs(hess.lo) <= _AFFINE_HESS_TOL) and np.all(np.abs(hess.hi) <= _AFFINE_HESS_TOL)
+    )
+
+
 def _integer_power(base: IntervalAD, p: int, n: int) -> IntervalAD:
     """Direct chain rule for ``g^p`` with integer ``p``.
 
@@ -483,7 +623,20 @@ def _integer_power(base: IntervalAD, p: int, n: int) -> IntervalAD:
     hess = _broadcast_product(coeff1, base.hess) + _broadcast_product(
         coeff2, _outer(base.grad, base.grad)
     )
-    return IntervalAD(value=value, grad=grad, hess=hess)
+    # Rank-1 metadata: when p == 2 and H_g is identically zero (g is
+    # affine), the second-order term ``p g^{p-1} H_g`` vanishes and
+    # the Hessian collapses exactly to ``2 · ∇g ∇gᵀ``. Soundness is
+    # independent of this field; it is consumed only as a tighter
+    # sufficient test by the certificate.
+    rank1: Optional[Rank1Factor] = None
+    if p == 2 and _hess_is_exactly_zero(base.hess):
+        rank1 = Rank1Factor(
+            c=Interval.point(2.0),
+            v=base.grad,
+            affine_base_value=base.value,
+            affine_base_grad=base.grad,
+        )
+    return IntervalAD(value=value, grad=grad, hess=hess, rank1_factor=rank1)
 
 
 def _reciprocal_power(base: IntervalAD, k: int, n: int) -> IntervalAD:
@@ -577,4 +730,4 @@ def _apply_log(arg: IntervalAD, n: int) -> IntervalAD:
     return IntervalAD(value=value, grad=grad, hess=hess)
 
 
-__all__ = ["IntervalAD", "interval_hessian"]
+__all__ = ["IntervalAD", "Rank1Factor", "interval_hessian"]
