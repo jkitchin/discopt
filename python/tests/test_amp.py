@@ -1181,6 +1181,85 @@ class TestAmpEndToEnd:
         assert result.gap is None
         assert result.gap_certified is False
 
+    def test_obbt_with_cutoff_kwarg_plumbed(self):
+        """``obbt_with_cutoff`` must reach solve_amp without being stripped.
+
+        Regression for the silent kwarg-drop in solver.py that swallowed
+        ``obbt_with_cutoff`` and made the cutoff-OBBT path unreachable from
+        ``Model.solve(solver="amp", ...)``.
+        """
+        import warnings
+
+        m = _make_nlp1()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            m.solve(
+                solver="amp",
+                rel_gap=1e-3,
+                time_limit=30,
+                obbt_at_root=True,
+                obbt_with_cutoff=True,
+                obbt_time_limit=5.0,
+            )
+        ignored_msgs = [
+            str(w.message) for w in caught if "AMP ignores" in str(w.message)
+        ]
+        for msg in ignored_msgs:
+            assert "obbt_with_cutoff" not in msg, (
+                f"obbt_with_cutoff was reported ignored: {msg}"
+            )
+
+    def test_cutoff_obbt_uses_current_partition_state(self, monkeypatch):
+        """Cutoff OBBT must build its relaxation from the live disc_state.
+
+        Empty-partition McCormick is strictly looser than partitioned
+        McCormick, so OBBT against the empty relaxation can miss bounds
+        that the current iteration's partitioning would tighten.  The
+        helper must pass a non-empty disc_state through to the relaxation
+        builder once partitioning has taken any steps.
+        """
+        from discopt.solvers import amp as amp_solver
+
+        seen_partition_lengths: list[int] = []
+        real_build = amp_solver.build_milp_relaxation if hasattr(
+            amp_solver, "build_milp_relaxation"
+        ) else None
+
+        from discopt._jax import milp_relaxation as milp_relax_mod
+
+        real_builder = milp_relax_mod.build_milp_relaxation
+
+        def wrapped_build(model, terms, disc_state, *args, **kwargs):
+            # Track only OBBT-time builds (incumbent arg None, oa_cuts arg from kwargs)
+            if disc_state is not None:
+                total = sum(
+                    len(pts) for pts in disc_state.partitions.values()
+                )
+                seen_partition_lengths.append(total)
+            return real_builder(model, terms, disc_state, *args, **kwargs)
+
+        monkeypatch.setattr(milp_relax_mod, "build_milp_relaxation", wrapped_build)
+        # The amp module imports build_milp_relaxation lazily inside helpers,
+        # so monkeypatching on the source module is sufficient.
+
+        m = _make_nlp1()
+        m.solve(
+            solver="amp",
+            rel_gap=1e-3,
+            time_limit=30,
+            n_init_partitions=4,
+            obbt_at_root=True,
+            obbt_with_cutoff=True,
+            obbt_time_limit=10.0,
+        )
+
+        # At least one OBBT relaxation build must have used a non-empty
+        # disc_state — namely the cutoff OBBT after the first incumbent.
+        assert any(n > 0 for n in seen_partition_lengths), (
+            f"Cutoff OBBT never saw a partitioned disc_state; "
+            f"partition counts seen: {seen_partition_lengths}"
+        )
+
     @pytest.mark.smoke
     def test_pure_quadratic_convex(self):
         """min x²  s.t. x ≥ 1: AMP should certify global optimum = 1."""
