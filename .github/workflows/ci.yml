@@ -53,12 +53,12 @@ jobs:
         run: mypy python/discopt/
 
   python-fast:
-    name: Python fast (3.12, ubuntu, shard ${{ matrix.shard }}/2)
+    name: Python fast (3.12, ubuntu, shard ${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -93,7 +93,7 @@ jobs:
             jax jaxlib numpy scipy highspy cyipopt \
             pytest pytest-timeout pytest-xdist pytest-split
           maturin develop
-      - name: Run pytest (PR-fast, parallel, shard ${{ matrix.shard }}/2)
+      - name: Run pytest (PR-fast, parallel, shard ${{ matrix.shard }}/4)
         run: |
           source .venv/bin/activate
           # -n auto: parallel across runner CPUs.
@@ -107,7 +107,7 @@ jobs:
             -m "not slow" \
             --ignore=python/tests/test_correctness.py \
             -n auto --dist loadgroup \
-            --splits 2 --group ${{ matrix.shard }} \
+            --splits 4 --group ${{ matrix.shard }} \
             --durations=20
         env:
           JAX_PLATFORMS: cpu
