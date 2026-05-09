@@ -44,6 +44,7 @@ from discopt._jax.mccormick import (
     relax_tan,
     relax_tanh,
 )
+from discopt._jax.multivariate_mccormick import get_composition_rule
 from discopt._jax.piecewise_mccormick import (
     piecewise_mccormick_bilinear,
     piecewise_relax_cos,
@@ -712,8 +713,23 @@ def _compile_relax_node(
             return fn
 
         if name in _univariate_relax:
-            relax_fn = _univariate_relax[name]
+            # Prefer the TM2014 (multivariate McCormick) composition rule when
+            # available — it is sound at non-degenerate inner intervals, where
+            # the legacy midpoint composition can violate the bounds. See
+            # python/discopt/_jax/multivariate_mccormick.py and issue #51 (M1).
+            tm_rule = get_composition_rule(name)
             a_fn = arg_fns[0]
+            if tm_rule is not None:
+
+                def fn(x_cv, x_cc, lb, ub, _tm=tm_rule, _a_fn=a_fn):
+                    cv_a, cc_a = _a_fn(x_cv, x_cc, lb, ub)
+                    # Use [cv_a, cc_a] as the (tightest known pointwise) bounds
+                    # on the inner expression g over which we build f's envelope.
+                    return _tm(cv_a, cc_a, cv_a, cc_a)
+
+                return fn
+
+            relax_fn = _univariate_relax[name]
 
             def fn(x_cv, x_cc, lb, ub, _relax_fn=relax_fn, _a_fn=a_fn):
                 cv_a, cc_a = _a_fn(x_cv, x_cc, lb, ub)
