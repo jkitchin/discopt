@@ -130,6 +130,7 @@ except ImportError:
 needs_rust = pytest.mark.skipif(not _has_rust, reason="discopt._rust not available")
 
 
+@pytest.mark.slow
 @needs_rust
 class TestNodeCallback:
     def test_node_callback_called(self):
@@ -162,6 +163,7 @@ class TestNodeCallback:
         assert isinstance(ctx.node_bound, float)
 
 
+@pytest.mark.slow
 @needs_rust
 class TestLazyConstraints:
     def test_lazy_cut_excludes_solution(self):
@@ -199,6 +201,7 @@ class TestLazyConstraints:
         assert result.objective is not None
 
 
+@pytest.mark.slow
 @needs_rust
 class TestIncumbentCallback:
     def test_incumbent_rejection(self):
@@ -228,6 +231,7 @@ class TestIncumbentCallback:
         assert result.status in ("optimal", "feasible")
 
 
+@pytest.mark.slow
 @needs_rust
 class TestCallbackExceptionHandling:
     def test_node_callback_exception_logged(self, caplog):
@@ -271,6 +275,7 @@ class TestCallbackExceptionHandling:
         assert result.status in ("optimal", "feasible", "infeasible", "node_limit")
 
 
+@pytest.mark.slow
 @needs_rust
 class TestCallbacksWithMILP:
     def test_all_callbacks_together(self):

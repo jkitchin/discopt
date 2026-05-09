@@ -51,27 +51,32 @@ def _random_point_in_bounds(lb, ub, rng):
     return lb + t * width
 
 
-def _check_soundness(relax_fn, true_fn, model, n_samples=10000, seed=42):
-    """Verify cv <= f(x) <= cc at many random points within variable bounds."""
+def _check_soundness(relax_fn, true_fn, model, n_samples=2000, seed=42):
+    """Verify cv <= f(x) <= cc at many random points within variable bounds.
+
+    The previous serial Python loop (10k samples calling a JAX scalar each
+    iteration) cost ~8-17s per test for trivial expressions because JAX call
+    overhead dominated. We vmap the relaxation+true evaluator across the
+    sample batch and reduce sample count to a still-statistically-tight 2000.
+    """
     rng = np.random.default_rng(seed)
     lb, ub = _get_var_bounds(model)
-    _flat_size(model)
+    width = jnp.maximum(ub - lb, 1e-6)
+    t = jnp.array(rng.uniform(0.05, 0.95, size=(n_samples,) + lb.shape), dtype=jnp.float64)
+    xs = lb + t * width  # (n_samples, n_vars)
 
-    violations_cv = 0
-    violations_cc = 0
+    @jax.jit
+    def _eval(xs):
+        cv_cc = jax.vmap(lambda x: relax_fn(x, x, lb, ub))(xs)
+        true_vals = jax.vmap(true_fn)(xs)
+        return cv_cc, true_vals
 
-    for _ in range(n_samples):
-        x = _random_point_in_bounds(lb, ub, rng)
-        # For soundness check: x_cv = x_cc = x (point relaxation)
-        cv, cc = relax_fn(x, x, lb, ub)
-        true_val = true_fn(x)
-
-        # Allow small numerical tolerance
-        if float(cv) > float(true_val) + 1e-8:
-            violations_cv += 1
-        if float(cc) < float(true_val) - 1e-8:
-            violations_cc += 1
-
+    (cv_b, cc_b), true_b = _eval(xs)
+    cv_arr = np.asarray(cv_b)
+    cc_arr = np.asarray(cc_b)
+    tv_arr = np.asarray(true_b)
+    violations_cv = int(np.sum(cv_arr > tv_arr + 1e-8))
+    violations_cc = int(np.sum(cc_arr < tv_arr - 1e-8))
     return violations_cv, violations_cc
 
 
@@ -95,7 +100,6 @@ class TestSimpleExpressionSoundness:
         assert cv_viol == 0, f"cv violations: {cv_viol}"
         assert cc_viol == 0, f"cc violations: {cc_viol}"
 
-    @pytest.mark.slow
     def test_bilinear_xy(self):
         m = Model("test")
         x = m.continuous("x", lb=0.5, ub=5)
@@ -110,7 +114,6 @@ class TestSimpleExpressionSoundness:
         assert cv_viol == 0, f"cv violations: {cv_viol}"
         assert cc_viol == 0, f"cc violations: {cc_viol}"
 
-    @pytest.mark.slow
     def test_exp_plus_log(self):
         m = Model("test")
         x = m.continuous("x", lb=0.1, ub=3)
@@ -125,7 +128,6 @@ class TestSimpleExpressionSoundness:
         assert cv_viol == 0, f"cv violations: {cv_viol}"
         assert cc_viol == 0, f"cc violations: {cc_viol}"
 
-    @pytest.mark.slow
     def test_x_squared(self):
         m = Model("test")
         x = m.continuous("x", lb=-3, ub=3)
@@ -303,7 +305,6 @@ class TestJitVmap:
 # ─────────────────────────────────────────────────────────────
 
 
-@pytest.mark.slow
 class TestExampleObjectives:
     def _test_example_model(self, build_fn, n_samples=5000):
         """Generic test: compile objective relaxation and verify soundness."""
