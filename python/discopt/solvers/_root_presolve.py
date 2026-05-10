@@ -43,6 +43,9 @@ def _flat_fbbt_bounds(
     offset = 0
     for block_idx, var in enumerate(model._variables):
         size = var.size
+        if size != 1:
+            offset += size
+            continue
         block_lb = float(fbbt_lbs[block_idx])
         block_ub = float(fbbt_ubs[block_idx])
         sl = slice(offset, offset + size)

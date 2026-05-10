@@ -2507,6 +2507,9 @@ def solve_model(
                         n_tightened = 0
                         flat_idx = 0
                         for bi, vinfo in enumerate(model._variables):
+                            if vinfo.size != 1:
+                                flat_idx += vinfo.size
+                                continue
                             for j in range(vinfo.size):
                                 new_lo = fbbt_lbs[bi]
                                 new_hi = fbbt_ubs[bi]

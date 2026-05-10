@@ -132,3 +132,32 @@ class TestFBBTBindings:
         np.testing.assert_allclose(tightened_ub[0], 3.0, atol=1e-12)
         np.testing.assert_allclose(tightened_lb[1], 0.0, atol=1e-12)
         assert tightened_ub[1] < 4.0
+
+    def test_root_presolve_preserves_heterogeneous_array_bounds(self):
+        """Block-level Rust FBBT bounds must not overwrite elementwise array bounds."""
+        from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
+
+        model = dm.Model("heterogeneous_array_bounds")
+        x = model.continuous(
+            "x",
+            shape=(2,),
+            lb=np.array([0.0, 0.0]),
+            ub=np.array([1.0, 10.0]),
+        )
+        model.minimize(-x[1])
+        lb, ub = _flat_variable_bounds(model)
+        repr_ = model_to_repr(model)
+
+        tightened_lb, tightened_ub, infeasible, changed = tighten_root_bounds_with_fbbt(
+            model,
+            lb,
+            ub,
+            int_offsets=[],
+            int_sizes=[],
+            model_repr=repr_,
+        )
+
+        assert not infeasible
+        assert not changed
+        np.testing.assert_allclose(tightened_lb, [0.0, 0.0], atol=1e-12)
+        np.testing.assert_allclose(tightened_ub, [1.0, 10.0], atol=1e-12)
