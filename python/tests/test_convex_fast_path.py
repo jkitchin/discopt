@@ -260,6 +260,7 @@ class TestTranslatedSpecialConvexRegressions:
     @pytest.mark.parametrize(
         "problem_id",
         [
+            "nlp_cvx_105_011",
             "nlp_cvx_108_010",
             "nlp_cvx_108_011",
             "nlp_cvx_108_012",
