@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 import numpy as np
 from scipy.optimize import minimize as scipy_minimize
@@ -154,6 +154,22 @@ class _AugmentedEvaluator:
                 return A_jax @ x - b_jax
 
         return augmented_con
+
+
+class _BoundOverrideEvaluator:
+    """Proxy an evaluator while overriding the variable bounds exposed to backends."""
+
+    def __init__(self, evaluator, lb: np.ndarray, ub: np.ndarray):
+        self._evaluator = evaluator
+        self._lb = np.asarray(lb, dtype=np.float64)
+        self._ub = np.asarray(ub, dtype=np.float64)
+
+    def __getattr__(self, name):
+        return getattr(self._evaluator, name)
+
+    @property
+    def variable_bounds(self):
+        return self._lb, self._ub
 
 
 def _evaluator_fingerprint(model: Model) -> tuple:
@@ -2701,15 +2717,16 @@ def _solve_continuous(
     opts["max_wall_time"] = max(remaining, 0.1)
 
     constraint_bounds = None
+    backend_evaluator = cast(NLPEvaluator, _BoundOverrideEvaluator(evaluator, lb, ub))
 
     t_jax_start = time.perf_counter()
     if nlp_solver == "ripopt":
         from discopt.solvers.nlp_ripopt import solve_nlp as solve_nlp_ripopt
 
         nlp_result = solve_nlp_ripopt(
-            evaluator, x0, constraint_bounds=constraint_bounds, options=opts
+            backend_evaluator, x0, constraint_bounds=constraint_bounds, options=opts
         )
-    elif nlp_solver == "sparse_ipm" and hasattr(evaluator, "_obj_fn"):
+    elif nlp_solver == "sparse_ipm" and hasattr(backend_evaluator, "_obj_fn"):
         from discopt._jax.sparse_ipm import solve_nlp_sparse_ipm
 
         # Build sparse Jacobian function if beneficial
@@ -2726,18 +2743,22 @@ def _solve_continuous(
         except Exception as e:
             logger.debug("Sparse Jacobian setup failed: %s", e)
         nlp_result = solve_nlp_sparse_ipm(
-            evaluator,
+            backend_evaluator,
             x0,
             constraint_bounds=constraint_bounds,
             options=opts,
             sparse_jac_fn=sparse_jac_fn,
         )
-    elif nlp_solver == "ipm" and hasattr(evaluator, "_obj_fn"):
+    elif nlp_solver == "ipm" and hasattr(backend_evaluator, "_obj_fn"):
         from discopt._jax.ipm import solve_nlp_ipm
 
-        nlp_result = solve_nlp_ipm(evaluator, x0, constraint_bounds=constraint_bounds, options=opts)
+        nlp_result = solve_nlp_ipm(
+            backend_evaluator, x0, constraint_bounds=constraint_bounds, options=opts
+        )
     else:
-        nlp_result = solve_nlp(evaluator, x0, constraint_bounds=constraint_bounds, options=opts)
+        nlp_result = solve_nlp(
+            backend_evaluator, x0, constraint_bounds=constraint_bounds, options=opts
+        )
     jax_time += time.perf_counter() - t_jax_start
 
     wall_time = time.perf_counter() - t_start
@@ -3312,20 +3333,7 @@ def _solve_node_nlp_ripopt(
     from discopt.solvers import NLPResult
     from discopt.solvers.nlp_ripopt import solve_nlp as solve_nlp_ripopt
 
-    class _BoundOverride:
-        """Thin proxy that overrides variable_bounds on the evaluator."""
-
-        def __init__(self, ev, lb, ub):
-            self._ev = ev
-            self._lb = lb
-            self._ub = ub
-
-        def __getattr__(self, name):
-            if name == "variable_bounds":
-                return (self._lb, self._ub)
-            return getattr(self._ev, name)
-
-    proxy = _BoundOverride(evaluator, node_lb, node_ub)
+    proxy = _BoundOverrideEvaluator(evaluator, node_lb, node_ub)
 
     # Guard against ripopt stalling on degenerate/infeasible subproblems
     # by enforcing a per-node wall time limit. Cap at 30s per node, but
