@@ -19,7 +19,7 @@ discopt.doe : Optimal design of experiments using the same Experiment interface.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Union
+from typing import Any, Union
 
 import numpy as np
 
@@ -245,7 +245,7 @@ def estimate_parameters(
     *,
     initial_guess: dict[str, float] | None = None,
     fixed_parameters: dict[str, float] | None = None,
-    solver_options: dict | None = None,
+    solver_options: dict[str, Any] | None = None,
 ) -> EstimationResult:
     """Estimate unknown parameters from experimental data.
 
@@ -277,7 +277,10 @@ def estimate_parameters(
         standalone for sub-model fits and one-at-a-time sensitivity
         studies.
     solver_options : dict, optional
-        Options passed to the solver.
+        Options passed to the solver. When omitted, estimation uses a local
+        continuous NLP solve (``skip_convex_check=True``) rather than global
+        spatial branch-and-bound, which is usually inappropriate for
+        nonlinear least-squares fitting.
 
     Returns
     -------
@@ -344,8 +347,11 @@ def estimate_parameters(
 
     em.model.minimize(dm.sum(residual_terms))
 
-    # Solve
-    solve_out = em.model.solve(**(solver_options or {}))
+    # Solve. Parameter estimation is a local nonlinear least-squares workflow;
+    # callers that need certified global optimization can override this.
+    effective_solver_options: dict[str, Any] = {"skip_convex_check": True}
+    effective_solver_options.update(solver_options or {})
+    solve_out = em.model.solve(**effective_solver_options)
     # solve() returns SolveResult (not streaming iterator) by default
     result: dm.SolveResult = solve_out  # type: ignore[assignment]
 

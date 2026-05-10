@@ -85,6 +85,50 @@ class TestConvexFastPathDetection:
         assert result.node_count == 0
 
 
+class TestNonconvexContinuousSpatialRegressions:
+    """Regression tests for nonconvex pure-continuous spatial dispatch."""
+
+    def test_nonconvex_nlp_root_local_point_is_not_certified_optimal(self):
+        m = Model("narrow_nonconvex_well")
+        x = m.continuous("x", lb=0.0, ub=1.0)
+        m.minimize(-dm.exp(-10000.0 * (x - 0.05) ** 2))
+
+        result = m.solve(nlp_solver="ipm", time_limit=10.0, gap_tolerance=1e-6, max_nodes=1)
+
+        assert result.convex_fast_path is False
+        assert result.status != "optimal"
+        assert result.objective is not None
+        assert result.objective > -0.1
+        assert result.node_count > 1
+        assert result.bound is None or result.bound < -0.5
+
+    def test_nonconvex_continuous_qp_minimize_uses_spatial_bb(self):
+        m = Model("nonconvex_qp_min")
+        x = m.continuous("x", lb=-1.0, ub=1.0)
+        m.minimize(-(x**2))
+
+        result = m.solve(nlp_solver="ipm", time_limit=10.0, gap_tolerance=1e-6, max_nodes=500)
+
+        assert result.status == "optimal"
+        assert result.convex_fast_path is False
+        assert result.objective == pytest.approx(-1.0, abs=1e-6)
+        assert abs(float(result.value(x))) == pytest.approx(1.0, abs=1e-6)
+        assert result.node_count > 0
+
+    def test_nonconvex_continuous_qp_maximize_uses_spatial_bb(self):
+        m = Model("nonconvex_qp_max")
+        x = m.continuous("x", lb=-1.0, ub=1.0)
+        m.maximize(x**2)
+
+        result = m.solve(nlp_solver="ipm", time_limit=10.0, gap_tolerance=1e-6, max_nodes=500)
+
+        assert result.status == "optimal"
+        assert result.convex_fast_path is False
+        assert result.objective == pytest.approx(1.0, abs=1e-6)
+        assert abs(float(result.value(x))) == pytest.approx(1.0, abs=1e-6)
+        assert result.node_count > 0
+
+
 class TestConvexFastPathOptOut:
     """Verify that skip_convex_check disables the fast path."""
 
