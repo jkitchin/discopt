@@ -1711,6 +1711,34 @@ def solve_amp(
     def _from_minimization_space(value: float) -> float:
         return -float(value) if maximize else float(value)
 
+    int_offsets: list[int] = []
+    int_sizes: list[int] = []
+    offset = 0
+    for v in model._variables:
+        if v.var_type in (VarType.BINARY, VarType.INTEGER):
+            int_offsets.append(offset)
+            int_sizes.append(v.size)
+        offset += v.size
+
+    from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
+
+    flat_lb, flat_ub, root_infeasible, root_changed = tighten_root_bounds_with_fbbt(
+        model,
+        flat_lb,
+        flat_ub,
+        int_offsets,
+        int_sizes,
+    )
+    if root_infeasible:
+        return SolveResult(
+            status="infeasible",
+            wall_time=time.perf_counter() - t_start,
+            mip_count=0,
+            gap_certified=True,
+        )
+    if root_changed:
+        logger.info("AMP: root FBBT tightened variable bounds before relaxation")
+
     tightened_lb, tightened_ub, nonlinear_bt_stats = tighten_nonlinear_bounds(
         model, flat_lb, flat_ub
     )
@@ -1722,6 +1750,7 @@ def solve_amp(
         return SolveResult(
             status="infeasible",
             wall_time=time.perf_counter() - t_start,
+            mip_count=0,
             gap_certified=True,
         )
     if nonlinear_bt_stats.n_tightened > 0:

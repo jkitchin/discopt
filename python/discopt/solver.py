@@ -1694,6 +1694,34 @@ def solve_model(
     # --- Extract variable info ---
     n_vars, lb, ub, int_offsets, int_sizes = _extract_variable_info(model)
 
+    # --- Root presolve: FBBT + integer-bound rounding before tree creation ---
+    t_rust_start = time.perf_counter()
+    from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
+
+    lb, ub, root_infeasible, _ = tighten_root_bounds_with_fbbt(
+        model,
+        lb,
+        ub,
+        int_offsets,
+        int_sizes,
+        model_repr=_model_repr,
+    )
+    rust_time += time.perf_counter() - t_rust_start
+    if root_infeasible:
+        wall_time = time.perf_counter() - t_start
+        return SolveResult(
+            status="infeasible",
+            objective=None,
+            bound=None,
+            gap=None,
+            x=None,
+            wall_time=wall_time,
+            node_count=0,
+            rust_time=rust_time,
+            jax_time=jax_time,
+            python_time=wall_time - rust_time - jax_time,
+        )
+
     # --- Create PyTreeManager (Rust) ---
     t_rust_start = time.perf_counter()
     tree = PyTreeManager(
@@ -2783,6 +2811,35 @@ def _solve_nlp_bb(
 
     # --- Extract variable info and create tree ---
     n_vars, lb, ub, int_offsets, int_sizes = _extract_variable_info(model)
+
+    # --- Root presolve: FBBT + integer-bound rounding before tree creation ---
+    t_rust_start = time.perf_counter()
+    from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
+
+    lb, ub, root_infeasible, _ = tighten_root_bounds_with_fbbt(
+        model,
+        lb,
+        ub,
+        int_offsets,
+        int_sizes,
+    )
+    rust_time += time.perf_counter() - t_rust_start
+    if root_infeasible:
+        wall_time = time.perf_counter() - t_start
+        return SolveResult(
+            status="infeasible",
+            objective=None,
+            bound=None,
+            gap=None,
+            x=None,
+            wall_time=wall_time,
+            node_count=0,
+            rust_time=rust_time,
+            jax_time=jax_time,
+            python_time=wall_time - rust_time - jax_time,
+            nlp_bb=True,
+            gap_certified=_gap_certified,
+        )
 
     t_rust_start = time.perf_counter()
     tree = PyTreeManager(

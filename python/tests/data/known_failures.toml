@@ -27,13 +27,6 @@ note     = "user-defined function via JuMP.register() has no dm equivalent"
 # RESOLVED: Fixed in f6d15a5 ("Fix maximize objective sign in solver and QP
 # extractor"). All 14 entries removed after rebase confirmed they now pass.
 
-# ── NaN on division + integer (issue #7) ─────────────────────────────────────
-
-[minlptests."nlp_mi_005_010/primary"]
-category = "numerical_error"
-issue    = 7
-note     = "division constraints (1/x form) produce NaN when x integer lb=0; crashes B&B"
-
 # ── IPM iteration_limit on unbounded variables ───────────────────────────────
 # Variables without explicit bounds get lb=-1e20,ub=1e20 which causes the IPM
 # to hit iteration_limit. All 501_011 (sqrt-constraint) variants are affected,
