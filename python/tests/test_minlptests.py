@@ -1187,7 +1187,7 @@ def _build_nlp_004_010() -> Model:
     z = m.continuous("z")
     m.minimize(dm.tan(x) + y + x * z + 0.5 * dm.abs(y))
     m.subject_to(x**2 + y**2 + z**2 <= 10)
-    m.subject_to(2 * x + 3 * y + z >= -10)
+    m.subject_to(-1.2 * x - y <= z / 1.35)
     return m
 
 

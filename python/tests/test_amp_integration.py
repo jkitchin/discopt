@@ -2298,6 +2298,77 @@ class TestCurrentCodeWeaknesses:
         assert tightened_ub[1] == pytest.approx(3.0)
         assert "sum_of_squares_upper_bound" in stats.applied_rules
 
+    def test_tighten_sqrt_sum_of_squares_bounds_infers_finite_box(self):
+        """Sqrt norm constraints should clamp otherwise unbounded domains."""
+        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+
+        m = Model("bt_sqrt_sum_of_squares")
+        x = m.continuous("x", lb=-1e20, ub=1e20)
+        y = m.continuous("y", lb=-1e20, ub=1e20)
+        m.subject_to(dm.sqrt(dm.sum([x**2, y**2])) <= 2.0)
+        m.minimize(x * 0.0 + y * 0.0)
+
+        tightened_lb, tightened_ub, stats = tighten_nonlinear_bounds(
+            m,
+            np.array([-1e20, -1e20], dtype=np.float64),
+            np.array([1e20, 1e20], dtype=np.float64),
+        )
+
+        assert tightened_lb[0] == pytest.approx(-2.0)
+        assert tightened_ub[0] == pytest.approx(2.0)
+        assert tightened_lb[1] == pytest.approx(-2.0)
+        assert tightened_ub[1] == pytest.approx(2.0)
+        assert "sqrt_sum_of_squares_upper_bound" in stats.applied_rules
+
+    def test_continuous_solver_starts_safely_after_sqrt_tightening(self):
+        """Formerly unbounded sqrt-norm variables should not start at the nonsmooth origin."""
+        m = Model("bt_sqrt_single_solve")
+        x = m.continuous("x", lb=-1e20, ub=1e20)
+        m.minimize(-x)
+        m.subject_to(dm.sqrt(dm.sum([x**2])) <= 1.0)
+
+        result = m.solve(time_limit=10.0, gap_tolerance=1e-6)
+
+        assert result.status in ("optimal", "feasible")
+        assert result.objective == pytest.approx(-1.0, abs=1e-5)
+
+    def test_continuous_solver_backend_receives_tightened_bounds(self, monkeypatch):
+        """Direct continuous NLP backends should see the tightened variable box."""
+        import time
+
+        import discopt.solver as solver_mod
+        from discopt.solvers import NLPResult, SolveStatus
+
+        captured: dict[str, np.ndarray] = {}
+
+        def fake_solve_nlp(evaluator, x0, constraint_bounds=None, options=None):
+            del constraint_bounds, options
+            backend_lb, backend_ub = evaluator.variable_bounds
+            captured["lb"] = np.asarray(backend_lb, dtype=np.float64).copy()
+            captured["ub"] = np.asarray(backend_ub, dtype=np.float64).copy()
+            captured["x0"] = np.asarray(x0, dtype=np.float64).copy()
+            return NLPResult(status=SolveStatus.OPTIMAL, x=captured["x0"], objective=0.0)
+
+        monkeypatch.setattr(solver_mod, "solve_nlp", fake_solve_nlp)
+
+        m = Model("bt_sqrt_backend_bounds")
+        x = m.continuous("x", lb=-1e20, ub=1e20)
+        m.minimize(x * 0.0)
+        m.subject_to(dm.sqrt(dm.sum([x**2])) <= 1.0)
+
+        result = solver_mod._solve_continuous(
+            m,
+            time_limit=5.0,
+            ipopt_options={},
+            t_start=time.perf_counter(),
+            nlp_solver="ipopt",
+        )
+
+        assert result.status == "optimal"
+        assert captured["lb"] == pytest.approx(np.array([-1.0]))
+        assert captured["ub"] == pytest.approx(np.array([1.0]))
+        assert captured["x0"] == pytest.approx(np.array([0.5]))
+
     def test_tighten_separable_quadratic_bounds_infers_finite_box(self):
         """Constraints like x + y^2 <= c should infer finite bounds for both variables."""
         from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
@@ -2316,6 +2387,29 @@ class TestCurrentCodeWeaknesses:
         assert tightened_ub[0] == pytest.approx(4.0)
         assert tightened_lb[1] == pytest.approx(-2.0)
         assert tightened_ub[1] == pytest.approx(2.0)
+        assert "separable_quadratic_upper_bound" in stats.applied_rules
+
+    def test_tighten_iterates_linked_quadratic_constraints(self):
+        """Linked quadratic inequalities should reach the compact implied box."""
+        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+
+        m = Model("bt_linked_quadratic")
+        x = m.continuous("x", lb=-1e20, ub=1e20)
+        y = m.continuous("y", lb=-1e20, ub=1e20)
+        m.subject_to(x**2 <= y)
+        m.subject_to(y <= 1.0 - x**2)
+        m.minimize(x * 0.0 + y * 0.0)
+
+        tightened_lb, tightened_ub, stats = tighten_nonlinear_bounds(
+            m,
+            np.array([-1e20, -1e20], dtype=np.float64),
+            np.array([1e20, 1e20], dtype=np.float64),
+        )
+
+        assert tightened_lb[0] == pytest.approx(-1.0)
+        assert tightened_ub[0] == pytest.approx(1.0)
+        assert tightened_lb[1] == pytest.approx(0.0)
+        assert tightened_ub[1] == pytest.approx(1.0)
         assert "separable_quadratic_upper_bound" in stats.applied_rules
 
     def test_tighten_monotone_function_bounds(self):
