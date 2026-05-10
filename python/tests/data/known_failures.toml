@@ -35,8 +35,3 @@ issue    = 33
 note     = "false infeasible: feasible exp/log problem incorrectly declared infeasible"
 
 # ── Infeasibility detection ──────────────────────────────────────────────────
-
-[minlptests."nlp_007_010/primary"]
-category = "no_convergence"
-issue    = 35
-note     = "iteration_limit instead of infeasible: y=exp(x), x=y^2 system"
