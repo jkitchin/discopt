@@ -134,6 +134,35 @@ def _match_scaled_linear_var(
     return flat_idx, scale
 
 
+def _match_scaled_square_var(
+    expr,
+    scale: float,
+    metadata: FlatVariableMetadata,
+) -> Optional[tuple[int, float]]:
+    if isinstance(expr, UnaryOp) and expr.op == "neg":
+        return _match_scaled_square_var(expr.operand, -scale, metadata)
+
+    if isinstance(expr, BinaryOp) and expr.op == "*":
+        left_const = _constant_value(expr.left)
+        if left_const is not None:
+            return _match_scaled_square_var(expr.right, scale * left_const, metadata)
+        right_const = _constant_value(expr.right)
+        if right_const is not None:
+            return _match_scaled_square_var(expr.left, scale * right_const, metadata)
+        return None
+
+    if isinstance(expr, BinaryOp) and expr.op == "**":
+        exponent = _constant_value(expr.right)
+        if exponent is None or abs(exponent - 2.0) > 1e-12:
+            return None
+        flat_idx = metadata.scalar_flat_index(expr.left)
+        if flat_idx is None:
+            return None
+        return flat_idx, scale
+
+    return None
+
+
 def _merge_affine_matches(
     left: tuple[Optional[int], float, float],
     right: tuple[Optional[int], float, float],
@@ -181,6 +210,15 @@ def _match_affine_var(
         return _merge_affine_matches(left, right)
 
     return None
+
+
+def _merge_single_variable_affine(
+    current: Optional[tuple[Optional[int], float, float]],
+    candidate: tuple[Optional[int], float, float],
+) -> Optional[tuple[Optional[int], float, float]]:
+    if current is None:
+        return candidate
+    return _merge_affine_matches(current, candidate)
 
 
 def _apply_integrality(
@@ -815,6 +853,190 @@ _MONOTONE_DOMAINS: dict[str, tuple[Optional[float], Optional[float]]] = {
 }
 
 
+class MonotoneFunctionEqualityRule(NonlinearBoundTighteningRule):
+    """Propagate equalities like y == exp(a*x + b) in both directions."""
+
+    name = "monotone_function_equality"
+
+    def _match_scaled_function(
+        self,
+        expr,
+        scale: float,
+        metadata: FlatVariableMetadata,
+    ) -> Optional[tuple[str, float, int, float, float]]:
+        if isinstance(expr, UnaryOp) and expr.op == "neg":
+            return self._match_scaled_function(expr.operand, -scale, metadata)
+
+        if isinstance(expr, BinaryOp) and expr.op == "*":
+            left_const = _constant_value(expr.left)
+            if left_const is not None:
+                return self._match_scaled_function(expr.right, scale * left_const, metadata)
+            right_const = _constant_value(expr.right)
+            if right_const is not None:
+                return self._match_scaled_function(expr.left, scale * right_const, metadata)
+            return None
+
+        if (
+            not isinstance(expr, FunctionCall)
+            or expr.func_name not in _MONOTONE_DOMAINS
+            or len(expr.args) != 1
+        ):
+            return None
+
+        affine_match = _match_affine_var(expr.args[0], 1.0, metadata)
+        if affine_match is None:
+            return None
+        flat_idx, arg_coeff, arg_offset = affine_match
+        if flat_idx is None or abs(arg_coeff) <= 1e-12:
+            return None
+        return expr.func_name, scale, flat_idx, arg_coeff, arg_offset
+
+    def tighten(
+        self,
+        model: Model,
+        flat_lb: np.ndarray,
+        flat_ub: np.ndarray,
+        metadata: FlatVariableMetadata,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        tightened_lb = flat_lb.copy()
+        tightened_ub = flat_ub.copy()
+
+        for constraint in model._constraints:
+            if getattr(constraint, "sense", None) != "==":
+                continue
+
+            terms: list[tuple[float, object]] = []
+            _flatten_sum(constraint.body, 1.0, terms)
+
+            constant_term = 0.0
+            affine_match: Optional[tuple[Optional[int], float, float]] = None
+            function_match: Optional[tuple[str, float, int, float, float]] = None
+            matches_pattern = True
+
+            for scale, term in terms:
+                const_val = _constant_value(term)
+                if const_val is not None:
+                    constant_term += scale * const_val
+                    continue
+
+                match = self._match_scaled_function(term, scale, metadata)
+                if match is not None:
+                    if function_match is not None:
+                        matches_pattern = False
+                        break
+                    function_match = match
+                    continue
+
+                affine_term = _match_affine_var(term, scale, metadata)
+                if affine_term is None:
+                    matches_pattern = False
+                    break
+                affine_match = _merge_single_variable_affine(affine_match, affine_term)
+                if affine_match is None:
+                    matches_pattern = False
+                    break
+
+            if (
+                not matches_pattern
+                or affine_match is None
+                or function_match is None
+                or affine_match[0] is None
+            ):
+                continue
+
+            linear_idx, linear_coeff, linear_offset = affine_match
+            assert linear_idx is not None
+            if abs(linear_coeff) <= 1e-12:
+                continue
+
+            func_name, func_coeff, arg_idx, arg_coeff, arg_offset = function_match
+            if abs(func_coeff) <= 1e-12:
+                continue
+
+            domain_lb, domain_ub = _MONOTONE_DOMAINS[func_name]
+            arg_endpoint_a = arg_coeff * float(tightened_lb[arg_idx]) + arg_offset
+            arg_endpoint_b = arg_coeff * float(tightened_ub[arg_idx]) + arg_offset
+            current_arg_lb = min(arg_endpoint_a, arg_endpoint_b)
+            current_arg_ub = max(arg_endpoint_a, arg_endpoint_b)
+            if domain_lb is not None:
+                current_arg_lb = max(current_arg_lb, domain_lb)
+            if domain_ub is not None:
+                current_arg_ub = min(current_arg_ub, domain_ub)
+            if current_arg_lb > current_arg_ub + 1e-12:
+                _prove_infeasible(
+                    self.name,
+                    constraint,
+                    f"{func_name} argument domain is empty on the current box",
+                )
+
+            func_min = _monotone_function_value(func_name, current_arg_lb)
+            func_max = _monotone_function_value(func_name, current_arg_ub)
+
+            linear_target_values = (
+                -constant_term - func_coeff * func_min,
+                -constant_term - func_coeff * func_max,
+            )
+            _tighten_affine_argument_interval(
+                tightened_lb,
+                tightened_ub,
+                metadata,
+                linear_idx,
+                linear_coeff,
+                linear_offset,
+                arg_lb=min(linear_target_values),
+                arg_ub=max(linear_target_values),
+            )
+
+            linear_endpoint_a = linear_coeff * float(tightened_lb[linear_idx]) + linear_offset
+            linear_endpoint_b = linear_coeff * float(tightened_ub[linear_idx]) + linear_offset
+            linear_expr_lb = min(linear_endpoint_a, linear_endpoint_b)
+            linear_expr_ub = max(linear_endpoint_a, linear_endpoint_b)
+            required_values = (
+                (-constant_term - linear_expr_lb) / func_coeff,
+                (-constant_term - linear_expr_ub) / func_coeff,
+            )
+            required_func_lb = min(required_values)
+            required_func_ub = max(required_values)
+
+            feasible_func_lb = max(required_func_lb, func_min)
+            feasible_func_ub = min(required_func_ub, func_max)
+            if feasible_func_lb > feasible_func_ub + 1e-12:
+                _prove_infeasible(
+                    self.name,
+                    constraint,
+                    f"{func_name}(argument) range cannot satisfy linked equality",
+                )
+
+            arg_lb = domain_lb
+            arg_ub = domain_ub
+            if np.isfinite(feasible_func_lb):
+                lower = _inverse_monotone_lower(func_name, feasible_func_lb)
+                if lower is not None:
+                    arg_lb = lower if arg_lb is None else max(arg_lb, lower)
+            if np.isfinite(feasible_func_ub):
+                upper = _inverse_monotone_upper(func_name, feasible_func_ub)
+                if upper is None:
+                    _prove_infeasible(
+                        self.name,
+                        constraint,
+                        f"{func_name}(argument) cannot be <= {feasible_func_ub}",
+                    )
+                arg_ub = upper if arg_ub is None else min(arg_ub, upper)
+
+            _tighten_affine_argument_interval(
+                tightened_lb,
+                tightened_ub,
+                metadata,
+                arg_idx,
+                arg_coeff,
+                arg_offset,
+                arg_lb=arg_lb,
+                arg_ub=arg_ub,
+            )
+
+        return tightened_lb, tightened_ub
+
+
 class MonotoneFunctionBoundsRule(NonlinearBoundTighteningRule):
     """Tighten affine arguments of monotone unary function constraints."""
 
@@ -945,6 +1167,171 @@ class MonotoneFunctionBoundsRule(NonlinearBoundTighteningRule):
                 arg_lb=arg_lb,
                 arg_ub=arg_ub,
             )
+
+        return tightened_lb, tightened_ub
+
+
+class QuadraticEqualityBoundsRule(NonlinearBoundTighteningRule):
+    """Propagate equalities like x == y**2 in both directions."""
+
+    name = "quadratic_equality_bounds"
+
+    @staticmethod
+    def _square_interval(lb: float, ub: float) -> tuple[float, float]:
+        if lb <= 0.0 <= ub:
+            return 0.0, max(lb * lb, ub * ub)
+        return min(lb * lb, ub * ub), max(lb * lb, ub * ub)
+
+    @staticmethod
+    def _intersect_square_preimage(
+        current_lb: float,
+        current_ub: float,
+        square_lb: float,
+        square_ub: float,
+    ) -> Optional[tuple[float, float]]:
+        if square_ub < -1e-12:
+            return None
+        square_lb = max(0.0, square_lb)
+        square_ub = max(0.0, square_ub)
+
+        radius = float(np.sqrt(square_ub))
+        new_lb = max(current_lb, -radius)
+        new_ub = min(current_ub, radius)
+
+        if square_lb > 1e-12:
+            inner = float(np.sqrt(square_lb))
+            if new_lb >= 0.0:
+                new_lb = max(new_lb, inner)
+            elif new_ub <= 0.0:
+                new_ub = min(new_ub, -inner)
+
+        if new_lb > new_ub + 1e-12:
+            return None
+        return new_lb, new_ub
+
+    def tighten(
+        self,
+        model: Model,
+        flat_lb: np.ndarray,
+        flat_ub: np.ndarray,
+        metadata: FlatVariableMetadata,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        tightened_lb = flat_lb.copy()
+        tightened_ub = flat_ub.copy()
+
+        for constraint in model._constraints:
+            if getattr(constraint, "sense", None) != "==":
+                continue
+
+            terms: list[tuple[float, object]] = []
+            _flatten_sum(constraint.body, 1.0, terms)
+
+            constant_term = 0.0
+            affine_match: Optional[tuple[Optional[int], float, float]] = None
+            square_match: Optional[tuple[int, float]] = None
+            matches_pattern = True
+
+            for scale, term in terms:
+                const_val = _constant_value(term)
+                if const_val is not None:
+                    constant_term += scale * const_val
+                    continue
+
+                match = _match_scaled_square_var(term, scale, metadata)
+                if match is not None:
+                    if square_match is not None:
+                        matches_pattern = False
+                        break
+                    square_match = match
+                    continue
+
+                affine_term = _match_affine_var(term, scale, metadata)
+                if affine_term is None:
+                    matches_pattern = False
+                    break
+                affine_match = _merge_single_variable_affine(affine_match, affine_term)
+                if affine_match is None:
+                    matches_pattern = False
+                    break
+
+            if (
+                not matches_pattern
+                or affine_match is None
+                or square_match is None
+                or affine_match[0] is None
+            ):
+                continue
+
+            linear_idx, linear_coeff, linear_offset = affine_match
+            assert linear_idx is not None
+            square_idx, square_coeff = square_match
+            if abs(linear_coeff) <= 1e-12 or abs(square_coeff) <= 1e-12:
+                continue
+
+            square_min, square_max = self._square_interval(
+                float(tightened_lb[square_idx]),
+                float(tightened_ub[square_idx]),
+            )
+            linear_target_values = (
+                -constant_term - square_coeff * square_min,
+                -constant_term - square_coeff * square_max,
+            )
+            _tighten_affine_argument_interval(
+                tightened_lb,
+                tightened_ub,
+                metadata,
+                linear_idx,
+                linear_coeff,
+                linear_offset,
+                arg_lb=min(linear_target_values),
+                arg_ub=max(linear_target_values),
+            )
+
+            linear_endpoint_a = linear_coeff * float(tightened_lb[linear_idx]) + linear_offset
+            linear_endpoint_b = linear_coeff * float(tightened_ub[linear_idx]) + linear_offset
+            linear_expr_lb = min(linear_endpoint_a, linear_endpoint_b)
+            linear_expr_ub = max(linear_endpoint_a, linear_endpoint_b)
+            required_square_values = (
+                (-constant_term - linear_expr_lb) / square_coeff,
+                (-constant_term - linear_expr_ub) / square_coeff,
+            )
+            required_square_lb = min(required_square_values)
+            required_square_ub = max(required_square_values)
+            feasible_square_lb = max(required_square_lb, square_min, 0.0)
+            feasible_square_ub = min(required_square_ub, square_max)
+            if feasible_square_lb > feasible_square_ub + 1e-12:
+                _prove_infeasible(
+                    self.name,
+                    constraint,
+                    "square term range cannot satisfy linked equality",
+                )
+
+            interval = self._intersect_square_preimage(
+                float(tightened_lb[square_idx]),
+                float(tightened_ub[square_idx]),
+                feasible_square_lb,
+                feasible_square_ub,
+            )
+            if interval is None:
+                _prove_infeasible(
+                    self.name,
+                    constraint,
+                    f"required interval for flat variable {square_idx} is empty",
+                )
+            new_lb, new_ub = _apply_integrality(
+                interval[0],
+                interval[1],
+                metadata.flat_var_types[square_idx],
+            )
+            if new_lb <= new_ub:
+                tightened_lb[square_idx] = new_lb
+                tightened_ub[square_idx] = new_ub
+            else:
+                _prove_infeasible(
+                    self.name,
+                    constraint,
+                    f"required interval for flat variable {square_idx} is empty",
+                )
 
         return tightened_lb, tightened_ub
 
@@ -1082,6 +1469,8 @@ class ReciprocalBoundsRule(NonlinearBoundTighteningRule):
 
 
 DEFAULT_NONLINEAR_BOUND_RULES: tuple[NonlinearBoundTighteningRule, ...] = (
+    MonotoneFunctionEqualityRule(),
+    QuadraticEqualityBoundsRule(),
     MonotoneFunctionBoundsRule(),
     ReciprocalBoundsRule(),
     SqrtSumOfSquaresUpperBoundRule(),

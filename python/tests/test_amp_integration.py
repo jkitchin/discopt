@@ -2412,6 +2412,30 @@ class TestCurrentCodeWeaknesses:
         assert tightened_ub[1] == pytest.approx(1.0)
         assert "separable_quadratic_upper_bound" in stats.applied_rules
 
+    def test_tighten_proves_exp_square_cycle_infeasible(self):
+        """Issue #33: y=exp(x), x=y^2 should be proven infeasible by tightening."""
+        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+
+        m = Model("bt_exp_square_cycle")
+        x = m.continuous("x")
+        y = m.continuous("y")
+        m.subject_to(y - dm.exp(x) == 0.0)
+        m.subject_to(x - y**2 == 0.0)
+        m.minimize(x * 0.0 + y * 0.0)
+
+        tightened_lb, tightened_ub, stats = tighten_nonlinear_bounds(
+            m,
+            np.array([-9.999e19, -9.999e19], dtype=np.float64),
+            np.array([9.999e19, 9.999e19], dtype=np.float64),
+        )
+
+        assert stats.infeasible is True
+        assert "monotone_function_equality" in stats.applied_rules
+        assert "quadratic_equality_bounds" in stats.applied_rules
+        assert tightened_lb[0] >= 0.0
+        assert tightened_lb[1] >= 1.0
+        assert np.all(np.isfinite(tightened_ub))
+
     def test_tighten_monotone_function_bounds(self):
         """Monotone unary constraints should tighten affine argument domains."""
         from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
