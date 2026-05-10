@@ -27,11 +27,4 @@ note     = "user-defined function via JuMP.register() has no dm equivalent"
 # RESOLVED: Fixed in f6d15a5 ("Fix maximize objective sign in solver and QP
 # extractor"). All 14 entries removed after rebase confirmed they now pass.
 
-# ── False infeasible ─────────────────────────────────────────────────────────
-
-[minlptests."nlp_cvx_105_011/primary"]
-category = "numerical_error"
-issue    = 33
-note     = "false infeasible: feasible exp/log problem incorrectly declared infeasible"
-
 # ── Infeasibility detection ──────────────────────────────────────────────────
