@@ -19,6 +19,7 @@ from discopt.modeling.core import (
     FunctionCall,
     IndexExpression,
     Model,
+    SumOverExpression,
     UnaryOp,
     Variable,
     VarType,
@@ -252,6 +253,11 @@ def _tighten_affine_argument_interval(
 
 
 def _flatten_sum(expr, scale: float, out: list[tuple[float, object]]) -> None:
+    if isinstance(expr, SumOverExpression):
+        for term in expr.terms:
+            _flatten_sum(term, scale, out)
+        return
+
     if isinstance(expr, BinaryOp) and expr.op == "+":
         _flatten_sum(expr.left, scale, out)
         _flatten_sum(expr.right, scale, out)
@@ -400,6 +406,169 @@ class SumOfSquaresUpperBoundRule(NonlinearBoundTighteningRule):
                     new_lb = float(np.ceil(new_lb - 1e-9))
                     new_ub = float(np.floor(new_ub + 1e-9))
 
+                if new_lb <= new_ub:
+                    tightened_lb[flat_idx] = new_lb
+                    tightened_ub[flat_idx] = new_ub
+                else:
+                    _prove_infeasible(
+                        self.name,
+                        constraint,
+                        f"required interval for flat variable {flat_idx} is empty",
+                    )
+
+        return tightened_lb, tightened_ub
+
+
+class SqrtSumOfSquaresUpperBoundRule(NonlinearBoundTighteningRule):
+    """Tighten bounds from constraints like sqrt(sum(a_i * x_i^2)) <= c."""
+
+    name = "sqrt_sum_of_squares_upper_bound"
+
+    def _match_scaled_square(
+        self,
+        expr,
+        scale: float,
+        metadata: FlatVariableMetadata,
+    ) -> Optional[tuple[int, float]]:
+        if isinstance(expr, UnaryOp) and expr.op == "neg":
+            return self._match_scaled_square(expr.operand, -scale, metadata)
+
+        if isinstance(expr, BinaryOp) and expr.op == "*":
+            left_const = _constant_value(expr.left)
+            if left_const is not None:
+                return self._match_scaled_square(expr.right, scale * left_const, metadata)
+            right_const = _constant_value(expr.right)
+            if right_const is not None:
+                return self._match_scaled_square(expr.left, scale * right_const, metadata)
+
+        if isinstance(expr, BinaryOp) and expr.op == "**":
+            exponent = _constant_value(expr.right)
+            if exponent is None or abs(exponent - 2.0) > 1e-12:
+                return None
+            flat_idx = metadata.scalar_flat_index(expr.left)
+            if flat_idx is None:
+                return None
+            return flat_idx, scale
+
+        return None
+
+    def _match_sum_of_squares(
+        self,
+        expr,
+        metadata: FlatVariableMetadata,
+    ) -> Optional[dict[int, float]]:
+        terms: list[tuple[float, object]] = []
+        _flatten_sum(expr, 1.0, terms)
+
+        constant_term = 0.0
+        square_coeffs: dict[int, float] = {}
+        for scale, term in terms:
+            const_val = _constant_value(term)
+            if const_val is not None:
+                constant_term += scale * const_val
+                continue
+
+            match = self._match_scaled_square(term, scale, metadata)
+            if match is None:
+                return None
+            flat_idx, coeff = match
+            if coeff <= 0.0:
+                return None
+            square_coeffs[flat_idx] = square_coeffs.get(flat_idx, 0.0) + coeff
+
+        if abs(constant_term) > 1e-12 or not square_coeffs:
+            return None
+        return square_coeffs
+
+    def _match_scaled_sqrt_sum_of_squares(
+        self,
+        expr,
+        scale: float,
+        metadata: FlatVariableMetadata,
+    ) -> Optional[tuple[float, dict[int, float]]]:
+        if isinstance(expr, UnaryOp) and expr.op == "neg":
+            return self._match_scaled_sqrt_sum_of_squares(expr.operand, -scale, metadata)
+
+        if isinstance(expr, BinaryOp) and expr.op == "*":
+            left_const = _constant_value(expr.left)
+            if left_const is not None:
+                return self._match_scaled_sqrt_sum_of_squares(
+                    expr.right, scale * left_const, metadata
+                )
+            right_const = _constant_value(expr.right)
+            if right_const is not None:
+                return self._match_scaled_sqrt_sum_of_squares(
+                    expr.left, scale * right_const, metadata
+                )
+            return None
+
+        if not isinstance(expr, FunctionCall) or expr.func_name != "sqrt" or len(expr.args) != 1:
+            return None
+
+        square_coeffs = self._match_sum_of_squares(expr.args[0], metadata)
+        if square_coeffs is None:
+            return None
+        return scale, square_coeffs
+
+    def tighten(
+        self,
+        model: Model,
+        flat_lb: np.ndarray,
+        flat_ub: np.ndarray,
+        metadata: FlatVariableMetadata,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        tightened_lb = flat_lb.copy()
+        tightened_ub = flat_ub.copy()
+
+        for constraint in model._constraints:
+            if getattr(constraint, "sense", None) not in ("<=", "=="):
+                continue
+
+            terms: list[tuple[float, object]] = []
+            _flatten_sum(constraint.body, 1.0, terms)
+
+            constant_term = 0.0
+            sqrt_match: Optional[tuple[float, dict[int, float]]] = None
+            matches_pattern = True
+
+            for scale, term in terms:
+                const_val = _constant_value(term)
+                if const_val is not None:
+                    constant_term += scale * const_val
+                    continue
+
+                match = self._match_scaled_sqrt_sum_of_squares(term, scale, metadata)
+                if match is None or sqrt_match is not None:
+                    matches_pattern = False
+                    break
+                sqrt_match = match
+
+            if not matches_pattern or sqrt_match is None:
+                continue
+
+            sqrt_coeff, square_coeffs = sqrt_match
+            if sqrt_coeff <= 0.0:
+                continue
+
+            rhs = -constant_term / sqrt_coeff
+            if rhs < -1e-12:
+                _prove_infeasible(
+                    self.name,
+                    constraint,
+                    "nonnegative sqrt sum of squares has a negative upper bound",
+                )
+            rhs = max(0.0, rhs)
+            squared_rhs = rhs * rhs
+
+            for flat_idx, coeff in square_coeffs.items():
+                radius = float(np.sqrt(squared_rhs / coeff))
+                new_lb = max(float(tightened_lb[flat_idx]), -radius)
+                new_ub = min(float(tightened_ub[flat_idx]), radius)
+                new_lb, new_ub = _apply_integrality(
+                    new_lb,
+                    new_ub,
+                    metadata.flat_var_types[flat_idx],
+                )
                 if new_lb <= new_ub:
                     tightened_lb[flat_idx] = new_lb
                     tightened_ub[flat_idx] = new_ub
@@ -915,6 +1084,7 @@ class ReciprocalBoundsRule(NonlinearBoundTighteningRule):
 DEFAULT_NONLINEAR_BOUND_RULES: tuple[NonlinearBoundTighteningRule, ...] = (
     MonotoneFunctionBoundsRule(),
     ReciprocalBoundsRule(),
+    SqrtSumOfSquaresUpperBoundRule(),
     SumOfSquaresUpperBoundRule(),
     SeparableQuadraticUpperBoundRule(),
 )
@@ -925,14 +1095,27 @@ def tighten_nonlinear_bounds(
     flat_lb: np.ndarray,
     flat_ub: np.ndarray,
     rules: Sequence[NonlinearBoundTighteningRule] = DEFAULT_NONLINEAR_BOUND_RULES,
+    max_rounds: int = 5,
 ) -> tuple[np.ndarray, np.ndarray, NonlinearBoundTighteningStats]:
     """Run registered nonlinear tightening rules on a variable box."""
     tightened_lb = np.asarray(flat_lb, dtype=np.float64).copy()
     tightened_ub = np.asarray(flat_ub, dtype=np.float64).copy()
+    initial_lb = tightened_lb.copy()
+    initial_ub = tightened_ub.copy()
     metadata = build_flat_variable_metadata(model)
 
     applied_rules: list[str] = []
-    n_tightened = 0
+
+    def _mark_rule(rule_name: str) -> None:
+        if rule_name not in applied_rules:
+            applied_rules.append(rule_name)
+
+    def _count_tightened(lb: np.ndarray, ub: np.ndarray) -> int:
+        return int(
+            np.count_nonzero(np.abs(lb - initial_lb) > 1e-12)
+            + np.count_nonzero(np.abs(ub - initial_ub) > 1e-12)
+        )
+
     empty_initial = np.flatnonzero(tightened_lb > tightened_ub + 1e-12)
     if empty_initial.size > 0:
         first_idx = int(empty_initial[0])
@@ -947,58 +1130,62 @@ def tighten_nonlinear_bounds(
             ),
         )
 
-    for rule in rules:
-        prev_lb = tightened_lb.copy()
-        prev_ub = tightened_ub.copy()
-        try:
-            cand_lb, cand_ub = rule.tighten(model, prev_lb, prev_ub, metadata)
-        except NonlinearBoundTighteningInfeasible as exc:
-            applied_rules.append(rule.name)
-            return (
-                prev_lb,
-                prev_ub,
-                NonlinearBoundTighteningStats(
-                    n_tightened=n_tightened,
-                    applied_rules=tuple(applied_rules),
-                    infeasible=True,
-                    infeasibility_reason=str(exc),
-                ),
-            )
-
-        cand_lb_arr = np.asarray(cand_lb, dtype=np.float64)
-        cand_ub_arr = np.asarray(cand_ub, dtype=np.float64)
-        empty_indices = np.flatnonzero(cand_lb_arr > cand_ub_arr + 1e-12)
-        if empty_indices.size > 0:
-            applied_rules.append(rule.name)
-            first_idx = int(empty_indices[0])
-            return (
-                prev_lb,
-                prev_ub,
-                NonlinearBoundTighteningStats(
-                    n_tightened=n_tightened,
-                    applied_rules=tuple(applied_rules),
-                    infeasible=True,
-                    infeasibility_reason=(
-                        f"{rule.name} returned an empty interval for flat variable {first_idx}"
+    for _ in range(max(1, int(max_rounds))):
+        round_changed = False
+        for rule in rules:
+            prev_lb = tightened_lb.copy()
+            prev_ub = tightened_ub.copy()
+            try:
+                cand_lb, cand_ub = rule.tighten(model, prev_lb, prev_ub, metadata)
+            except NonlinearBoundTighteningInfeasible as exc:
+                _mark_rule(rule.name)
+                return (
+                    prev_lb,
+                    prev_ub,
+                    NonlinearBoundTighteningStats(
+                        n_tightened=_count_tightened(prev_lb, prev_ub),
+                        applied_rules=tuple(applied_rules),
+                        infeasible=True,
+                        infeasibility_reason=str(exc),
                     ),
-                ),
-            )
-        tightened_lb = np.maximum(prev_lb, cand_lb_arr)
-        tightened_ub = np.minimum(prev_ub, cand_ub_arr)
+                )
 
-        n_changed = int(
-            np.count_nonzero(np.abs(tightened_lb - prev_lb) > 1e-12)
-            + np.count_nonzero(np.abs(tightened_ub - prev_ub) > 1e-12)
-        )
-        if n_changed > 0:
-            applied_rules.append(rule.name)
-            n_tightened += n_changed
+            cand_lb_arr = np.asarray(cand_lb, dtype=np.float64)
+            cand_ub_arr = np.asarray(cand_ub, dtype=np.float64)
+            empty_indices = np.flatnonzero(cand_lb_arr > cand_ub_arr + 1e-12)
+            if empty_indices.size > 0:
+                _mark_rule(rule.name)
+                first_idx = int(empty_indices[0])
+                return (
+                    prev_lb,
+                    prev_ub,
+                    NonlinearBoundTighteningStats(
+                        n_tightened=_count_tightened(prev_lb, prev_ub),
+                        applied_rules=tuple(applied_rules),
+                        infeasible=True,
+                        infeasibility_reason=(
+                            f"{rule.name} returned an empty interval for flat variable {first_idx}"
+                        ),
+                    ),
+                )
+            tightened_lb = np.maximum(prev_lb, cand_lb_arr)
+            tightened_ub = np.minimum(prev_ub, cand_ub_arr)
+
+            n_changed = int(
+                np.count_nonzero(np.abs(tightened_lb - prev_lb) > 1e-12)
+                + np.count_nonzero(np.abs(tightened_ub - prev_ub) > 1e-12)
+            )
+            if n_changed > 0:
+                _mark_rule(rule.name)
+                round_changed = True
+        if not round_changed:
+            break
 
     return (
         tightened_lb,
         tightened_ub,
         NonlinearBoundTighteningStats(
-            n_tightened=n_tightened,
+            n_tightened=_count_tightened(tightened_lb, tightened_ub),
             applied_rules=tuple(applied_rules),
         ),
     )

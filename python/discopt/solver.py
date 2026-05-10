@@ -2653,7 +2653,22 @@ def _solve_continuous(
     evaluator = _make_evaluator(model)
     jax_time = time.perf_counter() - t_jax_start
 
-    lb, ub = evaluator.variable_bounds
+    raw_lb, raw_ub = evaluator.variable_bounds
+    lb = np.asarray(raw_lb, dtype=np.float64).copy()
+    ub = np.asarray(raw_ub, dtype=np.float64).copy()
+    tightened_lb, tightened_ub, nonlinear_infeasible = _apply_nonlinear_tightening_with_status(
+        model, lb, ub
+    )
+    if nonlinear_infeasible:
+        wall_time = time.perf_counter() - t_start
+        return SolveResult(
+            status="infeasible",
+            wall_time=wall_time,
+            gap_certified=True,
+            jax_time=jax_time,
+            python_time=wall_time - jax_time,
+        )
+    lb, ub = tightened_lb, tightened_ub
     lb_clipped = np.clip(lb, -_SPC, _SPC)
     ub_clipped = np.clip(ub, -_SPC, _SPC)
     if initial_point is not None:
@@ -2661,13 +2676,12 @@ def _solve_continuous(
         logger.info("Using warm-start point for continuous NLP")
     else:
         x0 = 0.5 * (lb_clipped + ub_clipped)
-        # Variables that are effectively unbounded on both sides collapse
-        # to midpoint 0 above. Zero is a stationary point of periodic
-        # functions (sin, cos) and other even functions, so single-start
-        # local NLP gets stuck at a local max (e.g. cos(0) = 1). Nudge
-        # unbounded coordinates to 0.5 so first-order methods can pick a
-        # descent direction and escape the pathological start.
-        fully_unbounded = (lb <= -_BOUND_WARN_THRESHOLD) & (ub >= _BOUND_WARN_THRESHOLD)
+        # Variables that are effectively unbounded on both sides can collapse
+        # to midpoint 0 even after nonlinear tightening produces a compact
+        # box. Zero is a stationary or nonsmooth point for common atoms
+        # (sin/cos, sqrt(x^2), abs), so keep the original sentinel-bound
+        # signal when nudging starts away from that pathological point.
+        fully_unbounded = (raw_lb <= -_BOUND_WARN_THRESHOLD) & (raw_ub >= _BOUND_WARN_THRESHOLD)
         x0 = np.where(fully_unbounded, 0.5, x0)
         # On problems with one-sided large bounds (e.g. x >= 1e-5 with no
         # upper bound), the midpoint of the clipped [-_SPC, _SPC] range
