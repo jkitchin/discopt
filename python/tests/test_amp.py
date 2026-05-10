@@ -1647,6 +1647,34 @@ def test_oa_cut_generation_receives_convex_constraint_mask(monkeypatch):
     assert recorded_masks == [[True, False]]
 
 
+def test_amp_root_presolve_preserves_heterogeneous_array_bounds():
+    """Root FBBT must not narrow every array element to the first element's bound."""
+    m = Model("amp_heterogeneous_array_bounds")
+    x = m.continuous(
+        "x",
+        shape=(2,),
+        lb=np.array([0.0, 0.0]),
+        ub=np.array([1.0, 10.0]),
+    )
+    m.subject_to(x[0] ** 2 >= 0.0)
+    m.minimize(-x[1])
+
+    result = m.solve(
+        solver="amp",
+        apply_partitioning=False,
+        skip_convex_check=True,
+        presolve_bt=False,
+        max_iter=2,
+        time_limit=10,
+    )
+
+    assert result.status in ("optimal", "feasible")
+    assert result.x is not None
+    assert result.objective is not None
+    assert result.objective <= -9.0
+    assert result.x["x"][1] >= 9.0
+
+
 def test_small_integer_domain_fallback_enumerates_complete_domain(monkeypatch):
     """The small-domain fallback should enumerate bounded integer domains directly."""
     from discopt.solvers import amp as amp_mod

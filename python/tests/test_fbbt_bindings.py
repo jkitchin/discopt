@@ -23,6 +23,27 @@ def _make_exp_model():
     return m
 
 
+def _make_reciprocal_integer_model():
+    """MINLPTests nlp_mi_005_010 reciprocal/integer bound pattern."""
+    m = dm.Model("reciprocal_integer")
+    x = m.integer("x", lb=0)
+    y = m.continuous("y", lb=0.0)
+    m.minimize(x + y)
+    m.subject_to(y >= 1 / (x + 0.1) - 0.5)
+    m.subject_to(x >= y ** (-2) - 0.5)
+    m.subject_to(4 / (x + y + 0.1) >= 1)
+    return m
+
+
+def _flat_variable_bounds(model):
+    lbs = []
+    ubs = []
+    for var in model._variables:
+        lbs.append(var.lb.flatten())
+        ubs.append(var.ub.flatten())
+    return np.concatenate(lbs), np.concatenate(ubs)
+
+
 class TestFBBTBindings:
     """Test the PyO3 FBBT bindings on PyModelRepr."""
 
@@ -87,3 +108,56 @@ class TestFBBTBindings:
         # Infeasible => lbs > ubs (empty intervals)
         for i in range(len(lbs)):
             assert lbs[i] > ubs[i], f"Expected empty interval for var {i}"
+
+    def test_root_presolve_rounds_integer_reciprocal_bounds(self):
+        """Root presolve removes the infeasible x=0 branch for reciprocal MINLPs."""
+        from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
+
+        model = _make_reciprocal_integer_model()
+        lb, ub = _flat_variable_bounds(model)
+        repr_ = model_to_repr(model)
+
+        tightened_lb, tightened_ub, infeasible, changed = tighten_root_bounds_with_fbbt(
+            model,
+            lb,
+            ub,
+            int_offsets=[0],
+            int_sizes=[1],
+            model_repr=repr_,
+        )
+
+        assert not infeasible
+        assert changed
+        np.testing.assert_allclose(tightened_lb[0], 1.0, atol=1e-12)
+        np.testing.assert_allclose(tightened_ub[0], 3.0, atol=1e-12)
+        np.testing.assert_allclose(tightened_lb[1], 0.0, atol=1e-12)
+        assert tightened_ub[1] < 4.0
+
+    def test_root_presolve_preserves_heterogeneous_array_bounds(self):
+        """Block-level Rust FBBT bounds must not overwrite elementwise array bounds."""
+        from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
+
+        model = dm.Model("heterogeneous_array_bounds")
+        x = model.continuous(
+            "x",
+            shape=(2,),
+            lb=np.array([0.0, 0.0]),
+            ub=np.array([1.0, 10.0]),
+        )
+        model.minimize(-x[1])
+        lb, ub = _flat_variable_bounds(model)
+        repr_ = model_to_repr(model)
+
+        tightened_lb, tightened_ub, infeasible, changed = tighten_root_bounds_with_fbbt(
+            model,
+            lb,
+            ub,
+            int_offsets=[],
+            int_sizes=[],
+            model_repr=repr_,
+        )
+
+        assert not infeasible
+        assert not changed
+        np.testing.assert_allclose(tightened_lb, [0.0, 0.0], atol=1e-12)
+        np.testing.assert_allclose(tightened_ub, [1.0, 10.0], atol=1e-12)
