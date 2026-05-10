@@ -212,6 +212,7 @@ def _compile_relax_node(
     partitions: int = 0,
     mode: str = "standard",
     learned_registry: Optional["LearnedRelaxationRegistry"] = None,
+    arithmetic: str = "mccormick",
 ) -> Callable:
     """
     Recursively compile an Expression node into a relaxation function.
@@ -230,6 +231,12 @@ def _compile_relax_node(
             (ICNN-based learned relaxations with McCormick fallback).
         learned_registry: Registry of trained learned relaxations.
             Required when ``mode="learned"``.
+        arithmetic: Univariate-envelope provider — ``"mccormick"``
+            (default; existing analytic envelopes), ``"chebyshev"``, or
+            ``"taylor"``. The latter two route supported univariate ops
+            through ``oa_relax.make_oa_relax`` (M2 / M3 of issue #51).
+            Falls back to McCormick for unsupported operators or when the
+            inner expression's static box cannot be inferred.
     """
 
     if isinstance(expr, Constant):
@@ -269,8 +276,12 @@ def _compile_relax_node(
         return fn
 
     if isinstance(expr, BinaryOp):
-        left_fn = _compile_relax_node(expr.left, model, partitions, mode, learned_registry)
-        right_fn = _compile_relax_node(expr.right, model, partitions, mode, learned_registry)
+        left_fn = _compile_relax_node(
+            expr.left, model, partitions, mode, learned_registry, arithmetic
+        )
+        right_fn = _compile_relax_node(
+            expr.right, model, partitions, mode, learned_registry, arithmetic
+        )
         op = expr.op
 
         if op == "+":
@@ -589,7 +600,9 @@ def _compile_relax_node(
         raise ValueError(f"Unknown binary operator: {op!r}")
 
     if isinstance(expr, UnaryOp):
-        operand_fn = _compile_relax_node(expr.operand, model, partitions, mode, learned_registry)
+        operand_fn = _compile_relax_node(
+            expr.operand, model, partitions, mode, learned_registry, arithmetic
+        )
         op = expr.op
 
         if op == "neg":
@@ -613,7 +626,8 @@ def _compile_relax_node(
 
     if isinstance(expr, FunctionCall):
         arg_fns = [
-            _compile_relax_node(a, model, partitions, mode, learned_registry) for a in expr.args
+            _compile_relax_node(a, model, partitions, mode, learned_registry, arithmetic)
+            for a in expr.args
         ]
         name = expr.func_name
 
@@ -713,12 +727,38 @@ def _compile_relax_node(
             return fn
 
         if name in _univariate_relax:
+            a_fn = arg_fns[0]
+
+            # Chebyshev / Taylor dispatch (M2 / M3 of issue #51): build a
+            # pre-compiled outer-approximation shim if (a) the operator
+            # is supported, (b) we can infer a finite static box for the
+            # inner expression. Otherwise fall through to the existing
+            # McCormick path so the choice is non-blocking.
+            if arithmetic in ("chebyshev", "taylor"):
+                from discopt._jax import oa_relax
+
+                if oa_relax.is_supported(name):
+                    box = oa_relax.static_box_for_arg(expr.args[0], model)
+                    if box is not None:
+                        try:
+                            safe_box = oa_relax._safe_box_for_op(name, box[0], box[1])
+                            oa_fn = oa_relax.make_oa_relax(name, safe_box, arithmetic)
+
+                            def fn(x_cv, x_cc, lb, ub, _oa_fn=oa_fn, _a_fn=a_fn):
+                                cv_a, cc_a = _a_fn(x_cv, x_cc, lb, ub)
+                                mid = 0.5 * (cv_a + cc_a)
+                                return _oa_fn(mid, cv_a, cc_a)
+
+                            return fn
+                        except Exception:
+                            # Fall through to McCormick on any OA failure.
+                            pass
+
             # Prefer the TM2014 (multivariate McCormick) composition rule when
             # available — it is sound at non-degenerate inner intervals, where
             # the legacy midpoint composition can violate the bounds. See
             # python/discopt/_jax/multivariate_mccormick.py and issue #51 (M1).
             tm_rule = get_composition_rule(name)
-            a_fn = arg_fns[0]
             if tm_rule is not None:
 
                 def fn(x_cv, x_cc, lb, ub, _tm=tm_rule, _a_fn=a_fn):
@@ -851,7 +891,9 @@ def _compile_relax_node(
         raise ValueError(f"Unknown function: {name!r}")
 
     if isinstance(expr, IndexExpression):
-        base_fn = _compile_relax_node(expr.base, model, partitions, mode, learned_registry)
+        base_fn = _compile_relax_node(
+            expr.base, model, partitions, mode, learned_registry, arithmetic
+        )
         idx = expr.index
 
         def fn(x_cv, x_cc, lb, ub, _idx=idx):
@@ -861,7 +903,9 @@ def _compile_relax_node(
         return fn
 
     if isinstance(expr, SumExpression):
-        operand_fn = _compile_relax_node(expr.operand, model, partitions, mode, learned_registry)
+        operand_fn = _compile_relax_node(
+            expr.operand, model, partitions, mode, learned_registry, arithmetic
+        )
         axis = expr.axis
 
         def fn(x_cv, x_cc, lb, ub, _axis=axis):
@@ -872,7 +916,8 @@ def _compile_relax_node(
 
     if isinstance(expr, SumOverExpression):
         term_fns = [
-            _compile_relax_node(t, model, partitions, mode, learned_registry) for t in expr.terms
+            _compile_relax_node(t, model, partitions, mode, learned_registry, arithmetic)
+            for t in expr.terms
         ]
 
         def fn(x_cv, x_cc, lb, ub):
@@ -894,6 +939,7 @@ def compile_relaxation(
     partitions: int = 0,
     mode: str = "standard",
     learned_registry: Optional["LearnedRelaxationRegistry"] = None,
+    arithmetic: str = "mccormick",
 ) -> Callable:
     """
     Compile an Expression into a McCormick relaxation function.
@@ -920,7 +966,7 @@ def compile_relaxation(
 
         The function is compatible with jax.jit and jax.vmap.
     """
-    return _compile_relax_node(expr, model, partitions, mode, learned_registry)
+    return _compile_relax_node(expr, model, partitions, mode, learned_registry, arithmetic)
 
 
 def compile_objective_relaxation(
@@ -928,12 +974,18 @@ def compile_objective_relaxation(
     partitions: int = 0,
     mode: str = "standard",
     learned_registry: Optional["LearnedRelaxationRegistry"] = None,
+    arithmetic: str = "mccormick",
 ) -> Callable:
     """Compile relaxation of the model's objective."""
     if model._objective is None:
         raise ValueError("Model has no objective set.")
     return compile_relaxation(
-        model._objective.expression, model, partitions, mode, learned_registry
+        model._objective.expression,
+        model,
+        partitions,
+        mode,
+        learned_registry,
+        arithmetic,
     )
 
 
@@ -943,6 +995,9 @@ def compile_constraint_relaxation(
     partitions: int = 0,
     mode: str = "standard",
     learned_registry: Optional["LearnedRelaxationRegistry"] = None,
+    arithmetic: str = "mccormick",
 ) -> Callable:
     """Compile relaxation of a constraint body."""
-    return compile_relaxation(constraint.body, model, partitions, mode, learned_registry)
+    return compile_relaxation(
+        constraint.body, model, partitions, mode, learned_registry, arithmetic
+    )

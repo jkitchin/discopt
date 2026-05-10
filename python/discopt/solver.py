@@ -1238,6 +1238,8 @@ def solve_model(
     presolve: bool = True,
     presolve_polynomial: bool = False,
     presolve_reverse_ad: bool = False,
+    eigenvalue_root_bound: bool = False,
+    relaxation_arithmetic: str = "mccormick",
     **kwargs,
 ) -> SolveResult:
     """
@@ -1498,6 +1500,40 @@ def solve_model(
                 logger.info("Reverse-AD presolve tightened %d variable bounds", n_rad)
         except Exception as e:
             logger.debug("Reverse-AD tightening failed: %s", e)
+
+    # --- Eigenvalue root bound on quadratic objectives (M6 of #51, opt-in) ---
+    # For models with a quadratic objective, compute a sound root-node
+    # bound via spectral decomposition. Used only as an informational
+    # diagnostic at the root; does not affect the B&B tree directly.
+    if eigenvalue_root_bound:
+        try:
+            from discopt._jax.convexity.eigenvalue_arith import (
+                QuadraticForm,
+                quadratic_form_bound,
+            )
+            from discopt._jax.problem_classifier import (
+                ProblemClass,
+                classify_problem,
+                extract_qp_data,
+            )
+
+            pcls = classify_problem(model)
+            if pcls in (ProblemClass.QP, ProblemClass.MIQP):
+                qp = extract_qp_data(model)
+                Q_qf = 0.5 * np.asarray(qp.Q, dtype=np.float64)
+                b_qf = np.asarray(qp.c, dtype=np.float64)
+                qf = QuadraticForm(Q=Q_qf, b=b_qf, c=float(qp.obj_const))
+                x_lo = np.asarray(qp.x_l, dtype=np.float64)
+                x_hi = np.asarray(qp.x_u, dtype=np.float64)
+                if np.all(np.isfinite(x_lo)) and np.all(np.isfinite(x_hi)):
+                    eig_bound = quadratic_form_bound(qf, x_lo, x_hi)
+                    logger.info(
+                        "Eigenvalue root bound on quadratic objective: [%g, %g]",
+                        float(eig_bound.lo),
+                        float(eig_bound.hi),
+                    )
+        except Exception as e:
+            logger.debug("Eigenvalue root bound failed: %s", e)
 
     # --- Learned relaxation registry (opt-in) ---
     import warnings
@@ -1832,6 +1868,7 @@ def solve_model(
                 partitions=partitions,
                 mode=_relax_mode,
                 learned_registry=_learned_registry,
+                arithmetic=relaxation_arithmetic,
             )
             _mc_obj_eval = BatchRelaxationEvaluator(_mc_obj_relax_fn, n_vars)
             _mc_negate = model._objective.sense == ObjectiveSense.MAXIMIZE
@@ -1848,6 +1885,7 @@ def solve_model(
                                 partitions=partitions,
                                 mode=_relax_mode,
                                 learned_registry=_learned_registry,
+                                arithmetic=relaxation_arithmetic,
                             )
                         )
                         _mc_con_senses.append(c.sense)
