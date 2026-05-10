@@ -1235,6 +1235,9 @@ def solve_model(
     node_callback=None,
     solver: Optional[str] = None,
     use_highs_milp: bool = True,
+    presolve: bool = True,
+    presolve_polynomial: bool = False,
+    presolve_reverse_ad: bool = False,
     **kwargs,
 ) -> SolveResult:
     """
@@ -1447,6 +1450,54 @@ def solve_model(
         _model_repr = model_to_repr(model, _builder)
     except Exception:
         pass  # FBBT bindings unavailable; skip
+
+    # --- Root presolve: M10 variable elimination + (opt-in) M4+M5
+    # polynomial reformulation, then FBBT for bound propagation.
+    # Tightened bounds are pushed back into the Python `model` so that
+    # the relaxation compiler / B&B initialisation see them. See
+    # discopt._jax.presolve_pipeline for the sequencing rationale.
+    if _model_repr is not None and presolve:
+        try:
+            from discopt._jax.presolve_pipeline import (
+                propagate_bounds_to_model,
+                run_root_presolve,
+            )
+
+            _model_repr, _presolve_stats = run_root_presolve(
+                _model_repr,
+                eliminate=True,
+                polynomial=presolve_polynomial,
+                fbbt=True,
+            )
+            n_tightened = propagate_bounds_to_model(model, _model_repr)
+            elim = _presolve_stats.get("elimination", {})
+            poly = _presolve_stats.get("polynomial", {})
+            if elim.get("variables_fixed", 0) > 0 or n_tightened > 0:
+                logger.info(
+                    "Presolve: fixed %d vars, removed %d eqs, tightened %d "
+                    "bounds (poly aux vars: %d)",
+                    elim.get("variables_fixed", 0),
+                    elim.get("constraints_removed", 0),
+                    n_tightened,
+                    poly.get("aux_variables_introduced", 0),
+                )
+        except Exception as e:
+            logger.debug("Root presolve failed: %s", e)
+
+    # --- Reverse-AD interval tightening (M9 of #51, opt-in) ---
+    # Iterates Gauss-Seidel reverse-mode interval AD over every
+    # constraint to a fixed point and writes back tighter scalar bounds.
+    # Disabled by default because it walks the Python expression DAG and
+    # can be slow on very large models.
+    if presolve and presolve_reverse_ad:
+        try:
+            from discopt._jax.presolve_pipeline import run_reverse_ad_tightening
+
+            n_rad = run_reverse_ad_tightening(model)
+            if n_rad > 0:
+                logger.info("Reverse-AD presolve tightened %d variable bounds", n_rad)
+        except Exception as e:
+            logger.debug("Reverse-AD tightening failed: %s", e)
 
     # --- Learned relaxation registry (opt-in) ---
     import warnings
