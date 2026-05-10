@@ -3395,12 +3395,8 @@ class TestCurrentCodeWeaknesses:
             f"(gap={abs(result.objective - NLP1_OPTIMUM):.4f})"
         )
 
-    @pytest.mark.xfail(
-        reason="Documents a known weakness of the legacy spatial B&B on quadratic constraints",
-        strict=False,
-    )
     def test_circle_monomial_global_correctness(self):
-        """Existing solver weakness: x²+y²≥2 is not yet solved globally by spatial B&B."""
+        """Spatial B&B should solve the Alpine circle benchmark globally."""
         m = _make_circle()
         result = m.solve(time_limit=30, gap_tolerance=1e-3)
         assert result.objective is not None

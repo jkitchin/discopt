@@ -1639,7 +1639,9 @@ def solve_model(
             )
 
     # --- Convex NLP fast path: skip B&B for convex continuous problems ---
-    if _is_pure_continuous(model) and not skip_convex_check:
+    _pure_continuous = _is_pure_continuous(model)
+    _pure_continuous_convexity_known = False
+    if _pure_continuous and not skip_convex_check:
         try:
             from discopt._jax.convexity import classify_model as _classify_convexity
 
@@ -1649,6 +1651,7 @@ def solve_model(
             # on the root box, enabling the single-NLP fast path for
             # models whose convexity isn't visible at the DAG level.
             is_convex, _ = _classify_convexity(model, use_certificate=True)
+            _pure_continuous_convexity_known = True
             if is_convex:
                 logger.info(
                     "Convex NLP detected — solving with single NLP (global optimality guaranteed)"
@@ -1663,11 +1666,12 @@ def solve_model(
                 )
                 result.convex_fast_path = True
                 return result
+            logger.info("Nonconvex continuous NLP detected — using spatial Branch and Bound")
         except Exception as exc:
             logger.debug("Convex fast path detection failed: %s", exc)
 
-    # --- Pure continuous: solve directly with NLP, no B&B needed ---
-    if _is_pure_continuous(model):
+    # --- Pure continuous: solve directly only when convexity is unknown or skipped ---
+    if _pure_continuous and (skip_convex_check or not _pure_continuous_convexity_known):
         return _solve_continuous(
             model,
             time_limit,
