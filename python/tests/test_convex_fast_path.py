@@ -128,6 +128,44 @@ class TestNonconvexContinuousSpatialRegressions:
         assert abs(float(result.value(x))) == pytest.approx(1.0, abs=1e-6)
         assert result.node_count > 0
 
+    def test_skip_convex_check_nonconvex_continuous_qp_minimize_uses_spatial_bb(self):
+        m = Model("skip_check_nonconvex_qp_min")
+        x = m.continuous("x", lb=-1.0, ub=1.0)
+        m.minimize(-(x**2))
+
+        result = m.solve(
+            skip_convex_check=True,
+            nlp_solver="ipm",
+            time_limit=10.0,
+            gap_tolerance=1e-6,
+            max_nodes=500,
+        )
+
+        assert result.status == "optimal"
+        assert result.convex_fast_path is False
+        assert result.objective == pytest.approx(-1.0, abs=1e-6)
+        assert abs(float(result.value(x))) == pytest.approx(1.0, abs=1e-6)
+        assert result.node_count > 0
+
+    def test_skip_convex_check_nonconvex_continuous_qp_maximize_uses_spatial_bb(self):
+        m = Model("skip_check_nonconvex_qp_max")
+        x = m.continuous("x", lb=-1.0, ub=1.0)
+        m.maximize(x**2)
+
+        result = m.solve(
+            skip_convex_check=True,
+            nlp_solver="ipm",
+            time_limit=10.0,
+            gap_tolerance=1e-6,
+            max_nodes=500,
+        )
+
+        assert result.status == "optimal"
+        assert result.convex_fast_path is False
+        assert result.objective == pytest.approx(1.0, abs=1e-6)
+        assert abs(float(result.value(x))) == pytest.approx(1.0, abs=1e-6)
+        assert result.node_count > 0
+
 
 class TestConvexFastPathOptOut:
     """Verify that skip_convex_check disables the fast path."""

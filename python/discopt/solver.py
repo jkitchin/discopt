@@ -1641,7 +1641,7 @@ def solve_model(
         if problem_class == ProblemClass.LP:
             return _solve_lp(model, t_start, time_limit)
         elif problem_class == ProblemClass.QP:
-            if _pure_continuous and not skip_convex_check:
+            if _pure_continuous:
                 if _pure_continuous_convexity_known and _pure_continuous_is_convex:
                     return _solve_qp(model, t_start)
                 _pure_continuous_force_spatial = True
@@ -1690,10 +1690,11 @@ def solve_model(
         result.convex_fast_path = True
         return result
 
-    # --- Pure continuous: solve directly only when convexity is unknown or skipped ---
-    if _pure_continuous and (
-        skip_convex_check
-        or (not _pure_continuous_convexity_known and not _pure_continuous_force_spatial)
+    # --- Pure continuous: solve directly only when spatial search was not requested ---
+    if (
+        _pure_continuous
+        and not _pure_continuous_force_spatial
+        and (skip_convex_check or not _pure_continuous_convexity_known)
     ):
         return _solve_continuous(
             model,
