@@ -2294,6 +2294,7 @@ def solve_model(
                                 lb_jax,
                                 ub_jax,
                                 negate=_mc_negate,
+                                deadline=t_start + time_limit,
                             )
                         )
                     elif _mc_mode != "nlp":
@@ -2428,6 +2429,7 @@ def solve_model(
                                     lb_j,
                                     ub_j,
                                     negate=_mc_negate,
+                                    deadline=t_start + time_limit,
                                 )
                             elif _mc_mode != "nlp":
                                 from discopt._jax.mccormick_nlp import (

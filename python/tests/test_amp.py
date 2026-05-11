@@ -1522,6 +1522,30 @@ def test_nonlinear_tightening_reports_issue_28_contradictions(
     np.testing.assert_allclose(tightened_ub, flat_ub)
 
 
+def test_nonlinear_tightening_counts_infinite_bounds_without_warning():
+    """Unchanged infinite bounds should not warn while counting tightened entries."""
+    import warnings
+
+    from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+
+    m = Model("infinite_bound_counting")
+    x = m.continuous("x", lb=0.0, ub=np.inf)
+    y = m.continuous("y", lb=0.0, ub=np.inf)
+    m.subject_to(x**2 + y**2 <= 4.0)
+    m.minimize(x + y)
+
+    flat_lb = np.array([0.0, 0.0], dtype=np.float64)
+    flat_ub = np.array([np.inf, np.inf], dtype=np.float64)
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        tightened_lb, tightened_ub, stats = tighten_nonlinear_bounds(m, flat_lb, flat_ub)
+
+    assert not captured
+    assert stats.n_tightened == 2
+    np.testing.assert_allclose(tightened_lb, flat_lb)
+    np.testing.assert_allclose(tightened_ub, np.array([2.0, 2.0]))
+
+
 def test_oa_cut_recovery_drops_oldest_half(monkeypatch):
     """OA recovery should retry with the oldest half of cuts removed."""
     from discopt._jax.milp_relaxation import MilpRelaxationResult

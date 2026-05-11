@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import jax.numpy as jnp
 import numpy as np
 from discopt.modeling.core import Model
@@ -278,6 +280,35 @@ class TestNLPBounds:
         # McCormick cv should reach near-zero minimum
         assert nlp_lb <= 0.0 + 1e-2
         assert np.isfinite(nlp_lb)
+
+    def test_expired_deadline_skips_relaxation_solves(self):
+        """Expired B&B deadlines should not start more McCormick NLP solves."""
+        from discopt._jax.mccormick_nlp import (
+            solve_mccormick_batch,
+            solve_mccormick_relaxation_nlp,
+        )
+
+        calls = 0
+
+        def relax_fn(x_cv, x_cc, lb, ub):
+            nonlocal calls
+            calls += 1
+            return x_cv[0], x_cc[0]
+
+        lb = jnp.array([0.0])
+        ub = jnp.array([1.0])
+        expired = time.perf_counter() - 1.0
+
+        nlp_lb = solve_mccormick_relaxation_nlp(relax_fn, None, None, lb, ub, deadline=expired)
+        assert nlp_lb == -np.inf
+
+        lb_batch = jnp.array([[0.0], [0.0], [0.0]])
+        ub_batch = jnp.array([[1.0], [1.0], [1.0]])
+        batch_lbs = solve_mccormick_batch(
+            relax_fn, None, None, lb_batch, ub_batch, deadline=expired
+        )
+        np.testing.assert_allclose(np.asarray(batch_lbs), np.full(3, -np.inf))
+        assert calls == 0
 
     def test_end_to_end_minlp_nlp(self):
         """Full solve with mccormick_bounds='nlp'."""

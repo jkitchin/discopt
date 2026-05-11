@@ -1499,11 +1499,15 @@ def tighten_nonlinear_bounds(
         if rule_name not in applied_rules:
             applied_rules.append(rule_name)
 
+    def _count_changed(new: np.ndarray, old: np.ndarray) -> int:
+        finite = np.isfinite(new) & np.isfinite(old)
+        changed = np.zeros(new.shape, dtype=bool)
+        changed[finite] = np.abs(new[finite] - old[finite]) > 1e-12
+        changed[~finite] = new[~finite] != old[~finite]
+        return int(np.count_nonzero(changed))
+
     def _count_tightened(lb: np.ndarray, ub: np.ndarray) -> int:
-        return int(
-            np.count_nonzero(np.abs(lb - initial_lb) > 1e-12)
-            + np.count_nonzero(np.abs(ub - initial_ub) > 1e-12)
-        )
+        return int(_count_changed(lb, initial_lb) + _count_changed(ub, initial_ub))
 
     empty_initial = np.flatnonzero(tightened_lb > tightened_ub + 1e-12)
     if empty_initial.size > 0:
@@ -1560,9 +1564,8 @@ def tighten_nonlinear_bounds(
             tightened_lb = np.maximum(prev_lb, cand_lb_arr)
             tightened_ub = np.minimum(prev_ub, cand_ub_arr)
 
-            n_changed = int(
-                np.count_nonzero(np.abs(tightened_lb - prev_lb) > 1e-12)
-                + np.count_nonzero(np.abs(tightened_ub - prev_ub) > 1e-12)
+            n_changed = _count_changed(tightened_lb, prev_lb) + _count_changed(
+                tightened_ub, prev_ub
             )
             if n_changed > 0:
                 _mark_rule(rule.name)
