@@ -26,7 +26,7 @@ from typing import Callable
 
 import discopt.modeling as dm
 import pytest
-from discopt.modeling.core import Model
+from discopt.modeling.core import FunctionCall, Model, ObjectiveSense
 from discopt.validation.examiner import assert_examined
 
 # ── Failure tracking ─────────────────────────────────────────────────────────
@@ -1244,10 +1244,10 @@ def _build_nlp_008_011() -> Model:
 
 
 def _build_nlp_009_010() -> Model:
-    """Min min(0.75+(x-0.5)^3, 0.75-(x-0.5)^2). Opt: 0.75 at x=0.5."""
+    """Max min(0.75+(x-0.5)^3, 0.75-(x-0.5)^2). Opt: 0.75 at x=0.5."""
     m = dm.Model("nlp_009_010")
     x = m.continuous("x")
-    m.minimize(dm.minimum(0.75 + (x - 0.5) ** 3, 0.75 - (x - 0.5) ** 2))
+    m.maximize(dm.minimum(0.75 + (x - 0.5) ** 3, 0.75 - (x - 0.5) ** 2))
     return m
 
 
@@ -1632,6 +1632,18 @@ INFEASIBLE_INSTANCES = [
 # ═════════════════════════════════════════════════════════════════════════════
 # Test classes
 # ═════════════════════════════════════════════════════════════════════════════
+
+
+class TestMINLPTestsTranslations:
+    """Checks for source-level MINLPTests.jl translation details."""
+
+    def test_nlp_009_010_maximizes_min_objective(self) -> None:
+        model = _build_nlp_009_010()
+
+        assert model._objective is not None
+        assert model._objective.sense is ObjectiveSense.MAXIMIZE
+        assert isinstance(model._objective.expression, FunctionCall)
+        assert model._objective.expression.func_name == "min"
 
 
 @pytest.mark.minlptests
