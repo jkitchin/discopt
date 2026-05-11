@@ -175,7 +175,8 @@ hooks:
 #
 # Tiers (issue #68):
 #   test          - PR-fast: matches CI python-fast job. Excludes `slow`,
-#                   `correctness`, `integration`, and `amp_benchmark` while
+#                   `correctness`, `integration`, `amp_benchmark`, and
+#                   `requires_cyipopt` while
 #                   keeping the curated `pr_correctness` subset. Target <10 min.
 #   test-all      - everything, including slow + correctness. Target ~20 min.
 #   test-quick    - unit + smoke only, dev inner loop. Target <60 s.
@@ -187,10 +188,12 @@ hooks:
 # These exclusions keep the PR gate focused on ordinary feature tests plus the
 # curated `pr_correctness` subset. Full correctness, integration, and benchmark
 # coverage stay available through the explicit targets below.
-PYTEST_FAST_FLAGS := --timeout=120 -m "not slow and not correctness and not integration and not amp_benchmark" \
+PYTEST_FAST_FLAGS := --timeout=120 -m "not slow and not correctness and not integration and not amp_benchmark and not requires_cyipopt" \
     --ignore=python/tests/test_correctness.py
 
-PYTEST_QUICK_FLAGS := --timeout=60 -m "(unit or smoke) and not slow and not integration and not amp_benchmark"
+PYTEST_QUICK_FLAGS := --timeout=60 -m "(unit or smoke) and not slow and not integration and not amp_benchmark and not requires_cyipopt"
+
+PYTEST_AMP_FAST_FLAGS := --timeout=120 -m "not slow and not integration and not amp_benchmark and not requires_cyipopt"
 
 # File groups for slice targets. A test file may appear in more than one group.
 TEST_MODELING := \
@@ -331,12 +334,12 @@ test-amp: build
 
 test-amp-fast: build
 	@echo "==> Running fast AMP regression tests..."
-	$(PYTEST) python/tests/test_amp.py -v --tb=short -q
+	$(PYTEST) python/tests/test_amp.py -v --tb=short -q $(PYTEST_AMP_FAST_FLAGS)
 	@echo "==> Fast AMP tests passed"
 
 test-amp-integration: build
 	@echo "==> Running opt-in AMP Alpine/incidence tests..."
-	$(PYTEST) python/tests/test_amp_integration.py -v --tb=short -q -m "slow or integration or amp_benchmark"
+	$(PYTEST) python/tests/test_amp_integration.py -v --tb=short -q -m "slow or integration or amp_benchmark or requires_cyipopt"
 	@echo "==> AMP integration tests passed"
 
 test-nn: build

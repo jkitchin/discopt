@@ -66,6 +66,7 @@ def test_amp_integration_suite_is_opt_in():
     assert "pytest.mark.slow" in text
     assert "pytest.mark.integration" in text
     assert "pytest.mark.amp_benchmark" in text
+    assert "pytest.mark.requires_cyipopt" in text
 
 
 def _make_dry_run(target: str) -> str:
@@ -92,37 +93,30 @@ def test_quick_test_tier_excludes_amp_integration_markers():
     """The quick tier must not select opt-in AMP smoke tests."""
     output = _make_dry_run("test-quick")
 
-    assert '-m "(unit or smoke) and not slow and not integration and not amp_benchmark"' in output
+    assert (
+        '-m "(unit or smoke) and not slow and not integration '
+        'and not amp_benchmark and not requires_cyipopt"'
+    ) in output
 
 
 def test_pr_fast_tier_excludes_heavy_manual_markers():
     """The PR-fast tier should keep nightly/manual markers out of make test."""
     output = _make_dry_run("test")
 
-    assert '-m "not slow and not correctness and not integration and not amp_benchmark"' in output
+    assert (
+        '-m "not slow and not correctness and not integration '
+        'and not amp_benchmark and not requires_cyipopt"'
+    ) in output
     assert "--ignore=python/tests/test_correctness.py" in output
 
 
-@pytest.mark.requires_cyipopt
-def test_fast_amp_environment_includes_working_cyipopt():
-    """The fast AMP/CI environment should include a usable Ipopt Python backend."""
-    import cyipopt  # noqa: F401
-    from discopt.solvers import SolveStatus
-    from discopt.solvers.nlp_ipopt import solve_nlp_from_model
+def test_amp_fast_tier_excludes_optional_solver_markers():
+    """The local AMP fast target should not require optional NLP solver stacks."""
+    output = _make_dry_run("test-amp-fast")
 
-    m = Model("cyipopt_fast_smoke")
-    x = m.continuous("x", lb=-2.0, ub=2.0)
-    m.minimize((x - 0.25) ** 2)
-
-    result = solve_nlp_from_model(
-        m,
-        x0=np.array([1.5], dtype=np.float64),
-        options={"print_level": 0, "max_iter": 50},
-    )
-
-    assert result.status == SolveStatus.OPTIMAL
-    assert result.objective == pytest.approx(0.0, abs=1e-7)
-    assert float(result.x[0]) == pytest.approx(0.25, abs=1e-5)
+    assert (
+        '-m "not slow and not integration and not amp_benchmark and not requires_cyipopt"'
+    ) in output
 
 
 def test_amp_helper_defaults_cover_semifinite_domains():

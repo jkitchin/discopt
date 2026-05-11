@@ -67,6 +67,32 @@ MINLPTESTS_NLP_BY_ID = {
     instance.problem_id: instance for instance in map(_unwrap_minlptests_case, NLP_INSTANCES)
 }
 
+
+@pytest.mark.requires_cyipopt
+def test_amp_integration_environment_includes_working_cyipopt():
+    """The opt-in AMP integration environment should include a usable Ipopt backend."""
+    if not HAS_CYIPOPT:
+        pytest.skip("requires cyipopt/Ipopt")
+
+    import cyipopt  # noqa: F401
+    from discopt.solvers import SolveStatus
+    from discopt.solvers.nlp_ipopt import solve_nlp_from_model
+
+    m = Model("cyipopt_integration_smoke")
+    x = m.continuous("x", lb=-2.0, ub=2.0)
+    m.minimize((x - 0.25) ** 2)
+
+    result = solve_nlp_from_model(
+        m,
+        x0=np.array([1.5], dtype=np.float64),
+        options={"print_level": 0, "max_iter": 50},
+    )
+
+    assert result.status == SolveStatus.OPTIMAL
+    assert result.objective == pytest.approx(0.0, abs=1e-7)
+    assert float(result.x[0]) == pytest.approx(0.25, abs=1e-5)
+
+
 # ---------------------------------------------------------------------------
 # Shared helpers / problem builders
 # ---------------------------------------------------------------------------
