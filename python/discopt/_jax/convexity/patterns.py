@@ -51,6 +51,7 @@ from discopt.modeling.core import (
     Expression,
     FunctionCall,
     IndexExpression,
+    MatMulExpression,
     Model,
     Parameter,
     SumExpression,
@@ -76,6 +77,15 @@ def _scalar_var_offset(model: Model, target: Variable) -> Optional[int]:
     for v in model._variables:
         if v is target or v.name == target.name:
             return offset if v.size == 1 else None
+        offset += v.size
+    return None
+
+
+def _var_offset(model: Model, target: Variable) -> Optional[int]:
+    offset = 0
+    for v in model._variables:
+        if v is target or v.name == target.name:
+            return offset
         offset += v.size
     return None
 
@@ -296,8 +306,69 @@ def _quadratic_data(expr: Expression, model: Model):
     return Q, np.asarray(c, dtype=np.float64), float(const)
 
 
+def _linear_vector_matrix(expr: Expression, model: Model) -> Optional[np.ndarray]:
+    """Return A for vector affine form ``A @ x`` with no constant term."""
+    n_total = _total_scalar_variables(model)
+    if isinstance(expr, MatMulExpression):
+        if isinstance(expr.left, Constant) and isinstance(expr.right, Variable):
+            mat = np.asarray(expr.left.value, dtype=np.float64)
+            var = expr.right
+            offset = _var_offset(model, var)
+            if offset is None:
+                return None
+            if mat.ndim == 1:
+                mat = mat.reshape(1, -1)
+            if mat.ndim != 2 or mat.shape[1] != var.size:
+                return None
+            out = np.zeros((mat.shape[0], n_total), dtype=np.float64)
+            out[:, offset : offset + var.size] = mat.reshape(mat.shape[0], var.size)
+            return out
+        if isinstance(expr.left, Variable) and isinstance(expr.right, Constant):
+            mat = np.asarray(expr.right.value, dtype=np.float64)
+            var = expr.left
+            offset = _var_offset(model, var)
+            if offset is None:
+                return None
+            if mat.ndim == 1:
+                mat = mat.reshape(-1, 1)
+            if mat.ndim != 2 or mat.shape[0] != var.size:
+                return None
+            out = np.zeros((mat.shape[1], n_total), dtype=np.float64)
+            out[:, offset : offset + var.size] = mat.T.reshape(mat.shape[1], var.size)
+            return out
+    if isinstance(expr, Variable):
+        offset = _var_offset(model, expr)
+        if offset is None:
+            return None
+        out = np.zeros((expr.size, n_total), dtype=np.float64)
+        out[:, offset : offset + expr.size] = np.eye(expr.size, dtype=np.float64)
+        return out
+    return None
+
+
+def _sum_of_squares_linear_matrix(expr: Expression, model: Model) -> Optional[np.ndarray]:
+    """Return A for ``sum((A @ x) * (A @ x))``-style squared norms."""
+    if not isinstance(expr, SumExpression):
+        return None
+    operand = expr.operand
+    if not isinstance(operand, BinaryOp) or operand.op != "*":
+        return None
+    left = _linear_vector_matrix(operand.left, model)
+    right = _linear_vector_matrix(operand.right, model)
+    if left is None or right is None:
+        return None
+    if left.shape != right.shape or not np.allclose(left, right, atol=1e-12):
+        return None
+    return left
+
+
 def is_homogeneous_psd_quadratic(expr: Expression, model: Model) -> bool:
     """True when ``expr`` is ``x^T Q x`` (no linear/constant term) with Q PSD."""
+    mat = _sum_of_squares_linear_matrix(expr, model)
+    if mat is not None:
+        q = mat.T @ mat
+        eigvals = np.linalg.eigvalsh(q)
+        return bool(float(np.min(eigvals)) >= -1e-10)
     data = _quadratic_data(expr, model)
     if data is None:
         return False

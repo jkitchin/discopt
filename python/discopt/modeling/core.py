@@ -1801,8 +1801,9 @@ class Model:
         r"""
         Solve the model.
 
-        For pure-continuous models, solves the NLP directly. For models with
-        integer/binary variables, uses NLP-based spatial Branch & Bound.
+        For convex pure-continuous models, solves the NLP directly. For
+        nonconvex continuous models and models with integer/binary variables,
+        uses spatial Branch & Bound unless another solver backend is selected.
 
         Parameters
         ----------
