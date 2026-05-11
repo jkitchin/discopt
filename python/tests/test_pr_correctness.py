@@ -107,6 +107,9 @@ def test_pr_optimal_value(instance: ProblemInstance) -> None:
     model = instance.build_fn()
     result = model.solve(time_limit=10.0, gap_tolerance=1e-6, max_nodes=10_000)
     assert_optimal_value(result, instance.expected_obj, instance.name)
+    if instance.name == "binary_circle_minlp":
+        assert result.convex_fast_path is False
+        assert result.nlp_bb is False
 
 
 def test_pr_subset_keeps_small_nonconvex_minlp() -> None:
