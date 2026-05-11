@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -139,6 +140,16 @@ def test_amp_helper_defaults_cover_semifinite_domains():
     np.testing.assert_allclose(recovery_starts[0], np.array([0.5, 10.0]))
     np.testing.assert_allclose(recovery_starts[1], np.array([0.0, 2.0]))
     np.testing.assert_allclose(recovery_starts[2], np.array([1.0, 2.0]))
+
+
+def test_exp_univariate_domain_rejects_overflowing_bounds_without_warning():
+    """Wide finite exp domains should be rejected without probing exp(ub)."""
+    from discopt._jax.milp_relaxation import _univariate_domain_ok
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        assert _univariate_domain_ok("exp", 0.0, 1000.0) is False
+        assert _univariate_domain_ok("exp", -1000.0, 10.0) is True
 
 
 def test_amp_normalizes_initial_point_length_and_bounds():
