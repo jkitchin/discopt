@@ -11,16 +11,18 @@ Each instance is chosen to cover a distinct solver code path:
 * ``constrained_quadratic``    — pure continuous convex QP
 * ``simple_minlp``             — convex MINLP (textbook)
 * ``binary_knapsack``          — pure 0-1 MILP
-* ``binary_circle_minlp``      — tiny nonconvex MINLP (Alpine ``circlebin``-style)
+* ``binary_circle_minlp``      — tiny mixed continuous/binary nonconvex MINLP
 * ``exp_binary_minlp``         — OA-friendly convex MINLP with ``exp``
 
 The full ``circle_minlp`` case stays in the nightly correctness suite. It
 exercises the same nonconvex circle superlevel shape, but it is too expensive
-for this PR-fast tier in cold/local runs.
+for this PR-fast tier in cold/local runs. This file keeps cheaper PR coverage
+with a local Alpine ``circle``/``circlebin``-style replacement.
 
 The file deliberately does **not** import or re-apply the
 ``slow`` mark used at module level in :mod:`test_correctness`; it
-re-uses only the build functions and the optimal-value helper.
+re-uses shared build functions where practical, defines one local replacement,
+and shares the optimal-value helper.
 """
 
 from __future__ import annotations
@@ -42,12 +44,12 @@ pytestmark = pytest.mark.pr_correctness
 
 
 def _build_binary_circle_minlp() -> dm.Model:
-    """Alpine ``circlebin``-style nonconvex MINLP with a known optimum of 2."""
+    """Alpine circle-style nonconvex MINLP with a known optimum of 1."""
     m = dm.Model("binary_circle_minlp")
-    x1 = m.binary("x1")
-    x2 = m.binary("x2")
-    m.minimize(x1 + x2)
-    m.subject_to(x1**2 + x2**2 >= 2)
+    x = m.continuous("x", lb=0, ub=1)
+    y = m.binary("y")
+    m.minimize(x + 1.5 * y)
+    m.subject_to(x**2 + y**2 >= 1)
     return m
 
 
@@ -79,10 +81,10 @@ PR_INSTANCES: list[ProblemInstance] = [
     ProblemInstance(
         name="binary_circle_minlp",
         build_fn=_build_binary_circle_minlp,
-        expected_obj=2.0,
-        integer_vars=["x1", "x2"],
-        bounds={"x1": (0, 1), "x2": (0, 1)},
-        description="Tiny nonconvex binary-circle MINLP",
+        expected_obj=1.0,
+        integer_vars=["y"],
+        bounds={"x": (0, 1), "y": (0, 1)},
+        description="Tiny mixed continuous/binary nonconvex circle MINLP",
     ),
     ProblemInstance(
         name="exp_binary_minlp",
@@ -109,6 +111,14 @@ def test_pr_optimal_value(instance: ProblemInstance) -> None:
 
 def test_pr_subset_keeps_small_nonconvex_minlp() -> None:
     """Guard the issue #43 coverage contract for the PR-fast subset."""
+    from discopt._jax.convexity import classify_model
+    from discopt._jax.problem_classifier import ProblemClass, classify_problem
+
     instance_names = {inst.name for inst in PR_INSTANCES}
     assert "binary_circle_minlp" in instance_names
     assert "circle_minlp" not in instance_names
+
+    model = _build_binary_circle_minlp()
+    assert classify_problem(model) is ProblemClass.MINLP
+    is_convex, _ = classify_model(model, use_certificate=True)
+    assert not is_convex
