@@ -134,15 +134,16 @@ remain available through the explicit Make targets.
 ### AMP Test Suites
 
 Routine AMP development uses a fast default regression battery. The fast
-environment includes HiGHS and cyipopt, but excludes the longer Alpine,
-MINLPTests, and incidence-style AMP benchmark suite:
+environment uses solver-independent checks plus HiGHS-backed MILP relaxations,
+and excludes optional cyipopt, longer Alpine, MINLPTests, and incidence-style
+AMP benchmark coverage:
 
 ```bash
 make test-amp-fast
 ```
 
-Alpine-reference, MINLPTests, and incidence-style AMP checks are opt-in because
-they can require optional solvers and longer solve budgets:
+Alpine-reference, MINLPTests, cyipopt, and incidence-style AMP checks are
+opt-in because they can require optional solvers and longer solve budgets:
 
 ```bash
 # Uses a fresh .venv and pixi-provided solver libraries rather than a local Python env.

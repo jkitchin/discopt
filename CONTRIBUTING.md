@@ -37,8 +37,8 @@ Prefer the Make targets — they pin flags consistent with CI.
 # Rust tests
 cargo test -p discopt-core
 
-# PR-fast (matches CI; excludes slow/correctness/integration/manual markers,
-# includes pr_correctness; target <10 min).
+# PR-fast (matches CI; excludes slow/correctness/integration/manual/cyipopt
+# markers, includes pr_correctness; target <10 min).
 make test
 
 # Dev inner loop: unit + smoke markers only (~60 s).
@@ -73,6 +73,7 @@ pytest python/tests/ --cov=discopt
 | `pr_correctness` | Curated 5-instance correctness subset; <30 s total | yes |
 | `integration` | End-to-end workflows (DOE, discrimination, CUTEst) | nightly / manual |
 | `amp_benchmark` | AMP Alpine, MINLPTests, or incidence benchmark coverage | manual |
+| `requires_cyipopt` | Requires the optional cyipopt/Ipopt solver stack | manual |
 
 When adding a test, default to no marker for normal feature tests; add
 `slow` if it routinely costs more than ~3 s, and `unit` or `smoke` if it
