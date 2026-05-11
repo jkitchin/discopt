@@ -274,7 +274,7 @@ def test_end_to_end_nlp_duals_round_trip_through_examine():
     m = dm.Model("nlp_xyz")
     x = m.continuous("x", lb=0.0, ub=5.0)
     y = m.continuous("y", lb=0.0, ub=5.0)
-    m.minimize((x - 2) ** 2 + (y + 1) ** 2)
+    m.minimize(dm.exp(x - 2) + (y + 1) ** 2)
     m.subject_to(x + y <= 1, name="c0")
 
     res = m.solve()
