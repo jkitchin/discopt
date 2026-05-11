@@ -868,6 +868,17 @@ class SolveResult:
     jax_time: float = 0.0
     python_time: float = 0.0
 
+    # KKT duals at the returned point, when the underlying solver exposes them.
+    # ``constraint_duals`` is keyed by Constraint.name; entries with a vector
+    # body have one multiplier per row. ``bound_duals_lower`` /
+    # ``bound_duals_upper`` are keyed by Variable.name. All values are in the
+    # internal-minimization sign convention (``>= 0`` at active bounds /
+    # binding-from-below inequalities). For maximize problems, the multipliers
+    # correspond to the negated objective the solver actually saw.
+    constraint_duals: Optional[dict[str, np.ndarray]] = None
+    bound_duals_lower: Optional[dict[str, np.ndarray]] = None
+    bound_duals_upper: Optional[dict[str, np.ndarray]] = None
+
     # Convex fast path indicator
     convex_fast_path: bool = False
 

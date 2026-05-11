@@ -53,8 +53,11 @@ def reformulate_gdp(model: Model, method: str = "big-m") -> Model:
         constraints.
     method : str, default "big-m"
         Reformulation method for disjunctive constraints:
-        ``"big-m"`` (default), ``"hull"`` (convex hull), or
-        ``"mbigm"`` (multiple big-M with LP-based tightening).
+        ``"big-m"`` (default), ``"hull"`` (convex hull),
+        ``"mbigm"`` (multiple big-M with LP-based tightening), or
+        ``"auto"`` to dispatch per-disjunction via the F1 advisor in
+        :mod:`discopt._jax.gdp_advisor` (each disjunction independently
+        gets the structurally-best of the three).
         Indicator and SOS constraints always use big-M regardless.
 
     Returns
@@ -97,21 +100,35 @@ def reformulate_gdp(model: Model, method: str = "big-m") -> Model:
         new_model._variables.append(var)
         return var
 
-    # Precompute LP relaxation for MBM
+    # In auto mode, ask the F1 advisor for a per-disjunction
+    # recommendation up front; if any disjunction (or indicator) is
+    # routed to mbigm we still need the LP relaxation precomputed.
+    auto_advice: dict[int, str] = {}
+    if method == "auto":
+        from discopt._jax.gdp_advisor import recommend_methods
+
+        for adv in recommend_methods(model):
+            auto_advice[adv.disjunction_index] = adv.recommendation
+
+    # Precompute LP relaxation for MBM (or auto mode that may pick mbigm).
     lp_data = None
-    if method == "mbigm":
+    if method == "mbigm" or "mbigm" in auto_advice.values():
         lp_data = _precompute_lp_relaxation(model)
 
-    for c in model._constraints:
+    for ci, c in enumerate(model._constraints):
         if isinstance(c, _IndicatorConstraint):
             new_cons = _reformulate_indicator(c, new_model, lp_data=lp_data)
             new_model._constraints.extend(new_cons)
         elif isinstance(c, _DisjunctiveConstraint):
-            if method == "hull":
+            chosen = auto_advice.get(ci, method) if method == "auto" else method
+            if chosen == "hull":
                 new_vars, new_cons = _reformulate_disjunction_hull(c, new_model, _add_aux_binary)
             else:
+                # big-m and mbigm both go through _reformulate_disjunction;
+                # the difference is only whether lp_data is supplied.
+                disj_lp = lp_data if chosen == "mbigm" else None
                 new_vars, new_cons = _reformulate_disjunction(
-                    c, new_model, _add_aux_binary, lp_data=lp_data
+                    c, new_model, _add_aux_binary, lp_data=disj_lp
                 )
             new_model._constraints.extend(new_cons)
         elif isinstance(c, _SOSConstraint):

@@ -28,6 +28,10 @@ from discopt.doe import (
 )
 from discopt.estimate import Experiment, ExperimentModel, estimate_parameters
 
+# Profile-likelihood is a research feature; each test runs an NLP per parameter
+# value across a grid, so even tiny cases cost ~5-10s.  Keep on the nightly lane.
+pytestmark = pytest.mark.slow
+
 
 class LinearExperiment(Experiment):
     """y_i = a + b*x_i."""

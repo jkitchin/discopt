@@ -519,3 +519,151 @@ def run_obbt(
         n_tightened=n_tightened,
         total_lp_time=total_lp_time,
     )
+
+
+def run_obbt_on_relaxation(
+    relaxation,
+    n_orig: int,
+    candidate_idxs: Optional[list[int]] = None,
+    time_limit_per_lp: Optional[float] = 1.0,
+    incumbent_cutoff: Optional[float] = None,
+    min_width: float = 1e-6,
+    eps: float = 1e-7,
+    deadline: Optional[float] = None,
+) -> ObbtResult:
+    """OBBT over the LP relaxation of a MILP relaxation envelope.
+
+    For each candidate variable solves min/max x_i subject to the MILP
+    relaxation's linear constraints (with integrality dropped), and tightens
+    the variable's bound when the LP optimum is strictly inside the prior box.
+    The LP feasible region contains the MILP feasible region, which contains
+    the original MINLP feasible region, so any tightened bound is valid.
+
+    When ``incumbent_cutoff`` is provided, the constraint
+    ``c_obj^T x <= incumbent_cutoff - obj_offset`` is added (using the
+    relaxation's objective row), excluding regions that cannot beat the best
+    known feasible objective and often delivering a bigger tightening than
+    the structural envelopes alone.
+
+    Parameters
+    ----------
+    relaxation : MilpRelaxationModel
+        Built by ``build_milp_relaxation``.
+    n_orig : int
+        Number of original (non-aux) columns; only these are returned.
+    candidate_idxs : list[int], optional
+        Subset of column indices to tighten.  Defaults to all original columns.
+    time_limit_per_lp : float, optional
+        Per-LP time limit in seconds.  ``None`` for no limit.
+    incumbent_cutoff : float, optional
+        Cutoff on ``c_obj^T x + obj_offset`` (i.e. the relaxation objective in
+        the same scale as the user's objective).
+    min_width : float
+        Skip variables whose box width is below this.
+    deadline : float, optional
+        Absolute ``time.perf_counter()`` deadline; pass to abort early.
+
+    Returns
+    -------
+    ObbtResult
+        ``tightened_lb`` and ``tightened_ub`` are length-``n_orig`` arrays.
+    """
+    import time as _time
+
+    import scipy.sparse as sp
+
+    A_ub = relaxation._A_ub
+    b_ub = relaxation._b_ub
+    bounds = list(relaxation._bounds)
+    n_total = len(bounds)
+    c_obj = relaxation._c
+    obj_offset = float(relaxation._obj_offset)
+
+    if incumbent_cutoff is not None and c_obj is not None:
+        cutoff_row = np.asarray(c_obj, dtype=np.float64).reshape(1, -1)
+        cutoff_rhs = np.array([float(incumbent_cutoff) - obj_offset], dtype=np.float64)
+        if A_ub is not None and b_ub is not None:
+            if sp.issparse(A_ub):
+                A_ub = sp.vstack([A_ub, sp.csr_matrix(cutoff_row)], format="csr")
+            else:
+                A_ub = np.vstack([np.asarray(A_ub), cutoff_row])
+            b_ub = np.concatenate([np.asarray(b_ub, dtype=np.float64), cutoff_rhs])
+        else:
+            A_ub = cutoff_row
+            b_ub = cutoff_rhs
+
+    lb_arr = np.array([b[0] for b in bounds], dtype=np.float64)
+    ub_arr = np.array([b[1] for b in bounds], dtype=np.float64)
+
+    if candidate_idxs is None:
+        candidate_idxs = list(range(min(n_orig, n_total)))
+    else:
+        candidate_idxs = [i for i in candidate_idxs if 0 <= i < n_total]
+
+    n_lp_solves = 0
+    n_tightened = 0
+    total_lp_time = 0.0
+    warm_basis = None
+
+    def _bounds_list() -> list[tuple[float, float]]:
+        return [(float(lb_arr[i]), float(ub_arr[i])) for i in range(n_total)]
+
+    for var_idx in candidate_idxs:
+        if deadline is not None and _time.perf_counter() >= deadline:
+            break
+        width = ub_arr[var_idx] - lb_arr[var_idx]
+        if width <= min_width:
+            continue
+        if not (np.isfinite(lb_arr[var_idx]) and np.isfinite(ub_arr[var_idx])):
+            continue
+
+        # min x_i
+        c = np.zeros(n_total, dtype=np.float64)
+        c[var_idx] = 1.0
+        result = solve_lp(
+            c=c,
+            A_ub=A_ub,
+            b_ub=b_ub,
+            bounds=_bounds_list(),
+            warm_basis=warm_basis,
+            time_limit=time_limit_per_lp,
+        )
+        n_lp_solves += 1
+        total_lp_time += result.wall_time
+        if result.status == SolveStatus.OPTIMAL and result.objective is not None:
+            warm_basis = result.basis
+            new_lb = float(result.objective)
+            if new_lb > lb_arr[var_idx] + eps:
+                # Don't cross the upper bound.
+                lb_arr[var_idx] = min(new_lb, ub_arr[var_idx])
+                n_tightened += 1
+
+        if deadline is not None and _time.perf_counter() >= deadline:
+            break
+
+        # max x_i (minimize -x_i)
+        c[var_idx] = -1.0
+        result = solve_lp(
+            c=c,
+            A_ub=A_ub,
+            b_ub=b_ub,
+            bounds=_bounds_list(),
+            warm_basis=warm_basis,
+            time_limit=time_limit_per_lp,
+        )
+        n_lp_solves += 1
+        total_lp_time += result.wall_time
+        if result.status == SolveStatus.OPTIMAL and result.objective is not None:
+            warm_basis = result.basis
+            new_ub = -float(result.objective)
+            if new_ub < ub_arr[var_idx] - eps:
+                ub_arr[var_idx] = max(new_ub, lb_arr[var_idx])
+                n_tightened += 1
+
+    return ObbtResult(
+        tightened_lb=lb_arr[:n_orig].copy(),
+        tightened_ub=ub_arr[:n_orig].copy(),
+        n_lp_solves=n_lp_solves,
+        n_tightened=n_tightened,
+        total_lp_time=total_lp_time,
+    )

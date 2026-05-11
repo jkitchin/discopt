@@ -293,6 +293,7 @@ _EXAMPLE_FACTORIES = [
 ]
 
 
+@pytest.mark.slow
 class TestAllExamples:
     @pytest.mark.parametrize(
         "factory",

@@ -56,6 +56,7 @@ class TestConvexFastPathDetection:
         # Should still solve, but not via fast path
         assert result.convex_fast_path is False
 
+    @pytest.mark.slow
     def test_integer_variables_no_fast_path(self):
         """Integer variables prevent the fast path, even if relaxation is convex."""
         m = Model("integer_problem")

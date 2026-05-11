@@ -28,6 +28,11 @@ from discopt.doe import (
 )
 from discopt.estimate import Experiment, ExperimentModel
 
+# Each batch DOE test runs several real NLP solves; the suite is a research
+# feature that rarely regresses from typical PRs.  Keep it on the nightly
+# `slow` lane and out of the PR fast path.
+pytestmark = pytest.mark.slow
+
 # ──────────────────────────────────────────────────────────
 # Helper experiments (mirrored from test_doe.py, kept local
 # to avoid cross-file imports)

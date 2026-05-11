@@ -183,16 +183,20 @@ class TestWideBoxCertificateAbstainsAsDocumented:
     """The pure interval-Hessian certificate may abstain on wide boxes.
 
     These tests lock in the current behaviour of :func:`certify_convex`
-    for shapes whose Hessian contains exp/pow/div atoms: on a wide box
-    the interval enclosure overflows or loses enough precision for
-    Gershgorin to fail, and the certificate returns ``None``. This is
-    exactly the failure mode David flagged on ``nlp_cvx_205_010``, and
-    it is *expected* under the current certificate — the structural
-    recognizers are the reason those MINLPTests cases still pass.
+    for shapes whose Hessian contains exp/pow/div atoms. The
+    quadratic-over-linear shape ``x²/y`` is now certified via a
+    structural rank-1 PSD path through the interval-AD walker
+    (see :mod:`discopt._jax.convexity.interval_ad`), so it appears in
+    the *positive* :class:`TestWideBoxCertificateProvesConvex` group.
+    The remaining abstention pinned here is the exp-perspective
+    shape: ``y * exp(x/y)`` overflows ``exp`` on a wide box regardless
+    of how the interval Hessian is encoded, and recovering it requires
+    structural pattern recognition (out of scope for the certificate).
 
     If a future certificate tightening (e.g. αBB-style Hessian bounds,
-    affine arithmetic) turns any of these into successful proofs, the
-    test will surface that change rather than let it slip through.
+    affine arithmetic) turns the remaining case into a successful
+    proof, the test will surface that change rather than let it slip
+    through.
     """
 
     def test_exp_perspective_certificate_abstains_on_wide_box(self):
@@ -205,21 +209,6 @@ class TestWideBoxCertificateAbstainsAsDocumented:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
             verdict = certify_convex(y * dm.exp(x / y), m)
-        assert verdict is None
-
-    def test_quadratic_over_linear_certificate_abstains_on_wide_box(self):
-        # Hessian of x^2/y is
-        #   [[2/y,        -2x/y^2],
-        #    [-2x/y^2,     2x^2/y^3]]
-        # On x in [-WIDE, WIDE], y in [1e-3, WIDE] the off-diagonal and
-        # H[1,1] entries span many orders of magnitude; Gershgorin's
-        # lambda_min goes sharply negative and the certificate abstains.
-        m = Model("qol_cert_wide")
-        x = m.continuous("x", lb=-WIDE, ub=WIDE)
-        y = m.continuous("y", lb=1.0e-3, ub=WIDE)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
-            verdict = certify_convex((x * x) / y, m)
         assert verdict is None
 
     def test_structural_layer_strictly_stronger_than_certificate_on_perspective(self):
@@ -235,6 +224,66 @@ class TestWideBoxCertificateAbstainsAsDocumented:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
             assert certify_convex(expr, m) is None
+
+
+class TestWideBoxCertificateProvesConvex:
+    """Wide-box shapes the interval-AD certificate now certifies CONVEX.
+
+    Issue #42: the perspective form ``g²/h`` for affine ``g`` and
+    affine strictly-positive ``h`` has an exact rank-1 PSD Hessian
+    (see :func:`_rank1_quotient` in
+    :mod:`discopt._jax.convexity.interval_ad`). The certificate
+    propagates a :class:`Rank1Factor` through the AD walker and
+    consults it as a structural sufficient PSD test, certifying the
+    quotient on boxes where Gershgorin's row-sum bound would be too
+    loose.
+    """
+
+    def test_quadratic_over_linear_certificate_proves_convex_on_wide_box(self):
+        # Hessian of x^2/y is
+        #   [[2/y,        -2x/y^2],
+        #    [-2x/y^2,     2x^2/y^3]]
+        # = (2/y) · v vᵀ with v = [1, -x/y] — a rank-1 PSD form on
+        # any box with y > 0. The certificate's structural rank-1
+        # path certifies it via Rank1Factor metadata regardless of
+        # how wide the off-diagonal interval becomes.
+        m = Model("qol_cert_wide")
+        x = m.continuous("x", lb=-WIDE, ub=WIDE)
+        y = m.continuous("y", lb=1.0e-3, ub=WIDE)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            verdict = certify_convex((x * x) / y, m)
+        assert verdict == Curvature.CONVEX
+
+    def test_x_squared_via_pow_over_y_proves_convex_on_wide_box(self):
+        """``x**2 / y`` exercises the same path through ``_integer_power``."""
+        m = Model("qol_pow_cert_wide")
+        x = m.continuous("x", lb=-WIDE, ub=WIDE)
+        y = m.continuous("y", lb=1.0e-3, ub=WIDE)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            verdict = certify_convex((x**2) / y, m)
+        assert verdict == Curvature.CONVEX
+
+    def test_shifted_square_over_linear_proves_convex_on_wide_box(self):
+        """``(x+1)² / y`` — affine numerator squared, affine denominator."""
+        m = Model("shifted_qol_cert_wide")
+        x = m.continuous("x", lb=-WIDE, ub=WIDE)
+        y = m.continuous("y", lb=1.0e-3, ub=WIDE)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            verdict = certify_convex(((x + 1.0) ** 2) / y, m)
+        assert verdict == Curvature.CONVEX
+
+    def test_quadratic_over_scaled_linear_proves_convex_on_wide_box(self):
+        """``x² / (2y + 1)`` — denominator is affine and strictly positive."""
+        m = Model("qol_scaled_cert_wide")
+        x = m.continuous("x", lb=-WIDE, ub=WIDE)
+        y = m.continuous("y", lb=1.0e-3, ub=WIDE)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            verdict = certify_convex((x * x) / (2.0 * y + 1.0), m)
+        assert verdict == Curvature.CONVEX
 
 
 # ──────────────────────────────────────────────────────────────────────

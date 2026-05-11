@@ -3,7 +3,7 @@
 [![PyPI](https://img.shields.io/pypi/v/discopt)](https://pypi.org/project/discopt/)
 [![CI](https://github.com/jkitchin/discopt/actions/workflows/ci.yml/badge.svg)](https://github.com/jkitchin/discopt/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/jkitchin/discopt/graph/badge.svg?token=B3Y6LAtox9)](https://codecov.io/gh/jkitchin/discopt)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19762815.svg)](https://doi.org/10.5281/zenodo.19762815)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.19762815.svg?v=2)](https://doi.org/10.5281/zenodo.19762815)
 ![PyPI Downloads](https://img.shields.io/pypi/dm/discopt.svg)
 
 [![discopt](https://github.com/jkitchin/discopt/blob/main/discopt.png?raw=true)](https://github.com/jkitchin/discopt/blob/main/discopt.png?raw=true)

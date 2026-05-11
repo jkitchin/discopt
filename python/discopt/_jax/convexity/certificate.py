@@ -35,7 +35,7 @@ import numpy as np
 
 from discopt.modeling.core import Constraint, Expression, Model
 
-from .eigenvalue import gershgorin_lambda_max, gershgorin_lambda_min
+from .eigenvalue import gershgorin_lambda_max, gershgorin_lambda_min, psd_2x2_sufficient
 from .interval import Interval
 from .interval_ad import interval_hessian
 from .lattice import Curvature
@@ -80,6 +80,21 @@ def certify_convex(
     hess = ad.hess
     if not (np.all(np.isfinite(hess.lo)) and np.all(np.isfinite(hess.hi))):
         return None
+
+    # Structural rank-1 PSD fast path. When the AD walker has attached
+    # a ``Rank1Factor`` with nonneg coefficient, the Hessian equals
+    # ``c · v vᵀ`` pointwise (sound by construction) and is therefore
+    # PSD on the entire box even when the entry-wise interval matrix
+    # is too loose for Gershgorin to certify.
+    rank1 = ad.rank1_factor
+    if rank1 is not None and np.all(np.isfinite(rank1.c.lo)) and np.all(rank1.c.lo >= -_PSD_TOL):
+        return Curvature.CONVEX
+
+    # 2×2 sufficient PSD test (Sylvester) — useful when the interval
+    # Hessian is tight enough that Gershgorin's row-sum loosening
+    # would cross zero but the determinant proof still holds.
+    if hess.lo.shape == (2, 2) and psd_2x2_sufficient(hess):
+        return Curvature.CONVEX
 
     lam_min = gershgorin_lambda_min(hess)
     if lam_min >= -_PSD_TOL:

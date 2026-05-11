@@ -508,14 +508,21 @@ discopt machinery; B4 is added as a contained quick win; D6 is added for
 discopt-distinctive NN-embedded MINLPs; D4 moves down per its known
 scaling risk.
 
-### Phase P1 — Foundations (orchestrator + delta protocol)
+### Phase P1 — Foundations (orchestrator + delta protocol) ✅ shipped
 
 - A1, A2, A4. Refactor existing passes onto the new protocol with no behavior change.
 - Deliverable: presolve runs to a fixed point, reports a structured delta,
   is deterministic, has golden-file tests.
 - Risk: low. Pure refactor.
+- **Status (2026-05): complete.** Landed in the orchestrator + delta + pass
+  modules under `crates/discopt-core/src/presolve/`, with the determinism
+  harness in `crates/discopt-core/tests/presolve_determinism.rs` and
+  Python parity tests in `python/tests/test_presolve_orchestrator.py`.
+  `run_root_presolve` now routes through `PyModelRepr.presolve()` while
+  preserving its legacy stats keys. P2/P3/P4 items bolt onto the
+  `PresolvePass` + `PresolveDelta` contract.
 
-### Phase P2 — Evidence-backed quick wins
+### Phase P2 — Evidence-backed quick wins ✅ shipped
 
 - C1, C3, B1, B4, E1, E2, F2.
 - Adds B4 (FBBT-as-fixed-point-LP) and pulls E2 (reduced-cost fixing) and
@@ -528,7 +535,7 @@ scaling risk.
 - Risk: low–medium. Mostly MIP-style techniques plus one local refactor of
   `fbbt.rs`.
 
-### Phase P3 — Structural detection layer (the LANL-flavored core)
+### Phase P3 — Structural detection layer (the LANL-flavored core) ✅ shipped
 
 - A3, B2, D1, D2, D3, D6, F1.
 - D1 (convex reformulation as a rewrite) and D2 (polynomial→quadratic) are
@@ -542,7 +549,7 @@ scaling risk.
 - Risk: medium. D2 is architecturally invasive. D1 requires non-trivial
   integration between Python-side convexity detection and the Rust IR.
 
-### Phase P4 — Advanced (symmetry, in-tree presolve, factorable elimination)
+### Phase P4 — Advanced (symmetry, in-tree presolve, factorable elimination) ✅ shipped
 
 - B3, C2, C4, D4, D5.
 - D4 deferred from P3 per its known scaling cliffs (open question 3

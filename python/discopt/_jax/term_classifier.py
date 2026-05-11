@@ -82,6 +82,12 @@ class NonlinearTerms:
     trilinear: list[tuple[_VarIdx, _VarIdx, _VarIdx]] = field(default_factory=list)
     multilinear: list[tuple[_VarIdx, ...]] = field(default_factory=list)
     monomial: list[tuple[_VarIdx, int]] = field(default_factory=list)
+    fractional_power: list[tuple[_VarIdx, float]] = field(default_factory=list)
+    # Products of a linear variable with a fractional-power factor, recorded as
+    # ``(linear_var_idx, (base_var_idx, exponent))``.  The MILP relaxation lifts
+    # the fractional power to an aux column and adds a McCormick envelope on the
+    # resulting (linear, aux) bilinear product.
+    bilinear_with_fp: list[tuple[_VarIdx, tuple[_VarIdx, float]]] = field(default_factory=list)
     general_nl: list[Expression] = field(default_factory=list)
     term_incidence: dict[_VarIdx, set[int]] = field(default_factory=dict)
     partition_candidates: list[_VarIdx] = field(default_factory=list)
@@ -151,6 +157,83 @@ def _collect_product_factors(expr: Expression, model: Model) -> list[int] | None
         var_indices = indices  # may have duplicates if e.g. x*x
         if len(var_indices) >= 2:
             return var_indices
+    return None
+
+
+def distribute_products(expr: Expression) -> Expression:
+    """Recursively distribute multiplication over addition/subtraction.
+
+    ``(a + b) * c`` → ``a*c + b*c``;  ``c * (a - b)`` → ``c*a - c*b``.
+    Applied bottom-up so nested distributions resolve.  Other expression
+    types are returned with operator-tree shape preserved structurally.
+    """
+    if isinstance(expr, BinaryOp):
+        left = distribute_products(expr.left)
+        right = distribute_products(expr.right)
+        if expr.op == "*":
+            if isinstance(right, BinaryOp) and right.op in ("+", "-"):
+                return BinaryOp(
+                    right.op,
+                    distribute_products(BinaryOp("*", left, right.left)),
+                    distribute_products(BinaryOp("*", left, right.right)),
+                )
+            if isinstance(left, BinaryOp) and left.op in ("+", "-"):
+                return BinaryOp(
+                    left.op,
+                    distribute_products(BinaryOp("*", left.left, right)),
+                    distribute_products(BinaryOp("*", left.right, right)),
+                )
+        return BinaryOp(expr.op, left, right)
+    if isinstance(expr, UnaryOp):
+        return UnaryOp(expr.op, distribute_products(expr.operand))
+    return expr
+
+
+def _collect_extended_factors(
+    expr: Expression, model: Model
+) -> tuple[list[int], list[tuple[int, float]]] | None:
+    """Decompose a product tree into (flat-variable factors, fractional-power factors).
+
+    Returns ``None`` if the product tree contains non-variable, non-fractional-power
+    leaves (e.g., transcendental calls, sums, divisions).  Constant scale factors are
+    skipped (handled separately by the linearizer).
+
+    ``var^p`` with non-integer ``p`` and a flat-indexable base is captured as a
+    virtual ``(flat_idx, exp)`` factor; integer powers ``var^n`` (n ≥ 2) are
+    expanded into ``n`` repeated flat-variable factors so existing bilinear /
+    trilinear / monomial handling continues to apply.
+    """
+    flat_factors: list[int] = []
+    fp_factors: list[tuple[int, float]] = []
+
+    def _visit(e: Expression) -> bool:
+        if isinstance(e, BinaryOp) and e.op == "*":
+            return _visit(e.left) and _visit(e.right)
+        if isinstance(e, Constant):
+            return True
+        flat = _get_flat_index(e, model)
+        if flat is not None:
+            flat_factors.append(flat)
+            return True
+        if isinstance(e, BinaryOp) and e.op == "**" and isinstance(e.right, Constant):
+            base_flat = _get_flat_index(e.left, model)
+            if base_flat is not None:
+                exp_val = float(e.right.value)
+                n_int = int(exp_val)
+                if exp_val == n_int and n_int >= 2:
+                    flat_factors.extend([base_flat] * n_int)
+                    return True
+                if exp_val == n_int and n_int == 1:
+                    flat_factors.append(base_flat)
+                    return True
+                if exp_val != n_int:
+                    fp_factors.append((base_flat, exp_val))
+                    return True
+        return False
+
+    if _visit(expr):
+        if len(flat_factors) + len(fp_factors) >= 2:
+            return flat_factors, fp_factors
     return None
 
 
@@ -232,6 +315,8 @@ def _classify_nonlinear_terms_python(model: Model) -> NonlinearTerms:
     seen_trilinear: set[tuple[int, int, int]] = set()
     seen_multilinear: set[tuple[int, ...]] = set()
     seen_monomial: set[tuple[int, int]] = set()
+    seen_fractional: set[tuple[int, float]] = set()
+    seen_bilinear_fp: set[tuple[int, tuple[int, float]]] = set()
 
     def _next_product_term_idx() -> int:
         return len(result.bilinear) + len(result.trilinear) + len(result.multilinear)
@@ -273,6 +358,20 @@ def _classify_nonlinear_terms_python(model: Model) -> NonlinearTerms:
             seen_monomial.add(key)
             result.monomial.append(key)
 
+    def _record_fractional_power(var_idx: int, exp: float) -> None:
+        key = (var_idx, float(exp))
+        if key not in seen_fractional:
+            seen_fractional.add(key)
+            result.fractional_power.append(key)
+
+    def _record_bilinear_with_fp(var_idx: int, fp: tuple[int, float]) -> None:
+        fp_norm = (fp[0], float(fp[1]))
+        key = (var_idx, fp_norm)
+        if key not in seen_bilinear_fp:
+            seen_bilinear_fp.add(key)
+            result.bilinear_with_fp.append(key)
+        _record_fractional_power(*fp_norm)
+
     def _classify_node(expr: Expression) -> None:
         """Recursively classify all nonlinear nodes in the expression tree."""
         if isinstance(expr, Constant):
@@ -297,7 +396,11 @@ def _classify_nonlinear_terms_python(model: Model) -> NonlinearTerms:
                         _record_monomial(flat, int(exp_val))
                         return
                     elif exp_val != 1.0:
-                        # Non-integer or non-trivial exponent → general nonlinear
+                        # Non-integer (or negative-integer) exponent → fractional
+                        # power.  Record both as a fractional_power term (so the
+                        # MILP relaxation can lift it to an aux variable) and in
+                        # general_nl (so legacy callers see the same term set).
+                        _record_fractional_power(flat, exp_val)
                         result.general_nl.append(expr)
                         return
                 # Recurse for complex bases
@@ -335,6 +438,31 @@ def _classify_nonlinear_terms_python(model: Model) -> NonlinearTerms:
                     else:
                         _record_multilinear(unique_vars)
                         return
+                # Pure-variable decomposition failed.  Try the extended walk
+                # which permits fractional powers as virtual factors.
+                ext = _collect_extended_factors(expr, model)
+                if ext is not None:
+                    flat_facs, fp_facs = ext
+                    unique_flat = list(dict.fromkeys(flat_facs))
+                    if len(fp_facs) == 1 and len(flat_facs) == 1:
+                        # Pattern: x * y^p  →  bilinear-with-fractional-power.
+                        _record_bilinear_with_fp(flat_facs[0], fp_facs[0])
+                        return
+                    if len(fp_facs) == 1 and len(flat_facs) == 0:
+                        # Pattern: c * y^p  →  pure fractional power.
+                        _record_fractional_power(*fp_facs[0])
+                        return
+                    if len(fp_facs) == 0 and len(unique_flat) >= 1:
+                        # Should have been caught by _collect_product_factors;
+                        # falling through to general_nl is the safe choice.
+                        pass
+                    # Any other shape (multiple fp factors, fp × bilinear, …) is
+                    # outside the supported relaxations: keep as general_nl and
+                    # recurse so nested simple terms can still be classified.
+                    result.general_nl.append(expr)
+                    _classify_node(expr.left)
+                    _classify_node(expr.right)
+                    return
                 # If product decomposition failed, recurse on children
                 _classify_node(expr.left)
                 _classify_node(expr.right)
@@ -393,12 +521,15 @@ def _classify_nonlinear_terms_python(model: Model) -> NonlinearTerms:
             return
 
     # ── Scan objective ──
+    # Distribute multiplication over addition/subtraction first so that products
+    # of the form ``y * (x^p - c)`` decompose into ``y*x^p - y*c``, exposing the
+    # ``y * x^p`` bilinear-with-fractional-power pattern to classification.
     if model._objective is not None:
-        _classify_node(model._objective.expression)
+        _classify_node(distribute_products(model._objective.expression))
 
     # ── Scan constraints ──
     for constraint in model._constraints:
-        _classify_node(constraint.body)
+        _classify_node(distribute_products(constraint.body))
 
     # ── Build partition_candidates ──
     # Variables that appear in product terms (not just monomials, since x^2 is
@@ -413,6 +544,14 @@ def _classify_nonlinear_terms_python(model: Model) -> NonlinearTerms:
         candidates.add(k)
     for term in result.multilinear:
         candidates.update(term)
+    # Bilinear-with-fractional-power lifts the fp into an aux column, but the
+    # underlying base variable still needs domain partitioning to tighten the
+    # secant/tangent envelopes on a = x^p.
+    for lin_idx, (fp_base, _exp) in result.bilinear_with_fp:
+        candidates.add(lin_idx)
+        candidates.add(fp_base)
+    for fp_base, _exp in result.fractional_power:
+        candidates.add(fp_base)
     result.partition_candidates = sorted(candidates)
 
     return result
