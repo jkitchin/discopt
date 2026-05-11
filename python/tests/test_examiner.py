@@ -272,13 +272,14 @@ def test_end_to_end_nlp_duals_round_trip_through_examine():
     pytest.importorskip("cyipopt")
 
     m = dm.Model("nlp_xyz")
-    x = m.continuous("x", lb=0.1, ub=5.0)
-    y = m.continuous("y", lb=0.1, ub=5.0)
-    m.minimize(dm.exp(x - 2) + dm.log(y + 1))
+    x = m.continuous("x", lb=0.0, ub=5.0)
+    y = m.continuous("y", lb=0.0, ub=5.0)
+    m.minimize((x - 2) ** 2 + (y + 1) ** 2)
     m.subject_to(x + y <= 1, name="c0")
 
     res = m.solve()
     assert res.status == "optimal"
+    assert res.convex_fast_path is True
     # NLP path should populate solver-supplied duals.
     assert res.constraint_duals is not None
     assert res.bound_duals_lower is not None
