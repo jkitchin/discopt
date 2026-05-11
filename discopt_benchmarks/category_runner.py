@@ -161,6 +161,12 @@ class CategoryBenchmarkRunner:
         solver_name = "highs" if solver == "highs" else f"discopt_{solver}"
         timeout = max(0.0, self.time_limit) + (self.hard_timeout_grace or 0.0)
 
+        def print_worker_output(proc: subprocess.CompletedProcess[str]) -> None:
+            if proc.stdout:
+                print(proc.stdout, end="")
+            if proc.stderr:
+                print(proc.stderr, end="", file=sys.stderr)
+
         with tempfile.TemporaryDirectory(prefix="discopt_category_bench_") as tmp:
             result_path = Path(tmp) / "result.json"
             cmd = [
@@ -194,10 +200,7 @@ class CategoryBenchmarkRunner:
             if proc.returncode != 0 or not result_path.exists():
                 print(f"    ERROR ({solver}): {problem.name}: worker failed")
                 if "--verbose" in sys.argv:
-                    if proc.stdout:
-                        print(proc.stdout, end="")
-                    if proc.stderr:
-                        print(proc.stderr, end="", file=sys.stderr)
+                    print_worker_output(proc)
                 return SolveResult(
                     instance=problem.name,
                     solver=solver_name,
@@ -218,12 +221,17 @@ class CategoryBenchmarkRunner:
 
         if result.wall_time > self.time_limit:
             result.wall_time = self.time_limit
-            if result.status == SolveStatus.OPTIMAL:
-                result.status = (
-                    SolveStatus.FEASIBLE if result.objective is not None else SolveStatus.TIME_LIMIT
-                )
-            elif result.status == SolveStatus.UNKNOWN:
+            if result.status == SolveStatus.OPTIMAL and result.objective is not None:
+                result.status = SolveStatus.FEASIBLE
+            elif result.status in {
+                SolveStatus.OPTIMAL,
+                SolveStatus.INFEASIBLE,
+                SolveStatus.UNBOUNDED,
+                SolveStatus.UNKNOWN,
+            }:
                 result.status = SolveStatus.TIME_LIMIT
+        if result.status == SolveStatus.ERROR and "--verbose" in sys.argv:
+            print_worker_output(proc)
         return result
 
     def _run_discopt(self, problem: TestProblem, solver: str) -> SolveResult:

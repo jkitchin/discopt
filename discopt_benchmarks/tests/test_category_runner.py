@@ -77,6 +77,70 @@ def test_category_runner_caps_over_limit_worker_results(monkeypatch):
     assert result.wall_time == 3.0
 
 
+def test_category_runner_converts_late_certificates_to_time_limit(monkeypatch):
+    """Late proof certificates should not be counted as in-budget results."""
+    statuses = [SolveStatus.INFEASIBLE, SolveStatus.UNBOUNDED]
+
+    def fake_run(cmd, **kwargs):
+        del kwargs
+        worker_result = SolveResult(
+            instance="dummy",
+            solver="discopt_ipm",
+            status=statuses.pop(0),
+            wall_time=4.0,
+        )
+        Path(cmd[-1]).write_text(json.dumps(worker_result.to_dict()), encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("category_runner.subprocess.run", fake_run)
+
+    runner = CategoryBenchmarkRunner(
+        category="lp",
+        level="smoke",
+        time_limit=3.0,
+        hard_timeout_grace=1.0,
+    )
+
+    for _ in range(2):
+        result = runner._run_with_hard_timeout(_problem(), "ipm")
+        assert result.status == SolveStatus.TIME_LIMIT
+        assert result.wall_time == 3.0
+
+
+def test_category_runner_prints_error_worker_output_when_verbose(
+    monkeypatch,
+    capsys,
+):
+    """Verbose hard-timeout runs should surface worker diagnostics on ERROR."""
+
+    def fake_run(cmd, **kwargs):
+        del kwargs
+        worker_result = SolveResult(
+            instance="dummy",
+            solver="discopt_ipm",
+            status=SolveStatus.ERROR,
+            wall_time=0.2,
+        )
+        Path(cmd[-1]).write_text(json.dumps(worker_result.to_dict()), encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, "worker stdout\n", "worker stderr\n")
+
+    monkeypatch.setattr("category_runner.subprocess.run", fake_run)
+    monkeypatch.setattr("category_runner.sys.argv", ["run_category_benchmarks.py", "--verbose"])
+
+    runner = CategoryBenchmarkRunner(
+        category="lp",
+        level="smoke",
+        time_limit=3.0,
+        hard_timeout_grace=1.0,
+    )
+    result = runner._run_with_hard_timeout(_problem(), "ipm")
+    captured = capsys.readouterr()
+
+    assert result.status == SolveStatus.ERROR
+    assert "worker stdout" in captured.out
+    assert "worker stderr" in captured.err
+
+
 def test_category_runner_explicit_amp_filter_runs_amp(monkeypatch):
     """An explicit AMP filter should run AMP even when default solvers omit it."""
     calls = []
