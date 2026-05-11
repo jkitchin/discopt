@@ -69,6 +69,15 @@ def main():
         help="Per-problem time limit in seconds (default: 300)",
     )
     parser.add_argument(
+        "--solvers",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated solver filter. Supports ipm,ripopt,ipopt,highs,amp. "
+            "Use --solvers amp for AMP-specific category benchmarks."
+        ),
+    )
+    parser.add_argument(
         "--hard-timeout-grace",
         type=float,
         default=2.0,
@@ -99,6 +108,7 @@ def main():
         _list_categories()
         return
 
+    solver_filter = _parse_solver_filter(args.solvers)
     categories = get_all_categories() if args.category == "all" else [args.category]
 
     # Validate categories
@@ -119,6 +129,7 @@ def main():
             args.report,
             args.html,
             None if args.no_hard_timeout else args.hard_timeout_grace,
+            solver_filter,
         )
         all_results.append((cat, results))
 
@@ -134,14 +145,30 @@ def _list_categories():
         "qp": "Quadratic programming (QP) — ipm, ripopt, ipopt",
         "milp": "Mixed-integer LP (MILP) — ipm, ripopt, ipopt",
         "miqp": "Mixed-integer QP (MIQP) — ipm, ripopt, ipopt",
-        "minlp": "Mixed-integer NLP (MINLP) — ipm, ripopt, ipopt",
-        "global_opt": "Global optimization — ipm, ripopt, ipopt",
+        "minlp": "Mixed-integer NLP (MINLP) — ipm, ripopt, ipopt; use --solvers amp for AMP",
+        "global_opt": "Global optimization — ipm, ripopt, ipopt; use --solvers amp for AMP",
     }
     print("\nAvailable benchmark categories:\n")
     for name, desc in categories.items():
         print(f"  {name:12s}  {desc}")
     print("\n  all          Run all categories sequentially")
     print()
+
+
+def _parse_solver_filter(raw: str | None) -> list[str] | None:
+    """Parse and validate a comma-separated solver filter."""
+    if raw is None:
+        return None
+    solvers = [part.strip() for part in raw.split(",") if part.strip()]
+    if not solvers:
+        return None
+
+    valid = {"ipm", "ripopt", "ipopt", "highs", "amp"}
+    invalid = [solver for solver in solvers if solver not in valid]
+    if invalid:
+        print(f"ERROR: Unknown solver(s): {', '.join(invalid)}. Valid: {', '.join(sorted(valid))}")
+        sys.exit(1)
+    return list(dict.fromkeys(solvers))
 
 
 def _run_category(
@@ -152,6 +179,7 @@ def _run_category(
     generate_report: bool,
     generate_html: bool,
     hard_timeout_grace: float | None,
+    solver_filter: list[str] | None,
 ):
     """Run benchmarks for a single category."""
     from category_runner import CategoryBenchmarkRunner
@@ -161,6 +189,7 @@ def _run_category(
         level=level,
         time_limit=time_limit,
         hard_timeout_grace=hard_timeout_grace,
+        solver_filter=solver_filter,
     )
     results = runner.run()
 

@@ -6,20 +6,21 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from benchmarks.metrics import SolveResult, SolveStatus
 from benchmarks.problems.base import TestProblem as BenchmarkProblem
-from category_runner import CategoryBenchmarkRunner
+from category_runner import CategoryBenchmarkRunner, _run_worker
 
 
-def _problem() -> BenchmarkProblem:
+def _problem(build_fn=None) -> BenchmarkProblem:
     return BenchmarkProblem(
         name="dummy",
         category="lp",
         level="smoke",
-        build_fn=lambda: None,
+        build_fn=build_fn or (lambda: None),
         known_optimum=0.0,
         applicable_solvers=["ipm"],
     )
@@ -74,3 +75,93 @@ def test_category_runner_caps_over_limit_worker_results(monkeypatch):
     assert result.status == SolveStatus.FEASIBLE
     assert result.objective == 1.0
     assert result.wall_time == 3.0
+
+
+def test_category_runner_explicit_amp_filter_runs_amp(monkeypatch):
+    """An explicit AMP filter should run AMP even when default solvers omit it."""
+    calls = []
+
+    def fake_run_discopt(self, problem, solver):
+        del self, problem
+        calls.append(solver)
+        return SolveResult(
+            instance="dummy",
+            solver=f"discopt_{solver}",
+            status=SolveStatus.TIME_LIMIT,
+            wall_time=0.1,
+        )
+
+    monkeypatch.setattr("category_runner.get_problems", lambda category, level: [_problem()])
+    monkeypatch.setattr(CategoryBenchmarkRunner, "_run_discopt", fake_run_discopt)
+
+    runner = CategoryBenchmarkRunner(
+        category="lp",
+        level="smoke",
+        time_limit=3.0,
+        hard_timeout_grace=None,
+        solver_filter=["amp"],
+    )
+    results = runner.run()
+
+    assert calls == ["amp"]
+    assert results.get_solvers() == ["discopt_amp"]
+
+
+def test_category_runner_amp_solver_calls_model_solve_with_solver_amp():
+    """The AMP benchmark backend should call Model.solve(solver='amp')."""
+    captured = {}
+
+    class FakeModel:
+        def solve(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                status="optimal",
+                objective=1.0,
+                bound=1.0,
+                node_count=0,
+                iterations=0,
+            )
+
+    runner = CategoryBenchmarkRunner(
+        category="lp",
+        level="smoke",
+        time_limit=3.0,
+        hard_timeout_grace=None,
+    )
+    result = runner._run_discopt(_problem(build_fn=FakeModel), "amp")
+
+    assert captured["solver"] == "amp"
+    assert captured["time_limit"] == 3.0
+    assert captured["gap_tolerance"] == 1e-4
+    assert "nlp_solver" not in captured
+    assert "max_nodes" not in captured
+    assert result.solver == "discopt_amp"
+    assert result.status == SolveStatus.OPTIMAL
+
+
+def test_category_worker_writes_amp_result(tmp_path, monkeypatch):
+    """The hard-timeout worker entrypoint should run and serialize AMP results."""
+
+    class FakeModel:
+        def solve(self, **kwargs):
+            assert kwargs["solver"] == "amp"
+            return SimpleNamespace(
+                status="optimal",
+                objective=1.0,
+                bound=1.0,
+                node_count=0,
+                iterations=0,
+            )
+
+    monkeypatch.setattr(
+        "category_runner.get_problems",
+        lambda category, level: [_problem(build_fn=FakeModel)],
+    )
+
+    result_path = tmp_path / "result.json"
+    rc = _run_worker(["lp", "smoke", "dummy", "amp", "3.0", str(result_path)])
+
+    assert rc == 0
+    data = json.loads(result_path.read_text(encoding="utf-8"))
+    assert data["solver"] == "discopt_amp"
+    assert data["status"] == "optimal"

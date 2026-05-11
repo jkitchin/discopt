@@ -85,6 +85,15 @@ result = model.solve(
 )
 ```
 
+Category benchmarks default to the NLP-BB backends (`ipm`, `ripopt`, `ipopt`).
+For an AMP-specific benchmark over the same problem categories, select AMP
+explicitly:
+
+```bash
+python run_category_benchmarks.py --category minlp --level smoke --solvers amp --time-limit 60 --report --html
+python run_category_benchmarks.py --category global_opt --level smoke --solvers amp --time-limit 60 --report --html
+```
+
 For local Alpine/incidence checks, use the repository's documented pixi plus uv
 `.venv` workflow before running `make test-amp-integration`; avoid reusing an
 uncontrolled local Python environment for those solver-dependent examples.

@@ -27,7 +27,6 @@ from benchmarks.metrics import (
 )
 from benchmarks.problems.base import (
     TestProblem,
-    get_applicable_solvers,
     get_problems,
 )
 
@@ -46,6 +45,7 @@ class CategoryBenchmarkRunner:
         time_limit: float = 300.0,
         num_runs: int = 1,
         hard_timeout_grace: float | None = 2.0,
+        solver_filter: list[str] | None = None,
     ):
         self.category = category
         self.level = level
@@ -54,6 +54,7 @@ class CategoryBenchmarkRunner:
         self.hard_timeout_grace = (
             None if hard_timeout_grace is None else max(0.0, float(hard_timeout_grace))
         )
+        self.solver_filter = list(solver_filter) if solver_filter is not None else None
         self.results = BenchmarkResults(
             suite=f"{category}_{level}",
             timestamp=datetime.now().isoformat(),
@@ -88,19 +89,24 @@ class CategoryBenchmarkRunner:
             )
 
         # Header
-        solvers = get_applicable_solvers(self.category)
-        total_runs = len(problems) * len(solvers)
+        problem_solvers = {p.name: self._solvers_for_problem(p) for p in problems}
+        solvers = list(dict.fromkeys(s for slist in problem_solvers.values() for s in slist))
+        total_runs = sum(len(slist) for slist in problem_solvers.values())
         print(f"\n{'=' * 70}")
         print(f"Category Benchmark: {self.category.upper()} ({self.level})")
-        print(f"Problems: {len(problems)} | Solvers: {len(solvers)} | Total runs: {total_runs}")
+        solver_label = ", ".join(solvers) if solvers else "none"
+        print(f"Problems: {len(problems)} | Solvers: {solver_label} | Total runs: {total_runs}")
         print(f"Time limit: {self.time_limit}s")
         if self.hard_timeout_grace is not None:
             print(f"Hard timeout grace: {self.hard_timeout_grace}s")
         print(f"{'=' * 70}\n")
+        if total_runs == 0:
+            print("No applicable solvers selected for this category.")
+            return self.results
 
         completed = 0
         for problem in problems:
-            for solver in problem.applicable_solvers:
+            for solver in problem_solvers[problem.name]:
                 result = self._run_one(problem, solver)
                 self._validate(result, problem)
                 self.results.add_result(result)
@@ -126,6 +132,17 @@ class CategoryBenchmarkRunner:
         # Summary
         self._print_summary(problems)
         return self.results
+
+    def _solvers_for_problem(self, problem: TestProblem) -> list[str]:
+        """Return solvers to run for a problem, honoring explicit filters."""
+        if self.solver_filter is None:
+            return list(problem.applicable_solvers)
+
+        selected = []
+        for solver in self.solver_filter:
+            if solver == "amp" or solver in problem.applicable_solvers:
+                selected.append(solver)
+        return selected
 
     def _run_one(self, problem: TestProblem, solver: str) -> SolveResult:
         """Run a single problem with a single solver."""
@@ -214,12 +231,19 @@ class CategoryBenchmarkRunner:
         try:
             model = problem.build_fn()
             start = time.monotonic()
-            result = model.solve(
-                nlp_solver=solver,
-                time_limit=self.time_limit,
-                gap_tolerance=1e-4,
-                max_nodes=100_000,
-            )
+            if solver == "amp":
+                result = model.solve(
+                    solver="amp",
+                    time_limit=self.time_limit,
+                    gap_tolerance=1e-4,
+                )
+            else:
+                result = model.solve(
+                    nlp_solver=solver,
+                    time_limit=self.time_limit,
+                    gap_tolerance=1e-4,
+                    max_nodes=100_000,
+                )
             elapsed = time.monotonic() - start
 
             # Map status
