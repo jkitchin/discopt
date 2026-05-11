@@ -232,10 +232,12 @@ def _build_log_nlp() -> Model:
 def _build_sqrt_nlp() -> Model:
     """min sqrt(x+1) + sqrt(y+1) s.t. x+y>=2, x,y in [0,5].
 
-    sqrt is concave and increasing. On x+y=2:
+    sqrt is concave and increasing, so the minimum occurs on the active
+    constraint at a boundary point. On x+y=2:
     f(x) = sqrt(x+1) + sqrt(3-x). f'(x) = 1/(2*sqrt(x+1)) - 1/(2*sqrt(3-x)) = 0
     => sqrt(3-x) = sqrt(x+1) => 3-x = x+1 => x=1, y=1.
-    obj = sqrt(2) + sqrt(2) = 2*sqrt(2) ~= 2.8284.
+    Since f is concave, that stationary point is the maximum. The minima are
+    at (x, y) = (0, 2) and (2, 0), with obj = 1 + sqrt(3) ~= 2.7321.
     """
     m = dm.Model("sqrt_nlp")
     x = m.continuous("x", lb=0, ub=5)
@@ -562,7 +564,7 @@ INSTANCES: list[ProblemInstance] = [
     ProblemInstance(
         name="sqrt_nlp",
         build_fn=_build_sqrt_nlp,
-        expected_obj=2.0 * math.sqrt(2.0),
+        expected_obj=1.0 + math.sqrt(3.0),
         integer_vars=[],
         bounds={"x": (0, 5), "y": (0, 5)},
         description="min sqrt(x+1)+sqrt(y+1) s.t. x+y>=2",
