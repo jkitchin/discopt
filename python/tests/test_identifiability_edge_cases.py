@@ -29,6 +29,10 @@ from discopt.doe import (
 )
 from discopt.estimate import Experiment, ExperimentModel, estimate_parameters
 
+# Identifiability / profile-likelihood edge cases are research features; each
+# test runs a real estimation + profile sweep. Keep on the nightly slow lane.
+pytestmark = pytest.mark.slow
+
 
 class LinearExp(Experiment):
     def __init__(self, xs):

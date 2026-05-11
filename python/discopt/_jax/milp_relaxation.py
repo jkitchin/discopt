@@ -34,6 +34,7 @@ from discopt._jax.term_classifier import (
     NonlinearTerms,
     _compute_var_offset,
     _get_flat_index,
+    distribute_products,
 )
 from discopt.modeling.core import (
     BinaryOp,
@@ -51,6 +52,17 @@ from discopt.modeling.core import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Dedupe identical warnings emitted across repeated relaxation builds (AMP iterates).
+_warned_messages: set[str] = set()
+
+
+def _warn_once(msg: str, *args) -> None:
+    formatted = msg % args if args else msg
+    if formatted in _warned_messages:
+        return
+    _warned_messages.add(formatted)
+    logger.warning("%s", formatted)
 
 
 # ---------------------------------------------------------------------------
@@ -296,12 +308,17 @@ def _choose_trilinear_pair(
 # ---------------------------------------------------------------------------
 
 
-def _decompose_product(expr: Expression, model: Model) -> tuple[float, list[int]] | None:
-    """Decompose a product expression into (scalar, [flat_var_idx, ...]).
+def _decompose_product(
+    expr: Expression,
+    model: Model,
+    fractional_power_var_map: Optional[dict[tuple[int, float], int]] = None,
+) -> tuple[float, list[int]] | None:
+    """Decompose a product expression into (scalar, [flat_or_aux_idx, ...]).
 
     Returns None if expr contains non-constant, non-variable leaves.
-    Constants are accumulated into the scalar; variable references are
-    appended to the index list.
+    Constants are accumulated into the scalar; variable references and
+    registered fractional-power sub-expressions are appended to the index
+    list (using their MILP column indices).
     """
     scalar: list[float] = [1.0]
     var_indices: list[int] = []
@@ -316,6 +333,19 @@ def _decompose_product(expr: Expression, model: Model) -> tuple[float, list[int]
         if flat is not None:
             var_indices.append(flat)
             return True
+        # Recognize var^p (fractional p) when an aux column was allocated.
+        if (
+            fractional_power_var_map
+            and isinstance(e, BinaryOp)
+            and e.op == "**"
+            and isinstance(e.right, Constant)
+        ):
+            base_flat = _get_flat_index(e.left, model)
+            if base_flat is not None:
+                key = (base_flat, float(e.right.value))
+                if key in fractional_power_var_map:
+                    var_indices.append(fractional_power_var_map[key])
+                    return True
         return False
 
     if visit(expr):
@@ -630,6 +660,7 @@ def _linearize_expr(
     monomial_var_map: dict[tuple[int, int], int],
     univariate_var_map: dict[int, int],
     n_total_vars: int,
+    fractional_power_var_map: Optional[dict[tuple[int, float], int]] = None,
 ) -> tuple[np.ndarray, float]:
     """Walk expression tree and return (coeff, constant) for linearized form.
 
@@ -687,20 +718,26 @@ def _linearize_expr(
             elif e.op == "**":
                 flat = _get_flat_index(e.left, model)
                 if flat is not None and isinstance(e.right, Constant):
-                    n = int(float(e.right.value))
-                    if n == 1:
-                        coeff[flat] += scale
-                        return
-                    if n == 0:
-                        const_acc[0] += scale
-                        return
-                    key = (flat, n)
-                    if key in monomial_var_map:
-                        coeff[monomial_var_map[key]] += scale
-                    else:
+                    exp_val = float(e.right.value)
+                    n_int = int(exp_val)
+                    if exp_val == n_int:
+                        if n_int == 1:
+                            coeff[flat] += scale
+                            return
+                        if n_int == 0:
+                            const_acc[0] += scale
+                            return
+                        key = (flat, n_int)
+                        if key in monomial_var_map:
+                            coeff[monomial_var_map[key]] += scale
+                            return
                         raise ValueError(f"Monomial {key} not in monomial_var_map")
-                else:
-                    raise ValueError(f"Cannot linearize power expression: {e}")
+                    fp_key = (flat, exp_val)
+                    if fractional_power_var_map and fp_key in fractional_power_var_map:
+                        coeff[fractional_power_var_map[fp_key]] += scale
+                        return
+                    raise ValueError(f"Fractional power {fp_key} has no aux column")
+                raise ValueError(f"Cannot linearize power expression: {e}")
 
             elif e.op == "*":
                 # Constant scaling?
@@ -711,7 +748,7 @@ def _linearize_expr(
                     visit(e.left, scale * float(e.right.value))
                     return
                 # Full product decomposition
-                decomp = _decompose_product(e, model)
+                decomp = _decompose_product(e, model, fractional_power_var_map)
                 if decomp is None:
                     raise ValueError(f"Cannot decompose product: {e}")
                 c, indices = decomp
@@ -871,6 +908,7 @@ def build_milp_relaxation(
     multilinear_stage_map: dict[tuple[int, ...], list[dict[str, int]]] = {}
     monomial_var_map: dict[tuple[int, int], int] = {}
     univariate_var_map: dict[int, int] = {}
+    fractional_power_var_map: dict[tuple[int, float], int] = {}
 
     col_idx = n_orig
     all_bounds: list[tuple[float, float]] = list(zip(flat_lb.tolist(), flat_ub.tolist()))
@@ -1003,6 +1041,65 @@ def build_milp_relaxation(
         integrality_flags.append(0)
         col_idx += 1
 
+    # ── Fractional-power aux columns: a = x^p with non-integer p ────────────
+    # Only handle the cases where the relaxation is well-defined and
+    # numerically stable: x ≥ 0 strictly bounded, and either 0 < p < 1
+    # (concave) or p > 1 (convex).  Other cases are skipped and remain
+    # general_nl, surfacing through the existing warning path.
+    fractional_power_specs: list[dict] = []
+    for var_idx, p in terms.fractional_power:
+        lb_i = float(flat_lb[var_idx])
+        ub_i = float(flat_ub[var_idx])
+        if lb_i < 0.0 or ub_i <= lb_i:
+            continue
+        if p == 0.0 or p == 1.0:
+            continue
+        # Convexity: p ∈ (0,1) → concave on x ≥ 0; p > 1 or p < 0 → convex on x > 0.
+        if 0.0 < p < 1.0:
+            convexity = "concave"
+        elif p > 1.0 or p < 0.0:
+            convexity = "convex"
+            if p < 0.0 and lb_i <= 0.0:
+                continue
+        else:
+            continue
+        try:
+            f_lb = lb_i**p
+            f_ub = ub_i**p
+        except (ValueError, OverflowError):
+            continue
+        if not (np.isfinite(f_lb) and np.isfinite(f_ub)):
+            continue
+        col = col_idx
+        fractional_power_var_map[(var_idx, float(p))] = col
+        all_bounds.append((min(f_lb, f_ub), max(f_lb, f_ub)))
+        integrality_flags.append(0)
+        col_idx += 1
+        fractional_power_specs.append(
+            {
+                "var": var_idx,
+                "p": float(p),
+                "col": col,
+                "lb": lb_i,
+                "ub": ub_i,
+                "f_lb": f_lb,
+                "f_ub": f_ub,
+                "convexity": convexity,
+            }
+        )
+
+    # ── Bilinear-with-fractional-power: y * x^p  →  McCormick on (y_col, fp_col)
+    bilinear_with_fp_keys: list[tuple[int, int]] = []
+    for lin_idx, fp_key in terms.bilinear_with_fp:
+        if fp_key not in fractional_power_var_map:
+            continue
+        fp_col = fractional_power_var_map[fp_key]
+        pair = (min(lin_idx, fp_col), max(lin_idx, fp_col))
+        bilinear_with_fp_keys.append(pair)
+
+    for key in bilinear_with_fp_keys:
+        bilinear_var_map[key] = _ensure_bilinear_aux(*key)
+
     bilinear_pw_map: dict[tuple[int, int], list] = {}
     bilinear_lambda_map: dict[tuple[int, int], dict] = {}
 
@@ -1101,6 +1198,41 @@ def build_milp_relaxation(
                 "mode": convhull_mode,
             }
 
+    # ── Piecewise aux columns for shared disaggregated structure ───────────
+    # When a variable has partition breakpoints AND is the base of a concave
+    # fractional power ``z = x^p`` with p in (0, 1), replace the global secant
+    # with a piecewise version.  Monomial secants use their existing AMP
+    # interval-selector formulation below.
+    pw_candidate_vars: set[int] = set()
+    for spec_pre in terms.fractional_power:
+        var_idx, p = spec_pre
+        if 0.0 < float(p) < 1.0 and var_idx in disc_state.partitions:
+            pw_candidate_vars.add(var_idx)
+
+    piecewise_var_map: dict[int, list[tuple[int, int, float, float]]] = {}
+    for var_idx in sorted(pw_candidate_vars):
+        pw_pts = list(disc_state.partitions[var_idx])
+        if len(pw_pts) < 3:
+            # With only 2 breakpoints there's just one interval; the global
+            # secant already coincides with the piecewise secant.
+            continue
+        pw_intervals_list: list[tuple[int, int, float, float]] = []
+        for k in range(len(pw_pts) - 1):
+            p_lo = float(pw_pts[k])
+            p_hi = float(pw_pts[k + 1])
+            delta_col = col_idx
+            all_bounds.append((0.0, 1.0))
+            integrality_flags.append(1)
+            col_idx += 1
+            xbar_col = col_idx
+            xbar_lb = min(p_lo, 0.0)
+            xbar_ub = max(p_hi, 0.0)
+            all_bounds.append((xbar_lb, xbar_ub))
+            integrality_flags.append(0)
+            col_idx += 1
+            pw_intervals_list.append((delta_col, xbar_col, p_lo, p_hi))
+        piecewise_var_map[var_idx] = pw_intervals_list
+
     n_total = col_idx
 
     # ── Constraint rows (A_ub @ z ≤ b_ub) ───────────────────────────────────
@@ -1118,6 +1250,36 @@ def build_milp_relaxation(
             A_col_indices.extend(nz.tolist())
             A_data.extend(coeff_arr[nz].tolist())
         b_rows.append(float(rhs))
+
+    # ── Piecewise structural constraints (once per partitioned variable) ────
+    # For each var_idx with a piecewise structure we enforce:
+    #   sum δ_k = 1, x = Σ x̄_k, p_k δ_k ≤ x̄_k ≤ p_{k+1} δ_k.
+    # Both monomial-secant and concave-fp-secant rows reference these aux
+    # columns, so emitting structural rows once avoids duplicate constraints.
+    for var_idx, pw_intervals in piecewise_var_map.items():
+        # 1) Σ δ_k = 1 (encoded as ≤ 1 and ≥ 1)
+        row = np.zeros(n_total)
+        for delta_col, _xbar_col, _plo, _phi in pw_intervals:
+            row[delta_col] = 1.0
+        _add_row(row, 1.0)
+        _add_row(-row, -1.0)
+        # 2) x = Σ x̄_k  →  x − Σ x̄_k = 0
+        row = np.zeros(n_total)
+        row[var_idx] = 1.0
+        for _delta_col, xbar_col, _plo, _phi in pw_intervals:
+            row[xbar_col] = -1.0
+        _add_row(row, 0.0)
+        _add_row(-row, 0.0)
+        # 3) Per-interval bounds: p_k δ_k ≤ x̄_k ≤ p_{k+1} δ_k
+        for delta_col, xbar_col, p_lo, p_hi in pw_intervals:
+            row = np.zeros(n_total)
+            row[xbar_col] = 1.0
+            row[delta_col] = -p_hi
+            _add_row(row, 0.0)
+            row = np.zeros(n_total)
+            row[xbar_col] = -1.0
+            row[delta_col] = p_lo
+            _add_row(row, 0.0)
 
     # McCormick constraints for each lifted bilinear relation
     for (i, j), w_col in bilinear_relation_map.items():
@@ -1423,6 +1585,85 @@ def build_milp_relaxation(
             row[delta_col] = secant_m
             _add_row(row, intercept + secant_m)
 
+    # ── β-driven piecewise McCormick on bilinear-with-fp ────────────────────
+    # For pairs y = w * z where z = β^p is a fractional-power aux, the standard
+    # bilinear McCormick uses z's GLOBAL bounds, so it stays loose even after w
+    # is heavily partitioned.  When β has a piecewise structure we can derive
+    # per-β-interval tight bounds on z (z ∈ [p_k^p, p_{k+1}^p] when β ∈
+    # [p_k, p_{k+1}]) and add per-interval big-M McCormick on top of the
+    # existing standard or w-piecewise relaxation.  Their intersection is at
+    # least as tight, and is dramatically tighter inside each β cell.
+    for lin_idx, fp_key in terms.bilinear_with_fp:
+        if fp_key not in fractional_power_var_map:
+            continue
+        fp_col = fractional_power_var_map[fp_key]
+        beta_var, p_exp = fp_key
+        beta_var = int(beta_var)
+        p_exp = float(p_exp)
+        pw_intervals = piecewise_var_map.get(beta_var, [])
+        if not pw_intervals:
+            continue
+        pair_key = (min(lin_idx, fp_col), max(lin_idx, fp_col))
+        if pair_key not in bilinear_var_map:
+            continue
+        y_col = bilinear_var_map[pair_key]
+        w_lb, w_ub = [float(v) for v in all_bounds[lin_idx]]
+        z_lb_global, z_ub_global = [float(v) for v in all_bounds[fp_col]]
+        for delta_col, _xbar_col, p_lo, p_hi in pw_intervals:
+            try:
+                z_at_lo = p_lo**p_exp
+                z_at_hi = p_hi**p_exp
+            except (ValueError, OverflowError):
+                continue
+            if not (np.isfinite(z_at_lo) and np.isfinite(z_at_hi)):
+                continue
+            z_lb_k = min(z_at_lo, z_at_hi)
+            z_ub_k = max(z_at_lo, z_at_hi)
+            # Skip degenerate intervals.
+            if z_ub_k - z_lb_k < 1e-12:
+                continue
+            corners = [w_lb * z_lb_k, w_lb * z_ub_k, w_ub * z_lb_k, w_ub * z_ub_k]
+            # Big-M sized to dominate the global y range when δ_k = 0; use the
+            # max global corner so the relaxation is automatically slack on
+            # inactive intervals.
+            global_corners = [
+                w_lb * z_lb_global,
+                w_lb * z_ub_global,
+                w_ub * z_lb_global,
+                w_ub * z_ub_global,
+            ]
+            M_k = _compute_piecewise_big_m(global_corners + corners)
+            # cv1: y ≥ z_lb_k*w + w_lb*z - z_lb_k*w_lb  (relaxed by M when δ=0)
+            #   →  -y + z_lb_k*w + w_lb*z + M*δ_k ≤ z_lb_k*w_lb + M
+            row = np.zeros(n_total)
+            row[y_col] = -1.0
+            row[lin_idx] += z_lb_k
+            row[fp_col] += w_lb
+            row[delta_col] = M_k
+            _add_row(row, z_lb_k * w_lb + M_k)
+            # cv2: y ≥ z_ub_k*w + w_ub*z - z_ub_k*w_ub
+            row = np.zeros(n_total)
+            row[y_col] = -1.0
+            row[lin_idx] += z_ub_k
+            row[fp_col] += w_ub
+            row[delta_col] = M_k
+            _add_row(row, z_ub_k * w_ub + M_k)
+            # cc1: y ≤ z_ub_k*w + w_lb*z - z_ub_k*w_lb
+            #   →  y - z_ub_k*w - w_lb*z + M*δ_k ≤ M - z_ub_k*w_lb
+            row = np.zeros(n_total)
+            row[y_col] = 1.0
+            row[lin_idx] -= z_ub_k
+            row[fp_col] -= w_lb
+            row[delta_col] = M_k
+            _add_row(row, M_k - z_ub_k * w_lb)
+            # cc2: y ≤ z_lb_k*w + w_ub*z - z_lb_k*w_ub
+            row = np.zeros(n_total)
+            row[y_col] = 1.0
+            row[lin_idx] -= z_lb_k
+            row[fp_col] -= w_ub
+            row[delta_col] = M_k
+            _add_row(row, M_k - z_lb_k * w_ub)
+
     # Monomial constraints
     for var_idx, n in terms.monomial:
         lb_i = float(flat_lb[var_idx])
@@ -1553,9 +1794,99 @@ def build_milp_relaxation(
                 intercept = _univariate_value(relax.func_name, pt) - slope * pt
                 _add_upper_line(relax, slope, intercept)
 
+    # ── Fractional-power envelope constraints ──────────────────────────────
+    # For a = x^p with x in [lb, ub], lb ≥ 0:
+    #   - 0 < p < 1 (concave on x ≥ 0):
+    #         secant under-estimator, tangent over-estimators (refined by partition).
+    #   - p > 1 or p < 0 with lb > 0 (convex):
+    #         tangent under-estimators, secant over-estimator.
+    for spec in fractional_power_specs:
+        var_idx = spec["var"]
+        p = spec["p"]
+        a_col = spec["col"]
+        lb_i = spec["lb"]
+        ub_i = spec["ub"]
+        f_lb = spec["f_lb"]
+        f_ub = spec["f_ub"]
+        convexity = spec["convexity"]
+
+        # Tangent points: include partition breakpoints when available so the
+        # relaxation tightens monotonically as AMP refines.
+        if var_idx in disc_state.partitions and len(disc_state.partitions[var_idx]) >= 2:
+            tangent_pts = [float(t) for t in disc_state.partitions[var_idx]]
+        else:
+            tangent_pts = [lb_i, ub_i]
+        # Avoid degenerate tangents at zero when the slope or value is undefined.
+        tangent_pts = [t for t in tangent_pts if t > 0.0 or (t == 0.0 and p > 1.0)]
+        if not tangent_pts:
+            tangent_pts = [max(lb_i, 1e-12), ub_i]
+
+        # Secant slope over [lb, ub].
+        if abs(ub_i - lb_i) > 1e-12:
+            secant_slope = (f_ub - f_lb) / (ub_i - lb_i)
+            secant_intercept = f_lb - secant_slope * lb_i
+        else:
+            secant_slope = 0.0
+            secant_intercept = f_lb
+
+        if convexity == "concave":
+            pw_intervals = piecewise_var_map.get(var_idx, [])
+            if pw_intervals:
+                # Piecewise secant under-estimator: per interval k = [p_k, p_{k+1}],
+                # a ≥ p_k^p + slope_k (x − p_k), where slope_k = (p_{k+1}^p − p_k^p) /
+                # (p_{k+1} − p_k).  Disaggregated form using shared (δ_k, x̄_k):
+                #   −a + Σ_k (slope_k x̄_k + (p_k^p − slope_k p_k) δ_k) ≤ 0.
+                row = np.zeros(n_total)
+                row[a_col] = -1.0
+                for delta_col, xbar_col, p_lo, p_hi in pw_intervals:
+                    if abs(p_hi - p_lo) > 1e-12:
+                        try:
+                            f_plo = p_lo**p
+                            f_phi = p_hi**p
+                        except (ValueError, OverflowError):
+                            continue
+                        if not (np.isfinite(f_plo) and np.isfinite(f_phi)):
+                            continue
+                        slope_k = (f_phi - f_plo) / (p_hi - p_lo)
+                        intercept_k = f_plo - slope_k * p_lo
+                        row[xbar_col] += slope_k
+                        row[delta_col] += intercept_k
+                _add_row(row, 0.0)
+            else:
+                # Global secant under-estimator: a ≥ secant_slope*x + secant_intercept
+                #   →  -a + secant_slope*x ≤ -secant_intercept
+                row = np.zeros(n_total)
+                row[a_col] = -1.0
+                row[var_idx] = secant_slope
+                _add_row(row, -secant_intercept)
+            # Tangent over-estimators: a ≤ p*t^(p-1)*(x-t) + t^p
+            #   →  a - p*t^(p-1)*x ≤ -((p-1)*t^p) ... derivation below.
+            #   t_slope = p*t^(p-1);  t_const = t^p - t_slope*t = (1-p)*t^p
+            for t in tangent_pts:
+                t_slope = p * (t ** (p - 1.0))
+                t_const = (1.0 - p) * (t**p)
+                row = np.zeros(n_total)
+                row[a_col] = 1.0
+                row[var_idx] = -t_slope
+                _add_row(row, t_const)
+        else:  # convex
+            # Tangent under-estimators: a ≥ p*t^(p-1)*(x-t) + t^p
+            for t in tangent_pts:
+                t_slope = p * (t ** (p - 1.0))
+                t_const = (1.0 - p) * (t**p)
+                row = np.zeros(n_total)
+                row[a_col] = -1.0
+                row[var_idx] = t_slope
+                _add_row(row, -t_const)
+            # Secant over-estimator: a ≤ secant_slope*x + secant_intercept
+            row = np.zeros(n_total)
+            row[a_col] = 1.0
+            row[var_idx] = -secant_slope
+            _add_row(row, secant_intercept)
+
     # Model constraints
     for constraint in model._constraints:
-        body = constraint.body  # normalized: body <= 0  (sense is always "<=")
+        body = distribute_products(constraint.body)
         sense = constraint.sense
         try:
             c, const = _linearize_expr(
@@ -1567,6 +1898,7 @@ def build_milp_relaxation(
                 monomial_var_map,
                 univariate_var_map,
                 n_total,
+                fractional_power_var_map=fractional_power_var_map,
             )
             # body ≤ 0  →  c @ z + const ≤ 0  →  c @ z ≤ -const
             if sense == "<=":
@@ -1578,7 +1910,12 @@ def build_milp_relaxation(
         except ValueError as err:
             # Constraint contains terms we can't linearize (e.g. general nonlinear).
             # Omitting it makes the LP feasible region larger → still a valid lower bound.
-            logger.debug("AMP: omitting constraint (cannot linearize): %s", err)
+            _warn_once(
+                "AMP: omitting constraint %s from the MILP relaxation because it cannot "
+                "be linearized safely: %s",
+                constraint.name or "<unnamed>",
+                err,
+            )
 
     # ── OA tangent cuts from NLP incumbent ──────────────────────────────────
     # These are outer-approximation linearizations of the original nonlinear
@@ -1592,7 +1929,7 @@ def build_milp_relaxation(
 
     # ── Objective ────────────────────────────────────────────────────────────
     assert model._objective is not None
-    obj_expr = model._objective.expression
+    obj_expr = distribute_products(model._objective.expression)
     try:
         c_obj, const_obj = _linearize_expr(
             obj_expr,
@@ -1603,11 +1940,20 @@ def build_milp_relaxation(
             monomial_var_map,
             univariate_var_map,
             n_total,
+            fractional_power_var_map=fractional_power_var_map,
         )
         objective_bound_valid = True
-    except ValueError:
+    except ValueError as err:
         # Keep a feasibility objective so the relaxation can still produce a point,
-        # but do not treat the resulting LP value as a sound global bound.
+        # but do not treat the LP value as a sound global bound. Warn loudly:
+        # without an objective, AMP's lower-bound machinery is disabled and the
+        # solver can only ever return "feasible", never "optimal".
+        _warn_once(
+            "MILP relaxation could not linearize the objective (%s); falling back to "
+            "a feasibility objective. AMP will not be able to produce a lower bound "
+            "or certify optimality on this problem.",
+            err,
+        )
         c_obj = np.zeros(n_total)
         const_obj = 0.0
         objective_bound_valid = False

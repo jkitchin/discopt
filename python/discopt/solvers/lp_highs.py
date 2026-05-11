@@ -202,12 +202,15 @@ def solve_lp(
         x = np.array(sol.col_value, dtype=np.float64)
         _, obj = h.getInfoValue("objective_function_value")
         dual = np.array(sol.row_dual, dtype=np.float64)
+        col_dual_raw = np.array(getattr(sol, "col_dual", []), dtype=np.float64)
+        col_dual = col_dual_raw if col_dual_raw.size else None
         basis = h.getBasis()
         return LPResult(
             status=status,
             x=x,
             objective=obj,
             dual_values=dual,
+            reduced_costs=col_dual,
             basis=basis,
             iterations=int(iters),
             wall_time=float(wall_time),

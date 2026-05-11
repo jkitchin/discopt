@@ -227,12 +227,20 @@ def solve_nlp(
     multipliers = info.get("mult_g", None)
     if multipliers is not None and len(multipliers) == 0:
         multipliers = None
+    mult_x_L = info.get("mult_x_L", None)
+    if mult_x_L is not None and len(mult_x_L) == 0:
+        mult_x_L = None
+    mult_x_U = info.get("mult_x_U", None)
+    if mult_x_U is not None and len(mult_x_U) == 0:
+        mult_x_U = None
 
     return NLPResult(
         status=status,
         x=np.asarray(x),
         objective=float(info["obj_val"]),
         multipliers=np.asarray(multipliers) if multipliers is not None else None,
+        bound_multipliers_lower=np.asarray(mult_x_L) if mult_x_L is not None else None,
+        bound_multipliers_upper=np.asarray(mult_x_U) if mult_x_U is not None else None,
         iterations=0,  # Ipopt doesn't expose iteration count via this API
         wall_time=wall_time,
     )

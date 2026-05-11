@@ -1517,6 +1517,113 @@ def _prune_oa_cuts(oa_cuts: list, max_cuts: int = _DEFAULT_MAX_OA_CUTS) -> None:
         del oa_cuts[:overflow]
 
 
+def _run_cutoff_obbt(
+    *,
+    model: Model,
+    terms,
+    disc_state,
+    oa_cuts: list,
+    convhull_mode: str,
+    UB: float,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+    part_vars: list,
+    part_lbs: list,
+    part_ubs: list,
+    n_orig: int,
+    obbt_time_limit: float,
+    partition_scaling_factor: float,
+    disc_abs_width_tol: float,
+    n_init_partitions: int,
+    deadline: float,
+    iteration: int,
+    from_min_space: Callable[[float], float],
+) -> tuple[np.ndarray, np.ndarray, list, list, list]:
+    """Run cutoff-OBBT against the current MILP relaxation and apply tightenings.
+
+    Uses the current ``disc_state`` and accumulated ``oa_cuts`` so the LP
+    relaxation reflects the latest envelope strength.  Returns possibly
+    updated (flat_lb, flat_ub, part_vars, part_lbs, part_ubs).
+    """
+    try:
+        from discopt._jax.milp_relaxation import build_milp_relaxation
+        from discopt._jax.obbt import run_obbt_on_relaxation
+
+        cutoff_relax, _ = build_milp_relaxation(
+            model,
+            terms,
+            disc_state,
+            None,
+            oa_cuts=oa_cuts if oa_cuts else None,
+            convhull_formulation=convhull_mode,
+        )
+        candidates = sorted(set(part_vars) | set(terms.partition_candidates))
+        if not candidates:
+            return flat_lb, flat_ub, part_vars, part_lbs, part_ubs
+        per_lp = max(0.05, min(1.0, obbt_time_limit / max(1, 2 * len(candidates))))
+        remaining = max(1.0, min(obbt_time_limit, deadline - time.perf_counter()))
+        result = run_obbt_on_relaxation(
+            cutoff_relax,
+            n_orig=n_orig,
+            candidate_idxs=candidates,
+            time_limit_per_lp=per_lp,
+            incumbent_cutoff=float(UB),
+            deadline=time.perf_counter() + remaining,
+        )
+        if result.n_tightened == 0:
+            logger.info(
+                "AMP cutoff OBBT @ iter %d: no tightening (%d LPs, %.2fs, cutoff=%.6g)",
+                iteration,
+                result.n_lp_solves,
+                result.total_lp_time,
+                from_min_space(UB),
+            )
+            return flat_lb, flat_ub, part_vars, part_lbs, part_ubs
+
+        tight_lb = np.maximum(flat_lb, result.tightened_lb)
+        tight_ub = np.minimum(flat_ub, result.tightened_ub)
+        bad = tight_lb > tight_ub
+        if np.any(bad):
+            mid = 0.5 * (tight_lb[bad] + tight_ub[bad])
+            tight_lb = tight_lb.copy()
+            tight_ub = tight_ub.copy()
+            tight_lb[bad] = mid
+            tight_ub[bad] = mid
+        _apply_flat_bounds_to_model(model, tight_lb, tight_ub)
+        flat_lb, flat_ub = tight_lb, tight_ub
+        # Drop partition vars whose width has collapsed.
+        part_vars = [
+            i for i in part_vars if float(flat_ub[i]) - float(flat_lb[i]) > disc_abs_width_tol
+        ]
+        part_lbs = [float(flat_lb[i]) for i in part_vars]
+        part_ubs = [float(flat_ub[i]) for i in part_vars]
+        # Clip existing breakpoints into the new tighter box and re-anchor
+        # endpoints to the OBBT bounds.  Preserves prior refinement effort.
+        for k_pv, v_idx in enumerate(part_vars):
+            pts = disc_state.partitions.get(v_idx)
+            new_lo = float(part_lbs[k_pv])
+            new_hi = float(part_ubs[k_pv])
+            if pts is None or len(pts) < 2:
+                disc_state.partitions[v_idx] = np.linspace(new_lo, new_hi, n_init_partitions + 1)
+                continue
+            clipped = np.clip(pts, new_lo, new_hi)
+            merged = np.unique(np.concatenate([[new_lo], clipped, [new_hi]]))
+            disc_state.partitions[v_idx] = np.sort(merged)
+        logger.info(
+            "AMP cutoff OBBT @ iter %d: %d/%d bounds tightened in %d LPs (%.2fs, cutoff=%.6g)",
+            iteration,
+            result.n_tightened,
+            len(candidates),
+            result.n_lp_solves,
+            result.total_lp_time,
+            from_min_space(UB),
+        )
+        return flat_lb, flat_ub, part_vars, part_lbs, part_ubs
+    except Exception as exc:
+        logger.debug("AMP cutoff OBBT skipped: %s", exc)
+        return flat_lb, flat_ub, part_vars, part_lbs, part_ubs
+
+
 # ---------------------------------------------------------------------------
 # Main solver
 # ---------------------------------------------------------------------------
@@ -1550,6 +1657,9 @@ def solve_amp(
     initial_point: Optional[np.ndarray] = None,
     use_start_as_incumbent: bool = False,
     skip_convex_check: bool = False,
+    obbt_at_root: bool = False,
+    obbt_with_cutoff: bool = False,
+    obbt_time_limit: float = 30.0,
 ) -> SolveResult:
     """Solve MINLP globally using Adaptive Multivariate Partitioning (AMP).
 
@@ -1631,6 +1741,23 @@ def solve_amp(
     skip_convex_check : bool
         If True, force AMP even when the model is detected as a pure
         continuous convex problem.
+    obbt_at_root : bool, default False
+        Run optimization-based bound tightening on the LP relaxation of the
+        initial MILP envelope before iteration 1.  Tightens variable bounds
+        used by every subsequent McCormick / piecewise envelope.  Default is
+        off: without an incumbent cutoff, root OBBT can sometimes redirect
+        adaptive partition refinement toward a worse fixed point.
+    obbt_with_cutoff : bool, default False
+        After the first feasible incumbent is found, re-run OBBT with the
+        cutoff ``c^T x <= UB`` to exclude regions that cannot improve on the
+        incumbent.  This is the standard form used by BARON / Couenne / Alpine.
+        Off by default because OBBT can perturb the LP-optimal vertex enough
+        to redirect adaptive partition refinement toward a worse fixed point
+        on problems where variable bounds are already reasonably tight; turn
+        on for problems with loose initial variable bounds.
+    obbt_time_limit : float, default 30.0
+        Total wall-clock budget for OBBT calls (in seconds).  Per-LP budget is
+        ``min(1.0, obbt_time_limit / max(1, 2*n_candidates))``.
 
     Returns
     -------
@@ -1875,6 +2002,80 @@ def solve_amp(
         partition_label = "custom hook" if disc_var_pick_hook is not None else partition_mode
         logger.info("AMP: partitioning %d variables via %s", len(part_vars), partition_label)
 
+    # ── Root OBBT on the LP relaxation of the initial MILP envelope ─────────
+    # Tightens variable bounds used by every downstream McCormick / piecewise
+    # envelope.  Uses an empty-partition relaxation (cheapest LP) and only
+    # tightens variables whose width is large enough to plausibly matter.
+    if obbt_at_root and apply_partitioning:
+        try:
+            from discopt._jax.discretization import DiscretizationState
+            from discopt._jax.milp_relaxation import build_milp_relaxation
+            from discopt._jax.obbt import run_obbt_on_relaxation
+
+            _empty_disc = DiscretizationState(
+                scaling_factor=partition_scaling_factor,
+                abs_width_tol=disc_abs_width_tol,
+            )
+            _root_relax, _ = build_milp_relaxation(
+                model,
+                terms,
+                _empty_disc,
+                None,
+                oa_cuts=None,
+                convhull_formulation=convhull_mode,
+            )
+            # Tighten only the variables that appear in nonlinear terms — these
+            # drive every envelope's tightness.  Tightening linear-only vars
+            # rarely helps the relaxation and just costs LPs.
+            _candidates: list[int] = sorted(set(part_vars) | set(terms.partition_candidates))
+            _per_lp = max(0.05, min(1.0, obbt_time_limit / max(1, 2 * len(_candidates))))
+            _obbt = run_obbt_on_relaxation(
+                _root_relax,
+                n_orig=n_orig,
+                candidate_idxs=_candidates,
+                time_limit_per_lp=_per_lp,
+                deadline=t_start + obbt_time_limit,
+            )
+            if _obbt.n_tightened > 0:
+                # Apply tightened bounds to the model and to flat_lb / flat_ub.
+                tight_lb = np.maximum(flat_lb, _obbt.tightened_lb)
+                tight_ub = np.minimum(flat_ub, _obbt.tightened_ub)
+                # Soundness: don't cross — a numerical glitch could in principle
+                # tighten lb past ub by a hair; clamp to avoid infeasibility.
+                bad = tight_lb > tight_ub
+                if np.any(bad):
+                    mid = 0.5 * (tight_lb[bad] + tight_ub[bad])
+                    tight_lb = tight_lb.copy()
+                    tight_ub = tight_ub.copy()
+                    tight_lb[bad] = mid
+                    tight_ub[bad] = mid
+                _apply_flat_bounds_to_model(model, tight_lb, tight_ub)
+                flat_lb, flat_ub = tight_lb, tight_ub
+                logger.info(
+                    "AMP root OBBT: %d/%d bounds tightened in %d LPs (%.2fs)",
+                    _obbt.n_tightened,
+                    len(_candidates),
+                    _obbt.n_lp_solves,
+                    _obbt.total_lp_time,
+                )
+            else:
+                logger.info(
+                    "AMP root OBBT: no tighter bounds found (%d LPs, %.2fs)",
+                    _obbt.n_lp_solves,
+                    _obbt.total_lp_time,
+                )
+        except Exception as _obbt_err:
+            logger.debug("AMP root OBBT skipped: %s", _obbt_err)
+
+    # OBBT may have collapsed some candidate widths to ~0 (e.g. demand flows
+    # whose bound is implied by an equality).  Drop those from part_vars so
+    # initialize_partitions never sees a degenerate interval — partition
+    # refinement on a width-0 variable cannot tighten anything.
+    if part_vars:
+        part_vars = [
+            i for i in part_vars if float(flat_ub[i]) - float(flat_lb[i]) > disc_abs_width_tol
+        ]
+
     # ── Initialize partitions ────────────────────────────────────────────────
     if part_vars:
         part_lbs = [float(flat_lb[i]) for i in part_vars]
@@ -1920,6 +2121,9 @@ def solve_amp(
     oa_cuts: list = []  # accumulated OA linearizations from NLP incumbents
     mip_count = 0
     termination_reason = "iteration_limit"
+    _cutoff_obbt_done = False
+    _last_obbt_iter = 0
+    _obbt_period = 5
 
     for iteration in range(1, max_iter + 1):
         elapsed = time.perf_counter() - t_start
@@ -2087,6 +2291,68 @@ def solve_amp(
                         _prune_oa_cuts(oa_cuts)
                 except Exception as _oa_err:
                     logger.debug("AMP: OA cut computation failed: %s", _oa_err)
+
+                # ── Cutoff OBBT (first incumbent) ────────────────────────────
+                # Re-run OBBT with c^T x <= UB to exclude regions that cannot
+                # improve on the new incumbent.  Uses the current disc_state
+                # so envelopes are tighter than the empty-partition LP.
+                if obbt_with_cutoff and not _cutoff_obbt_done:
+                    _cutoff_obbt_done = True
+                    flat_lb, flat_ub, part_vars, part_lbs, part_ubs = _run_cutoff_obbt(
+                        model=model,
+                        terms=terms,
+                        disc_state=disc_state,
+                        oa_cuts=oa_cuts,
+                        convhull_mode=convhull_mode,
+                        UB=UB,
+                        flat_lb=flat_lb,
+                        flat_ub=flat_ub,
+                        part_vars=part_vars,
+                        part_lbs=part_lbs,
+                        part_ubs=part_ubs,
+                        n_orig=n_orig,
+                        obbt_time_limit=obbt_time_limit,
+                        partition_scaling_factor=partition_scaling_factor,
+                        disc_abs_width_tol=disc_abs_width_tol,
+                        n_init_partitions=n_init_partitions,
+                        deadline=deadline,
+                        iteration=iteration,
+                        from_min_space=_from_minimization_space,
+                    )
+                    _last_obbt_iter = iteration
+
+        # ── Periodic cutoff OBBT ─────────────────────────────────────────────
+        # After the first incumbent OBBT, re-run periodically as partitioning
+        # refines: tighter envelopes can produce strictly better bounds even
+        # without a new incumbent.
+        if (
+            obbt_with_cutoff
+            and _cutoff_obbt_done
+            and UB < np.inf
+            and iteration - _last_obbt_iter >= _obbt_period
+        ):
+            flat_lb, flat_ub, part_vars, part_lbs, part_ubs = _run_cutoff_obbt(
+                model=model,
+                terms=terms,
+                disc_state=disc_state,
+                oa_cuts=oa_cuts,
+                convhull_mode=convhull_mode,
+                UB=UB,
+                flat_lb=flat_lb,
+                flat_ub=flat_ub,
+                part_vars=part_vars,
+                part_lbs=part_lbs,
+                part_ubs=part_ubs,
+                n_orig=n_orig,
+                obbt_time_limit=obbt_time_limit,
+                partition_scaling_factor=partition_scaling_factor,
+                disc_abs_width_tol=disc_abs_width_tol,
+                n_init_partitions=n_init_partitions,
+                deadline=deadline,
+                iteration=iteration,
+                from_min_space=_from_minimization_space,
+            )
+            _last_obbt_iter = iteration
 
         # ── Step 3: Gap check ────────────────────────────────────────────────
         if iteration_callback is not None:

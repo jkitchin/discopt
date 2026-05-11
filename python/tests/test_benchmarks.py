@@ -9,6 +9,7 @@ import json
 import math
 import tempfile
 
+import pytest
 from discopt.benchmarks.metrics import (
     BatchMetrics,
     compute_batch_metrics,
@@ -260,6 +261,7 @@ class TestBenchmarkRunner:
             assert isinstance(model, Model)
             assert isinstance(name, str)
 
+    @pytest.mark.slow
     def test_run_smoke_suite(self):
         config = BenchmarkConfig(suite="smoke", time_limit=30.0)
         runner = BenchmarkRunner(config)

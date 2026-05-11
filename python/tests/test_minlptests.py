@@ -27,6 +27,7 @@ from typing import Callable
 import discopt.modeling as dm
 import pytest
 from discopt.modeling.core import Model
+from discopt.validation.examiner import assert_examined
 
 # ── Failure tracking ─────────────────────────────────────────────────────────
 
@@ -1649,6 +1650,7 @@ class TestMINLPTestsNLPCvx:
         model = instance.build_fn()
         result = model.solve(time_limit=60.0, gap_tolerance=1e-6)
         assert_optimal(result, instance.expected_obj, instance.problem_id)
+        assert_examined(result, model, instance.problem_id)
         if instance.is_convex:
             assert result.convex_fast_path is True, (
                 f"[{instance.problem_id}] Expected discopt convex fast path "
@@ -1667,6 +1669,7 @@ class TestMINLPTestsNLP:
         model = instance.build_fn()
         result = model.solve(time_limit=120.0, gap_tolerance=1e-6)
         assert_optimal(result, instance.expected_obj, instance.problem_id)
+        assert_examined(result, model, instance.problem_id)
 
 
 @pytest.mark.minlptests
@@ -1680,6 +1683,7 @@ class TestMINLPTestsMI:
         model = instance.build_fn()
         result = model.solve(time_limit=120.0, gap_tolerance=1e-6)
         assert_optimal(result, instance.expected_obj, instance.problem_id)
+        assert_examined(result, model, instance.problem_id)
 
 
 @pytest.mark.minlptests

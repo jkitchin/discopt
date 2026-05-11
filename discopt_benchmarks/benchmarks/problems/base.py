@@ -100,6 +100,7 @@ def _ensure_loaded():
     _LOADED = True
     import benchmarks.problems.global_opt  # noqa: F401
     import benchmarks.problems.lp_problems  # noqa: F401
+    import benchmarks.problems.m1_regression  # noqa: F401
     import benchmarks.problems.milp_problems  # noqa: F401
     import benchmarks.problems.minlp_problems  # noqa: F401
     import benchmarks.problems.minlptests_problems  # noqa: F401

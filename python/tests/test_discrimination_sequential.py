@@ -21,6 +21,11 @@ from discopt.doe import (
 )
 from discopt.estimate import Experiment, ExperimentModel
 
+# Each sequential-discrimination round runs a real estimation + DOE solve;
+# the suite is a research feature exercising the full discrimination loop.
+# Keep on the nightly slow lane.
+pytestmark = pytest.mark.slow
+
 # ─────────────────────────────────────────────────────────────────────
 # Stateful experiments: first-order vs second-order kinetics.
 # Both share the design inputs (t, C0) used by the proposed design at

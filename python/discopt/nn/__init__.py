@@ -24,20 +24,32 @@ Example
 from discopt.nn.bounds import LayerBounds, propagate_bounds
 from discopt.nn.formulations.base import NNFormulation, TreeFormulation
 from discopt.nn.network import Activation, DenseLayer, NetworkDefinition
+from discopt.nn.presolve import (
+    DeadReluLayer,
+    NNPresolvePass,
+    NNPresolveResult,
+    detect_dead_relus,
+    tighten_network,
+)
 from discopt.nn.scaling import OffsetScaling
 from discopt.nn.tree import DecisionTree, TreeEnsembleDefinition
 
 __all__ = [
     "Activation",
+    "DeadReluLayer",
     "DecisionTree",
     "DenseLayer",
     "LayerBounds",
     "NNFormulation",
+    "NNPresolvePass",
+    "NNPresolveResult",
     "NetworkDefinition",
     "OffsetScaling",
     "TreeEnsembleDefinition",
     "TreeFormulation",
+    "detect_dead_relus",
     "propagate_bounds",
+    "tighten_network",
 ]
 
 

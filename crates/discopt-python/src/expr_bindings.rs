@@ -103,6 +103,49 @@ impl PyModelRepr {
         self.inner.variables[index].ub.clone()
     }
 
+    /// Tighten variable block `block_idx`'s element-wise bounds by
+    /// intersection with the supplied `lb`/`ub` vectors. Element `k`
+    /// of the stored block satisfies
+    ///     `new_lb[k] = max(stored_lb[k], lb[k])`
+    ///     `new_ub[k] = min(stored_ub[k], ub[k])`.
+    /// Returns the number of endpoint updates that strictly tightened.
+    /// Used by the A3 Rust↔Python presolve handshake.
+    fn tighten_var_bounds(
+        &mut self,
+        block_idx: usize,
+        lb: Vec<f64>,
+        ub: Vec<f64>,
+    ) -> PyResult<usize> {
+        if block_idx >= self.inner.variables.len() {
+            return Err(pyo3::exceptions::PyIndexError::new_err(format!(
+                "block_idx {} out of range (n_blocks = {})",
+                block_idx,
+                self.inner.variables.len()
+            )));
+        }
+        let v = &mut self.inner.variables[block_idx];
+        if lb.len() != v.lb.len() || ub.len() != v.ub.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "bound length mismatch: block has {} elements, got lb={} ub={}",
+                v.lb.len(),
+                lb.len(),
+                ub.len()
+            )));
+        }
+        let mut count: usize = 0;
+        for i in 0..v.lb.len() {
+            if lb[i] > v.lb[i] + 1e-12 {
+                v.lb[i] = lb[i];
+                count += 1;
+            }
+            if ub[i] < v.ub[i] - 1e-12 {
+                v.ub[i] = ub[i];
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
     /// Is the objective linear?
     fn is_objective_linear(&self) -> bool {
         self.inner.arena.is_linear(self.inner.objective)
@@ -337,6 +380,44 @@ impl PyModelRepr {
         Ok((lb_arr.into_any().unbind(), ub_arr.into_any().unbind()))
     }
 
+    /// Eliminate continuous scalar variables uniquely determined by a
+    /// singleton equality constraint (M10 of #51).
+    ///
+    /// Returns a new `PyModelRepr` plus a stats dict with keys
+    /// `variables_fixed`, `constraints_removed`, `candidates_examined`.
+    fn eliminate_variables(&self, py: Python<'_>) -> PyResult<(PyModelRepr, PyObject)> {
+        use discopt_core::presolve::eliminate::eliminate_variables;
+        let (new_model, stats) = eliminate_variables(&self.inner);
+        let dict = PyDict::new(py);
+        dict.set_item("variables_fixed", stats.variables_fixed)?;
+        dict.set_item("constraints_removed", stats.constraints_removed)?;
+        dict.set_item("candidates_examined", stats.candidates_examined)?;
+        Ok((PyModelRepr { inner: new_model }, dict.into()))
+    }
+
+    /// Reformulate polynomial monomials of degree > 2 into bilinear
+    /// auxiliary products (M4 of #51), and derive McCormick-style aux
+    /// variable bounds from forward-interval propagation (M5).
+    ///
+    /// Returns a new `PyModelRepr` plus a stats dict with keys
+    /// `constraints_rewritten`, `constraints_skipped`,
+    /// `aux_variables_introduced`, `aux_constraints_introduced`,
+    /// `aux_bounds_derived`.
+    fn reformulate_polynomial(&self, py: Python<'_>) -> PyResult<(PyModelRepr, PyObject)> {
+        use discopt_core::presolve::polynomial::reformulate_polynomial;
+        let (new_model, stats) = reformulate_polynomial(&self.inner);
+        let dict = PyDict::new(py);
+        dict.set_item("constraints_rewritten", stats.constraints_rewritten)?;
+        dict.set_item("constraints_skipped", stats.constraints_skipped)?;
+        dict.set_item("aux_variables_introduced", stats.aux_variables_introduced)?;
+        dict.set_item(
+            "aux_constraints_introduced",
+            stats.aux_constraints_introduced,
+        )?;
+        dict.set_item("aux_bounds_derived", stats.aux_bounds_derived)?;
+        Ok((PyModelRepr { inner: new_model }, dict.into()))
+    }
+
     /// Run FBBT with an optional incumbent cutoff bound.
     ///
     /// When `incumbent_bound` is provided, an additional synthetic constraint
@@ -382,6 +463,312 @@ impl PyModelRepr {
         dict.set_item("term_incidence", incidence)?;
 
         Ok(dict.into())
+    }
+
+    /// Detect candidate variable permutation orbits (item D4 of issue #51).
+    ///
+    /// Returns a list of dicts, each `{"vars": [int, ...]}` listing
+    /// variable-block indices that are exchangeable under the model's
+    /// constraint and objective structure. Sound for fully-linear
+    /// models; reported as candidates for nonlinear models.
+    ///
+    /// Returns an empty list if the objective or any constraint is
+    /// not expressible as a polynomial (the kernel abstains rather
+    /// than risk an unsound orbit emission).
+    fn detect_symmetries(&self, py: Python<'_>) -> PyResult<PyObject> {
+        use discopt_core::presolve::detect_symmetries;
+        let (orbits, stats) = detect_symmetries(&self.inner);
+        let result = PyDict::new(py);
+        let orbit_list = pyo3::types::PyList::empty(py);
+        for orb in &orbits {
+            let d = PyDict::new(py);
+            d.set_item("vars", orb.vars.clone())?;
+            orbit_list.append(d)?;
+        }
+        result.set_item("orbits", orbit_list)?;
+        result.set_item("variables_examined", stats.variables_examined)?;
+        result.set_item("orbits_found", stats.orbits_found)?;
+        result.set_item("total_orbit_members", stats.total_orbit_members)?;
+        Ok(result.into_any().unbind())
+    }
+
+    /// Run persistent in-tree FBBT at a B&B node (item B3 of issue #51).
+    ///
+    /// `node_lb` / `node_ub` override the model's declared variable
+    /// bounds with the node's branched-on bounds. The pass is gated by
+    /// `depth_stride`: it runs only when `node_depth % depth_stride == 0`,
+    /// or skips and echoes the input bounds back unchanged. Setting
+    /// `depth_stride = 0` disables the pass entirely.
+    ///
+    /// Returns a dict with keys:
+    /// - `lb`, `ub`: numpy arrays of post-tightening per-variable bounds.
+    /// - `bounds_tightened`: int — number of half-bounds that tightened.
+    /// - `infeasible`: bool — `True` if the kernel detected emptiness.
+    /// - `ran`: bool — `True` if the schedule actually fired at this depth.
+    #[pyo3(signature = (
+        node_lb,
+        node_ub,
+        node_depth=0,
+        depth_stride=4,
+        max_iter=8,
+        tol=1e-6,
+        incumbent=None,
+    ))]
+    fn in_tree_presolve(
+        &self,
+        py: Python<'_>,
+        node_lb: Vec<f64>,
+        node_ub: Vec<f64>,
+        node_depth: usize,
+        depth_stride: u32,
+        max_iter: usize,
+        tol: f64,
+        incumbent: Option<f64>,
+    ) -> PyResult<PyObject> {
+        use discopt_core::bnb::{run_in_tree_presolve, InTreePresolveOptions};
+        if node_lb.len() != self.inner.variables.len()
+            || node_ub.len() != self.inner.variables.len()
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "node_lb/node_ub length must match number of variable blocks",
+            ));
+        }
+        let opts = InTreePresolveOptions {
+            depth_stride,
+            max_iter,
+            tol,
+        };
+        let delta = run_in_tree_presolve(
+            &self.inner,
+            &node_lb,
+            &node_ub,
+            node_depth,
+            incumbent,
+            &opts,
+        );
+        let out = PyDict::new(py);
+        out.set_item(
+            "lb",
+            numpy::PyArray1::from_vec(py, delta.lb).into_any().unbind(),
+        )?;
+        out.set_item(
+            "ub",
+            numpy::PyArray1::from_vec(py, delta.ub).into_any().unbind(),
+        )?;
+        out.set_item("bounds_tightened", delta.bounds_tightened)?;
+        out.set_item("infeasible", delta.infeasible)?;
+        out.set_item("ran", delta.ran)?;
+        Ok(out.into_any().unbind())
+    }
+
+    /// Run the presolve orchestrator (item A1 of issue #53) to a fixed
+    /// point and return the tightened model plus a structured stats dict.
+    ///
+    /// `passes`, when given, is a list of pass identifiers controlling
+    /// which kernels run and in what order. Recognised identifiers:
+    /// `"eliminate"`, `"aggregate"`, `"redundancy"`,
+    /// `"polynomial_reform"`, `"simplify"`, `"implied_bounds"`,
+    /// `"fbbt"`, `"fbbt_fixed_point"`, `"probing"`, `"scaling"`,
+    /// `"cliques"`, `"reduced_cost_fixing"`.
+    ///
+    /// `reduced_cost_info`, when given, is a dict with keys
+    /// `lp_value: float`, `cutoff: float`, `reduced_costs: list[float]`
+    /// (one per variable block). Required for the
+    /// `"reduced_cost_fixing"` pass to do anything; otherwise that pass
+    /// is a no-op.
+    /// Default order matches the historical
+    /// `_jax/presolve_pipeline.py:run_root_presolve` behaviour:
+    /// `["eliminate", "simplify", "fbbt", "probing"]`. Polynomial
+    /// reformulation is opt-in (it changes variable indexing).
+    ///
+    /// `max_iterations` caps the number of full sweeps over the pass
+    /// list. `time_limit_ms` and `work_unit_budget` cap wall time and
+    /// pass-defined work units; 0 disables a budget.
+    ///
+    /// Returns `(new_repr, stats)` where `stats` carries:
+    /// - `terminated_by`: one of `"NoProgress"`, `"IterationCap"`,
+    ///   `"TimeBudget"`, `"WorkBudget"`, `"Infeasible"`.
+    /// - `iterations`: number of full sweeps run.
+    /// - `bounds_lo`, `bounds_hi`: numpy arrays of final tightened
+    ///   per-block variable bounds.
+    /// - `deltas`: list of per-pass dicts (chronological).
+    #[pyo3(signature = (
+        passes=None,
+        max_iterations=16,
+        time_limit_ms=0,
+        work_unit_budget=0,
+        fbbt_max_iter=20,
+        fbbt_tol=1e-8,
+        reduced_cost_info=None,
+    ))]
+    fn presolve(
+        &self,
+        py: Python<'_>,
+        passes: Option<Vec<String>>,
+        max_iterations: u32,
+        time_limit_ms: u64,
+        work_unit_budget: u64,
+        fbbt_max_iter: usize,
+        fbbt_tol: f64,
+        reduced_cost_info: Option<Bound<'_, PyDict>>,
+    ) -> PyResult<(PyModelRepr, PyObject)> {
+        use discopt_core::presolve::{
+            run_orchestrator, AggregatePass, CliquePass, CoefficientStrengtheningPass,
+            EliminatePass, FactorableElimPass, FbbtFixedPointPass, FbbtPass, ImpliedBoundsPass,
+            OrchestratorOptions, PolynomialReformPass, PresolvePass, ProbingPass,
+            ReducedCostFixingPass, ReducedCostInfo, ReductionConstraintsPass, RedundancyPass,
+            ScalingPass, SimplifyPass,
+        };
+
+        // Parse the optional reduced-cost-fixing info dict once, up
+        // front, so that every "reduced_cost_fixing" pass instance
+        // shares the same input.
+        let rc_info: Option<ReducedCostInfo> = match reduced_cost_info {
+            Some(d) => {
+                let lp_value: f64 = d
+                    .get_item("lp_value")?
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyKeyError::new_err(
+                            "reduced_cost_info missing 'lp_value'",
+                        )
+                    })?
+                    .extract()?;
+                let cutoff: f64 = d
+                    .get_item("cutoff")?
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyKeyError::new_err("reduced_cost_info missing 'cutoff'")
+                    })?
+                    .extract()?;
+                let reduced_costs: Vec<f64> = d
+                    .get_item("reduced_costs")?
+                    .ok_or_else(|| {
+                        pyo3::exceptions::PyKeyError::new_err(
+                            "reduced_cost_info missing 'reduced_costs'",
+                        )
+                    })?
+                    .extract()?;
+                Some(ReducedCostInfo {
+                    lp_value,
+                    cutoff,
+                    reduced_costs,
+                })
+            }
+            None => None,
+        };
+
+        let pass_names: Vec<String> = passes.unwrap_or_else(|| {
+            vec![
+                "eliminate".to_string(),
+                "factorable_elim".to_string(),
+                "simplify".to_string(),
+                "coefficient_strengthening".to_string(),
+                "fbbt".to_string(),
+                "probing".to_string(),
+            ]
+        });
+
+        let mut pass_objs: Vec<Box<dyn PresolvePass>> = Vec::with_capacity(pass_names.len());
+        for name in &pass_names {
+            let p: Box<dyn PresolvePass> = match name.as_str() {
+                "eliminate" => Box::new(EliminatePass::default()),
+                "aggregate" => Box::new(AggregatePass),
+                "redundancy" => Box::new(RedundancyPass),
+                "implied_bounds" => Box::new(ImpliedBoundsPass),
+                "polynomial_reform" => Box::new(PolynomialReformPass::default()),
+                "simplify" => Box::new(SimplifyPass::default()),
+                "fbbt" => Box::new(FbbtPass {
+                    max_iter: fbbt_max_iter,
+                    tol: fbbt_tol,
+                    incumbent_bound: None,
+                }),
+                "fbbt_fixed_point" => Box::new(FbbtFixedPointPass {
+                    tol: fbbt_tol,
+                    max_visits: 0,
+                }),
+                "scaling" => Box::new(ScalingPass),
+                "cliques" => Box::new(CliquePass),
+                "reduced_cost_fixing" => Box::new(ReducedCostFixingPass {
+                    info: rc_info.clone(),
+                }),
+                "reduction_constraints" => Box::new(ReductionConstraintsPass),
+                "coefficient_strengthening" => Box::new(CoefficientStrengtheningPass),
+                "factorable_elim" => Box::new(FactorableElimPass),
+                "probing" => Box::new(ProbingPass::default()),
+                other => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "unknown presolve pass: {}",
+                        other
+                    )));
+                }
+            };
+            pass_objs.push(p);
+        }
+
+        let opts = OrchestratorOptions {
+            max_iterations,
+            time_limit_ms,
+            work_unit_budget,
+            pass_order: pass_objs,
+        };
+        let result = run_orchestrator(self.inner.clone(), opts);
+
+        // Build stats dict.
+        let stats = PyDict::new(py);
+        stats.set_item("terminated_by", format!("{:?}", result.terminated_by))?;
+        stats.set_item("iterations", result.iterations)?;
+        let lbs: Vec<f64> = result.bounds.iter().map(|b| b.lo).collect();
+        let ubs: Vec<f64> = result.bounds.iter().map(|b| b.hi).collect();
+        let lb_arr = numpy::PyArray1::from_vec(py, lbs);
+        let ub_arr = numpy::PyArray1::from_vec(py, ubs);
+        stats.set_item("bounds_lo", lb_arr.into_any().unbind())?;
+        stats.set_item("bounds_hi", ub_arr.into_any().unbind())?;
+
+        let deltas_list = pyo3::types::PyList::empty(py);
+        for d in &result.deltas {
+            let dd = PyDict::new(py);
+            dd.set_item("pass_name", d.pass_name)?;
+            dd.set_item("pass_iter", d.pass_iter)?;
+            dd.set_item("bounds_tightened", d.bounds_tightened)?;
+            dd.set_item("aux_vars_introduced", d.aux_vars_introduced)?;
+            dd.set_item("aux_constraints_introduced", d.aux_constraints_introduced)?;
+            dd.set_item("constraints_removed", d.constraints_removed.clone())?;
+            dd.set_item("constraints_rewritten", d.constraints_rewritten.clone())?;
+            dd.set_item("vars_fixed", d.vars_fixed.clone())?;
+            let aggs = pyo3::types::PyList::empty(py);
+            for a in &d.vars_aggregated {
+                let ad = PyDict::new(py);
+                ad.set_item("target", a.target)?;
+                ad.set_item("sources", a.sources.clone())?;
+                ad.set_item("coeffs", a.coeffs.clone())?;
+                ad.set_item("constant", a.constant)?;
+                aggs.append(ad)?;
+            }
+            dd.set_item("vars_aggregated", aggs)?;
+            if let Some(rs) = &d.row_scales {
+                dd.set_item("row_scales", rs.clone())?;
+            }
+            if let Some(cs) = &d.col_scales {
+                dd.set_item("col_scales", cs.clone())?;
+            }
+            if !d.structure.cliques.is_empty() {
+                let edges: Vec<(usize, usize)> = d.structure.cliques.clone();
+                dd.set_item("cliques", edges)?;
+            }
+            if !d.structure.convex_constraints.is_empty() {
+                dd.set_item("convex_constraints", d.structure.convex_constraints.clone())?;
+            }
+            dd.set_item("work_units", d.work_units)?;
+            dd.set_item("wall_time_ms", d.wall_time_ms)?;
+            deltas_list.append(dd)?;
+        }
+        stats.set_item("deltas", deltas_list)?;
+
+        Ok((
+            PyModelRepr {
+                inner: result.model,
+            },
+            stats.into(),
+        ))
     }
 }
 

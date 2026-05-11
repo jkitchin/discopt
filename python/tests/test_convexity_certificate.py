@@ -185,6 +185,48 @@ class TestCrossConsistencyWithSyntactic:
             assert cert == syntactic, f"Certificate {cert} disagrees with syntactic {syntactic}"
 
 
+class TestRank1QuotientPath:
+    """The interval-AD walker's rank-1 PSD fast path certifies the
+    perspective form ``g²/h`` (affine ``g``, affine strictly-positive
+    ``h``) on boxes where Gershgorin would otherwise abstain.
+    """
+
+    def test_quadratic_over_linear_wide_box(self):
+        m = Model("qol_wide")
+        x = m.continuous("x", lb=-1.0e8, ub=1.0e8)
+        y = m.continuous("y", lb=1.0e-3, ub=1.0e8)
+        assert certify_convex((x * x) / y, m) == Curvature.CONVEX
+
+    def test_quadratic_via_pow_over_linear_wide_box(self):
+        m = Model("qol_pow_wide")
+        x = m.continuous("x", lb=-1.0e8, ub=1.0e8)
+        y = m.continuous("y", lb=1.0e-3, ub=1.0e8)
+        assert certify_convex((x**2) / y, m) == Curvature.CONVEX
+
+    def test_shifted_square_over_linear_wide_box(self):
+        m = Model("shifted_qol_wide")
+        x = m.continuous("x", lb=-1.0e8, ub=1.0e8)
+        y = m.continuous("y", lb=1.0e-3, ub=1.0e8)
+        assert certify_convex(((x + 1.0) ** 2) / y, m) == Curvature.CONVEX
+
+    def test_quadratic_over_scaled_linear_wide_box(self):
+        m = Model("qol_scaled_wide")
+        x = m.continuous("x", lb=-1.0e8, ub=1.0e8)
+        y = m.continuous("y", lb=1.0e-3, ub=1.0e8)
+        assert certify_convex((x * x) / (2.0 * y + 1.0), m) == Curvature.CONVEX
+
+    def test_jensen_consistency_on_rank1_quotient(self):
+        """Independent Jensen audit: x²/y is convex on the box, and
+        the rank-1 path's CONVEX verdict must hold up against random
+        convex-combination probes (no false positives)."""
+        m = Model("qol_jensen")
+        x = m.continuous("x", lb=-2.0, ub=2.0)
+        y = m.continuous("y", lb=0.5, ub=3.0)
+        expr = (x * x) / y
+        assert certify_convex(expr, m) == Curvature.CONVEX
+        _jensen_consistent(expr, m, convex=True)
+
+
 @pytest.mark.slow
 class TestJensenAuditOnCertificate:
     """Every CONVEX/CONCAVE verdict from the certificate is cross-

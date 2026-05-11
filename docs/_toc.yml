@@ -31,6 +31,7 @@ parts:
     chapters:
       - file: notebooks/advanced_features
       - file: notebooks/solver_internals
+      - file: notebooks/presolve
       - file: notebooks/sensitivity_analysis
       - file: notebooks/llm_integration
       - file: llm_features

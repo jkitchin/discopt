@@ -637,6 +637,7 @@ class TestIPMMatchesCyipopt:
 # ---------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestIPMVmap:
     """Test vectorized batch solving via jax.vmap."""
 
@@ -890,6 +891,7 @@ class TestIPMWrapper:
 # ---------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestPredictorCorrector:
     """Test that Mehrotra predictor-corrector produces correct results."""
 
@@ -1003,6 +1005,7 @@ class TestPredictorCorrector:
 # ---------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestSecondOrderCorrection:
     """Test SOC prevents Maratos effect on nonconvex constrained problems."""
 
@@ -1141,6 +1144,7 @@ class TestSecondOrderCorrection:
 # ---------------------------------------------------------------
 
 
+@pytest.mark.slow
 class TestJaxFeasibilityRestoration:
     """Tests for the JAX-to-callback feasibility restoration bridge."""
 

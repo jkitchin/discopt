@@ -25,11 +25,29 @@ from discopt._jax.term_classifier import NonlinearTerms
 
 
 def _all_terms(terms: NonlinearTerms) -> list[tuple[int, ...]]:
-    """Flatten product terms into a single list."""
+    """Flatten nonlinear terms into covering tuples for vertex-cover selection.
+
+    Each tuple lists the variables whose partitioning would tighten the relaxation
+    of that term.  The minimum-cover code later filters these tuples through
+    ``terms.partition_candidates``, so monomial tuples only matter when the
+    caller has explicitly made monomials partition candidates.
+    """
     all_t: list[tuple[int, ...]] = []
     all_t.extend(terms.bilinear)
     all_t.extend(terms.trilinear)
     all_t.extend(terms.multilinear)
+    for var_idx, _n in terms.monomial:
+        all_t.append((var_idx,))
+    for var_idx, _exp in terms.fractional_power:
+        all_t.append((var_idx,))
+    for lin_idx, (fp_base, _exp) in terms.bilinear_with_fp:
+        # Record each endpoint as its own 1-element covering tuple so the vertex
+        # cover is forced to partition BOTH the linear factor and the fractional-
+        # power base.  Piecewise McCormick on x * y^p tightens substantially when
+        # both ends are partitioned, which a 2-element covering tuple would not
+        # require.
+        all_t.append((lin_idx,))
+        all_t.append((fp_base,))
     return all_t
 
 

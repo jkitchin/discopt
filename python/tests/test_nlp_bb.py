@@ -134,6 +134,7 @@ class TestNlpBbConvex:
         assert result_spatial.status == "optimal"
         assert result_nlpbb.objective == pytest.approx(result_spatial.objective, rel=1e-3)
 
+    @pytest.mark.slow
     def test_batch_size_one(self):
         """NLP-BB should work with batch_size=1 (serial fallback)."""
         m = _build_simple_convex_minlp()
@@ -144,6 +145,7 @@ class TestNlpBbConvex:
         assert result.objective == pytest.approx(1.0, abs=1e-4)
 
 
+@pytest.mark.slow
 class TestNlpBbNonconvex:
     """NLP-BB on nonconvex MINLPs runs in heuristic mode."""
 
@@ -180,6 +182,7 @@ class TestNlpBbNonconvex:
         assert result.nlp_bb is False
 
 
+@pytest.mark.slow
 class TestNlpBbOverride:
     """Test manual override behavior of nlp_bb parameter."""
 
