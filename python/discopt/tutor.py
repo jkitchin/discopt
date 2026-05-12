@@ -6,6 +6,11 @@ command (lesson, hint, assess, progress). The lesson library, grading
 rubrics, and progress tracking all live under ``course/``; this module
 adds no separate state.
 
+The course content ships as package data under ``discopt.course`` so a
+pip install includes it. ``discopt tutor install`` materializes a
+writable copy of the tree into the user's working directory and drops
+the ``/course:`` slash commands into ``./.claude/``.
+
 Subcommands:
 
 * ``discopt tutor``                       — dashboard (counts + next lesson)
@@ -30,12 +35,24 @@ from pathlib import Path
 _TRACKS = ("basic", "intermediate", "advanced")
 
 
+def _packaged_course_dir() -> Path | None:
+    """Return the read-only course/ tree shipped inside the wheel."""
+    try:
+        from discopt.course import package_root
+    except Exception:
+        return None
+    p = package_root()
+    return p if (p / "SYLLABUS.md").exists() else None
+
+
 def _find_course_dir() -> Path | None:
     """Locate the ``course/`` tree.
 
     Resolution order:
     1. ``$DISCOPT_COURSE_DIR``
-    2. Walk upward from cwd looking for ``course/SYLLABUS.md``.
+    2. Walk upward from cwd looking for ``course/SYLLABUS.md``
+       (so a writable copy in the user's project always wins).
+    3. The packaged copy shipped with the wheel (read-only).
     """
     env = os.environ.get("DISCOPT_COURSE_DIR")
     if env:
@@ -47,7 +64,18 @@ def _find_course_dir() -> Path | None:
     for cand in [cwd, *cwd.parents]:
         if (cand / "course" / "SYLLABUS.md").exists():
             return cand / "course"
-    return None
+    return _packaged_course_dir()
+
+
+def _is_read_only(course_dir: Path) -> bool:
+    """Heuristic: True when ``course_dir`` is the packaged copy in site-packages."""
+    pkg = _packaged_course_dir()
+    if pkg is None:
+        return False
+    try:
+        return course_dir.resolve() == pkg.resolve()
+    except OSError:
+        return False
 
 
 def _list_lessons(course_dir: Path) -> list[str]:
@@ -155,6 +183,11 @@ def _cmd_dashboard(_args, course_dir: Path) -> int:
     current = _current_lesson(progress)
 
     print(f"discopt tutor  ({course_dir})")
+    if _is_read_only(course_dir):
+        print(
+            "  (read-only packaged copy; run `discopt tutor install` to "
+            "materialize a writable course/ in cwd)"
+        )
     print()
     for track in _TRACKS:
         track_lessons = [le for le in lessons if le.startswith(track + "/")]
@@ -266,6 +299,13 @@ def _cmd_next(_args, course_dir: Path) -> int:
 
 
 def _cmd_reset(args, course_dir: Path) -> int:
+    if _is_read_only(course_dir):
+        print(
+            "course/ is the read-only packaged copy. Run "
+            "`discopt tutor install` first to make it writable.",
+            file=sys.stderr,
+        )
+        return 1
     path = _progress_path(course_dir)
     if not path.exists():
         print("no progress.yaml to reset.")
@@ -308,31 +348,89 @@ def _cmd_reset(args, course_dir: Path) -> int:
     return 0
 
 
-def _cmd_install(args, course_dir: Path) -> int:
-    """Copy ``course/_claude_assets/{commands,skills}/`` into ``./.claude/``."""
-    src_root = course_dir / "_claude_assets"
-    if not src_root.is_dir():
-        print(f"missing {src_root}; can't install.", file=sys.stderr)
-        return 1
-    dest_root = Path.cwd() / ".claude"
-    n_files = 0
-    n_skipped = 0
+_PY_ARTIFACT_SUFFIXES = (".pyc", ".pyo")
+
+
+def _is_py_artifact(rel: Path) -> bool:
+    """Reject Python build artifacts that leak through editable installs."""
+    if "__pycache__" in rel.parts:
+        return True
+    if rel.name == "__init__.py" and len(rel.parts) == 1:
+        # The course/__init__.py we added to make it a package — student
+        # shouldn't see it in their materialized copy.
+        return True
+    return rel.suffix in _PY_ARTIFACT_SUFFIXES
+
+
+def _copy_tree(src_root: Path, dest_root: Path, *, force: bool, skip: set[str]) -> tuple[int, int]:
+    """Copy ``src_root`` recursively into ``dest_root``.
+
+    Skips any top-level entry whose name is in *skip* (so the course copy
+    can exclude ``_claude_assets`` while still pulling lessons across) and
+    Python build artifacts (``__pycache__``, ``*.pyc``, the package's own
+    ``__init__.py``). Returns ``(copied, skipped)`` file counts.
+    """
+    copied = 0
+    skipped = 0
     for src in src_root.rglob("*"):
         if not src.is_file():
             continue
         rel = src.relative_to(src_root)
+        if rel.parts and rel.parts[0] in skip:
+            continue
+        if _is_py_artifact(rel):
+            continue
         dest = dest_root / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
-        if dest.exists() and not args.force:
+        if dest.exists() and not force:
             print(f"  skip  {rel} (exists; pass --force to overwrite)")
-            n_skipped += 1
+            skipped += 1
             continue
         shutil.copy2(src, dest)
         print(f"  copy  {rel}")
-        n_files += 1
-    print(f"\ninstalled {n_files} file(s) into {dest_root}")
-    if n_skipped:
-        print(f"  {n_skipped} skipped; pass --force to overwrite.")
+        copied += 1
+    return copied, skipped
+
+
+def _cmd_install(args, course_dir: Path) -> int:
+    """Materialize a writable course/ tree + Claude assets into cwd.
+
+    Copies:
+    * ``course/_claude_assets/`` -> ``./.claude/``
+    * everything else under ``course/`` -> ``./course/``
+
+    Idempotent: existing files are preserved unless ``--force`` is passed.
+    """
+    src_assets = course_dir / "_claude_assets"
+    if not src_assets.is_dir():
+        print(f"missing {src_assets}; can't install.", file=sys.stderr)
+        return 1
+    cwd = Path.cwd()
+    claude_dest = cwd / ".claude"
+    course_dest = cwd / "course"
+
+    print(f"installing Claude assets into {claude_dest}")
+    n_claude, n_claude_skip = _copy_tree(
+        src_assets, claude_dest, force=args.force, skip=set()
+    )
+
+    course_copied = course_skipped = 0
+    if course_dest.resolve() != course_dir.resolve():
+        print(f"\ninstalling course content into {course_dest}")
+        course_copied, course_skipped = _copy_tree(
+            course_dir,
+            course_dest,
+            force=args.force,
+            skip={"_claude_assets"},
+        )
+    else:
+        print(f"\nskipping course content copy: already at {course_dest}")
+
+    total = n_claude + course_copied
+    total_skipped = n_claude_skip + course_skipped
+    print(f"\ninstalled {total} file(s); {total_skipped} skipped.")
+    if total_skipped:
+        print("  pass --force to overwrite existing files.")
     return 0
 
 

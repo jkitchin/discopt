@@ -57,7 +57,8 @@ class TestFindCourseDir:
         monkeypatch.setenv("DISCOPT_COURSE_DIR", str(course))
         assert tutor._find_course_dir() == course.resolve()
 
-    def test_env_var_invalid(self, tmp_path, monkeypatch):
+    def test_env_var_invalid_falls_back_to_package(self, tmp_path, monkeypatch):
+        # An invalid env-var short-circuits to None (doesn't fall back).
         monkeypatch.setenv("DISCOPT_COURSE_DIR", str(tmp_path / "nope"))
         monkeypatch.chdir(tmp_path)
         assert tutor._find_course_dir() is None
@@ -70,9 +71,20 @@ class TestFindCourseDir:
         monkeypatch.chdir(deep)
         assert tutor._find_course_dir() == course
 
-    def test_missing(self, tmp_path, monkeypatch):
+    def test_packaged_fallback(self, tmp_path, monkeypatch):
+        # Outside any checkout, the packaged course/ is the fallback.
         monkeypatch.delenv("DISCOPT_COURSE_DIR", raising=False)
         monkeypatch.chdir(tmp_path)
+        found = tutor._find_course_dir()
+        assert found is not None
+        assert (found / "SYLLABUS.md").exists()
+        assert found == tutor._packaged_course_dir()
+
+    def test_no_packaged_fallback(self, tmp_path, monkeypatch):
+        # If the packaged copy is somehow missing, fallback returns None.
+        monkeypatch.delenv("DISCOPT_COURSE_DIR", raising=False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(tutor, "_packaged_course_dir", lambda: None)
         assert tutor._find_course_dir() is None
 
 
@@ -332,6 +344,13 @@ class TestReset:
         assert rc == 1
         assert "unknown lesson" in capsys.readouterr().err
 
+    def test_refuses_on_packaged_copy(self, monkeypatch, capsys):
+        pkg = tutor._packaged_course_dir()
+        assert pkg is not None
+        rc = tutor._cmd_reset(_ns(lesson=None), pkg)
+        assert rc == 1
+        assert "read-only packaged copy" in capsys.readouterr().err
+
 
 class TestInstall:
     def test_missing_assets(self, fake_course, tmp_path, monkeypatch, capsys):
@@ -341,7 +360,9 @@ class TestInstall:
         assert rc == 1
         assert "missing" in capsys.readouterr().err
 
-    def test_copies_files(self, fake_course, tmp_path, monkeypatch):
+    def test_copies_claude_assets_and_course_content(
+        self, fake_course, tmp_path, monkeypatch
+    ):
         # Build a tiny _claude_assets tree.
         assets = fake_course / "_claude_assets"
         (assets / "commands" / "course").mkdir(parents=True)
@@ -349,29 +370,73 @@ class TestInstall:
         (assets / "agents").mkdir()
         (assets / "agents" / "tutor.md").write_text("AGENT\n")
 
-        monkeypatch.chdir(tmp_path)
+        # Install into a separate writable directory.
+        work = tmp_path / "workspace"
+        work.mkdir()
+        monkeypatch.chdir(work)
         rc = tutor._cmd_install(_ns(force=False), fake_course)
         assert rc == 0
-        assert (tmp_path / ".claude" / "commands" / "course" / "lesson.md").read_text() == (
+        # Claude assets land in .claude/, course/ gets the lesson tree.
+        assert (work / ".claude" / "commands" / "course" / "lesson.md").read_text() == (
             "LESSON SLASH\n"
         )
-        assert (tmp_path / ".claude" / "agents" / "tutor.md").read_text() == "AGENT\n"
+        assert (work / ".claude" / "agents" / "tutor.md").read_text() == "AGENT\n"
+        assert (work / "course" / "SYLLABUS.md").exists()
+        assert (work / "course" / "basic" / "01_intro_to_optimization" / "reading.ipynb").exists()
+        # _claude_assets must NOT be duplicated under course/.
+        assert not (work / "course" / "_claude_assets").exists()
 
     def test_skip_without_force(self, fake_course, tmp_path, monkeypatch, capsys):
         assets = fake_course / "_claude_assets"
         (assets / "commands").mkdir(parents=True)
         (assets / "commands" / "x.md").write_text("from package\n")
-        monkeypatch.chdir(tmp_path)
+        work = tmp_path / "workspace"
+        work.mkdir()
+        monkeypatch.chdir(work)
 
-        (tmp_path / ".claude" / "commands").mkdir(parents=True)
-        (tmp_path / ".claude" / "commands" / "x.md").write_text("preexisting\n")
+        (work / ".claude" / "commands").mkdir(parents=True)
+        (work / ".claude" / "commands" / "x.md").write_text("preexisting\n")
 
         tutor._cmd_install(_ns(force=False), fake_course)
-        assert (tmp_path / ".claude" / "commands" / "x.md").read_text() == "preexisting\n"
+        assert (work / ".claude" / "commands" / "x.md").read_text() == "preexisting\n"
         assert "skip" in capsys.readouterr().out
 
         tutor._cmd_install(_ns(force=True), fake_course)
-        assert (tmp_path / ".claude" / "commands" / "x.md").read_text() == "from package\n"
+        assert (work / ".claude" / "commands" / "x.md").read_text() == "from package\n"
+
+    def test_skips_python_artifacts(self, fake_course, tmp_path, monkeypatch):
+        (fake_course / "_claude_assets").mkdir()
+        (fake_course / "_claude_assets" / "ok.md").write_text("k\n")
+        # Pollute the source with editable-install artifacts.
+        (fake_course / "__init__.py").write_text("")
+        (fake_course / "basic" / "__pycache__").mkdir()
+        (fake_course / "basic" / "__pycache__" / "x.cpython.pyc").write_bytes(b"")
+        (fake_course / "basic" / "01_intro_to_optimization" / "stale.pyc").write_bytes(b"")
+
+        work = tmp_path / "workspace"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        tutor._cmd_install(_ns(force=False), fake_course)
+
+        assert not (work / "course" / "__init__.py").exists()
+        assert not (work / "course" / "basic" / "__pycache__").exists()
+        assert not (
+            work / "course" / "basic" / "01_intro_to_optimization" / "stale.pyc"
+        ).exists()
+        # But real content still copies.
+        assert (work / "course" / "SYLLABUS.md").exists()
+
+    def test_no_self_copy_when_install_in_course_dir(
+        self, fake_course, tmp_path, monkeypatch, capsys
+    ):
+        # Running install from inside the course dir itself: don't copy onto self.
+        (fake_course / "_claude_assets").mkdir(exist_ok=True)
+        (fake_course / "_claude_assets" / "x.md").write_text("hi\n")
+        # Install with cwd as the *parent* of fake_course so cwd/course == fake_course.
+        monkeypatch.chdir(fake_course.parent)
+        rc = tutor._cmd_install(_ns(force=False), fake_course)
+        assert rc == 0
+        assert "skipping course content copy" in capsys.readouterr().out
 
 
 # ──────────────────────────────────────────────────────────
@@ -381,8 +446,10 @@ class TestInstall:
 
 class TestRun:
     def test_missing_course_dir(self, tmp_path, monkeypatch, capsys):
+        # Suppress the packaged-fallback so we exercise the not-found branch.
         monkeypatch.delenv("DISCOPT_COURSE_DIR", raising=False)
         monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(tutor, "_packaged_course_dir", lambda: None)
         rc = tutor.run(_ns(tutor_cmd=None, tutor_func=tutor._cmd_dashboard))
         assert rc == 1
         assert "course/ directory not found" in capsys.readouterr().err
