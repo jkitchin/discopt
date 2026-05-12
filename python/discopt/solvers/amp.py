@@ -129,6 +129,10 @@ def _refresh_partitions_for_bounds(
     part_vars = [i for i in part_vars if float(flat_ub[i]) - float(flat_lb[i]) > disc_abs_width_tol]
     part_lbs = [float(flat_lb[i]) for i in part_vars]
     part_ubs = [float(flat_ub[i]) for i in part_vars]
+    active_part_vars = set(part_vars)
+    for stale_idx in list(disc_state.partitions):
+        if stale_idx not in active_part_vars:
+            del disc_state.partitions[stale_idx]
     for k_pv, v_idx in enumerate(part_vars):
         pts = disc_state.partitions.get(v_idx)
         new_lo = float(part_lbs[k_pv])
@@ -282,17 +286,17 @@ def _tighten_simple_power_group(
             return lb, min(ub, bound)
         return max(lb, bound), ub
 
+    if degree % 2 == 1:
+        signed_root = float(np.sign(rhs / coeff) * (abs(rhs / coeff) ** (1.0 / degree)))
+        if coeff > 0.0:
+            return lb, min(ub, signed_root)
+        return max(lb, signed_root), ub
+
     if coeff <= 0.0 or rhs < 0.0:
         return lb, ub
 
     radius = float((rhs / coeff) ** (1.0 / degree))
-    if degree % 2 == 0:
-        return max(lb, -radius), min(ub, radius)
-    if lb >= 0.0:
-        return lb, min(ub, radius)
-    if ub <= 0.0:
-        return max(lb, -radius), ub
-    return lb, ub
+    return max(lb, -radius), min(ub, radius)
 
 
 def _tighten_bounds_with_objective_cutoff(

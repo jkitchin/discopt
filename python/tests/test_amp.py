@@ -2107,6 +2107,83 @@ def test_alphabb_quadratic_oa_skips_nonquadratic_row():
     assert cuts == []
 
 
+def test_objective_cutoff_odd_power_tightening_uses_signed_monotonic_root():
+    """Odd monomials are monotone, not symmetric level sets."""
+    from discopt.solvers import amp as amp_mod
+
+    assert amp_mod._tighten_simple_power_group({3: 1.0}, 8.0, -10.0, 10.0) == pytest.approx(
+        (-10.0, 2.0)
+    )
+    assert amp_mod._tighten_simple_power_group({3: 1.0}, 8.0, -10.0, -1.0) == pytest.approx(
+        (-10.0, -1.0)
+    )
+    assert amp_mod._tighten_simple_power_group({3: 1.0}, -8.0, -10.0, 10.0) == pytest.approx(
+        (-10.0, -2.0)
+    )
+    assert amp_mod._tighten_simple_power_group({3: -1.0}, 8.0, -10.0, 10.0) == pytest.approx(
+        (-2.0, 10.0)
+    )
+
+
+def test_objective_cutoff_negative_odd_power_interval_preserves_feasible_points():
+    """A positive cutoff on x**3 over a negative interval must not trim the left side."""
+    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt.solvers import amp as amp_mod
+
+    m = Model("odd_power_cutoff_counterexample")
+    x = m.continuous("x", lb=-10.0, ub=-1.0)
+    y = m.continuous("y", lb=100.0, ub=100.0)
+    m.minimize(x**3 + y**2)
+
+    flat_lb, flat_ub = flat_variable_bounds(m)
+    cutoff = 10001.0
+    cutoff_lb, cutoff_ub = amp_mod._tighten_bounds_with_objective_cutoff(
+        m,
+        flat_lb,
+        flat_ub,
+        cutoff=cutoff,
+    )
+
+    assert (-10.0) ** 3 + 100.0**2 <= cutoff
+    np.testing.assert_allclose(cutoff_lb, flat_lb)
+    np.testing.assert_allclose(cutoff_ub, flat_ub)
+
+
+def test_refresh_partitions_for_bounds_prunes_stale_partition_entries():
+    """Dropped partition vars must not leave stale active entries in disc_state."""
+    from discopt.solvers import amp as amp_mod
+
+    m = Model("partition_refresh_prunes_stale")
+    x = m.continuous("x", shape=(3,))
+    disc_state = SimpleNamespace(
+        partitions={
+            0: np.array([-5.0, 0.0, 5.0], dtype=np.float64),
+            1: np.array([1.0, 2.0, 3.0], dtype=np.float64),
+            2: np.array([-3.0, 0.0, 3.0], dtype=np.float64),
+        }
+    )
+    flat_lb = np.array([-1.0, 2.0, -3.0], dtype=np.float64)
+    flat_ub = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+
+    part_vars, part_lbs, part_ubs = amp_mod._refresh_partitions_for_bounds(
+        m,
+        disc_state,
+        flat_lb,
+        flat_ub,
+        part_vars=[0, 1],
+        disc_abs_width_tol=1e-9,
+        n_init_partitions=2,
+    )
+
+    assert part_vars == [0]
+    assert part_lbs == [-1.0]
+    assert part_ubs == [1.0]
+    assert set(disc_state.partitions) == {0}
+    np.testing.assert_allclose(disc_state.partitions[0], np.array([-1.0, 0.0, 1.0]))
+    np.testing.assert_allclose(x.lb, flat_lb)
+    np.testing.assert_allclose(x.ub, flat_ub)
+
+
 def test_objective_cutoff_bounds_enable_alphabb_for_issue_63_instances():
     """The exact nlp_008 objective cutoff should create finite alpha-BB bounds."""
     from discopt._jax.convexity import classify_oa_cut_convexity
