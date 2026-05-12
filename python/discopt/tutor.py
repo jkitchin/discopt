@@ -410,9 +410,7 @@ def _cmd_install(args, course_dir: Path) -> int:
     course_dest = cwd / "course"
 
     print(f"installing Claude assets into {claude_dest}")
-    n_claude, n_claude_skip = _copy_tree(
-        src_assets, claude_dest, force=args.force, skip=set()
-    )
+    n_claude, n_claude_skip = _copy_tree(src_assets, claude_dest, force=args.force, skip=set())
 
     course_copied = course_skipped = 0
     if course_dest.resolve() != course_dir.resolve():

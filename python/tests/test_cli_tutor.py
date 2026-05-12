@@ -283,9 +283,7 @@ class TestResume:
             "current_lesson: basic/03_modeling_in_discopt\nscores: null\n"
         )
         calls = []
-        monkeypatch.setattr(
-            tutor, "_launch_slash", lambda cmd, *args: calls.append(cmd) or 0
-        )
+        monkeypatch.setattr(tutor, "_launch_slash", lambda cmd, *args: calls.append(cmd) or 0)
         rc = tutor._cmd_resume(_ns(), fake_course)
         assert rc == 0
         assert calls == ["/course:lesson basic/03_modeling_in_discopt"]
@@ -294,9 +292,7 @@ class TestResume:
 class TestNextCmd:
     def test_launches_first_when_no_progress(self, fake_course, monkeypatch):
         calls = []
-        monkeypatch.setattr(
-            tutor, "_launch_slash", lambda cmd, *args: calls.append(cmd) or 0
-        )
+        monkeypatch.setattr(tutor, "_launch_slash", lambda cmd, *args: calls.append(cmd) or 0)
         rc = tutor._cmd_next(_ns(), fake_course)
         assert rc == 0
         assert calls == ["/course:lesson basic/01_intro_to_optimization"]
@@ -360,9 +356,7 @@ class TestInstall:
         assert rc == 1
         assert "missing" in capsys.readouterr().err
 
-    def test_copies_claude_assets_and_course_content(
-        self, fake_course, tmp_path, monkeypatch
-    ):
+    def test_copies_claude_assets_and_course_content(self, fake_course, tmp_path, monkeypatch):
         # Build a tiny _claude_assets tree.
         assets = fake_course / "_claude_assets"
         (assets / "commands" / "course").mkdir(parents=True)
@@ -420,9 +414,7 @@ class TestInstall:
 
         assert not (work / "course" / "__init__.py").exists()
         assert not (work / "course" / "basic" / "__pycache__").exists()
-        assert not (
-            work / "course" / "basic" / "01_intro_to_optimization" / "stale.pyc"
-        ).exists()
+        assert not (work / "course" / "basic" / "01_intro_to_optimization" / "stale.pyc").exists()
         # But real content still copies.
         assert (work / "course" / "SYLLABUS.md").exists()
 
