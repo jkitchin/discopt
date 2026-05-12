@@ -125,6 +125,38 @@ def _get_flat_index(expr: Expression, model: Model) -> int | None:
     return None
 
 
+def _contains_expandable_square(model: Model) -> bool:
+    """Return True if Python classification should expand a non-leaf square."""
+
+    def visit(expr: Expression) -> bool:
+        if isinstance(expr, BinaryOp):
+            if (
+                expr.op == "**"
+                and isinstance(expr.right, Constant)
+                and float(expr.right.value) == 2.0
+                and _get_flat_index(expr.left, model) is None
+            ):
+                return True
+            return visit(expr.left) or visit(expr.right)
+        if isinstance(expr, UnaryOp):
+            return visit(expr.operand)
+        if isinstance(expr, FunctionCall):
+            return any(visit(arg) for arg in expr.args)
+        if isinstance(expr, IndexExpression):
+            return not isinstance(expr.base, Variable) and visit(expr.base)
+        if isinstance(expr, SumExpression):
+            return visit(expr.operand)
+        if isinstance(expr, SumOverExpression):
+            return any(visit(term) for term in expr.terms)
+        if isinstance(expr, MatMulExpression):
+            return visit(expr.left) or visit(expr.right)
+        return False
+
+    if model._objective is not None and visit(model._objective.expression):
+        return True
+    return any(visit(constraint.body) for constraint in model._constraints)
+
+
 # ---------------------------------------------------------------------------
 # Helpers: product-tree decomposition
 # ---------------------------------------------------------------------------
@@ -164,12 +196,15 @@ def distribute_products(expr: Expression) -> Expression:
     """Recursively distribute multiplication over addition/subtraction.
 
     ``(a + b) * c`` → ``a*c + b*c``;  ``c * (a - b)`` → ``c*a - c*b``.
+    ``(a + b)^2`` → ``(a + b) * (a + b)`` before distribution.
     Applied bottom-up so nested distributions resolve.  Other expression
     types are returned with operator-tree shape preserved structurally.
     """
     if isinstance(expr, BinaryOp):
         left = distribute_products(expr.left)
         right = distribute_products(expr.right)
+        if expr.op == "**" and isinstance(right, Constant) and float(right.value) == 2.0:
+            return distribute_products(BinaryOp("*", left, left))
         if expr.op == "*":
             if isinstance(right, BinaryOp) and right.op in ("+", "-"):
                 return BinaryOp(
@@ -249,9 +284,10 @@ def classify_nonlinear_terms(model: Model) -> NonlinearTerms:
     available, falling back to the Python implementation for unsupported models
     and for cases that need concrete ``general_nl`` expression objects.
     """
-    rust_terms = _classify_nonlinear_terms_rust(model)
-    if rust_terms is not None:
-        return rust_terms
+    if not _contains_expandable_square(model):
+        rust_terms = _classify_nonlinear_terms_rust(model)
+        if rust_terms is not None:
+            return rust_terms
     return _classify_nonlinear_terms_python(model)
 
 

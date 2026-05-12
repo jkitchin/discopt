@@ -44,6 +44,15 @@ def _make_obbt_demo() -> Model:
     return m
 
 
+def _make_shifted_square_infeasible() -> Model:
+    m = dm.Model("nlp_mi_007_020")
+    x = m.integer("x", lb=-2, ub=3)
+    y = m.binary("y")
+    m.minimize(x * 0.0)
+    m.subject_to((x - 0.5) ** 2 + (4 * y - 2) ** 2 <= 3)
+    return m
+
+
 def _build_relaxation_for_test(
     model: Model,
     part_vars: list[int] | None = None,
@@ -211,6 +220,41 @@ def test_partitioned_square_secants_tighten_circle_superlevel_bound():
     assert fine.objective is not None
     assert fine.objective >= coarse.objective + 0.05
     assert fine.objective == pytest.approx(np.sqrt(2.0), abs=1e-4)
+
+
+def test_shifted_square_constraint_linearizes_and_proves_infeasible(caplog):
+    """Affine-square constraints should stay in the AMP MILP relaxation."""
+    from discopt._jax.term_classifier import classify_nonlinear_terms
+
+    m = _make_shifted_square_infeasible()
+    terms = classify_nonlinear_terms(m)
+
+    assert set(terms.monomial) == {(0, 2), (1, 2)}
+
+    with caplog.at_level("WARNING"):
+        milp_model, varmap = _build_relaxation_for_test(m)
+        result = milp_model.solve()
+
+    assert set(varmap["monomial"]) == {(0, 2), (1, 2)}
+    assert result.status == "infeasible"
+    assert "omitting constraint" not in caplog.text
+
+
+def test_amp_reports_shifted_square_minlptests_case_infeasible():
+    """Regression for MINLPTests nlp_mi_007_020."""
+    m = _make_shifted_square_infeasible()
+
+    result = m.solve(
+        solver="amp",
+        nlp_solver="ipm",
+        max_iter=1,
+        time_limit=10.0,
+        presolve_bt=False,
+        apply_partitioning=False,
+    )
+
+    assert result.status == "infeasible"
+    assert result.x is None
 
 
 def test_solve_nlp_subproblem_retries_ipopt_and_restores_bounds(monkeypatch):
