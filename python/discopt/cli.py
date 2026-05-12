@@ -5,6 +5,7 @@ Usage:
     discopt test
     discopt convert input.gms output.nl
     discopt install-skills [--project-scope] [--dev] [--force]
+    discopt tutor [list|start|resume|next|reset|install] ...
 
 Developer-only commands (``lit-scan``, ``adversary``, ``search-arxiv``,
 ``search-openalex``, ``write-report``) live under ``discopt-dev`` in
@@ -292,7 +293,15 @@ def main():
     )
     p_skills.set_defaults(func=_cmd_install_skills)
 
+    from discopt.tutor import add_subparser as _add_tutor_subparser
+
+    _add_tutor_subparser(subparsers)
+
     args = parser.parse_args()
+    if args.command == "tutor":
+        from discopt.tutor import run as _run_tutor
+
+        sys.exit(_run_tutor(args) or 0)
     args.func(args)
 
 
