@@ -2184,6 +2184,77 @@ def test_refresh_partitions_for_bounds_prunes_stale_partition_entries():
     np.testing.assert_allclose(x.ub, flat_ub)
 
 
+@pytest.mark.parametrize(
+    ("solver_kwargs", "expected_obbt_calls"),
+    [
+        ({}, 1),
+        ({"alphabb_cutoff_obbt": False}, 0),
+        ({"alphabb_cutoff_obbt": False, "obbt_with_cutoff": True}, 1),
+    ],
+)
+def test_alphabb_cutoff_obbt_option_controls_prerequisite_pass(
+    monkeypatch,
+    solver_kwargs,
+    expected_obbt_calls,
+):
+    """The alpha-BB cutoff OBBT pass has its own switch."""
+    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    from discopt.solvers import amp as amp_mod
+
+    calls = []
+
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_milp_with_oa_recovery",
+        lambda **kwargs: (
+            MilpRelaxationResult(
+                status="optimal",
+                objective=-1.0,
+                x=np.array([0.0, 0.0], dtype=np.float64),
+            ),
+            {},
+            [],
+            1,
+        ),
+    )
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_best_nlp_candidate",
+        lambda *args, **kwargs: (np.array([0.0, 0.0], dtype=np.float64), 0.0),
+    )
+
+    def fake_cutoff_obbt(**kwargs):
+        calls.append(kwargs["iteration"])
+        return (
+            kwargs["flat_lb"],
+            kwargs["flat_ub"],
+            kwargs["part_vars"],
+            kwargs["part_lbs"],
+            kwargs["part_ubs"],
+        )
+
+    monkeypatch.setattr(amp_mod, "_run_cutoff_obbt", fake_cutoff_obbt)
+
+    m = Model("alphabb_cutoff_obbt_option")
+    x = m.continuous("x")
+    y = m.continuous("y")
+    m.minimize(x + y**2)
+    m.subject_to(x**2 <= y**2 + 1.0)
+
+    result = m.solve(
+        solver="amp",
+        apply_partitioning=False,
+        skip_convex_check=True,
+        presolve_bt=False,
+        max_iter=1,
+        time_limit=5,
+        **solver_kwargs,
+    )
+
+    assert result.status in ("optimal", "feasible")
+    assert len(calls) == expected_obbt_calls
+
+
 def test_objective_cutoff_bounds_enable_alphabb_for_issue_63_instances():
     """The exact nlp_008 objective cutoff should create finite alpha-BB bounds."""
     from discopt._jax.convexity import classify_oa_cut_convexity

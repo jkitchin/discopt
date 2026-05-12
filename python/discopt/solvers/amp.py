@@ -1885,6 +1885,7 @@ def solve_amp(
     skip_convex_check: bool = False,
     obbt_at_root: bool = False,
     obbt_with_cutoff: bool = False,
+    alphabb_cutoff_obbt: bool = True,
     obbt_time_limit: float = 30.0,
 ) -> SolveResult:
     """Solve MINLP globally using Adaptive Multivariate Partitioning (AMP).
@@ -1981,6 +1982,12 @@ def solve_amp(
         to redirect adaptive partition refinement toward a worse fixed point
         on problems where variable bounds are already reasonably tight; turn
         on for problems with loose initial variable bounds.
+    alphabb_cutoff_obbt : bool, default True
+        Allow one cutoff OBBT pass before alpha-BB OA generation when a
+        nonconvex OA row starts from effectively unbounded variable bounds.
+        This is independent of the broader ``obbt_with_cutoff`` option and is
+        used to create finite boxes for alpha-BB cuts on loose MINLPTests-style
+        instances. Set False to disable this alpha-BB prerequisite pass.
     obbt_time_limit : float, default 30.0
         Total wall-clock budget for OBBT calls (in seconds).  Per-LP budget is
         ``min(1.0, obbt_time_limit / max(1, 2*n_candidates))``.
@@ -2450,7 +2457,10 @@ def solve_amp(
             if (
                 UB < np.inf
                 and not _cutoff_obbt_done
-                and (obbt_with_cutoff or (has_nonconvex_oa_row and had_effectively_unbounded))
+                and (
+                    obbt_with_cutoff
+                    or (alphabb_cutoff_obbt and has_nonconvex_oa_row and had_effectively_unbounded)
+                )
             ):
                 _cutoff_obbt_done = True
                 flat_lb, flat_ub, part_vars, part_lbs, part_ubs = _run_cutoff_obbt(
