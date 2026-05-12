@@ -290,6 +290,135 @@ def _tighten_affine_argument_interval(
     )
 
 
+def _linearize_affine_expr(
+    expr,
+    scale: float,
+    metadata: FlatVariableMetadata,
+    n_vars: int,
+) -> Optional[tuple[np.ndarray, float]]:
+    const_val = _constant_value(expr)
+    if const_val is not None:
+        return np.zeros(n_vars, dtype=np.float64), scale * const_val
+
+    flat_idx = metadata.scalar_flat_index(expr)
+    if flat_idx is not None:
+        coeff = np.zeros(n_vars, dtype=np.float64)
+        coeff[flat_idx] = scale
+        return coeff, 0.0
+
+    if isinstance(expr, UnaryOp) and expr.op == "neg":
+        return _linearize_affine_expr(expr.operand, -scale, metadata, n_vars)
+
+    if isinstance(expr, BinaryOp):
+        if expr.op == "+":
+            left = _linearize_affine_expr(expr.left, scale, metadata, n_vars)
+            right = _linearize_affine_expr(expr.right, scale, metadata, n_vars)
+            if left is None or right is None:
+                return None
+            return left[0] + right[0], left[1] + right[1]
+        if expr.op == "-":
+            left = _linearize_affine_expr(expr.left, scale, metadata, n_vars)
+            right = _linearize_affine_expr(expr.right, -scale, metadata, n_vars)
+            if left is None or right is None:
+                return None
+            return left[0] + right[0], left[1] + right[1]
+        if expr.op == "*":
+            left_const = _constant_value(expr.left)
+            if left_const is not None:
+                return _linearize_affine_expr(expr.right, scale * left_const, metadata, n_vars)
+            right_const = _constant_value(expr.right)
+            if right_const is not None:
+                return _linearize_affine_expr(expr.left, scale * right_const, metadata, n_vars)
+            return None
+        if expr.op == "/":
+            right_const = _constant_value(expr.right)
+            if right_const is not None and abs(right_const) > 1e-12:
+                return _linearize_affine_expr(expr.left, scale / right_const, metadata, n_vars)
+            return None
+        if expr.op == "**":
+            exponent = _constant_value(expr.right)
+            if exponent == 1.0:
+                return _linearize_affine_expr(expr.left, scale, metadata, n_vars)
+            if exponent == 0.0:
+                return np.zeros(n_vars, dtype=np.float64), scale
+            return None
+
+    if isinstance(expr, SumOverExpression):
+        coeff = np.zeros(n_vars, dtype=np.float64)
+        const = 0.0
+        for term in expr.terms:
+            piece = _linearize_affine_expr(term, scale, metadata, n_vars)
+            if piece is None:
+                return None
+            coeff += piece[0]
+            const += piece[1]
+        return coeff, const
+
+    return None
+
+
+def _affine_bounds(
+    coeff: np.ndarray,
+    const: float,
+    lb: np.ndarray,
+    ub: np.ndarray,
+) -> tuple[float, float]:
+    lower = float(const)
+    upper = float(const)
+    for c_i, lb_i, ub_i in zip(coeff, lb, ub):
+        c = float(c_i)
+        if c >= 0.0:
+            lower += c * float(lb_i)
+            upper += c * float(ub_i)
+        else:
+            lower += c * float(ub_i)
+            upper += c * float(lb_i)
+    return lower, upper
+
+
+def _tighten_affine_upper_bound(
+    tightened_lb: np.ndarray,
+    tightened_ub: np.ndarray,
+    metadata: FlatVariableMetadata,
+    coeff: np.ndarray,
+    const: float,
+    rhs: float,
+) -> None:
+    """Intersect a box with ``coeff @ x + const <= rhs`` using interval FBBT."""
+    for idx, c_i in enumerate(coeff):
+        c = float(c_i)
+        if abs(c) <= 1e-12:
+            continue
+
+        other_min = float(const)
+        for j, c_j in enumerate(coeff):
+            if j == idx:
+                continue
+            cj = float(c_j)
+            if cj >= 0.0:
+                other_min += cj * float(tightened_lb[j])
+            else:
+                other_min += cj * float(tightened_ub[j])
+
+        bound = (float(rhs) - other_min) / c
+        new_lb = float(tightened_lb[idx])
+        new_ub = float(tightened_ub[idx])
+        if c > 0.0:
+            new_ub = min(new_ub, bound)
+        else:
+            new_lb = max(new_lb, bound)
+
+        new_lb, new_ub = _apply_integrality(new_lb, new_ub, metadata.flat_var_types[idx])
+        if new_lb <= new_ub:
+            tightened_lb[idx] = new_lb
+            tightened_ub[idx] = new_ub
+            continue
+
+        raise NonlinearBoundTighteningInfeasible(
+            f"tightened interval is empty for flat variable {idx}: [{new_lb}, {new_ub}]"
+        )
+
+
 def _flatten_sum(expr, scale: float, out: list[tuple[float, object]]) -> None:
     if isinstance(expr, SumOverExpression):
         for term in expr.terms:
@@ -1336,6 +1465,219 @@ class QuadraticEqualityBoundsRule(NonlinearBoundTighteningRule):
         return tightened_lb, tightened_ub
 
 
+def _match_scaled_constant_division(expr, scale: float) -> Optional[tuple[float, object]]:
+    if isinstance(expr, UnaryOp) and expr.op == "neg":
+        return _match_scaled_constant_division(expr.operand, -scale)
+
+    if isinstance(expr, BinaryOp) and expr.op == "*":
+        left_const = _constant_value(expr.left)
+        if left_const is not None:
+            return _match_scaled_constant_division(expr.right, scale * left_const)
+        right_const = _constant_value(expr.right)
+        if right_const is not None:
+            return _match_scaled_constant_division(expr.left, scale * right_const)
+        return None
+
+    if not isinstance(expr, BinaryOp) or expr.op != "/":
+        return None
+    numerator = _constant_value(expr.left)
+    if numerator is None or abs(numerator) <= 1e-12:
+        return None
+    return scale * numerator, expr.right
+
+
+def _match_scaled_negative_power(
+    expr,
+    scale: float,
+    metadata: FlatVariableMetadata,
+) -> Optional[tuple[int, float, float]]:
+    if isinstance(expr, UnaryOp) and expr.op == "neg":
+        return _match_scaled_negative_power(expr.operand, -scale, metadata)
+
+    if isinstance(expr, BinaryOp) and expr.op == "*":
+        left_const = _constant_value(expr.left)
+        if left_const is not None:
+            return _match_scaled_negative_power(expr.right, scale * left_const, metadata)
+        right_const = _constant_value(expr.right)
+        if right_const is not None:
+            return _match_scaled_negative_power(expr.left, scale * right_const, metadata)
+        return None
+
+    if not isinstance(expr, BinaryOp) or expr.op != "**":
+        return None
+    exponent = _constant_value(expr.right)
+    if exponent is None or exponent >= 0.0:
+        return None
+    flat_idx = metadata.scalar_flat_index(expr.left)
+    if flat_idx is None:
+        return None
+    return flat_idx, float(exponent), scale
+
+
+class PositiveAffineReciprocalBoundsRule(NonlinearBoundTighteningRule):
+    """Propagate ``c / positive_affine >= rhs`` into affine upper bounds."""
+
+    name = "positive_affine_reciprocal_bounds"
+
+    def tighten(
+        self,
+        model: Model,
+        flat_lb: np.ndarray,
+        flat_ub: np.ndarray,
+        metadata: FlatVariableMetadata,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        tightened_lb = flat_lb.copy()
+        tightened_ub = flat_ub.copy()
+        n_vars = len(flat_lb)
+
+        for constraint in model._constraints:
+            if getattr(constraint, "sense", None) not in ("<=", "=="):
+                continue
+
+            terms: list[tuple[float, object]] = []
+            _flatten_sum(constraint.body, 1.0, terms)
+
+            constant_term = 0.0
+            reciprocal_match: Optional[tuple[float, object]] = None
+            matches_pattern = True
+
+            for scale, term in terms:
+                const_val = _constant_value(term)
+                if const_val is not None:
+                    constant_term += scale * const_val
+                    continue
+
+                match = _match_scaled_constant_division(term, scale)
+                if match is None or reciprocal_match is not None:
+                    matches_pattern = False
+                    break
+                reciprocal_match = match
+
+            if not matches_pattern or reciprocal_match is None or constant_term <= 0.0:
+                continue
+
+            scaled_numerator, denominator = reciprocal_match
+            if scaled_numerator >= 0.0:
+                continue
+
+            affine = _linearize_affine_expr(denominator, 1.0, metadata, n_vars)
+            if affine is None:
+                continue
+            coeff, const = affine
+            arg_lb, arg_ub = _affine_bounds(coeff, const, tightened_lb, tightened_ub)
+            if arg_lb <= 0.0:
+                continue
+
+            rhs = -scaled_numerator / constant_term
+            if not np.isfinite(rhs):
+                continue
+            if arg_lb > rhs + 1e-12:
+                _prove_infeasible(
+                    self.name,
+                    constraint,
+                    "positive affine denominator exceeds reciprocal upper bound",
+                )
+            if arg_ub <= rhs + 1e-12:
+                continue
+            _tighten_affine_upper_bound(tightened_lb, tightened_ub, metadata, coeff, const, rhs)
+
+        return tightened_lb, tightened_ub
+
+
+class NegativePowerBoundsRule(NonlinearBoundTighteningRule):
+    """Infer strict positive lower bounds from ``x**p <= affine`` for ``p < 0``."""
+
+    name = "negative_power_bounds"
+
+    def tighten(
+        self,
+        model: Model,
+        flat_lb: np.ndarray,
+        flat_ub: np.ndarray,
+        metadata: FlatVariableMetadata,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        tightened_lb = flat_lb.copy()
+        tightened_ub = flat_ub.copy()
+        n_vars = len(flat_lb)
+
+        for constraint in model._constraints:
+            if getattr(constraint, "sense", None) not in ("<=", "=="):
+                continue
+
+            terms: list[tuple[float, object]] = []
+            _flatten_sum(constraint.body, 1.0, terms)
+
+            power_match: Optional[tuple[int, float, float]] = None
+            affine_coeff = np.zeros(n_vars, dtype=np.float64)
+            affine_const = 0.0
+            matches_pattern = True
+
+            for scale, term in terms:
+                match = _match_scaled_negative_power(term, scale, metadata)
+                if match is not None:
+                    if power_match is not None:
+                        matches_pattern = False
+                        break
+                    power_match = match
+                    continue
+
+                affine = _linearize_affine_expr(term, scale, metadata, n_vars)
+                if affine is None:
+                    matches_pattern = False
+                    break
+                affine_coeff += affine[0]
+                affine_const += affine[1]
+
+            if not matches_pattern or power_match is None:
+                continue
+
+            base_idx, exponent, power_scale = power_match
+            if power_scale <= 0.0:
+                continue
+            if abs(float(affine_coeff[base_idx])) > 1e-12:
+                continue
+            if tightened_lb[base_idx] < -1e-12 or tightened_ub[base_idx] <= 0.0:
+                continue
+
+            affine_min, _affine_max = _affine_bounds(
+                affine_coeff,
+                affine_const,
+                tightened_lb,
+                tightened_ub,
+            )
+            rhs_ub = -affine_min / power_scale
+            if rhs_ub <= 0.0:
+                _prove_infeasible(
+                    self.name,
+                    constraint,
+                    "negative power has no positive upper allowance",
+                )
+            if not np.isfinite(rhs_ub):
+                continue
+
+            lower = float(rhs_ub ** (1.0 / exponent))
+            if not np.isfinite(lower):
+                continue
+            new_lb = max(float(tightened_lb[base_idx]), lower)
+            new_ub = float(tightened_ub[base_idx])
+            new_lb, new_ub = _apply_integrality(
+                new_lb,
+                new_ub,
+                metadata.flat_var_types[base_idx],
+            )
+            if new_lb <= new_ub:
+                tightened_lb[base_idx] = new_lb
+                tightened_ub[base_idx] = new_ub
+                continue
+            _prove_infeasible(
+                self.name,
+                constraint,
+                f"required positive lower bound {new_lb} exceeds upper bound {new_ub}",
+            )
+
+        return tightened_lb, tightened_ub
+
+
 class ReciprocalBoundsRule(NonlinearBoundTighteningRule):
     """Tighten sign-stable affine denominators in simple reciprocal constraints."""
 
@@ -1472,6 +1814,8 @@ DEFAULT_NONLINEAR_BOUND_RULES: tuple[NonlinearBoundTighteningRule, ...] = (
     MonotoneFunctionEqualityRule(),
     QuadraticEqualityBoundsRule(),
     MonotoneFunctionBoundsRule(),
+    PositiveAffineReciprocalBoundsRule(),
+    NegativePowerBoundsRule(),
     ReciprocalBoundsRule(),
     SqrtSumOfSquaresUpperBoundRule(),
     SumOfSquaresUpperBoundRule(),

@@ -1548,6 +1548,51 @@ class TestAmpPhase4Coverage:
         assert lbs[0] < 0.2
         assert lbs[-1] >= 0.999
 
+    def test_nlp_005_010_relaxation_keeps_reciprocal_and_negative_power(self, caplog):
+        """Issue #62: the root MILP should retain reciprocal and y**(-2) structure."""
+        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+
+        instance = MINLPTESTS_NLP_BY_ID["nlp_005_010"]
+        m = instance.build_fn()
+        flat_lb, flat_ub = flat_variable_bounds(m)
+        tightened_lb, tightened_ub, _stats = tighten_nonlinear_bounds(m, flat_lb, flat_ub)
+
+        terms = self.classify(m)
+        state = self.init_partitions(
+            terms.partition_candidates,
+            lb=[float(tightened_lb[i]) for i in terms.partition_candidates],
+            ub=[float(tightened_ub[i]) for i in terms.partition_candidates],
+            n_init=2,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="discopt._jax.milp_relaxation"):
+            milp_model, varmap = self.build_milp(
+                m,
+                terms,
+                state,
+                incumbent=None,
+                bound_override=(tightened_lb, tightened_ub),
+            )
+
+        reciprocal_lifts = [
+            relax for relax in varmap["univariate_relaxations"] if relax.func_name == "reciprocal"
+        ]
+        assert len(reciprocal_lifts) >= 2
+        assert (1, -2.0) in varmap["fractional_power"]
+
+        a_ub = milp_model._A_ub.toarray()
+        exact_rows = [
+            idx
+            for idx, row in enumerate(a_ub)
+            if np.allclose(row[:2], [1.0, 1.0], atol=1e-12)
+            and np.count_nonzero(np.abs(row[2:]) > 1e-12) == 0
+        ]
+        assert any(milp_model._b_ub[idx] == pytest.approx(3.9) for idx in exact_rows)
+        assert not any(
+            "Cannot linearize non-constant division" in rec.message for rec in caplog.records
+        )
+        assert not any("Monomial (1, -2)" in rec.message for rec in caplog.records)
+
     def test_mixed_sign_odd_tangent_filter_keeps_only_global_supporting_lines(self):
         """Only tangents that stay valid on the full mixed-sign box should be used."""
         assert self.is_valid_odd_tangent(0.5, -0.5, 0.5, 5, "under") is True
@@ -2511,6 +2556,22 @@ class TestCurrentCodeWeaknesses:
         assert tightened_lb[2] == pytest.approx(-1.0)
         assert tightened_ub[2] == pytest.approx(1.0)
         assert "reciprocal_bounds" in stats.applied_rules
+
+    def test_nlp_005_010_tightening_enables_negative_power_domain(self):
+        """Issue #62: reciprocal reformulation should expose a safe y**(-2) domain."""
+        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+
+        instance = MINLPTESTS_NLP_BY_ID["nlp_005_010"]
+        m = instance.build_fn()
+        flat_lb, flat_ub = flat_variable_bounds(m)
+
+        tightened_lb, tightened_ub, stats = tighten_nonlinear_bounds(m, flat_lb, flat_ub)
+
+        assert tightened_ub[0] <= 3.9 + 1e-9
+        assert tightened_ub[1] <= 3.9 + 1e-9
+        assert tightened_lb[1] >= 1.0 / np.sqrt(4.4) - 1e-9
+        assert "positive_affine_reciprocal_bounds" in stats.applied_rules
+        assert "negative_power_bounds" in stats.applied_rules
 
     def test_nonlinear_bound_tightening_reports_quadratic_contradiction(self):
         """A rule proof of infeasibility should be reported explicitly."""
