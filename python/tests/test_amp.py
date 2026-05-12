@@ -2107,6 +2107,71 @@ def test_alphabb_quadratic_oa_skips_nonquadratic_row():
     assert cuts == []
 
 
+def test_objective_cutoff_bounds_enable_alphabb_for_issue_63_instances():
+    """The exact nlp_008 objective cutoff should create finite alpha-BB bounds."""
+    from discopt._jax.convexity import classify_oa_cut_convexity
+    from discopt._jax.cutting_planes import generate_alphabb_quadratic_oa_cuts_from_evaluator
+    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt.solvers import amp as amp_mod
+    from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
+
+    m = Model("issue_63_exact_cutoff_bounds")
+    x = m.continuous("x")
+    y = m.continuous("y")
+    z = m.continuous("z", lb=0.0, ub=1.0)
+    m.minimize(x + y**2 + z**3)
+    m.subject_to(y >= dm.exp(-x - 2) + dm.exp(-z - 2) - 2)
+    m.subject_to(x**2 <= y**2 + z**2)
+    m.subject_to(y >= x / 2 + z)
+
+    flat_lb, flat_ub = flat_variable_bounds(m)
+    flat_lb, flat_ub, infeasible, _changed = tighten_root_bounds_with_fbbt(
+        m,
+        flat_lb,
+        flat_ub,
+        [],
+        [],
+    )
+    assert infeasible is False
+    assert not amp_mod.is_effectively_finite(float(flat_ub[0]))
+    assert not amp_mod.is_effectively_finite(float(flat_ub[1]))
+
+    cutoff_lb, cutoff_ub = amp_mod._tighten_bounds_with_objective_cutoff(
+        m,
+        flat_lb,
+        flat_ub,
+        cutoff=-0.3285279886580375,
+    )
+
+    assert amp_mod.is_effectively_finite(float(cutoff_ub[0]))
+    assert amp_mod.is_effectively_finite(float(cutoff_ub[1]))
+
+    amp_mod._apply_flat_bounds_to_model(m, cutoff_lb, cutoff_ub)
+    cutoff_lb, cutoff_ub, infeasible, _changed = tighten_root_bounds_with_fbbt(
+        m,
+        cutoff_lb,
+        cutoff_ub,
+        [],
+        [],
+    )
+    assert infeasible is False
+    assert cutoff_lb[0] > -10.0
+
+    oa_convexity = classify_oa_cut_convexity(m, use_certificate=True)
+    evaluator = NLPEvaluator(m)
+    cuts = generate_alphabb_quadratic_oa_cuts_from_evaluator(
+        evaluator,
+        np.array([-0.57718987, 0.27099034, 0.55958528], dtype=np.float64),
+        cutoff_lb,
+        cutoff_ub,
+        constraint_senses=[c.sense for c in m._constraints],
+        convex_mask=oa_convexity.constraint_mask,
+    )
+
+    assert len(cuts) == 1
+
+
 def test_amp_appends_alphabb_cut_for_issue_63_quadratic(monkeypatch):
     """AMP should append an alpha-BB cut for the nonconvex quadratic row."""
     import discopt._jax.cutting_planes as cutting_planes
