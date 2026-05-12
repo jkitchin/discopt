@@ -195,6 +195,15 @@ def _linear_expr_bounds(
     return lower, upper
 
 
+def _constant_value(expr: Expression) -> Optional[float]:
+    if not isinstance(expr, Constant):
+        return None
+    values = np.asarray(expr.value, dtype=np.float64).ravel()
+    if values.size != 1:
+        return None
+    return float(values[0])
+
+
 def _normalize_convhull_formulation(formulation: str) -> str:
     """Normalize accepted bilinear convex-hull mode names."""
     aliases = {
@@ -492,6 +501,8 @@ def _univariate_arg(expr: Expression) -> tuple[str, Expression] | None:
             return name, expr.args[0]
     if isinstance(expr, UnaryOp) and expr.op == "abs":
         return "abs", expr.operand
+    if isinstance(expr, BinaryOp) and expr.op == "/" and _constant_value(expr.left) is not None:
+        return "reciprocal", expr.right
     return None
 
 
@@ -509,6 +520,8 @@ def _univariate_value(func_name: str, x: float) -> float:
         return float(np.exp(x))
     if func_name == "abs":
         return float(abs(x))
+    if func_name == "reciprocal":
+        return float(1.0 / x)
     raise ValueError(f"Unsupported univariate function: {func_name}")
 
 
@@ -524,6 +537,8 @@ def _univariate_grad(func_name: str, x: float) -> float:
         return float(1.0 / (x * np.log(10.0)))
     if func_name == "exp":
         return float(np.exp(x))
+    if func_name == "reciprocal":
+        return float(-1.0 / (x * x))
     raise ValueError(f"No smooth derivative for univariate function: {func_name}")
 
 
@@ -541,6 +556,8 @@ def _univariate_domain_ok(func_name: str, arg_lb: float, arg_ub: float) -> bool:
         return bool(arg_ub <= _MAX_FINITE_EXP_ARG)
     if func_name == "abs":
         return True
+    if func_name == "reciprocal":
+        return bool(arg_lb > 0.0)
     return False
 
 
@@ -562,7 +579,7 @@ def _tangent_points(func_name: str, lb: float, ub: float) -> list[float]:
     for pt in raw_points:
         if func_name == "sqrt" and pt <= 0.0:
             continue
-        if func_name in {"log", "log2", "log10"} and pt <= 0.0:
+        if func_name in {"log", "log2", "log10", "reciprocal"} and pt <= 0.0:
             continue
         if not np.isfinite(pt):
             continue
@@ -571,16 +588,112 @@ def _tangent_points(func_name: str, lb: float, ub: float) -> list[float]:
     return points
 
 
+def _univariate_signature(
+    func_name: str,
+    arg_coeff: np.ndarray,
+    arg_const: float,
+) -> tuple[str, tuple[float, ...], float]:
+    return func_name, tuple(float(c) for c in arg_coeff.tolist()), float(arg_const)
+
+
+def _flatten_additive_terms(
+    expr: Expression, scale: float, out: list[tuple[float, Expression]]
+) -> None:
+    if isinstance(expr, BinaryOp) and expr.op == "+":
+        _flatten_additive_terms(expr.left, scale, out)
+        _flatten_additive_terms(expr.right, scale, out)
+        return
+    if isinstance(expr, BinaryOp) and expr.op == "-":
+        _flatten_additive_terms(expr.left, scale, out)
+        _flatten_additive_terms(expr.right, -scale, out)
+        return
+    if isinstance(expr, SumOverExpression):
+        for term in expr.terms:
+            _flatten_additive_terms(term, scale, out)
+        return
+    out.append((scale, expr))
+
+
+def _match_scaled_constant_division(
+    expr: Expression,
+    scale: float,
+) -> Optional[tuple[float, Expression]]:
+    """Return (scaled numerator, denominator) for scale * (c / denominator)."""
+    if isinstance(expr, UnaryOp) and expr.op == "neg":
+        return _match_scaled_constant_division(expr.operand, -scale)
+
+    if isinstance(expr, BinaryOp) and expr.op == "*":
+        left_const = _constant_value(expr.left)
+        if left_const is not None:
+            return _match_scaled_constant_division(expr.right, scale * left_const)
+        right_const = _constant_value(expr.right)
+        if right_const is not None:
+            return _match_scaled_constant_division(expr.left, scale * right_const)
+        return None
+
+    if not isinstance(expr, BinaryOp) or expr.op != "/":
+        return None
+    numerator = _constant_value(expr.left)
+    if numerator is None or abs(numerator) <= 1e-12:
+        return None
+    return scale * numerator, expr.right
+
+
+def _exact_positive_reciprocal_row(
+    expr: Expression,
+    model: Model,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> Optional[tuple[np.ndarray, float]]:
+    """Match ``constant - numerator / positive_affine <= 0`` as an exact affine row."""
+    terms: list[tuple[float, Expression]] = []
+    _flatten_additive_terms(expr, 1.0, terms)
+
+    constant_term = 0.0
+    reciprocal_match: Optional[tuple[float, Expression]] = None
+
+    for scale, term in terms:
+        const_val = _constant_value(term)
+        if const_val is not None:
+            constant_term += scale * const_val
+            continue
+
+        match = _match_scaled_constant_division(term, scale)
+        if match is None or reciprocal_match is not None:
+            return None
+        reciprocal_match = match
+
+    if reciprocal_match is None or constant_term <= 0.0:
+        return None
+
+    scaled_numerator, denominator = reciprocal_match
+    if scaled_numerator >= 0.0:
+        return None
+
+    try:
+        denom_coeff, denom_const = _linearize_affine_expr(denominator, model, len(flat_lb))
+        denom_lb, _denom_ub = _linear_expr_bounds(denom_coeff, denom_const, flat_lb, flat_ub)
+    except ValueError:
+        return None
+
+    if denom_lb <= 0.0:
+        return None
+    rhs = -scaled_numerator / constant_term
+    if not np.isfinite(rhs):
+        return None
+    return denom_coeff, float(rhs - denom_const)
+
+
 def _collect_univariate_relaxations(
     model: Model,
     n_orig: int,
     flat_lb: np.ndarray,
     flat_ub: np.ndarray,
     start_col: int,
-) -> tuple[list[UnivariateRelaxation], dict[int, int], list[tuple[float, float]]]:
+) -> tuple[list[UnivariateRelaxation], dict[object, int], list[tuple[float, float]]]:
     """Collect supported univariate operator nodes and assign auxiliary columns."""
     relaxations: list[UnivariateRelaxation] = []
-    var_map: dict[int, int] = {}
+    var_map: dict[object, int] = {}
     bounds: list[tuple[float, float]] = []
     seen: set[int] = set()
     col_idx = start_col
@@ -604,8 +717,14 @@ def _collect_univariate_relaxations(
         val_lb, val_ub = _univariate_value_bounds(func_name, arg_lb, arg_ub)
         if not np.isfinite(val_lb) or not np.isfinite(val_ub):
             return
+        signature = _univariate_signature(func_name, arg_coeff, arg_const)
+        if signature in var_map:
+            seen.add(expr_id)
+            var_map[expr_id] = var_map[signature]
+            return
         seen.add(expr_id)
         var_map[expr_id] = col_idx
+        var_map[signature] = col_idx
         relaxations.append(
             UnivariateRelaxation(
                 expr_id=expr_id,
@@ -659,7 +778,7 @@ def _linearize_expr(
     trilinear_var_map: dict[tuple[int, int, int], int],
     multilinear_var_map: dict[tuple[int, ...], int],
     monomial_var_map: dict[tuple[int, int], int],
-    univariate_var_map: dict[int, int],
+    univariate_var_map: dict[object, int],
     n_total_vars: int,
     fractional_power_var_map: Optional[dict[tuple[int, float], int]] = None,
 ) -> tuple[np.ndarray, float]:
@@ -673,6 +792,7 @@ def _linearize_expr(
     """
     coeff = np.zeros(n_total_vars, dtype=np.float64)
     const_acc: list[float] = [0.0]
+    n_orig = sum(var.size for var in model._variables)
 
     def visit(e: Expression, scale: float) -> None:  # noqa: C901
         if isinstance(e, Constant):
@@ -713,6 +833,21 @@ def _linearize_expr(
             elif e.op == "/":
                 if isinstance(e.right, Constant):
                     visit(e.left, scale / float(e.right.value))
+                elif isinstance(e.left, Constant):
+                    aux_col = univariate_var_map.get(id(e))
+                    if aux_col is None:
+                        try:
+                            arg_coeff, arg_const = _linearize_affine_expr(e.right, model, n_orig)
+                        except ValueError:
+                            aux_col = None
+                        else:
+                            aux_col = univariate_var_map.get(
+                                _univariate_signature("reciprocal", arg_coeff, arg_const)
+                            )
+                    if aux_col is not None:
+                        coeff[aux_col] += scale * float(e.left.value)
+                    else:
+                        raise ValueError(f"Cannot linearize non-constant division: {e}")
                 else:
                     raise ValueError(f"Cannot linearize non-constant division: {e}")
 
@@ -728,11 +863,12 @@ def _linearize_expr(
                         if n_int == 0:
                             const_acc[0] += scale
                             return
-                        key = (flat, n_int)
-                        if key in monomial_var_map:
-                            coeff[monomial_var_map[key]] += scale
-                            return
-                        raise ValueError(f"Monomial {key} not in monomial_var_map")
+                        if n_int >= 2:
+                            key = (flat, n_int)
+                            if key in monomial_var_map:
+                                coeff[monomial_var_map[key]] += scale
+                                return
+                            raise ValueError(f"Monomial {key} not in monomial_var_map")
                     fp_key = (flat, exp_val)
                     if fractional_power_var_map and fp_key in fractional_power_var_map:
                         coeff[fractional_power_var_map[fp_key]] += scale
@@ -908,7 +1044,7 @@ def build_milp_relaxation(
     multilinear_var_map: dict[tuple[int, ...], int] = {}
     multilinear_stage_map: dict[tuple[int, ...], list[dict[str, int]]] = {}
     monomial_var_map: dict[tuple[int, int], int] = {}
-    univariate_var_map: dict[int, int] = {}
+    univariate_var_map: dict[object, int] = {}
     fractional_power_var_map: dict[tuple[int, float], int] = {}
 
     col_idx = n_orig
@@ -1779,7 +1915,7 @@ def build_milp_relaxation(
         secant_slope = (f_ub - f_lb) / (ub_u - lb_u)
         secant_intercept = f_lb - secant_slope * lb_u
 
-        if relax.func_name == "exp":
+        if relax.func_name in {"exp", "reciprocal"}:
             # Convex: tangents are lower bounds; secant is an upper bound.
             for pt in _tangent_points(relax.func_name, lb_u, ub_u):
                 slope = _univariate_grad(relax.func_name, pt)
@@ -1889,6 +2025,13 @@ def build_milp_relaxation(
     for constraint in model._constraints:
         body = distribute_products(constraint.body)
         sense = constraint.sense
+        if sense == "<=":
+            exact_row = _exact_positive_reciprocal_row(body, model, flat_lb, flat_ub)
+            if exact_row is not None:
+                c_exact, rhs_exact = exact_row
+                row_exact = np.zeros(n_total)
+                row_exact[:n_orig] = c_exact
+                _add_row(row_exact, rhs_exact)
         try:
             c, const = _linearize_expr(
                 body,
@@ -2000,8 +2143,12 @@ def build_milp_relaxation(
         "multilinear_stages": multilinear_stage_map,
         "monomial": monomial_var_map,
         "monomial_pw": monomial_pw_map,
-        "univariate": univariate_var_map,
+        "univariate": {k: v for k, v in univariate_var_map.items() if isinstance(k, int)},
+        "univariate_signatures": {
+            k: v for k, v in univariate_var_map.items() if not isinstance(k, int)
+        },
         "univariate_relaxations": univariate_relaxations,
+        "fractional_power": fractional_power_var_map,
         "bilinear_pw": bilinear_pw_map,
         "bilinear_lambda": bilinear_lambda_map,
         "convhull_formulation": convhull_mode,
