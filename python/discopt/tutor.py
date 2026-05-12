@@ -489,4 +489,5 @@ def run(args) -> int:
             file=sys.stderr,
         )
         return 1
-    return args.tutor_func(args, course_dir)
+    rc: int = args.tutor_func(args, course_dir)
+    return rc
