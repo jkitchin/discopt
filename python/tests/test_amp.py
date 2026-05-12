@@ -2255,6 +2255,128 @@ def test_alphabb_cutoff_obbt_option_controls_prerequisite_pass(
     assert len(calls) == expected_obbt_calls
 
 
+def test_run_cutoff_obbt_returns_without_time_after_deadline(monkeypatch):
+    """Expired AMP deadlines must not be converted into a fresh OBBT budget."""
+    from discopt._jax import milp_relaxation as milp_relaxation_mod
+    from discopt.solvers import amp as amp_mod
+
+    build_calls = []
+
+    def fail_build_relaxation(*args, **kwargs):
+        build_calls.append((args, kwargs))
+        raise AssertionError("cutoff OBBT should not build a relaxation after the deadline")
+
+    monkeypatch.setattr(
+        milp_relaxation_mod,
+        "build_milp_relaxation",
+        fail_build_relaxation,
+    )
+
+    m = Model("expired_cutoff_obbt")
+    x = m.continuous("x")
+    m.minimize(x)
+    flat_lb = np.array([-np.inf], dtype=np.float64)
+    flat_ub = np.array([np.inf], dtype=np.float64)
+    part_vars = [0]
+    part_lbs = [-1.0]
+    part_ubs = [1.0]
+
+    result = amp_mod._run_cutoff_obbt(
+        model=m,
+        terms=SimpleNamespace(partition_candidates=[0]),
+        disc_state=SimpleNamespace(partitions={}),
+        oa_cuts=[],
+        convhull_mode="sos2",
+        UB=0.0,
+        flat_lb=flat_lb,
+        flat_ub=flat_ub,
+        part_vars=part_vars,
+        part_lbs=part_lbs,
+        part_ubs=part_ubs,
+        n_orig=1,
+        obbt_time_limit=30.0,
+        partition_scaling_factor=0.1,
+        disc_abs_width_tol=1e-9,
+        n_init_partitions=2,
+        deadline=amp_mod.time.perf_counter() - 1.0,
+        iteration=1,
+        from_min_space=float,
+    )
+
+    result_lb, result_ub, result_part_vars, result_part_lbs, result_part_ubs = result
+    assert result_lb is flat_lb
+    assert result_ub is flat_ub
+    assert result_part_vars is part_vars
+    assert result_part_lbs is part_lbs
+    assert result_part_ubs is part_ubs
+    assert build_calls == []
+
+
+def test_alphabb_cutoff_obbt_prerequisite_respects_expired_deadline(monkeypatch):
+    """The default alpha-BB prerequisite pass must honor the global AMP deadline."""
+    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    from discopt.solvers import amp as amp_mod
+
+    cutoff_obbt_calls = []
+
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_milp_with_oa_recovery",
+        lambda **kwargs: (
+            MilpRelaxationResult(
+                status="optimal",
+                objective=-1.0,
+                x=np.array([0.0, 0.0], dtype=np.float64),
+            ),
+            {},
+            [],
+            1,
+        ),
+    )
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_best_nlp_candidate",
+        lambda *args, **kwargs: (np.array([0.0, 0.0], dtype=np.float64), 0.0),
+    )
+
+    def fake_cutoff_obbt(**kwargs):
+        cutoff_obbt_calls.append(kwargs["iteration"])
+        return (
+            kwargs["flat_lb"],
+            kwargs["flat_ub"],
+            kwargs["part_vars"],
+            kwargs["part_lbs"],
+            kwargs["part_ubs"],
+        )
+
+    monkeypatch.setattr(amp_mod, "_run_cutoff_obbt", fake_cutoff_obbt)
+
+    clock_values = iter([0.0, 0.1, 2.0])
+
+    def fake_perf_counter():
+        return next(clock_values, 2.0)
+
+    monkeypatch.setattr(amp_mod.time, "perf_counter", fake_perf_counter)
+
+    m = Model("alphabb_cutoff_obbt_expired_deadline")
+    x = m.continuous("x")
+    y = m.continuous("y")
+    m.minimize(x + y**2)
+    m.subject_to(x**2 <= y**2 + 1.0)
+
+    result = m.solve(
+        solver="amp",
+        apply_partitioning=False,
+        skip_convex_check=True,
+        presolve_bt=False,
+        max_iter=1,
+        time_limit=1.0,
+    )
+
+    assert result.status in ("optimal", "feasible")
+    assert cutoff_obbt_calls == []
+
+
 def test_objective_cutoff_bounds_enable_alphabb_for_issue_63_instances():
     """The exact nlp_008 objective cutoff should create finite alpha-BB bounds."""
     from discopt._jax.convexity import classify_oa_cut_convexity

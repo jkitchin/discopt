@@ -1780,6 +1780,10 @@ def _run_cutoff_obbt(
     relaxation reflects the latest envelope strength.  Returns possibly
     updated (flat_lb, flat_ub, part_vars, part_lbs, part_ubs).
     """
+    remaining_wall_time = _remaining_wall_time(deadline)
+    if remaining_wall_time is not None and remaining_wall_time <= 0.0:
+        return flat_lb, flat_ub, part_vars, part_lbs, part_ubs
+
     try:
         from discopt._jax.milp_relaxation import build_milp_relaxation
         from discopt._jax.obbt import run_obbt_on_relaxation
@@ -1795,8 +1799,18 @@ def _run_cutoff_obbt(
         candidates = sorted(set(part_vars) | set(terms.partition_candidates))
         if not candidates:
             return flat_lb, flat_ub, part_vars, part_lbs, part_ubs
-        per_lp = max(0.05, min(1.0, obbt_time_limit / max(1, 2 * len(candidates))))
-        remaining = max(1.0, min(obbt_time_limit, deadline - time.perf_counter()))
+        remaining_wall_time = _remaining_wall_time(deadline)
+        if remaining_wall_time is not None and remaining_wall_time <= 0.0:
+            return flat_lb, flat_ub, part_vars, part_lbs, part_ubs
+        remaining = obbt_time_limit
+        if remaining_wall_time is not None:
+            remaining = min(remaining, remaining_wall_time)
+        if remaining <= 0.0:
+            return flat_lb, flat_ub, part_vars, part_lbs, part_ubs
+        per_lp = min(
+            remaining,
+            max(0.05, min(1.0, obbt_time_limit / max(1, 2 * len(candidates)))),
+        )
         result = run_obbt_on_relaxation(
             cutoff_relax,
             n_orig=n_orig,
@@ -2454,9 +2468,12 @@ def solve_amp(
                         "AMP objective cutoff tightened bounds before alpha-BB OA generation"
                     )
 
+            remaining_for_cutoff_obbt = _remaining_wall_time(deadline)
             if (
                 UB < np.inf
                 and not _cutoff_obbt_done
+                and remaining_for_cutoff_obbt is not None
+                and remaining_for_cutoff_obbt > 0.0
                 and (
                     obbt_with_cutoff
                     or (alphabb_cutoff_obbt and has_nonconvex_oa_row and had_effectively_unbounded)
