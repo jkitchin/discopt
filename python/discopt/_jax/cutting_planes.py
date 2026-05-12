@@ -21,6 +21,16 @@ import numpy as np
 
 from discopt._jax.nonlinear_bound_tightening import is_effectively_finite
 from discopt.constants import ALPHABB_EPS, ALPHABB_SAFETY
+from discopt.modeling.core import (
+    BinaryOp,
+    Constant,
+    Expression,
+    IndexExpression,
+    Model,
+    SumOverExpression,
+    UnaryOp,
+    Variable,
+)
 
 
 class LinearCut(NamedTuple):
@@ -290,40 +300,188 @@ def generate_oa_cuts_from_evaluator(
     return cuts
 
 
-def _constraint_row_hessian(evaluator, row_idx: int, x_sol: np.ndarray) -> np.ndarray:
-    """Evaluate the Hessian for one scalar constraint row."""
-    lam = np.zeros(evaluator.n_constraints, dtype=np.float64)
-    lam[row_idx] = 1.0
-    hess: np.ndarray = np.asarray(
-        evaluator.evaluate_lagrangian_hessian(x_sol, 0.0, lam),
-        dtype=np.float64,
-    )
-    sym_hess: np.ndarray = 0.5 * (hess + hess.T)
-    return sym_hess
+QuadraticPolynomial = dict[tuple[int, ...], float]
 
 
-def _quadratic_probe_point(x_sol: np.ndarray, x_lb: np.ndarray, x_ub: np.ndarray) -> np.ndarray:
-    """Build a nearby point for checking that a row Hessian is constant."""
-    probe: np.ndarray = np.asarray(x_sol, dtype=np.float64).copy()
-    for idx in range(probe.size):
-        lb_i = float(x_lb[idx])
-        ub_i = float(x_ub[idx])
-        if is_effectively_finite(lb_i) and is_effectively_finite(ub_i):
-            width = ub_i - lb_i
-            if width <= 1e-10:
-                continue
-            step = min(max(0.173 * width, 1e-4), 1.0)
-        else:
-            step = 1.0
+def _constant_scalar(expr: Expression) -> Optional[float]:
+    """Return a scalar constant value, or None when the expression is not scalar constant."""
+    if not isinstance(expr, Constant):
+        return None
+    value = np.asarray(expr.value, dtype=np.float64)
+    if value.shape != ():
+        return None
+    return float(value)
 
-        direction = 1.0 if idx % 2 == 0 else -1.0
-        candidate = probe[idx] + direction * step
-        if candidate < lb_i - 1e-12 or candidate > ub_i + 1e-12:
-            candidate = probe[idx] - direction * step
-        if candidate < lb_i - 1e-12 or candidate > ub_i + 1e-12:
-            continue
-        probe[idx] = candidate
-    return probe
+
+def _var_offset(var: Variable, model: Model) -> int:
+    """Return a variable's start index in the flattened model vector."""
+    offset = 0
+    for existing in model._variables[: var._index]:
+        offset += existing.size
+    return offset
+
+
+def _scalar_var_index(expr: Expression, model: Model) -> Optional[int]:
+    """Return the flat index for a scalar variable expression."""
+    if isinstance(expr, Variable):
+        if expr.size == 1:
+            return _var_offset(expr, model)
+        return None
+    if isinstance(expr, IndexExpression) and isinstance(expr.base, Variable):
+        base_offset = _var_offset(expr.base, model)
+        idx = expr.index
+        if isinstance(idx, int):
+            return base_offset + idx
+        if isinstance(idx, tuple) and len(idx) == 1 and isinstance(idx[0], int):
+            return base_offset + idx[0]
+    return None
+
+
+def _cleanup_polynomial(poly: QuadraticPolynomial) -> QuadraticPolynomial:
+    """Drop numerical zero coefficients from a structural polynomial."""
+    return {key: coeff for key, coeff in poly.items() if abs(coeff) > 1e-14}
+
+
+def _scale_polynomial(poly: QuadraticPolynomial, scale: float) -> QuadraticPolynomial:
+    """Scale polynomial coefficients."""
+    return _cleanup_polynomial({key: scale * coeff for key, coeff in poly.items()})
+
+
+def _add_polynomials(
+    left: QuadraticPolynomial,
+    right: QuadraticPolynomial,
+    right_scale: float = 1.0,
+) -> QuadraticPolynomial:
+    """Add two polynomials, optionally scaling the right operand."""
+    result = dict(left)
+    for key, coeff in right.items():
+        result[key] = result.get(key, 0.0) + right_scale * coeff
+    return _cleanup_polynomial(result)
+
+
+def _multiply_polynomials(
+    left: QuadraticPolynomial,
+    right: QuadraticPolynomial,
+) -> Optional[QuadraticPolynomial]:
+    """Multiply two polynomials, rejecting terms above degree two."""
+    result: QuadraticPolynomial = {}
+    for left_key, left_coeff in left.items():
+        for right_key, right_coeff in right.items():
+            key = tuple(sorted(left_key + right_key))
+            if len(key) > 2:
+                return None
+            result[key] = result.get(key, 0.0) + left_coeff * right_coeff
+    return _cleanup_polynomial(result)
+
+
+def _quadratic_polynomial(expr: Expression, model: Model) -> Optional[QuadraticPolynomial]:
+    """Extract a scalar polynomial of degree at most two, or None if unsupported."""
+    const_val = _constant_scalar(expr)
+    if const_val is not None:
+        return {(): const_val}
+
+    flat_idx = _scalar_var_index(expr, model)
+    if flat_idx is not None:
+        return {(flat_idx,): 1.0}
+
+    if isinstance(expr, UnaryOp) and expr.op == "neg":
+        operand = _quadratic_polynomial(expr.operand, model)
+        if operand is None:
+            return None
+        return _scale_polynomial(operand, -1.0)
+
+    if isinstance(expr, SumOverExpression):
+        result: QuadraticPolynomial = {}
+        for term in expr.terms:
+            term_poly = _quadratic_polynomial(term, model)
+            if term_poly is None:
+                return None
+            result = _add_polynomials(result, term_poly)
+        return result
+
+    if not isinstance(expr, BinaryOp):
+        return None
+
+    if expr.op in {"+", "-"}:
+        left = _quadratic_polynomial(expr.left, model)
+        right = _quadratic_polynomial(expr.right, model)
+        if left is None or right is None:
+            return None
+        return _add_polynomials(left, right, -1.0 if expr.op == "-" else 1.0)
+
+    if expr.op == "*":
+        left = _quadratic_polynomial(expr.left, model)
+        right = _quadratic_polynomial(expr.right, model)
+        if left is None or right is None:
+            return None
+        return _multiply_polynomials(left, right)
+
+    if expr.op == "/":
+        denom = _constant_scalar(expr.right)
+        if denom is None or abs(denom) <= 1e-14:
+            return None
+        left = _quadratic_polynomial(expr.left, model)
+        if left is None:
+            return None
+        return _scale_polynomial(left, 1.0 / denom)
+
+    if expr.op == "**":
+        exponent = _constant_scalar(expr.right)
+        if exponent is None or abs(exponent - round(exponent)) > 1e-12:
+            return None
+        exponent_int = int(round(exponent))
+        if exponent_int == 0:
+            return {(): 1.0}
+        if exponent_int == 1:
+            return _quadratic_polynomial(expr.left, model)
+        if exponent_int == 2:
+            base = _quadratic_polynomial(expr.left, model)
+            if base is None:
+                return None
+            return _multiply_polynomials(base, base)
+        return None
+
+    return None
+
+
+def _quadratic_hessian_from_polynomial(poly: QuadraticPolynomial, n_vars: int) -> np.ndarray:
+    """Build a Hessian matrix from a structural quadratic polynomial."""
+    hess = np.zeros((n_vars, n_vars), dtype=np.float64)
+    for key, coeff in poly.items():
+        if len(key) == 2:
+            i, j = key
+            if i == j:
+                hess[i, i] += 2.0 * coeff
+            else:
+                hess[i, j] += coeff
+                hess[j, i] += coeff
+    return hess
+
+
+def _constraint_row_quadratic_hessian(
+    evaluator,
+    row_idx: int,
+    n_vars: int,
+) -> Optional[np.ndarray]:
+    """Return a structural quadratic Hessian for a scalar constraint row."""
+    model = getattr(evaluator, "_model", None)
+    source_constraints = getattr(evaluator, "_source_constraints", None)
+    flat_sizes = getattr(evaluator, "_constraint_flat_sizes", None)
+    if model is None or source_constraints is None or flat_sizes is None:
+        return None
+
+    offset = 0
+    for constraint, flat_size_raw in zip(source_constraints, flat_sizes):
+        flat_size = int(flat_size_raw)
+        if row_idx < offset + flat_size:
+            if flat_size != 1 or row_idx != offset:
+                return None
+            poly = _quadratic_polynomial(constraint.body, model)
+            if poly is None:
+                return None
+            return _quadratic_hessian_from_polynomial(poly, n_vars)
+        offset += flat_size
+    return None
 
 
 def generate_alphabb_quadratic_oa_cuts_from_evaluator(
@@ -362,7 +520,6 @@ def generate_alphabb_quadratic_oa_cuts_from_evaluator(
 
     cons_vals = evaluator.evaluate_constraints(x_sol)
     jac = evaluator.evaluate_jacobian(x_sol)
-    probe = _quadratic_probe_point(x_sol, x_lb, x_ub)
 
     cuts: list[LinearCut] = []
     for k in range(m):
@@ -371,9 +528,8 @@ def generate_alphabb_quadratic_oa_cuts_from_evaluator(
         if constraint_senses[k] != "<=":
             continue
 
-        hess = _constraint_row_hessian(evaluator, k, x_sol)
-        probe_hess = _constraint_row_hessian(evaluator, k, probe)
-        if not np.allclose(hess, probe_hess, atol=hessian_tol, rtol=0.0):
+        hess = _constraint_row_quadratic_hessian(evaluator, k, x_sol.size)
+        if hess is None:
             continue
 
         curved = np.flatnonzero(np.any(np.abs(hess) > hessian_tol, axis=0))
@@ -549,7 +705,6 @@ def detect_bilinear_terms(model) -> list[BilinearTerm]:
     """
     from discopt.modeling.core import (
         BinaryOp,
-        Expression,
         IndexExpression,
         Variable,
     )

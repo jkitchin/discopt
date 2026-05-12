@@ -2082,6 +2082,31 @@ def test_alphabb_quadratic_oa_cut_covers_issue_63_row():
         assert float(np.dot(cut.coeffs, point)) <= cut.rhs + 1e-8
 
 
+def test_alphabb_quadratic_oa_skips_nonquadratic_row():
+    """Nonquadratic rows must not be accepted by local Hessian coincidence."""
+    from discopt._jax.cutting_planes import generate_alphabb_quadratic_oa_cuts_from_evaluator
+    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._jax.nlp_evaluator import NLPEvaluator
+
+    m = Model("nonquadratic_alphabb_skip")
+    x = m.continuous("x", lb=-1.0, ub=1.0)
+    m.subject_to(-(x**4) <= -1.0)
+    m.minimize(x)
+
+    evaluator = NLPEvaluator(m)
+    flat_lb, flat_ub = flat_variable_bounds(m)
+    cuts = generate_alphabb_quadratic_oa_cuts_from_evaluator(
+        evaluator,
+        np.array([-0.173], dtype=np.float64),
+        flat_lb,
+        flat_ub,
+        constraint_senses=[c.sense for c in m._constraints],
+        convex_mask=[False],
+    )
+
+    assert cuts == []
+
+
 def test_amp_appends_alphabb_cut_for_issue_63_quadratic(monkeypatch):
     """AMP should append an alpha-BB cut for the nonconvex quadratic row."""
     import discopt._jax.cutting_planes as cutting_planes
@@ -2140,6 +2165,79 @@ def test_amp_appends_alphabb_cut_for_issue_63_quadratic(monkeypatch):
     coeffs, rhs = captured_cuts[0]
     assert np.linalg.norm(coeffs) > 1e-12
     assert np.isfinite(rhs)
+
+
+def test_amp_keeps_direct_oa_when_alphabb_generation_fails(monkeypatch):
+    """Alpha-BB failures should not suppress already generated convex OA cuts."""
+    import discopt._jax.cutting_planes as cutting_planes
+    from discopt._jax.cutting_planes import LinearCut
+    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    from discopt.solvers import amp as amp_mod
+
+    captured_cuts = []
+
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_milp_with_oa_recovery",
+        lambda **kwargs: (
+            MilpRelaxationResult(
+                status="optimal",
+                objective=0.0,
+                x=np.array([1.0], dtype=np.float64),
+            ),
+            {},
+            [],
+            1,
+        ),
+    )
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_best_nlp_candidate",
+        lambda *args, **kwargs: (np.array([1.0], dtype=np.float64), 1.0),
+    )
+    monkeypatch.setattr(
+        cutting_planes,
+        "generate_oa_cuts_from_evaluator",
+        lambda *args, **kwargs: [
+            LinearCut(coeffs=np.array([1.0], dtype=np.float64), rhs=2.0, sense="<=")
+        ],
+    )
+
+    def fail_alphabb(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("alpha-BB failure")
+
+    def spy_prune(oa_cuts, max_cuts=128):
+        del max_cuts
+        captured_cuts[:] = list(oa_cuts)
+        return None
+
+    monkeypatch.setattr(
+        cutting_planes,
+        "generate_alphabb_quadratic_oa_cuts_from_evaluator",
+        fail_alphabb,
+    )
+    monkeypatch.setattr(amp_mod, "_prune_oa_cuts", spy_prune)
+
+    m = Model("direct_oa_survives_alphabb_failure")
+    x = m.continuous("x", lb=0.0, ub=2.0)
+    m.subject_to(x <= 2.0)
+    m.minimize(x)
+
+    result = m.solve(
+        solver="amp",
+        apply_partitioning=False,
+        skip_convex_check=True,
+        presolve_bt=False,
+        max_iter=1,
+        time_limit=5,
+    )
+
+    assert result.status in ("optimal", "feasible")
+    assert len(captured_cuts) == 1
+    coeffs, rhs = captured_cuts[0]
+    np.testing.assert_allclose(coeffs, np.array([1.0], dtype=np.float64))
+    assert rhs == pytest.approx(2.0)
 
 
 def test_amp_root_presolve_preserves_heterogeneous_array_bounds():

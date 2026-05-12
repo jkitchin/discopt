@@ -2278,16 +2278,24 @@ def solve_amp(
                             constraint_senses=_senses,
                             convex_mask=oa_convexity.constraint_mask,
                         )
-                        cuts.extend(
-                            generate_alphabb_quadratic_oa_cuts_from_evaluator(
-                                evaluator,
-                                _x_orig,
-                                flat_lb,
-                                flat_ub,
-                                constraint_senses=_senses,
-                                convex_mask=oa_convexity.constraint_mask,
+
+                        try:
+                            cuts.extend(
+                                generate_alphabb_quadratic_oa_cuts_from_evaluator(
+                                    evaluator,
+                                    _x_orig,
+                                    flat_lb,
+                                    flat_ub,
+                                    constraint_senses=_senses,
+                                    convex_mask=oa_convexity.constraint_mask,
+                                )
                             )
-                        )
+                        except Exception as _alphabb_oa_err:
+                            logger.debug(
+                                "AMP: alpha-BB OA cut computation failed: %s",
+                                _alphabb_oa_err,
+                            )
+
                         for cut in cuts:
                             if np.linalg.norm(cut.coeffs) < 1e-12:
                                 continue
