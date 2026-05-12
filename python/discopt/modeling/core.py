@@ -883,6 +883,9 @@ class SolveResult:
     nlp_bb: bool = False
     gap_certified: bool = True
 
+    # Examiner-style validation report (populated if validate=True).
+    validation_report: Optional[object] = None
+
     # LLM explanation (populated if llm=True)
     _explanation: Optional[str] = None
     _model: Optional["Model"] = None
@@ -1804,6 +1807,7 @@ class Model:
         incumbent_callback: Optional[Callable] = None,
         node_callback: Optional[Callable] = None,
         solver: Optional[str] = None,
+        validate: bool = False,
         **kwargs,
     ) -> Union[SolveResult, Iterator["SolveUpdate"]]:
         r"""
@@ -1864,6 +1868,11 @@ class Model:
         node_callback : callable, optional
             Node callback. Called after each batch of nodes is processed.
             Should accept ``(ctx, model)`` and return ``None``.
+        validate : bool, default False
+            If True, run Examiner-style KKT validation on the returned
+            point and attach the :class:`~discopt.validation.ExaminerReport`
+            to ``result.validation_report``. Errors during validation are
+            swallowed and leave ``validation_report`` as ``None``.
         \*\*kwargs
             Additional keyword arguments passed to the solver backend.
 
@@ -1941,6 +1950,14 @@ class Model:
                 result._explanation = result._explain_with_llm()
             except Exception:
                 pass
+
+        if validate and result.x is not None:
+            try:
+                from discopt.validation.examiner import examine
+
+                result.validation_report = examine(result, self)
+            except Exception:
+                result.validation_report = None
 
         return result
 

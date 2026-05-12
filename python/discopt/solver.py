@@ -3165,9 +3165,57 @@ def _solve_nlp_bb(
         if obj_val >= _SENTINEL_THRESHOLD:
             incumbent = None
 
+    constraint_duals = None
+    bound_duals_lower = None
+    bound_duals_upper = None
+
     if incumbent is not None:
         sol_flat = np.array(sol_array)
         x_dict = _unpack_solution(model, sol_flat)
+
+        # Recover relaxation duals at the incumbent by re-solving the NLP with
+        # integer variables fixed. Best-effort — failures leave duals as None
+        # and the examiner falls back to its LSQ recovery.
+        try:
+            fix_lb = lb.copy()
+            fix_ub = ub.copy()
+            for off, sz in zip(int_offsets, int_sizes):
+                for k in range(int(sz)):
+                    val = float(round(float(sol_flat[off + k])))
+                    fix_lb[off + k] = val
+                    fix_ub[off + k] = val
+            recover_opts = dict(opts)
+            recover_opts["max_wall_time"] = max(
+                0.1, min(5.0, time_limit - (time.perf_counter() - t_start))
+            )
+            recover_opts.setdefault("print_level", 0)
+            nlp_recovered = _solve_node_nlp_ipopt(
+                evaluator, sol_flat, fix_lb, fix_ub, constraint_bounds, recover_opts
+            )
+            if nlp_recovered.status in (
+                SolveStatus.OPTIMAL,
+                SolveStatus.ITERATION_LIMIT,
+            ):
+                constraint_duals = _unpack_constraint_duals(evaluator, nlp_recovered.multipliers)
+                bound_duals_lower = _unpack_bound_duals(
+                    model, nlp_recovered.bound_multipliers_lower
+                )
+                bound_duals_upper = _unpack_bound_duals(
+                    model, nlp_recovered.bound_multipliers_upper
+                )
+                # Zero bound multipliers on integer columns: they reflect the
+                # cost of fixing the integer, not bound activity in the
+                # original model. The examiner already drops integer columns
+                # from stationarity, so zeros are safe here.
+                if bound_duals_lower is not None or bound_duals_upper is not None:
+                    for v in model._variables:
+                        if v.var_type in (VarType.BINARY, VarType.INTEGER):
+                            if bound_duals_lower is not None and v.name in bound_duals_lower:
+                                bound_duals_lower[v.name] = np.zeros_like(bound_duals_lower[v.name])
+                            if bound_duals_upper is not None and v.name in bound_duals_upper:
+                                bound_duals_upper[v.name] = np.zeros_like(bound_duals_upper[v.name])
+        except Exception as _exc:
+            logger.debug("NLP-BB dual recovery failed: %s", _exc)
 
         assert model._objective is not None
         if model._objective.sense == ObjectiveSense.MAXIMIZE:
@@ -3206,6 +3254,9 @@ def _solve_nlp_bb(
         python_time=python_time,
         nlp_bb=True,
         gap_certified=_gap_certified,
+        constraint_duals=constraint_duals,
+        bound_duals_lower=bound_duals_lower,
+        bound_duals_upper=bound_duals_upper,
     )
 
 
@@ -3747,16 +3798,259 @@ def _solve_node_nlp_ipopt(
     status_code = info["status"]
     status = _IPOPT_STATUS_MAP.get(status_code, SolveStatus.ERROR)
 
+    mult_g = info.get("mult_g")
+    mult_x_L = info.get("mult_x_L")
+    mult_x_U = info.get("mult_x_U")
+
     return NLPResult(
         status=status,
         x=np.asarray(x),
         objective=float(info["obj_val"]),
+        multipliers=np.asarray(mult_g) if mult_g is not None else None,
+        bound_multipliers_lower=np.asarray(mult_x_L) if mult_x_L is not None else None,
+        bound_multipliers_upper=np.asarray(mult_x_U) if mult_x_U is not None else None,
     )
 
 
 # ---------------------------------------------------------------------------
 # Specialized LP/QP solvers
 # ---------------------------------------------------------------------------
+
+
+def _scalar_constraint_layout(
+    model: Model,
+) -> Optional[tuple[list[str], list[tuple[str, str]]]]:
+    """Return per-row identity for the LP/QP fast paths, when all constraints
+    are scalar.
+
+    The algebraic and repr-based extractors used by ``extract_lp_data`` /
+    ``extract_qp_data`` partition rows into ``[equalities..., inequalities...]``
+    in the order constraints appear in ``model._constraints``. This helper
+    returns parallel lists ``(eq_names, ub_info)``:
+
+      - ``eq_names[i]`` is the constraint name for the ``i``-th equality row.
+      - ``ub_info[j] = (name, original_sense)`` for the ``j``-th inequality
+        row, where ``original_sense`` is ``"<="`` or ``">="`` (used to flip
+        the dual sign for ``">="`` constraints that the extractor negated).
+
+    Returns ``None`` if any constraint body is non-scalar — vector-bodied
+    constraints don't have a one-row-per-constraint mapping the LP path can
+    rely on, and the LP fast path's algebraic/repr extractors don't handle
+    them either.
+    """
+    eq_names: list[str] = []
+    ub_info: list[tuple[str, str]] = []
+    for idx, con in enumerate(model._constraints):
+        if not isinstance(con, Constraint):
+            continue
+        body_shape = getattr(con.body, "shape", ())
+        if body_shape not in ((), (1,)):
+            return None
+        name = con.name if con.name else f"c{idx}"
+        if con.sense == "==":
+            eq_names.append(name)
+        elif con.sense in ("<=", ">="):
+            ub_info.append((name, con.sense))
+        else:
+            return None
+    return eq_names, ub_info
+
+
+def _lp_qp_unpack_duals(
+    model: Model,
+    *,
+    row_dual: Optional[np.ndarray],
+    col_dual: Optional[np.ndarray],
+    n_eq: int,
+    n_ub: int,
+    n_orig: int,
+) -> tuple[
+    Optional[dict[str, np.ndarray]],
+    Optional[dict[str, np.ndarray]],
+    Optional[dict[str, np.ndarray]],
+]:
+    """Translate HiGHS row duals + reduced costs into discopt's named-dual
+    convention.
+
+    HiGHS row dual layout matches the constraint matrix the wrapper assembles:
+    ``A_ub`` rows first (multipliers ≥ 0), then ``A_eq`` rows (free).
+    ``_decompose_eq_slack_form`` emits inequalities to ``A_ub`` in declared
+    order, flipping the row sign for ``">="`` so HiGHS sees ``-body ≤ 0``;
+    we flip the multiplier back so the returned dual reflects the original
+    ``">="`` body (giving ``μ ≤ 0`` in the examiner convention).
+
+    Reduced costs are split into lower- and upper-bound multipliers using the
+    examiner's convention ``λ_lb = max(rc, 0)``, ``λ_ub = max(-rc, 0)``.
+
+    Returns ``(constraint_duals, bound_duals_lower, bound_duals_upper)``;
+    any entry may be ``None`` if the underlying solver did not return that
+    family of multipliers, or the row layout cannot be mapped (vector body,
+    extractor mismatch, etc.).
+    """
+    layout = _scalar_constraint_layout(model)
+    if layout is None:
+        return None, None, None
+    eq_names, ub_info = layout
+    if len(eq_names) != n_eq or len(ub_info) != n_ub:
+        return None, None, None
+
+    constraint_duals: Optional[dict[str, np.ndarray]] = None
+    if row_dual is not None and row_dual.size == n_ub + n_eq:
+        # HiGHS reports row duals as ∂obj/∂b. The examiner uses the Lagrangian
+        # convention μ s.t. ∇f + ∇body·μ = 0, with μ ≥ 0 for "<=" and μ ≤ 0
+        # for ">=", so we negate for "<=" and "==" rows. For ">=" the
+        # extractor already flipped the row to "-body ≤ const", which (after
+        # composing the two negations) leaves the HiGHS row_dual unflipped.
+        out: dict[str, np.ndarray] = {}
+        for j, (name, original_sense) in enumerate(ub_info):
+            rd = float(row_dual[j])
+            mu = rd if original_sense == ">=" else -rd
+            out[name] = np.asarray(mu, dtype=float).reshape(())
+        for i, name in enumerate(eq_names):
+            mu = -float(row_dual[n_ub + i])
+            out[name] = np.asarray(mu, dtype=float).reshape(())
+        constraint_duals = out
+
+    bound_duals_lower: Optional[dict[str, np.ndarray]] = None
+    bound_duals_upper: Optional[dict[str, np.ndarray]] = None
+    if col_dual is not None and col_dual.size >= n_orig:
+        rc = np.asarray(col_dual[:n_orig], dtype=float)
+        lam_lb = np.maximum(rc, 0.0)
+        lam_ub = np.maximum(-rc, 0.0)
+        lo: dict[str, np.ndarray] = {}
+        up: dict[str, np.ndarray] = {}
+        offset = 0
+        for v in model._variables:
+            sz = int(v.size)
+            chunk_lo = lam_lb[offset : offset + sz]
+            chunk_up = lam_ub[offset : offset + sz]
+            if v.shape == () or v.shape == (1,):
+                lo[v.name] = chunk_lo.reshape(v.shape) if v.shape == (1,) else chunk_lo.reshape(())
+                up[v.name] = chunk_up.reshape(v.shape) if v.shape == (1,) else chunk_up.reshape(())
+            else:
+                lo[v.name] = chunk_lo.reshape(v.shape)
+                up[v.name] = chunk_up.reshape(v.shape)
+            offset += sz
+        bound_duals_lower = lo
+        bound_duals_upper = up
+
+    return constraint_duals, bound_duals_lower, bound_duals_upper
+
+
+def _mip_recover_relaxation_duals(
+    model: Model,
+    *,
+    lp_data,
+    x_flat: np.ndarray,
+    n_orig: int,
+    A_ub: Optional[np.ndarray],
+    b_ub: Optional[np.ndarray],
+    A_eq: Optional[np.ndarray],
+    b_eq: Optional[np.ndarray],
+    time_limit: Optional[float] = None,
+    Q_orig: Optional[np.ndarray] = None,
+) -> tuple[
+    Optional[dict[str, np.ndarray]],
+    Optional[dict[str, np.ndarray]],
+    Optional[dict[str, np.ndarray]],
+]:
+    """Re-solve the relaxation with integer variables fixed at their MIP
+    incumbent so HiGHS returns row duals + reduced costs we can map back to
+    discopt's named-dual convention.
+
+    Pass ``Q_orig`` for QP-style relaxations; omit it for LP-style. Returns
+    ``(None, None, None)`` if recovery is unavailable (HiGHS missing, the
+    fix-and-resolve LP/QP itself fails, or layout mismatch).
+
+    Bound multipliers on the fixing bounds for integer columns are zeroed in
+    the returned dicts — they reflect the act of fixing, not feasibility of
+    the original integer-feasible point.
+    """
+    try:
+        if Q_orig is None:
+            from discopt.solvers.lp_highs import solve_lp as _highs_solve_lp
+        else:
+            from discopt.solvers.qp_highs import solve_qp as _highs_solve_qp
+    except ImportError:
+        return None, None, None
+
+    from discopt.solvers import SolveStatus
+
+    bounds_fixed: list[tuple[float, float]] = []
+    is_integer_col = np.zeros(n_orig, dtype=bool)
+    offset = 0
+    for v in model._variables:
+        sz = int(v.size)
+        is_int = v.var_type in (VarType.BINARY, VarType.INTEGER)
+        for k in range(sz):
+            if is_int:
+                val = float(round(float(x_flat[offset + k])))
+                bounds_fixed.append((val, val))
+                is_integer_col[offset + k] = True
+            else:
+                lb_k = float(np.asarray(lp_data.x_l[offset + k]))
+                ub_k = float(np.asarray(lp_data.x_u[offset + k]))
+                bounds_fixed.append((lb_k, ub_k))
+        offset += sz
+
+    c_orig = np.asarray(lp_data.c[:n_orig])
+
+    try:
+        relax: Any
+        if Q_orig is None:
+            relax = _highs_solve_lp(
+                c=c_orig,
+                A_ub=A_ub,
+                b_ub=b_ub,
+                A_eq=A_eq,
+                b_eq=b_eq,
+                bounds=bounds_fixed,
+                time_limit=time_limit,
+            )
+        else:
+            relax = _highs_solve_qp(
+                Q=Q_orig,
+                c=c_orig,
+                A_ub=A_ub,
+                b_ub=b_ub,
+                A_eq=A_eq,
+                b_eq=b_eq,
+                bounds=bounds_fixed,
+                integrality=None,
+                time_limit=time_limit,
+            )
+    except Exception as exc:
+        logger.debug("MIP-relaxation dual recovery failed: %s", exc)
+        return None, None, None
+
+    if relax.status != SolveStatus.OPTIMAL:
+        return None, None, None
+
+    n_eq_rows = A_eq.shape[0] if A_eq is not None else 0
+    n_ub_rows = A_ub.shape[0] if A_ub is not None else 0
+    cd, bdl, bdu = _lp_qp_unpack_duals(
+        model,
+        row_dual=relax.dual_values,
+        col_dual=relax.reduced_costs,
+        n_eq=n_eq_rows,
+        n_ub=n_ub_rows,
+        n_orig=n_orig,
+    )
+
+    # Zero out bound multipliers on the fix-bounds of integer columns; they
+    # quantify the cost of fixing, not bound activity in the original model.
+    if (bdl is not None or bdu is not None) and is_integer_col.any():
+        offset = 0
+        for v in model._variables:
+            sz = int(v.size)
+            if v.var_type in (VarType.BINARY, VarType.INTEGER):
+                if bdl is not None and v.name in bdl:
+                    bdl[v.name] = np.zeros_like(bdl[v.name])
+                if bdu is not None and v.name in bdu:
+                    bdu[v.name] = np.zeros_like(bdu[v.name])
+            offset += sz
+
+    return cd, bdl, bdu
 
 
 def _decompose_eq_slack_form(
@@ -3923,6 +4217,17 @@ def _solve_lp_highs(
         if model._objective.sense == ObjectiveSense.MAXIMIZE:
             obj_val = -obj_val
 
+        n_eq_rows = A_eq.shape[0] if A_eq is not None else 0
+        n_ub_rows = A_ub.shape[0] if A_ub is not None else 0
+        cd, bdl, bdu = _lp_qp_unpack_duals(
+            model,
+            row_dual=result.dual_values,
+            col_dual=result.reduced_costs,
+            n_eq=n_eq_rows,
+            n_ub=n_ub_rows,
+            n_orig=n_orig,
+        )
+
         sr = SolveResult(
             status="optimal",
             objective=obj_val,
@@ -3934,6 +4239,9 @@ def _solve_lp_highs(
             rust_time=0.0,
             jax_time=0.0,
             python_time=wall_time,
+            constraint_duals=cd,
+            bound_duals_lower=bdl,
+            bound_duals_upper=bdu,
         )
         sr.convex_fast_path = True
         return sr
@@ -4029,6 +4337,33 @@ def _solve_qp_highs(
         if model._objective.sense == ObjectiveSense.MAXIMIZE:
             obj_val = -obj_val
 
+        n_eq_rows = A_eq.shape[0] if A_eq is not None else 0
+        n_ub_rows = A_ub.shape[0] if A_ub is not None else 0
+        if integrality is None:
+            cd, bdl, bdu = _lp_qp_unpack_duals(
+                model,
+                row_dual=result.dual_values,
+                col_dual=result.reduced_costs,
+                n_eq=n_eq_rows,
+                n_ub=n_ub_rows,
+                n_orig=n_orig,
+            )
+        else:
+            # MIQP: HiGHS doesn't expose MIP duals. Recover by re-solving the
+            # QP relaxation with integers fixed at the MIP incumbent.
+            cd, bdl, bdu = _mip_recover_relaxation_duals(
+                model,
+                lp_data=qp_data,
+                x_flat=np.asarray(x_flat, dtype=float),
+                n_orig=n_orig,
+                A_ub=A_ub,
+                b_ub=b_ub,
+                A_eq=A_eq,
+                b_eq=b_eq,
+                time_limit=time_limit,
+                Q_orig=Q_orig,
+            )
+
         sr = SolveResult(
             status="optimal",
             objective=obj_val,
@@ -4040,6 +4375,9 @@ def _solve_qp_highs(
             rust_time=0.0,
             jax_time=0.0,
             python_time=wall_time,
+            constraint_duals=cd,
+            bound_duals_lower=bdl,
+            bound_duals_upper=bdu,
         )
         # A detected QP with PSD Q is a convex problem solved directly without
         # B&B -- semantically the same as the convex NLP fast path.
@@ -4122,6 +4460,17 @@ def _solve_milp_highs(
         obj_val = result.objective + lp_data.obj_const
         if sense == ObjectiveSense.MAXIMIZE:
             obj_val = -obj_val
+        cd, bdl, bdu = _mip_recover_relaxation_duals(
+            model,
+            lp_data=lp_data,
+            x_flat=np.asarray(x_flat, dtype=float),
+            n_orig=n_orig,
+            A_ub=A_ub,
+            b_ub=b_ub,
+            A_eq=A_eq,
+            b_eq=b_eq,
+            time_limit=time_limit,
+        )
         return SolveResult(
             status="optimal",
             objective=obj_val,
@@ -4133,6 +4482,9 @@ def _solve_milp_highs(
             rust_time=0.0,
             jax_time=0.0,
             python_time=wall_time,
+            constraint_duals=cd,
+            bound_duals_lower=bdl,
+            bound_duals_upper=bdu,
         )
     elif result.status == SolveStatus.INFEASIBLE:
         return SolveResult(status="infeasible", wall_time=wall_time, node_count=result.node_count)
@@ -4357,9 +4709,37 @@ def _solve_milp_bb(
         if obj_val >= _SENTINEL_THRESHOLD:
             incumbent = None
 
+    constraint_duals = None
+    bound_duals_lower = None
+    bound_duals_upper = None
+
     if incumbent is not None:
         sol_flat = np.array(sol_array)
         x_dict = _unpack_solution(model, sol_flat)
+
+        # Recover relaxation duals at the integer-feasible incumbent by
+        # re-solving the LP relaxation with integer variables fixed.
+        try:
+            n_total = lp_data.A_eq.shape[1] if lp_data.A_eq.shape[0] > 0 else n_orig
+            n_slack = n_total - n_orig
+            A_eq_full = np.asarray(lp_data.A_eq)
+            b_eq_full = np.asarray(lp_data.b_eq)
+            A_ub, b_ub_, A_eq, b_eq = _decompose_eq_slack_form(
+                A_eq_full, b_eq_full, n_orig, n_slack
+            )
+            constraint_duals, bound_duals_lower, bound_duals_upper = _mip_recover_relaxation_duals(
+                model,
+                lp_data=lp_data,
+                x_flat=np.asarray(sol_flat[:n_orig], dtype=float),
+                n_orig=n_orig,
+                A_ub=A_ub,
+                b_ub=b_ub_,
+                A_eq=A_eq,
+                b_eq=b_eq,
+                time_limit=max(0.1, time_limit - (time.perf_counter() - t_start)),
+            )
+        except Exception as _exc:
+            logger.debug("MILP-BB dual recovery failed: %s", _exc)
 
         # Negate objective back for maximization (B&B tree tracks minimization)
         from discopt.modeling.core import ObjectiveSense
@@ -4401,6 +4781,9 @@ def _solve_milp_bb(
         rust_time=rust_time,
         jax_time=jax_time,
         python_time=python_time,
+        constraint_duals=constraint_duals,
+        bound_duals_lower=bound_duals_lower,
+        bound_duals_upper=bound_duals_upper,
     )
 
 
@@ -4579,9 +4962,39 @@ def _solve_miqp_bb(
         if obj_val >= _SENTINEL_THRESHOLD:
             incumbent = None
 
+    constraint_duals = None
+    bound_duals_lower = None
+    bound_duals_upper = None
+
     if incumbent is not None:
         sol_flat = np.array(sol_array)
         x_dict = _unpack_solution(model, sol_flat)
+
+        # Recover relaxation duals at the integer-feasible incumbent by
+        # re-solving the QP relaxation with integer variables fixed.
+        try:
+            n_total = qp_data.A_eq.shape[1] if qp_data.A_eq.shape[0] > 0 else n_orig
+            n_slack_local = n_total - n_orig
+            A_eq_full = np.asarray(qp_data.A_eq)
+            b_eq_full = np.asarray(qp_data.b_eq)
+            A_ub_, b_ub_, A_eq_, b_eq_ = _decompose_eq_slack_form(
+                A_eq_full, b_eq_full, n_orig, n_slack_local
+            )
+            Q_orig = np.asarray(qp_data.Q[:n_orig, :n_orig])
+            constraint_duals, bound_duals_lower, bound_duals_upper = _mip_recover_relaxation_duals(
+                model,
+                lp_data=qp_data,
+                x_flat=np.asarray(sol_flat[:n_orig], dtype=float),
+                n_orig=n_orig,
+                A_ub=A_ub_,
+                b_ub=b_ub_,
+                A_eq=A_eq_,
+                b_eq=b_eq_,
+                time_limit=max(0.1, time_limit - (time.perf_counter() - t_start)),
+                Q_orig=Q_orig,
+            )
+        except Exception as _exc:
+            logger.debug("MIQP-BB dual recovery failed: %s", _exc)
 
         # Negate objective back for maximization (B&B tree tracks minimization)
         from discopt.modeling.core import ObjectiveSense
@@ -4623,4 +5036,7 @@ def _solve_miqp_bb(
         rust_time=rust_time,
         jax_time=jax_time,
         python_time=python_time,
+        constraint_duals=constraint_duals,
+        bound_duals_lower=bound_duals_lower,
+        bound_duals_upper=bound_duals_upper,
     )

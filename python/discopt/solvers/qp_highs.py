@@ -214,10 +214,21 @@ def solve_qp(
             _, node_count_f = h.getInfoValue("mip_node_count")
             node_count = int(node_count_f)
 
+        # HiGHS does not produce duals for MIP problems, only for continuous QP.
+        dual_values: Optional[np.ndarray] = None
+        reduced_costs: Optional[np.ndarray] = None
+        if integrality is None:
+            row_dual_raw = np.array(getattr(sol, "row_dual", []), dtype=np.float64)
+            col_dual_raw = np.array(getattr(sol, "col_dual", []), dtype=np.float64)
+            dual_values = row_dual_raw if row_dual_raw.size else None
+            reduced_costs = col_dual_raw if col_dual_raw.size else None
+
         return QPResult(
             status=status,
             x=x,
             objective=obj,
+            dual_values=dual_values,
+            reduced_costs=reduced_costs,
             node_count=node_count,
             wall_time=float(wall_time),
         )
