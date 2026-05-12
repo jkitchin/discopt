@@ -47,7 +47,7 @@ xgboost = ["xgboost>=1.7"]
 lightgbm = ["lightgbm>=4.0"]
 gnn = ["equinox>=0.13.8", "optax>=0.1"]
 learned = ["equinox>=0.13.8", "optax>=0.1"]
-dev = ["pytest", "pytest-timeout", "pytest-cov", "ruff", "mypy", "highspy"]
+dev = ["pytest", "pytest-timeout", "pytest-cov", "pytest-xdist", "ruff", "mypy", "highspy"]
 all = ["discopt[ipopt,highs,cutest,llm,gnn,nn,ml]"]
 
 [project.scripts]

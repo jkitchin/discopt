@@ -171,8 +171,11 @@ lint:
 # Common flags for the PR-fast tier (kept in sync with .github/workflows/ci.yml).
 # `not slow` excludes the heavy backend matrix; the curated PR correctness
 # subset (test_pr_correctness.py) is *not* slow-marked so it still runs.
+# `-n auto --dist loadgroup` parallelizes across CPUs while keeping
+# class-shared fixtures pinned to one worker (matches CI).
 PYTEST_FAST_FLAGS := --timeout=120 -m "not slow" \
-    --ignore=python/tests/test_correctness.py
+    --ignore=python/tests/test_correctness.py \
+    -n auto --dist loadgroup
 
 # File groups for slice targets. A test file may appear in more than one group.
 TEST_MODELING := \
