@@ -37,11 +37,7 @@ def main():
         "--category",
         type=str,
         default="lp",
-        help=(
-            "Category to benchmark: "
-            "lp|qp|milp|miqp|minlp|global_opt|all "
-            "(default: lp)"
-        ),
+        help=("Category to benchmark: lp|qp|milp|miqp|minlp|global_opt|all (default: lp)"),
     )
     parser.add_argument(
         "--level",
@@ -73,6 +69,29 @@ def main():
         help="Per-problem time limit in seconds (default: 300)",
     )
     parser.add_argument(
+        "--solvers",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated solver filter. Supports ipm,ripopt,ipopt,highs,amp. "
+            "Use --solvers amp for AMP-specific category benchmarks."
+        ),
+    )
+    parser.add_argument(
+        "--hard-timeout-grace",
+        type=float,
+        default=2.0,
+        help=(
+            "Extra seconds before forcibly killing a per-problem worker "
+            "after --time-limit (default: 2)"
+        ),
+    )
+    parser.add_argument(
+        "--no-hard-timeout",
+        action="store_true",
+        help="Run category cases in-process without subprocess hard timeouts",
+    )
+    parser.add_argument(
         "--list",
         action="store_true",
         help="List available categories",
@@ -89,20 +108,14 @@ def main():
         _list_categories()
         return
 
-    categories = (
-        get_all_categories()
-        if args.category == "all"
-        else [args.category]
-    )
+    solver_filter = _parse_solver_filter(args.solvers)
+    categories = get_all_categories() if args.category == "all" else [args.category]
 
     # Validate categories
     valid = set(get_all_categories())
     for cat in categories:
         if cat not in valid:
-            print(
-                f"ERROR: Unknown category '{cat}'. "
-                f"Valid: {', '.join(sorted(valid))}"
-            )
+            print(f"ERROR: Unknown category '{cat}'. Valid: {', '.join(sorted(valid))}")
             sys.exit(1)
 
     # Run each category
@@ -115,6 +128,8 @@ def main():
             args.output,
             args.report,
             args.html,
+            None if args.no_hard_timeout else args.hard_timeout_grace,
+            solver_filter,
         )
         all_results.append((cat, results))
 
@@ -130,14 +145,30 @@ def _list_categories():
         "qp": "Quadratic programming (QP) — ipm, ripopt, ipopt",
         "milp": "Mixed-integer LP (MILP) — ipm, ripopt, ipopt",
         "miqp": "Mixed-integer QP (MIQP) — ipm, ripopt, ipopt",
-        "minlp": "Mixed-integer NLP (MINLP) — ipm, ripopt, ipopt",
-        "global_opt": "Global optimization — ipm, ripopt, ipopt",
+        "minlp": "Mixed-integer NLP (MINLP) — ipm, ripopt, ipopt; use --solvers amp for AMP",
+        "global_opt": "Global optimization — ipm, ripopt, ipopt; use --solvers amp for AMP",
     }
     print("\nAvailable benchmark categories:\n")
     for name, desc in categories.items():
         print(f"  {name:12s}  {desc}")
     print("\n  all          Run all categories sequentially")
     print()
+
+
+def _parse_solver_filter(raw: str | None) -> list[str] | None:
+    """Parse and validate a comma-separated solver filter."""
+    if raw is None:
+        return None
+    solvers = [part.strip() for part in raw.split(",") if part.strip()]
+    if not solvers:
+        return None
+
+    valid = {"ipm", "ripopt", "ipopt", "highs", "amp"}
+    invalid = [solver for solver in solvers if solver not in valid]
+    if invalid:
+        print(f"ERROR: Unknown solver(s): {', '.join(invalid)}. Valid: {', '.join(sorted(valid))}")
+        sys.exit(1)
+    return list(dict.fromkeys(solvers))
 
 
 def _run_category(
@@ -147,6 +178,8 @@ def _run_category(
     output_dir: str | None,
     generate_report: bool,
     generate_html: bool,
+    hard_timeout_grace: float | None,
+    solver_filter: list[str] | None,
 ):
     """Run benchmarks for a single category."""
     from category_runner import CategoryBenchmarkRunner
@@ -155,6 +188,8 @@ def _run_category(
         category=category,
         level=level,
         time_limit=time_limit,
+        hard_timeout_grace=hard_timeout_grace,
+        solver_filter=solver_filter,
     )
     results = runner.run()
 
@@ -220,20 +255,14 @@ def _print_combined_summary(
     print(f"Combined Summary — All Categories ({level})")
     print(f"{'=' * 70}")
 
-    print(
-        f"{'Category':<12s} {'Solver':<18s} "
-        f"{'Solved':>8s} {'Incorrect':>10s} "
-        f"{'SGM(s)':>10s}"
-    )
+    print(f"{'Category':<12s} {'Solver':<18s} {'Solved':>8s} {'Incorrect':>10s} {'SGM(s)':>10s}")
     print("-" * 62)
 
     total_incorrect = 0
     for cat, results in all_results:
         for solver in sorted(results.get_solvers()):
             solver_results = results.get_results(solver)
-            n_inst = len(
-                {r.instance for r in solver_results}
-            )
+            n_inst = len({r.instance for r in solver_results})
             n_solved = solved_count(solver_results)
 
             # Build known optima from instance_info
@@ -245,29 +274,19 @@ def _print_combined_summary(
             n_inc = incorrect_count(solver_results, known)
             total_incorrect += n_inc
 
-            times = [
-                r.wall_time
-                for r in solver_results
-                if r.is_solved
-            ]
+            times = [r.wall_time for r in solver_results if r.is_solved]
             sgm = shifted_geometric_mean(times)
-            sgm_str = (
-                f"{sgm:.3f}" if sgm < 1e6 else "inf"
-            )
+            sgm_str = f"{sgm:.3f}" if sgm < 1e6 else "inf"
 
             print(
-                f"{cat:<12s} {solver:<18s} "
-                f"{n_solved:>3d}/{n_inst:<4d}"
-                f" {n_inc:>10d} {sgm_str:>10s}"
+                f"{cat:<12s} {solver:<18s} {n_solved:>3d}/{n_inst:<4d} {n_inc:>10d} {sgm_str:>10s}"
             )
 
     print("-" * 62)
     if total_incorrect == 0:
         print("All results correct (0 incorrect total)")
     else:
-        print(
-            f"WARNING: {total_incorrect} incorrect result(s)!"
-        )
+        print(f"WARNING: {total_incorrect} incorrect result(s)!")
 
 
 if __name__ == "__main__":

@@ -55,6 +55,7 @@ logger = logging.getLogger(__name__)
 
 # Dedupe identical warnings emitted across repeated relaxation builds (AMP iterates).
 _warned_messages: set[str] = set()
+_MAX_FINITE_EXP_ARG = float(np.log(np.finfo(np.float64).max))
 
 
 def _warn_once(msg: str, *args) -> None:
@@ -537,7 +538,7 @@ def _univariate_domain_ok(func_name: str, arg_lb: float, arg_ub: float) -> bool:
     if func_name in {"sqrt", "log", "log2", "log10"}:
         return True
     if func_name == "exp":
-        return bool(np.isfinite(np.exp(arg_lb)) and np.isfinite(np.exp(arg_ub)))
+        return bool(arg_ub <= _MAX_FINITE_EXP_ARG)
     if func_name == "abs":
         return True
     return False

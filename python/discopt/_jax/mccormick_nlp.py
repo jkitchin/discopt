@@ -14,10 +14,15 @@ Two modes:
 
 from __future__ import annotations
 
+import time
 from typing import Callable, Optional
 
 import jax.numpy as jnp
 import numpy as np
+
+
+def _deadline_expired(deadline: float | None) -> bool:
+    return deadline is not None and time.perf_counter() >= deadline
 
 
 def evaluate_midpoint_bound(
@@ -126,6 +131,7 @@ def solve_mccormick_relaxation_nlp(
     node_ub: jnp.ndarray,
     negate: bool = False,
     max_iter: int = 50,
+    deadline: float | None = None,
 ) -> float:
     """Solve a convex NLP over McCormick relaxations for a tight lower bound.
 
@@ -140,11 +146,16 @@ def solve_mccormick_relaxation_nlp(
         node_ub: Variable upper bounds, shape (n,).
         negate: True if the original problem is maximization.
         max_iter: Maximum IPM iterations.
+        deadline: Absolute ``time.perf_counter()`` deadline. If expired before
+            a new relaxation solve starts, return ``-inf`` without solving.
 
     Returns:
         Valid lower bound (float), or -inf on failure.
     """
     from discopt._jax.ipm import IPMOptions, ipm_solve
+
+    if _deadline_expired(deadline):
+        return -np.inf
 
     lb = jnp.asarray(node_lb, dtype=jnp.float64)
     ub = jnp.asarray(node_ub, dtype=jnp.float64)
@@ -171,6 +182,9 @@ def solve_mccormick_relaxation_nlp(
     con_fn = None
 
     if con_relax_fns and con_senses:
+        if _deadline_expired(deadline):
+            return -np.inf
+
         # Filter out constraints that produce inf/NaN at wide bounds
         good_fns, good_senses = _filter_well_behaved_constraints(con_relax_fns, con_senses, lb, ub)
 
@@ -207,6 +221,9 @@ def solve_mccormick_relaxation_nlp(
     opts = IPMOptions(max_iter=max_iter)
     x0 = jnp.clip(0.5 * (lb + ub), lb, ub)
 
+    if _deadline_expired(deadline):
+        return -np.inf
+
     try:
         state = ipm_solve(obj_fn, con_fn, x0, lb, ub, g_l, g_u, opts)
         conv = int(state.converged)
@@ -228,6 +245,7 @@ def solve_mccormick_batch(
     ub_batch: jnp.ndarray,
     negate: bool = False,
     max_iter: int = 50,
+    deadline: float | None = None,
 ) -> jnp.ndarray:
     """Solve McCormick relaxation NLPs for a batch of nodes via vmap.
 
@@ -239,6 +257,9 @@ def solve_mccormick_batch(
         ub_batch: Upper bounds, shape (N, n_vars).
         negate: True for maximization.
         max_iter: Max IPM iterations per node.
+        deadline: Absolute ``time.perf_counter()`` deadline. If it expires,
+            remaining nodes receive ``-inf`` bounds without starting more
+            relaxation solves.
 
     Returns:
         Array of lower bounds, shape (N,).
@@ -260,6 +281,10 @@ def solve_mccormick_batch(
     result_list = []
 
     for i in range(n_batch):
+        if _deadline_expired(deadline):
+            result_list.extend([-np.inf] * (n_batch - i))
+            break
+
         lb_i = lb_batch[i]
         ub_i = ub_batch[i]
         val = solve_mccormick_relaxation_nlp(
@@ -270,6 +295,7 @@ def solve_mccormick_batch(
             ub_i,
             negate=negate,
             max_iter=max_iter,
+            deadline=deadline,
         )
         result_list.append(val)
 

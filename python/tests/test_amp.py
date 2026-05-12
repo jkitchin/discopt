@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -139,6 +140,16 @@ def test_amp_helper_defaults_cover_semifinite_domains():
     np.testing.assert_allclose(recovery_starts[0], np.array([0.5, 10.0]))
     np.testing.assert_allclose(recovery_starts[1], np.array([0.0, 2.0]))
     np.testing.assert_allclose(recovery_starts[2], np.array([1.0, 2.0]))
+
+
+def test_exp_univariate_domain_rejects_overflowing_bounds_without_warning():
+    """Wide finite exp domains should be rejected without probing exp(ub)."""
+    from discopt._jax.milp_relaxation import _univariate_domain_ok
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        assert _univariate_domain_ok("exp", 0.0, 1000.0) is False
+        assert _univariate_domain_ok("exp", -1000.0, 10.0) is True
 
 
 def test_amp_normalizes_initial_point_length_and_bounds():
@@ -1520,6 +1531,30 @@ def test_nonlinear_tightening_reports_issue_28_contradictions(
     assert expected_reason in (stats.infeasibility_reason or "")
     np.testing.assert_allclose(tightened_lb, flat_lb)
     np.testing.assert_allclose(tightened_ub, flat_ub)
+
+
+def test_nonlinear_tightening_counts_infinite_bounds_without_warning():
+    """Unchanged infinite bounds should not warn while counting tightened entries."""
+    import warnings
+
+    from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+
+    m = Model("infinite_bound_counting")
+    x = m.continuous("x", lb=0.0, ub=np.inf)
+    y = m.continuous("y", lb=0.0, ub=np.inf)
+    m.subject_to(x**2 + y**2 <= 4.0)
+    m.minimize(x + y)
+
+    flat_lb = np.array([0.0, 0.0], dtype=np.float64)
+    flat_ub = np.array([np.inf, np.inf], dtype=np.float64)
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        tightened_lb, tightened_ub, stats = tighten_nonlinear_bounds(m, flat_lb, flat_ub)
+
+    assert not captured
+    assert stats.n_tightened == 2
+    np.testing.assert_allclose(tightened_lb, flat_lb)
+    np.testing.assert_allclose(tightened_ub, np.array([2.0, 2.0]))
 
 
 def test_oa_cut_recovery_drops_oldest_half(monkeypatch):

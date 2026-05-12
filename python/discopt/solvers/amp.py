@@ -2034,7 +2034,7 @@ def solve_amp(
                 n_orig=n_orig,
                 candidate_idxs=_candidates,
                 time_limit_per_lp=_per_lp,
-                deadline=t_start + obbt_time_limit,
+                deadline=min(deadline, t_start + obbt_time_limit),
             )
             if _obbt.n_tightened > 0:
                 # Apply tightened bounds to the model and to flat_lb / flat_ub.

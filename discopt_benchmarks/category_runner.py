@@ -6,10 +6,14 @@ validates correctness, and collects performance metrics.
 
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
+import tempfile
 import time
 import traceback
 from datetime import datetime
+from pathlib import Path
 
 from benchmarks.metrics import (
     BenchmarkResults,
@@ -23,7 +27,6 @@ from benchmarks.metrics import (
 )
 from benchmarks.problems.base import (
     TestProblem,
-    get_applicable_solvers,
     get_problems,
 )
 
@@ -41,11 +44,17 @@ class CategoryBenchmarkRunner:
         level: str = "smoke",
         time_limit: float = 300.0,
         num_runs: int = 1,
+        hard_timeout_grace: float | None = 2.0,
+        solver_filter: list[str] | None = None,
     ):
         self.category = category
         self.level = level
         self.time_limit = time_limit
         self.num_runs = num_runs
+        self.hard_timeout_grace = (
+            None if hard_timeout_grace is None else max(0.0, float(hard_timeout_grace))
+        )
+        self.solver_filter = list(solver_filter) if solver_filter is not None else None
         self.results = BenchmarkResults(
             suite=f"{category}_{level}",
             timestamp=datetime.now().isoformat(),
@@ -56,10 +65,7 @@ class CategoryBenchmarkRunner:
         """Run all problems for the category against all solvers."""
         problems = get_problems(self.category, self.level)
         if not problems:
-            print(
-                f"No problems found for category={self.category} "
-                f"level={self.level}"
-            )
+            print(f"No problems found for category={self.category} level={self.level}")
             return self.results
 
         # Collect known optima
@@ -83,23 +89,24 @@ class CategoryBenchmarkRunner:
             )
 
         # Header
-        solvers = get_applicable_solvers(self.category)
-        total_runs = len(problems) * len(solvers)
+        problem_solvers = {p.name: self._solvers_for_problem(p) for p in problems}
+        solvers = list(dict.fromkeys(s for slist in problem_solvers.values() for s in slist))
+        total_runs = sum(len(slist) for slist in problem_solvers.values())
         print(f"\n{'=' * 70}")
-        print(
-            f"Category Benchmark: {self.category.upper()} "
-            f"({self.level})"
-        )
-        print(
-            f"Problems: {len(problems)} | Solvers: {len(solvers)} "
-            f"| Total runs: {total_runs}"
-        )
+        print(f"Category Benchmark: {self.category.upper()} ({self.level})")
+        solver_label = ", ".join(solvers) if solvers else "none"
+        print(f"Problems: {len(problems)} | Solvers: {solver_label} | Total runs: {total_runs}")
         print(f"Time limit: {self.time_limit}s")
+        if self.hard_timeout_grace is not None:
+            print(f"Hard timeout grace: {self.hard_timeout_grace}s")
         print(f"{'=' * 70}\n")
+        if total_runs == 0:
+            print("No applicable solvers selected for this category.")
+            return self.results
 
         completed = 0
         for problem in problems:
-            for solver in problem.applicable_solvers:
+            for solver in problem_solvers[problem.name]:
                 result = self._run_one(problem, solver)
                 self._validate(result, problem)
                 self.results.add_result(result)
@@ -107,21 +114,9 @@ class CategoryBenchmarkRunner:
 
                 # Progress output
                 icon = self._status_icon(result)
-                t_str = (
-                    f"{result.wall_time:.3f}s"
-                    if result.wall_time < float("inf")
-                    else "TL"
-                )
-                obj_str = (
-                    f"obj={result.objective:.6g}"
-                    if result.objective is not None
-                    else ""
-                )
-                iter_str = (
-                    f"iter={result.iterations}"
-                    if result.iterations > 0
-                    else ""
-                )
+                t_str = f"{result.wall_time:.3f}s" if result.wall_time < float("inf") else "TL"
+                obj_str = f"obj={result.objective:.6g}" if result.objective is not None else ""
+                iter_str = f"iter={result.iterations}" if result.iterations > 0 else ""
                 parts = [
                     f"  {icon} {problem.name:30s}",
                     f"{solver:8s}",
@@ -138,27 +133,125 @@ class CategoryBenchmarkRunner:
         self._print_summary(problems)
         return self.results
 
-    def _run_one(
-        self, problem: TestProblem, solver: str
-    ) -> SolveResult:
+    def _solvers_for_problem(self, problem: TestProblem) -> list[str]:
+        """Return solvers to run for a problem, honoring explicit filters."""
+        if self.solver_filter is None:
+            return list(problem.applicable_solvers)
+
+        selected = []
+        for solver in self.solver_filter:
+            if solver == "amp" or solver in problem.applicable_solvers:
+                selected.append(solver)
+        return selected
+
+    def _run_one(self, problem: TestProblem, solver: str) -> SolveResult:
         """Run a single problem with a single solver."""
+        if self.hard_timeout_grace is not None:
+            return self._run_with_hard_timeout(problem, solver)
+        return self._run_one_direct(problem, solver)
+
+    def _run_one_direct(self, problem: TestProblem, solver: str) -> SolveResult:
+        """Run a single problem in the current process."""
         if solver == "highs":
             return self._run_highs(problem)
         return self._run_discopt(problem, solver)
 
-    def _run_discopt(
-        self, problem: TestProblem, solver: str
-    ) -> SolveResult:
+    def _run_with_hard_timeout(self, problem: TestProblem, solver: str) -> SolveResult:
+        """Run a case in a worker process and kill it at the hard timeout."""
+        solver_name = "highs" if solver == "highs" else f"discopt_{solver}"
+        timeout = max(0.0, self.time_limit) + (self.hard_timeout_grace or 0.0)
+
+        def print_worker_output(proc: subprocess.CompletedProcess[str]) -> None:
+            if proc.stdout:
+                print(proc.stdout, end="")
+            if proc.stderr:
+                print(proc.stderr, end="", file=sys.stderr)
+
+        with tempfile.TemporaryDirectory(prefix="discopt_category_bench_") as tmp:
+            result_path = Path(tmp) / "result.json"
+            cmd = [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--worker",
+                self.category,
+                self.level,
+                problem.name,
+                solver,
+                str(self.time_limit),
+                str(result_path),
+            ]
+            started = time.monotonic()
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired:
+                return SolveResult(
+                    instance=problem.name,
+                    solver=solver_name,
+                    status=SolveStatus.TIME_LIMIT,
+                    wall_time=self.time_limit,
+                )
+
+            elapsed = time.monotonic() - started
+            if proc.returncode != 0 or not result_path.exists():
+                print(f"    ERROR ({solver}): {problem.name}: worker failed")
+                if "--verbose" in sys.argv:
+                    print_worker_output(proc)
+                return SolveResult(
+                    instance=problem.name,
+                    solver=solver_name,
+                    status=SolveStatus.ERROR,
+                    wall_time=elapsed,
+                )
+
+            try:
+                result = SolveResult.from_dict(json.loads(result_path.read_text()))
+            except Exception as e:
+                print(f"    ERROR ({solver}): {problem.name}: invalid worker result: {e}")
+                return SolveResult(
+                    instance=problem.name,
+                    solver=solver_name,
+                    status=SolveStatus.ERROR,
+                    wall_time=elapsed,
+                )
+
+        if result.wall_time > self.time_limit:
+            result.wall_time = self.time_limit
+            if result.status == SolveStatus.OPTIMAL and result.objective is not None:
+                result.status = SolveStatus.FEASIBLE
+            elif result.status in {
+                SolveStatus.OPTIMAL,
+                SolveStatus.INFEASIBLE,
+                SolveStatus.UNBOUNDED,
+                SolveStatus.UNKNOWN,
+            }:
+                result.status = SolveStatus.TIME_LIMIT
+        if result.status == SolveStatus.ERROR and "--verbose" in sys.argv:
+            print_worker_output(proc)
+        return result
+
+    def _run_discopt(self, problem: TestProblem, solver: str) -> SolveResult:
         """Run problem through discopt's model.solve()."""
         try:
             model = problem.build_fn()
             start = time.monotonic()
-            result = model.solve(
-                nlp_solver=solver,
-                time_limit=self.time_limit,
-                gap_tolerance=1e-4,
-                max_nodes=100_000,
-            )
+            if solver == "amp":
+                result = model.solve(
+                    solver="amp",
+                    time_limit=self.time_limit,
+                    gap_tolerance=1e-4,
+                )
+            else:
+                result = model.solve(
+                    nlp_solver=solver,
+                    time_limit=self.time_limit,
+                    gap_tolerance=1e-4,
+                    max_nodes=100_000,
+                )
             elapsed = time.monotonic() - start
 
             # Map status
@@ -170,9 +263,7 @@ class CategoryBenchmarkRunner:
                 "time_limit": SolveStatus.TIME_LIMIT,
                 "node_limit": SolveStatus.TIME_LIMIT,
             }
-            bench_status = status_map.get(
-                result.status, SolveStatus.UNKNOWN
-            )
+            bench_status = status_map.get(result.status, SolveStatus.UNKNOWN)
 
             return SolveResult(
                 instance=problem.name,
@@ -257,11 +348,7 @@ class CategoryBenchmarkRunner:
             else:
                 status = SolveStatus.ERROR
 
-            obj_val = (
-                float(lp_result.objective)
-                if lp_result.objective is not None
-                else None
-            )
+            obj_val = float(lp_result.objective) if lp_result.objective is not None else None
             if obj_val is not None:
                 obj_val += float(lp.obj_const)
 
@@ -271,9 +358,7 @@ class CategoryBenchmarkRunner:
                 status=status,
                 objective=obj_val,
                 wall_time=elapsed,
-                iterations=getattr(
-                    lp_result, "iterations", 0
-                ) or 0,
+                iterations=getattr(lp_result, "iterations", 0) or 0,
             )
         except Exception as e:
             print(f"    ERROR (highs): {problem.name}: {e}")
@@ -286,9 +371,7 @@ class CategoryBenchmarkRunner:
                 wall_time=float("inf"),
             )
 
-    def _validate(
-        self, result: SolveResult, problem: TestProblem
-    ) -> None:
+    def _validate(self, result: SolveResult, problem: TestProblem) -> None:
         """Check result against expected status and known optimum."""
         # Check expected status
         if problem.expected_status == "infeasible":
@@ -296,20 +379,14 @@ class CategoryBenchmarkRunner:
                 SolveStatus.INFEASIBLE,
                 SolveStatus.ERROR,
             ):
-                print(
-                    f"    WARN: {problem.name} expected infeasible, "
-                    f"got {result.status.value}"
-                )
+                print(f"    WARN: {problem.name} expected infeasible, got {result.status.value}")
             return
         if problem.expected_status == "unbounded":
             if result.status not in (
                 SolveStatus.UNBOUNDED,
                 SolveStatus.ERROR,
             ):
-                print(
-                    f"    WARN: {problem.name} expected unbounded, "
-                    f"got {result.status.value}"
-                )
+                print(f"    WARN: {problem.name} expected unbounded, got {result.status.value}")
             return
 
         # Check objective correctness
@@ -351,41 +428,24 @@ class CategoryBenchmarkRunner:
         n_inst = len(problems)
 
         print(f"\n{'=' * 70}")
-        print(
-            f"Summary: {self.category.upper()} ({self.level}) "
-            f"— {n_inst} problems"
-        )
+        print(f"Summary: {self.category.upper()} ({self.level}) — {n_inst} problems")
         print(f"{'=' * 70}")
         print(
-            f"{'Solver':<18s} {'Solved':>8s} "
-            f"{'Incorrect':>10s} {'SGM(s)':>10s} "
-            f"{'Med Iter':>10s}"
+            f"{'Solver':<18s} {'Solved':>8s} {'Incorrect':>10s} {'SGM(s)':>10s} {'Med Iter':>10s}"
         )
         print("-" * 60)
 
         for solver in solvers:
             solver_results = self.results.get_results(solver)
             n_solved = solved_count(solver_results)
-            n_incorrect = incorrect_count(
-                solver_results, self._known_optima
-            )
-            times = [
-                r.wall_time
-                for r in solver_results
-                if r.is_solved
-            ]
+            n_incorrect = incorrect_count(solver_results, self._known_optima)
+            times = [r.wall_time for r in solver_results if r.is_solved]
             sgm = shifted_geometric_mean(times)
             istats = iteration_stats(solver_results)
             med_iter = istats["median"]
 
-            sgm_str = (
-                f"{sgm:.3f}" if sgm < 1e6 else "inf"
-            )
-            iter_str = (
-                f"{med_iter:.0f}"
-                if med_iter == med_iter
-                else "N/A"
-            )
+            sgm_str = f"{sgm:.3f}" if sgm < 1e6 else "inf"
+            iter_str = f"{med_iter:.0f}" if med_iter == med_iter else "N/A"
 
             print(
                 f"{solver:<18s} {n_solved:>3d}/{n_inst:<4d}"
@@ -398,3 +458,37 @@ class CategoryBenchmarkRunner:
     def get_known_optima(self) -> dict[str, float]:
         """Return the known optima dict."""
         return dict(self._known_optima)
+
+
+def _run_worker(argv: list[str]) -> int:
+    """Worker entry point used by subprocess-backed hard timeouts."""
+    if len(argv) != 6:
+        print(
+            "usage: category_runner.py --worker "
+            "<category> <level> <problem> <solver> <time_limit> <result_path>",
+            file=sys.stderr,
+        )
+        return 2
+
+    category, level, problem_name, solver, time_limit_s, result_path_s = argv
+    problems = get_problems(category, level)
+    problem = next((p for p in problems if p.name == problem_name), None)
+    if problem is None:
+        print(f"unknown problem {problem_name!r} for {category}/{level}", file=sys.stderr)
+        return 2
+
+    runner = CategoryBenchmarkRunner(
+        category=category,
+        level=level,
+        time_limit=float(time_limit_s),
+        hard_timeout_grace=None,
+    )
+    result = runner._run_one_direct(problem, solver)
+    Path(result_path_s).write_text(json.dumps(result.to_dict()), encoding="utf-8")
+    return 0
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "--worker":
+        raise SystemExit(_run_worker(sys.argv[2:]))
+    raise SystemExit("category_runner.py is an internal module; use run_category_benchmarks.py")
