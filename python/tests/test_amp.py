@@ -2035,6 +2035,113 @@ def test_oa_cut_generation_receives_convex_constraint_mask(monkeypatch):
     assert recorded_masks == [[True, False]]
 
 
+def test_alphabb_quadratic_oa_cut_covers_issue_63_row():
+    """The indefinite quadratic row should get a relaxed OA cut, not direct OA."""
+    from discopt._jax.convexity import classify_oa_cut_convexity
+    from discopt._jax.cutting_planes import generate_alphabb_quadratic_oa_cuts_from_evaluator
+    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._jax.nlp_evaluator import NLPEvaluator
+
+    m = Model("issue_63_quadratic_cut")
+    x = m.continuous("x", lb=-2.0, ub=2.0)
+    y = m.continuous("y", lb=-2.0, ub=2.0)
+    z = m.continuous("z", lb=0.0, ub=1.0)
+    m.minimize(x + y**2 + z**3)
+    m.subject_to(y >= dm.exp(-x - 2) + dm.exp(-z - 2) - 2)
+    m.subject_to(x**2 <= y**2 + z**2)
+    m.subject_to(y >= x / 2 + z)
+
+    oa_convexity = classify_oa_cut_convexity(m, use_certificate=True)
+    assert oa_convexity.constraint_mask == [True, False, True]
+
+    evaluator = NLPEvaluator(m)
+    flat_lb, flat_ub = flat_variable_bounds(m)
+    x_star = np.array([0.25, 0.5, 0.25], dtype=np.float64)
+    cuts = generate_alphabb_quadratic_oa_cuts_from_evaluator(
+        evaluator,
+        x_star,
+        flat_lb,
+        flat_ub,
+        constraint_senses=[c.sense for c in m._constraints],
+        convex_mask=oa_convexity.constraint_mask,
+    )
+
+    assert len(cuts) == 1
+    cut = cuts[0]
+    assert cut.sense == "<="
+    assert np.linalg.norm(cut.coeffs) > 1e-12
+    assert np.isfinite(cut.rhs)
+
+    feasible_points = [
+        np.array([0.0, 0.0, 0.0], dtype=np.float64),
+        np.array([1.0, 1.0, 0.0], dtype=np.float64),
+        np.array([-1.0, 1.0, 1.0], dtype=np.float64),
+    ]
+    for point in feasible_points:
+        assert point[0] ** 2 <= point[1] ** 2 + point[2] ** 2 + 1e-12
+        assert float(np.dot(cut.coeffs, point)) <= cut.rhs + 1e-8
+
+
+def test_amp_appends_alphabb_cut_for_issue_63_quadratic(monkeypatch):
+    """AMP should append an alpha-BB cut for the nonconvex quadratic row."""
+    import discopt._jax.cutting_planes as cutting_planes
+    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    from discopt.solvers import amp as amp_mod
+
+    captured_cuts = []
+
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_milp_with_oa_recovery",
+        lambda **kwargs: (
+            MilpRelaxationResult(
+                status="optimal",
+                objective=0.0,
+                x=np.array([0.25, 0.5, 0.25], dtype=np.float64),
+            ),
+            {},
+            [],
+            1,
+        ),
+    )
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_best_nlp_candidate",
+        lambda *args, **kwargs: (np.array([0.25, 0.5, 0.25], dtype=np.float64), 1.0),
+    )
+    monkeypatch.setattr(cutting_planes, "generate_oa_cuts_from_evaluator", lambda *a, **k: [])
+
+    def spy_prune(oa_cuts, max_cuts=128):
+        captured_cuts[:] = list(oa_cuts)
+        return None
+
+    monkeypatch.setattr(amp_mod, "_prune_oa_cuts", spy_prune)
+
+    m = Model("issue_63_amp_cut")
+    x = m.continuous("x", lb=-2.0, ub=2.0)
+    y = m.continuous("y", lb=-2.0, ub=2.0)
+    z = m.continuous("z", lb=0.0, ub=1.0)
+    m.minimize(x + y**2 + z**3)
+    m.subject_to(y >= dm.exp(-x - 2) + dm.exp(-z - 2) - 2)
+    m.subject_to(x**2 <= y**2 + z**2)
+    m.subject_to(y >= x / 2 + z)
+
+    result = m.solve(
+        solver="amp",
+        apply_partitioning=False,
+        skip_convex_check=True,
+        presolve_bt=False,
+        max_iter=1,
+        time_limit=5,
+    )
+
+    assert result.status in ("optimal", "feasible")
+    assert len(captured_cuts) == 1
+    coeffs, rhs = captured_cuts[0]
+    assert np.linalg.norm(coeffs) > 1e-12
+    assert np.isfinite(rhs)
+
+
 def test_amp_root_presolve_preserves_heterogeneous_array_bounds():
     """Root FBBT must not narrow every array element to the first element's bound."""
     m = Model("amp_heterogeneous_array_bounds")

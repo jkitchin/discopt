@@ -2264,6 +2264,7 @@ def solve_amp(
                 # from cutting_planes.py which handles all constraint senses.
                 try:
                     from discopt._jax.cutting_planes import (
+                        generate_alphabb_quadratic_oa_cuts_from_evaluator,
                         generate_oa_cuts_from_evaluator,
                     )
                     from discopt.modeling.core import Constraint
@@ -2276,6 +2277,16 @@ def solve_amp(
                             _x_orig,
                             constraint_senses=_senses,
                             convex_mask=oa_convexity.constraint_mask,
+                        )
+                        cuts.extend(
+                            generate_alphabb_quadratic_oa_cuts_from_evaluator(
+                                evaluator,
+                                _x_orig,
+                                flat_lb,
+                                flat_ub,
+                                constraint_senses=_senses,
+                                convex_mask=oa_convexity.constraint_mask,
+                            )
                         )
                         for cut in cuts:
                             if np.linalg.norm(cut.coeffs) < 1e-12:

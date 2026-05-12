@@ -19,6 +19,9 @@ from typing import NamedTuple, Optional
 
 import numpy as np
 
+from discopt._jax.nonlinear_bound_tightening import is_effectively_finite
+from discopt.constants import ALPHABB_EPS, ALPHABB_SAFETY
+
 
 class LinearCut(NamedTuple):
     """A single linear cutting plane: coeffs @ x  sense  rhs.
@@ -283,6 +286,120 @@ def generate_oa_cuts_from_evaluator(
         sense = constraint_senses[k]
         cut = generate_oa_cut(grad_k, g_k, x_sol, sense=sense)
         cuts.append(cut)
+
+    return cuts
+
+
+def _constraint_row_hessian(evaluator, row_idx: int, x_sol: np.ndarray) -> np.ndarray:
+    """Evaluate the Hessian for one scalar constraint row."""
+    lam = np.zeros(evaluator.n_constraints, dtype=np.float64)
+    lam[row_idx] = 1.0
+    hess: np.ndarray = np.asarray(
+        evaluator.evaluate_lagrangian_hessian(x_sol, 0.0, lam),
+        dtype=np.float64,
+    )
+    sym_hess: np.ndarray = 0.5 * (hess + hess.T)
+    return sym_hess
+
+
+def _quadratic_probe_point(x_sol: np.ndarray, x_lb: np.ndarray, x_ub: np.ndarray) -> np.ndarray:
+    """Build a nearby point for checking that a row Hessian is constant."""
+    probe: np.ndarray = np.asarray(x_sol, dtype=np.float64).copy()
+    for idx in range(probe.size):
+        lb_i = float(x_lb[idx])
+        ub_i = float(x_ub[idx])
+        if is_effectively_finite(lb_i) and is_effectively_finite(ub_i):
+            width = ub_i - lb_i
+            if width <= 1e-10:
+                continue
+            step = min(max(0.173 * width, 1e-4), 1.0)
+        else:
+            step = 1.0
+
+        direction = 1.0 if idx % 2 == 0 else -1.0
+        candidate = probe[idx] + direction * step
+        if candidate < lb_i - 1e-12 or candidate > ub_i + 1e-12:
+            candidate = probe[idx] - direction * step
+        if candidate < lb_i - 1e-12 or candidate > ub_i + 1e-12:
+            continue
+        probe[idx] = candidate
+    return probe
+
+
+def generate_alphabb_quadratic_oa_cuts_from_evaluator(
+    evaluator,
+    x_sol: np.ndarray,
+    x_lb: np.ndarray,
+    x_ub: np.ndarray,
+    constraint_senses: Optional[list[str]] = None,
+    convex_mask: Optional[list[bool]] = None,
+    hessian_tol: float = 1e-8,
+) -> list[LinearCut]:
+    """Generate OA cuts from alpha-BB relaxations of nonconvex quadratic rows.
+
+    Direct OA cuts on a nonconvex row are not globally valid. For a quadratic
+    row ``q(x) <= 0`` with finite bounds on curved variables, alpha-BB gives a
+    convex underestimator
+
+        q_under(x) = q(x) - sum_i alpha_i (x_i - lb_i) (ub_i - x_i)
+
+    satisfying ``q_under(x) <= q(x)`` over the box. Every point feasible for the
+    original row therefore satisfies ``q_under(x) <= 0``, so a tangent cut of
+    the convex underestimator is a valid relaxation cut.
+    """
+    m = evaluator.n_constraints
+    if m == 0:
+        return []
+
+    x_sol = np.asarray(x_sol, dtype=np.float64).reshape(-1)
+    x_lb = np.asarray(x_lb, dtype=np.float64).reshape(-1)
+    x_ub = np.asarray(x_ub, dtype=np.float64).reshape(-1)
+    if x_sol.size != x_lb.size or x_sol.size != x_ub.size:
+        raise ValueError("x_sol, x_lb, and x_ub must have matching shapes")
+
+    if constraint_senses is None:
+        constraint_senses = ["<="] * m
+
+    cons_vals = evaluator.evaluate_constraints(x_sol)
+    jac = evaluator.evaluate_jacobian(x_sol)
+    probe = _quadratic_probe_point(x_sol, x_lb, x_ub)
+
+    cuts: list[LinearCut] = []
+    for k in range(m):
+        if convex_mask is not None and convex_mask[k]:
+            continue
+        if constraint_senses[k] != "<=":
+            continue
+
+        hess = _constraint_row_hessian(evaluator, k, x_sol)
+        probe_hess = _constraint_row_hessian(evaluator, k, probe)
+        if not np.allclose(hess, probe_hess, atol=hessian_tol, rtol=0.0):
+            continue
+
+        curved = np.flatnonzero(np.any(np.abs(hess) > hessian_tol, axis=0))
+        if curved.size == 0:
+            continue
+        if not all(
+            is_effectively_finite(float(x_lb[idx])) and is_effectively_finite(float(x_ub[idx]))
+            for idx in curved
+        ):
+            continue
+
+        hess_sub = hess[np.ix_(curved, curved)]
+        min_eig = float(np.linalg.eigvalsh(hess_sub)[0])
+        if min_eig >= -ALPHABB_EPS:
+            continue
+
+        alpha = np.zeros_like(x_sol, dtype=np.float64)
+        alpha[curved] = max(0.0, -0.5 * min_eig + ALPHABB_SAFETY)
+
+        perturbation = float(
+            np.sum(alpha[curved] * (x_sol[curved] - x_lb[curved]) * (x_ub[curved] - x_sol[curved]))
+        )
+        under_val = float(cons_vals[k]) - perturbation
+        under_grad = np.asarray(jac[k, :], dtype=np.float64).copy()
+        under_grad[curved] -= alpha[curved] * (x_lb[curved] + x_ub[curved] - 2.0 * x_sol[curved])
+        cuts.append(generate_oa_cut(under_grad, under_val, x_sol, sense="<="))
 
     return cuts
 
