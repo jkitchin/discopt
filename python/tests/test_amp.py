@@ -662,8 +662,26 @@ def test_x_exp_minlptests_objective_uses_separable_lower_bound(integer_y, caplog
 
     assert milp_model._objective_bound_valid is True
     assert result.status == "optimal"
-    assert result.objective == pytest.approx(-1.0 / np.e - 1.0)
+    cos_lb = min(np.cos(np.arange(1, 11))) if integer_y else -1.0
+    assert result.objective == pytest.approx(-1.0 / np.e + cos_lb)
     assert "falling back to a feasibility objective" not in caplog.text
+
+
+@pytest.mark.parametrize("scale", [1.0, -1.0])
+def test_integer_affine_cos_objective_uses_discrete_separable_lower_bound(scale):
+    """Finite integer affine cos terms should use their exact enumerated range."""
+    m = Model("integer_affine_cos")
+    y = m.integer("y", lb=-2, ub=3)
+    expr = dm.cos(2.0 * y + 1.0)
+    m.minimize(expr if scale > 0 else -expr)
+
+    milp_model, _ = _build_relaxation_for_test(m)
+    result = milp_model.solve()
+
+    values = scale * np.cos(2.0 * np.arange(-2, 4) + 1.0)
+    assert milp_model._objective_bound_valid is True
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(float(np.min(values)))
 
 
 def test_negative_unbounded_x_exp_objective_keeps_no_bound(caplog):

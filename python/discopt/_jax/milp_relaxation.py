@@ -20,6 +20,7 @@ Theory: Nagarajan et al., JOGO 2018, Section 4 (piecewise McCormick relaxation).
 
 from __future__ import annotations
 
+import itertools
 import logging
 from dataclasses import dataclass
 from typing import Optional, Union
@@ -56,6 +57,7 @@ logger = logging.getLogger(__name__)
 # Dedupe identical warnings emitted across repeated relaxation builds (AMP iterates).
 _warned_messages: set[str] = set()
 _EFFECTIVE_INF = 1e19
+_MAX_INTEGER_COS_ENUM = 10000
 _MAX_FINITE_EXP_ARG = float(np.log(np.finfo(np.float64).max))
 
 
@@ -861,6 +863,79 @@ def _is_cos_call(expr: Expression) -> bool:
     return isinstance(expr, FunctionCall) and expr.func_name == "cos" and len(expr.args) == 1
 
 
+def _flat_variable_types(model: Model) -> list[VarType]:
+    types: list[VarType] = []
+    for var in model._variables:
+        types.extend([var.var_type] * var.size)
+    return types
+
+
+def _integer_domain_values(
+    var_idx: int,
+    flat_types: list[VarType],
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> Optional[range]:
+    var_type = flat_types[var_idx]
+    if var_type not in (VarType.BINARY, VarType.INTEGER):
+        return None
+    lb_i = float(flat_lb[var_idx])
+    ub_i = float(flat_ub[var_idx])
+    if not (_is_effectively_finite(lb_i) and _is_effectively_finite(ub_i)):
+        return None
+    lo = int(np.ceil(lb_i - 1e-9))
+    hi = int(np.floor(ub_i + 1e-9))
+    if var_type == VarType.BINARY:
+        lo = max(lo, 0)
+        hi = min(hi, 1)
+    if lo > hi:
+        return None
+    return range(lo, hi + 1)
+
+
+def _integer_affine_cos_lower_bound(
+    expr: Expression,
+    scale: float,
+    model: Model,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> Optional[float]:
+    """Return exact lower bound for scale*cos(integer-affine expr) on a small box."""
+    if not isinstance(expr, FunctionCall) or expr.func_name != "cos" or len(expr.args) != 1:
+        return None
+    try:
+        coeff, const = _linearize_affine_expr(expr.args[0], model, len(flat_lb))
+    except ValueError:
+        return None
+
+    flat_types = _flat_variable_types(model)
+    entries: list[tuple[float, range]] = []
+    n_values = 1
+    for var_idx, c_i in enumerate(coeff):
+        c = float(c_i)
+        if abs(c) <= 1e-12:
+            continue
+        values = _integer_domain_values(var_idx, flat_types, flat_lb, flat_ub)
+        if values is None:
+            return None
+        n_values *= len(values)
+        if n_values > _MAX_INTEGER_COS_ENUM:
+            return None
+        entries.append((c, values))
+
+    if not entries:
+        value = scale * float(np.cos(const))
+        return value if np.isfinite(value) else None
+
+    best = np.inf
+    for assignment in itertools.product(*(values for _c, values in entries)):
+        arg = float(const)
+        for (c, _values), value in zip(entries, assignment):
+            arg += c * float(value)
+        best = min(best, scale * float(np.cos(arg)))
+    return float(best) if np.isfinite(best) else None
+
+
 def _scaled_affine_lower_bound(
     expr: Expression,
     scale: float,
@@ -979,7 +1054,8 @@ def _separable_objective_lower_bound(
             continue
 
         if _is_cos_call(term):
-            total += -abs(scale)
+            integer_lb = _integer_affine_cos_lower_bound(term, scale, model, flat_lb, flat_ub)
+            total += integer_lb if integer_lb is not None else -abs(scale)
             continue
 
         monomial = _match_scaled_monomial(term, model)
