@@ -624,6 +624,60 @@ def test_supported_univariate_constraint_tightens_relaxation():
     assert varmap["univariate_relaxations"][0].func_name == "exp"
 
 
+def test_issue71_log_constraint_is_kept_in_relaxation(caplog):
+    """Safe affine log constraints should not be omitted from the AMP relaxation."""
+    m = Model("issue71_log_constraint")
+    x = m.continuous("x", lb=1.0, ub=4.0)
+    y = m.continuous("y", lb=0.0, ub=2.0)
+    m.subject_to(y <= dm.log(x) - 0.1)
+    m.maximize(y)
+
+    with caplog.at_level("WARNING", logger="discopt._jax.milp_relaxation"):
+        milp_model, varmap = _build_relaxation_for_test(m)
+        result = milp_model.solve()
+
+    assert result.status == "optimal"
+    assert milp_model._objective_bound_valid is True
+    assert result.objective is not None
+    assert {r.func_name for r in varmap["univariate_relaxations"]} == {"log"}
+    assert "Cannot linearize FunctionCall: log" not in caplog.text
+    assert "omitting constraint" not in caplog.text
+
+
+def test_issue71_maximize_sqrt_objective_uses_real_relaxation_bound(caplog):
+    """Safe affine sqrt maximization objectives should not use a feasibility objective."""
+    m = Model("issue71_sqrt_max")
+    x = m.continuous("x", lb=0.0, ub=4.0)
+    m.maximize(dm.sqrt(x + 0.1))
+
+    with caplog.at_level("WARNING", logger="discopt._jax.milp_relaxation"):
+        milp_model, varmap = _build_relaxation_for_test(m)
+        result = milp_model.solve()
+
+    assert result.status == "optimal"
+    assert milp_model._objective_bound_valid is True
+    assert result.objective is not None
+    assert result.objective == pytest.approx(-np.sqrt(4.1), abs=1e-8)
+    assert {r.func_name for r in varmap["univariate_relaxations"]} == {"sqrt"}
+    assert "falling back to a feasibility objective" not in caplog.text
+
+
+def test_issue71_milp_wrapper_accepts_nonfatal_highs_warnings():
+    """HiGHS passModel warnings from tiny AMP rows must not discard valid bounds."""
+    from discopt.solvers import SolveStatus
+    from discopt.solvers.milp_highs import solve_milp
+
+    result = solve_milp(
+        c=np.array([1.0], dtype=np.float64),
+        A_ub=np.array([[1e-15]], dtype=np.float64),
+        b_ub=np.array([1e-30], dtype=np.float64),
+        bounds=[(1e-30, 1.0)],
+    )
+
+    assert result.status == SolveStatus.OPTIMAL
+    assert result.objective is not None
+
+
 def test_x_exp_objective_uses_lifted_product_relaxation(caplog):
     """Finite-box x*exp(x) objectives should use exp lift plus McCormick product."""
     m = Model("x_exp_finite")
