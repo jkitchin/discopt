@@ -20,6 +20,7 @@ Theory: Nagarajan et al., JOGO 2018, Section 4 (piecewise McCormick relaxation).
 
 from __future__ import annotations
 
+import itertools
 import logging
 from dataclasses import dataclass
 from typing import Optional, Union
@@ -55,6 +56,8 @@ logger = logging.getLogger(__name__)
 
 # Dedupe identical warnings emitted across repeated relaxation builds (AMP iterates).
 _warned_messages: set[str] = set()
+_EFFECTIVE_INF = 1e19
+_MAX_INTEGER_COS_ENUM = 10000
 _MAX_FINITE_EXP_ARG = float(np.log(np.finfo(np.float64).max))
 
 
@@ -64,6 +67,10 @@ def _warn_once(msg: str, *args) -> None:
         return
     _warned_messages.add(formatted)
     logger.warning("%s", formatted)
+
+
+def _is_effectively_finite(value: float) -> bool:
+    return bool(np.isfinite(value) and abs(float(value)) < _EFFECTIVE_INF)
 
 
 # ---------------------------------------------------------------------------
@@ -322,13 +329,14 @@ def _decompose_product(
     expr: Expression,
     model: Model,
     fractional_power_var_map: Optional[dict[tuple[int, float], int]] = None,
+    univariate_var_map: Optional[dict[object, int]] = None,
 ) -> tuple[float, list[int]] | None:
     """Decompose a product expression into (scalar, [flat_or_aux_idx, ...]).
 
     Returns None if expr contains non-constant, non-variable leaves.
     Constants are accumulated into the scalar; variable references and
-    registered fractional-power sub-expressions are appended to the index
-    list (using their MILP column indices).
+    registered lifted sub-expressions are appended to the index list (using
+    their MILP column indices).
     """
     scalar: list[float] = [1.0]
     var_indices: list[int] = []
@@ -343,6 +351,11 @@ def _decompose_product(
         if flat is not None:
             var_indices.append(flat)
             return True
+        if univariate_var_map:
+            aux_col = univariate_var_map.get(id(e))
+            if aux_col is not None:
+                var_indices.append(aux_col)
+                return True
         # Recognize var^p (fractional p) when an aux column was allocated.
         if (
             fractional_power_var_map
@@ -361,6 +374,68 @@ def _decompose_product(
     if visit(expr):
         return scalar[0], var_indices
     return None
+
+
+def _collect_lifted_bilinear_products(
+    model: Model,
+    fractional_power_var_map: dict[tuple[int, float], int],
+    univariate_var_map: dict[object, int],
+    n_orig: int,
+) -> list[tuple[int, int]]:
+    """Return products between original variables and lifted auxiliary columns."""
+    keys: set[tuple[int, int]] = set()
+
+    def visit(expr: Expression) -> None:
+        if isinstance(expr, BinaryOp):
+            if expr.op == "*":
+                decomp = _decompose_product(
+                    expr,
+                    model,
+                    fractional_power_var_map=fractional_power_var_map,
+                    univariate_var_map=univariate_var_map,
+                )
+                if decomp is not None:
+                    _scalar, indices = decomp
+                    unique = list(dict.fromkeys(indices))
+                    if (
+                        len(unique) == 2
+                        and len(indices) == 2
+                        and any(idx >= n_orig for idx in unique)
+                    ):
+                        i, j = sorted(unique)
+                        keys.add((i, j))
+            visit(expr.left)
+            visit(expr.right)
+            return
+
+        if isinstance(expr, UnaryOp):
+            visit(expr.operand)
+            return
+
+        if isinstance(expr, FunctionCall):
+            for arg in expr.args:
+                visit(arg)
+            return
+
+        if isinstance(expr, IndexExpression):
+            if not isinstance(expr.base, Variable):
+                visit(expr.base)
+            return
+
+        if isinstance(expr, SumExpression):
+            visit(expr.operand)
+            return
+
+        if isinstance(expr, SumOverExpression):
+            for term in expr.terms:
+                visit(term)
+
+    if model._objective is not None:
+        visit(distribute_products(model._objective.expression))
+    for constraint in model._constraints:
+        visit(distribute_products(constraint.body))
+
+    return sorted(keys)
 
 
 def _collect_distinct_multilinear_products(model: Model) -> list[tuple[int, ...]]:
@@ -607,6 +682,9 @@ def _flatten_additive_terms(
         _flatten_additive_terms(expr.left, scale, out)
         _flatten_additive_terms(expr.right, -scale, out)
         return
+    if isinstance(expr, UnaryOp) and expr.op == "neg":
+        _flatten_additive_terms(expr.operand, -scale, out)
+        return
     if isinstance(expr, SumOverExpression):
         for term in expr.terms:
             _flatten_additive_terms(term, scale, out)
@@ -682,6 +760,327 @@ def _exact_positive_reciprocal_row(
     if not np.isfinite(rhs):
         return None
     return denom_coeff, float(rhs - denom_const)
+
+
+def _flatten_product_factors(expr: Expression, out: list[Expression]) -> None:
+    if isinstance(expr, BinaryOp) and expr.op == "*":
+        _flatten_product_factors(expr.left, out)
+        _flatten_product_factors(expr.right, out)
+        return
+    out.append(expr)
+
+
+def _monomial_power_term(expr: Expression, model: Model) -> Optional[tuple[int, int]]:
+    flat = _get_flat_index(expr, model)
+    if flat is not None:
+        return flat, 1
+    if isinstance(expr, BinaryOp) and expr.op == "**" and isinstance(expr.right, Constant):
+        base = _get_flat_index(expr.left, model)
+        if base is None:
+            return None
+        exp_val = float(expr.right.value)
+        n_int = int(exp_val)
+        if exp_val == n_int and n_int >= 1:
+            return base, n_int
+    return None
+
+
+def _match_scaled_monomial(expr: Expression, model: Model) -> Optional[tuple[float, int, int]]:
+    factors: list[Expression] = []
+    _flatten_product_factors(expr, factors)
+    scalar = 1.0
+    var_idx: Optional[int] = None
+    power_total = 0
+    for factor in factors:
+        const = _constant_value(factor)
+        if const is not None:
+            scalar *= const
+            continue
+        power_term = _monomial_power_term(factor, model)
+        if power_term is None:
+            return None
+        factor_var, factor_power = power_term
+        if var_idx is None:
+            var_idx = factor_var
+        elif var_idx != factor_var:
+            return None
+        power_total += factor_power
+    if var_idx is None or power_total < 1:
+        return None
+    return scalar, var_idx, power_total
+
+
+def _match_x_exp_product(expr: Expression, model: Model) -> Optional[tuple[float, int]]:
+    factors: list[Expression] = []
+    _flatten_product_factors(expr, factors)
+    scalar = 1.0
+    var_idx: Optional[int] = None
+    exp_arg_idx: Optional[int] = None
+    for factor in factors:
+        const = _constant_value(factor)
+        if const is not None:
+            scalar *= const
+            continue
+        flat = _get_flat_index(factor, model)
+        if flat is not None:
+            if var_idx is not None:
+                return None
+            var_idx = flat
+            continue
+        if isinstance(factor, FunctionCall) and factor.func_name == "exp" and len(factor.args) == 1:
+            arg_idx = _get_flat_index(factor.args[0], model)
+            if arg_idx is None or exp_arg_idx is not None:
+                return None
+            exp_arg_idx = arg_idx
+            continue
+        return None
+    if var_idx is None or exp_arg_idx is None or var_idx != exp_arg_idx:
+        return None
+    return scalar, var_idx
+
+
+def _safe_x_exp_value(x: float) -> Optional[float]:
+    if not np.isfinite(x) or x > _MAX_FINITE_EXP_ARG:
+        return None
+    if x < -745.0:
+        return 0.0
+    return float(x * np.exp(x))
+
+
+def _x_exp_upper_bound(var_idx: int, flat_lb: np.ndarray, flat_ub: np.ndarray) -> Optional[float]:
+    lb = float(flat_lb[var_idx])
+    ub = float(flat_ub[var_idx])
+    if not (_is_effectively_finite(lb) and _is_effectively_finite(ub)):
+        return None
+    values = [_safe_x_exp_value(lb), _safe_x_exp_value(ub)]
+    finite_values = [value for value in values if value is not None and np.isfinite(value)]
+    if len(finite_values) != len(values):
+        return None
+    return max(finite_values)
+
+
+def _is_cos_call(expr: Expression) -> bool:
+    return isinstance(expr, FunctionCall) and expr.func_name == "cos" and len(expr.args) == 1
+
+
+def _flat_variable_types(model: Model) -> list[VarType]:
+    types: list[VarType] = []
+    for var in model._variables:
+        types.extend([var.var_type] * var.size)
+    return types
+
+
+def _integer_domain_values(
+    var_idx: int,
+    flat_types: list[VarType],
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> Optional[range]:
+    var_type = flat_types[var_idx]
+    if var_type not in (VarType.BINARY, VarType.INTEGER):
+        return None
+    lb_i = float(flat_lb[var_idx])
+    ub_i = float(flat_ub[var_idx])
+    if not (_is_effectively_finite(lb_i) and _is_effectively_finite(ub_i)):
+        return None
+    lo = int(np.ceil(lb_i - 1e-9))
+    hi = int(np.floor(ub_i + 1e-9))
+    if var_type == VarType.BINARY:
+        lo = max(lo, 0)
+        hi = min(hi, 1)
+    if lo > hi:
+        return None
+    return range(lo, hi + 1)
+
+
+def _integer_affine_cos_lower_bound(
+    expr: Expression,
+    scale: float,
+    model: Model,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> Optional[float]:
+    """Return exact lower bound for scale*cos(integer-affine expr) on a small box."""
+    if not isinstance(expr, FunctionCall) or expr.func_name != "cos" or len(expr.args) != 1:
+        return None
+    try:
+        coeff, const = _linearize_affine_expr(expr.args[0], model, len(flat_lb))
+    except ValueError:
+        return None
+
+    flat_types = _flat_variable_types(model)
+    entries: list[tuple[float, range]] = []
+    n_values = 1
+    for var_idx, c_i in enumerate(coeff):
+        c = float(c_i)
+        if abs(c) <= 1e-12:
+            continue
+        values = _integer_domain_values(var_idx, flat_types, flat_lb, flat_ub)
+        if values is None:
+            return None
+        n_values *= len(values)
+        if n_values > _MAX_INTEGER_COS_ENUM:
+            return None
+        entries.append((c, values))
+
+    if not entries:
+        value = scale * float(np.cos(const))
+        return value if np.isfinite(value) else None
+
+    best = np.inf
+    for assignment in itertools.product(*(values for _c, values in entries)):
+        arg = float(const)
+        for (c, _values), value in zip(entries, assignment):
+            arg += c * float(value)
+        best = min(best, scale * float(np.cos(arg)))
+    return float(best) if np.isfinite(best) else None
+
+
+def _scaled_affine_lower_bound(
+    expr: Expression,
+    scale: float,
+    model: Model,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> Optional[float]:
+    try:
+        coeff, const = _linearize_affine_expr(expr, model, len(flat_lb))
+    except ValueError:
+        return None
+    want_lower = scale >= 0.0
+    bound = float(const)
+    for c_i, lb_i, ub_i in zip(coeff, flat_lb, flat_ub):
+        c = float(c_i)
+        if abs(c) <= 1e-12:
+            continue
+        chosen = float(lb_i) if (c >= 0.0) == want_lower else float(ub_i)
+        if not _is_effectively_finite(chosen):
+            return None
+        bound += c * chosen
+    return scale * bound
+
+
+def _evaluate_polynomial(coeffs: dict[int, float], x: float) -> Optional[float]:
+    max_power = max(coeffs)
+    value = 0.0
+    for power in range(max_power, -1, -1):
+        value = value * x + float(coeffs.get(power, 0.0))
+        if not np.isfinite(value):
+            return None
+    return float(value)
+
+
+def _polynomial_lower_bound(
+    coeffs: dict[int, float],
+    lb: float,
+    ub: float,
+) -> Optional[float]:
+    clean = {power: coeff for power, coeff in coeffs.items() if abs(coeff) > 1e-12}
+    if not clean:
+        return 0.0
+    max_power = max(clean)
+    if max_power == 0:
+        return float(clean[0])
+
+    leading = float(clean[max_power])
+    lo_unbounded = not _is_effectively_finite(lb)
+    hi_unbounded = not _is_effectively_finite(ub)
+    if hi_unbounded and leading < 0.0:
+        return None
+    if lo_unbounded:
+        if max_power % 2 == 0 and leading < 0.0:
+            return None
+        if max_power % 2 == 1 and leading > 0.0:
+            return None
+
+    candidates: list[float] = []
+    if not lo_unbounded:
+        candidates.append(float(lb))
+    if not hi_unbounded:
+        candidates.append(float(ub))
+
+    deriv_coeffs = [power * clean.get(power, 0.0) for power in range(max_power, 0, -1)]
+    roots = np.roots(deriv_coeffs) if deriv_coeffs else np.array([])
+    for root in roots:
+        if abs(float(np.imag(root))) > 1e-9:
+            continue
+        x = float(np.real(root))
+        if (lo_unbounded or x >= lb - 1e-9) and (hi_unbounded or x <= ub + 1e-9):
+            candidates.append(x)
+
+    values: list[float] = []
+    for x in _sorted_unique_points(candidates):
+        value = _evaluate_polynomial(clean, x)
+        if value is not None and np.isfinite(value):
+            values.append(value)
+    if not values:
+        return None
+    return min(values)
+
+
+def _separable_objective_lower_bound(
+    expr: Expression,
+    model: Model,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> Optional[float]:
+    """Compute a conservative constant lower bound for simple separable objectives."""
+    terms: list[tuple[float, Expression]] = []
+    _flatten_additive_terms(expr, 1.0, terms)
+
+    total = 0.0
+    polynomial_terms: dict[int, dict[int, float]] = {}
+    for scale, term in terms:
+        if abs(scale) <= 1e-12:
+            continue
+        const = _constant_value(term)
+        if const is not None:
+            total += scale * const
+            continue
+
+        x_exp = _match_x_exp_product(term, model)
+        if x_exp is not None:
+            scalar, var_idx = x_exp
+            term_scale = scale * scalar
+            if abs(term_scale) <= 1e-12:
+                continue
+            if term_scale > 0.0:
+                total += term_scale * (-1.0 / np.e)
+                continue
+            upper = _x_exp_upper_bound(var_idx, flat_lb, flat_ub)
+            if upper is None:
+                return None
+            total += term_scale * upper
+            continue
+
+        if _is_cos_call(term):
+            integer_lb = _integer_affine_cos_lower_bound(term, scale, model, flat_lb, flat_ub)
+            total += integer_lb if integer_lb is not None else -abs(scale)
+            continue
+
+        monomial = _match_scaled_monomial(term, model)
+        if monomial is not None:
+            scalar, var_idx, power = monomial
+            polynomial_terms.setdefault(var_idx, {})
+            polynomial_terms[var_idx][power] = (
+                polynomial_terms[var_idx].get(power, 0.0) + scale * scalar
+            )
+            continue
+
+        affine_bound = _scaled_affine_lower_bound(term, scale, model, flat_lb, flat_ub)
+        if affine_bound is None:
+            return None
+        total += affine_bound
+
+    for var_idx, coeffs in polynomial_terms.items():
+        lower = _polynomial_lower_bound(coeffs, float(flat_lb[var_idx]), float(flat_ub[var_idx]))
+        if lower is None:
+            return None
+        total += lower
+
+    if not np.isfinite(total):
+        return None
+    return float(total)
 
 
 def _collect_univariate_relaxations(
@@ -885,7 +1284,12 @@ def _linearize_expr(
                     visit(e.left, scale * float(e.right.value))
                     return
                 # Full product decomposition
-                decomp = _decompose_product(e, model, fractional_power_var_map)
+                decomp = _decompose_product(
+                    e,
+                    model,
+                    fractional_power_var_map=fractional_power_var_map,
+                    univariate_var_map=univariate_var_map,
+                )
                 if decomp is None:
                     raise ValueError(f"Cannot decompose product: {e}")
                 c, indices = decomp
@@ -1129,6 +1533,8 @@ def build_milp_relaxation(
     for var_idx, n in terms.monomial:
         lb_i = float(flat_lb[var_idx])
         ub_i = float(flat_ub[var_idx])
+        if not (_is_effectively_finite(lb_i) and _is_effectively_finite(ub_i)):
+            continue
         vals = [lb_i**n, ub_i**n]
         if n % 2 == 0 and lb_i < 0 < ub_i:
             vals.append(0.0)
@@ -1139,6 +1545,8 @@ def build_milp_relaxation(
 
     monomial_pw_map: dict[tuple[int, int], list[tuple[int, float, float]]] = {}
     for var_idx, n in terms.monomial:
+        if (var_idx, n) not in monomial_var_map:
+            continue
         lb_i = float(flat_lb[var_idx])
         ub_i = float(flat_ub[var_idx])
         if (
@@ -1235,6 +1643,15 @@ def build_milp_relaxation(
         bilinear_with_fp_keys.append(pair)
 
     for key in bilinear_with_fp_keys:
+        bilinear_var_map[key] = _ensure_bilinear_aux(*key)
+
+    lifted_bilinear_keys = _collect_lifted_bilinear_products(
+        model,
+        fractional_power_var_map,
+        univariate_var_map,
+        n_orig,
+    )
+    for key in lifted_bilinear_keys:
         bilinear_var_map[key] = _ensure_bilinear_aux(*key)
 
     bilinear_pw_map: dict[tuple[int, int], list] = {}
@@ -1803,6 +2220,8 @@ def build_milp_relaxation(
 
     # Monomial constraints
     for var_idx, n in terms.monomial:
+        if (var_idx, n) not in monomial_var_map:
+            continue
         lb_i = float(flat_lb[var_idx])
         ub_i = float(flat_ub[var_idx])
         s_col = monomial_var_map[(var_idx, n)]
@@ -2088,20 +2507,32 @@ def build_milp_relaxation(
         )
         objective_bound_valid = True
     except ValueError as err:
-        # Keep a feasibility objective so the relaxation can still produce a point,
-        # but do not treat the LP value as a sound global bound. Warn loudly:
-        # without an objective, AMP's lower-bound machinery is disabled and the
-        # solver can only ever return "feasible", never "optimal".
-        _warn_once(
-            "MILP relaxation could not linearize the objective (%s); falling back to "
-            "a feasibility objective. AMP will not be able to produce a lower bound "
-            "or certify optimality on this problem.",
-            err,
-        )
-        c_obj = np.zeros(n_total)
-        const_obj = 0.0
-        objective_bound_valid = False
-        logger.debug("AMP: objective is not linearizable; MILP relaxation bound is unavailable")
+        fallback_lb = None
+        if model._objective.sense == ObjectiveSense.MINIMIZE:
+            fallback_lb = _separable_objective_lower_bound(obj_expr, model, flat_lb, flat_ub)
+        if fallback_lb is not None:
+            c_obj = np.zeros(n_total)
+            const_obj = float(fallback_lb)
+            objective_bound_valid = True
+            logger.debug(
+                "AMP: using separable objective lower bound after linearization failed: %s",
+                err,
+            )
+        else:
+            # Keep a feasibility objective so the relaxation can still produce a point,
+            # but do not treat the LP value as a sound global bound. Warn loudly:
+            # without an objective, AMP's lower-bound machinery is disabled and the
+            # solver can only ever return "feasible", never "optimal".
+            _warn_once(
+                "MILP relaxation could not linearize the objective (%s); falling back to "
+                "a feasibility objective. AMP will not be able to produce a lower bound "
+                "or certify optimality on this problem.",
+                err,
+            )
+            c_obj = np.zeros(n_total)
+            const_obj = 0.0
+            objective_bound_valid = False
+            logger.debug("AMP: objective is not linearizable; MILP relaxation bound is unavailable")
 
     # Negate for maximization
     if model._objective.sense == ObjectiveSense.MAXIMIZE:

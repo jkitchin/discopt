@@ -624,6 +624,82 @@ def test_supported_univariate_constraint_tightens_relaxation():
     assert varmap["univariate_relaxations"][0].func_name == "exp"
 
 
+def test_x_exp_objective_uses_lifted_product_relaxation(caplog):
+    """Finite-box x*exp(x) objectives should use exp lift plus McCormick product."""
+    m = Model("x_exp_finite")
+    x = m.continuous("x", lb=-2.0, ub=2.0)
+    m.minimize(x * dm.exp(x))
+
+    with caplog.at_level("WARNING", logger="discopt._jax.milp_relaxation"):
+        milp_model, varmap = _build_relaxation_for_test(m)
+        result = milp_model.solve()
+
+    exp_cols = [
+        relax.aux_col for relax in varmap["univariate_relaxations"] if relax.func_name == "exp"
+    ]
+
+    assert len(exp_cols) == 1
+    assert (0, exp_cols[0]) in varmap["bilinear"]
+    assert milp_model._objective_bound_valid is True
+    assert result.status == "optimal"
+    assert result.objective is not None
+    assert result.objective <= -1.0 / np.e + 1e-8
+    assert "falling back to a feasibility objective" not in caplog.text
+
+
+@pytest.mark.parametrize("integer_y", [False, True])
+def test_x_exp_minlptests_objective_uses_separable_lower_bound(integer_y, caplog):
+    """Unbounded MINLPTests x*exp(x)+cos(y)+z^3-z^2 gets a safe constant bound."""
+    m = Model("nlp_001_010_like")
+    x = m.continuous("x")
+    y = m.integer("y", lb=1, ub=10) if integer_y else m.continuous("y")
+    z = m.continuous("z", lb=1.0)
+    m.minimize(x * dm.exp(x) + dm.cos(y) + z**3 - z**2)
+
+    with caplog.at_level("WARNING", logger="discopt._jax.milp_relaxation"):
+        milp_model, _ = _build_relaxation_for_test(m)
+        result = milp_model.solve()
+
+    assert milp_model._objective_bound_valid is True
+    assert result.status == "optimal"
+    cos_lb = min(np.cos(np.arange(1, 11))) if integer_y else -1.0
+    assert result.objective == pytest.approx(-1.0 / np.e + cos_lb)
+    assert "falling back to a feasibility objective" not in caplog.text
+
+
+@pytest.mark.parametrize("scale", [1.0, -1.0])
+def test_integer_affine_cos_objective_uses_discrete_separable_lower_bound(scale):
+    """Finite integer affine cos terms should use their exact enumerated range."""
+    m = Model("integer_affine_cos")
+    y = m.integer("y", lb=-2, ub=3)
+    expr = dm.cos(2.0 * y + 1.0)
+    m.minimize(expr if scale > 0 else -expr)
+
+    milp_model, _ = _build_relaxation_for_test(m)
+    result = milp_model.solve()
+
+    values = scale * np.cos(2.0 * np.arange(-2, 4) + 1.0)
+    assert milp_model._objective_bound_valid is True
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(float(np.min(values)))
+
+
+def test_negative_unbounded_x_exp_objective_keeps_no_bound(caplog):
+    """Unsafe x*exp(x) signs must not receive a fake separable lower bound."""
+    m = Model("negative_x_exp_unbounded")
+    x = m.continuous("x")
+    m.minimize(-x * dm.exp(x))
+
+    with caplog.at_level("WARNING", logger="discopt._jax.milp_relaxation"):
+        milp_model, _ = _build_relaxation_for_test(m)
+        result = milp_model.solve()
+
+    assert milp_model._objective_bound_valid is False
+    assert result.status == "optimal"
+    assert result.objective is None
+    assert "falling back to a feasibility objective" in caplog.text
+
+
 def test_nested_univariate_objective_still_returns_no_relaxation_bound():
     """Unsupported nested operator arguments should keep the safe no-bound behavior."""
     m = Model("nested_sqrt")
