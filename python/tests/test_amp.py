@@ -2442,6 +2442,59 @@ def test_objective_cutoff_bounds_enable_alphabb_for_issue_63_instances():
     assert len(cuts) == 1
 
 
+def test_amp_restores_model_bounds_after_objective_cutoff_tightening(monkeypatch):
+    """Internal cutoff/FBBT bounds must not leak back to the caller's model."""
+    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt.solvers import amp as amp_mod
+
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_milp_with_oa_recovery",
+        lambda **kwargs: (
+            MilpRelaxationResult(
+                status="optimal",
+                objective=-1.0,
+                x=np.array([-0.6, 0.3, 0.5], dtype=np.float64),
+            ),
+            {},
+            [],
+            1,
+        ),
+    )
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_best_nlp_candidate",
+        lambda *args, **kwargs: (np.array([-0.6, 0.3, 0.5], dtype=np.float64), -0.33),
+    )
+
+    m = Model("issue_63_bound_restore")
+    x = m.continuous("x")
+    y = m.continuous("y")
+    z = m.continuous("z", lb=0.0, ub=1.0)
+    m.minimize(x + y**2 + z**3)
+    m.subject_to(y >= dm.exp(-x - 2) + dm.exp(-z - 2) - 2)
+    m.subject_to(x**2 <= y**2 + z**2)
+    m.subject_to(y >= x / 2 + z)
+
+    original_lb, original_ub = flat_variable_bounds(m)
+
+    result = m.solve(
+        solver="amp",
+        apply_partitioning=False,
+        skip_convex_check=True,
+        presolve_bt=False,
+        alphabb_cutoff_obbt=False,
+        max_iter=1,
+        time_limit=5,
+    )
+
+    restored_lb, restored_ub = flat_variable_bounds(m)
+    assert result.status in ("optimal", "feasible")
+    np.testing.assert_allclose(restored_lb, original_lb)
+    np.testing.assert_allclose(restored_ub, original_ub)
+
+
 def test_amp_appends_alphabb_cut_for_issue_63_quadratic(monkeypatch):
     """AMP should append an alpha-BB cut for the nonconvex quadratic row."""
     import discopt._jax.cutting_planes as cutting_planes

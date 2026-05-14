@@ -2057,6 +2057,11 @@ def solve_amp(
     n_orig = sum(v.size for v in model._variables)
     flat_lb, flat_ub = flat_variable_bounds(model)
     initial_point_arr = _normalize_initial_point(initial_point, n_orig, flat_lb, flat_ub)
+    original_variable_bounds = _snapshot_variable_bounds(model)
+
+    def _finish(result: SolveResult) -> SolveResult:
+        _restore_variable_bounds(original_variable_bounds)
+        return result
 
     if pure_continuous and not skip_convex_check:
         try:
@@ -2078,7 +2083,7 @@ def solve_amp(
                     initial_point=initial_point_arr,
                 )
                 result.convex_fast_path = True
-                return result
+                return _finish(result)
         except Exception as exc:
             logger.debug("AMP: convex delegation check failed: %s", exc)
 
@@ -2104,11 +2109,13 @@ def solve_amp(
         int_sizes,
     )
     if root_infeasible:
-        return SolveResult(
-            status="infeasible",
-            wall_time=time.perf_counter() - t_start,
-            mip_count=0,
-            gap_certified=True,
+        return _finish(
+            SolveResult(
+                status="infeasible",
+                wall_time=time.perf_counter() - t_start,
+                mip_count=0,
+                gap_certified=True,
+            )
         )
     if root_changed:
         logger.info("AMP: root FBBT tightened variable bounds before relaxation")
@@ -2121,11 +2128,13 @@ def solve_amp(
             "AMP: nonlinear bound tightening proved infeasibility: %s",
             nonlinear_bt_stats.infeasibility_reason,
         )
-        return SolveResult(
-            status="infeasible",
-            wall_time=time.perf_counter() - t_start,
-            mip_count=0,
-            gap_certified=True,
+        return _finish(
+            SolveResult(
+                status="infeasible",
+                wall_time=time.perf_counter() - t_start,
+                mip_count=0,
+                gap_certified=True,
+            )
         )
     if nonlinear_bt_stats.n_tightened > 0:
         flat_lb = tightened_lb
@@ -2621,7 +2630,7 @@ def solve_amp(
                                     )
                                     continue
                             recovered.mip_count = mip_count
-                            return recovered
+                            return _finish(recovered)
                     fallback_x, fallback_obj = _solve_small_integer_domain_fallback(
                         model,
                         evaluator,
@@ -2633,21 +2642,25 @@ def solve_amp(
                         deadline=deadline,
                     )
                     if fallback_x is not None and fallback_obj is not None:
-                        return SolveResult(
-                            status="feasible",
-                            objective=_from_minimization_space(fallback_obj),
-                            bound=None,
-                            gap=None,
-                            x=_build_x_dict(fallback_x, model),
-                            wall_time=time.perf_counter() - t_start,
-                            mip_count=mip_count,
-                            gap_certified=False,
+                        return _finish(
+                            SolveResult(
+                                status="feasible",
+                                objective=_from_minimization_space(fallback_obj),
+                                bound=None,
+                                gap=None,
+                                x=_build_x_dict(fallback_x, model),
+                                wall_time=time.perf_counter() - t_start,
+                                mip_count=mip_count,
+                                gap_certified=False,
+                            )
                         )
                     if milp_result.status == "infeasible":
-                        return SolveResult(
-                            status="infeasible",
-                            wall_time=time.perf_counter() - t_start,
-                            mip_count=mip_count,
+                        return _finish(
+                            SolveResult(
+                                status="infeasible",
+                                wall_time=time.perf_counter() - t_start,
+                                mip_count=mip_count,
+                            )
                         )
             break
 
@@ -2946,11 +2959,13 @@ def solve_amp(
             status = "error"
         else:
             status = "iteration_limit"
-        return SolveResult(
-            status=status,
-            wall_time=elapsed,
-            mip_count=mip_count,
-            gap_certified=False,
+        return _finish(
+            SolveResult(
+                status=status,
+                wall_time=elapsed,
+                mip_count=mip_count,
+                gap_certified=False,
+            )
         )
 
     if incumbent is not None:
@@ -2971,15 +2986,19 @@ def solve_amp(
         rel_gap_final = _compute_relative_gap(abs_gap_final, UB)
         status = "optimal" if gap_certified else "feasible"
 
-        return SolveResult(
-            status=status,
-            objective=_from_minimization_space(UB),
-            bound=(_from_minimization_space(LB) if LB > -np.inf and bound_is_trustworthy else None),
-            gap=float(rel_gap_final) if rel_gap_final is not None else None,
-            x=_build_x_dict(incumbent, model),
-            wall_time=elapsed,
-            mip_count=mip_count,
-            gap_certified=gap_certified,
+        return _finish(
+            SolveResult(
+                status=status,
+                objective=_from_minimization_space(UB),
+                bound=(
+                    _from_minimization_space(LB) if LB > -np.inf and bound_is_trustworthy else None
+                ),
+                gap=float(rel_gap_final) if rel_gap_final is not None else None,
+                x=_build_x_dict(incumbent, model),
+                wall_time=elapsed,
+                mip_count=mip_count,
+                gap_certified=gap_certified,
+            )
         )
 
     # No feasible solution found
@@ -2996,7 +3015,7 @@ def solve_amp(
         )
         if recovered is not None:
             recovered.mip_count = mip_count
-            return recovered
+            return _finish(recovered)
 
     if termination_reason == "time_limit" or elapsed >= time_limit:
         status = "time_limit"
@@ -3007,13 +3026,15 @@ def solve_amp(
     else:
         status = "iteration_limit"
 
-    return SolveResult(
-        status=status,
-        objective=None,
-        bound=_from_minimization_space(LB) if LB > -np.inf else None,
-        gap=None,
-        x=None,
-        wall_time=elapsed,
-        mip_count=mip_count,
-        gap_certified=False,
+    return _finish(
+        SolveResult(
+            status=status,
+            objective=None,
+            bound=_from_minimization_space(LB) if LB > -np.inf else None,
+            gap=None,
+            x=None,
+            wall_time=elapsed,
+            mip_count=mip_count,
+            gap_certified=False,
+        )
     )
