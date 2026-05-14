@@ -1869,7 +1869,7 @@ def _run_cutoff_obbt(
 # ---------------------------------------------------------------------------
 
 
-def solve_amp(
+def _solve_amp_impl(
     model: Model,
     rel_gap: float = 1e-3,
     abs_tol: float = 1e-6,
@@ -3038,3 +3038,78 @@ def solve_amp(
             gap_certified=False,
         )
     )
+
+
+def solve_amp(
+    model: Model,
+    rel_gap: float = 1e-3,
+    abs_tol: float = 1e-6,
+    time_limit: float = 3600.0,
+    max_iter: int = 50,
+    n_init_partitions: int = 2,
+    partition_method: str = "auto",
+    nlp_solver: str = "ipm",
+    iteration_callback: Optional[Callable] = None,
+    milp_time_limit: Optional[float] = None,
+    milp_gap_tolerance: Optional[float] = None,
+    apply_partitioning: bool = True,
+    disc_var_pick: int | str | Callable[[dict[str, Any]], Any] | None = None,
+    partition_scaling_factor: float = 10.0,
+    partition_scaling_factor_update: Optional[Callable[[dict[str, Any]], Any]] = None,
+    disc_add_partition_method: str | Callable[[dict[str, Any]], Any] = "adaptive",
+    disc_abs_width_tol: float = 1e-3,
+    convhull_formulation: str = "disaggregated",
+    convhull_ebd: bool = False,
+    convhull_ebd_encoding: str = "gray",
+    presolve_bt: bool = True,
+    presolve_bt_algo: int | str = 1,
+    presolve_bt_time_limit: Optional[float] = None,
+    presolve_bt_mip_time_limit: Optional[float] = None,
+    initial_point: Optional[np.ndarray] = None,
+    use_start_as_incumbent: bool = False,
+    skip_convex_check: bool = False,
+    obbt_at_root: bool = False,
+    obbt_with_cutoff: bool = False,
+    alphabb_cutoff_obbt: bool = True,
+    obbt_time_limit: float = 30.0,
+) -> SolveResult:
+    saved_bounds = _snapshot_variable_bounds(model)
+    try:
+        return _solve_amp_impl(
+            model,
+            rel_gap=rel_gap,
+            abs_tol=abs_tol,
+            time_limit=time_limit,
+            max_iter=max_iter,
+            n_init_partitions=n_init_partitions,
+            partition_method=partition_method,
+            nlp_solver=nlp_solver,
+            iteration_callback=iteration_callback,
+            milp_time_limit=milp_time_limit,
+            milp_gap_tolerance=milp_gap_tolerance,
+            apply_partitioning=apply_partitioning,
+            disc_var_pick=disc_var_pick,
+            partition_scaling_factor=partition_scaling_factor,
+            partition_scaling_factor_update=partition_scaling_factor_update,
+            disc_add_partition_method=disc_add_partition_method,
+            disc_abs_width_tol=disc_abs_width_tol,
+            convhull_formulation=convhull_formulation,
+            convhull_ebd=convhull_ebd,
+            convhull_ebd_encoding=convhull_ebd_encoding,
+            presolve_bt=presolve_bt,
+            presolve_bt_algo=presolve_bt_algo,
+            presolve_bt_time_limit=presolve_bt_time_limit,
+            presolve_bt_mip_time_limit=presolve_bt_mip_time_limit,
+            initial_point=initial_point,
+            use_start_as_incumbent=use_start_as_incumbent,
+            skip_convex_check=skip_convex_check,
+            obbt_at_root=obbt_at_root,
+            obbt_with_cutoff=obbt_with_cutoff,
+            alphabb_cutoff_obbt=alphabb_cutoff_obbt,
+            obbt_time_limit=obbt_time_limit,
+        )
+    finally:
+        _restore_variable_bounds(saved_bounds)
+
+
+solve_amp.__doc__ = _solve_amp_impl.__doc__
