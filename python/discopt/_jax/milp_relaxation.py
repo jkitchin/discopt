@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import math
 from dataclasses import dataclass
 from typing import Optional, Union
 
@@ -160,6 +161,16 @@ class UnivariateRelaxation:
     arg_ub: float
 
 
+@dataclass
+class UnivariateSquareRelaxation:
+    """Lifted square of a supported univariate auxiliary."""
+
+    base_col: int
+    aux_col: int
+    base_lb: float
+    base_ub: float
+
+
 # ---------------------------------------------------------------------------
 # Helpers: variable bounds
 # ---------------------------------------------------------------------------
@@ -200,6 +211,52 @@ def _linear_expr_bounds(
             lower += c * float(ub_i)
             upper += c * float(lb_i)
     return lower, upper
+
+
+def _critical_points_in_interval(start: float, period: float, lb: float, ub: float) -> list[float]:
+    tol = 1e-12
+    k_min = math.ceil((lb - start - tol) / period)
+    k_max = math.floor((ub - start + tol) / period)
+    return [start + k * period for k in range(k_min, k_max + 1)]
+
+
+def _tan_range(lb: float, ub: float) -> Optional[tuple[float, float]]:
+    """Return tan bounds only when the interval stays on one branch."""
+    if not (np.isfinite(lb) and np.isfinite(ub)):
+        return None
+    margin = 1e-7
+    k_min = math.floor((lb - math.pi / 2.0) / math.pi) - 1
+    k_max = math.ceil((ub - math.pi / 2.0) / math.pi) + 1
+    for k in range(k_min, k_max + 1):
+        asymptote = math.pi / 2.0 + k * math.pi
+        if lb - margin <= asymptote <= ub + margin:
+            return None
+    vals = [math.tan(lb), math.tan(ub)]
+    if not all(np.isfinite(v) for v in vals):
+        return None
+    return min(vals), max(vals)
+
+
+def _trig_range(func_name: str, lb: float, ub: float) -> Optional[tuple[float, float]]:
+    """Compute exact continuous range bounds for supported trig functions."""
+    if lb > ub:
+        lb, ub = ub, lb
+    if func_name == "tan":
+        return _tan_range(lb, ub)
+    if not (np.isfinite(lb) and np.isfinite(ub)):
+        return None
+    if ub - lb >= 2.0 * math.pi:
+        return -1.0, 1.0
+
+    points = [lb, ub]
+    if func_name == "sin":
+        points.extend(_critical_points_in_interval(math.pi / 2.0, math.pi, lb, ub))
+    elif func_name == "cos":
+        points.extend(_critical_points_in_interval(0.0, math.pi, lb, ub))
+    else:
+        return None
+    vals = [_univariate_value(func_name, p) for p in points if lb - 1e-12 <= p <= ub + 1e-12]
+    return min(vals), max(vals)
 
 
 def _constant_value(expr: Expression) -> Optional[float]:
@@ -572,7 +629,7 @@ def _univariate_arg(expr: Expression) -> tuple[str, Expression] | None:
     """Return (operator_name, argument) for supported univariate nodes."""
     if isinstance(expr, FunctionCall) and len(expr.args) == 1:
         name = expr.func_name
-        if name in {"sqrt", "log", "log2", "log10", "exp", "abs", "tan"}:
+        if name in {"sqrt", "log", "log2", "log10", "exp", "abs", "sin", "cos", "tan"}:
             return name, expr.args[0]
     if isinstance(expr, UnaryOp) and expr.op == "abs":
         return "abs", expr.operand
@@ -595,10 +652,14 @@ def _univariate_value(func_name: str, x: float) -> float:
         return float(np.exp(x))
     if func_name == "abs":
         return float(abs(x))
-    if func_name == "tan":
-        return float(np.tan(x))
     if func_name == "reciprocal":
         return float(1.0 / x)
+    if func_name == "sin":
+        return float(np.sin(x))
+    if func_name == "cos":
+        return float(np.cos(x))
+    if func_name == "tan":
+        return float(np.tan(x))
     raise ValueError(f"Unsupported univariate function: {func_name}")
 
 
@@ -614,11 +675,15 @@ def _univariate_grad(func_name: str, x: float) -> float:
         return float(1.0 / (x * np.log(10.0)))
     if func_name == "exp":
         return float(np.exp(x))
-    if func_name == "tan":
-        cos_x = float(np.cos(x))
-        return float(1.0 / (cos_x * cos_x))
     if func_name == "reciprocal":
         return float(-1.0 / (x * x))
+    if func_name == "sin":
+        return float(np.cos(x))
+    if func_name == "cos":
+        return float(-np.sin(x))
+    if func_name == "tan":
+        c = float(np.cos(x))
+        return float(1.0 / (c * c))
     raise ValueError(f"No smooth derivative for univariate function: {func_name}")
 
 
@@ -648,10 +713,12 @@ def _univariate_domain_ok(func_name: str, arg_lb: float, arg_ub: float) -> bool:
         return bool(arg_ub <= _MAX_FINITE_EXP_ARG)
     if func_name == "abs":
         return True
-    if func_name == "tan":
-        return _tan_domain_ok(arg_lb, arg_ub)
     if func_name == "reciprocal":
         return bool(arg_lb > 0.0)
+    if func_name in {"sin", "cos"}:
+        return True
+    if func_name == "tan":
+        return _tan_range(arg_lb, arg_ub) is not None
     return False
 
 
@@ -662,6 +729,11 @@ def _univariate_value_bounds(func_name: str, arg_lb: float, arg_ub: float) -> tu
             return 0.0, max(abs(arg_lb), abs(arg_ub))
         values = [abs(arg_lb), abs(arg_ub)]
         return min(values), max(values)
+    if func_name in {"sin", "cos", "tan"}:
+        bounds = _trig_range(func_name, arg_lb, arg_ub)
+        if bounds is None:
+            return np.nan, np.nan
+        return bounds
     values = [_univariate_value(func_name, arg_lb), _univariate_value(func_name, arg_ub)]
     return min(values), max(values)
 
@@ -682,6 +754,27 @@ def _tangent_points(func_name: str, lb: float, ub: float) -> list[float]:
         if all(abs(pt - seen) > 1e-12 for seen in points):
             points.append(float(pt))
     return points
+
+
+def _univariate_curvature(func_name: str, val_lb: float, val_ub: float) -> Optional[str]:
+    """Return certified curvature on the interval, or None for mixed curvature."""
+    tol = 1e-12
+    if func_name in {"exp", "reciprocal"}:
+        return "convex"
+    if func_name in {"sqrt", "log", "log2", "log10"}:
+        return "concave"
+    if func_name in {"sin", "cos"}:
+        if val_lb >= -tol:
+            return "concave"
+        if val_ub <= tol:
+            return "convex"
+        return None
+    if func_name == "tan":
+        if val_lb >= -tol:
+            return "convex"
+        if val_ub <= tol:
+            return "concave"
+    return None
 
 
 def _univariate_signature(
@@ -957,6 +1050,51 @@ def _integer_affine_cos_lower_bound(
     return float(best) if np.isfinite(best) else None
 
 
+def _integer_affine_trig_range(
+    func_name: str,
+    coeff: np.ndarray,
+    const: float,
+    model: Model,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> Optional[tuple[float, float]]:
+    """Return exact range for trig(affine integer vars) on small finite domains."""
+    if func_name not in {"sin", "cos", "tan"}:
+        return None
+
+    flat_types = _flat_variable_types(model)
+    entries: list[tuple[float, range]] = []
+    n_values = 1
+    for var_idx, c_i in enumerate(coeff):
+        c = float(c_i)
+        if abs(c) <= 1e-12:
+            continue
+        values = _integer_domain_values(var_idx, flat_types, flat_lb, flat_ub)
+        if values is None:
+            return None
+        n_values *= len(values)
+        if n_values > _MAX_INTEGER_COS_ENUM:
+            return None
+        entries.append((c, values))
+
+    if not entries:
+        value = _univariate_value(func_name, float(const))
+        return (value, value) if np.isfinite(value) else None
+
+    values_out: list[float] = []
+    for assignment in itertools.product(*(values for _c, values in entries)):
+        arg = float(const)
+        for (c, _values), value in zip(entries, assignment):
+            arg += c * float(value)
+        value_out = _univariate_value(func_name, arg)
+        if not np.isfinite(value_out):
+            return None
+        values_out.append(value_out)
+    if not values_out:
+        return None
+    return min(values_out), max(values_out)
+
+
 def _scaled_affine_lower_bound(
     expr: Expression,
     scale: float,
@@ -1134,7 +1272,18 @@ def _collect_univariate_relaxations(
             return
         if not _univariate_domain_ok(func_name, arg_lb, arg_ub):
             return
-        val_lb, val_ub = _univariate_value_bounds(func_name, arg_lb, arg_ub)
+        exact_integer_range = _integer_affine_trig_range(
+            func_name,
+            arg_coeff,
+            arg_const,
+            model,
+            flat_lb,
+            flat_ub,
+        )
+        if exact_integer_range is not None:
+            val_lb, val_ub = exact_integer_range
+        else:
+            val_lb, val_ub = _univariate_value_bounds(func_name, arg_lb, arg_ub)
         if not np.isfinite(val_lb) or not np.isfinite(val_ub):
             return
         signature = _univariate_signature(func_name, arg_coeff, arg_const)
@@ -1186,6 +1335,80 @@ def _collect_univariate_relaxations(
     return relaxations, var_map, bounds
 
 
+def _collect_univariate_square_relaxations(
+    model: Model,
+    univariate_var_map: dict[object, int],
+    all_bounds: list[tuple[float, float]],
+    start_col: int,
+) -> tuple[list[UnivariateSquareRelaxation], dict[tuple[int, int], int], list[tuple[float, float]]]:
+    """Collect squares of lifted trig calls and assign auxiliary columns."""
+    relaxations: list[UnivariateSquareRelaxation] = []
+    var_map: dict[tuple[int, int], int] = {}
+    bounds: list[tuple[float, float]] = []
+    col_idx = start_col
+
+    def maybe_add(expr: Expression) -> None:
+        nonlocal col_idx
+        if not (
+            isinstance(expr, BinaryOp)
+            and expr.op == "**"
+            and isinstance(expr.left, FunctionCall)
+            and expr.left.func_name in {"sin", "cos", "tan"}
+            and isinstance(expr.right, Constant)
+            and float(expr.right.value) == 2.0
+        ):
+            return
+
+        base_col = univariate_var_map.get(id(expr.left))
+        if base_col is None:
+            return
+        key = (base_col, 2)
+        if key in var_map:
+            return
+
+        base_lb, base_ub = [float(v) for v in all_bounds[base_col]]
+        vals = [base_lb * base_lb, base_ub * base_ub]
+        if base_lb <= 0.0 <= base_ub:
+            vals.append(0.0)
+        var_map[key] = col_idx
+        bounds.append((float(min(vals)), float(max(vals))))
+        relaxations.append(
+            UnivariateSquareRelaxation(
+                base_col=base_col,
+                aux_col=col_idx,
+                base_lb=base_lb,
+                base_ub=base_ub,
+            )
+        )
+        col_idx += 1
+
+    def visit(expr: Expression) -> None:
+        maybe_add(expr)
+        if isinstance(expr, BinaryOp):
+            visit(expr.left)
+            visit(expr.right)
+        elif isinstance(expr, UnaryOp):
+            visit(expr.operand)
+        elif isinstance(expr, FunctionCall):
+            for arg in expr.args:
+                visit(arg)
+        elif isinstance(expr, IndexExpression):
+            if not isinstance(expr.base, Variable):
+                visit(expr.base)
+        elif isinstance(expr, SumExpression):
+            visit(expr.operand)
+        elif isinstance(expr, SumOverExpression):
+            for term in expr.terms:
+                visit(term)
+
+    if model._objective is not None:
+        visit(model._objective.expression)
+    for constraint in model._constraints:
+        visit(constraint.body)
+
+    return relaxations, var_map, bounds
+
+
 # ---------------------------------------------------------------------------
 # Helpers: expression linearizer
 # ---------------------------------------------------------------------------
@@ -1201,6 +1424,7 @@ def _linearize_expr(
     univariate_var_map: dict[object, int],
     n_total_vars: int,
     fractional_power_var_map: Optional[dict[tuple[int, float], int]] = None,
+    univariate_square_var_map: Optional[dict[tuple[int, int], int]] = None,
 ) -> tuple[np.ndarray, float]:
     """Walk expression tree and return (coeff, constant) for linearized form.
 
@@ -1325,6 +1549,8 @@ def _linearize_expr(
                     key = (unique[0], n)
                     if key in monomial_var_map:
                         coeff[monomial_var_map[key]] += scale * c
+                    elif univariate_square_var_map and key in univariate_square_var_map:
+                        coeff[univariate_square_var_map[key]] += scale * c
                     else:
                         raise ValueError(f"Monomial {key} not in map")
                 elif len(unique) == 2:
@@ -1603,6 +1829,19 @@ def build_milp_relaxation(
         col_idx,
     )
     for val_bounds in univariate_bounds:
+        all_bounds.append(val_bounds)
+        integrality_flags.append(0)
+        col_idx += 1
+
+    univariate_square_relaxations, univariate_square_var_map, univariate_square_bounds = (
+        _collect_univariate_square_relaxations(
+            model,
+            univariate_var_map,
+            all_bounds,
+            col_idx,
+        )
+    )
+    for val_bounds in univariate_square_bounds:
         all_bounds.append(val_bounds)
         integrality_flags.append(0)
         col_idx += 1
@@ -2354,40 +2593,46 @@ def build_milp_relaxation(
         f_ub = _univariate_value(relax.func_name, ub_u)
         secant_slope = (f_ub - f_lb) / (ub_u - lb_u)
         secant_intercept = f_lb - secant_slope * lb_u
+        if relax.func_name in {"sin", "cos", "tan"}:
+            continuous_bounds = _trig_range(relax.func_name, lb_u, ub_u)
+            if continuous_bounds is None:
+                continue
+            val_lb, val_ub = continuous_bounds
+        else:
+            val_lb, val_ub = [float(v) for v in all_bounds[relax.aux_col]]
+        curvature = _univariate_curvature(relax.func_name, val_lb, val_ub)
 
-        if relax.func_name == "tan":
-            if f_lb >= 0.0:
-                # Convex branch: tangents are lower bounds; secant is an upper bound.
-                for pt in _tangent_points(relax.func_name, lb_u, ub_u):
-                    slope = _univariate_grad(relax.func_name, pt)
-                    intercept = _univariate_value(relax.func_name, pt) - slope * pt
-                    _add_lower_line(relax, slope, intercept)
-                _add_upper_line(relax, secant_slope, secant_intercept)
-            elif f_ub <= 0.0:
-                # Concave branch: secant is a lower bound; tangents are upper bounds.
-                _add_lower_line(relax, secant_slope, secant_intercept)
-                for pt in _tangent_points(relax.func_name, lb_u, ub_u):
-                    slope = _univariate_grad(relax.func_name, pt)
-                    intercept = _univariate_value(relax.func_name, pt) - slope * pt
-                    _add_upper_line(relax, slope, intercept)
-            # Mixed-curvature intervals keep only the finite range bounds.
-            continue
-
-        if relax.func_name in {"exp", "reciprocal"}:
+        if curvature == "convex":
             # Convex: tangents are lower bounds; secant is an upper bound.
             for pt in _tangent_points(relax.func_name, lb_u, ub_u):
                 slope = _univariate_grad(relax.func_name, pt)
                 intercept = _univariate_value(relax.func_name, pt) - slope * pt
                 _add_lower_line(relax, slope, intercept)
             _add_upper_line(relax, secant_slope, secant_intercept)
-        else:
-            # log/log2/log10/sqrt are concave on their supported domains:
-            # secant is a lower bound; tangents are upper bounds.
+        elif curvature == "concave":
+            # Concave: secant is a lower bound; tangents are upper bounds.
             _add_lower_line(relax, secant_slope, secant_intercept)
             for pt in _tangent_points(relax.func_name, lb_u, ub_u):
                 slope = _univariate_grad(relax.func_name, pt)
                 intercept = _univariate_value(relax.func_name, pt) - slope * pt
                 _add_upper_line(relax, slope, intercept)
+
+    for square_relax in univariate_square_relaxations:
+        lb_i = square_relax.base_lb
+        ub_i = square_relax.base_ub
+        tangent_pts = [lb_i, ub_i]
+        if lb_i <= 0.0 <= ub_i:
+            tangent_pts.append(0.0)
+        for t in _sorted_unique_points(tangent_pts):
+            row = np.zeros(n_total)
+            row[square_relax.aux_col] = -1.0
+            row[square_relax.base_col] = 2.0 * t
+            _add_row(row, t * t)
+        if abs(ub_i - lb_i) > 1e-12:
+            row = np.zeros(n_total)
+            row[square_relax.aux_col] = 1.0
+            row[square_relax.base_col] = -(lb_i + ub_i)
+            _add_row(row, -lb_i * ub_i)
 
     # ── Fractional-power envelope constraints ──────────────────────────────
     # For a = x^p with x in [lb, ub], lb ≥ 0:
@@ -2501,6 +2746,7 @@ def build_milp_relaxation(
                 univariate_var_map,
                 n_total,
                 fractional_power_var_map=fractional_power_var_map,
+                univariate_square_var_map=univariate_square_var_map,
             )
             # body ≤ 0  →  c @ z + const ≤ 0  →  c @ z ≤ -const
             if sense == "<=":
@@ -2543,6 +2789,7 @@ def build_milp_relaxation(
             univariate_var_map,
             n_total,
             fractional_power_var_map=fractional_power_var_map,
+            univariate_square_var_map=univariate_square_var_map,
         )
         objective_bound_valid = True
     except ValueError as err:
@@ -2618,6 +2865,8 @@ def build_milp_relaxation(
             k: v for k, v in univariate_var_map.items() if not isinstance(k, int)
         },
         "univariate_relaxations": univariate_relaxations,
+        "univariate_square": univariate_square_var_map,
+        "univariate_square_relaxations": univariate_square_relaxations,
         "fractional_power": fractional_power_var_map,
         "bilinear_pw": bilinear_pw_map,
         "bilinear_lambda": bilinear_lambda_map,

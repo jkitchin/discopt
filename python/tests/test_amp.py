@@ -701,6 +701,88 @@ def test_tan_abs_minlptests_objective_linearizes_without_fallback(caplog):
     )
 
 
+def test_affine_trig_constraints_are_retained_in_relaxation(caplog):
+    """Affine-argument sin/cos constraints should be lifted instead of omitted."""
+    m = Model("trig_affine_constraints")
+    x = m.continuous("x", lb=-3.0, ub=3.0)
+    y = m.continuous("y", lb=-1.0, ub=1.0)
+    m.minimize(-x - y)
+    m.subject_to(dm.sin(-x - 1.0) + x / 2 + 0.5 <= y)
+    m.subject_to(dm.cos(x - 0.5) + x / 4 - 0.5 >= y)
+
+    with caplog.at_level(logging.WARNING, logger="discopt._jax.milp_relaxation"):
+        milp_model, varmap = _build_relaxation_for_test(m)
+        result = milp_model.solve()
+
+    funcs = {relax.func_name for relax in varmap["univariate_relaxations"]}
+    assert {"sin", "cos"} <= funcs
+    assert "omitting constraint" not in caplog.text
+    assert result.status == "optimal"
+    assert result.objective is not None
+
+
+def test_trig_square_constraints_apply_range_bounds():
+    """sin(x)^2 and cos(y)^2 constraints should constrain the MILP relaxation."""
+    sin_model = Model("sin_square_relax")
+    x = sin_model.integer("x", lb=0, ub=4)
+    y = sin_model.integer("y", lb=0, ub=4)
+    sin_model.maximize(y)
+    sin_model.subject_to(y <= dm.sin(x) ** 2 + 2)
+
+    sin_relax, sin_varmap = _build_relaxation_for_test(sin_model)
+    sin_result = sin_relax.solve()
+
+    assert len(sin_varmap["univariate_square_relaxations"]) == 1
+    assert sin_result.status == "optimal"
+    assert sin_result.x is not None
+    assert sin_result.x[1] <= 3.0 + 1e-8
+
+    cos_model = Model("cos_square_relax")
+    z = cos_model.integer("z", lb=1, ub=4)
+    b = cos_model.binary("b")
+    cos_model.maximize(z)
+    cos_model.subject_to(z <= dm.cos(b) ** 2 + 1.5)
+
+    cos_relax, cos_varmap = _build_relaxation_for_test(cos_model)
+    cos_result = cos_relax.solve()
+
+    assert len(cos_varmap["univariate_square_relaxations"]) == 1
+    assert cos_result.status == "optimal"
+    assert cos_result.x is not None
+    assert cos_result.x[0] <= 2.0 + 1e-8
+
+
+def test_safe_tan_objective_keeps_relaxation_bound():
+    """tan(x) should be lifted when the argument interval avoids asymptotes."""
+    m = Model("safe_tan_objective")
+    x = m.continuous("x", lb=-1.0, ub=1.0)
+    m.minimize(dm.tan(x))
+
+    milp_model, varmap = _build_relaxation_for_test(m)
+    result = milp_model.solve()
+
+    assert {relax.func_name for relax in varmap["univariate_relaxations"]} == {"tan"}
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(float(np.tan(-1.0)), abs=1e-8)
+
+
+def test_unsafe_tan_objective_still_falls_back(caplog):
+    """tan(x) intervals crossing an asymptote should remain unsupported."""
+    m = Model("unsafe_tan_objective")
+    x = m.continuous("x", lb=1.0, ub=2.0)
+    m.minimize(dm.tan(x))
+
+    with caplog.at_level(logging.WARNING, logger="discopt._jax.milp_relaxation"):
+        milp_model, varmap = _build_relaxation_for_test(m)
+        result = milp_model.solve()
+
+    assert all(relax.func_name != "tan" for relax in varmap["univariate_relaxations"])
+    assert milp_model._objective_bound_valid is False
+    assert result.status == "optimal"
+    assert result.objective is None
+    assert "could not linearize the objective" in caplog.text
+
+
 def test_x_exp_objective_uses_lifted_product_relaxation(caplog):
     """Finite-box x*exp(x) objectives should use exp lift plus McCormick product."""
     m = Model("x_exp_finite")
