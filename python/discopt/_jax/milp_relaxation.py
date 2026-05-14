@@ -196,6 +196,29 @@ class UnivariateSquareRelaxation:
 
 
 @dataclass
+class PiecewiseTrigSquareInterval:
+    """Binary-selected interval for a direct trig-square relaxation."""
+
+    delta_col: int
+    lb: float
+    ub: float
+    curvature: Optional[str]
+
+
+@dataclass
+class PiecewiseTrigSquareRelaxation:
+    """Partition-aware direct relaxation for sin(arg)^2 or cos(arg)^2."""
+
+    square: UnivariateSquareRelaxation
+    func_name: str
+    arg_coeff: np.ndarray
+    arg_const: float
+    arg_lb: float
+    arg_ub: float
+    intervals: list[PiecewiseTrigSquareInterval]
+
+
+@dataclass
 class MinMaxObjectiveLift:
     """Epigraph/hypograph lift for a supported objective-level min/max call."""
 
@@ -292,6 +315,66 @@ def _trig_range(func_name: str, lb: float, ub: float) -> Optional[tuple[float, f
         return None
     vals = [_univariate_value(func_name, p) for p in points if lb - 1e-12 <= p <= ub + 1e-12]
     return min(vals), max(vals)
+
+
+def _trig_square_value(func_name: str, x: float) -> float:
+    """Evaluate sin(x)^2 or cos(x)^2."""
+    value = _univariate_value(func_name, x)
+    return float(value * value)
+
+
+def _trig_square_grad(func_name: str, x: float) -> float:
+    """Evaluate the first derivative of sin(x)^2 or cos(x)^2."""
+    if func_name == "sin":
+        return float(np.sin(2.0 * x))
+    if func_name == "cos":
+        return float(-np.sin(2.0 * x))
+    raise ValueError(f"Unsupported trig-square function: {func_name}")
+
+
+def _trig_square_second_derivative(func_name: str, x: float) -> float:
+    """Evaluate the second derivative of sin(x)^2 or cos(x)^2."""
+    if func_name == "sin":
+        return float(2.0 * np.cos(2.0 * x))
+    if func_name == "cos":
+        return float(-2.0 * np.cos(2.0 * x))
+    raise ValueError(f"Unsupported trig-square function: {func_name}")
+
+
+def _trig_square_range(func_name: str, lb: float, ub: float) -> Optional[tuple[float, float]]:
+    """Compute exact continuous bounds for sin(x)^2 or cos(x)^2."""
+    if lb > ub:
+        lb, ub = ub, lb
+    if func_name not in {"sin", "cos"} or not (np.isfinite(lb) and np.isfinite(ub)):
+        return None
+    if ub - lb >= math.pi:
+        return 0.0, 1.0
+
+    points = [lb, ub]
+    points.extend(_critical_points_in_interval(0.0, math.pi / 2.0, lb, ub))
+    vals = [_trig_square_value(func_name, p) for p in points if lb - 1e-12 <= p <= ub + 1e-12]
+    return min(vals), max(vals)
+
+
+def _trig_square_curvature(func_name: str, lb: float, ub: float) -> Optional[str]:
+    """Return certified curvature for sin(x)^2/cos(x)^2, or None if mixed."""
+    if func_name not in {"sin", "cos"} or not (np.isfinite(lb) and np.isfinite(ub)):
+        return None
+    if ub <= lb + 1e-12:
+        return None
+
+    tol = 1e-12
+    for point in _critical_points_in_interval(math.pi / 4.0, math.pi / 2.0, lb, ub):
+        if lb + tol < point < ub - tol:
+            return None
+
+    midpoint = 0.5 * (lb + ub)
+    second = _trig_square_second_derivative(func_name, midpoint)
+    if second >= -tol:
+        return "convex"
+    if second <= tol:
+        return "concave"
+    return None
 
 
 def _constant_value(expr: Expression) -> Optional[float]:
@@ -1066,6 +1149,86 @@ def _trig_piecewise_interval_specs(
         curvature = None
         if local_bounds is not None:
             curvature = _univariate_curvature(relax.func_name, local_bounds[0], local_bounds[1])
+        intervals.append((float(a), float(b), curvature))
+    if sum(1 for _a, _b, curvature in intervals if curvature is not None) < 2:
+        return []
+    return intervals
+
+
+def _affine_argument_has_continuous_var(arg_coeff: np.ndarray, model: Model) -> bool:
+    """Return true if an affine argument depends on at least one continuous variable."""
+    offset = 0
+    for var in model._variables:
+        is_continuous = var.var_type not in (VarType.BINARY, VarType.INTEGER)
+        for k in range(var.size):
+            if abs(float(arg_coeff[offset + k])) > 1e-12 and is_continuous:
+                return True
+        offset += var.size
+    return False
+
+
+def _trig_square_partition_breakpoints(
+    relax: UnivariateRelaxation,
+    disc_state: DiscretizationState,
+    n_orig: int,
+) -> list[float]:
+    """Return safe breakpoints for a mixed-curvature trig-square argument interval."""
+    lb = float(relax.arg_lb)
+    ub = float(relax.arg_ub)
+    points = [lb, ub]
+    points.extend(_critical_points_in_interval(0.0, math.pi / 2.0, lb, ub))
+    points.extend(_critical_points_in_interval(math.pi / 4.0, math.pi / 2.0, lb, ub))
+
+    nz = np.flatnonzero(np.abs(relax.arg_coeff) > 1e-12)
+    if nz.size == 1:
+        var_idx = int(nz[0])
+        if var_idx < n_orig and var_idx in disc_state.partitions:
+            coeff = float(relax.arg_coeff[var_idx])
+            partition = np.asarray(disc_state.partitions[var_idx], dtype=np.float64)
+            if partition.size <= _MAX_TRIG_IMPORTED_BREAKPOINTS:
+                transformed = coeff * partition + relax.arg_const
+                points.extend(float(p) for p in transformed)
+
+    base = _sorted_unique_points([p for p in points if lb - 1e-12 <= p <= ub + 1e-12])
+    refined: list[float] = []
+    for a, b in zip(base[:-1], base[1:]):
+        if not refined:
+            refined.append(float(a))
+        width = float(b - a)
+        if width > _MAX_TRIG_PIECEWISE_WIDTH:
+            n_chunks = int(math.ceil(width / _MAX_TRIG_PIECEWISE_WIDTH))
+            for k in range(1, n_chunks):
+                refined.append(float(a + width * k / n_chunks))
+        refined.append(float(b))
+    return _sorted_unique_points(refined or base)
+
+
+def _trig_square_piecewise_interval_specs(
+    relax: UnivariateRelaxation,
+    disc_state: DiscretizationState,
+    n_orig: int,
+) -> list[tuple[float, float, Optional[str]]]:
+    """Build certified curvature subintervals for mixed-curvature trig-square terms."""
+    if relax.func_name not in {"sin", "cos"}:
+        return []
+    if not (np.isfinite(relax.arg_lb) and np.isfinite(relax.arg_ub)):
+        return []
+    if relax.arg_ub - relax.arg_lb >= _MAX_TRIG_PIECEWISE_SPAN:
+        return []
+    if _trig_square_range(relax.func_name, relax.arg_lb, relax.arg_ub) is None:
+        return []
+    if _trig_square_curvature(relax.func_name, relax.arg_lb, relax.arg_ub) is not None:
+        return []
+
+    points = _trig_square_partition_breakpoints(relax, disc_state, n_orig)
+    if len(points) - 1 > _MAX_TRIG_PIECEWISE_INTERVALS:
+        return []
+
+    intervals: list[tuple[float, float, Optional[str]]] = []
+    for a, b in zip(points[:-1], points[1:]):
+        if b <= a + 1e-12:
+            continue
+        curvature = _trig_square_curvature(relax.func_name, a, b)
         intervals.append((float(a), float(b), curvature))
     if sum(1 for _a, _b, curvature in intervals if curvature is not None) < 2:
         return []
@@ -2196,6 +2359,46 @@ def build_milp_relaxation(
         integrality_flags.append(0)
         col_idx += 1
 
+    univariate_by_aux_col = {relax.aux_col: relax for relax in univariate_relaxations}
+    piecewise_trig_square_relaxations: list[PiecewiseTrigSquareRelaxation] = []
+    for square_relax in univariate_square_relaxations:
+        base_relax = univariate_by_aux_col.get(square_relax.base_col)
+        if base_relax is None or base_relax.func_name not in {"sin", "cos"}:
+            continue
+        if not _affine_argument_has_continuous_var(base_relax.arg_coeff, model):
+            continue
+        interval_specs = _trig_square_piecewise_interval_specs(base_relax, disc_state, n_orig)
+        if not interval_specs:
+            continue
+
+        trig_square_intervals: list[PiecewiseTrigSquareInterval] = []
+        for a_k, b_k, curvature in interval_specs:
+            delta_col = col_idx
+            all_bounds.append((0.0, 1.0))
+            integrality_flags.append(1)
+            col_idx += 1
+            trig_square_intervals.append(
+                PiecewiseTrigSquareInterval(
+                    delta_col=delta_col,
+                    lb=float(a_k),
+                    ub=float(b_k),
+                    curvature=curvature,
+                )
+            )
+
+        if trig_square_intervals:
+            piecewise_trig_square_relaxations.append(
+                PiecewiseTrigSquareRelaxation(
+                    square=square_relax,
+                    func_name=base_relax.func_name,
+                    arg_coeff=base_relax.arg_coeff,
+                    arg_const=base_relax.arg_const,
+                    arg_lb=base_relax.arg_lb,
+                    arg_ub=base_relax.arg_ub,
+                    intervals=trig_square_intervals,
+                )
+            )
+
     piecewise_univariate_relaxations: list[PiecewiseUnivariateRelaxation] = []
     for relax in univariate_relaxations:
         interval_specs = _trig_piecewise_interval_specs(relax, disc_state, n_orig)
@@ -3009,6 +3212,40 @@ def build_milp_relaxation(
         rhs = intercept + slope * relax.arg_const
         _add_gated_row(row, rhs, interval.delta_col, big_m)
 
+    def _add_gated_trig_square_lower_line(
+        relax: PiecewiseTrigSquareRelaxation,
+        interval: PiecewiseTrigSquareInterval,
+        slope: float,
+        intercept: float,
+    ) -> None:
+        """Add q >= slope * arg + intercept on one active interval."""
+        q_lb, _q_ub = [float(v) for v in all_bounds[relax.square.aux_col]]
+        _line_lb, line_ub = _linear_line_bounds(slope, intercept, relax.arg_lb, relax.arg_ub)
+        big_m = max(0.0, line_ub - q_lb)
+
+        row = np.zeros(n_total)
+        row[:n_orig] = slope * relax.arg_coeff
+        row[relax.square.aux_col] = -1.0
+        rhs = -intercept - slope * relax.arg_const
+        _add_gated_row(row, rhs, interval.delta_col, big_m)
+
+    def _add_gated_trig_square_upper_line(
+        relax: PiecewiseTrigSquareRelaxation,
+        interval: PiecewiseTrigSquareInterval,
+        slope: float,
+        intercept: float,
+    ) -> None:
+        """Add q <= slope * arg + intercept on one active interval."""
+        _q_lb, q_ub = [float(v) for v in all_bounds[relax.square.aux_col]]
+        line_lb, _line_ub = _linear_line_bounds(slope, intercept, relax.arg_lb, relax.arg_ub)
+        big_m = max(0.0, q_ub - line_lb)
+
+        row = np.zeros(n_total)
+        row[:n_orig] = -slope * relax.arg_coeff
+        row[relax.square.aux_col] = 1.0
+        rhs = intercept + slope * relax.arg_const
+        _add_gated_row(row, rhs, interval.delta_col, big_m)
+
     for relax in univariate_relaxations:
         lb_u = relax.arg_lb
         ub_u = relax.arg_ub
@@ -3113,6 +3350,77 @@ def build_milp_relaxation(
                     slope = _univariate_grad(relax.func_name, pt)
                     intercept = _univariate_value(relax.func_name, pt) - slope * pt
                     _add_gated_upper_line(relax, interval, slope, intercept)
+
+    for trig_square_relax in piecewise_trig_square_relaxations:
+        row_sum = np.zeros(n_total)
+        for trig_square_interval in trig_square_relax.intervals:
+            row_sum[trig_square_interval.delta_col] = -1.0
+        _add_row(row_sum, -1.0)
+        _add_row(-row_sum, 1.0)
+
+        for trig_square_interval in trig_square_relax.intervals:
+            arg_lb = float(trig_square_relax.arg_lb)
+            arg_ub = float(trig_square_relax.arg_ub)
+
+            # arg >= interval.lb when selected.
+            lower_m = max(0.0, trig_square_interval.lb - arg_lb)
+            row = np.zeros(n_total)
+            row[:n_orig] = -trig_square_relax.arg_coeff
+            rhs = trig_square_relax.arg_const - trig_square_interval.lb
+            _add_gated_row(row, rhs, trig_square_interval.delta_col, lower_m)
+
+            # arg <= interval.ub when selected.
+            upper_m = max(0.0, arg_ub - trig_square_interval.ub)
+            row = np.zeros(n_total)
+            row[:n_orig] = trig_square_relax.arg_coeff
+            rhs = trig_square_interval.ub - trig_square_relax.arg_const
+            _add_gated_row(row, rhs, trig_square_interval.delta_col, upper_m)
+
+            if trig_square_interval.curvature not in {"convex", "concave"}:
+                continue
+
+            f_lb = _trig_square_value(trig_square_relax.func_name, trig_square_interval.lb)
+            f_ub = _trig_square_value(trig_square_relax.func_name, trig_square_interval.ub)
+            secant_slope = (f_ub - f_lb) / (trig_square_interval.ub - trig_square_interval.lb)
+            secant_intercept = f_lb - secant_slope * trig_square_interval.lb
+
+            tangent_points = [
+                trig_square_interval.lb,
+                0.5 * (trig_square_interval.lb + trig_square_interval.ub),
+                trig_square_interval.ub,
+            ]
+            if trig_square_interval.curvature == "convex":
+                for pt in _sorted_unique_points(tangent_points):
+                    slope = _trig_square_grad(trig_square_relax.func_name, pt)
+                    intercept = _trig_square_value(trig_square_relax.func_name, pt) - slope * pt
+                    _add_gated_trig_square_lower_line(
+                        trig_square_relax,
+                        trig_square_interval,
+                        slope,
+                        intercept,
+                    )
+                _add_gated_trig_square_upper_line(
+                    trig_square_relax,
+                    trig_square_interval,
+                    secant_slope,
+                    secant_intercept,
+                )
+            else:
+                _add_gated_trig_square_lower_line(
+                    trig_square_relax,
+                    trig_square_interval,
+                    secant_slope,
+                    secant_intercept,
+                )
+                for pt in _sorted_unique_points(tangent_points):
+                    slope = _trig_square_grad(trig_square_relax.func_name, pt)
+                    intercept = _trig_square_value(trig_square_relax.func_name, pt) - slope * pt
+                    _add_gated_trig_square_upper_line(
+                        trig_square_relax,
+                        trig_square_interval,
+                        slope,
+                        intercept,
+                    )
 
     for square_relax in univariate_square_relaxations:
         lb_i = square_relax.base_lb
@@ -3412,6 +3720,7 @@ def build_milp_relaxation(
         "univariate_piecewise_relaxations": piecewise_univariate_relaxations,
         "univariate_square": univariate_square_var_map,
         "univariate_square_relaxations": univariate_square_relaxations,
+        "univariate_square_piecewise_relaxations": piecewise_trig_square_relaxations,
         "fractional_power": fractional_power_var_map,
         "minmax_objective_lift": (
             {
