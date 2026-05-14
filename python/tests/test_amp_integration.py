@@ -2857,22 +2857,27 @@ class TestCurrentCodeWeaknesses:
         tol = 1e-6 + 1e-4 * abs(instance.expected_obj)
         assert abs(result.objective - instance.expected_obj) <= tol
 
-    def test_amp_does_not_certify_invalid_negative_gap_on_nlp_004_010(self):
-        """A lower bound above the incumbent must not be reported as certified optimality."""
+    def test_amp_certifies_tan_abs_nlp_004_010_at_issue_gap(self):
+        """The continuous tan/abs nlp_004 case should certify the issue-79 gap."""
         instance = MINLPTESTS_NLP_BY_ID["nlp_004_010"]
         m = instance.build_fn()
 
         result = m.solve(
             solver="amp",
             nlp_solver="ipm",
-            time_limit=30.0,
-            gap_tolerance=1e-3,
+            time_limit=300.0,
+            gap_tolerance=1e-6,
+            max_iter=1000,
         )
 
-        assert result.status == "feasible"
-        assert result.gap_certified is False
+        assert result.status == "optimal"
         assert result.objective is not None
-        assert result.gap is None or result.gap >= 0.0
+        assert abs(result.objective - instance.expected_obj) <= 1e-6
+        assert result.bound is not None
+        assert result.bound <= result.objective + 1e-6
+        assert result.gap is not None
+        assert result.gap <= 1e-6
+        assert result.gap_certified is True
 
     def test_amp_reports_bound_for_tan_abs_nlp_004_010(self, caplog):
         """The nlp_004 tan/abs objective should not fall back to feasibility mode."""
@@ -3062,6 +3067,29 @@ class TestCurrentCodeWeaknesses:
         assert result.objective is not None
         tol = 1e-6 + 1e-4 * abs(instance.expected_obj)
         assert abs(result.objective - instance.expected_obj) <= tol
+
+    @pytest.mark.parametrize("problem_id", ["nlp_mi_004_010", "nlp_mi_004_011"])
+    def test_amp_certifies_tan_abs_integer_nlp_004_cases_at_issue_gap(self, problem_id):
+        """The mixed-integer tan/abs nlp_004 cases should certify the issue-79 gap."""
+        instance = MINLPTESTS_MI_BY_ID[problem_id]
+        m = instance.build_fn()
+
+        result = m.solve(
+            solver="amp",
+            nlp_solver="ipm",
+            time_limit=300.0,
+            gap_tolerance=1e-6,
+            max_iter=1000,
+        )
+
+        assert result.status == "optimal"
+        assert result.objective is not None
+        assert abs(result.objective - instance.expected_obj) <= 1e-6
+        assert result.bound is not None
+        assert result.bound <= result.objective + 1e-6
+        assert result.gap is not None
+        assert result.gap <= 1e-6
+        assert result.gap_certified is True
 
     @pytest.mark.requires_cyipopt
     def test_amp_fixed_integer_nlp_retries_with_ipopt(self):

@@ -1082,17 +1082,20 @@ def _trig_partition_breakpoints(
     """Return safe breakpoints for a mixed-curvature trig argument interval."""
     lb = float(relax.arg_lb)
     ub = float(relax.arg_ub)
-    if relax.func_name not in {"sin", "cos"} or not (np.isfinite(lb) and np.isfinite(ub)):
+    if relax.func_name not in {"sin", "cos", "tan"} or not (np.isfinite(lb) and np.isfinite(ub)):
         return [lb, ub]
 
     points = [lb, ub]
     if relax.func_name == "sin":
         curvature_start, critical_start = 0.0, math.pi / 2.0
-    else:
+        points.extend(_critical_points_in_interval(critical_start, math.pi, lb, ub))
+    elif relax.func_name == "cos":
         curvature_start, critical_start = math.pi / 2.0, 0.0
+        points.extend(_critical_points_in_interval(critical_start, math.pi, lb, ub))
+    else:
+        curvature_start = 0.0
 
     points.extend(_critical_points_in_interval(curvature_start, math.pi, lb, ub))
-    points.extend(_critical_points_in_interval(critical_start, math.pi, lb, ub))
 
     nz = np.flatnonzero(np.abs(relax.arg_coeff) > 1e-12)
     if nz.size == 1:
@@ -1125,8 +1128,8 @@ def _trig_piecewise_interval_specs(
     disc_state: DiscretizationState,
     n_orig: int,
 ) -> list[tuple[float, float, Optional[str]]]:
-    """Build certified curvature subintervals for mixed-curvature sin/cos."""
-    if relax.func_name not in {"sin", "cos"}:
+    """Build certified curvature subintervals for mixed-curvature trig functions."""
+    if relax.func_name not in {"sin", "cos", "tan"}:
         return []
     if not (np.isfinite(relax.arg_lb) and np.isfinite(relax.arg_ub)):
         return []
@@ -2857,7 +2860,19 @@ def build_milp_relaxation(
                     yj_lb,
                     yj_ub,
                 )
-                M_k = _compute_piecewise_big_m(corners)
+
+                def _inactive_big_m(other_coeff: float, rhs: float) -> float:
+                    violations = [
+                        float(other_coeff) * yj_lb - float(rhs),
+                        float(other_coeff) * yj_ub - float(rhs),
+                    ]
+                    max_violation = max(0.0, *violations)
+                    if max_violation <= 0.0:
+                        return 0.0
+                    return max_violation * (1.0 + 1e-4) + max(
+                        1e-9,
+                        1e-9 * max_violation,
+                    )
 
                 # x̄_k ≥ a_k * δ_k  (x̄_k is in [a_k, b_k] when δ_k=1)
                 row = np.zeros(n_total)
@@ -2878,51 +2893,59 @@ def build_milp_relaxation(
                 row[delta_col] = -wk_hi
                 _add_row(row, 0.0)
 
-                # w̄_k ≥ wk_lo * δ_k  → w̄_k=0 when δ_k=0 (for wk_lo ≥ 0 case)
-                if wk_lo > 0:
-                    row = np.zeros(n_total)
-                    row[wbar_col] = -1.0
-                    row[delta_col] = wk_lo
-                    _add_row(row, 0.0)
+                # w̄_k ≥ wk_lo * δ_k. Together with the upper row this forces
+                # w̄_k=0 when the interval is inactive, even for negative products.
+                row = np.zeros(n_total)
+                row[wbar_col] = -1.0
+                row[delta_col] = wk_lo
+                _add_row(row, 0.0)
 
                 # Per-interval McCormick with big-M relaxation.
                 # The big-M term LOOSENS the constraint when δ_k=0 (interval inactive).
                 #
                 # cv1: w̄_k ≥ a_k*y + x̄_k*y_lb - a_k*y_lb - M*(1-δ_k)
                 #   → -w̄_k + a_k*y + x̄_k*y_lb + M*δ_k ≤ a_k*y_lb + M
+                rhs = a_k * yj_lb
+                big_m = _inactive_big_m(a_k, rhs)
                 row = np.zeros(n_total)
                 row[wbar_col] = -1.0
                 row[other_var] += a_k
                 row[xbar_col] += yj_lb
-                row[delta_col] = M_k  # +M_k so constraint loosens when δ_k=0
-                _add_row(row, a_k * yj_lb + M_k)
+                row[delta_col] = big_m
+                _add_row(row, rhs + big_m)
 
                 # cv2: w̄_k ≥ b_k*y + x̄_k*y_ub - b_k*y_ub - M*(1-δ_k)
                 #   → -w̄_k + b_k*y + x̄_k*y_ub + M*δ_k ≤ b_k*y_ub + M
+                rhs = b_k * yj_ub
+                big_m = _inactive_big_m(b_k, rhs)
                 row = np.zeros(n_total)
                 row[wbar_col] = -1.0
                 row[other_var] += b_k
                 row[xbar_col] += yj_ub
-                row[delta_col] = M_k
-                _add_row(row, b_k * yj_ub + M_k)
+                row[delta_col] = big_m
+                _add_row(row, rhs + big_m)
 
                 # cc1: w̄_k ≤ b_k*y + x̄_k*y_lb - b_k*y_lb + M*(1-δ_k)
                 #   → w̄_k - b_k*y - x̄_k*y_lb + M*δ_k ≤ M - b_k*y_lb
+                rhs = -b_k * yj_lb
+                big_m = _inactive_big_m(-b_k, rhs)
                 row = np.zeros(n_total)
                 row[wbar_col] = 1.0
                 row[other_var] -= b_k
                 row[xbar_col] -= yj_lb
-                row[delta_col] = M_k  # +M_k so constraint loosens when δ_k=0
-                _add_row(row, M_k - b_k * yj_lb)
+                row[delta_col] = big_m
+                _add_row(row, rhs + big_m)
 
                 # cc2: w̄_k ≤ a_k*y + x̄_k*y_ub - a_k*y_ub + M*(1-δ_k)
                 #   → w̄_k - a_k*y - x̄_k*y_ub + M*δ_k ≤ M - a_k*y_ub
+                rhs = -a_k * yj_ub
+                big_m = _inactive_big_m(-a_k, rhs)
                 row = np.zeros(n_total)
                 row[wbar_col] = 1.0
                 row[other_var] -= a_k
                 row[xbar_col] -= yj_ub
-                row[delta_col] = M_k
-                _add_row(row, M_k - a_k * yj_ub)
+                row[delta_col] = big_m
+                _add_row(row, rhs + big_m)
 
         else:
             # ── Standard (global) McCormick ──────────────────────────────────
