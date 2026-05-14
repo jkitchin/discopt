@@ -190,6 +190,7 @@ markers = [
     "slow: long-running tests (backend cross-product, mid-size instances, ML training)",
     "integration: end-to-end multi-component workflows (DOE, discrimination, CUTEst)",
     "amp_benchmark: opt-in AMP Alpine, MINLPTests, or incidence benchmark coverage",
+    "memory_heavy: tests that can compile or solve enough AMP/JAX work to require memory caps",
     "requires_cyipopt: requires the optional cyipopt/Ipopt solver stack",
     "gpu: requires GPU",
     "correctness: known-optima validation tests; usually also `slow`",

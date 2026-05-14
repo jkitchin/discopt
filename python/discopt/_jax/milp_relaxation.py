@@ -64,6 +64,7 @@ _MAX_TRIG_PIECEWISE_SPAN = 2.0 * math.pi
 _MAX_TRIG_PIECEWISE_INTERVALS = 32
 _MAX_TRIG_IMPORTED_BREAKPOINTS = _MAX_TRIG_PIECEWISE_INTERVALS + 1
 _MAX_TRIG_PIECEWISE_WIDTH = math.pi / 6.0
+_MAX_RELAXATION_PARTITION_INTERVALS = 128
 
 
 def _warn_once(msg: str, *args) -> None:
@@ -1788,6 +1789,49 @@ def build_milp_relaxation(
         raise ValueError(
             "convhull_ebd is only supported with convhull_formulation='sos2' or its 'lambda' alias."
         )
+    generation_guardrails: list[str] = []
+    generation_guardrail_keys: set[tuple[str, str, int, int]] = set()
+
+    def _record_generation_guardrail(
+        kind: str,
+        target: object,
+        interval_count: int,
+        limit: int,
+    ) -> None:
+        key = (kind, repr(target), int(interval_count), int(limit))
+        if key in generation_guardrail_keys:
+            return
+        generation_guardrail_keys.add(key)
+        note = (
+            f"skipped {kind} refinement for {target}: "
+            f"{interval_count} intervals exceeds cap {limit}"
+        )
+        generation_guardrails.append(note)
+        logger.debug("AMP: %s", note)
+
+    def _guarded_partition_points(
+        kind: str,
+        target: object,
+        points: list[float] | np.ndarray,
+    ) -> Optional[list[float]]:
+        finite_points = [float(p) for p in points if np.isfinite(float(p))]
+        guarded = _sorted_unique_points(finite_points)
+        interval_count = max(0, len(guarded) - 1)
+        if interval_count > _MAX_RELAXATION_PARTITION_INTERVALS:
+            _record_generation_guardrail(
+                kind,
+                target,
+                interval_count,
+                _MAX_RELAXATION_PARTITION_INTERVALS,
+            )
+            return None
+        return guarded
+
+    def _coarse_monomial_breakpoints(lb_i: float, ub_i: float) -> list[float]:
+        points = [lb_i, ub_i]
+        if lb_i < 0.0 < ub_i:
+            points.append(0.0)
+        return _sorted_unique_points(points)
 
     # ── Assign MILP column indices ──────────────────────────────────────────
     # Original variables keep columns 0..n_orig-1. Additional columns are created
@@ -1907,7 +1951,13 @@ def build_milp_relaxation(
         ):
             continue
 
-        breakpoints = _monomial_breakpoints(var_idx, lb_i, ub_i, disc_state)
+        breakpoints = _guarded_partition_points(
+            "monomial piecewise",
+            (var_idx, n),
+            _monomial_breakpoints(var_idx, lb_i, ub_i, disc_state),
+        )
+        if breakpoints is None:
+            continue
         if len(breakpoints) < 3:
             continue
 
@@ -2057,7 +2107,13 @@ def build_milp_relaxation(
         else:
             continue
 
-        pts = disc_state.partitions[part_var]
+        pts = _guarded_partition_points(
+            "bilinear piecewise",
+            (lhs_col, rhs_col),
+            disc_state.partitions[part_var],
+        )
+        if pts is None:
+            continue
         other_lb, other_ub = all_bounds[other_var]
 
         if convhull_mode == "disaggregated":
@@ -2154,7 +2210,13 @@ def build_milp_relaxation(
 
     piecewise_var_map: dict[int, list[tuple[int, int, float, float]]] = {}
     for var_idx in sorted(pw_candidate_vars):
-        pw_pts = list(disc_state.partitions[var_idx])
+        pw_pts = _guarded_partition_points(
+            "fractional-power piecewise",
+            var_idx,
+            disc_state.partitions[var_idx],
+        )
+        if pw_pts is None:
+            continue
         if len(pw_pts) < 3:
             # With only 2 breakpoints there's just one interval; the global
             # secant already coincides with the piecewise secant.
@@ -2614,7 +2676,13 @@ def build_milp_relaxation(
         lb_i = float(flat_lb[var_idx])
         ub_i = float(flat_ub[var_idx])
         s_col = monomial_var_map[(var_idx, n)]
-        breakpoints = _monomial_breakpoints(var_idx, lb_i, ub_i, disc_state)
+        breakpoints = _guarded_partition_points(
+            "monomial tangent",
+            (var_idx, n),
+            _monomial_breakpoints(var_idx, lb_i, ub_i, disc_state),
+        )
+        if breakpoints is None:
+            breakpoints = _coarse_monomial_breakpoints(lb_i, ub_i)
 
         def _add_under_tangent(t: float) -> None:
             slope, intercept = _power_tangent_line(t, n)
@@ -2879,7 +2947,15 @@ def build_milp_relaxation(
         # Tangent points: include partition breakpoints when available so the
         # relaxation tightens monotonically as AMP refines.
         if var_idx in disc_state.partitions and len(disc_state.partitions[var_idx]) >= 2:
-            tangent_pts = [float(t) for t in disc_state.partitions[var_idx]]
+            guarded_tangent_pts = _guarded_partition_points(
+                "fractional-power tangent",
+                (var_idx, p),
+                disc_state.partitions[var_idx],
+            )
+            if guarded_tangent_pts is None:
+                tangent_pts = [lb_i, ub_i]
+            else:
+                tangent_pts = [float(t) for t in guarded_tangent_pts]
         else:
             tangent_pts = [lb_i, ub_i]
         # Avoid degenerate tangents at zero when the slope or value is undefined.
@@ -3100,6 +3176,7 @@ def build_milp_relaxation(
         "convhull_formulation": convhull_mode,
         "convhull_ebd": convhull_ebd,
         "convhull_ebd_encoding": convhull_ebd_encoding,
+        "generation_guardrails": generation_guardrails,
     }
 
     return milp_model, varmap
