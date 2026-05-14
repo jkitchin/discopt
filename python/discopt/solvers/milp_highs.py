@@ -114,8 +114,10 @@ def solve_milp(
     if time_limit is not None:
         h.setOptionValue("time_limit", float(time_limit))
 
+    nonfatal_statuses = {highspy.HighsStatus.kOk, highspy.HighsStatus.kWarning}
+
     pass_status = h.passModel(lp)
-    if pass_status != highspy.HighsStatus.kOk:
+    if pass_status not in nonfatal_statuses:
         return MILPResult(status=SolveStatus.ERROR)
 
     run_status = h.run()
@@ -125,7 +127,7 @@ def solve_milp(
 
     wall_time = 0.0
     node_count = 0
-    if run_status == highspy.HighsStatus.kOk and status != SolveStatus.ERROR:
+    if run_status in nonfatal_statuses and status != SolveStatus.ERROR:
         run_time_status, run_time_value = h.getInfoValue("run_time")
         if run_time_status == highspy.HighsStatus.kOk and run_time_value is not None:
             wall_time = float(run_time_value)

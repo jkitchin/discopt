@@ -2877,8 +2877,18 @@ class TestCurrentCodeWeaknesses:
         [
             "nlp_003_010",
             "nlp_003_011",
+            "nlp_003_012",
+            "nlp_003_013",
+            "nlp_003_014",
+            "nlp_003_015",
+            "nlp_003_016",
             "nlp_mi_003_010",
             "nlp_mi_003_011",
+            "nlp_mi_003_012",
+            "nlp_mi_003_013",
+            "nlp_mi_003_014",
+            "nlp_mi_003_015",
+            "nlp_mi_003_016",
         ],
     )
     def test_amp_reports_supported_univariate_bound_for_minlptests_cases(
@@ -2886,7 +2896,7 @@ class TestCurrentCodeWeaknesses:
         problem_id,
         caplog,
     ):
-        """Affine sqrt objectives with exp constraints should produce valid relaxation bounds."""
+        """MINLPTests exp/sqrt issue cases should produce valid relaxation bounds."""
         instances = (
             MINLPTESTS_MI_BY_ID if problem_id.startswith("nlp_mi_") else MINLPTESTS_NLP_BY_ID
         )
