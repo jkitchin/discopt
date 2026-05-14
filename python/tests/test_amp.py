@@ -102,14 +102,15 @@ def _make_dry_run(target: str) -> str:
 
 
 def test_quick_test_tier_excludes_amp_integration_markers():
-    """The quick tier must not select opt-in AMP smoke tests."""
+    """The quick tier must not select opt-in AMP smoke tests or use prlimit."""
     output = _make_dry_run("test-quick")
 
     assert (
         '-m "(unit or smoke) and not slow and not integration '
         'and not amp_benchmark and not requires_cyipopt and not memory_heavy"'
     ) in output
-    assert "scripts/run_memory_capped_pytest.sh python -m pytest" in output
+    assert "python -m pytest python/tests/" in output
+    assert "scripts/run_memory_capped_pytest.sh python -m pytest" not in output
 
 
 def test_pr_fast_tier_excludes_heavy_manual_markers():

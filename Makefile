@@ -312,7 +312,7 @@ test-all: build
 # may be near-empty until those markers are populated.
 test-quick: build
 	@echo "==> Running quick tests (unit + smoke)..."
-	$(PYTEST_CAPPED) python/tests/ -v --tb=short -q $(PYTEST_QUICK_FLAGS)
+	$(PYTEST) python/tests/ -v --tb=short -q $(PYTEST_QUICK_FLAGS)
 	@echo "==> Quick tests passed"
 
 # Only the slow-marked tests (backend cross-product, big instances, ML training).
