@@ -1043,6 +1043,7 @@ def test_trig_square_constraints_apply_range_bounds():
 
     assert len(sin_varmap["univariate_square_relaxations"]) == 1
     assert sin_varmap["univariate_square_piecewise_relaxations"] == []
+    assert len(sin_varmap["finite_domain_trig_square_tables"]) == 1
     assert sin_result.status == "optimal"
     assert sin_result.x is not None
     assert sin_result.x[1] <= 3.0 + 1e-8
@@ -1058,9 +1059,47 @@ def test_trig_square_constraints_apply_range_bounds():
 
     assert len(cos_varmap["univariate_square_relaxations"]) == 1
     assert cos_varmap["univariate_square_piecewise_relaxations"] == []
+    assert len(cos_varmap["finite_domain_trig_square_tables"]) == 1
     assert cos_result.status == "optimal"
     assert cos_result.x is not None
     assert cos_result.x[0] <= 2.0 + 1e-8
+
+
+def test_finite_domain_trig_square_tables_link_integer_arguments_exactly():
+    """Small integer trig-square arguments should use selector value tables."""
+    sin_model = Model("issue72_sin_square_table")
+    x = sin_model.integer("x", lb=0, ub=4)
+    y = sin_model.continuous("y", lb=0, ub=4)
+    sin_model.maximize(10 * x + y)
+    sin_model.subject_to(y <= dm.sin(x) ** 2 + 2)
+
+    sin_relax, sin_varmap = _build_relaxation_for_test(sin_model)
+    sin_result = sin_relax.solve()
+
+    sin_tables = sin_varmap["finite_domain_trig_square_tables"]
+    assert len(sin_tables) == 1
+    assert sin_tables[0].func_name == "sin"
+    assert sin_tables[0].domain_values == [0, 1, 2, 3, 4]
+    assert len(sin_tables[0].selector_cols) == 5
+    assert sin_result.status == "optimal"
+    assert sin_result.objective == pytest.approx(-(40.0 + np.sin(4.0) ** 2 + 2.0), abs=1e-8)
+
+    cos_model = Model("issue72_cos_square_table")
+    z = cos_model.integer("z", lb=1, ub=4)
+    b = cos_model.binary("b")
+    cos_model.maximize(z + 10 * b)
+    cos_model.subject_to(z <= dm.cos(b) ** 2 + 1.5)
+
+    cos_relax, cos_varmap = _build_relaxation_for_test(cos_model)
+    cos_result = cos_relax.solve()
+
+    cos_tables = cos_varmap["finite_domain_trig_square_tables"]
+    assert len(cos_tables) == 1
+    assert cos_tables[0].func_name == "cos"
+    assert cos_tables[0].domain_values == [0, 1]
+    assert len(cos_tables[0].selector_cols) == 2
+    assert cos_result.status == "optimal"
+    assert cos_result.objective == pytest.approx(-11.0, abs=1e-8)
 
 
 @pytest.mark.parametrize(("func_name", "func"), [("sin", dm.sin), ("cos", dm.cos)])
