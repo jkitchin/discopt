@@ -2833,6 +2833,7 @@ class TestCurrentCodeWeaknesses:
             "nlp_008_010",
             "nlp_008_011",
             "nlp_009_010",
+            "nlp_009_011",
         ],
     )
     @pytest.mark.requires_cyipopt
@@ -2896,6 +2897,37 @@ class TestCurrentCodeWeaknesses:
             if "falling back to a feasibility objective" in record.message
         ]
         assert not any("abs" in message or "tan" in message for message in fallback_messages)
+
+    @pytest.mark.parametrize("problem_id", ["nlp_009_010", "nlp_009_011"])
+    @pytest.mark.requires_cyipopt
+    def test_amp_reports_bound_for_minmax_objective_minlptests_cases(self, problem_id, caplog):
+        """The nlp_009 min/max objectives should not fall back to feasibility mode."""
+        if not HAS_CYIPOPT:
+            pytest.skip("requires cyipopt for pure continuous NLP recovery")
+
+        instance = MINLPTESTS_NLP_BY_ID[problem_id]
+        m = instance.build_fn()
+
+        with caplog.at_level(logging.WARNING, logger="discopt._jax.milp_relaxation"):
+            result = m.solve(
+                solver="amp",
+                nlp_solver="ipm",
+                time_limit=30.0,
+                gap_tolerance=1e-3,
+            )
+
+        assert result.status in ("optimal", "feasible")
+        assert result.objective is not None
+        tol = 1e-6 + 1e-4 * abs(instance.expected_obj)
+        assert abs(result.objective - instance.expected_obj) <= tol
+        assert result.bound is not None
+        fallback_messages = [
+            record.message
+            for record in caplog.records
+            if "falling back to a feasibility objective" in record.message
+        ]
+        assert not any("FunctionCall: min" in message for message in fallback_messages)
+        assert not any("FunctionCall: max" in message for message in fallback_messages)
 
     @pytest.mark.parametrize(
         "problem_id",

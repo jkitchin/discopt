@@ -65,6 +65,7 @@ _MAX_TRIG_PIECEWISE_INTERVALS = 32
 _MAX_TRIG_IMPORTED_BREAKPOINTS = _MAX_TRIG_PIECEWISE_INTERVALS + 1
 _MAX_TRIG_PIECEWISE_WIDTH = math.pi / 6.0
 _MAX_RELAXATION_PARTITION_INTERVALS = 128
+_MAX_OBJECTIVE_LIFT_POWER = 6
 
 
 def _warn_once(msg: str, *args) -> None:
@@ -194,6 +195,17 @@ class UnivariateSquareRelaxation:
     base_ub: float
 
 
+@dataclass
+class MinMaxObjectiveLift:
+    """Epigraph/hypograph lift for a supported objective-level min/max call."""
+
+    func_name: str
+    aux_col: int
+    branch_exprs: tuple[Expression, ...]
+    branch_bounds: tuple[tuple[Optional[float], Optional[float]], ...]
+    aux_bounds: tuple[float, float]
+
+
 # ---------------------------------------------------------------------------
 # Helpers: variable bounds
 # ---------------------------------------------------------------------------
@@ -289,6 +301,185 @@ def _constant_value(expr: Expression) -> Optional[float]:
     if values.size != 1:
         return None
     return float(values[0])
+
+
+def _finite_bound_or_none(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    value = float(value)
+    if not _is_effectively_finite(value):
+        return None
+    return value
+
+
+def _expand_integer_powers_for_relaxation(expr: Expression, model: Model) -> Expression:
+    """Expand small integer powers of affine expressions for existing monomial lifts."""
+
+    def visit(node: Expression) -> Expression:
+        if isinstance(node, BinaryOp):
+            left = visit(node.left)
+            right = visit(node.right)
+            if node.op == "**":
+                exp = _constant_value(right)
+                if exp is not None:
+                    n = int(exp)
+                    if exp == n and 2 <= n <= _MAX_OBJECTIVE_LIFT_POWER:
+                        base = left
+                        product = base
+                        for _ in range(n - 1):
+                            product = BinaryOp("*", product, base)
+                        return distribute_products(product)
+            return distribute_products(BinaryOp(node.op, left, right))
+        if isinstance(node, UnaryOp):
+            return UnaryOp(node.op, visit(node.operand))
+        if isinstance(node, SumExpression):
+            return SumExpression(visit(node.operand), axis=node.axis)
+        if isinstance(node, SumOverExpression):
+            return SumOverExpression([visit(term) for term in node.terms])
+        # Preserve FunctionCall object identity so existing univariate lift maps
+        # keyed by id(expr) remain usable during branch linearization.
+        return node
+
+    return distribute_products(visit(expr))
+
+
+def _expression_lower_bound_for_lift(
+    expr: Expression,
+    model: Model,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> Optional[float]:
+    expanded = _expand_integer_powers_for_relaxation(expr, model)
+    lower = _separable_objective_lower_bound(expanded, model, flat_lb, flat_ub)
+    return _finite_bound_or_none(lower)
+
+
+def _expression_upper_bound_for_lift(
+    expr: Expression,
+    model: Model,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> Optional[float]:
+    lower_of_negated = _expression_lower_bound_for_lift(
+        UnaryOp("neg", expr),
+        model,
+        flat_lb,
+        flat_ub,
+    )
+    if lower_of_negated is None:
+        return None
+    return -lower_of_negated
+
+
+def _collect_monomial_terms_for_lift(expr: Expression, model: Model) -> set[tuple[int, int]]:
+    terms: set[tuple[int, int]] = set()
+
+    def visit(node: Expression) -> None:
+        if isinstance(node, BinaryOp):
+            if node.op == "*":
+                decomp = _decompose_product(node, model)
+                if decomp is not None:
+                    _scalar, indices = decomp
+                    unique = list(dict.fromkeys(indices))
+                    if len(unique) == 1 and len(indices) >= 2:
+                        terms.add((unique[0], len(indices)))
+            elif node.op == "**":
+                flat = _get_flat_index(node.left, model)
+                exp = _constant_value(node.right)
+                if flat is not None and exp is not None:
+                    n = int(exp)
+                    if exp == n and n >= 2:
+                        terms.add((flat, n))
+            visit(node.left)
+            visit(node.right)
+            return
+        if isinstance(node, UnaryOp):
+            visit(node.operand)
+            return
+        if isinstance(node, FunctionCall):
+            for arg in node.args:
+                visit(arg)
+            return
+        if isinstance(node, IndexExpression) and not isinstance(node.base, Variable):
+            visit(node.base)
+            return
+        if isinstance(node, SumExpression):
+            visit(node.operand)
+            return
+        if isinstance(node, SumOverExpression):
+            for term in node.terms:
+                visit(term)
+
+    visit(expr)
+    return terms
+
+
+def _build_minmax_objective_lift(
+    model: Model,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> Optional[MinMaxObjectiveLift]:
+    if model._objective is None:
+        return None
+    expr = model._objective.expression
+    if not isinstance(expr, FunctionCall) or len(expr.args) < 2:
+        return None
+    if model._objective.sense == ObjectiveSense.MINIMIZE and expr.func_name != "max":
+        return None
+    if model._objective.sense == ObjectiveSense.MAXIMIZE and expr.func_name != "min":
+        return None
+    if expr.func_name not in {"min", "max"}:
+        return None
+
+    branch_exprs = tuple(_expand_integer_powers_for_relaxation(arg, model) for arg in expr.args)
+    branch_bounds = tuple(
+        (
+            _expression_lower_bound_for_lift(branch, model, flat_lb, flat_ub),
+            _expression_upper_bound_for_lift(branch, model, flat_lb, flat_ub),
+        )
+        for branch in branch_exprs
+    )
+
+    lower_bounds = [lb for lb, _ub in branch_bounds if lb is not None]
+    upper_bounds = [ub for _lb, ub in branch_bounds if ub is not None]
+    aux_lb: Optional[float]
+    aux_ub: Optional[float]
+    if expr.func_name == "max":
+        # max(f_i) is at least any available lower bound on a branch.
+        aux_lb = max(lower_bounds) if lower_bounds else None
+        # max(f_i) is at most max(ub_i) only when every branch has an upper bound.
+        aux_ub = max(upper_bounds) if len(upper_bounds) == len(branch_bounds) else None
+        directional_bound = aux_lb
+    else:
+        # min(f_i) is at least min(lb_i) only when every branch has a lower bound.
+        aux_lb = min(lower_bounds) if len(lower_bounds) == len(branch_bounds) else None
+        # min(f_i) is at most any available upper bound on a branch.
+        aux_ub = min(upper_bounds) if upper_bounds else None
+        directional_bound = aux_ub
+
+    directional_bound = _finite_bound_or_none(directional_bound)
+    if directional_bound is None:
+        return None
+
+    lb = _finite_bound_or_none(aux_lb)
+    ub = _finite_bound_or_none(aux_ub)
+    aux_bounds = (
+        lb if lb is not None else -_EFFECTIVE_INF,
+        ub if ub is not None else _EFFECTIVE_INF,
+    )
+    if aux_bounds[0] > aux_bounds[1] + 1e-9:
+        return None
+    if aux_bounds[0] > aux_bounds[1]:
+        mid = 0.5 * (aux_bounds[0] + aux_bounds[1])
+        aux_bounds = (mid, mid)
+
+    return MinMaxObjectiveLift(
+        func_name=expr.func_name,
+        aux_col=-1,
+        branch_exprs=branch_exprs,
+        branch_bounds=branch_bounds,
+        aux_bounds=aux_bounds,
+    )
 
 
 def _normalize_convhull_formulation(formulation: str) -> str:
@@ -1791,6 +1982,12 @@ def build_milp_relaxation(
         )
     generation_guardrails: list[str] = []
     generation_guardrail_keys: set[tuple[str, str, int, int]] = set()
+    objective_lift = _build_minmax_objective_lift(model, flat_lb, flat_ub)
+    objective_lift_monomials: set[tuple[int, int]] = set()
+    if objective_lift is not None:
+        for branch_expr in objective_lift.branch_exprs:
+            objective_lift_monomials.update(_collect_monomial_terms_for_lift(branch_expr, model))
+    monomial_terms = sorted(set(terms.monomial) | objective_lift_monomials)
 
     def _record_generation_guardrail(
         kind: str,
@@ -1924,7 +2121,7 @@ def build_milp_relaxation(
         multilinear_var_map[multi_term] = final_col
         multilinear_stage_map[multi_term] = stages
 
-    for var_idx, n in terms.monomial:
+    for var_idx, n in monomial_terms:
         lb_i = float(flat_lb[var_idx])
         ub_i = float(flat_ub[var_idx])
         if not (_is_effectively_finite(lb_i) and _is_effectively_finite(ub_i)):
@@ -1938,7 +2135,7 @@ def build_milp_relaxation(
         col_idx += 1
 
     monomial_pw_map: dict[tuple[int, int], list[tuple[int, float, float]]] = {}
-    for var_idx, n in terms.monomial:
+    for var_idx, n in monomial_terms:
         if (var_idx, n) not in monomial_var_map:
             continue
         lb_i = float(flat_lb[var_idx])
@@ -2237,6 +2434,12 @@ def build_milp_relaxation(
             col_idx += 1
             pw_intervals_list.append((delta_col, xbar_col, p_lo, p_hi))
         piecewise_var_map[var_idx] = pw_intervals_list
+
+    if objective_lift is not None:
+        objective_lift.aux_col = col_idx
+        all_bounds.append(objective_lift.aux_bounds)
+        integrality_flags.append(0)
+        col_idx += 1
 
     n_total = col_idx
 
@@ -2670,7 +2873,7 @@ def build_milp_relaxation(
             _add_row(row, M_k - z_lb_k * w_ub)
 
     # Monomial constraints
-    for var_idx, n in terms.monomial:
+    for var_idx, n in monomial_terms:
         if (var_idx, n) not in monomial_var_map:
             continue
         lb_i = float(flat_lb[var_idx])
@@ -3026,6 +3229,40 @@ def build_milp_relaxation(
             row[var_idx] = -secant_slope
             _add_row(row, secant_intercept)
 
+    if objective_lift is not None:
+        for branch_expr in objective_lift.branch_exprs:
+            try:
+                c_branch, const_branch = _linearize_expr(
+                    branch_expr,
+                    model,
+                    bilinear_var_map,
+                    trilinear_var_map,
+                    multilinear_var_map,
+                    monomial_var_map,
+                    univariate_var_map,
+                    n_total,
+                    fractional_power_var_map=fractional_power_var_map,
+                    univariate_square_var_map=univariate_square_var_map,
+                )
+            except ValueError as err:
+                logger.debug(
+                    "AMP: min/max objective lift uses auxiliary bounds because a branch "
+                    "could not be linearized: %s",
+                    err,
+                )
+                continue
+
+            if objective_lift.func_name == "max":
+                # minimize max(f_i): f_i <= t  ->  f_i - t <= 0
+                row = c_branch.copy()
+                row[objective_lift.aux_col] -= 1.0
+                _add_row(row, -const_branch)
+            else:
+                # maximize min(f_i): t <= f_i  ->  t - f_i <= 0
+                row = -c_branch
+                row[objective_lift.aux_col] += 1.0
+                _add_row(row, const_branch)
+
     # Model constraints
     for constraint in model._constraints:
         body = distribute_products(constraint.body)
@@ -3081,18 +3318,23 @@ def build_milp_relaxation(
     assert model._objective is not None
     obj_expr = distribute_products(model._objective.expression)
     try:
-        c_obj, const_obj = _linearize_expr(
-            obj_expr,
-            model,
-            bilinear_var_map,
-            trilinear_var_map,
-            multilinear_var_map,
-            monomial_var_map,
-            univariate_var_map,
-            n_total,
-            fractional_power_var_map=fractional_power_var_map,
-            univariate_square_var_map=univariate_square_var_map,
-        )
+        if objective_lift is not None:
+            c_obj = np.zeros(n_total)
+            c_obj[objective_lift.aux_col] = 1.0
+            const_obj = 0.0
+        else:
+            c_obj, const_obj = _linearize_expr(
+                obj_expr,
+                model,
+                bilinear_var_map,
+                trilinear_var_map,
+                multilinear_var_map,
+                monomial_var_map,
+                univariate_var_map,
+                n_total,
+                fractional_power_var_map=fractional_power_var_map,
+                univariate_square_var_map=univariate_square_var_map,
+            )
         objective_bound_valid = True
     except ValueError as err:
         fallback_lb = None
@@ -3171,6 +3413,16 @@ def build_milp_relaxation(
         "univariate_square": univariate_square_var_map,
         "univariate_square_relaxations": univariate_square_relaxations,
         "fractional_power": fractional_power_var_map,
+        "minmax_objective_lift": (
+            {
+                "func_name": objective_lift.func_name,
+                "aux_col": objective_lift.aux_col,
+                "branch_bounds": objective_lift.branch_bounds,
+                "aux_bounds": objective_lift.aux_bounds,
+            }
+            if objective_lift is not None
+            else None
+        ),
         "bilinear_pw": bilinear_pw_map,
         "bilinear_lambda": bilinear_lambda_map,
         "convhull_formulation": convhull_mode,

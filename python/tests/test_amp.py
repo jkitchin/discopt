@@ -706,6 +706,77 @@ def test_issue71_maximize_sqrt_objective_uses_real_relaxation_bound(caplog):
     assert "falling back to a feasibility objective" not in caplog.text
 
 
+@pytest.mark.parametrize(
+    ("sense", "func_name", "expected_relaxation_obj"),
+    [
+        ("minimize", "max", 1.5),
+        ("maximize", "min", -1.5),
+    ],
+)
+def test_issue64_affine_minmax_objective_lift_adds_correct_rows(
+    sense,
+    func_name,
+    expected_relaxation_obj,
+):
+    """Objective-level min/max calls should be lifted with epigraph/hypograph rows."""
+    m = Model(f"issue64_affine_{func_name}")
+    x = m.continuous("x", lb=0.0, ub=3.0)
+    expr = dm.maximum(x + 1.0, 2.0 - x) if func_name == "max" else dm.minimum(x + 1.0, 2.0 - x)
+    if sense == "minimize":
+        m.minimize(expr)
+    else:
+        m.maximize(expr)
+
+    milp_model, varmap = _build_relaxation_for_test(m)
+    result = milp_model.solve()
+
+    lift = varmap["minmax_objective_lift"]
+    assert lift is not None
+    assert lift["func_name"] == func_name
+    assert milp_model._objective_bound_valid is True
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(expected_relaxation_obj, abs=1e-8)
+
+
+@pytest.mark.parametrize(
+    ("sense", "func_name", "expected_relaxation_obj"),
+    [
+        ("maximize", "min", -0.75),
+        ("minimize", "max", 0.75),
+    ],
+)
+def test_issue64_minlptests_minmax_objective_uses_lifted_bound(
+    sense,
+    func_name,
+    expected_relaxation_obj,
+    caplog,
+):
+    """The nlp_009 min/max objectives should not force feasibility-objective fallback."""
+    m = Model(f"issue64_nlp_009_{func_name}")
+    x = m.continuous("x")
+    if func_name == "min":
+        expr = dm.minimum(0.75 + (x - 0.5) ** 3, 0.75 - (x - 0.5) ** 2)
+    else:
+        expr = dm.maximum(0.75 + (x - 0.5) ** 3, 0.75 + (x - 0.5) ** 2)
+    if sense == "minimize":
+        m.minimize(expr)
+    else:
+        m.maximize(expr)
+
+    with caplog.at_level(logging.WARNING, logger="discopt._jax.milp_relaxation"):
+        milp_model, varmap = _build_relaxation_for_test(m)
+        result = milp_model.solve()
+
+    lift = varmap["minmax_objective_lift"]
+    assert lift is not None
+    assert lift["func_name"] == func_name
+    assert milp_model._objective_bound_valid is True
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(expected_relaxation_obj, abs=1e-8)
+    assert "falling back to a feasibility objective" not in caplog.text
+    assert f"Cannot linearize FunctionCall: {func_name}" not in caplog.text
+
+
 def test_issue71_milp_wrapper_accepts_nonfatal_highs_warnings():
     """HiGHS passModel warnings from tiny AMP rows must not discard valid bounds."""
     from discopt.solvers import SolveStatus
