@@ -572,7 +572,7 @@ def _univariate_arg(expr: Expression) -> tuple[str, Expression] | None:
     """Return (operator_name, argument) for supported univariate nodes."""
     if isinstance(expr, FunctionCall) and len(expr.args) == 1:
         name = expr.func_name
-        if name in {"sqrt", "log", "log2", "log10", "exp", "abs"}:
+        if name in {"sqrt", "log", "log2", "log10", "exp", "abs", "tan"}:
             return name, expr.args[0]
     if isinstance(expr, UnaryOp) and expr.op == "abs":
         return "abs", expr.operand
@@ -595,6 +595,8 @@ def _univariate_value(func_name: str, x: float) -> float:
         return float(np.exp(x))
     if func_name == "abs":
         return float(abs(x))
+    if func_name == "tan":
+        return float(np.tan(x))
     if func_name == "reciprocal":
         return float(1.0 / x)
     raise ValueError(f"Unsupported univariate function: {func_name}")
@@ -612,9 +614,24 @@ def _univariate_grad(func_name: str, x: float) -> float:
         return float(1.0 / (x * np.log(10.0)))
     if func_name == "exp":
         return float(np.exp(x))
+    if func_name == "tan":
+        cos_x = float(np.cos(x))
+        return float(1.0 / (cos_x * cos_x))
     if func_name == "reciprocal":
         return float(-1.0 / (x * x))
     raise ValueError(f"No smooth derivative for univariate function: {func_name}")
+
+
+def _tan_domain_ok(arg_lb: float, arg_ub: float) -> bool:
+    """Return True when ``tan`` is finite and continuous on the interval."""
+    if not np.isfinite(arg_lb) or not np.isfinite(arg_ub) or arg_lb > arg_ub:
+        return False
+    half_pi = 0.5 * np.pi
+    k = np.ceil((arg_lb - half_pi) / np.pi)
+    asymptote = half_pi + k * np.pi
+    if arg_lb <= asymptote <= arg_ub:
+        return False
+    return all(_is_effectively_finite(np.tan(x)) for x in (arg_lb, arg_ub))
 
 
 def _univariate_domain_ok(func_name: str, arg_lb: float, arg_ub: float) -> bool:
@@ -631,6 +648,8 @@ def _univariate_domain_ok(func_name: str, arg_lb: float, arg_ub: float) -> bool:
         return bool(arg_ub <= _MAX_FINITE_EXP_ARG)
     if func_name == "abs":
         return True
+    if func_name == "tan":
+        return _tan_domain_ok(arg_lb, arg_ub)
     if func_name == "reciprocal":
         return bool(arg_lb > 0.0)
     return False
@@ -655,6 +674,8 @@ def _tangent_points(func_name: str, lb: float, ub: float) -> list[float]:
         if func_name == "sqrt" and pt <= 0.0:
             continue
         if func_name in {"log", "log2", "log10", "reciprocal"} and pt <= 0.0:
+            continue
+        if func_name == "tan" and not _is_effectively_finite(np.tan(pt)):
             continue
         if not np.isfinite(pt):
             continue
@@ -2333,6 +2354,24 @@ def build_milp_relaxation(
         f_ub = _univariate_value(relax.func_name, ub_u)
         secant_slope = (f_ub - f_lb) / (ub_u - lb_u)
         secant_intercept = f_lb - secant_slope * lb_u
+
+        if relax.func_name == "tan":
+            if f_lb >= 0.0:
+                # Convex branch: tangents are lower bounds; secant is an upper bound.
+                for pt in _tangent_points(relax.func_name, lb_u, ub_u):
+                    slope = _univariate_grad(relax.func_name, pt)
+                    intercept = _univariate_value(relax.func_name, pt) - slope * pt
+                    _add_lower_line(relax, slope, intercept)
+                _add_upper_line(relax, secant_slope, secant_intercept)
+            elif f_ub <= 0.0:
+                # Concave branch: secant is a lower bound; tangents are upper bounds.
+                _add_lower_line(relax, secant_slope, secant_intercept)
+                for pt in _tangent_points(relax.func_name, lb_u, ub_u):
+                    slope = _univariate_grad(relax.func_name, pt)
+                    intercept = _univariate_value(relax.func_name, pt) - slope * pt
+                    _add_upper_line(relax, slope, intercept)
+            # Mixed-curvature intervals keep only the finite range bounds.
+            continue
 
         if relax.func_name in {"exp", "reciprocal"}:
             # Convex: tangents are lower bounds; secant is an upper bound.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import warnings
@@ -676,6 +677,28 @@ def test_issue71_milp_wrapper_accepts_nonfatal_highs_warnings():
 
     assert result.status == SolveStatus.OPTIMAL
     assert result.objective is not None
+
+
+def test_tan_abs_minlptests_objective_linearizes_without_fallback(caplog):
+    """The nlp_004-style tan/abs objective should keep a valid MILP objective."""
+    m = Model("tan_abs_obj")
+    x = m.continuous("x", lb=-1.0, ub=1.0)
+    y = m.continuous("y", lb=-4.0, ub=4.0)
+    z = m.continuous("z", lb=-4.0, ub=4.0)
+    m.minimize(dm.tan(x) + y + x * z + 0.5 * dm.abs(y))
+    m.subject_to(x**2 + y**2 + z**2 <= 10.0)
+    m.subject_to(-1.2 * x - y <= z / 1.35)
+
+    with caplog.at_level(logging.WARNING):
+        milp_model, varmap = _build_relaxation_for_test(m)
+        result = milp_model.solve()
+
+    assert result.status == "optimal"
+    assert result.objective is not None
+    assert {"abs", "tan"} <= {relax.func_name for relax in varmap["univariate_relaxations"]}
+    assert not any(
+        "could not linearize the objective" in record.message for record in caplog.records
+    )
 
 
 def test_x_exp_objective_uses_lifted_product_relaxation(caplog):

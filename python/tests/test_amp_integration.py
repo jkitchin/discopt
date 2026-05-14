@@ -2872,6 +2872,30 @@ class TestCurrentCodeWeaknesses:
         assert result.objective is not None
         assert result.gap is None or result.gap >= 0.0
 
+    def test_amp_reports_bound_for_tan_abs_nlp_004_010(self, caplog):
+        """The nlp_004 tan/abs objective should not fall back to feasibility mode."""
+        instance = MINLPTESTS_NLP_BY_ID["nlp_004_010"]
+        m = instance.build_fn()
+
+        with caplog.at_level(logging.WARNING, logger="discopt._jax.milp_relaxation"):
+            result = m.solve(
+                solver="amp",
+                nlp_solver="ipm",
+                time_limit=30.0,
+                gap_tolerance=1e-3,
+            )
+
+        assert result.status in ("optimal", "feasible")
+        assert result.objective is not None
+        assert result.bound is not None
+        assert result.gap is None or result.gap >= 0.0
+        fallback_messages = [
+            record.message
+            for record in caplog.records
+            if "falling back to a feasibility objective" in record.message
+        ]
+        assert not any("abs" in message or "tan" in message for message in fallback_messages)
+
     @pytest.mark.parametrize(
         "problem_id",
         [
