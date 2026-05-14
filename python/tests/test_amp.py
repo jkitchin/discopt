@@ -977,6 +977,7 @@ def test_trig_square_constraints_apply_range_bounds():
     sin_result = sin_relax.solve()
 
     assert len(sin_varmap["univariate_square_relaxations"]) == 1
+    assert sin_varmap["univariate_square_piecewise_relaxations"] == []
     assert sin_result.status == "optimal"
     assert sin_result.x is not None
     assert sin_result.x[1] <= 3.0 + 1e-8
@@ -991,9 +992,38 @@ def test_trig_square_constraints_apply_range_bounds():
     cos_result = cos_relax.solve()
 
     assert len(cos_varmap["univariate_square_relaxations"]) == 1
+    assert cos_varmap["univariate_square_piecewise_relaxations"] == []
     assert cos_result.status == "optimal"
     assert cos_result.x is not None
     assert cos_result.x[0] <= 2.0 + 1e-8
+
+
+@pytest.mark.parametrize(("func_name", "func"), [("sin", dm.sin), ("cos", dm.cos)])
+def test_continuous_trig_square_uses_direct_piecewise_relaxation(func_name, func):
+    """Continuous trig-square constraints should not relax to the range-only q <= 1."""
+    m = Model(f"{func_name}_square_continuous_piecewise")
+    x = m.continuous("x", lb=0.0, ub=4.0)
+    y = m.continuous("y", lb=0.0, ub=4.0)
+    m.maximize(x + y)
+    m.subject_to(y <= func(x) ** 2 + 2.0)
+
+    milp_model, varmap = _build_relaxation_for_test(
+        m,
+        part_vars=[0],
+        lbs=[0.0],
+        ubs=[4.0],
+        n_init=4,
+    )
+    result = milp_model.solve()
+
+    piecewise = varmap["univariate_square_piecewise_relaxations"]
+    assert len(piecewise) == 1
+    assert piecewise[0].func_name == func_name
+    assert len(piecewise[0].intervals) > 2
+    assert all(interval.curvature in {"convex", "concave"} for interval in piecewise[0].intervals)
+    assert result.status == "optimal"
+    assert result.x is not None
+    assert float(result.x[0] + result.x[1]) < 6.95
 
 
 def test_safe_tan_objective_keeps_relaxation_bound():
