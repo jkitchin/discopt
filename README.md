@@ -136,10 +136,11 @@ remain available through the explicit Make targets.
 Routine AMP development uses a fast default regression battery. The fast
 environment uses solver-independent checks plus HiGHS-backed MILP relaxations,
 and excludes optional cyipopt, longer Alpine, MINLPTests, and incidence-style
-AMP benchmark coverage. Make targets run pytest through
+AMP benchmark coverage. AMP and PR-fast Make targets run pytest through
 `scripts/run_memory_capped_pytest.sh`, which applies a 16 GB address-space cap
 with `prlimit` when available. Override with `PYTEST_MEMORY_LIMIT_MB=...`, or
-set `PYTEST_MEMORY_LIMIT_MB=0` to disable the cap.
+set `PYTEST_MEMORY_LIMIT_MB=0` to disable the cap. The broad `make test-quick`
+dev-loop target remains uncapped and excludes `memory_heavy` tests.
 
 ```bash
 make test-amp-fast
