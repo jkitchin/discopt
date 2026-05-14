@@ -115,6 +115,241 @@ def _apply_flat_bounds_to_model(model: Model, lb: np.ndarray, ub: np.ndarray) ->
         offset += size
 
 
+def _refresh_partitions_for_bounds(
+    model: Model,
+    disc_state,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+    part_vars: list[int],
+    disc_abs_width_tol: float,
+    n_init_partitions: int,
+) -> tuple[list[int], list[float], list[float]]:
+    """Apply tightened bounds and keep AMP partition endpoints consistent."""
+    _apply_flat_bounds_to_model(model, flat_lb, flat_ub)
+    part_vars = [i for i in part_vars if float(flat_ub[i]) - float(flat_lb[i]) > disc_abs_width_tol]
+    part_lbs = [float(flat_lb[i]) for i in part_vars]
+    part_ubs = [float(flat_ub[i]) for i in part_vars]
+    active_part_vars = set(part_vars)
+    for stale_idx in list(disc_state.partitions):
+        if stale_idx not in active_part_vars:
+            del disc_state.partitions[stale_idx]
+    for k_pv, v_idx in enumerate(part_vars):
+        pts = disc_state.partitions.get(v_idx)
+        new_lo = float(part_lbs[k_pv])
+        new_hi = float(part_ubs[k_pv])
+        if pts is None or len(pts) < 2:
+            disc_state.partitions[v_idx] = np.linspace(new_lo, new_hi, n_init_partitions + 1)
+            continue
+        clipped = np.clip(pts, new_lo, new_hi)
+        merged = np.unique(np.concatenate([[new_lo], clipped, [new_hi]]))
+        disc_state.partitions[v_idx] = np.sort(merged)
+    return part_vars, part_lbs, part_ubs
+
+
+def _scalar_constant(expr: Expression) -> Optional[float]:
+    if not isinstance(expr, Constant):
+        return None
+    value = np.asarray(expr.value, dtype=np.float64)
+    if value.shape != ():
+        return None
+    return float(value)
+
+
+def _flat_var_index(expr: Expression, model: Model) -> Optional[int]:
+    if isinstance(expr, Variable):
+        if expr.size != 1:
+            return None
+        return sum(existing.size for existing in model._variables[: expr._index])
+    if isinstance(expr, IndexExpression) and isinstance(expr.base, Variable):
+        base = expr.base
+        base_offset = sum(existing.size for existing in model._variables[: base._index])
+        idx = expr.index
+        if base.shape == ():
+            return base_offset
+        if not isinstance(idx, tuple):
+            idx = (idx,)
+        return base_offset + int(np.ravel_multi_index(idx, base.shape))
+    return None
+
+
+def _flatten_objective_power_terms(
+    expr: Expression,
+    model: Model,
+    scale: float,
+    groups: dict[int, dict[int, float]],
+) -> Optional[float]:
+    """Collect separable monomial objective terms, returning the constant offset."""
+    const = _scalar_constant(expr)
+    if const is not None:
+        return scale * const
+
+    flat_idx = _flat_var_index(expr, model)
+    if flat_idx is not None:
+        terms = groups.setdefault(flat_idx, {})
+        terms[1] = terms.get(1, 0.0) + scale
+        return 0.0
+
+    if isinstance(expr, SumExpression):
+        return _flatten_objective_power_terms(expr.operand, model, scale, groups)
+
+    if isinstance(expr, SumOverExpression):
+        total = 0.0
+        for term in expr.terms:
+            term_const = _flatten_objective_power_terms(term, model, scale, groups)
+            if term_const is None:
+                return None
+            total += term_const
+        return total
+
+    if isinstance(expr, UnaryOp) and expr.op == "neg":
+        return _flatten_objective_power_terms(expr.operand, model, -scale, groups)
+
+    if not isinstance(expr, BinaryOp):
+        return None
+
+    if expr.op in {"+", "-"}:
+        left_const = _flatten_objective_power_terms(expr.left, model, scale, groups)
+        right_scale = scale if expr.op == "+" else -scale
+        right_const = _flatten_objective_power_terms(expr.right, model, right_scale, groups)
+        if left_const is None or right_const is None:
+            return None
+        return left_const + right_const
+
+    if expr.op == "*":
+        left_const = _scalar_constant(expr.left)
+        if left_const is not None:
+            return _flatten_objective_power_terms(expr.right, model, scale * left_const, groups)
+        right_const = _scalar_constant(expr.right)
+        if right_const is not None:
+            return _flatten_objective_power_terms(expr.left, model, scale * right_const, groups)
+        return None
+
+    if expr.op == "/":
+        denom = _scalar_constant(expr.right)
+        if denom is None or abs(denom) <= 1e-14:
+            return None
+        return _flatten_objective_power_terms(expr.left, model, scale / denom, groups)
+
+    if expr.op == "**":
+        exponent = _scalar_constant(expr.right)
+        if exponent is None or abs(exponent - round(exponent)) > 1e-12:
+            return None
+        exponent_int = int(round(exponent))
+        if exponent_int <= 0:
+            return None
+        flat_idx = _flat_var_index(expr.left, model)
+        if flat_idx is None:
+            return None
+        terms = groups.setdefault(flat_idx, {})
+        terms[exponent_int] = terms.get(exponent_int, 0.0) + scale
+        return 0.0
+
+    return None
+
+
+def _polynomial_value(terms: dict[int, float], x: float) -> float:
+    return float(sum(coeff * (x**degree) for degree, coeff in terms.items()))
+
+
+def _univariate_polynomial_minimum(terms: dict[int, float], lb: float, ub: float) -> float:
+    points = [lb, ub]
+    if lb <= 0.0 <= ub:
+        points.append(0.0)
+    max_degree = max((degree for degree in terms if degree > 0), default=0)
+    derivative_coeffs = [terms.get(degree, 0.0) * degree for degree in range(max_degree, 0, -1)]
+    if any(abs(coeff) > 1e-14 for coeff in derivative_coeffs):
+        for root in np.roots(derivative_coeffs):
+            if abs(float(np.imag(root))) <= 1e-10:
+                real_root = float(np.real(root))
+                if lb <= real_root <= ub:
+                    points.append(real_root)
+    return min(_polynomial_value(terms, point) for point in points)
+
+
+def _tighten_simple_power_group(
+    terms: dict[int, float],
+    rhs: float,
+    lb: float,
+    ub: float,
+) -> tuple[float, float]:
+    """Intersect simple monomial level sets with the current interval."""
+    nonzero_terms = {degree: coeff for degree, coeff in terms.items() if abs(coeff) > 1e-14}
+    if not np.isfinite(rhs) or not nonzero_terms:
+        return lb, ub
+    if len(nonzero_terms) != 1:
+        return lb, ub
+
+    degree, coeff = next(iter(nonzero_terms.items()))
+    if degree == 1:
+        bound = rhs / coeff
+        if coeff > 0.0:
+            return lb, min(ub, bound)
+        return max(lb, bound), ub
+
+    if degree % 2 == 1:
+        signed_root = float(np.sign(rhs / coeff) * (abs(rhs / coeff) ** (1.0 / degree)))
+        if coeff > 0.0:
+            return lb, min(ub, signed_root)
+        return max(lb, signed_root), ub
+
+    if coeff <= 0.0 or rhs < 0.0:
+        return lb, ub
+
+    radius = float((rhs / coeff) ** (1.0 / degree))
+    return max(lb, -radius), min(ub, radius)
+
+
+def _tighten_bounds_with_objective_cutoff(
+    model: Model,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+    cutoff: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Use a separable objective cutoff to infer a finite box before cutoff OBBT."""
+    if (
+        model._objective is None
+        or model._objective.sense != ObjectiveSense.MINIMIZE
+        or not np.isfinite(cutoff)
+    ):
+        return flat_lb, flat_ub
+
+    groups: dict[int, dict[int, float]] = {}
+    constant = _flatten_objective_power_terms(model._objective.expression, model, 1.0, groups)
+    if constant is None or not groups:
+        return flat_lb, flat_ub
+
+    tightened_lb = np.asarray(flat_lb, dtype=np.float64).copy()
+    tightened_ub = np.asarray(flat_ub, dtype=np.float64).copy()
+    cutoff = float(cutoff) + 1e-8 * max(1.0, abs(float(cutoff)))
+
+    group_min: dict[int, float] = {}
+    for flat_idx, terms in groups.items():
+        lb_i = float(tightened_lb[flat_idx])
+        ub_i = float(tightened_ub[flat_idx])
+        if not (np.isfinite(lb_i) and np.isfinite(ub_i)):
+            return flat_lb, flat_ub
+        group_min[flat_idx] = _univariate_polynomial_minimum(terms, lb_i, ub_i)
+
+    total_min = float(constant) + float(sum(group_min.values()))
+    if total_min > cutoff + 1e-8:
+        return flat_lb, flat_ub
+
+    for flat_idx, terms in groups.items():
+        other_min = total_min - group_min[flat_idx]
+        rhs = cutoff - other_min
+        new_lb, new_ub = _tighten_simple_power_group(
+            terms,
+            rhs,
+            float(tightened_lb[flat_idx]),
+            float(tightened_ub[flat_idx]),
+        )
+        if new_lb <= new_ub + 1e-10:
+            tightened_lb[flat_idx] = max(tightened_lb[flat_idx], new_lb)
+            tightened_ub[flat_idx] = min(tightened_ub[flat_idx], new_ub)
+
+    return tightened_lb, tightened_ub
+
+
 def _default_nlp_start(flat_lb: np.ndarray, flat_ub: np.ndarray) -> np.ndarray:
     """Build a neutral NLP start point that behaves sensibly on semi-infinite domains."""
     x0 = np.zeros_like(flat_lb, dtype=np.float64)
@@ -1545,6 +1780,10 @@ def _run_cutoff_obbt(
     relaxation reflects the latest envelope strength.  Returns possibly
     updated (flat_lb, flat_ub, part_vars, part_lbs, part_ubs).
     """
+    remaining_wall_time = _remaining_wall_time(deadline)
+    if remaining_wall_time is not None and remaining_wall_time <= 0.0:
+        return flat_lb, flat_ub, part_vars, part_lbs, part_ubs
+
     try:
         from discopt._jax.milp_relaxation import build_milp_relaxation
         from discopt._jax.obbt import run_obbt_on_relaxation
@@ -1560,8 +1799,18 @@ def _run_cutoff_obbt(
         candidates = sorted(set(part_vars) | set(terms.partition_candidates))
         if not candidates:
             return flat_lb, flat_ub, part_vars, part_lbs, part_ubs
-        per_lp = max(0.05, min(1.0, obbt_time_limit / max(1, 2 * len(candidates))))
-        remaining = max(1.0, min(obbt_time_limit, deadline - time.perf_counter()))
+        remaining_wall_time = _remaining_wall_time(deadline)
+        if remaining_wall_time is not None and remaining_wall_time <= 0.0:
+            return flat_lb, flat_ub, part_vars, part_lbs, part_ubs
+        remaining = obbt_time_limit
+        if remaining_wall_time is not None:
+            remaining = min(remaining, remaining_wall_time)
+        if remaining <= 0.0:
+            return flat_lb, flat_ub, part_vars, part_lbs, part_ubs
+        per_lp = min(
+            remaining,
+            max(0.05, min(1.0, obbt_time_limit / max(1, 2 * len(candidates)))),
+        )
         result = run_obbt_on_relaxation(
             cutoff_relax,
             n_orig=n_orig,
@@ -1591,24 +1840,15 @@ def _run_cutoff_obbt(
             tight_ub[bad] = mid
         _apply_flat_bounds_to_model(model, tight_lb, tight_ub)
         flat_lb, flat_ub = tight_lb, tight_ub
-        # Drop partition vars whose width has collapsed.
-        part_vars = [
-            i for i in part_vars if float(flat_ub[i]) - float(flat_lb[i]) > disc_abs_width_tol
-        ]
-        part_lbs = [float(flat_lb[i]) for i in part_vars]
-        part_ubs = [float(flat_ub[i]) for i in part_vars]
-        # Clip existing breakpoints into the new tighter box and re-anchor
-        # endpoints to the OBBT bounds.  Preserves prior refinement effort.
-        for k_pv, v_idx in enumerate(part_vars):
-            pts = disc_state.partitions.get(v_idx)
-            new_lo = float(part_lbs[k_pv])
-            new_hi = float(part_ubs[k_pv])
-            if pts is None or len(pts) < 2:
-                disc_state.partitions[v_idx] = np.linspace(new_lo, new_hi, n_init_partitions + 1)
-                continue
-            clipped = np.clip(pts, new_lo, new_hi)
-            merged = np.unique(np.concatenate([[new_lo], clipped, [new_hi]]))
-            disc_state.partitions[v_idx] = np.sort(merged)
+        part_vars, part_lbs, part_ubs = _refresh_partitions_for_bounds(
+            model,
+            disc_state,
+            flat_lb,
+            flat_ub,
+            part_vars,
+            disc_abs_width_tol,
+            n_init_partitions,
+        )
         logger.info(
             "AMP cutoff OBBT @ iter %d: %d/%d bounds tightened in %d LPs (%.2fs, cutoff=%.6g)",
             iteration,
@@ -1629,7 +1869,7 @@ def _run_cutoff_obbt(
 # ---------------------------------------------------------------------------
 
 
-def solve_amp(
+def _solve_amp_impl(
     model: Model,
     rel_gap: float = 1e-3,
     abs_tol: float = 1e-6,
@@ -1659,6 +1899,7 @@ def solve_amp(
     skip_convex_check: bool = False,
     obbt_at_root: bool = False,
     obbt_with_cutoff: bool = False,
+    alphabb_cutoff_obbt: bool = True,
     obbt_time_limit: float = 30.0,
 ) -> SolveResult:
     """Solve MINLP globally using Adaptive Multivariate Partitioning (AMP).
@@ -1755,6 +1996,12 @@ def solve_amp(
         to redirect adaptive partition refinement toward a worse fixed point
         on problems where variable bounds are already reasonably tight; turn
         on for problems with loose initial variable bounds.
+    alphabb_cutoff_obbt : bool, default True
+        Allow one cutoff OBBT pass before alpha-BB OA generation when a
+        nonconvex OA row starts from effectively unbounded variable bounds.
+        This is independent of the broader ``obbt_with_cutoff`` option and is
+        used to create finite boxes for alpha-BB cuts on loose MINLPTests-style
+        instances. Set False to disable this alpha-BB prerequisite pass.
     obbt_time_limit : float, default 30.0
         Total wall-clock budget for OBBT calls (in seconds).  Per-LP budget is
         ``min(1.0, obbt_time_limit / max(1, 2*n_candidates))``.
@@ -1810,6 +2057,11 @@ def solve_amp(
     n_orig = sum(v.size for v in model._variables)
     flat_lb, flat_ub = flat_variable_bounds(model)
     initial_point_arr = _normalize_initial_point(initial_point, n_orig, flat_lb, flat_ub)
+    original_variable_bounds = _snapshot_variable_bounds(model)
+
+    def _finish(result: SolveResult) -> SolveResult:
+        _restore_variable_bounds(original_variable_bounds)
+        return result
 
     if pure_continuous and not skip_convex_check:
         try:
@@ -1831,7 +2083,7 @@ def solve_amp(
                     initial_point=initial_point_arr,
                 )
                 result.convex_fast_path = True
-                return result
+                return _finish(result)
         except Exception as exc:
             logger.debug("AMP: convex delegation check failed: %s", exc)
 
@@ -1857,11 +2109,13 @@ def solve_amp(
         int_sizes,
     )
     if root_infeasible:
-        return SolveResult(
-            status="infeasible",
-            wall_time=time.perf_counter() - t_start,
-            mip_count=0,
-            gap_certified=True,
+        return _finish(
+            SolveResult(
+                status="infeasible",
+                wall_time=time.perf_counter() - t_start,
+                mip_count=0,
+                gap_certified=True,
+            )
         )
     if root_changed:
         logger.info("AMP: root FBBT tightened variable bounds before relaxation")
@@ -1874,11 +2128,13 @@ def solve_amp(
             "AMP: nonlinear bound tightening proved infeasibility: %s",
             nonlinear_bt_stats.infeasibility_reason,
         )
-        return SolveResult(
-            status="infeasible",
-            wall_time=time.perf_counter() - t_start,
-            mip_count=0,
-            gap_certified=True,
+        return _finish(
+            SolveResult(
+                status="infeasible",
+                wall_time=time.perf_counter() - t_start,
+                mip_count=0,
+                gap_certified=True,
+            )
         )
     if nonlinear_bt_stats.n_tightened > 0:
         flat_lb = tightened_lb
@@ -2125,6 +2381,158 @@ def solve_amp(
     _last_obbt_iter = 0
     _obbt_period = 5
 
+    def _append_linearized_cuts(cuts) -> int:
+        appended = 0
+        for cut in cuts:
+            if np.linalg.norm(cut.coeffs) < 1e-12:
+                continue
+            if cut.sense == ">=":
+                # Convert to <= form for milp_relaxation.py
+                oa_cuts.append((-cut.coeffs, -cut.rhs))
+            elif cut.sense == "==":
+                oa_cuts.append((cut.coeffs, cut.rhs))
+                oa_cuts.append((-cut.coeffs, -cut.rhs))
+                appended += 2
+                continue
+            else:
+                oa_cuts.append((cut.coeffs, cut.rhs))
+            appended += 1
+        return appended
+
+    def _add_incumbent_oa_cuts_after_cutoff_tightening(
+        x_incumbent: np.ndarray,
+        iteration_idx: int,
+    ) -> int:
+        """Append direct OA, run cutoff tightening, then append alpha-BB OA cuts."""
+        nonlocal flat_lb, flat_ub, part_vars, part_lbs, part_ubs
+        nonlocal _cutoff_obbt_done, _last_obbt_iter
+
+        if evaluator.n_constraints <= 0:
+            return 0
+
+        appended = 0
+        try:
+            from discopt._jax.cutting_planes import (
+                generate_alphabb_quadratic_oa_cuts_from_evaluator,
+                generate_oa_cuts_from_evaluator,
+            )
+            from discopt.modeling.core import Constraint
+
+            _x_orig = x_incumbent[:n_orig]
+            _senses = [c.sense for c in model._constraints if isinstance(c, Constraint)]
+            direct_cuts = generate_oa_cuts_from_evaluator(
+                evaluator,
+                _x_orig,
+                constraint_senses=_senses,
+                convex_mask=oa_convexity.constraint_mask,
+            )
+            appended += _append_linearized_cuts(direct_cuts)
+
+            has_nonconvex_oa_row = not all(oa_convexity.constraint_mask)
+            had_effectively_unbounded = any(
+                not is_effectively_finite(float(value))
+                for value in np.concatenate([flat_lb, flat_ub])
+            )
+            if has_nonconvex_oa_row and UB < np.inf:
+                cutoff_lb, cutoff_ub = _tighten_bounds_with_objective_cutoff(
+                    model,
+                    flat_lb,
+                    flat_ub,
+                    UB,
+                )
+                if np.any(cutoff_lb > flat_lb + 1e-10) or np.any(cutoff_ub < flat_ub - 1e-10):
+                    flat_lb = np.maximum(flat_lb, cutoff_lb)
+                    flat_ub = np.minimum(flat_ub, cutoff_ub)
+                    _apply_flat_bounds_to_model(model, flat_lb, flat_ub)
+                    try:
+                        from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
+
+                        fbbt_lb, fbbt_ub, fbbt_infeasible, _fbbt_changed = (
+                            tighten_root_bounds_with_fbbt(
+                                model,
+                                flat_lb,
+                                flat_ub,
+                                int_offsets,
+                                int_sizes,
+                            )
+                        )
+                        if not fbbt_infeasible:
+                            flat_lb = np.maximum(flat_lb, fbbt_lb)
+                            flat_ub = np.minimum(flat_ub, fbbt_ub)
+                    except Exception as _cutoff_fbbt_err:
+                        logger.debug(
+                            "AMP objective cutoff FBBT skipped: %s",
+                            _cutoff_fbbt_err,
+                        )
+                    part_vars, part_lbs, part_ubs = _refresh_partitions_for_bounds(
+                        model,
+                        disc_state,
+                        flat_lb,
+                        flat_ub,
+                        part_vars,
+                        disc_abs_width_tol,
+                        n_init_partitions,
+                    )
+                    logger.info(
+                        "AMP objective cutoff tightened bounds before alpha-BB OA generation"
+                    )
+
+            remaining_for_cutoff_obbt = _remaining_wall_time(deadline)
+            if (
+                UB < np.inf
+                and not _cutoff_obbt_done
+                and remaining_for_cutoff_obbt is not None
+                and remaining_for_cutoff_obbt > 0.0
+                and (
+                    obbt_with_cutoff
+                    or (alphabb_cutoff_obbt and has_nonconvex_oa_row and had_effectively_unbounded)
+                )
+            ):
+                _cutoff_obbt_done = True
+                flat_lb, flat_ub, part_vars, part_lbs, part_ubs = _run_cutoff_obbt(
+                    model=model,
+                    terms=terms,
+                    disc_state=disc_state,
+                    oa_cuts=oa_cuts,
+                    convhull_mode=convhull_mode,
+                    UB=UB,
+                    flat_lb=flat_lb,
+                    flat_ub=flat_ub,
+                    part_vars=part_vars,
+                    part_lbs=part_lbs,
+                    part_ubs=part_ubs,
+                    n_orig=n_orig,
+                    obbt_time_limit=obbt_time_limit,
+                    partition_scaling_factor=partition_scaling_factor,
+                    disc_abs_width_tol=disc_abs_width_tol,
+                    n_init_partitions=n_init_partitions,
+                    deadline=deadline,
+                    iteration=iteration_idx,
+                    from_min_space=_from_minimization_space,
+                )
+                _last_obbt_iter = iteration_idx
+
+            try:
+                alphabb_cuts = generate_alphabb_quadratic_oa_cuts_from_evaluator(
+                    evaluator,
+                    _x_orig,
+                    flat_lb,
+                    flat_ub,
+                    constraint_senses=_senses,
+                    convex_mask=oa_convexity.constraint_mask,
+                )
+                appended += _append_linearized_cuts(alphabb_cuts)
+            except Exception as _alphabb_oa_err:
+                logger.debug(
+                    "AMP: alpha-BB OA cut computation failed: %s",
+                    _alphabb_oa_err,
+                )
+
+            _prune_oa_cuts(oa_cuts)
+        except Exception as _oa_err:
+            logger.debug("AMP: OA cut computation failed: %s", _oa_err)
+        return appended
+
     for iteration in range(1, max_iter + 1):
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
@@ -2188,8 +2596,41 @@ def solve_amp(
                             initial_point=initial_point_arr,
                         )
                         if recovered is not None:
+                            recovered_x = None
+                            if recovered.x is not None:
+                                try:
+                                    recovered_x = np.concatenate(
+                                        [
+                                            np.asarray(recovered.x[var.name], dtype=np.float64)
+                                            .reshape(-1)
+                                            .copy()
+                                            for var in model._variables
+                                        ]
+                                    )
+                                except Exception:
+                                    recovered_x = None
+                            if recovered_x is not None and recovered.objective is not None:
+                                incumbent = recovered_x
+                                UB = (
+                                    -float(recovered.objective)
+                                    if maximize
+                                    else float(recovered.objective)
+                                )
+                                n_before = len(oa_cuts)
+                                _add_incumbent_oa_cuts_after_cutoff_tightening(
+                                    incumbent,
+                                    iteration,
+                                )
+                                if len(oa_cuts) > n_before:
+                                    termination_reason = "iteration_limit"
+                                    logger.info(
+                                        "AMP: continuing after pure-continuous recovery "
+                                        "with %d OA cuts",
+                                        len(oa_cuts) - n_before,
+                                    )
+                                    continue
                             recovered.mip_count = mip_count
-                            return recovered
+                            return _finish(recovered)
                     fallback_x, fallback_obj = _solve_small_integer_domain_fallback(
                         model,
                         evaluator,
@@ -2201,21 +2642,25 @@ def solve_amp(
                         deadline=deadline,
                     )
                     if fallback_x is not None and fallback_obj is not None:
-                        return SolveResult(
-                            status="feasible",
-                            objective=_from_minimization_space(fallback_obj),
-                            bound=None,
-                            gap=None,
-                            x=_build_x_dict(fallback_x, model),
-                            wall_time=time.perf_counter() - t_start,
-                            mip_count=mip_count,
-                            gap_certified=False,
+                        return _finish(
+                            SolveResult(
+                                status="feasible",
+                                objective=_from_minimization_space(fallback_obj),
+                                bound=None,
+                                gap=None,
+                                x=_build_x_dict(fallback_x, model),
+                                wall_time=time.perf_counter() - t_start,
+                                mip_count=mip_count,
+                                gap_certified=False,
+                            )
                         )
                     if milp_result.status == "infeasible":
-                        return SolveResult(
-                            status="infeasible",
-                            wall_time=time.perf_counter() - t_start,
-                            mip_count=mip_count,
+                        return _finish(
+                            SolveResult(
+                                status="infeasible",
+                                wall_time=time.perf_counter() - t_start,
+                                mip_count=mip_count,
+                            )
                         )
             break
 
@@ -2259,67 +2704,10 @@ def solve_amp(
                     _from_minimization_space(UB),
                 )
 
-                # Accumulate OA tangent cuts at this NLP solution to tighten
-                # the next MILP relaxation.  Uses existing OA infrastructure
-                # from cutting_planes.py which handles all constraint senses.
-                try:
-                    from discopt._jax.cutting_planes import (
-                        generate_oa_cuts_from_evaluator,
-                    )
-                    from discopt.modeling.core import Constraint
-
-                    _x_orig = x_nlp[:n_orig]
-                    if evaluator.n_constraints > 0:
-                        _senses = [c.sense for c in model._constraints if isinstance(c, Constraint)]
-                        cuts = generate_oa_cuts_from_evaluator(
-                            evaluator,
-                            _x_orig,
-                            constraint_senses=_senses,
-                            convex_mask=oa_convexity.constraint_mask,
-                        )
-                        for cut in cuts:
-                            if np.linalg.norm(cut.coeffs) < 1e-12:
-                                continue
-                            if cut.sense == ">=":
-                                # Convert to <= form for milp_relaxation.py
-                                oa_cuts.append((-cut.coeffs, -cut.rhs))
-                            elif cut.sense == "==":
-                                oa_cuts.append((cut.coeffs, cut.rhs))
-                                oa_cuts.append((-cut.coeffs, -cut.rhs))
-                            else:
-                                oa_cuts.append((cut.coeffs, cut.rhs))
-                        _prune_oa_cuts(oa_cuts)
-                except Exception as _oa_err:
-                    logger.debug("AMP: OA cut computation failed: %s", _oa_err)
-
-                # ── Cutoff OBBT (first incumbent) ────────────────────────────
-                # Re-run OBBT with c^T x <= UB to exclude regions that cannot
-                # improve on the new incumbent.  Uses the current disc_state
-                # so envelopes are tighter than the empty-partition LP.
-                if obbt_with_cutoff and not _cutoff_obbt_done:
-                    _cutoff_obbt_done = True
-                    flat_lb, flat_ub, part_vars, part_lbs, part_ubs = _run_cutoff_obbt(
-                        model=model,
-                        terms=terms,
-                        disc_state=disc_state,
-                        oa_cuts=oa_cuts,
-                        convhull_mode=convhull_mode,
-                        UB=UB,
-                        flat_lb=flat_lb,
-                        flat_ub=flat_ub,
-                        part_vars=part_vars,
-                        part_lbs=part_lbs,
-                        part_ubs=part_ubs,
-                        n_orig=n_orig,
-                        obbt_time_limit=obbt_time_limit,
-                        partition_scaling_factor=partition_scaling_factor,
-                        disc_abs_width_tol=disc_abs_width_tol,
-                        n_init_partitions=n_init_partitions,
-                        deadline=deadline,
-                        iteration=iteration,
-                        from_min_space=_from_minimization_space,
-                    )
-                    _last_obbt_iter = iteration
+                # Accumulate OA tangent cuts at this NLP solution.  Direct
+                # convex OA cuts are appended first, then cutoff tightening runs
+                # before alpha-BB tries to build cuts that require finite boxes.
+                _add_incumbent_oa_cuts_after_cutoff_tightening(x_nlp, iteration)
 
         # ── Periodic cutoff OBBT ─────────────────────────────────────────────
         # After the first incumbent OBBT, re-run periodically as partitioning
@@ -2571,11 +2959,13 @@ def solve_amp(
             status = "error"
         else:
             status = "iteration_limit"
-        return SolveResult(
-            status=status,
-            wall_time=elapsed,
-            mip_count=mip_count,
-            gap_certified=False,
+        return _finish(
+            SolveResult(
+                status=status,
+                wall_time=elapsed,
+                mip_count=mip_count,
+                gap_certified=False,
+            )
         )
 
     if incumbent is not None:
@@ -2596,15 +2986,19 @@ def solve_amp(
         rel_gap_final = _compute_relative_gap(abs_gap_final, UB)
         status = "optimal" if gap_certified else "feasible"
 
-        return SolveResult(
-            status=status,
-            objective=_from_minimization_space(UB),
-            bound=(_from_minimization_space(LB) if LB > -np.inf and bound_is_trustworthy else None),
-            gap=float(rel_gap_final) if rel_gap_final is not None else None,
-            x=_build_x_dict(incumbent, model),
-            wall_time=elapsed,
-            mip_count=mip_count,
-            gap_certified=gap_certified,
+        return _finish(
+            SolveResult(
+                status=status,
+                objective=_from_minimization_space(UB),
+                bound=(
+                    _from_minimization_space(LB) if LB > -np.inf and bound_is_trustworthy else None
+                ),
+                gap=float(rel_gap_final) if rel_gap_final is not None else None,
+                x=_build_x_dict(incumbent, model),
+                wall_time=elapsed,
+                mip_count=mip_count,
+                gap_certified=gap_certified,
+            )
         )
 
     # No feasible solution found
@@ -2621,7 +3015,7 @@ def solve_amp(
         )
         if recovered is not None:
             recovered.mip_count = mip_count
-            return recovered
+            return _finish(recovered)
 
     if termination_reason == "time_limit" or elapsed >= time_limit:
         status = "time_limit"
@@ -2632,13 +3026,90 @@ def solve_amp(
     else:
         status = "iteration_limit"
 
-    return SolveResult(
-        status=status,
-        objective=None,
-        bound=_from_minimization_space(LB) if LB > -np.inf else None,
-        gap=None,
-        x=None,
-        wall_time=elapsed,
-        mip_count=mip_count,
-        gap_certified=False,
+    return _finish(
+        SolveResult(
+            status=status,
+            objective=None,
+            bound=_from_minimization_space(LB) if LB > -np.inf else None,
+            gap=None,
+            x=None,
+            wall_time=elapsed,
+            mip_count=mip_count,
+            gap_certified=False,
+        )
     )
+
+
+def solve_amp(
+    model: Model,
+    rel_gap: float = 1e-3,
+    abs_tol: float = 1e-6,
+    time_limit: float = 3600.0,
+    max_iter: int = 50,
+    n_init_partitions: int = 2,
+    partition_method: str = "auto",
+    nlp_solver: str = "ipm",
+    iteration_callback: Optional[Callable] = None,
+    milp_time_limit: Optional[float] = None,
+    milp_gap_tolerance: Optional[float] = None,
+    apply_partitioning: bool = True,
+    disc_var_pick: int | str | Callable[[dict[str, Any]], Any] | None = None,
+    partition_scaling_factor: float = 10.0,
+    partition_scaling_factor_update: Optional[Callable[[dict[str, Any]], Any]] = None,
+    disc_add_partition_method: str | Callable[[dict[str, Any]], Any] = "adaptive",
+    disc_abs_width_tol: float = 1e-3,
+    convhull_formulation: str = "disaggregated",
+    convhull_ebd: bool = False,
+    convhull_ebd_encoding: str = "gray",
+    presolve_bt: bool = True,
+    presolve_bt_algo: int | str = 1,
+    presolve_bt_time_limit: Optional[float] = None,
+    presolve_bt_mip_time_limit: Optional[float] = None,
+    initial_point: Optional[np.ndarray] = None,
+    use_start_as_incumbent: bool = False,
+    skip_convex_check: bool = False,
+    obbt_at_root: bool = False,
+    obbt_with_cutoff: bool = False,
+    alphabb_cutoff_obbt: bool = True,
+    obbt_time_limit: float = 30.0,
+) -> SolveResult:
+    saved_bounds = _snapshot_variable_bounds(model)
+    try:
+        return _solve_amp_impl(
+            model,
+            rel_gap=rel_gap,
+            abs_tol=abs_tol,
+            time_limit=time_limit,
+            max_iter=max_iter,
+            n_init_partitions=n_init_partitions,
+            partition_method=partition_method,
+            nlp_solver=nlp_solver,
+            iteration_callback=iteration_callback,
+            milp_time_limit=milp_time_limit,
+            milp_gap_tolerance=milp_gap_tolerance,
+            apply_partitioning=apply_partitioning,
+            disc_var_pick=disc_var_pick,
+            partition_scaling_factor=partition_scaling_factor,
+            partition_scaling_factor_update=partition_scaling_factor_update,
+            disc_add_partition_method=disc_add_partition_method,
+            disc_abs_width_tol=disc_abs_width_tol,
+            convhull_formulation=convhull_formulation,
+            convhull_ebd=convhull_ebd,
+            convhull_ebd_encoding=convhull_ebd_encoding,
+            presolve_bt=presolve_bt,
+            presolve_bt_algo=presolve_bt_algo,
+            presolve_bt_time_limit=presolve_bt_time_limit,
+            presolve_bt_mip_time_limit=presolve_bt_mip_time_limit,
+            initial_point=initial_point,
+            use_start_as_incumbent=use_start_as_incumbent,
+            skip_convex_check=skip_convex_check,
+            obbt_at_root=obbt_at_root,
+            obbt_with_cutoff=obbt_with_cutoff,
+            alphabb_cutoff_obbt=alphabb_cutoff_obbt,
+            obbt_time_limit=obbt_time_limit,
+        )
+    finally:
+        _restore_variable_bounds(saved_bounds)
+
+
+solve_amp.__doc__ = _solve_amp_impl.__doc__

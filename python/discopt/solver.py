@@ -1498,6 +1498,7 @@ def solve_model(
             "use_start_as_incumbent",
             "obbt_at_root",
             "obbt_with_cutoff",
+            "alphabb_cutoff_obbt",
             "obbt_time_limit",
         )
         for key in amp_option_keys:

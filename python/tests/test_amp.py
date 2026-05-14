@@ -2035,6 +2035,656 @@ def test_oa_cut_generation_receives_convex_constraint_mask(monkeypatch):
     assert recorded_masks == [[True, False]]
 
 
+def test_alphabb_quadratic_oa_cut_covers_issue_63_row():
+    """The indefinite quadratic row should get a relaxed OA cut, not direct OA."""
+    from discopt._jax.convexity import classify_oa_cut_convexity
+    from discopt._jax.cutting_planes import generate_alphabb_quadratic_oa_cuts_from_evaluator
+    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._jax.nlp_evaluator import NLPEvaluator
+
+    m = Model("issue_63_quadratic_cut")
+    x = m.continuous("x", lb=-2.0, ub=2.0)
+    y = m.continuous("y", lb=-2.0, ub=2.0)
+    z = m.continuous("z", lb=0.0, ub=1.0)
+    m.minimize(x + y**2 + z**3)
+    m.subject_to(y >= dm.exp(-x - 2) + dm.exp(-z - 2) - 2)
+    m.subject_to(x**2 <= y**2 + z**2)
+    m.subject_to(y >= x / 2 + z)
+
+    oa_convexity = classify_oa_cut_convexity(m, use_certificate=True)
+    assert oa_convexity.constraint_mask == [True, False, True]
+
+    evaluator = NLPEvaluator(m)
+    flat_lb, flat_ub = flat_variable_bounds(m)
+    x_star = np.array([0.25, 0.5, 0.25], dtype=np.float64)
+    cuts = generate_alphabb_quadratic_oa_cuts_from_evaluator(
+        evaluator,
+        x_star,
+        flat_lb,
+        flat_ub,
+        constraint_senses=[c.sense for c in m._constraints],
+        convex_mask=oa_convexity.constraint_mask,
+    )
+
+    assert len(cuts) == 1
+    cut = cuts[0]
+    assert cut.sense == "<="
+    assert np.linalg.norm(cut.coeffs) > 1e-12
+    assert np.isfinite(cut.rhs)
+
+    feasible_points = [
+        np.array([0.0, 0.0, 0.0], dtype=np.float64),
+        np.array([1.0, 1.0, 0.0], dtype=np.float64),
+        np.array([-1.0, 1.0, 1.0], dtype=np.float64),
+    ]
+    for point in feasible_points:
+        assert point[0] ** 2 <= point[1] ** 2 + point[2] ** 2 + 1e-12
+        assert float(np.dot(cut.coeffs, point)) <= cut.rhs + 1e-8
+
+
+def test_alphabb_quadratic_oa_skips_nonquadratic_row():
+    """Nonquadratic rows must not be accepted by local Hessian coincidence."""
+    from discopt._jax.cutting_planes import generate_alphabb_quadratic_oa_cuts_from_evaluator
+    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._jax.nlp_evaluator import NLPEvaluator
+
+    m = Model("nonquadratic_alphabb_skip")
+    x = m.continuous("x", lb=-1.0, ub=1.0)
+    m.subject_to(-(x**4) <= -1.0)
+    m.minimize(x)
+
+    evaluator = NLPEvaluator(m)
+    flat_lb, flat_ub = flat_variable_bounds(m)
+    cuts = generate_alphabb_quadratic_oa_cuts_from_evaluator(
+        evaluator,
+        np.array([-0.173], dtype=np.float64),
+        flat_lb,
+        flat_ub,
+        constraint_senses=[c.sense for c in m._constraints],
+        convex_mask=[False],
+    )
+
+    assert cuts == []
+
+
+def test_objective_cutoff_odd_power_tightening_uses_signed_monotonic_root():
+    """Odd monomials are monotone, not symmetric level sets."""
+    from discopt.solvers import amp as amp_mod
+
+    assert amp_mod._tighten_simple_power_group({3: 1.0}, 8.0, -10.0, 10.0) == pytest.approx(
+        (-10.0, 2.0)
+    )
+    assert amp_mod._tighten_simple_power_group({3: 1.0}, 8.0, -10.0, -1.0) == pytest.approx(
+        (-10.0, -1.0)
+    )
+    assert amp_mod._tighten_simple_power_group({3: 1.0}, -8.0, -10.0, 10.0) == pytest.approx(
+        (-10.0, -2.0)
+    )
+    assert amp_mod._tighten_simple_power_group({3: -1.0}, 8.0, -10.0, 10.0) == pytest.approx(
+        (-2.0, 10.0)
+    )
+
+
+def test_objective_cutoff_negative_odd_power_interval_preserves_feasible_points():
+    """A positive cutoff on x**3 over a negative interval must not trim the left side."""
+    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt.solvers import amp as amp_mod
+
+    m = Model("odd_power_cutoff_counterexample")
+    x = m.continuous("x", lb=-10.0, ub=-1.0)
+    y = m.continuous("y", lb=100.0, ub=100.0)
+    m.minimize(x**3 + y**2)
+
+    flat_lb, flat_ub = flat_variable_bounds(m)
+    cutoff = 10001.0
+    cutoff_lb, cutoff_ub = amp_mod._tighten_bounds_with_objective_cutoff(
+        m,
+        flat_lb,
+        flat_ub,
+        cutoff=cutoff,
+    )
+
+    assert (-10.0) ** 3 + 100.0**2 <= cutoff
+    np.testing.assert_allclose(cutoff_lb, flat_lb)
+    np.testing.assert_allclose(cutoff_ub, flat_ub)
+
+
+def test_refresh_partitions_for_bounds_prunes_stale_partition_entries():
+    """Dropped partition vars must not leave stale active entries in disc_state."""
+    from discopt.solvers import amp as amp_mod
+
+    m = Model("partition_refresh_prunes_stale")
+    x = m.continuous("x", shape=(3,))
+    disc_state = SimpleNamespace(
+        partitions={
+            0: np.array([-5.0, 0.0, 5.0], dtype=np.float64),
+            1: np.array([1.0, 2.0, 3.0], dtype=np.float64),
+            2: np.array([-3.0, 0.0, 3.0], dtype=np.float64),
+        }
+    )
+    flat_lb = np.array([-1.0, 2.0, -3.0], dtype=np.float64)
+    flat_ub = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+
+    part_vars, part_lbs, part_ubs = amp_mod._refresh_partitions_for_bounds(
+        m,
+        disc_state,
+        flat_lb,
+        flat_ub,
+        part_vars=[0, 1],
+        disc_abs_width_tol=1e-9,
+        n_init_partitions=2,
+    )
+
+    assert part_vars == [0]
+    assert part_lbs == [-1.0]
+    assert part_ubs == [1.0]
+    assert set(disc_state.partitions) == {0}
+    np.testing.assert_allclose(disc_state.partitions[0], np.array([-1.0, 0.0, 1.0]))
+    np.testing.assert_allclose(x.lb, flat_lb)
+    np.testing.assert_allclose(x.ub, flat_ub)
+
+
+@pytest.mark.parametrize(
+    ("solver_kwargs", "expected_obbt_calls"),
+    [
+        ({}, 1),
+        ({"alphabb_cutoff_obbt": False}, 0),
+        ({"alphabb_cutoff_obbt": False, "obbt_with_cutoff": True}, 1),
+    ],
+)
+def test_alphabb_cutoff_obbt_option_controls_prerequisite_pass(
+    monkeypatch,
+    solver_kwargs,
+    expected_obbt_calls,
+):
+    """The alpha-BB cutoff OBBT pass has its own switch."""
+    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    from discopt.solvers import amp as amp_mod
+
+    calls = []
+
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_milp_with_oa_recovery",
+        lambda **kwargs: (
+            MilpRelaxationResult(
+                status="optimal",
+                objective=-1.0,
+                x=np.array([0.0, 0.0], dtype=np.float64),
+            ),
+            {},
+            [],
+            1,
+        ),
+    )
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_best_nlp_candidate",
+        lambda *args, **kwargs: (np.array([0.0, 0.0], dtype=np.float64), 0.0),
+    )
+
+    def fake_cutoff_obbt(**kwargs):
+        calls.append(kwargs["iteration"])
+        return (
+            kwargs["flat_lb"],
+            kwargs["flat_ub"],
+            kwargs["part_vars"],
+            kwargs["part_lbs"],
+            kwargs["part_ubs"],
+        )
+
+    monkeypatch.setattr(amp_mod, "_run_cutoff_obbt", fake_cutoff_obbt)
+
+    m = Model("alphabb_cutoff_obbt_option")
+    x = m.continuous("x")
+    y = m.continuous("y")
+    m.minimize(x + y**2)
+    m.subject_to(x**2 <= y**2 + 1.0)
+
+    result = m.solve(
+        solver="amp",
+        apply_partitioning=False,
+        skip_convex_check=True,
+        presolve_bt=False,
+        max_iter=1,
+        time_limit=5,
+        **solver_kwargs,
+    )
+
+    assert result.status in ("optimal", "feasible")
+    assert len(calls) == expected_obbt_calls
+
+
+def test_run_cutoff_obbt_returns_without_time_after_deadline(monkeypatch):
+    """Expired AMP deadlines must not be converted into a fresh OBBT budget."""
+    from discopt._jax import milp_relaxation as milp_relaxation_mod
+    from discopt.solvers import amp as amp_mod
+
+    build_calls = []
+
+    def fail_build_relaxation(*args, **kwargs):
+        build_calls.append((args, kwargs))
+        raise AssertionError("cutoff OBBT should not build a relaxation after the deadline")
+
+    monkeypatch.setattr(
+        milp_relaxation_mod,
+        "build_milp_relaxation",
+        fail_build_relaxation,
+    )
+
+    m = Model("expired_cutoff_obbt")
+    x = m.continuous("x")
+    m.minimize(x)
+    flat_lb = np.array([-np.inf], dtype=np.float64)
+    flat_ub = np.array([np.inf], dtype=np.float64)
+    part_vars = [0]
+    part_lbs = [-1.0]
+    part_ubs = [1.0]
+
+    result = amp_mod._run_cutoff_obbt(
+        model=m,
+        terms=SimpleNamespace(partition_candidates=[0]),
+        disc_state=SimpleNamespace(partitions={}),
+        oa_cuts=[],
+        convhull_mode="sos2",
+        UB=0.0,
+        flat_lb=flat_lb,
+        flat_ub=flat_ub,
+        part_vars=part_vars,
+        part_lbs=part_lbs,
+        part_ubs=part_ubs,
+        n_orig=1,
+        obbt_time_limit=30.0,
+        partition_scaling_factor=0.1,
+        disc_abs_width_tol=1e-9,
+        n_init_partitions=2,
+        deadline=amp_mod.time.perf_counter() - 1.0,
+        iteration=1,
+        from_min_space=float,
+    )
+
+    result_lb, result_ub, result_part_vars, result_part_lbs, result_part_ubs = result
+    assert result_lb is flat_lb
+    assert result_ub is flat_ub
+    assert result_part_vars is part_vars
+    assert result_part_lbs is part_lbs
+    assert result_part_ubs is part_ubs
+    assert build_calls == []
+
+
+def test_alphabb_cutoff_obbt_prerequisite_respects_expired_deadline(monkeypatch):
+    """The default alpha-BB prerequisite pass must honor the global AMP deadline."""
+    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    from discopt.solvers import amp as amp_mod
+
+    cutoff_obbt_calls = []
+
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_milp_with_oa_recovery",
+        lambda **kwargs: (
+            MilpRelaxationResult(
+                status="optimal",
+                objective=-1.0,
+                x=np.array([0.0, 0.0], dtype=np.float64),
+            ),
+            {},
+            [],
+            1,
+        ),
+    )
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_best_nlp_candidate",
+        lambda *args, **kwargs: (np.array([0.0, 0.0], dtype=np.float64), 0.0),
+    )
+
+    def fake_cutoff_obbt(**kwargs):
+        cutoff_obbt_calls.append(kwargs["iteration"])
+        return (
+            kwargs["flat_lb"],
+            kwargs["flat_ub"],
+            kwargs["part_vars"],
+            kwargs["part_lbs"],
+            kwargs["part_ubs"],
+        )
+
+    monkeypatch.setattr(amp_mod, "_run_cutoff_obbt", fake_cutoff_obbt)
+
+    clock_values = iter([0.0, 0.1, 2.0])
+
+    def fake_perf_counter():
+        return next(clock_values, 2.0)
+
+    monkeypatch.setattr(amp_mod.time, "perf_counter", fake_perf_counter)
+
+    m = Model("alphabb_cutoff_obbt_expired_deadline")
+    x = m.continuous("x")
+    y = m.continuous("y")
+    m.minimize(x + y**2)
+    m.subject_to(x**2 <= y**2 + 1.0)
+
+    result = m.solve(
+        solver="amp",
+        apply_partitioning=False,
+        skip_convex_check=True,
+        presolve_bt=False,
+        max_iter=1,
+        time_limit=1.0,
+    )
+
+    assert result.status in ("optimal", "feasible")
+    assert cutoff_obbt_calls == []
+
+
+def test_objective_cutoff_bounds_enable_alphabb_for_issue_63_instances():
+    """The exact nlp_008 objective cutoff should create finite alpha-BB bounds."""
+    from discopt._jax.convexity import classify_oa_cut_convexity
+    from discopt._jax.cutting_planes import generate_alphabb_quadratic_oa_cuts_from_evaluator
+    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt.solvers import amp as amp_mod
+    from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
+
+    m = Model("issue_63_exact_cutoff_bounds")
+    x = m.continuous("x")
+    y = m.continuous("y")
+    z = m.continuous("z", lb=0.0, ub=1.0)
+    m.minimize(x + y**2 + z**3)
+    m.subject_to(y >= dm.exp(-x - 2) + dm.exp(-z - 2) - 2)
+    m.subject_to(x**2 <= y**2 + z**2)
+    m.subject_to(y >= x / 2 + z)
+
+    flat_lb, flat_ub = flat_variable_bounds(m)
+    flat_lb, flat_ub, infeasible, _changed = tighten_root_bounds_with_fbbt(
+        m,
+        flat_lb,
+        flat_ub,
+        [],
+        [],
+    )
+    assert infeasible is False
+    assert not amp_mod.is_effectively_finite(float(flat_ub[0]))
+    assert not amp_mod.is_effectively_finite(float(flat_ub[1]))
+
+    cutoff_lb, cutoff_ub = amp_mod._tighten_bounds_with_objective_cutoff(
+        m,
+        flat_lb,
+        flat_ub,
+        cutoff=-0.3285279886580375,
+    )
+
+    assert amp_mod.is_effectively_finite(float(cutoff_ub[0]))
+    assert amp_mod.is_effectively_finite(float(cutoff_ub[1]))
+
+    amp_mod._apply_flat_bounds_to_model(m, cutoff_lb, cutoff_ub)
+    cutoff_lb, cutoff_ub, infeasible, _changed = tighten_root_bounds_with_fbbt(
+        m,
+        cutoff_lb,
+        cutoff_ub,
+        [],
+        [],
+    )
+    assert infeasible is False
+    assert cutoff_lb[0] > -10.0
+
+    oa_convexity = classify_oa_cut_convexity(m, use_certificate=True)
+    evaluator = NLPEvaluator(m)
+    cuts = generate_alphabb_quadratic_oa_cuts_from_evaluator(
+        evaluator,
+        np.array([-0.57718987, 0.27099034, 0.55958528], dtype=np.float64),
+        cutoff_lb,
+        cutoff_ub,
+        constraint_senses=[c.sense for c in m._constraints],
+        convex_mask=oa_convexity.constraint_mask,
+    )
+
+    assert len(cuts) == 1
+
+
+def test_amp_restores_model_bounds_after_objective_cutoff_tightening(monkeypatch):
+    """Internal cutoff/FBBT bounds must not leak back to the caller's model."""
+    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt.solvers import amp as amp_mod
+
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_milp_with_oa_recovery",
+        lambda **kwargs: (
+            MilpRelaxationResult(
+                status="optimal",
+                objective=-1.0,
+                x=np.array([-0.6, 0.3, 0.5], dtype=np.float64),
+            ),
+            {},
+            [],
+            1,
+        ),
+    )
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_best_nlp_candidate",
+        lambda *args, **kwargs: (np.array([-0.6, 0.3, 0.5], dtype=np.float64), -0.33),
+    )
+
+    m = Model("issue_63_bound_restore")
+    x = m.continuous("x")
+    y = m.continuous("y")
+    z = m.continuous("z", lb=0.0, ub=1.0)
+    m.minimize(x + y**2 + z**3)
+    m.subject_to(y >= dm.exp(-x - 2) + dm.exp(-z - 2) - 2)
+    m.subject_to(x**2 <= y**2 + z**2)
+    m.subject_to(y >= x / 2 + z)
+
+    original_lb, original_ub = flat_variable_bounds(m)
+
+    result = m.solve(
+        solver="amp",
+        apply_partitioning=False,
+        skip_convex_check=True,
+        presolve_bt=False,
+        alphabb_cutoff_obbt=False,
+        max_iter=1,
+        time_limit=5,
+    )
+
+    restored_lb, restored_ub = flat_variable_bounds(m)
+    assert result.status in ("optimal", "feasible")
+    np.testing.assert_allclose(restored_lb, original_lb)
+    np.testing.assert_allclose(restored_ub, original_ub)
+
+
+def test_amp_restores_model_bounds_when_callback_raises_after_cutoff(monkeypatch):
+    """Propagated callback errors must still restore temporary AMP bounds."""
+    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt.solvers import amp as amp_mod
+
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_milp_with_oa_recovery",
+        lambda **kwargs: (
+            MilpRelaxationResult(
+                status="optimal",
+                objective=-1.0,
+                x=np.array([-0.6, 0.3, 0.5], dtype=np.float64),
+            ),
+            {},
+            [],
+            1,
+        ),
+    )
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_best_nlp_candidate",
+        lambda *args, **kwargs: (np.array([-0.6, 0.3, 0.5], dtype=np.float64), -0.33),
+    )
+
+    m = Model("issue_63_bound_restore_callback_error")
+    x = m.continuous("x")
+    y = m.continuous("y")
+    z = m.continuous("z", lb=0.0, ub=1.0)
+    m.minimize(x + y**2 + z**3)
+    m.subject_to(y >= dm.exp(-x - 2) + dm.exp(-z - 2) - 2)
+    m.subject_to(x**2 <= y**2 + z**2)
+    m.subject_to(y >= x / 2 + z)
+
+    original_lb, original_ub = flat_variable_bounds(m)
+
+    def fail_callback(_info):
+        raise RuntimeError("callback failed")
+
+    with pytest.raises(RuntimeError, match="callback failed"):
+        m.solve(
+            solver="amp",
+            apply_partitioning=False,
+            skip_convex_check=True,
+            presolve_bt=False,
+            alphabb_cutoff_obbt=False,
+            max_iter=1,
+            time_limit=5,
+            iteration_callback=fail_callback,
+        )
+
+    restored_lb, restored_ub = flat_variable_bounds(m)
+    np.testing.assert_allclose(restored_lb, original_lb)
+    np.testing.assert_allclose(restored_ub, original_ub)
+
+
+def test_amp_appends_alphabb_cut_for_issue_63_quadratic(monkeypatch):
+    """AMP should append an alpha-BB cut for the nonconvex quadratic row."""
+    import discopt._jax.cutting_planes as cutting_planes
+    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    from discopt.solvers import amp as amp_mod
+
+    captured_cuts = []
+
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_milp_with_oa_recovery",
+        lambda **kwargs: (
+            MilpRelaxationResult(
+                status="optimal",
+                objective=0.0,
+                x=np.array([0.25, 0.5, 0.25], dtype=np.float64),
+            ),
+            {},
+            [],
+            1,
+        ),
+    )
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_best_nlp_candidate",
+        lambda *args, **kwargs: (np.array([0.25, 0.5, 0.25], dtype=np.float64), 1.0),
+    )
+    monkeypatch.setattr(cutting_planes, "generate_oa_cuts_from_evaluator", lambda *a, **k: [])
+
+    def spy_prune(oa_cuts, max_cuts=128):
+        captured_cuts[:] = list(oa_cuts)
+        return None
+
+    monkeypatch.setattr(amp_mod, "_prune_oa_cuts", spy_prune)
+
+    m = Model("issue_63_amp_cut")
+    x = m.continuous("x", lb=-2.0, ub=2.0)
+    y = m.continuous("y", lb=-2.0, ub=2.0)
+    z = m.continuous("z", lb=0.0, ub=1.0)
+    m.minimize(x + y**2 + z**3)
+    m.subject_to(y >= dm.exp(-x - 2) + dm.exp(-z - 2) - 2)
+    m.subject_to(x**2 <= y**2 + z**2)
+    m.subject_to(y >= x / 2 + z)
+
+    result = m.solve(
+        solver="amp",
+        apply_partitioning=False,
+        skip_convex_check=True,
+        presolve_bt=False,
+        max_iter=1,
+        time_limit=5,
+    )
+
+    assert result.status in ("optimal", "feasible")
+    assert len(captured_cuts) == 1
+    coeffs, rhs = captured_cuts[0]
+    assert np.linalg.norm(coeffs) > 1e-12
+    assert np.isfinite(rhs)
+
+
+def test_amp_keeps_direct_oa_when_alphabb_generation_fails(monkeypatch):
+    """Alpha-BB failures should not suppress already generated convex OA cuts."""
+    import discopt._jax.cutting_planes as cutting_planes
+    from discopt._jax.cutting_planes import LinearCut
+    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    from discopt.solvers import amp as amp_mod
+
+    captured_cuts = []
+
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_milp_with_oa_recovery",
+        lambda **kwargs: (
+            MilpRelaxationResult(
+                status="optimal",
+                objective=0.0,
+                x=np.array([1.0], dtype=np.float64),
+            ),
+            {},
+            [],
+            1,
+        ),
+    )
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_best_nlp_candidate",
+        lambda *args, **kwargs: (np.array([1.0], dtype=np.float64), 1.0),
+    )
+    monkeypatch.setattr(
+        cutting_planes,
+        "generate_oa_cuts_from_evaluator",
+        lambda *args, **kwargs: [
+            LinearCut(coeffs=np.array([1.0], dtype=np.float64), rhs=2.0, sense="<=")
+        ],
+    )
+
+    def fail_alphabb(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("alpha-BB failure")
+
+    def spy_prune(oa_cuts, max_cuts=128):
+        del max_cuts
+        captured_cuts[:] = list(oa_cuts)
+        return None
+
+    monkeypatch.setattr(
+        cutting_planes,
+        "generate_alphabb_quadratic_oa_cuts_from_evaluator",
+        fail_alphabb,
+    )
+    monkeypatch.setattr(amp_mod, "_prune_oa_cuts", spy_prune)
+
+    m = Model("direct_oa_survives_alphabb_failure")
+    x = m.continuous("x", lb=0.0, ub=2.0)
+    m.subject_to(x <= 2.0)
+    m.minimize(x)
+
+    result = m.solve(
+        solver="amp",
+        apply_partitioning=False,
+        skip_convex_check=True,
+        presolve_bt=False,
+        max_iter=1,
+        time_limit=5,
+    )
+
+    assert result.status in ("optimal", "feasible")
+    assert len(captured_cuts) == 1
+    coeffs, rhs = captured_cuts[0]
+    np.testing.assert_allclose(coeffs, np.array([1.0], dtype=np.float64))
+    assert rhs == pytest.approx(2.0)
+
+
 def test_amp_root_presolve_preserves_heterogeneous_array_bounds():
     """Root FBBT must not narrow every array element to the first element's bound."""
     m = Model("amp_heterogeneous_array_bounds")
