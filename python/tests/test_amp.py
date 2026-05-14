@@ -721,6 +721,41 @@ def test_affine_trig_constraints_are_retained_in_relaxation(caplog):
     assert result.objective is not None
 
 
+@pytest.mark.parametrize(
+    ("objective", "old_range_bound"),
+    [
+        ("neg_sum", -4.0),
+        ("sum", -4.0),
+    ],
+)
+def test_mixed_curvature_affine_trig_uses_piecewise_relaxation(objective, old_range_bound):
+    """106-style mixed-curvature sin/cos constraints should not be range-only."""
+    m = Model(f"trig_affine_piecewise_{objective}")
+    x = m.continuous("x", lb=-3.0, ub=3.0)
+    y = m.continuous("y", lb=-1.0, ub=1.0)
+    if objective == "neg_sum":
+        m.minimize(-x - y)
+    else:
+        m.minimize(x + y)
+    m.subject_to(dm.sin(-x - 1.0) + x / 2 + 0.5 <= y)
+    m.subject_to(dm.cos(x - 0.5) + x / 4 - 0.5 >= y)
+
+    milp_model, varmap = _build_relaxation_for_test(m)
+    result = milp_model.solve()
+
+    piecewise = varmap["univariate_piecewise_relaxations"]
+    assert {relax.relax.func_name for relax in piecewise} == {"sin", "cos"}
+    assert all(len(relax.intervals) > 2 for relax in piecewise)
+    assert all(
+        interval.curvature in {"convex", "concave"}
+        for relax in piecewise
+        for interval in relax.intervals
+    )
+    assert result.status == "optimal"
+    assert result.objective is not None
+    assert result.objective > old_range_bound + 1e-6
+
+
 def test_trig_square_constraints_apply_range_bounds():
     """sin(x)^2 and cos(y)^2 constraints should constrain the MILP relaxation."""
     sin_model = Model("sin_square_relax")
@@ -816,9 +851,10 @@ def test_x_exp_minlptests_objective_uses_separable_lower_bound(integer_y, caplog
     m.minimize(x * dm.exp(x) + dm.cos(y) + z**3 - z**2)
 
     with caplog.at_level("WARNING", logger="discopt._jax.milp_relaxation"):
-        milp_model, _ = _build_relaxation_for_test(m)
+        milp_model, varmap = _build_relaxation_for_test(m)
         result = milp_model.solve()
 
+    assert varmap["univariate_piecewise_relaxations"] == []
     assert milp_model._objective_bound_valid is True
     assert result.status == "optimal"
     cos_lb = min(np.cos(np.arange(1, 11))) if integer_y else -1.0

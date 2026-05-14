@@ -162,6 +162,24 @@ class UnivariateRelaxation:
 
 
 @dataclass
+class PiecewiseUnivariateInterval:
+    """Binary-selected interval for a mixed-curvature univariate relaxation."""
+
+    delta_col: int
+    lb: float
+    ub: float
+    curvature: Optional[str]
+
+
+@dataclass
+class PiecewiseUnivariateRelaxation:
+    """Partition-aware relaxation for a lifted univariate operator."""
+
+    relax: UnivariateRelaxation
+    intervals: list[PiecewiseUnivariateInterval]
+
+
+@dataclass
 class UnivariateSquareRelaxation:
     """Lifted square of a supported univariate auxiliary."""
 
@@ -775,6 +793,84 @@ def _univariate_curvature(func_name: str, val_lb: float, val_ub: float) -> Optio
         if val_ub <= tol:
             return "concave"
     return None
+
+
+def _trig_partition_breakpoints(
+    relax: UnivariateRelaxation,
+    disc_state: DiscretizationState,
+    n_orig: int,
+) -> list[float]:
+    """Return safe breakpoints for a mixed-curvature trig argument interval."""
+    lb = float(relax.arg_lb)
+    ub = float(relax.arg_ub)
+    if relax.func_name not in {"sin", "cos"} or not (np.isfinite(lb) and np.isfinite(ub)):
+        return [lb, ub]
+
+    points = [lb, ub]
+    if relax.func_name == "sin":
+        curvature_start, critical_start = 0.0, math.pi / 2.0
+    else:
+        curvature_start, critical_start = math.pi / 2.0, 0.0
+
+    points.extend(_critical_points_in_interval(curvature_start, math.pi, lb, ub))
+    points.extend(_critical_points_in_interval(critical_start, math.pi, lb, ub))
+
+    nz = np.flatnonzero(np.abs(relax.arg_coeff) > 1e-12)
+    if nz.size == 1:
+        var_idx = int(nz[0])
+        if var_idx < n_orig and var_idx in disc_state.partitions:
+            coeff = float(relax.arg_coeff[var_idx])
+            transformed = coeff * np.asarray(disc_state.partitions[var_idx]) + relax.arg_const
+            points.extend(float(p) for p in transformed)
+
+    # A modest fixed split keeps the dedicated trig relaxation useful even when
+    # no AMP variable partition exists for the affine argument.
+    max_width = math.pi / 6.0
+    base = _sorted_unique_points([p for p in points if lb - 1e-12 <= p <= ub + 1e-12])
+    refined: list[float] = []
+    for a, b in zip(base[:-1], base[1:]):
+        if not refined:
+            refined.append(float(a))
+        width = float(b - a)
+        if width > max_width:
+            n_chunks = int(math.ceil(width / max_width))
+            for k in range(1, n_chunks):
+                refined.append(float(a + width * k / n_chunks))
+        refined.append(float(b))
+    return _sorted_unique_points(refined or base)
+
+
+def _trig_piecewise_interval_specs(
+    relax: UnivariateRelaxation,
+    disc_state: DiscretizationState,
+    n_orig: int,
+) -> list[tuple[float, float, Optional[str]]]:
+    """Build certified curvature subintervals for mixed-curvature sin/cos."""
+    if relax.func_name not in {"sin", "cos"}:
+        return []
+    if not (np.isfinite(relax.arg_lb) and np.isfinite(relax.arg_ub)):
+        return []
+    if relax.arg_ub - relax.arg_lb >= 2.0 * math.pi:
+        return []
+    bounds = _trig_range(relax.func_name, relax.arg_lb, relax.arg_ub)
+    if bounds is None:
+        return []
+    if _univariate_curvature(relax.func_name, bounds[0], bounds[1]) is not None:
+        return []
+
+    points = _trig_partition_breakpoints(relax, disc_state, n_orig)
+    intervals: list[tuple[float, float, Optional[str]]] = []
+    for a, b in zip(points[:-1], points[1:]):
+        if b <= a + 1e-12:
+            continue
+        local_bounds = _trig_range(relax.func_name, a, b)
+        curvature = None
+        if local_bounds is not None:
+            curvature = _univariate_curvature(relax.func_name, local_bounds[0], local_bounds[1])
+        intervals.append((float(a), float(b), curvature))
+    if sum(1 for _a, _b, curvature in intervals if curvature is not None) < 2:
+        return []
+    return intervals
 
 
 def _univariate_signature(
@@ -1846,6 +1942,32 @@ def build_milp_relaxation(
         integrality_flags.append(0)
         col_idx += 1
 
+    piecewise_univariate_relaxations: list[PiecewiseUnivariateRelaxation] = []
+    for relax in univariate_relaxations:
+        interval_specs = _trig_piecewise_interval_specs(relax, disc_state, n_orig)
+        if not interval_specs:
+            continue
+
+        trig_intervals: list[PiecewiseUnivariateInterval] = []
+        for a_k, b_k, curvature in interval_specs:
+            delta_col = col_idx
+            all_bounds.append((0.0, 1.0))
+            integrality_flags.append(1)
+            col_idx += 1
+            trig_intervals.append(
+                PiecewiseUnivariateInterval(
+                    delta_col=delta_col,
+                    lb=float(a_k),
+                    ub=float(b_k),
+                    curvature=curvature,
+                )
+            )
+
+        if trig_intervals:
+            piecewise_univariate_relaxations.append(
+                PiecewiseUnivariateRelaxation(relax=relax, intervals=trig_intervals)
+            )
+
     # ── Fractional-power aux columns: a = x^p with non-integer p ────────────
     # Only handle the cases where the relaxation is well-defined and
     # numerically stable: x ≥ 0 strictly bounded, and either 0 < p < 1
@@ -2560,6 +2682,55 @@ def build_milp_relaxation(
         _add_row(row, rhs)
         _add_row(-row, -rhs)
 
+    def _add_gated_row(row: np.ndarray, rhs: float, delta_col: int, big_m: float) -> None:
+        """Add ``row @ z <= rhs`` active when ``delta_col`` is one."""
+        gated = row.copy()
+        gated[delta_col] += max(0.0, float(big_m))
+        _add_row(gated, rhs + max(0.0, float(big_m)))
+
+    def _linear_line_bounds(
+        slope: float,
+        intercept: float,
+        lb: float,
+        ub: float,
+    ) -> tuple[float, float]:
+        values = [slope * lb + intercept, slope * ub + intercept]
+        return min(values), max(values)
+
+    def _add_gated_lower_line(
+        relax: UnivariateRelaxation,
+        interval: PiecewiseUnivariateInterval,
+        slope: float,
+        intercept: float,
+    ) -> None:
+        """Add t >= slope * arg + intercept on one active interval."""
+        t_lb, _t_ub = [float(v) for v in all_bounds[relax.aux_col]]
+        _line_lb, line_ub = _linear_line_bounds(slope, intercept, relax.arg_lb, relax.arg_ub)
+        big_m = max(0.0, line_ub - t_lb)
+
+        row = np.zeros(n_total)
+        row[:n_orig] = slope * relax.arg_coeff
+        row[relax.aux_col] = -1.0
+        rhs = -intercept - slope * relax.arg_const
+        _add_gated_row(row, rhs, interval.delta_col, big_m)
+
+    def _add_gated_upper_line(
+        relax: UnivariateRelaxation,
+        interval: PiecewiseUnivariateInterval,
+        slope: float,
+        intercept: float,
+    ) -> None:
+        """Add t <= slope * arg + intercept on one active interval."""
+        _t_lb, t_ub = [float(v) for v in all_bounds[relax.aux_col]]
+        line_lb, _line_ub = _linear_line_bounds(slope, intercept, relax.arg_lb, relax.arg_ub)
+        big_m = max(0.0, t_ub - line_lb)
+
+        row = np.zeros(n_total)
+        row[:n_orig] = -slope * relax.arg_coeff
+        row[relax.aux_col] = 1.0
+        rhs = intercept + slope * relax.arg_const
+        _add_gated_row(row, rhs, interval.delta_col, big_m)
+
     for relax in univariate_relaxations:
         lb_u = relax.arg_lb
         ub_u = relax.arg_ub
@@ -2616,6 +2787,54 @@ def build_milp_relaxation(
                 slope = _univariate_grad(relax.func_name, pt)
                 intercept = _univariate_value(relax.func_name, pt) - slope * pt
                 _add_upper_line(relax, slope, intercept)
+
+    for pw_relax in piecewise_univariate_relaxations:
+        relax = pw_relax.relax
+
+        row_sum = np.zeros(n_total)
+        for interval in pw_relax.intervals:
+            row_sum[interval.delta_col] = -1.0
+        _add_row(row_sum, -1.0)
+        _add_row(-row_sum, 1.0)
+
+        for interval in pw_relax.intervals:
+            arg_lb = float(relax.arg_lb)
+            arg_ub = float(relax.arg_ub)
+
+            # arg >= interval.lb when selected.
+            lower_m = max(0.0, interval.lb - arg_lb)
+            row = np.zeros(n_total)
+            row[:n_orig] = -relax.arg_coeff
+            rhs = relax.arg_const - interval.lb
+            _add_gated_row(row, rhs, interval.delta_col, lower_m)
+
+            # arg <= interval.ub when selected.
+            upper_m = max(0.0, arg_ub - interval.ub)
+            row = np.zeros(n_total)
+            row[:n_orig] = relax.arg_coeff
+            rhs = interval.ub - relax.arg_const
+            _add_gated_row(row, rhs, interval.delta_col, upper_m)
+
+            if interval.curvature not in {"convex", "concave"}:
+                continue
+
+            f_lb = _univariate_value(relax.func_name, interval.lb)
+            f_ub = _univariate_value(relax.func_name, interval.ub)
+            secant_slope = (f_ub - f_lb) / (interval.ub - interval.lb)
+            secant_intercept = f_lb - secant_slope * interval.lb
+
+            if interval.curvature == "convex":
+                for pt in _tangent_points(relax.func_name, interval.lb, interval.ub):
+                    slope = _univariate_grad(relax.func_name, pt)
+                    intercept = _univariate_value(relax.func_name, pt) - slope * pt
+                    _add_gated_lower_line(relax, interval, slope, intercept)
+                _add_gated_upper_line(relax, interval, secant_slope, secant_intercept)
+            else:
+                _add_gated_lower_line(relax, interval, secant_slope, secant_intercept)
+                for pt in _tangent_points(relax.func_name, interval.lb, interval.ub):
+                    slope = _univariate_grad(relax.func_name, pt)
+                    intercept = _univariate_value(relax.func_name, pt) - slope * pt
+                    _add_gated_upper_line(relax, interval, slope, intercept)
 
     for square_relax in univariate_square_relaxations:
         lb_i = square_relax.base_lb
@@ -2865,6 +3084,7 @@ def build_milp_relaxation(
             k: v for k, v in univariate_var_map.items() if not isinstance(k, int)
         },
         "univariate_relaxations": univariate_relaxations,
+        "univariate_piecewise_relaxations": piecewise_univariate_relaxations,
         "univariate_square": univariate_square_var_map,
         "univariate_square_relaxations": univariate_square_relaxations,
         "fractional_power": fractional_power_var_map,
