@@ -60,6 +60,10 @@ _warned_messages: set[str] = set()
 _EFFECTIVE_INF = 1e19
 _MAX_INTEGER_COS_ENUM = 10000
 _MAX_FINITE_EXP_ARG = float(np.log(np.finfo(np.float64).max))
+_MAX_TRIG_PIECEWISE_SPAN = 2.0 * math.pi
+_MAX_TRIG_PIECEWISE_INTERVALS = 32
+_MAX_TRIG_IMPORTED_BREAKPOINTS = _MAX_TRIG_PIECEWISE_INTERVALS + 1
+_MAX_TRIG_PIECEWISE_WIDTH = math.pi / 6.0
 
 
 def _warn_once(msg: str, *args) -> None:
@@ -820,20 +824,21 @@ def _trig_partition_breakpoints(
         var_idx = int(nz[0])
         if var_idx < n_orig and var_idx in disc_state.partitions:
             coeff = float(relax.arg_coeff[var_idx])
-            transformed = coeff * np.asarray(disc_state.partitions[var_idx]) + relax.arg_const
-            points.extend(float(p) for p in transformed)
+            partition = np.asarray(disc_state.partitions[var_idx], dtype=np.float64)
+            if partition.size <= _MAX_TRIG_IMPORTED_BREAKPOINTS:
+                transformed = coeff * partition + relax.arg_const
+                points.extend(float(p) for p in transformed)
 
     # A modest fixed split keeps the dedicated trig relaxation useful even when
     # no AMP variable partition exists for the affine argument.
-    max_width = math.pi / 6.0
     base = _sorted_unique_points([p for p in points if lb - 1e-12 <= p <= ub + 1e-12])
     refined: list[float] = []
     for a, b in zip(base[:-1], base[1:]):
         if not refined:
             refined.append(float(a))
         width = float(b - a)
-        if width > max_width:
-            n_chunks = int(math.ceil(width / max_width))
+        if width > _MAX_TRIG_PIECEWISE_WIDTH:
+            n_chunks = int(math.ceil(width / _MAX_TRIG_PIECEWISE_WIDTH))
             for k in range(1, n_chunks):
                 refined.append(float(a + width * k / n_chunks))
         refined.append(float(b))
@@ -850,7 +855,7 @@ def _trig_piecewise_interval_specs(
         return []
     if not (np.isfinite(relax.arg_lb) and np.isfinite(relax.arg_ub)):
         return []
-    if relax.arg_ub - relax.arg_lb >= 2.0 * math.pi:
+    if relax.arg_ub - relax.arg_lb >= _MAX_TRIG_PIECEWISE_SPAN:
         return []
     bounds = _trig_range(relax.func_name, relax.arg_lb, relax.arg_ub)
     if bounds is None:
@@ -859,6 +864,8 @@ def _trig_piecewise_interval_specs(
         return []
 
     points = _trig_partition_breakpoints(relax, disc_state, n_orig)
+    if len(points) - 1 > _MAX_TRIG_PIECEWISE_INTERVALS:
+        return []
     intervals: list[tuple[float, float, Optional[str]]] = []
     for a, b in zip(points[:-1], points[1:]):
         if b <= a + 1e-12:

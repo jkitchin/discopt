@@ -756,6 +756,31 @@ def test_mixed_curvature_affine_trig_uses_piecewise_relaxation(objective, old_ra
     assert result.objective > old_range_bound + 1e-6
 
 
+def test_trig_piecewise_relaxation_caps_dense_partitions():
+    """Dense AMP partitions should not be copied into oversized trig MILPs."""
+    from discopt._jax.milp_relaxation import _MAX_TRIG_PIECEWISE_INTERVALS
+
+    m = Model("trig_dense_partition_guard")
+    x = m.continuous("x", lb=-1.0, ub=1.0)
+    y = m.continuous("y", lb=-2.0, ub=2.0)
+    m.minimize(y)
+    m.subject_to(dm.sin(x) <= y)
+
+    _milp_model, varmap = _build_relaxation_for_test(
+        m,
+        part_vars=[0],
+        lbs=[-1.0],
+        ubs=[1.0],
+        n_init=96,
+    )
+
+    piecewise = varmap["univariate_piecewise_relaxations"]
+    assert len(piecewise) == 1
+    assert piecewise[0].relax.func_name == "sin"
+    assert len(piecewise[0].intervals) <= _MAX_TRIG_PIECEWISE_INTERVALS
+    assert len(piecewise[0].intervals) < 96
+
+
 def test_trig_square_constraints_apply_range_bounds():
     """sin(x)^2 and cos(y)^2 constraints should constrain the MILP relaxation."""
     sin_model = Model("sin_square_relax")
