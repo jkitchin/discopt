@@ -78,6 +78,7 @@ def test_amp_integration_suite_is_opt_in():
     assert "pytest.mark.integration" in text
     assert "pytest.mark.amp_benchmark" in text
     assert "pytest.mark.requires_cyipopt" in text
+    assert "pytest.mark.memory_heavy" in text
 
 
 def _make_dry_run(target: str) -> str:
@@ -106,8 +107,9 @@ def test_quick_test_tier_excludes_amp_integration_markers():
 
     assert (
         '-m "(unit or smoke) and not slow and not integration '
-        'and not amp_benchmark and not requires_cyipopt"'
+        'and not amp_benchmark and not requires_cyipopt and not memory_heavy"'
     ) in output
+    assert "scripts/run_memory_capped_pytest.sh python -m pytest" in output
 
 
 def test_pr_fast_tier_excludes_heavy_manual_markers():
@@ -116,9 +118,10 @@ def test_pr_fast_tier_excludes_heavy_manual_markers():
 
     assert (
         '-m "not slow and not correctness and not integration '
-        'and not amp_benchmark and not requires_cyipopt"'
+        'and not amp_benchmark and not requires_cyipopt and not memory_heavy"'
     ) in output
     assert "--ignore=python/tests/test_correctness.py" in output
+    assert "scripts/run_memory_capped_pytest.sh python -m pytest" in output
 
 
 def test_amp_fast_tier_excludes_optional_solver_markers():
@@ -126,8 +129,46 @@ def test_amp_fast_tier_excludes_optional_solver_markers():
     output = _make_dry_run("test-amp-fast")
 
     assert (
-        '-m "not slow and not integration and not amp_benchmark and not requires_cyipopt"'
+        '-m "not slow and not integration and not amp_benchmark '
+        'and not requires_cyipopt and not memory_heavy"'
     ) in output
+    assert "scripts/run_memory_capped_pytest.sh python -m pytest" in output
+
+
+def test_amp_integration_tier_selects_memory_heavy_marker():
+    """The opt-in AMP integration target should include memory-heavy tests under the cap."""
+    output = _make_dry_run("test-amp-integration")
+
+    assert '-m "slow or integration or amp_benchmark or requires_cyipopt or memory_heavy"' in output
+    assert "scripts/run_memory_capped_pytest.sh python -m pytest" in output
+
+
+def test_memory_capped_pytest_wrapper_dry_run():
+    """The pytest wrapper should expose the command and resource caps for diagnosis."""
+    repo = Path(__file__).resolve().parents[2]
+    script = repo / "scripts" / "run_memory_capped_pytest.sh"
+    env = {
+        **os.environ,
+        "RUN_MEMORY_CAPPED_PYTEST_DRY_RUN": "1",
+        "PYTEST_MEMORY_LIMIT_MB": "64",
+        "PYTEST_CPU_LIMIT_SECONDS": "5",
+    }
+
+    result = subprocess.run(
+        [str(script), "python", "-m", "pytest", "python/tests/test_amp.py", "-q"],
+        cwd=repo,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert "python" in result.stdout
+    assert "pytest" in result.stdout
+    assert "python/tests/test_amp.py" in result.stdout
+    if "prlimit" in result.stdout:
+        assert "--as=67108864" in result.stdout
+        assert "--cpu=5" in result.stdout
 
 
 def test_amp_helper_defaults_cover_semifinite_domains():
@@ -241,6 +282,7 @@ def test_shifted_square_constraint_linearizes_and_proves_infeasible(caplog):
     assert "omitting constraint" not in caplog.text
 
 
+@pytest.mark.memory_heavy
 def test_amp_reports_shifted_square_minlptests_case_infeasible():
     """Regression for MINLPTests nlp_mi_007_020."""
     m = _make_shifted_square_infeasible()
@@ -781,6 +823,57 @@ def test_trig_piecewise_relaxation_caps_dense_partitions():
     assert len(piecewise[0].intervals) < 96
 
 
+def test_dense_bilinear_partitions_fall_back_to_global_relaxation(caplog):
+    """Oversized bilinear partition refinements should keep the global McCormick path."""
+    from discopt._jax.milp_relaxation import _MAX_RELAXATION_PARTITION_INTERVALS
+
+    m = Model("dense_bilinear_guard")
+    x = m.continuous("x", lb=0.0, ub=1.0)
+    y = m.continuous("y", lb=0.0, ub=1.0)
+    m.minimize(x * y)
+
+    with caplog.at_level(logging.DEBUG, logger="discopt._jax.milp_relaxation"):
+        milp_model, varmap = _build_relaxation_for_test(
+            m,
+            part_vars=[0],
+            lbs=[0.0],
+            ubs=[1.0],
+            n_init=_MAX_RELAXATION_PARTITION_INTERVALS + 1,
+        )
+
+    assert (0, 1) in varmap["bilinear"]
+    assert varmap["bilinear_pw"] == {}
+    assert varmap["bilinear_lambda"] == {}
+    assert any("bilinear piecewise" in note for note in varmap["generation_guardrails"])
+    assert "skipped bilinear piecewise refinement" in caplog.text
+    assert milp_model._A_ub.shape[0] < 20
+
+
+def test_dense_monomial_partitions_use_coarse_global_relaxation(caplog):
+    """Oversized monomial partitions should avoid allocating one binary per interval."""
+    from discopt._jax.milp_relaxation import _MAX_RELAXATION_PARTITION_INTERVALS
+
+    m = Model("dense_monomial_guard")
+    x = m.continuous("x", lb=-1.0, ub=1.0)
+    m.minimize(x**2)
+
+    with caplog.at_level(logging.DEBUG, logger="discopt._jax.milp_relaxation"):
+        milp_model, varmap = _build_relaxation_for_test(
+            m,
+            part_vars=[0],
+            lbs=[-1.0],
+            ubs=[1.0],
+            n_init=_MAX_RELAXATION_PARTITION_INTERVALS + 1,
+        )
+
+    assert (0, 2) in varmap["monomial"]
+    assert varmap["monomial_pw"] == {}
+    assert any("monomial piecewise" in note for note in varmap["generation_guardrails"])
+    assert any("monomial tangent" in note for note in varmap["generation_guardrails"])
+    assert "skipped monomial piecewise refinement" in caplog.text
+    assert milp_model._A_ub.shape[0] < 20
+
+
 def test_trig_piecewise_relaxation_skips_huge_argument_span():
     """Very wide trig spans should use range bounds, not many piecewise rows."""
     from discopt._jax.milp_relaxation import _MAX_TRIG_PIECEWISE_SPAN
@@ -1144,6 +1237,7 @@ def test_amp_adaptive_keeps_monomial_fallback_partitions(monkeypatch):
     assert result.gap_certified is False
 
 
+@pytest.mark.memory_heavy
 def test_amp_adaptive_refines_weymouth_like_monomials(monkeypatch):
     """Adaptive selection should keep square-balance variables when products also exist."""
     import discopt._jax.discretization as disc_mod
@@ -1565,6 +1659,7 @@ def test_amp_rejects_nonfinite_direct_initial_point(bad_value):
         )
 
 
+@pytest.mark.memory_heavy
 def test_amp_does_not_accept_start_with_nonfinite_objective(monkeypatch):
     """A finite start with NaN objective is not a valid AMP incumbent."""
     import discopt._jax.nlp_evaluator as nlp_eval
@@ -2192,6 +2287,7 @@ def test_refresh_partitions_for_bounds_prunes_stale_partition_entries():
         ({"alphabb_cutoff_obbt": False, "obbt_with_cutoff": True}, 1),
     ],
 )
+@pytest.mark.memory_heavy
 def test_alphabb_cutoff_obbt_option_controls_prerequisite_pass(
     monkeypatch,
     solver_kwargs,
@@ -2312,6 +2408,7 @@ def test_run_cutoff_obbt_returns_without_time_after_deadline(monkeypatch):
     assert build_calls == []
 
 
+@pytest.mark.memory_heavy
 def test_alphabb_cutoff_obbt_prerequisite_respects_expired_deadline(monkeypatch):
     """The default alpha-BB prerequisite pass must honor the global AMP deadline."""
     from discopt._jax.milp_relaxation import MilpRelaxationResult
@@ -2377,6 +2474,7 @@ def test_alphabb_cutoff_obbt_prerequisite_respects_expired_deadline(monkeypatch)
     assert cutoff_obbt_calls == []
 
 
+@pytest.mark.memory_heavy
 def test_objective_cutoff_bounds_enable_alphabb_for_issue_63_instances():
     """The exact nlp_008 objective cutoff should create finite alpha-BB bounds."""
     from discopt._jax.convexity import classify_oa_cut_convexity
@@ -2442,6 +2540,7 @@ def test_objective_cutoff_bounds_enable_alphabb_for_issue_63_instances():
     assert len(cuts) == 1
 
 
+@pytest.mark.memory_heavy
 def test_amp_restores_model_bounds_after_objective_cutoff_tightening(monkeypatch):
     """Internal cutoff/FBBT bounds must not leak back to the caller's model."""
     from discopt._jax.milp_relaxation import MilpRelaxationResult
@@ -2495,6 +2594,7 @@ def test_amp_restores_model_bounds_after_objective_cutoff_tightening(monkeypatch
     np.testing.assert_allclose(restored_ub, original_ub)
 
 
+@pytest.mark.memory_heavy
 def test_amp_restores_model_bounds_when_callback_raises_after_cutoff(monkeypatch):
     """Propagated callback errors must still restore temporary AMP bounds."""
     from discopt._jax.milp_relaxation import MilpRelaxationResult
@@ -2552,6 +2652,7 @@ def test_amp_restores_model_bounds_when_callback_raises_after_cutoff(monkeypatch
     np.testing.assert_allclose(restored_ub, original_ub)
 
 
+@pytest.mark.memory_heavy
 def test_amp_appends_alphabb_cut_for_issue_63_quadratic(monkeypatch):
     """AMP should append an alpha-BB cut for the nonconvex quadratic row."""
     import discopt._jax.cutting_planes as cutting_planes
@@ -2612,6 +2713,7 @@ def test_amp_appends_alphabb_cut_for_issue_63_quadratic(monkeypatch):
     assert np.isfinite(rhs)
 
 
+@pytest.mark.memory_heavy
 def test_amp_keeps_direct_oa_when_alphabb_generation_fails(monkeypatch):
     """Alpha-BB failures should not suppress already generated convex OA cuts."""
     import discopt._jax.cutting_planes as cutting_planes
@@ -2685,6 +2787,7 @@ def test_amp_keeps_direct_oa_when_alphabb_generation_fails(monkeypatch):
     assert rhs == pytest.approx(2.0)
 
 
+@pytest.mark.memory_heavy
 def test_amp_root_presolve_preserves_heterogeneous_array_bounds():
     """Root FBBT must not narrow every array element to the first element's bound."""
     m = Model("amp_heterogeneous_array_bounds")
@@ -2745,6 +2848,7 @@ def test_small_integer_domain_fallback_enumerates_complete_domain(monkeypatch):
     assert sorted(float(candidate[0]) for candidate in selected_candidates) == [0.0, 1.0, 2.0]
 
 
+@pytest.mark.memory_heavy
 def test_obbt_presolve_tightens_bilinear_demo_bounds():
     """OBBT should shrink the initial [0, 10]^2 box to the linear hull x + y = 1."""
     from discopt._jax.obbt import run_obbt
@@ -2769,6 +2873,7 @@ def test_amp_returns_infeasible_for_nonlinear_tightening_contradiction():
     assert result.x is None
 
 
+@pytest.mark.memory_heavy
 def test_amp_max_iter_without_gap_certificate_returns_feasible():
     """An incumbent without a certified gap should not be labeled optimal."""
     m = _make_nlp1()

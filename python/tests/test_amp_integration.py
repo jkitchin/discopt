@@ -50,6 +50,7 @@ pytestmark = [
     pytest.mark.slow,
     pytest.mark.integration,
     pytest.mark.amp_benchmark,
+    pytest.mark.memory_heavy,
 ]
 
 

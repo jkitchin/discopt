@@ -38,6 +38,11 @@ SHELL := /bin/bash
 PYTHON      ?= python
 MATURIN     ?= $(PYTHON) -m maturin
 PYTEST      ?= pytest
+PYTEST_MEMORY_CAP ?= scripts/run_memory_capped_pytest.sh
+PYTEST_MEMORY_LIMIT_MB ?= 16384
+PYTEST_CPU_LIMIT_SECONDS ?= 0
+PYTEST_XDIST_WORKERS ?= 2
+PYTEST_CAPPED = PYTEST_MEMORY_LIMIT_MB=$(PYTEST_MEMORY_LIMIT_MB) PYTEST_CPU_LIMIT_SECONDS=$(PYTEST_CPU_LIMIT_SECONDS) $(PYTEST_MEMORY_CAP) $(PYTEST)
 RUFF        ?= ruff
 JUPYTER     ?= jupyter
 PRE_COMMIT  ?= pre-commit
@@ -188,12 +193,12 @@ hooks:
 # These exclusions keep the PR gate focused on ordinary feature tests plus the
 # curated `pr_correctness` subset. Full correctness, integration, and benchmark
 # coverage stay available through the explicit targets below.
-PYTEST_FAST_FLAGS := --timeout=120 -m "not slow and not correctness and not integration and not amp_benchmark and not requires_cyipopt" \
+PYTEST_FAST_FLAGS := --timeout=120 -m "not slow and not correctness and not integration and not amp_benchmark and not requires_cyipopt and not memory_heavy" \
     --ignore=python/tests/test_correctness.py
 
-PYTEST_QUICK_FLAGS := --timeout=60 -m "(unit or smoke) and not slow and not integration and not amp_benchmark and not requires_cyipopt"
+PYTEST_QUICK_FLAGS := --timeout=60 -m "(unit or smoke) and not slow and not integration and not amp_benchmark and not requires_cyipopt and not memory_heavy"
 
-PYTEST_AMP_FAST_FLAGS := --timeout=120 -m "not slow and not integration and not amp_benchmark and not requires_cyipopt"
+PYTEST_AMP_FAST_FLAGS := --timeout=120 -m "not slow and not integration and not amp_benchmark and not requires_cyipopt and not memory_heavy"
 
 # File groups for slice targets. A test file may appear in more than one group.
 TEST_MODELING := \
@@ -292,7 +297,7 @@ TEST_LLM := \
 # PR-fast: matches python-fast CI job. This is what `make test` should mean.
 test: build
 	@echo "==> Running PR-fast pytest suite (matches CI python-fast)..."
-	$(PYTEST) python/tests/ -v --tb=short -q $(PYTEST_FAST_FLAGS)
+	$(PYTEST_CAPPED) python/tests/ -v --tb=short -q $(PYTEST_FAST_FLAGS)
 	@echo "==> PR-fast tests passed"
 
 test-fast: test
@@ -300,59 +305,59 @@ test-fast: test
 # Full suite: every test, no exclusions. Use before releases or when triaging.
 test-all: build
 	@echo "==> Running full pytest suite (slow + correctness + everything)..."
-	$(PYTEST) python/tests/ -v --tb=short -q
+	$(PYTEST_CAPPED) python/tests/ -v --tb=short -q
 	@echo "==> Full suite passed"
 
 # Dev inner loop: only unit and smoke markers. Wired by Phase 3 of issue #68;
 # may be near-empty until those markers are populated.
 test-quick: build
 	@echo "==> Running quick tests (unit + smoke)..."
-	$(PYTEST) python/tests/ -v --tb=short -q $(PYTEST_QUICK_FLAGS)
+	$(PYTEST_CAPPED) python/tests/ -v --tb=short -q $(PYTEST_QUICK_FLAGS)
 	@echo "==> Quick tests passed"
 
 # Only the slow-marked tests (backend cross-product, big instances, ML training).
 test-slow: build
 	@echo "==> Running slow-marked tests..."
-	$(PYTEST) python/tests/ -v --tb=short -q -m "slow"
+	$(PYTEST_CAPPED) python/tests/ -v --tb=short -q -m "slow"
 	@echo "==> Slow tests passed"
 
 # Full known-optima validation. Heavy; not in PR gate.
 test-correctness: build
 	@echo "==> Running correctness suite (known-optima validation)..."
-	$(PYTEST) python/tests/test_correctness.py -v --tb=short -q
+	$(PYTEST_CAPPED) python/tests/test_correctness.py -v --tb=short -q
 	@echo "==> Correctness suite passed"
 
 # Slice targets: PR-fast filter applied within a subject area.
 test-modeling: build
-	$(PYTEST) $(TEST_MODELING) -v --tb=short -q $(PYTEST_FAST_FLAGS)
+	$(PYTEST_CAPPED) $(TEST_MODELING) -v --tb=short -q $(PYTEST_FAST_FLAGS)
 
 test-solvers: build
-	$(PYTEST) $(TEST_SOLVERS) -v --tb=short -q $(PYTEST_FAST_FLAGS)
+	$(PYTEST_CAPPED) $(TEST_SOLVERS) -v --tb=short -q $(PYTEST_FAST_FLAGS)
 
 test-amp: build
-	$(PYTEST) $(TEST_AMP) -v --tb=short -q $(PYTEST_FAST_FLAGS)
+	$(PYTEST_CAPPED) $(TEST_AMP) -v --tb=short -q $(PYTEST_FAST_FLAGS)
 
 test-amp-fast: build
 	@echo "==> Running fast AMP regression tests..."
-	$(PYTEST) python/tests/test_amp.py -v --tb=short -q $(PYTEST_AMP_FAST_FLAGS)
+	$(PYTEST_CAPPED) python/tests/test_amp.py -v --tb=short -q $(PYTEST_AMP_FAST_FLAGS)
 	@echo "==> Fast AMP tests passed"
 
 test-amp-integration: build
 	@echo "==> Running opt-in AMP Alpine/incidence tests..."
-	$(PYTEST) python/tests/test_amp_integration.py -v --tb=short -q -m "slow or integration or amp_benchmark or requires_cyipopt"
+	$(PYTEST_CAPPED) python/tests/test_amp_integration.py -v --tb=short -q -m "slow or integration or amp_benchmark or requires_cyipopt or memory_heavy"
 	@echo "==> AMP integration tests passed"
 
 test-nn: build
-	$(PYTEST) $(TEST_NN) -v --tb=short -q $(PYTEST_FAST_FLAGS)
+	$(PYTEST_CAPPED) $(TEST_NN) -v --tb=short -q $(PYTEST_FAST_FLAGS)
 
 test-convexity: build
-	$(PYTEST) $(TEST_CONVEXITY) -v --tb=short -q $(PYTEST_FAST_FLAGS)
+	$(PYTEST_CAPPED) $(TEST_CONVEXITY) -v --tb=short -q $(PYTEST_FAST_FLAGS)
 
 test-jax: build
-	$(PYTEST) $(TEST_JAX) -v --tb=short -q $(PYTEST_FAST_FLAGS)
+	$(PYTEST_CAPPED) $(TEST_JAX) -v --tb=short -q $(PYTEST_FAST_FLAGS)
 
 test-llm: build
-	$(PYTEST) $(TEST_LLM) -v --tb=short -q $(PYTEST_FAST_FLAGS)
+	$(PYTEST_CAPPED) $(TEST_LLM) -v --tb=short -q $(PYTEST_FAST_FLAGS)
 
 # --- Results directory --------------------------------------------------------
 
@@ -407,7 +412,7 @@ bench-phase3-gate: build | $(RESULTS_DIR)
 
 bench-tests: build | $(RESULTS_DIR)
 	@echo "==> Running benchmark test suite..."
-	$(PYTEST) discopt_benchmarks/tests/ -v --tb=short -q \
+	$(PYTEST_CAPPED) discopt_benchmarks/tests/ -v --tb=short -q \
 		--junitxml=$(RESULTS_DIR)/bench_tests_$(TS).xml 2>&1 \
 		| tee $(RESULTS_DIR)/bench_tests_$(TS).log
 	@echo "==> Benchmark tests saved to $(RESULTS_DIR)/bench_tests_$(TS).*"

@@ -30,7 +30,8 @@ jobs:
       - name: Run opt-in AMP integration suite
         run: |
           source .venv/bin/activate
-          pytest python/tests/test_amp_integration.py -v --timeout=300 -m "slow or integration or amp_benchmark or requires_cyipopt"
+          scripts/run_memory_capped_pytest.sh pytest python/tests/test_amp_integration.py -v --timeout=300 -m "slow or integration or amp_benchmark or requires_cyipopt or memory_heavy"
         env:
           JAX_PLATFORMS: cpu
           JAX_ENABLE_X64: "1"
+          PYTEST_MEMORY_LIMIT_MB: "16384"
