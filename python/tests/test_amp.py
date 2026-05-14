@@ -781,6 +781,25 @@ def test_trig_piecewise_relaxation_caps_dense_partitions():
     assert len(piecewise[0].intervals) < 96
 
 
+def test_trig_piecewise_relaxation_skips_huge_argument_span():
+    """Very wide trig spans should use range bounds, not many piecewise rows."""
+    from discopt._jax.milp_relaxation import _MAX_TRIG_PIECEWISE_SPAN
+
+    span = 2.0 * _MAX_TRIG_PIECEWISE_SPAN
+    m = Model("trig_huge_span_guard")
+    x = m.continuous("x", lb=-span / 2.0, ub=span / 2.0)
+    m.minimize(dm.sin(x))
+
+    milp_model, varmap = _build_relaxation_for_test(m)
+    result = milp_model.solve()
+
+    assert varmap["univariate_piecewise_relaxations"] == []
+    assert {relax.func_name for relax in varmap["univariate_relaxations"]} == {"sin"}
+    assert milp_model._objective_bound_valid is True
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(-1.0)
+
+
 def test_trig_square_constraints_apply_range_bounds():
     """sin(x)^2 and cos(y)^2 constraints should constrain the MILP relaxation."""
     sin_model = Model("sin_square_relax")
