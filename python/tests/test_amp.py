@@ -219,7 +219,7 @@ def test_amp_normalizes_initial_point_length_and_bounds():
 
 
 def test_weymouth_like_squares_extend_builtin_partition_selection():
-    """Square-balance equalities should add monomial vars without changing classifier output."""
+    """Coupled square constraints should add monomial vars without changing classifier output."""
     from discopt._jax.term_classifier import classify_nonlinear_terms
     from discopt.solvers import amp as amp_mod
 
@@ -234,6 +234,20 @@ def test_weymouth_like_squares_extend_builtin_partition_selection():
     assert (3, 2) in terms.monomial
     assert set(terms.partition_candidates) == {0, 1}
     assert set(amp_mod._equality_square_monomial_partition_candidates(m, terms)) == {2, 3}
+
+    sphere = Model("sphere_candidates")
+    y = sphere.continuous("y", lb=-4.0, ub=4.0, shape=(3,))
+    sphere.minimize(y[0] * y[2])
+    sphere.subject_to(y[0] ** 2 + y[1] ** 2 + y[2] ** 2 <= 10.0)
+
+    sphere_terms = classify_nonlinear_terms(sphere)
+
+    assert set(sphere_terms.partition_candidates) == {0, 2}
+    assert set(amp_mod._equality_square_monomial_partition_candidates(sphere, sphere_terms)) == {
+        0,
+        1,
+        2,
+    }
 
 
 def test_partitioned_square_secants_tighten_circle_superlevel_bound():
@@ -813,6 +827,57 @@ def test_tan_abs_minlptests_objective_linearizes_without_fallback(caplog):
     assert not any(
         "could not linearize the objective" in record.message for record in caplog.records
     )
+
+
+def test_mixed_curvature_tan_relaxation_respects_fixed_argument():
+    """Piecewise tan envelopes should tighten a mixed-curvature lifted objective."""
+    m = Model("tan_fixed_arg")
+    x = m.continuous("x", lb=-1.0, ub=1.0)
+    m.minimize(dm.tan(x))
+    m.subject_to(x == 0.0)
+
+    milp_model, varmap = _build_relaxation_for_test(m)
+    result = milp_model.solve()
+
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(0.0, abs=1e-8)
+    piecewise = varmap["univariate_piecewise_relaxations"]
+    assert [relax.relax.func_name for relax in piecewise] == ["tan"]
+    assert {interval.curvature for interval in piecewise[0].intervals} == {"concave", "convex"}
+
+
+def test_disaggregated_piecewise_bilinear_big_m_keeps_negative_endpoint_feasible():
+    """Inactive piecewise McCormick rows need enough slack on negative intervals."""
+    from discopt._jax.discretization import DiscretizationState
+    from discopt._jax.milp_relaxation import build_milp_relaxation
+    from discopt._jax.term_classifier import classify_nonlinear_terms
+
+    z_value = 2.85671038
+    z_bound = float(np.sqrt(10.0))
+    m = Model("fixed_negative_bilinear")
+    x = m.continuous("x", lb=-1.0, ub=1.0)
+    z = m.continuous("z", lb=-z_bound, ub=z_bound)
+    m.minimize(x * z)
+    m.subject_to(x == -1.0)
+    m.subject_to(z == z_value)
+
+    state = DiscretizationState(
+        partitions={
+            0: np.array([-1.0, -0.99, -0.9, 0.0, 1.0], dtype=np.float64),
+            1: np.array([-z_bound, 0.0, 2.687936011, 2.956729612, z_bound]),
+        }
+    )
+    milp_model, _ = build_milp_relaxation(
+        m,
+        classify_nonlinear_terms(m),
+        state,
+        incumbent=None,
+        convhull_formulation="disaggregated",
+    )
+    result = milp_model.solve()
+
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(-z_value, abs=1e-8)
 
 
 def test_affine_trig_constraints_are_retained_in_relaxation(caplog):

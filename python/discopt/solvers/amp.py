@@ -1135,12 +1135,17 @@ def _square_monomial_vars_in_expr(expr: Expression, model: Model) -> set[int]:
 
 
 def _equality_square_monomial_partition_candidates(model: Model, terms: Any) -> list[int]:
-    """Select square monomials from equality balances for AMP refinement.
+    """Select coupled square monomials that benefit from AMP refinement.
 
     Weymouth constraints have the form ``f^2 = C * (p_in^2 - p_out^2)``:
     multiple square monomials coupled by one equality.  Partitioning those
     variables lets the monomial tangent cuts adapt around the MILP point without
     making every monomial in every model a partition candidate.
+
+    Sphere/ball constraints such as ``x^2 + y^2 + z^2 <= r`` need the same
+    treatment: the tangent under-estimators for each square must tighten
+    together, otherwise an unpartitioned square can leave too much room in the
+    convex quadratic upper-bound constraint.
     """
     known_squares = {
         int(var_idx) for var_idx, exp in getattr(terms, "monomial", []) if int(exp) == 2
@@ -1150,7 +1155,7 @@ def _equality_square_monomial_partition_candidates(model: Model, terms: Any) -> 
 
     candidates: set[int] = set()
     for constraint in model._constraints:
-        if constraint.sense != "==":
+        if constraint.sense not in {"==", "<="}:
             continue
         square_vars = _square_monomial_vars_in_expr(constraint.body, model) & known_squares
         if len(square_vars) >= 2:
