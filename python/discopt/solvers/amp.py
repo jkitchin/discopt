@@ -39,6 +39,7 @@ from discopt._jax.nonlinear_bound_tightening import (
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
+    Constraint,
     Expression,
     FunctionCall,
     IndexExpression,
@@ -1134,6 +1135,121 @@ def _square_monomial_vars_in_expr(expr: Expression, model: Model) -> set[int]:
     return square_vars
 
 
+def _expr_variable_indices(expr: Expression, model: Model) -> set[int]:
+    """Collect flat variable indices referenced by an expression."""
+    flat_idx = _flat_var_index(expr, model)
+    if flat_idx is not None:
+        return {flat_idx}
+    if isinstance(expr, Variable):
+        start = _compute_var_offset(expr, model)
+        return set(range(start, start + expr.size))
+    if isinstance(expr, (Constant, IndexExpression)):
+        return set()
+    if isinstance(expr, BinaryOp):
+        left = _expr_variable_indices(expr.left, model)
+        right = _expr_variable_indices(expr.right, model)
+        return left | right
+    if isinstance(expr, UnaryOp):
+        return _expr_variable_indices(expr.operand, model)
+    if isinstance(expr, FunctionCall):
+        indices: set[int] = set()
+        for arg in expr.args:
+            indices.update(_expr_variable_indices(arg, model))
+        return indices
+    if isinstance(expr, MatMulExpression):
+        left = _expr_variable_indices(expr.left, model)
+        right = _expr_variable_indices(expr.right, model)
+        return left | right
+    if isinstance(expr, SumExpression):
+        return _expr_variable_indices(expr.operand, model)
+    if isinstance(expr, SumOverExpression):
+        indices = set()
+        for term in expr.terms:
+            indices.update(_expr_variable_indices(term, model))
+        return indices
+    return set()
+
+
+def _expr_has_function(expr: Expression, names: set[str]) -> bool:
+    """Return true when an expression tree calls any named function."""
+    if isinstance(expr, FunctionCall):
+        return expr.func_name in names or any(_expr_has_function(arg, names) for arg in expr.args)
+    if isinstance(expr, BinaryOp):
+        return _expr_has_function(expr.left, names) or _expr_has_function(expr.right, names)
+    if isinstance(expr, UnaryOp):
+        return _expr_has_function(expr.operand, names)
+    if isinstance(expr, MatMulExpression):
+        return _expr_has_function(expr.left, names) or _expr_has_function(expr.right, names)
+    if isinstance(expr, SumExpression):
+        return _expr_has_function(expr.operand, names)
+    if isinstance(expr, SumOverExpression):
+        return any(_expr_has_function(term, names) for term in expr.terms)
+    if isinstance(expr, IndexExpression) and not isinstance(expr.base, Variable):
+        return _expr_has_function(expr.base, names)
+    return False
+
+
+def _expr_all_vars_fixed(
+    expr: Expression,
+    model: Model,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+    tol: float = 1e-9,
+) -> bool:
+    """Return true when all variables used by an expression have fixed bounds."""
+    indices = _expr_variable_indices(expr, model)
+    if not indices:
+        return False
+    return all(float(flat_ub[idx]) - float(flat_lb[idx]) <= tol for idx in indices)
+
+
+def _direct_oa_skip_reasons(
+    model: Model,
+    convex_mask: list[bool],
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> list[str | None]:
+    """Explain why each constraint row is excluded from direct tangent OA."""
+    from discopt._jax.convexity.rules import Curvature, classify_expr
+    from discopt._jax.cutting_planes import _quadratic_polynomial
+
+    reasons: list[str | None] = []
+    for idx, is_convex in enumerate(convex_mask):
+        if is_convex:
+            reasons.append(None)
+            continue
+
+        constraint = model._constraints[idx]
+        if not isinstance(constraint, Constraint):
+            reasons.append("unsupported_constraint_type")
+            continue
+
+        expr = constraint.body
+        if _expr_all_vars_fixed(expr, model, flat_lb, flat_ub):
+            reasons.append("fixed_nonlinear_row")
+            continue
+        if constraint.sense == "==":
+            reasons.append("nonaffine_equality")
+            continue
+
+        curvature = classify_expr(expr, model)
+        if (constraint.sense == "<=" and curvature == Curvature.CONCAVE) or (
+            constraint.sense == ">=" and curvature == Curvature.CONVEX
+        ):
+            reasons.append("opposite_curvature_for_direct_oa")
+            continue
+
+        if _quadratic_polynomial(expr, model) is not None:
+            reasons.append("nonconvex_quadratic_alpha_bb_candidate")
+            continue
+        if _expr_has_function(expr, {"sin", "cos", "tan"}):
+            reasons.append("trigonometric_not_certified_convex")
+            continue
+
+        reasons.append("not_certified_convex")
+    return reasons
+
+
 def _equality_square_monomial_partition_candidates(model: Model, terms: Any) -> list[int]:
     """Select coupled square monomials that benefit from AMP refinement.
 
@@ -2162,8 +2278,14 @@ def _solve_amp_impl(
         constraint_ub,
     )
     oa_convexity = classify_oa_cut_convexity(model, use_certificate=True)
+    direct_oa_skip_reasons = _direct_oa_skip_reasons(
+        model,
+        oa_convexity.constraint_mask,
+        flat_lb,
+        flat_ub,
+    )
     direct_oa_skipped_rows = [
-        idx for idx, is_convex in enumerate(oa_convexity.constraint_mask) if not is_convex
+        (idx, reason) for idx, reason in enumerate(direct_oa_skip_reasons) if reason is not None
     ]
     if evaluator.n_constraints > 0 and direct_oa_skipped_rows:
         logger.warning(
@@ -2432,7 +2554,6 @@ def _solve_amp_impl(
                 generate_alphabb_quadratic_oa_cuts_from_evaluator,
                 generate_oa_cuts_from_evaluator_report,
             )
-            from discopt.modeling.core import Constraint
 
             _x_orig = x_incumbent[:n_orig]
             _senses = [c.sense for c in model._constraints if isinstance(c, Constraint)]
@@ -2441,6 +2562,7 @@ def _solve_amp_impl(
                 _x_orig,
                 constraint_senses=_senses,
                 convex_mask=oa_convexity.constraint_mask,
+                skip_reasons=direct_oa_skip_reasons,
             )
             if direct_report.skipped:
                 logger.debug(

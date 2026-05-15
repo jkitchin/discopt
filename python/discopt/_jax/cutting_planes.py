@@ -273,6 +273,7 @@ def generate_oa_cuts_from_evaluator(
     x_sol: np.ndarray,
     constraint_senses: Optional[list[str]] = None,
     convex_mask: Optional[list[bool]] = None,
+    skip_reasons: Optional[list[Optional[str]]] = None,
 ) -> list[LinearCut]:
     """Generate OA cuts for all constraints using an NLPEvaluator.
 
@@ -296,6 +297,7 @@ def generate_oa_cuts_from_evaluator(
         x_sol,
         constraint_senses=constraint_senses,
         convex_mask=convex_mask,
+        skip_reasons=skip_reasons,
     ).cuts
 
 
@@ -304,11 +306,13 @@ def generate_oa_cuts_from_evaluator_report(
     x_sol: np.ndarray,
     constraint_senses: Optional[list[str]] = None,
     convex_mask: Optional[list[bool]] = None,
+    skip_reasons: Optional[list[Optional[str]]] = None,
 ) -> OACutGenerationReport:
     """Generate direct evaluator OA cuts and record intentionally skipped rows.
 
     A row marked false in ``convex_mask`` is not safe for direct tangent OA, so
-    it is skipped with the ``"not_certified_convex"`` reason. The existing
+    it is skipped with the corresponding ``skip_reasons[k]`` value, or
+    ``"not_certified_convex"`` when no reason is supplied. The existing
     :func:`generate_oa_cuts_from_evaluator` API returns only ``report.cuts``.
     """
     m = evaluator.n_constraints
@@ -325,7 +329,10 @@ def generate_oa_cuts_from_evaluator_report(
     skipped = []
     for k in range(m):
         if convex_mask is not None and not convex_mask[k]:
-            skipped.append(OACutSkip(constraint_index=k, reason="not_certified_convex"))
+            reason = "not_certified_convex"
+            if skip_reasons is not None and skip_reasons[k] is not None:
+                reason = str(skip_reasons[k])
+            skipped.append(OACutSkip(constraint_index=k, reason=reason))
             continue
         grad_k = jac[k, :]
         g_k = float(cons_vals[k])

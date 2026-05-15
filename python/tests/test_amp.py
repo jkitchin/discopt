@@ -2372,6 +2372,7 @@ def test_oa_cut_generation_receives_convex_constraint_mask(monkeypatch):
     from discopt.solvers import amp as amp_mod
 
     recorded_masks = []
+    recorded_reasons = []
     classify_calls = []
 
     def fake_classify(model, **kwargs):
@@ -2405,6 +2406,7 @@ def test_oa_cut_generation_receives_convex_constraint_mask(monkeypatch):
 
     def fake_generate_report(*args, **kwargs):
         recorded_masks.append(list(kwargs["convex_mask"]))
+        recorded_reasons.append(list(kwargs["skip_reasons"]))
         return cutting_planes.OACutGenerationReport(cuts=[], skipped=[])
 
     monkeypatch.setattr(
@@ -2431,6 +2433,7 @@ def test_oa_cut_generation_receives_convex_constraint_mask(monkeypatch):
     assert result.status in ("optimal", "feasible")
     assert classify_calls == [{"use_certificate": True}]
     assert recorded_masks == [[True, False]]
+    assert recorded_reasons == [[None, "opposite_curvature_for_direct_oa"]]
 
 
 def test_amp_oa_classification_uses_tightened_bounds_for_reciprocal_rows(monkeypatch):
@@ -2490,6 +2493,160 @@ def test_amp_oa_classification_uses_tightened_bounds_for_reciprocal_rows(monkeyp
 
     assert result.status in ("optimal", "feasible")
     assert recorded_masks == [[True, True, False]]
+
+
+def _unwrap_minlptests_case(case):
+    return case.values[0] if hasattr(case, "values") else case
+
+
+def _issue91_minlptests_model(group: str, problem_id: str) -> Model:
+    from test_minlptests import MINLPTESTS_CVX_BY_ID, NLP_INSTANCES, NLP_MI_INSTANCES
+
+    if group == "cvx":
+        return MINLPTESTS_CVX_BY_ID[problem_id].build_fn()
+    instances = NLP_MI_INSTANCES if group == "mi" else NLP_INSTANCES
+    by_id = {
+        instance.problem_id: instance
+        for instance in (_unwrap_minlptests_case(case) for case in instances)
+    }
+    return by_id[problem_id].build_fn()
+
+
+def _issue91_oa_mask_and_skip_reasons(model: Model) -> tuple[list[bool], list[str | None]]:
+    from discopt._jax.convexity import classify_oa_cut_convexity
+    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+    from discopt.modeling.core import VarType
+    from discopt.solvers import amp as amp_mod
+    from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
+
+    flat_lb, flat_ub = flat_variable_bounds(model)
+    int_offsets = []
+    int_sizes = []
+    offset = 0
+    for variable in model._variables:
+        if variable.var_type in (VarType.BINARY, VarType.INTEGER):
+            int_offsets.append(offset)
+            int_sizes.append(variable.size)
+        offset += variable.size
+
+    flat_lb, flat_ub, root_infeasible, _root_changed = tighten_root_bounds_with_fbbt(
+        model,
+        flat_lb,
+        flat_ub,
+        int_offsets,
+        int_sizes,
+    )
+    assert not root_infeasible
+
+    flat_lb, flat_ub, nonlinear_bt_stats = tighten_nonlinear_bounds(model, flat_lb, flat_ub)
+    assert not nonlinear_bt_stats.infeasible
+    amp_mod._apply_flat_bounds_to_model(model, flat_lb, flat_ub)
+
+    oa_convexity = classify_oa_cut_convexity(model, use_certificate=True)
+    reasons = amp_mod._direct_oa_skip_reasons(
+        model,
+        oa_convexity.constraint_mask,
+        flat_lb,
+        flat_ub,
+    )
+    return oa_convexity.constraint_mask, reasons
+
+
+@pytest.mark.parametrize(
+    ("group", "problem_id", "expected_mask", "expected_reasons"),
+    [
+        pytest.param(
+            "cvx",
+            "nlp_cvx_106_010",
+            [False, False],
+            ["trigonometric_not_certified_convex", "trigonometric_not_certified_convex"],
+            id="nlp_cvx_106_010",
+        ),
+        pytest.param(
+            "cvx",
+            "nlp_cvx_106_011",
+            [False, False],
+            ["trigonometric_not_certified_convex", "trigonometric_not_certified_convex"],
+            id="nlp_cvx_106_011",
+        ),
+        pytest.param(
+            "nlp",
+            "nlp_002_010",
+            [False, False],
+            ["nonaffine_equality", "nonaffine_equality"],
+            id="nlp_002_010",
+        ),
+        *[
+            pytest.param(
+                "nlp",
+                f"nlp_003_0{suffix}",
+                [True, False],
+                [None, "trigonometric_not_certified_convex"],
+                id=f"nlp_003_0{suffix}",
+            )
+            for suffix in range(10, 17)
+        ],
+        pytest.param(
+            "nlp",
+            "nlp_005_010",
+            [True, True, False],
+            [None, None, "opposite_curvature_for_direct_oa"],
+            id="nlp_005_010",
+        ),
+        pytest.param(
+            "nlp",
+            "nlp_008_010",
+            [True, False, True],
+            [None, "nonconvex_quadratic_alpha_bb_candidate", None],
+            id="nlp_008_010",
+        ),
+        pytest.param(
+            "nlp",
+            "nlp_008_011",
+            [True, False, True],
+            [None, "nonconvex_quadratic_alpha_bb_candidate", None],
+            id="nlp_008_011",
+        ),
+        pytest.param(
+            "mi",
+            "nlp_mi_002_010",
+            [True, False],
+            [None, "fixed_nonlinear_row"],
+            id="nlp_mi_002_010",
+        ),
+        *[
+            pytest.param(
+                "mi",
+                f"nlp_mi_003_0{suffix}",
+                [True, False],
+                [None, "trigonometric_not_certified_convex"],
+                id=f"nlp_mi_003_0{suffix}",
+            )
+            for suffix in range(10, 17)
+        ],
+        pytest.param(
+            "mi",
+            "nlp_mi_005_010",
+            [True, True, False],
+            [None, None, "opposite_curvature_for_direct_oa"],
+            id="nlp_mi_005_010",
+        ),
+    ],
+)
+def test_issue91_minlptests_oa_rows_are_cut_or_explained(
+    group,
+    problem_id,
+    expected_mask,
+    expected_reasons,
+):
+    """Every issue 91 motivating row should be cut or have a stable direct-OA skip reason."""
+    model = _issue91_minlptests_model(group, problem_id)
+
+    mask, reasons = _issue91_oa_mask_and_skip_reasons(model)
+
+    assert mask == expected_mask
+    assert reasons == expected_reasons
 
 
 def test_alphabb_quadratic_oa_cut_covers_issue_63_row():

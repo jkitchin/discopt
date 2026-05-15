@@ -352,11 +352,12 @@ class TestOACutsFromEvaluator:
             np.array([0.5, 0.5]),
             constraint_senses=["<=", "<="],
             convex_mask=[True, False],
+            skip_reasons=[None, "bilinear_not_direct_oa"],
         )
 
         assert isinstance(report, OACutGenerationReport)
         assert len(report.cuts) == 1
-        assert report.skipped == [OACutSkip(constraint_index=1, reason="not_certified_convex")]
+        assert report.skipped == [OACutSkip(constraint_index=1, reason="bilinear_not_direct_oa")]
 
 
 class TestOASeparation:
