@@ -297,6 +297,27 @@ def test_shifted_square_constraint_linearizes_and_proves_infeasible(caplog):
     assert "omitting constraint" not in caplog.text
 
 
+def test_issue90_unbounded_square_constraint_linearizes_with_lifted_aux(caplog):
+    """The nlp_008_010 square constraint should get aux columns even on wide boxes."""
+    m = Model("nlp_008_010_square_core")
+    x = m.continuous("x")
+    y = m.continuous("y")
+    z = m.continuous("z", lb=0.0, ub=1.0)
+    m.minimize(y**2 + z**3)
+    m.subject_to(x**2 <= y**2 + z**2)
+
+    with caplog.at_level("WARNING", logger="discopt._jax.milp_relaxation"):
+        milp_model, varmap = _build_relaxation_for_test(m)
+        result = milp_model.solve()
+
+    assert {(0, 2), (1, 2), (2, 2), (2, 3)} <= set(varmap["monomial"])
+    assert milp_model._objective_bound_valid is True
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(0.0, abs=1e-8)
+    assert "Monomial (0, 2)" not in caplog.text
+    assert "omitting constraint" not in caplog.text
+
+
 @pytest.mark.memory_heavy
 def test_amp_reports_shifted_square_minlptests_case_infeasible():
     """Regression for MINLPTests nlp_mi_007_020."""
