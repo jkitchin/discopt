@@ -2217,6 +2217,72 @@ def test_nonlinear_tightening_counts_infinite_bounds_without_warning():
     np.testing.assert_allclose(tightened_ub, np.array([2.0, 2.0]))
 
 
+def test_square_difference_tightens_weymouth_like_upstream_pressure():
+    """Rows like f^2 = C*(p_from^2 - p_to^2) imply a lower bound on p_from."""
+    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+
+    m = Model("weymouth_bound_tightening")
+    f = m.continuous("f", lb=6.0, ub=20.0)
+    p_to = m.continuous("p_to", lb=5.0, ub=10.0)
+    p_from = m.continuous("p_from", lb=0.0, ub=20.0)
+    m.subject_to(f**2 == 4.0 * (p_from**2 - p_to**2))
+    m.minimize(p_from)
+
+    flat_lb, flat_ub = flat_variable_bounds(m)
+    tightened_lb, _tightened_ub, stats = tighten_nonlinear_bounds(m, flat_lb, flat_ub)
+
+    assert "square_difference_lower_bound" in stats.applied_rules
+    assert tightened_lb[2] == pytest.approx(np.sqrt(5.0**2 + 6.0**2 / 4.0))
+
+
+def test_gas_square_difference_tightening_strengthens_root_relaxation():
+    """The gas benchmark should start AMP from a tighter Weymouth pressure box."""
+    from discopt._jax.discretization import initialize_partitions
+    from discopt._jax.milp_relaxation import build_milp_relaxation
+    from discopt._jax.model_utils import flat_variable_bounds
+    from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt.benchmarks.problems.gas_network_minlp import build_gas_network_minlp
+    from discopt.solvers import amp as amp_mod
+
+    m = build_gas_network_minlp()
+    terms = classify_nonlinear_terms(m)
+    raw_lb, raw_ub = flat_variable_bounds(m)
+    tightened_lb, tightened_ub, stats = tighten_nonlinear_bounds(m, raw_lb, raw_ub)
+
+    assert "square_difference_lower_bound" in stats.applied_rules
+    assert tightened_lb[4] >= 45.0
+
+    part_vars = sorted(
+        set(terms.partition_candidates)
+        | set(amp_mod._equality_square_monomial_partition_candidates(m, terms))
+    )
+
+    def root_bound(lb, ub):
+        state = initialize_partitions(
+            part_vars,
+            lb=[float(lb[i]) for i in part_vars],
+            ub=[float(ub[i]) for i in part_vars],
+            n_init=4,
+        )
+        milp_model, _varmap = build_milp_relaxation(
+            m,
+            terms,
+            state,
+            bound_override=(lb, ub),
+        )
+        result = milp_model.solve()
+        assert result.objective is not None
+        return float(result.objective)
+
+    raw_bound = root_bound(raw_lb, raw_ub)
+    tightened_bound = root_bound(tightened_lb, tightened_ub)
+
+    assert tightened_bound >= raw_bound + 0.1
+    assert tightened_bound > 2.3
+
+
 def test_oa_cut_recovery_drops_oldest_half(monkeypatch):
     """OA recovery should retry with the oldest half of cuts removed."""
     from discopt._jax.milp_relaxation import MilpRelaxationResult
