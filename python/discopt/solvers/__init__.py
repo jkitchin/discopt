@@ -57,6 +57,7 @@ class QPResult:
     x: Optional[np.ndarray] = None
     objective: Optional[float] = None
     dual_values: Optional[np.ndarray] = None
+    reduced_costs: Optional[np.ndarray] = None
     node_count: int = 0
     iterations: int = 0
     wall_time: float = 0.0

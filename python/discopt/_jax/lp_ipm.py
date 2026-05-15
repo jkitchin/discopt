@@ -30,6 +30,8 @@ import jax
 import jax.numpy as jnp
 import jax.scipy.linalg as jsla
 
+from discopt._jax.deadline import deadline_exceeded_jax
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -544,8 +546,8 @@ def _iteration_body(carry: LPCarry, tol: float, max_iter: int, tau_min: float) -
 # ---------------------------------------------------------------------------
 
 
-@functools.partial(jax.jit, static_argnums=(5, 6, 7, 8))
-def _lp_ipm_solve_jit(c, A, b, x_l, x_u, tol, max_iter, tau_min, bound_push):
+@functools.partial(jax.jit, static_argnums=(5, 6, 7, 8, 9))
+def _lp_ipm_solve_jit(c, A, b, x_l, x_u, tol, max_iter, tau_min, bound_push, check_deadline):
     """JIT-compiled LP IPM core (m > 0 path).
 
     By wrapping the entire solve (init + while_loop) in @jax.jit, all JAX
@@ -556,14 +558,30 @@ def _lp_ipm_solve_jit(c, A, b, x_l, x_u, tol, max_iter, tau_min, bound_push):
     Options (tol, max_iter, tau_min, bound_push) are static_argnums so they
     become compile-time constants.  Different option values cause recompilation,
     but benchmarks typically use the same options for all runs.
+
+    ``check_deadline`` is also static so the cond_fn is compiled with or
+    without the host-callback predicate. The vmap'd batch path passes
+    False because ``io_callback`` does not survive a batched while_loop
+    predicate (issue #80).
     """
     pd = _make_problem_data(c, A, b, x_l, x_u)
     opts = LPIPMOptions(tol=tol, max_iter=max_iter, tau_min=tau_min, bound_push=bound_push)
     state = _initialize_state(pd, opts)
     carry = LPCarry(state=state, pd=pd)
 
-    def cond(carry):
-        return carry.state.converged == 0
+    if check_deadline:
+
+        def cond(carry):
+            # Self-terminate if the process-global wall-clock deadline
+            # trips mid-solve (issue #80).
+            return jnp.logical_and(
+                carry.state.converged == 0,
+                jnp.logical_not(deadline_exceeded_jax()),
+            )
+    else:
+
+        def cond(carry):
+            return carry.state.converged == 0
 
     def body(carry):
         return _iteration_body(carry, tol, max_iter, tau_min)
@@ -579,6 +597,8 @@ def lp_ipm_solve(
     x_l: jnp.ndarray,
     x_u: jnp.ndarray,
     options: LPIPMOptions | None = None,
+    *,
+    check_deadline: bool = True,
 ) -> LPIPMState:
     """Solve an LP using a pure-JAX Mehrotra predictor-corrector IPM.
 
@@ -630,7 +650,16 @@ def lp_ipm_solve(
         return state  # type: ignore[no-any-return]
 
     state = _lp_ipm_solve_jit(
-        c, A, b, x_l, x_u, opts.tol, opts.max_iter, opts.tau_min, opts.bound_push
+        c,
+        A,
+        b,
+        x_l,
+        x_u,
+        opts.tol,
+        opts.max_iter,
+        opts.tau_min,
+        opts.bound_push,
+        check_deadline,
     )
     if factors.applied:
         x_us, y_us, zl_us, zu_us = unscale_lp_solution(
@@ -667,7 +696,10 @@ def lp_ipm_solve_batch(
     """
 
     def _solve_single(xl_single, xu_single):
-        return lp_ipm_solve(c, A, b, xl_single, xu_single, options)
+        # Host-callback deadline check doesn't survive a batched while_loop
+        # predicate; the Python orchestration layer caps the batch call
+        # externally (issue #80).
+        return lp_ipm_solve(c, A, b, xl_single, xu_single, options, check_deadline=False)
 
     result: LPIPMState = jax.vmap(_solve_single)(xl_batch, xu_batch)
     return result

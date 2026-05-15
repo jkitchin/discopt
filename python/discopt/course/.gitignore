@@ -1,0 +1,12 @@
+# Personal progress file (the template is checked in)
+progress.yaml
+
+# Notebook execution artifacts
+**/.ipynb_checkpoints/
+
+# Student-submitted writing drafts (uncomment if you want privacy)
+# **/writing_response.md
+__pycache__/
+
+# Reference solutions — instructors only; do not ship to student clones.
+solutions/

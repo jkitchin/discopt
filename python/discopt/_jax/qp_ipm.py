@@ -30,6 +30,8 @@ import jax
 import jax.numpy as jnp
 import jax.scipy.linalg as jsla
 
+from discopt._jax.deadline import deadline_exceeded_jax
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -524,21 +526,36 @@ def _iteration_body(carry: QPCarry, tol: float, max_iter: int, tau_min: float) -
 # ---------------------------------------------------------------------------
 
 
-@functools.partial(jax.jit, static_argnums=(6, 7, 8, 9))
-def _qp_ipm_solve_jit(Q, c, A, b, x_l, x_u, tol, max_iter, tau_min, bound_push):
+@functools.partial(jax.jit, static_argnums=(6, 7, 8, 9, 10))
+def _qp_ipm_solve_jit(Q, c, A, b, x_l, x_u, tol, max_iter, tau_min, bound_push, check_deadline):
     """JIT-compiled QP IPM core.
 
     Wraps the entire solve (init + while_loop) in @jax.jit so all JAX
     operations compile into a single XLA program, eliminating Python
     dispatch overhead (~75x speedup on warm calls).
+
+    ``check_deadline`` is static so the cond_fn is compiled with or
+    without the host-callback predicate. The vmap'd batch path passes
+    False because ``io_callback`` doesn't survive a batched while_loop
+    predicate (issue #80).
     """
     pd = _make_problem_data(Q, c, A, b, x_l, x_u)
     opts = QPIPMOptions(tol=tol, max_iter=max_iter, tau_min=tau_min, bound_push=bound_push)
     state = _initialize_state(pd, opts)
     carry = QPCarry(state=state, pd=pd)
 
-    def cond(carry):
-        return carry.state.converged == 0
+    if check_deadline:
+
+        def cond(carry):
+            # Self-terminate on a process-global wall-clock deadline (#80).
+            return jnp.logical_and(
+                carry.state.converged == 0,
+                jnp.logical_not(deadline_exceeded_jax()),
+            )
+    else:
+
+        def cond(carry):
+            return carry.state.converged == 0
 
     def body(carry):
         return _iteration_body(carry, tol, max_iter, tau_min)
@@ -555,6 +572,8 @@ def qp_ipm_solve(
     x_l: jnp.ndarray,
     x_u: jnp.ndarray,
     options: QPIPMOptions | None = None,
+    *,
+    check_deadline: bool = True,
 ) -> QPIPMState:
     """Solve a QP using a pure-JAX Mehrotra predictor-corrector IPM.
 
@@ -593,7 +612,17 @@ def qp_ipm_solve(
     x_u = jnp.asarray(x_u, dtype=jnp.float64)
 
     return _qp_ipm_solve_jit(  # type: ignore[no-any-return]
-        Q, c, A, b, x_l, x_u, opts.tol, opts.max_iter, opts.tau_min, opts.bound_push
+        Q,
+        c,
+        A,
+        b,
+        x_l,
+        x_u,
+        opts.tol,
+        opts.max_iter,
+        opts.tau_min,
+        opts.bound_push,
+        check_deadline,
     )
 
 
@@ -624,6 +653,9 @@ def qp_ipm_solve_batch(
     """
 
     def _solve_single(xl_single, xu_single):
-        return qp_ipm_solve(Q, c, A, b, xl_single, xu_single, options)
+        # Host-callback deadline check doesn't survive a batched while_loop
+        # predicate; the Python orchestration layer caps the batch call
+        # externally (issue #80).
+        return qp_ipm_solve(Q, c, A, b, xl_single, xu_single, options, check_deadline=False)
 
     return jax.vmap(_solve_single)(xl_batch, xu_batch)  # type: ignore[no-any-return]

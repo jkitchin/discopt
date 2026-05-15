@@ -193,8 +193,11 @@ hooks:
 # These exclusions keep the PR gate focused on ordinary feature tests plus the
 # curated `pr_correctness` subset. Full correctness, integration, and benchmark
 # coverage stay available through the explicit targets below.
+# `--dist loadgroup` keeps tests sharing a class on the same worker so
+# xdist-incompatible fixtures stay serialized.
 PYTEST_FAST_FLAGS := --timeout=120 -m "not slow and not correctness and not integration and not amp_benchmark and not requires_cyipopt and not memory_heavy" \
-    --ignore=python/tests/test_correctness.py
+    --ignore=python/tests/test_correctness.py \
+    -n $(PYTEST_XDIST_WORKERS) --dist loadgroup
 
 PYTEST_QUICK_FLAGS := --timeout=60 -m "(unit or smoke) and not slow and not integration and not amp_benchmark and not requires_cyipopt and not memory_heavy"
 
