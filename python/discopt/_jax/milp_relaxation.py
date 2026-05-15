@@ -66,6 +66,7 @@ _MAX_TRIG_IMPORTED_BREAKPOINTS = _MAX_TRIG_PIECEWISE_INTERVALS + 1
 _MAX_TRIG_PIECEWISE_WIDTH = math.pi / 6.0
 _MAX_RELAXATION_PARTITION_INTERVALS = 128
 _MAX_OBJECTIVE_LIFT_POWER = 6
+_MAX_FINITE_DOMAIN_TRIG_TABLE_VALUES = 256
 
 
 def _warn_once(msg: str, *args) -> None:
@@ -216,6 +217,21 @@ class PiecewiseTrigSquareRelaxation:
     arg_lb: float
     arg_ub: float
     intervals: list[PiecewiseTrigSquareInterval]
+
+
+@dataclass
+class FiniteDomainTrigSquareTable:
+    """Exact selector table for sin(integer_affine)^2 or cos(integer_affine)^2."""
+
+    square: UnivariateSquareRelaxation
+    func_name: str
+    var_idx: int
+    arg_coeff: float
+    arg_const: float
+    domain_values: list[int]
+    trig_values: list[float]
+    square_values: list[float]
+    selector_cols: list[int]
 
 
 @dataclass
@@ -1556,6 +1572,49 @@ def _integer_affine_trig_range(
     return min(values_out), max(values_out)
 
 
+def _finite_domain_trig_square_table_values(
+    relax: UnivariateRelaxation,
+    model: Model,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> Optional[tuple[int, float, float, list[int], list[float], list[float]]]:
+    """Return exact finite-domain values for a single integer trig-square argument."""
+    if relax.func_name not in {"sin", "cos"}:
+        return None
+
+    nz = np.flatnonzero(np.abs(relax.arg_coeff) > 1e-12)
+    if nz.size != 1:
+        return None
+
+    var_idx = int(nz[0])
+    flat_types = _flat_variable_types(model)
+    domain = _integer_domain_values(var_idx, flat_types, flat_lb, flat_ub)
+    if domain is None:
+        return None
+
+    domain_values = list(domain)
+    if not domain_values or len(domain_values) > _MAX_FINITE_DOMAIN_TRIG_TABLE_VALUES:
+        return None
+
+    arg_coeff = float(relax.arg_coeff[var_idx])
+    arg_const = float(relax.arg_const)
+    if not (_is_effectively_finite(arg_coeff) and _is_effectively_finite(arg_const)):
+        return None
+
+    trig_values: list[float] = []
+    square_values: list[float] = []
+    for value in domain_values:
+        arg = arg_coeff * float(value) + arg_const
+        trig_value = _univariate_value(relax.func_name, arg)
+        square_value = trig_value * trig_value
+        if not (np.isfinite(trig_value) and np.isfinite(square_value)):
+            return None
+        trig_values.append(float(trig_value))
+        square_values.append(float(square_value))
+
+    return var_idx, arg_coeff, arg_const, domain_values, trig_values, square_values
+
+
 def _scaled_affine_lower_bound(
     expr: Expression,
     scale: float,
@@ -2363,6 +2422,43 @@ def build_milp_relaxation(
         col_idx += 1
 
     univariate_by_aux_col = {relax.aux_col: relax for relax in univariate_relaxations}
+    finite_domain_trig_square_tables: list[FiniteDomainTrigSquareTable] = []
+    for square_relax in univariate_square_relaxations:
+        base_relax = univariate_by_aux_col.get(square_relax.base_col)
+        if base_relax is None:
+            continue
+        table_values = _finite_domain_trig_square_table_values(
+            base_relax,
+            model,
+            flat_lb,
+            flat_ub,
+        )
+        if table_values is None:
+            continue
+        var_idx, arg_coeff, arg_const, domain_values, trig_values, square_values = table_values
+
+        selector_cols: list[int] = []
+        if len(domain_values) > 1:
+            for _ in domain_values:
+                selector_cols.append(col_idx)
+                all_bounds.append((0.0, 1.0))
+                integrality_flags.append(1)
+                col_idx += 1
+
+        finite_domain_trig_square_tables.append(
+            FiniteDomainTrigSquareTable(
+                square=square_relax,
+                func_name=base_relax.func_name,
+                var_idx=var_idx,
+                arg_coeff=arg_coeff,
+                arg_const=arg_const,
+                domain_values=domain_values,
+                trig_values=trig_values,
+                square_values=square_values,
+                selector_cols=selector_cols,
+            )
+        )
+
     piecewise_trig_square_relaxations: list[PiecewiseTrigSquareRelaxation] = []
     for square_relax in univariate_square_relaxations:
         base_relax = univariate_by_aux_col.get(square_relax.base_col)
@@ -3326,6 +3422,52 @@ def build_milp_relaxation(
                 intercept = _univariate_value(relax.func_name, pt) - slope * pt
                 _add_upper_line(relax, slope, intercept)
 
+    for table in finite_domain_trig_square_tables:
+        base_col = table.square.base_col
+        square_col = table.square.aux_col
+
+        if not table.selector_cols:
+            trig_value = table.trig_values[0]
+            square_value = table.square_values[0]
+
+            row = np.zeros(n_total)
+            row[base_col] = 1.0
+            _add_row(row, trig_value)
+            _add_row(-row, -trig_value)
+
+            row = np.zeros(n_total)
+            row[square_col] = 1.0
+            _add_row(row, square_value)
+            _add_row(-row, -square_value)
+            continue
+
+        row_sum = np.zeros(n_total)
+        for selector_col in table.selector_cols:
+            row_sum[selector_col] = 1.0
+        _add_row(row_sum, 1.0)
+        _add_row(-row_sum, -1.0)
+
+        row = np.zeros(n_total)
+        row[table.var_idx] = 1.0
+        for domain_value, selector_col in zip(table.domain_values, table.selector_cols):
+            row[selector_col] -= float(domain_value)
+        _add_row(row, 0.0)
+        _add_row(-row, 0.0)
+
+        row = np.zeros(n_total)
+        row[base_col] = 1.0
+        for trig_value, selector_col in zip(table.trig_values, table.selector_cols):
+            row[selector_col] -= trig_value
+        _add_row(row, 0.0)
+        _add_row(-row, 0.0)
+
+        row = np.zeros(n_total)
+        row[square_col] = 1.0
+        for square_value, selector_col in zip(table.square_values, table.selector_cols):
+            row[selector_col] -= square_value
+        _add_row(row, 0.0)
+        _add_row(-row, 0.0)
+
     for pw_relax in piecewise_univariate_relaxations:
         relax = pw_relax.relax
 
@@ -3744,6 +3886,7 @@ def build_milp_relaxation(
         "univariate_square": univariate_square_var_map,
         "univariate_square_relaxations": univariate_square_relaxations,
         "univariate_square_piecewise_relaxations": piecewise_trig_square_relaxations,
+        "finite_domain_trig_square_tables": finite_domain_trig_square_tables,
         "fractional_power": fractional_power_var_map,
         "minmax_objective_lift": (
             {
