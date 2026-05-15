@@ -2255,6 +2255,34 @@ def build_milp_relaxation(
             points.append(0.0)
         return _sorted_unique_points(points)
 
+    def _monomial_aux_bounds(lb_i: float, ub_i: float, n: int) -> tuple[float, float]:
+        """Return safe auxiliary bounds for ``s = x**n``.
+
+        Effectively infinite original bounds cannot support numerically useful
+        tangent/secant rows, but the auxiliary still lets constraints and
+        objectives reference the lifted monomial instead of dropping the whole
+        expression from the MILP relaxation.
+        """
+        lb_finite = _is_effectively_finite(lb_i)
+        ub_finite = _is_effectively_finite(ub_i)
+        if lb_finite and ub_finite:
+            vals = [lb_i**n, ub_i**n]
+            if n % 2 == 0 and lb_i < 0 < ub_i:
+                vals.append(0.0)
+            return min(vals), max(vals)
+
+        if n % 2 == 0:
+            lower = 0.0
+            if lb_finite and lb_i > 0.0:
+                lower = lb_i**n
+            elif ub_finite and ub_i < 0.0:
+                lower = ub_i**n
+            return float(lower), np.inf
+
+        lower = lb_i**n if lb_finite else -np.inf
+        upper = ub_i**n if ub_finite else np.inf
+        return float(lower), float(upper)
+
     # ── Assign MILP column indices ──────────────────────────────────────────
     # Original variables keep columns 0..n_orig-1. Additional columns are created
     # for lifted bilinear, trilinear, and monomial terms plus any piecewise binaries.
@@ -2349,13 +2377,8 @@ def build_milp_relaxation(
     for var_idx, n in monomial_terms:
         lb_i = float(flat_lb[var_idx])
         ub_i = float(flat_ub[var_idx])
-        if not (_is_effectively_finite(lb_i) and _is_effectively_finite(ub_i)):
-            continue
-        vals = [lb_i**n, ub_i**n]
-        if n % 2 == 0 and lb_i < 0 < ub_i:
-            vals.append(0.0)
         monomial_var_map[(var_idx, n)] = col_idx
-        all_bounds.append((min(vals), max(vals)))
+        all_bounds.append(_monomial_aux_bounds(lb_i, ub_i, n))
         integrality_flags.append(0)
         col_idx += 1
 
@@ -2368,8 +2391,8 @@ def build_milp_relaxation(
         if (
             var_idx not in disc_state.partitions
             or not _power_is_convex_on_box(n, lb_i)
-            or not np.isfinite(lb_i)
-            or not np.isfinite(ub_i)
+            or not _is_effectively_finite(lb_i)
+            or not _is_effectively_finite(ub_i)
         ):
             continue
 
@@ -3200,6 +3223,8 @@ def build_milp_relaxation(
             continue
         lb_i = float(flat_lb[var_idx])
         ub_i = float(flat_ub[var_idx])
+        if not (_is_effectively_finite(lb_i) and _is_effectively_finite(ub_i)):
+            continue
         s_col = monomial_var_map[(var_idx, n)]
         breakpoints = _guarded_partition_points(
             "monomial tangent",
