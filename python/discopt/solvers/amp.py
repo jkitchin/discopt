@@ -2149,6 +2149,8 @@ def _solve_amp_impl(
             nonlinear_bt_stats.n_tightened,
             ", ".join(nonlinear_bt_stats.applied_rules),
         )
+    if root_changed or nonlinear_bt_stats.n_tightened > 0:
+        _apply_flat_bounds_to_model(model, flat_lb, flat_ub)
     evaluator = NLPEvaluator(model)
     constraint_lb, constraint_ub = _infer_constraint_bounds(model)
     deadline = t_start + time_limit
@@ -2159,10 +2161,19 @@ def _solve_amp_impl(
         constraint_lb,
         constraint_ub,
     )
-    oa_convexity = classify_oa_cut_convexity(model)
-    if evaluator.n_constraints > 0 and not all(oa_convexity.constraint_mask):
+    oa_convexity = classify_oa_cut_convexity(model, use_certificate=True)
+    direct_oa_skipped_rows = [
+        idx for idx, is_convex in enumerate(oa_convexity.constraint_mask) if not is_convex
+    ]
+    if evaluator.n_constraints > 0 and direct_oa_skipped_rows:
         logger.warning(
-            "AMP: generating OA cuts only for %d of %d constraints classified convex",
+            "AMP: direct OA skips %d of %d constraint rows not certified convex: rows=%s",
+            len(direct_oa_skipped_rows),
+            len(oa_convexity.constraint_mask),
+            direct_oa_skipped_rows,
+        )
+        logger.info(
+            "AMP: direct OA enabled for %d of %d constraint rows certified convex",
             sum(1 for is_convex in oa_convexity.constraint_mask if is_convex),
             len(oa_convexity.constraint_mask),
         )
@@ -2419,19 +2430,25 @@ def _solve_amp_impl(
         try:
             from discopt._jax.cutting_planes import (
                 generate_alphabb_quadratic_oa_cuts_from_evaluator,
-                generate_oa_cuts_from_evaluator,
+                generate_oa_cuts_from_evaluator_report,
             )
             from discopt.modeling.core import Constraint
 
             _x_orig = x_incumbent[:n_orig]
             _senses = [c.sense for c in model._constraints if isinstance(c, Constraint)]
-            direct_cuts = generate_oa_cuts_from_evaluator(
+            direct_report = generate_oa_cuts_from_evaluator_report(
                 evaluator,
                 _x_orig,
                 constraint_senses=_senses,
                 convex_mask=oa_convexity.constraint_mask,
             )
-            appended += _append_linearized_cuts(direct_cuts)
+            if direct_report.skipped:
+                logger.debug(
+                    "AMP iter %d: direct OA skipped rows: %s",
+                    iteration_idx,
+                    list(direct_report.skipped),
+                )
+            appended += _append_linearized_cuts(direct_report.cuts)
 
             has_nonconvex_oa_row = not all(oa_convexity.constraint_mask)
             had_effectively_unbounded = any(

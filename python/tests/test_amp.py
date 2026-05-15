@@ -2372,11 +2372,16 @@ def test_oa_cut_generation_receives_convex_constraint_mask(monkeypatch):
     from discopt.solvers import amp as amp_mod
 
     recorded_masks = []
+    classify_calls = []
+
+    def fake_classify(model, **kwargs):
+        classify_calls.append(kwargs)
+        return OACutConvexity(objective_is_convex=True, constraint_mask=[True, False])
 
     monkeypatch.setattr(
         convexity_mod,
         "classify_oa_cut_convexity",
-        lambda model: OACutConvexity(objective_is_convex=True, constraint_mask=[True, False]),
+        fake_classify,
     )
     monkeypatch.setattr(
         amp_mod,
@@ -2398,11 +2403,15 @@ def test_oa_cut_generation_receives_convex_constraint_mask(monkeypatch):
         lambda *args, **kwargs: (np.array([1.0, 1.0], dtype=np.float64), 2.0),
     )
 
-    def fake_generate(*args, **kwargs):
+    def fake_generate_report(*args, **kwargs):
         recorded_masks.append(list(kwargs["convex_mask"]))
-        return []
+        return cutting_planes.OACutGenerationReport(cuts=[], skipped=[])
 
-    monkeypatch.setattr(cutting_planes, "generate_oa_cuts_from_evaluator", fake_generate)
+    monkeypatch.setattr(
+        cutting_planes,
+        "generate_oa_cuts_from_evaluator_report",
+        fake_generate_report,
+    )
 
     m = Model("amp_oa_mask")
     x = m.continuous("x", lb=0, ub=2, shape=(2,))
@@ -2420,7 +2429,67 @@ def test_oa_cut_generation_receives_convex_constraint_mask(monkeypatch):
     )
 
     assert result.status in ("optimal", "feasible")
+    assert classify_calls == [{"use_certificate": True}]
     assert recorded_masks == [[True, False]]
+
+
+def test_amp_oa_classification_uses_tightened_bounds_for_reciprocal_rows(monkeypatch):
+    """Root bound tightening should feed OA convexity classification."""
+    import discopt._jax.cutting_planes as cutting_planes
+    from discopt._jax.milp_relaxation import MilpRelaxationResult
+    from discopt.solvers import amp as amp_mod
+
+    recorded_masks = []
+
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_milp_with_oa_recovery",
+        lambda **kwargs: (
+            MilpRelaxationResult(
+                status="optimal",
+                objective=0.0,
+                x=np.array([1.0, 1.0], dtype=np.float64),
+            ),
+            {},
+            [],
+            1,
+        ),
+    )
+    monkeypatch.setattr(
+        amp_mod,
+        "_solve_best_nlp_candidate",
+        lambda *args, **kwargs: (np.array([1.0, 1.0], dtype=np.float64), 2.0),
+    )
+
+    def fake_generate_report(*args, **kwargs):
+        recorded_masks.append(list(kwargs["convex_mask"]))
+        return cutting_planes.OACutGenerationReport(cuts=[], skipped=[])
+
+    monkeypatch.setattr(
+        cutting_planes,
+        "generate_oa_cuts_from_evaluator_report",
+        fake_generate_report,
+    )
+
+    m = Model("amp_reciprocal_oa_bounds")
+    x = m.continuous("x", lb=0.0)
+    y = m.continuous("y", lb=0.0)
+    m.minimize(x + y)
+    m.subject_to(y >= 1 / (x + 0.1) - 0.5)
+    m.subject_to(x >= y ** (-2) - 0.5)
+    m.subject_to(4 / (x + y + 0.1) >= 1)
+
+    result = m.solve(
+        solver="amp",
+        apply_partitioning=False,
+        skip_convex_check=True,
+        presolve_bt=False,
+        max_iter=1,
+        time_limit=5,
+    )
+
+    assert result.status in ("optimal", "feasible")
+    assert recorded_masks == [[True, True, False]]
 
 
 def test_alphabb_quadratic_oa_cut_covers_issue_63_row():

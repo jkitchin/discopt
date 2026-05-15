@@ -47,6 +47,20 @@ class LinearCut(NamedTuple):
     sense: str
 
 
+class OACutSkip(NamedTuple):
+    """Structured reason an evaluator constraint did not receive a direct OA cut."""
+
+    constraint_index: int
+    reason: str
+
+
+class OACutGenerationReport(NamedTuple):
+    """Direct evaluator OA cuts plus per-row skip reasons."""
+
+    cuts: list[LinearCut]
+    skipped: list[OACutSkip]
+
+
 # ---------------------------------------------------------------------------
 # RLT (Reformulation-Linearization Technique) cuts
 #
@@ -277,9 +291,29 @@ def generate_oa_cuts_from_evaluator(
     Returns:
         List of LinearCut objects, one per constraint.
     """
+    return generate_oa_cuts_from_evaluator_report(
+        evaluator,
+        x_sol,
+        constraint_senses=constraint_senses,
+        convex_mask=convex_mask,
+    ).cuts
+
+
+def generate_oa_cuts_from_evaluator_report(
+    evaluator,
+    x_sol: np.ndarray,
+    constraint_senses: Optional[list[str]] = None,
+    convex_mask: Optional[list[bool]] = None,
+) -> OACutGenerationReport:
+    """Generate direct evaluator OA cuts and record intentionally skipped rows.
+
+    A row marked false in ``convex_mask`` is not safe for direct tangent OA, so
+    it is skipped with the ``"not_certified_convex"`` reason. The existing
+    :func:`generate_oa_cuts_from_evaluator` API returns only ``report.cuts``.
+    """
     m = evaluator.n_constraints
     if m == 0:
-        return []
+        return OACutGenerationReport(cuts=[], skipped=[])
 
     cons_vals = evaluator.evaluate_constraints(x_sol)
     jac = evaluator.evaluate_jacobian(x_sol)
@@ -288,8 +322,10 @@ def generate_oa_cuts_from_evaluator(
         constraint_senses = ["<="] * m
 
     cuts = []
+    skipped = []
     for k in range(m):
         if convex_mask is not None and not convex_mask[k]:
+            skipped.append(OACutSkip(constraint_index=k, reason="not_certified_convex"))
             continue
         grad_k = jac[k, :]
         g_k = float(cons_vals[k])
@@ -297,7 +333,7 @@ def generate_oa_cuts_from_evaluator(
         cut = generate_oa_cut(grad_k, g_k, x_sol, sense=sense)
         cuts.append(cut)
 
-    return cuts
+    return OACutGenerationReport(cuts=cuts, skipped=skipped)
 
 
 QuadraticPolynomial = dict[tuple[int, ...], float]
