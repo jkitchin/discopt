@@ -1465,6 +1465,151 @@ class QuadraticEqualityBoundsRule(NonlinearBoundTighteningRule):
         return tightened_lb, tightened_ub
 
 
+class SquareDifferenceLowerBoundRule(NonlinearBoundTighteningRule):
+    """Tighten the leading square in equalities like ``a*x^2 = b*y^2 + c*z^2``."""
+
+    name = "square_difference_lower_bound"
+
+    def _collect_square_sum(
+        self,
+        expr,
+        scale: float,
+        metadata: FlatVariableMetadata,
+        square_coeffs: dict[int, float],
+    ) -> Optional[float]:
+        const_val = _constant_value(expr)
+        if const_val is not None:
+            return scale * const_val
+
+        match = _match_scaled_square_var(expr, scale, metadata)
+        if match is not None:
+            flat_idx, coeff = match
+            square_coeffs[flat_idx] = square_coeffs.get(flat_idx, 0.0) + coeff
+            return 0.0
+
+        if isinstance(expr, UnaryOp) and expr.op == "neg":
+            return self._collect_square_sum(expr.operand, -scale, metadata, square_coeffs)
+
+        if isinstance(expr, BinaryOp):
+            if expr.op == "+":
+                left = self._collect_square_sum(expr.left, scale, metadata, square_coeffs)
+                right = self._collect_square_sum(expr.right, scale, metadata, square_coeffs)
+                if left is None or right is None:
+                    return None
+                return left + right
+            if expr.op == "-":
+                left = self._collect_square_sum(expr.left, scale, metadata, square_coeffs)
+                right = self._collect_square_sum(expr.right, -scale, metadata, square_coeffs)
+                if left is None or right is None:
+                    return None
+                return left + right
+            if expr.op == "*":
+                left_const = _constant_value(expr.left)
+                if left_const is not None:
+                    return self._collect_square_sum(
+                        expr.right, scale * left_const, metadata, square_coeffs
+                    )
+                right_const = _constant_value(expr.right)
+                if right_const is not None:
+                    return self._collect_square_sum(
+                        expr.left, scale * right_const, metadata, square_coeffs
+                    )
+            if expr.op == "/":
+                right_const = _constant_value(expr.right)
+                if right_const is not None:
+                    return self._collect_square_sum(
+                        expr.left, scale / right_const, metadata, square_coeffs
+                    )
+
+        return None
+
+    def tighten(
+        self,
+        model: Model,
+        flat_lb: np.ndarray,
+        flat_ub: np.ndarray,
+        metadata: FlatVariableMetadata,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        tightened_lb = flat_lb.copy()
+        tightened_ub = flat_ub.copy()
+
+        for constraint in model._constraints:
+            if getattr(constraint, "sense", None) != "==":
+                continue
+
+            square_coeffs: dict[int, float] = {}
+            constant = self._collect_square_sum(constraint.body, 1.0, metadata, square_coeffs)
+            if constant is None:
+                continue
+            constant_term = float(constant)
+
+            square_coeffs = {
+                idx: coeff for idx, coeff in square_coeffs.items() if abs(coeff) > 1e-12
+            }
+            negative = [(idx, coeff) for idx, coeff in square_coeffs.items() if coeff < -1e-12]
+            positive = [(idx, coeff) for idx, coeff in square_coeffs.items() if coeff > 1e-12]
+            if len(negative) != 1 or not positive:
+                continue
+
+            target_idx, target_coeff = negative[0]
+            target_scale = -target_coeff
+            rhs_lb = constant_term
+            rhs_ub = constant_term
+            for flat_idx, coeff in positive:
+                sq_lb, sq_ub = QuadraticEqualityBoundsRule._square_interval(
+                    float(tightened_lb[flat_idx]),
+                    float(tightened_ub[flat_idx]),
+                )
+                rhs_lb += coeff * sq_lb
+                rhs_ub += coeff * sq_ub
+
+            if rhs_ub < -1e-12:
+                _prove_infeasible(
+                    self.name,
+                    constraint,
+                    "positive square activity cannot balance the negative square",
+                )
+
+            feasible_square_lb = max(0.0, rhs_lb / target_scale)
+            feasible_square_ub = max(0.0, rhs_ub / target_scale)
+            if feasible_square_lb > feasible_square_ub + 1e-12:
+                _prove_infeasible(
+                    self.name,
+                    constraint,
+                    "required square interval is empty",
+                )
+
+            interval = QuadraticEqualityBoundsRule._intersect_square_preimage(
+                float(tightened_lb[target_idx]),
+                float(tightened_ub[target_idx]),
+                feasible_square_lb,
+                feasible_square_ub,
+            )
+            if interval is None:
+                _prove_infeasible(
+                    self.name,
+                    constraint,
+                    f"required interval for flat variable {target_idx} is empty",
+                )
+
+            new_lb, new_ub = _apply_integrality(
+                interval[0],
+                interval[1],
+                metadata.flat_var_types[target_idx],
+            )
+            if new_lb <= new_ub:
+                tightened_lb[target_idx] = new_lb
+                tightened_ub[target_idx] = new_ub
+            else:
+                _prove_infeasible(
+                    self.name,
+                    constraint,
+                    f"required interval for flat variable {target_idx} is empty",
+                )
+
+        return tightened_lb, tightened_ub
+
+
 def _match_scaled_constant_division(expr, scale: float) -> Optional[tuple[float, object]]:
     if isinstance(expr, UnaryOp) and expr.op == "neg":
         return _match_scaled_constant_division(expr.operand, -scale)
@@ -1813,6 +1958,7 @@ class ReciprocalBoundsRule(NonlinearBoundTighteningRule):
 DEFAULT_NONLINEAR_BOUND_RULES: tuple[NonlinearBoundTighteningRule, ...] = (
     MonotoneFunctionEqualityRule(),
     QuadraticEqualityBoundsRule(),
+    SquareDifferenceLowerBoundRule(),
     MonotoneFunctionBoundsRule(),
     PositiveAffineReciprocalBoundsRule(),
     NegativePowerBoundsRule(),
