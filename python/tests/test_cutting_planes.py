@@ -29,11 +29,14 @@ from discopt._jax.cutting_planes import (
     BilinearTerm,
     CutPool,
     LinearCut,
+    OACutGenerationReport,
+    OACutSkip,
     detect_bilinear_terms,
     generate_cuts_at_node,
     generate_lift_and_project_cut,
     generate_oa_cut,
     generate_oa_cuts_from_evaluator,
+    generate_oa_cuts_from_evaluator_report,
     generate_objective_oa_cut,
     generate_rlt_cuts,
     is_cut_violated,
@@ -331,6 +334,30 @@ class TestOACutsFromEvaluator:
         assert len(cuts) == 1
         np.testing.assert_allclose(cuts[0].coeffs, [1.0, 1.0], atol=1e-6)
         assert cuts[0].sense == "<="
+
+    def test_report_records_nonconvex_mask_skip_reason(self):
+        """The report exposes why direct evaluator OA skipped a row."""
+        from discopt._jax.nlp_evaluator import NLPEvaluator
+        from discopt.modeling.core import Model
+
+        m = Model("test_oa_report")
+        x = m.continuous("x", shape=(2,), lb=-2.0, ub=2.0)
+        m.minimize(x[0] + x[1])
+        m.subject_to(x[0] + x[1] <= 1.0, name="linear")
+        m.subject_to(x[0] * x[1] <= 0.25, name="bilinear")
+        evaluator = NLPEvaluator(m)
+
+        report = generate_oa_cuts_from_evaluator_report(
+            evaluator,
+            np.array([0.5, 0.5]),
+            constraint_senses=["<=", "<="],
+            convex_mask=[True, False],
+            skip_reasons=[None, "bilinear_not_direct_oa"],
+        )
+
+        assert isinstance(report, OACutGenerationReport)
+        assert len(report.cuts) == 1
+        assert report.skipped == [OACutSkip(constraint_index=1, reason="bilinear_not_direct_oa")]
 
 
 class TestOASeparation:
