@@ -40,10 +40,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 import numpy.polynomial.polynomial as np_poly
+from jax.experimental.jet import jet
 
 # ---------------------------------------------------------------------------
 # Helpers (interval arithmetic + polynomial range)
@@ -253,27 +253,27 @@ def _taylor_coefficients(f_callable, x0: float, half_width: float, degree: int) 
     so ``sum_k coeffs[k] * s^k`` approximates ``f(x0 + half_width * s)`` for
     ``s ∈ [-1, 1]``.
 
-    Derivatives are computed via repeated ``jax.grad`` on a JAX-traceable
-    wrapper. ``f_callable`` must accept and return JAX-compatible scalars
-    (the standard NumPy unary functions ``np.exp``, ``np.log``, etc. work
-    because JAX's ``jnp`` versions have the same API and ``jax.grad`` traces
-    through the chosen elementary operations of the wrapper).
+    Uses ``jax.experimental.jet.jet`` to evaluate the entire Taylor tower in a
+    single tracing pass. That replaces the older chained ``jax.grad`` approach,
+    which retraced + recompiled at every order (the dominant cost for
+    high-degree univariate compositions).
     """
-
-    def _f(u):
-        # Wrap to ensure jax can trace; rely on caller passing jax-compatible f.
-        return f_callable(u)
-
+    x0_jax = jnp.asarray(x0, dtype=jnp.float64)
+    if degree == 0:
+        return np.array([float(f_callable(x0_jax))])
+    # For x(t) = x0 + t, the input series is (1, 0, 0, ...). ``jet`` returns
+    # ``y_terms[k-1] = f^(k)(x0)`` (raw higher derivatives, not divided by k!)
+    # and ``y0 = f(x0)``.
+    series = ((1.0,) + (0.0,) * (degree - 1),)
+    y0, y_terms = jet(f_callable, (x0_jax,), series)
     coeffs = np.zeros(degree + 1)
-    deriv = _f
+    coeffs[0] = float(y0)
+    hw_pow = half_width
     factorial = 1.0
-    hw_pow = 1.0
-    for k in range(degree + 1):
-        val = float(deriv(jnp.asarray(x0, dtype=jnp.float64)))
-        coeffs[k] = val * hw_pow / factorial
-        deriv = jax.grad(deriv)
+    for k in range(1, degree + 1):
+        factorial *= k
+        coeffs[k] = float(y_terms[k - 1]) * hw_pow / factorial
         hw_pow *= half_width
-        factorial *= k + 1
     return coeffs
 
 
@@ -323,7 +323,7 @@ def compose_unary(f_callable, g: TaylorModel) -> TaylorModel:
     M = _COMPOSE_VALIDATE_GRID
     fine_s = np.linspace(-1.0, 1.0, M)
     fine_u = x0 + half_width * fine_s
-    f_fine = np.array([float(f_callable(jnp.asarray(float(u)))) for u in fine_u])
+    f_fine = np.asarray(f_callable(jnp.asarray(fine_u, dtype=jnp.float64)))
     p_fine = np_poly.polyval(fine_s, f_coeffs)
     resid = np.abs(f_fine - p_fine)
     resid_max = float(resid.max())

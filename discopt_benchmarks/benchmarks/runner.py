@@ -24,9 +24,10 @@ from benchmarks.metrics import (
 @dataclass
 class SolverConfig:
     """Configuration for a solver executable."""
+
     name: str
     command: str
-    solver_type: str          # "internal" (discopt) or "external"
+    solver_type: str  # "internal" (discopt) or "external"
     nl_interface: bool = False
     options: dict = None
 
@@ -38,6 +39,7 @@ class SolverConfig:
 @dataclass
 class BenchmarkConfig:
     """Configuration for a benchmark run."""
+
     suite_name: str
     time_limit: int = 3600
     memory_limit_mb: int = 32768
@@ -104,12 +106,14 @@ class BenchmarkRunner:
         total = len(instances) * len(self.config.solvers) * self.config.num_runs
         completed = 0
 
-        print(f"\n{'='*70}")
+        print(f"\n{'=' * 70}")
         print(f"discopt Benchmark: {self.config.suite_name}")
-        print(f"Instances: {len(instances)} | Solvers: {len(self.config.solvers)} "
-              f"| Runs: {self.config.num_runs} | Total: {total}")
+        print(
+            f"Instances: {len(instances)} | Solvers: {len(self.config.solvers)} "
+            f"| Runs: {self.config.num_runs} | Total: {total}"
+        )
         print(f"Time limit: {self.config.time_limit}s | Memory: {self.config.memory_limit_mb}MB")
-        print(f"{'='*70}\n")
+        print(f"{'=' * 70}\n")
 
         for solver_config in self.config.solvers:
             print(f"\n--- Solver: {solver_config.name} ---")
@@ -118,17 +122,18 @@ class BenchmarkRunner:
                 best_result = None
 
                 for run_idx in range(self.config.num_runs):
-                    result = self._run_single(
-                        solver_config, instance_name, run_idx
-                    )
+                    result = self._run_single(solver_config, instance_name, run_idx)
                     run_times.append(result.wall_time)
 
                     # Keep the result from the median-time run
-                    if best_result is None or (
-                        result.is_solved and not best_result.is_solved
-                    ) or (
-                        result.is_solved and best_result.is_solved
-                        and result.wall_time < best_result.wall_time
+                    if (
+                        best_result is None
+                        or (result.is_solved and not best_result.is_solved)
+                        or (
+                            result.is_solved
+                            and best_result.is_solved
+                            and result.wall_time < best_result.wall_time
+                        )
                     ):
                         best_result = result
 
@@ -147,9 +152,7 @@ class BenchmarkRunner:
                             )
 
                 # Check determinism
-                if self.config.num_runs > 1 and all(
-                    t < float("inf") for t in run_times
-                ):
+                if self.config.num_runs > 1 and all(t < float("inf") for t in run_times):
                     cv = _coefficient_of_variation(run_times)
                     if cv > 0.1:
                         print(
@@ -217,7 +220,15 @@ class BenchmarkRunner:
         Run discopt solver on a .nl instance.
 
         Uses the Python API directly, capturing layer profiling data.
+
+        A daemon-thread watchdog joins with ``time_limit + grace`` so a
+        single hung instance (e.g. a JAX while_loop that ignored the
+        wall clock, see issue #80) cannot hold the whole sweep hostage.
+        The aborted thread is left to drain in the background; the
+        returned result reflects the time-limit verdict.
         """
+        import threading
+
         start_time = time.monotonic()
         try:
             import discopt.modeling as dm
@@ -241,12 +252,41 @@ class BenchmarkRunner:
             max_nodes = opts.pop("max_nodes", 100_000)
             opts.pop("gpu", None)  # legacy option, ignored
 
-            result = model.solve(
-                time_limit=time_limit,
-                gap_tolerance=gap_tol,
-                max_nodes=max_nodes,
-                **opts,
-            )
+            box: dict = {}
+
+            def _do_solve() -> None:
+                try:
+                    box["result"] = model.solve(
+                        time_limit=time_limit,
+                        gap_tolerance=gap_tol,
+                        max_nodes=max_nodes,
+                        **opts,
+                    )
+                except BaseException as e:  # propagate to caller
+                    box["error"] = e
+
+            grace = 30.0  # mirrors the external-solver path
+            worker = threading.Thread(target=_do_solve, daemon=True)
+            worker.start()
+            worker.join(timeout=float(time_limit) + grace)
+            if worker.is_alive():
+                # Watchdog tripped: a JAX-compiled loop or other in-process
+                # call ignored time_limit. Surface a TIME_LIMIT result and
+                # let the daemon thread drain in the background.
+                elapsed = time.monotonic() - start_time
+                print(
+                    f"  WATCHDOG {instance}: in-process solve exceeded "
+                    f"time_limit+{int(grace)}s, abandoning thread"
+                )
+                return SolveResult(
+                    instance=instance,
+                    solver=solver.name,
+                    status=SolveStatus.TIME_LIMIT,
+                    wall_time=elapsed,
+                )
+            if "error" in box:
+                raise box["error"]
+            result = box["result"]
 
             # Map discopt status to benchmark status
             status_map = {
@@ -398,6 +438,7 @@ def _coefficient_of_variation(values: list[float]) -> float:
     if len(values) < 2:
         return 0.0
     import numpy as np
+
     arr = np.array(values)
     mean = np.mean(arr)
     if mean < 1e-6:

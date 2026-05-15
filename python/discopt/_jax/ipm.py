@@ -21,6 +21,8 @@ from typing import Callable, NamedTuple, Optional
 import jax
 import jax.numpy as jnp
 
+from discopt._jax.deadline import deadline_exceeded_jax
+
 # ---------------------------------------------------------------------------
 # Data structures (NamedTuples for JAX pytree compatibility)
 # ---------------------------------------------------------------------------
@@ -1186,6 +1188,8 @@ def ipm_solve(
     g_l: Optional[jnp.ndarray] = None,
     g_u: Optional[jnp.ndarray] = None,
     options: Optional[IPMOptions] = None,
+    *,
+    check_deadline: bool = True,
 ) -> IPMState:
     """
     Solve an NLP using a pure-JAX interior point method.
@@ -1199,6 +1203,11 @@ def ipm_solve(
         g_l: Lower constraint bounds (m,).
         g_u: Upper constraint bounds (m,).
         options: IPMOptions.
+        check_deadline: When True (default), the cond_fn polls the process-
+            global wall-clock deadline via host callback so the while_loop
+            self-terminates on time-out (issue #80). Must be set to False
+            when this function is wrapped in ``jax.vmap``; the host callback
+            does not survive a batched predicate.
 
     Returns:
         Final IPMState with solution in state.x.
@@ -1226,8 +1235,20 @@ def ipm_solve(
     state = _initialize_state(obj_fn, con_fn_safe, x0, pd, opts)
     body = _make_iteration_body(obj_fn, con_fn_safe, pd, opts)
 
-    def cond(st):
-        return st.converged == 0
+    if check_deadline:
+
+        def cond(st):
+            # Self-terminate on a process-global wall-clock deadline (#80).
+            # solve_nlp_ipm's post-hoc check maps elapsed > max_wall_time to
+            # ITERATION_LIMIT, so partial state on early exit is handled.
+            return jnp.logical_and(
+                st.converged == 0,
+                jnp.logical_not(deadline_exceeded_jax()),
+            )
+    else:
+
+        def cond(st):
+            return st.converged == 0
 
     return jax.lax.while_loop(cond, body, state)  # type: ignore[no-any-return]
 
@@ -1349,9 +1370,11 @@ def solve_nlp_ipm(
         if fields:
             ipm_opts = ipm_opts._replace(**fields)
 
-    # Enforce max_wall_time by capping max_iter. The JIT-compiled
-    # jax.lax.while_loop cannot check wall clock, so we limit iterations
-    # upfront and verify after the solve (issue #5).
+    # max_wall_time backstop: the in-loop deadline check (issue #80)
+    # interrupts the JAX while_loop within ~1 host callback, but we still
+    # cross-check post-hoc so callers that pass max_wall_time without
+    # entering a deadline_scope still see the correct ITERATION_LIMIT
+    # status (issue #5).
     max_wall_time = options.get("max_wall_time") if options else None
 
     obj_fn = evaluator._obj_fn
@@ -1497,6 +1520,7 @@ def solve_nlp_batch(
             g_l,
             g_u,
             options,
+            check_deadline=False,  # host callback unsupported under vmap (#80)
         )
 
     return jax.vmap(_solve_single)(x0_batch, xl_batch, xu_batch)  # type: ignore[no-any-return]

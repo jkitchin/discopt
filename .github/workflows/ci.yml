@@ -5,6 +5,9 @@ on:
     branches: [main, amp]
   pull_request:
     branches: [main, amp]
+  schedule:
+    # Nightly coverage refresh (07:30 UTC ≈ 03:30 ET).
+    - cron: "30 7 * * *"
 
 # Cancel superseded runs on the same PR/branch — saves CI minutes when
 # pushes land in quick succession.
@@ -112,11 +115,12 @@ jobs:
 
   python-coverage:
     name: Python coverage (3.12, ubuntu)
-    # Run coverage on main pushes and on PRs explicitly opted in via the
-    # `coverage` label.  Keeping it off the default PR path is what gets
-    # the per-PR turnaround under 2 minutes (issue #68).
+    # Run coverage nightly (scheduled), or on PRs explicitly opted in via the
+    # `coverage` label. Skipped on plain main pushes so the post-merge wall
+    # clock isn't gated on the coverage instrumentation tax (~100s vs the
+    # fast job). See issue #68 for the per-PR/main turnaround target.
     if: >-
-      github.event_name == 'push' ||
+      github.event_name == 'schedule' ||
       contains(github.event.pull_request.labels.*.name, 'coverage')
     runs-on: ubuntu-latest
     steps:

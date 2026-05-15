@@ -47,7 +47,16 @@ xgboost = ["xgboost>=1.7"]
 lightgbm = ["lightgbm>=4.0"]
 gnn = ["equinox>=0.13.8", "optax>=0.1"]
 learned = ["equinox>=0.13.8", "optax>=0.1"]
-dev = ["pytest", "pytest-timeout", "pytest-cov", "ruff", "mypy", "highspy", "pre-commit"]
+dev = [
+    "pytest",
+    "pytest-timeout",
+    "pytest-cov",
+    "pytest-xdist",
+    "ruff",
+    "mypy",
+    "highspy",
+    "pre-commit",
+]
 all = ["discopt[ipopt,highs,cutest,llm,gnn,nn,ml]"]
 
 [project.scripts]
@@ -70,7 +79,7 @@ include = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-extend-exclude = ["adversary/"]
+extend-exclude = ["adversary/", "python/discopt/course/"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]

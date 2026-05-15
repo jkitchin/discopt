@@ -481,6 +481,7 @@ def solve_nlp_iterative_batch(
             g_l,
             g_u,
             options,
+            check_deadline=False,  # host callback unsupported under vmap (#80)
         )
 
     return jax.vmap(_solve_single)(  # type: ignore[no-any-return]
