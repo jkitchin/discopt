@@ -1343,6 +1343,27 @@ def _is_pure_continuous(model: Model) -> bool:
     return all(v.var_type == VarType.CONTINUOUS for v in model._variables)
 
 
+def _classify_model_convexity(
+    model: Model,
+    *,
+    failure_label: str = "Convexity detection failed",
+    log_nonconvex_continuous: bool = False,
+) -> tuple[bool, bool, list[bool] | None]:
+    """Run the sound model convexity classifier once for solver dispatch."""
+    try:
+        from discopt._jax.convexity import classify_model as _classify_convexity
+
+        # use_certificate=True enables the sound interval-Hessian fallback
+        # for constraints/objective the syntactic walker leaves unproven.
+        is_convex, constraint_mask = _classify_convexity(model, use_certificate=True)
+        if log_nonconvex_continuous and not is_convex:
+            logger.info("Nonconvex continuous model detected — using spatial Branch and Bound")
+        return True, bool(is_convex), list(constraint_mask)
+    except Exception as exc:
+        logger.debug("%s: %s", failure_label, exc)
+        return False, False, None
+
+
 def solve_model(
     model: Model,
     time_limit: float = 3600.0,
@@ -1442,6 +1463,16 @@ def solve_model(
     solver : str or None, default None
         Optional global-solver selector. Use ``"amp"`` to dispatch to
         Adaptive Multivariate Partitioning instead of branch-and-bound.
+    solver="amp" options
+        The AMP backend also accepts ``rel_gap``, ``abs_tol``, ``max_iter``,
+        ``n_init_partitions``, ``partition_method``, ``milp_time_limit``,
+        ``milp_gap_tolerance``, ``presolve_bt``, ``presolve_bt_algo``,
+        ``presolve_bt_time_limit``, ``presolve_bt_mip_time_limit``,
+        ``apply_partitioning``, ``disc_var_pick``, ``partition_scaling_factor``,
+        ``partition_scaling_factor_update``, ``disc_add_partition_method``,
+        ``disc_abs_width_tol``, ``convhull_formulation``, ``convhull_ebd``,
+        ``convhull_ebd_encoding``, ``use_start_as_incumbent``, ``obbt_at_root``,
+        ``obbt_with_cutoff``, ``alphabb_cutoff_obbt``, and ``obbt_time_limit``.
 
     Returns
     -------
@@ -1738,22 +1769,20 @@ def solve_model(
     _pure_continuous_is_convex = False
     _pure_continuous_constraint_mask = None
     if _pure_continuous and not skip_convex_check:
-        try:
-            from discopt._jax.convexity import classify_model as _classify_convexity
-
-            # use_certificate=True enables the sound interval-Hessian
-            # fallback for constraints/objective the syntactic walker
-            # leaves unproven — tightens UNKNOWN to CONVEX when provable
-            # on the root box.  For QPs this must run before QP dispatch so
-            # indefinite pure-continuous QPs do not use the convex QP solver.
-            is_convex, constraint_mask = _classify_convexity(model, use_certificate=True)
-            _pure_continuous_convexity_known = True
-            _pure_continuous_is_convex = is_convex
-            _pure_continuous_constraint_mask = constraint_mask
-            if not is_convex:
-                logger.info("Nonconvex continuous model detected — using spatial Branch and Bound")
-        except Exception as exc:
-            logger.debug("Convex fast path detection failed: %s", exc)
+        # For QPs this must run before QP dispatch so indefinite
+        # pure-continuous QPs do not use the convex QP solver.
+        (
+            _pure_continuous_convexity_known,
+            _pure_continuous_is_convex,
+            _pure_continuous_constraint_mask,
+        ) = _classify_model_convexity(
+            model,
+            failure_label="Convex fast path detection failed",
+            log_nonconvex_continuous=True,
+        )
+    _root_convexity_known = _pure_continuous_convexity_known
+    _root_is_convex = _pure_continuous_is_convex
+    _root_constraint_mask = _pure_continuous_constraint_mask
 
     # --- Explicit NLP-BB override: bypass specialized solvers ---
     if nlp_bb is True and not _pure_continuous:
@@ -1859,31 +1888,32 @@ def solve_model(
     # Also skip when lazy constraints are provided (they need the cut pool
     # infrastructure from the full spatial B&B loop).
     if nlp_bb is None and lazy_constraints is None:
-        try:
-            from discopt._jax.convexity import classify_model as _cls_conv
-
-            _is_conv, _ = _cls_conv(model, use_certificate=True)
-            if _is_conv:
-                logger.info("Convex MINLP detected, using NLP-BB (nonlinear Branch and Bound)")
-                return _solve_nlp_bb(
+        if not _root_convexity_known:
+            _root_convexity_known, _root_is_convex, _root_constraint_mask = (
+                _classify_model_convexity(
                     model,
-                    time_limit,
-                    gap_tolerance,
-                    batch_size,
-                    strategy,
-                    max_nodes,
-                    t_start,
-                    nlp_solver,
-                    skip_convex_check=skip_convex_check,
-                    initial_point=initial_point,
-                    lazy_constraints=lazy_constraints,
-                    incumbent_callback=incumbent_callback,
-                    node_callback=node_callback,
-                    in_tree_presolve_stride=in_tree_presolve_stride,
-                    in_tree_presolve_repr=_model_repr,
+                    failure_label="Convex MINLP detection failed",
                 )
-        except Exception:
-            pass
+            )
+        if _root_convexity_known and _root_is_convex:
+            logger.info("Convex MINLP detected, using NLP-BB (nonlinear Branch and Bound)")
+            return _solve_nlp_bb(
+                model,
+                time_limit,
+                gap_tolerance,
+                batch_size,
+                strategy,
+                max_nodes,
+                t_start,
+                nlp_solver,
+                skip_convex_check=skip_convex_check,
+                initial_point=initial_point,
+                lazy_constraints=lazy_constraints,
+                incumbent_callback=incumbent_callback,
+                node_callback=node_callback,
+                in_tree_presolve_stride=in_tree_presolve_stride,
+                in_tree_presolve_repr=_model_repr,
+            )
 
     # --- Extract variable info ---
     n_vars, lb, ub, int_offsets, int_sizes = _extract_variable_info(model)
@@ -1977,30 +2007,25 @@ def solve_model(
     _model_is_convex = False
     _oa_enabled = False
     _convex_constraint_mask = None
-    if _pure_continuous_convexity_known:
-        _model_is_convex = _pure_continuous_is_convex
-        _convex_constraint_mask = _pure_continuous_constraint_mask or []
+    if _root_convexity_known:
+        _model_is_convex = _root_is_convex
+        _convex_constraint_mask = _root_constraint_mask or []
         if _model_is_convex:
             logger.info("Model detected as convex — NLP solutions are valid lower bounds")
         if cutting_planes and any(_convex_constraint_mask):
             _oa_enabled = True
     else:
-        try:
-            from discopt._jax.convexity import classify_model as _classify_model
-
-            # use_certificate consults the sound interval-Hessian fallback
-            # for constraints the syntactic walker leaves unproven. Tightens
-            # _convex_constraint_mask entries to True when the certificate
-            # proves convexity on the root box — enabling OA cuts and the
-            # αBB skip below for structurally-convex problems whose
-            # convexity the DCP walker alone cannot recognise.
-            _model_is_convex, _convex_constraint_mask = _classify_model(model, use_certificate=True)
+        _root_convexity_known, _root_is_convex, _root_constraint_mask = _classify_model_convexity(
+            model
+        )
+        if _root_convexity_known:
+            _model_is_convex = _root_is_convex
+            _convex_constraint_mask = _root_constraint_mask or []
             if _model_is_convex:
                 logger.info("Model detected as convex — NLP solutions are valid lower bounds")
             if cutting_planes and any(_convex_constraint_mask):
                 _oa_enabled = True
-        except Exception as exc:
-            logger.debug("Convexity detection failed: %s", exc)
+        else:
             if cutting_planes and model._constraints:
                 _convex_constraint_mask = [False] * len(model._constraints)
 

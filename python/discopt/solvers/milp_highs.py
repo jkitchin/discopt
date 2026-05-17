@@ -121,6 +121,8 @@ def solve_milp(
         return MILPResult(status=SolveStatus.ERROR)
 
     run_status = h.run()
+    if run_status not in nonfatal_statuses:
+        return MILPResult(status=SolveStatus.ERROR)
 
     model_status = h.getModelStatus()
     status = _STATUS_MAP.get(model_status, SolveStatus.ERROR)

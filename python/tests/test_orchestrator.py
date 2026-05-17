@@ -403,6 +403,12 @@ class TestDeterminism:
 # ──────────────────────────────────────────────────────────
 
 
+def test_solve_result_declares_mip_count_field():
+    result = SolveResult(status="optimal", mip_count=3)
+
+    assert result.mip_count == 3
+
+
 @pytest.mark.slow
 class TestSolveResult:
     """Test SolveResult API methods."""

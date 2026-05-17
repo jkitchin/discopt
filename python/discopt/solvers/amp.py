@@ -24,9 +24,10 @@ from __future__ import annotations
 import itertools
 import logging
 import time
+from dataclasses import dataclass
 from functools import lru_cache
 from importlib.util import find_spec
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, cast
 
 import numpy as np
 
@@ -114,6 +115,39 @@ def _apply_flat_bounds_to_model(model: Model, lb: np.ndarray, ub: np.ndarray) ->
         var.lb = np.asarray(lb[offset : offset + size], dtype=np.float64).reshape(var.shape).copy()
         var.ub = np.asarray(ub[offset : offset + size], dtype=np.float64).reshape(var.shape).copy()
         offset += size
+
+
+def _repair_inverted_bounds(
+    lb: np.ndarray,
+    ub: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Snap numerically inverted intervals to their midpoint."""
+    bad = lb > ub
+    if not np.any(bad):
+        return lb, ub
+
+    repaired_lb = np.array(lb, dtype=np.float64, copy=True)
+    repaired_ub = np.array(ub, dtype=np.float64, copy=True)
+    midpoint = 0.5 * (repaired_lb[bad] + repaired_ub[bad])
+    repaired_lb[bad] = midpoint
+    repaired_ub[bad] = midpoint
+    return repaired_lb, repaired_ub
+
+
+@dataclass
+class _AmpCutoffState:
+    """Mutable cutoff-tightening state carried by AMP OA cut generation."""
+
+    flat_lb: np.ndarray
+    flat_ub: np.ndarray
+    part_vars: list[int]
+    part_lbs: list[float]
+    part_ubs: list[float]
+    cutoff_obbt_done: bool = False
+    last_obbt_iter: int = 0
+
+    def bounds_tuple(self) -> tuple[np.ndarray, np.ndarray, list[int], list[float], list[float]]:
+        return self.flat_lb, self.flat_ub, self.part_vars, self.part_lbs, self.part_ubs
 
 
 def _refresh_partitions_for_bounds(
@@ -463,50 +497,47 @@ def _solve_nlp_subproblem(
         ub_clip = np.clip(ub, -1e8, 1e8)
         x0_clipped = np.clip(x0, lb_clip, ub_clip)
         local_deadline = time.perf_counter() + time_limit if time_limit is not None else None
-        model = evaluator._model
-        saved_bounds = _snapshot_variable_bounds(model)
-        _apply_flat_bounds_to_model(model, lb, ub)
-        try:
-            solver_sequence = [nlp_solver]
-            if nlp_solver == "ipm" and _has_cyipopt():
-                # The pure-JAX IPM is less robust on the tightly fixed integer
-                # subproblems used in AMP's local incumbent search. Retry with
-                # Ipopt before giving up so feasible incumbents are not missed.
-                solver_sequence.append("ipopt")
+        from discopt.solver import _BoundOverrideEvaluator
 
-            result = None
-            for solver_name in solver_sequence:
-                remaining = _remaining_wall_time(local_deadline)
-                if remaining is not None and remaining <= 0.0:
-                    break
-                options: dict[str, float | int] = {"print_level": 0, "max_iter": 300}
+        backend_evaluator = _BoundOverrideEvaluator(evaluator, lb, ub)
+        solver_sequence = [nlp_solver]
+        if nlp_solver == "ipm" and _has_cyipopt():
+            # The pure-JAX IPM is less robust on the tightly fixed integer
+            # subproblems used in AMP's local incumbent search. Retry with
+            # Ipopt before giving up so feasible incumbents are not missed.
+            solver_sequence.append("ipopt")
+
+        result = None
+        for solver_name in solver_sequence:
+            remaining = _remaining_wall_time(local_deadline)
+            if remaining is not None and remaining <= 0.0:
+                break
+            options: dict[str, float | int] = {"print_level": 0, "max_iter": 300}
+            if remaining is not None:
+                options["max_wall_time"] = max(remaining, 0.05)
+            if solver_name == "ipm" and hasattr(evaluator, "_obj_fn"):
+                from discopt._jax.ipm import solve_nlp_ipm
+
+                trial = solve_nlp_ipm(
+                    backend_evaluator,
+                    x0_clipped,
+                    options=options,
+                )
+            else:
+                from discopt.solvers.nlp_ipopt import solve_nlp
+
                 if remaining is not None:
-                    options["max_wall_time"] = max(remaining, 0.05)
-                if solver_name == "ipm" and hasattr(evaluator, "_obj_fn"):
-                    from discopt._jax.ipm import solve_nlp_ipm
+                    options["max_cpu_time"] = max(remaining, 0.05)
+                trial = solve_nlp(
+                    cast(Any, backend_evaluator),
+                    x0_clipped,
+                    options=options,
+                )
+            result = trial
+            from discopt.solvers import SolveStatus
 
-                    trial = solve_nlp_ipm(
-                        evaluator,
-                        x0_clipped,
-                        options=options,
-                    )
-                else:
-                    from discopt.solvers.nlp_ipopt import solve_nlp
-
-                    if remaining is not None:
-                        options["max_cpu_time"] = max(remaining, 0.05)
-                    trial = solve_nlp(
-                        evaluator,
-                        x0_clipped,
-                        options=options,
-                    )
-                result = trial
-                from discopt.solvers import SolveStatus
-
-                if trial.status == SolveStatus.OPTIMAL:
-                    break
-        finally:
-            _restore_variable_bounds(saved_bounds)
+            if trial.status == SolveStatus.OPTIMAL:
+                break
 
         from discopt.solvers import SolveStatus
 
@@ -1952,13 +1983,7 @@ def _run_cutoff_obbt(
 
         tight_lb = np.maximum(flat_lb, result.tightened_lb)
         tight_ub = np.minimum(flat_ub, result.tightened_ub)
-        bad = tight_lb > tight_ub
-        if np.any(bad):
-            mid = 0.5 * (tight_lb[bad] + tight_ub[bad])
-            tight_lb = tight_lb.copy()
-            tight_ub = tight_ub.copy()
-            tight_lb[bad] = mid
-            tight_ub[bad] = mid
+        tight_lb, tight_ub = _repair_inverted_bounds(tight_lb, tight_ub)
         _apply_flat_bounds_to_model(model, tight_lb, tight_ub)
         flat_lb, flat_ub = tight_lb, tight_ub
         part_vars, part_lbs, part_ubs = _refresh_partitions_for_bounds(
@@ -2178,10 +2203,8 @@ def _solve_amp_impl(
     n_orig = sum(v.size for v in model._variables)
     flat_lb, flat_ub = flat_variable_bounds(model)
     initial_point_arr = _normalize_initial_point(initial_point, n_orig, flat_lb, flat_ub)
-    original_variable_bounds = _snapshot_variable_bounds(model)
 
     def _finish(result: SolveResult) -> SolveResult:
-        _restore_variable_bounds(original_variable_bounds)
         return result
 
     if pure_continuous and not skip_convex_check:
@@ -2436,13 +2459,7 @@ def _solve_amp_impl(
                 tight_ub = np.minimum(flat_ub, _obbt.tightened_ub)
                 # Soundness: don't cross — a numerical glitch could in principle
                 # tighten lb past ub by a hair; clamp to avoid infeasibility.
-                bad = tight_lb > tight_ub
-                if np.any(bad):
-                    mid = 0.5 * (tight_lb[bad] + tight_ub[bad])
-                    tight_lb = tight_lb.copy()
-                    tight_ub = tight_ub.copy()
-                    tight_lb[bad] = mid
-                    tight_ub[bad] = mid
+                tight_lb, tight_ub = _repair_inverted_bounds(tight_lb, tight_ub)
                 _apply_flat_bounds_to_model(model, tight_lb, tight_ub)
                 flat_lb, flat_ub = tight_lb, tight_ub
                 logger.info(
@@ -2515,8 +2532,8 @@ def _solve_amp_impl(
     oa_cuts: list = []  # accumulated OA linearizations from NLP incumbents
     mip_count = 0
     termination_reason = "iteration_limit"
-    _cutoff_obbt_done = False
-    _last_obbt_iter = 0
+    cutoff_obbt_done = False
+    last_obbt_iter = 0
     _obbt_period = 5
 
     def _append_linearized_cuts(cuts) -> int:
@@ -2540,13 +2557,11 @@ def _solve_amp_impl(
     def _add_incumbent_oa_cuts_after_cutoff_tightening(
         x_incumbent: np.ndarray,
         iteration_idx: int,
-    ) -> int:
+        state: _AmpCutoffState,
+    ) -> tuple[int, _AmpCutoffState]:
         """Append direct OA, run cutoff tightening, then append alpha-BB OA cuts."""
-        nonlocal flat_lb, flat_ub, part_vars, part_lbs, part_ubs
-        nonlocal _cutoff_obbt_done, _last_obbt_iter
-
         if evaluator.n_constraints <= 0:
-            return 0
+            return 0, state
 
         appended = 0
         try:
@@ -2575,47 +2590,59 @@ def _solve_amp_impl(
             has_nonconvex_oa_row = not all(oa_convexity.constraint_mask)
             had_effectively_unbounded = any(
                 not is_effectively_finite(float(value))
-                for value in np.concatenate([flat_lb, flat_ub])
+                for value in np.concatenate([state.flat_lb, state.flat_ub])
             )
             if has_nonconvex_oa_row and UB < np.inf:
                 cutoff_lb, cutoff_ub = _tighten_bounds_with_objective_cutoff(
                     model,
-                    flat_lb,
-                    flat_ub,
+                    state.flat_lb,
+                    state.flat_ub,
                     UB,
                 )
-                if np.any(cutoff_lb > flat_lb + 1e-10) or np.any(cutoff_ub < flat_ub - 1e-10):
-                    flat_lb = np.maximum(flat_lb, cutoff_lb)
-                    flat_ub = np.minimum(flat_ub, cutoff_ub)
-                    _apply_flat_bounds_to_model(model, flat_lb, flat_ub)
+                if np.any(cutoff_lb > state.flat_lb + 1e-10) or np.any(
+                    cutoff_ub < state.flat_ub - 1e-10
+                ):
+                    state.flat_lb = np.maximum(state.flat_lb, cutoff_lb)
+                    state.flat_ub = np.minimum(state.flat_ub, cutoff_ub)
+                    state.flat_lb, state.flat_ub = _repair_inverted_bounds(
+                        state.flat_lb,
+                        state.flat_ub,
+                    )
+                    _apply_flat_bounds_to_model(model, state.flat_lb, state.flat_ub)
                     try:
                         from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
 
                         fbbt_lb, fbbt_ub, fbbt_infeasible, _fbbt_changed = (
                             tighten_root_bounds_with_fbbt(
                                 model,
-                                flat_lb,
-                                flat_ub,
+                                state.flat_lb,
+                                state.flat_ub,
                                 int_offsets,
                                 int_sizes,
                             )
                         )
                         if not fbbt_infeasible:
-                            flat_lb = np.maximum(flat_lb, fbbt_lb)
-                            flat_ub = np.minimum(flat_ub, fbbt_ub)
+                            state.flat_lb = np.maximum(state.flat_lb, fbbt_lb)
+                            state.flat_ub = np.minimum(state.flat_ub, fbbt_ub)
+                            state.flat_lb, state.flat_ub = _repair_inverted_bounds(
+                                state.flat_lb,
+                                state.flat_ub,
+                            )
                     except Exception as _cutoff_fbbt_err:
                         logger.debug(
                             "AMP objective cutoff FBBT skipped: %s",
                             _cutoff_fbbt_err,
                         )
-                    part_vars, part_lbs, part_ubs = _refresh_partitions_for_bounds(
-                        model,
-                        disc_state,
-                        flat_lb,
-                        flat_ub,
-                        part_vars,
-                        disc_abs_width_tol,
-                        n_init_partitions,
+                    state.part_vars, state.part_lbs, state.part_ubs = (
+                        _refresh_partitions_for_bounds(
+                            model,
+                            disc_state,
+                            state.flat_lb,
+                            state.flat_ub,
+                            state.part_vars,
+                            disc_abs_width_tol,
+                            n_init_partitions,
+                        )
                     )
                     logger.info(
                         "AMP objective cutoff tightened bounds before alpha-BB OA generation"
@@ -2624,7 +2651,7 @@ def _solve_amp_impl(
             remaining_for_cutoff_obbt = _remaining_wall_time(deadline)
             if (
                 UB < np.inf
-                and not _cutoff_obbt_done
+                and not state.cutoff_obbt_done
                 and remaining_for_cutoff_obbt is not None
                 and remaining_for_cutoff_obbt > 0.0
                 and (
@@ -2632,19 +2659,25 @@ def _solve_amp_impl(
                     or (alphabb_cutoff_obbt and has_nonconvex_oa_row and had_effectively_unbounded)
                 )
             ):
-                _cutoff_obbt_done = True
-                flat_lb, flat_ub, part_vars, part_lbs, part_ubs = _run_cutoff_obbt(
+                state.cutoff_obbt_done = True
+                (
+                    state.flat_lb,
+                    state.flat_ub,
+                    state.part_vars,
+                    state.part_lbs,
+                    state.part_ubs,
+                ) = _run_cutoff_obbt(
                     model=model,
                     terms=terms,
                     disc_state=disc_state,
                     oa_cuts=oa_cuts,
                     convhull_mode=convhull_mode,
                     UB=UB,
-                    flat_lb=flat_lb,
-                    flat_ub=flat_ub,
-                    part_vars=part_vars,
-                    part_lbs=part_lbs,
-                    part_ubs=part_ubs,
+                    flat_lb=state.flat_lb,
+                    flat_ub=state.flat_ub,
+                    part_vars=state.part_vars,
+                    part_lbs=state.part_lbs,
+                    part_ubs=state.part_ubs,
                     n_orig=n_orig,
                     obbt_time_limit=obbt_time_limit,
                     partition_scaling_factor=partition_scaling_factor,
@@ -2654,14 +2687,14 @@ def _solve_amp_impl(
                     iteration=iteration_idx,
                     from_min_space=_from_minimization_space,
                 )
-                _last_obbt_iter = iteration_idx
+                state.last_obbt_iter = iteration_idx
 
             try:
                 alphabb_cuts = generate_alphabb_quadratic_oa_cuts_from_evaluator(
                     evaluator,
                     _x_orig,
-                    flat_lb,
-                    flat_ub,
+                    state.flat_lb,
+                    state.flat_ub,
                     constraint_senses=_senses,
                     convex_mask=oa_convexity.constraint_mask,
                 )
@@ -2675,7 +2708,7 @@ def _solve_amp_impl(
             _prune_oa_cuts(oa_cuts)
         except Exception as _oa_err:
             logger.debug("AMP: OA cut computation failed: %s", _oa_err)
-        return appended
+        return appended, state
 
     for iteration in range(1, max_iter + 1):
         elapsed = time.perf_counter() - t_start
@@ -2761,10 +2794,25 @@ def _solve_amp_impl(
                                     else float(recovered.objective)
                                 )
                                 n_before = len(oa_cuts)
-                                _add_incumbent_oa_cuts_after_cutoff_tightening(
+                                cutoff_state = _AmpCutoffState(
+                                    flat_lb,
+                                    flat_ub,
+                                    part_vars,
+                                    part_lbs,
+                                    part_ubs,
+                                    cutoff_obbt_done,
+                                    last_obbt_iter,
+                                )
+                                _, cutoff_state = _add_incumbent_oa_cuts_after_cutoff_tightening(
                                     incumbent,
                                     iteration,
+                                    cutoff_state,
                                 )
+                                flat_lb, flat_ub, part_vars, part_lbs, part_ubs = (
+                                    cutoff_state.bounds_tuple()
+                                )
+                                cutoff_obbt_done = cutoff_state.cutoff_obbt_done
+                                last_obbt_iter = cutoff_state.last_obbt_iter
                                 if len(oa_cuts) > n_before:
                                     termination_reason = "iteration_limit"
                                     logger.info(
@@ -2851,7 +2899,23 @@ def _solve_amp_impl(
                 # Accumulate OA tangent cuts at this NLP solution.  Direct
                 # convex OA cuts are appended first, then cutoff tightening runs
                 # before alpha-BB tries to build cuts that require finite boxes.
-                _add_incumbent_oa_cuts_after_cutoff_tightening(x_nlp, iteration)
+                cutoff_state = _AmpCutoffState(
+                    flat_lb,
+                    flat_ub,
+                    part_vars,
+                    part_lbs,
+                    part_ubs,
+                    cutoff_obbt_done,
+                    last_obbt_iter,
+                )
+                _, cutoff_state = _add_incumbent_oa_cuts_after_cutoff_tightening(
+                    x_nlp,
+                    iteration,
+                    cutoff_state,
+                )
+                flat_lb, flat_ub, part_vars, part_lbs, part_ubs = cutoff_state.bounds_tuple()
+                cutoff_obbt_done = cutoff_state.cutoff_obbt_done
+                last_obbt_iter = cutoff_state.last_obbt_iter
 
         # ── Periodic cutoff OBBT ─────────────────────────────────────────────
         # After the first incumbent OBBT, re-run periodically as partitioning
@@ -2859,9 +2923,9 @@ def _solve_amp_impl(
         # without a new incumbent.
         if (
             obbt_with_cutoff
-            and _cutoff_obbt_done
+            and cutoff_obbt_done
             and UB < np.inf
-            and iteration - _last_obbt_iter >= _obbt_period
+            and iteration - last_obbt_iter >= _obbt_period
         ):
             flat_lb, flat_ub, part_vars, part_lbs, part_ubs = _run_cutoff_obbt(
                 model=model,
@@ -2884,7 +2948,7 @@ def _solve_amp_impl(
                 iteration=iteration,
                 from_min_space=_from_minimization_space,
             )
-            _last_obbt_iter = iteration
+            last_obbt_iter = iteration
 
         # ── Step 3: Gap check ────────────────────────────────────────────────
         if iteration_callback is not None:

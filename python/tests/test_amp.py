@@ -337,7 +337,7 @@ def test_amp_reports_shifted_square_minlptests_case_infeasible():
 
 
 def test_solve_nlp_subproblem_retries_ipopt_and_restores_bounds(monkeypatch):
-    """AMP local NLP recovery should retry Ipopt and restore temporary fixed bounds."""
+    """AMP local NLP recovery should retry Ipopt without mutating model bounds."""
     import discopt._jax.ipm as ipm_mod
     import discopt.solvers.nlp_ipopt as ipopt_mod
     from discopt.solvers import NLPResult, SolveStatus
@@ -357,15 +357,18 @@ def test_solve_nlp_subproblem_retries_ipopt_and_restores_bounds(monkeypatch):
             return float((x_flat[0] - 3.0) ** 2)
 
     calls = []
+    seen_bounds = []
 
     def fake_ipm(evaluator, x0, options):
-        del evaluator, x0, options
+        del x0, options
         calls.append("ipm")
+        seen_bounds.append(evaluator.variable_bounds)
         return NLPResult(status=SolveStatus.ERROR)
 
     def fake_ipopt(evaluator, x0, options):
-        del evaluator, options
+        del options
         calls.append("ipopt")
+        seen_bounds.append(evaluator.variable_bounds)
         return NLPResult(status=SolveStatus.OPTIMAL, x=np.array([3.0]), objective=0.0)
 
     monkeypatch.setattr(amp_mod, "_has_cyipopt", lambda: True)
@@ -382,10 +385,27 @@ def test_solve_nlp_subproblem_retries_ipopt_and_restores_bounds(monkeypatch):
     )
 
     assert calls == ["ipm", "ipopt"]
+    for lb_seen, ub_seen in seen_bounds:
+        np.testing.assert_allclose(lb_seen, np.array([1.0]))
+        np.testing.assert_allclose(ub_seen, np.array([5.0]))
     np.testing.assert_allclose(x_opt, np.array([3.0]))
     assert obj == pytest.approx(0.0)
     np.testing.assert_allclose(x.lb, original_lb)
     np.testing.assert_allclose(x.ub, original_ub)
+
+
+def test_repair_inverted_bounds_snaps_to_midpoint():
+    from discopt.solvers import amp as amp_mod
+
+    lb, ub = amp_mod._repair_inverted_bounds(
+        np.array([0.0, 2.0], dtype=np.float64),
+        np.array([1.0, 1.999999999999], dtype=np.float64),
+    )
+
+    assert lb[0] == pytest.approx(0.0)
+    assert ub[0] == pytest.approx(1.0)
+    assert lb[1] == pytest.approx(1.9999999999995)
+    assert ub[1] == pytest.approx(1.9999999999995)
 
 
 def test_solve_nlp_subproblem_respects_expired_time_limit():
@@ -826,6 +846,34 @@ def test_issue71_milp_wrapper_accepts_nonfatal_highs_warnings():
 
     assert result.status == SolveStatus.OPTIMAL
     assert result.objective is not None
+
+
+def test_milp_wrapper_bails_on_fatal_run_status(monkeypatch):
+    """A fatal HiGHS run status must not fall through to getSolution()."""
+    from discopt.solvers import SolveStatus, milp_highs
+
+    class FakeHighs:
+        def setOptionValue(self, *args):
+            pass
+
+        def passModel(self, lp):
+            del lp
+            return milp_highs.highspy.HighsStatus.kOk
+
+        def run(self):
+            return milp_highs.highspy.HighsStatus.kError
+
+        def getModelStatus(self):
+            return milp_highs.highspy.HighsModelStatus.kOptimal
+
+        def getSolution(self):
+            raise AssertionError("getSolution should not be called after fatal run status")
+
+    monkeypatch.setattr(milp_highs.highspy, "Highs", FakeHighs)
+
+    result = milp_highs.solve_milp(c=np.array([1.0], dtype=np.float64), bounds=[(0.0, 1.0)])
+
+    assert result.status == SolveStatus.ERROR
 
 
 def test_tan_abs_minlptests_objective_linearizes_without_fallback(caplog):

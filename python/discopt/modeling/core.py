@@ -1873,6 +1873,20 @@ class Model:
         node_callback : callable, optional
             Node callback. Called after each batch of nodes is processed.
             Should accept ``(ctx, model)`` and return ``None``.
+        solver : str, optional
+            Optional backend selector. Use ``solver="amp"`` to select
+            Adaptive Multivariate Partitioning. AMP-specific keyword
+            arguments include ``rel_gap``, ``abs_tol``, ``max_iter``,
+            ``n_init_partitions``, ``partition_method``, ``milp_time_limit``,
+            ``milp_gap_tolerance``, ``presolve_bt``, ``presolve_bt_algo``,
+            ``presolve_bt_time_limit``, ``presolve_bt_mip_time_limit``,
+            ``apply_partitioning``, ``disc_var_pick``,
+            ``partition_scaling_factor``, ``partition_scaling_factor_update``,
+            ``disc_add_partition_method``, ``disc_abs_width_tol``,
+            ``convhull_formulation``, ``convhull_ebd``,
+            ``convhull_ebd_encoding``, ``use_start_as_incumbent``,
+            ``obbt_at_root``, ``obbt_with_cutoff``, ``alphabb_cutoff_obbt``,
+            and ``obbt_time_limit``.
         validate : bool, default False
             If True, run Examiner-style KKT validation on the returned
             point and attach the :class:`~discopt.validation.ExaminerReport`
