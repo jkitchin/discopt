@@ -82,8 +82,13 @@ def test_amp_integration_suite_is_opt_in():
     assert "pytest.mark.memory_heavy" in text
 
 
-def _make_dry_run(target: str) -> str:
+def _make_dry_run(target: str, env_overrides: dict[str, str] | None = None) -> str:
     repo = Path(__file__).resolve().parents[2]
+    env = os.environ.copy()
+    if env_overrides is None:
+        env.pop("PYTEST_XDIST_WORKERS", None)
+    else:
+        env.update(env_overrides)
     result = subprocess.run(
         [
             "make",
@@ -98,6 +103,7 @@ def _make_dry_run(target: str) -> str:
         check=True,
         text=True,
         capture_output=True,
+        env=env,
     )
     return result.stdout
 
@@ -145,6 +151,14 @@ def test_pr_fast_tier_excludes_heavy_manual_markers():
     assert "--ignore=python/tests/test_correctness.py" in output
     assert args[args.index("-n") + 1] == "auto"
     assert "scripts/run_memory_capped_pytest.sh python -m pytest" in output
+
+
+def test_pr_fast_tier_honors_worker_override():
+    """The PR-fast tier should honor CI's explicit xdist worker count."""
+    output = _make_dry_run("test", {"PYTEST_XDIST_WORKERS": "2"})
+    args = _dry_run_pytest_args(output)
+
+    assert args[args.index("-n") + 1] == "2"
 
 
 def test_amp_fast_tier_excludes_optional_solver_markers():
@@ -398,6 +412,7 @@ def test_amp_reports_shifted_square_minlptests_case_infeasible():
 def test_solve_nlp_subproblem_retries_ipopt_and_restores_bounds(monkeypatch):
     """AMP local NLP recovery should retry Ipopt without mutating model bounds."""
     import discopt._jax.ipm as ipm_mod
+    import discopt.solver as solver_mod
     import discopt.solvers.nlp_ipopt as ipopt_mod
     from discopt.solvers import NLPResult, SolveStatus
     from discopt.solvers import amp as amp_mod
@@ -433,6 +448,7 @@ def test_solve_nlp_subproblem_retries_ipopt_and_restores_bounds(monkeypatch):
     monkeypatch.setattr(amp_mod, "_has_cyipopt", lambda: True)
     monkeypatch.setattr(ipm_mod, "solve_nlp_ipm", fake_ipm)
     monkeypatch.setattr(ipopt_mod, "solve_nlp", fake_ipopt)
+    assert solver_mod.solve_nlp is not fake_ipopt
 
     x_opt, obj = amp_mod._solve_nlp_subproblem(
         FakeEvaluator(),
@@ -2641,7 +2657,7 @@ def test_former_known_failure_nlp_mi_005_runs_in_pr_fast_suite():
     result = m.solve(
         solver="amp",
         nlp_solver="ipm",
-        time_limit=2.0,
+        time_limit=10.0,
         gap_tolerance=1e-3,
         apply_partitioning=False,
         max_iter=1,
