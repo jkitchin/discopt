@@ -25,7 +25,7 @@ solvers
     NLP solver backends: ripopt (Rust IPM), pure-JAX IPM (vmap batch), cyipopt (Ipopt).
 """
 
-__version__ = "0.4.0"
+__version__ = "0.4.1.dev0"
 
 # Enable JAX 64-bit mode before any downstream discopt import triggers a
 # jax import. IPOPT tolerances (default tol=1e-6, bound_relax_factor=1e-8)
