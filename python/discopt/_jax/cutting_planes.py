@@ -575,7 +575,8 @@ def generate_alphabb_quadratic_oa_cuts_from_evaluator(
         if hess is None:
             continue
 
-        curved = np.flatnonzero(np.any(np.abs(hess) > hessian_tol, axis=0))
+        hess_nz = np.abs(hess) > hessian_tol
+        curved = np.flatnonzero(np.any(hess_nz, axis=0) | np.any(hess_nz, axis=1))
         if curved.size == 0:
             continue
         if not all(
@@ -585,6 +586,7 @@ def generate_alphabb_quadratic_oa_cuts_from_evaluator(
             continue
 
         hess_sub = hess[np.ix_(curved, curved)]
+        hess_sub = 0.5 * (hess_sub + hess_sub.T)
         min_eig = float(np.linalg.eigvalsh(hess_sub)[0])
         if min_eig >= -ALPHABB_EPS:
             continue

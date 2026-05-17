@@ -9,10 +9,11 @@ future rules can be added without changing solver-side plumbing.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import NoReturn, Optional, Sequence
+from typing import Callable, NoReturn, Optional, Sequence, TypeVar
 
 import numpy as np
 
+from discopt._jax._numeric import is_effectively_finite as _is_effectively_finite
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -25,12 +26,9 @@ from discopt.modeling.core import (
     VarType,
 )
 
-_EFFECTIVE_INF = 1e19
+is_effectively_finite = _is_effectively_finite
 
-
-def is_effectively_finite(value: float) -> bool:
-    """Return True when a bound is finite in the solver sense."""
-    return bool(np.isfinite(value) and abs(float(value)) < _EFFECTIVE_INF)
+_ScaledMatch = TypeVar("_ScaledMatch")
 
 
 @dataclass(frozen=True)
@@ -88,6 +86,13 @@ class NonlinearBoundTighteningInfeasible(ValueError):
     """Raised internally when a sound tightening rule proves infeasibility."""
 
 
+class _ReciprocalIntervalInfeasible:
+    """Sentinel for reciprocal interval propagation that proves infeasibility."""
+
+
+_RECIPROCAL_INTERVAL_INFEASIBLE = _ReciprocalIntervalInfeasible()
+
+
 class NonlinearBoundTighteningRule:
     """Base class for extensible nonlinear bound tightening rules."""
 
@@ -112,26 +117,42 @@ def _constant_value(expr) -> Optional[float]:
     return float(values[0])
 
 
+class _ScaledExpressionMatcher:
+    """Shared scale/negation matcher for rule-specific expression leaves."""
+
+    @staticmethod
+    def match(
+        expr,
+        scale: float,
+        leaf_match: Callable[[object, float], Optional[_ScaledMatch]],
+    ) -> Optional[_ScaledMatch]:
+        if isinstance(expr, UnaryOp) and expr.op == "neg":
+            return _ScaledExpressionMatcher.match(expr.operand, -scale, leaf_match)
+
+        if isinstance(expr, BinaryOp) and expr.op == "*":
+            left_const = _constant_value(expr.left)
+            if left_const is not None:
+                return _ScaledExpressionMatcher.match(expr.right, scale * left_const, leaf_match)
+            right_const = _constant_value(expr.right)
+            if right_const is not None:
+                return _ScaledExpressionMatcher.match(expr.left, scale * right_const, leaf_match)
+            return None
+
+        return leaf_match(expr, scale)
+
+
 def _match_scaled_linear_var(
     expr,
     scale: float,
     metadata: FlatVariableMetadata,
 ) -> Optional[tuple[int, float]]:
-    if isinstance(expr, UnaryOp) and expr.op == "neg":
-        return _match_scaled_linear_var(expr.operand, -scale, metadata)
+    def leaf_match(leaf: object, leaf_scale: float) -> Optional[tuple[int, float]]:
+        flat_idx = metadata.scalar_flat_index(leaf)
+        if flat_idx is None:
+            return None
+        return flat_idx, leaf_scale
 
-    if isinstance(expr, BinaryOp) and expr.op == "*":
-        left_const = _constant_value(expr.left)
-        if left_const is not None:
-            return _match_scaled_linear_var(expr.right, scale * left_const, metadata)
-        right_const = _constant_value(expr.right)
-        if right_const is not None:
-            return _match_scaled_linear_var(expr.left, scale * right_const, metadata)
-
-    flat_idx = metadata.scalar_flat_index(expr)
-    if flat_idx is None:
-        return None
-    return flat_idx, scale
+    return _ScaledExpressionMatcher.match(expr, scale, leaf_match)
 
 
 def _match_scaled_square_var(
@@ -139,28 +160,18 @@ def _match_scaled_square_var(
     scale: float,
     metadata: FlatVariableMetadata,
 ) -> Optional[tuple[int, float]]:
-    if isinstance(expr, UnaryOp) and expr.op == "neg":
-        return _match_scaled_square_var(expr.operand, -scale, metadata)
-
-    if isinstance(expr, BinaryOp) and expr.op == "*":
-        left_const = _constant_value(expr.left)
-        if left_const is not None:
-            return _match_scaled_square_var(expr.right, scale * left_const, metadata)
-        right_const = _constant_value(expr.right)
-        if right_const is not None:
-            return _match_scaled_square_var(expr.left, scale * right_const, metadata)
+    def leaf_match(leaf: object, leaf_scale: float) -> Optional[tuple[int, float]]:
+        if isinstance(leaf, BinaryOp) and leaf.op == "**":
+            exponent = _constant_value(leaf.right)
+            if exponent is None or abs(exponent - 2.0) > 1e-12:
+                return None
+            flat_idx = metadata.scalar_flat_index(leaf.left)
+            if flat_idx is None:
+                return None
+            return flat_idx, leaf_scale
         return None
 
-    if isinstance(expr, BinaryOp) and expr.op == "**":
-        exponent = _constant_value(expr.right)
-        if exponent is None or abs(exponent - 2.0) > 1e-12:
-            return None
-        flat_idx = metadata.scalar_flat_index(expr.left)
-        if flat_idx is None:
-            return None
-        return flat_idx, scale
-
-    return None
+    return _ScaledExpressionMatcher.match(expr, scale, leaf_match)
 
 
 def _merge_affine_matches(
@@ -486,27 +497,7 @@ class SumOfSquaresUpperBoundRule(NonlinearBoundTighteningRule):
         scale: float,
         metadata: FlatVariableMetadata,
     ) -> Optional[tuple[int, float]]:
-        if isinstance(expr, UnaryOp) and expr.op == "neg":
-            return self._match_scaled_square(expr.operand, -scale, metadata)
-
-        if isinstance(expr, BinaryOp) and expr.op == "*":
-            left_const = _constant_value(expr.left)
-            if left_const is not None:
-                return self._match_scaled_square(expr.right, scale * left_const, metadata)
-            right_const = _constant_value(expr.right)
-            if right_const is not None:
-                return self._match_scaled_square(expr.left, scale * right_const, metadata)
-
-        if isinstance(expr, BinaryOp) and expr.op == "**":
-            exponent = _constant_value(expr.right)
-            if exponent is None or abs(exponent - 2.0) > 1e-12:
-                return None
-            flat_idx = metadata.scalar_flat_index(expr.left)
-            if flat_idx is None:
-                return None
-            return flat_idx, scale
-
-        return None
+        return _match_scaled_square_var(expr, scale, metadata)
 
     def tighten(
         self,
@@ -597,27 +588,7 @@ class SqrtSumOfSquaresUpperBoundRule(NonlinearBoundTighteningRule):
         scale: float,
         metadata: FlatVariableMetadata,
     ) -> Optional[tuple[int, float]]:
-        if isinstance(expr, UnaryOp) and expr.op == "neg":
-            return self._match_scaled_square(expr.operand, -scale, metadata)
-
-        if isinstance(expr, BinaryOp) and expr.op == "*":
-            left_const = _constant_value(expr.left)
-            if left_const is not None:
-                return self._match_scaled_square(expr.right, scale * left_const, metadata)
-            right_const = _constant_value(expr.right)
-            if right_const is not None:
-                return self._match_scaled_square(expr.left, scale * right_const, metadata)
-
-        if isinstance(expr, BinaryOp) and expr.op == "**":
-            exponent = _constant_value(expr.right)
-            if exponent is None or abs(exponent - 2.0) > 1e-12:
-                return None
-            flat_idx = metadata.scalar_flat_index(expr.left)
-            if flat_idx is None:
-                return None
-            return flat_idx, scale
-
-        return None
+        return _match_scaled_square_var(expr, scale, metadata)
 
     def _match_sum_of_squares(
         self,
@@ -760,27 +731,7 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
         scale: float,
         metadata: FlatVariableMetadata,
     ) -> Optional[tuple[int, float]]:
-        if isinstance(expr, UnaryOp) and expr.op == "neg":
-            return self._match_scaled_square(expr.operand, -scale, metadata)
-
-        if isinstance(expr, BinaryOp) and expr.op == "*":
-            left_const = _constant_value(expr.left)
-            if left_const is not None:
-                return self._match_scaled_square(expr.right, scale * left_const, metadata)
-            right_const = _constant_value(expr.right)
-            if right_const is not None:
-                return self._match_scaled_square(expr.left, scale * right_const, metadata)
-
-        if isinstance(expr, BinaryOp) and expr.op == "**":
-            exponent = _constant_value(expr.right)
-            if exponent is None or abs(exponent - 2.0) > 1e-12:
-                return None
-            flat_idx = metadata.scalar_flat_index(expr.left)
-            if flat_idx is None:
-                return None
-            return flat_idx, scale
-
-        return None
+        return _match_scaled_square_var(expr, scale, metadata)
 
     def tighten(
         self,
@@ -1868,14 +1819,14 @@ class ReciprocalBoundsRule(NonlinearBoundTighteningRule):
         rhs: float,
         arg_lo: float,
         arg_hi: float,
-    ) -> tuple[Optional[float], Optional[float]]:
+    ) -> Optional[tuple[Optional[float], Optional[float]] | _ReciprocalIntervalInfeasible]:
         vals = (numerator / arg_lo, numerator / arg_hi)
         min_val = min(vals)
         max_val = max(vals)
         if rhs >= max_val - 1e-12:
-            return None, None
+            return None
         if rhs < min_val - 1e-12:
-            return None, None
+            return _RECIPROCAL_INTERVAL_INFEASIBLE
 
         threshold = numerator / rhs
         if numerator > 0.0:
@@ -1927,20 +1878,22 @@ class ReciprocalBoundsRule(NonlinearBoundTighteningRule):
                 continue
 
             rhs = -constant_term
-            vals = (numerator / arg_lo, numerator / arg_hi)
-            if rhs < min(vals) - 1e-12:
-                _prove_infeasible(
-                    self.name,
-                    constraint,
-                    "reciprocal activity exceeds the upper bound on the sign-stable box",
-                )
-
-            arg_lb, arg_ub = self._argument_interval_for_leq(
+            arg_interval = self._argument_interval_for_leq(
                 numerator,
                 rhs,
                 arg_lo,
                 arg_hi,
             )
+            if isinstance(arg_interval, _ReciprocalIntervalInfeasible):
+                _prove_infeasible(
+                    self.name,
+                    constraint,
+                    "reciprocal activity exceeds the upper bound on the sign-stable box",
+                )
+            elif arg_interval is None:
+                continue
+            else:
+                arg_lb, arg_ub = arg_interval
             _tighten_affine_argument_interval(
                 tightened_lb,
                 tightened_ub,

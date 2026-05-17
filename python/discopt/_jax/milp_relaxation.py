@@ -29,6 +29,8 @@ from typing import Optional, Union
 import numpy as np
 import scipy.sparse as sp
 
+from discopt._jax._numeric import EFFECTIVE_INF as _EFFECTIVE_INF
+from discopt._jax._numeric import is_effectively_finite as _is_effectively_finite
 from discopt._jax.discretization import DiscretizationState
 from discopt._jax.embedding import EmbeddingMap, build_embedding_map
 from discopt._jax.model_utils import flat_variable_bounds
@@ -57,7 +59,6 @@ logger = logging.getLogger(__name__)
 
 # Dedupe identical warnings emitted across repeated relaxation builds (AMP iterates).
 _warned_messages: set[str] = set()
-_EFFECTIVE_INF = 1e19
 _MAX_INTEGER_COS_ENUM = 10000
 _MAX_FINITE_EXP_ARG = float(np.log(np.finfo(np.float64).max))
 _MAX_TRIG_PIECEWISE_SPAN = 2.0 * math.pi
@@ -75,10 +76,6 @@ def _warn_once(msg: str, *args) -> None:
         return
     _warned_messages.add(formatted)
     logger.warning("%s", formatted)
-
-
-def _is_effectively_finite(value: float) -> bool:
-    return bool(np.isfinite(value) and abs(float(value)) < _EFFECTIVE_INF)
 
 
 # ---------------------------------------------------------------------------
@@ -298,13 +295,15 @@ def _tan_range(lb: float, ub: float) -> Optional[tuple[float, float]]:
     """Return tan bounds only when the interval stays on one branch."""
     if not (np.isfinite(lb) and np.isfinite(ub)):
         return None
-    margin = 1e-7
+    margin = 1e-4
     k_min = math.floor((lb - math.pi / 2.0) / math.pi) - 1
     k_max = math.ceil((ub - math.pi / 2.0) / math.pi) + 1
     for k in range(k_min, k_max + 1):
         asymptote = math.pi / 2.0 + k * math.pi
         if lb - margin <= asymptote <= ub + margin:
             return None
+    if abs(math.cos(lb)) < 1e-3 or abs(math.cos(ub)) < 1e-3:
+        return None
     vals = [math.tan(lb), math.tan(ub)]
     if not all(np.isfinite(v) for v in vals):
         return None

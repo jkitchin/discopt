@@ -832,6 +832,14 @@ def test_issue64_minlptests_minmax_objective_uses_lifted_bound(
     assert f"Cannot linearize FunctionCall: {func_name}" not in caplog.text
 
 
+def test_tan_range_rejects_near_asymptote_endpoints():
+    from discopt._jax.milp_relaxation import _tan_range
+
+    near_asymptote = np.pi / 2.0 - 5e-4
+
+    assert _tan_range(near_asymptote - 1e-5, near_asymptote) is None
+
+
 def test_issue71_milp_wrapper_accepts_nonfatal_highs_warnings():
     """HiGHS passModel warnings from tiny AMP rows must not discard valid bounds."""
     from discopt.solvers import SolveStatus
@@ -2262,6 +2270,19 @@ def test_nonlinear_tightening_reports_issue_28_contradictions(
     np.testing.assert_allclose(tightened_ub, flat_ub)
 
 
+def test_reciprocal_argument_interval_uses_explicit_infeasible_sentinel():
+    from discopt._jax import nonlinear_bound_tightening as nbt
+
+    interval = nbt.ReciprocalBoundsRule._argument_interval_for_leq(
+        numerator=1.0,
+        rhs=0.25,
+        arg_lo=1.0,
+        arg_hi=2.0,
+    )
+
+    assert interval is nbt._RECIPROCAL_INTERVAL_INFEASIBLE
+
+
 def test_nonlinear_tightening_counts_infinite_bounds_without_warning():
     """Unchanged infinite bounds should not warn while counting tightened entries."""
     import warnings
@@ -2767,6 +2788,39 @@ def test_alphabb_quadratic_oa_skips_nonquadratic_row():
     )
 
     assert cuts == []
+
+
+def test_alphabb_quadratic_oa_uses_row_col_hessian_support(monkeypatch):
+    """Column-only Hessian scans miss nonsymmetric fragments; row/col union must cut."""
+    import discopt._jax.cutting_planes as cp
+
+    class FakeEvaluator:
+        n_constraints = 1
+
+        def evaluate_constraints(self, x):
+            del x
+            return np.array([0.0], dtype=np.float64)
+
+        def evaluate_jacobian(self, x):
+            return np.zeros((1, len(x)), dtype=np.float64)
+
+    def fake_hessian(evaluator, row_idx, n_vars):
+        del evaluator, row_idx, n_vars
+        return np.array([[0.0, 0.0], [-2.0, 0.0]], dtype=np.float64)
+
+    monkeypatch.setattr(cp, "_constraint_row_quadratic_hessian", fake_hessian)
+
+    cuts = cp.generate_alphabb_quadratic_oa_cuts_from_evaluator(
+        FakeEvaluator(),
+        np.array([0.25, -0.25], dtype=np.float64),
+        np.array([-1.0, -1.0], dtype=np.float64),
+        np.array([1.0, 1.0], dtype=np.float64),
+        constraint_senses=["<="],
+        convex_mask=[False],
+    )
+
+    assert len(cuts) == 1
+    assert np.linalg.norm(cuts[0].coeffs) > 1e-12
 
 
 def test_objective_cutoff_odd_power_tightening_uses_signed_monotonic_root():
