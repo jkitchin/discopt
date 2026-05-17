@@ -7,11 +7,14 @@ validates correctness, and collects performance metrics.
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
 import sys
 import tempfile
 import time
 import traceback
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 
@@ -181,20 +184,26 @@ class CategoryBenchmarkRunner:
                 str(result_path),
             ]
             started = time.monotonic()
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
             try:
-                proc = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                )
+                stdout, stderr = proc.communicate(timeout=timeout)
             except subprocess.TimeoutExpired:
+                with suppress(ProcessLookupError):
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                proc.communicate()
                 return SolveResult(
                     instance=problem.name,
                     solver=solver_name,
                     status=SolveStatus.TIME_LIMIT,
                     wall_time=self.time_limit,
                 )
+            proc = subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
             elapsed = time.monotonic() - started
             if proc.returncode != 0 or not result_path.exists():
@@ -222,6 +231,9 @@ class CategoryBenchmarkRunner:
         if result.wall_time > self.time_limit:
             result.wall_time = self.time_limit
             if result.status == SolveStatus.OPTIMAL and result.objective is not None:
+                # The worker returned during the grace window. Keep objective and
+                # bound for gap reporting, but do not count the late certificate
+                # as an in-budget proof of optimality.
                 result.status = SolveStatus.FEASIBLE
             elif result.status in {
                 SolveStatus.OPTIMAL,

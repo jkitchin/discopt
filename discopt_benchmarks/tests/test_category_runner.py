@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -26,13 +27,57 @@ def _problem(build_fn=None) -> BenchmarkProblem:
     )
 
 
+def _fake_popen_factory(
+    worker_result=None,
+    *,
+    returncode: int = 0,
+    stdout: str = "",
+    stderr: str = "",
+    timeout_expired: bool = False,
+    on_init=None,
+):
+    class FakePopen:
+        pid = 12345
+
+        def __init__(self, cmd, **kwargs):
+            assert kwargs["stdout"] is subprocess.PIPE
+            assert kwargs["stderr"] is subprocess.PIPE
+            assert kwargs["text"] is True
+            assert kwargs["start_new_session"] is True
+            self.cmd = cmd
+            self.returncode = returncode
+            self._wrote_result = False
+            if on_init is not None:
+                on_init(self)
+
+        def communicate(self, timeout=None):
+            if timeout is not None and timeout_expired:
+                raise subprocess.TimeoutExpired(cmd=self.cmd, timeout=timeout)
+            if worker_result is not None and not timeout_expired and not self._wrote_result:
+                result = worker_result() if callable(worker_result) else worker_result
+                Path(self.cmd[-1]).write_text(
+                    json.dumps(result.to_dict()),
+                    encoding="utf-8",
+                )
+                self._wrote_result = True
+            return stdout, stderr
+
+    return FakePopen
+
+
 def test_category_runner_hard_timeout_returns_time_limit(monkeypatch):
     """The parent runner should kill over-budget workers and record TL."""
+    killed = []
 
-    def fake_run(*args, **kwargs):
-        raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs["timeout"])
-
-    monkeypatch.setattr("category_runner.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "category_runner.subprocess.Popen",
+        _fake_popen_factory(timeout_expired=True),
+    )
+    monkeypatch.setattr("category_runner.os.getpgid", lambda pid: 6789)
+    monkeypatch.setattr(
+        "category_runner.os.killpg",
+        lambda pgid, sig: killed.append((pgid, sig)),
+    )
 
     runner = CategoryBenchmarkRunner(
         category="lp",
@@ -45,24 +90,24 @@ def test_category_runner_hard_timeout_returns_time_limit(monkeypatch):
     assert result.status == SolveStatus.TIME_LIMIT
     assert result.wall_time == 3.0
     assert result.solver == "discopt_ipm"
+    assert killed == [(6789, signal.SIGKILL)]
 
 
 def test_category_runner_caps_over_limit_worker_results(monkeypatch):
     """A worker that returns during grace should not report over-limit time."""
 
-    def fake_run(cmd, **kwargs):
-        del kwargs
-        worker_result = SolveResult(
-            instance="dummy",
-            solver="discopt_ipm",
-            status=SolveStatus.OPTIMAL,
-            objective=1.0,
-            wall_time=4.0,
-        )
-        Path(cmd[-1]).write_text(json.dumps(worker_result.to_dict()), encoding="utf-8")
-        return subprocess.CompletedProcess(cmd, 0, "", "")
+    worker_result = SolveResult(
+        instance="dummy",
+        solver="discopt_ipm",
+        status=SolveStatus.OPTIMAL,
+        objective=1.0,
+        wall_time=4.0,
+    )
 
-    monkeypatch.setattr("category_runner.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "category_runner.subprocess.Popen",
+        _fake_popen_factory(worker_result),
+    )
 
     runner = CategoryBenchmarkRunner(
         category="lp",
@@ -81,18 +126,19 @@ def test_category_runner_converts_late_certificates_to_time_limit(monkeypatch):
     """Late proof certificates should not be counted as in-budget results."""
     statuses = [SolveStatus.INFEASIBLE, SolveStatus.UNBOUNDED]
 
-    def fake_run(cmd, **kwargs):
-        del kwargs
+    def next_worker_result():
         worker_result = SolveResult(
             instance="dummy",
             solver="discopt_ipm",
             status=statuses.pop(0),
             wall_time=4.0,
         )
-        Path(cmd[-1]).write_text(json.dumps(worker_result.to_dict()), encoding="utf-8")
-        return subprocess.CompletedProcess(cmd, 0, "", "")
+        return worker_result
 
-    monkeypatch.setattr("category_runner.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "category_runner.subprocess.Popen",
+        _fake_popen_factory(next_worker_result),
+    )
 
     runner = CategoryBenchmarkRunner(
         category="lp",
@@ -113,18 +159,17 @@ def test_category_runner_prints_error_worker_output_when_verbose(
 ):
     """Verbose hard-timeout runs should surface worker diagnostics on ERROR."""
 
-    def fake_run(cmd, **kwargs):
-        del kwargs
-        worker_result = SolveResult(
-            instance="dummy",
-            solver="discopt_ipm",
-            status=SolveStatus.ERROR,
-            wall_time=0.2,
-        )
-        Path(cmd[-1]).write_text(json.dumps(worker_result.to_dict()), encoding="utf-8")
-        return subprocess.CompletedProcess(cmd, 0, "worker stdout\n", "worker stderr\n")
+    worker_result = SolveResult(
+        instance="dummy",
+        solver="discopt_ipm",
+        status=SolveStatus.ERROR,
+        wall_time=0.2,
+    )
 
-    monkeypatch.setattr("category_runner.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "category_runner.subprocess.Popen",
+        _fake_popen_factory(worker_result, stdout="worker stdout\n", stderr="worker stderr\n"),
+    )
     monkeypatch.setattr("category_runner.sys.argv", ["run_category_benchmarks.py", "--verbose"])
 
     runner = CategoryBenchmarkRunner(
