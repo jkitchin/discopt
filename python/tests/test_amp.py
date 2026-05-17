@@ -3361,6 +3361,7 @@ def test_amp_restores_model_bounds_when_callback_raises_after_cutoff(monkeypatch
 def test_amp_appends_alphabb_cut_for_issue_63_quadratic(monkeypatch):
     """AMP should append an alpha-BB cut for the nonconvex quadratic row."""
     import discopt._jax.cutting_planes as cutting_planes
+    from discopt._jax.cutting_planes import OACutGenerationReport
     from discopt._jax.milp_relaxation import MilpRelaxationResult
     from discopt.solvers import amp as amp_mod
 
@@ -3385,7 +3386,11 @@ def test_amp_appends_alphabb_cut_for_issue_63_quadratic(monkeypatch):
         "_solve_best_nlp_candidate",
         lambda *args, **kwargs: (np.array([0.25, 0.5, 0.25], dtype=np.float64), 1.0),
     )
-    monkeypatch.setattr(cutting_planes, "generate_oa_cuts_from_evaluator", lambda *a, **k: [])
+    monkeypatch.setattr(
+        cutting_planes,
+        "generate_oa_cuts_from_evaluator_report",
+        lambda *a, **k: OACutGenerationReport(cuts=[], skipped=[]),
+    )
 
     def spy_prune(oa_cuts, max_cuts=128):
         captured_cuts[:] = list(oa_cuts)
