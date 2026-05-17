@@ -494,7 +494,7 @@ The detector is conservative by design: it underclaims rather than overclaims. E
   :END:
 #+LATEX: \label{sec-amp}
 
-In addition to the spatial branch and bound described in earlier sections, discopt provides AMP --- a complementary global MINLP solver based on the Adaptive Multivariate Partitioning algorithm of Nagarajan and co-workers cite:&Nagarajan2016;&Nagarajan2019, also known as the algorithm behind the Alpine solver. AMP is selected with =Model.solve(method="amp")= and is preferred when the bilinear / multilinear structure of the problem benefits from refined piecewise relaxations rather than from binary branching.
+In addition to the spatial branch and bound described in earlier sections, discopt provides AMP --- a complementary global MINLP solver based on the Adaptive Multivariate Partitioning algorithm of Nagarajan and co-workers cite:&Nagarajan2016;&Nagarajan2019, also known as the algorithm behind the Alpine solver. AMP is selected with =Model.solve(solver="amp")= and is preferred when the bilinear / multilinear structure of the problem benefits from refined piecewise relaxations rather than from binary branching.
 
 Where sBB enumerates a binary tree of variable-bound subregions, AMP iterates a single tightening loop on the *partitioning* of the continuous-variable domain. At iteration $k$ the algorithm performs three steps:
 
@@ -510,7 +510,16 @@ LB_k \;\le\; \min_{x \in \mathcal X^{\mathrm{MINLP}}} f(x) \;\le\; UB_k \quad \t
 
 so termination at the first $k$ with closed gap is a certified $\varepsilon$-optimal solution. The MILP-relaxation construction is shared with the convex-hull / Big-M formulation work used elsewhere in discopt and is implemented in =discopt._jax.milp_relaxation=. The MILP itself is solved by HiGHS through the existing solver dispatch (Section ref:sec-nlp-backends), and the NLP subproblem by any of the three NLP backends (default ripopt; cyipopt is selected automatically when available).
 
-Compared with the default sBB, AMP trades branching combinatorics for relaxation tightness: the MILP at each iteration is larger (one binary per partition cell per branched variable) but the tree is shallow because partitions, not subregions, are refined. On problems where the optimum lives on a few active partition cells --- pooling problems, water-network synthesis, generalised disjunctive programs with bilinear terms --- AMP closes the gap in tens of iterations where sBB would explore thousands of nodes. The algorithm exposes hyperparameters =rel_gap=, =max_iter=, =time_limit=, =initial_partitions=, and =refinement_strategy= (=longest-edge=, default; =equal-bisection=; =adaptive=) on =Model.solve=.
+Compared with the default sBB, AMP trades branching combinatorics for relaxation tightness: the MILP at each iteration is larger (one binary per partition cell per branched variable) but the tree is shallow because partitions, not subregions, are refined. On problems where the optimum lives on a few active partition cells --- pooling problems, water-network synthesis, generalised disjunctive programs with bilinear terms --- AMP closes the gap in tens of iterations where sBB would explore thousands of nodes.
+
+*v0.4 hardening.* The first AMP release covered the core piecewise-McCormick / disaggregated-convex-hull path on bilinear and trilinear terms. The v0.4 line extends term coverage and relaxation tightness in four directions:
+
+1. *Fractional-power lifting.* Fractional powers $x^p$ with $p \in \mathbb{Q} \setminus \mathbb{Z}$ are lifted to MILP auxiliary variables with piecewise-secant under- and over-estimators, removing the previous restriction to integer monomial degrees.
+2. *Universal piecewise-secant coverage.* Concave univariate terms ($\log$, $\sqrt{\cdot}$, fractional powers, concave exponential branches) now receive piecewise-secant outer approximations consistent with the rest of the relaxation, rather than fall back to a single tangent.
+3. *$\beta$-driven piecewise McCormick.* For products of the form $x \cdot y$ where one factor itself contains a fractional-power expression, AMP refines the partition along the variable that drives the largest envelope gap rather than the longest edge, giving faster gap closure on signomial pooling instances.
+4. *Optimisation-based bound tightening on the relaxation.* An opt-in OBBT pass on the active MILP relaxation tightens variable bounds before each MILP solve. When an incumbent is available, the cutoff is added as a constraint during OBBT, and live partition state =disc_state= is passed through so the tightening reflects the current $\mathcal P^{(k)}$ rather than the root box.
+
+The convex-hull formulation can be selected via =convhull_formulation \in \{=disaggregated=, =sos2=, =facet=\}= with the optional logarithmic Gray-code embedding =convhull_ebd=True= (giving $\log_2 |\mathcal P|$ binaries per branched variable instead of $|\mathcal P|$). The algorithm also exposes =rel_gap=, =max_iter=, =time_limit=, =n_init_partitions=, =partition_method= (=adaptive=, default; =longest-edge=; =equal-bisection=), =presolve_bt=, =obbt_at_root=, =obbt_with_cutoff=, =alphabb_cutoff_obbt=, and an =iteration_callback= hook receiving =(iteration, lower_bound, upper_bound)= for live convergence inspection on =Model.solve(solver="amp", ...)=.
 
 * Differentiable Optimization
   :PROPERTIES:

@@ -1,6 +1,6 @@
 # Development Roadmap
 
-discopt followed a 4-phase development plan. Phases 1-4 are complete. Phases 5-7 track future extensions.
+discopt followed a 4-phase development plan. Phases 1-4 are complete. Phases 5-7 track future extensions; many items in 5-7 are already shipped (see status columns).
 
 ## Phase 1: Working Solver (complete)
 
@@ -50,14 +50,17 @@ discopt followed a 4-phase development plan. Phases 1-4 are complete. Phases 5-7
 | Solver integration      | Done   | partitions, branching_policy, cutting_planes parameters |
 |                         |        |                                                         |
 
-## Phase 4: Polish + Release (nearly complete)
+## Phase 4: Polish + Release (complete)
 
 | Task                              | Status      | Description                                               |
 |-----------------------------------|-------------|-----------------------------------------------------------|
 | ripopt integration (PyO3)         | Done        | Rust IPM solver via PyO3 bindings (`nlp_solver="ripopt"`) |
 | CUTEst interface                  | Done        | PyCUTEst evaluator for NLP benchmarking                   |
-| Documentation + example notebooks | Done        | 42 notebooks, Jupyter Book site builds with zero warnings |
+| Documentation + example notebooks | Done        | 43 notebooks, Jupyter Book site builds with zero warnings |
 | Release engineering               | Done        | Published on PyPI, maturin build, CI auto-publish on tags |
+| Tiered Python test suite          | Done        | Fast PR-tier + full + integration markers (#69)           |
+| Examiner / KKT validator          | Done        | `Model.solve(validate=True)`, dual recovery (#55, #83)    |
+| Optimization course + tutor CLI   | Done        | 30-lesson curriculum + `discopt tutor` (#85)              |
 
 ## Phase 5: Problem Class Coverage
 
@@ -79,11 +82,14 @@ New problem types to make discopt competitive across the full optimization lands
 
 | Task                              | Status  | Description                                                                  |
 |-----------------------------------|---------|------------------------------------------------------------------------------|
-| QP-specific solver                | Planned | Dedicated active-set or IPM QP solver, or OSQP integration                   |
+| QP-specific solver                | Done    | HiGHS QP wrapper + JAX IPM QP path; convex QP fast path                      |
 | Benders decomposition             | Planned | Classical and generalized Benders for block-structured MILP/MINLP            |
 | Lagrangian relaxation             | Planned | Dantzig-Wolfe, column generation, subgradient/bundle methods                 |
-| Global optimization beyond B&B    | Planned | DIRECT, basin-hopping multi-start, interval-based methods                    |
-| Convex NLP fast path              | Planned | Detect convex NLPs and solve without B&B, guaranteeing global optimality     |
+| Global optimization beyond B&B    | Done    | AMP (Adaptive Multivariate Partitioning) global MINLP solver (#23, #86)      |
+| Convex NLP fast path              | Done    | SUSPECT-style convexity detector + convex-NLP fast path (#46)                |
+| Structural presolve pipeline      | Done    | 22 structural passes wired into the root presolve pipeline (#53)             |
+| Convexification roadmap M1-M11    | Done    | M2/M3 arithmetics, M4/M5/M9/M10 root passes, M6 eigenvalue bound (#51)       |
+| Deadline-aware JAX IPM            | Done    | Wall-clock `time_limit` honored inside JAX-compiled `while_loop`s (#80)      |
 
 ## Phase 7: Modeling API and Infrastructure
 

@@ -32,6 +32,8 @@ Model.solve()  -->  Python orchestrator  -->  Rust TreeManager (B&B engine)
 
 **Orchestrator** (`python/discopt/solver.py`): End-to-end `Model.solve()` connecting all components. At each B&B node: solve continuous NLP relaxation with the interior-point method {cite:p}`Nocedal2006`, prune infeasible nodes, fathom integer-feasible solutions, branch on most fractional variable.
 
+**Certified-global MINLP via AMP** (`python/discopt/solvers/amp.py`): Adaptive Multivariate Partitioning {cite:p}`Nagarajan2019` for nonconvex MINLPs (bilinear, signomial, concave). Iterates a piecewise-McCormick / convex-hull MILP relaxation against an NLP subproblem (Ipopt), refining the partition where the relaxation gap is largest. At every iteration `LB_k <= global_opt <= UB_k`, so termination yields a certified suboptimality bound. Invoked with `Model.solve(solver="amp")`; see {doc}`notebooks/amp_global_minlp`.
+
 **Parameter estimation & MBDoE** (`python/discopt/estimate.py`, `python/discopt/doe/`): Model-based parameter estimation via weighted least-squares NLP, and optimal design of experiments using Fisher Information Matrix analysis {cite:p}`Wang2022,Franceschini2008`. Key advantage: exact sensitivity Jacobians via JAX autodiff (no finite differences). Includes sequential DoE loop, identifiability analysis, and design space exploration with D/A/E/ME-optimality criteria {cite:p}`Atkinson2007`.
 
 ## Quick Start

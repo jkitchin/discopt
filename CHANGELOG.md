@@ -16,8 +16,34 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
-- Large-bound warnings now remain conservative when nonlinear tightening can
-  infer a smaller box but that tightened box is not applied to every solve path.
+## [0.4.0] - 2026-05-17
+
+### Added
+
+- **AMP global MINLP solver, hardened end-to-end** (`feat(amp)`, #86, #15, #71). Adaptive Multivariate Partitioning gets the contributor build from #44 promoted to first-class status: lifted fractional powers to MILP aux variables (`d8ebffa`); piecewise secants + cover for every nonlinear term (`cc8f741`); piecewise secants for concave fractional powers (`9248fa1`); β-driven piecewise McCormick on bilinear-with-fp (`6cd81e3`); opt-in OBBT-on-relaxation (`e595a11`); cutoff-OBBT now honors `obbt_with_cutoff` and uses live `disc_state` (#71). New README section + worked tutorial at `docs/notebooks/amp_global_minlp.ipynb`.
+- **Structural presolve pipeline (#53)** (`feat(presolve)`, #77). Orchestrator wiring 22 structural passes; M4+M5, M9, M10 wired into the root presolve pipeline; presolve roadmap grounded in the literature with B4/D6 prioritization (`fc268a1`, `cfe5b4f`, `22c6298`, `b23c0e7`).
+- **Convexification roadmap M1–M11** (`feat(relaxation)`, #51, #75, #79). Permutation-symmetric trilinear McCormick (`70008ef`); M2/M3 relaxation arithmetics + M6 eigenvalue bound (#79); rank-1 certificate path for `x^2/y` on wide boxes (#74).
+- **Examiner / KKT validator + solver-dual plumbing** (`feat(examiner)`, `feat(validation)`, #55, #65, #83). New `Model.solve(validate=True)`; `SolveResult` now carries solver duals; Examiner-style KKT validator with independent dual recovery; `minlptests` validator re-validates the primal at the returned `x`.
+- **30-lesson optimization course + `discopt tutor` CLI** (`feat(course)`, #85). Full tutorial curriculum and interactive tutor CLI.
+- **Deadline-aware JAX IPM** (`feat(deadline)`, #80). Wall-clock `time_limit` honored inside JAX-compiled IPM `while_loop`s.
+- **Slice indexing on `IndexExpression`** (`feat(modeling)`, #61). `IndexExpression` now supports Python slice syntax.
+- **Tiered Python test suite + ripopt 0.8** (`test`, #69). Fast PR-tier markers separated from full and integration tiers; ripopt bumped to 0.8.
+- `discopt-dev` script splits developer commands out of the main `discopt` CLI (`a003ac3`).
+
+### Changed
+
+- **CI Python tests parallelized; coverage moved off PR path** (`ci`, #68, #72). `pytest-xdist` parallel execution by default; coverage job runs nightly + on push-to-main + on `coverage`-labeled PRs to keep PR turnaround fast.
+- **Coverage floor temporarily lowered 85% → 70%** (`ci`, #88, tracking #87). AMP merge added ~7k statements without proportional smoke-test coverage; 85% target restored once the AMP test surface is expanded.
+- `make test` now matches CI's parallel xdist invocation (`chore(test)`, #68, #84).
+
+### Fixed
+
+- **LOA/OA gap computation near-zero objective** (`fix(loa,oa)`, `9838fdb`). Relative gap was undefined when the objective was near zero; now uses a safe denominator.
+- **Serial Ipopt B&B incumbent injection + NaN guards** (`fix(solver)`, #34, #73). `inject_incumbent` now wired into the serial Ipopt B&B path; starting points are clipped before evaluation to suppress NaNs.
+- **Convexity certificate for `x^2/y` on wide boxes** (`fix(convexity)`, #42, #74). Rank-1 certificate path correctly identifies convexity over wide variable boxes.
+- **LP-data extraction for vector-valued constraint bodies** (`fix(classifier)`, #67). `extract_lp_data` no longer drops vector-valued constraint bodies.
+- **Latent mypy + clippy after #53** (`fix(ci)`, `32eb334`). Cleared lint failures introduced by the presolve merge.
+- **Large-bound conservatism** (carried forward from `[Unreleased]`). Large-bound warnings remain conservative when nonlinear tightening can infer a smaller box but that tightened box is not applied to every solve path.
 
 ## [0.3.0] - 2026-04-24
 
@@ -71,5 +97,6 @@ git log v0.2.0..v0.2.1
 
 Going forward, every release will have a section above with curated entries.
 
-[Unreleased]: https://github.com/jkitchin/discopt/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/jkitchin/discopt/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/jkitchin/discopt/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jkitchin/discopt/compare/v0.2.5...v0.3.0

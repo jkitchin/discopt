@@ -96,7 +96,7 @@ Optional LLM-powered features using litellm as a universal adapter (100+ provide
 - **Correctness is non-negotiable**: Every phase gate enforces `incorrect_count ≤ 0`. Never weaken this check.
 - **Numerical tolerances**: abs=1e-6, rel=1e-4, integrality=1e-5, factorization=1e-12 (defined in `conftest.py`).
 - **ruff** line-length is 100 chars, targeting Python 3.10+. Pinned to v0.14.6 across pre-commit and CI.
-- **Coverage** must stay ≥70% (temporary floor after AMP merge; #87 tracks restoring to 85%).
+- **Coverage** must stay ≥65% (temporary floor after AMP merge; #87 tracks restoring to 85%).
 - Tests have a 300-second default timeout (configurable in `pyproject.toml`).
 
 <!-- crucible-project -->

@@ -114,12 +114,14 @@ def tighten_network(
 ) -> NNPresolveResult:
     """Run one round of NN-presolve.
 
-    Args:
-        network: the network whose layer bounds we want to refresh.
-        input_lb, input_ub: optional input box overriding
-            ``network.input_bounds``. Used by the orchestrator to feed
-            the *current* (possibly tightened) input bounds rather than
-            the static declared box.
+    :param network: the network whose layer bounds we want to refresh.
+    :param input_lb: optional input lower-bound vector overriding
+        ``network.input_bounds``. Used by the orchestrator to feed the
+        *current* (possibly tightened) input bounds rather than the
+        static declared box.
+    :param input_ub: optional input upper-bound vector overriding
+        ``network.input_bounds``; must be provided together with
+        ``input_lb``.
     """
     # Snapshot the network's input bounds so we can restore them; we
     # do not mutate the input network's input_bounds in place because
@@ -185,14 +187,13 @@ class NNPresolvePass:
     structure (currently only when activations themselves trigger
     further reverse propagation; left as future work for v1).
 
-    Args:
-        network: the embedded :class:`NetworkDefinition`.
-        input_block_index: variable block index of the input layer in
-            the model_repr passed at runtime. Set to None if the
-            network's inputs are not represented as a single contiguous
-            variable block (e.g., spread across multiple variables); in
-            that case the pass uses ``network.input_bounds`` only and
-            does no writeback.
+    :param network: the embedded :class:`NetworkDefinition`.
+    :param input_block_index: variable block index of the input layer
+        in the ``model_repr`` passed at runtime. Set to ``None`` if the
+        network's inputs are not represented as a single contiguous
+        variable block (e.g., spread across multiple variables); in that
+        case the pass uses ``network.input_bounds`` only and does no
+        writeback.
     """
 
     name = "nn_presolve"
