@@ -34,6 +34,17 @@ from discopt._jax._numeric import is_effectively_finite as _is_effectively_finit
 from discopt._jax.discretization import DiscretizationState
 from discopt._jax.embedding import EmbeddingMap, build_embedding_map
 from discopt._jax.model_utils import flat_variable_bounds
+from discopt._jax.operator_relaxations import (
+    critical_points_in_interval as _critical_points_in_interval,
+)
+from discopt._jax.operator_relaxations import tan_range as _tan_range
+from discopt._jax.operator_relaxations import trig_range as _trig_range
+from discopt._jax.operator_relaxations import trig_square_curvature as _trig_square_curvature
+from discopt._jax.operator_relaxations import (
+    trig_square_grad as _trig_square_grad,
+)
+from discopt._jax.operator_relaxations import trig_square_range as _trig_square_range
+from discopt._jax.operator_relaxations import trig_square_value as _trig_square_value
 from discopt._jax.term_classifier import (
     NonlinearTerms,
     _compute_var_offset,
@@ -282,114 +293,6 @@ def _linear_expr_bounds(
             lower += c * float(ub_i)
             upper += c * float(lb_i)
     return lower, upper
-
-
-def _critical_points_in_interval(start: float, period: float, lb: float, ub: float) -> list[float]:
-    tol = 1e-12
-    k_min = math.ceil((lb - start - tol) / period)
-    k_max = math.floor((ub - start + tol) / period)
-    return [start + k * period for k in range(k_min, k_max + 1)]
-
-
-def _tan_range(lb: float, ub: float) -> Optional[tuple[float, float]]:
-    """Return tan bounds only when the interval stays on one branch."""
-    if not (np.isfinite(lb) and np.isfinite(ub)):
-        return None
-    margin = 1e-4
-    k_min = math.floor((lb - math.pi / 2.0) / math.pi) - 1
-    k_max = math.ceil((ub - math.pi / 2.0) / math.pi) + 1
-    for k in range(k_min, k_max + 1):
-        asymptote = math.pi / 2.0 + k * math.pi
-        if lb - margin <= asymptote <= ub + margin:
-            return None
-    if abs(math.cos(lb)) < 1e-3 or abs(math.cos(ub)) < 1e-3:
-        return None
-    vals = [math.tan(lb), math.tan(ub)]
-    if not all(np.isfinite(v) for v in vals):
-        return None
-    return min(vals), max(vals)
-
-
-def _trig_range(func_name: str, lb: float, ub: float) -> Optional[tuple[float, float]]:
-    """Compute exact continuous range bounds for supported trig functions."""
-    if lb > ub:
-        lb, ub = ub, lb
-    if func_name == "tan":
-        return _tan_range(lb, ub)
-    if not (np.isfinite(lb) and np.isfinite(ub)):
-        return None
-    if ub - lb >= 2.0 * math.pi:
-        return -1.0, 1.0
-
-    points = [lb, ub]
-    if func_name == "sin":
-        points.extend(_critical_points_in_interval(math.pi / 2.0, math.pi, lb, ub))
-    elif func_name == "cos":
-        points.extend(_critical_points_in_interval(0.0, math.pi, lb, ub))
-    else:
-        return None
-    vals = [_univariate_value(func_name, p) for p in points if lb - 1e-12 <= p <= ub + 1e-12]
-    return min(vals), max(vals)
-
-
-def _trig_square_value(func_name: str, x: float) -> float:
-    """Evaluate sin(x)^2 or cos(x)^2."""
-    value = _univariate_value(func_name, x)
-    return float(value * value)
-
-
-def _trig_square_grad(func_name: str, x: float) -> float:
-    """Evaluate the first derivative of sin(x)^2 or cos(x)^2."""
-    if func_name == "sin":
-        return float(np.sin(2.0 * x))
-    if func_name == "cos":
-        return float(-np.sin(2.0 * x))
-    raise ValueError(f"Unsupported trig-square function: {func_name}")
-
-
-def _trig_square_second_derivative(func_name: str, x: float) -> float:
-    """Evaluate the second derivative of sin(x)^2 or cos(x)^2."""
-    if func_name == "sin":
-        return float(2.0 * np.cos(2.0 * x))
-    if func_name == "cos":
-        return float(-2.0 * np.cos(2.0 * x))
-    raise ValueError(f"Unsupported trig-square function: {func_name}")
-
-
-def _trig_square_range(func_name: str, lb: float, ub: float) -> Optional[tuple[float, float]]:
-    """Compute exact continuous bounds for sin(x)^2 or cos(x)^2."""
-    if lb > ub:
-        lb, ub = ub, lb
-    if func_name not in {"sin", "cos"} or not (np.isfinite(lb) and np.isfinite(ub)):
-        return None
-    if ub - lb >= math.pi:
-        return 0.0, 1.0
-
-    points = [lb, ub]
-    points.extend(_critical_points_in_interval(0.0, math.pi / 2.0, lb, ub))
-    vals = [_trig_square_value(func_name, p) for p in points if lb - 1e-12 <= p <= ub + 1e-12]
-    return min(vals), max(vals)
-
-
-def _trig_square_curvature(func_name: str, lb: float, ub: float) -> Optional[str]:
-    """Return certified curvature for sin(x)^2/cos(x)^2, or None if mixed."""
-    if func_name not in {"sin", "cos"} or not (np.isfinite(lb) and np.isfinite(ub)):
-        return None
-    if ub <= lb + 1e-12:
-        return None
-
-    tol = 1e-12
-    for point in _critical_points_in_interval(math.pi / 4.0, math.pi / 2.0, lb, ub):
-        if lb + tol < point < ub - tol:
-            return None
-
-    midpoint = 0.5 * (lb + ub)
-    second = _trig_square_second_derivative(func_name, midpoint)
-    if second >= -tol:
-        return "convex"
-    if second <= tol:
-        return "concave"
-    return None
 
 
 def _constant_value(expr: Expression) -> Optional[float]:
