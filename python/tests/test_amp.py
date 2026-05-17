@@ -2568,6 +2568,31 @@ def _unwrap_minlptests_case(case):
     return case.values[0] if hasattr(case, "values") else case
 
 
+def test_former_known_failure_nlp_mi_005_runs_in_pr_fast_suite():
+    """Representative removed MINLPTests xfail should produce a PR-time AMP signal."""
+    from test_minlptests import NLP_MI_INSTANCES
+
+    instances = {
+        instance.problem_id: instance
+        for instance in (_unwrap_minlptests_case(case) for case in NLP_MI_INSTANCES)
+    }
+    instance = instances["nlp_mi_005_010"]
+    m = instance.build_fn()
+
+    result = m.solve(
+        solver="amp",
+        nlp_solver="ipm",
+        time_limit=2.0,
+        gap_tolerance=1e-3,
+        apply_partitioning=False,
+        max_iter=1,
+    )
+
+    assert result.status in ("optimal", "feasible")
+    assert result.objective is not None
+    assert result.objective == pytest.approx(instance.expected_obj, abs=1e-4)
+
+
 def _issue91_minlptests_model(group: str, problem_id: str) -> Model:
     from test_minlptests import MINLPTESTS_CVX_BY_ID, NLP_INSTANCES, NLP_MI_INSTANCES
 

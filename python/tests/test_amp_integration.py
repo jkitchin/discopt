@@ -29,7 +29,6 @@ from __future__ import annotations
 import logging
 import os
 import warnings
-from importlib.util import find_spec
 
 os.environ["JAX_PLATFORMS"] = "cpu"
 os.environ["JAX_ENABLE_X64"] = "1"
@@ -43,8 +42,6 @@ from discopt.modeling.core import (
     SolveResult,
 )
 from test_minlptests import NLP_CVX_INSTANCES, NLP_INSTANCES, NLP_MI_INSTANCES
-
-HAS_CYIPOPT = find_spec("cyipopt") is not None
 
 pytestmark = [
     pytest.mark.slow,
@@ -72,9 +69,6 @@ MINLPTESTS_NLP_BY_ID = {
 @pytest.mark.requires_cyipopt
 def test_amp_integration_environment_includes_working_cyipopt():
     """The opt-in AMP integration environment should include a usable Ipopt backend."""
-    if not HAS_CYIPOPT:
-        pytest.skip("requires cyipopt/Ipopt")
-
     import cyipopt  # noqa: F401
     from discopt.solvers import SolveStatus
     from discopt.solvers.nlp_ipopt import solve_nlp_from_model
@@ -2839,9 +2833,6 @@ class TestCurrentCodeWeaknesses:
     @pytest.mark.requires_cyipopt
     def test_amp_recovers_remaining_pure_continuous_minlptests_cases(self, problem_id):
         """AMP should return a recovered incumbent instead of false infeasible."""
-        if not HAS_CYIPOPT:
-            pytest.skip("requires cyipopt for pure continuous NLP recovery")
-
         instance = MINLPTESTS_NLP_BY_ID[problem_id]
         m = instance.build_fn()
 
@@ -2907,9 +2898,6 @@ class TestCurrentCodeWeaknesses:
     @pytest.mark.requires_cyipopt
     def test_amp_reports_bound_for_minmax_objective_minlptests_cases(self, problem_id, caplog):
         """The nlp_009 min/max objectives should not fall back to feasibility mode."""
-        if not HAS_CYIPOPT:
-            pytest.skip("requires cyipopt for pure continuous NLP recovery")
-
         instance = MINLPTESTS_NLP_BY_ID[problem_id]
         m = instance.build_fn()
 
@@ -3031,9 +3019,6 @@ class TestCurrentCodeWeaknesses:
     @pytest.mark.requires_cyipopt
     def test_amp_fallback_enumerates_small_integer_domain_when_milp_relaxation_fails(self):
         """AMP should still recover a bounded integer optimum if the first MILP errors out."""
-        if not HAS_CYIPOPT:
-            pytest.skip("requires cyipopt for the fixed-integer NLP fallback")
-
         instance = MINLPTESTS_MI_BY_ID["nlp_mi_001_010"]
         m = instance.build_fn()
 
@@ -3094,9 +3079,6 @@ class TestCurrentCodeWeaknesses:
     @pytest.mark.requires_cyipopt
     def test_amp_fixed_integer_nlp_retries_with_ipopt(self):
         """Fixed-integer NLP candidates should not be lost when the JAX IPM stalls."""
-        if not HAS_CYIPOPT:
-            pytest.skip("requires cyipopt for the ipopt retry path")
-
         instance = MINLPTESTS_MI_BY_ID["nlp_mi_005_010"]
         m = instance.build_fn()
 
