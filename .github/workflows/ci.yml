@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, amp]
+    branches: [main]
   pull_request:
-    branches: [main, amp]
+    branches: [main]
   schedule:
     # Nightly coverage refresh (07:30 UTC ≈ 03:30 ET).
     - cron: "30 7 * * *"
@@ -115,13 +115,13 @@ jobs:
 
   python-coverage:
     name: Python coverage (3.12, ubuntu)
-    # Run coverage nightly (scheduled), or on PRs explicitly opted in via the
-    # `coverage` label. Skipped on plain main pushes so the post-merge wall
-    # clock isn't gated on the coverage instrumentation tax (~100s vs the
-    # fast job). See issue #68 for the per-PR/main turnaround target.
+    # Run coverage nightly, after main pushes, or on PRs explicitly opted in
+    # via the `coverage` label.
     if: >-
       github.event_name == 'schedule' ||
-      contains(github.event.pull_request.labels.*.name, 'coverage')
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+        contains(github.event.pull_request.labels.*.name, 'coverage'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -164,7 +164,8 @@ jobs:
             -m "not slow and not correctness and not integration and not amp_benchmark and not requires_cyipopt and not memory_heavy" \
             --ignore=python/tests/test_correctness.py \
             -n "${PYTEST_XDIST_WORKERS}" --dist loadgroup \
-            --cov=discopt --cov-report=term-missing --cov-report=xml:coverage.xml
+            --cov=discopt --cov-report=term-missing --cov-report=xml:coverage.xml \
+            --cov-fail-under=85
         env:
           JAX_PLATFORMS: cpu
           JAX_ENABLE_X64: "1"

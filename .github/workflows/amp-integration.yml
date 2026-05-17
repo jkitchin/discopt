@@ -2,12 +2,20 @@ name: AMP integration
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, ready_for_review]
   schedule:
     - cron: "18 8 * * 1"
 
 jobs:
   amp-integration:
     name: AMP Alpine/incidence suite
+    if: >-
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'amp-integration')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -27,6 +35,10 @@ jobs:
           pip install maturin
           pip install jax jaxlib numpy scipy highspy cyipopt pytest pytest-timeout
           maturin develop
+      - name: Verify cyipopt is importable
+        run: |
+          source .venv/bin/activate
+          python -c "import cyipopt"
       - name: Run opt-in AMP integration suite
         run: |
           source .venv/bin/activate

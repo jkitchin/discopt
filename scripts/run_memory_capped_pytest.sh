@@ -47,6 +47,7 @@ if [[ "$dry_run" == "1" ]]; then
 fi
 
 if [[ "${#limits[@]}" -gt 0 ]]; then
-    echo "warning: prlimit unavailable; running pytest without resource caps" >&2
+    echo "WARNING: prlimit is unavailable; requested pytest resource caps are NOT enforced (memory=${memory_mb}MB cpu=${cpu_seconds}s)." >&2
+    echo "WARNING: this commonly happens on macOS; run in Linux/CI when memory-capped behavior matters." >&2
 fi
 exec "${cmd[@]}"

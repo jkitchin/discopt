@@ -36,12 +36,12 @@ SHELL := /bin/bash
 # --- Configuration -----------------------------------------------------------
 
 PYTHON      ?= python
-MATURIN     ?= $(PYTHON) -m maturin
+MATURIN     ?= maturin
 PYTEST      ?= pytest
 PYTEST_MEMORY_CAP ?= scripts/run_memory_capped_pytest.sh
 PYTEST_MEMORY_LIMIT_MB ?= 16384
 PYTEST_CPU_LIMIT_SECONDS ?= 0
-PYTEST_XDIST_WORKERS ?= 2
+PYTEST_XDIST_WORKERS ?=
 PYTEST_CAPPED = PYTEST_MEMORY_LIMIT_MB=$(PYTEST_MEMORY_LIMIT_MB) PYTEST_CPU_LIMIT_SECONDS=$(PYTEST_CPU_LIMIT_SECONDS) $(PYTEST_MEMORY_CAP) $(PYTEST)
 RUFF        ?= ruff
 JUPYTER     ?= jupyter
@@ -197,7 +197,7 @@ hooks:
 # xdist-incompatible fixtures stay serialized.
 PYTEST_FAST_FLAGS := --timeout=120 -m "not slow and not correctness and not integration and not amp_benchmark and not requires_cyipopt and not memory_heavy" \
     --ignore=python/tests/test_correctness.py \
-    -n $(PYTEST_XDIST_WORKERS) --dist loadgroup
+    -n $(or $(PYTEST_XDIST_WORKERS),auto) --dist loadgroup
 
 PYTEST_QUICK_FLAGS := --timeout=60 -m "(unit or smoke) and not slow and not integration and not amp_benchmark and not requires_cyipopt and not memory_heavy"
 
