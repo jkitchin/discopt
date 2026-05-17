@@ -56,6 +56,7 @@ parts:
       - file: notebooks/estimation_and_doe
       - file: notebooks/tutorial_estimation
       - file: notebooks/tutorial_doe
+      - file: notebooks/doe_cli
       - file: notebooks/tutorial_batch_doe
       - file: notebooks/identifiability-estimability
       - file: notebooks/model-discrimination

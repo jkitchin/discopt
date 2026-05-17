@@ -47,6 +47,8 @@ xgboost = ["xgboost>=1.7"]
 lightgbm = ["lightgbm>=4.0"]
 gnn = ["equinox>=0.13.8", "optax>=0.1"]
 learned = ["equinox>=0.13.8", "optax>=0.1"]
+doe = ["openpyxl>=3.1"]
+doe-gui = ["discopt[doe]", "streamlit>=1.30", "pandas>=2.0"]
 dev = [
     "pytest",
     "pytest-timeout",
@@ -57,7 +59,7 @@ dev = [
     "highspy",
     "pre-commit",
 ]
-all = ["discopt[ipopt,highs,cutest,llm,gnn,nn,ml]"]
+all = ["discopt[ipopt,highs,cutest,llm,gnn,nn,ml,doe,doe-gui]"]
 
 [project.scripts]
 discopt = "discopt.cli:main"

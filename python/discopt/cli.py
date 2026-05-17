@@ -297,11 +297,19 @@ def main():
 
     _add_tutor_subparser(subparsers)
 
+    from discopt.doe.cli import add_subparser as _add_doe_subparser
+
+    _add_doe_subparser(subparsers)
+
     args = parser.parse_args()
     if args.command == "tutor":
         from discopt.tutor import run as _run_tutor
 
         sys.exit(_run_tutor(args) or 0)
+    if args.command == "doe":
+        from discopt.doe.cli import run as _run_doe
+
+        sys.exit(_run_doe(args) or 0)
     args.func(args)
 
 

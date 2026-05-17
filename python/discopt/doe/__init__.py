@@ -73,6 +73,13 @@ from discopt.doe.sequential import (
     DoERound,
     sequential_doe,
 )
+from discopt.doe.templates import (
+    TEMPLATE_NAMES,
+    build_template,
+    linear_template,
+    polynomial_1d_template,
+    response_surface_template,
+)
 
 __all__ = [
     "BatchDesignResult",
@@ -90,7 +97,9 @@ __all__ = [
     "IdentifiabilityResult",
     "ModelSelectionResult",
     "ProfileLikelihoodResult",
+    "TEMPLATE_NAMES",
     "batch_optimal_experiment",
+    "build_template",
     "check_identifiability",
     "collinearity_index",
     "compute_fim",
@@ -101,8 +110,11 @@ __all__ = [
     "estimability_rank",
     "explore_design_space",
     "likelihood_ratio_test",
+    "linear_template",
     "model_selection",
     "optimal_experiment",
+    "polynomial_1d_template",
+    "response_surface_template",
     "profile_all",
     "profile_likelihood",
     "sequential_discrimination",
