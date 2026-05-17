@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::expr::{BinOp, ExprId, ExprNode, IndexElem, IndexSpec, ModelRepr, UnOp};
+use crate::expr::{index_spec_collect_flat, BinOp, ExprId, ExprNode, ModelRepr, UnOp};
 
 /// Classified nonlinear terms used by AMP partition selection and relaxation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -21,6 +21,9 @@ pub struct AmpNonlinearTerms {
     /// Number of general nonlinear expression nodes encountered.
     pub general_nl_count: usize,
     /// Variable-to-product-term incidence map.
+    ///
+    /// Product term ids are assigned in discovery order across bilinear,
+    /// trilinear, and higher-order multilinear terms.
     pub term_incidence: BTreeMap<usize, BTreeSet<usize>>,
     /// Sorted variables that appear in bilinear or multilinear product terms.
     pub partition_candidates: Vec<usize>,
@@ -187,6 +190,9 @@ impl<'a> TermClassifier<'a> {
     fn classify_power(&mut self, left: ExprId, right: ExprId) {
         if let Some(flat) = self.flat_index(left) {
             if let Some(exp_val) = self.constant_value(right) {
+                if exp_val.abs() <= 1e-12 {
+                    return;
+                }
                 if exp_val >= 2.0
                     && exp_val.is_finite()
                     && (exp_val - exp_val.round()).abs() <= 1e-12
@@ -288,11 +294,12 @@ impl<'a> TermClassifier<'a> {
                     ..
                 } = self.model.arena.get(*base)
                 {
-                    let local = scalar_index(index)?;
-                    self.model
-                        .variables
-                        .get(*var_block_idx)
-                        .map(|var| var.offset + local)
+                    let var = self.model.variables.get(*var_block_idx)?;
+                    let selected = index_spec_collect_flat(index, &var.shape);
+                    match selected.as_slice() {
+                        [local] => Some(var.offset + *local),
+                        _ => None,
+                    }
                 } else {
                     None
                 }
@@ -309,24 +316,12 @@ impl<'a> TermClassifier<'a> {
     }
 }
 
-fn scalar_index(index: &IndexSpec) -> Option<usize> {
-    match index {
-        IndexSpec::Scalar(i) => Some(*i),
-        IndexSpec::Tuple(indices) if indices.len() == 1 => Some(indices[0]),
-        IndexSpec::Multi(elems) if elems.len() == 1 => match &elems[0] {
-            IndexElem::Scalar(i) => Some(*i),
-            IndexElem::Slice { .. } => None,
-        },
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::expr::{
-        ConstraintRepr, ConstraintSense, ExprArena, ExprNode, ModelRepr, ObjectiveSense, VarInfo,
-        VarType,
+        ConstraintRepr, ConstraintSense, ExprArena, ExprNode, IndexElem, IndexSpec, MathFunc,
+        ModelRepr, ObjectiveSense, VarInfo, VarType,
     };
 
     fn bilinear_model() -> ModelRepr {
@@ -397,5 +392,244 @@ mod tests {
         assert_eq!(terms.term_incidence.get(&0).unwrap().len(), 2);
         assert_eq!(terms.term_incidence.get(&1).unwrap().len(), 1);
         assert_eq!(terms.term_incidence.get(&2).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn classifies_multidimensional_indices_with_row_major_offsets() {
+        let mut arena = ExprArena::new();
+        let x = arena.add(ExprNode::Variable {
+            name: "x".to_string(),
+            index: 0,
+            size: 8,
+            shape: vec![2, 4],
+        });
+        let x12 = arena.add(ExprNode::Index {
+            base: x,
+            index: IndexSpec::Tuple(vec![1, 2]),
+        });
+        let x13 = arena.add(ExprNode::Index {
+            base: x,
+            index: IndexSpec::Tuple(vec![1, 3]),
+        });
+        let x00 = arena.add(ExprNode::Index {
+            base: x,
+            index: IndexSpec::Multi(vec![IndexElem::Scalar(0), IndexElem::Scalar(0)]),
+        });
+        let x01 = arena.add(ExprNode::Index {
+            base: x,
+            index: IndexSpec::Multi(vec![IndexElem::Scalar(0), IndexElem::Scalar(1)]),
+        });
+        let prod_last_row = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: x12,
+            right: x13,
+        });
+        let prod_first_row = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: x00,
+            right: x01,
+        });
+        let objective = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Add,
+            left: prod_last_row,
+            right: prod_first_row,
+        });
+
+        let model = ModelRepr {
+            arena,
+            objective,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![],
+            variables: vec![VarInfo {
+                name: "x".to_string(),
+                var_type: VarType::Continuous,
+                offset: 0,
+                size: 8,
+                shape: vec![2, 4],
+                lb: vec![0.0; 8],
+                ub: vec![10.0; 8],
+            }],
+            n_vars: 8,
+        };
+
+        let terms = classify_nonlinear_terms(&model);
+
+        assert_eq!(terms.bilinear, vec![(6, 7), (0, 1)]);
+        assert_eq!(terms.partition_candidates, vec![0, 1, 6, 7]);
+        assert_eq!(terms.term_incidence.get(&6), Some(&BTreeSet::from([0])));
+        assert_eq!(terms.term_incidence.get(&7), Some(&BTreeSet::from([0])));
+        assert_eq!(terms.term_incidence.get(&0), Some(&BTreeSet::from([1])));
+        assert_eq!(terms.term_incidence.get(&1), Some(&BTreeSet::from([1])));
+    }
+
+    #[test]
+    fn classifies_trilinear_multilinear_and_monomial_terms() {
+        let mut arena = ExprArena::new();
+        let x = arena.add(ExprNode::Variable {
+            name: "x".to_string(),
+            index: 0,
+            size: 5,
+            shape: vec![5],
+        });
+        let refs: Vec<_> = (0..5)
+            .map(|i| {
+                arena.add(ExprNode::Index {
+                    base: x,
+                    index: IndexSpec::Scalar(i),
+                })
+            })
+            .collect();
+        let tri01 = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: refs[0],
+            right: refs[1],
+        });
+        let tri = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: tri01,
+            right: refs[2],
+        });
+        let multi01 = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: refs[0],
+            right: refs[1],
+        });
+        let multi012 = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: multi01,
+            right: refs[2],
+        });
+        let multi = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: multi012,
+            right: refs[3],
+        });
+        let pow_exp = arena.add(ExprNode::Constant(3.0));
+        let monomial = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Pow,
+            left: refs[4],
+            right: pow_exp,
+        });
+        let sum = arena.add(ExprNode::SumOver {
+            terms: vec![tri, multi, monomial],
+        });
+
+        let model = ModelRepr {
+            arena,
+            objective: sum,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![],
+            variables: vec![VarInfo {
+                name: "x".to_string(),
+                var_type: VarType::Continuous,
+                offset: 0,
+                size: 5,
+                shape: vec![5],
+                lb: vec![0.0; 5],
+                ub: vec![10.0; 5],
+            }],
+            n_vars: 5,
+        };
+
+        let terms = classify_nonlinear_terms(&model);
+
+        assert_eq!(terms.trilinear, vec![(0, 1, 2)]);
+        assert_eq!(terms.multilinear, vec![vec![0, 1, 2, 3]]);
+        assert_eq!(terms.monomial, vec![(4, 3)]);
+        assert_eq!(terms.partition_candidates, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn ignores_zero_power_as_constant() {
+        let mut arena = ExprArena::new();
+        let x = arena.add(ExprNode::Variable {
+            name: "x".to_string(),
+            index: 0,
+            size: 1,
+            shape: vec![],
+        });
+        let zero = arena.add(ExprNode::Constant(0.0));
+        let objective = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Pow,
+            left: x,
+            right: zero,
+        });
+        let model = ModelRepr {
+            arena,
+            objective,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![],
+            variables: vec![VarInfo {
+                name: "x".to_string(),
+                var_type: VarType::Continuous,
+                offset: 0,
+                size: 1,
+                shape: vec![],
+                lb: vec![0.0],
+                ub: vec![10.0],
+            }],
+            n_vars: 1,
+        };
+
+        let terms = classify_nonlinear_terms(&model);
+
+        assert!(terms.monomial.is_empty());
+        assert_eq!(terms.general_nl_count, 0);
+        assert!(terms.partition_candidates.is_empty());
+    }
+
+    #[test]
+    fn counts_general_nonlinear_div_abs_and_function_call() {
+        let mut arena = ExprArena::new();
+        let x = arena.add(ExprNode::Variable {
+            name: "x".to_string(),
+            index: 0,
+            size: 2,
+            shape: vec![2],
+        });
+        let x0 = arena.add(ExprNode::Index {
+            base: x,
+            index: IndexSpec::Scalar(0),
+        });
+        let x1 = arena.add(ExprNode::Index {
+            base: x,
+            index: IndexSpec::Scalar(1),
+        });
+        let div = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Div,
+            left: x0,
+            right: x1,
+        });
+        let abs = arena.add(ExprNode::UnaryOp {
+            op: UnOp::Abs,
+            operand: x0,
+        });
+        let sin = arena.add(ExprNode::FunctionCall {
+            func: MathFunc::Sin,
+            args: vec![x1],
+        });
+        let objective = arena.add(ExprNode::SumOver {
+            terms: vec![div, abs, sin],
+        });
+        let model = ModelRepr {
+            arena,
+            objective,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![],
+            variables: vec![VarInfo {
+                name: "x".to_string(),
+                var_type: VarType::Continuous,
+                offset: 0,
+                size: 2,
+                shape: vec![2],
+                lb: vec![0.0; 2],
+                ub: vec![10.0; 2],
+            }],
+            n_vars: 2,
+        };
+
+        let terms = classify_nonlinear_terms(&model);
+
+        assert_eq!(terms.general_nl_count, 3);
     }
 }

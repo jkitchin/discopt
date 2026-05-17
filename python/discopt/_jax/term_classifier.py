@@ -21,7 +21,9 @@ Theory references:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from operator import index as operator_index
 from typing import Any
 
 from discopt.modeling.core import (
@@ -68,8 +70,9 @@ class NonlinearTerms:
         sqrt, tan, abs).
     term_incidence : dict[int, set[int]]
         Maps flat variable index → set of term indices (into the combined bilinear +
-        trilinear + multilinear list) that the variable appears in.  Used for
-        vertex-cover computation.
+        trilinear + multilinear list) that the variable appears in. Term indices
+        are assigned in product-term discovery order and are used for vertex-cover
+        computation.
     partition_candidates : list[int]
         Sorted list of flat variable indices appearing in any bilinear,
         trilinear, or higher-order multilinear product.  These are the
@@ -106,6 +109,27 @@ def _compute_var_offset(var: Variable, model: Model) -> int:
     return offset
 
 
+def _as_scalar_index(value: Any) -> int | None:
+    """Return a Python integer index, or None for slices and non-scalars."""
+    try:
+        return operator_index(value)
+    except TypeError:
+        return None
+
+
+def _tuple_to_flat_index(indices: Sequence[int], shape: Sequence[int]) -> int | None:
+    """Flatten a scalar multidimensional index in row-major order."""
+    if len(indices) != len(shape):
+        return None
+
+    flat = 0
+    stride = 1
+    for idx, dim in zip(reversed(indices), reversed(shape)):
+        flat += idx * stride
+        stride *= dim
+    return flat
+
+
 def _get_flat_index(expr: Expression, model: Model) -> int | None:
     """Return the flat variable index for a scalar Variable or IndexExpression.
 
@@ -118,10 +142,19 @@ def _get_flat_index(expr: Expression, model: Model) -> int | None:
     if isinstance(expr, IndexExpression) and isinstance(expr.base, Variable):
         base_off = _compute_var_offset(expr.base, model)
         idx = expr.index
-        if isinstance(idx, int):
-            return base_off + idx
-        if isinstance(idx, tuple) and len(idx) == 1 and isinstance(idx[0], int):
-            return base_off + idx[0]
+        scalar_idx = _as_scalar_index(idx)
+        if scalar_idx is not None:
+            return base_off + scalar_idx
+        if isinstance(idx, tuple):
+            scalar_indices = []
+            for item in idx:
+                item_idx = _as_scalar_index(item)
+                if item_idx is None:
+                    return None
+                scalar_indices.append(item_idx)
+            flat = _tuple_to_flat_index(scalar_indices, expr.base.shape)
+            if flat is not None:
+                return base_off + flat
     return None
 
 
