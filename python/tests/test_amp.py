@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
 import subprocess
 import warnings
 from pathlib import Path
@@ -101,14 +102,27 @@ def _make_dry_run(target: str) -> str:
     return result.stdout
 
 
+def _dry_run_pytest_args(output: str) -> list[str]:
+    for line in output.splitlines():
+        if "python -m pytest" in line:
+            return shlex.split(line)
+    raise AssertionError(f"pytest command not found in dry-run output:\n{output}")
+
+
+def _dry_run_marker_expression(output: str) -> str:
+    args = _dry_run_pytest_args(output)
+    marker_idx = [idx for idx, arg in enumerate(args) if arg == "-m"][-1]
+    return args[marker_idx + 1]
+
+
 def test_quick_test_tier_excludes_amp_integration_markers():
     """The quick tier must not select opt-in AMP smoke tests or use prlimit."""
     output = _make_dry_run("test-quick")
+    marker_expr = _dry_run_marker_expression(output)
 
-    assert (
-        '-m "(unit or smoke) and not slow and not integration '
-        'and not amp_benchmark and not requires_cyipopt and not memory_heavy"'
-    ) in output
+    assert "unit or smoke" in marker_expr
+    for marker in ("slow", "integration", "amp_benchmark", "requires_cyipopt", "memory_heavy"):
+        assert f"not {marker}" in marker_expr
     assert "python -m pytest python/tests/" in output
     assert "scripts/run_memory_capped_pytest.sh python -m pytest" not in output
 
@@ -116,32 +130,54 @@ def test_quick_test_tier_excludes_amp_integration_markers():
 def test_pr_fast_tier_excludes_heavy_manual_markers():
     """The PR-fast tier should keep nightly/manual markers out of make test."""
     output = _make_dry_run("test")
+    marker_expr = _dry_run_marker_expression(output)
+    args = _dry_run_pytest_args(output)
 
-    assert (
-        '-m "not slow and not correctness and not integration '
-        'and not amp_benchmark and not requires_cyipopt and not memory_heavy"'
-    ) in output
+    for marker in (
+        "slow",
+        "correctness",
+        "integration",
+        "amp_benchmark",
+        "requires_cyipopt",
+        "memory_heavy",
+    ):
+        assert f"not {marker}" in marker_expr
     assert "--ignore=python/tests/test_correctness.py" in output
+    assert args[args.index("-n") + 1] == "auto"
     assert "scripts/run_memory_capped_pytest.sh python -m pytest" in output
 
 
 def test_amp_fast_tier_excludes_optional_solver_markers():
     """The local AMP fast target should not require optional NLP solver stacks."""
     output = _make_dry_run("test-amp-fast")
+    marker_expr = _dry_run_marker_expression(output)
 
-    assert (
-        '-m "not slow and not integration and not amp_benchmark '
-        'and not requires_cyipopt and not memory_heavy"'
-    ) in output
+    for marker in ("slow", "integration", "amp_benchmark", "requires_cyipopt", "memory_heavy"):
+        assert f"not {marker}" in marker_expr
     assert "scripts/run_memory_capped_pytest.sh python -m pytest" in output
 
 
 def test_amp_integration_tier_selects_memory_heavy_marker():
     """The opt-in AMP integration target should include memory-heavy tests under the cap."""
     output = _make_dry_run("test-amp-integration")
+    marker_expr = _dry_run_marker_expression(output)
 
-    assert '-m "slow or integration or amp_benchmark or requires_cyipopt or memory_heavy"' in output
+    for marker in ("slow", "integration", "amp_benchmark", "requires_cyipopt", "memory_heavy"):
+        assert marker in marker_expr
     assert "scripts/run_memory_capped_pytest.sh python -m pytest" in output
+
+
+def test_embedding_map_single_partition_uses_no_selector_bits():
+    """One SOS2 interval does not need an embedded binary selector."""
+    from discopt._jax.embedding import EmbeddingMap, build_embedding_map
+
+    embedding = build_embedding_map(2, encoding="gray")
+
+    assert isinstance(embedding, EmbeddingMap)
+    assert embedding.bit_count == 0
+    assert embedding.codes == ((),)
+    assert embedding.positive_sets == ()
+    assert embedding.negative_sets == ()
 
 
 def test_memory_capped_pytest_wrapper_dry_run():
@@ -170,6 +206,29 @@ def test_memory_capped_pytest_wrapper_dry_run():
     if "prlimit" in result.stdout:
         assert "--as=67108864" in result.stdout
         assert "--cpu=5" in result.stdout
+
+
+def test_memory_capped_pytest_warns_when_prlimit_missing():
+    """Missing prlimit should be explicit because the test then runs uncapped."""
+    repo = Path(__file__).resolve().parents[2]
+    script = repo / "scripts" / "run_memory_capped_pytest.sh"
+    env = {
+        **os.environ,
+        "PATH": "/tmp",
+        "PYTEST_MEMORY_LIMIT_MB": "64",
+        "PYTEST_CPU_LIMIT_SECONDS": "5",
+    }
+
+    result = subprocess.run(
+        ["/bin/bash", str(script), "/bin/true"],
+        cwd=repo,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert "resource caps are NOT enforced" in result.stderr
 
 
 def test_amp_helper_defaults_cover_semifinite_domains():

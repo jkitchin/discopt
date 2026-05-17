@@ -161,3 +161,31 @@ class TestFBBTBindings:
         assert not changed
         np.testing.assert_allclose(tightened_lb, [0.0, 0.0], atol=1e-12)
         np.testing.assert_allclose(tightened_ub, [1.0, 10.0], atol=1e-12)
+
+    def test_root_presolve_logs_fbbt_failures(self, caplog):
+        """Unexpected Rust FBBT failures should be visible at DEBUG level."""
+        from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
+
+        class FailingRepr:
+            def fbbt(self, *, max_iter, tol):
+                del max_iter, tol
+                raise RuntimeError("synthetic fbbt failure")
+
+        model = _make_linear_model()
+        lb, ub = _flat_variable_bounds(model)
+
+        with caplog.at_level("DEBUG", logger="discopt.solvers._root_presolve"):
+            tightened_lb, tightened_ub, infeasible, changed = tighten_root_bounds_with_fbbt(
+                model,
+                lb,
+                ub,
+                int_offsets=[],
+                int_sizes=[],
+                model_repr=FailingRepr(),
+            )
+
+        assert not infeasible
+        assert not changed
+        np.testing.assert_allclose(tightened_lb, lb)
+        np.testing.assert_allclose(tightened_ub, ub)
+        assert "Root FBBT bound tightening skipped: synthetic fbbt failure" in caplog.text

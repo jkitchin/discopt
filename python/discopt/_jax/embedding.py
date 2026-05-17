@@ -9,10 +9,11 @@ pattern on the lambda variables.
 from __future__ import annotations
 
 import math
-from typing import TypedDict
+from dataclasses import dataclass
 
 
-class EmbeddingMap(TypedDict):
+@dataclass(frozen=True)
+class EmbeddingMap:
     """Structured SOS2 embedding metadata."""
 
     encoding: str
@@ -69,18 +70,27 @@ def build_embedding_map(
     """
     if lambda_count < 2:
         raise ValueError("lambda_count must be at least 2")
-
-    partition_count = lambda_count - 1
-    bit_count = max(1, int(math.ceil(math.log2(max(1, partition_count)))))
-
-    if encoding == "gray":
-        codes = [_gray_code(i, bit_count) for i in range(partition_count)]
-    elif encoding == "binary":
-        codes = [_binary_code(i, bit_count) for i in range(partition_count)]
-    else:
+    if encoding not in {"gray", "binary"}:
         raise ValueError(
             f"Unsupported embedding encoding: {encoding!r}. Choose from 'gray' or 'binary'."
         )
+
+    partition_count = lambda_count - 1
+    if partition_count == 1:
+        return EmbeddingMap(
+            encoding=encoding,
+            bit_count=0,
+            codes=((),),
+            positive_sets=(),
+            negative_sets=(),
+        )
+
+    bit_count = int(math.ceil(math.log2(partition_count)))
+
+    if encoding == "gray":
+        codes = [_gray_code(i, bit_count) for i in range(partition_count)]
+    else:
+        codes = [_binary_code(i, bit_count) for i in range(partition_count)]
 
     if not _is_sos2_compatible(codes):
         if encoding == "binary":
@@ -111,10 +121,10 @@ def build_embedding_map(
         positive_sets.append(tuple(positive))
         negative_sets.append(tuple(negative))
 
-    return {
-        "encoding": encoding,
-        "bit_count": bit_count,
-        "codes": tuple(codes),
-        "positive_sets": tuple(positive_sets),
-        "negative_sets": tuple(negative_sets),
-    }
+    return EmbeddingMap(
+        encoding=encoding,
+        bit_count=bit_count,
+        codes=tuple(codes),
+        positive_sets=tuple(positive_sets),
+        negative_sets=tuple(negative_sets),
+    )

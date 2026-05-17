@@ -1166,58 +1166,91 @@ def _square_monomial_vars_in_expr(expr: Expression, model: Model) -> set[int]:
     return square_vars
 
 
-def _expr_variable_indices(expr: Expression, model: Model) -> set[int]:
+def _expr_variable_indices(
+    expr: Expression,
+    model: Model,
+    cache: Optional[dict[int, frozenset[int]]] = None,
+) -> set[int]:
     """Collect flat variable indices referenced by an expression."""
+    cache_key = id(expr)
+    if cache is not None and cache_key in cache:
+        return set(cache[cache_key])
+
+    result: set[int]
     flat_idx = _flat_var_index(expr, model)
     if flat_idx is not None:
-        return {flat_idx}
-    if isinstance(expr, Variable):
+        result = {flat_idx}
+    elif isinstance(expr, Variable):
         start = _compute_var_offset(expr, model)
-        return set(range(start, start + expr.size))
-    if isinstance(expr, (Constant, IndexExpression)):
-        return set()
-    if isinstance(expr, BinaryOp):
-        left = _expr_variable_indices(expr.left, model)
-        right = _expr_variable_indices(expr.right, model)
-        return left | right
-    if isinstance(expr, UnaryOp):
-        return _expr_variable_indices(expr.operand, model)
-    if isinstance(expr, FunctionCall):
+        result = set(range(start, start + expr.size))
+    elif isinstance(expr, (Constant, IndexExpression)):
+        result = set()
+    elif isinstance(expr, BinaryOp):
+        left = _expr_variable_indices(expr.left, model, cache)
+        right = _expr_variable_indices(expr.right, model, cache)
+        result = left | right
+    elif isinstance(expr, UnaryOp):
+        result = _expr_variable_indices(expr.operand, model, cache)
+    elif isinstance(expr, FunctionCall):
         indices: set[int] = set()
         for arg in expr.args:
-            indices.update(_expr_variable_indices(arg, model))
-        return indices
-    if isinstance(expr, MatMulExpression):
-        left = _expr_variable_indices(expr.left, model)
-        right = _expr_variable_indices(expr.right, model)
-        return left | right
-    if isinstance(expr, SumExpression):
-        return _expr_variable_indices(expr.operand, model)
-    if isinstance(expr, SumOverExpression):
+            indices.update(_expr_variable_indices(arg, model, cache))
+        result = indices
+    elif isinstance(expr, MatMulExpression):
+        left = _expr_variable_indices(expr.left, model, cache)
+        right = _expr_variable_indices(expr.right, model, cache)
+        result = left | right
+    elif isinstance(expr, SumExpression):
+        result = _expr_variable_indices(expr.operand, model, cache)
+    elif isinstance(expr, SumOverExpression):
         indices = set()
         for term in expr.terms:
-            indices.update(_expr_variable_indices(term, model))
-        return indices
-    return set()
+            indices.update(_expr_variable_indices(term, model, cache))
+        result = indices
+    else:
+        result = set()
+
+    if cache is not None:
+        cache[cache_key] = frozenset(result)
+    return result
 
 
-def _expr_has_function(expr: Expression, names: set[str]) -> bool:
+def _expr_has_function(
+    expr: Expression,
+    names: set[str],
+    cache: Optional[dict[tuple[int, tuple[str, ...]], bool]] = None,
+) -> bool:
     """Return true when an expression tree calls any named function."""
+    cache_key = (id(expr), tuple(sorted(names)))
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
+
     if isinstance(expr, FunctionCall):
-        return expr.func_name in names or any(_expr_has_function(arg, names) for arg in expr.args)
-    if isinstance(expr, BinaryOp):
-        return _expr_has_function(expr.left, names) or _expr_has_function(expr.right, names)
-    if isinstance(expr, UnaryOp):
-        return _expr_has_function(expr.operand, names)
-    if isinstance(expr, MatMulExpression):
-        return _expr_has_function(expr.left, names) or _expr_has_function(expr.right, names)
-    if isinstance(expr, SumExpression):
-        return _expr_has_function(expr.operand, names)
-    if isinstance(expr, SumOverExpression):
-        return any(_expr_has_function(term, names) for term in expr.terms)
-    if isinstance(expr, IndexExpression) and not isinstance(expr.base, Variable):
-        return _expr_has_function(expr.base, names)
-    return False
+        result = expr.func_name in names or any(
+            _expr_has_function(arg, names, cache) for arg in expr.args
+        )
+    elif isinstance(expr, BinaryOp):
+        result = _expr_has_function(expr.left, names, cache) or _expr_has_function(
+            expr.right, names, cache
+        )
+    elif isinstance(expr, UnaryOp):
+        result = _expr_has_function(expr.operand, names, cache)
+    elif isinstance(expr, MatMulExpression):
+        result = _expr_has_function(expr.left, names, cache) or _expr_has_function(
+            expr.right, names, cache
+        )
+    elif isinstance(expr, SumExpression):
+        result = _expr_has_function(expr.operand, names, cache)
+    elif isinstance(expr, SumOverExpression):
+        result = any(_expr_has_function(term, names, cache) for term in expr.terms)
+    elif isinstance(expr, IndexExpression) and not isinstance(expr.base, Variable):
+        result = _expr_has_function(expr.base, names, cache)
+    else:
+        result = False
+
+    if cache is not None:
+        cache[cache_key] = result
+    return result
 
 
 def _expr_all_vars_fixed(
@@ -1226,9 +1259,10 @@ def _expr_all_vars_fixed(
     flat_lb: np.ndarray,
     flat_ub: np.ndarray,
     tol: float = 1e-9,
+    var_index_cache: Optional[dict[int, frozenset[int]]] = None,
 ) -> bool:
     """Return true when all variables used by an expression have fixed bounds."""
-    indices = _expr_variable_indices(expr, model)
+    indices = _expr_variable_indices(expr, model, var_index_cache)
     if not indices:
         return False
     return all(float(flat_ub[idx]) - float(flat_lb[idx]) <= tol for idx in indices)
@@ -1245,6 +1279,8 @@ def _direct_oa_skip_reasons(
     from discopt._jax.cutting_planes import _quadratic_polynomial
 
     reasons: list[str | None] = []
+    var_index_cache: dict[int, frozenset[int]] = {}
+    function_cache: dict[tuple[int, tuple[str, ...]], bool] = {}
     for idx, is_convex in enumerate(convex_mask):
         if is_convex:
             reasons.append(None)
@@ -1256,7 +1292,7 @@ def _direct_oa_skip_reasons(
             continue
 
         expr = constraint.body
-        if _expr_all_vars_fixed(expr, model, flat_lb, flat_ub):
+        if _expr_all_vars_fixed(expr, model, flat_lb, flat_ub, var_index_cache=var_index_cache):
             reasons.append("fixed_nonlinear_row")
             continue
         if constraint.sense == "==":
@@ -1273,7 +1309,7 @@ def _direct_oa_skip_reasons(
         if _quadratic_polynomial(expr, model) is not None:
             reasons.append("nonconvex_quadratic_alpha_bb_candidate")
             continue
-        if _expr_has_function(expr, {"sin", "cos", "tan"}):
+        if _expr_has_function(expr, {"sin", "cos", "tan"}, function_cache):
             reasons.append("trigonometric_not_certified_convex")
             continue
 

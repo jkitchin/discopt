@@ -2688,7 +2688,7 @@ def build_milp_relaxation(
                     len(breakpoints),
                     encoding=convhull_ebd_encoding,
                 )
-                for _ in range(embedding_info["bit_count"]):
+                for _ in range(embedding_info.bit_count):
                     embedding_cols.append(col_idx)
                     all_bounds.append((0.0, 1.0))
                     integrality_flags.append(1)
@@ -2873,8 +2873,8 @@ def build_milp_relaxation(
             if mode == "sos2" and embedding_info is not None:
                 for bit_col, positive_set, negative_set in zip(
                     embedding_cols,
-                    embedding_info["positive_sets"],
-                    embedding_info["negative_sets"],
+                    embedding_info.positive_sets,
+                    embedding_info.negative_sets,
                 ):
                     row = np.zeros(n_total)
                     for lambda_idx in positive_set:

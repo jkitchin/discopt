@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import numpy as np
 
 from discopt.modeling.core import Model
+
+logger = logging.getLogger(__name__)
 
 
 def _round_integral_bounds(
@@ -84,7 +87,8 @@ def tighten_root_bounds_with_fbbt(
             from discopt._rust import model_to_repr
 
             model_repr = model_to_repr(model, getattr(model, "_builder", None))
-        except Exception:
+        except Exception as exc:
+            logger.debug("Root FBBT model conversion skipped: %s", exc)
             model_repr = None
 
     if model_repr is not None:
@@ -97,8 +101,8 @@ def tighten_root_bounds_with_fbbt(
                 tightened_lb,
                 tightened_ub,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Root FBBT bound tightening skipped: %s", exc)
 
     _round_integral_bounds(tightened_lb, tightened_ub, int_offsets, int_sizes)
 

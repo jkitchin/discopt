@@ -1373,19 +1373,21 @@ class TestMilpRelaxation:
 
     def test_sos2_embedding_requires_selector_columns(self, monkeypatch):
         """SOS2 linking must keep either alpha or embedded selector columns."""
+        from discopt._jax.embedding import EmbeddingMap
+
         m = _make_nlp1()
         terms = self.classify(m)
         state = self.init_partitions([0], lb=[1.0], ub=[4.0], n_init=4)
 
         monkeypatch.setattr(
             "discopt._jax.milp_relaxation.build_embedding_map",
-            lambda lambda_count, encoding="gray": {
-                "encoding": encoding,
-                "bit_count": 0,
-                "codes": tuple(),
-                "positive_sets": tuple(),
-                "negative_sets": tuple(),
-            },
+            lambda lambda_count, encoding="gray": EmbeddingMap(
+                encoding=encoding,
+                bit_count=0,
+                codes=tuple(),
+                positive_sets=tuple(),
+                negative_sets=tuple(),
+            ),
         )
 
         with pytest.raises(

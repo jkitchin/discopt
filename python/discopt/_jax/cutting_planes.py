@@ -277,9 +277,11 @@ def generate_oa_cuts_from_evaluator(
 ) -> list[LinearCut]:
     """Generate OA cuts for all constraints using an NLPEvaluator.
 
-    WARNING: These cuts are only globally valid if all constraints are convex.
-    For non-convex constraints, use generate_oa_cuts_from_relaxation() instead,
-    which linearizes the McCormick convex underestimators.
+    Direct tangent OA cuts are emitted only for rows certified convex by
+    ``convex_mask``. Rows marked false are intentionally skipped and can be
+    explained through ``skip_reasons``/``generate_oa_cuts_from_evaluator_report``.
+    For nonconvex rows that still need cuts, use a relaxation-specific cut
+    generator such as McCormick or alpha-BB instead.
 
     Args:
         evaluator: An NLPEvaluator with evaluate_constraints and evaluate_jacobian.
@@ -288,6 +290,8 @@ def generate_oa_cuts_from_evaluator(
             all constraints are assumed to be "<=".
         convex_mask: Per-constraint boolean list. If provided, only constraints
             where ``convex_mask[k]`` is True are linearized.
+        skip_reasons: Optional per-row reason strings for nonconvex rows. Used
+            by the report API; accepted here so callers can share arguments.
 
     Returns:
         List of LinearCut objects, one per constraint.
