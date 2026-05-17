@@ -291,6 +291,19 @@ class TestAmpTermClassification:
         assert terms.partition_candidates == [6, 7]
         assert terms.general_nl
 
+    def test_repeated_factor_product_does_not_double_classify_subproducts(self):
+        from discopt._jax.term_classifier import classify_nonlinear_terms
+
+        m = dm.Model("amp_terms_repeated_factor")
+        x = m.continuous("x", shape=(2,), lb=0, ub=10)
+        m.minimize(x[0] * x[0] * x[1])
+
+        terms = classify_nonlinear_terms(m)
+
+        assert len(terms.general_nl) == 1
+        assert terms.monomial == []
+        assert terms.bilinear == []
+
     def test_public_classifier_falls_back_for_general_nonlinear_objects(self):
         from discopt._jax.term_classifier import (
             _classify_nonlinear_terms_python,

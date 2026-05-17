@@ -492,11 +492,8 @@ def _classify_nonlinear_terms_python(model: Model) -> NonlinearTerms:
                         # Mixed repeated-factor products such as x*x*y are not
                         # represented correctly by the current bilinear/trilinear
                         # relaxation pipeline. Keep the whole product in general_nl
-                        # and recurse so nested pure monomials like x*x are still
-                        # discovered on their own subexpressions.
+                        # without also classifying subproducts from the same term.
                         result.general_nl.append(expr)
-                        _classify_node(expr.left)
-                        _classify_node(expr.right)
                         return
                     if n_unique == 2:
                         _record_bilinear(unique_vars[0], unique_vars[1])

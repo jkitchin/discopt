@@ -141,48 +141,65 @@ impl<'a> TermClassifier<'a> {
     }
 
     fn classify_node(&mut self, id: ExprId) {
-        match self.model.arena.get(id).clone() {
+        match self.model.arena.get(id) {
             ExprNode::Constant(_) | ExprNode::ConstantArray(_, _) | ExprNode::Parameter { .. } => {}
             ExprNode::Variable { .. } => {}
             ExprNode::Index { base, .. } => {
+                let base = *base;
                 if !matches!(self.model.arena.get(base), ExprNode::Variable { .. }) {
                     self.classify_node(base);
                 }
             }
             ExprNode::BinaryOp { op, left, right } => match op {
-                BinOp::Pow => self.classify_power(left, right),
-                BinOp::Mul => self.classify_product(id, left, right),
+                BinOp::Pow => self.classify_power(*left, *right),
+                BinOp::Mul => self.classify_product(id, *left, *right),
                 BinOp::Add | BinOp::Sub => {
-                    self.classify_node(left);
-                    self.classify_node(right);
+                    self.classify_node(*left);
+                    self.classify_node(*right);
                 }
                 BinOp::Div => {
-                    if self.constant_value(right).is_some() {
-                        self.classify_node(left);
+                    if self.constant_value(*right).is_some() {
+                        self.classify_node(*left);
                     } else {
                         self.result.general_nl_count += 1;
                     }
                 }
             },
             ExprNode::UnaryOp { op, operand } => match op {
-                UnOp::Neg => self.classify_node(operand),
+                UnOp::Neg => self.classify_node(*operand),
                 UnOp::Abs => self.result.general_nl_count += 1,
             },
-            ExprNode::FunctionCall { args, .. } => {
+            ExprNode::FunctionCall { .. } => {
                 self.result.general_nl_count += 1;
-                for arg in args {
+                let args_len = match self.model.arena.get(id) {
+                    ExprNode::FunctionCall { args, .. } => args.len(),
+                    _ => unreachable!(),
+                };
+                for arg_idx in 0..args_len {
+                    let arg = match self.model.arena.get(id) {
+                        ExprNode::FunctionCall { args, .. } => args[arg_idx],
+                        _ => unreachable!(),
+                    };
                     self.classify_node(arg);
                 }
             }
-            ExprNode::Sum { operand, .. } => self.classify_node(operand),
-            ExprNode::SumOver { terms } => {
-                for term in terms {
+            ExprNode::Sum { operand, .. } => self.classify_node(*operand),
+            ExprNode::SumOver { .. } => {
+                let terms_len = match self.model.arena.get(id) {
+                    ExprNode::SumOver { terms } => terms.len(),
+                    _ => unreachable!(),
+                };
+                for term_idx in 0..terms_len {
+                    let term = match self.model.arena.get(id) {
+                        ExprNode::SumOver { terms } => terms[term_idx],
+                        _ => unreachable!(),
+                    };
                     self.classify_node(term);
                 }
             }
             ExprNode::MatMul { left, right } => {
-                self.classify_node(left);
-                self.classify_node(right);
+                self.classify_node(*left);
+                self.classify_node(*right);
             }
         }
     }
@@ -231,8 +248,6 @@ impl<'a> TermClassifier<'a> {
                 .any(|var| factors.iter().filter(|idx| *idx == var).count() >= 2)
             {
                 self.result.general_nl_count += 1;
-                self.classify_node(left);
-                self.classify_node(right);
                 return;
             }
 
@@ -631,5 +646,56 @@ mod tests {
         let terms = classify_nonlinear_terms(&model);
 
         assert_eq!(terms.general_nl_count, 3);
+    }
+
+    #[test]
+    fn repeated_factor_product_is_single_general_nonlinearity() {
+        let mut arena = ExprArena::new();
+        let x = arena.add(ExprNode::Variable {
+            name: "x".to_string(),
+            index: 0,
+            size: 2,
+            shape: vec![2],
+        });
+        let x0 = arena.add(ExprNode::Index {
+            base: x,
+            index: IndexSpec::Scalar(0),
+        });
+        let x1 = arena.add(ExprNode::Index {
+            base: x,
+            index: IndexSpec::Scalar(1),
+        });
+        let x0_squared = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: x0,
+            right: x0,
+        });
+        let objective = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: x0_squared,
+            right: x1,
+        });
+        let model = ModelRepr {
+            arena,
+            objective,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![],
+            variables: vec![VarInfo {
+                name: "x".to_string(),
+                var_type: VarType::Continuous,
+                offset: 0,
+                size: 2,
+                shape: vec![2],
+                lb: vec![0.0; 2],
+                ub: vec![10.0; 2],
+            }],
+            n_vars: 2,
+        };
+
+        let terms = classify_nonlinear_terms(&model);
+
+        assert_eq!(terms.general_nl_count, 1);
+        assert!(terms.monomial.is_empty());
+        assert!(terms.bilinear.is_empty());
     }
 }
