@@ -12,6 +12,7 @@ import os
 import socket
 import subprocess
 import sys
+import time
 import webbrowser
 from pathlib import Path
 
@@ -20,6 +21,18 @@ def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return int(s.getsockname()[1])
+
+
+def _wait_for_port(host: str, port: int, timeout: float = 20.0) -> bool:
+    """Poll until ``host:port`` accepts a TCP connection. Returns True on success."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=0.5):
+                return True
+        except OSError:
+            time.sleep(0.1)
+    return False
 
 
 def _streamlit_available() -> bool:
@@ -106,14 +119,25 @@ def launch(
     if not spawn:
         return 0
 
-    if open_browser:
-        try:
-            webbrowser.open(url, new=2)
-        except Exception:
-            pass
-
+    proc = subprocess.Popen(cmd, env=env)
     try:
-        proc = subprocess.run(cmd, env=env, check=False)
+        if open_browser:
+            ready = _wait_for_port("127.0.0.1", bind_port, timeout=20.0)
+            if not ready:
+                print(
+                    f"warning: streamlit didn't bind {url} within 20s; "
+                    "opening browser anyway",
+                    file=sys.stderr,
+                )
+            try:
+                webbrowser.open(url, new=2)
+            except Exception:
+                pass
+        return int(proc.wait() or 0)
     except KeyboardInterrupt:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
         return 0
-    return int(proc.returncode or 0)

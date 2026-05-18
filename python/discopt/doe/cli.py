@@ -448,6 +448,7 @@ def do_status(params: dict[str, Any]) -> dict[str, Any]:
     return {
         "workbook_path": str(wb.path),
         "template": wb.template_name(),
+        "template_args": wb.template_args(),
         "module_callable": wb.module_callable(),
         "response_name": response,
         "input_specs": [s.to_dict() for s in wb.input_specs()],
@@ -584,6 +585,14 @@ def do_fit(params: dict[str, Any]) -> dict[str, Any]:
 
     wb.write_parameters(parameter_names, estimates, std_errors, cis)
     wb.write_fim(cum_fim, parameter_names)
+    coefficients, anova_rows, fit_summary = _compute_anova(
+        y=y, X=X, beta=beta, residual_ss=residual_ss,
+        std_errs=std_errs, parameter_names=parameter_names,
+        n_obs=n_obs, n_p=n_p, sigma=sigma,
+    )
+    wb.write_anova(
+        coefficients=coefficients, anova_rows=anova_rows, fit_summary=fit_summary,
+    )
     wb.log("fit", {"n_completed": n_obs})
     wb.save()
 
@@ -608,6 +617,134 @@ def do_fit(params: dict[str, Any]) -> dict[str, Any]:
         "log_det_fim": log_det_fim,
         "next_command": f"discopt doe extend {wb.path} --n N",
     }
+
+
+def _compute_anova(
+    *,
+    y: np.ndarray,
+    X: np.ndarray,
+    beta: np.ndarray,
+    residual_ss: float,
+    std_errs: np.ndarray,
+    parameter_names: list[str],
+    n_obs: int,
+    n_p: int,
+    sigma: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[tuple[str, Any]]]:
+    """Compute coefficient table, ANOVA decomposition, and fit summary.
+
+    Assumes the model includes an intercept (true for every built-in
+    template), so ``df_regression = n_p - 1``. Returns NaN-filled entries
+    for fields that aren't statistically meaningful (e.g. when
+    ``n_obs <= n_p``).
+    """
+    from scipy.stats import f as f_dist
+    from scipy.stats import t as t_dist
+
+    dof_resid = n_obs - n_p
+    has_dof = dof_resid > 0
+    nan = float("nan")
+
+    if has_dof:
+        t_crit = float(t_dist.ppf(0.975, df=dof_resid))
+        t_stats = np.where(std_errs > 0, beta / np.where(std_errs > 0, std_errs, 1.0), nan)
+        p_vals = np.where(
+            std_errs > 0,
+            2.0 * t_dist.sf(np.abs(t_stats), df=dof_resid),
+            nan,
+        )
+    else:
+        t_crit = nan
+        t_stats = np.full(n_p, nan)
+        p_vals = np.full(n_p, nan)
+
+    coefficients: list[dict[str, Any]] = []
+    for i, name in enumerate(parameter_names):
+        se = float(std_errs[i])
+        est = float(beta[i])
+        ci_half = t_crit * se if has_dof and np.isfinite(se) else nan
+        coefficients.append(
+            {
+                "name": name,
+                "estimate": est,
+                "std_error": se if np.isfinite(se) else nan,
+                "t_statistic": float(t_stats[i]),
+                "p_value": float(p_vals[i]),
+                "ci_lower_95": est - ci_half if np.isfinite(ci_half) else nan,
+                "ci_upper_95": est + ci_half if np.isfinite(ci_half) else nan,
+            }
+        )
+
+    # Overall ANOVA (corrected total; intercept-aware).
+    y_bar = float(np.mean(y))
+    ss_total = float(np.sum((y - y_bar) ** 2))
+    ss_residual = float(residual_ss)
+    ss_regression = max(ss_total - ss_residual, 0.0)
+    df_regression = max(n_p - 1, 0)
+    df_total = n_obs - 1
+
+    if has_dof and df_regression > 0:
+        ms_regression = ss_regression / df_regression
+        ms_residual = ss_residual / dof_resid
+        f_stat = ms_regression / ms_residual if ms_residual > 0 else nan
+        p_f = float(f_dist.sf(f_stat, df_regression, dof_resid)) if np.isfinite(f_stat) else nan
+    else:
+        ms_regression = nan
+        ms_residual = nan
+        f_stat = nan
+        p_f = nan
+
+    anova_rows: list[dict[str, Any]] = [
+        {
+            "source": "Regression",
+            "ss": ss_regression,
+            "df": df_regression,
+            "ms": ms_regression,
+            "f_statistic": f_stat,
+            "p_value": p_f,
+        },
+        {
+            "source": "Residual",
+            "ss": ss_residual,
+            "df": dof_resid,
+            "ms": ms_residual,
+            "f_statistic": None,
+            "p_value": None,
+        },
+        {
+            "source": "Total (corrected)",
+            "ss": ss_total,
+            "df": df_total,
+            "ms": None,
+            "f_statistic": None,
+            "p_value": None,
+        },
+    ]
+
+    if ss_total > 0:
+        r2 = 1.0 - ss_residual / ss_total
+        if has_dof:
+            r2_adj = 1.0 - (1.0 - r2) * (n_obs - 1) / dof_resid
+        else:
+            r2_adj = nan
+    else:
+        r2 = nan
+        r2_adj = nan
+    rmse = float(np.sqrt(ms_residual)) if np.isfinite(ms_residual) else nan
+    sigma_hat = rmse  # RMSE is the estimated σ from residuals
+
+    fit_summary: list[tuple[str, Any]] = [
+        ("n_observations", int(n_obs)),
+        ("n_parameters", int(n_p)),
+        ("degrees_of_freedom", int(dof_resid) if has_dof else "n/a (under-determined)"),
+        ("R_squared", float(r2)),
+        ("adjusted_R_squared", float(r2_adj)),
+        ("RMSE (sigma_hat)", float(sigma_hat)),
+        ("sigma_declared", float(sigma)),
+        ("F_statistic", float(f_stat)),
+        ("F_p_value", float(p_f)),
+    ]
+    return coefficients, anova_rows, fit_summary
 
 
 def _design_row(

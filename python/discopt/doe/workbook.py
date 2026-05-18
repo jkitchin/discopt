@@ -36,8 +36,16 @@ Sheets
     Append-only log of CLI commands run against this workbook.
 
 ``instructions``
-    Plain prose paragraph in cell A1 describing the loop for the
-    experimentalist.
+    Human-readable workflow guide, one styled block per row in column A
+    (title, section headers, body, code). Rendered by
+    :func:`_write_instructions_sheet`.
+
+``anova``
+    Regression diagnostics written by ``fit``: per-parameter coefficient
+    table (estimate, std error, t-statistic, p-value, 95% CI), overall
+    ANOVA decomposition (regression / residual / total sums of squares,
+    F-statistic, p-value), and fit-summary statistics (R², adjusted R²,
+    RMSE). Only populated for built-in templates (the OLS path).
 """
 
 from __future__ import annotations
@@ -59,24 +67,78 @@ SHEET_PARAMETERS = "parameters"
 SHEET_FIM = "fim"
 SHEET_HISTORY = "history"
 SHEET_INSTRUCTIONS = "instructions"
+SHEET_ANOVA = "anova"
 
-_INSTRUCTIONS_TEXT = (
-    "discopt DoE campaign workbook.\n\n"
-    "1. The 'runs' sheet lists the experiments to perform. For each row, run the\n"
-    "   experiment at the listed input conditions and fill in the response column\n"
-    "   (and optionally 'measured_at'). Leave rows you haven't done yet blank.\n"
-    "2. Save the workbook.\n"
-    "3. From the command line, run:\n"
-    "       discopt doe status <this-file.xlsx>\n"
-    "   to verify how many runs are complete, then\n"
-    "       discopt doe fit <this-file.xlsx>\n"
-    "   to estimate parameters from the completed rows. Results are written to\n"
-    "   the 'parameters' and 'fim' sheets.\n"
-    "4. To request more recommended runs, run:\n"
-    "       discopt doe extend <this-file.xlsx> --n M\n"
-    "   New rows are appended to 'runs' with the next batch number.\n\n"
-    "Do not edit the 'metadata', 'fim', or 'history' sheets by hand."
-)
+# Instructions sheet layout: a list of (style, text) blocks rendered top-to-bottom.
+# Styles: "title" (large bold), "h2" (bold section header), "body" (wrapped prose),
+# "code" (monospace, no wrap). Each block becomes one cell in column A.
+_INSTRUCTIONS_BLOCKS: list[tuple[str, str]] = [
+    ("title", "discopt DoE campaign workbook"),
+    ("h2", "Workflow"),
+    (
+        "body",
+        "1. The 'runs' sheet lists the experiments to perform. For each row, "
+        "run the experiment at the listed input conditions and fill in the "
+        "response column (and optionally 'measured_at'). Leave rows you "
+        "haven't done yet blank.",
+    ),
+    ("body", "2. Save the workbook."),
+    ("body", "3. From the command line, check status:"),
+    ("code", "    discopt doe status <this-file.xlsx>"),
+    ("body", "   then estimate parameters from the completed rows:"),
+    ("code", "    discopt doe fit <this-file.xlsx>"),
+    ("body", "   Results are written to the 'parameters' and 'fim' sheets."),
+    ("body", "4. To request more recommended runs:"),
+    ("code", "    discopt doe extend <this-file.xlsx> --n M"),
+    ("body", "   New rows are appended to 'runs' with the next batch number."),
+    ("h2", "Hands off"),
+    (
+        "body",
+        "Do not edit the 'metadata', 'fim', or 'history' sheets by hand. "
+        "The CLI rewrites them and any manual edits will be lost.",
+    ),
+    ("h2", "Sheets in this workbook"),
+    ("body", "runs — experiments to perform; you fill in the response column."),
+    ("body", "metadata — campaign configuration (template, inputs, criterion, seed, ...)."),
+    ("body", "parameters — fitted parameter estimates, std errors, and 95% CIs."),
+    ("body", "anova — regression report: coefficient table (estimate, SE, t, p, 95% CI), ANOVA decomposition, R², adjusted R², RMSE."),
+    ("body", "fim — cumulative Fisher Information Matrix (reused by 'extend')."),
+    ("body", "history — append-only log of CLI commands run against this workbook."),
+]
+
+
+def _write_instructions_sheet(sheet: Any) -> None:
+    """Render the instructions blocks into ``sheet`` with readable formatting."""
+    from openpyxl.styles import Alignment, Font
+
+    # Single wide column, generous height so wrapped prose isn't clipped.
+    sheet.column_dimensions["A"].width = 100
+
+    title_font = Font(name="Calibri", size=16, bold=True)
+    h2_font = Font(name="Calibri", size=12, bold=True)
+    body_font = Font(name="Calibri", size=11)
+    code_font = Font(name="Consolas", size=10)
+    wrap = Alignment(wrap_text=True, vertical="top")
+    nowrap = Alignment(wrap_text=False, vertical="top")
+
+    # Heuristic row-height per style; openpyxl can't auto-fit wrapped text.
+    row_height = {"title": 28, "h2": 22, "body": None, "code": 18}
+    font_for = {"title": title_font, "h2": h2_font, "body": body_font, "code": code_font}
+    align_for = {"title": nowrap, "h2": nowrap, "body": wrap, "code": nowrap}
+
+    # Width in characters used for body row-height estimation.
+    col_chars = 95
+
+    for idx, (style, text) in enumerate(_INSTRUCTIONS_BLOCKS, start=1):
+        cell = sheet.cell(row=idx, column=1, value=text)
+        cell.font = font_for[style]
+        cell.alignment = align_for[style]
+        if style == "body":
+            # Estimate wrapped line count; ~16pt per line.
+            lines = max(1, (len(text) + col_chars - 1) // col_chars)
+            sheet.row_dimensions[idx].height = 16 * lines + 4
+        else:
+            sheet.row_dimensions[idx].height = row_height[style]
 
 
 @dataclass
@@ -155,11 +217,12 @@ class Workbook:
         wb.create_sheet(SHEET_RUNS)
         wb.create_sheet(SHEET_METADATA)
         wb.create_sheet(SHEET_PARAMETERS)
+        wb.create_sheet(SHEET_ANOVA)
         wb.create_sheet(SHEET_FIM)
         wb.create_sheet(SHEET_HISTORY)
 
         # Instructions
-        wb[SHEET_INSTRUCTIONS]["A1"] = _INSTRUCTIONS_TEXT
+        _write_instructions_sheet(wb[SHEET_INSTRUCTIONS])
 
         # Metadata
         import discopt as _discopt
@@ -363,6 +426,102 @@ class Workbook:
             lo, hi = confidence_intervals.get(name, (float("nan"), float("nan")))
             sheet.append([name, est, se, float(lo), float(hi), ts])
 
+    def write_anova(
+        self,
+        *,
+        coefficients: list[dict[str, Any]],
+        anova_rows: list[dict[str, Any]],
+        fit_summary: list[tuple[str, Any]],
+    ) -> None:
+        """Write the regression report (coefficients + ANOVA + summary) sheet.
+
+        ``coefficients`` rows: ``name``, ``estimate``, ``std_error``,
+        ``t_statistic``, ``p_value``, ``ci_lower_95``, ``ci_upper_95``.
+        ``anova_rows`` rows: ``source``, ``ss``, ``df``, ``ms``,
+        ``f_statistic``, ``p_value`` (last two may be ``None`` for the
+        Residual / Total rows). ``fit_summary`` is an ordered list of
+        ``(label, value)`` pairs.
+        """
+        from openpyxl.styles import Alignment, Font
+
+        if SHEET_ANOVA not in self._wb.sheetnames:
+            self._wb.create_sheet(SHEET_ANOVA)
+        sheet = self._wb[SHEET_ANOVA]
+        if sheet.max_row >= 1:
+            sheet.delete_rows(1, sheet.max_row)
+
+        # Column widths tuned for the longest expected content.
+        widths = {"A": 22, "B": 16, "C": 8, "D": 16, "E": 14, "F": 14, "G": 14}
+        for col, w in widths.items():
+            sheet.column_dimensions[col].width = w
+
+        h1 = Font(name="Calibri", size=14, bold=True)
+        h2_font = Font(name="Calibri", size=11, bold=True)
+        body = Font(name="Calibri", size=11)
+        right = Alignment(horizontal="right")
+
+        def _section(row: int, title: str) -> int:
+            cell = sheet.cell(row=row, column=1, value=title)
+            cell.font = h1
+            return row + 1
+
+        def _header(row: int, cols: list[str]) -> int:
+            for j, name in enumerate(cols, start=1):
+                c = sheet.cell(row=row, column=j, value=name)
+                c.font = h2_font
+            return row + 1
+
+        def _num(row: int, col: int, value: Any, fmt: str = "0.0000") -> None:
+            c = sheet.cell(row=row, column=col, value=value)
+            c.font = body
+            c.alignment = right
+            if isinstance(value, (int, float)) and value is not None:
+                c.number_format = fmt
+
+        r = 1
+        # --- Coefficients ---
+        r = _section(r, "Coefficients")
+        r = _header(
+            r,
+            ["name", "estimate", "std_error", "t_statistic", "p_value",
+             "ci_lower_95", "ci_upper_95"],
+        )
+        for coef in coefficients:
+            sheet.cell(row=r, column=1, value=coef["name"]).font = body
+            _num(r, 2, coef.get("estimate"), "0.000000")
+            _num(r, 3, coef.get("std_error"), "0.0000E+00")
+            _num(r, 4, coef.get("t_statistic"), "0.0000")
+            _num(r, 5, coef.get("p_value"), "0.0000E+00")
+            _num(r, 6, coef.get("ci_lower_95"), "0.000000")
+            _num(r, 7, coef.get("ci_upper_95"), "0.000000")
+            r += 1
+        r += 1  # blank spacer
+
+        # --- ANOVA table ---
+        r = _section(r, "ANOVA")
+        r = _header(r, ["source", "SS", "df", "MS", "F", "p_value"])
+        for row in anova_rows:
+            sheet.cell(row=r, column=1, value=row["source"]).font = body
+            _num(r, 2, row.get("ss"), "0.000000")
+            _num(r, 3, row.get("df"), "0")
+            _num(r, 4, row.get("ms"), "0.000000")
+            _num(r, 5, row.get("f_statistic"), "0.0000")
+            _num(r, 6, row.get("p_value"), "0.0000E+00")
+            r += 1
+        r += 1
+
+        # --- Fit summary ---
+        r = _section(r, "Fit summary")
+        for label, value in fit_summary:
+            sheet.cell(row=r, column=1, value=label).font = body
+            if isinstance(value, float):
+                _num(r, 2, value, "0.000000")
+            else:
+                c = sheet.cell(row=r, column=2, value=value)
+                c.font = body
+                c.alignment = right
+            r += 1
+
     def read_parameters(self) -> list[dict[str, Any]]:
         sheet = self._wb[SHEET_PARAMETERS]
         out: list[dict[str, Any]] = []
@@ -486,6 +645,7 @@ def _load_module_callable(spec: str) -> Experiment:
 __all__ = [
     "InputSpec",
     "Workbook",
+    "SHEET_ANOVA",
     "SHEET_FIM",
     "SHEET_HISTORY",
     "SHEET_INSTRUCTIONS",

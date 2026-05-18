@@ -27,12 +27,13 @@ from discopt.doe.cli import (
     DoEError,
     ExtendParams,
     NewParams,
+    _design_row,
     do_extend,
     do_fit,
     do_new,
     do_status,
 )
-from discopt.doe.workbook import SHEET_HISTORY, SHEET_RUNS
+from discopt.doe.workbook import SHEET_ANOVA, SHEET_HISTORY, SHEET_RUNS, Workbook
 
 _WORKBOOK_ENV = "DISCOPT_DOE_WORKBOOK"
 
@@ -104,6 +105,186 @@ def _save_responses(path: str, edited: pd.DataFrame, response: str) -> int:
             n_updates += 1
     wb.save(path)
     return n_updates
+
+
+def _model_terms(
+    template: str | None,
+    template_args: dict[str, Any],
+    input_names: list[str],
+    parameter_names: list[str],
+) -> dict[str, str]:
+    """Map each parameter name to its basis term (e.g. ``b12`` → ``x1·x2``).
+
+    Returns an empty dict for templates we don't recognise (custom modules).
+    The strings use a centered dot for products and Unicode superscripts
+    for powers — they render cleanly in Streamlit tables and markdown.
+    """
+    if not template:
+        return {}
+
+    sup = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
+
+    def _pow(name: str, exp: int) -> str:
+        if exp == 0:
+            return "1"
+        if exp == 1:
+            return name
+        return f"{name}{str(exp).translate(sup)}"
+
+    if template == "linear":
+        out = {"b0": "1 (intercept)"}
+        for i, nm in enumerate(input_names, start=1):
+            out[f"b{i}"] = nm
+        return out
+
+    if template == "polynomial-1d":
+        x = input_names[0] if input_names else "x"
+        degree = int(template_args.get("degree", max(0, len(parameter_names) - 1)))
+        return {f"b{j}": _pow(x, j) for j in range(degree + 1)}
+
+    if template in ("response-surface-2d", "response-surface-3d"):
+        n = len(input_names)
+        out = {"b0": "1 (intercept)"}
+        for i, nm in enumerate(input_names, start=1):
+            out[f"b{i}"] = nm
+        for i, nm in enumerate(input_names, start=1):
+            out[f"b{i}{i}"] = _pow(nm, 2)
+        for i in range(n):
+            for j in range(i + 1, n):
+                out[f"b{i + 1}{j + 1}"] = f"{input_names[i]}·{input_names[j]}"
+        return out
+
+    return {}
+
+
+def _model_equation(
+    template: str | None,
+    template_args: dict[str, Any],
+    input_names: list[str],
+    response: str,
+    parameter_names: list[str],
+    estimates: dict[str, float] | None = None,
+) -> str | None:
+    """Build a human-readable model equation.
+
+    If ``estimates`` is supplied, numeric coefficients are substituted
+    in place of symbolic names. Returns ``None`` for unrecognised
+    templates.
+    """
+    terms = _model_terms(template, template_args, input_names, parameter_names)
+    if not terms:
+        return None
+
+    def _coef(name: str, *, is_first: bool) -> str:
+        if estimates is None or name not in estimates:
+            return ("" if is_first else "+ ") + name
+        v = float(estimates[name])
+        sign = "" if is_first and v >= 0 else ("+ " if v >= 0 else "- ")
+        return f"{sign}{abs(v):.4g}"
+
+    parts: list[str] = []
+    for i, name in enumerate(parameter_names):
+        term = terms.get(name, name)
+        coef = _coef(name, is_first=(i == 0))
+        if term == "1 (intercept)" or term == "1":
+            parts.append(coef.rstrip())
+        else:
+            parts.append(f"{coef}·{term}" if estimates is not None else f"{coef}·{term}")
+    return f"{response} = " + " ".join(parts)
+
+
+def _read_anova_sheet(path: str) -> dict[str, Any] | None:
+    """Parse the 3-section ``anova`` sheet into structured pieces.
+
+    Returns ``{"coefficients": DataFrame, "anova": DataFrame,
+    "fit_summary": list[(label, value)]}`` or ``None`` if the sheet is
+    missing or empty (e.g. workbook never fit).
+    """
+    wb = openpyxl.load_workbook(path)
+    if SHEET_ANOVA not in wb.sheetnames:
+        return None
+    sheet = wb[SHEET_ANOVA]
+    rows = list(sheet.iter_rows(values_only=True))
+    if not rows:
+        return None
+    # Sections are demarcated by single-cell section headers ("Coefficients",
+    # "ANOVA", "Fit summary"). Walk the rows and split.
+    sections: dict[str, list[tuple]] = {}
+    current: str | None = None
+    for row in rows:
+        if row is None or all(c is None for c in row):
+            continue
+        first = row[0]
+        rest = [c for c in row[1:] if c is not None]
+        if isinstance(first, str) and not rest and first in (
+            "Coefficients", "ANOVA", "Fit summary"
+        ):
+            current = first
+            sections[current] = []
+            continue
+        if current is not None:
+            sections[current].append(row)
+
+    def _to_df(rows_):
+        if not rows_:
+            return pd.DataFrame()
+        header = [str(c) if c is not None else "" for c in rows_[0]]
+        # Trim trailing empty columns
+        while header and header[-1] == "":
+            header.pop()
+        body = [list(r[: len(header)]) for r in rows_[1:]]
+        return pd.DataFrame(body, columns=header)
+
+    fit_summary_rows = sections.get("Fit summary", [])
+    fit_summary = [(str(r[0]), r[1]) for r in fit_summary_rows if r and r[0] is not None]
+
+    return {
+        "coefficients": _to_df(sections.get("Coefficients", [])),
+        "anova": _to_df(sections.get("ANOVA", [])),
+        "fit_summary": fit_summary,
+    }
+
+
+def _compute_parity(path: str, status: dict[str, Any]) -> pd.DataFrame | None:
+    """Return per-completed-run observed/predicted/residual values.
+
+    ``None`` if no fit results are available, no completed runs exist,
+    or the experiment uses ``module_callable`` (no analytic design row).
+    """
+    template = status.get("template")
+    if not template:
+        return None
+    params = status.get("parameters") or []
+    if not params:
+        return None
+    try:
+        wb_obj = Workbook.open(Path(path))
+    except (FileNotFoundError, ValueError):
+        return None
+    completed = wb_obj.completed_runs()
+    if not completed:
+        return None
+    parameter_names = [p["name"] for p in params]
+    beta = [float(p["estimate"]) for p in params]
+    input_names = [s.name for s in wb_obj.input_specs()]
+    template_args = wb_obj.template_args()
+    response = status["response_name"]
+
+    rows = []
+    for run in completed:
+        x_row = _design_row(template, template_args, parameter_names, input_names, run)
+        y_pred = float(sum(b * x for b, x in zip(beta, x_row)))
+        y_obs = float(run[response])
+        rows.append(
+            {
+                "run_id": int(run["run_id"]),
+                "batch": int(run["batch"]) if run.get("batch") is not None else None,
+                "y_observed": y_obs,
+                "y_predicted": y_pred,
+                "residual": y_obs - y_pred,
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def _history_rows(path: str) -> list[dict[str, Any]]:
@@ -558,6 +739,18 @@ def _status_banner(status: dict[str, Any]) -> None:
         f"{s['name']} ∈ [{s['lb']}, {s['ub']}]" for s in status["input_specs"]
     )
     st.caption(f"**Response**: `{status['response_name']}`  •  **Factors**: {inputs_str}")
+
+    input_names = [s["name"] for s in status["input_specs"]]
+    parameter_names = [p["name"] for p in (status.get("parameters") or [])]
+    equation = _model_equation(
+        status.get("template"),
+        status.get("template_args") or {},
+        input_names,
+        status["response_name"],
+        parameter_names,
+    )
+    if equation:
+        st.caption(f"**Model**: `{equation}`")
     st.caption(f"**Next step (CLI)**: `{status['next_command']}`")
 
 
@@ -624,19 +817,195 @@ def _fit_panel(path: str, status: dict[str, Any]) -> None:
             return
         st.rerun()
 
-    if status["parameters"]:
-        rows = []
-        for p in status["parameters"]:
-            rows.append(
-                {
-                    "name": p["name"],
-                    "estimate": p["estimate"],
-                    "std_error": p["std_error"],
-                    "ci_lower_95": p["ci_lower_95"],
-                    "ci_upper_95": p["ci_upper_95"],
-                }
+    if not status["parameters"]:
+        return
+
+    anova = _read_anova_sheet(path)
+    parity = _compute_parity(path, status)
+    _render_fit_results(status, anova, parity)
+
+
+def _render_fit_results(
+    status: dict[str, Any],
+    anova: dict[str, Any] | None,
+    parity: pd.DataFrame | None,
+) -> None:
+    """Render the post-fit diagnostics: coefficients, ANOVA, parity, residuals."""
+    tabs = st.tabs(["Coefficients", "ANOVA", "Parity", "Residuals"])
+
+    # --- Coefficients ---
+    input_names = [s["name"] for s in status["input_specs"]]
+    parameter_names = [p["name"] for p in status["parameters"]]
+    estimates = {p["name"]: p["estimate"] for p in status["parameters"]}
+    term_map = _model_terms(
+        status.get("template"),
+        status.get("template_args") or {},
+        input_names,
+        parameter_names,
+    )
+
+    with tabs[0]:
+        symbolic = _model_equation(
+            status.get("template"),
+            status.get("template_args") or {},
+            input_names,
+            status["response_name"],
+            parameter_names,
+        )
+        fitted_eq = _model_equation(
+            status.get("template"),
+            status.get("template_args") or {},
+            input_names,
+            status["response_name"],
+            parameter_names,
+            estimates=estimates,
+        )
+        if symbolic:
+            st.markdown(f"**Model form:** `{symbolic}`")
+        if fitted_eq:
+            st.markdown(f"**Fitted equation:** `{fitted_eq}`")
+
+        coef_df = (anova or {}).get("coefficients") if anova else None
+        if coef_df is None or coef_df.empty:
+            # Fall back to the parameters sheet (no t-stat / p-value).
+            coef_df = pd.DataFrame(
+                [
+                    {
+                        "name": p["name"],
+                        "estimate": p["estimate"],
+                        "std_error": p["std_error"],
+                        "ci_lower_95": p["ci_lower_95"],
+                        "ci_upper_95": p["ci_upper_95"],
+                    }
+                    for p in status["parameters"]
+                ]
             )
-        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+
+        # Insert a "term" column right after "name" so each coefficient
+        # is annotated with the basis function it multiplies.
+        if "name" in coef_df.columns and term_map:
+            coef_df = coef_df.copy()
+            coef_df.insert(
+                1, "term", coef_df["name"].map(lambda n: term_map.get(str(n), ""))
+            )
+        st.dataframe(coef_df, width="stretch", hide_index=True)
+        st.caption(
+            "`term` shows the basis function each coefficient multiplies. "
+            "p-values test H₀: coefficient = 0 (two-sided t-test, "
+            "df = n_obs − n_params). Lower p = stronger evidence the term "
+            "is needed."
+        )
+
+    # --- ANOVA + fit summary ---
+    with tabs[1]:
+        if not anova or anova["anova"].empty:
+            st.info("No ANOVA table yet — re-run `fit` to populate it.")
+        else:
+            st.markdown("**Decomposition**")
+            st.dataframe(anova["anova"], width="stretch", hide_index=True)
+            st.markdown("**Fit summary**")
+            summary = anova["fit_summary"]
+            if summary:
+                # Promote the most useful stats to metric tiles.
+                lookup = dict(summary)
+                cols = st.columns(4)
+                _metric(cols[0], "R²", lookup.get("R_squared"), fmt="{:.4f}")
+                _metric(
+                    cols[1], "Adj. R²", lookup.get("adjusted_R_squared"), fmt="{:.4f}"
+                )
+                _metric(cols[2], "RMSE", lookup.get("RMSE (sigma_hat)"), fmt="{:.4g}")
+                _metric(
+                    cols[3],
+                    "F p-value",
+                    lookup.get("F_p_value"),
+                    fmt="{:.3g}",
+                )
+                st.dataframe(
+                    pd.DataFrame(summary, columns=["statistic", "value"]),
+                    width="stretch",
+                    hide_index=True,
+                )
+
+    # --- Parity ---
+    with tabs[2]:
+        if parity is None or parity.empty:
+            st.info("Parity plot needs completed runs and a fitted model.")
+        else:
+            st.altair_chart(_parity_chart(parity), use_container_width=True)
+            st.caption(
+                "Each point is one completed run; the diagonal is perfect "
+                "prediction. Points far off the line indicate fit error or "
+                "outliers."
+            )
+
+    # --- Residuals ---
+    with tabs[3]:
+        if parity is None or parity.empty:
+            st.info("Residual plot needs completed runs and a fitted model.")
+        else:
+            st.altair_chart(_residual_chart(parity), use_container_width=True)
+            st.caption(
+                "Residual = observed − predicted, plotted vs predicted. "
+                "Look for trends or fanning out (signs of model "
+                "mis-specification or heteroscedasticity)."
+            )
+
+
+def _metric(col: Any, label: str, value: Any, *, fmt: str = "{}") -> None:
+    if isinstance(value, (int, float)):
+        try:
+            col.metric(label, fmt.format(value))
+            return
+        except (ValueError, TypeError):
+            pass
+    col.metric(label, "—")
+
+
+def _parity_chart(df: pd.DataFrame) -> Any:
+    import altair as alt
+
+    lo = float(min(df["y_observed"].min(), df["y_predicted"].min()))
+    hi = float(max(df["y_observed"].max(), df["y_predicted"].max()))
+    pad = 0.05 * (hi - lo or 1.0)
+    domain = [lo - pad, hi + pad]
+
+    points = (
+        alt.Chart(df)
+        .mark_circle(size=80, opacity=0.75)
+        .encode(
+            x=alt.X("y_predicted:Q", scale=alt.Scale(domain=domain), title="Predicted"),
+            y=alt.Y("y_observed:Q", scale=alt.Scale(domain=domain), title="Observed"),
+            color=alt.Color("batch:N", title="Batch"),
+            tooltip=["run_id", "batch", "y_observed", "y_predicted", "residual"],
+        )
+    )
+    diag = (
+        alt.Chart(pd.DataFrame({"x": domain, "y": domain}))
+        .mark_line(strokeDash=[4, 4], color="gray")
+        .encode(x="x:Q", y="y:Q")
+    )
+    return (diag + points).properties(height=380)
+
+
+def _residual_chart(df: pd.DataFrame) -> Any:
+    import altair as alt
+
+    points = (
+        alt.Chart(df)
+        .mark_circle(size=80, opacity=0.75)
+        .encode(
+            x=alt.X("y_predicted:Q", title="Predicted"),
+            y=alt.Y("residual:Q", title="Residual (observed − predicted)"),
+            color=alt.Color("batch:N", title="Batch"),
+            tooltip=["run_id", "batch", "y_observed", "y_predicted", "residual"],
+        )
+    )
+    zero = (
+        alt.Chart(pd.DataFrame({"y": [0]}))
+        .mark_rule(color="gray", strokeDash=[4, 4])
+        .encode(y="y:Q")
+    )
+    return (zero + points).properties(height=380)
 
 
 def _extend_panel(path: str, status: dict[str, Any]) -> None:
