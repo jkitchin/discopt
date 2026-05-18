@@ -208,7 +208,9 @@ def response_surface_template(
     return _ResponseSurfaceTemplate()
 
 
-def template_parameter_names(template: str, *, degree: int | None = None, n_inputs: int) -> list[str]:
+def template_parameter_names(
+    template: str, *, degree: int | None = None, n_inputs: int
+) -> list[str]:
     """Return the ordered parameter-name list a template would emit.
 
     Used by the CLI/workbook to populate the ``parameters`` sheet
@@ -241,7 +243,9 @@ def build_template(
 ) -> Experiment:
     """Dispatch by template name. Used by the CLI to keep dispatch in one place."""
     if template == "linear":
-        return linear_template(inputs, response_name=response_name, measurement_error=measurement_error)
+        return linear_template(
+            inputs, response_name=response_name, measurement_error=measurement_error
+        )
     if template == "polynomial-1d":
         if len(inputs) != 1:
             raise ValueError("polynomial-1d takes exactly one input")

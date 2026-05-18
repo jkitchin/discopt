@@ -125,8 +125,7 @@ def launch(
             ready = _wait_for_port("127.0.0.1", bind_port, timeout=20.0)
             if not ready:
                 print(
-                    f"warning: streamlit didn't bind {url} within 20s; "
-                    "opening browser anyway",
+                    f"warning: streamlit didn't bind {url} within 20s; opening browser anyway",
                     file=sys.stderr,
                 )
             try:

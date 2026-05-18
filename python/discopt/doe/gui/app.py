@@ -17,7 +17,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import openpyxl
 import pandas as pd
@@ -87,9 +87,7 @@ def _save_responses(path: str, edited: pd.DataFrame, response: str) -> int:
     resp_idx = headers.index(response)
     id_idx = headers.index("run_id")
     edits_by_id = {
-        int(row["run_id"]): row[response]
-        for _, row in edited.iterrows()
-        if pd.notna(row["run_id"])
+        int(row["run_id"]): row[response] for _, row in edited.iterrows() if pd.notna(row["run_id"])
     }
     n_updates = 0
     for row in sheet.iter_rows(min_row=2):
@@ -216,8 +214,10 @@ def _read_anova_sheet(path: str) -> dict[str, Any] | None:
             continue
         first = row[0]
         rest = [c for c in row[1:] if c is not None]
-        if isinstance(first, str) and not rest and first in (
-            "Coefficients", "ANOVA", "Fit summary"
+        if (
+            isinstance(first, str)
+            and not rest
+            and first in ("Coefficients", "ANOVA", "Fit summary")
         ):
             current = first
             sections[current] = []
@@ -447,7 +447,7 @@ def _sidebar_new() -> None:
             "ub": [1.0] * n_factors_default,
         }
     )
-    num_rows = "fixed" if factors_fixed else "dynamic"
+    num_rows: Literal["fixed", "dynamic"] = "fixed" if factors_fixed else "dynamic"
     factors_df = st.sidebar.data_editor(
         default_factors,
         num_rows=num_rows,
@@ -460,9 +460,7 @@ def _sidebar_new() -> None:
             "lb": st.column_config.NumberColumn(
                 "lb", help="Lower bound of the factor's experimental range."
             ),
-            "ub": st.column_config.NumberColumn(
-                "ub", help="Upper bound (must exceed lb)."
-            ),
+            "ub": st.column_config.NumberColumn("ub", help="Upper bound (must exceed lb)."),
         },
     )
 
@@ -528,8 +526,7 @@ def _sidebar_new() -> None:
         "Generate initial design",
         type="primary",
         help=(
-            "Solve the optimal-design problem, write the workbook to "
-            "disk, and open it in this GUI."
+            "Solve the optimal-design problem, write the workbook to disk, and open it in this GUI."
         ),
     ):
         inputs = _validate_factors(factors_df)
@@ -537,10 +534,7 @@ def _sidebar_new() -> None:
             return
         actual_template = _resolve_template(template_choice, len(inputs))
         if actual_template is None:
-            st.sidebar.error(
-                "Response surface needs exactly 2 or 3 factors; "
-                f"got {len(inputs)}."
-            )
+            st.sidebar.error(f"Response surface needs exactly 2 or 3 factors; got {len(inputs)}.")
             return
         out_path = Path(output_path).expanduser().resolve()
         if out_path.exists():
@@ -611,9 +605,7 @@ def _output_path_picker() -> tuple[str, str]:
         try:
             entries = sorted(current_dir.iterdir(), key=lambda p: p.name.lower())
             subdirs = [p for p in entries if p.is_dir() and not p.name.startswith(".")]
-            xlsx_files = [
-                p for p in entries if p.is_file() and p.suffix.lower() == ".xlsx"
-            ]
+            xlsx_files = [p for p in entries if p.is_file() and p.suffix.lower() == ".xlsx"]
         except (OSError, PermissionError) as e:
             st.error(f"Cannot list folder: {e}")
             subdirs, xlsx_files = [], []
@@ -670,9 +662,7 @@ def _validate_factors(df: pd.DataFrame) -> list[tuple[str, float, float]] | None
             st.sidebar.error(f"Row {int(i) + 1}: factor name is required.")
             return None
         if pd.isna(lb) or pd.isna(ub):
-            st.sidebar.error(
-                f"Factor {name!r}: both lower and upper bounds are required."
-            )
+            st.sidebar.error(f"Factor {name!r}: both lower and upper bounds are required.")
             return None
         if float(ub) <= float(lb):
             st.sidebar.error(f"Factor {name!r}: upper bound must exceed lower bound.")
@@ -735,9 +725,7 @@ def _status_banner(status: dict[str, Any]) -> None:
         len(status["parameters"]) if status["parameters"] else 0,
     )
 
-    inputs_str = ", ".join(
-        f"{s['name']} ∈ [{s['lb']}, {s['ub']}]" for s in status["input_specs"]
-    )
+    inputs_str = ", ".join(f"{s['name']} ∈ [{s['lb']}, {s['ub']}]" for s in status["input_specs"])
     st.caption(f"**Response**: `{status['response_name']}`  •  **Factors**: {inputs_str}")
 
     input_names = [s["name"] for s in status["input_specs"]]
@@ -774,9 +762,7 @@ def _runs_editor(path: str, status: dict[str, Any]) -> None:
             response: st.column_config.NumberColumn(
                 response, help=f"Measured value for '{response}' (blank = pending)"
             ),
-            **{
-                c: st.column_config.NumberColumn(c, disabled=True) for c in input_cols
-            },
+            **{c: st.column_config.NumberColumn(c, disabled=True) for c in input_cols},
         },
     )
 
@@ -806,9 +792,7 @@ def _fit_panel(path: str, status: dict[str, Any]) -> None:
             st.info("No completed runs yet — fill in some response values first.")
         return
 
-    if st.button(
-        f"Fit ({status['n_completed']} observation(s))", type="primary", key="fit_btn"
-    ):
+    if st.button(f"Fit ({status['n_completed']} observation(s))", type="primary", key="fit_btn"):
         try:
             with st.spinner("Fitting parameters..."):
                 do_fit({"workbook": path})
@@ -885,9 +869,7 @@ def _render_fit_results(
         # is annotated with the basis function it multiplies.
         if "name" in coef_df.columns and term_map:
             coef_df = coef_df.copy()
-            coef_df.insert(
-                1, "term", coef_df["name"].map(lambda n: term_map.get(str(n), ""))
-            )
+            coef_df.insert(1, "term", coef_df["name"].map(lambda n: term_map.get(str(n), "")))
         st.dataframe(coef_df, width="stretch", hide_index=True)
         st.caption(
             "`term` shows the basis function each coefficient multiplies. "
@@ -910,9 +892,7 @@ def _render_fit_results(
                 lookup = dict(summary)
                 cols = st.columns(4)
                 _metric(cols[0], "R²", lookup.get("R_squared"), fmt="{:.4f}")
-                _metric(
-                    cols[1], "Adj. R²", lookup.get("adjusted_R_squared"), fmt="{:.4f}"
-                )
+                _metric(cols[1], "Adj. R²", lookup.get("adjusted_R_squared"), fmt="{:.4f}")
                 _metric(cols[2], "RMSE", lookup.get("RMSE (sigma_hat)"), fmt="{:.4g}")
                 _metric(
                     cols[3],
@@ -1017,17 +997,11 @@ def _extend_panel(path: str, status: dict[str, Any]) -> None:
         )
         return
     n = st.number_input("Number of new runs", min_value=1, value=4, key="extend_n")
-    n_starts = st.number_input(
-        "Multi-start budget", min_value=1, value=5, key="extend_starts"
-    )
+    n_starts = st.number_input("Multi-start budget", min_value=1, value=5, key="extend_starts")
     if st.button(f"Append {int(n)} run(s)", type="primary", key="extend_btn"):
         try:
             with st.spinner("Solving next-batch design..."):
-                do_extend(
-                    ExtendParams(
-                        workbook=Path(path), n=int(n), n_starts=int(n_starts)
-                    )
-                )
+                do_extend(ExtendParams(workbook=Path(path), n=int(n), n_starts=int(n_starts)))
         except (DoEError, ValueError) as e:
             st.error(str(e))
             return
@@ -1055,9 +1029,7 @@ def _history_panel(path: str) -> None:
                     "args": args,
                 }
             )
-        st.dataframe(
-            pd.DataFrame(formatted), width="stretch", hide_index=True
-        )
+        st.dataframe(pd.DataFrame(formatted), width="stretch", hide_index=True)
 
 
 def _download_panel(path: str) -> None:

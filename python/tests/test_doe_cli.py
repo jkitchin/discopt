@@ -30,7 +30,6 @@ from discopt.doe.cli import (  # noqa: E402
 )
 from discopt.doe.workbook import Workbook  # noqa: E402
 
-
 # ──────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────
@@ -97,9 +96,7 @@ def test_new_linear(tmp_path):
 
 def test_new_polynomial_1d(tmp_path):
     out = do_new(
-        _new_params(
-            tmp_path, template="polynomial-1d", inputs=[("x", 0.0, 10.0)], n=4, degree=3
-        )
+        _new_params(tmp_path, template="polynomial-1d", inputs=[("x", 0.0, 10.0)], n=4, degree=3)
     )
     assert out["parameter_names"] == ["b0", "b1", "b2", "b3"]
     assert len(out["designs"]) == 4
@@ -159,9 +156,7 @@ def test_fit_recovers_known_truth_response_surface(tmp_path):
         )
 
     out = do_new(
-        _new_params(
-            tmp_path, template="response-surface-2d", inputs=inputs, n=10, error=0.01
-        )
+        _new_params(tmp_path, template="response-surface-2d", inputs=inputs, n=10, error=0.01)
     )
     wb_path = Path(out["workbook_path"])
     _fill_response(wb_path, "y", predict)
@@ -321,9 +316,7 @@ def test_new_rejects_both_template_and_module(tmp_path):
 
 
 def test_fit_no_completed_runs(tmp_path):
-    out = do_new(
-        _new_params(tmp_path, template="linear", inputs=[("x", 0, 1)], n=2)
-    )
+    out = do_new(_new_params(tmp_path, template="linear", inputs=[("x", 0, 1)], n=2))
     with pytest.raises(DoEError, match="no completed runs"):
         do_fit({"workbook": out["workbook_path"]})
 
@@ -364,9 +357,7 @@ def test_workbook_metadata_roundtrip(tmp_path):
 def test_fim_persisted_and_used_by_extend(tmp_path):
     inputs = [("x1", 0.0, 10.0), ("x2", -5.0, 5.0)]
     out = do_new(
-        _new_params(
-            tmp_path, template="response-surface-2d", inputs=inputs, n=6, error=0.5
-        )
+        _new_params(tmp_path, template="response-surface-2d", inputs=inputs, n=6, error=0.5)
     )
     wb_path = Path(out["workbook_path"])
 

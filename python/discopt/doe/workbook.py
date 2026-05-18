@@ -101,7 +101,11 @@ _INSTRUCTIONS_BLOCKS: list[tuple[str, str]] = [
     ("body", "runs — experiments to perform; you fill in the response column."),
     ("body", "metadata — campaign configuration (template, inputs, criterion, seed, ...)."),
     ("body", "parameters — fitted parameter estimates, std errors, and 95% CIs."),
-    ("body", "anova — regression report: coefficient table (estimate, SE, t, p, 95% CI), ANOVA decomposition, R², adjusted R², RMSE."),
+    (
+        "body",
+        "anova — regression report: coefficient table (estimate, SE, t, p, 95% CI), "
+        "ANOVA decomposition, R², adjusted R², RMSE.",
+    ),
     ("body", "fim — cumulative Fisher Information Matrix (reused by 'extend')."),
     ("body", "history — append-only log of CLI commands run against this workbook."),
 ]
@@ -250,7 +254,9 @@ class Workbook:
 
         # Runs header row
         runs_sheet = wb[SHEET_RUNS]
-        header = ["run_id", "batch"] + [s.name for s in input_specs] + [response_name, "measured_at"]
+        header = (
+            ["run_id", "batch"] + [s.name for s in input_specs] + [response_name, "measured_at"]
+        )
         runs_sheet.append(header)
 
         # Parameters header
@@ -320,7 +326,8 @@ class Workbook:
 
     def template_args(self) -> dict[str, Any]:
         raw = self.metadata().get("template_args") or "{}"
-        return json.loads(raw)
+        result: dict[str, Any] = json.loads(raw)
+        return result
 
     def module_callable(self) -> str | None:
         v = self.metadata().get("module_callable")
@@ -358,7 +365,6 @@ class Workbook:
         """Append a batch of pending runs to the workbook. Returns the new run_ids."""
         sheet = self._wb[SHEET_RUNS]
         input_names = self._input_column_names()
-        response = self.response_name()
         # Determine next run_id
         existing_ids = []
         for row in sheet.iter_rows(min_row=2, values_only=True):
@@ -483,8 +489,15 @@ class Workbook:
         r = _section(r, "Coefficients")
         r = _header(
             r,
-            ["name", "estimate", "std_error", "t_statistic", "p_value",
-             "ci_lower_95", "ci_upper_95"],
+            [
+                "name",
+                "estimate",
+                "std_error",
+                "t_statistic",
+                "p_value",
+                "ci_lower_95",
+                "ci_upper_95",
+            ],
         )
         for coef in coefficients:
             sheet.cell(row=r, column=1, value=coef["name"]).font = body
@@ -623,9 +636,7 @@ def _load_module_callable(spec: str) -> Experiment:
     import importlib
 
     if ":" not in spec:
-        raise ValueError(
-            f"--module must be of the form 'pkg.mod:callable', got {spec!r}"
-        )
+        raise ValueError(f"--module must be of the form 'pkg.mod:callable', got {spec!r}")
     mod_name, _, attr = spec.partition(":")
     if not mod_name or not attr:
         raise ValueError(f"invalid module spec {spec!r}")

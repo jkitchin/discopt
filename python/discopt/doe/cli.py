@@ -65,9 +65,7 @@ def _parse_input_spec(s: str) -> tuple[str, float, float]:
     """Parse ``name:lb:ub`` (used by ``--input`` / ``--bounds``)."""
     parts = s.split(":")
     if len(parts) != 3:
-        raise argparse.ArgumentTypeError(
-            f"expected 'name:lb:ub', got {s!r}"
-        )
+        raise argparse.ArgumentTypeError(f"expected 'name:lb:ub', got {s!r}")
     name, lb_s, ub_s = parts
     if not name:
         raise argparse.ArgumentTypeError(f"input name is empty in {s!r}")
@@ -77,9 +75,7 @@ def _parse_input_spec(s: str) -> tuple[str, float, float]:
     except ValueError as e:
         raise argparse.ArgumentTypeError(f"bad bound in {s!r}: {e}") from e
     if not (ub > lb):
-        raise argparse.ArgumentTypeError(
-            f"input {name!r}: upper bound must exceed lower bound"
-        )
+        raise argparse.ArgumentTypeError(f"input {name!r}: upper bound must exceed lower bound")
     return (name, lb, ub)
 
 
@@ -243,8 +239,7 @@ _TEMPLATE_DESCRIPTIONS = {
 def do_templates(_params: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "templates": [
-            {"name": name, "description": _TEMPLATE_DESCRIPTIONS[name]}
-            for name in TEMPLATE_NAMES
+            {"name": name, "description": _TEMPLATE_DESCRIPTIONS[name]} for name in TEMPLATE_NAMES
         ]
     }
 
@@ -346,8 +341,10 @@ def do_new(params: NewParams) -> dict[str, Any]:
         "module_callable": params.module_callable,
         "batch": 1,
         "new_run_ids": new_ids,
-        "designs": [{"run_id": rid, **{nm: float(d[nm]) for nm in input_names}}
-                    for rid, d in zip(new_ids, designs)],
+        "designs": [
+            {"run_id": rid, **{nm: float(d[nm]) for nm in input_names}}
+            for rid, d in zip(new_ids, designs)
+        ],
         "criterion": params.criterion,
         "criterion_value": criterion_value,
         "parameter_names": parameter_names,
@@ -365,9 +362,7 @@ def _cmd_new(args) -> int:
             workbook_path=str(output),
         )
     is_module = bool(getattr(args, "_is_module", False))
-    inputs: list[tuple[str, float, float]] = list(args.input or []) + list(
-        args.bounds or []
-    )
+    inputs: list[tuple[str, float, float]] = list(args.input or []) + list(args.bounds or [])
     params = NewParams(
         output=output,
         n=int(args.n),
@@ -428,10 +423,7 @@ def do_status(params: dict[str, Any]) -> dict[str, Any]:
 
     if pending:
         if completed:
-            next_command = (
-                f"discopt doe fit {wb.path}  "
-                f"# {len(pending)} run(s) still pending"
-            )
+            next_command = f"discopt doe fit {wb.path}  # {len(pending)} run(s) still pending"
         else:
             next_command = (
                 f"# fill in '{response}' column for run_ids "
@@ -474,9 +466,7 @@ def _cmd_status(args) -> int:
         label = out["template"] or out["module_callable"] or "(unknown model)"
         print(f"{out['workbook_path']}")
         print(f"  model:       {label}")
-        inputs_str = ", ".join(
-            f"{s['name']} in [{s['lb']}, {s['ub']}]" for s in out["input_specs"]
-        )
+        inputs_str = ", ".join(f"{s['name']} in [{s['lb']}, {s['ub']}]" for s in out["input_specs"])
         print(f"  inputs:      {inputs_str}")
         print(f"  response:    {out['response_name']}")
         print(
@@ -520,9 +510,7 @@ def do_fit(params: dict[str, Any]) -> dict[str, Any]:
     response = wb.response_name()
     completed = wb.completed_runs()
     if not completed:
-        raise DoEError(
-            f"no completed runs in {wb.path}; fill in the '{response}' column first"
-        )
+        raise DoEError(f"no completed runs in {wb.path}; fill in the '{response}' column first")
 
     template = wb.template_name()
     if not template:
@@ -573,8 +561,7 @@ def do_fit(params: dict[str, Any]) -> dict[str, Any]:
     estimates = {name: float(beta[i]) for i, name in enumerate(parameter_names)}
     std_errors = {name: float(std_errs[i]) for i, name in enumerate(parameter_names)}
     cis = {
-        name: (float(cis_arr[i, 0]), float(cis_arr[i, 1]))
-        for i, name in enumerate(parameter_names)
+        name: (float(cis_arr[i, 0]), float(cis_arr[i, 1])) for i, name in enumerate(parameter_names)
     }
 
     # FIM = XᵀX / σ² is the design's information about the parameters
@@ -586,12 +573,20 @@ def do_fit(params: dict[str, Any]) -> dict[str, Any]:
     wb.write_parameters(parameter_names, estimates, std_errors, cis)
     wb.write_fim(cum_fim, parameter_names)
     coefficients, anova_rows, fit_summary = _compute_anova(
-        y=y, X=X, beta=beta, residual_ss=residual_ss,
-        std_errs=std_errs, parameter_names=parameter_names,
-        n_obs=n_obs, n_p=n_p, sigma=sigma,
+        y=y,
+        X=X,
+        beta=beta,
+        residual_ss=residual_ss,
+        std_errs=std_errs,
+        parameter_names=parameter_names,
+        n_obs=n_obs,
+        n_p=n_p,
+        sigma=sigma,
     )
     wb.write_anova(
-        coefficients=coefficients, anova_rows=anova_rows, fit_summary=fit_summary,
+        coefficients=coefficients,
+        anova_rows=anova_rows,
+        fit_summary=fit_summary,
     )
     wb.log("fit", {"n_completed": n_obs})
     wb.save()
@@ -967,9 +962,7 @@ def add_subparser(subparsers) -> None:
             help="Design factor as NAME:LB:UB (repeatable).",
         )
         if tmpl == "polynomial-1d":
-            sp.add_argument(
-                "--degree", type=int, required=True, help="Polynomial degree (>= 1)."
-            )
+            sp.add_argument("--degree", type=int, required=True, help="Polynomial degree (>= 1).")
         _add_common_new_options(sp)
         sp.set_defaults(doe_func=_cmd_new, _is_module=False, bounds=None, params=None, module=None)
 
@@ -1079,9 +1072,7 @@ def _add_common_new_options(sp) -> None:
         default=10,
         help="Multi-start budget for each single-design search (default 10).",
     )
-    sp.add_argument(
-        "--force", action="store_true", help="Overwrite existing output file."
-    )
+    sp.add_argument("--force", action="store_true", help="Overwrite existing output file.")
     _add_json(sp)
 
 
