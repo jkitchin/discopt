@@ -54,7 +54,7 @@ def _fill_response(path: Path, response: str, predictor) -> None:
 # ──────────────────────────────────────────────────────────────────
 
 
-def test_templates_lists_four():
+def test_templates_lists_all():
     out = do_templates()
     names = [t["name"] for t in out["templates"]]
     assert names == [
@@ -62,6 +62,14 @@ def test_templates_lists_four():
         "polynomial-1d",
         "response-surface-2d",
         "response-surface-3d",
+        "scheffe-linear",
+        "scheffe-quadratic",
+        "scheffe-special-cubic",
+        "latin-square",
+        "graeco-latin",
+        "hyper-graeco-latin",
+        "factorial-2level",
+        "optimize",
     ]
 
 

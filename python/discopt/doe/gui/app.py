@@ -27,10 +27,12 @@ from discopt.doe.cli import (
     DoEError,
     ExtendParams,
     NewParams,
+    OptimizeParams,
     _design_row,
     do_extend,
     do_fit,
     do_new,
+    do_optimize,
     do_status,
 )
 from discopt.doe.workbook import SHEET_ANOVA, SHEET_HISTORY, SHEET_RUNS, Workbook
@@ -151,6 +153,26 @@ def _model_terms(
             for j in range(i + 1, n):
                 out[f"b{i + 1}{j + 1}"] = f"{input_names[i]}·{input_names[j]}"
         return out
+
+    if template in ("scheffe-linear", "scheffe-quadratic", "scheffe-special-cubic"):
+        q = len(input_names)
+        out_s: dict[str, str] = {}
+        for i, nm in enumerate(input_names, start=1):
+            out_s[f"b{i}"] = nm
+        if template == "scheffe-linear":
+            return out_s
+        for i in range(q):
+            for j in range(i + 1, q):
+                out_s[f"b{i + 1}{j + 1}"] = f"{input_names[i]}·{input_names[j]}"
+        if template == "scheffe-quadratic":
+            return out_s
+        for i in range(q):
+            for j in range(i + 1, q):
+                for k in range(j + 1, q):
+                    out_s[f"b{i + 1}{j + 1}{k + 1}"] = (
+                        f"{input_names[i]}·{input_names[j]}·{input_names[k]}"
+                    )
+        return out_s
 
     return {}
 
@@ -307,7 +329,15 @@ def _history_rows(path: str) -> list[dict[str, Any]]:
 # GUI template menu collapses response-surface-2d and -3d into a single
 # "response surface" choice; we pick the underlying template by factor
 # count when generating.
-_GUI_TEMPLATE_CHOICES = ("linear", "polynomial-1d", "response-surface")
+_GUI_TEMPLATE_CHOICES = (
+    "linear",
+    "polynomial-1d",
+    "response-surface",
+    "mixture (Scheffé)",
+    "Latin square (ANOVA)",
+    "Factor screening (2-level)",
+    "Active-learning optimization",
+)
 _GUI_TEMPLATE_HELP = {
     "linear": (
         "First-order model: y = b0 + b1·x1 + ... + bn·xn. "
@@ -324,6 +354,44 @@ _GUI_TEMPLATE_HELP = {
         "main effects, pure quadratic terms, and pairwise interactions. "
         "Use for optimization once you know the factors matter."
     ),
+    "mixture (Scheffé)": (
+        "Scheffé canonical mixture model: components are blend "
+        "proportions / volumes constrained to sum to a fixed total. "
+        "Pick the polynomial order (linear, quadratic, special cubic) "
+        "and the total below."
+    ),
+    "Latin square (ANOVA)": (
+        "Classical Latin / Graeco-Latin / hyper-Graeco-Latin square for "
+        "ANOVA on additive main effects. 3 factors → Latin (k² runs), "
+        "4 → Graeco-Latin, 5 → hyper-Graeco-Latin. Each factor has the "
+        "same number of categorical levels."
+    ),
+    "Factor screening (2-level)": (
+        "Answer 'does this factor matter?' with a full 2-level "
+        "factorial. Each factor is varied between a LOW and HIGH "
+        "level; 2^k runs at the corners. Add center points to detect "
+        "curvature; replicate to estimate σ. Use this before fitting "
+        "a response surface."
+    ),
+    "Active-learning optimization": (
+        "Find the input that minimizes or maximizes the response using "
+        "as few experiments as possible. Each round fits a surrogate "
+        "(GP, response surface, or your own UQ-providing sklearn model) "
+        "to completed runs and recommends the next batch by acquisition "
+        "(expected improvement, UCB, steepest ascent)."
+    ),
+}
+
+_LATIN_FACTOR_COUNT_TO_TEMPLATE = {
+    3: "latin-square",
+    4: "graeco-latin",
+    5: "hyper-graeco-latin",
+}
+
+_SCHEFFE_FORMS = {
+    "linear": "scheffe-linear",
+    "quadratic": "scheffe-quadratic",
+    "special-cubic": "scheffe-special-cubic",
 }
 
 
@@ -401,6 +469,17 @@ def _sidebar_new() -> None:
     )
     st.sidebar.caption(_GUI_TEMPLATE_HELP[template_choice])
 
+    scheffe_form: str | None = None
+    mixture_total: float | None = None
+    if template_choice == "Latin square (ANOVA)":
+        _sidebar_new_latin()
+        return
+    if template_choice == "Factor screening (2-level)":
+        _sidebar_new_factorial()
+        return
+    if template_choice == "Active-learning optimization":
+        _sidebar_new_optimize()
+        return
     if template_choice == "polynomial-1d":
         degree = st.sidebar.number_input(
             "Polynomial degree",
@@ -419,6 +498,34 @@ def _sidebar_new() -> None:
         degree = None
         n_factors_default = 2
         factors_fixed = False
+    elif template_choice == "mixture (Scheffé)":
+        degree = None
+        scheffe_form = st.sidebar.selectbox(
+            "Mixture model order",
+            list(_SCHEFFE_FORMS.keys()),
+            index=1,
+            help=(
+                "Scheffé canonical polynomial. **linear** = pure-blend "
+                "terms only (q parameters); **quadratic** adds pairwise "
+                "blending (q + q(q-1)/2 parameters); **special-cubic** "
+                "adds three-way blending (requires q ≥ 3)."
+            ),
+        )
+        mixture_total = float(
+            st.sidebar.number_input(
+                "Sum to (mixture total)",
+                min_value=1e-9,
+                value=1.0,
+                format="%g",
+                help=(
+                    "Required sum of the component values. Use 1.0 for "
+                    "fractions, or an absolute total (mass, volume) when "
+                    "factor bounds are in physical units."
+                ),
+            )
+        )
+        n_factors_default = 3
+        factors_fixed = False
     else:  # linear
         degree = None
         n_factors_default = 2
@@ -435,18 +542,36 @@ def _sidebar_new() -> None:
             "One row per design factor. Add as many as you want; each needs "
             "a name and lower/upper bounds."
         )
+    elif template_choice == "mixture (Scheffé)":
+        st.sidebar.caption(
+            "One row per mixture component (at least 2; at least 3 for "
+            "special-cubic). Bounds default to [0, sum-to]; tighten them "
+            "for realistic per-component limits. The sum equality is "
+            "enforced automatically."
+        )
     else:
         st.sidebar.caption(
             "One row for the single design factor: name plus the range "
             "the polynomial will be fit over."
         )
-    default_factors = pd.DataFrame(
-        {
-            "name": [f"x{i + 1}" for i in range(n_factors_default)],
-            "lb": [0.0] * n_factors_default,
-            "ub": [1.0] * n_factors_default,
-        }
-    )
+    if template_choice == "mixture (Scheffé)":
+        ub_default = mixture_total if mixture_total is not None else 1.0
+        default_factors = pd.DataFrame(
+            {
+                "name": ["A", "B", "C"][:n_factors_default]
+                + [f"x{i + 1}" for i in range(3, n_factors_default)],
+                "lb": [0.0] * n_factors_default,
+                "ub": [float(ub_default)] * n_factors_default,
+            }
+        )
+    else:
+        default_factors = pd.DataFrame(
+            {
+                "name": [f"x{i + 1}" for i in range(n_factors_default)],
+                "lb": [0.0] * n_factors_default,
+                "ub": [1.0] * n_factors_default,
+            }
+        )
     num_rows: Literal["fixed", "dynamic"] = "fixed" if factors_fixed else "dynamic"
     factors_df = st.sidebar.data_editor(
         default_factors,
@@ -532,9 +657,18 @@ def _sidebar_new() -> None:
         inputs = _validate_factors(factors_df)
         if inputs is None:
             return
-        actual_template = _resolve_template(template_choice, len(inputs))
+        actual_template = _resolve_template(template_choice, len(inputs), scheffe_form)
         if actual_template is None:
-            st.sidebar.error(f"Response surface needs exactly 2 or 3 factors; got {len(inputs)}.")
+            if template_choice == "mixture (Scheffé)":
+                st.sidebar.error(
+                    "Scheffé mixture needs at least 2 components "
+                    "(at least 3 for special-cubic); got "
+                    f"{len(inputs)}."
+                )
+            else:
+                st.sidebar.error(
+                    f"Response surface needs exactly 2 or 3 factors; got {len(inputs)}."
+                )
             return
         out_path = Path(output_path).expanduser().resolve()
         if out_path.exists():
@@ -551,6 +685,7 @@ def _sidebar_new() -> None:
             n_starts=int(n_starts),
             template=actual_template,
             degree=int(degree) if degree is not None else None,
+            mixture_total=mixture_total,
         )
         try:
             with st.spinner("Solving optimal design..."):
@@ -562,7 +697,407 @@ def _sidebar_new() -> None:
         st.rerun()
 
 
-def _resolve_template(gui_choice: str, n_factors: int) -> str | None:
+def _sidebar_new_latin() -> None:
+    """Sidebar widgets for creating a Latin-family workbook."""
+    n_factors = int(
+        st.sidebar.selectbox(
+            "Number of factors",
+            (3, 4, 5),
+            index=0,
+            help=(
+                "3 = Latin square (1 treatment + 2 blocking factors). "
+                "4 = Graeco-Latin square. 5 = hyper-Graeco-Latin square."
+            ),
+        )
+    )
+    template = _LATIN_FACTOR_COUNT_TO_TEMPLATE[n_factors]
+    st.sidebar.caption(f"Generates a `{template}` design.")
+
+    k = int(
+        st.sidebar.number_input(
+            "Levels per factor (k)",
+            min_value=2,
+            max_value=9,
+            value=4,
+            help=(
+                "Number of levels each factor takes. The design uses k² "
+                "runs per replicate. For 4+ factors k = 6 is rejected "
+                "(no MOLS pair exists)."
+            ),
+        )
+    )
+    replicates = int(
+        st.sidebar.number_input(
+            "Replicates",
+            min_value=1,
+            max_value=20,
+            value=1,
+            help=(
+                "Number of independent randomizations of the whole "
+                "square. Replication is needed when k is small to give "
+                "the residual MS enough degrees of freedom for ANOVA."
+            ),
+        )
+    )
+
+    st.sidebar.markdown("**Factors and levels**")
+    st.sidebar.caption(
+        "One row per factor. Each `levels` cell is a comma-separated "
+        "list of k values (numeric or string)."
+    )
+    default_names = ["row", "col", "treatment", "block_D", "block_E"][:n_factors]
+    default_levels = ",".join(str(i + 1) for i in range(k))
+    default_df = pd.DataFrame(
+        {
+            "name": default_names,
+            "levels": [default_levels] * n_factors,
+        }
+    )
+    factors_df = st.sidebar.data_editor(
+        default_df,
+        num_rows="fixed",
+        key=f"latin_factors_editor_{n_factors}_{k}",
+        width="stretch",
+        column_config={
+            "name": st.column_config.TextColumn(
+                "name", help="Factor name; becomes a column header."
+            ),
+            "levels": st.column_config.TextColumn(
+                "levels",
+                help="Comma-separated level list. All factors must have exactly k levels.",
+            ),
+        },
+    )
+
+    response_name = st.sidebar.text_input("Response name", value="y")
+    seed = st.sidebar.number_input("Random seed", value=42, step=1)
+
+    output_dir, output_name = _output_path_picker()
+    output_path = str(Path(output_dir) / output_name)
+
+    if st.sidebar.button(
+        "Generate Latin design",
+        type="primary",
+        help="Build the Latin square, write the workbook, and open it here.",
+    ):
+        levels: dict[str, list[object]] = {}
+        for _, row in factors_df.iterrows():
+            name = str(row["name"]).strip()
+            if not name:
+                st.sidebar.error("Every factor must have a name.")
+                return
+            raw = [p.strip() for p in str(row["levels"]).split(",") if p.strip()]
+            if len(raw) != k:
+                st.sidebar.error(f"Factor {name!r}: expected {k} levels, got {len(raw)}.")
+                return
+            try:
+                vals: list[object] = [float(p) for p in raw]
+            except ValueError:
+                vals = list(raw)
+            levels[name] = vals
+        if len(levels) != n_factors:
+            st.sidebar.error(f"Need {n_factors} unique factor names.")
+            return
+        if n_factors >= 4 and k == 6:
+            st.sidebar.error("k = 6 is not allowed for 4+ factor Latin designs.")
+            return
+
+        out_path = Path(output_path).expanduser().resolve()
+        if out_path.exists():
+            st.sidebar.error(f"{out_path} already exists. Pick another path.")
+            return
+
+        params = NewParams(
+            output=out_path,
+            n=k * k * replicates,
+            inputs=[],
+            response_name=response_name,
+            measurement_error=1.0,
+            criterion="anova",
+            seed=int(seed),
+            n_starts=1,
+            template=template,
+            levels=levels,
+            replicates=replicates,
+        )
+        try:
+            with st.spinner("Building Latin design..."):
+                do_new(params)
+        except (DoEError, ValueError) as e:
+            st.sidebar.error(str(e))
+            return
+        _set_workbook(out_path)
+        st.rerun()
+
+
+def _sidebar_new_factorial() -> None:
+    """Sidebar widgets for creating a 2-level factorial workbook."""
+    st.sidebar.markdown("**Factors (LOW / HIGH)**")
+    st.sidebar.caption(
+        "One row per factor (2 - 8 rows). LOW / HIGH may be numbers "
+        "(e.g. 80, 120) or strings (e.g. A, B). Each factor's two "
+        "values define its two test levels."
+    )
+    default_df = pd.DataFrame(
+        {
+            "name": ["temp", "pressure", "catalyst"],
+            "low": ["80", "1", "A"],
+            "high": ["120", "5", "B"],
+        }
+    )
+    factors_df = st.sidebar.data_editor(
+        default_df,
+        num_rows="dynamic",
+        key="factorial_factors_editor",
+        width="stretch",
+        column_config={
+            "name": st.column_config.TextColumn(
+                "name", help="Factor name; becomes a column header."
+            ),
+            "low": st.column_config.TextColumn("low", help="LOW level (numeric or string)."),
+            "high": st.column_config.TextColumn("high", help="HIGH level (numeric or string)."),
+        },
+    )
+
+    center_points = int(
+        st.sidebar.number_input(
+            "Center points (per replicate)",
+            min_value=0,
+            max_value=20,
+            value=0,
+            help=(
+                "Number of center-point runs added per replicate. "
+                "Requires all factors to be numeric. Useful to detect "
+                "curvature and estimate σ without assuming the linear "
+                "model is correct."
+            ),
+        )
+    )
+    replicates = int(
+        st.sidebar.number_input(
+            "Replicates",
+            min_value=1,
+            max_value=10,
+            value=1,
+            help=(
+                "Number of independent replications of the whole "
+                "design (each replicate is freshly randomized)."
+            ),
+        )
+    )
+
+    response_name = st.sidebar.text_input("Response name", value="y")
+    seed = st.sidebar.number_input("Random seed", value=42, step=1)
+
+    output_dir, output_name = _output_path_picker()
+    output_path = str(Path(output_dir) / output_name)
+
+    if st.sidebar.button(
+        "Generate screening design",
+        type="primary",
+        help="Build the 2-level factorial, write the workbook, open it here.",
+    ):
+
+        def _coerce(v: str) -> object:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return v
+
+        pairs: dict[str, tuple[object, object]] = {}
+        for _, row in factors_df.iterrows():
+            name = str(row["name"]).strip()
+            if not name:
+                continue
+            lo_raw = str(row["low"]).strip()
+            hi_raw = str(row["high"]).strip()
+            if not lo_raw or not hi_raw:
+                st.sidebar.error(f"Factor {name!r}: both LOW and HIGH required.")
+                return
+            lo, hi = _coerce(lo_raw), _coerce(hi_raw)
+            if lo == hi:
+                st.sidebar.error(f"Factor {name!r}: LOW and HIGH must differ.")
+                return
+            pairs[name] = (lo, hi)
+        if len(pairs) < 2 or len(pairs) > 8:
+            st.sidebar.error(f"Need 2 - 8 factors, got {len(pairs)}.")
+            return
+        if center_points > 0:
+            non_numeric = [
+                n
+                for n, (lo, hi) in pairs.items()
+                if not (
+                    isinstance(lo, (int, float))
+                    and isinstance(hi, (int, float))
+                    and not isinstance(lo, bool)
+                )
+            ]
+            if non_numeric:
+                st.sidebar.error(
+                    f"Center points require numeric factors only; non-numeric: "
+                    f"{', '.join(non_numeric)}."
+                )
+                return
+
+        out_path = Path(output_path).expanduser().resolve()
+        if out_path.exists():
+            st.sidebar.error(f"{out_path} already exists. Pick another path.")
+            return
+        params = NewParams(
+            output=out_path,
+            n=2 ** len(pairs) * replicates + center_points * replicates,
+            inputs=[],
+            response_name=response_name,
+            measurement_error=1.0,
+            criterion="anova",
+            seed=int(seed),
+            n_starts=1,
+            template="factorial-2level",
+            factor_pairs=pairs,
+            center_points=center_points,
+            replicates=replicates,
+        )
+        try:
+            with st.spinner("Building factorial design..."):
+                do_new(params)
+        except (DoEError, ValueError) as e:
+            st.sidebar.error(str(e))
+            return
+        _set_workbook(out_path)
+        st.rerun()
+
+
+def _sidebar_new_optimize() -> None:
+    """Sidebar widgets for creating an active-learning optimization workbook."""
+    st.sidebar.markdown("**Factors (box bounds)**")
+    st.sidebar.caption(
+        "One row per numeric factor. Each row needs a name and the "
+        "lower / upper bounds defining the search box. Categorical "
+        "factors are not yet supported here — encode them as 0/1 "
+        "indicators upstream."
+    )
+    default_factors = pd.DataFrame(
+        {
+            "name": ["x1", "x2"],
+            "lb": [-1.0, -1.0],
+            "ub": [1.0, 1.0],
+        }
+    )
+    factors_df = st.sidebar.data_editor(
+        default_factors,
+        num_rows="dynamic",
+        key="optimize_factors_editor",
+        width="stretch",
+        column_config={
+            "name": st.column_config.TextColumn("name"),
+            "lb": st.column_config.NumberColumn("lb"),
+            "ub": st.column_config.NumberColumn("ub"),
+        },
+    )
+
+    response_name = st.sidebar.text_input("Response name", value="y")
+    measurement_error = float(
+        st.sidebar.number_input(
+            "Measurement noise σ",
+            min_value=1e-9,
+            value=1.0,
+            format="%g",
+            help=(
+                "Estimated standard deviation of the response. Stored "
+                "in the workbook for reference; the surrogate handles "
+                "noise on its own."
+            ),
+        )
+    )
+
+    st.sidebar.markdown("**Initial design**")
+    n_seed = int(
+        st.sidebar.number_input(
+            "Seed batch size",
+            min_value=2,
+            value=8,
+            help=(
+                "Sobol-distributed points inside the box, run once "
+                "before active learning takes over. A good default is "
+                "2--5 × the number of factors."
+            ),
+        )
+    )
+
+    st.sidebar.markdown("**Active-learning defaults**")
+    criterion = st.sidebar.selectbox(
+        "Objective",
+        ["maximize", "minimize"],
+        help="Are we looking for the highest or lowest response?",
+    )
+    surrogate = st.sidebar.selectbox(
+        "Surrogate (default)",
+        ["gp", "response-surface"],
+        help=(
+            "**gp**: Gaussian process with Matern(5/2) + white noise. "
+            "Best for smooth nonlinear responses with < 200 runs. "
+            "**response-surface**: degree-2 polynomial + Bayesian "
+            "ridge. Faster, interpretable, restricted to quadratic."
+        ),
+    )
+    acquisition = st.sidebar.selectbox(
+        "Acquisition (default)",
+        ["expected_improvement", "ucb", "steepest_ascent"],
+        help=(
+            "**expected_improvement** balances mean and uncertainty "
+            "(the standard BO choice). **ucb** uses μ + κσ; tune κ in "
+            "the main panel. **steepest_ascent** ignores σ — useful "
+            "with a response-surface surrogate for classical "
+            "Box-Wilson behavior."
+        ),
+    )
+
+    seed = st.sidebar.number_input("Random seed", value=42, step=1)
+    output_dir, output_name = _output_path_picker()
+    output_path = str(Path(output_dir) / output_name)
+
+    if st.sidebar.button(
+        "Generate seed batch",
+        type="primary",
+        help="Sobol-sample the seed batch, write the workbook, open it.",
+    ):
+        inputs = _validate_factors(factors_df)
+        if inputs is None:
+            return
+        if len(inputs) < 1:
+            st.sidebar.error("Need at least one factor.")
+            return
+        out_path = Path(output_path).expanduser().resolve()
+        if out_path.exists():
+            st.sidebar.error(f"{out_path} already exists. Pick another path.")
+            return
+        params = NewParams(
+            output=out_path,
+            n=int(n_seed),
+            inputs=inputs,
+            response_name=response_name,
+            measurement_error=measurement_error,
+            criterion="active-learning",
+            seed=int(seed),
+            n_starts=1,
+            template="optimize",
+            optimize_criterion=criterion,
+            optimize_surrogate=surrogate,
+            optimize_acquisition=acquisition,
+        )
+        try:
+            with st.spinner("Sobol-sampling the seed batch..."):
+                do_new(params)
+        except (DoEError, ValueError) as e:
+            st.sidebar.error(str(e))
+            return
+        _set_workbook(out_path)
+        st.rerun()
+
+
+def _resolve_template(
+    gui_choice: str, n_factors: int, scheffe_form: str | None = None
+) -> str | None:
     """Map the GUI's template menu choice to an actual `do_new` template."""
     if gui_choice == "response-surface":
         if n_factors == 2:
@@ -570,6 +1105,14 @@ def _resolve_template(gui_choice: str, n_factors: int) -> str | None:
         if n_factors == 3:
             return "response-surface-3d"
         return None
+    if gui_choice == "mixture (Scheffé)":
+        if scheffe_form is None or scheffe_form not in _SCHEFFE_FORMS:
+            return None
+        if n_factors < 2:
+            return None
+        if scheffe_form == "special-cubic" and n_factors < 3:
+            return None
+        return _SCHEFFE_FORMS[scheffe_form]
     return gui_choice
 
 
@@ -695,8 +1238,14 @@ def _main_pane() -> None:
 
     _status_banner(status)
     _runs_editor(path, status)
-    _fit_panel(path, status)
-    _extend_panel(path, status)
+    template = status.get("template") or ""
+    if template in {"latin-square", "graeco-latin", "hyper-graeco-latin", "factorial-2level"}:
+        _anova_panel(path, status)
+    elif template == "optimize":
+        _optimize_panel(path, status)
+    else:
+        _fit_panel(path, status)
+        _extend_panel(path, status)
     _history_panel(path)
     _download_panel(path)
 
@@ -725,7 +1274,22 @@ def _status_banner(status: dict[str, Any]) -> None:
         len(status["parameters"]) if status["parameters"] else 0,
     )
 
-    inputs_str = ", ".join(f"{s['name']} ∈ [{s['lb']}, {s['ub']}]" for s in status["input_specs"])
+    template = status.get("template") or ""
+    template_args = status.get("template_args") or {}
+    if template in {
+        "latin-square",
+        "graeco-latin",
+        "hyper-graeco-latin",
+        "factorial-2level",
+    }:
+        levels_map = template_args.get("levels", {})
+        inputs_str = ", ".join(
+            f"{name} ∈ {{{', '.join(str(v) for v in vals)}}}" for name, vals in levels_map.items()
+        )
+    else:
+        inputs_str = ", ".join(
+            f"{s['name']} ∈ [{s['lb']}, {s['ub']}]" for s in status["input_specs"]
+        )
     st.caption(f"**Response**: `{status['response_name']}`  •  **Factors**: {inputs_str}")
 
     input_names = [s["name"] for s in status["input_specs"]]
@@ -752,6 +1316,13 @@ def _runs_editor(path: str, status: dict[str, Any]) -> None:
     response = status["response_name"]
     input_cols = [s["name"] for s in status["input_specs"]]
     locked = [c for c in df.columns if c not in (response,)]
+    input_col_configs: dict[str, Any] = {}
+    for c in input_cols:
+        col_dtype = df[c].dtype if c in df.columns else None
+        if col_dtype is not None and pd.api.types.is_numeric_dtype(col_dtype):
+            input_col_configs[c] = st.column_config.NumberColumn(c, disabled=True)
+        else:
+            input_col_configs[c] = st.column_config.TextColumn(c, disabled=True)
     edited = st.data_editor(
         df,
         disabled=locked,
@@ -762,7 +1333,7 @@ def _runs_editor(path: str, status: dict[str, Any]) -> None:
             response: st.column_config.NumberColumn(
                 response, help=f"Measured value for '{response}' (blank = pending)"
             ),
-            **{c: st.column_config.NumberColumn(c, disabled=True) for c in input_cols},
+            **input_col_configs,
         },
     )
 
@@ -776,6 +1347,386 @@ def _runs_editor(path: str, status: dict[str, Any]) -> None:
             st.rerun()
     if col_b.button("Reload from disk"):
         st.rerun()
+
+
+def _anova_panel(path: str, status: dict[str, Any]) -> None:
+    """ANOVA panel shown for Latin-family workbooks in place of fit/extend."""
+    from discopt.doe.cli import do_anova
+
+    st.markdown("### ANOVA")
+    n_done = status["n_completed"]
+    n_total = status["n_total"]
+    if n_done == 0:
+        st.info(f"No completed runs yet — fill in the response column (0/{n_total}).")
+        return
+    if n_done < n_total:
+        st.warning(
+            f"{n_done} of {n_total} runs have responses. ANOVA needs all "
+            "runs (or at least enough for residual df > 0)."
+        )
+
+    levels_map = (status.get("template_args") or {}).get("levels") or {}
+    factor_names = list(levels_map.keys())
+    interactions: list[tuple[str, ...]] = []
+    if len(factor_names) >= 2:
+        choices = [":".join(p) for p in _two_way_pairs(factor_names)]
+        if choices:
+            picked = st.multiselect(
+                "Include 2-way interactions",
+                choices,
+                default=[],
+                help=(
+                    "Optional pairwise interaction terms. Each consumes "
+                    "(k-1)·(k-1) residual degrees of freedom; available "
+                    "only if there are enough df left."
+                ),
+            )
+            interactions = [tuple(s.split(":")) for s in picked]
+    include_replicate = False
+    replicates = int((status.get("template_args") or {}).get("replicates", 1) or 1)
+    if replicates > 1:
+        include_replicate = st.checkbox(
+            "Treat replicate as a blocking factor",
+            value=False,
+            help="Adds the replicate index as an additional ANOVA factor.",
+        )
+
+    if st.button(
+        f"Run ANOVA ({n_done} observation(s))",
+        type="primary",
+        key="anova_btn",
+    ):
+        try:
+            out = do_anova(
+                {
+                    "workbook": path,
+                    "interactions": interactions or None,
+                    "include_replicate": include_replicate,
+                }
+            )
+        except (DoEError, ValueError) as e:
+            st.error(str(e))
+            return
+        st.session_state["last_anova_result"] = out
+
+    out = st.session_state.get("last_anova_result")
+    if not out:
+        return
+    cols = st.columns(3)
+    cols[0].metric("Observations", out["n_observations"])
+    cols[1].metric("Grand mean", f"{out['grand_mean']:.4g}")
+    cols[2].metric("Balanced", "yes" if out["balanced"] else "no")
+    rows_df = pd.DataFrame(out["rows"])
+    rows_df = rows_df.rename(columns={"ss": "SS", "df": "df", "ms": "MS", "f": "F", "p": "p-value"})
+    st.dataframe(rows_df, width="stretch")
+    if not out["balanced"]:
+        st.caption("Design is unbalanced; Type-I SS depend on factor order in the workbook.")
+
+
+def _two_way_pairs(names: list[str]) -> list[tuple[str, str]]:
+    out = []
+    for i, a in enumerate(names):
+        for b in names[i + 1 :]:
+            out.append((a, b))
+    return out
+
+
+def _optimize_panel(path: str, status: dict[str, Any]) -> None:
+    """Active-learning round driver shown for optimize-template workbooks."""
+    st.markdown("### Active-learning round")
+
+    template_args = status.get("template_args") or {}
+    default_criterion = template_args.get("criterion", "maximize")
+    default_surrogate = template_args.get("surrogate", "gp")
+    default_acquisition = template_args.get("acquisition", "expected_improvement")
+    input_names = [s["name"] for s in status["input_specs"]]
+
+    if status["n_completed"] == 0:
+        st.info(
+            "No completed runs yet — fill in the response column above "
+            "and save before requesting the first active-learning batch."
+        )
+        return
+
+    col1, col2 = st.columns(2)
+    criterion = col1.selectbox(
+        "Objective",
+        ["maximize", "minimize"],
+        index=0 if default_criterion == "maximize" else 1,
+        help="Are we looking for the highest or lowest response?",
+    )
+    batch_size = int(
+        col2.number_input(
+            "Batch size",
+            min_value=1,
+            max_value=64,
+            value=4,
+            help="Number of new experiments to recommend this round.",
+        )
+    )
+
+    col3, col4 = st.columns(2)
+    surrogate_choice = col3.selectbox(
+        "Surrogate",
+        ["gp", "response-surface", "custom (sklearn import)"],
+        index=(
+            0
+            if default_surrogate == "gp"
+            else (1 if default_surrogate == "response-surface" else 2)
+        ),
+        help=(
+            "**gp**: Matern(5/2) + white noise. **response-surface**: "
+            "degree-2 polynomial + Bayesian ridge. **custom**: import "
+            "any UQ-providing sklearn-style estimator below."
+        ),
+    )
+    acquisition = col4.selectbox(
+        "Acquisition",
+        ["expected_improvement", "ucb", "steepest_ascent"],
+        index={"expected_improvement": 0, "ucb": 1, "steepest_ascent": 2}.get(
+            default_acquisition, 0
+        ),
+        help=(
+            "**expected_improvement** balances mean and uncertainty. "
+            "**ucb** uses μ + κσ (tune κ below). "
+            "**steepest_ascent** ignores σ — pair with response-surface "
+            "for Box-Wilson behavior."
+        ),
+    )
+
+    custom_path: str | None = None
+    custom_kwargs: dict[str, Any] | None = None
+    if surrogate_choice == "custom (sklearn import)":
+        st.markdown("**Custom surrogate**")
+        st.caption(
+            "Importable dotted path to an estimator class. The adapter "
+            "auto-detects `predict(X, return_std=True)`, "
+            "`predict(X, return_interval=True)`, or falls back to a "
+            "residual bootstrap. Constructor kwargs are JSON."
+        )
+        custom_path = st.text_input(
+            "Estimator path",
+            value="sklearn.gaussian_process:GaussianProcessRegressor",
+            help="e.g. `pycse.sklearn.lpr:LinearLPR` or `sklearn.linear_model:BayesianRidge`",
+        )
+        kwargs_text = st.text_area(
+            "Constructor kwargs (JSON)",
+            value="{}",
+            height=80,
+            help="JSON dict forwarded to the class constructor.",
+        )
+        try:
+            custom_kwargs = json.loads(kwargs_text) if kwargs_text.strip() else {}
+            if not isinstance(custom_kwargs, dict):
+                raise ValueError("must be a JSON object")
+        except (json.JSONDecodeError, ValueError) as e:
+            st.error(f"kwargs JSON is invalid: {e}")
+            custom_kwargs = None
+
+    acq_kwargs: dict[str, float] = {}
+    if acquisition in {"ucb", "lcb", "confidence_bound"}:
+        acq_kwargs["kappa"] = float(
+            st.number_input(
+                "UCB κ (explore/exploit tradeoff)",
+                min_value=0.0,
+                value=2.0,
+                step=0.1,
+                help="Larger κ = more exploration.",
+            )
+        )
+    if acquisition in {"expected_improvement", "ei"}:
+        acq_kwargs["xi"] = float(
+            st.number_input(
+                "EI ξ (min improvement)",
+                min_value=0.0,
+                value=0.0,
+                step=0.001,
+                format="%.4f",
+                help=(
+                    "Demand at least this much improvement before EI "
+                    "rates a candidate. ξ > 0 encourages exploration."
+                ),
+            )
+        )
+
+    seed = int(
+        st.number_input(
+            "Random seed",
+            value=int(status.get("seed", 0)) + 1,
+            step=1,
+            help="Seed for the Sobol candidate pool.",
+        )
+    )
+
+    can_run = surrogate_choice != "custom (sklearn import)" or (
+        custom_path and custom_kwargs is not None
+    )
+    if st.button(
+        "Recommend next batch",
+        type="primary",
+        disabled=not can_run,
+        help=(
+            "Fit the surrogate to completed runs, score Sobol "
+            "candidates, append the top batch to the workbook."
+        ),
+    ):
+        params = OptimizeParams(
+            workbook=Path(path),
+            criterion=criterion,
+            surrogate="gp" if surrogate_choice != "custom (sklearn import)" else default_surrogate,
+            acquisition=acquisition,
+            batch_size=batch_size,
+            seed=seed,
+            acquisition_kwargs=acq_kwargs or None,
+            custom_surrogate_path=custom_path,
+            custom_surrogate_kwargs=custom_kwargs,
+        )
+        if surrogate_choice == "response-surface":
+            params.surrogate = "response-surface"
+        try:
+            with st.spinner("Fitting surrogate + scoring candidates..."):
+                out = do_optimize(params)
+        except (DoEError, ValueError, TypeError) as e:
+            st.error(str(e))
+            return
+        st.session_state["last_optimize_result"] = out
+        st.success(f"Appended {len(out['next_designs'])} new pending runs.")
+        st.rerun()
+
+    out = st.session_state.get("last_optimize_result")
+    if out and out.get("workbook_path") == str(Path(path)):
+        st.markdown("**Last recommendation**")
+        cols = st.columns(3)
+        inc_y = out.get("incumbent_y")
+        cols[0].metric(
+            "Incumbent y",
+            f"{inc_y:.4g}" if inc_y is not None else "—",
+        )
+        cols[1].metric("Surrogate mode", out.get("surrogate_mode") or "—")
+        cols[2].metric("New runs", len(out.get("next_designs", [])))
+
+        inc_x = out.get("incumbent_x")
+        if inc_x:
+            st.caption("Incumbent x: " + ", ".join(f"{k}={v:.4g}" for k, v in inc_x.items()))
+        next_df = pd.DataFrame(out.get("next_designs", []))
+        if not next_df.empty:
+            st.dataframe(next_df, width="stretch", hide_index=True)
+
+    _optimize_history_plot(path, status, input_names)
+
+
+def _optimize_history_plot(path: str, status: dict[str, Any], input_names: list[str]) -> None:
+    """Best-so-far curve + (for 1D/2D) a surrogate posterior plot."""
+    from discopt.doe.workbook import Workbook as _Wb
+
+    completed = _Wb.open(Path(path)).completed_runs()
+    if len(completed) < 2:
+        return
+    response = status["response_name"]
+    try:
+        ys = [float(r[response]) for r in completed]
+    except (KeyError, TypeError, ValueError):
+        return
+    template_args = status.get("template_args") or {}
+    criterion = template_args.get("criterion", "maximize")
+    direction = 1 if criterion == "maximize" else -1
+
+    best_so_far = []
+    cur = ys[0]
+    for y in ys:
+        cur = y if direction * y > direction * cur else cur
+        best_so_far.append(cur)
+
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(6, 3))
+    ax.plot(
+        range(1, len(ys) + 1), best_so_far, "o-", color="C0", label=f"best so far ({criterion})"
+    )
+    ax.scatter(range(1, len(ys) + 1), ys, color="grey", alpha=0.5, s=20, label="each run")
+    ax.set_xlabel("run number")
+    ax.set_ylabel(response)
+    ax.set_title("Convergence so far")
+    ax.legend()
+    st.pyplot(fig, clear_figure=True)
+
+    if len(input_names) == 1 and len(completed) >= 3:
+        _plot_surrogate_1d(completed, input_names[0], response, status)
+    elif len(input_names) == 2 and len(completed) >= 4:
+        _plot_surrogate_2d(completed, input_names, response, status)
+
+
+def _plot_surrogate_1d(
+    completed: list[dict[str, Any]],
+    xname: str,
+    response: str,
+    status: dict[str, Any],
+) -> None:
+    import matplotlib.pyplot as plt
+    import numpy as _np
+
+    from discopt.doe.surrogate import coerce_surrogate
+
+    X = _np.array([[float(r[xname])] for r in completed])
+    y = _np.array([float(r[response]) for r in completed])
+    try:
+        s = coerce_surrogate("gp")
+        s.fit(X, y)
+    except Exception as e:  # pragma: no cover - GP convergence noise
+        st.caption(f"(could not fit surrogate for plot: {e})")
+        return
+    spec = next(s for s in status["input_specs"] if s["name"] == xname)
+    xs = _np.linspace(spec["lb"], spec["ub"], 200).reshape(-1, 1)
+    mu, sd = s.predict(xs)
+    fig, ax = plt.subplots(figsize=(6, 3))
+    ax.plot(xs.ravel(), mu, color="C0", label="GP mean")
+    ax.fill_between(
+        xs.ravel(), mu - 1.96 * sd, mu + 1.96 * sd, color="C0", alpha=0.2, label="95% band"
+    )
+    ax.scatter(X.ravel(), y, color="k", marker="o", label="runs")
+    ax.set_xlabel(xname)
+    ax.set_ylabel(response)
+    ax.set_title("Surrogate (GP) posterior")
+    ax.legend()
+    st.pyplot(fig, clear_figure=True)
+
+
+def _plot_surrogate_2d(
+    completed: list[dict[str, Any]],
+    names: list[str],
+    response: str,
+    status: dict[str, Any],
+) -> None:
+    import matplotlib.pyplot as plt
+    import numpy as _np
+
+    from discopt.doe.surrogate import coerce_surrogate
+
+    X = _np.array([[float(r[names[0]]), float(r[names[1]])] for r in completed])
+    y = _np.array([float(r[response]) for r in completed])
+    try:
+        s = coerce_surrogate("gp")
+        s.fit(X, y)
+    except Exception as e:  # pragma: no cover
+        st.caption(f"(could not fit surrogate for plot: {e})")
+        return
+    spec_a = next(s for s in status["input_specs"] if s["name"] == names[0])
+    spec_b = next(s for s in status["input_specs"] if s["name"] == names[1])
+    g1 = _np.linspace(spec_a["lb"], spec_a["ub"], 60)
+    g2 = _np.linspace(spec_b["lb"], spec_b["ub"], 60)
+    G1, G2 = _np.meshgrid(g1, g2)
+    Xg = _np.column_stack([G1.ravel(), G2.ravel()])
+    mu, _ = s.predict(Xg)
+    Mu = mu.reshape(G1.shape)
+    fig, ax = plt.subplots(figsize=(6, 4.5))
+    cs = ax.contourf(G1, G2, Mu, levels=20, cmap="viridis")
+    plt.colorbar(cs, ax=ax, label=f"GP mean ({response})")
+    ax.scatter(X[:, 0], X[:, 1], color="white", edgecolor="k", s=40, label="runs")
+    ax.set_xlabel(names[0])
+    ax.set_ylabel(names[1])
+    ax.set_title("Surrogate (GP) posterior mean")
+    ax.legend()
+    st.pyplot(fig, clear_figure=True)
 
 
 def _fit_panel(path: str, status: dict[str, Any]) -> None:

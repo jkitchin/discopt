@@ -8,6 +8,7 @@ Information Matrix.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable, Sequence
 
 import numpy as np
 from scipy.optimize import minimize
@@ -16,6 +17,105 @@ from discopt.doe.fim import FIMResult, compute_fim
 from discopt.estimate import Experiment
 
 _SINGULAR_SENTINEL = 1e12
+
+# A constraint is a callable that takes a design dict and returns a scalar.
+# Equality constraints are enforced as ``fn(design) == 0`` and inequality
+# constraints as ``fn(design) >= 0`` (scipy SLSQP convention).
+DesignConstraint = Callable[[dict[str, float]], float]
+
+
+def sum_constraint(variables: Sequence[str], total: float = 1.0) -> DesignConstraint:
+    """Return an equality constraint that enforces ``sum(variables) == total``.
+
+    Useful for mixture designs where component fractions or volumes must
+    sum to a fixed amount.
+
+    Parameters
+    ----------
+    variables : sequence of str
+        Design variable names that participate in the sum.
+    total : float, default ``1.0``
+        Required sum value.
+
+    Returns
+    -------
+    Callable[[dict[str, float]], float]
+        Function ``g(design)`` returning ``sum(design[v] for v in variables) - total``.
+        Pass to ``optimal_experiment(..., equality_constraints=[g])``.
+    """
+    names = tuple(variables)
+    target = float(total)
+
+    def _g(design: dict[str, float]) -> float:
+        return float(sum(design[n] for n in names) - target)
+
+    return _g
+
+
+def sample_simplex(
+    variables: Sequence[str],
+    total: float,
+    rng: np.random.Generator,
+    bounds: dict[str, tuple[float, float]] | None = None,
+) -> dict[str, float]:
+    """Draw a Dirichlet sample on the simplex ``sum(variables) == total``.
+
+    When ``bounds`` is supplied, samples that fall outside the per-axis
+    bounds are clipped and rescaled; for tight bounds this may bias the
+    sample, but it always returns a feasible point on the equality
+    surface (up to one rescaling pass).
+    """
+    names = list(variables)
+    q = len(names)
+    weights = rng.dirichlet(np.ones(q))
+    point = {n: float(total * w) for n, w in zip(names, weights)}
+    if bounds is None:
+        return point
+    # Clip to bounds, then rescale the free mass back to ``total``.
+    clipped = {n: float(np.clip(point[n], bounds[n][0], bounds[n][1])) for n in names}
+    s = sum(clipped.values())
+    if s > 0 and abs(s - total) > 1e-12:
+        scale = total / s
+        clipped = {n: clipped[n] * scale for n in names}
+    return clipped
+
+
+def project_to_simplex(
+    point: dict[str, float],
+    variables: Sequence[str],
+    total: float = 1.0,
+    bounds: dict[str, tuple[float, float]] | None = None,
+) -> dict[str, float]:
+    """Project ``point`` onto ``sum(variables) == total`` with non-negativity.
+
+    Uses the standard Euclidean projection onto the probability simplex
+    (Wang & Carreira-Perpiñán, 2013), scaled by ``total``. Variables
+    outside ``variables`` are returned unchanged. If ``bounds`` is given,
+    each projected component is then clipped to its box; this may push
+    the sum slightly off ``total`` if the bounds are tight, but provides
+    a reasonable warm start for SLSQP.
+    """
+    names = list(variables)
+    v = np.array([point[n] for n in names], dtype=float)
+    # Project v onto {w : w >= 0, sum(w) = total}.
+    u = np.sort(v)[::-1]
+    cssv = np.cumsum(u) - total
+    rho = np.where(u - cssv / (np.arange(len(u)) + 1) > 0)[0]
+    if len(rho) == 0:
+        rho_idx = 0
+    else:
+        rho_idx = int(rho[-1])
+    theta = cssv[rho_idx] / (rho_idx + 1)
+    w = np.maximum(v - theta, 0.0)
+
+    projected: dict[str, float] = dict(point)
+    for n, val in zip(names, w):
+        projected[n] = float(val)
+    if bounds is not None:
+        for n in names:
+            lo, hi = bounds[n]
+            projected[n] = float(np.clip(projected[n], lo, hi))
+    return projected
 
 
 class DesignCriterion:
@@ -224,6 +324,9 @@ def optimal_experiment(
     *,
     criterion: str = DesignCriterion.D_OPTIMAL,
     prior_fim: np.ndarray | None = None,
+    equality_constraints: Sequence[DesignConstraint] | None = None,
+    inequality_constraints: Sequence[DesignConstraint] | None = None,
+    feasible_projection: Callable[[dict[str, float]], dict[str, float]] | None = None,
     n_starts: int = 10,
     local_refine: bool = True,
     seed: int = 42,
@@ -232,7 +335,7 @@ def optimal_experiment(
 
     Evaluates the FIM criterion at multiple starting points within the
     design bounds and refines the best candidate with a bounded local
-    solver (scipy L-BFGS-B).
+    solver. When constraints are supplied, the refiner switches to SLSQP.
 
     Parameters
     ----------
@@ -247,11 +350,22 @@ def optimal_experiment(
         ``"min_eigenvalue"`` (E), ``"condition_number"`` (ME).
     prior_fim : numpy.ndarray, optional
         Prior FIM from previous experiments.
+    equality_constraints : sequence of callable, optional
+        Constraints ``g(design) == 0``. For mixture designs use
+        :func:`sum_constraint`.
+    inequality_constraints : sequence of callable, optional
+        Constraints ``h(design) >= 0`` (scipy SLSQP convention).
+    feasible_projection : callable, optional
+        Maps a raw candidate to a constraint-feasible candidate. Used to
+        seed the multi-start with feasible points. For mixture designs
+        pass a partial of :func:`project_to_simplex`.
     n_starts : int, default 10
         Number of random starting points to evaluate.
     local_refine : bool, default True
         If True, refine the best multi-start candidate with
-        scipy.optimize.minimize (L-BFGS-B, finite-difference gradient).
+        scipy.optimize.minimize (L-BFGS-B without constraints, SLSQP
+        when ``equality_constraints`` or ``inequality_constraints`` are
+        supplied).
     seed : int, default 42
         Random seed for reproducibility.
 
@@ -261,7 +375,11 @@ def optimal_experiment(
         Optimal design, FIM, and metrics.
     """
     design_names = list(design_bounds.keys())
-    candidates = _multi_start_candidates(design_bounds, n_starts, seed)
+    eq = list(equality_constraints) if equality_constraints else []
+    ineq = list(inequality_constraints) if inequality_constraints else []
+    candidates = _multi_start_candidates(
+        design_bounds, n_starts, seed, projection=feasible_projection
+    )
 
     best_design, best_criterion, best_fim_result = _scan_candidates(
         experiment, param_values, candidates, criterion, prior_fim
@@ -279,6 +397,8 @@ def optimal_experiment(
             design_bounds,
             criterion,
             prior_fim,
+            equality_constraints=eq,
+            inequality_constraints=ineq,
         )
         if refined is not None and _is_better(refined[1], best_criterion, criterion):
             best_design, best_criterion, best_fim_result = refined
@@ -294,8 +414,14 @@ def _multi_start_candidates(
     design_bounds: dict[str, tuple[float, float]],
     n_starts: int,
     seed: int,
+    projection: Callable[[dict[str, float]], dict[str, float]] | None = None,
 ) -> list[dict[str, float]]:
-    """Generate random interior + boundary design candidates."""
+    """Generate random interior + boundary design candidates.
+
+    When ``projection`` is supplied, each candidate is passed through it
+    before being returned (used to seed multi-start with feasible points
+    for problems with equality constraints, e.g. mixture designs).
+    """
     rng = np.random.default_rng(seed)
     design_names = list(design_bounds.keys())
 
@@ -310,6 +436,8 @@ def _multi_start_candidates(
             point[name] = val
             candidates.append(point)
 
+    if projection is not None:
+        candidates = [projection(c) for c in candidates]
     return candidates
 
 
@@ -348,14 +476,19 @@ def _refine_single_design(
     design_bounds: dict[str, tuple[float, float]],
     criterion: str,
     prior_fim: np.ndarray | None,
+    equality_constraints: Sequence[DesignConstraint] = (),
+    inequality_constraints: Sequence[DesignConstraint] = (),
 ) -> tuple[dict[str, float], float, FIMResult] | None:
-    """Local refinement of a single design via scipy L-BFGS-B."""
+    """Local refinement of a single design via scipy L-BFGS-B or SLSQP."""
     maximize = _is_maximization(criterion)
     bounds = [design_bounds[n] for n in design_names]
     x0 = np.array([seed_design[n] for n in design_names], dtype=float)
 
+    def to_design(x: np.ndarray) -> dict[str, float]:
+        return {n: float(v) for n, v in zip(design_names, x)}
+
     def objective(x: np.ndarray) -> float:
-        design = {n: float(v) for n, v in zip(design_names, x)}
+        design = to_design(x)
         try:
             fim_result = compute_fim(experiment, param_values, design, prior_fim=prior_fim)
             crit = _evaluate_criterion(fim_result, criterion)
@@ -365,15 +498,29 @@ def _refine_single_design(
             return _SINGULAR_SENTINEL
         return -crit if maximize else crit
 
-    try:
-        res = minimize(objective, x0, method="L-BFGS-B", bounds=bounds)
-    except Exception:
-        return None
+    has_constraints = bool(equality_constraints) or bool(inequality_constraints)
+    if has_constraints:
+        scipy_cons = [
+            {"type": "eq", "fun": (lambda x, g=g: float(g(to_design(x))))}
+            for g in equality_constraints
+        ] + [
+            {"type": "ineq", "fun": (lambda x, h=h: float(h(to_design(x))))}
+            for h in inequality_constraints
+        ]
+        try:
+            res = minimize(objective, x0, method="SLSQP", bounds=bounds, constraints=scipy_cons)
+        except Exception:
+            return None
+    else:
+        try:
+            res = minimize(objective, x0, method="L-BFGS-B", bounds=bounds)
+        except Exception:
+            return None
 
     if not res.success and not np.isfinite(res.fun):
         return None
 
-    design = {n: float(v) for n, v in zip(design_names, res.x)}
+    design = to_design(np.asarray(res.x))
     try:
         fim_result = compute_fim(experiment, param_values, design, prior_fim=prior_fim)
     except Exception:
@@ -419,6 +566,9 @@ def batch_optimal_experiment(
     criterion: str = DesignCriterion.D_OPTIMAL,
     strategy: str = BatchStrategy.GREEDY,
     prior_fim: np.ndarray | None = None,
+    equality_constraints: Sequence[DesignConstraint] | None = None,
+    inequality_constraints: Sequence[DesignConstraint] | None = None,
+    feasible_projection: Callable[[dict[str, float]], dict[str, float]] | None = None,
     n_starts: int = 10,
     local_refine: bool = True,
     min_distance: float | None = None,
@@ -467,6 +617,9 @@ def batch_optimal_experiment(
     if n_experiments < 1:
         raise ValueError(f"n_experiments must be >= 1, got {n_experiments}")
 
+    eq = list(equality_constraints) if equality_constraints else []
+    ineq = list(inequality_constraints) if inequality_constraints else []
+
     if strategy == BatchStrategy.GREEDY:
         return _greedy_batch(
             experiment,
@@ -475,6 +628,9 @@ def batch_optimal_experiment(
             n_experiments,
             criterion=criterion,
             prior_fim=prior_fim,
+            equality_constraints=eq,
+            inequality_constraints=ineq,
+            feasible_projection=feasible_projection,
             n_starts=n_starts,
             local_refine=local_refine,
             seed=seed,
@@ -487,6 +643,9 @@ def batch_optimal_experiment(
             n_experiments,
             criterion=criterion,
             prior_fim=prior_fim,
+            equality_constraints=eq,
+            inequality_constraints=ineq,
+            feasible_projection=feasible_projection,
             n_starts=n_starts,
             local_refine=local_refine,
             seed=seed,
@@ -499,6 +658,9 @@ def batch_optimal_experiment(
             n_experiments,
             criterion=criterion,
             prior_fim=prior_fim,
+            equality_constraints=eq,
+            inequality_constraints=ineq,
+            feasible_projection=feasible_projection,
             n_starts=n_starts,
             local_refine=local_refine,
             min_distance=min_distance,
@@ -516,6 +678,9 @@ def _greedy_batch(
     *,
     criterion: str,
     prior_fim: np.ndarray | None,
+    equality_constraints: Sequence[DesignConstraint] = (),
+    inequality_constraints: Sequence[DesignConstraint] = (),
+    feasible_projection: Callable[[dict[str, float]], dict[str, float]] | None = None,
     n_starts: int,
     local_refine: bool,
     seed: int,
@@ -533,6 +698,9 @@ def _greedy_batch(
             design_bounds,
             criterion=criterion,
             prior_fim=running_prior,
+            equality_constraints=equality_constraints or None,
+            inequality_constraints=inequality_constraints or None,
+            feasible_projection=feasible_projection,
             n_starts=n_starts,
             local_refine=local_refine,
             seed=seed + i,
@@ -562,6 +730,9 @@ def _joint_batch(
     *,
     criterion: str,
     prior_fim: np.ndarray | None,
+    equality_constraints: Sequence[DesignConstraint] = (),
+    inequality_constraints: Sequence[DesignConstraint] = (),
+    feasible_projection: Callable[[dict[str, float]], dict[str, float]] | None = None,
     n_starts: int,
     local_refine: bool,
     seed: int,
@@ -617,15 +788,28 @@ def _joint_batch(
 
     rng = np.random.default_rng(seed)
 
+    def project_stack(z: np.ndarray) -> np.ndarray:
+        if feasible_projection is None:
+            return z
+        stacks = z.reshape(n_experiments, d)
+        out = np.empty_like(z)
+        for i in range(n_experiments):
+            point = {name: float(stacks[i, j]) for j, name in enumerate(design_names)}
+            projected = feasible_projection(point)
+            for j, name in enumerate(design_names):
+                out[i * d + j] = projected[name]
+        return out
+
     # Multi-start: pure random stacks + a few structured ones.
     starts: list[np.ndarray] = []
     for _ in range(n_starts):
-        starts.append(rng.uniform(np.tile(lows, n_experiments), np.tile(highs, n_experiments)))
+        z = rng.uniform(np.tile(lows, n_experiments), np.tile(highs, n_experiments))
+        starts.append(project_stack(z))
     # Structured: one stack with each row at a distinct quantile of each bound.
     if n_experiments >= 2:
         quantiles = np.linspace(0.0, 1.0, n_experiments)
         structured = np.concatenate([lows + q * (highs - lows) for q in quantiles])
-        starts.append(structured)
+        starts.append(project_stack(structured))
 
     best_z: np.ndarray | None = None
     best_val = _SINGULAR_SENTINEL
@@ -640,13 +824,43 @@ def _joint_batch(
 
     final_z: np.ndarray = best_z
     if local_refine:
-        try:
-            refined = minimize(objective, final_z, method="L-BFGS-B", bounds=flat_bounds)
-            if np.isfinite(refined.fun) and refined.fun < best_val:
-                final_z = np.asarray(refined.x)
-                best_val = float(refined.fun)
-        except Exception:
-            pass
+        has_constraints = bool(equality_constraints) or bool(inequality_constraints)
+        if has_constraints:
+
+            def slot_dict(z: np.ndarray, i: int) -> dict[str, float]:
+                return {name: float(z[i * d + j]) for j, name in enumerate(design_names)}
+
+            scipy_cons = []
+            for i in range(n_experiments):
+                for g in equality_constraints:
+                    scipy_cons.append(
+                        {"type": "eq", "fun": (lambda z, ii=i, gg=g: float(gg(slot_dict(z, ii))))}
+                    )
+                for h in inequality_constraints:
+                    scipy_cons.append(
+                        {"type": "ineq", "fun": (lambda z, ii=i, hh=h: float(hh(slot_dict(z, ii))))}
+                    )
+            try:
+                refined = minimize(
+                    objective,
+                    final_z,
+                    method="SLSQP",
+                    bounds=flat_bounds,
+                    constraints=scipy_cons,
+                )
+                if np.isfinite(refined.fun) and refined.fun < best_val:
+                    final_z = np.asarray(refined.x)
+                    best_val = float(refined.fun)
+            except Exception:
+                pass
+        else:
+            try:
+                refined = minimize(objective, final_z, method="L-BFGS-B", bounds=flat_bounds)
+                if np.isfinite(refined.fun) and refined.fun < best_val:
+                    final_z = np.asarray(refined.x)
+                    best_val = float(refined.fun)
+            except Exception:
+                pass
 
     designs = unpack(final_z)
     final = joint_fim_and_pieces(designs)
@@ -673,6 +887,9 @@ def _penalized_batch(
     *,
     criterion: str,
     prior_fim: np.ndarray | None,
+    equality_constraints: Sequence[DesignConstraint] = (),
+    inequality_constraints: Sequence[DesignConstraint] = (),
+    feasible_projection: Callable[[dict[str, float]], dict[str, float]] | None = None,
     n_starts: int,
     local_refine: bool,
     min_distance: float | None,
@@ -688,11 +905,15 @@ def _penalized_batch(
     per_round: list[float] = []
 
     for i in range(n_experiments):
-        candidates = _multi_start_candidates(design_bounds, n_starts, seed + i)
+        candidates = _multi_start_candidates(
+            design_bounds, n_starts, seed + i, projection=feasible_projection
+        )
         filtered = _filter_by_min_distance(candidates, designs, design_bounds, min_dist)
         if not filtered:
             # Retry with a bigger pool before giving up.
-            candidates = _multi_start_candidates(design_bounds, n_starts * 5, seed + 1000 + i)
+            candidates = _multi_start_candidates(
+                design_bounds, n_starts * 5, seed + 1000 + i, projection=feasible_projection
+            )
             filtered = _filter_by_min_distance(candidates, designs, design_bounds, min_dist)
         if not filtered:
             raise RuntimeError(
@@ -716,6 +937,8 @@ def _penalized_batch(
                 design_bounds,
                 criterion,
                 running_prior,
+                equality_constraints=equality_constraints,
+                inequality_constraints=inequality_constraints,
             )
             if (
                 refined is not None

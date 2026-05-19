@@ -111,6 +111,50 @@ class DiscriminationDesignResult:
 # ─────────────────────────────────────────────────────────────────────
 
 
+def evaluate_discrimination_criterion(
+    experiments: dict[str, Experiment],
+    param_estimates: dict[str, dict[str, float]],
+    design: dict[str, float],
+    *,
+    criterion: DiscriminationCriterion = DiscriminationCriterion.BF,
+    model_priors: dict[str, float] | None = None,
+    mi_samples: int = 2000,
+    seed: int | None = None,
+) -> float:
+    """Evaluate a discrimination criterion at a single design point.
+
+    Useful for plotting the criterion surface or for diagnosing why
+    :func:`discriminate_design` picked a particular point. Uses the
+    same predictive-covariance machinery as the optimiser, so the
+    returned value matches ``DiscriminationDesignResult.criterion_value``
+    when ``design`` equals ``result.design``.
+
+    Parameters
+    ----------
+    experiments, param_estimates : as in :func:`discriminate_design`.
+    design : dict[str, float]
+        Design point at which to evaluate the criterion.
+    criterion : DiscriminationCriterion, default BF
+        Which criterion to evaluate. ``DT`` is not supported here;
+        evaluate its components (D-optimal + a discrimination criterion)
+        separately.
+    model_priors, mi_samples, seed : as in :func:`discriminate_design`.
+
+    Returns
+    -------
+    float
+        The (positive, to-be-maximised) criterion value.
+    """
+    _validate_inputs(experiments, param_estimates, {k: (v, v) for k, v in design.items()})
+    model_names = list(experiments.keys())
+    weights = _normalise_priors(model_priors, model_names)
+    rng = np.random.default_rng(seed)
+    rng_seed = int(rng.integers(0, 2**31 - 1))
+    preds = _predict_all_models(experiments, param_estimates, design)
+    value, _ = _evaluate_criterion(criterion, preds, weights, mi_samples, rng_seed)
+    return float(value)
+
+
 def discriminate_design(
     experiments: dict[str, Experiment],
     param_estimates: dict[str, dict[str, float]],
@@ -710,4 +754,5 @@ __all__ = [
     "DiscriminationDesignResult",
     "discriminate_compound",
     "discriminate_design",
+    "evaluate_discrimination_criterion",
 ]

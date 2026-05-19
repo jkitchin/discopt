@@ -58,9 +58,13 @@ parts:
       - file: notebooks/tutorial_doe
       - file: notebooks/doe_cli
       - file: notebooks/tutorial_batch_doe
+      - file: notebooks/mixture-designs
+      - file: notebooks/latin-designs
+      - file: notebooks/factor-screening
+      - file: notebooks/active-learning
+      - file: notebooks/model-based-active-learning
       - file: notebooks/identifiability-estimability
       - file: notebooks/model-discrimination
-      - file: notebooks/doe-implementation-plan
   - caption: API Reference
     chapters:
       - file: api

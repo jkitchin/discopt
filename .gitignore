@@ -79,3 +79,6 @@ adversary/
 
 # Jupyter Book
 docs/_build/
+
+# DoE demo workbook artifacts
+docs/notebooks/*.xlsx

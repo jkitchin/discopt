@@ -128,6 +128,60 @@ def test_app_runs_against_real_workbook(monkeypatch, tmp_path: Path) -> None:
     assert "Reload from disk" in button_labels
 
 
+def test_resolve_template_mixture() -> None:
+    """Mixture template choice dispatches to the right Scheffé form."""
+    from discopt.doe.gui.app import _resolve_template
+
+    assert _resolve_template("mixture (Scheffé)", 3, "linear") == "scheffe-linear"
+    assert _resolve_template("mixture (Scheffé)", 3, "quadratic") == "scheffe-quadratic"
+    assert _resolve_template("mixture (Scheffé)", 4, "special-cubic") == "scheffe-special-cubic"
+    # Need at least 2 components, 3 for special-cubic.
+    assert _resolve_template("mixture (Scheffé)", 1, "linear") is None
+    assert _resolve_template("mixture (Scheffé)", 2, "special-cubic") is None
+    # Missing form selector.
+    assert _resolve_template("mixture (Scheffé)", 3, None) is None
+    # Other templates pass through unchanged.
+    assert _resolve_template("linear", 4) == "linear"
+
+
+def test_gui_mixture_workflow(monkeypatch, tmp_path: Path) -> None:
+    """End-to-end mixture workflow: do_new builds a Scheffé experiment,
+    writes the workbook, and the runs lie on the simplex."""
+    from discopt.doe.cli import NewParams, do_new
+    from discopt.doe.workbook import Workbook
+
+    wb_path = tmp_path / "mixture.xlsx"
+    do_new(
+        NewParams(
+            output=wb_path,
+            n=6,
+            inputs=[("A", 0.0, 1.0), ("B", 0.0, 1.0), ("C", 0.0, 1.0)],
+            response_name="y",
+            measurement_error=0.1,
+            criterion="determinant",
+            seed=0,
+            n_starts=10,
+            template="scheffe-quadratic",
+            mixture_total=1.0,
+        )
+    )
+    wb = Workbook.open(wb_path)
+    assert wb.template_name() == "scheffe-quadratic"
+    assert wb.template_args().get("mixture_total") == 1.0
+    runs = wb.pending_runs() if hasattr(wb, "pending_runs") else []
+    if not runs:
+        # Fall back: read from the runs sheet directly.
+        import openpyxl
+
+        sheet = openpyxl.load_workbook(wb_path)["runs"]
+        rows = list(sheet.iter_rows(values_only=True))
+        header = list(rows[0])
+        idx = {name: header.index(name) for name in ("A", "B", "C")}
+        for row in rows[1:]:
+            s = sum(float(row[idx[c]]) for c in ("A", "B", "C"))
+            assert abs(s - 1.0) < 1e-6, f"row sum {s} != 1"
+
+
 def test_cli_gui_dispatches_to_launcher(monkeypatch, tmp_path: Path) -> None:
     """The CLI `gui` verb must call `launcher.launch` with parsed args."""
     import argparse

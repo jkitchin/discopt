@@ -378,7 +378,11 @@ class Workbook:
         for run in runs:
             row = [next_id, int(batch_idx)]
             for nm in input_names:
-                row.append(float(run[nm]))
+                v = run[nm]
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    row.append(float(v))
+                else:
+                    row.append(v)
             row.append(None)  # response (blank => pending)
             row.append(None)  # measured_at
             sheet.append(row)
@@ -597,16 +601,22 @@ class Workbook:
         from the :class:`ExperimentModel` so they match the order used
         by FIM / covariance matrices throughout this module.
         """
-        from discopt.doe.templates import build_template
+        from discopt.doe.templates import COMBINATORIAL_TEMPLATES, build_template
 
         meta = self.metadata()
         template = meta.get("template") or ""
+        if template in COMBINATORIAL_TEMPLATES:
+            raise ValueError(
+                f"workbook uses combinatorial template {template!r}; use `discopt doe anova` "
+                "instead of fit/extend"
+            )
         specs = self.input_specs()
         response = self.response_name()
         sigma = self.measurement_error()
         if template:
             args = self.template_args()
             degree = args.get("degree")
+            mixture_total = args.get("mixture_total")
             inputs = [(s.name, s.lb, s.ub) for s in specs]
             exp = build_template(
                 template,
@@ -614,6 +624,7 @@ class Workbook:
                 response_name=response,
                 measurement_error=sigma,
                 degree=int(degree) if degree is not None else None,
+                mixture_total=float(mixture_total) if mixture_total is not None else None,
             )
         else:
             mod_call = self.module_callable()
