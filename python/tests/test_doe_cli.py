@@ -169,8 +169,18 @@ def test_fit_recovers_known_truth_response_surface(tmp_path):
             + truth["b12"] * x1 * x2
         )
 
+    # n_starts=1: this test only checks fit recovery of known parameters, not
+    # design optimality. The default n_starts=3 triples the inner D-optimal QP
+    # solves and pushes the test past the 120s CI timeout under parallel load.
     out = do_new(
-        _new_params(tmp_path, template="response-surface-2d", inputs=inputs, n=10, error=0.01)
+        _new_params(
+            tmp_path,
+            template="response-surface-2d",
+            inputs=inputs,
+            n=10,
+            error=0.01,
+            n_starts=1,
+        )
     )
     wb_path = Path(out["workbook_path"])
     _fill_response(wb_path, "y", predict)
