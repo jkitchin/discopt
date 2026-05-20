@@ -76,7 +76,7 @@ from __future__ import annotations
 
 import itertools
 import random
-from typing import Mapping
+from typing import Mapping, cast
 
 import numpy as np
 
@@ -258,7 +258,8 @@ def fractional_factorial_design(
             rep_rows.append(row)
         for _ in range(center_points):
             cp_row: dict[str, object] = {
-                names[i]: (float(lows[i]) + float(highs[i])) / 2.0 for i in range(k)
+                names[i]: (float(cast(float, lows[i])) + float(cast(float, highs[i]))) / 2.0
+                for i in range(k)
             }
             cp_row["replicate"] = r
             cp_row["is_center"] = True
@@ -269,7 +270,7 @@ def fractional_factorial_design(
     rng.shuffle(order)
     for new_idx, original_idx in enumerate(order):
         rows[original_idx]["run_order"] = new_idx
-    rows.sort(key=lambda d: d["run_order"])
+    rows.sort(key=lambda d: cast(int, d["run_order"]))
 
     return FactorialDesign(
         factors=names,
@@ -334,7 +335,9 @@ def _solve_row_milp(
     # solution is unique-up-to-ties.
     m.minimize(sum(r * x[r] for r in range(N)) * 0.0)
 
-    result = m.solve(time_limit=time_limit, gap_tolerance=1e-9)
+    from discopt.modeling.core import SolveResult
+
+    result = cast(SolveResult, m.solve(time_limit=time_limit, gap_tolerance=1e-9))
     if result.x is None or result.status not in {"optimal", "feasible"}:
         raise ValueError(
             f"fractional factorial MILP infeasible or unsolved "

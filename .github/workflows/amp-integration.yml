@@ -46,4 +46,9 @@ jobs:
         env:
           JAX_PLATFORMS: cpu
           JAX_ENABLE_X64: "1"
-          PYTEST_MEMORY_LIMIT_MB: "16384"
+          # No prlimit --as cap: the suite runs single-process and accumulates
+          # XLA address-space reservations across hundreds of compilations, so a
+          # virtual-memory cap produces flaky std::bad_alloc aborts (exit 134)
+          # unrelated to real RAM use. The runner's kernel OOM-killer remains
+          # the safety net against a genuine resident-memory runaway.
+          PYTEST_MEMORY_LIMIT_MB: "0"

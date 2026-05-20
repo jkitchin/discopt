@@ -78,7 +78,7 @@ def test_templates_lists_all():
 # ──────────────────────────────────────────────────────────────────
 
 
-def _new_params(tmpdir, *, template, inputs, n, degree=None, response="y", error=1.0):
+def _new_params(tmpdir, *, template, inputs, n, degree=None, response="y", error=1.0, n_starts=3):
     return NewParams(
         output=Path(tmpdir) / f"{template}.xlsx",
         n=n,
@@ -87,7 +87,7 @@ def _new_params(tmpdir, *, template, inputs, n, degree=None, response="y", error
         measurement_error=error,
         criterion="determinant",
         seed=0,
-        n_starts=3,
+        n_starts=n_starts,
         template=template,
         degree=degree,
     )
@@ -123,13 +123,19 @@ def test_new_response_surface_2d(tmp_path):
     assert len(out["designs"]) == 6
 
 
+@pytest.mark.slow
 def test_new_response_surface_3d(tmp_path):
+    # Marked slow: a 10-parameter D-optimal search drives ~700 inner QP solves
+    # and runs ~40s locally, blowing past the 120s CI fast-job timeout under
+    # parallel load. n_starts=1 keeps the full-suite run as short as possible.
+    # The response-surface model-based path is already covered by the 2D test.
     out = do_new(
         _new_params(
             tmp_path,
             template="response-surface-3d",
             inputs=[("x1", 0.0, 10.0), ("x2", -5.0, 5.0), ("x3", 0.0, 1.0)],
             n=10,
+            n_starts=1,
         )
     )
     assert len(out["parameter_names"]) == 10

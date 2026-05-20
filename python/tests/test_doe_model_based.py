@@ -25,7 +25,8 @@ from discopt.doe.model_based import (
 from discopt.doe.optimize import OptimizationCriterion
 from discopt.doe.templates import polynomial_1d_template, response_surface_template
 from discopt.doe.workbook import InputSpec, Workbook
-from openpyxl import load_workbook as _lwb
+
+_lwb = pytest.importorskip("openpyxl").load_workbook
 
 # ──────────────────────────────────────────────────────────────────
 # ParametricSurrogate unit tests

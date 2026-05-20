@@ -27,7 +27,7 @@ import math
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -816,7 +816,8 @@ def _do_new_latin(params: NewParams) -> dict[str, Any]:
     for name in factor_names:
         vals = params.levels[name]
         if all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in vals):
-            lb, ub = float(min(vals)), float(max(vals))
+            numeric_vals = [float(cast(float, v)) for v in vals]
+            lb, ub = min(numeric_vals), max(numeric_vals)
             if ub == lb:
                 ub = lb + 1.0
         else:

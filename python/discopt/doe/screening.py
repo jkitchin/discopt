@@ -87,7 +87,7 @@ import itertools
 import math
 import random
 from dataclasses import dataclass
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 
 @dataclass(frozen=True)
@@ -190,7 +190,8 @@ def factorial_2level_design(
             rep_rows.append(row)
         for _ in range(center_points):
             cp_row: dict[str, object] = {
-                names[i]: (float(lows[i]) + float(highs[i])) / 2.0 for i in range(k)
+                names[i]: (float(cast(float, lows[i])) + float(cast(float, highs[i]))) / 2.0
+                for i in range(k)
             }
             cp_row["replicate"] = r
             cp_row["is_center"] = True
@@ -201,7 +202,7 @@ def factorial_2level_design(
     rng.shuffle(order)
     for new_idx, original_idx in enumerate(order):
         rows[original_idx]["run_order"] = new_idx
-    rows.sort(key=lambda d: d["run_order"])
+    rows.sort(key=lambda d: cast(int, d["run_order"]))
 
     return FactorialDesign(
         factors=names,
@@ -249,7 +250,7 @@ def effects_estimates(
     y = []
     for r in rows:
         try:
-            y.append(float(r[response]))
+            y.append(float(cast(float, r[response])))
         except (TypeError, ValueError) as e:
             raise ValueError(f"response value {r[response]!r} is not numeric") from e
 
@@ -258,7 +259,7 @@ def effects_estimates(
     effects: list[dict[str, object]] = []
     levels_per_factor: dict[str, tuple[object, object]] = {}
     for f in factors:
-        vals = []
+        vals: list[Any] = []
         for r in rows:
             if r[f] not in vals:
                 vals.append(r[f])
@@ -299,7 +300,7 @@ def effects_estimates(
             t = effect / se if se > 0 else float("nan")
         effects.append({"factor": f, "effect": effect, "se": se, "t": t, "low": lo, "high": hi})
 
-    effects.sort(key=lambda d: abs(float(d["effect"])), reverse=True)
+    effects.sort(key=lambda d: abs(float(cast(float, d["effect"]))), reverse=True)
     _ = grand_mean  # silence linter; used as reference for callers
     return effects
 

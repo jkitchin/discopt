@@ -28,7 +28,7 @@ import warnings
 from collections import defaultdict
 from dataclasses import dataclass
 from itertools import product
-from typing import Iterable, Mapping, Sequence
+from typing import Iterable, Mapping, Sequence, cast
 
 
 @dataclass(frozen=True)
@@ -152,7 +152,7 @@ def anova_report(
     y = []
     for r in rows:
         try:
-            y.append(float(r[response]))
+            y.append(float(cast(float, r[response])))
         except (TypeError, ValueError) as e:
             raise ValueError(f"response value {r[response]!r} is not numeric") from e
 
@@ -257,13 +257,13 @@ def anova_report(
 
     # Compute F and p now that we know the residual MS.
     final_rows: list[AnovaEffect] = []
-    for r in effect_rows:
-        if r.df == 0 or ms_residual <= 0:
-            final_rows.append(r)
+    for eff in effect_rows:
+        if eff.df == 0 or ms_residual <= 0:
+            final_rows.append(eff)
             continue
-        f_stat = r.ms / ms_residual
-        p = float(f_dist.sf(f_stat, r.df, df_residual)) if f_stat > 0 else 1.0
-        final_rows.append(AnovaEffect(r.source, r.ss, r.df, r.ms, f_stat, p))
+        f_stat = eff.ms / ms_residual
+        p = float(f_dist.sf(f_stat, eff.df, df_residual)) if f_stat > 0 else 1.0
+        final_rows.append(AnovaEffect(eff.source, eff.ss, eff.df, eff.ms, f_stat, p))
     final_rows.append(AnovaEffect("Residual", ss_residual, df_residual, ms_residual, None, None))
     final_rows.append(AnovaEffect("Total", ss_total, n - 1, 0.0, None, None))
 

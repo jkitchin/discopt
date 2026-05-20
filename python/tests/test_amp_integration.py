@@ -26,6 +26,7 @@ Sections:
 
 from __future__ import annotations
 
+import itertools
 import logging
 import os
 import warnings
@@ -49,6 +50,26 @@ pytestmark = [
     pytest.mark.amp_benchmark,
     pytest.mark.memory_heavy,
 ]
+
+
+@pytest.fixture(autouse=True)
+def _clear_jax_caches():
+    """Release accumulated XLA executables after every test in this module.
+
+    This suite runs ~190 AMP solver tests in a single process, and each
+    ``Model.solve(solver="amp")`` call triggers many JAX compilations. JAX
+    caches every compiled executable, so without clearing the process's
+    resident set grows monotonically until XLA aborts mid-compilation
+    ("Fatal Python error: Aborted", exit 134) ~90% through the run on the
+    16 GB CI runner. Clearing after each test keeps peak memory bounded.
+    """
+    yield
+    import gc
+
+    import jax
+
+    jax.clear_caches()
+    gc.collect()
 
 
 def _unwrap_minlptests_case(case):
@@ -492,7 +513,10 @@ class TestTermClassifier:
 
         assert len(terms.bilinear) == 0
         assert len(terms.general_nl) >= 1
-        assert (0, 2) in terms.monomial
+        # The whole x*x*y product is kept in general_nl; the classifier
+        # deliberately does not extract convex sub-monomials from a mixed
+        # repeated-factor term (see term_classifier.py).
+        assert not terms.monomial
 
     def test_partition_candidates_excludes_linear_vars(self):
         """Variable not in any nonlinear term must NOT be a partition candidate."""
@@ -3161,7 +3185,9 @@ class TestCurrentCodeWeaknesses:
         from discopt._jax import cutting_planes
 
         recorded_masks = []
-        real_generate = cutting_planes.generate_oa_cuts_from_evaluator
+        # AMP linearizes constraint rows through the *_report variant directly
+        # (it needs the skip report), so the wrapper is patched there.
+        real_generate = cutting_planes.generate_oa_cuts_from_evaluator_report
 
         def wrapped_generate(*args, **kwargs):
             convex_mask = kwargs.get("convex_mask")
@@ -3169,7 +3195,9 @@ class TestCurrentCodeWeaknesses:
                 recorded_masks.append(list(convex_mask))
             return real_generate(*args, **kwargs)
 
-        monkeypatch.setattr(cutting_planes, "generate_oa_cuts_from_evaluator", wrapped_generate)
+        monkeypatch.setattr(
+            cutting_planes, "generate_oa_cuts_from_evaluator_report", wrapped_generate
+        )
 
         m = Model("amp_nonconvex_constraint_mask")
         x = m.continuous("x", lb=0, ub=2)
@@ -3447,7 +3475,10 @@ class TestCurrentCodeWeaknesses:
         from discopt._jax.milp_relaxation import MilpRelaxationResult
         from discopt.solvers import amp as amp_mod
 
-        fake_clock = iter([0.0, 0.0, 1.5])
+        # First two reads land before the deadline; every later read is past it,
+        # so the timeout path triggers regardless of how many clock samples
+        # solve_amp takes.
+        fake_clock = itertools.chain([0.0, 0.0], itertools.repeat(1.5))
 
         monkeypatch.setattr(amp_mod.time, "perf_counter", lambda: next(fake_clock))
         monkeypatch.setattr(

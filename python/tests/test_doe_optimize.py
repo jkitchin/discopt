@@ -32,7 +32,8 @@ from discopt.doe.surrogate import (
     coerce_surrogate,
 )
 from discopt.doe.workbook import InputSpec, Workbook
-from openpyxl import load_workbook as _lwb
+
+_lwb = pytest.importorskip("openpyxl").load_workbook
 
 # ──────────────────────────────────────────────────────────────────
 # Surrogate adapter
