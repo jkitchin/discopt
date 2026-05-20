@@ -236,7 +236,7 @@ def test_anova_unbalanced_warns():
 
 
 def test_cli_new_latin_then_anova(tmp_path: Path) -> None:
-    import openpyxl
+    openpyxl = pytest.importorskip("openpyxl")
     from discopt.doe.cli import NewParams, do_anova, do_new
 
     wb_path = tmp_path / "latin.xlsx"
