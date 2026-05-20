@@ -17,7 +17,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import openpyxl
 import pandas as pd
@@ -1396,6 +1396,7 @@ def _anova_panel(path: str, status: dict[str, Any]) -> None:
         type="primary",
         key="anova_btn",
     ):
+        out: dict[str, Any] | None
         try:
             out = do_anova(
                 {
@@ -1409,7 +1410,7 @@ def _anova_panel(path: str, status: dict[str, Any]) -> None:
             return
         st.session_state["last_anova_result"] = out
 
-    out = st.session_state.get("last_anova_result")
+    out = cast("dict[str, Any] | None", st.session_state.get("last_anova_result"))
     if not out:
         return
     cols = st.columns(3)
@@ -1583,6 +1584,7 @@ def _optimize_panel(path: str, status: dict[str, Any]) -> None:
         )
         if surrogate_choice == "response-surface":
             params.surrogate = "response-surface"
+        out: dict[str, Any] | None
         try:
             with st.spinner("Fitting surrogate + scoring candidates..."):
                 out = do_optimize(params)
@@ -1593,7 +1595,7 @@ def _optimize_panel(path: str, status: dict[str, Any]) -> None:
         st.success(f"Appended {len(out['next_designs'])} new pending runs.")
         st.rerun()
 
-    out = st.session_state.get("last_optimize_result")
+    out = cast("dict[str, Any] | None", st.session_state.get("last_optimize_result"))
     if out and out.get("workbook_path") == str(Path(path)):
         st.markdown("**Last recommendation**")
         cols = st.columns(3)

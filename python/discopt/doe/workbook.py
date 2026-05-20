@@ -54,7 +54,7 @@ import datetime as _dt
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -361,7 +361,7 @@ class Workbook:
     def _input_column_names(self) -> list[str]:
         return [s.name for s in self.input_specs()]
 
-    def append_runs(self, batch_idx: int, runs: list[dict[str, float]]) -> list[int]:
+    def append_runs(self, batch_idx: int, runs: Sequence[Mapping[str, object]]) -> list[int]:
         """Append a batch of pending runs to the workbook. Returns the new run_ids."""
         sheet = self._wb[SHEET_RUNS]
         input_names = self._input_column_names()

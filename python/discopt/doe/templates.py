@@ -291,18 +291,29 @@ def build_template(
         components = [s[0] for s in inputs]
         bounds = [(s[1], s[2]) for s in inputs]
         total = float(mixture_total) if mixture_total is not None else 1.0
-        kwargs = dict(
+        if template == "scheffe-linear":
+            return scheffe_linear_template(
+                components=components,
+                total=total,
+                bounds=bounds,
+                response_name=response_name,
+                measurement_error=measurement_error,
+            )
+        if template == "scheffe-quadratic":
+            return scheffe_quadratic_template(
+                components=components,
+                total=total,
+                bounds=bounds,
+                response_name=response_name,
+                measurement_error=measurement_error,
+            )
+        return scheffe_special_cubic_template(
             components=components,
             total=total,
             bounds=bounds,
             response_name=response_name,
             measurement_error=measurement_error,
         )
-        if template == "scheffe-linear":
-            return scheffe_linear_template(**kwargs)
-        if template == "scheffe-quadratic":
-            return scheffe_quadratic_template(**kwargs)
-        return scheffe_special_cubic_template(**kwargs)
     raise ValueError(f"unknown template {template!r}")
 
 

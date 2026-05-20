@@ -31,7 +31,7 @@ Implementations
 from __future__ import annotations
 
 import math
-from typing import Literal
+from typing import Callable, Literal
 
 import numpy as np
 
@@ -41,7 +41,7 @@ Direction = Literal[1, -1]
 
 
 def _erf(x: np.ndarray) -> np.ndarray:
-    return np.vectorize(math.erf)(x)
+    return np.asarray(np.vectorize(math.erf)(x), dtype=float)
 
 
 def _norm_cdf(x: np.ndarray) -> np.ndarray:
@@ -49,7 +49,7 @@ def _norm_cdf(x: np.ndarray) -> np.ndarray:
 
 
 def _norm_pdf(x: np.ndarray) -> np.ndarray:
-    return np.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+    return np.asarray(np.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi), dtype=float)
 
 
 def expected_improvement(
@@ -77,11 +77,11 @@ def expected_improvement(
     mu, sigma = surrogate.predict(np.asarray(X_candidates, dtype=float))
     mu = np.asarray(mu, dtype=float).ravel()
     sigma = np.asarray(sigma, dtype=float).ravel()
-    direction = int(direction)
-    if direction not in (1, -1):
-        raise ValueError(f"direction must be +1 or -1, got {direction}")
+    dir_sign = int(direction)
+    if dir_sign not in (1, -1):
+        raise ValueError(f"direction must be +1 or -1, got {dir_sign}")
 
-    improvement = direction * (mu - y_best) - xi
+    improvement = dir_sign * (mu - y_best) - xi
     safe_sigma = np.where(sigma > 0.0, sigma, 1.0)
     z = improvement / safe_sigma
     ei = improvement * _norm_cdf(z) + safe_sigma * _norm_pdf(z)
@@ -144,14 +144,14 @@ def steepest_ascent(
     does not change the ranking). Use this with a response-surface
     surrogate to reproduce classical Box-Wilson behaviour.
     """
-    mu, _ = surrogate.predict(np.asarray(X_candidates, dtype=float))
+    mu, _sigma = surrogate.predict(np.asarray(X_candidates, dtype=float))
     mu = np.asarray(mu, dtype=float).ravel()
     if y_best is None:
         return int(direction) * mu
     return int(direction) * (mu - float(y_best))
 
 
-ACQUISITIONS = {
+ACQUISITIONS: dict[str, Callable[..., np.ndarray]] = {
     "expected_improvement": expected_improvement,
     "ei": expected_improvement,
     "ucb": confidence_bound,

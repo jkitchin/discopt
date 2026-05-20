@@ -352,7 +352,7 @@ def _sample_candidates(
             u = rng.uniform(size=(n, d))
     else:
         raise ValueError(f"unknown candidate_sampler {sampler!r}")
-    return lo + (hi - lo) * u
+    return np.asarray(lo + (hi - lo) * u, dtype=float)
 
 
 _ = Surrogate  # ensure protocol import is exported for downstream users

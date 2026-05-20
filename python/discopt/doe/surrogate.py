@@ -66,7 +66,7 @@ Conventions
 
 from __future__ import annotations
 
-from typing import Callable, Protocol, runtime_checkable
+from typing import Callable, Protocol, cast, runtime_checkable
 
 import numpy as np
 
@@ -248,7 +248,7 @@ def coerce_surrogate(obj: object) -> Surrogate:
             ) from e
         return factory()
     if _matches_surrogate_protocol(obj):
-        return obj  # already returns (mean, std)
+        return cast(Surrogate, obj)  # already returns (mean, std)
     if hasattr(obj, "fit") and hasattr(obj, "predict"):
         return _SklearnUQAdapter(obj)
     raise TypeError(

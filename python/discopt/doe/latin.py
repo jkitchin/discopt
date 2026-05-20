@@ -29,7 +29,7 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
-from typing import Mapping, Sequence
+from typing import Mapping, Sequence, cast
 
 LevelSpec = Mapping[str, Sequence[object]]
 
@@ -270,7 +270,7 @@ def latin_square_design(
     rng.shuffle(order)
     for new_idx, original_idx in enumerate(order):
         rows[original_idx]["run_order"] = new_idx
-    rows.sort(key=lambda d: d["run_order"])
+    rows.sort(key=lambda d: cast(int, d["run_order"]))
     return LatinDesign(factors=names, levels=levels, rows=rows, family=family)
 
 

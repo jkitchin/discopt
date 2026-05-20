@@ -125,7 +125,7 @@ def _load_progress(course_dir: Path) -> dict | None:
     if not path.exists():
         return None
     try:
-        import yaml  # type: ignore[import-not-found]
+        import yaml  # type: ignore[import-not-found, import-untyped]
     except ImportError:
         return None
     try:
@@ -329,7 +329,7 @@ def _cmd_reset(args, course_dir: Path) -> int:
         print(f"unknown lesson: {args.lesson!r}", file=sys.stderr)
         return 1
     try:
-        import yaml  # type: ignore[import-not-found]
+        import yaml  # type: ignore[import-not-found, import-untyped]
     except ImportError:
         print(
             "per-lesson reset needs PyYAML. Install it or edit progress.yaml by hand.",
