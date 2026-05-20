@@ -52,6 +52,26 @@ pytestmark = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def _clear_jax_caches():
+    """Release accumulated XLA executables after every test in this module.
+
+    This suite runs ~190 AMP solver tests in a single process, and each
+    ``Model.solve(solver="amp")`` call triggers many JAX compilations. JAX
+    caches every compiled executable, so without clearing the process's
+    resident set grows monotonically until XLA aborts mid-compilation
+    ("Fatal Python error: Aborted", exit 134) ~90% through the run on the
+    16 GB CI runner. Clearing after each test keeps peak memory bounded.
+    """
+    yield
+    import gc
+
+    import jax
+
+    jax.clear_caches()
+    gc.collect()
+
+
 def _unwrap_minlptests_case(case):
     return case.values[0] if hasattr(case, "values") else case
 
