@@ -28,7 +28,7 @@ from discopt.doe.cli import (  # noqa: E402
     do_status,
     do_templates,
 )
-from discopt.doe.workbook import Workbook  # noqa: E402
+from discopt.doe.workbook import InputSpec, Workbook  # noqa: E402
 
 # ──────────────────────────────────────────────────────────────────
 # Helpers
@@ -148,6 +148,15 @@ def test_new_response_surface_3d(tmp_path):
 
 
 def test_fit_recovers_known_truth_response_surface(tmp_path):
+    """do_fit recovers known quadratic-truth parameters from a filled workbook.
+
+    The workbook is built directly with a fixed 3x3-grid-plus-center design
+    rather than via do_new. This test validates *fit recovery*, not design
+    optimality (the model-based design path is covered by
+    test_new_response_surface_2d). do_new's inner D-optimal search costs ~20s
+    even at n_starts=1 — that fixed cost is what previously pushed this test
+    past the 120s CI timeout. Bypassing it keeps the run under a second.
+    """
     inputs = [("x1", 0.0, 10.0), ("x2", -5.0, 5.0)]
     truth = {
         "b0": 1.0,
@@ -169,20 +178,24 @@ def test_fit_recovers_known_truth_response_surface(tmp_path):
             + truth["b12"] * x1 * x2
         )
 
-    # n_starts=1: this test only checks fit recovery of known parameters, not
-    # design optimality. The default n_starts=3 triples the inner D-optimal QP
-    # solves and pushes the test past the 120s CI timeout under parallel load.
-    out = do_new(
-        _new_params(
-            tmp_path,
-            template="response-surface-2d",
-            inputs=inputs,
-            n=10,
-            error=0.01,
-            n_starts=1,
-        )
+    # Fixed 3x3 grid (corners, edge midpoints, center) plus one extra center
+    # run = 10 points: well-conditioned for the 6-term quadratic surface.
+    design = [{"x1": x1, "x2": x2} for x1 in (0.0, 5.0, 10.0) for x2 in (-5.0, 0.0, 5.0)]
+    design.append({"x1": 5.0, "x2": 0.0})
+
+    wb_path = tmp_path / "response-surface-2d.xlsx"
+    wb = Workbook.create(
+        wb_path,
+        template="response-surface-2d",
+        template_args={},
+        input_specs=[InputSpec(name, lb, ub) for name, lb, ub in inputs],
+        criterion="determinant",
+        measurement_error=0.01,
+        seed=0,
+        response_name="y",
     )
-    wb_path = Path(out["workbook_path"])
+    wb.append_runs(1, design)
+    wb.save()
     _fill_response(wb_path, "y", predict)
 
     fit = do_fit({"workbook": str(wb_path)})
