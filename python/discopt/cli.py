@@ -301,7 +301,13 @@ def main():
 
     _add_doe_subparser(subparsers)
 
+    p_help = subparsers.add_parser("help", help="Show this help message and exit")
+    p_help.set_defaults(func=lambda _args: parser.print_help())
+
     args = parser.parse_args()
+    if args.command == "help":
+        parser.print_help()
+        return
     if args.command == "tutor":
         from discopt.tutor import run as _run_tutor
 
