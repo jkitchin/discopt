@@ -2102,18 +2102,33 @@ def solve_model(
     if _mc_mode == "lp" and model._objective is not None:
         from discopt._jax.mccormick_lp import MccormickLPRelaxer
 
-        try:
-            _mc_lp_relaxer = MccormickLPRelaxer(model)
-        except Exception as e:
-            logger.warning("McCormick LP relaxer setup failed: %s", e)
+        _has_continuous_var = any(
+            v.var_type == VarType.CONTINUOUS for v in model._variables
+        )
+        if not _has_continuous_var:
+            # Spatial-BB on integer-only models has nothing to branch on:
+            # the LP relaxer's integer-feasible point doesn't satisfy the
+            # original bilinear constraints, and with no continuous var to
+            # bisect, the tree dead-ends after the root. Fall back to NLP.
+            logger.info(
+                "McCormick LP requested but model has no continuous "
+                "variables; falling back to NLP relaxation."
+            )
             _mc_lp_relaxer = None
-            _mc_mode = "none"
+            _mc_mode = "nlp"
         else:
-            if not _mc_lp_relaxer.has_bilinear:
-                # No nonlinear products → standard LP relaxation = the model
-                # itself for linear parts. Drop back to the NLP path.
+            try:
+                _mc_lp_relaxer = MccormickLPRelaxer(model)
+            except Exception as e:
+                logger.warning("McCormick LP relaxer setup failed: %s", e)
                 _mc_lp_relaxer = None
-                _mc_mode = "nlp"
+                _mc_mode = "none"
+            else:
+                if not _mc_lp_relaxer.has_bilinear:
+                    # No nonlinear products → standard LP relaxation = the
+                    # model itself for linear parts. Drop back to NLP.
+                    _mc_lp_relaxer = None
+                    _mc_mode = "nlp"
 
     if _mc_mode in ("midpoint", "nlp") and model._objective is not None:
         from discopt._jax.batch_evaluator import BatchRelaxationEvaluator
