@@ -2412,7 +2412,12 @@ def solve_model(
                 node_lb = np.array(batch_lb[i])
                 node_ub = np.array(batch_ub[i])
 
-                if iteration == 0:
+                nlp_result = None
+                if iteration == 0 and _mc_lp_relaxer is None:
+                    # The root multistart NLP is the only bound source we have.
+                    # When the LP relaxer is active, skip it: the LP block below
+                    # supplies the bound + primal and SubNLP turns that into
+                    # the incumbent — running multistart NLP here is wasted work.
                     if _use_ipm_batch:
                         # More random starts for nonconvex problems
                         _root_n_random = 5 if not _model_is_convex else 2
@@ -2435,7 +2440,7 @@ def solve_model(
                             opts,
                             nlp_solver,
                         )
-                else:
+                elif iteration > 0:
                     # Warm-start from parent solution if available
                     psol_i = np.array(batch_psols[i])
                     if not np.any(np.isnan(psol_i)):
@@ -2469,7 +2474,10 @@ def solve_model(
 
                 result_ids[i] = int(batch_ids[i])
 
-                if nlp_result.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
+                if nlp_result is not None and nlp_result.status in (
+                    SolveStatus.OPTIMAL,
+                    SolveStatus.ITERATION_LIMIT,
+                ):
                     nlp_obj = float(nlp_result.objective)
                     nlp_lb = nlp_obj
                     convex_lb = -np.inf  # accumulate valid convex lower bound
@@ -2569,9 +2577,10 @@ def solve_model(
                     result_feas[i] = False
 
                 # LP-form McCormick bound (lifted bilinears, HiGHS LP).
-                # Runs independently of NLP success: provides a valid lower
-                # bound and a feasible LP point usable for spatial branching
-                # even when the NLP solver returns infeasible / iteration_limit.
+                # Runs independently of the NLP: provides a valid lower bound
+                # and a feasible LP point usable for spatial branching even
+                # when the NLP was skipped (root) or returned infeasible /
+                # iteration_limit (any node).
                 if _mc_lp_relaxer is not None:
                     try:
                         mc_lp_res = _mc_lp_relaxer.solve_at_node(node_lb, node_ub)
@@ -2587,8 +2596,9 @@ def solve_model(
                         mc_lp_lb = float(mc_lp_res.lower_bound)
                         cur = result_lbs[i]
                         if cur >= _SENTINEL_THRESHOLD or not np.isfinite(cur):
-                            # NLP failed: adopt the LP point + LP bound so the
-                            # tree can spatial-branch on a valid relaxation.
+                            # No NLP bound (skipped or failed): adopt LP point
+                            # + LP bound so the tree has a valid relaxation
+                            # to spatial-branch on.
                             result_lbs[i] = mc_lp_lb
                             if mc_lp_res.x is not None:
                                 result_sols[i] = mc_lp_res.x
