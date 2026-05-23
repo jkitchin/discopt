@@ -160,12 +160,43 @@ def _print_no_claude() -> None:
     )
 
 
+def _slash_command_installed(slash_command: str) -> bool:
+    """Check whether ``claude`` can resolve ``slash_command`` locally.
+
+    Slash commands are markdown files under ``.claude/commands/<ns>/<name>.md``
+    in the cwd, or the user-global ``~/.claude/commands/<ns>/<name>.md``.
+    We map ``/ns:name`` (or ``/name``) to that path and return True if any
+    candidate exists. Conservative on the side of "installed": only used to
+    print a friendly hint before launching.
+    """
+    cmd = slash_command.lstrip("/").split()[0]
+    if ":" in cmd:
+        ns, name = cmd.split(":", 1)
+        rel = Path(".claude") / "commands" / ns / f"{name}.md"
+    else:
+        rel = Path(".claude") / "commands" / f"{cmd}.md"
+    for base in (Path.cwd(), Path.home()):
+        if (base / rel).exists():
+            return True
+    return False
+
+
 def _launch_slash(slash_command: str, *extra_args: str) -> int:
     """Spawn ``claude "<slash_command> <extra_args>"`` and inherit its TTY."""
     claude = _claude_binary()
     if claude is None:
         _print_no_claude()
         return 1
+    if not _slash_command_installed(slash_command):
+        cmd = slash_command.lstrip("/").split()[0]
+        print(
+            f"warning: {slash_command.split()[0]} is not installed in "
+            f"./.claude/commands/ or ~/.claude/commands/. Claude will report "
+            f"'Unknown command: /{cmd}'.\n"
+            f"Run `discopt tutor install` to install the /course: slash "
+            f"commands, then re-run this command.",
+            file=sys.stderr,
+        )
     initial = " ".join((slash_command, *extra_args)).strip()
     # Inherit stdin/stdout/stderr so the user gets a real interactive session.
     return subprocess.call([claude, initial])
