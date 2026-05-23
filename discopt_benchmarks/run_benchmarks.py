@@ -82,6 +82,52 @@ def main():
         "--history", action="store_true",
         help="Print historical trend table for the suite"
     )
+    parser.add_argument(
+        "--subprocess", action="store_true",
+        help="Use the subprocess-isolated ScaledRunner (resumable, parallel). "
+             "Recommended for the full MINLPLib suite."
+    )
+    parser.add_argument(
+        "--workers", type=int, default=1,
+        help="Number of parallel worker processes (only with --subprocess)"
+    )
+    parser.add_argument(
+        "--mem-limit-mb", type=int, default=8192,
+        help="Per-instance address-space cap in MB (only with --subprocess)"
+    )
+    parser.add_argument(
+        "--scaled-out-dir", type=str, default=None,
+        help="Output directory for the ScaledRunner (default: reports/<suite>_<timestamp>/)"
+    )
+    parser.add_argument(
+        "--fetch", action="store_true",
+        help="Fetch MINLPLib into the local cache before running"
+    )
+    parser.add_argument(
+        "--minlplib-cache", type=str, default=None,
+        help="Override the MINLPLib cache dir (defaults to ~/.cache/discopt/minlplib)"
+    )
+    parser.add_argument(
+        "--minlplib-version", type=str, default="current",
+        help="MINLPLib snapshot version tag (default: current)"
+    )
+    parser.add_argument(
+        "--use-cache", action="store_true",
+        help="Load instances from the MINLPLib cache directory rather than vendored test data"
+    )
+    parser.add_argument(
+        "--pin-baseline", action="store_true",
+        help="After the run, write current results to baselines/<suite>.json"
+    )
+    parser.add_argument(
+        "--strict-time", action="store_true",
+        help="In gate mode, treat >1.5x per-instance time regression as failure"
+    )
+    parser.add_argument(
+        "--report-format", type=str, default=None,
+        choices=[None, "default", "minlplib"],
+        help="Report style (default = legacy markdown, minlplib = MINLPLib-style per-class table)"
+    )
 
     args = parser.parse_args()
 
@@ -103,12 +149,16 @@ def main():
 
 def _list_suites():
     """List available benchmark suites."""
-    suites = {
+    tiers = {
+        "small":   "~60 stratified MINLPLib instances, 60s/inst   (~30 min on 8 workers)",
+        "medium":  "~250 stratified MINLPLib instances, 300s/inst (~2 h on 8 workers)",
+        "full":    "All MINLPLib instances, 600s/inst             (~12-30 h on 8 workers)",
+    }
+    other = {
         "smoke":         "Quick sanity check (10 instances, 60s limit)",
         "phase1":        "Phase 1 validation (small instances, ≤10 vars)",
         "phase2":        "Phase 2 validation (medium instances, ≤50 vars)",
         "phase3":        "Phase 3 validation (large instances, ≤100 vars)",
-        "full":          "Complete MINLPLib (~1700 instances)",
         "comparison":    "Head-to-head solver comparison (curated set)",
         "nightly":       "Nightly CI regression suite (100 instances)",
         "global_opt":    "Global optimality verification (known optima)",
@@ -121,19 +171,40 @@ def _list_suites():
         "pooling":       "GPU-amenable pooling problems",
         "gpu_scaling":   "GPU batching scalability measurement",
     }
-    print("\nAvailable benchmark suites:\n")
-    for name, desc in suites.items():
+    print("\nStratified MINLPLib tiers (preferred for the --gate workflow):\n")
+    for name, desc in tiers.items():
+        print(f"  {name:15s}  {desc}")
+    print("\nOther suites:\n")
+    for name, desc in other.items():
         print(f"  {name:15s}  {desc}")
     print()
 
 
 def _run_gate_check(args):
-    """Run phase gate evaluation."""
+    """Run phase gate evaluation.
+
+    Two modes:
+
+      1. ``--gate <suite>`` with a pinned baseline at
+         ``baselines/<suite>.json`` → baseline regression check
+         (solved-count + incorrect-count, optionally time).
+      2. ``--gate phaseN`` with TOML criteria in benchmarks.toml → phase gate
+         criterion evaluation (legacy behavior).
+
+    Mode 1 takes precedence when a baseline file exists.
+    """
+    from utils.baseline import (
+        baseline_path as _bpath,
+        compare_to_baseline,
+        format_gate_report,
+        load_baseline,
+        save_gate_report,
+    )
+
     print(f"\n{'='*60}")
-    print(f"Phase Gate Check: {args.gate}")
+    print(f"Gate Check: {args.gate}")
     print(f"{'='*60}\n")
 
-    # Load latest results
     results_path = Path(args.output) if args.output else _find_latest_results(args.gate)
     if not results_path or not results_path.exists():
         print(f"ERROR: No results found for gate '{args.gate}'.")
@@ -142,10 +213,31 @@ def _run_gate_check(args):
 
     benchmark = BenchmarkResults.load(results_path)
 
-    # Load gate config
+    # Mode 1: baseline regression gate
+    baseline = load_baseline(args.gate)
+    if baseline is not None:
+        # Pull MINLPLib known optima from the cached index if available.
+        known_optima = _known_optima_for_gate(args)
+        report = compare_to_baseline(
+            current=benchmark,
+            baseline=baseline,
+            suite=args.gate,
+            solver="discopt",
+            known_optima=known_optima,
+            strict_time=args.strict_time,
+        )
+        print(format_gate_report(report))
+        out = Path("reports") / f"{args.gate}_gate_report.json"
+        save_gate_report(report, out)
+        print(f"\nGate report saved: {out}")
+        print(f"Baseline: {_bpath(args.gate)}")
+        sys.exit(0 if report.passed else 1)
+
+    # Mode 2: TOML phase gate criteria
     gate_config = _load_gate_config(args.gate)
     if not gate_config:
-        print(f"ERROR: No gate configuration found for '{args.gate}'")
+        print(f"ERROR: No baseline at baselines/{args.gate}.json AND no gate "
+              f"configuration in benchmarks.toml for '{args.gate}'")
         sys.exit(1)
 
     all_passed, criteria = evaluate_phase_gate(
@@ -171,9 +263,193 @@ def _run_gate_check(args):
         sys.exit(1)
 
 
+def _known_optima_for_gate(args) -> dict[str, float]:
+    """Best-effort: pull known optima from the MINLPLib cache index if present."""
+    try:
+        from scripts.fetch_minlplib import get_cache_dir, get_instancedata_path
+        from utils.minlplib_data import known_optima_from_index, load_instance_data
+
+        cache = Path(args.minlplib_cache).expanduser() if args.minlplib_cache else get_cache_dir()
+        csv = get_instancedata_path(cache, args.minlplib_version)
+        if not csv.exists():
+            return {}
+        index = load_instance_data(csv)
+        return known_optima_from_index(index)
+    except Exception:
+        return {}
+
+
+def _load_minlplib_from_cache(
+    args,
+    suite_config: dict | None,
+) -> tuple[list, dict[str, float]]:
+    """Load instances + known optima from the fetched MINLPLib cache.
+
+    Mirrors _load_minlplib_instances but uses the cache directory and the
+    full instancedata.csv index instead of the vendored ~30 .nl files.
+    """
+    from scripts.fetch_minlplib import get_cache_dir, get_instancedata_path, get_nl_dir
+    from utils.minlplib_data import known_optima_from_index, load_instance_data
+    from benchmarks.metrics import InstanceInfo
+
+    cache = Path(args.minlplib_cache).expanduser() if args.minlplib_cache else get_cache_dir()
+    nl_dir = get_nl_dir(cache, args.minlplib_version)
+    csv = get_instancedata_path(cache, args.minlplib_version)
+
+    if not nl_dir.is_dir():
+        print(f"ERROR: MINLPLib cache not populated at {nl_dir}. Run with --fetch first.",
+              file=sys.stderr)
+        sys.exit(1)
+
+    index = load_instance_data(csv) if csv.exists() else {}
+    known_optima = known_optima_from_index(index)
+
+    max_vars = suite_config.get("max_variables", 10**9) if suite_config else 10**9
+    max_cons = suite_config.get("max_constraints", 10**9) if suite_config else 10**9
+    max_instances = suite_config.get("max_instances", 10**9) if suite_config else 10**9
+    problem_class_filter = suite_config.get("problem_class") if suite_config else None
+    inline = suite_config.get("instance_list_inline") if suite_config else None
+    list_file = suite_config.get("instance_list") if suite_config else None
+
+    instances: list[InstanceInfo] = []
+    nl_files = sorted(nl_dir.glob("*.nl"))
+    allowed = _read_instance_list(list_file)
+    if inline:
+        allowed = (allowed or set()) | set(inline)
+    if allowed is not None:
+        nl_files = [p for p in nl_files if p.stem in allowed]
+        # Preserve list-file ordering: emit instances in the order they appear,
+        # falling back to alphabetical for anything not in the list.
+        order = _instance_list_order(list_file)
+        if order:
+            rank = {n: i for i, n in enumerate(order)}
+            nl_files.sort(key=lambda p: rank.get(p.stem, len(order)))
+
+    for nl in nl_files:
+        name = nl.stem
+        meta = index.get(name)
+        n_vars = meta.n_vars if meta else 0
+        n_cons = meta.n_constraints if meta else 0
+        cat = meta.category_bucket if meta else "unknown"
+
+        if n_vars and n_vars > max_vars:
+            continue
+        if n_cons and n_cons > max_cons:
+            continue
+        if problem_class_filter and cat.lower() != problem_class_filter.lower():
+            continue
+
+        instances.append(InstanceInfo(
+            name=name,
+            num_variables=n_vars,
+            num_constraints=n_cons,
+            best_known_objective=known_optima.get(name),
+            problem_class=cat.lower(),
+            source="minlplib",
+        ))
+        if len(instances) >= max_instances:
+            break
+
+    return instances, known_optima
+
+
+def _run_scaled(args, suite_config: dict, instances: list, known_optima: dict[str, float]) -> Path:
+    """Run the subprocess-isolated ScaledRunner and return the consolidated JSON path."""
+    from benchmarks.scaled_runner import ScaledConfig, ScaledRunner
+    from scripts.fetch_minlplib import get_cache_dir, get_nl_dir
+
+    time_limit = suite_config.get("time_limit_seconds", 3600) if suite_config else 3600
+
+    out_dir = Path(args.scaled_out_dir) if args.scaled_out_dir else (
+        Path("reports") / f"{args.suite}_{datetime.now().strftime('%Y-%m-%dT%H-%M-%S')}"
+    )
+
+    cache = Path(args.minlplib_cache).expanduser() if args.minlplib_cache else get_cache_dir()
+    nl_dir = get_nl_dir(cache, args.minlplib_version)
+
+    # Build (name, nl_path) pairs from the InstanceInfo list.
+    instance_specs: list[tuple[str, Path]] = []
+    info_by_name = {inst.name: inst for inst in instances}
+    for inst in instances:
+        nl_path = nl_dir / f"{inst.name}.nl"
+        if not nl_path.exists():
+            # Fallback to vendored data
+            for candidate in [
+                Path("python/tests/data/minlplib_nl") / f"{inst.name}.nl",
+                Path("python/tests/data/minlplib") / f"{inst.name}.nl",
+            ]:
+                if candidate.exists():
+                    nl_path = candidate
+                    break
+        if nl_path.exists():
+            instance_specs.append((inst.name, nl_path))
+        else:
+            print(f"  skip {inst.name}: no .nl file found", file=sys.stderr)
+
+    cfg = ScaledConfig(
+        suite_name=args.suite,
+        out_dir=out_dir,
+        time_limit=time_limit,
+        mem_limit_mb=args.mem_limit_mb,
+        n_workers=args.workers,
+        solver_name="discopt",
+        solver_options={},
+    )
+    runner = ScaledRunner(cfg)
+    runner.run(instance_specs, instance_info=info_by_name)
+    consolidated = runner.save_consolidated()
+    print(f"\nConsolidated results: {consolidated}")
+
+    # Append history entry as the in-process path does.
+    try:
+        from utils.history import append_to_history
+        results = runner.collect()
+        hp = append_to_history(args.suite, results)
+        print(f"History updated: {hp}")
+    except Exception as e:  # noqa: BLE001
+        print(f"history update skipped: {e}")
+
+    # Pin baseline if requested
+    if args.pin_baseline:
+        from utils.baseline import save_baseline
+        results = runner.collect()
+        bp = save_baseline(results, args.suite)
+        print(f"Baseline pinned: {bp}")
+
+    # Reports
+    if args.report or args.report_format:
+        _emit_reports(args, runner.collect(), known_optima)
+
+    return consolidated
+
+
+def _emit_reports(args, results: BenchmarkResults, known_optima: dict[str, float]) -> None:
+    fmt = args.report_format or "default"
+    if fmt == "minlplib":
+        from utils.reporting import generate_minlplib_report
+        from utils.minlplib_data import load_instance_data
+        from scripts.fetch_minlplib import get_cache_dir, get_instancedata_path
+
+        cache = Path(args.minlplib_cache).expanduser() if args.minlplib_cache else get_cache_dir()
+        csv = get_instancedata_path(cache, args.minlplib_version)
+        index = load_instance_data(csv) if csv.exists() else {}
+        out = Path("reports") / f"{args.suite}_minlplib_report.md"
+        generate_minlplib_report(results, index, output_path=out)
+    else:
+        from utils.reporting import generate_report
+        out = Path("reports") / f"{args.suite}_report.md"
+        generate_report(results, known_optima=known_optima, output_path=out)
+
+
 def _run_benchmark(args):
     """Run a benchmark suite."""
     from benchmarks.runner import BenchmarkConfig, BenchmarkRunner, SolverConfig
+
+    # Fetch MINLPLib first if requested
+    if args.fetch:
+        from scripts.fetch_minlplib import fetch, get_cache_dir
+        cache = Path(args.minlplib_cache).expanduser() if args.minlplib_cache else get_cache_dir()
+        fetch(cache_dir=cache, version=args.minlplib_version)
 
     print("\ndiscopt Benchmark Runner")
     print(f"Suite: {args.suite}")
@@ -210,10 +486,18 @@ def _run_benchmark(args):
         solvers=solver_configs,
     )
 
-    runner = BenchmarkRunner(config)
+    # Load instances either from the MINLPLib cache or the vendored test data.
+    if args.use_cache:
+        instances, known_optima = _load_minlplib_from_cache(args, suite_config)
+    else:
+        instances, known_optima = _load_minlplib_instances(suite_config)
 
-    # Load instances from available .nl files
-    instances, known_optima = _load_minlplib_instances(suite_config)
+    # Subprocess-isolated, resumable path (recommended for full MINLPLib).
+    if args.subprocess:
+        _run_scaled(args, suite_config or {}, instances, known_optima)
+        return
+
+    runner = BenchmarkRunner(config)
     runner.load_instances(instances)
     runner.load_known_optima(known_optima)
 
@@ -276,6 +560,12 @@ def _run_benchmark(args):
         results.save(baseline_path)
         print(f"Baseline saved: {baseline_path}")
 
+    # Pin baseline (writes to checked-in baselines/ directory)
+    if args.pin_baseline:
+        from utils.baseline import save_baseline
+        bp = save_baseline(results, args.suite)
+        print(f"Pinned baseline: {bp}")
+
     # Compare against baseline
     baseline_path_for_compare = None
     if args.compare_baseline or args.baseline:
@@ -303,14 +593,11 @@ def _run_benchmark(args):
                 print(f"\nNo regressions vs baseline ({solver_name})")
 
     # Generate report if requested
-    if args.report:
+    if args.report or args.report_format:
         try:
-            from utils.reporting import generate_report
-            report_path = Path("reports") / f"{args.suite}_report.md"
-            generate_report(results, known_optima=known_optima, output_path=report_path)
-            print(f"\nReport: {report_path}")
-        except ImportError:
-            print("\nReport generation requires utils.reporting module")
+            _emit_reports(args, results, known_optima)
+        except ImportError as e:
+            print(f"\nReport generation failed: {e}")
 
 
 def _find_latest_results(suite: str) -> Path | None:
@@ -346,6 +633,50 @@ def _load_suite_config(suite_name: str) -> dict | None:
     """Load suite configuration from TOML config."""
     config = _load_toml_config()
     return config.get("suites", {}).get(suite_name)
+
+
+def _read_instance_list(path: str | Path | None) -> set[str] | None:
+    """Parse an instance-list file (one name per line; '#'-comments ignored).
+
+    Returns None if no path given (meaning "no filter"), or a set of names
+    if the file exists. A non-existent path returns an empty set so the caller
+    sees "filtered to nothing" rather than silently running everything.
+    """
+    if not path:
+        return None
+    p = Path(path)
+    if not p.is_absolute():
+        p = Path(__file__).parent / p
+    if not p.exists():
+        print(f"WARN: instance_list {p} not found", file=sys.stderr)
+        return set()
+    names: set[str] = set()
+    with open(p) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            names.add(line)
+    return names
+
+
+def _instance_list_order(path: str | Path | None) -> list[str]:
+    """Same as _read_instance_list but preserves file order."""
+    if not path:
+        return []
+    p = Path(path)
+    if not p.is_absolute():
+        p = Path(__file__).parent / p
+    if not p.exists():
+        return []
+    out: list[str] = []
+    with open(p) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            out.append(line)
+    return out
 
 
 def _load_solver_config(solver_name: str) -> dict | None:

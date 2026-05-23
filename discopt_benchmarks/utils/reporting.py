@@ -548,6 +548,170 @@ def generate_cutest_report(
     return report
 
 
+# ─────────────────────────────────────────────────────────────
+# MINLPLib Standard-Format Report (BARON / SCIP / ANTIGONE style)
+# ─────────────────────────────────────────────────────────────
+
+
+def generate_minlplib_report(
+    benchmark: BenchmarkResults,
+    index: dict,  # {name: InstanceMeta} from utils.minlplib_data
+    solver_name: str = "discopt",
+    output_path: Optional[Path] = None,
+    abs_tol: float = 1e-4,
+    rel_tol: float = 1e-3,
+) -> str:
+    """Render a MINLPLib-style results table for one solver.
+
+    Buckets by (category, size) and reports the columns every published MINLP
+    benchmark uses: #instances, #optimal-proven, #feasible-only, #timeout,
+    #incorrect, shifted geomean time over the solved set.
+
+    The category bucket comes from ``InstanceMeta.category_bucket`` which maps
+    the MINLPLib probtype field (LP/MILP/QP/MIQP/QCQP/MIQCP/NLP/MINLP).
+    Size buckets are <=10, <=30, <=100, <=500, >500 variables.
+    """
+    from utils.minlplib_data import (
+        ALL_OUTCOMES,
+        OUTCOME_ERROR,
+        OUTCOME_FEASIBLE,
+        OUTCOME_INCORRECT,
+        OUTCOME_INFEASIBLE,
+        OUTCOME_OPTIMAL,
+        OUTCOME_TIMEOUT,
+        OUTCOME_UNKNOWN,
+        score_result,
+    )
+
+    results = benchmark.get_results(solver_name)
+
+    # Group by (category, size_bucket). One entry per instance.
+    buckets: dict[tuple[str, str], list[tuple]] = {}
+    for r in results:
+        meta = index.get(r.instance)
+        if meta is None:
+            cat, size = "unknown", "?"
+        else:
+            cat, size = meta.category_bucket, meta.size_bucket
+        buckets.setdefault((cat, size), []).append((r, meta))
+
+    # Stable bucket ordering for readability.
+    cat_order = ["LP", "QP", "QCQP", "MILP", "MIQP", "MIQCP", "NLP", "MINLP", "unknown"]
+    size_order = ["<=10", "<=30", "<=100", "<=500", ">500", "?"]
+
+    lines = []
+    lines.append(f"# MINLPLib Results: {solver_name}")
+    lines.append("")
+    lines.append(f"**Suite:** {benchmark.suite}")
+    lines.append(f"**Timestamp:** {benchmark.timestamp}")
+    lines.append(f"**Total instances:** {len(results)}")
+    lines.append(
+        f"**Reference tolerance:** abs={abs_tol:g}, rel={rel_tol:g} "
+        f"(proven-optimal MINLPLib instances only)"
+    )
+    lines.append("")
+    lines.append("## Per-class results")
+    lines.append("")
+    lines.append(
+        "| Class | Size | #inst | #optimal | #feasible | #timeout | #infeas | #error | #incorrect | SGM time (s) |"
+    )
+    lines.append(
+        "|-------|------|-------|----------|-----------|----------|---------|--------|------------|--------------|"
+    )
+
+    overall = {o: 0 for o in ALL_OUTCOMES}
+    overall_n = 0
+    overall_solved_times: list[float] = []
+    overall_incorrect_instances: list[str] = []
+
+    for cat in cat_order:
+        for size in size_order:
+            entries = buckets.get((cat, size))
+            if not entries:
+                continue
+            tally = {o: 0 for o in ALL_OUTCOMES}
+            solved_times: list[float] = []
+            for r, meta in entries:
+                outcome = score_result(r, meta, abs_tol=abs_tol, rel_tol=rel_tol)
+                tally[outcome] += 1
+                overall[outcome] += 1
+                overall_n += 1
+                if outcome == OUTCOME_OPTIMAL:
+                    solved_times.append(r.wall_time)
+                    overall_solved_times.append(r.wall_time)
+                if outcome == OUTCOME_INCORRECT:
+                    overall_incorrect_instances.append(r.instance)
+            sgm = shifted_geometric_mean(solved_times) if solved_times else float("nan")
+            sgm_str = f"{sgm:.2f}" if not np.isnan(sgm) and sgm < 1e6 else "—"
+            lines.append(
+                f"| {cat} | {size} | {len(entries)} | "
+                f"{tally[OUTCOME_OPTIMAL]} | {tally[OUTCOME_FEASIBLE]} | "
+                f"{tally[OUTCOME_TIMEOUT]} | {tally[OUTCOME_INFEASIBLE]} | "
+                f"{tally[OUTCOME_ERROR]} | {tally[OUTCOME_INCORRECT]} | "
+                f"{sgm_str} |"
+            )
+
+    # Catch any (cat, size) we didn't anticipate
+    for (cat, size), entries in buckets.items():
+        if cat in cat_order and size in size_order:
+            continue
+        tally = {o: 0 for o in ALL_OUTCOMES}
+        solved_times: list[float] = []
+        for r, meta in entries:
+            outcome = score_result(r, meta, abs_tol=abs_tol, rel_tol=rel_tol)
+            tally[outcome] += 1
+            overall[outcome] += 1
+            overall_n += 1
+            if outcome == OUTCOME_OPTIMAL:
+                solved_times.append(r.wall_time)
+                overall_solved_times.append(r.wall_time)
+            if outcome == OUTCOME_INCORRECT:
+                overall_incorrect_instances.append(r.instance)
+        sgm = shifted_geometric_mean(solved_times) if solved_times else float("nan")
+        sgm_str = f"{sgm:.2f}" if not np.isnan(sgm) and sgm < 1e6 else "—"
+        lines.append(
+            f"| {cat} | {size} | {len(entries)} | "
+            f"{tally[OUTCOME_OPTIMAL]} | {tally[OUTCOME_FEASIBLE]} | "
+            f"{tally[OUTCOME_TIMEOUT]} | {tally[OUTCOME_INFEASIBLE]} | "
+            f"{tally[OUTCOME_ERROR]} | {tally[OUTCOME_INCORRECT]} | "
+            f"{sgm_str} |"
+        )
+
+    # Totals row
+    sgm_all = shifted_geometric_mean(overall_solved_times) if overall_solved_times else float("nan")
+    sgm_all_str = f"{sgm_all:.2f}" if not np.isnan(sgm_all) and sgm_all < 1e6 else "—"
+    lines.append(
+        f"| **TOTAL** | — | {overall_n} | "
+        f"{overall[OUTCOME_OPTIMAL]} | {overall[OUTCOME_FEASIBLE]} | "
+        f"{overall[OUTCOME_TIMEOUT]} | {overall[OUTCOME_INFEASIBLE]} | "
+        f"{overall[OUTCOME_ERROR]} | {overall[OUTCOME_INCORRECT]} | "
+        f"{sgm_all_str} |"
+    )
+    lines.append("")
+
+    if overall_incorrect_instances:
+        lines.append("## Incorrect results (must be zero for release)")
+        lines.append("")
+        for inst in overall_incorrect_instances[:50]:
+            r = next((r for r, _ in sum(buckets.values(), []) if r.instance == inst), None)
+            meta = index.get(inst)
+            ref = meta.known_optimum if meta else None
+            obj = r.objective if r else None
+            lines.append(
+                f"- `{inst}`: solver obj={obj}, reference={ref}"
+            )
+        if len(overall_incorrect_instances) > 50:
+            lines.append(f"- ... and {len(overall_incorrect_instances) - 50} more")
+        lines.append("")
+
+    report = "\n".join(lines)
+    if output_path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(report)
+        print(f"MINLPLib report written to: {output_path}")
+    return report
+
+
 def generate_cutest_performance_profile_data(
     benchmark: BenchmarkResults,
 ) -> dict[str, dict]:
