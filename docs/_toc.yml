@@ -6,6 +6,7 @@ parts:
       - file: notebooks/tutorial_lp
       - file: notebooks/tutorial_qp
       - file: notebooks/tutorial_milp
+      - file: notebooks/knapsack_backpack
       - file: notebooks/tutorial_miqp
       - file: notebooks/tutorial_minlp
       - file: notebooks/tutorial_gdp
