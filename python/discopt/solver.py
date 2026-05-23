@@ -1453,15 +1453,23 @@ def solve_model(
         Use ICNN-based learned convex relaxations instead of standard
         McCormick. Requires ``pip install discopt[gnn]`` (equinox + optax).
         Falls back to standard McCormick for unsupported operations.
-    mccormick_bounds : str, default "none"
+    mccormick_bounds : str, default "auto"
         McCormick relaxation lower-bounding strategy:
         ``"auto"`` selects ``"nlp"`` when a JAX objective is
         available, ``"none"`` otherwise,
         ``"nlp"`` solves a convex NLP over the McCormick relaxation
         (gives valid lower bounds for pruning),
+        ``"lp"`` solves an LP over the full McCormick reformulation —
+        gives a *valid global* lower bound and tends to find provable
+        global optima much faster on nonconvex problems with bilinears
+        (pooling, polynomial NLP, QCQP). Recommended when your model
+        is nonconvex and contains bilinear/multilinear terms; pair with
+        ``subnlp_frequency=1`` to turn each LP primal into an incumbent.
+        Requires at least one continuous variable; falls back to
+        ``"nlp"`` for pure-integer models,
         ``"midpoint"`` evaluates the convex underestimator at midpoint
         (heuristic, not a valid global lower bound — use with caution),
-        ``"none"`` disables (default).
+        ``"none"`` disables.
     gdp_method : str, default "big-m"
         Reformulation method for disjunctive constraints:
         ``"big-m"`` (default) or ``"hull"`` (convex hull).
