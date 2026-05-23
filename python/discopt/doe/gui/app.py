@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -38,6 +37,10 @@ from discopt.doe.cli import (
 from discopt.doe.workbook import SHEET_ANOVA, SHEET_HISTORY, SHEET_RUNS, Workbook
 
 _WORKBOOK_ENV = "DISCOPT_DOE_WORKBOOK"
+_LOGO_PATH = Path(__file__).with_name("discopt-logo.png")
+_ISSUES_URL = "https://github.com/jkitchin/discopt/issues"
+
+
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -79,6 +82,71 @@ def _runs_df(path: str) -> pd.DataFrame:
     headers = [str(c) for c in rows[0]]
     data = [r for r in rows[1:] if r and r[0] is not None]
     return pd.DataFrame(data, columns=headers)
+
+
+_RESERVED_COLUMN_NAMES = frozenset({"run_id", "batch", "measured_at"})
+
+
+def _rename_columns(
+    path: str,
+    *,
+    input_renames: dict[str, str],
+    response_rename: tuple[str, str] | None,
+) -> None:
+    """Rename input/response columns in an existing campaign.
+
+    Updates the runs-sheet header row, the metadata ``input_specs`` /
+    ``response_name`` / ``template_args.levels`` entries, and wipes the
+    fit-derived sheets (``parameters``, ``fim``, ``anova``) since their
+    row/column labels reference the old names. The user must re-run
+    ``fit`` to repopulate them.
+    """
+    from discopt.doe.workbook import SHEET_FIM, SHEET_METADATA, SHEET_PARAMETERS
+
+    wb = openpyxl.load_workbook(path)
+
+    runs = wb[SHEET_RUNS]
+    header_row = next(iter(runs.iter_rows(min_row=1, max_row=1)), ())
+    for cell in header_row:
+        val = cell.value
+        if val in input_renames:
+            cell.value = input_renames[val]
+        elif response_rename and val == response_rename[0]:
+            cell.value = response_rename[1]
+
+    meta = wb[SHEET_METADATA]
+    for row in meta.iter_rows(min_row=2):
+        key = row[0].value
+        val = row[1].value
+        if key == "input_specs" and val:
+            specs = json.loads(val)
+            for s in specs:
+                if s.get("name") in input_renames:
+                    s["name"] = input_renames[s["name"]]
+            row[1].value = json.dumps(specs, sort_keys=True)
+        elif key == "response_name" and response_rename and val == response_rename[0]:
+            row[1].value = response_rename[1]
+        elif key == "template_args" and val:
+            args = json.loads(val)
+            levels = args.get("levels")
+            if isinstance(levels, dict):
+                args["levels"] = {input_renames.get(k, k): v for k, v in levels.items()}
+                row[1].value = json.dumps(args, sort_keys=True)
+
+    # Wipe fit artifacts. parameters keeps its header row; fim/anova are rewritten
+    # from scratch on next fit so we clear them completely.
+    params_sheet = wb[SHEET_PARAMETERS]
+    if params_sheet.max_row > 1:
+        params_sheet.delete_rows(2, params_sheet.max_row - 1)
+    fim_sheet = wb[SHEET_FIM]
+    if fim_sheet.max_row >= 1:
+        fim_sheet.delete_rows(1, fim_sheet.max_row)
+    if SHEET_ANOVA in wb.sheetnames:
+        anova_sheet = wb[SHEET_ANOVA]
+        if anova_sheet.max_row >= 1:
+            anova_sheet.delete_rows(1, anova_sheet.max_row)
+
+    wb.save(path)
 
 
 def _save_responses(path: str, edited: pd.DataFrame, response: str) -> int:
@@ -417,6 +485,108 @@ def _sidebar() -> None:
         _sidebar_new()
 
 
+def _native_file_picker() -> str | None:
+    """Spawn a native OS file picker as a subprocess and return the path.
+
+    Returns ``None`` if the user cancels, no picker is available, or the
+    subprocess fails. Cross-platform: AppleScript on macOS, ``zenity`` /
+    ``kdialog`` on Linux, PowerShell ``OpenFileDialog`` on Windows.
+
+    Filters by `*.xlsx` *visually*, but allows the user to switch to "all
+    files" — the legacy 4-char OSType filter that grays out modern .xlsx
+    files on macOS is *not* used.
+    """
+    import shutil
+    import subprocess
+    import sys
+
+    if sys.platform == "darwin":
+        script = (
+            'try\n'
+            '    set theFile to choose file with prompt '
+            '"Open discopt doe workbook"\n'
+            '    return POSIX path of theFile\n'
+            'on error\n'
+            '    return ""\n'
+            'end try\n'
+        )
+        osascript = shutil.which("osascript")
+        if not osascript:
+            return None
+        try:
+            r = subprocess.run(
+                [osascript, "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=3600,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return None
+        return r.stdout.strip() or None
+
+    if sys.platform.startswith("linux"):
+        zenity = shutil.which("zenity")
+        if zenity:
+            try:
+                r = subprocess.run(
+                    [
+                        zenity,
+                        "--file-selection",
+                        "--title=Open discopt doe workbook",
+                        "--file-filter=Excel workbook | *.xlsx",
+                        "--file-filter=All files | *",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=3600,
+                )
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                return None
+            return r.stdout.strip() or None
+        kdialog = shutil.which("kdialog")
+        if kdialog:
+            try:
+                r = subprocess.run(
+                    [
+                        kdialog,
+                        "--getopenfilename",
+                        ".",
+                        "Excel workbook (*.xlsx)|All files (*)",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=3600,
+                )
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                return None
+            return r.stdout.strip() or None
+        return None
+
+    if sys.platform == "win32":
+        ps = (
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "$d = New-Object System.Windows.Forms.OpenFileDialog; "
+            "$d.Title = 'Open discopt doe workbook'; "
+            "$d.Filter = 'Excel workbook (*.xlsx)|*.xlsx|All files (*.*)|*.*'; "
+            "if ($d.ShowDialog() -eq 'OK') { Write-Output $d.FileName }"
+        )
+        powershell = shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            return None
+        try:
+            r = subprocess.run(
+                [powershell, "-NoProfile", "-Command", ps],
+                capture_output=True,
+                text=True,
+                timeout=3600,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return None
+        return r.stdout.strip() or None
+
+    return None
+
+
 def _sidebar_open() -> None:
     current = st.session_state.get("workbook_path") or ""
     path_input = st.sidebar.text_input(
@@ -427,9 +597,11 @@ def _sidebar_open() -> None:
             "The file must already exist."
         ),
     )
-    if st.sidebar.button(
+    col_open, col_browse = st.sidebar.columns(2)
+    if col_open.button(
         "Open",
         help="Load the workbook at the path above into the GUI.",
+        use_container_width=True,
     ):
         candidate = Path(path_input).expanduser().resolve()
         if not candidate.is_file():
@@ -437,25 +609,21 @@ def _sidebar_open() -> None:
         else:
             _set_workbook(candidate)
             st.rerun()
-
-    uploaded = st.sidebar.file_uploader(
-        "...or upload one",
-        type="xlsx",
-        key="uploader",
-        help=(
-            "Upload a workbook from your computer. A copy is saved to a "
-            "temp directory; use the **Download workbook** button on the "
-            "main page to grab it back when done."
-        ),
-    )
-    if uploaded is not None and st.sidebar.button(
-        "Use uploaded copy",
-        help="Open the uploaded workbook in the GUI.",
+    if col_browse.button(
+        "Browse…",
+        help="Open a native OS file picker.",
+        use_container_width=True,
     ):
-        tmp = Path(tempfile.gettempdir()) / f"discopt-doe-{uploaded.name}"
-        tmp.write_bytes(uploaded.getvalue())
-        _set_workbook(tmp)
-        st.rerun()
+        picked = _native_file_picker()
+        if picked is None:
+            st.sidebar.caption("_(no file selected)_")
+        else:
+            candidate = Path(picked).expanduser().resolve()
+            if candidate.is_file():
+                _set_workbook(candidate)
+                st.rerun()
+            else:
+                st.sidebar.error(f"Not found: {candidate}")
 
 
 def _sidebar_new() -> None:
@@ -1237,6 +1405,7 @@ def _main_pane() -> None:
         return
 
     _status_banner(status)
+    _rename_panel(path, status)
     _runs_editor(path, status)
     template = status.get("template") or ""
     if template in {"latin-square", "graeco-latin", "hyper-graeco-latin", "factorial-2level"}:
@@ -1304,6 +1473,99 @@ def _status_banner(status: dict[str, Any]) -> None:
     if equation:
         st.caption(f"**Model**: `{equation}`")
     st.caption(f"**Next step (CLI)**: `{status['next_command']}`")
+
+
+def _rename_panel(path: str, status: dict[str, Any]) -> None:
+    """Expander UI to rename factor / response columns of an open campaign.
+
+    Per option B in the design discussion: rename succeeds even if a fit
+    already exists, but the fit artifacts (parameters / FIM / ANOVA) are
+    cleared and the user must re-run ``fit``.
+    """
+    input_specs = status.get("input_specs") or []
+    old_response = status["response_name"]
+    old_inputs = [s["name"] for s in input_specs]
+    has_fit = bool(status.get("parameters")) or bool(status.get("n_parameters"))
+
+    with st.expander("Rename factors / response", expanded=False):
+        st.caption(
+            "Rename the response or any factor column. Updates the `runs` "
+            "header, `metadata`, and template levels. `run_id`, `batch`, "
+            "and `measured_at` are reserved and cannot be renamed."
+        )
+        if has_fit:
+            st.warning(
+                "This workbook has fit results. Renaming will clear the "
+                "`parameters`, `fim`, and `anova` sheets — you'll need to "
+                "re-run **Fit** afterwards."
+            )
+
+        new_response = st.text_input(
+            "Response",
+            value=old_response,
+            key=f"rename_response_{path}",
+        )
+        new_inputs: list[str] = []
+        for i, old in enumerate(old_inputs):
+            new_inputs.append(
+                st.text_input(
+                    f"Factor {i + 1}",
+                    value=old,
+                    key=f"rename_factor_{i}_{path}",
+                )
+            )
+
+        if not st.button("Apply renames", key=f"rename_apply_{path}"):
+            return
+
+        # Validate.
+        candidates = [new_response, *new_inputs]
+        for c in candidates:
+            if not c or not c.strip():
+                st.error("Names cannot be empty.")
+                return
+        stripped = [c.strip() for c in candidates]
+        if len(set(stripped)) != len(stripped):
+            st.error("New names must be unique (response + every factor).")
+            return
+        for c in stripped:
+            if c in _RESERVED_COLUMN_NAMES:
+                st.error(f"`{c}` is reserved (run_id / batch / measured_at).")
+                return
+
+        new_response_s = stripped[0]
+        new_inputs_s = stripped[1:]
+        input_renames = {
+            old: new for old, new in zip(old_inputs, new_inputs_s) if old != new
+        }
+        response_rename: tuple[str, str] | None = (
+            (old_response, new_response_s) if old_response != new_response_s else None
+        )
+        if not input_renames and response_rename is None:
+            st.info("No name changes detected.")
+            return
+
+        try:
+            _rename_columns(
+                path,
+                input_renames=input_renames,
+                response_rename=response_rename,
+            )
+        except (FileNotFoundError, ValueError, KeyError, OSError) as e:
+            st.error(f"Rename failed: {e}")
+            return
+
+        msg_parts = []
+        if input_renames:
+            msg_parts.append(
+                "factors: " + ", ".join(f"{a}→{b}" for a, b in input_renames.items())
+            )
+        if response_rename:
+            msg_parts.append(f"response: {response_rename[0]}→{response_rename[1]}")
+        st.success("Renamed " + " · ".join(msg_parts) + ".")
+        if has_fit:
+            st.info("Fit artifacts cleared — run **Fit** again to repopulate.")
+        st.rerun()
 
 
 def _runs_editor(path: str, status: dict[str, Any]) -> None:
@@ -2003,9 +2265,22 @@ def _download_panel(path: str) -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="discopt doe", layout="wide")
+    st.set_page_config(
+        page_title="discopt doe",
+        page_icon=str(_LOGO_PATH) if _LOGO_PATH.is_file() else None,
+        layout="wide",
+    )
+    if _LOGO_PATH.is_file():
+        st.logo(str(_LOGO_PATH), size="large", link=_ISSUES_URL.rsplit("/", 1)[0])
     _init_state()
+    if _LOGO_PATH.is_file():
+        st.sidebar.image(str(_LOGO_PATH), width=120)
     _sidebar()
+    st.sidebar.divider()
+    st.sidebar.markdown(
+        f"[Report an issue]({_ISSUES_URL}) &nbsp;·&nbsp; "
+        f"[discopt on GitHub]({_ISSUES_URL.rsplit('/', 1)[0]})"
+    )
     _main_pane()
 
 

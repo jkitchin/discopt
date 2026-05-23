@@ -76,6 +76,7 @@ include = [
     "Cargo.lock",
     "crates/**/*.rs",
     "crates/**/*.toml",
+    "python/discopt/doe/gui/discopt-logo.png",
 ]
 
 [tool.ruff]
