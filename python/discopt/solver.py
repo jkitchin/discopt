@@ -1396,6 +1396,11 @@ def solve_model(
     in_tree_presolve_stride: int = 0,
     eigenvalue_root_bound: bool = False,
     relaxation_arithmetic: str = "mccormick",
+    subnlp_enabled: bool = True,
+    subnlp_backend: str = "auto",
+    subnlp_frequency: int = 20,
+    subnlp_max_calls: int = 200,
+    subnlp_options: Optional[dict] = None,
     **kwargs,
 ) -> SolveResult:
     """
@@ -2166,6 +2171,20 @@ def solve_model(
     # Try to find an integer-feasible incumbent before B&B starts.
     _fp_ran = False
 
+    # --- SubNLP primal heuristic state ---
+    _subnlp_backend_fn = None
+    _subnlp_calls = 0
+    _subnlp_feasible = 0
+    _subnlp_incumbent_updates = 0
+    if subnlp_enabled:
+        try:
+            from discopt.solvers.nlp_backend import get_nlp_solver
+
+            _subnlp_backend_fn = get_nlp_solver(subnlp_backend)
+        except ImportError as _e:
+            logger.debug("SubNLP backend unavailable, disabling: %s", _e)
+            _subnlp_backend_fn = None
+
     # --- B&B loop ---
     # McCormick NLP is expensive (one IPM per node). Run it every N iterations
     # and use cheap midpoint bounds in between. Period=1 means every iteration.
@@ -2664,6 +2683,84 @@ def solve_model(
                 except Exception as e:
                     logger.debug("Feasibility pump failed: %s", e)
 
+        # --- SubNLP primal heuristic ---
+        # Fix integers in the best relaxation solution, then solve the
+        # resulting continuous NLP. Useful for nonconvex problems whose
+        # relaxation solver returns a local optimum that violates either
+        # integrality or constraints (so the existing inject_incumbent
+        # path above declines it). Runs at root and on a schedule after,
+        # capped per solve. Skipped for convex models (no benefit).
+        if (
+            _subnlp_backend_fn is not None
+            and not _model_is_convex
+            and _subnlp_calls < subnlp_max_calls
+            and (iteration == 0 or iteration % max(1, subnlp_frequency) == 0)
+        ):
+            from discopt._jax.primal_heuristics import subnlp as _subnlp
+
+            _cands_sn = [
+                (i, float(result_lbs[i]))
+                for i in range(n_batch)
+                if result_lbs[i] < _SENTINEL_THRESHOLD and np.isfinite(result_lbs[i])
+            ]
+            _cands_sn.sort(key=lambda t: t[1])
+            # Fall back to bound midpoint if no relaxation produced a usable point.
+            if not _cands_sn and iteration == 0:
+                _lb_c = np.clip(lb, -_SPC, _SPC)
+                _ub_c = np.clip(ub, -_SPC, _SPC)
+                _x_seed = 0.5 * (_lb_c + _ub_c)
+                _subnlp_calls += 1
+                try:
+                    _sn = _subnlp(
+                        model,
+                        _x_seed,
+                        backend=_subnlp_backend_fn,
+                        nlp_options=subnlp_options,
+                        evaluator=evaluator,
+                    )
+                except Exception as _e:
+                    logger.debug("subnlp raised: %s", _e)
+                    _sn = None
+                if _sn is not None:
+                    _x_sn, _obj_sn = _sn
+                    _subnlp_feasible += 1
+                    if np.isfinite(_obj_sn) and _obj_sn < _SENTINEL_THRESHOLD:
+                        tree.inject_incumbent(_x_sn.copy(), float(_obj_sn))
+                        _subnlp_incumbent_updates += 1
+                        # SubNLP returns a primal local optimum, not a global
+                        # lower bound — flag the gap as uncertified so we
+                        # don't falsely claim optimality on nonconvex models.
+                        _gap_certified = False
+                        logger.info("SubNLP incumbent (seed): obj=%.6g", _obj_sn)
+            else:
+                _try_idxs = (
+                    [i for i, _ in _cands_sn] if iteration == 0 else [i for i, _ in _cands_sn[:1]]
+                )
+                for _i in _try_idxs:
+                    if _subnlp_calls >= subnlp_max_calls:
+                        break
+                    _subnlp_calls += 1
+                    try:
+                        _sn = _subnlp(
+                            model,
+                            result_sols[_i],
+                            backend=_subnlp_backend_fn,
+                            nlp_options=subnlp_options,
+                            evaluator=evaluator,
+                        )
+                    except Exception as _e:
+                        logger.debug("subnlp raised: %s", _e)
+                        _sn = None
+                    if _sn is None:
+                        continue
+                    _x_sn, _obj_sn = _sn
+                    _subnlp_feasible += 1
+                    if np.isfinite(_obj_sn) and _obj_sn < _SENTINEL_THRESHOLD:
+                        tree.inject_incumbent(_x_sn.copy(), float(_obj_sn))
+                        _subnlp_incumbent_updates += 1
+                        _gap_certified = False
+                        logger.info("SubNLP incumbent: obj=%.6g (iter=%d)", _obj_sn, iteration)
+
         # --- User callbacks: lazy constraints and incumbent filtering ---
         if lazy_constraints is not None or incumbent_callback is not None:
             _invoke_pre_import_callbacks(
@@ -2862,6 +2959,9 @@ def solve_model(
         jax_time=jax_time,
         python_time=python_time,
         gap_certified=_gap_certified,
+        subnlp_calls=_subnlp_calls,
+        subnlp_feasible=_subnlp_feasible,
+        subnlp_incumbent_updates=_subnlp_incumbent_updates,
     )
 
 

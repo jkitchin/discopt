@@ -895,6 +895,11 @@ class SolveResult:
     nlp_bb: bool = False
     gap_certified: bool = True
 
+    # SubNLP primal-heuristic counters (zero unless the heuristic ran).
+    subnlp_calls: int = 0
+    subnlp_feasible: int = 0
+    subnlp_incumbent_updates: int = 0
+
     # Examiner-style validation report (populated if validate=True).
     validation_report: Optional[object] = None
 
