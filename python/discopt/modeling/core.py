@@ -96,6 +96,13 @@ class Expression:
     operators and math functions.
     """
 
+    # Tell NumPy to defer to our __matmul__/__rmatmul__ (and other dunder
+    # operators) when any Expression appears alongside an ndarray. Without
+    # this, ``A @ x`` and ``c @ (xp - xm)`` route through numpy's matmul
+    # gufunc, which sees the Expression as a 0-d object and raises
+    # ``ValueError: Input operand 1 does not have enough dimensions``.
+    __array_ufunc__ = None
+
     def __add__(self, other):
         return BinaryOp("+", self, _wrap(other))
 
@@ -196,6 +203,8 @@ class Variable(Expression):
     ub : numpy.ndarray
         Element-wise upper bounds.
     """
+
+    # __array_ufunc__ = None is inherited from Expression.
 
     def __init__(
         self,
