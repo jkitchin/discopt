@@ -320,7 +320,9 @@ def subnlp(
 
         try:
             nlp_result = backend(evaluator, x0, options=opts)
-        except Exception:
+        except BaseException:
+            # Catch BaseException — some NLP backends (e.g. pounce via PyO3)
+            # raise PanicException, which is not a subclass of Exception.
             return None
     finally:
         for v, (lb_v, ub_v) in zip(model._variables, saved_bounds):
