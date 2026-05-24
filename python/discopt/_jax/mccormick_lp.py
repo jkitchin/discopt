@@ -81,8 +81,10 @@ class MccormickLPRelaxer:
                 self._model,
                 self._terms,
                 self._disc,
-                bound_override=(np.asarray(node_lb, dtype=np.float64),
-                                np.asarray(node_ub, dtype=np.float64)),
+                bound_override=(
+                    np.asarray(node_lb, dtype=np.float64),
+                    np.asarray(node_ub, dtype=np.float64),
+                ),
             )
         except Exception:
             return MccormickLPResult(status="error")

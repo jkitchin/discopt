@@ -2110,9 +2110,7 @@ def solve_model(
     if _mc_mode == "lp" and model._objective is not None:
         from discopt._jax.mccormick_lp import MccormickLPRelaxer
 
-        _has_continuous_var = any(
-            v.var_type == VarType.CONTINUOUS for v in model._variables
-        )
+        _has_continuous_var = any(v.var_type == VarType.CONTINUOUS for v in model._variables)
         if not _has_continuous_var:
             # Spatial-BB on integer-only models has nothing to branch on:
             # the LP relaxer's integer-feasible point doesn't satisfy the
@@ -2608,8 +2606,7 @@ def solve_model(
                     try:
                         mc_lp_res = _mc_lp_relaxer.solve_at_node(node_lb, node_ub)
                     except Exception as e:
-                        logger.debug("McCormick LP failed at node %d: %s",
-                                     int(batch_ids[i]), e)
+                        logger.debug("McCormick LP failed at node %d: %s", int(batch_ids[i]), e)
                         mc_lp_res = None
                     if (
                         mc_lp_res is not None
@@ -2820,11 +2817,6 @@ def solve_model(
                     if np.isfinite(_obj_sn) and _obj_sn < _SENTINEL_THRESHOLD:
                         tree.inject_incumbent(_x_sn.copy(), float(_obj_sn))
                         _subnlp_incumbent_updates += 1
-                        # SubNLP returns a primal local optimum, not a global
-                        # lower bound — flag the gap as uncertified unless we
-                        # have an independent valid-LB source (McCormick LP).
-                        if _mc_lp_relaxer is None:
-                            _gap_certified = False
                         logger.info("SubNLP incumbent (seed): obj=%.6g", _obj_sn)
             else:
                 _try_idxs = (
@@ -2852,8 +2844,6 @@ def solve_model(
                     if np.isfinite(_obj_sn) and _obj_sn < _SENTINEL_THRESHOLD:
                         tree.inject_incumbent(_x_sn.copy(), float(_obj_sn))
                         _subnlp_incumbent_updates += 1
-                        if _mc_lp_relaxer is None:
-                            _gap_certified = False
                         logger.info("SubNLP incumbent: obj=%.6g (iter=%d)", _obj_sn, iteration)
 
         # --- User callbacks: lazy constraints and incumbent filtering ---
