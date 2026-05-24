@@ -2089,6 +2089,8 @@ def solve_model(
     _mc_obj_eval = None  # BatchRelaxationEvaluator for midpoint bounds
     _mc_obj_relax_fn = None  # raw relaxation fn for NLP bounds
     _mc_con_relax_fns = None
+    _mc_obj_relax_fn_np = None  # numpy-backed relaxation, when supported
+    _mc_con_relax_fns_np = None
     _mc_con_senses = None
     _mc_negate = False
     _mc_mode = mccormick_bounds
@@ -2171,10 +2173,41 @@ def solve_model(
                             )
                         )
                         _mc_con_senses.append(c.sense)
+
+            # Build numpy-backed relaxations alongside JAX when the model
+            # uses only supported ops. Skip when piecewise/learned/
+            # chebyshev/taylor modes are active — those paths produce
+            # tighter relaxations that the numpy backend doesn't replicate.
+            if (
+                _mc_mode == "nlp"
+                and partitions == 0
+                and _relax_mode == "standard"
+                and relaxation_arithmetic == "mccormick"
+            ):
+                try:
+                    from discopt._numpy.relaxation_compiler import (
+                        compile_constraint_relaxation as _np_compile_con,
+                        compile_objective_relaxation as _np_compile_obj,
+                        supported_for_model,
+                    )
+
+                    if supported_for_model(model):
+                        _mc_obj_relax_fn_np = _np_compile_obj(model)
+                        if model._constraints:
+                            _mc_con_relax_fns_np = []
+                            for c in model._constraints:
+                                if isinstance(c, Constraint):
+                                    _mc_con_relax_fns_np.append(_np_compile_con(c, model))
+                except (NotImplementedError, Exception) as e:
+                    logger.debug("numpy McCormick backend unavailable: %s", e)
+                    _mc_obj_relax_fn_np = None
+                    _mc_con_relax_fns_np = None
         except Exception as e:
             logger.warning("McCormick relaxation setup failed: %s", e)
             _mc_obj_eval = None
             _mc_obj_relax_fn = None
+            _mc_obj_relax_fn_np = None
+            _mc_con_relax_fns_np = None
 
     # --- Warm-start: inject user-provided initial solution as incumbent ---
     if initial_point is not None:
@@ -2380,6 +2413,8 @@ def solve_model(
                                 ub_jax,
                                 negate=_mc_negate,
                                 deadline=t_start + time_limit,
+                                obj_relax_fn_numpy=_mc_obj_relax_fn_np,
+                                con_relax_fns_numpy=_mc_con_relax_fns_np,
                             )
                         )
                     elif _mc_mode != "nlp":
@@ -2538,6 +2573,8 @@ def solve_model(
                                     ub_j,
                                     negate=_mc_negate,
                                     deadline=t_start + time_limit,
+                                    obj_relax_fn_numpy=_mc_obj_relax_fn_np,
+                                    con_relax_fns_numpy=_mc_con_relax_fns_np,
                                 )
                             elif _mc_mode != "nlp":
                                 from discopt._jax.mccormick_nlp import (

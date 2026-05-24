@@ -14,11 +14,45 @@ Two modes:
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Callable, Optional
 
+import jax
 import jax.numpy as jnp
 import numpy as np
+
+
+# Default n_vars threshold below which the numpy/scipy backend is used
+# when caller supplies a numpy-compiled relaxation. Overridable via
+# DISCOPT_MCCORMICK_NUMPY_THRESHOLD.
+#
+# Default is 0 (disabled). The numpy backend bypasses JAX trace/compile
+# entirely via scipy.optimize.minimize(SLSQP); on small instances it is
+# competitive on short solves and more robust at the root node (returns
+# finite bounds where the JAX IPM may return -inf), but produces looser
+# relaxation bounds than the JAX IPM, so on long solves it explores more
+# B&B nodes. Set the env var to N to opt in for problems with <= N vars.
+_NUMPY_THRESHOLD_DEFAULT = 0
+
+
+def _numpy_threshold() -> int:
+    raw = os.environ.get("DISCOPT_MCCORMICK_NUMPY_THRESHOLD")
+    if raw is None:
+        return _NUMPY_THRESHOLD_DEFAULT
+    try:
+        return int(raw)
+    except ValueError:
+        return _NUMPY_THRESHOLD_DEFAULT
+
+
+# Per-(relaxation, options) jit caches. Keyed by Python id() of the
+# relaxation functions plus negate/max_iter so repeat B&B nodes hit the
+# XLA cache instead of recompiling. Without these caches each call built
+# fresh closures over (lb, ub), forcing JAX to retrace+recompile per node
+# (the dominant cost on small instances).
+_midpoint_batch_cache: dict = {}
+_relax_solver_cache: dict = {}
 
 
 def _deadline_expired(deadline: float | None) -> bool:
@@ -70,9 +104,11 @@ def evaluate_midpoint_bound_batch(
     Returns:
         Array of lower bounds, shape (N,).
     """
-    import jax
-
-    vmapped_fn = jax.jit(jax.vmap(obj_relax_fn))
+    key = id(obj_relax_fn)
+    vmapped_fn = _midpoint_batch_cache.get(key)
+    if vmapped_fn is None:
+        vmapped_fn = jax.jit(jax.vmap(obj_relax_fn))
+        _midpoint_batch_cache[key] = vmapped_fn
     mid = 0.5 * (lb_batch + ub_batch)
     cv_batch, cc_batch = vmapped_fn(mid, mid, lb_batch, ub_batch)
     if negate:
@@ -123,6 +159,78 @@ def _filter_well_behaved_constraints(
     return good_fns, good_senses
 
 
+def _get_or_build_relax_solver(
+    obj_relax_fn: Callable,
+    con_relax_fns: Optional[tuple[Callable, ...]],
+    con_senses: Optional[tuple[str, ...]],
+    negate: bool,
+    max_iter: int,
+) -> Callable:
+    """Return a jit-compiled solver for a given relaxation signature.
+
+    Cached by function identity so that B&B nodes (which share the same
+    relaxation functions and only differ in bounds) hit the XLA cache.
+    Bounds are passed as traced arguments to the returned solver, so a
+    single compiled module serves every node on a given problem.
+    """
+    from discopt._jax.ipm import IPMOptions, ipm_solve
+
+    con_key = tuple(id(f) for f in con_relax_fns) if con_relax_fns else ()
+    sense_key = tuple(con_senses) if con_senses else ()
+    key = (id(obj_relax_fn), con_key, sense_key, bool(negate), int(max_iter))
+
+    cached = _relax_solver_cache.get(key)
+    if cached is not None:
+        return cached
+
+    has_cons = bool(con_relax_fns) and bool(con_senses)
+    fns_local = tuple(con_relax_fns) if has_cons else ()
+    senses_local = tuple(con_senses) if has_cons else ()
+    n_cons = len(fns_local)
+    opts = IPMOptions(max_iter=max_iter)
+
+    @jax.jit
+    def _solve(node_lb, node_ub):
+        def obj_fn(x):
+            cv, cc = obj_relax_fn(x, x, node_lb, node_ub)
+            return -cc if negate else cv
+
+        if has_cons:
+            def con_fn(x):
+                vals = []
+                for fn, sense in zip(fns_local, senses_local):
+                    cv, cc = fn(x, x, node_lb, node_ub)
+                    if sense == ">=":
+                        vals.append(-cc)
+                    else:  # "<=" and "==" both use cv as upper-bounded by 0
+                        vals.append(cv)
+                return jnp.stack(vals)
+
+            g_l = jnp.full(n_cons, -1e20, dtype=jnp.float64)
+            g_u = jnp.zeros(n_cons, dtype=jnp.float64)
+        else:
+            con_fn = None
+            g_l = None
+            g_u = None
+
+        x0 = jnp.clip(0.5 * (node_lb + node_ub), node_lb, node_ub)
+        state = ipm_solve(
+            obj_fn,
+            con_fn,
+            x0,
+            node_lb,
+            node_ub,
+            g_l,
+            g_u,
+            opts,
+            check_deadline=False,
+        )
+        return state.obj, state.converged
+
+    _relax_solver_cache[key] = _solve
+    return _solve
+
+
 def solve_mccormick_relaxation_nlp(
     obj_relax_fn: Callable,
     con_relax_fns: Optional[list[Callable]],
@@ -132,6 +240,8 @@ def solve_mccormick_relaxation_nlp(
     negate: bool = False,
     max_iter: int = 50,
     deadline: float | None = None,
+    obj_relax_fn_numpy: Optional[Callable] = None,
+    con_relax_fns_numpy: Optional[list[Callable]] = None,
 ) -> float:
     """Solve a convex NLP over McCormick relaxations for a tight lower bound.
 
@@ -152,85 +262,60 @@ def solve_mccormick_relaxation_nlp(
     Returns:
         Valid lower bound (float), or -inf on failure.
     """
-    from discopt._jax.ipm import IPMOptions, ipm_solve
-
     if _deadline_expired(deadline):
         return -np.inf
+
+    # Dispatch to numpy/scipy backend when caller supplied numpy fns and
+    # problem is small enough that JAX trace/compile would dominate.
+    if obj_relax_fn_numpy is not None:
+        n_vars = int(np.asarray(node_lb).size)
+        if n_vars <= _numpy_threshold():
+            from discopt._numpy.nlp_solver import solve_mccormick_relaxation_nlp_numpy
+
+            return solve_mccormick_relaxation_nlp_numpy(
+                obj_relax_fn_numpy,
+                con_relax_fns_numpy,
+                con_senses,
+                np.asarray(node_lb, dtype=np.float64),
+                np.asarray(node_ub, dtype=np.float64),
+                negate=negate,
+                max_iter=max(max_iter, 100),
+                deadline=deadline,
+            )
 
     lb = jnp.asarray(node_lb, dtype=jnp.float64)
     ub = jnp.asarray(node_ub, dtype=jnp.float64)
 
-    # Check objective relaxation is well-behaved
+    # Cheap early bailout: if the obj relaxation is degenerate at the
+    # midpoint, skip the solve. One sync per node (vs O(m) in the old
+    # per-constraint filter) — still cheaper than entering the IPM only
+    # to have it blow up on inf/NaN.
     mid = 0.5 * (lb + ub)
     try:
         cv_test, cc_test = obj_relax_fn(mid, mid, lb, ub)
-        if not np.isfinite(float(cv_test)) or not np.isfinite(float(cc_test)):
+        cv_t = float(cv_test)
+        cc_t = float(cc_test)
+        if not (np.isfinite(cv_t) and np.isfinite(cc_t)):
             return -np.inf
     except Exception:
         return -np.inf
 
-    # Build convex objective: minimize cv(x) for minimization
-    def obj_fn(x):
-        cv, cc = obj_relax_fn(x, x, lb, ub)
-        if negate:
-            return -cc
-        return cv
-
-    # Build constraint function from relaxations
-    g_l = None
-    g_u = None
-    con_fn = None
-
-    if con_relax_fns and con_senses:
-        if _deadline_expired(deadline):
-            return -np.inf
-
-        # Filter out constraints that produce inf/NaN at wide bounds
-        good_fns, good_senses = _filter_well_behaved_constraints(con_relax_fns, con_senses, lb, ub)
-
-        if good_fns:
-            g_l_list = []
-            g_u_list = []
-
-            for sense in good_senses:
-                if sense == "<=":
-                    g_l_list.append(-1e20)
-                    g_u_list.append(0.0)
-                elif sense == ">=":
-                    g_l_list.append(-1e20)
-                    g_u_list.append(0.0)
-                elif sense == "==":
-                    g_l_list.append(-1e20)
-                    g_u_list.append(0.0)
-
-            g_l = jnp.array(g_l_list, dtype=jnp.float64)
-            g_u = jnp.array(g_u_list, dtype=jnp.float64)
-
-            def con_fn(x, _lb=lb, _ub=ub, _fns=good_fns, _senses=good_senses):
-                vals = []
-                for fn, sense in zip(_fns, _senses):
-                    cv, cc = fn(x, x, _lb, _ub)
-                    if sense == "<=":
-                        vals.append(cv)
-                    elif sense == ">=":
-                        vals.append(-cc)
-                    elif sense == "==":
-                        vals.append(cv)
-                return jnp.stack(vals)
-
-    opts = IPMOptions(max_iter=max_iter)
-    x0 = jnp.clip(0.5 * (lb + ub), lb, ub)
-
     if _deadline_expired(deadline):
         return -np.inf
 
+    con_fns_tuple = tuple(con_relax_fns) if con_relax_fns else None
+    senses_tuple = tuple(con_senses) if con_senses else None
+
     try:
-        state = ipm_solve(obj_fn, con_fn, x0, lb, ub, g_l, g_u, opts)
-        conv = int(state.converged)
+        solver = _get_or_build_relax_solver(
+            obj_relax_fn, con_fns_tuple, senses_tuple, negate, max_iter
+        )
+        obj_val, converged = solver(lb, ub)
+        conv = int(converged)
         if conv in (1, 2, 3):
-            obj_val = float(state.obj)
-            if np.isfinite(obj_val):
-                return obj_val
+            v = float(obj_val)
+            if np.isfinite(v):
+                return v
     except Exception:
         pass
 
@@ -246,6 +331,8 @@ def solve_mccormick_batch(
     negate: bool = False,
     max_iter: int = 50,
     deadline: float | None = None,
+    obj_relax_fn_numpy: Optional[Callable] = None,
+    con_relax_fns_numpy: Optional[list[Callable]] = None,
 ) -> jnp.ndarray:
     """Solve McCormick relaxation NLPs for a batch of nodes via vmap.
 
@@ -296,6 +383,8 @@ def solve_mccormick_batch(
             negate=negate,
             max_iter=max_iter,
             deadline=deadline,
+            obj_relax_fn_numpy=obj_relax_fn_numpy,
+            con_relax_fns_numpy=con_relax_fns_numpy,
         )
         result_list.append(val)
 
