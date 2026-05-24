@@ -46,6 +46,20 @@ def _numpy_threshold() -> int:
         return _NUMPY_THRESHOLD_DEFAULT
 
 
+def _ripopt_backend_enabled() -> bool:
+    """True when DISCOPT_MCCORMICK_BACKEND=ripopt.
+
+    Opt-in: routes the convex relaxation NLP through the Rust ripopt IPM
+    (same one the original-NLP path uses) instead of the JAX-jit'd
+    ``_jax/ipm.py``. The McCormickRelaxationEvaluator builds small jit'd
+    objective/gradient/Jacobian/Hessian modules and Ripopt drives the IPM
+    in Rust, releasing the GIL during the solve. Avoids the trace/compile
+    floor of the inline JAX IPM at the cost of one Python<->Rust boundary
+    per IPM iteration.
+    """
+    return os.environ.get("DISCOPT_MCCORMICK_BACKEND", "ipm").strip().lower() == "ripopt"
+
+
 # Per-(relaxation, options) jit caches. Keyed by Python id() of the
 # relaxation functions plus negate/max_iter so repeat B&B nodes hit the
 # XLA cache instead of recompiling. Without these caches each call built
@@ -53,6 +67,7 @@ def _numpy_threshold() -> int:
 # (the dominant cost on small instances).
 _midpoint_batch_cache: dict = {}
 _relax_solver_cache: dict = {}
+_ripopt_evaluator_cache: dict = {}
 
 
 def _deadline_expired(deadline: float | None) -> bool:
@@ -157,6 +172,94 @@ def _filter_well_behaved_constraints(
             good_senses.append(sense)
 
     return good_fns, good_senses
+
+
+def _get_or_build_ripopt_evaluator(
+    obj_relax_fn: Callable,
+    con_fns_tuple: Optional[tuple[Callable, ...]],
+    senses_tuple: Optional[tuple[str, ...]],
+    n_vars: int,
+    negate: bool,
+):
+    """Cache the McCormickRelaxationEvaluator by relaxation identity.
+
+    A single evaluator per problem signature is reused across B&B nodes,
+    so the underlying jit'd grad/jacobian/hessian modules are compiled
+    once and warm for every subsequent solve.
+    """
+    from discopt._jax.mccormick_evaluator import McCormickRelaxationEvaluator
+
+    con_key = tuple(id(f) for f in con_fns_tuple) if con_fns_tuple else ()
+    sense_key = senses_tuple or ()
+    key = (id(obj_relax_fn), con_key, sense_key, int(n_vars), bool(negate))
+    cached = _ripopt_evaluator_cache.get(key)
+    if cached is not None:
+        return cached
+    ev = McCormickRelaxationEvaluator(
+        obj_relax_fn,
+        list(con_fns_tuple) if con_fns_tuple else None,
+        list(senses_tuple) if senses_tuple else None,
+        n_vars=n_vars,
+        negate=negate,
+    )
+    _ripopt_evaluator_cache[key] = ev
+    return ev
+
+
+def _solve_relaxation_with_ripopt(
+    obj_relax_fn: Callable,
+    con_fns_tuple: Optional[tuple[Callable, ...]],
+    senses_tuple: Optional[tuple[str, ...]],
+    node_lb: np.ndarray,
+    node_ub: np.ndarray,
+    negate: bool,
+    max_iter: int,
+    deadline: float | None,
+) -> float:
+    """Solve the McCormick relaxation NLP via the Rust ripopt IPM."""
+    try:
+        from discopt._rust import solve_ripopt
+    except ImportError:
+        return -np.inf
+
+    lb = np.asarray(node_lb, dtype=np.float64)
+    ub = np.asarray(node_ub, dtype=np.float64)
+    n_vars = int(lb.size)
+
+    ev = _get_or_build_ripopt_evaluator(
+        obj_relax_fn, con_fns_tuple, senses_tuple, n_vars, negate
+    )
+    ev.set_bounds(lb, ub)
+
+    m = ev.n_constraints
+    if m > 0:
+        g_l = np.full(m, -np.inf, dtype=np.float64)
+        g_u = np.zeros(m, dtype=np.float64)
+    else:
+        g_l = np.empty(0, dtype=np.float64)
+        g_u = np.empty(0, dtype=np.float64)
+
+    x0 = np.clip(0.5 * (lb + ub), lb, ub).astype(np.float64)
+
+    opts: dict = {"max_iter": int(max_iter), "print_level": 0}
+    if deadline is not None:
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0.0:
+            return -np.inf
+        opts["max_wall_time"] = float(remaining)
+
+    try:
+        result = solve_ripopt(ev, x0, lb, ub, g_l, g_u, opts)
+    except Exception:
+        return -np.inf
+
+    status = result.get("status", "")
+    if status not in ("optimal", "acceptable", "stop_at_tiny_step", "max_iterations"):
+        return -np.inf
+    val = float(result["objective"])
+    if not np.isfinite(val):
+        return -np.inf
+    return val
 
 
 def _get_or_build_relax_solver(
@@ -305,6 +408,21 @@ def solve_mccormick_relaxation_nlp(
 
     con_fns_tuple = tuple(con_relax_fns) if con_relax_fns else None
     senses_tuple = tuple(con_senses) if con_senses else None
+
+    # Optional: route the convex relaxation NLP through the Rust ripopt
+    # IPM (same one the original-NLP path uses) instead of the inline
+    # jit'd JAX IPM. Avoids the JAX IPM trace/compile floor.
+    if _ripopt_backend_enabled():
+        return _solve_relaxation_with_ripopt(
+            obj_relax_fn,
+            con_fns_tuple,
+            senses_tuple,
+            np.asarray(node_lb, dtype=np.float64),
+            np.asarray(node_ub, dtype=np.float64),
+            negate=negate,
+            max_iter=max(max_iter, 100),
+            deadline=deadline,
+        )
 
     try:
         solver = _get_or_build_relax_solver(
