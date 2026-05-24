@@ -2216,9 +2216,11 @@ def solve_model(
     _subnlp_incumbent_updates = 0
     if subnlp_enabled:
         try:
-            from discopt.solvers.nlp_backend import get_nlp_solver
+            from typing import cast
 
-            _subnlp_backend_fn = get_nlp_solver(subnlp_backend)
+            from discopt.solvers.nlp_backend import Backend, get_nlp_solver
+
+            _subnlp_backend_fn = get_nlp_solver(cast(Backend, subnlp_backend))
         except ImportError as _e:
             logger.debug("SubNLP backend unavailable, disabling: %s", _e)
             _subnlp_backend_fn = None
