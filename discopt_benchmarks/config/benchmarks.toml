@@ -43,10 +43,23 @@ max_variables = 100
 max_constraints = 500
 time_limit_seconds = 3600
 
-[suites.full]
-description = "Complete MINLPLib benchmark"
+[suites.small]
+description = "Stratified MINLPLib (~60 instances spanning every class+size, ~30 min on 8 workers)"
 sources = ["minlplib"]
-time_limit_seconds = 3600
+instance_list = "config/suites/small.txt"
+time_limit_seconds = 60         # per-instance wall-clock cap
+
+[suites.medium]
+description = "Stratified MINLPLib (~250 instances spanning every class+size, ~2 h on 8 workers)"
+sources = ["minlplib"]
+instance_list = "config/suites/medium.txt"
+time_limit_seconds = 300
+
+[suites.full]
+description = "Complete MINLPLib benchmark (~1700 instances, 12-30 h on 8 workers)"
+sources = ["minlplib"]
+instance_list = "config/suites/full.txt"
+time_limit_seconds = 600
 
 [suites.comparison]
 description = "Head-to-head comparison on curated set"
@@ -309,11 +322,21 @@ command = "couenne"
 type = "external"
 nl_interface = true
 options = { threads = 1 }
+note = "Not available on conda-forge for osx-arm64; build from source via coinbrew."
+
+[solvers.bonmin]
+command = "/opt/homebrew/Caskroom/miniforge/base/envs/discopt-bench/bin/bonmin"
+type = "external"
+nl_interface = true
+options = { threads = 1 }
+note = "Installed via `mamba create -n discopt-bench -c conda-forge coin-or-bonmin`."
 
 [solvers.scip]
 command = "scip"
 type = "external"
+nl_interface = true
 options = { threads = 1 }
+note = "Installed via `brew install scip`."
 
 [solvers.highs]
 command = "highs"

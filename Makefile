@@ -604,6 +604,119 @@ bench-full-all: bench-lp-full bench-qp-full bench-milp-full bench-miqp-full benc
 bench-all: bench-smoke-all bench-full-all
 	@echo "==> All benchmarks complete"
 
+# --- Stratified MINLPLib tiers (small / medium / full) ------------------------
+# Three tiered suites that span every (class × size) bucket of MINLPLib.
+# See discopt_benchmarks/config/suites/{small,medium,full}.txt for the lists.
+#
+# Per-instance time limits: 60s (small) / 300s (medium) / 600s (full)
+# Target wall-clock on 8 workers: ~30 min / ~2 h / 12-30 h.
+#
+# Two variants per tier:
+#   bench-<tier>          discopt only via the scaled (parallel, resumable) path
+#   bench-<tier>-compare  multi-solver head-to-head via the in-process path
+
+BENCH_WORKERS ?= 8
+BENCH_OUT_DIR ?= reports
+SOLVERS_COMPARE ?= discopt,scip,bonmin
+
+# ── Data + solver setup (one-time) ───────────────────────────────────────────
+
+fetch-minlplib:
+	@echo "==> Fetching MINLPLib into ~/.cache/discopt/minlplib/current/"
+	$(PYTHON) -m discopt_benchmarks.scripts.fetch_minlplib
+
+fetch-minlplib-small:
+	@echo "==> Fetching only the small-tier instances"
+	@INST=$$(grep -v '^#' discopt_benchmarks/config/suites/small.txt | grep -v '^$$' | paste -sd, -); \
+	$(PYTHON) -m discopt_benchmarks.scripts.fetch_minlplib --instances "$$INST"
+
+make-suites:
+	@echo "==> Regenerating stratified instance lists"
+	$(PYTHON) -m discopt_benchmarks.scripts.make_suites --force
+
+setup-solvers:
+	@echo "==> Installing SCIP via Homebrew + Bonmin via conda-forge"
+	@brew list scip >/dev/null 2>&1 || brew install scip
+	@brew list --cask miniforge >/dev/null 2>&1 || brew install --cask miniforge
+	@source /opt/homebrew/Caskroom/miniforge/base/etc/profile.d/conda.sh; \
+		conda env list | grep -q '^discopt-bench ' \
+		|| mamba create -n discopt-bench -c conda-forge -y coin-or-bonmin
+	@echo "==> Done. Run 'make check-solvers' to verify."
+
+check-solvers:
+	@echo "==> Checking installed solvers..."
+	@command -v scip >/dev/null && scip --version | head -1 || echo "  scip:    MISSING (brew install scip)"
+	@BONMIN=/opt/homebrew/Caskroom/miniforge/base/envs/discopt-bench/bin/bonmin; \
+		test -x $$BONMIN && $$BONMIN -v 2>/dev/null | head -1 \
+		|| echo "  bonmin:  MISSING (make setup-solvers)"
+	@command -v couenne >/dev/null && couenne -v 2>/dev/null | head -1 \
+		|| echo "  couenne: not installed (no conda-forge package for osx-arm64)"
+
+# ── Small tier (~60 instances, ~30 min on 8 workers) ─────────────────────────
+
+bench-small: build
+	@echo "==> Running small tier (discopt, scaled-runner, $(BENCH_WORKERS) workers)"
+	$(PYTHON) discopt_benchmarks/run_benchmarks.py \
+		--suite small --use-cache --subprocess \
+		--workers $(BENCH_WORKERS) --mem-limit-mb 0 \
+		--scaled-out-dir $(BENCH_OUT_DIR)/small_$(TS)
+
+bench-small-compare: build
+	@echo "==> Running small tier head-to-head: $(SOLVERS_COMPARE)"
+	$(PYTHON) discopt_benchmarks/run_benchmarks.py \
+		--suite small --use-cache \
+		--solvers $(SOLVERS_COMPARE) \
+		--scaled-out-dir $(BENCH_OUT_DIR)/small_compare_$(TS)
+
+# ── Medium tier (~250 instances, ~2 h on 8 workers) ──────────────────────────
+
+bench-medium: build
+	@echo "==> Running medium tier (discopt, scaled-runner)"
+	$(PYTHON) discopt_benchmarks/run_benchmarks.py \
+		--suite medium --use-cache --subprocess \
+		--workers $(BENCH_WORKERS) --mem-limit-mb 0 \
+		--scaled-out-dir $(BENCH_OUT_DIR)/medium_$(TS)
+
+bench-medium-compare: build
+	@echo "==> Running medium tier head-to-head: $(SOLVERS_COMPARE)"
+	$(PYTHON) discopt_benchmarks/run_benchmarks.py \
+		--suite medium --use-cache \
+		--solvers $(SOLVERS_COMPARE) \
+		--scaled-out-dir $(BENCH_OUT_DIR)/medium_compare_$(TS)
+
+# ── Full tier (~1700 instances, overnight) ───────────────────────────────────
+
+bench-full: build
+	@echo "==> Running full tier (discopt, scaled-runner) — this is overnight scale"
+	$(PYTHON) discopt_benchmarks/run_benchmarks.py \
+		--suite full --use-cache --subprocess \
+		--workers $(BENCH_WORKERS) --mem-limit-mb 0 \
+		--scaled-out-dir $(BENCH_OUT_DIR)/full_$(TS)
+
+# ── Baselines + gating ───────────────────────────────────────────────────────
+
+pin-baseline-small: build
+	$(PYTHON) discopt_benchmarks/run_benchmarks.py \
+		--suite small --use-cache --subprocess \
+		--workers $(BENCH_WORKERS) --mem-limit-mb 0 \
+		--scaled-out-dir $(BENCH_OUT_DIR)/small_baseline_$(TS) \
+		--pin-baseline
+
+gate-small: build
+	$(PYTHON) discopt_benchmarks/run_benchmarks.py \
+		--suite small --use-cache --subprocess \
+		--workers $(BENCH_WORKERS) --mem-limit-mb 0 \
+		--scaled-out-dir $(BENCH_OUT_DIR)/small_gate_$(TS) \
+		--gate small
+
+# ── Dashboard (local web UI) ─────────────────────────────────────────────────
+
+DASHBOARD_PORT ?= 8765
+
+dashboard:
+	@echo "==> Starting dashboard at http://127.0.0.1:$(DASHBOARD_PORT)"
+	$(PYTHON) -m discopt_benchmarks.dashboard --port $(DASHBOARD_PORT) --open
+
 # --- Clean --------------------------------------------------------------------
 
 clean:

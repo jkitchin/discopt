@@ -41,8 +41,6 @@ _LOGO_PATH = Path(__file__).with_name("discopt-logo.png")
 _ISSUES_URL = "https://github.com/jkitchin/discopt/issues"
 
 
-
-
 # ──────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────
@@ -502,13 +500,13 @@ def _native_file_picker() -> str | None:
 
     if sys.platform == "darwin":
         script = (
-            'try\n'
-            '    set theFile to choose file with prompt '
+            "try\n"
+            "    set theFile to choose file with prompt "
             '"Open discopt doe workbook"\n'
-            '    return POSIX path of theFile\n'
-            'on error\n'
+            "    return POSIX path of theFile\n"
+            "on error\n"
             '    return ""\n'
-            'end try\n'
+            "end try\n"
         )
         osascript = shutil.which("osascript")
         if not osascript:
@@ -1535,9 +1533,7 @@ def _rename_panel(path: str, status: dict[str, Any]) -> None:
 
         new_response_s = stripped[0]
         new_inputs_s = stripped[1:]
-        input_renames = {
-            old: new for old, new in zip(old_inputs, new_inputs_s) if old != new
-        }
+        input_renames = {old: new for old, new in zip(old_inputs, new_inputs_s) if old != new}
         response_rename: tuple[str, str] | None = (
             (old_response, new_response_s) if old_response != new_response_s else None
         )
@@ -1557,9 +1553,7 @@ def _rename_panel(path: str, status: dict[str, Any]) -> None:
 
         msg_parts = []
         if input_renames:
-            msg_parts.append(
-                "factors: " + ", ".join(f"{a}→{b}" for a, b in input_renames.items())
-            )
+            msg_parts.append("factors: " + ", ".join(f"{a}→{b}" for a, b in input_renames.items()))
         if response_rename:
             msg_parts.append(f"response: {response_rename[0]}→{response_rename[1]}")
         st.success("Renamed " + " · ".join(msg_parts) + ".")

@@ -1396,6 +1396,11 @@ def solve_model(
     in_tree_presolve_stride: int = 0,
     eigenvalue_root_bound: bool = False,
     relaxation_arithmetic: str = "mccormick",
+    subnlp_enabled: bool = True,
+    subnlp_backend: str = "auto",
+    subnlp_frequency: int = 20,
+    subnlp_max_calls: int = 200,
+    subnlp_options: Optional[dict] = None,
     **kwargs,
 ) -> SolveResult:
     """
@@ -1448,15 +1453,23 @@ def solve_model(
         Use ICNN-based learned convex relaxations instead of standard
         McCormick. Requires ``pip install discopt[gnn]`` (equinox + optax).
         Falls back to standard McCormick for unsupported operations.
-    mccormick_bounds : str, default "none"
+    mccormick_bounds : str, default "auto"
         McCormick relaxation lower-bounding strategy:
         ``"auto"`` selects ``"nlp"`` when a JAX objective is
         available, ``"none"`` otherwise,
         ``"nlp"`` solves a convex NLP over the McCormick relaxation
         (gives valid lower bounds for pruning),
+        ``"lp"`` solves an LP over the full McCormick reformulation —
+        gives a *valid global* lower bound and tends to find provable
+        global optima much faster on nonconvex problems with bilinears
+        (pooling, polynomial NLP, QCQP). Recommended when your model
+        is nonconvex and contains bilinear/multilinear terms; pair with
+        ``subnlp_frequency=1`` to turn each LP primal into an incumbent.
+        Requires at least one continuous variable; falls back to
+        ``"nlp"`` for pure-integer models,
         ``"midpoint"`` evaluates the convex underestimator at midpoint
         (heuristic, not a valid global lower bound — use with caution),
-        ``"none"`` disables (default).
+        ``"none"`` disables.
     gdp_method : str, default "big-m"
         Reformulation method for disjunctive constraints:
         ``"big-m"`` (default) or ``"hull"`` (convex hull).
@@ -2079,6 +2092,7 @@ def solve_model(
     _mc_con_senses = None
     _mc_negate = False
     _mc_mode = mccormick_bounds
+    _mc_lp_relaxer = None  # MccormickLPRelaxer instance when _mc_mode == "lp"
 
     if _mc_mode == "auto":
         if _model_is_convex:
@@ -2092,6 +2106,35 @@ def solve_model(
             _mc_mode = "nlp"
         else:
             _mc_mode = "none"
+
+    if _mc_mode == "lp" and model._objective is not None:
+        from discopt._jax.mccormick_lp import MccormickLPRelaxer
+
+        _has_continuous_var = any(v.var_type == VarType.CONTINUOUS for v in model._variables)
+        if not _has_continuous_var:
+            # Spatial-BB on integer-only models has nothing to branch on:
+            # the LP relaxer's integer-feasible point doesn't satisfy the
+            # original bilinear constraints, and with no continuous var to
+            # bisect, the tree dead-ends after the root. Fall back to NLP.
+            logger.info(
+                "McCormick LP requested but model has no continuous "
+                "variables; falling back to NLP relaxation."
+            )
+            _mc_lp_relaxer = None
+            _mc_mode = "nlp"
+        else:
+            try:
+                _mc_lp_relaxer = MccormickLPRelaxer(model)
+            except Exception as e:
+                logger.warning("McCormick LP relaxer setup failed: %s", e)
+                _mc_lp_relaxer = None
+                _mc_mode = "none"
+            else:
+                if not _mc_lp_relaxer.has_bilinear:
+                    # No nonlinear products → standard LP relaxation = the
+                    # model itself for linear parts. Drop back to NLP.
+                    _mc_lp_relaxer = None
+                    _mc_mode = "nlp"
 
     if _mc_mode in ("midpoint", "nlp") and model._objective is not None:
         from discopt._jax.batch_evaluator import BatchRelaxationEvaluator
@@ -2165,6 +2208,22 @@ def solve_model(
     # --- Feasibility pump at root ---
     # Try to find an integer-feasible incumbent before B&B starts.
     _fp_ran = False
+
+    # --- SubNLP primal heuristic state ---
+    _subnlp_backend_fn = None
+    _subnlp_calls = 0
+    _subnlp_feasible = 0
+    _subnlp_incumbent_updates = 0
+    if subnlp_enabled:
+        try:
+            from typing import cast
+
+            from discopt.solvers.nlp_backend import Backend, get_nlp_solver
+
+            _subnlp_backend_fn = get_nlp_solver(cast(Backend, subnlp_backend))
+        except ImportError as _e:
+            logger.debug("SubNLP backend unavailable, disabling: %s", _e)
+            _subnlp_backend_fn = None
 
     # --- B&B loop ---
     # McCormick NLP is expensive (one IPM per node). Run it every N iterations
@@ -2345,6 +2404,21 @@ def solve_model(
                                 result_lbs[i] = max(result_lbs[i], float(mc_lbs[i]))
                 except (ValueError, ArithmeticError, RuntimeError) as e:
                     logger.debug("Batch McCormick bound failed: %s", e)
+            # LP-form McCormick: lift bilinears, solve as LP via HiGHS.
+            # Per-node, ~20ms for problems with tens of bilinear terms.
+            if _mc_lp_relaxer is not None:
+                for i in range(n_batch):
+                    if result_lbs[i] < _SENTINEL_THRESHOLD:
+                        try:
+                            mc_res = _mc_lp_relaxer.solve_at_node(
+                                np.asarray(batch_lb[i]),
+                                np.asarray(batch_ub[i]),
+                            )
+                        except Exception as e:
+                            logger.debug("McCormick LP failed at node %d: %s", i, e)
+                            continue
+                        if mc_res.lower_bound is not None and np.isfinite(mc_res.lower_bound):
+                            result_lbs[i] = max(result_lbs[i], float(mc_res.lower_bound))
             if not _model_is_convex:
                 for i in range(n_batch):
                     if result_lbs[i] == -np.inf:
@@ -2361,7 +2435,12 @@ def solve_model(
                 node_lb = np.array(batch_lb[i])
                 node_ub = np.array(batch_ub[i])
 
-                if iteration == 0:
+                nlp_result = None
+                if iteration == 0 and _mc_lp_relaxer is None:
+                    # The root multistart NLP is the only bound source we have.
+                    # When the LP relaxer is active, skip it: the LP block below
+                    # supplies the bound + primal and SubNLP turns that into
+                    # the incumbent — running multistart NLP here is wasted work.
                     if _use_ipm_batch:
                         # More random starts for nonconvex problems
                         _root_n_random = 5 if not _model_is_convex else 2
@@ -2384,7 +2463,7 @@ def solve_model(
                             opts,
                             nlp_solver,
                         )
-                else:
+                elif iteration > 0:
                     # Warm-start from parent solution if available
                     psol_i = np.array(batch_psols[i])
                     if not np.any(np.isnan(psol_i)):
@@ -2418,7 +2497,10 @@ def solve_model(
 
                 result_ids[i] = int(batch_ids[i])
 
-                if nlp_result.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
+                if nlp_result is not None and nlp_result.status in (
+                    SolveStatus.OPTIMAL,
+                    SolveStatus.ITERATION_LIMIT,
+                ):
                     nlp_obj = float(nlp_result.objective)
                     nlp_lb = nlp_obj
                     convex_lb = -np.inf  # accumulate valid convex lower bound
@@ -2516,6 +2598,35 @@ def solve_model(
                     ub_clipped = np.clip(node_ub, -_SPC, _SPC)
                     result_sols[i] = 0.5 * (lb_clipped + ub_clipped)
                     result_feas[i] = False
+
+                # LP-form McCormick bound (lifted bilinears, HiGHS LP).
+                # Runs independently of the NLP: provides a valid lower bound
+                # and a feasible LP point usable for spatial branching even
+                # when the NLP was skipped (root) or returned infeasible /
+                # iteration_limit (any node).
+                if _mc_lp_relaxer is not None:
+                    try:
+                        mc_lp_res = _mc_lp_relaxer.solve_at_node(node_lb, node_ub)
+                    except Exception as e:
+                        logger.debug("McCormick LP failed at node %d: %s", int(batch_ids[i]), e)
+                        mc_lp_res = None
+                    if (
+                        mc_lp_res is not None
+                        and mc_lp_res.lower_bound is not None
+                        and np.isfinite(mc_lp_res.lower_bound)
+                    ):
+                        mc_lp_lb = float(mc_lp_res.lower_bound)
+                        cur = result_lbs[i]
+                        if cur >= _SENTINEL_THRESHOLD or not np.isfinite(cur):
+                            # No NLP bound (skipped or failed): adopt LP point
+                            # + LP bound so the tree has a valid relaxation
+                            # to spatial-branch on.
+                            result_lbs[i] = mc_lp_lb
+                            if mc_lp_res.x is not None:
+                                result_sols[i] = mc_lp_res.x
+                            result_feas[i] = False
+                        else:
+                            result_lbs[i] = max(cur, mc_lp_lb)
         jax_time += time.perf_counter() - t_jax_start
 
         if np.any(node_infeasible_mask):
@@ -2663,6 +2774,79 @@ def solve_model(
                             logger.info("Feasibility pump found incumbent: obj=%.6g", fp_obj)
                 except Exception as e:
                     logger.debug("Feasibility pump failed: %s", e)
+
+        # --- SubNLP primal heuristic ---
+        # Fix integers in the best relaxation solution, then solve the
+        # resulting continuous NLP. Useful for nonconvex problems whose
+        # relaxation solver returns a local optimum that violates either
+        # integrality or constraints (so the existing inject_incumbent
+        # path above declines it). Runs at root and on a schedule after,
+        # capped per solve. Skipped for convex models (no benefit).
+        if (
+            _subnlp_backend_fn is not None
+            and not _model_is_convex
+            and _subnlp_calls < subnlp_max_calls
+            and (iteration == 0 or iteration % max(1, subnlp_frequency) == 0)
+        ):
+            from discopt._jax.primal_heuristics import subnlp as _subnlp
+
+            _cands_sn = [
+                (i, float(result_lbs[i]))
+                for i in range(n_batch)
+                if result_lbs[i] < _SENTINEL_THRESHOLD and np.isfinite(result_lbs[i])
+            ]
+            _cands_sn.sort(key=lambda t: t[1])
+            # Fall back to bound midpoint if no relaxation produced a usable point.
+            if not _cands_sn and iteration == 0:
+                _lb_c = np.clip(lb, -_SPC, _SPC)
+                _ub_c = np.clip(ub, -_SPC, _SPC)
+                _x_seed = 0.5 * (_lb_c + _ub_c)
+                _subnlp_calls += 1
+                try:
+                    _sn = _subnlp(
+                        model,
+                        _x_seed,
+                        backend=_subnlp_backend_fn,
+                        nlp_options=subnlp_options,
+                        evaluator=evaluator,
+                    )
+                except Exception as _e:
+                    logger.debug("subnlp raised: %s", _e)
+                    _sn = None
+                if _sn is not None:
+                    _x_sn, _obj_sn = _sn
+                    _subnlp_feasible += 1
+                    if np.isfinite(_obj_sn) and _obj_sn < _SENTINEL_THRESHOLD:
+                        tree.inject_incumbent(_x_sn.copy(), float(_obj_sn))
+                        _subnlp_incumbent_updates += 1
+                        logger.info("SubNLP incumbent (seed): obj=%.6g", _obj_sn)
+            else:
+                _try_idxs = (
+                    [i for i, _ in _cands_sn] if iteration == 0 else [i for i, _ in _cands_sn[:1]]
+                )
+                for _i in _try_idxs:
+                    if _subnlp_calls >= subnlp_max_calls:
+                        break
+                    _subnlp_calls += 1
+                    try:
+                        _sn = _subnlp(
+                            model,
+                            result_sols[_i],
+                            backend=_subnlp_backend_fn,
+                            nlp_options=subnlp_options,
+                            evaluator=evaluator,
+                        )
+                    except Exception as _e:
+                        logger.debug("subnlp raised: %s", _e)
+                        _sn = None
+                    if _sn is None:
+                        continue
+                    _x_sn, _obj_sn = _sn
+                    _subnlp_feasible += 1
+                    if np.isfinite(_obj_sn) and _obj_sn < _SENTINEL_THRESHOLD:
+                        tree.inject_incumbent(_x_sn.copy(), float(_obj_sn))
+                        _subnlp_incumbent_updates += 1
+                        logger.info("SubNLP incumbent: obj=%.6g (iter=%d)", _obj_sn, iteration)
 
         # --- User callbacks: lazy constraints and incumbent filtering ---
         if lazy_constraints is not None or incumbent_callback is not None:
@@ -2862,6 +3046,9 @@ def solve_model(
         jax_time=jax_time,
         python_time=python_time,
         gap_certified=_gap_certified,
+        subnlp_calls=_subnlp_calls,
+        subnlp_feasible=_subnlp_feasible,
+        subnlp_incumbent_updates=_subnlp_incumbent_updates,
     )
 
 

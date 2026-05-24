@@ -9,7 +9,7 @@ and re-solves the resulting NLP.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -232,3 +232,121 @@ def feasibility_pump(
             return nlp_result.x.copy()
 
     return None
+
+
+def _check_constraint_feasibility(
+    evaluator: NLPEvaluator,
+    x: np.ndarray,
+    tol: float = 1e-6,
+) -> bool:
+    """Check that ``x`` satisfies the model's constraints to within ``tol``."""
+    if evaluator.n_constraints == 0:
+        return True
+    g = np.asarray(evaluator.evaluate_constraints(x))
+    from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
+
+    cl, cu = _infer_constraint_bounds(evaluator)
+    return bool(np.all(g >= cl - tol) and np.all(g <= cu + tol))
+
+
+def subnlp(
+    model: Model,
+    x_relax: np.ndarray,
+    backend: Optional[Callable] = None,
+    nlp_options: Optional[dict] = None,
+    integer_tol: float = 1e-5,
+    feas_tol: float = 1e-6,
+    evaluator: Optional[NLPEvaluator] = None,
+) -> Optional[tuple[np.ndarray, float]]:
+    """SubNLP-style primal heuristic: fix integers, re-solve continuous NLP.
+
+    Given a relaxation point ``x_relax``:
+    1. Round integer variables to their nearest integer value and tighten
+       their bounds to that single value (fixed). For pure-continuous models,
+       this step is a no-op.
+    2. Solve the resulting continuous NLP from ``x_relax`` as warm start.
+    3. Verify that the returned point is integer-feasible (trivial when
+       integers are fixed) and constraint-feasible.
+
+    Args:
+        model: The optimization model.
+        x_relax: Relaxation point (NLP-relaxed solution at a B&B node).
+        backend: ``solve_nlp(evaluator, x0, options=...)`` callable. If None,
+            uses :func:`discopt.solvers.nlp_backend.get_nlp_solver('auto')`.
+        nlp_options: Options dict forwarded to the NLP backend.
+        integer_tol: Tolerance for declaring integer feasibility.
+        feas_tol: Tolerance for declaring constraint feasibility.
+        evaluator: Pre-built NLPEvaluator; one is constructed if omitted.
+
+    Returns:
+        ``(x, obj)`` if the heuristic produced a usable integer- and
+        constraint-feasible point, else ``None``.
+    """
+    if backend is None:
+        from discopt.solvers.nlp_backend import get_nlp_solver
+
+        backend = get_nlp_solver("auto")
+
+    if evaluator is None:
+        evaluator = NLPEvaluator(model)
+
+    int_mask = _get_integer_mask(model)
+    lb_orig, ub_orig = _get_variable_bounds(model)
+
+    x0 = np.asarray(x_relax, dtype=np.float64).copy()
+
+    # Fix integer variables by rounding and clamping bounds to that value.
+    # We mutate the model variables' bounds in-place and restore afterwards
+    # since NLPEvaluator.variable_bounds reads from the model on each call.
+    saved_bounds: list[tuple[np.ndarray, np.ndarray]] = []
+    try:
+        if np.any(int_mask):
+            x0[int_mask] = np.round(x0[int_mask])
+            x0 = np.clip(x0, lb_orig, ub_orig)
+
+            # Save and tighten bounds on integer variables.
+            offset = 0
+            for v in model._variables:
+                sz = v.size
+                saved_bounds.append((v.lb.copy(), v.ub.copy()))
+                if v.var_type in (VarType.BINARY, VarType.INTEGER):
+                    fixed = x0[offset : offset + sz].reshape(v.lb.shape)
+                    v.lb = fixed.copy()
+                    v.ub = fixed.copy()
+                offset += sz
+
+        opts = dict(nlp_options) if nlp_options else {}
+        opts.setdefault("print_level", 0)
+
+        try:
+            nlp_result = backend(evaluator, x0, options=opts)
+        except BaseException:
+            # Catch BaseException — some NLP backends (e.g. pounce via PyO3)
+            # raise PanicException, which is not a subclass of Exception.
+            return None
+    finally:
+        for v, (lb_v, ub_v) in zip(model._variables, saved_bounds):
+            v.lb = lb_v
+            v.ub = ub_v
+
+    if not _is_nlp_feasible(nlp_result):
+        return None
+    if nlp_result.x is None or nlp_result.objective is None:
+        return None
+
+    x_out = np.asarray(nlp_result.x)
+
+    # Clip integer slots back to the rounded value (the fixed-bounds solve
+    # should already yield this, but guard against tiny drifts).
+    if np.any(int_mask):
+        x_out = x_out.copy()
+        x_out[int_mask] = np.round(x_out[int_mask])
+        if not _is_integer_feasible(x_out, int_mask, tol=integer_tol):
+            return None
+
+    if not _check_constraint_feasibility(evaluator, x_out, tol=feas_tol):
+        return None
+
+    # Recompute objective at the snapped point to keep it consistent.
+    obj = float(evaluator.evaluate_objective(x_out))
+    return x_out, obj
