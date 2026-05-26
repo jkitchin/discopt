@@ -510,9 +510,19 @@ def add_subparser(subparsers) -> None:
 
 def run(args) -> int:
     """Dispatch ``discopt tutor ...`` after argparse parsing."""
+    # `install` always sources from the packaged copy in the wheel — the
+    # walk-up search would otherwise find a previously-materialized course
+    # tree that has no `_claude_assets/` and the install would fail.
+    if args.tutor_func is _cmd_install:
+        course_dir = _packaged_course_dir()
+        if course_dir is None:
+            print(
+                "packaged course/ not found inside the discopt wheel; can't install.",
+                file=sys.stderr,
+            )
+            return 1
+        return int(args.tutor_func(args, course_dir))
     course_dir = _find_course_dir()
-    # ``install`` is the only command that legitimately runs against a course
-    # tree the user might still need help finding; all others require it.
     if course_dir is None:
         print(
             "course/ directory not found. Run from a discopt checkout that "

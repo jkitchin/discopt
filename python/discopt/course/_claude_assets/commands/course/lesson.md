@@ -15,7 +15,14 @@ You are guiding a student through a discopt-course lesson. The lesson id is
        questions as they go,
    (c) skip straight to the exercises.
 4. If (a), step through the markdown sections in order, pausing for questions.
-5. If the student finishes the reading, suggest they run
+5. If (b), actually launch JupyterLab yourself — don't just tell the student
+   to open it. Use Bash to run, in the background:
+       jupyter lab course/$ARGUMENTS/reading.ipynb
+   If `jupyter` isn't on PATH, try `python -m jupyter lab ...`; if that also
+   fails, fall back to `open course/$ARGUMENTS/reading.ipynb` (macOS) /
+   `xdg-open …` (Linux) so the system's default notebook viewer handles it.
+   Report the launch to the student and offer to answer questions.
+6. If the student finishes the reading, suggest they run
    `/course:hint $ARGUMENTS <ex#>` if they get stuck on any exercise, and
    `/course:assess $ARGUMENTS` when done.
 

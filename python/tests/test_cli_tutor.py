@@ -457,6 +457,37 @@ class TestRun:
         assert rc == 7
         assert called["course_dir"] == fake_course
 
+    def test_install_uses_packaged_copy_not_walk_up(self, tmp_path, monkeypatch):
+        # Regression: walking up from cwd may find a previously-materialized
+        # course tree with no `_claude_assets/`. `install` must source from
+        # the packaged copy regardless.
+        materialized = _make_course(tmp_path)  # no _claude_assets/
+        monkeypatch.delenv("DISCOPT_COURSE_DIR", raising=False)
+        monkeypatch.chdir(materialized.parent)
+        sentinel = tmp_path / "pkg"
+        sentinel.mkdir()
+        (sentinel / "SYLLABUS.md").write_text("")
+        monkeypatch.setattr(tutor, "_packaged_course_dir", lambda: sentinel)
+
+        seen = {}
+
+        def fake_install(args, course_dir):
+            seen["course_dir"] = course_dir
+            return 0
+
+        monkeypatch.setattr(tutor, "_cmd_install", fake_install)
+        rc = tutor.run(_ns(tutor_cmd="install", tutor_func=tutor._cmd_install, force=False))
+        assert rc == 0
+        assert seen["course_dir"] == sentinel
+
+    def test_install_errors_when_no_packaged_copy(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.delenv("DISCOPT_COURSE_DIR", raising=False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(tutor, "_packaged_course_dir", lambda: None)
+        rc = tutor.run(_ns(tutor_cmd="install", tutor_func=tutor._cmd_install, force=False))
+        assert rc == 1
+        assert "packaged course/ not found" in capsys.readouterr().err
+
 
 class TestArgparseWiring:
     def test_tutor_help(self):
