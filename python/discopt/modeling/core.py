@@ -1117,7 +1117,7 @@ class Model:
 
         .. warning::
 
-            NLP solvers (ipm, ipopt, ripopt) use interior-point barrier methods
+            NLP solvers (ipm, ipopt, pounce) use interior-point barrier methods
             that require finite, reasonably-sized bounds.  The defaults
             (±9.999×10¹⁹) exceed the safe threshold (~10¹⁵) and will cause
             NaN objectives or ``iteration_limit`` status.  Always supply

@@ -628,7 +628,7 @@ def solve_oa(
     max_iterations : int
         Maximum OA iterations.
     nlp_solver : str
-        NLP backend: ``"ipm"``, ``"ipopt"``, ``"ripopt"``.
+        NLP backend: ``"ipm"``, ``"ipopt"``, ``"pounce"``.
     equality_relaxation : bool
         Relax nonlinear equalities to inequalities in OA cuts
         (Viswanathan & Grossmann 1990). Helps when nonlinear equalities

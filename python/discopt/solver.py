@@ -1435,9 +1435,10 @@ def solve_model(
     ipopt_options : dict, optional
         Options passed to cyipopt (only used when ``nlp_solver="ipopt"``).
     nlp_solver : str, default "ipm"
-        NLP solver backend: ``"ripopt"`` (Rust IPM via PyO3),
+        NLP solver backend: ``"pounce"`` (POUNCE — pure-Rust Ipopt port),
         ``"ipopt"`` (cyipopt), ``"ipm"`` (pure-JAX IPM), or
         ``"sparse_ipm"`` (sparse KKT + scipy direct solve).
+        ``"ripopt"`` is accepted as a deprecated alias for ``"pounce"``.
     sparse : bool or None, default None
         Force sparse (True) or dense (False) Jacobian evaluation.
         If None, auto-selects based on problem size and density.
@@ -1508,6 +1509,18 @@ def solve_model(
             "Results may be inaccurate.",
             stacklevel=2,
         )
+
+    if nlp_solver == "ripopt":
+        import warnings
+
+        warnings.warn(
+            "nlp_solver='ripopt' is deprecated; use nlp_solver='pounce' "
+            "(POUNCE is a pure-Rust port of Ipopt). The 'ripopt' alias "
+            "will be removed in a future release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        nlp_solver = "pounce"
 
     # --- AMP (Adaptive Multivariate Partitioning) global solver ---
     _solver = solver if solver is not None else kwargs.pop("solver", None)
@@ -1753,8 +1766,8 @@ def solve_model(
     rust_time = 0.0
     jax_time = 0.0
 
-    if nlp_solver == "ripopt":
-        logger.info("Using ripopt (Rust interior point method)")
+    if nlp_solver == "pounce":
+        logger.info("Using POUNCE (pure-Rust Ipopt port)")
     elif nlp_solver == "sparse_ipm":
         logger.info("Using sparse IPM (scipy direct solve)")
     elif nlp_solver == "ipm":
@@ -3104,7 +3117,7 @@ def _solve_continuous(
     # terminate at a non-KKT point and report OPTIMAL (false optimality).
     # B&B subproblems tolerate this because the tree catches it, but single
     # solves don't, so promote the default ipm -> ipopt here. Users who
-    # explicitly requested ipm/ripopt/sparse_ipm still get what they asked for.
+    # explicitly requested ipm/pounce/sparse_ipm still get what they asked for.
     if nlp_solver == "ipm":
         nlp_solver = "ipopt"
 
@@ -3163,10 +3176,10 @@ def _solve_continuous(
     backend_evaluator = cast(NLPEvaluator, _BoundOverrideEvaluator(evaluator, lb, ub))
 
     t_jax_start = time.perf_counter()
-    if nlp_solver == "ripopt":
-        from discopt.solvers.nlp_ripopt import solve_nlp as solve_nlp_ripopt
+    if nlp_solver == "pounce":
+        from discopt.solvers.nlp_pounce import solve_nlp as solve_nlp_pounce
 
-        nlp_result = solve_nlp_ripopt(
+        nlp_result = solve_nlp_pounce(
             backend_evaluator, x0, constraint_bounds=constraint_bounds, options=opts
         )
     elif nlp_solver == "sparse_ipm" and hasattr(backend_evaluator, "_obj_fn"):
@@ -3796,7 +3809,7 @@ def _solve_node_nlp(
     """
     # Pre-screen: detect trivially infeasible nodes by evaluating constraints
     # at the midpoint. When the feasible region is very narrow (most variables
-    # pinned) and constraints are violated, NLP solvers like ripopt can stall
+    # pinned) and constraints are violated, NLP solvers like POUNCE can stall
     # for thousands of iterations instead of quickly returning infeasible.
     if constraint_bounds is not None and evaluator.n_constraints > 0:
         from discopt.solvers import NLPResult
@@ -3835,8 +3848,8 @@ def _solve_node_nlp(
             except Exception:
                 pass  # If evaluation fails, fall through to NLP solver
 
-    if nlp_solver == "ripopt":
-        return _solve_node_nlp_ripopt(evaluator, x0, node_lb, node_ub, constraint_bounds, options)
+    if nlp_solver == "pounce":
+        return _solve_node_nlp_pounce(evaluator, x0, node_lb, node_ub, constraint_bounds, options)
     if nlp_solver == "ipm":
         # JAX IPM requires JAX-compiled _obj_fn/_cons_fn; fall back to ipopt
         # for evaluators without these attributes.
@@ -3850,7 +3863,7 @@ def _solve_node_nlp(
     return _solve_node_nlp_ipopt(evaluator, x0, node_lb, node_ub, constraint_bounds, options)
 
 
-def _solve_node_nlp_ripopt(
+def _solve_node_nlp_pounce(
     evaluator: NLPEvaluator,
     x0: np.ndarray,
     node_lb: np.ndarray,
@@ -3858,13 +3871,13 @@ def _solve_node_nlp_ripopt(
     constraint_bounds: Optional[list[tuple[float, float]]],
     options: dict,
 ):
-    """Solve node NLP with ripopt (Rust IPM)."""
+    """Solve node NLP with POUNCE (pure-Rust Ipopt port)."""
     from discopt.solvers import NLPResult
-    from discopt.solvers.nlp_ripopt import solve_nlp as solve_nlp_ripopt
+    from discopt.solvers.nlp_pounce import solve_nlp as solve_nlp_pounce
 
     proxy = _BoundOverrideEvaluator(evaluator, node_lb, node_ub)
 
-    # Guard against ripopt stalling on degenerate/infeasible subproblems
+    # Guard against POUNCE stalling on degenerate/infeasible subproblems
     # by enforcing a per-node wall time limit. Cap at 30s per node, but
     # also respect the remaining global budget passed via options (issue #5).
     opts = dict(options)
@@ -3874,14 +3887,14 @@ def _solve_node_nlp_ripopt(
     opts["max_wall_time"] = min(30.0, caller_limit)
 
     try:
-        return solve_nlp_ripopt(
+        return solve_nlp_pounce(
             proxy,
             x0,
             constraint_bounds=constraint_bounds,
             options=opts,
         )
     except Exception as e:
-        logger.debug("ripopt solver failed: %s", e)
+        logger.debug("POUNCE solver failed: %s", e)
         return NLPResult(status=SolveStatus.ERROR, x=x0, objective=_INFEASIBILITY_SENTINEL)
 
 

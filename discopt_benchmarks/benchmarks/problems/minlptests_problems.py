@@ -16,9 +16,9 @@ import math
 
 from benchmarks.problems.base import TestProblem, register
 
-_NLP_CVX = ["ipm", "ripopt", "ipopt"]
-_NLP = ["ipm", "ripopt", "ipopt"]
-_MI = ["ipm", "ripopt", "ipopt"]
+_NLP_CVX = ["ipm", "pounce", "ipopt"]
+_NLP = ["ipm", "pounce", "ipopt"]
+_MI = ["ipm", "pounce", "ipopt"]
 
 
 # ── Convex NLP (nlp-cvx) ──────────────────────────────────────────────────

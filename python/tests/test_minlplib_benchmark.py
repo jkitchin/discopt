@@ -2,7 +2,7 @@
 Benchmark five MINLPLib instances across NLP solvers and MINLP strategies.
 
 Instances: gbd, ex1223a, fuel, alan, portfol_robust050_34
-NLP solvers: jax_ipm, ripopt, ipopt
+NLP solvers: jax_ipm, pounce, ipopt
 Strategies: B&B only, B&B + OA (cutting planes)
 
 Known optimal values sourced from MINLPLib (verified by BARON).
@@ -33,7 +33,7 @@ INSTANCES = {
     # "portfol_robust050_34": -0.07207553,
 }
 
-NLP_SOLVERS = ["ipm", "ripopt", "ipopt"]
+NLP_SOLVERS = ["ipm", "pounce", "ipopt"]
 STRATEGIES = [
     pytest.param(False, id="bb"),
     pytest.param(True, id="bb+oa"),

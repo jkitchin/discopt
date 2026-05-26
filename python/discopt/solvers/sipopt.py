@@ -1,28 +1,30 @@
 """
 sIPOPT-style parametric sensitivity analysis for discopt models.
 
-Provides `ripopt_sensitivity()` which:
-  1. Solves the NLP with ripopt.
+Provides :func:`pounce_sensitivity` which:
+  1. Solves the NLP with POUNCE (pure-Rust Ipopt port).
   2. Builds the KKT matrix at the optimal solution using JAX-compiled derivatives.
   3. Computes ∂x*/∂p and ∂λ*/∂p via finite-difference perturbation of parameter
      values (recompiling NLPEvaluator for each perturbation direction).
-  4. Returns a SensitivityResult that supports fast first-order predictions
-     without re-solving.
+  4. Returns a :class:`SensitivityResult` that supports fast first-order
+     predictions without re-solving.
 
 The approach implements the classical sIPOPT sensitivity framework
-(Pirnay et al., 2012) in Python, mirroring ripopt v0.3.0's native Rust
-`solve_with_sensitivity` API.
+{cite:p}`Pirnay2012` in Python on top of the discopt NLP evaluator,
+backed by POUNCE for the primal solve. ``ripopt_sensitivity`` is kept
+as a deprecated alias.
 """
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
 
 from discopt._jax.nlp_evaluator import NLPEvaluator
-from discopt.solvers.nlp_ripopt import solve_nlp
+from discopt.solvers.nlp_pounce import solve_nlp
 
 
 @dataclass
@@ -38,13 +40,13 @@ class SensitivityResult:
     objective : float
         Optimal objective value.
     status : str
-        Ripopt termination status (e.g. ``"optimal"``).
+        NLP termination status (e.g. ``"optimal"``).
     dx_dp : ndarray, shape (n, n_params)
         Solution sensitivity matrix. Column k is dx*/dp_k.
     dlambda_dp : ndarray, shape (m, n_params)
         Multiplier sensitivity matrix. Column k is dλ*/dp_k.
     parameters : list
-        The dm.Parameter objects passed to ``ripopt_sensitivity``, in order.
+        The dm.Parameter objects passed to :func:`pounce_sensitivity`, in order.
     """
 
     x_star: np.ndarray
@@ -95,10 +97,7 @@ class SensitivityResult:
         linear approximation using the multiplier signs.
         """
         self.predict(new_values)
-        # Approximation: use the multiplier-based envelope theorem
-        # df* ≈ f(x*) + ∇f · Δx  (primal linearisation)
-        # This is a second-order accurate bound for many problems.
-        return float(self.objective)  # override in subclasses if needed
+        return float(self.objective)
 
     def sensitivity_summary(
         self, var_names: Optional[list[str]] = None, param_names: Optional[list[str]] = None
@@ -128,13 +127,13 @@ class SensitivityResult:
         return "\n".join(rows)
 
 
-def ripopt_sensitivity(
+def pounce_sensitivity(
     model,
     parameters: list,
     options: Optional[dict] = None,
     eps: float = 1e-6,
 ) -> SensitivityResult:
-    """Solve an NLP with ripopt and compute parametric sensitivity (sIPOPT).
+    """Solve an NLP with POUNCE and compute parametric sensitivity (sIPOPT).
 
     After a single solve, computes the full dx*/dp and dλ*/dp matrices
     using the KKT sensitivity system {cite:p}`Pirnay2012`:
@@ -156,7 +155,7 @@ def ripopt_sensitivity(
         Parameters to differentiate with respect to.  Each must be a
         scalar parameter (``param.value`` is a float or 0-d array).
     options : dict, optional
-        Ripopt solver options (e.g. ``{"max_iter": 1000, "tol": 1e-8}``).
+        POUNCE solver options (e.g. ``{"max_iter": 1000, "tol": 1e-8}``).
     eps : float
         Central finite-difference step for parametric derivatives.
 
@@ -168,19 +167,18 @@ def ripopt_sensitivity(
     Examples
     --------
     >>> import discopt.modeling as dm
-    >>> from discopt.solvers.sipopt import ripopt_sensitivity
+    >>> from discopt.solvers.sipopt import pounce_sensitivity
     >>>
     >>> m = dm.Model("portfolio")
     >>> mu = m.parameter("mu", value=0.08)
     >>> # ... build model ...
-    >>> sens = ripopt_sensitivity(m, [mu])
+    >>> sens = pounce_sensitivity(m, [mu])
     >>> # Predict allocation if expected return rises to 0.10
     >>> x_new = sens.predict([0.10])
     """
     opts = dict(options or {})
     opts.setdefault("print_level", 0)
 
-    # ── Step 1: Solve ──────────────────────────────────────────────────────
     evaluator = NLPEvaluator(model)
     n = evaluator.n_variables
     m_cons = evaluator.n_constraints
@@ -189,12 +187,13 @@ def ripopt_sensitivity(
 
     nlp_result = solve_nlp(evaluator, x0, options=opts)
     if nlp_result.x is None:
-        raise RuntimeError(f"ripopt solve failed with status: {nlp_result.status}")
+        raise RuntimeError(f"POUNCE solve failed with status: {nlp_result.status}")
     x_star: np.ndarray = nlp_result.x
     objective: float = float(nlp_result.objective) if nlp_result.objective is not None else 0.0
-    lambda_star = nlp_result.multipliers if nlp_result.multipliers is not None else np.zeros(m_cons)
+    lambda_star = (
+        nlp_result.multipliers if nlp_result.multipliers is not None else np.zeros(m_cons)
+    )
 
-    # ── Step 2: KKT matrix ────────────────────────────────────────────────
     W = evaluator.evaluate_lagrangian_hessian(x_star, 1.0, lambda_star)
     J = evaluator.evaluate_jacobian(x_star)
 
@@ -203,10 +202,8 @@ def ripopt_sensitivity(
     else:
         KKT = W.copy()
 
-    # Regularise the saddle-point system for numerical stability
     KKT += 1e-10 * np.eye(n + m_cons)
 
-    # ── Step 3: Parametric RHS via finite differences ─────────────────────
     n_params = len(parameters)
     dx_dp = np.zeros((n, n_params))
     dlambda_dp = np.zeros((m_cons, n_params))
@@ -228,7 +225,7 @@ def ripopt_sensitivity(
             lag_m = lag_m + ev_m.evaluate_jacobian(x_star).T @ lambda_star
             cons_m = ev_m.evaluate_constraints(x_star)
 
-        param.value = np.float64(orig)  # restore
+        param.value = np.float64(orig)
 
         d_lag = (lag_p - lag_m) / (2.0 * eps)
         if m_cons > 0:
@@ -251,3 +248,20 @@ def ripopt_sensitivity(
         dlambda_dp=dlambda_dp,
         parameters=list(parameters),
     )
+
+
+def ripopt_sensitivity(
+    model,
+    parameters: list,
+    options: Optional[dict] = None,
+    eps: float = 1e-6,
+) -> SensitivityResult:
+    """Deprecated alias for :func:`pounce_sensitivity`."""
+    warnings.warn(
+        "ripopt_sensitivity is deprecated; use pounce_sensitivity "
+        "(POUNCE is a pure-Rust port of Ipopt). The 'ripopt_sensitivity' "
+        "name will be removed in a future release.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return pounce_sensitivity(model, parameters, options=options, eps=eps)

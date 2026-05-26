@@ -8,7 +8,7 @@ import numpy as np
 from benchmarks.problems.base import TestProblem, register
 
 # Applicable solvers for MILP problems
-_SOLVERS = ["ipm", "ripopt", "ipopt"]
+_SOLVERS = ["ipm", "pounce", "ipopt"]
 
 
 # ─────────────────────────────────────────────────────────────

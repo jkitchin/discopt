@@ -1,4 +1,4 @@
-"""Evaluator wrapping McCormick relaxation closures for the ripopt protocol.
+"""Evaluator wrapping McCormick relaxation closures for the discopt NLP protocol.
 
 The McCormick relaxation closures produced by ``_jax/relaxation_compiler.py``
 have signature ``(x_cv, x_cc, lb, ub) -> (cv, cc)``. The convex relaxation
@@ -9,10 +9,11 @@ NLP we want to solve is::
                 -cc_g(x)  <= 0   for sense == ">="
                 lb <= x <= ub
 
-This module wraps those closures into an object implementing the same
-evaluator protocol that ``ripopt_bindings.rs`` consumes — ``evaluate_objective``,
-``evaluate_gradient``, ``evaluate_constraints``, ``evaluate_jacobian``,
-``evaluate_lagrangian_hessian``, plus structure / sparse-values methods.
+This module wraps those closures into an object implementing the discopt
+NLP evaluator protocol — ``evaluate_objective``, ``evaluate_gradient``,
+``evaluate_constraints``, ``evaluate_jacobian``, ``evaluate_lagrangian_hessian``,
+plus structure / sparse-values methods. The same evaluator is consumed by
+POUNCE (via :mod:`discopt.solvers.nlp_pounce`) and the JAX IPM.
 
 Bounds (lb, ub) are runtime args of the jit'd callables, so a single
 compiled module serves every B&B node on a given problem.
@@ -28,7 +29,7 @@ import numpy as np
 
 
 class McCormickRelaxationEvaluator:
-    """Wrap McCormick relaxation closures for the ripopt protocol.
+    """Wrap McCormick relaxation closures for the discopt NLP evaluator protocol.
 
     The relaxation closures are kept by identity, so a single evaluator
     instance can be reused across B&B nodes by calling :meth:`set_bounds`

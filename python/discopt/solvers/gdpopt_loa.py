@@ -43,7 +43,7 @@ def solve_gdpopt_loa(
     max_iterations : int
         Maximum LOA iterations.
     nlp_solver : str
-        NLP solver backend for subproblems (``"ipm"``, ``"ripopt"``, ``"ipopt"``).
+        NLP solver backend for subproblems (``"ipm"``, ``"pounce"``, ``"ipopt"``).
 
     Returns
     -------

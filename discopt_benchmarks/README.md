@@ -85,7 +85,7 @@ result = model.solve(
 )
 ```
 
-Category benchmarks default to the NLP-BB backends (`ipm`, `ripopt`, `ipopt`).
+Category benchmarks default to the NLP-BB backends (`ipm`, `pounce`, `ipopt`).
 For an AMP-specific benchmark over the same problem categories, select AMP
 explicitly:
 

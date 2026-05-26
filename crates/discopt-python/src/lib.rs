@@ -1,7 +1,8 @@
 //! PyO3 bindings for the discopt MINLP solver.
 //!
 //! Provides Python-accessible wrappers for the Rust B&B tree manager,
-//! expression IR, batch dispatch, .nl parser, and ripopt IPM solver.
+//! expression IR, batch dispatch, and .nl parser. The IPM NLP solver
+//! is POUNCE (https://github.com/jkitchin/pounce), used from Python.
 
 #![deny(missing_docs)]
 
@@ -11,7 +12,6 @@ mod batch;
 mod bnb_bindings;
 mod expr_bindings;
 mod nl_bindings;
-mod ripopt_bindings;
 
 /// Returns the discopt version.
 #[pyfunction]
@@ -30,6 +30,5 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(expr_bindings::model_to_repr, m)?)?;
     m.add_function(wrap_pyfunction!(nl_bindings::parse_nl_file, m)?)?;
     m.add_function(wrap_pyfunction!(nl_bindings::parse_nl_string, m)?)?;
-    m.add_function(wrap_pyfunction!(ripopt_bindings::solve_ripopt, m)?)?;
     Ok(())
 }

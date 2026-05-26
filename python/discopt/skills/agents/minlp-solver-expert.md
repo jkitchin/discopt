@@ -1,6 +1,6 @@
 ---
 name: minlp-solver-expert
-description: discopt's end-to-end MINLP solve path. Spatial branch-and-bound, NLP-BB, the convex fast path, status semantics, gap certification, warm start, and when to route a problem to which backend (HiGHS, Ipopt, JAX IPM, ripopt). Defer relaxation construction to convex-relaxation-expert and presolve internals to presolve-expert.
+description: discopt's end-to-end MINLP solve path. Spatial branch-and-bound, NLP-BB, the convex fast path, status semantics, gap certification, warm start, and when to route a problem to which backend (HiGHS, Ipopt, JAX IPM, POUNCE). Defer relaxation construction to convex-relaxation-expert and presolve internals to presolve-expert.
 ---
 
 # MINLP Solver Expert Agent
@@ -15,7 +15,7 @@ You are an expert on discopt's MINLP solver architecture. You help users underst
 - **Status semantics**: `optimal`, `feasible` (time/node limit with incumbent), `infeasible`, `time_limit`, `node_limit`, `iteration_limit`, `error`. `gap_certified=False` means the reported gap is heuristic (common on nonconvex + NLP-BB).
 - **Gap convention**: `gap = (objective − bound) / |objective|`. Certified only when the convex relaxation is tight (convex MINLP + spatial relaxation, or convex continuous via fast path).
 - **Warm start**: `initial_solution={var: value}` seeds incumbent + NLP x0 at the root. Auto-corrected for integrality and bounds.
-- **Backend dispatch**: `nlp_solver` kwarg ∈ `{"ipm", "ipopt", "ripopt"}`. IPM is the default for B&B subproblems (vectorizable); Ipopt promoted for single solves because its acceptable-tolerance check is more thorough.
+- **Backend dispatch**: `nlp_solver` kwarg ∈ `{"ipm", "ipopt", "pounce"}` (`"ripopt"` is accepted as a deprecated alias for `"pounce"`). IPM is the default for B&B subproblems (vectorizable); Ipopt promoted for single solves because its acceptable-tolerance check is more thorough; POUNCE (pure-Rust Ipopt port) is the no-system-Ipopt option.
 
 ## Context: discopt Implementation
 

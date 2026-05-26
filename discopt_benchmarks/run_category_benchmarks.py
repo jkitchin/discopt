@@ -73,7 +73,8 @@ def main():
         type=str,
         default=None,
         help=(
-            "Comma-separated solver filter. Supports ipm,ripopt,ipopt,highs,amp. "
+            "Comma-separated solver filter. Supports ipm,pounce,ipopt,highs,amp "
+            "(ripopt accepted as a deprecated alias for pounce). "
             "Use --solvers amp for AMP-specific category benchmarks."
         ),
     )
@@ -141,12 +142,12 @@ def main():
 def _list_categories():
     """List available benchmark categories."""
     categories = {
-        "lp": "Linear programming (LP) — ipm, ripopt, ipopt, highs",
-        "qp": "Quadratic programming (QP) — ipm, ripopt, ipopt",
-        "milp": "Mixed-integer LP (MILP) — ipm, ripopt, ipopt",
-        "miqp": "Mixed-integer QP (MIQP) — ipm, ripopt, ipopt",
-        "minlp": "Mixed-integer NLP (MINLP) — ipm, ripopt, ipopt; use --solvers amp for AMP",
-        "global_opt": "Global optimization — ipm, ripopt, ipopt; use --solvers amp for AMP",
+        "lp": "Linear programming (LP) — ipm, pounce, ipopt, highs",
+        "qp": "Quadratic programming (QP) — ipm, pounce, ipopt",
+        "milp": "Mixed-integer LP (MILP) — ipm, pounce, ipopt",
+        "miqp": "Mixed-integer QP (MIQP) — ipm, pounce, ipopt",
+        "minlp": "Mixed-integer NLP (MINLP) — ipm, pounce, ipopt; use --solvers amp for AMP",
+        "global_opt": "Global optimization — ipm, pounce, ipopt; use --solvers amp for AMP",
     }
     print("\nAvailable benchmark categories:\n")
     for name, desc in categories.items():
@@ -163,7 +164,7 @@ def _parse_solver_filter(raw: str | None) -> list[str] | None:
     if not solvers:
         return None
 
-    valid = {"ipm", "ripopt", "ipopt", "highs", "amp"}
+    valid = {"ipm", "pounce", "ripopt", "ipopt", "highs", "amp"}
     invalid = [solver for solver in solvers if solver not in valid]
     if invalid:
         print(f"ERROR: Unknown solver(s): {', '.join(invalid)}. Valid: {', '.join(sorted(valid))}")

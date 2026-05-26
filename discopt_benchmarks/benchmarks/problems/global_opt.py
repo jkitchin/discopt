@@ -6,7 +6,7 @@ from pathlib import Path
 
 from benchmarks.problems.base import TestProblem, register
 
-_APPLICABLE = ["ipm", "ripopt", "ipopt"]
+_APPLICABLE = ["ipm", "pounce", "ipopt"]
 
 _NL_DIR = Path(__file__).parent.parent.parent.parent / "python" / "tests" / "data" / "minlplib_nl"
 

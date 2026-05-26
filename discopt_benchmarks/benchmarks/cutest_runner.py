@@ -205,7 +205,8 @@ class CUTEstBenchmarkRunner:
         """Run a single solver on a single CUTEst problem."""
         dispatch = {
             "discopt_ipopt": self._run_discopt_ipopt,
-            "discopt_ripopt": self._run_discopt_ripopt,
+            "discopt_pounce": self._run_discopt_pounce,
+            "discopt_ripopt": self._run_discopt_pounce,
             "discopt_ipm": self._run_discopt_ipm,
             "scipy": self._run_scipy,
             "ipopt_standalone": self._run_ipopt_standalone,
@@ -271,11 +272,11 @@ class CUTEstBenchmarkRunner:
                 wall_time=float("inf"),
             )
 
-    def _run_discopt_ripopt(self, problem_name: str) -> SolveResult:
-        """Solve via discopt's ripopt (Rust IPM) backend using NLPEvaluatorFromCUTEst."""
+    def _run_discopt_pounce(self, problem_name: str) -> SolveResult:
+        """Solve via discopt's POUNCE (pure-Rust Ipopt port) backend using NLPEvaluatorFromCUTEst."""
         try:
             from discopt.interfaces.cutest import load_cutest_problem
-            from discopt.solvers.nlp_ripopt import solve_nlp
+            from discopt.solvers.nlp_pounce import solve_nlp
 
             prob = load_cutest_problem(problem_name, sif_params=self.config.sif_params)
             evaluator = prob.to_evaluator()
@@ -308,7 +309,7 @@ class CUTEstBenchmarkRunner:
             prob.close()
             return SolveResult(
                 instance=problem_name,
-                solver="discopt_ripopt",
+                solver="discopt_pounce",
                 status=status_map.get(nlp_result.status, SolveStatus.ERROR),
                 objective=nlp_result.objective,
                 wall_time=wall_time,
@@ -316,7 +317,7 @@ class CUTEstBenchmarkRunner:
         except Exception:
             return SolveResult(
                 instance=problem_name,
-                solver="discopt_ripopt",
+                solver="discopt_pounce",
                 status=SolveStatus.ERROR,
                 wall_time=float("inf"),
             )

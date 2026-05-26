@@ -7,7 +7,7 @@ from scipy.optimize import minimize as scipy_minimize
 
 from benchmarks.problems.base import TestProblem, register
 
-_APPLICABLE = ["ipm", "ripopt", "ipopt"]
+_APPLICABLE = ["ipm", "pounce", "ipopt"]
 
 
 # ---------------------------------------------------------------------------

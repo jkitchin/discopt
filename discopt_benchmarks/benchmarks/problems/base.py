@@ -13,15 +13,15 @@ _REGISTRY: dict[str, list[TestProblem]] = {}
 
 # Solver applicability per category
 _SOLVER_MAP: dict[str, list[str]] = {
-    "lp": ["ipm", "ripopt", "ipopt", "highs"],
-    "qp": ["ipm", "ripopt", "ipopt"],
-    "milp": ["ipm", "ripopt", "ipopt"],
-    "miqp": ["ipm", "ripopt", "ipopt"],
-    "minlp": ["ipm", "ripopt", "ipopt"],
-    "global_opt": ["ipm", "ripopt", "ipopt"],
-    "nlp_convex": ["ipm", "ripopt", "ipopt"],
-    "nlp_nonconvex": ["ipm", "ripopt", "ipopt"],
-    "minlp_nonconvex": ["ipm", "ripopt", "ipopt"],
+    "lp": ["ipm", "pounce", "ipopt", "highs"],
+    "qp": ["ipm", "pounce", "ipopt"],
+    "milp": ["ipm", "pounce", "ipopt"],
+    "miqp": ["ipm", "pounce", "ipopt"],
+    "minlp": ["ipm", "pounce", "ipopt"],
+    "global_opt": ["ipm", "pounce", "ipopt"],
+    "nlp_convex": ["ipm", "pounce", "ipopt"],
+    "nlp_nonconvex": ["ipm", "pounce", "ipopt"],
+    "minlp_nonconvex": ["ipm", "pounce", "ipopt"],
 }
 
 

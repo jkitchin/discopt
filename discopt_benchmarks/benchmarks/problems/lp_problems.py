@@ -11,7 +11,7 @@ import numpy as np
 
 from benchmarks.problems.base import TestProblem, register
 
-_LP_SOLVERS = ["ipm", "ripopt", "ipopt", "highs"]
+_LP_SOLVERS = ["ipm", "pounce", "ipopt", "highs"]
 
 
 # ---------------------------------------------------------------------------
