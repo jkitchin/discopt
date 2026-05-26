@@ -22,6 +22,18 @@ max_constraints = 5
 max_instances = 10
 time_limit_seconds = 60
 
+[suites.nonconvex_qcp_smoke]
+description = "Targeted probe of nonconvex QCP / bilinear pooling instances"
+sources = ["minlplib"]
+instance_list_inline = [
+  "pooling_haverly1stp", "pooling_haverly3stp", "pooling_rt2tp",
+  "ex9_1_8",
+  "kall_congruentcircles_c41", "kall_congruentcircles_c51",
+  "kall_circlesrectangles_c1r13",
+  "wastewater15m1",
+]
+time_limit_seconds = 60
+
 [suites.phase1]
 description = "Phase 1 milestone: small instances, ≤10 vars"
 sources = ["minlplib"]
