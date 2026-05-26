@@ -1480,6 +1480,13 @@ def solve_nlp_ipm(
 # ---------------------------------------------------------------------------
 
 
+# Cache keyed on (id(obj_fn), id(con_fn), id(options)) so that repeated
+# calls with the same callables hit the XLA cache. Without this, the
+# per-call definition of `_solve_single` produced a fresh function
+# identity each invocation, defeating jax.vmap's compilation cache.
+_batch_solver_cache: dict = {}
+
+
 def solve_nlp_batch(
     obj_fn: Callable,
     con_fn: Optional[Callable],
@@ -1509,18 +1516,52 @@ def solve_nlp_batch(
     Returns:
         IPMState with batched arrays (batch, ...).
     """
+    has_con = con_fn is not None
+    has_g = g_l is not None
+    # Use options hashed by value (NamedTuple) — caller often constructs a
+    # fresh IPMOptions per call with the same field values, and id-based
+    # keying would miss the cache and trigger a fresh XLA compile each time.
+    opts_key = options if options is not None else None
+    key = (
+        id(obj_fn),
+        id(con_fn) if has_con else None,
+        opts_key,
+        bool(has_g),
+    )
 
-    def _solve_single(x0_single, xl_single, xu_single):
-        return ipm_solve(
-            obj_fn,
-            con_fn,
-            x0_single,
-            xl_single,
-            xu_single,
-            g_l,
-            g_u,
-            options,
-            check_deadline=False,  # host callback unsupported under vmap (#80)
-        )
+    cached = _batch_solver_cache.get(key)
+    if cached is None:
+        local_obj = obj_fn
+        local_con = con_fn
+        local_opts = options
+        local_has_con = has_con
+        local_has_g = has_g
 
-    return jax.vmap(_solve_single)(x0_batch, xl_batch, xu_batch)  # type: ignore[no-any-return]
+        @jax.jit
+        def _batch_solve(x0_b, xl_b, xu_b, g_l_in, g_u_in):
+            def _solve_single(x0_single, xl_single, xu_single):
+                return ipm_solve(
+                    local_obj,
+                    local_con if local_has_con else None,
+                    x0_single,
+                    xl_single,
+                    xu_single,
+                    g_l_in if local_has_g else None,
+                    g_u_in if local_has_g else None,
+                    local_opts,
+                    check_deadline=False,  # host callback unsupported under vmap (#80)
+                )
+
+            return jax.vmap(_solve_single)(x0_b, xl_b, xu_b)
+
+        cached = _batch_solve
+        _batch_solver_cache[key] = cached
+
+    if has_g:
+        g_l_arg = jnp.asarray(g_l, dtype=jnp.float64)
+        g_u_arg = jnp.asarray(g_u, dtype=jnp.float64)
+    else:
+        g_l_arg = jnp.zeros(0, dtype=jnp.float64)
+        g_u_arg = jnp.zeros(0, dtype=jnp.float64)
+
+    return cached(x0_batch, xl_batch, xu_batch, g_l_arg, g_u_arg)  # type: ignore[no-any-return]
