@@ -40,6 +40,10 @@ coverage.svg
 # Benchmark results and reports
 /results/
 /reports/
+/discopt_benchmarks/reports/
+
+# Generated course material (built from python/discopt/course/)
+/course/
 
 # Build output
 _build/

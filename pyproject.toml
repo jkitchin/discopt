@@ -196,6 +196,13 @@ disable_error_code = ["assignment", "misc", "union-attr", "operator", "arg-type"
 [tool.pytest.ini_options]
 testpaths = ["python/tests"]
 timeout = 300
+# Default run is fast-correctness-ish. Opt into the heavy sets explicitly:
+#   pytest -m slow            # backend cross-product, mid-size instances
+#   pytest -m correctness     # known-optima validation (lives alongside benchmarks)
+#   pytest -m amp_benchmark   # AMP / Alpine / MINLPTests benchmark coverage
+#   pytest -m cutest          # requires CUTEst install
+#   pytest -m ''              # everything, ignoring this filter
+addopts = "-m 'not slow and not correctness and not amp_benchmark and not cutest and not memory_heavy and not gpu'"
 markers = [
     "unit: pure-logic tests; no solver, no JAX trace beyond cached; <0.1 s",
     "smoke: one solve per code path on a tiny instance; <1 s",

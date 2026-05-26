@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import shlex
+import shutil
 import subprocess
 import warnings
 from pathlib import Path
@@ -226,6 +227,8 @@ def test_memory_capped_pytest_warns_when_prlimit_missing():
     """Missing prlimit should be explicit because the test then runs uncapped."""
     repo = Path(__file__).resolve().parents[2]
     script = repo / "scripts" / "run_memory_capped_pytest.sh"
+    true_bin = shutil.which("true")
+    assert true_bin is not None, "could not locate 'true' on PATH"
     env = {
         **os.environ,
         "PATH": "/tmp",
@@ -234,7 +237,7 @@ def test_memory_capped_pytest_warns_when_prlimit_missing():
     }
 
     result = subprocess.run(
-        ["/bin/bash", str(script), "/bin/true"],
+        ["/bin/bash", str(script), true_bin],
         cwd=repo,
         check=True,
         text=True,
