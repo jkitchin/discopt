@@ -5,9 +5,6 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  schedule:
-    # Nightly coverage refresh (07:30 UTC ≈ 03:30 ET).
-    - cron: "30 7 * * *"
 
 # Cancel superseded runs on the same PR/branch — saves CI minutes when
 # pushes land in quick succession.
@@ -115,10 +112,9 @@ jobs:
 
   python-coverage:
     name: Python coverage (3.12, ubuntu)
-    # Run coverage nightly, after main pushes, or on PRs explicitly opted in
+    # Run coverage on main pushes, or on PRs explicitly opted in
     # via the `coverage` label.
     if: >-
-      github.event_name == 'schedule' ||
       github.event_name == 'push' ||
       (github.event_name == 'pull_request' &&
         contains(github.event.pull_request.labels.*.name, 'coverage'))
