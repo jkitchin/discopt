@@ -2200,7 +2200,11 @@ def solve_model(
                 try:
                     from discopt._numpy.relaxation_compiler import (
                         compile_constraint_relaxation as _np_compile_con,
+                    )
+                    from discopt._numpy.relaxation_compiler import (
                         compile_objective_relaxation as _np_compile_obj,
+                    )
+                    from discopt._numpy.relaxation_compiler import (
                         supported_for_model,
                     )
 

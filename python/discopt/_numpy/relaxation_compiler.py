@@ -63,10 +63,26 @@ from discopt.modeling.core import (
 )
 
 _SUPPORTED_FUNCS = {
-    "exp", "log", "log2", "log10", "sqrt",
-    "sin", "cos", "tan", "atan", "asin", "acos",
-    "sinh", "cosh", "tanh", "sigmoid", "softplus",
-    "abs", "sign", "min", "max",
+    "exp",
+    "log",
+    "log2",
+    "log10",
+    "sqrt",
+    "sin",
+    "cos",
+    "tan",
+    "atan",
+    "asin",
+    "acos",
+    "sinh",
+    "cosh",
+    "tanh",
+    "sigmoid",
+    "softplus",
+    "abs",
+    "sign",
+    "min",
+    "max",
 }
 
 
@@ -178,17 +194,21 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
         op = expr.op
 
         if op == "+":
+
             def fn(x_cv, x_cc, lb, ub):
                 cv_l, cc_l = left_fn(x_cv, x_cc, lb, ub)
                 cv_r, cc_r = right_fn(x_cv, x_cc, lb, ub)
                 return relax_add(cv_l, cc_l, cv_r, cc_r)
+
             return fn
 
         if op == "-":
+
             def fn(x_cv, x_cc, lb, ub):
                 cv_l, cc_l = left_fn(x_cv, x_cc, lb, ub)
                 cv_r, cc_r = right_fn(x_cv, x_cc, lb, ub)
                 return relax_sub(cv_l, cc_l, cv_r, cc_r)
+
             return fn
 
         if op == "*":
@@ -201,6 +221,7 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
                     new_cv = np.where(pos, _c * cv_r, _c * cc_r)
                     new_cc = np.where(pos, _c * cc_r, _c * cv_r)
                     return new_cv, new_cc
+
                 return fn
 
             if _is_constant_expr(expr.right):
@@ -212,6 +233,7 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
                     new_cv = np.where(pos, _c * cv_l, _c * cc_l)
                     new_cc = np.where(pos, _c * cc_l, _c * cv_l)
                     return new_cv, new_cc
+
                 return fn
 
             def fn(x_cv, x_cc, lb, ub):
@@ -220,6 +242,7 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
                 mid_l = 0.5 * (cv_l + cc_l)
                 mid_r = 0.5 * (cv_r + cc_r)
                 return relax_bilinear(mid_l, mid_r, cv_l, cc_l, cv_r, cc_r)
+
             return fn
 
         if op == "/":
@@ -233,6 +256,7 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
                     new_cv = np.where(pos, _inv_c * cv_l, _inv_c * cc_l)
                     new_cc = np.where(pos, _inv_c * cc_l, _inv_c * cv_l)
                     return new_cv, new_cc
+
                 return fn
 
             def fn(x_cv, x_cc, lb, ub):
@@ -241,6 +265,7 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
                 mid_l = 0.5 * (cv_l + cc_l)
                 mid_r = 0.5 * (cv_r + cc_r)
                 return relax_div(mid_l, mid_r, cv_l, cc_l, cv_r, cc_r)
+
             return fn
 
         if op == "**":
@@ -248,10 +273,12 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
                 n_val = expr.right.value
                 n_int = int(n_val)
                 if np.isclose(float(n_val), float(n_int)):
+
                     def fn(x_cv, x_cc, lb, ub, _n=n_int):
                         cv_l, cc_l = left_fn(x_cv, x_cc, lb, ub)
                         mid = 0.5 * (cv_l + cc_l)
                         return relax_pow(mid, cv_l, cc_l, _n)
+
                     return fn
 
                 alpha = float(n_val)
@@ -262,13 +289,14 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
                         cv_l, cc_l = left_fn(x_cv, x_cc, lb, ub)
                         cv_l = np.maximum(cv_l, 1e-30)
                         cc_l = np.maximum(cc_l, 1e-30)
-                        cc_out = cc_l ** _a
-                        fa = cv_l ** _a
-                        fb = cc_l ** _a
+                        cc_out = cc_l**_a
+                        fa = cv_l**_a
+                        fb = cc_l**_a
                         slope = (fb - fa) / np.maximum(cc_l - cv_l, 1e-30)
                         mid = 0.5 * (cv_l + cc_l)
                         cv_out = fa + slope * (mid - cv_l)
                         return cv_out, cc_out
+
                     return fn
 
                 if alpha > 1.0:
@@ -278,13 +306,14 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
                         cv_l, cc_l = left_fn(x_cv, x_cc, lb, ub)
                         cv_l = np.maximum(cv_l, 1e-30)
                         cc_l = np.maximum(cc_l, 1e-30)
-                        cv_out = cv_l ** _a
-                        fa = cv_l ** _a
-                        fb = cc_l ** _a
+                        cv_out = cv_l**_a
+                        fa = cv_l**_a
+                        fb = cc_l**_a
                         slope = (fb - fa) / np.maximum(cc_l - cv_l, 1e-30)
                         mid = 0.5 * (cv_l + cc_l)
                         cc_out = fa + slope * (mid - cv_l)
                         return cv_out, cc_out
+
                     return fn
 
             # Non-constant exponent: x^y = exp(y * log(x))
@@ -295,11 +324,10 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
                 mid_r = 0.5 * (cv_r + cc_r)
                 log_cv, log_cc = relax_log(mid_l, cv_l, cc_l)
                 mid_log = 0.5 * (log_cv + log_cc)
-                prod_cv, prod_cc = relax_bilinear(
-                    mid_r, mid_log, cv_r, cc_r, log_cv, log_cc
-                )
+                prod_cv, prod_cc = relax_bilinear(mid_r, mid_log, cv_r, cc_r, log_cv, log_cc)
                 mid_prod = 0.5 * (prod_cv + prod_cc)
                 return relax_exp(mid_prod, prod_cv, prod_cc)
+
             return fn
 
         raise NotImplementedError(f"Unknown binary operator: {op!r}")
@@ -309,16 +337,20 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
         op = expr.op
 
         if op == "neg":
+
             def fn(x_cv, x_cc, lb, ub):
                 cv_child, cc_child = operand_fn(x_cv, x_cc, lb, ub)
                 return relax_neg(cv_child, cc_child)
+
             return fn
 
         if op == "abs":
+
             def fn(x_cv, x_cc, lb, ub):
                 cv_child, cc_child = operand_fn(x_cv, x_cc, lb, ub)
                 mid = 0.5 * (cv_child + cc_child)
                 return relax_abs(mid, cv_child, cc_child)
+
             return fn
 
         raise NotImplementedError(f"Unknown unary operator: {op!r}")
@@ -355,6 +387,7 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
                 cv_a, cc_a = _a_fn(x_cv, x_cc, lb, ub)
                 mid = 0.5 * (cv_a + cc_a)
                 return _relax_fn(mid, cv_a, cc_a)
+
             return fn
 
         if name == "sign":
@@ -364,6 +397,7 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
                 cv_a, cc_a = a_fn(x_cv, x_cc, lb, ub)
                 mid = 0.5 * (cv_a + cc_a)
                 return relax_sign(mid, cv_a, cc_a)
+
             return fn
 
         if name == "min":
@@ -375,6 +409,7 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
                 mid_a = 0.5 * (cv_a + cc_a)
                 mid_b = 0.5 * (cv_b + cc_b)
                 return relax_min(mid_a, mid_b, cv_a, cc_a, cv_b, cc_b)
+
             return fn
 
         if name == "max":
@@ -386,6 +421,7 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
                 mid_a = 0.5 * (cv_a + cc_a)
                 mid_b = 0.5 * (cv_b + cc_b)
                 return relax_max(mid_a, mid_b, cv_a, cc_a, cv_b, cc_b)
+
             return fn
 
         raise NotImplementedError(f"Unknown function: {name!r}")
@@ -397,6 +433,7 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
         def fn(x_cv, x_cc, lb, ub, _idx=idx):
             cv_base, cc_base = base_fn(x_cv, x_cc, lb, ub)
             return cv_base[_idx], cc_base[_idx]
+
         return fn
 
     if isinstance(expr, SumExpression):
@@ -406,6 +443,7 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
         def fn(x_cv, x_cc, lb, ub, _axis=axis):
             cv_op, cc_op = operand_fn(x_cv, x_cc, lb, ub)
             return np.sum(cv_op, axis=_axis), np.sum(cc_op, axis=_axis)
+
         return fn
 
     if isinstance(expr, SumOverExpression):
@@ -418,6 +456,7 @@ def _compile_relax_node(expr: Expression, model: Model) -> Callable:
                 cv_acc = cv_acc + cv_t
                 cc_acc = cc_acc + cc_t
             return cv_acc, cc_acc
+
         return fn
 
     raise NotImplementedError(f"Unhandled expression type: {type(expr).__name__}")

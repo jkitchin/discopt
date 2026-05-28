@@ -190,9 +190,7 @@ def pounce_sensitivity(
         raise RuntimeError(f"POUNCE solve failed with status: {nlp_result.status}")
     x_star: np.ndarray = nlp_result.x
     objective: float = float(nlp_result.objective) if nlp_result.objective is not None else 0.0
-    lambda_star = (
-        nlp_result.multipliers if nlp_result.multipliers is not None else np.zeros(m_cons)
-    )
+    lambda_star = nlp_result.multipliers if nlp_result.multipliers is not None else np.zeros(m_cons)
 
     W = evaluator.evaluate_lagrangian_hessian(x_star, 1.0, lambda_star)
     J = evaluator.evaluate_jacobian(x_star)

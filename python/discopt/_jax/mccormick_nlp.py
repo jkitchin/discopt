@@ -22,7 +22,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-
 # Default n_vars threshold below which the numpy/scipy backend is used
 # when caller supplies a numpy-compiled relaxation. Overridable via
 # DISCOPT_MCCORMICK_NUMPY_THRESHOLD.
@@ -217,8 +216,9 @@ def _solve_relaxation_with_pounce(
     deadline: float | None,
 ) -> float:
     """Solve the McCormick relaxation NLP via POUNCE."""
-    from discopt.solvers.nlp_pounce import POUNCE_AVAILABLE, solve_nlp as solve_nlp_pounce
     from discopt.solvers import SolveStatus
+    from discopt.solvers.nlp_pounce import POUNCE_AVAILABLE
+    from discopt.solvers.nlp_pounce import solve_nlp as solve_nlp_pounce
 
     if not POUNCE_AVAILABLE:
         return -np.inf
@@ -227,9 +227,7 @@ def _solve_relaxation_with_pounce(
     ub = np.asarray(node_ub, dtype=np.float64)
     n_vars = int(lb.size)
 
-    ev = _get_or_build_pounce_evaluator(
-        obj_relax_fn, con_fns_tuple, senses_tuple, n_vars, negate
-    )
+    ev = _get_or_build_pounce_evaluator(obj_relax_fn, con_fns_tuple, senses_tuple, n_vars, negate)
     ev.set_bounds(lb, ub)
 
     m = ev.n_constraints
@@ -305,6 +303,7 @@ def _get_or_build_relax_solver(
             return -cc if negate else cv
 
         if has_cons:
+
             def con_fn(x):
                 vals = []
                 for fn, sense in zip(fns_local, senses_local):

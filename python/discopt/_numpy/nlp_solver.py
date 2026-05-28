@@ -68,7 +68,9 @@ def solve_mccormick_relaxation_nlp_numpy(
                     def c(x):
                         _cv, cc = f(x, x, lb, ub)
                         return float(cc)
+
                     return c
+
                 constraints.append({"type": "ineq", "fun": make_ge()})
             else:
                 # "<=" and "=="; relaxation requires cv <= 0 i.e. -cv >= 0.
@@ -76,7 +78,9 @@ def solve_mccormick_relaxation_nlp_numpy(
                     def c(x):
                         cv, _cc = f(x, x, lb, ub)
                         return float(-cv)
+
                     return c
+
                 constraints.append({"type": "ineq", "fun": make_le()})
 
     x0 = np.clip(mid, lb, ub)
