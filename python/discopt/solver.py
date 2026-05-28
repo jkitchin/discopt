@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Optional, cast
+from typing import Any, Callable, Optional, cast
 
 import numpy as np
 from scipy.optimize import minimize as scipy_minimize
@@ -2101,9 +2101,9 @@ def solve_model(
     # --- McCormick relaxation bounds ---
     _mc_obj_eval = None  # BatchRelaxationEvaluator for midpoint bounds
     _mc_obj_relax_fn = None  # raw relaxation fn for NLP bounds
-    _mc_con_relax_fns = None
+    _mc_con_relax_fns: list[Callable] | None = None
     _mc_obj_relax_fn_np = None  # numpy-backed relaxation, when supported
-    _mc_con_relax_fns_np = None
+    _mc_con_relax_fns_np: list[Callable] | None = None
     _mc_con_senses = None
     _mc_negate = False
     _mc_mode = mccormick_bounds
@@ -3892,7 +3892,7 @@ def _solve_node_nlp_pounce(
 
     try:
         return solve_nlp_pounce(
-            proxy,
+            proxy,  # type: ignore[arg-type]
             x0,
             constraint_bounds=constraint_bounds,
             options=opts,

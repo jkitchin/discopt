@@ -65,7 +65,7 @@ def _pounce_backend_enabled() -> bool:
 # fresh closures over (lb, ub), forcing JAX to retrace+recompile per node
 # (the dominant cost on small instances).
 _midpoint_batch_cache: dict = {}
-_relax_solver_cache: dict = {}
+_relax_solver_cache: dict[tuple, Callable] = {}
 _pounce_evaluator_cache: dict = {}
 
 
@@ -260,6 +260,8 @@ def _solve_relaxation_with_pounce(
         SolveStatus.UNBOUNDED,
     ):
         return -np.inf
+    if result.objective is None:
+        return -np.inf
     val = float(result.objective)
     if not np.isfinite(val):
         return -np.inf
@@ -291,8 +293,8 @@ def _get_or_build_relax_solver(
         return cached
 
     has_cons = bool(con_relax_fns) and bool(con_senses)
-    fns_local = tuple(con_relax_fns) if has_cons else ()
-    senses_local = tuple(con_senses) if has_cons else ()
+    fns_local: tuple[Callable, ...] = tuple(con_relax_fns) if con_relax_fns is not None else ()
+    senses_local: tuple[str, ...] = tuple(con_senses) if con_senses is not None else ()
     n_cons = len(fns_local)
     opts = IPMOptions(max_iter=max_iter)
 

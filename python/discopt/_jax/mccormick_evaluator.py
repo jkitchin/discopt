@@ -59,6 +59,8 @@ class McCormickRelaxationEvaluator:
             cv, cc = obj_relax_fn(x, x, lb, ub)
             return -cc if negate else cv
 
+        self._cons_jit: Optional[Callable] = None
+        self._jac_jit: Optional[Callable] = None
         if self._m > 0:
             fns_local = self._fns
             senses_local = self._senses
@@ -75,9 +77,6 @@ class McCormickRelaxationEvaluator:
 
             self._cons_jit = jax.jit(cons_vec)
             self._jac_jit = jax.jit(jax.jacobian(cons_vec, argnums=0))
-        else:
-            self._cons_jit = None
-            self._jac_jit = None
 
         self._obj_jit = jax.jit(obj_scalar)
         self._grad_jit = jax.jit(jax.grad(obj_scalar, argnums=0))

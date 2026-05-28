@@ -58,9 +58,10 @@ def solve_mccormick_relaxation_nlp_numpy(
         cv, cc = obj_relax_fn(x, x, lb, ub)
         return float(-cc if negate else cv)
 
-    constraints = []
+    constraints: list[dict] = []
     has_cons = bool(con_relax_fns) and bool(con_senses)
     if has_cons:
+        assert con_relax_fns is not None and con_senses is not None
         for fn, sense in zip(con_relax_fns, con_senses):
             if sense == ">=":
                 # Original: g(x) >= 0; relaxation requires -cc <= 0 i.e. cc >= 0.
