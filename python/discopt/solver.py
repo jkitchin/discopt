@@ -747,7 +747,7 @@ def _solve_root_node_multistart_ipm(
         # KKT stationarity — objective is not a valid LB for convex NLP-BB.
         if convex and best_code in (3, 4):
             try:
-                polish = _solve_node_nlp_ipopt(
+                polish = _solve_node_nlp_kkt(
                     evaluator,
                     best_x,
                     np.asarray(node_lb),
@@ -1437,8 +1437,9 @@ def solve_model(
     nlp_solver : str, default "ipm"
         NLP solver backend: ``"pounce"`` (POUNCE — pure-Rust Ipopt port),
         ``"ipopt"`` (cyipopt), ``"ipm"`` (pure-JAX IPM), or
-        ``"sparse_ipm"`` (sparse KKT + scipy direct solve).
-        ``"ripopt"`` is accepted as a deprecated alias for ``"pounce"``.
+        ``"sparse_ipm"`` (sparse KKT + scipy direct solve). For single
+        continuous solves the ``"ipm"`` default is promoted to a KKT-valid
+        backend, resolving to POUNCE when available and falling back to cyipopt.
     sparse : bool or None, default None
         Force sparse (True) or dense (False) Jacobian evaluation.
         If None, auto-selects based on problem size and density.
@@ -1510,17 +1511,13 @@ def solve_model(
             stacklevel=2,
         )
 
-    if nlp_solver == "ripopt":
-        import warnings
-
-        warnings.warn(
-            "nlp_solver='ripopt' is deprecated; use nlp_solver='pounce' "
-            "(POUNCE is a pure-Rust port of Ipopt). The 'ripopt' alias "
-            "will be removed in a future release.",
-            DeprecationWarning,
-            stacklevel=2,
+    _valid_nlp_solvers = {"ipm", "pounce", "ipopt", "cyipopt", "sparse_ipm"}
+    if nlp_solver not in _valid_nlp_solvers:
+        raise ValueError(
+            f"Unknown nlp_solver={nlp_solver!r}. Choose one of "
+            f"{sorted(_valid_nlp_solvers)}. (The 'ripopt' backend was replaced "
+            "by 'pounce', a pure-Rust port of Ipopt.)"
         )
-        nlp_solver = "pounce"
 
     # --- AMP (Adaptive Multivariate Partitioning) global solver ---
     _solver = solver if solver is not None else kwargs.pop("solver", None)
@@ -3054,6 +3051,46 @@ def solve_model(
         sol_flat = np.array(sol_array)
         x_dict = _unpack_solution(model, sol_flat)
 
+        # Refine the incumbent's continuous variables with a KKT-accurate
+        # re-solve (integers fixed at their incumbent values). The batched JAX
+        # IPM can leave continuous variables a few digits short of full
+        # precision, which inflates active-constraint complementarity at
+        # validation time; POUNCE (or cyipopt) converges them tightly. This is
+        # a single solve at the end of the search. Best-effort and guarded so a
+        # divergent re-solve can never change the reported optimum.
+        try:
+            _fix_lb = lb.copy()
+            _fix_ub = ub.copy()
+            for _off, _sz in zip(int_offsets, int_sizes):
+                for _k in range(int(_sz)):
+                    _val = float(round(float(sol_flat[_off + _k])))
+                    _fix_lb[_off + _k] = _val
+                    _fix_ub[_off + _k] = _val
+            _polish_opts = dict(opts)
+            _polish_opts["max_wall_time"] = max(
+                0.1, min(5.0, time_limit - (time.perf_counter() - t_start))
+            )
+            _polish_opts.setdefault("print_level", 0)
+            _polished = _solve_node_nlp_kkt(
+                evaluator, sol_flat, _fix_lb, _fix_ub, constraint_bounds, _polish_opts
+            )
+            if (
+                _polished.status == SolveStatus.OPTIMAL
+                and _polished.x is not None
+                and np.all(np.isfinite(_polished.x))
+                and _polished.objective is not None
+                and abs(float(_polished.objective) - obj_val) <= 1e-4 * (1.0 + abs(obj_val))
+            ):
+                _refined = np.asarray(_polished.x, dtype=float).copy()
+                for _off, _sz in zip(int_offsets, int_sizes):
+                    for _k in range(int(_sz)):
+                        _refined[_off + _k] = round(float(sol_flat[_off + _k]))
+                sol_flat = _refined
+                x_dict = _unpack_solution(model, sol_flat)
+                obj_val = float(_polished.objective)
+        except Exception as _exc:
+            logger.debug("Incumbent KKT polish failed: %s", _exc)
+
         # Negate objective back for maximization (B&B tree tracks minimization)
         from discopt.modeling.core import ObjectiveSense
 
@@ -3106,6 +3143,23 @@ def solve_model(
     )
 
 
+def _default_nlp_solver() -> str:
+    """Resolve the default KKT-valid NLP backend.
+
+    Prefers POUNCE (pure-Rust Ipopt port), falls back to cyipopt, then to the
+    pure-JAX IPM as a last resort. Mirrors the preference order of
+    :func:`discopt.solvers.nlp_backend.get_nlp_solver`.
+    """
+    from discopt.solvers.nlp_backend import available_backends
+
+    avail = available_backends()
+    if "pounce" in avail:
+        return "pounce"
+    if "cyipopt" in avail:
+        return "ipopt"
+    return "ipm"
+
+
 def _solve_continuous(
     model: Model,
     time_limit: float,
@@ -3120,10 +3174,11 @@ def _solve_continuous(
     # problems with unbounded variables and inequality constraints it can
     # terminate at a non-KKT point and report OPTIMAL (false optimality).
     # B&B subproblems tolerate this because the tree catches it, but single
-    # solves don't, so promote the default ipm -> ipopt here. Users who
-    # explicitly requested ipm/pounce/sparse_ipm still get what they asked for.
+    # solves don't, so promote the default ipm -> a KKT-valid solver (POUNCE,
+    # falling back to cyipopt). Users who explicitly requested
+    # ipm/pounce/sparse_ipm still get what they asked for.
     if nlp_solver == "ipm":
-        nlp_solver = "ipopt"
+        nlp_solver = _default_nlp_solver()
 
     t_jax_start = time.perf_counter()
     evaluator = _make_evaluator(model)
@@ -3725,7 +3780,7 @@ def _solve_nlp_bb(
                 0.1, min(5.0, time_limit - (time.perf_counter() - t_start))
             )
             recover_opts.setdefault("print_level", 0)
-            nlp_recovered = _solve_node_nlp_ipopt(
+            nlp_recovered = _solve_node_nlp_kkt(
                 evaluator, sol_flat, fix_lb, fix_ub, constraint_bounds, recover_opts
             )
             if nlp_recovered.status in (
@@ -3750,6 +3805,31 @@ def _solve_nlp_bb(
                                 bound_duals_lower[v.name] = np.zeros_like(bound_duals_lower[v.name])
                             if bound_duals_upper is not None and v.name in bound_duals_upper:
                                 bound_duals_upper[v.name] = np.zeros_like(bound_duals_upper[v.name])
+
+                # Adopt the refined primal from the KKT re-solve. It solves the
+                # same integer-fixed subproblem to tighter precision than the
+                # batched JAX IPM, so the continuous variables (and thus
+                # active-constraint residuals) stay consistent with the
+                # recovered duals — without this, complementarity (mu * residual)
+                # can exceed validation tolerances. Guarded: only adopt an
+                # OPTIMAL re-solve whose objective matches the incumbent, so a
+                # divergent recover can never corrupt the reported solution.
+                if (
+                    nlp_recovered.status == SolveStatus.OPTIMAL
+                    and nlp_recovered.x is not None
+                    and np.all(np.isfinite(nlp_recovered.x))
+                    and nlp_recovered.objective is not None
+                    and abs(float(nlp_recovered.objective) - obj_val) <= 1e-4 * (1.0 + abs(obj_val))
+                ):
+                    refined = np.asarray(nlp_recovered.x, dtype=float).copy()
+                    # Keep integer columns pinned at their (rounded) incumbent
+                    # values; only the continuous variables are refined.
+                    for off, sz in zip(int_offsets, int_sizes):
+                        for k in range(int(sz)):
+                            refined[off + k] = round(float(sol_flat[off + k]))
+                    sol_flat = refined
+                    x_dict = _unpack_solution(model, sol_flat)
+                    obj_val = float(nlp_recovered.objective)
         except Exception as _exc:
             logger.debug("NLP-BB dual recovery failed: %s", _exc)
 
@@ -4020,7 +4100,7 @@ def _solve_node_nlp_ipm(
     # for a convex NLP. Re-solve with cyipopt. See issue #39.
     if convex and conv in (3, 4):
         try:
-            polish = _solve_node_nlp_ipopt(
+            polish = _solve_node_nlp_kkt(
                 evaluator, x_sol, node_lb, node_ub, constraint_bounds, options
             )
         except Exception as e:
@@ -4184,7 +4264,7 @@ def _solve_batch_ipm(
                 node_lb_i = np.asarray(xl_batch[row])
                 node_ub_i = np.asarray(xu_batch[row])
                 try:
-                    polish = _solve_node_nlp_ipopt(
+                    polish = _solve_node_nlp_kkt(
                         evaluator,
                         result_sols[i],
                         node_lb_i,
@@ -4333,6 +4413,25 @@ def _solve_node_nlp_ipopt(
         bound_multipliers_lower=np.asarray(mult_x_L) if mult_x_L is not None else None,
         bound_multipliers_upper=np.asarray(mult_x_U) if mult_x_U is not None else None,
     )
+
+
+def _solve_node_nlp_kkt(
+    evaluator: NLPEvaluator,
+    x0: np.ndarray,
+    node_lb: np.ndarray,
+    node_ub: np.ndarray,
+    constraint_bounds: Optional[list[tuple[float, float]]],
+    options: dict,
+):
+    """Solve a node NLP with a KKT-valid solver for B&B polish passes.
+
+    Prefers POUNCE (pure-Rust Ipopt port); falls back to cyipopt when POUNCE
+    is unavailable. Used to re-solve nodes whose IPM iterate stalled at a
+    non-KKT point, where the objective is not a valid lower bound.
+    """
+    if _default_nlp_solver() == "pounce":
+        return _solve_node_nlp_pounce(evaluator, x0, node_lb, node_ub, constraint_bounds, options)
+    return _solve_node_nlp_ipopt(evaluator, x0, node_lb, node_ub, constraint_bounds, options)
 
 
 # ---------------------------------------------------------------------------

@@ -17,6 +17,7 @@ from typing import Optional
 import numpy as np
 
 from discopt._jax.nlp_evaluator import NLPEvaluator
+from discopt.modeling.core import Model
 from discopt.solvers import NLPResult, SolveStatus
 from discopt.solvers.nlp_ipopt import (
     _IPOPT_STATUS_MAP,
@@ -119,3 +120,32 @@ def solve_nlp(
         iterations=int(info.get("iter_count", 0)),
         wall_time=wall_time,
     )
+
+
+def solve_nlp_from_model(
+    model: Model,
+    x0: Optional[np.ndarray] = None,
+    options: Optional[dict] = None,
+) -> NLPResult:
+    """Convenience: create an NLPEvaluator from a model and solve with POUNCE.
+
+    Same signature and semantics as
+    :func:`discopt.solvers.nlp_ipopt.solve_nlp_from_model`.
+
+    Args:
+        model: A Model with objective and constraints set.
+        x0: Initial point (n,). If None, uses midpoint of bounds clipped to [-100, 100].
+        options: POUNCE/Ipopt options dict.
+
+    Returns:
+        NLPResult with solution.
+    """
+    evaluator = NLPEvaluator(model)
+
+    if x0 is None:
+        lb, ub = evaluator.variable_bounds
+        lb_clipped = np.clip(lb, -100.0, 100.0)
+        ub_clipped = np.clip(ub, -100.0, 100.0)
+        x0 = 0.5 * (lb_clipped + ub_clipped)
+
+    return solve_nlp(evaluator, x0, options=options)

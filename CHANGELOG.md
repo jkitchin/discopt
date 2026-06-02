@@ -12,7 +12,29 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **POUNCE NLP backend declared as a dependency** (`feat(solvers)`). New
+  `pounce` optional extra (`pip install discopt[pounce]`, dist `pounce-solver`)
+  and a `requires_pounce` test marker. POUNCE is a standalone pure-Rust port of
+  Ipopt (https://github.com/jkitchin/pounce). Added `solve_nlp_from_model` to
+  `discopt.solvers.nlp_pounce` for parity with the cyipopt wrapper, plus
+  `python/tests/test_nlp_pounce.py`.
+
 ### Changed
+
+- **POUNCE is now the default single-solve NLP backend** (`feat(solvers)`).
+  For single continuous solves the `ipm` default is promoted to a KKT-valid
+  backend via `_default_nlp_solver()`, resolving to POUNCE when installed and
+  falling back to cyipopt. B&B convex-polish / dual-recovery passes likewise
+  prefer POUNCE through the new `_solve_node_nlp_kkt` wrapper.
+
+### Removed
+
+- **BREAKING: removed the deprecated `ripopt` aliases** (`feat(solvers)!`). The
+  old in-repo Rust IPM crate `ripopt` was already superseded by POUNCE; the
+  remaining compatibility shims are gone: the `discopt.solvers.nlp_ripopt`
+  module, `nlp_solver="ripopt"` (now raises `ValueError`),
+  `DISCOPT_MCCORMICK_BACKEND=ripopt`, `sipopt.ripopt_sensitivity`, and the
+  `discopt_ripopt` benchmark key. Use `pounce` / `pounce_sensitivity` instead.
 
 ### Fixed
 

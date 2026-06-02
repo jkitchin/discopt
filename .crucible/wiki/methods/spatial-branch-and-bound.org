@@ -138,7 +138,7 @@ Rust B&B tree (TreeManager) manages the search tree, node selection, and
 bound management. Python orchestration in solver.py dispatches convex
 relaxation construction and NLP subproblem solving to JAX (batched IPM,
 McCormick relaxations, alphaBB underestimators) or to external NLP solvers
-(Ipopt, ripopt). FBBT is implemented in the Rust core via expression DAG
+(Ipopt, POUNCE). FBBT is implemented in the Rust core via expression DAG
 propagation, and the factorable decomposition that Smith and Pantelides
 formalized is performed on the Rust-side expression IR before the JAX
 relaxation compiler builds node relaxations.

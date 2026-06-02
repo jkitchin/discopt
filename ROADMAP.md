@@ -23,7 +23,7 @@ discopt followed a 4-phase development plan. Phases 1-4 are complete. Phases 5-7
 | T14 Solver orchestrator  | Done        | End-to-end Model.solve() via B&B                   |
 | T15 MINLPLib validation  | Done        | 34 solvable instances, zero incorrect              |
 | T16 Phase 1 gate         | Done        | All criteria pass                                  |
-| T9a Rust Ipopt (ripopt)  | Superseded  | Replaced by T17 pure-JAX IPM                       |
+| T9a Rust Ipopt (ripopt)  | Superseded  | Old ripopt crate replaced by T17 pure-JAX IPM and POUNCE |
 |                          |             |                                                    |
 
 ## Phase 2: GPU + Differentiability (complete)
@@ -54,7 +54,7 @@ discopt followed a 4-phase development plan. Phases 1-4 are complete. Phases 5-7
 
 | Task                              | Status      | Description                                               |
 |-----------------------------------|-------------|-----------------------------------------------------------|
-| ripopt integration (PyO3)         | Done        | Rust IPM solver via PyO3 bindings (`nlp_solver="ripopt"`) |
+| POUNCE integration                | Done        | Pure-Rust Ipopt port via Python bindings (`nlp_solver="pounce"`); default single-solve backend, replaced the old ripopt crate |
 | CUTEst interface                  | Done        | PyCUTEst evaluator for NLP benchmarking                   |
 | Documentation + example notebooks | Done        | 43 notebooks, Jupyter Book site builds with zero warnings |
 | Release engineering               | Done        | Published on PyPI, maturin build, CI auto-publish on tags |

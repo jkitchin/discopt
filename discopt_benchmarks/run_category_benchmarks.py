@@ -73,8 +73,7 @@ def main():
         type=str,
         default=None,
         help=(
-            "Comma-separated solver filter. Supports ipm,pounce,ipopt,highs,amp "
-            "(ripopt accepted as a deprecated alias for pounce). "
+            "Comma-separated solver filter. Supports ipm,pounce,ipopt,highs,amp. "
             "Use --solvers amp for AMP-specific category benchmarks."
         ),
     )
@@ -164,7 +163,7 @@ def _parse_solver_filter(raw: str | None) -> list[str] | None:
     if not solvers:
         return None
 
-    valid = {"ipm", "pounce", "ripopt", "ipopt", "highs", "amp"}
+    valid = {"ipm", "pounce", "ipopt", "highs", "amp"}
     invalid = [solver for solver in solvers if solver not in valid]
     if invalid:
         print(f"ERROR: Unknown solver(s): {', '.join(invalid)}. Valid: {', '.join(sorted(valid))}")

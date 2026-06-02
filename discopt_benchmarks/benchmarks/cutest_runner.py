@@ -206,7 +206,6 @@ class CUTEstBenchmarkRunner:
         dispatch = {
             "discopt_ipopt": self._run_discopt_ipopt,
             "discopt_pounce": self._run_discopt_pounce,
-            "discopt_ripopt": self._run_discopt_pounce,
             "discopt_ipm": self._run_discopt_ipm,
             "scipy": self._run_scipy,
             "ipopt_standalone": self._run_ipopt_standalone,

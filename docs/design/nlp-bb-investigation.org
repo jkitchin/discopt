@@ -87,7 +87,7 @@ gate to determine whether gap certification is possible.
 
 The =NLPEvaluator= compiles the model's objective, gradient, Hessian,
 constraints, and Jacobian to JIT'd JAX functions. It provides the callback
-interface used by all NLP solvers (cyipopt, ripopt, JAX IPM). NLP-BB reuses it
+interface used by all NLP solvers (cyipopt, POUNCE, JAX IPM). NLP-BB reuses it
 without modification.
 
 ** What NLP-BB Does NOT Need

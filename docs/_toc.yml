@@ -19,8 +19,8 @@ parts:
       - file: notebooks/tutorial_oa
       - file: notebooks/amp_global_minlp
       - file: notebooks/tutorial_solver_jax_ipm
-      - file: notebooks/tutorial_solver_ripopt
-      - file: notebooks/tutorial_ripopt_sipopt
+      - file: notebooks/tutorial_solver_pounce
+      - file: notebooks/tutorial_pounce_sipopt
       - file: notebooks/tutorial_solver_cyipopt
       - file: notebooks/tutorial_solver_selection
   - caption: Tutorials

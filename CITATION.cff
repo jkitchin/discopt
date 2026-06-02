@@ -7,7 +7,7 @@ abstract: >-
   JAX (automatic differentiation, NLP relaxations, GPU acceleration), and
   Python orchestration. It supports spatial branch-and-bound, McCormick
   relaxations, neural-network embedding, generalized disjunctive
-  programming, and multiple NLP backends (pure-JAX IPM, ripopt, cyipopt).
+  programming, and multiple NLP backends (pure-JAX IPM, POUNCE, cyipopt).
 type: software
 authors:
   - family-names: Kitchin

@@ -11,13 +11,11 @@ Provides :func:`pounce_sensitivity` which:
 
 The approach implements the classical sIPOPT sensitivity framework
 {cite:p}`Pirnay2012` in Python on top of the discopt NLP evaluator,
-backed by POUNCE for the primal solve. ``ripopt_sensitivity`` is kept
-as a deprecated alias.
+backed by POUNCE for the primal solve.
 """
 
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -246,20 +244,3 @@ def pounce_sensitivity(
         dlambda_dp=dlambda_dp,
         parameters=list(parameters),
     )
-
-
-def ripopt_sensitivity(
-    model,
-    parameters: list,
-    options: Optional[dict] = None,
-    eps: float = 1e-6,
-) -> SensitivityResult:
-    """Deprecated alias for :func:`pounce_sensitivity`."""
-    warnings.warn(
-        "ripopt_sensitivity is deprecated; use pounce_sensitivity "
-        "(POUNCE is a pure-Rust port of Ipopt). The 'ripopt_sensitivity' "
-        "name will be removed in a future release.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return pounce_sensitivity(model, parameters, options=options, eps=eps)
