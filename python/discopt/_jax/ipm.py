@@ -10,7 +10,7 @@ Implements a primal-dual barrier method with:
   - Adaptive barrier parameter (Loqo rule)
   - jax.lax.while_loop for JIT-compatible iteration
 
-Ported from the ripopt algorithm (Rust primal-dual IPM).
+Ported from a Rust primal-dual IPM implementation.
 All data structures are NamedTuples for JAX pytree compatibility.
 """
 

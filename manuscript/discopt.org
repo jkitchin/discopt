@@ -12,7 +12,7 @@
 
 * Abstract
 
-We present discopt, a hybrid Rust/JAX/Python solver for mixed-integer nonlinear programming (MINLP) problems, together with ripopt, a faithful Rust translation of Ipopt's interior point algorithm. The system makes five contributions: (1) differentiable MINLP solving via implicit differentiation of the KKT system, enabling decision-focused learning through nonconvex optimization layers; (2) batched node evaluation using =jax.vmap= for data-parallel branch-and-bound; (3) a pure-JAX interior point method with Mehrotra predictor-corrector steps and Ipopt-style filter line search that is JIT-compilable and vmappable; (4) ripopt, a memory-safe Rust IPM with zero C/Fortran dependencies that implements Ipopt's numerical hardening through a source-level translation; (5) a compositional relaxation compiler supporting McCormick, \alpha BB, piecewise McCormick, and ICNN-learned relaxations; and (6) a neural network embedding module that formulates trained feedforward networks as algebraic MINLP constraints via full-space, big-M, and reduced-space strategies, enabling optimization over ML surrogates. All three NLP backends (pure-JAX IPM, ripopt, Ipopt) produce identical optimal solutions on a suite of 9 NLP and 24 MINLP benchmark problems with zero incorrect results. On a decision-focused learning task, differentiating through the solver achieves 36% regret reduction versus two-stage predict-then-optimize. The algebraic coefficient extraction path provides 17--226\times speedups for LP and QP subproblems. Source code is available under EPL-2.0 license (discopt and ripopt).
+We present discopt, a hybrid Rust/JAX/Python solver for mixed-integer nonlinear programming (MINLP) problems, which integrates POUNCE, a separate companion project providing a faithful Rust translation of Ipopt's interior point algorithm, as one of its NLP backends. The system makes five contributions: (1) differentiable MINLP solving via implicit differentiation of the KKT system, enabling decision-focused learning through nonconvex optimization layers; (2) batched node evaluation using =jax.vmap= for data-parallel branch-and-bound; (3) a pure-JAX interior point method with Mehrotra predictor-corrector steps and Ipopt-style filter line search that is JIT-compilable and vmappable; (4) integration of POUNCE, a memory-safe Rust IPM with zero C/Fortran dependencies that implements Ipopt's numerical hardening through a source-level translation; (5) a compositional relaxation compiler supporting McCormick, \alpha BB, piecewise McCormick, and ICNN-learned relaxations; and (6) a neural network embedding module that formulates trained feedforward networks as algebraic MINLP constraints via full-space, big-M, and reduced-space strategies, enabling optimization over ML surrogates. All three NLP backends (pure-JAX IPM, POUNCE, Ipopt) produce identical optimal solutions on a suite of 9 NLP and 24 MINLP benchmark problems with zero incorrect results. On a decision-focused learning task, differentiating through the solver achieves 36% regret reduction versus two-stage predict-then-optimize. The algebraic coefficient extraction path provides 17--226\times speedups for LP and QP subproblems. discopt is available under the EPL-2.0 license, and POUNCE is available as a separate project (https://github.com/jkitchin/pounce) under the EPL-2.0 license.
 
 * Introduction
 
@@ -26,12 +26,12 @@ State-of-the-art MINLP solvers---BARON cite:&Tawarmalani2005, Couenne, SCIP cite
 
 *Gap 3: No memory-safe, dependency-free IPM.* Ipopt cite:&Wachter2006 is the workhorse NLP solver used inside most MINLP solvers. It depends on Fortran BLAS/LAPACK, the MUMPS sparse direct solver, and C++ infrastructure totaling hundreds of thousands of lines of code. Installing cyipopt on a fresh system requires compiling or locating these Fortran dependencies. A Rust cite:&Matsakis2014 reimplementation would provide memory safety guarantees, zero C/Fortran dependencies, and a clean =cargo build= workflow.
 
-This paper describes discopt and ripopt, which together address these three gaps. The contributions are:
+This paper describes discopt and its integration with POUNCE, which together address these three gaps. The contributions are:
 
 1. *Differentiable MINLP* via two mechanisms: the envelope theorem (Level 1) for fast objective sensitivity, and implicit differentiation of the KKT system (Level 3) for full primal--dual sensitivity matrices, enabling decision-focused learning through nonconvex solvers.
 2. *Batched node evaluation* using =jax.vmap= over NLP relaxation solves at B&B nodes, with warm-starting from parent solutions.
 3. *Pure-JAX interior point method* with Mehrotra predictor-corrector cite:&Mehrotra1992, Cholesky-based inertia correction, Ipopt-style filter line search cite:&Wachter2006, and carry-based =jax.lax.while_loop= for JIT cache reuse.
-4. *ripopt*: a source-level C++ \to Rust translation of Ipopt's core IPM algorithm, producing a standalone memory-safe NLP solver with a clean =NlpProblem= trait interface.
+4. *POUNCE integration*: discopt uses POUNCE, a separate companion project that is a source-level C++ \to Rust translation of Ipopt's core IPM algorithm, producing a standalone memory-safe NLP solver with a clean =NlpProblem= trait interface, as one of its NLP backends.
 5. *Compositional relaxation framework* with 21 McCormick relaxation functions cite:&McCormick1976;&Tsoukalas2014, \alpha BB underestimators cite:&Androulakis1995;&Adjiman1998, piecewise McCormick with adaptive partitioning cite:&Castro2015 achieving 91--94% gap reduction, ICNN-learned relaxations cite:&Amos2017icnn, and a sound DCP/SUSPECT-style structural convexity certifier cite:&GrantBoydYe2006;&Ceccon2020 that routes certified-convex models to a single-solve fast path.
 6. *Neural network embedding* that formulates trained feedforward networks (ReLU, sigmoid, tanh, softplus) as MINLP constraints via big-M, full-space, and reduced-space strategies, with interval arithmetic bound propagation and ONNX model import cite:&Ceccon2022;&Anderson2020.
 7. *Adaptive Multivariate Partitioning* cite:&Nagarajan2016;&Nagarajan2019, a complementary global MINLP solver that iterates piecewise-McCormick MILP relaxations with adaptive partition refinement, with the soundness guarantee $LB_k \le f^* \le UB_k$ at every iteration.
@@ -112,7 +112,7 @@ discopt is organized as a three-layer system: (1) a Python modeling API for prob
        |                                        |
        v                                        v
   B&B Tree Manager               NLP Solver Backend
-  (node pool, branching,         (IPM / ripopt / Ipopt)
+  (node pool, branching,         (IPM / POUNCE / Ipopt)
    bound tightening)                    |
        |                                v
        +-------- batch dispatch --------+
@@ -357,12 +357,12 @@ This solves all $k$ node relaxations simultaneously, providing approximately $k$
 
 At the root node of the B&B tree, multi-start solving uses 5 diverse starting points (midpoint, lower-quarter, upper-quarter, and 2 random) solved simultaneously via =vmap=. On non-root nodes, the solver warm-starts from the parent node's solution clipped to the child's tightened bounds.
 
-** ripopt: A Memory-Safe IPM in Rust
+** POUNCE: A Memory-Safe IPM in Rust
    :PROPERTIES:
    :CUSTOM_ID: sec-ripopt
    :END:
 
-ripopt (Rust Interior Point OPTimizer) is a source-level translation of Ipopt's core interior point algorithm from C++ to Rust. It is *not* a wrapper around C++ Ipopt; it is a standalone Rust crate that produces native code with Rust's ownership and borrowing guarantees.
+POUNCE is a source-level translation of Ipopt's core interior point algorithm from C++ to Rust, developed as a separate companion project (https://github.com/jkitchin/pounce). It is *not* a wrapper around C++ Ipopt; it is a standalone Rust crate that produces native code with Rust's ownership and borrowing guarantees. discopt integrates POUNCE as one of its NLP backends through POUNCE's Python bindings (PyPI distribution =pounce-solver=, import name =pounce=).
 
 *** Motivation
 
@@ -372,11 +372,11 @@ Three considerations drove the decision to translate rather than wrap:
 
 2. *Memory safety.* Rust's ownership model eliminates use-after-free bugs, data races, and buffer overflows at compile time---categories of bugs that have affected C++ numerical codes. The =cargo clippy= linter and optional =miri= interpreter catch additional issues.
 
-3. *Deployment simplicity.* ripopt compiles with =cargo build= with zero C or Fortran dependencies. The entire solver is a single Rust crate, eliminating the MUMPS/BLAS/LAPACK dependency chain that makes Ipopt installation non-trivial.
+3. *Deployment simplicity.* POUNCE compiles with =cargo build= with zero C or Fortran dependencies. The entire solver is a single Rust crate, eliminating the MUMPS/BLAS/LAPACK dependency chain that makes Ipopt installation non-trivial.
 
 *** Architecture
 
-ripopt exposes a clean =NlpProblem= trait that users implement:
+POUNCE exposes a clean =NlpProblem= trait that users implement:
 
 #+BEGIN_SRC rust
 pub trait NlpProblem {
@@ -400,21 +400,21 @@ The solver implements filter line search with Ipopt-style acceptance criteria, i
 
 *** PyO3 Integration
 
-The =discopt-python= crate wraps ripopt with PyO3 bindings cite:&pyo3. A =PyNlpProblem= struct implements the =NlpProblem= trait by calling back into Python evaluator methods (=evaluate_objective=, =evaluate_gradient=, =evaluate_constraints=, =evaluate_jacobian=, =evaluate_lagrangian_hessian=). Bounds and sparsity structure are cached in Rust-owned memory. The main solve loop releases the Python GIL via =py.allow_threads()=, and callbacks re-acquire it only for the duration of each evaluation:
+POUNCE ships PyO3 bindings cite:&pyo3 that discopt drives directly. A =PyNlpProblem= struct implements the =NlpProblem= trait by calling back into Python evaluator methods (=evaluate_objective=, =evaluate_gradient=, =evaluate_constraints=, =evaluate_jacobian=, =evaluate_lagrangian_hessian=). Bounds and sparsity structure are cached in Rust-owned memory. The main solve loop releases the Python GIL via =py.allow_threads()=, and callbacks re-acquire it only for the duration of each evaluation:
 
 #+BEGIN_SRC rust
-let result = py.allow_threads(|| ripopt::solve(&problem, &opts));
+let result = py.allow_threads(|| pounce::solve(&problem, &opts));
 #+END_SRC
 
 This means the heavy linear algebra in the IPM iteration runs without GIL contention, while the JAX-compiled gradient and Hessian evaluations use Python callbacks through the GIL.
 
 *** Licensing
 
-Because ripopt is a source-level translation of Ipopt (EPL-2.0), it is distributed under the Eclipse Public License 2.0. EPL-2.0 is not viral: code that /depends on/ ripopt does not need to adopt EPL-2.0, however, we have implemented a pure Python version in jax of the Ipopt algorithm in discopt, and have adopted the EPL-2.0 license for the entire discopt repository to avoid confusion and ensure that all components are covered by the same license.
+Because POUNCE is a source-level translation of Ipopt (EPL-2.0), it is distributed under the Eclipse Public License 2.0 in its own repository (https://github.com/jkitchin/pounce). POUNCE replaced the earlier in-repo =ripopt= crate, which has been extracted into this standalone companion project. EPL-2.0 is not viral: code that /depends on/ POUNCE does not need to adopt EPL-2.0. discopt depends on POUNCE only through its Python bindings; we have additionally implemented a pure Python version in jax of the Ipopt algorithm in discopt, and have adopted the EPL-2.0 license for the entire discopt repository to avoid confusion and ensure that all components are covered by the same license.
 
 ** Ipopt via cyipopt
 
-The third backend uses the industry-standard Ipopt solver cite:&Wachter2006 via cyipopt Python bindings. This serves as the correctness reference: any discrepancy between the pure-JAX IPM or ripopt and Ipopt on a well-conditioned problem indicates a bug in the former. Ipopt's advantage is its mature sparse linear algebra (MUMPS, MA27/MA57) which scales better on large, sparse problems ($n > 1000$). Its disadvantage is the Fortran/C++ dependency chain and inability to batch or differentiate through the solve.
+The third backend uses the industry-standard Ipopt solver cite:&Wachter2006 via cyipopt Python bindings. This serves as the correctness reference: any discrepancy between the pure-JAX IPM or POUNCE and Ipopt on a well-conditioned problem indicates a bug in the former. Ipopt's advantage is its mature sparse linear algebra (MUMPS, MA27/MA57) which scales better on large, sparse problems ($n > 1000$). Its disadvantage is the Fortran/C++ dependency chain and inability to batch or differentiate through the solve.
 
 * Convex Relaxation Framework
   :PROPERTIES:
@@ -508,7 +508,7 @@ Soundness is maintained at every iteration by the McCormick guarantee on the MIL
 LB_k \;\le\; \min_{x \in \mathcal X^{\mathrm{MINLP}}} f(x) \;\le\; UB_k \quad \text{for all } k,
 \end{equation}
 
-so termination at the first $k$ with closed gap is a certified $\varepsilon$-optimal solution. The MILP-relaxation construction is shared with the convex-hull / Big-M formulation work used elsewhere in discopt and is implemented in =discopt._jax.milp_relaxation=. The MILP itself is solved by HiGHS through the existing solver dispatch (Section ref:sec-nlp-backends), and the NLP subproblem by any of the three NLP backends (default ripopt; cyipopt is selected automatically when available).
+so termination at the first $k$ with closed gap is a certified $\varepsilon$-optimal solution. The MILP-relaxation construction is shared with the convex-hull / Big-M formulation work used elsewhere in discopt and is implemented in =discopt._jax.milp_relaxation=. The MILP itself is solved by HiGHS through the existing solver dispatch (Section ref:sec-nlp-backends), and the NLP subproblem by any of the three NLP backends (default =pounce=; cyipopt is selected automatically when available).
 
 Compared with the default sBB, AMP trades branching combinatorics for relaxation tightness: the MILP at each iteration is larger (one binary per partition cell per branched variable) but the tree is shallow because partitions, not subregions, are refined. On problems where the optimum lives on a few active partition cells --- pooling problems, water-network synthesis, generalised disjunctive programs with bilinear terms --- AMP closes the gap in tens of iterations where sBB would explore thousands of nodes.
 
@@ -619,7 +619,7 @@ The =discopt.estimate= module estimates unknown model parameters from experiment
 \hat{\theta} = \arg\min_{\theta \in \Theta} \sum_{i=1}^{N} \left( \frac{y_i^{\mathrm{obs}} - y_i^{\mathrm{model}}(\theta; d_i)}{\sigma_i} \right)^2,
 \end{equation}
 
-where $d_i$ are design conditions (sampling times, input concentrations, etc.) for observation $i$, $\Theta$ is a parameter box, and $y_i^{\mathrm{model}}$ is any discopt expression, including one produced by the DAE transcription of Section ref:sec-dyn. Because the objective is an ordinary discopt expression, estimation reuses the full NLP stack: the pure-JAX IPM, ripopt, or cyipopt.
+where $d_i$ are design conditions (sampling times, input concentrations, etc.) for observation $i$, $\Theta$ is a parameter box, and $y_i^{\mathrm{model}}$ is any discopt expression, including one produced by the DAE transcription of Section ref:sec-dyn. Because the objective is an ordinary discopt expression, estimation reuses the full NLP stack: the pure-JAX IPM, POUNCE, or cyipopt.
 
 Users declare an =Experiment= by subclassing a thin interface and providing =create_model(**kwargs)= returning an =ExperimentModel= that tags which variables are unknown parameters, which are design inputs, which expressions are responses, and the per-response measurement error. The same =Experiment= object is reused across estimation, FIM computation, and optimal experimental design, ensuring the three share a single source of truth.
 
@@ -753,7 +753,7 @@ We compare the three NLP backends on 5 test problems spanning unconstrained quad
 
 #+NAME: tab-nlp-backends
 #+CAPTION: NLP backend comparison. All backends achieve identical objectives (to solver tolerance). Timings on Apple M4 Pro, CPU.
-| Problem                 | $f^*$    | IPM (s) | ripopt (s) | Ipopt (s) |
+| Problem                 | $f^*$    | IPM (s) | POUNCE (s) | Ipopt (s) |
 |-------------------------+----------+---------+------------+-----------|
 | Quadratic ($n=2$)       | 0.000000 |   0.023 |      0.033 |     0.013 |
 | Constrained ($n=5$)     | 1.250000 |   0.269 |      0.001 |     0.001 |
@@ -765,9 +765,9 @@ We compare the three NLP backends on 5 test problems spanning unconstrained quad
 
 Key observations:
 - All three backends produce *identical optimal objectives* to solver tolerance ($10^{-6}$), confirming correctness across the Rust, JAX, and C++ implementations.
-- ripopt is competitive with Ipopt (total 0.17s vs 0.20s), and faster on Rosenbrock (0.082s vs 0.114s) and sum-of-squares (0.049s vs 0.070s).
+- POUNCE is competitive with Ipopt (total 0.17s vs 0.20s), and faster on Rosenbrock (0.082s vs 0.114s) and sum-of-squares (0.049s vs 0.070s).
 - The pure-JAX IPM includes JIT compilation overhead on first evaluation; subsequent solves of similarly-structured problems benefit from cached JIT traces.
-- On a quartic constrained NLP ($n=10$), ripopt (0.334s) and the JAX IPM (0.795s) agree to $6.5 \times 10^{-15}$ in objective value, confirming numerical equivalence.
+- On a quartic constrained NLP ($n=10$), POUNCE (0.334s) and the JAX IPM (0.795s) agree to $6.5 \times 10^{-15}$ in objective value, confirming numerical equivalence.
 
 ** MINLP Correctness
 
@@ -777,7 +777,7 @@ We validate on 24 MINLP problems (12 NLP + 12 MINLP with binary/integer variable
 - Tolerances: absolute $10^{-4}$, relative $10^{-3}$ for objectives; integrality tolerance $10^{-5}$
 - Problems include Rosenbrock, exponential, logarithmic, trigonometric, bilinear, and cardinality-constrained formulations
 
-B&B convergence with the ripopt backend was verified on two MINLP instances: a simple 3-variable problem (optimal $f^* = 2.0$, 1 node, 0.039s) and a larger 6-variable formulation (optimal $f^* = 3.0$, 13 nodes, 2.38s).
+B&B convergence with the POUNCE backend was verified on two MINLP instances: a simple 3-variable problem (optimal $f^* = 2.0$, 1 node, 0.039s) and a larger 6-variable formulation (optimal $f^* = 3.0$, 13 nodes, 2.38s).
 
 *** MINLPLib Validation
 
@@ -834,17 +834,17 @@ discopt demonstrates that a modern, multi-language MINLP solver can provide capa
 
 *Limitations.* The pure-JAX IPM uses dense linear algebra, which limits scalability to problems with $n \lesssim 5000$ variables. For larger problems, the sparse IPM backend (using scipy sparse factorization) or Ipopt should be used. The =.nl= file import path does not yet compute convex relaxations, limiting global optimality guarantees on imported MINLPLib instances. The JAX Metal backend (Apple GPU) is currently broken in JAX 0.8.2, so GPU acceleration is CPU-only on macOS.
 
-*Comparison with existing solvers.* discopt is not intended to replace BARON or SCIP on their core strength---solving large-scale MINLP to global optimality via decades-tuned sparse algorithms. Rather, discopt targets a complementary niche: problems where differentiability, batch solving, or Python-native modeling are primary requirements. The multi-backend architecture means users can start with the pure-JAX IPM for rapid prototyping and differentiable workflows, then switch to ripopt or Ipopt for production performance.
+*Comparison with existing solvers.* discopt is not intended to replace BARON or SCIP on their core strength---solving large-scale MINLP to global optimality via decades-tuned sparse algorithms. Rather, discopt targets a complementary niche: problems where differentiability, batch solving, or Python-native modeling are primary requirements. The multi-backend architecture means users can start with the pure-JAX IPM for rapid prototyping and differentiable workflows, then switch to POUNCE or Ipopt for production performance.
 
 *Command-line interface and literature monitoring.* discopt provides a command-line interface (=discopt=) installable via =pip=, with subcommands for searching arXiv and OpenAlex APIs and writing structured reports. These subcommands output JSON, enabling integration with scripting workflows and CI pipelines. A companion "discoptbot" agent uses the CLI to periodically scan for new publications relevant to the solver's algorithmic components (spatial B&B, McCormick relaxations, GNN branching, GPU-accelerated IPM), score them by relevance, and produce structured literature reports. This automated monitoring helps maintain awareness of algorithmic advances that could inform future solver development.
 
-*Future work.* Key directions include: (1) GPU-accelerated batch IPM via JAX's XLA backend when GPU support matures; (2) extending ripopt with sparse linear algebra to compete with Ipopt on large problems; (3) deeper integration of learned relaxations with online training during the B&B search; (4) exploiting the differentiable solver for bilevel optimization and meta-learning of solver parameters; (5) extending the DAE collocation module to higher-index DAEs, adaptive mesh refinement, and multi-stage optimal control with path constraints; (6) extending the neural network embedding to convolutional layers, residual connections, gradient-boosted tree models, and LP-based bound tightening (OBBT) for tighter big-M constants; and (7) extending the robust optimization module beyond the current affine decision rules to bilinear coefficient uncertainty (via LP dual auxiliary variables), polynomial or piecewise-linear recourse policies, and distributionally robust optimization via moment-based or Wasserstein ambiguity sets cite:&BenTalGoryashko2004;&Bertsimas2010.
+*Future work.* Key directions include: (1) GPU-accelerated batch IPM via JAX's XLA backend when GPU support matures; (2) extending POUNCE with sparse linear algebra to compete with Ipopt on large problems; (3) deeper integration of learned relaxations with online training during the B&B search; (4) exploiting the differentiable solver for bilevel optimization and meta-learning of solver parameters; (5) extending the DAE collocation module to higher-index DAEs, adaptive mesh refinement, and multi-stage optimal control with path constraints; (6) extending the neural network embedding to convolutional layers, residual connections, gradient-boosted tree models, and LP-based bound tightening (OBBT) for tighter big-M constants; and (7) extending the robust optimization module beyond the current affine decision rules to bilinear coefficient uncertainty (via LP dual auxiliary variables), polynomial or piecewise-linear recourse policies, and distributionally robust optimization via moment-based or Wasserstein ambiguity sets cite:&BenTalGoryashko2004;&Bertsimas2010.
 
 * Conclusion
 
-We have presented discopt, a hybrid Rust/JAX/Python MINLP solver that bridges the gap between classical mathematical programming and modern differentiable programming. The solver provides three interchangeable NLP backends---a pure-JAX IPM, ripopt (a memory-safe Rust translation of Ipopt), and Ipopt via cyipopt---all producing identical results on benchmark problems. The differentiable solving capability enables decision-focused learning through nonconvex optimization, achieving 36% regret reduction on resource allocation tasks. The compositional relaxation compiler achieves 91--94% gap reduction via piecewise McCormick, and the algebraic coefficient extraction path provides 17--226\times speedups for structured subproblems. The neural network embedding module enables optimization over trained ML surrogates by formulating feedforward networks as MINLP constraints with big-M, full-space, and reduced-space strategies. ripopt eliminates the Fortran/C++ dependency chain while preserving Ipopt's numerical robustness.
+We have presented discopt, a hybrid Rust/JAX/Python MINLP solver that bridges the gap between classical mathematical programming and modern differentiable programming. The solver provides three interchangeable NLP backends---a pure-JAX IPM, POUNCE (a memory-safe Rust translation of Ipopt, developed as a separate companion project), and Ipopt via cyipopt---all producing identical results on benchmark problems. The differentiable solving capability enables decision-focused learning through nonconvex optimization, achieving 36% regret reduction on resource allocation tasks. The compositional relaxation compiler achieves 91--94% gap reduction via piecewise McCormick, and the algebraic coefficient extraction path provides 17--226\times speedups for structured subproblems. The neural network embedding module enables optimization over trained ML surrogates by formulating feedforward networks as MINLP constraints with big-M, full-space, and reduced-space strategies. POUNCE eliminates the Fortran/C++ dependency chain while preserving Ipopt's numerical robustness.
 
-The system is open-source: discopt and ripopt are available under the EPL-2.0 License.
+The system is open-source: discopt is available under the EPL-2.0 License, and POUNCE is available as a separate companion project (https://github.com/jkitchin/pounce) under the EPL-2.0 License.
 
 bibliographystyle:unsrtnat
 bibliography:references.bib

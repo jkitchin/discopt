@@ -46,7 +46,7 @@ def _numpy_threshold() -> int:
 
 
 def _pounce_backend_enabled() -> bool:
-    """True when DISCOPT_MCCORMICK_BACKEND=pounce (or the deprecated "ripopt").
+    """True when DISCOPT_MCCORMICK_BACKEND=pounce.
 
     Opt-in: routes the convex relaxation NLP through POUNCE (pure-Rust
     Ipopt port; https://github.com/jkitchin/pounce) instead of the
@@ -56,7 +56,7 @@ def _pounce_backend_enabled() -> bool:
     at the cost of one Python<->Rust boundary per IPM iteration.
     """
     val = os.environ.get("DISCOPT_MCCORMICK_BACKEND", "ipm").strip().lower()
-    return val in ("pounce", "ripopt")
+    return val == "pounce"
 
 
 # Per-(relaxation, options) jit caches. Keyed by Python id() of the
@@ -250,7 +250,7 @@ def _solve_relaxation_with_pounce(
     except Exception:
         return -np.inf
 
-    # Mirror the prior ripopt acceptance set: optimal, acceptable, stalled
+    # Mirror the POUNCE/Ipopt acceptance set: optimal, acceptable, stalled
     # (Search_Direction_Becomes_Too_Small → UNBOUNDED in the discopt enum),
     # and max-iterations are all valid B&B lower bounds because the
     # McCormick underestimator is convex.

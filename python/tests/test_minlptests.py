@@ -398,10 +398,17 @@ def _build_nlp_cvx_106_011() -> Model:
 
 
 def _build_nlp_cvx_107_010() -> Model:
-    """Min (x-0.5)^2+(y-0.5)^2; x^2+y^2<=1. Opt: 0 (feasible interior)."""
+    """Min (x-0.5)^2+(y-0.5)^2; x^2+y^2<=1. Opt: 0 (feasible interior).
+
+    Bounds [-1, 1] are implied by x^2+y^2<=1 (feasible region and optimum
+    unchanged), but make them explicit and finite: with the default +/-1e20
+    bounds the interior optimum leaves a spurious tiny bound multiplier whose
+    complementarity product lambda*|x - 1e20| blows up the Examiner primal_cs
+    check.
+    """
     m = dm.Model("nlp_cvx_107_010")
-    x = m.continuous("x")
-    y = m.continuous("y")
+    x = m.continuous("x", lb=-1.0, ub=1.0)
+    y = m.continuous("y", lb=-1.0, ub=1.0)
     m.minimize((x - 0.5) ** 2 + (y - 0.5) ** 2)
     m.subject_to(x**2 + y**2 <= 1.0)
     return m

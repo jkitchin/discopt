@@ -15,7 +15,7 @@ Model.solve()  -->  Python orchestrator  -->  Rust TreeManager (B&B engine)
                         |                          |
                   JAX NLPEvaluator           Node pool / branching / pruning
                   NLP backends:              Zero-copy numpy arrays (PyO3)
-                    ripopt  (Rust IPM, PyO3)
+                    pounce  (pure-Rust Ipopt port)
                     ipm     (pure-JAX, vmap batch)  [default]
                     cyipopt (Ipopt)
 ```
@@ -24,7 +24,7 @@ Model.solve()  -->  Python orchestrator  -->  Rust TreeManager (B&B engine)
 
 **JAX layer** (`python/discopt/_jax`): DAG compiler mapping modeling expressions to JAX primitives, JIT-compiled NLP evaluator (objective, gradient, Hessian, constraint Jacobian), McCormick convex/concave relaxations {cite:p}`McCormick1976` (21 functions including sigmoid, softplus, tanh), and a relaxation compiler with vmap support.
 
-**Solver wrappers** (`python/discopt/solvers`): ripopt (Rust IPM via PyO3), cyipopt NLP wrapper for Ipopt {cite:p}`Wachter2006`, HiGHS LP and MILP wrappers with warm-start support (MILP used by the LOA decomposition solver).
+**Solver wrappers** (`python/discopt/solvers`): POUNCE (pure-Rust Ipopt port), cyipopt NLP wrapper for Ipopt {cite:p}`Wachter2006`, HiGHS LP and MILP wrappers with warm-start support (MILP used by the LOA decomposition solver).
 
 **Neural network embedding** (`python/discopt/nn`): embeds trained feedforward networks as algebraic MINLP constraints {cite:p}`Ceccon2022` via full-space (smooth activations), ReLU big-M MILP {cite:p}`Anderson2020`, and reduced-space strategies; interval arithmetic bound propagation; ONNX model import.
 
@@ -104,11 +104,14 @@ discopt supports three NLP solver backends, each with different strengths:
 | Backend         | Implementation    | Use Case                                   |
 |-----------------|-------------------|--------------------------------------------|
 | `ipm` (default) | Pure-JAX IPM      | B&B inner loop; GPU-batched via `jax.vmap` |
-| `ripopt`        | Rust IPM via PyO3 | Single-problem NLP; fastest wall-clock     |
+| `pounce`        | Pure-Rust Ipopt port | Single-problem NLP; fastest wall-clock  |
 | `cyipopt`       | Ipopt via cyipopt | Single-problem NLP; most robust            |
 
+For single continuous solves the `ipm` default is promoted to a KKT-valid
+backend, resolving to POUNCE when installed and falling back to cyipopt.
+
 ```python
-result = model.solve(nlp_solver="ripopt")   # Rust IPM
+result = model.solve(nlp_solver="pounce")   # POUNCE (pure-Rust Ipopt port)
 result = model.solve(nlp_solver="ipm")      # Pure-JAX (default)
 result = model.solve(nlp_solver="cyipopt")  # Ipopt
 ```

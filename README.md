@@ -17,7 +17,7 @@ A hybrid Mixed-Integer Nonlinear Programming (MINLP) solver combining a Rust bac
 - **Algebraic modeling API** -- continuous, binary, and integer variables with operator overloading
 - **Spatial Branch and Bound** -- Rust-powered node pool, branching, and pruning
 - **JIT-compiled NLP evaluation** -- objective, gradient, Hessian, and constraint Jacobian via JAX
-- **Three NLP backends** -- pure-JAX interior-point method (default, vmap-batched), ripopt (Rust IPM via PyO3), cyipopt (Ipopt)
+- **Three NLP backends** -- pure-JAX interior-point method (default, vmap-batched), POUNCE (pure-Rust Ipopt port), cyipopt (Ipopt)
 - **Convex relaxations** -- McCormick envelopes (21 functions including sigmoid/softplus/tanh), piecewise McCormick, alphaBB underestimators
 - **Neural network embedding** -- embed trained feedforward networks (ReLU, sigmoid, tanh, softplus) as MINLP constraints via big-M, full-space, and reduced-space strategies; interval arithmetic bound propagation; ONNX import (`pip install discopt[nn]`)
 - **Generalized disjunctive programming** -- `BooleanVar`, propositional logic operators (`land`, `lor`, `lnot`, `atleast`, `atmost`, `exactly`), `either_or()`, `if_then()`; reformulated via big-M, multiple big-M (LP-tightened), hull, or Logic-based Outer Approximation (`gdp_method="loa"`)
@@ -59,7 +59,7 @@ Model.solve()  -->  Python orchestrator  -->  Rust TreeManager (B&B engine)
                         |                          |
                   JAX NLPEvaluator           Node pool / branching / pruning
                   NLP backends:              Zero-copy numpy arrays (PyO3)
-                    ripopt  (Rust IPM, PyO3)
+                    pounce  (pure-Rust Ipopt port)
                     ipm     (pure-JAX, vmap batch)  [default]
                     cyipopt (Ipopt)
 ```
@@ -70,7 +70,7 @@ Model.solve()  -->  Python orchestrator  -->  Rust TreeManager (B&B engine)
 
 **JAX layer** (`python/discopt/_jax`): DAG compiler mapping modeling expressions to JAX primitives, JIT-compiled NLP evaluator (objective, gradient, Hessian, constraint Jacobian), McCormick convex/concave relaxations (21 functions), and a relaxation compiler with vmap support.
 
-**Solver wrappers** (`python/discopt/solvers`): ripopt (Rust IPM via PyO3), cyipopt NLP wrapper for Ipopt, HiGHS LP and MILP wrappers with warm-start support.
+**Solver wrappers** (`python/discopt/solvers`): POUNCE (pure-Rust Ipopt port), cyipopt NLP wrapper for Ipopt, HiGHS LP and MILP wrappers with warm-start support.
 
 **CUTEst interface** (`python/discopt/interfaces/cutest.py`): PyCUTEst-based evaluator for NLP benchmarking against the CUTEst test set.
 
@@ -81,12 +81,15 @@ Model.solve()  -->  Python orchestrator  -->  Rust TreeManager (B&B engine)
 | Backend         | Implementation    | Use Case                                   |
 |-----------------|-------------------|--------------------------------------------|
 | `ipm` (default) | Pure-JAX IPM      | B&B inner loop; GPU-batched via `jax.vmap` |
-| `ripopt`        | Rust IPM via PyO3 | Single-problem NLP; fastest wall-clock     |
+| `pounce`        | Pure-Rust Ipopt port | Single-problem NLP; fastest wall-clock  |
 | `cyipopt`       | Ipopt via cyipopt | Single-problem NLP; most robust            |
+
+For single continuous solves the `ipm` default is promoted to a KKT-valid
+backend, resolving to POUNCE when installed and falling back to cyipopt.
 
 ```python
 result = model.solve(nlp_solver="ipm")      # Pure-JAX (default)
-result = model.solve(nlp_solver="ripopt")   # Rust IPM
+result = model.solve(nlp_solver="pounce")   # POUNCE (pure-Rust Ipopt port)
 result = model.solve(nlp_solver="cyipopt")  # Ipopt
 ```
 
@@ -100,26 +103,28 @@ Performance measured on Apple M4 Pro (CPU, JAX 0.8.2). "Warm" times exclude JIT 
 | **QP** (n=100) | 0.04s warm | scipy SLSQP 0.02s | Was 66s before algebraic extraction |
 | **MILP** (n=25) | 0.002s | HiGHS MIP 0.002s | B&B + LP relaxation, correct objectives |
 | **MIQP** (n=10) | 0.004s | NLP path 4.9s | QP-specialized path: 1000x+ speedup |
-| **NLP** (n=20, Rosenbrock) | IPM 1.1s warm, ripopt 0.42s, Ipopt 0.43s | -- | ripopt fastest single-solve; IPM best for batched B&B |
+| **NLP** (n=20, Rosenbrock) | IPM 1.1s warm, POUNCE 0.42s, Ipopt 0.43s | -- | POUNCE fastest single-solve; IPM best for batched B&B |
 | **MINLP** (n=10) | 0.9s (batch=1) | 0.9s (batch=16) | vmap batching helps with deeper B&B trees |
 
 See the benchmark notebooks for full scaling plots and details:
 - [Benchmarks by Problem Class](docs/notebooks/benchmarks_by_class.ipynb) -- LP, QP, MILP, MIQP, NLP (3 backends), MINLP
-- [IPM vs ripopt vs Ipopt](docs/notebooks/ipm_vs_ipopt.ipynb) -- detailed NLP backend comparison
+- [IPM vs POUNCE vs Ipopt](docs/notebooks/ipm_vs_ipopt.ipynb) -- detailed NLP backend comparison
 - [Batch IPM vs Ipopt](docs/notebooks/batch_ipm_vs_ipopt.ipynb) -- vmap-batched IPM for B&B inner loops
 
 ## Installation
 
-Requires Rust 1.84+, Python 3.10+, and Ipopt.
+Requires Rust 1.84+ and Python 3.10+. POUNCE (the default single-solve NLP
+backend) is a pure-Rust Ipopt port with no system dependencies; cyipopt is an
+optional fallback that needs the Ipopt C library.
 
 ```bash
-# Install Ipopt (macOS)
-brew install ipopt
+# Install the POUNCE NLP backend (pure-Rust Ipopt port)
+pip install pounce-solver
 
-# Clone ripopt alongside discopt (path dependency at ../ripopt)
-git clone <ripopt-repo-url> ../ripopt
+# Optional cyipopt fallback (needs the Ipopt C library; macOS: brew install ipopt)
+pip install "discopt[ipopt]"
 
-# Build Rust-Python bindings (includes ripopt PyO3 bindings)
+# Build Rust-Python bindings
 cd crates/discopt-python && maturin develop && cd ../..
 
 # Run the fast default PR battery

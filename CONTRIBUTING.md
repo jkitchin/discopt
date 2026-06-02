@@ -8,21 +8,20 @@ Prerequisites:
 
 - Rust 1.84+
 - Python 3.10+
-- Ipopt (`brew install ipopt` on macOS)
+- Ipopt (optional cyipopt fallback only; `brew install ipopt` on macOS)
 
 ```bash
 # Clone the repo
 git clone https://github.com/jkitchin/discopt.git
 cd discopt
 
-# Clone ripopt (Rust IPM dependency, path dependency at ../ripopt)
-git clone <ripopt-repo-url> ../ripopt
-
 # Create a Python virtual environment
 python -m venv .venv && source .venv/bin/activate
 
-# Install Python dependencies
-pip install -e ".[dev,ipopt,highs]"
+# Install Python dependencies. The `pounce` extra pulls in POUNCE
+# (pure-Rust Ipopt port, the default single-solve NLP backend); the
+# `ipopt` extra adds the optional cyipopt fallback.
+pip install -e ".[dev,pounce,ipopt,highs]"
 
 # Build Rust-Python bindings
 cd crates/discopt-python && maturin develop && cd ../..
@@ -74,6 +73,7 @@ pytest python/tests/ --cov=discopt
 | `integration` | End-to-end workflows (DOE, discrimination, CUTEst) | nightly / manual |
 | `amp_benchmark` | AMP Alpine, MINLPTests, or incidence benchmark coverage | manual |
 | `requires_cyipopt` | Requires the optional cyipopt/Ipopt solver stack | manual |
+| `requires_pounce` | Requires the optional POUNCE (pure-Rust Ipopt port) solver | manual |
 
 When adding a test, default to no marker for normal feature tests; add
 `slow` if it routinely costs more than ~3 s, and `unit` or `smoke` if it

@@ -15,13 +15,13 @@ Reviewers: 3 automated scientific reviewers cross-referencing `manuscript/discop
 - **Fix**: Change "100–226x" → "17–226x" in Section 3.1
 
 ### E2. CUTEst benchmark numbers are outdated (Section 4.2, ~line 433)
-- Manuscript: ripopt 552/727 (75.9%), Ipopt 557/727 (76.6%), both solve 519, agree 431
-- Actual (from ripopt repo): ripopt **583–586/727 (80.6%)**, Ipopt **558–560/727 (77.0%)**, both solve **544–548**, agree **452–455**
-- **Fix**: Update all CUTEst numbers from `RIPOPT_VS_IPOPT.md` / `CUTEST_REPORT.md`
+- Manuscript: POUNCE 552/727 (75.9%), Ipopt 557/727 (76.6%), both solve 519, agree 431
+- Actual (from POUNCE repo): POUNCE **583–586/727 (80.6%)**, Ipopt **558–560/727 (77.0%)**, both solve **544–548**, agree **452–455**
+- **Fix**: Update all CUTEst numbers from `POUNCE_VS_IPOPT.md` / `CUTEST_REPORT.md`
 
 ### E3. "identical mean iteration counts (14.5)" is wrong (Section 4.2, ~line 433)
-- Actual: ripopt mean = 14.5, Ipopt mean = **13.3** (not identical)
-- **Fix**: Change to "comparable mean iteration counts (ripopt: 14.5, Ipopt: 13.3)"
+- Actual: POUNCE mean = 14.5, Ipopt mean = **13.3** (not identical)
+- **Fix**: Change to "comparable mean iteration counts (POUNCE: 14.5, Ipopt: 13.3)"
 
 ### E4. McCormick function count: 19 → 25 (Section 5.1, ~line 461; also abstract)
 - `mccormick.py` has **25** `relax_*` functions (6 added later: atan, asin, acos, sinh, cosh, tanh)
@@ -144,8 +144,8 @@ Reviewers: 3 automated scientific reviewers cross-referencing `manuscript/discop
 
 The following major claims were verified against source code:
 - Pure-JAX IPM: augmented KKT, Mehrotra PC, carry-based while_loop, filter line search ✓
-- ripopt: L-BFGS, augmented Lagrangian, slack reformulation, 3-stage restoration ✓
-- ripopt: HS 119/120 (99.2%) vs 118/120 ✓
+- POUNCE: L-BFGS, augmented Lagrangian, slack reformulation, 3-stage restoration ✓
+- POUNCE: HS 119/120 (99.2%) vs 118/120 ✓
 - McCormick: pure JAX, jit+vmap compatible ✓
 - alphaBB: eigenvalue + Gershgorin methods ✓
 - GDP: big-M, hull, SOS, logical propositions ✓

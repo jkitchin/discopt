@@ -109,13 +109,15 @@ in its design. The overall structure of solving a symmetric KKT system at each
 iteration and managing the barrier parameter reduction follows the same
 intellectual lineage.
 
-** ripopt and JAX IPM
+** POUNCE and JAX IPM
 
 discopt provides two additional IPM implementations that build on Mehrotra's
-predictor-corrector framework. ripopt is a Rust-native interior point solver
-accessed via PyO3 bindings that implements the predictor-corrector method
-directly, making cite:mehrotra1992 its algorithmic foundation. By implementing
-the core iteration in Rust, ripopt avoids the overhead of Python-level loops
+predictor-corrector framework. POUNCE is a Rust-native interior point solver
+(a separate companion project, https://github.com/jkitchin/pounce, that replaced
+the earlier in-repo ripopt crate) accessed via PyO3 bindings that implements the
+predictor-corrector method directly, making cite:mehrotra1992 its algorithmic
+foundation. By implementing the core iteration in Rust, POUNCE avoids the
+overhead of Python-level loops
 and achieves performance competitive with compiled solvers while remaining
 lightweight and easy to embed. The predictor-corrector structure is
 particularly well-suited to this setting because the KKT factorization (the

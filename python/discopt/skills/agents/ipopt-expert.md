@@ -1,6 +1,6 @@
 ---
 name: ipopt-expert
-description: Ipopt and discopt's wrappers around it - cyipopt binding, POUNCE (pure-Rust Ipopt port; replaces ripopt), option tuning, restoration phase, scaling, watchdog, acceptable-tolerance behavior, wide-bounds handling. Use when the NLP backend is failing, returning NaN, hitting iteration_limit, or entering restoration.
+description: Ipopt and discopt's wrappers around it - cyipopt binding, POUNCE (pure-Rust Ipopt port; the default single-solve backend), option tuning, restoration phase, scaling, watchdog, acceptable-tolerance behavior, wide-bounds handling. Use when the NLP backend is failing, returning NaN, hitting iteration_limit, or entering restoration.
 ---
 
 # Ipopt Expert Agent
@@ -17,7 +17,7 @@ You are an expert on Ipopt as used by discopt. You help users diagnose NLP failu
 - **Wide-bounds trap**: bounds with magnitude `≥ 1e15` approach Ipopt's internal infinity; can cause NaN gradients or silent false-optimality. discopt warns at solve time via `UserWarning`.
 - **cyipopt vs. POUNCE**:
   - **cyipopt**: Python binding to system Ipopt library. Used in `python/discopt/solvers/nlp_ipopt.py`.
-  - **POUNCE**: pure-Rust port of Ipopt with Python bindings (cyipopt-compatible `Problem` API); avoids a system Ipopt dependency. Selected with `nlp_solver="pounce"` (driven via `python/discopt/solvers/nlp_pounce.py`). Replaces the older `ripopt` Rust crate; `nlp_solver="ripopt"` is accepted as a deprecated alias.
+  - **POUNCE**: pure-Rust port of Ipopt with Python bindings (cyipopt-compatible `Problem` API); avoids a system Ipopt dependency. Selected with `nlp_solver="pounce"` (driven via `python/discopt/solvers/nlp_pounce.py`), and the default single-solve backend (with cyipopt fallback). Replaced the older `ripopt` Rust crate, which has been removed.
   - Algorithmically Ipopt; differences are in invocation overhead and option plumbing.
 
 ## Context: discopt Implementation
@@ -49,9 +49,8 @@ r = solve_ipopt(
 ### Key files
 - `python/discopt/solvers/nlp_ipopt.py` — cyipopt wrapper + evaluator glue.
 - `python/discopt/solvers/nlp_pounce.py` — POUNCE wrapper (reuses the cyipopt callback adapter; `pounce.Problem` is shape-compatible).
-- `python/discopt/solvers/nlp_ripopt.py` — deprecation shim re-exporting `solve_nlp` from `nlp_pounce`.
 - `python/discopt/solvers/sipopt.py` — sensitivity extraction via sIPOPT (now backed by POUNCE).
-- `python/discopt/solver.py::_solve_continuous` — the fast-path dispatcher that **promotes** `nlp_solver="ipm"` to `"ipopt"` for single-problem NLP solves (because the IPM's acceptable-tolerance check is incomplete for unbounded variables).
+- `python/discopt/solver.py::_solve_continuous` — the fast-path dispatcher that **promotes** `nlp_solver="ipm"` to a KKT-valid backend (`_default_nlp_solver()`: POUNCE if installed, else cyipopt) for single-problem NLP solves (because the IPM's acceptable-tolerance check is incomplete for unbounded variables).
 
 ### Convention: which wrapper is used where
 - **Pure-continuous convex NLP (fast path)**: Ipopt (automatic promotion).
