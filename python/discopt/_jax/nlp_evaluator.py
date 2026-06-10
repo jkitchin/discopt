@@ -207,6 +207,9 @@ class NLPEvaluator:
                 return obj_factor * gn_obj_hess_fn(x, params) + constraint_hessian(x, lam, params)
 
             self._lagrangian_hess_fn_jit = jax.jit(lagrangian_hess)
+            # The compressed-HVP Hessian path assumes the exact Lagrangian; it
+            # is not wired for the Gauss-Newton approximation, so disable it.
+            self._lagrangian_hvp_fn_jit = None
         else:
 
             def lagrangian(x, obj_factor, lam, params):
@@ -216,6 +219,20 @@ class NLPEvaluator:
                 return L
 
             self._lagrangian_hess_fn_jit = jax.jit(jax.hessian(lagrangian, argnums=0))
+
+            # Matrix-free Lagrangian Hessian-vector product (forward-over-reverse).
+            # Used by the compressed sparse-Hessian path to recover the block-
+            # banded Hessian of large DAE/collocation NLPs without ever
+            # materializing the dense ``n x n`` matrix (issue #95).
+            _lagrangian_grad = jax.grad(lagrangian, argnums=0)
+
+            def lagrangian_hvp(x, obj_factor, lam, params, v):
+                _, hv = jax.jvp(
+                    lambda xx: _lagrangian_grad(xx, obj_factor, lam, params), (x,), (v,)
+                )
+                return hv
+
+            self._lagrangian_hvp_fn_jit = jax.jit(lagrangian_hvp)
 
         # Legacy single-argument wrappers. These close over ``self`` and read
         # the current parameter values at call time, so downstream callers
@@ -598,10 +615,71 @@ class NLPEvaluator:
     def evaluate_hessian_values(
         self, x: np.ndarray, obj_factor: float, lambda_: np.ndarray
     ) -> np.ndarray:
-        """Return Lagrangian Hessian values as 1-D array matching hessian_structure order."""
+        """Return Lagrangian Hessian values as 1-D array matching hessian_structure order.
+
+        When the Hessian is sparse enough, values are recovered via colored
+        Hessian-vector products (see :mod:`discopt._jax.sparse_hessian`),
+        avoiding the dense ``n x n`` materialization that makes large
+        DAE/collocation solves intractable (issue #95). Otherwise the dense
+        Lagrangian Hessian is evaluated and projected onto the COO pattern.
+        """
         self._ensure_coo_cache()
+        values_fn = self._ensure_sparse_hess_values_fn()
+        if values_fn is not None:
+            x64 = np.asarray(x, dtype=np.float64)
+            lam64 = np.asarray(lambda_, dtype=np.float64)
+            return values_fn(x64, float(obj_factor), lam64, self._current_params())
         h = self.evaluate_lagrangian_hessian(x, obj_factor, lambda_)
         return h[self._hess_rows, self._hess_cols].astype(np.float64)
+
+    def _use_sparse_hessian(self) -> bool:
+        """True when colored-HVP Hessian recovery is expected to pay off.
+
+        Gated on a sparse structure being available, the exact Lagrangian HVP
+        being built (not the Gauss-Newton path), and the Hessian being both
+        large and sparse enough that the dense ``n x n`` assembly dominates.
+        """
+        if not hasattr(self, "_use_sparse_hess_cache"):
+            self._use_sparse_hess_cache = False
+            if (
+                self.has_sparse_structure()
+                and getattr(self, "_lagrangian_hvp_fn_jit", None) is not None
+            ):
+                pattern = self.sparsity_pattern
+                if (
+                    pattern is not None
+                    and pattern.n_vars >= 50
+                    and pattern.hessian_nnz > 0
+                    and pattern.hessian_density < 0.15
+                ):
+                    self._use_sparse_hess_cache = True
+        return self._use_sparse_hess_cache
+
+    def _ensure_sparse_hess_values_fn(self):
+        """Lazily build a fn(x, obj_factor, lam, params) -> COO Hessian values."""
+        if hasattr(self, "_sparse_hess_values_fn"):
+            return self._sparse_hess_values_fn
+        self._sparse_hess_values_fn = None
+        if self._use_sparse_hessian():
+            try:
+                from discopt._jax.sparse_hessian import (
+                    build_hessian_coloring,
+                    make_sparse_hess_values_fn,
+                )
+
+                self._ensure_coo_cache()
+                seed, coo_seed_idx, coo_lookup_row = build_hessian_coloring(
+                    self.sparsity_pattern, self._hess_rows, self._hess_cols
+                )
+                self._sparse_hess_values_fn = make_sparse_hess_values_fn(
+                    self._lagrangian_hvp_fn_jit,
+                    seed,
+                    coo_seed_idx,
+                    coo_lookup_row,
+                )
+            except Exception:
+                self._sparse_hess_values_fn = None
+        return self._sparse_hess_values_fn
 
     def _ensure_coo_cache(self) -> None:
         """Lazily compute and cache COO index arrays for Jacobian and Hessian."""
