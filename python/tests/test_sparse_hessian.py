@@ -163,9 +163,12 @@ class TestEndToEndSolve:
 
     def test_dae_collocation_solve_does_not_hang(self):
         sys.setrecursionlimit(100000)
-        m, _k = _dae_estimation_model(nfe=60, n_states=1)
-        # This model routes through the compressed-HVP Hessian path; without it
-        # the dense n×n assembly would dominate and the solve would not finish.
+        # nfe=25 keeps this a fast plumbing smoke test: it still routes through
+        # the compressed-HVP Hessian path (asserted below), but solves in a few
+        # seconds even on the ipm fallback used in CI (where pounce is absent).
+        # The O(n²)→O(seeds) scaling that actually defeats the dense-assembly
+        # hang is proven separately, without a solve, by TestSeedCount.
+        m, _k = _dae_estimation_model(nfe=25, n_states=1)
         assert NLPEvaluator(m)._use_sparse_hessian()
         try:
             import pounce  # noqa: F401
