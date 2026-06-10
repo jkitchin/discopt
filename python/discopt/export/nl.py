@@ -26,7 +26,7 @@ from __future__ import annotations
 import io
 import math
 from pathlib import Path
-from typing import Union
+from typing import Union, cast
 
 import numpy as np
 
@@ -193,17 +193,172 @@ class _NLWriter:
             self._obj_nonlinear = nonlinear
 
         for con in self.model._constraints:
-            linear, nonlinear = self._split_expr(con.body)
-            self._con_linear.append(linear)
-            self._con_nonlinear.append(nonlinear)
-            # Determine constraint bound type
+            # Determine constraint bound type (shared by every scalar row this
+            # constraint expands into).
             rhs = con.rhs
             if con.sense == "<=":
-                self._con_bounds.append((1, 0.0, float(rhs)))  # body <= rhs
+                bnd = (1, 0.0, float(rhs))  # body <= rhs
             elif con.sense == ">=":
-                self._con_bounds.append((2, float(rhs), 0.0))  # body >= rhs (stored as <=)
+                bnd = (2, float(rhs), 0.0)  # body >= rhs (stored as <=)
             elif con.sense == "==":
-                self._con_bounds.append((4, float(rhs), float(rhs)))
+                bnd = (4, float(rhs), float(rhs))
+            else:
+                bnd = (3, 0.0, 0.0)  # free (unreachable in practice)
+
+            # Vectorized constraints (e.g. DAE/collocation bodies built from
+            # matrix products and broadcasting) carry an array-valued body that
+            # encodes many scalar constraints at once. Expand it into one scalar
+            # expression per output element before linear/nonlinear splitting.
+            bodies = self._scalarize_body(con.body)
+            for body in bodies:
+                linear, nonlinear = self._split_expr(body)
+                self._con_linear.append(linear)
+                self._con_nonlinear.append(nonlinear)
+                self._con_bounds.append(bnd)
+
+    def _scalarize_body(self, expr: Expression) -> list[Expression]:
+        """Return the scalar constraint bodies a (possibly array) body expands to.
+
+        A scalar body yields a single-element list; an array body yields one
+        scalar expression per element in row-major order.
+        """
+        arr = self._scalarize(expr)
+        if arr.ndim == 0:
+            return [cast(Expression, arr[()])]
+        return list(arr.ravel())
+
+    @staticmethod
+    def _obj0(x) -> np.ndarray:
+        """Wrap a single expression in a 0-d object array."""
+        out = np.empty((), dtype=object)
+        out[()] = x
+        return out
+
+    def _sum_terms(self, terms: list[Expression]) -> Expression:
+        """Left-fold a list of scalar expressions into a sum (``+``)."""
+        if not terms:
+            return Constant(0.0)
+        result: Expression = terms[0]
+        for t in terms[1:]:
+            result = BinaryOp("+", result, t)
+        return result
+
+    def _matmul_scalar(self, left: np.ndarray, right: np.ndarray) -> np.ndarray:
+        """Symbolic matmul of two object arrays of scalar expressions."""
+        if left.ndim == 1 and right.ndim == 1:
+            (k,) = left.shape
+            return self._obj0(self._sum_terms([BinaryOp("*", left[i], right[i]) for i in range(k)]))
+        if left.ndim == 2 and right.ndim == 1:
+            m, k = left.shape
+            out = np.empty((m,), dtype=object)
+            for i in range(m):
+                out[i] = self._sum_terms([BinaryOp("*", left[i, p], right[p]) for p in range(k)])
+            return out
+        if left.ndim == 1 and right.ndim == 2:
+            k, n = right.shape
+            out = np.empty((n,), dtype=object)
+            for j in range(n):
+                out[j] = self._sum_terms([BinaryOp("*", left[p], right[p, j]) for p in range(k)])
+            return out
+        if left.ndim == 2 and right.ndim == 2:
+            m, k = left.shape
+            _, n = right.shape
+            out = np.empty((m, n), dtype=object)
+            for i in range(m):
+                for j in range(n):
+                    out[i, j] = self._sum_terms(
+                        [BinaryOp("*", left[i, p], right[p, j]) for p in range(k)]
+                    )
+            return out
+        raise ValueError(f"Unsupported matmul of shapes {left.shape} @ {right.shape}")
+
+    def _sum_axis(self, arr: np.ndarray, axis: int | None) -> np.ndarray:
+        """Symbolic reduction (``+``) of an object array along ``axis``."""
+        if axis is None:
+            return self._obj0(self._sum_terms([arr[idx] for idx in np.ndindex(arr.shape)]))
+        moved = np.moveaxis(arr, axis, 0)
+        out_shape = moved.shape[1:]
+        out = np.empty(out_shape, dtype=object)
+        for idx in np.ndindex(out_shape):
+            out[idx] = self._sum_terms([moved[(p, *idx)] for p in range(moved.shape[0])])
+        if out.ndim == 0:
+            return self._obj0(out[()])
+        return out
+
+    def _scalarize(self, expr: Expression) -> np.ndarray:
+        """Expand an expression into an object ndarray of scalar expressions.
+
+        Indexing, broadcasting, and matrix products are pushed through the DAG
+        so each output element becomes a plain scalar expression that the rest
+        of the (scalar-oriented) writer can decompose. Scalars are returned as
+        0-d object arrays. Node types without a known array structure (e.g.
+        parameters) are treated as opaque scalar leaves.
+        """
+        if isinstance(expr, Constant):
+            v = expr.value
+            if v.ndim == 0:
+                return self._obj0(Constant(float(v)))
+            out = np.empty(v.shape, dtype=object)
+            for idx in np.ndindex(v.shape):
+                out[idx] = Constant(float(v[idx]))
+            return out
+
+        if isinstance(expr, Variable):
+            if expr.shape == () or expr.shape == (1,):
+                return self._obj0(expr)
+            out = np.empty(expr.shape, dtype=object)
+            ndim = len(expr.shape)
+            for idx in np.ndindex(expr.shape):
+                out[idx] = IndexExpression(expr, idx if ndim > 1 else idx[0])
+            return out
+
+        if isinstance(expr, IndexExpression):
+            base = self._scalarize(expr.base)
+            sub = base[expr.index]
+            return sub if isinstance(sub, np.ndarray) else self._obj0(sub)
+
+        if isinstance(expr, UnaryOp):
+            operand = self._scalarize(expr.operand)
+            out = np.empty(operand.shape, dtype=object)
+            for idx in np.ndindex(operand.shape):
+                out[idx] = UnaryOp(expr.op, operand[idx])
+            return out
+
+        if isinstance(expr, BinaryOp):
+            left, right = np.broadcast_arrays(
+                self._scalarize(expr.left), self._scalarize(expr.right)
+            )
+            out = np.empty(left.shape, dtype=object)
+            for idx in np.ndindex(left.shape):
+                out[idx] = BinaryOp(expr.op, left[idx], right[idx])
+            return out
+
+        if isinstance(expr, FunctionCall):
+            args = [self._scalarize(a) for a in expr.args]
+            bargs = list(np.broadcast_arrays(*args)) if len(args) > 1 else args
+            shape = bargs[0].shape
+            out = np.empty(shape, dtype=object)
+            for idx in np.ndindex(shape):
+                out[idx] = FunctionCall(expr.func_name, *[b[idx] for b in bargs])
+            return out
+
+        if isinstance(expr, MatMulExpression):
+            return self._matmul_scalar(self._scalarize(expr.left), self._scalarize(expr.right))
+
+        if isinstance(expr, SumExpression):
+            return self._sum_axis(self._scalarize(expr.operand), expr.axis)
+
+        if isinstance(expr, SumOverExpression):
+            terms = [self._scalarize(t) for t in expr.terms]
+            bterms = list(np.broadcast_arrays(*terms)) if len(terms) > 1 else terms
+            shape = bterms[0].shape
+            out = np.empty(shape, dtype=object)
+            for idx in np.ndindex(shape):
+                out[idx] = self._sum_terms([b[idx] for b in bterms])
+            return out
+
+        # Opaque scalar leaf (e.g. Parameter): leave intact.
+        return self._obj0(expr)
 
     def _split_expr(self, expr: Expression) -> tuple[dict[int, float], Expression | None]:
         """Split an expression into linear terms {var_idx: coeff} and nonlinear remainder."""
@@ -295,7 +450,11 @@ class _NLWriter:
             nonlinear.append(BinaryOp("*", Constant(coeff), expr))
 
     def _get_const(self, expr: Expression) -> float | None:
-        if isinstance(expr, Constant):
+        # Only 0-d (scalar) constants are linear coefficients. Array-valued
+        # constants are pushed to scalars by _scalarize before we get here;
+        # guard defensively so a stray array constant degrades to "nonlinear"
+        # rather than raising in float().
+        if isinstance(expr, Constant) and expr.value.ndim == 0:
             return float(expr.value)
         return None
 
@@ -324,7 +483,9 @@ class _NLWriter:
 
     def _write_header(self, buf: io.StringIO):
         n_vars = self._n_total
-        n_cons = len(self.model._constraints)
+        # Use the expanded scalar-constraint count: a single vectorized
+        # (DAE/collocation) constraint expands into many scalar rows.
+        n_cons = len(self._con_linear)
         n_objs = 1 if self.model._objective else 0
 
         # Count nonlinear constraints and objectives

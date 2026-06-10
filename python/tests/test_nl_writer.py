@@ -284,3 +284,85 @@ class TestNLWriterNestedFunctions:
         nl = m.to_nl()
         assert "o44" in nl  # exp
         assert "o43" in nl  # log
+
+
+class TestNLWriterCollocation:
+    """Export of DAEBuilder / orthogonal-collocation models (issue #96).
+
+    Collocation ``discretize()`` emits vectorized constraints whose bodies are
+    array-valued (built from differentiation-matrix products and broadcasting).
+    The scalar-oriented writer must expand each into one scalar row per output
+    element rather than crashing in ``float()`` on an array constant.
+    """
+
+    @staticmethod
+    def _build_dae_model():
+        from discopt.dae import ContinuousSet, DAEBuilder
+
+        m = dm.Model("dae")
+        cs = ContinuousSet("t", bounds=(0, 1), nfe=4, ncp=3, scheme="radau")
+        dae = DAEBuilder(m, cs)
+        dae.add_state("a", bounds=(0, 1), initial=0.0)
+        dae.add_control("u", bounds=(0, 1))
+        dae.set_ode(lambda t, x, z, u: {"a": -x["a"] + u["u"]})
+        v = dae.discretize()
+        m.minimize(sum((v["a"][i, j] - 0.5) ** 2 for i in range(4) for j in range(1, 4)))
+        return m
+
+    def test_collocation_to_nl_succeeds(self):
+        """The repro from issue #96 must export without raising."""
+        m = self._build_dae_model()
+        nl = m.to_nl()
+        assert nl  # non-empty
+        # Header line carries the expanded scalar-constraint count.
+        header = nl.split("\n")[1].split()
+        n_vars, n_cons = int(header[0]), int(header[1])
+        assert n_vars > 0
+        assert n_cons > 0
+
+    def test_scalarized_bodies_match_array_body(self):
+        """Each scalar row must equal the corresponding element of the array body.
+
+        Compile both the original (array-valued) constraint body and every
+        scalar body produced by the writer's expansion, evaluate them at a
+        random point, and require elementwise agreement.
+        """
+        import numpy as np
+        from discopt._jax.dag_compiler import compile_expression
+        from discopt.export.nl import _NLWriter
+
+        m = self._build_dae_model()
+        writer = _NLWriter(m)
+        writer._build_var_map()
+
+        nvar = sum(max(1, int(np.prod(var.shape))) for var in m._variables)
+        rng = np.random.default_rng(0)
+        x = rng.standard_normal(nvar)
+
+        assert m._constraints  # the collocation constraints exist
+        for con in m._constraints:
+            expected = np.asarray(compile_expression(con.body, m)(x)).ravel()
+            bodies = writer._scalarize_body(con.body)
+            got = np.array([float(compile_expression(b, m)(x)) for b in bodies])
+            assert got.shape == expected.shape
+            np.testing.assert_allclose(got, expected, atol=1e-9)
+
+    def test_collocation_roundtrip_parse(self, tmp_path):
+        """The emitted .nl must parse back with the Rust parser, var counts intact."""
+        try:
+            from discopt._rust import parse_nl_file
+        except ImportError:
+            pytest.skip("Rust .nl parser not available")
+
+        import numpy as np
+
+        m = self._build_dae_model()
+        nvar = sum(max(1, int(np.prod(var.shape))) for var in m._variables)
+
+        nl_path = tmp_path / "dae.nl"
+        m.to_nl(str(nl_path))
+
+        rep = parse_nl_file(str(nl_path))
+        assert rep.n_vars == nvar
+        assert rep.n_constraints > 0
+        assert rep.objective_sense == "minimize"
