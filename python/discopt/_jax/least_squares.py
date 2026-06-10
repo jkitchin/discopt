@@ -153,6 +153,7 @@ def extract_residuals(expr: Expression) -> list[Expression] | None:
     * ``base ** 2``                          → residual ``base``
     * ``a * a`` (structurally equal factors) → residual ``a``
     * ``c * <square>`` with scalar ``c ≥ 0`` → residual ``√c · base``
+    * ``<square> / c`` with scalar ``c > 0`` → residual ``√(1/c) · base``
     * ``sum(<elementwise square array>)``    → raveled residuals
     """
     # Additive split: Σ of sums of squares is a sum of squares.
@@ -178,6 +179,21 @@ def extract_residuals(expr: Expression) -> list[Expression] | None:
         # Square written as a product of identical factors: a · a.
         if _expr_equal(expr.left, expr.right):
             return [expr.left]
+        return None
+
+    if isinstance(expr, BinaryOp) and expr.op == "/":
+        # Positive scalar denominator: g / c  ==  (1/c) · g  (residuals of g,
+        # scaled by √(1/c)). This is the natural form for a variance-weighted
+        # least-squares term, ``(...)**2 / sigma``. Only a *positive scalar
+        # constant* preserves the sum-of-squares structure; a non-constant or
+        # array denominator can change sign (so ``2 JᵀJ`` no longer holds) and
+        # ``c ≤ 0`` is rejected exactly as the ``c · g`` path rejects ``c < 0``.
+        c = _scalar_const(expr.right)
+        if c is not None and c > 0.0:
+            inner = extract_residuals(expr.left)
+            if inner is None:
+                return None
+            return _scale_residuals(inner, float(np.sqrt(1.0 / c)))
         return None
 
     if isinstance(expr, BinaryOp) and expr.op == "**":

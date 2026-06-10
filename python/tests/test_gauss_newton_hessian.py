@@ -65,6 +65,51 @@ def test_extract_nonnegative_weighted():
     assert len(residuals) == 2
 
 
+def test_extract_division_by_positive_constant():
+    # Variance-weighted least squares: (...)**2 / sigma with sigma > 0 is a
+    # sum of squares with residual sqrt(1/sigma)·base (issue #100).
+    m = Model("d")
+    x = m.continuous("x", shape=(2,))
+    expr = (x[0] - 1.0) ** 2 / 1e-3 + (x[1] - 2.0) ** 2 / 4.0
+    residuals = extract_residuals(expr)
+    assert residuals is not None
+    assert len(residuals) == 2
+
+
+def test_extract_division_of_vectorized_square():
+    m = Model("d")
+    x = m.continuous("x", shape=(3,))
+    A = np.arange(9.0).reshape(3, 3)
+    b = np.ones(3)
+    residuals = extract_residuals(dm.sum((A @ x - b) ** 2) / 2.0)
+    assert residuals is not None
+    assert len(residuals) == 1
+
+
+def test_division_by_constant_matches_equivalent_weight():
+    # g / c and (1/c) * g must produce the *same* Gauss-Newton Hessian, since
+    # the residual scaling sqrt(1/c) is identical for both forms.
+    m_div = Model("div")
+    xd = m_div.continuous("x", shape=(2,), lb=-5, ub=5)
+    m_div.minimize((xd[0] - 1.0) ** 2 / 4.0 + (xd[1] - 2.0) ** 2 / 0.25)
+    ev_div = NLPEvaluator(m_div, gauss_newton=True)
+    assert ev_div.is_gauss_newton
+
+    m_mul = Model("mul")
+    xm = m_mul.continuous("x", shape=(2,), lb=-5, ub=5)
+    m_mul.minimize(0.25 * (xm[0] - 1.0) ** 2 + 4.0 * (xm[1] - 2.0) ** 2)
+    ev_mul = NLPEvaluator(m_mul, gauss_newton=True)
+
+    rng = np.random.default_rng(1)
+    x = rng.uniform(-2, 2, 2)
+    lam = np.array([], dtype=np.float64)
+    H_div = ev_div.evaluate_lagrangian_hessian(x, 1.0, lam)
+    H_mul = ev_mul.evaluate_lagrangian_hessian(x, 1.0, lam)
+    np.testing.assert_allclose(H_div, H_mul, atol=1e-12)
+    # Closed form: H = diag(2/4, 2/0.25) = diag(0.5, 8).
+    np.testing.assert_allclose(np.diag(H_div), [0.5, 8.0], atol=1e-10)
+
+
 @pytest.mark.parametrize(
     "make_expr",
     [
@@ -73,6 +118,8 @@ def test_extract_nonnegative_weighted():
         lambda x: -2.0 * x[0] ** 2,  # negative weight
         lambda x: x[0] ** 3 + x[1] ** 2,  # cubic term
         lambda x: x[0] * x[1],  # bilinear, not a square (distinct factors)
+        lambda x: x[0] ** 2 / (-2.0),  # division by a negative constant
+        lambda x: x[0] ** 2 / (x[1] + 3.0),  # non-constant denominator
     ],
 )
 def test_extract_rejects_non_sum_of_squares(make_expr):
