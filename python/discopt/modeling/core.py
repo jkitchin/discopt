@@ -1825,6 +1825,7 @@ class Model:
         node_callback: Optional[Callable] = None,
         solver: Optional[str] = None,
         validate: bool = False,
+        gauss_newton: bool = False,
         **kwargs,
     ) -> Union[SolveResult, Iterator["SolveUpdate"]]:
         r"""
@@ -1906,6 +1907,18 @@ class Model:
             point and attach the :class:`~discopt.validation.ExaminerReport`
             to ``result.validation_report``. Errors during validation are
             swallowed and leave ``validation_report`` as ``None``.
+        gauss_newton : bool, default False
+            If True and the objective is a non-negative-weighted sum of squares
+            (e.g. ``dm.sum((C @ S - D) ** 2)`` or an explicit
+            ``Σ (resid_i) ** 2``), use the Gauss-Newton objective Hessian
+            ``2 Jᵀ J`` of the residuals instead of the dense ``jax.hessian``.
+            This sidesteps the super-linear second-derivative XLA compile that
+            can dominate least-squares solves (issue #98). The Gauss-Newton
+            Hessian is always PSD and exact at a zero-residual solution, but
+            drops the ``Σ rᵢ ∇²rᵢ`` curvature term, so it changes the Newton
+            step (iteration path) without changing the KKT point converged to.
+            Silently falls back to the exact dense Hessian when the objective
+            is not a recognized sum of squares (or the model maximizes).
         \*\*kwargs
             Additional keyword arguments passed to the solver backend.
 
@@ -1922,6 +1935,11 @@ class Model:
             If *initial_solution* contains non-Variable keys.
         """
         self.validate()
+
+        # Opt-in Gauss-Newton objective Hessian (issue #98). Read by
+        # ``solver._make_evaluator`` when (re)building the NLPEvaluator; toggling
+        # it participates in the evaluator-cache fingerprint.
+        self._gauss_newton_hessian = bool(gauss_newton)
 
         # Validate initial solution if provided
         _x0_flat = None
