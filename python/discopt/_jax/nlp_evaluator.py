@@ -23,6 +23,7 @@ import numpy as np
 from discopt._jax.dag_compiler import (
     _build_param_index,
     compile_constraint_params,
+    compile_expression_params,
     compile_objective_params,
 )
 from discopt.modeling.core import Constraint, Model, ObjectiveSense
@@ -86,12 +87,20 @@ class NLPEvaluator:
         jac = evaluator.evaluate_jacobian(x)
     """
 
-    def __init__(self, model: Model) -> None:
+    def __init__(self, model: Model, gauss_newton: bool = False) -> None:
         """
         Compile model expressions into JIT-compiled evaluation functions.
 
         Args:
             model: A Model with objective and constraints set.
+            gauss_newton: When True and the objective is a non-negative-weighted
+                sum of squares, use the Gauss-Newton objective Hessian
+                (``2 Jᵀ J`` of the residuals) instead of the dense
+                ``jax.hessian``. This sidesteps the super-linear second-
+                derivative compile for least-squares objectives (issue #98) at
+                the cost of dropping the ``Σ rᵢ ∇²rᵢ`` curvature term. Silently
+                falls back to the exact dense Hessian when the objective is not
+                a recognized sum of squares (or the model maximizes).
         """
         if model._objective is None:
             raise ValueError("Model has no objective set.")
@@ -122,7 +131,8 @@ class NLPEvaluator:
             obj_fn = raw_obj_fn
         self._obj_fn_jit = jax.jit(obj_fn)
         self._grad_fn_jit = jax.jit(jax.grad(obj_fn, argnums=0))
-        self._hess_fn_jit = jax.jit(jax.hessian(obj_fn, argnums=0))
+        # The objective Hessian (``self._hess_fn_jit``) is built below, after the
+        # constraints, so the Gauss-Newton path can share the constraint plumbing.
 
         # Compile constraints. Constraint bodies may be scalar OR array-valued
         # (the latter is what DAEBuilder emits for collocation). We detect
@@ -165,16 +175,47 @@ class NLPEvaluator:
             self._cons_fn_jit = None
             self._jac_fn_jit = None
 
-        # Compile Lagrangian Hessian: obj_factor * ∇²f(x) + Σᵢ λᵢ ∇²gᵢ(x)
+        # Gauss-Newton objective Hessian (opt-in, issue #98). When requested and
+        # the objective is a non-negative-weighted sum of squares, build a
+        # residual function r(x, params) and use H_obj ≈ 2 Jᵀ J (J = ∂r/∂x).
+        # This avoids compiling the dense second-derivative graph, whose XLA
+        # codegen is super-linear in the objective expression size.
         cons_fn_jit = self._cons_fn_jit
+        gn_obj_hess_fn = self._build_gauss_newton_obj_hessian(model) if gauss_newton else None
+        self._gauss_newton = gn_obj_hess_fn is not None
 
-        def lagrangian(x, obj_factor, lam, params):
-            L = obj_factor * obj_fn(x, params)
-            if cons_fn_jit is not None:
-                L = L + jnp.dot(lam, cons_fn_jit(x, params))
-            return L
+        # Objective Hessian ∇²f(x).
+        if gn_obj_hess_fn is not None:
+            self._hess_fn_jit = jax.jit(gn_obj_hess_fn)
+        else:
+            self._hess_fn_jit = jax.jit(jax.hessian(obj_fn, argnums=0))
 
-        self._lagrangian_hess_fn_jit = jax.jit(jax.hessian(lagrangian, argnums=0))
+        # Lagrangian Hessian: obj_factor * ∇²f(x) + Σᵢ λᵢ ∇²gᵢ(x).
+        if gn_obj_hess_fn is not None:
+            # Gauss-Newton objective curvature + the exact constraint curvature.
+            # The constraint term keeps its true Hessian (cheap when linear,
+            # zero when there are no constraints); only the objective second-
+            # derivative graph is sidestepped.
+            n_vars = self._n_variables
+
+            def constraint_hessian(x, lam, params):
+                if cons_fn_jit is None:
+                    return jnp.zeros((n_vars, n_vars), dtype=jnp.float64)
+                return jax.hessian(lambda xx: jnp.dot(lam, cons_fn_jit(xx, params)))(x)
+
+            def lagrangian_hess(x, obj_factor, lam, params):
+                return obj_factor * gn_obj_hess_fn(x, params) + constraint_hessian(x, lam, params)
+
+            self._lagrangian_hess_fn_jit = jax.jit(lagrangian_hess)
+        else:
+
+            def lagrangian(x, obj_factor, lam, params):
+                L = obj_factor * obj_fn(x, params)
+                if cons_fn_jit is not None:
+                    L = L + jnp.dot(lam, cons_fn_jit(x, params))
+                return L
+
+            self._lagrangian_hess_fn_jit = jax.jit(jax.hessian(lagrangian, argnums=0))
 
         # Legacy single-argument wrappers. These close over ``self`` and read
         # the current parameter values at call time, so downstream callers
@@ -191,6 +232,58 @@ class NLPEvaluator:
             self._cons_fn = None
             self._jac_fn = None
         self._lagrangian_hess_fn = self._bind_x_obj_lam(self._lagrangian_hess_fn_jit)
+
+    def _build_gauss_newton_obj_hessian(self, model: Model):
+        """Build ``fn(x, params) -> 2 Jᵀ J`` if the objective is a sum of squares.
+
+        Returns ``None`` (so the caller uses the exact dense ``jax.hessian``)
+        when Gauss-Newton does not apply: the model maximizes, or the objective
+        is not a recognized non-negative-weighted sum of squares.
+        """
+        import logging
+
+        logger = logging.getLogger("discopt.nlp")
+
+        if self._negate:
+            logger.info(
+                "gauss_newton ignored: objective is maximized (not a minimized "
+                "sum of squares); using exact dense Hessian."
+            )
+            return None
+
+        from discopt._jax.least_squares import extract_residuals
+
+        assert model._objective is not None  # guaranteed by __init__
+        residual_exprs = extract_residuals(model._objective.expression)
+        if not residual_exprs:
+            logger.info(
+                "gauss_newton requested but the objective is not a recognized "
+                "sum of squares; using exact dense Hessian."
+            )
+            return None
+
+        residual_fns = [
+            compile_expression_params(e, model, self._param_index) for e in residual_exprs
+        ]
+
+        def residual_vector(x, params):
+            parts = [jnp.reshape(fn(x, params), (-1,)) for fn in residual_fns]
+            if len(parts) == 1:
+                return parts[0]
+            return jnp.concatenate(parts)
+
+        def gn_obj_hessian(x, params):
+            # J = ∂r/∂x has shape (R, n); the Gauss-Newton Hessian of Σ rᵢ² is
+            # 2 Jᵀ J. Only first derivatives of the residuals are compiled.
+            jac = jax.jacfwd(residual_vector, argnums=0)(x, params)
+            return 2.0 * (jac.T @ jac)
+
+        return gn_obj_hessian
+
+    @property
+    def is_gauss_newton(self) -> bool:
+        """True when the objective Hessian uses the Gauss-Newton approximation."""
+        return getattr(self, "_gauss_newton", False)
 
     def _bind_x_only(self, fn_xp):
         """Wrap an ``fn(x, params)`` jit into an ``fn(x)`` callable that reads

@@ -200,6 +200,7 @@ def _evaluator_fingerprint(model: Model) -> tuple:
         tuple(id(c) for c in model._constraints),
         tuple(id(v) for v in model._variables),
         tuple(id(p) for p in model._parameters),
+        bool(getattr(model, "_gauss_newton_hessian", False)),
     )
 
 
@@ -218,7 +219,7 @@ def _make_evaluator(model: Model):
         ev, cached_fp = cached
         if cached_fp == fingerprint:
             return ev
-    ev = NLPEvaluator(model)
+    ev = NLPEvaluator(model, gauss_newton=getattr(model, "_gauss_newton_hessian", False))
     model._nlp_evaluator_cache = (ev, fingerprint)
     return ev
 
