@@ -678,18 +678,74 @@ class DAEBuilder:
 
         return np.array(t_list), np.array(x_list)
 
+    def state_at(
+        self,
+        state_name: str,
+        t: float,
+        component: int | None = None,
+    ) -> Any:
+        """Return an expression for a state evaluated at an arbitrary time ``t``.
+
+        The state is reconstructed by evaluating the collocation polynomial of
+        the finite element that contains ``t``:
+
+            ``x(t) = sum_k  L_k(t) * var[elem, k]``
+
+        where ``L_k`` are the Lagrange basis polynomials through the element's
+        node times. This is exact to the collocation order (no node-spacing
+        error), making it the right primitive for observation operators, event
+        constraints, path outputs, and time-accurate measurement fitting.
+
+        Must be called after :meth:`discretize`.
+
+        Parameters
+        ----------
+        state_name : str
+            Name of the state variable.
+        t : float
+            Time at which to evaluate the state. Values outside the domain are
+            clamped to the nearest element (the polynomial then extrapolates).
+        component : int, optional
+            For vector-valued states, which component to evaluate.
+
+        Returns
+        -------
+        Expression
+            A discopt expression for the interpolated state value.
+        """
+        if not self._discretized:
+            raise RuntimeError("Call discretize() before state_at()")
+        if state_name not in self._vars:
+            raise KeyError(f"Unknown state {state_name!r}")
+
+        from discopt.dae.polynomials import lagrange_basis
+
+        t = float(t)
+        var = self._vars[state_name]
+        tp = self._element_points()  # (nfe, ncp+1)
+        elem = self._locate_element(t)
+        nodes = tp[elem]  # (ncp+1,) node times of the containing element
+
+        expr = None
+        for k in range(self._cs.ncp + 1):
+            coeff = float(lagrange_basis(nodes, t, k))
+            x_kc = var[elem, k, component] if component is not None else var[elem, k]
+            term = coeff * x_kc
+            expr = term if expr is None else expr + term
+        return expr
+
     def least_squares(
         self,
         state_name: str,
         t_data: np.ndarray,
         y_data: np.ndarray,
         component: int | None = None,
+        interpolate: bool = True,
     ) -> object:
         """Build a sum-of-squared-residuals expression for parameter estimation.
 
-        Maps each measurement time to the nearest collocation node and returns
-        ``sum((x[nearest] - y_data[i])^2)`` as a discopt expression suitable
-        for ``m.minimize()``.
+        Returns ``sum((x(t_data[i]) - y_data[i])^2)`` as a discopt expression
+        suitable for ``m.minimize()``.
 
         Must be called after :meth:`discretize`.
 
@@ -703,6 +759,14 @@ class DAEBuilder:
             Observed values, shape ``(n_obs,)``.
         component : int, optional
             For vector-valued states, which component to fit.
+        interpolate : bool, default True
+            If ``True`` (default), evaluate the model at the exact measurement
+            time by interpolating the element's collocation polynomial (see
+            :meth:`state_at`). This is exact to the collocation order and
+            removes the time-misalignment bias that arises when measurements do
+            not coincide with collocation nodes. If ``False``, fall back to the
+            legacy behavior of snapping each measurement to the nearest
+            collocation node (kept for backwards compatibility).
 
         Returns
         -------
@@ -717,19 +781,24 @@ class DAEBuilder:
         y_data = np.asarray(y_data, dtype=np.float64)
 
         var = self._vars[state_name]
-        tp = self._element_points()  # (nfe, ncp+1)
-        tp_flat = tp.ravel()
 
         terms = []
-        for i in range(len(t_data)):
-            idx = int(np.argmin(np.abs(tp_flat - t_data[i])))
-            elem = idx // (self._cs.ncp + 1)
-            node = idx % (self._cs.ncp + 1)
-            if component is not None:
-                x_expr = var[elem, node, component]
-            else:
-                x_expr = var[elem, node]
-            terms.append((x_expr - float(y_data[i])) ** 2)
+        if interpolate:
+            for i in range(len(t_data)):
+                x_expr = self.state_at(state_name, float(t_data[i]), component)
+                terms.append((x_expr - float(y_data[i])) ** 2)
+        else:
+            tp = self._element_points()  # (nfe, ncp+1)
+            tp_flat = tp.ravel()
+            for i in range(len(t_data)):
+                idx = int(np.argmin(np.abs(tp_flat - t_data[i])))
+                elem = idx // (self._cs.ncp + 1)
+                node = idx % (self._cs.ncp + 1)
+                if component is not None:
+                    x_expr = var[elem, node, component]
+                else:
+                    x_expr = var[elem, node]
+                terms.append((x_expr - float(y_data[i])) ** 2)
 
         result = terms[0]
         for t in terms[1:]:
@@ -737,6 +806,23 @@ class DAEBuilder:
         return result
 
     # ── Internal helpers ──
+
+    def _element_boundaries(self) -> np.ndarray:
+        """Return element boundary times, shape (nfe + 1,)."""
+        cs = self._cs
+        if cs.element_boundaries is not None:
+            return np.asarray(cs.element_boundaries, dtype=np.float64)
+        return np.linspace(cs.bounds[0], cs.bounds[1], cs.nfe + 1)
+
+    def _locate_element(self, t: float) -> int:
+        """Return the index of the finite element that contains time ``t``.
+
+        Times outside the domain clamp to the first/last element. Times on an
+        interior boundary resolve to the element to their right.
+        """
+        eb = self._element_boundaries()
+        idx = int(np.searchsorted(eb, float(t), side="right") - 1)
+        return max(0, min(idx, self._cs.nfe - 1))
 
     def _element_points(self) -> np.ndarray:
         """Return time values at all nodes, shape (nfe, ncp+1)."""
@@ -750,10 +836,7 @@ class DAEBuilder:
 
             cp = legendre_roots(cs.ncp)
 
-        if cs.element_boundaries is not None:
-            eb = cs.element_boundaries
-        else:
-            eb = np.linspace(cs.bounds[0], cs.bounds[1], cs.nfe + 1)
+        eb = self._element_boundaries()
 
         tp = np.zeros((cs.nfe, cs.ncp + 1))
         for i in range(cs.nfe):

@@ -1087,6 +1087,206 @@ class TestLeastSquares:
         np.testing.assert_allclose(k_est, k_true, atol=0.1)
 
 
+class TestLeastSquaresInterpolation:
+    """Deterministic checks of the interpolating least_squares objective.
+
+    These pin the collocation node variables and evaluate the compiled
+    objective directly, so they need no solver and run in the fast suite.
+    """
+
+    def test_interpolation_reduces_offnode_residual(self):
+        """Interpolating at exact measurement times removes node-snapping bias.
+
+        Pin the node variables to an exact smooth signal and compare the
+        sum-of-squares objective built by each mode against measurements taken
+        at off-node times. The interpolated residual is ~0 (exact to
+        collocation order); the snapped residual is not, because it compares the
+        signal at a node against data taken between nodes (issue #94).
+        """
+        import discopt.modeling as dm
+        from discopt._jax.dag_compiler import compile_expression
+        from discopt.dae import ContinuousSet, DAEBuilder
+
+        k_true = 2.0
+        # Measurement times deliberately off the (uniform, nfe=5) node grid.
+        t_obs = np.array([0.07, 0.23, 0.41, 0.58, 0.74, 0.91])
+        g = lambda t: np.exp(-k_true * t)  # noqa: E731  smooth A -> B decay
+        y_obs = g(t_obs)
+
+        m = dm.Model("offnode")
+        cs = ContinuousSet("t", bounds=(0, 1), nfe=5, ncp=3)
+        dae = DAEBuilder(m, cs)
+        dae.add_state("x", initial=1.0, bounds=(-5, 5))
+        dae.set_ode(lambda t, s, a, c: {"x": -k_true * s["x"]})
+        dae.discretize()
+
+        # Pin node values to the exact signal; evaluate each objective there.
+        x_flat = g(dae._element_points()).ravel()
+        obj_interp = compile_expression(dae.least_squares("x", t_obs, y_obs, interpolate=True), m)
+        obj_snap = compile_expression(dae.least_squares("x", t_obs, y_obs, interpolate=False), m)
+        r_interp = float(obj_interp(x_flat))
+        r_snap = float(obj_snap(x_flat))
+
+        # Interpolation reconstructs the signal at the exact measurement times.
+        assert r_interp < 1e-6
+        # Nearest-node snapping carries a real time-misalignment residual.
+        assert r_snap > 1e-3
+        assert r_interp < r_snap
+
+    def test_interpolate_matches_snapping_on_nodes(self):
+        """When measurements land exactly on nodes, both modes must agree.
+
+        ``state_at`` reduces to the node variable at a node (Lagrange delta
+        property), so the two objective constructions are identical there.
+        """
+        import discopt.modeling as dm
+        from discopt._jax.dag_compiler import compile_expression
+        from discopt.dae import ContinuousSet, DAEBuilder
+
+        m = dm.Model("onnode")
+        cs = ContinuousSet("t", bounds=(0, 2), nfe=8, ncp=3)
+        dae = DAEBuilder(m, cs)
+        dae.add_state("x", initial=1.0, bounds=(-5, 5))
+        dae.set_ode(lambda t, s, a, c: {"x": -s["x"]})
+        dae.discretize()
+
+        # Measurements sampled directly at collocation node times.
+        t_obs = dae.time_points()[1::5]
+        y_obs = np.exp(-1.3 * t_obs)
+        x_flat = np.exp(-0.9 * dae._element_points()).ravel()  # arbitrary node state
+
+        obj_interp = compile_expression(dae.least_squares("x", t_obs, y_obs, interpolate=True), m)
+        obj_snap = compile_expression(dae.least_squares("x", t_obs, y_obs, interpolate=False), m)
+        np.testing.assert_allclose(float(obj_interp(x_flat)), float(obj_snap(x_flat)), rtol=1e-9)
+
+
+class TestStateAt:
+    def test_before_discretize_raises(self):
+        import discopt.modeling as dm
+        from discopt.dae import ContinuousSet, DAEBuilder
+
+        m = dm.Model("sa_pre")
+        cs = ContinuousSet("t", bounds=(0, 1), nfe=4, ncp=3)
+        dae = DAEBuilder(m, cs)
+        dae.add_state("x", initial=1.0)
+        dae.set_ode(lambda t, s, a, c: {"x": -s["x"]})
+
+        with pytest.raises(RuntimeError):
+            dae.state_at("x", 0.5)
+
+    def test_unknown_state_raises(self):
+        import discopt.modeling as dm
+        from discopt.dae import ContinuousSet, DAEBuilder
+
+        m = dm.Model("sa_unknown")
+        cs = ContinuousSet("t", bounds=(0, 1), nfe=4, ncp=3)
+        dae = DAEBuilder(m, cs)
+        dae.add_state("x", initial=1.0)
+        dae.set_ode(lambda t, s, a, c: {"x": -s["x"]})
+        dae.discretize()
+
+        with pytest.raises(KeyError):
+            dae.state_at("nope", 0.5)
+
+    def test_locate_element(self):
+        """_locate_element maps times to the containing element and clamps."""
+        import discopt.modeling as dm
+        from discopt.dae import ContinuousSet, DAEBuilder
+
+        m = dm.Model("sa_locate")
+        cs = ContinuousSet("t", bounds=(0, 1), nfe=5, ncp=3)  # boundaries every 0.2
+        dae = DAEBuilder(m, cs)
+        dae.add_state("x", initial=1.0)
+        dae.set_ode(lambda t, s, a, c: {"x": -s["x"]})
+        dae.discretize()
+
+        assert dae._locate_element(0.0) == 0
+        assert dae._locate_element(0.1) == 0
+        assert dae._locate_element(0.25) == 1
+        assert dae._locate_element(0.99) == 4
+        assert dae._locate_element(1.0) == 4
+        # Out-of-domain clamps to the nearest element.
+        assert dae._locate_element(-1.0) == 0
+        assert dae._locate_element(5.0) == 4
+
+    def test_exact_for_polynomial(self):
+        """state_at reproduces a degree<=ncp polynomial exactly at any time.
+
+        With ncp=3 each element has 4 nodes, so the collocation polynomial
+        interpolates cubics exactly. Evaluated against pinned node values via
+        the compiled expression (no solver needed).
+        """
+        import discopt.modeling as dm
+        from discopt._jax.dag_compiler import compile_expression
+        from discopt.dae import ContinuousSet, DAEBuilder
+
+        m = dm.Model("sa_poly")
+        cs = ContinuousSet("t", bounds=(0, 1), nfe=5, ncp=3)
+        dae = DAEBuilder(m, cs)
+        dae.add_state("x", initial=1.0, bounds=(-50, 50))
+        dae.set_ode(lambda t, s, a, c: {"x": -s["x"]})
+        dae.discretize()
+
+        p = lambda t: 1.0 + 2.0 * t - 0.5 * t**2 + 0.3 * t**3  # noqa: E731
+        x_flat = p(dae._element_points()).ravel()
+
+        for t_q in [0.0, 0.13, 0.37, 0.5, 0.62, 0.88, 1.0]:
+            fn = compile_expression(dae.state_at("x", t_q), m)
+            np.testing.assert_allclose(float(fn(x_flat)), p(t_q), atol=1e-10)
+
+    def test_reduces_to_node_value_at_node(self):
+        """At a collocation node, state_at returns exactly that node's value."""
+        import discopt.modeling as dm
+        from discopt._jax.dag_compiler import compile_expression
+        from discopt.dae import ContinuousSet, DAEBuilder
+
+        m = dm.Model("sa_node")
+        cs = ContinuousSet("t", bounds=(0, 2), nfe=4, ncp=3)
+        dae = DAEBuilder(m, cs)
+        dae.add_state("x", initial=1.0, bounds=(-50, 50))
+        dae.set_ode(lambda t, s, a, c: {"x": -s["x"]})
+        dae.discretize()
+
+        tp = dae._element_points()
+        # Node values from an injective function of time: a wrong element/node
+        # index would return the value for a different time and fail. Boundary
+        # nodes shared by two elements have the same time, hence same value, so
+        # state_at resolving a boundary to the right element stays consistent.
+        h = lambda t: 3.0 * t + 0.7  # noqa: E731  injective in t
+        node_vals = h(tp)
+        x_flat = node_vals.ravel()
+
+        for elem in range(cs.nfe):
+            for k in range(cs.ncp + 1):
+                fn = compile_expression(dae.state_at("x", float(tp[elem, k])), m)
+                np.testing.assert_allclose(float(fn(x_flat)), h(tp[elem, k]), atol=1e-9)
+
+    def test_vector_state_component(self):
+        """state_at selects the requested component of a vector state."""
+        import discopt.modeling as dm
+        from discopt._jax.dag_compiler import compile_expression
+        from discopt.dae import ContinuousSet, DAEBuilder
+
+        m = dm.Model("sa_vec")
+        cs = ContinuousSet("t", bounds=(0, 1), nfe=3, ncp=3)
+        dae = DAEBuilder(m, cs)
+        dae.add_state("x", n_components=2, initial=np.array([1.0, 0.0]), bounds=(-50, 50))
+        dae.set_ode(lambda t, s, a, c: {"x": [-s["x"][0], s["x"][0]]})
+        dae.discretize()
+
+        tp = dae._element_points()  # (nfe, ncp+1)
+        f0 = lambda t: 1.0 + t  # noqa: E731  component 0
+        f1 = lambda t: 2.0 - 0.5 * t  # noqa: E731  component 1
+        vals = np.stack([f0(tp), f1(tp)], axis=-1)  # (nfe, ncp+1, 2)
+        x_flat = vals.ravel()
+
+        t_q = 0.41
+        fn0 = compile_expression(dae.state_at("x", t_q, component=0), m)
+        fn1 = compile_expression(dae.state_at("x", t_q, component=1), m)
+        np.testing.assert_allclose(float(fn0(x_flat)), f0(t_q), atol=1e-9)
+        np.testing.assert_allclose(float(fn1(x_flat)), f1(t_q), atol=1e-9)
+
+
 # ─────────────────────────────────────────────────────────────
 # Phase 8: scipy cross-validation
 # ─────────────────────────────────────────────────────────────
