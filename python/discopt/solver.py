@@ -35,6 +35,21 @@ from discopt.solvers.nlp_ipopt import solve_nlp
 
 logger = logging.getLogger(__name__)
 
+# --- POUNCE batched-NLP node solver tuning (Phase A, discopt#97) ---
+# The callback-based POUNCE batch path runs node NLPs through Python/JAX
+# callbacks, so every objective/gradient/Jacobian/Hessian call re-acquires the
+# GIL and the Python share of each solve serializes across Rayon workers. The
+# batch therefore only amortizes its overhead on larger per-node problems.
+# Benchmarks (14 cores): net loss at n_vars=6 (pooling: 8.4s serial vs 9.4s
+# batch), ~4% win at n_vars=105 (facility: 109.6s vs 105.2s). Below this many
+# variables we stay on the serial per-node path. (The real fix is a native-Rust
+# node evaluator — Phase B — which removes the GIL bottleneck entirely.)
+_POUNCE_BATCH_MIN_VARS = 50
+# Multistart runs 3 starts per nonconvex node (warm/midpoint/random) and keeps
+# the best — better incumbents on nonconvex models, but ~3x the node-solve cost.
+# Off by default; flip to opt in (or pass multistart=True to _solve_batch_pounce).
+_POUNCE_BATCH_MULTISTART = False
+
 
 class _AugmentedEvaluator:
     """Wraps an NLPEvaluator with additional linear cut constraints.
@@ -2328,21 +2343,41 @@ def solve_model(
                 )
 
         _use_ipm_batch = nlp_solver == "ipm" and hasattr(evaluator, "_obj_fn")
-        if _use_ipm_batch and n_batch > 1:
-            result_ids, result_lbs, result_sols, result_feas = _solve_batch_ipm(
-                _active_evaluator,
-                batch_lb,
-                batch_ub,
-                batch_ids,
-                n_vars,
-                _active_cb,
-                opts,
-                _active_gl,
-                _active_gu,
-                batch_psols=batch_psols,
-                multistart=True,  # IPM needs multistart even for convex models
-                convex=_model_is_convex,
-            )
+        # POUNCE batches node NLPs via solve_nlp_batch (Phase A, discopt#97).
+        # It uses Python callbacks, so unlike the IPM path it needs no JAX
+        # _obj_fn on the evaluator. The callback path is GIL-bound, so only
+        # batch when the per-node problem is large enough to amortize it
+        # (_POUNCE_BATCH_MIN_VARS); smaller nodes stay on the serial path.
+        _use_pounce_batch = nlp_solver == "pounce" and n_vars >= _POUNCE_BATCH_MIN_VARS
+        if (_use_ipm_batch or _use_pounce_batch) and n_batch > 1:
+            if _use_pounce_batch:
+                result_ids, result_lbs, result_sols, result_feas = _solve_batch_pounce(
+                    _active_evaluator,
+                    batch_lb,
+                    batch_ub,
+                    batch_ids,
+                    n_vars,
+                    _active_cb,
+                    opts,
+                    batch_psols=batch_psols,
+                    multistart=_POUNCE_BATCH_MULTISTART,
+                    convex=_model_is_convex,
+                )
+            else:
+                result_ids, result_lbs, result_sols, result_feas = _solve_batch_ipm(
+                    _active_evaluator,
+                    batch_lb,
+                    batch_ub,
+                    batch_ids,
+                    n_vars,
+                    _active_cb,
+                    opts,
+                    _active_gl,
+                    _active_gu,
+                    batch_psols=batch_psols,
+                    multistart=True,  # IPM needs multistart even for convex models
+                    convex=_model_is_convex,
+                )
             # Constraint feasibility post-check for batch IPM results.
             # When the IPM solution violates constraints (e.g. due to hitting
             # the iteration limit), mark the node as infeasible (SENTINEL).
@@ -3459,6 +3494,12 @@ def _solve_nlp_bb(
 
     # --- NLP-BB loop ---
     _use_ipm_batch = nlp_solver == "ipm" and hasattr(evaluator, "_obj_fn")
+    # POUNCE batches node NLPs via solve_nlp_batch (Phase A, discopt#97); it is
+    # a true KKT solver, so its converged objective is a reliable lower bound
+    # for convex MINLPs (no polish pass needed, unlike the JAX IPM). The callback
+    # path is GIL-bound, so only batch when the per-node problem is large enough
+    # to amortize it; smaller nodes stay on the serial path.
+    _use_pounce_batch = nlp_solver == "pounce" and n_vars >= _POUNCE_BATCH_MIN_VARS
     iteration = 0
     while True:
         elapsed = time.perf_counter() - t_start
@@ -3520,21 +3561,35 @@ def _solve_nlp_bb(
         # Solve NLP at each node (no relaxation, no multistart for convex)
         t_jax_start = time.perf_counter()
 
-        if _use_ipm_batch and n_batch > 1:
-            result_ids, result_lbs, result_sols, result_feas = _solve_batch_ipm(
-                evaluator,
-                batch_lb,
-                batch_ub,
-                batch_ids,
-                n_vars,
-                constraint_bounds,
-                opts,
-                g_l_jax,
-                g_u_jax,
-                batch_psols=batch_psols,
-                multistart=True,  # IPM needs multistart even for convex models
-                convex=_model_is_convex,
-            )
+        if (_use_ipm_batch or _use_pounce_batch) and n_batch > 1:
+            if _use_pounce_batch:
+                result_ids, result_lbs, result_sols, result_feas = _solve_batch_pounce(
+                    evaluator,
+                    batch_lb,
+                    batch_ub,
+                    batch_ids,
+                    n_vars,
+                    constraint_bounds,
+                    opts,
+                    batch_psols=batch_psols,
+                    multistart=_POUNCE_BATCH_MULTISTART,
+                    convex=_model_is_convex,
+                )
+            else:
+                result_ids, result_lbs, result_sols, result_feas = _solve_batch_ipm(
+                    evaluator,
+                    batch_lb,
+                    batch_ub,
+                    batch_ids,
+                    n_vars,
+                    constraint_bounds,
+                    opts,
+                    g_l_jax,
+                    g_u_jax,
+                    batch_psols=batch_psols,
+                    multistart=True,  # IPM needs multistart even for convex models
+                    convex=_model_is_convex,
+                )
             # Constraint feasibility post-check
             if cl_list:
                 for i in range(n_batch):
@@ -4330,6 +4385,185 @@ def _solve_batch_ipm(
 
     result_ids = np.array(batch_ids, dtype=np.int64)
     result_feas = np.zeros(n_batch, dtype=bool)  # Let Rust check integrality
+
+    return result_ids, result_lbs, result_sols, result_feas
+
+
+def _solve_batch_pounce(
+    evaluator,
+    batch_lb,
+    batch_ub,
+    batch_ids,
+    n_vars,
+    constraint_bounds,
+    options,
+    batch_psols=None,
+    multistart=False,
+    convex=False,
+):
+    """Solve a batch of node NLP relaxations in parallel with POUNCE.
+
+    Phase A of discopt#97: the general-NLP analog of :func:`_solve_batch_ipm`,
+    using POUNCE's ``solve_nlp_batch`` (pounce#126). Each (node, start) pair
+    becomes one callback ``pounce.Problem`` differing only in its tightened
+    variable bounds and initial point; POUNCE runs one instance per Rayon
+    worker (the GIL is released except during the per-evaluation callbacks).
+    Siblings share KKT sparsity, so ``share_structure=True`` reuses each
+    worker's symbolic factorization across the instances it handles.
+
+    Returns the same ``(result_ids, result_lbs, result_sols, result_feas)``
+    contract as :func:`_solve_batch_ipm`: ``result_lbs`` holds the NLP
+    objective per node (or ``_INFEASIBILITY_SENTINEL`` for failed / infeasible
+    nodes), and ``result_feas`` is all-``False`` (the Rust tree checks
+    integrality). POUNCE is a true filter-IPM (KKT-valid), so unlike the JAX
+    IPM its converged objective needs no polish pass on convex models; the
+    caller still applies the nonconvex / constraint-feasibility post-checks.
+
+    Starting points per node:
+
+    * ``multistart=False`` or ``convex=True`` → a single warm start (the
+      parent solution clipped into the child bounds, else the bound midpoint).
+      A convex node has a unique optimum, so one start reaches it — POUNCE
+      needs no multistart there, unlike the JAX IPM.
+    * ``multistart=True`` and ``convex=False`` → three starts per node
+      (warm, midpoint, deterministic-random), keeping the best converged
+      objective. Mirrors :func:`_solve_batch_ipm`'s scheme; on nonconvex nodes
+      a better local solution becomes a stronger incumbent and prunes the
+      tree faster.
+    """
+    import pounce
+
+    from discopt.solvers.nlp_ipopt import (
+        _IPOPT_STATUS_MAP,
+        _infer_constraint_bounds,
+        _IpoptCallbacks,
+    )
+
+    n_batch = len(batch_ids)
+    m = evaluator.n_constraints
+
+    # Constraint bounds are shared across nodes; only variable bounds vary.
+    if constraint_bounds is not None:
+        cl = np.array([b[0] for b in constraint_bounds], dtype=np.float64)
+        cu = np.array([b[1] for b in constraint_bounds], dtype=np.float64)
+    elif m > 0:
+        cl, cu = _infer_constraint_bounds(evaluator)
+    else:
+        cl = np.empty(0, dtype=np.float64)
+        cu = np.empty(0, dtype=np.float64)
+
+    # Batch-level options. Whitelist keys POUNCE understands and enforce the
+    # per-node wall-time guard (issue #5) used by the serial pounce path.
+    batch_opts: dict = {"print_level": 0}
+    for k in ("max_iter", "tol", "acceptable_tol"):
+        if options.get(k) is not None:
+            batch_opts[k] = options[k]
+    caller_limit = options.get("max_wall_time", 30.0)
+    if not caller_limit or caller_limit <= 0:
+        caller_limit = 30.0
+    batch_opts["max_wall_time"] = min(30.0, caller_limit)
+
+    # Multistart only helps escape weak local minima on nonconvex nodes.
+    do_multistart = bool(multistart) and not convex
+    n_starts = 3 if do_multistart else 1
+    rng = np.random.RandomState(42) if do_multistart else None
+
+    # Flatten (node, start) into one problem list; node i occupies the slice
+    # [i * n_starts : (i + 1) * n_starts].
+    problems = []
+    x0s = []
+    node_bounds = []
+    for i in range(n_batch):
+        node_lb = np.asarray(batch_lb[i], dtype=np.float64)
+        node_ub = np.asarray(batch_ub[i], dtype=np.float64)
+        node_bounds.append((node_lb, node_ub))
+
+        lb_c = np.clip(node_lb, -_SPC, _SPC)
+        ub_c = np.clip(node_ub, -_SPC, _SPC)
+        midpoint = 0.5 * (lb_c + ub_c)
+
+        # Warm start: parent solution clipped into child bounds, else midpoint.
+        if batch_psols is not None:
+            psol_i = np.asarray(batch_psols[i], dtype=np.float64)
+            warm = np.clip(psol_i, node_lb, node_ub) if not np.any(np.isnan(psol_i)) else midpoint
+        else:
+            warm = midpoint
+
+        if do_multistart:
+            span = np.maximum(ub_c - lb_c, 0.0)
+            rand = lb_c + rng.uniform(size=n_vars) * span  # type: ignore[union-attr]
+            node_starts = [warm, midpoint, rand]
+        else:
+            node_starts = [warm]
+
+        for x0 in node_starts:
+            # One callbacks proxy per problem so concurrent Rayon workers never
+            # share mutable Python state. The JAX evaluator is pure/reentrant.
+            proxy = _BoundOverrideEvaluator(evaluator, node_lb, node_ub)
+            callbacks = _IpoptCallbacks(proxy)
+            problems.append(
+                pounce.Problem(
+                    n=n_vars,
+                    m=m,
+                    problem_obj=callbacks,
+                    lb=node_lb,
+                    ub=node_ub,
+                    cl=cl,
+                    cu=cu,
+                )
+            )
+            x0s.append(np.asarray(x0, dtype=np.float64))
+
+    result_ids = np.array(batch_ids, dtype=np.int64)
+    result_sols = np.empty((n_batch, n_vars), dtype=np.float64)
+    result_lbs = np.full(n_batch, _INFEASIBILITY_SENTINEL, dtype=np.float64)
+    result_feas = np.zeros(n_batch, dtype=bool)  # Let Rust check integrality
+
+    try:
+        results = pounce.solve_nlp_batch(
+            problems,
+            x0s=x0s,
+            options=batch_opts,
+            share_structure=True,
+        )
+    except Exception as e:
+        # Whole-batch failure: fall back to per-node serial solves so one bad
+        # instance can't sink the iteration (single warm start per node).
+        logger.debug("Batch POUNCE failed (%s); falling back to serial nodes", e)
+        for i in range(n_batch):
+            node_lb, node_ub = node_bounds[i]
+            res = _solve_node_nlp_pounce(
+                evaluator, x0s[i * n_starts], node_lb, node_ub, constraint_bounds, options
+            )
+            result_sols[i] = np.asarray(res.x, dtype=np.float64)
+            if res.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
+                obj = float(res.objective)
+                if np.isfinite(obj):
+                    result_lbs[i] = obj
+        return result_ids, result_lbs, result_sols, result_feas
+
+    # Reduce the starts of each node to its best accepted result. The evaluator
+    # objective is in minimization sense (maximize models are negated), so the
+    # lowest objective is best — matching _solve_batch_ipm's argmin.
+    for i in range(n_batch):
+        best_obj = None
+        best_x = None
+        for s in range(n_starts):
+            x, info = results[i * n_starts + s]
+            x_arr = np.asarray(x, dtype=np.float64)
+            if best_x is None:
+                best_x = x_arr  # placeholder if no start is accepted
+            status = _IPOPT_STATUS_MAP.get(info.get("status", -100), SolveStatus.ERROR)
+            # Accept the same statuses as the serial pounce node path; anything
+            # else (infeasible, restoration failure, errors) is not usable.
+            if status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
+                obj = float(info.get("obj_val", np.nan))
+                if np.isfinite(obj) and (best_obj is None or obj < best_obj):
+                    best_obj = obj
+                    best_x = x_arr
+        result_sols[i] = best_x
+        if best_obj is not None:
+            result_lbs[i] = best_obj
 
     return result_ids, result_lbs, result_sols, result_feas
 
