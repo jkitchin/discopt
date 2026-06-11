@@ -8,6 +8,16 @@ use crate::expr::{
 };
 use std::f64::consts::PI;
 
+/// Feasibility tolerance for declaring a constraint infeasible during FBBT.
+///
+/// A forward-propagated constraint body that misses its required output bound
+/// by less than this is treated as feasible (numerical noise), not as proof of
+/// infeasibility. Matches the solver's absolute feasibility tolerance (1e-6)
+/// and is deliberately larger than the FBBT convergence tolerance (~1e-8) so
+/// that eps-scale residuals from approximate reformulations (e.g. GDP hull
+/// perspective forms) cannot fabricate an unsound infeasibility certificate.
+pub const FEAS_TOL: f64 = 1e-6;
+
 // ─────────────────────────────────────────────────────────────
 // Interval type
 // ─────────────────────────────────────────────────────────────
@@ -58,6 +68,21 @@ impl Interval {
     /// Whether the interval is empty (lo > hi).
     pub fn is_empty(&self) -> bool {
         self.lo > self.hi
+    }
+
+    /// Whether the interval is empty by more than a feasibility tolerance,
+    /// i.e. `lo - hi > tol`.
+    ///
+    /// Use this (not [`is_empty`]) when deciding that a *constraint* is
+    /// genuinely infeasible. Approximate reformulations — notably the GDP
+    /// hull perspective form `y * f(v / y)` with a clamp `y + eps` — leave
+    /// eps-scale (~1e-8) residuals at integer faces. A strict `lo > hi`
+    /// check mistakes that numerical noise for infeasibility and can fix a
+    /// disjunction's selector incorrectly, producing an unsound bound. A
+    /// tolerance-aware check declares infeasibility only when the violation
+    /// exceeds the feasibility tolerance.
+    pub fn is_empty_beyond(&self, tol: f64) -> bool {
+        self.lo - self.hi > tol
     }
 
     /// Whether `x` is contained in the interval.
@@ -711,7 +736,7 @@ pub fn fbbt_with_cutoff(
             };
 
             let body_bound = node_bounds[constr.body.0];
-            if body_bound.intersect(&output_bound).is_empty() {
+            if body_bound.intersect(&output_bound).is_empty_beyond(FEAS_TOL) {
                 for b in &mut var_bounds {
                     *b = Interval::empty();
                 }
@@ -731,7 +756,7 @@ pub fn fbbt_with_cutoff(
         if let Some((obj_expr, ref cutoff_bound)) = obj_cutoff {
             let node_bounds = forward_propagate(&model.arena, obj_expr, &var_bounds);
             let obj_bound = node_bounds[obj_expr.0];
-            if obj_bound.intersect(cutoff_bound).is_empty() {
+            if obj_bound.intersect(cutoff_bound).is_empty_beyond(FEAS_TOL) {
                 for b in &mut var_bounds {
                     *b = Interval::empty();
                 }
@@ -794,7 +819,7 @@ pub fn fbbt(model: &ModelRepr, max_iter: usize, tol: f64) -> Vec<Interval> {
             // Check feasibility: if the forward bound is incompatible
             // with the constraint, the problem is infeasible.
             let body_bound = node_bounds[constr.body.0];
-            if body_bound.intersect(&output_bound).is_empty() {
+            if body_bound.intersect(&output_bound).is_empty_beyond(FEAS_TOL) {
                 // Infeasible — mark all bounds as empty.
                 for b in &mut var_bounds {
                     *b = Interval::empty();
@@ -1593,5 +1618,86 @@ mod tests {
         let bounds = fbbt_with_cutoff(&model, 10, 1e-8, Some(cutoff));
         assert!((bounds[0].lo - (-10.0)).abs() < 1e-8);
         assert!((bounds[0].hi - 2.0).abs() < 1e-8);
+    }
+
+    // -- feasibility-tolerance regression tests (issue #27a) --
+
+    #[test]
+    fn test_is_empty_beyond_tolerance() {
+        // An eps-scale inverted interval is empty in the strict sense but
+        // feasible within tolerance — it must not be treated as infeasible.
+        let eps = Interval::new(1.0, 1.0 - 1e-9);
+        assert!(eps.is_empty());
+        assert!(!eps.is_empty_beyond(FEAS_TOL));
+
+        // A genuinely inverted interval is empty beyond tolerance.
+        let real = Interval::new(1.0, 0.9);
+        assert!(real.is_empty());
+        assert!(real.is_empty_beyond(FEAS_TOL));
+
+        // The canonical empty interval is empty beyond any finite tolerance.
+        assert!(Interval::empty().is_empty_beyond(FEAS_TOL));
+    }
+
+    /// Build a one-variable model `x` fixed to `[0, 0]` with a single `x >= rhs`
+    /// constraint. With `rhs` a small positive number the constraint is violated
+    /// by exactly `rhs` — the shape of a GDP hull perspective residual at an
+    /// integer face.
+    fn make_eps_violated_model(rhs: f64) -> ModelRepr {
+        let mut arena = ExprArena::new();
+        let x = arena.add(ExprNode::Variable {
+            name: "x".into(),
+            index: 0,
+            size: 1,
+            shape: vec![],
+        });
+        ModelRepr {
+            arena,
+            objective: x,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![ConstraintRepr {
+                body: x,
+                sense: ConstraintSense::Ge,
+                rhs,
+                name: Some("c1".into()),
+            }],
+            variables: vec![VarInfo {
+                name: "x".into(),
+                var_type: VarType::Continuous,
+                offset: 0,
+                size: 1,
+                shape: vec![],
+                lb: vec![0.0],
+                ub: vec![0.0],
+            }],
+            n_vars: 1,
+        }
+    }
+
+    #[test]
+    fn test_fbbt_eps_violation_not_infeasible() {
+        // x = 0, constraint x >= 1e-9. The body misses the bound by 1e-9, well
+        // within the feasibility tolerance: FBBT must NOT collapse all bounds to
+        // empty (which would fabricate an unsound infeasibility certificate).
+        let model = make_eps_violated_model(1e-9);
+        let bounds = fbbt(&model, 5, 1e-8);
+        assert!(
+            bounds[0].lo.is_finite() && bounds[0].hi.is_finite(),
+            "eps-scale violation must not be treated as infeasible"
+        );
+        // The variable stays pinned near its fixed value, not blown up to empty.
+        assert!(bounds[0].lo <= 1e-6 && bounds[0].hi >= -1e-6);
+    }
+
+    #[test]
+    fn test_fbbt_real_violation_is_infeasible() {
+        // x = 0, constraint x >= 0.5. The violation (0.5) exceeds the feasibility
+        // tolerance, so FBBT must still detect infeasibility and empty the bounds.
+        let model = make_eps_violated_model(0.5);
+        let bounds = fbbt(&model, 5, 1e-8);
+        assert!(
+            bounds.iter().all(|b| b.is_empty()),
+            "a violation beyond the feasibility tolerance must be infeasible"
+        );
     }
 }
