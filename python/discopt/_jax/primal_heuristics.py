@@ -9,6 +9,7 @@ and re-solves the resulting NLP.
 from __future__ import annotations
 
 import itertools
+import logging
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -17,6 +18,8 @@ import numpy as np
 from discopt._jax.nlp_evaluator import NLPEvaluator
 from discopt.modeling.core import Model, VarType
 from discopt.solvers import NLPResult, SolveStatus
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -431,19 +434,38 @@ def enumerate_binary_seeds_subnlp(
     if not binary_idx or len(binary_idx) > max_binaries:
         return []
 
+    # Continuous (non-binary) base seeds. The relaxation point is a good start
+    # for whichever disjunct it settled in, but a *bad* one for the others —
+    # the disaggregated perspective variables carry the wrong disjunct's values,
+    # which on some platforms traps the NLP at the relaxation's local optimum.
+    # Add a neutral bound-midpoint start so escaping to the right disjunct does
+    # not depend on platform-sensitive convergence from the stale start.
+    cont_mask = ~np.isin(np.arange(len(x_relax)), binary_idx)
+    _spc = 1e6
+    midpoint = x_relax.copy()
+    midpoint[cont_mask] = 0.5 * (np.clip(lb, -_spc, _spc) + np.clip(ub, -_spc, _spc))[cont_mask]
+    base_seeds = [x_relax, midpoint]
+
     results: list[tuple[np.ndarray, float]] = []
     for combo in itertools.product((0.0, 1.0), repeat=len(binary_idx)):
-        seed = x_relax.copy()
-        for idx, value in zip(binary_idx, combo):
-            seed[idx] = value
-        found = subnlp(
-            model,
-            seed,
-            backend=backend,
-            nlp_options=nlp_options,
-            evaluator=evaluator,
-            integer_tol=integer_tol,
-        )
-        if found is not None:
-            results.append(found)
+        for base in base_seeds:
+            seed = base.copy()
+            for idx, value in zip(binary_idx, combo):
+                seed[idx] = value
+            found = subnlp(
+                model,
+                seed,
+                backend=backend,
+                nlp_options=nlp_options,
+                evaluator=evaluator,
+                integer_tol=integer_tol,
+            )
+            logger.warning(
+                "GDPENUM combo=%s start=%s -> %s",
+                combo,
+                "relax" if base is x_relax else "mid",
+                "None" if found is None else f"obj={found[1]:.6g}",
+            )
+            if found is not None:
+                results.append(found)
     return results
