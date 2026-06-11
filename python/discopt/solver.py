@@ -2912,7 +2912,12 @@ def solve_model(
                 try:
                     from discopt._jax.primal_heuristics import feasibility_pump
 
-                    fp_sol = feasibility_pump(model, result_sols[best_root_idx], max_rounds=5)
+                    fp_sol = feasibility_pump(
+                        model,
+                        result_sols[best_root_idx],
+                        max_rounds=5,
+                        backend=_resolve_heuristic_backend(nlp_solver),
+                    )
                     if fp_sol is not None:
                         fp_obj = float(evaluator.evaluate_objective(fp_sol))
                         fp_feas = not cl_list or _check_constraint_feasibility(
@@ -3256,6 +3261,31 @@ def _default_nlp_solver() -> str:
     if "cyipopt" in avail:
         return "ipopt"
     return "ipm"
+
+
+def _resolve_heuristic_backend(nlp_solver: str) -> Optional[Callable]:
+    """Resolve the NLP backend for primal heuristics, honoring ``nlp_solver``.
+
+    The pump / rounding heuristics project onto the continuous feasible set with
+    a standalone ``solve_nlp`` callable. Map the caller's choice to a KKT-valid
+    backend (POUNCE-preferred): explicit ``"pounce"`` / ``"ipopt"`` are honored,
+    while the pure-JAX ``"ipm"`` / ``"sparse_ipm"`` selections (which have no
+    standalone NLP entry point) fall back to ``"auto"`` (POUNCE if importable,
+    else cyipopt). If the preferred backend is unimportable we degrade to
+    ``"auto"``, and return ``None`` only when no backend exists at all (letting
+    the heuristic default to its own ``"auto"`` resolution / skip).
+    """
+    from discopt.solvers.nlp_backend import Backend, get_nlp_solver
+
+    preferred = {"pounce": "pounce", "ipopt": "cyipopt", "cyipopt": "cyipopt"}.get(
+        nlp_solver, "auto"
+    )
+    for backend in (preferred, "auto"):
+        try:
+            return get_nlp_solver(cast(Backend, backend))
+        except ImportError:
+            continue
+    return None
 
 
 def _solve_continuous(
@@ -3785,7 +3815,12 @@ def _solve_nlp_bb(
                 try:
                     from discopt._jax.primal_heuristics import feasibility_pump
 
-                    fp_sol = feasibility_pump(model, result_sols[best_root_idx], max_rounds=5)
+                    fp_sol = feasibility_pump(
+                        model,
+                        result_sols[best_root_idx],
+                        max_rounds=5,
+                        backend=_resolve_heuristic_backend(nlp_solver),
+                    )
                     if fp_sol is not None:
                         fp_obj = float(evaluator.evaluate_objective(fp_sol))
                         fp_feas = not cl_list or _check_constraint_feasibility(

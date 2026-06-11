@@ -16,7 +16,6 @@ import numpy as np
 from discopt._jax.nlp_evaluator import NLPEvaluator
 from discopt.modeling.core import Model, VarType
 from discopt.solvers import NLPResult, SolveStatus
-from discopt.solvers.nlp_ipopt import solve_nlp
 
 
 @dataclass
@@ -115,11 +114,15 @@ class MultiStartNLP:
     def solve(
         self,
         ipopt_options: Optional[dict] = None,
+        backend: Optional[Callable] = None,
     ) -> MultiStartResult:
         """Run multi-start NLP solving.
 
         Args:
-            ipopt_options: Options passed to Ipopt (e.g. max_iter, tol).
+            ipopt_options: Options passed to the NLP backend (e.g. max_iter, tol).
+            backend: ``solve_nlp(evaluator, x0, options=...)`` callable. If None,
+                resolves to ``get_nlp_solver("auto")``
+                (POUNCE-preferred, falling back to cyipopt).
 
         Returns:
             MultiStartResult with best solution and statistics.
@@ -135,13 +138,17 @@ class MultiStartNLP:
 
         opts = dict(ipopt_options) if ipopt_options else {}
         opts.setdefault("print_level", 0)
+        if backend is None:
+            from discopt.solvers.nlp_backend import get_nlp_solver
+
+            backend = get_nlp_solver("auto")
 
         result = MultiStartResult(n_starts=self._n_starts)
         best_obj = float("inf")
 
         for i in range(self._n_starts):
             x0 = starts[i]
-            nlp_result = solve_nlp(evaluator, x0, options=opts)
+            nlp_result = backend(evaluator, x0, options=opts)
             if not _is_nlp_feasible(nlp_result):
                 continue
 
@@ -172,6 +179,7 @@ def feasibility_pump(
     x_nlp: np.ndarray,
     max_rounds: int = 5,
     ipopt_options: Optional[dict] = None,
+    backend: Optional[Callable] = None,
 ) -> Optional[np.ndarray]:
     """Try to find an integer-feasible solution via rounding + re-solve.
 
@@ -184,7 +192,10 @@ def feasibility_pump(
         model: The optimization model.
         x_nlp: An NLP relaxation solution (may have fractional integers).
         max_rounds: Maximum rounding + re-solve attempts.
-        ipopt_options: Options passed to Ipopt.
+        ipopt_options: Options passed to the NLP backend.
+        backend: ``solve_nlp(evaluator, x0, options=...)`` callable. If None,
+            resolves to ``get_nlp_solver("auto")``
+            (POUNCE-preferred, falling back to cyipopt).
 
     Returns:
         An integer-feasible solution vector, or None if not found.
@@ -199,6 +210,10 @@ def feasibility_pump(
 
     opts = dict(ipopt_options) if ipopt_options else {}
     opts.setdefault("print_level", 0)
+    if backend is None:
+        from discopt.solvers.nlp_backend import get_nlp_solver
+
+        backend = get_nlp_solver("auto")
 
     rng = np.random.default_rng(42)
 
@@ -223,7 +238,7 @@ def feasibility_pump(
         # are used as the starting point. Ipopt will respect variable bounds.
         x0 = x_try.copy()
 
-        nlp_result = solve_nlp(evaluator, x0, options=opts)
+        nlp_result = backend(evaluator, x0, options=opts)
         if not _is_nlp_feasible(nlp_result):
             continue
 
