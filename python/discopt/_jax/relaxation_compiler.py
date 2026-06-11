@@ -729,12 +729,12 @@ def _compile_relax_node(
         if name in _univariate_relax:
             a_fn = arg_fns[0]
 
-            # Chebyshev / Taylor dispatch (M2 / M3 of issue #51): build a
-            # pre-compiled outer-approximation shim if (a) the operator
-            # is supported, (b) we can infer a finite static box for the
-            # inner expression. Otherwise fall through to the existing
-            # McCormick path so the choice is non-blocking.
-            if arithmetic in ("chebyshev", "taylor"):
+            # Chebyshev / Taylor / ellipsoidal dispatch (M2 / M3 of issue
+            # #51; M7 of issue #81): build a pre-compiled outer-approximation
+            # shim if (a) the operator is supported, (b) we can infer a finite
+            # static box for the inner expression. Otherwise fall through to
+            # the existing McCormick path so the choice is non-blocking.
+            if arithmetic in ("chebyshev", "taylor", "ellipsoidal"):
                 from discopt._jax import oa_relax
 
                 if oa_relax.is_supported(name):

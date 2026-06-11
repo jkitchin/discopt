@@ -41,9 +41,21 @@ def test_unknown_arithmetic_raises():
         oa.outer_approximation(jnp.exp, (-1.0, 1.0), "bogus")
 
 
-def test_ellipsoidal_not_implemented():
-    with pytest.raises(NotImplementedError):
-        oa.outer_approximation(jnp.exp, (-1.0, 1.0), "ellipsoidal")
+def test_ellipsoidal_is_implemented_and_sound():
+    """M7 (issue #81): the ellipsoidal provider now produces a valid OA."""
+    approx = oa.outer_approximation(jnp.exp, (-1.0, 1.0), "ellipsoidal")
+    assert approx.arithmetic == "ellipsoidal"
+    assert approx.cuts
+    rng = np.random.default_rng(0)
+    xs = rng.uniform(-1.0, 1.0, size=N_SAMPLES)
+    ys = np.exp(xs)
+    for cut in approx.cuts:
+        sx, sy = float(cut.coeffs[0]), float(cut.coeffs[1])
+        lhs = sx * xs + sy * ys
+        if cut.sense == ">=":
+            assert (lhs >= cut.rhs - TOL).all()
+        else:
+            assert (lhs <= cut.rhs + TOL).all()
 
 
 def test_invalid_domain_raises():
@@ -85,7 +97,7 @@ SOUNDNESS_CASES = [
 ]
 
 
-@pytest.mark.parametrize("arithmetic", ["mccormick", "chebyshev", "taylor"])
+@pytest.mark.parametrize("arithmetic", ["mccormick", "chebyshev", "taylor", "ellipsoidal"])
 @pytest.mark.parametrize("name, f, domain, degree", SOUNDNESS_CASES)
 def test_oa_is_sound(arithmetic, name, f, domain, degree):
     rng = np.random.default_rng(0)
@@ -98,7 +110,7 @@ def test_oa_is_sound(arithmetic, name, f, domain, degree):
     assert (true <= hi + TOL).all(), f"{arithmetic}/{name}: upper violated"
 
 
-@pytest.mark.parametrize("arithmetic", ["mccormick", "chebyshev", "taylor"])
+@pytest.mark.parametrize("arithmetic", ["mccormick", "chebyshev", "taylor", "ellipsoidal"])
 def test_oa_each_cut_is_globally_valid(arithmetic):
     """Stronger than the OA-as-tube test: every individual cut must hold
     for every sampled point. This guards against future refactors that
@@ -125,7 +137,7 @@ def test_oa_each_cut_is_globally_valid(arithmetic):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("arithmetic", ["mccormick", "chebyshev", "taylor"])
+@pytest.mark.parametrize("arithmetic", ["mccormick", "chebyshev", "taylor", "ellipsoidal"])
 def test_endpoint_secant_present(arithmetic):
     domain = (-1.0, 2.0)
     a, b = domain
@@ -162,7 +174,7 @@ def test_uniform_api_across_arithmetics():
     domain = (-0.5, 0.5)
     results = {
         kind: oa.outer_approximation(jnp.exp, domain, kind, degree=6, n_slopes=8)
-        for kind in ("mccormick", "chebyshev", "taylor")
+        for kind in ("mccormick", "chebyshev", "taylor", "ellipsoidal")
     }
     for kind, r in results.items():
         assert r.arithmetic == kind
