@@ -9,7 +9,6 @@ and re-solves the resulting NLP.
 from __future__ import annotations
 
 import itertools
-import logging
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -18,8 +17,6 @@ import numpy as np
 from discopt._jax.nlp_evaluator import NLPEvaluator
 from discopt.modeling.core import Model, VarType
 from discopt.solvers import NLPResult, SolveStatus
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -399,9 +396,15 @@ def enumerate_binary_seeds_subnlp(
     regardless of which branch the relaxation happened to lock onto. Seeds whose
     fixing is infeasible simply yield no sub-NLP solution and are dropped.
 
-    The cost is bounded to ``2 ** max_binaries`` sub-NLP solves; when the model
-    has more than ``max_binaries`` binaries the enumeration is skipped (an empty
-    list is returned) to avoid combinatorial blow-up, leaving the regular
+    Each disjunct is attempted from two continuous starts — the relaxation point
+    and a neutral bound midpoint. The disaggregated perspective variables in the
+    relaxation point carry the *settled* disjunct's values, a poor (and
+    platform-sensitively convergent) start for the others; the second start
+    makes escaping to the right disjunct robust across platforms.
+
+    The cost is bounded to ``2 ** (max_binaries + 1)`` sub-NLP solves; when the
+    model has more than ``max_binaries`` binaries the enumeration is skipped (an
+    empty list is returned) to avoid combinatorial blow-up, leaving the regular
     rounding/pump heuristics in charge. Intended for a single root invocation.
 
     Args:
@@ -459,12 +462,6 @@ def enumerate_binary_seeds_subnlp(
                 nlp_options=nlp_options,
                 evaluator=evaluator,
                 integer_tol=integer_tol,
-            )
-            logger.warning(
-                "GDPENUM combo=%s start=%s -> %s",
-                combo,
-                "relax" if base is x_relax else "mid",
-                "None" if found is None else f"obj={found[1]:.6g}",
             )
             if found is not None:
                 results.append(found)
