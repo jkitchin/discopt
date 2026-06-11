@@ -3066,6 +3066,58 @@ def solve_model(
                         _subnlp_incumbent_updates += 1
                         logger.info("SubNLP incumbent: obj=%.6g (iter=%d)", _obj_sn, iteration)
 
+        # --- Root binary-seed enumeration (deterministic disjunct cover) ---
+        # A single nearest-rounding subnlp lands in whichever disjunct the
+        # relaxation's fractional selector happens to round toward, a choice
+        # decided by platform-dependent floating point for nonconvex GDP
+        # models. At the root only, enumerate every 0/1 assignment over the
+        # (capped) set of fractional binaries and solve a fixed-integer subnlp
+        # from each, so the optimal disjunct is always tried regardless of
+        # platform FP. Bounded to 2**max_binaries solves; skipped above the cap.
+        if (
+            iteration == 0
+            and _subnlp_backend_fn is not None
+            and not _model_is_convex
+            and _subnlp_calls < subnlp_max_calls
+        ):
+            from discopt._jax.primal_heuristics import enumerate_binary_seeds_subnlp
+
+            # Seed the enumeration from the best root relaxation point when one
+            # produced a usable bound; otherwise fall back to the bound midpoint.
+            # The enumeration sets the binaries explicitly and starts each
+            # disjunct's continuous NLP from zero, so it does not actually need a
+            # good relaxation point — and on some platforms the root relaxation
+            # returns only sentinel bounds (no usable candidate), which must not
+            # silently disable this heuristic.
+            _enum_cands = [
+                (i, float(result_lbs[i]))
+                for i in range(n_batch)
+                if result_lbs[i] < _SENTINEL_THRESHOLD and np.isfinite(result_lbs[i])
+            ]
+            _enum_cands.sort(key=lambda t: t[1])
+            if _enum_cands:
+                _enum_seed = result_sols[_enum_cands[0][0]]
+            else:
+                _enum_seed = 0.5 * (np.clip(lb, -_SPC, _SPC) + np.clip(ub, -_SPC, _SPC))
+            try:
+                _enum_results = enumerate_binary_seeds_subnlp(
+                    model,
+                    _enum_seed,
+                    backend=_subnlp_backend_fn,
+                    nlp_options=subnlp_options,
+                    evaluator=evaluator,
+                )
+            except Exception as _e:
+                logger.debug("enumerate_binary_seeds_subnlp raised: %s", _e)
+                _enum_results = []
+            _subnlp_calls += len(_enum_results)
+            for _x_en, _obj_en in _enum_results:
+                _subnlp_feasible += 1
+                if np.isfinite(_obj_en) and _obj_en < _SENTINEL_THRESHOLD:
+                    tree.inject_incumbent(_x_en.copy(), float(_obj_en))
+                    _subnlp_incumbent_updates += 1
+                    logger.info("SubNLP enum incumbent: obj=%.6g", _obj_en)
+
         # --- User callbacks: lazy constraints and incumbent filtering ---
         if lazy_constraints is not None or incumbent_callback is not None:
             _invoke_pre_import_callbacks(
