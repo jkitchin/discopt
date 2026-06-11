@@ -87,6 +87,7 @@ jobs:
           uv pip install maturin
           uv pip install \
             jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn \
+            pounce-solver \
             pytest pytest-timeout pytest-xdist
           maturin develop
       - name: Run pytest (PR-fast, parallel)
@@ -150,6 +151,7 @@ jobs:
           uv pip install maturin
           uv pip install \
             jax jaxlib numpy scipy highspy cyipopt openpyxl scikit-learn \
+            pounce-solver \
             pytest pytest-timeout pytest-xdist pytest-cov
           maturin develop
       # --cov-fail-under temporarily lowered from 85 -> 70 -> 65 after the
