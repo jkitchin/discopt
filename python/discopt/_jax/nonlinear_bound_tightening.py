@@ -478,17 +478,29 @@ def _tighten_univariate_quadratic_interval(
     lb: float,
     ub: float,
 ) -> Optional[tuple[float, float]]:
-    """Intersect [lb, ub] with the feasible set of a*x^2 + b*x <= rhs for a >= 0."""
+    """Intersect [lb, ub] with the feasible set of a*x^2 + b*x <= rhs for a >= 0.
+
+    Infeasibility is declared (``None``) only when the constraint is violated by
+    more than the feasibility tolerance. A sub-tolerance violation — e.g. the
+    O(eps) residual of an approximate GDP hull perspective — must not manufacture
+    a hard infeasibility here, because the ``None`` return is pruned upstream
+    without any tolerance check. The threshold is translated into each branch's
+    native units: a constant constraint compares ``rhs`` directly, while the
+    quadratic branch compares the discriminant, since the constraint violation of
+    ``a*x^2 + b*x <= rhs`` at its vertex equals ``-discriminant / (4a)`` (issue
+    #27a). Such residuals are deferred to the node NLP for exact validation.
+    """
     if abs(a) <= 1e-12:
         if abs(b) <= 1e-12:
-            return (lb, ub) if rhs >= -1e-12 else None
+            return (lb, ub) if rhs >= -_EMPTY_INTERVAL_FEAS_TOL else None
         bound = rhs / b
         if b > 0.0:
             return (lb, min(ub, bound))
         return (max(lb, bound), ub)
 
     discriminant = b * b + 4.0 * a * rhs
-    if discriminant < -1e-12:
+    # Vertex violation = -discriminant / (4a); infeasible only beyond tolerance.
+    if discriminant < -4.0 * a * _EMPTY_INTERVAL_FEAS_TOL:
         return None
     discriminant = max(discriminant, 0.0)
     sqrt_disc = float(np.sqrt(discriminant))
@@ -552,7 +564,11 @@ class SumOfSquaresUpperBoundRule(NonlinearBoundTighteningRule):
                 continue
 
             rhs = -constant_term
-            if rhs < -1e-12:
+            # A negative upper bound on a nonnegative sum of squares is genuine
+            # infeasibility only beyond the feasibility tolerance; a sub-tolerance
+            # excess (e.g. an eps-scale hull-perspective residual) is feasible
+            # within tolerance and must not be pruned (issue #27a).
+            if rhs < -_EMPTY_INTERVAL_FEAS_TOL:
                 _prove_infeasible(
                     self.name,
                     constraint,
@@ -700,7 +716,9 @@ class SqrtSumOfSquaresUpperBoundRule(NonlinearBoundTighteningRule):
                 continue
 
             rhs = -constant_term / sqrt_coeff
-            if rhs < -1e-12:
+            # Infeasible only beyond the feasibility tolerance (see issue #27a);
+            # a sub-tolerance excess is feasible within tolerance and deferred.
+            if rhs < -_EMPTY_INTERVAL_FEAS_TOL:
                 _prove_infeasible(
                     self.name,
                     constraint,
@@ -1290,7 +1308,10 @@ class QuadraticEqualityBoundsRule(NonlinearBoundTighteningRule):
         square_lb: float,
         square_ub: float,
     ) -> Optional[tuple[float, float]]:
-        if square_ub < -1e-12:
+        # A negative upper bound on x**2 is infeasible only beyond the
+        # feasibility tolerance; a sub-tolerance residual (e.g. eps-scale hull
+        # perspective) is feasible within tolerance and deferred (issue #27a).
+        if square_ub < -_EMPTY_INTERVAL_FEAS_TOL:
             return None
         square_lb = max(0.0, square_lb)
         square_ub = max(0.0, square_ub)
@@ -1535,7 +1556,9 @@ class SquareDifferenceLowerBoundRule(NonlinearBoundTighteningRule):
                 rhs_lb += coeff * sq_lb
                 rhs_ub += coeff * sq_ub
 
-            if rhs_ub < -1e-12:
+            # Infeasible only beyond the feasibility tolerance (issue #27a); a
+            # sub-tolerance residual is feasible within tolerance and deferred.
+            if rhs_ub < -_EMPTY_INTERVAL_FEAS_TOL:
                 _prove_infeasible(
                     self.name,
                     constraint,
@@ -1544,7 +1567,7 @@ class SquareDifferenceLowerBoundRule(NonlinearBoundTighteningRule):
 
             feasible_square_lb = max(0.0, rhs_lb / target_scale)
             feasible_square_ub = max(0.0, rhs_ub / target_scale)
-            if feasible_square_lb > feasible_square_ub + 1e-12:
+            if feasible_square_lb > feasible_square_ub + _EMPTY_INTERVAL_FEAS_TOL:
                 _prove_infeasible(
                     self.name,
                     constraint,

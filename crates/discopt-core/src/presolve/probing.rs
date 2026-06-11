@@ -3,7 +3,7 @@
 //! For each binary variable, temporarily fix it to 0 and 1, run FBBT,
 //! and use the results to detect fixings, tightened bounds, and implications.
 
-use super::fbbt::{fbbt, Interval};
+use super::fbbt::{fbbt, Interval, FEAS_TOL};
 use crate::expr::{ModelRepr, VarType};
 
 /// Result of probing all binary variables.
@@ -55,14 +55,19 @@ pub fn probe_binary_vars(model: &ModelRepr, var_bounds: &[Interval]) -> ProbingR
         bounds_zero[i] = Interval::new(0.0, 0.0);
         let model_zero = make_probing_model(model, &bounds_zero);
         let result_zero = fbbt(&model_zero, max_fbbt_iter, fbbt_tol);
-        let infeasible_zero = result_zero.iter().any(|b| b.is_empty());
+        // Declare a fixing infeasible only when a bound is empty beyond the
+        // feasibility tolerance. An eps-scale inverted interval (e.g. from a
+        // GDP hull perspective residual) is numerical noise, not proof that
+        // the selector cannot take this value — treating it as such would fix
+        // the disjunction wrongly and yield an unsound bound.
+        let infeasible_zero = result_zero.iter().any(|b| b.is_empty_beyond(FEAS_TOL));
 
         // Probe y=1.
         let mut bounds_one = var_bounds.to_vec();
         bounds_one[i] = Interval::new(1.0, 1.0);
         let model_one = make_probing_model(model, &bounds_one);
         let result_one = fbbt(&model_one, max_fbbt_iter, fbbt_tol);
-        let infeasible_one = result_one.iter().any(|b| b.is_empty());
+        let infeasible_one = result_one.iter().any(|b| b.is_empty_beyond(FEAS_TOL));
 
         if infeasible_zero && infeasible_one {
             // Both infeasible — model is infeasible. Mark bounds as empty.
@@ -437,5 +442,149 @@ mod tests {
 
         // x should be tightened.
         assert!(result.tightened_bounds[0].hi <= 8.0 + 1e-8);
+    }
+
+    #[test]
+    fn test_probing_ignores_eps_residual() {
+        // x + 1e-9*y <= 0, with x fixed to [0, 0], y binary.
+        // Fixing y=1 makes the body 1e-9 — an eps-scale violation of the bound,
+        // exactly the shape of a GDP hull perspective residual at an integer
+        // face. This is feasible within tolerance and MUST NOT fix y=0; doing so
+        // would wrongly eliminate a disjunct and yield an unsound bound (#27a).
+        let mut arena = ExprArena::new();
+        let x = arena.add(ExprNode::Variable {
+            name: "x".into(),
+            index: 0,
+            size: 1,
+            shape: vec![],
+        });
+        let y = arena.add(ExprNode::Variable {
+            name: "y".into(),
+            index: 1,
+            size: 1,
+            shape: vec![],
+        });
+        let eps = arena.add(ExprNode::Constant(1e-9));
+        let prod = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: eps,
+            right: y,
+        });
+        let sum = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Add,
+            left: x,
+            right: prod,
+        });
+        let model = ModelRepr {
+            arena,
+            objective: x,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![ConstraintRepr {
+                body: sum,
+                sense: ConstraintSense::Le,
+                rhs: 0.0,
+                name: Some("c1".into()),
+            }],
+            variables: vec![
+                VarInfo {
+                    name: "x".into(),
+                    var_type: VarType::Continuous,
+                    offset: 0,
+                    size: 1,
+                    shape: vec![],
+                    lb: vec![0.0],
+                    ub: vec![0.0],
+                },
+                VarInfo {
+                    name: "y".into(),
+                    var_type: VarType::Binary,
+                    offset: 1,
+                    size: 1,
+                    shape: vec![],
+                    lb: vec![0.0],
+                    ub: vec![1.0],
+                },
+            ],
+            n_vars: 2,
+        };
+
+        let var_bounds = vec![Interval::new(0.0, 0.0), Interval::new(0.0, 1.0)];
+        let result = probe_binary_vars(&model, &var_bounds);
+
+        // y must remain free: the eps-scale residual is not a real infeasibility.
+        assert!(
+            result.fixed_vars.is_empty(),
+            "eps-scale residual must not fix the binary selector"
+        );
+    }
+
+    #[test]
+    fn test_probing_fixes_on_real_violation() {
+        // x + 1.0*y <= 0, with x fixed to [0, 0], y binary.
+        // Fixing y=1 makes the body 1.0 — a violation well beyond the
+        // feasibility tolerance — so y must genuinely be fixed to 0.
+        let mut arena = ExprArena::new();
+        let x = arena.add(ExprNode::Variable {
+            name: "x".into(),
+            index: 0,
+            size: 1,
+            shape: vec![],
+        });
+        let y = arena.add(ExprNode::Variable {
+            name: "y".into(),
+            index: 1,
+            size: 1,
+            shape: vec![],
+        });
+        let one = arena.add(ExprNode::Constant(1.0));
+        let prod = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: one,
+            right: y,
+        });
+        let sum = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Add,
+            left: x,
+            right: prod,
+        });
+        let model = ModelRepr {
+            arena,
+            objective: x,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![ConstraintRepr {
+                body: sum,
+                sense: ConstraintSense::Le,
+                rhs: 0.0,
+                name: Some("c1".into()),
+            }],
+            variables: vec![
+                VarInfo {
+                    name: "x".into(),
+                    var_type: VarType::Continuous,
+                    offset: 0,
+                    size: 1,
+                    shape: vec![],
+                    lb: vec![0.0],
+                    ub: vec![0.0],
+                },
+                VarInfo {
+                    name: "y".into(),
+                    var_type: VarType::Binary,
+                    offset: 1,
+                    size: 1,
+                    shape: vec![],
+                    lb: vec![0.0],
+                    ub: vec![1.0],
+                },
+            ],
+            n_vars: 2,
+        };
+
+        let var_bounds = vec![Interval::new(0.0, 0.0), Interval::new(0.0, 1.0)];
+        let result = probe_binary_vars(&model, &var_bounds);
+
+        assert_eq!(result.fixed_vars.len(), 1);
+        assert_eq!(result.fixed_vars[0].0, 1);
+        assert!((result.fixed_vars[0].1 - 0.0).abs() < 1e-15);
     }
 }
