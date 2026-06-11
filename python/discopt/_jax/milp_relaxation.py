@@ -710,6 +710,120 @@ def _collect_lifted_bilinear_products(
     return sorted(keys)
 
 
+# Univariate functions whose superposition cuts are supported: smooth on any
+# box the lifted aux already validated, so the Chebyshev kernel encloses them
+# rigorously. ``abs`` (non-smooth) and ``tan`` (poles) are deliberately omitted.
+_SUPERPOSITION_FUNCS = {
+    "exp",
+    "log",
+    "log2",
+    "log10",
+    "sqrt",
+    "reciprocal",
+    "sin",
+    "cos",
+}
+
+
+def _superposition_jax_func(func_name: str):
+    """Return a jax-traceable callable for ``func_name``, or ``None`` if unsupported."""
+    import jax.numpy as jnp
+
+    table = {
+        "exp": jnp.exp,
+        "log": jnp.log,
+        "log2": lambda t: jnp.log(t) / jnp.log(2.0),
+        "log10": lambda t: jnp.log(t) / jnp.log(10.0),
+        "sqrt": jnp.sqrt,
+        "reciprocal": lambda t: 1.0 / t,
+        "sin": jnp.sin,
+        "cos": jnp.cos,
+    }
+    return table.get(func_name)
+
+
+def _add_superposition_cuts(
+    add_row,
+    univariate_by_aux_col: dict[int, "UnivariateRelaxation"],
+    bilinear_var_map: dict[tuple[int, int], int],
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+    n_orig: int,
+    n_total: int,
+) -> None:
+    """Inject rigorous interior-reference cuts for lifted ``w = f(arg)*y`` products.
+
+    For each bilinear aux ``w`` whose factors are a lifted univariate aux
+    ``u = f(arg)`` (``arg`` affine in the original variables) and an original
+    variable ``y``, emit the superposition cut family from
+    :mod:`discopt._jax.superposition`. Each cut is an individually valid global
+    bound on the true product surface, so the LP stays a sound lower-bounding
+    relaxation. Any term that cannot be handled safely is skipped (never relaxed
+    incorrectly): unsupported function, shared variable between ``arg`` and
+    ``y``, degenerate box, or a non-finite cut coefficient.
+    """
+    from discopt._jax.superposition import (
+        BilinearNonlinearTerm,
+        bilinear_nonlinear_cuts,
+        superposition_references,
+    )
+
+    for (i, j), w_col in bilinear_var_map.items():
+        # Identify the univariate-aux factor and the original-variable factor.
+        if i in univariate_by_aux_col and j < n_orig:
+            relax = univariate_by_aux_col[i]
+            y_col = j
+        elif j in univariate_by_aux_col and i < n_orig:
+            relax = univariate_by_aux_col[j]
+            y_col = i
+        else:
+            continue
+
+        func = _superposition_jax_func(relax.func_name)
+        if func is None:
+            continue
+
+        arg_coeff = np.asarray(relax.arg_coeff, dtype=np.float64)
+        # ``y`` must be independent of the argument of ``f`` for the bilinear
+        # split to be valid; skip if it appears in the affine argument.
+        if y_col < len(arg_coeff) and arg_coeff[y_col] != 0.0:
+            continue
+
+        x_lb, x_ub = float(relax.arg_lb), float(relax.arg_ub)
+        y_lb, y_ub = float(flat_lb[y_col]), float(flat_ub[y_col])
+        if not (x_lb < x_ub and y_lb < y_ub):
+            continue
+        if not (
+            np.isfinite(x_lb) and np.isfinite(x_ub) and np.isfinite(y_lb) and np.isfinite(y_ub)
+        ):
+            continue
+
+        try:
+            term = BilinearNonlinearTerm(func, (x_lb, x_ub), (y_lb, y_ub))
+            refs = superposition_references((x_lb, x_ub), (y_lb, y_ub))
+            cuts = bilinear_nonlinear_cuts(term, refs)
+        except (ValueError, ArithmeticError, FloatingPointError):
+            continue
+
+        arg_const = float(relax.arg_const)
+        for cut in cuts:
+            # Local cut over (t, y, w): coeffs = [-ax, -ay, 1] with t the
+            # argument of f. Substitute t = arg_coeff·x + arg_const.
+            neg_ax, neg_ay, aw = (float(c) for c in cut.coeffs)
+            row = np.zeros(n_total, dtype=np.float64)
+            row[:n_orig] += neg_ax * arg_coeff[:n_orig]
+            row[y_col] += neg_ay
+            row[w_col] += aw
+            rhs = float(cut.rhs) - neg_ax * arg_const
+            if not np.all(np.isfinite(row)) or not np.isfinite(rhs):
+                continue
+            # ``add_row(coeff, rhs)`` encodes ``coeff·z <= rhs``.
+            if cut.sense == "<=":
+                add_row(row, rhs)
+            elif cut.sense == ">=":
+                add_row(-row, -rhs)
+
+
 def _collect_distinct_multilinear_products(model: Model) -> list[tuple[int, ...]]:
     """Return distinct-variable product terms with four or more factors."""
     terms: set[tuple[int, ...]] = set()
@@ -2052,6 +2166,7 @@ def build_milp_relaxation(
     convhull_ebd: bool = False,
     convhull_ebd_encoding: str = "gray",
     bound_override: Optional[tuple[np.ndarray, np.ndarray]] = None,
+    superposition: bool = False,
 ) -> tuple["MilpRelaxationModel", dict]:
     """Build a MILP relaxation with piecewise McCormick for bilinear/monomial terms.
 
@@ -3713,6 +3828,23 @@ def build_milp_relaxation(
             row = np.zeros(n_total)
             row[: len(coeff)] = coeff[: n_total if len(coeff) > n_total else len(coeff)]
             _add_row(row, rhs)
+
+    # ── Superposition cuts for bilinear-of-nonlinear terms (M8 of #81) ───────
+    # For each lifted product w = f(x)*y (a univariate aux times an original
+    # variable), add rigorous interior-reference cuts that strictly tighten the
+    # compositional McCormick envelope. Every cut is an individually valid bound
+    # on the true product surface, so the LP remains a sound lower-bounding
+    # relaxation (the rigorous-bound invariant is preserved).
+    if superposition:
+        _add_superposition_cuts(
+            _add_row,
+            univariate_by_aux_col,
+            bilinear_var_map,
+            flat_lb,
+            flat_ub,
+            n_orig,
+            n_total,
+        )
 
     # ── Objective ────────────────────────────────────────────────────────────
     assert model._objective is not None

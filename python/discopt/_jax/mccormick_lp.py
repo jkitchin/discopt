@@ -44,9 +44,11 @@ class MccormickLPRelaxer:
     the lifted LP with the node's bound box and solves it via HiGHS.
     """
 
-    def __init__(self, model: Model) -> None:
+    def __init__(self, model: Model, *, superposition: bool = False) -> None:
         self._model = model
         self._terms: NonlinearTerms = classify_nonlinear_terms(model)
+        # Opt-in M8 superposition cuts for bilinear-of-nonlinear products.
+        self._superposition = superposition
         # Spatial-BB uses standard McCormick globally — no partitioning here.
         self._disc = DiscretizationState(partitions={})
         self._n_orig = sum(v.size for v in model._variables)
@@ -85,6 +87,7 @@ class MccormickLPRelaxer:
                     np.asarray(node_lb, dtype=np.float64),
                     np.asarray(node_ub, dtype=np.float64),
                 ),
+                superposition=self._superposition,
             )
         except Exception:
             return MccormickLPResult(status="error")

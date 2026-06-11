@@ -2214,7 +2214,10 @@ def solve_model(
             _mc_mode = "nlp"
         else:
             try:
-                _mc_lp_relaxer = MccormickLPRelaxer(model)
+                _mc_lp_relaxer = MccormickLPRelaxer(
+                    model,
+                    superposition=(relaxation_arithmetic == "superposition"),
+                )
             except Exception as e:
                 logger.warning("McCormick LP relaxer setup failed: %s", e)
                 _mc_lp_relaxer = None
