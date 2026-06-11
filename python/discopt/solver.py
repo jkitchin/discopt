@@ -3110,11 +3110,6 @@ def solve_model(
             except Exception as _e:
                 logger.debug("enumerate_binary_seeds_subnlp raised: %s", _e)
                 _enum_results = []
-            print(  # TEMP-GDPENUM: remove after Linux determinism confirmed
-                f"GDPENUM-GUARD n_cands={len(_enum_cands)} "
-                f"results={[round(o, 6) for _, o in _enum_results]}",
-                flush=True,
-            )
             _subnlp_calls += len(_enum_results)
             for _x_en, _obj_en in _enum_results:
                 _subnlp_feasible += 1
