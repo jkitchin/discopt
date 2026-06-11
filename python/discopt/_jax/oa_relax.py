@@ -73,7 +73,8 @@ def make_oa_relax(
         name: univariate operator name (must be a key of ``_NAME_TO_JAX_FN``).
         ref_box: ``(a, b)`` reference box used to fit the OA. Must satisfy
             ``a < b`` and be inside the natural domain of ``f``.
-        arithmetic: one of ``"chebyshev"``, ``"taylor"``, ``"mccormick"``.
+        arithmetic: one of ``"chebyshev"``, ``"taylor"``, ``"mccormick"``,
+            ``"ellipsoidal"``.
         degree: polynomial degree for the bound provider.
         n_slopes: number of candidate slopes (yields up to ``2 * n_slopes``
             cuts after deduplication).

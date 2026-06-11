@@ -34,7 +34,11 @@ Provider dispatch:
   univariate-OA face of the McCormick path; the native multivariate
   McCormick envelopes already implemented in ``mccormick.py`` continue
   to be the path used by ``relaxation_compiler.py``.)
-* ``arithmetic="ellipsoidal"``: not yet implemented (M7).
+* ``arithmetic="ellipsoidal"``: build a first-order ellipsoidal-arithmetic
+  enclosure of the joint ``(x, f(x))`` (:mod:`ellipsoidal_arith`, M7) and use
+  its rigorous interval support to bound ``f - s*x``. The generator part is
+  exact on the affine ``-s*x`` term, so the ellipsoidal provider captures the
+  ``x``/``f(x)`` correlation an interval bound would drop.
 
 Acceptance criteria from issue #51 met by this module:
 
@@ -54,6 +58,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Union
 
+import jax.numpy as jnp
 import numpy as np
 
 from discopt._jax import chebyshev_model as cm
@@ -132,18 +137,16 @@ def outer_approximation(
         raise ValueError(f"domain must have a < b, got {(a, b)}")
     if arithmetic not in ARITHMETICS:
         raise ValueError(f"arithmetic must be one of {ARITHMETICS}, got {arithmetic!r}")
-    if arithmetic == "ellipsoidal":
-        raise NotImplementedError(
-            "ellipsoidal outer approximation is not yet implemented (M7 of #51)"
-        )
     if n_slopes < 2:
         raise ValueError(f"n_slopes must be >= 2, got {n_slopes}")
 
-    provider: Union["_ChebyshevProvider", "_TaylorProvider"]
+    provider: Union["_ChebyshevProvider", "_TaylorProvider", "_EllipsoidalProvider"]
     if arithmetic == "chebyshev":
         provider = _ChebyshevProvider(f_callable, (a, b), degree)
     elif arithmetic == "taylor":
         provider = _TaylorProvider(f_callable, (a, b), degree)
+    elif arithmetic == "ellipsoidal":
+        provider = _EllipsoidalProvider(f_callable, (a, b), degree)
     elif arithmetic == "mccormick":
         # Use the Chebyshev kernel as a rigorous univariate bound provider
         # for the standalone OA wrapper. The multivariate McCormick path
@@ -188,6 +191,35 @@ class _TaylorProvider:
 
     def sample_polynomial(self, xs: np.ndarray) -> np.ndarray:
         return np.asarray(self._f.evaluate_polynomial(xs), dtype=np.float64)
+
+
+class _EllipsoidalProvider:
+    """Ellipsoidal-arithmetic bound provider (M7).
+
+    Tracks the joint ``(x, f(x))`` as ellipsoidal forms over a single shared
+    input noise symbol: ``x = c_x + r_x * xi`` and ``y = f(x)`` via a first-order
+    linearisation with a rigorous Chebyshev-bounded remainder. Because ``y`` and
+    ``x`` share ``xi``, ``f(x) - s*x`` keeps their correlation exactly on the
+    generator part, and its rigorous range is read off the form's bounds.
+    """
+
+    def __init__(self, f, domain, degree):
+        from discopt._jax import ellipsoidal_arith as ea
+
+        a, b = domain
+        self._f = f
+        self._degree = degree
+        (self._x_form,) = ea.forms_from_box(np.array([a]), np.array([b]))
+        self._y_form = self._x_form.apply_unary(f, degree=degree)
+
+    def range_minus_slope(self, s: float) -> tuple[float, float]:
+        h = self._y_form - self._x_form.scaled(float(s))
+        lo, hi = h.bounds()
+        return float(lo), float(hi)
+
+    def sample_polynomial(self, xs: np.ndarray) -> np.ndarray:
+        # No polynomial part; evaluate f directly to obtain true secant slopes.
+        return np.asarray(self._f(jnp.asarray(xs, dtype=jnp.float64)), dtype=np.float64)
 
 
 # ---------------------------------------------------------------------------

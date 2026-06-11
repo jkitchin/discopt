@@ -36,7 +36,7 @@ def _eval_at(fn, x_val, n_vars):
     return float(cv), float(cc)
 
 
-@pytest.mark.parametrize("arithmetic", ["chebyshev", "taylor"])
+@pytest.mark.parametrize("arithmetic", ["chebyshev", "taylor", "ellipsoidal"])
 def test_oa_relax_soundness_exp(arithmetic):
     """cv ≤ exp(x) ≤ cc on a Monte Carlo sample inside the box."""
     m = discopt.Model("exp_test")
@@ -54,7 +54,7 @@ def test_oa_relax_soundness_exp(arithmetic):
         assert cc >= true - 1e-6, f"cc={cc} < exp({xv})={true} at arithmetic={arithmetic}"
 
 
-@pytest.mark.parametrize("arithmetic", ["chebyshev", "taylor"])
+@pytest.mark.parametrize("arithmetic", ["chebyshev", "taylor", "ellipsoidal"])
 def test_oa_relax_soundness_log(arithmetic):
     """cv ≤ log(x) ≤ cc on a Monte Carlo sample inside the box."""
     m = discopt.Model("log_test")
@@ -114,3 +114,23 @@ def test_solve_with_chebyshev_preserves_optimum():
     assert res_base.status in ("optimal", "feasible")
     assert res_cheb.status in ("optimal", "feasible")
     assert res_cheb.objective == pytest.approx(res_base.objective, abs=1e-3, rel=1e-3)
+
+
+def test_solve_with_ellipsoidal_preserves_optimum():
+    """End-to-end: compile-time ellipsoidal path (M7) keeps the global optimum."""
+
+    def _build(name):
+        m = discopt.Model(name)
+        x = m.continuous("x", lb=-1.0, ub=1.0)
+        y = m.continuous("y", lb=-1.0, ub=1.0)
+        m.minimize(discopt.exp(x) + discopt.log(y + 2.0) + (x - y) ** 2)
+        m.subject_to(x + y >= 0.0)
+        return m
+
+    base = _build("base")
+    res_base = base.solve(time_limit=30.0, relaxation_arithmetic="mccormick")
+    ell = _build("ell")
+    res_ell = ell.solve(time_limit=30.0, relaxation_arithmetic="ellipsoidal")
+    assert res_base.status in ("optimal", "feasible")
+    assert res_ell.status in ("optimal", "feasible")
+    assert res_ell.objective == pytest.approx(res_base.objective, abs=1e-3, rel=1e-3)
