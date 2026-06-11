@@ -9,7 +9,6 @@ and re-solves the resulting NLP.
 from __future__ import annotations
 
 import itertools
-import logging
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -18,8 +17,6 @@ import numpy as np
 from discopt._jax.nlp_evaluator import NLPEvaluator
 from discopt.modeling.core import Model, VarType
 from discopt.solvers import NLPResult, SolveStatus
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -467,12 +464,6 @@ def enumerate_binary_seeds_subnlp(
                 nlp_options=nlp_options,
                 evaluator=evaluator,
                 integer_tol=integer_tol,
-            )
-            print(
-                f"GDPENUM combo={combo} "
-                f"start={'zero' if base is zero_start else 'relax'} -> "
-                f"{'None' if found is None else f'obj={found[1]:.6g}'}",
-                flush=True,
             )
             if found is not None:
                 results.append(found)
