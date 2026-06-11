@@ -435,22 +435,27 @@ def _make_disjunctive_minlp() -> Model:
 class TestEnumerateBinarySeeds:
     def test_finds_global_disjunct_regardless_of_seed(self):
         """Both disjuncts are tried, so the global optimum is found whichever
-        way the fractional binary leans in the seed."""
+        way the selector leans in the seed -- fractional or integral."""
         m = _make_disjunctive_minlp()
-        # Flat order is [x, z]. Seed x at 0; vary the fractional selector so
-        # nearest rounding would pick the worse disjunct in one case.
-        for z_frac in (0.2, 0.8):
-            seed = np.array([0.0, z_frac])
+        # Flat order is [x, z]. Vary the selector across fractional values and
+        # both clean integers; every case must still surface the z=1 optimum.
+        for z_val in (0.2, 0.8, 0.0, 1.0):
+            seed = np.array([0.0, z_val])
             results = enumerate_binary_seeds_subnlp(m, seed)
-            assert results, f"no feasible points for z_frac={z_frac}"
+            assert results, f"no feasible points for z={z_val}"
             best = min(obj for _, obj in results)
             assert best == pytest.approx(1.0, abs=1e-3)
 
-    def test_skips_when_binary_already_integral(self):
-        """No fractional binary -> nothing to enumerate -> empty list."""
+    def test_finds_global_from_wrong_integral_seed(self):
+        """The key robustness property: a clean-integral seed pinned to the
+        *worse* disjunct (z=0, obj 2) must still recover the z=1 global (obj 1).
+        This is the platform-FP case the heuristic exists to fix."""
         m = _make_disjunctive_minlp()
-        seed = np.array([0.0, 0.0])
-        assert enumerate_binary_seeds_subnlp(m, seed) == []
+        seed = np.array([-1.0, 0.0])  # integral selector at the wrong branch
+        results = enumerate_binary_seeds_subnlp(m, seed)
+        objs = sorted(obj for _, obj in results)
+        assert objs, "enumeration returned no feasible points"
+        assert objs[0] == pytest.approx(1.0, abs=1e-3)
 
     def test_skips_above_cap(self):
         """More fractional binaries than max_binaries -> skipped (empty list)."""

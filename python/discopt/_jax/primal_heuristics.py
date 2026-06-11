@@ -377,35 +377,40 @@ def enumerate_binary_seeds_subnlp(
     max_binaries: int = 4,
     integer_tol: float = 1e-5,
 ) -> list[tuple[np.ndarray, float]]:
-    """Root primal heuristic: enumerate roundings of the fractional binaries.
+    """Root primal heuristic: enumerate every 0/1 assignment of the binaries.
 
     A single nearest-rounding :func:`subnlp` seed lands in whichever disjunct
-    the relaxation's fractional selector happens to round toward. For a
-    nonconvex disjunctive (GDP) model that choice is decided by tiny,
-    platform-dependent floating-point differences in the relaxation solution —
-    so the global optimum is found on one platform and missed on another, an
-    unwanted nondeterminism.
+    the relaxation's selector points at — and for a nonconvex disjunctive (GDP)
+    model the relaxation can return an *integer-feasible but only locally
+    optimal* selector (e.g. the wrong branch of an ``if_else``). Which branch it
+    settles on is decided by tiny, platform-dependent floating-point differences
+    in the relaxation solution, so the global optimum is found on one platform
+    and missed on another — unwanted nondeterminism. Critically the offending
+    selector is usually *not* fractional: the relaxation reports it at a clean
+    0/1, so rounding heuristics never reconsider it.
 
-    This heuristic removes that dependence at the root: it takes the (capped)
-    set of binary variables that are fractional in ``x_relax`` and enumerates
-    *all* 0/1 assignments over them, solving a fixed-integer sub-NLP from each.
-    For a single disjunction the enumeration covers every disjunct, so the
-    optimal one is always tried regardless of which way the relaxation leaned.
+    This heuristic removes that dependence at the root: it enumerates *all* 0/1
+    assignments over the (capped) set of binary variables — fractional or not —
+    and solves a fixed-integer sub-NLP from each. For a single disjunction the
+    enumeration covers every disjunct, so the optimal one is always tried
+    regardless of which branch the relaxation happened to lock onto. Seeds whose
+    fixing is infeasible simply yield no sub-NLP solution and are dropped.
 
-    The cost is bounded to ``2 ** max_binaries`` sub-NLP solves; when more than
-    ``max_binaries`` binaries are fractional the enumeration is skipped (an
-    empty list is returned) to avoid combinatorial blow-up, leaving the regular
-    rounding/pump heuristics in charge.
+    The cost is bounded to ``2 ** max_binaries`` sub-NLP solves; when the model
+    has more than ``max_binaries`` binaries the enumeration is skipped (an empty
+    list is returned) to avoid combinatorial blow-up, leaving the regular
+    rounding/pump heuristics in charge. Intended for a single root invocation.
 
     Args:
         model: The optimization model.
-        x_relax: Relaxation point at the root node.
+        x_relax: Relaxation point at the root node (used as the continuous seed).
         backend: ``solve_nlp(evaluator, x0, options=...)`` callable; resolved to
             ``get_nlp_solver("auto")`` if None.
         nlp_options: Options forwarded to the NLP backend.
         evaluator: Pre-built evaluator; one is constructed if omitted.
-        max_binaries: Maximum number of fractional binaries to enumerate over.
-        integer_tol: Tolerance for deciding a binary is fractional.
+        max_binaries: Maximum number of binaries to enumerate over; above this
+            the enumeration is skipped entirely.
+        integer_tol: Integrality tolerance forwarded to :func:`subnlp`.
 
     Returns:
         Every feasible ``(x, obj)`` found across the enumerated seeds (possibly
@@ -419,16 +424,17 @@ def enumerate_binary_seeds_subnlp(
     lb, ub = _get_variable_bounds(model)
     x_relax = np.asarray(x_relax, dtype=np.float64)
 
-    # Binary variables: integer-typed with [0, 1] bounds.
-    binary = int_mask & (lb >= -1e-9) & (ub <= 1.0 + 1e-9)
-    frac = [i for i in np.nonzero(binary)[0] if integer_tol < x_relax[i] < 1.0 - integer_tol]
-    if not frac or len(frac) > max_binaries:
+    # Binary variables: integer-typed with [0, 1] bounds. Enumerate over *all*
+    # of them, not just the fractional ones — the selector that traps the
+    # relaxation in the wrong disjunct is typically reported at a clean 0/1.
+    binary_idx = [i for i in np.nonzero(int_mask)[0] if lb[i] >= -1e-9 and ub[i] <= 1.0 + 1e-9]
+    if not binary_idx or len(binary_idx) > max_binaries:
         return []
 
     results: list[tuple[np.ndarray, float]] = []
-    for combo in itertools.product((0.0, 1.0), repeat=len(frac)):
+    for combo in itertools.product((0.0, 1.0), repeat=len(binary_idx)):
         seed = x_relax.copy()
-        for idx, value in zip(frac, combo):
+        for idx, value in zip(binary_idx, combo):
             seed[idx] = value
         found = subnlp(
             model,
