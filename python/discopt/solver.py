@@ -26,6 +26,7 @@ from discopt.constants import SENTINEL_THRESHOLD as _SENTINEL_THRESHOLD
 from discopt.constants import STARTING_POINT_CLIP as _SPC
 from discopt.modeling.core import (
     Constraint,
+    CustomCall,
     Model,
     SolveResult,
     VarType,
@@ -1404,6 +1405,52 @@ def _is_pure_continuous(model: Model) -> bool:
     return all(v.var_type == VarType.CONTINUOUS for v in model._variables)
 
 
+def _model_contains_custom_call(model: Model) -> bool:
+    """True if any objective/constraint body contains a ``CustomCall`` node.
+
+    A ``CustomCall`` wraps an opaque AD-only user function (``dm.custom``) that
+    the relaxation compiler, Rust presolve, and ``.nl`` export cannot reason
+    about. The solver uses this to force the local NLP path and to refuse global
+    branch-and-bound (see ``solve_model``). See issue #27b.
+    """
+
+    def _walk(expr) -> bool:
+        if isinstance(expr, CustomCall):
+            return True
+        # Generic child traversal mirroring the DAG node fields used elsewhere
+        # (e.g. discopt._jax.cutting_planes): BinaryOp/MatMul -> left/right,
+        # UnaryOp/SumExpression -> operand, FunctionCall/CustomCall -> args,
+        # SumOverExpression -> terms, IndexExpression -> base.
+        left = getattr(expr, "left", None)
+        if left is not None and _walk(left):
+            return True
+        right = getattr(expr, "right", None)
+        if right is not None and _walk(right):
+            return True
+        operand = getattr(expr, "operand", None)
+        if operand is not None and _walk(operand):
+            return True
+        base = getattr(expr, "base", None)
+        if base is not None and _walk(base):
+            return True
+        for a in getattr(expr, "args", ()) or ():
+            if _walk(a):
+                return True
+        for t in getattr(expr, "terms", ()) or ():
+            if _walk(t):
+                return True
+        return False
+
+    obj = getattr(model, "_objective", None)
+    if obj is not None and getattr(obj, "expression", None) is not None and _walk(obj.expression):
+        return True
+    for c in model._constraints:
+        body = getattr(c, "body", None)
+        if body is not None and _walk(body):
+            return True
+    return False
+
+
 def _classify_model_convexity(
     model: Model,
     *,
@@ -1885,6 +1932,38 @@ def solve_model(
     t_start = time.perf_counter()
     rust_time = 0.0
     jax_time = 0.0
+
+    # --- AD-only user functions (dm.custom): force the local NLP path ---
+    # A CustomCall wraps an opaque JAX-traceable callable. discopt can autodiff
+    # it (so the local NLP path works), but the relaxation compiler, Rust
+    # presolve, .nl export, and nonlinear bound tightening cannot reason about
+    # it — global branch-and-bound would have no valid node relaxation. So we
+    # solve locally only (no global optimality certificate) and refuse when
+    # integer/binary variables force B&B. Placed before the DAG-walking
+    # presolve/infeasibility checks so they never see a CustomCall. See #27b.
+    if _model_contains_custom_call(model):
+        if not _is_pure_continuous(model):
+            raise ValueError(
+                "Model contains a dm.custom(...) AD-only user function together "
+                "with integer/binary variables. Global branch-and-bound needs a "
+                "valid relaxation at each node, which an opaque callable cannot "
+                "provide. Rebuild the function from dm.* primitives (see dm.udf), "
+                "or remove the integer/binary variables."
+            )
+        logger.info(
+            "Model contains a dm.custom(...) AD-only user function — solving on "
+            "the local NLP path only (no global optimality certificate)."
+        )
+        result = _solve_continuous(
+            model,
+            time_limit,
+            ipopt_options,
+            t_start,
+            nlp_solver,
+            initial_point=initial_point,
+        )
+        result.gap_certified = False
+        return result
 
     if nlp_solver == "pounce":
         logger.info("Using POUNCE (pure-Rust Ipopt port)")

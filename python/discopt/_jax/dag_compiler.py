@@ -29,6 +29,7 @@ from discopt.modeling.core import (
     BinaryOp,
     Constant,
     Constraint,
+    CustomCall,
     Expression,
     FunctionCall,
     IndexExpression,
@@ -206,6 +207,19 @@ def _compile_node(expr: Expression, model: Model, param_index: dict) -> Callable
             return fn
 
         raise ValueError(f"Unknown function: {name!r}")
+
+    if isinstance(expr, CustomCall):
+        # Opaque AD-only user function: trace the stored callable through JAX so
+        # value + autodiff gradients/Hessians come for free on the local NLP
+        # path. No relaxation rule exists (see relaxation_compiler / solver
+        # guards), so this branch is only reached on the continuous NLP path.
+        custom_arg_fns = tuple(_compile_node(a, model, param_index) for a in expr.args)
+        user_fn = expr.fn
+
+        def fn(x_flat, params, _user_fn=user_fn, _arg_fns=custom_arg_fns):
+            return _user_fn(*[a(x_flat, params) for a in _arg_fns])
+
+        return fn
 
     if isinstance(expr, IndexExpression):
         base_fn = _compile_node(expr.base, model, param_index)

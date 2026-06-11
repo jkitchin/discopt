@@ -282,6 +282,39 @@ class FunctionCall(Expression):
         return f"{self.func_name}({arg_str})"
 
 
+class CustomCall(Expression):
+    """Opaque, AD-only user function wrapping a JAX-traceable callable.
+
+    Unlike :class:`FunctionCall` -- whose ``func_name`` is dispatched to a known
+    value / relaxation / interval / ``.nl`` rule -- a ``CustomCall`` carries an
+    arbitrary Python callable that discopt evaluates by *tracing it through JAX*.
+    discopt can therefore autodifferentiate it for the local NLP path, but it
+    CANNOT build the rigorous convex/concave relaxations and interval rules that
+    global spatial branch-and-bound, the Rust presolve, and ``.nl`` export
+    require.
+
+    Consequences (enforced by the solver and the export/relaxation layers):
+
+    - A model containing a ``CustomCall`` is solved on the **local NLP path
+      only** -- the result carries **no global optimality certificate**
+      (``gap_certified`` is ``False``).
+    - The solver **raises** if integer/binary variables are present, because
+      global B&B has no valid node relaxation for an opaque callable.
+    - Relaxation compilation and ``.nl`` export **raise** a clear error.
+
+    Built via :func:`custom`; do not instantiate directly in user code.
+    """
+
+    def __init__(self, fn: Callable, *args: Expression, name: Optional[str] = None):
+        self.fn = fn
+        self.args = tuple(args)
+        self.name = name or getattr(fn, "__name__", "custom")
+
+    def __repr__(self):
+        arg_str = ", ".join(str(a) for a in self.args)
+        return f"custom:{self.name}({arg_str})"
+
+
 class MatMulExpression(Expression):
     """Matrix multiplication: A @ x."""
 
@@ -708,6 +741,57 @@ def udf(fn: Callable) -> Callable:
     if not callable(fn):
         raise TypeError(f"udf() expects a callable, got {type(fn).__name__}")
     return fn
+
+
+def custom(fn: Callable, *, name: Optional[str] = None) -> Callable:
+    """Wrap an opaque, JAX-traceable callable as an AD-only user function.
+
+    Use this **only** when a function genuinely cannot be expressed with
+    ``dm.*`` primitives. If you can write the body symbolically (with
+    ``dm.exp``, ``dm.maximum``, ``dm.if_else``, arithmetic on variables, ...),
+    use :func:`udf` instead -- that keeps full global-solver support, whereas a
+    ``custom`` function is restricted to the local NLP path.
+
+    *fn* must be differentiable by JAX: write it with ``jax.numpy`` operations
+    on its array arguments so discopt can autodiff it for gradients/Hessians.
+    The returned wrapper builds a :class:`CustomCall` node when called with
+    expression arguments::
+
+        import jax.numpy as jnp
+        import discopt.modeling as dm
+
+        weird = dm.custom(lambda x: jnp.sum(jnp.sinc(x) ** 2))
+        m.minimize(weird(x) + dm.sum(x))
+
+    Because the body is opaque to the relaxation machinery, a model that uses a
+    ``dm.custom`` function is solved on the **local NLP path only** -- there is
+    no global optimality certificate -- and the solver raises if integer/binary
+    variables are present (global branch-and-bound cannot bound an opaque
+    callable). See :class:`CustomCall`.
+
+    Parameters
+    ----------
+    fn : callable
+        A JAX-traceable function of one or more array arguments returning a
+        scalar (objective term) or array (constraint body).
+    name : str, optional
+        Display name used in reprs and error messages. Defaults to
+        ``fn.__name__``.
+
+    Returns
+    -------
+    callable
+        A builder; call it with expression arguments to produce a
+        :class:`CustomCall` DAG node.
+    """
+    if not callable(fn):
+        raise TypeError(f"custom() expects a callable, got {type(fn).__name__}")
+
+    def _build(*args) -> Expression:
+        return CustomCall(fn, *[_wrap(a) for a in args], name=name)
+
+    _build.__name__ = name or str(getattr(fn, "__name__", "custom"))
+    return _build
 
 
 # ─────────────────────────────────────────────────────────────

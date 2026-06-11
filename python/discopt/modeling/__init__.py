@@ -21,6 +21,8 @@ from discopt.modeling.core import (
     BooleanVar,
     BooleanVarArray,
     Constraint,
+    # Opaque AD-only user function node (for isinstance checks)
+    CustomCall,
     Disjunct,
     # Expressions (for isinstance checks, rarely needed)
     Expression,
@@ -41,6 +43,7 @@ from discopt.modeling.core import (
     atleast,
     atmost,
     cos,
+    custom,
     erf,
     exactly,
     # Mathematical functions
@@ -106,6 +109,8 @@ __all__ = [
     "maximum",
     "if_else",
     "udf",
+    "custom",
+    "CustomCall",
     "sum",
     "prod",
     "norm",

@@ -23,6 +23,7 @@ from discopt.modeling.core import (
     BinaryOp,
     Constant,
     Constraint,
+    CustomCall,
     Expression,
     FunctionCall,
     IndexExpression,
@@ -106,7 +107,11 @@ def _collect_variable_indices(expr: Expression, model: Model) -> set[int]:
         return left | right
     if isinstance(expr, UnaryOp):
         return _collect_variable_indices(expr.operand, model)
-    if isinstance(expr, FunctionCall):
+    if isinstance(expr, (FunctionCall, CustomCall)):
+        # CustomCall is an opaque AD-only callable: we cannot see inside it, so
+        # conservatively treat every variable reaching its arguments as a
+        # structural dependency (over-approximation is always sound for
+        # sparsity — it can only declare extra nonzeros, never miss one).
         result: set[int] = set()
         for arg in expr.args:
             result |= _collect_variable_indices(arg, model)
@@ -159,7 +164,10 @@ def _collect_nonlinear_pairs(expr: Expression, model: Model) -> set[tuple[int, i
             pairs.add((i, i))
         pairs |= _collect_nonlinear_pairs(expr.operand, model)
 
-    elif isinstance(expr, FunctionCall):
+    elif isinstance(expr, (FunctionCall, CustomCall)):
+        # Opaque/nonlinear: assume every pair of argument variables interacts
+        # nonlinearly (dense Hessian block over the touched variables). This is
+        # a sound over-approximation of the true Hessian sparsity.
         all_vars: set[int] = set()
         for arg in expr.args:
             all_vars |= _collect_variable_indices(arg, model)
