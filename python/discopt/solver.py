@@ -400,6 +400,39 @@ def _is_integer_feasible_solution(x, int_offsets, int_sizes, tol=1e-5):
     return True
 
 
+def _structural_linear_row_mask(model, sizes, m):
+    """Boolean mask (length ``m``) of Jacobian rows whose body is structurally affine.
+
+    The numeric Jacobian-difference test for linearity samples the constraint
+    gradient at two interior points. A saturating nonlinearity such as
+    ``max(c, f(x))`` whose two samples both land in the same flat piece reads as
+    constant-gradient and is misclassified as linear; FBBT then extrapolates that
+    local flat behaviour across the whole box and can exclude feasible regions
+    (e.g. pinning a GDP big-M disjunct-output variable to its kink value, which
+    fathoms the subtree holding the true optimum — issue #27a). Gating linear
+    FBBT on a *structural* affineness check as well makes the classification
+    rigorous: a row is treated as linear only when its source constraint body
+    contains no nonlinear operator. Conservative — a structural false negative
+    only forgoes a tightening, it can never cause a false prune.
+
+    Returns ``None`` if the per-constraint row expansion cannot be aligned with
+    ``m`` (caller then keeps the purely numeric classification).
+    """
+    from discopt._jax.gdp_reformulate import _is_linear
+
+    flags: list[bool] = []
+    k = 0
+    for c in model._constraints:
+        if not isinstance(c, Constraint):
+            continue
+        n = int(sizes[k]) if sizes is not None and k < len(sizes) else 1
+        flags.extend([bool(_is_linear(c.body))] * n)
+        k += 1
+    if len(flags) != m:
+        return None
+    return np.asarray(flags, dtype=bool)
+
+
 def _tighten_node_bounds_with_status(evaluator, node_lb, node_ub, cl_list, cu_list, max_rounds=3):
     """Constraint-based bound tightening (FBBT) for a single B&B node.
 
@@ -453,6 +486,18 @@ def _tighten_node_bounds_with_status(evaluator, node_lb, node_ub, cl_list, cu_li
         is_linear = np.all(np.abs(J_a - J_b) < 1e-8, axis=1)  # (m,) bool
     except Exception:
         return _apply_nonlinear_tightening_with_status(evaluator._model, lb, ub)
+
+    # The two-point Jacobian test is fooled by saturating nonlinearities
+    # (max/abs/clamped exprs) when both samples fall in one locally-flat piece;
+    # require structural affineness as well so FBBT never linearizes a nonlinear
+    # body and over-tightens it (issue #27a).
+    try:
+        _sizes = getattr(evaluator, "_constraint_flat_sizes", None)
+        _structural = _structural_linear_row_mask(evaluator._model, _sizes, len(is_linear))
+        if _structural is not None:
+            is_linear = is_linear & _structural
+    except Exception:
+        pass
 
     if not np.any(is_linear):
         return _apply_nonlinear_tightening_with_status(evaluator._model, lb, ub)
@@ -2779,6 +2824,22 @@ def solve_model(
                             result_feas[i] = False
                         else:
                             result_lbs[i] = max(cur, mc_lp_lb)
+
+                # Soundness guard (issue #27a): a nonconvex node pruned with no
+                # rigorous lower bound and no rigorous (FBBT) infeasibility proof
+                # is NOT proven suboptimal — the local NLP merely failed/diverged
+                # or its optimum violated the original constraints, neither of
+                # which rules out a better solution in the subtree. Certifying
+                # the gap anyway lets big-M/mbigm GDP relaxations of nonlinear
+                # disjuncts silently fathom an unsolved subtree and report a
+                # wrong "optimal". Decertify so the result downgrades to
+                # "feasible" with an uncertified bound instead of lying.
+                if (
+                    not _model_is_convex
+                    and not node_infeasible_mask[i]
+                    and result_lbs[i] >= _SENTINEL_THRESHOLD
+                ):
+                    _gap_certified = False
         jax_time += time.perf_counter() - t_jax_start
 
         if np.any(node_infeasible_mask):

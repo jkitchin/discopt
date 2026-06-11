@@ -125,6 +125,32 @@ def examine(
     if result.x is None:
         raise ValueError("examine() requires a primal point in result.x")
 
+    # GDP models: disjunctions / indicators / SOS / logical constraints are not
+    # smooth NLP rows (NLPEvaluator drops them), so KKT stationarity is only
+    # well-defined on the reformulation the solver actually optimized. Detect
+    # any such constraint and examine the reformulated (smooth) model instead;
+    # ``result.x`` already carries the auxiliary / disaggregated variables it
+    # introduces. The default method matches ``Model.solve``'s default, and any
+    # per-disjunction override (e.g. ``Model.if_else``'s hull) is honoured by
+    # ``reformulate_gdp``. Non-GDP models are untouched (no behaviour change).
+    from discopt.modeling.core import (
+        _DisjunctiveConstraint,
+        _IndicatorConstraint,
+        _LogicalConstraint,
+        _SOSConstraint,
+    )
+
+    _gdp_types = (
+        _DisjunctiveConstraint,
+        _IndicatorConstraint,
+        _SOSConstraint,
+        _LogicalConstraint,
+    )
+    if any(isinstance(c, _gdp_types) for c in model._constraints):
+        from discopt._jax.gdp_reformulate import reformulate_gdp
+
+        model = reformulate_gdp(model)
+
     from discopt._jax.nlp_evaluator import NLPEvaluator
 
     parts: list[np.ndarray] = []

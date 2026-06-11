@@ -30,6 +30,17 @@ is_effectively_finite = _is_effectively_finite
 
 _ScaledMatch = TypeVar("_ScaledMatch")
 
+# Feasibility tolerance for declaring a tightened variable box empty. Bound
+# tightening must never certify infeasibility from a crossover smaller than the
+# solver's absolute feasibility tolerance: such a box is feasible *within
+# tolerance*, and pruning it can discard a genuine optimum. This matters for
+# approximate reformulations such as the GDP hull perspective, whose eps-clamped
+# form leaves an O(eps) residual that would otherwise read as a hard
+# infeasibility (issue #27a). A box that is empty by less than this tolerance is
+# snapped to a degenerate (lb == ub) box and left for the node NLP to validate;
+# a crossover larger than the tolerance is a genuine infeasibility and is pruned.
+_EMPTY_INTERVAL_FEAS_TOL = 1e-6
+
 
 @dataclass(frozen=True)
 class FlatVariableMetadata:
@@ -799,7 +810,12 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
                 )
 
             total_min = float(sum(min_contribs.values()))
-            if constant_term + total_min > 1e-12:
+            # Declare infeasibility only when the minimum separable activity
+            # exceeds the upper bound by more than the feasibility tolerance;
+            # a sub-tolerance excess is feasible within tolerance (e.g. the
+            # eps-scale residual of an approximate GDP hull perspective) and
+            # must not be pruned (issue #27a).
+            if constant_term + total_min > _EMPTY_INTERVAL_FEAS_TOL:
                 _prove_infeasible(
                     self.name,
                     constraint,
@@ -836,6 +852,11 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
 
                 if new_lb <= new_ub:
                     tightened_lb[flat_idx] = new_lb
+                    tightened_ub[flat_idx] = new_ub
+                elif new_lb <= new_ub + _EMPTY_INTERVAL_FEAS_TOL:
+                    # Sub-tolerance crossover: snap to a degenerate box instead
+                    # of pruning, leaving validation to the node NLP.
+                    tightened_lb[flat_idx] = new_ub
                     tightened_ub[flat_idx] = new_ub
                 else:
                     _prove_infeasible(
@@ -1922,6 +1943,20 @@ DEFAULT_NONLINEAR_BOUND_RULES: tuple[NonlinearBoundTighteningRule, ...] = (
 )
 
 
+def _snap_tolerant_crossovers(lb: np.ndarray, ub: np.ndarray) -> None:
+    """Collapse sub-tolerance ``lb > ub`` crossovers to a degenerate box in place.
+
+    Where ``ub < lb <= ub + _EMPTY_INTERVAL_FEAS_TOL`` the lower bound is pulled
+    down to the (exact, more constraining) upper bound, yielding ``lb == ub``
+    rather than an empty box. This keeps an approximate reformulation's eps-scale
+    residual from manufacturing a hard infeasibility while leaving the genuine
+    bound intact for the node NLP to validate.
+    """
+    crossed = (lb > ub) & (lb <= ub + _EMPTY_INTERVAL_FEAS_TOL)
+    if np.any(crossed):
+        lb[crossed] = ub[crossed]
+
+
 def tighten_nonlinear_bounds(
     model: Model,
     flat_lb: np.ndarray,
@@ -1952,7 +1987,7 @@ def tighten_nonlinear_bounds(
     def _count_tightened(lb: np.ndarray, ub: np.ndarray) -> int:
         return int(_count_changed(lb, initial_lb) + _count_changed(ub, initial_ub))
 
-    empty_initial = np.flatnonzero(tightened_lb > tightened_ub + 1e-12)
+    empty_initial = np.flatnonzero(tightened_lb > tightened_ub + _EMPTY_INTERVAL_FEAS_TOL)
     if empty_initial.size > 0:
         first_idx = int(empty_initial[0])
         return (
@@ -1965,6 +2000,9 @@ def tighten_nonlinear_bounds(
                 infeasibility_reason=f"initial interval is empty for flat variable {first_idx}",
             ),
         )
+    # Snap sub-tolerance crossovers (lb slightly above ub) to a degenerate box
+    # so they are explored and validated by the node NLP rather than pruned.
+    _snap_tolerant_crossovers(tightened_lb, tightened_ub)
 
     for _ in range(max(1, int(max_rounds))):
         round_changed = False
@@ -1988,7 +2026,9 @@ def tighten_nonlinear_bounds(
 
             cand_lb_arr = np.asarray(cand_lb, dtype=np.float64)
             cand_ub_arr = np.asarray(cand_ub, dtype=np.float64)
-            empty_indices = np.flatnonzero(cand_lb_arr > cand_ub_arr + 1e-12)
+            tightened_lb = np.maximum(prev_lb, cand_lb_arr)
+            tightened_ub = np.minimum(prev_ub, cand_ub_arr)
+            empty_indices = np.flatnonzero(tightened_lb > tightened_ub + _EMPTY_INTERVAL_FEAS_TOL)
             if empty_indices.size > 0:
                 _mark_rule(rule.name)
                 first_idx = int(empty_indices[0])
@@ -2004,8 +2044,10 @@ def tighten_nonlinear_bounds(
                         ),
                     ),
                 )
-            tightened_lb = np.maximum(prev_lb, cand_lb_arr)
-            tightened_ub = np.minimum(prev_ub, cand_ub_arr)
+            # Snap sub-tolerance crossovers introduced by intersecting this rule's
+            # box with the prior box (e.g. an eps-scale perspective residual vs a
+            # bound-linking zero) to a degenerate box rather than pruning.
+            _snap_tolerant_crossovers(tightened_lb, tightened_ub)
 
             n_changed = _count_changed(tightened_lb, prev_lb) + _count_changed(
                 tightened_ub, prev_ub

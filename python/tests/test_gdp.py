@@ -1248,3 +1248,89 @@ class TestDisjunctBlock:
         d = m.make_disjunct("mode")
         d.subject_to([x <= 5, x >= 2])
         assert len(d.constraints) == 2
+
+
+# ── if_else / udf piecewise conditional (issue #27a) ──
+
+
+class TestIfElse:
+    """Tests for ``Model.if_else`` / ``dm.if_else`` and ``dm.udf``."""
+
+    def test_returns_variable_and_hull_disjunction(self):
+        """if_else creates an aux variable and a hull-tagged disjunction."""
+        from discopt.modeling.core import _DisjunctiveConstraint
+
+        m = dm.Model("ie")
+        x = m.continuous("x", lb=-5, ub=5)
+        w = m.if_else(x >= 0, x, -x)
+        assert w in m._variables
+        assert w.var_type == VarType.CONTINUOUS
+        disj = [c for c in m._constraints if isinstance(c, _DisjunctiveConstraint)]
+        assert len(disj) == 1
+        assert disj[0].method == "hull"
+        assert len(disj[0].disjuncts) == 2
+
+    def test_free_function_discovers_model(self):
+        """dm.if_else finds the owning model from the condition variables."""
+        m = dm.Model("ie")
+        x = m.continuous("x", lb=-5, ub=5)
+        w = dm.if_else(x >= 0, x, -x)
+        assert w in m._variables
+
+    def test_aux_bounds_enclose_both_branches(self):
+        """Aux variable bounds soundly enclose both branch images."""
+        m = dm.Model("ie")
+        x = m.continuous("x", lb=-1.0, ub=1.0)
+        # then in [0,1] (x), else in [0,1] (-x over [-1,0] is [0,1]); union [-1,1]
+        w = m.if_else(x >= 0, x, -x)
+        lb = float(np.asarray(w.lb).reshape(()))
+        ub = float(np.asarray(w.ub).reshape(()))
+        assert lb <= -1.0 + 1e-9
+        assert ub >= 1.0 - 1e-9
+
+    def test_equality_condition_rejected(self):
+        m = dm.Model("ie")
+        x = m.continuous("x", lb=-5, ub=5)
+        with pytest.raises(ValueError, match="inequality"):
+            m.if_else(x == 0, x, -x)
+
+    def test_non_constraint_condition_rejected(self):
+        m = dm.Model("ie")
+        x = m.continuous("x", lb=-5, ub=5)
+        with pytest.raises(TypeError):
+            m.if_else(x, x, -x)
+
+    def test_free_function_no_model_rejected(self):
+        with pytest.raises(TypeError):
+            dm.if_else(3.0, 1.0, 2.0)
+
+    def test_udf_passthrough_and_validation(self):
+        f = dm.udf(lambda t: t + 1)
+        assert callable(f)
+        m = dm.Model("ie")
+        x = m.continuous("x", lb=0, ub=1)
+        assert f(x) is not None
+        with pytest.raises(TypeError):
+            dm.udf(123)
+
+    def test_solve_piecewise_reaches_global_optimum(self):
+        """End-to-end: minimize a piecewise function with a unique optimum.
+
+        f(x) = (x >= 0) ? (x-1)^2 + 1 : (x+1)^2 + 2.  The then-branch minimum is
+        1 at x=1 (interior); the else-branch minimum is 2.  Global min = 1.
+
+        Regression for issue #27a: the hull perspective is an O(eps) approximation
+        at the integer faces; treating its eps-scale residual as a hard
+        infeasibility in constraint-based bound tightening used to prune the
+        feasible then-branch and certify a wrong 'optimal' of 2.0. Bound
+        tightening now declares infeasibility only beyond the feasibility
+        tolerance, so the global optimum of 1.0 is reached.
+        """
+        m = dm.Model("pw")
+        x = m.continuous("x", lb=-3.0, ub=3.0)
+        w = m.if_else(x >= 0, (x - 1) ** 2 + 1, (x + 1) ** 2 + 2)
+        m.minimize(w)
+        r = m.solve(time_limit=30.0, gap_tolerance=1e-6)
+        assert r.status in ("optimal", "feasible")
+        assert r.objective == pytest.approx(1.0, abs=1e-3)
+        assert r.x["x"] == pytest.approx(1.0, abs=1e-2)

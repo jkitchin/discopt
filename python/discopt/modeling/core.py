@@ -606,6 +606,110 @@ def maximum(x: Union[Expression, float], y: Union[Expression, float]) -> Express
     return FunctionCall("max", _wrap(x), _wrap(y))
 
 
+def _find_owning_model(*exprs: Expression) -> Optional["Model"]:
+    """Walk expression DAGs and return the first owning Model found."""
+    stack = list(exprs)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, Variable):
+            return node.model
+        if isinstance(node, IndexExpression):
+            stack.append(node.base)
+        elif isinstance(node, BinaryOp):
+            stack.extend((node.left, node.right))
+        elif isinstance(node, UnaryOp):
+            stack.append(node.operand)
+        elif isinstance(node, FunctionCall):
+            stack.extend(node.args)
+        elif isinstance(node, MatMulExpression):
+            stack.extend((node.left, node.right))
+        elif isinstance(node, SumExpression):
+            stack.append(node.operand)
+        elif isinstance(node, SumOverExpression):
+            stack.extend(node.terms)
+    return None
+
+
+def if_else(
+    condition: "Constraint",
+    then_value: Union[Expression, float],
+    else_value: Union[Expression, float],
+    *,
+    name: Optional[str] = None,
+) -> Variable:
+    """Piecewise conditional expression (free-function form of :meth:`Model.if_else`).
+
+    Discovers the owning :class:`Model` from the variables appearing in
+    *condition* / *then_value* / *else_value* and delegates to
+    :meth:`Model.if_else`. See that method for the full contract.
+
+    Parameters
+    ----------
+    condition : Constraint
+        An inequality constraint (e.g. ``x >= 0``).
+    then_value, else_value : Expression or float
+        Branch values.
+    name : str, optional
+        Base name for the auxiliary variable.
+
+    Returns
+    -------
+    Variable
+        Auxiliary variable standing for the conditional value.
+
+    Examples
+    --------
+    >>> import discopt.modeling as dm
+    >>> w = dm.if_else(x >= 0, dm.maximum(0.25, dm.exp(x) - 1), dm.log(-x + 3))
+    """
+    if not isinstance(condition, Constraint):
+        raise TypeError(
+            f"if_else() condition must be a Constraint (an inequality such as "
+            f"'x >= 0'), got {type(condition).__name__}"
+        )
+    model = _find_owning_model(condition.body, _wrap(then_value), _wrap(else_value))
+    if model is None:
+        raise ValueError(
+            "if_else() could not determine the owning Model (no variables found "
+            "in condition/then/else); call model.if_else(...) directly instead."
+        )
+    return model.if_else(condition, then_value, else_value, name=name)
+
+
+def udf(fn: Callable) -> Callable:
+    """Compose a Python-callable user-defined function into the expression DAG.
+
+    ``udf`` is a thin pass-through that documents intent: *fn* must build its
+    result entirely from ``discopt.modeling`` primitives (``dm.exp``,
+    ``dm.maximum``, ``dm.if_else``, arithmetic on variables, ...), so the
+    returned expression is a normal DAG node the solver can relax and bound.
+    Unlike an opaque numeric callback (e.g. JuMP's ``register``), the body must
+    be symbolic — that is what lets discopt build rigorous relaxations.
+
+    Parameters
+    ----------
+    fn : callable
+        A function whose body uses only ``dm.*`` primitives and operator
+        overloading on expressions.
+
+    Returns
+    -------
+    callable
+        *fn* unchanged; call it with expression arguments to build the DAG.
+
+    Examples
+    --------
+    >>> import discopt.modeling as dm
+    >>> user_fn = dm.udf(
+    ...     lambda x: dm.if_else(x >= 0, dm.maximum(0.25, dm.exp(x) - 1), dm.log(-x + 3))
+    ... )
+    >>> expr = user_fn(x)   # ordinary discopt expression
+    """
+    if not callable(fn):
+        raise TypeError(f"udf() expects a callable, got {type(fn).__name__}")
+    return fn
+
+
 # ─────────────────────────────────────────────────────────────
 # Aggregation Functions
 # ─────────────────────────────────────────────────────────────
@@ -1086,6 +1190,7 @@ class Model:
         self._constraints: list[Constraint] = []
         self._objective: Optional[Objective] = None
         self._builder = None  # Optional PyModelBuilder, lazy-initialized
+        self._aux_counter = 0  # monotonic suffix for if_else auxiliary names
 
     # ── Variable constructors ──
 
@@ -1598,6 +1703,117 @@ class Model:
                 name=name,
             )
         )
+
+    def _branch_bounds(
+        self, then_expr: "Expression", else_expr: "Expression"
+    ) -> tuple[float, float]:
+        """Sound bounds for an if_else auxiliary variable.
+
+        The auxiliary ``w`` must enclose the image of *both* branches, since
+        either may be selected. Returns ``(min lo, max hi)`` over the static
+        interval enclosures of the two branch expressions. Falls back to the
+        default (huge) bounds when either enclosure is non-finite or cannot be
+        computed; presolve/FBBT tighten from there. Always sound.
+        """
+        from discopt._jax.convexity.interval_eval import evaluate_interval
+
+        los: list[float] = []
+        his: list[float] = []
+        for e in (then_expr, else_expr):
+            try:
+                iv = evaluate_interval(e, self)
+                lo = float(np.asarray(iv.lo).reshape(()))
+                hi = float(np.asarray(iv.hi).reshape(()))
+            except Exception:
+                return -9.999e19, 9.999e19
+            if not (np.isfinite(lo) and np.isfinite(hi)):
+                return -9.999e19, 9.999e19
+            los.append(lo)
+            his.append(hi)
+        return min(los), max(his)
+
+    def if_else(
+        self,
+        condition: "Constraint",
+        then_value: Union["Expression", float],
+        else_value: Union["Expression", float],
+        *,
+        name: Optional[str] = None,
+    ) -> Variable:
+        """Piecewise conditional expression ``then if condition else otherwise``.
+
+        Introduces an auxiliary continuous variable ``w`` and a two-way
+        disjunction so that, when *condition* holds, ``w == then_value``, and
+        when it fails, ``w == else_value``. The disjunction is lowered to a
+        big-M / hull reformulation by the GDP pass at solve time, so ``w`` may
+        be used anywhere a continuous expression is allowed (objective or
+        constraint bodies), composes with the relaxation pipeline, and keeps a
+        valid global lower bound under branch-and-bound.
+
+        Parameters
+        ----------
+        condition : Constraint
+            An *inequality* constraint (e.g. ``x >= 0``). Equality conditions
+            are rejected: a zero-measure condition is not a meaningful split.
+        then_value : Expression or float
+            Value of the result when *condition* holds.
+        else_value : Expression or float
+            Value of the result when *condition* fails.
+        name : str, optional
+            Base name for the auxiliary variable and disjunction.
+
+        Returns
+        -------
+        Variable
+            The auxiliary variable ``w`` standing for the conditional value.
+
+        Notes
+        -----
+        On the boundary where the condition holds with equality, *both*
+        disjuncts are feasible, so the relaxed graph includes both branch
+        values at that single point. This is a sound over-approximation for a
+        global solver — it never excludes a true optimum.
+
+        Examples
+        --------
+        >>> # user_function_1d(x) = (x >= 0) ? max(0.25, exp(x) - 1) : log(-x + 3)
+        >>> w = m.if_else(x >= 0, maximum(0.25, exp(x) - 1), log(-x + 3))
+        >>> m.subject_to(y >= w)
+        """
+        if not isinstance(condition, Constraint):
+            raise TypeError(
+                f"if_else() condition must be a Constraint (an inequality such "
+                f"as 'x >= 0'), got {type(condition).__name__}"
+            )
+        if condition.sense == "==":
+            raise ValueError(
+                "if_else() condition must be an inequality, not an equality; "
+                "an equality condition holds on a zero-measure set."
+            )
+        then_expr = _wrap(then_value)
+        else_expr = _wrap(else_value)
+        lb, ub = self._branch_bounds(then_expr, else_expr)
+        self._aux_counter += 1
+        base = name or "ifelse"
+        w = self.continuous(f"_{base}_{self._aux_counter}", lb=lb, ub=ub)
+        # condition is normalized to ``body <= 0``; its complement is ``-body <= 0``.
+        complement = Constraint(-condition.body, sense="<=", rhs=0.0)
+        # Force the hull (perspective) reformulation: it disaggregates the
+        # disjunct variables, so each branch's nonlinear body is relaxed only
+        # over its own active region. Big-M keeps every branch's equation in
+        # the global model and yields an unreliable relaxation bound for
+        # nonlinear equality disjuncts (it can cut off the true optimum).
+        self._constraints.append(
+            _DisjunctiveConstraint(
+                disjuncts=[
+                    [condition, w == then_expr],
+                    [complement, w == else_expr],
+                ],
+                name=f"_{base}_{self._aux_counter}_disj",
+                method="hull",
+            )
+        )
+        return w
 
     # ── Special ordered sets ──
 
@@ -2191,6 +2407,12 @@ class _IndicatorConstraint:
 class _DisjunctiveConstraint:
     disjuncts: list[list[Constraint]]
     name: Optional[str] = None
+    # Optional per-disjunction reformulation override ("hull" | "big-m" | ...).
+    # When set, it takes precedence over the solver-wide ``gdp_method``. Used by
+    # ``Model.if_else`` to force the exact hull (perspective) reformulation,
+    # which is robust for nonlinear equality disjuncts where big-M's relaxation
+    # bound is unreliable.
+    method: Optional[str] = None
 
 
 @dataclass

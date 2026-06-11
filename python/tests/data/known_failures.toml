@@ -13,16 +13,6 @@
 #   issue    = <GitHub issue number>
 #   note     = "human-readable explanation"
 
-[minlptests."nlp_006_010/primary"]
-category = "no_convergence"
-issue    = 4
-note     = "user-defined function via JuMP.register() has no dm equivalent"
-
-[minlptests."nlp_mi_006_010/primary"]
-category = "no_convergence"
-issue    = 4
-note     = "user-defined function via JuMP.register() has no dm equivalent"
-
 # ── Maximize sign bug (issue #6 / jkitchin/discopt#28) ──────────────────────
 # RESOLVED: Fixed in f6d15a5 ("Fix maximize objective sign in solver and QP
 # extractor"). All 14 entries removed after rebase confirmed they now pass.

@@ -50,6 +50,8 @@ from discopt.modeling.core import (
     from_nl,
     # Import functions
     from_pyomo,
+    # Conditional / user-defined function
+    if_else,
     land,
     lnot,
     log,
@@ -70,6 +72,7 @@ from discopt.modeling.core import (
     sum,
     tan,
     tanh,
+    udf,
 )
 from discopt.modeling.core import (
     abs_ as abs,
@@ -101,6 +104,8 @@ __all__ = [
     "softplus",
     "minimum",
     "maximum",
+    "if_else",
+    "udf",
     "sum",
     "prod",
     "norm",

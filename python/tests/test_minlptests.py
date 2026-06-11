@@ -1211,6 +1211,36 @@ def _build_nlp_005_010() -> Model:
     return m
 
 
+def _user_function_1d(t):
+    """Piecewise user function from MINLPTests 006_010 (nlp + nlp-mi).
+
+    ``f(t) = (t >= 0) ? max(0.25, exp(t) - 1) : log(-t + 3)``.
+
+    The upstream JuMP model registers this as an opaque user-defined function;
+    here it is expressed symbolically via ``dm.if_else`` so discopt can build a
+    rigorous relaxation (issue #27a). Wrapped with ``dm.udf`` to document that
+    the body is composed entirely of ``dm.*`` primitives.
+    """
+    return dm.if_else(t >= 0, dm.maximum(0.25, dm.exp(t) - 1), dm.log(-t + 3))
+
+
+def _build_nlp_006_010() -> Model:
+    """Max y + x; y >= f(x); x^2 + y^3 <= 2; y >= 0.
+
+    f is the piecewise user function (see :func:`_user_function_1d`). The
+    feasible region implies |x| <= sqrt(2) and y <= 2^(1/3); finite bounds are
+    supplied for the NLP solver. Opt: 1.8813786425753092 at x≈0.7546, y≈1.1268.
+    """
+    m = dm.Model("nlp_006_010")
+    x = m.continuous("x", lb=-10.0, ub=10.0)
+    y = m.continuous("y", lb=0.0, ub=10.0)
+    user_function_1d = dm.udf(_user_function_1d)
+    m.maximize(y + x)
+    m.subject_to(y >= user_function_1d(x))
+    m.subject_to(x**2 + y**3 <= 2)
+    return m
+
+
 def _build_nlp_007_010() -> Model:
     """INFEASIBLE: y=exp(x) and x=y^2 have no real solution."""
     m = dm.Model("nlp_007_010")
@@ -1318,6 +1348,10 @@ NLP_INSTANCES = [
     pytest.param(
         MINLPTestInstance("nlp_005_010", _build_nlp_005_010, 1.5449760741521967),
         id="nlp_005_010",
+    ),
+    pytest.param(
+        MINLPTestInstance("nlp_006_010", _build_nlp_006_010, 1.8813786425753092),
+        id="nlp_006_010",
     ),
     pytest.param(
         MINLPTestInstance("nlp_008_010", _build_nlp_008_010, -0.3755859312158738),
@@ -1515,6 +1549,23 @@ def _build_nlp_mi_005_010() -> Model:
     return m
 
 
+def _build_nlp_mi_006_010() -> Model:
+    """Max y + x; y >= f(x); x^2 + y^3 <= 2; y binary.
+
+    Mixed-integer twin of :func:`_build_nlp_006_010` with ``y`` binary. f is the
+    piecewise user function (see :func:`_user_function_1d`). Opt: 1 + log(2) ≈
+    1.6931471805599454 at x=log(2), y=1.
+    """
+    m = dm.Model("nlp_mi_006_010")
+    x = m.continuous("x", lb=-10.0, ub=10.0)
+    y = m.binary("y")
+    user_function_1d = dm.udf(_user_function_1d)
+    m.maximize(y + x)
+    m.subject_to(y >= user_function_1d(x))
+    m.subject_to(x**2 + y**3 <= 2)
+    return m
+
+
 def _build_nlp_mi_007_010() -> Model:
     """INFEASIBLE: y=exp(x) and x=y^2; both x,y integer."""
     m = dm.Model("nlp_mi_007_010")
@@ -1619,6 +1670,12 @@ NLP_MI_INSTANCES = [
         marks=[pytest.mark.smoke],
         id="nlp_mi_005_010",
     ),
+    pytest.param(
+        MINLPTestInstance(
+            "nlp_mi_006_010", _build_nlp_mi_006_010, 1.6931471805599454, has_integers=True
+        ),
+        id="nlp_mi_006_010",
+    ),
 ]
 
 # ── Infeasible instances ───────────────────────────────────────────────────
@@ -1629,11 +1686,10 @@ INFEASIBLE_INSTANCES = [
     MINLPTestInstance("nlp_mi_007_020", _build_nlp_mi_007_020, 0.0, expected_status="infeasible"),
 ]
 
-# ── xfail registrations: nlp_006_010 and nlp_mi_006_010 ─────────────────
-# These use JuMP.register() user-defined functions which have no discopt
-# equivalent. They are tracked in known_failures.toml and skipped here.
-# When user-defined function support is added, remove from known_failures.toml
-# and add the build functions and instances to NLP_INSTANCES / NLP_MI_INSTANCES.
+# Note: nlp_006_010 / nlp_mi_006_010 use a piecewise user-defined function
+# (max(0.25, exp(x)-1) for x>=0, else log(-x+3)). As of issue #27a this is
+# expressed with dm.udf + dm.if_else (see _user_function_1d) and the instances
+# are registered in NLP_INSTANCES / NLP_MI_INSTANCES above — no longer xfailed.
 
 
 # ═════════════════════════════════════════════════════════════════════════════

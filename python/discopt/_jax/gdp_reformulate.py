@@ -120,7 +120,13 @@ def reformulate_gdp(model: Model, method: str = "big-m") -> Model:
             new_cons = _reformulate_indicator(c, new_model, lp_data=lp_data)
             new_model._constraints.extend(new_cons)
         elif isinstance(c, _DisjunctiveConstraint):
-            chosen = auto_advice.get(ci, method) if method == "auto" else method
+            # A per-disjunction ``method`` override (set e.g. by Model.if_else)
+            # takes precedence over the solver-wide method / auto advice.
+            override = getattr(c, "method", None)
+            if override is not None:
+                chosen = override
+            else:
+                chosen = auto_advice.get(ci, method) if method == "auto" else method
             if chosen == "hull":
                 new_vars, new_cons = _reformulate_disjunction_hull(c, new_model, _add_aux_binary)
             else:
@@ -945,7 +951,18 @@ def _reformulate_disjunction_hull(
                 rhs_expr = _wrap(con.rhs) * y_k
             else:
                 # Nonlinear: perspective form with clamped y_k
-                # f(v_k / y_clamp) * y_clamp where y_clamp = y_k + eps
+                # f(v_k / y_clamp) * y_clamp where y_clamp = y_k + eps.
+                #
+                # The eps clamp avoids division by zero at y_k = 0 but makes the
+                # perspective only an O(eps) approximation at the integer faces:
+                # at y_k = 0 the disaggregated vars are pinned to 0 by the
+                # bound-linking constraints, yet the body evaluates to
+                # f(0) * eps != 0 instead of exactly 0. The constraints are kept
+                # exact here (so KKT verification sees them tight at the optimum);
+                # the eps-scale residual is absorbed downstream by the feasibility
+                # tolerance in constraint-based bound tightening, which must not
+                # certify infeasibility from a violation below the solver's
+                # feasibility tolerance (issue #27a).
                 y_clamp = y_k + _wrap(eps)
                 persp_map = {vname: disagg[k][vname] / y_clamp for vname in all_vars}
                 subst_body = _substitute_vars(con.body, persp_map)

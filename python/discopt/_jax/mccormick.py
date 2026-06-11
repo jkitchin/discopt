@@ -681,40 +681,69 @@ def relax_sign(x, lb, ub):
 def relax_min(x, y, cv_x, cc_x, cv_y, cc_y):
     """McCormick relaxation of min(x, y).
 
-    min is concave: cv = secant-based, cc = min(cc_x, cc_y).
-    Uses the identity: min(x,y) = 0.5 * (x + y - |x - y|).
+    ``min`` is concave. Using the identity ``min(a, b) = 0.5*(a + b - |a - b|)``:
+
+    - **cc** (concave overestimator): ``min(cc_x, cc_y)``. The minimum of two
+      concave functions is concave, and ``cc_x >= x, cc_y >= y`` give
+      ``min(cc_x, cc_y) >= min(x, y)``. Valid and concave.
+    - **cv** (convex underestimator): ``0.5*(cv_x + cv_y - S)`` where ``S`` is the
+      *concave* (affine secant) overestimator of ``|a - b|`` evaluated at the
+      actual underestimator difference ``cv_x - cv_y``. Since
+      ``S >= |cv_x - cv_y|`` we get ``cv <= 0.5*(cv_x + cv_y - |cv_x - cv_y|) =
+      min(cv_x, cv_y) <= min(x, y)`` -- sound -- while ``-S`` (concave) keeps the
+      whole expression convex.
+
+    The earlier implementation used ``cv = min(cv_x, cv_y)``: a valid *value*
+    bound, but the pointwise minimum of two convex functions is **not convex**,
+    so a local relaxation solve over that nonconvex feasible set yields invalid
+    (too-tight) bounds -- pruning true optima in spatial B&B. See issue #27a.
 
     Returns (cv, cc).
     """
-    # min(x, y) <= min(cc_x, cc_y) since cc_x >= x, cc_y >= y
     cc = jnp.minimum(cc_x, cc_y)
-    # min(x, y) >= min(cv_x, cv_y) is NOT correct (min is not monotone like that)
-    # Instead: min(x, y) >= cv_x if x <= y, else min(x,y) = y >= cv_y
-    # Safe lower bound: min(cv_x, cv_y) - but this is too loose.
-    # Better: since min(x,y) = (x + y - |x-y|)/2 and cv_z >= cv_x + cv_y - (cc of |x-y|)
-    # For soundness, use: cv = min(cv_x, cv_y) which may not always be <= min(x,y).
-    # Actually min(x,y) >= min(cv_x, cv_y)? No: cv_x <= x and cv_y <= y,
-    # so min(cv_x, cv_y) <= min(x, y)? Not necessarily.
-    # Example: cv_x = 0, cv_y = 5, x = 1, y = 6 -> min(cv) = 0, min(x,y) = 1. OK.
-    # Example: cv_x = 5, cv_y = 0, x = 6, y = 1 -> min(cv) = 0, min(x,y) = 1. OK.
-    # In general: min(cv_x, cv_y) <= min(x, y)?
-    # Since cv_x <= x and cv_y <= y: min(cv_x, cv_y) <= max(cv_x, cv_y) <= max(x, y)
-    # But also min(cv_x, cv_y) <= cv_x <= x and min(cv_x, cv_y) <= cv_y <= y
-    # So min(cv_x, cv_y) <= min(x, y). Yes!
-    cv = jnp.minimum(cv_x, cv_y)
+    # Concave (affine secant) overestimator of |a - b| over [cv_x - cc_y,
+    # cc_x - cv_y], evaluated at the actual underestimator difference
+    # cv_x - cv_y (which lies inside that interval).  Evaluating the secant at
+    # the *actual* difference -- not the interval midpoint -- is what keeps the
+    # result sound: S >= |cv_x - cv_y|.  See issue #27a.
+    cv_d = cv_x - cc_y
+    cc_d = cc_x - cv_y
+    _, cc_abs = relax_abs(cv_x - cv_y, cv_d, cc_d)
+    cv = 0.5 * (cv_x + cv_y - cc_abs)
     return cv, cc
 
 
 def relax_max(x, y, cv_x, cc_x, cv_y, cc_y):
     """McCormick relaxation of max(x, y).
 
-    max is convex: cv = max(cv_x, cv_y), cc uses concave overestimator.
+    ``max`` is convex. Using the identity ``max(a, b) = 0.5*(a + b + |a - b|)``:
+
+    - **cv** (convex underestimator): ``max(cv_x, cv_y)``. The maximum of two
+      convex functions is convex, and ``cv_x <= x, cv_y <= y`` give
+      ``max(cv_x, cv_y) <= max(x, y)``. Valid and convex.
+    - **cc** (concave overestimator): ``0.5*(cc_x + cc_y + S)`` where ``S`` is the
+      *concave* (affine secant) overestimator of ``|a - b|`` evaluated at the
+      actual overestimator difference ``cc_x - cc_y``. Since
+      ``S >= |cc_x - cc_y|`` we get ``cc >= 0.5*(cc_x + cc_y + |cc_x - cc_y|) =
+      max(cc_x, cc_y) >= max(x, y)`` -- sound -- while ``+S`` (concave) keeps the
+      whole expression concave.
+
+    The earlier implementation used ``cc = max(cc_x, cc_y)``: a valid *value*
+    bound, but the pointwise maximum of two concave functions is **not
+    concave**, so a local relaxation solve over that nonconvex feasible set
+    yields invalid bounds -- pruning true optima in spatial B&B (e.g.
+    ``w == max(...)`` from ``if_else``). See issue #27a.
 
     Returns (cv, cc).
     """
-    # max(x,y) >= max(cv_x, cv_y) since cv_x <= x, cv_y <= y ->
-    # max(cv_x, cv_y) <= max(x, y)
     cv = jnp.maximum(cv_x, cv_y)
-    # max(x,y) <= max(cc_x, cc_y) since cc_x >= x, cc_y >= y
-    cc = jnp.maximum(cc_x, cc_y)
+    # Concave (affine secant) overestimator of |a - b| over [cv_x - cc_y,
+    # cc_x - cv_y], evaluated at the actual overestimator difference
+    # cc_x - cc_y (which lies inside that interval).  Evaluating the secant at
+    # the *actual* difference -- not the interval midpoint -- is what keeps the
+    # result sound: S >= |cc_x - cc_y|.  See issue #27a.
+    cv_d = cv_x - cc_y
+    cc_d = cc_x - cv_y
+    _, cc_abs = relax_abs(cc_x - cc_y, cv_d, cc_d)
+    cc = 0.5 * (cc_x + cc_y + cc_abs)
     return cv, cc

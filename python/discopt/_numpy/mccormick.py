@@ -321,12 +321,32 @@ def relax_sign(x, lb, ub):
 
 
 def relax_min(x, y, cv_x, cc_x, cv_y, cc_y):
+    # min(a,b) = 0.5*(a + b - |a-b|).  cc = min(cc_x, cc_y) is concave (min of
+    # concave).  cv must be convex, so subtract the *concave* affine-secant
+    # overestimator S of |a-b| (S >= |a-b|) rather than using min(cv_x, cv_y)
+    # (non-convex -> invalid spatial-B&B bounds).  Evaluate the secant at the
+    # actual underestimator difference cv_x - cv_y (inside [cv_x-cc_y, cc_x-cv_y])
+    # -- NOT the interval midpoint -- so S >= |cv_x - cv_y| and cv stays sound.
+    # See issue #27a and discopt._jax.mccormick.
     cc = jnp.minimum(cc_x, cc_y)
-    cv = jnp.minimum(cv_x, cv_y)
+    cv_d = cv_x - cc_y
+    cc_d = cc_x - cv_y
+    _, cc_abs = relax_abs(cv_x - cv_y, cv_d, cc_d)
+    cv = 0.5 * (cv_x + cv_y - cc_abs)
     return cv, cc
 
 
 def relax_max(x, y, cv_x, cc_x, cv_y, cc_y):
+    # max(a,b) = 0.5*(a + b + |a-b|).  cv = max(cv_x, cv_y) is convex (max of
+    # convex).  cc must be concave, so add the *concave* affine-secant
+    # overestimator S of |a-b| (S >= |a-b|) rather than using max(cc_x, cc_y)
+    # (non-concave -> invalid spatial-B&B bounds).  Evaluate the secant at the
+    # actual overestimator difference cc_x - cc_y (inside [cv_x-cc_y, cc_x-cv_y])
+    # -- NOT the interval midpoint -- so S >= |cc_x - cc_y| and cc stays sound.
+    # See issue #27a and discopt._jax.mccormick.
     cv = jnp.maximum(cv_x, cv_y)
-    cc = jnp.maximum(cc_x, cc_y)
+    cv_d = cv_x - cc_y
+    cc_d = cc_x - cv_y
+    _, cc_abs = relax_abs(cc_x - cc_y, cv_d, cc_d)
+    cc = 0.5 * (cc_x + cc_y + cc_abs)
     return cv, cc
