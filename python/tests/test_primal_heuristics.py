@@ -18,6 +18,7 @@ from discopt._jax.primal_heuristics import (  # noqa: E402
     _generate_starts,
     _get_integer_mask,
     _is_integer_feasible,
+    enumerate_binary_seeds_subnlp,
     feasibility_pump,
 )
 from discopt.modeling.core import Model  # noqa: E402
@@ -408,3 +409,60 @@ class TestIntegerMask:
         """Empty integer mask is always feasible."""
         mask = np.array([False, False])
         assert _is_integer_feasible(np.array([1.5, 2.5]), mask)
+
+
+# ─────────────────────────────────────────────────────────────
+# TestEnumerateBinarySeeds
+# ─────────────────────────────────────────────────────────────
+
+
+def _make_disjunctive_minlp() -> Model:
+    """min z*((x-1)^2+1) + (1-z)*((x+1)^2+2), x in [-3,3], z in {0,1}.
+
+    Two local optima: z=0 -> obj 2 at x=-1; z=1 -> obj 1 at x=1.
+    Global optimum is obj 1 at z=1. Nearest-rounding a fractional z<0.5
+    seed lands in the worse z=0 disjunct; enumeration must still find z=1.
+    """
+    m = Model("disjunctive")
+    x = m.continuous("x", lb=-3, ub=3)
+    z = m.binary("z")
+    m.minimize(z * ((x - 1) ** 2 + 1) + (1 - z) * ((x + 1) ** 2 + 2))
+    return m
+
+
+@pytest.mark.slow
+@pytest.mark.integration
+class TestEnumerateBinarySeeds:
+    def test_finds_global_disjunct_regardless_of_seed(self):
+        """Both disjuncts are tried, so the global optimum is found whichever
+        way the fractional binary leans in the seed."""
+        m = _make_disjunctive_minlp()
+        # Flat order is [x, z]. Seed x at 0; vary the fractional selector so
+        # nearest rounding would pick the worse disjunct in one case.
+        for z_frac in (0.2, 0.8):
+            seed = np.array([0.0, z_frac])
+            results = enumerate_binary_seeds_subnlp(m, seed)
+            assert results, f"no feasible points for z_frac={z_frac}"
+            best = min(obj for _, obj in results)
+            assert best == pytest.approx(1.0, abs=1e-3)
+
+    def test_skips_when_binary_already_integral(self):
+        """No fractional binary -> nothing to enumerate -> empty list."""
+        m = _make_disjunctive_minlp()
+        seed = np.array([0.0, 0.0])
+        assert enumerate_binary_seeds_subnlp(m, seed) == []
+
+    def test_skips_above_cap(self):
+        """More fractional binaries than max_binaries -> skipped (empty list)."""
+        m = Model("many_binaries")
+        x = m.continuous("x", lb=-3, ub=3)
+        zs = [m.binary(f"z{i}") for i in range(5)]
+        m.minimize(x**2 + sum(zs))
+        seed = np.array([0.0, 0.5, 0.5, 0.5, 0.5, 0.5])
+        assert enumerate_binary_seeds_subnlp(m, seed, max_binaries=4) == []
+
+    def test_no_integers_returns_empty(self):
+        """Continuous-only model has no binaries to enumerate."""
+        m = _make_quadratic_nlp()
+        seed = np.array([0.0, 0.0])
+        assert enumerate_binary_seeds_subnlp(m, seed) == []
