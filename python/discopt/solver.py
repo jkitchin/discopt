@@ -3074,6 +3074,12 @@ def solve_model(
         # (capped) set of fractional binaries and solve a fixed-integer subnlp
         # from each, so the optimal disjunct is always tried regardless of
         # platform FP. Bounded to 2**max_binaries solves; skipped above the cap.
+        if iteration == 0:
+            print(
+                f"GDPENUM-GUARD iter0 backend={_subnlp_backend_fn is not None} "
+                f"convex={_model_is_convex} calls={_subnlp_calls}/{subnlp_max_calls}",
+                flush=True,
+            )
         if (
             iteration == 0
             and _subnlp_backend_fn is not None
@@ -3088,6 +3094,7 @@ def solve_model(
                 if result_lbs[i] < _SENTINEL_THRESHOLD and np.isfinite(result_lbs[i])
             ]
             _enum_cands.sort(key=lambda t: t[1])
+            print(f"GDPENUM-GUARD n_cands={len(_enum_cands)}", flush=True)
             if _enum_cands:
                 _enum_seed = result_sols[_enum_cands[0][0]]
                 try:
@@ -3099,8 +3106,11 @@ def solve_model(
                         evaluator=evaluator,
                     )
                 except Exception as _e:
+                    print(f"GDPENUM-GUARD raised: {_e!r}", flush=True)
                     logger.debug("enumerate_binary_seeds_subnlp raised: %s", _e)
                     _enum_results = []
+                _enum_objs = [round(o, 6) for _, o in _enum_results]
+                print(f"GDPENUM-GUARD results={_enum_objs}", flush=True)
                 _subnlp_calls += len(_enum_results)
                 for _x_en, _obj_en in _enum_results:
                     _subnlp_feasible += 1

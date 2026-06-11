@@ -468,11 +468,11 @@ def enumerate_binary_seeds_subnlp(
                 evaluator=evaluator,
                 integer_tol=integer_tol,
             )
-            logger.warning(
-                "GDPENUM combo=%s start=%s -> %s",
-                combo,
-                "zero" if base is zero_start else "relax",
-                "None" if found is None else f"obj={found[1]:.6g}",
+            print(
+                f"GDPENUM combo={combo} "
+                f"start={'zero' if base is zero_start else 'relax'} -> "
+                f"{'None' if found is None else f'obj={found[1]:.6g}'}",
+                flush=True,
             )
             if found is not None:
                 results.append(found)
