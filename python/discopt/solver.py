@@ -1494,6 +1494,12 @@ def solve_model(
     solver : str or None, default None
         Optional global-solver selector. Use ``"amp"`` to dispatch to
         Adaptive Multivariate Partitioning instead of branch-and-bound.
+        Use ``"gp"`` to dispatch to the geometric-programming fast path:
+        the model is checked for GP structure (posynomial/monomial
+        objective and constraints over strictly-positive continuous
+        variables) and, if it qualifies, solved exactly via the log-space
+        convex reformulation (``y = log x``). Raises ``ValueError`` if the
+        model is not a geometric program. See :mod:`discopt.gp`.
     solver="amp" options
         The AMP backend also accepts ``rel_gap``, ``abs_tol``, ``max_iter``,
         ``n_init_partitions``, ``partition_method``, ``milp_time_limit``,
@@ -1621,6 +1627,62 @@ def solve_model(
             skip_convex_check=skip_convex_check,
             **amp_kwargs,
         )
+
+    # --- GP (geometric programming) log-space convex fast path ---
+    if _solver == "gp":
+        import warnings
+
+        from discopt.gp import classify_gp, solve_gp
+
+        if classify_gp(model) is None:
+            raise ValueError(
+                "solver='gp' was requested but the model is not a geometric "
+                "program. A GP needs a posynomial (or monomial) objective, "
+                "constraints of the form posynomial <= monomial or monomial "
+                "== monomial, and strictly-positive continuous variables. "
+                "See discopt.gp.classify_gp for the exact preconditions."
+            )
+
+        ignored_gp_options = []
+
+        def _note_ignored_gp(name: str, should_warn: bool) -> None:
+            if should_warn:
+                ignored_gp_options.append(name)
+
+        _note_ignored_gp("threads", threads != 1)
+        _note_ignored_gp("deterministic", deterministic is not True)
+        _note_ignored_gp("batch_size", batch_size != 16)
+        _note_ignored_gp("strategy", strategy != "best_first")
+        _note_ignored_gp("max_nodes", max_nodes != 100_000)
+        _note_ignored_gp("partitions", partitions != 0)
+        _note_ignored_gp("branching_policy", branching_policy != "fractional")
+        _note_ignored_gp("use_learned_relaxations", use_learned_relaxations is not False)
+        _note_ignored_gp("mccormick_bounds", mccormick_bounds != "auto")
+        _note_ignored_gp("gdp_method", gdp_method != "big-m")
+        _note_ignored_gp("cutting_planes", cutting_planes is not False)
+        _note_ignored_gp("nlp_bb", nlp_bb is not None)
+        _note_ignored_gp("lazy_constraints", lazy_constraints is not None)
+        _note_ignored_gp("incumbent_callback", incumbent_callback is not None)
+        _note_ignored_gp("node_callback", node_callback is not None)
+        if kwargs:
+            ignored_gp_options.extend(sorted(kwargs))
+        if ignored_gp_options:
+            warnings.warn(
+                "GP fast path ignores solve_model options: "
+                + ", ".join(sorted(dict.fromkeys(ignored_gp_options))),
+                stacklevel=2,
+            )
+
+        result = solve_gp(
+            model,
+            time_limit=time_limit,
+            gap_tolerance=gap_tolerance,
+            nlp_solver=nlp_solver,
+            ipopt_options=ipopt_options,
+        )
+        if result is None:  # pragma: no cover - guarded by classify_gp above
+            raise RuntimeError("GP reformulation failed unexpectedly.")
+        return result
 
     # --- OA decomposition: general-purpose Outer Approximation ---
     if gdp_method == "oa":
