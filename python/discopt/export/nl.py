@@ -33,6 +33,7 @@ import numpy as np
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
+    CustomCall,
     Expression,
     FunctionCall,
     IndexExpression,
@@ -801,6 +802,13 @@ class _NLWriter:
             raise ValueError(
                 "MatMul expressions must be expanded before .nl export. "
                 "Use explicit indexing instead of @."
+            )
+
+        if isinstance(expr, CustomCall):
+            raise ValueError(
+                f"Cannot export the opaque AD-only user function {expr.name!r} "
+                f"(dm.custom) to .nl: it has no AMPL opcode. Rebuild the function "
+                f"from dm.* primitives and use dm.udf to make it exportable."
             )
 
         raise ValueError(f"Cannot write expression type to .nl: {type(expr).__name__}")

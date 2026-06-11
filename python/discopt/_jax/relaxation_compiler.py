@@ -59,6 +59,7 @@ from discopt.modeling.core import (
     BinaryOp,
     Constant,
     Constraint,
+    CustomCall,
     Expression,
     FunctionCall,
     IndexExpression,
@@ -929,6 +930,16 @@ def _compile_relax_node(
             return cv_acc, cc_acc
 
         return fn
+
+    if isinstance(expr, CustomCall):
+        raise NotImplementedError(
+            f"Cannot build a McCormick relaxation for the opaque AD-only user "
+            f"function {expr.name!r} (dm.custom). Global / spatial branch-and-bound "
+            f"needs rigorous convex/concave relaxations, which an opaque callable "
+            f"cannot provide. Solve on the local NLP path (pure-continuous models "
+            f"route there automatically), or rebuild the function from dm.* "
+            f"primitives and use dm.udf."
+        )
 
     raise TypeError(f"Unhandled expression type: {type(expr).__name__}")
 
