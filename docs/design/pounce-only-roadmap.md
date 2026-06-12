@@ -199,9 +199,42 @@ is a trustworthy LP/dual engine. Work breakdown:
   and its multipliers for reduced-cost fixing, **only** when the solve
   converged to tolerance. An unconverged IPM bound used for fathoming can
   cut the optimum — this violates the `incorrect_count ≤ 0` invariant.
+
+  *Status / implementation notes (from code investigation):*
+  - **Batch sentinel parity — DONE (commit 3b59e8b).** The batch IPM/POUNCE
+    path used to silently prune nodes whose relaxation solve *failed*
+    (error, divergence, local infeasibility) and still report a certified
+    `optimal`. It now mirrors the serial path's #27a guard: such nodes
+    decertify the gap, and the McCormick-LP bound rescues them where the
+    relaxer is active. Verified that all four paths (pounce/ipm ×
+    batch/serial) now agree (e.g. Haverly pooling → `feasible`, obj 1390).
+  - **Convex non-KKT objectives — OPEN.** For a *convex* model the node
+    relaxation objective is imported as the node lower bound. A non-KKT
+    result (Ipopt status `ITERATION_LIMIT`, i.e. JAX-IPM codes 3/4 or a
+    POUNCE max-iter exit) gives `f(x~) ≥ f*`, which is **not** a valid lower
+    bound (issue #39). The JAX-IPM paths polish such nodes via
+    `_solve_node_nlp_kkt` (now backed by POUNCE, so the common case is
+    covered once POUNCE is installed); the **POUNCE serial/batch paths have
+    no polish**, so a POUNCE max-iter exit on a convex node is still trusted.
+  - **Blocker: bound/incumbent conflation.** A correct fix cannot simply set
+    the untrusted node bound to `-inf` or a sentinel. In *convex* mode the
+    Rust tree uses `node_lb` as **both** the dual bound and the incumbent
+    objective for integer-feasible nodes (`process_evaluated`,
+    `tree_manager.rs`): `-inf` would corrupt the incumbent, a sentinel would
+    prune a node we failed to bound. The sound design must **decouple** the
+    two — inject the true objective `f(x_sol)` as the incumbent (as the
+    nonconvex path already does via `inject_incumbent`) while marking the
+    dual bound untrusted. Recommended mechanism: a `trusted` mask returned
+    from `_solve_batch_ipm`/`_solve_batch_pounce` (additive; bound values
+    unchanged) that decertifies the gap, plus a POUNCE polish-retry
+    (re-solve at higher `max_iter`) before giving up. This spans both B&B
+    loops (`solve_model` and `_solve_nlp_bb`) and is its own focused change.
 - **P0.4 Batch LP/QP.** Extend the `solve_nlp_batch` path to LP/QP node
   waves; extend `nlp_backend.py` so the seam dispatches LP/QP as well as
-  NLP, keeping call sites engine-agnostic.
+  NLP, keeping call sites engine-agnostic. Note: the published
+  `pounce-solver` wheel (0.4.0) exposes `pounce.Problem`/`.solve` but **not**
+  `solve_nlp_batch`, so `_solve_batch_pounce` currently falls back to serial
+  per-node solves; batch LP/QP depends on that POUNCE API landing.
 - **P0.5 HiGHS as CI oracle.** From this phase on, cross-check every POUNCE
   LP/QP result against HiGHS in CI (test-only dependency). HiGHS stops
   being a runtime engine long before it stops being a correctness guard.
