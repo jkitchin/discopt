@@ -350,6 +350,25 @@ is a trustworthy LP/dual engine. Work breakdown:
 
 ### Phase 1 — Self-hosted integer B&B ("cover" milestone)
 
+*Status / implementation notes:*
+- **Scoping finding.** `_solve_milp_bb` / `_solve_miqp_bb` already exist as
+  self-hosted Rust-tree B&B with **in-house JAX LP/QP IPM** node relaxations
+  (no third-party solver — already POUNCE-only-compatible); they are the
+  *fallback* today (HiGHS is default via `use_highs_milp=True`). "Cover" =
+  make them sound, then default.
+- **Correctness floor — DONE.** Both accepted a non-KKT (max-iter,
+  `converged==3`) relaxation objective as a valid lower bound and certified
+  `"optimal"` on `tree.gap()`/`is_finished()` alone — a latent wrong-`optimal`
+  path (the same #39 class as P0.3). Fixed: a code-3 node bound decertifies
+  the gap (`_gap_certified=False`), `"optimal"` now requires a closed search
+  **and** a certified gap, the bound/gap are nulled when uncertified, and
+  `SolveResult.gap_certified` is surfaced. Bounds/incumbent untouched.
+  Tests: `test_p1_milp_bb_soundness.py` (controls still certify; forced
+  code-3 → `"feasible"`, `gap_certified=False`, correct incumbent).
+- **Open:** POUNCE polish/fallback for code-3 nodes (recover instead of
+  decertify); interior-solution purification; reduced-cost fixing / OBBT via
+  relaxation duals; then flip the default off HiGHS.
+
 - Route pure MILP and MIQP through the existing Rust B&B
   (`crates/discopt-core/src/bnb/`) with POUNCE LP/QP relaxations, replacing
   the `milp_highs.py` whole-problem hand-off.

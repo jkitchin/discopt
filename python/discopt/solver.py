@@ -6068,6 +6068,13 @@ def _solve_milp_bb(
     tree.initialize()
     rust_time += time.perf_counter() - t_rust_start
 
+    # A node relaxation that stalled at the iteration limit (converged==3) is
+    # not at KKT, so its objective is not a valid lower bound for the node
+    # (f(x~) >= f*); trusting it can prune the true integer optimum. Track
+    # whether any such bound was used and, if so, refuse to certify the gap
+    # (mirrors the P0.3 trust-gate; bounds are left untouched).
+    _gap_certified = True
+
     iteration = 0
     while True:
         elapsed = time.perf_counter() - t_start
@@ -6124,6 +6131,10 @@ def _solve_milp_bb(
                         lb_c = np.clip(np.array(batch_lb[i]), -_SPC, _SPC)
                         ub_c = np.clip(np.array(batch_ub[i]), -_SPC, _SPC)
                         result_sols[i] = 0.5 * (lb_c + ub_c)
+                # Any non-KKT (max-iter) LP bound that survived as a finite
+                # lower bound makes the gap uncertifiable.
+                if np.any((converged == 3) & (result_lbs < _SENTINEL_THRESHOLD)):
+                    _gap_certified = False
             except Exception as e:
                 logger.debug("Batch LP solve failed: %s", e)
                 result_lbs = np.full(n_batch, _INFEASIBILITY_SENTINEL, dtype=np.float64)
@@ -6156,6 +6167,8 @@ def _solve_milp_bb(
                         if _check_lp_solution_feasibility(lp_data.A_eq, lp_data.b_eq, state.x):
                             result_lbs[i] = float(state.obj) + lp_data.obj_const
                             result_sols[i] = np.asarray(state.x[:n_vars])
+                            if conv == 3:  # non-KKT bound: uncertifiable gap
+                                _gap_certified = False
                         else:
                             result_lbs[i] = _INFEASIBILITY_SENTINEL
                             lb_c = np.clip(node_lb, -_SPC, _SPC)
@@ -6238,7 +6251,10 @@ def _solve_milp_bb(
         if model._objective.sense == ObjectiveSense.MAXIMIZE:
             obj_val = -obj_val
 
-        if tree.gap() <= gap_tolerance or tree.is_finished():
+        # "optimal" needs a closed search AND a certified gap: a stalled
+        # (non-KKT) node bound leaves optimality unproven even when the tree
+        # appears finished.
+        if (tree.gap() <= gap_tolerance or tree.is_finished()) and _gap_certified:
             status = "optimal"
         else:
             status = "feasible"
@@ -6260,11 +6276,17 @@ def _solve_milp_bb(
     if bound_val is not None and model._objective.sense == ObjectiveSense.MAXIMIZE:
         bound_val = -bound_val
 
+    # An uncertified gap is not a rigorous dual bound; do not present one.
+    gap_val = stats["gap"]
+    if not _gap_certified:
+        bound_val = None
+        gap_val = None
+
     return SolveResult(
         status=status,
         objective=obj_val,
         bound=bound_val,
-        gap=stats["gap"],
+        gap=gap_val,
         x=x_dict,
         wall_time=wall_time,
         node_count=stats["total_nodes"],
@@ -6274,6 +6296,7 @@ def _solve_milp_bb(
         constraint_duals=constraint_duals,
         bound_duals_lower=bound_duals_lower,
         bound_duals_upper=bound_duals_upper,
+        gap_certified=_gap_certified,
     )
 
 
@@ -6306,6 +6329,13 @@ def _solve_miqp_bb(
     tree = PyTreeManager(n_vars, lb.tolist(), ub.tolist(), int_offsets, int_sizes, strategy)
     tree.initialize()
     rust_time += time.perf_counter() - t_rust_start
+
+    # A node relaxation that stalled at the iteration limit (converged==3) is
+    # not at KKT, so its objective is not a valid lower bound for the node
+    # (f(x~) >= f*); trusting it can prune the true integer optimum. Track
+    # whether any such bound was used and, if so, refuse to certify the gap
+    # (mirrors the P0.3 trust-gate; bounds are left untouched).
+    _gap_certified = True
 
     iteration = 0
     while True:
@@ -6370,6 +6400,10 @@ def _solve_miqp_bb(
                         lb_c = np.clip(np.array(batch_ub[i]), -_SPC, _SPC)
                         ub_c = np.clip(np.array(batch_ub[i]), -_SPC, _SPC)
                         result_sols[i] = 0.5 * (lb_c + ub_c)
+                # Any non-KKT (max-iter) QP bound surviving as a finite lower
+                # bound makes the gap uncertifiable.
+                if np.any((converged == 3) & (result_lbs < _SENTINEL_THRESHOLD)):
+                    _gap_certified = False
             except Exception as e:
                 logger.debug("Batch QP solve failed: %s", e)
                 result_lbs = np.full(n_batch, _INFEASIBILITY_SENTINEL, dtype=np.float64)
@@ -6409,6 +6443,8 @@ def _solve_miqp_bb(
                         if _check_lp_solution_feasibility(qp_data.A_eq, qp_data.b_eq, state.x):
                             result_lbs[i] = float(state.obj) + qp_data.obj_const
                             result_sols[i] = np.asarray(state.x[:n_vars])
+                            if conv == 3:  # non-KKT bound: uncertifiable gap
+                                _gap_certified = False
                         else:
                             result_lbs[i] = _INFEASIBILITY_SENTINEL
                             lb_c = np.clip(node_lb, -_SPC, _SPC)
@@ -6493,7 +6529,10 @@ def _solve_miqp_bb(
         if model._objective.sense == ObjectiveSense.MAXIMIZE:
             obj_val = -obj_val
 
-        if tree.gap() <= gap_tolerance or tree.is_finished():
+        # "optimal" needs a closed search AND a certified gap: a stalled
+        # (non-KKT) node bound leaves optimality unproven even when the tree
+        # appears finished.
+        if (tree.gap() <= gap_tolerance or tree.is_finished()) and _gap_certified:
             status = "optimal"
         else:
             status = "feasible"
@@ -6515,11 +6554,17 @@ def _solve_miqp_bb(
     if bound_val is not None and model._objective.sense == ObjectiveSense.MAXIMIZE:
         bound_val = -bound_val
 
+    # An uncertified gap is not a rigorous dual bound; do not present one.
+    gap_val = stats["gap"]
+    if not _gap_certified:
+        bound_val = None
+        gap_val = None
+
     return SolveResult(
         status=status,
         objective=obj_val,
         bound=bound_val,
-        gap=stats["gap"],
+        gap=gap_val,
         x=x_dict,
         wall_time=wall_time,
         node_count=stats["total_nodes"],
@@ -6529,4 +6574,5 @@ def _solve_miqp_bb(
         constraint_duals=constraint_duals,
         bound_duals_lower=bound_duals_lower,
         bound_duals_upper=bound_duals_upper,
+        gap_certified=_gap_certified,
     )
