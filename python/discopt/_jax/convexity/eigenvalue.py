@@ -36,6 +36,43 @@ import numpy as np
 
 from .interval import Interval, _round_down, _round_up
 
+# Unit roundoff for IEEE-754 binary64 round-to-nearest (2**-53).
+_UNIT_ROUNDOFF = 2.0**-53
+
+
+def _row_offdiag_abs_sum_upper(abs_sup: np.ndarray) -> np.ndarray:
+    """Sound per-row upper bound on the off-diagonal absolute sums.
+
+    ``abs_sup`` is the entry-wise ``max(|H_lo|, |H_hi|)`` matrix with its
+    diagonal already zeroed, so row ``i`` summed gives ``Σ_{j≠i} |H_ij|``.
+
+    The previous implementation accumulated each row in a Python double loop,
+    pushing every partial one ULP toward ``+∞`` — O(n²) scalar ``np.nextafter``
+    calls and the dominant cost of the whole certificate. This computes the
+    row sums with a single vectorised ``np.sum`` and then inflates each by the
+    standard Higham recursive-summation error factor
+
+        ``S ≤ Ŝ / (1 − γ_m)``,   ``γ_m = m·u / (1 − m·u)``,   ``m = n − 1``,
+
+    valid because all summands are nonnegative (so ``Σ|x_i| = S``). numpy's
+    pairwise summation has an even smaller error than the recursive bound, so
+    ``γ_{n−1}`` is a safe over-estimate. A final outward round absorbs the
+    division's own roundoff. The result is therefore a rigorous upper bound,
+    matching the loop's guarantee at O(n²) vectorised cost instead of O(n²)
+    interpreted scalar ops.
+    """
+    raw = np.asarray(np.sum(abs_sup, axis=1), dtype=np.float64)
+    m = abs_sup.shape[1] - 1  # off-diagonal terms per row (diagonal is zeroed)
+    if m <= 0:
+        return raw
+    mu = m * _UNIT_ROUNDOFF
+    # mu < 1 for any n < 2**53; guard defensively so the bound stays sound
+    # (and finite) even in the absurd-size limit.
+    if mu >= 0.5:
+        return _round_up(np.full_like(raw, np.inf))
+    gamma = mu / (1.0 - mu)
+    return _round_up(raw / (1.0 - gamma))
+
 
 def gershgorin_lambda_min(H: Interval) -> float:
     """Sound lower bound on ``λ_min`` over the interval Hessian ``H``.
@@ -64,20 +101,13 @@ def gershgorin_lambda_min(H: Interval) -> float:
     if not (np.all(np.isfinite(lo)) and np.all(np.isfinite(hi))):
         return float(-np.inf)
 
-    n = lo.shape[0]
     # |A_ij| supremum over the interval: max(|lo|, |hi|).
     abs_sup = np.maximum(np.abs(lo), np.abs(hi))
-    # Remove diagonal contribution so row_sums holds Σ_{j ≠ i} |A_ij|.
-    abs_sup[np.arange(n), np.arange(n)] = 0.0
+    # Remove diagonal contribution so row sums hold Σ_{j ≠ i} |A_ij|.
+    np.fill_diagonal(abs_sup, 0.0)
 
-    # Sum with outward rounding. ``np.sum`` is not directed-rounded,
-    # so we accumulate pair-wise and push each partial toward +∞.
-    row_sum = np.zeros(n, dtype=np.float64)
-    for i in range(n):
-        s = 0.0
-        for j in range(n):
-            s = _round_up(np.float64(s + abs_sup[i, j]))
-        row_sum[i] = s
+    # Sound per-row upper bound on the off-diagonal sums (vectorised).
+    row_sum = _row_offdiag_abs_sum_upper(abs_sup)
 
     # Diagonal lower bound minus sum — round down.
     diag_lo = np.diag(lo)
@@ -94,16 +124,10 @@ def gershgorin_lambda_max(H: Interval) -> float:
     if not (np.all(np.isfinite(lo)) and np.all(np.isfinite(hi))):
         return float(np.inf)
 
-    n = lo.shape[0]
     abs_sup = np.maximum(np.abs(lo), np.abs(hi))
-    abs_sup[np.arange(n), np.arange(n)] = 0.0
+    np.fill_diagonal(abs_sup, 0.0)
 
-    row_sum = np.zeros(n, dtype=np.float64)
-    for i in range(n):
-        s = 0.0
-        for j in range(n):
-            s = _round_up(np.float64(s + abs_sup[i, j]))
-        row_sum[i] = s
+    row_sum = _row_offdiag_abs_sum_upper(abs_sup)
 
     diag_hi = np.diag(hi)
     bounds = _round_up(diag_hi + row_sum)

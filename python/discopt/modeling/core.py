@@ -222,10 +222,15 @@ class Variable(Expression):
         self.ub = np.broadcast_to(np.asarray(ub, dtype=np.float64), shape)
         self.model = model
         self._index = len(model._variables)  # Position in flat variable vector
+        # ``size`` is a hot property on the convexity / AD walkers (called
+        # once per leaf, per node visited). ``shape`` is immutable after
+        # construction, so cache the product once instead of recomputing
+        # ``int(np.prod(shape))`` on every access.
+        self._size = int(np.prod(shape)) if shape else 1
 
     @property
     def size(self) -> int:
-        return int(np.prod(self.shape))
+        return self._size
 
     def __hash__(self):
         return id(self)
