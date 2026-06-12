@@ -21,7 +21,7 @@ from typing import List, Optional, Tuple, Union
 import numpy as np
 import scipy.sparse as sp
 
-from discopt.solvers import LPResult, SolveStatus
+from discopt.solvers import InfeasibilityCertificate, LPResult, SolveStatus
 
 try:
     import pounce as _pounce  # noqa: F401
@@ -148,6 +148,7 @@ def solve_lp(
     time_limit: Optional[float] = None,
     x0: Optional[np.ndarray] = None,
     options: Optional[dict] = None,
+    certificate: bool = False,
 ) -> LPResult:
     """Solve ``min c^T x`` s.t. linear constraints and bounds via POUNCE.
 
@@ -156,6 +157,13 @@ def solve_lp(
 
     ``warm_basis`` is accepted for signature compatibility but ignored: an IPM
     does not warm-start from a simplex basis. ``LPResult.basis`` is ``None``.
+
+    When the result is ``INFEASIBLE``, an
+    :class:`~discopt.solvers.InfeasibilityCertificate` is attached if one was
+    computed: always for infeasibility found via the Phase-1 disambiguation
+    path (free — Phase-1 already ran), and on demand for a directly
+    POUNCE-detected infeasibility when ``certificate=True`` (one extra Phase-1
+    solve).
 
     Raises:
         ImportError: If POUNCE is not installed.
@@ -207,6 +215,9 @@ def solve_lp(
     # ---- stacked linear constraints -----------------------------------------
     A, cl, cu = _stack_constraints(A_ub, b_ub, A_eq, b_eq, n)
     m = A.shape[0]
+    # Row split for mapping a certificate back to the caller's matrices: the
+    # stack is inequality rows then equality rows (see _stack_constraints).
+    n_ineq = A_ub.shape[0] if (A_ub is not None and b_ub is not None) else 0
 
     # ---- starting point: strictly interior where bounds are finite ----------
     if x0 is None:
@@ -230,15 +241,31 @@ def solve_lp(
     # proves the original was feasible (so the failure was numerical, not
     # infeasibility — report it honestly rather than as INFEASIBLE).
     if m > 0 and result.status in (SolveStatus.ITERATION_LIMIT, SolveStatus.ERROR):
-        viol = _phase1_min_violation(A, cl, cu, lb, ub, opts)
-        if viol is not None and viol > _FEAS_TOL:
+        slacks = _phase1_min_violation(A, cl, cu, lb, ub, opts)
+        if slacks is not None and float(slacks.sum()) > _FEAS_TOL:
             return LPResult(
                 status=SolveStatus.INFEASIBLE,
                 iterations=result.iterations,
                 wall_time=result.wall_time,
+                infeasibility_certificate=_build_certificate(slacks, n_ineq),
             )
+    elif certificate and result.status == SolveStatus.INFEASIBLE and m > 0:
+        # POUNCE detected infeasibility directly; spend one Phase-1 solve to
+        # build the requested witness.
+        slacks = _phase1_min_violation(A, cl, cu, lb, ub, opts)
+        if slacks is not None and float(slacks.sum()) > _FEAS_TOL:
+            result.infeasibility_certificate = _build_certificate(slacks, n_ineq)
 
     return result
+
+
+def _build_certificate(slacks: np.ndarray, n_ineq: int) -> InfeasibilityCertificate:
+    """Split the Phase-1 per-row slacks into an inequality/equality witness."""
+    return InfeasibilityCertificate(
+        total_violation=float(slacks.sum()),
+        ineq_violations=np.asarray(slacks[:n_ineq], dtype=np.float64),
+        eq_violations=np.asarray(slacks[n_ineq:], dtype=np.float64),
+    )
 
 
 def _solve_core(
@@ -322,8 +349,8 @@ def _phase1_min_violation(
     lb: np.ndarray,
     ub: np.ndarray,
     opts: dict,
-) -> Optional[float]:
-    """Minimal total constraint violation of ``cl <= A x <= cu`` over the box.
+) -> Optional[np.ndarray]:
+    """Per-row minimal constraint violation of ``cl <= A x <= cu`` over the box.
 
     Builds and solves the elastic LP
 
@@ -331,9 +358,10 @@ def _phase1_min_violation(
         s.t. A x - s <= cu,   A x + s >= cl,   lb <= x <= ub,   s >= 0
 
     in the variables ``[x, s]`` (one slack per row). The elastic LP is always
-    feasible and bounded below by 0; its optimum is the smallest total
-    violation. Returns that value, or ``None`` if even the (well-posed)
-    Phase-1 solve did not reach optimality.
+    feasible and bounded below by 0; at the optimum each ``s_i`` is the minimal
+    violation row ``i`` must incur. Returns that length-``m`` slack vector
+    (its sum is the total minimal violation), or ``None`` if even the
+    (well-posed) Phase-1 solve did not reach optimality.
     """
     m, n = A.shape
     eye = np.eye(m, dtype=np.float64)
@@ -347,6 +375,8 @@ def _phase1_min_violation(
     x0 = np.concatenate([_interior_start(lb, ub), np.ones(m)])
 
     res = _solve_core(c2, A2, cl2, cu2, lb2, ub2, x0, opts)
-    if res.status == SolveStatus.OPTIMAL and res.objective is not None:
-        return float(res.objective)
+    if res.status == SolveStatus.OPTIMAL and res.x is not None:
+        # The slacks are the trailing m entries; clip tiny negatives from the
+        # interior-point tolerance.
+        return np.clip(np.asarray(res.x[n:], dtype=np.float64), 0.0, None)
     return None

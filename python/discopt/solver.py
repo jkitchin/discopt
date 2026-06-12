@@ -5406,12 +5406,17 @@ def _solve_lp_pounce(
 ) -> SolveResult | None:
     """Solve an LP using POUNCE (pure-Rust IPM). Returns None when POUNCE is
     unavailable or fails, so the caller can fall back to another engine."""
+    import functools
+
     from discopt.solvers.lp_pounce import POUNCE_AVAILABLE
     from discopt.solvers.lp_pounce import solve_lp as _pounce_solve_lp
 
     if not POUNCE_AVAILABLE:
         return None
-    return _solve_lp_matrix(model, t_start, time_limit, _pounce_solve_lp, "POUNCE")
+    # Request an infeasibility certificate so an infeasible model-level LP
+    # surfaces *why* via SolveResult.infeasibility_certificate (roadmap P0.2).
+    solve_fn = functools.partial(_pounce_solve_lp, certificate=True)
+    return _solve_lp_matrix(model, t_start, time_limit, solve_fn, "POUNCE")
 
 
 def _solve_lp_matrix(
@@ -5498,7 +5503,11 @@ def _solve_lp_matrix(
         sr.convex_fast_path = True
         return sr
     if result.status == SolveStatus.INFEASIBLE:
-        return SolveResult(status="infeasible", wall_time=wall_time)
+        return SolveResult(
+            status="infeasible",
+            wall_time=wall_time,
+            infeasibility_certificate=getattr(result, "infeasibility_certificate", None),
+        )
     if result.status == SolveStatus.UNBOUNDED:
         return SolveResult(status="unbounded", wall_time=wall_time)
     if result.status == SolveStatus.TIME_LIMIT:

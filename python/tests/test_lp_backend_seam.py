@@ -83,3 +83,45 @@ class TestLPBackendSeam:
         assert abs(r_h.objective - r_p.objective) < 1e-5
         for name in ("x", "y"):
             np.testing.assert_allclose(r_h.x[name], r_p.x[name], atol=1e-4)
+
+
+def _build_infeasible_lp() -> dm.Model:
+    """x+y <= 1 and x+y >= 10 with x,y >= 0: infeasible."""
+    m = dm.Model("seam_infeasible_lp")
+    x = m.continuous("x", lb=0, ub=10)
+    y = m.continuous("y", lb=0, ub=10)
+    m.minimize(x + y)
+    m.subject_to(x + y <= 1)
+    m.subject_to(x + y >= 10)
+    return m
+
+
+class TestInfeasibilityCertificateExposed:
+    """An infeasible LP solved via POUNCE surfaces the certificate on
+    SolveResult (roadmap P0.2).
+
+    The engine wrappers are called directly here: at the full ``Model.solve``
+    level, simple infeasible LPs are usually proved infeasible by FBBT bound
+    tightening *before* any LP engine runs (returning "infeasible" with no
+    certificate), so these tests exercise the engine→SolveResult plumbing that
+    the internal LP consumers (OBBT, masters) actually hit.
+    """
+
+    def test_pounce_engine_attaches_certificate(self):
+        import time
+
+        res = S._solve_lp_pounce(_build_infeasible_lp(), time.perf_counter())
+        assert res is not None and res.status == "infeasible"
+        cert = res.infeasibility_certificate
+        assert cert is not None
+        # Gap between x+y<=1 and x+y>=10 forces total violation ~9.
+        assert cert.total_violation > 1.0
+
+    def test_highs_engine_has_no_certificate(self):
+        pytest.importorskip("highspy")
+        import time
+
+        res = S._solve_lp_highs(_build_infeasible_lp(), time.perf_counter())
+        assert res is not None and res.status == "infeasible"
+        # HiGHS path does not compute the elastic Phase-1 witness.
+        assert res.infeasibility_certificate is None

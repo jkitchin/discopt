@@ -232,13 +232,23 @@ is a trustworthy LP/dual engine. Work breakdown:
     there. The soundness half of this is already handled (commit 3b59e8b:
     a failed/locally-infeasible node carries a sentinel that decertifies the
     gap rather than silently pruning).
+  - **Expose the certificate — DONE.** `InfeasibilityCertificate`
+    (`total_violation`, `ineq_violations`, `eq_violations`; the Phase-1
+    per-row slacks) is attached to `LPResult.infeasibility_certificate` on an
+    infeasible result — for free on the disambiguation path, and on demand
+    (`solve_lp(certificate=True)`) for a directly POUNCE-detected
+    infeasibility. `SolveResult.infeasibility_certificate` surfaces it at the
+    model level (the POUNCE LP engine requests it). Note: at full
+    `Model.solve` level FBBT often proves simple infeasible LPs *before* any
+    engine runs (no certificate there); the witness is most useful to the
+    internal LP consumers (OBBT, masters) that call `lp_pounce.solve_lp`
+    directly. Tests: `TestInfeasibilityCertificate`,
+    `TestInfeasibilityCertificateExposed`.
   - **Open: serial POUNCE node retry.** `_solve_node_nlp_pounce` does a single
     solve; on local infeasibility it should retry from alternative starts
     (the batch path already multistarts nonconvex nodes) to avoid losing
-    nodes / decertifying unnecessarily. Robustness, not soundness.
-  - **Open: expose the certificate.** The Phase-1 slacks identify *which*
-    rows are violated (an IIS-like diagnosis); surfacing this needs a new
-    field on `LPResult`/`NLPResult`.
+    nodes / decertifying unnecessarily. Robustness, not soundness — the only
+    remaining P0.2 item, separate from the (now complete) certificate work.
 - **P0.3 Bound trust-gate.** Use a POUNCE objective as a valid dual bound,
   and its multipliers for reduced-cost fixing, **only** when the solve
   converged to tolerance. An unconverged IPM bound used for fathoming can

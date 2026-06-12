@@ -361,7 +361,8 @@ class TestInfeasibilityCertificate:
         else:
             lb = np.array([b[0] for b in bounds], dtype=float)
             ub = np.array([b[1] for b in bounds], dtype=float)
-        return _phase1_min_violation(A, cl, cu, lb, ub, self._OPTS)
+        slacks = _phase1_min_violation(A, cl, cu, lb, ub, self._OPTS)
+        return None if slacks is None else float(slacks.sum())
 
     def test_violation_positive_when_infeasible(self):
         # x1+x2 = 1 and = 5  =>  minimal total violation is 4.
@@ -372,6 +373,51 @@ class TestInfeasibilityCertificate:
         # A feasible system: minimal violation is 0.
         v = self._violation(A_ub=np.array([[1.0, 1.0]]), b_ub=np.array([10.0]))
         assert v is not None and v < 1e-5
+
+    def test_certificate_attached_on_infeasible(self):
+        """An infeasibility found via Phase-1 carries the witness for free."""
+        r = solve_lp(
+            c=np.array([1.0, 1.0]),
+            A_eq=np.array([[1.0, 1.0], [1.0, 1.0]]),
+            b_eq=np.array([1.0, 5.0]),
+            options={"max_iter": 300},
+        )
+        assert r.status == SolveStatus.INFEASIBLE
+        cert = r.infeasibility_certificate
+        assert cert is not None
+        assert abs(cert.total_violation - 4.0) < 1e-4
+        assert cert.ineq_violations.shape == (0,)
+        assert cert.eq_violations.shape == (2,)
+        # Both equalities participate in the conflict.
+        assert np.all(cert.eq_violations >= -1e-9)
+        assert cert.eq_violations.sum() == pytest.approx(4.0, abs=1e-4)
+
+    def test_certificate_identifies_conflicting_inequalities(self):
+        """x1+x2 <= 1 and -(x1+x2) <= -10 conflict; both rows show violation."""
+        r = solve_lp(
+            c=np.array([1.0, 1.0]),
+            A_ub=np.array([[1.0, 1.0], [-1.0, -1.0]]),
+            b_ub=np.array([1.0, -10.0]),
+            certificate=True,
+        )
+        assert r.status == SolveStatus.INFEASIBLE
+        cert = r.infeasibility_certificate
+        assert cert is not None
+        assert cert.ineq_violations.shape == (2,)
+        assert cert.total_violation > 1.0  # gap between <=1 and >=10
+        # At least one of the two conflicting rows carries positive violation.
+        assert cert.ineq_violations.max() > 1e-3
+
+    def test_no_certificate_without_flag_on_direct_infeasible(self):
+        """Directly POUNCE-detected infeasibility skips the extra Phase-1
+        unless a certificate is requested."""
+        r = solve_lp(
+            c=np.array([1.0, 1.0]),
+            A_ub=np.array([[1.0, 1.0], [-1.0, -1.0]]),
+            b_ub=np.array([1.0, -10.0]),
+        )
+        assert r.status == SolveStatus.INFEASIBLE
+        assert r.infeasibility_certificate is None
 
     def test_feasible_consistent_redundant_not_flagged(self):
         """Consistent but redundant equalities must NOT be called infeasible."""

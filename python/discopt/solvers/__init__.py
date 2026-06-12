@@ -17,6 +17,25 @@ class SolveStatus(Enum):
 
 
 @dataclass
+class InfeasibilityCertificate:
+    """Constructive (minimal-violation) witness that an LP is infeasible.
+
+    Produced by the elastic Phase-1 LP that minimizes total constraint
+    violation. A positive ``total_violation`` is, by LP duality, a Farkas
+    certificate: no point satisfies all constraints and bounds simultaneously.
+    ``ineq_violations`` and ``eq_violations`` give the minimal violation each
+    row must incur (an entry ``> 0`` marks a conflicting constraint) — an
+    IIS-like diagnosis, though not guaranteed to be a minimal irreducible
+    subsystem. Rows are in the order the matrices were passed (inequalities
+    then equalities).
+    """
+
+    total_violation: float
+    ineq_violations: np.ndarray
+    eq_violations: np.ndarray
+
+
+@dataclass
 class LPResult:
     """Result of solving a linear program.
 
@@ -24,6 +43,9 @@ class LPResult:
     ``reduced_costs`` are variable marginals (one per column). Both are in
     the sign convention of the LP as passed to the solver (i.e. the
     internal minimization form).
+
+    ``infeasibility_certificate`` is populated (when available) on an
+    ``INFEASIBLE`` result to witness *why* the LP is infeasible.
     """
 
     status: SolveStatus
@@ -34,6 +56,7 @@ class LPResult:
     basis: Optional[object] = None
     iterations: int = 0
     wall_time: float = 0.0
+    infeasibility_certificate: Optional[InfeasibilityCertificate] = None
 
 
 @dataclass
