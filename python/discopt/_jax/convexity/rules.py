@@ -363,11 +363,16 @@ def _classify_product(
     # Special product patterns: perspective of exp and weighted
     # geometric mean. See :mod:`patterns` for the preconditions.
     if model is not None:
-        from .patterns import classify_product_pattern
+        from .patterns import classify_perspective_product, classify_product_pattern
 
         special = classify_product_pattern(expr, model, classify_expr, cache)
         if special is not None:
             return ExprInfo(special, prod_sign)
+
+        # Perspective product ((g/L)**2)*L + affine companions → quad-over-affine.
+        special = classify_perspective_product(expr, model, classify_expr, cache)
+        if special == Curvature.CONVEX:
+            return ExprInfo(Curvature.CONVEX, prod_sign)
 
     # Bilinear / general product: curvature is UNKNOWN even when both
     # factors share a sign (consider x*y on the positive orthant, whose
@@ -545,12 +550,19 @@ def _classify_function_call(expr: FunctionCall, model: Optional[Model], cache: d
 
     # sqrt(x'Qx) with Q PSD is a norm — convex even though the inner
     # quadratic is convex (concave∘convex would fail DCP composition).
+    # sqrt(prod base_i^{p_i}) over affine nonneg bases is a weighted
+    # geometric mean — concave (geo-mean concavity, e.g. sqrt(x_i x_j)).
     if name == "sqrt" and model is not None:
         from .patterns import classify_sqrt_pattern
 
-        special = classify_sqrt_pattern(expr.args[0], model)
+        special = classify_sqrt_pattern(expr.args[0], model, classify_expr, cache)
         if special == Curvature.CONVEX:
             return ExprInfo(Curvature.CONVEX, Sign.NONNEG)
+        if special == Curvature.CONCAVE:
+            # Preserve the sqrt result sign (strict POS on a strictly-positive
+            # argument) so an enclosing reciprocal / log composition still
+            # applies; falling back to NONNEG would drop that strictness.
+            return ExprInfo(Curvature.CONCAVE, _function_result_sign(name, arg_sign))
 
     if profile is None:
         return ExprInfo(Curvature.UNKNOWN, _function_result_sign(name, arg_sign))
