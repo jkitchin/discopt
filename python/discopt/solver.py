@@ -1592,6 +1592,13 @@ def solve_model(
         variables) and, if it qualifies, solved exactly via the log-space
         convex reformulation (``y = log x``). Raises ``ValueError`` if the
         model is not a geometric program. See :mod:`discopt.gp`.
+        When ``solver`` is left ``None``, a recognised GP is **automatically**
+        routed through this same exact log-space convex solve (a single NLP,
+        global optimum) instead of branch-and-bound; pass ``"bb"`` to opt out
+        and force the classic branch-and-bound path. The automatic route is
+        skipped when branch-and-bound streaming callbacks (``incumbent_callback``,
+        ``node_callback``, ``iteration_callback``) are attached, or when
+        ``skip_convex_check=True``.
     solver="amp" options
         The AMP backend also accepts ``rel_gap``, ``abs_tol``, ``max_iter``,
         ``n_init_partitions``, ``partition_method``, ``milp_time_limit``,
@@ -1635,6 +1642,13 @@ def solve_model(
 
     # --- AMP (Adaptive Multivariate Partitioning) global solver ---
     _solver = solver if solver is not None else kwargs.pop("solver", None)
+    # Recognised global-solver selectors: ``None`` (default branch-and-bound,
+    # with the automatic GP fast path below), ``"amp"``, ``"gp"`` (force the GP
+    # log-space path), and ``"bb"`` (force classic branch-and-bound, opting out
+    # of the automatic GP fast path). Reject anything else rather than silently
+    # falling through to B&B.
+    if _solver not in (None, "amp", "gp", "bb"):
+        raise ValueError(f"Unknown solver={_solver!r}. Choose one of None, 'amp', 'gp', 'bb'.")
     if _solver == "amp":
         import warnings
 
@@ -1775,6 +1789,34 @@ def solve_model(
         if result is None:  # pragma: no cover - guarded by classify_gp above
             raise RuntimeError("GP reformulation failed unexpectedly.")
         return result
+
+    # --- Auto GP fast path: a recognised geometric program solves exactly via
+    # its log-space convex reformulation (y = log x), which is strictly better
+    # than branch-and-bound (a single convex NLP gives the global optimum). This
+    # fires only when no global solver was explicitly requested and the user did
+    # not attach branch-and-bound streaming callbacks (which the GP path cannot
+    # honour — falling through to B&B keeps them firing). ``solver="bb"`` is an
+    # explicit opt-out that forces the classic path. ``classify_gp`` bails on the
+    # first integer variable / non-positive lower bound, so the probe is cheap on
+    # the common (non-GP) path.
+    _has_bb_callbacks = (
+        incumbent_callback is not None
+        or node_callback is not None
+        or kwargs.get("iteration_callback") is not None
+    )
+    if _solver is None and not _has_bb_callbacks and not skip_convex_check:
+        from discopt.gp import classify_gp, solve_gp
+
+        if classify_gp(model) is not None:
+            gp_result = solve_gp(
+                model,
+                time_limit=time_limit,
+                gap_tolerance=gap_tolerance,
+                nlp_solver=nlp_solver,
+                ipopt_options=ipopt_options,
+            )
+            if gp_result is not None:
+                return gp_result
 
     # --- OA decomposition: general-purpose Outer Approximation ---
     if gdp_method == "oa":

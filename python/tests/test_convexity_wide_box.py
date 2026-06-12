@@ -375,18 +375,38 @@ class TestWideBoxSolverIntegration:
         assert result.convex_fast_path is True
         assert abs(result.objective - (2.0 * (2.0**0.5) - 2.0)) <= 1.0e-4
 
-    def test_bilinear_feasibility_does_not_take_convex_fast_path(self):
-        """Negative control: a genuinely nonconvex bilinear constraint
-        must NOT be promoted to the convex fast path by any wide-box
-        code path. Ensures the structural recognisers haven't
-        accidentally widened to over-accept.
+    def test_bilinear_feasibility_x_space_recognisers_do_not_over_accept(self):
+        """Negative control: the *x-space* structural recognisers must NOT
+        promote a genuinely nonconvex bilinear constraint to convex.
+
+        ``min u+v  s.t.  u*v >= 5`` is nonconvex in x-space, so
+        ``classify_model`` (with the certificate, the exact gate for the
+        x-space convex fast path) must keep returning ``is_convex == False`` —
+        the over-acceptance guard this control exists for.
+
+        Note this model is, however, a *geometric program* (the objective is a
+        posynomial and ``u*v >= 5`` is ``5*u^-1*v^-1 <= 1``, a monomial), so a
+        plain ``solve`` legitimately auto-routes through the exact log-space
+        convex reformulation (``discopt.gp``) and reports
+        ``convex_fast_path is True`` for that single-NLP global solve. To
+        exercise the classic branch-and-bound path here we opt out with
+        ``solver="bb"``.
         """
         m = Model("bilinear_solver_nonconvex")
         u = m.continuous("u", lb=0.1, ub=10.0)
         v = m.continuous("v", lb=0.1, ub=10.0)
         m.minimize(u + v)
-        m.subject_to(u * v >= 5.0)  # nonconvex feasible region
-        result = m.solve(time_limit=60.0)
+        m.subject_to(u * v >= 5.0)  # nonconvex in x-space (a GP in log-space)
+
+        # The genuine guard: the x-space detector must abstain.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            is_convex, _mask = classify_model(m, use_certificate=True)
+        assert is_convex is False
+
+        # Classic branch-and-bound (opting out of the GP fast path): no x-space
+        # convex shortcut is taken, and the global optimum is still found.
+        result = m.solve(time_limit=60.0, solver="bb")
         assert result.status == "optimal"
         assert result.convex_fast_path is False
         # Analytic optimum: u = v = sqrt(5), objective 2*sqrt(5) ≈ 4.472.
