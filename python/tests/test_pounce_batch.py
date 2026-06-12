@@ -180,7 +180,14 @@ def test_pounce_batch_end_to_end_pooling(monkeypatch):
     model = example_pooling_haverly()
     res = model.solve(nlp_solver="pounce", batch_size=16, time_limit=120)
 
-    assert res.status == "optimal"
+    # Pooling-Haverly is nonconvex: the McCormick relaxation bounds do not
+    # rigorously close the gap, and spatial-branch nodes whose NLP relaxation
+    # fails carry no rigorous lower bound. Per the #27a soundness guard
+    # (applied on the serial path and, since the batch-sentinel fix, on the
+    # batch path too), such a search reports the correct incumbent as
+    # "feasible" rather than claiming a certificate it does not hold. Every
+    # solve path (pounce/ipm × batch/serial) agrees on "feasible" here.
+    assert res.status in ("optimal", "feasible")
     # Haverly pooling global optimum (this formulation): -400 profit => 1390 obj.
     assert res.objective == pytest.approx(1390.0, abs=1.0, rel=1e-3)
     # The batch path must have actually fired with more than one node.
