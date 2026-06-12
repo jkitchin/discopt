@@ -2087,10 +2087,10 @@ def solve_model(
         elif problem_class == ProblemClass.QP:
             if _pure_continuous:
                 if _pure_continuous_convexity_known and _pure_continuous_is_convex:
-                    return _solve_qp(model, t_start)
+                    return _solve_qp(model, t_start, prefer_pounce=nlp_solver == "pounce")
                 _pure_continuous_force_spatial = True
             else:
-                return _solve_qp(model, t_start)
+                return _solve_qp(model, t_start, prefer_pounce=nlp_solver == "pounce")
         elif problem_class == ProblemClass.MILP:
             if use_highs_milp:
                 highs_result = _solve_milp_highs(model, t_start, time_limit, gap_tolerance)
@@ -5610,6 +5610,13 @@ def _solve_lp_matrix(
 
     if result.status == SolveStatus.OPTIMAL:
         assert result.x is not None and result.objective is not None
+        if not _matrix_solution_feasible(result.x[:n_orig], A_ub, b_ub, A_eq, b_eq, bounds):
+            logger.warning(
+                "%s LP returned an infeasible point labeled optimal; "
+                "falling back to the next engine.",
+                engine,
+            )
+            return None
         obj_val = float(result.objective) + float(lp_data.obj_const)
         assert model._objective is not None
         if model._objective.sense == ObjectiveSense.MAXIMIZE:
@@ -5656,11 +5663,21 @@ def _solve_lp_matrix(
     return None
 
 
-def _solve_qp(model: Model, t_start: float) -> SolveResult:
-    """Solve a QP, preferring HiGHS when available, falling back to JAX IPM."""
-    result = _solve_qp_highs(model, t_start)
-    if result is not None:
-        return result
+def _solve_qp(model: Model, t_start: float, prefer_pounce: bool = False) -> SolveResult:
+    """Solve a QP through the first available engine, then the JAX QP IPM.
+
+    Engine order is HiGHS -> POUNCE, or POUNCE -> HiGHS when ``prefer_pounce``
+    is set (the user passed ``nlp_solver="pounce"``; roadmap P0.4). The POUNCE
+    engine handles pure-continuous QPs only — MIQPs stay on HiGHS or fall
+    through to the JAX path / B&B.
+    """
+    engines = [_solve_qp_highs, _solve_qp_pounce]
+    if prefer_pounce:
+        engines.reverse()
+    for engine in engines:
+        result = engine(model, t_start)
+        if result is not None:
+            return result
     return _solve_qp_jax(model, t_start)
 
 
@@ -5674,7 +5691,67 @@ def _solve_qp_highs(
         from discopt.solvers.qp_highs import solve_qp as _highs_solve_qp
     except ImportError:
         return None
+    return _solve_qp_matrix(model, t_start, time_limit, _highs_solve_qp, "HiGHS")
 
+
+def _solve_qp_pounce(
+    model: Model,
+    t_start: float,
+    time_limit: float | None = None,
+) -> SolveResult | None:
+    """Solve a pure-continuous QP using POUNCE. Returns None when POUNCE is
+    unavailable, the model has integer variables (no MIQP in an IPM), or the
+    solve fails — so the caller can fall back to another engine."""
+    import functools
+
+    from discopt.solvers.qp_pounce import POUNCE_AVAILABLE
+    from discopt.solvers.qp_pounce import solve_qp as _pounce_solve_qp
+
+    if not POUNCE_AVAILABLE:
+        return None
+    if any(v.var_type in (VarType.BINARY, VarType.INTEGER) for v in model._variables):
+        return None
+    solve_fn = functools.partial(_pounce_solve_qp, certificate=True)
+    return _solve_qp_matrix(model, t_start, time_limit, solve_fn, "POUNCE")
+
+
+def _matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, bounds, tol=1e-6) -> bool:
+    """Check a matrix-form LP/QP solution against its own constraints.
+
+    Engines can mislabel results: HiGHS's QP solver has been observed to
+    return a constraint-violating point flagged kOptimal (violation ~7.5 on a
+    small random strictly convex QP). A point failing its own constraints is
+    never accepted as optimal — the caller falls through to the next engine.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    if not np.all(np.isfinite(x)):
+        return False
+    scale = 1.0 + float(np.max(np.abs(x)))
+    if A_ub is not None and b_ub is not None and len(b_ub):
+        if np.max(np.asarray(A_ub) @ x - np.asarray(b_ub)) > tol * scale:
+            return False
+    if A_eq is not None and b_eq is not None and len(b_eq):
+        if np.max(np.abs(np.asarray(A_eq) @ x - np.asarray(b_eq))) > tol * scale:
+            return False
+    if bounds is not None:
+        for xi, (lo, hi) in zip(x, bounds):
+            if xi < lo - tol * scale or xi > hi + tol * scale:
+                return False
+    return True
+
+
+def _solve_qp_matrix(
+    model: Model,
+    t_start: float,
+    time_limit: float | None,
+    solve_qp_fn,
+    engine: str,
+) -> SolveResult | None:
+    """Solve a QP/MIQP through a matrix-form ``solve_qp`` backend.
+
+    ``solve_qp_fn`` must follow the shared QP contract (qp_highs / qp_pounce):
+    same signature, same ``QPResult`` with HiGHS-convention duals.
+    """
     from discopt._jax.problem_classifier import extract_qp_data
     from discopt.modeling.core import ObjectiveSense
     from discopt.solvers import SolveStatus
@@ -5713,7 +5790,7 @@ def _solve_qp_highs(
     c_orig = np.asarray(qp_data.c[:n_orig])
 
     try:
-        result = _highs_solve_qp(
+        result = solve_qp_fn(
             Q=Q_orig,
             c=c_orig,
             A_ub=A_ub,
@@ -5725,13 +5802,20 @@ def _solve_qp_highs(
             time_limit=time_limit,
         )
     except Exception as e:
-        logger.debug("HiGHS QP solve failed: %s", e)
+        logger.debug("%s QP solve failed: %s", engine, e)
         return None
 
     wall_time = time.perf_counter() - t_start
 
     if result.status == SolveStatus.OPTIMAL:
         assert result.x is not None and result.objective is not None
+        if not _matrix_solution_feasible(result.x[:n_orig], A_ub, b_ub, A_eq, b_eq, bounds):
+            logger.warning(
+                "%s QP returned an infeasible point labeled optimal; "
+                "falling back to the next engine.",
+                engine,
+            )
+            return None
         x_flat = result.x[:n_orig]
         obj_val = result.objective + qp_data.obj_const
 
@@ -5787,7 +5871,11 @@ def _solve_qp_highs(
             sr.convex_fast_path = True
         return sr
     elif result.status == SolveStatus.INFEASIBLE:
-        return SolveResult(status="infeasible", wall_time=wall_time)
+        return SolveResult(
+            status="infeasible",
+            wall_time=wall_time,
+            infeasibility_certificate=getattr(result, "infeasibility_certificate", None),
+        )
     elif result.status == SolveStatus.TIME_LIMIT:
         return SolveResult(status="time_limit", wall_time=wall_time)
 

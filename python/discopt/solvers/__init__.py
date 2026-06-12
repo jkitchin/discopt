@@ -74,7 +74,11 @@ class MILPResult:
 
 @dataclass
 class QPResult:
-    """Result of solving a quadratic program."""
+    """Result of solving a quadratic program.
+
+    ``infeasibility_certificate`` is populated (when available) on an
+    ``INFEASIBLE`` result to witness *why* the QP is infeasible.
+    """
 
     status: SolveStatus
     x: Optional[np.ndarray] = None
@@ -84,6 +88,7 @@ class QPResult:
     node_count: int = 0
     iterations: int = 0
     wall_time: float = 0.0
+    infeasibility_certificate: Optional[InfeasibilityCertificate] = None
 
 
 @dataclass
