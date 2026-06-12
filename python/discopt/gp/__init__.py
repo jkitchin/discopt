@@ -175,6 +175,33 @@ def _all_variables_positive_continuous(model: Model) -> bool:
     return True
 
 
+def is_log_convex(model: Model) -> bool:
+    """Return ``True`` iff ``model`` is a geometric program.
+
+    A GP is convex under the change of variables ``y = log x`` (every
+    monomial becomes ``exp`` of an affine form, a posynomial a convex
+    sum-of-exponentials). This is a verdict in **log-space**, kept
+    deliberately separate from
+    :func:`discopt._jax.convexity.classify_model`, which reports
+    convexity in the **original** ``x``-space.
+
+    The distinction matters: a genuine GP is generally *not* convex in
+    ``x`` (a posynomial Hessian is indefinite on the positive orthant),
+    so for such a model ``classify_model(model, use_certificate=True)``
+    returns ``(False, ...)`` while ``is_log_convex(model)`` returns
+    ``True``. Folding log-convexity into the ``x``-space verdict would
+    mis-gate the ``x``-space convex fast path — a soundness break — so the
+    two are exposed as independent predicates.
+
+    This is whole-model recognition (the model is a GP in standard form);
+    per-expression log-curvature lattice propagation is a future
+    extension. A ``True`` result is a proof: it is exactly the precondition
+    under which :func:`as_geometric_program` builds an equivalent convex
+    NLP in ``y``.
+    """
+    return classify_gp(model) is not None
+
+
 def classify_gp(model: Model) -> Optional[GPStructure]:
     """Return the :class:`GPStructure` of ``model`` if it is a GP, else ``None``.
 
@@ -397,6 +424,22 @@ def solve_gp(model: Model, **solve_kwargs) -> Optional[SolveResult]:
         y_values = np.asarray(log_result.x["y"], dtype=np.float64).reshape(-1)
         result.x = gp.recover_x(y_values)
         result.objective = gp.objective_value(y_values)
+
+    # The log-space program is convex and equivalent to the original GP, so an
+    # ``optimal`` log-space solution is the *global* optimum of the GP. Its
+    # objective is therefore simultaneously the best incumbent and a valid lower
+    # bound (a zero-gap, single-NLP solve). Only assert this when the convex
+    # solve actually converged — on a limit/infeasible status we must not
+    # fabricate a bound (correctness invariant). Guarded on a finite objective
+    # so a NaN/inf recovery never poses as a certified optimum.
+    if (
+        log_result.status == "optimal"
+        and result.objective is not None
+        and math.isfinite(result.objective)
+    ):
+        result.bound = result.objective
+        result.gap = 0.0
+        result.convex_fast_path = True
     return result
 
 
@@ -406,5 +449,6 @@ __all__ = [
     "GeometricProgram",
     "as_geometric_program",
     "classify_gp",
+    "is_log_convex",
     "solve_gp",
 ]
