@@ -285,7 +285,13 @@ def _solve_core(
     x_arr = np.asarray(x, dtype=np.float64)
     obj = float(info.get("obj_val", c @ x_arr))
     dual = info.get("mult_g", None)
-    dual_values = np.asarray(dual, dtype=np.float64) if dual is not None and len(dual) else None
+    # Ipopt's multipliers enter the Lagrangian as f + mult_g^T g, so they are
+    # the *negation* of the shadow-price convention HiGHS reports (y = dz/db)
+    # and that LPResult documents. Negate so both backends agree; the reduced
+    # costs (mult_x_L - mult_x_U == c - A^T y) already match. On a
+    # dual-degenerate LP the IPM returns an interior point of the dual optimal
+    # face rather than a vertex — a valid dual solution, just not simplex's.
+    dual_values = -np.asarray(dual, dtype=np.float64) if dual is not None and len(dual) else None
     mult_l = np.asarray(info.get("mult_x_L", []), dtype=np.float64)
     mult_u = np.asarray(info.get("mult_x_U", []), dtype=np.float64)
     reduced_costs = (mult_l - mult_u) if mult_l.size and mult_u.size else None

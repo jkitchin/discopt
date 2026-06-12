@@ -265,6 +265,39 @@ class TestDuals:
 
 
 # ---------------------------------------------------------------------------
+# 11b. Dual sign convention parity with HiGHS
+# ---------------------------------------------------------------------------
+@pytest.mark.skipif(not _HIGHS, reason="HiGHS oracle unavailable")
+class TestDualConvention:
+    """LPResult documents one dual convention (HiGHS shadow prices, y=dz/db).
+
+    Ipopt-style multipliers enter the Lagrangian as f + mult_g^T g and are the
+    negation of that; lp_pounce flips them. On LPs with a *unique* dual
+    solution the two backends must agree exactly.
+    """
+
+    def test_equality_dual_matches_highs(self):
+        # min x1+x2 s.t. x1+x2 = 5: unique dual y = 1.
+        kw = dict(c=np.array([1.0, 1.0]), A_eq=np.array([[1.0, 1.0]]), b_eq=np.array([5.0]))
+        rp = solve_lp(**kw)
+        rh = solve_lp_highs(**kw)
+        np.testing.assert_allclose(rp.dual_values, rh.dual_values, atol=1e-5)
+
+    def test_inequality_duals_match_highs(self):
+        # min -3x1-5x2 s.t. x1<=4, 2x2<=12, 3x1+5x2<=25: nondegenerate optimum
+        # at x=(5/3, 4) with rows 2,3 active -> unique duals.
+        kw = dict(
+            c=np.array([-3.0, -5.0]),
+            A_ub=np.array([[1.0, 0.0], [0.0, 2.0], [3.0, 5.0]]),
+            b_ub=np.array([4.0, 12.0, 25.0]),
+        )
+        rp = solve_lp(**kw)
+        rh = solve_lp_highs(**kw)
+        np.testing.assert_allclose(rp.dual_values, rh.dual_values, atol=1e-5)
+        np.testing.assert_allclose(rp.reduced_costs, rh.reduced_costs, atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
 # 12. Sparse matrix support
 # ---------------------------------------------------------------------------
 class TestSparse:

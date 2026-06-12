@@ -2083,7 +2083,7 @@ def solve_model(
     _pure_continuous_force_spatial = False
     if problem_class is not None:
         if problem_class == ProblemClass.LP:
-            return _solve_lp(model, t_start, time_limit)
+            return _solve_lp(model, t_start, time_limit, prefer_pounce=nlp_solver == "pounce")
         elif problem_class == ProblemClass.QP:
             if _pure_continuous:
                 if _pure_continuous_convexity_known and _pure_continuous_is_convex:
@@ -5317,17 +5317,28 @@ def _decompose_eq_slack_form(
     return A_ub, b_ub, A_eq, b_eq
 
 
-def _solve_lp(model: Model, t_start: float, time_limit: float | None = None) -> SolveResult:
-    """Solve an LP, preferring HiGHS and falling back to the pure-JAX LP IPM.
+def _solve_lp(
+    model: Model,
+    t_start: float,
+    time_limit: float | None = None,
+    prefer_pounce: bool = False,
+) -> SolveResult:
+    """Solve an LP through the first available engine, then the JAX LP IPM.
 
-    The pure-JAX IPM struggles on problems whose declared bounds exceed
-    ~1e15 (it returns NaN via Newton blow-up on unbounded variables); HiGHS
-    handles unbounded columns natively and is also usually faster. We try
-    HiGHS first and fall back to the IPM only when HiGHS is unavailable.
+    Engine order is HiGHS -> POUNCE -> JAX IPM, or POUNCE -> HiGHS -> JAX IPM
+    when ``prefer_pounce`` is set (the user passed ``nlp_solver="pounce"``,
+    i.e. asked for POUNCE everywhere; roadmap P0.4). The pure-JAX IPM
+    struggles on problems whose declared bounds exceed ~1e15 (it returns NaN
+    via Newton blow-up on unbounded variables); HiGHS and POUNCE both handle
+    unbounded columns natively, so the IPM is the last resort.
     """
-    highs_result = _solve_lp_highs(model, t_start, time_limit)
-    if highs_result is not None:
-        return highs_result
+    engines = [_solve_lp_highs, _solve_lp_pounce]
+    if prefer_pounce:
+        engines.reverse()
+    for engine in engines:
+        result = engine(model, t_start, time_limit)
+        if result is not None:
+            return result
 
     from discopt._jax.lp_ipm import lp_ipm_solve
     from discopt._jax.problem_classifier import extract_lp_data
@@ -5380,12 +5391,41 @@ def _solve_lp_highs(
     time_limit: float | None = None,
 ) -> SolveResult | None:
     """Solve an LP using HiGHS. Returns None when HiGHS is unavailable or
-    the HiGHS wrapper fails, so the caller can fall back to the JAX IPM."""
+    the HiGHS wrapper fails, so the caller can fall back to another engine."""
     try:
         from discopt.solvers.lp_highs import solve_lp as _highs_solve_lp
     except ImportError:
         return None
+    return _solve_lp_matrix(model, t_start, time_limit, _highs_solve_lp, "HiGHS")
 
+
+def _solve_lp_pounce(
+    model: Model,
+    t_start: float,
+    time_limit: float | None = None,
+) -> SolveResult | None:
+    """Solve an LP using POUNCE (pure-Rust IPM). Returns None when POUNCE is
+    unavailable or fails, so the caller can fall back to another engine."""
+    from discopt.solvers.lp_pounce import POUNCE_AVAILABLE
+    from discopt.solvers.lp_pounce import solve_lp as _pounce_solve_lp
+
+    if not POUNCE_AVAILABLE:
+        return None
+    return _solve_lp_matrix(model, t_start, time_limit, _pounce_solve_lp, "POUNCE")
+
+
+def _solve_lp_matrix(
+    model: Model,
+    t_start: float,
+    time_limit: float | None,
+    solve_lp_fn,
+    engine: str,
+) -> SolveResult | None:
+    """Solve a pure LP through a matrix-form ``solve_lp`` backend.
+
+    ``solve_lp_fn`` must follow the shared LP contract (lp_highs / lp_pounce):
+    same signature, same ``LPResult`` with HiGHS-convention duals.
+    """
     from discopt._jax.problem_classifier import extract_lp_data
     from discopt.modeling.core import ObjectiveSense
     from discopt.solvers import SolveStatus
@@ -5407,7 +5447,7 @@ def _solve_lp_highs(
     A_ub, b_ub, A_eq, b_eq = _decompose_eq_slack_form(A_eq_full, b_eq_full, n_orig, n_slack)
 
     try:
-        result = _highs_solve_lp(
+        result = solve_lp_fn(
             c=np.asarray(lp_data.c[:n_orig]),
             A_ub=A_ub,
             b_ub=b_ub,
@@ -5417,7 +5457,7 @@ def _solve_lp_highs(
             time_limit=time_limit,
         )
     except Exception as e:
-        logger.debug("HiGHS LP solve failed: %s", e)
+        logger.debug("%s LP solve failed: %s", engine, e)
         return None
 
     wall_time = time.perf_counter() - t_start

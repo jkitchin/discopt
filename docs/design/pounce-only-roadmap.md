@@ -273,12 +273,31 @@ is a trustworthy LP/dual engine. Work breakdown:
     unchanged) that decertifies the gap, plus a POUNCE polish-retry
     (re-solve at higher `max_iter`) before giving up. This spans both B&B
     loops (`solve_model` and `_solve_nlp_bb`) and is its own focused change.
-- **P0.4 Batch LP/QP.** Extend the `solve_nlp_batch` path to LP/QP node
-  waves; extend `nlp_backend.py` so the seam dispatches LP/QP as well as
-  NLP, keeping call sites engine-agnostic. Note: the published
-  `pounce-solver` wheel (0.4.0) exposes `pounce.Problem`/`.solve` but **not**
-  `solve_nlp_batch`, so `_solve_batch_pounce` currently falls back to serial
-  per-node solves; batch LP/QP depends on that POUNCE API landing.
+- **P0.4 Batch LP/QP + LP seam.** Extend the `solve_nlp_batch` path to LP/QP
+  node waves; extend the backend seam so LP/QP dispatch is engine-agnostic.
+  Note: the published `pounce-solver` wheel (0.4.0) exposes
+  `pounce.Problem`/`.solve` but **not** `solve_nlp_batch`, so
+  `_solve_batch_pounce` currently falls back to serial per-node solves;
+  batch LP/QP depends on that POUNCE API landing.
+
+  *Status / implementation notes:*
+  - **LP seam — DONE.** `_solve_lp` now tries matrix-form engines in order
+    HiGHS → POUNCE → JAX IPM, flipped to POUNCE-first on
+    `nlp_solver="pounce"` (the user asked for POUNCE everywhere). The shared
+    model→matrix→SolveResult body is factored into `_solve_lp_matrix`;
+    `_solve_lp_highs` / `_solve_lp_pounce` are thin engine wrappers. Default
+    behavior unchanged (HiGHS first; `nlp_solver` defaults to `"ipm"` with no
+    auto-resolution). Routing pinned by `test_lp_backend_seam.py`.
+  - **Dual convention reconciled.** Ipopt-style `mult_g` enters the
+    Lagrangian as `f + mult_g^T g` — the negation of the HiGHS shadow-price
+    convention `LPResult` documents. `lp_pounce` negates row duals so both
+    backends agree (exact parity tested on unique-dual LPs;
+    `TestDualConvention`). Reduced costs (`mult_x_L - mult_x_U = c - A^T y`)
+    already matched. On dual-degenerate LPs the IPM returns an interior
+    point of the dual optimal face — valid, but not simplex's vertex dual.
+  - **Open:** QP seam (`_solve_qp` still HiGHS→JAX only), batch LP/QP waves
+    (blocked on POUNCE `solve_nlp_batch`), OBBT/McCormick-LP consumers
+    (Phase 4).
 - **P0.5 HiGHS as CI oracle.** From this phase on, cross-check every POUNCE
   LP/QP result against HiGHS in CI (test-only dependency). HiGHS stops
   being a runtime engine long before it stops being a correctness guard.
