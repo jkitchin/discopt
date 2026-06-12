@@ -244,11 +244,14 @@ is a trustworthy LP/dual engine. Work breakdown:
     internal LP consumers (OBBT, masters) that call `lp_pounce.solve_lp`
     directly. Tests: `TestInfeasibilityCertificate`,
     `TestInfeasibilityCertificateExposed`.
-  - **Open: serial POUNCE node retry.** `_solve_node_nlp_pounce` does a single
-    solve; on local infeasibility it should retry from alternative starts
-    (the batch path already multistarts nonconvex nodes) to avoid losing
-    nodes / decertifying unnecessarily. Robustness, not soundness — the only
-    remaining P0.2 item, separate from the (now complete) certificate work.
+  - **Serial POUNCE node retry — DONE.** `_solve_node_nlp_pounce` now retries
+    a failed solve (error / divergence / local infeasibility) from up to two
+    alternative deterministic starts (box midpoint, then an off-center point
+    at lb + 0.382·width — no RNG, determinism by default) before reporting
+    the failure. Without this a single bad start cost the node its bound and
+    decertified the gap. Tests: `test_p03_trust_gate.py::TestSerialNodeRetry`
+    (retry on failure, three-attempts-then-give-up, no retry on success).
+    P0.2 is complete.
 - **P0.3 Bound trust-gate.** Use a POUNCE objective as a valid dual bound,
   and its multipliers for reduced-cost fixing, **only** when the solve
   converged to tolerance. An unconverged IPM bound used for fathoming can
@@ -288,9 +291,16 @@ is a trustworthy LP/dual engine. Work breakdown:
     `tree_manager.rs`): `-inf` would corrupt the incumbent, a sentinel would
     prune a node we failed to bound. The `trusted` mask sidesteps this by
     leaving bound values intact and only decertifying the gap.
-  - **Open (optional):** a POUNCE polish-retry (re-solve a stalled convex
-    node at higher `max_iter` before marking it untrusted) would recover some
-    nodes that currently just decertify — robustness, not soundness.
+  - **POUNCE polish-retry — DONE.** A convex node stalling at
+    `ITERATION_LIMIT` now gets one boosted re-solve (max(3×`max_iter`, 3000)
+    iterations, warm-started from the stalled iterate) before trust is
+    withheld: in `_solve_node_nlp_pounce` (serial, via `convex=` forwarded
+    from `_solve_node_nlp`) and in `_solve_batch_pounce`'s reduce loop and
+    serial fallback. Only an OPTIMAL (KKT) polish restores the bound/trust;
+    otherwise the node decertifies as before. Recovers nodes that previously
+    just decertified — e.g. a `max_iter=1` stall now returns the true
+    optimum with `trusted=True`
+    (`TestTrustedMaskPOUNCE::test_stalled_convex_is_rescued_by_polish_retry`).
 - **P0.4 Batch LP/QP + LP seam.** Extend the `solve_nlp_batch` path to LP/QP
   node waves; extend the backend seam so LP/QP dispatch is engine-agnostic.
   Note: the published `pounce-solver` wheel (0.4.0) exposes

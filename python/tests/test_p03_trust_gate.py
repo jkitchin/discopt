@@ -109,7 +109,29 @@ class TestTrustedMaskIPM:
 
 
 class TestTrustedMaskPOUNCE:
-    def test_non_kkt_convex_is_untrusted(self):
+    def test_stalled_convex_is_rescued_by_polish_retry(self):
+        """A max_iter=1 stall is no longer just untrusted: the boosted polish
+        re-solve (P0.3 polish-retry) reaches KKT, so the node keeps a valid,
+        trusted bound (the true optimum here is 0)."""
+        ev, cb, _, _ = _convex_eval()
+        _, lbs, _, _, trusted = _solve_batch_pounce(
+            ev, _LB, _UB, [0, 1], ev.n_variables, cb, {"max_iter": 1}, convex=True
+        )
+        assert trusted.all()
+        assert np.allclose(lbs, 0.0, atol=1e-4)
+
+    def test_unpolishable_convex_is_untrusted(self, monkeypatch):
+        """When even the polish re-solve cannot reach KKT, trust is withheld."""
+        from discopt.solvers import NLPResult
+
+        def stalled(evaluator, x0, node_lb, node_ub, constraint_bounds, options, convex=False):
+            return NLPResult(
+                status=SolveStatus.ITERATION_LIMIT,
+                x=np.asarray(x0, dtype=np.float64),
+                objective=1.234,
+            )
+
+        monkeypatch.setattr(S, "_solve_node_nlp_pounce", stalled)
         ev, cb, _, _ = _convex_eval()
         *_, trusted = _solve_batch_pounce(
             ev, _LB, _UB, [0, 1], ev.n_variables, cb, {"max_iter": 1}, convex=True
@@ -129,6 +151,52 @@ class TestTrustedMaskPOUNCE:
             ev, _LB, _UB, [0, 1], ev.n_variables, cb, {"max_iter": 1}, convex=False
         )
         assert trusted.all()
+
+
+# ---------------------------------------------------------------------------
+# Serial-node retry: failed solves retry from alternative starts (P0.2)
+# ---------------------------------------------------------------------------
+class TestSerialNodeRetry:
+    def _run(self, monkeypatch, outcomes):
+        """Drive _solve_node_nlp_pounce with a scripted solve_nlp sequence."""
+        import discopt.solvers.nlp_pounce as nlp_pounce
+        from discopt.solvers import NLPResult
+
+        ev, cb, _, _ = _convex_eval()
+        starts: list[np.ndarray] = []
+
+        def scripted(evaluator, x0, constraint_bounds=None, options=None):
+            starts.append(np.asarray(x0, dtype=np.float64).copy())
+            status = outcomes[min(len(starts), len(outcomes)) - 1]
+            obj = 0.5 if status == SolveStatus.OPTIMAL else np.nan
+            return NLPResult(status=status, x=np.asarray(x0, dtype=np.float64), objective=obj)
+
+        monkeypatch.setattr(nlp_pounce, "solve_nlp", scripted)
+        x0 = np.array([4.0, 4.0])
+        res = S._solve_node_nlp_pounce(
+            ev, x0, np.array([-5.0, -5.0]), np.array([5.0, 5.0]), cb, {"max_iter": 100}
+        )
+        return res, starts
+
+    def test_failed_solve_retries_alternative_starts(self, monkeypatch):
+        """ERROR on the warm start -> retry from the midpoint succeeds."""
+        res, starts = self._run(monkeypatch, [SolveStatus.ERROR, SolveStatus.OPTIMAL])
+        assert res.status == SolveStatus.OPTIMAL
+        assert len(starts) == 2
+        assert not np.allclose(starts[0], starts[1])  # genuinely different start
+
+    def test_all_starts_failing_reports_failure(self, monkeypatch):
+        """If every start fails, the failure is reported (3 attempts max)."""
+        res, starts = self._run(
+            monkeypatch, [SolveStatus.ERROR, SolveStatus.ERROR, SolveStatus.ERROR]
+        )
+        assert res.status == SolveStatus.ERROR
+        assert len(starts) == 3  # warm + midpoint + off-center, then give up
+
+    def test_successful_solve_does_not_retry(self, monkeypatch):
+        res, starts = self._run(monkeypatch, [SolveStatus.OPTIMAL])
+        assert res.status == SolveStatus.OPTIMAL
+        assert len(starts) == 1
 
 
 # ---------------------------------------------------------------------------

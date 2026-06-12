@@ -2598,21 +2598,19 @@ def solve_model(
                     )
                 )
             else:
-                result_ids, result_lbs, result_sols, result_feas, _batch_trusted = (
-                    _solve_batch_ipm(
-                        _active_evaluator,
-                        batch_lb,
-                        batch_ub,
-                        batch_ids,
-                        n_vars,
-                        _active_cb,
-                        opts,
-                        _active_gl,
-                        _active_gu,
-                        batch_psols=batch_psols,
-                        multistart=True,  # IPM needs multistart even for convex models
-                        convex=_model_is_convex,
-                    )
+                result_ids, result_lbs, result_sols, result_feas, _batch_trusted = _solve_batch_ipm(
+                    _active_evaluator,
+                    batch_lb,
+                    batch_ub,
+                    batch_ids,
+                    n_vars,
+                    _active_cb,
+                    opts,
+                    _active_gl,
+                    _active_gu,
+                    batch_psols=batch_psols,
+                    multistart=True,  # IPM needs multistart even for convex models
+                    convex=_model_is_convex,
                 )
             # A convex node whose relaxation objective is not KKT-valid (and
             # could not be polished) is not a valid lower bound; decertify the
@@ -3938,21 +3936,19 @@ def _solve_nlp_bb(
                     )
                 )
             else:
-                result_ids, result_lbs, result_sols, result_feas, _batch_trusted = (
-                    _solve_batch_ipm(
-                        evaluator,
-                        batch_lb,
-                        batch_ub,
-                        batch_ids,
-                        n_vars,
-                        constraint_bounds,
-                        opts,
-                        g_l_jax,
-                        g_u_jax,
-                        batch_psols=batch_psols,
-                        multistart=True,  # IPM needs multistart even for convex models
-                        convex=_model_is_convex,
-                    )
+                result_ids, result_lbs, result_sols, result_feas, _batch_trusted = _solve_batch_ipm(
+                    evaluator,
+                    batch_lb,
+                    batch_ub,
+                    batch_ids,
+                    n_vars,
+                    constraint_bounds,
+                    opts,
+                    g_l_jax,
+                    g_u_jax,
+                    batch_psols=batch_psols,
+                    multistart=True,  # IPM needs multistart even for convex models
+                    convex=_model_is_convex,
                 )
             # Convex MINLP: the NLP objective is the node lower bound. A node
             # whose relaxation did not reach KKT (and could not be polished) is
@@ -4379,7 +4375,9 @@ def _solve_node_nlp(
                 pass  # If evaluation fails, fall through to NLP solver
 
     if nlp_solver == "pounce":
-        return _solve_node_nlp_pounce(evaluator, x0, node_lb, node_ub, constraint_bounds, options)
+        return _solve_node_nlp_pounce(
+            evaluator, x0, node_lb, node_ub, constraint_bounds, options, convex=convex
+        )
     if nlp_solver == "ipm":
         # JAX IPM requires JAX-compiled _obj_fn/_cons_fn; fall back to ipopt
         # for evaluators without these attributes.
@@ -4400,8 +4398,22 @@ def _solve_node_nlp_pounce(
     node_ub: np.ndarray,
     constraint_bounds: Optional[list[tuple[float, float]]],
     options: dict,
+    convex: bool = False,
 ):
-    """Solve node NLP with POUNCE (pure-Rust Ipopt port)."""
+    """Solve node NLP with POUNCE (pure-Rust Ipopt port).
+
+    Robustness layer (roadmap P0.2/P0.3):
+
+    - A failed solve (error / divergence / *local* infeasibility — which on a
+      nonconvex node is not an infeasibility proof) is retried from up to two
+      alternative deterministic starts (box midpoint, then an off-center
+      point) before the failure is reported. Without this a single bad start
+      costs the node its bound and decertifies the gap.
+    - When ``convex=True`` and the result is ITERATION_LIMIT (non-KKT, so the
+      objective is not a valid lower bound), one polish re-solve at a boosted
+      iteration budget is attempted from the stalled iterate; only an OPTIMAL
+      polish restores trust in the bound.
+    """
     from discopt.solvers import NLPResult
     from discopt.solvers.nlp_pounce import solve_nlp as solve_nlp_pounce
 
@@ -4416,16 +4428,51 @@ def _solve_node_nlp_pounce(
         caller_limit = 30.0
     opts["max_wall_time"] = min(30.0, caller_limit)
 
-    try:
-        return solve_nlp_pounce(
-            proxy,  # type: ignore[arg-type]
-            x0,
-            constraint_bounds=constraint_bounds,
-            options=opts,
-        )
-    except Exception as e:
-        logger.debug("POUNCE solver failed: %s", e)
-        return NLPResult(status=SolveStatus.ERROR, x=x0, objective=_INFEASIBILITY_SENTINEL)
+    def _attempt(start: np.ndarray, attempt_opts: dict):
+        try:
+            return solve_nlp_pounce(
+                proxy,  # type: ignore[arg-type]
+                start,
+                constraint_bounds=constraint_bounds,
+                options=attempt_opts,
+            )
+        except Exception as e:
+            logger.debug("POUNCE solver failed: %s", e)
+            return NLPResult(status=SolveStatus.ERROR, x=start, objective=_INFEASIBILITY_SENTINEL)
+
+    lb_c = np.clip(np.asarray(node_lb, dtype=np.float64), -_SPC, _SPC)
+    ub_c = np.clip(np.asarray(node_ub, dtype=np.float64), -_SPC, _SPC)
+    midpoint = 0.5 * (lb_c + ub_c)
+    # Deterministic off-center fallback start (no RNG: determinism by default).
+    off_center = lb_c + 0.382 * (ub_c - lb_c)
+
+    result = _attempt(np.asarray(x0, dtype=np.float64), opts)
+    if result.status not in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
+        for alt in (midpoint, off_center):
+            if np.allclose(alt, x0, atol=1e-12):
+                continue
+            retry = _attempt(alt, opts)
+            if retry.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
+                result = retry
+                break
+
+    # Convex polish-retry: a non-KKT objective is not a valid LB; one boosted
+    # re-solve from the stalled iterate often reaches KKT (trusted again).
+    if convex and result.status == SolveStatus.ITERATION_LIMIT:
+        polish_opts = dict(opts)
+        polish_opts["max_iter"] = max(3 * int(opts.get("max_iter", 1000) or 1000), 3000)
+        start = np.asarray(result.x, dtype=np.float64)
+        if not np.all(np.isfinite(start)):
+            start = midpoint
+        polished = _attempt(np.clip(start, node_lb, node_ub), polish_opts)
+        if (
+            polished.status == SolveStatus.OPTIMAL
+            and polished.objective is not None
+            and np.isfinite(polished.objective)
+        ):
+            return polished
+
+    return result
 
 
 def _solve_node_nlp_ipm(
@@ -4951,7 +4998,13 @@ def _solve_batch_pounce(
         for i in range(n_batch):
             node_lb, node_ub = node_bounds[i]
             res = _solve_node_nlp_pounce(
-                evaluator, x0s[i * n_starts], node_lb, node_ub, constraint_bounds, options
+                evaluator,
+                x0s[i * n_starts],
+                node_lb,
+                node_ub,
+                constraint_bounds,
+                options,
+                convex=convex,
             )
             result_sols[i] = np.asarray(res.x, dtype=np.float64)
             if res.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
@@ -4987,8 +5040,27 @@ def _solve_batch_pounce(
         if best_obj is not None:
             result_lbs[i] = best_obj
             # A non-KKT (ITERATION_LIMIT) convex objective is not a valid LB.
+            # Try one boosted polish re-solve from the stalled iterate before
+            # giving up trust (P0.3 polish-retry); only OPTIMAL restores it.
             if convex and best_status != SolveStatus.OPTIMAL:
-                trusted[i] = False
+                node_lb_i, node_ub_i = node_bounds[i]
+                polish = _solve_node_nlp_pounce(
+                    evaluator,
+                    np.clip(best_x, node_lb_i, node_ub_i),
+                    node_lb_i,
+                    node_ub_i,
+                    constraint_bounds,
+                    {**options, "max_iter": max(3 * int(options.get("max_iter") or 1000), 3000)},
+                )
+                if (
+                    polish.status == SolveStatus.OPTIMAL
+                    and polish.objective is not None
+                    and np.isfinite(polish.objective)
+                ):
+                    result_lbs[i] = float(polish.objective)
+                    result_sols[i] = np.asarray(polish.x, dtype=np.float64)
+                else:
+                    trusted[i] = False
 
     return result_ids, result_lbs, result_sols, result_feas, trusted
 
