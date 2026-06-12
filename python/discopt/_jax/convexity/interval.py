@@ -80,15 +80,36 @@ class Interval:
 
     def __post_init__(self) -> None:
         # Frozen dataclass: use object.__setattr__ to normalize inputs.
-        lo = np.asarray(self.lo, dtype=np.float64)
-        hi = np.asarray(self.hi, dtype=np.float64)
-        # Broadcast to a common shape once so downstream ops can assume
-        # shape agreement without re-broadcasting every time.
-        lo, hi = np.broadcast_arrays(lo, hi)
-        if np.any(lo > hi):
+        #
+        # This constructor is extremely hot — the interval AD / monotonicity
+        # walkers build millions of tiny (mostly 0-d) intervals. The general
+        # ``np.broadcast_arrays`` + ``np.ascontiguousarray`` + ``np.any`` path
+        # dominates those walks, so the common case (both endpoints already
+        # ``float64`` ndarrays of identical shape, which every internal
+        # arithmetic result satisfies) takes a fast path that skips the
+        # broadcasting machinery entirely. Soundness is unchanged: the
+        # ``lo <= hi`` invariant is still validated.
+        lo = self.lo
+        hi = self.hi
+        if type(lo) is not np.ndarray or lo.dtype != np.float64:
+            lo = np.asarray(lo, dtype=np.float64)
+        if type(hi) is not np.ndarray or hi.dtype != np.float64:
+            hi = np.asarray(hi, dtype=np.float64)
+        if lo.shape != hi.shape:
+            # Differing shapes: broadcast to a common shape once and force
+            # contiguity so downstream ops can assume shape agreement.
+            lo, hi = np.broadcast_arrays(lo, hi)
+            lo = np.ascontiguousarray(lo)
+            hi = np.ascontiguousarray(hi)
+        if lo.ndim == 0:
+            # Scalar fast path: a direct comparison avoids the ``np.any``
+            # ufunc-reduction wrapper that otherwise shows up by the million.
+            if lo > hi:
+                raise ValueError(f"Interval lo > hi: lo={lo}, hi={hi}")
+        elif np.any(lo > hi):
             raise ValueError(f"Interval lo > hi: lo={lo}, hi={hi}")
-        object.__setattr__(self, "lo", np.ascontiguousarray(lo))
-        object.__setattr__(self, "hi", np.ascontiguousarray(hi))
+        object.__setattr__(self, "lo", lo)
+        object.__setattr__(self, "hi", hi)
 
     # ------------------------------------------------------------------
     # Construction

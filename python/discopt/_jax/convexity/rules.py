@@ -351,6 +351,15 @@ def _classify_product(
         s = 0 if val == 0 else (1 if val > 0 else -1)
         return ExprInfo(scale(left.curvature, s), prod_sign)
 
+    # Square of an affine expression: ``e * e`` with ``e`` affine is convex
+    # and nonnegative. Recognising it here (the two operands are the *same*
+    # node, so ``expr.left is expr.right``) is both sound and a large speed
+    # win: it keeps ``x * x`` out of the whole-expression quadratic fallback,
+    # which would otherwise build a dense n×n form and run an O(n³)
+    # eigendecomposition on every such product node.
+    if expr.left is expr.right and left.curvature == Curvature.AFFINE:
+        return ExprInfo(Curvature.CONVEX, Sign.NONNEG)
+
     # Special product patterns: perspective of exp and weighted
     # geometric mean. See :mod:`patterns` for the preconditions.
     if model is not None:
