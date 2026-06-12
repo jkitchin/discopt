@@ -215,6 +215,109 @@ def _affine_range_1d(alpha: float, beta: float, lb: float, ub: float) -> tuple[f
     return float(lo), float(hi)
 
 
+def _box_bounds(model: Model) -> tuple[np.ndarray, np.ndarray]:
+    """Per-scalar-slot lower/upper bound vectors over all model variables."""
+    los: list[np.ndarray] = []
+    his: list[np.ndarray] = []
+    for v in model._variables:
+        lb = np.asarray(v.lb, dtype=np.float64).ravel()
+        ub = np.asarray(v.ub, dtype=np.float64).ravel()
+        if lb.size == 1 and v.size != 1:
+            lb = np.full(v.size, float(lb), dtype=np.float64)
+        if ub.size == 1 and v.size != 1:
+            ub = np.full(v.size, float(ub), dtype=np.float64)
+        los.append(lb)
+        his.append(ub)
+    if not los:
+        return np.zeros(0), np.zeros(0)
+    return np.concatenate(los), np.concatenate(his)
+
+
+def _affine_lower_bound(expr: Expression, model: Model) -> Optional[float]:
+    """Rigorous lower bound of an affine ``expr`` over the declared box.
+
+    Returns ``None`` when ``expr`` is not affine-extractable or the bound is
+    not finite (an unbounded contributing variable). Unlike
+    :func:`_has_positive_lower_bound` this evaluates the affine form against the
+    box, so ``0.001 + 0.999 * x18`` with ``x18 in [0, 1]`` correctly yields
+    ``0.001`` even though the ``x18`` term alone is only non-negative.
+    """
+    from discopt._jax.problem_classifier import _extract_linear_coefficients
+
+    n = _total_scalar_variables(model)
+    try:
+        vec, const = _extract_linear_coefficients(expr, model, n)
+    except Exception:
+        return None
+    vec = np.asarray(vec, dtype=np.float64).ravel()
+    lo_box, hi_box = _box_bounds(model)
+    if vec.size != lo_box.size:
+        return None
+    # min of c·x = Σ (c>0 ? c·lb : c·ub); guard infinities that actually matter.
+    contrib = np.where(vec >= 0.0, vec * lo_box, vec * hi_box)
+    if not np.all(np.isfinite(contrib)):
+        return None
+    return float(const) + float(np.sum(contrib))
+
+
+def _affine_strictly_positive(expr: Expression, model: Model) -> bool:
+    """True when an affine ``expr`` has a proven strictly-positive lower bound."""
+    lb = _affine_lower_bound(expr, model)
+    return lb is not None and lb > 1e-12
+
+
+def _expr_struct_eq(a: Expression, b: Expression) -> bool:
+    """Structural equality for the small affine shapes the recognizers match.
+
+    ``from_nl`` reconstruction rebuilds shared subexpressions as distinct nodes,
+    so a denominator appearing in several terms is not object-identical; this
+    compares by structure (constants by value, variables by name).
+    """
+    if a is b:
+        return True
+    if isinstance(a, Constant) and isinstance(b, Constant):
+        va = np.asarray(a.value)
+        vb = np.asarray(b.value)
+        return va.shape == vb.shape and bool(np.allclose(va, vb))
+    if isinstance(a, Variable) and isinstance(b, Variable):
+        return a.name == b.name
+    if isinstance(a, IndexExpression) and isinstance(b, IndexExpression):
+        return _expr_struct_eq(a.base, b.base) and a.index == b.index
+    if isinstance(a, Parameter) and isinstance(b, Parameter):
+        return a is b or a.name == b.name
+    if isinstance(a, BinaryOp) and isinstance(b, BinaryOp):
+        return (
+            a.op == b.op and _expr_struct_eq(a.left, b.left) and _expr_struct_eq(a.right, b.right)
+        )
+    if isinstance(a, UnaryOp) and isinstance(b, UnaryOp):
+        return a.op == b.op and _expr_struct_eq(a.operand, b.operand)
+    return False
+
+
+def _split_const_mul(expr: Expression) -> tuple[float, Optional[Expression]]:
+    """Factor scalar constants out of a product: ``expr == const * core``.
+
+    ``core`` is ``None`` when every factor is a scalar constant.
+    """
+    factors: list[Expression] = []
+    _flatten_product(expr, factors)
+    const = 1.0
+    core_factors: list[Expression] = []
+    for f in factors:
+        if isinstance(f, (Constant, Parameter)):
+            v = np.asarray(f.value)
+            if v.ndim == 0:
+                const *= float(v)
+                continue
+        core_factors.append(f)
+    if not core_factors:
+        return const, None
+    core = core_factors[0]
+    for f in core_factors[1:]:
+        core = BinaryOp("*", core, f)
+    return const, core
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Sign-on-domain checks
 # ──────────────────────────────────────────────────────────────────────
@@ -420,9 +523,17 @@ def classify_product_pattern(
 
     * ``y * exp(x / y)`` with ``y > 0`` and ``x`` affine — perspective of
       ``exp``: CONVEX.
-    * ``prod_i base_i ** a_i`` with every base affine and nonneg,
-      ``a_i in [0, 1]``, ``sum a_i == 1`` — weighted geometric mean:
-      CONCAVE.
+    * **Signomial monomial** ``c * prod_i base_i ** a_i`` with every base
+      affine, classified by exponent sign pattern on the positive orthant
+      (Boyd & Vandenberghe §3.1.5):
+
+        - all ``a_i >= 0`` and ``sum a_i <= 1`` with nonneg bases — a
+          generalized weighted geometric mean: CONCAVE.
+        - all ``a_i <= 0`` with strictly-positive bases: CONVEX.
+        - exactly one ``a_k >= 1``, every other ``a_i <= 0``, ``sum a_i >= 1``,
+          strictly-positive bases: CONVEX.
+
+      A negative leading constant ``c`` flips CONVEX <-> CONCAVE.
     """
     # Perspective of exp: y * exp(x / y), y > 0.
     for scale_expr, exp_expr in ((expr.left, expr.right), (expr.right, expr.left)):
@@ -442,10 +553,15 @@ def classify_product_pattern(
                 ):
                     return Curvature.CONVEX
 
-    # Weighted geometric mean: prod_i x_i^{a_i}, each x_i affine & nonneg,
-    # a_i in [0, 1], sum a_i = 1.
+    # Signomial monomial: c * prod_i base_i ** a_i, each base affine.
+    # Peel the leading scalar constant, then classify the product of powers
+    # by its exponent sign pattern (see the function docstring). A negative
+    # constant flips the curvature.
+    const, core = _split_const_mul(expr)
+    if core is None or abs(const) <= 1e-12:
+        return None
     factors: list[Expression] = []
-    _flatten_product(expr, factors)
+    _flatten_product(core, factors)
     if len(factors) < 2:
         return None
 
@@ -455,17 +571,39 @@ def classify_product_pattern(
         if extracted is None:
             return None
         base, exponent = extracted
-        if exponent < -1e-10 or exponent > 1.0 + 1e-10:
-            return None
         if classify_expr(base, model, cache) != Curvature.AFFINE:
-            return None
-        if not _is_nonneg_domain(base, model):
             return None
         parsed.append((base, exponent))
 
-    if abs(sum(exp for _, exp in parsed) - 1.0) <= 1e-10:
-        return Curvature.CONCAVE
-    return None
+    exps = [exp for _, exp in parsed]
+    bases = [base for base, _ in parsed]
+    total = sum(exps)
+    tol = 1e-10
+
+    base_curv: Optional[Curvature] = None
+    if (
+        all(exp >= -tol for exp in exps)
+        and total <= 1.0 + tol
+        and all(_is_nonneg_domain(base, model) for base in bases)
+    ):
+        # Generalized weighted geometric mean — concave on the nonneg orthant.
+        base_curv = Curvature.CONCAVE
+    elif all(_affine_strictly_positive(base, model) for base in bases):
+        if all(exp <= tol for exp in exps):
+            # All exponents non-positive — convex on the positive orthant.
+            base_curv = Curvature.CONVEX
+        else:
+            big = [exp for exp in exps if exp >= 1.0 - tol]
+            rest_nonpos = all(exp <= tol for exp in exps if exp < 1.0 - tol)
+            if len(big) == 1 and rest_nonpos and total >= 1.0 - tol:
+                # One exponent >= 1, the rest <= 0, total >= 1 — convex.
+                base_curv = Curvature.CONVEX
+
+    if base_curv is None:
+        return None
+    if const < 0:
+        return Curvature.CONCAVE if base_curv == Curvature.CONVEX else Curvature.CONVEX
+    return base_curv
 
 
 def classify_division_pattern(
@@ -487,10 +625,134 @@ def classify_division_pattern(
 def classify_sqrt_pattern(
     arg: Expression,
     model: Model,
+    classify_expr=None,  # noqa: ANN001 — forward reference avoids circular import
+    cache: Optional[dict] = None,
 ) -> Optional[Curvature]:
-    """Return CONVEX for ``sqrt(x^T Q x)`` with Q PSD (Euclidean-style norm)."""
+    """Return curvature for recognised ``sqrt(arg)`` shapes, else None.
+
+    * ``sqrt(x^T Q x)`` with Q PSD — Euclidean-style norm: CONVEX (even though
+      the inner quadratic is itself convex, ``concave ∘ convex`` would fail DCP
+      composition, so the norm is recognised directly).
+    * ``sqrt(prod_i base_i ** p_i)`` with every ``base_i`` affine and nonneg on
+      the box, ``p_i >= 0`` and ``sum_i p_i <= 2`` — a weighted geometric mean
+      ``prod_i base_i ** (p_i / 2)`` whose halved exponents are nonneg and sum
+      to ``<= 1``: CONCAVE. Covers ``sqrt(x_i * x_j)`` geometric-mean concavity
+      (MINLPLib ``tls*``). Requires ``classify_expr`` / ``cache`` to verify the
+      bases are affine; skipped when they are not supplied.
+    """
     if is_homogeneous_psd_quadratic(arg, model):
         return Curvature.CONVEX
+
+    # Geometric-mean concavity: sqrt of a product of nonneg affine powers.
+    # sqrt(prod base_i^{p_i}) = prod base_i^{p_i/2}; with weights w_i = p_i/2
+    # >= 0 and sum w_i <= 1 over affine nonneg bases, the product of powers is
+    # concave on the nonneg orthant (Boyd & Vandenberghe §3.1.5).
+    if classify_expr is not None:
+        factors: list[Expression] = []
+        _flatten_product(arg, factors)
+        if len(factors) >= 1:
+            total = 0.0
+            ok = True
+            for factor in factors:
+                extracted = _extract_power_factor(factor)
+                if extracted is None:
+                    ok = False
+                    break
+                base, exponent = extracted
+                if exponent < -1e-10:
+                    ok = False
+                    break
+                if classify_expr(base, model, cache) != Curvature.AFFINE:
+                    ok = False
+                    break
+                if not _is_nonneg_domain(base, model):
+                    ok = False
+                    break
+                total += exponent
+            if ok and total > 1e-10 and total <= 2.0 + 1e-10:
+                return Curvature.CONCAVE
+    return None
+
+
+def classify_perspective_product(
+    expr: BinaryOp,
+    model: Model,
+    classify_expr,  # noqa: ANN001 — forward reference avoids circular import
+    cache: dict,
+) -> Optional[Curvature]:
+    """Return CONVEX for a perspective product ``P * L`` with ``L`` affine > 0.
+
+    Recognises the perspective reformulation ``g(x)^2 / L`` written in the
+    expanded arrangement ``((g / L) ** 2) * L`` together with its affine
+    companions ``(h / L) * L`` and ``const * L``. With ``L`` affine and
+    strictly positive on the box, each squared term ``(g / L) ** 2`` (``g``
+    affine) is a quadratic-over-affine; multiplying the whole sum by ``L``
+    distributes and collapses ``(g / L)^2 * L = g^2 / L`` (convex
+    quad-over-linear), ``(h / L) * L = h`` (affine), and ``const * L`` (affine).
+    A nonneg-weighted sum of convex + affine terms is convex.
+
+    Covers the MINLPLib ``clay*hfsg`` perspective layout, which the
+    quadratic-over-affine recogniser misses (the ``* L`` keeps the node a
+    product) and whose box interval Hessian blows up as ``L`` approaches its
+    lower bound, defeating the Gershgorin certificate.
+
+    Requires at least one genuine squared (quad-over-affine) term — a product
+    whose terms all collapse to affine is left to the generic walker.
+    """
+    if not isinstance(expr, BinaryOp) or expr.op != "*":
+        return None
+
+    for p_expr, l_expr in ((expr.left, expr.right), (expr.right, expr.left)):
+        if classify_expr(l_expr, model, cache) != Curvature.AFFINE:
+            continue
+        if not _affine_strictly_positive(l_expr, model):
+            continue
+
+        terms: list[tuple[float, Expression]] = []
+        _flatten_sum_terms(p_expr, 1.0, terms)
+        if not terms:
+            continue
+
+        all_ok = True
+        saw_square = False
+        for scale_i, term in terms:
+            const, core = _split_const_mul(term)
+            if core is None:
+                # const * L → affine, any sign acceptable.
+                continue
+            # Affine companion: (h / L) * L = h, with h affine, denominator ≡ L.
+            if (
+                isinstance(core, BinaryOp)
+                and core.op == "/"
+                and _expr_struct_eq(core.right, l_expr)
+                and classify_expr(core.left, model, cache) == Curvature.AFFINE
+            ):
+                continue
+            # Square term: (g / L) ** 2, g affine, denominator ≡ L; the squared
+            # quad-over-affine is convex only with a nonneg effective weight.
+            if (
+                isinstance(core, BinaryOp)
+                and core.op == "**"
+                and isinstance(core.right, (Constant, Parameter))
+            ):
+                pwr = np.asarray(core.right.value)
+                inner = core.left
+                if (
+                    pwr.ndim == 0
+                    and abs(float(pwr) - 2.0) <= 1e-10
+                    and isinstance(inner, BinaryOp)
+                    and inner.op == "/"
+                    and _expr_struct_eq(inner.right, l_expr)
+                    and classify_expr(inner.left, model, cache) == Curvature.AFFINE
+                ):
+                    if scale_i * const >= -1e-10:
+                        saw_square = True
+                        continue
+            all_ok = False
+            break
+
+        if all_ok and saw_square:
+            return Curvature.CONVEX
     return None
 
 
@@ -626,6 +888,7 @@ def classify_fractional_epigraph_constraint(
 __all__ = [
     "classify_division_pattern",
     "classify_fractional_epigraph_constraint",
+    "classify_perspective_product",
     "classify_product_pattern",
     "classify_sqrt_pattern",
     "is_homogeneous_psd_quadratic",

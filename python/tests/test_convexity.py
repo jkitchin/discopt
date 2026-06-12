@@ -493,3 +493,70 @@ class TestSpecialConvexPatterns:
         is_convex, mask = classify_model(m)
         assert is_convex is True
         assert all(mask)
+
+
+class TestSignomialMonomial:
+    """Signomial-monomial sign-pattern recogniser (issue #40, Tier 1).
+
+    A monomial ``c·∏ xᵢ^aᵢ`` on the positive orthant is classified by its
+    exponent sign pattern (Boyd & Vandenberghe §3.1.5). These exercise the
+    branches directly; the MINLPLib ``cvxnonsep_*`` instances are the
+    integration coverage in ``test_convexity_minlplib_suspect.py``.
+    """
+
+    def test_all_negative_exponents_is_convex(self):
+        # x^-0.5 * y^-0.3 on x,y>0 — all exponents <= 0 → convex.
+        m = Model("t")
+        x = m.continuous("x", lb=0.1, ub=10)
+        y = m.continuous("y", lb=0.1, ub=10)
+        assert classify_expr(x**-0.5 * y**-0.3, m) == Curvature.CONVEX
+
+    def test_nonneg_exponents_sum_below_one_is_concave(self):
+        # x^0.3 * y^0.4 (sum 0.7 <= 1) on x,y>=0 — generalized geo mean → concave.
+        m = Model("t")
+        x = m.continuous("x", lb=0.0, ub=10)
+        y = m.continuous("y", lb=0.0, ub=10)
+        assert classify_expr(x**0.3 * y**0.4, m) == Curvature.CONCAVE
+
+    def test_geometric_mean_sum_one_is_concave(self):
+        # x^0.5 * y^0.5 (sum == 1) — classic geometric mean → concave (regression).
+        m = Model("t")
+        x = m.continuous("x", lb=0.0, ub=10)
+        y = m.continuous("y", lb=0.0, ub=10)
+        assert classify_expr(x**0.5 * y**0.5, m) == Curvature.CONCAVE
+
+    def test_mixed_one_large_rest_nonpos_is_convex(self):
+        # x^2 * y^-1 = x^2 / y on x,y>0 — one exp >= 1, rest <= 0, sum 1 → convex.
+        m = Model("t")
+        x = m.continuous("x", lb=0.1, ub=10)
+        y = m.continuous("y", lb=0.1, ub=10)
+        assert classify_expr(x**2 * y**-1, m) == Curvature.CONVEX
+
+    def test_negative_leading_constant_flips_curvature(self):
+        # -(x^-0.5 * y^-0.3): convex monomial negated → concave.
+        m = Model("t")
+        x = m.continuous("x", lb=0.1, ub=10)
+        y = m.continuous("y", lb=0.1, ub=10)
+        assert classify_expr(-1.0 * (x**-0.5 * y**-0.3), m) == Curvature.CONCAVE
+
+    def test_bilinear_stays_unknown(self):
+        # x*y (exps 1,1; sum 2) is neither convex nor concave — soundness guard.
+        m = Model("t")
+        x = m.continuous("x", lb=0.1, ub=10)
+        y = m.continuous("y", lb=0.1, ub=10)
+        assert classify_expr(x * y, m) == Curvature.UNKNOWN
+
+    def test_mixed_sign_nonconforming_stays_unknown(self):
+        # x^0.5 * y^-0.3: not all one sign, no single exp >= 1 — UNKNOWN (sound).
+        m = Model("t")
+        x = m.continuous("x", lb=0.1, ub=10)
+        y = m.continuous("y", lb=0.1, ub=10)
+        assert classify_expr(x**0.5 * y**-0.3, m) == Curvature.UNKNOWN
+
+    def test_convex_monomial_requires_strict_positivity(self):
+        # All-negative exponents but a base may be zero (lb=0): NOT provably
+        # convex (x^-0.5 blows up at 0), recogniser must abstain.
+        m = Model("t")
+        x = m.continuous("x", lb=0.0, ub=10)
+        y = m.continuous("y", lb=0.0, ub=10)
+        assert classify_expr(x**-0.5 * y**-0.3, m) != Curvature.CONVEX
