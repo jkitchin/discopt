@@ -55,11 +55,14 @@ only path. Each instance falls into one of three pinned buckets:
   promoted to ``CONVEX_PROVEN``. Currently empty — every characterised gap in
   this corpus has been closed.
 
-Most instances are vendored under ``data/minlplib_nl/`` and run in CI. A few
-large negative controls (``super1``..``super3t``) classify in tens of seconds
-and are left in the local MINLPLib cache only; they are exercised when present
-(``--instances super1,super2,super3,super3t`` via ``fetch_minlplib``) and skipped
-otherwise.
+Most instances are vendored under ``data/minlplib_nl/`` and run in the PR-fast
+job. Two vendored negative controls (``casctanks``, ``heatexch_gen3``) classify
+in ~2 minutes — past the 120 s per-test timeout — so they live in ``NEGATIVE_SLOW``
+and are marked ``slow`` (deselected on the PR-fast / coverage path, exercised in
+full / slow runs). A few large negative controls (``super1``..``super3t``)
+classify in tens of seconds and are left in the local MINLPLib cache only; they
+are exercised when present (``--instances super1,super2,super3,super3t`` via
+``fetch_minlplib``) and skipped otherwise.
 """
 
 from __future__ import annotations
@@ -84,7 +87,6 @@ NEGATIVE = (
     # heat-exchanger / scheduling / supply-chain instances (MINLPLib convex=False)
     "4stufen",
     "beuster",
-    "casctanks",
     "contvar",
     "ex1224",
     "gkocis",
@@ -96,7 +98,6 @@ NEGATIVE = (
     "tspn12",
     "heatexch_gen1",
     "heatexch_gen2",
-    "heatexch_gen3",
     "oaer",
     # hda: signomial equilibrium constraints; its convex structure is in
     # log-space, explicitly out of scope for #40 — discopt soundly stays
@@ -107,6 +108,16 @@ NEGATIVE = (
     "bchoco06",
     "bchoco07",
     "bchoco08",
+)
+
+# Slow vendored negative controls: same soundness gate as ``NEGATIVE`` but each
+# classifies in ~2 minutes (dense Hessian / large signomial DAGs), which exceeds
+# the PR-fast job's 120 s per-test timeout. Marked ``@pytest.mark.slow`` so the
+# PR-fast and coverage jobs deselect them; still vendored and exercised in full /
+# slow runs, preserving their non-convex soundness coverage.
+NEGATIVE_SLOW = (
+    "casctanks",
+    "heatexch_gen3",
 )
 
 # Large negative controls kept in the local cache only (not vendored: each
@@ -205,6 +216,22 @@ def test_minlplib_negative_control_stays_nonconvex(name: str) -> None:
 
 
 @pytest.mark.slow
+@pytest.mark.parametrize("name", NEGATIVE_SLOW)
+def test_minlplib_slow_negative_control_stays_nonconvex(name: str) -> None:
+    """SOUNDNESS on the slow vendored negative controls (~2 min each).
+
+    Same non-negotiable invariant as ``test_minlplib_negative_control_stays_nonconvex``,
+    but marked ``slow`` so the PR-fast / coverage jobs (120 s per-test timeout)
+    deselect them. Exercised in full / slow runs.
+    """
+    is_convex, _mask = _classify(name)
+    assert is_convex is False, (
+        f"SOUNDNESS REGRESSION: {name} is non-convex (MINLPLib/SUSPECT regression "
+        f"corpus) but classify_model promoted it to convex."
+    )
+
+
+@pytest.mark.slow
 @pytest.mark.parametrize("name", NEGATIVE_CACHE_ONLY)
 def test_minlplib_large_negative_control_stays_nonconvex(name: str) -> None:
     """SOUNDNESS on the large cache-only negative controls (super*).
@@ -251,13 +278,20 @@ def test_pinned_buckets_are_disjoint_and_present() -> None:
     """Sanity: buckets don't overlap and every vendored instance is loadable."""
     buckets = {
         "NEGATIVE": set(NEGATIVE),
+        "NEGATIVE_SLOW": set(NEGATIVE_SLOW),
         "NEGATIVE_CACHE_ONLY": set(NEGATIVE_CACHE_ONLY),
         "CONVEX_PROVEN": set(CONVEX_PROVEN),
         "CONVEX_ABSTAIN": set(CONVEX_ABSTAIN),
     }
-    names = list(NEGATIVE) + list(NEGATIVE_CACHE_ONLY) + list(CONVEX_PROVEN) + list(CONVEX_ABSTAIN)
+    names = (
+        list(NEGATIVE)
+        + list(NEGATIVE_SLOW)
+        + list(NEGATIVE_CACHE_ONLY)
+        + list(CONVEX_PROVEN)
+        + list(CONVEX_ABSTAIN)
+    )
     assert len(names) == len(set(names)), "duplicate instance across buckets"
-    # Every non-cache-only instance must be vendored so CI can run it.
-    for name in list(NEGATIVE) + list(CONVEX_PROVEN) + list(CONVEX_ABSTAIN):
+    # Every vendored (non-cache-only) instance must be present so CI can run it.
+    for name in list(NEGATIVE) + list(NEGATIVE_SLOW) + list(CONVEX_PROVEN) + list(CONVEX_ABSTAIN):
         assert (_DATA_DIR / f"{name}.nl").exists(), f"{name}.nl not vendored"
     assert buckets  # keep the structure referenced
