@@ -183,11 +183,30 @@ harder road to MILP parity.
 Foundation; correctness-critical. Nothing downstream is safe until POUNCE
 is a trustworthy LP/dual engine. Work breakdown:
 
-- **P0.1 Pure-LP path.** Validate POUNCE on zero-Hessian / pure-linear
-  problems: degeneracy, dual degeneracy, unboundedness, free variables,
-  empty constraint sets. LP is the inner loop of everything downstream
-  (OBBT, McCormick-LP, masters). Add an LP-specific test matrix mirroring
-  `test_lp_highs.py`.
+- **P0.1 Pure-LP path — DONE (validation).** `discopt/solvers/lp_pounce.py`
+  provides `solve_lp(c, A_ub, b_ub, A_eq, b_eq, bounds, ...)` —
+  signature/return-type compatible with `lp_highs.solve_lp` — by exposing the
+  LP to POUNCE as a zero-Hessian, constant-Jacobian callback problem.
+  `test_lp_pounce.py` mirrors `test_lp_highs.py` and cross-checks objectives
+  against HiGHS (P0.5 oracle). Validation outcomes:
+  - Objective matches HiGHS across inequality / equality / mixed / bounded /
+    free-variable / empty-constraint LPs and a random battery.
+  - Convex corner cases map soundly: inequality-infeasible → INFEASIBLE,
+    unbounded → UNBOUNDED (raw Ipopt code 4, which the *general* NLP map sends
+    to ERROR — hence the LP-specific status map).
+  - Degenerate / dual-degenerate LPs return the analytic center of the
+    optimal face, not a vertex: objective matches, primal differs by design.
+  - **Known limitation:** an *inconsistent-equality* system can cycle to the
+    iteration limit instead of reporting INFEASIBLE (the IPM's restoration
+    doesn't always certify infeasibility). Result is still sound (never a
+    bogus OPTIMAL, no solution returned); clean certification needs the
+    Farkas-ray check from P0.2.
+  - No simplex basis / warm-start: `LPResult.basis` is `None`, `warm_basis`
+    is accepted but ignored (an IPM does not warm-start from a basis).
+  - *Not yet wired in:* downstream consumers (OBBT, McCormick-LP, masters)
+    and `_solve_lp` still call HiGHS; switching them over is P0.4/P4. Sparse
+    `A` is densified for now (validation-scale); sparse Jacobian is a P0.4
+    follow-up for large LPs.
 - **P0.2 Infeasible-node handling.** The cyipopt status map inherited by
   `nlp_pounce.py` sends Ipopt status 2 (*locally* infeasible) to `ERROR`.
   For an IPM this means "this start found no feasible interior point," not
