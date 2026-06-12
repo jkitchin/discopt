@@ -56,7 +56,8 @@ def _all_sentinel_batch(evaluator, batch_lb, batch_ub, batch_ids, n_vars, *args,
         ub = np.asarray(batch_ub[i], dtype=np.float64)
         sols[i] = 0.5 * (np.clip(lb, -1e4, 1e4) + np.clip(ub, -1e4, 1e4))
     feas = np.zeros(n_batch, dtype=bool)
-    return ids, lbs, sols, feas
+    trusted = np.ones(n_batch, dtype=bool)
+    return ids, lbs, sols, feas, trusted
 
 
 @pytest.mark.correctness

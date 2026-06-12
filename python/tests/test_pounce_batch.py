@@ -72,7 +72,7 @@ def test_batch_pounce_matches_serial_feasible():
     batch_ub = [b[1].tolist() for b in boxes]
     opts = {"max_iter": 200, "max_wall_time": 30.0}
 
-    rid, rlb, rsol, rfeas = _solve_batch_pounce(
+    rid, rlb, rsol, rfeas, _ = _solve_batch_pounce(
         ev, batch_lb, batch_ub, list(range(len(boxes))), n, cb, opts
     )
 
@@ -108,11 +108,11 @@ def test_batch_pounce_multistart_matches_single_start_on_convex_node():
     batch_ub = [b[1].tolist() for b in boxes]
     opts = {"max_iter": 200, "max_wall_time": 30.0}
 
-    _, single, _, _ = _solve_batch_pounce(
+    _, single, _, _, _ = _solve_batch_pounce(
         ev, batch_lb, batch_ub, list(range(len(boxes))), n, cb, opts
     )
     # Force the multistart path (convex=False) even though the nodes are convex.
-    _, multi, msol, _ = _solve_batch_pounce(
+    _, multi, msol, _, _ = _solve_batch_pounce(
         ev,
         batch_lb,
         batch_ub,
@@ -143,7 +143,7 @@ def test_batch_pounce_marks_infeasible_nodes():
     # x + y >= 1 is impossible when both are pinned near -5.
     nlb = np.array([-5.0, -5.0])
     nub = np.array([-4.9, -4.9])
-    rid, rlb, rsol, rfeas = _solve_batch_pounce(
+    rid, rlb, rsol, rfeas, _ = _solve_batch_pounce(
         ev,
         [nlb.tolist(), nlb.tolist()],
         [nub.tolist(), nub.tolist()],

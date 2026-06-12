@@ -2583,33 +2583,42 @@ def solve_model(
         _use_pounce_batch = nlp_solver == "pounce" and n_vars >= _POUNCE_BATCH_MIN_VARS
         if (_use_ipm_batch or _use_pounce_batch) and n_batch > 1:
             if _use_pounce_batch:
-                result_ids, result_lbs, result_sols, result_feas = _solve_batch_pounce(
-                    _active_evaluator,
-                    batch_lb,
-                    batch_ub,
-                    batch_ids,
-                    n_vars,
-                    _active_cb,
-                    opts,
-                    batch_psols=batch_psols,
-                    multistart=_POUNCE_BATCH_MULTISTART,
-                    convex=_model_is_convex,
+                result_ids, result_lbs, result_sols, result_feas, _batch_trusted = (
+                    _solve_batch_pounce(
+                        _active_evaluator,
+                        batch_lb,
+                        batch_ub,
+                        batch_ids,
+                        n_vars,
+                        _active_cb,
+                        opts,
+                        batch_psols=batch_psols,
+                        multistart=_POUNCE_BATCH_MULTISTART,
+                        convex=_model_is_convex,
+                    )
                 )
             else:
-                result_ids, result_lbs, result_sols, result_feas = _solve_batch_ipm(
-                    _active_evaluator,
-                    batch_lb,
-                    batch_ub,
-                    batch_ids,
-                    n_vars,
-                    _active_cb,
-                    opts,
-                    _active_gl,
-                    _active_gu,
-                    batch_psols=batch_psols,
-                    multistart=True,  # IPM needs multistart even for convex models
-                    convex=_model_is_convex,
+                result_ids, result_lbs, result_sols, result_feas, _batch_trusted = (
+                    _solve_batch_ipm(
+                        _active_evaluator,
+                        batch_lb,
+                        batch_ub,
+                        batch_ids,
+                        n_vars,
+                        _active_cb,
+                        opts,
+                        _active_gl,
+                        _active_gu,
+                        batch_psols=batch_psols,
+                        multistart=True,  # IPM needs multistart even for convex models
+                        convex=_model_is_convex,
+                    )
                 )
+            # A convex node whose relaxation objective is not KKT-valid (and
+            # could not be polished) is not a valid lower bound; decertify the
+            # gap rather than trust it (roadmap P0.3). Bounds are left as-is.
+            if _model_is_convex and not bool(np.all(_batch_trusted)):
+                _gap_certified = False
             # Constraint feasibility post-check for batch IPM results.
             # When the IPM solution violates constraints (e.g. due to hitting
             # the iteration limit), mark the node as infeasible (SENTINEL).
@@ -3914,33 +3923,43 @@ def _solve_nlp_bb(
 
         if (_use_ipm_batch or _use_pounce_batch) and n_batch > 1:
             if _use_pounce_batch:
-                result_ids, result_lbs, result_sols, result_feas = _solve_batch_pounce(
-                    evaluator,
-                    batch_lb,
-                    batch_ub,
-                    batch_ids,
-                    n_vars,
-                    constraint_bounds,
-                    opts,
-                    batch_psols=batch_psols,
-                    multistart=_POUNCE_BATCH_MULTISTART,
-                    convex=_model_is_convex,
+                result_ids, result_lbs, result_sols, result_feas, _batch_trusted = (
+                    _solve_batch_pounce(
+                        evaluator,
+                        batch_lb,
+                        batch_ub,
+                        batch_ids,
+                        n_vars,
+                        constraint_bounds,
+                        opts,
+                        batch_psols=batch_psols,
+                        multistart=_POUNCE_BATCH_MULTISTART,
+                        convex=_model_is_convex,
+                    )
                 )
             else:
-                result_ids, result_lbs, result_sols, result_feas = _solve_batch_ipm(
-                    evaluator,
-                    batch_lb,
-                    batch_ub,
-                    batch_ids,
-                    n_vars,
-                    constraint_bounds,
-                    opts,
-                    g_l_jax,
-                    g_u_jax,
-                    batch_psols=batch_psols,
-                    multistart=True,  # IPM needs multistart even for convex models
-                    convex=_model_is_convex,
+                result_ids, result_lbs, result_sols, result_feas, _batch_trusted = (
+                    _solve_batch_ipm(
+                        evaluator,
+                        batch_lb,
+                        batch_ub,
+                        batch_ids,
+                        n_vars,
+                        constraint_bounds,
+                        opts,
+                        g_l_jax,
+                        g_u_jax,
+                        batch_psols=batch_psols,
+                        multistart=True,  # IPM needs multistart even for convex models
+                        convex=_model_is_convex,
+                    )
                 )
+            # Convex MINLP: the NLP objective is the node lower bound. A node
+            # whose relaxation did not reach KKT (and could not be polished) is
+            # not a valid lower bound, so decertify the gap rather than trust
+            # it — leaving bound/incumbent untouched (roadmap P0.3).
+            if _model_is_convex and not bool(np.all(_batch_trusted)):
+                _gap_certified = False
             # Constraint feasibility post-check
             if cl_list:
                 for i in range(n_batch):
@@ -4021,6 +4040,13 @@ def _solve_nlp_bb(
                 result_ids[i] = int(batch_ids[i])
                 if nlp_result.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
                     nlp_lb = nlp_result.objective
+                    # Convex node bound is only valid if the relaxation reached
+                    # KKT. ITERATION_LIMIT here means non-KKT and unpolished
+                    # (the serial IPM path polishes; POUNCE does not), so the
+                    # objective is not a valid lower bound — decertify the gap
+                    # (roadmap P0.3) while still using it as a branching point.
+                    if _model_is_convex and nlp_result.status == SolveStatus.ITERATION_LIMIT:
+                        _gap_certified = False
                     # Constraint feasibility check
                     if cl_list and not _check_constraint_feasibility(
                         evaluator, nlp_result.x, cl_list, cu_list
@@ -4248,7 +4274,10 @@ def _solve_nlp_bb(
         if model._objective.sense == ObjectiveSense.MAXIMIZE:
             obj_val = -obj_val
 
-        if tree.gap() <= gap_tolerance or tree.is_finished():
+        # "optimal" requires both a closed search AND a certified gap: a node
+        # whose convex relaxation was not KKT-valid (roadmap P0.3) leaves the
+        # bound uncertified, so the search closing does not prove optimality.
+        if (tree.gap() <= gap_tolerance or tree.is_finished()) and _gap_certified:
             status = "optimal"
         else:
             status = "feasible"
@@ -4268,11 +4297,17 @@ def _solve_nlp_bb(
     if bound_val is not None and model._objective.sense == ObjectiveSense.MAXIMIZE:
         bound_val = -bound_val
 
+    # An uncertified gap is not a rigorous dual bound; do not present one.
+    gap_val = stats["gap"]
+    if not _gap_certified:
+        bound_val = None
+        gap_val = None
+
     return SolveResult(
         status=status,
         objective=obj_val,
         bound=bound_val,
-        gap=stats["gap"],
+        gap=gap_val,
         x=x_dict,
         wall_time=wall_time,
         node_count=stats["total_nodes"],
@@ -4630,12 +4665,21 @@ def _solve_batch_ipm(
         result_lbs = np.full(n_batch, _INFEASIBILITY_SENTINEL, dtype=np.float64)
         result_sols = np.asarray(midpoint_x0 if not multistart else x0_expanded[:, 0, :])
         result_feas = np.zeros(n_batch, dtype=bool)
-        return result_ids, result_lbs, result_sols, result_feas
+        trusted = np.ones(n_batch, dtype=bool)
+        return result_ids, result_lbs, result_sols, result_feas, trusted
 
     # Unpack batched IPMState → numpy arrays
     converged = np.asarray(state.converged)
     obj_vals = np.asarray(state.obj)
     x_vals = np.asarray(state.x)
+
+    # trusted[i] is False when result_lbs[i] is a numeric bound that is NOT a
+    # valid lower bound — a non-KKT (code 3/4) convex objective that could not
+    # be polished to optimality (issue #39). The caller uses it to decertify
+    # the gap without corrupting bounds/incumbent (roadmap P0.3). For
+    # nonconvex models the NLP objective is discarded by the caller, so trust
+    # is irrelevant and stays True.
+    trusted = np.ones(n_batch, dtype=bool)
 
     if multistart:
         # Reshape (n_batch*n_starts,) → (n_batch, n_starts), pick best per node
@@ -4671,6 +4715,8 @@ def _solve_batch_ipm(
             best_codes = np.array([int(converged[i, best_per_node[i]]) for i in range(n_batch)])
             polish_needed = any_feasible & ((best_codes == 3) | (best_codes == 4))
             for i in np.where(polish_needed)[0]:
+                # Non-KKT until a polish solve certifies optimality.
+                trusted[i] = False
                 row = int(i * n_starts)
                 node_lb_i = np.asarray(xl_batch[row])
                 node_ub_i = np.asarray(xu_batch[row])
@@ -4691,6 +4737,9 @@ def _solve_batch_ipm(
                     if np.isfinite(polished_obj) and polished_obj < _SENTINEL_THRESHOLD:
                         result_lbs[i] = polished_obj
                         result_sols[i] = np.asarray(polish.x, dtype=np.float64)
+                        # Only an optimal (KKT) polish makes the bound valid.
+                        if polish.status == SolveStatus.OPTIMAL:
+                            trusted[i] = True
     else:
         conv_mask = (converged == 1) | (converged == 2) | (converged == 3) | (converged == 4)
         ok_mask = conv_mask & np.isfinite(obj_vals)
@@ -4699,6 +4748,12 @@ def _solve_batch_ipm(
             dtype=np.float64,
         )
         result_sols = np.array(x_vals, dtype=np.float64)  # writable copy
+        if convex:
+            # Feasible but non-KKT (code 3/4) objectives are not valid lower
+            # bounds. (No polish on this branch; it is not used by the convex
+            # B&B loop, which always multistarts.)
+            non_kkt = ok_mask & ~((converged == 1) | (converged == 2))
+            trusted[np.asarray(non_kkt)] = False
 
         # Restoration: for failed nodes (NaN or code 5), try to recover
         # a feasible point via restoration and re-solve individually.
@@ -4742,7 +4797,7 @@ def _solve_batch_ipm(
     result_ids = np.array(batch_ids, dtype=np.int64)
     result_feas = np.zeros(n_batch, dtype=bool)  # Let Rust check integrality
 
-    return result_ids, result_lbs, result_sols, result_feas
+    return result_ids, result_lbs, result_sols, result_feas, trusted
 
 
 def _solve_batch_pounce(
@@ -4874,6 +4929,13 @@ def _solve_batch_pounce(
     result_sols = np.empty((n_batch, n_vars), dtype=np.float64)
     result_lbs = np.full(n_batch, _INFEASIBILITY_SENTINEL, dtype=np.float64)
     result_feas = np.zeros(n_batch, dtype=bool)  # Let Rust check integrality
+    # trusted[i] is False when result_lbs[i] is a numeric bound that is not a
+    # valid lower bound: for a convex model, a non-KKT (ITERATION_LIMIT)
+    # objective. POUNCE has no polish loop, so any non-optimal-but-usable
+    # convex result is untrusted. The caller decertifies the gap on these
+    # without touching the bound/incumbent (roadmap P0.3). Irrelevant for
+    # nonconvex models (objective discarded by the caller) → stays True.
+    trusted = np.ones(n_batch, dtype=bool)
 
     try:
         results = pounce.solve_nlp_batch(
@@ -4896,7 +4958,9 @@ def _solve_batch_pounce(
                 obj = float(res.objective)
                 if np.isfinite(obj):
                     result_lbs[i] = obj
-        return result_ids, result_lbs, result_sols, result_feas
+                if convex and res.status != SolveStatus.OPTIMAL:
+                    trusted[i] = False
+        return result_ids, result_lbs, result_sols, result_feas, trusted
 
     # Reduce the starts of each node to its best accepted result. The evaluator
     # objective is in minimization sense (maximize models are negated), so the
@@ -4904,6 +4968,7 @@ def _solve_batch_pounce(
     for i in range(n_batch):
         best_obj = None
         best_x = None
+        best_status = None
         for s in range(n_starts):
             x, info = results[i * n_starts + s]
             x_arr = np.asarray(x, dtype=np.float64)
@@ -4917,11 +4982,15 @@ def _solve_batch_pounce(
                 if np.isfinite(obj) and (best_obj is None or obj < best_obj):
                     best_obj = obj
                     best_x = x_arr
+                    best_status = status
         result_sols[i] = best_x
         if best_obj is not None:
             result_lbs[i] = best_obj
+            # A non-KKT (ITERATION_LIMIT) convex objective is not a valid LB.
+            if convex and best_status != SolveStatus.OPTIMAL:
+                trusted[i] = False
 
-    return result_ids, result_lbs, result_sols, result_feas
+    return result_ids, result_lbs, result_sols, result_feas, trusted
 
 
 def _solve_node_nlp_ipopt(

@@ -262,27 +262,35 @@ is a trustworthy LP/dual engine. Work breakdown:
     decertify the gap, and the McCormick-LP bound rescues them where the
     relaxer is active. Verified that all four paths (pounce/ipm ×
     batch/serial) now agree (e.g. Haverly pooling → `feasible`, obj 1390).
-  - **Convex non-KKT objectives — OPEN.** For a *convex* model the node
-    relaxation objective is imported as the node lower bound. A non-KKT
-    result (Ipopt status `ITERATION_LIMIT`, i.e. JAX-IPM codes 3/4 or a
-    POUNCE max-iter exit) gives `f(x~) ≥ f*`, which is **not** a valid lower
-    bound (issue #39). The JAX-IPM paths polish such nodes via
-    `_solve_node_nlp_kkt` (now backed by POUNCE, so the common case is
-    covered once POUNCE is installed); the **POUNCE serial/batch paths have
-    no polish**, so a POUNCE max-iter exit on a convex node is still trusted.
-  - **Blocker: bound/incumbent conflation.** A correct fix cannot simply set
-    the untrusted node bound to `-inf` or a sentinel. In *convex* mode the
-    Rust tree uses `node_lb` as **both** the dual bound and the incumbent
-    objective for integer-feasible nodes (`process_evaluated`,
+  - **Convex non-KKT objectives — DONE (trusted-mask decoupling).** For a
+    *convex* model the node relaxation objective is the node lower bound; a
+    non-KKT result (Ipopt `ITERATION_LIMIT`, i.e. JAX-IPM codes 3/4 or a
+    POUNCE max-iter exit) gives `f(x~) ≥ f*`, not a valid lower bound (#39).
+    Resolved without touching bound/incumbent (avoiding the conflation
+    below): `_solve_batch_ipm`/`_solve_batch_pounce` now return an additive
+    5th value, a per-node `trusted` mask — `False` for a convex node whose
+    objective is non-KKT and could not be polished to optimality (JAX-IPM
+    polishes via `_solve_node_nlp_kkt`/POUNCE; POUNCE has no polish so any
+    non-optimal-but-usable convex result is untrusted). Both B&B loops
+    (`solve_model`, `_solve_nlp_bb`) and the serial paths decertify the gap
+    (`_gap_certified = False`) on untrusted/`ITERATION_LIMIT` convex nodes
+    and report `"feasible"` rather than a falsely-certified `"optimal"` —
+    bounds and incumbent are left untouched. `_solve_nlp_bb` additionally now
+    gates `"optimal"` on `_gap_certified` (it previously reported `"optimal"`
+    on search closure alone, also unsound for nonconvex heuristic-mode runs)
+    and nulls the bound/gap when uncertified. Tests:
+    `test_p03_trust_gate.py` (mask both solvers + caller decertification,
+    batch & serial). Nonconvex models are unaffected — they discard the NLP
+    objective (`trusted` stays `True`).
+  - **Why not `-inf`/sentinel (the conflation that forced the mask).** In
+    *convex* mode the Rust tree uses `node_lb` as **both** the dual bound and
+    the incumbent objective for integer-feasible nodes (`process_evaluated`,
     `tree_manager.rs`): `-inf` would corrupt the incumbent, a sentinel would
-    prune a node we failed to bound. The sound design must **decouple** the
-    two — inject the true objective `f(x_sol)` as the incumbent (as the
-    nonconvex path already does via `inject_incumbent`) while marking the
-    dual bound untrusted. Recommended mechanism: a `trusted` mask returned
-    from `_solve_batch_ipm`/`_solve_batch_pounce` (additive; bound values
-    unchanged) that decertifies the gap, plus a POUNCE polish-retry
-    (re-solve at higher `max_iter`) before giving up. This spans both B&B
-    loops (`solve_model` and `_solve_nlp_bb`) and is its own focused change.
+    prune a node we failed to bound. The `trusted` mask sidesteps this by
+    leaving bound values intact and only decertifying the gap.
+  - **Open (optional):** a POUNCE polish-retry (re-solve a stalled convex
+    node at higher `max_iter` before marking it untrusted) would recover some
+    nodes that currently just decertify — robustness, not soundness.
 - **P0.4 Batch LP/QP + LP seam.** Extend the `solve_nlp_batch` path to LP/QP
   node waves; extend the backend seam so LP/QP dispatch is engine-agnostic.
   Note: the published `pounce-solver` wheel (0.4.0) exposes
