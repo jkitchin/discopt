@@ -2724,16 +2724,28 @@ def solve_model(
             # Per-node, ~20ms for problems with tens of bilinear terms.
             if _mc_lp_relaxer is not None:
                 for i in range(n_batch):
-                    if result_lbs[i] < _SENTINEL_THRESHOLD:
-                        try:
-                            mc_res = _mc_lp_relaxer.solve_at_node(
-                                np.asarray(batch_lb[i]),
-                                np.asarray(batch_ub[i]),
-                            )
-                        except Exception as e:
-                            logger.debug("McCormick LP failed at node %d: %s", i, e)
-                            continue
-                        if mc_res.lower_bound is not None and np.isfinite(mc_res.lower_bound):
+                    if node_infeasible_mask[i]:
+                        continue
+                    nlp_failed = result_lbs[i] >= _SENTINEL_THRESHOLD
+                    try:
+                        mc_res = _mc_lp_relaxer.solve_at_node(
+                            np.asarray(batch_lb[i]),
+                            np.asarray(batch_ub[i]),
+                        )
+                    except Exception as e:
+                        logger.debug("McCormick LP failed at node %d: %s", i, e)
+                        continue
+                    if mc_res.lower_bound is not None and np.isfinite(mc_res.lower_bound):
+                        if nlp_failed:
+                            # A failed / locally-infeasible NLP solve is not an
+                            # infeasibility proof. Adopt the LP bound + LP point
+                            # so the node branches instead of being pruned via
+                            # the sentinel (mirrors the serial path).
+                            result_lbs[i] = float(mc_res.lower_bound)
+                            if mc_res.x is not None:
+                                result_sols[i] = mc_res.x
+                            result_feas[i] = False
+                        else:
                             result_lbs[i] = max(result_lbs[i], float(mc_res.lower_bound))
             if not _model_is_convex:
                 for i in range(n_batch):
@@ -2741,6 +2753,15 @@ def solve_model(
                         _gap_certified = False
                     elif not np.isfinite(result_lbs[i]):
                         result_lbs[i] = _INFEASIBILITY_SENTINEL
+                    elif result_lbs[i] >= _SENTINEL_THRESHOLD and not node_infeasible_mask[i]:
+                        # Soundness guard (issue #27a, batch parity with the
+                        # serial path): a node carrying the failure sentinel
+                        # without an FBBT infeasibility proof is pruned without
+                        # being proven suboptimal — the NLP merely failed or
+                        # was locally infeasible. Decertify the gap so the
+                        # result downgrades to "feasible" instead of claiming
+                        # a certified optimum.
+                        _gap_certified = False
         else:
             result_ids = np.empty(n_batch, dtype=np.int64)
             result_lbs = np.empty(n_batch, dtype=np.float64)
