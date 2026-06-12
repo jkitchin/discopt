@@ -214,6 +214,31 @@ is a trustworthy LP/dual engine. Work breakdown:
   feasibility-restoration retry / restart on local infeasibility; declare a
   node infeasible **only** on a genuine Farkas dual ray (infeasibility
   certificate). Expose the certificate through `NLPResult`.
+
+  *Status / implementation notes:*
+  - **LP infeasibility certificate — DONE.** `lp_pounce.solve_lp` now
+    disambiguates a non-optimal IPM exit (ITERATION_LIMIT / ERROR) with an
+    elastic Phase-1 LP that minimizes total constraint violation
+    (`_phase1_min_violation`). By LP duality a positive minimal violation is a
+    Farkas certificate, so the result is reported as INFEASIBLE; a ~0 minimum
+    proves feasibility (the failure was numerical, reported honestly).
+    Closes the P0.1 inconsistent-equality limitation
+    (`test_lp_pounce.py::TestInfeasibilityCertificate`), and the Phase-1 path
+    only runs on non-optimal exits so feasible/optimal solves are untouched.
+  - **Nonconvex B&B nodes — by design, no NLP-based certificate.** Local
+    infeasibility of a nonconvex node's NLP relaxation is *not* a global
+    infeasibility proof, so the node solve must never rigorously prune a
+    nonconvex node; only FBBT (interval) infeasibility is a certificate
+    there. The soundness half of this is already handled (commit 3b59e8b:
+    a failed/locally-infeasible node carries a sentinel that decertifies the
+    gap rather than silently pruning).
+  - **Open: serial POUNCE node retry.** `_solve_node_nlp_pounce` does a single
+    solve; on local infeasibility it should retry from alternative starts
+    (the batch path already multistarts nonconvex nodes) to avoid losing
+    nodes / decertifying unnecessarily. Robustness, not soundness.
+  - **Open: expose the certificate.** The Phase-1 slacks identify *which*
+    rows are violated (an IIS-like diagnosis); surfacing this needs a new
+    field on `LPResult`/`NLPResult`.
 - **P0.3 Bound trust-gate.** Use a POUNCE objective as a valid dual bound,
   and its multipliers for reduced-cost fixing, **only** when the solve
   converged to tolerance. An unconverged IPM bound used for fathoming can

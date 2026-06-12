@@ -35,6 +35,9 @@ except ImportError:
 # threshold is mapped to a single sentinel infinity here.
 _INF = 1e20
 _FINITE_BOUND_THRESHOLD = 1e15
+# Above this total constraint violation, the elastic Phase-1 LP certifies the
+# original LP infeasible (roadmap P0.2).
+_FEAS_TOL = 1e-6
 
 # Ipopt return codes (POUNCE is shape-compatible). For a *convex* LP, local
 # infeasibility is global, so code 2 is a sound INFEASIBLE; diverging iterates
@@ -162,8 +165,6 @@ def solve_lp(
         raise ImportError(
             "pounce is required for this backend. Install it with:\n  pip install pounce-solver"
         )
-    import pounce
-
     c_arr = np.asarray(c, dtype=np.float64).ravel()
     n = len(c_arr)
 
@@ -209,25 +210,57 @@ def solve_lp(
 
     # ---- starting point: strictly interior where bounds are finite ----------
     if x0 is None:
-        lo = np.where(np.isfinite(lb) & (lb > -_INF), lb, -1.0)
-        hi = np.where(np.isfinite(ub) & (ub < _INF), ub, 1.0)
-        x0 = np.clip(0.5 * (lo + hi), -1e3, 1e3)
+        x0 = _interior_start(lb, ub)
     x0 = np.asarray(x0, dtype=np.float64).ravel()
 
-    problem = pounce.Problem(
-        n=n,
-        m=m,
-        problem_obj=_LPCallbacks(c_arr, A),
-        lb=lb,
-        ub=ub,
-        cl=cl,
-        cu=cu,
-    )
     opts = {"print_level": 0}
     if options:
         opts.update(options)
     if time_limit is not None:
         opts.setdefault("max_wall_time", float(time_limit))
+
+    result = _solve_core(c_arr, A, cl, cu, lb, ub, x0, opts)
+
+    # ---- infeasibility certificate (roadmap P0.2) ---------------------------
+    # An IPM does not always certify infeasibility: an inconsistent system can
+    # exit at the iteration limit (or as a generic error) rather than as
+    # INFEASIBLE. Disambiguate with an elastic Phase-1 LP that minimizes total
+    # constraint violation. For an LP this is exact (by LP duality a positive
+    # minimal violation is a Farkas certificate): >0 proves infeasibility, ~0
+    # proves the original was feasible (so the failure was numerical, not
+    # infeasibility — report it honestly rather than as INFEASIBLE).
+    if m > 0 and result.status in (SolveStatus.ITERATION_LIMIT, SolveStatus.ERROR):
+        viol = _phase1_min_violation(A, cl, cu, lb, ub, opts)
+        if viol is not None and viol > _FEAS_TOL:
+            return LPResult(
+                status=SolveStatus.INFEASIBLE,
+                iterations=result.iterations,
+                wall_time=result.wall_time,
+            )
+
+    return result
+
+
+def _solve_core(
+    c: np.ndarray,
+    A: np.ndarray,
+    cl: np.ndarray,
+    cu: np.ndarray,
+    lb: np.ndarray,
+    ub: np.ndarray,
+    x0: np.ndarray,
+    opts: dict,
+) -> LPResult:
+    """Solve ``min c^T x`` over stacked rows ``cl <= A x <= cu`` and bounds.
+
+    The single POUNCE entry point shared by :func:`solve_lp` and the Phase-1
+    feasibility probe. Status is mapped via :data:`_LP_STATUS_MAP`.
+    """
+    import pounce
+
+    n = len(c)
+    m = A.shape[0]
+    problem = pounce.Problem(n=n, m=m, problem_obj=_LPCallbacks(c, A), lb=lb, ub=ub, cl=cl, cu=cu)
     for key, value in opts.items():
         try:
             if isinstance(value, (np.floating, float)):
@@ -250,7 +283,7 @@ def solve_lp(
         return LPResult(status=status, iterations=iters, wall_time=wall_time)
 
     x_arr = np.asarray(x, dtype=np.float64)
-    obj = float(info.get("obj_val", c_arr @ x_arr))
+    obj = float(info.get("obj_val", c @ x_arr))
     dual = info.get("mult_g", None)
     dual_values = np.asarray(dual, dtype=np.float64) if dual is not None and len(dual) else None
     mult_l = np.asarray(info.get("mult_x_L", []), dtype=np.float64)
@@ -267,3 +300,47 @@ def solve_lp(
         iterations=iters,
         wall_time=wall_time,
     )
+
+
+def _interior_start(lb: np.ndarray, ub: np.ndarray) -> np.ndarray:
+    """A starting point in the box interior where bounds are finite."""
+    lo = np.where(np.isfinite(lb) & (lb > -_INF), lb, -1.0)
+    hi = np.where(np.isfinite(ub) & (ub < _INF), ub, 1.0)
+    return np.clip(0.5 * (lo + hi), -1e3, 1e3)
+
+
+def _phase1_min_violation(
+    A: np.ndarray,
+    cl: np.ndarray,
+    cu: np.ndarray,
+    lb: np.ndarray,
+    ub: np.ndarray,
+    opts: dict,
+) -> Optional[float]:
+    """Minimal total constraint violation of ``cl <= A x <= cu`` over the box.
+
+    Builds and solves the elastic LP
+
+        min  1^T s
+        s.t. A x - s <= cu,   A x + s >= cl,   lb <= x <= ub,   s >= 0
+
+    in the variables ``[x, s]`` (one slack per row). The elastic LP is always
+    feasible and bounded below by 0; its optimum is the smallest total
+    violation. Returns that value, or ``None`` if even the (well-posed)
+    Phase-1 solve did not reach optimality.
+    """
+    m, n = A.shape
+    eye = np.eye(m, dtype=np.float64)
+    # [A | -I] bounded above by cu;  [A | +I] bounded below by cl.
+    A2 = np.vstack([np.hstack([A, -eye]), np.hstack([A, eye])])
+    cl2 = np.concatenate([np.full(m, -_INF), cl])
+    cu2 = np.concatenate([cu, np.full(m, _INF)])
+    c2 = np.concatenate([np.zeros(n), np.ones(m)])
+    lb2 = np.concatenate([lb, np.zeros(m)])
+    ub2 = np.concatenate([ub, np.full(m, _INF)])
+    x0 = np.concatenate([_interior_start(lb, ub), np.ones(m)])
+
+    res = _solve_core(c2, A2, cl2, cu2, lb2, ub2, x0, opts)
+    if res.status == SolveStatus.OPTIMAL and res.objective is not None:
+        return float(res.objective)
+    return None

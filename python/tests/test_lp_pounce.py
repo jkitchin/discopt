@@ -26,7 +26,12 @@ import scipy.sparse as sp
 pytest.importorskip("pounce")
 
 from discopt.solvers import SolveStatus  # noqa: E402
-from discopt.solvers.lp_pounce import solve_lp  # noqa: E402
+from discopt.solvers.lp_pounce import (  # noqa: E402
+    _INF,
+    _phase1_min_violation,
+    _stack_constraints,
+    solve_lp,
+)
 
 try:
     from discopt.solvers.lp_highs import solve_lp as solve_lp_highs
@@ -209,13 +214,10 @@ class TestInfeasible:
     def test_infeasible_equality(self):
         """Inconsistent equalities (x1+x2 = 1 and = 5).
 
-        Validation finding (roadmap P0.1): unlike inequality-based
-        infeasibility — which POUNCE reports cleanly as INFEASIBLE above — an
-        inconsistent *equality* system can cycle to the iteration limit rather
-        than trigger the IPM's infeasibility detection. The
-        soundness-relevant guarantee holds either way: the result is never a
-        bogus OPTIMAL and carries no solution. Robust certification of this
-        case needs a Farkas-ray check (roadmap P0.2).
+        The IPM alone can cycle to the iteration limit here rather than
+        certify infeasibility (a finding from P0.1). The elastic Phase-1
+        certificate (P0.2) resolves it: the minimal total violation is 4 > 0,
+        which proves infeasibility, so the status is INFEASIBLE.
         """
         r = solve_lp(
             c=np.array([1.0, 1.0]),
@@ -223,8 +225,7 @@ class TestInfeasible:
             b_eq=np.array([1.0, 5.0]),
             options={"max_iter": 300},
         )
-        assert r.status in (SolveStatus.INFEASIBLE, SolveStatus.ITERATION_LIMIT)
-        assert r.status != SolveStatus.OPTIMAL
+        assert r.status == SolveStatus.INFEASIBLE
         assert r.x is None
 
 
@@ -309,6 +310,53 @@ class TestDimensionMismatch:
     def test_b_eq_missing(self):
         with pytest.raises(ValueError, match="b_eq"):
             solve_lp(c=np.array([1.0]), A_eq=np.array([[1.0]]))
+
+
+# ---------------------------------------------------------------------------
+# 13b. Elastic Phase-1 infeasibility certificate (roadmap P0.2)
+# ---------------------------------------------------------------------------
+class TestInfeasibilityCertificate:
+    """The Phase-1 LP minimizes total constraint violation; its optimum is an
+    exact infeasibility certificate for an LP (>0 iff infeasible)."""
+
+    _OPTS = {"print_level": 0}
+
+    def _violation(self, A_ub=None, b_ub=None, A_eq=None, b_eq=None, bounds=None, n=2):
+        A, cl, cu = _stack_constraints(A_ub, b_ub, A_eq, b_eq, n)
+        if bounds is None:
+            lb, ub = np.zeros(n), np.full(n, _INF)
+        else:
+            lb = np.array([b[0] for b in bounds], dtype=float)
+            ub = np.array([b[1] for b in bounds], dtype=float)
+        return _phase1_min_violation(A, cl, cu, lb, ub, self._OPTS)
+
+    def test_violation_positive_when_infeasible(self):
+        # x1+x2 = 1 and = 5  =>  minimal total violation is 4.
+        v = self._violation(A_eq=np.array([[1.0, 1.0], [1.0, 1.0]]), b_eq=np.array([1.0, 5.0]))
+        assert v is not None and abs(v - 4.0) < 1e-4
+
+    def test_violation_zero_when_feasible(self):
+        # A feasible system: minimal violation is 0.
+        v = self._violation(A_ub=np.array([[1.0, 1.0]]), b_ub=np.array([10.0]))
+        assert v is not None and v < 1e-5
+
+    def test_feasible_consistent_redundant_not_flagged(self):
+        """Consistent but redundant equalities must NOT be called infeasible."""
+        r = solve_lp(
+            c=np.array([1.0, 1.0]),
+            A_eq=np.array([[1.0, 1.0], [2.0, 2.0]]),
+            b_eq=np.array([5.0, 10.0]),
+            options={"max_iter": 300},
+        )
+        assert r.status != SolveStatus.INFEASIBLE
+        if r.status == SolveStatus.OPTIMAL:
+            assert abs(r.objective - 5.0) < _OBJ_TOL
+
+    def test_certificate_does_not_alter_optimal(self):
+        """A clean optimal solve never triggers the Phase-1 path."""
+        r = solve_lp(c=np.array([-1.0, -2.0]), A_ub=np.array([[1.0, 1.0]]), b_ub=np.array([10.0]))
+        assert r.status == SolveStatus.OPTIMAL
+        assert abs(r.objective - (-20.0)) < _OBJ_TOL
 
 
 # ---------------------------------------------------------------------------
