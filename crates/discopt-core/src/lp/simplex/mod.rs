@@ -17,6 +17,9 @@
 //! on this in subsequent increments.
 
 pub mod linsolve;
+pub mod primal;
+
+pub use primal::solve_lp;
 
 use crate::lp::basis::Basis;
 
