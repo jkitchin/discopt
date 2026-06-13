@@ -112,3 +112,45 @@ def _separate_row(a, b, x, nz, tol):
     if sum(x[j] for j in cover) > rhs + tol:
         return frozenset(int(j) for j in cover), rhs
     return None
+
+
+def separate_clique_cuts(
+    edges, x_star: np.ndarray, tol: float = 1e-6
+) -> list[tuple[frozenset[int], float]]:
+    """Violated clique cuts ``sum_{j in C} x_j <= 1`` from conflict-graph edges.
+
+    Each edge ``(i, j)`` asserts binaries ``i`` and ``j`` cannot both be 1. The
+    edges are greedily *merged* into larger cliques (every pair in ``C``
+    conflicts), giving the valid cut ``sum_{j in C} x_j <= 1`` — much stronger
+    than the pairwise edges (a triangle yields ``x_i+x_j+x_k <= 1``) and, for
+    ``|C| >= 3``, separating even a symmetric interior point (``0.5*3 > 1``)
+    that the pairwise/cover cuts miss. Pairwise edges are usually redundant
+    with the constraints they came from; the merged cliques are where the
+    value is. Returns violated cuts in the shared ``(C, rhs)`` format.
+    """
+    x = np.asarray(x_star, dtype=np.float64)
+    adj: dict[int, set[int]] = {}
+    for i, j in edges:
+        i, j = int(i), int(j)
+        adj.setdefault(i, set()).add(j)
+        adj.setdefault(j, set()).add(i)
+
+    cuts: list[tuple[frozenset[int], float]] = []
+    seen: set[frozenset[int]] = set()
+    for i, j in edges:
+        i, j = int(i), int(j)
+        clique = {i, j}
+        # Grow into a (greedy maximal) clique: add common neighbours adjacent
+        # to every current member, preferring high-``x*`` items to maximize
+        # the chance of a violated cut.
+        candidates = sorted(adj[i] & adj[j], key=lambda k: -x[k])
+        for k in candidates:
+            if all(k in adj[c] for c in clique):
+                clique.add(k)
+        cf = frozenset(clique)
+        if cf in seen:
+            continue
+        seen.add(cf)
+        if sum(x[t] for t in clique) > 1.0 + tol:
+            cuts.append((cf, 1.0))
+    return cuts

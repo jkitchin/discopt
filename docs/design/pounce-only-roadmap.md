@@ -437,9 +437,25 @@ competitive performance) lives in Phases 2–3.
     cover (`0.9 < 1`), whereas simplex's vertex `[1, 0.8, 0, 0]` is cut
     immediately. Effective MILP cutting on this stack ultimately wants the
     IPM→vertex crossover (Phase 2 keystone).
-- **Open:** crossover→Gomory/MIR (Phase 2 keystone, Rust, the path to general
-  cut effectiveness from interior points); clique cuts (consume the Rust
-  presolve clique table); diving/RINS heuristics; conflict analysis.
+- **Clique cuts — DONE.** `_extract_clique_edges` runs the Rust presolve
+  conflict-graph pass; `separate_clique_cuts` greedily *merges* the 2-clique
+  edges into larger cliques and emits the violated `sum_{j in C} x_j <= 1`
+  (folded into `_root_cover_cut_loop`). Pairwise edges are usually redundant
+  with their source constraints, but a merged clique of size >= 3 separates
+  even the symmetric IPM center (`0.5*3 > 1`) — partly overcoming the
+  interior-point cut limitation that defeats cover cuts. Exhaustively
+  verified valid (cuts are true cliques, never exclude a feasible point); a
+  triangle set-packing drops 3 → 1 nodes. (`test_clique_cuts.py`)
+- **Root diving heuristic — DONE.** `_root_dive` fixes the most-fractional
+  integer and re-solves the LP until integral, injecting an early incumbent
+  that front-loads pruning / reduced-cost fixing (complements the
+  near-integral snap purification). Optimum preserved, node count never
+  worsened. (`test_root_dive.py`)
+- **Open (Phase 2 keystone, Rust):** the IPM→vertex crossover, the path to
+  general cut effectiveness from interior points and to basis-derived
+  Gomory/MIR cuts. Also: RINS (sub-MILP neighborhood search) and conflict
+  analysis. These are the remaining "compete" items; the tractable
+  Python-side cut/heuristic pieces are now done.
 
 ### Phase 4 — Retire remaining HiGHS consumers (in progress)
 
