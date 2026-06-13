@@ -613,8 +613,28 @@ shared seam and falls back to whichever backend is importable.
     adds the worked `2s ≥ 1` example (exact coefficients + validity by
     enumeration) and a real-pipeline test (IPM → crossover → GMI) asserting the
     cuts are finite and separate the fractional vertex.
-  - **Increment 5 — wire into the root cut loop (next):** feed GMI cuts (with
-    the crossover vertex + basis) into `_root_cover_cut_loop` / the `CutPool`.
+  - **Increment 5 — wire into the root cut loop — ATTEMPTED, REVERTED (not
+    yet safe).** Wired `gomory_cuts_py` into `_root_cover_cut_loop` (separate at
+    the crossover vertex, augment `lp_data` with `coeffs·x − s = rhs` rows under
+    a safe-GMI rhs margin). The `test_milp_pounce` HiGHS-agreement battery
+    immediately caught a **correctness violation**: on a general-integer seed
+    the solver returned `-11` labelled optimal vs HiGHS's true `-13` — a GMI cut
+    excluded the true integer optimum. Root cause: GMI is derived from the
+    *numerical* IPM→crossover basis, and the tableau coefficient `ā_j = w·A_j`
+    inherits the basis' error; near an integer it flips the fractional part
+    `f_j` between ≈0 and ≈1, changing a coefficient by O(1). The fixed rhs
+    margin cannot absorb this because the cut-value error at an integer point
+    scales with that point's *distance from its bound* — unbounded for
+    general-integer variables (the failing case had a variable at value 2).
+    Wiring reverted to keep `incorrect_count == 0`. **The crossover + basis +
+    GMI-generation machinery is sound and unit-validated; what is missing for
+    safe integration is a sufficiently accurate basis.** Options for a safe
+    integration (decision pending): (a) restrict GMI to pure 0/1 problems, where
+    the per-point error is bounded by the margin; (b) refine the basis (e.g. an
+    exact rational/iterative-refinement re-solve of `B`) before deriving cuts;
+    (c) keep GMI generation as a validated library entry point and defer
+    in-solver use. The battery test that caught this is the safeguard for any
+    future attempt.
 - **Basis cuts:** Gomory mixed-integer and MIR at the root and at periodic
   re-solves, feeding the existing `CutPool`
   (`python/discopt/_jax/cutting_planes.py`; cap/aging/dedup already there).
