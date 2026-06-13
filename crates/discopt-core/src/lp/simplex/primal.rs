@@ -209,6 +209,12 @@ impl<'a> Simplex<'a> {
         let m = self.m;
         let mut updates = 0usize;
         let mut stall = 0usize;
+        // Devex reference weights γⱼ ≥ 1 for nonbasic pricing, reset per loop
+        // (the basis composition differs between Phase 1 and Phase 2). Devex
+        // selects the entering column maximizing dⱼ²/γⱼ — a cheap steepest-edge
+        // approximation that only changes *which* improving column enters, so it
+        // never affects correctness (Bland's rule still guards against cycling).
+        let mut gamma = vec![1.0f64; self.na];
         // Maintain x_B incrementally across pivots (rank-1 update per step)
         // instead of recomputing it by a full ftran each iteration; refreshed
         // exactly on every refactorization to bound floating-point drift.
@@ -222,9 +228,10 @@ impl<'a> Simplex<'a> {
                 return Err(LpStatus::Numerical);
             }
             let bland = stall > 2 * (self.na + 1);
-            // choose entering
+            // choose entering: Devex (max dⱼ²/γⱼ over improving cols), with a
+            // Bland's-rule fallback (first improving) once a stall is detected.
             let mut enter: Option<usize> = None;
-            let mut best = self.tol;
+            let mut best_score = 0.0f64;
             for j in 0..self.na {
                 if self.stat[j] == BASIC {
                     continue;
@@ -238,8 +245,9 @@ impl<'a> Simplex<'a> {
                         enter = Some(j);
                         break;
                     }
-                    if dj.abs() > best {
-                        best = dj.abs();
+                    let score = dj * dj / gamma[j];
+                    if score > best_score {
+                        best_score = score;
                         enter = Some(j);
                     }
                 }
@@ -317,6 +325,35 @@ impl<'a> Simplex<'a> {
                     };
                 }
                 Some(slot) => {
+                    // Devex reference-weight update — uses the OLD basis (the LU
+                    // still factorizes it until `update` below). Pivot element is
+                    // α at the leaving row; it is nonzero by the ratio test.
+                    let pivot = alpha[slot];
+                    if !bland && pivot.abs() > self.tol {
+                        let gamma_q = gamma[q];
+                        let mut rho = vec![0.0; m];
+                        rho[slot] = 1.0;
+                        if self.lu.btran(&mut rho).is_ok() {
+                            for j in 0..self.na {
+                                if self.stat[j] != BASIC && j != q {
+                                    let arj = dot(&rho, &self.column(j, art_sign));
+                                    let cand = (arj / pivot) * (arj / pivot) * gamma_q;
+                                    if cand > gamma[j] {
+                                        gamma[j] = cand;
+                                    }
+                                }
+                            }
+                            // The leaving variable becomes nonbasic with a fresh weight.
+                            let leaving0 = self.basis[slot];
+                            gamma[leaving0] = (gamma_q / (pivot * pivot)).max(1.0);
+                            // Reframe (reset weights) if drift makes them blow up.
+                            if gamma[leaving0] > 1e10 {
+                                for g in gamma.iter_mut() {
+                                    *g = 1.0;
+                                }
+                            }
+                        }
+                    }
                     let leaving = self.basis[slot];
                     self.stat[leaving] = if leave_to_upper { AT_UPPER } else { AT_LOWER };
                     self.slot_of[leaving] = -1;
