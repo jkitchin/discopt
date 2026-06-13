@@ -6339,6 +6339,36 @@ def _augment_lpdata_with_cover_cuts(lp_data, n_orig: int, cuts):
     )
 
 
+def _extract_clique_edges(model: Model) -> list[tuple[int, int]]:
+    """Conflict-graph 2-clique edges from the Rust presolve clique pass.
+
+    Each edge ``(i, j)`` (flat variable indices) is a pair of binaries that
+    cannot both be 1. Best-effort: returns ``[]`` if the bridge/pass is
+    unavailable."""
+    try:
+        from discopt._jax.presolve_pipeline import run_root_presolve
+        from discopt._rust import model_to_repr
+
+        repr_ = model_to_repr(model, getattr(model, "_builder", None))
+        _, stats = run_root_presolve(
+            repr_,
+            cliques=True,
+            eliminate=False,
+            aggregate=False,
+            redundancy=False,
+            implied_bounds=False,
+            coefficient_strengthening=False,
+            factorable_elim=False,
+            fbbt=False,
+            simplify=False,
+            probing=False,
+        )
+        return list(stats.get("cliques", {}).get("edges", []) or [])
+    except Exception as e:
+        logger.debug("clique edge extraction skipped: %s", e)
+        return []
+
+
 def _root_cover_cut_loop(
     lp_data,
     n_orig: int,
@@ -6347,18 +6377,26 @@ def _root_cover_cut_loop(
     b_ub_orig,
     t_start: float,
     time_limit: float,
+    clique_edges=(),
     max_rounds: int = 5,
     max_total_cuts: int = 500,
 ):
-    """Round-based root knapsack-cover separation (Phase 3).
+    """Round-based root cut separation: knapsack cover + clique cuts (Phase 3).
 
-    Solves the root LP relaxation, separates violated cover cuts from the
-    *original* knapsack rows, augments ``lp_data`` with them, and repeats.
-    Returns the (possibly augmented) ``lp_data`` and the number of cuts added.
-    A no-op when there are no binary-knapsack rows."""
-    from discopt._jax.cover_cuts import has_binary_knapsack_rows, separate_cover_cuts
+    Solves the root LP relaxation, separates violated cover cuts (from the
+    *original* knapsack rows) and violated clique cuts (from the presolve
+    conflict-graph edges), augments ``lp_data``, and repeats. Returns the
+    (possibly augmented) ``lp_data`` and the number of cuts added. A no-op when
+    there are neither binary-knapsack rows nor clique edges."""
+    from discopt._jax.cover_cuts import (
+        has_binary_knapsack_rows,
+        separate_clique_cuts,
+        separate_cover_cuts,
+    )
 
-    if A_ub_orig is None or not has_binary_knapsack_rows(A_ub_orig, b_ub_orig, is_binary):
+    has_cover = A_ub_orig is not None and has_binary_knapsack_rows(A_ub_orig, b_ub_orig, is_binary)
+    has_clique = bool(clique_edges)
+    if not has_cover and not has_clique:
         return lp_data, 0
 
     import jax.numpy as jnp
@@ -6379,7 +6417,18 @@ def _root_cover_cut_loop(
         if int(state.converged) != 1:  # need a converged optimum to separate
             break
         x_star = np.asarray(state.x)[:n_orig]
-        cuts = separate_cover_cuts(A_ub_orig, b_ub_orig, x_star, is_binary)
+        cuts: list[tuple[frozenset, float]] = []
+        seen: set[frozenset] = set()
+        sources = []
+        if has_cover:
+            sources.append(separate_cover_cuts(A_ub_orig, b_ub_orig, x_star, is_binary))
+        if has_clique:
+            sources.append(separate_clique_cuts(clique_edges, x_star))
+        for found in sources:
+            for cover, rhs in found:
+                if cover not in seen:
+                    seen.add(cover)
+                    cuts.append((cover, rhs))
         if not cuts:
             break
         lp_data = _augment_lpdata_with_cover_cuts(lp_data, n_orig, cuts)
@@ -6387,6 +6436,48 @@ def _root_cover_cut_loop(
         if total >= max_total_cuts:
             break
     return lp_data, total
+
+
+def _root_dive(lp_data, n_orig, int_idx, t_start, time_limit, max_steps=None):
+    """Fractional diving from the root LP to find an early incumbent (Phase 3).
+
+    Repeatedly solve the LP relaxation, fix the most-fractional unfixed integer
+    variable to its nearest integer, and re-solve, until every integer is
+    integral (an incumbent) or a fix makes the LP non-optimal (dive abandoned).
+    Returns ``(objective, x_orig)`` in minimization sense, or ``None``. An early
+    incumbent front-loads pruning and reduced-cost fixing.
+    """
+    if not int_idx:
+        return None
+    import jax.numpy as jnp
+
+    from discopt._jax.lp_ipm import lp_ipm_solve
+
+    xl = np.asarray(lp_data.x_l, dtype=np.float64).copy()
+    xu = np.asarray(lp_data.x_u, dtype=np.float64).copy()
+    c = jnp.asarray(lp_data.c)
+    A = jnp.asarray(lp_data.A_eq)
+    b = jnp.asarray(lp_data.b_eq)
+    steps = max_steps if max_steps is not None else len(int_idx) + 1
+    for _ in range(steps):
+        if time.perf_counter() - t_start >= time_limit:
+            return None
+        state = lp_ipm_solve(c, A, b, jnp.asarray(xl), jnp.asarray(xu))
+        if int(state.converged) != 1:
+            return None  # infeasible/stalled fix -> abandon the dive
+        x = np.asarray(state.x)
+        fracs = [
+            (j, abs(x[j] - round(x[j])))
+            for j in int_idx
+            if xl[j] != xu[j] and abs(x[j] - round(x[j])) > 1e-6
+        ]
+        if not fracs:
+            return float(state.obj) + float(lp_data.obj_const), x[:n_orig]
+        j = max(fracs, key=lambda t: t[1])[0]
+        v = float(round(x[j]))
+        xl[j] = v
+        xu[j] = v
+    return None
 
 
 def _solve_milp_bb(
@@ -6446,19 +6537,23 @@ def _solve_milp_bb(
         np.asarray(lp_data.A_eq), np.asarray(lp_data.b_eq), n_orig, _n_total0 - n_orig
     )
     try:
-        lp_data, _n_cover = _root_cover_cut_loop(
+        _is_bin = _binary_mask(model, n_orig)
+        # Conflict-graph clique edges (only worth extracting if binaries exist).
+        _clique_edges = _extract_clique_edges(model) if bool(_is_bin.any()) else []
+        lp_data, _n_cuts = _root_cover_cut_loop(
             lp_data,
             n_orig,
-            _binary_mask(model, n_orig),
+            _is_bin,
             _A_ub_m,
             _b_ub_m,
             t_start,
             time_limit,
+            clique_edges=_clique_edges,
         )
-        if _n_cover:
-            logger.info("root cover cuts added %d valid inequalities", _n_cover)
+        if _n_cuts:
+            logger.info("root cuts added %d valid inequalities (cover + clique)", _n_cuts)
     except Exception as _cc_exc:
-        logger.debug("root cover cuts skipped: %s", _cc_exc)
+        logger.debug("root cuts skipped: %s", _cc_exc)
 
     t_rust_start = time.perf_counter()
     tree = PyTreeManager(n_vars, lb.tolist(), ub.tolist(), int_offsets, int_sizes, strategy)
@@ -6466,6 +6561,16 @@ def _solve_milp_bb(
     if _root_incumbent is not None:
         _z_inc, _x_inc = _root_incumbent
         tree.inject_incumbent(np.asarray(_x_inc[:n_vars], dtype=np.float64).copy(), float(_z_inc))
+    # Root fractional diving (Phase 3): an early incumbent front-loads pruning
+    # and reduced-cost fixing. The tree keeps the best of any injected points.
+    try:
+        _int_idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
+        _dive = _root_dive(lp_data, n_orig, _int_idx, t_start, time_limit)
+        if _dive is not None:
+            _dz, _dx = _dive
+            tree.inject_incumbent(np.asarray(_dx[:n_vars], dtype=np.float64).copy(), float(_dz))
+    except Exception as _dive_exc:
+        logger.debug("root dive skipped: %s", _dive_exc)
     rust_time += time.perf_counter() - t_rust_start
 
     # A node relaxation that stalled at the iteration limit (converged==3) is
