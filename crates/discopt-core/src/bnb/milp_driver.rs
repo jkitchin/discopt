@@ -78,6 +78,8 @@ pub struct MilpOptions {
     pub node_cuts: bool,
     /// Cap on the total number of pooled cuts (root + node).
     pub max_pool_cuts: usize,
+    /// Rounding primal heuristic at fractional nodes (early incumbents).
+    pub heuristics: bool,
     /// Root feasibility-based bound tightening (sound, dimension-preserving).
     pub presolve: bool,
     /// Limited strong branching on unreliable candidates (reliability branching).
@@ -293,6 +295,25 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
                         .iter()
                         .enumerate()
                         .all(|(j, &it)| !it || frac(xs[j]) <= INT_TOL);
+                    // Primal heuristic: round this fractional point and inject a
+                    // feasible incumbent early so the tree prunes more.
+                    if opts.heuristics && !feasible {
+                        if let Some((cand, cobj)) = try_rounding(
+                            &sol.x,
+                            ns,
+                            &is_int,
+                            &a_w,
+                            &b_w,
+                            &c_w,
+                            &l_w[..ns],
+                            &u_w[..ns],
+                            n_orig_rows,
+                            n_w,
+                            obj_const,
+                        ) {
+                            tm.inject_incumbent(cand, cobj);
+                        }
+                    }
                     // Node-level cover separation: a fractional node exposes
                     // violated covers the root never sees. These are globally
                     // valid, so they go into the shared pool (added between
@@ -623,6 +644,63 @@ fn extend_basis(mut basis: Basis, n_w: usize) -> Basis {
     basis
 }
 
+/// Rounding primal heuristic: round the integer variables of an LP point and,
+/// if the rounded point satisfies the original `≤` rows and the (global)
+/// variable bounds, return it with its objective. Tries nearest-rounding, then
+/// floor (which can only lower the activity of a nonnegative-weight `≤` row, so
+/// it is feasible for knapsack-like rows). Returns the better feasible candidate.
+/// Cheap (`O(ns · n_orig_rows)`); an early incumbent prunes the whole tree.
+#[allow(clippy::too_many_arguments)]
+fn try_rounding(
+    x: &[f64],
+    ns: usize,
+    is_int: &[bool],
+    a_w: &[f64],
+    b_w: &[f64],
+    c_w: &[f64],
+    glb: &[f64],
+    gub: &[f64],
+    n_orig_rows: usize,
+    n_w: usize,
+    obj_const: f64,
+) -> Option<(Vec<f64>, f64)> {
+    let feasible = |xc: &[f64]| -> bool {
+        for i in 0..n_orig_rows {
+            let mut act = 0.0;
+            for j in 0..ns {
+                act += a_w[i * n_w + j] * xc[j];
+            }
+            if act > b_w[i] + 1e-6 {
+                return false;
+            }
+        }
+        true
+    };
+    let obj = |xc: &[f64]| -> f64 { (0..ns).map(|j| c_w[j] * xc[j]).sum::<f64>() + obj_const };
+
+    let make = |round: &dyn Fn(f64) -> f64| -> Vec<f64> {
+        (0..ns)
+            .map(|j| {
+                let v = if is_int[j] { round(x[j]) } else { x[j] };
+                v.clamp(glb[j], gub[j])
+            })
+            .collect()
+    };
+
+    let mut best: Option<(Vec<f64>, f64)> = None;
+    let mut consider = |xc: Vec<f64>| {
+        if feasible(&xc) {
+            let o = obj(&xc);
+            if best.as_ref().map(|(_, bo)| o < *bo).unwrap_or(true) {
+                best = Some((xc, o));
+            }
+        }
+    };
+    consider(make(&|v: f64| v.round()));
+    consider(make(&|v: f64| v.floor()));
+    best
+}
+
 fn frac(v: f64) -> f64 {
     let f = v - v.floor();
     f.min(1.0 - f)
@@ -649,6 +727,7 @@ mod tests {
             cut_rounds: 3,
             node_cuts: true,
             max_pool_cuts: 500,
+            heuristics: true,
             presolve: true,
             strong_branch: true,
             sb_max_cands: 8,
