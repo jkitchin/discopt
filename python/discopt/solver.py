@@ -6356,9 +6356,26 @@ def _augment_lpdata_with_cover_cuts(lp_data, n_orig: int, cuts):
 # guarded) but, in this JAX stack, adding cut rows changes the LP shape and
 # forces the interior-point solver to recompile for the augmented problem. On
 # hard MILPs the one-time cost is dwarfed by the node reductions, but on trivial
-# instances it dominates, so GMI is OFF by default and opt-in. Enable globally
-# with ``discopt.solver.GOMORY_CUTS_ENABLED = True``.
-GOMORY_CUTS_ENABLED = False
+# instances it dominates. A size-gate enables GMI automatically only once a
+# problem has enough integer variables to amortize that cost.
+#
+# ``GOMORY_CUTS_ENABLED`` is a hard override: ``True``/``False`` force GMI on/off
+# for every solve; ``None`` (the default) defers to the size-gate, which turns
+# GMI on when the integer-variable count is at least ``GOMORY_MIN_INT_VARS``.
+# The threshold is a heuristic — calibrate it against a size-sweep benchmark.
+GOMORY_CUTS_ENABLED: bool | None = None
+GOMORY_MIN_INT_VARS = 25
+
+
+def _gomory_enabled(n_int: int) -> bool:
+    """Whether to run Gomory cuts for a problem with ``n_int`` integer variables.
+
+    Honors the ``GOMORY_CUTS_ENABLED`` override; otherwise applies the size-gate
+    (``n_int >= GOMORY_MIN_INT_VARS``) so the recompile cost is only paid when
+    the problem is large enough for cut-driven node reductions to repay it."""
+    if GOMORY_CUTS_ENABLED is not None:
+        return bool(GOMORY_CUTS_ENABLED)
+    return n_int >= GOMORY_MIN_INT_VARS
 
 
 def _augment_lpdata_with_gomory_cuts(lp_data, coeffs: np.ndarray, rhs: np.ndarray):
@@ -6736,12 +6753,14 @@ def _solve_milp_bb(
         _is_bin = _binary_mask(model, n_orig)
         # Conflict-graph clique edges (only worth extracting if binaries exist).
         _clique_edges = _extract_clique_edges(model) if bool(_is_bin.any()) else []
-        # Gomory cuts are opt-in (see GOMORY_CUTS_ENABLED): passing no integer
-        # indices disables the GMI branch, so the loop runs exactly as it did
-        # before GMI (cover/clique only) with no added per-solve cost.
+        # Gomory cuts gated by size (see _gomory_enabled): passing no integer
+        # indices disables the GMI branch, so for problems below the threshold
+        # the loop runs exactly as it did before GMI (cover/clique only) with no
+        # added per-solve cost.
+        _n_int = sum(int(sz) for sz in int_sizes)
         _cut_int_idx = (
             [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
-            if GOMORY_CUTS_ENABLED
+            if _gomory_enabled(_n_int)
             else []
         )
         lp_data, _n_cuts = _root_cover_cut_loop(

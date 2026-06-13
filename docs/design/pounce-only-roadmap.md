@@ -681,10 +681,26 @@ shared seam and falls back to whichever backend is importable.
     basis-recovery/GMI work unless an integer variable is fractional at the
     vertex, and stop after round 0 when there are no cover/clique cuts to
     re-separate. `TestGomoryWiring` enables the flag explicitly.
-  - **Open (future):** an automatic size/hardness gate to turn GMI on for the
-    problems that benefit; GMI re-separation across rounds (needs robust
-    conditioning of repeatedly-augmented systems); MIR cuts; and robust
-    handling of non-converged augmented node LPs.
+  - **Increment 5e — automatic size-gate (prototype).** `_gomory_enabled(n_int)`
+    turns GMI on automatically once a problem has enough integer variables to
+    amortize the one-time recompile, so the benefit reaches real MILPs without a
+    manual flag while trivial instances still pay nothing. `GOMORY_CUTS_ENABLED`
+    becomes a tri-state hard override (`True`/`False` force on/off; `None`, the
+    default, defers to the gate); `GOMORY_MIN_INT_VARS` (default 25) is the
+    threshold. The threshold is a **heuristic placeholder** — the honest next
+    step is a size-sweep benchmark to find the actual crossover where node
+    reductions repay the compile, and ideally a hardness signal (e.g. root
+    fractional-integer count or LP-relaxation gap) rather than raw size. Below
+    the threshold the call site passes no integer indices, so small problems run
+    exactly as before GMI. Tested by `TestGomorySizeGate` (gate logic, the
+    default keeps a 4-integer MILP off, and lowering the threshold auto-enables
+    GMI while staying correct on the formerly-failing knapsack).
+  - **Open (future):** calibrate the size-gate / replace it with a hardness
+    signal; GMI re-separation across rounds (needs robust conditioning of
+    repeatedly-augmented systems); MIR cuts; robust handling of non-converged
+    augmented node LPs; and — to make cuts cheap enough to keep always-on — a
+    fixed-shape (padded or shape-polymorphic) IPM so adding cut rows no longer
+    triggers a JAX recompile.
 - **Basis cuts:** Gomory mixed-integer and MIR at the root and at periodic
   re-solves, feeding the existing `CutPool`
   (`python/discopt/_jax/cutting_planes.py`; cap/aging/dedup already there).

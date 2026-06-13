@@ -226,3 +226,49 @@ class TestGomoryWiring:
         assert abs(r_gmi.objective - (-10.0)) < 1e-4  # correct optimum (was -8)
         assert abs(r_gmi.objective - r_nogmi.objective) < 1e-4
         assert r_gmi.node_count <= r_nogmi.node_count  # cuts never worsen the tree
+
+
+class TestGomorySizeGate:
+    """GMI is gated by problem size so small instances don't pay the JAX
+    recompile cost; ``GOMORY_CUTS_ENABLED`` is a hard override."""
+
+    def test_gate_logic(self, monkeypatch):
+        import discopt.solver as S
+
+        # Auto mode: enable at/above the threshold, disable below.
+        monkeypatch.setattr(S, "GOMORY_CUTS_ENABLED", None)
+        monkeypatch.setattr(S, "GOMORY_MIN_INT_VARS", 25)
+        assert S._gomory_enabled(24) is False
+        assert S._gomory_enabled(25) is True
+        assert S._gomory_enabled(100) is True
+        # Hard overrides ignore the threshold.
+        monkeypatch.setattr(S, "GOMORY_CUTS_ENABLED", True)
+        assert S._gomory_enabled(0) is True
+        monkeypatch.setattr(S, "GOMORY_CUTS_ENABLED", False)
+        assert S._gomory_enabled(1000) is False
+
+    def test_small_problem_gated_off_by_default(self):
+        # Default threshold keeps a tiny MILP (4 integers) off the GMI path, so
+        # the common case pays nothing.
+        import discopt.solver as S
+
+        assert S.GOMORY_CUTS_ENABLED is None  # auto by default
+        assert S._gomory_enabled(4) is False
+
+    def test_gate_auto_enables_and_stays_correct(self, monkeypatch):
+        # Lower the threshold so the size-gate (not the override) turns GMI on,
+        # and confirm the gated path is still correct on the knapsack that the
+        # naive GMI got wrong.
+        pytest.importorskip("pounce")
+        import discopt.solver as S
+
+        monkeypatch.setattr(S, "GOMORY_CUTS_ENABLED", None)  # auto
+        monkeypatch.setattr(S, "GOMORY_MIN_INT_VARS", 4)  # gate ON for 4 ints
+
+        m = dm.Model("k")
+        xs = [m.binary(f"x{i}") for i in range(4)]
+        m.minimize(-(10 * xs[0] + 9 * xs[1] + 8 * xs[2] + 1 * xs[3]))
+        m.subject_to(5 * xs[0] + 5 * xs[1] + 5 * xs[2] + 5 * xs[3] <= 9)
+        r = m.solve(use_highs_milp=False, time_limit=60)
+        assert r.status == "optimal"
+        assert abs(r.objective - (-10.0)) < 1e-4
