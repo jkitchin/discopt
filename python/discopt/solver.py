@@ -6538,6 +6538,75 @@ def _separate_gomory_cuts(lp_data, x_vertex, n_orig, int_idx, max_cuts: int = 8)
     return np.array(proj_coeffs, dtype=np.float64), np.array(proj_rhs, dtype=np.float64)
 
 
+def _augment_lpdata_with_mir_cuts(lp_data, coeffs: np.ndarray, rhs: np.ndarray):
+    """Add MIR cuts ``coeffs[i] · x <= rhs[i]`` to the standard-form LP, each
+    with a non-negative slack column (``coeffs·x + s = rhs``).
+
+    MIR cuts are over the structural columns with O(1) coefficients (no slack
+    coupling), so the augmented relaxation stays well-conditioned. A small rhs
+    relaxation guards against floating-point error in the separation point so a
+    cut cannot exclude a true integer point."""
+    A = np.asarray(lp_data.A_eq, dtype=np.float64)
+    b = np.asarray(lp_data.b_eq, dtype=np.float64)
+    c = np.asarray(lp_data.c, dtype=np.float64)
+    xl = np.asarray(lp_data.x_l, dtype=np.float64)
+    xu = np.asarray(lp_data.x_u, dtype=np.float64)
+    m_rows, n_cols = A.shape
+    k = coeffs.shape[0]
+    newA = np.zeros((m_rows + k, n_cols + k), dtype=np.float64)
+    newA[:m_rows, :n_cols] = A
+    newb = np.concatenate([b, np.zeros(k, dtype=np.float64)])
+    for i in range(k):
+        row = np.asarray(coeffs[i], dtype=np.float64)
+        margin = 1e-7 * (1.0 + float(np.abs(row).sum()))  # safe-cut rhs relaxation
+        newA[m_rows + i, :n_cols] = row
+        newA[m_rows + i, n_cols + i] = 1.0  # slack: coeffs·x + s = rhs, s >= 0
+        newb[m_rows + i] = float(rhs[i]) + margin
+    return lp_data._replace(
+        A_eq=newA,
+        b_eq=newb,
+        c=np.concatenate([c, np.zeros(k, dtype=np.float64)]),
+        x_l=np.concatenate([xl, np.zeros(k, dtype=np.float64)]),
+        x_u=np.concatenate([xu, np.full(k, 1e20, dtype=np.float64)]),
+    )
+
+
+def _separate_mir_cuts(lp_data, x_vertex, n_orig, int_idx, a_ub_orig, b_ub_orig, max_cuts: int = 8):
+    """Separate MIR cuts from the original ``<=`` rows at the crossover vertex
+    via the Rust ``_rust`` binding, embedded into the current columns.
+
+    Returns ``(coeffs, rhs)`` over the current standard-form columns (structural
+    entries set, slacks zero) or ``None`` when the binding is unavailable, the
+    structural lower bounds are not finite (the MIR shift needs them), or no cut
+    is produced. Only the integer-constrained structural columns are marked
+    integral, so the cuts are sound."""
+    if a_ub_orig is None or np.asarray(a_ub_orig).shape[0] == 0:
+        return None
+    try:
+        from discopt._rust import mir_cuts_py
+    except ImportError:
+        return None
+    lo = np.asarray(lp_data.x_l, dtype=np.float64)[:n_orig]
+    if not np.all(np.isfinite(lo)):
+        return None  # MIR's lower-bound shift requires finite lower bounds
+    integ = np.zeros(n_orig, dtype=bool)
+    integ[[j for j in int_idx if j < n_orig]] = True
+    res = mir_cuts_py(
+        np.ascontiguousarray(a_ub_orig, dtype=np.float64),
+        np.ascontiguousarray(b_ub_orig, dtype=np.float64),
+        np.ascontiguousarray(lo),
+        integ,
+        np.ascontiguousarray(np.asarray(x_vertex, dtype=np.float64)[:n_orig]),
+    )
+    if res is None:
+        return None
+    coeffs, rhs = np.asarray(res[0], dtype=np.float64), np.asarray(res[1], dtype=np.float64)
+    n_cur = int(np.asarray(lp_data.A_eq).shape[1])
+    embedded = np.zeros((coeffs.shape[0], n_cur), dtype=np.float64)
+    embedded[:, :n_orig] = coeffs[:, :n_orig]
+    return embedded[:max_cuts], rhs[:max_cuts]
+
+
 def _extract_clique_edges(model: Model) -> list[tuple[int, int]]:
     """Conflict-graph 2-clique edges from the Rust presolve clique pass.
 
@@ -6724,6 +6793,18 @@ def _root_cover_cut_loop(
                 gc, gr = gom
                 lp_data = _augment_lpdata_with_gomory_cuts(lp_data, gc, gr)
                 round_added += int(gc.shape[0])
+        # MIR cuts from the original <= rows (basis-free; complements GMI). Same
+        # POUNCE-mode gate (has_gomory) and round-0-only policy.
+        if has_gomory and _round == 0:
+            try:
+                mir = _separate_mir_cuts(lp_data, x_vertex, n_orig, int_idx, A_ub_orig, b_ub_orig)
+            except Exception as _mir_exc:
+                logger.debug("mir separation skipped: %s", _mir_exc)
+                mir = None
+            if mir is not None:
+                mc, mr = mir
+                lp_data = _augment_lpdata_with_mir_cuts(lp_data, mc, mr)
+                round_added += int(mc.shape[0])
         if cuts:  # cover/clique reference original columns (< n_orig), still valid
             lp_data = _augment_lpdata_with_cover_cuts(lp_data, n_orig, cuts)
             round_added += len(cuts)

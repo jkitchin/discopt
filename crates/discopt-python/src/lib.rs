@@ -34,5 +34,6 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lp_bindings::crossover_to_vertex_py, m)?)?;
     m.add_function(wrap_pyfunction!(lp_bindings::recover_basis_py, m)?)?;
     m.add_function(wrap_pyfunction!(lp_bindings::gomory_cuts_py, m)?)?;
+    m.add_function(wrap_pyfunction!(lp_bindings::mir_cuts_py, m)?)?;
     Ok(())
 }

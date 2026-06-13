@@ -14,6 +14,7 @@
 use discopt_core::lp::basis::recover_basis;
 use discopt_core::lp::crossover::{crossover_to_vertex, LpView};
 use discopt_core::lp::gomory::separate_gomory;
+use discopt_core::lp::mir::separate_mir;
 use numpy::{
     PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods,
 };
@@ -144,6 +145,52 @@ pub fn gomory_cuts_py<'py>(
     );
 
     let k = cuts.len();
+    let mut flat = Vec::with_capacity(k * n);
+    let mut rhs = Vec::with_capacity(k);
+    for cut in &cuts {
+        flat.extend_from_slice(&cut.coeffs);
+        rhs.push(cut.rhs);
+    }
+    let coeffs = PyArray1::from_vec(py, flat).reshape([k, n])?;
+    Ok(Some((coeffs, PyArray1::from_vec(py, rhs))))
+}
+
+/// Separate MIR cuts from the `≤` rows `a_ub · x ≤ b_ub` at point `x`.
+///
+/// `a_ub` is C-contiguous `m × n`; `lb` the length-`n` lower bounds;
+/// `integrality` a length-`n` bool array. Returns `(coeffs, rhs)` — a `k × n`
+/// array and length-`k` rhs, the cuts `coeffs[i] · x ≤ rhs[i]` over the
+/// structural variables — or `None` when no cut is produced.
+#[pyfunction]
+#[pyo3(signature = (a_ub, b_ub, lb, integrality, x, tol=1e-7, max_dynamism=1e7))]
+pub fn mir_cuts_py<'py>(
+    py: Python<'py>,
+    a_ub: PyReadonlyArray2<'py, f64>,
+    b_ub: PyReadonlyArray1<'py, f64>,
+    lb: PyReadonlyArray1<'py, f64>,
+    integrality: PyReadonlyArray1<'py, bool>,
+    x: PyReadonlyArray1<'py, f64>,
+    tol: f64,
+    max_dynamism: f64,
+) -> PyResult<Option<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>)>> {
+    let dims = a_ub.shape();
+    let n = dims[1];
+    let a_flat = a_ub
+        .as_slice()
+        .map_err(|_| PyValueError::new_err("`a_ub` must be C-contiguous"))?;
+    let cuts = separate_mir(
+        a_flat,
+        b_ub.as_slice()?,
+        lb.as_slice()?,
+        integrality.as_slice()?,
+        x.as_slice()?,
+        tol,
+        max_dynamism,
+    );
+    let k = cuts.len();
+    if k == 0 {
+        return Ok(None);
+    }
     let mut flat = Vec::with_capacity(k * n);
     let mut rhs = Vec::with_capacity(k);
     for cut in &cuts {

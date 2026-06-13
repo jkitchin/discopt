@@ -709,9 +709,28 @@ shared seam and falls back to whichever backend is importable.
     through POUNCE in POUNCE mode (JAX IPM otherwise), so the residual recompile
     when GMI augments the shape mid-loop is gone too. The relaxation point is
     only a separation seed, so cut validity is unaffected by the engine.
-  - **Open (future):** MIR cuts; GMI re-separation across rounds; and, if
-    batched-GPU node solving becomes a priority, a fixed-shape (padded /
-    shape-polymorphic) JAX IPM so cuts stay cheap there as well.
+  - **Increment 7 — MIR cuts from original rows — DONE.** `lp/mir.rs`
+    (`separate_mir`) separates Mixed-Integer Rounding cuts directly from the
+    model's `≤` rows, complementing GMI (which applies the MIR function to
+    *tableau* rows): for `Σ a_j x_j ≤ b` shifted to `x' = x − l ≥ 0`, with
+    `f = frac(b')`, integer columns get `⌊a_j⌋ + (f_j − f)^+/(1−f)` and
+    continuous columns `min(a_j,0)/(1−f)`, rhs `⌊b'⌋`. Single-row MIR is only as
+    strong as the row scaling, so each row is tried at `δ = 1` and `1/|a_j|` per
+    integer column and the most-violated valid cut is kept, then mapped back to
+    the original `x`. Basis-free and structural (O(1) coefficients), so it
+    composes with Path B without recompile; numerically guarded
+    (`FRAC_MIN`/`MAX_ABS_COEFF`/dynamism) and validated by exhaustive
+    integer-hull enumeration over random rows (`lp::mir` tests). Exposed via
+    `discopt._rust.mir_cuts_py`, wired into the cut loop alongside GMI under the
+    same POUNCE-mode gate, and added with its own `≤`-slack
+    (`_augment_lpdata_with_mir_cuts`). `TestMirCuts` covers the binding and a
+    POUNCE-mode end-to-end correctness check against HiGHS. Upper-bound
+    complementation and aggregation-based c-MIR (multi-row) are the strengthening
+    follow-ups.
+  - **Open (future):** c-MIR aggregation + upper-bound complementation; GMI/MIR
+    re-separation across rounds; and, if batched-GPU node solving becomes a
+    priority, a fixed-shape (padded / shape-polymorphic) JAX IPM so cuts stay
+    cheap there too.
 - **Basis cuts:** Gomory mixed-integer and MIR at the root and at periodic
   re-solves, feeding the existing `CutPool`
   (`python/discopt/_jax/cutting_planes.py`; cap/aging/dedup already there).

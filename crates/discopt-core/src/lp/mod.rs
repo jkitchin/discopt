@@ -14,3 +14,4 @@
 pub mod basis;
 pub mod crossover;
 pub mod gomory;
+pub mod mir;

@@ -269,3 +269,47 @@ class TestGomoryGate:
         )
         assert r.status == SolveStatus.OPTIMAL
         assert abs(r.objective - (-10.0)) < 1e-4
+
+
+class TestMirCuts:
+    """MIR cuts from original ``<=`` rows (basis-free, complement GMI)."""
+
+    def test_mir_binding_rounds_row_and_is_valid(self):
+        if not hasattr(rust, "mir_cuts_py"):
+            pytest.skip("mir binding not built")
+        # x0 + x1 <= 1.5, x0,x1 binary -> MIR x0 + x1 <= 1.
+        a = np.array([[1.0, 1.0]])
+        b = np.array([1.5])
+        lb = np.array([0.0, 0.0])
+        integ = np.array([True, True])
+        x = np.array([0.75, 0.75])
+        res = rust.mir_cuts_py(a, b, lb, integ, x)
+        assert res is not None
+        coeffs, rhs = np.asarray(res[0]), np.asarray(res[1])
+        np.testing.assert_allclose(coeffs[0], [1.0, 1.0], atol=1e-9)
+        assert abs(rhs[0] - 1.0) < 1e-9
+        assert coeffs[0] @ x > rhs[0] + 1e-6  # separates the fractional point
+        # Valid for every integer-feasible point of the row.
+        for b0 in (0, 1):
+            for b1 in (0, 1):
+                if b0 + b1 <= 1.5:
+                    assert coeffs[0] @ np.array([b0, b1]) <= rhs[0] + 1e-6
+
+    def test_mir_in_pounce_solve_stays_correct(self):
+        # solve_milp runs prefer_pounce=True, so MIR (and GMI) are auto-on;
+        # confirm a general-integer MILP matches the HiGHS optimum.
+        pytest.importorskip("pounce")
+        pytest.importorskip("highspy")
+        from discopt.solvers import SolveStatus
+        from discopt.solvers.milp_highs import solve_milp as highs
+        from discopt.solvers.milp_pounce import solve_milp
+
+        rng = np.random.default_rng(7)
+        c = rng.integers(-5, 6, 4).astype(float)
+        A = rng.integers(0, 4, (3, 4)).astype(float)
+        b = (A @ rng.integers(0, 4, 4) + rng.integers(1, 5, 3)).astype(float)
+        kw = dict(c=c, A_ub=A, b_ub=b, bounds=[(0, 5)] * 4, integrality=np.ones(4))
+        rp = solve_milp(**kw)
+        rh = highs(**kw)
+        assert rp.status == SolveStatus.OPTIMAL
+        assert abs(rp.objective - rh.objective) < 1e-3
