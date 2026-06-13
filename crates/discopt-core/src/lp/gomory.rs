@@ -57,7 +57,7 @@ pub struct GomoryCut {
 
 /// Solve the dense `n × n` system `mat · x = rhs` (row-major) by Gaussian
 /// elimination with partial pivoting. Returns `None` if singular to `tol`.
-fn solve_dense(mat: &[f64], n: usize, rhs: &[f64], tol: f64) -> Option<Vec<f64>> {
+pub(crate) fn solve_dense(mat: &[f64], n: usize, rhs: &[f64], tol: f64) -> Option<Vec<f64>> {
     let mut a = mat.to_vec();
     let mut x = rhs.to_vec();
     for col in 0..n {

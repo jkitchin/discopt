@@ -31,13 +31,32 @@ pub const BASIC: i8 = 1;
 /// Nonbasic at upper bound — HiGHS `HighsBasisStatus::kUpper`.
 pub const AT_UPPER: i8 = 2;
 
-/// A recovered LP basis.
+/// A recovered LP basis. `Clone` so a B&B node's optimal basis can be inherited
+/// by its children as the warm-start state.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Basis {
     /// Per-variable status, length `n`: [`BASIC`], [`AT_LOWER`] or [`AT_UPPER`]
     /// (HiGHS `HighsBasisStatus` codes).
     pub col_status: Vec<i8>,
     /// The `m` basic column indices, in the order they entered the basis.
     pub basic_vars: Vec<usize>,
+}
+
+impl Basis {
+    /// Build a basis from an explicit set of `basic` column indices over `n`
+    /// variables, with every other column nonbasic at its lower bound. For a
+    /// standard-form LP with one slack per row this gives the all-slack starting
+    /// basis (pass the slack column indices).
+    pub fn from_basic(n: usize, basic: Vec<usize>) -> Self {
+        let mut col_status = vec![AT_LOWER; n];
+        for &j in &basic {
+            col_status[j] = BASIC;
+        }
+        Self {
+            col_status,
+            basic_vars: basic,
+        }
+    }
 }
 
 /// Incremental rank tracker over `m`-vectors: accepts a column iff it is
