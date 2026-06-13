@@ -1688,6 +1688,7 @@ def solve_model(
             "obbt_with_cutoff",
             "alphabb_cutoff_obbt",
             "obbt_time_limit",
+            "milp_solver",
         )
         for key in amp_option_keys:
             if key in kwargs:

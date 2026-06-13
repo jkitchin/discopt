@@ -106,14 +106,39 @@ def _milp_pounce() -> Callable | None:
         return None
 
 
-def get_milp_solver(prefer_pounce: bool = False) -> Callable:
+def _milp_simplex() -> Callable | None:
+    # Pure-Rust warm-started-simplex B&B; available iff the binding is built.
+    try:
+        from discopt._rust import solve_milp_py  # noqa: F401
+        from discopt.solvers.milp_simplex import solve_milp
+
+        return solve_milp
+    except ImportError:
+        return None
+
+
+def get_milp_solver(prefer_pounce: bool = False, backend: str = "auto") -> Callable:
     """Return a matrix-form ``solve_milp(c, A_ub, ..., integrality, ...)``.
 
-    HiGHS-first by default, POUNCE-first (self-hosted B&B) in POUNCE-only
-    mode; falls back to whichever is importable. Raises :class:`ImportError`
-    only when neither is available.
+    ``backend`` selects the preferred engine: ``"auto"`` (HiGHS-first, or
+    POUNCE-first under ``prefer_pounce``), ``"highs"``, ``"pounce"``, or
+    ``"simplex"`` (the pure-Rust warm-started-simplex B&B). The preferred engine
+    is tried first and the call falls back to the standard order if it is
+    unavailable, so selection never fails when *any* backend is importable.
+    Raises :class:`ImportError` only when none is available.
     """
-    order = (_milp_pounce, _milp_highs) if prefer_pounce else (_milp_highs, _milp_pounce)
+    valid = {"auto", "highs", "pounce", "simplex"}
+    if backend not in valid:
+        raise ValueError(f"Unknown MILP backend {backend!r}; choose from {sorted(valid)}.")
+    base = (_milp_pounce, _milp_highs) if prefer_pounce else (_milp_highs, _milp_pounce)
+    if backend == "simplex":
+        order: tuple[Callable[[], Callable | None], ...] = (_milp_simplex, *base)
+    elif backend == "highs":
+        order = (_milp_highs, *base)
+    elif backend == "pounce":
+        order = (_milp_pounce, *base)
+    else:
+        order = base
     for factory in order:
         solver = factory()
         if solver is not None:

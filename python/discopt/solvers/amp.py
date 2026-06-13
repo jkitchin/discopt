@@ -937,6 +937,7 @@ def _solve_milp_with_oa_recovery(
     convhull_ebd: bool,
     convhull_ebd_encoding: str,
     bound_override: Optional[tuple[np.ndarray, np.ndarray]] = None,
+    milp_solver: str = "auto",
 ):
     """Retry MILP solves after dropping the oldest half of OA cuts on infeasibility."""
     from discopt._jax.milp_relaxation import build_milp_relaxation
@@ -959,9 +960,14 @@ def _solve_milp_with_oa_recovery(
             convhull_ebd_encoding=convhull_ebd_encoding,
             bound_override=bound_override,
         )
+        # Pass `backend` only when non-default so the default path calls
+        # `.solve(time_limit, gap_tolerance)` exactly as before (keeps minimal
+        # `.solve` implementations / mocks working).
+        _backend_kw = {} if milp_solver == "auto" else {"backend": milp_solver}
         milp_result = milp_model.solve(
             time_limit=time_limit,
             gap_tolerance=gap_tolerance,
+            **_backend_kw,
         )
         mip_solve_count += 1
         if milp_result.status != "infeasible" or not active_oa_cuts:
@@ -1611,6 +1617,7 @@ def _run_partitioned_obbt(
     disc_var_pick_hook: Optional[Callable[[dict[str, Any]], Any]] = None,
     disc_add_partition_hook: Optional[Callable[[dict[str, Any]], Any]] = None,
     min_width: float = 1e-6,
+    milp_solver: str = "auto",
 ):
     """Run incumbent-seeded OBBT on AMP's partition-aware MILP relaxation."""
     from discopt._jax.discretization import (
@@ -1771,9 +1778,11 @@ def _run_partitioned_obbt(
             objective_bound_valid=True,
         )
         start = time.perf_counter()
+        _backend_kw = {} if milp_solver == "auto" else {"backend": milp_solver}
         result = subproblem.solve(
             time_limit=subproblem_limit,
             gap_tolerance=gap_tolerance,
+            **_backend_kw,
         )
         total_solve_time += time.perf_counter() - start
         n_mip_solves += 1
@@ -1841,6 +1850,7 @@ def _run_amp_presolve_bound_tightening(
     partition_scaling_factor_update: Optional[Callable[[dict[str, Any]], Any]] = None,
     disc_var_pick_hook: Optional[Callable[[dict[str, Any]], Any]] = None,
     disc_add_partition_hook: Optional[Callable[[dict[str, Any]], Any]] = None,
+    milp_solver: str = "auto",
 ) -> tuple[np.ndarray, np.ndarray, Any]:
     """Run the configured AMP presolve OBBT mode and return tightened bounds."""
     from discopt._jax.obbt import run_obbt
@@ -1901,6 +1911,7 @@ def _run_amp_presolve_bound_tightening(
             partition_scaling_factor_update=partition_scaling_factor_update,
             disc_var_pick_hook=disc_var_pick_hook,
             disc_add_partition_hook=disc_add_partition_hook,
+            milp_solver=milp_solver,
         )
     except Exception as err:
         logger.warning(
@@ -2083,6 +2094,7 @@ def _solve_amp_impl(
     obbt_with_cutoff: bool = False,
     alphabb_cutoff_obbt: bool = True,
     obbt_time_limit: float = 30.0,
+    milp_solver: str = "auto",
 ) -> SolveResult:
     """Solve MINLP globally using Adaptive Multivariate Partitioning (AMP).
 
@@ -2229,6 +2241,11 @@ def _solve_amp_impl(
     convhull_mode = _normalize_convhull_formulation(convhull_formulation)
     if convhull_ebd and convhull_mode != "sos2":
         raise ValueError("convhull_ebd requires convhull_formulation='sos2' or the 'lambda' alias.")
+    _valid_milp_solvers = {"auto", "highs", "pounce", "simplex"}
+    if milp_solver not in _valid_milp_solvers:
+        raise ValueError(
+            f"Unknown milp_solver={milp_solver!r}. Choose one of {sorted(_valid_milp_solvers)}."
+        )
     _resolve_presolve_bt_time_limits(
         remaining=time_limit,
         n_orig=max(1, sum(v.size for v in model._variables)),
@@ -2396,6 +2413,7 @@ def _solve_amp_impl(
                 partition_scaling_factor_update=partition_scaling_factor_update,
                 disc_var_pick_hook=disc_var_pick_hook,
                 disc_add_partition_hook=disc_add_partition_hook,
+                milp_solver=milp_solver,
             )
         except ImportError as err:
             logger.warning("AMP: OBBT presolve unavailable; continuing without it: %s", err)
@@ -2779,6 +2797,7 @@ def _solve_amp_impl(
                 convhull_ebd=convhull_ebd,
                 convhull_ebd_encoding=convhull_ebd_encoding,
                 bound_override=(flat_lb, flat_ub),
+                milp_solver=milp_solver,
             )
             mip_count += iter_mip_count
             oa_cuts = active_oa_cuts
@@ -3316,6 +3335,7 @@ def solve_amp(
     obbt_with_cutoff: bool = False,
     alphabb_cutoff_obbt: bool = True,
     obbt_time_limit: float = 30.0,
+    milp_solver: str = "auto",
 ) -> SolveResult:
     saved_bounds = _snapshot_variable_bounds(model)
     try:
@@ -3351,6 +3371,7 @@ def solve_amp(
             obbt_with_cutoff=obbt_with_cutoff,
             alphabb_cutoff_obbt=alphabb_cutoff_obbt,
             obbt_time_limit=obbt_time_limit,
+            milp_solver=milp_solver,
         )
     finally:
         _restore_variable_bounds(saved_bounds)

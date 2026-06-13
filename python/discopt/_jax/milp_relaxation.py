@@ -131,12 +131,14 @@ class MilpRelaxationModel:
         self,
         time_limit: Optional[float] = None,
         gap_tolerance: float = 1e-4,
+        backend: str = "auto",
     ) -> MilpRelaxationResult:
         from discopt.solvers import SolveStatus
         from discopt.solvers.lp_backend import get_milp_solver
 
-        # HiGHS if present, else POUNCE (self-hosted B&B) — HiGHS-free path.
-        solve_milp = get_milp_solver()
+        # backend="auto": HiGHS if present, else POUNCE. backend="simplex" routes
+        # to the warm-started-simplex B&B (falls back to auto if unavailable).
+        solve_milp = get_milp_solver(backend=backend)
 
         result = solve_milp(
             c=self._c,
