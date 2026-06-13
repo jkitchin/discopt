@@ -2092,7 +2092,12 @@ def solve_model(
             else:
                 return _solve_qp(model, t_start, prefer_pounce=nlp_solver == "pounce")
         elif problem_class == ProblemClass.MILP:
-            if use_highs_milp:
+            # POUNCE-only mode (nlp_solver="pounce") routes to the self-hosted
+            # B&B and bypasses HiGHS entirely (Phase 1 increment 5); the
+            # self-hosted path is sound (incr 1), POUNCE-recovers stalled
+            # nodes (2), purifies incumbents (3), and reduced-cost-fixes (4).
+            _pounce_only = nlp_solver == "pounce"
+            if use_highs_milp and not _pounce_only:
                 highs_result = _solve_milp_highs(model, t_start, time_limit, gap_tolerance)
                 if highs_result is not None:
                     return highs_result
@@ -2104,12 +2109,15 @@ def solve_model(
                 strategy,
                 max_nodes,
                 t_start,
+                prefer_pounce=_pounce_only,
             )
         elif problem_class == ProblemClass.MIQP:
-            # Try HiGHS MIQP first, fall back to B&B with QP relaxations
-            highs_result = _solve_qp_highs(model, t_start, time_limit)
-            if highs_result is not None:
-                return highs_result
+            # Try HiGHS MIQP first (unless POUNCE-only), fall back to B&B.
+            _pounce_only = nlp_solver == "pounce"
+            if not _pounce_only:
+                highs_result = _solve_qp_highs(model, t_start, time_limit)
+                if highs_result is not None:
+                    return highs_result
             return _solve_miqp_bb(
                 model,
                 time_limit,
@@ -2118,6 +2126,7 @@ def solve_model(
                 strategy,
                 max_nodes,
                 t_start,
+                prefer_pounce=_pounce_only,
             )
 
     # --- Convex NLP fast path: skip B&B for convex continuous problems ---
@@ -5302,25 +5311,33 @@ def _mip_recover_relaxation_duals(
     b_eq: Optional[np.ndarray],
     time_limit: Optional[float] = None,
     Q_orig: Optional[np.ndarray] = None,
+    prefer_pounce: bool = False,
 ) -> tuple[
     Optional[dict[str, np.ndarray]],
     Optional[dict[str, np.ndarray]],
     Optional[dict[str, np.ndarray]],
 ]:
     """Re-solve the relaxation with integer variables fixed at their MIP
-    incumbent so HiGHS returns row duals + reduced costs we can map back to
-    discopt's named-dual convention.
+    incumbent so the LP/QP solver returns row duals + reduced costs we can map
+    back to discopt's named-dual convention.
 
-    Pass ``Q_orig`` for QP-style relaxations; omit it for LP-style. Returns
-    ``(None, None, None)`` if recovery is unavailable (HiGHS missing, the
-    fix-and-resolve LP/QP itself fails, or layout mismatch).
+    Pass ``Q_orig`` for QP-style relaxations; omit it for LP-style. With
+    ``prefer_pounce`` the fix-and-resolve uses POUNCE (HiGHS-free path);
+    otherwise HiGHS. Returns ``(None, None, None)`` if recovery is unavailable
+    (solver missing, the fix-and-resolve LP/QP itself fails, or layout
+    mismatch).
 
     Bound multipliers on the fixing bounds for integer columns are zeroed in
     the returned dicts — they reflect the act of fixing, not feasibility of
     the original integer-feasible point.
     """
     try:
-        if Q_orig is None:
+        if prefer_pounce:
+            if Q_orig is None:
+                from discopt.solvers.lp_pounce import solve_lp as _highs_solve_lp
+            else:
+                from discopt.solvers.qp_pounce import solve_qp as _highs_solve_qp
+        elif Q_orig is None:
             from discopt.solvers.lp_highs import solve_lp as _highs_solve_lp
         else:
             from discopt.solvers.qp_highs import solve_qp as _highs_solve_qp
@@ -6285,8 +6302,13 @@ def _solve_milp_bb(
     strategy: str,
     max_nodes: int,
     t_start: float,
+    prefer_pounce: bool = False,
 ) -> SolveResult:
-    """Solve a MILP via B&B with LP relaxation solves at each node."""
+    """Solve a MILP via B&B with LP relaxation solves at each node.
+
+    ``prefer_pounce`` (POUNCE-only mode) routes the incumbent dual recovery
+    through POUNCE instead of HiGHS so the whole solve is HiGHS-free.
+    """
     import jax.numpy as jnp
 
     from discopt._jax.lp_ipm import lp_ipm_solve
@@ -6561,6 +6583,7 @@ def _solve_milp_bb(
                 A_eq=A_eq,
                 b_eq=b_eq,
                 time_limit=max(0.1, time_limit - (time.perf_counter() - t_start)),
+                prefer_pounce=prefer_pounce,
             )
         except Exception as _exc:
             logger.debug("MILP-BB dual recovery failed: %s", _exc)
@@ -6629,8 +6652,13 @@ def _solve_miqp_bb(
     strategy: str,
     max_nodes: int,
     t_start: float,
+    prefer_pounce: bool = False,
 ) -> SolveResult:
-    """Solve a MIQP via B&B with QP relaxation solves at each node."""
+    """Solve a MIQP via B&B with QP relaxation solves at each node.
+
+    ``prefer_pounce`` (POUNCE-only mode) routes the incumbent dual recovery
+    through POUNCE instead of HiGHS so the whole solve is HiGHS-free.
+    """
     import jax.numpy as jnp
 
     from discopt._jax.problem_classifier import extract_qp_data
@@ -6906,6 +6934,7 @@ def _solve_miqp_bb(
                 b_eq=b_eq_,
                 time_limit=max(0.1, time_limit - (time.perf_counter() - t_start)),
                 Q_orig=Q_orig,
+                prefer_pounce=prefer_pounce,
             )
         except Exception as _exc:
             logger.debug("MIQP-BB dual recovery failed: %s", _exc)

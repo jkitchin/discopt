@@ -341,3 +341,53 @@ class TestReducedCostFixing:
         assert with_rcf.status == without_rcf.status == "optimal"
         assert abs(with_rcf.objective - without_rcf.objective) < 1e-6
         assert with_rcf.objective == -10.0
+
+
+# ---------------------------------------------------------------------------
+# Increment 5: POUNCE-only mode routes MILP/MIQP off HiGHS
+# ---------------------------------------------------------------------------
+class TestPounceOnlyRouting:
+    def _no_highs(self, monkeypatch):
+        # Any HiGHS touch (model-level wrappers or matrix solvers) must fail.
+        def boom(*a, **k):
+            raise AssertionError("HiGHS must not be used in pounce-only mode")
+
+        monkeypatch.setattr(S, "_solve_milp_highs", boom)
+        monkeypatch.setattr(S, "_solve_qp_highs", boom)
+        import discopt.solvers.lp_highs as lph
+        import discopt.solvers.qp_highs as qph
+
+        monkeypatch.setattr(lph, "solve_lp", boom)
+        monkeypatch.setattr(qph, "solve_qp", boom)
+
+    def test_milp_pounce_only_is_highs_free(self, monkeypatch):
+        import pytest as _pytest
+
+        _pytest.importorskip("pounce")
+        self._no_highs(monkeypatch)
+        r = _knapsack_milp().solve(nlp_solver="pounce", time_limit=60)
+        assert r.status == "optimal"
+        assert r.gap_certified is True
+        assert abs(r.objective - (-8.0)) < 1e-4
+        assert r.constraint_duals is not None  # recovered via POUNCE, not HiGHS
+
+    def test_miqp_pounce_only_is_highs_free(self, monkeypatch):
+        import pytest as _pytest
+
+        _pytest.importorskip("pounce")
+        self._no_highs(monkeypatch)
+        r = _miqp().solve(nlp_solver="pounce", time_limit=60)
+        assert r.status == "optimal"
+        assert r.gap_certified is True
+        assert abs(r.objective - 0.18) < 1e-3
+
+    def test_default_milp_still_routes_to_highs(self, monkeypatch):
+        pytest_highs = __import__("pytest")
+        pytest_highs.importorskip("highspy")
+        calls = []
+        orig = S._solve_milp_highs
+        monkeypatch.setattr(
+            S, "_solve_milp_highs", lambda *a, **k: (calls.append(1), orig(*a, **k))[1]
+        )
+        _knapsack_milp().solve(time_limit=60)  # default: use_highs_milp=True
+        assert calls, "default MILP must still try HiGHS first"

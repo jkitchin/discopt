@@ -400,7 +400,25 @@ is a trustworthy LP/dual engine. Work breakdown:
     optima becomes the incumbent; `test_solver_duals` was made well-posed
     (unique optimum) so its recovered-dual assertion no longer depends on the
     tie-break.
-- **Open:** flip the MILP/MIQP default off HiGHS behind correctness gates.
+- **Flip off HiGHS — DONE (increment 5).** With `nlp_solver="pounce"` (the
+  POUNCE-only opt-in, mirroring the LP/QP seams), MILP/MIQP now route
+  straight to the self-hosted B&B and bypass HiGHS entirely: the HiGHS
+  pre-try is skipped and the incumbent dual recovery
+  (`_mip_recover_relaxation_duals`) re-solves the fixed relaxation via
+  `lp_pounce`/`qp_pounce` (`prefer_pounce` threaded through both B&B
+  functions). Verified HiGHS-free: with every HiGHS entry point made to
+  raise, `m.solve(nlp_solver="pounce")` solves the knapsack MILP (−8.0,
+  certified, duals recovered) and the MIQP (0.18) correctly; the default
+  mode still tries HiGHS first (routing unchanged). The *global* default
+  flip — removing HiGHS for non-pounce users — is deferred to Phase 4 when
+  HiGHS is dropped as a dependency; flipping a slower engine on for everyone
+  is out of scope for the "cover" milestone.
+
+**Phase 1 complete (cover milestone):** the self-hosted MILP/MIQP B&B is
+sound (incr 1), recovers stalled nodes via POUNCE (2), purifies incumbents
+(3), reduced-cost-fixes at the root (4, MILP), and is fully HiGHS-free in
+POUNCE-only mode (5). Remaining MILP work (cutting planes, crossover,
+competitive performance) lives in Phases 2–3.
 
 - Route pure MILP and MIQP through the existing Rust B&B
   (`crates/discopt-core/src/bnb/`) with POUNCE LP/QP relaxations, replacing
