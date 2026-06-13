@@ -134,12 +134,13 @@ class TestRustCrossover:
         if not hasattr(rust, "gomory_cuts_py"):
             pytest.skip("gomory binding not built")
         a = np.array([[1.0, 1.0, 1.0]])
+        bvec = np.array([1.5])
         c = np.zeros(3)
         lo = np.array([0.0, 0.0, 0.0])
         up = np.array([1.0, 1.0, 1e30])
         x = np.array([1.0, 0.5, 0.0])
         integ = np.array([True, True, False])
-        res = rust.gomory_cuts_py(x, a, c, lo, up, integ)
+        res = rust.gomory_cuts_py(x, a, bvec, c, lo, up, integ)
         assert res is not None
         coeffs, rhs = np.asarray(res[0]), np.asarray(res[1])
         assert coeffs.shape == (1, 3)
@@ -163,7 +164,7 @@ class TestRustCrossover:
         xv = np.asarray(rust.crossover_to_vertex_py(x_int, a, c, lo, up))
         n = a.shape[1]
         integ = np.array([True] * 4 + [False] * (n - 4))  # 4 binaries + slacks
-        res = rust.gomory_cuts_py(xv, a, c, lo, up, integ)
+        res = rust.gomory_cuts_py(xv, a, b, c, lo, up, integ)
         assert res is not None  # xv is a vertex
         coeffs, rhs = np.asarray(res[0]), np.asarray(res[1])
         for i in range(coeffs.shape[0]):

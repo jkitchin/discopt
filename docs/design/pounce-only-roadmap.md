@@ -626,15 +626,37 @@ shared seam and falls back to whichever backend is importable.
     margin cannot absorb this because the cut-value error at an integer point
     scales with that point's *distance from its bound* — unbounded for
     general-integer variables (the failing case had a variable at value 2).
-    Wiring reverted to keep `incorrect_count == 0`. **The crossover + basis +
-    GMI-generation machinery is sound and unit-validated; what is missing for
-    safe integration is a sufficiently accurate basis.** Options for a safe
-    integration (decision pending): (a) restrict GMI to pure 0/1 problems, where
-    the per-point error is bounded by the margin; (b) refine the basis (e.g. an
-    exact rational/iterative-refinement re-solve of `B`) before deriving cuts;
-    (c) keep GMI generation as a validated library entry point and defer
-    in-solver use. The battery test that caught this is the safeguard for any
-    future attempt.
+    Wiring reverted to keep `incorrect_count == 0`.
+  - **Increment 5b — basis refinement (DONE) + wiring (still blocked, deeper
+    cause found).** Chose option (b): `lp/gomory.rs` now reconstructs the vertex
+    and tableau from the *exact* basis and bounds with **iterative refinement**
+    (`solve_refined`) instead of trusting the IPM vertex, snaps the refined
+    `ā_j` to integers within `SNAP_TOL`, and filters on a fractionality band
+    (`FRAC_MIN`) and an absolute coefficient cap (`MAX_ABS_COEFF`).
+    `separate_gomory` now takes `b` (the rhs) and needs no input vertex.
+    **This fixed cut accuracy**: a dedicated general-integer-at-upper-bound unit
+    test (variable at value 2 — the failing class) passes, and with refinement
+    the full `test_milp_pounce` HiGHS battery passes *with GMI wired*, with node
+    reductions on several seeds (3→1).
+    **But a third, deeper failure surfaced and the wiring was reverted again.**
+    On a pure-binary knapsack the solver returned `-8` vs the true `-10` even
+    though every generated cut was valid and the optimum stayed LP-feasible in
+    the augmented system. Cause: the GMI cut came out over the original `≤`-row
+    *slack* (`0.25·x₄ ≥ 1`, where `x₄ ∈ [0, 1e20]`); **stacking that
+    huge-range-slack-coupled cut with the cover cuts makes the augmented LP
+    ill-conditioned and the IPM diverges** (`converged=3`, `obj=nan`), so the
+    B&B prunes on garbage bounds. Cover-cuts-only converges; a single GMI cut
+    converges; the *combination* does not.
+    **Conclusion:** the blocker is no longer cut accuracy (refinement solved
+    that) but **IPM robustness on cut-augmented relaxations**. The clear path
+    forward: *project GMI cuts onto the structural variables* (substitute each
+    slack `x_s = b_row − row·x` so the cut becomes e.g. `Σx ≤ 1`, coefficients
+    O(1), its own bounded `[0,1]` slack) — well-conditioned and decoupled from
+    the `1e20`-range row slacks — plus robust handling of non-converged
+    augmented node LPs. The refined generation + binding are committed as
+    validated building blocks; in-solver use waits on the structural projection.
+    The `test_milp_pounce` battery + the cover-cut end-to-end test are the
+    safeguards for any retry.
 - **Basis cuts:** Gomory mixed-integer and MIR at the root and at periodic
   re-solves, feeding the existing `CutPool`
   (`python/discopt/_jax/cutting_planes.py`; cap/aging/dedup already there).

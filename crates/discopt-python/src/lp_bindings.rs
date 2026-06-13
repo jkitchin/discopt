@@ -96,17 +96,19 @@ pub fn recover_basis_py<'py>(
 
 /// Separate Gomory mixed-integer cuts at the vertex `x` of the standard-form LP.
 ///
-/// Recovers a basis at `x` then derives one GMI cut per fractional integer
-/// basic variable. `integrality` is a length-`n` bool array. Returns
-/// `(coeffs, rhs)` — `coeffs` is a `k × n` array and `rhs` length `k`, the cuts
-/// `coeffs[i] · x ≥ rhs[i]` over the standard-form variables — or `None` when
-/// `x` is not a basic feasible solution (basis recovery declined).
+/// Recovers a basis at `x`, reconstructs the vertex from the exact basis +
+/// bounds + `b` (the length-`m` rhs of `A x = b`), and derives one GMI cut per
+/// fractional integer basic variable. `integrality` is a length-`n` bool array.
+/// Returns `(coeffs, rhs)` — `coeffs` is a `k × n` array and `rhs` length `k`,
+/// the cuts `coeffs[i] · x ≥ rhs[i]` over the standard-form variables — or
+/// `None` when `x` is not a basic feasible solution (basis recovery declined).
 #[pyfunction]
-#[pyo3(signature = (x, a, c, lb, ub, integrality, tol=1e-7, max_dynamism=1e7))]
+#[pyo3(signature = (x, a, b, c, lb, ub, integrality, tol=1e-7, max_dynamism=1e7))]
 pub fn gomory_cuts_py<'py>(
     py: Python<'py>,
     x: PyReadonlyArray1<'py, f64>,
     a: PyReadonlyArray2<'py, f64>,
+    b: PyReadonlyArray1<'py, f64>,
     c: PyReadonlyArray1<'py, f64>,
     lb: PyReadonlyArray1<'py, f64>,
     ub: PyReadonlyArray1<'py, f64>,
@@ -129,10 +131,17 @@ pub fn gomory_cuts_py<'py>(
     };
     let xs = x.as_slice()?;
     let basis = match recover_basis(xs, &lp, tol) {
-        Some(b) => b,
+        Some(bs) => bs,
         None => return Ok(None),
     };
-    let cuts = separate_gomory(&lp, &basis, integrality.as_slice()?, xs, tol, max_dynamism);
+    let cuts = separate_gomory(
+        &lp,
+        b.as_slice()?,
+        &basis,
+        integrality.as_slice()?,
+        tol,
+        max_dynamism,
+    );
 
     let k = cuts.len();
     let mut flat = Vec::with_capacity(k * n);

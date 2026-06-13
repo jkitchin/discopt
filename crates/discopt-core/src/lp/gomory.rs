@@ -1,29 +1,51 @@
 //! Gomory mixed-integer (GMI) cuts from a recovered LP basis.
 //!
-//! Given an optimal basis (from [`super::basis::recover_basis`]) at a vertex
-//! `x*`, the simplex tableau row for a basic variable `x_{B_i}` is
-//! `x_{B_i} + Σ_{j∈N} ā_j x_j = b̄_i`, where `ā = B⁻¹A` restricted to the
-//! nonbasic columns `N` and `b̄_i = x*_{B_i}`. When `x_{B_i}` is an
+//! Given a basis (from [`super::basis::recover_basis`]) the simplex tableau row
+//! for a basic variable `x_{B_i}` is `x_{B_i} + Σ_{j∈N} ā_j x_j = b̄_i`, where
+//! `ā = B⁻¹A` over the nonbasic columns `N`. When `x_{B_i}` is an
 //! integer-constrained variable with a fractional value, this row yields a
-//! **Gomory mixed-integer cut** — a valid inequality that every integer-feasible
-//! point satisfies but `x*` violates.
+//! **Gomory mixed-integer cut** — a valid inequality every integer-feasible
+//! point satisfies but the current fractional vertex violates.
 //!
 //! The derivation works in the *shifted nonbasic space* `x̃_j ≥ 0`
-//! (`x̃_j = x_j − l_j` if `x_j` is nonbasic at its lower bound,
-//! `x̃_j = u_j − x_j` if at its upper bound). With the row written as
-//! `x_{B_i} + Σ_j ᾱ_j x̃_j = β` (so `f₀ = β − ⌊β⌋ = frac(x*_{B_i})`), the GMI
-//! cut is `Σ_j ψ_j x̃_j ≥ 1` with, for `f_j = ᾱ_j − ⌊ᾱ_j⌋`:
+//! (`x̃_j = x_j − l_j` at a lower bound, `u_j − x_j` at an upper bound). With the
+//! row as `x_{B_i} + Σ_j ᾱ_j x̃_j = β` (`f₀ = β − ⌊β⌋`), the GMI cut is
+//! `Σ_j ψ_j x̃_j ≥ 1` with, for `f_j = ᾱ_j − ⌊ᾱ_j⌋`:
 //!
 //! - integer nonbasic `j`: `ψ_j = f_j/f₀` if `f_j ≤ f₀`, else `(1−f_j)/(1−f₀)`;
 //! - continuous nonbasic `j`: `ψ_j = ᾱ_j/f₀` if `ᾱ_j ≥ 0`, else `−ᾱ_j/(1−f₀)`.
 //!
-//! Substituting `x̃` back gives a cut `Σ_j γ_j x_j ≥ δ` in the original
-//! standard-form variables (basic variables do not appear). The cut is valid
-//! for any basis row with an integer basic variable — optimality is not
-//! required — so soundness does not depend on crossover/IPM numerics.
+//! Substituting `x̃` back gives a cut `Σ_j γ_j x_j ≥ δ` over the original
+//! standard-form variables (basic variables do not appear).
+//!
+//! **Numerical safety.** GMI is notoriously sensitive: an inaccurate tableau
+//! coefficient `ā_j` near an integer flips `f_j` between ≈0 and ≈1, an O(1)
+//! error that can make the cut *invalid* and cut off the true integer optimum.
+//! Because the basis comes from an interior-point solve + crossover (accurate
+//! only to ~1e-7), we do **not** trust the input vertex: the basic primal
+//! values `x_B = B⁻¹(b − A_N x_N)` and the tableau rows `B⁻ᵀ e_i` are both
+//! recomputed from the *exact* basis and bounds with **iterative refinement**
+//! (driving the residual to ~machine precision), and the refined `ā_j` are then
+//! snapped to the nearest integer within [`SNAP_TOL`]. This collapses the flip
+//! error so the cut is valid up to machine precision; a small caller-side rhs
+//! margin then absorbs the remainder.
 
 use super::basis::{Basis, AT_UPPER, BASIC};
 use super::crossover::LpView;
+
+/// Tolerance for snapping a refined tableau coefficient to the nearest integer.
+const SNAP_TOL: f64 = 1e-9;
+
+/// Minimum fractionality of a basic variable to cut on. A value nearer than
+/// this to an integer would divide by a tiny `f₀` (or `1−f₀`) and blow the cut
+/// coefficients up to numerically unsafe magnitudes, so we skip it.
+const FRAC_MIN: f64 = 1e-3;
+
+/// Absolute cap on a cut coefficient. A cut with a larger coefficient comes
+/// from an ill-conditioned basis (or a near-integral pivot) and is dropped: it
+/// would dominate the relaxation numerically and is unsafe even when formally
+/// valid.
+const MAX_ABS_COEFF: f64 = 1e7;
 
 /// A generated cut `coeffs · x ≥ rhs` over the standard-form variables.
 pub struct GomoryCut {
@@ -33,7 +55,7 @@ pub struct GomoryCut {
     pub rhs: f64,
 }
 
-/// Solve the dense `n × n` system `mat · w = rhs` (row-major `mat`) by Gaussian
+/// Solve the dense `n × n` system `mat · x = rhs` (row-major) by Gaussian
 /// elimination with partial pivoting. Returns `None` if singular to `tol`.
 fn solve_dense(mat: &[f64], n: usize, rhs: &[f64], tol: f64) -> Option<Vec<f64>> {
     let mut a = mat.to_vec();
@@ -74,23 +96,45 @@ fn solve_dense(mat: &[f64], n: usize, rhs: &[f64], tol: f64) -> Option<Vec<f64>>
     Some(x)
 }
 
-/// Separate Gomory mixed-integer cuts at the basic vertex `x` of `lp`.
+/// Solve `mat · x = rhs` with a few rounds of iterative refinement: after an
+/// initial solve, repeatedly solve `mat · δ = rhs − mat·x` and add `δ`, which
+/// drives the residual toward machine precision for a well-conditioned `mat`.
+fn solve_refined(mat: &[f64], n: usize, rhs: &[f64], tol: f64) -> Option<Vec<f64>> {
+    let mut x = solve_dense(mat, n, rhs, tol)?;
+    for _ in 0..3 {
+        let mut r = rhs.to_vec();
+        for (i, ri) in r.iter_mut().enumerate() {
+            let row: f64 = (0..n).map(|j| mat[i * n + j] * x[j]).sum();
+            *ri -= row;
+        }
+        let dx = solve_dense(mat, n, &r, tol)?;
+        let mut maxdx = 0.0_f64;
+        for (xi, dxi) in x.iter_mut().zip(&dx) {
+            *xi += dxi;
+            maxdx = maxdx.max(dxi.abs());
+        }
+        if maxdx <= 1e-15 {
+            break;
+        }
+    }
+    Some(x)
+}
+
+/// Separate Gomory mixed-integer cuts from the basis of `lp` (`b` is the
+/// length-`m` right-hand side of `A x = b`).
 ///
-/// `basis` is the recovered basis, `integrality[j]` whether variable `j` is
-/// integer-constrained, `tol` the fractionality/zero tolerance, and
-/// `max_dynamism` the largest allowed `max|coeff| / min nonzero |coeff|` ratio
-/// (cuts exceeding it are dropped as numerically unsafe). Returns one cut per
-/// fractional integer basic variable that produces a numerically sound
-/// inequality.
-///
-/// The right-hand side `b` of `A x = b` is not needed: each basic variable's
-/// value is read directly from `x` (which `recover_basis` guarantees is
-/// consistent with `A_B x_B = b − A_N x_N`).
+/// The vertex is reconstructed from the exact basis and bounds (not from any
+/// approximate input point): nonbasic variables sit at the bound named by
+/// `basis.col_status`, and the basic values come from a refined solve of
+/// `B x_B = b − A_N x_N`. `integrality[j]` marks integer-constrained variables,
+/// `tol` is the fractionality/zero tolerance, and `max_dynamism` caps a cut's
+/// `max|coeff| / min nonzero |coeff|` ratio. Returns one cut per fractional
+/// integer basic variable that yields a numerically sound inequality.
 pub fn separate_gomory(
     lp: &LpView<'_>,
+    b: &[f64],
     basis: &Basis,
     integrality: &[bool],
-    x: &[f64],
     tol: f64,
     max_dynamism: f64,
 ) -> Vec<GomoryCut> {
@@ -100,8 +144,17 @@ pub fn separate_gomory(
         return cuts;
     }
 
-    // B^T (row-major m×m): row r is basis column basic_vars[r].
-    // bt[r*m + c] = B[c][r] = a[c*n + basic_vars[r]].
+    // B (row-major m×m): column k is basis column basic_vars[k].
+    let bmat: Vec<f64> = {
+        let mut v = vec![0.0_f64; m * m];
+        for i in 0..m {
+            for (k, &bv) in basis.basic_vars.iter().enumerate() {
+                v[i * m + k] = a[i * n + bv];
+            }
+        }
+        v
+    };
+    // Bᵀ (row-major m×m): row r is basis column basic_vars[r].
     let bt: Vec<f64> = {
         let mut v = vec![0.0_f64; m * m];
         for (r, &bv) in basis.basic_vars.iter().enumerate() {
@@ -112,25 +165,46 @@ pub fn separate_gomory(
         v
     };
 
+    // Reconstruct the vertex exactly: nonbasic at bounds, x_B = B⁻¹(b − A_N x_N).
+    let mut rhs_b = b.to_vec();
+    for j in 0..n {
+        if basis.col_status[j] == BASIC {
+            continue;
+        }
+        let val = if basis.col_status[j] == AT_UPPER {
+            u[j]
+        } else {
+            l[j]
+        };
+        if val != 0.0 {
+            for (i, ri) in rhs_b.iter_mut().enumerate() {
+                *ri -= a[i * n + j] * val;
+            }
+        }
+    }
+    let xb = match solve_refined(&bmat, m, &rhs_b, tol) {
+        Some(xb) => xb,
+        None => return cuts,
+    };
+
     for (i, &bi) in basis.basic_vars.iter().enumerate() {
         if !integrality[bi] {
             continue; // only integer basic variables yield cuts
         }
-        let f0 = x[bi] - x[bi].floor();
-        if f0 < tol || f0 > 1.0 - tol {
-            continue; // already integral
+        let f0 = xb[i] - xb[i].floor();
+        if !(FRAC_MIN..=1.0 - FRAC_MIN).contains(&f0) {
+            continue; // integral, or too close to integral for a safe cut
         }
 
-        // Row i of B⁻¹: solve B^T w = e_i.
+        // Row i of B⁻¹: refined solve of Bᵀ w = e_i.
         let mut e_i = vec![0.0_f64; m];
         e_i[i] = 1.0;
-        let w = match solve_dense(&bt, m, &e_i, tol) {
+        let w = match solve_refined(&bt, m, &e_i, tol) {
             Some(w) => w,
             None => continue,
         };
 
-        // Build ψ over nonbasic vars and accumulate the cut in original space:
-        //   Σ_j ψ_j x̃_j ≥ 1, with x̃_j = x_j − l_j (lower) or u_j − x_j (upper).
+        // GMI cut Σ ψ_j x̃_j ≥ 1, accumulated into original-variable space.
         let mut coeffs = vec![0.0_f64; n];
         let mut rhs = 1.0_f64;
         let mut max_c = 0.0_f64;
@@ -140,11 +214,14 @@ pub fn separate_gomory(
             if basis.col_status[j] == BASIC {
                 continue;
             }
-            // ā_j = w · A[:,j].
-            let abar: f64 = (0..m).map(|r| w[r] * a[r * n + j]).sum();
+            // ā_j = w · A[:,j], snapped to the nearest integer when very close
+            // (the refined value is accurate, so this only removes ulp noise).
+            let mut abar: f64 = (0..m).map(|r| w[r] * a[r * n + j]).sum();
+            if (abar - abar.round()).abs() < SNAP_TOL {
+                abar = abar.round();
+            }
             // Nonbasic at its upper bound uses x̃_j = u_j − x_j (sign flip).
             let at_upper = basis.col_status[j] == AT_UPPER;
-            // ᾱ_j: coefficient of x̃_j in the row (sign flips at the upper bound).
             let alpha = if at_upper { -abar } else { abar };
 
             let psi = if integrality[j] {
@@ -166,7 +243,6 @@ pub fn separate_gomory(
                 ok = false;
                 break;
             }
-            // Σ ψ_j x̃_j ≥ 1  →  original-variable coefficients.
             if at_upper {
                 coeffs[j] = -psi;
                 rhs -= psi * u[j];
@@ -178,7 +254,12 @@ pub fn separate_gomory(
             min_c = min_c.min(psi.abs());
         }
 
-        if !ok || max_c == 0.0 || (min_c > 0.0 && max_c / min_c > max_dynamism) {
+        if !ok
+            || max_c == 0.0
+            || max_c > MAX_ABS_COEFF
+            || rhs.abs() > MAX_ABS_COEFF
+            || (min_c > 0.0 && max_c / min_c > max_dynamism)
+        {
             continue;
         }
         cuts.push(GomoryCut { coeffs, rhs });
@@ -212,25 +293,22 @@ mod tests {
             l: &l,
             u: &u,
         };
+        let b = [1.5];
         let x = [1.0, 0.5, 0.0];
         let integrality = [true, true, false];
 
         let basis = recover_basis(&x, &lp, 1e-7).expect("basis");
         assert_eq!(basis.basic_vars, vec![1]); // x1 is the basic (free) var
 
-        let cuts = separate_gomory(&lp, &basis, &integrality, &x, 1e-7, 1e9);
+        let cuts = separate_gomory(&lp, &b, &basis, &integrality, 1e-7, 1e9);
         assert_eq!(cuts.len(), 1);
         let cut = &cuts[0];
-
-        // Violated by x*: coeffs · x* < rhs.
-        assert!(dot(&cut.coeffs, &x) < cut.rhs - 1e-6);
-
-        // Valid for every integer-feasible standard-form point.
+        assert!(dot(&cut.coeffs, &x) < cut.rhs - 1e-6); // cuts off the vertex
         for b0 in 0..=1 {
             for b1 in 0..=1 {
                 let s = 1.5 - b0 as f64 - b1 as f64;
                 if s < -1e-9 {
-                    continue; // infeasible (x0=x1=1)
+                    continue;
                 }
                 let pt = [b0 as f64, b1 as f64, s];
                 assert!(
@@ -242,9 +320,53 @@ mod tests {
     }
 
     #[test]
+    fn gmi_cut_valid_for_general_integer_at_upper_bound() {
+        // 2x0 + 2x1 + s = 5, x0,x1 integer in [0,2], s >= 0. Vertex
+        // (0.5, 2, 0): x0 basic & fractional, x1 nonbasic at its UPPER bound 2
+        // (the general-integer case that broke a naive, unrefined GMI). The cut
+        // is s ≥ 1, i.e. x0 + x1 ≤ 2.
+        let a = [2.0, 2.0, 1.0];
+        let c = [0.0, 0.0, 0.0];
+        let l = [0.0, 0.0, 0.0];
+        let u = [2.0, 2.0, f64::INFINITY];
+        let lp = LpView {
+            a: &a,
+            m: 1,
+            n: 3,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let b = [5.0];
+        let x = [0.5, 2.0, 0.0];
+        let integrality = [true, true, false];
+
+        let basis = recover_basis(&x, &lp, 1e-7).expect("basis");
+        assert_eq!(basis.basic_vars, vec![0]);
+
+        let cuts = separate_gomory(&lp, &b, &basis, &integrality, 1e-7, 1e9);
+        assert_eq!(cuts.len(), 1);
+        let cut = &cuts[0];
+        assert!(dot(&cut.coeffs, &x) < cut.rhs - 1e-6); // separates (0.5, 2, 0)
+        for i0 in 0..=2 {
+            for i1 in 0..=2 {
+                let s = 5.0 - 2.0 * i0 as f64 - 2.0 * i1 as f64;
+                if s < -1e-9 {
+                    continue;
+                }
+                let pt = [i0 as f64, i1 as f64, s];
+                assert!(
+                    dot(&cut.coeffs, &pt) >= cut.rhs - 1e-6,
+                    "cut excludes feasible point {pt:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn no_cut_when_vertex_is_integral() {
-        // Same system, integral vertex (1, 0, 0.5): no fractional integer basic
-        // variable (s is continuous), so no GMI cut.
+        // Same first system, integral vertex (1, 0, 0.5): the only basic var is
+        // the continuous slack, so no GMI cut.
         let a = [1.0, 1.0, 1.0];
         let c = [0.0, 0.0, 0.0];
         let l = [0.0, 0.0, 0.0];
@@ -257,21 +379,19 @@ mod tests {
             l: &l,
             u: &u,
         };
+        let b = [1.5];
         let x = [1.0, 0.0, 0.5]; // s basic = 0.5, but s is continuous
         let integrality = [true, true, false];
         let basis = recover_basis(&x, &lp, 1e-7).expect("basis");
-        let cuts = separate_gomory(&lp, &basis, &integrality, &x, 1e-7, 1e9);
+        let cuts = separate_gomory(&lp, &b, &basis, &integrality, 1e-7, 1e9);
         assert!(cuts.is_empty());
     }
 
     #[test]
     fn gmi_cut_two_constraints_is_valid() {
         // 2x0 + x1 + s0 = 3,  x0 + 2x1 + s1 = 3,  x0,x1 integer >= 0, s >= 0.
-        // LP relaxation optimum (max x0+x1) is (1,1)... pick a fractional
-        // vertex by construction: x0 = x1 = 1.0 is integral; instead use the
-        // vertex where only the first row binds. Take x0 = 1.5, x1 = 0,
-        // s0 = 0, s1 = 1.5 → 2(1.5)+0+0 = 3 ✓, 1.5+0+1.5 = 3 ✓. x0 fractional.
-        let n = 4; // x0, x1, s0, s1
+        // Vertex x0 = 1.5, x1 = 0, s0 = 0, s1 = 1.5 (x0 basic & fractional).
+        let n = 4;
         let m = 2;
         let a = [
             2.0, 1.0, 1.0, 0.0, // 2x0 + x1 + s0 = 3
@@ -288,17 +408,16 @@ mod tests {
             l: &l,
             u: &u,
         };
+        let b = [3.0, 3.0];
         let x = [1.5, 0.0, 0.0, 1.5];
         let integrality = [true, true, false, false];
 
         let basis = recover_basis(&x, &lp, 1e-7).expect("basis");
-        let cuts = separate_gomory(&lp, &basis, &integrality, &x, 1e-7, 1e9);
+        let cuts = separate_gomory(&lp, &b, &basis, &integrality, 1e-7, 1e9);
         assert!(!cuts.is_empty(), "expected a cut from fractional x0");
 
         for cut in &cuts {
-            // Violated by x*.
             assert!(dot(&cut.coeffs, &x) < cut.rhs - 1e-6);
-            // Valid for integer-feasible points (enumerate small x0,x1).
             for i0 in 0..=3 {
                 for i1 in 0..=3 {
                     let (x0, x1) = (i0 as f64, i1 as f64);
