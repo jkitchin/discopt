@@ -20,6 +20,7 @@ pub mod dual;
 pub mod linsolve;
 pub mod presolve;
 pub mod primal;
+pub mod sparse;
 
 pub use dual::solve_lp_warm;
 pub use presolve::tighten_bounds;

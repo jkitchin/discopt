@@ -16,6 +16,7 @@
 #![allow(clippy::needless_range_loop)]
 
 use super::linsolve::{FeralLU, LinearSolver};
+use super::sparse::SparseCols;
 use super::{LpSolve, LpStatus, SimplexOptions};
 use crate::lp::basis::{Basis, AT_LOWER, AT_UPPER, BASIC};
 use crate::lp::crossover::LpView;
@@ -28,9 +29,10 @@ pub fn solve_lp(lp: &LpView<'_>, b: &[f64], opts: &SimplexOptions) -> LpSolve {
 }
 
 struct Simplex<'a> {
-    a: &'a [f64], // m×n row-major (structural+slack columns)
-    b: &'a [f64], // length m
-    c: &'a [f64], // length n
+    a: &'a [f64],     // m×n row-major (structural+slack columns)
+    cols: SparseCols, // CSC view of `a`, built once (pricing hot path)
+    b: &'a [f64],     // length m
+    c: &'a [f64],     // length n
     m: usize,
     n: usize,  // real columns
     na: usize, // n + m (with artificials appended)
@@ -55,6 +57,7 @@ impl<'a> Simplex<'a> {
         // Artificials: bounds set per phase (Phase 1 [0,inf], Phase 2 [0,0]).
         Self {
             a: lp.a,
+            cols: SparseCols::from_dense(lp.a, m, n),
             b,
             c: lp.c,
             m,
@@ -76,14 +79,25 @@ impl<'a> Simplex<'a> {
     fn column(&self, j: usize, art_sign: &[f64]) -> Vec<f64> {
         let mut col = vec![0.0; self.m];
         if j < self.n {
-            for (i, ci) in col.iter_mut().enumerate() {
-                *ci = self.a[i * self.n + j];
-            }
+            self.cols.scatter(j, &mut col);
         } else {
             let i = j - self.n;
             col[i] = art_sign[i];
         }
         col
+    }
+
+    /// Sparse `yᵀ A_j` for column `j` (real column via CSC, artificial via its
+    /// single signed entry). The pricing/Devex hot path uses this instead of
+    /// materializing a dense column.
+    #[inline]
+    fn col_dot(&self, j: usize, y: &[f64], art_sign: &[f64]) -> f64 {
+        if j < self.n {
+            self.cols.dot(j, y)
+        } else {
+            let i = j - self.n;
+            y[i] * art_sign[i]
+        }
     }
 
     /// Bound value a nonbasic column sits at (lower or upper).
@@ -108,9 +122,13 @@ impl<'a> Simplex<'a> {
             if self.stat[j] != BASIC {
                 let v = self.nb_value(j);
                 if v != 0.0 {
-                    let col = self.column(j, art_sign);
-                    for (i, ci) in col.iter().enumerate() {
-                        rhs[i] -= ci * v;
+                    if j < self.n {
+                        let (rows, vals) = self.cols.col(j);
+                        for (k, &r) in rows.iter().enumerate() {
+                            rhs[r] -= vals[k] * v;
+                        }
+                    } else {
+                        rhs[j - self.n] -= art_sign[j - self.n] * v;
                     }
                 }
             }
@@ -236,8 +254,7 @@ impl<'a> Simplex<'a> {
                 if self.stat[j] == BASIC {
                     continue;
                 }
-                let col = self.column(j, art_sign);
-                let dj = cost[j] - dot(&y, &col);
+                let dj = cost[j] - self.col_dot(j, &y, art_sign);
                 let improving = (self.stat[j] == AT_LOWER && dj < -self.tol)
                     || (self.stat[j] == AT_UPPER && dj > self.tol);
                 if improving {
@@ -372,7 +389,7 @@ impl<'a> Simplex<'a> {
                         if self.lu.btran(&mut rho).is_ok() {
                             for j in 0..self.na {
                                 if self.stat[j] != BASIC && j != q {
-                                    let arj = dot(&rho, &self.column(j, art_sign));
+                                    let arj = self.col_dot(j, &rho, art_sign);
                                     let cand = (arj / pivot) * (arj / pivot) * gamma_q;
                                     if cand > gamma[j] {
                                         gamma[j] = cand;
@@ -459,10 +476,6 @@ impl<'a> Simplex<'a> {
             iters: 0,
         }
     }
-}
-
-fn dot(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
 #[cfg(test)]

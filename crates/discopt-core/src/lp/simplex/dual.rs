@@ -17,6 +17,7 @@
 
 use super::linsolve::{FeralLU, LinearSolver};
 use super::primal::solve_lp;
+use super::sparse::SparseCols;
 use super::{LpSolve, LpStatus, SimplexOptions};
 use crate::lp::basis::{Basis, AT_LOWER, AT_UPPER, BASIC};
 use crate::lp::crossover::LpView;
@@ -36,10 +37,6 @@ fn col(a: &[f64], m: usize, n: usize, j: usize) -> Vec<f64> {
     (0..m).map(|i| a[i * n + j]).collect()
 }
 
-fn dot(x: &[f64], y: &[f64]) -> f64 {
-    x.iter().zip(y).map(|(a, b)| a * b).sum()
-}
-
 /// The dual-simplex attempt. Returns `None` to request the cold fallback.
 fn try_dual(lp: &LpView<'_>, b: &[f64], start: &Basis, opts: &SimplexOptions) -> Option<LpSolve> {
     let (a, m, n, l, u, c) = (lp.a, lp.m, lp.n, lp.l, lp.u, lp.c);
@@ -57,6 +54,7 @@ fn try_dual(lp: &LpView<'_>, b: &[f64], start: &Basis, opts: &SimplexOptions) ->
         return None;
     }
 
+    let sp = SparseCols::from_dense(a, m, n);
     let mut lu = FeralLU::new();
     let cols: Vec<Vec<f64>> = basis.iter().map(|&j| col(a, m, n, j)).collect();
     if lu.factorize(m, &cols).is_err() {
@@ -82,9 +80,9 @@ fn try_dual(lp: &LpView<'_>, b: &[f64], start: &Basis, opts: &SimplexOptions) ->
             if stat[j] != BASIC {
                 let v = nb_value(&stat, j);
                 if v != 0.0 {
-                    let cj = col(a, m, n, j);
-                    for i in 0..m {
-                        xb[i] -= cj[i] * v;
+                    let (rows, vals) = sp.col(j);
+                    for (k, &rr) in rows.iter().enumerate() {
+                        xb[rr] -= vals[k] * v;
                     }
                 }
             }
@@ -160,7 +158,7 @@ fn try_dual(lp: &LpView<'_>, b: &[f64], start: &Basis, opts: &SimplexOptions) ->
             if u[j] - l[j] <= tol {
                 continue; // fixed var can't enter
             }
-            let arj = dot(&rho, &col(a, m, n, j));
+            let arj = sp.dot(j, &rho);
             // Eligibility: increasing leaving (to_lower) wants the basic var to
             // rise; the entering var that preserves dual feasibility satisfies:
             //  - at lower:  arj < 0  (to_lower) /  arj > 0  (to_upper)
@@ -177,7 +175,7 @@ fn try_dual(lp: &LpView<'_>, b: &[f64], start: &Basis, opts: &SimplexOptions) ->
                 arj < -tol
             };
             if eligible {
-                let dj = c[j] - dot(&y, &col(a, m, n, j));
+                let dj = c[j] - sp.dot(j, &y);
                 let ratio = (dj / arj).abs();
                 if ratio < best_ratio - tol {
                     best_ratio = ratio;
