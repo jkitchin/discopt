@@ -451,11 +451,26 @@ competitive performance) lives in Phases 2–3.
   that front-loads pruning / reduced-cost fixing (complements the
   near-integral snap purification). Optimum preserved, node count never
   worsened. (`test_root_dive.py`)
-- **Open (Phase 2 keystone, Rust):** the IPM→vertex crossover, the path to
-  general cut effectiveness from interior points and to basis-derived
-  Gomory/MIR cuts. Also: RINS (sub-MILP neighborhood search) and conflict
-  analysis. These are the remaining "compete" items; the tractable
-  Python-side cut/heuristic pieces are now done.
+- **IPM→vertex crossover — DONE (Python/numpy).** `_jax/crossover.py`
+  (`crossover_to_vertex`) pushes an interior LP optimum to a vertex of the
+  optimal face: it repeatedly moves along a null-space direction supported on
+  the *free* variables with `A d = 0` and `c^T d = 0` (SVD-based, so both
+  feasibility and objective are preserved exactly) and ratio-tests to the next
+  bound, fixing one variable per step until no free direction remains —
+  terminating in at most `n` steps. The root cut loop now separates from the
+  crossed-over vertex instead of the raw interior point, so cover/clique cuts
+  finally bite from an IPM solve: on the symmetric knapsack the analytic center
+  `[0.45]*4` violates no cover, but its crossover vertex `[1, 0, 0.8, 0]` is
+  cut immediately, dropping the node count 21 → 1 with the optimum preserved.
+  Soundness is unaffected by crossover numerics — the crossover only *locates*
+  candidate cuts; each cut is still validated by its own cover/clique structure.
+  A size guard (`_MAX_CROSSOVER_VARS = 400`) falls back to interior-point
+  separation on very wide problems. A pure-Rust port (with basis recovery, the
+  prerequisite for Gomory/MIR) remains future work. (`test_crossover.py`)
+- **Open (Phase 2 keystone, Rust):** the Rust crossover port with *basis*
+  recovery, the path to basis-derived Gomory/MIR cuts. Also: RINS (sub-MILP
+  neighborhood search) and conflict analysis. These are the remaining
+  "compete" items; the tractable Python-side cut/heuristic pieces are now done.
 
 ### Phase 4 — Retire remaining HiGHS consumers (in progress)
 
@@ -508,9 +523,15 @@ shared seam and falls back to whichever backend is importable.
 
 ### Phase 2 — Crossover + root cut generation (compete I)
 
-- **Pure-Rust crossover** (interior → basic feasible vertex + basis).
-  Keystone deliverable; budget as its own sub-project with heavy numerical
-  testing. Use HiGHS basis output as the test oracle.
+- **Primal crossover (interior → vertex) — DONE in Python.**
+  `_jax/crossover.py`; null-space push preserving objective and feasibility,
+  wired into the root cut loop so cover/clique cuts bite from IPM solves
+  (symmetric knapsack 21 → 1 nodes). See the Phase 3 (started) section for
+  details.
+- **Pure-Rust crossover** (interior → basic feasible vertex + *basis*).
+  Remaining keystone: the basis (not just the vertex) is the prerequisite for
+  basis-derived Gomory/MIR cuts. Budget as its own sub-project with heavy
+  numerical testing. Use HiGHS basis output as the test oracle.
 - **Basis cuts:** Gomory mixed-integer and MIR at the root and at periodic
   re-solves, feeding the existing `CutPool`
   (`python/discopt/_jax/cutting_planes.py`; cap/aging/dedup already there).

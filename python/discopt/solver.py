@@ -5339,9 +5339,13 @@ def _mip_recover_relaxation_duals(
             else:
                 from discopt.solvers.qp_pounce import solve_qp as _highs_solve_qp
         elif Q_orig is None:
-            from discopt.solvers.lp_highs import solve_lp as _highs_solve_lp
+            from discopt.solvers.lp_highs import (  # type: ignore[assignment]
+                solve_lp as _highs_solve_lp,
+            )
         else:
-            from discopt.solvers.qp_highs import solve_qp as _highs_solve_qp
+            from discopt.solvers.qp_highs import (  # type: ignore[assignment]
+                solve_qp as _highs_solve_qp,
+            )
     except ImportError:
         return None, None, None
 
@@ -6086,7 +6090,9 @@ def _pounce_recover_node_bound(
             from discopt.solvers.lp_pounce import solve_lp as _pounce_solve
         else:
             from discopt.solvers.qp_pounce import POUNCE_AVAILABLE
-            from discopt.solvers.qp_pounce import solve_qp as _pounce_solve
+            from discopt.solvers.qp_pounce import (  # type: ignore[assignment]
+                solve_qp as _pounce_solve,
+            )
     except ImportError:
         return None
     if not POUNCE_AVAILABLE:
@@ -6416,7 +6422,25 @@ def _root_cover_cut_loop(
         )
         if int(state.converged) != 1:  # need a converged optimum to separate
             break
-        x_star = np.asarray(state.x)[:n_orig]
+        # Cross over the interior optimum to a vertex of the optimal face
+        # (Phase 2): cover/clique cuts separate a vertex sharply but the
+        # interior analytic center weakly. Separation stays valid regardless,
+        # so a failed crossover only costs cut effectiveness, never soundness.
+        from discopt._jax.crossover import crossover_to_vertex
+
+        try:
+            x_vertex = crossover_to_vertex(
+                np.asarray(state.x),
+                np.asarray(lp_data.A_eq),
+                np.asarray(lp_data.b_eq),
+                np.asarray(lp_data.c),
+                np.asarray(lp_data.x_l),
+                np.asarray(lp_data.x_u),
+            )
+        except Exception as _xo_exc:
+            logger.debug("crossover skipped: %s", _xo_exc)
+            x_vertex = np.asarray(state.x)
+        x_star = x_vertex[:n_orig]
         cuts: list[tuple[frozenset, float]] = []
         seen: set[frozenset] = set()
         sources = []

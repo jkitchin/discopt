@@ -27,7 +27,7 @@ objective-independent and applies to QPs unchanged.
 from __future__ import annotations
 
 import time
-from typing import List, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 
 import numpy as np
 import scipy.sparse as sp
@@ -69,10 +69,10 @@ class _QPCallbacks:
         return float(0.5 * x @ self._Q @ x + self._c @ x)
 
     def gradient(self, x: np.ndarray) -> np.ndarray:
-        return self._Q @ x + self._c
+        return np.asarray(self._Q @ x + self._c, dtype=np.float64)
 
     def constraints(self, x: np.ndarray) -> np.ndarray:
-        return self._A @ x
+        return np.asarray(self._A @ x, dtype=np.float64)
 
     def jacobian(self, x: np.ndarray) -> np.ndarray:
         return self._jac_flat
@@ -149,7 +149,7 @@ def solve_qp(
         x0 = _interior_start(lb, ub)
     x0 = np.asarray(x0, dtype=np.float64).ravel()
 
-    opts = {"print_level": 0}
+    opts: dict[str, Any] = {"print_level": 0}
     if options:
         opts.update(options)
     if time_limit is not None:

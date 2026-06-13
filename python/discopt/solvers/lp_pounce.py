@@ -16,7 +16,7 @@ below expose exactly that to POUNCE.
 from __future__ import annotations
 
 import time
-from typing import List, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union, cast
 
 import numpy as np
 import scipy.sparse as sp
@@ -79,7 +79,7 @@ class _LPCallbacks:
         return self._c
 
     def constraints(self, x: np.ndarray) -> np.ndarray:
-        return self._A @ x
+        return np.asarray(self._A @ x, dtype=np.float64)
 
     def jacobian(self, x: np.ndarray) -> np.ndarray:
         return self._jac_flat
@@ -97,7 +97,7 @@ class _LPCallbacks:
 
 def _to_dense(A: Union[np.ndarray, sp.spmatrix]) -> np.ndarray:
     if sp.issparse(A):
-        return np.asarray(A.todense(), dtype=np.float64)
+        return np.asarray(cast(sp.spmatrix, A).todense(), dtype=np.float64)
     return np.asarray(A, dtype=np.float64)
 
 
@@ -224,7 +224,7 @@ def solve_lp(
         x0 = _interior_start(lb, ub)
     x0 = np.asarray(x0, dtype=np.float64).ravel()
 
-    opts = {"print_level": 0}
+    opts: dict[str, Any] = {"print_level": 0}
     if options:
         opts.update(options)
     if time_limit is not None:
