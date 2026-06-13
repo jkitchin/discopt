@@ -6102,6 +6102,62 @@ def _pounce_recover_node_bound(
     return None
 
 
+# Interior-point relaxation optima are interior: integer coordinates come
+# back smeared (e.g. 0.99996) — beyond the tree's 1e-5 integrality tolerance
+# but clearly integral. Coordinates within this tolerance are candidates for
+# the snap-fix-resolve purification below.
+_SNAP_TOL = 1e-4
+
+
+def _pounce_snap_incumbent(
+    x_relax: np.ndarray,
+    int_offsets,
+    int_sizes,
+    node_lb: np.ndarray,
+    node_ub: np.ndarray,
+    c: np.ndarray,
+    obj_const: float,
+    A_ub,
+    b_ub,
+    A_eq,
+    b_eq,
+    t_start: float,
+    time_limit: float,
+    Q: Optional[np.ndarray] = None,
+):
+    """Purify a near-integral relaxation point into an exact incumbent.
+
+    Naively rounding the integer coordinates of an interior point breaks
+    equality rows by ~the snap distance, so instead: round each integer
+    coordinate that is within ``_SNAP_TOL`` of an integer, *fix* it there, and
+    re-solve the continuous relaxation with POUNCE (Phase 1 increment 3).
+    An OPTIMAL result is an exactly feasible integer point with an exact
+    objective, suitable for ``tree.inject_incumbent``. Returns
+    ``(objective, x)`` in minimization form, or ``None``.
+    """
+    idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
+    if not idx:
+        return None
+    vals = np.asarray(x_relax, dtype=np.float64)[idx]
+    snapped = np.round(vals)
+    if not np.all(np.isfinite(vals)) or float(np.max(np.abs(vals - snapped))) > _SNAP_TOL:
+        return None
+    fl = np.asarray(node_lb, dtype=np.float64).copy()
+    fu = np.asarray(node_ub, dtype=np.float64).copy()
+    # The snapped value must lie inside the *original* node box (pinning both
+    # bounds afterwards would mask an out-of-box snap).
+    if np.any(snapped < fl[idx] - 1e-9) or np.any(snapped > fu[idx] + 1e-9):
+        return None
+    fl[idx] = snapped
+    fu[idx] = snapped
+    rec = _pounce_recover_node_bound(
+        fl, fu, c, obj_const, A_ub, b_ub, A_eq, b_eq, t_start, time_limit, Q=Q
+    )
+    if rec is not None and rec[0] == "optimal":
+        return rec[1], rec[2]
+    return None
+
+
 def _solve_milp_bb(
     model: Model,
     time_limit: float,
@@ -6169,6 +6225,29 @@ def _solve_milp_bb(
         else:  # Phase-1-certified infeasible node: prune is rigorous.
             lbs[i] = _INFEASIBILITY_SENTINEL
 
+    def _maybe_inject_snapped(x_row, node_lb_i, node_ub_i):
+        # Purification (increment 3): near-integral interior points become
+        # exact incumbents via snap-fix-resolve.
+        inc = _pounce_snap_incumbent(
+            x_row,
+            int_offsets,
+            int_sizes,
+            node_lb_i,
+            node_ub_i,
+            _c_m,
+            float(lp_data.obj_const),
+            _A_ub_m,
+            _b_ub_m,
+            _A_eq_m,
+            _b_eq_m,
+            t_start,
+            time_limit,
+        )
+        if inc is not None:
+            tree.inject_incumbent(
+                np.asarray(inc[1][:n_vars], dtype=np.float64).copy(), float(inc[0])
+            )
+
     iteration = 0
     while True:
         elapsed = time.perf_counter() - t_start
@@ -6221,6 +6300,12 @@ def _solve_milp_bb(
                             lb_c = np.clip(np.array(batch_lb[i]), -_SPC, _SPC)
                             ub_c = np.clip(np.array(batch_ub[i]), -_SPC, _SPC)
                             result_sols[i] = 0.5 * (lb_c + ub_c)
+                        else:
+                            _maybe_inject_snapped(
+                                result_sols[i],
+                                np.array(batch_lb[i]),
+                                np.array(batch_ub[i]),
+                            )
                     else:
                         lb_c = np.clip(np.array(batch_lb[i]), -_SPC, _SPC)
                         ub_c = np.clip(np.array(batch_ub[i]), -_SPC, _SPC)
@@ -6269,6 +6354,8 @@ def _solve_milp_bb(
                             result_sols[i] = np.asarray(state.x[:n_vars])
                             if conv == 3:  # non-KKT: recover via POUNCE
                                 _recover_or_decertify(i, result_lbs, result_sols, node_lb, node_ub)
+                            if result_lbs[i] < _SENTINEL_THRESHOLD:
+                                _maybe_inject_snapped(result_sols[i], node_lb, node_ub)
                         else:
                             result_lbs[i] = _INFEASIBILITY_SENTINEL
                             lb_c = np.clip(node_lb, -_SPC, _SPC)
@@ -6466,6 +6553,30 @@ def _solve_miqp_bb(
         else:  # Phase-1-certified infeasible node: prune is rigorous.
             lbs[i] = _INFEASIBILITY_SENTINEL
 
+    def _maybe_inject_snapped(x_row, node_lb_i, node_ub_i):
+        # Purification (increment 3): near-integral interior points become
+        # exact incumbents via snap-fix-resolve.
+        inc = _pounce_snap_incumbent(
+            x_row,
+            int_offsets,
+            int_sizes,
+            node_lb_i,
+            node_ub_i,
+            _c_m,
+            float(qp_data.obj_const),
+            _A_ub_m,
+            _b_ub_m,
+            _A_eq_m,
+            _b_eq_m,
+            t_start,
+            time_limit,
+            Q=_Q_m,
+        )
+        if inc is not None:
+            tree.inject_incumbent(
+                np.asarray(inc[1][:n_vars], dtype=np.float64).copy(), float(inc[0])
+            )
+
     iteration = 0
     while True:
         elapsed = time.perf_counter() - t_start
@@ -6525,6 +6636,12 @@ def _solve_miqp_bb(
                             lb_c = np.clip(np.array(batch_lb[i]), -_SPC, _SPC)
                             ub_c = np.clip(np.array(batch_lb[i]), -_SPC, _SPC)
                             result_sols[i] = 0.5 * (lb_c + ub_c)
+                        else:
+                            _maybe_inject_snapped(
+                                result_sols[i],
+                                np.array(batch_lb[i]),
+                                np.array(batch_ub[i]),
+                            )
                     else:
                         lb_c = np.clip(np.array(batch_ub[i]), -_SPC, _SPC)
                         ub_c = np.clip(np.array(batch_ub[i]), -_SPC, _SPC)
@@ -6580,6 +6697,8 @@ def _solve_miqp_bb(
                             result_sols[i] = np.asarray(state.x[:n_vars])
                             if conv == 3:  # non-KKT: recover via POUNCE
                                 _recover_or_decertify(i, result_lbs, result_sols, node_lb, node_ub)
+                            if result_lbs[i] < _SENTINEL_THRESHOLD:
+                                _maybe_inject_snapped(result_sols[i], node_lb, node_ub)
                         else:
                             result_lbs[i] = _INFEASIBILITY_SENTINEL
                             lb_c = np.clip(node_lb, -_SPC, _SPC)

@@ -160,3 +160,108 @@ class TestNonKKTDecertifiesWhenUnrecoverable:
         assert r.status == "feasible"
         assert r.bound is None and r.gap is None
         assert abs(r.objective - 0.18) < 1e-3  # incumbent still correct
+
+
+# ---------------------------------------------------------------------------
+# Increment 3: snap-fix-resolve purification of interior relaxation points
+# ---------------------------------------------------------------------------
+class TestSnapFixResolvePurification:
+    def _lp_parts(self):
+        # min -x1 - 2*x2 s.t. x1 + x2 <= 10, both integer in [0, 10].
+        c = np.array([-1.0, -2.0])
+        A_ub = np.array([[1.0, 1.0]])
+        b_ub = np.array([10.0])
+        return c, A_ub, b_ub
+
+    def test_near_integral_point_purified(self):
+        import pytest as _pytest
+
+        _pytest.importorskip("pounce")
+        c, A_ub, b_ub = self._lp_parts()
+        # Smeared interior point: ints at 0.0003 / 9.99996 (beyond 1e-5 tol).
+        inc = S._pounce_snap_incumbent(
+            np.array([0.0003 - 0.0003, 9.99996]),  # x1 ~ 0, x2 ~ 10
+            [0, 1],
+            [1, 1],
+            np.array([0.0, 0.0]),
+            np.array([10.0, 10.0]),
+            c,
+            0.0,
+            A_ub,
+            b_ub,
+            None,
+            None,
+            0.0,
+            30.0,
+        )
+        assert inc is not None
+        obj, x = inc
+        np.testing.assert_allclose(x[:2], [0.0, 10.0], atol=1e-6)
+        assert abs(obj - (-20.0)) < 1e-6  # exact objective at the integer point
+
+    def test_far_from_integral_returns_none(self):
+        c, A_ub, b_ub = self._lp_parts()
+        inc = S._pounce_snap_incumbent(
+            np.array([0.4, 9.5]),  # genuinely fractional
+            [0, 1],
+            [1, 1],
+            np.array([0.0, 0.0]),
+            np.array([10.0, 10.0]),
+            c,
+            0.0,
+            A_ub,
+            b_ub,
+            None,
+            None,
+            0.0,
+            30.0,
+        )
+        assert inc is None
+
+    def test_snap_outside_node_box_returns_none(self):
+        c, A_ub, b_ub = self._lp_parts()
+        # x2 ~ 5.99997 snaps to 6, but the node box caps x2 at 5.99998.
+        inc = S._pounce_snap_incumbent(
+            np.array([0.0, 5.99997]),
+            [0, 1],
+            [1, 1],
+            np.array([0.0, 0.0]),
+            np.array([10.0, 5.99998]),
+            c,
+            0.0,
+            A_ub,
+            b_ub,
+            None,
+            None,
+            0.0,
+            30.0,
+        )
+        assert inc is None
+
+    def test_no_integer_vars_returns_none(self):
+        c, A_ub, b_ub = self._lp_parts()
+        inc = S._pounce_snap_incumbent(
+            np.array([0.5, 0.5]),
+            [],
+            [],
+            np.zeros(2),
+            np.full(2, 10.0),
+            c,
+            0.0,
+            A_ub,
+            b_ub,
+            None,
+            None,
+            0.0,
+            30.0,
+        )
+        assert inc is None
+
+    def test_purification_yields_exact_incumbent_end_to_end(self):
+        import pytest as _pytest
+
+        _pytest.importorskip("pounce")
+        r = _knapsack_milp().solve(use_highs_milp=False, time_limit=60)
+        assert r.status == "optimal"
+        # The snapped incumbent is exact, not the smeared IPM objective.
+        assert r.objective == -8.0
