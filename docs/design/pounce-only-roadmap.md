@@ -560,11 +560,27 @@ shared seam and falls back to whichever backend is importable.
     independent (a vertex). 5 Rust unit tests (objective + feasibility
     preserved, lands on a vertex, already-vertex stable, size guard, 50 random
     LPs); `cargo test/clippy/fmt` clean.
-  - **Increment 2 — basis recovery (next):** classify the vertex's active set
-    into a basic/nonbasic partition (nonbasic at their bounds), validated
-    cell-by-cell against HiGHS `getBasis()`; expose via PyO3 so the Python cut
-    loop can call the Rust crossover and consume the basis.
-  - **Increment 3:** Gomory mixed-integer / MIR cuts off the recovered basis.
+  - **Increment 2 — basis recovery — DONE.** `lp/basis.rs`:
+    `recover_basis(x, &LpView, tol) -> Option<Basis>` turns a vertex into a
+    simplex basis — the free (strictly-interior) variables must be basic, then
+    the basis is completed greedily with at-bound columns that raise the rank
+    of `A_B` (incremental Gaussian elimination via a `RankTracker`), and the
+    rest are classified `AtLower`/`AtUpper` with HiGHS-compatible status codes
+    (`kLower=0`/`kBasic=1`/`kUpper=2`). It **declines** (returns `None`) on a
+    point that is a vertex of a higher-dimensional optimal face but *not* a
+    polytope vertex (> `m` interior vars) — basis recovery is only well-defined
+    at an actual basic feasible solution, i.e. an LP optimum after crossover.
+    On a degenerate vertex many bases are valid; recovery returns *a* valid one
+    (the soundness property cuts need), not necessarily simplex's. 4 Rust tests
+    assert basis *validity* — `|B| = m`, free vars basic, nonbasics at their
+    bound, and `A_B x_B = b − A_N x_N` reconstructs the vertex — over a clean
+    vertex, a vertex with a free (basic) variable, an end-to-end
+    crossover→recover, and the declined non-vertex case.
+  - **Increment 3 — PyO3 binding (next):** expose `crossover_to_vertex` +
+    `recover_basis` through `discopt._rust` so the Python cut loop can call the
+    Rust crossover and consume the basis; validate the basis against HiGHS
+    `getBasis()` on uniquely-optimal LPs (where the basis is unique).
+  - **Increment 4:** Gomory mixed-integer / MIR cuts off the recovered basis.
 - **Basis cuts:** Gomory mixed-integer and MIR at the root and at periodic
   re-solves, feeding the existing `CutPool`
   (`python/discopt/_jax/cutting_planes.py`; cap/aging/dedup already there).

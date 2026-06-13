@@ -11,4 +11,5 @@
 //! LP optimum), so a hand-written rank-revealing elimination is both adequate
 //! and avoids pulling a BLAS/LAPACK stack into the wheel build.
 
+pub mod basis;
 pub mod crossover;
