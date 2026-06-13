@@ -209,6 +209,12 @@ impl<'a> Simplex<'a> {
         let m = self.m;
         let mut updates = 0usize;
         let mut stall = 0usize;
+        // Maintain x_B incrementally across pivots (rank-1 update per step)
+        // instead of recomputing it by a full ftran each iteration; refreshed
+        // exactly on every refactorization to bound floating-point drift.
+        let mut xb = self
+            .basic_values(art_sign)
+            .map_err(|_| LpStatus::Numerical)?;
         for _iter in 0..self.max_iter {
             // price: y = B⁻ᵀ c_B ; reduced cost d_j = c_j − yᵀA_j
             let mut y: Vec<f64> = self.basis.iter().map(|&j| cost[j]).collect();
@@ -249,10 +255,6 @@ impl<'a> Simplex<'a> {
             if self.lu.ftran(&mut alpha).is_err() {
                 return Err(LpStatus::Numerical);
             }
-            let xb = match self.basic_values(art_sign) {
-                Ok(v) => v,
-                Err(()) => return Err(LpStatus::Numerical),
-            };
 
             // ratio test: entering moves by t≥0; basic i: v_i(t) = xb[i] − dir·t·α[i]
             let mut t_max = if self.ub[q] < INF && self.lb[q] > -INF {
@@ -299,6 +301,12 @@ impl<'a> Simplex<'a> {
                 stall = 0;
             }
 
+            // Incremental x_B step: basic values move along −dir·α by t_max.
+            let q_val = self.nb_value(q); // entering's value before the move
+            for (i, xbi) in xb.iter_mut().enumerate() {
+                *xbi -= dir * t_max * alpha[i];
+            }
+
             match leave_slot {
                 None => {
                     // bound flip: entering goes to its other bound, no basis change
@@ -315,6 +323,8 @@ impl<'a> Simplex<'a> {
                     self.basis[slot] = q;
                     self.slot_of[q] = slot as i64;
                     self.stat[q] = BASIC;
+                    // the entering variable now occupies this slot
+                    xb[slot] = q_val + dir * t_max;
                     // factorization update with the entering column
                     let col = self.column(q, art_sign);
                     let need_refac = self.lu.update(slot, &col).is_err();
@@ -323,6 +333,9 @@ impl<'a> Simplex<'a> {
                         if self.refactorize(art_sign).is_err() {
                             return Err(LpStatus::Numerical);
                         }
+                        xb = self
+                            .basic_values(art_sign)
+                            .map_err(|_| LpStatus::Numerical)?;
                         updates = 0;
                     }
                 }
