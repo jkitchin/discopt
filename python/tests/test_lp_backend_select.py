@@ -99,6 +99,77 @@ class TestPounceOnlyInstall:
             lp_backend.get_lp_solver()
 
 
+class TestHighspyConsumersRetired:
+    """The remaining raw-``highspy`` LP/QP/MILP consumers now route through the
+    backend selector, so they run with only POUNCE installed (roadmap Phase 4).
+    """
+
+    def test_partition_selection_milp_is_highs_free(self, monkeypatch):
+        """The vertex-cover MILP in partition selection solves without HiGHS."""
+        pytest.importorskip("pounce")
+        _without_highs(monkeypatch)
+        from discopt._jax import partition_selection as ps
+
+        # Disable the greedy fallback so any returned cover must come from the
+        # MILP — solved via the POUNCE B&B, since HiGHS is unavailable.
+        def _no_greedy(*a, **k):
+            raise AssertionError("greedy fallback used; MILP path did not run")
+
+        monkeypatch.setattr(ps, "_greedy_vertex_cover", _no_greedy)
+
+        terms = [(0, 1), (1, 2), (0, 2)]  # triangle: min vertex cover is 2
+        cover = ps._solve_vertex_cover_milp([0, 1, 2], terms)
+        cset = set(cover)
+        assert all(any(v in cset for v in t) for t in terms)  # valid cover
+        assert len(cover) == 2  # and minimal
+
+    def test_strong_branch_lp_is_highs_free(self, monkeypatch):
+        """Strong branching's LP probes run on POUNCE when HiGHS is absent."""
+        pytest.importorskip("pounce")
+        _without_highs(monkeypatch)
+        import discopt.solver as S
+
+        class _Eval:  # minimal evaluator: linear objective, no constraints
+            n_constraints = 0
+
+            def evaluate_gradient(self, x):
+                return np.array([-1.0, -1.0])
+
+        best = S._strong_branch_lp(
+            _Eval(),
+            solution=np.array([0.5, 0.5]),
+            node_lb=np.array([0.0, 0.0]),
+            node_ub=np.array([1.0, 1.0]),
+            candidate_var_indices=np.array([0, 1]),
+            parent_lb=-1.0,
+            prefer_pounce=True,
+        )
+        assert best in (0, 1)  # picked a candidate via POUNCE LP probes
+
+    def test_gdp_big_m_lp_is_highs_free(self, monkeypatch):
+        """Multiple-big-M's LP-based bound tightening runs without HiGHS and
+        matches the HiGHS-computed M."""
+        pytest.importorskip("pounce")
+        pytest.importorskip("highspy")
+        import discopt.modeling as dm
+        from discopt._jax.gdp_reformulate import _compute_big_m_lp, _precompute_lp_relaxation
+        from discopt.modeling.core import Constraint
+
+        m = dm.Model("mbm")
+        x = m.continuous("x", lb=0, ub=10)
+        y = m.continuous("y", lb=0, ub=10)
+        m.subject_to(x + y <= 8)
+        lp_data = _precompute_lp_relaxation(m)
+        assert lp_data is not None
+        con = Constraint(body=x + y - dm.core.Constant(5.0), sense="<=", rhs=0.0)
+
+        m_highs = _compute_big_m_lp(con, m, lp_data)  # HiGHS preferred
+        _without_highs(monkeypatch)
+        m_pounce = _compute_big_m_lp(con, m, lp_data)  # POUNCE only
+        assert np.isfinite(m_highs) and np.isfinite(m_pounce)
+        assert abs(m_highs - m_pounce) < 1e-3
+
+
 class TestObbtRetired:
     """OBBT runs through the backend seam, so it works POUNCE-only."""
 

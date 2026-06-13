@@ -1181,6 +1181,7 @@ def _strong_branch_lp(
     parent_lb: float,
     max_candidates: int = 5,
     time_limit: float = 1.0,
+    prefer_pounce: bool = False,
 ) -> Optional[int]:
     """Perform strong branching via LP relaxations for unreliable candidates.
 
@@ -1212,7 +1213,12 @@ def _strong_branch_lp(
     int or None
         Best variable index to branch on, or None if no valid candidate.
     """
-    from discopt.solvers.lp_highs import solve_lp
+    try:
+        from discopt.solvers.lp_backend import get_lp_solver
+
+        solve_lp = get_lp_solver(prefer_pounce)
+    except ImportError:
+        return None  # strong branching is optional; fall back to pseudocosts
 
     n_vars = len(solution)
     n_candidates = len(candidate_var_indices)
@@ -3060,6 +3066,7 @@ def solve_model(
                         parent_lb=float(result_lbs[i]),
                         max_candidates=5,
                         time_limit=0.5,
+                        prefer_pounce=nlp_solver == "pounce",
                     )
                     if best_var is not None:
                         sb_hint_ids.append(node_id)

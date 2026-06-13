@@ -499,9 +499,25 @@ shared seam and falls back to whichever backend is importable.
   12-seed random MILP battery (0 mismatches), and OA's master solves
   HiGHS-free end to end (`test_milp_pounce.py`,
   `test_lp_backend_select.py::test_oa_master_is_highs_free`).
-- **Open:** the raw-`highspy` LP/QP consumers (`partition_selection`, DOE,
-  robust-opt) — each needs reformulating into the matrix `solve_lp`/`solve_qp`
-  interface before it can use the selector. Smaller, per-file work.
+- **Raw-`highspy` consumers retired — DONE.** The three remaining call sites
+  that imported a HiGHS wrapper (or `highspy`) directly now go through the
+  selector and so run with only POUNCE installed:
+  - **`partition_selection._solve_vertex_cover_milp`** — the covering MILP
+    (binary `min Σy s.t. Ay ≥ 1`) built by hand against `highspy.Highs()` now
+    calls `get_milp_solver()` and keeps its greedy-cover fallback.
+  - **`solver._strong_branch_lp`** — strong-branching's up/down LP probes take
+    a `prefer_pounce` flag (threaded from `nlp_solver == "pounce"` at the call
+    site) and select through `get_lp_solver`; if no LP backend is importable
+    it returns `None` and the tree falls back to pseudocost branching.
+  - **`gdp_reformulate._compute_big_m_lp`** — multiple-big-M's LP-based bound
+    tightening selects through `get_lp_solver()` (keeping its interval-
+    arithmetic fallback).
+  Verified HiGHS-free and (for big-M) numerically identical to HiGHS in
+  `test_lp_backend_select.py::TestHighspyConsumersRetired`. The DOE and
+  robust-opt paths the earlier scan flagged were already clean: both build a
+  `Model` and call `Model.solve()`, which is POUNCE-capable. No remaining
+  module imports `highspy` outside the `*_highs.py` wrappers themselves, so
+  `highspy` can move to the dev/test extra.
 
 - Route pure MILP and MIQP through the existing Rust B&B
   (`crates/discopt-core/src/bnb/`) with POUNCE LP/QP relaxations, replacing
