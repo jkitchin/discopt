@@ -381,8 +381,26 @@ is a trustworthy LP/dual engine. Work breakdown:
   objective, injected via `tree.inject_incumbent` (also a rounding
   heuristic). Visible win: the knapsack MILP incumbent is exactly `-8.0`
   instead of the smeared `-7.999999997754972`.
-- **Open:** reduced-cost fixing / OBBT via relaxation duals; then flip the
-  default off HiGHS.
+- **Reduced-cost fixing — DONE (increment 4).** `_root_reduced_cost_fixing`
+  solves the root LP with POUNCE (KKT-valid duals), purifies a near-integral
+  point into an incumbent, and tightens integer bounds via
+  `_reduced_cost_fixing`: for a minimization relaxation with lower bound
+  `z_lp`, reduced costs `d`, and incumbent `z_inc`, each non-basic integer is
+  capped by `d_j·(x_j − bound_j) ≤ z_inc − z_lp`. The true optimum (objective
+  `≤ z_inc`) always satisfies these, so RCF never cuts it; `gap` is inflated
+  by a small relative margin so interior-point dual tolerance cannot
+  over-tighten. Best-effort and graceful (only tightens; skipped if POUNCE is
+  absent or no incumbent recoverable), wired at the root of `_solve_milp_bb`
+  before tree creation. A 200-case property test confirms no integer point
+  with objective `≤ z_inc` is ever excluded; an end-to-end test confirms the
+  answer is identical with and without RCF. (RCF is an LP technique — the
+  quadratic term breaks the reduced-cost decomposition — so it is MILP-only;
+  OBBT and MIQP bound-tightening remain optional perf follow-ups.)
+  - *Note:* purification (increment 3) can change which of several tied
+    optima becomes the incumbent; `test_solver_duals` was made well-posed
+    (unique optimum) so its recovered-dual assertion no longer depends on the
+    tie-break.
+- **Open:** flip the MILP/MIQP default off HiGHS behind correctness gates.
 
 - Route pure MILP and MIQP through the existing Rust B&B
   (`crates/discopt-core/src/bnb/`) with POUNCE LP/QP relaxations, replacing

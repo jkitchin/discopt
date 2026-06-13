@@ -6158,6 +6158,125 @@ def _pounce_snap_incumbent(
     return None
 
 
+# Reduced costs below this are treated as zero (basic / degenerate -> no fix).
+_RCF_RC_TOL = 1e-7
+
+
+def _reduced_cost_fixing(lb, ub, int_idx, reduced_costs, z_lp, z_inc):
+    """Tighten integer variable bounds by LP reduced-cost fixing.
+
+    For a minimization relaxation with optimum ``z_lp`` (a valid lower bound),
+    reduced costs ``d = c - A^T y``, and an incumbent objective ``z_inc`` (a
+    valid upper bound), every improving feasible point satisfies, term by
+    term (all terms are non-negative at the LP optimum),
+
+        d_j * (x_j - bound_j) <= z_inc - z_lp =: gap
+
+    which caps how far each non-basic integer variable can move from the
+    bound it is pressed against:
+
+        d_j >  tol (pressed to lb): x_j <= lb_j + floor(gap / d_j)
+        d_j < -tol (pressed to ub): x_j >= ub_j - floor(gap / |d_j|)
+
+    The true optimum ``x*`` has objective ``<= z_inc``, so it satisfies these
+    bounds — RCF never cuts it. ``gap`` is inflated by a small relative
+    margin so interior-point dual tolerance cannot over-tighten. Returns
+    tightened ``(lb, ub)`` copies and the number of bound changes.
+    """
+    lb = np.array(lb, dtype=np.float64).copy()
+    ub = np.array(ub, dtype=np.float64).copy()
+    gap = float(z_inc) - float(z_lp)
+    if not np.isfinite(gap) or gap < 0:
+        return lb, ub, 0
+    # Safety margin for IPM dual tolerance: never tighten so hard we risk the
+    # optimum (correctness over aggressiveness).
+    gap += 1e-6 * (1.0 + abs(float(z_inc)))
+    changes = 0
+    for j in int_idx:
+        d = float(reduced_costs[j])
+        if d > _RCF_RC_TOL:
+            new_ub = lb[j] + float(np.floor(gap / d + 1e-9))
+            if new_ub < ub[j] - 0.5:
+                ub[j] = max(lb[j], new_ub)
+                changes += 1
+        elif d < -_RCF_RC_TOL:
+            new_lb = ub[j] - float(np.floor(gap / (-d) + 1e-9))
+            if new_lb > lb[j] + 0.5:
+                lb[j] = min(ub[j], new_lb)
+                changes += 1
+    return lb, ub, changes
+
+
+def _root_reduced_cost_fixing(lp_data, n_orig, lb, ub, int_offsets, int_sizes, t_start, time_limit):
+    """Best-effort root reduced-cost fixing for a MILP (increment 4).
+
+    Solves the root LP relaxation with POUNCE (for KKT-valid duals), purifies
+    a near-integral point into an incumbent, and applies
+    :func:`_reduced_cost_fixing`. Returns ``(lb, ub, incumbent_or_None)``,
+    unchanged (and ``None``) whenever POUNCE is unavailable, the root LP is
+    not optimal, or no incumbent is recoverable — so it can never weaken the
+    search, only tighten it.
+    """
+    int_idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
+    if not int_idx:
+        return lb, ub, None
+    try:
+        from discopt.solvers.lp_pounce import POUNCE_AVAILABLE
+        from discopt.solvers.lp_pounce import solve_lp as _pounce_solve_lp
+    except ImportError:
+        return lb, ub, None
+    if not POUNCE_AVAILABLE:
+        return lb, ub, None
+
+    n_total = lp_data.A_eq.shape[1] if lp_data.A_eq.shape[0] > 0 else n_orig
+    A_ub, b_ub, A_eq, b_eq = _decompose_eq_slack_form(
+        np.asarray(lp_data.A_eq), np.asarray(lp_data.b_eq), n_orig, n_total - n_orig
+    )
+    c_m = np.asarray(lp_data.c[:n_orig])
+    obj_const = float(lp_data.obj_const)
+    try:
+        res = _pounce_solve_lp(
+            c=c_m,
+            A_ub=A_ub,
+            b_ub=b_ub,
+            A_eq=A_eq,
+            b_eq=b_eq,
+            bounds=list(zip(np.asarray(lb).tolist(), np.asarray(ub).tolist())),
+            time_limit=min(30.0, max(0.5, time_limit - (time.perf_counter() - t_start))),
+        )
+    except Exception as e:
+        logger.debug("root RCF: POUNCE LP failed: %s", e)
+        return lb, ub, None
+    if res.status != SolveStatus.OPTIMAL or res.reduced_costs is None or res.x is None:
+        return lb, ub, None
+
+    z_lp = float(res.objective) + obj_const
+    inc = _pounce_snap_incumbent(
+        np.asarray(res.x),
+        int_offsets,
+        int_sizes,
+        lb,
+        ub,
+        c_m,
+        obj_const,
+        A_ub,
+        b_ub,
+        A_eq,
+        b_eq,
+        t_start,
+        time_limit,
+    )
+    if inc is None:
+        return lb, ub, None
+    z_inc, x_inc = inc
+    new_lb, new_ub, n_changes = _reduced_cost_fixing(
+        lb, ub, int_idx, np.asarray(res.reduced_costs), z_lp, z_inc
+    )
+    if n_changes:
+        logger.info("root reduced-cost fixing tightened %d integer bound(s)", n_changes)
+    return new_lb, new_ub, (z_inc, x_inc)
+
+
 def _solve_milp_bb(
     model: Model,
     time_limit: float,
@@ -6183,9 +6302,24 @@ def _solve_milp_bb(
     n_vars, lb, ub, int_offsets, int_sizes = _extract_variable_info(model)
     n_orig = sum(v.size for v in model._variables)
 
+    # Root reduced-cost fixing (increment 4): best-effort integer-bound
+    # tightening from the root LP duals + a purified incumbent. Sound and
+    # graceful -- only ever tightens, skipped entirely if POUNCE is absent or
+    # no incumbent is recoverable.
+    _root_incumbent = None
+    try:
+        lb, ub, _root_incumbent = _root_reduced_cost_fixing(
+            lp_data, n_orig, lb, ub, int_offsets, int_sizes, t_start, time_limit
+        )
+    except Exception as _rcf_exc:
+        logger.debug("root RCF skipped: %s", _rcf_exc)
+
     t_rust_start = time.perf_counter()
     tree = PyTreeManager(n_vars, lb.tolist(), ub.tolist(), int_offsets, int_sizes, strategy)
     tree.initialize()
+    if _root_incumbent is not None:
+        _z_inc, _x_inc = _root_incumbent
+        tree.inject_incumbent(np.asarray(_x_inc[:n_vars], dtype=np.float64).copy(), float(_z_inc))
     rust_time += time.perf_counter() - t_rust_start
 
     # A node relaxation that stalled at the iteration limit (converged==3) is

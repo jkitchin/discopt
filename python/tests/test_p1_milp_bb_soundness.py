@@ -265,3 +265,79 @@ class TestSnapFixResolvePurification:
         assert r.status == "optimal"
         # The snapped incumbent is exact, not the smeared IPM objective.
         assert r.objective == -8.0
+
+
+# ---------------------------------------------------------------------------
+# Increment 4: reduced-cost fixing via relaxation duals
+# ---------------------------------------------------------------------------
+class TestReducedCostFixing:
+    def test_tightens_and_fixes(self):
+        # z_lp=10, z_inc=12, gap=2 (+ tiny margin).
+        #  d0=5  (lb): x0 <= 0 + floor(2/5)=0   -> fixed to 0
+        #  d1=0.5(lb): x1 <= 0 + floor(2/0.5)=4 -> ub 10->4
+        #  d2=-3 (ub): x2 >= 8 - floor(2/3)=8   -> fixed to 8
+        lb = np.array([0.0, 0.0, 0.0])
+        ub = np.array([5.0, 10.0, 8.0])
+        rc = np.array([5.0, 0.5, -3.0])
+        nlb, nub, nch = S._reduced_cost_fixing(lb, ub, [0, 1, 2], rc, z_lp=10.0, z_inc=12.0)
+        assert nch == 3
+        assert nlb[0] == 0.0 and nub[0] == 0.0
+        assert nub[1] == 4.0
+        assert nlb[2] == 8.0 and nub[2] == 8.0
+
+    def test_negative_gap_is_noop(self):
+        lb = np.array([0.0])
+        ub = np.array([5.0])
+        nlb, nub, nch = S._reduced_cost_fixing(lb, ub, [0], np.array([5.0]), z_lp=12.0, z_inc=10.0)
+        assert nch == 0 and nub[0] == 5.0
+
+    def test_near_zero_reduced_cost_skipped(self):
+        # A basic / degenerate variable (|d| below tol) is never fixed.
+        lb = np.array([0.0])
+        ub = np.array([5.0])
+        nlb, nub, nch = S._reduced_cost_fixing(lb, ub, [0], np.array([1e-9]), z_lp=10.0, z_inc=12.0)
+        assert nch == 0 and nub[0] == 5.0
+
+    def test_never_cuts_the_optimum(self):
+        # The true optimum x* with objective <= z_inc must survive RCF: any
+        # integer x* satisfies d_j*(x*_j - bound_j) <= gap term-by-term.
+        rng = np.random.default_rng(0)
+        for _ in range(200):
+            n = 4
+            lb = np.zeros(n)
+            ub = rng.integers(1, 6, n).astype(float)
+            rc = rng.uniform(-4, 4, n)
+            z_lp = rng.uniform(-5, 5)
+            gap = rng.uniform(0, 6)
+            z_inc = z_lp + gap
+            nlb, nub, _ = S._reduced_cost_fixing(lb, ub, list(range(n)), rc, z_lp, z_inc)
+            # Any integer point whose reduced-cost objective estimate is within
+            # the gap must lie inside the tightened box.
+            for x in rng.integers(0, 6, (50, n)).astype(float):
+                if np.any(x < lb) or np.any(x > ub):
+                    continue
+                est = z_lp + sum(rc[j] * (x[j] - (lb[j] if rc[j] > 0 else ub[j])) for j in range(n))
+                if est <= z_inc + 1e-12:  # an "improving" point per the LP bound
+                    assert np.all(x >= nlb - 1e-9) and np.all(x <= nub + 1e-9)
+
+    def test_end_to_end_answer_unchanged_with_and_without_rcf(self, monkeypatch):
+        import pytest as _pytest
+
+        _pytest.importorskip("pounce")
+
+        def _knap():
+            m = dm.Model("k")
+            xs = [m.binary(f"x{i}") for i in range(5)]
+            vals, wts = [8, 5, 3, 2, 1], [5, 4, 3, 2, 1]
+            m.minimize(-sum(v * x for v, x in zip(vals, xs)))
+            m.subject_to(sum(w * x for w, x in zip(wts, xs)) <= 7)
+            return m
+
+        with_rcf = _knap().solve(use_highs_milp=False, time_limit=60)
+        monkeypatch.setattr(
+            S, "_root_reduced_cost_fixing", lambda lp, n, lb, ub, *a: (lb, ub, None)
+        )
+        without_rcf = _knap().solve(use_highs_milp=False, time_limit=60)
+        assert with_rcf.status == without_rcf.status == "optimal"
+        assert abs(with_rcf.objective - without_rcf.objective) < 1e-6
+        assert with_rcf.objective == -10.0
