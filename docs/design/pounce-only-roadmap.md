@@ -589,9 +589,26 @@ shared seam and falls back to whichever backend is importable.
     basis is valid (reconstructs the vertex); and it reproduces HiGHS's
     optimum. (CI builds the extension with maturin, so the bindings are present
     there; the test skips if an older prebuilt `.so` lacks them.)
-  - **Increment 4 — Gomory/MIR cuts (next):** generate Gomory mixed-integer /
-    MIR cuts from the recovered basis' tableau rows `B⁻¹A`, feeding the
-    existing `CutPool` / root cut loop.
+  - **Increment 4a — Gomory cut generation core — DONE.** `lp/gomory.rs`:
+    `separate_gomory(&LpView, &Basis, integrality, x, tol, max_dynamism)`
+    derives a Gomory mixed-integer (GMI) cut from each fractional integer basic
+    variable's tableau row. For basic var `B_i` it solves `Bᵀ w = e_i` to get
+    row `i` of `B⁻¹`, forms `ā_j = w·A_j` for nonbasic `j`, works in the shifted
+    nonbasic space `x̃_j ≥ 0` (sign-flipping at upper bounds via the recovered
+    `col_status`), applies the standard GMI formula, and maps the resulting
+    `Σ ψ_j x̃_j ≥ 1` back to a cut `Σ γ_j x_j ≥ δ` over the original variables.
+    Numerically guarded (fractionality tolerance, a max-dynamism filter, finite
+    coefficients). The cut is valid for *any* basis row with an integer basic
+    variable — optimality not required — so soundness is independent of
+    crossover/IPM numerics. 3 Rust tests verify, by enumerating all
+    integer-feasible points, that each cut excludes none of them yet cuts off
+    the fractional vertex (worked example: `x0+x1+s=1.5` at `(1, 0.5, 0)` →
+    `2s ≥ 1` ⇔ `x0+x1 ≤ 1`), plus a two-constraint case and the no-cut
+    (integral) case.
+  - **Increment 4b — PyO3 binding + Python validation (next):** expose
+    `separate_gomory` through `discopt._rust`.
+  - **Increment 5 — wire into the root cut loop:** feed GMI cuts (with the
+    crossover vertex + basis) into `_root_cover_cut_loop` / the `CutPool`.
 - **Basis cuts:** Gomory mixed-integer and MIR at the root and at periodic
   re-solves, feeding the existing `CutPool`
   (`python/discopt/_jax/cutting_planes.py`; cap/aging/dedup already there).
