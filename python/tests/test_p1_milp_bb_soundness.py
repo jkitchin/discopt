@@ -129,6 +129,10 @@ class TestNonKKTDecertifiesWhenUnrecoverable:
     def test_milp_batch_decertifies(self, monkeypatch):
         import discopt._jax.lp_ipm as lp_ipm
 
+        # Disable root cover cuts: they solve this knapsack at the (serial)
+        # root, so the batch path under test would never run. Decertification
+        # is orthogonal to cutting.
+        monkeypatch.setattr(S, "_root_cover_cut_loop", lambda ld, *a, **k: (ld, 0))
         _force_code3(monkeypatch, lp_ipm, "lp_ipm_solve_batch")
         monkeypatch.setattr(S, "_pounce_recover_node_bound", lambda *a, **k: None)
         r = _knapsack_milp().solve(use_highs_milp=False, time_limit=60, batch_size=8)

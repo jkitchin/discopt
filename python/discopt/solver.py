@@ -6295,6 +6295,100 @@ def _root_reduced_cost_fixing(lp_data, n_orig, lb, ub, int_offsets, int_sizes, t
     return new_lb, new_ub, (z_inc, x_inc)
 
 
+def _binary_mask(model: Model, n_orig: int) -> np.ndarray:
+    """Length-``n_orig`` mask of which flat columns are binary variables."""
+    mask = np.zeros(n_orig, dtype=bool)
+    off = 0
+    for v in model._variables:
+        sz = int(v.size)
+        if v.var_type == VarType.BINARY:
+            mask[off : off + sz] = True
+        off += sz
+    return mask
+
+
+def _augment_lpdata_with_cover_cuts(lp_data, n_orig: int, cuts):
+    """Add ``sum_{j in C} x_j <= rhs`` rows to the standard-form LP, each with
+    its own non-negative slack column (``sum x_C + s = rhs``).
+
+    Augments the relaxation only (extra rows + slack columns); the tree's
+    original-variable structure is untouched, so the B&B branches exactly as
+    before but on a tighter relaxation. Cover cuts are valid, so the optimum
+    is preserved (cannot affect ``incorrect_count``)."""
+    A = np.asarray(lp_data.A_eq, dtype=np.float64)
+    b = np.asarray(lp_data.b_eq, dtype=np.float64)
+    c = np.asarray(lp_data.c, dtype=np.float64)
+    xl = np.asarray(lp_data.x_l, dtype=np.float64)
+    xu = np.asarray(lp_data.x_u, dtype=np.float64)
+    m_rows, n_cols = A.shape
+    k = len(cuts)
+    newA = np.zeros((m_rows + k, n_cols + k), dtype=np.float64)
+    newA[:m_rows, :n_cols] = A
+    newb = np.concatenate([b, np.zeros(k, dtype=np.float64)])
+    for i, (cover, rhs) in enumerate(cuts):
+        for j in cover:
+            newA[m_rows + i, j] = 1.0
+        newA[m_rows + i, n_cols + i] = 1.0  # slack: sum x_C + s = rhs, s >= 0
+        newb[m_rows + i] = rhs
+    return lp_data._replace(
+        A_eq=newA,
+        b_eq=newb,
+        c=np.concatenate([c, np.zeros(k, dtype=np.float64)]),
+        x_l=np.concatenate([xl, np.zeros(k, dtype=np.float64)]),
+        x_u=np.concatenate([xu, np.full(k, 1e20, dtype=np.float64)]),
+    )
+
+
+def _root_cover_cut_loop(
+    lp_data,
+    n_orig: int,
+    is_binary: np.ndarray,
+    A_ub_orig,
+    b_ub_orig,
+    t_start: float,
+    time_limit: float,
+    max_rounds: int = 5,
+    max_total_cuts: int = 500,
+):
+    """Round-based root knapsack-cover separation (Phase 3).
+
+    Solves the root LP relaxation, separates violated cover cuts from the
+    *original* knapsack rows, augments ``lp_data`` with them, and repeats.
+    Returns the (possibly augmented) ``lp_data`` and the number of cuts added.
+    A no-op when there are no binary-knapsack rows."""
+    from discopt._jax.cover_cuts import has_binary_knapsack_rows, separate_cover_cuts
+
+    if A_ub_orig is None or not has_binary_knapsack_rows(A_ub_orig, b_ub_orig, is_binary):
+        return lp_data, 0
+
+    import jax.numpy as jnp
+
+    from discopt._jax.lp_ipm import lp_ipm_solve
+
+    total = 0
+    for _ in range(max_rounds):
+        if time.perf_counter() - t_start >= time_limit:
+            break
+        state = lp_ipm_solve(
+            jnp.asarray(lp_data.c),
+            jnp.asarray(lp_data.A_eq),
+            jnp.asarray(lp_data.b_eq),
+            jnp.asarray(lp_data.x_l),
+            jnp.asarray(lp_data.x_u),
+        )
+        if int(state.converged) != 1:  # need a converged optimum to separate
+            break
+        x_star = np.asarray(state.x)[:n_orig]
+        cuts = separate_cover_cuts(A_ub_orig, b_ub_orig, x_star, is_binary)
+        if not cuts:
+            break
+        lp_data = _augment_lpdata_with_cover_cuts(lp_data, n_orig, cuts)
+        total += len(cuts)
+        if total >= max_total_cuts:
+            break
+    return lp_data, total
+
+
 def _solve_milp_bb(
     model: Model,
     time_limit: float,
@@ -6337,6 +6431,35 @@ def _solve_milp_bb(
     except Exception as _rcf_exc:
         logger.debug("root RCF skipped: %s", _rcf_exc)
 
+    # --- Root knapsack cover cuts (Phase 3) ---
+    # Separate valid cover inequalities from the *original* knapsack rows and
+    # augment the relaxation, tightening every node's LP bound. Cover cuts are
+    # valid, so the optimum is preserved; the tree variable structure is
+    # untouched (extra rows/slacks only).
+    # Decompose the ORIGINAL problem once: reused for cover separation and for
+    # node/dual recovery, which must reference the user's constraints (not the
+    # auxiliary cover rows). The B&B node LP relaxations below use the
+    # cover-augmented ``lp_data``; recovery uses ``lp_data_orig`` / these.
+    lp_data_orig = lp_data
+    _n_total0 = lp_data.A_eq.shape[1] if lp_data.A_eq.shape[0] > 0 else n_orig
+    _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m = _decompose_eq_slack_form(
+        np.asarray(lp_data.A_eq), np.asarray(lp_data.b_eq), n_orig, _n_total0 - n_orig
+    )
+    try:
+        lp_data, _n_cover = _root_cover_cut_loop(
+            lp_data,
+            n_orig,
+            _binary_mask(model, n_orig),
+            _A_ub_m,
+            _b_ub_m,
+            t_start,
+            time_limit,
+        )
+        if _n_cover:
+            logger.info("root cover cuts added %d valid inequalities", _n_cover)
+    except Exception as _cc_exc:
+        logger.debug("root cover cuts skipped: %s", _cc_exc)
+
     t_rust_start = time.perf_counter()
     tree = PyTreeManager(n_vars, lb.tolist(), ub.tolist(), int_offsets, int_sizes, strategy)
     tree.initialize()
@@ -6352,13 +6475,10 @@ def _solve_milp_bb(
     # infeasibility); only unrecoverable ones decertify the gap (mirrors the
     # P0.3 trust-gate + polish-retry; bounds are left untouched).
     _gap_certified = True
-    # Original-variable matrix form for the POUNCE recovery (and reused by
-    # the dual-recovery epilogue's convention).
-    _n_total0 = lp_data.A_eq.shape[1] if lp_data.A_eq.shape[0] > 0 else n_orig
-    _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m = _decompose_eq_slack_form(
-        np.asarray(lp_data.A_eq), np.asarray(lp_data.b_eq), n_orig, _n_total0 - n_orig
-    )
-    _c_m = np.asarray(lp_data.c[:n_orig])
+    # _A_ub_m/_b_ub_m/_A_eq_m/_b_eq_m (original problem) were decomposed above,
+    # before cover augmentation; node recovery uses them so its bound is for
+    # the user's constraints.
+    _c_m = np.asarray(lp_data_orig.c[:n_orig])
 
     def _recover_or_decertify(i, lbs, sols, node_lb_i, node_ub_i):
         nonlocal _gap_certified
@@ -6565,24 +6685,19 @@ def _solve_milp_bb(
         x_dict = _unpack_solution(model, sol_flat)
 
         # Recover relaxation duals at the integer-feasible incumbent by
-        # re-solving the LP relaxation with integer variables fixed.
+        # re-solving the LP relaxation with integer variables fixed. Use the
+        # ORIGINAL problem (lp_data_orig / its decomposition); the duals are
+        # for the user's named constraints, not the auxiliary cover rows.
         try:
-            n_total = lp_data.A_eq.shape[1] if lp_data.A_eq.shape[0] > 0 else n_orig
-            n_slack = n_total - n_orig
-            A_eq_full = np.asarray(lp_data.A_eq)
-            b_eq_full = np.asarray(lp_data.b_eq)
-            A_ub, b_ub_, A_eq, b_eq = _decompose_eq_slack_form(
-                A_eq_full, b_eq_full, n_orig, n_slack
-            )
             constraint_duals, bound_duals_lower, bound_duals_upper = _mip_recover_relaxation_duals(
                 model,
-                lp_data=lp_data,
+                lp_data=lp_data_orig,
                 x_flat=np.asarray(sol_flat[:n_orig], dtype=float),
                 n_orig=n_orig,
-                A_ub=A_ub,
-                b_ub=b_ub_,
-                A_eq=A_eq,
-                b_eq=b_eq,
+                A_ub=_A_ub_m,
+                b_ub=_b_ub_m,
+                A_eq=_A_eq_m,
+                b_eq=_b_eq_m,
                 time_limit=max(0.1, time_limit - (time.perf_counter() - t_start)),
                 prefer_pounce=prefer_pounce,
             )

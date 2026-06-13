@@ -420,6 +420,27 @@ sound (incr 1), recovers stalled nodes via POUNCE (2), purifies incumbents
 POUNCE-only mode (5). Remaining MILP work (cutting planes, crossover,
 competitive performance) lives in Phases 2–3.
 
+### Phase 3 — Cut & heuristic suite (started)
+
+- **Knapsack cover cuts — DONE.** `_jax/cover_cuts.py` separates valid cover
+  inequalities `sum_{j in C} x_j <= |C|-1` from binary-knapsack rows; a root
+  cut loop (`_root_cover_cut_loop`) solves the root LP, separates violated
+  covers, and augments the standard-form `lp_data` with each cut as a row +
+  non-negative slack (`_augment_lpdata_with_cover_cuts`) — tightening every
+  node's relaxation without touching the tree's variable structure. Cuts are
+  rigorously valid (exhaustively verified to never exclude a feasible 0/1
+  point), so the optimum is preserved. On a unique-optimum knapsack the node
+  count dropped 15 → 7. Basis-free, so it composes with the IPM relaxations.
+  - **Empirical finding (motivates the Phase-2 crossover).** Cover cuts
+    separate a *vertex* sharply but an interior point weakly: on a symmetric
+    knapsack the IPM returns the analytic center `[0.45]*4`, which violates no
+    cover (`0.9 < 1`), whereas simplex's vertex `[1, 0.8, 0, 0]` is cut
+    immediately. Effective MILP cutting on this stack ultimately wants the
+    IPM→vertex crossover (Phase 2 keystone).
+- **Open:** crossover→Gomory/MIR (Phase 2 keystone, Rust, the path to general
+  cut effectiveness from interior points); clique cuts (consume the Rust
+  presolve clique table); diving/RINS heuristics; conflict analysis.
+
 ### Phase 4 — Retire remaining HiGHS consumers (in progress)
 
 Goal: discopt runs fully with **only POUNCE installed** (no HiGHS). Each
