@@ -259,7 +259,7 @@ pub fn solve_lp_py<'py>(
 #[pyfunction]
 #[pyo3(signature = (c, a, b, lb, ub, integer_cols, n_struct, obj_const=0.0,
                     max_nodes=1_000_000, gap_tol=1e-6, tol=1e-9, root_cuts=16,
-                    presolve=true, strong_branch=true, sb_max_cands=8,
+                    cut_rounds=1, presolve=true, strong_branch=true, sb_max_cands=8,
                     sb_node_budget=1024))]
 pub fn solve_milp_py<'py>(
     py: Python<'py>,
@@ -275,6 +275,7 @@ pub fn solve_milp_py<'py>(
     gap_tol: f64,
     tol: f64,
     root_cuts: usize,
+    cut_rounds: usize,
     presolve: bool,
     strong_branch: bool,
     sb_max_cands: usize,
@@ -300,6 +301,7 @@ pub fn solve_milp_py<'py>(
         max_nodes,
         gap_tol,
         root_cuts,
+        cut_rounds,
         presolve,
         strong_branch,
         sb_max_cands,

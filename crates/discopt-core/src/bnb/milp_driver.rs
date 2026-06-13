@@ -65,9 +65,12 @@ pub struct MilpOptions {
     pub max_nodes: usize,
     /// Relative gap tolerance for proving optimality.
     pub gap_tol: f64,
-    /// Max Gomory mixed-integer cuts to add at the root (0 disables). Derived
-    /// from the root's *native* simplex basis — no crossover needed.
+    /// Max Gomory mixed-integer cuts to add at the root (0 disables), summed
+    /// over rounds. Derived from the root's *native* simplex basis — no
+    /// crossover needed.
     pub root_cuts: usize,
+    /// Max root cut rounds (separate → re-solve → separate). 1 = single pass.
+    pub cut_rounds: usize,
     /// Root feasibility-based bound tightening (sound, dimension-preserving).
     pub presolve: bool,
     /// Limited strong branching on unreliable candidates (reliability branching).
@@ -149,19 +152,38 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
     let mut unbounded = false;
     let mut gap_certified = true;
 
-    // --- P5: root GMI cuts from the native simplex basis ---
+    // --- P5/P8: multi-round root GMI cuts from the native simplex basis ---
+    // Each round re-solves the (growing) root LP and separates GMI cuts off its
+    // native basis, adding them as `coeffs·x − s = rhs` surplus rows. Iterating
+    // rounds (Gomory's classic approach) tightens the relaxation far more than a
+    // single pass; we stop on the cut cap, when no violated cut is found, or when
+    // the bound stops improving (tailing off).
     if opts.root_cuts > 0 {
-        let root_lp = LpView {
-            a: &a_w,
-            m: m_w,
-            n: n_w,
-            c: &c_w,
-            l: &l_w,
-            u: &u_w,
-        };
-        let root = solve_lp(&root_lp, &b_w, &opts.simplex);
-        lp_iters += root.iters;
-        if root.status == LpStatus::Optimal {
+        let mut total_cuts = 0usize;
+        let mut prev_obj = f64::NEG_INFINITY;
+        for _round in 0..opts.cut_rounds {
+            if total_cuts >= opts.root_cuts {
+                break;
+            }
+            let root_lp = LpView {
+                a: &a_w,
+                m: m_w,
+                n: n_w,
+                c: &c_w,
+                l: &l_w,
+                u: &u_w,
+            };
+            let root = solve_lp(&root_lp, &b_w, &opts.simplex);
+            lp_iters += root.iters;
+            if root.status != LpStatus::Optimal {
+                break;
+            }
+            // Tailing off: stop once added cuts barely move the bound.
+            if root.obj <= prev_obj + 1e-7 * (1.0 + prev_obj.abs()) && prev_obj > f64::NEG_INFINITY {
+                break;
+            }
+            prev_obj = root.obj;
+
             let cuts = separate_gomory(
                 &root_lp,
                 &b_w,
@@ -170,29 +192,31 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
                 opts.simplex.tol,
                 1e7,
             );
-            let k = cuts.len().min(opts.root_cuts);
-            if k > 0 {
-                let (m_old, n_old) = (m_w, n_w);
-                let (m_new, n_new) = (m_old + k, n_old + k);
-                let mut a_new = vec![0.0; m_new * n_new];
-                for i in 0..m_old {
-                    a_new[i * n_new..i * n_new + n_old]
-                        .copy_from_slice(&a_w[i * n_old..(i + 1) * n_old]);
-                }
-                for (ci, cut) in cuts.iter().take(k).enumerate() {
-                    let row = m_old + ci;
-                    a_new[row * n_new..row * n_new + n_old].copy_from_slice(&cut.coeffs);
-                    a_new[row * n_new + n_old + ci] = -1.0; // surplus: coeffs·x − s = rhs
-                    b_w.push(cut.rhs);
-                    c_w.push(0.0);
-                    l_w.push(0.0);
-                    u_w.push(INF);
-                    is_int_full.push(false);
-                }
-                a_w = a_new;
-                m_w = m_new;
-                n_w = n_new;
+            let k = cuts.len().min(opts.root_cuts - total_cuts);
+            if k == 0 {
+                break;
             }
+            let (m_old, n_old) = (m_w, n_w);
+            let (m_new, n_new) = (m_old + k, n_old + k);
+            let mut a_new = vec![0.0; m_new * n_new];
+            for i in 0..m_old {
+                a_new[i * n_new..i * n_new + n_old]
+                    .copy_from_slice(&a_w[i * n_old..(i + 1) * n_old]);
+            }
+            for (ci, cut) in cuts.iter().take(k).enumerate() {
+                let row = m_old + ci;
+                a_new[row * n_new..row * n_new + n_old].copy_from_slice(&cut.coeffs);
+                a_new[row * n_new + n_old + ci] = -1.0; // surplus: coeffs·x − s = rhs
+                b_w.push(cut.rhs);
+                c_w.push(0.0);
+                l_w.push(0.0);
+                u_w.push(INF);
+                is_int_full.push(false);
+            }
+            a_w = a_new;
+            m_w = m_new;
+            n_w = n_new;
+            total_cuts += k;
         }
     }
     let slack_l = l_w[ns..].to_vec();
@@ -469,6 +493,7 @@ mod tests {
             max_nodes: 100_000,
             gap_tol: 1e-9,
             root_cuts: 16,
+            cut_rounds: 3,
             presolve: true,
             strong_branch: true,
             sb_max_cands: 8,
