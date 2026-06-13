@@ -179,3 +179,50 @@ class TestRustCrossover:
         if rust.recover_basis_py(x_int, a, c, lo, up) is not None:
             # Degenerate fallback: only assert the *crossed-over* point recovers.
             pytest.skip("interior optimum happened to be a vertex")
+
+
+class TestGomoryWiring:
+    """GMI cuts wired into the root cut loop: structural projection keeps the
+    augmented relaxation well-conditioned, so cuts are valid *and* the IPM-based
+    B&B stays correct (roadmap Phase 2, increment 5c)."""
+
+    def test_projection_to_structural_eliminates_slack(self):
+        # Binary knapsack std form: 5(x0+x1+x2+x3) + s = 9. The GMI slack cut
+        # 0.25 s >= 1 projects to -1.25 sum(x) >= -1.25, i.e. sum(x) <= 1 —
+        # structural-only, O(1) coefficients, no wide-range slack coupling.
+        import discopt.solver as S
+
+        A = np.array([[5.0, 5.0, 5.0, 5.0, 1.0]])
+        b = np.array([9.0])
+        coeffs = np.array([0.0, 0.0, 0.0, 0.0, 0.25])  # 0.25 * slack >= 1
+        out = S._project_cut_to_structural(coeffs, 1.0, A, b, n_orig=4)
+        assert out is not None
+        proj, prhs = out
+        np.testing.assert_allclose(proj, [-1.25, -1.25, -1.25, -1.25, 0.0], atol=1e-9)
+        assert abs(prhs - (-1.25)) < 1e-9
+        assert proj[4] == 0.0  # slack column eliminated
+
+    def test_wired_solve_is_correct_and_cuts_nodes(self, monkeypatch):
+        # The pure-binary knapsack that a naive (slack-coupled) GMI got wrong
+        # (-8 vs -10). With structural projection the optimum is preserved and
+        # the cut solves it at the root.
+        pytest.importorskip("pounce")
+        import discopt.solver as S
+
+        monkeypatch.setattr(S, "GOMORY_CUTS_ENABLED", True)  # opt-in
+
+        def _knap():
+            m = dm.Model("k")
+            xs = [m.binary(f"x{i}") for i in range(4)]
+            m.minimize(-(10 * xs[0] + 9 * xs[1] + 8 * xs[2] + 1 * xs[3]))
+            m.subject_to(5 * xs[0] + 5 * xs[1] + 5 * xs[2] + 5 * xs[3] <= 9)
+            return m
+
+        r_gmi = _knap().solve(use_highs_milp=False, time_limit=60)
+        monkeypatch.setattr(S, "_separate_gomory_cuts", lambda *a, **k: None)
+        r_nogmi = _knap().solve(use_highs_milp=False, time_limit=60)
+
+        assert r_gmi.status == "optimal" and r_nogmi.status == "optimal"
+        assert abs(r_gmi.objective - (-10.0)) < 1e-4  # correct optimum (was -8)
+        assert abs(r_gmi.objective - r_nogmi.objective) < 1e-4
+        assert r_gmi.node_count <= r_nogmi.node_count  # cuts never worsen the tree

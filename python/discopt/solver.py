@@ -6352,6 +6352,129 @@ def _augment_lpdata_with_cover_cuts(lp_data, n_orig: int, cuts):
     )
 
 
+# Gomory mixed-integer cuts are correct (structurally projected, soundness
+# guarded) but, in this JAX stack, adding cut rows changes the LP shape and
+# forces the interior-point solver to recompile for the augmented problem. On
+# hard MILPs the one-time cost is dwarfed by the node reductions, but on trivial
+# instances it dominates, so GMI is OFF by default and opt-in. Enable globally
+# with ``discopt.solver.GOMORY_CUTS_ENABLED = True``.
+GOMORY_CUTS_ENABLED = False
+
+
+def _augment_lpdata_with_gomory_cuts(lp_data, coeffs: np.ndarray, rhs: np.ndarray):
+    """Add Gomory cuts ``coeffs[i] · x >= rhs[i]`` to the standard-form LP, each
+    with a non-negative surplus column (``coeffs·x - s = rhs``).
+
+    ``coeffs`` are the *structurally projected* GMI coefficients (see
+    :func:`_separate_gomory_cuts`), so they are O(1) and reference only the
+    structural columns — keeping the augmented relaxation well-conditioned. A
+    small rhs margin scaled to the coefficient magnitude absorbs the residual
+    numerical error in the refined basis, so a cut can never exclude a true
+    integer point (preserving ``incorrect_count == 0``) while still separating
+    the fractional vertex."""
+    A = np.asarray(lp_data.A_eq, dtype=np.float64)
+    b = np.asarray(lp_data.b_eq, dtype=np.float64)
+    c = np.asarray(lp_data.c, dtype=np.float64)
+    xl = np.asarray(lp_data.x_l, dtype=np.float64)
+    xu = np.asarray(lp_data.x_u, dtype=np.float64)
+    m_rows, n_cols = A.shape
+    k = coeffs.shape[0]
+    newA = np.zeros((m_rows + k, n_cols + k), dtype=np.float64)
+    newA[:m_rows, :n_cols] = A
+    newb = np.concatenate([b, np.zeros(k, dtype=np.float64)])
+    for i in range(k):
+        row = np.asarray(coeffs[i], dtype=np.float64)
+        margin = 1e-7 * (1.0 + float(np.abs(row).sum()))  # safe-GMI rhs relaxation
+        newA[m_rows + i, :n_cols] = row
+        newA[m_rows + i, n_cols + i] = -1.0  # surplus: coeffs·x - s = rhs, s >= 0
+        newb[m_rows + i] = float(rhs[i]) - margin
+    return lp_data._replace(
+        A_eq=newA,
+        b_eq=newb,
+        c=np.concatenate([c, np.zeros(k, dtype=np.float64)]),
+        x_l=np.concatenate([xl, np.zeros(k, dtype=np.float64)]),
+        x_u=np.concatenate([xu, np.full(k, 1e20, dtype=np.float64)]),
+    )
+
+
+def _project_cut_to_structural(coeffs, rhs, A, b, n_orig):
+    """Project a standard-form cut ``coeffs·x >= rhs`` onto the structural
+    variables by substituting each slack ``x_s = (b_r - sum_k A[r,k] x_k)/c_s``
+    via its (singleton) defining row ``r``.
+
+    This is an exact substitution through ``A_eq x = b_eq`` — true for every
+    feasible point — so validity and the separation of the current vertex are
+    preserved, but the result references only structural columns with O(1)
+    coefficients (no coupling to the wide-range row slacks that diverge the IPM
+    on cut-augmented relaxations). Returns a length-``n`` coefficient vector
+    (slack entries zero) and rhs, or ``None`` if a slack column is not a clean
+    singleton."""
+    n_cols = A.shape[1]
+    out = np.zeros(n_cols, dtype=np.float64)
+    out[:n_orig] = np.asarray(coeffs[:n_orig], dtype=np.float64)
+    r_rhs = float(rhs)
+    for s in range(n_orig, n_cols):
+        gs = float(coeffs[s])
+        if gs == 0.0:
+            continue
+        rows = np.nonzero(A[:, s])[0]
+        if rows.size != 1:
+            return None  # not a singleton slack — cannot project cleanly
+        r = int(rows[0])
+        cs = A[r, s]
+        if abs(cs) < 1e-12:
+            return None
+        factor = gs / cs
+        out[:n_orig] -= factor * A[r, :n_orig]
+        r_rhs -= factor * b[r]
+    if not np.all(np.isfinite(out)) or not np.isfinite(r_rhs):
+        return None
+    if np.max(np.abs(out)) < 1e-12:
+        return None  # projected to a trivial cut
+    return out, r_rhs
+
+
+def _separate_gomory_cuts(lp_data, x_vertex, n_orig, int_idx, max_cuts: int = 8):
+    """Separate GMI cuts at the crossover vertex via the Rust ``_rust`` binding,
+    then project each onto the structural variables.
+
+    Returns ``(coeffs, rhs)`` arrays (up to ``max_cuts`` projected rows) or
+    ``None`` when the binding is unavailable, ``x_vertex`` is not a basic
+    feasible solution, or no cut survives. Only the genuine integer-constrained
+    structural columns (``int_idx``) are marked integral — slacks stay
+    continuous — so the cuts are sound for the original problem."""
+    try:
+        from discopt._rust import gomory_cuts_py
+    except ImportError:
+        return None
+    A = np.asarray(lp_data.A_eq, dtype=np.float64)
+    b = np.asarray(lp_data.b_eq, dtype=np.float64)
+    n_cur = A.shape[1]
+    integrality = np.zeros(n_cur, dtype=bool)
+    integrality[[j for j in int_idx if j < n_cur]] = True
+    res = gomory_cuts_py(
+        np.ascontiguousarray(x_vertex, dtype=np.float64),
+        np.ascontiguousarray(A),
+        np.ascontiguousarray(b),
+        np.ascontiguousarray(lp_data.c, dtype=np.float64),
+        np.ascontiguousarray(lp_data.x_l, dtype=np.float64),
+        np.ascontiguousarray(lp_data.x_u, dtype=np.float64),
+        integrality,
+    )
+    if res is None:
+        return None
+    coeffs, rhs = np.asarray(res[0], dtype=np.float64), np.asarray(res[1], dtype=np.float64)
+    proj_coeffs, proj_rhs = [], []
+    for ci in range(min(coeffs.shape[0], max_cuts)):
+        projected = _project_cut_to_structural(coeffs[ci], float(rhs[ci]), A, b, n_orig)
+        if projected is not None:
+            proj_coeffs.append(projected[0])
+            proj_rhs.append(projected[1])
+    if not proj_coeffs:
+        return None
+    return np.array(proj_coeffs, dtype=np.float64), np.array(proj_rhs, dtype=np.float64)
+
+
 def _extract_clique_edges(model: Model) -> list[tuple[int, int]]:
     """Conflict-graph 2-clique edges from the Rust presolve clique pass.
 
@@ -6391,16 +6514,19 @@ def _root_cover_cut_loop(
     t_start: float,
     time_limit: float,
     clique_edges=(),
+    int_idx=(),
     max_rounds: int = 5,
     max_total_cuts: int = 500,
 ):
-    """Round-based root cut separation: knapsack cover + clique cuts (Phase 3).
+    """Round-based root cut separation: cover + clique + Gomory cuts (Phase 2/3).
 
-    Solves the root LP relaxation, separates violated cover cuts (from the
-    *original* knapsack rows) and violated clique cuts (from the presolve
-    conflict-graph edges), augments ``lp_data``, and repeats. Returns the
-    (possibly augmented) ``lp_data`` and the number of cuts added. A no-op when
-    there are neither binary-knapsack rows nor clique edges."""
+    Solves the root LP relaxation, crosses the interior optimum over to a
+    vertex, separates violated cover cuts (from the *original* knapsack rows),
+    clique cuts (from the presolve conflict-graph edges), and structurally
+    projected Gomory mixed-integer cuts (from the iteratively-refined basis at
+    the vertex), augments ``lp_data``, and repeats. Returns the (possibly
+    augmented) ``lp_data`` and the number of cuts added. A no-op when there are
+    no binary-knapsack rows, clique edges, or integer variables."""
     from discopt._jax.cover_cuts import (
         has_binary_knapsack_rows,
         separate_clique_cuts,
@@ -6409,7 +6535,8 @@ def _root_cover_cut_loop(
 
     has_cover = A_ub_orig is not None and has_binary_knapsack_rows(A_ub_orig, b_ub_orig, is_binary)
     has_clique = bool(clique_edges)
-    if not has_cover and not has_clique:
+    has_gomory = bool(len(int_idx))
+    if not has_cover and not has_clique and not has_gomory:
         return lp_data, 0
 
     import jax.numpy as jnp
@@ -6417,7 +6544,7 @@ def _root_cover_cut_loop(
     from discopt._jax.lp_ipm import lp_ipm_solve
 
     total = 0
-    for _ in range(max_rounds):
+    for _round in range(max_rounds):
         if time.perf_counter() - t_start >= time_limit:
             break
         state = lp_ipm_solve(
@@ -6460,11 +6587,49 @@ def _root_cover_cut_loop(
                 if cover not in seen:
                     seen.add(cover)
                     cuts.append((cover, rhs))
-        if not cuts:
+
+        round_added = 0
+        # Gomory cuts on the first round only: derived from the original
+        # (well-conditioned) standard-form basis and projected onto the
+        # structural variables. Re-separating GMI on the cut-augmented system
+        # compounds ill-conditioning, so later rounds keep only the
+        # combinatorial (cover/clique) cuts. Added before cover/clique grow the
+        # matrix so the projected coefficients stay sized to the structural
+        # columns; soundness-guarded by the rhs margin in the augmentation.
+        # Cheap pre-check: only attempt the (basis-recovery + GMI) work when an
+        # integer variable is actually fractional at the vertex; otherwise GMI
+        # would find nothing and the basis solve is wasted.
+        _int_fractional = (
+            has_gomory
+            and _round == 0
+            and any(
+                abs(x_vertex[j] - round(float(x_vertex[j]))) > 1e-6
+                for j in int_idx
+                if j < len(x_vertex)
+            )
+        )
+        if _int_fractional:
+            try:
+                gom = _separate_gomory_cuts(lp_data, x_vertex, n_orig, int_idx)
+            except Exception as _gom_exc:
+                logger.debug("gomory separation skipped: %s", _gom_exc)
+                gom = None
+            if gom is not None:
+                gc, gr = gom
+                lp_data = _augment_lpdata_with_gomory_cuts(lp_data, gc, gr)
+                round_added += int(gc.shape[0])
+        if cuts:  # cover/clique reference original columns (< n_orig), still valid
+            lp_data = _augment_lpdata_with_cover_cuts(lp_data, n_orig, cuts)
+            round_added += len(cuts)
+
+        if round_added == 0:
             break
-        lp_data = _augment_lpdata_with_cover_cuts(lp_data, n_orig, cuts)
-        total += len(cuts)
+        total += round_added
         if total >= max_total_cuts:
+            break
+        # GMI is round-0 only; with no cover/clique to re-separate, further
+        # rounds would just re-solve the LP for nothing.
+        if not has_cover and not has_clique:
             break
     return lp_data, total
 
@@ -6571,6 +6736,14 @@ def _solve_milp_bb(
         _is_bin = _binary_mask(model, n_orig)
         # Conflict-graph clique edges (only worth extracting if binaries exist).
         _clique_edges = _extract_clique_edges(model) if bool(_is_bin.any()) else []
+        # Gomory cuts are opt-in (see GOMORY_CUTS_ENABLED): passing no integer
+        # indices disables the GMI branch, so the loop runs exactly as it did
+        # before GMI (cover/clique only) with no added per-solve cost.
+        _cut_int_idx = (
+            [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
+            if GOMORY_CUTS_ENABLED
+            else []
+        )
         lp_data, _n_cuts = _root_cover_cut_loop(
             lp_data,
             n_orig,
@@ -6580,9 +6753,10 @@ def _solve_milp_bb(
             t_start,
             time_limit,
             clique_edges=_clique_edges,
+            int_idx=_cut_int_idx,
         )
         if _n_cuts:
-            logger.info("root cuts added %d valid inequalities (cover + clique)", _n_cuts)
+            logger.info("root cuts added %d valid inequalities (cover + clique + gomory)", _n_cuts)
     except Exception as _cc_exc:
         logger.debug("root cuts skipped: %s", _cc_exc)
 

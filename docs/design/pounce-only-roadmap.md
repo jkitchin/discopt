@@ -647,16 +647,44 @@ shared seam and falls back to whichever backend is importable.
     ill-conditioned and the IPM diverges** (`converged=3`, `obj=nan`), so the
     B&B prunes on garbage bounds. Cover-cuts-only converges; a single GMI cut
     converges; the *combination* does not.
-    **Conclusion:** the blocker is no longer cut accuracy (refinement solved
-    that) but **IPM robustness on cut-augmented relaxations**. The clear path
-    forward: *project GMI cuts onto the structural variables* (substitute each
-    slack `x_s = b_row − row·x` so the cut becomes e.g. `Σx ≤ 1`, coefficients
-    O(1), its own bounded `[0,1]` slack) — well-conditioned and decoupled from
-    the `1e20`-range row slacks — plus robust handling of non-converged
-    augmented node LPs. The refined generation + binding are committed as
-    validated building blocks; in-solver use waits on the structural projection.
-    The `test_milp_pounce` battery + the cover-cut end-to-end test are the
-    safeguards for any retry.
+    Diagnosis: the blocker was no longer cut accuracy (refinement solved that)
+    but **IPM robustness on cut-augmented relaxations**.
+  - **Increment 5c — structural projection — DONE (GMI now wired and
+    correct).** `_project_cut_to_structural` (solver.py) substitutes every
+    slack `x_s = (b_r − Σ_k A[r,k] x_k)/c_s` via its singleton defining row,
+    turning a slack-coupled cut like `0.25·x₄ ≥ 1` into the structural
+    `−1.25·Σx ≥ −1.25` (i.e. `Σx ≤ 1`): O(1) coefficients, no coupling to the
+    `1e20`-range row slacks. The substitution is exact through `A_eq x = b_eq`
+    (true at every feasible point), so validity and vertex-separation are
+    preserved. `_separate_gomory_cuts` now projects each refined GMI cut before
+    augmentation, and the root loop runs GMI on round 0 only. **Results:** the
+    pure-binary knapsack that returned `-8` now returns the correct `-10` at the
+    root; the full `test_milp_pounce` HiGHS battery passes with GMI wired;
+    objectives stay consistent and GMI reduces the node count on ~⅓ of the
+    battery seeds (never worsens). New tests in `test_rust_crossover.py`
+    (`TestGomoryWiring`): the projection unit test and an end-to-end correctness
+    + node-reduction test on the formerly-failing knapsack. **GMI cuts are now a
+    live, sound part of the MILP solve path** — the payoff of the crossover +
+    basis keystone. The `test_milp_pounce` battery + the cover-cut end-to-end
+    test remain the standing correctness safeguards.
+  - **Increment 5d — opt-in by default (performance).** Always-on GMI
+    regressed the full fast suite ~30% (≈11→14 min): in this JAX stack, adding
+    cut rows changes the LP shape and forces the interior-point solver to
+    **recompile** for the augmented problem. Cover/clique cuts avoid this
+    because they only fire on knapsack/clique problems; GMI hitting *every*
+    integer problem made all of them pay the recompile + an extra root solve.
+    On hard MILPs that one-time cost is dwarfed by the node reductions, but on
+    trivial instances it dominates. GMI is therefore **opt-in, off by default**
+    (`discopt.solver.GOMORY_CUTS_ENABLED`); when off, the call site passes no
+    integer indices so the cut loop runs exactly as it did before GMI (no
+    added per-solve cost). Two pure optimizations apply when it is on: skip the
+    basis-recovery/GMI work unless an integer variable is fractional at the
+    vertex, and stop after round 0 when there are no cover/clique cuts to
+    re-separate. `TestGomoryWiring` enables the flag explicitly.
+  - **Open (future):** an automatic size/hardness gate to turn GMI on for the
+    problems that benefit; GMI re-separation across rounds (needs robust
+    conditioning of repeatedly-augmented systems); MIR cuts; and robust
+    handling of non-converged augmented node LPs.
 - **Basis cuts:** Gomory mixed-integer and MIR at the root and at periodic
   re-solves, feeding the existing `CutPool`
   (`python/discopt/_jax/cutting_planes.py`; cap/aging/dedup already there).
