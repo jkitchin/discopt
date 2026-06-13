@@ -516,8 +516,11 @@ shared seam and falls back to whichever backend is importable.
   `test_lp_backend_select.py::TestHighspyConsumersRetired`. The DOE and
   robust-opt paths the earlier scan flagged were already clean: both build a
   `Model` and call `Model.solve()`, which is POUNCE-capable. No remaining
-  module imports `highspy` outside the `*_highs.py` wrappers themselves, so
-  `highspy` can move to the dev/test extra.
+  module imports `highspy` outside the `*_highs.py` wrappers themselves, and
+  those are imported only lazily through the selector — so a `[pounce]`-only
+  install is fully functional. `highspy` is already an optional extra (`highs`,
+  and in `dev`), and we keep it that way: HiGHS stays the default engine when
+  installed and the reference oracle (see the Phase 4 packaging note).
 
 - Route pure MILP and MIQP through the existing Rust B&B
   (`crates/discopt-core/src/bnb/`) with POUNCE LP/QP relaxations, replacing
@@ -576,9 +579,18 @@ shared seam and falls back to whichever backend is importable.
 - `_jax/obbt.py` → POUNCE LP. McCormick-LP mode (`mccormick_lp.py`,
   `milp_relaxation.py`), `partition_selection.py`, DOE optimal design, RO
   polyhedral subproblems, `export`/`cli` incidentals.
-- Remove `highspy` from runtime dependencies in `pyproject.toml`; keep it
-  in the dev/test extra as the CI oracle. **discopt is now HiGHS-free at
-  runtime.**
+- **Packaging — already done; no removal needed.** `highspy` was never a
+  hard runtime dependency: `pyproject.toml` lists only `jax`/`jaxlib`/`numpy`/
+  `scipy` under `dependencies`, with HiGHS behind the `highs` extra (and the
+  `dev` extra) and POUNCE behind the `pounce` extra. The thing that was
+  actually missing was code paths that *hard-required* HiGHS even in
+  POUNCE-only mode; once those go through the selector (above),
+  `pip install discopt[pounce]` is fully functional with no HiGHS present.
+  **We deliberately keep `highspy` selectable.** discopt is likely not yet
+  performance-competitive with HiGHS, and HiGHS remains valuable as (a) the
+  default, faster engine when installed (the selector is HiGHS-first unless
+  `nlp_solver="pounce"`) and (b) the reference oracle for correctness/basis
+  tests. So the end state is *HiGHS-optional at runtime*, not HiGHS-free.
 
 ### Phase 5 — Parity push + differentiability completion
 
