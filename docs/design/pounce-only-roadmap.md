@@ -365,9 +365,24 @@ is a trustworthy LP/dual engine. Work breakdown:
   `SolveResult.gap_certified` is surfaced. Bounds/incumbent untouched.
   Tests: `test_p1_milp_bb_soundness.py` (controls still certify; forced
   code-3 → `"feasible"`, `gap_certified=False`, correct incumbent).
-- **Open:** POUNCE polish/fallback for code-3 nodes (recover instead of
-  decertify); interior-solution purification; reduced-cost fixing / OBBT via
-  relaxation duals; then flip the default off HiGHS.
+- **POUNCE recovery for stalled nodes — DONE (increment 2).** Instead of
+  decertifying on a code-3 node, `_pounce_recover_node_bound` re-solves the
+  node in original-variable matrix form via `lp_pounce`/`qp_pounce`: an
+  OPTIMAL result is a KKT-valid bound (node recovered, search certifies
+  normally), INFEASIBLE is Phase-1-certified (rigorous prune); only when
+  POUNCE is unavailable or also fails does the gap decertify. Wired into the
+  batch and serial paths of both functions.
+- **Interior-solution purification — DONE (increment 3).** IPM relaxation
+  optima are interior, so integer coordinates come back smeared (e.g.
+  0.99996) beyond the 1e-5 integrality tolerance. `_pounce_snap_incumbent`
+  rounds integer coordinates within 1e-4, validates them against the
+  original node box, *fixes* them, and re-solves the continuous relaxation
+  with POUNCE — yielding an exactly feasible integer point with an exact
+  objective, injected via `tree.inject_incumbent` (also a rounding
+  heuristic). Visible win: the knapsack MILP incumbent is exactly `-8.0`
+  instead of the smeared `-7.999999997754972`.
+- **Open:** reduced-cost fixing / OBBT via relaxation duals; then flip the
+  default off HiGHS.
 
 - Route pure MILP and MIQP through the existing Rust B&B
   (`crates/discopt-core/src/bnb/`) with POUNCE LP/QP relaxations, replacing
