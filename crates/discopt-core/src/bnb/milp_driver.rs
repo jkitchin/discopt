@@ -16,7 +16,7 @@ use crate::bnb::pool::SelectionStrategy;
 use crate::bnb::tree_manager::{NodeResult, TreeManager};
 use crate::lp::crossover::LpView;
 use crate::lp::gomory::separate_gomory;
-use crate::lp::simplex::{solve_lp, solve_lp_warm, LpStatus, SimplexOptions};
+use crate::lp::simplex::{solve_lp, solve_lp_warm, tighten_bounds, LpStatus, SimplexOptions};
 
 const INF: f64 = 1e20;
 const INFEAS_SENTINEL: f64 = 1e30;
@@ -67,6 +67,8 @@ pub struct MilpOptions {
     /// Max Gomory mixed-integer cuts to add at the root (0 disables). Derived
     /// from the root's *native* simplex basis — no crossover needed.
     pub root_cuts: usize,
+    /// Root feasibility-based bound tightening (sound, dimension-preserving).
+    pub presolve: bool,
     /// LP solver options.
     pub simplex: SimplexOptions,
 }
@@ -94,8 +96,32 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
         })
         .collect();
 
-    let glb = lp.l[..ns].to_vec();
-    let gub = lp.u[..ns].to_vec();
+    let mut is_int_full = vec![false; n];
+    is_int_full[..ns].copy_from_slice(&is_int);
+
+    // --- presolve: sound, dimension-preserving root bound tightening ---
+    // Only narrows bounds (interval/FBBT contraction), so it never cuts a
+    // feasible solution and needs no postsolve; the tightened bounds seed both
+    // the tree's global bounds and the node LPs. A proven-empty box ⇒ infeasible.
+    let (base_l, base_u) = if opts.presolve {
+        let pr = tighten_bounds(lp, b, &is_int_full, opts.simplex.tol);
+        if pr.infeasible {
+            return MilpResult {
+                status: MilpStatus::Infeasible,
+                x: vec![0.0; ns],
+                obj: f64::INFINITY,
+                bound: f64::INFINITY,
+                nodes: 0,
+                lp_iters: 0,
+            };
+        }
+        (pr.l, pr.u)
+    } else {
+        (lp.l.to_vec(), lp.u.to_vec())
+    };
+
+    let glb = base_l[..ns].to_vec();
+    let gub = base_u[..ns].to_vec();
     let mut tm = TreeManager::new(ns, glb, gub, int_info, SelectionStrategy::BestFirst);
     tm.initialize();
 
@@ -105,12 +131,10 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
     let mut a_w = lp.a.to_vec();
     let mut b_w = b.to_vec();
     let mut c_w = lp.c.to_vec();
-    let mut l_w = lp.l.to_vec();
-    let mut u_w = lp.u.to_vec();
+    let mut l_w = base_l;
+    let mut u_w = base_u;
     let mut m_w = lp.m;
     let mut n_w = n;
-    let mut is_int_full = vec![false; n];
-    is_int_full[..ns].copy_from_slice(&is_int);
 
     let mut lp_iters = 0usize;
     let mut unbounded = false;
@@ -303,6 +327,7 @@ mod tests {
             max_nodes: 100_000,
             gap_tol: 1e-9,
             root_cuts: 16,
+            presolve: true,
             simplex: SimplexOptions::default(),
         }
     }
@@ -399,6 +424,41 @@ mod tests {
             r_cut.nodes,
             r_no.nodes
         );
+    }
+
+    #[test]
+    fn presolve_matches_no_presolve() {
+        // Equality-constrained MILP where FBBT actually fires:
+        //   min -x0 - 2x1 - x2  s.t.  x0 + x1 + x2 = 3,  2x1 + x2 + s = 4,
+        //   x∈[0,3] integer, s≥0. Presolve must not change the optimum.
+        let a = [1.0, 1.0, 1.0, 0.0, 0.0, 2.0, 1.0, 1.0];
+        let c = [-1.0, -2.0, -1.0, 0.0];
+        let l = [0.0, 0.0, 0.0, 0.0];
+        let u = [3.0, 3.0, 3.0, INF];
+        let lp = LpView {
+            a: &a,
+            m: 2,
+            n: 4,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let mut on = opts(3, vec![0, 1, 2]);
+        on.presolve = true;
+        let mut off = opts(3, vec![0, 1, 2]);
+        off.presolve = false;
+        let r_on = solve_milp(&lp, &[3.0, 4.0], 0.0, &on);
+        let r_off = solve_milp(&lp, &[3.0, 4.0], 0.0, &off);
+        assert_eq!(r_on.status, MilpStatus::Optimal);
+        assert_eq!(r_off.status, MilpStatus::Optimal);
+        assert!(
+            (r_on.obj - r_off.obj).abs() < 1e-6,
+            "presolve {} vs no-presolve {}",
+            r_on.obj,
+            r_off.obj
+        );
+        // Tightening should not increase node count.
+        assert!(r_on.nodes <= r_off.nodes, "{} vs {}", r_on.nodes, r_off.nodes);
     }
 
     #[test]
