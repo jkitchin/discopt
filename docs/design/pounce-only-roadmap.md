@@ -549,8 +549,22 @@ shared seam and falls back to whichever backend is importable.
   details.
 - **Pure-Rust crossover** (interior → basic feasible vertex + *basis*).
   Remaining keystone: the basis (not just the vertex) is the prerequisite for
-  basis-derived Gomory/MIR cuts. Budget as its own sub-project with heavy
-  numerical testing. Use HiGHS basis output as the test oracle.
+  basis-derived Gomory/MIR cuts. Use HiGHS basis output as the test oracle.
+  - **Increment 1 — vertex crossover core — DONE.**
+    `crates/discopt-core/src/lp/{mod,crossover}.rs`. New dependency-free `lp`
+    module: `crossover_to_vertex(x, &LpView, tol, max_iter)` ports the Python
+    null-space push to Rust — `LpView` is a borrowed standard-form LP view, the
+    null direction of `[A_free; c_freeᵀ]` comes from a hand-written
+    rank-revealing RREF (no BLAS/LAPACK dep, keeping the wheel build clean),
+    and a ratio test fixes one variable per step until the free columns are
+    independent (a vertex). 5 Rust unit tests (objective + feasibility
+    preserved, lands on a vertex, already-vertex stable, size guard, 50 random
+    LPs); `cargo test/clippy/fmt` clean.
+  - **Increment 2 — basis recovery (next):** classify the vertex's active set
+    into a basic/nonbasic partition (nonbasic at their bounds), validated
+    cell-by-cell against HiGHS `getBasis()`; expose via PyO3 so the Python cut
+    loop can call the Rust crossover and consume the basis.
+  - **Increment 3:** Gomory mixed-integer / MIR cuts off the recovered basis.
 - **Basis cuts:** Gomory mixed-integer and MIR at the root and at periodic
   re-solves, feeding the existing `CutPool`
   (`python/discopt/_jax/cutting_planes.py`; cap/aging/dedup already there).
