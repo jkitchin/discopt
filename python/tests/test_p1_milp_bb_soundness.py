@@ -79,12 +79,58 @@ def _force_code3(monkeypatch, module, name):
     monkeypatch.setattr(module, name, wrapper)
 
 
-class TestNonKKTDecertifies:
-    def test_milp_batch_non_kkt_decertifies(self, monkeypatch):
+class TestNonKKTRecoveredByPounce:
+    """Increment 2: a stalled (code-3) node is re-solved with POUNCE, whose
+    KKT-valid optimum restores the bound — the solve certifies normally."""
+
+    def test_milp_batch_non_kkt_recovered(self, monkeypatch):
+        import pytest as _pytest
+
+        _pytest.importorskip("pounce")
         import discopt._jax.lp_ipm as lp_ipm
 
         # batch_size=8 lets the tree export >1 node -> batch LP path.
         _force_code3(monkeypatch, lp_ipm, "lp_ipm_solve_batch")
+        r = _knapsack_milp().solve(use_highs_milp=False, time_limit=60, batch_size=8)
+        assert r.status == "optimal"
+        assert r.gap_certified is True
+        assert abs(r.objective - (-8.0)) < 1e-4
+
+    def test_milp_serial_non_kkt_recovered(self, monkeypatch):
+        import pytest as _pytest
+
+        _pytest.importorskip("pounce")
+        import discopt._jax.lp_ipm as lp_ipm
+
+        # batch_size=1 forces the serial per-node LP path.
+        _force_code3(monkeypatch, lp_ipm, "lp_ipm_solve")
+        r = _knapsack_milp().solve(use_highs_milp=False, time_limit=60, batch_size=1)
+        assert r.status == "optimal"
+        assert r.gap_certified is True
+        assert abs(r.objective - (-8.0)) < 1e-4
+
+    def test_miqp_batch_non_kkt_recovered(self, monkeypatch):
+        import pytest as _pytest
+
+        _pytest.importorskip("pounce")
+        import discopt._jax.qp_ipm as qp_ipm
+
+        monkeypatch.setattr(S, "_solve_qp_highs", lambda *a, **k: None)
+        _force_code3(monkeypatch, qp_ipm, "qp_ipm_solve_batch")
+        r = _miqp().solve(time_limit=60, batch_size=8)
+        assert r.status == "optimal"
+        assert r.gap_certified is True
+        assert abs(r.objective - 0.18) < 1e-3
+
+
+class TestNonKKTDecertifiesWhenUnrecoverable:
+    """When POUNCE recovery also fails, the gap must not be certified."""
+
+    def test_milp_batch_decertifies(self, monkeypatch):
+        import discopt._jax.lp_ipm as lp_ipm
+
+        _force_code3(monkeypatch, lp_ipm, "lp_ipm_solve_batch")
+        monkeypatch.setattr(S, "_pounce_recover_node_bound", lambda *a, **k: None)
         r = _knapsack_milp().solve(use_highs_milp=False, time_limit=60, batch_size=8)
         # Bounds are the real LP optima (just relabeled non-KKT), so the answer
         # is still found, but optimality must not be certified.
@@ -93,21 +139,22 @@ class TestNonKKTDecertifies:
         assert r.bound is None and r.gap is None
         assert abs(r.objective - (-8.0)) < 1e-4  # incumbent still correct
 
-    def test_milp_serial_non_kkt_decertifies(self, monkeypatch):
+    def test_milp_serial_decertifies(self, monkeypatch):
         import discopt._jax.lp_ipm as lp_ipm
 
-        # batch_size=1 forces the serial per-node LP path.
         _force_code3(monkeypatch, lp_ipm, "lp_ipm_solve")
+        monkeypatch.setattr(S, "_pounce_recover_node_bound", lambda *a, **k: None)
         r = _knapsack_milp().solve(use_highs_milp=False, time_limit=60, batch_size=1)
         assert r.gap_certified is False
         assert r.status == "feasible"
         assert abs(r.objective - (-8.0)) < 1e-4
 
-    def test_miqp_batch_non_kkt_decertifies(self, monkeypatch):
+    def test_miqp_batch_decertifies(self, monkeypatch):
         import discopt._jax.qp_ipm as qp_ipm
 
         monkeypatch.setattr(S, "_solve_qp_highs", lambda *a, **k: None)
         _force_code3(monkeypatch, qp_ipm, "qp_ipm_solve_batch")
+        monkeypatch.setattr(S, "_pounce_recover_node_bound", lambda *a, **k: None)
         r = _miqp().solve(time_limit=60, batch_size=8)
         assert r.gap_certified is False
         assert r.status == "feasible"

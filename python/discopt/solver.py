@@ -6038,6 +6038,70 @@ def _solve_qp_jax(model: Model, t_start: float) -> SolveResult:
     return sr
 
 
+def _pounce_recover_node_bound(
+    node_lb: np.ndarray,
+    node_ub: np.ndarray,
+    c: np.ndarray,
+    obj_const: float,
+    A_ub,
+    b_ub,
+    A_eq,
+    b_eq,
+    t_start: float,
+    time_limit: float,
+    Q: Optional[np.ndarray] = None,
+):
+    """Re-solve a stalled (non-KKT) MILP/MIQP node relaxation with POUNCE.
+
+    The JAX LP/QP IPM reports ``converged==3`` when it hits the iteration
+    limit; that objective is not a valid node lower bound. POUNCE is a true
+    filter IPM, so its OPTIMAL objective is KKT-valid and its INFEASIBLE is
+    Phase-1-certified — either recovers the node instead of decertifying the
+    whole gap (Phase 1 increment 2; mirrors the P0.3 polish-retry).
+
+    Returns ``("optimal", bound, x)``, ``("infeasible", None, None)``, or
+    ``None`` when POUNCE is unavailable / could not settle the node either.
+    """
+    try:
+        if Q is None:
+            from discopt.solvers.lp_pounce import POUNCE_AVAILABLE
+            from discopt.solvers.lp_pounce import solve_lp as _pounce_solve
+        else:
+            from discopt.solvers.qp_pounce import POUNCE_AVAILABLE
+            from discopt.solvers.qp_pounce import solve_qp as _pounce_solve
+    except ImportError:
+        return None
+    if not POUNCE_AVAILABLE:
+        return None
+
+    time_left = max(0.5, time_limit - (time.perf_counter() - t_start))
+    kwargs = dict(
+        c=c,
+        A_ub=A_ub,
+        b_ub=b_ub,
+        A_eq=A_eq,
+        b_eq=b_eq,
+        bounds=list(zip(np.asarray(node_lb).tolist(), np.asarray(node_ub).tolist())),
+        time_limit=min(30.0, time_left),
+    )
+    if Q is not None:
+        kwargs["Q"] = Q
+    try:
+        res = _pounce_solve(**kwargs)
+    except Exception as e:
+        logger.debug("POUNCE node-bound recovery failed: %s", e)
+        return None
+    if (
+        res.status == SolveStatus.OPTIMAL
+        and res.objective is not None
+        and np.isfinite(res.objective)
+    ):
+        return ("optimal", float(res.objective) + float(obj_const), np.asarray(res.x))
+    if res.status == SolveStatus.INFEASIBLE:
+        return ("infeasible", None, None)
+    return None
+
+
 def _solve_milp_bb(
     model: Model,
     time_limit: float,
@@ -6070,10 +6134,40 @@ def _solve_milp_bb(
 
     # A node relaxation that stalled at the iteration limit (converged==3) is
     # not at KKT, so its objective is not a valid lower bound for the node
-    # (f(x~) >= f*); trusting it can prune the true integer optimum. Track
-    # whether any such bound was used and, if so, refuse to certify the gap
-    # (mirrors the P0.3 trust-gate; bounds are left untouched).
+    # (f(x~) >= f*); trusting it can prune the true integer optimum. Such
+    # nodes are first re-solved with POUNCE (KKT-valid bound or certified
+    # infeasibility); only unrecoverable ones decertify the gap (mirrors the
+    # P0.3 trust-gate + polish-retry; bounds are left untouched).
     _gap_certified = True
+    # Original-variable matrix form for the POUNCE recovery (and reused by
+    # the dual-recovery epilogue's convention).
+    _n_total0 = lp_data.A_eq.shape[1] if lp_data.A_eq.shape[0] > 0 else n_orig
+    _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m = _decompose_eq_slack_form(
+        np.asarray(lp_data.A_eq), np.asarray(lp_data.b_eq), n_orig, _n_total0 - n_orig
+    )
+    _c_m = np.asarray(lp_data.c[:n_orig])
+
+    def _recover_or_decertify(i, lbs, sols, node_lb_i, node_ub_i):
+        nonlocal _gap_certified
+        rec = _pounce_recover_node_bound(
+            node_lb_i,
+            node_ub_i,
+            _c_m,
+            float(lp_data.obj_const),
+            _A_ub_m,
+            _b_ub_m,
+            _A_eq_m,
+            _b_eq_m,
+            t_start,
+            time_limit,
+        )
+        if rec is None:
+            _gap_certified = False
+        elif rec[0] == "optimal":
+            lbs[i] = rec[1]
+            sols[i] = rec[2][:n_vars]
+        else:  # Phase-1-certified infeasible node: prune is rigorous.
+            lbs[i] = _INFEASIBILITY_SENTINEL
 
     iteration = 0
     while True:
@@ -6131,10 +6225,16 @@ def _solve_milp_bb(
                         lb_c = np.clip(np.array(batch_lb[i]), -_SPC, _SPC)
                         ub_c = np.clip(np.array(batch_ub[i]), -_SPC, _SPC)
                         result_sols[i] = 0.5 * (lb_c + ub_c)
-                # Any non-KKT (max-iter) LP bound that survived as a finite
-                # lower bound makes the gap uncertifiable.
-                if np.any((converged == 3) & (result_lbs < _SENTINEL_THRESHOLD)):
-                    _gap_certified = False
+                # Non-KKT (max-iter) LP bounds are recovered via POUNCE;
+                # unrecoverable ones decertify the gap.
+                for i in np.where((converged == 3) & (result_lbs < _SENTINEL_THRESHOLD))[0]:
+                    _recover_or_decertify(
+                        int(i),
+                        result_lbs,
+                        result_sols,
+                        np.array(batch_lb[i]),
+                        np.array(batch_ub[i]),
+                    )
             except Exception as e:
                 logger.debug("Batch LP solve failed: %s", e)
                 result_lbs = np.full(n_batch, _INFEASIBILITY_SENTINEL, dtype=np.float64)
@@ -6167,8 +6267,8 @@ def _solve_milp_bb(
                         if _check_lp_solution_feasibility(lp_data.A_eq, lp_data.b_eq, state.x):
                             result_lbs[i] = float(state.obj) + lp_data.obj_const
                             result_sols[i] = np.asarray(state.x[:n_vars])
-                            if conv == 3:  # non-KKT bound: uncertifiable gap
-                                _gap_certified = False
+                            if conv == 3:  # non-KKT: recover via POUNCE
+                                _recover_or_decertify(i, result_lbs, result_sols, node_lb, node_ub)
                         else:
                             result_lbs[i] = _INFEASIBILITY_SENTINEL
                             lb_c = np.clip(node_lb, -_SPC, _SPC)
@@ -6332,10 +6432,39 @@ def _solve_miqp_bb(
 
     # A node relaxation that stalled at the iteration limit (converged==3) is
     # not at KKT, so its objective is not a valid lower bound for the node
-    # (f(x~) >= f*); trusting it can prune the true integer optimum. Track
-    # whether any such bound was used and, if so, refuse to certify the gap
-    # (mirrors the P0.3 trust-gate; bounds are left untouched).
+    # (f(x~) >= f*); trusting it can prune the true integer optimum. Such
+    # nodes are first re-solved with POUNCE; only unrecoverable ones
+    # decertify the gap (mirrors the P0.3 trust-gate + polish-retry).
     _gap_certified = True
+    _n_total0 = qp_data.A_eq.shape[1] if qp_data.A_eq.shape[0] > 0 else n_orig
+    _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m = _decompose_eq_slack_form(
+        np.asarray(qp_data.A_eq), np.asarray(qp_data.b_eq), n_orig, _n_total0 - n_orig
+    )
+    _c_m = np.asarray(qp_data.c[:n_orig])
+    _Q_m = np.asarray(qp_data.Q[:n_orig, :n_orig])
+
+    def _recover_or_decertify(i, lbs, sols, node_lb_i, node_ub_i):
+        nonlocal _gap_certified
+        rec = _pounce_recover_node_bound(
+            node_lb_i,
+            node_ub_i,
+            _c_m,
+            float(qp_data.obj_const),
+            _A_ub_m,
+            _b_ub_m,
+            _A_eq_m,
+            _b_eq_m,
+            t_start,
+            time_limit,
+            Q=_Q_m,
+        )
+        if rec is None:
+            _gap_certified = False
+        elif rec[0] == "optimal":
+            lbs[i] = rec[1]
+            sols[i] = rec[2][:n_vars]
+        else:  # Phase-1-certified infeasible node: prune is rigorous.
+            lbs[i] = _INFEASIBILITY_SENTINEL
 
     iteration = 0
     while True:
@@ -6400,10 +6529,16 @@ def _solve_miqp_bb(
                         lb_c = np.clip(np.array(batch_ub[i]), -_SPC, _SPC)
                         ub_c = np.clip(np.array(batch_ub[i]), -_SPC, _SPC)
                         result_sols[i] = 0.5 * (lb_c + ub_c)
-                # Any non-KKT (max-iter) QP bound surviving as a finite lower
-                # bound makes the gap uncertifiable.
-                if np.any((converged == 3) & (result_lbs < _SENTINEL_THRESHOLD)):
-                    _gap_certified = False
+                # Non-KKT (max-iter) QP bounds are recovered via POUNCE;
+                # unrecoverable ones decertify the gap.
+                for i in np.where((converged == 3) & (result_lbs < _SENTINEL_THRESHOLD))[0]:
+                    _recover_or_decertify(
+                        int(i),
+                        result_lbs,
+                        result_sols,
+                        np.array(batch_lb[i]),
+                        np.array(batch_ub[i]),
+                    )
             except Exception as e:
                 logger.debug("Batch QP solve failed: %s", e)
                 result_lbs = np.full(n_batch, _INFEASIBILITY_SENTINEL, dtype=np.float64)
@@ -6443,8 +6578,8 @@ def _solve_miqp_bb(
                         if _check_lp_solution_feasibility(qp_data.A_eq, qp_data.b_eq, state.x):
                             result_lbs[i] = float(state.obj) + qp_data.obj_const
                             result_sols[i] = np.asarray(state.x[:n_vars])
-                            if conv == 3:  # non-KKT bound: uncertifiable gap
-                                _gap_certified = False
+                            if conv == 3:  # non-KKT: recover via POUNCE
+                                _recover_or_decertify(i, result_lbs, result_sols, node_lb, node_ub)
                         else:
                             result_lbs[i] = _INFEASIBILITY_SENTINEL
                             lb_c = np.clip(node_lb, -_SPC, _SPC)
