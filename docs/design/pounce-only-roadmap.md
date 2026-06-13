@@ -605,10 +605,16 @@ shared seam and falls back to whichever backend is importable.
     the fractional vertex (worked example: `x0+x1+s=1.5` at `(1, 0.5, 0)` →
     `2s ≥ 1` ⇔ `x0+x1 ≤ 1`), plus a two-constraint case and the no-cut
     (integral) case.
-  - **Increment 4b — PyO3 binding + Python validation (next):** expose
-    `separate_gomory` through `discopt._rust`.
-  - **Increment 5 — wire into the root cut loop:** feed GMI cuts (with the
-    crossover vertex + basis) into `_root_cover_cut_loop` / the `CutPool`.
+  - **Increment 4b — PyO3 binding — DONE.** `lp_bindings.rs` adds
+    `discopt._rust.gomory_cuts_py(x, a, c, lb, ub, integrality, tol,
+    max_dynamism)`, which recovers the basis at `x` and separates GMI cuts in
+    one call, returning `(coeffs[k×n], rhs[k])` (cuts `coeffs[i]·x ≥ rhs[i]`) or
+    `None` when `x` is not a basic feasible solution. `test_rust_crossover.py`
+    adds the worked `2s ≥ 1` example (exact coefficients + validity by
+    enumeration) and a real-pipeline test (IPM → crossover → GMI) asserting the
+    cuts are finite and separate the fractional vertex.
+  - **Increment 5 — wire into the root cut loop (next):** feed GMI cuts (with
+    the crossover vertex + basis) into `_root_cover_cut_loop` / the `CutPool`.
 - **Basis cuts:** Gomory mixed-integer and MIR at the root and at periodic
   re-solves, feeding the existing `CutPool`
   (`python/discopt/_jax/cutting_planes.py`; cap/aging/dedup already there).

@@ -127,6 +127,49 @@ class TestRustCrossover:
         status, basic = np.asarray(res[0]), np.asarray(res[1])
         _assert_valid_basis(status, basic, xv, a, b, lo, up)
 
+    def test_gomory_worked_example(self):
+        # x0 + x1 + s = 1.5, x0,x1 binary-relaxed, s >= 0. At vertex (1, 0.5, 0)
+        # the GMI cut is 2 s >= 1 (i.e. x0 + x1 <= 1). Check exact cut, that it
+        # cuts off the vertex, and that it excludes no integer-feasible point.
+        if not hasattr(rust, "gomory_cuts_py"):
+            pytest.skip("gomory binding not built")
+        a = np.array([[1.0, 1.0, 1.0]])
+        c = np.zeros(3)
+        lo = np.array([0.0, 0.0, 0.0])
+        up = np.array([1.0, 1.0, 1e30])
+        x = np.array([1.0, 0.5, 0.0])
+        integ = np.array([True, True, False])
+        res = rust.gomory_cuts_py(x, a, c, lo, up, integ)
+        assert res is not None
+        coeffs, rhs = np.asarray(res[0]), np.asarray(res[1])
+        assert coeffs.shape == (1, 3)
+        np.testing.assert_allclose(coeffs[0], [0.0, 0.0, 2.0], atol=1e-9)
+        np.testing.assert_allclose(rhs, [1.0], atol=1e-9)
+        assert coeffs[0] @ x < rhs[0] - 1e-6  # cuts off the vertex
+        for b0 in (0, 1):
+            for b1 in (0, 1):
+                s = 1.5 - b0 - b1
+                if s < -1e-9:
+                    continue
+                pt = np.array([b0, b1, s])
+                assert coeffs[0] @ pt >= rhs[0] - 1e-6
+
+    def test_gomory_pipeline_separates_vertex(self):
+        # Real pipeline: IPM interior optimum -> Rust crossover -> GMI cuts.
+        # Every returned cut must be finite and cut off the crossover vertex.
+        if not hasattr(rust, "gomory_cuts_py"):
+            pytest.skip("gomory binding not built")
+        a, b, c, lo, up, x_int = _lp_interior_optimum(_sym_knapsack())
+        xv = np.asarray(rust.crossover_to_vertex_py(x_int, a, c, lo, up))
+        n = a.shape[1]
+        integ = np.array([True] * 4 + [False] * (n - 4))  # 4 binaries + slacks
+        res = rust.gomory_cuts_py(xv, a, c, lo, up, integ)
+        assert res is not None  # xv is a vertex
+        coeffs, rhs = np.asarray(res[0]), np.asarray(res[1])
+        for i in range(coeffs.shape[0]):
+            assert np.all(np.isfinite(coeffs[i])) and np.isfinite(rhs[i])
+            assert coeffs[i] @ xv < rhs[i] - 1e-6  # separates the fractional vertex
+
     def test_declines_non_vertex(self):
         # The raw interior optimum (analytic center) is not a polytope vertex;
         # recovery must decline rather than fabricate a basis.

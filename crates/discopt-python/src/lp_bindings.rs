@@ -13,7 +13,10 @@
 
 use discopt_core::lp::basis::recover_basis;
 use discopt_core::lp::crossover::{crossover_to_vertex, LpView};
-use numpy::{PyArray1, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
+use discopt_core::lp::gomory::separate_gomory;
+use numpy::{
+    PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods,
+};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -89,4 +92,55 @@ pub fn recover_basis_py<'py>(
         }
         None => Ok(None),
     }
+}
+
+/// Separate Gomory mixed-integer cuts at the vertex `x` of the standard-form LP.
+///
+/// Recovers a basis at `x` then derives one GMI cut per fractional integer
+/// basic variable. `integrality` is a length-`n` bool array. Returns
+/// `(coeffs, rhs)` — `coeffs` is a `k × n` array and `rhs` length `k`, the cuts
+/// `coeffs[i] · x ≥ rhs[i]` over the standard-form variables — or `None` when
+/// `x` is not a basic feasible solution (basis recovery declined).
+#[pyfunction]
+#[pyo3(signature = (x, a, c, lb, ub, integrality, tol=1e-7, max_dynamism=1e7))]
+pub fn gomory_cuts_py<'py>(
+    py: Python<'py>,
+    x: PyReadonlyArray1<'py, f64>,
+    a: PyReadonlyArray2<'py, f64>,
+    c: PyReadonlyArray1<'py, f64>,
+    lb: PyReadonlyArray1<'py, f64>,
+    ub: PyReadonlyArray1<'py, f64>,
+    integrality: PyReadonlyArray1<'py, bool>,
+    tol: f64,
+    max_dynamism: f64,
+) -> PyResult<Option<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>)>> {
+    let dims = a.shape();
+    let (m, n) = (dims[0], dims[1]);
+    let a_flat = a
+        .as_slice()
+        .map_err(|_| PyValueError::new_err("`a` must be C-contiguous"))?;
+    let lp = LpView {
+        a: a_flat,
+        m,
+        n,
+        c: c.as_slice()?,
+        l: lb.as_slice()?,
+        u: ub.as_slice()?,
+    };
+    let xs = x.as_slice()?;
+    let basis = match recover_basis(xs, &lp, tol) {
+        Some(b) => b,
+        None => return Ok(None),
+    };
+    let cuts = separate_gomory(&lp, &basis, integrality.as_slice()?, xs, tol, max_dynamism);
+
+    let k = cuts.len();
+    let mut flat = Vec::with_capacity(k * n);
+    let mut rhs = Vec::with_capacity(k);
+    for cut in &cuts {
+        flat.extend_from_slice(&cut.coeffs);
+        rhs.push(cut.rhs);
+    }
+    let coeffs = PyArray1::from_vec(py, flat).reshape([k, n])?;
+    Ok(Some((coeffs, PyArray1::from_vec(py, rhs))))
 }
