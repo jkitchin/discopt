@@ -704,11 +704,14 @@ shared seam and falls back to whichever backend is importable.
     the formerly-failing knapsack. This trades away batched-GPU node waves in
     POUNCE mode (POUNCE solves sequentially), an accepted call given GPU is not
     a near-term priority.
-  - **Open (future):** route the *cut-loop* root solve through POUNCE too (it
-    still uses the JAX IPM, a minor residual recompile when GMI is on in POUNCE
-    mode); MIR cuts; GMI re-separation across rounds; and, if batched-GPU node
-    solving becomes a priority, a fixed-shape (padded / shape-polymorphic) JAX
-    IPM so cuts stay cheap there as well.
+  - **Increment 6b — cut-loop root solve through POUNCE — DONE.**
+    `_cut_loop_relaxation_x` routes the cut loop's own root relaxation solve
+    through POUNCE in POUNCE mode (JAX IPM otherwise), so the residual recompile
+    when GMI augments the shape mid-loop is gone too. The relaxation point is
+    only a separation seed, so cut validity is unaffected by the engine.
+  - **Open (future):** MIR cuts; GMI re-separation across rounds; and, if
+    batched-GPU node solving becomes a priority, a fixed-shape (padded /
+    shape-polymorphic) JAX IPM so cuts stay cheap there as well.
 - **Basis cuts:** Gomory mixed-integer and MIR at the root and at periodic
   re-solves, feeding the existing `CutPool`
   (`python/discopt/_jax/cutting_planes.py`; cap/aging/dedup already there).

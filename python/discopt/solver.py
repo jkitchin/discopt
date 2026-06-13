@@ -6568,6 +6568,55 @@ def _extract_clique_edges(model: Model) -> list[tuple[int, int]]:
         return []
 
 
+def _cut_loop_relaxation_x(lp_data, prefer_pounce: bool):
+    """Solve the (cut-augmented) root relaxation for the cut loop, returning the
+    optimum ``x`` or ``None``.
+
+    In POUNCE mode the solve goes through POUNCE so the cut-augmented shape costs
+    no JAX recompile (consistent with the Path-B node engine); otherwise the JAX
+    IPM is used. Either way the returned point is just a separation seed —
+    crossover and cut validity do not depend on which engine produced it."""
+    if prefer_pounce:
+        try:
+            from discopt.solvers.lp_pounce import POUNCE_AVAILABLE
+            from discopt.solvers.lp_pounce import solve_lp as _pounce_solve
+        except ImportError:
+            POUNCE_AVAILABLE = False
+        if POUNCE_AVAILABLE:
+            try:
+                res = _pounce_solve(
+                    c=np.asarray(lp_data.c, dtype=np.float64),
+                    A_eq=np.asarray(lp_data.A_eq, dtype=np.float64),
+                    b_eq=np.asarray(lp_data.b_eq, dtype=np.float64),
+                    bounds=list(
+                        zip(
+                            np.asarray(lp_data.x_l, dtype=np.float64).tolist(),
+                            np.asarray(lp_data.x_u, dtype=np.float64).tolist(),
+                        )
+                    ),
+                )
+            except Exception as exc:
+                logger.debug("cut-loop POUNCE solve failed: %s", exc)
+                return None
+            if res.status == SolveStatus.OPTIMAL and res.x is not None:
+                return np.asarray(res.x, dtype=np.float64)
+            return None
+    import jax.numpy as jnp
+
+    from discopt._jax.lp_ipm import lp_ipm_solve
+
+    state = lp_ipm_solve(
+        jnp.asarray(lp_data.c),
+        jnp.asarray(lp_data.A_eq),
+        jnp.asarray(lp_data.b_eq),
+        jnp.asarray(lp_data.x_l),
+        jnp.asarray(lp_data.x_u),
+    )
+    if int(state.converged) != 1:
+        return None
+    return np.asarray(state.x, dtype=np.float64)
+
+
 def _root_cover_cut_loop(
     lp_data,
     n_orig: int,
@@ -6578,6 +6627,7 @@ def _root_cover_cut_loop(
     time_limit: float,
     clique_edges=(),
     int_idx=(),
+    prefer_pounce: bool = False,
     max_rounds: int = 5,
     max_total_cuts: int = 500,
 ):
@@ -6602,22 +6652,15 @@ def _root_cover_cut_loop(
     if not has_cover and not has_clique and not has_gomory:
         return lp_data, 0
 
-    import jax.numpy as jnp
-
-    from discopt._jax.lp_ipm import lp_ipm_solve
-
     total = 0
     for _round in range(max_rounds):
         if time.perf_counter() - t_start >= time_limit:
             break
-        state = lp_ipm_solve(
-            jnp.asarray(lp_data.c),
-            jnp.asarray(lp_data.A_eq),
-            jnp.asarray(lp_data.b_eq),
-            jnp.asarray(lp_data.x_l),
-            jnp.asarray(lp_data.x_u),
-        )
-        if int(state.converged) != 1:  # need a converged optimum to separate
+        # Solve the (possibly cut-augmented) root relaxation. In POUNCE mode use
+        # POUNCE so adding cut rows costs no JAX recompile (matches the Path-B
+        # node engine); otherwise the JAX IPM.
+        x_relax = _cut_loop_relaxation_x(lp_data, prefer_pounce)
+        if x_relax is None:  # need a usable optimum to separate
             break
         # Cross over the interior optimum to a vertex of the optimal face
         # (Phase 2): cover/clique cuts separate a vertex sharply but the
@@ -6627,7 +6670,7 @@ def _root_cover_cut_loop(
 
         try:
             x_vertex = crossover_to_vertex(
-                np.asarray(state.x),
+                x_relax,
                 np.asarray(lp_data.A_eq),
                 np.asarray(lp_data.b_eq),
                 np.asarray(lp_data.c),
@@ -6636,7 +6679,7 @@ def _root_cover_cut_loop(
             )
         except Exception as _xo_exc:
             logger.debug("crossover skipped: %s", _xo_exc)
-            x_vertex = np.asarray(state.x)
+            x_vertex = x_relax
         x_star = x_vertex[:n_orig]
         cuts: list[tuple[frozenset, float]] = []
         seen: set[frozenset] = set()
@@ -6819,6 +6862,7 @@ def _solve_milp_bb(
             time_limit,
             clique_edges=_clique_edges,
             int_idx=_cut_int_idx,
+            prefer_pounce=prefer_pounce,
         )
         if _n_cuts:
             logger.info("root cuts added %d valid inequalities (cover + clique + gomory)", _n_cuts)
