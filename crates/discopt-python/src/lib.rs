@@ -11,6 +11,7 @@ use pyo3::prelude::*;
 mod batch;
 mod bnb_bindings;
 mod expr_bindings;
+mod lp_bindings;
 mod nl_bindings;
 
 /// Returns the discopt version.
@@ -30,5 +31,7 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(expr_bindings::model_to_repr, m)?)?;
     m.add_function(wrap_pyfunction!(nl_bindings::parse_nl_file, m)?)?;
     m.add_function(wrap_pyfunction!(nl_bindings::parse_nl_string, m)?)?;
+    m.add_function(wrap_pyfunction!(lp_bindings::crossover_to_vertex_py, m)?)?;
+    m.add_function(wrap_pyfunction!(lp_bindings::recover_basis_py, m)?)?;
     Ok(())
 }

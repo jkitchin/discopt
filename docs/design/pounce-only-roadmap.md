@@ -576,11 +576,22 @@ shared seam and falls back to whichever backend is importable.
     bound, and `A_B x_B = b − A_N x_N` reconstructs the vertex — over a clean
     vertex, a vertex with a free (basic) variable, an end-to-end
     crossover→recover, and the declined non-vertex case.
-  - **Increment 3 — PyO3 binding (next):** expose `crossover_to_vertex` +
-    `recover_basis` through `discopt._rust` so the Python cut loop can call the
-    Rust crossover and consume the basis; validate the basis against HiGHS
-    `getBasis()` on uniquely-optimal LPs (where the basis is unique).
-  - **Increment 4:** Gomory mixed-integer / MIR cuts off the recovered basis.
+  - **Increment 3 — PyO3 binding — DONE.**
+    `crates/discopt-python/src/lp_bindings.rs` exposes
+    `discopt._rust.crossover_to_vertex_py(x, a, c, lb, ub, tol, max_iter)` and
+    `recover_basis_py(x, a, c, lb, ub, tol) -> (col_status, basic_vars) | None`,
+    taking the standard-form LP as zero-copy numpy (C-contiguous `A`). The
+    Python B&B can now call the Rust crossover and consume the basis.
+    `test_rust_crossover.py` drives the real pipeline (`extract_lp_data` →
+    `lp_ipm_solve` interior optimum → Rust crossover → basis): objective and
+    feasibility preserved and lands on a vertex; matches the numpy reference's
+    *properties* (both reach a valid vertex, tie-breaking aside); the recovered
+    basis is valid (reconstructs the vertex); and it reproduces HiGHS's
+    optimum. (CI builds the extension with maturin, so the bindings are present
+    there; the test skips if an older prebuilt `.so` lacks them.)
+  - **Increment 4 — Gomory/MIR cuts (next):** generate Gomory mixed-integer /
+    MIR cuts from the recovered basis' tableau rows `B⁻¹A`, feeding the
+    existing `CutPool` / root cut loop.
 - **Basis cuts:** Gomory mixed-integer and MIR at the root and at periodic
   re-solves, feeding the existing `CutPool`
   (`python/discopt/_jax/cutting_planes.py`; cap/aging/dedup already there).
