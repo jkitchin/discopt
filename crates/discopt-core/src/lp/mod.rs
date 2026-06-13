@@ -12,6 +12,7 @@
 //! and avoids pulling a BLAS/LAPACK stack into the wheel build.
 
 pub mod basis;
+pub mod cover;
 pub mod crossover;
 pub mod gomory;
 pub mod mir;

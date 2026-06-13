@@ -15,6 +15,7 @@ use crate::bnb::branching::VarBranchInfo;
 use crate::bnb::pool::SelectionStrategy;
 use crate::bnb::tree_manager::{NodeResult, TreeManager};
 use crate::lp::basis::Basis;
+use crate::lp::cover::separate_cover;
 use crate::lp::crossover::LpView;
 use crate::lp::gomory::separate_gomory;
 use crate::lp::simplex::{solve_lp, solve_lp_warm, tighten_bounds, LpStatus, SimplexOptions};
@@ -159,6 +160,7 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
     // single pass; we stop on the cut cap, when no violated cut is found, or when
     // the bound stops improving (tailing off).
     if opts.root_cuts > 0 {
+        let n_orig_rows = m_w; // rows present before any cuts are knapsack candidates
         let mut total_cuts = 0usize;
         let mut prev_obj = f64::NEG_INFINITY;
         for _round in 0..opts.cut_rounds {
@@ -184,14 +186,25 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
             }
             prev_obj = root.obj;
 
-            let cuts = separate_gomory(
+            // Knapsack cover cuts (sparse, strong on knapsack structure) plus
+            // Gomory mixed-integer cuts off the native basis.
+            let mut cuts = separate_cover(
+                &root_lp,
+                &b_w,
+                &root.x,
+                ns,
+                &is_int_full,
+                n_orig_rows,
+                opts.simplex.tol,
+            );
+            cuts.extend(separate_gomory(
                 &root_lp,
                 &b_w,
                 &root.basis,
                 &is_int_full,
                 opts.simplex.tol,
                 1e7,
-            );
+            ));
             let k = cuts.len().min(opts.root_cuts - total_cuts);
             if k == 0 {
                 break;
