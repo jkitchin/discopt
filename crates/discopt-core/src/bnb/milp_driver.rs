@@ -15,6 +15,7 @@ use crate::bnb::branching::VarBranchInfo;
 use crate::bnb::pool::SelectionStrategy;
 use crate::bnb::tree_manager::{NodeResult, TreeManager};
 use crate::lp::crossover::LpView;
+use crate::lp::gomory::separate_gomory;
 use crate::lp::simplex::{solve_lp, solve_lp_warm, LpStatus, SimplexOptions};
 
 const INF: f64 = 1e20;
@@ -63,6 +64,9 @@ pub struct MilpOptions {
     pub max_nodes: usize,
     /// Relative gap tolerance for proving optimality.
     pub gap_tol: f64,
+    /// Max Gomory mixed-integer cuts to add at the root (0 disables). Derived
+    /// from the root's *native* simplex basis — no crossover needed.
+    pub root_cuts: usize,
     /// LP solver options.
     pub simplex: SimplexOptions,
 }
@@ -95,12 +99,71 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
     let mut tm = TreeManager::new(ns, glb, gub, int_info, SelectionStrategy::BestFirst);
     tm.initialize();
 
-    let slack_l = lp.l[ns..].to_vec();
-    let slack_u = lp.u[ns..].to_vec();
+    // Working LP, possibly augmented with root cuts. Cuts add rows + slack
+    // columns; structural columns [0, ns) are untouched, so the tree's
+    // structural bounds still apply unchanged.
+    let mut a_w = lp.a.to_vec();
+    let mut b_w = b.to_vec();
+    let mut c_w = lp.c.to_vec();
+    let mut l_w = lp.l.to_vec();
+    let mut u_w = lp.u.to_vec();
+    let mut m_w = lp.m;
+    let mut n_w = n;
+    let mut is_int_full = vec![false; n];
+    is_int_full[..ns].copy_from_slice(&is_int);
 
     let mut lp_iters = 0usize;
     let mut unbounded = false;
     let mut gap_certified = true;
+
+    // --- P5: root GMI cuts from the native simplex basis ---
+    if opts.root_cuts > 0 {
+        let root_lp = LpView {
+            a: &a_w,
+            m: m_w,
+            n: n_w,
+            c: &c_w,
+            l: &l_w,
+            u: &u_w,
+        };
+        let root = solve_lp(&root_lp, &b_w, &opts.simplex);
+        lp_iters += root.iters;
+        if root.status == LpStatus::Optimal {
+            let cuts = separate_gomory(
+                &root_lp,
+                &b_w,
+                &root.basis,
+                &is_int_full,
+                opts.simplex.tol,
+                1e7,
+            );
+            let k = cuts.len().min(opts.root_cuts);
+            if k > 0 {
+                let (m_old, n_old) = (m_w, n_w);
+                let (m_new, n_new) = (m_old + k, n_old + k);
+                let mut a_new = vec![0.0; m_new * n_new];
+                for i in 0..m_old {
+                    a_new[i * n_new..i * n_new + n_old]
+                        .copy_from_slice(&a_w[i * n_old..(i + 1) * n_old]);
+                }
+                for (ci, cut) in cuts.iter().take(k).enumerate() {
+                    let row = m_old + ci;
+                    a_new[row * n_new..row * n_new + n_old].copy_from_slice(&cut.coeffs);
+                    a_new[row * n_new + n_old + ci] = -1.0; // surplus: coeffs·x − s = rhs
+                    b_w.push(cut.rhs);
+                    c_w.push(0.0);
+                    l_w.push(0.0);
+                    u_w.push(INF);
+                    is_int_full.push(false);
+                }
+                a_w = a_new;
+                m_w = m_new;
+                n_w = n_new;
+            }
+        }
+    }
+    let slack_l = l_w[ns..].to_vec();
+    let slack_u = u_w[ns..].to_vec();
 
     'search: loop {
         if tm.is_finished() || tm.gap() <= opts.gap_tol {
@@ -117,24 +180,24 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
         let mut results = Vec::with_capacity(batch.node_ids.len());
         for k in 0..batch.node_ids.len() {
             let id = batch.node_ids[k];
-            let mut full_l = vec![0.0; n];
-            let mut full_u = vec![0.0; n];
+            let mut full_l = vec![0.0; n_w];
+            let mut full_u = vec![0.0; n_w];
             full_l[..ns].copy_from_slice(&batch.lb[k]);
             full_u[..ns].copy_from_slice(&batch.ub[k]);
             full_l[ns..].copy_from_slice(&slack_l);
             full_u[ns..].copy_from_slice(&slack_u);
             let node_lp = LpView {
-                a: lp.a,
-                m: lp.m,
-                n,
-                c: lp.c,
+                a: &a_w,
+                m: m_w,
+                n: n_w,
+                c: &c_w,
                 l: &full_l,
                 u: &full_u,
             };
 
             let sol = match tm.node_basis(id) {
-                Some(basis) => solve_lp_warm(&node_lp, b, &basis, &opts.simplex),
-                None => solve_lp(&node_lp, b, &opts.simplex),
+                Some(basis) => solve_lp_warm(&node_lp, &b_w, &basis, &opts.simplex),
+                None => solve_lp(&node_lp, &b_w, &opts.simplex),
             };
             lp_iters += sol.iters;
 
@@ -239,6 +302,7 @@ mod tests {
             integer_cols: int_cols,
             max_nodes: 100_000,
             gap_tol: 1e-9,
+            root_cuts: 16,
             simplex: SimplexOptions::default(),
         }
     }
@@ -302,6 +366,39 @@ mod tests {
         };
         let r = solve_milp(&lp, &[1.0], 0.0, &opts(1, vec![0]));
         assert_eq!(r.status, MilpStatus::Infeasible);
+    }
+
+    #[test]
+    fn root_cuts_reduce_nodes() {
+        // Symmetric knapsack 5Σx + s = 9, x binary, min -16Σx. Optimum -16
+        // (one item). The fractional root [0.45]^4 yields a GMI cut Σx ≤ 1.
+        let a = [5.0, 5.0, 5.0, 5.0, 1.0];
+        let c = [-16.0, -16.0, -16.0, -16.0, 0.0];
+        let l = [0.0; 5];
+        let u = [1.0, 1.0, 1.0, 1.0, INF];
+        let lp = LpView {
+            a: &a,
+            m: 1,
+            n: 5,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let mut o_cut = opts(4, vec![0, 1, 2, 3]);
+        o_cut.root_cuts = 16;
+        let mut o_no = opts(4, vec![0, 1, 2, 3]);
+        o_no.root_cuts = 0;
+        let r_cut = solve_milp(&lp, &[9.0], 0.0, &o_cut);
+        let r_no = solve_milp(&lp, &[9.0], 0.0, &o_no);
+        assert_eq!(r_cut.status, MilpStatus::Optimal);
+        assert_eq!(r_no.status, MilpStatus::Optimal);
+        assert!((r_cut.obj - (-16.0)).abs() < 1e-6 && (r_no.obj - (-16.0)).abs() < 1e-6);
+        assert!(
+            r_cut.nodes <= r_no.nodes,
+            "cuts {} vs no-cuts {}",
+            r_cut.nodes,
+            r_no.nodes
+        );
     }
 
     #[test]

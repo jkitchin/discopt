@@ -258,7 +258,7 @@ pub fn solve_lp_py<'py>(
 /// `optimal`, `feasible`, `infeasible`, `unbounded`, `node_limit`.
 #[pyfunction]
 #[pyo3(signature = (c, a, b, lb, ub, integer_cols, n_struct, obj_const=0.0,
-                    max_nodes=1_000_000, gap_tol=1e-6, tol=1e-9))]
+                    max_nodes=1_000_000, gap_tol=1e-6, tol=1e-9, root_cuts=16))]
 pub fn solve_milp_py<'py>(
     py: Python<'py>,
     c: PyReadonlyArray1<'py, f64>,
@@ -272,6 +272,7 @@ pub fn solve_milp_py<'py>(
     max_nodes: usize,
     gap_tol: f64,
     tol: f64,
+    root_cuts: usize,
 ) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
     let dims = a.shape();
     let (m, n) = (dims[0], dims[1]);
@@ -292,6 +293,7 @@ pub fn solve_milp_py<'py>(
         integer_cols: int_cols,
         max_nodes,
         gap_tol,
+        root_cuts,
         simplex: SimplexOptions { tol, max_iter: 100_000 },
     };
     let res = core_solve_milp(&lp, b.as_slice()?, obj_const, &opts);
