@@ -11,13 +11,15 @@
 //! Python by a single PyO3 entry. MINLP/MIQP/NLP are untouched (they keep the
 //! POUNCE/JAX path); only linear MILP reaches here.
 
+use std::collections::HashSet;
+
 use crate::bnb::branching::VarBranchInfo;
 use crate::bnb::pool::SelectionStrategy;
 use crate::bnb::tree_manager::{NodeResult, TreeManager};
-use crate::lp::basis::Basis;
+use crate::lp::basis::{Basis, BASIC};
 use crate::lp::cover::separate_cover;
 use crate::lp::crossover::LpView;
-use crate::lp::gomory::separate_gomory;
+use crate::lp::gomory::{separate_gomory, GomoryCut};
 use crate::lp::simplex::{solve_lp, solve_lp_warm, tighten_bounds, LpStatus, SimplexOptions};
 
 const INF: f64 = 1e20;
@@ -72,6 +74,10 @@ pub struct MilpOptions {
     pub root_cuts: usize,
     /// Max root cut rounds (separate → re-solve → separate). 1 = single pass.
     pub cut_rounds: usize,
+    /// Separate globally-valid cover cuts at fractional nodes into a shared pool.
+    pub node_cuts: bool,
+    /// Cap on the total number of pooled cuts (root + node).
+    pub max_pool_cuts: usize,
     /// Root feasibility-based bound tightening (sound, dimension-preserving).
     pub presolve: bool,
     /// Limited strong branching on unreliable candidates (reliability branching).
@@ -153,6 +159,13 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
     let mut unbounded = false;
     let mut gap_certified = true;
 
+    // Original constraint rows (before any cuts) are the knapsack candidates for
+    // cover separation; later rows are themselves cuts.
+    let n_orig_rows = m_w;
+    // Global cut pool signatures — globally-valid cover cuts found anywhere in
+    // the tree are added once and shared by all nodes.
+    let mut pool_sigs: HashSet<Vec<(u32, i64)>> = HashSet::new();
+
     // --- P5/P8: multi-round root GMI cuts from the native simplex basis ---
     // Each round re-solves the (growing) root LP and separates GMI cuts off its
     // native basis, adding them as `coeffs·x − s = rhs` surplus rows. Iterating
@@ -160,7 +173,6 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
     // single pass; we stop on the cut cap, when no violated cut is found, or when
     // the bound stops improving (tailing off).
     if opts.root_cuts > 0 {
-        let n_orig_rows = m_w; // rows present before any cuts are knapsack candidates
         let mut total_cuts = 0usize;
         let mut prev_obj = f64::NEG_INFINITY;
         for _round in 0..opts.cut_rounds {
@@ -205,35 +217,29 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
                 opts.simplex.tol,
                 1e7,
             ));
-            let k = cuts.len().min(opts.root_cuts - total_cuts);
-            if k == 0 {
+            cuts.truncate(opts.root_cuts - total_cuts);
+            let new_cuts = dedup_new_cuts(cuts, &mut pool_sigs, usize::MAX);
+            if new_cuts.is_empty() {
                 break;
             }
-            let (m_old, n_old) = (m_w, n_w);
-            let (m_new, n_new) = (m_old + k, n_old + k);
-            let mut a_new = vec![0.0; m_new * n_new];
-            for i in 0..m_old {
-                a_new[i * n_new..i * n_new + n_old]
-                    .copy_from_slice(&a_w[i * n_old..(i + 1) * n_old]);
-            }
-            for (ci, cut) in cuts.iter().take(k).enumerate() {
-                let row = m_old + ci;
-                a_new[row * n_new..row * n_new + n_old].copy_from_slice(&cut.coeffs);
-                a_new[row * n_new + n_old + ci] = -1.0; // surplus: coeffs·x − s = rhs
-                b_w.push(cut.rhs);
-                c_w.push(0.0);
-                l_w.push(0.0);
-                u_w.push(INF);
-                is_int_full.push(false);
-            }
-            a_w = a_new;
-            m_w = m_new;
-            n_w = n_new;
-            total_cuts += k;
+            total_cuts += new_cuts.len();
+            let (nm, nn) = augment_with_cuts(
+                &mut a_w,
+                &mut b_w,
+                &mut c_w,
+                &mut l_w,
+                &mut u_w,
+                &mut is_int_full,
+                m_w,
+                n_w,
+                &new_cuts,
+            );
+            m_w = nm;
+            n_w = nn;
         }
     }
-    let slack_l = l_w[ns..].to_vec();
-    let slack_u = u_w[ns..].to_vec();
+    let mut slack_l = l_w[ns..].to_vec();
+    let mut slack_u = u_w[ns..].to_vec();
 
     'search: loop {
         if tm.is_finished() || tm.gap() <= opts.gap_tol {
@@ -249,6 +255,7 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
         }
         let sb_active = opts.strong_branch && tm.stats().total_nodes < opts.sb_node_budget;
         let mut results = Vec::with_capacity(batch.node_ids.len());
+        let mut pending_cuts: Vec<GomoryCut> = Vec::new();
         for k in 0..batch.node_ids.len() {
             let id = batch.node_ids[k];
             let mut full_l = vec![0.0; n_w];
@@ -266,8 +273,14 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
                 u: &full_u,
             };
 
+            // Lazily extend a basis stored before later cuts grew the matrix:
+            // the appended cut slacks become basic (a valid, dual-repairable
+            // starting basis).
             let sol = match tm.node_basis(id) {
-                Some(basis) => solve_lp_warm(&node_lp, &b_w, &basis, &opts.simplex),
+                Some(basis) => {
+                    let basis = extend_basis(basis, n_w);
+                    solve_lp_warm(&node_lp, &b_w, &basis, &opts.simplex)
+                }
                 None => solve_lp(&node_lp, &b_w, &opts.simplex),
             };
             lp_iters += sol.iters;
@@ -280,6 +293,26 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
                         .iter()
                         .enumerate()
                         .all(|(j, &it)| !it || frac(xs[j]) <= INT_TOL);
+                    // Node-level cover separation: a fractional node exposes
+                    // violated covers the root never sees. These are globally
+                    // valid, so they go into the shared pool (added between
+                    // batches) and tighten the whole tree.
+                    if opts.node_cuts && !feasible && pool_sigs.len() < opts.max_pool_cuts {
+                        let found = separate_cover(
+                            &node_lp,
+                            &b_w,
+                            &sol.x,
+                            ns,
+                            &is_int_full,
+                            n_orig_rows,
+                            opts.simplex.tol,
+                        );
+                        pending_cuts.extend(dedup_new_cuts(
+                            found,
+                            &mut pool_sigs,
+                            opts.max_pool_cuts,
+                        ));
+                    }
                     // Strong branching: for a fractional node that won't be
                     // pruned, probe the unreliable candidates and hint the best
                     // branching variable. Only the *choice* of variable changes,
@@ -344,6 +377,27 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
         }
         tm.import_results(&results);
         tm.process_evaluated();
+
+        // Fold this batch's newly-found global cuts into the shared matrix.
+        // Stored node bases are extended lazily on their next solve, so children
+        // warm-start through the dual simplex from the cut-augmented basis.
+        if !pending_cuts.is_empty() {
+            let (nm, nn) = augment_with_cuts(
+                &mut a_w,
+                &mut b_w,
+                &mut c_w,
+                &mut l_w,
+                &mut u_w,
+                &mut is_int_full,
+                m_w,
+                n_w,
+                &pending_cuts,
+            );
+            m_w = nm;
+            n_w = nn;
+            slack_l = l_w[ns..].to_vec();
+            slack_u = u_w[ns..].to_vec();
+        }
     }
 
     let stats = tm.stats();
@@ -483,6 +537,92 @@ fn strong_branch(
     (best, pivots)
 }
 
+/// Append `cuts` (each `coeffs·x ≥ rhs`, coeffs length `n_w`) to the working LP
+/// as `coeffs·x − s = rhs` surplus rows (`s ≥ 0`), growing the dense matrix and
+/// the bound/cost/integrality vectors. Returns the new `(m, n)`.
+#[allow(clippy::too_many_arguments)]
+fn augment_with_cuts(
+    a_w: &mut Vec<f64>,
+    b_w: &mut Vec<f64>,
+    c_w: &mut Vec<f64>,
+    l_w: &mut Vec<f64>,
+    u_w: &mut Vec<f64>,
+    is_int_full: &mut Vec<bool>,
+    m_w: usize,
+    n_w: usize,
+    cuts: &[GomoryCut],
+) -> (usize, usize) {
+    let k = cuts.len();
+    if k == 0 {
+        return (m_w, n_w);
+    }
+    let (m_old, n_old) = (m_w, n_w);
+    let (m_new, n_new) = (m_old + k, n_old + k);
+    let mut a_new = vec![0.0; m_new * n_new];
+    for i in 0..m_old {
+        a_new[i * n_new..i * n_new + n_old].copy_from_slice(&a_w[i * n_old..(i + 1) * n_old]);
+    }
+    for (ci, cut) in cuts.iter().enumerate() {
+        let row = m_old + ci;
+        let w = cut.coeffs.len().min(n_old);
+        a_new[row * n_new..row * n_new + w].copy_from_slice(&cut.coeffs[..w]);
+        a_new[row * n_new + n_old + ci] = -1.0; // surplus: coeffs·x − s = rhs
+        b_w.push(cut.rhs);
+        c_w.push(0.0);
+        l_w.push(0.0);
+        u_w.push(INF);
+        is_int_full.push(false);
+    }
+    *a_w = a_new;
+    (m_new, n_new)
+}
+
+/// Sparse signature of a cut for pool deduplication: its nonzero `(col, coeff)`
+/// pairs (quantized) plus the rhs, so an identical cut found at many nodes is
+/// added to the pool only once.
+fn cut_signature(cut: &GomoryCut) -> Vec<(u32, i64)> {
+    let mut s: Vec<(u32, i64)> = cut
+        .coeffs
+        .iter()
+        .enumerate()
+        .filter(|(_, &v)| v != 0.0)
+        .map(|(j, &v)| (j as u32, (v * 1e6).round() as i64))
+        .collect();
+    s.push((u32::MAX, (cut.rhs * 1e6).round() as i64));
+    s
+}
+
+/// Keep only cuts whose signature is new (recording it), up to a pool budget.
+fn dedup_new_cuts(
+    cuts: Vec<GomoryCut>,
+    sigs: &mut HashSet<Vec<(u32, i64)>>,
+    max_pool: usize,
+) -> Vec<GomoryCut> {
+    let mut out = Vec::new();
+    for cut in cuts {
+        if sigs.len() >= max_pool {
+            break;
+        }
+        if sigs.insert(cut_signature(&cut)) {
+            out.push(cut);
+        }
+    }
+    out
+}
+
+/// Extend a stored basis to the current matrix size after cuts were appended:
+/// each new column is a cut's surplus slack (a −e on its new row), so making the
+/// new slacks basic gives a valid (block-triangular, nonsingular) basis the dual
+/// simplex can repair from. No-op when the basis already spans the matrix.
+fn extend_basis(mut basis: Basis, n_w: usize) -> Basis {
+    let n0 = basis.col_status.len();
+    for j in n0..n_w {
+        basis.col_status.push(BASIC);
+        basis.basic_vars.push(j);
+    }
+    basis
+}
+
 fn frac(v: f64) -> f64 {
     let f = v - v.floor();
     f.min(1.0 - f)
@@ -507,6 +647,8 @@ mod tests {
             gap_tol: 1e-9,
             root_cuts: 16,
             cut_rounds: 3,
+            node_cuts: true,
+            max_pool_cuts: 500,
             presolve: true,
             strong_branch: true,
             sb_max_cands: 8,

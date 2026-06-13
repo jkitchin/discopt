@@ -20,7 +20,6 @@
 use crate::lp::crossover::LpView;
 use crate::lp::gomory::GomoryCut;
 
-const INF: f64 = 1e19;
 /// Capacity ceiling for the integer lifting DP; above it we emit the basic cover.
 const MAX_CAP_DP: f64 = 100_000.0;
 
@@ -29,8 +28,9 @@ const MAX_CAP_DP: f64 = 100_000.0;
 ///
 /// `x` is the current fractional point (length `lp.n`), `ns` the structural
 /// column count, `is_int[j]` the integer mask. A row qualifies as a knapsack
-/// when it has a single unit slack `s ∈ [0, ∞)` and its structural entries are
-/// binary with nonnegative weights.
+/// when it has a single unit slack with lower bound 0 (a `≤` row; its upper
+/// bound may be tightened) and its structural entries are binary with
+/// nonnegative weights.
 pub fn separate_cover(
     lp: &LpView<'_>,
     b: &[f64],
@@ -63,7 +63,9 @@ pub fn separate_cover(
             (true, Some(s)) => s,
             _ => continue,
         };
-        if lp.l[s].abs() > tol || lp.u[s] < INF {
+        // The slack must be a `≤` surplus (lower bound 0); its upper bound is
+        // irrelevant to cover validity (presolve may have tightened it to ≤ cap).
+        if lp.l[s].abs() > tol {
             continue;
         }
 
@@ -206,7 +208,7 @@ mod tests {
         let a = [5.0, 5.0, 5.0, 1.0];
         let c = [0.0; 4];
         let l = [0.0; 4];
-        let u = [1.0, 1.0, 1.0, INF + 1.0];
+        let u = [1.0, 1.0, 1.0, 1e20];
         let lp = LpView { a: &a, m: 1, n: 4, c: &c, l: &l, u: &u };
         let x = [0.6, 0.6, 0.6, 0.0];
         let is_int = [true, true, true, false];
@@ -230,7 +232,7 @@ mod tests {
         let a = [-5.0, 5.0, 1.0];
         let c = [0.0; 3];
         let l = [0.0; 3];
-        let u = [1.0, 1.0, INF + 1.0];
+        let u = [1.0, 1.0, 1e20];
         let lp = LpView { a: &a, m: 1, n: 3, c: &c, l: &l, u: &u };
         let x = [0.6, 0.6, 0.0];
         let is_int = [true, true, false];
