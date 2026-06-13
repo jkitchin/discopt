@@ -344,7 +344,9 @@ class TestReducedCostFixing:
         without_rcf = _knap().solve(use_highs_milp=False, time_limit=60)
         assert with_rcf.status == without_rcf.status == "optimal"
         assert abs(with_rcf.objective - without_rcf.objective) < 1e-6
-        assert with_rcf.objective == -10.0
+        # IPM optima carry ~1e-7 residuals; compare to the optimum within the
+        # project's abs tolerance rather than by exact float equality.
+        assert abs(with_rcf.objective - (-10.0)) < 1e-6
 
 
 # ---------------------------------------------------------------------------
