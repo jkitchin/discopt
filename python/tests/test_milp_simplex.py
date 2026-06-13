@@ -89,3 +89,47 @@ class TestMilpSimplexVsHighs:
             c, A, b, np.array([2.0]), np.array([5.0]), [0]
         )
         assert status == "infeasible"
+
+
+class TestModelSolveSimplex:
+    """End-to-end: Model.solve(nlp_solver="simplex") routes a pure MILP to the
+    Rust warm-started-simplex engine and matches HiGHS."""
+
+    def _knapsack(self):
+        import discopt.modeling as dm
+
+        m = dm.Model("k")
+        xs = [m.binary(f"x{i}") for i in range(4)]
+        m.minimize(-(10 * xs[0] + 9 * xs[1] + 8 * xs[2] + 1 * xs[3]))
+        m.subject_to(5 * xs[0] + 5 * xs[1] + 5 * xs[2] + 5 * xs[3] <= 9)
+        return m
+
+    def test_knapsack_via_model_solve(self):
+        r = self._knapsack().solve(nlp_solver="simplex", time_limit=30)
+        assert r.status == "optimal"
+        assert abs(r.objective - (-10.0)) < 1e-4
+
+    def test_matches_default_on_random(self):
+        import discopt.modeling as dm
+
+        for seed in range(8):
+            rng = np.random.default_rng(1000 + seed)
+            n = 4
+            v = rng.integers(1, 12, n)
+            w = rng.integers(1, 12, n)
+            cap = float(0.6 * w.sum())
+            m = dm.Model("k")
+            xs = [m.binary(f"x{i}") for i in range(n)]
+            m.minimize(-sum(int(v[i]) * xs[i] for i in range(n)))
+            m.subject_to(sum(int(w[i]) * xs[i] for i in range(n)) <= cap)
+            r_s = m.solve(nlp_solver="simplex", time_limit=30)
+
+            m2 = dm.Model("k2")
+            ys = [m2.binary(f"x{i}") for i in range(n)]
+            m2.minimize(-sum(int(v[i]) * ys[i] for i in range(n)))
+            m2.subject_to(sum(int(w[i]) * ys[i] for i in range(n)) <= cap)
+            r_h = m2.solve(use_highs_milp=True, time_limit=30)
+
+            assert r_s.status == "optimal"
+            if r_h.status == "optimal":
+                assert abs(r_s.objective - r_h.objective) < 1e-4, f"seed={seed}"

@@ -1638,7 +1638,7 @@ def solve_model(
             stacklevel=2,
         )
 
-    _valid_nlp_solvers = {"ipm", "pounce", "ipopt", "cyipopt", "sparse_ipm"}
+    _valid_nlp_solvers = {"ipm", "pounce", "ipopt", "cyipopt", "sparse_ipm", "simplex"}
     if nlp_solver not in _valid_nlp_solvers:
         raise ValueError(
             f"Unknown nlp_solver={nlp_solver!r}. Choose one of "
@@ -2098,6 +2098,15 @@ def solve_model(
             else:
                 return _solve_qp(model, t_start, prefer_pounce=nlp_solver == "pounce")
         elif problem_class == ProblemClass.MILP:
+            # Warm-started-simplex engine (nlp_solver="simplex"): the whole MILP
+            # B&B runs in Rust with dual-warm-started simplex node solves. Opt-in;
+            # falls through to the default path if unavailable.
+            if nlp_solver == "simplex":
+                _simplex_res = _solve_milp_simplex(
+                    model, time_limit, gap_tolerance, max_nodes, t_start
+                )
+                if _simplex_res is not None:
+                    return _simplex_res
             # POUNCE-only mode (nlp_solver="pounce") routes to the self-hosted
             # B&B and bypasses HiGHS entirely (Phase 1 increment 5); the
             # self-hosted path is sound (incr 1), POUNCE-recovers stalled
@@ -6861,6 +6870,76 @@ def _root_dive(lp_data, n_orig, int_idx, t_start, time_limit, max_steps=None):
         xl[j] = v
         xu[j] = v
     return None
+
+
+def _solve_milp_simplex(
+    model: Model,
+    time_limit: float,
+    gap_tolerance: float,
+    max_nodes: int,
+    t_start: float,
+) -> Optional[SolveResult]:
+    """Solve a pure MILP with the Rust-internal warm-started-simplex B&B
+    (``nlp_solver="simplex"``).
+
+    The whole search runs in Rust: the existing tree manager with each node's LP
+    solved by the bounded simplex (root cold, children dual-warm-started from the
+    inherited basis). Returns ``None`` to defer to the default path when the
+    binding is unavailable or the model has no constraints. Pure-MILP only;
+    MINLP/MIQP keep the POUNCE/IPM path."""
+    from discopt._jax.problem_classifier import extract_lp_data
+    from discopt.modeling.core import ObjectiveSense
+
+    try:
+        from discopt._rust import solve_milp_py
+    except ImportError:
+        return None
+
+    lp_data = extract_lp_data(model)
+    A = np.ascontiguousarray(lp_data.A_eq, dtype=np.float64)
+    if A.shape[0] == 0:
+        return None  # no constraints — let the default path handle it
+    n_orig = sum(v.size for v in model._variables)
+    _, _, _, int_offsets, int_sizes = _extract_variable_info(model)
+    int_idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
+
+    status, x_struct, obj, bound, nodes, _lp_iters = solve_milp_py(
+        np.ascontiguousarray(lp_data.c, dtype=np.float64),
+        A,
+        np.ascontiguousarray(lp_data.b_eq, dtype=np.float64),
+        np.ascontiguousarray(lp_data.x_l, dtype=np.float64),
+        np.ascontiguousarray(lp_data.x_u, dtype=np.float64),
+        np.ascontiguousarray(np.asarray(int_idx, dtype=np.int64)),
+        n_orig,
+        float(lp_data.obj_const),
+        int(max_nodes),
+        float(gap_tolerance),
+    )
+    wall_time = time.perf_counter() - t_start
+    maximize = model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE
+
+    if status in ("optimal", "feasible"):
+        x_dict = _unpack_solution(model, np.asarray(x_struct, dtype=np.float64))
+        obj_val = -obj if maximize else obj
+        bound_val = None
+        gap_val = None
+        if np.isfinite(bound):
+            bound_val = -bound if maximize else bound
+            gap_val = abs(obj_val - bound_val) / (abs(obj_val) + 1e-10)
+        return SolveResult(
+            status=status,
+            objective=obj_val,
+            bound=bound_val,
+            gap=gap_val,
+            x=x_dict,
+            wall_time=wall_time,
+            node_count=nodes,
+        )
+    if status == "unbounded":
+        return SolveResult(status="unbounded", wall_time=wall_time, node_count=nodes)
+    if status == "node_limit":
+        return SolveResult(status="node_limit", wall_time=wall_time, node_count=nodes)
+    return SolveResult(status="infeasible", wall_time=wall_time, node_count=nodes)
 
 
 def _solve_milp_bb(
