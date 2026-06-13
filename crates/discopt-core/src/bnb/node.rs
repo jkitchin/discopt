@@ -1,5 +1,7 @@
 //! B&B tree node representation.
 
+use crate::lp::basis::Basis;
+
 /// Unique identifier for a node in the B&B tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeId(pub usize);
@@ -38,6 +40,10 @@ pub struct Node {
     pub status: NodeStatus,
     /// Parent node's NLP solution, used as warm-start for child solves.
     pub parent_solution: Option<Vec<f64>>,
+    /// Parent node's optimal LP basis, inherited as the dual-simplex warm-start
+    /// state for the MILP simplex node engine (roadmap P3). `None` for the root
+    /// and for the POUNCE/IPM-driven path, which ignores it.
+    pub basis: Option<Basis>,
 }
 
 impl Node {
@@ -58,6 +64,7 @@ impl Node {
             local_lower_bound: f64::NEG_INFINITY,
             status: NodeStatus::Pending,
             parent_solution: None,
+            basis: None,
         }
     }
 }
