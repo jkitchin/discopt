@@ -435,10 +435,21 @@ shared seam and falls back to whichever backend is importable.
   goes through the selector with a `prefer_pounce` param, threaded from the
   spatial-B&B OBBT call site (`nlp_solver="pounce"`). Verified it tightens
   identically across backends and works with HiGHS absent.
-- **Open:** McCormick-LP / partition-selection (LP), DOE & robust-opt (LP/QP),
-  and the OA/GDP-LOA + `milp_relaxation` *MILP masters* — the last need a
-  matrix-form MILP→self-hosted-B&B adapter (POUNCE has no matrix MILP), a
-  larger separate piece.
+- **Matrix-form MILP via self-hosted B&B — DONE.** `solvers/milp_pounce.py`
+  exposes the Phase-1 B&B behind the `milp_highs.solve_milp`
+  signature/`MILPResult` contract by building a `Model` from the matrices and
+  running `_solve_milp_bb(prefer_pounce=True)`, then mapping back
+  (`"optimal"→OPTIMAL`, `"feasible"/"node_limit"→ITERATION_LIMIT+incumbent`,
+  etc.). `get_milp_solver` added to the selector. The three matrix-MILP
+  consumers — the **OA and GDP-LOA convex-MINLP masters** and
+  `milp_relaxation` — now go through it, so they run with only POUNCE. The
+  Model round-trip is validated faithful: the adapter matches HiGHS on a
+  12-seed random MILP battery (0 mismatches), and OA's master solves
+  HiGHS-free end to end (`test_milp_pounce.py`,
+  `test_lp_backend_select.py::test_oa_master_is_highs_free`).
+- **Open:** the raw-`highspy` LP/QP consumers (`partition_selection`, DOE,
+  robust-opt) — each needs reformulating into the matrix `solve_lp`/`solve_qp`
+  interface before it can use the selector. Smaller, per-file work.
 
 - Route pure MILP and MIQP through the existing Rust B&B
   (`crates/discopt-core/src/bnb/`) with POUNCE LP/QP relaxations, replacing

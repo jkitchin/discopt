@@ -133,7 +133,10 @@ class MilpRelaxationModel:
         gap_tolerance: float = 1e-4,
     ) -> MilpRelaxationResult:
         from discopt.solvers import SolveStatus
-        from discopt.solvers.milp_highs import solve_milp
+        from discopt.solvers.lp_backend import get_milp_solver
+
+        # HiGHS if present, else POUNCE (self-hosted B&B) — HiGHS-free path.
+        solve_milp = get_milp_solver()
 
         result = solve_milp(
             c=self._c,

@@ -502,10 +502,14 @@ def _solve_master_milp(
 ):
     """Build and solve the master MILP."""
     try:
-        from discopt.solvers.milp_highs import solve_milp
+        from discopt.solvers.lp_backend import get_milp_solver
+
+        # HiGHS if present, else POUNCE (self-hosted B&B) — HiGHS-free path.
+        solve_milp = get_milp_solver()
     except ImportError as e:
         raise ImportError(
-            "LOA solver requires highspy for the MILP master. Install with: pip install highspy"
+            "LOA solver requires a MILP backend for the master. Install one of: "
+            "pip install highspy  |  pip install pounce-solver"
         ) from e
 
     # Determine master problem dimensions

@@ -83,6 +83,48 @@ def get_qp_solver(prefer_pounce: bool = False) -> Callable:
     )
 
 
+def _milp_highs() -> Callable | None:
+    try:
+        from discopt.solvers.milp_highs import solve_milp
+
+        return solve_milp
+    except ImportError:
+        return None
+
+
+def _milp_pounce() -> Callable | None:
+    # POUNCE "matrix MILP" is the self-hosted B&B; available iff POUNCE is.
+    try:
+        from discopt.solvers.lp_pounce import POUNCE_AVAILABLE
+
+        if not POUNCE_AVAILABLE:
+            return None
+        from discopt.solvers.milp_pounce import solve_milp
+
+        return solve_milp
+    except ImportError:
+        return None
+
+
+def get_milp_solver(prefer_pounce: bool = False) -> Callable:
+    """Return a matrix-form ``solve_milp(c, A_ub, ..., integrality, ...)``.
+
+    HiGHS-first by default, POUNCE-first (self-hosted B&B) in POUNCE-only
+    mode; falls back to whichever is importable. Raises :class:`ImportError`
+    only when neither is available.
+    """
+    order = (_milp_pounce, _milp_highs) if prefer_pounce else (_milp_highs, _milp_pounce)
+    for factory in order:
+        solver = factory()
+        if solver is not None:
+            return solver
+    raise ImportError(
+        "No MILP backend available. Install one of:\n"
+        "  pip install pounce-solver   (POUNCE, via the self-hosted B&B)\n"
+        "  pip install highspy         (HiGHS)"
+    )
+
+
 def available_lp_backends() -> list[str]:
     names = []
     if _lp_highs() is not None:

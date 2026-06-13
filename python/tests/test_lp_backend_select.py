@@ -31,11 +31,23 @@ def _without_highs(monkeypatch):
     real_import = builtins.__import__
 
     def fake_import(name, *a, **k):
-        if "lp_highs" in name or "qp_highs" in name or name == "highspy":
+        if any(s in name for s in ("lp_highs", "qp_highs", "milp_highs")) or name == "highspy":
             raise ImportError("HiGHS unavailable (simulated POUNCE-only install)")
         return real_import(name, *a, **k)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
+
+
+def test_default_milp_prefers_highs_when_present():
+    pytest.importorskip("highspy")
+    assert lp_backend.get_milp_solver().__module__ == "discopt.solvers.milp_highs"
+
+
+def test_prefer_pounce_milp_uses_self_hosted_bb():
+    pytest.importorskip("pounce")
+    assert (
+        lp_backend.get_milp_solver(prefer_pounce=True).__module__ == "discopt.solvers.milp_pounce"
+    )
 
 
 class TestPounceOnlyInstall:
@@ -43,6 +55,31 @@ class TestPounceOnlyInstall:
         pytest.importorskip("pounce")
         _without_highs(monkeypatch)
         assert lp_backend.get_lp_solver().__module__ == "discopt.solvers.lp_pounce"
+
+    def test_milp_selector_falls_back_to_pounce(self, monkeypatch):
+        pytest.importorskip("pounce")
+        _without_highs(monkeypatch)
+        assert lp_backend.get_milp_solver().__module__ == "discopt.solvers.milp_pounce"
+
+    def test_oa_master_is_highs_free(self, monkeypatch):
+        """The OA convex-MINLP master MILP solves without HiGHS (via the
+        POUNCE B&B adapter)."""
+        pytest.importorskip("pounce")
+        import discopt.modeling as dm
+        from discopt.solvers import lp_backend as lb
+        from discopt.solvers.milp_pounce import solve_milp as _pounce_milp
+
+        monkeypatch.setattr(lb, "get_milp_solver", lambda prefer_pounce=False: _pounce_milp)
+        m = dm.Model("oa_highsfree")
+        x = m.integer("x", lb=0, ub=3)
+        y = m.continuous("y", lb=0, ub=10)
+        m.minimize((x - 1.5) ** 2 + y)
+        m.subject_to(x + y >= 2)
+        from discopt.solvers.oa import solve_oa
+
+        r = solve_oa(m, time_limit=30)
+        assert r.status in ("optimal", "feasible")
+        assert abs(r.objective - 0.25) < 1e-3  # x=2, y=0
 
     def test_qp_selector_falls_back_to_pounce(self, monkeypatch):
         pytest.importorskip("pounce")
