@@ -264,40 +264,76 @@ impl<'a> Simplex<'a> {
                 return Err(LpStatus::Numerical);
             }
 
-            // ratio test: entering moves by t≥0; basic i: v_i(t) = xb[i] − dir·t·α[i]
-            let mut t_max = if self.ub[q] < INF && self.lb[q] > -INF {
+            // Harris two-pass bounded ratio test. Entering moves by t≥0; basic
+            // i has value v_i(t) = xb[i] − dir·t·α[i]. Pass 1 finds the largest
+            // step keeping every basic within a small feasibility expansion δ of
+            // its bound; pass 2 picks, among columns that truly block within that
+            // step, the one with the largest pivot |α_i| (numerical stability),
+            // which may push others up to δ past a bound — the accepted Harris
+            // trade, with δ ≪ the 1e-6 feasibility tolerance used elsewhere.
+            let delta_tol = 1e-7;
+            // entering's own bound-flip cap (the step at which q hits its far bound)
+            let cap = if self.ub[q] < INF && self.lb[q] > -INF {
                 self.ub[q] - self.lb[q]
             } else {
                 INF
             };
-            let mut leave_slot: Option<usize> = None;
-            let mut leave_to_upper = false;
+            // pass 1: largest step under δ-expanded bounds
+            let mut t_pass1 = cap;
             for i in 0..m {
-                let delta = -dir * alpha[i]; // d v_i / d t
+                let delta = -dir * alpha[i];
                 let bi = self.basis[i];
                 if delta < -self.tol {
-                    // decreasing → hits lower bound
                     let lb = self.lb[bi];
                     if lb > -INF {
-                        let t = (xb[i] - lb) / (-delta);
-                        if t < t_max - self.tol || (leave_slot.is_none() && t <= t_max + self.tol) {
-                            t_max = t.max(0.0);
-                            leave_slot = Some(i);
-                            leave_to_upper = false;
+                        let t = (xb[i] - lb + delta_tol) / (-delta);
+                        if t < t_pass1 {
+                            t_pass1 = t;
                         }
                     }
                 } else if delta > self.tol {
-                    // increasing → hits upper bound
                     let ub = self.ub[bi];
                     if ub < INF {
-                        let t = (ub - xb[i]) / delta;
-                        if t < t_max - self.tol || (leave_slot.is_none() && t <= t_max + self.tol) {
-                            t_max = t.max(0.0);
-                            leave_slot = Some(i);
-                            leave_to_upper = true;
+                        let t = (ub - xb[i] + delta_tol) / delta;
+                        if t < t_pass1 {
+                            t_pass1 = t;
                         }
                     }
                 }
+            }
+            let t_pass1 = t_pass1.max(0.0);
+            // pass 2: among true blockers with ratio ≤ t_pass1, take the max pivot
+            let mut t_max = cap;
+            let mut leave_slot: Option<usize> = None;
+            let mut leave_to_upper = false;
+            let mut best_pivot = 0.0f64;
+            for i in 0..m {
+                let delta = -dir * alpha[i];
+                let bi = self.basis[i];
+                let (t_true, to_upper) = if delta < -self.tol {
+                    let lb = self.lb[bi];
+                    if lb <= -INF {
+                        continue;
+                    }
+                    (((xb[i] - lb) / (-delta)).max(0.0), false)
+                } else if delta > self.tol {
+                    let ub = self.ub[bi];
+                    if ub >= INF {
+                        continue;
+                    }
+                    (((ub - xb[i]) / delta).max(0.0), true)
+                } else {
+                    continue;
+                };
+                if t_true <= t_pass1 + self.tol && alpha[i].abs() > best_pivot {
+                    best_pivot = alpha[i].abs();
+                    leave_slot = Some(i);
+                    leave_to_upper = to_upper;
+                    t_max = t_true;
+                }
+            }
+            if leave_slot.is_none() {
+                t_max = cap; // no basic blocks → pure bound flip (or unbounded)
             }
 
             if t_max >= INF {
