@@ -6133,6 +6133,56 @@ def _pounce_recover_node_bound(
     return None
 
 
+def _solve_node_lp_pounce(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, time_limit):
+    """Solve one MILP-B&B node relaxation with POUNCE on the augmented
+    standard-form LP (Path B: POUNCE as the *primary* node engine in POUNCE
+    mode, not just recovery).
+
+    POUNCE (Rust) takes the cut-augmented LP at any shape with no per-shape JAX
+    recompilation — the reason root cuts are cheap here — and its ``OPTIMAL``
+    objective is KKT-valid, so no trust-gate decertification is needed. Solving
+    the *augmented* ``lp_data`` directly preserves the root cuts' bound
+    tightening (node bounds apply to the structural columns; the slack columns
+    keep their ``lp_data`` bounds).
+
+    Returns ``(lower_bound, solution_over_n_vars, "optimal")``,
+    ``(sentinel, None, "infeasible")``, or ``None`` when POUNCE is unavailable
+    or could not settle the node (the caller falls back / decertifies)."""
+    try:
+        from discopt.solvers.lp_pounce import POUNCE_AVAILABLE
+        from discopt.solvers.lp_pounce import solve_lp as _pounce_solve
+    except ImportError:
+        return None
+    if not POUNCE_AVAILABLE:
+        return None
+    xl = np.asarray(lp_data.x_l, dtype=np.float64)
+    xu = np.asarray(lp_data.x_u, dtype=np.float64)
+    full_lb = np.concatenate([np.asarray(node_lb, dtype=np.float64), xl[n_orig:]])
+    full_ub = np.concatenate([np.asarray(node_ub, dtype=np.float64), xu[n_orig:]])
+    time_left = max(0.5, time_limit - (time.perf_counter() - t_start))
+    try:
+        res = _pounce_solve(
+            c=np.asarray(lp_data.c, dtype=np.float64),
+            A_eq=np.asarray(lp_data.A_eq, dtype=np.float64),
+            b_eq=np.asarray(lp_data.b_eq, dtype=np.float64),
+            bounds=list(zip(full_lb.tolist(), full_ub.tolist())),
+            time_limit=min(30.0, time_left),
+        )
+    except Exception as e:
+        logger.debug("POUNCE node solve failed: %s", e)
+        return None
+    if (
+        res.status == SolveStatus.OPTIMAL
+        and res.objective is not None
+        and np.isfinite(res.objective)
+    ):
+        bound = float(res.objective) + float(lp_data.obj_const)
+        return (bound, np.asarray(res.x[:n_vars]), "optimal")
+    if res.status == SolveStatus.INFEASIBLE:
+        return (_INFEASIBILITY_SENTINEL, None, "infeasible")
+    return None
+
+
 # Interior-point relaxation optima are interior: integer coordinates come
 # back smeared (e.g. 0.99996) — beyond the tree's 1e-5 integrality tolerance
 # but clearly integral. Coordinates within this tolerance are candidates for
@@ -6353,29 +6403,25 @@ def _augment_lpdata_with_cover_cuts(lp_data, n_orig: int, cuts):
 
 
 # Gomory mixed-integer cuts are correct (structurally projected, soundness
-# guarded) but, in this JAX stack, adding cut rows changes the LP shape and
-# forces the interior-point solver to recompile for the augmented problem. On
-# hard MILPs the one-time cost is dwarfed by the node reductions, but on trivial
-# instances it dominates. A size-gate enables GMI automatically only once a
-# problem has enough integer variables to amortize that cost.
+# guarded). Their cost depends entirely on the relaxation engine: adding cut
+# rows changes the LP shape, which forces a JAX recompile but is free for
+# POUNCE (Rust, Path B). GMI is therefore a **POUNCE-mode feature** — enabled
+# automatically when node relaxations are solved by POUNCE (no recompile), and
+# left off under the JAX IPM where the per-shape recompile would dominate.
 #
 # ``GOMORY_CUTS_ENABLED`` is a hard override: ``True``/``False`` force GMI on/off
-# for every solve; ``None`` (the default) defers to the size-gate, which turns
-# GMI on when the integer-variable count is at least ``GOMORY_MIN_INT_VARS``.
-# The threshold is a heuristic — calibrate it against a size-sweep benchmark.
+# for every solve; ``None`` (the default) defers to the engine gate below.
 GOMORY_CUTS_ENABLED: bool | None = None
-GOMORY_MIN_INT_VARS = 25
 
 
-def _gomory_enabled(n_int: int) -> bool:
-    """Whether to run Gomory cuts for a problem with ``n_int`` integer variables.
-
-    Honors the ``GOMORY_CUTS_ENABLED`` override; otherwise applies the size-gate
-    (``n_int >= GOMORY_MIN_INT_VARS``) so the recompile cost is only paid when
-    the problem is large enough for cut-driven node reductions to repay it."""
+def _gomory_enabled(prefer_pounce: bool) -> bool:
+    """Whether to run Gomory cuts. Honors the ``GOMORY_CUTS_ENABLED`` override;
+    otherwise GMI is on exactly when the node relaxations are solved by POUNCE
+    (``prefer_pounce``), where cut-augmented shapes cost no JAX recompile (Path
+    B). Under the JAX IPM, adding cuts would recompile per shape, so GMI is off."""
     if GOMORY_CUTS_ENABLED is not None:
         return bool(GOMORY_CUTS_ENABLED)
-    return n_int >= GOMORY_MIN_INT_VARS
+    return prefer_pounce
 
 
 def _augment_lpdata_with_gomory_cuts(lp_data, coeffs: np.ndarray, rhs: np.ndarray):
@@ -6753,14 +6799,14 @@ def _solve_milp_bb(
         _is_bin = _binary_mask(model, n_orig)
         # Conflict-graph clique edges (only worth extracting if binaries exist).
         _clique_edges = _extract_clique_edges(model) if bool(_is_bin.any()) else []
-        # Gomory cuts gated by size (see _gomory_enabled): passing no integer
-        # indices disables the GMI branch, so for problems below the threshold
-        # the loop runs exactly as it did before GMI (cover/clique only) with no
-        # added per-solve cost.
-        _n_int = sum(int(sz) for sz in int_sizes)
+        # Gomory cuts gated on the relaxation engine (see _gomory_enabled):
+        # passing no integer indices disables the GMI branch, so under the JAX
+        # IPM the loop runs exactly as before GMI (cover/clique only, no
+        # recompile). In POUNCE mode the node solves (Path B) take cut-augmented
+        # shapes for free, so GMI is enabled.
         _cut_int_idx = (
             [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
-            if _gomory_enabled(_n_int)
+            if _gomory_enabled(prefer_pounce)
             else []
         )
         lp_data, _n_cuts = _root_cover_cut_loop(
@@ -6854,6 +6900,17 @@ def _solve_milp_bb(
                 np.asarray(inc[1][:n_vars], dtype=np.float64).copy(), float(inc[0])
             )
 
+    # Path B: in POUNCE-only mode, POUNCE solves node relaxations directly
+    # (no JAX recompile on cut-augmented shapes). Checked once here.
+    _pounce_nodes_avail = False
+    if prefer_pounce:
+        try:
+            from discopt.solvers.lp_pounce import POUNCE_AVAILABLE as _PNA
+
+            _pounce_nodes_avail = bool(_PNA)
+        except ImportError:
+            _pounce_nodes_avail = False
+
     iteration = 0
     while True:
         elapsed = time.perf_counter() - t_start
@@ -6872,7 +6929,34 @@ def _solve_milp_bb(
         result_ids = np.array(batch_ids, dtype=np.int64)
         n_slack = lp_data.x_l.shape[0] - n_orig
 
-        if n_batch > 1:
+        if prefer_pounce and _pounce_nodes_avail:
+            # Path B: solve each node's relaxation with POUNCE (Rust) instead of
+            # the JAX IPM. POUNCE takes the cut-augmented LP at any shape with no
+            # per-shape recompile, and its OPTIMAL bound is KKT-valid. The rare
+            # stall/unavailable node defers to the existing recovery/decertify.
+            result_lbs = np.empty(n_batch, dtype=np.float64)
+            result_sols = np.empty((n_batch, n_vars), dtype=np.float64)
+            result_feas = np.zeros(n_batch, dtype=bool)
+            for i in range(n_batch):
+                node_lb = np.array(batch_lb[i])
+                node_ub = np.array(batch_ub[i])
+                _mid = 0.5 * (np.clip(node_lb, -_SPC, _SPC) + np.clip(node_ub, -_SPC, _SPC))
+                out = _solve_node_lp_pounce(
+                    lp_data, node_lb, node_ub, n_vars, n_orig, t_start, time_limit
+                )
+                if out is not None and out[2] == "optimal":
+                    result_lbs[i] = out[0]
+                    result_sols[i] = out[1]
+                    if result_lbs[i] < _SENTINEL_THRESHOLD:
+                        _maybe_inject_snapped(result_sols[i], node_lb, node_ub)
+                elif out is not None:  # POUNCE-certified infeasible: rigorous prune
+                    result_lbs[i] = _INFEASIBILITY_SENTINEL
+                    result_sols[i] = _mid
+                else:  # unavailable/stalled: original-problem recovery or decertify
+                    result_lbs[i] = _INFEASIBILITY_SENTINEL
+                    result_sols[i] = _mid
+                    _recover_or_decertify(i, result_lbs, result_sols, node_lb, node_ub)
+        elif n_batch > 1:
             # Batch LP solve via vmap
             from discopt._jax.lp_ipm import lp_ipm_solve_batch
 

@@ -228,47 +228,44 @@ class TestGomoryWiring:
         assert r_gmi.node_count <= r_nogmi.node_count  # cuts never worsen the tree
 
 
-class TestGomorySizeGate:
-    """GMI is gated by problem size so small instances don't pay the JAX
-    recompile cost; ``GOMORY_CUTS_ENABLED`` is a hard override."""
+class TestGomoryGate:
+    """GMI is a POUNCE-mode feature: on when node relaxations are solved by
+    POUNCE (Path B, no JAX recompile on cut-augmented shapes), off under the JAX
+    IPM. ``GOMORY_CUTS_ENABLED`` is a hard override."""
 
     def test_gate_logic(self, monkeypatch):
         import discopt.solver as S
 
-        # Auto mode: enable at/above the threshold, disable below.
+        # Auto mode: on iff POUNCE solves the node relaxations.
         monkeypatch.setattr(S, "GOMORY_CUTS_ENABLED", None)
-        monkeypatch.setattr(S, "GOMORY_MIN_INT_VARS", 25)
-        assert S._gomory_enabled(24) is False
-        assert S._gomory_enabled(25) is True
-        assert S._gomory_enabled(100) is True
-        # Hard overrides ignore the threshold.
+        assert S._gomory_enabled(True) is True  # POUNCE mode
+        assert S._gomory_enabled(False) is False  # JAX mode
+        # Hard overrides ignore the engine.
         monkeypatch.setattr(S, "GOMORY_CUTS_ENABLED", True)
-        assert S._gomory_enabled(0) is True
+        assert S._gomory_enabled(False) is True
         monkeypatch.setattr(S, "GOMORY_CUTS_ENABLED", False)
-        assert S._gomory_enabled(1000) is False
+        assert S._gomory_enabled(True) is False
 
-    def test_small_problem_gated_off_by_default(self):
-        # Default threshold keeps a tiny MILP (4 integers) off the GMI path, so
-        # the common case pays nothing.
+    def test_default_off_under_jax_ipm(self):
+        # Default (auto) keeps GMI off in JAX mode, so that path pays nothing.
         import discopt.solver as S
 
         assert S.GOMORY_CUTS_ENABLED is None  # auto by default
-        assert S._gomory_enabled(4) is False
+        assert S._gomory_enabled(False) is False
 
-    def test_gate_auto_enables_and_stays_correct(self, monkeypatch):
-        # Lower the threshold so the size-gate (not the override) turns GMI on,
-        # and confirm the gated path is still correct on the knapsack that the
-        # naive GMI got wrong.
+    def test_auto_on_in_pounce_mode_and_correct(self):
+        # solve_milp runs prefer_pounce=True (POUNCE node solves), so GMI
+        # auto-enables; confirm the knapsack a naive GMI got wrong is correct.
         pytest.importorskip("pounce")
-        import discopt.solver as S
+        from discopt.solvers import SolveStatus
+        from discopt.solvers.milp_pounce import solve_milp
 
-        monkeypatch.setattr(S, "GOMORY_CUTS_ENABLED", None)  # auto
-        monkeypatch.setattr(S, "GOMORY_MIN_INT_VARS", 4)  # gate ON for 4 ints
-
-        m = dm.Model("k")
-        xs = [m.binary(f"x{i}") for i in range(4)]
-        m.minimize(-(10 * xs[0] + 9 * xs[1] + 8 * xs[2] + 1 * xs[3]))
-        m.subject_to(5 * xs[0] + 5 * xs[1] + 5 * xs[2] + 5 * xs[3] <= 9)
-        r = m.solve(use_highs_milp=False, time_limit=60)
-        assert r.status == "optimal"
+        r = solve_milp(
+            c=np.array([-10.0, -9.0, -8.0, -1.0]),
+            A_ub=np.array([[5.0, 5.0, 5.0, 5.0]]),
+            b_ub=np.array([9.0]),
+            bounds=[(0, 1)] * 4,
+            integrality=np.array([1, 1, 1, 1]),
+        )
+        assert r.status == SolveStatus.OPTIMAL
         assert abs(r.objective - (-10.0)) < 1e-4

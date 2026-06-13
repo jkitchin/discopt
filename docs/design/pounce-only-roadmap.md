@@ -681,26 +681,34 @@ shared seam and falls back to whichever backend is importable.
     basis-recovery/GMI work unless an integer variable is fractional at the
     vertex, and stop after round 0 when there are no cover/clique cuts to
     re-separate. `TestGomoryWiring` enables the flag explicitly.
-  - **Increment 5e — automatic size-gate (prototype).** `_gomory_enabled(n_int)`
-    turns GMI on automatically once a problem has enough integer variables to
-    amortize the one-time recompile, so the benefit reaches real MILPs without a
-    manual flag while trivial instances still pay nothing. `GOMORY_CUTS_ENABLED`
-    becomes a tri-state hard override (`True`/`False` force on/off; `None`, the
-    default, defers to the gate); `GOMORY_MIN_INT_VARS` (default 25) is the
-    threshold. The threshold is a **heuristic placeholder** — the honest next
-    step is a size-sweep benchmark to find the actual crossover where node
-    reductions repay the compile, and ideally a hardness signal (e.g. root
-    fractional-integer count or LP-relaxation gap) rather than raw size. Below
-    the threshold the call site passes no integer indices, so small problems run
-    exactly as before GMI. Tested by `TestGomorySizeGate` (gate logic, the
-    default keeps a 4-integer MILP off, and lowering the threshold auto-enables
-    GMI while staying correct on the formerly-failing knapsack).
-  - **Open (future):** calibrate the size-gate / replace it with a hardness
-    signal; GMI re-separation across rounds (needs robust conditioning of
-    repeatedly-augmented systems); MIR cuts; robust handling of non-converged
-    augmented node LPs; and — to make cuts cheap enough to keep always-on — a
-    fixed-shape (padded or shape-polymorphic) IPM so adding cut rows no longer
-    triggers a JAX recompile.
+    *(The interim size-gate, `GOMORY_MIN_INT_VARS`, was superseded by Path B
+    below: it kept the suite green but still ~15 min, because the suite's larger
+    JAX-mode instances tripped the threshold and recompiled. The real fix was to
+    remove the recompile, not to tune a threshold around it.)*
+  - **Increment 6 — Path B: POUNCE as the primary node engine (the real fix).**
+    The recompile is a property of *shape-varying JAX*: the MILP B&B solved node
+    relaxations with a `vmap`'d JAX IPM, so cut-augmented shapes recompiled. In
+    POUNCE-only mode, node relaxations are now solved by **POUNCE (Rust)**
+    directly (`_solve_node_lp_pounce`) on the *augmented* standard form — any
+    shape, no recompile, and the `OPTIMAL` bound is KKT-valid (no trust-gate
+    decertification; the rare stall/unavailable node still defers to the
+    existing POUNCE recovery / gap-decertification). POUNCE was already wired in
+    for *recovery*; this promotes it to the primary engine. Consequently GMI is
+    re-gated as a **POUNCE-mode feature**: `_gomory_enabled(prefer_pounce)` turns
+    it on exactly when node solves are POUNCE (cut shapes free), and off under
+    the JAX IPM (where cuts would recompile). Net result: the JAX default path
+    is back to baseline (GMI off, no recompile), and POUNCE mode gets the cut
+    benefit cheaply — node reductions with no per-shape recompile. Verified: the
+    `test_milp_pounce` HiGHS battery (POUNCE mode, GMI now auto-on) passes;
+    `TestGomoryGate` covers the engine gate + a POUNCE-mode correctness check on
+    the formerly-failing knapsack. This trades away batched-GPU node waves in
+    POUNCE mode (POUNCE solves sequentially), an accepted call given GPU is not
+    a near-term priority.
+  - **Open (future):** route the *cut-loop* root solve through POUNCE too (it
+    still uses the JAX IPM, a minor residual recompile when GMI is on in POUNCE
+    mode); MIR cuts; GMI re-separation across rounds; and, if batched-GPU node
+    solving becomes a priority, a fixed-shape (padded / shape-polymorphic) JAX
+    IPM so cuts stay cheap there as well.
 - **Basis cuts:** Gomory mixed-integer and MIR at the root and at periodic
   re-solves, feeding the existing `CutPool`
   (`python/discopt/_jax/cutting_planes.py`; cap/aging/dedup already there).
