@@ -3318,6 +3318,7 @@ def solve_model(
                             ub=np.array(ub),
                             incumbent_cutoff=float(inc_obj),
                             time_limit_per_lp=0.1,
+                            prefer_pounce=nlp_solver == "pounce",
                         )
                         if obbt_result.n_tightened > 0:
                             lb = obbt_result.tightened_lb

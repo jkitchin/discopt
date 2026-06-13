@@ -18,7 +18,17 @@ import numpy as np
 
 from discopt.modeling.core import Model
 from discopt.solvers import SolveStatus
-from discopt.solvers.lp_highs import solve_lp
+from discopt.solvers.lp_backend import get_lp_solver
+
+
+def solve_lp(**kwargs):
+    """Module-level default LP solve (HiGHS-first, POUNCE fallback).
+
+    Indirected through the backend selector so discopt runs POUNCE-only
+    and so tests can monkeypatch this symbol. Resolved lazily — importing
+    this module never requires a solver to be installed.
+    """
+    return get_lp_solver(prefer_pounce=False)(**kwargs)
 
 
 @dataclass
@@ -352,6 +362,7 @@ def run_obbt(
     time_limit_per_lp: Optional[float] = None,
     total_time_limit: Optional[float] = None,
     incumbent_cutoff: Optional[float] = None,
+    prefer_pounce: bool = False,
 ) -> ObbtResult:
     """Run OBBT to tighten variable bounds.
 
@@ -381,6 +392,7 @@ def run_obbt(
     if total_time_limit is not None and total_time_limit < 0.0:
         raise ValueError("total_time_limit must be non-negative")
 
+    _lp = get_lp_solver(prefer_pounce=True) if prefer_pounce else solve_lp
     model_lb, model_ub = _get_var_bounds(model)
     if lb is None:
         lb = model_lb.copy()
@@ -463,7 +475,7 @@ def run_obbt(
         c = np.zeros(n_vars, dtype=np.float64)
         c[var_idx] = 1.0
 
-        result = solve_lp(
+        result = _lp(
             c=c,
             A_ub=A_ub,
             b_ub=b_ub,
@@ -491,7 +503,7 @@ def run_obbt(
 
         c[var_idx] = -1.0
 
-        result = solve_lp(
+        result = _lp(
             c=c,
             A_ub=A_ub,
             b_ub=b_ub,
@@ -530,6 +542,7 @@ def run_obbt_on_relaxation(
     min_width: float = 1e-6,
     eps: float = 1e-7,
     deadline: Optional[float] = None,
+    prefer_pounce: bool = False,
 ) -> ObbtResult:
     """OBBT over the LP relaxation of a MILP relaxation envelope.
 
@@ -572,6 +585,7 @@ def run_obbt_on_relaxation(
 
     import scipy.sparse as sp
 
+    _lp = get_lp_solver(prefer_pounce=True) if prefer_pounce else solve_lp
     A_ub = relaxation._A_ub
     b_ub = relaxation._b_ub
     bounds = list(relaxation._bounds)
@@ -620,7 +634,7 @@ def run_obbt_on_relaxation(
         # min x_i
         c = np.zeros(n_total, dtype=np.float64)
         c[var_idx] = 1.0
-        result = solve_lp(
+        result = _lp(
             c=c,
             A_ub=A_ub,
             b_ub=b_ub,
@@ -643,7 +657,7 @@ def run_obbt_on_relaxation(
 
         # max x_i (minimize -x_i)
         c[var_idx] = -1.0
-        result = solve_lp(
+        result = _lp(
             c=c,
             A_ub=A_ub,
             b_ub=b_ub,

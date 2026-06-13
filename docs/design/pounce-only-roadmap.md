@@ -420,6 +420,26 @@ sound (incr 1), recovers stalled nodes via POUNCE (2), purifies incumbents
 POUNCE-only mode (5). Remaining MILP work (cutting planes, crossover,
 competitive performance) lives in Phases 2–3.
 
+### Phase 4 — Retire remaining HiGHS consumers (in progress)
+
+Goal: discopt runs fully with **only POUNCE installed** (no HiGHS). Each
+matrix-form HiGHS caller selects a signature-compatible engine through a
+shared seam and falls back to whichever backend is importable.
+
+- **LP/QP backend selector — DONE.** `discopt/solvers/lp_backend.py`
+  (`get_lp_solver`/`get_qp_solver`, `prefer_pounce=`) picks HiGHS or POUNCE,
+  HiGHS-first by default and POUNCE-first in POUNCE-only mode, falling back to
+  whichever is importable (raises only if neither is). Tested incl. a
+  simulated HiGHS-absent install.
+- **OBBT — DONE.** `_jax/obbt.py` (`run_obbt`, `run_obbt_on_relaxation`) now
+  goes through the selector with a `prefer_pounce` param, threaded from the
+  spatial-B&B OBBT call site (`nlp_solver="pounce"`). Verified it tightens
+  identically across backends and works with HiGHS absent.
+- **Open:** McCormick-LP / partition-selection (LP), DOE & robust-opt (LP/QP),
+  and the OA/GDP-LOA + `milp_relaxation` *MILP masters* — the last need a
+  matrix-form MILP→self-hosted-B&B adapter (POUNCE has no matrix MILP), a
+  larger separate piece.
+
 - Route pure MILP and MIQP through the existing Rust B&B
   (`crates/discopt-core/src/bnb/`) with POUNCE LP/QP relaxations, replacing
   the `milp_highs.py` whole-problem hand-off.
