@@ -812,3 +812,54 @@ shared seam and falls back to whichever backend is importable.
 3. Should the McCormick-LP mode (`mccormick_lp.py`) migrate to POUNCE LP
    (Phase 4) or be subsumed by the self-hosted MILP path once cuts land?
    Defer until Phase 3 data exists.
+
+## 9. Warm-started simplex MILP node engine (the competitive fix)
+
+Benchmarking showed discopt MILP was correct but **~100–600× slower than
+HiGHS**, bottlenecked by the LP node engine: a cold interior-point solve per
+node (~14 ms/node on knap_160) plus ~1 s fixed per-solve overhead — *not* the
+cut/heuristic layer. The field's answer is a **warm-started dual simplex** that
+re-optimizes a child from its parent's optimal basis in a few pivots. This
+section adds one for **pure MILP**, in Rust, keeping POUNCE/IPM for
+MINLP/MIQP/NLP (nonlinear relaxations + differentiability), where simplex does
+not apply. Decision: Rust-internal (whole MILP solve in one process, no per-node
+Python round-trip), targeting HiGHS-class.
+
+**Factorization via `feral` (`jkitchin/feral`).** Rather than hand-roll a sparse
+LU, the engine uses feral's pure-Rust unsymmetric LU basis engine (`PLUQ` with
+`ftran`/`btran` + simplex-style product-form column updates). Pure-Rust, so
+clean wheels are preserved; `discopt-core` gains one dependency behind a
+`LinearSolver` trait (with a dense oracle for cross-checking).
+
+Increments (all done, validated against HiGHS):
+- **P0 — scaffolding + feral LU.** `lp/simplex/{mod,linsolve}.rs`: the
+  `LinearSolver` trait, `FeralLU` (production) + `DenseLU` (oracle), `Basis`
+  gains `Clone` + an all-slack constructor. Cross-check test.
+- **P1 — primal simplex (cold).** `lp/simplex/primal.rs`: bounded-variable
+  two-phase primal simplex (artificial Phase 1, Dantzig + Bland's fallback,
+  bounded ratio test). `solve_lp_py` matches HiGHS on 40 random LPs.
+- **P2 — dual simplex + warm-start.** `lp/simplex/dual.rs`: `solve_lp_warm`
+  re-optimizes from a parent basis via dual pivots, with a **cold fallback** on
+  any difficulty so correctness is never at risk. Matches cold on 40 perturbed
+  LPs; the dual path is confirmed exercised (≥1 pivot), not silently falling back.
+- **P3 — node basis storage + inheritance.** `Node.basis: Option<Basis>`;
+  `create_children` clones it to both children. Additive; the POUNCE path ignores it.
+- **P4 — Rust-internal MILP driver.** `bnb/milp_driver.rs`: reuses `TreeManager`
+  (selection/prune/branch/pseudocosts/incumbent/gap) but solves each node with
+  the simplex (root cold, children dual-warm from the inherited basis), storing
+  each node's optimal basis back for its children. PyO3 `solve_milp_py`. Matches
+  HiGHS on 30 random MILPs + knapsack/infeasible.
+- **P7 — Python seam.** `nlp_solver="simplex"` routes a pure MILP through
+  `_solve_milp_simplex` → `solve_milp_py`, opt-in, MILP-only; default routing
+  (HiGHS / POUNCE B&B) and MINLP/MIQP untouched.
+
+**Result:** on the same instances that were ~100–600× slow, the warm-started
+simplex is now **~1.9–3.8× of HiGHS** (knap_160: 10.88 s → 0.080 s, ~135×
+faster) with every objective matching HiGHS — a competitive MILP engine.
+
+- **Open (future):** **P5** — feed the existing GMI/MIR separators from the
+  driver's native simplex basis (root cuts) — and **P6** — HiGHS-class
+  hardening: Devex/steepest-edge pricing, Harris bound-flipping ratio test, LP
+  presolve, and incremental `x_B` (the driver currently recomputes it by `ftran`
+  each iteration — correctness-first). These close the remaining ~2–4× and scale
+  to MIPLIB-size instances.
