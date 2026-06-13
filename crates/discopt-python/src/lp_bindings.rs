@@ -11,6 +11,7 @@
 // type-complexity lints don't meaningfully apply to these binding shims.
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
+use discopt_core::bnb::milp_driver::{solve_milp as core_solve_milp, MilpOptions, MilpStatus};
 use discopt_core::lp::basis::recover_basis;
 use discopt_core::lp::crossover::{crossover_to_vertex, LpView};
 use discopt_core::lp::gomory::separate_gomory;
@@ -246,5 +247,67 @@ pub fn solve_lp_py<'py>(
         PyArray1::from_vec(py, sol.x),
         sol.obj,
         sol.iters,
+    ))
+}
+
+/// Solve a pure MILP `min cᵀx + obj_const s.t. A x = b, lb ≤ x ≤ ub`, with the
+/// columns in `integer_cols` integer-constrained, by the Rust-internal
+/// warm-started-simplex branch and bound. `a` is C-contiguous `m × n` standard
+/// form (structural columns `[0, n_struct)`, slacks after). Returns
+/// `(status, x[n_struct], obj, bound, nodes, lp_iters)` where status is one of
+/// `optimal`, `feasible`, `infeasible`, `unbounded`, `node_limit`.
+#[pyfunction]
+#[pyo3(signature = (c, a, b, lb, ub, integer_cols, n_struct, obj_const=0.0,
+                    max_nodes=1_000_000, gap_tol=1e-6, tol=1e-9))]
+pub fn solve_milp_py<'py>(
+    py: Python<'py>,
+    c: PyReadonlyArray1<'py, f64>,
+    a: PyReadonlyArray2<'py, f64>,
+    b: PyReadonlyArray1<'py, f64>,
+    lb: PyReadonlyArray1<'py, f64>,
+    ub: PyReadonlyArray1<'py, f64>,
+    integer_cols: PyReadonlyArray1<'py, i64>,
+    n_struct: usize,
+    obj_const: f64,
+    max_nodes: usize,
+    gap_tol: f64,
+    tol: f64,
+) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
+    let dims = a.shape();
+    let (m, n) = (dims[0], dims[1]);
+    let a_flat = a
+        .as_slice()
+        .map_err(|_| PyValueError::new_err("`a` must be C-contiguous"))?;
+    let lp = LpView {
+        a: a_flat,
+        m,
+        n,
+        c: c.as_slice()?,
+        l: lb.as_slice()?,
+        u: ub.as_slice()?,
+    };
+    let int_cols: Vec<usize> = integer_cols.as_slice()?.iter().map(|&v| v as usize).collect();
+    let opts = MilpOptions {
+        n_struct,
+        integer_cols: int_cols,
+        max_nodes,
+        gap_tol,
+        simplex: SimplexOptions { tol, max_iter: 100_000 },
+    };
+    let res = core_solve_milp(&lp, b.as_slice()?, obj_const, &opts);
+    let status = match res.status {
+        MilpStatus::Optimal => "optimal",
+        MilpStatus::Feasible => "feasible",
+        MilpStatus::Infeasible => "infeasible",
+        MilpStatus::Unbounded => "unbounded",
+        MilpStatus::NodeLimit => "node_limit",
+    };
+    Ok((
+        status.to_string(),
+        PyArray1::from_vec(py, res.x),
+        res.obj,
+        res.bound,
+        res.nodes,
+        res.lp_iters,
     ))
 }

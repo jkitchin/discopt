@@ -466,6 +466,18 @@ impl TreeManager {
         }
     }
 
+    /// The warm-start basis stored on a node (cloned), for the Rust-internal
+    /// simplex MILP driver. `None` if the node has no inherited basis (root).
+    pub fn node_basis(&self, id: NodeId) -> Option<crate::lp::basis::Basis> {
+        self.pool.get(id).basis.clone()
+    }
+
+    /// Store a node's optimal basis before it is branched, so its children
+    /// inherit it as their dual-simplex warm-start state.
+    pub fn set_node_basis(&mut self, id: NodeId, basis: Option<crate::lp::basis::Basis>) {
+        self.pool.get_mut(id).basis = basis;
+    }
+
     /// Get the current incumbent solution, if any.
     pub fn incumbent(&self) -> Option<(&[f64], f64)> {
         self.incumbent_solution

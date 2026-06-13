@@ -36,5 +36,6 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lp_bindings::gomory_cuts_py, m)?)?;
     m.add_function(wrap_pyfunction!(lp_bindings::mir_cuts_py, m)?)?;
     m.add_function(wrap_pyfunction!(lp_bindings::solve_lp_py, m)?)?;
+    m.add_function(wrap_pyfunction!(lp_bindings::solve_milp_py, m)?)?;
     Ok(())
 }
