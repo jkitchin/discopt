@@ -21,6 +21,8 @@ use crate::lp::crossover::LpView;
 use crate::lp::gomory::GomoryCut;
 
 const INF: f64 = 1e19;
+/// Capacity ceiling for the integer lifting DP; above it we emit the basic cover.
+const MAX_CAP_DP: f64 = 100_000.0;
 
 /// Separate violated knapsack cover cuts from the first `n_orig_rows` rows of
 /// the standard-form LP (the original `≤` constraints; later rows are cuts).
@@ -122,16 +124,71 @@ pub fn separate_cover(
 
         // Violated when Σ_C x* > |C| − 1.
         let rhs_le = cover.len() as f64 - 1.0;
-        if xsum > rhs_le + 1e-4 && cover.len() >= 2 {
-            let mut coeffs = vec![0.0; n];
-            for &(j, _, _) in &cover {
-                coeffs[j] = -1.0;
-            }
-            cuts.push(GomoryCut {
-                coeffs,
-                rhs: -rhs_le,
-            });
+        if !(xsum > rhs_le + 1e-4 && cover.len() >= 2) {
+            continue;
         }
+        let rhs_i = cover.len() as i64 - 1; // |C| − 1
+
+        // Cover variables keep coefficient 1; non-cover variables are lifted.
+        let mut coeffs = vec![0.0; n];
+        for &(j, _, _) in &cover {
+            coeffs[j] = -1.0;
+        }
+
+        // Sequential up-lifting via an integer-capacity knapsack DP. Needs
+        // integral weights and a modest capacity; otherwise the basic minimal
+        // cover above is emitted unchanged.
+        let cap_int = cap.round();
+        let integral = (cap - cap_int).abs() < 1e-6
+            && items.iter().all(|&(_, w, _)| (w - w.round()).abs() < 1e-6);
+        if integral && (0.0..=MAX_CAP_DP).contains(&cap_int) {
+            let capn = cap_int as usize;
+            // f[b] = max LHS achievable within capacity b. Seed with the cover
+            // variables (each coefficient 1).
+            let mut f = vec![0i64; capn + 1];
+            for &(_, w, _) in &cover {
+                let wi = w.round() as usize;
+                if wi == 0 || wi > capn {
+                    continue;
+                }
+                for b in (wi..=capn).rev() {
+                    let cand = f[b - wi] + 1;
+                    if cand > f[b] {
+                        f[b] = cand;
+                    }
+                }
+            }
+            // Lift non-cover variables, heaviest first, folding each into f so
+            // later coefficients account for it (true sequential lifting).
+            let mut noncover: Vec<(usize, usize)> = items
+                .iter()
+                .filter(|&&(j, _, _)| !cover.iter().any(|&(cj, _, _)| cj == j))
+                .map(|&(j, w, _)| (j, w.round() as usize))
+                .collect();
+            noncover.sort_by(|a, b| b.1.cmp(&a.1));
+            for (j, wi) in noncover {
+                let alpha = if wi > capn {
+                    rhs_i // never fits alongside anything → maximal coefficient
+                } else {
+                    rhs_i - f[capn - wi]
+                };
+                if alpha > 0 {
+                    coeffs[j] = -(alpha as f64);
+                    if (1..=capn).contains(&wi) {
+                        for b in (wi..=capn).rev() {
+                            let cand = f[b - wi] + alpha;
+                            if cand > f[b] {
+                                f[b] = cand;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        cuts.push(GomoryCut {
+            coeffs,
+            rhs: -(rhs_i as f64),
+        });
     }
     cuts
 }
@@ -155,11 +212,15 @@ mod tests {
         let is_int = [true, true, true, false];
         let cuts = separate_cover(&lp, &[9.0], &x, 3, &is_int, 1, 1e-9);
         assert!(!cuts.is_empty(), "expected a violated cover cut");
-        // ≥ form: coeffs = −1 on the cover, rhs = −(|C|−1). A minimal cover here
-        // has size 2 → rhs = −1, two −1 coefficients.
+        // Minimal cover is a pair (5+5>9, rhs=1); the third weight-5 item lifts
+        // in with coefficient 1 (any pair is a cover), giving the strong cut
+        // x0+x1+x2 ≤ 1. In ≥ form: all three coeffs −1, rhs −1.
         let cut = &cuts[0];
         let nnz: Vec<usize> = (0..3).filter(|&j| cut.coeffs[j].abs() > 1e-9).collect();
-        assert_eq!(nnz.len(), 2, "minimal cover should have 2 items");
+        assert_eq!(nnz.len(), 3, "lifting should pull in the third item");
+        for &j in &nnz {
+            assert!((cut.coeffs[j] - (-1.0)).abs() < 1e-9, "coeff[{}]={}", j, cut.coeffs[j]);
+        }
         assert!((cut.rhs - (-1.0)).abs() < 1e-9, "rhs {}", cut.rhs);
     }
 
