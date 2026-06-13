@@ -259,7 +259,8 @@ pub fn solve_lp_py<'py>(
 #[pyfunction]
 #[pyo3(signature = (c, a, b, lb, ub, integer_cols, n_struct, obj_const=0.0,
                     max_nodes=1_000_000, gap_tol=1e-6, tol=1e-9, root_cuts=16,
-                    presolve=true))]
+                    presolve=true, strong_branch=true, sb_max_cands=8,
+                    sb_node_budget=1024))]
 pub fn solve_milp_py<'py>(
     py: Python<'py>,
     c: PyReadonlyArray1<'py, f64>,
@@ -275,6 +276,9 @@ pub fn solve_milp_py<'py>(
     tol: f64,
     root_cuts: usize,
     presolve: bool,
+    strong_branch: bool,
+    sb_max_cands: usize,
+    sb_node_budget: usize,
 ) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
     let dims = a.shape();
     let (m, n) = (dims[0], dims[1]);
@@ -297,6 +301,9 @@ pub fn solve_milp_py<'py>(
         gap_tol,
         root_cuts,
         presolve,
+        strong_branch,
+        sb_max_cands,
+        sb_node_budget,
         simplex: SimplexOptions { tol, max_iter: 100_000 },
     };
     let res = core_solve_milp(&lp, b.as_slice()?, obj_const, &opts);

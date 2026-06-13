@@ -14,6 +14,7 @@
 use crate::bnb::branching::VarBranchInfo;
 use crate::bnb::pool::SelectionStrategy;
 use crate::bnb::tree_manager::{NodeResult, TreeManager};
+use crate::lp::basis::Basis;
 use crate::lp::crossover::LpView;
 use crate::lp::gomory::separate_gomory;
 use crate::lp::simplex::{solve_lp, solve_lp_warm, tighten_bounds, LpStatus, SimplexOptions};
@@ -69,6 +70,14 @@ pub struct MilpOptions {
     pub root_cuts: usize,
     /// Root feasibility-based bound tightening (sound, dimension-preserving).
     pub presolve: bool,
+    /// Limited strong branching on unreliable candidates (reliability branching).
+    pub strong_branch: bool,
+    /// Max candidates probed per node when strong branching.
+    pub sb_max_cands: usize,
+    /// Only strong-branch while the tree is smaller than this many nodes — the
+    /// early region where branching choices shape the whole search. Beyond it,
+    /// matured pseudocosts decide (avoids probing overhead deep in large trees).
+    pub sb_node_budget: usize,
     /// LP solver options.
     pub simplex: SimplexOptions,
 }
@@ -201,6 +210,7 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
         if batch.node_ids.is_empty() {
             break;
         }
+        let sb_active = opts.strong_branch && tm.stats().total_nodes < opts.sb_node_budget;
         let mut results = Vec::with_capacity(batch.node_ids.len());
         for k in 0..batch.node_ids.len() {
             let id = batch.node_ids[k];
@@ -233,6 +243,36 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
                         .iter()
                         .enumerate()
                         .all(|(j, &it)| !it || frac(xs[j]) <= INT_TOL);
+                    // Strong branching: for a fractional node that won't be
+                    // pruned, probe the unreliable candidates and hint the best
+                    // branching variable. Only the *choice* of variable changes,
+                    // so this never affects correctness — only the node count.
+                    if sb_active && !feasible {
+                        let node_bound = sol.obj + obj_const;
+                        let prunable = tm
+                            .incumbent()
+                            .map(|(_, inc)| node_bound >= inc - 1e-9)
+                            .unwrap_or(false);
+                        if !prunable {
+                            let reliability = tm.get_reliability_threshold();
+                            let cands = tm.score_candidates(xs);
+                            let (best, piv) = strong_branch(
+                                &node_lp,
+                                &b_w,
+                                &sol.basis,
+                                &sol.x,
+                                sol.obj,
+                                &cands,
+                                reliability,
+                                opts.sb_max_cands,
+                                &opts.simplex,
+                            );
+                            lp_iters += piv;
+                            if let Some(v) = best {
+                                tm.set_branch_hint(id, v);
+                            }
+                        }
+                    }
                     NodeResult {
                         node_id: id,
                         lower_bound: sol.obj + obj_const,
@@ -304,6 +344,108 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
     }
 }
 
+/// Limited strong branching. For the *unreliable* fractional candidates (those
+/// whose pseudocosts aren't trusted yet), probe both child bounds with a warm
+/// dual re-solve from the node's basis and pick the variable with the best
+/// product score `max(Δ↓,ε)·max(Δ↑,ε)` (an infeasible child scores high — it
+/// prunes immediately). Returns the chosen structural variable, if any, and the
+/// simplex pivots spent. Cheap because each probe is a few warm pivots, and it
+/// tapers automatically as pseudocosts mature past the reliability threshold.
+#[allow(clippy::too_many_arguments)]
+fn strong_branch(
+    lp: &LpView<'_>,
+    b: &[f64],
+    basis: &Basis,
+    x: &[f64],
+    node_obj: f64,
+    cands: &[(usize, f64, u32, f64)],
+    reliability: u32,
+    max_cands: usize,
+    simplex: &SimplexOptions,
+) -> (Option<usize>, usize) {
+    // Unreliable candidates, most-fractional (nearest 0.5) first.
+    let mut cand: Vec<(usize, f64)> = cands
+        .iter()
+        .filter(|c| c.2 < reliability)
+        .map(|c| (c.0, c.1))
+        .collect();
+    if cand.is_empty() {
+        return (None, 0);
+    }
+    cand.sort_by(|a, c| {
+        (c.1 - 0.5)
+            .abs()
+            .partial_cmp(&(a.1 - 0.5).abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    cand.truncate(max_cands.max(1));
+
+    const INFEAS_DELTA: f64 = 1e7; // a pruned child is a strong branching signal
+    let eps = 1e-6;
+    let mut l = lp.l.to_vec();
+    let mut u = lp.u.to_vec();
+    let mut best: Option<usize> = None;
+    let mut best_score = f64::NEG_INFINITY;
+    let mut pivots = 0usize;
+    for (idx, _f) in cand {
+        let xi = x[idx];
+        let (lo0, hi0) = (lp.l[idx], lp.u[idx]);
+
+        // Down branch: x_idx ≤ floor(x_idx).
+        u[idx] = xi.floor();
+        let dn = solve_lp_warm(
+            &LpView {
+                a: lp.a,
+                m: lp.m,
+                n: lp.n,
+                c: lp.c,
+                l: &l,
+                u: &u,
+            },
+            b,
+            basis,
+            simplex,
+        );
+        u[idx] = hi0;
+        pivots += dn.iters;
+        let d_dn = match dn.status {
+            LpStatus::Optimal => (dn.obj - node_obj).max(0.0),
+            LpStatus::Infeasible => INFEAS_DELTA,
+            _ => 0.0,
+        };
+
+        // Up branch: x_idx ≥ ceil(x_idx).
+        l[idx] = xi.ceil();
+        let up = solve_lp_warm(
+            &LpView {
+                a: lp.a,
+                m: lp.m,
+                n: lp.n,
+                c: lp.c,
+                l: &l,
+                u: &u,
+            },
+            b,
+            basis,
+            simplex,
+        );
+        l[idx] = lo0;
+        pivots += up.iters;
+        let d_up = match up.status {
+            LpStatus::Optimal => (up.obj - node_obj).max(0.0),
+            LpStatus::Infeasible => INFEAS_DELTA,
+            _ => 0.0,
+        };
+
+        let score = d_dn.max(eps) * d_up.max(eps);
+        if score > best_score {
+            best_score = score;
+            best = Some(idx);
+        }
+    }
+    (best, pivots)
+}
+
 fn frac(v: f64) -> f64 {
     let f = v - v.floor();
     f.min(1.0 - f)
@@ -328,6 +470,9 @@ mod tests {
             gap_tol: 1e-9,
             root_cuts: 16,
             presolve: true,
+            strong_branch: true,
+            sb_max_cands: 8,
+            sb_node_budget: 1024,
             simplex: SimplexOptions::default(),
         }
     }
