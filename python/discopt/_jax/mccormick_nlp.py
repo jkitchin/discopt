@@ -2,8 +2,10 @@
 McCormick relaxation NLP solver for computing valid lower bounds in B&B.
 
 Builds a convex NLP from McCormick relaxations of the objective and constraints,
-then solves it with the pure-JAX IPM. The optimal value of the convex relaxation
-is a valid lower bound on the original nonconvex problem over the node's domain.
+then solves it with POUNCE (the pure-Rust Ipopt port). The optimal value of the
+convex relaxation is a valid lower bound on the original nonconvex problem over the
+node's domain. (The JAX IPM previously used here is retired; the relaxation
+*functions* remain JAX-built.)
 
 Two modes:
   - **midpoint**: Evaluate the McCormick convex underestimator at the midpoint
@@ -45,27 +47,12 @@ def _numpy_threshold() -> int:
         return _NUMPY_THRESHOLD_DEFAULT
 
 
-def _pounce_backend_enabled() -> bool:
-    """True when DISCOPT_MCCORMICK_BACKEND=pounce.
-
-    Opt-in: routes the convex relaxation NLP through POUNCE (pure-Rust
-    Ipopt port; https://github.com/jkitchin/pounce) instead of the
-    JAX-jit'd ``_jax/ipm.py``. The McCormickRelaxationEvaluator builds
-    small jit'd objective/gradient/Jacobian/Hessian modules and POUNCE
-    drives the IPM. Avoids the trace/compile floor of the inline JAX IPM
-    at the cost of one Python<->Rust boundary per IPM iteration.
-    """
-    val = os.environ.get("DISCOPT_MCCORMICK_BACKEND", "ipm").strip().lower()
-    return val == "pounce"
-
-
 # Per-(relaxation, options) jit caches. Keyed by Python id() of the
 # relaxation functions plus negate/max_iter so repeat B&B nodes hit the
 # XLA cache instead of recompiling. Without these caches each call built
 # fresh closures over (lb, ub), forcing JAX to retrace+recompile per node
 # (the dominant cost on small instances).
 _midpoint_batch_cache: dict = {}
-_relax_solver_cache: dict[tuple, Callable] = {}
 _pounce_evaluator_cache: dict = {}
 
 
@@ -268,79 +255,6 @@ def _solve_relaxation_with_pounce(
     return val
 
 
-def _get_or_build_relax_solver(
-    obj_relax_fn: Callable,
-    con_relax_fns: Optional[tuple[Callable, ...]],
-    con_senses: Optional[tuple[str, ...]],
-    negate: bool,
-    max_iter: int,
-) -> Callable:
-    """Return a jit-compiled solver for a given relaxation signature.
-
-    Cached by function identity so that B&B nodes (which share the same
-    relaxation functions and only differ in bounds) hit the XLA cache.
-    Bounds are passed as traced arguments to the returned solver, so a
-    single compiled module serves every node on a given problem.
-    """
-    from discopt._jax.ipm import IPMOptions, ipm_solve
-
-    con_key = tuple(id(f) for f in con_relax_fns) if con_relax_fns else ()
-    sense_key = tuple(con_senses) if con_senses else ()
-    key = (id(obj_relax_fn), con_key, sense_key, bool(negate), int(max_iter))
-
-    cached = _relax_solver_cache.get(key)
-    if cached is not None:
-        return cached
-
-    has_cons = bool(con_relax_fns) and bool(con_senses)
-    fns_local: tuple[Callable, ...] = tuple(con_relax_fns) if con_relax_fns is not None else ()
-    senses_local: tuple[str, ...] = tuple(con_senses) if con_senses is not None else ()
-    n_cons = len(fns_local)
-    opts = IPMOptions(max_iter=max_iter)
-
-    @jax.jit
-    def _solve(node_lb, node_ub):
-        def obj_fn(x):
-            cv, cc = obj_relax_fn(x, x, node_lb, node_ub)
-            return -cc if negate else cv
-
-        if has_cons:
-
-            def con_fn(x):
-                vals = []
-                for fn, sense in zip(fns_local, senses_local):
-                    cv, cc = fn(x, x, node_lb, node_ub)
-                    if sense == ">=":
-                        vals.append(-cc)
-                    else:  # "<=" and "==" both use cv as upper-bounded by 0
-                        vals.append(cv)
-                return jnp.stack(vals)
-
-            g_l = jnp.full(n_cons, -1e20, dtype=jnp.float64)
-            g_u = jnp.zeros(n_cons, dtype=jnp.float64)
-        else:
-            con_fn = None
-            g_l = None
-            g_u = None
-
-        x0 = jnp.clip(0.5 * (node_lb + node_ub), node_lb, node_ub)
-        state = ipm_solve(
-            obj_fn,
-            con_fn,
-            x0,
-            node_lb,
-            node_ub,
-            g_l,
-            g_u,
-            opts,
-            check_deadline=False,
-        )
-        return state.obj, state.converged
-
-    _relax_solver_cache[key] = _solve
-    return _solve
-
-
 def solve_mccormick_relaxation_nlp(
     obj_relax_fn: Callable,
     con_relax_fns: Optional[list[Callable]],
@@ -416,35 +330,20 @@ def solve_mccormick_relaxation_nlp(
     con_fns_tuple = tuple(con_relax_fns) if con_relax_fns else None
     senses_tuple = tuple(con_senses) if con_senses else None
 
-    # Optional: route the convex relaxation NLP through POUNCE (pure-Rust
-    # Ipopt port; same one the original-NLP path uses) instead of the
-    # inline jit'd JAX IPM. Avoids the JAX IPM trace/compile floor.
-    if _pounce_backend_enabled():
-        return _solve_relaxation_with_pounce(
-            obj_relax_fn,
-            con_fns_tuple,
-            senses_tuple,
-            np.asarray(node_lb, dtype=np.float64),
-            np.asarray(node_ub, dtype=np.float64),
-            negate=negate,
-            max_iter=max(max_iter, 100),
-            deadline=deadline,
-        )
-
-    try:
-        solver = _get_or_build_relax_solver(
-            obj_relax_fn, con_fns_tuple, senses_tuple, negate, max_iter
-        )
-        obj_val, converged = solver(lb, ub)
-        conv = int(converged)
-        if conv in (1, 2, 3):
-            v = float(obj_val)
-            if np.isfinite(v):
-                return v
-    except Exception:
-        pass
-
-    return -np.inf
+    # The convex relaxation NLP is solved by POUNCE (pure-Rust Ipopt port; the
+    # same engine the original-NLP path uses). The JAX IPM previously used here
+    # is retired — POUNCE has no JAX trace/compile floor and keeps the spatial-
+    # B&B relaxation path off the deprecated _jax.ipm core.
+    return _solve_relaxation_with_pounce(
+        obj_relax_fn,
+        con_fns_tuple,
+        senses_tuple,
+        np.asarray(node_lb, dtype=np.float64),
+        np.asarray(node_ub, dtype=np.float64),
+        negate=negate,
+        max_iter=max(max_iter, 100),
+        deadline=deadline,
+    )
 
 
 def solve_mccormick_batch(
