@@ -96,6 +96,16 @@ def solve_milp(
     else:
         lbs = [0.0] * n
         ubs = [float("inf")] * n
+    # Snap tiny floating-point bound inversions (lb just above ub) so the
+    # self-hosted B&B's per-node LP relaxations are not rejected by POUNCE's
+    # strict bound validation (see lp_pounce._snap_inverted_bounds).
+    from discopt.solvers.lp_pounce import _snap_inverted_bounds
+
+    _lb_snap, _ub_snap = _snap_inverted_bounds(
+        np.asarray(lbs, dtype=np.float64), np.asarray(ubs, dtype=np.float64)
+    )
+    lbs = _lb_snap.tolist()
+    ubs = _ub_snap.tolist()
     is_int = (
         np.zeros(n, dtype=bool) if integrality is None else (np.asarray(integrality).ravel() == 1)
     )

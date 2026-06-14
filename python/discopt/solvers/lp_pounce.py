@@ -38,6 +38,27 @@ _FINITE_BOUND_THRESHOLD = 1e15
 # Above this total constraint violation, the elastic Phase-1 LP certifies the
 # original LP infeasible (roadmap P0.2).
 _FEAS_TOL = 1e-6
+# Tiny floating-point bound inversions (lb just above ub, e.g. ~1e-11 out of
+# relaxation/bound-tightening) are snapped to a single fixed value before they
+# reach POUNCE. POUNCE's IPM strictly validates bounds and rejects ``lb > ub``
+# as Invalid_Problem_Definition; presolve-based solvers (HiGHS) silently snap
+# them. Inversions beyond this tolerance are left intact so they surface as
+# genuine infeasibility rather than being masked.
+_BOUND_SNAP_TOL = 1e-7
+
+
+def _snap_inverted_bounds(lb: np.ndarray, ub: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Snap tiny ``lb > ub`` inversions to their midpoint (in place-safe)."""
+    inverted = lb > ub
+    if np.any(inverted):
+        tiny = inverted & ((lb - ub) <= _BOUND_SNAP_TOL * (1.0 + np.abs(ub)))
+        if np.any(tiny):
+            lb = lb.copy()
+            ub = ub.copy()
+            mid = 0.5 * (lb[tiny] + ub[tiny])
+            lb[tiny] = mid
+            ub[tiny] = mid
+    return lb, ub
 
 
 class PounceKKTError(RuntimeError):
@@ -218,6 +239,7 @@ def solve_lp(
         ub = np.full(n, _INF, dtype=np.float64)
     lb = np.where(lb <= -_FINITE_BOUND_THRESHOLD, -_INF, lb)
     ub = np.where(ub >= _FINITE_BOUND_THRESHOLD, _INF, ub)
+    lb, ub = _snap_inverted_bounds(lb, ub)
 
     # ---- stacked linear constraints -----------------------------------------
     A, cl, cu = _stack_constraints(A_ub, b_ub, A_eq, b_eq, n)
@@ -308,6 +330,7 @@ def solve_lp_kkt(
     ub = np.asarray(x_u, dtype=np.float64).ravel().copy()
     lb = np.where(lb <= -_FINITE_BOUND_THRESHOLD, -_INF, lb)
     ub = np.where(ub >= _FINITE_BOUND_THRESHOLD, _INF, ub)
+    lb, ub = _snap_inverted_bounds(lb, ub)
 
     cl = b_arr.copy()
     cu = b_arr.copy()
