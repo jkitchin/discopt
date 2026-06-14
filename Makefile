@@ -11,6 +11,10 @@
 #   make bench-cutest-smoke   # Quick CUTEst smoke (10 problems)
 #   make setup-cutest         # Install CUTEst/SIFDecode/SIF libraries
 #   make build               # Rebuild Rust .so if sources changed
+#   make gams-install        # Build + register discopt as a GAMS solver
+#   make gams-build          # Install discopt with the GAMS link (gamsapi[core])
+#   make gams-register       # Register discopt in GAMS_CONFIG_DIR (default ~/.gams)
+#   make gams-test           # Run the GAMS link test suite
 #   make test                # PR-fast pytest suite (matches CI python-fast job)
 #   make test-all            # Full pytest suite (slow + correctness)
 #   make test-quick          # unit + smoke only (dev inner loop, target <60s)
@@ -83,6 +87,7 @@ CUTEST_ENV      := $(CUTEST_PREFIX)/env.sh
         bench-notebook bench-smoke bench-phase3-gate bench-tests \
         bench-cutest bench-cutest-smoke setup-cutest check-cutest \
         docs docs-open notebooks \
+        gams-build gams-register gams-install gams-test \
         bench-lp-smoke bench-qp-smoke bench-milp-smoke bench-miqp-smoke bench-minlp-smoke bench-global-smoke \
         bench-lp-full bench-qp-full bench-milp-full bench-miqp-full bench-minlp-full bench-global-full \
         bench-smoke-all bench-full-all bench-all
@@ -110,6 +115,10 @@ help:
 	@echo "  make test-llm           LLM modules slice"
 	@echo "  make lint               Ruff lint + format check"
 	@echo "  make hooks              Install pre-commit hooks"
+	@echo "  make gams-install       Build + register discopt as a GAMS solver"
+	@echo "  make gams-build         Install discopt with the GAMS link (gamsapi[core])"
+	@echo "  make gams-register      Register discopt in GAMS_CONFIG_DIR (default ~/.gams)"
+	@echo "  make gams-test          Run the GAMS link test suite"
 	@echo "  make bench-notebook     Run benchmark notebook, save HTML + JSON"
 	@echo "  make bench-smoke        Quick smoke benchmark via run_benchmarks.py"
 	@echo "  make bench-phase3-gate  Phase 3 gate validation script"
@@ -161,6 +170,38 @@ $(SO_TARGET): $(RUST_SRCS)
 	@echo "==> Rust extension ready"
 
 build: $(SO_TARGET)
+
+# --- GAMS solver link ---------------------------------------------------------
+#
+# Build and install discopt as a GAMS solver. `gams-install` does both:
+# installs discopt with the GMO/GEV Python bindings, then registers the solver
+# with your GAMS system so `option minlp = discopt;` dispatches to discopt.
+#
+#   make gams-install                       # build + register (default dir)
+#   make gams-install GAMS_CONFIG_DIR=/path # register into a specific dir
+#
+# GAMS_CONFIG_DIR defaults to $(HOME)/.gams, which GAMS reads automatically.
+
+PIP             ?= pip
+GAMS_CONFIG_DIR ?= $(HOME)/.gams
+
+gams-build:
+	@echo "==> Installing discopt with the GAMS link (gamsapi[core])..."
+	$(PIP) install -e ".[gams]"
+	@echo "==> discopt[gams] installed"
+
+gams-register:
+	@echo "==> Registering discopt as a GAMS solver in $(GAMS_CONFIG_DIR)..."
+	$(PYTHON) -m discopt.cli gams-register --directory "$(GAMS_CONFIG_DIR)"
+
+gams-install: gams-build gams-register
+	@echo "==> discopt GAMS link built and registered."
+	@echo "    Merge $(GAMS_CONFIG_DIR)/gamsconfig.yaml into your GAMS config if needed,"
+	@echo "    then in GAMS: option minlp = discopt; solve m using minlp minimizing z;"
+
+gams-test:
+	@echo "==> Running GAMS link test suite..."
+	$(PYTEST) python/tests/test_gams_link.py -v
 
 # --- Lint ---------------------------------------------------------------------
 
