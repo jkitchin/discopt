@@ -314,12 +314,18 @@ def _dispatch_nlp_solve(nlp_solver: str, evaluator, x0, options: dict):
         from discopt._jax.ipm import solve_nlp_ipm
 
         return solve_nlp_ipm(evaluator, x0, constraint_bounds=None, options=options)
+    elif nlp_solver == "pounce":
+        from discopt.solvers.nlp_pounce import solve_nlp
+
+        return solve_nlp(evaluator, x0, options=options)
     elif nlp_solver == "ipopt":
         from discopt.solvers.nlp_ipopt import solve_nlp
 
         return solve_nlp(evaluator, x0, options=options)
     else:
-        raise ValueError(f"Unknown nlp_solver: {nlp_solver!r}. Use 'ipm' or 'ipopt'.")
+        raise ValueError(
+            f"Unknown nlp_solver: {nlp_solver!r}. Use 'ipm', 'pounce', or 'ipopt'."
+        )
 
 
 def _safe_x0(evaluator) -> np.ndarray:
@@ -353,7 +359,7 @@ def differentiable_solve(
     model: Model,
     ipopt_options: Optional[dict] = None,
     *,
-    nlp_solver: str = "ipopt",
+    nlp_solver: str = "pounce",
     solver_options: Optional[dict] = None,
 ) -> "DiffSolveResult":
     """Solve a continuous model and return a result with parameter sensitivities.
@@ -502,10 +508,11 @@ def _compute_sensitivity_at_solution(
     nlp_result = _dispatch_nlp_solve(nlp_solver, evaluator, x0, opts)
 
     if nlp_result.status != SolveStatus.OPTIMAL:
-        # Fall back to ipopt if ipm didn't converge
+        # Fall back to POUNCE (pure-Rust Ipopt port) if the JAX IPM didn't
+        # converge — e.g. zero-Hessian LPs where the IPM can stall.
         if nlp_solver == "ipm":
             try:
-                nlp_result = _dispatch_nlp_solve("ipopt", evaluator, x0, opts)
+                nlp_result = _dispatch_nlp_solve("pounce", evaluator, x0, opts)
             except Exception:
                 pass
         if nlp_result.status != SolveStatus.OPTIMAL:
@@ -1272,7 +1279,7 @@ def differentiable_solve_l3(
     ipopt_options: Optional[dict] = None,
     active_tol: float = 1e-3,
     *,
-    nlp_solver: str = "ipopt",
+    nlp_solver: str = "pounce",
     solver_options: Optional[dict] = None,
 ) -> DiffSolveResultL3:
     """Solve a continuous model with L3 implicit differentiation sensitivities.

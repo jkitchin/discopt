@@ -119,7 +119,7 @@ class TestParametricCompiler:
 class TestDifferentiableSolve:
     """Test differentiable_solve returns correct solutions and gradients."""
 
-    @pytest.mark.parametrize("nlp_solver", ["ipm", "ipopt"])
+    @pytest.mark.parametrize("nlp_solver", ["ipm", "pounce"])
     def test_simple_parametric_lp(self, nlp_solver):
         """min p*x s.t. x >= 1, x <= 5, p > 0.
 
@@ -141,7 +141,7 @@ class TestDifferentiableSolve:
         # d(obj*)/dp = x* = 1.0
         assert float(grad) == pytest.approx(1.0, abs=1e-3)
 
-    @pytest.mark.parametrize("nlp_solver", ["ipm", "ipopt"])
+    @pytest.mark.parametrize("nlp_solver", ["ipm", "pounce"])
     def test_parametric_rhs(self, nlp_solver):
         """min x s.t. x >= b, x <= 10.
 
@@ -205,7 +205,7 @@ class TestDifferentiableSolve:
         assert grad[0] == pytest.approx(1.0, abs=1e-2)
         assert grad[1] == pytest.approx(0.0, abs=1e-2)
 
-    @pytest.mark.parametrize("nlp_solver", ["ipm", "ipopt"])
+    @pytest.mark.parametrize("nlp_solver", ["ipm", "pounce"])
     def test_parametric_nlp(self, nlp_solver):
         """min x^2 + p*x s.t. x >= 0.
 
@@ -611,7 +611,7 @@ class TestActiveSetFinder:
 class TestImplicitDifferentiation:
     """Test implicit differentiation via KKT system."""
 
-    @pytest.mark.parametrize("nlp_solver", ["ipm", "ipopt"])
+    @pytest.mark.parametrize("nlp_solver", ["ipm", "pounce"])
     def test_unconstrained_quadratic(self, nlp_solver):
         """min (x - p)^2, unconstrained: x* = p, dx/dp = 1, dobj/dp = 0."""
         m = dm.Model("imp_unconstrained")
@@ -632,7 +632,7 @@ class TestImplicitDifferentiation:
         assert sens is not None
         assert float(sens[0, 0]) == pytest.approx(1.0, abs=1e-2)
 
-    @pytest.mark.parametrize("nlp_solver", ["ipm", "ipopt"])
+    @pytest.mark.parametrize("nlp_solver", ["ipm", "pounce"])
     def test_constrained_active(self, nlp_solver):
         """min x^2 s.t. x >= p. At optimum x* = p, dobj/dp = 2p."""
         m = dm.Model("imp_constrained")
@@ -919,7 +919,7 @@ class TestL3VsL1Comparison:
         m.minimize(m._parameters[0] * x1 + m._parameters[1] * x2)
         m.subject_to(x1 + x2 >= 1)
 
-        result = differentiable_solve_l3(m, nlp_solver="ipopt")
+        result = differentiable_solve_l3(m, nlp_solver="pounce")
         sens = result.sensitivity_matrix()
         assert sens is not None
         assert sens.shape == (2, 2)
