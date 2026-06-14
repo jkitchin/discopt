@@ -1734,10 +1734,10 @@ def solve_model(
 
     if nlp_solver == "pounce":
         logger.info("Using POUNCE (pure-Rust Ipopt port)")
-    elif nlp_solver == "sparse_ipm":
-        logger.info("Using sparse IPM (scipy direct solve)")
-    elif nlp_solver == "ipm":
-        logger.info("Using discopt IPM (pure-JAX interior point method)")
+    elif nlp_solver in ("sparse_ipm", "ipm"):
+        # The JAX IPM (and its sparse variant) was retired; these names are
+        # back-compat aliases that resolve to POUNCE on the NLP/MINLP path.
+        logger.info("Using POUNCE (pure-Rust Ipopt port; %r is a deprecated alias)", nlp_solver)
     else:
         logger.info("Using Ipopt (via cyipopt)")
 

@@ -1,6 +1,23 @@
 # POUNCE-Only Roadmap: Eliminating HiGHS
 
-**Status:** Draft for review
+**Status:** Largely implemented — this document is the original plan plus dated
+addenda (see §8+). Several early-section statements were superseded by what
+actually shipped; the corrections below take precedence over the body text:
+
+- **An LP-basis warm-start *was* built.** §4/§5 argue "do **not** build
+  LP-basis warm-start" (batch width as the throughput lever). That decision was
+  reversed: discopt now ships a pure-Rust **warm-started dual simplex** for the
+  MILP B&B node LPs (see §8's P1–P2 addendum). The IPM remains the LP/QP engine
+  for the differentiable and relaxation paths.
+- **The JAX IPM is removed, not retained.** Statements that `ipm.py`'s
+  `ipm_solve` core is *kept* for the McCormick-NLP path (§12) are obsolete:
+  `_jax/ipm.py` and the entire JAX interior-point stack have been **deleted**;
+  the McCormick-NLP relaxation and all NLP node solves run on POUNCE.
+- **`pounce-solver` is a core dependency.** The `[pounce]`-only-install framing
+  (§9 and elsewhere) is superseded — `pounce-solver` is now a hard core
+  dependency in `pyproject.toml`; `[pounce]` is kept only as a back-compat alias
+  extra.
+
 **Scope:** Multi-phase plan to make discopt a complete, pip-installable
 MILP/MIQP/MINLP solver whose only third-party numerical engine is POUNCE
 (the pure-Rust Ipopt port), with HiGHS retired from the runtime dependency
