@@ -228,7 +228,7 @@ class TestCallerDecertifies:
 
     def test_batch_untrusted_node_decertifies(self, monkeypatch):
         """An untrusted batch node decertifies the gap but keeps the answer."""
-        orig = S._solve_batch_ipm
+        orig = S._solve_batch_pounce
 
         def wrap(*a, **k):
             ids, lbs, sols, feas, trusted = orig(*a, **k)
@@ -236,8 +236,10 @@ class TestCallerDecertifies:
             trusted[0] = False  # simulate an unpolishable non-KKT convex node
             return ids, lbs, sols, feas, trusted
 
-        monkeypatch.setattr(S, "_solve_batch_ipm", wrap)
-        r = _convex_minlp().solve(nlp_solver="ipm", time_limit=60, batch_size=8)
+        # POUNCE is the NLP-node batch engine; force batching on this small model.
+        monkeypatch.setattr(S, "_POUNCE_BATCH_MIN_VARS", 1)
+        monkeypatch.setattr(S, "_solve_batch_pounce", wrap)
+        r = _convex_minlp().solve(nlp_solver="pounce", time_limit=60, batch_size=8)
         assert r.gap_certified is False
         assert r.status == "feasible"
         # Bounds were untouched, so the incumbent is still correct.

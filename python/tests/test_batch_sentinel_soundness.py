@@ -67,16 +67,19 @@ class TestBatchSentinelSoundness:
         m, warm = _build_nonconvex_minlp()
 
         calls = {"n": 0}
-        real_batch = S._solve_batch_ipm
+        real_batch = S._solve_batch_pounce
 
         def fake_batch(*args, **kwargs):
             calls["n"] += 1
             return _all_sentinel_batch(*args, **kwargs)
 
-        monkeypatch.setattr(S, "_solve_batch_ipm", fake_batch)
+        # POUNCE is the NLP-node batch engine; force batching on this small model
+        # (the size gate would otherwise route it to the serial path).
+        monkeypatch.setattr(S, "_POUNCE_BATCH_MIN_VARS", 1)
+        monkeypatch.setattr(S, "_solve_batch_pounce", fake_batch)
 
         result = m.solve(
-            nlp_solver="ipm",
+            nlp_solver="pounce",
             batch_size=4,
             time_limit=60.0,
             max_nodes=5_000,
@@ -85,7 +88,7 @@ class TestBatchSentinelSoundness:
 
         assert calls["n"] >= 1, (
             "Batch path was never exercised; test setup no longer matches "
-            "the solver's dispatch (check _use_ipm_batch conditions)."
+            "the solver's dispatch (check _use_pounce_batch conditions)."
         )
         # The incumbent (warm start or better) survives as a feasible point...
         assert result.objective is not None
@@ -98,7 +101,7 @@ class TestBatchSentinelSoundness:
         assert result.bound is None
         assert result.gap is None
 
-        monkeypatch.setattr(S, "_solve_batch_ipm", real_batch)
+        monkeypatch.setattr(S, "_solve_batch_pounce", real_batch)
 
     def test_unpatched_solver_still_certifies(self) -> None:
         """Control: the real batch solver still reaches a certified optimum,

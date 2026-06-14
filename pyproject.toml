@@ -28,6 +28,7 @@ dependencies = [
     "jaxlib>=0.4",
     "numpy>=1.24",
     "scipy>=1.10",
+    "pounce-solver>=0.3",
 ]
 
 [project.urls]
@@ -37,6 +38,8 @@ Documentation = "https://github.com/jkitchin/discopt#readme"
 Issues = "https://github.com/jkitchin/discopt/issues"
 
 [project.optional-dependencies]
+# POUNCE is now a core dependency (the default NLP/IPM engine); this extra is
+# kept as a no-op alias for back-compat with `pip install discopt[pounce]`.
 pounce = ["pounce-solver>=0.3"]
 ipopt = ["cyipopt>=1.4"]
 highs = ["highspy"]
