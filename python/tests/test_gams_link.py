@@ -7,6 +7,9 @@ solver registration files.  None of this requires a GAMS installation.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import discopt.modeling as dm
 import pytest
 from discopt.gams import (
@@ -271,3 +274,31 @@ def test_write_registration(tmp_path):
 
 def test_is_available_returns_bool():
     assert isinstance(is_available(), bool)
+
+
+# ── on-disk .gms smoke corpus ────────────────────────────────────────────────
+# Small GAMS models with known optima (python/tests/data/gams/). The GAMS-side
+# solver link is verified end-to-end by scripts/verify_gams_link.py; here we
+# exercise the same corpus through discopt's own from_gams() reader.
+_GAMS_DATA = Path(__file__).parent / "data" / "gams"
+_MANIFEST = json.loads((_GAMS_DATA / "manifest.json").read_text())["models"]
+
+
+@pytest.mark.parametrize("entry", _MANIFEST, ids=[m["file"] for m in _MANIFEST])
+def test_smoke_gms_file_parses(entry):
+    model = dm.from_gams(str(_GAMS_DATA / entry["file"]))
+    assert len(model._variables) >= 1
+    assert model._objective is not None
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [m for m in _MANIFEST if m.get("via_from_gams")],
+    ids=[m["file"] for m in _MANIFEST if m.get("via_from_gams")],
+)
+def test_smoke_gms_optimum_via_from_gams(entry):
+    model = dm.from_gams(str(_GAMS_DATA / entry["file"]))
+    result = model.solve(time_limit=120)
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(entry["objective"], abs=max(entry["tol"], 1e-4))
+

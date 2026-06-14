@@ -86,6 +86,28 @@ discopt termination statuses are mapped to GAMS `(modelStat, solveStat)` pairs:
 Feasible if an incumbent exists, otherwise No-Solution-Returned), and errors →
 Error/Solver-Error.
 
+## Smoke testing
+
+A small corpus of GAMS models with known optima lives in
+`python/tests/data/gams/` (LP, MIP, convex NLP, nonconvex NLP, and a convex
+MINLP), described by `manifest.json`. There are two layers of checking:
+
+- **Reader path (no GAMS needed)** — the unit tests parse each model with
+  `from_gams()` and solve it with discopt, asserting the known optimum
+  (`pytest python/tests/test_gams_link.py -k smoke`).
+- **Solver-link path (needs a GAMS install)** — `scripts/verify_gams_link.py`
+  runs every model through GAMS with the solver forced to discopt, reads back the
+  objective and GAMS model/solve status, and checks them against the optimum:
+
+  ```bash
+  make gams-install   # build + register discopt with GAMS
+  make gams-verify    # python scripts/verify_gams_link.py
+  ```
+
+The canonical `lp_transport.gms` (sets/tables) is included for the solver-link
+path; discopt's `from_gams()` reader does not yet substitute indexed parameter
+data into objective coefficients, so it is flagged GAMS-only in the manifest.
+
 ## Programmatic use
 
 The GAMS-library-free core is importable and testable on its own — useful when

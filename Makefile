@@ -15,6 +15,7 @@
 #   make gams-build          # Install discopt with the GAMS link (gamsapi[core])
 #   make gams-register       # Register discopt in GAMS_CONFIG_DIR (default ~/.gams)
 #   make gams-test           # Run the GAMS link test suite
+#   make gams-verify         # End-to-end GAMS link smoke test (needs a GAMS install)
 #   make test                # PR-fast pytest suite (matches CI python-fast job)
 #   make test-all            # Full pytest suite (slow + correctness)
 #   make test-quick          # unit + smoke only (dev inner loop, target <60s)
@@ -87,7 +88,7 @@ CUTEST_ENV      := $(CUTEST_PREFIX)/env.sh
         bench-notebook bench-smoke bench-phase3-gate bench-tests \
         bench-cutest bench-cutest-smoke setup-cutest check-cutest \
         docs docs-open notebooks \
-        gams-build gams-register gams-install gams-test \
+        gams-build gams-register gams-install gams-test gams-verify \
         bench-lp-smoke bench-qp-smoke bench-milp-smoke bench-miqp-smoke bench-minlp-smoke bench-global-smoke \
         bench-lp-full bench-qp-full bench-milp-full bench-miqp-full bench-minlp-full bench-global-full \
         bench-smoke-all bench-full-all bench-all
@@ -119,6 +120,7 @@ help:
 	@echo "  make gams-build         Install discopt with the GAMS link (gamsapi[core])"
 	@echo "  make gams-register      Register discopt in GAMS_CONFIG_DIR (default ~/.gams)"
 	@echo "  make gams-test          Run the GAMS link test suite"
+	@echo "  make gams-verify        End-to-end GAMS link smoke test (needs GAMS)"
 	@echo "  make bench-notebook     Run benchmark notebook, save HTML + JSON"
 	@echo "  make bench-smoke        Quick smoke benchmark via run_benchmarks.py"
 	@echo "  make bench-phase3-gate  Phase 3 gate validation script"
@@ -202,6 +204,10 @@ gams-install: gams-build gams-register
 gams-test:
 	@echo "==> Running GAMS link test suite..."
 	$(PYTEST) python/tests/test_gams_link.py -v
+
+gams-verify:
+	@echo "==> Verifying the GAMS link end-to-end (requires a GAMS install + registration)..."
+	$(PYTHON) scripts/verify_gams_link.py
 
 # --- Lint ---------------------------------------------------------------------
 
