@@ -42,6 +42,7 @@ class GmoView(Protocol):
     def obj_constant(self) -> float: ...
     def obj_linear(self) -> dict[int, float]: ...
     def obj_nl(self) -> tuple[list[int], list[int]]: ...
+    def obj_nl_sign(self) -> float: ...
 
     def row_name(self, i: int) -> str: ...
     def row_sense(self, i: int) -> str: ...
@@ -87,7 +88,13 @@ def model_from_gmo(g: GmoView) -> Model:
     obj = _add_linear(obj, g.obj_linear(), variables)
     obj_op, obj_fld = g.obj_nl()
     if obj_op:
-        obj = obj + translate_instructions(obj_op, obj_fld, variables, constants)
+        # GMO stores the objective *equation* residual (e.g. ``objvar - f(x)``),
+        # so its nonlinear part decodes to a sign-flipped ``f``; obj_nl_sign()
+        # carries the ``-1 / objVarJacobian`` correction (1.0 for views that
+        # already supply the objective directly).
+        sign = _obj_nl_sign(g)
+        nl = translate_instructions(obj_op, obj_fld, variables, constants)
+        obj = obj + (nl if sign == 1.0 else _const(sign) * nl)
     if g.minimize():
         m.minimize(obj)
     else:
@@ -109,6 +116,17 @@ def model_from_gmo(g: GmoView) -> Model:
         # Surfaced for warm-starting; mirrors gams_parser's convention.
         m._gams_initial_values = initial  # type: ignore[attr-defined]
     return m
+
+
+def _obj_nl_sign(g: GmoView) -> float:
+    """Sign correction for the objective nonlinear part (1.0 if not supplied)."""
+    fn = getattr(g, "obj_nl_sign", None)
+    if fn is None:
+        return 1.0
+    try:
+        return float(fn())
+    except Exception:
+        return 1.0
 
 
 def _build_constraint(body: Expression, sense: str, rhs: float):

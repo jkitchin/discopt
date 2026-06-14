@@ -198,11 +198,43 @@ class _FakeGmo:
         return [], []
 
 
+class _FakeGmoRawObj(_FakeGmo):
+    """Mirror GMO's raw objective: the equation residual ``-f`` plus a -1 sign.
+
+    GMO returns the objective *equation* residual (``objvar - f``), so its
+    nonlinear instructions decode to ``-(x0^2 + x1^2)`` and the link recovers
+    ``f`` via ``obj_nl_sign() == -1``.  The resulting model must match the
+    direct-``f`` fake exactly.
+    """
+
+    def obj_nl(self):
+        ops, flds = super().obj_nl()
+        return [*ops, Op.nlUMin], [*flds, 0]  # append unary minus -> -(x0^2 + x1^2)
+
+    def obj_nl_sign(self):
+        return -1.0
+
+
 def test_model_from_gmo_structure():
     m = model_from_gmo(_FakeGmo())
     assert [v.name for v in m._variables] == ["x0", "x1"]
     assert len(m._constraints) == 1
     assert m._objective is not None
+
+
+def test_obj_nl_sign_recovers_objective():
+    # The raw-residual fake (-f, sign -1) must solve to the same optimum as the
+    # direct-f fake: min x0^2 + x1^2 s.t. x0 + x1 >= 1  ->  obj = 0.5.
+    _, result = solve_view(_FakeGmoRawObj())
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(0.5, abs=1e-4)
+
+
+def test_obj_nl_sign_defaults_to_one_when_absent():
+    from discopt.gams.gmo_translate import _obj_nl_sign
+
+    assert _obj_nl_sign(_FakeGmo()) == 1.0  # no obj_nl_sign attribute -> 1.0
+    assert _obj_nl_sign(_FakeGmoRawObj()) == -1.0
 
 
 def test_model_from_gmo_discrete_types():
@@ -249,9 +281,22 @@ def test_status_to_gams_error():
 # ── registration ─────────────────────────────────────────────────────────────
 def test_gamsconfig_snippet_contains_solver_and_types():
     snip = gamsconfig_snippet("discopt-gams")
-    assert "name: discopt" in snip
+    assert "- discopt:" in snip  # solver name is the mapping key (per schema)
     assert "scriptName: discopt-gams" in snip
     assert "MINLP" in snip and "NLP" in snip
+
+
+def test_gamsconfig_snippet_is_schema_valid():
+    import yaml  # pyyaml is a transitive dep via the GAMS toolchain/tests
+
+    snip = gamsconfig_snippet("/abs/discopt-gams")
+    doc = yaml.safe_load(snip)
+    entry = doc["solverConfig"][0]["discopt"]
+    assert entry["scriptName"] == "/abs/discopt-gams"
+    assert "MINLP" in entry["modelTypes"]
+    # No empty/invalid fields that the GAMS schema rejects (licCodes minLength 2,
+    # library requires non-empty libName) -- those keys must be absent entirely.
+    assert "licCodes" not in entry and "library" not in entry
 
 
 def test_run_script_invokes_link():
@@ -259,6 +304,43 @@ def test_run_script_invokes_link():
     assert script.startswith("#!/bin/sh")
     assert "discopt.gams.link" in script
     assert '"$@"' in script
+
+
+def test_parse_gams_args_prefers_control_file_over_param_file(tmp_path):
+    """GAMS calls the script as ``<scrdir> <workdir> <prm> <cntr> <sysdir> <name>``.
+
+    The control file must be picked specifically (``gamscntr*``); a regression
+    guard against selecting the parameter file ``gmsprmun.dat`` -- which has the
+    same ``.dat`` suffix and appears earlier in the argument list -- and pointing
+    ``gevInitEnvironmentLegacy`` at the wrong scratch directory (loads an empty
+    model and segfaults on the first bound query).
+    """
+    from discopt.gams.link import _parse_gams_args
+
+    scr = tmp_path / "225a"
+    scr.mkdir()
+    prm = scr / "gmsprmun.dat"
+    cntr = scr / "gamscntr.dat"
+    sysdir = tmp_path / "sys"
+    sysdir.mkdir()
+    for p in (prm, cntr):
+        p.write_text("x")
+    (sysdir / "gmscmpun.txt").write_text("x")
+
+    args = [str(scr) + "/", str(tmp_path) + "/", str(prm), str(cntr), str(sysdir), "DISCOPT"]
+    control_file, found_sys = _parse_gams_args(args)
+    assert control_file == str(cntr)
+    assert found_sys == str(sysdir)
+
+
+def test_parse_gams_args_single_control_file(tmp_path):
+    from discopt.gams.link import _parse_gams_args
+
+    cntr = tmp_path / "gamscntr.dat"
+    cntr.write_text("x")
+    control_file, found_sys = _parse_gams_args([str(cntr)])
+    assert control_file == str(cntr)
+    assert found_sys is None
 
 
 def test_write_registration(tmp_path):
@@ -301,4 +383,3 @@ def test_smoke_gms_optimum_via_from_gams(entry):
     result = model.solve(time_limit=120)
     assert result.status == "optimal"
     assert result.objective == pytest.approx(entry["objective"], abs=max(entry["tol"], 1e-4))
-

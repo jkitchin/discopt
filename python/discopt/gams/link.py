@@ -18,12 +18,15 @@ plain Python and unit-tested without a GAMS installation.
 
 from __future__ import annotations
 
+import ctypes
+import os
 import sys
 from typing import TYPE_CHECKING
 
 from discopt.modeling.core import Model, SolveResult, VarType
 
 from .gmo_translate import model_from_gmo
+from .instructions import VAR_FIELD_OPCODES
 
 if TYPE_CHECKING:
     from .gmo_translate import GmoView
@@ -101,8 +104,40 @@ def solve_view(view: "GmoView", *, time_limit: float = 1e10, gap: float = 1e-4):
     return model, result
 
 
-def solve_from_control_file(control_file: str) -> int:  # pragma: no cover - needs GAMS
+def _gams_sysdir(control_file: str) -> str | None:
+    """Best-effort discovery of the GAMS system directory from a control file.
+
+    ``gmoCreateD`` / ``gevCreateD`` need the directory holding the GAMS shared
+    libraries.  The control file references it (e.g. via ``gmscmpun.txt``); we
+    locate it robustly rather than relying on a fixed line number, falling back
+    to ``None`` so the caller can try the search-path ``gevCreate``.
+    """
+    try:
+        with open(control_file) as fh:
+            lines = [ln.strip() for ln in fh]
+    except OSError:
+        return None
+    # 1. Directory of any referenced GAMS solver-config file.
+    for ln in lines:
+        for tok in ln.split():
+            if os.path.basename(tok) in ("gmscmpun.txt", "gmscmpdef.txt") and os.path.isfile(tok):
+                return os.path.dirname(tok)
+    # 2. A bare directory line that looks like a GAMS system directory.
+    for ln in lines:
+        if os.path.isdir(ln) and os.path.isfile(os.path.join(ln, "gmscmpun.txt")):
+            return ln
+    return None
+
+
+def solve_from_control_file(
+    control_file: str, sysdir: str | None = None
+) -> int:  # pragma: no cover - needs GAMS
     """Entry point GAMS invokes: solve the model described by ``control_file``.
+
+    ``sysdir`` is the GAMS system directory (passed explicitly by GAMS); when
+    omitted it is discovered from the control file.  It is needed so the GAMS
+    shared libraries -- and their dependencies, e.g. ``libjoatdclib`` -- load
+    from the right place via ``gmoCreateD`` / ``gevCreateD``.
 
     Returns a process exit code (0 on success).
     """
@@ -117,29 +152,38 @@ def solve_from_control_file(control_file: str) -> int:  # pragma: no cover - nee
         )
         return 1
 
+    if not (sysdir and os.path.isdir(sysdir)):
+        sysdir = _gams_sysdir(control_file)
+
     gev_h = gev.new_gevHandle_tp()
-    rc, msg = gev.gevCreate(gev_h, 256)
+    rc, msg = gev.gevCreateD(gev_h, sysdir, 256) if sysdir else gev.gevCreate(gev_h, 256)
     if not rc:
         sys.stderr.write(f"gevCreate failed: {msg}\n")
         return 1
     gev.gevInitEnvironmentLegacy(gev_h, control_file)
 
     gmo_h = gmo.new_gmoHandle_tp()
-    rc, msg = gmo.gmoCreate(gmo_h, 256)
+    rc, msg = gmo.gmoCreateD(gmo_h, sysdir, 256) if sysdir else gmo.gmoCreate(gmo_h, 256)
     if not rc:
         sys.stderr.write(f"gmoCreate failed: {msg}\n")
         return 1
     gmo.gmoRegisterEnvironment(gmo_h, gev.gevHandleToPtr(gev_h))
     gmo.gmoLoadDataLegacy(gmo_h)
 
-    # Objective handled as a function (objective variable substituted out).
+    # Objective handled as a function (objective variable substituted out), with
+    # 0-based column/row indexing.
     gmo.gmoObjStyleSet(gmo_h, gmo.gmoObjType_Fun)
     gmo.gmoIndexBaseSet(gmo_h, 0)
 
     view = _GmoAdapter(gmo_h, gmo)
     model, result = solve_view(view)
 
+    # GAMS requires the solver to open, write, and finalize a status file via
+    # the environment object; otherwise it reports solveStat=13 ("SOLVER DID NOT
+    # WRITE A STATUS FILE") regardless of the GMO solution we unload.
+    gev.gevStatCon(gev_h)
     _write_solution(gmo_h, gmo, model, result)
+    gev.gevStatEOF(gev_h)
     return 0
 
 
@@ -161,19 +205,44 @@ def _write_solution(gmo_h, gmo, model: Model, result: SolveResult) -> None:  # p
 class _GmoAdapter:  # pragma: no cover - thin wrapper over gamsapi calls
     """Adapt a gamsapi GMO handle to the :class:`GmoView` protocol.
 
-    Isolates the version-specific GMO calling convention. Index base is set to 0
-    by the caller, so column/row indices here are 0-based.
+    Isolates the version-specific GMO calling convention (validated against
+    GAMS 53 / gamsapi).  Index base is set to 0 by the caller, so column/row
+    indices here are 0-based.  Three GMO peculiarities are handled here:
+
+    * **Output buffers.** Vector/instruction getters fill preallocated SWIG
+      ``intArray`` / ``doubleArray`` buffers and return ``[rc, length]`` (or
+      ``[rc, nz, nlnz]``), rather than returning Python lists.
+    * **Constant pool.** ``gmoPPool`` exposes the nonlinear constant pool as a
+      raw ``double *``; we read ``gmoNLConst`` doubles from it via ``ctypes``.
+    * **Column space.** Nonlinear instruction var-fields are 1-based indices in
+      the *original* GAMS column space; :meth:`_remap_var_fields` maps them into
+      the reduced solver column space (1-based) the translator expects.  The
+      objective equation residual is sign-flipped, recovered by
+      :meth:`obj_nl_sign`.
     """
 
     def __init__(self, gmo_h, gmo):
         self._h = gmo_h
         self._gmo = gmo
+        self._n = int(gmo.gmoN(gmo_h))
+        nc = int(gmo.gmoNLConst(gmo_h))
+        if nc > 0:
+            buf = (ctypes.c_double * nc).from_address(int(gmo.gmoPPool(gmo_h)))
+            self._pool = [float(v) for v in buf]
+        else:
+            self._pool = []
+        # An individual function's instruction list cannot exceed the model's
+        # total nonlinear code size; pad for the header/store sentinels.
+        self._cap = max(int(gmo.gmoNLCodeSize(gmo_h)), 16) + 16
 
     def name(self) -> str:
-        return str(self._gmo.gmoNameModel(self._h))
+        try:
+            return str(self._gmo.gmoNameModel(self._h))
+        except Exception:
+            return "gams_model"
 
     def num_vars(self) -> int:
-        return int(self._gmo.gmoN(self._h))
+        return self._n
 
     def num_rows(self) -> int:
         return int(self._gmo.gmoM(self._h))
@@ -182,7 +251,7 @@ class _GmoAdapter:  # pragma: no cover - thin wrapper over gamsapi calls
         return bool(self._gmo.gmoSense(self._h) == self._gmo.gmoObj_Min)
 
     def constants(self) -> list[float]:
-        return [float(c) for c in self._gmo.gmoPPool(self._h)]
+        return self._pool
 
     def var_lower(self, j: int) -> float:
         return float(self._gmo.gmoGetVarLowerOne(self._h, j))
@@ -194,7 +263,13 @@ class _GmoAdapter:  # pragma: no cover - thin wrapper over gamsapi calls
         return int(self._gmo.gmoGetVarTypeOne(self._h, j))
 
     def var_name(self, j: int) -> str:
-        return str(self._gmo.gmoGetVarNameOne(self._h, j))
+        # The GAMS dictionary may be unavailable (e.g. a control file saved
+        # without it); fall back to a positional name in that case.
+        try:
+            name = str(self._gmo.gmoGetVarNameOne(self._h, j))
+        except Exception:
+            return ""
+        return "" if (not name or name == "ERROR") else name
 
     def var_level(self, j: int) -> float:
         return float(self._gmo.gmoGetVarLOne(self._h, j))
@@ -202,16 +277,36 @@ class _GmoAdapter:  # pragma: no cover - thin wrapper over gamsapi calls
     def obj_constant(self) -> float:
         return float(self._gmo.gmoObjConst(self._h))
 
+    def obj_nl_sign(self) -> float:
+        # Objective stored as ``objVarJac * objvar + ... + nl = rhs``; the true
+        # objective nonlinear part is ``-nl / objVarJac`` (objVarJac is +/-1).
+        jac = float(self._gmo.gmoObjJacVal(self._h))
+        return -1.0 / jac if jac else -1.0
+
     def obj_linear(self) -> dict[int, float]:
-        grad = self._gmo.gmoGetObjVector(self._h)
-        return {j: float(c) for j, c in enumerate(grad) if c != 0.0}
+        gmo, n = self._gmo, self._n
+        jac = gmo.doubleArray(n)
+        nlflag = gmo.intArray(n)
+        gmo.gmoGetObjVector(self._h, jac, nlflag)
+        # Columns flagged nonlinear carry a reference-point derivative, not a
+        # constant coefficient, so they are excluded from the linear part.
+        return {j: float(jac[j]) for j in range(n) if nlflag[j] == 0 and jac[j] != 0.0}
 
     def obj_nl(self) -> tuple[list[int], list[int]]:
-        opcodes, fields = self._gmo.gmoGetObjFNLInstr(self._h)
-        return list(opcodes), list(fields)
+        gmo = self._gmo
+        op, fld = gmo.intArray(self._cap), gmo.intArray(self._cap)
+        ret = gmo.gmoDirtyGetObjFNLInstr(self._h, op, fld)
+        ln = _instr_len(ret)
+        opcodes = [int(op[i]) for i in range(ln)]
+        fields = [int(fld[i]) for i in range(ln)]
+        return opcodes, self._remap_var_fields(opcodes, fields)
 
     def row_name(self, i: int) -> str:
-        return str(self._gmo.gmoGetEquNameOne(self._h, i))
+        try:
+            name = str(self._gmo.gmoGetEquNameOne(self._h, i))
+        except Exception:
+            return ""
+        return "" if (not name or name == "ERROR") else name
 
     def row_sense(self, i: int) -> str:
         t = self._gmo.gmoGetEquTypeOne(self._h, i)
@@ -224,21 +319,93 @@ class _GmoAdapter:  # pragma: no cover - thin wrapper over gamsapi calls
         return 0.0
 
     def row_linear(self, i: int) -> dict[int, float]:
-        coefs, idxs, _nl, _nz = self._gmo.gmoGetRowSparse(self._h, i)
-        return {int(j): float(c) for j, c in zip(idxs, coefs) if c != 0.0}
+        gmo, n = self._gmo, self._n
+        jidx = gmo.intArray(n)
+        coef = gmo.doubleArray(n)
+        nlflag = gmo.intArray(n)
+        ret = gmo.gmoGetRowSparse(self._h, i, jidx, coef, nlflag)
+        nz = ret[1] if isinstance(ret, (list, tuple)) else int(ret)
+        return {
+            int(jidx[k]): float(coef[k]) for k in range(nz) if nlflag[k] == 0 and coef[k] != 0.0
+        }
 
     def row_nl(self, i: int) -> tuple[list[int], list[int]]:
-        opcodes, fields = self._gmo.gmoGetEquFNLInstr(self._h, i)
-        return list(opcodes), list(fields)
+        gmo = self._gmo
+        op, fld = gmo.intArray(self._cap), gmo.intArray(self._cap)
+        ret = gmo.gmoDirtyGetRowFNLInstr(self._h, i, op, fld)
+        ln = _instr_len(ret)
+        opcodes = [int(op[k]) for k in range(ln)]
+        fields = [int(fld[k]) for k in range(ln)]
+        return opcodes, self._remap_var_fields(opcodes, fields)
+
+    def _remap_var_fields(self, opcodes: list[int], fields: list[int]) -> list[int]:
+        """Remap 1-based original-column var-fields into solver column space."""
+        out: list[int] = []
+        for op, f in zip(opcodes, fields):
+            if op in VAR_FIELD_OPCODES:
+                # gmoGetjSolver maps a 0-based model column to its solver column.
+                out.append(int(self._gmo.gmoGetjSolver(self._h, f - 1)) + 1)
+            else:
+                out.append(f)
+        return out
+
+
+def _instr_len(ret) -> int:
+    """Extract the instruction count from a ``gmoDirtyGet*FNLInstr`` return."""
+    return ret[1] if isinstance(ret, (list, tuple)) else int(ret)
+
+
+def _parse_gams_args(args: list[str]) -> tuple[str | None, str | None]:
+    """Resolve ``(control_file, sysdir)`` from a solver script's arguments.
+
+    GAMS does not call a script solver with just the control file: the classic
+    interface passes six arguments -- ``<scrdir> <workdir> <prmfile> <cntrfile>
+    <sysdir> <solvername>`` -- so the control file is the 4th and the system
+    directory the 5th.  We resolve them by *content* (the existing file vs. the
+    existing GAMS system directory) so the link is robust to convention drift
+    and also works when invoked directly with a single control-file argument.
+    """
+    # The control file is specifically the ``gamscntr*`` file; match it first so
+    # we never mistake the parameter file (``gmsprmun.dat``) or a model-data file
+    # for it.  Only if no such file is present do we fall back to a generic
+    # ``.dat`` and finally to the first existing file (direct single-arg use).
+    files = [tok for tok in args if os.path.isfile(tok)]
+    control_file = next(
+        (tok for tok in files if os.path.basename(tok).startswith("gamscntr")), None
+    )
+    if control_file is None:
+        control_file = next((tok for tok in files if tok.endswith(".dat")), None)
+    if control_file is None:
+        control_file = files[0] if files else None
+
+    sysdir = next(
+        (
+            tok
+            for tok in args
+            if os.path.isdir(tok) and os.path.isfile(os.path.join(tok, "gmscmpun.txt"))
+        ),
+        None,
+    )
+    return control_file, sysdir
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Console entry point (``discopt-gams <control-file>``)."""
+    """Console entry point: GAMS solver link.
+
+    Accepts either a single control-file path (direct invocation) or the full
+    GAMS script-solver argument list (``<scrdir> <workdir> <prm> <cntr> <sysdir>
+    <name>``).
+    """
     args = sys.argv[1:] if argv is None else argv
     if not args or args[0] in ("-h", "--help"):
         sys.stderr.write("usage: discopt-gams <gams-control-file>\n")
         return 0 if args else 1
-    return solve_from_control_file(args[0])
+
+    control_file, sysdir = _parse_gams_args(args)
+    if control_file is None:
+        sys.stderr.write(f"discopt-gams: no control file found in arguments: {args}\n")
+        return 1
+    return solve_from_control_file(control_file, sysdir)
 
 
 if __name__ == "__main__":  # pragma: no cover

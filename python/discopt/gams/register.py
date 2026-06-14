@@ -22,21 +22,19 @@ MODEL_TYPES = ("LP", "MIP", "RMIP", "NLP", "DNLP", "RMINLP", "MINLP", "QCP", "MI
 
 
 def gamsconfig_snippet(script_path: str | Path = "discopt-gams") -> str:
-    """Return the ``gamsconfig.yaml`` ``solverConfig`` block for discopt."""
+    """Return the ``gamsconfig.yaml`` ``solverConfig`` block for discopt.
+
+    Follows the GAMS ``gamsconfig_schema.json`` solver schema: each entry maps
+    the *solver name* to its config object, with ``scriptName`` + ``modelTypes``
+    required.  discopt is a control-file *script* solver, so no ``library``
+    block is emitted (GAMS invokes ``scriptName`` with the control file).
+    """
     model_types = "\n".join(f"        - {t}" for t in MODEL_TYPES)
     return f"""\
 solverConfig:
-  - name: {SOLVER_NAME}
-    fileType: GMS
-    dictType: GMD
-    licCodes: ""
-    defName: ""
-    scriptName: {script_path}
-    library:
-      libName: ""
-    solverInterfaceType: 2
-    threadSafeIndic: false
-    modelTypes:
+  - {SOLVER_NAME}:
+      scriptName: {script_path}
+      modelTypes:
 {model_types}
 """
 

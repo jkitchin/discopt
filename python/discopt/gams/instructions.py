@@ -211,6 +211,21 @@ FUNC_CODE: dict[str, int] = {name: i for i, name in enumerate(_FUNC_CODE_NAMES)}
 # integer function code -> name
 FUNC_NAME: dict[int, str] = {i: name for i, name in enumerate(_FUNC_CODE_NAMES)}
 
+# Opcodes whose ``field`` is a (1-based) GMO column index rather than a constant
+# index or function code.  GMO stores those fields in the *original model*
+# column space, so a solver link reading instructions through GMO must remap
+# them into its own (reduced) column space before translation.
+VAR_FIELD_OPCODES: frozenset[int] = frozenset(
+    {
+        GamsOpCode.nlPushV,
+        GamsOpCode.nlAddV,
+        GamsOpCode.nlSubV,
+        GamsOpCode.nlMulV,
+        GamsOpCode.nlDivV,
+        GamsOpCode.nlUMinV,
+    }
+)
+
 
 # ── Function-code -> discopt expression builders ────────────────────────────
 # These mirror discopt.modeling.gams_parser._map_func so that a model produced
