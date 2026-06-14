@@ -59,3 +59,34 @@ def test_pounce_milp_bb_avoids_jax_ipm(monkeypatch):
     # Optimum: a=1, c=1 (2+1=3<=4) -> 5+3=8; adding b violates (2+3=5>4).
     assert r.objective is not None
     assert abs(float(r.objective) - (-8.0)) <= 1e-4
+
+
+def test_pounce_milp_seeds_finite_root_bound():
+    """A POUNCE MILP solve must return a finite, sound lower bound even when it
+    cannot finish in the time budget — the root LP relaxation bound is seeded so
+    the result is never bound=None/-inf (which left AMP's LB stuck at -inf and
+    its reported bound at None on the issue #15 gas network)."""
+    import numpy as np
+    from discopt.solvers.milp_pounce import solve_milp
+
+    c = np.array([-5.0, -4.0, -3.0])
+    A_ub = np.array([[2.0, 3.0, 1.0]])
+    b_ub = np.array([4.0])
+    bounds = [(0.0, 1.0)] * 3
+    integrality = np.array([1, 1, 1])
+
+    # Tiny budget: the bounding loop exits before closing the tree, so the
+    # reported bound comes from the seeded root LP relaxation.
+    r = solve_milp(
+        c=c,
+        A_ub=A_ub,
+        b_ub=b_ub,
+        bounds=bounds,
+        integrality=integrality,
+        time_limit=1e-6,
+        gap_tolerance=1e-4,
+    )
+    assert r.bound is not None
+    assert np.isfinite(r.bound)
+    # A valid lower bound never exceeds the true optimum (-8).
+    assert float(r.bound) <= -8.0 + 1e-4

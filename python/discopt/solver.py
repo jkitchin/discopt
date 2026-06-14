@@ -6451,6 +6451,25 @@ def _solve_milp_bb(
     except Exception as _cc_exc:
         logger.debug("root cuts skipped: %s", _cc_exc)
 
+    # Seed a rigorous root lower bound from the (cut-augmented) LP relaxation,
+    # solved once via the fast convex engine (~0.03 s). This is always a valid
+    # dual bound and is surfaced even on an uncertified / time-limited exit, so
+    # a solve that cannot finish the tree — e.g. AMP's short per-iteration MILP
+    # budget, which otherwise returns bound=-inf and leaves AMP's LB stuck at
+    # -inf — still yields a finite lower bound. Tightens across AMP iterations
+    # as the relaxation gains partitions/cuts. POUNCE-only (the convex engine);
+    # left at -inf otherwise so behavior is unchanged on the JAX-IPM path.
+    _root_lp_bound = -np.inf
+    if prefer_pounce:
+        try:
+            _root_out = _solve_node_lp_pounce(
+                lp_data, lb, ub, n_vars, n_orig, t_start, time_limit
+            )
+            if _root_out is not None and _root_out[2] == "optimal" and np.isfinite(_root_out[0]):
+                _root_lp_bound = float(_root_out[0])
+        except Exception as _rlb_exc:
+            logger.debug("root LP bound seeding skipped: %s", _rlb_exc)
+
     t_rust_start = time.perf_counter()
     tree = PyTreeManager(n_vars, lb.tolist(), ub.tolist(), int_offsets, int_sizes, strategy)
     tree.initialize()
@@ -6774,14 +6793,23 @@ def _solve_milp_bb(
     # Negate bound back for maximization
     bound_val = stats["global_lower_bound"]
     assert model._objective is not None
-    if bound_val is not None and model._objective.sense == ObjectiveSense.MAXIMIZE:
+    _maximize = model._objective.sense == ObjectiveSense.MAXIMIZE
+    if bound_val is not None and _maximize:
         bound_val = -bound_val
 
-    # An uncertified gap is not a rigorous dual bound; do not present one.
     gap_val = stats["gap"]
     if not _gap_certified:
+        # Tree bound/gap are not rigorous on an uncertified exit (a node may
+        # have been pruned without proof); drop them.
         bound_val = None
         gap_val = None
+    # The root LP relaxation bound is always a valid dual bound. Surface it
+    # whenever the tree did not yield a usable finite bound — an uncertified
+    # exit (dropped above) or a certified-but-time-limited solve that never
+    # closed a node (global_lower_bound still -inf). This lets AMP's short
+    # per-iteration MILP budget return a finite lower bound instead of None.
+    if (bound_val is None or not np.isfinite(bound_val)) and np.isfinite(_root_lp_bound):
+        bound_val = -_root_lp_bound if _maximize else _root_lp_bound
 
     return SolveResult(
         status=status,
