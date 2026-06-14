@@ -310,6 +310,46 @@ def _compute_alphabb_bound(evaluator, node_lb, node_ub, alpha):
     return best_val if np.isfinite(best_val) else -np.inf
 
 
+def _compute_interval_bound(model, node_lb, node_ub, negate):
+    """Sound interval-arithmetic lower bound on the objective over a node box.
+
+    Builds a ``{Variable: Interval}`` box from the flat node bounds and
+    evaluates the objective expression with outward-rounded interval
+    arithmetic. The lower endpoint of the resulting enclosure is always a
+    valid (if loose) lower bound on ``f`` over the box; for a maximization
+    model the internal minimization objective is ``-f``, so its valid lower
+    bound is ``-hi``.
+
+    Unlike the McCormick-NLP bound this is cheap and unconditional, so it lets
+    every open nonconvex node carry a finite valid bound on every iteration
+    (instead of ``-inf`` on iterations where the periodic McCormick-NLP solve
+    is skipped). Returns ``-inf`` when the enclosure is not finite or
+    evaluation fails — never an invalid (too-high) bound.
+    """
+    if model._objective is None:
+        return -np.inf
+    try:
+        from discopt._jax.convexity.interval import Interval
+        from discopt._jax.convexity.interval_eval import evaluate_interval
+
+        box = {}
+        offset = 0
+        for v in model._variables:
+            sz = v.size
+            lo = np.asarray(node_lb[offset : offset + sz], dtype=np.float64).reshape(v.shape)
+            hi = np.asarray(node_ub[offset : offset + sz], dtype=np.float64).reshape(v.shape)
+            box[v] = Interval(lo, hi)
+            offset += sz
+        iv = evaluate_interval(model._objective.expression, model, box)
+        lo = float(np.min(np.asarray(iv.lo)))
+        hi = float(np.max(np.asarray(iv.hi)))
+    except (ValueError, ArithmeticError, RuntimeError, TypeError, KeyError, IndexError) as e:
+        logger.debug("interval objective bound failed: %s", e)
+        return -np.inf
+    bound = -hi if negate else lo
+    return bound if np.isfinite(bound) else -np.inf
+
+
 def _extract_variable_info(model: Model):
     """Extract flat variable bounds and integer variable group info from a model.
 
@@ -2067,6 +2107,16 @@ def solve_model(
         tree.set_nonconvex(True)
     _gap_certified = True
 
+    # Sense-derived negation flag for the internal (minimization) B&B. Unlike
+    # ``_mc_negate`` below — which is only assigned correctly inside the
+    # McCormick "nlp"/"midpoint" setup — this is valid in every relaxation
+    # mode, so the interval bound stays sound for maximization models too.
+    from discopt.modeling.core import ObjectiveSense as _ObjectiveSense
+
+    _obj_negate = (
+        model._objective is not None and model._objective.sense == _ObjectiveSense.MAXIMIZE
+    )
+
     # --- Default Ipopt options ---
     opts = dict(ipopt_options) if ipopt_options else {}
     opts.setdefault("print_level", 0)
@@ -2437,6 +2487,20 @@ def solve_model(
                             result_lbs[i] = max(result_lbs[i], relax_lb)
                         except (ValueError, ArithmeticError, RuntimeError) as e:
                             logger.debug("alphaBB bound failed at node %d: %s", i, e)
+            # Cheap, always-valid interval-arithmetic bound. Runs every
+            # iteration so nonconvex nodes never sit at -inf between the
+            # periodic McCormick-NLP solves (which only fire every
+            # _mc_nlp_period iterations). max() of valid bounds stays valid,
+            # so this only ever tightens the global lower bound — enabling
+            # certified "optimal" status without weakening soundness.
+            if not _model_is_convex and model._objective is not None:
+                for i in range(n_batch):
+                    if result_lbs[i] < _SENTINEL_THRESHOLD:
+                        iv_lb = _compute_interval_bound(
+                            model, batch_lb[i], batch_ub[i], _obj_negate
+                        )
+                        if np.isfinite(iv_lb):
+                            result_lbs[i] = max(result_lbs[i], iv_lb)
             # Tighten lower bounds with McCormick relaxation
             if _mc_obj_eval is not None:
                 try:
@@ -2651,6 +2715,15 @@ def solve_model(
                                 convex_lb = max(convex_lb, mc_lb)
                         except (ValueError, ArithmeticError, RuntimeError) as e:
                             logger.debug("McCormick bound failed: %s", e)
+
+                    # Cheap, always-valid interval-arithmetic bound. Keeps
+                    # nonconvex nodes off -inf between the periodic
+                    # McCormick-NLP solves so the global lower bound tightens
+                    # every iteration. max() of valid bounds stays valid.
+                    if not _model_is_convex:
+                        iv_lb = _compute_interval_bound(model, node_lb, node_ub, _obj_negate)
+                        if np.isfinite(iv_lb):
+                            convex_lb = max(convex_lb, iv_lb)
 
                     # For nonconvex problems: NLP local min is NOT a valid
                     # lower bound (can exceed global opt → premature pruning).
