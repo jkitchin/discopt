@@ -5539,17 +5539,35 @@ def _solve_node_lp_pounce(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, ti
         return None
     if not POUNCE_AVAILABLE:
         return None
-    xl = np.asarray(lp_data.x_l, dtype=np.float64)
-    xu = np.asarray(lp_data.x_u, dtype=np.float64)
-    full_lb = np.concatenate([np.asarray(node_lb, dtype=np.float64), xl[n_orig:]])
-    full_ub = np.concatenate([np.asarray(node_ub, dtype=np.float64), xu[n_orig:]])
     time_left = max(0.5, time_limit - (time.perf_counter() - t_start))
+    # POUNCE's interior-point LP is far faster on the native *inequality* form
+    # than on the slack-expanded standard form: ``lp_data`` carries one explicit
+    # slack column per inequality, which quadruples the variable count (e.g.
+    # 92 -> 400) and stalls the IPM (it times out without a bound). Decompose
+    # the standard form back to inequalities over the structural columns and
+    # hand POUNCE ``A_ub``/``A_eq`` directly with only the structural bounds.
+    n_slack = int(lp_data.A_eq.shape[1]) - n_orig
     try:
+        A_ub_m, b_ub_m, A_eq_m, b_eq_m = _decompose_eq_slack_form(
+            np.asarray(lp_data.A_eq, dtype=np.float64),
+            np.asarray(lp_data.b_eq, dtype=np.float64),
+            n_orig,
+            n_slack,
+        )
+        # _decompose_eq_slack_form already returns None for empty A_ub/A_eq,
+        # which solve_lp accepts; pass through directly.
         res = _pounce_solve(
-            c=np.asarray(lp_data.c, dtype=np.float64),
-            A_eq=np.asarray(lp_data.A_eq, dtype=np.float64),
-            b_eq=np.asarray(lp_data.b_eq, dtype=np.float64),
-            bounds=list(zip(full_lb.tolist(), full_ub.tolist())),
+            c=np.asarray(lp_data.c[:n_orig], dtype=np.float64),
+            A_ub=A_ub_m,
+            b_ub=b_ub_m,
+            A_eq=A_eq_m,
+            b_eq=b_eq_m,
+            bounds=list(
+                zip(
+                    np.asarray(node_lb, dtype=np.float64).tolist(),
+                    np.asarray(node_ub, dtype=np.float64).tolist(),
+                )
+            ),
             time_limit=min(30.0, time_left),
         )
     except Exception as e:
@@ -6205,7 +6223,7 @@ def _root_cover_cut_loop(
     return lp_data, total
 
 
-def _root_dive(lp_data, n_orig, int_idx, t_start, time_limit, max_steps=None):
+def _root_dive(lp_data, n_orig, int_idx, t_start, time_limit, max_steps=None, prefer_pounce=False):
     """Fractional diving from the root LP to find an early incumbent (Phase 3).
 
     Repeatedly solve the LP relaxation, fix the most-fractional unfixed integer
@@ -6213,9 +6231,26 @@ def _root_dive(lp_data, n_orig, int_idx, t_start, time_limit, max_steps=None):
     integral (an incumbent) or a fix makes the LP non-optimal (dive abandoned).
     Returns ``(objective, x_orig)`` in minimization sense, or ``None``. An early
     incumbent front-loads pruning and reduced-cost fixing.
+
+    In POUNCE-only mode (``prefer_pounce``) the dive LPs are solved with POUNCE
+    on the native inequality form instead of the pure-JAX IPM (Phase 8: no JAX
+    IPM on the POUNCE LP/MILP path; the JAX IPM stalls on the slack-expanded
+    standard form anyway).
     """
     if not int_idx:
         return None
+
+    steps = max_steps if max_steps is not None else len(int_idx) + 1
+
+    if prefer_pounce:
+        # POUNCE-only mode (Phase 8: no pure-JAX IPM on this path). The dive is
+        # an optional early-incumbent heuristic; a faithful POUNCE port would
+        # need one LP solve per fixed integer (dozens of sequential solves),
+        # which can starve the main B&B budget on larger relaxations. Skipping
+        # it is sound — node solves and small-integer recovery still find
+        # incumbents — and removes the last JAX-IPM call from the POUNCE path.
+        return None
+
     import jax.numpy as jnp
 
     from discopt._jax.lp_ipm import lp_ipm_solve
@@ -6414,7 +6449,9 @@ def _solve_milp_bb(
     # and reduced-cost fixing. The tree keeps the best of any injected points.
     try:
         _int_idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
-        _dive = _root_dive(lp_data, n_orig, _int_idx, t_start, time_limit)
+        _dive = _root_dive(
+            lp_data, n_orig, _int_idx, t_start, time_limit, prefer_pounce=prefer_pounce
+        )
         if _dive is not None:
             _dz, _dx = _dive
             tree.inject_incumbent(np.asarray(_dx[:n_vars], dtype=np.float64).copy(), float(_dz))
