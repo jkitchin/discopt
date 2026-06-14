@@ -7,6 +7,7 @@ collects results, computes metrics, and generates reports.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -96,9 +97,7 @@ class BenchmarkRunner:
         if "max_instances" in f:
             # Handled externally by truncating list
             pass
-        if "problem_class" in f and inst.problem_class != f["problem_class"]:
-            return False
-        return True
+        return not ("problem_class" in f and inst.problem_class != f["problem_class"])
 
     def run_all(self, parallel: bool = False, max_workers: int = 4):
         """Run all solvers on all instances."""
@@ -398,11 +397,78 @@ class BenchmarkRunner:
             )
 
     def _build_command(self, solver: SolverConfig, instance: str) -> list[str]:
-        """Build solver command line."""
+        """Build a solver command line for the .nl-interface external solvers.
+
+        SCIP is driven through its batch (``-c``) interface so we can set the
+        time limit and dump the solution/statistics; the AMPL-ASL solvers
+        (Couenne, BARON, Bonmin, HiGHS-ASL) read the ``.nl`` directly and report
+        on stdout. The subprocess wrapper in :meth:`_run_external` enforces a
+        hard wall-clock timeout regardless, so an internal limit is best-effort.
+        """
+        nl = self._find_nl_file(instance) or instance
         cmd = [solver.command]
-        # Solver-specific flags would be added here
-        cmd.append(instance)
+        name = solver.name.lower()
+        time_limit = int(self.config.time_limit)
+
+        if name.startswith("scip"):
+            cmd += [
+                "-c",
+                f"set limits time {time_limit}",
+                "-c",
+                f"read {nl}",
+                "-c",
+                "optimize",
+                "-c",
+                "display solution",
+                "-c",
+                "display statistics",
+                "-c",
+                "quit",
+            ]
+        else:
+            # Couenne / BARON / Bonmin / HiGHS-ASL: solve the .nl directly.
+            cmd.append(nl)
         return cmd
+
+    @staticmethod
+    def _nl_is_maximize(nl_path: str) -> bool:
+        """Read the .nl objective sense from the ``O`` segment.
+
+        ``O<k> 0`` is minimize, ``O<k> 1`` is maximize. Couenne reports its
+        Lower/Upper bounds in internal-minimization sense, so we need this to
+        recover the original-sense objective.
+        """
+        try:
+            with open(nl_path) as fh:
+                for line in fh:
+                    if line.startswith("O"):
+                        parts = line.split()
+                        return len(parts) >= 2 and parts[1].strip() == "1"
+        except OSError:
+            pass
+        return False
+
+    @staticmethod
+    def _first_float(pattern: str, text: str) -> float | None:
+        m = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+        if not m:
+            return None
+        try:
+            val = float(m.group(1))
+        except ValueError:
+            return None
+        # AMPL/solvers use ~1e20/1e50 as +/-infinity sentinels for "no bound".
+        return None if abs(val) >= 1e19 else val
+
+    @staticmethod
+    def _first_int(pattern: str, text: str) -> int:
+        m = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
+        if not m:
+            return 0
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return 0
 
     def _parse_external_output(
         self,
@@ -412,14 +478,112 @@ class BenchmarkRunner:
         stderr: str,
         elapsed: float,
     ) -> SolveResult:
-        """Parse external solver output into SolveResult."""
-        # This would have solver-specific parsers for BARON, Couenne, SCIP, etc.
-        # Stub implementation
+        """Parse external-solver stdout into a :class:`SolveResult`."""
+        name = solver_name.lower()
+        if name.startswith("scip"):
+            return self._parse_scip(instance, solver_name, stdout, elapsed)
+        if name.startswith("highs"):
+            return self._parse_highs(instance, solver_name, stdout, elapsed)
+        # Couenne / BARON / Bonmin and other AMPL-ASL solvers.
+        return self._parse_ampl_solver(instance, solver_name, stdout, elapsed)
+
+    def _parse_scip(
+        self, instance: str, solver_name: str, stdout: str, elapsed: float
+    ) -> SolveResult:
+        status = SolveStatus.UNKNOWN
+        m = re.search(r"SCIP Status\s*:\s*(.+)", stdout)
+        line = m.group(1).lower() if m else ""
+        if "optimal solution found" in line:
+            status = SolveStatus.OPTIMAL
+        elif "infeasible" in line and "unbounded" not in line:
+            status = SolveStatus.INFEASIBLE
+        elif "unbounded" in line:
+            status = SolveStatus.UNBOUNDED
+        elif "time limit" in line:
+            status = SolveStatus.TIME_LIMIT
+        elif "memory limit" in line:
+            status = SolveStatus.MEMORY_LIMIT
+
+        primal = self._first_float(r"Primal Bound\s*:\s*([+\-0-9.eE]+)", stdout)
+        dual = self._first_float(r"Dual Bound\s*:\s*([+\-0-9.eE]+)", stdout)
+        nodes = self._first_int(r"Solving Nodes\s*:\s*([0-9]+)", stdout)
         return SolveResult(
             instance=instance,
             solver=solver_name,
-            status=SolveStatus.UNKNOWN,
+            status=status,
+            objective=primal,
+            bound=dual,
             wall_time=elapsed,
+            node_count=nodes,
+        )
+
+    def _parse_highs(
+        self, instance: str, solver_name: str, stdout: str, elapsed: float
+    ) -> SolveResult:
+        # ASL build prints e.g. "HiGHS 1.11.0: optimal solution; objective 6"
+        status = SolveStatus.UNKNOWN
+        low = stdout.lower()
+        if "optimal" in low:
+            status = SolveStatus.OPTIMAL
+        elif "infeasible" in low:
+            status = SolveStatus.INFEASIBLE
+        elif "unbounded" in low:
+            status = SolveStatus.UNBOUNDED
+        elif "time limit" in low or "time_limit" in low:
+            status = SolveStatus.TIME_LIMIT
+        objective = self._first_float(r"objective\s+([+\-0-9.eE]+)", stdout)
+        return SolveResult(
+            instance=instance,
+            solver=solver_name,
+            status=status,
+            objective=objective,
+            wall_time=elapsed,
+        )
+
+    def _parse_ampl_solver(
+        self, instance: str, solver_name: str, stdout: str, elapsed: float
+    ) -> SolveResult:
+        """Parse Couenne (and similar COIN AMPL solvers) stdout.
+
+        Couenne prints a ``<solver>: <Status>`` summary plus ``Lower bound:`` /
+        ``Upper bound:`` lines in *internal-minimization* sense; we un-negate
+        them for maximization models so the reported objective is original-sense.
+        """
+        status = SolveStatus.UNKNOWN
+        low = stdout.lower()
+        m = re.search(
+            r"^\s*\w+:\s*(optimal|infeasible|unbounded|\w+)",
+            stdout,
+            re.MULTILINE | re.IGNORECASE,
+        )
+        verdict = m.group(1).lower() if m else ""
+        if verdict == "optimal" or "optimal" in low:
+            status = SolveStatus.OPTIMAL
+        elif "infeasible" in low:
+            status = SolveStatus.INFEASIBLE
+        elif "unbounded" in low:
+            status = SolveStatus.UNBOUNDED
+        elif verdict in {"stopped", "limit"} or "time limit" in low:
+            status = SolveStatus.TIME_LIMIT
+
+        upper = self._first_float(r"Upper bound:\s*([+\-0-9.eE]+)", stdout)
+        lower = self._first_float(r"Lower bound:\s*([+\-0-9.eE]+)", stdout)
+        nodes = self._first_int(r"Branch-and-bound nodes:\s*([0-9]+)", stdout)
+
+        objective, bound = upper, lower
+        nl = self._find_nl_file(instance)
+        if nl and self._nl_is_maximize(nl):
+            # internal min g = -f: f_best = -upper_internal, bound = -lower_internal
+            objective = None if upper is None else -upper
+            bound = None if lower is None else -lower
+        return SolveResult(
+            instance=instance,
+            solver=solver_name,
+            status=status,
+            objective=objective,
+            bound=bound,
+            wall_time=elapsed,
+            node_count=nodes,
         )
 
     def save_results(self, path: Path | None = None):
