@@ -184,7 +184,14 @@ def test_bb_opt_out_skips_gp_fast_path() -> None:
     model = _monomial_balance()
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        result = model.solve(solver="bb")
+        # Bounded budget: this is a nonconvex division GP (x/y + y/x) over a
+        # wide [1e-3, 1e3] box. The optimum (2.0) is found at the root, but
+        # *certifying* it via spatial B&B + the sound alphaBB/McCormick bound
+        # exhausts the tree only after many minutes — the prior unbounded form
+        # relied on an unsound NLP pruning bound (removed in #120) to terminate
+        # fast. The classic-path assertions below hold the instant the
+        # incumbent is found, so cap the budget to keep the test deterministic.
+        result = model.solve(solver="bb", time_limit=30.0)
     assert result.status in ("optimal", "feasible")
     assert result.objective == pytest.approx(2.0, abs=1e-4)
     # The classic path does not set the convex single-NLP fast-path flag.
