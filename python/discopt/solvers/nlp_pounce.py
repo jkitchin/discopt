@@ -60,6 +60,16 @@ def solve_nlp(
     n = evaluator.n_variables
     m = evaluator.n_constraints
     lb, ub = evaluator.variable_bounds
+    # Snap tiny floating-point bound inversions (lb just above ub) so POUNCE's
+    # IPM does not reject the problem as Invalid_Problem_Definition. These arise
+    # from relaxation / bound-tightening rounding (e.g. an AMP integer-fixed
+    # subproblem whose continuous bounds were tightened to lb=ub+1e-11); the
+    # mirror of the same guard on the LP path (lp_pounce._snap_inverted_bounds).
+    from discopt.solvers.lp_pounce import _snap_inverted_bounds
+
+    lb, ub = _snap_inverted_bounds(
+        np.asarray(lb, dtype=np.float64), np.asarray(ub, dtype=np.float64)
+    )
 
     if constraint_bounds is not None:
         cl = np.array([b[0] for b in constraint_bounds], dtype=np.float64)

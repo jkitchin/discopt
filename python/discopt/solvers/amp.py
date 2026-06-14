@@ -2587,6 +2587,10 @@ def _solve_amp_impl(
     cutoff_obbt_done = False
     last_obbt_iter = 0
     _obbt_period = 5
+    # One-shot guard for small-integer incumbent recovery when the MILP
+    # relaxation backend produces no usable result (see the recovery block in
+    # the main loop).
+    _small_int_recovery_attempted = False
 
     def _append_linearized_cuts(cuts) -> int:
         appended = 0
@@ -2918,6 +2922,44 @@ def _solve_amp_impl(
             LB = max(LB, new_lb)
 
         logger.debug("AMP iter %d: LB=%.6g, UB=%.6g", iteration, LB, UB)
+
+        # ── Incumbent recovery when the MILP relaxation yields nothing ───────
+        # If the MILP solve returns neither a dual bound nor a solution point
+        # (e.g. the LP/MILP backend times out or errors on the relaxation —
+        # as POUNCE does on degenerate equality-encoded relaxations when HiGHS
+        # is unavailable), the NLP step below has no binary assignment to fix
+        # and cannot find an integer-feasible incumbent, so AMP would return no
+        # solution at all. Fall back once to enumerating the small integer
+        # domain (each assignment solved as a binaries-fixed NLP) so a feasible
+        # incumbent is still recovered. The bound stays uncertified.
+        _milp_bound_unusable = milp_result.bound is None or not np.isfinite(milp_result.bound)
+        if (
+            incumbent is None
+            and milp_result.x is None
+            and _milp_bound_unusable
+            and not _small_int_recovery_attempted
+        ):
+            _small_int_recovery_attempted = True
+            fb_x, fb_obj = _solve_small_integer_domain_fallback(
+                model,
+                evaluator,
+                flat_lb,
+                flat_ub,
+                constraint_lb,
+                constraint_ub,
+                nlp_solver,
+                deadline=deadline,
+            )
+            if fb_x is not None and fb_obj is not None and fb_obj < UB:
+                UB = fb_obj
+                incumbent = fb_x.copy()
+                logger.info(
+                    "AMP iter %d: recovered feasible incumbent (objective=%.6g) via "
+                    "small-integer enumeration after the MILP relaxation produced no "
+                    "usable result",
+                    iteration,
+                    _from_minimization_space(UB),
+                )
 
         # ── Step 2: NLP upper-bound subproblem ───────────────────────────────
         # Use MILP solution point as initial point for NLP

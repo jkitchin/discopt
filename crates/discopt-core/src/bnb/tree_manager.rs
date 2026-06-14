@@ -430,7 +430,16 @@ impl TreeManager {
         if min_lb == f64::INFINITY {
             self.global_lower_bound = self.incumbent_value;
         } else {
-            self.global_lower_bound = min_lb;
+            // The global lower bound can never exceed the best known incumbent:
+            // the optimum is <= any feasible solution, so a valid lower bound is
+            // <= the incumbent too. When every open node's bound is already >=
+            // the incumbent (which happens transiently after the incumbent
+            // improves but before those nodes are re-pruned), the incumbent is
+            // proven optimal and the bound equals it. Without this cap,
+            // global_lower_bound could exceed the incumbent, producing a
+            // negative gap (masked by the clamp in `gap()`) and an unsound
+            // "bound > objective" at a certified-optimal exit.
+            self.global_lower_bound = min_lb.min(self.incumbent_value);
         }
     }
 
@@ -699,6 +708,43 @@ mod tests {
         tm.incumbent_value = 10.0;
         tm.global_lower_bound = 5.0;
         assert!((tm.gap() - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_global_lower_bound_capped_at_incumbent() {
+        // Regression: when the incumbent improves below an already-open node's
+        // bound (before that node is re-pruned), the global lower bound must be
+        // capped at the incumbent — never exceed it. An uncapped bound yields a
+        // negative gap (masked by the clamp in `gap()`) and an unsound
+        // "bound > objective" at a certified-optimal exit.
+        let mut tm = TreeManager::new(
+            1,
+            vec![0.0],
+            vec![1.0],
+            vec![VarBranchInfo {
+                offset: 0,
+                size: 1,
+                is_integer: true,
+            }],
+            SelectionStrategy::BestFirst,
+        );
+        tm.initialize();
+        // One open node whose bound sits above the (later, better) incumbent.
+        let node = tm.pool.get_mut(NodeId(0));
+        node.local_lower_bound = 2.48;
+        node.status = NodeStatus::Evaluated;
+        tm.incumbent_value = 1.92;
+
+        tm.update_global_lower_bound();
+
+        assert!(
+            tm.global_lower_bound <= tm.incumbent_value + 1e-12,
+            "global_lower_bound {} must not exceed incumbent {}",
+            tm.global_lower_bound,
+            tm.incumbent_value
+        );
+        assert!((tm.global_lower_bound - 1.92).abs() < 1e-12);
+        assert!(tm.gap() >= 0.0);
     }
 
     #[test]

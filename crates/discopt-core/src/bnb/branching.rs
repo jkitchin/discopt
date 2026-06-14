@@ -421,8 +421,14 @@ pub fn select_spatial_branch_variable(
         if relative_width < SPATIAL_MIN_WIDTH {
             continue; // Domain already very tight.
         }
-        if width > best_width {
-            best_width = width;
+        // Select on the same relative width used for the threshold so the
+        // branch falls on the dimension that has shrunk least relative to its
+        // root domain (longest-edge in normalized coordinates). Selecting on
+        // the absolute width instead just tracks whichever variable happens to
+        // have the largest raw range. Strict `>` with the ascending scan keeps
+        // tie-breaking deterministic (lowest index wins).
+        if relative_width > best_width {
+            best_width = relative_width;
             best_idx = Some(idx);
         }
     }

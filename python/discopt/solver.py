@@ -310,6 +310,46 @@ def _compute_alphabb_bound(evaluator, node_lb, node_ub, alpha):
     return best_val if np.isfinite(best_val) else -np.inf
 
 
+def _compute_interval_bound(model, node_lb, node_ub, negate):
+    """Sound interval-arithmetic lower bound on the objective over a node box.
+
+    Builds a ``{Variable: Interval}`` box from the flat node bounds and
+    evaluates the objective expression with outward-rounded interval
+    arithmetic. The lower endpoint of the resulting enclosure is always a
+    valid (if loose) lower bound on ``f`` over the box; for a maximization
+    model the internal minimization objective is ``-f``, so its valid lower
+    bound is ``-hi``.
+
+    Unlike the McCormick-NLP bound this is cheap and unconditional, so it lets
+    every open nonconvex node carry a finite valid bound on every iteration
+    (instead of ``-inf`` on iterations where the periodic McCormick-NLP solve
+    is skipped). Returns ``-inf`` when the enclosure is not finite or
+    evaluation fails — never an invalid (too-high) bound.
+    """
+    if model._objective is None:
+        return -np.inf
+    try:
+        from discopt._jax.convexity.interval import Interval
+        from discopt._jax.convexity.interval_eval import evaluate_interval
+
+        box = {}
+        offset = 0
+        for v in model._variables:
+            sz = v.size
+            lo = np.asarray(node_lb[offset : offset + sz], dtype=np.float64).reshape(v.shape)
+            hi = np.asarray(node_ub[offset : offset + sz], dtype=np.float64).reshape(v.shape)
+            box[v] = Interval(lo, hi)
+            offset += sz
+        iv = evaluate_interval(model._objective.expression, model, box)
+        lo = float(np.min(np.asarray(iv.lo)))
+        hi = float(np.max(np.asarray(iv.hi)))
+    except (ValueError, ArithmeticError, RuntimeError, TypeError, KeyError, IndexError) as e:
+        logger.debug("interval objective bound failed: %s", e)
+        return -np.inf
+    bound = -hi if negate else lo
+    return bound if np.isfinite(bound) else -np.inf
+
+
 def _extract_variable_info(model: Model):
     """Extract flat variable bounds and integer variable group info from a model.
 
@@ -2067,6 +2107,16 @@ def solve_model(
         tree.set_nonconvex(True)
     _gap_certified = True
 
+    # Sense-derived negation flag for the internal (minimization) B&B. Unlike
+    # ``_mc_negate`` below — which is only assigned correctly inside the
+    # McCormick "nlp"/"midpoint" setup — this is valid in every relaxation
+    # mode, so the interval bound stays sound for maximization models too.
+    from discopt.modeling.core import ObjectiveSense as _ObjectiveSense
+
+    _obj_negate = (
+        model._objective is not None and model._objective.sense == _ObjectiveSense.MAXIMIZE
+    )
+
     # --- Default Ipopt options ---
     opts = dict(ipopt_options) if ipopt_options else {}
     opts.setdefault("print_level", 0)
@@ -2437,6 +2487,20 @@ def solve_model(
                             result_lbs[i] = max(result_lbs[i], relax_lb)
                         except (ValueError, ArithmeticError, RuntimeError) as e:
                             logger.debug("alphaBB bound failed at node %d: %s", i, e)
+            # Cheap, always-valid interval-arithmetic bound. Runs every
+            # iteration so nonconvex nodes never sit at -inf between the
+            # periodic McCormick-NLP solves (which only fire every
+            # _mc_nlp_period iterations). max() of valid bounds stays valid,
+            # so this only ever tightens the global lower bound — enabling
+            # certified "optimal" status without weakening soundness.
+            if not _model_is_convex and model._objective is not None:
+                for i in range(n_batch):
+                    if result_lbs[i] < _SENTINEL_THRESHOLD:
+                        iv_lb = _compute_interval_bound(
+                            model, batch_lb[i], batch_ub[i], _obj_negate
+                        )
+                        if np.isfinite(iv_lb):
+                            result_lbs[i] = max(result_lbs[i], iv_lb)
             # Tighten lower bounds with McCormick relaxation
             if _mc_obj_eval is not None:
                 try:
@@ -2651,6 +2715,15 @@ def solve_model(
                                 convex_lb = max(convex_lb, mc_lb)
                         except (ValueError, ArithmeticError, RuntimeError) as e:
                             logger.debug("McCormick bound failed: %s", e)
+
+                    # Cheap, always-valid interval-arithmetic bound. Keeps
+                    # nonconvex nodes off -inf between the periodic
+                    # McCormick-NLP solves so the global lower bound tightens
+                    # every iteration. max() of valid bounds stays valid.
+                    if not _model_is_convex:
+                        iv_lb = _compute_interval_bound(model, node_lb, node_ub, _obj_negate)
+                        if np.isfinite(iv_lb):
+                            convex_lb = max(convex_lb, iv_lb)
 
                     # For nonconvex problems: NLP local min is NOT a valid
                     # lower bound (can exceed global opt → premature pruning).
@@ -5460,36 +5533,64 @@ def _solve_node_lp_pounce(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, ti
     ``(sentinel, None, "infeasible")``, or ``None`` when POUNCE is unavailable
     or could not settle the node (the caller falls back / decertifies)."""
     try:
-        from discopt.solvers.lp_pounce import POUNCE_AVAILABLE
-        from discopt.solvers.lp_pounce import solve_lp as _pounce_solve
+        import pounce
+
+        from discopt.solvers.lp_pounce import POUNCE_AVAILABLE, _snap_inverted_bounds
     except ImportError:
         return None
     if not POUNCE_AVAILABLE:
         return None
-    xl = np.asarray(lp_data.x_l, dtype=np.float64)
-    xu = np.asarray(lp_data.x_u, dtype=np.float64)
-    full_lb = np.concatenate([np.asarray(node_lb, dtype=np.float64), xl[n_orig:]])
-    full_ub = np.concatenate([np.asarray(node_ub, dtype=np.float64), xu[n_orig:]])
-    time_left = max(0.5, time_limit - (time.perf_counter() - t_start))
+    # Solve the node relaxation with POUNCE's *structured convex* LP/QP engine
+    # (``pounce.solve_qp`` over the pounce-convex IPM, with presolve), not the
+    # generic callback TNLP path (``solve_lp``). The callback path hides the
+    # linear structure, so POUNCE's presolve cannot engage and its IPM takes
+    # ~100 iterations (~3 s) on these degenerate, equality-pair-encoded
+    # relaxations; the structured convex path presolves + scales and converges
+    # in ~20 iterations (~0.03 s) on the same LP (~100x), which is what lets the
+    # MILP B&B visit enough nodes to bound the tree. It needs the native
+    # inequality form, so decompose the slack-expanded standard form back to
+    # A_ub/A_eq over the structural columns.
+    n_slack = int(lp_data.A_eq.shape[1]) - n_orig
     try:
-        res = _pounce_solve(
-            c=np.asarray(lp_data.c, dtype=np.float64),
-            A_eq=np.asarray(lp_data.A_eq, dtype=np.float64),
-            b_eq=np.asarray(lp_data.b_eq, dtype=np.float64),
-            bounds=list(zip(full_lb.tolist(), full_ub.tolist())),
-            time_limit=min(30.0, time_left),
+        A_ub_m, b_ub_m, A_eq_m, b_eq_m = _decompose_eq_slack_form(
+            np.asarray(lp_data.A_eq, dtype=np.float64),
+            np.asarray(lp_data.b_eq, dtype=np.float64),
+            n_orig,
+            n_slack,
+        )
+        lb_n = np.asarray(node_lb, dtype=np.float64)
+        ub_n = np.asarray(node_ub, dtype=np.float64)
+        lb_n, ub_n = _snap_inverted_bounds(lb_n, ub_n)
+        res = pounce.solve_qp(
+            P=None,  # P=0 -> LP
+            c=np.asarray(lp_data.c[:n_orig], dtype=np.float64),
+            G=A_ub_m,
+            h=b_ub_m,
+            A=A_eq_m,
+            b=b_eq_m,
+            lb=lb_n,
+            ub=ub_n,
         )
     except Exception as e:
-        logger.debug("POUNCE node solve failed: %s", e)
+        logger.debug("POUNCE convex node solve failed: %s", e)
         return None
-    if (
-        res.status == SolveStatus.OPTIMAL
-        and res.objective is not None
-        and np.isfinite(res.objective)
-    ):
-        bound = float(res.objective) + float(lp_data.obj_const)
-        return (bound, np.asarray(res.x[:n_vars]), "optimal")
-    if res.status == SolveStatus.INFEASIBLE:
+    if res.status == "optimal" and res.x is not None and np.isfinite(res.obj):
+        x_sol = np.asarray(res.x, dtype=np.float64)
+        # Soundness gate (mirrors the JAX-IPM path's _check_lp_solution_feasibility):
+        # reject a node point that violates its own rows so a slightly-infeasible
+        # relaxation solution cannot seed a spurious incumbent or node bound.
+        tol = 1e-5
+        feasible = True
+        if A_ub_m is not None and A_ub_m.shape[0]:
+            feasible = bool(np.all(A_ub_m @ x_sol <= b_ub_m + tol * (1.0 + np.abs(b_ub_m))))
+        if feasible and A_eq_m is not None and A_eq_m.shape[0]:
+            feasible = bool(np.all(np.abs(A_eq_m @ x_sol - b_eq_m) <= tol * (1.0 + np.abs(b_eq_m))))
+        if not feasible:
+            logger.debug("POUNCE convex node solution violates its rows; rejecting")
+            return None
+        bound = float(res.obj) + float(lp_data.obj_const)
+        return (bound, x_sol[:n_vars], "optimal")
+    if res.status == "primal_infeasible":
         return (_INFEASIBILITY_SENTINEL, None, "infeasible")
     return None
 
@@ -6132,7 +6233,7 @@ def _root_cover_cut_loop(
     return lp_data, total
 
 
-def _root_dive(lp_data, n_orig, int_idx, t_start, time_limit, max_steps=None):
+def _root_dive(lp_data, n_orig, int_idx, t_start, time_limit, max_steps=None, prefer_pounce=False):
     """Fractional diving from the root LP to find an early incumbent (Phase 3).
 
     Repeatedly solve the LP relaxation, fix the most-fractional unfixed integer
@@ -6140,9 +6241,26 @@ def _root_dive(lp_data, n_orig, int_idx, t_start, time_limit, max_steps=None):
     integral (an incumbent) or a fix makes the LP non-optimal (dive abandoned).
     Returns ``(objective, x_orig)`` in minimization sense, or ``None``. An early
     incumbent front-loads pruning and reduced-cost fixing.
+
+    In POUNCE-only mode (``prefer_pounce``) the dive LPs are solved with POUNCE
+    on the native inequality form instead of the pure-JAX IPM (Phase 8: no JAX
+    IPM on the POUNCE LP/MILP path; the JAX IPM stalls on the slack-expanded
+    standard form anyway).
     """
     if not int_idx:
         return None
+
+    steps = max_steps if max_steps is not None else len(int_idx) + 1
+
+    if prefer_pounce:
+        # POUNCE-only mode (Phase 8: no pure-JAX IPM on this path). The dive is
+        # an optional early-incumbent heuristic; a faithful POUNCE port would
+        # need one LP solve per fixed integer (dozens of sequential solves),
+        # which can starve the main B&B budget on larger relaxations. Skipping
+        # it is sound — node solves and small-integer recovery still find
+        # incumbents — and removes the last JAX-IPM call from the POUNCE path.
+        return None
+
     import jax.numpy as jnp
 
     from discopt._jax.lp_ipm import lp_ipm_solve
@@ -6331,6 +6449,23 @@ def _solve_milp_bb(
     except Exception as _cc_exc:
         logger.debug("root cuts skipped: %s", _cc_exc)
 
+    # Seed a rigorous root lower bound from the (cut-augmented) LP relaxation,
+    # solved once via the fast convex engine (~0.03 s). This is always a valid
+    # dual bound and is surfaced even on an uncertified / time-limited exit, so
+    # a solve that cannot finish the tree — e.g. AMP's short per-iteration MILP
+    # budget, which otherwise returns bound=-inf and leaves AMP's LB stuck at
+    # -inf — still yields a finite lower bound. Tightens across AMP iterations
+    # as the relaxation gains partitions/cuts. POUNCE-only (the convex engine);
+    # left at -inf otherwise so behavior is unchanged on the JAX-IPM path.
+    _root_lp_bound = -np.inf
+    if prefer_pounce:
+        try:
+            _root_out = _solve_node_lp_pounce(lp_data, lb, ub, n_vars, n_orig, t_start, time_limit)
+            if _root_out is not None and _root_out[2] == "optimal" and np.isfinite(_root_out[0]):
+                _root_lp_bound = float(_root_out[0])
+        except Exception as _rlb_exc:
+            logger.debug("root LP bound seeding skipped: %s", _rlb_exc)
+
     t_rust_start = time.perf_counter()
     tree = PyTreeManager(n_vars, lb.tolist(), ub.tolist(), int_offsets, int_sizes, strategy)
     tree.initialize()
@@ -6341,7 +6476,9 @@ def _solve_milp_bb(
     # and reduced-cost fixing. The tree keeps the best of any injected points.
     try:
         _int_idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
-        _dive = _root_dive(lp_data, n_orig, _int_idx, t_start, time_limit)
+        _dive = _root_dive(
+            lp_data, n_orig, _int_idx, t_start, time_limit, prefer_pounce=prefer_pounce
+        )
         if _dive is not None:
             _dz, _dx = _dive
             tree.inject_incumbent(np.asarray(_dx[:n_vars], dtype=np.float64).copy(), float(_dz))
@@ -6652,14 +6789,23 @@ def _solve_milp_bb(
     # Negate bound back for maximization
     bound_val = stats["global_lower_bound"]
     assert model._objective is not None
-    if bound_val is not None and model._objective.sense == ObjectiveSense.MAXIMIZE:
+    _maximize = model._objective.sense == ObjectiveSense.MAXIMIZE
+    if bound_val is not None and _maximize:
         bound_val = -bound_val
 
-    # An uncertified gap is not a rigorous dual bound; do not present one.
     gap_val = stats["gap"]
     if not _gap_certified:
+        # Tree bound/gap are not rigorous on an uncertified exit (a node may
+        # have been pruned without proof); drop them.
         bound_val = None
         gap_val = None
+    # The root LP relaxation bound is always a valid dual bound. Surface it
+    # whenever the tree did not yield a usable finite bound — an uncertified
+    # exit (dropped above) or a certified-but-time-limited solve that never
+    # closed a node (global_lower_bound still -inf). This lets AMP's short
+    # per-iteration MILP budget return a finite lower bound instead of None.
+    if (bound_val is None or not np.isfinite(bound_val)) and np.isfinite(_root_lp_bound):
+        bound_val = -_root_lp_bound if _maximize else _root_lp_bound
 
     return SolveResult(
         status=status,
