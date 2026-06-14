@@ -1289,10 +1289,17 @@ def solve_model(
         Falls back to standard McCormick for unsupported operations.
     mccormick_bounds : str, default "auto"
         McCormick relaxation lower-bounding strategy:
-        ``"auto"`` selects ``"nlp"`` when a JAX objective is
-        available, ``"none"`` otherwise,
-        ``"nlp"`` solves a convex NLP over the McCormick relaxation
-        (gives valid lower bounds for pruning),
+        ``"auto"`` resolves to ``"none"`` — the McCormick ``"nlp"`` bound is
+        only valid for convex models (see below), and convex models already
+        get valid bounds from the NLP relaxation, so ``"auto"`` relies on the
+        NLP/alphaBB path in both cases,
+        ``"nlp"`` solves an NLP over the McCormick objective relaxation.
+        This is a valid lower bound **only for convex models**: the bound
+        solver evaluates the relaxation at ``x_cv == x_cc`` where every
+        McCormick rule is tight, so it minimizes the original objective
+        *locally* and a nonconvex local optimum is not a valid bound
+        (issue #120). For nonconvex models it is automatically downgraded to
+        ``"none"``,
         ``"lp"`` solves an LP over the full McCormick reformulation —
         gives a *valid global* lower bound and tends to find provable
         global optima much faster on nonconvex problems with bilinears
@@ -1300,7 +1307,8 @@ def solve_model(
         is nonconvex and contains bilinear/multilinear terms; pair with
         ``subnlp_frequency=1`` to turn each LP primal into an incumbent.
         Requires at least one continuous variable; falls back to
-        ``"nlp"`` for pure-integer models,
+        ``"none"`` for pure-integer nonconvex models (the ``"nlp"`` fallback
+        would be unsound — issue #120),
         ``"midpoint"`` evaluates the convex underestimator at midpoint
         (heuristic, not a valid global lower bound — use with caution),
         ``"none"`` disables.
@@ -2095,17 +2103,18 @@ def solve_model(
     _mc_lp_relaxer = None  # MccormickLPRelaxer instance when _mc_mode == "lp"
 
     if _mc_mode == "auto":
-        if _model_is_convex:
-            # (E2) For convex models, NLP relaxation already gives valid
-            # lower bounds — no need for McCormick relaxation overhead.
-            _mc_mode = "none"
-        elif model._objective is not None:
-            # "nlp" mode solves a convex relaxation NLP for valid lower bounds.
-            # "midpoint" is a heuristic (not a valid bound) and can cause
-            # incorrect pruning — do not use it for bound tightening.
-            _mc_mode = "nlp"
-        else:
-            _mc_mode = "none"
+        # The McCormick "nlp" objective bound is a *valid* dual bound only when
+        # the objective relaxation is a convex underestimator. The bound solver
+        # evaluates the compiled relaxation at x_cv == x_cc (see
+        # mccormick_nlp.solve_mccormick_relaxation_nlp / McCormickRelaxation-
+        # Evaluator), where every McCormick rule is tight, so the minimized
+        # surface coincides with the original objective and is convex iff the
+        # model is convex. For a nonconvex model a *local* NLP solve of that
+        # surface can return a value ABOVE the true optimum and certify it as a
+        # lower bound — a silent false-optimal (issue #120: nvs16 certified the
+        # local 14.20 over the true optimum 0.70). The rigorous alphaBB
+        # underestimator ("none") + spatial branching is the valid path here.
+        _mc_mode = "none"
 
     if _mc_mode == "lp" and model._objective is not None:
         from discopt._jax.mccormick_lp import MccormickLPRelaxer
@@ -2138,6 +2147,24 @@ def solve_model(
                     # model itself for linear parts. Drop back to NLP.
                     _mc_lp_relaxer = None
                     _mc_mode = "nlp"
+
+    # Soundness guard (issue #120): the McCormick "nlp" objective bound is a
+    # valid dual bound only for convex models. The bound solver evaluates the
+    # compiled relaxation at x_cv == x_cc, where every McCormick rule is tight,
+    # so it minimizes the original objective *locally*; for a nonconvex model
+    # that local optimum can lie ABOVE the true optimum and be certified as a
+    # lower bound (silent false-optimal). "auto" already avoids "nlp" for
+    # nonconvex models above; this also catches an explicit
+    # mccormick_bounds="nlp" and the lp→nlp fallbacks (e.g. pure-integer
+    # nonconvex models). Fall back to the rigorous alphaBB underestimator.
+    if _mc_mode == "nlp" and not _model_is_convex:
+        logger.warning(
+            "McCormick 'nlp' objective bound is not a valid dual bound for "
+            "nonconvex models (issue #120); falling back to the alphaBB "
+            "underestimator. Use mccormick_bounds='lp' for a valid spatial "
+            "relaxation on models with continuous variables."
+        )
+        _mc_mode = "none"
 
     if _mc_mode in ("midpoint", "nlp") and model._objective is not None:
         from discopt._jax.batch_evaluator import BatchRelaxationEvaluator
