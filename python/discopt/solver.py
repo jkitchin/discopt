@@ -2112,9 +2112,27 @@ def solve_model(
         # model is convex. For a nonconvex model a *local* NLP solve of that
         # surface can return a value ABOVE the true optimum and certify it as a
         # lower bound — a silent false-optimal (issue #120: nvs16 certified the
-        # local 14.20 over the true optimum 0.70). The rigorous alphaBB
-        # underestimator ("none") + spatial branching is the valid path here.
-        _mc_mode = "none"
+        # local 14.20 over the true optimum 0.70).
+        #
+        # For a nonconvex model with continuous variables, the LP-form McCormick
+        # relaxation IS a rigorous valid dual bound: it is a polyhedral OUTER
+        # approximation of the nonconvex feasible set, so its LP optimum is a
+        # true lower bound, and an infeasible relaxation is a rigorous fathom.
+        # Combined with spatial branching this closes the gap and *certifies*
+        # optimality on bilinear/multilinear models (e.g. min u+v s.t. u*v>=5),
+        # where the "none" path finds the optimum but cannot prove it. The "lp"
+        # setup below falls back to "none"/"nlp" (and the nonconvex-"nlp" guard
+        # to "none") when the model has no bilinear terms or the relaxer cannot
+        # be built, and any per-node term it cannot relax safely yields an LP
+        # "error" (no bound) rather than an invalid one — so this never trades
+        # soundness for the tighter bound. Pure-integer nonconvex models have
+        # nothing to spatial-branch on, so they keep the rigorous alphaBB
+        # underestimator ("none").
+        _has_continuous_var = any(v.var_type == VarType.CONTINUOUS for v in model._variables)
+        if not _model_is_convex and _has_continuous_var and model._objective is not None:
+            _mc_mode = "lp"
+        else:
+            _mc_mode = "none"
 
     if _mc_mode == "lp" and model._objective is not None:
         from discopt._jax.mccormick_lp import MccormickLPRelaxer
@@ -2488,6 +2506,15 @@ def solve_model(
                     except Exception as e:
                         logger.debug("McCormick LP failed at node %d: %s", i, e)
                         continue
+                    if mc_res.status == "infeasible":
+                        # Rigorous fathom: the McCormick LP is a valid outer
+                        # relaxation, so an empty relaxed feasible set proves the
+                        # node's subtree infeasible. Mark it (sentinel + mask) so
+                        # the finalize block below does not decertify the gap.
+                        node_infeasible_mask[i] = True
+                        result_lbs[i] = _INFEASIBILITY_SENTINEL
+                        result_feas[i] = False
+                        continue
                     if mc_res.lower_bound is not None and np.isfinite(mc_res.lower_bound):
                         if nlp_failed:
                             # A failed / locally-infeasible NLP solve is not an
@@ -2649,12 +2676,14 @@ def solve_model(
 
                     # Guard: NaN and +inf lower bounds corrupt the Rust B&B
                     # tree.  Keep -inf for nonconvex nodes without a valid
-                    # relaxation bound; that makes the reported gap
-                    # uncertified instead of pretending the NLP point is a LB.
+                    # relaxation bound; the post-LP finalize block below
+                    # decertifies the gap only if no valid bound source (NLP,
+                    # alphaBB, McCormick, or the LP relaxer) supplied a finite
+                    # lower bound.  Deferring the -inf decertification until
+                    # after the LP relaxer mirrors the batch path and lets a
+                    # valid LP McCormick bound certify optimality on bilinears.
                     if np.isnan(nlp_lb) or nlp_lb == np.inf:
                         nlp_lb = _INFEASIBILITY_SENTINEL
-                    elif nlp_lb == -np.inf:
-                        _gap_certified = False
                     result_lbs[i] = nlp_lb
                     result_sols[i] = nlp_result.x
                     result_feas[i] = False
@@ -2676,7 +2705,19 @@ def solve_model(
                     except Exception as e:
                         logger.debug("McCormick LP failed at node %d: %s", int(batch_ids[i]), e)
                         mc_lp_res = None
-                    if (
+                    if mc_lp_res is not None and mc_lp_res.status == "infeasible":
+                        # The McCormick LP is a valid OUTER relaxation of this
+                        # node's subtree: if the (larger) relaxed feasible set is
+                        # empty, the original is too.  This is a rigorous
+                        # infeasibility proof, so the node is fathomed — mark it
+                        # infeasible (sentinel + mask) and DO NOT decertify the
+                        # gap.  Without this, an LP-infeasible node keeps the
+                        # failure sentinel and the finalize block below would
+                        # wrongly downgrade the run to "feasible".
+                        node_infeasible_mask[i] = True
+                        result_lbs[i] = _INFEASIBILITY_SENTINEL
+                        result_feas[i] = False
+                    elif (
                         mc_lp_res is not None
                         and mc_lp_res.lower_bound is not None
                         and np.isfinite(mc_lp_res.lower_bound)
@@ -2694,21 +2735,33 @@ def solve_model(
                         else:
                             result_lbs[i] = max(cur, mc_lp_lb)
 
-                # Soundness guard (issue #27a): a nonconvex node pruned with no
-                # rigorous lower bound and no rigorous (FBBT) infeasibility proof
-                # is NOT proven suboptimal — the local NLP merely failed/diverged
-                # or its optimum violated the original constraints, neither of
-                # which rules out a better solution in the subtree. Certifying
-                # the gap anyway lets big-M/mbigm GDP relaxations of nonlinear
-                # disjuncts silently fathom an unsolved subtree and report a
-                # wrong "optimal". Decertify so the result downgrades to
-                # "feasible" with an uncertified bound instead of lying.
-                if (
-                    not _model_is_convex
-                    and not node_infeasible_mask[i]
-                    and result_lbs[i] >= _SENTINEL_THRESHOLD
-                ):
-                    _gap_certified = False
+                # Nonconvex finalize (mirrors the batch path at the top of this
+                # iteration).  Runs AFTER every bound source (NLP, alphaBB,
+                # McCormick, LP relaxer) so a valid relaxation bound is given
+                # the chance to certify optimality before we decide to
+                # decertify the gap.
+                #   * -inf  : no bound source produced a finite lower bound, so
+                #             the node carries only the trivial -inf bound. The
+                #             gap cannot be certified; downgrade to "feasible".
+                #   * non-finite (and not -inf): coerce to the infeasibility
+                #             sentinel so the Rust tree prunes it cleanly.
+                #   * >= sentinel (issue #27a): a node pruned with no rigorous
+                #             lower bound and no rigorous (FBBT) infeasibility
+                #             proof is NOT proven suboptimal — the local NLP
+                #             merely failed/diverged or its optimum violated the
+                #             original constraints, neither of which rules out a
+                #             better solution in the subtree. Certifying anyway
+                #             lets big-M/mbigm GDP relaxations of nonlinear
+                #             disjuncts silently fathom an unsolved subtree and
+                #             report a wrong "optimal". Decertify so the result
+                #             downgrades to "feasible" instead of lying.
+                if not _model_is_convex and not node_infeasible_mask[i]:
+                    if result_lbs[i] == -np.inf:
+                        _gap_certified = False
+                    elif not np.isfinite(result_lbs[i]):
+                        result_lbs[i] = _INFEASIBILITY_SENTINEL
+                    elif result_lbs[i] >= _SENTINEL_THRESHOLD:
+                        _gap_certified = False
         jax_time += time.perf_counter() - t_jax_start
 
         if np.any(node_infeasible_mask):
