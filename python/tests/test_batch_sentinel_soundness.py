@@ -24,25 +24,32 @@ import pytest
 
 
 def _build_nonconvex_minlp() -> tuple[dm.Model, dict]:
-    """Nonconvex MINLP whose root relaxation is fractional in the binaries.
+    """Nonconvex MINLP that branches into a multi-node frontier.
 
-    The knapsack structure forces real branching (several open nodes, so the
-    batch path runs with batch_size=4); the x1*y*y term (degree 3) keeps the
-    model out of the MIQP classification and makes it nonconvex. The warm
-    start (all zeros, obj=0) is feasible but far from optimal (-11.5), so
-    pruning the whole tree off failure sentinels and certifying the gap
-    would report a badly wrong "optimal".
+    The integer ``x`` makes the root relaxation fractional, so the tree opens
+    several nodes at once: ``export_batch`` returns >1 node and the POUNCE
+    batch path (``n_batch > 1``) runs. The ``sin`` term keeps the model
+    nonconvex and out of the MIQP class and — crucially — leaves it free of
+    bilinear products, so the spatial-BB McCormick LP relaxer is inactive.
+    That matters because the relaxer would otherwise rescue a failed node-NLP
+    solve with a valid LP bound; without it, the failure sentinel survives to
+    the decertification guard. The optimum is x=0, y≈3.665 (1.3*0 + sin≈-1.0 =
+    -1.0); the warm start (x=8, y=5) is feasible but far worse, so pruning the
+    whole tree off failure sentinels and certifying the gap would report a
+    badly wrong "optimal".
     """
     m = dm.Model("sentinel_soundness")
-    x1 = m.binary("x1")
-    x2 = m.binary("x2")
-    x3 = m.binary("x3")
-    x4 = m.binary("x4")
-    y = m.continuous("y", lb=0, ub=1)
-    m.minimize(-3 * x1 - 4 * x2 - 5 * x3 - 7 * x4 + x1 * y * y - 0.5 * y)
-    m.subject_to(2 * x1 + 3 * x2 + 4 * x3 + 5 * x4 <= 8)
-    warm = {x1: 0, x2: 0, x3: 0, x4: 0, y: 0.0}
+    x = m.integer("x", lb=0, ub=8)
+    y = m.continuous("y", lb=0, ub=5)
+    m.minimize(2 * x + dm.sin(3 * y) - 0.7 * x)
+    m.subject_to(3 * x + 2 * y >= 7)
+    m.subject_to(x - y <= 3)
+    warm = {x: 8, y: 5.0}
     return m, warm
+
+
+# Optimum of the model above: x=0, y≈3.665 -> 1.3*0 + sin(3y)≈-1.0.
+_OPT = -1.0
 
 
 def _all_sentinel_batch(evaluator, batch_lb, batch_ub, batch_ids, n_vars, *args, **kwargs):
@@ -80,7 +87,7 @@ class TestBatchSentinelSoundness:
 
         result = m.solve(
             nlp_solver="pounce",
-            batch_size=4,
+            batch_size=8,
             time_limit=60.0,
             max_nodes=5_000,
             initial_solution=warm,
@@ -104,16 +111,19 @@ class TestBatchSentinelSoundness:
         monkeypatch.setattr(S, "_solve_batch_pounce", real_batch)
 
     def test_unpatched_solver_still_certifies(self) -> None:
-        """Control: the real batch solver still reaches a certified optimum,
-        so the decertification above is attributable to the sentinels."""
+        """Control: the real batch solver reaches the optimum with a valid
+        (certified) bound, so the decertification above is attributable to the
+        injected sentinels and not to the model being unsolvable."""
         m, _ = _build_nonconvex_minlp()
         result = m.solve(
-            nlp_solver="ipm",
-            batch_size=4,
+            nlp_solver="pounce",
+            batch_size=8,
             time_limit=120.0,
             max_nodes=20_000,
         )
         assert result.status in ("optimal", "feasible")
         assert result.objective is not None
-        # Optimum: x2=1,x4=1 (weight 8), x1=0 so y→1 → -11 - 0.5 = -11.5.
-        assert abs(result.objective - (-11.5)) <= 1e-3 + 1e-2 * 11.5
+        assert abs(result.objective - _OPT) <= 1e-2
+        # Unlike the sentinel case, the real solve keeps a rigorous bound.
+        assert result.gap_certified is True
+        assert result.bound is not None
