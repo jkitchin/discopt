@@ -104,6 +104,7 @@ New problem types to make discopt competitive across the full optimization lands
 | Infeasibility analysis (IIS)      | Planned | Algorithmic irreducible infeasible subsystem computation                     |
 | Pyomo import                      | Done    | `from_pyomo()` converter for Var, Constraint, Objective, GDP constructs      |
 | GAMS import                       | Done    | `from_gams()` reader for .gms scalar models                                 |
+| GAMS solver link                  | Done    | `discopt.gams`: run discopt *as* a GAMS solver via the GMO/GEV control-file link |
 
 ## Phase 8: POUNCE-Only Solver Stack
 

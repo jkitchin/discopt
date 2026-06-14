@@ -72,4 +72,5 @@ parts:
   - caption: Appendix
     chapters:
       - file: comparison
+      - file: gams_solver_link
       - file: references

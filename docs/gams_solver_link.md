@@ -1,0 +1,98 @@
+# Using discopt as a GAMS solver
+
+discopt can act as a **solver inside GAMS**: once registered, a GAMS user solves
+a model with discopt the same way they would call BARON, SCIP, or CONOPT:
+
+```gams
+option minlp = discopt;
+solve m using minlp minimizing z;
+```
+
+This is the inverse of the file converters (`from_gams()` / `to_gams()`): instead
+of translating a `.gms` file, discopt plugs directly into the GAMS *solve* call.
+
+## How the link works
+
+GAMS does not pass solvers a model file. When a registered solver is invoked,
+GAMS launches it with a single argument — the path to a **control file** — and
+expects the solution to be written back through two libraries:
+
+- **GEV** (GAMS Environment Object): options, logging, resource limits.
+- **GMO** (GAMS Modeling Object): the model instance — columns (variables,
+  bounds, types), the objective, the Jacobian, and the *nonlinear instruction
+  lists* for the objective and every constraint row.
+
+The discopt link (`discopt.gams.link`) does the following:
+
+1. Boots GEV/GMO from the control file.
+2. Reads each column into a scalar discopt variable, with bounds and
+   continuous/binary/integer type.
+3. Rebuilds the objective and every constraint from the GMO linear coefficients
+   **and** a faithful translation of the GMO nonlinear instruction lists. The
+   instruction lists are a reverse-Polish stack machine (push variable, push
+   constant, add, multiply, call `exp`/`log`/`sqr`/`power`/…); the translator in
+   `discopt.gams.instructions` walks them into discopt's expression DAG, mirroring
+   the function mapping used by `from_gams()` so the result is identical to
+   parsing the equivalent `.gms`.
+4. Solves the resulting `discopt.Model`.
+5. Writes the primal solution and the GAMS model/solve status back into GMO.
+
+The model is reconstructed natively, so the full discopt stack applies:
+spatial branch-and-bound, McCormick/αBB relaxations, FBBT presolve, and the
+convex fast path.
+
+## Installation and registration
+
+The link needs the GAMS expert-level Python API (the GMO/GEV bindings). It ships
+with every GAMS system and is also on PyPI:
+
+```bash
+pip install "discopt[gams]"   # pulls gamsapi[core]
+```
+
+Register discopt with your GAMS system:
+
+```bash
+discopt gams-register --directory ./discopt-gams-config
+```
+
+This writes two files:
+
+- `gamsconfig.yaml` — a `solverConfig` block declaring the `discopt` solver and
+  the model types it accepts (LP, MIP, NLP, DNLP, RMINLP, MINLP, QCP, MIQCP, …).
+  Merge it into the `gamsconfig.yaml` in your GAMS system directory (or
+  `$HOME/.gams`).
+- `discopt-gams` — a small launcher script GAMS runs with the control file; it
+  invokes `python -m discopt.gams.link`.
+
+After registration, `option minlp = discopt;` (and the analogous options for the
+other model types) dispatches to discopt.
+
+## Supported functions
+
+The translator supports the algebraic operators (`+ - * / **`, unary minus) and
+the intrinsic functions discopt models natively: `exp`, `log`, `log2`, `log10`,
+`sqrt`, `sqr`, `abs`, `sin`, `cos`, `tan`, `arcsin`, `arccos`, `arctan`, `sinh`,
+`cosh`, `tanh`, `sigmoid`, `sign`, `errf`, the `power`/`rpower`/`cvpower`/
+`vcpower` family, `div`, and `min`/`max`. A GAMS intrinsic outside this set
+raises a clear `GamsTranslationError` naming the function rather than silently
+producing a wrong model.
+
+## Status mapping
+
+discopt termination statuses are mapped to GAMS `(modelStat, solveStat)` pairs:
+`optimal` → Optimal/Integer + Normal, `feasible` → Feasible + Normal,
+`infeasible` → Infeasible + Normal, `time_limit`/`node_limit` → Resource (with
+Feasible if an incumbent exists, otherwise No-Solution-Returned), and errors →
+Error/Solver-Error.
+
+## Programmatic use
+
+The GAMS-library-free core is importable and testable on its own — useful when
+embedding GMO instances produced by other tooling:
+
+```python
+from discopt.gams import solve_view  # takes any object implementing GmoView
+model, result = solve_view(my_gmo_view)
+print(result.status, result.objective)
+```

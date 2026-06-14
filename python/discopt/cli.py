@@ -193,6 +193,36 @@ def _cmd_convert(args):
     print(f"Converted {in_path} -> {out_path}")
 
 
+def _cmd_gams_register(args):
+    """Register discopt as a solver with a GAMS system.
+
+    Writes ``gamsconfig.yaml`` and a ``discopt-gams`` run script into the target
+    directory.  Merge the YAML into your GAMS system dir (or ``$HOME/.gams``) so
+    that ``option minlp = discopt;`` dispatches to discopt.
+    """
+    from discopt.gams import is_available, write_registration
+
+    out = Path(args.directory)
+    written = write_registration(out)
+    print(f"Wrote GAMS registration files to {out}:")
+    print(f"  config: {written['config']}")
+    print(f"  script: {written['script']}")
+    print(
+        "\nNext steps:\n"
+        f"  1. Merge {written['config'].name} into your GAMS gamsconfig.yaml "
+        "(GAMS system dir or $HOME/.gams).\n"
+        "  2. Ensure the run script is reachable, then in GAMS use:\n"
+        "       option minlp = discopt;\n"
+        "       solve m using minlp minimizing z;\n"
+    )
+    if not is_available():
+        print(
+            "\nNote: the GAMS Python API (gamsapi) is not importable here. "
+            "Install it from your GAMS system: pip install gamsapi[core]",
+            file=sys.stderr,
+        )
+
+
 def _cmd_install_skills(args):
     """Install packaged Claude Code skills/agents into the user's .claude/ tree.
 
@@ -271,6 +301,17 @@ def main():
     p_conv.add_argument("input", help="Input file path (.gms or .nl)")
     p_conv.add_argument("output", help="Output file path (.gms, .nl, .mps, or .lp)")
     p_conv.set_defaults(func=_cmd_convert)
+
+    p_gams = subparsers.add_parser(
+        "gams-register",
+        help="Register discopt as a solver with a GAMS system",
+    )
+    p_gams.add_argument(
+        "--directory",
+        default="discopt-gams-config",
+        help="Directory to write gamsconfig.yaml and the run script into.",
+    )
+    p_gams.set_defaults(func=_cmd_gams_register)
 
     p_skills = subparsers.add_parser(
         "install-skills",

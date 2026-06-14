@@ -1,0 +1,273 @@
+"""Tests for the discopt-as-a-GAMS-solver link (discopt.gams).
+
+Covers the GAMS-library-free core: the nonlinear instruction translator, the
+GMO-view -> Model translation, the solve wrapper, the status mapping, and the
+solver registration files.  None of this requires a GAMS installation.
+"""
+
+from __future__ import annotations
+
+import discopt.modeling as dm
+import pytest
+from discopt.gams import (
+    gamsconfig_snippet,
+    is_available,
+    model_from_gmo,
+    run_script,
+    solve_view,
+    status_to_gams,
+    write_registration,
+)
+from discopt.gams.instructions import (
+    FUNC_CODE,
+    FUNC_NAME,
+    GamsTranslationError,
+    translate_instructions,
+)
+from discopt.gams.instructions import (
+    GamsOpCode as Op,
+)
+
+
+# ── instruction translator ──────────────────────────────────────────────────
+@pytest.fixture
+def vc():
+    m = dm.Model("t")
+    x = m.continuous("x", lb=0, ub=10)
+    y = m.continuous("y", lb=0, ub=10)
+    return [x, y], [3.0, 2.0]
+
+
+def test_func_code_table_is_consistent():
+    # Spot-check known positions from the GAMS GamsFuncCode enum.
+    assert FUNC_CODE["mapval"] == 0
+    assert FUNC_CODE["sqr"] == 9
+    assert FUNC_CODE["exp"] == 10
+    assert FUNC_CODE["log"] == 11
+    assert FUNC_CODE["log2"] == 50
+    assert FUNC_CODE["rpower"] == 64
+    assert FUNC_NAME[FUNC_CODE["vcpower"]] == "vcpower"
+
+
+def test_translate_push_variable(vc):
+    v, c = vc
+    expr = translate_instructions([Op.nlPushV], [1], v, c)
+    assert expr is v[0]
+
+
+def test_translate_bilinear(vc):
+    v, c = vc
+    expr = translate_instructions([Op.nlPushV, Op.nlPushV, Op.nlMul], [1, 2, 0], v, c)
+    assert repr(expr) == "(x * y)"
+
+
+def test_translate_sum_of_squares(vc):
+    v, c = vc
+    ops = [Op.nlPushV, Op.nlCallArg1, Op.nlPushV, Op.nlCallArg1, Op.nlAdd]
+    flds = [1, FUNC_CODE["sqr"], 2, FUNC_CODE["sqr"], 0]
+    assert repr(translate_instructions(ops, flds, v, c)) == "((x ** 2) + (y ** 2))"
+
+
+def test_translate_immediate_ops(vc):
+    v, c = vc  # constants pool [3, 2]; 3*x + 2
+    expr = translate_instructions([Op.nlPushV, Op.nlMulI, Op.nlAddI], [1, 1, 2], v, c)
+    assert repr(expr) == "((x * 3) + 2)"
+
+
+def test_translate_subtraction_and_division(vc):
+    v, c = vc
+    # x - y
+    assert repr(translate_instructions([Op.nlPushV, Op.nlSubV], [1, 2], v, c)) == "(x - y)"
+    # x / y
+    assert repr(translate_instructions([Op.nlPushV, Op.nlDivV], [1, 2], v, c)) == "(x / y)"
+
+
+def test_translate_unary_minus(vc):
+    v, c = vc
+    expr = translate_instructions([Op.nlPushV, Op.nlUMin], [1, 0], v, c)
+    assert repr(expr) == "neg(x)"
+
+
+def test_translate_muliadd(vc):
+    v, c = vc  # y + x * const(1)=3  ->  (y + (x * 3))
+    ops = [Op.nlPushV, Op.nlPushV, Op.nlMulIAdd]
+    expr = translate_instructions(ops, [2, 1, 1], v, c)
+    assert repr(expr) == "(y + (x * 3))"
+
+
+def test_translate_binary_function_power(vc):
+    v, c = vc  # rpower(x, y) -> x ** y
+    ops = [Op.nlPushV, Op.nlPushV, Op.nlCallArg2]
+    expr = translate_instructions(ops, [1, 2, FUNC_CODE["rpower"]], v, c)
+    assert repr(expr) == "(x ** y)"
+
+
+def test_translate_nary_min(vc):
+    v, c = vc
+    ops = [Op.nlPushV, Op.nlPushV, Op.nlFuncArgN, Op.nlCallArgN]
+    expr = translate_instructions(ops, [1, 2, 2, FUNC_CODE["min"]], v, c)
+    assert repr(expr) == "min(x, y)"
+
+
+def test_translate_unary_functions(vc):
+    v, c = vc
+    for name in ("exp", "log", "sqrt", "sin", "cos", "tan"):
+        expr = translate_instructions([Op.nlPushV, Op.nlCallArg1], [1, FUNC_CODE[name]], v, c)
+        assert repr(expr).startswith(name)
+
+
+def test_translate_errors(vc):
+    v, c = vc
+    with pytest.raises(GamsTranslationError):
+        translate_instructions([Op.nlPushV], [1, 2], v, c)  # length mismatch
+    with pytest.raises(GamsTranslationError):
+        translate_instructions([Op.nlAdd], [0], v, c)  # stack underflow
+    with pytest.raises(GamsTranslationError):
+        translate_instructions([Op.nlPushV], [99], v, c)  # var out of range
+    with pytest.raises(GamsTranslationError):
+        # unsupported function code (jdate)
+        translate_instructions([Op.nlPushV, Op.nlCallArg1], [1, FUNC_CODE["jdate"]], v, c)
+
+
+# ── GMO view -> Model ────────────────────────────────────────────────────────
+class _FakeGmo:
+    """In-memory GMO view: min x0^2 + x1^2 s.t. x0 + x1 >= 1, x in [0, 5]."""
+
+    def __init__(self, discrete=False):
+        self._discrete = discrete
+
+    def name(self):
+        return "fake"
+
+    def num_vars(self):
+        return 2
+
+    def num_rows(self):
+        return 1
+
+    def minimize(self):
+        return True
+
+    def constants(self):
+        return []
+
+    def var_lower(self, j):
+        return 0.0
+
+    def var_upper(self, j):
+        return 5.0
+
+    def var_type(self, j):
+        return 2 if self._discrete else 0
+
+    def var_name(self, j):
+        return f"x{j}"
+
+    def var_level(self, j):
+        return 0.0
+
+    def obj_constant(self):
+        return 0.0
+
+    def obj_linear(self):
+        return {}
+
+    def obj_nl(self):
+        ops = [Op.nlPushV, Op.nlCallArg1, Op.nlPushV, Op.nlCallArg1, Op.nlAdd]
+        return ops, [1, FUNC_CODE["sqr"], 2, FUNC_CODE["sqr"], 0]
+
+    def row_name(self, i):
+        return "c1"
+
+    def row_sense(self, i):
+        return ">="
+
+    def row_rhs(self, i):
+        return 1.0
+
+    def row_constant(self, i):
+        return 0.0
+
+    def row_linear(self, i):
+        return {0: 1.0, 1: 1.0}
+
+    def row_nl(self, i):
+        return [], []
+
+
+def test_model_from_gmo_structure():
+    m = model_from_gmo(_FakeGmo())
+    assert [v.name for v in m._variables] == ["x0", "x1"]
+    assert len(m._constraints) == 1
+    assert m._objective is not None
+
+
+def test_model_from_gmo_discrete_types():
+    m = model_from_gmo(_FakeGmo(discrete=True))
+    assert all(v.var_type == dm.VarType.INTEGER for v in m._variables)
+
+
+def test_solve_view_end_to_end():
+    model, result = solve_view(_FakeGmo())
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(0.5, abs=1e-4)
+    assert result.x["x0"] == pytest.approx(0.5, abs=1e-3)
+    assert result.x["x1"] == pytest.approx(0.5, abs=1e-3)
+
+
+# ── status mapping ───────────────────────────────────────────────────────────
+def test_status_to_gams_optimal_continuous():
+    res = dm.SolveResult(status="optimal", objective=1.0, x={"x": 0.0})
+    assert status_to_gams(res, has_discrete=False) == (1, 1)  # Optimal, Normal
+
+
+def test_status_to_gams_optimal_discrete():
+    res = dm.SolveResult(status="optimal", objective=1.0, x={"x": 0.0})
+    assert status_to_gams(res, has_discrete=True) == (8, 1)  # Integer, Normal
+
+
+def test_status_to_gams_infeasible():
+    res = dm.SolveResult(status="infeasible")
+    assert status_to_gams(res, has_discrete=False) == (4, 1)
+
+
+def test_status_to_gams_time_limit_with_and_without_solution():
+    with_sol = dm.SolveResult(status="time_limit", x={"x": 0.0})
+    assert status_to_gams(with_sol, has_discrete=False) == (7, 3)  # Feasible, Resource
+    no_sol = dm.SolveResult(status="time_limit")
+    assert status_to_gams(no_sol, has_discrete=False) == (14, 3)  # NoSolution, Resource
+
+
+def test_status_to_gams_error():
+    res = dm.SolveResult(status="error")
+    assert status_to_gams(res, has_discrete=False) == (13, 10)
+
+
+# ── registration ─────────────────────────────────────────────────────────────
+def test_gamsconfig_snippet_contains_solver_and_types():
+    snip = gamsconfig_snippet("discopt-gams")
+    assert "name: discopt" in snip
+    assert "scriptName: discopt-gams" in snip
+    assert "MINLP" in snip and "NLP" in snip
+
+
+def test_run_script_invokes_link():
+    script = run_script("/usr/bin/python3")
+    assert script.startswith("#!/bin/sh")
+    assert "discopt.gams.link" in script
+    assert '"$@"' in script
+
+
+def test_write_registration(tmp_path):
+    written = write_registration(tmp_path)
+    assert written["config"].exists()
+    assert written["script"].exists()
+    # script should be executable
+    import os
+
+    assert os.access(written["script"], os.X_OK)
+    assert "solverConfig" in written["config"].read_text()
+
+
+def test_is_available_returns_bool():
+    assert isinstance(is_available(), bool)
