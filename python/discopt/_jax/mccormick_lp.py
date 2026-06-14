@@ -44,11 +44,16 @@ class MccormickLPRelaxer:
     the lifted LP with the node's bound box and solves it via HiGHS.
     """
 
-    def __init__(self, model: Model, *, superposition: bool = False) -> None:
+    def __init__(self, model: Model, *, superposition: bool = False, backend: str = "simplex") -> None:
         self._model = model
         self._terms: NonlinearTerms = classify_nonlinear_terms(model)
         # Opt-in M8 superposition cuts for bilinear-of-nonlinear products.
         self._superposition = superposition
+        # LP backend for the per-node relaxation solve: "simplex" routes to the
+        # pure-Rust warm-started simplex (no JAX in the spatial-B&B relaxation
+        # path); "auto" keeps HiGHS->POUNCE. Falls back automatically if the
+        # Rust binding is unavailable.
+        self._backend = backend
         # Spatial-BB uses standard McCormick globally — no partitioning here.
         self._disc = DiscretizationState(partitions={})
         self._n_orig = sum(v.size for v in model._variables)
@@ -104,7 +109,7 @@ class MccormickLPRelaxer:
         if not int(milp._integrality.sum()):
             milp._integrality = None
 
-        res = milp.solve(time_limit=time_limit)
+        res = milp.solve(time_limit=time_limit, backend=self._backend)
         if res.objective is None or res.x is None:
             return MccormickLPResult(status=res.status)
         x_orig = np.asarray(res.x)[: self._n_orig].copy()
