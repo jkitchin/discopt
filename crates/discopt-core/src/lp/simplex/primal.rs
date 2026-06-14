@@ -447,6 +447,40 @@ impl<'a> Simplex<'a> {
             };
         }
         let obj: f64 = (0..self.n).map(|j| self.c[j] * x[j]).sum();
+
+        // Final feasibility audit before certifying Optimal. x_B is maintained
+        // incrementally between the ~48-pivot refactorizations and the Harris
+        // ratio test permits small bound excursions, so the returned point can
+        // drift. Verify it actually satisfies its bounds and Ax=b; on violation
+        // downgrade to Numerical so the warm-start cold fallback re-solves
+        // rather than trusting a wrong "Optimal".
+        let status = if status == LpStatus::Optimal {
+            const FEAS: f64 = 1e-6;
+            let mut ok = true;
+            for j in 0..self.n {
+                if x[j] < self.lb[j] - FEAS || x[j] > self.ub[j] + FEAS {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                for i in 0..self.m {
+                    let row: f64 = (0..self.n).map(|j| self.a[i * self.n + j] * x[j]).sum();
+                    if (row - self.b[i]).abs() > FEAS * (1.0 + self.b[i].abs()) {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok {
+                LpStatus::Optimal
+            } else {
+                LpStatus::Numerical
+            }
+        } else {
+            status
+        };
+
         // basis over the real columns (artificials excluded; if a real-var basis
         // is wanted the caller post-processes — here basic_vars lists real basics)
         let basic_vars: Vec<usize> = self.basis.iter().copied().filter(|&j| j < self.n).collect();

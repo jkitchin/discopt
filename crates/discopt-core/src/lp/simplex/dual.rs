@@ -71,6 +71,32 @@ fn try_dual(lp: &LpView<'_>, b: &[f64], start: &Basis, opts: &SimplexOptions) ->
         }
     };
 
+    // Verify the starting basis is actually dual-feasible — the precondition
+    // the dual simplex *maintains* but does not *establish*. With y = B⁻ᵀc_B the
+    // reduced cost is d_j = c_j − yᵀA_j; a nonbasic-at-lower needs d_j ≥ −tol and
+    // a nonbasic-at-upper needs d_j ≤ tol. A dual-infeasible start would silently
+    // converge to a wrong Optimal/Infeasible, so request the cold fallback.
+    {
+        let mut y: Vec<f64> = basis.iter().map(|&j| c[j]).collect();
+        if lu.btran(&mut y).is_err() {
+            return None;
+        }
+        for j in 0..n {
+            if stat[j] == BASIC || u[j] - l[j] <= tol {
+                continue; // basic or fixed: dual feasibility is unconstrained
+            }
+            let dj = c[j] - sp.dot(j, &y);
+            let ok = if stat[j] == AT_UPPER {
+                dj <= tol
+            } else {
+                dj >= -tol
+            };
+            if !ok {
+                return None; // dual-infeasible warm start → cold fallback
+            }
+        }
+    }
+
     let mut updates = 0usize;
     let mut pivots = 0usize;
     for _iter in 0..opts.max_iter {

@@ -224,7 +224,16 @@ pub fn separate_gomory(
             let at_upper = basis.col_status[j] == AT_UPPER;
             let alpha = if at_upper { -abar } else { abar };
 
-            let psi = if integrality[j] {
+            // The integer GMI strengthening is valid only when the nonbasic
+            // integer variable is pinned at an INTEGER bound, so the shifted
+            // x̃_j = x_j − l_j (or u_j − x_j) takes integer values. If presolve
+            // (coefficient strengthening / implied bounds) handed it a
+            // fractional bound, that premise fails and the integer ψ can cut the
+            // true optimum — fall back to the continuous formula, which is
+            // always valid (a weaker but sound cut).
+            let pinned = if at_upper { u[j] } else { l[j] };
+            let use_integer = integrality[j] && (pinned - pinned.round()).abs() <= tol;
+            let psi = if use_integer {
                 let fj = alpha - alpha.floor();
                 if fj <= f0 {
                     fj / f0
