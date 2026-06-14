@@ -39,6 +39,12 @@ _FINITE_BOUND_THRESHOLD = 1e15
 # original LP infeasible (roadmap P0.2).
 _FEAS_TOL = 1e-6
 
+
+class PounceKKTError(RuntimeError):
+    """A KKT-point solve (``solve_lp_kkt`` / ``solve_qp_kkt``) failed to
+    converge, so the returned point is not stationary. Raised instead of
+    returning silently-wrong sensitivities to a differentiable layer."""
+
 # Ipopt return codes (POUNCE is shape-compatible). For a *convex* LP, local
 # infeasibility is global, so code 2 is a sound INFEASIBLE; diverging iterates
 # (4) and a too-small search direction (3) on an LP signal unboundedness.
@@ -234,13 +240,19 @@ def solve_lp(
 
     # ---- infeasibility certificate (roadmap P0.2) ---------------------------
     # An IPM does not always certify infeasibility: an inconsistent system can
-    # exit at the iteration limit (or as a generic error) rather than as
-    # INFEASIBLE. Disambiguate with an elastic Phase-1 LP that minimizes total
-    # constraint violation. For an LP this is exact (by LP duality a positive
-    # minimal violation is a Farkas certificate): >0 proves infeasibility, ~0
-    # proves the original was feasible (so the failure was numerical, not
-    # infeasibility — report it honestly rather than as INFEASIBLE).
-    if m > 0 and result.status in (SolveStatus.ITERATION_LIMIT, SolveStatus.ERROR):
+    # exit at the iteration limit, as a generic error, or — because diverging
+    # iterates / a too-small search direction (Ipopt codes 4/3) look the same on
+    # an infeasible LP as on an unbounded one — as a spurious UNBOUNDED.
+    # Disambiguate with an elastic Phase-1 LP that minimizes total constraint
+    # violation. For an LP this is exact (by LP duality a positive minimal
+    # violation is a Farkas certificate): >0 proves infeasibility; ~0 proves the
+    # original was feasible, so the prior status (numerical failure, or a genuine
+    # UNBOUNDED once feasibility is established) is reported honestly.
+    if m > 0 and result.status in (
+        SolveStatus.ITERATION_LIMIT,
+        SolveStatus.ERROR,
+        SolveStatus.UNBOUNDED,
+    ):
         slacks = _phase1_min_violation(A, cl, cu, lb, ub, opts)
         if slacks is not None and float(slacks.sum()) > _FEAS_TOL:
             return LPResult(
@@ -319,6 +331,15 @@ def solve_lp_kkt(
             pass
 
     x, info = problem.solve(x0)
+    # The differentiable LP layer linearizes the KKT system at this point, so a
+    # non-converged solve (anything but Solve_Succeeded / Solved_To_Acceptable)
+    # would yield silently wrong gradients. Fail loudly instead.
+    status_code = info.get("status", -100)
+    if status_code not in (0, 1):
+        raise PounceKKTError(
+            f"solve_lp_kkt did not converge (Ipopt status {status_code}); "
+            "the KKT point is non-stationary and would give invalid gradients."
+        )
     x_arr = np.asarray(x, dtype=np.float64).ravel()
     mult_g = np.asarray(info.get("mult_g", np.zeros(m)), dtype=np.float64).ravel()
     z_l = np.asarray(info.get("mult_x_L", np.zeros(n)), dtype=np.float64).ravel()

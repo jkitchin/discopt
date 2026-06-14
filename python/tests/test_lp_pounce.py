@@ -459,3 +459,61 @@ class TestHighsOracle:
         assert abs(rp.objective - rh.objective) < 1e-4, (
             f"seed={seed}: POUNCE {rp.objective} vs HiGHS {rh.objective}"
         )
+
+
+class TestUnboundedDisambiguation:
+    """Ipopt codes 3/4 (too-small direction / diverging iterates) map to
+    UNBOUNDED, but they fire the same way on an *infeasible* LP. The Phase-1
+    Farkas disambiguation must run before UNBOUNDED is trusted (PR #117
+    review #3), so a spurious UNBOUNDED on an infeasible system is corrected
+    to INFEASIBLE."""
+
+    def test_infeasible_reported_as_unbounded_is_corrected(self, monkeypatch):
+        import discopt.solvers.lp_pounce as M
+        from discopt.solvers import LPResult
+
+        # Infeasible LP: x == 0 and x == 1 (two equality rows on one var).
+        A = np.array([[1.0], [1.0]])
+        b = np.array([0.0, 1.0])
+
+        # Force only the *main* solve to (wrongly) report UNBOUNDED, as codes 3/4
+        # would; the real solver still runs the Phase-1 elastic LP underneath.
+        orig_core = M._solve_core
+        calls = {"n": 0}
+
+        def fake_core(*a, **k):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return LPResult(status=SolveStatus.UNBOUNDED)
+            return orig_core(*a, **k)
+
+        monkeypatch.setattr(M, "_solve_core", fake_core)
+
+        res = M.solve_lp(c=np.array([1.0]), A_eq=A, b_eq=b, bounds=[(-1e20, 1e20)])
+        # Phase-1 finds positive minimal violation -> genuine INFEASIBLE.
+        assert res.status == SolveStatus.INFEASIBLE
+        assert res.infeasibility_certificate is not None
+
+    def test_feasible_unbounded_stays_unbounded(self, monkeypatch):
+        import discopt.solvers.lp_pounce as M
+        from discopt.solvers import LPResult
+
+        # Feasible, genuinely unbounded: minimize -x with x >= 0, no upper bound,
+        # one trivial satisfiable equality so m > 0 (Phase-1 path runs).
+        A = np.array([[0.0]])
+        b = np.array([0.0])
+
+        orig_core = M._solve_core
+        calls = {"n": 0}
+
+        def fake_core(*a, **k):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return LPResult(status=SolveStatus.UNBOUNDED)
+            return orig_core(*a, **k)
+
+        monkeypatch.setattr(M, "_solve_core", fake_core)
+
+        res = M.solve_lp(c=np.array([-1.0]), A_eq=A, b_eq=b, bounds=[(0.0, 1e20)])
+        # Phase-1 violation ~0 (feasible) -> the genuine UNBOUNDED stands.
+        assert res.status == SolveStatus.UNBOUNDED

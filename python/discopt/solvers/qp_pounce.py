@@ -39,6 +39,7 @@ from discopt.solvers.lp_pounce import (
     _INF,
     _LP_STATUS_MAP,
     POUNCE_AVAILABLE,
+    PounceKKTError,
     _build_certificate,
     _interior_start,
     _phase1_min_violation,
@@ -159,8 +160,14 @@ def solve_qp(
 
     # ---- infeasibility certificate (roadmap P0.2; same logic as lp_pounce) ---
     # Constraints are linear, so the elastic Phase-1 LP is an exact Farkas
-    # disambiguation regardless of the quadratic objective.
-    if m > 0 and result.status in (SolveStatus.ITERATION_LIMIT, SolveStatus.ERROR):
+    # disambiguation regardless of the quadratic objective. UNBOUNDED is included
+    # because Ipopt codes 3/4 (too-small direction / diverging iterates) cannot
+    # distinguish an unbounded QP from an infeasible one — Phase-1 settles it.
+    if m > 0 and result.status in (
+        SolveStatus.ITERATION_LIMIT,
+        SolveStatus.ERROR,
+        SolveStatus.UNBOUNDED,
+    ):
         slacks = _phase1_min_violation(A, cl, cu, lb, ub, opts)
         if slacks is not None and float(slacks.sum()) > _FEAS_TOL:
             return QPResult(
@@ -239,6 +246,14 @@ def solve_qp_kkt(
             pass
 
     x, info = problem.solve(x0)
+    # The differentiable QP layer linearizes the KKT system here, so a
+    # non-converged solve would yield silently wrong gradients. Fail loudly.
+    status_code = info.get("status", -100)
+    if status_code not in (0, 1):
+        raise PounceKKTError(
+            f"solve_qp_kkt did not converge (Ipopt status {status_code}); "
+            "the KKT point is non-stationary and would give invalid gradients."
+        )
     x_arr = np.asarray(x, dtype=np.float64).ravel()
     mult_g = np.asarray(info.get("mult_g", np.zeros(m)), dtype=np.float64).ravel()
     z_l = np.asarray(info.get("mult_x_L", np.zeros(n)), dtype=np.float64).ravel()
