@@ -44,7 +44,9 @@ class MccormickLPRelaxer:
     the lifted LP with the node's bound box and solves it via HiGHS.
     """
 
-    def __init__(self, model: Model, *, superposition: bool = False, backend: str = "simplex") -> None:
+    def __init__(
+        self, model: Model, *, superposition: bool = False, backend: str = "simplex"
+    ) -> None:
         self._model = model
         self._terms: NonlinearTerms = classify_nonlinear_terms(model)
         # Opt-in M8 superposition cuts for bilinear-of-nonlinear products.
