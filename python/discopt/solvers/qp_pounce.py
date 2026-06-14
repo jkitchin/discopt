@@ -34,7 +34,6 @@ import scipy.sparse as sp
 
 from discopt.solvers import QPResult, SolveStatus
 from discopt.solvers.lp_pounce import (
-    _FEAS_TOL,
     _FINITE_BOUND_THRESHOLD,
     _INF,
     _LP_STATUS_MAP,
@@ -42,6 +41,7 @@ from discopt.solvers.lp_pounce import (
     PounceKKTError,
     _build_certificate,
     _interior_start,
+    _is_infeasible_violation,
     _phase1_min_violation,
     _stack_constraints,
 )
@@ -169,7 +169,7 @@ def solve_qp(
         SolveStatus.UNBOUNDED,
     ):
         slacks = _phase1_min_violation(A, cl, cu, lb, ub, opts)
-        if slacks is not None and float(slacks.sum()) > _FEAS_TOL:
+        if slacks is not None and _is_infeasible_violation(slacks, cl, cu):
             return QPResult(
                 status=SolveStatus.INFEASIBLE,
                 iterations=result.iterations,
@@ -178,7 +178,7 @@ def solve_qp(
             )
     elif certificate and result.status == SolveStatus.INFEASIBLE and m > 0:
         slacks = _phase1_min_violation(A, cl, cu, lb, ub, opts)
-        if slacks is not None and float(slacks.sum()) > _FEAS_TOL:
+        if slacks is not None and _is_infeasible_violation(slacks, cl, cu):
             result.infeasibility_certificate = _build_certificate(slacks, n_ineq)
 
     return result

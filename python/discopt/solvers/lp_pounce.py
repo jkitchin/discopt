@@ -255,7 +255,7 @@ def solve_lp(
         SolveStatus.UNBOUNDED,
     ):
         slacks = _phase1_min_violation(A, cl, cu, lb, ub, opts)
-        if slacks is not None and float(slacks.sum()) > _FEAS_TOL:
+        if slacks is not None and _is_infeasible_violation(slacks, cl, cu):
             return LPResult(
                 status=SolveStatus.INFEASIBLE,
                 iterations=result.iterations,
@@ -266,7 +266,7 @@ def solve_lp(
         # POUNCE detected infeasibility directly; spend one Phase-1 solve to
         # build the requested witness.
         slacks = _phase1_min_violation(A, cl, cu, lb, ub, opts)
-        if slacks is not None and float(slacks.sum()) > _FEAS_TOL:
+        if slacks is not None and _is_infeasible_violation(slacks, cl, cu):
             result.infeasibility_certificate = _build_certificate(slacks, n_ineq)
 
     return result
@@ -354,6 +354,34 @@ def solve_lp_kkt(
     y = -mult_g
     obj = float(info.get("obj_val", c_arr @ x_arr))
     return obj, x_arr, y, z_l, z_u
+
+
+def _is_infeasible_violation(slacks: Optional[np.ndarray], cl: np.ndarray, cu: np.ndarray) -> bool:
+    """Whether the Phase-1 minimal total violation certifies infeasibility.
+
+    The decision uses a scale-aware threshold rather than the bare absolute
+    ``_FEAS_TOL``: the interior-point Phase-1 leaves a small residual per row, so
+    a constant tolerance summed over all ``m`` rows raises false ``INFEASIBLE``
+    verdicts on large or large-magnitude systems. Scale by the row count and the
+    right-hand-side magnitude so only a genuine (data-significant) violation
+    trips. Erring toward *not* certifying infeasibility is the safe direction —
+    the caller then reports the prior status (e.g. iteration limit) rather than a
+    wrong ``INFEASIBLE``.
+    """
+    if slacks is None:
+        return False
+    arr = np.asarray(slacks, dtype=np.float64)
+    total = float(arr.sum())
+    m = int(arr.size)
+    # Use only genuinely finite RHS entries for the scale — the ±_INF sentinel
+    # (1e20) is "finite" to np.isfinite and would blow the scale up.
+    cl = np.asarray(cl, dtype=np.float64).ravel()
+    cu = np.asarray(cu, dtype=np.float64).ravel()
+    finite = np.concatenate(
+        [cl[np.abs(cl) < _FINITE_BOUND_THRESHOLD], cu[np.abs(cu) < _FINITE_BOUND_THRESHOLD]]
+    )
+    rhs_scale = 1.0 + (float(np.max(np.abs(finite))) if finite.size else 0.0)
+    return total > _FEAS_TOL * max(1.0, float(m)) * rhs_scale
 
 
 def _build_certificate(slacks: np.ndarray, n_ineq: int) -> InfeasibilityCertificate:

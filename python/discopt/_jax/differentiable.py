@@ -668,9 +668,19 @@ def _make_jax_differentiable_solve(
             offset += p_size
         ev = NLPEvaluator(model)
         result = _dispatch_nlp_solve(_nlp_solver, ev, x0_default, opts)
+        # Fail loudly on a non-converged solve rather than propagating a NaN
+        # objective / non-stationary point into the envelope-theorem JVP (which
+        # would give silently-wrong gradients). Consistent with
+        # _compute_sensitivity_at_solution, which also raises.
+        from discopt.solvers import SolveStatus
+
+        if result.status != SolveStatus.OPTIMAL:
+            raise RuntimeError(f"Differentiable NLP solve did not converge: {result.status.value}")
         x_sol = result.x if result.x is not None else x0_default
         mults = result.multipliers
         obj = result.objective if result.objective is not None else 0.0
+        if not np.isfinite(obj):
+            raise RuntimeError("Differentiable NLP solve returned a non-finite objective.")
         # Pack: [obj, x_star..., multipliers...]
         if mults is not None:
             packed = np.concatenate([np.array([obj]), x_sol, mults]).astype(np.float64)
