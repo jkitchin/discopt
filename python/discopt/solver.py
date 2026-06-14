@@ -5584,9 +5584,7 @@ def _solve_node_lp_pounce(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, ti
         if A_ub_m is not None and A_ub_m.shape[0]:
             feasible = bool(np.all(A_ub_m @ x_sol <= b_ub_m + tol * (1.0 + np.abs(b_ub_m))))
         if feasible and A_eq_m is not None and A_eq_m.shape[0]:
-            feasible = bool(
-                np.all(np.abs(A_eq_m @ x_sol - b_eq_m) <= tol * (1.0 + np.abs(b_eq_m)))
-            )
+            feasible = bool(np.all(np.abs(A_eq_m @ x_sol - b_eq_m) <= tol * (1.0 + np.abs(b_eq_m))))
         if not feasible:
             logger.debug("POUNCE convex node solution violates its rows; rejecting")
             return None
@@ -6462,9 +6460,7 @@ def _solve_milp_bb(
     _root_lp_bound = -np.inf
     if prefer_pounce:
         try:
-            _root_out = _solve_node_lp_pounce(
-                lp_data, lb, ub, n_vars, n_orig, t_start, time_limit
-            )
+            _root_out = _solve_node_lp_pounce(lp_data, lb, ub, n_vars, n_orig, t_start, time_limit)
             if _root_out is not None and _root_out[2] == "optimal" and np.isfinite(_root_out[0]):
                 _root_lp_bound = float(_root_out[0])
         except Exception as _rlb_exc:

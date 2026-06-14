@@ -19,9 +19,7 @@ import numpy as np
 import pytest
 from discopt.solvers import SolveStatus
 
-POUNCE_AVAILABLE = pytest.importorskip(
-    "discopt.solvers.lp_pounce"
-).POUNCE_AVAILABLE  # type: ignore[attr-defined]
+POUNCE_AVAILABLE = pytest.importorskip("discopt.solvers.lp_pounce").POUNCE_AVAILABLE  # type: ignore[attr-defined]
 
 pytestmark = pytest.mark.skipif(not POUNCE_AVAILABLE, reason="POUNCE not installed")
 
