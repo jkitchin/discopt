@@ -311,6 +311,11 @@ def _get_param_slice(param: Parameter, model: Model) -> tuple[int, int]:
 def _dispatch_nlp_solve(nlp_solver: str, evaluator, x0, options: dict):
     """Dispatch NLP solve to the selected backend."""
     if nlp_solver == "ipm":
+        # The JAX IPM is retained ONLY here: as the JAX-traceable forward solve
+        # for the differentiable-solve helpers (custom_jvp), whose forward runs
+        # inside a JAX trace. POUNCE (a host pure_callback) cannot be the forward
+        # in that traced context — for a differentiable POUNCE NLP layer use
+        # discopt._jax.pounce_layer.make_nlp_layer instead.
         from discopt._jax.ipm import solve_nlp_ipm
 
         return solve_nlp_ipm(evaluator, x0, constraint_bounds=None, options=options)

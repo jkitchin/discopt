@@ -2145,6 +2145,16 @@ def solve_model(
                 prefer_pounce=_pounce_only,
             )
 
+    # The pure-JAX interior-point method ("ipm") and its sparse variant
+    # ("sparse_ipm") are retired as NLP solvers. From here on (the NLP/MINLP
+    # path only) route them to POUNCE, the pure-Rust Ipopt port. MILP/MIQP/LP/QP
+    # already returned above with the original nlp_solver, so their HiGHS-vs-
+    # POUNCE routing (gated by _pounce_only == "pounce") is unaffected. JAX
+    # remains the autodiff substrate (McCormick relaxations + differentiable
+    # layers). "ipm" is the historical default, so this resolution is silent.
+    if nlp_solver in ("ipm", "sparse_ipm"):
+        nlp_solver = "pounce"
+
     # --- Convex NLP fast path: skip B&B for convex continuous problems ---
     if _pure_continuous and _pure_continuous_convexity_known and _pure_continuous_is_convex:
         logger.info("Convex NLP detected — solving with single NLP (global optimality guaranteed)")
@@ -4401,18 +4411,10 @@ def _solve_node_nlp(
             except Exception:
                 pass  # If evaluation fails, fall through to NLP solver
 
-    if nlp_solver == "pounce":
+    if nlp_solver in ("pounce", "ipm", "sparse_ipm"):
+        # "ipm"/"sparse_ipm" are deprecated aliases — the JAX IPM is retired as a
+        # node NLP solver, so all route to POUNCE (the pure-Rust Ipopt port).
         return _solve_node_nlp_pounce(
-            evaluator, x0, node_lb, node_ub, constraint_bounds, options, convex=convex
-        )
-    if nlp_solver == "ipm":
-        # JAX IPM requires JAX-compiled _obj_fn/_cons_fn; fall back to ipopt
-        # for evaluators without these attributes.
-        if not hasattr(evaluator, "_obj_fn"):
-            return _solve_node_nlp_ipopt(
-                evaluator, x0, node_lb, node_ub, constraint_bounds, options
-            )
-        return _solve_node_nlp_ipm(
             evaluator, x0, node_lb, node_ub, constraint_bounds, options, convex=convex
         )
     return _solve_node_nlp_ipopt(evaluator, x0, node_lb, node_ub, constraint_bounds, options)
