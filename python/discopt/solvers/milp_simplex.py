@@ -16,7 +16,7 @@ raises :class:`SimplexBackendUnavailable` so the selector can fall back.
 
 from __future__ import annotations
 
-from typing import Optional, Union
+from typing import Optional, Union, cast
 
 import numpy as np
 import scipy.sparse as sp
@@ -60,11 +60,19 @@ def solve_milp(
     rows: list[np.ndarray] = []
     rhs: list[float] = []
     if A_ub is not None and b_ub is not None and np.size(b_ub) > 0:
-        a = A_ub.toarray() if sp.issparse(A_ub) else np.asarray(A_ub, dtype=np.float64)
+        a = (
+            cast("sp.spmatrix", A_ub).toarray()
+            if sp.issparse(A_ub)
+            else np.asarray(A_ub, dtype=np.float64)
+        )
         rows.append(a.reshape(-1, n))
         rhs.extend(np.asarray(b_ub, dtype=np.float64).ravel().tolist())
     if A_eq is not None and b_eq is not None and np.size(b_eq) > 0:
-        a = A_eq.toarray() if sp.issparse(A_eq) else np.asarray(A_eq, dtype=np.float64)
+        a = (
+            cast("sp.spmatrix", A_eq).toarray()
+            if sp.issparse(A_eq)
+            else np.asarray(A_eq, dtype=np.float64)
+        )
         a = a.reshape(-1, n)
         be = np.asarray(b_eq, dtype=np.float64).ravel()
         rows.append(a)
