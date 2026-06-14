@@ -500,12 +500,10 @@ def _solve_nlp_subproblem(
         from discopt.solver import _BoundOverrideEvaluator
 
         backend_evaluator = _BoundOverrideEvaluator(evaluator, lb, ub)
+        # "ipm"/"pounce" both route to POUNCE (a robust pure-Rust Ipopt port),
+        # so no separate Ipopt retry is needed for AMP's tightly-fixed integer
+        # subproblems. An explicit nlp_solver="ipopt" still uses cyipopt.
         solver_sequence = [nlp_solver]
-        if nlp_solver == "ipm" and _has_cyipopt():
-            # The pure-JAX IPM is less robust on the tightly fixed integer
-            # subproblems used in AMP's local incumbent search. Retry with
-            # Ipopt before giving up so feasible incumbents are not missed.
-            solver_sequence.append("ipopt")
 
         result = None
         for solver_name in solver_sequence:
@@ -515,19 +513,19 @@ def _solve_nlp_subproblem(
             options: dict[str, float | int] = {"print_level": 0, "max_iter": 300}
             if remaining is not None:
                 options["max_wall_time"] = max(remaining, 0.05)
-            if solver_name == "ipm" and hasattr(evaluator, "_obj_fn"):
-                from discopt._jax.ipm import solve_nlp_ipm
-
-                trial = solve_nlp_ipm(
-                    backend_evaluator,
-                    x0_clipped,
-                    options=options,
-                )
-            else:
+            if solver_name == "ipopt":
                 from discopt.solvers.nlp_ipopt import solve_nlp
 
                 if remaining is not None:
                     options["max_cpu_time"] = max(remaining, 0.05)
+                trial = solve_nlp(
+                    cast(Any, backend_evaluator),
+                    x0_clipped,
+                    options=options,
+                )
+            else:
+                from discopt.solvers.nlp_pounce import solve_nlp
+
                 trial = solve_nlp(
                     cast(Any, backend_evaluator),
                     x0_clipped,

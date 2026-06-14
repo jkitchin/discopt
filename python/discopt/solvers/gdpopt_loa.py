@@ -288,14 +288,12 @@ def _solve_nlp_relaxation(evaluator, lb, ub, nlp_solver: str) -> np.ndarray | No
     x0 = 0.5 * (lb_clip + ub_clip)
 
     try:
-        if nlp_solver == "ipm" and hasattr(evaluator, "_obj_fn"):
-            from discopt._jax.ipm import solve_nlp_ipm
-
-            result = solve_nlp_ipm(evaluator, x0, options={"print_level": 0})
-        else:
+        if nlp_solver == "ipopt":
             from discopt.solvers.nlp_ipopt import solve_nlp
+        else:
+            from discopt.solvers.nlp_pounce import solve_nlp
 
-            result = solve_nlp(evaluator, x0, options={"print_level": 0})
+        result = solve_nlp(evaluator, x0, options={"print_level": 0})
 
         from discopt.solvers import SolveStatus
 
@@ -323,16 +321,14 @@ def _solve_nlp_subproblem(evaluator, sub_lb, sub_ub, nlp_solver: str) -> np.ndar
     proxy = _BoundsProxy(evaluator, ipm_lb, ipm_ub)
 
     try:
-        if nlp_solver == "ipm" and hasattr(evaluator, "_obj_fn"):
-            from discopt._jax.ipm import solve_nlp_ipm
-
-            result = solve_nlp_ipm(proxy, x0, options={"print_level": 0, "max_iter": 200})
-        else:
+        if nlp_solver == "ipopt":
             from discopt.solvers.nlp_ipopt import solve_nlp
+        else:
+            from discopt.solvers.nlp_pounce import solve_nlp
 
-            result = solve_nlp(
-                cast(NLPEvaluator, proxy), x0, options={"print_level": 0, "max_iter": 200}
-            )
+        result = solve_nlp(
+            cast(NLPEvaluator, proxy), x0, options={"print_level": 0, "max_iter": 200}
+        )
 
         from discopt.solvers import SolveStatus
 
