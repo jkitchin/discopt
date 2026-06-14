@@ -62,3 +62,33 @@ def test_milp_snaps_tiny_inverted_bound():
     assert r.status == SolveStatus.OPTIMAL
     assert r.x is not None
     assert abs(float(r.x[1]) - 1.0) <= 1e-6
+
+
+def test_nlp_snaps_tiny_inverted_bound():
+    """The NLP path must also snap tiny inversions: AMP integer-fixed
+    subproblems can arrive with a continuous bound tightened to lb=ub+1e-11,
+    which POUNCE's IPM otherwise rejects as Invalid_Problem_Definition,
+    blocking incumbent recovery (issue #15 gas network)."""
+    import discopt.modeling as dm
+    from discopt.solver import _BoundOverrideEvaluator, _extract_variable_info, _make_evaluator
+    from discopt.solvers.nlp_pounce import solve_nlp
+
+    m = dm.Model("nlp_snap")
+    x = m.continuous("x", lb=0.0, ub=5.0)
+    y = m.continuous("y", lb=0.0, ub=5.0)
+    m.minimize((x - 2.0) * (x - 2.0) + (y - 3.0) * (y - 3.0))
+    m.subject_to(x + y >= 1.0)
+
+    ev = _make_evaluator(m)
+    _, lb, ub, _, _ = _extract_variable_info(m)
+    lb2 = lb.copy()
+    ub2 = ub.copy()
+    # Fix x ~= 2 with a tiny lb > ub inversion (the failure mode from AMP).
+    lb2[0] = 2.0 + 1.8e-11
+    ub2[0] = 2.0
+    be = _BoundOverrideEvaluator(ev, lb2, ub2)
+
+    r = solve_nlp(be, np.array([2.0, 3.0]))
+    assert r.status == SolveStatus.OPTIMAL  # not ERROR / Invalid_Problem_Definition
+    assert r.x is not None
+    assert abs(float(r.x[1]) - 3.0) <= 1e-4
