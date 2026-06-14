@@ -444,4 +444,52 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn gmi_cut_valid_when_integer_var_has_fractional_bound() {
+        // x0 + x1 + s = 2, x0 integer in [0,2], x1 integer with a *fractional*
+        // lower bound 0.5 (as presolve coefficient-strengthening / implied bounds
+        // could produce), s >= 0. Vertex (1.5, 0.5, 0): x0 basic & fractional,
+        // x1 nonbasic at its fractional lower bound. The integer GMI ψ assumes
+        // the nonbasic integer sits at an integer bound, which is FALSE here; the
+        // guard must fall back to the continuous ψ so the cut stays valid for
+        // every feasible integer point (x1 ∈ {1,2}, since x1 is integer ≥ 0.5).
+        let a = [1.0, 1.0, 1.0];
+        let c = [0.0, 0.0, 0.0];
+        let l = [0.0, 0.5, 0.0];
+        let u = [2.0, 2.0, f64::INFINITY];
+        let lp = LpView {
+            a: &a,
+            m: 1,
+            n: 3,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let b = [2.0];
+        let x = [1.5, 0.5, 0.0];
+        let integrality = [true, true, false];
+
+        let basis = recover_basis(&x, &lp, 1e-7).expect("basis");
+        assert_eq!(basis.basic_vars, vec![0]); // x0 is the fractional basic var
+
+        let cuts = separate_gomory(&lp, &b, &basis, &integrality, 1e-7, 1e9);
+        for cut in &cuts {
+            assert!(dot(&cut.coeffs, &x) < cut.rhs - 1e-6, "cut must separate vertex");
+            // Feasible integer points: x1 integer ≥ 0.5 → x1 ∈ {1, 2}.
+            for x0i in 0..=2 {
+                for x1i in 1..=2 {
+                    let s = 2.0 - x0i as f64 - x1i as f64;
+                    if s < -1e-9 {
+                        continue;
+                    }
+                    let pt = [x0i as f64, x1i as f64, s];
+                    assert!(
+                        dot(&cut.coeffs, &pt) >= cut.rhs - 1e-6,
+                        "cut excludes feasible integer point {pt:?}"
+                    );
+                }
+            }
+        }
+    }
 }

@@ -28,6 +28,34 @@ pub fn solve_lp(lp: &LpView<'_>, b: &[f64], opts: &SimplexOptions) -> LpSolve {
     Simplex::new(lp, b, opts).run()
 }
 
+/// Whether `x` satisfies the box `l ≤ x ≤ u` and the equalities `A x = b` to a
+/// small absolute/relative tolerance. Used as the final feasibility audit before
+/// certifying an `Optimal` solve so incremental `x_B` drift (Harris bound
+/// excursions, deferred refactorization) cannot return a wrong optimum.
+fn solution_within_tolerance(
+    a: &[f64],
+    m: usize,
+    n: usize,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+    x: &[f64],
+) -> bool {
+    const FEAS: f64 = 1e-6;
+    for j in 0..n {
+        if x[j] < l[j] - FEAS || x[j] > u[j] + FEAS {
+            return false;
+        }
+    }
+    for i in 0..m {
+        let row: f64 = (0..n).map(|j| a[i * n + j] * x[j]).sum();
+        if (row - b[i]).abs() > FEAS * (1.0 + b[i].abs()) {
+            return false;
+        }
+    }
+    true
+}
+
 struct Simplex<'a> {
     a: &'a [f64],     // m×n row-major (structural+slack columns)
     cols: SparseCols, // CSC view of `a`, built once (pricing hot path)
@@ -452,31 +480,13 @@ impl<'a> Simplex<'a> {
         // incrementally between the ~48-pivot refactorizations and the Harris
         // ratio test permits small bound excursions, so the returned point can
         // drift. Verify it actually satisfies its bounds and Ax=b; on violation
-        // downgrade to Numerical so the warm-start cold fallback re-solves
-        // rather than trusting a wrong "Optimal".
-        let status = if status == LpStatus::Optimal {
-            const FEAS: f64 = 1e-6;
-            let mut ok = true;
-            for j in 0..self.n {
-                if x[j] < self.lb[j] - FEAS || x[j] > self.ub[j] + FEAS {
-                    ok = false;
-                    break;
-                }
-            }
-            if ok {
-                for i in 0..self.m {
-                    let row: f64 = (0..self.n).map(|j| self.a[i * self.n + j] * x[j]).sum();
-                    if (row - self.b[i]).abs() > FEAS * (1.0 + self.b[i].abs()) {
-                        ok = false;
-                        break;
-                    }
-                }
-            }
-            if ok {
-                LpStatus::Optimal
-            } else {
-                LpStatus::Numerical
-            }
+        // downgrade to Numerical so the caller treats it as a failed solve (the
+        // warm path's cold fallback, or the MILP driver decertifying the gap and
+        // branching) rather than trusting a wrong "Optimal".
+        let status = if status == LpStatus::Optimal
+            && !solution_within_tolerance(self.a, self.m, self.n, self.b, &self.lb, &self.ub, &x)
+        {
+            LpStatus::Numerical
         } else {
             status
         };
@@ -594,5 +604,35 @@ mod tests {
         assert_eq!(r.status, LpStatus::Optimal);
         assert!((r.obj - (-3.0)).abs() < 1e-6, "obj {}", r.obj);
         assert!((r.x[0] - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn feasibility_audit_accepts_and_rejects() {
+        // Row: x0 + x1 = 4, with x0,x1 ∈ [0, 5]. (n real cols = 2)
+        let a = [1.0, 1.0];
+        let b = [4.0];
+        let l = [0.0, 0.0];
+        let u = [5.0, 5.0];
+        // Exact feasible point passes.
+        assert!(solution_within_tolerance(&a, 1, 2, &b, &l, &u, &[1.0, 3.0]));
+        // Ax=b drift beyond tolerance is rejected (would be a false "Optimal").
+        assert!(!solution_within_tolerance(&a, 1, 2, &b, &l, &u, &[1.0, 3.1]));
+        // A bound excursion beyond tolerance is rejected.
+        assert!(!solution_within_tolerance(&a, 1, 2, &b, &l, &u, &[-1.0, 5.0]));
+        // Tiny within-tolerance noise still passes.
+        assert!(solution_within_tolerance(&a, 1, 2, &b, &l, &u, &[1.0, 3.0 + 1e-9]));
+    }
+
+    #[test]
+    fn audit_downgrades_drifted_optimal_to_numerical() {
+        // A clean solve still certifies Optimal (audit must not false-trip).
+        let a = [1.0, 1.0, 1.0, 0.0, 1.0, 3.0, 0.0, 1.0];
+        let c = [-1.0, -2.0, 0.0, 0.0];
+        let l = [0.0; 4];
+        let u = [INF; 4];
+        let r = solve(&a, 2, 4, &[4.0, 6.0], &c, &l, &u);
+        assert_eq!(r.status, LpStatus::Optimal);
+        // The returned optimum genuinely satisfies the audit predicate.
+        assert!(solution_within_tolerance(&a, 2, 4, &[4.0, 6.0], &l, &u, &r.x));
     }
 }

@@ -73,8 +73,9 @@ fn try_dual(lp: &LpView<'_>, b: &[f64], start: &Basis, opts: &SimplexOptions) ->
 
     // Verify the starting basis is actually dual-feasible — the precondition
     // the dual simplex *maintains* but does not *establish*. With y = B⁻ᵀc_B the
-    // reduced cost is d_j = c_j − yᵀA_j; a nonbasic-at-lower needs d_j ≥ −tol and
-    // a nonbasic-at-upper needs d_j ≤ tol. A dual-infeasible start would silently
+    // reduced cost is d_j = c_j − yᵀA_j; a nonbasic-at-lower needs d_j ≥ −tol, a
+    // nonbasic-at-upper needs d_j ≤ tol, and a nonbasic *free* variable (both
+    // bounds infinite) needs |d_j| ≤ tol. A dual-infeasible start would silently
     // converge to a wrong Optimal/Infeasible, so request the cold fallback.
     {
         let mut y: Vec<f64> = basis.iter().map(|&j| c[j]).collect();
@@ -86,7 +87,10 @@ fn try_dual(lp: &LpView<'_>, b: &[f64], start: &Basis, opts: &SimplexOptions) ->
                 continue; // basic or fixed: dual feasibility is unconstrained
             }
             let dj = c[j] - sp.dot(j, &y);
-            let ok = if stat[j] == AT_UPPER {
+            let free = l[j] <= -INF && u[j] >= INF;
+            let ok = if free {
+                dj.abs() <= tol
+            } else if stat[j] == AT_UPPER {
                 dj <= tol
             } else {
                 dj >= -tol
@@ -408,5 +412,51 @@ mod tests {
                 );
             }
         }
+    }
+
+    // A dual-INFEASIBLE warm start must be rejected by the precondition check
+    // and fall back to a cold solve — not silently declared "Optimal" at the
+    // wrong point. The all-slack basis for `min -x0 -2x1` has reduced costs
+    // d_x0=-1, d_x1=-2 < 0 at their lower bounds (dual-infeasible) yet is
+    // primal-feasible, so without the check the dual simplex would see no primal
+    // infeasibility and return the origin (obj 0) as optimal.
+    #[test]
+    fn dual_infeasible_warm_start_falls_back_to_cold() {
+        let a = [1.0, 1.0, 1.0, 0.0, 1.0, 3.0, 0.0, 1.0];
+        let (m, n) = (2, 4);
+        let b = [4.0, 6.0];
+        let c = [-1.0, -2.0, 0.0, 0.0];
+        let l = [0.0; 4];
+        let u = [5.0, 5.0, INF, INF];
+        let lp = LpView {
+            a: &a,
+            m,
+            n,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+
+        // All-slack basis: slacks (cols 2,3) basic; structurals at their lower
+        // bound. Primal-feasible (x=0, s=b) but dual-infeasible.
+        let bad = Basis {
+            basic_vars: vec![2, 3],
+            col_status: vec![AT_LOWER, AT_LOWER, BASIC, BASIC],
+        };
+
+        let warm = solve_lp_warm(&lp, &b, &bad, &opts());
+        let cold = solve_lp(&lp, &b, &opts());
+        assert_eq!(cold.status, LpStatus::Optimal);
+        assert_eq!(warm.status, LpStatus::Optimal);
+        // Correct optimum, not the origin the dual-infeasible basis sits at.
+        assert!(cold.obj < -1.0, "sanity: true optimum is negative");
+        assert!(
+            (warm.obj - cold.obj).abs() < 1e-7,
+            "warm {} vs cold {} (should match the true optimum, not 0)",
+            warm.obj,
+            cold.obj
+        );
+        // iters==0 confirms the cold fallback ran (the dual path sets iters>0).
+        assert_eq!(warm.iters, 0, "precondition should have forced cold fallback");
     }
 }
