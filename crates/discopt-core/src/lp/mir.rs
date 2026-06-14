@@ -70,7 +70,7 @@ pub fn separate_mir(
     max_dynamism: f64,
 ) -> Vec<MirCut> {
     let m = b_ub.len();
-    let n = if m > 0 { a_ub.len() / m } else { 0 };
+    let n = a_ub.len().checked_div(m).unwrap_or(0);
     let mut cuts = Vec::new();
     if n == 0 {
         return cuts;

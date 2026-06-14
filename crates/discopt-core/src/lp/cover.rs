@@ -167,7 +167,7 @@ pub fn separate_cover(
                 .filter(|&&(j, _, _)| !cover.iter().any(|&(cj, _, _)| cj == j))
                 .map(|&(j, w, _)| (j, w.round() as usize))
                 .collect();
-            noncover.sort_by(|a, b| b.1.cmp(&a.1));
+            noncover.sort_by_key(|b| std::cmp::Reverse(b.1));
             for (j, wi) in noncover {
                 let alpha = if wi > capn {
                     rhs_i // never fits alongside anything → maximal coefficient

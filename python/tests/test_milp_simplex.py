@@ -74,9 +74,7 @@ class TestMilpSimplexVsHighs:
         c = np.array([-10.0, -9.0, -8.0, -1.0])
         A = np.array([[5.0, 5.0, 5.0, 5.0]])
         b = np.array([9.0])
-        status, _x, obj, _b, _n, _i = _solve_simplex(
-            c, A, b, np.zeros(4), np.ones(4), [0, 1, 2, 3]
-        )
+        status, _x, obj, _b, _n, _i = _solve_simplex(c, A, b, np.zeros(4), np.ones(4), [0, 1, 2, 3])
         assert status == "optimal"
         assert abs(obj - (-10.0)) < 1e-6
 

@@ -328,9 +328,7 @@ def _dispatch_nlp_solve(nlp_solver: str, evaluator, x0, options: dict):
 
         return solve_nlp(evaluator, x0, options=options)
     else:
-        raise ValueError(
-            f"Unknown nlp_solver: {nlp_solver!r}. Use 'ipm', 'pounce', or 'ipopt'."
-        )
+        raise ValueError(f"Unknown nlp_solver: {nlp_solver!r}. Use 'ipm', 'pounce', or 'ipopt'.")
 
 
 def _safe_x0(evaluator) -> np.ndarray:
