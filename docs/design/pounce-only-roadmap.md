@@ -863,3 +863,113 @@ faster) with every objective matching HiGHS — a competitive MILP engine.
   presolve, and incremental `x_B` (the driver currently recomputes it by `ftran`
   each iteration — correctness-first). These close the remaining ~2–4× and scale
   to MIPLIB-size instances.
+
+## 10. Search-intelligence hardening (P5/P6/P8 — done)
+
+The remaining ~2–4× gap and MIPLIB-scale robustness were closed by completing the
+HiGHS-class stack on the warm-started simplex, all validated against HiGHS
+(`incorrect_count == 0`):
+
+- **Devex pricing** (`lp/simplex/primal.rs`) — reference-weight steepest-edge
+  approximation replacing Dantzig; only changes which improving column enters, so
+  correctness is unaffected (Bland's rule still guards cycling). Cf. the Devex code
+  of Harris (1973) {cite-key: Harris1973} and steepest-edge of Forrest & Goldfarb
+  (1992) {cite-key: ForrestGoldfarb1992}.
+- **Harris two-pass bound-flipping ratio test** (`primal.rs`) — pass 1 finds the
+  largest step within a small feasibility expansion δ; pass 2 takes the
+  largest-pivot blocker for numerical stability (Harris 1973).
+- **Incremental x_B** — rank-1 update of the basic-variable vector per pivot,
+  refreshed on refactorization (replaces the per-iteration `ftran`).
+- **Sparse node-LP representation (CSC)** (`lp/simplex/sparse.rs`) — pricing and
+  ratio-test dots iterate column nonzeros instead of materializing dense columns.
+- **LP presolve / FBBT** (`lp/simplex/presolve.rs`) — sound, dimension-preserving
+  interval bound tightening at the root; never cuts a feasible point, so no
+  postsolve.
+- **Root + node cuts**: GMI (Gomory 1958 {cite-key: Gomory1958}) off the native
+  basis (multi-round, tailing-off) and **lifted knapsack cover cuts**
+  (`lp/cover.rs`) via the Crowder–Johnson–Padberg greedy heuristic with sequential
+  up-lifting (Crowder, Johnson & Padberg 1983 {cite-key: CrowderJohnsonPadberg1983}),
+  shared through a global cut pool with lazy basis extension.
+- **Reliability strong branching** and a **rounding primal heuristic** for early
+  incumbents — the latter was the decisive lever on hard knapsacks (a 320-var
+  instance fell 13701 → 505 nodes, to ~1.1× HiGHS).
+
+**Net:** the pure-MILP engine is competitive-to-faster than HiGHS on knapsack-class
+instances, correct throughout, with MINLP/MIQP/NLP untouched on the POUNCE path.
+
+## 11. AMP inner MILP relaxation on the simplex
+
+AMP (Nagarajan et al. 2019 {cite-key: Nagarajan2019}) iterates a
+piecewise-McCormick / convex-hull **MILP relaxation** (→ lower bound) against an
+NLP subproblem (→ upper bound). A `milp_solver="simplex"` option routes that inner
+relaxation `MilpRelaxationModel.solve(backend="simplex")` through the warm-started
+simplex. Soundness: the adapter reports the MILP **dual lower bound**, so AMP's
+`LB ≤ global_opt ≤ UB` certificate is preserved. All convhull formulations
+(disaggregated/facet/sos2) are linearized to pure binary MILPs, so the engine is
+correctness-safe for all three.
+
+## 12. POUNCE as differentiable JAX layers; retiring the JAX IPM
+
+Differentiability in discopt is the **implicit function theorem at the KKT point**,
+not autodiff through a solver's iterations — so it is orthogonal to the backend
+(McCormick 1976 for relaxations; Mehrotra 1992 {cite-key: Mehrotra1992} for the IPM
+step; Wächter & Biegler 2006 {cite-key: Wachter2006} for the filter line-search
+Ipopt that POUNCE ports; Pirnay et al. 2012 {cite-key: Pirnay2012} for sIPOPT
+sensitivity; Amos & Kolter 2017 {cite-key: Amos2017} for OptNet-style implicit
+LP/QP differentiation).
+
+`_jax/pounce_layer.py` wraps POUNCE as a differentiable JAX layer: the forward
+solve runs on the host via `jax.pure_callback`, and a `jax.custom_vjp` backward
+solves the KKT adjoint assembled from JAX-compiled model derivatives (reusing the
+`sipopt.py` machinery). The differentiable LP/QP layers (`differentiable_lp.py` /
+`differentiable_qp.py`) keep their implicit-KKT `defjvp` but now solve the forward
+on POUNCE's interior-point KKT point (`solve_lp_kkt` / `solve_qp_kkt`), which —
+being an analytic-center point — keeps the sensitivity system nonsingular (unlike a
+degenerate simplex vertex). The OA/GDP/AMP NLP subproblems and the differentiable
+test suite were repointed off the JAX IPM (and off cyipopt) onto POUNCE.
+
+**Retirement status.** The JAX IPM is retired as a *user-facing NLP solver*; JAX
+remains the indispensable **autodiff substrate** (model Hessians/Jacobians/∂p,
+McCormick envelopes, the custom_vjp adjoint solves). Its `ipm_solve` core is *not*
+deleted, because it powers the jit-fused McCormick-NLP relaxation engine
+(`mccormick_nlp.py`) used for tight spatial-B&B bounds — a GPU/vmap-capable path
+POUNCE (a host callback) cannot fuse per node.
+
+## 13. All-Rust spatial-B&B relaxation (in progress)
+
+The spatial-B&B LP-form McCormick relaxation (`MccormickLPRelaxer`, bilinears lifted
+to McCormick envelopes — McCormick 1976 {cite-key: McCormick1976}, Tsoukalas &
+Mitsos 2014 {cite-key: Tsoukalas2014}) now solves each node via the **Rust
+warm-started simplex** (`backend="simplex"`, default), with HiGHS/POUNCE fallback.
+Bounds match HiGHS exactly; an end-to-end nonconvex global solve certifies the
+correct optimum. Remaining (future): port the McCormick **construction** into Rust
+(the math foundations are already in `crates/discopt-core/src/presolve/polynomial.rs`
+plus the Expression IR) so the spatial-B&B relaxation path is fully JAX-free, at
+which point the McCormick-NLP/`ipm_solve` engine can be retired too — gated on a
+benchmark of the LP-vs-NLP relaxation tightness tradeoff so global-solver
+effectiveness is not degraded.
+
+### References (verified)
+
+- Crowder, H., Johnson, E. L., Padberg, M. (1983). Solving large-scale zero-one
+  linear programming problems. *Operations Research* 31(5), 803–834.
+- Forrest, J. J., Goldfarb, D. (1992). Steepest-edge simplex algorithms for linear
+  programming. *Mathematical Programming* 57, 341–374.
+- Gomory, R. E. (1958). Outline of an algorithm for integer solutions to linear
+  programs. *Bulletin of the AMS* 64, 275–278.
+- Harris, P. M. J. (1973). Pivot selection methods of the Devex LP code.
+  *Mathematical Programming* 5, 1–28.
+- McCormick, G. P. (1976). Computability of global solutions to factorable
+  nonconvex programs: Part I. *Mathematical Programming* 10, 147–175.
+- Mehrotra, S. (1992). On the implementation of a primal-dual interior point
+  method. *SIAM Journal on Optimization* 2(4), 575–601.
+- Nagarajan, H., Lu, M., Wang, S., Bent, R., Sundar, K. (2019). An adaptive,
+  multivariate partitioning algorithm for global optimization of nonconvex
+  programs. *Journal of Global Optimization* 74, 639–675.
+- Pirnay, H., López-Negrete, R., Biegler, L. T. (2012). Optimal sensitivity based
+  on IPOPT. *Mathematical Programming Computation* 4(4), 307–331.
+- Tsoukalas, A., Mitsos, A. (2014). Multivariate McCormick relaxations.
+  *Journal of Global Optimization* 59, 633–662.
+- Wächter, A., Biegler, L. T. (2006). On the implementation of an interior-point
+  filter line-search algorithm for large-scale nonlinear programming.
+  *Mathematical Programming* 106, 25–57.
