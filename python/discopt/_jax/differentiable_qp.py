@@ -13,18 +13,37 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-
-from discopt._jax.qp_ipm import qp_ipm_solve
+import numpy as np
 
 _EPS = 1e-20
+
+
+def _qp_forward_host(Q, c, A, b, x_l, x_u):
+    """Host forward solve via POUNCE's interior-point QP, returning the KKT point.
+
+    Interior-point ⇒ analytic-center solution, keeping the KKT sensitivity in
+    ``qp_solve_jvp`` nonsingular (as the JAX IPM did before).
+    """
+    from discopt.solvers.qp_pounce import solve_qp_kkt
+
+    obj, x, y, z_l, z_u = solve_qp_kkt(
+        np.asarray(Q, dtype=np.float64),
+        np.asarray(c, dtype=np.float64),
+        np.asarray(A, dtype=np.float64),
+        np.asarray(b, dtype=np.float64),
+        np.asarray(x_l, dtype=np.float64),
+        np.asarray(x_u, dtype=np.float64),
+    )
+    return (np.float64(obj), x, y, z_l, z_u)
 
 
 @jax.custom_jvp
 def qp_solve(Q, c, A, b, x_l, x_u):
     """Solve a QP and return (obj, x, y, z_l, z_u).
 
-    This function is differentiable w.r.t. all inputs via implicit
-    differentiation of the KKT conditions.
+    The forward solve runs on POUNCE (pure-Rust IPM) via ``jax.pure_callback``;
+    differentiability comes from implicit differentiation of the KKT conditions
+    (see ``qp_solve_jvp``), independent of the backend.
 
     Args:
         Q: (n, n) symmetric positive semi-definite objective matrix.
@@ -37,8 +56,18 @@ def qp_solve(Q, c, A, b, x_l, x_u):
     Returns:
         Tuple of (obj, x, y, z_l, z_u).
     """
-    state = qp_ipm_solve(Q, c, A, b, x_l, x_u)
-    return state.obj, state.x, state.y, state.z_l, state.z_u
+    n = c.shape[0]
+    m = A.shape[0]
+    shapes = (
+        jax.ShapeDtypeStruct((), jnp.float64),
+        jax.ShapeDtypeStruct((n,), jnp.float64),
+        jax.ShapeDtypeStruct((m,), jnp.float64),
+        jax.ShapeDtypeStruct((n,), jnp.float64),
+        jax.ShapeDtypeStruct((n,), jnp.float64),
+    )
+    return jax.pure_callback(
+        _qp_forward_host, shapes, Q, c, A, b, x_l, x_u, vmap_method="sequential"
+    )
 
 
 @qp_solve.defjvp
