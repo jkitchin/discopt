@@ -123,13 +123,13 @@ def _solve_objective(model: Model, problem_class: ProblemClass) -> float | None:
             )
             return float(qp_state.obj) + qp_data.obj_const
         else:
-            from discopt._jax.ipm import solve_nlp_ipm
             from discopt._jax.nlp_evaluator import NLPEvaluator
+            from discopt.solvers.nlp_pounce import solve_nlp
 
             evaluator = NLPEvaluator(model)
             lb, ub = evaluator.variable_bounds
             x0 = 0.5 * (np.clip(lb, -100, 100) + np.clip(ub, -100, 100))
-            nlp_result = solve_nlp_ipm(evaluator, x0)
+            nlp_result = solve_nlp(evaluator, x0)
             obj = nlp_result.objective
             return float(obj) if obj is not None else None
     except Exception:

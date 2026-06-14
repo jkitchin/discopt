@@ -181,8 +181,10 @@ def solve_gdpopt_loa(
             break
 
         x_master = master_result.x[:n_vars]
-        if master_bound_valid and master_result.objective is not None:
-            LB = max(LB, master_result.objective)
+        # Valid LB comes from the master's dual ``bound`` only, never the
+        # incumbent ``objective`` (an upper bound on a limited master solve).
+        if master_bound_valid and master_result.bound is not None:
+            LB = max(LB, master_result.bound)
 
         # b. Fix integers to master values, solve NLP subproblem
         sub_lb = lb.copy()
@@ -288,14 +290,12 @@ def _solve_nlp_relaxation(evaluator, lb, ub, nlp_solver: str) -> np.ndarray | No
     x0 = 0.5 * (lb_clip + ub_clip)
 
     try:
-        if nlp_solver == "ipm" and hasattr(evaluator, "_obj_fn"):
-            from discopt._jax.ipm import solve_nlp_ipm
-
-            result = solve_nlp_ipm(evaluator, x0, options={"print_level": 0})
-        else:
+        if nlp_solver == "ipopt":
             from discopt.solvers.nlp_ipopt import solve_nlp
+        else:
+            from discopt.solvers.nlp_pounce import solve_nlp
 
-            result = solve_nlp(evaluator, x0, options={"print_level": 0})
+        result = solve_nlp(evaluator, x0, options={"print_level": 0})
 
         from discopt.solvers import SolveStatus
 
@@ -323,16 +323,14 @@ def _solve_nlp_subproblem(evaluator, sub_lb, sub_ub, nlp_solver: str) -> np.ndar
     proxy = _BoundsProxy(evaluator, ipm_lb, ipm_ub)
 
     try:
-        if nlp_solver == "ipm" and hasattr(evaluator, "_obj_fn"):
-            from discopt._jax.ipm import solve_nlp_ipm
-
-            result = solve_nlp_ipm(proxy, x0, options={"print_level": 0, "max_iter": 200})
-        else:
+        if nlp_solver == "ipopt":
             from discopt.solvers.nlp_ipopt import solve_nlp
+        else:
+            from discopt.solvers.nlp_pounce import solve_nlp
 
-            result = solve_nlp(
-                cast(NLPEvaluator, proxy), x0, options={"print_level": 0, "max_iter": 200}
-            )
+        result = solve_nlp(
+            cast(NLPEvaluator, proxy), x0, options={"print_level": 0, "max_iter": 200}
+        )
 
         from discopt.solvers import SolveStatus
 
@@ -502,10 +500,14 @@ def _solve_master_milp(
 ):
     """Build and solve the master MILP."""
     try:
-        from discopt.solvers.milp_highs import solve_milp
+        from discopt.solvers.lp_backend import get_milp_solver
+
+        # HiGHS if present, else POUNCE (self-hosted B&B) — HiGHS-free path.
+        solve_milp = get_milp_solver()
     except ImportError as e:
         raise ImportError(
-            "LOA solver requires highspy for the MILP master. Install with: pip install highspy"
+            "LOA solver requires a MILP backend for the master. Install one of: "
+            "pip install highspy  |  pip install pounce-solver"
         ) from e
 
     # Determine master problem dimensions

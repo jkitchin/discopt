@@ -96,10 +96,18 @@ def _warn_once(msg: str, *args) -> None:
 
 @dataclass
 class MilpRelaxationResult:
-    """Result of solving a MILP relaxation."""
+    """Result of solving a MILP relaxation.
+
+    ``objective`` is the relaxation MILP's incumbent. ``bound`` is the rigorous
+    dual lower bound on the relaxation optimum (hence on the original problem);
+    it is the value AMP/OA-style callers must use as the global lower bound. It
+    is ``None`` when no valid dual bound is available (or the relaxation
+    objective is not itself a valid bound on the original).
+    """
 
     status: str  # "optimal", "infeasible", "error", "time_limit"
     objective: Optional[float] = None
+    bound: Optional[float] = None
     x: Optional[np.ndarray] = None
 
 
@@ -131,9 +139,14 @@ class MilpRelaxationModel:
         self,
         time_limit: Optional[float] = None,
         gap_tolerance: float = 1e-4,
+        backend: str = "auto",
     ) -> MilpRelaxationResult:
         from discopt.solvers import SolveStatus
-        from discopt.solvers.milp_highs import solve_milp
+        from discopt.solvers.lp_backend import get_milp_solver
+
+        # backend="auto": HiGHS if present, else POUNCE. backend="simplex" routes
+        # to the warm-started-simplex B&B (falls back to auto if unavailable).
+        solve_milp = get_milp_solver(backend=backend)
 
         result = solve_milp(
             c=self._c,
@@ -160,7 +173,14 @@ class MilpRelaxationModel:
         if result.objective is not None and self._objective_bound_valid:
             obj = float(result.objective) + self._obj_offset
 
-        return MilpRelaxationResult(status=status_str, objective=obj, x=result.x)
+        # The sound lower bound on the original problem is the MILP's dual bound
+        # (not its incumbent), and only when this relaxation's objective is a
+        # valid bound on the original (``_objective_bound_valid``).
+        bound = None
+        if result.bound is not None and self._objective_bound_valid:
+            bound = float(result.bound) + self._obj_offset
+
+        return MilpRelaxationResult(status=status_str, objective=obj, bound=bound, x=result.x)
 
 
 @dataclass

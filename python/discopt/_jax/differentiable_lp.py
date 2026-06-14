@@ -14,18 +14,37 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-
-from discopt._jax.lp_ipm import lp_ipm_solve
+import numpy as np
 
 _EPS = 1e-20
+
+
+def _lp_forward_host(c, A, b, x_l, x_u):
+    """Host forward solve via POUNCE's interior-point LP, returning the KKT point.
+
+    POUNCE returns the analytic center of the optimal face (strictly positive
+    complementarity slacks), so the KKT sensitivity system in ``lp_solve_jvp``
+    stays nonsingular — the property the JAX IPM previously provided.
+    """
+    from discopt.solvers.lp_pounce import solve_lp_kkt
+
+    obj, x, y, z_l, z_u = solve_lp_kkt(
+        np.asarray(c, dtype=np.float64),
+        np.asarray(A, dtype=np.float64),
+        np.asarray(b, dtype=np.float64),
+        np.asarray(x_l, dtype=np.float64),
+        np.asarray(x_u, dtype=np.float64),
+    )
+    return (np.float64(obj), x, y, z_l, z_u)
 
 
 @jax.custom_jvp
 def lp_solve(c, A, b, x_l, x_u):
     """Solve an LP and return (obj, x, y, z_l, z_u).
 
-    This function is differentiable w.r.t. all inputs via implicit
-    differentiation of the KKT conditions.
+    The forward solve runs on POUNCE (pure-Rust IPM) via ``jax.pure_callback``;
+    the function is differentiable w.r.t. all inputs via implicit differentiation
+    of the KKT conditions (see ``lp_solve_jvp``), independent of the backend.
 
     Args:
         c: (n,) objective coefficients.
@@ -42,8 +61,16 @@ def lp_solve(c, A, b, x_l, x_u):
           z_l: (n,) optimal dual variables for lower bounds
           z_u: (n,) optimal dual variables for upper bounds
     """
-    state = lp_ipm_solve(c, A, b, x_l, x_u)
-    return state.obj, state.x, state.y, state.z_l, state.z_u
+    n = c.shape[0]
+    m = A.shape[0]
+    shapes = (
+        jax.ShapeDtypeStruct((), jnp.float64),
+        jax.ShapeDtypeStruct((n,), jnp.float64),
+        jax.ShapeDtypeStruct((m,), jnp.float64),
+        jax.ShapeDtypeStruct((n,), jnp.float64),
+        jax.ShapeDtypeStruct((n,), jnp.float64),
+    )
+    return jax.pure_callback(_lp_forward_host, shapes, c, A, b, x_l, x_u, vmap_method="sequential")
 
 
 @lp_solve.defjvp

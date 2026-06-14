@@ -366,3 +366,72 @@ class TestNLWriterCollocation:
         assert rep.n_vars == nvar
         assert rep.n_constraints > 0
         assert rep.objective_sense == "minimize"
+
+
+class TestNLWriterDeepNesting:
+    """Deep, left-nested expression DAGs must export without recursion overflow.
+
+    A model built with ``sum()`` over many terms produces a long chain of
+    ``BinaryOp`` '+' nodes. The writer traverses the DAG iteratively (explicit
+    work stacks), so export must succeed well past Python's recursion limit
+    (~1000) and stay numerically faithful.
+    """
+
+    def test_deep_sum_objective_and_constraint_export(self):
+        import sys
+
+        n = 3 * sys.getrecursionlimit()  # comfortably past the recursion limit
+        m = dm.Model("deep")
+        xs = [m.continuous(f"x{i}", lb=0, ub=1) for i in range(n)]
+        m.minimize(sum((xs[i] - 0.5) ** 2 for i in range(n)))
+        m.subject_to(sum(xs[i] for i in range(n)) >= 1)
+
+        nl = m.to_nl()  # must not raise RecursionError
+        assert nl is not None and nl.startswith("g3")
+
+    def test_deep_sum_roundtrip_parse(self, tmp_path):
+        try:
+            from discopt._rust import parse_nl_file
+        except ImportError:
+            pytest.skip("Rust .nl parser not available")
+
+        n = 2000
+        m = dm.Model("deep")
+        xs = [m.continuous(f"x{i}", lb=0, ub=1) for i in range(n)]
+        m.minimize(sum(xs))
+        m.subject_to(sum(xs) <= 5)
+
+        nl_path = tmp_path / "deep.nl"
+        m.to_nl(str(nl_path))
+        rep = parse_nl_file(str(nl_path))
+        assert rep.n_vars == n
+        assert rep.n_constraints == 1
+
+    def test_deep_sum_values_match_compiled(self):
+        """The exported nonlinear body must evaluate to the same value the
+        compiled expression does (the iterative linear+nonlinear split stays
+        faithful). A modest chain length keeps the JAX compiler used as the
+        oracle below within its own recursion limit."""
+        import numpy as np
+        from discopt._jax.dag_compiler import compile_expression
+        from discopt.export.nl import _NLWriter
+
+        n = 150
+        m = dm.Model("deep")
+        xs = [m.continuous(f"x{i}", lb=-1, ub=1) for i in range(n)]
+        m.minimize(sum((xs[i] - 0.5) ** 2 for i in range(n)))
+
+        writer = _NLWriter(m)
+        writer._build_var_map()
+        writer._decompose_expressions()
+
+        rng = np.random.default_rng(0)
+        x = rng.standard_normal(n)
+        nl_part = (
+            float(compile_expression(writer._obj_nonlinear, m)(x))
+            if writer._obj_nonlinear is not None
+            else 0.0
+        )
+        lin_part = sum(coeff * x[idx] for idx, coeff in writer._obj_linear.items())
+        expected = float(compile_expression(m._objective.expression, m)(x))
+        np.testing.assert_allclose(lin_part + nl_part, expected, atol=1e-9)

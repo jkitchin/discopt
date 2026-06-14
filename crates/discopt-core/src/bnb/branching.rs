@@ -284,8 +284,11 @@ pub fn create_children(
     let idx = decision.var_index;
     let bp = decision.branch_point;
 
-    // Warm-start: pass parent's stored solution to children.
+    // Warm-start: pass parent's stored solution and optimal LP basis to
+    // children. The parent's basis is dual-feasible for each child (the branch
+    // only tightens one bound), so the dual simplex re-optimizes in few pivots.
     let parent_sol = parent.parent_solution.clone();
+    let parent_basis = parent.basis.clone();
 
     // Inherit parent's lower bound: the child's feasible region is a subset
     // of the parent's, so the parent's lower bound is valid for the child.
@@ -305,6 +308,7 @@ pub fn create_children(
         local_lower_bound: inherited_lb,
         status: NodeStatus::Pending,
         parent_solution: parent_sol.clone(),
+        basis: parent_basis.clone(),
     };
 
     // Right child: x_i >= ceil(val)
@@ -319,6 +323,7 @@ pub fn create_children(
         local_lower_bound: inherited_lb,
         status: NodeStatus::Pending,
         parent_solution: parent_sol,
+        basis: parent_basis,
     };
 
     (left, right)
@@ -351,6 +356,7 @@ pub fn create_children_spatial(
         local_lower_bound: inherited_lb,
         status: NodeStatus::Pending,
         parent_solution: parent_sol.clone(),
+        basis: None, // spatial branching is MINLP-side; no simplex basis
     };
 
     // Right child: x_i >= midpoint (no gap)
@@ -365,6 +371,7 @@ pub fn create_children_spatial(
         local_lower_bound: inherited_lb,
         status: NodeStatus::Pending,
         parent_solution: parent_sol,
+        basis: None, // spatial branching is MINLP-side; no simplex basis
     };
 
     (left, right)
@@ -432,6 +439,29 @@ pub fn select_spatial_branch_variable(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lp::basis::Basis;
+
+    #[test]
+    fn children_inherit_parent_basis() {
+        // A parent carrying an optimal basis branches; both children must
+        // inherit that basis as their dual-simplex warm-start state.
+        let mut parent = Node::new(NodeId(0), None, 0, vec![0.0, 0.0], vec![5.0, 5.0]);
+        let basis = Basis::from_basic(4, vec![2, 3]);
+        parent.basis = Some(basis.clone());
+        parent.local_lower_bound = -10.0;
+        let decision = BranchDecision {
+            var_index: 0,
+            branch_point: 2.0,
+        };
+        let mut counter = 1usize;
+        let (left, right) = create_children(&parent, &decision, || {
+            let id = NodeId(counter);
+            counter += 1;
+            id
+        });
+        assert_eq!(left.basis.as_ref(), Some(&basis));
+        assert_eq!(right.basis.as_ref(), Some(&basis));
+    }
 
     #[test]
     fn test_most_fractional_selects_closest_to_half() {

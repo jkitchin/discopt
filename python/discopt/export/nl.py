@@ -222,11 +222,52 @@ class _NLWriter:
 
         A scalar body yields a single-element list; an array body yields one
         scalar expression per element in row-major order.
+
+        A purely scalar body (the common case, including deep ``sum()`` chains)
+        skips the recursive :meth:`_scalarize` pass entirely — the downstream
+        linear/nonlinear split and writer already traverse scalar nodes
+        iteratively, so this avoids a recursion-limit overflow on deep DAGs.
+        Only genuinely array-structured bodies (matrix products, axis
+        reductions, unindexed array variables) need expansion.
         """
+        if not self._needs_scalarize(expr):
+            return [expr]
         arr = self._scalarize(expr)
         if arr.ndim == 0:
             return [cast(Expression, arr[()])]
         return list(arr.ravel())
+
+    def _needs_scalarize(self, expr: Expression) -> bool:
+        """True if ``expr`` has array structure requiring element expansion.
+
+        Walks the DAG iteratively (no recursion). Returns ``True`` on the first
+        node that introduces array shape — an unindexed array ``Variable``, a
+        ``MatMulExpression``, an axis-reducing ``SumExpression``, or an
+        ``IndexExpression`` that does not resolve to a single scalar variable.
+        Scalar-only bodies return ``False`` and bypass :meth:`_scalarize`.
+        """
+        stack: list[Expression] = [expr]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, Variable):
+                if node.shape not in ((), (1,)):
+                    return True
+            elif isinstance(node, (MatMulExpression, SumExpression)):
+                return True
+            elif isinstance(node, IndexExpression):
+                if self._resolve_var_index(node) is None:
+                    return True
+            elif isinstance(node, BinaryOp):
+                stack.append(node.left)
+                stack.append(node.right)
+            elif isinstance(node, UnaryOp):
+                stack.append(node.operand)
+            elif isinstance(node, FunctionCall):
+                stack.extend(node.args)
+            elif isinstance(node, SumOverExpression):
+                stack.extend(node.terms)
+            # Constant, scalar Variable, resolved IndexExpression, opaque leaves: fine
+        return False
 
     @staticmethod
     def _obj0(x) -> np.ndarray:
@@ -383,72 +424,78 @@ class _NLWriter:
         linear: dict[int, float],
         nonlinear: list[Expression],
     ):
-        """Recursively collect linear terms and segregate nonlinear ones."""
-        if isinstance(expr, Constant):
-            val = float(expr.value)
-            if val != 0.0:
-                # Constant contributes to the nonlinear part (or rather, a constant offset)
-                nonlinear.append(Constant(val * coeff))
-            return
+        """Collect linear terms ``{var_idx: coeff}`` and segregate nonlinear ones.
 
-        if isinstance(expr, Variable):
-            if expr.shape == () or expr.shape == (1,):
-                idx = self._var_index.get((expr.name, 0))
-                if idx is not None:
-                    linear[idx] = linear.get(idx, 0.0) + coeff
-                    return
-            # Array variable without indexing - treat as nonlinear
-            nonlinear.append(expr if coeff == 1.0 else BinaryOp("*", Constant(coeff), expr))
-            return
+        Driven by an explicit ``(expr, coeff)`` work stack rather than recursion:
+        a body built with ``sum()`` of many terms is a deeply left-nested chain
+        of ``BinaryOp`` "+" nodes, which overflows Python's recursion limit. The
+        ``nonlinear`` output list is order-sensitive (it is later folded into a
+        sum), so children are pushed reversed to preserve the original
+        left-to-right pre-order in which terms were appended.
+        """
+        stack: list[tuple[Expression, float]] = [(expr, coeff)]
+        while stack:
+            node, c = stack.pop()
 
-        if isinstance(expr, IndexExpression):
-            var_idx = self._resolve_var_index(expr)
-            if var_idx is not None:
-                linear[var_idx] = linear.get(var_idx, 0.0) + coeff
-                return
-            nonlinear.append(expr if coeff == 1.0 else BinaryOp("*", Constant(coeff), expr))
-            return
+            if isinstance(node, Constant):
+                val = float(node.value)
+                if val != 0.0:
+                    # A nonzero constant contributes a constant offset.
+                    nonlinear.append(Constant(val * c))
+                continue
 
-        if isinstance(expr, BinaryOp):
-            if expr.op == "+":
-                self._collect_linear(expr.left, coeff, linear, nonlinear)
-                self._collect_linear(expr.right, coeff, linear, nonlinear)
-                return
-            if expr.op == "-":
-                self._collect_linear(expr.left, coeff, linear, nonlinear)
-                self._collect_linear(expr.right, -coeff, linear, nonlinear)
-                return
-            if expr.op == "*":
-                # Check if one side is a constant
-                lc = self._get_const(expr.left)
-                rc = self._get_const(expr.right)
-                if lc is not None:
-                    self._collect_linear(expr.right, coeff * lc, linear, nonlinear)
-                    return
-                if rc is not None:
-                    self._collect_linear(expr.left, coeff * rc, linear, nonlinear)
-                    return
-            # Not linear
-            if coeff == 1.0:
-                nonlinear.append(expr)
-            else:
-                nonlinear.append(BinaryOp("*", Constant(coeff), expr))
-            return
+            if isinstance(node, Variable):
+                if node.shape == () or node.shape == (1,):
+                    idx = self._var_index.get((node.name, 0))
+                    if idx is not None:
+                        linear[idx] = linear.get(idx, 0.0) + c
+                        continue
+                # Array variable without indexing - treat as nonlinear
+                nonlinear.append(node if c == 1.0 else BinaryOp("*", Constant(c), node))
+                continue
 
-        if isinstance(expr, UnaryOp) and expr.op == "neg":
-            self._collect_linear(expr.operand, -coeff, linear, nonlinear)
-            return
+            if isinstance(node, IndexExpression):
+                var_idx = self._resolve_var_index(node)
+                if var_idx is not None:
+                    linear[var_idx] = linear.get(var_idx, 0.0) + c
+                    continue
+                nonlinear.append(node if c == 1.0 else BinaryOp("*", Constant(c), node))
+                continue
 
-        if isinstance(expr, SumOverExpression):
-            for term in expr.terms:
-                self._collect_linear(term, coeff, linear, nonlinear)
-            return
+            if isinstance(node, BinaryOp):
+                if node.op == "+":
+                    stack.append((node.right, c))
+                    stack.append((node.left, c))
+                    continue
+                if node.op == "-":
+                    stack.append((node.right, -c))
+                    stack.append((node.left, c))
+                    continue
+                if node.op == "*":
+                    # Fold in a constant factor on either side.
+                    lc = self._get_const(node.left)
+                    rc = self._get_const(node.right)
+                    if lc is not None:
+                        stack.append((node.right, c * lc))
+                        continue
+                    if rc is not None:
+                        stack.append((node.left, c * rc))
+                        continue
+                # Not linear (/, **, or product of two non-constants)
+                nonlinear.append(node if c == 1.0 else BinaryOp("*", Constant(c), node))
+                continue
 
-        # Everything else is nonlinear
-        if coeff == 1.0:
-            nonlinear.append(expr)
-        else:
-            nonlinear.append(BinaryOp("*", Constant(coeff), expr))
+            if isinstance(node, UnaryOp) and node.op == "neg":
+                stack.append((node.operand, -c))
+                continue
+
+            if isinstance(node, SumOverExpression):
+                for term in reversed(node.terms):
+                    stack.append((term, c))
+                continue
+
+            # Everything else is nonlinear
+            nonlinear.append(node if c == 1.0 else BinaryOp("*", Constant(c), node))
 
     def _get_const(self, expr: Expression) -> float | None:
         # Only 0-d (scalar) constants are linear coefficients. Array-valued
@@ -546,29 +593,36 @@ class _NLWriter:
         buf.write(" 0 0 0 0 0\t# common expressions\n")
 
     def _collect_var_indices(self, expr: Expression, result: set[int]):
-        """Collect all variable indices referenced in an expression."""
-        if isinstance(expr, Variable):
-            if expr.shape == () or expr.shape == (1,):
-                idx = self._var_index.get((expr.name, 0))
-                if idx is not None:
-                    result.add(idx)
-        elif isinstance(expr, IndexExpression):
-            vi = self._resolve_var_index(expr)
-            if vi is not None:
-                result.add(vi)
-        elif isinstance(expr, BinaryOp):
-            self._collect_var_indices(expr.left, result)
-            self._collect_var_indices(expr.right, result)
-        elif isinstance(expr, UnaryOp):
-            self._collect_var_indices(expr.operand, result)
-        elif isinstance(expr, FunctionCall):
-            for arg in expr.args:
-                self._collect_var_indices(arg, result)
-        elif isinstance(expr, SumExpression):
-            self._collect_var_indices(expr.operand, result)
-        elif isinstance(expr, SumOverExpression):
-            for term in expr.terms:
-                self._collect_var_indices(term, result)
+        """Collect all variable indices referenced in an expression.
+
+        Uses an explicit work stack rather than recursion: a model built with
+        ``sum()`` of many terms produces a deeply left-nested chain of
+        ``BinaryOp`` nodes, and recursing over it overflows Python's recursion
+        limit. Traversal order is irrelevant since ``result`` is a set.
+        """
+        stack: list[Expression] = [expr]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, Variable):
+                if node.shape == () or node.shape == (1,):
+                    idx = self._var_index.get((node.name, 0))
+                    if idx is not None:
+                        result.add(idx)
+            elif isinstance(node, IndexExpression):
+                vi = self._resolve_var_index(node)
+                if vi is not None:
+                    result.add(vi)
+            elif isinstance(node, BinaryOp):
+                stack.append(node.left)
+                stack.append(node.right)
+            elif isinstance(node, UnaryOp):
+                stack.append(node.operand)
+            elif isinstance(node, FunctionCall):
+                stack.extend(node.args)
+            elif isinstance(node, SumExpression):
+                stack.append(node.operand)
+            elif isinstance(node, SumOverExpression):
+                stack.extend(node.terms)
 
     # ── C sections (nonlinear constraint bodies) ──
 
@@ -673,142 +727,126 @@ class _NLWriter:
     # ── Expression → .nl opcode encoding ──
 
     def _write_expr(self, expr: Expression, buf: io.StringIO):
-        """Recursively emit an expression in .nl prefix notation."""
-        if isinstance(expr, Constant):
-            val = float(expr.value)
-            buf.write(f"n{val}\n")
-            return
+        """Emit an expression in .nl prefix notation.
 
-        if isinstance(expr, Variable):
-            if expr.shape == () or expr.shape == (1,):
-                idx = self._var_index.get((expr.name, 0))
-                if idx is not None:
-                    buf.write(f"v{idx}\n")
-                    return
-            raise ValueError(f"Cannot write array variable {expr.name} without indexing")
+        Driven by an explicit work stack rather than recursion so deeply
+        left-nested DAGs (``sum()`` of many terms builds a long chain of
+        ``BinaryOp`` "+" nodes) cannot exceed Python's recursion limit. Stack
+        items are either ``Expression`` nodes (to encode) or pre-rendered token
+        strings (written verbatim); children are pushed in reverse so they pop
+        in left-to-right prefix order.
+        """
+        stack: list = [expr]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, str):
+                buf.write(node)
+                continue
 
-        if isinstance(expr, IndexExpression):
-            vi = self._resolve_var_index(expr)
-            if vi is not None:
+            if isinstance(node, Constant):
+                buf.write(f"n{float(node.value)}\n")
+            elif isinstance(node, Variable):
+                if node.shape == () or node.shape == (1,):
+                    idx = self._var_index.get((node.name, 0))
+                    if idx is not None:
+                        buf.write(f"v{idx}\n")
+                        continue
+                raise ValueError(f"Cannot write array variable {node.name} without indexing")
+            elif isinstance(node, IndexExpression):
+                vi = self._resolve_var_index(node)
+                if vi is None:
+                    raise ValueError(f"Cannot resolve indexed expression: {node}")
                 buf.write(f"v{vi}\n")
-                return
-            raise ValueError(f"Cannot resolve indexed expression: {expr}")
-
-        if isinstance(expr, BinaryOp):
-            op_map = {
-                "+": _OP_ADD,
-                "-": _OP_SUB,
-                "*": _OP_MUL,
-                "/": _OP_DIV,
-                "**": _OP_POW,
-            }
-            opcode = op_map.get(expr.op)
-            if opcode is None:
-                raise ValueError(f"Unknown binary operator: {expr.op}")
-            buf.write(f"o{opcode}\n")
-            self._write_expr(expr.left, buf)
-            self._write_expr(expr.right, buf)
-            return
-
-        if isinstance(expr, UnaryOp):
-            if expr.op == "neg":
-                buf.write(f"o{_OP_NEG}\n")
-                self._write_expr(expr.operand, buf)
-                return
-            if expr.op == "abs":
-                buf.write(f"o{_OP_ABS}\n")
-                self._write_expr(expr.operand, buf)
-                return
-            raise ValueError(f"Unknown unary operator: {expr.op}")
-
-        if isinstance(expr, FunctionCall):
-            fname = expr.func_name.lower()
-            # Special cases
-            if fname == "tan":
-                # tan(x) = sin(x) / cos(x)
-                buf.write(f"o{_OP_DIV}\n")
-                buf.write(f"o{_OP_SIN}\n")
-                self._write_expr(expr.args[0], buf)
-                buf.write(f"o{_OP_COS}\n")
-                self._write_expr(expr.args[0], buf)
-                return
-            if fname == "log2":
-                # log2(x) = log(x) / log(2)
-                buf.write(f"o{_OP_DIV}\n")
-                buf.write(f"o{_OP_LOG}\n")
-                self._write_expr(expr.args[0], buf)
-                buf.write(f"n{math.log(2)}\n")
-                return
-            if fname == "log1p":
-                # log1p(x) = log(1 + x)
-                buf.write(f"o{_OP_LOG}\n")
-                buf.write(f"o{_OP_ADD}\n")
-                buf.write("n1\n")
-                self._write_expr(expr.args[0], buf)
-                return
-            if fname == "sigmoid":
-                # sigmoid(x) = 1 / (1 + exp(-x))
-                buf.write(f"o{_OP_DIV}\n")
-                buf.write("n1\n")
-                buf.write(f"o{_OP_ADD}\n")
-                buf.write("n1\n")
-                buf.write(f"o{_OP_EXP}\n")
-                buf.write(f"o{_OP_NEG}\n")
-                self._write_expr(expr.args[0], buf)
-                return
-            if fname == "softplus":
-                # softplus(x) = log(1 + exp(x))
-                buf.write(f"o{_OP_LOG}\n")
-                buf.write(f"o{_OP_ADD}\n")
-                buf.write("n1\n")
-                buf.write(f"o{_OP_EXP}\n")
-                self._write_expr(expr.args[0], buf)
-                return
-            if fname == "erf":
-                # No direct .nl opcode — approximate or raise
-                raise ValueError("erf() has no .nl opcode; reformulate without erf")
-            if fname == "sign":
-                raise ValueError("sign() has no .nl opcode; reformulate without sign")
-            if fname in ("min", "max"):
-                # min/max of two args: use ternary or raise
-                raise ValueError(f"{fname}() requires DNLP model type; not supported in .nl export")
-            # Standard single-arg functions
-            opcode = _FUNC_OPCODES.get(fname)
-            if opcode is not None:
+            elif isinstance(node, BinaryOp):
+                op_map = {
+                    "+": _OP_ADD,
+                    "-": _OP_SUB,
+                    "*": _OP_MUL,
+                    "/": _OP_DIV,
+                    "**": _OP_POW,
+                }
+                opcode = op_map.get(node.op)
+                if opcode is None:
+                    raise ValueError(f"Unknown binary operator: {node.op}")
                 buf.write(f"o{opcode}\n")
-                self._write_expr(expr.args[0], buf)
-                return
-            raise ValueError(f"Unknown function in .nl export: {fname}")
+                stack.append(node.right)
+                stack.append(node.left)
+            elif isinstance(node, UnaryOp):
+                if node.op == "neg":
+                    buf.write(f"o{_OP_NEG}\n")
+                elif node.op == "abs":
+                    buf.write(f"o{_OP_ABS}\n")
+                else:
+                    raise ValueError(f"Unknown unary operator: {node.op}")
+                stack.append(node.operand)
+            elif isinstance(node, FunctionCall):
+                # Build the emit sequence (tokens + sub-expressions) and push it
+                # reversed; tokens are written when popped.
+                seq = self._function_call_sequence(node)
+                stack.extend(reversed(seq))
+            elif isinstance(node, SumExpression):
+                stack.append(node.operand)
+            elif isinstance(node, SumOverExpression):
+                if len(node.terms) == 0:
+                    buf.write("n0\n")
+                elif len(node.terms) == 1:
+                    stack.append(node.terms[0])
+                else:
+                    buf.write(f"o{_OP_SUMLIST}\n")
+                    buf.write(f"{len(node.terms)}\n")
+                    stack.extend(reversed(node.terms))
+            elif isinstance(node, MatMulExpression):
+                raise ValueError(
+                    "MatMul expressions must be expanded before .nl export. "
+                    "Use explicit indexing instead of @."
+                )
+            elif isinstance(node, CustomCall):
+                raise ValueError(
+                    f"Cannot export the opaque AD-only user function {node.name!r} "
+                    f"(dm.custom) to .nl: it has no AMPL opcode. Rebuild the function "
+                    f"from dm.* primitives and use dm.udf to make it exportable."
+                )
+            else:
+                raise ValueError(f"Cannot write expression type to .nl: {type(node).__name__}")
 
-        if isinstance(expr, SumExpression):
-            self._write_expr(expr.operand, buf)
-            return
+    def _function_call_sequence(self, expr: FunctionCall) -> list:
+        """Return the ordered .nl emit sequence for a function call.
 
-        if isinstance(expr, SumOverExpression):
-            if len(expr.terms) == 0:
-                buf.write("n0\n")
-                return
-            if len(expr.terms) == 1:
-                self._write_expr(expr.terms[0], buf)
-                return
-            # Use sumlist opcode
-            buf.write(f"o{_OP_SUMLIST}\n")
-            buf.write(f"{len(expr.terms)}\n")
-            for term in expr.terms:
-                self._write_expr(term, buf)
-            return
-
-        if isinstance(expr, MatMulExpression):
-            raise ValueError(
-                "MatMul expressions must be expanded before .nl export. "
-                "Use explicit indexing instead of @."
-            )
-
-        if isinstance(expr, CustomCall):
-            raise ValueError(
-                f"Cannot export the opaque AD-only user function {expr.name!r} "
-                f"(dm.custom) to .nl: it has no AMPL opcode. Rebuild the function "
-                f"from dm.* primitives and use dm.udf to make it exportable."
-            )
-
-        raise ValueError(f"Cannot write expression type to .nl: {type(expr).__name__}")
+        Each element is either a token string (written verbatim) or an
+        ``Expression`` to be encoded. Returned in prefix order; the caller
+        pushes it reversed onto the work stack.
+        """
+        fname = expr.func_name.lower()
+        if fname == "tan":
+            # tan(x) = sin(x) / cos(x)
+            return [f"o{_OP_DIV}\n", f"o{_OP_SIN}\n", expr.args[0], f"o{_OP_COS}\n", expr.args[0]]
+        if fname == "log2":
+            # log2(x) = log(x) / log(2)
+            return [f"o{_OP_DIV}\n", f"o{_OP_LOG}\n", expr.args[0], f"n{math.log(2)}\n"]
+        if fname == "log1p":
+            # log1p(x) = log(1 + x)
+            return [f"o{_OP_LOG}\n", f"o{_OP_ADD}\n", "n1\n", expr.args[0]]
+        if fname == "sigmoid":
+            # sigmoid(x) = 1 / (1 + exp(-x))
+            return [
+                f"o{_OP_DIV}\n",
+                "n1\n",
+                f"o{_OP_ADD}\n",
+                "n1\n",
+                f"o{_OP_EXP}\n",
+                f"o{_OP_NEG}\n",
+                expr.args[0],
+            ]
+        if fname == "softplus":
+            # softplus(x) = log(1 + exp(x))
+            return [f"o{_OP_LOG}\n", f"o{_OP_ADD}\n", "n1\n", f"o{_OP_EXP}\n", expr.args[0]]
+        if fname == "erf":
+            raise ValueError("erf() has no .nl opcode; reformulate without erf")
+        if fname == "sign":
+            raise ValueError("sign() has no .nl opcode; reformulate without sign")
+        if fname in ("min", "max"):
+            raise ValueError(f"{fname}() requires DNLP model type; not supported in .nl export")
+        opcode = _FUNC_OPCODES.get(fname)
+        if opcode is not None:
+            return [f"o{opcode}\n", expr.args[0]]
+        raise ValueError(f"Unknown function in .nl export: {fname}")

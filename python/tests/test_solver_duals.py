@@ -118,15 +118,19 @@ def test_milp_returns_relaxation_duals_at_incumbent():
 
 
 def test_miqp_returns_relaxation_duals_at_incumbent():
-    """min (x-0.5)^2 + (y-0.5)^2 s.t. x+y >= 5, x cont, y int.
+    """min (x-0.5)^2 + (y-2.0)^2 s.t. x+y >= 5, x cont, y int.
 
-    With y fixed at incumbent (=3), the LP relaxation is min (x-0.5)^2
-    s.t. x >= 2, x in [0,10] → x*=2, μ=3 on the ">=" row.
+    The y-center is offset to 2.0 (not 0.5) so the optimum is *unique*
+    (y=3, x=2): with the symmetric 0.5 center, y=2,x=3 and y=3,x=2 are both
+    optimal at 8.5 and the recovered dual depends on which tied incumbent the
+    search keeps (purification can pick either). With y fixed at the
+    incumbent (=3), the QP relaxation is min (x-0.5)^2 s.t. x >= 2,
+    x in [0,10] → x*=2, μ=3 on the ">=" row.
     """
     m = dm.Model("miqp")
     x = m.continuous("x", lb=0.0, ub=10.0)
     y = m.integer("y", lb=0, ub=10)
-    m.minimize((x - 0.5) ** 2 + (y - 0.5) ** 2)
+    m.minimize((x - 0.5) ** 2 + (y - 2.0) ** 2)
     m.subject_to(x + y >= 5, name="c1")
 
     res = m.solve()

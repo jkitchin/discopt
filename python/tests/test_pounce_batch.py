@@ -72,7 +72,7 @@ def test_batch_pounce_matches_serial_feasible():
     batch_ub = [b[1].tolist() for b in boxes]
     opts = {"max_iter": 200, "max_wall_time": 30.0}
 
-    rid, rlb, rsol, rfeas = _solve_batch_pounce(
+    rid, rlb, rsol, rfeas, _ = _solve_batch_pounce(
         ev, batch_lb, batch_ub, list(range(len(boxes))), n, cb, opts
     )
 
@@ -108,11 +108,11 @@ def test_batch_pounce_multistart_matches_single_start_on_convex_node():
     batch_ub = [b[1].tolist() for b in boxes]
     opts = {"max_iter": 200, "max_wall_time": 30.0}
 
-    _, single, _, _ = _solve_batch_pounce(
+    _, single, _, _, _ = _solve_batch_pounce(
         ev, batch_lb, batch_ub, list(range(len(boxes))), n, cb, opts
     )
     # Force the multistart path (convex=False) even though the nodes are convex.
-    _, multi, msol, _ = _solve_batch_pounce(
+    _, multi, msol, _, _ = _solve_batch_pounce(
         ev,
         batch_lb,
         batch_ub,
@@ -143,7 +143,7 @@ def test_batch_pounce_marks_infeasible_nodes():
     # x + y >= 1 is impossible when both are pinned near -5.
     nlb = np.array([-5.0, -5.0])
     nub = np.array([-4.9, -4.9])
-    rid, rlb, rsol, rfeas = _solve_batch_pounce(
+    rid, rlb, rsol, rfeas, _ = _solve_batch_pounce(
         ev,
         [nlb.tolist(), nlb.tolist()],
         [nub.tolist(), nub.tolist()],
@@ -180,7 +180,14 @@ def test_pounce_batch_end_to_end_pooling(monkeypatch):
     model = example_pooling_haverly()
     res = model.solve(nlp_solver="pounce", batch_size=16, time_limit=120)
 
-    assert res.status == "optimal"
+    # Pooling-Haverly is nonconvex: the McCormick relaxation bounds do not
+    # rigorously close the gap, and spatial-branch nodes whose NLP relaxation
+    # fails carry no rigorous lower bound. Per the #27a soundness guard
+    # (applied on the serial path and, since the batch-sentinel fix, on the
+    # batch path too), such a search reports the correct incumbent as
+    # "feasible" rather than claiming a certificate it does not hold. Every
+    # solve path (pounce/ipm × batch/serial) agrees on "feasible" here.
+    assert res.status in ("optimal", "feasible")
     # Haverly pooling global optimum (this formulation): -400 profit => 1390 obj.
     assert res.objective == pytest.approx(1390.0, abs=1.0, rel=1e-3)
     # The batch path must have actually fired with more than one node.

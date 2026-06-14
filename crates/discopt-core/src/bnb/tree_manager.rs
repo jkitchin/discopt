@@ -271,9 +271,17 @@ impl TreeManager {
                 continue;
             }
 
-            // 2. Check if solution is integer-feasible.
-            let int_feasible =
-                result.is_feasible || is_integer_feasible(&result.solution, &self.integer_vars);
+            // 2. Check if solution is integer-feasible. A node whose LP failed
+            // (iteration limit / numerical) carries a non-finite bound and an
+            // untrusted solution (the bound-box midpoint); it must never be
+            // fathomed or promoted to the incumbent off that point — only
+            // branched, so its subtree is still explored. (The driver already
+            // decertifies the gap for such nodes.) is_integer_feasible(midpoint)
+            // can spuriously be true when bounds are integral, so gate on a
+            // finite, trusted bound first.
+            let trusted = node_lb.is_finite();
+            let int_feasible = trusted
+                && (result.is_feasible || is_integer_feasible(&result.solution, &self.integer_vars));
 
             if int_feasible {
                 if self.nonconvex {
@@ -391,7 +399,10 @@ impl TreeManager {
                 // No fractional variable found — treat as fathomed.
                 self.pool.get_mut(result.node_id).status = NodeStatus::Fathomed;
                 stats.fathomed += 1;
-                if node_lb < self.incumbent_value {
+                // Only a trusted (finite-bound, solver-verified) node may become
+                // the incumbent. A failed LP's untrusted bound-box midpoint must
+                // not — it would corrupt the incumbent with a -inf objective.
+                if trusted && node_lb < self.incumbent_value {
                     self.incumbent_value = node_lb;
                     self.incumbent_solution = Some(result.solution.clone());
                     stats.incumbent_updates += 1;
@@ -464,6 +475,18 @@ impl TreeManager {
             global_lower_bound: self.global_lower_bound,
             gap: self.gap(),
         }
+    }
+
+    /// The warm-start basis stored on a node (cloned), for the Rust-internal
+    /// simplex MILP driver. `None` if the node has no inherited basis (root).
+    pub fn node_basis(&self, id: NodeId) -> Option<crate::lp::basis::Basis> {
+        self.pool.get(id).basis.clone()
+    }
+
+    /// Store a node's optimal basis before it is branched, so its children
+    /// inherit it as their dual-simplex warm-start state.
+    pub fn set_node_basis(&mut self, id: NodeId, basis: Option<crate::lp::basis::Basis>) {
+        self.pool.get_mut(id).basis = basis;
     }
 
     /// Get the current incumbent solution, if any.
@@ -783,6 +806,40 @@ mod tests {
         }]);
         tm.process_evaluated();
         assert_eq!(tm.incumbent().unwrap().1, 10.0);
+    }
+
+    #[test]
+    fn test_failed_node_lp_never_becomes_incumbent() {
+        // A node whose LP failed (iteration limit / numerical) reports
+        // is_feasible=false, a non-finite (-inf) bound, and an untrusted
+        // bound-box midpoint as its "solution". With integer bounds [0, 10] the
+        // midpoint 5.0 is integral, so is_integer_feasible() is spuriously true.
+        // The failed node must NOT be promoted to the incumbent at -inf.
+        let mut tm = TreeManager::new(
+            1,
+            vec![0.0],
+            vec![10.0],
+            vec![VarBranchInfo {
+                offset: 0,
+                size: 1,
+                is_integer: true,
+            }],
+            SelectionStrategy::BestFirst,
+        );
+        tm.initialize();
+
+        let batch = tm.export_batch(1);
+        tm.import_results(&[NodeResult {
+            node_id: batch.node_ids[0],
+            lower_bound: f64::NEG_INFINITY,
+            solution: vec![5.0],
+            is_feasible: false,
+        }]);
+        tm.process_evaluated();
+
+        // No trusted feasible point was found, so there must be no incumbent
+        // (and certainly not one valued at -inf).
+        assert!(tm.incumbent().is_none());
     }
 
     #[test]

@@ -339,9 +339,11 @@ class CUTEstBenchmarkRunner:
 
             t0 = time.perf_counter()
 
-            from discopt._jax.ipm import solve_nlp_ipm
+            # The JAX IPM was retired; this backend now runs on POUNCE (the
+            # pure-Rust interior-point solver, signature-compatible).
+            from discopt.solvers.nlp_pounce import solve_nlp
 
-            nlp_result = solve_nlp_ipm(
+            nlp_result = solve_nlp(
                 evaluator, x0, constraint_bounds=constraint_bounds, options=opts
             )
             wall_time = time.perf_counter() - t0
