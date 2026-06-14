@@ -45,6 +45,7 @@ class PounceKKTError(RuntimeError):
     converge, so the returned point is not stationary. Raised instead of
     returning silently-wrong sensitivities to a differentiable layer."""
 
+
 # Ipopt return codes (POUNCE is shape-compatible). For a *convex* LP, local
 # infeasibility is global, so code 2 is a sound INFEASIBLE; diverging iterates
 # (4) and a too-small search direction (3) on an LP signal unboundedness.
