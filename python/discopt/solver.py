@@ -5533,19 +5533,23 @@ def _solve_node_lp_pounce(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, ti
     ``(sentinel, None, "infeasible")``, or ``None`` when POUNCE is unavailable
     or could not settle the node (the caller falls back / decertifies)."""
     try:
-        from discopt.solvers.lp_pounce import POUNCE_AVAILABLE
-        from discopt.solvers.lp_pounce import solve_lp as _pounce_solve
+        import pounce
+
+        from discopt.solvers.lp_pounce import POUNCE_AVAILABLE, _snap_inverted_bounds
     except ImportError:
         return None
     if not POUNCE_AVAILABLE:
         return None
-    time_left = max(0.5, time_limit - (time.perf_counter() - t_start))
-    # POUNCE's interior-point LP is far faster on the native *inequality* form
-    # than on the slack-expanded standard form: ``lp_data`` carries one explicit
-    # slack column per inequality, which quadruples the variable count (e.g.
-    # 92 -> 400) and stalls the IPM (it times out without a bound). Decompose
-    # the standard form back to inequalities over the structural columns and
-    # hand POUNCE ``A_ub``/``A_eq`` directly with only the structural bounds.
+    # Solve the node relaxation with POUNCE's *structured convex* LP/QP engine
+    # (``pounce.solve_qp`` over the pounce-convex IPM, with presolve), not the
+    # generic callback TNLP path (``solve_lp``). The callback path hides the
+    # linear structure, so POUNCE's presolve cannot engage and its IPM takes
+    # ~100 iterations (~3 s) on these degenerate, equality-pair-encoded
+    # relaxations; the structured convex path presolves + scales and converges
+    # in ~20 iterations (~0.03 s) on the same LP (~100x), which is what lets the
+    # MILP B&B visit enough nodes to bound the tree. It needs the native
+    # inequality form, so decompose the slack-expanded standard form back to
+    # A_ub/A_eq over the structural columns.
     n_slack = int(lp_data.A_eq.shape[1]) - n_orig
     try:
         A_ub_m, b_ub_m, A_eq_m, b_eq_m = _decompose_eq_slack_form(
@@ -5554,33 +5558,41 @@ def _solve_node_lp_pounce(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, ti
             n_orig,
             n_slack,
         )
-        # _decompose_eq_slack_form already returns None for empty A_ub/A_eq,
-        # which solve_lp accepts; pass through directly.
-        res = _pounce_solve(
+        lb_n = np.asarray(node_lb, dtype=np.float64)
+        ub_n = np.asarray(node_ub, dtype=np.float64)
+        lb_n, ub_n = _snap_inverted_bounds(lb_n, ub_n)
+        res = pounce.solve_qp(
+            P=None,  # P=0 -> LP
             c=np.asarray(lp_data.c[:n_orig], dtype=np.float64),
-            A_ub=A_ub_m,
-            b_ub=b_ub_m,
-            A_eq=A_eq_m,
-            b_eq=b_eq_m,
-            bounds=list(
-                zip(
-                    np.asarray(node_lb, dtype=np.float64).tolist(),
-                    np.asarray(node_ub, dtype=np.float64).tolist(),
-                )
-            ),
-            time_limit=min(30.0, time_left),
+            G=A_ub_m,
+            h=b_ub_m,
+            A=A_eq_m,
+            b=b_eq_m,
+            lb=lb_n,
+            ub=ub_n,
         )
     except Exception as e:
-        logger.debug("POUNCE node solve failed: %s", e)
+        logger.debug("POUNCE convex node solve failed: %s", e)
         return None
-    if (
-        res.status == SolveStatus.OPTIMAL
-        and res.objective is not None
-        and np.isfinite(res.objective)
-    ):
-        bound = float(res.objective) + float(lp_data.obj_const)
-        return (bound, np.asarray(res.x[:n_vars]), "optimal")
-    if res.status == SolveStatus.INFEASIBLE:
+    if res.status == "optimal" and res.x is not None and np.isfinite(res.obj):
+        x_sol = np.asarray(res.x, dtype=np.float64)
+        # Soundness gate (mirrors the JAX-IPM path's _check_lp_solution_feasibility):
+        # reject a node point that violates its own rows so a slightly-infeasible
+        # relaxation solution cannot seed a spurious incumbent or node bound.
+        tol = 1e-5
+        feasible = True
+        if A_ub_m is not None and A_ub_m.shape[0]:
+            feasible = bool(np.all(A_ub_m @ x_sol <= b_ub_m + tol * (1.0 + np.abs(b_ub_m))))
+        if feasible and A_eq_m is not None and A_eq_m.shape[0]:
+            feasible = bool(
+                np.all(np.abs(A_eq_m @ x_sol - b_eq_m) <= tol * (1.0 + np.abs(b_eq_m)))
+            )
+        if not feasible:
+            logger.debug("POUNCE convex node solution violates its rows; rejecting")
+            return None
+        bound = float(res.obj) + float(lp_data.obj_const)
+        return (bound, x_sol[:n_vars], "optimal")
+    if res.status == "primal_infeasible":
         return (_INFEASIBILITY_SENTINEL, None, "infeasible")
     return None
 
