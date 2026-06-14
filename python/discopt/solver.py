@@ -727,288 +727,6 @@ def _solve_root_node_multistart(
     return nlp_result
 
 
-def _solve_root_node_multistart_ipm(
-    evaluator,
-    node_lb,
-    node_ub,
-    constraint_bounds,
-    g_l_jax,
-    g_u_jax,
-    options,
-    n_random=2,
-    convex=False,
-):
-    """Solve root NLP relaxation from multiple starting points via vmap'd IPM.
-
-    Uses jax.vmap to solve all starting points in parallel, giving ~Nx speedup
-    over the serial loop when using the pure-JAX IPM backend.
-
-    When ``convex=True``, iterates whose best code is 3 (max_iter) or 4
-    (stalled) are polished with cyipopt; IPM's non-KKT obj is not a valid
-    lower bound for convex NLP-BB (issue #39).
-    """
-    import jax.numpy as jnp
-
-    from discopt._jax.ipm import (
-        IPMOptions,
-        _jax_feasibility_restoration,
-        ipm_solve,
-        solve_nlp_batch,
-    )
-    from discopt.solvers import NLPResult
-
-    starting_points = _generate_starting_points(node_lb, node_ub, n_random=n_random)
-    n_starts = len(starting_points)
-
-    obj_fn = evaluator._obj_fn
-    m = evaluator.n_constraints
-    con_fn = evaluator._cons_fn if m > 0 else None
-
-    # Stack starting points into (n_starts, n_vars) batch
-    x0_batch = jnp.array(np.stack(starting_points), dtype=jnp.float64)
-    # Broadcast node bounds to (n_starts, n_vars)
-    xl_batch = jnp.broadcast_to(jnp.array(node_lb, dtype=jnp.float64), (n_starts, len(node_lb)))
-    xu_batch = jnp.broadcast_to(jnp.array(node_ub, dtype=jnp.float64), (n_starts, len(node_ub)))
-
-    ipm_opts = IPMOptions(max_iter=int(options.get("max_iter", 200)))
-
-    try:
-        state = solve_nlp_batch(
-            obj_fn, con_fn, x0_batch, xl_batch, xu_batch, g_l_jax, g_u_jax, ipm_opts
-        )
-    except Exception as e:
-        logger.debug("Root multistart batch IPM failed: %s", e)
-        # Fall back: return infeasible sentinel
-        return NLPResult(
-            status=SolveStatus.ERROR,
-            x=np.asarray(starting_points[0]),
-            objective=_INFEASIBILITY_SENTINEL,
-        )
-
-    # Unpack batched results: pick best converged solution
-    converged = np.asarray(state.converged)  # (n_starts,)
-    obj_vals = np.asarray(state.obj)  # (n_starts,)
-    x_vals = np.asarray(state.x)  # (n_starts, n_vars)
-
-    # Mask: converged == 1 (optimal), 2 (acceptable), 3 (iter limit), or 4 (stalled).
-    # Code 5 (infeasible) is excluded. NaN objectives are also excluded —
-    # they indicate IPM divergence (e.g. log of negative argument).
-    feasible_mask = (
-        (converged == 1) | (converged == 2) | (converged == 3) | (converged == 4)
-    ) & np.isfinite(obj_vals)
-
-    if np.any(feasible_mask):
-        # Among feasible, pick the one with lowest objective
-        masked_obj = np.where(feasible_mask, obj_vals, np.inf)
-        best_idx = int(np.argmin(masked_obj))
-        best_code = int(converged[best_idx])
-        best_obj = float(obj_vals[best_idx])
-        best_x = np.asarray(x_vals[best_idx], dtype=np.float64)
-
-        # Convex polish: codes 3 (max_iter) / 4 (stalled) don't certify
-        # KKT stationarity — objective is not a valid LB for convex NLP-BB.
-        if convex and best_code in (3, 4):
-            try:
-                polish = _solve_node_nlp_kkt(
-                    evaluator,
-                    best_x,
-                    np.asarray(node_lb),
-                    np.asarray(node_ub),
-                    constraint_bounds,
-                    options,
-                )
-            except Exception as e:
-                logger.debug("Root IPM convex polish failed: %s", e)
-                polish = None
-            if polish is not None and polish.status in (
-                SolveStatus.OPTIMAL,
-                SolveStatus.ITERATION_LIMIT,
-            ):
-                p_obj = float(polish.objective)
-                if np.isfinite(p_obj) and p_obj < _SENTINEL_THRESHOLD:
-                    return NLPResult(
-                        status=polish.status,
-                        x=np.asarray(polish.x),
-                        objective=p_obj,
-                    )
-
-        return NLPResult(
-            status=SolveStatus.OPTIMAL,
-            x=best_x,
-            objective=best_obj,
-        )
-    else:
-        # All starts infeasible or NaN — attempt feasibility restoration.
-        if con_fn is not None and g_l_jax is not None:
-            xl_jax = jnp.array(node_lb, dtype=jnp.float64)
-            xu_jax = jnp.array(node_ub, dtype=jnp.float64)
-            for i in range(n_starts):
-                if converged[i] == 5:
-                    try:
-                        x_restored, rest_ok = _jax_feasibility_restoration(
-                            con_fn,
-                            jnp.asarray(x_vals[i]),
-                            xl_jax,
-                            xu_jax,
-                            g_l_jax,
-                            g_u_jax,
-                            ipm_opts,
-                        )
-                    except Exception:
-                        continue
-                    if rest_ok:
-                        try:
-                            state_i = ipm_solve(
-                                obj_fn,
-                                con_fn,
-                                x_restored,
-                                xl_jax,
-                                xu_jax,
-                                g_l_jax,
-                                g_u_jax,
-                                ipm_opts,
-                            )
-                        except Exception:
-                            continue
-                        conv_i = int(state_i.converged)
-                        if conv_i in (1, 2, 3, 4):
-                            return NLPResult(
-                                status=SolveStatus.OPTIMAL,
-                                x=np.asarray(state_i.x),
-                                objective=float(state_i.obj),
-                            )
-        return NLPResult(
-            status=SolveStatus.ERROR,
-            x=x_vals[0],
-            objective=_INFEASIBILITY_SENTINEL,
-        )
-
-
-def _solve_node_multistart_ipm(
-    evaluator,
-    x0,
-    node_lb,
-    node_ub,
-    constraint_bounds,
-    g_l_jax,
-    g_u_jax,
-    options,
-    n_extra=2,
-):
-    """Multistart NLP at a child node: parent warm-start + diverse points.
-
-    Uses parent warm-start as primary starting point, plus midpoint and
-    random points within the node bounds. All points are solved in parallel
-    via vmap'd IPM, and the best converged solution is returned.
-    """
-    import jax.numpy as jnp
-
-    from discopt._jax.ipm import (
-        IPMOptions,
-        _jax_feasibility_restoration,
-        ipm_solve,
-        solve_nlp_batch,
-    )
-    from discopt.solvers import NLPResult
-
-    n_vars = len(node_lb)
-    lb_clipped = np.clip(node_lb, -_SPC, _SPC)
-    ub_clipped = np.clip(node_ub, -_SPC, _SPC)
-
-    # Starting points: parent warm-start + midpoint + random
-    starts = [np.asarray(x0, dtype=np.float64)]
-    span = np.maximum(ub_clipped - lb_clipped, 0.0)
-    starts.append(0.5 * (lb_clipped + ub_clipped))  # midpoint
-
-    # Deterministic seed from node bounds for reproducibility
-    seed = int(abs(hash(tuple(node_lb[:4].tolist()) + tuple(node_ub[:4].tolist())))) % (2**31)
-    rng = np.random.RandomState(seed)
-    starts.append(lb_clipped + rng.uniform(size=n_vars) * span)
-
-    n_starts = len(starts)
-    obj_fn = evaluator._obj_fn
-    m = evaluator.n_constraints
-    con_fn = evaluator._cons_fn if m > 0 else None
-
-    x0_batch = jnp.array(np.stack(starts), dtype=jnp.float64)
-    xl_batch = jnp.broadcast_to(jnp.array(node_lb, dtype=jnp.float64), (n_starts, n_vars))
-    xu_batch = jnp.broadcast_to(jnp.array(node_ub, dtype=jnp.float64), (n_starts, n_vars))
-
-    ipm_opts = IPMOptions(max_iter=int(options.get("max_iter", 200)))
-
-    try:
-        state = solve_nlp_batch(
-            obj_fn, con_fn, x0_batch, xl_batch, xu_batch, g_l_jax, g_u_jax, ipm_opts
-        )
-    except Exception as e:
-        logger.debug("Node multistart batch IPM failed: %s", e)
-        return NLPResult(
-            status=SolveStatus.ERROR,
-            x=np.asarray(x0),
-            objective=_INFEASIBILITY_SENTINEL,
-        )
-
-    converged = np.asarray(state.converged)
-    obj_vals = np.asarray(state.obj)
-    x_vals = np.asarray(state.x)
-
-    feasible_mask = ((converged == 1) | (converged == 2) | (converged == 3)) & np.isfinite(obj_vals)
-
-    if np.any(feasible_mask):
-        masked_obj = np.where(feasible_mask, obj_vals, np.inf)
-        best_idx = int(np.argmin(masked_obj))
-        return NLPResult(
-            status=SolveStatus.OPTIMAL,
-            x=x_vals[best_idx],
-            objective=float(obj_vals[best_idx]),
-        )
-    else:
-        # All starts infeasible — attempt feasibility restoration.
-        if con_fn is not None and g_l_jax is not None:
-            xl_jax = jnp.array(node_lb, dtype=jnp.float64)
-            xu_jax = jnp.array(node_ub, dtype=jnp.float64)
-            for i in range(n_starts):
-                if converged[i] == 5:
-                    try:
-                        x_restored, rest_ok = _jax_feasibility_restoration(
-                            con_fn,
-                            jnp.asarray(x_vals[i]),
-                            xl_jax,
-                            xu_jax,
-                            g_l_jax,
-                            g_u_jax,
-                            ipm_opts,
-                        )
-                    except Exception:
-                        continue
-                    if rest_ok:
-                        try:
-                            state_i = ipm_solve(
-                                obj_fn,
-                                con_fn,
-                                x_restored,
-                                xl_jax,
-                                xu_jax,
-                                g_l_jax,
-                                g_u_jax,
-                                ipm_opts,
-                            )
-                        except Exception:
-                            continue
-                        conv_i = int(state_i.converged)
-                        if conv_i in (1, 2, 3):
-                            return NLPResult(
-                                status=SolveStatus.OPTIMAL,
-                                x=np.asarray(state_i.x),
-                                objective=float(state_i.obj),
-                            )
-        return NLPResult(
-            status=SolveStatus.ERROR,
-            x=x_vals[0],
-            objective=_INFEASIBILITY_SENTINEL,
-        )
-
-
 def _invoke_pre_import_callbacks(
     *,
     model,
@@ -1181,6 +899,7 @@ def _strong_branch_lp(
     parent_lb: float,
     max_candidates: int = 5,
     time_limit: float = 1.0,
+    prefer_pounce: bool = False,
 ) -> Optional[int]:
     """Perform strong branching via LP relaxations for unreliable candidates.
 
@@ -1212,7 +931,12 @@ def _strong_branch_lp(
     int or None
         Best variable index to branch on, or None if no valid candidate.
     """
-    from discopt.solvers.lp_highs import solve_lp
+    try:
+        from discopt.solvers.lp_backend import get_lp_solver
+
+        solve_lp = get_lp_solver(prefer_pounce)
+    except ImportError:
+        return None  # strong branching is optional; fall back to pseudocosts
 
     n_vars = len(solution)
     n_candidates = len(candidate_var_indices)
@@ -1632,7 +1356,7 @@ def solve_model(
             stacklevel=2,
         )
 
-    _valid_nlp_solvers = {"ipm", "pounce", "ipopt", "cyipopt", "sparse_ipm"}
+    _valid_nlp_solvers = {"ipm", "pounce", "ipopt", "cyipopt", "sparse_ipm", "simplex"}
     if nlp_solver not in _valid_nlp_solvers:
         raise ValueError(
             f"Unknown nlp_solver={nlp_solver!r}. Choose one of "
@@ -1682,6 +1406,7 @@ def solve_model(
             "obbt_with_cutoff",
             "alphabb_cutoff_obbt",
             "obbt_time_limit",
+            "milp_solver",
         )
         for key in amp_option_keys:
             if key in kwargs:
@@ -2083,16 +1808,30 @@ def solve_model(
     _pure_continuous_force_spatial = False
     if problem_class is not None:
         if problem_class == ProblemClass.LP:
-            return _solve_lp(model, t_start, time_limit)
+            return _solve_lp(model, t_start, time_limit, prefer_pounce=nlp_solver == "pounce")
         elif problem_class == ProblemClass.QP:
             if _pure_continuous:
                 if _pure_continuous_convexity_known and _pure_continuous_is_convex:
-                    return _solve_qp(model, t_start)
+                    return _solve_qp(model, t_start, prefer_pounce=nlp_solver == "pounce")
                 _pure_continuous_force_spatial = True
             else:
-                return _solve_qp(model, t_start)
+                return _solve_qp(model, t_start, prefer_pounce=nlp_solver == "pounce")
         elif problem_class == ProblemClass.MILP:
-            if use_highs_milp:
+            # Warm-started-simplex engine (nlp_solver="simplex"): the whole MILP
+            # B&B runs in Rust with dual-warm-started simplex node solves. Opt-in;
+            # falls through to the default path if unavailable.
+            if nlp_solver == "simplex":
+                _simplex_res = _solve_milp_simplex(
+                    model, time_limit, gap_tolerance, max_nodes, t_start
+                )
+                if _simplex_res is not None:
+                    return _simplex_res
+            # POUNCE-only mode (nlp_solver="pounce") routes to the self-hosted
+            # B&B and bypasses HiGHS entirely (Phase 1 increment 5); the
+            # self-hosted path is sound (incr 1), POUNCE-recovers stalled
+            # nodes (2), purifies incumbents (3), and reduced-cost-fixes (4).
+            _pounce_only = nlp_solver == "pounce"
+            if use_highs_milp and not _pounce_only:
                 highs_result = _solve_milp_highs(model, t_start, time_limit, gap_tolerance)
                 if highs_result is not None:
                     return highs_result
@@ -2104,12 +1843,15 @@ def solve_model(
                 strategy,
                 max_nodes,
                 t_start,
+                prefer_pounce=_pounce_only,
             )
         elif problem_class == ProblemClass.MIQP:
-            # Try HiGHS MIQP first, fall back to B&B with QP relaxations
-            highs_result = _solve_qp_highs(model, t_start, time_limit)
-            if highs_result is not None:
-                return highs_result
+            # Try HiGHS MIQP first (unless POUNCE-only), fall back to B&B.
+            _pounce_only = nlp_solver == "pounce"
+            if not _pounce_only:
+                highs_result = _solve_qp_highs(model, t_start, time_limit)
+                if highs_result is not None:
+                    return highs_result
             return _solve_miqp_bb(
                 model,
                 time_limit,
@@ -2118,7 +1860,18 @@ def solve_model(
                 strategy,
                 max_nodes,
                 t_start,
+                prefer_pounce=_pounce_only,
             )
+
+    # The pure-JAX interior-point method ("ipm") and its sparse variant
+    # ("sparse_ipm") are retired as NLP solvers. From here on (the NLP/MINLP
+    # path only) route them to POUNCE, the pure-Rust Ipopt port. MILP/MIQP/LP/QP
+    # already returned above with the original nlp_solver, so their HiGHS-vs-
+    # POUNCE routing (gated by _pounce_only == "pounce") is unaffected. JAX
+    # remains the autodiff substrate (McCormick relaxations + differentiable
+    # layers). "ipm" is the historical default, so this resolution is silent.
+    if nlp_solver in ("ipm", "sparse_ipm"):
+        nlp_solver = "pounce"
 
     # --- Convex NLP fast path: skip B&B for convex continuous problems ---
     if _pure_continuous and _pure_continuous_convexity_known and _pure_continuous_is_convex:
@@ -2234,15 +1987,6 @@ def solve_model(
     # --- Infer constraint bounds ---
     cl_list, cu_list = _infer_constraint_bounds(model, evaluator)
     constraint_bounds = list(zip(cl_list, cu_list)) if cl_list else None
-
-    # Pre-compute constraint bounds as JAX arrays for batch IPM
-    g_l_jax = None
-    g_u_jax = None
-    if nlp_solver == "ipm" and cl_list:
-        import jax.numpy as jnp
-
-        g_l_jax = jnp.array(cl_list, dtype=jnp.float64)
-        g_u_jax = jnp.array(cu_list, dtype=jnp.float64)
 
     # --- Prepare cut generation if enabled ---
     _generate_cuts = None
@@ -2563,53 +2307,35 @@ def solve_model(
         # Use augmented evaluator with cuts if available
         _active_evaluator = evaluator
         _active_cb = constraint_bounds
-        _active_gl = g_l_jax
-        _active_gu = g_u_jax
         if _cut_pool is not None and len(_cut_pool) > 0:
             _augmented_evaluator = _AugmentedEvaluator(evaluator, _cut_pool)
             _active_evaluator = _augmented_evaluator
             _active_cb = _augmented_evaluator.get_augmented_constraint_bounds(constraint_bounds)
-            if nlp_solver == "ipm" and hasattr(evaluator, "_obj_fn"):
-                _active_gl, _active_gu = _augmented_evaluator.get_augmented_jax_bounds(
-                    g_l_jax, g_u_jax
-                )
 
-        _use_ipm_batch = nlp_solver == "ipm" and hasattr(evaluator, "_obj_fn")
         # POUNCE batches node NLPs via solve_nlp_batch (Phase A, discopt#97).
-        # It uses Python callbacks, so unlike the IPM path it needs no JAX
-        # _obj_fn on the evaluator. The callback path is GIL-bound, so only
-        # batch when the per-node problem is large enough to amortize it
-        # (_POUNCE_BATCH_MIN_VARS); smaller nodes stay on the serial path.
+        # It uses Python callbacks, so it needs no JAX _obj_fn on the evaluator.
+        # The callback path is GIL-bound, so only batch when the per-node problem
+        # is large enough to amortize it (_POUNCE_BATCH_MIN_VARS); smaller nodes
+        # stay on the serial path.
         _use_pounce_batch = nlp_solver == "pounce" and n_vars >= _POUNCE_BATCH_MIN_VARS
-        if (_use_ipm_batch or _use_pounce_batch) and n_batch > 1:
-            if _use_pounce_batch:
-                result_ids, result_lbs, result_sols, result_feas = _solve_batch_pounce(
-                    _active_evaluator,
-                    batch_lb,
-                    batch_ub,
-                    batch_ids,
-                    n_vars,
-                    _active_cb,
-                    opts,
-                    batch_psols=batch_psols,
-                    multistart=_POUNCE_BATCH_MULTISTART,
-                    convex=_model_is_convex,
-                )
-            else:
-                result_ids, result_lbs, result_sols, result_feas = _solve_batch_ipm(
-                    _active_evaluator,
-                    batch_lb,
-                    batch_ub,
-                    batch_ids,
-                    n_vars,
-                    _active_cb,
-                    opts,
-                    _active_gl,
-                    _active_gu,
-                    batch_psols=batch_psols,
-                    multistart=True,  # IPM needs multistart even for convex models
-                    convex=_model_is_convex,
-                )
+        if _use_pounce_batch and n_batch > 1:
+            result_ids, result_lbs, result_sols, result_feas, _batch_trusted = _solve_batch_pounce(
+                _active_evaluator,
+                batch_lb,
+                batch_ub,
+                batch_ids,
+                n_vars,
+                _active_cb,
+                opts,
+                batch_psols=batch_psols,
+                multistart=_POUNCE_BATCH_MULTISTART,
+                convex=_model_is_convex,
+            )
+            # A convex node whose relaxation objective is not KKT-valid (and
+            # could not be polished) is not a valid lower bound; decertify the
+            # gap rather than trust it (roadmap P0.3). Bounds are left as-is.
+            if _model_is_convex and not bool(np.all(_batch_trusted)):
+                _gap_certified = False
             # Constraint feasibility post-check for batch IPM results.
             # When the IPM solution violates constraints (e.g. due to hitting
             # the iteration limit), mark the node as infeasible (SENTINEL).
@@ -2724,16 +2450,28 @@ def solve_model(
             # Per-node, ~20ms for problems with tens of bilinear terms.
             if _mc_lp_relaxer is not None:
                 for i in range(n_batch):
-                    if result_lbs[i] < _SENTINEL_THRESHOLD:
-                        try:
-                            mc_res = _mc_lp_relaxer.solve_at_node(
-                                np.asarray(batch_lb[i]),
-                                np.asarray(batch_ub[i]),
-                            )
-                        except Exception as e:
-                            logger.debug("McCormick LP failed at node %d: %s", i, e)
-                            continue
-                        if mc_res.lower_bound is not None and np.isfinite(mc_res.lower_bound):
+                    if node_infeasible_mask[i]:
+                        continue
+                    nlp_failed = result_lbs[i] >= _SENTINEL_THRESHOLD
+                    try:
+                        mc_res = _mc_lp_relaxer.solve_at_node(
+                            np.asarray(batch_lb[i]),
+                            np.asarray(batch_ub[i]),
+                        )
+                    except Exception as e:
+                        logger.debug("McCormick LP failed at node %d: %s", i, e)
+                        continue
+                    if mc_res.lower_bound is not None and np.isfinite(mc_res.lower_bound):
+                        if nlp_failed:
+                            # A failed / locally-infeasible NLP solve is not an
+                            # infeasibility proof. Adopt the LP bound + LP point
+                            # so the node branches instead of being pruned via
+                            # the sentinel (mirrors the serial path).
+                            result_lbs[i] = float(mc_res.lower_bound)
+                            if mc_res.x is not None:
+                                result_sols[i] = mc_res.x
+                            result_feas[i] = False
+                        else:
                             result_lbs[i] = max(result_lbs[i], float(mc_res.lower_bound))
             if not _model_is_convex:
                 for i in range(n_batch):
@@ -2741,6 +2479,15 @@ def solve_model(
                         _gap_certified = False
                     elif not np.isfinite(result_lbs[i]):
                         result_lbs[i] = _INFEASIBILITY_SENTINEL
+                    elif result_lbs[i] >= _SENTINEL_THRESHOLD and not node_infeasible_mask[i]:
+                        # Soundness guard (issue #27a, batch parity with the
+                        # serial path): a node carrying the failure sentinel
+                        # without an FBBT infeasibility proof is pruned without
+                        # being proven suboptimal — the NLP merely failed or
+                        # was locally infeasible. Decertify the gap so the
+                        # result downgrades to "feasible" instead of claiming
+                        # a certified optimum.
+                        _gap_certified = False
         else:
             result_ids = np.empty(n_batch, dtype=np.int64)
             result_lbs = np.empty(n_batch, dtype=np.float64)
@@ -2757,28 +2504,14 @@ def solve_model(
                     # When the LP relaxer is active, skip it: the LP block below
                     # supplies the bound + primal and SubNLP turns that into
                     # the incumbent — running multistart NLP here is wasted work.
-                    if _use_ipm_batch:
-                        # More random starts for nonconvex problems
-                        _root_n_random = 5 if not _model_is_convex else 2
-                        nlp_result = _solve_root_node_multistart_ipm(
-                            _active_evaluator,
-                            node_lb,
-                            node_ub,
-                            _active_cb,
-                            _active_gl,
-                            _active_gu,
-                            opts,
-                            n_random=_root_n_random,
-                        )
-                    else:
-                        nlp_result = _solve_root_node_multistart(
-                            _active_evaluator,
-                            node_lb,
-                            node_ub,
-                            _active_cb,
-                            opts,
-                            nlp_solver,
-                        )
+                    nlp_result = _solve_root_node_multistart(
+                        _active_evaluator,
+                        node_lb,
+                        node_ub,
+                        _active_cb,
+                        opts,
+                        nlp_solver,
+                    )
                 elif iteration > 0:
                     # Warm-start from parent solution if available
                     psol_i = np.array(batch_psols[i])
@@ -2789,27 +2522,15 @@ def solve_model(
                         lb_clipped = np.clip(node_lb, -_SPC, _SPC)
                         ub_clipped = np.clip(node_ub, -_SPC, _SPC)
                         x0 = 0.5 * (lb_clipped + ub_clipped)
-                    if _use_ipm_batch:
-                        nlp_result = _solve_node_multistart_ipm(
-                            _active_evaluator,
-                            x0,
-                            node_lb,
-                            node_ub,
-                            _active_cb,
-                            _active_gl,
-                            _active_gu,
-                            opts,
-                        )
-                    else:
-                        nlp_result = _solve_node_nlp(
-                            _active_evaluator,
-                            x0,
-                            node_lb,
-                            node_ub,
-                            _active_cb,
-                            opts,
-                            nlp_solver=nlp_solver,
-                        )
+                    nlp_result = _solve_node_nlp(
+                        _active_evaluator,
+                        x0,
+                        node_lb,
+                        node_ub,
+                        _active_cb,
+                        opts,
+                        nlp_solver=nlp_solver,
+                    )
 
                 result_ids[i] = int(batch_ids[i])
 
@@ -3023,6 +2744,7 @@ def solve_model(
                         parent_lb=float(result_lbs[i]),
                         max_candidates=5,
                         time_limit=0.5,
+                        prefer_pounce=nlp_solver == "pounce",
                     )
                     if best_var is not None:
                         sb_hint_ids.append(node_id)
@@ -3281,6 +3003,7 @@ def solve_model(
                             ub=np.array(ub),
                             incumbent_cutoff=float(inc_obj),
                             time_limit_per_lp=0.1,
+                            prefer_pounce=nlp_solver == "pounce",
                         )
                         if obbt_result.n_tightened > 0:
                             lb = obbt_result.tightened_lb
@@ -3606,36 +3329,9 @@ def _solve_continuous(
         nlp_result = solve_nlp_pounce(
             backend_evaluator, x0, constraint_bounds=constraint_bounds, options=opts
         )
-    elif nlp_solver == "sparse_ipm" and hasattr(backend_evaluator, "_obj_fn"):
-        from discopt._jax.sparse_ipm import solve_nlp_sparse_ipm
-
-        # Build sparse Jacobian function if beneficial
-        sparse_jac_fn = None
-        try:
-            from discopt._jax.sparsity import detect_and_color
-
-            result = detect_and_color(model)
-            if result is not None:
-                from discopt._jax.sparse_jacobian import make_sparse_jac_fn
-
-                pattern, colors, n_colors, seed = result
-                sparse_jac_fn = make_sparse_jac_fn(evaluator._cons_fn, pattern, colors, seed)
-        except Exception as e:
-            logger.debug("Sparse Jacobian setup failed: %s", e)
-        nlp_result = solve_nlp_sparse_ipm(
-            backend_evaluator,
-            x0,
-            constraint_bounds=constraint_bounds,
-            options=opts,
-            sparse_jac_fn=sparse_jac_fn,
-        )
-    elif nlp_solver == "ipm" and hasattr(backend_evaluator, "_obj_fn"):
-        from discopt._jax.ipm import solve_nlp_ipm
-
-        nlp_result = solve_nlp_ipm(
-            backend_evaluator, x0, constraint_bounds=constraint_bounds, options=opts
-        )
     else:
+        # "ipm"/"sparse_ipm" resolve to POUNCE upstream (the JAX IPM is retired);
+        # only "ipopt"/"cyipopt" reach this branch.
         nlp_result = solve_nlp(
             backend_evaluator, x0, constraint_bounds=constraint_bounds, options=opts
         )
@@ -3710,8 +3406,6 @@ def _solve_nlp_bb(
     For nonconvex problems the NLP objective is NOT a valid lower bound;
     the solver runs in heuristic mode and reports gap_certified=False.
     """
-    import jax.numpy as jnp
-
     from discopt._jax.gdp_reformulate import reformulate_gdp
     from discopt.modeling.core import ObjectiveSense
 
@@ -3789,12 +3483,6 @@ def _solve_nlp_bb(
     cl_list, cu_list = _infer_constraint_bounds(model, evaluator)
     constraint_bounds = list(zip(cl_list, cu_list)) if cl_list else None
 
-    g_l_jax = None
-    g_u_jax = None
-    if nlp_solver == "ipm" and cl_list:
-        g_l_jax = jnp.array(cl_list, dtype=jnp.float64)
-        g_u_jax = jnp.array(cu_list, dtype=jnp.float64)
-
     opts: dict = {}
     opts.setdefault("print_level", 0)
     opts.setdefault("max_iter", 3000)
@@ -3823,12 +3511,11 @@ def _solve_nlp_bb(
     _fp_ran = False
 
     # --- NLP-BB loop ---
-    _use_ipm_batch = nlp_solver == "ipm" and hasattr(evaluator, "_obj_fn")
     # POUNCE batches node NLPs via solve_nlp_batch (Phase A, discopt#97); it is
     # a true KKT solver, so its converged objective is a reliable lower bound
-    # for convex MINLPs (no polish pass needed, unlike the JAX IPM). The callback
-    # path is GIL-bound, so only batch when the per-node problem is large enough
-    # to amortize it; smaller nodes stay on the serial path.
+    # for convex MINLPs. The callback path is GIL-bound, so only batch when the
+    # per-node problem is large enough to amortize it; smaller nodes stay on the
+    # serial path.
     _use_pounce_batch = nlp_solver == "pounce" and n_vars >= _POUNCE_BATCH_MIN_VARS
     iteration = 0
     while True:
@@ -3891,35 +3578,25 @@ def _solve_nlp_bb(
         # Solve NLP at each node (no relaxation, no multistart for convex)
         t_jax_start = time.perf_counter()
 
-        if (_use_ipm_batch or _use_pounce_batch) and n_batch > 1:
-            if _use_pounce_batch:
-                result_ids, result_lbs, result_sols, result_feas = _solve_batch_pounce(
-                    evaluator,
-                    batch_lb,
-                    batch_ub,
-                    batch_ids,
-                    n_vars,
-                    constraint_bounds,
-                    opts,
-                    batch_psols=batch_psols,
-                    multistart=_POUNCE_BATCH_MULTISTART,
-                    convex=_model_is_convex,
-                )
-            else:
-                result_ids, result_lbs, result_sols, result_feas = _solve_batch_ipm(
-                    evaluator,
-                    batch_lb,
-                    batch_ub,
-                    batch_ids,
-                    n_vars,
-                    constraint_bounds,
-                    opts,
-                    g_l_jax,
-                    g_u_jax,
-                    batch_psols=batch_psols,
-                    multistart=True,  # IPM needs multistart even for convex models
-                    convex=_model_is_convex,
-                )
+        if _use_pounce_batch and n_batch > 1:
+            result_ids, result_lbs, result_sols, result_feas, _batch_trusted = _solve_batch_pounce(
+                evaluator,
+                batch_lb,
+                batch_ub,
+                batch_ids,
+                n_vars,
+                constraint_bounds,
+                opts,
+                batch_psols=batch_psols,
+                multistart=_POUNCE_BATCH_MULTISTART,
+                convex=_model_is_convex,
+            )
+            # Convex MINLP: the NLP objective is the node lower bound. A node
+            # whose relaxation did not reach KKT (and could not be polished) is
+            # not a valid lower bound, so decertify the gap rather than trust
+            # it — leaving bound/incumbent untouched (roadmap P0.3).
+            if _model_is_convex and not bool(np.all(_batch_trusted)):
+                _gap_certified = False
             # Constraint feasibility post-check
             if cl_list:
                 for i in range(n_batch):
@@ -3956,20 +3633,7 @@ def _solve_nlp_bb(
                 node_lb = np.array(batch_lb[i])
                 node_ub = np.array(batch_ub[i])
 
-                if iteration == 0 and _use_ipm_batch:
-                    n_random = 2 if _model_is_convex else 5
-                    nlp_result = _solve_root_node_multistart_ipm(
-                        evaluator,
-                        node_lb,
-                        node_ub,
-                        constraint_bounds,
-                        g_l_jax,
-                        g_u_jax,
-                        opts,
-                        n_random=n_random,
-                        convex=_model_is_convex,
-                    )
-                elif iteration == 0:
+                if iteration == 0:
                     nlp_result = _solve_root_node_multistart(
                         evaluator,
                         node_lb,
@@ -4000,6 +3664,13 @@ def _solve_nlp_bb(
                 result_ids[i] = int(batch_ids[i])
                 if nlp_result.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
                     nlp_lb = nlp_result.objective
+                    # Convex node bound is only valid if the relaxation reached
+                    # KKT. ITERATION_LIMIT here means non-KKT and unpolished
+                    # (the serial IPM path polishes; POUNCE does not), so the
+                    # objective is not a valid lower bound — decertify the gap
+                    # (roadmap P0.3) while still using it as a branching point.
+                    if _model_is_convex and nlp_result.status == SolveStatus.ITERATION_LIMIT:
+                        _gap_certified = False
                     # Constraint feasibility check
                     if cl_list and not _check_constraint_feasibility(
                         evaluator, nlp_result.x, cl_list, cu_list
@@ -4227,7 +3898,10 @@ def _solve_nlp_bb(
         if model._objective.sense == ObjectiveSense.MAXIMIZE:
             obj_val = -obj_val
 
-        if tree.gap() <= gap_tolerance or tree.is_finished():
+        # "optimal" requires both a closed search AND a certified gap: a node
+        # whose convex relaxation was not KKT-valid (roadmap P0.3) leaves the
+        # bound uncertified, so the search closing does not prove optimality.
+        if (tree.gap() <= gap_tolerance or tree.is_finished()) and _gap_certified:
             status = "optimal"
         else:
             status = "feasible"
@@ -4247,11 +3921,17 @@ def _solve_nlp_bb(
     if bound_val is not None and model._objective.sense == ObjectiveSense.MAXIMIZE:
         bound_val = -bound_val
 
+    # An uncertified gap is not a rigorous dual bound; do not present one.
+    gap_val = stats["gap"]
+    if not _gap_certified:
+        bound_val = None
+        gap_val = None
+
     return SolveResult(
         status=status,
         objective=obj_val,
         bound=bound_val,
-        gap=stats["gap"],
+        gap=gap_val,
         x=x_dict,
         wall_time=wall_time,
         node_count=stats["total_nodes"],
@@ -4322,16 +4002,10 @@ def _solve_node_nlp(
             except Exception:
                 pass  # If evaluation fails, fall through to NLP solver
 
-    if nlp_solver == "pounce":
-        return _solve_node_nlp_pounce(evaluator, x0, node_lb, node_ub, constraint_bounds, options)
-    if nlp_solver == "ipm":
-        # JAX IPM requires JAX-compiled _obj_fn/_cons_fn; fall back to ipopt
-        # for evaluators without these attributes.
-        if not hasattr(evaluator, "_obj_fn"):
-            return _solve_node_nlp_ipopt(
-                evaluator, x0, node_lb, node_ub, constraint_bounds, options
-            )
-        return _solve_node_nlp_ipm(
+    if nlp_solver in ("pounce", "ipm", "sparse_ipm"):
+        # "ipm"/"sparse_ipm" are deprecated aliases — the JAX IPM is retired as a
+        # node NLP solver, so all route to POUNCE (the pure-Rust Ipopt port).
+        return _solve_node_nlp_pounce(
             evaluator, x0, node_lb, node_ub, constraint_bounds, options, convex=convex
         )
     return _solve_node_nlp_ipopt(evaluator, x0, node_lb, node_ub, constraint_bounds, options)
@@ -4344,8 +4018,22 @@ def _solve_node_nlp_pounce(
     node_ub: np.ndarray,
     constraint_bounds: Optional[list[tuple[float, float]]],
     options: dict,
+    convex: bool = False,
 ):
-    """Solve node NLP with POUNCE (pure-Rust Ipopt port)."""
+    """Solve node NLP with POUNCE (pure-Rust Ipopt port).
+
+    Robustness layer (roadmap P0.2/P0.3):
+
+    - A failed solve (error / divergence / *local* infeasibility — which on a
+      nonconvex node is not an infeasibility proof) is retried from up to two
+      alternative deterministic starts (box midpoint, then an off-center
+      point) before the failure is reported. Without this a single bad start
+      costs the node its bound and decertifies the gap.
+    - When ``convex=True`` and the result is ITERATION_LIMIT (non-KKT, so the
+      objective is not a valid lower bound), one polish re-solve at a boosted
+      iteration budget is attempted from the stalled iterate; only an OPTIMAL
+      polish restores trust in the bound.
+    """
     from discopt.solvers import NLPResult
     from discopt.solvers.nlp_pounce import solve_nlp as solve_nlp_pounce
 
@@ -4360,368 +4048,51 @@ def _solve_node_nlp_pounce(
         caller_limit = 30.0
     opts["max_wall_time"] = min(30.0, caller_limit)
 
-    try:
-        return solve_nlp_pounce(
-            proxy,  # type: ignore[arg-type]
-            x0,
-            constraint_bounds=constraint_bounds,
-            options=opts,
-        )
-    except Exception as e:
-        logger.debug("POUNCE solver failed: %s", e)
-        return NLPResult(status=SolveStatus.ERROR, x=x0, objective=_INFEASIBILITY_SENTINEL)
-
-
-def _solve_node_nlp_ipm(
-    evaluator: NLPEvaluator,
-    x0: np.ndarray,
-    node_lb: np.ndarray,
-    node_ub: np.ndarray,
-    constraint_bounds: Optional[list[tuple[float, float]]],
-    options: dict,
-    convex: bool = False,
-):
-    """Solve node NLP with the pure-JAX IPM.
-
-    When ``convex=True``, iterates that hit ``max_iter`` / stall (codes 3,
-    4) are polished with cyipopt because a non-KKT IPM objective is not a
-    valid lower bound for the convex NLP (issue #39).
-    """
-    import jax.numpy as jnp
-
-    from discopt._jax.ipm import IPMOptions, ipm_solve
-    from discopt.solvers import NLPResult
-
-    obj_fn = evaluator._obj_fn
-    m = evaluator.n_constraints
-    con_fn = evaluator._cons_fn if m > 0 else None
-
-    x0_jax = jnp.array(x0, dtype=jnp.float64)
-    x_l = jnp.array(node_lb, dtype=jnp.float64)
-    x_u = jnp.array(node_ub, dtype=jnp.float64)
-
-    if constraint_bounds is not None:
-        g_l = jnp.array([b[0] for b in constraint_bounds], dtype=jnp.float64)
-        g_u = jnp.array([b[1] for b in constraint_bounds], dtype=jnp.float64)
-    else:
-        g_l = None
-        g_u = None
-
-    ipm_opts = IPMOptions(max_iter=int(options.get("max_iter", 200)))
-    max_wall_time = options.get("max_wall_time")
-
-    try:
-        t0 = time.perf_counter()
-        state = ipm_solve(obj_fn, con_fn, x0_jax, x_l, x_u, g_l, g_u, ipm_opts)
-        wall_time = time.perf_counter() - t0
-    except Exception as e:
-        logger.debug("IPM solver failed: %s", e)
-        return NLPResult(status=SolveStatus.ERROR, x=x0, objective=_INFEASIBILITY_SENTINEL)
-
-    conv = int(state.converged)
-
-    obj_val = float(state.obj)
-    x_sol = np.asarray(state.x)
-    needs_recovery = conv == 5 or not np.isfinite(obj_val) or np.any(~np.isfinite(x_sol))
-
-    # Feasibility restoration: when the IPM declares infeasible or diverges
-    # to NaN, try to find a feasible point via restoration, then re-solve.
-    if needs_recovery and con_fn is not None and g_l is not None and g_u is not None:
-        from discopt._jax.ipm import _jax_feasibility_restoration
-
-        x_rest_start = x0_jax if np.any(~np.isfinite(x_sol)) else state.x
-        for _rest_attempt in range(3):
-            try:
-                x_restored, rest_ok = _jax_feasibility_restoration(
-                    con_fn,
-                    x_rest_start,
-                    x_l,
-                    x_u,
-                    g_l,
-                    g_u,
-                    ipm_opts,
-                )
-            except Exception:
-                break
-            if not rest_ok:
-                break
-            try:
-                state = ipm_solve(
-                    obj_fn,
-                    con_fn,
-                    x_restored,
-                    x_l,
-                    x_u,
-                    g_l,
-                    g_u,
-                    ipm_opts,
-                )
-            except Exception:
-                break
-            conv = int(state.converged)
-            obj_val = float(state.obj)
-            x_sol = np.asarray(state.x)
-            if conv != 5 and np.isfinite(obj_val) and np.all(np.isfinite(x_sol)):
-                break
-            x_rest_start = x0_jax if np.any(~np.isfinite(x_sol)) else state.x
-
-    # Check wall-time limit post-hoc (issue #5). The JIT-compiled
-    # jax.lax.while_loop cannot check wall clock mid-iteration.
-    wall_time = time.perf_counter() - t0
-    exceeded_time = max_wall_time is not None and wall_time > max_wall_time
-    if conv in (1, 2) and not exceeded_time:
-        status = SolveStatus.OPTIMAL
-    elif conv == 5:
-        status = SolveStatus.INFEASIBLE
-    elif conv in (3, 4) or exceeded_time:
-        status = SolveStatus.ITERATION_LIMIT
-    else:
-        status = SolveStatus.ERROR
-
-    # Final NaN guard — if restoration also failed, mark as error.
-    if not np.isfinite(obj_val) or np.any(~np.isfinite(x_sol)):
-        return NLPResult(
-            status=SolveStatus.ERROR,
-            x=x0,
-            objective=_INFEASIBILITY_SENTINEL,
-        )
-
-    # Convex polish: codes 3/4 are not KKT, so obj_val is not a valid LB
-    # for a convex NLP. Re-solve with cyipopt. See issue #39.
-    if convex and conv in (3, 4):
+    def _attempt(start: np.ndarray, attempt_opts: dict):
         try:
-            polish = _solve_node_nlp_kkt(
-                evaluator, x_sol, node_lb, node_ub, constraint_bounds, options
+            return solve_nlp_pounce(
+                proxy,  # type: ignore[arg-type]
+                start,
+                constraint_bounds=constraint_bounds,
+                options=attempt_opts,
             )
         except Exception as e:
-            logger.debug("IPM convex polish failed (single-node): %s", e)
-            polish = None
-        if polish is not None and polish.status in (
-            SolveStatus.OPTIMAL,
-            SolveStatus.ITERATION_LIMIT,
+            logger.debug("POUNCE solver failed: %s", e)
+            return NLPResult(status=SolveStatus.ERROR, x=start, objective=_INFEASIBILITY_SENTINEL)
+
+    lb_c = np.clip(np.asarray(node_lb, dtype=np.float64), -_SPC, _SPC)
+    ub_c = np.clip(np.asarray(node_ub, dtype=np.float64), -_SPC, _SPC)
+    midpoint = 0.5 * (lb_c + ub_c)
+    # Deterministic off-center fallback start (no RNG: determinism by default).
+    off_center = lb_c + 0.382 * (ub_c - lb_c)
+
+    result = _attempt(np.asarray(x0, dtype=np.float64), opts)
+    if result.status not in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
+        for alt in (midpoint, off_center):
+            if np.allclose(alt, x0, atol=1e-12):
+                continue
+            retry = _attempt(alt, opts)
+            if retry.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
+                result = retry
+                break
+
+    # Convex polish-retry: a non-KKT objective is not a valid LB; one boosted
+    # re-solve from the stalled iterate often reaches KKT (trusted again).
+    if convex and result.status == SolveStatus.ITERATION_LIMIT:
+        polish_opts = dict(opts)
+        polish_opts["max_iter"] = max(3 * int(opts.get("max_iter", 1000) or 1000), 3000)
+        start = np.asarray(result.x, dtype=np.float64)
+        if not np.all(np.isfinite(start)):
+            start = midpoint
+        polished = _attempt(np.clip(start, node_lb, node_ub), polish_opts)
+        if (
+            polished.status == SolveStatus.OPTIMAL
+            and polished.objective is not None
+            and np.isfinite(polished.objective)
         ):
-            p_obj = float(polish.objective)
-            if np.isfinite(p_obj) and p_obj < _SENTINEL_THRESHOLD:
-                return NLPResult(
-                    status=polish.status,
-                    x=np.asarray(polish.x),
-                    objective=p_obj,
-                )
+            return polished
 
-    return NLPResult(
-        status=status,
-        x=x_sol,
-        objective=obj_val,
-    )
-
-
-def _solve_batch_ipm(
-    evaluator,
-    batch_lb,
-    batch_ub,
-    batch_ids,
-    n_vars,
-    constraint_bounds,
-    options,
-    g_l_jax,
-    g_u_jax,
-    batch_psols=None,
-    multistart=False,
-    convex=False,
-):
-    """Solve a batch of NLP relaxations simultaneously via vmap'd IPM.
-
-    When multistart=True, each node gets 3 starting points (warm-start,
-    midpoint, random) solved in parallel, with the best converged solution
-    selected per node.
-
-    When ``convex=True``, the caller is treating the NLP objective at each
-    node as a valid lower bound (sound only for convex models). IPM
-    iterates that hit ``max_iter`` (code 3) or stall (code 4) are not at
-    KKT stationarity and their objective is not a reliable lower bound, so
-    those nodes get a polish pass with cyipopt.
-    """
-    import jax.numpy as jnp
-
-    from discopt._jax.ipm import (
-        IPMOptions,
-        _jax_feasibility_restoration,
-        ipm_solve,
-        solve_nlp_batch,
-    )
-
-    n_batch = len(batch_ids)
-    obj_fn = evaluator._obj_fn
-    m = evaluator.n_constraints
-    con_fn = evaluator._cons_fn if m > 0 else None
-
-    # Build (batch, n) JAX arrays for bounds and starting points
-    xl_batch = jnp.array(batch_lb, dtype=jnp.float64)
-    xu_batch = jnp.array(batch_ub, dtype=jnp.float64)
-
-    # Warm-start: use parent solutions clipped to child bounds, fall back to midpoint
-    lb_clipped = jnp.clip(xl_batch, -_SPC, _SPC)
-    ub_clipped = jnp.clip(xu_batch, -_SPC, _SPC)
-    midpoint_x0 = 0.5 * (lb_clipped + ub_clipped)
-
-    if batch_psols is not None:
-        psols_jax = jnp.array(batch_psols, dtype=jnp.float64)
-        has_parent = ~jnp.any(jnp.isnan(psols_jax), axis=1, keepdims=True)
-        warm_x0 = jnp.clip(psols_jax, xl_batch, xu_batch)
-        x0_batch = jnp.where(has_parent, warm_x0, midpoint_x0)
-    else:
-        x0_batch = midpoint_x0
-
-    n_starts = 1
-    if multistart:
-        # Expand: 3 starting points per node (warm-start, midpoint, random)
-        # More starts give better solutions but 3x cost per node.
-        n_starts = 3
-        span = jnp.maximum(ub_clipped - lb_clipped, 0.0)
-        # Random starting point (deterministic seed)
-        rng = np.random.RandomState(42)
-        rand_offsets = jnp.array(rng.uniform(size=(n_batch, n_vars)), dtype=jnp.float64)
-        rand_x0 = lb_clipped + rand_offsets * span
-
-        # Stack: (n_batch, 3, n_vars) then reshape to (n_batch*3, n_vars)
-        x0_expanded = jnp.stack([x0_batch, midpoint_x0, rand_x0], axis=1)
-        x0_batch = x0_expanded.reshape(n_batch * n_starts, n_vars)
-        # Repeat bounds to match interleaved order
-        xl_expanded = jnp.broadcast_to(xl_batch[:, None, :], (n_batch, n_starts, n_vars)).reshape(
-            n_batch * n_starts, n_vars
-        )
-        xu_expanded = jnp.broadcast_to(xu_batch[:, None, :], (n_batch, n_starts, n_vars)).reshape(
-            n_batch * n_starts, n_vars
-        )
-        xl_batch = xl_expanded
-        xu_batch = xu_expanded
-
-    ipm_opts = IPMOptions(max_iter=int(options.get("max_iter", 200)))
-
-    try:
-        state = solve_nlp_batch(
-            obj_fn, con_fn, x0_batch, xl_batch, xu_batch, g_l_jax, g_u_jax, ipm_opts
-        )
-    except Exception as e:
-        logger.debug("Batch IPM failed: %s", e)
-        # Fallback: mark all as infeasible
-        result_ids = np.array(batch_ids, dtype=np.int64)
-        result_lbs = np.full(n_batch, _INFEASIBILITY_SENTINEL, dtype=np.float64)
-        result_sols = np.asarray(midpoint_x0 if not multistart else x0_expanded[:, 0, :])
-        result_feas = np.zeros(n_batch, dtype=bool)
-        return result_ids, result_lbs, result_sols, result_feas
-
-    # Unpack batched IPMState → numpy arrays
-    converged = np.asarray(state.converged)
-    obj_vals = np.asarray(state.obj)
-    x_vals = np.asarray(state.x)
-
-    if multistart:
-        # Reshape (n_batch*n_starts,) → (n_batch, n_starts), pick best per node
-        converged = converged.reshape(n_batch, n_starts)
-        obj_vals = obj_vals.reshape(n_batch, n_starts)
-        x_vals = x_vals.reshape(n_batch, n_starts, n_vars)
-
-        # Accept converged (1=optimal, 2=acceptable), iteration-limit (3),
-        # and stalled (4) solutions. Code 5 (infeasible) is excluded.
-        # Constraint feasibility is checked separately in the caller;
-        # iteration-limit solutions that violate constraints are handled
-        # there (not pruned, but given a conservative lower bound).
-        feasible_mask = (
-            (converged == 1) | (converged == 2) | (converged == 3) | (converged == 4)
-        ) & np.isfinite(obj_vals)
-        masked_obj = np.where(feasible_mask, obj_vals, np.inf)
-        best_per_node = np.argmin(masked_obj, axis=1)  # (n_batch,)
-
-        result_obj = np.array([obj_vals[i, best_per_node[i]] for i in range(n_batch)])
-        result_x = np.array([x_vals[i, best_per_node[i]] for i in range(n_batch)], dtype=np.float64)
-        any_feasible = np.any(feasible_mask, axis=1)
-        result_lbs = np.asarray(
-            np.where(any_feasible, result_obj, _INFEASIBILITY_SENTINEL), dtype=np.float64
-        )
-        result_sols = result_x  # already writable np.array
-
-        # Convex polish: IPM codes 3 (max_iter) / 4 (stalled) don't certify
-        # KKT stationarity, so their objective is not a valid lower bound
-        # for a convex NLP. Re-solve those nodes with cyipopt and use its
-        # (reliable) optimum as the LB. See issue #39 (synthes2 B&B node
-        # stalls at 92.10 vs true 73.04).
-        if convex:
-            best_codes = np.array([int(converged[i, best_per_node[i]]) for i in range(n_batch)])
-            polish_needed = any_feasible & ((best_codes == 3) | (best_codes == 4))
-            for i in np.where(polish_needed)[0]:
-                row = int(i * n_starts)
-                node_lb_i = np.asarray(xl_batch[row])
-                node_ub_i = np.asarray(xu_batch[row])
-                try:
-                    polish = _solve_node_nlp_kkt(
-                        evaluator,
-                        result_sols[i],
-                        node_lb_i,
-                        node_ub_i,
-                        constraint_bounds,
-                        options,
-                    )
-                except Exception as e:
-                    logger.debug("IPM convex polish failed at node %d: %s", i, e)
-                    continue
-                if polish.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
-                    polished_obj = float(polish.objective)
-                    if np.isfinite(polished_obj) and polished_obj < _SENTINEL_THRESHOLD:
-                        result_lbs[i] = polished_obj
-                        result_sols[i] = np.asarray(polish.x, dtype=np.float64)
-    else:
-        conv_mask = (converged == 1) | (converged == 2) | (converged == 3) | (converged == 4)
-        ok_mask = conv_mask & np.isfinite(obj_vals)
-        result_lbs = np.asarray(
-            np.where(ok_mask, obj_vals, _INFEASIBILITY_SENTINEL),
-            dtype=np.float64,
-        )
-        result_sols = np.array(x_vals, dtype=np.float64)  # writable copy
-
-        # Restoration: for failed nodes (NaN or code 5), try to recover
-        # a feasible point via restoration and re-solve individually.
-        failed_indices = np.where(~ok_mask)[0]
-        if len(failed_indices) > 0 and con_fn is not None and g_l_jax is not None:
-            for idx in failed_indices:
-                x_start = x0_batch[idx] if not np.all(np.isfinite(x_vals[idx])) else x_vals[idx]
-                try:
-                    x_restored, rest_ok = _jax_feasibility_restoration(
-                        con_fn,
-                        x_start,
-                        xl_batch[idx] if xl_batch.ndim == 2 else xl_batch,
-                        xu_batch[idx] if xu_batch.ndim == 2 else xu_batch,
-                        g_l_jax,
-                        g_u_jax,
-                        ipm_opts,
-                    )
-                except Exception:
-                    continue
-                if rest_ok:
-                    try:
-                        state_i = ipm_solve(
-                            obj_fn,
-                            con_fn,
-                            x_restored,
-                            xl_batch[idx] if xl_batch.ndim == 2 else xl_batch,
-                            xu_batch[idx] if xu_batch.ndim == 2 else xu_batch,
-                            g_l_jax,
-                            g_u_jax,
-                            ipm_opts,
-                        )
-                    except Exception:
-                        continue
-                    conv_i = int(state_i.converged)
-                    obj_i = float(state_i.obj)
-                    x_i = np.asarray(state_i.x)
-                    if conv_i in (1, 2, 3, 4) and np.isfinite(obj_i) and np.all(np.isfinite(x_i)):
-                        result_lbs[idx] = obj_i
-                        result_sols[idx] = x_i
-
-    result_ids = np.array(batch_ids, dtype=np.int64)
-    result_feas = np.zeros(n_batch, dtype=bool)  # Let Rust check integrality
-
-    return result_ids, result_lbs, result_sols, result_feas
+    return result
 
 
 def _solve_batch_pounce(
@@ -4853,6 +4224,13 @@ def _solve_batch_pounce(
     result_sols = np.empty((n_batch, n_vars), dtype=np.float64)
     result_lbs = np.full(n_batch, _INFEASIBILITY_SENTINEL, dtype=np.float64)
     result_feas = np.zeros(n_batch, dtype=bool)  # Let Rust check integrality
+    # trusted[i] is False when result_lbs[i] is a numeric bound that is not a
+    # valid lower bound: for a convex model, a non-KKT (ITERATION_LIMIT)
+    # objective. POUNCE has no polish loop, so any non-optimal-but-usable
+    # convex result is untrusted. The caller decertifies the gap on these
+    # without touching the bound/incumbent (roadmap P0.3). Irrelevant for
+    # nonconvex models (objective discarded by the caller) → stays True.
+    trusted = np.ones(n_batch, dtype=bool)
 
     try:
         results = pounce.solve_nlp_batch(
@@ -4868,14 +4246,22 @@ def _solve_batch_pounce(
         for i in range(n_batch):
             node_lb, node_ub = node_bounds[i]
             res = _solve_node_nlp_pounce(
-                evaluator, x0s[i * n_starts], node_lb, node_ub, constraint_bounds, options
+                evaluator,
+                x0s[i * n_starts],
+                node_lb,
+                node_ub,
+                constraint_bounds,
+                options,
+                convex=convex,
             )
             result_sols[i] = np.asarray(res.x, dtype=np.float64)
             if res.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
                 obj = float(res.objective)
                 if np.isfinite(obj):
                     result_lbs[i] = obj
-        return result_ids, result_lbs, result_sols, result_feas
+                if convex and res.status != SolveStatus.OPTIMAL:
+                    trusted[i] = False
+        return result_ids, result_lbs, result_sols, result_feas, trusted
 
     # Reduce the starts of each node to its best accepted result. The evaluator
     # objective is in minimization sense (maximize models are negated), so the
@@ -4883,6 +4269,7 @@ def _solve_batch_pounce(
     for i in range(n_batch):
         best_obj = None
         best_x = None
+        best_status = None
         for s in range(n_starts):
             x, info = results[i * n_starts + s]
             x_arr = np.asarray(x, dtype=np.float64)
@@ -4896,11 +4283,34 @@ def _solve_batch_pounce(
                 if np.isfinite(obj) and (best_obj is None or obj < best_obj):
                     best_obj = obj
                     best_x = x_arr
+                    best_status = status
         result_sols[i] = best_x
         if best_obj is not None:
             result_lbs[i] = best_obj
+            # A non-KKT (ITERATION_LIMIT) convex objective is not a valid LB.
+            # Try one boosted polish re-solve from the stalled iterate before
+            # giving up trust (P0.3 polish-retry); only OPTIMAL restores it.
+            if convex and best_status != SolveStatus.OPTIMAL:
+                node_lb_i, node_ub_i = node_bounds[i]
+                polish = _solve_node_nlp_pounce(
+                    evaluator,
+                    np.clip(best_x, node_lb_i, node_ub_i),
+                    node_lb_i,
+                    node_ub_i,
+                    constraint_bounds,
+                    {**options, "max_iter": max(3 * int(options.get("max_iter") or 1000), 3000)},
+                )
+                if (
+                    polish.status == SolveStatus.OPTIMAL
+                    and polish.objective is not None
+                    and np.isfinite(polish.objective)
+                ):
+                    result_lbs[i] = float(polish.objective)
+                    result_sols[i] = np.asarray(polish.x, dtype=np.float64)
+                else:
+                    trusted[i] = False
 
-    return result_ids, result_lbs, result_sols, result_feas
+    return result_ids, result_lbs, result_sols, result_feas, trusted
 
 
 def _solve_node_nlp_ipopt(
@@ -5140,28 +4550,40 @@ def _mip_recover_relaxation_duals(
     b_eq: Optional[np.ndarray],
     time_limit: Optional[float] = None,
     Q_orig: Optional[np.ndarray] = None,
+    prefer_pounce: bool = False,
 ) -> tuple[
     Optional[dict[str, np.ndarray]],
     Optional[dict[str, np.ndarray]],
     Optional[dict[str, np.ndarray]],
 ]:
     """Re-solve the relaxation with integer variables fixed at their MIP
-    incumbent so HiGHS returns row duals + reduced costs we can map back to
-    discopt's named-dual convention.
+    incumbent so the LP/QP solver returns row duals + reduced costs we can map
+    back to discopt's named-dual convention.
 
-    Pass ``Q_orig`` for QP-style relaxations; omit it for LP-style. Returns
-    ``(None, None, None)`` if recovery is unavailable (HiGHS missing, the
-    fix-and-resolve LP/QP itself fails, or layout mismatch).
+    Pass ``Q_orig`` for QP-style relaxations; omit it for LP-style. With
+    ``prefer_pounce`` the fix-and-resolve uses POUNCE (HiGHS-free path);
+    otherwise HiGHS. Returns ``(None, None, None)`` if recovery is unavailable
+    (solver missing, the fix-and-resolve LP/QP itself fails, or layout
+    mismatch).
 
     Bound multipliers on the fixing bounds for integer columns are zeroed in
     the returned dicts — they reflect the act of fixing, not feasibility of
     the original integer-feasible point.
     """
     try:
-        if Q_orig is None:
-            from discopt.solvers.lp_highs import solve_lp as _highs_solve_lp
+        if prefer_pounce:
+            if Q_orig is None:
+                from discopt.solvers.lp_pounce import solve_lp as _highs_solve_lp
+            else:
+                from discopt.solvers.qp_pounce import solve_qp as _highs_solve_qp
+        elif Q_orig is None:
+            from discopt.solvers.lp_highs import (  # type: ignore[assignment]
+                solve_lp as _highs_solve_lp,
+            )
         else:
-            from discopt.solvers.qp_highs import solve_qp as _highs_solve_qp
+            from discopt.solvers.qp_highs import (  # type: ignore[assignment]
+                solve_qp as _highs_solve_qp,
+            )
     except ImportError:
         return None, None, None
 
@@ -5296,17 +4718,28 @@ def _decompose_eq_slack_form(
     return A_ub, b_ub, A_eq, b_eq
 
 
-def _solve_lp(model: Model, t_start: float, time_limit: float | None = None) -> SolveResult:
-    """Solve an LP, preferring HiGHS and falling back to the pure-JAX LP IPM.
+def _solve_lp(
+    model: Model,
+    t_start: float,
+    time_limit: float | None = None,
+    prefer_pounce: bool = False,
+) -> SolveResult:
+    """Solve an LP through the first available engine, then the JAX LP IPM.
 
-    The pure-JAX IPM struggles on problems whose declared bounds exceed
-    ~1e15 (it returns NaN via Newton blow-up on unbounded variables); HiGHS
-    handles unbounded columns natively and is also usually faster. We try
-    HiGHS first and fall back to the IPM only when HiGHS is unavailable.
+    Engine order is HiGHS -> POUNCE -> JAX IPM, or POUNCE -> HiGHS -> JAX IPM
+    when ``prefer_pounce`` is set (the user passed ``nlp_solver="pounce"``,
+    i.e. asked for POUNCE everywhere; roadmap P0.4). The pure-JAX IPM
+    struggles on problems whose declared bounds exceed ~1e15 (it returns NaN
+    via Newton blow-up on unbounded variables); HiGHS and POUNCE both handle
+    unbounded columns natively, so the IPM is the last resort.
     """
-    highs_result = _solve_lp_highs(model, t_start, time_limit)
-    if highs_result is not None:
-        return highs_result
+    engines = [_solve_lp_highs, _solve_lp_pounce]
+    if prefer_pounce:
+        engines.reverse()
+    for engine in engines:
+        result = engine(model, t_start, time_limit)
+        if result is not None:
+            return result
 
     from discopt._jax.lp_ipm import lp_ipm_solve
     from discopt._jax.problem_classifier import extract_lp_data
@@ -5359,12 +4792,46 @@ def _solve_lp_highs(
     time_limit: float | None = None,
 ) -> SolveResult | None:
     """Solve an LP using HiGHS. Returns None when HiGHS is unavailable or
-    the HiGHS wrapper fails, so the caller can fall back to the JAX IPM."""
+    the HiGHS wrapper fails, so the caller can fall back to another engine."""
     try:
         from discopt.solvers.lp_highs import solve_lp as _highs_solve_lp
     except ImportError:
         return None
+    return _solve_lp_matrix(model, t_start, time_limit, _highs_solve_lp, "HiGHS")
 
+
+def _solve_lp_pounce(
+    model: Model,
+    t_start: float,
+    time_limit: float | None = None,
+) -> SolveResult | None:
+    """Solve an LP using POUNCE (pure-Rust IPM). Returns None when POUNCE is
+    unavailable or fails, so the caller can fall back to another engine."""
+    import functools
+
+    from discopt.solvers.lp_pounce import POUNCE_AVAILABLE
+    from discopt.solvers.lp_pounce import solve_lp as _pounce_solve_lp
+
+    if not POUNCE_AVAILABLE:
+        return None
+    # Request an infeasibility certificate so an infeasible model-level LP
+    # surfaces *why* via SolveResult.infeasibility_certificate (roadmap P0.2).
+    solve_fn = functools.partial(_pounce_solve_lp, certificate=True)
+    return _solve_lp_matrix(model, t_start, time_limit, solve_fn, "POUNCE")
+
+
+def _solve_lp_matrix(
+    model: Model,
+    t_start: float,
+    time_limit: float | None,
+    solve_lp_fn,
+    engine: str,
+) -> SolveResult | None:
+    """Solve a pure LP through a matrix-form ``solve_lp`` backend.
+
+    ``solve_lp_fn`` must follow the shared LP contract (lp_highs / lp_pounce):
+    same signature, same ``LPResult`` with HiGHS-convention duals.
+    """
     from discopt._jax.problem_classifier import extract_lp_data
     from discopt.modeling.core import ObjectiveSense
     from discopt.solvers import SolveStatus
@@ -5386,7 +4853,7 @@ def _solve_lp_highs(
     A_ub, b_ub, A_eq, b_eq = _decompose_eq_slack_form(A_eq_full, b_eq_full, n_orig, n_slack)
 
     try:
-        result = _highs_solve_lp(
+        result = solve_lp_fn(
             c=np.asarray(lp_data.c[:n_orig]),
             A_ub=A_ub,
             b_ub=b_ub,
@@ -5396,13 +4863,20 @@ def _solve_lp_highs(
             time_limit=time_limit,
         )
     except Exception as e:
-        logger.debug("HiGHS LP solve failed: %s", e)
+        logger.debug("%s LP solve failed: %s", engine, e)
         return None
 
     wall_time = time.perf_counter() - t_start
 
     if result.status == SolveStatus.OPTIMAL:
         assert result.x is not None and result.objective is not None
+        if not _matrix_solution_feasible(result.x[:n_orig], A_ub, b_ub, A_eq, b_eq, bounds):
+            logger.warning(
+                "%s LP returned an infeasible point labeled optimal; "
+                "falling back to the next engine.",
+                engine,
+            )
+            return None
         obj_val = float(result.objective) + float(lp_data.obj_const)
         assert model._objective is not None
         if model._objective.sense == ObjectiveSense.MAXIMIZE:
@@ -5437,7 +4911,11 @@ def _solve_lp_highs(
         sr.convex_fast_path = True
         return sr
     if result.status == SolveStatus.INFEASIBLE:
-        return SolveResult(status="infeasible", wall_time=wall_time)
+        return SolveResult(
+            status="infeasible",
+            wall_time=wall_time,
+            infeasibility_certificate=getattr(result, "infeasibility_certificate", None),
+        )
     if result.status == SolveStatus.UNBOUNDED:
         return SolveResult(status="unbounded", wall_time=wall_time)
     if result.status == SolveStatus.TIME_LIMIT:
@@ -5445,11 +4923,21 @@ def _solve_lp_highs(
     return None
 
 
-def _solve_qp(model: Model, t_start: float) -> SolveResult:
-    """Solve a QP, preferring HiGHS when available, falling back to JAX IPM."""
-    result = _solve_qp_highs(model, t_start)
-    if result is not None:
-        return result
+def _solve_qp(model: Model, t_start: float, prefer_pounce: bool = False) -> SolveResult:
+    """Solve a QP through the first available engine, then the JAX QP IPM.
+
+    Engine order is HiGHS -> POUNCE, or POUNCE -> HiGHS when ``prefer_pounce``
+    is set (the user passed ``nlp_solver="pounce"``; roadmap P0.4). The POUNCE
+    engine handles pure-continuous QPs only — MIQPs stay on HiGHS or fall
+    through to the JAX path / B&B.
+    """
+    engines = [_solve_qp_highs, _solve_qp_pounce]
+    if prefer_pounce:
+        engines.reverse()
+    for engine in engines:
+        result = engine(model, t_start)
+        if result is not None:
+            return result
     return _solve_qp_jax(model, t_start)
 
 
@@ -5463,7 +4951,67 @@ def _solve_qp_highs(
         from discopt.solvers.qp_highs import solve_qp as _highs_solve_qp
     except ImportError:
         return None
+    return _solve_qp_matrix(model, t_start, time_limit, _highs_solve_qp, "HiGHS")
 
+
+def _solve_qp_pounce(
+    model: Model,
+    t_start: float,
+    time_limit: float | None = None,
+) -> SolveResult | None:
+    """Solve a pure-continuous QP using POUNCE. Returns None when POUNCE is
+    unavailable, the model has integer variables (no MIQP in an IPM), or the
+    solve fails — so the caller can fall back to another engine."""
+    import functools
+
+    from discopt.solvers.qp_pounce import POUNCE_AVAILABLE
+    from discopt.solvers.qp_pounce import solve_qp as _pounce_solve_qp
+
+    if not POUNCE_AVAILABLE:
+        return None
+    if any(v.var_type in (VarType.BINARY, VarType.INTEGER) for v in model._variables):
+        return None
+    solve_fn = functools.partial(_pounce_solve_qp, certificate=True)
+    return _solve_qp_matrix(model, t_start, time_limit, solve_fn, "POUNCE")
+
+
+def _matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, bounds, tol=1e-6) -> bool:
+    """Check a matrix-form LP/QP solution against its own constraints.
+
+    Engines can mislabel results: HiGHS's QP solver has been observed to
+    return a constraint-violating point flagged kOptimal (violation ~7.5 on a
+    small random strictly convex QP). A point failing its own constraints is
+    never accepted as optimal — the caller falls through to the next engine.
+    """
+    x = np.asarray(x, dtype=np.float64)
+    if not np.all(np.isfinite(x)):
+        return False
+    scale = 1.0 + float(np.max(np.abs(x)))
+    if A_ub is not None and b_ub is not None and len(b_ub):
+        if np.max(np.asarray(A_ub) @ x - np.asarray(b_ub)) > tol * scale:
+            return False
+    if A_eq is not None and b_eq is not None and len(b_eq):
+        if np.max(np.abs(np.asarray(A_eq) @ x - np.asarray(b_eq))) > tol * scale:
+            return False
+    if bounds is not None:
+        for xi, (lo, hi) in zip(x, bounds):
+            if xi < lo - tol * scale or xi > hi + tol * scale:
+                return False
+    return True
+
+
+def _solve_qp_matrix(
+    model: Model,
+    t_start: float,
+    time_limit: float | None,
+    solve_qp_fn,
+    engine: str,
+) -> SolveResult | None:
+    """Solve a QP/MIQP through a matrix-form ``solve_qp`` backend.
+
+    ``solve_qp_fn`` must follow the shared QP contract (qp_highs / qp_pounce):
+    same signature, same ``QPResult`` with HiGHS-convention duals.
+    """
     from discopt._jax.problem_classifier import extract_qp_data
     from discopt.modeling.core import ObjectiveSense
     from discopt.solvers import SolveStatus
@@ -5502,7 +5050,7 @@ def _solve_qp_highs(
     c_orig = np.asarray(qp_data.c[:n_orig])
 
     try:
-        result = _highs_solve_qp(
+        result = solve_qp_fn(
             Q=Q_orig,
             c=c_orig,
             A_ub=A_ub,
@@ -5514,13 +5062,20 @@ def _solve_qp_highs(
             time_limit=time_limit,
         )
     except Exception as e:
-        logger.debug("HiGHS QP solve failed: %s", e)
+        logger.debug("%s QP solve failed: %s", engine, e)
         return None
 
     wall_time = time.perf_counter() - t_start
 
     if result.status == SolveStatus.OPTIMAL:
         assert result.x is not None and result.objective is not None
+        if not _matrix_solution_feasible(result.x[:n_orig], A_ub, b_ub, A_eq, b_eq, bounds):
+            logger.warning(
+                "%s QP returned an infeasible point labeled optimal; "
+                "falling back to the next engine.",
+                engine,
+            )
+            return None
         x_flat = result.x[:n_orig]
         obj_val = result.objective + qp_data.obj_const
 
@@ -5576,7 +5131,11 @@ def _solve_qp_highs(
             sr.convex_fast_path = True
         return sr
     elif result.status == SolveStatus.INFEASIBLE:
-        return SolveResult(status="infeasible", wall_time=wall_time)
+        return SolveResult(
+            status="infeasible",
+            wall_time=wall_time,
+            infeasibility_certificate=getattr(result, "infeasibility_certificate", None),
+        )
     elif result.status == SolveStatus.TIME_LIMIT:
         return SolveResult(status="time_limit", wall_time=wall_time)
 
@@ -5739,6 +5298,872 @@ def _solve_qp_jax(model: Model, t_start: float) -> SolveResult:
     return sr
 
 
+def _pounce_recover_node_bound(
+    node_lb: np.ndarray,
+    node_ub: np.ndarray,
+    c: np.ndarray,
+    obj_const: float,
+    A_ub,
+    b_ub,
+    A_eq,
+    b_eq,
+    t_start: float,
+    time_limit: float,
+    Q: Optional[np.ndarray] = None,
+):
+    """Re-solve a stalled (non-KKT) MILP/MIQP node relaxation with POUNCE.
+
+    The JAX LP/QP IPM reports ``converged==3`` when it hits the iteration
+    limit; that objective is not a valid node lower bound. POUNCE is a true
+    filter IPM, so its OPTIMAL objective is KKT-valid and its INFEASIBLE is
+    Phase-1-certified — either recovers the node instead of decertifying the
+    whole gap (Phase 1 increment 2; mirrors the P0.3 polish-retry).
+
+    Returns ``("optimal", bound, x)``, ``("infeasible", None, None)``, or
+    ``None`` when POUNCE is unavailable / could not settle the node either.
+    """
+    try:
+        if Q is None:
+            from discopt.solvers.lp_pounce import POUNCE_AVAILABLE
+            from discopt.solvers.lp_pounce import solve_lp as _pounce_solve
+        else:
+            from discopt.solvers.qp_pounce import POUNCE_AVAILABLE
+            from discopt.solvers.qp_pounce import (  # type: ignore[assignment]
+                solve_qp as _pounce_solve,
+            )
+    except ImportError:
+        return None
+    if not POUNCE_AVAILABLE:
+        return None
+
+    time_left = max(0.5, time_limit - (time.perf_counter() - t_start))
+    kwargs = dict(
+        c=c,
+        A_ub=A_ub,
+        b_ub=b_ub,
+        A_eq=A_eq,
+        b_eq=b_eq,
+        bounds=list(zip(np.asarray(node_lb).tolist(), np.asarray(node_ub).tolist())),
+        time_limit=min(30.0, time_left),
+    )
+    if Q is not None:
+        kwargs["Q"] = Q
+    try:
+        res = _pounce_solve(**kwargs)
+    except Exception as e:
+        logger.debug("POUNCE node-bound recovery failed: %s", e)
+        return None
+    if (
+        res.status == SolveStatus.OPTIMAL
+        and res.objective is not None
+        and np.isfinite(res.objective)
+    ):
+        return ("optimal", float(res.objective) + float(obj_const), np.asarray(res.x))
+    if res.status == SolveStatus.INFEASIBLE:
+        return ("infeasible", None, None)
+    return None
+
+
+def _solve_node_lp_pounce(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, time_limit):
+    """Solve one MILP-B&B node relaxation with POUNCE on the augmented
+    standard-form LP (Path B: POUNCE as the *primary* node engine in POUNCE
+    mode, not just recovery).
+
+    POUNCE (Rust) takes the cut-augmented LP at any shape with no per-shape JAX
+    recompilation — the reason root cuts are cheap here — and its ``OPTIMAL``
+    objective is KKT-valid, so no trust-gate decertification is needed. Solving
+    the *augmented* ``lp_data`` directly preserves the root cuts' bound
+    tightening (node bounds apply to the structural columns; the slack columns
+    keep their ``lp_data`` bounds).
+
+    Returns ``(lower_bound, solution_over_n_vars, "optimal")``,
+    ``(sentinel, None, "infeasible")``, or ``None`` when POUNCE is unavailable
+    or could not settle the node (the caller falls back / decertifies)."""
+    try:
+        from discopt.solvers.lp_pounce import POUNCE_AVAILABLE
+        from discopt.solvers.lp_pounce import solve_lp as _pounce_solve
+    except ImportError:
+        return None
+    if not POUNCE_AVAILABLE:
+        return None
+    xl = np.asarray(lp_data.x_l, dtype=np.float64)
+    xu = np.asarray(lp_data.x_u, dtype=np.float64)
+    full_lb = np.concatenate([np.asarray(node_lb, dtype=np.float64), xl[n_orig:]])
+    full_ub = np.concatenate([np.asarray(node_ub, dtype=np.float64), xu[n_orig:]])
+    time_left = max(0.5, time_limit - (time.perf_counter() - t_start))
+    try:
+        res = _pounce_solve(
+            c=np.asarray(lp_data.c, dtype=np.float64),
+            A_eq=np.asarray(lp_data.A_eq, dtype=np.float64),
+            b_eq=np.asarray(lp_data.b_eq, dtype=np.float64),
+            bounds=list(zip(full_lb.tolist(), full_ub.tolist())),
+            time_limit=min(30.0, time_left),
+        )
+    except Exception as e:
+        logger.debug("POUNCE node solve failed: %s", e)
+        return None
+    if (
+        res.status == SolveStatus.OPTIMAL
+        and res.objective is not None
+        and np.isfinite(res.objective)
+    ):
+        bound = float(res.objective) + float(lp_data.obj_const)
+        return (bound, np.asarray(res.x[:n_vars]), "optimal")
+    if res.status == SolveStatus.INFEASIBLE:
+        return (_INFEASIBILITY_SENTINEL, None, "infeasible")
+    return None
+
+
+# Interior-point relaxation optima are interior: integer coordinates come
+# back smeared (e.g. 0.99996) — beyond the tree's 1e-5 integrality tolerance
+# but clearly integral. Coordinates within this tolerance are candidates for
+# the snap-fix-resolve purification below.
+_SNAP_TOL = 1e-4
+
+
+def _pounce_snap_incumbent(
+    x_relax: np.ndarray,
+    int_offsets,
+    int_sizes,
+    node_lb: np.ndarray,
+    node_ub: np.ndarray,
+    c: np.ndarray,
+    obj_const: float,
+    A_ub,
+    b_ub,
+    A_eq,
+    b_eq,
+    t_start: float,
+    time_limit: float,
+    Q: Optional[np.ndarray] = None,
+):
+    """Purify a near-integral relaxation point into an exact incumbent.
+
+    Naively rounding the integer coordinates of an interior point breaks
+    equality rows by ~the snap distance, so instead: round each integer
+    coordinate that is within ``_SNAP_TOL`` of an integer, *fix* it there, and
+    re-solve the continuous relaxation with POUNCE (Phase 1 increment 3).
+    An OPTIMAL result is an exactly feasible integer point with an exact
+    objective, suitable for ``tree.inject_incumbent``. Returns
+    ``(objective, x)`` in minimization form, or ``None``.
+    """
+    idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
+    if not idx:
+        return None
+    vals = np.asarray(x_relax, dtype=np.float64)[idx]
+    snapped = np.round(vals)
+    if not np.all(np.isfinite(vals)) or float(np.max(np.abs(vals - snapped))) > _SNAP_TOL:
+        return None
+    fl = np.asarray(node_lb, dtype=np.float64).copy()
+    fu = np.asarray(node_ub, dtype=np.float64).copy()
+    # The snapped value must lie inside the *original* node box (pinning both
+    # bounds afterwards would mask an out-of-box snap).
+    if np.any(snapped < fl[idx] - 1e-9) or np.any(snapped > fu[idx] + 1e-9):
+        return None
+    fl[idx] = snapped
+    fu[idx] = snapped
+    rec = _pounce_recover_node_bound(
+        fl, fu, c, obj_const, A_ub, b_ub, A_eq, b_eq, t_start, time_limit, Q=Q
+    )
+    if rec is not None and rec[0] == "optimal":
+        return rec[1], rec[2]
+    return None
+
+
+# Reduced costs below this are treated as zero (basic / degenerate -> no fix).
+_RCF_RC_TOL = 1e-7
+
+
+def _reduced_cost_fixing(lb, ub, int_idx, reduced_costs, z_lp, z_inc):
+    """Tighten integer variable bounds by LP reduced-cost fixing.
+
+    For a minimization relaxation with optimum ``z_lp`` (a valid lower bound),
+    reduced costs ``d = c - A^T y``, and an incumbent objective ``z_inc`` (a
+    valid upper bound), every improving feasible point satisfies, term by
+    term (all terms are non-negative at the LP optimum),
+
+        d_j * (x_j - bound_j) <= z_inc - z_lp =: gap
+
+    which caps how far each non-basic integer variable can move from the
+    bound it is pressed against:
+
+        d_j >  tol (pressed to lb): x_j <= lb_j + floor(gap / d_j)
+        d_j < -tol (pressed to ub): x_j >= ub_j - floor(gap / |d_j|)
+
+    The true optimum ``x*`` has objective ``<= z_inc``, so it satisfies these
+    bounds — RCF never cuts it. ``gap`` is inflated by a small relative
+    margin so interior-point dual tolerance cannot over-tighten. Returns
+    tightened ``(lb, ub)`` copies and the number of bound changes.
+    """
+    lb = np.array(lb, dtype=np.float64).copy()
+    ub = np.array(ub, dtype=np.float64).copy()
+    gap = float(z_inc) - float(z_lp)
+    if not np.isfinite(gap) or gap < 0:
+        return lb, ub, 0
+    # Safety margin for IPM dual tolerance: never tighten so hard we risk the
+    # optimum (correctness over aggressiveness).
+    gap += 1e-6 * (1.0 + abs(float(z_inc)))
+    changes = 0
+    for j in int_idx:
+        d = float(reduced_costs[j])
+        if d > _RCF_RC_TOL:
+            new_ub = lb[j] + float(np.floor(gap / d + 1e-9))
+            if new_ub < ub[j] - 0.5:
+                ub[j] = max(lb[j], new_ub)
+                changes += 1
+        elif d < -_RCF_RC_TOL:
+            new_lb = ub[j] - float(np.floor(gap / (-d) + 1e-9))
+            if new_lb > lb[j] + 0.5:
+                lb[j] = min(ub[j], new_lb)
+                changes += 1
+    return lb, ub, changes
+
+
+def _root_reduced_cost_fixing(lp_data, n_orig, lb, ub, int_offsets, int_sizes, t_start, time_limit):
+    """Best-effort root reduced-cost fixing for a MILP (increment 4).
+
+    Solves the root LP relaxation with POUNCE (for KKT-valid duals), purifies
+    a near-integral point into an incumbent, and applies
+    :func:`_reduced_cost_fixing`. Returns ``(lb, ub, incumbent_or_None)``,
+    unchanged (and ``None``) whenever POUNCE is unavailable, the root LP is
+    not optimal, or no incumbent is recoverable — so it can never weaken the
+    search, only tighten it.
+    """
+    int_idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
+    if not int_idx:
+        return lb, ub, None
+    try:
+        from discopt.solvers.lp_pounce import POUNCE_AVAILABLE
+        from discopt.solvers.lp_pounce import solve_lp as _pounce_solve_lp
+    except ImportError:
+        return lb, ub, None
+    if not POUNCE_AVAILABLE:
+        return lb, ub, None
+
+    n_total = lp_data.A_eq.shape[1] if lp_data.A_eq.shape[0] > 0 else n_orig
+    A_ub, b_ub, A_eq, b_eq = _decompose_eq_slack_form(
+        np.asarray(lp_data.A_eq), np.asarray(lp_data.b_eq), n_orig, n_total - n_orig
+    )
+    c_m = np.asarray(lp_data.c[:n_orig])
+    obj_const = float(lp_data.obj_const)
+    try:
+        res = _pounce_solve_lp(
+            c=c_m,
+            A_ub=A_ub,
+            b_ub=b_ub,
+            A_eq=A_eq,
+            b_eq=b_eq,
+            bounds=list(zip(np.asarray(lb).tolist(), np.asarray(ub).tolist())),
+            time_limit=min(30.0, max(0.5, time_limit - (time.perf_counter() - t_start))),
+        )
+    except Exception as e:
+        logger.debug("root RCF: POUNCE LP failed: %s", e)
+        return lb, ub, None
+    if res.status != SolveStatus.OPTIMAL or res.reduced_costs is None or res.x is None:
+        return lb, ub, None
+
+    z_lp = float(res.objective) + obj_const
+    inc = _pounce_snap_incumbent(
+        np.asarray(res.x),
+        int_offsets,
+        int_sizes,
+        lb,
+        ub,
+        c_m,
+        obj_const,
+        A_ub,
+        b_ub,
+        A_eq,
+        b_eq,
+        t_start,
+        time_limit,
+    )
+    if inc is None:
+        return lb, ub, None
+    z_inc, x_inc = inc
+    new_lb, new_ub, n_changes = _reduced_cost_fixing(
+        lb, ub, int_idx, np.asarray(res.reduced_costs), z_lp, z_inc
+    )
+    if n_changes:
+        logger.info("root reduced-cost fixing tightened %d integer bound(s)", n_changes)
+    return new_lb, new_ub, (z_inc, x_inc)
+
+
+def _binary_mask(model: Model, n_orig: int) -> np.ndarray:
+    """Length-``n_orig`` mask of which flat columns are binary variables."""
+    mask = np.zeros(n_orig, dtype=bool)
+    off = 0
+    for v in model._variables:
+        sz = int(v.size)
+        if v.var_type == VarType.BINARY:
+            mask[off : off + sz] = True
+        off += sz
+    return mask
+
+
+def _augment_lpdata_with_cover_cuts(lp_data, n_orig: int, cuts):
+    """Add ``sum_{j in C} x_j <= rhs`` rows to the standard-form LP, each with
+    its own non-negative slack column (``sum x_C + s = rhs``).
+
+    Augments the relaxation only (extra rows + slack columns); the tree's
+    original-variable structure is untouched, so the B&B branches exactly as
+    before but on a tighter relaxation. Cover cuts are valid, so the optimum
+    is preserved (cannot affect ``incorrect_count``)."""
+    A = np.asarray(lp_data.A_eq, dtype=np.float64)
+    b = np.asarray(lp_data.b_eq, dtype=np.float64)
+    c = np.asarray(lp_data.c, dtype=np.float64)
+    xl = np.asarray(lp_data.x_l, dtype=np.float64)
+    xu = np.asarray(lp_data.x_u, dtype=np.float64)
+    m_rows, n_cols = A.shape
+    k = len(cuts)
+    newA = np.zeros((m_rows + k, n_cols + k), dtype=np.float64)
+    newA[:m_rows, :n_cols] = A
+    newb = np.concatenate([b, np.zeros(k, dtype=np.float64)])
+    for i, (cover, rhs) in enumerate(cuts):
+        for j in cover:
+            newA[m_rows + i, j] = 1.0
+        newA[m_rows + i, n_cols + i] = 1.0  # slack: sum x_C + s = rhs, s >= 0
+        newb[m_rows + i] = rhs
+    return lp_data._replace(
+        A_eq=newA,
+        b_eq=newb,
+        c=np.concatenate([c, np.zeros(k, dtype=np.float64)]),
+        x_l=np.concatenate([xl, np.zeros(k, dtype=np.float64)]),
+        x_u=np.concatenate([xu, np.full(k, 1e20, dtype=np.float64)]),
+    )
+
+
+# Gomory mixed-integer cuts are correct (structurally projected, soundness
+# guarded). Their cost depends entirely on the relaxation engine: adding cut
+# rows changes the LP shape, which forces a JAX recompile but is free for
+# POUNCE (Rust, Path B). GMI is therefore a **POUNCE-mode feature** — enabled
+# automatically when node relaxations are solved by POUNCE (no recompile), and
+# left off under the JAX IPM where the per-shape recompile would dominate.
+#
+# ``GOMORY_CUTS_ENABLED`` is a hard override: ``True``/``False`` force GMI on/off
+# for every solve; ``None`` (the default) defers to the engine gate below.
+GOMORY_CUTS_ENABLED: bool | None = None
+
+
+def _gomory_enabled(prefer_pounce: bool) -> bool:
+    """Whether to run Gomory cuts. Honors the ``GOMORY_CUTS_ENABLED`` override;
+    otherwise GMI is on exactly when the node relaxations are solved by POUNCE
+    (``prefer_pounce``), where cut-augmented shapes cost no JAX recompile (Path
+    B). Under the JAX IPM, adding cuts would recompile per shape, so GMI is off."""
+    if GOMORY_CUTS_ENABLED is not None:
+        return bool(GOMORY_CUTS_ENABLED)
+    return prefer_pounce
+
+
+def _augment_lpdata_with_gomory_cuts(lp_data, coeffs: np.ndarray, rhs: np.ndarray):
+    """Add Gomory cuts ``coeffs[i] · x >= rhs[i]`` to the standard-form LP, each
+    with a non-negative surplus column (``coeffs·x - s = rhs``).
+
+    ``coeffs`` are the *structurally projected* GMI coefficients (see
+    :func:`_separate_gomory_cuts`), so they are O(1) and reference only the
+    structural columns — keeping the augmented relaxation well-conditioned. A
+    small rhs margin scaled to the coefficient magnitude absorbs the residual
+    numerical error in the refined basis, so a cut can never exclude a true
+    integer point (preserving ``incorrect_count == 0``) while still separating
+    the fractional vertex."""
+    A = np.asarray(lp_data.A_eq, dtype=np.float64)
+    b = np.asarray(lp_data.b_eq, dtype=np.float64)
+    c = np.asarray(lp_data.c, dtype=np.float64)
+    xl = np.asarray(lp_data.x_l, dtype=np.float64)
+    xu = np.asarray(lp_data.x_u, dtype=np.float64)
+    m_rows, n_cols = A.shape
+    k = coeffs.shape[0]
+    newA = np.zeros((m_rows + k, n_cols + k), dtype=np.float64)
+    newA[:m_rows, :n_cols] = A
+    newb = np.concatenate([b, np.zeros(k, dtype=np.float64)])
+    for i in range(k):
+        row = np.asarray(coeffs[i], dtype=np.float64)
+        margin = 1e-7 * (1.0 + float(np.abs(row).sum()))  # safe-GMI rhs relaxation
+        newA[m_rows + i, :n_cols] = row
+        newA[m_rows + i, n_cols + i] = -1.0  # surplus: coeffs·x - s = rhs, s >= 0
+        newb[m_rows + i] = float(rhs[i]) - margin
+    return lp_data._replace(
+        A_eq=newA,
+        b_eq=newb,
+        c=np.concatenate([c, np.zeros(k, dtype=np.float64)]),
+        x_l=np.concatenate([xl, np.zeros(k, dtype=np.float64)]),
+        x_u=np.concatenate([xu, np.full(k, 1e20, dtype=np.float64)]),
+    )
+
+
+def _project_cut_to_structural(coeffs, rhs, A, b, n_orig):
+    """Project a standard-form cut ``coeffs·x >= rhs`` onto the structural
+    variables by substituting each slack ``x_s = (b_r - sum_k A[r,k] x_k)/c_s``
+    via its (singleton) defining row ``r``.
+
+    This is an exact substitution through ``A_eq x = b_eq`` — true for every
+    feasible point — so validity and the separation of the current vertex are
+    preserved, but the result references only structural columns with O(1)
+    coefficients (no coupling to the wide-range row slacks that diverge the IPM
+    on cut-augmented relaxations). Returns a length-``n`` coefficient vector
+    (slack entries zero) and rhs, or ``None`` if a slack column is not a clean
+    singleton."""
+    n_cols = A.shape[1]
+    out = np.zeros(n_cols, dtype=np.float64)
+    out[:n_orig] = np.asarray(coeffs[:n_orig], dtype=np.float64)
+    r_rhs = float(rhs)
+    for s in range(n_orig, n_cols):
+        gs = float(coeffs[s])
+        if gs == 0.0:
+            continue
+        rows = np.nonzero(A[:, s])[0]
+        if rows.size != 1:
+            return None  # not a singleton slack — cannot project cleanly
+        r = int(rows[0])
+        cs = A[r, s]
+        if abs(cs) < 1e-12:
+            return None
+        factor = gs / cs
+        out[:n_orig] -= factor * A[r, :n_orig]
+        r_rhs -= factor * b[r]
+    if not np.all(np.isfinite(out)) or not np.isfinite(r_rhs):
+        return None
+    if np.max(np.abs(out)) < 1e-12:
+        return None  # projected to a trivial cut
+    return out, r_rhs
+
+
+def _separate_gomory_cuts(lp_data, x_vertex, n_orig, int_idx, max_cuts: int = 8):
+    """Separate GMI cuts at the crossover vertex via the Rust ``_rust`` binding,
+    then project each onto the structural variables.
+
+    Returns ``(coeffs, rhs)`` arrays (up to ``max_cuts`` projected rows) or
+    ``None`` when the binding is unavailable, ``x_vertex`` is not a basic
+    feasible solution, or no cut survives. Only the genuine integer-constrained
+    structural columns (``int_idx``) are marked integral — slacks stay
+    continuous — so the cuts are sound for the original problem."""
+    try:
+        from discopt._rust import gomory_cuts_py
+    except ImportError:
+        return None
+    A = np.asarray(lp_data.A_eq, dtype=np.float64)
+    b = np.asarray(lp_data.b_eq, dtype=np.float64)
+    n_cur = A.shape[1]
+    integrality = np.zeros(n_cur, dtype=bool)
+    integrality[[j for j in int_idx if j < n_cur]] = True
+    res = gomory_cuts_py(
+        np.ascontiguousarray(x_vertex, dtype=np.float64),
+        np.ascontiguousarray(A),
+        np.ascontiguousarray(b),
+        np.ascontiguousarray(lp_data.c, dtype=np.float64),
+        np.ascontiguousarray(lp_data.x_l, dtype=np.float64),
+        np.ascontiguousarray(lp_data.x_u, dtype=np.float64),
+        integrality,
+    )
+    if res is None:
+        return None
+    coeffs, rhs = np.asarray(res[0], dtype=np.float64), np.asarray(res[1], dtype=np.float64)
+    proj_coeffs, proj_rhs = [], []
+    for ci in range(min(coeffs.shape[0], max_cuts)):
+        projected = _project_cut_to_structural(coeffs[ci], float(rhs[ci]), A, b, n_orig)
+        if projected is not None:
+            proj_coeffs.append(projected[0])
+            proj_rhs.append(projected[1])
+    if not proj_coeffs:
+        return None
+    return np.array(proj_coeffs, dtype=np.float64), np.array(proj_rhs, dtype=np.float64)
+
+
+def _augment_lpdata_with_mir_cuts(lp_data, coeffs: np.ndarray, rhs: np.ndarray):
+    """Add MIR cuts ``coeffs[i] · x <= rhs[i]`` to the standard-form LP, each
+    with a non-negative slack column (``coeffs·x + s = rhs``).
+
+    MIR cuts are over the structural columns with O(1) coefficients (no slack
+    coupling), so the augmented relaxation stays well-conditioned. A small rhs
+    relaxation guards against floating-point error in the separation point so a
+    cut cannot exclude a true integer point."""
+    A = np.asarray(lp_data.A_eq, dtype=np.float64)
+    b = np.asarray(lp_data.b_eq, dtype=np.float64)
+    c = np.asarray(lp_data.c, dtype=np.float64)
+    xl = np.asarray(lp_data.x_l, dtype=np.float64)
+    xu = np.asarray(lp_data.x_u, dtype=np.float64)
+    m_rows, n_cols = A.shape
+    k = coeffs.shape[0]
+    newA = np.zeros((m_rows + k, n_cols + k), dtype=np.float64)
+    newA[:m_rows, :n_cols] = A
+    newb = np.concatenate([b, np.zeros(k, dtype=np.float64)])
+    for i in range(k):
+        row = np.asarray(coeffs[i], dtype=np.float64)
+        margin = 1e-7 * (1.0 + float(np.abs(row).sum()))  # safe-cut rhs relaxation
+        newA[m_rows + i, :n_cols] = row
+        newA[m_rows + i, n_cols + i] = 1.0  # slack: coeffs·x + s = rhs, s >= 0
+        newb[m_rows + i] = float(rhs[i]) + margin
+    return lp_data._replace(
+        A_eq=newA,
+        b_eq=newb,
+        c=np.concatenate([c, np.zeros(k, dtype=np.float64)]),
+        x_l=np.concatenate([xl, np.zeros(k, dtype=np.float64)]),
+        x_u=np.concatenate([xu, np.full(k, 1e20, dtype=np.float64)]),
+    )
+
+
+def _separate_mir_cuts(lp_data, x_vertex, n_orig, int_idx, a_ub_orig, b_ub_orig, max_cuts: int = 8):
+    """Separate MIR cuts from the original ``<=`` rows at the crossover vertex
+    via the Rust ``_rust`` binding, embedded into the current columns.
+
+    Returns ``(coeffs, rhs)`` over the current standard-form columns (structural
+    entries set, slacks zero) or ``None`` when the binding is unavailable, the
+    structural lower bounds are not finite (the MIR shift needs them), or no cut
+    is produced. Only the integer-constrained structural columns are marked
+    integral, so the cuts are sound."""
+    if a_ub_orig is None or np.asarray(a_ub_orig).shape[0] == 0:
+        return None
+    try:
+        from discopt._rust import mir_cuts_py
+    except ImportError:
+        return None
+    lo = np.asarray(lp_data.x_l, dtype=np.float64)[:n_orig]
+    if not np.all(np.isfinite(lo)):
+        return None  # MIR's lower-bound shift requires finite lower bounds
+    integ = np.zeros(n_orig, dtype=bool)
+    integ[[j for j in int_idx if j < n_orig]] = True
+    res = mir_cuts_py(
+        np.ascontiguousarray(a_ub_orig, dtype=np.float64),
+        np.ascontiguousarray(b_ub_orig, dtype=np.float64),
+        np.ascontiguousarray(lo),
+        integ,
+        np.ascontiguousarray(np.asarray(x_vertex, dtype=np.float64)[:n_orig]),
+    )
+    if res is None:
+        return None
+    coeffs, rhs = np.asarray(res[0], dtype=np.float64), np.asarray(res[1], dtype=np.float64)
+    n_cur = int(np.asarray(lp_data.A_eq).shape[1])
+    embedded = np.zeros((coeffs.shape[0], n_cur), dtype=np.float64)
+    embedded[:, :n_orig] = coeffs[:, :n_orig]
+    return embedded[:max_cuts], rhs[:max_cuts]
+
+
+def _extract_clique_edges(model: Model) -> list[tuple[int, int]]:
+    """Conflict-graph 2-clique edges from the Rust presolve clique pass.
+
+    Each edge ``(i, j)`` (flat variable indices) is a pair of binaries that
+    cannot both be 1. Best-effort: returns ``[]`` if the bridge/pass is
+    unavailable."""
+    try:
+        from discopt._jax.presolve_pipeline import run_root_presolve
+        from discopt._rust import model_to_repr
+
+        repr_ = model_to_repr(model, getattr(model, "_builder", None))
+        _, stats = run_root_presolve(
+            repr_,
+            cliques=True,
+            eliminate=False,
+            aggregate=False,
+            redundancy=False,
+            implied_bounds=False,
+            coefficient_strengthening=False,
+            factorable_elim=False,
+            fbbt=False,
+            simplify=False,
+            probing=False,
+        )
+        return list(stats.get("cliques", {}).get("edges", []) or [])
+    except Exception as e:
+        logger.debug("clique edge extraction skipped: %s", e)
+        return []
+
+
+def _cut_loop_relaxation_x(lp_data, prefer_pounce: bool):
+    """Solve the (cut-augmented) root relaxation for the cut loop, returning the
+    optimum ``x`` or ``None``.
+
+    In POUNCE mode the solve goes through POUNCE so the cut-augmented shape costs
+    no JAX recompile (consistent with the Path-B node engine); otherwise the JAX
+    IPM is used. Either way the returned point is just a separation seed —
+    crossover and cut validity do not depend on which engine produced it."""
+    if prefer_pounce:
+        try:
+            from discopt.solvers.lp_pounce import POUNCE_AVAILABLE
+            from discopt.solvers.lp_pounce import solve_lp as _pounce_solve
+        except ImportError:
+            POUNCE_AVAILABLE = False
+        if POUNCE_AVAILABLE:
+            try:
+                res = _pounce_solve(
+                    c=np.asarray(lp_data.c, dtype=np.float64),
+                    A_eq=np.asarray(lp_data.A_eq, dtype=np.float64),
+                    b_eq=np.asarray(lp_data.b_eq, dtype=np.float64),
+                    bounds=list(
+                        zip(
+                            np.asarray(lp_data.x_l, dtype=np.float64).tolist(),
+                            np.asarray(lp_data.x_u, dtype=np.float64).tolist(),
+                        )
+                    ),
+                )
+            except Exception as exc:
+                logger.debug("cut-loop POUNCE solve failed: %s", exc)
+                return None
+            if res.status == SolveStatus.OPTIMAL and res.x is not None:
+                return np.asarray(res.x, dtype=np.float64)
+            return None
+    import jax.numpy as jnp
+
+    from discopt._jax.lp_ipm import lp_ipm_solve
+
+    state = lp_ipm_solve(
+        jnp.asarray(lp_data.c),
+        jnp.asarray(lp_data.A_eq),
+        jnp.asarray(lp_data.b_eq),
+        jnp.asarray(lp_data.x_l),
+        jnp.asarray(lp_data.x_u),
+    )
+    if int(state.converged) != 1:
+        return None
+    return np.asarray(state.x, dtype=np.float64)
+
+
+def _root_cover_cut_loop(
+    lp_data,
+    n_orig: int,
+    is_binary: np.ndarray,
+    A_ub_orig,
+    b_ub_orig,
+    t_start: float,
+    time_limit: float,
+    clique_edges=(),
+    int_idx=(),
+    prefer_pounce: bool = False,
+    max_rounds: int = 5,
+    max_total_cuts: int = 500,
+):
+    """Round-based root cut separation: cover + clique + Gomory cuts (Phase 2/3).
+
+    Solves the root LP relaxation, crosses the interior optimum over to a
+    vertex, separates violated cover cuts (from the *original* knapsack rows),
+    clique cuts (from the presolve conflict-graph edges), and structurally
+    projected Gomory mixed-integer cuts (from the iteratively-refined basis at
+    the vertex), augments ``lp_data``, and repeats. Returns the (possibly
+    augmented) ``lp_data`` and the number of cuts added. A no-op when there are
+    no binary-knapsack rows, clique edges, or integer variables."""
+    from discopt._jax.cover_cuts import (
+        has_binary_knapsack_rows,
+        separate_clique_cuts,
+        separate_cover_cuts,
+    )
+
+    has_cover = A_ub_orig is not None and has_binary_knapsack_rows(A_ub_orig, b_ub_orig, is_binary)
+    has_clique = bool(clique_edges)
+    has_gomory = bool(len(int_idx))
+    if not has_cover and not has_clique and not has_gomory:
+        return lp_data, 0
+
+    total = 0
+    for _round in range(max_rounds):
+        if time.perf_counter() - t_start >= time_limit:
+            break
+        # Solve the (possibly cut-augmented) root relaxation. In POUNCE mode use
+        # POUNCE so adding cut rows costs no JAX recompile (matches the Path-B
+        # node engine); otherwise the JAX IPM.
+        x_relax = _cut_loop_relaxation_x(lp_data, prefer_pounce)
+        if x_relax is None:  # need a usable optimum to separate
+            break
+        # Cross over the interior optimum to a vertex of the optimal face
+        # (Phase 2): cover/clique cuts separate a vertex sharply but the
+        # interior analytic center weakly. Separation stays valid regardless,
+        # so a failed crossover only costs cut effectiveness, never soundness.
+        from discopt._jax.crossover import crossover_to_vertex
+
+        try:
+            x_vertex = crossover_to_vertex(
+                x_relax,
+                np.asarray(lp_data.A_eq),
+                np.asarray(lp_data.b_eq),
+                np.asarray(lp_data.c),
+                np.asarray(lp_data.x_l),
+                np.asarray(lp_data.x_u),
+            )
+        except Exception as _xo_exc:
+            logger.debug("crossover skipped: %s", _xo_exc)
+            x_vertex = x_relax
+        x_star = x_vertex[:n_orig]
+        cuts: list[tuple[frozenset, float]] = []
+        seen: set[frozenset] = set()
+        sources = []
+        if has_cover:
+            sources.append(separate_cover_cuts(A_ub_orig, b_ub_orig, x_star, is_binary))
+        if has_clique:
+            sources.append(separate_clique_cuts(clique_edges, x_star))
+        for found in sources:
+            for cover, rhs in found:
+                if cover not in seen:
+                    seen.add(cover)
+                    cuts.append((cover, rhs))
+
+        round_added = 0
+        # Gomory cuts on the first round only: derived from the original
+        # (well-conditioned) standard-form basis and projected onto the
+        # structural variables. Re-separating GMI on the cut-augmented system
+        # compounds ill-conditioning, so later rounds keep only the
+        # combinatorial (cover/clique) cuts. Added before cover/clique grow the
+        # matrix so the projected coefficients stay sized to the structural
+        # columns; soundness-guarded by the rhs margin in the augmentation.
+        # Cheap pre-check: only attempt the (basis-recovery + GMI) work when an
+        # integer variable is actually fractional at the vertex; otherwise GMI
+        # would find nothing and the basis solve is wasted.
+        _int_fractional = (
+            has_gomory
+            and _round == 0
+            and any(
+                abs(x_vertex[j] - round(float(x_vertex[j]))) > 1e-6
+                for j in int_idx
+                if j < len(x_vertex)
+            )
+        )
+        if _int_fractional:
+            try:
+                gom = _separate_gomory_cuts(lp_data, x_vertex, n_orig, int_idx)
+            except Exception as _gom_exc:
+                logger.debug("gomory separation skipped: %s", _gom_exc)
+                gom = None
+            if gom is not None:
+                gc, gr = gom
+                lp_data = _augment_lpdata_with_gomory_cuts(lp_data, gc, gr)
+                round_added += int(gc.shape[0])
+        # MIR cuts from the original <= rows (basis-free; complements GMI). Same
+        # POUNCE-mode gate (has_gomory) and round-0-only policy.
+        if has_gomory and _round == 0:
+            try:
+                mir = _separate_mir_cuts(lp_data, x_vertex, n_orig, int_idx, A_ub_orig, b_ub_orig)
+            except Exception as _mir_exc:
+                logger.debug("mir separation skipped: %s", _mir_exc)
+                mir = None
+            if mir is not None:
+                mc, mr = mir
+                lp_data = _augment_lpdata_with_mir_cuts(lp_data, mc, mr)
+                round_added += int(mc.shape[0])
+        if cuts:  # cover/clique reference original columns (< n_orig), still valid
+            lp_data = _augment_lpdata_with_cover_cuts(lp_data, n_orig, cuts)
+            round_added += len(cuts)
+
+        if round_added == 0:
+            break
+        total += round_added
+        if total >= max_total_cuts:
+            break
+        # GMI is round-0 only; with no cover/clique to re-separate, further
+        # rounds would just re-solve the LP for nothing.
+        if not has_cover and not has_clique:
+            break
+    return lp_data, total
+
+
+def _root_dive(lp_data, n_orig, int_idx, t_start, time_limit, max_steps=None):
+    """Fractional diving from the root LP to find an early incumbent (Phase 3).
+
+    Repeatedly solve the LP relaxation, fix the most-fractional unfixed integer
+    variable to its nearest integer, and re-solve, until every integer is
+    integral (an incumbent) or a fix makes the LP non-optimal (dive abandoned).
+    Returns ``(objective, x_orig)`` in minimization sense, or ``None``. An early
+    incumbent front-loads pruning and reduced-cost fixing.
+    """
+    if not int_idx:
+        return None
+    import jax.numpy as jnp
+
+    from discopt._jax.lp_ipm import lp_ipm_solve
+
+    xl = np.asarray(lp_data.x_l, dtype=np.float64).copy()
+    xu = np.asarray(lp_data.x_u, dtype=np.float64).copy()
+    c = jnp.asarray(lp_data.c)
+    A = jnp.asarray(lp_data.A_eq)
+    b = jnp.asarray(lp_data.b_eq)
+    steps = max_steps if max_steps is not None else len(int_idx) + 1
+    for _ in range(steps):
+        if time.perf_counter() - t_start >= time_limit:
+            return None
+        state = lp_ipm_solve(c, A, b, jnp.asarray(xl), jnp.asarray(xu))
+        if int(state.converged) != 1:
+            return None  # infeasible/stalled fix -> abandon the dive
+        x = np.asarray(state.x)
+        fracs = [
+            (j, abs(x[j] - round(x[j])))
+            for j in int_idx
+            if xl[j] != xu[j] and abs(x[j] - round(x[j])) > 1e-6
+        ]
+        if not fracs:
+            return float(state.obj) + float(lp_data.obj_const), x[:n_orig]
+        j = max(fracs, key=lambda t: t[1])[0]
+        v = float(round(x[j]))
+        xl[j] = v
+        xu[j] = v
+    return None
+
+
+def _solve_milp_simplex(
+    model: Model,
+    time_limit: float,
+    gap_tolerance: float,
+    max_nodes: int,
+    t_start: float,
+) -> Optional[SolveResult]:
+    """Solve a pure MILP with the Rust-internal warm-started-simplex B&B
+    (``nlp_solver="simplex"``).
+
+    The whole search runs in Rust: the existing tree manager with each node's LP
+    solved by the bounded simplex (root cold, children dual-warm-started from the
+    inherited basis). Returns ``None`` to defer to the default path when the
+    binding is unavailable or the model has no constraints. Pure-MILP only;
+    MINLP/MIQP keep the POUNCE/IPM path."""
+    from discopt._jax.problem_classifier import extract_lp_data
+    from discopt.modeling.core import ObjectiveSense
+
+    try:
+        from discopt._rust import solve_milp_py
+    except ImportError:
+        return None
+
+    lp_data = extract_lp_data(model)
+    A = np.ascontiguousarray(lp_data.A_eq, dtype=np.float64)
+    if A.shape[0] == 0:
+        return None  # no constraints — let the default path handle it
+    n_orig = sum(v.size for v in model._variables)
+    _, _, _, int_offsets, int_sizes = _extract_variable_info(model)
+    int_idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
+
+    status, x_struct, obj, bound, nodes, _lp_iters = solve_milp_py(
+        np.ascontiguousarray(lp_data.c, dtype=np.float64),
+        A,
+        np.ascontiguousarray(lp_data.b_eq, dtype=np.float64),
+        np.ascontiguousarray(lp_data.x_l, dtype=np.float64),
+        np.ascontiguousarray(lp_data.x_u, dtype=np.float64),
+        np.ascontiguousarray(np.asarray(int_idx, dtype=np.int64)),
+        n_orig,
+        float(lp_data.obj_const),
+        int(max_nodes),
+        float(gap_tolerance),
+    )
+    wall_time = time.perf_counter() - t_start
+    maximize = model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE
+
+    if status in ("optimal", "feasible"):
+        x_dict = _unpack_solution(model, np.asarray(x_struct, dtype=np.float64))
+        obj_val = -obj if maximize else obj
+        bound_val = None
+        gap_val = None
+        if np.isfinite(bound):
+            bound_val = -bound if maximize else bound
+            gap_val = abs(obj_val - bound_val) / (abs(obj_val) + 1e-10)
+        return SolveResult(
+            status=status,
+            objective=obj_val,
+            bound=bound_val,
+            gap=gap_val,
+            x=x_dict,
+            wall_time=wall_time,
+            node_count=nodes,
+        )
+    if status == "unbounded":
+        return SolveResult(status="unbounded", wall_time=wall_time, node_count=nodes)
+    if status == "node_limit":
+        return SolveResult(status="node_limit", wall_time=wall_time, node_count=nodes)
+    return SolveResult(status="infeasible", wall_time=wall_time, node_count=nodes)
+
+
 def _solve_milp_bb(
     model: Model,
     time_limit: float,
@@ -5747,8 +6172,13 @@ def _solve_milp_bb(
     strategy: str,
     max_nodes: int,
     t_start: float,
+    prefer_pounce: bool = False,
 ) -> SolveResult:
-    """Solve a MILP via B&B with LP relaxation solves at each node."""
+    """Solve a MILP via B&B with LP relaxation solves at each node.
+
+    ``prefer_pounce`` (POUNCE-only mode) routes the incumbent dual recovery
+    through POUNCE instead of HiGHS so the whole solve is HiGHS-free.
+    """
     import jax.numpy as jnp
 
     from discopt._jax.lp_ipm import lp_ipm_solve
@@ -5764,10 +6194,148 @@ def _solve_milp_bb(
     n_vars, lb, ub, int_offsets, int_sizes = _extract_variable_info(model)
     n_orig = sum(v.size for v in model._variables)
 
+    # Root reduced-cost fixing (increment 4): best-effort integer-bound
+    # tightening from the root LP duals + a purified incumbent. Sound and
+    # graceful -- only ever tightens, skipped entirely if POUNCE is absent or
+    # no incumbent is recoverable.
+    _root_incumbent = None
+    try:
+        lb, ub, _root_incumbent = _root_reduced_cost_fixing(
+            lp_data, n_orig, lb, ub, int_offsets, int_sizes, t_start, time_limit
+        )
+    except Exception as _rcf_exc:
+        logger.debug("root RCF skipped: %s", _rcf_exc)
+
+    # --- Root knapsack cover cuts (Phase 3) ---
+    # Separate valid cover inequalities from the *original* knapsack rows and
+    # augment the relaxation, tightening every node's LP bound. Cover cuts are
+    # valid, so the optimum is preserved; the tree variable structure is
+    # untouched (extra rows/slacks only).
+    # Decompose the ORIGINAL problem once: reused for cover separation and for
+    # node/dual recovery, which must reference the user's constraints (not the
+    # auxiliary cover rows). The B&B node LP relaxations below use the
+    # cover-augmented ``lp_data``; recovery uses ``lp_data_orig`` / these.
+    lp_data_orig = lp_data
+    _n_total0 = lp_data.A_eq.shape[1] if lp_data.A_eq.shape[0] > 0 else n_orig
+    _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m = _decompose_eq_slack_form(
+        np.asarray(lp_data.A_eq), np.asarray(lp_data.b_eq), n_orig, _n_total0 - n_orig
+    )
+    try:
+        _is_bin = _binary_mask(model, n_orig)
+        # Conflict-graph clique edges (only worth extracting if binaries exist).
+        _clique_edges = _extract_clique_edges(model) if bool(_is_bin.any()) else []
+        # Gomory cuts gated on the relaxation engine (see _gomory_enabled):
+        # passing no integer indices disables the GMI branch, so under the JAX
+        # IPM the loop runs exactly as before GMI (cover/clique only, no
+        # recompile). In POUNCE mode the node solves (Path B) take cut-augmented
+        # shapes for free, so GMI is enabled.
+        _cut_int_idx = (
+            [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
+            if _gomory_enabled(prefer_pounce)
+            else []
+        )
+        lp_data, _n_cuts = _root_cover_cut_loop(
+            lp_data,
+            n_orig,
+            _is_bin,
+            _A_ub_m,
+            _b_ub_m,
+            t_start,
+            time_limit,
+            clique_edges=_clique_edges,
+            int_idx=_cut_int_idx,
+            prefer_pounce=prefer_pounce,
+        )
+        if _n_cuts:
+            logger.info("root cuts added %d valid inequalities (cover + clique + gomory)", _n_cuts)
+    except Exception as _cc_exc:
+        logger.debug("root cuts skipped: %s", _cc_exc)
+
     t_rust_start = time.perf_counter()
     tree = PyTreeManager(n_vars, lb.tolist(), ub.tolist(), int_offsets, int_sizes, strategy)
     tree.initialize()
+    if _root_incumbent is not None:
+        _z_inc, _x_inc = _root_incumbent
+        tree.inject_incumbent(np.asarray(_x_inc[:n_vars], dtype=np.float64).copy(), float(_z_inc))
+    # Root fractional diving (Phase 3): an early incumbent front-loads pruning
+    # and reduced-cost fixing. The tree keeps the best of any injected points.
+    try:
+        _int_idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
+        _dive = _root_dive(lp_data, n_orig, _int_idx, t_start, time_limit)
+        if _dive is not None:
+            _dz, _dx = _dive
+            tree.inject_incumbent(np.asarray(_dx[:n_vars], dtype=np.float64).copy(), float(_dz))
+    except Exception as _dive_exc:
+        logger.debug("root dive skipped: %s", _dive_exc)
     rust_time += time.perf_counter() - t_rust_start
+
+    # A node relaxation that stalled at the iteration limit (converged==3) is
+    # not at KKT, so its objective is not a valid lower bound for the node
+    # (f(x~) >= f*); trusting it can prune the true integer optimum. Such
+    # nodes are first re-solved with POUNCE (KKT-valid bound or certified
+    # infeasibility); only unrecoverable ones decertify the gap (mirrors the
+    # P0.3 trust-gate + polish-retry; bounds are left untouched).
+    _gap_certified = True
+    # _A_ub_m/_b_ub_m/_A_eq_m/_b_eq_m (original problem) were decomposed above,
+    # before cover augmentation; node recovery uses them so its bound is for
+    # the user's constraints.
+    _c_m = np.asarray(lp_data_orig.c[:n_orig])
+
+    def _recover_or_decertify(i, lbs, sols, node_lb_i, node_ub_i):
+        nonlocal _gap_certified
+        rec = _pounce_recover_node_bound(
+            node_lb_i,
+            node_ub_i,
+            _c_m,
+            float(lp_data.obj_const),
+            _A_ub_m,
+            _b_ub_m,
+            _A_eq_m,
+            _b_eq_m,
+            t_start,
+            time_limit,
+        )
+        if rec is None:
+            _gap_certified = False
+        elif rec[0] == "optimal":
+            lbs[i] = rec[1]
+            sols[i] = rec[2][:n_vars]
+        else:  # Phase-1-certified infeasible node: prune is rigorous.
+            lbs[i] = _INFEASIBILITY_SENTINEL
+
+    def _maybe_inject_snapped(x_row, node_lb_i, node_ub_i):
+        # Purification (increment 3): near-integral interior points become
+        # exact incumbents via snap-fix-resolve.
+        inc = _pounce_snap_incumbent(
+            x_row,
+            int_offsets,
+            int_sizes,
+            node_lb_i,
+            node_ub_i,
+            _c_m,
+            float(lp_data.obj_const),
+            _A_ub_m,
+            _b_ub_m,
+            _A_eq_m,
+            _b_eq_m,
+            t_start,
+            time_limit,
+        )
+        if inc is not None:
+            tree.inject_incumbent(
+                np.asarray(inc[1][:n_vars], dtype=np.float64).copy(), float(inc[0])
+            )
+
+    # Path B: in POUNCE-only mode, POUNCE solves node relaxations directly
+    # (no JAX recompile on cut-augmented shapes). Checked once here.
+    _pounce_nodes_avail = False
+    if prefer_pounce:
+        try:
+            from discopt.solvers.lp_pounce import POUNCE_AVAILABLE as _PNA
+
+            _pounce_nodes_avail = bool(_PNA)
+        except ImportError:
+            _pounce_nodes_avail = False
 
     iteration = 0
     while True:
@@ -5787,7 +6355,34 @@ def _solve_milp_bb(
         result_ids = np.array(batch_ids, dtype=np.int64)
         n_slack = lp_data.x_l.shape[0] - n_orig
 
-        if n_batch > 1:
+        if prefer_pounce and _pounce_nodes_avail:
+            # Path B: solve each node's relaxation with POUNCE (Rust) instead of
+            # the JAX IPM. POUNCE takes the cut-augmented LP at any shape with no
+            # per-shape recompile, and its OPTIMAL bound is KKT-valid. The rare
+            # stall/unavailable node defers to the existing recovery/decertify.
+            result_lbs = np.empty(n_batch, dtype=np.float64)
+            result_sols = np.empty((n_batch, n_vars), dtype=np.float64)
+            result_feas = np.zeros(n_batch, dtype=bool)
+            for i in range(n_batch):
+                node_lb = np.array(batch_lb[i])
+                node_ub = np.array(batch_ub[i])
+                _mid = 0.5 * (np.clip(node_lb, -_SPC, _SPC) + np.clip(node_ub, -_SPC, _SPC))
+                out = _solve_node_lp_pounce(
+                    lp_data, node_lb, node_ub, n_vars, n_orig, t_start, time_limit
+                )
+                if out is not None and out[2] == "optimal":
+                    result_lbs[i] = out[0]
+                    result_sols[i] = out[1]
+                    if result_lbs[i] < _SENTINEL_THRESHOLD:
+                        _maybe_inject_snapped(result_sols[i], node_lb, node_ub)
+                elif out is not None:  # POUNCE-certified infeasible: rigorous prune
+                    result_lbs[i] = _INFEASIBILITY_SENTINEL
+                    result_sols[i] = _mid
+                else:  # unavailable/stalled: original-problem recovery or decertify
+                    result_lbs[i] = _INFEASIBILITY_SENTINEL
+                    result_sols[i] = _mid
+                    _recover_or_decertify(i, result_lbs, result_sols, node_lb, node_ub)
+        elif n_batch > 1:
             # Batch LP solve via vmap
             from discopt._jax.lp_ipm import lp_ipm_solve_batch
 
@@ -5821,10 +6416,26 @@ def _solve_milp_bb(
                             lb_c = np.clip(np.array(batch_lb[i]), -_SPC, _SPC)
                             ub_c = np.clip(np.array(batch_ub[i]), -_SPC, _SPC)
                             result_sols[i] = 0.5 * (lb_c + ub_c)
+                        else:
+                            _maybe_inject_snapped(
+                                result_sols[i],
+                                np.array(batch_lb[i]),
+                                np.array(batch_ub[i]),
+                            )
                     else:
                         lb_c = np.clip(np.array(batch_lb[i]), -_SPC, _SPC)
                         ub_c = np.clip(np.array(batch_ub[i]), -_SPC, _SPC)
                         result_sols[i] = 0.5 * (lb_c + ub_c)
+                # Non-KKT (max-iter) LP bounds are recovered via POUNCE;
+                # unrecoverable ones decertify the gap.
+                for i in np.where((converged == 3) & (result_lbs < _SENTINEL_THRESHOLD))[0]:
+                    _recover_or_decertify(
+                        int(i),
+                        result_lbs,
+                        result_sols,
+                        np.array(batch_lb[i]),
+                        np.array(batch_ub[i]),
+                    )
             except Exception as e:
                 logger.debug("Batch LP solve failed: %s", e)
                 result_lbs = np.full(n_batch, _INFEASIBILITY_SENTINEL, dtype=np.float64)
@@ -5857,6 +6468,10 @@ def _solve_milp_bb(
                         if _check_lp_solution_feasibility(lp_data.A_eq, lp_data.b_eq, state.x):
                             result_lbs[i] = float(state.obj) + lp_data.obj_const
                             result_sols[i] = np.asarray(state.x[:n_vars])
+                            if conv == 3:  # non-KKT: recover via POUNCE
+                                _recover_or_decertify(i, result_lbs, result_sols, node_lb, node_ub)
+                            if result_lbs[i] < _SENTINEL_THRESHOLD:
+                                _maybe_inject_snapped(result_sols[i], node_lb, node_ub)
                         else:
                             result_lbs[i] = _INFEASIBILITY_SENTINEL
                             lb_c = np.clip(node_lb, -_SPC, _SPC)
@@ -5909,25 +6524,21 @@ def _solve_milp_bb(
         x_dict = _unpack_solution(model, sol_flat)
 
         # Recover relaxation duals at the integer-feasible incumbent by
-        # re-solving the LP relaxation with integer variables fixed.
+        # re-solving the LP relaxation with integer variables fixed. Use the
+        # ORIGINAL problem (lp_data_orig / its decomposition); the duals are
+        # for the user's named constraints, not the auxiliary cover rows.
         try:
-            n_total = lp_data.A_eq.shape[1] if lp_data.A_eq.shape[0] > 0 else n_orig
-            n_slack = n_total - n_orig
-            A_eq_full = np.asarray(lp_data.A_eq)
-            b_eq_full = np.asarray(lp_data.b_eq)
-            A_ub, b_ub_, A_eq, b_eq = _decompose_eq_slack_form(
-                A_eq_full, b_eq_full, n_orig, n_slack
-            )
             constraint_duals, bound_duals_lower, bound_duals_upper = _mip_recover_relaxation_duals(
                 model,
-                lp_data=lp_data,
+                lp_data=lp_data_orig,
                 x_flat=np.asarray(sol_flat[:n_orig], dtype=float),
                 n_orig=n_orig,
-                A_ub=A_ub,
-                b_ub=b_ub_,
-                A_eq=A_eq,
-                b_eq=b_eq,
+                A_ub=_A_ub_m,
+                b_ub=_b_ub_m,
+                A_eq=_A_eq_m,
+                b_eq=_b_eq_m,
                 time_limit=max(0.1, time_limit - (time.perf_counter() - t_start)),
+                prefer_pounce=prefer_pounce,
             )
         except Exception as _exc:
             logger.debug("MILP-BB dual recovery failed: %s", _exc)
@@ -5939,7 +6550,10 @@ def _solve_milp_bb(
         if model._objective.sense == ObjectiveSense.MAXIMIZE:
             obj_val = -obj_val
 
-        if tree.gap() <= gap_tolerance or tree.is_finished():
+        # "optimal" needs a closed search AND a certified gap: a stalled
+        # (non-KKT) node bound leaves optimality unproven even when the tree
+        # appears finished.
+        if (tree.gap() <= gap_tolerance or tree.is_finished()) and _gap_certified:
             status = "optimal"
         else:
             status = "feasible"
@@ -5961,11 +6575,17 @@ def _solve_milp_bb(
     if bound_val is not None and model._objective.sense == ObjectiveSense.MAXIMIZE:
         bound_val = -bound_val
 
+    # An uncertified gap is not a rigorous dual bound; do not present one.
+    gap_val = stats["gap"]
+    if not _gap_certified:
+        bound_val = None
+        gap_val = None
+
     return SolveResult(
         status=status,
         objective=obj_val,
         bound=bound_val,
-        gap=stats["gap"],
+        gap=gap_val,
         x=x_dict,
         wall_time=wall_time,
         node_count=stats["total_nodes"],
@@ -5975,6 +6595,7 @@ def _solve_milp_bb(
         constraint_duals=constraint_duals,
         bound_duals_lower=bound_duals_lower,
         bound_duals_upper=bound_duals_upper,
+        gap_certified=_gap_certified,
     )
 
 
@@ -5986,8 +6607,13 @@ def _solve_miqp_bb(
     strategy: str,
     max_nodes: int,
     t_start: float,
+    prefer_pounce: bool = False,
 ) -> SolveResult:
-    """Solve a MIQP via B&B with QP relaxation solves at each node."""
+    """Solve a MIQP via B&B with QP relaxation solves at each node.
+
+    ``prefer_pounce`` (POUNCE-only mode) routes the incumbent dual recovery
+    through POUNCE instead of HiGHS so the whole solve is HiGHS-free.
+    """
     import jax.numpy as jnp
 
     from discopt._jax.problem_classifier import extract_qp_data
@@ -6007,6 +6633,66 @@ def _solve_miqp_bb(
     tree = PyTreeManager(n_vars, lb.tolist(), ub.tolist(), int_offsets, int_sizes, strategy)
     tree.initialize()
     rust_time += time.perf_counter() - t_rust_start
+
+    # A node relaxation that stalled at the iteration limit (converged==3) is
+    # not at KKT, so its objective is not a valid lower bound for the node
+    # (f(x~) >= f*); trusting it can prune the true integer optimum. Such
+    # nodes are first re-solved with POUNCE; only unrecoverable ones
+    # decertify the gap (mirrors the P0.3 trust-gate + polish-retry).
+    _gap_certified = True
+    _n_total0 = qp_data.A_eq.shape[1] if qp_data.A_eq.shape[0] > 0 else n_orig
+    _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m = _decompose_eq_slack_form(
+        np.asarray(qp_data.A_eq), np.asarray(qp_data.b_eq), n_orig, _n_total0 - n_orig
+    )
+    _c_m = np.asarray(qp_data.c[:n_orig])
+    _Q_m = np.asarray(qp_data.Q[:n_orig, :n_orig])
+
+    def _recover_or_decertify(i, lbs, sols, node_lb_i, node_ub_i):
+        nonlocal _gap_certified
+        rec = _pounce_recover_node_bound(
+            node_lb_i,
+            node_ub_i,
+            _c_m,
+            float(qp_data.obj_const),
+            _A_ub_m,
+            _b_ub_m,
+            _A_eq_m,
+            _b_eq_m,
+            t_start,
+            time_limit,
+            Q=_Q_m,
+        )
+        if rec is None:
+            _gap_certified = False
+        elif rec[0] == "optimal":
+            lbs[i] = rec[1]
+            sols[i] = rec[2][:n_vars]
+        else:  # Phase-1-certified infeasible node: prune is rigorous.
+            lbs[i] = _INFEASIBILITY_SENTINEL
+
+    def _maybe_inject_snapped(x_row, node_lb_i, node_ub_i):
+        # Purification (increment 3): near-integral interior points become
+        # exact incumbents via snap-fix-resolve.
+        inc = _pounce_snap_incumbent(
+            x_row,
+            int_offsets,
+            int_sizes,
+            node_lb_i,
+            node_ub_i,
+            _c_m,
+            float(qp_data.obj_const),
+            _A_ub_m,
+            _b_ub_m,
+            _A_eq_m,
+            _b_eq_m,
+            t_start,
+            time_limit,
+            Q=_Q_m,
+        )
+        if inc is not None:
+            tree.inject_incumbent(
+                np.asarray(inc[1][:n_vars], dtype=np.float64).copy(), float(inc[0])
+            )
 
     iteration = 0
     while True:
@@ -6067,10 +6753,26 @@ def _solve_miqp_bb(
                             lb_c = np.clip(np.array(batch_lb[i]), -_SPC, _SPC)
                             ub_c = np.clip(np.array(batch_lb[i]), -_SPC, _SPC)
                             result_sols[i] = 0.5 * (lb_c + ub_c)
+                        else:
+                            _maybe_inject_snapped(
+                                result_sols[i],
+                                np.array(batch_lb[i]),
+                                np.array(batch_ub[i]),
+                            )
                     else:
                         lb_c = np.clip(np.array(batch_ub[i]), -_SPC, _SPC)
                         ub_c = np.clip(np.array(batch_ub[i]), -_SPC, _SPC)
                         result_sols[i] = 0.5 * (lb_c + ub_c)
+                # Non-KKT (max-iter) QP bounds are recovered via POUNCE;
+                # unrecoverable ones decertify the gap.
+                for i in np.where((converged == 3) & (result_lbs < _SENTINEL_THRESHOLD))[0]:
+                    _recover_or_decertify(
+                        int(i),
+                        result_lbs,
+                        result_sols,
+                        np.array(batch_lb[i]),
+                        np.array(batch_ub[i]),
+                    )
             except Exception as e:
                 logger.debug("Batch QP solve failed: %s", e)
                 result_lbs = np.full(n_batch, _INFEASIBILITY_SENTINEL, dtype=np.float64)
@@ -6110,6 +6812,10 @@ def _solve_miqp_bb(
                         if _check_lp_solution_feasibility(qp_data.A_eq, qp_data.b_eq, state.x):
                             result_lbs[i] = float(state.obj) + qp_data.obj_const
                             result_sols[i] = np.asarray(state.x[:n_vars])
+                            if conv == 3:  # non-KKT: recover via POUNCE
+                                _recover_or_decertify(i, result_lbs, result_sols, node_lb, node_ub)
+                            if result_lbs[i] < _SENTINEL_THRESHOLD:
+                                _maybe_inject_snapped(result_sols[i], node_lb, node_ub)
                         else:
                             result_lbs[i] = _INFEASIBILITY_SENTINEL
                             lb_c = np.clip(node_lb, -_SPC, _SPC)
@@ -6183,6 +6889,7 @@ def _solve_miqp_bb(
                 b_eq=b_eq_,
                 time_limit=max(0.1, time_limit - (time.perf_counter() - t_start)),
                 Q_orig=Q_orig,
+                prefer_pounce=prefer_pounce,
             )
         except Exception as _exc:
             logger.debug("MIQP-BB dual recovery failed: %s", _exc)
@@ -6194,7 +6901,10 @@ def _solve_miqp_bb(
         if model._objective.sense == ObjectiveSense.MAXIMIZE:
             obj_val = -obj_val
 
-        if tree.gap() <= gap_tolerance or tree.is_finished():
+        # "optimal" needs a closed search AND a certified gap: a stalled
+        # (non-KKT) node bound leaves optimality unproven even when the tree
+        # appears finished.
+        if (tree.gap() <= gap_tolerance or tree.is_finished()) and _gap_certified:
             status = "optimal"
         else:
             status = "feasible"
@@ -6216,11 +6926,17 @@ def _solve_miqp_bb(
     if bound_val is not None and model._objective.sense == ObjectiveSense.MAXIMIZE:
         bound_val = -bound_val
 
+    # An uncertified gap is not a rigorous dual bound; do not present one.
+    gap_val = stats["gap"]
+    if not _gap_certified:
+        bound_val = None
+        gap_val = None
+
     return SolveResult(
         status=status,
         objective=obj_val,
         bound=bound_val,
-        gap=stats["gap"],
+        gap=gap_val,
         x=x_dict,
         wall_time=wall_time,
         node_count=stats["total_nodes"],
@@ -6230,4 +6946,5 @@ def _solve_miqp_bb(
         constraint_duals=constraint_duals,
         bound_duals_lower=bound_duals_lower,
         bound_duals_upper=bound_duals_upper,
+        gap_certified=_gap_certified,
     )

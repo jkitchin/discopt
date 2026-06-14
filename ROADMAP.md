@@ -104,3 +104,19 @@ New problem types to make discopt competitive across the full optimization lands
 | Infeasibility analysis (IIS)      | Planned | Algorithmic irreducible infeasible subsystem computation                     |
 | Pyomo import                      | Done    | `from_pyomo()` converter for Var, Constraint, Objective, GDP constructs      |
 | GAMS import                       | Done    | `from_gams()` reader for .gms scalar models                                 |
+
+## Phase 8: POUNCE-Only Solver Stack
+
+Eliminate HiGHS as a runtime dependency so discopt ships as a complete pip-installable
+solver on a single in-house engine (POUNCE), with end-to-end differentiability and a
+batch-first (CPU multicore; GPU opportunistic) architecture. Detailed plan, phase exit
+gates, and risk register: [docs/design/pounce-only-roadmap.md](docs/design/pounce-only-roadmap.md).
+
+| Task                                   | Status  | Description                                                              |
+|----------------------------------------|---------|--------------------------------------------------------------------------|
+| P0 POUNCE universal continuous engine  | Planned | Pure-LP path, Farkas-certificate infeasibility, bound trust-gate, batch LP/QP, HiGHS demoted to CI oracle |
+| P1 Self-hosted integer B&B             | Planned | MILP/MIQP via Rust B&B + POUNCE relaxations; solution purification; dual-driven fixing/OBBT |
+| P2 Crossover + root cuts               | Planned | Pure-Rust IPM-to-basis crossover; Gomory MIR/lift-and-project at root and periodic re-solves |
+| P3 Cut and heuristic suite             | Planned | Cover/clique/flow cuts, batched diving/RINS/local branching, conflict analysis |
+| P4 Retire remaining HiGHS consumers    | Planned | OA/GDP masters, OBBT, McCormick-LP, DOE, RO subproblems → POUNCE; drop `highspy` from runtime deps |
+| P5 Parity push + differentiable MILP   | Planned | Benchmark-gated gap closing vs HiGHS/BARON; KKT implicit diff through integer solves |

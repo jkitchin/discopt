@@ -7,4 +7,7 @@ license.workspace = true
 description = "Core MINLP solver: B&B engine, expression IR, presolve"
 
 [dependencies]
-# Dependencies will be added as modules are implemented
+# feral: pure-Rust sparse linear algebra. Provides the unsymmetric LU basis
+# engine (ftran/btran + product-form column updates) that backs the warm-started
+# simplex node engine for MILP. Pure-Rust, so clean-wheel builds are preserved.
+feral = { git = "https://github.com/jkitchin/feral", rev = "5ab8074b3c87c96d223e56e8012c38b1cf591e0e" }

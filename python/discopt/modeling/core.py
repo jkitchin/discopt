@@ -1081,6 +1081,11 @@ class SolveResult:
     bound_duals_lower: Optional[dict[str, np.ndarray]] = None
     bound_duals_upper: Optional[dict[str, np.ndarray]] = None
 
+    # Witness for an infeasible result, when the backend computed one. An
+    # ``InfeasibilityCertificate`` (per-row minimal constraint violations, in
+    # LP-row order) for LPs solved via the POUNCE engine; None otherwise.
+    infeasibility_certificate: Optional[object] = None
+
     # Convex fast path indicator
     convex_fast_path: bool = False
 

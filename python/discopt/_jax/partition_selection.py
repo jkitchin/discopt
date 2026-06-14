@@ -111,11 +111,15 @@ def _solve_vertex_cover_milp(
     terms: list[tuple[int, ...]],
     weights: dict[int, float] | None = None,
 ) -> list[int]:
-    """Solve the minimum vertex cover as a MILP using HiGHS.
+    """Solve the minimum vertex cover as a MILP through the backend selector.
 
     Variables: y_v ∈ {0,1} for each candidate v
     Objective: min sum(y_v)
     Constraints: for each term t: sum(y_v for v in t ∩ candidates) >= 1
+
+    Routed through ``get_milp_solver`` so it runs on HiGHS or the POUNCE
+    self-hosted B&B — whichever is installed — and falls back to a greedy
+    cover if neither is available or the MILP does not solve to optimality.
     """
     import numpy as np
 
@@ -159,47 +163,41 @@ def _solve_vertex_cover_milp(
     A_le = -A
     b_le = -np.ones(m_rows, dtype=np.float64)
 
-    try:
-        import highspy
-
-        h = highspy.Highs()
-        h.silent()
-        h.setOptionValue("time_limit", 30.0)
-
-        # Add binary variables (y_v ∈ {0,1} for each candidate)
-        for i in range(n):
-            h.addBinary(obj=c[i])  # binary + set objective coefficient
-
-        # Add covering constraints: -A @ y <= -1  (i.e., A @ y >= 1)
-        for row_idx in range(m_rows):
-            nonzero_cols = np.array(
-                [i for i in range(n) if A_le[row_idx, i] != 0.0], dtype=np.int32
-            )
-            vals = np.array([A_le[row_idx, i] for i in nonzero_cols], dtype=np.float64)
-            h.addRow(-np.inf, float(b_le[row_idx]), len(nonzero_cols), nonzero_cols, vals)
-
-        h.run()
-        model_status = h.getModelStatus()
-        if model_status != highspy.HighsModelStatus.kOptimal:
-            greedy = _greedy_vertex_cover(candidates, valid_terms, weights=weights)
-            return greedy if greedy else list(dict.fromkeys(candidates))
-
-        sol = h.getSolution()
-        y = np.array(sol.col_value[:n])
-        selected = [candidates[i] for i in range(n) if y[i] > 0.5]
-        selected_set = set(selected)
-
-        # Verify coverage (fallback to max_cover if something went wrong)
-        for term in valid_terms:
-            if not any(v in selected_set for v in term):
-                greedy = _greedy_vertex_cover(candidates, valid_terms, weights=weights)
-                return greedy if greedy else list(dict.fromkeys(candidates))
-
-        return selected
-
-    except ImportError:
+    def _greedy_fallback() -> list[int]:
         greedy = _greedy_vertex_cover(candidates, valid_terms, weights=weights)
         return greedy if greedy else list(dict.fromkeys(candidates))
+
+    # Solve the covering MILP through the backend selector so it runs on either
+    # HiGHS or POUNCE (the self-hosted B&B) — whichever is installed.
+    try:
+        from discopt.solvers import SolveStatus
+        from discopt.solvers.lp_backend import get_milp_solver
+
+        solve_milp = get_milp_solver()
+    except ImportError:
+        return _greedy_fallback()
+
+    result = solve_milp(
+        c=c,
+        A_ub=A_le,
+        b_ub=b_le,
+        integrality=np.ones(n, dtype=np.float64),
+        bounds=[(0.0, 1.0)] * n,
+        time_limit=30.0,
+    )
+    if result.status != SolveStatus.OPTIMAL or result.x is None:
+        return _greedy_fallback()
+
+    y = np.asarray(result.x[:n], dtype=np.float64)
+    selected = [candidates[i] for i in range(n) if y[i] > 0.5]
+    selected_set = set(selected)
+
+    # Verify coverage (fall back to greedy if something went wrong).
+    for term in valid_terms:
+        if not any(v in selected_set for v in term):
+            return _greedy_fallback()
+
+    return selected
 
 
 def _greedy_vertex_cover(

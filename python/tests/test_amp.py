@@ -412,11 +412,10 @@ def test_amp_reports_shifted_square_minlptests_case_infeasible():
     assert result.x is None
 
 
-def test_solve_nlp_subproblem_retries_ipopt_and_restores_bounds(monkeypatch):
-    """AMP local NLP recovery should retry Ipopt without mutating model bounds."""
-    import discopt._jax.ipm as ipm_mod
-    import discopt.solver as solver_mod
-    import discopt.solvers.nlp_ipopt as ipopt_mod
+def test_solve_nlp_subproblem_uses_pounce_and_restores_bounds(monkeypatch):
+    """AMP local NLP recovery routes nlp_solver='ipm' to POUNCE and restores
+    the model's variable bounds afterward (no mutation leak)."""
+    import discopt.solvers.nlp_pounce as pounce_mod
     from discopt.solvers import NLPResult, SolveStatus
     from discopt.solvers import amp as amp_mod
 
@@ -436,22 +435,13 @@ def test_solve_nlp_subproblem_retries_ipopt_and_restores_bounds(monkeypatch):
     calls = []
     seen_bounds = []
 
-    def fake_ipm(evaluator, x0, options):
+    def fake_pounce(evaluator, x0, options=None):
         del x0, options
-        calls.append("ipm")
-        seen_bounds.append(evaluator.variable_bounds)
-        return NLPResult(status=SolveStatus.ERROR)
-
-    def fake_ipopt(evaluator, x0, options):
-        del options
-        calls.append("ipopt")
+        calls.append("pounce")
         seen_bounds.append(evaluator.variable_bounds)
         return NLPResult(status=SolveStatus.OPTIMAL, x=np.array([3.0]), objective=0.0)
 
-    monkeypatch.setattr(amp_mod, "_has_cyipopt", lambda: True)
-    monkeypatch.setattr(ipm_mod, "solve_nlp_ipm", fake_ipm)
-    monkeypatch.setattr(ipopt_mod, "solve_nlp", fake_ipopt)
-    assert solver_mod.solve_nlp is not fake_ipopt
+    monkeypatch.setattr(pounce_mod, "solve_nlp", fake_pounce)
 
     x_opt, obj = amp_mod._solve_nlp_subproblem(
         FakeEvaluator(),
@@ -462,7 +452,7 @@ def test_solve_nlp_subproblem_retries_ipopt_and_restores_bounds(monkeypatch):
         time_limit=10.0,
     )
 
-    assert calls == ["ipm", "ipopt"]
+    assert calls == ["pounce"]
     for lb_seen, ub_seen in seen_bounds:
         np.testing.assert_allclose(lb_seen, np.array([1.0]))
         np.testing.assert_allclose(ub_seen, np.array([5.0]))

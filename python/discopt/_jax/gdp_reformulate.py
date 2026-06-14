@@ -225,7 +225,9 @@ def _compute_big_m_lp(
         Fallback M value.
     """
     try:
-        from discopt.solvers.lp_highs import solve_lp
+        from discopt.solvers.lp_backend import get_lp_solver
+
+        solve_lp = get_lp_solver()
     except ImportError:
         return _compute_big_m(constraint, model, default)
 
