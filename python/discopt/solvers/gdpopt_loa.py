@@ -181,8 +181,10 @@ def solve_gdpopt_loa(
             break
 
         x_master = master_result.x[:n_vars]
-        if master_bound_valid and master_result.objective is not None:
-            LB = max(LB, master_result.objective)
+        # Valid LB comes from the master's dual ``bound`` only, never the
+        # incumbent ``objective`` (an upper bound on a limited master solve).
+        if master_bound_valid and master_result.bound is not None:
+            LB = max(LB, master_result.bound)
 
         # b. Fix integers to master values, solve NLP subproblem
         sub_lb = lb.copy()

@@ -7,11 +7,12 @@ A ``solve_milp(c, A_ub, b_ub, ..., integrality, ...)`` adapter, signature- and
 form into the engine's standard form ``A_eq z = b`` (one explicit slack per row) and runs
 the pure-Rust warm-started-simplex branch-and-bound.
 
-Soundness: callers such as AMP use the returned ``objective`` as a *lower* bound on the
-MILP optimum. This adapter therefore reports the engine's **dual lower bound** — which
-equals the optimum when the solve is proven optimal and remains a valid lower bound
-otherwise — never the (upper-bound) incumbent. If the Rust binding is unavailable it
-raises :class:`SimplexBackendUnavailable` so the selector can fall back.
+Soundness: ``MILPResult.objective`` is the incumbent (an upper bound on a non-optimal
+exit) and ``MILPResult.bound`` is the engine's **dual lower bound** — equal to the
+incumbent once the solve is proven optimal, and a valid lower bound otherwise. Callers
+that need a lower bound (AMP/OA/GDP-LOA) must read ``bound``, never ``objective``. If the
+Rust binding is unavailable it raises :class:`SimplexBackendUnavailable` so the selector
+can fall back.
 """
 
 from __future__ import annotations
@@ -129,19 +130,22 @@ def solve_milp(
 
     x_struct = np.asarray(x_full, dtype=np.float64)[:n]
     if status == "optimal":
-        # Proven optimum: obj == dual bound, a tight valid lower bound.
+        # Proven optimum: incumbent == dual bound, a tight valid lower bound.
         return MILPResult(
             status=SolveStatus.OPTIMAL,
             x=x_struct,
             objective=float(obj),
+            bound=float(obj),
             node_count=int(nodes),
         )
 
-    # node_limit / feasible: report the dual lower bound (sound) if finite.
-    objective = float(bound) if np.isfinite(bound) else None
+    # node_limit / feasible: ``objective`` is the incumbent (upper bound) and
+    # ``bound`` is the engine's dual lower bound (sound) if finite. Callers that
+    # need a lower bound must read ``bound``, never ``objective``.
     return MILPResult(
         status=SolveStatus.ITERATION_LIMIT,
         x=x_struct,
-        objective=objective,
+        objective=float(obj) if np.isfinite(obj) else None,
+        bound=float(bound) if np.isfinite(bound) else None,
         node_count=int(nodes),
     )

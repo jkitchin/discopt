@@ -134,10 +134,15 @@ def solve_milp(
             [float(np.asarray(res.x[f"x{j}"]).ravel()[0]) for j in range(n)], dtype=np.float64
         )
 
+    # ``objective`` is the incumbent (upper bound). ``bound`` is the rigorous
+    # dual lower bound: ``res.bound`` is the B&B global lower bound, already set
+    # to ``None`` by the driver when the gap is not certified, so it is a sound
+    # lower bound on every exit. Callers needing a lower bound must read it.
     return MILPResult(
         status=status,
         x=x,
         objective=res.objective if x is not None else None,
+        bound=res.bound,
         gap=res.gap,
         node_count=int(res.node_count),
         wall_time=wall_time,

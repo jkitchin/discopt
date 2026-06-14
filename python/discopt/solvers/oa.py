@@ -795,8 +795,10 @@ def solve_oa(
             continue
 
         x_master = master_result.x[:n_vars]
-        if decomp.master_bound_valid and master_result.objective is not None:
-            LB = max(LB, master_result.objective)
+        # The master gives a valid LB only via its dual ``bound`` (never the
+        # incumbent ``objective``, which is an upper bound on a limited solve).
+        if decomp.master_bound_valid and master_result.bound is not None:
+            LB = max(LB, master_result.bound)
 
         # b. ECP mode: add cuts at master point, skip NLP
         if ecp_mode:

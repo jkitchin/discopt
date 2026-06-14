@@ -61,11 +61,23 @@ class LPResult:
 
 @dataclass
 class MILPResult:
-    """Result of solving a mixed-integer linear program."""
+    """Result of solving a mixed-integer linear program.
+
+    ``objective`` is the incumbent value (an *upper* bound for a minimization on
+    a non-optimal exit). ``bound`` is the rigorous dual *lower* bound on the
+    optimum (for minimization): it equals ``objective`` once the solve is proven
+    optimal and remains a valid lower bound on a time/node-limited exit.
+
+    Callers that need a sound lower bound (AMP / OA / GDP-LOA master relaxations)
+    MUST read ``bound``, never ``objective`` — using the incumbent as a lower
+    bound can inflate the global LB past the true optimum and falsely certify
+    optimality. ``bound`` is ``None`` when no valid dual bound is available.
+    """
 
     status: SolveStatus
     x: Optional[np.ndarray] = None
     objective: Optional[float] = None
+    bound: Optional[float] = None
     gap: Optional[float] = None
     node_count: int = 0
     iterations: int = 0

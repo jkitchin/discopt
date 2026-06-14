@@ -2909,8 +2909,11 @@ def _solve_amp_impl(
                         )
             break
 
-        if milp_result.objective is not None:
-            new_lb = float(milp_result.objective)
+        # Use the relaxation's rigorous dual *bound* as the global lower bound,
+        # never its incumbent ``objective`` — on a time/node-limited relaxation
+        # solve the incumbent is an upper bound and would falsely inflate LB.
+        if milp_result.bound is not None:
+            new_lb = float(milp_result.bound)
             # Soundness: LB must be non-decreasing
             LB = max(LB, new_lb)
 

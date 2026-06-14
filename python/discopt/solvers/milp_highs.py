@@ -143,17 +143,28 @@ def solve_milp(
         x = np.array(sol.col_value, dtype=np.float64)
         _, obj = h.getInfoValue("objective_function_value")
         _, gap = h.getInfoValue("mip_gap")
+        # Proven optimum: the dual lower bound equals the objective.
         return MILPResult(
             status=status,
             x=x,
             objective=obj,
+            bound=obj,
             gap=gap,
             node_count=int(node_count),
             wall_time=float(wall_time),
         )
 
+    # Non-optimal (time/iteration limit, etc.): expose HiGHS's dual lower bound
+    # as the sound ``bound`` so callers (AMP/OA/GDP) get a valid LB instead of
+    # nothing. ``objective`` stays ``None`` — the incumbent is never a lower bound.
+    bound = None
+    if run_status in nonfatal_statuses and status != SolveStatus.ERROR:
+        db_status, db_value = h.getInfoValue("mip_dual_bound")
+        if db_status == highspy.HighsStatus.kOk and db_value is not None and np.isfinite(db_value):
+            bound = float(db_value)
     return MILPResult(
         status=status,
+        bound=bound,
         node_count=int(node_count),
         wall_time=float(wall_time),
     )

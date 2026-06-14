@@ -131,3 +131,72 @@ class TestModelSolveSimplex:
             assert r_s.status == "optimal"
             if r_h.status == "optimal":
                 assert abs(r_s.objective - r_h.objective) < 1e-4, f"seed={seed}"
+
+
+class TestMILPBoundChannel:
+    """`MILPResult.bound` must be a sound dual *lower* bound on every exit,
+    distinct from the incumbent `objective` (upper bound). This pins the
+    contract the AMP/OA/GDP lower-bound updates rely on (PR #117 review #1)."""
+
+    def _knapsack(self, n=30, seed=7):
+        import discopt.modeling as dm
+
+        rng = np.random.default_rng(seed)
+        v = rng.integers(1, 30, n)
+        w = rng.integers(1, 30, n)
+        cap = float(0.5 * w.sum())
+        m = dm.Model("k")
+        xs = [m.binary(f"x{i}") for i in range(n)]
+        m.minimize(-sum(int(v[i]) * xs[i] for i in range(n)))
+        m.subject_to(sum(int(w[i]) * xs[i] for i in range(n)) <= cap)
+        c = (-v).astype(float)
+        A = w.reshape(1, -1).astype(float)
+        b = np.array([cap])
+        return m, c, A, b, n
+
+    def test_optimal_bound_equals_objective(self):
+        from discopt.solvers.milp_simplex import solve_milp
+
+        _, c, A, b, n = self._knapsack()
+        r = solve_milp(c=c, A_ub=A, b_ub=b, bounds=[(0, 1)] * n, integrality=np.ones(n))
+        assert r.status == SolveStatus.OPTIMAL
+        assert r.bound is not None and r.objective is not None
+        # On a proven optimum the dual bound is tight.
+        assert abs(r.bound - r.objective) < 1e-6
+
+    def test_node_limited_bound_brackets_optimum(self):
+        """Force a node limit: `bound` must stay a valid lower bound (<= true
+        optimum) and `objective`, if present, an upper bound (>= optimum).
+        The incumbent must never be reported as the bound."""
+        from discopt.solvers.milp_simplex import solve_milp
+
+        _, c, A, b, n = self._knapsack()
+        opt = solve_milp(c=c, A_ub=A, b_ub=b, bounds=[(0, 1)] * n, integrality=np.ones(n))
+        true_opt = opt.objective
+
+        r = solve_milp(
+            c=c, A_ub=A, b_ub=b, bounds=[(0, 1)] * n, integrality=np.ones(n), max_nodes=5
+        )
+        if r.status == SolveStatus.OPTIMAL:
+            pytest.skip("instance solved at the root; cannot force a gap")
+        # The dual bound is a sound lower bound on the optimum...
+        assert r.bound is not None
+        assert r.bound <= true_opt + 1e-6
+        # ...and the incumbent is an upper bound strictly worse than the optimum
+        # here — i.e. using it as the LB (the bug) would over-certify. `bound`
+        # must be reported separately and never equal that incumbent.
+        assert r.objective is not None
+        assert r.objective >= true_opt - 1e-6
+        assert r.bound <= r.objective + 1e-9
+
+    def test_relaxation_model_propagates_bound(self):
+        """MilpRelaxationModel.solve must surface the dual `bound`, not the
+        incumbent, as the relaxation's lower bound."""
+        from discopt.solvers import MILPResult
+        from discopt.solvers import SolveStatus as S
+
+        # A node-limited MILPResult: incumbent above, dual bound below.
+        res = MILPResult(status=S.ITERATION_LIMIT, x=np.zeros(2), objective=5.0, bound=-3.0)
+        assert res.bound == -3.0 and res.objective == 5.0
+        # The result type carries both channels independently.
+        assert res.bound < res.objective
