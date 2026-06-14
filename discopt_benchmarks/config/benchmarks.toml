@@ -330,28 +330,29 @@ nl_interface = true
 options = { threads = 1, epsa = 1e-6, epsr = 1e-4 }
 
 [solvers.couenne]
-command = "couenne"
+command = "/Applications/AMPL/couenne"
 type = "external"
 nl_interface = true
 options = { threads = 1 }
-note = "Not available on conda-forge for osx-arm64; build from source via coinbrew."
+note = "COIN-OR Couenne 0.5.8 (AMPL-ASL build). Not on conda-forge for osx-arm64; the AMPL bundle ships an open-source ASL-linked binary that reads .nl directly (no AMPL license needed)."
 
 [solvers.bonmin]
 command = "/opt/homebrew/Caskroom/miniforge/base/envs/discopt-bench/bin/bonmin"
 type = "external"
 nl_interface = true
 options = { threads = 1 }
-note = "Installed via `mamba create -n discopt-bench -c conda-forge coin-or-bonmin`."
+note = "conda-forge coin-or-bonmin in the discopt-bench env."
 
 [solvers.scip]
-command = "scip"
+command = "/opt/homebrew/Caskroom/miniforge/base/envs/discopt-bench/bin/scip"
 type = "external"
 nl_interface = true
 options = { threads = 1 }
-note = "Installed via `brew install scip`."
+note = "conda-forge scip 10.0.2 (SoPlex 8.0.2) in the discopt-bench env; has the AMPL/MP .nl reader. Driven via the SCIP batch -c interface."
 
 [solvers.highs]
-command = "highs"
+command = "/Applications/AMPL/highs"
 type = "external"
+nl_interface = true
 options = { threads = 1 }
-note = "LP/MILP only — used for LP subsolver comparison"
+note = "HiGHS 1.11.0 (AMPL-ASL build) — reads .nl. NOTE: the conda-forge `highs` CLI is mps/lp-only and does NOT read .nl, so the .nl benchmark path must use the ASL build. LP/MILP only."
