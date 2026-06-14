@@ -177,6 +177,83 @@ def solve_qp(
     return result
 
 
+def solve_qp_kkt(
+    Q: np.ndarray,
+    c: np.ndarray,
+    A: np.ndarray,
+    b: np.ndarray,
+    x_l: np.ndarray,
+    x_u: np.ndarray,
+    options: Optional[dict] = None,
+) -> Tuple[float, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Solve ``min 0.5 xᵀQx + cᵀx  s.t.  A x = b,  x_l ≤ x ≤ x_u`` and return the
+    interior-point KKT point ``(obj, x, y, z_l, z_u)``.
+
+    Same sign convention as :func:`discopt.solvers.lp_pounce.solve_lp_kkt`:
+    stationarity ``Qx + c − Aᵀy − z_l + z_u = 0`` with ``z_l, z_u ≥ 0``, so
+    ``y = −mult_g``, ``z_l = mult_x_L``, ``z_u = mult_x_U``. All-equality form
+    only (the differentiable QP layer feeds ``A_eq``/``b_eq``).
+    """
+    if not POUNCE_AVAILABLE:
+        raise ImportError(
+            "pounce is required for this backend. Install it with:\n  pip install pounce-solver"
+        )
+    import pounce
+
+    Q_arr = np.asarray(Q, dtype=np.float64)
+    c_arr = np.asarray(c, dtype=np.float64).ravel()
+    n = c_arr.size
+    A_arr = (
+        np.asarray(A, dtype=np.float64).reshape(-1, n)
+        if A is not None
+        else np.empty((0, n), dtype=np.float64)
+    )
+    b_arr = np.asarray(b, dtype=np.float64).ravel()
+    m = A_arr.shape[0]
+
+    lb = np.asarray(x_l, dtype=np.float64).ravel().copy()
+    ub = np.asarray(x_u, dtype=np.float64).ravel().copy()
+    lb = np.where(lb <= -_FINITE_BOUND_THRESHOLD, -_INF, lb)
+    ub = np.where(ub >= _FINITE_BOUND_THRESHOLD, _INF, ub)
+
+    cl = b_arr.copy()
+    cu = b_arr.copy()
+    x0 = _interior_start(lb, ub)
+
+    opts: dict[str, Any] = {"print_level": 0}
+    if options:
+        opts.update(options)
+
+    problem = pounce.Problem(
+        n=n, m=m, problem_obj=_QPCallbacks(Q_arr, c_arr, A_arr), lb=lb, ub=ub, cl=cl, cu=cu
+    )
+    for key, value in opts.items():
+        try:
+            if isinstance(value, (np.floating, float)):
+                problem.add_option(key, float(value))
+            elif isinstance(value, (np.integer, int)):
+                problem.add_option(key, int(value))
+            else:
+                problem.add_option(key, value)
+        except (TypeError, ValueError, RuntimeError):
+            pass
+
+    x, info = problem.solve(x0)
+    x_arr = np.asarray(x, dtype=np.float64).ravel()
+    mult_g = np.asarray(info.get("mult_g", np.zeros(m)), dtype=np.float64).ravel()
+    z_l = np.asarray(info.get("mult_x_L", np.zeros(n)), dtype=np.float64).ravel()
+    z_u = np.asarray(info.get("mult_x_U", np.zeros(n)), dtype=np.float64).ravel()
+    if mult_g.size != m:
+        mult_g = np.zeros(m)
+    if z_l.size != n:
+        z_l = np.zeros(n)
+    if z_u.size != n:
+        z_u = np.zeros(n)
+    y = -mult_g
+    obj = float(info.get("obj_val", 0.5 * x_arr @ Q_arr @ x_arr + c_arr @ x_arr))
+    return obj, x_arr, y, z_l, z_u
+
+
 def _solve_qp_core(
     Q: np.ndarray,
     c: np.ndarray,

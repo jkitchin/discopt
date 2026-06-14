@@ -259,6 +259,81 @@ def solve_lp(
     return result
 
 
+def solve_lp_kkt(
+    c: np.ndarray,
+    A: np.ndarray,
+    b: np.ndarray,
+    x_l: np.ndarray,
+    x_u: np.ndarray,
+    options: Optional[dict] = None,
+) -> Tuple[float, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Solve ``min cᵀx  s.t.  A x = b,  x_l ≤ x ≤ x_u`` and return the full
+    interior-point KKT point ``(obj, x, y, z_l, z_u)``.
+
+    The signs follow the differentiable-layer stationarity convention
+    ``c − Aᵀy − z_l + z_u = 0`` with ``z_l, z_u ≥ 0``; from Ipopt's stationarity
+    ``∇f + Aᵀ·mult_g − mult_x_L + mult_x_U = 0`` that means ``y = −mult_g``,
+    ``z_l = mult_x_L``, ``z_u = mult_x_U``. Because POUNCE is an IPM it returns
+    the analytic center of the optimal face (strictly positive complementarity
+    slacks), so the KKT sensitivity system used by ``differentiable_lp`` stays
+    nonsingular — unlike a degenerate simplex vertex. All-equality form only
+    (the differentiable LP layer feeds ``A_eq``/``b_eq``).
+    """
+    if not POUNCE_AVAILABLE:
+        raise ImportError(
+            "pounce is required for this backend. Install it with:\n  pip install pounce-solver"
+        )
+    import pounce
+
+    c_arr = np.asarray(c, dtype=np.float64).ravel()
+    n = c_arr.size
+    A_arr = _to_dense(A).reshape(-1, n) if A is not None else np.empty((0, n), dtype=np.float64)
+    b_arr = np.asarray(b, dtype=np.float64).ravel()
+    m = A_arr.shape[0]
+
+    lb = np.asarray(x_l, dtype=np.float64).ravel().copy()
+    ub = np.asarray(x_u, dtype=np.float64).ravel().copy()
+    lb = np.where(lb <= -_FINITE_BOUND_THRESHOLD, -_INF, lb)
+    ub = np.where(ub >= _FINITE_BOUND_THRESHOLD, _INF, ub)
+
+    cl = b_arr.copy()
+    cu = b_arr.copy()
+    x0 = _interior_start(lb, ub)
+
+    opts: dict[str, Any] = {"print_level": 0}
+    if options:
+        opts.update(options)
+
+    problem = pounce.Problem(
+        n=n, m=m, problem_obj=_LPCallbacks(c_arr, A_arr), lb=lb, ub=ub, cl=cl, cu=cu
+    )
+    for key, value in opts.items():
+        try:
+            if isinstance(value, (np.floating, float)):
+                problem.add_option(key, float(value))
+            elif isinstance(value, (np.integer, int)):
+                problem.add_option(key, int(value))
+            else:
+                problem.add_option(key, value)
+        except (TypeError, ValueError, RuntimeError):
+            pass
+
+    x, info = problem.solve(x0)
+    x_arr = np.asarray(x, dtype=np.float64).ravel()
+    mult_g = np.asarray(info.get("mult_g", np.zeros(m)), dtype=np.float64).ravel()
+    z_l = np.asarray(info.get("mult_x_L", np.zeros(n)), dtype=np.float64).ravel()
+    z_u = np.asarray(info.get("mult_x_U", np.zeros(n)), dtype=np.float64).ravel()
+    if mult_g.size != m:
+        mult_g = np.zeros(m)
+    if z_l.size != n:
+        z_l = np.zeros(n)
+    if z_u.size != n:
+        z_u = np.zeros(n)
+    y = -mult_g
+    obj = float(info.get("obj_val", c_arr @ x_arr))
+    return obj, x_arr, y, z_l, z_u
+
+
 def _build_certificate(slacks: np.ndarray, n_ineq: int) -> InfeasibilityCertificate:
     """Split the Phase-1 per-row slacks into an inequality/equality witness."""
     return InfeasibilityCertificate(
