@@ -332,8 +332,8 @@ def solve_mccormick_relaxation_nlp(
 
     # The convex relaxation NLP is solved by POUNCE (pure-Rust Ipopt port; the
     # same engine the original-NLP path uses). The JAX IPM previously used here
-    # is retired — POUNCE has no JAX trace/compile floor and keeps the spatial-
-    # B&B relaxation path off the deprecated _jax.ipm core.
+    # has been removed — POUNCE has no JAX trace/compile floor and keeps the
+    # spatial-B&B relaxation path off any JAX interior-point core.
     return _solve_relaxation_with_pounce(
         obj_relax_fn,
         con_fns_tuple,

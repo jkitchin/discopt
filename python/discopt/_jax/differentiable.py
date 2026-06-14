@@ -12,9 +12,11 @@ optimal dual variables (constraint multipliers) returned by the NLP solver.
 This avoids solving any linear system -- the duals from the NLP solve
 directly provide the sensitivity information we need.
 
-The default NLP backend is the pure-JAX IPM (``solve_nlp_ipm``), which keeps
-the entire pipeline in JAX and requires no external C dependencies. Pass
-``nlp_solver="ipopt"`` to use cyipopt instead.
+The default NLP backend is POUNCE (the pure-Rust interior-point solver); the
+host callbacks set parameters and build the evaluator from concrete values
+inside ``jax.pure_callback``, so the solve stays off the JAX trace. ``"ipm"``
+is accepted as a back-compat alias for POUNCE; pass ``nlp_solver="ipopt"`` to
+use cyipopt instead.
 """
 
 from __future__ import annotations
@@ -309,17 +311,15 @@ def _get_param_slice(param: Parameter, model: Model) -> tuple[int, int]:
 
 
 def _dispatch_nlp_solve(nlp_solver: str, evaluator, x0, options: dict):
-    """Dispatch NLP solve to the selected backend."""
-    if nlp_solver == "ipm":
-        # The JAX IPM is retained ONLY here: as the JAX-traceable forward solve
-        # for the differentiable-solve helpers (custom_jvp), whose forward runs
-        # inside a JAX trace. POUNCE (a host pure_callback) cannot be the forward
-        # in that traced context — for a differentiable POUNCE NLP layer use
-        # discopt._jax.pounce_layer.make_nlp_layer instead.
-        from discopt._jax.ipm import solve_nlp_ipm
+    """Dispatch NLP solve to the selected backend.
 
-        return solve_nlp_ipm(evaluator, x0, constraint_bounds=None, options=options)
-    elif nlp_solver == "pounce":
+    ``"ipm"`` is accepted as a back-compat alias for POUNCE (the pure-Rust
+    interior-point solver, now the default). The host callbacks that drive the
+    differentiable-solve forward set parameters and build the evaluator from
+    concrete values *inside* ``jax.pure_callback``, so POUNCE works as the
+    forward there without any in-trace solve.
+    """
+    if nlp_solver in ("ipm", "pounce"):
         from discopt.solvers.nlp_pounce import solve_nlp
 
         return solve_nlp(evaluator, x0, options=options)
@@ -657,35 +657,34 @@ def _make_jax_differentiable_solve(
         if isinstance(c, Constraint):
             constraint_fns_parametric.append(_compile_parametric_constraint(c, model))
 
-    @jax.custom_jvp
-    def solve_fn(p_flat):
-        """Solve the NLP for given parameter values and return optimal objective."""
-        # Update parameter values in the model
+    def _host_solve(p_np):
+        """Host-side NLP solve. Sets parameter values and builds the evaluator
+        from the *concrete* ``p_np`` handed in by ``jax.pure_callback`` — never
+        from a traced value — so a host solver (POUNCE) can be the forward."""
         offset = 0
         for p in model._parameters:
             p_size = int(np.prod(p.shape)) if p.shape else 1
-            p.value = np.asarray(p_flat[offset : offset + p_size]).reshape(p.shape)
+            p.value = np.asarray(p_np[offset : offset + p_size]).reshape(p.shape)
             offset += p_size
-
-        # Re-compile evaluator with updated parameter values
         ev = NLPEvaluator(model)
+        result = _dispatch_nlp_solve(_nlp_solver, ev, x0_default, opts)
+        x_sol = result.x if result.x is not None else x0_default
+        mults = result.multipliers
+        obj = result.objective if result.objective is not None else 0.0
+        # Pack: [obj, x_star..., multipliers...]
+        if mults is not None:
+            packed = np.concatenate([np.array([obj]), x_sol, mults]).astype(np.float64)
+        else:
+            packed = np.concatenate([np.array([obj]), x_sol, np.zeros(n_constraints)]).astype(
+                np.float64
+            )
+        return packed
 
-        def _solve(p_np):
-            result = _dispatch_nlp_solve(_nlp_solver, ev, x0_default, opts)
-            x_sol = result.x if result.x is not None else x0_default
-            mults = result.multipliers
-            obj = result.objective if result.objective is not None else 0.0
-            # Pack: [obj, x_star..., multipliers...]
-            if mults is not None:
-                packed = np.concatenate([np.array([obj]), x_sol, mults]).astype(np.float64)
-            else:
-                packed = np.concatenate([np.array([obj]), x_sol, np.zeros(n_constraints)]).astype(
-                    np.float64
-                )
-            return packed
-
+    @jax.custom_jvp
+    def solve_fn(p_flat):
+        """Solve the NLP for given parameter values and return optimal objective."""
         result_shape = jax.ShapeDtypeStruct((1 + n_vars + n_constraints,), jnp.float64)
-        packed = jax.pure_callback(_solve, result_shape, p_flat)
+        packed = jax.pure_callback(_host_solve, result_shape, p_flat)
         return packed[0]
 
     @solve_fn.defjvp
@@ -693,31 +692,10 @@ def _make_jax_differentiable_solve(
         (p_flat,) = primals
         (p_dot,) = tangents
 
-        # Forward: solve the problem
-        # We need x* and lambda* for the JVP, so we call the callback again
-        offset = 0
-        for p in model._parameters:
-            p_size = int(np.prod(p.shape)) if p.shape else 1
-            p.value = np.asarray(p_flat[offset : offset + p_size]).reshape(p.shape)
-            offset += p_size
-
-        ev = NLPEvaluator(model)
-
-        def _solve_full(p_np):
-            result = _dispatch_nlp_solve(_nlp_solver, ev, x0_default, opts)
-            x_sol = result.x if result.x is not None else x0_default
-            mults = result.multipliers
-            obj = result.objective if result.objective is not None else 0.0
-            if mults is not None:
-                packed = np.concatenate([np.array([obj]), x_sol, mults]).astype(np.float64)
-            else:
-                packed = np.concatenate([np.array([obj]), x_sol, np.zeros(n_constraints)]).astype(
-                    np.float64
-                )
-            return packed
-
+        # Forward: solve the problem (x* and lambda* come back through the same
+        # concrete-parameter host callback used by solve_fn).
         result_shape = jax.ShapeDtypeStruct((1 + n_vars + n_constraints,), jnp.float64)
-        packed = jax.pure_callback(_solve_full, result_shape, p_flat)
+        packed = jax.pure_callback(_host_solve, result_shape, p_flat)
 
         primal_out = packed[0]
         x_star = packed[1 : 1 + n_vars]

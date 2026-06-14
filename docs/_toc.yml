@@ -18,7 +18,6 @@ parts:
     chapters:
       - file: notebooks/tutorial_oa
       - file: notebooks/amp_global_minlp
-      - file: notebooks/tutorial_solver_jax_ipm
       - file: notebooks/tutorial_solver_pounce
       - file: notebooks/tutorial_pounce_sipopt
       - file: notebooks/differentiable_pounce_layer
@@ -49,7 +48,6 @@ parts:
     chapters:
       - file: notebooks/qp_solver
       - file: notebooks/ipm_vs_ipopt
-      - file: notebooks/batch_ipm_vs_ipopt
       - file: notebooks/benchmarks_by_class
       - file: notebooks/benchmark_dashboard
   - caption: Applications

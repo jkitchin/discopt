@@ -28,7 +28,6 @@ import discopt.solver as S  # noqa: E402
 import jax.numpy as jnp  # noqa: E402
 from discopt.solver import (  # noqa: E402
     _make_evaluator,
-    _solve_batch_ipm,
     _solve_batch_pounce,
 )
 from discopt.solvers import SolveStatus  # noqa: E402
@@ -55,59 +54,6 @@ _UB = [[5.0, 5.0], [5.0, 5.0]]
 # ---------------------------------------------------------------------------
 # Solver side: the trusted mask
 # ---------------------------------------------------------------------------
-class TestTrustedMaskIPM:
-    def test_non_kkt_convex_is_untrusted(self):
-        ev, cb, gl, gu = _convex_eval()
-        *_, trusted = _solve_batch_ipm(
-            ev,
-            _LB,
-            _UB,
-            [0, 1],
-            ev.n_variables,
-            cb,
-            {"max_iter": 1},
-            gl,
-            gu,
-            multistart=True,
-            convex=True,
-        )
-        assert not trusted.any()  # max_iter=1 -> non-KKT, polish also capped
-
-    def test_converged_convex_is_trusted(self):
-        ev, cb, gl, gu = _convex_eval()
-        *_, trusted = _solve_batch_ipm(
-            ev,
-            _LB,
-            _UB,
-            [0, 1],
-            ev.n_variables,
-            cb,
-            {"max_iter": 200},
-            gl,
-            gu,
-            multistart=True,
-            convex=True,
-        )
-        assert trusted.all()
-
-    def test_nonconvex_always_trusted(self):
-        ev, cb, gl, gu = _convex_eval()
-        *_, trusted = _solve_batch_ipm(
-            ev,
-            _LB,
-            _UB,
-            [0, 1],
-            ev.n_variables,
-            cb,
-            {"max_iter": 1},
-            gl,
-            gu,
-            multistart=True,
-            convex=False,
-        )
-        assert trusted.all()  # objective discarded by caller -> trust irrelevant
-
-
 class TestTrustedMaskPOUNCE:
     def test_stalled_convex_is_rescued_by_polish_retry(self):
         """A max_iter=1 stall is no longer just untrusted: the boosted polish

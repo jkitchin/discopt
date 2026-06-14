@@ -53,7 +53,7 @@ _OPT = -1.0
 
 
 def _all_sentinel_batch(evaluator, batch_lb, batch_ub, batch_ids, n_vars, *args, **kwargs):
-    """Stand-in for _solve_batch_ipm: every node NLP 'fails'."""
+    """Stand-in for _solve_batch_pounce: every node NLP 'fails'."""
     n_batch = len(batch_ids)
     ids = np.array(batch_ids, dtype=np.int64)
     lbs = np.full(n_batch, S._INFEASIBILITY_SENTINEL, dtype=np.float64)

@@ -727,288 +727,6 @@ def _solve_root_node_multistart(
     return nlp_result
 
 
-def _solve_root_node_multistart_ipm(
-    evaluator,
-    node_lb,
-    node_ub,
-    constraint_bounds,
-    g_l_jax,
-    g_u_jax,
-    options,
-    n_random=2,
-    convex=False,
-):
-    """Solve root NLP relaxation from multiple starting points via vmap'd IPM.
-
-    Uses jax.vmap to solve all starting points in parallel, giving ~Nx speedup
-    over the serial loop when using the pure-JAX IPM backend.
-
-    When ``convex=True``, iterates whose best code is 3 (max_iter) or 4
-    (stalled) are polished with cyipopt; IPM's non-KKT obj is not a valid
-    lower bound for convex NLP-BB (issue #39).
-    """
-    import jax.numpy as jnp
-
-    from discopt._jax.ipm import (
-        IPMOptions,
-        _jax_feasibility_restoration,
-        ipm_solve,
-        solve_nlp_batch,
-    )
-    from discopt.solvers import NLPResult
-
-    starting_points = _generate_starting_points(node_lb, node_ub, n_random=n_random)
-    n_starts = len(starting_points)
-
-    obj_fn = evaluator._obj_fn
-    m = evaluator.n_constraints
-    con_fn = evaluator._cons_fn if m > 0 else None
-
-    # Stack starting points into (n_starts, n_vars) batch
-    x0_batch = jnp.array(np.stack(starting_points), dtype=jnp.float64)
-    # Broadcast node bounds to (n_starts, n_vars)
-    xl_batch = jnp.broadcast_to(jnp.array(node_lb, dtype=jnp.float64), (n_starts, len(node_lb)))
-    xu_batch = jnp.broadcast_to(jnp.array(node_ub, dtype=jnp.float64), (n_starts, len(node_ub)))
-
-    ipm_opts = IPMOptions(max_iter=int(options.get("max_iter", 200)))
-
-    try:
-        state = solve_nlp_batch(
-            obj_fn, con_fn, x0_batch, xl_batch, xu_batch, g_l_jax, g_u_jax, ipm_opts
-        )
-    except Exception as e:
-        logger.debug("Root multistart batch IPM failed: %s", e)
-        # Fall back: return infeasible sentinel
-        return NLPResult(
-            status=SolveStatus.ERROR,
-            x=np.asarray(starting_points[0]),
-            objective=_INFEASIBILITY_SENTINEL,
-        )
-
-    # Unpack batched results: pick best converged solution
-    converged = np.asarray(state.converged)  # (n_starts,)
-    obj_vals = np.asarray(state.obj)  # (n_starts,)
-    x_vals = np.asarray(state.x)  # (n_starts, n_vars)
-
-    # Mask: converged == 1 (optimal), 2 (acceptable), 3 (iter limit), or 4 (stalled).
-    # Code 5 (infeasible) is excluded. NaN objectives are also excluded —
-    # they indicate IPM divergence (e.g. log of negative argument).
-    feasible_mask = (
-        (converged == 1) | (converged == 2) | (converged == 3) | (converged == 4)
-    ) & np.isfinite(obj_vals)
-
-    if np.any(feasible_mask):
-        # Among feasible, pick the one with lowest objective
-        masked_obj = np.where(feasible_mask, obj_vals, np.inf)
-        best_idx = int(np.argmin(masked_obj))
-        best_code = int(converged[best_idx])
-        best_obj = float(obj_vals[best_idx])
-        best_x = np.asarray(x_vals[best_idx], dtype=np.float64)
-
-        # Convex polish: codes 3 (max_iter) / 4 (stalled) don't certify
-        # KKT stationarity — objective is not a valid LB for convex NLP-BB.
-        if convex and best_code in (3, 4):
-            try:
-                polish = _solve_node_nlp_kkt(
-                    evaluator,
-                    best_x,
-                    np.asarray(node_lb),
-                    np.asarray(node_ub),
-                    constraint_bounds,
-                    options,
-                )
-            except Exception as e:
-                logger.debug("Root IPM convex polish failed: %s", e)
-                polish = None
-            if polish is not None and polish.status in (
-                SolveStatus.OPTIMAL,
-                SolveStatus.ITERATION_LIMIT,
-            ):
-                p_obj = float(polish.objective)
-                if np.isfinite(p_obj) and p_obj < _SENTINEL_THRESHOLD:
-                    return NLPResult(
-                        status=polish.status,
-                        x=np.asarray(polish.x),
-                        objective=p_obj,
-                    )
-
-        return NLPResult(
-            status=SolveStatus.OPTIMAL,
-            x=best_x,
-            objective=best_obj,
-        )
-    else:
-        # All starts infeasible or NaN — attempt feasibility restoration.
-        if con_fn is not None and g_l_jax is not None:
-            xl_jax = jnp.array(node_lb, dtype=jnp.float64)
-            xu_jax = jnp.array(node_ub, dtype=jnp.float64)
-            for i in range(n_starts):
-                if converged[i] == 5:
-                    try:
-                        x_restored, rest_ok = _jax_feasibility_restoration(
-                            con_fn,
-                            jnp.asarray(x_vals[i]),
-                            xl_jax,
-                            xu_jax,
-                            g_l_jax,
-                            g_u_jax,
-                            ipm_opts,
-                        )
-                    except Exception:
-                        continue
-                    if rest_ok:
-                        try:
-                            state_i = ipm_solve(
-                                obj_fn,
-                                con_fn,
-                                x_restored,
-                                xl_jax,
-                                xu_jax,
-                                g_l_jax,
-                                g_u_jax,
-                                ipm_opts,
-                            )
-                        except Exception:
-                            continue
-                        conv_i = int(state_i.converged)
-                        if conv_i in (1, 2, 3, 4):
-                            return NLPResult(
-                                status=SolveStatus.OPTIMAL,
-                                x=np.asarray(state_i.x),
-                                objective=float(state_i.obj),
-                            )
-        return NLPResult(
-            status=SolveStatus.ERROR,
-            x=x_vals[0],
-            objective=_INFEASIBILITY_SENTINEL,
-        )
-
-
-def _solve_node_multistart_ipm(
-    evaluator,
-    x0,
-    node_lb,
-    node_ub,
-    constraint_bounds,
-    g_l_jax,
-    g_u_jax,
-    options,
-    n_extra=2,
-):
-    """Multistart NLP at a child node: parent warm-start + diverse points.
-
-    Uses parent warm-start as primary starting point, plus midpoint and
-    random points within the node bounds. All points are solved in parallel
-    via vmap'd IPM, and the best converged solution is returned.
-    """
-    import jax.numpy as jnp
-
-    from discopt._jax.ipm import (
-        IPMOptions,
-        _jax_feasibility_restoration,
-        ipm_solve,
-        solve_nlp_batch,
-    )
-    from discopt.solvers import NLPResult
-
-    n_vars = len(node_lb)
-    lb_clipped = np.clip(node_lb, -_SPC, _SPC)
-    ub_clipped = np.clip(node_ub, -_SPC, _SPC)
-
-    # Starting points: parent warm-start + midpoint + random
-    starts = [np.asarray(x0, dtype=np.float64)]
-    span = np.maximum(ub_clipped - lb_clipped, 0.0)
-    starts.append(0.5 * (lb_clipped + ub_clipped))  # midpoint
-
-    # Deterministic seed from node bounds for reproducibility
-    seed = int(abs(hash(tuple(node_lb[:4].tolist()) + tuple(node_ub[:4].tolist())))) % (2**31)
-    rng = np.random.RandomState(seed)
-    starts.append(lb_clipped + rng.uniform(size=n_vars) * span)
-
-    n_starts = len(starts)
-    obj_fn = evaluator._obj_fn
-    m = evaluator.n_constraints
-    con_fn = evaluator._cons_fn if m > 0 else None
-
-    x0_batch = jnp.array(np.stack(starts), dtype=jnp.float64)
-    xl_batch = jnp.broadcast_to(jnp.array(node_lb, dtype=jnp.float64), (n_starts, n_vars))
-    xu_batch = jnp.broadcast_to(jnp.array(node_ub, dtype=jnp.float64), (n_starts, n_vars))
-
-    ipm_opts = IPMOptions(max_iter=int(options.get("max_iter", 200)))
-
-    try:
-        state = solve_nlp_batch(
-            obj_fn, con_fn, x0_batch, xl_batch, xu_batch, g_l_jax, g_u_jax, ipm_opts
-        )
-    except Exception as e:
-        logger.debug("Node multistart batch IPM failed: %s", e)
-        return NLPResult(
-            status=SolveStatus.ERROR,
-            x=np.asarray(x0),
-            objective=_INFEASIBILITY_SENTINEL,
-        )
-
-    converged = np.asarray(state.converged)
-    obj_vals = np.asarray(state.obj)
-    x_vals = np.asarray(state.x)
-
-    feasible_mask = ((converged == 1) | (converged == 2) | (converged == 3)) & np.isfinite(obj_vals)
-
-    if np.any(feasible_mask):
-        masked_obj = np.where(feasible_mask, obj_vals, np.inf)
-        best_idx = int(np.argmin(masked_obj))
-        return NLPResult(
-            status=SolveStatus.OPTIMAL,
-            x=x_vals[best_idx],
-            objective=float(obj_vals[best_idx]),
-        )
-    else:
-        # All starts infeasible — attempt feasibility restoration.
-        if con_fn is not None and g_l_jax is not None:
-            xl_jax = jnp.array(node_lb, dtype=jnp.float64)
-            xu_jax = jnp.array(node_ub, dtype=jnp.float64)
-            for i in range(n_starts):
-                if converged[i] == 5:
-                    try:
-                        x_restored, rest_ok = _jax_feasibility_restoration(
-                            con_fn,
-                            jnp.asarray(x_vals[i]),
-                            xl_jax,
-                            xu_jax,
-                            g_l_jax,
-                            g_u_jax,
-                            ipm_opts,
-                        )
-                    except Exception:
-                        continue
-                    if rest_ok:
-                        try:
-                            state_i = ipm_solve(
-                                obj_fn,
-                                con_fn,
-                                x_restored,
-                                xl_jax,
-                                xu_jax,
-                                g_l_jax,
-                                g_u_jax,
-                                ipm_opts,
-                            )
-                        except Exception:
-                            continue
-                        conv_i = int(state_i.converged)
-                        if conv_i in (1, 2, 3):
-                            return NLPResult(
-                                status=SolveStatus.OPTIMAL,
-                                x=np.asarray(state_i.x),
-                                objective=float(state_i.obj),
-                            )
-        return NLPResult(
-            status=SolveStatus.ERROR,
-            x=x_vals[0],
-            objective=_INFEASIBILITY_SENTINEL,
-        )
-
-
 def _invoke_pre_import_callbacks(
     *,
     model,
@@ -2270,15 +1988,6 @@ def solve_model(
     cl_list, cu_list = _infer_constraint_bounds(model, evaluator)
     constraint_bounds = list(zip(cl_list, cu_list)) if cl_list else None
 
-    # Pre-compute constraint bounds as JAX arrays for batch IPM
-    g_l_jax = None
-    g_u_jax = None
-    if nlp_solver == "ipm" and cl_list:
-        import jax.numpy as jnp
-
-        g_l_jax = jnp.array(cl_list, dtype=jnp.float64)
-        g_u_jax = jnp.array(cu_list, dtype=jnp.float64)
-
     # --- Prepare cut generation if enabled ---
     _generate_cuts = None
     _bilinear_terms = None
@@ -2598,55 +2307,30 @@ def solve_model(
         # Use augmented evaluator with cuts if available
         _active_evaluator = evaluator
         _active_cb = constraint_bounds
-        _active_gl = g_l_jax
-        _active_gu = g_u_jax
         if _cut_pool is not None and len(_cut_pool) > 0:
             _augmented_evaluator = _AugmentedEvaluator(evaluator, _cut_pool)
             _active_evaluator = _augmented_evaluator
             _active_cb = _augmented_evaluator.get_augmented_constraint_bounds(constraint_bounds)
-            if nlp_solver == "ipm" and hasattr(evaluator, "_obj_fn"):
-                _active_gl, _active_gu = _augmented_evaluator.get_augmented_jax_bounds(
-                    g_l_jax, g_u_jax
-                )
 
-        _use_ipm_batch = nlp_solver == "ipm" and hasattr(evaluator, "_obj_fn")
         # POUNCE batches node NLPs via solve_nlp_batch (Phase A, discopt#97).
-        # It uses Python callbacks, so unlike the IPM path it needs no JAX
-        # _obj_fn on the evaluator. The callback path is GIL-bound, so only
-        # batch when the per-node problem is large enough to amortize it
-        # (_POUNCE_BATCH_MIN_VARS); smaller nodes stay on the serial path.
+        # It uses Python callbacks, so it needs no JAX _obj_fn on the evaluator.
+        # The callback path is GIL-bound, so only batch when the per-node problem
+        # is large enough to amortize it (_POUNCE_BATCH_MIN_VARS); smaller nodes
+        # stay on the serial path.
         _use_pounce_batch = nlp_solver == "pounce" and n_vars >= _POUNCE_BATCH_MIN_VARS
-        if (_use_ipm_batch or _use_pounce_batch) and n_batch > 1:
-            if _use_pounce_batch:
-                result_ids, result_lbs, result_sols, result_feas, _batch_trusted = (
-                    _solve_batch_pounce(
-                        _active_evaluator,
-                        batch_lb,
-                        batch_ub,
-                        batch_ids,
-                        n_vars,
-                        _active_cb,
-                        opts,
-                        batch_psols=batch_psols,
-                        multistart=_POUNCE_BATCH_MULTISTART,
-                        convex=_model_is_convex,
-                    )
-                )
-            else:
-                result_ids, result_lbs, result_sols, result_feas, _batch_trusted = _solve_batch_ipm(
-                    _active_evaluator,
-                    batch_lb,
-                    batch_ub,
-                    batch_ids,
-                    n_vars,
-                    _active_cb,
-                    opts,
-                    _active_gl,
-                    _active_gu,
-                    batch_psols=batch_psols,
-                    multistart=True,  # IPM needs multistart even for convex models
-                    convex=_model_is_convex,
-                )
+        if _use_pounce_batch and n_batch > 1:
+            result_ids, result_lbs, result_sols, result_feas, _batch_trusted = _solve_batch_pounce(
+                _active_evaluator,
+                batch_lb,
+                batch_ub,
+                batch_ids,
+                n_vars,
+                _active_cb,
+                opts,
+                batch_psols=batch_psols,
+                multistart=_POUNCE_BATCH_MULTISTART,
+                convex=_model_is_convex,
+            )
             # A convex node whose relaxation objective is not KKT-valid (and
             # could not be polished) is not a valid lower bound; decertify the
             # gap rather than trust it (roadmap P0.3). Bounds are left as-is.
@@ -2820,28 +2504,14 @@ def solve_model(
                     # When the LP relaxer is active, skip it: the LP block below
                     # supplies the bound + primal and SubNLP turns that into
                     # the incumbent — running multistart NLP here is wasted work.
-                    if _use_ipm_batch:
-                        # More random starts for nonconvex problems
-                        _root_n_random = 5 if not _model_is_convex else 2
-                        nlp_result = _solve_root_node_multistart_ipm(
-                            _active_evaluator,
-                            node_lb,
-                            node_ub,
-                            _active_cb,
-                            _active_gl,
-                            _active_gu,
-                            opts,
-                            n_random=_root_n_random,
-                        )
-                    else:
-                        nlp_result = _solve_root_node_multistart(
-                            _active_evaluator,
-                            node_lb,
-                            node_ub,
-                            _active_cb,
-                            opts,
-                            nlp_solver,
-                        )
+                    nlp_result = _solve_root_node_multistart(
+                        _active_evaluator,
+                        node_lb,
+                        node_ub,
+                        _active_cb,
+                        opts,
+                        nlp_solver,
+                    )
                 elif iteration > 0:
                     # Warm-start from parent solution if available
                     psol_i = np.array(batch_psols[i])
@@ -2852,27 +2522,15 @@ def solve_model(
                         lb_clipped = np.clip(node_lb, -_SPC, _SPC)
                         ub_clipped = np.clip(node_ub, -_SPC, _SPC)
                         x0 = 0.5 * (lb_clipped + ub_clipped)
-                    if _use_ipm_batch:
-                        nlp_result = _solve_node_multistart_ipm(
-                            _active_evaluator,
-                            x0,
-                            node_lb,
-                            node_ub,
-                            _active_cb,
-                            _active_gl,
-                            _active_gu,
-                            opts,
-                        )
-                    else:
-                        nlp_result = _solve_node_nlp(
-                            _active_evaluator,
-                            x0,
-                            node_lb,
-                            node_ub,
-                            _active_cb,
-                            opts,
-                            nlp_solver=nlp_solver,
-                        )
+                    nlp_result = _solve_node_nlp(
+                        _active_evaluator,
+                        x0,
+                        node_lb,
+                        node_ub,
+                        _active_cb,
+                        opts,
+                        nlp_solver=nlp_solver,
+                    )
 
                 result_ids[i] = int(batch_ids[i])
 
@@ -3671,36 +3329,9 @@ def _solve_continuous(
         nlp_result = solve_nlp_pounce(
             backend_evaluator, x0, constraint_bounds=constraint_bounds, options=opts
         )
-    elif nlp_solver == "sparse_ipm" and hasattr(backend_evaluator, "_obj_fn"):
-        from discopt._jax.sparse_ipm import solve_nlp_sparse_ipm
-
-        # Build sparse Jacobian function if beneficial
-        sparse_jac_fn = None
-        try:
-            from discopt._jax.sparsity import detect_and_color
-
-            result = detect_and_color(model)
-            if result is not None:
-                from discopt._jax.sparse_jacobian import make_sparse_jac_fn
-
-                pattern, colors, n_colors, seed = result
-                sparse_jac_fn = make_sparse_jac_fn(evaluator._cons_fn, pattern, colors, seed)
-        except Exception as e:
-            logger.debug("Sparse Jacobian setup failed: %s", e)
-        nlp_result = solve_nlp_sparse_ipm(
-            backend_evaluator,
-            x0,
-            constraint_bounds=constraint_bounds,
-            options=opts,
-            sparse_jac_fn=sparse_jac_fn,
-        )
-    elif nlp_solver == "ipm" and hasattr(backend_evaluator, "_obj_fn"):
-        from discopt._jax.ipm import solve_nlp_ipm
-
-        nlp_result = solve_nlp_ipm(
-            backend_evaluator, x0, constraint_bounds=constraint_bounds, options=opts
-        )
     else:
+        # "ipm"/"sparse_ipm" resolve to POUNCE upstream (the JAX IPM is retired);
+        # only "ipopt"/"cyipopt" reach this branch.
         nlp_result = solve_nlp(
             backend_evaluator, x0, constraint_bounds=constraint_bounds, options=opts
         )
@@ -3775,8 +3406,6 @@ def _solve_nlp_bb(
     For nonconvex problems the NLP objective is NOT a valid lower bound;
     the solver runs in heuristic mode and reports gap_certified=False.
     """
-    import jax.numpy as jnp
-
     from discopt._jax.gdp_reformulate import reformulate_gdp
     from discopt.modeling.core import ObjectiveSense
 
@@ -3854,12 +3483,6 @@ def _solve_nlp_bb(
     cl_list, cu_list = _infer_constraint_bounds(model, evaluator)
     constraint_bounds = list(zip(cl_list, cu_list)) if cl_list else None
 
-    g_l_jax = None
-    g_u_jax = None
-    if nlp_solver == "ipm" and cl_list:
-        g_l_jax = jnp.array(cl_list, dtype=jnp.float64)
-        g_u_jax = jnp.array(cu_list, dtype=jnp.float64)
-
     opts: dict = {}
     opts.setdefault("print_level", 0)
     opts.setdefault("max_iter", 3000)
@@ -3888,12 +3511,11 @@ def _solve_nlp_bb(
     _fp_ran = False
 
     # --- NLP-BB loop ---
-    _use_ipm_batch = nlp_solver == "ipm" and hasattr(evaluator, "_obj_fn")
     # POUNCE batches node NLPs via solve_nlp_batch (Phase A, discopt#97); it is
     # a true KKT solver, so its converged objective is a reliable lower bound
-    # for convex MINLPs (no polish pass needed, unlike the JAX IPM). The callback
-    # path is GIL-bound, so only batch when the per-node problem is large enough
-    # to amortize it; smaller nodes stay on the serial path.
+    # for convex MINLPs. The callback path is GIL-bound, so only batch when the
+    # per-node problem is large enough to amortize it; smaller nodes stay on the
+    # serial path.
     _use_pounce_batch = nlp_solver == "pounce" and n_vars >= _POUNCE_BATCH_MIN_VARS
     iteration = 0
     while True:
@@ -3956,37 +3578,19 @@ def _solve_nlp_bb(
         # Solve NLP at each node (no relaxation, no multistart for convex)
         t_jax_start = time.perf_counter()
 
-        if (_use_ipm_batch or _use_pounce_batch) and n_batch > 1:
-            if _use_pounce_batch:
-                result_ids, result_lbs, result_sols, result_feas, _batch_trusted = (
-                    _solve_batch_pounce(
-                        evaluator,
-                        batch_lb,
-                        batch_ub,
-                        batch_ids,
-                        n_vars,
-                        constraint_bounds,
-                        opts,
-                        batch_psols=batch_psols,
-                        multistart=_POUNCE_BATCH_MULTISTART,
-                        convex=_model_is_convex,
-                    )
-                )
-            else:
-                result_ids, result_lbs, result_sols, result_feas, _batch_trusted = _solve_batch_ipm(
-                    evaluator,
-                    batch_lb,
-                    batch_ub,
-                    batch_ids,
-                    n_vars,
-                    constraint_bounds,
-                    opts,
-                    g_l_jax,
-                    g_u_jax,
-                    batch_psols=batch_psols,
-                    multistart=True,  # IPM needs multistart even for convex models
-                    convex=_model_is_convex,
-                )
+        if _use_pounce_batch and n_batch > 1:
+            result_ids, result_lbs, result_sols, result_feas, _batch_trusted = _solve_batch_pounce(
+                evaluator,
+                batch_lb,
+                batch_ub,
+                batch_ids,
+                n_vars,
+                constraint_bounds,
+                opts,
+                batch_psols=batch_psols,
+                multistart=_POUNCE_BATCH_MULTISTART,
+                convex=_model_is_convex,
+            )
             # Convex MINLP: the NLP objective is the node lower bound. A node
             # whose relaxation did not reach KKT (and could not be polished) is
             # not a valid lower bound, so decertify the gap rather than trust
@@ -4029,20 +3633,7 @@ def _solve_nlp_bb(
                 node_lb = np.array(batch_lb[i])
                 node_ub = np.array(batch_ub[i])
 
-                if iteration == 0 and _use_ipm_batch:
-                    n_random = 2 if _model_is_convex else 5
-                    nlp_result = _solve_root_node_multistart_ipm(
-                        evaluator,
-                        node_lb,
-                        node_ub,
-                        constraint_bounds,
-                        g_l_jax,
-                        g_u_jax,
-                        opts,
-                        n_random=n_random,
-                        convex=_model_is_convex,
-                    )
-                elif iteration == 0:
+                if iteration == 0:
                     nlp_result = _solve_root_node_multistart(
                         evaluator,
                         node_lb,
@@ -4502,378 +4093,6 @@ def _solve_node_nlp_pounce(
             return polished
 
     return result
-
-
-def _solve_node_nlp_ipm(
-    evaluator: NLPEvaluator,
-    x0: np.ndarray,
-    node_lb: np.ndarray,
-    node_ub: np.ndarray,
-    constraint_bounds: Optional[list[tuple[float, float]]],
-    options: dict,
-    convex: bool = False,
-):
-    """Solve node NLP with the pure-JAX IPM.
-
-    When ``convex=True``, iterates that hit ``max_iter`` / stall (codes 3,
-    4) are polished with cyipopt because a non-KKT IPM objective is not a
-    valid lower bound for the convex NLP (issue #39).
-    """
-    import jax.numpy as jnp
-
-    from discopt._jax.ipm import IPMOptions, ipm_solve
-    from discopt.solvers import NLPResult
-
-    obj_fn = evaluator._obj_fn
-    m = evaluator.n_constraints
-    con_fn = evaluator._cons_fn if m > 0 else None
-
-    x0_jax = jnp.array(x0, dtype=jnp.float64)
-    x_l = jnp.array(node_lb, dtype=jnp.float64)
-    x_u = jnp.array(node_ub, dtype=jnp.float64)
-
-    if constraint_bounds is not None:
-        g_l = jnp.array([b[0] for b in constraint_bounds], dtype=jnp.float64)
-        g_u = jnp.array([b[1] for b in constraint_bounds], dtype=jnp.float64)
-    else:
-        g_l = None
-        g_u = None
-
-    ipm_opts = IPMOptions(max_iter=int(options.get("max_iter", 200)))
-    max_wall_time = options.get("max_wall_time")
-
-    try:
-        t0 = time.perf_counter()
-        state = ipm_solve(obj_fn, con_fn, x0_jax, x_l, x_u, g_l, g_u, ipm_opts)
-        wall_time = time.perf_counter() - t0
-    except Exception as e:
-        logger.debug("IPM solver failed: %s", e)
-        return NLPResult(status=SolveStatus.ERROR, x=x0, objective=_INFEASIBILITY_SENTINEL)
-
-    conv = int(state.converged)
-
-    obj_val = float(state.obj)
-    x_sol = np.asarray(state.x)
-    needs_recovery = conv == 5 or not np.isfinite(obj_val) or np.any(~np.isfinite(x_sol))
-
-    # Feasibility restoration: when the IPM declares infeasible or diverges
-    # to NaN, try to find a feasible point via restoration, then re-solve.
-    if needs_recovery and con_fn is not None and g_l is not None and g_u is not None:
-        from discopt._jax.ipm import _jax_feasibility_restoration
-
-        x_rest_start = x0_jax if np.any(~np.isfinite(x_sol)) else state.x
-        for _rest_attempt in range(3):
-            try:
-                x_restored, rest_ok = _jax_feasibility_restoration(
-                    con_fn,
-                    x_rest_start,
-                    x_l,
-                    x_u,
-                    g_l,
-                    g_u,
-                    ipm_opts,
-                )
-            except Exception:
-                break
-            if not rest_ok:
-                break
-            try:
-                state = ipm_solve(
-                    obj_fn,
-                    con_fn,
-                    x_restored,
-                    x_l,
-                    x_u,
-                    g_l,
-                    g_u,
-                    ipm_opts,
-                )
-            except Exception:
-                break
-            conv = int(state.converged)
-            obj_val = float(state.obj)
-            x_sol = np.asarray(state.x)
-            if conv != 5 and np.isfinite(obj_val) and np.all(np.isfinite(x_sol)):
-                break
-            x_rest_start = x0_jax if np.any(~np.isfinite(x_sol)) else state.x
-
-    # Check wall-time limit post-hoc (issue #5). The JIT-compiled
-    # jax.lax.while_loop cannot check wall clock mid-iteration.
-    wall_time = time.perf_counter() - t0
-    exceeded_time = max_wall_time is not None and wall_time > max_wall_time
-    if conv in (1, 2) and not exceeded_time:
-        status = SolveStatus.OPTIMAL
-    elif conv == 5:
-        status = SolveStatus.INFEASIBLE
-    elif conv in (3, 4) or exceeded_time:
-        status = SolveStatus.ITERATION_LIMIT
-    else:
-        status = SolveStatus.ERROR
-
-    # Final NaN guard — if restoration also failed, mark as error.
-    if not np.isfinite(obj_val) or np.any(~np.isfinite(x_sol)):
-        return NLPResult(
-            status=SolveStatus.ERROR,
-            x=x0,
-            objective=_INFEASIBILITY_SENTINEL,
-        )
-
-    # Convex polish: codes 3/4 are not KKT, so obj_val is not a valid LB
-    # for a convex NLP. Re-solve with cyipopt. See issue #39.
-    if convex and conv in (3, 4):
-        try:
-            polish = _solve_node_nlp_kkt(
-                evaluator, x_sol, node_lb, node_ub, constraint_bounds, options
-            )
-        except Exception as e:
-            logger.debug("IPM convex polish failed (single-node): %s", e)
-            polish = None
-        if polish is not None and polish.status in (
-            SolveStatus.OPTIMAL,
-            SolveStatus.ITERATION_LIMIT,
-        ):
-            p_obj = float(polish.objective)
-            if np.isfinite(p_obj) and p_obj < _SENTINEL_THRESHOLD:
-                return NLPResult(
-                    status=polish.status,
-                    x=np.asarray(polish.x),
-                    objective=p_obj,
-                )
-
-    return NLPResult(
-        status=status,
-        x=x_sol,
-        objective=obj_val,
-    )
-
-
-def _solve_batch_ipm(
-    evaluator,
-    batch_lb,
-    batch_ub,
-    batch_ids,
-    n_vars,
-    constraint_bounds,
-    options,
-    g_l_jax,
-    g_u_jax,
-    batch_psols=None,
-    multistart=False,
-    convex=False,
-):
-    """Solve a batch of NLP relaxations simultaneously via vmap'd IPM.
-
-    When multistart=True, each node gets 3 starting points (warm-start,
-    midpoint, random) solved in parallel, with the best converged solution
-    selected per node.
-
-    When ``convex=True``, the caller is treating the NLP objective at each
-    node as a valid lower bound (sound only for convex models). IPM
-    iterates that hit ``max_iter`` (code 3) or stall (code 4) are not at
-    KKT stationarity and their objective is not a reliable lower bound, so
-    those nodes get a polish pass with cyipopt.
-    """
-    import jax.numpy as jnp
-
-    from discopt._jax.ipm import (
-        IPMOptions,
-        _jax_feasibility_restoration,
-        ipm_solve,
-        solve_nlp_batch,
-    )
-
-    n_batch = len(batch_ids)
-    obj_fn = evaluator._obj_fn
-    m = evaluator.n_constraints
-    con_fn = evaluator._cons_fn if m > 0 else None
-
-    # Build (batch, n) JAX arrays for bounds and starting points
-    xl_batch = jnp.array(batch_lb, dtype=jnp.float64)
-    xu_batch = jnp.array(batch_ub, dtype=jnp.float64)
-
-    # Warm-start: use parent solutions clipped to child bounds, fall back to midpoint
-    lb_clipped = jnp.clip(xl_batch, -_SPC, _SPC)
-    ub_clipped = jnp.clip(xu_batch, -_SPC, _SPC)
-    midpoint_x0 = 0.5 * (lb_clipped + ub_clipped)
-
-    if batch_psols is not None:
-        psols_jax = jnp.array(batch_psols, dtype=jnp.float64)
-        has_parent = ~jnp.any(jnp.isnan(psols_jax), axis=1, keepdims=True)
-        warm_x0 = jnp.clip(psols_jax, xl_batch, xu_batch)
-        x0_batch = jnp.where(has_parent, warm_x0, midpoint_x0)
-    else:
-        x0_batch = midpoint_x0
-
-    n_starts = 1
-    if multistart:
-        # Expand: 3 starting points per node (warm-start, midpoint, random)
-        # More starts give better solutions but 3x cost per node.
-        n_starts = 3
-        span = jnp.maximum(ub_clipped - lb_clipped, 0.0)
-        # Random starting point (deterministic seed)
-        rng = np.random.RandomState(42)
-        rand_offsets = jnp.array(rng.uniform(size=(n_batch, n_vars)), dtype=jnp.float64)
-        rand_x0 = lb_clipped + rand_offsets * span
-
-        # Stack: (n_batch, 3, n_vars) then reshape to (n_batch*3, n_vars)
-        x0_expanded = jnp.stack([x0_batch, midpoint_x0, rand_x0], axis=1)
-        x0_batch = x0_expanded.reshape(n_batch * n_starts, n_vars)
-        # Repeat bounds to match interleaved order
-        xl_expanded = jnp.broadcast_to(xl_batch[:, None, :], (n_batch, n_starts, n_vars)).reshape(
-            n_batch * n_starts, n_vars
-        )
-        xu_expanded = jnp.broadcast_to(xu_batch[:, None, :], (n_batch, n_starts, n_vars)).reshape(
-            n_batch * n_starts, n_vars
-        )
-        xl_batch = xl_expanded
-        xu_batch = xu_expanded
-
-    ipm_opts = IPMOptions(max_iter=int(options.get("max_iter", 200)))
-
-    try:
-        state = solve_nlp_batch(
-            obj_fn, con_fn, x0_batch, xl_batch, xu_batch, g_l_jax, g_u_jax, ipm_opts
-        )
-    except Exception as e:
-        logger.debug("Batch IPM failed: %s", e)
-        # Fallback: mark all as infeasible
-        result_ids = np.array(batch_ids, dtype=np.int64)
-        result_lbs = np.full(n_batch, _INFEASIBILITY_SENTINEL, dtype=np.float64)
-        result_sols = np.asarray(midpoint_x0 if not multistart else x0_expanded[:, 0, :])
-        result_feas = np.zeros(n_batch, dtype=bool)
-        trusted = np.ones(n_batch, dtype=bool)
-        return result_ids, result_lbs, result_sols, result_feas, trusted
-
-    # Unpack batched IPMState → numpy arrays
-    converged = np.asarray(state.converged)
-    obj_vals = np.asarray(state.obj)
-    x_vals = np.asarray(state.x)
-
-    # trusted[i] is False when result_lbs[i] is a numeric bound that is NOT a
-    # valid lower bound — a non-KKT (code 3/4) convex objective that could not
-    # be polished to optimality (issue #39). The caller uses it to decertify
-    # the gap without corrupting bounds/incumbent (roadmap P0.3). For
-    # nonconvex models the NLP objective is discarded by the caller, so trust
-    # is irrelevant and stays True.
-    trusted = np.ones(n_batch, dtype=bool)
-
-    if multistart:
-        # Reshape (n_batch*n_starts,) → (n_batch, n_starts), pick best per node
-        converged = converged.reshape(n_batch, n_starts)
-        obj_vals = obj_vals.reshape(n_batch, n_starts)
-        x_vals = x_vals.reshape(n_batch, n_starts, n_vars)
-
-        # Accept converged (1=optimal, 2=acceptable), iteration-limit (3),
-        # and stalled (4) solutions. Code 5 (infeasible) is excluded.
-        # Constraint feasibility is checked separately in the caller;
-        # iteration-limit solutions that violate constraints are handled
-        # there (not pruned, but given a conservative lower bound).
-        feasible_mask = (
-            (converged == 1) | (converged == 2) | (converged == 3) | (converged == 4)
-        ) & np.isfinite(obj_vals)
-        masked_obj = np.where(feasible_mask, obj_vals, np.inf)
-        best_per_node = np.argmin(masked_obj, axis=1)  # (n_batch,)
-
-        result_obj = np.array([obj_vals[i, best_per_node[i]] for i in range(n_batch)])
-        result_x = np.array([x_vals[i, best_per_node[i]] for i in range(n_batch)], dtype=np.float64)
-        any_feasible = np.any(feasible_mask, axis=1)
-        result_lbs = np.asarray(
-            np.where(any_feasible, result_obj, _INFEASIBILITY_SENTINEL), dtype=np.float64
-        )
-        result_sols = result_x  # already writable np.array
-
-        # Convex polish: IPM codes 3 (max_iter) / 4 (stalled) don't certify
-        # KKT stationarity, so their objective is not a valid lower bound
-        # for a convex NLP. Re-solve those nodes with cyipopt and use its
-        # (reliable) optimum as the LB. See issue #39 (synthes2 B&B node
-        # stalls at 92.10 vs true 73.04).
-        if convex:
-            best_codes = np.array([int(converged[i, best_per_node[i]]) for i in range(n_batch)])
-            polish_needed = any_feasible & ((best_codes == 3) | (best_codes == 4))
-            for i in np.where(polish_needed)[0]:
-                # Non-KKT until a polish solve certifies optimality.
-                trusted[i] = False
-                row = int(i * n_starts)
-                node_lb_i = np.asarray(xl_batch[row])
-                node_ub_i = np.asarray(xu_batch[row])
-                try:
-                    polish = _solve_node_nlp_kkt(
-                        evaluator,
-                        result_sols[i],
-                        node_lb_i,
-                        node_ub_i,
-                        constraint_bounds,
-                        options,
-                    )
-                except Exception as e:
-                    logger.debug("IPM convex polish failed at node %d: %s", i, e)
-                    continue
-                if polish.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
-                    polished_obj = float(polish.objective)
-                    if np.isfinite(polished_obj) and polished_obj < _SENTINEL_THRESHOLD:
-                        result_lbs[i] = polished_obj
-                        result_sols[i] = np.asarray(polish.x, dtype=np.float64)
-                        # Only an optimal (KKT) polish makes the bound valid.
-                        if polish.status == SolveStatus.OPTIMAL:
-                            trusted[i] = True
-    else:
-        conv_mask = (converged == 1) | (converged == 2) | (converged == 3) | (converged == 4)
-        ok_mask = conv_mask & np.isfinite(obj_vals)
-        result_lbs = np.asarray(
-            np.where(ok_mask, obj_vals, _INFEASIBILITY_SENTINEL),
-            dtype=np.float64,
-        )
-        result_sols = np.array(x_vals, dtype=np.float64)  # writable copy
-        if convex:
-            # Feasible but non-KKT (code 3/4) objectives are not valid lower
-            # bounds. (No polish on this branch; it is not used by the convex
-            # B&B loop, which always multistarts.)
-            non_kkt = ok_mask & ~((converged == 1) | (converged == 2))
-            trusted[np.asarray(non_kkt)] = False
-
-        # Restoration: for failed nodes (NaN or code 5), try to recover
-        # a feasible point via restoration and re-solve individually.
-        failed_indices = np.where(~ok_mask)[0]
-        if len(failed_indices) > 0 and con_fn is not None and g_l_jax is not None:
-            for idx in failed_indices:
-                x_start = x0_batch[idx] if not np.all(np.isfinite(x_vals[idx])) else x_vals[idx]
-                try:
-                    x_restored, rest_ok = _jax_feasibility_restoration(
-                        con_fn,
-                        x_start,
-                        xl_batch[idx] if xl_batch.ndim == 2 else xl_batch,
-                        xu_batch[idx] if xu_batch.ndim == 2 else xu_batch,
-                        g_l_jax,
-                        g_u_jax,
-                        ipm_opts,
-                    )
-                except Exception:
-                    continue
-                if rest_ok:
-                    try:
-                        state_i = ipm_solve(
-                            obj_fn,
-                            con_fn,
-                            x_restored,
-                            xl_batch[idx] if xl_batch.ndim == 2 else xl_batch,
-                            xu_batch[idx] if xu_batch.ndim == 2 else xu_batch,
-                            g_l_jax,
-                            g_u_jax,
-                            ipm_opts,
-                        )
-                    except Exception:
-                        continue
-                    conv_i = int(state_i.converged)
-                    obj_i = float(state_i.obj)
-                    x_i = np.asarray(state_i.x)
-                    if conv_i in (1, 2, 3, 4) and np.isfinite(obj_i) and np.all(np.isfinite(x_i)):
-                        result_lbs[idx] = obj_i
-                        result_sols[idx] = x_i
-
-    result_ids = np.array(batch_ids, dtype=np.int64)
-    result_feas = np.zeros(n_batch, dtype=bool)  # Let Rust check integrality
-
-    return result_ids, result_lbs, result_sols, result_feas, trusted
 
 
 def _solve_batch_pounce(
