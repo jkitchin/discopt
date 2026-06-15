@@ -14,6 +14,7 @@
 use std::collections::HashSet;
 
 use crate::bnb::branching::VarBranchInfo;
+use crate::bnb::node::NodeId;
 use crate::bnb::pool::SelectionStrategy;
 use crate::bnb::tree_manager::{NodeResult, TreeManager};
 use crate::lp::basis::{Basis, BASIC};
@@ -195,7 +196,8 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
                 break;
             }
             // Tailing off: stop once added cuts barely move the bound.
-            if root.obj <= prev_obj + 1e-7 * (1.0 + prev_obj.abs()) && prev_obj > f64::NEG_INFINITY {
+            if root.obj <= prev_obj + 1e-7 * (1.0 + prev_obj.abs()) && prev_obj > f64::NEG_INFINITY
+            {
                 break;
             }
             prev_obj = root.obj;
@@ -258,143 +260,103 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
         let sb_active = opts.strong_branch && tm.stats().total_nodes < opts.sb_node_budget;
         let mut results = Vec::with_capacity(batch.node_ids.len());
         let mut pending_cuts: Vec<GomoryCut> = Vec::new();
-        for k in 0..batch.node_ids.len() {
+
+        // --- per-node evaluation (parallelizable) ---
+        // Each node's relaxation solve is independent and reads only the
+        // immutable working LP plus a snapshot of the tree's read-only state, so
+        // the bodies run concurrently and the resulting `NodeOutput`s are folded
+        // back into the tree sequentially, in batch order, below. The snapshot
+        // (incumbent/reliability/pool-room) is taken once per batch; pseudocosts
+        // are likewise constant within a batch (updated in `process_evaluated`),
+        // so each node's computation is independent of thread scheduling and the
+        // search stays deterministic.
+        // `ctx` is scoped to the map so its immutable borrow of `tm` ends before
+        // the mutable reduce below.
+        let outputs: Vec<NodeOutput> = {
+            let ctx = NodeCtx {
+                a_w: &a_w,
+                b_w: &b_w,
+                c_w: &c_w,
+                l_w: &l_w,
+                u_w: &u_w,
+                slack_l: &slack_l,
+                slack_u: &slack_u,
+                is_int: &is_int,
+                is_int_full: &is_int_full,
+                ns,
+                m_w,
+                n_w,
+                n_orig_rows,
+                obj_const,
+                opts,
+                sb_active,
+                inc_snapshot: tm.incumbent().map(|(_, inc)| inc),
+                reliability: tm.get_reliability_threshold(),
+                pool_room: pool_sigs.len() < opts.max_pool_cuts,
+                tm: &tm,
+            };
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+                // Small batches don't amortize task-spawn overhead; solve those
+                // serially. PAR_MIN_BATCH is conservative — the bench tunes it.
+                const PAR_MIN_BATCH: usize = 4;
+                if batch.node_ids.len() >= PAR_MIN_BATCH {
+                    (0..batch.node_ids.len())
+                        .into_par_iter()
+                        .map(|k| solve_node(batch.node_ids[k], &batch.lb[k], &batch.ub[k], &ctx))
+                        .collect()
+                } else {
+                    (0..batch.node_ids.len())
+                        .map(|k| solve_node(batch.node_ids[k], &batch.lb[k], &batch.ub[k], &ctx))
+                        .collect()
+                }
+            }
+            #[cfg(not(feature = "parallel"))]
+            {
+                (0..batch.node_ids.len())
+                    .map(|k| solve_node(batch.node_ids[k], &batch.lb[k], &batch.ub[k], &ctx))
+                    .collect()
+            }
+        };
+
+        // --- sequential reduce: apply tree mutations in batch order ---
+        let mut hit_unbounded = false;
+        for (k, out) in outputs.into_iter().enumerate() {
             let id = batch.node_ids[k];
-            let mut full_l = vec![0.0; n_w];
-            let mut full_u = vec![0.0; n_w];
-            full_l[..ns].copy_from_slice(&batch.lb[k]);
-            full_u[..ns].copy_from_slice(&batch.ub[k]);
-            full_l[ns..].copy_from_slice(&slack_l);
-            full_u[ns..].copy_from_slice(&slack_u);
-            let node_lp = LpView {
-                a: &a_w,
-                m: m_w,
-                n: n_w,
-                c: &c_w,
-                l: &full_l,
-                u: &full_u,
-            };
-
-            // Lazily extend a basis stored before later cuts grew the matrix:
-            // the appended cut slacks become basic (a valid, dual-repairable
-            // starting basis).
-            let sol = match tm.node_basis(id) {
-                Some(basis) => {
-                    let basis = extend_basis(basis, n_w);
-                    solve_lp_warm(&node_lp, &b_w, &basis, &opts.simplex)
-                }
-                None => solve_lp(&node_lp, &b_w, &opts.simplex),
-            };
-            lp_iters += sol.iters;
-
-            let result = match sol.status {
-                LpStatus::Optimal => {
-                    tm.set_node_basis(id, Some(sol.basis.clone()));
-                    let xs = &sol.x[..ns];
-                    let feasible = is_int
-                        .iter()
-                        .enumerate()
-                        .all(|(j, &it)| !it || frac(xs[j]) <= INT_TOL);
-                    // Primal heuristic: round this fractional point and inject a
-                    // feasible incumbent early so the tree prunes more.
-                    if opts.heuristics && !feasible {
-                        if let Some((cand, cobj)) = try_rounding(
-                            &sol.x,
-                            ns,
-                            &is_int,
-                            &a_w,
-                            &b_w,
-                            &c_w,
-                            &l_w[..ns],
-                            &u_w[..ns],
-                            n_orig_rows,
-                            n_w,
-                            obj_const,
-                        ) {
-                            tm.inject_incumbent(cand, cobj);
-                        }
-                    }
-                    // Node-level cover separation: a fractional node exposes
-                    // violated covers the root never sees. These are globally
-                    // valid, so they go into the shared pool (added between
-                    // batches) and tighten the whole tree.
-                    if opts.node_cuts && !feasible && pool_sigs.len() < opts.max_pool_cuts {
-                        let found = separate_cover(
-                            &node_lp,
-                            &b_w,
-                            &sol.x,
-                            ns,
-                            &is_int_full,
-                            n_orig_rows,
-                            opts.simplex.tol,
-                        );
-                        pending_cuts.extend(dedup_new_cuts(
-                            found,
-                            &mut pool_sigs,
-                            opts.max_pool_cuts,
-                        ));
-                    }
-                    // Strong branching: for a fractional node that won't be
-                    // pruned, probe the unreliable candidates and hint the best
-                    // branching variable. Only the *choice* of variable changes,
-                    // so this never affects correctness — only the node count.
-                    if sb_active && !feasible {
-                        let node_bound = sol.obj + obj_const;
-                        let prunable = tm
-                            .incumbent()
-                            .map(|(_, inc)| node_bound >= inc - 1e-9)
-                            .unwrap_or(false);
-                        if !prunable {
-                            let reliability = tm.get_reliability_threshold();
-                            let cands = tm.score_candidates(xs);
-                            let (best, piv) = strong_branch(
-                                &node_lp,
-                                &b_w,
-                                &sol.basis,
-                                &sol.x,
-                                sol.obj,
-                                &cands,
-                                reliability,
-                                opts.sb_max_cands,
-                                &opts.simplex,
-                            );
-                            lp_iters += piv;
-                            if let Some(v) = best {
-                                tm.set_branch_hint(id, v);
-                            }
-                        }
-                    }
-                    NodeResult {
-                        node_id: id,
-                        lower_bound: sol.obj + obj_const,
-                        solution: xs.to_vec(),
-                        is_feasible: feasible,
-                    }
-                }
-                LpStatus::Infeasible => NodeResult {
-                    node_id: id,
-                    lower_bound: INFEAS_SENTINEL, // pruned
-                    solution: vec![0.0; ns],
-                    is_feasible: false,
-                },
-                LpStatus::Unbounded => {
-                    unbounded = true;
-                    break 'search;
-                }
-                LpStatus::IterLimit | LpStatus::Numerical => {
-                    // Cannot trust a bound: never prune (could drop the optimum).
-                    // Give a non-pruning bound and leave the node to be branched;
-                    // mark the gap uncertified so we never claim optimality.
-                    gap_certified = false;
-                    NodeResult {
-                        node_id: id,
-                        lower_bound: f64::NEG_INFINITY,
-                        solution: midpoint(&batch.lb[k], &batch.ub[k]),
-                        is_feasible: false,
-                    }
-                }
-            };
-            results.push(result);
+            lp_iters += out.iters;
+            if out.unbounded {
+                hit_unbounded = true;
+                break;
+            }
+            if out.uncertified {
+                // An untrusted (iter-limit/numerical) node bound: never claim
+                // optimality from this search.
+                gap_certified = false;
+            }
+            if let Some(basis) = out.basis {
+                tm.set_node_basis(id, Some(basis));
+            }
+            if let Some((cand, cobj)) = out.incumbent {
+                tm.inject_incumbent(cand, cobj);
+            }
+            if let Some(v) = out.branch_hint {
+                tm.set_branch_hint(id, v);
+            }
+            // Dedup this node's cuts against the shared pool *in order*, with the
+            // same room check the serial path applied, so the pool is identical.
+            if !out.found_cuts.is_empty() && pool_sigs.len() < opts.max_pool_cuts {
+                pending_cuts.extend(dedup_new_cuts(
+                    out.found_cuts,
+                    &mut pool_sigs,
+                    opts.max_pool_cuts,
+                ));
+            }
+            results.push(out.result);
+        }
+        if hit_unbounded {
+            unbounded = true;
+            break 'search;
         }
         tm.import_results(&results);
         tm.process_evaluated();
@@ -454,6 +416,206 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
         nodes: stats.total_nodes,
         lp_iters,
     }
+}
+
+/// Immutable per-batch context shared by every node evaluation. Holds the
+/// working LP (constant within a batch), the options, and a snapshot of the
+/// tree's read-only state. All fields are `Sync`, so `solve_node` runs under
+/// `rayon`'s `into_par_iter` over the batch.
+struct NodeCtx<'a> {
+    a_w: &'a [f64],
+    b_w: &'a [f64],
+    c_w: &'a [f64],
+    l_w: &'a [f64],
+    u_w: &'a [f64],
+    slack_l: &'a [f64],
+    slack_u: &'a [f64],
+    is_int: &'a [bool],
+    is_int_full: &'a [bool],
+    ns: usize,
+    m_w: usize,
+    n_w: usize,
+    n_orig_rows: usize,
+    obj_const: f64,
+    opts: &'a MilpOptions,
+    sb_active: bool,
+    /// Incumbent value at batch start (for the strong-branch prunable check).
+    inc_snapshot: Option<f64>,
+    reliability: u32,
+    /// Whether the cut pool had room at batch start (gates separation work).
+    pool_room: bool,
+    tm: &'a TreeManager,
+}
+
+/// The product of one node's evaluation, applied to the tree later in the
+/// sequential reduce (in batch order). Keeping every tree mutation out of the
+/// parallel region is what preserves determinism: parallelism changes only
+/// *when* a node's LP is solved, never the order results fold into the tree.
+struct NodeOutput {
+    result: NodeResult,
+    /// Optimal basis to store on the node (for children to warm-start from).
+    basis: Option<Basis>,
+    /// Incumbent candidate from the rounding heuristic.
+    incumbent: Option<(Vec<f64>, f64)>,
+    /// Cover cuts found at this node (raw; deduped against the pool in reduce).
+    found_cuts: Vec<GomoryCut>,
+    /// Strong-branching variable hint.
+    branch_hint: Option<usize>,
+    /// Simplex pivots spent on this node (LP solve + strong-branch probes).
+    iters: usize,
+    /// Relaxation was unbounded — the whole search terminates.
+    unbounded: bool,
+    /// LP hit iter-limit / numerical breakdown — gap can't be certified.
+    uncertified: bool,
+}
+
+/// Evaluate a single B&B node: solve its LP relaxation (cold, or warm from the
+/// basis it inherited), then run the optional rounding heuristic, cover
+/// separation, and strong branching. Pure given `ctx` (the immutable working LP
+/// plus a read-only tree snapshot), so it is safe to call concurrently across a
+/// batch. Returns a [`NodeOutput`] the caller folds into the tree sequentially.
+fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> NodeOutput {
+    let mut full_l = vec![0.0; ctx.n_w];
+    let mut full_u = vec![0.0; ctx.n_w];
+    full_l[..ctx.ns].copy_from_slice(lb_k);
+    full_u[..ctx.ns].copy_from_slice(ub_k);
+    full_l[ctx.ns..].copy_from_slice(ctx.slack_l);
+    full_u[ctx.ns..].copy_from_slice(ctx.slack_u);
+    let node_lp = LpView {
+        a: ctx.a_w,
+        m: ctx.m_w,
+        n: ctx.n_w,
+        c: ctx.c_w,
+        l: &full_l,
+        u: &full_u,
+    };
+
+    // Lazily extend a basis stored before later cuts grew the matrix: the
+    // appended cut slacks become basic (a valid, dual-repairable starting basis).
+    let sol = match ctx.tm.node_basis(id) {
+        Some(basis) => {
+            let basis = extend_basis(basis, ctx.n_w);
+            solve_lp_warm(&node_lp, ctx.b_w, &basis, &ctx.opts.simplex)
+        }
+        None => solve_lp(&node_lp, ctx.b_w, &ctx.opts.simplex),
+    };
+
+    let mut out = NodeOutput {
+        result: NodeResult {
+            node_id: id,
+            lower_bound: 0.0,
+            solution: Vec::new(),
+            is_feasible: false,
+        },
+        basis: None,
+        incumbent: None,
+        found_cuts: Vec::new(),
+        branch_hint: None,
+        iters: sol.iters,
+        unbounded: false,
+        uncertified: false,
+    };
+
+    match sol.status {
+        LpStatus::Optimal => {
+            out.basis = Some(sol.basis.clone());
+            let xs = &sol.x[..ctx.ns];
+            let feasible = ctx
+                .is_int
+                .iter()
+                .enumerate()
+                .all(|(j, &it)| !it || frac(xs[j]) <= INT_TOL);
+            // Primal heuristic: round this fractional point so the reduce can
+            // inject a feasible incumbent early and prune more of the tree.
+            if ctx.opts.heuristics && !feasible {
+                out.incumbent = try_rounding(
+                    &sol.x,
+                    ctx.ns,
+                    ctx.is_int,
+                    ctx.a_w,
+                    ctx.b_w,
+                    ctx.c_w,
+                    &ctx.l_w[..ctx.ns],
+                    &ctx.u_w[..ctx.ns],
+                    ctx.n_orig_rows,
+                    ctx.n_w,
+                    ctx.obj_const,
+                );
+            }
+            // Node-level cover separation: a fractional node exposes violated
+            // covers the root never sees. These are globally valid; the reduce
+            // dedups them into the shared pool to tighten the whole tree.
+            if ctx.opts.node_cuts && !feasible && ctx.pool_room {
+                out.found_cuts = separate_cover(
+                    &node_lp,
+                    ctx.b_w,
+                    &sol.x,
+                    ctx.ns,
+                    ctx.is_int_full,
+                    ctx.n_orig_rows,
+                    ctx.opts.simplex.tol,
+                );
+            }
+            // Strong branching: for a fractional node that won't be pruned, probe
+            // the unreliable candidates and hint the best branching variable.
+            // Only the *choice* of variable changes, so this never affects
+            // correctness — only the node count. The prunable check uses the
+            // batch-start incumbent snapshot (an effort decision, not a bound).
+            if ctx.sb_active && !feasible {
+                let node_bound = sol.obj + ctx.obj_const;
+                let prunable = ctx
+                    .inc_snapshot
+                    .map(|inc| node_bound >= inc - 1e-9)
+                    .unwrap_or(false);
+                if !prunable {
+                    let cands = ctx.tm.score_candidates(xs);
+                    let (best, piv) = strong_branch(
+                        &node_lp,
+                        ctx.b_w,
+                        &sol.basis,
+                        &sol.x,
+                        sol.obj,
+                        &cands,
+                        ctx.reliability,
+                        ctx.opts.sb_max_cands,
+                        &ctx.opts.simplex,
+                    );
+                    out.iters += piv;
+                    out.branch_hint = best;
+                }
+            }
+            out.result = NodeResult {
+                node_id: id,
+                lower_bound: sol.obj + ctx.obj_const,
+                solution: xs.to_vec(),
+                is_feasible: feasible,
+            };
+        }
+        LpStatus::Infeasible => {
+            out.result = NodeResult {
+                node_id: id,
+                lower_bound: INFEAS_SENTINEL, // pruned
+                solution: vec![0.0; ctx.ns],
+                is_feasible: false,
+            };
+        }
+        LpStatus::Unbounded => {
+            out.unbounded = true;
+        }
+        LpStatus::IterLimit | LpStatus::Numerical => {
+            // Cannot trust a bound: never prune (could drop the optimum). Give a
+            // non-pruning bound and leave the node to be branched; the reduce
+            // marks the gap uncertified so we never claim optimality.
+            out.uncertified = true;
+            out.result = NodeResult {
+                node_id: id,
+                lower_bound: f64::NEG_INFINITY,
+                solution: midpoint(lb_k, ub_k),
+                is_feasible: false,
+            };
+        }
+    }
+    out
 }
 
 /// Limited strong branching. For the *unreliable* fractional candidates (those
@@ -862,7 +1024,12 @@ mod tests {
             r_off.obj
         );
         // Tightening should not increase node count.
-        assert!(r_on.nodes <= r_off.nodes, "{} vs {}", r_on.nodes, r_off.nodes);
+        assert!(
+            r_on.nodes <= r_off.nodes,
+            "{} vs {}",
+            r_on.nodes,
+            r_off.nodes
+        );
     }
 
     #[test]

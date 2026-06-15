@@ -14,3 +14,9 @@ crate-type = ["cdylib"]
 discopt-core = { path = "../discopt-core" }
 pyo3.workspace = true
 numpy.workspace = true
+
+[features]
+# Build the extension with the core's rayon-parallel MILP B&B node loop. On by
+# default; build with `--no-default-features` for the serial path.
+default = ["parallel"]
+parallel = ["discopt-core/parallel"]

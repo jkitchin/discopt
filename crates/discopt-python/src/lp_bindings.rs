@@ -286,18 +286,25 @@ pub fn solve_milp_py<'py>(
 ) -> PyResult<(String, Bound<'py, PyArray1<f64>>, f64, f64, usize, usize)> {
     let dims = a.shape();
     let (m, n) = (dims[0], dims[1]);
-    let a_flat = a
+    // Materialize owned copies of the borrowed numpy inputs. `PyReadonlyArray`
+    // borrows are only valid while the GIL is held, so we copy before releasing
+    // it; the copies (not the numpy buffers) feed the solve. The solve is long
+    // and touches no Python objects, so it runs under `py.allow_threads` — this
+    // unblocks the interpreter and lets the core's rayon workers (when built with
+    // `parallel`) run without contending on the GIL.
+    let a_owned: Vec<f64> = a
         .as_slice()
-        .map_err(|_| PyValueError::new_err("`a` must be C-contiguous"))?;
-    let lp = LpView {
-        a: a_flat,
-        m,
-        n,
-        c: c.as_slice()?,
-        l: lb.as_slice()?,
-        u: ub.as_slice()?,
-    };
-    let int_cols: Vec<usize> = integer_cols.as_slice()?.iter().map(|&v| v as usize).collect();
+        .map_err(|_| PyValueError::new_err("`a` must be C-contiguous"))?
+        .to_vec();
+    let c_owned: Vec<f64> = c.as_slice()?.to_vec();
+    let b_owned: Vec<f64> = b.as_slice()?.to_vec();
+    let l_owned: Vec<f64> = lb.as_slice()?.to_vec();
+    let u_owned: Vec<f64> = ub.as_slice()?.to_vec();
+    let int_cols: Vec<usize> = integer_cols
+        .as_slice()?
+        .iter()
+        .map(|&v| v as usize)
+        .collect();
     let opts = MilpOptions {
         n_struct,
         integer_cols: int_cols,
@@ -312,9 +319,22 @@ pub fn solve_milp_py<'py>(
         strong_branch,
         sb_max_cands,
         sb_node_budget,
-        simplex: SimplexOptions { tol, max_iter: 100_000 },
+        simplex: SimplexOptions {
+            tol,
+            max_iter: 100_000,
+        },
     };
-    let res = core_solve_milp(&lp, b.as_slice()?, obj_const, &opts);
+    let res = py.allow_threads(|| {
+        let lp = LpView {
+            a: &a_owned,
+            m,
+            n,
+            c: &c_owned,
+            l: &l_owned,
+            u: &u_owned,
+        };
+        core_solve_milp(&lp, &b_owned, obj_const, &opts)
+    });
     let status = match res.status {
         MilpStatus::Optimal => "optimal",
         MilpStatus::Feasible => "feasible",
