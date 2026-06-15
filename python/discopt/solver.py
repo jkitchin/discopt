@@ -1633,6 +1633,25 @@ def solve_model(
 
     model = reformulate_gdp(model, method=gdp_method)
 
+    # --- Factorable reformulation: clear sign-definite denominators and lift
+    # mixed repeated-factor products (e.g. x*x*y) into bilinear form via
+    # monomial aux variables, so terms the relaxation pipeline would otherwise
+    # drop to general_nl get a valid outer approximation (issue #130). The pass
+    # is value-preserving, but clearing a denominator (e.g. x**2/z, convex for
+    # z>0) or distributing a product can *destroy* convexity — so it is gated to
+    # provably-nonconvex models only, preserving the convex fast path for the
+    # rest. The cheap structural scan runs first so only models that actually
+    # have liftable terms pay for convexity detection.
+    from discopt._jax.factorable_reform import (
+        factorable_reformulate,
+        has_factorable_work,
+    )
+
+    if has_factorable_work(model):
+        _fr_ok, _fr_convex, _ = _classify_model_convexity(model)
+        if _fr_ok and not _fr_convex:
+            model = factorable_reformulate(model)
+
     # --- Build Rust model representation for FBBT ---
     _model_repr = None
     try:

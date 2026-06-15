@@ -1383,8 +1383,15 @@ def test_negative_unbounded_x_exp_objective_keeps_no_bound(caplog):
     assert "falling back to a feasibility objective" in caplog.text
 
 
-def test_nested_univariate_objective_still_returns_no_relaxation_bound():
-    """Unsupported nested operator arguments should keep the safe no-bound behavior."""
+def test_nested_univariate_objective_gets_sound_composite_bound():
+    """A single-variable composite (sqrt of a quadratic) is now soundly relaxed.
+
+    ``sqrt(x**2 + 1)`` depends on one original variable but has non-affine internal
+    structure, so the named-function univariate path abstains. The composite
+    primitive certifies its convexity on the box and emits an outer envelope, so
+    the relaxation now produces a sound lower bound instead of no bound at all. The
+    true minimum is 1.0 (at x = 0); the bound must not exceed it.
+    """
     m = Model("nested_sqrt")
     x = m.continuous("x", lb=-2.0, ub=2.0)
     m.minimize(dm.sqrt(x**2 + 1.0))
@@ -1397,9 +1404,17 @@ def test_nested_univariate_objective_still_returns_no_relaxation_bound():
     )
     result = milp_model.solve()
 
+    # Not a named-function univariate relaxation; handled by the composite path.
     assert varmap["univariate_relaxations"] == []
+    composite = varmap["composite_relaxations"]
+    assert len(composite) == 1
+    assert composite[0].curvature == "convex"
+
     assert result.status == "optimal"
-    assert result.objective is None
+    assert result.objective is not None
+    # Sound lower bound: never above the true optimum of 1.0.
+    assert result.bound is not None
+    assert result.bound <= 1.0 + 1e-6
     assert result.x is not None
 
 

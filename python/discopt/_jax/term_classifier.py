@@ -272,9 +272,16 @@ def distribute_products(expr: Expression) -> Expression:
         right = distribute_products(expr.right)
         if expr.op == "*":
             return _distribute_mul(left, right)
+        # Preserve node identity when nothing distributed, so id()-keyed maps
+        # (e.g. composite/univariate aux columns) still match the rebuilt tree.
+        if left is expr.left and right is expr.right:
+            return expr
         return BinaryOp(expr.op, left, right)
     if isinstance(expr, UnaryOp):
-        return UnaryOp(expr.op, distribute_products(expr.operand))
+        operand = distribute_products(expr.operand)
+        if operand is expr.operand:
+            return expr
+        return UnaryOp(expr.op, operand)
     return expr
 
 
