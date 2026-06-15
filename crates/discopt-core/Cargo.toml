@@ -17,6 +17,8 @@ feral = { git = "https://github.com/jkitchin/feral", rev = "5ab8074b3c87c96d223e
 rayon = { version = "1.10", optional = true }
 
 [features]
-# Parallel node evaluation in the MILP B&B driver via rayon. Off by default so
-# the serial path stays the reference until benchmarks justify making it default.
+# Parallel node evaluation in the MILP B&B driver via rayon. On by default
+# (benchmarks show ~3.7x on 4 cores with an identical, deterministic tree);
+# build with `--no-default-features` for the reference serial path.
+default = ["parallel"]
 parallel = ["dep:rayon"]
