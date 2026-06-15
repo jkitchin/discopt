@@ -1108,6 +1108,23 @@ class SolveResult:
     # Sensitivity cache (populated lazily by .gradient())
     _sensitivity: Optional[np.ndarray] = None
 
+    def __post_init__(self) -> None:
+        # Soundness guard: a *certified* optimality gap requires a finite dual
+        # bound. A non-finite bound (``±inf``) or an absent bound (``None``)
+        # certifies nothing about optimality — e.g. a ``time_limit`` termination
+        # where no node ever produced a finite relaxation bound leaves the
+        # global lower bound at ``-inf``. Reporting ``gap_certified=True`` there
+        # is a false certification (the benchmark gate would miscount it as a
+        # solved/certified instance), so we downgrade it and clear the
+        # meaningless bound/gap. Infeasibility certificates are exempt:
+        # ``status="infeasible"`` with ``gap_certified=True`` certifies
+        # infeasibility, not a gap, and legitimately carries ``bound=None``.
+        if self.gap_certified and self.status != "infeasible":
+            if self.bound is None or not np.isfinite(self.bound):
+                self.gap_certified = False
+                self.bound = None
+                self.gap = None
+
     def value(self, var: Variable) -> np.ndarray:
         """
         Get the optimal value of a variable.
