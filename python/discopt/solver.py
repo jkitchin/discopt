@@ -2573,9 +2573,7 @@ def solve_model(
                         mc_res = _mc_lp_relaxer.solve_at_node(
                             np.asarray(batch_lb[i]),
                             np.asarray(batch_ub[i]),
-                            time_limit=max(
-                                _deadline - time.perf_counter(), _DEADLINE_NODE_FLOOR_S
-                            ),
+                            time_limit=max(_deadline - time.perf_counter(), _DEADLINE_NODE_FLOOR_S),
                         )
                     except Exception as e:
                         logger.debug("McCormick LP failed at node %d: %s", i, e)
@@ -2808,9 +2806,7 @@ def solve_model(
                         mc_lp_res = _mc_lp_relaxer.solve_at_node(
                             node_lb,
                             node_ub,
-                            time_limit=max(
-                                _deadline - time.perf_counter(), _DEADLINE_NODE_FLOOR_S
-                            ),
+                            time_limit=max(_deadline - time.perf_counter(), _DEADLINE_NODE_FLOOR_S),
                         )
                     except Exception as e:
                         logger.debug("McCormick LP failed at node %d: %s", int(batch_ids[i]), e)
