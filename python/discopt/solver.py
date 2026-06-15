@@ -6935,6 +6935,35 @@ def _solve_miqp_bb(
     n_vars, lb, ub, int_offsets, int_sizes = _extract_variable_info(model)
     n_orig = sum(v.size for v in model._variables)
 
+    # --- Root presolve: FBBT before tree creation ---
+    # The node QP IPM diverges to NaN on variables with infinite bounds (e.g.
+    # alan's x0..x3 are [0, inf), bounded only implicitly by the equalities).
+    # A NaN solve was then mis-pruned as rigorously infeasible, yielding a
+    # false-infeasible verdict on a feasible model (issue #127). FBBT tightens
+    # such bounds (here to [0, 1]/[0, 0.833]) so every node relaxation is
+    # well-posed; a True root_infeasible from FBBT is itself a sound proof.
+    t_rust_start = time.perf_counter()
+    from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
+
+    lb, ub, root_infeasible, _ = tighten_root_bounds_with_fbbt(
+        model, lb, ub, int_offsets, int_sizes
+    )
+    rust_time += time.perf_counter() - t_rust_start
+    if root_infeasible:
+        wall_time = time.perf_counter() - t_start
+        return SolveResult(
+            status="infeasible",
+            objective=None,
+            bound=None,
+            gap=None,
+            x=None,
+            wall_time=wall_time,
+            node_count=0,
+            rust_time=rust_time,
+            jax_time=jax_time,
+            python_time=wall_time - rust_time - jax_time,
+        )
+
     t_rust_start = time.perf_counter()
     tree = PyTreeManager(n_vars, lb.tolist(), ub.tolist(), int_offsets, int_sizes, strategy)
     tree.initialize()
@@ -6952,29 +6981,6 @@ def _solve_miqp_bb(
     )
     _c_m = np.asarray(qp_data.c[:n_orig])
     _Q_m = np.asarray(qp_data.Q[:n_orig, :n_orig])
-
-    def _recover_or_decertify(i, lbs, sols, node_lb_i, node_ub_i):
-        nonlocal _gap_certified
-        rec = _pounce_recover_node_bound(
-            node_lb_i,
-            node_ub_i,
-            _c_m,
-            float(qp_data.obj_const),
-            _A_ub_m,
-            _b_ub_m,
-            _A_eq_m,
-            _b_eq_m,
-            t_start,
-            time_limit,
-            Q=_Q_m,
-        )
-        if rec is None:
-            _gap_certified = False
-        elif rec[0] == "optimal":
-            lbs[i] = rec[1]
-            sols[i] = rec[2][:n_vars]
-        else:  # Phase-1-certified infeasible node: prune is rigorous.
-            lbs[i] = _INFEASIBILITY_SENTINEL
 
     def _maybe_inject_snapped(x_row, node_lb_i, node_ub_i):
         # Purification (increment 3): near-integral interior points become
@@ -6999,6 +7005,82 @@ def _solve_miqp_bb(
             tree.inject_incumbent(
                 np.asarray(inc[1][:n_vars], dtype=np.float64).copy(), float(inc[0])
             )
+
+    def _handle_nonclean(i, lbs, sols, x_full, obj_val, node_lb_i, node_ub_i):
+        # A node whose QP relaxation did not cleanly converge (non-KKT, solver
+        # failure, or NaN iterate) is not a valid lower bound, and — crucially —
+        # is not a proof of infeasibility. Pruning it as rigorously infeasible is
+        # the false-infeasible bug (issue #127).
+        #
+        # ``x_full`` is the returned iterate (or None). When it is finite and
+        # constraint-feasible it is a genuine feasible point: its objective
+        # ``obj_val`` is exact there, so it is a valid incumbent (upper bound).
+        # We keep it (the tree harvests an integer-feasible point) and decertify
+        # the gap, since as a *lower* bound a non-KKT objective is untrusted.
+        # Otherwise there is no usable iterate, so we re-solve with POUNCE: a
+        # Phase-1-certified-infeasible verdict prunes soundly, an optimal one
+        # restores a trusted bound, and an inconclusive one keeps the node open
+        # (lb=-inf — branched, never fathomed by a bogus bound) and decertifies.
+        nonlocal _gap_certified
+        finite_feas = (
+            x_full is not None
+            and bool(np.all(np.isfinite(x_full)))
+            and _check_lp_solution_feasibility(qp_data.A_eq, qp_data.b_eq, x_full)
+        )
+        if finite_feas:
+            # Try first to recover a trusted (KKT) lower bound; if POUNCE
+            # certifies one, the node certifies normally. Otherwise keep the
+            # non-KKT objective as an (untrusted) bound and decertify — the
+            # feasible iterate is still a valid incumbent either way.
+            rec = _pounce_recover_node_bound(
+                node_lb_i,
+                node_ub_i,
+                _c_m,
+                float(qp_data.obj_const),
+                _A_ub_m,
+                _b_ub_m,
+                _A_eq_m,
+                _b_eq_m,
+                t_start,
+                time_limit,
+                Q=_Q_m,
+            )
+            if rec is not None and rec[0] == "optimal":
+                lbs[i] = rec[1]
+                sols[i] = np.asarray(rec[2][:n_vars], dtype=np.float64)
+            else:
+                sols[i] = np.asarray(x_full[:n_vars], dtype=np.float64)
+                lbs[i] = float(obj_val)
+                _gap_certified = False
+            if lbs[i] < _SENTINEL_THRESHOLD:
+                _maybe_inject_snapped(sols[i], node_lb_i, node_ub_i)
+            return
+        lb_c = np.clip(node_lb_i, -_SPC, _SPC)
+        ub_c = np.clip(node_ub_i, -_SPC, _SPC)
+        sols[i] = 0.5 * (lb_c + ub_c)
+        rec = _pounce_recover_node_bound(
+            node_lb_i,
+            node_ub_i,
+            _c_m,
+            float(qp_data.obj_const),
+            _A_ub_m,
+            _b_ub_m,
+            _A_eq_m,
+            _b_eq_m,
+            t_start,
+            time_limit,
+            Q=_Q_m,
+        )
+        if rec is not None and rec[0] == "optimal":
+            lbs[i] = rec[1]
+            sols[i] = np.asarray(rec[2][:n_vars], dtype=np.float64)
+            if lbs[i] < _SENTINEL_THRESHOLD:
+                _maybe_inject_snapped(sols[i], node_lb_i, node_ub_i)
+        elif rec is not None:  # Phase-1-certified infeasible: rigorous prune.
+            lbs[i] = _INFEASIBILITY_SENTINEL
+        else:  # inconclusive — keep the node open, never a false-infeasible.
+            lbs[i] = -np.inf
+            _gap_certified = False
 
     iteration = 0
     while True:
@@ -7042,43 +7124,41 @@ def _solve_miqp_bb(
                 obj_vals = np.asarray(state.obj)
                 x_vals = np.asarray(state.x)
 
-                ok = (converged == 1) | (converged == 2) | (converged == 3)
-                result_lbs = np.asarray(
-                    np.where(ok, obj_vals + float(qp_data.obj_const), _INFEASIBILITY_SENTINEL),
-                    dtype=np.float64,
-                )
+                # Only a cleanly converged (KKT) QP with a finite iterate is a
+                # trustworthy bound or infeasibility verdict. conv==3 (max-iter)
+                # and non-finite iterates are routed to POUNCE recovery instead
+                # of being pruned as infeasible (issue #127).
+                finite_rows = np.all(np.isfinite(x_vals), axis=1)
+                clean = ((converged == 1) | (converged == 2)) & finite_rows
+                result_lbs = np.full(n_batch, _INFEASIBILITY_SENTINEL, dtype=np.float64)
                 result_sols = np.empty((n_batch, n_vars), dtype=np.float64)
                 for i in range(n_batch):
-                    if ok[i]:
+                    lb_c = np.clip(np.array(batch_lb[i]), -_SPC, _SPC)
+                    ub_c = np.clip(np.array(batch_ub[i]), -_SPC, _SPC)
+                    if clean[i] and _check_lp_solution_feasibility(
+                        qp_data.A_eq, qp_data.b_eq, x_vals[i]
+                    ):
+                        result_lbs[i] = obj_vals[i] + float(qp_data.obj_const)
                         result_sols[i] = x_vals[i, :n_vars]
-                        # Reject QP solutions that violate constraints
-                        if not _check_lp_solution_feasibility(
-                            qp_data.A_eq, qp_data.b_eq, x_vals[i]
-                        ):
-                            result_lbs[i] = _INFEASIBILITY_SENTINEL
-                            lb_c = np.clip(np.array(batch_lb[i]), -_SPC, _SPC)
-                            ub_c = np.clip(np.array(batch_lb[i]), -_SPC, _SPC)
-                            result_sols[i] = 0.5 * (lb_c + ub_c)
-                        else:
-                            _maybe_inject_snapped(
-                                result_sols[i],
-                                np.array(batch_lb[i]),
-                                np.array(batch_ub[i]),
-                            )
-                    else:
-                        lb_c = np.clip(np.array(batch_ub[i]), -_SPC, _SPC)
-                        ub_c = np.clip(np.array(batch_ub[i]), -_SPC, _SPC)
+                        _maybe_inject_snapped(
+                            result_sols[i], np.array(batch_lb[i]), np.array(batch_ub[i])
+                        )
+                    elif clean[i]:
+                        # Converged + finite but the node box is genuinely
+                        # infeasible: a sound prune.
                         result_sols[i] = 0.5 * (lb_c + ub_c)
-                # Non-KKT (max-iter) QP bounds are recovered via POUNCE;
-                # unrecoverable ones decertify the gap.
-                for i in np.where((converged == 3) & (result_lbs < _SENTINEL_THRESHOLD))[0]:
-                    _recover_or_decertify(
-                        int(i),
-                        result_lbs,
-                        result_sols,
-                        np.array(batch_lb[i]),
-                        np.array(batch_ub[i]),
-                    )
+                    else:
+                        # Non-KKT / non-finite: untrusted bound, never a
+                        # false-infeasible prune (issue #127).
+                        _handle_nonclean(
+                            i,
+                            result_lbs,
+                            result_sols,
+                            x_vals[i],
+                            obj_vals[i] + float(qp_data.obj_const),
+                            np.array(batch_lb[i]),
+                            np.array(batch_ub[i]),
+                        )
             except Exception as e:
                 logger.debug("Batch QP solve failed: %s", e)
                 result_lbs = np.full(n_batch, _INFEASIBILITY_SENTINEL, dtype=np.float64)
@@ -7113,31 +7193,45 @@ def _solve_miqp_bb(
                         x_u_full,
                     )
                     conv = int(state.converged)
-                    if conv in (1, 2, 3):
-                        # Reject QP solutions that violate constraints
-                        if _check_lp_solution_feasibility(qp_data.A_eq, qp_data.b_eq, state.x):
-                            result_lbs[i] = float(state.obj) + qp_data.obj_const
-                            result_sols[i] = np.asarray(state.x[:n_vars])
-                            if conv == 3:  # non-KKT: recover via POUNCE
-                                _recover_or_decertify(i, result_lbs, result_sols, node_lb, node_ub)
-                            if result_lbs[i] < _SENTINEL_THRESHOLD:
-                                _maybe_inject_snapped(result_sols[i], node_lb, node_ub)
-                        else:
-                            result_lbs[i] = _INFEASIBILITY_SENTINEL
-                            lb_c = np.clip(node_lb, -_SPC, _SPC)
-                            ub_c = np.clip(node_ub, -_SPC, _SPC)
-                            result_sols[i] = 0.5 * (lb_c + ub_c)
-                    else:
-                        result_lbs[i] = _INFEASIBILITY_SENTINEL
-                        lb_c = np.clip(node_lb, -_SPC, _SPC)
-                        ub_c = np.clip(node_ub, -_SPC, _SPC)
-                        result_sols[i] = 0.5 * (lb_c + ub_c)
-                except Exception as e:
-                    logger.debug("Per-node LP/QP solve failed: %s", e)
-                    result_lbs[i] = _INFEASIBILITY_SENTINEL
+                    x_np = np.asarray(state.x)
+                    # Only a cleanly converged (KKT) QP with a finite iterate is
+                    # trustworthy as a bound or an infeasibility verdict. conv==3
+                    # (max-iter) and non-finite iterates go to POUNCE recovery
+                    # rather than being pruned as infeasible (issue #127).
+                    clean = conv in (1, 2) and bool(np.all(np.isfinite(x_np)))
                     lb_c = np.clip(node_lb, -_SPC, _SPC)
                     ub_c = np.clip(node_ub, -_SPC, _SPC)
-                    result_sols[i] = 0.5 * (lb_c + ub_c)
+                    if clean and _check_lp_solution_feasibility(
+                        qp_data.A_eq, qp_data.b_eq, state.x
+                    ):
+                        result_lbs[i] = float(state.obj) + qp_data.obj_const
+                        result_sols[i] = x_np[:n_vars]
+                        if result_lbs[i] < _SENTINEL_THRESHOLD:
+                            _maybe_inject_snapped(result_sols[i], node_lb, node_ub)
+                    elif clean:
+                        # Converged, finite, yet the node box admits no point
+                        # satisfying the equalities: a sound infeasibility prune.
+                        result_lbs[i] = _INFEASIBILITY_SENTINEL
+                        result_sols[i] = 0.5 * (lb_c + ub_c)
+                    else:
+                        # Non-KKT / non-finite: untrusted bound, never a
+                        # false-infeasible prune (issue #127).
+                        result_lbs[i] = _INFEASIBILITY_SENTINEL
+                        _handle_nonclean(
+                            i,
+                            result_lbs,
+                            result_sols,
+                            x_np,
+                            float(state.obj) + qp_data.obj_const,
+                            node_lb,
+                            node_ub,
+                        )
+                except Exception as e:
+                    logger.debug("Per-node LP/QP solve failed: %s", e)
+                    # No usable iterate from a crashed solve: recover or keep
+                    # open, never a false-infeasible prune (issue #127).
+                    result_lbs[i] = _INFEASIBILITY_SENTINEL
+                    _handle_nonclean(i, result_lbs, result_sols, None, np.nan, node_lb, node_ub)
 
         jax_time += time.perf_counter() - t_jax_start
 
