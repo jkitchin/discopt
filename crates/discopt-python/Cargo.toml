@@ -14,3 +14,8 @@ crate-type = ["cdylib"]
 discopt-core = { path = "../discopt-core" }
 pyo3.workspace = true
 numpy.workspace = true
+
+[features]
+# Build the extension with the core's rayon-parallel MILP B&B node loop. Off by
+# default; enable via `maturin build --features parallel` once validated.
+parallel = ["discopt-core/parallel"]

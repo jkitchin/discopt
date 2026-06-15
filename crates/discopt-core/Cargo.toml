@@ -11,3 +11,12 @@ description = "Core MINLP solver: B&B engine, expression IR, presolve"
 # engine (ftran/btran + product-form column updates) that backs the warm-started
 # simplex node engine for MILP. Pure-Rust, so clean-wheel builds are preserved.
 feral = { git = "https://github.com/jkitchin/feral", rev = "5ab8074b3c87c96d223e56e8012c38b1cf591e0e" }
+# rayon: data-parallel iterators. Used (behind the `parallel` feature) to solve
+# the independent per-node LP relaxations of a B&B batch concurrently. Pinned to
+# 1.10 to keep the crate's MSRV (1.75); 1.12+ requires rustc 1.80.
+rayon = { version = "1.10", optional = true }
+
+[features]
+# Parallel node evaluation in the MILP B&B driver via rayon. Off by default so
+# the serial path stays the reference until benchmarks justify making it default.
+parallel = ["dep:rayon"]

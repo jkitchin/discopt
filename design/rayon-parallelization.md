@@ -1,8 +1,34 @@
 # Parallelizing the Rust MILP engine with Rayon — design write-up
 
-**Status:** proposal / exploration (no code changes yet)
+**Status:** implemented behind the `parallel` cargo feature (off by default); benchmarked.
 **Scope:** the pure-Rust MILP branch-and-bound driver (`crates/discopt-core/src/bnb/milp_driver.rs`).
-**Author:** design note for review.
+**Author:** design note + results.
+
+## 0. Results (measured)
+
+The map→reduce design below is implemented. The batch loop in `solve_milp` was
+refactored into a per-node `solve_node` (pure over a shared `NodeCtx` snapshot) plus
+a sequential, batch-ordered reduce. Parallelism is gated by the `parallel` feature
+(`cargo build --features parallel`); the serial path is unchanged when it's off. The
+Python binding (`solve_milp_py`) now copies its numpy inputs and runs the solve under
+`py.allow_threads`.
+
+Benchmark: 6 multidimensional 0/1 knapsacks solved to optimality
+(`cargo run --release --example par_bench [--features parallel]`), 4-core machine:
+
+| mode | threads | wall time | speedup | total nodes | total pivots |
+|------|--------:|----------:|--------:|------------:|-------------:|
+| serial | 1 | 55.04 s | 1.00× | 41 782 | 214 101 |
+| parallel | 2 | 28.46 s | 1.93× | 41 782 | 214 101 |
+| parallel | 4 | 14.96 s | 3.68× | 41 782 | 214 101 |
+
+Near-linear scaling (92% efficiency at 4 cores). Crucially the **node and pivot
+counts — and every per-instance objective — are bit-identical** across all three
+configurations, confirming the parallel path explores the exact same tree as serial:
+correctness and determinism are preserved, only wall-clock changes.
+
+Not yet done (deferred, see §4/§7): parallel *strong branching* and making the
+feature default. The size gate `PAR_MIN_BATCH` is set conservatively at 4.
 
 ## 1. Summary
 
