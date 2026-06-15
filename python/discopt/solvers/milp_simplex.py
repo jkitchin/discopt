@@ -121,6 +121,7 @@ def solve_milp(
         0.0,  # obj_const: caller (MilpRelaxationModel) applies its own offset
         int(max_nodes),
         float(gap_tolerance),
+        time_limit_s=0.0 if time_limit is None else max(0.0, float(time_limit)),
     )
 
     if status == "infeasible":

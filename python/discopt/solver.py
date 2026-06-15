@@ -46,6 +46,12 @@ logger = logging.getLogger(__name__)
 # variables we stay on the serial per-node path. (The real fix is a native-Rust
 # node evaluator — Phase B — which removes the GIL bottleneck entirely.)
 _POUNCE_BATCH_MIN_VARS = 50
+# Floor on the per-node NLP wall-time budget. The B&B loop re-derives each
+# node's budget from the live remaining time to the global deadline; this floor
+# keeps a node that straddles the deadline from being handed a zero/negative
+# budget. Nodes that start fully past the deadline are skipped (see the serial
+# loop), so at most one node per batch can overrun by this floor.
+_DEADLINE_NODE_FLOOR_S = 0.1
 # Multistart runs 3 starts per nonconvex node (warm/midpoint/random) and keeps
 # the best — better incumbents on nonconvex models, but ~3x the node-solve cost.
 # Off by default; flip to opt in (or pass multistart=True to _solve_batch_pounce).
@@ -2391,6 +2397,7 @@ def solve_model(
     # and use cheap midpoint bounds in between. Period=1 means every iteration.
     _mc_nlp_period = 5  # run McCormick NLP every 5th iteration
     iteration = 0
+    _deadline = t_start + time_limit
     while True:
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
@@ -2398,7 +2405,7 @@ def solve_model(
 
         # Update per-iteration time budget for NLP subproblem solves (issue #5).
         remaining = time_limit - elapsed
-        opts["max_wall_time"] = max(remaining, 0.1)
+        opts["max_wall_time"] = max(remaining, _DEADLINE_NODE_FLOOR_S)
 
         # Export batch from Rust tree
         t_rust_start = time.perf_counter()
@@ -2594,6 +2601,7 @@ def solve_model(
                         mc_res = _mc_lp_relaxer.solve_at_node(
                             np.asarray(batch_lb[i]),
                             np.asarray(batch_ub[i]),
+                            time_limit=max(_deadline - time.perf_counter(), _DEADLINE_NODE_FLOOR_S),
                         )
                     except Exception as e:
                         logger.debug("McCormick LP failed at node %d: %s", i, e)
@@ -2643,6 +2651,27 @@ def solve_model(
             for i in range(n_batch):
                 node_lb = np.array(batch_lb[i])
                 node_ub = np.array(batch_ub[i])
+
+                # Deadline enforcement (time_limit overrun fix). The budget set
+                # at the batch top is the WHOLE remaining time; reusing it for
+                # every node lets a batch of N nodes run ~N x over the cap. Re-
+                # derive the live remaining budget before each node so the cap
+                # is honored. Once past the deadline, skip the solve and record a
+                # trivial (-inf) lower bound: -inf leaves the node unpruned (it
+                # is the default node bound) and decertifies the gap below, so we
+                # stop early without ever fabricating a false "optimal".
+                _node_remaining = _deadline - time.perf_counter()
+                if _node_remaining <= 0.0:
+                    result_ids[i] = int(batch_ids[i])
+                    result_lbs[i] = -np.inf
+                    lb_clipped = np.clip(node_lb, -_SPC, _SPC)
+                    ub_clipped = np.clip(node_ub, -_SPC, _SPC)
+                    result_sols[i] = 0.5 * (lb_clipped + ub_clipped)
+                    result_feas[i] = False
+                    if not _model_is_convex:
+                        _gap_certified = False
+                    continue
+                opts["max_wall_time"] = max(_node_remaining, _DEADLINE_NODE_FLOOR_S)
 
                 nlp_result = None
                 if iteration == 0 and _mc_lp_relaxer is None:
@@ -2802,7 +2831,11 @@ def solve_model(
                 # iteration_limit (any node).
                 if _mc_lp_relaxer is not None:
                     try:
-                        mc_lp_res = _mc_lp_relaxer.solve_at_node(node_lb, node_ub)
+                        mc_lp_res = _mc_lp_relaxer.solve_at_node(
+                            node_lb,
+                            node_ub,
+                            time_limit=max(_deadline - time.perf_counter(), _DEADLINE_NODE_FLOOR_S),
+                        )
                     except Exception as e:
                         logger.debug("McCormick LP failed at node %d: %s", int(batch_ids[i]), e)
                         mc_lp_res = None

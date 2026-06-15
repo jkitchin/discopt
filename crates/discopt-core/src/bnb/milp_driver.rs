@@ -67,6 +67,12 @@ pub struct MilpOptions {
     pub integer_cols: Vec<usize>,
     /// Node-creation cap.
     pub max_nodes: usize,
+    /// Optional wall-time cap in seconds. `None` = unlimited. Checked at each
+    /// batch boundary of the B&B search; on expiry the search stops and returns
+    /// the incumbent with a valid (uncertified) dual bound — never a false
+    /// "optimal". Keeps a single atomic MILP solve from overrunning a caller's
+    /// `time_limit` (the McCormick LP relaxer node solve was the worst offender).
+    pub time_limit_s: Option<f64>,
     /// Relative gap tolerance for proving optimality.
     pub gap_tol: f64,
     /// Max Gomory mixed-integer cuts to add at the root (0 disables), summed
@@ -245,6 +251,7 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
     let mut slack_l = l_w[ns..].to_vec();
     let mut slack_u = u_w[ns..].to_vec();
 
+    let t_start = std::time::Instant::now();
     'search: loop {
         if tm.is_finished() || tm.gap() <= opts.gap_tol {
             break;
@@ -252,6 +259,12 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
         if tm.stats().total_nodes >= opts.max_nodes {
             gap_certified = false;
             break;
+        }
+        if let Some(tl) = opts.time_limit_s {
+            if t_start.elapsed().as_secs_f64() >= tl {
+                gap_certified = false;
+                break;
+            }
         }
         let batch = tm.export_batch(64);
         if batch.node_ids.is_empty() {
@@ -884,6 +897,7 @@ mod tests {
             n_struct: ns,
             integer_cols: int_cols,
             max_nodes: 100_000,
+            time_limit_s: None,
             gap_tol: 1e-9,
             root_cuts: 16,
             cut_rounds: 3,
