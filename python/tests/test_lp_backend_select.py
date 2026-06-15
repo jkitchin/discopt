@@ -171,7 +171,15 @@ class TestHighspyConsumersRetired:
 
 
 class TestObbtRetired:
-    """OBBT runs through the backend seam, so it works POUNCE-only."""
+    """OBBT bound tightening requires an *exact* LP oracle (HiGHS).
+
+    OBBT tightens a variable's bound to the optimum of ``min``/``max x_i`` over
+    the relaxation polytope, so the subproblem LP must be solved to its true
+    optimum to stay sound. The POUNCE IPM returns an analytic-center objective
+    that can be wrong on ill-conditioned LPs while reporting ``OPTIMAL`` (#145),
+    so OBBT routes through HiGHS regardless of ``prefer_pounce`` and is a sound
+    no-op when no exact oracle is available.
+    """
 
     def _model(self):
         import discopt.modeling as dm
@@ -185,8 +193,10 @@ class TestObbtRetired:
         m.subject_to(xv <= 4)
         return m
 
-    def test_obbt_via_pounce_tightens(self):
-        pytest.importorskip("pounce")
+    def test_obbt_tightens_via_exact_oracle(self):
+        # Tightening requires the exact (HiGHS) oracle; ``prefer_pounce`` is a
+        # no-op for the solver selection (#145).
+        pytest.importorskip("highspy")
         from discopt._jax.obbt import run_obbt
 
         res = run_obbt(self._model(), prefer_pounce=True, time_limit_per_lp=5.0)
@@ -194,8 +204,10 @@ class TestObbtRetired:
         assert res.tightened_ub[0] == pytest.approx(4.0, abs=1e-4)
         assert res.n_lp_solves >= 1
 
-    def test_obbt_matches_across_backends(self):
-        pytest.importorskip("pounce")
+    def test_obbt_ignores_prefer_pounce(self):
+        # Both calls must route through the exact oracle, so the tightened box
+        # is identical regardless of ``prefer_pounce`` (it no longer selects the
+        # IPM backend for OBBT — #145).
         pytest.importorskip("highspy")
         from discopt._jax.obbt import run_obbt
 

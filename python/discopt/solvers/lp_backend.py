@@ -67,6 +67,24 @@ def get_lp_solver(prefer_pounce: bool = False) -> Callable:
     )
 
 
+def get_exact_lp_solver() -> Callable | None:
+    """Return an *exact* (simplex/vertex) LP oracle, or ``None`` if unavailable.
+
+    This is HiGHS only — never the POUNCE IPM. OBBT tightens a variable's bound
+    to the optimum of ``min``/``max x_i`` over the relaxation polytope, which is
+    sound **only when that LP is solved to its true optimum**. POUNCE's
+    interior-point method returns the analytic center of the optimal face; its
+    reported objective normally matches the simplex optimum but can be grossly
+    wrong on ill-conditioned LPs (e.g. a 1e6 coefficient spread) while still
+    reporting ``OPTIMAL`` — an over-tightening that cuts off feasible, even
+    globally-optimal, points (issue #145). HiGHS dual simplex reaches the exact
+    vertex, so its optimum is a rigorous bound. Callers that need a *sound*
+    bound (OBBT) must use this; when it returns ``None`` they must skip
+    tightening rather than fall back to the IPM.
+    """
+    return _lp_highs()
+
+
 def get_qp_solver(prefer_pounce: bool = False) -> Callable:
     """Return a matrix-form ``solve_qp(Q, c, A_ub, ...)``; see
     :func:`get_lp_solver`. POUNCE handles continuous QPs only (MIQPs go

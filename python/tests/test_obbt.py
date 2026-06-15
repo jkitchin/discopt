@@ -225,7 +225,10 @@ class TestObbtBasic:
             clock["now"] += 0.11
             return LPResult(status=SolveStatus.OPTIMAL, objective=0.0, wall_time=0.11)
 
-        monkeypatch.setattr(obbt_mod, "solve_lp", fake_solve_lp)
+        # OBBT now resolves its LP oracle through ``get_exact_lp_solver`` (it
+        # must use an exact simplex backend for sound tightening — see #145),
+        # so patch that seam rather than the module-level ``solve_lp``.
+        monkeypatch.setattr(obbt_mod, "get_exact_lp_solver", lambda: fake_solve_lp)
 
         result = run_obbt(m, time_limit_per_lp=1.0, total_time_limit=0.2)
 
