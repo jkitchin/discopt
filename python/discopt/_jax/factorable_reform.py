@@ -215,8 +215,8 @@ def _lift_expr(expr: Expression, model: Model, lifter: _Lifter) -> Expression:
 def _find_clearable_denominator(expr: Expression, model: Model):
     """Return the denominator ``D`` of the first division term ``N/D`` in
     *expr*'s additive structure whose ``D`` is non-constant and sign-definite
-    over the variable box, together with its sign (+1 or -1).  ``None`` if no
-    such division exists."""
+    over the variable box, as ``(D, sign, dmin)`` where ``sign`` is +1/-1 and
+    ``dmin = min |D|`` over the box.  ``None`` if no such division exists."""
     if isinstance(expr, BinaryOp):
         if expr.op in ("+", "-"):
             found = _find_clearable_denominator(expr.left, model)
@@ -228,9 +228,9 @@ def _find_clearable_denominator(expr: Expression, model: Model):
             if not isinstance(d, Constant):
                 lo, hi = _bound_expression(d, model)
                 if lo > _ZERO_MARGIN:
-                    return d, 1
+                    return d, 1, lo
                 if hi < -_ZERO_MARGIN:
-                    return d, -1
+                    return d, -1, -hi
             # Search the numerator for a nested division.
             return _find_clearable_denominator(expr.left, model)
     if isinstance(expr, UnaryOp) and expr.op == "neg":
@@ -263,15 +263,34 @@ _FLIP = {"<=": ">=", ">=": "<=", "==": "=="}
 
 def _clear_divisions(body: Expression, sense: str, model: Model):
     """Clear every sign-definite denominator from a constraint ``body sense 0``.
-    Returns ``(new_body, new_sense)``."""
+    Returns ``(new_body, new_sense)``.
+
+    Multiplying a constraint through by a denominator ``D`` rescales it by
+    ``D(x)``.  When ``|D|`` can be < 1 over the box, a *gross* violation of the
+    original constraint shrinks proportionally in the cleared form — e.g.
+    clearing ``6 - x0 + 0.2458 x0**2/x1 <= 0`` by ``x1 in [1e-5, 30]`` turns a
+    violation of 6.0 into ``6.0 * x1 ~ 6e-5``, which then slips *under* the
+    absolute incumbent-feasibility tolerance (1e-4).  The spatial-B&B would then
+    accept an infeasible point as a feasible incumbent and certify it — a
+    false-optimal.  To keep the fixed absolute tolerance sound, divide the
+    cleared body by ``dmin = min |D|`` so the scaled magnitude is never *smaller*
+    than the original (``|D(x)| / dmin >= 1`` everywhere in the box).  This is
+    exact (division by a positive constant preserves the feasible set) and only
+    ever makes the feasibility test stricter, never looser.
+    """
+    scale = 1.0
     for _ in range(8):  # bounded: each pass clears one denominator family
         found = _find_clearable_denominator(body, model)
         if found is None:
             break
-        denom, sign = found
+        denom, sign, dmin = found
         body = _multiply_through(body, denom)
         if sign < 0:
             sense = _FLIP[sense]
+        if dmin < 1.0:
+            scale /= dmin
+    if scale != 1.0:
+        body = BinaryOp("*", Constant(scale), body)
     return body, sense
 
 
