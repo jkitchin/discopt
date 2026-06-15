@@ -333,6 +333,68 @@ def _collect_extended_factors(
     return None
 
 
+def extract_single_var_power(expr: Expression, model: Model) -> tuple[int, float] | None:
+    """Recognize ``expr`` as ``x**p`` for a single flat-indexable variable ``x``.
+
+    Folds a product / power / ``sqrt`` tree over ONE variable into a single
+    ``(flat_idx, exponent)``: e.g. ``sqrt(x)`` → ``(idx, 0.5)``, ``x**3`` →
+    ``(idx, 3.0)``, ``x**3 * sqrt(x)`` → ``(idx, 3.5)``. Returns ``None`` for
+    anything else (multiple variables, constant scale factors, transcendental
+    calls, sums). Constant scale factors are intentionally rejected so callers
+    do not silently drop a coefficient.
+
+    This is what lets a reciprocal of a monomial product — ``1/(x**3 * sqrt(x))``
+    in nvs08 — be canonicalized to the fractional power ``x**-3.5`` and relaxed,
+    rather than dropped as a non-constant division.
+    """
+
+    def _visit(e: Expression) -> tuple[int, float] | None:
+        flat = _get_flat_index(e, model)
+        if flat is not None:
+            return (flat, 1.0)
+        if isinstance(e, FunctionCall) and e.func_name == "sqrt" and len(e.args) == 1:
+            inner = _visit(e.args[0])
+            if inner is not None:
+                return (inner[0], 0.5 * inner[1])
+            return None
+        if isinstance(e, BinaryOp) and e.op == "**" and isinstance(e.right, Constant):
+            inner = _visit(e.left)
+            if inner is not None:
+                return (inner[0], inner[1] * float(e.right.value))
+            return None
+        if isinstance(e, BinaryOp) and e.op == "*":
+            left = _visit(e.left)
+            right = _visit(e.right)
+            if left is not None and right is not None and left[0] == right[0]:
+                return (left[0], left[1] + right[1])
+            return None
+        return None
+
+    return _visit(expr)
+
+
+def extract_reciprocal_power(expr: Expression, model: Model) -> tuple[int, float, float] | None:
+    """Recognize ``expr`` as ``c / (x**p)`` → ``(flat_idx, -p, c)``.
+
+    Returns ``(flat_idx, exponent, coeff)`` such that ``expr == coeff *
+    x_flat_idx ** exponent`` with a negative ``exponent``, or ``None``. Only a
+    constant numerator over a single-variable power denominator is matched (the
+    ``1/(x**3 * sqrt(x))`` shape in nvs08); a non-constant numerator or a
+    multi-variable / scaled denominator returns ``None``.
+    """
+    if not (isinstance(expr, BinaryOp) and expr.op == "/"):
+        return None
+    if not isinstance(expr.left, Constant):
+        return None
+    denom = extract_single_var_power(expr.right, model)
+    if denom is None:
+        return None
+    flat_idx, exponent = denom
+    if exponent <= 0.0:
+        return None
+    return (flat_idx, -exponent, float(expr.left.value))
+
+
 # ---------------------------------------------------------------------------
 # Main classifier
 # ---------------------------------------------------------------------------
@@ -572,6 +634,15 @@ def _classify_nonlinear_terms_python(model: Model) -> NonlinearTerms:
                 # x / c where c is constant → linear scaling
                 if isinstance(expr.right, Constant):
                     _classify_node(expr.left)
+                    return
+                # c / (x**p)  →  fractional power x**-p (e.g. 1/(x**3*sqrt(x))
+                # in nvs08 → x**-3.5). Record it so the MILP relaxation lifts it
+                # to an aux column instead of dropping the whole constraint.
+                recip = extract_reciprocal_power(expr, model)
+                if recip is not None:
+                    flat_idx, neg_exp, _coeff = recip
+                    _record_fractional_power(flat_idx, neg_exp)
+                    result.general_nl.append(expr)
                     return
                 # c / x or x / y → general nonlinear
                 result.general_nl.append(expr)

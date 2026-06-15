@@ -130,6 +130,24 @@ class MccormickLPRelaxer:
             milp._integrality = None
 
         res = milp.solve(time_limit=time_limit, backend=self._backend)
+
+        # Soundness guard: a floating-point simplex "infeasible" verdict is NOT
+        # a proof that the relaxed feasible set is empty. The spatial-B&B driver
+        # treats a relaxation "infeasible" as a RIGOROUS fathom (it prunes the
+        # node's whole subtree), so an unverified false-infeasible silently
+        # fathoms a *feasible* node and certifies a suboptimal incumbent — a
+        # false-optimal. The fast Rust simplex can be fooled here: a fractional
+        # power x**p with |p| large over a domain reaching toward 0 (e.g.
+        # x in [1e-3, 200], p=-3.5) lifts to an LP whose tangent slopes and aux
+        # bounds span >1e13, and the simplex reports it infeasible while HiGHS
+        # solves it correctly. Re-verify any non-HiGHS "infeasible" with HiGHS
+        # before trusting it; on disagreement adopt HiGHS's (valid) bound so the
+        # node branches instead of being wrongly pruned.
+        if res.status == "infeasible" and self._backend != "auto":
+            verify = milp.solve(time_limit=time_limit, backend="auto")
+            if verify.status != "infeasible":
+                res = verify
+
         if res.objective is None or res.x is None:
             return MccormickLPResult(status=res.status)
         x_orig = np.asarray(res.x)[: self._n_orig].copy()

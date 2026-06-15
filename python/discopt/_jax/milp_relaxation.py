@@ -50,6 +50,7 @@ from discopt._jax.term_classifier import (
     _compute_var_offset,
     _get_flat_index,
     distribute_products,
+    extract_reciprocal_power,
 )
 from discopt.modeling.core import (
     BinaryOp,
@@ -2523,6 +2524,23 @@ def _linearize_expr(
                 if isinstance(e.right, Constant):
                     visit(e.left, scale / float(e.right.value))
                 elif isinstance(e.left, Constant):
+                    # c / (x**p)  →  fractional-power aux column for x**-p
+                    # (e.g. 1/(x**3*sqrt(x)) → x**-3.5 in nvs08). Try this before
+                    # the reciprocal univariate path so a monomial-product
+                    # denominator is relaxed instead of dropped.
+                    fp_aux = None
+                    if fractional_power_var_map is not None:
+                        recip = extract_reciprocal_power(e, model)
+                        if recip is not None:
+                            fp_idx, fp_exp, fp_coeff = recip
+                            pinned = _pinned_value(fp_idx)
+                            if pinned is not None:
+                                const_acc[0] += scale * fp_coeff * (pinned**fp_exp)
+                                return
+                            fp_aux = fractional_power_var_map.get((fp_idx, float(fp_exp)))
+                            if fp_aux is not None:
+                                coeff[fp_aux] += scale * fp_coeff
+                                return
                     aux_col = univariate_var_map.get(id(e))
                     if aux_col is None:
                         try:
