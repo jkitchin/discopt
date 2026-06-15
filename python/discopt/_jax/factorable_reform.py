@@ -315,6 +315,25 @@ def has_factorable_work(model: Model) -> bool:
     return any(isinstance(c, Constraint) and scan(c.body) for c in model._constraints)
 
 
+def has_clearable_denominator(model: Model) -> bool:
+    """True if any constraint has a sign-definite, non-constant denominator that
+    denominator clearing would rewrite.
+
+    Distinct from :func:`has_factorable_work`, which also fires on mixed
+    repeated-factor products.  The solver uses this to decide whether a
+    *convex* model is worth clearing: a non-constant division drops to
+    ``general_nl`` and so cannot be bounded by the relaxation (no dual bound, no
+    certification), and clearing a sign-definite denominator is exact — so it is
+    a strict improvement for such models, unlike the mixed-product lift which can
+    only destroy convexity.  Objective ratios are excluded: clearing multiplies a
+    *constraint* through by its denominator and has no analogue for an objective.
+    """
+    return any(
+        isinstance(c, Constraint) and _find_clearable_denominator(c.body, model) is not None
+        for c in model._constraints
+    )
+
+
 def _scan_for_mixed_product(expr: Expression, model: Model) -> bool:
     if isinstance(expr, BinaryOp):
         if expr.op == "*":
@@ -331,13 +350,20 @@ def _scan_for_mixed_product(expr: Expression, model: Model) -> bool:
     return False
 
 
-def factorable_reformulate(model: Model) -> Model:
+def factorable_reformulate(model: Model, *, clear_only: bool = False) -> Model:
     """Return a model equivalent to *model* with sign-definite denominators
     cleared and mixed repeated-factor products lifted to bilinear form.
 
     If neither rewrite applies, *model* is returned unchanged.  On any
     unexpected error the original model is returned, so the pass can never make
     a previously-solvable model unsolvable.
+
+    ``clear_only`` restricts the pass to denominator clearing and skips the
+    mixed repeated-factor product lift entirely.  The lift distributes products
+    and introduces ``w == x**k`` aux variables, which destroys convex structure
+    even where it was unnecessary; clearing alone is the right rewrite for a
+    *convex* model that merely needs its non-constant division exposed to the
+    relaxation (see ``has_clearable_denominator``).
     """
     try:
         if not has_factorable_work(model):
@@ -356,6 +382,15 @@ def factorable_reformulate(model: Model) -> Model:
                 rebuilt.append(c)  # pass through anything exotic untouched
                 continue
             body, sense = _clear_divisions(c.body, c.sense, new_model)
+            if clear_only:
+                # Only touch constraints the clearing actually rewrote; leave
+                # everything else byte-for-byte identical so convex structure
+                # elsewhere is preserved.
+                if body is c.body and sense == c.sense:
+                    rebuilt.append(c)
+                else:
+                    rebuilt.append(Constraint(distribute_products(body), sense, c.rhs, c.name))
+                continue
             body = distribute_products(body)
             body = _lift_expr(body, new_model, lifter)
             if body is c.body and sense == c.sense:
@@ -365,7 +400,7 @@ def factorable_reformulate(model: Model) -> Model:
 
         # Lift the objective too (it may contain a mixed product); division
         # clearing is meaningless for an objective so only the lift applies.
-        if new_model._objective is not None:
+        if not clear_only and new_model._objective is not None:
             obj_expr = distribute_products(new_model._objective.expression)
             lifted_obj = _lift_expr(obj_expr, new_model, lifter)
             if lifted_obj is not new_model._objective.expression:
