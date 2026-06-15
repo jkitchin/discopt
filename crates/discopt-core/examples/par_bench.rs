@@ -108,6 +108,7 @@ fn opts(inst: &Instance) -> MilpOptions {
         n_struct: inst.n_struct,
         integer_cols: inst.integer_cols.clone(),
         max_nodes: 2_000_000,
+        time_limit_s: None,
         gap_tol: 1e-6,
         root_cuts: 16,
         cut_rounds: 2,
