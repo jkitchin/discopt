@@ -18,7 +18,21 @@ import numpy as np
 
 from discopt.modeling.core import Model
 from discopt.solvers import SolveStatus
-from discopt.solvers.lp_backend import get_lp_solver
+from discopt.solvers.lp_backend import get_exact_lp_solver, get_lp_solver
+
+# Beyond this magnitude the McCormick relaxation's LP is too ill-conditioned for
+# an OBBT tightening to be rigorous. OBBT shrinks a variable's domain to an LP
+# optimum, and a feasibility tolerance ``ftol`` against a constraint coefficient
+# of size ``M`` lets the LP vertex sit ~``M*ftol`` past the true feasible point
+# in that variable. Once that absolute slack approaches the integrality /
+# feasibility tolerances the tightening can cut off a feasible (even optimal)
+# point — e.g. the fractional power ``x**-3.5`` near 0 builds envelope slopes
+# ~1e14 and OBBT then prunes the true optimum (the nvs08/fp soundness model).
+# When the relaxation's largest magnitude exceeds this limit OBBT returns the
+# box untightened: skipping is always sound, only weaker. Well-conditioned
+# stiff models (e.g. the 1e6-coefficient #145 ratio) stay well under it and are
+# still tightened by the exact (HiGHS) oracle.
+_OBBT_COND_LIMIT = 1e10
 
 
 def solve_lp(**kwargs):
@@ -392,7 +406,21 @@ def run_obbt(
     if total_time_limit is not None and total_time_limit < 0.0:
         raise ValueError("total_time_limit must be non-negative")
 
-    _lp = get_lp_solver(prefer_pounce=True) if prefer_pounce else solve_lp
+    # OBBT requires an EXACT LP oracle for sound tightening — see
+    # ``run_obbt_on_relaxation`` / ``get_exact_lp_solver`` (issue #145). The IPM
+    # is never used here; if no exact (HiGHS) oracle is available the pass is a
+    # sound no-op. ``prefer_pounce`` is kept for signature compatibility.
+    _lp = get_exact_lp_solver()
+    if _lp is None:
+        eff_lb = lb if lb is not None else _get_var_bounds(model)[0].copy()
+        eff_ub = ub if ub is not None else _get_var_bounds(model)[1].copy()
+        return ObbtResult(
+            tightened_lb=np.asarray(eff_lb, dtype=np.float64),
+            tightened_ub=np.asarray(eff_ub, dtype=np.float64),
+            n_lp_solves=0,
+            n_tightened=0,
+            total_lp_time=0.0,
+        )
     model_lb, model_ub = _get_var_bounds(model)
     if lb is None:
         lb = model_lb.copy()
@@ -585,13 +613,54 @@ def run_obbt_on_relaxation(
 
     import scipy.sparse as sp
 
-    _lp = get_lp_solver(prefer_pounce=True) if prefer_pounce else solve_lp
+    # OBBT must solve its min/max subproblems with an EXACT LP oracle: the
+    # tightened bound is taken from the LP optimum, so an inexact optimum (the
+    # POUNCE IPM's analytic-center objective, which can be grossly wrong on
+    # ill-conditioned LPs while still reporting OPTIMAL) yields an unsound
+    # tightening that cuts off feasible points (issue #145). ``prefer_pounce``
+    # is accepted for signature compatibility but never honoured here — when no
+    # exact (HiGHS) oracle is available we return the box untightened rather
+    # than risk an unsound shrink.
+    _lp = get_exact_lp_solver()
+    if _lp is None:
+        return ObbtResult(
+            tightened_lb=np.array([b[0] for b in relaxation._bounds[:n_orig]], dtype=np.float64),
+            tightened_ub=np.array([b[1] for b in relaxation._bounds[:n_orig]], dtype=np.float64),
+            n_lp_solves=0,
+            n_tightened=0,
+            total_lp_time=0.0,
+        )
     A_ub = relaxation._A_ub
     b_ub = relaxation._b_ub
     bounds = list(relaxation._bounds)
     n_total = len(bounds)
     c_obj = relaxation._c
     obj_offset = float(relaxation._obj_offset)
+
+    # Refuse to tighten over a numerically ill-conditioned relaxation: an OBBT
+    # bound from such an LP is not rigorous and can prune feasible points (see
+    # ``_OBBT_COND_LIMIT``). Returning the box untightened is sound.
+    def _max_abs(x) -> float:
+        if x is None:
+            return 0.0
+        if sp.issparse(x):
+            return float(np.abs(x.data).max()) if x.nnz else 0.0
+        arr = np.asarray(x, dtype=np.float64)
+        if arr.size == 0:
+            return 0.0
+        finite = arr[np.isfinite(arr)]
+        return float(np.abs(finite).max()) if finite.size else 0.0
+
+    _bound_vals = np.array([v for pair in bounds for v in pair], dtype=np.float64)
+    _cond = max(_max_abs(A_ub), _max_abs(b_ub), _max_abs(_bound_vals))
+    if _cond > _OBBT_COND_LIMIT:
+        return ObbtResult(
+            tightened_lb=np.array([b[0] for b in bounds[:n_orig]], dtype=np.float64),
+            tightened_ub=np.array([b[1] for b in bounds[:n_orig]], dtype=np.float64),
+            n_lp_solves=0,
+            n_tightened=0,
+            total_lp_time=0.0,
+        )
 
     if incumbent_cutoff is not None and c_obj is not None:
         cutoff_row = np.asarray(c_obj, dtype=np.float64).reshape(1, -1)
