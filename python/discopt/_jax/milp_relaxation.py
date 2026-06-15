@@ -623,6 +623,7 @@ def _decompose_product(
     fractional_power_var_map: Optional[dict[tuple[int, float], int]] = None,
     univariate_var_map: Optional[dict[object, int]] = None,
     monomial_var_map: Optional[dict[tuple[int, int], int]] = None,
+    composite_var_map: Optional[dict[int, int]] = None,
 ) -> tuple[float, list[int]] | None:
     """Decompose a product expression into (scalar, [flat_or_aux_idx, ...]).
 
@@ -653,6 +654,11 @@ def _decompose_product(
             return True
         if univariate_var_map:
             aux_col = univariate_var_map.get(id(e))
+            if aux_col is not None:
+                var_indices.append(aux_col)
+                return True
+        if composite_var_map:
+            aux_col = composite_var_map.get(id(e))
             if aux_col is not None:
                 var_indices.append(aux_col)
                 return True
@@ -713,6 +719,7 @@ def _collect_lifted_bilinear_products(
     univariate_var_map: dict[object, int],
     n_orig: int,
     monomial_var_map: Optional[dict[tuple[int, int], int]] = None,
+    composite_var_map: Optional[dict[int, int]] = None,
 ) -> list[tuple[int, int]]:
     """Return products between original variables and lifted auxiliary columns."""
     keys: set[tuple[int, int]] = set()
@@ -726,6 +733,7 @@ def _collect_lifted_bilinear_products(
                     fractional_power_var_map=fractional_power_var_map,
                     univariate_var_map=univariate_var_map,
                     monomial_var_map=monomial_var_map,
+                    composite_var_map=composite_var_map,
                 )
                 if decomp is not None:
                     _scalar, indices = decomp
@@ -1839,6 +1847,417 @@ def _separable_objective_lower_bound(
     return float(total)
 
 
+@dataclass
+class CompositeUnivariateRelaxation:
+    """Outer relaxation for a single-variable nonlinear node of certified curvature.
+
+    Unlike :class:`UnivariateRelaxation` (a named operator of an *affine*
+    argument), this handles a composite node ``f(x_i)`` that depends on a single
+    original variable but whose internal structure is non-affine — e.g.
+    ``sqrt(x**2 + c)``, ``(a*x + b)**p``, or ``exp(c - k/(d + x))``. Curvature is
+    proven sound on the node box (analytic power rule, or a subdivided
+    interval-Hessian certificate), so the tangent/secant envelope below is a
+    rigorous outer approximation. The aux column ``z`` satisfies
+    ``lower_lines ≤ z ≤ upper_lines`` (convex: tangents below, secant above;
+    concave: secant below, tangents above).
+    """
+
+    expr_id: int
+    aux_col: int
+    var_idx: int
+    curvature: str
+    arg_lb: float
+    arg_ub: float
+    lower_lines: tuple[tuple[float, float], ...]
+    upper_lines: tuple[tuple[float, float], ...]
+    pin_value: Optional[float]
+
+
+_COMPOSITE_CURV_TOL = 1e-9
+_COMPOSITE_MAX_SUBDIV = 256
+
+
+def _build_convexity_box(model: Model, flat_lb: np.ndarray, flat_ub: np.ndarray) -> dict:
+    """Build the ``{Variable: Interval}`` box the convexity certificate expects."""
+    from discopt._jax.convexity.interval import Interval
+
+    box: dict = {}
+    offset = 0
+    for v in model._variables:
+        size = v.size
+        shape = v.shape if v.shape else (1,)
+        lo = np.asarray(flat_lb[offset : offset + size], dtype=np.float64).reshape(shape)
+        hi = np.asarray(flat_ub[offset : offset + size], dtype=np.float64).reshape(shape)
+        box[v] = Interval(lo, hi)
+        offset += size
+    return box
+
+
+def _composite_referenced_var(expr: Expression, model: Model) -> Optional[tuple[Variable, int]]:
+    """Return ``(var, flat_idx)`` if ``expr`` depends on exactly one scalar variable."""
+    found: dict[int, Variable] = {}
+
+    def visit(e: Expression) -> None:
+        if isinstance(e, Variable):
+            found[id(e)] = e
+            return
+        if isinstance(e, IndexExpression):
+            if isinstance(e.base, Variable):
+                found[id(e.base)] = e.base
+            else:
+                visit(e.base)
+            return
+        if isinstance(e, BinaryOp):
+            visit(e.left)
+            visit(e.right)
+        elif isinstance(e, UnaryOp):
+            visit(e.operand)
+        elif isinstance(e, FunctionCall):
+            for a in e.args:
+                visit(a)
+        elif isinstance(e, SumExpression):
+            visit(e.operand)
+        elif isinstance(e, SumOverExpression):
+            for t in e.terms:
+                visit(t)
+
+    visit(expr)
+    if len(found) != 1:
+        return None
+    var = next(iter(found.values()))
+    if var.size != 1:
+        return None
+    return var, _compute_var_offset(var, model)
+
+
+def _should_claim_composite(expr: Expression, model: Model, n_orig: int) -> bool:
+    """True when ``expr`` is a nonlinear node the *existing* machinery cannot lift.
+
+    The bilinear/monomial/fractional-power/univariate-of-affine builders already
+    cover their cases; claiming those here would create duplicate aux columns.
+    So claim only:
+
+    * a named univariate call whose argument is *non-affine* (the affine case is
+      handled by :func:`_collect_univariate_relaxations`), or
+    * ``(base)**p`` with a *non-integer* constant exponent ``p`` and a *non-bare*
+      base (a bare variable base is a monomial / fractional power; integer powers
+      of a non-bare base are squares/monomials handled by the dedicated square and
+      ``distribute_products`` machinery, so claiming them duplicates aux columns).
+    """
+    if isinstance(expr, FunctionCall) and len(expr.args) == 1:
+        op_info = _univariate_arg(expr)
+        if op_info is None:
+            return False
+        _name, arg = op_info
+        try:
+            _linearize_affine_expr(arg, model, n_orig)
+        except ValueError:
+            return True  # non-affine argument → existing univariate path can't lift it
+        return False
+    if isinstance(expr, BinaryOp) and expr.op == "**" and isinstance(expr.right, Constant):
+        p = float(expr.right.value)
+        if p == int(p):
+            return False  # integer powers → monomial / square / distribute machinery
+        # Bare variable / indexed base is a fractional power already.
+        if _get_flat_index(expr.left, model) is not None:
+            return False
+        return True
+    return False
+
+
+def _affine_base_power_curvature(expr: Expression, model: Model, box: dict) -> Optional[str]:
+    """Analytic curvature of ``(affine_base)**p`` from ``p`` and the base sign.
+
+    ``x**p`` is convex for ``p ≥ 1`` or ``p ≤ 0`` and concave for ``0 ≤ p ≤ 1``
+    on ``x > 0``; composition with an affine map preserves curvature. The base
+    sign is checked with a sound interval enclosure (Boyd & Vandenberghe §3.1.5).
+    """
+    if not (isinstance(expr, BinaryOp) and expr.op == "**" and isinstance(expr.right, Constant)):
+        return None
+    p = float(expr.right.value)
+    if p in (0.0, 1.0):
+        return None
+    from discopt._jax.convexity.interval_eval import evaluate_interval
+
+    try:
+        base_iv = evaluate_interval(expr.left, model, box=box)
+    except Exception:
+        return None
+    base_lo = float(np.asarray(base_iv.lo).ravel()[0])
+    if not np.isfinite(base_lo):
+        return None
+    # Outward interval rounding can render a true 0 as a tiny negative; a small
+    # tolerance keeps the nonnegativity test from spuriously abstaining.
+    tol = 1e-9
+    if p < 0.0:
+        return "convex" if base_lo > tol else None
+    if base_lo < -tol:
+        return None  # non-integer / odd powers need a nonnegative base for a clean verdict
+    if p > 1.0:
+        return "convex"
+    return "concave"  # 0 < p < 1
+
+
+def _subdivision_curvature(
+    expr: Expression,
+    model: Model,
+    var: Variable,
+    flat_idx: int,
+    lo: float,
+    hi: float,
+    box: dict,
+) -> Optional[str]:
+    """Sound curvature via a subdivided interval Hessian.
+
+    ``f`` is C² and depends on one variable, so its Hessian is the scalar
+    ``f''`` in entry ``(flat_idx, flat_idx)``. Covering ``[lo, hi]`` with
+    sub-intervals and enclosing ``f''`` on each tightens the dependency-induced
+    looseness of a single whole-box enclosure: if every piece has ``f'' ≥ 0``
+    the function is convex on the union ``[lo, hi]`` (symmetrically for concave).
+    """
+    from discopt._jax.convexity.interval import Interval
+    from discopt._jax.convexity.interval_ad import interval_hessian
+
+    if hi - lo <= _COMPOSITE_CURV_TOL:
+        return None  # pinned — handled by the exact pin value, not an envelope
+    shape = var.shape if var.shape else (1,)
+    n_sub = 4
+    while n_sub <= _COMPOSITE_MAX_SUBDIV:
+        edges = np.linspace(lo, hi, n_sub + 1)
+        all_convex = True
+        all_concave = True
+        finite = True
+        for k in range(n_sub):
+            box[var] = Interval(
+                np.full(shape, edges[k], dtype=np.float64),
+                np.full(shape, edges[k + 1], dtype=np.float64),
+            )
+            try:
+                ad = interval_hessian(expr, model, box=box)
+            except Exception:
+                finite = False
+                break
+            h = ad.hess
+            h_lo = float(h.lo[flat_idx, flat_idx])
+            h_hi = float(h.hi[flat_idx, flat_idx])
+            if not (np.isfinite(h_lo) and np.isfinite(h_hi)):
+                finite = False
+                break
+            if h_lo < -_COMPOSITE_CURV_TOL:
+                all_convex = False
+            if h_hi > _COMPOSITE_CURV_TOL:
+                all_concave = False
+            if not all_convex and not all_concave:
+                break
+        box[var] = Interval(
+            np.full(shape, lo, dtype=np.float64), np.full(shape, hi, dtype=np.float64)
+        )
+        if not finite:
+            return None
+        if all_convex:
+            return "convex"
+        if all_concave:
+            return "concave"
+        n_sub *= 4
+    return None
+
+
+def _composite_curvature(
+    expr: Expression,
+    model: Model,
+    var: Variable,
+    flat_idx: int,
+    lo: float,
+    hi: float,
+    box: dict,
+) -> Optional[str]:
+    """Certified curvature of a single-variable composite, or ``None`` to abstain."""
+    analytic = _affine_base_power_curvature(expr, model, box)
+    if analytic is not None:
+        return analytic
+    return _subdivision_curvature(expr, model, var, flat_idx, lo, hi, box)
+
+
+def _composite_envelope(
+    curvature: str,
+    lo: float,
+    hi: float,
+    value_fn,
+    grad_fn,
+) -> Optional[tuple[tuple, tuple, Optional[float], tuple[float, float]]]:
+    """Build (lower_lines, upper_lines, pin_value, col_bounds) for a composite.
+
+    Lines are ``(slope, intercept)`` in the single variable. For a convex
+    function tangents underestimate and the endpoint secant overestimates; the
+    roles swap for concave. Slopes/values come from exact autodiff, so for a
+    truly-convex (resp. concave) ``f`` each tangent is a supporting line and the
+    secant a chord — a rigorous outer band.
+
+    ``col_bounds`` is a rigorous box on the aux column derived from the same
+    certified curvature: a convex ``f`` attains its maximum at an endpoint, and
+    its underestimating tangents bound it from below (symmetrically for concave).
+    This avoids the interval evaluator, which abstains (``±inf``) on a
+    non-integer power whose base interval grazes zero.
+    """
+    if hi - lo <= _COMPOSITE_CURV_TOL:
+        v = value_fn(0.5 * (lo + hi))
+        if not np.isfinite(v):
+            return None
+        return (), (), float(v), (float(v), float(v))
+
+    pts: list[float] = []
+    for t in (lo, 0.5 * (lo + hi), hi):
+        if all(abs(t - s) > 1e-12 for s in pts):
+            pts.append(float(t))
+
+    f_lo = value_fn(lo)
+    f_hi = value_fn(hi)
+    if not (np.isfinite(f_lo) and np.isfinite(f_hi)):
+        return None
+    secant_slope = (f_hi - f_lo) / (hi - lo)
+    secant_intercept = f_lo - secant_slope * lo
+    if not (np.isfinite(secant_slope) and np.isfinite(secant_intercept)):
+        return None
+
+    tangents: list[tuple[float, float]] = []
+    for t in pts:
+        slope = grad_fn(t)
+        val = value_fn(t)
+        if not (np.isfinite(slope) and np.isfinite(val)):
+            return None
+        tangents.append((float(slope), float(val - slope * t)))
+
+    def _line_span(slope: float, intercept: float) -> tuple[float, float]:
+        a = slope * lo + intercept
+        b = slope * hi + intercept
+        return min(a, b), max(a, b)
+
+    secant = (float(secant_slope), float(secant_intercept))
+    if curvature == "convex":
+        # Max at an endpoint; tangents (underestimators) bound below.
+        col_hi = max(f_lo, f_hi)
+        col_lo = min(_line_span(s, b)[0] for s, b in tangents)
+        return tuple(tangents), (secant,), None, (float(col_lo), float(col_hi))
+    # Concave: min at an endpoint; tangents (overestimators) bound above.
+    col_lo = min(f_lo, f_hi)
+    col_hi = max(_line_span(s, b)[1] for s, b in tangents)
+    return (secant,), tuple(tangents), None, (float(col_lo), float(col_hi))
+
+
+def _collect_composite_univariate_relaxations(
+    model: Model,
+    n_orig: int,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+    start_col: int,
+    claimed_ids: set[int],
+) -> tuple[list[CompositeUnivariateRelaxation], dict[int, int], list[tuple[float, float]]]:
+    """Collect single-variable composite nodes with certified curvature.
+
+    Returns ``(relaxations, var_map, bounds)`` where ``var_map`` maps the node's
+    ``id(expr)`` to its aux column. Abstains silently (no entry) whenever
+    curvature can't be proven, the value range isn't finite, or autodiff fails —
+    abstention drops to the existing warn-and-omit path and never to an unsound
+    cut.
+    """
+    relaxations: list[CompositeUnivariateRelaxation] = []
+    var_map: dict[int, int] = {}
+    bounds: list[tuple[float, float]] = []
+    seen: set[int] = set()
+    col_idx = start_col
+
+    try:
+        import jax
+        import jax.numpy as jnp
+
+        from discopt._jax.dag_compiler import compile_expression
+    except Exception:
+        return relaxations, var_map, bounds
+
+    box = _build_convexity_box(model, flat_lb, flat_ub)
+    base_x = np.zeros(n_orig, dtype=np.float64)
+
+    def maybe_add(expr: Expression) -> None:
+        nonlocal col_idx
+        eid = id(expr)
+        if eid in seen or eid in claimed_ids:
+            return
+        if not _should_claim_composite(expr, model, n_orig):
+            return
+        ref = _composite_referenced_var(expr, model)
+        if ref is None:
+            return
+        var, flat_idx = ref
+        lo = float(flat_lb[flat_idx])
+        hi = float(flat_ub[flat_idx])
+        if not (np.isfinite(lo) and np.isfinite(hi)) or hi < lo:
+            return
+        curvature = _composite_curvature(expr, model, var, flat_idx, lo, hi, box)
+        if curvature is None:
+            return
+        try:
+            f = compile_expression(expr, model)
+            grad_f = jax.grad(lambda xv: jnp.reshape(f(xv), ()))
+        except Exception:
+            return
+
+        def value_fn(t: float) -> float:
+            x = jnp.asarray(base_x).at[flat_idx].set(t)
+            return float(jnp.reshape(f(x), ()))
+
+        def grad_fn(t: float) -> float:
+            x = jnp.asarray(base_x).at[flat_idx].set(t)
+            return float(np.asarray(grad_f(x)).ravel()[flat_idx])
+
+        env = _composite_envelope(curvature, lo, hi, value_fn, grad_fn)
+        if env is None:
+            return
+        lower_lines, upper_lines, pin_value, col_bounds = env
+        seen.add(eid)
+        var_map[eid] = col_idx
+        relaxations.append(
+            CompositeUnivariateRelaxation(
+                expr_id=eid,
+                aux_col=col_idx,
+                var_idx=flat_idx,
+                curvature=curvature,
+                arg_lb=lo,
+                arg_ub=hi,
+                lower_lines=lower_lines,
+                upper_lines=upper_lines,
+                pin_value=pin_value,
+            )
+        )
+        bounds.append(col_bounds)
+        col_idx += 1
+
+    def visit(expr: Expression) -> None:
+        maybe_add(expr)
+        if isinstance(expr, BinaryOp):
+            visit(expr.left)
+            visit(expr.right)
+        elif isinstance(expr, UnaryOp):
+            visit(expr.operand)
+        elif isinstance(expr, FunctionCall):
+            for arg in expr.args:
+                visit(arg)
+        elif isinstance(expr, IndexExpression):
+            if not isinstance(expr.base, Variable):
+                visit(expr.base)
+        elif isinstance(expr, SumExpression):
+            visit(expr.operand)
+        elif isinstance(expr, SumOverExpression):
+            for term in expr.terms:
+                visit(term)
+
+    if model._objective is not None:
+        visit(model._objective.expression)
+    for constraint in model._constraints:
+        visit(constraint.body)
+
+    return relaxations, var_map, bounds
+
+
 def _collect_univariate_relaxations(
     model: Model,
     n_orig: int,
@@ -2024,6 +2443,7 @@ def _linearize_expr(
     univariate_square_var_map: Optional[dict[tuple[int, int], int]] = None,
     flat_lb: Optional[np.ndarray] = None,
     flat_ub: Optional[np.ndarray] = None,
+    composite_var_map: Optional[dict[int, int]] = None,
 ) -> tuple[np.ndarray, float]:
     """Walk expression tree and return (coeff, constant) for linearized form.
 
@@ -2058,6 +2478,12 @@ def _linearize_expr(
         return None
 
     def visit(e: Expression, scale: float) -> None:  # noqa: C901
+        if composite_var_map is not None:
+            aux_col = composite_var_map.get(id(e))
+            if aux_col is not None:
+                coeff[aux_col] += scale
+                return
+
         if isinstance(e, Constant):
             const_acc[0] += scale * float(e.value)
 
@@ -2162,6 +2588,7 @@ def _linearize_expr(
                     fractional_power_var_map=fractional_power_var_map,
                     univariate_var_map=univariate_var_map,
                     monomial_var_map=monomial_var_map,
+                    composite_var_map=composite_var_map,
                 )
                 if decomp is None:
                     raise ValueError(f"Cannot decompose product: {e}")
@@ -2554,6 +2981,24 @@ def build_milp_relaxation(
         integrality_flags.append(0)
         col_idx += 1
 
+    # Single-variable composite nodes (sqrt-of-quadratic, affine-base power,
+    # exp-of-rational, …) whose curvature is certified sound on the node box.
+    _univariate_claimed_ids = {k for k in univariate_var_map if isinstance(k, int)}
+    composite_relaxations, composite_var_map, composite_bounds = (
+        _collect_composite_univariate_relaxations(
+            model,
+            n_orig,
+            flat_lb,
+            flat_ub,
+            col_idx,
+            _univariate_claimed_ids,
+        )
+    )
+    for val_bounds in composite_bounds:
+        all_bounds.append(val_bounds)
+        integrality_flags.append(0)
+        col_idx += 1
+
     univariate_square_relaxations, univariate_square_var_map, univariate_square_bounds = (
         _collect_univariate_square_relaxations(
             model,
@@ -2735,6 +3180,7 @@ def build_milp_relaxation(
         univariate_var_map,
         n_orig,
         monomial_var_map=monomial_var_map,
+        composite_var_map=composite_var_map,
     )
     for key in lifted_bilinear_keys:
         bilinear_var_map[key] = _ensure_bilinear_aux(*key)
@@ -3571,6 +4017,28 @@ def build_milp_relaxation(
                 intercept = _univariate_value(relax.func_name, pt) - slope * pt
                 _add_upper_line(relax, slope, intercept)
 
+    # ── Single-variable composite relaxations (certified curvature) ─────────
+    # z is the aux column for f(x_i); each (slope, intercept) line is in x_i.
+    # lower_lines give ``z ≥ slope·x_i + intercept`` and upper_lines give
+    # ``z ≤ slope·x_i + intercept``. A pinned variable yields an exact equality.
+    for crelax in composite_relaxations:
+        if crelax.pin_value is not None:
+            row = np.zeros(n_total)
+            row[crelax.aux_col] = 1.0
+            _add_row(row, crelax.pin_value)
+            _add_row(-row, -crelax.pin_value)
+            continue
+        for slope, intercept in crelax.lower_lines:
+            row = np.zeros(n_total)
+            row[crelax.var_idx] += slope
+            row[crelax.aux_col] = -1.0
+            _add_row(row, -intercept)
+        for slope, intercept in crelax.upper_lines:
+            row = np.zeros(n_total)
+            row[crelax.var_idx] += -slope
+            row[crelax.aux_col] = 1.0
+            _add_row(row, intercept)
+
     for table in finite_domain_trig_square_tables:
         base_col = table.square.base_col
         square_col = table.square.aux_col
@@ -3867,6 +4335,7 @@ def build_milp_relaxation(
                     univariate_square_var_map=univariate_square_var_map,
                     flat_lb=flat_lb,
                     flat_ub=flat_ub,
+                    composite_var_map=composite_var_map,
                 )
             except ValueError as err:
                 logger.debug(
@@ -3912,6 +4381,7 @@ def build_milp_relaxation(
                 univariate_square_var_map=univariate_square_var_map,
                 flat_lb=flat_lb,
                 flat_ub=flat_ub,
+                composite_var_map=composite_var_map,
             )
             # body ≤ 0  →  c @ z + const ≤ 0  →  c @ z ≤ -const
             if sense == "<=":
@@ -3979,6 +4449,7 @@ def build_milp_relaxation(
                 univariate_square_var_map=univariate_square_var_map,
                 flat_lb=flat_lb,
                 flat_ub=flat_ub,
+                composite_var_map=composite_var_map,
             )
         objective_bound_valid = True
     except ValueError as err:
@@ -4054,6 +4525,7 @@ def build_milp_relaxation(
             k: v for k, v in univariate_var_map.items() if not isinstance(k, int)
         },
         "univariate_relaxations": univariate_relaxations,
+        "composite_relaxations": composite_relaxations,
         "univariate_piecewise_relaxations": piecewise_univariate_relaxations,
         "univariate_square": univariate_square_var_map,
         "univariate_square_relaxations": univariate_square_relaxations,
