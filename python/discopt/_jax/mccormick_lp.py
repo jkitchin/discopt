@@ -72,6 +72,24 @@ class MccormickLPRelaxer:
         """True if the model has any bilinear / trilinear / multilinear product."""
         return bool(self._terms.bilinear or self._terms.trilinear or self._terms.multilinear)
 
+    @property
+    def has_relaxable_nonlinearity(self) -> bool:
+        """True if the model has any nonlinear term the LP relaxer can bound.
+
+        :func:`build_milp_relaxation` emits valid outer-approximation cuts not
+        only for products (bilinear/trilinear/multilinear) but also for
+        ``monomial`` (x^n, n≥2) and ``fractional_power`` (x^p) terms. Gating the
+        spatial LP relaxer on :attr:`has_bilinear` alone routes purely
+        univariate-power nonconvex models to the McCormick "nlp" bound, which is
+        not a valid dual bound for nonconvex models (issue #120). The LP
+        relaxation is a rigorous polyhedral outer approximation for every term
+        type here, so engaging it on these models yields a valid lower bound
+        (and any per-node term it cannot relax safely errors out to "no bound"
+        rather than an unsound one).
+        """
+        t = self._terms
+        return bool(t.bilinear or t.trilinear or t.multilinear or t.monomial or t.fractional_power)
+
     def solve_at_node(
         self,
         node_lb: np.ndarray,
