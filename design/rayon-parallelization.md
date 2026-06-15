@@ -1,6 +1,6 @@
 # Parallelizing the Rust MILP engine with Rayon — design write-up
 
-**Status:** implemented behind the `parallel` cargo feature (off by default); benchmarked.
+**Status:** implemented behind the `parallel` cargo feature (**on by default**); benchmarked.
 **Scope:** the pure-Rust MILP branch-and-bound driver (`crates/discopt-core/src/bnb/milp_driver.rs`).
 **Author:** design note + results.
 
@@ -27,8 +27,15 @@ counts — and every per-instance objective — are bit-identical** across all t
 configurations, confirming the parallel path explores the exact same tree as serial:
 correctness and determinism are preserved, only wall-clock changes.
 
-Not yet done (deferred, see §4/§7): parallel *strong branching* and making the
-feature default. The size gate `PAR_MIN_BATCH` is set conservatively at 4.
+The `parallel` feature is **on by default** (in both `discopt-core` and
+`discopt-python`). The determinism argument in §3 is independent of thread count,
+the measured tree is bit-identical to serial, and CI guards the equivalence on
+every run (it builds and tests both `--no-default-features` and the default, and
+diffs the `par_bench` node/pivot/objective output across the two). Build with
+`--no-default-features` for the reference serial path.
+
+Not yet done (deferred, see §4): parallel *strong branching*. The size gate
+`PAR_MIN_BATCH` is set conservatively at 4.
 
 ## 1. Summary
 
@@ -226,13 +233,17 @@ prerequisite for parallelism to benefit real Python callers.
   (already true today, just concurrently). Peak memory rises by ~`min(cores,64)×` the
   per-node working set — modest.
 
-## 7. Implementation checklist (when greenlit)
+## 7. Implementation checklist (done)
+
+This is the original plan; all steps below have landed. The feature shipped
+**on by default** once the determinism guard (step 7) was wired into CI.
 
 1. Add `rayon` to `crates/discopt-core/Cargo.toml`. Pure-Rust, preserves clean-wheel
    builds. (MSRV 1.75 is fine; current rayon supports it.)
-2. **Gate behind a cargo feature** (e.g. `parallel`, default off initially) so the
-   serial path stays the reference until benchmarks land. Expose a runtime toggle /
-   thread-count via `MilpOptions` and a `solve_milp_py` kwarg if desired.
+2. **Gate behind a cargo feature** (`parallel`). It was developed default-off as the
+   serial path stayed the reference; it ships **default-on** now that benchmarks
+   confirm a bit-identical tree and CI diffs the two paths on every run (step 7).
+   Build `--no-default-features` for the serial reference.
 3. Refactor the batch body into a free function `fn solve_node(...) -> NodeOutput`
    taking only `&`-shared inputs — this makes both the serial and parallel paths call
    the same code and keeps the diff reviewable.
@@ -264,3 +275,10 @@ criterion bench to get a serial baseline, (3) add the feature-gated `par_iter` b
 loop and measure, (4) tune the size gate, (5) only then consider parallel strong
 branching. Keep correctness/determinism tests green at every step before making the
 parallel path default.
+
+**Done:** steps (1)–(4) and the GIL fix shipped, and the parallel path is now the
+default. A CI step (`Parallel ≡ serial tree equivalence`) builds and tests both
+`--no-default-features` and the default feature set and diffs the `par_bench`
+node/pivot/objective output, so the serial reference and the parallel≡serial
+invariant stay guarded on every run. Parallel strong branching (§4) remains
+deferred.

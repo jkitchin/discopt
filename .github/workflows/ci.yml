@@ -25,8 +25,26 @@ jobs:
         with:
           workspaces: ". -> target"
       - run: cargo build -p discopt-core
+      # Default features include `parallel` (rayon node loop).
       - run: cargo test -p discopt-core
+      # The serial path is the correctness reference; keep it building and green
+      # so it can't rot now that `parallel` is the default.
+      - run: cargo test -p discopt-core --no-default-features
       - run: cargo clippy -p discopt-core -- -D warnings
+      - run: cargo clippy -p discopt-core --no-default-features -- -D warnings
+      # Determinism guard: the parallel and serial batch loops must explore a
+      # bit-identical B&B tree. Run the knapsack bench under both feature sets
+      # and diff everything except the mode banner and the wall-clock line
+      # (node counts, pivot counts, and per-instance objectives must match).
+      - name: Parallel ≡ serial tree equivalence
+        run: |
+          cargo run --release -q -p discopt-core --example par_bench \
+            --no-default-features \
+            | grep -vE '^mode:|^total wall:' > /tmp/par_bench_serial.txt
+          cargo run --release -q -p discopt-core --example par_bench \
+            | grep -vE '^mode:|^total wall:' > /tmp/par_bench_parallel.txt
+          diff -u /tmp/par_bench_serial.txt /tmp/par_bench_parallel.txt \
+            && echo "OK: parallel path explores an identical tree to serial"
 
   lint:
     name: Lint + typecheck
