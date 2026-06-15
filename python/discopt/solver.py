@@ -2039,6 +2039,65 @@ def solve_model(
             python_time=wall_time - rust_time - jax_time,
         )
 
+    # --- Root OBBT over the McCormick relaxation (range reduction) ---
+    # For nonconvex models the spatial B&B solves an LP-form McCormick
+    # relaxation at every node; tightening the root box here strengthens that
+    # envelope for the *entire* tree. Unlike the per-incumbent linear-only OBBT
+    # below, this min/max-es each variable over the full relaxation polytope,
+    # so it reduces ranges even when the only constraints are nonlinear (the LP
+    # polytope is a valid outer approximation, so every tightening is sound).
+    # Skipped for known-convex models (handled by the convex/NLP path) and for
+    # pure-integer models (no continuous variable to spatial-branch on).
+    _obbt_has_continuous = any(v.var_type == VarType.CONTINUOUS for v in model._variables)
+    _obbt_known_convex = _root_convexity_known and _root_is_convex
+    if (
+        bool(kwargs.get("obbt_at_root", True))
+        and model._objective is not None
+        and _obbt_has_continuous
+        and not _obbt_known_convex
+        and n_vars <= 500
+    ):
+        # OBBT wall time falls into python_time (computed as the remainder at
+        # the end of the solve), so no separate timer is tracked here.
+        try:
+            from discopt._jax.obbt import obbt_tighten_root
+
+            _obbt_budget = min(max(time_limit * 0.1, 2.0), 15.0)
+            _obbt_res = obbt_tighten_root(
+                model,
+                lb,
+                ub,
+                rounds=3,
+                deadline=time.perf_counter() + _obbt_budget,
+                superposition=(relaxation_arithmetic == "superposition"),
+                prefer_pounce=nlp_solver == "pounce",
+            )
+            if _obbt_res.infeasible:
+                wall_time = time.perf_counter() - t_start
+                return SolveResult(
+                    status="infeasible",
+                    objective=None,
+                    bound=None,
+                    gap=None,
+                    x=None,
+                    wall_time=wall_time,
+                    node_count=0,
+                    rust_time=rust_time,
+                    jax_time=jax_time,
+                    python_time=wall_time - rust_time - jax_time,
+                )
+            if _obbt_res.n_tightened > 0:
+                lb = np.maximum(lb, _obbt_res.lb)
+                ub = np.minimum(ub, _obbt_res.ub)
+                logger.info(
+                    "Root OBBT tightened %d bounds over %d sweep(s) (%.2fs)",
+                    _obbt_res.n_tightened,
+                    _obbt_res.n_rounds,
+                    _obbt_res.total_lp_time,
+                )
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("Root OBBT failed: %s", e)
+
     # --- Create PyTreeManager (Rust) ---
     t_rust_start = time.perf_counter()
     tree = PyTreeManager(

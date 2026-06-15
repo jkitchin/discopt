@@ -681,3 +681,153 @@ def run_obbt_on_relaxation(
         n_tightened=n_tightened,
         total_lp_time=total_lp_time,
     )
+
+
+@dataclass
+class RootObbtResult:
+    """Result of a structural root OBBT pass over the McCormick relaxation."""
+
+    lb: np.ndarray
+    ub: np.ndarray
+    n_tightened: int
+    n_rounds: int
+    total_lp_time: float
+    infeasible: bool = False
+
+
+def obbt_tighten_root(
+    model: Model,
+    lb: np.ndarray,
+    ub: np.ndarray,
+    *,
+    rounds: int = 3,
+    deadline: Optional[float] = None,
+    time_limit_per_lp: float = 0.2,
+    min_width: float = 1e-6,
+    eps: float = 1e-7,
+    incumbent_cutoff: Optional[float] = None,
+    superposition: bool = False,
+    prefer_pounce: bool = False,
+) -> RootObbtResult:
+    """Structural root OBBT over the LP-form McCormick relaxation.
+
+    For each original variable, solves ``min x_i`` and ``max x_i`` subject to
+    the McCormick LP relaxation of the model at the current bound box, and
+    tightens the variable's bound to the LP optimum.  The LP feasible region is
+    a polyhedral OUTER approximation of the nonconvex MINLP feasible set, so any
+    tightened bound is rigorously valid — OBBT never removes a feasible point.
+    Tightening shrinks the box, which strengthens the McCormick envelopes, so
+    the pass is iterated up to ``rounds`` times (stopping early at a fixpoint).
+
+    Unlike :func:`run_obbt` (which only sees the model's *linear* constraints
+    and is therefore a no-op for models whose only constraints are nonlinear),
+    this builds the full relaxation and so tightens bounds from the bilinear /
+    trilinear / monomial / fractional-power envelopes themselves.
+
+    The pass is purely a tightening: the returned box is always a subset of the
+    input box (intersected, never loosened), integer bounds are rounded inward,
+    and any internal failure returns the input box unchanged (``n_tightened=0``)
+    rather than raising — it can never make the solve unsound.
+
+    Parameters
+    ----------
+    model : Model
+        The (already reformulated) MINLP model.
+    lb, ub : np.ndarray
+        Current flat variable bounds (length = number of scalar variables).
+    rounds : int
+        Maximum OBBT sweeps; each sweep rebuilds the envelope at the tightened
+        box.  Stops early when a sweep tightens nothing.
+    deadline : float, optional
+        Absolute ``time.perf_counter()`` budget; the loop aborts when reached.
+    incumbent_cutoff : float, optional
+        If a feasible objective is known, add ``obj <= cutoff`` to the polytope
+        (optimality-based tightening) — often a much larger reduction.
+    """
+    from discopt.modeling.core import VarType
+
+    lb = np.asarray(lb, dtype=np.float64).copy()
+    ub = np.asarray(ub, dtype=np.float64).copy()
+    n_orig = len(lb)
+
+    # Per-variable integrality, to round integer bounds inward after each sweep.
+    is_int = np.zeros(n_orig, dtype=bool)
+    flat_idx = 0
+    for v in model._variables:
+        flag = v.var_type in (VarType.BINARY, VarType.INTEGER)
+        for _ in range(v.size):
+            if flat_idx < n_orig:
+                is_int[flat_idx] = flag
+            flat_idx += 1
+
+    total_tight = 0
+    total_lp_time = 0.0
+    n_rounds = 0
+    try:
+        from discopt._jax.mccormick_lp import (
+            MccormickLPRelaxer,
+            build_milp_relaxation,
+        )
+
+        relaxer = MccormickLPRelaxer(model, superposition=superposition)
+        if not relaxer.has_relaxable_nonlinearity:
+            return RootObbtResult(lb, ub, 0, 0, 0.0)
+
+        for _ in range(max(1, rounds)):
+            if deadline is not None and time.perf_counter() >= deadline:
+                break
+            # OBBT requires a finite box to build the envelopes; bail (return
+            # whatever tightening prior rounds achieved) if any bound is open.
+            if not (np.all(np.isfinite(lb)) and np.all(np.isfinite(ub))):
+                break
+            try:
+                milp, _ = build_milp_relaxation(
+                    relaxer._model,
+                    relaxer._terms,
+                    relaxer._disc,
+                    bound_override=(lb, ub),
+                    superposition=relaxer._superposition,
+                )
+            except Exception:
+                break
+
+            res = run_obbt_on_relaxation(
+                milp,
+                relaxer._n_orig,
+                time_limit_per_lp=time_limit_per_lp,
+                incumbent_cutoff=incumbent_cutoff,
+                min_width=min_width,
+                eps=eps,
+                deadline=deadline,
+                prefer_pounce=prefer_pounce,
+            )
+            total_lp_time += res.total_lp_time
+            n_rounds += 1
+
+            sweep_tight = 0
+            for i in range(min(n_orig, len(res.tightened_lb))):
+                new_lo = res.tightened_lb[i]
+                new_hi = res.tightened_ub[i]
+                if is_int[i]:
+                    new_lo = np.ceil(new_lo - eps)
+                    new_hi = np.floor(new_hi + eps)
+                if new_lo > lb[i] + eps:
+                    lb[i] = new_lo
+                    sweep_tight += 1
+                if new_hi < ub[i] - eps:
+                    ub[i] = new_hi
+                    sweep_tight += 1
+                if lb[i] > ub[i] + 1e-9:
+                    # The tightened box is empty -> the (sub)problem is infeasible.
+                    return RootObbtResult(
+                        lb, ub, total_tight + sweep_tight, n_rounds, total_lp_time, True
+                    )
+
+            total_tight += sweep_tight
+            if sweep_tight == 0:
+                break
+    except Exception:
+        # Never let bound tightening crash or corrupt the solve.
+        return RootObbtResult(lb, ub, total_tight, n_rounds, total_lp_time)
+
+    return RootObbtResult(lb, ub, total_tight, n_rounds, total_lp_time)

@@ -11,6 +11,7 @@ import numpy as np
 from discopt._jax.obbt import (
     ObbtResult,
     _extract_linear_constraints,
+    obbt_tighten_root,
     run_obbt,
 )
 from discopt.modeling.core import Model
@@ -516,3 +517,93 @@ class TestObbtIncumbentCutoff:
         # Should not crash, just skip cutoff
         result = run_obbt(m, incumbent_cutoff=25.0)
         assert result.tightened_ub[0] <= 5.0 + 1e-6
+
+
+# ─────────────────────────────────────────────────────────────
+# Root OBBT over the McCormick relaxation (range reduction)
+# ─────────────────────────────────────────────────────────────
+
+
+class TestRootObbt:
+    """obbt_tighten_root tightens via the nonlinear relaxation polytope.
+
+    Unlike run_obbt (linear constraints only), this sees the bilinear /
+    monomial envelopes, so it reduces ranges even when the only constraint is
+    nonlinear. Every tightening is a valid outer-approximation deduction, so
+    the returned box is always a subset of the input box.
+    """
+
+    def _bilinear_model(self):
+        # min x+y s.t. x*y <= 5, x in [4,10], y in [0,10].
+        # McCormick: x*y >= xlo*y = 4y, so 4y <= 5 => y <= 1.25.
+        m = Model("bil")
+        m.continuous("x", lb=4, ub=10)
+        m.continuous("y", lb=0, ub=10)
+        x, y = m._variables[0], m._variables[1]
+        m.minimize(x + y)
+        m.subject_to(x * y <= 5)
+        return m
+
+    def test_tightens_nonlinear_only_bound(self):
+        m = self._bilinear_model()
+        lb = np.array([4.0, 0.0])
+        ub = np.array([10.0, 10.0])
+        r = obbt_tighten_root(m, lb, ub)
+        assert r.n_tightened >= 1
+        assert not r.infeasible
+        # y's upper bound is reduced to the envelope-implied 1.25.
+        assert r.ub[1] <= 2.0
+        assert abs(r.ub[1] - 1.25) <= 1e-4
+
+    def test_never_loosens_bounds(self):
+        m = self._bilinear_model()
+        lb = np.array([4.0, 0.0])
+        ub = np.array([10.0, 10.0])
+        r = obbt_tighten_root(m, lb, ub)
+        # The returned box must be a subset of the input box (sound).
+        assert np.all(r.lb >= lb - 1e-9)
+        assert np.all(r.ub <= ub + 1e-9)
+        assert np.all(r.lb <= r.ub + 1e-9)
+
+    def test_linear_model_is_noop(self):
+        # No relaxable nonlinearity -> nothing for relaxation OBBT to tighten.
+        m = Model("lin")
+        m.continuous("x", lb=0, ub=10)
+        m.continuous("y", lb=0, ub=10)
+        x, y = m._variables[0], m._variables[1]
+        m.minimize(x + y)
+        m.subject_to(x + y <= 5)
+        lb = np.array([0.0, 0.0])
+        ub = np.array([10.0, 10.0])
+        r = obbt_tighten_root(m, lb, ub)
+        assert r.n_tightened == 0
+        np.testing.assert_allclose(r.lb, lb)
+        np.testing.assert_allclose(r.ub, ub)
+
+    def test_integer_bounds_rounded_inward(self):
+        # The integer factor's tightened bound must be rounded to an integer.
+        # z integer in [0,10], w continuous in [3,10], z*w <= 5 with w>=3
+        # => z <= 5/3 = 1.66.., rounded inward to z <= 1.
+        m = Model("intbil")
+        m.integer("z", lb=0, ub=10)
+        m.continuous("w", lb=3, ub=10)
+        z, w = m._variables[0], m._variables[1]
+        m.minimize(z + w)
+        m.subject_to(z * w <= 5)
+        lb = np.array([0.0, 3.0])
+        ub = np.array([10.0, 10.0])
+        r = obbt_tighten_root(m, lb, ub)
+        # z's upper bound is an integer and at most 1.
+        assert r.ub[0] == np.floor(r.ub[0])
+        assert r.ub[0] <= 1.0
+
+    def test_returns_input_box_on_unbounded(self):
+        # An open box can't build finite McCormick envelopes; return unchanged
+        # rather than raising, so the solve stays sound.
+        m = self._bilinear_model()
+        lb = np.array([4.0, 0.0])
+        ub = np.array([10.0, np.inf])
+        r = obbt_tighten_root(m, lb, ub)
+        assert not r.infeasible
+        # Must not loosen and must not crash.
+        assert np.all(r.lb >= lb - 1e-9)
