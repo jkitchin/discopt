@@ -622,6 +622,7 @@ def _decompose_product(
     model: Model,
     fractional_power_var_map: Optional[dict[tuple[int, float], int]] = None,
     univariate_var_map: Optional[dict[object, int]] = None,
+    monomial_var_map: Optional[dict[tuple[int, int], int]] = None,
 ) -> tuple[float, list[int]] | None:
     """Decompose a product expression into (scalar, [flat_or_aux_idx, ...]).
 
@@ -629,6 +630,13 @@ def _decompose_product(
     Constants are accumulated into the scalar; variable references and
     registered lifted sub-expressions are appended to the index list (using
     their MILP column indices).
+
+    When ``monomial_var_map`` is supplied, a *mixed repeated-factor* product
+    such as ``x*x*y`` is collapsed: the repeated original-variable group ``x*x``
+    is replaced by its monomial aux column (``x**2``), leaving ``[col(x**2), y]``
+    — a lifted bilinear pair. This lets the standard McCormick pipeline relax
+    ``x**2 * y`` (one monomial envelope + one bilinear envelope) instead of
+    rejecting it as an unsupported repeated-factor term.
     """
     scalar: list[float] = [1.0]
     var_indices: list[int] = []
@@ -663,9 +671,40 @@ def _decompose_product(
                     return True
         return False
 
-    if visit(expr):
-        return scalar[0], var_indices
-    return None
+    if not visit(expr):
+        return None
+
+    # Collapse mixed repeated-factor groups (x*x*y) into monomial aux columns
+    # so the product reduces to distinct lifted factors the McCormick pipeline
+    # can relax. Pure monomials (x*x with a single unique base) are left intact
+    # for the dedicated monomial branch in the linearizer.
+    if monomial_var_map:
+        n_orig = sum(v.size for v in model._variables)
+        counts: dict[int, int] = {}
+        for i in var_indices:
+            if i < n_orig:
+                counts[i] = counts.get(i, 0) + 1
+        repeated = {i for i, c in counts.items() if c >= 2}
+        if repeated and len(set(var_indices)) >= 2:
+            collapsed: list[int] = []
+            seen: set[int] = set()
+            ok = True
+            for i in var_indices:
+                if i in repeated:
+                    if i in seen:
+                        continue
+                    col = monomial_var_map.get((i, counts[i]))
+                    if col is None:
+                        ok = False
+                        break
+                    collapsed.append(col)
+                    seen.add(i)
+                else:
+                    collapsed.append(i)
+            if ok:
+                var_indices = collapsed
+
+    return scalar[0], var_indices
 
 
 def _collect_lifted_bilinear_products(
@@ -673,6 +712,7 @@ def _collect_lifted_bilinear_products(
     fractional_power_var_map: dict[tuple[int, float], int],
     univariate_var_map: dict[object, int],
     n_orig: int,
+    monomial_var_map: Optional[dict[tuple[int, int], int]] = None,
 ) -> list[tuple[int, int]]:
     """Return products between original variables and lifted auxiliary columns."""
     keys: set[tuple[int, int]] = set()
@@ -685,6 +725,7 @@ def _collect_lifted_bilinear_products(
                     model,
                     fractional_power_var_map=fractional_power_var_map,
                     univariate_var_map=univariate_var_map,
+                    monomial_var_map=monomial_var_map,
                 )
                 if decomp is not None:
                     _scalar, indices = decomp
@@ -1981,6 +2022,8 @@ def _linearize_expr(
     n_total_vars: int,
     fractional_power_var_map: Optional[dict[tuple[int, float], int]] = None,
     univariate_square_var_map: Optional[dict[tuple[int, int], int]] = None,
+    flat_lb: Optional[np.ndarray] = None,
+    flat_ub: Optional[np.ndarray] = None,
 ) -> tuple[np.ndarray, float]:
     """Walk expression tree and return (coeff, constant) for linearized form.
 
@@ -1989,10 +2032,30 @@ def _linearize_expr(
 
     Nonlinear terms must have a corresponding auxiliary variable in the maps;
     raises ValueError if an unregistered nonlinear term is encountered.
+
+    When ``flat_lb``/``flat_ub`` are supplied, any nonlinear term whose base
+    variable is *pinned* at this node (``ub - lb`` within tolerance — produced
+    by spatial branching driving a domain to a point) is folded to its exact
+    constant value instead of requiring an auxiliary column. The aux-column
+    builders intentionally skip degenerate (zero-width) domains, so without
+    this fold a pinned monomial/fractional-power term would fail to linearize
+    and silently sink the node's objective bound to "feasibility only".
     """
     coeff = np.zeros(n_total_vars, dtype=np.float64)
     const_acc: list[float] = [0.0]
     n_orig = sum(var.size for var in model._variables)
+
+    _PIN_TOL = 1e-9
+
+    def _pinned_value(idx: int) -> Optional[float]:
+        """Exact value of variable ``idx`` if pinned at this node, else None."""
+        if flat_lb is None or flat_ub is None or idx >= len(flat_lb):
+            return None
+        lo = float(flat_lb[idx])
+        hi = float(flat_ub[idx])
+        if hi - lo <= _PIN_TOL:
+            return 0.5 * (lo + hi)
+        return None
 
     def visit(e: Expression, scale: float) -> None:  # noqa: C901
         if isinstance(e, Constant):
@@ -2068,10 +2131,18 @@ def _linearize_expr(
                             if key in monomial_var_map:
                                 coeff[monomial_var_map[key]] += scale
                                 return
+                            pinned = _pinned_value(flat)
+                            if pinned is not None:
+                                const_acc[0] += scale * (pinned**n_int)
+                                return
                             raise ValueError(f"Monomial {key} not in monomial_var_map")
                     fp_key = (flat, exp_val)
                     if fractional_power_var_map and fp_key in fractional_power_var_map:
                         coeff[fractional_power_var_map[fp_key]] += scale
+                        return
+                    pinned = _pinned_value(flat)
+                    if pinned is not None and pinned >= 0.0:
+                        const_acc[0] += scale * (pinned**exp_val)
                         return
                     raise ValueError(f"Fractional power {fp_key} has no aux column")
                 raise ValueError(f"Cannot linearize power expression: {e}")
@@ -2090,10 +2161,25 @@ def _linearize_expr(
                     model,
                     fractional_power_var_map=fractional_power_var_map,
                     univariate_var_map=univariate_var_map,
+                    monomial_var_map=monomial_var_map,
                 )
                 if decomp is None:
                     raise ValueError(f"Cannot decompose product: {e}")
                 c, indices = decomp
+                # Fold pinned factors (lb==ub at this node) into the constant
+                # coefficient — their value is exact, lowering the product's
+                # arity so a partially-pinned bilinear/trilinear collapses to a
+                # lower-order term (or a constant) instead of demanding an aux
+                # column the builder skipped for the degenerate domain.
+                if (flat_lb is not None or flat_ub is not None) and indices:
+                    kept_indices: list[int] = []
+                    for idx in indices:
+                        pinned = _pinned_value(idx)
+                        if pinned is not None:
+                            c *= pinned
+                        else:
+                            kept_indices.append(idx)
+                    indices = kept_indices
                 unique = list(dict.fromkeys(indices))
                 if len(indices) == 0:
                     const_acc[0] += scale * c
@@ -2648,6 +2734,7 @@ def build_milp_relaxation(
         fractional_power_var_map,
         univariate_var_map,
         n_orig,
+        monomial_var_map=monomial_var_map,
     )
     for key in lifted_bilinear_keys:
         bilinear_var_map[key] = _ensure_bilinear_aux(*key)
@@ -3778,6 +3865,8 @@ def build_milp_relaxation(
                     n_total,
                     fractional_power_var_map=fractional_power_var_map,
                     univariate_square_var_map=univariate_square_var_map,
+                    flat_lb=flat_lb,
+                    flat_ub=flat_ub,
                 )
             except ValueError as err:
                 logger.debug(
@@ -3821,6 +3910,8 @@ def build_milp_relaxation(
                 n_total,
                 fractional_power_var_map=fractional_power_var_map,
                 univariate_square_var_map=univariate_square_var_map,
+                flat_lb=flat_lb,
+                flat_ub=flat_ub,
             )
             # body ≤ 0  →  c @ z + const ≤ 0  →  c @ z ≤ -const
             if sense == "<=":
@@ -3886,6 +3977,8 @@ def build_milp_relaxation(
                 n_total,
                 fractional_power_var_map=fractional_power_var_map,
                 univariate_square_var_map=univariate_square_var_map,
+                flat_lb=flat_lb,
+                flat_ub=flat_ub,
             )
         objective_bound_valid = True
     except ValueError as err:
