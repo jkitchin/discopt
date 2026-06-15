@@ -1651,6 +1651,12 @@ def solve_model(
         _fr_ok, _fr_convex, _ = _classify_model_convexity(model)
         if _fr_ok and not _fr_convex:
             model = factorable_reformulate(model)
+        # A *convex* model with a clearable denominator is deliberately left
+        # untouched here: many such divisions (e.g. the rotated-SOC ``x**2/z``)
+        # are solved exactly by the convex NLP fast path, and clearing would
+        # needlessly destroy that structure. Only if the convex NLP later *fails*
+        # to certify do we clear and fall back to spatial B&B (see the convex
+        # fast-path block below).
 
     # --- Build Rust model representation for FBBT ---
     _model_repr = None
@@ -1958,7 +1964,41 @@ def solve_model(
             initial_point=initial_point,
         )
         result.convex_fast_path = True
-        return result
+        if result.status == "optimal":
+            return result
+        # The convex NLP did not certify (e.g. an ill-conditioned division whose
+        # denominator reaches toward zero, like st_e17's 0.2458*x0**2/x1 with
+        # x1 down to 1e-5). If the model has a sign-definite non-constant
+        # denominator — which the relaxation otherwise drops to general_nl —
+        # clear it (exact, value-preserving) and fall back to the sound spatial
+        # B&B, which can certify it. Only clearing is applied (no
+        # convexity-destroying mixed-product lift). When nothing is clearable,
+        # return the NLP result unchanged (no regression).
+        from discopt._jax.factorable_reform import has_clearable_denominator
+
+        if has_clearable_denominator(model):
+            cleared = factorable_reformulate(model, clear_only=True)
+            if cleared is not model:
+                logger.info(
+                    "Convex NLP did not certify (status=%s); clearing sign-definite "
+                    "denominator and retrying via spatial B&B",
+                    result.status,
+                )
+                model = cleared
+                _pure_continuous_is_convex = False
+                _root_is_convex = False
+                _root_constraint_mask = None  # stale: cleared constraint is nonconvex
+                try:
+                    from discopt._rust import model_to_repr
+
+                    _model_repr = model_to_repr(model, getattr(model, "_builder", None))
+                except Exception:
+                    _model_repr = None
+                # Fall through to the spatial B&B below (rebuilt from `model`).
+            else:
+                return result
+        else:
+            return result
 
     # --- Pure continuous: solve directly only when spatial search was not requested ---
     if (

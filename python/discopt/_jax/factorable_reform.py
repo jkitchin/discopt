@@ -215,8 +215,8 @@ def _lift_expr(expr: Expression, model: Model, lifter: _Lifter) -> Expression:
 def _find_clearable_denominator(expr: Expression, model: Model):
     """Return the denominator ``D`` of the first division term ``N/D`` in
     *expr*'s additive structure whose ``D`` is non-constant and sign-definite
-    over the variable box, together with its sign (+1 or -1).  ``None`` if no
-    such division exists."""
+    over the variable box, as ``(D, sign, dmin)`` where ``sign`` is +1/-1 and
+    ``dmin = min |D|`` over the box.  ``None`` if no such division exists."""
     if isinstance(expr, BinaryOp):
         if expr.op in ("+", "-"):
             found = _find_clearable_denominator(expr.left, model)
@@ -228,9 +228,9 @@ def _find_clearable_denominator(expr: Expression, model: Model):
             if not isinstance(d, Constant):
                 lo, hi = _bound_expression(d, model)
                 if lo > _ZERO_MARGIN:
-                    return d, 1
+                    return d, 1, lo
                 if hi < -_ZERO_MARGIN:
-                    return d, -1
+                    return d, -1, -hi
             # Search the numerator for a nested division.
             return _find_clearable_denominator(expr.left, model)
     if isinstance(expr, UnaryOp) and expr.op == "neg":
@@ -263,15 +263,34 @@ _FLIP = {"<=": ">=", ">=": "<=", "==": "=="}
 
 def _clear_divisions(body: Expression, sense: str, model: Model):
     """Clear every sign-definite denominator from a constraint ``body sense 0``.
-    Returns ``(new_body, new_sense)``."""
+    Returns ``(new_body, new_sense)``.
+
+    Multiplying a constraint through by a denominator ``D`` rescales it by
+    ``D(x)``.  When ``|D|`` can be < 1 over the box, a *gross* violation of the
+    original constraint shrinks proportionally in the cleared form — e.g.
+    clearing ``6 - x0 + 0.2458 x0**2/x1 <= 0`` by ``x1 in [1e-5, 30]`` turns a
+    violation of 6.0 into ``6.0 * x1 ~ 6e-5``, which then slips *under* the
+    absolute incumbent-feasibility tolerance (1e-4).  The spatial-B&B would then
+    accept an infeasible point as a feasible incumbent and certify it — a
+    false-optimal.  To keep the fixed absolute tolerance sound, divide the
+    cleared body by ``dmin = min |D|`` so the scaled magnitude is never *smaller*
+    than the original (``|D(x)| / dmin >= 1`` everywhere in the box).  This is
+    exact (division by a positive constant preserves the feasible set) and only
+    ever makes the feasibility test stricter, never looser.
+    """
+    scale = 1.0
     for _ in range(8):  # bounded: each pass clears one denominator family
         found = _find_clearable_denominator(body, model)
         if found is None:
             break
-        denom, sign = found
+        denom, sign, dmin = found
         body = _multiply_through(body, denom)
         if sign < 0:
             sense = _FLIP[sense]
+        if dmin < 1.0:
+            scale /= dmin
+    if scale != 1.0:
+        body = BinaryOp("*", Constant(scale), body)
     return body, sense
 
 
@@ -296,6 +315,25 @@ def has_factorable_work(model: Model) -> bool:
     return any(isinstance(c, Constraint) and scan(c.body) for c in model._constraints)
 
 
+def has_clearable_denominator(model: Model) -> bool:
+    """True if any constraint has a sign-definite, non-constant denominator that
+    denominator clearing would rewrite.
+
+    Distinct from :func:`has_factorable_work`, which also fires on mixed
+    repeated-factor products.  The solver uses this to decide whether a
+    *convex* model is worth clearing: a non-constant division drops to
+    ``general_nl`` and so cannot be bounded by the relaxation (no dual bound, no
+    certification), and clearing a sign-definite denominator is exact — so it is
+    a strict improvement for such models, unlike the mixed-product lift which can
+    only destroy convexity.  Objective ratios are excluded: clearing multiplies a
+    *constraint* through by its denominator and has no analogue for an objective.
+    """
+    return any(
+        isinstance(c, Constraint) and _find_clearable_denominator(c.body, model) is not None
+        for c in model._constraints
+    )
+
+
 def _scan_for_mixed_product(expr: Expression, model: Model) -> bool:
     if isinstance(expr, BinaryOp):
         if expr.op == "*":
@@ -312,13 +350,20 @@ def _scan_for_mixed_product(expr: Expression, model: Model) -> bool:
     return False
 
 
-def factorable_reformulate(model: Model) -> Model:
+def factorable_reformulate(model: Model, *, clear_only: bool = False) -> Model:
     """Return a model equivalent to *model* with sign-definite denominators
     cleared and mixed repeated-factor products lifted to bilinear form.
 
     If neither rewrite applies, *model* is returned unchanged.  On any
     unexpected error the original model is returned, so the pass can never make
     a previously-solvable model unsolvable.
+
+    ``clear_only`` restricts the pass to denominator clearing and skips the
+    mixed repeated-factor product lift entirely.  The lift distributes products
+    and introduces ``w == x**k`` aux variables, which destroys convex structure
+    even where it was unnecessary; clearing alone is the right rewrite for a
+    *convex* model that merely needs its non-constant division exposed to the
+    relaxation (see ``has_clearable_denominator``).
     """
     try:
         if not has_factorable_work(model):
@@ -337,6 +382,15 @@ def factorable_reformulate(model: Model) -> Model:
                 rebuilt.append(c)  # pass through anything exotic untouched
                 continue
             body, sense = _clear_divisions(c.body, c.sense, new_model)
+            if clear_only:
+                # Only touch constraints the clearing actually rewrote; leave
+                # everything else byte-for-byte identical so convex structure
+                # elsewhere is preserved.
+                if body is c.body and sense == c.sense:
+                    rebuilt.append(c)
+                else:
+                    rebuilt.append(Constraint(distribute_products(body), sense, c.rhs, c.name))
+                continue
             body = distribute_products(body)
             body = _lift_expr(body, new_model, lifter)
             if body is c.body and sense == c.sense:
@@ -346,7 +400,7 @@ def factorable_reformulate(model: Model) -> Model:
 
         # Lift the objective too (it may contain a mixed product); division
         # clearing is meaningless for an objective so only the lift applies.
-        if new_model._objective is not None:
+        if not clear_only and new_model._objective is not None:
             obj_expr = distribute_products(new_model._objective.expression)
             lifted_obj = _lift_expr(obj_expr, new_model, lifter)
             if lifted_obj is not new_model._objective.expression:
