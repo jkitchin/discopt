@@ -622,6 +622,7 @@ def _decompose_product(
     model: Model,
     fractional_power_var_map: Optional[dict[tuple[int, float], int]] = None,
     univariate_var_map: Optional[dict[object, int]] = None,
+    monomial_var_map: Optional[dict[tuple[int, int], int]] = None,
 ) -> tuple[float, list[int]] | None:
     """Decompose a product expression into (scalar, [flat_or_aux_idx, ...]).
 
@@ -629,6 +630,13 @@ def _decompose_product(
     Constants are accumulated into the scalar; variable references and
     registered lifted sub-expressions are appended to the index list (using
     their MILP column indices).
+
+    When ``monomial_var_map`` is supplied, a *mixed repeated-factor* product
+    such as ``x*x*y`` is collapsed: the repeated original-variable group ``x*x``
+    is replaced by its monomial aux column (``x**2``), leaving ``[col(x**2), y]``
+    — a lifted bilinear pair. This lets the standard McCormick pipeline relax
+    ``x**2 * y`` (one monomial envelope + one bilinear envelope) instead of
+    rejecting it as an unsupported repeated-factor term.
     """
     scalar: list[float] = [1.0]
     var_indices: list[int] = []
@@ -663,9 +671,40 @@ def _decompose_product(
                     return True
         return False
 
-    if visit(expr):
-        return scalar[0], var_indices
-    return None
+    if not visit(expr):
+        return None
+
+    # Collapse mixed repeated-factor groups (x*x*y) into monomial aux columns
+    # so the product reduces to distinct lifted factors the McCormick pipeline
+    # can relax. Pure monomials (x*x with a single unique base) are left intact
+    # for the dedicated monomial branch in the linearizer.
+    if monomial_var_map:
+        n_orig = sum(v.size for v in model._variables)
+        counts: dict[int, int] = {}
+        for i in var_indices:
+            if i < n_orig:
+                counts[i] = counts.get(i, 0) + 1
+        repeated = {i for i, c in counts.items() if c >= 2}
+        if repeated and len(set(var_indices)) >= 2:
+            collapsed: list[int] = []
+            seen: set[int] = set()
+            ok = True
+            for i in var_indices:
+                if i in repeated:
+                    if i in seen:
+                        continue
+                    col = monomial_var_map.get((i, counts[i]))
+                    if col is None:
+                        ok = False
+                        break
+                    collapsed.append(col)
+                    seen.add(i)
+                else:
+                    collapsed.append(i)
+            if ok:
+                var_indices = collapsed
+
+    return scalar[0], var_indices
 
 
 def _collect_lifted_bilinear_products(
@@ -673,6 +712,7 @@ def _collect_lifted_bilinear_products(
     fractional_power_var_map: dict[tuple[int, float], int],
     univariate_var_map: dict[object, int],
     n_orig: int,
+    monomial_var_map: Optional[dict[tuple[int, int], int]] = None,
 ) -> list[tuple[int, int]]:
     """Return products between original variables and lifted auxiliary columns."""
     keys: set[tuple[int, int]] = set()
@@ -685,6 +725,7 @@ def _collect_lifted_bilinear_products(
                     model,
                     fractional_power_var_map=fractional_power_var_map,
                     univariate_var_map=univariate_var_map,
+                    monomial_var_map=monomial_var_map,
                 )
                 if decomp is not None:
                     _scalar, indices = decomp
@@ -2120,6 +2161,7 @@ def _linearize_expr(
                     model,
                     fractional_power_var_map=fractional_power_var_map,
                     univariate_var_map=univariate_var_map,
+                    monomial_var_map=monomial_var_map,
                 )
                 if decomp is None:
                     raise ValueError(f"Cannot decompose product: {e}")
@@ -2692,6 +2734,7 @@ def build_milp_relaxation(
         fractional_power_var_map,
         univariate_var_map,
         n_orig,
+        monomial_var_map=monomial_var_map,
     )
     for key in lifted_bilinear_keys:
         bilinear_var_map[key] = _ensure_bilinear_aux(*key)
