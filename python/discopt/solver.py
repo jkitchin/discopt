@@ -2210,11 +2210,39 @@ def solve_model(
                 _mc_lp_relaxer = None
                 _mc_mode = "none"
             else:
-                if not _mc_lp_relaxer.has_bilinear:
-                    # No nonlinear products → standard LP relaxation = the
-                    # model itself for linear parts. Drop back to NLP.
+                if not _mc_lp_relaxer.has_relaxable_nonlinearity:
+                    # No nonlinear term the LP relaxer can bound (products,
+                    # monomials, or fractional powers) → standard LP relaxation
+                    # = the model itself for linear parts. Drop back to NLP.
+                    # NB: monomial/fractional-power-only nonconvex models DO get
+                    # a valid LP dual bound here (issue #120 fix); gating on
+                    # has_bilinear alone wrongly routed them to the unsound "nlp"
+                    # bound.
                     _mc_lp_relaxer = None
                     _mc_mode = "nlp"
+                else:
+                    # Root probe: keep the LP relaxer only if it actually yields
+                    # a valid objective bound (or a rigorous infeasibility proof)
+                    # at the root box. When the objective is not LP-linearizable
+                    # the relaxer falls back to a feasibility objective and
+                    # returns no bound; engaging it would then SKIP the root NLP
+                    # multistart and suppress the alphaBB/interval floor, losing
+                    # a bound that path would otherwise produce. Falling back to
+                    # "none" here preserves the rigorous alphaBB underestimator
+                    # for those models while keeping the LP bound for the ones it
+                    # can actually relax.
+                    try:
+                        _probe_lb, _probe_ub = flat_variable_bounds(model)
+                        _probe = _mc_lp_relaxer.solve_at_node(_probe_lb, _probe_ub)
+                    except Exception as e:  # pragma: no cover - defensive
+                        logger.debug("McCormick LP root probe failed: %s", e)
+                        _probe = None
+                    _probe_useful = _probe is not None and (
+                        _probe.status == "infeasible" or _probe.lower_bound is not None
+                    )
+                    if not _probe_useful:
+                        _mc_lp_relaxer = None
+                        _mc_mode = "none"
 
     # Soundness guard (issue #120): the McCormick "nlp" objective bound is a
     # valid dual bound only for convex models. The bound solver evaluates the
