@@ -225,6 +225,29 @@ def _collect_product_factors(expr: Expression, model: Model) -> list[int] | None
     return None
 
 
+def _distribute_mul(left: Expression, right: Expression) -> Expression:
+    """Distribute ``left * right`` where BOTH are already fully distributed.
+
+    Recurses only over the additive (``+``/``-``) structure of the operands —
+    never over their already-flat product leaves — so it builds exactly the
+    output sum-of-products with no re-walking. The result tree's additive terms
+    and their signs match the naive ``a*c + b*c`` expansion.
+    """
+    if isinstance(right, BinaryOp) and right.op in ("+", "-"):
+        return BinaryOp(
+            right.op,
+            _distribute_mul(left, right.left),
+            _distribute_mul(left, right.right),
+        )
+    if isinstance(left, BinaryOp) and left.op in ("+", "-"):
+        return BinaryOp(
+            left.op,
+            _distribute_mul(left.left, right),
+            _distribute_mul(left.right, right),
+        )
+    return BinaryOp("*", left, right)
+
+
 def distribute_products(expr: Expression) -> Expression:
     """Recursively distribute multiplication over addition/subtraction.
 
@@ -232,25 +255,23 @@ def distribute_products(expr: Expression) -> Expression:
     ``(a + b)^2`` → ``(a + b) * (a + b)`` before distribution.
     Applied bottom-up so nested distributions resolve.  Other expression
     types are returned with operator-tree shape preserved structurally.
+
+    Operands are distributed exactly once (bottom-up); the multiplication itself
+    is then expanded by :func:`_distribute_mul`, which walks only the additive
+    structure of the already-distributed operands. The earlier formulation
+    re-invoked ``distribute_products`` on every product it constructed, re-walking
+    and rebuilding already-flat subtrees — quadratic-to-exponential node creation
+    even when the final expansion is small (e.g. a chain of small squared sums
+    blew up to tens of millions of throwaway nodes).
     """
     if isinstance(expr, BinaryOp):
+        if expr.op == "**" and isinstance(expr.right, Constant) and float(expr.right.value) == 2.0:
+            left = distribute_products(expr.left)
+            return _distribute_mul(left, left)
         left = distribute_products(expr.left)
         right = distribute_products(expr.right)
-        if expr.op == "**" and isinstance(right, Constant) and float(right.value) == 2.0:
-            return distribute_products(BinaryOp("*", left, left))
         if expr.op == "*":
-            if isinstance(right, BinaryOp) and right.op in ("+", "-"):
-                return BinaryOp(
-                    right.op,
-                    distribute_products(BinaryOp("*", left, right.left)),
-                    distribute_products(BinaryOp("*", left, right.right)),
-                )
-            if isinstance(left, BinaryOp) and left.op in ("+", "-"):
-                return BinaryOp(
-                    left.op,
-                    distribute_products(BinaryOp("*", left.left, right)),
-                    distribute_products(BinaryOp("*", left.right, right)),
-                )
+            return _distribute_mul(left, right)
         return BinaryOp(expr.op, left, right)
     if isinstance(expr, UnaryOp):
         return UnaryOp(expr.op, distribute_products(expr.operand))
