@@ -11,11 +11,12 @@ the extreme-magnitude monomial guard now lift them soundly.
 
 Soundness is the invariant under test: a valid lower bound must NEVER exceed the
 true optimum. We assert the root McCormick LP bound is finite and ``<= opt`` for
-the eight liftable instances. ``nvs16`` is the lone exception — its objective is
-a Beale sum-of-squares that distributes into degree-8 monomials of magnitude
-~1e18 over the integer box ``[0, 200]**2``; a proper square-of-affine-in-lifted
-envelope is follow-up work. It currently yields no root objective bound on *main*
-too, so we assert only that it has not regressed (no bound, or a sound one).
+every liftable instance. ``nvs16`` — the Beale sum-of-squares over the integer
+box ``[0, 200]**2`` whose naive distribution explodes into degree-8 monomials of
+magnitude ~1e18 — is now lifted via the square-of-affine-in-lifted-vars envelope
+(issue #155): each residual ``r_i`` is affine in lifted product columns and
+``r_i**2`` gets a univariate square envelope, recovering the trivial sound bound
+``>= 0`` without any catastrophic expansion.
 
 Reference optima are the MINLPLib values (cross-checked against
 ``discopt_benchmarks`` problem definitions).
@@ -48,6 +49,7 @@ _SOUND_BOUND_CASES = [
     ("nvs22", 6.0584),
     ("chance", 29.8945),
     ("st_e36", -246.0),
+    ("nvs16", 0.703125),
 ]
 
 
@@ -73,12 +75,14 @@ def test_bucket2_instance_has_sound_root_bound(instance, optimum):
 
 
 @pytest.mark.correctness
-def test_nvs16_does_not_regress():
-    """``nvs16`` (Beale sum-of-squares, integer box [0,200]^2) distributes into
-    ~1e18-magnitude monomials, so its objective legitimately drops from the root
-    relaxation today. The bucket-2 acceptance requires only that it not regress:
-    the root LP must still solve (no spurious infeasibility), and any bound it
-    does produce must be sound (<= optimum 0.703125)."""
+def test_nvs16_produces_sound_finite_bound():
+    """``nvs16`` (Beale sum-of-squares, integer box [0,200]^2) used to distribute
+    into ~1e18-magnitude monomials and drop its objective. The
+    square-of-affine-in-lifted-vars envelope (issue #155) now lifts each residual
+    ``r_i`` affinely and applies a univariate square envelope on ``r_i**2``,
+    avoiding any distributive blow-up. We require a *finite* root bound (the
+    objective no longer drops) that is sound (``<= optimum 0.703125``); because the
+    objective is a sum of squares, the recovered bound is the trivial ``>= 0``."""
     nl = _DATA / "nvs16.nl"
     assert nl.exists(), f"missing {nl}"
     m = dm.from_nl(str(nl))
@@ -89,9 +93,10 @@ def test_nvs16_does_not_regress():
 
     # No false-infeasibility — the LP itself must solve cleanly.
     assert res.status == "optimal", f"nvs16 root LP status {res.status}"
-    # The objective may drop (no bound) — that is the current, non-regressed
-    # state — but if a bound IS produced it must underestimate the optimum.
-    if res.lower_bound is not None and math.isfinite(res.lower_bound):
-        assert res.lower_bound <= 0.703125 + 1e-3, (
-            f"nvs16 UNSOUND bound {res.lower_bound} > 0.703125"
-        )
+    # The objective no longer drops: a finite bound must be produced.
+    assert res.lower_bound is not None, "nvs16 objective dropped — no root bound"
+    assert math.isfinite(res.lower_bound), f"nvs16 non-finite bound {res.lower_bound}"
+    # Sum of squares ⇒ the sound bound is ≥ 0 and must not exceed the optimum.
+    assert -1e-6 <= res.lower_bound <= 0.703125 + 1e-3, (
+        f"nvs16 bound {res.lower_bound} outside sound range [0, 0.703125]"
+    )
