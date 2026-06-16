@@ -208,6 +208,12 @@ impl<'a> PreparedDual<'a> {
 
         let mut updates = 0usize;
         let mut pivots = 0usize;
+        // Dual Devex reference weights γ_i ≥ 1, one per basic slot. The leaving
+        // variable maximizes (bound violation)²/γ_i — a cheap steepest-edge
+        // approximation that cuts dual iterations versus plain largest-violation
+        // pricing. Pricing only chooses *which* primal-infeasible row leaves, never
+        // affects correctness (any infeasible basic var is a valid leaving choice).
+        let mut gamma = vec![1.0f64; m];
         for _iter in 0..opts.max_iter {
             // Basic values x_B = B⁻¹(b − Σ_nonbasic A_j x_j).
             let mut xb = b.to_vec();
@@ -226,25 +232,26 @@ impl<'a> PreparedDual<'a> {
                 return None;
             }
 
-            // Most primal-infeasible basic variable leaves.
+            // Leaving variable: most primal-infeasible basic var by Devex score
+            // (violation²/γ_i). `to_lower` = the bound the leaving var is pinned at.
             let mut r = None;
-            let mut worst = tol;
+            let mut best_score = 0.0f64;
             let mut to_lower = true;
             for i in 0..m {
                 let bi = basis[i];
-                if xb[i] < l[bi] - tol {
-                    let viol = l[bi] - xb[i];
-                    if viol > worst {
-                        worst = viol;
-                        r = Some(i);
-                        to_lower = true; // leaving var pinned at its lower bound
-                    }
+                let viol = if xb[i] < l[bi] - tol {
+                    Some((l[bi] - xb[i], true)) // below lower → pin at lower
                 } else if xb[i] > u[bi] + tol {
-                    let viol = xb[i] - u[bi];
-                    if viol > worst {
-                        worst = viol;
+                    Some((xb[i] - u[bi], false)) // above upper → pin at upper
+                } else {
+                    None
+                };
+                if let Some((v, lo)) = viol {
+                    let score = v * v / gamma[i];
+                    if score > best_score {
+                        best_score = score;
                         r = Some(i);
-                        to_lower = false;
+                        to_lower = lo;
                     }
                 }
             }
@@ -319,6 +326,34 @@ impl<'a> PreparedDual<'a> {
                 }
             };
 
+            // Entering column α = B⁻¹A_q for the Devex weight update (and reused as
+            // the raw column for the product-form basis update).
+            let raw_q = col(a, m, n, q);
+            let mut alpha = raw_q.clone();
+            if lu.ftran(&mut alpha).is_err() {
+                return None;
+            }
+            let piv = alpha[r];
+            if piv.abs() > tol {
+                // Goldfarb–Reid dual Devex update (uses the still-current basis).
+                let gamma_r = gamma[r];
+                for i in 0..m {
+                    if i != r {
+                        let cand = (alpha[i] / piv).powi(2) * gamma_r;
+                        if cand > gamma[i] {
+                            gamma[i] = cand;
+                        }
+                    }
+                }
+                // Slot r now holds the entering variable; give it a fresh weight.
+                gamma[r] = (gamma_r / (piv * piv)).max(1.0);
+                if gamma[r] > 1e10 {
+                    for g in gamma.iter_mut() {
+                        *g = 1.0; // reframe when weights blow up
+                    }
+                }
+            }
+
             // Pivot: q enters at slot r; leaving var pinned at the violated bound.
             let leaving = basis[r];
             stat[leaving] = if to_lower { AT_LOWER } else { AT_UPPER };
@@ -327,7 +362,7 @@ impl<'a> PreparedDual<'a> {
             slot_of[q] = r as i64;
             stat[q] = BASIC;
             pivots += 1;
-            let need_refac = lu.update(r, &col(a, m, n, q)).is_err();
+            let need_refac = lu.update(r, &raw_q).is_err();
             updates += 1;
             if need_refac || updates >= 48 {
                 let cols: Vec<Vec<f64>> = basis.iter().map(|&j| col(a, m, n, j)).collect();
