@@ -16,14 +16,26 @@ These tests pin that behavior. ``st_e17`` (``x0**2/x1`` via convex-clearing) is
 guarded separately by ``test_st_e17_certification.py``.
 
 Scope note (issue #138): the remaining bucket-1 instances ``gear4``, ``ex1233``,
-``nvs05``, ``nvs22``, ``st_e35`` currently return ``bound=None`` (the relaxation
-soundly *drops* the ratio rather than producing a false bound) and are **not**
-locked here. The naive "lift ``y = N/D`` to the bilinear equality ``y*D = N``"
-route is deliberately NOT taken: on ``gear4`` it produces a deterministic
-false-optimal (the large linking coefficient drives an invalid node lower bound),
-which would convert a sound ``bound=None`` into an unsound certified-optimal. That
-is tracked as a separate solver soundness bug (#145); closing bucket-1 soundly
-waits on it plus tighter division-specific envelopes.
+``nvs05``, ``nvs22``, ``st_e35`` return ``bound=None`` (the relaxation soundly
+*drops* the ratio rather than producing a false bound). The naive "lift
+``y = N/D`` to the bilinear equality ``y*D = N``" route is deliberately NOT taken:
+on ``gear4`` it produced a deterministic false-optimal (the large linking
+coefficient drove an invalid node lower bound), which would have converted a sound
+``bound=None`` into an unsound certified-optimal. That was tracked and fixed as a
+separate solver soundness bug (#145, now closed via an exact LP oracle for OBBT);
+closing bucket-1 with an *actual* finite bound additionally needs the
+division-specific / fractional-power-of-product envelopes shared with buckets #2
+and #4.
+
+These five are now regression-locked here for **soundness** (not for a certified
+optimum): each must return a sound result — never a dual bound above the known
+optimum, and never ``gap_certified=True`` without an incumbent. The latter guards
+a spurious-certification bug uncovered while picking up #138: a resource-limit
+termination with no incumbent left the ``SolveResult.gap_certified`` default of
+``True`` in place (together with a phantom near-zero bound and ``gap=inf``), so
+``ex1233`` reported ``gap_certified=True`` with ``objective=None``. The no-incumbent
+branches of the B&B finalizers now clear ``gap_certified`` for resource-limit
+exits (an exhausted-tree ``infeasible`` conclusion stays certified).
 """
 
 import os
@@ -74,3 +86,65 @@ def test_nvs_ratio_certifies(instance, optimum):
     # Soundness: a valid dual bound never exceeds the known global optimum.
     assert r.bound <= optimum + 1e-2, f"[{instance}] unsound dual bound {r.bound} > {optimum}"
     assert r.gap_certified, f"[{instance}] expected certified optimality"
+
+
+# Known global optima (MINLPLib) used only as an upper reference for the
+# soundness guard below: a valid dual lower bound for a minimization can never
+# exceed the true optimum.  These instances are *not* expected to certify on
+# ``main`` — the ratio / fractional-power-of-product term is soundly dropped from
+# the relaxation, so no finite bound is produced yet.
+_BUCKET1_WEAK = {
+    "gear4": 1.64342847,  # (x0*x1)/(x2*x3) equality, integer — pure integrality gap
+    "ex1233": 62.1833,  # linear / (product)^(1/3) plus sqrt-of-product terms
+    "nvs05": 5.47093411,  # var/var ratio + sqrt-of-product in defining equalities
+    "nvs22": 6.0581153,  # var/var ratio
+    "st_e35": 64868.6,  # (x / (product)^(1/3))^0.83 in the objective
+}
+
+
+@pytest.mark.correctness
+@pytest.mark.parametrize("instance, optimum", sorted(_BUCKET1_WEAK.items()))
+def test_bucket1_weak_instances_stay_sound(instance, optimum):
+    """The not-yet-certified bucket-1 instances must stay **sound**.
+
+    Two invariants, both of which a previous build violated on ``ex1233``:
+
+    1. A presented dual bound never exceeds the known optimum (no false bound).
+    2. ``gap_certified=True`` is never reported without an incumbent — a
+       resource-limit termination that found no feasible solution must not claim
+       optimality just because the ``SolveResult.gap_certified`` field defaults to
+       ``True`` (issue #138 follow-up; the no-incumbent B&B exit now clears it).
+    """
+    nl = _DATA / f"{instance}.nl"
+    assert nl.exists(), f"missing {nl}"
+    r = dm.from_nl(str(nl)).solve(time_limit=30, gap_tolerance=1e-4)
+
+    # (1) No false dual bound for a minimization: bound <= true optimum.
+    if r.bound is not None:
+        assert r.bound <= optimum + 1e-2, f"[{instance}] unsound dual bound {r.bound} > {optimum}"
+
+    # (2) Certification requires an incumbent; if certified, it must be genuine.
+    if r.gap_certified:
+        assert r.objective is not None, (
+            f"[{instance}] gap_certified=True with no incumbent (objective is None)"
+        )
+        assert r.bound is not None and r.bound <= r.objective + 1e-6, (
+            f"[{instance}] certified but bound {r.bound} > objective {r.objective}"
+        )
+
+
+@pytest.mark.correctness
+def test_ex1233_no_spurious_certification():
+    """ex1233 hits the time limit with no incumbent; it must report an honest,
+    uncertified result — regression for the spurious ``gap_certified=True`` /
+    phantom near-zero bound / ``gap=inf`` returned when a no-incumbent
+    resource-limit exit left the ``gap_certified`` default of ``True`` in place.
+    """
+    nl = _DATA / "ex1233.nl"
+    assert nl.exists(), f"missing {nl}"
+    r = dm.from_nl(str(nl)).solve(time_limit=20, gap_tolerance=1e-4)
+
+    # The fundamental invariant: never certify optimality without an incumbent.
+    assert not (r.gap_certified and r.objective is None), (
+        f"ex1233 certified with no incumbent: status={r.status} bound={r.bound} gap={r.gap}"
+    )
