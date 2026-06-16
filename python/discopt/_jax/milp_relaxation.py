@@ -4186,29 +4186,42 @@ def build_milp_relaxation(
     for _constraint in model._constraints:
         _walk_lift(distributed_bodies[id(_constraint)])
 
-    # ── Trilinear RLT convex-hull cuts (setup) ─────────────────────────────
-    # The recursive chain w_xyz = (x*y)*z gives a valid but loose relaxation of
-    # x*y*z. Adding the eight degree-3 bound-factor product inequalities — each
-    # the product of three nonnegative bound factors (x-xL),(xU-x),... hence
-    # individually valid — together with the pairwise McCormick envelopes on
-    # ALL three pairwise products yields the exact convex/concave hull of the
-    # trilinear monomial (RLT; Rikun 1997 / Meyer & Floudas 2004). Here we make
-    # sure the two pairwise aux columns the chain did not create (x*z and y*z)
-    # exist so the cut can reference them; the cut rows are emitted below.
-    trilinear_rlt_specs: list[tuple[int, int, int, int, int, int, int]] = []
+    # ── Multilinear RLT convex-hull cuts (setup) ───────────────────────────
+    # The recursive chain w = (((x0*x1)*x2)*...) gives a valid but loose
+    # relaxation of a multilinear product. The exact convex/concave hull is the
+    # Reformulation-Linearization (RLT) system: for every subset S of the
+    # factors with |S| >= 2, the |S|-degree bound-factor product inequalities
+    #     prod_{i in S} (s_i*x_i + c_i) >= 0,  (x-xL) -> (+1,-xL), (xU-x) -> (-1,xU)
+    # linearized via a lifted column w_T for every sub-product T (|T| >= 2).
+    # Each is a product of nonnegative bound factors, hence individually valid
+    # (tightens, never invalidates); the full set is the exact hull (Rikun
+    # 1997 / Meyer & Floudas 2004), verified to match the box-vertex envelope.
+    # |S|=2 cuts are exactly the McCormick envelopes already emitted by
+    # _ensure_bilinear_aux, so here we (a) materialize every subset-product
+    # column so the higher cuts can reference it, and (b) record the term for
+    # the |S|>=3 cut rows emitted below. Capped at DISCOPT_MULTILINEAR_RLT_MAX
+    # factors (default 4) to bound the 2^n column/row growth; larger products
+    # keep the loose recursive chain.
+    rlt_terms: list[tuple[tuple[int, ...], dict[frozenset, int]]] = []
     if os.environ.get("DISCOPT_TRILINEAR_RLT", "1") != "0":
-        for _stage in trilinear_stage_map.values():
-            ci, cj = _stage["pair"]
-            ck = _stage["remaining_var"]
-            # Distinct columns only; repeated-factor products (x*x*y) collapse a
-            # pairwise product onto a monomial aux and are not true trilinears.
-            if len({ci, cj, ck}) != 3:
+        _rlt_cap = int(os.environ.get("DISCOPT_MULTILINEAR_RLT_MAX", "4"))
+        _candidate_terms = set(trilinear_stage_map.keys()) | set(multilinear_stage_map.keys())
+        for _term in _candidate_terms:
+            _vars = tuple(sorted(set(_term)))
+            _n = len(_vars)
+            # Distinct factors only; repeated-factor products (x*x*y) collapse
+            # onto a monomial aux and are not handled here.
+            if _n < 3 or _n > _rlt_cap or _n != len(_term):
                 continue
-            w_ij = _stage["pair_col"]
-            w_ijk = _stage["product_col"]
-            w_ik = _ensure_bilinear_aux(ci, ck)
-            w_jk = _ensure_bilinear_aux(cj, ck)
-            trilinear_rlt_specs.append((ci, cj, ck, w_ij, w_ik, w_jk, w_ijk))
+            subset_cols: dict[frozenset, int] = {frozenset([c]): c for c in _vars}
+            for _k in range(2, _n + 1):
+                for _comb in itertools.combinations(_vars, _k):
+                    _m = max(_comb)
+                    _rest = frozenset(c for c in _comb if c != _m)
+                    subset_cols[frozenset(_comb)] = _ensure_bilinear_aux(
+                        subset_cols[_rest], _m
+                    )
+            rlt_terms.append((_vars, subset_cols))
 
     bilinear_pw_map: dict[tuple[int, int], list] = {}
     bilinear_lambda_map: dict[tuple[int, int], dict] = {}
@@ -4708,36 +4721,49 @@ def build_milp_relaxation(
             row[j] -= xi_lb_g
             _add_row(row, -xi_lb_g * xj_ub_g)
 
-    # ── Trilinear RLT convex-hull cuts (emission) ──────────────────────────
-    # For each lifted trilinear term, emit the eight degree-3 bound-factor
-    # product inequalities. With factor (x - xL) encoded as (sx=+1, c=-xL) and
-    # (xU - x) as (sx=-1, c=+xU), the product
-    #   (sx·x + cx)(sy·y + cy)(sz·z + cz) >= 0
-    # linearizes (x*y -> w_xy, x*y*z -> w_xyz, ...) to a valid cut. Together
-    # with the pairwise McCormick on w_xy/w_xz/w_yz this is the exact trilinear
-    # hull; each cut alone is sound, so a partial set only tightens.
-    for ci, cj, ck, w_ij, w_ik, w_jk, w_ijk in trilinear_rlt_specs:
-        xi_lb, xi_ub = (float(v) for v in all_bounds[ci])
-        xj_lb, xj_ub = (float(v) for v in all_bounds[cj])
-        xk_lb, xk_ub = (float(v) for v in all_bounds[ck])
-        if not all(
-            _is_effectively_finite(v)
-            for v in (xi_lb, xi_ub, xj_lb, xj_ub, xk_lb, xk_ub)
-        ):
+    # ── Multilinear RLT convex-hull cuts (emission) ────────────────────────
+    # For each recorded term, emit the |S|-degree bound-factor product cuts for
+    # every factor-subset S with |S| >= 3 (the |S|=2 cuts are the McCormick
+    # envelopes already emitted above). With factor (x_i - xL_i) encoded as
+    # (s_i=+1, c_i=-xL_i) and (xU_i - x_i) as (s_i=-1, c_i=+xU_i),
+    #   prod_{i in S} (s_i*x_i + c_i) >= 0
+    # expands to  sum_{T subset of S} (prod_{i in T} s_i)(prod_{i in S\T} c_i)*w_T
+    # (w_T the lifted column of sub-product T, w_{empty}=1, w_{single i}=x_i),
+    # which linearizes to a valid cut. The full subset family is the exact hull;
+    # each cut alone is sound, so any subset only tightens.
+    for _vars, subset_cols in rlt_terms:
+        _bnd: dict[int, tuple[float, float]] = {}
+        _finite = True
+        for c in _vars:
+            lo, hi = (float(v) for v in all_bounds[c])
+            if not (_is_effectively_finite(lo) and _is_effectively_finite(hi)):
+                _finite = False
+                break
+            _bnd[c] = (lo, hi)
+        if not _finite:
             continue
-        for sx, cx in ((1.0, -xi_lb), (-1.0, xi_ub)):
-            for sy, cy in ((1.0, -xj_lb), (-1.0, xj_ub)):
-                for sz, cz in ((1.0, -xk_lb), (-1.0, xk_ub)):
+        for k in range(3, len(_vars) + 1):
+            for comb in itertools.combinations(_vars, k):
+                for corner in itertools.product((0, 1), repeat=k):
+                    sc = {
+                        i: ((1.0, -_bnd[i][0]) if corner[pos] == 0 else (-1.0, _bnd[i][1]))
+                        for pos, i in enumerate(comb)
+                    }
                     row = np.zeros(n_total)
+                    const = 0.0
+                    # iterate every subset T of comb (include empty -> constant)
+                    for r in range(k + 1):
+                        for tcomb in itertools.combinations(comb, r):
+                            tset = frozenset(tcomb)
+                            coef = 1.0
+                            for i in comb:
+                                coef *= sc[i][0] if i in tset else sc[i][1]
+                            if r == 0:
+                                const += coef
+                            else:
+                                row[subset_cols[tset]] += coef
                     # product >= 0  ->  -(linear part) <= constant
-                    row[w_ijk] += -(sx * sy * sz)
-                    row[w_ij] += -(sx * sy * cz)
-                    row[w_ik] += -(sx * sz * cy)
-                    row[w_jk] += -(sy * sz * cx)
-                    row[ci] += -(sx * cy * cz)
-                    row[cj] += -(sy * cx * cz)
-                    row[ck] += -(sz * cx * cy)
-                    _add_row(row, cx * cy * cz)
+                    _add_row(-row, const)
 
     # Binary interval selectors for partitioned convex monomial overestimators.
     # A local secant is valid only on its own interval, so the selector links the
