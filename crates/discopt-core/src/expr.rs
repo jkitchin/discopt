@@ -106,6 +106,9 @@ pub enum MathFunc {
     Norm1,
     /// L-infinity norm (maximum absolute value).
     NormInf,
+    /// General p-norm `(Σ |x_i|^p)^{1/p}` for an integer order `p >= 1`
+    /// (orders 1 and 2 use the dedicated `Norm1` / `Norm2` variants).
+    NormP(u32),
 }
 
 /// One axis of a generalized index: either a scalar position or a slice.
@@ -845,6 +848,7 @@ impl ExprArena {
                     | MathFunc::Softplus
                     | MathFunc::Norm1
                     | MathFunc::NormInf
+                    | MathFunc::NormP(_)
                     | MathFunc::Norm2 => usize::MAX,
                     // abs, sign: not strictly polynomial but handled specially
                     MathFunc::Abs | MathFunc::Sign => usize::MAX,
@@ -1052,6 +1056,14 @@ impl ExprArena {
                         .reduction_values(args, x)
                         .iter()
                         .fold(0.0_f64, |m, t| m.max(t.abs())),
+                    MathFunc::NormP(p) => {
+                        let pf = *p as f64;
+                        self.reduction_values(args, x)
+                            .iter()
+                            .map(|t| t.abs().powf(pf))
+                            .sum::<f64>()
+                            .powf(1.0 / pf)
+                    }
                 }
             }
             ExprNode::Index { base, index } => {
@@ -1452,6 +1464,14 @@ impl ModelRepr {
                         .reduction_values(args, x)
                         .iter()
                         .fold(0.0_f64, |m, t| m.max(t.abs())),
+                    MathFunc::NormP(p) => {
+                        let pf = *p as f64;
+                        self.reduction_values(args, x)
+                            .iter()
+                            .map(|t| t.abs().powf(pf))
+                            .sum::<f64>()
+                            .powf(1.0 / pf)
+                    }
                 }
             }
             ExprNode::Index { base, index } => match self.arena.get(*base) {

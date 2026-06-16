@@ -263,8 +263,9 @@ impl PyModelRepr {
             }
             ExprNode::FunctionCall { func, args } => {
                 dict.set_item("type", "function_call")?;
-                dict.set_item(
-                    "func",
+                let func_name: String = if let MathFunc::NormP(p) = func {
+                    format!("norm{p}")
+                } else {
                     match func {
                         MathFunc::Exp => "exp",
                         MathFunc::Log => "log",
@@ -295,8 +296,11 @@ impl PyModelRepr {
                         MathFunc::Softplus => "softplus",
                         MathFunc::Norm1 => "norm1",
                         MathFunc::NormInf => "norminf",
-                    },
-                )?;
+                        MathFunc::NormP(_) => unreachable!(),
+                    }
+                    .to_string()
+                };
+                dict.set_item("func", func_name)?;
                 let arg_indices: Vec<usize> = args.iter().map(|a| a.0).collect();
                 dict.set_item("args", arg_indices)?;
             }
@@ -1149,6 +1153,17 @@ fn convert_expr(
                 "softplus" => MathFunc::Softplus,
                 "norm1" => MathFunc::Norm1,
                 "norminf" => MathFunc::NormInf,
+                // General integer-order p-norm "norm{p}" (p != 1, 2, inf).
+                other if other.starts_with("norm") => {
+                    match other["norm".len()..].parse::<u32>() {
+                        Ok(p) if p >= 1 => MathFunc::NormP(p),
+                        _ => {
+                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                                "Unknown MathFunc: {func_str}"
+                            )));
+                        }
+                    }
+                }
                 _ => {
                     return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                         "Unknown MathFunc: {func_str}"

@@ -499,7 +499,7 @@ fn eval_node_interval(
                         result
                     }
                 }
-                MathFunc::Norm1 | MathFunc::Norm2 | MathFunc::NormInf => {
+                MathFunc::Norm1 | MathFunc::Norm2 | MathFunc::NormInf | MathFunc::NormP(_) => {
                     // A p-norm is non-negative. The forward pass collapses an
                     // array argument to a single node interval, so a tight
                     // component-wise bound is not available here; return the
