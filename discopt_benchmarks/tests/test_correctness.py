@@ -48,26 +48,27 @@ def solve_instance(name: str, **kwargs) -> MockSolution:
 # 1. KNOWN OPTIMUM VALIDATION
 # ─────────────────────────────────────────────────────────────
 
-# Known optimal values from MINLPLib (subset for testing)
+# Known optimal values from MINLPLib (subset for testing).
+#
+# Verified against the official MINLPLib ``minlplib.solu`` file (issue #138). The
+# nine entries marked "corrected" were demonstrably wrong — most were ~100-1500x
+# too small (apparently a stale/mis-parsed import). Values below are the
+# authoritative ``=opt=`` (proven optimal) / ``=best=`` (best known) figures.
 KNOWN_OPTIMA = {
     "ex1221":       7.6672,
     "ex1222":       1.0765,
     "ex1223":       4.5796,
     "ex1223a":      4.5796,
     "ex1224":      -0.94347,
-    # Corrected from a wrong 0.0: discopt certifies the optimum at 31.0 (bound ==
-    # incumbent, gap closed) and the MINLP literature reports 31.0 for ex1225.
-    "ex1225":       31.0,
+    "ex1225":       31.0,  # corrected from 0.0 (=opt= 31.0; discopt also certifies 31.0)
     "ex1226":      -17.0,
-    # Corrected from a wrong 62.1833 (below a proven rigorous lower bound of
-    # ~109649); MINLPLib global optimum, found as a feasible incumbent (#138).
-    "ex1233":      155010.6713,
-    "ex1243":      83.6455,
-    "ex1244":      83.6455,
-    "ex1252":    1169.37,
-    "ex1252a":   1169.37,
-    "ex1263":      19.46,
-    "ex1263a":     19.46,
+    "ex1233":      155010.6713,  # corrected from 62.1833 (=best=); rigorous LB ~109649
+    "ex1243":      83402.50641,  # corrected from 83.6455 (=opt=)
+    "ex1244":      82042.90522,  # corrected from 83.6455 (=opt=)
+    "ex1252":    128893.741,  # corrected from 1169.37 (=opt=; Kocis-Grossmann batch plant)
+    "ex1252a":   128893.741,  # corrected from 1169.37 (=opt=)
+    "ex1263":      19.6,  # corrected from 19.46 (=opt=)
+    "ex1263a":     19.6,  # corrected from 19.46 (=opt=)
     "ex1264":       8.6,
     "ex1264a":      8.6,
     "ex1265":      10.3,
@@ -76,7 +77,10 @@ KNOWN_OPTIMA = {
     "ex1266a":     16.3,
     "fuel":         8566.12,
     "gastrans":   89.08588,
-    "ghg_1veh":  -246.04,
+    "ghg_1veh":    7.7816348850,  # corrected from -246.04 (=opt=)
+    # NOTE: not present in the current MINLPLib minlplib.solu, so unverifiable —
+    # the instance names do not match (it has procurement1{large,mot} and
+    # smallinvDAXr1b0NN-0NN, not these). Left as-is pending confirmation.
     "procurement1": 0.0,
     "smallinvDAXr1b50": -3.83,
 }
