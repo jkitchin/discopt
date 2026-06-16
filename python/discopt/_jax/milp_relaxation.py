@@ -95,6 +95,19 @@ _SQRT_NEG_TOL = 1e-9
 # dropping a cut only ENLARGES the relaxation, so abstention is always sound.
 _LIFT_MAX_ENVELOPE_SLOPE = 1e6
 
+# Largest argument magnitude a *cross-term* sqrt/reciprocal lift (issue #154,
+# increment 2) may carry. Lifting ``sqrt(g)`` of a cross-term polynomial (e.g.
+# nvs05/nvs22 ``sqrt(x4**2 + 2*x4*x5*x7 + x5**2)``) folds the product factors
+# into McCormick aux columns whose bounds — and the resulting envelope row
+# coefficients — scale with ``|g|``. When that magnitude reaches ~1e9 the LP is
+# ill-conditioned: the fast simplex backend returns a wrong "optimal" bound that
+# can exceed the true optimum (an unsound dual bound), while HiGHS still solves
+# it correctly. Fast-simplex is demonstrated reliable up to ~1e7 on these
+# relaxations, so cross-term lifts abstain above this limit. Abstention only
+# drops a cut (the constraint is simply left un-lifted), which ENLARGES the
+# relaxation and is therefore always sound.
+_LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE = 1e7
+
 
 def _envelope_slope_ok(slope: float) -> bool:
     """True when an envelope cut's slope is well-conditioned enough to emit.
@@ -3752,6 +3765,11 @@ def build_milp_relaxation(
 
     _MAX_FORCED_POWER = 4
 
+    # Set by ``_lift_inner_to_affine`` whenever the cross-term-monomial fallback
+    # (issue #154 increment 2) claims a factor; read by ``_maybe_lift_outer_atom``
+    # to apply the cross-term conditioning guard. Reset before each outer lift.
+    cross_term_used = [False]
+
     def _ensure_bounded_bilinear(lhs_col: int, rhs_col: int) -> Optional[int]:
         """Force-create the product aux for two bounded columns (``x*y``, or
         ``x*x`` for a square), or ``None`` if a factor is unbounded or the product
@@ -3802,6 +3820,68 @@ def build_milp_relaxation(
                 return col
         return None
 
+    def _lift_monomial_with_coeff(expr: Expression) -> Optional[tuple[list[int], float]]:
+        """Decompose a multiplicative monomial into ``(variable-factor columns,
+        scalar coefficient)``. Unlike :func:`_lift_factor_to_col`, embedded
+        constant factors are folded into the coefficient rather than rejected, so
+        a cross term such as ``2*x4*x5*x7`` (nvs05/nvs22 constraint C4) resolves to
+        ``([x4, x5, x7], 2.0)``. Mirrors ``_lift_factor_to_col``'s claims (bounded
+        original variables, products, integer powers) and likewise abstains on
+        affine-base powers so the #155 square-of-affine envelope keeps that path.
+        Returns ``None`` on any non-monomial / unbounded shape."""
+        c = _constant_value(expr)
+        if c is not None:
+            return [], float(c)
+        flat = _get_flat_index(expr, model)
+        if flat is not None:
+            lo, hi = all_bounds[flat]
+            if not (np.isfinite(lo) and np.isfinite(hi)):
+                return None
+            return [flat], 1.0
+        if isinstance(expr, UnaryOp) and expr.op == "-":
+            sub = _lift_monomial_with_coeff(expr.operand)
+            if sub is None:
+                return None
+            cols, coeff = sub
+            return cols, -coeff
+        if isinstance(expr, BinaryOp) and expr.op == "*":
+            left = _lift_monomial_with_coeff(expr.left)
+            if left is None:
+                return None
+            right = _lift_monomial_with_coeff(expr.right)
+            if right is None:
+                return None
+            lcols, lc = left
+            rcols, rc = right
+            return lcols + rcols, lc * rc
+        if isinstance(expr, BinaryOp) and expr.op == "**" and isinstance(expr.right, Constant):
+            p = float(expr.right.value)
+            if p.is_integer() and 2 <= int(p) <= _MAX_FORCED_POWER:
+                base = _lift_monomial_with_coeff(expr.left)
+                if base is None:
+                    return None
+                bcols, bc = base
+                return bcols * int(p), bc ** int(p)
+        return None
+
+    def _fold_cols_to_aux(cols: list[int]) -> Optional[int]:
+        """Fold a list of bounded columns into a single product aux via iterated
+        bilinear lifting, or ``None`` if any factor is unbounded / the product aux
+        bound exceeds the monomial limit. Empty list yields ``None`` (the caller
+        treats a coefficient-only monomial as a constant)."""
+        if not cols:
+            return None
+        col = cols[0]
+        lo, hi = all_bounds[col]
+        if not (np.isfinite(lo) and np.isfinite(hi)):
+            return None
+        for nxt in cols[1:]:
+            folded = _ensure_bounded_bilinear(col, nxt)
+            if folded is None:
+                return None
+            col = folded
+        return col
+
     def _lift_inner_to_affine(expr: Expression) -> Optional[tuple[dict[int, float], float]]:
         """Resolve ``g`` to ``(coeffs, const)`` over the extended column space,
         force-lifting product factors. ``None`` to abstain on any unclaimed shape."""
@@ -3840,9 +3920,22 @@ def build_milp_relaxation(
             sc, sconst = inner
             return {k: -v for k, v in sc.items()}, -sconst
         col = _lift_factor_to_col(expr)
-        if col is None:
+        if col is not None:
+            return {col: 1.0}, 0.0
+        # Increment #2 (issue #154): a monomial carrying an embedded constant
+        # factor — e.g. the cross term ``2*x4*x5*x7`` in nvs05/nvs22 constraint
+        # C4 — abstains above because ``_lift_factor_to_col`` rejects the scalar
+        # ``2``. Strip the coefficient and fold the variable factors into one
+        # product aux so ``sqrt`` of a cross-term quadratic lifts soundly.
+        mono = _lift_monomial_with_coeff(expr)
+        if mono is None:
             return None
-        return {col: 1.0}, 0.0
+        cols, coeff = mono
+        folded = _fold_cols_to_aux(cols)
+        if folded is None:
+            return None
+        cross_term_used[0] = True
+        return {folded: coeff}, 0.0
 
     def _maybe_lift_outer_atom(expr: Expression) -> None:
         nonlocal col_idx
@@ -3859,6 +3952,7 @@ def build_milp_relaxation(
         else:
             return
 
+        cross_term_used[0] = False
         lifted = _lift_inner_to_affine(inner)
         if lifted is None:
             return
@@ -3876,6 +3970,13 @@ def build_milp_relaxation(
 
         gl, gh = _extended_affine_interval(arg_coeff, arg_const)
         if not (np.isfinite(gl) and np.isfinite(gh)) or gh < gl:
+            return
+        # Cross-term conditioning guard (issue #154 increment 2): a cross-term
+        # lift whose argument magnitude is large enough to make the LP
+        # ill-conditioned can produce a wrong "optimal" — and therefore an
+        # *unsound* dual bound — from the fast simplex backend. Abstain (drop the
+        # lift, enlarging the relaxation, which is always sound) above the limit.
+        if cross_term_used[0] and max(abs(gl), abs(gh)) > _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE:
             return
         if func_name == "reciprocal":
             if gl <= _RECIP_MIN_DENOM:
