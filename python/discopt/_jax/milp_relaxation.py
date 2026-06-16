@@ -75,6 +75,30 @@ _warned_messages: set[str] = set()
 _MAX_INTEGER_COS_ENUM = 10000
 _MAX_FINITE_EXP_ARG = float(np.log(np.finfo(np.float64).max))
 _MAX_TRIG_PIECEWISE_SPAN = 2.0 * math.pi
+# Conditioning guard for fractional-power envelopes (issue #158). A power
+# ``x**p`` with ``p<0`` (or ``0<p<1``) over a box whose lower bound reaches
+# toward zero has tangent/secant slopes (``p*t**(p-1)`` and the secant over
+# ``[lb,ub]``) that blow up, reaching ~1e9+. An LP row carrying such a coefficient
+# against an RHS of order 1 is numerically unreliable: HiGHS returns a polytope
+# that EXCLUDES feasible points, so OBBT shrinks a variable past its true feasible
+# range and the per-node relaxer reports a feasible node "infeasible" (the nvs08
+# false optimum). Refuse to emit any envelope cut whose slope exceeds this limit;
+# dropping a cut only ENLARGES the relaxation, so abstention is always sound.
+_LIFT_MAX_ENVELOPE_SLOPE = 1e6
+
+
+def _envelope_slope_ok(slope: float) -> bool:
+    """True when an envelope cut's slope is well-conditioned enough to emit.
+
+    A finite slope at or below :data:`_LIFT_MAX_ENVELOPE_SLOPE` keeps the LP row
+    numerically reliable; anything steeper (e.g. ``p*t**(p-1)`` for ``x**p`` with
+    ``p<0`` near a small lower bound) makes HiGHS return an unsound polytope, so
+    the caller abstains. Dropping a cut only enlarges the relaxation, so an
+    abstention is always sound — at worst the aux column keeps its value bounds.
+    """
+    return bool(np.isfinite(slope)) and abs(slope) <= _LIFT_MAX_ENVELOPE_SLOPE
+
+
 _MAX_TRIG_PIECEWISE_INTERVALS = 32
 _MAX_TRIG_IMPORTED_BREAKPOINTS = _MAX_TRIG_PIECEWISE_INTERVALS + 1
 _MAX_TRIG_PIECEWISE_WIDTH = math.pi / 6.0
@@ -4819,6 +4843,18 @@ def build_milp_relaxation(
             secant_slope = 0.0
             secant_intercept = f_lb
 
+        # Conditioning guard (issue #158): for steep powers (``p<0`` near a small
+        # ``lb_i``, or ``0<p<1`` near zero) the tangent/secant slopes blow up
+        # (``p*t**(p-1)`` and the secant over ``[lb,ub]``), reaching ~1e9+.  An LP
+        # row with such a coefficient against an RHS of order 1 is numerically
+        # unreliable: HiGHS returns a polytope that EXCLUDES feasible points,
+        # which makes OBBT shrink a variable past its true feasible range and the
+        # per-node relaxer report a feasible node "infeasible" (nvs08 false
+        # optimum).  Dropping any individual cut only ENLARGES the relaxation, so
+        # abstaining on an ill-conditioned row is always sound — at worst the aux
+        # column degrades to its (exact) value bounds.
+        _slope_ok = _envelope_slope_ok
+
         if convexity == "concave":
             pw_intervals = piecewise_var_map.get(var_idx, [])
             if pw_intervals:
@@ -4828,6 +4864,7 @@ def build_milp_relaxation(
                 #   −a + Σ_k (slope_k x̄_k + (p_k^p − slope_k p_k) δ_k) ≤ 0.
                 row = np.zeros(n_total)
                 row[a_col] = -1.0
+                _pw_ill_conditioned = False
                 for delta_col, xbar_col, p_lo, p_hi in pw_intervals:
                     if abs(p_hi - p_lo) > 1e-12:
                         try:
@@ -4838,11 +4875,18 @@ def build_milp_relaxation(
                         if not (np.isfinite(f_plo) and np.isfinite(f_phi)):
                             continue
                         slope_k = (f_phi - f_plo) / (p_hi - p_lo)
+                        if not _slope_ok(slope_k):
+                            _pw_ill_conditioned = True
+                            break
                         intercept_k = f_plo - slope_k * p_lo
                         row[xbar_col] += slope_k
                         row[delta_col] += intercept_k
-                _add_row(row, 0.0)
-            else:
+                # A single aggregated row mixes every interval's slope; if any
+                # breakpoint is ill-conditioned the whole row is unreliable, so
+                # omit it rather than emit a partially-built (unsound) cut.
+                if not _pw_ill_conditioned:
+                    _add_row(row, 0.0)
+            elif _slope_ok(secant_slope):
                 # Global secant under-estimator: a ≥ secant_slope*x + secant_intercept
                 #   →  -a + secant_slope*x ≤ -secant_intercept
                 row = np.zeros(n_total)
@@ -4854,6 +4898,8 @@ def build_milp_relaxation(
             #   t_slope = p*t^(p-1);  t_const = t^p - t_slope*t = (1-p)*t^p
             for t in tangent_pts:
                 t_slope = p * (t ** (p - 1.0))
+                if not _slope_ok(t_slope):
+                    continue
                 t_const = (1.0 - p) * (t**p)
                 row = np.zeros(n_total)
                 row[a_col] = 1.0
@@ -4863,16 +4909,19 @@ def build_milp_relaxation(
             # Tangent under-estimators: a ≥ p*t^(p-1)*(x-t) + t^p
             for t in tangent_pts:
                 t_slope = p * (t ** (p - 1.0))
+                if not _slope_ok(t_slope):
+                    continue
                 t_const = (1.0 - p) * (t**p)
                 row = np.zeros(n_total)
                 row[a_col] = -1.0
                 row[var_idx] = t_slope
                 _add_row(row, -t_const)
             # Secant over-estimator: a ≤ secant_slope*x + secant_intercept
-            row = np.zeros(n_total)
-            row[a_col] = 1.0
-            row[var_idx] = -secant_slope
-            _add_row(row, secant_intercept)
+            if _slope_ok(secant_slope):
+                row = np.zeros(n_total)
+                row[a_col] = 1.0
+                row[var_idx] = -secant_slope
+                _add_row(row, secant_intercept)
 
     if objective_lift is not None:
         for branch_expr in objective_lift.branch_exprs:
