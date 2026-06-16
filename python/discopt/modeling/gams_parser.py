@@ -1562,6 +1562,7 @@ class _ModelBuilder:
         """Build constraints and objective from equation definitions."""
         obj_var_name = solve.objective_var if solve else None
         obj_sense = solve.sense if solve else "minimizing"
+        obj_set = False
 
         for eqdef in self.p.equation_defs:
             # Build the constraint for each index combination
@@ -1614,8 +1615,26 @@ class _ModelBuilder:
                         m.minimize(obj_expr)
                     else:
                         m.maximize(obj_expr)
+                    obj_set = True
                 else:
                     self._add_constraint(m, lhs_expr, eqdef.sense, rhs_expr, eqdef.name)
+
+        # Fallback for the MINLPLib standard form: ``Solve m ... minimizing
+        # objvar`` where ``objvar`` is a free variable that does NOT appear as a
+        # bare ``objvar =e= expr`` definition but is instead embedded in a
+        # defining equation (e.g. ``defobj.. expr + objvar =E= 0``). No equation
+        # was recognized as the objective above, so minimize/maximize the
+        # objective variable directly and leave every equation (including the
+        # defining one, already added as a constraint) in place. This is the
+        # exact GAMS semantics — GAMS minimizes the scalar variable ``objvar``
+        # subject to all equations — so it is sound and value-preserving.
+        if obj_var_name and not obj_set:
+            obj_var = self.dvar_map.get(obj_var_name)
+            if obj_var is not None and getattr(obj_var, "shape", None) in ((), (1,)):
+                if obj_sense.startswith("min"):
+                    m.minimize(obj_var)
+                else:
+                    m.maximize(obj_var)
 
     def _is_obj_equation(self, eqdef, obj_var_name: str | None) -> bool:
         if obj_var_name is None:
@@ -1780,8 +1799,21 @@ class _ModelBuilder:
 
         # check params/tables
         if name in self.param_values:
-            key = tuple(str_indices) if len(str_indices) > 1 else (str_indices[0],)
-            val = self.param_values[name].get(key, 0.0)
+            pdata = self.param_values[name]
+            # 1-D parameter data is stored under the bare element key by
+            # ``_parse_param_data`` (e.g. ``"p1"``), while multi-dim data uses a
+            # tuple key. Earlier this looked up 1-D refs as a 1-tuple ``("p1",)``,
+            # which never matched the bare-string storage and silently fell back
+            # to the 0.0 default — quietly dropping every 1-D parameter value.
+            # Tolerate both key forms so the lookup matches regardless of how the
+            # entry was stored.
+            if len(str_indices) == 1:
+                key: object = str_indices[0]
+                if key not in pdata:
+                    key = (str_indices[0],)
+            else:
+                key = tuple(str_indices)
+            val = pdata.get(key, 0.0)
             return Constant(float(val))
         # check variables
         if name in self.dvar_map:

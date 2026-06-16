@@ -168,6 +168,17 @@ class TestGamsImportTransport:
         assert m._objective is not None
         assert m._objective.sense.value == "minimize"
 
+    def test_one_dim_parameter_values_resolve(self):
+        # Regression: 1-D parameter data (a(i), b(j)) is stored under a bare
+        # element key, but _resolve_indexed once looked it up as a 1-tuple and
+        # silently fell back to 0.0 — so every supply/demand RHS became 0 and
+        # the model solved to a false optimum. Assert the declared values
+        # actually reach the constraint expressions.
+        m = parse_gams(TRANSPORT_GMS)
+        rendered = " ".join(str(c) for c in m._constraints)
+        for val in ("350", "600", "325", "300", "275"):
+            assert val in rendered, f"1-D parameter value {val} missing from constraints"
+
 
 class TestGamsImportKnapsack:
     def test_binary_variables(self):
@@ -215,6 +226,53 @@ class TestGamsImportNLP:
         m = parse_gams(NLP_ROSENBROCK_GMS)
         assert m._objective is not None
         assert len(m._variables) == 3  # x1, x2, obj
+
+
+# MINLPLib standard form: a free ``objvar`` that is minimized but is *embedded*
+# in a defining equation (``defobj.. expr - objvar =E= 0``) rather than written
+# as a bare ``objvar =e= expr``. This is how every minlplib.org .gms file
+# encodes its objective, so from_gams must recognize it.
+MINLPLIB_OBJVAR_GMS = textwrap.dedent("""\
+    Variables  x1,x2,objvar;
+
+    Equations  e1,e2,defobj;
+
+    e1.. x1 + x2 =G= 4;
+    e2.. x1 - x2 =L= 1;
+    defobj.. sqr(x1) + sqr(x2) - objvar =E= 0;
+
+    x1.lo = 0; x2.lo = 0;
+
+    Model m / all /;
+    Solve m using NLP minimizing objvar;
+""")
+
+
+class TestGamsImportObjvarEmbedded:
+    def test_embedded_objvar_objective_is_set(self):
+        # Regression: the objective variable appears inside the defining
+        # equation rather than alone on one side, so _is_obj_equation does not
+        # match. from_gams must fall back to minimizing the objvar *variable*
+        # directly (exact GAMS semantics) instead of leaving the model with no
+        # objective at all.
+        m = parse_gams(MINLPLIB_OBJVAR_GMS)
+        assert m._objective is not None
+        assert m._objective.sense.value == "minimize"
+
+    def test_embedded_objvar_keeps_defining_equation_as_constraint(self):
+        # Minimizing the variable directly means every equation, including the
+        # objvar-defining one, stays a constraint (e1, e2, defobj = 3).
+        m = parse_gams(MINLPLIB_OBJVAR_GMS)
+        assert len(m._constraints) == 3
+
+    def test_embedded_objvar_solves_to_known_optimum(self):
+        # min x1^2 + x2^2 s.t. x1 + x2 >= 4, x1 - x2 <= 1, x>=0.
+        # x1 + x2 >= 4 binds; x1 - x2 <= 1 is slack, so the optimum is the
+        # symmetric point x1 = x2 = 2 -> objective 4 + 4 = 8.
+        m = parse_gams(MINLPLIB_OBJVAR_GMS)
+        res = m.solve(time_limit=30)
+        assert res.status in ("optimal", "feasible")
+        assert res.objective == pytest.approx(8.0, abs=1e-3)
 
 
 class TestGamsImportNonlinear:
