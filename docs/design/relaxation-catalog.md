@@ -214,3 +214,18 @@ spatial B&B unnecessarily.
 5. **Expose `atan/asin/acos/sinh/cosh` as `dm.*` builders (C).** Cheap ergonomics win.
 6. **Tighter multilinear hulls (D)** — true trilinear/edge-concave envelopes — for
    parity with BARON on signomial/multilinear problems.
+
+## 7. Implementation status (this work)
+
+Items 1–5 above are implemented; the `prod` path now uses the proper recursive
+McCormick fold (corner-product interval tracking). Item 6 (the literal
+multilinear convex hull) was investigated and found **not achievable as an
+incremental change in the current relaxation architecture**: the compositional
+`(cv, cc)` value-evaluator linearizes at the box midpoint, where recursive
+McCormick is provably order-invariant (verified — `relax_trilinear_exact`'s
+three orderings coincide at the midpoint, so permutation-merging yields no
+tightening). The exact hull is the RLT bound-factor system over *lifted*
+bilinear variables (Rikun 1997 / Meyer & Floudas 2004), which requires routing
+multilinear terms through the vertex-based LP relaxation rather than the
+midpoint evaluator. That lifting is the real next step for BARON-parity
+multilinear tightness and remains future work.

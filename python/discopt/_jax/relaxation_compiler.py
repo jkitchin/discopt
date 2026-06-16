@@ -890,10 +890,22 @@ def _compile_relax_node(
             return fn
 
         if name == "prod":
-            # Multilinear product prod_i x_i over an array argument.
-            # Relax by folding pairwise McCormick bilinear envelopes (the
-            # standard recursive McCormick relaxation of a multilinear term).
-            # Not the convex hull, but a valid relaxation for every factor sign.
+            # Multilinear product prod_i x_i over an array argument, relaxed by
+            # the recursive McCormick fold of envelopes._nested_trilinear_one_order
+            # generalized to n factors: maintain the accumulated product's value
+            # envelope (w_cv, w_cc) AND its exact interval [w_lb, w_ub] (via
+            # corner products), folding one factor at a time through the bilinear
+            # envelope. A valid relaxation for every factor sign.
+            #
+            # NOTE: this is not the literal convex hull of the multilinear
+            # monomial (Rikun 1997 / Meyer & Floudas 2004). The exact hull is
+            # given by RLT bound-factor products over *lifted* bilinear variables,
+            # which this compositional value-evaluator does not carry. Merging
+            # association orderings does NOT help here: at the midpoint/box-center
+            # linearization point this evaluator uses, recursive McCormick is
+            # order-invariant (verified: relax_trilinear_exact's three orderings
+            # coincide at the midpoint). Tightening to the true hull needs the
+            # lifted-variable LP path and remains future work.
             a_fn = arg_fns[0]
             n = getattr(expr.args[0], "size", None)
             if n is None or n < 1:
@@ -906,14 +918,34 @@ def _compile_relax_node(
                 cv_a, cc_a = _a_fn(x_cv, x_cc, lb, ub)
                 cv_a = jnp.reshape(cv_a, (-1,))
                 cc_a = jnp.reshape(cc_a, (-1,))
-                acc_cv, acc_cc = cv_a[0], cc_a[0]
-                for k in range(1, _n):
-                    mid_acc = 0.5 * (acc_cv + acc_cc)
-                    mid_k = 0.5 * (cv_a[k] + cc_a[k])
-                    acc_cv, acc_cc = relax_bilinear(
-                        mid_acc, mid_k, acc_cv, acc_cc, cv_a[k], cc_a[k]
+                if _n == 1:
+                    return cv_a[0], cc_a[0]
+                # Seed the fold with the first two factors' bilinear envelope.
+                w_cv, w_cc = relax_bilinear(
+                    0.5 * (cv_a[0] + cc_a[0]),
+                    0.5 * (cv_a[1] + cc_a[1]),
+                    cv_a[0],
+                    cc_a[0],
+                    cv_a[1],
+                    cc_a[1],
+                )
+                corners = jnp.stack(
+                    [cv_a[0] * cv_a[1], cv_a[0] * cc_a[1], cc_a[0] * cv_a[1], cc_a[0] * cc_a[1]]
+                )
+                w_lb, w_ub = jnp.min(corners), jnp.max(corners)
+                for k in range(2, _n):
+                    c_lb, c_ub = cv_a[k], cc_a[k]
+                    c_mid = 0.5 * (c_lb + c_ub)
+                    cv1, cc1 = relax_bilinear(w_cv, c_mid, w_lb, w_ub, c_lb, c_ub)
+                    cv2, cc2 = relax_bilinear(w_cc, c_mid, w_lb, w_ub, c_lb, c_ub)
+                    new_cv = jnp.minimum(cv1, cv2)
+                    new_cc = jnp.maximum(cc1, cc2)
+                    corners = jnp.stack(
+                        [w_lb * c_lb, w_lb * c_ub, w_ub * c_lb, w_ub * c_ub]
                     )
-                return acc_cv, acc_cc
+                    w_lb, w_ub = jnp.min(corners), jnp.max(corners)
+                    w_cv, w_cc = new_cv, new_cc
+                return w_cv, w_cc
 
             return fn
 
