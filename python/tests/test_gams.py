@@ -168,6 +168,17 @@ class TestGamsImportTransport:
         assert m._objective is not None
         assert m._objective.sense.value == "minimize"
 
+    def test_one_dim_parameter_values_resolve(self):
+        # Regression: 1-D parameter data (a(i), b(j)) is stored under a bare
+        # element key, but _resolve_indexed once looked it up as a 1-tuple and
+        # silently fell back to 0.0 — so every supply/demand RHS became 0 and
+        # the model solved to a false optimum. Assert the declared values
+        # actually reach the constraint expressions.
+        m = parse_gams(TRANSPORT_GMS)
+        rendered = " ".join(str(c) for c in m._constraints)
+        for val in ("350", "600", "325", "300", "275"):
+            assert val in rendered, f"1-D parameter value {val} missing from constraints"
+
 
 class TestGamsImportKnapsack:
     def test_binary_variables(self):

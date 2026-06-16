@@ -64,8 +64,8 @@
       "objective_var": "z",
       "objective": 75.0,
       "tol": 1e-3,
-      "via_from_gams": false,
-      "notes": "Original 2x2 transport LP (sets/tables). GAMS-side only: discopt's from_gams() does not yet substitute indexed parameter data into objective coefficients."
+      "via_from_gams": true,
+      "notes": "Original 2x2 transport LP (sets/tables/1-D parameters). Regression lock for the indexed-parameter resolution bug: 1-D parameter data (cap(i), dem(j)) was stored under a bare element key but looked up as a 1-tuple, so every 1-D parameter silently resolved to 0 and the model solved to a false optimum of 0 instead of 75."
     }
   ]
 }

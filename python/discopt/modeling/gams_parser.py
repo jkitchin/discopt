@@ -1780,8 +1780,21 @@ class _ModelBuilder:
 
         # check params/tables
         if name in self.param_values:
-            key = tuple(str_indices) if len(str_indices) > 1 else (str_indices[0],)
-            val = self.param_values[name].get(key, 0.0)
+            pdata = self.param_values[name]
+            # 1-D parameter data is stored under the bare element key by
+            # ``_parse_param_data`` (e.g. ``"p1"``), while multi-dim data uses a
+            # tuple key. Earlier this looked up 1-D refs as a 1-tuple ``("p1",)``,
+            # which never matched the bare-string storage and silently fell back
+            # to the 0.0 default — quietly dropping every 1-D parameter value.
+            # Tolerate both key forms so the lookup matches regardless of how the
+            # entry was stored.
+            if len(str_indices) == 1:
+                key: object = str_indices[0]
+                if key not in pdata:
+                    key = (str_indices[0],)
+            else:
+                key = tuple(str_indices)
+            val = pdata.get(key, 0.0)
             return Constant(float(val))
         # check variables
         if name in self.dvar_map:
