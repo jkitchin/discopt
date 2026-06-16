@@ -331,3 +331,91 @@ class TestIdentifiability:
         result = check_identifiability(exp, {"k": 2.0})
         assert result.is_identifiable
         assert result.fim_rank == 1
+
+
+# ──────────────────────────────────────────────────────────
+# TestSolveFreeAndBatch: explicit-model fast path + multi-RHS
+# ──────────────────────────────────────────────────────────
+
+
+class TestSolveFreeAndBatch:
+    """The solve-free direct assembly and the batched multi-RHS path must be
+    numerically identical to the original per-point solve-based computation."""
+
+    def _rsm_experiment(self):
+        from discopt.doe.templates import response_surface_template
+
+        spec = [("x1", 0.0, 10.0), ("x2", -5.0, 5.0)]
+        exp = response_surface_template(spec, response_name="y", measurement_error=1.0)
+        pnames = exp.create_model().parameter_names
+        return exp, {n: 0.3 for n in pnames}
+
+    def test_explicit_model_uses_direct_assembly(self):
+        """A pure explicit response model needs no solve: x* is assembled directly."""
+        from discopt.doe.fim import _assemble_x_flat_direct
+
+        exp, pv = self._rsm_experiment()
+        em = exp.create_model(**pv)
+        x_flat = _assemble_x_flat_direct(em, pv, {"x1": 4.0, "x2": -2.0})
+        assert x_flat is not None  # eligible -> solve is skipped
+
+    def test_direct_matches_forced_solve(self):
+        """compute_fim's direct path equals the box-LS solve it replaces."""
+        import discopt.doe.fim as fimmod
+
+        exp, pv = self._rsm_experiment()
+        design = {"x1": 7.0, "x2": -3.0}
+        direct = compute_fim(exp, pv, design)
+
+        orig = fimmod._assemble_x_flat_direct
+        fimmod._assemble_x_flat_direct = lambda *a, **k: None  # force the solve path
+        try:
+            solved = compute_fim(exp, pv, design)
+        finally:
+            fimmod._assemble_x_flat_direct = orig
+
+        np.testing.assert_allclose(direct.fim, solved.fim, rtol=1e-9, atol=1e-9)
+
+    def test_batch_matches_per_point(self):
+        """compute_fim_batch returns the same FIM as looping compute_fim."""
+        from discopt.doe.fim import compute_fim_batch
+
+        exp, pv = self._rsm_experiment()
+        rng = np.random.default_rng(0)
+        pts = [{"x1": float(rng.uniform(0, 10)), "x2": float(rng.uniform(-5, 5))} for _ in range(8)]
+        batch = compute_fim_batch(exp, pv, pts)
+        assert len(batch) == len(pts)
+        for dp, b in zip(pts, batch):
+            single = compute_fim(exp, pv, dp)
+            np.testing.assert_allclose(b.fim, single.fim, rtol=1e-9, atol=1e-9)
+
+    def test_batch_empty(self):
+        from discopt.doe.fim import compute_fim_batch
+
+        exp, pv = self._rsm_experiment()
+        assert compute_fim_batch(exp, pv, []) == []
+
+    def test_constrained_model_falls_back_to_solve(self):
+        """A model with a constraint is ineligible for direct assembly."""
+        from discopt.doe.fim import _assemble_x_flat_direct
+
+        class ConstrainedExp(Experiment):
+            def create_model(self, **kwargs):
+                m = dm.Model("constrained")
+                k = m.continuous("k", lb=0.01, ub=20)
+                x = m.continuous("x", lb=0.1, ub=10)
+                m.subject_to(x <= 5.0)
+                return ExperimentModel(
+                    model=m,
+                    unknown_parameters={"k": k},
+                    design_inputs={"x": x},
+                    responses={"y": k * x},
+                    measurement_error={"y": 0.1},
+                )
+
+        exp = ConstrainedExp()
+        em = exp.create_model(k=1.0)
+        assert _assemble_x_flat_direct(em, {"k": 1.0}, {"x": 2.0}) is None
+        # And compute_fim still works through the solve fallback.
+        result = compute_fim(exp, {"k": 1.0}, {"x": 2.0})
+        assert result.fim.shape == (1, 1)
