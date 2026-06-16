@@ -16,7 +16,8 @@
 #![allow(clippy::needless_range_loop)]
 
 use super::linsolve::{FeralLU, LinearSolver};
-use super::primal::solve_lp;
+use super::primal::solve_lp_scaled;
+use super::scaling::ScaledLp;
 use super::sparse::SparseCols;
 use super::{LpSolve, LpStatus, SimplexOptions};
 use crate::lp::basis::{Basis, AT_LOWER, AT_UPPER, BASIC};
@@ -26,10 +27,35 @@ const INF: f64 = 1e20;
 
 /// Re-optimize `min cᵀx s.t. A x = b, l ≤ x ≤ u` from a warm `start` basis via
 /// the dual simplex, falling back to a cold solve on any difficulty.
+///
+/// Like [`solve_lp`](super::solve_lp), an ill-scaled matrix is equilibrated
+/// first so the basis factorization stays well-conditioned, and the scaled
+/// solution is mapped back. The warm-start basis is scaling-invariant (a column
+/// is basic or not regardless of its scale) and the factors come from `A` alone,
+/// so the basis a child inherits from its parent stays valid across the tree.
 pub fn solve_lp_warm(lp: &LpView<'_>, b: &[f64], start: &Basis, opts: &SimplexOptions) -> LpSolve {
+    match ScaledLp::maybe_new(lp, b) {
+        Some(scaled) => {
+            let view = scaled.view();
+            let mut sol = solve_warm_scaled(&view, scaled.b(), start, opts);
+            scaled.unscale_x(&mut sol.x);
+            sol
+        }
+        None => solve_warm_scaled(lp, b, start, opts),
+    }
+}
+
+/// Warm dual re-optimization on an already-equilibrated LP, with the cold
+/// primal fallback (also on the scaled matrix, so it is never scaled twice).
+fn solve_warm_scaled(
+    lp: &LpView<'_>,
+    b: &[f64],
+    start: &Basis,
+    opts: &SimplexOptions,
+) -> LpSolve {
     match try_dual(lp, b, start, opts) {
         Some(sol) => sol,
-        None => solve_lp(lp, b, opts), // safe fallback — always correct
+        None => solve_lp_scaled(lp, b, opts), // safe fallback — always correct
     }
 }
 
@@ -299,6 +325,7 @@ fn assemble(
 
 #[cfg(test)]
 mod tests {
+    use super::super::primal::solve_lp;
     use super::*;
 
     fn opts() -> SimplexOptions {
