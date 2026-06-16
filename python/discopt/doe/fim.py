@@ -23,7 +23,7 @@ The FIM is used to:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -381,6 +381,72 @@ def compute_fim_batch(
             )
         )
     return results
+
+
+def _make_direct_fim_evaluator(
+    experiment: Experiment,
+    param_values: dict[str, float],
+    *,
+    prior_fim: np.ndarray | None = None,
+) -> Callable[[dict[str, float] | None], FIMResult] | None:
+    """Return a reusable FIM evaluator that compiles the response Jacobian once.
+
+    For a *pure explicit response model* (see :func:`_design_source_map`) the
+    model is built and the response Jacobian JIT-compiled a *single* time; the
+    returned ``evaluator(design_values) -> FIMResult`` then reuses that compiled
+    Jacobian for every design point, assembling ``x*`` directly (no solve). This
+    is the single-point analogue of :func:`compute_fim_batch`, intended for the
+    adaptive scipy refinement loop in :mod:`discopt.doe.design`, where design
+    points are chosen one at a time and the same Jacobian is evaluated many
+    times.
+
+    Returns ``None`` when the model has constraints or implicit state (the
+    caller falls back to per-call :func:`compute_fim`, which solves). For every
+    design point the returned FIM is identical (to float tolerance) to calling
+    :func:`compute_fim` on that point — only the per-call model rebuild and JAX
+    re-trace are eliminated.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    from discopt._jax.differentiable import _compile_parametric_node
+
+    em = experiment.create_model(**param_values)
+    if _design_source_map(em) is None:
+        return None
+
+    response_fns = [_compile_parametric_node(em.responses[n], em.model) for n in em.response_names]
+    param_indices = _get_param_indices(em)
+    p_flat = _build_p_flat(em.model)
+
+    def response_vector(x_flat_arg):
+        return jnp.stack([fn(x_flat_arg, p_flat) for fn in response_fns])
+
+    # Compile the Jacobian once; the JIT cache keys on x*'s (fixed) shape, so
+    # every subsequent design point reuses the same compiled trace.
+    jac = jax.jit(jax.jacobian(response_vector))
+    sigma = np.array([em.measurement_error[name] for name in em.response_names])
+    Sigma_inv = np.diag(1.0 / sigma**2)
+    param_names = em.parameter_names
+    response_names = em.response_names
+
+    def evaluator(design_values: dict[str, float] | None) -> FIMResult:
+        x_flat = _assemble_x_flat_direct(em, param_values, design_values)
+        if x_flat is None:
+            # Per-point shape/missing-design mismatch: fall back to the solve.
+            return compute_fim(experiment, param_values, design_values, prior_fim=prior_fim)
+        J = np.asarray(jac(x_flat))[:, param_indices]
+        fim = J.T @ Sigma_inv @ J
+        if prior_fim is not None:
+            fim = fim + prior_fim
+        return FIMResult(
+            fim=np.asarray(fim),
+            jacobian=np.asarray(J),
+            parameter_names=param_names,
+            response_names=response_names,
+        )
+
+    return evaluator
 
 
 @dataclass
