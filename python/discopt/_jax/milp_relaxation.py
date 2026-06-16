@@ -2780,6 +2780,20 @@ def build_milp_relaxation(
     if objective_lift is not None:
         for branch_expr in objective_lift.branch_exprs:
             objective_lift_monomials.update(_collect_monomial_terms_for_lift(branch_expr, model))
+    elif model._objective is not None:
+        # Regular (non-minmax) objective: collect monomial sub-terms from
+        # repeated-factor products such as ``x**2 * y`` (issue #139, bucket 2).
+        # The term classifier punts mixed repeated-factor products to
+        # ``general_nl`` without recording the constituent monomial, so the
+        # objective term would otherwise drop (objective_bound_valid=False).
+        # Lifting the monomial (``x**2``) lets the product relax via one
+        # monomial envelope + one lifted bilinear envelope — both rigorous
+        # McCormick underestimators — instead of dropping the objective.
+        objective_lift_monomials.update(
+            _collect_monomial_terms_for_lift(
+                distribute_products(model._objective.expression), model
+            )
+        )
     monomial_terms = sorted(set(terms.monomial) | objective_lift_monomials)
 
     def _record_generation_guardrail(
@@ -2924,6 +2938,12 @@ def build_milp_relaxation(
         if canonical not in trilinear_terms:
             trilinear_terms.append(canonical)
 
+    def _builder_pinned(idx: int) -> bool:
+        """True if original variable ``idx`` is pinned (lb==ub) at this node."""
+        if idx >= len(flat_lb):
+            return False
+        return float(flat_ub[idx]) - float(flat_lb[idx]) <= 1e-9
+
     for term in sorted(trilinear_terms):
         pair, remaining = _choose_trilinear_pair(term, partitioned_vars)
         pair_col = _ensure_bilinear_aux(*pair)
@@ -2935,6 +2955,18 @@ def build_milp_relaxation(
             "remaining_var": remaining,
             "product_col": final_col,
         }
+        # Pinned-factor collapse: when exactly one factor is pinned at this node
+        # (lb==ub from branching/OBBT), ``_linearize_expr`` folds that factor's
+        # exact value into the coefficient, leaving a *bilinear* in the other two
+        # factors. Pre-allocate that bilinear's aux column + McCormick envelope so
+        # the collapsed term still linearizes; otherwise the linearizer raises
+        # "Bilinear (i,j) not in map" and the whole objective/constraint drops
+        # (issue #139: surfaces on nvs22 once its x**2*y objective term lifts).
+        unpinned = [v for v in term if not _builder_pinned(v)]
+        if len(unpinned) == 2:
+            bkey = (min(unpinned), max(unpinned))
+            if bkey not in bilinear_var_map:
+                bilinear_var_map[bkey] = _ensure_bilinear_aux(*bkey)
 
     multilinear_terms = terms.multilinear or _collect_distinct_multilinear_products(model)
     for multi_term in multilinear_terms:
@@ -3406,6 +3438,22 @@ def build_milp_relaxation(
     for (i, j), w_col in bilinear_relation_map.items():
         xi_lb_g, xi_ub_g = [float(v) for v in all_bounds[i]]
         xj_lb_g, xj_ub_g = [float(v) for v in all_bounds[j]]
+
+        # A McCormick envelope needs finite bounds on both factors: the four
+        # inequalities use ``x_lb``/``x_ub`` as coefficients, so an unbounded
+        # factor injects ``±inf`` into the constraint matrix and the LP solver
+        # errors out (e.g. nvs22's free auxiliary variables x4-x7, which only
+        # appear in omitted division/sqrt constraints). Skip the envelope: the
+        # aux ``w`` stays unconstrained, which only enlarges the feasible region
+        # and therefore keeps the dual bound valid. This mirrors the finite-bound
+        # guard already applied to monomial envelopes below.
+        if not (
+            _is_effectively_finite(xi_lb_g)
+            and _is_effectively_finite(xi_ub_g)
+            and _is_effectively_finite(xj_lb_g)
+            and _is_effectively_finite(xj_ub_g)
+        ):
+            continue
 
         if (i, j) in bilinear_lambda_map:
             lambda_info = bilinear_lambda_map[(i, j)]
