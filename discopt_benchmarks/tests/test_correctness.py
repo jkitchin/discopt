@@ -78,11 +78,18 @@ KNOWN_OPTIMA = {
     "fuel":         8566.12,
     "gastrans":   89.08588,
     "ghg_1veh":    7.7816348850,  # corrected from -246.04 (=opt=)
-    # NOTE: not present in the current MINLPLib minlplib.solu, so unverifiable —
-    # the instance names do not match (it has procurement1{large,mot} and
-    # smallinvDAXr1b0NN-0NN, not these). Left as-is pending confirmation.
-    "procurement1": 0.0,
-    "smallinvDAXr1b50": -3.83,
+    # The previous "procurement1" (0.0) and "smallinvDAXr1b50" (-3.83) were
+    # phantom entries: those names match no MINLPLib instance and the values
+    # matched nothing. Replaced with the real instances the benchmark suites
+    # actually reference (discopt_benchmarks/config/suites/), values from
+    # minlplib.solu. procurement1{large,mot} are =best= (best known, optimum not
+    # proven); the rest are =opt= (proven optimal).
+    "procurement1large":      3802.1797490,   # =best=
+    "procurement1mot":         291.5416577,   # =best=
+    "procurement2mot":         212.0707488,   # =opt=
+    "smallinvDAXr1b020-022":     1.5715279820,  # =opt= (cardinality portfolio, DAX-100)
+    "smallinvDAXr1b050-055":     9.7971434540,  # =opt=
+    "smallinvDAXr1b100-110":    39.1621418600,  # =opt=
 }
 
 ABS_TOL = 1e-4
