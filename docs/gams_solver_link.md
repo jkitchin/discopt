@@ -41,32 +41,52 @@ The model is reconstructed natively, so the full discopt stack applies:
 spatial branch-and-bound, McCormick/αBB relaxations, FBBT presolve, and the
 convex fast path.
 
-## Installation and registration
+## Install discopt as a GAMS solver
 
-The link needs the GAMS expert-level Python API (the GMO/GEV bindings). It ships
-with every GAMS system and is also on PyPI:
-
-```bash
-pip install "discopt[gams]"   # pulls gamsapi[core]
-```
-
-Register discopt with your GAMS system:
+Two steps — install the package, then register it with GAMS:
 
 ```bash
-discopt gams-register --directory ./discopt-gams-config
+pip install "discopt[gams]"   # discopt (prebuilt wheel) + gamsapi[core] + PyYAML
+discopt gams-register          # writes ~/.gams/gamsconfig.yaml + the launcher
 ```
 
-This writes two files:
+Then, in any GAMS model:
 
-- `gamsconfig.yaml` — a `solverConfig` block declaring the `discopt` solver and
-  the model types it accepts (LP, MIP, NLP, DNLP, RMINLP, MINLP, QCP, MIQCP, …).
-  Merge it into the `gamsconfig.yaml` in your GAMS system directory (or
-  `$HOME/.gams`).
-- `discopt-gams` — a small launcher script GAMS runs with the control file; it
-  invokes `python -m discopt.gams.link`.
+```gams
+option minlp = discopt;        // and/or lp/mip/nlp/... = discopt
+solve m using minlp minimizing z;
+```
 
-After registration, `option minlp = discopt;` (and the analogous options for the
-other model types) dispatches to discopt.
+`discopt` ships as a prebuilt wheel (the Rust extension is compiled in CI), so
+no Rust toolchain is needed. The expert-level GAMS Python API (`gamsapi[core]`,
+the GMO/GEV bindings) ships with every GAMS system and is also on PyPI.
+
+### What `gams-register` does
+
+- **Merges** a `discopt` entry into `gamsconfig.yaml` in the target directory
+  (default `$HOME/.gams`, which GAMS reads automatically), declaring the model
+  types discopt accepts (LP, MIP, NLP, DNLP, RMINLP, MINLP, QCP, MIQCP, …). It
+  preserves any other solvers and top-level keys already there, and re-running
+  it just updates the discopt entry (no duplicates). Use `--directory` to target
+  your GAMS system dir instead.
+- Writes the **`discopt-gams`** launcher GAMS runs with the control file. The
+  launcher hardcodes the current Python interpreter (`sys.executable`), so it
+  works regardless of virtualenv activation or `PATH`.
+
+### Two gotchas worth knowing
+
+- **Match `gamsapi` to your GAMS version.** The GMO/GEV bindings `dlopen` the
+  GAMS C libraries, so the `gamsapi` version must agree with your installed
+  GAMS. The safest source is the one bundled with your GAMS
+  (`<GAMS_DIR>/apifiles/Python/api/...`); otherwise pin the PyPI release to your
+  GAMS version. Verify with:
+
+  ```bash
+  discopt gams-register --check    # reports gamsapi import + version, or how to fix
+  ```
+
+- **Re-register if you move the Python environment**, since the launcher
+  embeds an absolute interpreter path.
 
 ## Low latency: the warm daemon
 

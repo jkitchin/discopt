@@ -399,11 +399,49 @@ def test_write_registration(tmp_path):
     written = write_registration(tmp_path)
     assert written["config"].exists()
     assert written["script"].exists()
+    assert written["action"] == "created"
     # script should be executable
     import os
 
     assert os.access(written["script"], os.X_OK)
     assert "solverConfig" in written["config"].read_text()
+
+
+def test_register_merges_into_existing_gamsconfig(tmp_path):
+    import yaml
+
+    # Pre-existing config: another solver + an unrelated top-level key.
+    cfg = tmp_path / "gamsconfig.yaml"
+    cfg.write_text(
+        "defaultSolvers:\n  - NLP: conopt\n"
+        "solverConfig:\n  - mysolver:\n      scriptName: /x/mysolver\n"
+        "      modelTypes:\n        - NLP\n"
+    )
+    written = write_registration(tmp_path)
+    assert written["action"] == "merged"
+    doc = yaml.safe_load(cfg.read_text())
+    names = [next(iter(item)) for item in doc["solverConfig"]]
+    assert names == ["mysolver", "discopt"]  # existing preserved, discopt added
+    assert "defaultSolvers" in doc  # other top-level keys preserved
+
+
+def test_register_is_idempotent(tmp_path):
+    import yaml
+
+    write_registration(tmp_path)
+    written = write_registration(tmp_path)  # second run
+    assert written["action"] == "replaced"
+    doc = yaml.safe_load((tmp_path / "gamsconfig.yaml").read_text())
+    names = [next(iter(item)) for item in doc["solverConfig"]]
+    assert names.count("discopt") == 1  # no duplicate entry
+
+
+def test_check_gamsapi_returns_bool_and_message():
+    from discopt.gams import check_gamsapi
+
+    ok, message = check_gamsapi()
+    assert isinstance(ok, bool)
+    assert isinstance(message, str) and "gamsapi" in message
 
 
 def test_is_available_returns_bool():

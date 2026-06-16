@@ -35,7 +35,7 @@ from .instructions import (
     translate_instructions,
 )
 from .link import is_available, solve_from_control_file, solve_view, status_to_gams
-from .register import gamsconfig_snippet, run_script, write_registration
+from .register import check_gamsapi, gamsconfig_snippet, run_script, write_registration
 
 __all__ = [
     "is_available",
@@ -52,6 +52,7 @@ __all__ = [
     "gamsconfig_snippet",
     "run_script",
     "write_registration",
+    "check_gamsapi",
     "DaemonServer",
     "solve_via_daemon",
     "spawn_daemon",

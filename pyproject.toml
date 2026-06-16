@@ -46,7 +46,9 @@ highs = ["highspy"]
 cutest = ["pycutest>=1.8.0"]
 # GAMS solver link: the expert-level GAMS Python API (GMO/GEV). Ships with a
 # GAMS system; also on PyPI. Required only to run discopt *as* a GAMS solver.
-gams = ["gamsapi[core]>=45"]
+# Pin gamsapi to match your installed GAMS version. PyYAML is used by
+# `discopt gams-register` to merge into an existing gamsconfig.yaml.
+gams = ["gamsapi[core]>=45", "pyyaml>=6"]
 llm = ["litellm>=1.0"]
 nn = ["onnx>=1.14", "onnxruntime>=1.16"]
 ml = ["scikit-learn>=1.0"]

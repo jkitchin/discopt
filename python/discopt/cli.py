@@ -196,31 +196,32 @@ def _cmd_convert(args):
 def _cmd_gams_register(args):
     """Register discopt as a solver with a GAMS system.
 
-    Writes ``gamsconfig.yaml`` and a ``discopt-gams`` run script into the target
-    directory.  Merge the YAML into your GAMS system dir (or ``$HOME/.gams``) so
-    that ``option minlp = discopt;`` dispatches to discopt.
+    Writes a ``discopt-gams`` run script and merges a discopt entry into
+    ``gamsconfig.yaml`` in the target directory (default ``$HOME/.gams``, which
+    GAMS reads automatically), so ``option minlp = discopt;`` dispatches to
+    discopt. ``--check`` only runs the gamsapi diagnostic.
     """
-    from discopt.gams import is_available, write_registration
+    from discopt.gams import check_gamsapi, write_registration
+
+    ok, message = check_gamsapi()
+    if args.check:
+        print(("OK: " if ok else "PROBLEM: ") + message)
+        sys.exit(0 if ok else 1)
 
     out = Path(args.directory)
     written = write_registration(out)
-    print(f"Wrote GAMS registration files to {out}:")
-    print(f"  config: {written['config']}")
-    print(f"  script: {written['script']}")
-    print(
-        "\nNext steps:\n"
-        f"  1. Merge {written['config'].name} into your GAMS gamsconfig.yaml "
-        "(GAMS system dir or $HOME/.gams).\n"
-        "  2. Ensure the run script is reachable, then in GAMS use:\n"
-        "       option minlp = discopt;\n"
-        "       solve m using minlp minimizing z;\n"
-    )
-    if not is_available():
+    verb = {"created": "Created", "merged": "Merged into", "replaced": "Updated"}[written["action"]]
+    print(f"{verb} {written['config']}")
+    print(f"Run script: {written['script']}")
+    if out == Path.home() / ".gams":
+        print("\nGAMS reads $HOME/.gams/gamsconfig.yaml automatically. In GAMS:")
+    else:
         print(
-            "\nNote: the GAMS Python API (gamsapi) is not importable here. "
-            "Install it from your GAMS system: pip install gamsapi[core]",
-            file=sys.stderr,
+            f"\nMerge {written['config']} into your GAMS gamsconfig.yaml "
+            "($HOME/.gams or the GAMS system dir), then in GAMS:"
         )
+    print("    option minlp = discopt;\n    solve m using minlp minimizing z;")
+    print(f"\ngamsapi check: {message}")
 
 
 def _cmd_gams_daemon(args):
@@ -315,8 +316,14 @@ def main():
     )
     p_gams.add_argument(
         "--directory",
-        default="discopt-gams-config",
-        help="Directory to write gamsconfig.yaml and the run script into.",
+        default=str(Path.home() / ".gams"),
+        help="Directory to write/merge gamsconfig.yaml + run script "
+        "(default: $HOME/.gams, which GAMS reads automatically).",
+    )
+    p_gams.add_argument(
+        "--check",
+        action="store_true",
+        help="Only run the gamsapi diagnostic; do not write any files.",
     )
     p_gams.set_defaults(func=_cmd_gams_register)
 
