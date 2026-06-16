@@ -190,8 +190,10 @@ def test_bb_opt_out_skips_gp_fast_path() -> None:
         # exhausts the tree only after many minutes — the prior unbounded form
         # relied on an unsound NLP pruning bound (removed in #120) to terminate
         # fast. The classic-path assertions below hold the instant the
-        # incumbent is found, so cap the budget to keep the test deterministic.
-        result = model.solve(solver="bb", time_limit=30.0)
+        # incumbent is found (at the root), so a small budget suffices and keeps
+        # this off the fast-CI critical path; the cap only bounds the
+        # never-reached certification, not the assertions.
+        result = model.solve(solver="bb", time_limit=5.0)
     assert result.status in ("optimal", "feasible")
     assert result.objective == pytest.approx(2.0, abs=1e-4)
     # The classic path does not set the convex single-NLP fast-path flag.
