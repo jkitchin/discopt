@@ -33,6 +33,7 @@ import numpy as np
 # MARKERS
 # ─────────────────────────────────────────────────────────────
 
+
 def pytest_configure(config):
     """Register custom markers."""
     config.addinivalue_line("markers", "smoke: Fast smoke tests for CI")
@@ -50,62 +51,13 @@ def pytest_configure(config):
 # FIXTURES
 # ─────────────────────────────────────────────────────────────
 
-@pytest.fixture(scope="session")
-def known_optima() -> dict[str, float]:
-    """
-    Load verified global optima for correctness testing.
-
-    This is the ground truth. Any solver result that disagrees
-    with these values is INCORRECT. Values are sourced from
-    MINLPLib and independently verified by BARON.
-    """
-    optima_file = Path(__file__).parent / "data" / "known_optima.json"
-    if optima_file.exists():
-        with open(optima_file) as f:
-            return json.load(f)
-
-    # Fallback: hardcoded subset for bootstrap
-    return {
-        "ex1221": 7.6672,
-        "ex1222": 1.0765,
-        "ex1223": 4.5796,
-        "ex1224": -0.94347,
-        # Corrected from a wrong 0.0: discopt certifies the optimum at 31.0 and
-        # the MINLP literature reports 31.0 for ex1225 (issue #138).
-        "ex1225": 31.0,
-        "ex1226": -17.0,
-        # Corrected from a wrong 62.1833: the spatial relaxation proves a rigorous
-        # lower bound of ~109649 on ex1233 and the solver finds a feasible
-        # incumbent at the MINLPLib global optimum 155010.6713 (issue #138).
-        "ex1233": 155010.6713,
-        "fuel": 8566.12,
-        "gastrans": 89.08588,
-    }
-
-
-@pytest.fixture(scope="session")
-def netlib_optima() -> dict[str, float]:
-    """Known optimal values for Netlib LP instances."""
-    optima_file = Path(__file__).parent / "data" / "netlib_optima.json"
-    if optima_file.exists():
-        with open(optima_file) as f:
-            return json.load(f)
-    return {
-        "afiro": -4.6475314e+02,
-        "sc50a": -6.4575077e+01,
-        "sc50b": -7.0000000e+01,
-        "sc105": -5.2202061e+01,
-        "blend": -3.0812150e+01,
-        "kb2": -1.7499001e+03,
-        "adlittle": 2.2549496e+05,
-    }
-
 
 @pytest.fixture(scope="session")
 def has_gpu() -> bool:
     """Check if GPU is available for JAX."""
     try:
         import jax
+
         return len(jax.devices("gpu")) > 0
     except Exception:
         return False
@@ -114,20 +66,23 @@ def has_gpu() -> bool:
 @pytest.fixture
 def numerical_tolerance():
     """Standard numerical tolerances for the project."""
+
     @dataclass
     class Tolerances:
-        abs_tol: float = 1e-6       # Absolute tolerance
-        rel_tol: float = 1e-4       # Relative tolerance
-        bound_tol: float = 1e-6     # Bound validity tolerance
+        abs_tol: float = 1e-6  # Absolute tolerance
+        rel_tol: float = 1e-4  # Relative tolerance
+        bound_tol: float = 1e-6  # Bound validity tolerance
         integrality_tol: float = 1e-5  # Integer feasibility
-        constraint_tol: float = 1e-6   # Constraint satisfaction
+        constraint_tol: float = 1e-6  # Constraint satisfaction
         factorization_tol: float = 1e-12  # Sparse LA accuracy
+
     return Tolerances()
 
 
 @pytest.fixture
 def timer():
     """Simple wall-clock timer for performance assertions."""
+
     class Timer:
         def __init__(self):
             self.start_time = None
@@ -139,12 +94,14 @@ def timer():
 
         def __exit__(self, *args):
             self.elapsed = time.monotonic() - self.start_time
+
     return Timer
 
 
 @pytest.fixture
 def random_lp():
     """Generate random LP instances for property-based testing."""
+
     def _make(m: int, n: int, seed: int = 42):
         rng = np.random.default_rng(seed)
         c = rng.standard_normal(n)
@@ -152,23 +109,27 @@ def random_lp():
         x_feas = rng.uniform(0, 1, n)
         b = A @ x_feas + rng.uniform(0, 1, m)  # Ensure feasibility
         return {"c": c, "A_ub": A, "b_ub": b, "bounds": [(0, None)] * n}
+
     return _make
 
 
 @pytest.fixture
 def random_bounds():
     """Generate random variable bounds for relaxation testing."""
+
     def _make(n: int, seed: int = 42):
         rng = np.random.default_rng(seed)
         lb = rng.uniform(-5, 0, n)
         ub = lb + rng.uniform(0.1, 5, n)
         return lb, ub
+
     return _make
 
 
 # ─────────────────────────────────────────────────────────────
 # TEST RESULT COLLECTION (for regression tracking)
 # ─────────────────────────────────────────────────────────────
+
 
 class PerformanceCollector:
     """Collect timing data during test runs for regression analysis."""
@@ -177,13 +138,15 @@ class PerformanceCollector:
         self.results: list[dict] = []
 
     def record(self, test_name: str, metric: str, value: float, unit: str = "seconds"):
-        self.results.append({
-            "test": test_name,
-            "metric": metric,
-            "value": value,
-            "unit": unit,
-            "timestamp": time.time(),
-        })
+        self.results.append(
+            {
+                "test": test_name,
+                "metric": metric,
+                "value": value,
+                "unit": unit,
+                "timestamp": time.time(),
+            }
+        )
 
     def save(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -205,10 +168,12 @@ def perf_collector():
 # HOOKS
 # ─────────────────────────────────────────────────────────────
 
+
 def pytest_collection_modifyitems(config, items):
     """Auto-skip GPU tests when no GPU available."""
     try:
         import jax
+
         has_gpu = len(jax.devices("gpu")) > 0
     except Exception:
         has_gpu = False
