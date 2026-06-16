@@ -104,7 +104,7 @@ class MccormickLPRelaxer:
         On any solver failure, ``status != "optimal"`` and the LB is ``None``.
         """
         try:
-            milp, _ = build_milp_relaxation(
+            milp, varmap = build_milp_relaxation(
                 self._model,
                 self._terms,
                 self._disc,
@@ -131,6 +131,13 @@ class MccormickLPRelaxer:
 
         res = milp.solve(time_limit=time_limit, backend=self._backend)
 
+        # On-demand separation of the exact multilinear hull for products with
+        # more factors than the dense RLT cap (those carry only the loose
+        # recursive chain). Every separated cut is a supporting hyperplane of the
+        # convex/concave envelope, hence valid; adding them only tightens the
+        # bound, so the loop is sound at any round.
+        res = self._separate_multilinear(milp, varmap, res, time_limit)
+
         # Soundness guard: a floating-point simplex "infeasible" verdict is NOT
         # a proof that the relaxed feasible set is empty. The spatial-B&B driver
         # treats a relaxation "infeasible" as a RIGOROUS fathom (it prunes the
@@ -156,3 +163,86 @@ class MccormickLPRelaxer:
             lower_bound=float(res.objective),
             x=x_orig,
         )
+
+    def _separate_multilinear(self, milp, varmap, res, time_limit):
+        """Tighten products beyond the dense RLT cap by on-demand hull separation.
+
+        For each multilinear/trilinear product with more factors than
+        ``DISCOPT_MULTILINEAR_RLT_MAX`` (the dense-cut cap), repeatedly solve the
+        relaxation, separate the convex/concave envelope cuts the current point
+        violates (``multilinear_separation``), append them, and re-solve — up to
+        a small round limit. Each cut is a valid supporting hyperplane, so the
+        returned bound is always sound; on any failure the input ``res`` is
+        returned unchanged.
+        """
+        import os
+
+        if os.environ.get("DISCOPT_MULTILINEAR_SEPARATE", "1") == "0":
+            return res
+        if res is None or res.status != "optimal" or res.x is None:
+            return res
+        try:
+            import scipy.sparse as sp
+
+            from discopt._jax.multilinear_separation import separate_multilinear_envelope
+
+            cap = int(os.environ.get("DISCOPT_MULTILINEAR_RLT_MAX", "4"))
+            n_total = len(milp._c)
+            # Build (factor-columns, product-column) specs for over-cap products.
+            specs: list[tuple[list[int], int]] = []
+            for src in ("multilinear", "trilinear"):
+                for term, prod_col in (varmap.get(src) or {}).items():
+                    cols = sorted(set(int(c) for c in term))
+                    if len(cols) > cap and len(cols) == len(set(term)):
+                        specs.append((cols, int(prod_col)))
+            if not specs:
+                return res
+
+            def _append(rows: list[np.ndarray], rhs: list[float]) -> None:
+                R = np.asarray(rows, dtype=np.float64)
+                b = np.asarray(rhs, dtype=np.float64)
+                if milp._A_ub is None:
+                    milp._A_ub = R
+                    milp._b_ub = b
+                elif sp.issparse(milp._A_ub):
+                    milp._A_ub = sp.vstack([milp._A_ub, sp.csr_matrix(R)], format="csr")
+                    milp._b_ub = np.concatenate([milp._b_ub, b])
+                else:
+                    milp._A_ub = np.vstack([np.asarray(milp._A_ub), R])
+                    milp._b_ub = np.concatenate([np.asarray(milp._b_ub), b])
+
+            for _round in range(8):
+                x = np.asarray(res.x, dtype=np.float64)
+                rows: list[np.ndarray] = []
+                rhs: list[float] = []
+                for cols, prod_col in specs:
+                    lb = np.array([milp._bounds[c][0] for c in cols], dtype=np.float64)
+                    ub = np.array([milp._bounds[c][1] for c in cols], dtype=np.float64)
+                    xs = x[cols]
+                    ws = float(x[prod_col])
+                    for cut in separate_multilinear_envelope(lb, ub, xs, ws):
+                        row = np.zeros(n_total)
+                        if cut.sense == "under":
+                            # w >= a.x + b  ->  a.x - w <= -b
+                            for d, c in enumerate(cols):
+                                row[c] += float(cut.a[d])
+                            row[prod_col] += -1.0
+                            rows.append(row)
+                            rhs.append(-float(cut.b))
+                        else:
+                            # w <= a.x + b  ->  w - a.x <= b
+                            for d, c in enumerate(cols):
+                                row[c] += -float(cut.a[d])
+                            row[prod_col] += 1.0
+                            rows.append(row)
+                            rhs.append(float(cut.b))
+                if not rows:
+                    break
+                _append(rows, rhs)
+                new_res = milp.solve(time_limit=time_limit, backend=self._backend)
+                if new_res.status != "optimal" or new_res.objective is None:
+                    break
+                res = new_res
+            return res
+        except Exception:
+            return res
