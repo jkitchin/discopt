@@ -223,6 +223,13 @@ def _cmd_gams_register(args):
         )
 
 
+def _cmd_gams_daemon(args):
+    """Control the warm discopt GAMS solver daemon."""
+    from discopt.gams import daemon
+
+    return daemon.main([args.action])
+
+
 def _cmd_install_skills(args):
     """Install packaged Claude Code skills/agents into the user's .claude/ tree.
 
@@ -312,6 +319,17 @@ def main():
         help="Directory to write gamsconfig.yaml and the run script into.",
     )
     p_gams.set_defaults(func=_cmd_gams_register)
+
+    p_gamsd = subparsers.add_parser(
+        "gams-daemon",
+        help="Control the warm GAMS solver daemon (serve/stop/status)",
+    )
+    p_gamsd.add_argument(
+        "action",
+        choices=["serve", "stop", "status"],
+        help="serve (run in foreground), stop, or status.",
+    )
+    p_gamsd.set_defaults(func=_cmd_gams_daemon)
 
     p_skills = subparsers.add_parser(
         "install-skills",

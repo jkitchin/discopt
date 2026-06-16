@@ -395,6 +395,12 @@ def main(argv: list[str] | None = None) -> int:
     Accepts either a single control-file path (direct invocation) or the full
     GAMS script-solver argument list (``<scrdir> <workdir> <prm> <cntr> <sysdir>
     <name>``).
+
+    By default the solve is routed through a warm :mod:`discopt.gams.daemon`
+    (spawned on demand) to avoid per-solve Python/JAX startup; set
+    ``DISCOPT_GAMS_NO_DAEMON=1`` to always solve in-process.  If the daemon is
+    unreachable and cannot be started, this falls back to an in-process solve so
+    correctness never depends on the daemon.
     """
     args = sys.argv[1:] if argv is None else argv
     if not args or args[0] in ("-h", "--help"):
@@ -405,6 +411,12 @@ def main(argv: list[str] | None = None) -> int:
     if control_file is None:
         sys.stderr.write(f"discopt-gams: no control file found in arguments: {args}\n")
         return 1
+    if os.environ.get("DISCOPT_GAMS_NO_DAEMON", "0") != "1":
+        from .daemon import solve_via_daemon
+
+        rc = solve_via_daemon(control_file, sysdir=sysdir)
+        if rc is not None:
+            return rc
     return solve_from_control_file(control_file, sysdir)
 
 

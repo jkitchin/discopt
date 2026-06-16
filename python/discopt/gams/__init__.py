@@ -18,6 +18,14 @@ optional dependency: ``pip install discopt[gams]`` (which pulls ``gamsapi``).
 
 from __future__ import annotations
 
+from .daemon import (
+    DaemonServer,
+    default_socket_path,
+    ping,
+    solve_via_daemon,
+    spawn_daemon,
+    stop_daemon,
+)
 from .gmo_translate import GmoView, model_from_gmo
 from .instructions import (
     FUNC_CODE,
@@ -44,4 +52,10 @@ __all__ = [
     "gamsconfig_snippet",
     "run_script",
     "write_registration",
+    "DaemonServer",
+    "solve_via_daemon",
+    "spawn_daemon",
+    "stop_daemon",
+    "ping",
+    "default_socket_path",
 ]

@@ -68,6 +68,36 @@ This writes two files:
 After registration, `option minlp = discopt;` (and the analogous options for the
 other model types) dispatches to discopt.
 
+## Low latency: the warm daemon
+
+GAMS launches a solver as a fresh process for every solve, so a naive link
+re-pays Python and JAX import plus first-JIT warmup each time, even though a
+*warm* discopt solve is on the order of 10 ms. Two things keep the link fast:
+
+- **Lazy JAX.** `import discopt` no longer imports JAX eagerly (it sets
+  `JAX_ENABLE_X64` in the environment instead), so LP/MILP solves — which run
+  entirely in the Rust core — never load JAX at all.
+- **A warm solver daemon** (`discopt.gams.daemon`). The first solve spawns a
+  detached, long-lived process that holds JAX and the JIT cache warm; every
+  subsequent GAMS solve becomes a thin unix-socket round-trip to it. The daemon
+  self-terminates on idle timeout, max lifetime, max solves, or a version
+  change, and the client lazily respawns it — so it never needs explicit
+  management. If the daemon is unreachable and cannot be started, the link
+  falls back to an in-process solve, so correctness never depends on it.
+
+The daemon is on by default. Controls:
+
+```bash
+discopt gams-daemon status      # is one running?
+discopt gams-daemon stop        # ask it to exit
+DISCOPT_GAMS_NO_DAEMON=1 ...     # bypass the daemon, always solve in-process
+```
+
+Tunables (env vars): `DISCOPT_GAMS_IDLE_TIMEOUT` (default 600 s),
+`DISCOPT_GAMS_MAX_LIFETIME` (3600 s), `DISCOPT_GAMS_MAX_SOLVES` (500),
+`DISCOPT_GAMS_SOCKET` (socket path). Concurrent solves are serialized through
+the one warm interpreter.
+
 ## Supported functions
 
 The translator supports the algebraic operators (`+ - * / **`, unary minus) and
