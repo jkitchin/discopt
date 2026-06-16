@@ -75,14 +75,23 @@ _warned_messages: set[str] = set()
 _MAX_INTEGER_COS_ENUM = 10000
 _MAX_FINITE_EXP_ARG = float(np.log(np.finfo(np.float64).max))
 _MAX_TRIG_PIECEWISE_SPAN = 2.0 * math.pi
-# Conditioning guard for fractional-power envelopes (issue #158). A power
-# ``x**p`` with ``p<0`` (or ``0<p<1``) over a box whose lower bound reaches
-# toward zero has tangent/secant slopes (``p*t**(p-1)`` and the secant over
-# ``[lb,ub]``) that blow up, reaching ~1e9+. An LP row carrying such a coefficient
-# against an RHS of order 1 is numerically unreliable: HiGHS returns a polytope
-# that EXCLUDES feasible points, so OBBT shrinks a variable past its true feasible
-# range and the per-node relaxer reports a feasible node "infeasible" (the nvs08
-# false optimum). Refuse to emit any envelope cut whose slope exceeds this limit;
+# Lifted ``1/g`` (issue #154) is convex only on ``g > 0``; require the inner
+# interval's lower end to clear this strictly-positive floor so the reciprocal
+# and its tangent slopes (``-1/g**2``) stay finite and well-conditioned.
+_RECIP_MIN_DENOM = 1e-6
+# Lifted ``sqrt(g)`` needs ``g >= 0``; tolerate a tiny negative slack from loose
+# interval bounds on a provably-nonnegative argument (sum of squares) and clamp.
+_SQRT_NEG_TOL = 1e-9
+# Conditioning guard shared by the fractional-power envelopes (issue #158) and the
+# lifted reciprocal/sqrt envelopes (issue #154). A power ``x**p`` with ``p<0`` (or
+# ``0<p<1``) near a small lower bound, the convex ``1/g`` slope ``-1/g**2``, and the
+# concave ``sqrt(g)`` slope ``1/(2*sqrt(g))`` all blow up (reaching ~1e9+) as the
+# interval's lower end approaches zero. An LP row carrying such a coefficient against
+# an RHS of order 1 is numerically unreliable: HiGHS returns a polytope that EXCLUDES
+# feasible points (so OBBT shrinks a variable past its true feasible range and the
+# per-node relaxer reports a feasible node "infeasible" — the nvs08 false optimum),
+# or stalls at ``iteration_limit`` with a partial objective that is NOT a valid dual
+# bound. Refuse to emit/lift any envelope cut whose slope exceeds this limit;
 # dropping a cut only ENLARGES the relaxation, so abstention is always sound.
 _LIFT_MAX_ENVELOPE_SLOPE = 1e6
 
@@ -3706,6 +3715,256 @@ def build_milp_relaxation(
         composite_var_map[id(node)] = s_col
         affine_square_protected_ids.add(id(node))
 
+    # ── Lifted reciprocal / sqrt of a bounded inner expression (issue #154) ──
+    # ``c / g`` and ``sqrt(g)`` are dropped by the affine-only univariate path
+    # whenever ``g`` is itself nonlinear (a product or a sum of products), which
+    # leaves the defining equality (e.g. ``x4 = 4243.28/(x0*x1)``) omitted and
+    # the root bound loose. Here we *force-lift* ``g`` to an affine combination
+    # over the extended variable space: every multiplicative factor — including
+    # squares ``x*x`` (built as the McCormick bilinear ``x·x``) — becomes a
+    # bounded product aux column via ``_ensure_bilinear_aux``, which auto-emits
+    # its McCormick envelope through ``bilinear_relation_map``. When ``g`` resolves
+    # and its interval is finite with the right sign — ``g > 0`` for ``1/g``
+    # (convex), ``g >= 0`` for ``sqrt(g)`` (concave) — we lift an aux column for
+    # the outer atom and let the standard convex/concave envelope (tangents +
+    # secant) cut it.
+    #
+    # Soundness: at any true feasible point set each product aux to its exact
+    # value (the McCormick envelope contains the true product), so ``g`` is exact
+    # and the outer convex/concave envelope encloses the curve; the relaxation
+    # feasible set is therefore a superset of the true one and the dual bound
+    # stays valid. We deliberately abstain (fall back to warn-and-omit, which only
+    # enlarges the feasible region) on anything not provably sound here: a
+    # square-of-affine with cross terms ``(a·x+b·y)**2`` (deferred to the
+    # square-of-affine envelope, #155), a non-constant numerator, an unbounded or
+    # wrong-sign interval, or a product whose aux bound magnitude blows past the
+    # monomial limit (ex1252's ~1e15 terms).
+    def _extended_affine_interval(arg_coeff: np.ndarray, arg_const: float) -> tuple[float, float]:
+        lo = float(arg_const)
+        hi = float(arg_const)
+        for j in np.flatnonzero(arg_coeff):
+            c = float(arg_coeff[j])
+            clb, cub = all_bounds[j]
+            terms_j = (c * float(clb), c * float(cub))
+            lo += min(terms_j)
+            hi += max(terms_j)
+        return lo, hi
+
+    _MAX_FORCED_POWER = 4
+
+    def _ensure_bounded_bilinear(lhs_col: int, rhs_col: int) -> Optional[int]:
+        """Force-create the product aux for two bounded columns (``x*y``, or
+        ``x*x`` for a square), or ``None`` if a factor is unbounded or the product
+        aux's bound magnitude exceeds the monomial limit (kept numerically tame)."""
+        for c in (lhs_col, rhs_col):
+            lo, hi = all_bounds[c]
+            if not (np.isfinite(lo) and np.isfinite(hi)):
+                return None
+        a_lo, a_hi = (float(v) for v in all_bounds[lhs_col])
+        b_lo, b_hi = (float(v) for v in all_bounds[rhs_col])
+        corners = [a_lo * b_lo, a_lo * b_hi, a_hi * b_lo, a_hi * b_hi]
+        if max(abs(min(corners)), abs(max(corners))) > _MONOMIAL_AUX_BOUND_LIMIT:
+            return None
+        return _ensure_bilinear_aux(lhs_col, rhs_col)
+
+    def _lift_factor_to_col(expr: Expression) -> Optional[int]:
+        """Reduce one multiplicative factor to a single bounded column, creating
+        product aux columns as needed. Claims only bounded original variables,
+        their pairwise/iterated products, and positive-integer powers of a single
+        bounded variable. Abstains (``None``) on affine-base powers/squares so the
+        cross-term square-of-affine envelope (#155) stays the path for those."""
+        flat = _get_flat_index(expr, model)
+        if flat is not None:
+            lo, hi = all_bounds[flat]
+            if not (np.isfinite(lo) and np.isfinite(hi)):
+                return None
+            return flat
+        if isinstance(expr, BinaryOp) and expr.op == "*":
+            lcol = _lift_factor_to_col(expr.left)
+            if lcol is None:
+                return None
+            rcol = _lift_factor_to_col(expr.right)
+            if rcol is None:
+                return None
+            return _ensure_bounded_bilinear(lcol, rcol)
+        if isinstance(expr, BinaryOp) and expr.op == "**" and isinstance(expr.right, Constant):
+            p = float(expr.right.value)
+            if p.is_integer() and 2 <= int(p) <= _MAX_FORCED_POWER:
+                base = _lift_factor_to_col(expr.left)
+                if base is None:
+                    return None
+                col = base
+                for _ in range(int(p) - 1):
+                    nxt = _ensure_bounded_bilinear(col, base)
+                    if nxt is None:
+                        return None
+                    col = nxt
+                return col
+        return None
+
+    def _lift_inner_to_affine(expr: Expression) -> Optional[tuple[dict[int, float], float]]:
+        """Resolve ``g`` to ``(coeffs, const)`` over the extended column space,
+        force-lifting product factors. ``None`` to abstain on any unclaimed shape."""
+        c = _constant_value(expr)
+        if c is not None:
+            return {}, float(c)
+        if isinstance(expr, BinaryOp) and expr.op in ("+", "-"):
+            left = _lift_inner_to_affine(expr.left)
+            if left is None:
+                return None
+            right = _lift_inner_to_affine(expr.right)
+            if right is None:
+                return None
+            lc, lconst = left
+            rc, rconst = right
+            sign = 1.0 if expr.op == "+" else -1.0
+            out = dict(lc)
+            for k, v in rc.items():
+                out[k] = out.get(k, 0.0) + sign * v
+            return out, lconst + sign * rconst
+        if isinstance(expr, BinaryOp) and expr.op == "*":
+            lconst_val = _constant_value(expr.left)
+            rconst_val = _constant_value(expr.right)
+            scale = lconst_val if lconst_val is not None else rconst_val
+            if scale is not None:
+                sub = expr.right if lconst_val is not None else expr.left
+                inner = _lift_inner_to_affine(sub)
+                if inner is None:
+                    return None
+                sc, sconst = inner
+                return {k: scale * v for k, v in sc.items()}, scale * sconst
+        if isinstance(expr, UnaryOp) and expr.op == "-":
+            inner = _lift_inner_to_affine(expr.operand)
+            if inner is None:
+                return None
+            sc, sconst = inner
+            return {k: -v for k, v in sc.items()}, -sconst
+        col = _lift_factor_to_col(expr)
+        if col is None:
+            return None
+        return {col: 1.0}, 0.0
+
+    def _maybe_lift_outer_atom(expr: Expression) -> None:
+        nonlocal col_idx
+        eid = id(expr)
+        if eid in univariate_var_map or eid in composite_var_map:
+            return
+        if isinstance(expr, BinaryOp) and expr.op == "/":
+            num = _constant_value(expr.left)
+            if num is None:
+                return
+            func_name, inner = "reciprocal", expr.right
+        elif isinstance(expr, FunctionCall) and expr.func_name == "sqrt" and len(expr.args) == 1:
+            func_name, inner = "sqrt", expr.args[0]
+        else:
+            return
+
+        lifted = _lift_inner_to_affine(inner)
+        if lifted is None:
+            return
+        coeffs, arg_const = lifted
+
+        # A purely-affine inner over original variables is already handled by the
+        # standard univariate path; only claim genuinely lifted (aux-referencing)
+        # arguments so we never shadow or double-count that path.
+        if not any(col >= n_orig for col in coeffs):
+            return
+
+        arg_coeff = np.zeros(col_idx)
+        for col, val in coeffs.items():
+            arg_coeff[col] = val
+
+        gl, gh = _extended_affine_interval(arg_coeff, arg_const)
+        if not (np.isfinite(gl) and np.isfinite(gh)) or gh < gl:
+            return
+        if func_name == "reciprocal":
+            if gl <= _RECIP_MIN_DENOM:
+                return
+            # Tangent slope ``-1/gl**2`` is the largest coefficient the envelope
+            # injects; refuse a numerically degenerate cut.
+            if 1.0 / (gl * gl) > _LIFT_MAX_ENVELOPE_SLOPE:
+                return
+            val_lb, val_ub = 1.0 / gh, 1.0 / gl
+        else:  # sqrt
+            if gl < -_SQRT_NEG_TOL:
+                return
+            gl = max(gl, 0.0)
+            # Concave-tangent overestimator slope ``1/(2*sqrt(t))`` blows up as
+            # ``t→0``. The emission places tangents at ``[lb, mid, ub]`` but skips
+            # any ``pt <= 0`` (``_tangent_points``), so when ``gl == 0`` the worst
+            # emitted tangent sits at the midpoint ``gh/2`` (well-conditioned);
+            # otherwise it sits at ``gl``. Guard that worst emitted slope.
+            slope_pt = gl if gl > 0.0 else 0.5 * gh
+            if slope_pt <= 0.0 or 1.0 / (2.0 * np.sqrt(slope_pt)) > _LIFT_MAX_ENVELOPE_SLOPE:
+                return
+            val_lb, val_ub = float(np.sqrt(gl)), float(np.sqrt(gh))
+        if not (np.isfinite(val_lb) and np.isfinite(val_ub)):
+            return
+
+        aux_col = col_idx
+        univariate_var_map[eid] = aux_col
+        univariate_relaxations.append(
+            UnivariateRelaxation(
+                expr_id=eid,
+                func_name=func_name,
+                aux_col=aux_col,
+                arg_coeff=arg_coeff,
+                arg_const=float(arg_const),
+                arg_lb=float(gl),
+                arg_ub=float(gh),
+            )
+        )
+        all_bounds.append((float(val_lb), float(val_ub)))
+        integrality_flags.append(0)
+        col_idx += 1
+
+    def _walk_lift(expr: Expression) -> None:
+        _maybe_lift_outer_atom(expr)
+        if isinstance(expr, BinaryOp):
+            _walk_lift(expr.left)
+            _walk_lift(expr.right)
+        elif isinstance(expr, UnaryOp):
+            _walk_lift(expr.operand)
+        elif isinstance(expr, FunctionCall):
+            for arg in expr.args:
+                _walk_lift(arg)
+        elif isinstance(expr, IndexExpression):
+            if not isinstance(expr.base, Variable):
+                _walk_lift(expr.base)
+        elif isinstance(expr, SumExpression):
+            _walk_lift(expr.operand)
+        elif isinstance(expr, SumOverExpression):
+            for term in expr.terms:
+                _walk_lift(term)
+
+    # Distribute products ONCE and reuse the *same* trees for both this lift walk
+    # and the constraint/objective linearization later. ``distribute_products``
+    # rebuilds the operator tree (and expands ``(a+b)**2`` into its monomial/
+    # bilinear terms), so a second call would yield different node identities and
+    # the lifted ``univariate_var_map[id(div_or_sqrt_node)]`` keys would not match
+    # the nodes the linearizer visits. Sharing the trees keeps the keys aligned —
+    # and the square expansion lets ``sqrt`` of a cross-term quadratic lift too,
+    # each term enveloped by its own (sound) McCormick product aux.
+    # Protect the #155 affine-square nodes so ``distribute_products`` leaves their
+    # ``**2`` intact (the affine-square envelope resolves them through
+    # ``composite_var_map`` by original node id); every other ``(a+b)**2`` still
+    # expands so the #154 sqrt/reciprocal lift can envelope each product term.
+    protected_squares = (
+        frozenset(affine_square_protected_ids) if affine_square_protected_ids else None
+    )
+    distributed_objective = (
+        distribute_products(model._objective.expression, protected_squares)
+        if model._objective is not None
+        else None
+    )
+    distributed_bodies = {
+        id(c): distribute_products(c.body, protected_squares) for c in model._constraints
+    }
+    if distributed_objective is not None:
+        _walk_lift(distributed_objective)
+    for _constraint in model._constraints:
+        _walk_lift(distributed_bodies[id(_constraint)])
+
     bilinear_pw_map: dict[tuple[int, int], list] = {}
     bilinear_lambda_map: dict[tuple[int, int], dict] = {}
 
@@ -4393,23 +4652,29 @@ def build_milp_relaxation(
 
     # Supported univariate operator graph relaxations.
     def _add_lower_line(relax: UnivariateRelaxation, slope: float, intercept: float) -> None:
-        """Add t >= slope * arg + intercept."""
+        """Add t >= slope * arg + intercept.
+
+        ``arg_coeff`` is normally affine over the original variables
+        (``n_orig`` wide), but a lifted reciprocal/sqrt relaxation expresses its
+        argument over the *extended* space (original + product aux columns), so
+        the slice width follows ``arg_coeff`` rather than a fixed ``n_orig``.
+        """
         row = np.zeros(n_total)
-        row[:n_orig] = slope * relax.arg_coeff
+        row[: relax.arg_coeff.shape[0]] = slope * relax.arg_coeff
         row[relax.aux_col] = -1.0
         _add_row(row, -intercept - slope * relax.arg_const)
 
     def _add_upper_line(relax: UnivariateRelaxation, slope: float, intercept: float) -> None:
         """Add t <= slope * arg + intercept."""
         row = np.zeros(n_total)
-        row[:n_orig] = -slope * relax.arg_coeff
+        row[: relax.arg_coeff.shape[0]] = -slope * relax.arg_coeff
         row[relax.aux_col] = 1.0
         _add_row(row, intercept + slope * relax.arg_const)
 
     def _add_aux_equality(relax: UnivariateRelaxation, coeff: np.ndarray, rhs: float) -> None:
         """Add equality t + coeff @ x = rhs as two inequality rows."""
         row = np.zeros(n_total)
-        row[:n_orig] = coeff
+        row[: coeff.shape[0]] = coeff
         row[relax.aux_col] = 1.0
         _add_row(row, rhs)
         _add_row(-row, -rhs)
@@ -4961,11 +5226,8 @@ def build_milp_relaxation(
                 _add_row(row, const_branch)
 
     # Model constraints
-    protected_squares = (
-        frozenset(affine_square_protected_ids) if affine_square_protected_ids else None
-    )
     for constraint in model._constraints:
-        body = distribute_products(constraint.body, protected_squares)
+        body = distributed_bodies[id(constraint)]
         sense = constraint.sense
         if sense == "<=":
             exact_row = _exact_positive_reciprocal_row(body, model, flat_lb, flat_ub)
@@ -5036,7 +5298,8 @@ def build_milp_relaxation(
 
     # ── Objective ────────────────────────────────────────────────────────────
     assert model._objective is not None
-    obj_expr = distribute_products(model._objective.expression, protected_squares)
+    assert distributed_objective is not None
+    obj_expr = distributed_objective
     try:
         if objective_lift is not None:
             c_obj = np.zeros(n_total)
