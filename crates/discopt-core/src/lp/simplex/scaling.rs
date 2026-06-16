@@ -55,28 +55,25 @@ fn nearest_pow2(v: f64) -> f64 {
     2f64.powi(v.log2().round() as i32)
 }
 
-/// An owned, equilibrated copy of an [`LpView`] together with its RHS and the
-/// column factors needed to map a scaled solution back to the original space.
-pub struct ScaledLp {
-    a: Vec<f64>,
-    b: Vec<f64>,
-    c: Vec<f64>,
-    l: Vec<f64>,
-    u: Vec<f64>,
+/// Diagonal row/column equilibration factors for a fixed constraint matrix `A`,
+/// derived from `A` alone. Because the factors depend only on the matrix — not on
+/// the rhs or bounds — one `Scaling` can be reused to scale a whole family of LPs
+/// that share `A` (the B&B tree, a multi-rhs or batched solve): compute it once,
+/// then apply the cheap per-vector transforms below.
+pub struct Scaling {
+    row: Vec<f64>, // r_i, length m
+    col: Vec<f64>, // c_j, length n  (also the x unscale factors)
     m: usize,
     n: usize,
-    col: Vec<f64>, // column scale factors c_j (for unscaling x)
 }
 
-impl ScaledLp {
-    /// Equilibrate `lp` (with rhs `b`) if its dynamic range exceeds
-    /// [`SCALE_TRIGGER`]; otherwise return `None` so the caller solves the
-    /// original system unchanged (zero copy, bit-identical).
-    pub fn maybe_new(lp: &LpView<'_>, b: &[f64]) -> Option<ScaledLp> {
-        let (m, n) = (lp.m, lp.n);
-        // Dynamic range of the matrix nonzeros.
+impl Scaling {
+    /// Equilibration factors for the dense row-major `m × n` matrix `a`, or
+    /// `None` when its dynamic range is below [`SCALE_TRIGGER`] (well-conditioned
+    /// — the caller should solve unscaled, which is then bit-identical to before).
+    pub fn from_matrix(a: &[f64], m: usize, n: usize) -> Option<Scaling> {
         let (mut lo, mut hi) = (f64::INFINITY, 0.0f64);
-        for &v in lp.a.iter() {
+        for &v in a.iter() {
             let av = v.abs();
             if av > 0.0 {
                 lo = lo.min(av);
@@ -84,54 +81,47 @@ impl ScaledLp {
             }
         }
         if hi == 0.0 || hi / lo <= SCALE_TRIGGER {
-            return None; // empty or well-conditioned: no scaling
+            return None;
         }
+        let (row, col) = equilibrate(a, m, n);
+        Some(Scaling { row, col, m, n })
+    }
 
-        let (row, col) = equilibrate(lp.a, m, n);
-        let mut a = vec![0.0; m * n];
+    /// Scaled matrix `Â = R A C` (owned, row-major `m × n`).
+    pub fn scale_matrix(&self, a: &[f64]) -> Vec<f64> {
+        let (m, n) = (self.m, self.n);
+        let mut out = vec![0.0; m * n];
         for i in 0..m {
-            let ri = row[i];
+            let ri = self.row[i];
             for j in 0..n {
-                a[i * n + j] = ri * lp.a[i * n + j] * col[j];
+                out[i * n + j] = ri * a[i * n + j] * self.col[j];
             }
         }
-        let b = (0..m).map(|i| row[i] * b[i]).collect();
-        let c = (0..n).map(|j| col[j] * lp.c[j]).collect();
-        // Bounds: l̂ = l / c_j (c_j > 0, so order is preserved). Infinite bounds
-        // stay infinite so free / one-sided variables keep their character.
-        let l = (0..n)
-            .map(|j| if lp.l[j] <= -INF { lp.l[j] } else { lp.l[j] / col[j] })
-            .collect();
-        let u = (0..n)
-            .map(|j| if lp.u[j] >= INF { lp.u[j] } else { lp.u[j] / col[j] })
-            .collect();
-        Some(ScaledLp {
-            a,
-            b,
-            c,
-            l,
-            u,
-            m,
-            n,
-            col,
-        })
+        out
     }
 
-    /// Borrow the scaled LP as an [`LpView`].
-    pub fn view(&self) -> LpView<'_> {
-        LpView {
-            a: &self.a,
-            m: self.m,
-            n: self.n,
-            c: &self.c,
-            l: &self.l,
-            u: &self.u,
-        }
+    /// Scaled objective `ĉ = C c` (objective value is then invariant: `ĉᵀx̂ = cᵀx`).
+    pub fn scale_c(&self, c: &[f64]) -> Vec<f64> {
+        (0..self.n).map(|j| self.col[j] * c[j]).collect()
     }
 
-    /// The scaled right-hand side.
-    pub fn b(&self) -> &[f64] {
-        &self.b
+    /// Scaled rhs `b̂ = R b`.
+    pub fn scale_b(&self, b: &[f64]) -> Vec<f64> {
+        (0..self.m).map(|i| self.row[i] * b[i]).collect()
+    }
+
+    /// Scaled lower bounds `l̂ = C⁻¹ l` (infinite bounds preserved).
+    pub fn scale_lower(&self, l: &[f64]) -> Vec<f64> {
+        (0..self.n)
+            .map(|j| if l[j] <= -INF { l[j] } else { l[j] / self.col[j] })
+            .collect()
+    }
+
+    /// Scaled upper bounds `û = C⁻¹ u` (infinite bounds preserved).
+    pub fn scale_upper(&self, u: &[f64]) -> Vec<f64> {
+        (0..self.n)
+            .map(|j| if u[j] >= INF { u[j] } else { u[j] / self.col[j] })
+            .collect()
     }
 
     /// Map a scaled primal point back to the original space in place: the first
@@ -144,6 +134,56 @@ impl ScaledLp {
             }
             x[j] *= *c;
         }
+    }
+}
+
+/// An owned, equilibrated copy of an [`LpView`] together with its RHS, for a
+/// single solve. Thin convenience wrapper over [`Scaling`].
+pub struct ScaledLp {
+    scaling: Scaling,
+    a: Vec<f64>,
+    b: Vec<f64>,
+    c: Vec<f64>,
+    l: Vec<f64>,
+    u: Vec<f64>,
+}
+
+impl ScaledLp {
+    /// Equilibrate `lp` (with rhs `b`) if its dynamic range exceeds
+    /// [`SCALE_TRIGGER`]; otherwise return `None` so the caller solves the
+    /// original system unchanged (zero copy, bit-identical).
+    pub fn maybe_new(lp: &LpView<'_>, b: &[f64]) -> Option<ScaledLp> {
+        let scaling = Scaling::from_matrix(lp.a, lp.m, lp.n)?;
+        Some(ScaledLp {
+            a: scaling.scale_matrix(lp.a),
+            b: scaling.scale_b(b),
+            c: scaling.scale_c(lp.c),
+            l: scaling.scale_lower(lp.l),
+            u: scaling.scale_upper(lp.u),
+            scaling,
+        })
+    }
+
+    /// Borrow the scaled LP as an [`LpView`].
+    pub fn view(&self) -> LpView<'_> {
+        LpView {
+            a: &self.a,
+            m: self.scaling.m,
+            n: self.scaling.n,
+            c: &self.c,
+            l: &self.l,
+            u: &self.u,
+        }
+    }
+
+    /// The scaled right-hand side.
+    pub fn b(&self) -> &[f64] {
+        &self.b
+    }
+
+    /// Map a scaled primal point back to the original space in place.
+    pub fn unscale_x(&self, x: &mut [f64]) {
+        self.scaling.unscale_x(x);
     }
 }
 
@@ -258,21 +298,39 @@ mod tests {
 
     #[test]
     fn unscale_recovers_original_scale() {
+        // Scaling derived from a wide-range matrix; x̂ maps back exactly by the
+        // (power-of-two) column factors, and scale_lower/upper invert it.
         let a = [1e9, 0.0, 0.0, 1.0];
+        let scaling = Scaling::from_matrix(&a, 2, 2).expect("should scale");
+        let l = scaling.scale_lower(&[4.0, 8.0]);
+        let mut x = l.clone();
+        scaling.unscale_x(&mut x);
+        // unscale ∘ scale_lower is the identity (exact for power-of-two factors).
+        assert_eq!(x, vec![4.0, 8.0]);
+        // Infinite bounds are preserved, not divided.
+        assert_eq!(scaling.scale_upper(&[INF, 1e12])[0], INF);
+    }
+
+    #[test]
+    fn shared_scaling_matches_single_solve_transform() {
+        // The reusable Scaling applied piecewise must reproduce ScaledLp's combined
+        // transform (the batch path and the single-solve path agree).
+        let a = [1e8, 2.0, 3.0, 1e-2];
         let lp = LpView {
             a: &a,
             m: 2,
             n: 2,
-            c: &[1.0, 1.0],
+            c: &[5.0, 7.0],
             l: &[0.0, 0.0],
-            u: &[1e12, 1e12],
+            u: &[1e10, 1e10],
         };
-        let scaled = ScaledLp::maybe_new(&lp, &[1.0, 1.0]).expect("should scale");
-        // x̂ in scaled space maps back by the (power-of-two) column factors.
-        let mut x = vec![2.0, 3.0];
-        let xhat = x.clone();
-        scaled.unscale_x(&mut x);
-        assert_eq!(x[0], xhat[0] * scaled.col[0]);
-        assert_eq!(x[1], xhat[1] * scaled.col[1]);
+        let b = [1.0, 2.0];
+        let single = ScaledLp::maybe_new(&lp, &b).expect("should scale");
+        let sc = Scaling::from_matrix(lp.a, lp.m, lp.n).expect("should scale");
+        assert_eq!(single.a, sc.scale_matrix(lp.a));
+        assert_eq!(single.b, sc.scale_b(&b));
+        assert_eq!(single.c, sc.scale_c(lp.c));
+        assert_eq!(single.l, sc.scale_lower(lp.l));
+        assert_eq!(single.u, sc.scale_upper(lp.u));
     }
 }
