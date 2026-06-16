@@ -158,7 +158,25 @@ class MccormickLPRelaxer:
             if verify.status != "infeasible":
                 res = verify
 
-        if res.objective is None or res.x is None:
+        # Soundness guard: a non-optimal termination (``iteration_limit`` /
+        # ``time_limit``) returns the solver's *unconverged* objective. For the
+        # warm-started simplex that value is a primal incumbent — an UPPER bound
+        # on the LP optimum — and the backend reports ``bound == objective``, so
+        # there is no salvageable dual bound. Trusting it as a lower bound is
+        # unsound: nvs22 on its FBBT-tightened box stalls the simplex at
+        # ``iteration_limit`` reporting 8.31 while HiGHS solves the same LP to
+        # 2.55 (true optimum 6.06). Re-verify a non-optimal fast-backend result
+        # with HiGHS and adopt it only if HiGHS converges to optimality.
+        if res.status not in ("optimal", "infeasible") and self._backend != "auto":
+            verify = milp.solve(time_limit=time_limit, backend="auto")
+            if verify.status == "optimal":
+                res = verify
+
+        # A valid lower bound on the original problem requires the relaxation LP
+        # to be solved to OPTIMALITY; any other terminal status yields no
+        # certified bound, so report the status with no lower bound and let the
+        # spatial-B&B driver branch instead of fathoming on an unconverged value.
+        if res.status != "optimal" or res.objective is None or res.x is None:
             return MccormickLPResult(status=res.status)
         x_orig = np.asarray(res.x)[: self._n_orig].copy()
         return MccormickLPResult(
