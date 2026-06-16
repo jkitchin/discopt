@@ -251,6 +251,39 @@ def _monotonic_nonincr(x: Interval, f) -> Interval:
     return Interval(_round_down(lo), _round_up(hi))
 
 
+def _monotonic_nondec_safe(x: Interval, f) -> Interval:
+    """Image of ``x`` under a nondecreasing ``f`` restricted to its domain.
+
+    Like :func:`_monotonic_nondec`, but for partial-domain atoms (``asin``,
+    ``acosh``, ``atanh``, ``log1p``, …). When an endpoint falls outside the
+    natural domain numpy returns ``NaN``; an open-domain asymptote yields
+    ``±inf``. Either way the endpoint collapses to a conservative unbounded
+    value (``-inf`` for the lower, ``+inf`` for the upper), so the certificate
+    soundly abstains instead of trusting an undefined evaluation.
+    """
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        lo = _round_down(f(x.lo))
+        hi = _round_up(f(x.hi))
+    lo = np.where(np.isnan(lo), -np.inf, lo)
+    hi = np.where(np.isnan(hi), np.inf, hi)
+    return Interval(lo, hi)
+
+
+def _monotonic_nonincr_safe(x: Interval, f) -> Interval:
+    """Image of ``x`` under a nonincreasing ``f`` restricted to its domain.
+
+    The nonincreasing analogue of :func:`_monotonic_nondec_safe` (used by
+    ``acos``): the lower endpoint comes from ``f(x.hi)`` and the upper from
+    ``f(x.lo)``; out-of-domain ``NaN`` endpoints collapse outward.
+    """
+    with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+        lo = _round_down(f(x.hi))
+        hi = _round_up(f(x.lo))
+    lo = np.where(np.isnan(lo), -np.inf, lo)
+    hi = np.where(np.isnan(hi), np.inf, hi)
+    return Interval(lo, hi)
+
+
 def exp(x: Interval) -> Interval:
     """Sound enclosure of ``exp([lo, hi])``."""
     return _monotonic_nondec(x, np.exp)
@@ -403,6 +436,57 @@ def tan(x: Interval) -> Interval:
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Monotone inverse-trig / inverse-hyperbolic / error / log1p atoms
+#
+# Every atom below is monotone on its (possibly restricted) domain, so a
+# sound enclosure is the image of the endpoints — the "easy group" of
+# transcendental certification (issue #136).
+# ──────────────────────────────────────────────────────────────────────
+
+
+def atan(x: Interval) -> Interval:
+    """``atan`` is nondecreasing on all of R; image in ``(-π/2, π/2)``."""
+    return _monotonic_nondec(x, np.arctan)
+
+
+def asinh(x: Interval) -> Interval:
+    """``asinh`` is nondecreasing on all of R."""
+    return _monotonic_nondec(x, np.arcsinh)
+
+
+def erf(x: Interval) -> Interval:
+    """``erf`` is nondecreasing on all of R; image in ``(-1, 1)``."""
+    from scipy.special import erf as _erf
+
+    return _monotonic_nondec(x, _erf)
+
+
+def asin(x: Interval) -> Interval:
+    """``asin`` is nondecreasing on its domain ``[-1, 1]``."""
+    return _monotonic_nondec_safe(x, np.arcsin)
+
+
+def acos(x: Interval) -> Interval:
+    """``acos`` is nonincreasing on its domain ``[-1, 1]``; image ``[0, π]``."""
+    return _monotonic_nonincr_safe(x, np.arccos)
+
+
+def acosh(x: Interval) -> Interval:
+    """``acosh`` is nondecreasing on its domain ``[1, ∞)``; image ``[0, ∞)``."""
+    return _monotonic_nondec_safe(x, np.arccosh)
+
+
+def atanh(x: Interval) -> Interval:
+    """``atanh`` is nondecreasing on ``(-1, 1)`` with asymptotes at ``±1``."""
+    return _monotonic_nondec_safe(x, np.arctanh)
+
+
+def log1p(x: Interval) -> Interval:
+    """``log1p`` is nondecreasing on ``(-1, ∞)`` with an asymptote at ``-1``."""
+    return _monotonic_nondec_safe(x, np.log1p)
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────
 
@@ -427,4 +511,12 @@ __all__ = [
     "sinh",
     "cosh",
     "tanh",
+    "atan",
+    "asin",
+    "acos",
+    "asinh",
+    "acosh",
+    "atanh",
+    "erf",
+    "log1p",
 ]

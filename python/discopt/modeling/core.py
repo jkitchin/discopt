@@ -496,6 +496,21 @@ def tan(x: Union[Expression, float]) -> Expression:
     return FunctionCall("tan", _wrap(x))
 
 
+def atan(x: Union[Expression, float]) -> Expression:
+    """Inverse tangent (arctan); image in (-π/2, π/2)."""
+    return FunctionCall("atan", _wrap(x))
+
+
+def asin(x: Union[Expression, float]) -> Expression:
+    """Inverse sine (arcsin); domain [-1, 1]."""
+    return FunctionCall("asin", _wrap(x))
+
+
+def acos(x: Union[Expression, float]) -> Expression:
+    """Inverse cosine (arccos); domain [-1, 1]."""
+    return FunctionCall("acos", _wrap(x))
+
+
 def asinh(x: Union[Expression, float]) -> Expression:
     """Inverse hyperbolic sine."""
     return FunctionCall("asinh", _wrap(x))

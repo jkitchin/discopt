@@ -67,16 +67,17 @@ EXPECTED_DISCOPT_STRONGER = frozenset(
 )
 
 # Instances where SUSPECT proves curvature discopt misses. Pinned so a newly
-# discovered gap fails loudly instead of being silently tolerated. These are
-# SUSPECT's bound-aware trig rules: on a sign-restricted branch it proves the
-# curvature of sin / cos, which discopt's detector leaves UNKNOWN.
+# discovered gap fails loudly instead of being silently tolerated. These remain
+# SUSPECT's bound-aware *periodic* rules: on a sign-restricted branch it proves
+# the curvature of sin / cos, which discopt's detector leaves UNKNOWN (the
+# periodic group is tracked separately from the monotone atoms in issue #136).
+#
+# The monotone inverse atoms (asin / acos / atan, etc.) are no longer gaps:
+# discopt's lattice now classifies them on sign-restricted branches (#136).
 KNOWN_SUSPECT_STRONGER: frozenset[str] = frozenset(
     {
         "sin_convex_branch::objective",  # sin convex on [pi, 2pi]
         "cos_concave_branch::objective",  # cos concave on [-pi/2, pi/2]
-        "asin_convex_branch::objective",  # asin convex on (0, 1)
-        "acos_concave_branch::objective",  # acos concave on (0, 1)
-        "atan_concave_branch::objective",  # atan concave on x > 0
     }
 )
 

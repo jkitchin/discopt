@@ -251,6 +251,24 @@ def _eval_function_call(expr: FunctionCall, model: Model, box: dict, cache: dict
         return iv.cosh(arg)
     if name == "tanh":
         return iv.tanh(arg)
+    # Monotone inverse-trig / inverse-hyperbolic / error / log1p atoms
+    # (issue #136): each has a sound endpoint-image enclosure on its domain.
+    if name == "atan":
+        return iv.atan(arg)
+    if name == "asin":
+        return iv.asin(arg)
+    if name == "acos":
+        return iv.acos(arg)
+    if name == "asinh":
+        return iv.asinh(arg)
+    if name == "acosh":
+        return iv.acosh(arg)
+    if name == "atanh":
+        return iv.atanh(arg)
+    if name == "erf":
+        return iv.erf(arg)
+    if name == "log1p":
+        return iv.log1p(arg)
     # Unsupported atoms return an unbounded enclosure; the certificate
     # will refuse to prove convexity for expressions that hit this
     # path, preserving soundness.
