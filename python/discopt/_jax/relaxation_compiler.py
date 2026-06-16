@@ -28,6 +28,7 @@ from discopt._jax.mccormick import (
     relax_cos,
     relax_cosh,
     relax_div,
+    relax_entropy,
     relax_exp,
     relax_log,
     relax_log2,
@@ -713,6 +714,7 @@ def _compile_relax_node(
             "sigmoid": relax_sigmoid,
             "softplus": relax_softplus,
             "abs": relax_abs,
+            "entropy": relax_entropy,
         }
 
         if partitions > 0 and name in _piecewise_relax:

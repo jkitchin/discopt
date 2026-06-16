@@ -193,6 +193,51 @@ def _cmd_convert(args):
     print(f"Converted {in_path} -> {out_path}")
 
 
+def _cmd_gams_register(args):
+    """Register discopt as a solver with a GAMS system.
+
+    Writes a ``discopt-gams`` run script and merges a discopt entry into
+    ``gamsconfig.yaml`` in the target directory (default ``$HOME/.gams``, which
+    GAMS reads automatically), so ``option minlp = discopt;`` dispatches to
+    discopt. ``--check`` only runs the gamsapi diagnostic.
+    """
+    from discopt.gams import check_gamsapi, write_registration
+
+    ok, message = check_gamsapi()
+    if args.check:
+        print(("OK: " if ok else "PROBLEM: ") + message)
+        sys.exit(0 if ok else 1)
+
+    out = Path(args.directory)
+    written = write_registration(out)
+    verb = {"created": "Created", "merged": "Merged into", "replaced": "Updated"}[written["action"]]
+    print(f"{verb} {written['config']}")
+    print(f"Run script: {written['script']}")
+    if out == Path.home() / ".gams":
+        print("\nGAMS reads $HOME/.gams/gamsconfig.yaml automatically. In GAMS:")
+    else:
+        print(
+            f"\nMerge {written['config']} into your GAMS gamsconfig.yaml "
+            "($HOME/.gams or the GAMS system dir), then in GAMS:"
+        )
+    print("    option minlp = discopt;\n    solve m using minlp minimizing z;")
+    print(f"\ngamsapi check: {message}")
+
+
+def _cmd_gams_daemon(args):
+    """Control the warm discopt GAMS solver daemon."""
+    from discopt.gams import daemon
+
+    return daemon.main([args.action])
+
+
+def _cmd_gams_verify(args):
+    """Run the packaged .gms smoke corpus through GAMS with solver=discopt."""
+    from discopt.gams import verify
+
+    sys.exit(verify(gams=args.gams, solver=args.solver, keep=args.keep))
+
+
 def _cmd_install_skills(args):
     """Install packaged Claude Code skills/agents into the user's .claude/ tree.
 
@@ -271,6 +316,43 @@ def main():
     p_conv.add_argument("input", help="Input file path (.gms or .nl)")
     p_conv.add_argument("output", help="Output file path (.gms, .nl, .mps, or .lp)")
     p_conv.set_defaults(func=_cmd_convert)
+
+    p_gams = subparsers.add_parser(
+        "gams-register",
+        help="Register discopt as a solver with a GAMS system",
+    )
+    p_gams.add_argument(
+        "--directory",
+        default=str(Path.home() / ".gams"),
+        help="Directory to write/merge gamsconfig.yaml + run script "
+        "(default: $HOME/.gams, which GAMS reads automatically).",
+    )
+    p_gams.add_argument(
+        "--check",
+        action="store_true",
+        help="Only run the gamsapi diagnostic; do not write any files.",
+    )
+    p_gams.set_defaults(func=_cmd_gams_register)
+
+    p_gamsd = subparsers.add_parser(
+        "gams-daemon",
+        help="Control the warm GAMS solver daemon (serve/stop/status)",
+    )
+    p_gamsd.add_argument(
+        "action",
+        choices=["serve", "stop", "status"],
+        help="serve (run in foreground), stop, or status.",
+    )
+    p_gamsd.set_defaults(func=_cmd_gams_daemon)
+
+    p_gamsv = subparsers.add_parser(
+        "gams-verify",
+        help="Run the packaged .gms corpus through GAMS with solver=discopt (needs GAMS)",
+    )
+    p_gamsv.add_argument("--gams", default="gams", help="Path to the gams executable.")
+    p_gamsv.add_argument("--solver", default="discopt", help="GAMS solver name to force.")
+    p_gamsv.add_argument("--keep", action="store_true", help="Keep the scratch directory.")
+    p_gamsv.set_defaults(func=_cmd_gams_verify)
 
     p_skills = subparsers.add_parser(
         "install-skills",

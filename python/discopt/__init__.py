@@ -33,16 +33,15 @@ __version__ = "0.4.1.dev0"
 # causes NMPC failures and parameter-array warnings. Users who need float32
 # can opt out by setting ``JAX_ENABLE_X64=0`` in the environment before
 # importing discopt.
+#
+# We set the environment variable rather than importing jax here: JAX reads
+# ``JAX_ENABLE_X64`` at its own (lazy) import time, so this keeps ``import
+# discopt`` free of the multi-second jax import for code paths (e.g. the GAMS
+# link's LP/MILP solves) that never touch jax.
 import os as _os
 
 if _os.environ.get("JAX_ENABLE_X64", "1") != "0":
     _os.environ.setdefault("JAX_ENABLE_X64", "1")
-    try:
-        import jax as _jax
-
-        _jax.config.update("jax_enable_x64", True)
-    except ImportError:
-        pass
 
 from discopt.callbacks import (
     CallbackContext as CallbackContext,

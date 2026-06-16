@@ -201,6 +201,24 @@ class TestElementaryFunctions:
         out = iv.cosh(a)
         assert out.lo <= 1.0 + 1e-12
 
+    @pytest.mark.parametrize("seed", [0, 1, 2])
+    @pytest.mark.parametrize("lo, hi", [(0.1, 3.0), (0.05, 0.2), (1.0, 5.0), (0.3, 0.5)])
+    def test_entropy_encloses(self, lo, hi, seed):
+        a = Interval.from_bounds(lo, hi)
+        out = iv.entropy(a)
+        xs = _sample_in(a, SAMPLES, seed=seed)
+        _assert_encloses(out, xs * np.log(xs))
+
+    def test_entropy_minimum_captured_when_straddled(self):
+        # 1/e ≈ 0.368 is inside, so the lower endpoint must reach -1/e.
+        out = iv.entropy(Interval.from_bounds(0.1, 3.0))
+        assert out.lo <= -1.0 / np.e + 1e-12
+
+    def test_entropy_out_of_domain_abstains(self):
+        # A box touching nonpositive x is out of domain -> collapse outward.
+        out = iv.entropy(Interval.from_bounds(-1.0, 2.0))
+        assert np.isneginf(out.lo) and np.isposinf(out.hi)
+
 
 class TestTrigEnclosures:
     """Periodic-trig soundness on small intervals and on wide intervals."""

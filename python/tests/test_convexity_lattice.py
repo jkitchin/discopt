@@ -183,6 +183,16 @@ class TestAtomProfiles:
         assert unary_atom_profile("tanh", Sign.NEG) == AtomProfile(
             Curvature.CONVEX, Monotonicity.NONDEC
         )
+
+    def test_entropy_is_convex_nonmonotone_on_positive_domain(self):
+        # entropy(x) = x*log(x): convex on x>0, non-monotone (min at 1/e).
+        assert unary_atom_profile("entropy", Sign.POS) == AtomProfile(
+            Curvature.CONVEX, Monotonicity.UNKNOWN
+        )
+        # Requires a strictly positive argument; weaker signs abstain.
+        assert unary_atom_profile("entropy", Sign.NONNEG) is None
+        assert unary_atom_profile("entropy", Sign.UNKNOWN) is None
+        assert unary_atom_profile("entropy", Sign.NEG) is None
         assert unary_atom_profile("tanh", Sign.UNKNOWN) is None
 
     def test_unknown_atom(self):

@@ -44,6 +44,11 @@ pounce = ["pounce-solver>=0.3"]
 ipopt = ["cyipopt>=1.4"]
 highs = ["highspy"]
 cutest = ["pycutest>=1.8.0"]
+# GAMS solver link: the expert-level GAMS Python API (GMO/GEV). Ships with a
+# GAMS system; also on PyPI. Required only to run discopt *as* a GAMS solver.
+# Pin gamsapi to match your installed GAMS version. PyYAML is used by
+# `discopt gams-register` to merge into an existing gamsconfig.yaml.
+gams = ["gamsapi[core]>=45", "pyyaml>=6"]
 llm = ["litellm>=1.0"]
 nn = ["onnx>=1.14", "onnxruntime>=1.16"]
 ml = ["scikit-learn>=1.0"]
@@ -68,6 +73,7 @@ all = ["discopt[pounce,ipopt,highs,cutest,llm,gnn,nn,ml,doe,doe-gui]"]
 [project.scripts]
 discopt = "discopt.cli:main"
 discopt-dev = "discopt.dev.cli:main"
+discopt-gams = "discopt.gams.link:main"
 
 [tool.maturin]
 manifest-path = "crates/discopt-python/Cargo.toml"
@@ -81,6 +87,8 @@ include = [
     "crates/**/*.rs",
     "crates/**/*.toml",
     "python/discopt/doe/gui/discopt-logo.png",
+    "python/discopt/gams/data/*.gms",
+    "python/discopt/gams/data/manifest.json",
 ]
 
 [tool.ruff]

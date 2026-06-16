@@ -25,6 +25,7 @@ from discopt._jax.mccormick import (
     relax_bilinear,
     relax_cos,
     relax_div,
+    relax_entropy,
     relax_exp,
     relax_log,
     relax_log2,
@@ -490,3 +491,26 @@ class TestGradients:
 
         g = jax.grad(loss)(jnp.float64(1.0))
         assert jnp.isfinite(g), f"pow grad is not finite: {g}"
+
+
+class TestEntropySoundness:
+    """relax_entropy: entropy(x) = x*log(x), convex on x > 0."""
+
+    @pytest.mark.parametrize(
+        "seed, lb, ub, label",
+        [
+            (70, 0.01, 1.0, "entropy (0,1]"),
+            (71, 0.5, 5.0, "entropy [0.5,5]"),
+            (72, 1.0, 100.0, "entropy [1,100]"),
+        ],
+    )
+    def test_soundness(self, seed, lb, ub, label):
+        x = _random_points(jax.random.PRNGKey(seed), lb, ub)
+        cv, cc = relax_entropy(x, lb, ub)
+        _check_soundness(cv, cc, x * jnp.log(x), label)
+
+    def test_convex_underestimator_is_tight(self):
+        # For a convex function the underestimator equals f itself.
+        x = _random_points(jax.random.PRNGKey(73), 0.1, 4.0)
+        cv, _ = relax_entropy(x, 0.1, 4.0)
+        assert jnp.allclose(cv, x * jnp.log(x), atol=1e-10)

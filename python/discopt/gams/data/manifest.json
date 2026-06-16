@@ -1,0 +1,71 @@
+{
+  "description": "Small GAMS smoke models with known optima for the discopt GAMS solver link. Each entry records the GAMS model name, the objective variable, the optimal objective value, and whether discopt's from_gams() reader currently reproduces it (the GAMS-side solver link handles all of them, since GAMS does the parsing).",
+  "models": [
+    {
+      "file": "lp_prodmix.gms",
+      "model_name": "prodmix",
+      "model_type": "LP",
+      "sense": "max",
+      "objective_var": "profit",
+      "objective": 36.0,
+      "tol": 1e-4,
+      "via_from_gams": true,
+      "notes": "Textbook product-mix LP; optimum at (x, y) = (2, 6)."
+    },
+    {
+      "file": "mip_knapsack.gms",
+      "model_name": "knapsack",
+      "model_type": "MIP",
+      "sense": "max",
+      "objective_var": "obj",
+      "objective": 420.0,
+      "tol": 1e-4,
+      "via_from_gams": true,
+      "notes": "0/1 knapsack (scalar); select items 1..4, weight 100."
+    },
+    {
+      "file": "nlp_circle.gms",
+      "model_name": "circle",
+      "model_type": "NLP",
+      "sense": "min",
+      "objective_var": "obj",
+      "objective": 2.0,
+      "tol": 1e-5,
+      "via_from_gams": true,
+      "notes": "Convex least-distance QP/NLP; optimum at (2, 3)."
+    },
+    {
+      "file": "minlp_exp.gms",
+      "model_name": "minlp_exp",
+      "model_type": "MINLP",
+      "sense": "min",
+      "objective_var": "z",
+      "objective": -0.295836866004329,
+      "tol": 1e-5,
+      "via_from_gams": true,
+      "notes": "Convex MINLP with exp + binary; z = 3 - 3*ln(3) at (ln 3, 0)."
+    },
+    {
+      "file": "nlp_rosenbrock.gms",
+      "model_name": "rosen",
+      "model_type": "NLP",
+      "sense": "min",
+      "objective_var": "obj",
+      "objective": 0.0,
+      "tol": 1e-4,
+      "via_from_gams": true,
+      "notes": "Nonconvex Rosenbrock on [-2,2]^2; global optimum 0 at (1, 1)."
+    },
+    {
+      "file": "lp_transport.gms",
+      "model_name": "transport",
+      "model_type": "LP",
+      "sense": "min",
+      "objective_var": "z",
+      "objective": 75.0,
+      "tol": 1e-3,
+      "via_from_gams": false,
+      "notes": "Original 2x2 transport LP (sets/tables). GAMS-side only: discopt's from_gams() does not yet substitute indexed parameter data into objective coefficients."
+    }
+  ]
+}
