@@ -228,6 +228,53 @@ class TestGamsImportNLP:
         assert len(m._variables) == 3  # x1, x2, obj
 
 
+# MINLPLib standard form: a free ``objvar`` that is minimized but is *embedded*
+# in a defining equation (``defobj.. expr - objvar =E= 0``) rather than written
+# as a bare ``objvar =e= expr``. This is how every minlplib.org .gms file
+# encodes its objective, so from_gams must recognize it.
+MINLPLIB_OBJVAR_GMS = textwrap.dedent("""\
+    Variables  x1,x2,objvar;
+
+    Equations  e1,e2,defobj;
+
+    e1.. x1 + x2 =G= 4;
+    e2.. x1 - x2 =L= 1;
+    defobj.. sqr(x1) + sqr(x2) - objvar =E= 0;
+
+    x1.lo = 0; x2.lo = 0;
+
+    Model m / all /;
+    Solve m using NLP minimizing objvar;
+""")
+
+
+class TestGamsImportObjvarEmbedded:
+    def test_embedded_objvar_objective_is_set(self):
+        # Regression: the objective variable appears inside the defining
+        # equation rather than alone on one side, so _is_obj_equation does not
+        # match. from_gams must fall back to minimizing the objvar *variable*
+        # directly (exact GAMS semantics) instead of leaving the model with no
+        # objective at all.
+        m = parse_gams(MINLPLIB_OBJVAR_GMS)
+        assert m._objective is not None
+        assert m._objective.sense.value == "minimize"
+
+    def test_embedded_objvar_keeps_defining_equation_as_constraint(self):
+        # Minimizing the variable directly means every equation, including the
+        # objvar-defining one, stays a constraint (e1, e2, defobj = 3).
+        m = parse_gams(MINLPLIB_OBJVAR_GMS)
+        assert len(m._constraints) == 3
+
+    def test_embedded_objvar_solves_to_known_optimum(self):
+        # min x1^2 + x2^2 s.t. x1 + x2 >= 4, x1 - x2 <= 1, x>=0.
+        # x1 + x2 >= 4 binds; x1 - x2 <= 1 is slack, so the optimum is the
+        # symmetric point x1 = x2 = 2 -> objective 4 + 4 = 8.
+        m = parse_gams(MINLPLIB_OBJVAR_GMS)
+        res = m.solve(time_limit=30)
+        assert res.status in ("optimal", "feasible")
+        assert res.objective == pytest.approx(8.0, abs=1e-3)
+
+
 class TestGamsImportNonlinear:
     def test_exp_sqrt_sin_power(self):
         m = parse_gams(MINLP_NONLINEAR_GMS)

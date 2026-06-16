@@ -1562,6 +1562,7 @@ class _ModelBuilder:
         """Build constraints and objective from equation definitions."""
         obj_var_name = solve.objective_var if solve else None
         obj_sense = solve.sense if solve else "minimizing"
+        obj_set = False
 
         for eqdef in self.p.equation_defs:
             # Build the constraint for each index combination
@@ -1614,8 +1615,26 @@ class _ModelBuilder:
                         m.minimize(obj_expr)
                     else:
                         m.maximize(obj_expr)
+                    obj_set = True
                 else:
                     self._add_constraint(m, lhs_expr, eqdef.sense, rhs_expr, eqdef.name)
+
+        # Fallback for the MINLPLib standard form: ``Solve m ... minimizing
+        # objvar`` where ``objvar`` is a free variable that does NOT appear as a
+        # bare ``objvar =e= expr`` definition but is instead embedded in a
+        # defining equation (e.g. ``defobj.. expr + objvar =E= 0``). No equation
+        # was recognized as the objective above, so minimize/maximize the
+        # objective variable directly and leave every equation (including the
+        # defining one, already added as a constraint) in place. This is the
+        # exact GAMS semantics — GAMS minimizes the scalar variable ``objvar``
+        # subject to all equations — so it is sound and value-preserving.
+        if obj_var_name and not obj_set:
+            obj_var = self.dvar_map.get(obj_var_name)
+            if obj_var is not None and getattr(obj_var, "shape", None) in ((), (1,)):
+                if obj_sense.startswith("min"):
+                    m.minimize(obj_var)
+                else:
+                    m.maximize(obj_var)
 
     def _is_obj_equation(self, eqdef, obj_var_name: str | None) -> bool:
         if obj_var_name is None:
