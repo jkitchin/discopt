@@ -23,6 +23,7 @@ The FIM is used to:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -95,6 +96,106 @@ class FIMResult:
         }
 
 
+def _design_source_map(em: ExperimentModel) -> dict | None:
+    """Classify every model variable as a parameter or a design input.
+
+    Returns ``{id(var): ("param"|"design", name, var)}`` when the model is a
+    *pure explicit response model* — it has no constraints and every variable
+    is either an unknown parameter or a design input, so the solution point
+    ``x*`` is fully determined by the nominal parameters and the fixed design.
+    Returns ``None`` when the model has constraints or any other variable (an
+    implicit state that genuinely requires a solve).
+    """
+    if getattr(em.model, "_constraints", None):
+        return None
+    src: dict[int, tuple[str, str, Any]] = {}
+    for name, var in em.unknown_parameters.items():
+        src[id(var)] = ("param", name, var)
+    for name, var in em.design_inputs.items():
+        src[id(var)] = ("design", name, var)
+    for v in em.model._variables:
+        if id(v) not in src:
+            return None
+    return src
+
+
+def _direct_var_values(
+    src_entry: tuple[str, str, Any],
+    param_values: dict[str, float],
+    design_values: dict[str, float] | None,
+) -> np.ndarray | None:
+    """Values for one variable at ``x*`` without solving.
+
+    Parameters take their nominal value (clipped to the variable bounds, to
+    match the box-constrained least-squares solve they replace); design inputs
+    take their fixed design value. Returns ``None`` on any shape mismatch or a
+    missing design value, signalling the caller to fall back to the solve.
+    """
+    kind, name, var = src_entry
+    size = int(getattr(var, "size", 1) or 1)
+    if kind == "param":
+        pv = np.asarray(param_values[name], dtype=np.float64).ravel()
+        if pv.size == 1:
+            arr = np.full(size, float(pv[0]))
+        elif pv.size == size:
+            arr = pv.astype(np.float64).copy()
+        else:
+            return None
+        clipped = np.clip(
+            arr, np.asarray(var.lb, dtype=np.float64), np.asarray(var.ub, dtype=np.float64)
+        )
+        return np.asarray(clipped, dtype=np.float64)
+    if not design_values or name not in design_values:
+        return None
+    dv: np.ndarray = np.asarray(design_values[name], dtype=np.float64).ravel()
+    if dv.size == 1:
+        return np.full(size, float(dv[0]))
+    if dv.size == size:
+        out: np.ndarray = dv.copy()
+        return out
+    return None
+
+
+def _assemble_x_flat_direct(em, param_values, design_values):
+    """Assemble the flat solution vector ``x*`` directly, or ``None``.
+
+    Bypasses the QP solve for pure explicit response models (see
+    :func:`_design_source_map`). The result is identical to solving
+    ``min Σ(θ - θ_nom)²`` with the design fixed, but with no solver call.
+    """
+    src = _design_source_map(em)
+    if src is None:
+        return None
+    parts = []
+    for v in em.model._variables:
+        arr = _direct_var_values(src[id(v)], param_values, design_values)
+        if arr is None:
+            return None
+        parts.append(arr)
+    import jax.numpy as jnp
+
+    return jnp.array(np.concatenate(parts), dtype=jnp.float64)
+
+
+def _assemble_x_flat_batch_direct(em, param_values, design_points):
+    """Stack ``x*`` for many design points into one ``(B, n)`` array, or ``None``."""
+    src = _design_source_map(em)
+    if src is None:
+        return None
+    rows = []
+    for dp in design_points:
+        parts = []
+        for v in em.model._variables:
+            arr = _direct_var_values(src[id(v)], param_values, dp)
+            if arr is None:
+                return None
+            parts.append(arr)
+        rows.append(np.concatenate(parts))
+    import jax.numpy as jnp
+
+    return jnp.asarray(np.stack(rows, axis=0), dtype=jnp.float64)
+
+
 def compute_fim(
     experiment: Experiment,
     param_values: dict[str, float],
@@ -141,25 +242,34 @@ def compute_fim(
     # Build the model at nominal parameter values
     em = experiment.create_model(**param_values)
 
-    # Set design variable values if provided
-    if design_values:
-        for name, val in design_values.items():
-            if name in em.design_inputs:
-                var = em.design_inputs[name]
-                # Fix design variable by setting lb = ub = val
-                val_arr = np.asarray(val, dtype=np.float64)
-                if var.shape:
-                    val_arr = np.full(var.shape, val_arr)
-                var.lb = val_arr
-                var.ub = val_arr
+    # Fast path: for a pure explicit response model (no constraints; every
+    # variable is an unknown parameter or a design input) the solution point
+    # x* is fully determined by the nominal parameters and the fixed design.
+    # The QP solve below would merely reconstruct values we already know, so
+    # assemble x* directly and skip it. ``x_flat`` here is identical (to solver
+    # tolerance) to the solved one.
+    x_flat = _assemble_x_flat_direct(em, param_values, design_values)
 
-    # Solve the model to get x* at nominal parameters
-    em.model.minimize(
-        sum((em.unknown_parameters[n] - param_values[n]) ** 2 for n in em.parameter_names)
-    )
-    result = em.model.solve()
+    if x_flat is None:
+        # General path: a constrained / implicit-state model genuinely needs a
+        # solve to recover x*. Fix the design, then minimise Σ(θ - θ_nom)².
+        if design_values:
+            for name, val in design_values.items():
+                if name in em.design_inputs:
+                    var = em.design_inputs[name]
+                    # Fix design variable by setting lb = ub = val
+                    val_arr = np.asarray(val, dtype=np.float64)
+                    if var.shape:
+                        val_arr = np.full(var.shape, val_arr)
+                    var.lb = val_arr
+                    var.ub = val_arr
 
-    x_flat = extract_x_flat(result, em.model)
+        em.model.minimize(
+            sum((em.unknown_parameters[n] - param_values[n]) ** 2 for n in em.parameter_names)
+        )
+        result = em.model.solve()
+
+        x_flat = extract_x_flat(result, em.model)
 
     # Compile response functions
     response_fns = []
@@ -196,6 +306,81 @@ def compute_fim(
         parameter_names=em.parameter_names,
         response_names=em.response_names,
     )
+
+
+def compute_fim_batch(
+    experiment: Experiment,
+    param_values: dict[str, float],
+    design_points: list[dict[str, float]],
+    *,
+    prior_fim: np.ndarray | None = None,
+    method: str = "autodiff",
+    fd_step: float = 1e-5,
+) -> list[FIMResult]:
+    """Compute the FIM for a batch of design points (multi-RHS).
+
+    Fast path — for a pure explicit response model (no constraints; every
+    variable an unknown parameter or design input) the per-point ``x*`` is
+    assembled directly (no QP solve) and the response Jacobian is evaluated for
+    the whole batch in a single ``vmap`` pass. This is the multi-RHS analogue
+    of :func:`compute_fim`: the model is built and the response functions
+    compiled once, then reused across every design point.
+
+    Returns one :class:`FIMResult` per design point, in input order. Falls back
+    to a per-point :func:`compute_fim` loop for any model that needs a solve or
+    a non-autodiff ``method``, so the result is always identical to calling
+    :func:`compute_fim` on each point.
+    """
+    from discopt._jax.differentiable import _compile_parametric_node
+
+    if not design_points:
+        return []
+
+    em = experiment.create_model(**param_values)
+
+    X = None
+    if method == "autodiff":
+        X = _assemble_x_flat_batch_direct(em, param_values, design_points)
+    if X is None:
+        return [
+            compute_fim(
+                experiment, param_values, dp, prior_fim=prior_fim, method=method, fd_step=fd_step
+            )
+            for dp in design_points
+        ]
+
+    import jax
+    import jax.numpy as jnp
+
+    response_fns = [_compile_parametric_node(em.responses[n], em.model) for n in em.response_names]
+    param_indices = _get_param_indices(em)
+    p_flat = _build_p_flat(em.model)
+
+    def response_vector(x_flat_arg):
+        return jnp.stack([fn(x_flat_arg, p_flat) for fn in response_fns])
+
+    # One traced Jacobian, vmapped across the batch axis of x*.
+    J_all = np.asarray(jax.vmap(jax.jacobian(response_vector))(X))
+    J_all = J_all[:, :, param_indices]
+
+    sigma = np.array([em.measurement_error[name] for name in em.response_names])
+    Sigma_inv = np.diag(1.0 / sigma**2)
+
+    results: list[FIMResult] = []
+    for b in range(J_all.shape[0]):
+        J = J_all[b]
+        fim = J.T @ Sigma_inv @ J
+        if prior_fim is not None:
+            fim = fim + prior_fim
+        results.append(
+            FIMResult(
+                fim=np.asarray(fim),
+                jacobian=np.asarray(J),
+                parameter_names=em.parameter_names,
+                response_names=em.response_names,
+            )
+        )
+    return results
 
 
 @dataclass

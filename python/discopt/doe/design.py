@@ -13,7 +13,7 @@ from typing import Callable, Sequence
 import numpy as np
 from scipy.optimize import minimize
 
-from discopt.doe.fim import FIMResult, compute_fim
+from discopt.doe.fim import FIMResult, compute_fim, compute_fim_batch
 from discopt.estimate import Experiment
 
 _SINGULAR_SENTINEL = 1e12
@@ -453,9 +453,20 @@ def _scan_candidates(
     best_criterion = -np.inf if _is_maximization(criterion) else np.inf
     best_fim_result: FIMResult | None = None
 
-    for design_point in candidates:
+    # Multi-RHS: evaluate every candidate's FIM in one batched pass (no
+    # per-candidate solve / Jacobian re-trace for explicit response models).
+    fim_results: list[FIMResult | None]
+    try:
+        fim_results = list(
+            compute_fim_batch(experiment, param_values, candidates, prior_fim=prior_fim)
+        )
+    except Exception:
+        fim_results = [None] * len(candidates)
+
+    for design_point, fim_result in zip(candidates, fim_results):
+        if fim_result is None:
+            continue
         try:
-            fim_result = compute_fim(experiment, param_values, design_point, prior_fim=prior_fim)
             crit_val = _evaluate_criterion(fim_result, criterion)
         except Exception:
             continue
