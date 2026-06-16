@@ -99,14 +99,19 @@ class TestBatchSentinelSoundness:
         )
         # The incumbent (warm start or better) survives as a feasible point...
         assert result.objective is not None
-        # ...but the gap must NOT be certified: every pruned node carried a
-        # failure sentinel, not an infeasibility proof or valid bound.
+        # ...but the gap must NOT be *certified* off failure sentinels: every
+        # pruned node carried a failure sentinel, not an infeasibility proof.
         assert result.status != "optimal", (
             f"Unsound certification: status={result.status!r} with "
             f"obj={result.objective} after pruning failed nodes"
         )
-        assert result.bound is None
-        assert result.gap is None
+        assert not result.gap_certified, "sentinel failures must not certify the gap"
+        # A dual bound MAY now be reported — not from the failed batch nodes, but
+        # from the independent root-relaxation fallback (issue #138); when present
+        # it must be sound (never above the true optimum), never a false bound.
+        assert result.bound is None or result.bound <= _OPT + 1e-6, (
+            f"unsound bound {result.bound} > optimum {_OPT}"
+        )
 
         monkeypatch.setattr(S, "_solve_batch_pounce", real_batch)
 
