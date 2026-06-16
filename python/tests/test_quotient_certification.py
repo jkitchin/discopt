@@ -103,14 +103,21 @@ _BUCKET1_WEAK = {
     "st_e35": 64868.6,  # (x / (product)^(1/3))^0.83 in the objective
 }
 
-# Subset that now returns a *finite* sound bound via the root MILP-relaxation
-# fallback (issue #138): the objective lifts cleanly (factorable_reform), and the
-# fallback solves the sanitized root relaxation whose catastrophically scaled
-# rows/bounds — from cleared-division equalities over the wide-ranged defined
-# variables x4..x7 — would otherwise leave the LP unsolvable.
+# Subset that now returns a *finite* sound bound (issue #138):
+#   nvs05 / nvs22 — via the root MILP-relaxation fallback over the sanitized
+#     relaxation (their cleared-division equalities over the wide-ranged defined
+#     variables x4..x7 would otherwise leave the LP unsolvable);
+#   st_e35 — via the fractional-power-of-product objective lift: each term
+#     ``(x / g**(1/3))**0.83`` is decomposed (g -> aux t, t**(1/3) -> aux d,
+#     x/d -> aux r, r**0.83 -> aux s) so the objective becomes linear in the aux
+#     and the relaxation can bound it.
+# ex1233 stays ``None``: it has the same fractional-power-of-product structure but
+# its geometric variables are *unbounded* (ub=inf), so the lifted base has no
+# finite interval and the term is still soundly dropped.
 _BUCKET1_NOW_BOUNDED = {
     "nvs05": 5.47093411,
     "nvs22": 6.0581153,
+    "st_e35": 64868.6,
 }
 
 
@@ -187,23 +194,62 @@ def test_gear4_returns_finite_sound_bound():
 
 @pytest.mark.correctness
 @pytest.mark.parametrize("instance, optimum", sorted(_BUCKET1_NOW_BOUNDED.items()))
-def test_nvs_ratio_returns_finite_sound_bound(instance, optimum):
-    """nvs05 / nvs22 now return a *finite* sound lower bound, not ``None``.
+def test_bucket1_instance_returns_finite_sound_bound(instance, optimum):
+    """nvs05 / nvs22 / st_e35 now return a *finite* sound lower bound, not ``None``.
 
-    Their objective is a clean polynomial (e.g. ``1.10471*x0**2*x1 + ...``) that
-    ``factorable_reform`` lifts to bilinear form, but the spatial tree bound is
-    uncertified and dropped, and the AMP MILP relaxation's cleared-division
-    equalities (``x4*x0*x1``, ``x5*x0*_fr_aux_0``) over the wide-ranged defined
-    variables x4..x7 produce envelope entries up to ~1e37 that leave the LP
-    unsolvable. The root-relaxation fallback (issue #138) sanitizes those
-    catastrophic rows/bounds — sound, since dropping a constraint or widening a
-    box only relaxes — and solves the conditioned relaxation, yielding a finite
-    dual bound well below the optimum (weak, never false).
+    nvs05 / nvs22: clean polynomial objective lifted to bilinear form, but the
+    spatial tree bound is uncertified and dropped and the relaxation's
+    cleared-division equalities over the wide-ranged defined variables x4..x7
+    produce envelope entries up to ~1e37 that leave the LP unsolvable; the
+    root-relaxation fallback sanitizes those catastrophic rows/bounds (sound,
+    since dropping a constraint or widening a box only relaxes) and solves it.
+
+    st_e35: the fractional-power-of-product objective term ``(x / g**(1/3))**0.83``
+    is decomposed into elementary aux variables so the objective becomes linear
+    in the aux and the relaxation can bound it.
+
+    In every case the dual bound stays well below the optimum (weak, never false).
     """
     nl = _DATA / f"{instance}.nl"
     assert nl.exists(), f"missing {nl}"
-    r = dm.from_nl(str(nl)).solve(time_limit=30, gap_tolerance=1e-4)
+    r = dm.from_nl(str(nl)).solve(time_limit=40, gap_tolerance=1e-4)
 
     assert r.bound is not None, f"[{instance}] produced no finite bound (regressed to None)"
     # Soundness: a valid dual lower bound never exceeds the known optimum.
     assert r.bound <= optimum + 1e-2, f"[{instance}] unsound dual bound {r.bound} > {optimum}"
+
+
+@pytest.mark.parametrize(
+    "build, expected",
+    [
+        # ex1233-shaped term  N / g**(1/3)  with bounded positive vars.
+        ("ex1233_ratio", 60.00966),
+        # st_e35-shaped term  (N / g**(1/3))**0.83  with bounded positive vars.
+        ("st_e35_power", 176.16932),
+    ],
+)
+def test_fractional_power_of_product_envelope_is_sound(build, expected):
+    """The fractional-power-of-product objective lift certifies the known optimum
+    of a small, fully-bounded instance (issue #138).
+
+    These pin the envelope itself (independent of the slow MINLPLib ``.nl``
+    solves): the automatic ``factorable_reform`` decomposition of
+    ``N / g**p`` and ``(N / g**p)**q`` must reproduce the value computed by hand
+    and certify a sound bound (``bound <= objective``).
+    """
+    m = dm.Model(build)
+    x = m.continuous("x", lb=1.0, ub=10.0)
+    xa = m.continuous("xa", lb=1.0, ub=5.0)
+    xb = m.continuous("xb", lb=1.0, ub=5.0)
+    if build == "ex1233_ratio":
+        m.minimize(300 * x / (0.5 * (xa**2 * xb + xa * xb**2)) ** 0.3333)
+    else:
+        m.minimize(670 * (x / (0.5 * (xa**2 * xb + xb**2 * xa)) ** 0.333333) ** 0.83)
+
+    r = m.solve(time_limit=30, gap_tolerance=1e-4)
+
+    assert r.objective is not None and r.bound is not None
+    assert abs(r.objective - expected) <= 1e-1, f"obj {r.objective} != expected {expected}"
+    # Soundness: the dual bound never exceeds the objective at the optimum.
+    assert r.bound <= r.objective + 1e-4, f"unsound bound {r.bound} > obj {r.objective}"
+    assert r.gap_certified, "small fully-bounded instance should certify"
