@@ -88,19 +88,29 @@ def test_nvs_ratio_certifies(instance, optimum):
     assert r.gap_certified, f"[{instance}] expected certified optimality"
 
 
-# Known global optima (MINLPLib) used only as an upper reference for the
-# soundness guard below: a valid dual lower bound for a minimization can never
-# exceed the true optimum.  These instances are *not* expected to certify on
-# ``main`` — the ratio / fractional-power-of-product term is soundly dropped from
-# the relaxation, so no *tight* bound is produced yet.  ``gear4`` is the exception:
-# it now returns a finite (weak but sound) bound via the separable objective floor
-# (see ``test_gear4_returns_finite_sound_bound``).
+# Known global optima (MINLPLib) used as an upper reference for the soundness
+# guard below: a valid dual lower bound for a minimization can never exceed the
+# true optimum. None of these *certify* on ``main`` (the gap stays open), but
+# they must never report a false bound. ``gear4`` (separable floor) and
+# ``nvs05`` / ``nvs22`` (root MILP-relaxation fallback) now additionally return a
+# finite, weak-but-sound bound; ``ex1233`` / ``st_e35`` still drop their
+# fractional-power-of-product objective term entirely and stay ``bound=None``.
 _BUCKET1_WEAK = {
     "gear4": 1.64342847,  # (x0*x1)/(x2*x3) equality, integer — pure integrality gap
     "ex1233": 62.1833,  # linear / (product)^(1/3) plus sqrt-of-product terms
     "nvs05": 5.47093411,  # var/var ratio + sqrt-of-product in defining equalities
     "nvs22": 6.0581153,  # var/var ratio
     "st_e35": 64868.6,  # (x / (product)^(1/3))^0.83 in the objective
+}
+
+# Subset that now returns a *finite* sound bound via the root MILP-relaxation
+# fallback (issue #138): the objective lifts cleanly (factorable_reform), and the
+# fallback solves the sanitized root relaxation whose catastrophically scaled
+# rows/bounds — from cleared-division equalities over the wide-ranged defined
+# variables x4..x7 — would otherwise leave the LP unsolvable.
+_BUCKET1_NOW_BOUNDED = {
+    "nvs05": 5.47093411,
+    "nvs22": 6.0581153,
 }
 
 
@@ -173,3 +183,27 @@ def test_gear4_returns_finite_sound_bound():
     assert r.bound <= 1.64342847 + 1e-6, f"gear4 unsound bound {r.bound} > optimum"
     # The trivial-but-rigorous floor from x4,x5 >= 0 is 0.
     assert r.bound >= -1e-9, f"gear4 bound {r.bound} below the x4,x5>=0 floor"
+
+
+@pytest.mark.correctness
+@pytest.mark.parametrize("instance, optimum", sorted(_BUCKET1_NOW_BOUNDED.items()))
+def test_nvs_ratio_returns_finite_sound_bound(instance, optimum):
+    """nvs05 / nvs22 now return a *finite* sound lower bound, not ``None``.
+
+    Their objective is a clean polynomial (e.g. ``1.10471*x0**2*x1 + ...``) that
+    ``factorable_reform`` lifts to bilinear form, but the spatial tree bound is
+    uncertified and dropped, and the AMP MILP relaxation's cleared-division
+    equalities (``x4*x0*x1``, ``x5*x0*_fr_aux_0``) over the wide-ranged defined
+    variables x4..x7 produce envelope entries up to ~1e37 that leave the LP
+    unsolvable. The root-relaxation fallback (issue #138) sanitizes those
+    catastrophic rows/bounds — sound, since dropping a constraint or widening a
+    box only relaxes — and solves the conditioned relaxation, yielding a finite
+    dual bound well below the optimum (weak, never false).
+    """
+    nl = _DATA / f"{instance}.nl"
+    assert nl.exists(), f"missing {nl}"
+    r = dm.from_nl(str(nl)).solve(time_limit=30, gap_tolerance=1e-4)
+
+    assert r.bound is not None, f"[{instance}] produced no finite bound (regressed to None)"
+    # Soundness: a valid dual lower bound never exceeds the known optimum.
+    assert r.bound <= optimum + 1e-2, f"[{instance}] unsound dual bound {r.bound} > {optimum}"

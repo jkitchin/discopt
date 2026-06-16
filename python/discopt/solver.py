@@ -1242,6 +1242,57 @@ def _classify_model_convexity(
         return False, False, None
 
 
+def _root_relaxation_lower_bound(
+    model: "Model",
+    root_lb: np.ndarray,
+    root_ub: np.ndarray,
+    time_limit: float,
+) -> Optional[float]:
+    """Solve the root MILP relaxation once and return its LP value as a rigorous
+    global lower bound, or ``None`` if unavailable.
+
+    The MILP relaxation built by ``build_milp_relaxation`` is a convex outer
+    approximation of *model* over the box ``[root_lb, root_ub]`` (the same one AMP
+    uses). When its objective is fully linearized (``objective_bound_valid``), the
+    relaxation LP's optimal value is a valid lower bound on the original objective
+    over that box — hence over the whole feasible set — for a *minimization*. This
+    mirrors the root-LP-bound seeding ``_solve_milp_bb`` already performs, but for
+    the spatial path, whose tree ``global_lower_bound`` can be tainted up to the
+    incumbent on a nonconvex model and is dropped on an uncertified exit.
+
+    Numerically catastrophic envelopes (e.g. cleared-division equalities over
+    wide-ranged defined variables) are sanitized away first so the backend can
+    return a bound instead of failing on the conditioning. Only ever called for a
+    MINIMIZE objective; defensively returns ``None`` on any failure so it can
+    never make a previously-bounded solve worse.
+    """
+    from discopt._jax.discretization import DiscretizationState
+    from discopt._jax.milp_relaxation import (
+        build_milp_relaxation,
+        sanitize_relaxation_for_conditioning,
+    )
+    from discopt._jax.term_classifier import classify_nonlinear_terms
+
+    try:
+        terms = classify_nonlinear_terms(model)
+        relax, _ = build_milp_relaxation(
+            model,
+            terms,
+            DiscretizationState(),
+            bound_override=(root_lb, root_ub),
+        )
+        if not relax._objective_bound_valid:
+            return None
+        relax = sanitize_relaxation_for_conditioning(relax)
+        budget = min(10.0, max(1.0, time_limit * 0.1))
+        result = relax.solve(time_limit=budget, gap_tolerance=1e-6)
+        if result.bound is not None and np.isfinite(result.bound):
+            return float(result.bound)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("root MILP-relaxation bound skipped: %s", exc)
+    return None
+
+
 def solve_model(
     model: Model,
     time_limit: float = 3600.0,
@@ -2162,6 +2213,13 @@ def solve_model(
                 _separable_obj_floor = float(_sep)
         except Exception as _sep_exc:  # pragma: no cover - defensive
             logger.debug("separable objective floor skipped: %s", _sep_exc)
+
+    # Snapshot the root-global box (root FBBT + non-cutoff root OBBT only) so a
+    # rigorous root MILP-relaxation fallback bound can be computed at the end if
+    # the spatial tree yields nothing usable. Taken here, before the search
+    # loop's incumbent-cutoff OBBT, whose bounds are not valid for a global bound.
+    _root_lb_snapshot = np.asarray(lb, dtype=np.float64).copy()
+    _root_ub_snapshot = np.asarray(ub, dtype=np.float64).copy()
 
     # --- Create PyTreeManager (Rust) ---
     t_rust_start = time.perf_counter()
@@ -3554,14 +3612,27 @@ def solve_model(
         gap_val = None
 
     # When the tree produced no usable dual bound (uncertified exit, or a
-    # relaxation the LP backend could not solve), fall back to the rigorous
-    # separable objective floor computed over the root box. This is always a
-    # valid global lower bound for a minimization, so the solve reports a finite
-    # sound bound instead of None (issue #138). Never overrides a finite bound.
-    if (bound_val is None or not np.isfinite(bound_val)) and _separable_obj_floor is not None:
-        bound_val = _separable_obj_floor
-        if obj_val is not None and np.isfinite(obj_val):
-            gap_val = max(0.0, obj_val - bound_val) / max(1.0, abs(obj_val))
+    # relaxation the LP backend could not solve), fall back to a rigorous global
+    # lower bound computed over the *root* box, so the solve reports a finite
+    # sound bound instead of None (issue #138). Two sound sources, take the
+    # tighter (larger) one: the root MILP-relaxation LP value and the separable
+    # objective floor. Both only ever apply to a minimization and never override
+    # an existing finite bound. The relaxation solve is done lazily here so it is
+    # paid only when the search yielded nothing.
+    if bound_val is None or not np.isfinite(bound_val):
+        _fallbacks = []
+        if _separable_obj_floor is not None:
+            _fallbacks.append(_separable_obj_floor)
+        if model._objective.sense == ObjectiveSense.MINIMIZE:
+            _rr = _root_relaxation_lower_bound(
+                model, _root_lb_snapshot, _root_ub_snapshot, time_limit
+            )
+            if _rr is not None:
+                _fallbacks.append(_rr)
+        if _fallbacks:
+            bound_val = max(_fallbacks)
+            if obj_val is not None and np.isfinite(obj_val):
+                gap_val = max(0.0, obj_val - bound_val) / max(1.0, abs(obj_val))
 
     return SolveResult(
         status=status,

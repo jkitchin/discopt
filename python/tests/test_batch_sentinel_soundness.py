@@ -105,8 +105,15 @@ class TestBatchSentinelSoundness:
             f"Unsound certification: status={result.status!r} with "
             f"obj={result.objective} after pruning failed nodes"
         )
-        assert result.bound is None
-        assert result.gap is None
+        assert not result.gap_certified, "failed-sentinel tree must not certify"
+        # The tree itself yields no valid bound from the failed nodes. A bound
+        # may still be reported from the *independent* root-relaxation fallback
+        # (issue #138) — that is sound, so the only requirement is that it never
+        # exceeds the true optimum (~ -1.0) and is never presented as certified.
+        if result.bound is not None:
+            assert result.bound <= _OPT + 1e-6, (
+                f"unsound fallback bound {result.bound} > optimum {_OPT}"
+            )
 
         monkeypatch.setattr(S, "_solve_batch_pounce", real_batch)
 
