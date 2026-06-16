@@ -294,6 +294,40 @@ def _clear_divisions(body: Expression, sense: str, model: Model):
     return body, sense
 
 
+def _has_unbounded_nonlinear_term(body: Expression, model: Model) -> bool:
+    """True if the distributed *body* contains a nonlinear product term (total
+    variable degree >= 2) whose interval bound is non-finite over the model box.
+
+    Denominator clearing multiplies the *whole* constraint through by ``D``, so a
+    benign linear term in an unbounded variable (e.g. a continuous slack ``x4``
+    with ``ub = +inf``) becomes a nonlinear product ``x4 * D``.  A product with a
+    non-finitely-bounded factor has no valid finite McCormick/bilinear envelope:
+    the relaxation built on it can *exclude* feasible points and report a false
+    infeasibility (gear4, a feasible MINLPLib instance whose linear slacks are
+    unbounded above).  When clearing introduces such a term the rewrite must be
+    rejected and the original quotient kept — the McCormick-``lp`` path bounds the
+    division soundly.
+    """
+    dist = distribute_products(body)
+
+    def walk(e: Expression) -> bool:
+        if isinstance(e, BinaryOp) and e.op in ("+", "-"):
+            return walk(e.left) or walk(e.right)
+        if isinstance(e, UnaryOp) and e.op == "neg":
+            return walk(e.operand)
+        decomp = _decompose_poly_product(e, model)
+        if decomp is not None:
+            _coeff, powers, extra = decomp
+            total_degree = sum(exp for _leaf, exp in powers.values())
+            if not extra and total_degree >= 2:
+                lo, hi = _bound_expression(e, model)
+                if not (np.isfinite(lo) and np.isfinite(hi)):
+                    return True
+        return False
+
+    return walk(dist)
+
+
 def has_factorable_work(model: Model) -> bool:
     """True if any constraint/objective has a clearable division or a mixed
     repeated-factor product — i.e. the pass would change the model.
@@ -382,6 +416,16 @@ def factorable_reformulate(model: Model, *, clear_only: bool = False) -> Model:
                 rebuilt.append(c)  # pass through anything exotic untouched
                 continue
             body, sense = _clear_divisions(c.body, c.sense, new_model)
+            # Soundness gate: clearing multiplies the constraint through by the
+            # denominator, which can pull an unbounded linear term into a
+            # nonlinear product (``x4 * D``) that has no valid finite envelope.
+            # Such a cleared relaxation can exclude feasible points and certify a
+            # false infeasibility (gear4). Keep the original quotient in that case.
+            if (body is not c.body or sense != c.sense) and _has_unbounded_nonlinear_term(
+                body, new_model
+            ):
+                rebuilt.append(c)
+                continue
             if clear_only:
                 # Only touch constraints the clearing actually rewrote; leave
                 # everything else byte-for-byte identical so convex structure
