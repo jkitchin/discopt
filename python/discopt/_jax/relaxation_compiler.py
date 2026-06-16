@@ -1027,8 +1027,31 @@ def compile_relaxation(
           - cc: concave overestimator of expr
 
         The function is compatible with jax.jit and jax.vmap.
+
+        When ``arithmetic="alphabb"``, the whole expression is relaxed with a
+        rigorous (sound interval-Hessian) alphaBB underestimator/overestimator
+        instead of compositional McCormick. For the default McCormick path, any
+        node with no McCormick rule triggers an automatic alphaBB fallback so a
+        valid relaxation is always produced when the interval Hessian is finite.
     """
-    return _compile_relax_node(expr, model, partitions, mode, learned_registry, arithmetic)
+    if arithmetic == "alphabb":
+        from discopt._jax.alphabb import compile_alphabb_relaxation
+
+        return compile_alphabb_relaxation(expr, model)
+
+    try:
+        return _compile_relax_node(expr, model, partitions, mode, learned_registry, arithmetic)
+    except (ValueError, NotImplementedError) as exc:
+        # No McCormick rule for some node — fall back to a rigorous alphaBB
+        # relaxation of the whole expression. This keeps the solver supplied
+        # with a valid relaxation (gap D). If alphaBB also abstains (unbounded
+        # interval Hessian) re-raise the original McCormick error.
+        try:
+            from discopt._jax.alphabb import compile_alphabb_relaxation
+
+            return compile_alphabb_relaxation(expr, model)
+        except (ValueError, NotImplementedError):
+            raise exc
 
 
 def compile_objective_relaxation(
