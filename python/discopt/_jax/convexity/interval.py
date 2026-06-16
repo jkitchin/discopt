@@ -486,6 +486,18 @@ def log1p(x: Interval) -> Interval:
     return _monotonic_nondec_safe(x, np.log1p)
 
 
+def sigmoid(x: Interval) -> Interval:
+    """``sigmoid`` is nondecreasing on all of R; image in ``(0, 1)``."""
+    from scipy.special import expit as _expit
+
+    return _monotonic_nondec(x, _expit)
+
+
+def softplus(x: Interval) -> Interval:
+    """``softplus`` is nondecreasing on all of R; image in ``(0, ∞)``."""
+    return _monotonic_nondec(x, lambda v: np.logaddexp(v, 0.0))
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────
@@ -519,4 +531,6 @@ __all__ = [
     "atanh",
     "erf",
     "log1p",
+    "sigmoid",
+    "softplus",
 ]

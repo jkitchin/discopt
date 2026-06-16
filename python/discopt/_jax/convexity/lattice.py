@@ -358,6 +358,11 @@ def unary_atom_profile(name: str, arg_sign: Sign) -> Optional[AtomProfile]:
         # exp is convex and nondecreasing on all of R.
         return AtomProfile(Curvature.CONVEX, Monotonicity.NONDEC)
 
+    if name == "softplus":
+        # softplus(x) = ln(1+e^x): f'' = sigmoid'(x) > 0, so convex and
+        # nondecreasing on all of R (like exp, but with bounded slope).
+        return AtomProfile(Curvature.CONVEX, Monotonicity.NONDEC)
+
     if name in ("log", "log2", "log10"):
         # log is concave and nondecreasing on strictly positive R.
         if is_pos(arg_sign):
@@ -415,9 +420,10 @@ def unary_atom_profile(name: str, arg_sign: Sign) -> Optional[AtomProfile]:
             return AtomProfile(Curvature.CONCAVE, Monotonicity.NONDEC)
         return None
 
-    if name in ("atan", "asinh", "erf"):
-        # atan, asinh, erf share f'' = -ve·x: concave on x>=0, convex on x<=0;
-        # nondecreasing everywhere (atan/asinh/erf are defined on all of R).
+    if name in ("atan", "asinh", "erf", "sigmoid"):
+        # atan, asinh, erf, sigmoid share f'' = -ve·x: concave on x>=0, convex
+        # on x<=0; nondecreasing everywhere (all defined on all of R). For
+        # sigmoid, f'' = sigmoid'(x)(1 - 2·sigmoid(x)) flips sign at x=0.
         if is_nonneg(arg_sign):
             return AtomProfile(Curvature.CONCAVE, Monotonicity.NONDEC)
         if is_nonpos(arg_sign):

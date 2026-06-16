@@ -216,15 +216,19 @@ Source: `crates/discopt-core/src/presolve/fbbt.rs`.
   Cosh, Sigmoid, Softplus, Tan` (Tan within the forward input's branch). Remaining no-ops:
   periodic `Sin/Cos`, `Erf` (no std `erfinv`), and `Sign/Min/Max/Prod/Norm`.
 
-### F. Convexity detection coverage — MOSTLY CLOSED (PR #149)
+### F. Convexity detection coverage — RESOLVED (for smooth unary atoms)
 
-`convexity/lattice.py:unary_atom_profile` now assigns curvature to **17 atoms**:
+`convexity/lattice.py:unary_atom_profile` now assigns curvature to **19 atoms**:
 `exp, log, log2, log10, sqrt, abs, cosh, sinh, tanh, asin, atanh, atan, asinh, erf, acos,
-acosh, log1p`. Interval evaluation (`convexity/interval_eval.py`) additionally covers
-`sin, cos, tan`. **Still `UNKNOWN`:** `sin, cos, tan` (no curvature profile — periodic),
-and `sigmoid, softplus, sign, min, max, prod, norm`. The convex fast-path therefore still
-under-recognizes models using those atoms, but the previously-large gap (which excluded
-all inverse-trig/hyperbolic and `erf/log1p`) is closed.
+acosh, log1p` (PR #149) plus `softplus` (globally convex) and `sigmoid` (sign-split, joins
+the `atan/asinh/erf` group) added on this branch, with matching sound interval enclosures
+in `convexity/interval.py` / `interval_eval.py`. **Every smooth unary atom that has a
+definable global or sign-conditioned curvature is now covered.** The remaining
+`unary_atom_profile` returns `None` only for atoms where that is *correct*: `sin, cos, tan`
+(periodic — no sign-based curvature; the interval-Hessian certificate handles them
+region-wise) and `sign` (discontinuous). `min, max, prod, norm` are n-ary, not unary atoms;
+`norm` is convex and could be added to the DCP *composition* rules (`rules.py`) as a future
+enhancement.
 
 ---
 
@@ -238,10 +242,10 @@ all inverse-trig/hyperbolic and `erf/log1p`) is closed.
    order-invariant (verified: `relax_trilinear_exact`'s three orderings coincide at the
    midpoint, so permutation-merging yields no tightening). Tightening must happen on the
    **LP** path with explicit lifted variables.
-2. **Curvature profiles for the remaining atoms (F).** `softplus` is globally convex and
-   `sigmoid` is sign-split (convex for x<0, concave for x>0, like `tanh`); both are smooth
-   and easy to add. Treating `sin/cos/tan` piecewise would further widen the convex
-   fast-path.
+2. **DCP curvature for the n-ary `norm` atom (F).** Any p-norm is convex; adding it to the
+   DCP composition rules (`rules.py`) would let the convex fast-path recognize
+   least-norm/regression models without the interval-Hessian fallback. (Treating
+   `sin/cos/tan` piecewise is a separate, lower-value extension.)
 3. **Range-reduction / OBBT orchestration loop (D).** Coordinate `obbt.py` + nonlinear
    bound tightening with the relaxation in a probing loop.
 4. **FBBT backward for `Erf`** (needs an `erfinv`) and a periodic-aware inverse for
@@ -252,8 +256,10 @@ all inverse-trig/hyperbolic and `erf/log1p`) is closed.
 ## 8. Implementation status (this branch)
 
 Implemented and verified here: gaps **A**, **B**, **C** closed; **D** α-BB sub-item closed
-(rigorous, auto-dispatched); **E** forward Tan + backward monotone-function set; **F**
-context updated (closed by #149). The `prod` path uses the proper recursive-McCormick fold;
-L1/L2/L∞ norms are certified and a NaN vector-eval bug in the Rust IR was fixed. Item 1 of
-§7 (exact multilinear hull) was investigated and deferred to the LP/lifted path; the rest
-of §7 is open.
+(rigorous, auto-dispatched); **E** forward Tan + backward monotone-function set; **F** closed
+for smooth unary atoms — `softplus`/`sigmoid` curvature profiles + sound interval enclosures
+added on top of #149, so every smooth unary atom with a definable curvature is now covered
+(verified sound: a zero-spanning `sigmoid` and a concave `-softplus` are *not* misclassified
+convex). The `prod` path uses the proper recursive-McCormick fold; L1/L2/L∞ norms are
+certified and a NaN vector-eval bug in the Rust IR was fixed. Item 1 of §7 (exact multilinear
+hull) was investigated and deferred to the LP/lifted path; the rest of §7 is open.
