@@ -271,7 +271,7 @@ def sanitize_relaxation_for_conditioning(
     A = model._A_ub
     b = model._b_ub
     if A is not None and b is not None and A.shape[0] > 0:
-        A = A.tocsr()
+        A = sp.csr_matrix(A)  # accepts dense or sparse; typed CSR for .data/.indptr
         b = np.asarray(b, dtype=np.float64)
         row_of_nz = np.repeat(np.arange(A.shape[0]), np.diff(A.indptr))
         bad_nz = ~np.isfinite(A.data) | (np.abs(A.data) >= cap)
