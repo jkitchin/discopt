@@ -511,6 +511,16 @@ def acos(x: Union[Expression, float]) -> Expression:
     return FunctionCall("acos", _wrap(x))
 
 
+def sinh(x: Union[Expression, float]) -> Expression:
+    """Hyperbolic sine."""
+    return FunctionCall("sinh", _wrap(x))
+
+
+def cosh(x: Union[Expression, float]) -> Expression:
+    """Hyperbolic cosine."""
+    return FunctionCall("cosh", _wrap(x))
+
+
 def asinh(x: Union[Expression, float]) -> Expression:
     """Inverse hyperbolic sine."""
     return FunctionCall("asinh", _wrap(x))
@@ -885,7 +895,7 @@ def prod(x: Union[Expression, list, Callable], *, over: Optional[Sequence] = Non
     return FunctionCall("prod", _wrap(x))
 
 
-def norm(x: Expression, ord: int = 2) -> Expression:
+def norm(x: Expression, ord: Union[int, float, str] = 2) -> Expression:
     """
     Vector norm.
 
@@ -893,14 +903,21 @@ def norm(x: Expression, ord: int = 2) -> Expression:
     ----------
     x : Expression
         Input vector expression.
-    ord : int, default 2
-        Norm order (e.g. 1 for L1-norm, 2 for L2-norm).
+    ord : int, float, or str, default 2
+        Norm order. ``1`` (L1), ``2`` (L2/Euclidean), and ``inf`` (Chebyshev,
+        passed as ``float("inf")`` or ``"inf"``) are supported on the global
+        certification path (Rust ``MathFunc``). Other integer orders are
+        evaluated and relaxed on the JAX path but are not in the core IR.
 
     Returns
     -------
     Expression
     """
-    return FunctionCall(f"norm{ord}", _wrap(x))
+    if ord in (float("inf"), "inf", "Inf"):
+        suffix = "inf"
+    else:
+        suffix = str(ord)
+    return FunctionCall(f"norm{suffix}", _wrap(x))
 
 
 # ─────────────────────────────────────────────────────────────

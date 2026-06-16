@@ -2787,9 +2787,18 @@ def _issue91_oa_mask_and_skip_reasons(model: Model) -> tuple[list[bool], list[st
         ),
         pytest.param(
             "mi",
+            # ``x <= cos(y)^2 + 1.5`` with binary y: root FBBT + nonlinear BT fix
+            # this instance to the single point (x=2, y=0). Over that box the row
+            # body ``x - cos(y)^2 - 1.5`` has a PSD Hessian (H_yy = -2*cos(2*0) ...
+            # i.e. d^2/dy^2 of -cos^2 y at 0 is +2 >= 0), so it is *provably*
+            # convex and directly OA-eligible. The region-aware sin/cos support in
+            # the interval-Hessian certificate now certifies this; previously the
+            # certificate abstained on cos and the row fell to the
+            # "fixed_nonlinear_row" skip. The new verdict is sound (the row is
+            # convex on the tightened box) and strictly more capable.
             "nlp_mi_002_010",
-            [True, False],
-            [None, "fixed_nonlinear_row"],
+            [True, True],
+            [None, None],
             id="nlp_mi_002_010",
         ),
         *[

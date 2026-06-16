@@ -516,10 +516,10 @@ fn parse_opcode(
             }))
         }
         47 => {
-            // o47: atanh — approximate as atan (no MathFunc::Atanh)
+            // o47: atanh
             let arg = parse_expr(reader, arena, var_nodes)?;
             Ok(arena.add(ExprNode::FunctionCall {
-                func: MathFunc::Atan,
+                func: MathFunc::Atanh,
                 args: vec![arg],
             }))
         }
@@ -532,10 +532,10 @@ fn parse_opcode(
             }))
         }
         50 => {
-            // o50: asinh — approximate as asin (no MathFunc::Asinh)
+            // o50: asinh
             let arg = parse_expr(reader, arena, var_nodes)?;
             Ok(arena.add(ExprNode::FunctionCall {
-                func: MathFunc::Asin,
+                func: MathFunc::Asinh,
                 args: vec![arg],
             }))
         }
@@ -548,10 +548,10 @@ fn parse_opcode(
             }))
         }
         52 => {
-            // o52: acosh — approximate as acos (no MathFunc::Acosh)
+            // o52: acosh
             let arg = parse_expr(reader, arena, var_nodes)?;
             Ok(arena.add(ExprNode::FunctionCall {
-                func: MathFunc::Acos,
+                func: MathFunc::Acosh,
                 args: vec![arg],
             }))
         }

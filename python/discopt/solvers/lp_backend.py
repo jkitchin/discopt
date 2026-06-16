@@ -96,6 +96,20 @@ def get_exact_lp_solver() -> Callable | None:
     return _lp_simplex() or _lp_highs()
 
 
+def get_exact_dual_lp_solver() -> Callable | None:
+    """Return an exact LP oracle that also provides **reduced costs**, or ``None``.
+
+    Duality-based bound tightening (DBBT) reads the LP's reduced costs to bound
+    how far each variable can move from the bound it is pressed against. That
+    requires an exact (vertex) oracle that *exposes* its duals: HiGHS does
+    (``col_dual``); discopt's pure-Rust simplex reaches the exact vertex but does
+    not expose reduced costs across the binding, and the POUNCE IPM's duals are
+    not rigorous (issue #145). So this returns HiGHS when available, else
+    ``None`` — DBBT then soundly no-ops rather than tighten from inexact duals.
+    """
+    return _lp_highs()
+
+
 def get_qp_solver(prefer_pounce: bool = False) -> Callable:
     """Return a matrix-form ``solve_qp(Q, c, A_ub, ...)``; see
     :func:`get_lp_solver`. POUNCE handles continuous QPs only (MIQPs go

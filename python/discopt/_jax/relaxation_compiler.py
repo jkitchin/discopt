@@ -889,6 +889,87 @@ def _compile_relax_node(
 
             return fn
 
+        if name == "prod":
+            # Multilinear product prod_i x_i over an array argument, relaxed by
+            # the recursive McCormick fold of envelopes._nested_trilinear_one_order
+            # generalized to n factors: maintain the accumulated product's value
+            # envelope (w_cv, w_cc) AND its exact interval [w_lb, w_ub] (via
+            # corner products), folding one factor at a time through the bilinear
+            # envelope. A valid relaxation for every factor sign.
+            #
+            # NOTE: this is not the literal convex hull of the multilinear
+            # monomial (Rikun 1997 / Meyer & Floudas 2004). The exact hull is
+            # given by RLT bound-factor products over *lifted* bilinear variables,
+            # which this compositional value-evaluator does not carry. Merging
+            # association orderings does NOT help here: at the midpoint/box-center
+            # linearization point this evaluator uses, recursive McCormick is
+            # order-invariant (verified: relax_trilinear_exact's three orderings
+            # coincide at the midpoint). Tightening to the true hull needs the
+            # lifted-variable LP path and remains future work.
+            a_fn = arg_fns[0]
+            n = getattr(expr.args[0], "size", None)
+            if n is None or n < 1:
+                raise ValueError(
+                    "prod relaxation requires a fixed-size array argument; "
+                    f"got {type(expr.args[0]).__name__}"
+                )
+
+            def fn(x_cv, x_cc, lb, ub, _a_fn=a_fn, _n=int(n)):
+                cv_a, cc_a = _a_fn(x_cv, x_cc, lb, ub)
+                cv_a = jnp.reshape(cv_a, (-1,))
+                cc_a = jnp.reshape(cc_a, (-1,))
+                if _n == 1:
+                    return cv_a[0], cc_a[0]
+                # Seed the fold with the first two factors' bilinear envelope.
+                w_cv, w_cc = relax_bilinear(
+                    0.5 * (cv_a[0] + cc_a[0]),
+                    0.5 * (cv_a[1] + cc_a[1]),
+                    cv_a[0],
+                    cc_a[0],
+                    cv_a[1],
+                    cc_a[1],
+                )
+                corners = jnp.stack(
+                    [cv_a[0] * cv_a[1], cv_a[0] * cc_a[1], cc_a[0] * cv_a[1], cc_a[0] * cc_a[1]]
+                )
+                w_lb, w_ub = jnp.min(corners), jnp.max(corners)
+                for k in range(2, _n):
+                    c_lb, c_ub = cv_a[k], cc_a[k]
+                    c_mid = 0.5 * (c_lb + c_ub)
+                    cv1, cc1 = relax_bilinear(w_cv, c_mid, w_lb, w_ub, c_lb, c_ub)
+                    cv2, cc2 = relax_bilinear(w_cc, c_mid, w_lb, w_ub, c_lb, c_ub)
+                    new_cv = jnp.minimum(cv1, cv2)
+                    new_cc = jnp.maximum(cc1, cc2)
+                    corners = jnp.stack([w_lb * c_lb, w_lb * c_ub, w_ub * c_lb, w_ub * c_ub])
+                    w_lb, w_ub = jnp.min(corners), jnp.max(corners)
+                    w_cv, w_cc = new_cv, new_cc
+                return w_cv, w_cc
+
+            return fn
+
+        if name.startswith("norm"):
+            # p-norm ||x||_p over an array argument (p >= 1, e.g. norm1/norm2).
+            # Valid bounds for every p >= 1 from norm equivalence:
+            #   ||x||_inf <= ||x||_p <= ||x||_1
+            # giving a convex underestimator max_i |x_i| and a concave
+            # overestimator sum_i |x_i|, each built from the per-component
+            # |.| envelope. A scalar argument reduces to |x|.
+            a_fn = arg_fns[0]
+
+            def fn(x_cv, x_cc, lb, ub, _a_fn=a_fn):
+                cv_a, cc_a = _a_fn(x_cv, x_cc, lb, ub)
+                cv_a = jnp.reshape(cv_a, (-1,))
+                cc_a = jnp.reshape(cc_a, (-1,))
+                mid = 0.5 * (cv_a + cc_a)
+                cv_abs, cc_abs = relax_abs(mid, cv_a, cc_a)
+                # ||x||_p >= ||x||_inf = max_i |x_i|  (convex underestimator)
+                cv = jnp.max(cv_abs)
+                # ||x||_p <= ||x||_1 = sum_i |x_i|    (concave overestimator)
+                cc = jnp.sum(cc_abs)
+                return cv, cc
+
+            return fn
+
         raise ValueError(f"Unknown function: {name!r}")
 
     if isinstance(expr, IndexExpression):
@@ -976,8 +1057,31 @@ def compile_relaxation(
           - cc: concave overestimator of expr
 
         The function is compatible with jax.jit and jax.vmap.
+
+        When ``arithmetic="alphabb"``, the whole expression is relaxed with a
+        rigorous (sound interval-Hessian) alphaBB underestimator/overestimator
+        instead of compositional McCormick. For the default McCormick path, any
+        node with no McCormick rule triggers an automatic alphaBB fallback so a
+        valid relaxation is always produced when the interval Hessian is finite.
     """
-    return _compile_relax_node(expr, model, partitions, mode, learned_registry, arithmetic)
+    if arithmetic == "alphabb":
+        from discopt._jax.alphabb import compile_alphabb_relaxation
+
+        return compile_alphabb_relaxation(expr, model)
+
+    try:
+        return _compile_relax_node(expr, model, partitions, mode, learned_registry, arithmetic)
+    except (ValueError, NotImplementedError) as exc:
+        # No McCormick rule for some node — fall back to a rigorous alphaBB
+        # relaxation of the whole expression. This keeps the solver supplied
+        # with a valid relaxation (gap D). If alphaBB also abstains (unbounded
+        # interval Hessian) re-raise the original McCormick error.
+        try:
+            from discopt._jax.alphabb import compile_alphabb_relaxation
+
+            return compile_alphabb_relaxation(expr, model)
+        except (ValueError, NotImplementedError):
+            raise exc
 
 
 def compile_objective_relaxation(

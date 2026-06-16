@@ -29,6 +29,7 @@ All functions are pure JAX and compatible with jax.jit and jax.vmap.
 from __future__ import annotations
 
 import functools
+from typing import Callable
 
 import jax
 import jax.numpy as jnp
@@ -251,3 +252,97 @@ def make_alphabb_relaxation(f, lb, ub, n_samples=100, method="eigenvalue"):
         return alphabb_overestimator(f, x, lb, ub, alpha_neg)
 
     return under_fn, over_fn, alpha, alpha_neg
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Rigorous alphaBB from a SOUND interval Hessian (safe for certification)
+# ──────────────────────────────────────────────────────────────────────
+#
+# ``estimate_alpha`` above samples the Hessian at random/edge points; the
+# resulting alpha is a heuristic, NOT a guaranteed lower bound on the
+# minimum eigenvalue, so it must never be used to certify a global bound.
+# The functions below instead derive alpha from a *sound* interval
+# enclosure of the Hessian over the box (``convexity.interval_ad``) and a
+# rigorous interval-Gershgorin eigenvalue bound, so the underestimator is
+# a valid relaxation. They abstain (raise) whenever the interval Hessian is
+# unbounded, leaving the caller's existing (McCormick) handling in place.
+
+
+def rigorous_alpha(expr, model, box=None):
+    """Guaranteed per-variable alphaBB parameters for ``expr`` over its box.
+
+    Uses a sound interval enclosure of the Hessian and a per-row interval
+    Gershgorin bound. For row ``i``,
+
+        lambda_min >= H[i,i].lo - sum_{j != i} max(|H[i,j].lo|, |H[i,j].hi|)
+
+    is a valid lower bound on the smallest eigenvalue contribution, giving
+
+        alpha_i = max(0, -0.5 * gershgorin_lo_i).
+
+    Variables absent from ``expr`` (or appearing linearly) have a
+    zero Hessian row, hence ``alpha_i = 0`` — the perturbation is applied
+    only to the nonlinear variables, keeping the relaxation as tight as the
+    diagonal-dominance bound allows.
+
+    Args:
+        expr: Scalar :class:`~discopt.modeling.core.Expression`.
+        model: Model defining the flat variable layout.
+        box: Optional ``{Variable: Interval}`` overriding declared bounds.
+
+    Returns:
+        ``np.ndarray`` of shape ``(n,)``. Entries are ``+inf`` wherever the
+        interval Hessian abstained (unbounded), signalling that no useful
+        alphaBB relaxation exists for this box.
+    """
+    import numpy as np
+
+    from discopt._jax.convexity.interval_ad import interval_hessian
+
+    iad = interval_hessian(expr, model, box)
+    h_lo = np.asarray(iad.hess.lo, dtype=float)
+    h_hi = np.asarray(iad.hess.hi, dtype=float)
+    abs_max = np.maximum(np.abs(h_lo), np.abs(h_hi))
+    # Per-row off-diagonal radius = sum of |.| over the row minus the diagonal.
+    row_radius = abs_max.sum(axis=1) - np.abs(np.diag(abs_max))
+    with np.errstate(invalid="ignore"):
+        gershgorin_lo = np.diag(h_lo) - row_radius
+        alpha = np.maximum(0.0, -0.5 * gershgorin_lo)
+    # NaN arises from inf - inf at abstaining nodes; treat as unbounded.
+    alpha = np.where(np.isnan(alpha), np.inf, alpha)
+    return alpha
+
+
+def compile_alphabb_relaxation(expr, model) -> Callable:
+    """Compile a rigorous alphaBB relaxation node for ``expr``.
+
+    Returns ``fn(x_cv, x_cc, lb, ub) -> (cv, cc)`` matching the McCormick
+    relaxation-compiler node contract, with ``cv`` a convex underestimator
+    and ``cc`` a concave overestimator of ``expr`` over the per-call box.
+
+    Raises:
+        ValueError: if the sound interval Hessian is unbounded (abstains),
+            so the caller can fall back to its existing handling.
+    """
+    import numpy as np
+
+    from discopt._jax.dag_compiler import compile_expression_params
+
+    alpha = rigorous_alpha(expr, model)
+    if not np.all(np.isfinite(alpha)):
+        raise ValueError(
+            "alphaBB: interval Hessian is unbounded for this expression/box; "
+            "no valid alphaBB relaxation (falling back to McCormick)."
+        )
+    alpha_j = jnp.asarray(alpha, dtype=jnp.float64)
+    f_fwd = compile_expression_params(expr, model)
+    params = tuple(jnp.asarray(p.value, dtype=jnp.float64) for p in model._parameters)
+
+    def fn(x_cv, x_cc, lb, ub, _f=f_fwd, _a=alpha_j, _p=params):
+        mid = 0.5 * (x_cv + x_cc)
+        fval = _f(mid, _p)
+        # (mid - lb)(ub - mid) >= 0 on the box; subtract for cv, add for cc.
+        pert = jnp.sum(_a * (mid - lb) * (ub - mid))
+        return fval - pert, fval + pert
+
+    return fn

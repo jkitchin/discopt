@@ -269,6 +269,10 @@ def _eval_function_call(expr: FunctionCall, model: Model, box: dict, cache: dict
         return iv.erf(arg)
     if name == "log1p":
         return iv.log1p(arg)
+    if name == "sigmoid":
+        return iv.sigmoid(arg)
+    if name == "softplus":
+        return iv.softplus(arg)
     # Unsupported atoms return an unbounded enclosure; the certificate
     # will refuse to prove convexity for expressions that hit this
     # path, preserving soundness.

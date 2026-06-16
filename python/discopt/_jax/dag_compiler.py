@@ -198,11 +198,21 @@ def _compile_node(expr: Expression, model: Model, param_index: dict) -> Callable
 
             return fn
 
-        if name == "norm2":
+        if name.startswith("norm"):
+            # norm{p}: p-norm of an array argument (norm1, norm2, ...).
             a_fn = arg_fns[0]
+            suffix = name[len("norm") :]
+            try:
+                ord_p: float = (
+                    float(suffix)
+                    if suffix not in ("", "inf")
+                    else (jnp.inf if suffix == "inf" else 2.0)
+                )
+            except ValueError as exc:
+                raise ValueError(f"Unsupported norm order: {name!r}") from exc
 
-            def fn(x_flat, params):
-                return jnp.linalg.norm(a_fn(x_flat, params), ord=2)
+            def fn(x_flat, params, _ord=ord_p):
+                return jnp.linalg.norm(a_fn(x_flat, params), ord=_ord)
 
             return fn
 

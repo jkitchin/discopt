@@ -536,6 +536,17 @@ def _classify_function_call(expr: FunctionCall, model: Optional[Model], cache: d
     if name == "min" and len(expr.args) >= 2:
         return _classify_nary_min(expr, model, cache)
 
+    # Any p-norm ‖·‖_p is convex and nonnegative. The DCP composition rule
+    # (convex, nondecreasing-in-each-|arg|) is only sound when the inner
+    # expression is *affine*: ‖affine‖_p is convex, but ‖nonconvex‖_p need not
+    # be. So classify the (vector) argument and license CONVEX only on an affine
+    # argument; otherwise abstain (UNKNOWN), preserving soundness.
+    if name.startswith("norm") and len(expr.args) == 1:
+        arg_info = classify_expr_info(expr.args[0], model, cache)
+        if arg_info.curvature == Curvature.AFFINE:
+            return ExprInfo(Curvature.CONVEX, Sign.NONNEG)
+        return ExprInfo(Curvature.UNKNOWN, Sign.NONNEG)
+
     if len(expr.args) != 1:
         return ExprInfo(Curvature.UNKNOWN, Sign.UNKNOWN)
 

@@ -119,23 +119,35 @@ class TestDegenerate:
 
 
 class TestUnsupportedAtom:
-    def test_sigmoid_atom_returns_unbounded(self):
-        """``sigmoid`` isn't in the interval atom table; enclosure is ±inf."""
+    def test_sigmoid_atom_sound_enclosure(self):
+        """``sigmoid`` is now in the interval atom table: a sound, tight enclosure."""
+        from scipy.special import expit
+
         m = Model("t")
         x = m.continuous("x", lb=-1.0, ub=1.0)
         # discopt's sigmoid emits a FunctionCall("sigmoid", x).
         iv_out = evaluate_interval(dm.sigmoid(x), m)
-        # The certificate downstream will refuse to certify — that's
-        # the safe behavior. Test here just ensures we don't crash and
-        # that the enclosure is at least [−∞, +∞] (sound but useless).
-        assert (
-            not np.isfinite(float(np.asarray(iv_out.lo).ravel()[0]))
-            or not np.isfinite(float(np.asarray(iv_out.hi).ravel()[0]))
-            or (
-                float(np.asarray(iv_out.lo).ravel()[0]) <= 0.0
-                and float(np.asarray(iv_out.hi).ravel()[0]) >= 1.0
-            )
-        )
+        lo = float(np.asarray(iv_out.lo).ravel()[0])
+        hi = float(np.asarray(iv_out.hi).ravel()[0])
+        xs = np.linspace(-1.0, 1.0, 1000)
+        ys = expit(xs)
+        # Sound: the enclosure contains the true range. Bounded (not ±inf).
+        assert np.isfinite(lo) and np.isfinite(hi)
+        assert lo <= ys.min() + 1e-12
+        assert hi >= ys.max() - 1e-12
+
+    def test_softplus_atom_sound_enclosure(self):
+        """``softplus`` is now in the interval atom table: a sound, tight enclosure."""
+        m = Model("t")
+        x = m.continuous("x", lb=-1.0, ub=1.0)
+        iv_out = evaluate_interval(dm.softplus(x), m)
+        lo = float(np.asarray(iv_out.lo).ravel()[0])
+        hi = float(np.asarray(iv_out.hi).ravel()[0])
+        xs = np.linspace(-1.0, 1.0, 1000)
+        ys = np.logaddexp(xs, 0.0)
+        assert np.isfinite(lo) and np.isfinite(hi)
+        assert lo <= ys.min() + 1e-12
+        assert hi >= ys.max() - 1e-12
 
 
 class TestCaching:

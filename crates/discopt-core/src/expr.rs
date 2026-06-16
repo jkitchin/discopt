@@ -88,6 +88,27 @@ pub enum MathFunc {
     Prod,
     /// L2 norm.
     Norm2,
+    /// Inverse hyperbolic sine (`asinh(x) = ln(x + sqrt(x^2 + 1))`).
+    Asinh,
+    /// Inverse hyperbolic cosine (`acosh(x) = ln(x + sqrt(x^2 - 1))`, x >= 1).
+    Acosh,
+    /// Inverse hyperbolic tangent (`atanh(x) = 0.5 ln((1+x)/(1-x))`, |x| < 1).
+    Atanh,
+    /// Gauss error function.
+    Erf,
+    /// Natural log of one plus the argument (`log1p(x) = ln(1 + x)`).
+    Log1p,
+    /// Logistic sigmoid (`sigmoid(x) = 1 / (1 + e^{-x})`).
+    Sigmoid,
+    /// Softplus (`softplus(x) = ln(1 + e^x)`).
+    Softplus,
+    /// L1 norm (sum of absolute values).
+    Norm1,
+    /// L-infinity norm (maximum absolute value).
+    NormInf,
+    /// General p-norm `(Σ |x_i|^p)^{1/p}` for an integer order `p >= 1`
+    /// (orders 1 and 2 use the dedicated `Norm1` / `Norm2` variants).
+    NormP(u32),
 }
 
 /// One axis of a generalized index: either a scalar position or a slice.
@@ -818,6 +839,16 @@ impl ExprArena {
                     | MathFunc::Asin
                     | MathFunc::Acos
                     | MathFunc::Tanh
+                    | MathFunc::Asinh
+                    | MathFunc::Acosh
+                    | MathFunc::Atanh
+                    | MathFunc::Erf
+                    | MathFunc::Log1p
+                    | MathFunc::Sigmoid
+                    | MathFunc::Softplus
+                    | MathFunc::Norm1
+                    | MathFunc::NormInf
+                    | MathFunc::NormP(_)
                     | MathFunc::Norm2 => usize::MAX,
                     // abs, sign: not strictly polynomial but handled specially
                     MathFunc::Abs | MathFunc::Sign => usize::MAX,
@@ -976,6 +1007,15 @@ impl ExprArena {
                     MathFunc::Asin => a0.asin(),
                     MathFunc::Acos => a0.acos(),
                     MathFunc::Tanh => a0.tanh(),
+                    MathFunc::Asinh => a0.asinh(),
+                    MathFunc::Acosh => a0.acosh(),
+                    MathFunc::Atanh => a0.atanh(),
+                    MathFunc::Erf => libm::erf(a0),
+                    MathFunc::Log1p => a0.ln_1p(),
+                    // Numerically stable logistic: 0.5 + 0.5*tanh(x/2).
+                    MathFunc::Sigmoid => 0.5 + 0.5 * (0.5 * a0).tanh(),
+                    // Numerically stable softplus: max(x,0) + ln(1 + e^{-|x|}).
+                    MathFunc::Softplus => a0.max(0.0) + (-a0.abs()).exp().ln_1p(),
                     MathFunc::Abs => a0.abs(),
                     MathFunc::Sign => {
                         if a0 > 0.0 {
@@ -1002,8 +1042,28 @@ impl ExprArena {
                         };
                         a0.max(a1)
                     }
-                    MathFunc::Prod => a0,  // single-arg prod is identity
-                    MathFunc::Norm2 => a0, // single-arg norm2 is abs
+                    MathFunc::Prod => self.reduction_values(args, x).iter().product(),
+                    MathFunc::Norm1 => {
+                        self.reduction_values(args, x).iter().map(|t| t.abs()).sum()
+                    }
+                    MathFunc::Norm2 => self
+                        .reduction_values(args, x)
+                        .iter()
+                        .map(|t| t * t)
+                        .sum::<f64>()
+                        .sqrt(),
+                    MathFunc::NormInf => self
+                        .reduction_values(args, x)
+                        .iter()
+                        .fold(0.0_f64, |m, t| m.max(t.abs())),
+                    MathFunc::NormP(p) => {
+                        let pf = *p as f64;
+                        self.reduction_values(args, x)
+                            .iter()
+                            .map(|t| t.abs().powf(pf))
+                            .sum::<f64>()
+                            .powf(1.0 / pf)
+                    }
                 }
             }
             ExprNode::Index { base, index } => {
@@ -1117,6 +1177,18 @@ impl ExprArena {
                 _ => vec![self.evaluate(id, x)],
             },
             _ => vec![self.evaluate(id, x)],
+        }
+    }
+
+    /// Collect the scalar operands of a reduction function (prod / norm).
+    ///
+    /// A single array-valued argument (`norm(x)` with vector `x`) is expanded
+    /// to its components; multiple scalar arguments are each evaluated.
+    fn reduction_values(&self, args: &[ExprId], x: &[f64]) -> Vec<f64> {
+        if args.len() == 1 {
+            self.collect_array_values(args[0], x)
+        } else {
+            args.iter().map(|a| self.evaluate(*a, x)).collect()
         }
     }
 
@@ -1343,6 +1415,15 @@ impl ModelRepr {
                     MathFunc::Asin => a0.asin(),
                     MathFunc::Acos => a0.acos(),
                     MathFunc::Tanh => a0.tanh(),
+                    MathFunc::Asinh => a0.asinh(),
+                    MathFunc::Acosh => a0.acosh(),
+                    MathFunc::Atanh => a0.atanh(),
+                    MathFunc::Erf => libm::erf(a0),
+                    MathFunc::Log1p => a0.ln_1p(),
+                    // Numerically stable logistic: 0.5 + 0.5*tanh(x/2).
+                    MathFunc::Sigmoid => 0.5 + 0.5 * (0.5 * a0).tanh(),
+                    // Numerically stable softplus: max(x,0) + ln(1 + e^{-|x|}).
+                    MathFunc::Softplus => a0.max(0.0) + (-a0.abs()).exp().ln_1p(),
                     MathFunc::Abs => a0.abs(),
                     MathFunc::Sign => {
                         if a0 > 0.0 {
@@ -1369,8 +1450,28 @@ impl ModelRepr {
                         };
                         a0.max(a1)
                     }
-                    MathFunc::Prod => a0,
-                    MathFunc::Norm2 => a0,
+                    MathFunc::Prod => self.reduction_values(args, x).iter().product(),
+                    MathFunc::Norm1 => {
+                        self.reduction_values(args, x).iter().map(|t| t.abs()).sum()
+                    }
+                    MathFunc::Norm2 => self
+                        .reduction_values(args, x)
+                        .iter()
+                        .map(|t| t * t)
+                        .sum::<f64>()
+                        .sqrt(),
+                    MathFunc::NormInf => self
+                        .reduction_values(args, x)
+                        .iter()
+                        .fold(0.0_f64, |m, t| m.max(t.abs())),
+                    MathFunc::NormP(p) => {
+                        let pf = *p as f64;
+                        self.reduction_values(args, x)
+                            .iter()
+                            .map(|t| t.abs().powf(pf))
+                            .sum::<f64>()
+                            .powf(1.0 / pf)
+                    }
                 }
             }
             ExprNode::Index { base, index } => match self.arena.get(*base) {
@@ -1396,6 +1497,17 @@ impl ModelRepr {
             ExprNode::MatMul { left, right } => self.evaluate_matmul(*left, *right, x),
             ExprNode::Sum { operand, .. } => self.evaluate_sum_all(*operand, x),
             ExprNode::SumOver { terms } => terms.iter().map(|t| self.evaluate_node(*t, x)).sum(),
+        }
+    }
+
+    /// Collect the scalar operands of a reduction (prod / norm): a single
+    /// array argument is expanded to its components, multiple scalar arguments
+    /// are each evaluated.
+    fn reduction_values(&self, args: &[ExprId], x: &[f64]) -> Vec<f64> {
+        if args.len() == 1 {
+            self.collect_array_values(args[0], x)
+        } else {
+            args.iter().map(|a| self.evaluate_node(*a, x)).collect()
         }
     }
 
@@ -1684,6 +1796,28 @@ mod tests {
         });
         let val = arena.evaluate(exp_x, &[1.0]);
         assert!((val - 1.0_f64.exp()).abs() < 1e-14);
+    }
+
+    #[test]
+    fn test_evaluate_vector_norm_and_prod() {
+        // Regression: norm/prod over an array argument must reduce over the
+        // vector components, not return NaN (the old single-scalar stub).
+        let mut arena = ExprArena::new();
+        let x = arena.add(ExprNode::Variable {
+            name: "x".into(),
+            index: 0,
+            size: 2,
+            shape: vec![2],
+        });
+        let pt = [3.0_f64, -4.0_f64];
+        let n1 = arena.add(ExprNode::FunctionCall { func: MathFunc::Norm1, args: vec![x] });
+        let n2 = arena.add(ExprNode::FunctionCall { func: MathFunc::Norm2, args: vec![x] });
+        let ninf = arena.add(ExprNode::FunctionCall { func: MathFunc::NormInf, args: vec![x] });
+        let pr = arena.add(ExprNode::FunctionCall { func: MathFunc::Prod, args: vec![x] });
+        assert!((arena.evaluate(n1, &pt) - 7.0).abs() < 1e-12);
+        assert!((arena.evaluate(n2, &pt) - 5.0).abs() < 1e-12);
+        assert!((arena.evaluate(ninf, &pt) - 4.0).abs() < 1e-12);
+        assert!((arena.evaluate(pr, &pt) - (-12.0)).abs() < 1e-12);
     }
 
     #[test]

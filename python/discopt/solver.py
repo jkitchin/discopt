@@ -3342,21 +3342,30 @@ def solve_model(
                 inc_sol, inc_obj = incumbent_info
                 if inc_obj < _SENTINEL_THRESHOLD:
                     try:
-                        from discopt._jax.obbt import run_obbt
+                        from discopt._jax.obbt import obbt_tighten_root
 
-                        obbt_result = run_obbt(
+                        # Tighten against the McCormick *relaxation* (not just the
+                        # model's linear rows) with the incumbent as a cutoff. This
+                        # runs duality-based bound tightening (one objective LP whose
+                        # reduced costs bound every variable) followed by
+                        # optimality-based OBBT, so a new incumbent shrinks the box
+                        # via the nonlinear envelopes too — both are rigorous
+                        # tightenings of an outer approximation.
+                        obbt_result = obbt_tighten_root(
                             model,
-                            lb=np.array(lb),
+                            np.array(lb),
                             ub=np.array(ub),
+                            rounds=2,
                             incumbent_cutoff=float(inc_obj),
+                            deadline=time.perf_counter() + 5.0,
                             time_limit_per_lp=0.1,
                             prefer_pounce=nlp_solver == "pounce",
                         )
-                        if obbt_result.n_tightened > 0:
-                            lb = obbt_result.tightened_lb
-                            ub = obbt_result.tightened_ub
+                        if not obbt_result.infeasible and obbt_result.n_tightened > 0:
+                            lb = obbt_result.lb
+                            ub = obbt_result.ub
                             logger.info(
-                                "OBBT tightened %d bounds (incumbent=%.6g)",
+                                "Relaxation OBBT/DBBT tightened %d bounds (incumbent=%.6g)",
                                 obbt_result.n_tightened,
                                 inc_obj,
                             )

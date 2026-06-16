@@ -104,7 +104,7 @@ class MccormickLPRelaxer:
         On any solver failure, ``status != "optimal"`` and the LB is ``None``.
         """
         try:
-            milp, _ = build_milp_relaxation(
+            milp, varmap = build_milp_relaxation(
                 self._model,
                 self._terms,
                 self._disc,
@@ -131,6 +131,16 @@ class MccormickLPRelaxer:
 
         res = milp.solve(time_limit=time_limit, backend=self._backend)
 
+        # On-demand separation of the exact multilinear hull for products with
+        # more factors than the dense RLT cap (those carry only the loose
+        # recursive chain). Every separated cut is a supporting hyperplane of the
+        # convex/concave envelope, hence valid; adding them only tightens the
+        # bound, so the loop is sound at any round.
+        res = self._separate_multilinear(milp, varmap, res, time_limit)
+        # Edge-concave / edge-convex quadratic blocks: tighten the joint
+        # vertex-polyhedral envelope (cuts on the existing bilinear/square auxes).
+        res = self._separate_edge_concave(milp, varmap, res, time_limit)
+
         # Soundness guard: a floating-point simplex "infeasible" verdict is NOT
         # a proof that the relaxed feasible set is empty. The spatial-B&B driver
         # treats a relaxation "infeasible" as a RIGOROUS fathom (it prunes the
@@ -148,7 +158,25 @@ class MccormickLPRelaxer:
             if verify.status != "infeasible":
                 res = verify
 
-        if res.objective is None or res.x is None:
+        # Soundness guard: a non-optimal termination (``iteration_limit`` /
+        # ``time_limit``) returns the solver's *unconverged* objective. For the
+        # warm-started simplex that value is a primal incumbent — an UPPER bound
+        # on the LP optimum — and the backend reports ``bound == objective``, so
+        # there is no salvageable dual bound. Trusting it as a lower bound is
+        # unsound: nvs22 on its FBBT-tightened box stalls the simplex at
+        # ``iteration_limit`` reporting 8.31 while HiGHS solves the same LP to
+        # 2.55 (true optimum 6.06). Re-verify a non-optimal fast-backend result
+        # with HiGHS and adopt it only if HiGHS converges to optimality.
+        if res.status not in ("optimal", "infeasible") and self._backend != "auto":
+            verify = milp.solve(time_limit=time_limit, backend="auto")
+            if verify.status == "optimal":
+                res = verify
+
+        # A valid lower bound on the original problem requires the relaxation LP
+        # to be solved to OPTIMALITY; any other terminal status yields no
+        # certified bound, so report the status with no lower bound and let the
+        # spatial-B&B driver branch instead of fathoming on an unconverged value.
+        if res.status != "optimal" or res.objective is None or res.x is None:
             return MccormickLPResult(status=res.status)
         x_orig = np.asarray(res.x)[: self._n_orig].copy()
         return MccormickLPResult(
@@ -156,3 +184,210 @@ class MccormickLPRelaxer:
             lower_bound=float(res.objective),
             x=x_orig,
         )
+
+    def _separate_multilinear(self, milp, varmap, res, time_limit):
+        """Tighten products beyond the dense RLT cap by on-demand hull separation.
+
+        For each multilinear/trilinear product with more factors than
+        ``DISCOPT_MULTILINEAR_RLT_MAX`` (the dense-cut cap), repeatedly solve the
+        relaxation, separate the convex/concave envelope cuts the current point
+        violates (``multilinear_separation``), append them, and re-solve — up to
+        a small round limit. Each cut is a valid supporting hyperplane, so the
+        returned bound is always sound; on any failure the input ``res`` is
+        returned unchanged.
+        """
+        import os
+
+        if os.environ.get("DISCOPT_MULTILINEAR_SEPARATE", "1") == "0":
+            return res
+        if res is None or res.status != "optimal" or res.x is None:
+            return res
+        try:
+            import scipy.sparse as sp
+
+            from discopt._jax.multilinear_separation import separate_multilinear_envelope
+
+            cap = int(os.environ.get("DISCOPT_MULTILINEAR_RLT_MAX", "4"))
+            n_total = len(milp._c)
+            # Build (factor-columns, product-column) specs for over-cap products.
+            specs: list[tuple[list[int], int]] = []
+            for src in ("multilinear", "trilinear"):
+                for term, prod_col in (varmap.get(src) or {}).items():
+                    cols = sorted(set(int(c) for c in term))
+                    if len(cols) > cap and len(cols) == len(set(term)):
+                        specs.append((cols, int(prod_col)))
+            if not specs:
+                return res
+
+            def _append(rows: list[np.ndarray], rhs: list[float]) -> None:
+                R = np.asarray(rows, dtype=np.float64)
+                b = np.asarray(rhs, dtype=np.float64)
+                if milp._A_ub is None:
+                    milp._A_ub = R
+                    milp._b_ub = b
+                elif sp.issparse(milp._A_ub):
+                    milp._A_ub = sp.vstack([milp._A_ub, sp.csr_matrix(R)], format="csr")
+                    milp._b_ub = np.concatenate([milp._b_ub, b])
+                else:
+                    milp._A_ub = np.vstack([np.asarray(milp._A_ub), R])
+                    milp._b_ub = np.concatenate([np.asarray(milp._b_ub), b])
+
+            for _round in range(8):
+                x = np.asarray(res.x, dtype=np.float64)
+                rows: list[np.ndarray] = []
+                rhs: list[float] = []
+                for cols, prod_col in specs:
+                    lb = np.array([milp._bounds[c][0] for c in cols], dtype=np.float64)
+                    ub = np.array([milp._bounds[c][1] for c in cols], dtype=np.float64)
+                    xs = x[cols]
+                    ws = float(x[prod_col])
+                    for cut in separate_multilinear_envelope(lb, ub, xs, ws):
+                        row = np.zeros(n_total)
+                        if cut.sense == "under":
+                            # w >= a.x + b  ->  a.x - w <= -b
+                            for d, c in enumerate(cols):
+                                row[c] += float(cut.a[d])
+                            row[prod_col] += -1.0
+                            rows.append(row)
+                            rhs.append(-float(cut.b))
+                        else:
+                            # w <= a.x + b  ->  w - a.x <= b
+                            for d, c in enumerate(cols):
+                                row[c] += -float(cut.a[d])
+                            row[prod_col] += 1.0
+                            rows.append(row)
+                            rhs.append(float(cut.b))
+                if not rows:
+                    break
+                _append(rows, rhs)
+                new_res = milp.solve(time_limit=time_limit, backend=self._backend)
+                if new_res.status != "optimal" or new_res.objective is None:
+                    break
+                res = new_res
+            return res
+        except Exception:
+            return res
+
+    def _separate_edge_concave(self, milp, varmap, res, time_limit):
+        """Tighten edge-concave/edge-convex quadratic blocks by hull separation.
+
+        Each block's vertex-hull supporting hyperplane gives a valid cut on the
+        existing ``x_i^2`` / ``x_i x_j`` auxiliary columns (no lifting). Sound at
+        any round; any failure returns the input ``res`` unchanged.
+        """
+        import os
+
+        if os.environ.get("DISCOPT_EDGE_CONCAVE", "1") == "0":
+            return res
+        if res is None or res.status != "optimal" or res.x is None:
+            return res
+        try:
+            import scipy.sparse as sp
+
+            from discopt._jax.edge_concave import (
+                collect_edge_concave_quadratics,
+                separate_edge_concave_quadratic,
+            )
+
+            if getattr(self, "_ec_blocks", None) is None:
+                self._ec_blocks = collect_edge_concave_quadratics(self._model)
+            blocks = self._ec_blocks
+            if not blocks:
+                return res
+
+            bilinear = varmap.get("bilinear") or {}
+            monomial = varmap.get("monomial") or {}
+            n_total = len(milp._c)
+            lb = np.array([b[0] for b in milp._bounds], dtype=np.float64)
+            ub = np.array([b[1] for b in milp._bounds], dtype=np.float64)
+
+            # Resolve each block's aux columns once; drop blocks missing any aux.
+            specs = []
+            for blk in blocks:
+                cols_sq = {}
+                cols_bl = {}
+                ok = True
+                for i in blk.sq:
+                    col = monomial.get((i, 2))
+                    if col is None:
+                        ok = False
+                        break
+                    cols_sq[i] = col
+                if ok:
+                    for key in blk.bilin:
+                        col = bilinear.get(key)
+                        if col is None:
+                            ok = False
+                            break
+                        cols_bl[key] = col
+                if ok:
+                    specs.append((blk, cols_sq, cols_bl))
+            if not specs:
+                return res
+
+            def _append(rows, rhs):
+                R = np.asarray(rows, dtype=np.float64)
+                b = np.asarray(rhs, dtype=np.float64)
+                if milp._A_ub is None:
+                    milp._A_ub, milp._b_ub = R, b
+                elif sp.issparse(milp._A_ub):
+                    milp._A_ub = sp.vstack([milp._A_ub, sp.csr_matrix(R)], format="csr")
+                    milp._b_ub = np.concatenate([milp._b_ub, b])
+                else:
+                    milp._A_ub = np.vstack([np.asarray(milp._A_ub), R])
+                    milp._b_ub = np.concatenate([np.asarray(milp._b_ub), b])
+
+            for _round in range(6):
+                x = np.asarray(res.x, dtype=np.float64)
+                rows, rhs = [], []
+                for blk, cols_sq, cols_bl in specs:
+                    vi = list(blk.var_idxs)
+                    blk_lb = lb[vi]
+                    blk_ub = ub[vi]
+                    x_star = x[vi]
+                    q_star = blk.const
+                    for i, coeff in blk.sq.items():
+                        q_star += coeff * x[cols_sq[i]]
+                    for key, coeff in blk.bilin.items():
+                        q_star += coeff * x[cols_bl[key]]
+                    for i, coeff in blk.lin.items():
+                        q_star += coeff * x[i]
+                    cut = separate_edge_concave_quadratic(blk, blk_lb, blk_ub, x_star, q_star)
+                    if cut is None:
+                        continue
+                    A, B = cut
+                    row = np.zeros(n_total)
+                    if blk.sense == "under":
+                        # q >= A.x + B  ->  A.x - q <= -B
+                        for d, v in enumerate(vi):
+                            row[v] += float(A[d])
+                        for i, coeff in blk.sq.items():
+                            row[cols_sq[i]] += -coeff
+                        for key, coeff in blk.bilin.items():
+                            row[cols_bl[key]] += -coeff
+                        for i, coeff in blk.lin.items():
+                            row[i] += -coeff
+                        rows.append(row)
+                        rhs.append(blk.const - float(B))
+                    else:
+                        # q <= A.x + B  ->  q - A.x <= B
+                        for i, coeff in blk.sq.items():
+                            row[cols_sq[i]] += coeff
+                        for key, coeff in blk.bilin.items():
+                            row[cols_bl[key]] += coeff
+                        for i, coeff in blk.lin.items():
+                            row[i] += coeff
+                        for d, v in enumerate(vi):
+                            row[v] += -float(A[d])
+                        rows.append(row)
+                        rhs.append(float(B) - blk.const)
+                if not rows:
+                    break
+                _append(rows, rhs)
+                new_res = milp.solve(time_limit=time_limit, backend=self._backend)
+                if new_res.status != "optimal" or new_res.objective is None:
+                    break
+                res = new_res
+            return res
+        except Exception:
+            return res

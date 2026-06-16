@@ -278,6 +278,26 @@ pub fn interval_cos(a: &Interval) -> Interval {
     interval_sin(&Interval::new(a.lo + PI / 2.0, a.hi + PI / 2.0))
 }
 
+/// `tan([a,b])` with branch handling.
+///
+/// `tan` is increasing and continuous on each branch `((k-1/2)pi, (k+1/2)pi)`
+/// with vertical asymptotes at `(k+1/2)pi`. When `[a,b]` lies within a single
+/// branch (no asymptote strictly inside), `tan` is monotone, so the image is
+/// `[tan(a), tan(b)]`. Otherwise the image is unbounded and we return `entire`.
+pub fn interval_tan(a: &Interval) -> Interval {
+    // The branch index of x is round(x / pi): branch k spans
+    // ((k-1/2)pi, (k+1/2)pi), with asymptotes at the half-integer multiples.
+    let branch_lo = (a.lo / PI).round();
+    let branch_hi = (a.hi / PI).round();
+    if branch_lo == branch_hi {
+        // Same branch: tan is increasing and finite here.
+        Interval::new(a.lo.tan(), a.hi.tan())
+    } else {
+        // Spans at least one asymptote: unbounded.
+        Interval::entire()
+    }
+}
+
 /// Check if the angle `target` (mod 2*pi) is in [lo_norm, hi_norm].
 fn contains_angle(lo_norm: f64, hi_norm: f64, target: f64) -> bool {
     // Check if any 2*k*pi + target falls in [lo_norm, hi_norm].
@@ -376,10 +396,7 @@ fn eval_node_interval(
                 MathFunc::Sqrt => interval_sqrt(&a0),
                 MathFunc::Sin => interval_sin(&a0),
                 MathFunc::Cos => interval_cos(&a0),
-                MathFunc::Tan => {
-                    // Conservative: tan can diverge, return entire.
-                    Interval::entire()
-                }
+                MathFunc::Tan => interval_tan(&a0),
                 MathFunc::Atan => {
                     // atan is monotonically increasing, range (-pi/2, pi/2)
                     Interval::new(a0.lo.atan(), a0.hi.atan())
@@ -414,6 +431,44 @@ fn eval_node_interval(
                     // tanh is monotonically increasing, range (-1, 1)
                     Interval::new(a0.lo.tanh(), a0.hi.tanh())
                 }
+                MathFunc::Asinh => {
+                    // asinh is monotonically increasing on all of R
+                    Interval::new(a0.lo.asinh(), a0.hi.asinh())
+                }
+                MathFunc::Acosh => {
+                    // acosh defined on [1, inf), monotonically increasing
+                    let lo = a0.lo.max(1.0).acosh();
+                    let hi = a0.hi.max(1.0).acosh();
+                    Interval::new(lo, hi)
+                }
+                MathFunc::Atanh => {
+                    // atanh defined on (-1, 1), monotonically increasing.
+                    // Clamp just inside the domain to avoid +/-inf.
+                    const EPS: f64 = 1e-12;
+                    let lo = a0.lo.clamp(-1.0 + EPS, 1.0 - EPS).atanh();
+                    let hi = a0.hi.clamp(-1.0 + EPS, 1.0 - EPS).atanh();
+                    Interval::new(lo, hi)
+                }
+                MathFunc::Erf => {
+                    // erf is monotonically increasing, range (-1, 1)
+                    Interval::new(libm::erf(a0.lo), libm::erf(a0.hi))
+                }
+                MathFunc::Log1p => {
+                    // log1p(x) = ln(1 + x), defined on (-1, inf), increasing.
+                    let lo = (a0.lo.max(-1.0)).ln_1p();
+                    let hi = (a0.hi.max(-1.0)).ln_1p();
+                    Interval::new(lo, hi)
+                }
+                MathFunc::Sigmoid => {
+                    // sigmoid is monotonically increasing, range (0, 1)
+                    let sig = |x: f64| 0.5 + 0.5 * (0.5 * x).tanh();
+                    Interval::new(sig(a0.lo), sig(a0.hi))
+                }
+                MathFunc::Softplus => {
+                    // softplus is monotonically increasing, range (0, inf)
+                    let sp = |x: f64| x.max(0.0) + (-x.abs()).exp().ln_1p();
+                    Interval::new(sp(a0.lo), sp(a0.hi))
+                }
                 MathFunc::Abs => interval_abs(&a0),
                 MathFunc::Sign => Interval::new(-1.0, 1.0),
                 MathFunc::Min => {
@@ -444,14 +499,13 @@ fn eval_node_interval(
                         result
                     }
                 }
-                MathFunc::Norm2 => {
-                    // |x| for single arg.
-                    if args.len() == 1 {
-                        interval_abs(&a0)
-                    } else {
-                        // sqrt(sum(x_i^2)) — conservative.
-                        Interval::new(0.0, f64::INFINITY)
-                    }
+                MathFunc::Norm1 | MathFunc::Norm2 | MathFunc::NormInf | MathFunc::NormP(_) => {
+                    // A p-norm is non-negative. The forward pass collapses an
+                    // array argument to a single node interval, so a tight
+                    // component-wise bound is not available here; return the
+                    // sound non-negative enclosure. (Tightening for norms comes
+                    // from the McCormick relaxation, not FBBT.)
+                    Interval::new(0.0, f64::INFINITY)
                 }
             }
         }
@@ -480,6 +534,31 @@ fn eval_node_interval(
 // ─────────────────────────────────────────────────────────────
 // Backward propagation
 // ─────────────────────────────────────────────────────────────
+
+/// Inverse error function `erf^{-1}(y)` for `y in (-1, 1)`.
+///
+/// A Winitzki closed-form initial guess refined by Newton iterations against
+/// `libm::erf` (which converges to ~machine precision). Backward propagation
+/// widens the result outward by a small margin so the preimage stays a sound
+/// superset despite any residual error.
+fn erfinv(y: f64) -> f64 {
+    use std::f64::consts::PI;
+    let y = y.clamp(-1.0 + 1e-12, 1.0 - 1e-12);
+    let a = 0.147_f64;
+    let ln = (1.0 - y * y).ln();
+    let t1 = 2.0 / (PI * a) + 0.5 * ln;
+    let mut x = y.signum() * ((t1 * t1 - ln / a).sqrt() - t1).sqrt();
+    // Newton refinement: x <- x - (erf(x) - y) / (2/sqrt(pi) * e^{-x^2}).
+    let two_over_sqrt_pi = 2.0 / PI.sqrt();
+    for _ in 0..3 {
+        let deriv = two_over_sqrt_pi * (-x * x).exp();
+        if deriv.abs() < 1e-300 {
+            break;
+        }
+        x -= (libm::erf(x) - y) / deriv;
+    }
+    x
+}
 
 /// Backward-propagate an output bound through the expression DAG to
 /// tighten variable bounds.
@@ -629,8 +708,215 @@ pub fn backward_propagate(
                     let new = Interval::new(lo * lo, tightened.hi * tightened.hi);
                     backward_propagate(arena, args[0], new, node_bounds, var_bounds);
                 }
+                MathFunc::Log2 => {
+                    // log2(a) in [lo, hi] => a in [2^lo, 2^hi]
+                    let new = Interval::new(tightened.lo.exp2(), tightened.hi.exp2());
+                    backward_propagate(arena, args[0], new, node_bounds, var_bounds);
+                }
+                MathFunc::Log10 => {
+                    // log10(a) in [lo, hi] => a in [10^lo, 10^hi]
+                    let new = Interval::new(10f64.powf(tightened.lo), 10f64.powf(tightened.hi));
+                    backward_propagate(arena, args[0], new, node_bounds, var_bounds);
+                }
+                MathFunc::Log1p => {
+                    // log1p(a)=ln(1+a) in [lo, hi] => a in [e^lo - 1, e^hi - 1]
+                    let new = Interval::new(tightened.lo.exp_m1(), tightened.hi.exp_m1());
+                    backward_propagate(arena, args[0], new, node_bounds, var_bounds);
+                }
+                MathFunc::Sinh => {
+                    // sinh increasing, inverse asinh.
+                    let new = Interval::new(tightened.lo.asinh(), tightened.hi.asinh());
+                    backward_propagate(arena, args[0], new, node_bounds, var_bounds);
+                }
+                MathFunc::Asinh => {
+                    // asinh increasing, inverse sinh.
+                    let new = Interval::new(tightened.lo.sinh(), tightened.hi.sinh());
+                    backward_propagate(arena, args[0], new, node_bounds, var_bounds);
+                }
+                MathFunc::Tanh => {
+                    // tanh increasing onto (-1, 1), inverse atanh. Clamp inside domain.
+                    const EPS: f64 = 1e-12;
+                    let lo = tightened.lo.clamp(-1.0 + EPS, 1.0 - EPS).atanh();
+                    let hi = tightened.hi.clamp(-1.0 + EPS, 1.0 - EPS).atanh();
+                    backward_propagate(arena, args[0], Interval::new(lo, hi), node_bounds, var_bounds);
+                }
+                MathFunc::Atanh => {
+                    // atanh increasing on (-1, 1), inverse tanh.
+                    let new = Interval::new(tightened.lo.tanh(), tightened.hi.tanh());
+                    backward_propagate(arena, args[0], new, node_bounds, var_bounds);
+                }
+                MathFunc::Tan => {
+                    // tan is monotone within a single branch. If the forward
+                    // input interval lies in one branch, invert via atan with
+                    // the branch offset: x = atan(y) + k*pi.
+                    use std::f64::consts::PI;
+                    let inp = node_bounds[args[0].0];
+                    let branch_lo = (inp.lo / PI).round();
+                    let branch_hi = (inp.hi / PI).round();
+                    if branch_lo == branch_hi {
+                        let k_pi = branch_lo * PI;
+                        let new_lo = tightened.lo.atan() + k_pi;
+                        let new_hi = tightened.hi.atan() + k_pi;
+                        backward_propagate(
+                            arena,
+                            args[0],
+                            Interval::new(new_lo, new_hi),
+                            node_bounds,
+                            var_bounds,
+                        );
+                    }
+                }
+                MathFunc::Atan => {
+                    // atan increasing onto (-pi/2, pi/2), inverse tan. Clamp range.
+                    use std::f64::consts::FRAC_PI_2;
+                    const EPS: f64 = 1e-12;
+                    let lo = tightened.lo.clamp(-FRAC_PI_2 + EPS, FRAC_PI_2 - EPS).tan();
+                    let hi = tightened.hi.clamp(-FRAC_PI_2 + EPS, FRAC_PI_2 - EPS).tan();
+                    backward_propagate(arena, args[0], Interval::new(lo, hi), node_bounds, var_bounds);
+                }
+                MathFunc::Asin => {
+                    // asin increasing onto [-pi/2, pi/2], inverse sin; preimage in [-1, 1].
+                    use std::f64::consts::FRAC_PI_2;
+                    let lo = tightened.lo.clamp(-FRAC_PI_2, FRAC_PI_2).sin();
+                    let hi = tightened.hi.clamp(-FRAC_PI_2, FRAC_PI_2).sin();
+                    backward_propagate(arena, args[0], Interval::new(lo, hi), node_bounds, var_bounds);
+                }
+                MathFunc::Acos => {
+                    // acos decreasing onto [0, pi], inverse cos; preimage in [-1, 1].
+                    use std::f64::consts::PI;
+                    let lo_in = tightened.lo.clamp(0.0, PI);
+                    let hi_in = tightened.hi.clamp(0.0, PI);
+                    // decreasing: a in [cos(hi_in), cos(lo_in)]
+                    backward_propagate(
+                        arena,
+                        args[0],
+                        Interval::new(hi_in.cos(), lo_in.cos()),
+                        node_bounds,
+                        var_bounds,
+                    );
+                }
+                MathFunc::Acosh => {
+                    // acosh increasing onto [0, inf), inverse cosh; preimage in [1, inf).
+                    let lo = tightened.lo.max(0.0).cosh();
+                    let hi = tightened.hi.max(0.0).cosh();
+                    backward_propagate(arena, args[0], Interval::new(lo, hi), node_bounds, var_bounds);
+                }
+                MathFunc::Cosh => {
+                    // cosh(a) in [lo, hi] (hi >= 1) is even; conservative symmetric preimage
+                    // a in [-acosh(hi), acosh(hi)].
+                    let r = tightened.hi.max(1.0).acosh();
+                    backward_propagate(arena, args[0], Interval::new(-r, r), node_bounds, var_bounds);
+                }
+                MathFunc::Sigmoid => {
+                    // sigmoid increasing onto (0, 1), inverse logit a = ln(p/(1-p)).
+                    const EPS: f64 = 1e-12;
+                    let logit = |p: f64| {
+                        let p = p.clamp(EPS, 1.0 - EPS);
+                        p.ln() - (1.0 - p).ln()
+                    };
+                    backward_propagate(
+                        arena,
+                        args[0],
+                        Interval::new(logit(tightened.lo), logit(tightened.hi)),
+                        node_bounds,
+                        var_bounds,
+                    );
+                }
+                MathFunc::Softplus => {
+                    // softplus increasing onto (0, inf), inverse a = s + ln(1 - e^{-s}), s > 0.
+                    const EPS: f64 = 1e-12;
+                    let inv = |s: f64| {
+                        let s = s.max(EPS);
+                        s + (-(-s).exp()).ln_1p()
+                    };
+                    backward_propagate(
+                        arena,
+                        args[0],
+                        Interval::new(inv(tightened.lo), inv(tightened.hi)),
+                        node_bounds,
+                        var_bounds,
+                    );
+                }
+                MathFunc::Erf => {
+                    // erf increasing onto (-1, 1); invert with erfinv, clamped
+                    // to the open domain and widened by a small margin so the
+                    // preimage is a sound superset despite erfinv's tiny error.
+                    const M: f64 = 1e-9;
+                    let lo = erfinv(tightened.lo) - M;
+                    let hi = erfinv(tightened.hi) + M;
+                    backward_propagate(arena, args[0], Interval::new(lo, hi), node_bounds, var_bounds);
+                }
+                MathFunc::Sin => {
+                    // sin is monotone on each piece between consecutive extrema
+                    // at pi/2 + k*pi. If the forward input lies in one piece,
+                    // invert via asin with the right 2*m*pi offset; otherwise the
+                    // preimage is a union of intervals and we conservatively skip.
+                    use std::f64::consts::{FRAC_PI_2, PI};
+                    let inp = node_bounds[args[0].0];
+                    // Monotone iff no sin-extremum (pi/2 + k*pi) is strictly
+                    // interior to [inp.lo, inp.hi]; extrema at the endpoints are
+                    // fine. Take the smallest extremum >= inp.lo.
+                    let ext = FRAC_PI_2 + ((inp.lo - FRAC_PI_2) / PI).ceil() * PI;
+                    let monotone = !(ext > inp.lo + 1e-12 && ext < inp.hi - 1e-12);
+                    if monotone && (inp.hi - inp.lo) <= PI + 1e-9 {
+                        let mid = 0.5 * (inp.lo + inp.hi);
+                        let ylo = tightened.lo.clamp(-1.0, 1.0);
+                        let yhi = tightened.hi.clamp(-1.0, 1.0);
+                        let (new_lo, new_hi) = if mid.cos() >= 0.0 {
+                            // increasing piece centered at 2*m*pi
+                            let m = (mid / (2.0 * PI)).round();
+                            (ylo.asin() + 2.0 * m * PI, yhi.asin() + 2.0 * m * PI)
+                        } else {
+                            // decreasing piece centered at pi + 2*m*pi
+                            let m = ((mid - PI) / (2.0 * PI)).round();
+                            (
+                                PI - yhi.asin() + 2.0 * m * PI,
+                                PI - ylo.asin() + 2.0 * m * PI,
+                            )
+                        };
+                        backward_propagate(
+                            arena,
+                            args[0],
+                            Interval::new(new_lo, new_hi),
+                            node_bounds,
+                            var_bounds,
+                        );
+                    }
+                }
+                MathFunc::Cos => {
+                    // cos is monotone on each piece [k*pi, (k+1)*pi]: decreasing
+                    // where sin>0, increasing where sin<0. acos(y) in [0, pi].
+                    use std::f64::consts::PI;
+                    let inp = node_bounds[args[0].0];
+                    // Monotone iff no cos-extremum (k*pi) is strictly interior.
+                    let ext = (inp.lo / PI).ceil() * PI;
+                    let monotone = !(ext > inp.lo + 1e-12 && ext < inp.hi - 1e-12);
+                    if monotone && (inp.hi - inp.lo) <= PI + 1e-9 {
+                        let mid = 0.5 * (inp.lo + inp.hi);
+                        let ylo = tightened.lo.clamp(-1.0, 1.0);
+                        let yhi = tightened.hi.clamp(-1.0, 1.0);
+                        let m = (mid / (2.0 * PI)).round();
+                        let (new_lo, new_hi) = if mid.sin() > 0.0 {
+                            // decreasing piece [2m*pi, pi+2m*pi]: x = acos(y) + 2m*pi,
+                            // larger y -> smaller x.
+                            (yhi.acos() + 2.0 * m * PI, ylo.acos() + 2.0 * m * PI)
+                        } else {
+                            // increasing piece [pi+2m'*pi, 2pi+2m'*pi]:
+                            // x = 2*pi*m - acos(y) (m rounds to the piece's right end).
+                            (2.0 * PI * m - ylo.acos(), 2.0 * PI * m - yhi.acos())
+                        };
+                        backward_propagate(
+                            arena,
+                            args[0],
+                            Interval::new(new_lo, new_hi),
+                            node_bounds,
+                            var_bounds,
+                        );
+                    }
+                }
                 _ => {
-                    // No backward propagation for other functions.
+                    // No backward propagation for the remaining functions
+                    // (sign, min/max, prod, norm).
                 }
             }
         }
