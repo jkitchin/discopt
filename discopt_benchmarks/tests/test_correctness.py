@@ -48,22 +48,25 @@ def solve_instance(name: str, **kwargs) -> MockSolution:
 # 1. KNOWN OPTIMUM VALIDATION
 # ─────────────────────────────────────────────────────────────
 
-# Known optimal values from MINLPLib (subset for testing)
+# Known optimal values from MINLPLib (subset for testing).
+# Verified against the official MINLPLib `minlplib.solu`; nine entries were
+# demonstrably wrong (most ~100-1500x too small) and are corrected here to the
+# authoritative =opt= (proven) / =best= (best known) values.
 KNOWN_OPTIMA = {
     "ex1221":       7.6672,
     "ex1222":       1.0765,
     "ex1223":       4.5796,
     "ex1223a":      4.5796,
     "ex1224":      -0.94347,
-    "ex1225":       0.0,
+    "ex1225":      31.0,           # was 0.0 (=opt=)
     "ex1226":      -17.0,
-    "ex1233":      62.1833,
-    "ex1243":      83.6455,
-    "ex1244":      83.6455,
-    "ex1252":    1169.37,
-    "ex1252a":   1169.37,
-    "ex1263":      19.46,
-    "ex1263a":     19.46,
+    "ex1233":      155010.6713,    # was 62.1833 (=best=)
+    "ex1243":      83402.50641,    # was 83.6455 (=opt=)
+    "ex1244":      82042.90522,    # was 83.6455 (=opt=)
+    "ex1252":      128893.741,     # was 1169.37 (=opt=; Kocis-Grossmann batch plant)
+    "ex1252a":     128893.741,     # was 1169.37 (=opt=)
+    "ex1263":      19.6,           # was 19.46 (=opt=)
+    "ex1263a":     19.6,           # was 19.46 (=opt=)
     "ex1264":       8.6,
     "ex1264a":      8.6,
     "ex1265":      10.3,
@@ -72,9 +75,16 @@ KNOWN_OPTIMA = {
     "ex1266a":     16.3,
     "fuel":         8566.12,
     "gastrans":   89.08588,
-    "ghg_1veh":  -246.04,
-    "procurement1": 0.0,
-    "smallinvDAXr1b50": -3.83,
+    "ghg_1veh":    7.7816348850,   # was -246.04 (=opt=)
+    # `procurement1` (0.0) and `smallinvDAXr1b50` (-3.83) were phantom entries —
+    # those names match no MINLPLib instance and the values matched nothing.
+    # Replaced with the real instances the suites reference (=best= / =opt=).
+    "procurement1large":      3802.1797490,
+    "procurement1mot":         291.5416577,
+    "procurement2mot":         212.0707488,
+    "smallinvDAXr1b020-022":     1.5715279820,
+    "smallinvDAXr1b050-055":     9.7971434540,
+    "smallinvDAXr1b100-110":    39.1621418600,
 }
 
 ABS_TOL = 1e-4

@@ -3518,9 +3518,17 @@ def solve_model(
         obj_val = None
         if stats["total_nodes"] >= max_nodes:
             status = "node_limit"
+            # No incumbent and a resource limit: nothing is certified. Without an
+            # incumbent there is no gap to certify, and a leftover tree bound
+            # describes an unexplored search, not a proven optimum — a certified
+            # exit here would claim optimality with no solution at all.
+            _gap_certified = False
         elif wall_time >= time_limit:
             status = "time_limit"
+            _gap_certified = False
         else:
+            # Tree exhausted with no feasible node: infeasibility *is* a certified
+            # conclusion, so leave _gap_certified untouched.
             status = "infeasible"
 
     from discopt.modeling.core import ObjectiveSense
@@ -4257,9 +4265,17 @@ def _solve_nlp_bb(
         obj_val = None
         if stats["total_nodes"] >= max_nodes:
             status = "node_limit"
+            # No incumbent and a resource limit: nothing is certified. Without an
+            # incumbent there is no gap to certify, and a leftover tree bound
+            # describes an unexplored search, not a proven optimum — a certified
+            # exit here would claim optimality with no solution at all.
+            _gap_certified = False
         elif wall_time >= time_limit:
             status = "time_limit"
+            _gap_certified = False
         else:
+            # Tree exhausted with no feasible node: infeasibility *is* a certified
+            # conclusion, so leave _gap_certified untouched.
             status = "infeasible"
 
     # Negate bound back for maximization
@@ -6973,9 +6989,17 @@ def _solve_milp_bb(
         obj_val = None
         if stats["total_nodes"] >= max_nodes:
             status = "node_limit"
+            # No incumbent and a resource limit: nothing is certified. Without an
+            # incumbent there is no gap to certify, and a leftover tree bound
+            # describes an unexplored search, not a proven optimum — a certified
+            # exit here would claim optimality with no solution at all.
+            _gap_certified = False
         elif wall_time >= time_limit:
             status = "time_limit"
+            _gap_certified = False
         else:
+            # Tree exhausted with no feasible node: infeasibility *is* a certified
+            # conclusion, so leave _gap_certified untouched.
             status = "infeasible"
 
     from discopt.modeling.core import ObjectiveSense
@@ -7427,9 +7451,17 @@ def _solve_miqp_bb(
         obj_val = None
         if stats["total_nodes"] >= max_nodes:
             status = "node_limit"
+            # No incumbent and a resource limit: nothing is certified. Without an
+            # incumbent there is no gap to certify, and a leftover tree bound
+            # describes an unexplored search, not a proven optimum — a certified
+            # exit here would claim optimality with no solution at all.
+            _gap_certified = False
         elif wall_time >= time_limit:
             status = "time_limit"
+            _gap_certified = False
         else:
+            # Tree exhausted with no feasible node: infeasibility *is* a certified
+            # conclusion, so leave _gap_certified untouched.
             status = "infeasible"
 
     from discopt.modeling.core import ObjectiveSense

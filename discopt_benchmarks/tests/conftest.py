@@ -70,9 +70,9 @@ def known_optima() -> dict[str, float]:
         "ex1222": 1.0765,
         "ex1223": 4.5796,
         "ex1224": -0.94347,
-        "ex1225": 0.0,
+        "ex1225": 31.0,  # was 0.0 (MINLPLib =opt=)
         "ex1226": -17.0,
-        "ex1233": 62.1833,
+        "ex1233": 155010.6713,  # was 62.1833 (MINLPLib =best=)
         "fuel": 8566.12,
         "gastrans": 89.08588,
     }
