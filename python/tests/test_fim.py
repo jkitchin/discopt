@@ -419,3 +419,58 @@ class TestSolveFreeAndBatch:
         # And compute_fim still works through the solve fallback.
         result = compute_fim(exp, {"k": 1.0}, {"x": 2.0})
         assert result.fim.shape == (1, 1)
+
+    def test_evaluator_matches_compute_fim(self):
+        """The reusable refinement evaluator returns FIMs identical to compute_fim.
+
+        The evaluator hoists the model build + JAX Jacobian compile out of the
+        scipy refinement loop and reuses one compiled Jacobian across every
+        design point. It must be numerically indistinguishable from calling
+        compute_fim per point — only the per-call overhead is removed."""
+        from discopt.doe.fim import _make_direct_fim_evaluator
+
+        exp, pv = self._rsm_experiment()
+        evaluator = _make_direct_fim_evaluator(exp, pv)
+        assert evaluator is not None  # explicit response model -> fast path eligible
+
+        rng = np.random.default_rng(1)
+        for _ in range(8):
+            dp = {"x1": float(rng.uniform(0, 10)), "x2": float(rng.uniform(-5, 5))}
+            single = compute_fim(exp, pv, dp)
+            via_eval = evaluator(dp)
+            np.testing.assert_allclose(via_eval.fim, single.fim, rtol=1e-9, atol=1e-9)
+            np.testing.assert_allclose(via_eval.jacobian, single.jacobian, rtol=1e-9, atol=1e-9)
+
+    def test_evaluator_matches_compute_fim_with_prior(self):
+        """The evaluator folds prior_fim exactly like compute_fim."""
+        from discopt.doe.fim import _make_direct_fim_evaluator
+
+        exp, pv = self._rsm_experiment()
+        n_p = len(exp.create_model(**pv).parameter_names)
+        prior = 0.5 * np.eye(n_p)
+        evaluator = _make_direct_fim_evaluator(exp, pv, prior_fim=prior)
+        assert evaluator is not None
+
+        dp = {"x1": 6.0, "x2": -1.0}
+        single = compute_fim(exp, pv, dp, prior_fim=prior)
+        np.testing.assert_allclose(evaluator(dp).fim, single.fim, rtol=1e-9, atol=1e-9)
+
+    def test_evaluator_none_for_constrained_model(self):
+        """A model that needs a solve yields no fast evaluator (caller falls back)."""
+        from discopt.doe.fim import _make_direct_fim_evaluator
+
+        class ConstrainedExp(Experiment):
+            def create_model(self, **kwargs):
+                m = dm.Model("constrained")
+                k = m.continuous("k", lb=0.01, ub=20)
+                x = m.continuous("x", lb=0.1, ub=10)
+                m.subject_to(x <= 5.0)
+                return ExperimentModel(
+                    model=m,
+                    unknown_parameters={"k": k},
+                    design_inputs={"x": x},
+                    responses={"y": k * x},
+                    measurement_error={"y": 0.1},
+                )
+
+        assert _make_direct_fim_evaluator(ConstrainedExp(), {"k": 1.0}) is None

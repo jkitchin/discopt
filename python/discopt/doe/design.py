@@ -13,7 +13,12 @@ from typing import Callable, Sequence
 import numpy as np
 from scipy.optimize import minimize
 
-from discopt.doe.fim import FIMResult, compute_fim, compute_fim_batch
+from discopt.doe.fim import (
+    FIMResult,
+    _make_direct_fim_evaluator,
+    compute_fim,
+    compute_fim_batch,
+)
 from discopt.estimate import Experiment
 
 _SINGULAR_SENTINEL = 1e12
@@ -495,13 +500,26 @@ def _refine_single_design(
     bounds = [design_bounds[n] for n in design_names]
     x0 = np.array([seed_design[n] for n in design_names], dtype=float)
 
+    # The scipy refiner evaluates the FIM many times (each L-BFGS-B / SLSQP step
+    # plus its finite-difference gradient). For a pure explicit response model,
+    # build the model and JIT-compile the response Jacobian ONCE here and reuse
+    # it across every evaluation, instead of rebuilding + re-tracing per call
+    # inside compute_fim. Falls back to per-call compute_fim (which solves) for
+    # constrained / implicit-state models, where the evaluator is None.
+    evaluator = _make_direct_fim_evaluator(experiment, param_values, prior_fim=prior_fim)
+
+    def eval_fim(design: dict[str, float]) -> FIMResult:
+        if evaluator is not None:
+            return evaluator(design)
+        return compute_fim(experiment, param_values, design, prior_fim=prior_fim)
+
     def to_design(x: np.ndarray) -> dict[str, float]:
         return {n: float(v) for n, v in zip(design_names, x)}
 
     def objective(x: np.ndarray) -> float:
         design = to_design(x)
         try:
-            fim_result = compute_fim(experiment, param_values, design, prior_fim=prior_fim)
+            fim_result = eval_fim(design)
             crit = _evaluate_criterion(fim_result, criterion)
         except Exception:
             return _SINGULAR_SENTINEL
@@ -533,7 +551,7 @@ def _refine_single_design(
 
     design = to_design(np.asarray(res.x))
     try:
-        fim_result = compute_fim(experiment, param_values, design, prior_fim=prior_fim)
+        fim_result = eval_fim(design)
     except Exception:
         return None
     crit_val = _evaluate_criterion(fim_result, criterion)
