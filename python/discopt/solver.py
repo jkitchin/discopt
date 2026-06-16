@@ -1647,6 +1647,18 @@ def solve_model(
         has_factorable_work,
     )
 
+    # Whether the model has continuous DECISION variables, captured *before* the
+    # factorable lift introduces continuous *auxiliary* variables (w == x**k).
+    # A model whose original variables are all discrete is a combinatorial
+    # problem: the bilinear lift adds dependent continuous aux vars, but spatial
+    # branching on them does not help and can trap the incumbent search on an
+    # objective plateau (nvs16 stalls at the x1==1 plateau obj=14.203 instead of
+    # the true 0.703 — issue #120 primal convergence). Route those models to the
+    # integer-B&B + alphaBB path (mc_mode "none") rather than the McCormick LP
+    # spatial path, mirroring the existing "integer-only models have nothing to
+    # spatial-branch on" fallback below (which the aux vars otherwise defeat).
+    _origin_has_continuous_var = any(v.var_type == VarType.CONTINUOUS for v in model._variables)
+
     if has_factorable_work(model):
         _fr_ok, _fr_convex, _ = _classify_model_convexity(model)
         if _fr_ok and not _fr_convex:
@@ -2301,8 +2313,11 @@ def solve_model(
         # "error" (no bound) rather than an invalid one — so this never trades
         # soundness for the tighter bound. Pure-integer nonconvex models have
         # nothing to spatial-branch on, so they keep the rigorous alphaBB
-        # underestimator ("none").
-        _has_continuous_var = any(v.var_type == VarType.CONTINUOUS for v in model._variables)
+        # underestimator ("none"). The flag is taken over the *original*
+        # decision variables (captured before the factorable lift) so dependent
+        # continuous lift aux vars do not spuriously route a combinatorial model
+        # onto the spatial path and stall its incumbent search (nvs16).
+        _has_continuous_var = _origin_has_continuous_var
         if not _model_is_convex and _has_continuous_var and model._objective is not None:
             _mc_mode = "lp"
         else:
@@ -2311,7 +2326,7 @@ def solve_model(
     if _mc_mode == "lp" and model._objective is not None:
         from discopt._jax.mccormick_lp import MccormickLPRelaxer
 
-        _has_continuous_var = any(v.var_type == VarType.CONTINUOUS for v in model._variables)
+        _has_continuous_var = _origin_has_continuous_var
         if not _has_continuous_var:
             # Spatial-BB on integer-only models has nothing to branch on:
             # the LP relaxer's integer-feasible point doesn't satisfy the

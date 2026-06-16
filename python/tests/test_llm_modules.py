@@ -788,9 +788,15 @@ class TestDiagnosisResult:
         m.continuous("x", lb=0, ub=10)
         m.minimize(0)
 
+        # A certified gap requires a finite dual bound — otherwise the
+        # SolveResult soundness guard (``__post_init__``) clears the gap as a
+        # non-credible certification. Give each fixture an objective/bound pair
+        # consistent with its stated gap so the diagnosis sees a real gap.
         # Small gap
         r1 = SolveResult(
             status="time_limit",
+            objective=1.0,
+            bound=0.995,
             wall_time=10.0,
             node_count=100,
             gap=0.005,
@@ -804,6 +810,8 @@ class TestDiagnosisResult:
         # Moderate gap
         r2 = SolveResult(
             status="time_limit",
+            objective=1.0,
+            bound=0.95,
             wall_time=10.0,
             node_count=100,
             gap=0.05,
@@ -817,6 +825,8 @@ class TestDiagnosisResult:
         # Large gap
         r3 = SolveResult(
             status="time_limit",
+            objective=1.0,
+            bound=0.80,
             wall_time=10.0,
             node_count=100,
             gap=0.20,
