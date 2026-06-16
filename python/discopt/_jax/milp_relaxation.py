@@ -23,6 +23,7 @@ from __future__ import annotations
 import itertools
 import logging
 import math
+from collections import Counter
 from dataclasses import dataclass
 from typing import Optional, Union
 
@@ -223,6 +224,23 @@ class UnivariateSquareRelaxation:
     aux_col: int
     base_lb: float
     base_ub: float
+
+
+@dataclass
+class AffineSquareRelaxation:
+    """Univariate square envelope on an affine residual over lifted columns.
+
+    ``r = const + Σ resid[col] * z[col]`` is an affine form whose factors (a
+    bilinear/monomial product) are already lifted to auxiliary columns. ``s`` is
+    the lifted ``r**2`` and ``[r_lb, r_ub]`` is an interval-arithmetic outer
+    bound on ``r`` used to build the tangent/secant square envelope (issue #155).
+    """
+
+    aux_col: int
+    resid: dict[int, float]
+    const: float
+    r_lb: float
+    r_ub: float
 
 
 @dataclass
@@ -434,6 +452,175 @@ def _collect_monomial_terms_for_lift(expr: Expression, model: Model) -> set[tupl
 
     visit(expr)
     return terms
+
+
+# Flat-variable monomial: a sorted tuple of original variable indices, repeated
+# by power (e.g. ``x1**2 * x0`` → ``(0, 1, 1)``).  An affine-square residual is
+# represented as ``(const, [(coeff, monomial), ...])``.
+_Monomial = tuple[int, ...]
+_AffineSquare = tuple[float, list[tuple[float, _Monomial]]]
+
+
+def _product_to_monomial(expr: Expression, model: Model) -> tuple[float, _Monomial] | None:
+    """Fold a pure product of original variables / integer powers / constants.
+
+    Returns ``(scalar, monomial)`` where ``monomial`` is the sorted tuple of
+    original flat variable indices (repeated by power), or ``None`` if the
+    product contains a non-polynomial leaf (a function call, a non-constant
+    division, a fractional power, …).
+    """
+    scalar = [1.0]
+    idxs: list[int] = []
+
+    def visit(e: Expression) -> bool:
+        if isinstance(e, BinaryOp) and e.op == "*":
+            return visit(e.left) and visit(e.right)
+        if isinstance(e, UnaryOp) and e.op == "neg":
+            scalar[0] *= -1.0
+            return visit(e.operand)
+        if isinstance(e, Constant):
+            scalar[0] *= float(e.value)
+            return True
+        flat = _get_flat_index(e, model)
+        if flat is not None:
+            idxs.append(flat)
+            return True
+        if isinstance(e, BinaryOp) and e.op == "**" and isinstance(e.right, Constant):
+            base_flat = _get_flat_index(e.left, model)
+            if base_flat is not None:
+                exp_val = float(e.right.value)
+                n = int(exp_val)
+                if exp_val == n and n >= 1:
+                    idxs.extend([base_flat] * n)
+                    return True
+        return False
+
+    if not visit(expr):
+        return None
+    return scalar[0], tuple(sorted(idxs))
+
+
+def _expr_to_polynomial(expr: Expression, model: Model) -> _AffineSquare | None:
+    """Walk a *distributed* expression into ``(const, [(coeff, monomial), ...])``.
+
+    Returns ``None`` if any leaf is not a polynomial in the original variables
+    (so the caller falls back to the existing relaxation paths instead of
+    misclassifying a transcendental residual).
+    """
+    const = [0.0]
+    terms: list[tuple[float, _Monomial]] = []
+
+    def visit(e: Expression, scale: float) -> bool:
+        if isinstance(e, Constant):
+            const[0] += scale * float(e.value)
+            return True
+        flat = _get_flat_index(e, model)
+        if flat is not None:
+            terms.append((scale, (flat,)))
+            return True
+        if isinstance(e, UnaryOp):
+            if e.op == "neg":
+                return visit(e.operand, -scale)
+            return False
+        if isinstance(e, SumExpression):
+            return visit(e.operand, scale)
+        if isinstance(e, BinaryOp):
+            if e.op == "+":
+                return visit(e.left, scale) and visit(e.right, scale)
+            if e.op == "-":
+                return visit(e.left, scale) and visit(e.right, -scale)
+            if e.op == "/":
+                if isinstance(e.right, Constant):
+                    denom = float(e.right.value)
+                    if denom == 0.0:
+                        return False
+                    return visit(e.left, scale / denom)
+                return False
+            if e.op == "*":
+                decomp = _product_to_monomial(e, model)
+                if decomp is None:
+                    return False
+                coeff, monomial = decomp
+                terms.append((scale * coeff, monomial))
+                return True
+            if e.op == "**":
+                decomp = _product_to_monomial(e, model)
+                if decomp is None:
+                    return False
+                coeff, monomial = decomp
+                terms.append((scale * coeff, monomial))
+                return True
+        return False
+
+    if not visit(expr, 1.0):
+        return None
+    return const[0], terms
+
+
+def _extract_affine_square(expr: Expression, model: Model) -> _AffineSquare | None:
+    """Recognize ``E**2`` where ``E`` is an affine combination of liftable products.
+
+    Returns the residual polynomial ``(const, terms)`` for ``E`` when ``E``
+    distributes into a sum of at least two addends with at least one genuinely
+    nonlinear term (a product or power ≥ 2) — the shape that, if the square were
+    distributed, would blow up into high-degree monomials (issue #155). Returns
+    ``None`` for transcendental residuals, pure quadratic forms of a linear
+    residual, and single-term squares (handled by the existing pipelines).
+    """
+    if not (
+        isinstance(expr, BinaryOp)
+        and expr.op == "**"
+        and isinstance(expr.right, Constant)
+        and float(expr.right.value) == 2.0
+    ):
+        return None
+    base = distribute_products(expr.left)
+    poly = _expr_to_polynomial(base, model)
+    if poly is None:
+        return None
+    const, terms = poly
+    if not any(len(monomial) >= 2 for _coeff, monomial in terms):
+        return None
+    n_addends = len(terms) + (1 if const != 0.0 else 0)
+    if n_addends < 2:
+        return None
+    return const, terms
+
+
+def _collect_affine_squares(model: Model) -> list[tuple[Expression, _AffineSquare]]:
+    """Find every ``E**2`` affine-square node in the objective and constraints."""
+    found: list[tuple[Expression, _AffineSquare]] = []
+    seen: set[int] = set()
+
+    def visit(e: Expression) -> None:
+        info = _extract_affine_square(e, model)
+        if info is not None and id(e) not in seen:
+            seen.add(id(e))
+            found.append((e, info))
+            # The residual is lifted wholesale; do not descend into it.
+            return
+        if isinstance(e, BinaryOp):
+            visit(e.left)
+            visit(e.right)
+        elif isinstance(e, UnaryOp):
+            visit(e.operand)
+        elif isinstance(e, FunctionCall):
+            for arg in e.args:
+                visit(arg)
+        elif isinstance(e, IndexExpression):
+            if not isinstance(e.base, Variable):
+                visit(e.base)
+        elif isinstance(e, SumExpression):
+            visit(e.operand)
+        elif isinstance(e, SumOverExpression):
+            for term in e.terms:
+                visit(term)
+
+    if model._objective is not None:
+        visit(model._objective.expression)
+    for constraint in model._constraints:
+        visit(constraint.body)
+    return found
 
 
 def _build_minmax_objective_lift(
@@ -2882,7 +3069,23 @@ def build_milp_relaxation(
                 distribute_products(model._objective.expression), model
             )
         )
-    monomial_terms = sorted(set(terms.monomial) | objective_lift_monomials)
+    # ── Square-of-affine-in-lifted-vars residuals (issue #155) ──────────────
+    # ``(1.5 - x0*(1-x1))**2``-style terms are lifted wholesale to a univariate
+    # square envelope on the affine residual rather than distributed into the
+    # catastrophic high-degree monomials (~1e18 on nvs16) that the magnitude cap
+    # would otherwise drop. Collect the squares now so every single-variable
+    # power factor (``x1**2``, ``x1**3``) the residual needs is allocated through
+    # the standard monomial machinery (column + tangent/secant envelope) below.
+    affine_squares = _collect_affine_squares(model)
+    affine_square_monomials: set[tuple[int, int]] = set()
+    for _node, (_const, sq_terms) in affine_squares:
+        for _coeff, monomial in sq_terms:
+            for var_idx, power in Counter(monomial).items():
+                if power >= 2:
+                    affine_square_monomials.add((var_idx, power))
+    monomial_terms = sorted(
+        set(terms.monomial) | objective_lift_monomials | affine_square_monomials
+    )
 
     def _record_generation_guardrail(
         kind: str,
@@ -3392,6 +3595,92 @@ def build_milp_relaxation(
         final_col, stages = _ensure_multilinear_aux(multi_term)
         multilinear_var_map[multi_term] = final_col
         multilinear_stage_map[multi_term] = stages
+
+    # ── Square-of-affine-in-lifted-vars envelopes (issue #155) ──────────────
+    # For each recognized ``E**2`` residual, lift every product factor to a
+    # column (monomial aux for ``x**n``, recursive bilinear chain for products),
+    # build the affine residual ``r`` over those columns, and allocate ``s = r^2``
+    # with an interval-arithmetic bound on ``r``. The tangent/secant envelope is
+    # emitted with the other square rows; the linearizer resolves the protected
+    # ``**2`` node to ``s`` through ``composite_var_map``.
+    affine_square_relaxations: list[AffineSquareRelaxation] = []
+    affine_square_protected_ids: set[int] = set()
+
+    def _lift_monomial_column(monomial: _Monomial) -> Optional[int]:
+        """Column for a product of original variables, or None if not liftable."""
+        power_cols: list[int] = []
+        for var_idx, power in sorted(Counter(monomial).items()):
+            if power == 1:
+                power_cols.append(var_idx)
+            else:
+                mono_col = monomial_var_map.get((var_idx, power))
+                if mono_col is None:
+                    # The monomial was dropped by the magnitude cap; the whole
+                    # square cannot be lifted soundly, so fall back (skip it).
+                    return None
+                power_cols.append(mono_col)
+        if not power_cols:
+            return None
+        col = power_cols[0]
+        for nxt in power_cols[1:]:
+            col = _ensure_bilinear_aux(col, nxt)
+        return col
+
+    for node, (sq_const, sq_terms) in affine_squares:
+        resid: dict[int, float] = {}
+        residual_const = float(sq_const)
+        liftable = True
+        for coeff, monomial in sq_terms:
+            if not monomial:
+                residual_const += coeff
+                continue
+            lifted_col = _lift_monomial_column(monomial)
+            if lifted_col is None:
+                liftable = False
+                break
+            resid[lifted_col] = resid.get(lifted_col, 0.0) + coeff
+        if not liftable or not resid:
+            continue
+
+        r_lb = residual_const
+        r_ub = residual_const
+        finite = True
+        for col, coeff in resid.items():
+            clo, chi = (float(v) for v in all_bounds[col])
+            if not (_is_effectively_finite(clo) and _is_effectively_finite(chi)):
+                finite = False
+                break
+            lo_contrib = coeff * clo if coeff >= 0.0 else coeff * chi
+            hi_contrib = coeff * chi if coeff >= 0.0 else coeff * clo
+            r_lb += lo_contrib
+            r_ub += hi_contrib
+        if not finite or not (np.isfinite(r_lb) and np.isfinite(r_ub)) or r_ub < r_lb:
+            continue
+
+        s_lb = 0.0 if r_lb <= 0.0 <= r_ub else min(r_lb * r_lb, r_ub * r_ub)
+        s_ub = max(r_lb * r_lb, r_ub * r_ub)
+        # Cap an extreme square upper bound to avoid a numerically degenerate LP
+        # (the residual range legitimately reaches ~1.6e9 on nvs16, so s_ub ~1e18).
+        # An unbounded-above aux is sound: the lower bound comes from the tangent
+        # underestimators and the column's own lower bound s_lb.
+        if not np.isfinite(s_ub) or s_ub > _MONOMIAL_AUX_BOUND_LIMIT:
+            s_ub = np.inf
+
+        s_col = col_idx
+        all_bounds.append((float(s_lb), float(s_ub)))
+        integrality_flags.append(0)
+        col_idx += 1
+        affine_square_relaxations.append(
+            AffineSquareRelaxation(
+                aux_col=s_col,
+                resid=resid,
+                const=residual_const,
+                r_lb=float(r_lb),
+                r_ub=float(r_ub),
+            )
+        )
+        composite_var_map[id(node)] = s_col
+        affine_square_protected_ids.add(id(node))
 
     bilinear_pw_map: dict[tuple[int, int], list] = {}
     bilinear_lambda_map: dict[tuple[int, int], dict] = {}
@@ -4445,6 +4734,48 @@ def build_milp_relaxation(
             row[square_relax.base_col] = -(lb_i + ub_i)
             _add_row(row, -lb_i * ub_i)
 
+    # ── Square-of-affine-in-lifted-vars envelopes (issue #155) ──────────────
+    # ``s = r**2`` over the affine residual ``r = const + Σ resid[col]*z[col]``,
+    # ``r ∈ [r_lb, r_ub]``. ``s`` convex → tangent under-estimators and a secant
+    # over-estimator. Every row is an individually valid bound, so any row whose
+    # coefficients or rhs reach an extreme magnitude (the residual range hits
+    # ~1.6e9 on nvs16, so a tangent at the far endpoint carries a ~1e18 constant)
+    # is dropped to keep the LP well-conditioned — omitting an over/under-estimator
+    # only enlarges the feasible region and keeps the dual bound sound. The
+    # tangent at ``r = 0`` (and the column lower bound ``s_lb``) still pins
+    # ``s ≥ 0``, recovering the trivial sum-of-squares bound.
+    def _affine_square_row_ok(row: np.ndarray, rhs: float) -> bool:
+        if not np.isfinite(rhs) or abs(rhs) > _MONOMIAL_AUX_BOUND_LIMIT:
+            return False
+        nz = np.flatnonzero(row)
+        return bool(nz.size) and float(np.max(np.abs(row[nz]))) <= _MONOMIAL_AUX_BOUND_LIMIT
+
+    for sq in affine_square_relaxations:
+        r_lb = sq.r_lb
+        r_ub = sq.r_ub
+        tangent_pts = [r_lb, r_ub]
+        if r_lb <= 0.0 <= r_ub:
+            tangent_pts.append(0.0)
+        # Tangent under-estimators: s ≥ 2t*r - t^2  →  -s + 2t*r ≤ t^2.
+        for t in _sorted_unique_points(tangent_pts):
+            row = np.zeros(n_total)
+            row[sq.aux_col] = -1.0
+            for col, coeff in sq.resid.items():
+                row[col] += 2.0 * t * coeff
+            rhs = t * t - 2.0 * t * sq.const
+            if _affine_square_row_ok(row, rhs):
+                _add_row(row, rhs)
+        # Secant over-estimator: s ≤ (r_lb+r_ub)*r - r_lb*r_ub.
+        if abs(r_ub - r_lb) > 1e-12:
+            slope = r_lb + r_ub
+            row = np.zeros(n_total)
+            row[sq.aux_col] = 1.0
+            for col, coeff in sq.resid.items():
+                row[col] += -slope * coeff
+            rhs = slope * sq.const - r_lb * r_ub
+            if _affine_square_row_ok(row, rhs):
+                _add_row(row, rhs)
+
     # ── Fractional-power envelope constraints ──────────────────────────────
     # For a = x^p with x in [lb, ub], lb ≥ 0:
     #   - 0 < p < 1 (concave on x ≥ 0):
@@ -4581,8 +4912,11 @@ def build_milp_relaxation(
                 _add_row(row, const_branch)
 
     # Model constraints
+    protected_squares = (
+        frozenset(affine_square_protected_ids) if affine_square_protected_ids else None
+    )
     for constraint in model._constraints:
-        body = distribute_products(constraint.body)
+        body = distribute_products(constraint.body, protected_squares)
         sense = constraint.sense
         if sense == "<=":
             exact_row = _exact_positive_reciprocal_row(body, model, flat_lb, flat_ub)
@@ -4653,7 +4987,7 @@ def build_milp_relaxation(
 
     # ── Objective ────────────────────────────────────────────────────────────
     assert model._objective is not None
-    obj_expr = distribute_products(model._objective.expression)
+    obj_expr = distribute_products(model._objective.expression, protected_squares)
     try:
         if objective_lift is not None:
             c_obj = np.zeros(n_total)

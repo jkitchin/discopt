@@ -248,7 +248,9 @@ def _distribute_mul(left: Expression, right: Expression) -> Expression:
     return BinaryOp("*", left, right)
 
 
-def distribute_products(expr: Expression) -> Expression:
+def distribute_products(
+    expr: Expression, protected_squares: frozenset[int] | None = None
+) -> Expression:
     """Recursively distribute multiplication over addition/subtraction.
 
     ``(a + b) * c`` → ``a*c + b*c``;  ``c * (a - b)`` → ``c*a - c*b``.
@@ -263,13 +265,22 @@ def distribute_products(expr: Expression) -> Expression:
     and rebuilding already-flat subtrees — quadratic-to-exponential node creation
     even when the final expansion is small (e.g. a chain of small squared sums
     blew up to tens of millions of throwaway nodes).
+
+    ``protected_squares`` holds ``id()`` values of ``E**2`` nodes that must be
+    left intact rather than distributed.  The MILP relaxation lifts such a square
+    to a single auxiliary column with a univariate square envelope on the affine
+    residual ``E`` (issue #155); distributing it would re-expand ``E**2`` into the
+    catastrophic high-degree monomials the lift exists to avoid.  Preserving the
+    node's identity also lets the linearizer resolve it through its id-keyed map.
     """
     if isinstance(expr, BinaryOp):
         if expr.op == "**" and isinstance(expr.right, Constant) and float(expr.right.value) == 2.0:
-            left = distribute_products(expr.left)
+            if protected_squares is not None and id(expr) in protected_squares:
+                return expr
+            left = distribute_products(expr.left, protected_squares)
             return _distribute_mul(left, left)
-        left = distribute_products(expr.left)
-        right = distribute_products(expr.right)
+        left = distribute_products(expr.left, protected_squares)
+        right = distribute_products(expr.right, protected_squares)
         if expr.op == "*":
             return _distribute_mul(left, right)
         # Preserve node identity when nothing distributed, so id()-keyed maps
@@ -278,7 +289,7 @@ def distribute_products(expr: Expression) -> Expression:
             return expr
         return BinaryOp(expr.op, left, right)
     if isinstance(expr, UnaryOp):
-        operand = distribute_products(expr.operand)
+        operand = distribute_products(expr.operand, protected_squares)
         if operand is expr.operand:
             return expr
         return UnaryOp(expr.op, operand)
