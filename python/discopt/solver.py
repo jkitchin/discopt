@@ -3637,6 +3637,19 @@ def solve_model(
     if bound_val is not None and model._objective.sense == ObjectiveSense.MAXIMIZE:
         bound_val = -bound_val
     gap_val = stats["gap"]
+
+    # A *feasible* exit never inherits the tree's validity flag as a certificate.
+    # The flag means no node invalidated the tree bound — NOT that the gap is
+    # closed; a budget/node-limited feasible exit leaves that valid bound strictly
+    # below the incumbent (open gap). Reporting gap_certified=True there would
+    # falsely claim global optimality (max_nodes=1 root-only exit: obj 19029,
+    # bound -583, gap 1.03 — yet previously "certified"). Drop the flag here and
+    # re-earn it below only if a rigorous global bound actually closes the gap.
+    # "optimal" already implies a closed certified search; infeasible/limit exits
+    # are handled above and keep their own certification semantics.
+    if status == "feasible":
+        _gap_certified = False
+
     if not _gap_certified:
         bound_val = None
         gap_val = None
@@ -3656,6 +3669,24 @@ def solve_model(
             bound_val = _rr
             if obj_val is not None and np.isfinite(obj_val):
                 gap_val = max(0.0, obj_val - bound_val) / max(1.0, abs(obj_val))
+
+    # Re-earn certification on a feasible exit iff a *rigorous* global lower bound
+    # (here the root-relaxation fallback, itself only returned when the objective
+    # is validly linearized) meets the incumbent within tolerance — then the
+    # incumbent is provably global and the honest status is "optimal". The
+    # bound <= incumbent guard stops a spurious above-incumbent bound (which the
+    # max(0, …) gap clamp would otherwise read as gap 0) from certifying.
+    if (
+        status == "feasible"
+        and obj_val is not None
+        and bound_val is not None
+        and np.isfinite(bound_val)
+        and bound_val <= obj_val + 1e-9
+        and gap_val is not None
+        and gap_val <= gap_tolerance
+    ):
+        _gap_certified = True
+        status = "optimal"
 
     return SolveResult(
         status=status,
@@ -4400,6 +4431,15 @@ def _solve_nlp_bb(
 
     # An uncertified gap is not a rigorous dual bound; do not present one.
     gap_val = stats["gap"]
+
+    # A *feasible* exit never inherits the tree's validity flag as a certificate:
+    # the flag attests bound validity, not gap closure, and a node/budget-limited
+    # feasible exit leaves the tree gap open. See the spatial-path note above
+    # (max_nodes=1 false-certification regression). This path carries no rigorous
+    # root-relaxation fallback, so a dropped certificate is not re-earned here.
+    if status == "feasible":
+        _gap_certified = False
+
     if not _gap_certified:
         bound_val = None
         gap_val = None
@@ -7126,6 +7166,15 @@ def _solve_milp_bb(
         bound_val = -bound_val
 
     gap_val = stats["gap"]
+
+    # A *feasible* exit never inherits the tree's validity flag as a certificate:
+    # the flag attests bound validity, not gap closure, and a node/budget-limited
+    # feasible exit leaves the tree gap open. See the spatial-path note above
+    # (max_nodes=1 false-certification regression). This path carries no rigorous
+    # root-relaxation fallback, so a dropped certificate is not re-earned here.
+    if status == "feasible":
+        _gap_certified = False
+
     if not _gap_certified:
         # Tree bound/gap are not rigorous on an uncertified exit (a node may
         # have been pruned without proof); drop them.
@@ -7588,6 +7637,15 @@ def _solve_miqp_bb(
 
     # An uncertified gap is not a rigorous dual bound; do not present one.
     gap_val = stats["gap"]
+
+    # A *feasible* exit never inherits the tree's validity flag as a certificate:
+    # the flag attests bound validity, not gap closure, and a node/budget-limited
+    # feasible exit leaves the tree gap open. See the spatial-path note above
+    # (max_nodes=1 false-certification regression). This path carries no rigorous
+    # root-relaxation fallback, so a dropped certificate is not re-earned here.
+    if status == "feasible":
+        _gap_certified = False
+
     if not _gap_certified:
         bound_val = None
         gap_val = None
