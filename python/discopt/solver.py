@@ -1699,6 +1699,37 @@ def solve_model(
     )
 
     if has_factorable_work(model):
+        # Tighten variable bounds with FBBT *before* the reform so its interval
+        # checks see finite bounds. A fractional-power-of-product lift (issue
+        # #138) only fires when the lifted base has a finite interval; constraint
+        # propagation supplies that for models whose denominator variables are
+        # *declared* unbounded but are pinned finitely by other constraints (e.g.
+        # ex1233's geometric vars x12..x20, bounded by the assignment rows). Cheap
+        # and only run when the reform is about to fire; sound (FBBT only removes
+        # infeasible regions, so the tightened box still contains every feasible
+        # point). The later root presolve re-tightens, so this never loosens.
+        try:
+            from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
+
+            _fr_off: list[int] = []
+            _fr_sz: list[int] = []
+            _fr_o = 0
+            for _v in model._variables:
+                if _v.var_type in (VarType.BINARY, VarType.INTEGER):
+                    _fr_off.append(_fr_o)
+                    _fr_sz.append(_v.size)
+                _fr_o += _v.size
+            _, _fr_lb, _fr_ub, _, _ = _extract_variable_info(model)
+            _fr_lb, _fr_ub, _fr_infeas, _fr_changed = tighten_root_bounds_with_fbbt(
+                model, _fr_lb, _fr_ub, _fr_off, _fr_sz
+            )
+            if not _fr_infeas and _fr_changed:
+                from discopt.solvers.amp import _apply_flat_bounds_to_model
+
+                _apply_flat_bounds_to_model(model, _fr_lb, _fr_ub)
+        except Exception as _fr_fbbt_exc:  # pragma: no cover - defensive
+            logger.debug("pre-reform FBBT skipped: %s", _fr_fbbt_exc)
+
         _fr_ok, _fr_convex, _ = _classify_model_convexity(model)
         if _fr_ok and not _fr_convex:
             model = factorable_reformulate(model)

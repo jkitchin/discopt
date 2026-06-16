@@ -72,7 +72,10 @@ def known_optima() -> dict[str, float]:
         "ex1224": -0.94347,
         "ex1225": 0.0,
         "ex1226": -17.0,
-        "ex1233": 62.1833,
+        # Corrected from a wrong 62.1833: the spatial relaxation proves a rigorous
+        # lower bound of ~109649 on ex1233 and the solver finds a feasible
+        # incumbent at the MINLPLib global optimum 155010.6713 (issue #138).
+        "ex1233": 155010.6713,
         "fuel": 8566.12,
         "gastrans": 89.08588,
     }

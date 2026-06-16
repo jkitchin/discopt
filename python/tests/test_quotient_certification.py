@@ -90,14 +90,18 @@ def test_nvs_ratio_certifies(instance, optimum):
 
 # Known global optima (MINLPLib) used as an upper reference for the soundness
 # guard below: a valid dual lower bound for a minimization can never exceed the
-# true optimum. None of these *certify* on ``main`` (the gap stays open), but
-# they must never report a false bound. ``gear4`` (separable floor) and
-# ``nvs05`` / ``nvs22`` (root MILP-relaxation fallback) now additionally return a
-# finite, weak-but-sound bound; ``ex1233`` / ``st_e35`` still drop their
-# fractional-power-of-product objective term entirely and stay ``bound=None``.
+# true optimum, so a sound bound must always sit at or below these.
+#
+# NOTE on ex1233: the value is 155010.6713, NOT the 62.1833 long recorded in
+# ``discopt_benchmarks`` KNOWN_OPTIMA. That figure is demonstrably wrong — the
+# spatial relaxation now produces a *rigorous* (``gap_certified``) lower bound of
+# ~109649 on ex1233, and the solver finds a feasible incumbent at 155010.671
+# (the MINLPLib global optimum). A valid lower bound of 109649 means no feasible
+# point has objective below it, so 62.1833 cannot be the optimum. The benchmark
+# value has been corrected alongside this change.
 _BUCKET1_WEAK = {
     "gear4": 1.64342847,  # (x0*x1)/(x2*x3) equality, integer — pure integrality gap
-    "ex1233": 62.1833,  # linear / (product)^(1/3) plus sqrt-of-product terms
+    "ex1233": 155010.6713,  # linear / (product)^(1/3); corrected from a wrong 62.1833
     "nvs05": 5.47093411,  # var/var ratio + sqrt-of-product in defining equalities
     "nvs22": 6.0581153,  # var/var ratio
     "st_e35": 64868.6,  # (x / (product)^(1/3))^0.83 in the objective
@@ -107,14 +111,15 @@ _BUCKET1_WEAK = {
 #   nvs05 / nvs22 — via the root MILP-relaxation fallback over the sanitized
 #     relaxation (their cleared-division equalities over the wide-ranged defined
 #     variables x4..x7 would otherwise leave the LP unsolvable);
-#   st_e35 — via the fractional-power-of-product objective lift: each term
-#     ``(x / g**(1/3))**0.83`` is decomposed (g -> aux t, t**(1/3) -> aux d,
-#     x/d -> aux r, r**0.83 -> aux s) so the objective becomes linear in the aux
-#     and the relaxation can bound it.
-# ex1233 stays ``None``: it has the same fractional-power-of-product structure but
-# its geometric variables are *unbounded* (ub=inf), so the lifted base has no
-# finite interval and the term is still soundly dropped.
+#   ex1233 / st_e35 — via the fractional-power-of-product objective lift: each
+#     term ``(x / g**(1/3))**0.83`` (st_e35) or ``x / g**(1/3)`` (ex1233) is
+#     decomposed into elementary aux variables (g -> t, t**(1/3) -> d, x/d -> r,
+#     r**0.83 -> s) so the objective becomes linear in the aux and the relaxation
+#     can bound it. ex1233 additionally needs its geometric variables bounded,
+#     which a pre-reform FBBT pass now supplies (they are declared unbounded but
+#     pinned finitely by the assignment constraints).
 _BUCKET1_NOW_BOUNDED = {
+    "ex1233": 155010.6713,
     "nvs05": 5.47093411,
     "nvs22": 6.0581153,
     "st_e35": 64868.6,
@@ -195,7 +200,7 @@ def test_gear4_returns_finite_sound_bound():
 @pytest.mark.correctness
 @pytest.mark.parametrize("instance, optimum", sorted(_BUCKET1_NOW_BOUNDED.items()))
 def test_bucket1_instance_returns_finite_sound_bound(instance, optimum):
-    """nvs05 / nvs22 / st_e35 now return a *finite* sound lower bound, not ``None``.
+    """ex1233 / nvs05 / nvs22 / st_e35 now return a *finite* sound lower bound.
 
     nvs05 / nvs22: clean polynomial objective lifted to bilinear form, but the
     spatial tree bound is uncertified and dropped and the relaxation's
@@ -204,11 +209,14 @@ def test_bucket1_instance_returns_finite_sound_bound(instance, optimum):
     root-relaxation fallback sanitizes those catastrophic rows/bounds (sound,
     since dropping a constraint or widening a box only relaxes) and solves it.
 
-    st_e35: the fractional-power-of-product objective term ``(x / g**(1/3))**0.83``
-    is decomposed into elementary aux variables so the objective becomes linear
-    in the aux and the relaxation can bound it.
+    ex1233 / st_e35: the fractional-power-of-product objective term is decomposed
+    into elementary aux variables so the objective becomes linear in the aux and
+    the relaxation can bound it; ex1233 additionally relies on a pre-reform FBBT
+    pass to bound its (declared-unbounded) geometric variables. ex1233's bound is
+    rigorous and ~109649 — far above the 62.1833 once wrongly recorded as its
+    optimum, confirming that value was below a valid lower bound.
 
-    In every case the dual bound stays well below the optimum (weak, never false).
+    In every case the dual bound stays at or below the true optimum (never false).
     """
     nl = _DATA / f"{instance}.nl"
     assert nl.exists(), f"missing {nl}"

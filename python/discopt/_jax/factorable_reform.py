@@ -182,8 +182,12 @@ class _Lifter:
         w = Variable(name, VarType.CONTINUOUS, (), lo, hi, self.model)
         self.model._variables.append(w)
         self._expr_cache[key] = w
-        lifted = _lift_expr(expr, self.model, self)
-        self.aux_constraints.append(Constraint(BinaryOp("-", w, lifted), "==", 0.0))
+        # Clear any sign-definite division in the defining equality ``w == expr``
+        # (so a ratio ``w == N / D`` becomes the bilinear ``w*D == N`` the
+        # relaxation can McCormick), then lift its mixed products.
+        body, _sense = _clear_divisions(BinaryOp("-", w, expr), "==", self.model)
+        body = _lift_expr(distribute_products(body), self.model, self)
+        self.aux_constraints.append(Constraint(body, "==", 0.0))
         return w
 
     def fractional_power(self, base_var: Variable, p: float):
@@ -272,45 +276,64 @@ def _is_simple_power_base(expr: Expression, model: Model) -> bool:
     return _leaf_index_and_exp(expr, model) is not None
 
 
-def _lift_fractional_power_bases(expr: Expression, model: Model, lifter: "_Lifter") -> Expression:
-    """Replace every ``base ** p`` with ``t ** p`` where *p* is a non-integer
-    constant and *base* is a composite expression (not a bare variable/monomial),
-    lifting *base* into a fresh aux variable ``t == base``.
+def _lift_objective_atoms(expr: Expression, model: Model, lifter: "_Lifter") -> Expression:
+    """Decompose composite fractional-power and variable/variable-ratio atoms into
+    elementary auxiliary variables, so an objective the relaxation would otherwise
+    drop becomes linear in supported terms.
 
     The relaxation can bound a fractional power of a *single variable*
-    (``fractional_power_var_map``) but drops a fractional power of a polynomial.
-    Exposing ``t ** p`` therefore lets ratios/outer-powers built on it — e.g.
-    ``N / g**(1/3)`` (ex1233) and ``(N / g**(1/3))**0.83`` (st_e35) — be relaxed
-    instead of dropped. Identity-preserving and bounded-recursion; leaves the node
-    untouched when *base* has no finite interval (e.g. an unbounded variable), so
-    the rewrite is never unsound — at worst the term stays dropped as before.
+    (``fractional_power_var_map``) and a sign-definite ratio (via clearing), but
+    not a fractional power of a polynomial or a ratio whose value sits raw in the
+    objective (the objective linearizer rejects a non-constant division). So,
+    bottom-up:
+
+    * ``base ** p`` (non-integer *p*) -> a plain aux ``d == t ** p`` where ``t``
+      is *base* lifted to a variable. Exposes ``N / d`` instead of ``N / base**p``.
+    * ``N / D`` (non-constant *D*) -> a plain aux ``r == N / D`` (whose defining
+      equality is cleared to the bilinear ``r*D == N``).
+
+    Recursion composes these: ``(N / g**(1/3))**0.83`` (st_e35) becomes
+    ``g->t, t**(1/3)->d, N/d->r, r**0.83->s`` and ``N / g**(1/3)`` (ex1233) becomes
+    ``g->t, t**(1/3)->d, N/d->r``, leaving the objective linear in the aux.
+    Identity-preserving; leaves a node untouched when an operand has no finite
+    interval (e.g. an unbounded variable), so the rewrite is never unsound — at
+    worst the term stays dropped, exactly as before.
     """
     if isinstance(expr, BinaryOp):
-        if expr.op == "**" and isinstance(expr.right, Constant):
+        if (
+            expr.op == "**"
+            and isinstance(expr.right, Constant)
+            and float(expr.right.value) != int(float(expr.right.value))
+        ):
             p = float(expr.right.value)
-            base = expr.left
-            if p != int(p) and not _is_simple_power_base(base, model):
-                # Recurse into the base first so nested fractional powers lift too.
-                new_base = _lift_fractional_power_bases(base, model, lifter)
-                t = lifter.expression(distribute_products(new_base))
-                if t is not None:
-                    # Lift the power *value* to a plain variable ``d == t**p`` so
-                    # a surrounding ratio/outer-power sees ``N / d`` (a form the
-                    # objective linearizer accepts), not ``N / t**p``.
-                    d = lifter.fractional_power(t, p)
-                    if d is not None:
-                        return d
-                    return BinaryOp("**", t, expr.right)
-                if new_base is not base:
-                    return BinaryOp("**", new_base, expr.right)
-                return expr
-        left = _lift_fractional_power_bases(expr.left, model, lifter)
-        right = _lift_fractional_power_bases(expr.right, model, lifter)
+            base = _lift_objective_atoms(expr.left, model, lifter)
+            # The fractional power needs a single-variable argument ``t``.
+            if isinstance(base, (Variable, IndexExpression)):
+                t = base
+            else:
+                t = lifter.expression(distribute_products(base))
+            if isinstance(t, Variable):
+                d = lifter.fractional_power(t, p)
+                if d is not None:
+                    return d
+            if base is not expr.left:
+                return BinaryOp("**", base, expr.right)
+            return expr
+        if expr.op == "/" and not isinstance(expr.right, Constant):
+            num = _lift_objective_atoms(expr.left, model, lifter)
+            den = _lift_objective_atoms(expr.right, model, lifter)
+            ratio = expr if (num is expr.left and den is expr.right) else BinaryOp("/", num, den)
+            r = lifter.expression(distribute_products(ratio))
+            if r is not None:
+                return r
+            return ratio
+        left = _lift_objective_atoms(expr.left, model, lifter)
+        right = _lift_objective_atoms(expr.right, model, lifter)
         if left is expr.left and right is expr.right:
             return expr
         return BinaryOp(expr.op, left, right)
     if isinstance(expr, UnaryOp):
-        operand = _lift_fractional_power_bases(expr.operand, model, lifter)
+        operand = _lift_objective_atoms(expr.operand, model, lifter)
         if operand is expr.operand:
             return expr
         return UnaryOp(expr.op, operand)
@@ -497,7 +520,7 @@ def factorable_reformulate(model: Model, *, clear_only: bool = False) -> Model:
                     rebuilt.append(Constraint(distribute_products(body), sense, c.rhs, c.name))
                 continue
             body = distribute_products(body)
-            body = _lift_fractional_power_bases(body, new_model, lifter)
+            body = _lift_objective_atoms(body, new_model, lifter)
             body = _lift_expr(body, new_model, lifter)
             if body is c.body and sense == c.sense:
                 rebuilt.append(c)
@@ -509,7 +532,7 @@ def factorable_reformulate(model: Model, *, clear_only: bool = False) -> Model:
         # objective so only the lifts apply.
         if not clear_only and new_model._objective is not None:
             obj_expr = distribute_products(new_model._objective.expression)
-            obj_expr = _lift_fractional_power_bases(obj_expr, new_model, lifter)
+            obj_expr = _lift_objective_atoms(obj_expr, new_model, lifter)
             lifted_obj = _lift_expr(obj_expr, new_model, lifter)
             if lifted_obj is not new_model._objective.expression:
                 from discopt.modeling.core import Objective

@@ -57,7 +57,9 @@ KNOWN_OPTIMA = {
     "ex1224":      -0.94347,
     "ex1225":       0.0,
     "ex1226":      -17.0,
-    "ex1233":      62.1833,
+    # Corrected from a wrong 62.1833 (below a proven rigorous lower bound of
+    # ~109649); MINLPLib global optimum, found as a feasible incumbent (#138).
+    "ex1233":      155010.6713,
     "ex1243":      83.6455,
     "ex1244":      83.6455,
     "ex1252":    1169.37,
