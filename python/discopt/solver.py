@@ -1242,6 +1242,57 @@ def _classify_model_convexity(
         return False, False, None
 
 
+def _root_relaxation_lower_bound(
+    model: "Model",
+    root_lb: np.ndarray,
+    root_ub: np.ndarray,
+    time_limit: float,
+) -> Optional[float]:
+    """Solve the root MILP relaxation once and return its LP value as a rigorous
+    global lower bound, or ``None`` if unavailable.
+
+    The MILP relaxation built by ``build_milp_relaxation`` is a convex outer
+    approximation of *model* over the box ``[root_lb, root_ub]`` (the same one AMP
+    uses). When its objective is fully linearized (``objective_bound_valid``), the
+    relaxation LP's optimal value is a valid lower bound on the original objective
+    over that box — hence over the whole feasible set — for a *minimization*. This
+    mirrors the root-LP-bound seeding ``_solve_milp_bb`` already performs, but for
+    the spatial path, whose tree ``global_lower_bound`` can be tainted up to the
+    incumbent on a nonconvex model and is dropped on an uncertified exit.
+
+    Numerically catastrophic envelopes (e.g. cleared-division equalities over
+    wide-ranged defined variables) are sanitized away first so the backend can
+    return a bound instead of failing on the conditioning. Only ever called for a
+    MINIMIZE objective; defensively returns ``None`` on any failure so it can
+    never make a previously-bounded solve worse.
+    """
+    from discopt._jax.discretization import DiscretizationState
+    from discopt._jax.milp_relaxation import (
+        build_milp_relaxation,
+        sanitize_relaxation_for_conditioning,
+    )
+    from discopt._jax.term_classifier import classify_nonlinear_terms
+
+    try:
+        terms = classify_nonlinear_terms(model)
+        relax, _ = build_milp_relaxation(
+            model,
+            terms,
+            DiscretizationState(),
+            bound_override=(root_lb, root_ub),
+        )
+        if not relax._objective_bound_valid:
+            return None
+        relax = sanitize_relaxation_for_conditioning(relax)
+        budget = min(10.0, max(1.0, time_limit * 0.1))
+        result = relax.solve(time_limit=budget, gap_tolerance=1e-6)
+        if result.bound is not None and np.isfinite(result.bound):
+            return float(result.bound)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("root MILP-relaxation bound skipped: %s", exc)
+    return None
+
+
 def solve_model(
     model: Model,
     time_limit: float = 3600.0,
@@ -1660,6 +1711,37 @@ def solve_model(
     _origin_has_continuous_var = any(v.var_type == VarType.CONTINUOUS for v in model._variables)
 
     if has_factorable_work(model):
+        # Tighten variable bounds with FBBT *before* the reform so its interval
+        # checks see finite bounds. A fractional-power-of-product lift (issue
+        # #138) only fires when the lifted base has a finite interval; constraint
+        # propagation supplies that for models whose denominator variables are
+        # *declared* unbounded but are pinned finitely by other constraints (e.g.
+        # ex1233's geometric vars x12..x20, bounded by the assignment rows). Cheap
+        # and only run when the reform is about to fire; sound (FBBT only removes
+        # infeasible regions, so the tightened box still contains every feasible
+        # point). The later root presolve re-tightens, so this never loosens.
+        try:
+            from discopt.solvers._root_presolve import tighten_root_bounds_with_fbbt
+
+            _fr_off: list[int] = []
+            _fr_sz: list[int] = []
+            _fr_o = 0
+            for _v in model._variables:
+                if _v.var_type in (VarType.BINARY, VarType.INTEGER):
+                    _fr_off.append(_fr_o)
+                    _fr_sz.append(_v.size)
+                _fr_o += _v.size
+            _, _fr_lb, _fr_ub, _, _ = _extract_variable_info(model)
+            _fr_lb, _fr_ub, _fr_infeas, _fr_changed = tighten_root_bounds_with_fbbt(
+                model, _fr_lb, _fr_ub, _fr_off, _fr_sz
+            )
+            if not _fr_infeas and _fr_changed:
+                from discopt.solvers.amp import _apply_flat_bounds_to_model
+
+                _apply_flat_bounds_to_model(model, _fr_lb, _fr_ub)
+        except Exception as _fr_fbbt_exc:  # pragma: no cover - defensive
+            logger.debug("pre-reform FBBT skipped: %s", _fr_fbbt_exc)
+
         _fr_ok, _fr_convex, _ = _classify_model_convexity(model)
         if _fr_ok and not _fr_convex:
             model = factorable_reformulate(model)
@@ -2149,6 +2231,13 @@ def solve_model(
                 )
         except Exception as e:  # pragma: no cover - defensive
             logger.debug("Root OBBT failed: %s", e)
+
+    # Snapshot the root-global box (root FBBT + non-cutoff root OBBT only) so a
+    # rigorous root MILP-relaxation fallback bound can be computed at the end if
+    # the spatial tree yields nothing usable. Taken here, before the search
+    # loop's incumbent-cutoff OBBT, whose bounds are not valid for a global bound.
+    _root_lb_snapshot = np.asarray(lb, dtype=np.float64).copy()
+    _root_ub_snapshot = np.asarray(ub, dtype=np.float64).copy()
 
     # --- Create PyTreeManager (Rust) ---
     t_rust_start = time.perf_counter()
@@ -3551,6 +3640,22 @@ def solve_model(
     if not _gap_certified:
         bound_val = None
         gap_val = None
+
+    # When the tree produced no usable dual bound (uncertified exit, or a
+    # relaxation the LP backend could not solve), fall back to a rigorous global
+    # lower bound from the root MILP relaxation over the root box, so a
+    # minimization reports a finite sound bound instead of None (issue #138). The
+    # MILP path already seeds such a root bound; this brings the spatial path to
+    # parity. Surfaced lazily — only when the search yielded nothing — and never
+    # overrides an existing finite bound.
+    if (bound_val is None or not np.isfinite(bound_val)) and (
+        model._objective.sense == ObjectiveSense.MINIMIZE
+    ):
+        _rr = _root_relaxation_lower_bound(model, _root_lb_snapshot, _root_ub_snapshot, time_limit)
+        if _rr is not None and np.isfinite(_rr):
+            bound_val = _rr
+            if obj_val is not None and np.isfinite(obj_val):
+                gap_val = max(0.0, obj_val - bound_val) / max(1.0, abs(obj_val))
 
     return SolveResult(
         status=status,

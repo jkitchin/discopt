@@ -129,6 +129,20 @@ _MAX_RELAXATION_PARTITION_INTERVALS = 128
 _MAX_OBJECTIVE_LIFT_POWER = 6
 _MAX_FINITE_DOMAIN_TRIG_TABLE_VALUES = 256
 
+# A relaxation row coefficient / RHS, or a variable bound, at or above this
+# magnitude is "numerically catastrophic": it comes from a McCormick/secant
+# envelope over a variable with an enormous (or effectively infinite) range, and
+# leaves the LP so ill-conditioned (dynamic range ~1e13+) that the backend
+# (HiGHS) returns kSolveError and *no* bound at all. The cap sits above any
+# legitimate modeling coefficient (big-M ~1e9, gear4's 1e6 linking term) and
+# below the 1e11..1e37 entries such envelopes produce, so well-scaled models are
+# never affected. Used only by ``sanitize_relaxation_for_conditioning``, which in
+# turn only feeds the last-resort root-relaxation fallback bound — never the main
+# solve — so dropping a borderline-large row can at most weaken that fallback,
+# never the primary result. The recovered bound is empirically stable for caps
+# from 1e11 down to 1e6 on the affected instances.
+_RELAX_NUMERIC_CAP = 1e10
+
 
 def _warn_once(msg: str, *args) -> None:
     formatted = msg % args if args else msg
@@ -230,6 +244,71 @@ class MilpRelaxationModel:
             bound = float(result.bound) + self._obj_offset
 
         return MilpRelaxationResult(status=status_str, objective=obj, bound=bound, x=result.x)
+
+
+def sanitize_relaxation_for_conditioning(
+    model: "MilpRelaxationModel",
+) -> "MilpRelaxationModel":
+    """Return a copy of *model* with numerically catastrophic content removed, so
+    the LP backend can produce a (sound, possibly weaker) bound instead of failing.
+
+    Two transforms, both of which only *relax* the feasible set — the LP optimum
+    therefore remains a valid lower bound for a minimization (weaker, never
+    higher than the true optimum):
+
+    1. Drop any constraint row whose coefficient or RHS is non-finite or has
+       magnitude >= ``_RELAX_NUMERIC_CAP``. Removing a constraint enlarges the
+       feasible set.
+    2. Clamp any variable bound of magnitude >= ``_RELAX_NUMERIC_CAP`` to +/-inf.
+       Widening a variable's box enlarges the feasible set. (A clamped objective
+       variable can make the LP unbounded -> bound becomes -inf/None, still sound.)
+
+    Both are no-ops on well-scaled models (no row or bound reaches the cap), so
+    this is safe to apply unconditionally before a fallback root-bound solve.
+    """
+    cap = _RELAX_NUMERIC_CAP
+
+    A = model._A_ub
+    b = model._b_ub
+    if A is not None and b is not None and A.shape[0] > 0:
+        A = A.tocsr()
+        b = np.asarray(b, dtype=np.float64)
+        row_of_nz = np.repeat(np.arange(A.shape[0]), np.diff(A.indptr))
+        bad_nz = ~np.isfinite(A.data) | (np.abs(A.data) >= cap)
+        keep = np.isfinite(b) & (np.abs(b) < cap)
+        if bad_nz.any():
+            keep[row_of_nz[bad_nz]] = False
+        if not keep.all():
+            logger.debug(
+                "relaxation conditioning: dropped %d catastrophic constraint row(s)",
+                int((~keep).sum()),
+            )
+            A = A[keep]
+            b = b[keep]
+        if A.shape[0] == 0:
+            A = None
+            b = None
+    else:
+        A = None
+        b = None
+
+    bounds = [
+        (
+            lo if abs(lo) < cap else (-np.inf if lo < 0 else np.inf),
+            hi if abs(hi) < cap else (np.inf if hi > 0 else -np.inf),
+        )
+        for (lo, hi) in model._bounds
+    ]
+
+    return MilpRelaxationModel(
+        c=model._c,
+        A_ub=A,
+        b_ub=b,
+        bounds=bounds,
+        obj_offset=model._obj_offset,
+        integrality=model._integrality,
+        objective_bound_valid=model._objective_bound_valid,
+    )
 
 
 @dataclass
