@@ -31,6 +31,8 @@ pub enum NlParseError {
     InvalidHeader(String),
     /// An expression opcode was not recognised.
     UnknownOpcode(i32),
+    /// The file uses the binary (`b`) .nl encoding, which is not supported.
+    BinaryUnsupported,
     /// General parse error with a human-readable message.
     Parse(String),
 }
@@ -41,6 +43,12 @@ impl fmt::Display for NlParseError {
             NlParseError::UnexpectedEof => write!(f, "unexpected end of .nl input"),
             NlParseError::InvalidHeader(msg) => write!(f, "invalid .nl header: {msg}"),
             NlParseError::UnknownOpcode(op) => write!(f, "unknown .nl opcode: o{op}"),
+            NlParseError::BinaryUnsupported => write!(
+                f,
+                "binary .nl format not supported: file uses the binary ('b') encoding, \
+                 but only the text/ASCII ('g') format is supported. Re-export the model \
+                 in text .nl format (e.g. AMPL `write g<stub>;` rather than `write b<stub>;`)"
+            ),
             NlParseError::Parse(msg) => write!(f, ".nl parse error: {msg}"),
         }
     }
@@ -146,12 +154,16 @@ fn split_ws(line: &str) -> Vec<&str> {
 // ─────────────────────────────────────────────────────────────
 
 fn parse_header(reader: &mut LineReader<'_>) -> Result<NlHeader, NlParseError> {
-    // Line 0: "g3 1 1 0" or similar — we just check it starts with 'g'.
+    // Line 0: "g3 1 1 0" or similar. The leading char selects the encoding of
+    // the file body: 'g' = text/ASCII, 'b' = binary. Only text is supported.
     let line0 = reader.next_line()?;
     let l0 = line0.trim();
-    if !l0.starts_with('g') && !l0.starts_with('b') {
+    if l0.starts_with('b') {
+        return Err(NlParseError::BinaryUnsupported);
+    }
+    if !l0.starts_with('g') {
         return Err(NlParseError::InvalidHeader(format!(
-            "expected 'g' or 'b' prefix, got: {l0}"
+            "expected 'g' (text) prefix, got: {l0}"
         )));
     }
 
@@ -1171,10 +1183,27 @@ fn is_zero_constant(arena: &ExprArena, id: ExprId) -> bool {
 }
 
 /// Parse a .nl file from a file path.
+///
+/// Reads the file as raw bytes and inspects the leading magic character to
+/// select the encoding: `g` = text/ASCII (supported), `b` = binary (not
+/// supported — yields an explicit [`NlParseError::BinaryUnsupported`] rather
+/// than a confusing UTF-8 decode error, since binary bodies embed raw IEEE-754
+/// doubles that are not valid UTF-8).
 pub fn parse_nl_file(path: &str) -> Result<ModelRepr, NlParseError> {
-    let content = std::fs::read_to_string(path)
+    let bytes = std::fs::read(path)
         .map_err(|e| NlParseError::Parse(format!("failed to read file '{path}': {e}")))?;
-    parse_nl(&content)
+
+    // Detect the format from the first non-whitespace byte.
+    if let Some(b'b') = bytes.iter().find(|b| !b.is_ascii_whitespace()) {
+        return Err(NlParseError::BinaryUnsupported);
+    }
+
+    let content = std::str::from_utf8(&bytes).map_err(|e| {
+        NlParseError::Parse(format!(
+            "failed to read file '{path}': not valid UTF-8 text .nl ({e})"
+        ))
+    })?;
+    parse_nl(content)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2085,6 +2114,28 @@ mod tests {
     fn test_parse_nl_file_missing() {
         let result = parse_nl_file("/nonexistent/path/to/file.nl");
         assert!(result.is_err());
+    }
+
+    // ─── Test: binary .nl format yields explicit diagnostic ───
+
+    #[test]
+    fn test_binary_header_rejected() {
+        // A 'b'-prefixed header signals the binary encoding.
+        let err = parse_nl("b3 1 1 0\n").unwrap_err();
+        assert!(matches!(err, NlParseError::BinaryUnsupported));
+        let msg = err.to_string();
+        assert!(msg.contains("binary .nl format not supported"), "{msg}");
+    }
+
+    #[test]
+    fn test_parse_nl_file_binary_detected() {
+        // Write a fake binary .nl: text header line plus a non-UTF-8 body byte.
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("discopt_binary_test_{}.nl", std::process::id()));
+        std::fs::write(&path, b"b3 0 1 0\t# problem\n\x00\xf0\x3f").unwrap();
+        let result = parse_nl_file(path.to_str().unwrap());
+        let _ = std::fs::remove_file(&path);
+        assert!(matches!(result, Err(NlParseError::BinaryUnsupported)));
     }
 
     // ─── Test: coefficient -1 optimization ────────────────
