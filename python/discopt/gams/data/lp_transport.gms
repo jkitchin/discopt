@@ -1,31 +1,28 @@
-$title Transport LP (gamslib trnsport) -- discopt GAMS-link smoke model
-* Classic Dantzig transportation problem. Known optimum: z = 153.675.
+$title Transport LP (2x2, original) -- discopt GAMS-link smoke model
+* A small, self-contained transportation LP authored for this test corpus
+* (not derived from any GAMS-distributed example). Known optimum: z = 75,
+* shipping x(p1,m1)=20, x(p2,m1)=5, x(p2,m2)=15.
 
 Sets
-    i "canning plants" / Seattle, San_Diego /
-    j "markets"        / New_York, Chicago, Topeka / ;
+    i "plants"  / p1, p2 /
+    j "markets" / m1, m2 / ;
 
-Scalar f "freight in dollars per case per thousand miles" / 90 / ;
+Parameter cap(i) "plant capacity" / p1 20, p2 30 / ;
+Parameter dem(j) "market demand"  / m1 25, m2 15 / ;
 
-Table d(i,j) "distance in thousands of miles"
-              New_York  Chicago  Topeka
-    Seattle      2.5      1.7     1.8
-    San_Diego    2.5      1.8     1.4 ;
+Table c(i,j) "unit shipping cost"
+          m1   m2
+    p1     2    3
+    p2     4    1 ;
 
-Parameter a(i) "capacity of plant i in cases"  / Seattle 350, San_Diego 600 / ;
-Parameter b(j) "demand at market j in cases"   / New_York 325, Chicago 300, Topeka 275 / ;
+Positive Variable x(i,j) "shipments" ;
+Free Variable z "total shipping cost" ;
 
-Positive Variables x(i,j) "shipment quantities in cases" ;
-Free Variable z "total transportation costs in thousands of dollars" ;
+Equations cost, supply(i), demand(j) ;
 
-Equations
-    cost      "define objective function"
-    supply(i) "observe supply limit at plant i"
-    demand(j) "satisfy demand at market j" ;
-
-cost..      z =e= sum((i,j), f * d(i,j) * x(i,j) / 1000) ;
-supply(i).. sum(j, x(i,j)) =l= a(i) ;
-demand(j).. sum(i, x(i,j)) =g= b(j) ;
+cost..      z =e= sum((i,j), c(i,j) * x(i,j)) ;
+supply(i).. sum(j, x(i,j)) =l= cap(i) ;
+demand(j).. sum(i, x(i,j)) =g= dem(j) ;
 
 Model transport / all / ;
 Solve transport using LP minimizing z ;

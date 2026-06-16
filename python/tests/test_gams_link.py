@@ -514,54 +514,6 @@ def test_entropy_solves_globally():
     assert result.gap_certified  # certified global via the entropy convexity atom
 
 
-# ── globality classification ─────────────────────────────────────────────────
-def test_globally_relaxable_entropy_is_global():
-    from discopt.gams.link import globally_relaxable
-    from discopt.modeling.core import FunctionCall
-
-    m = dm.Model("e")
-    x = m.continuous("x", lb=0.1, ub=3.0)
-    m.minimize(FunctionCall("entropy", x))
-    is_global, nonrelax = globally_relaxable(m)
-    assert is_global is True
-    assert nonrelax == set()
-
-
-def test_globally_relaxable_atan2_is_local():
-    from discopt.gams.link import globally_relaxable
-    from discopt.modeling.core import FunctionCall
-
-    m = dm.Model("a")
-    y = m.continuous("y", lb=0.5, ub=2.0)
-    z = m.continuous("z", lb=0.5, ub=2.0)
-    m.minimize(FunctionCall("atan2", y, z))
-    is_global, nonrelax = globally_relaxable(m)
-    assert is_global is False
-    assert nonrelax == {"atan2"}
-
-
-def test_linear_model_is_relaxable_without_jax():
-    # No function calls -> globally relaxable, and the JAX-heavy relaxation layer
-    # is not imported (keeps LP/MILP link solves fast).
-
-    from discopt.gams.link import _has_function_calls, globally_relaxable
-
-    m = dm.Model("lp")
-    a = m.continuous("a", lb=0, ub=5)
-    m.minimize(3 * a)
-    assert _has_function_calls(m) is False
-    assert globally_relaxable(m) == (True, set())
-
-
-def test_status_local_when_not_globally_relaxable():
-    # A certified-looking result on a non-relaxable model is reported as local.
-    res = dm.SolveResult(status="optimal", objective=1.0, bound=1.0, x={"x": 0.0})
-    assert res.gap_certified is True
-    assert status_to_gams(res, has_discrete=False, globally_relaxable=False) == (2, 1)
-    assert status_to_gams(res, has_discrete=True, globally_relaxable=False) == (2, 1)
-    assert status_to_gams(res, has_discrete=False, globally_relaxable=True) == (1, 1)
-
-
 def test_no_cross_problem_contamination():
     """Solving other problems in the same process must not perturb a result.
 

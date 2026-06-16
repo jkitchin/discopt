@@ -62,10 +62,10 @@
       "model_type": "LP",
       "sense": "min",
       "objective_var": "z",
-      "objective": 153.675,
+      "objective": 75.0,
       "tol": 1e-3,
       "via_from_gams": false,
-      "notes": "Canonical gamslib trnsport (sets/tables). GAMS-side only: discopt's from_gams() does not yet substitute indexed parameter data into objective coefficients."
+      "notes": "Original 2x2 transport LP (sets/tables). GAMS-side only: discopt's from_gams() does not yet substitute indexed parameter data into objective coefficients."
     }
   ]
 }

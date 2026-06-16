@@ -170,16 +170,14 @@ their out-of-domain extrapolation, so they map to the intended base function
 (curvature profile + interval enclosure) and has a rigorous relaxation, so it is
 solved to a **certified global** optimum.
 
-In general, reaching the correct optimum and *certifying* it as global are
-distinct: discopt certifies a gap only when it can prove the dual bound valid
-(convexity of the atom), so an otherwise-convex function it cannot yet certify
-is honestly reported `LocallyOptimal` rather than overstated as global.
-
-A few supported functions are **nonconvex/bivariate with no rigorous
-relaxation** — `signpower`, `centropy`, and `atan2`. discopt still solves models
-that use them, but only *locally*: the link detects them up front
-(`globally_relaxable`), names them in the GAMS log, and reports the result as
-`LocallyOptimal` (never overstated as global — see Status mapping).
+Functions without a tailored McCormick rule (e.g. `atan2`, `centropy`,
+`signpower`) are not dead ends: discopt's relaxation compiler automatically
+falls back to a rigorous **αBB** relaxation, which certifies a global optimum
+whenever the interval Hessian over the box is finite. Reaching the correct
+optimum and *certifying* it as global are still distinct, though — discopt sets
+`gap_certified` only when it produced a valid finite dual bound (McCormick or
+αBB), and the link reports `LocallyOptimal` otherwise rather than overstating a
+local solution as global (see Status mapping).
 
 **Discontinuous** intrinsics (`ceil`, `floor`, `round`, `trunc`, `frac`, `mod`,
 `ifthen`) have no valid continuous relaxation and are rejected with a clear

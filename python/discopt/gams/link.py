@@ -60,28 +60,24 @@ def is_available() -> bool:
         return False
 
 
-def status_to_gams(
-    result: SolveResult, has_discrete: bool, globally_relaxable: bool = True
-) -> tuple[int, int]:
+def status_to_gams(result: SolveResult, has_discrete: bool) -> tuple[int, int]:
     """Map a discopt :class:`SolveResult` to ``(modelStat, solveStat)``.
 
     ``has_discrete`` selects between the continuous (``Optimal``) and discrete
     (``Integer``) optimal model-status codes, matching GAMS conventions.
 
-    Globality is reported honestly: a discopt ``"optimal"`` result counts as a
-    *certified global* optimum -- GAMS ``Optimal`` / ``Integer`` -- only when its
-    gap is mathematically certified (``result.gap_certified``) **and** every
-    nonlinear function in the model has a rigorous relaxation
-    (``globally_relaxable``).  The latter guards against discopt's solver
-    reporting ``gap_certified`` after silently falling back when a relaxation
-    could not be built for an unsupported function; such results are reported as
-    GAMS ``LocallyOptimal`` rather than overstating them as global.
+    Globality is reported from ``result.gap_certified``: discopt sets it only
+    when it produced a valid finite dual bound (McCormick, or the rigorous
+    alphaBB fallback), with main's soundness guards downgrading it otherwise. A
+    ``"optimal"`` result is therefore reported as GAMS ``Optimal`` / ``Integer``
+    (certified global) only when certified, else ``LocallyOptimal`` -- the link
+    trusts the solver's certificate rather than a static function allow-list.
     """
     status = (result.status or "").lower()
     has_solution = result.x is not None
 
     if status == "optimal":
-        if not globally_relaxable or not getattr(result, "gap_certified", True):
+        if not getattr(result, "gap_certified", True):
             return MODELSTAT_LOCALLY_OPTIMAL, SOLVESTAT_NORMAL
         model_stat = MODELSTAT_INTEGER if has_discrete else MODELSTAT_OPTIMAL
         return model_stat, SOLVESTAT_NORMAL
@@ -115,51 +111,6 @@ def solve_view(view: "GmoView", *, time_limit: float = 1e10, gap: float = 1e-4):
     model = model_from_gmo(view)
     result = model.solve(time_limit=time_limit, gap_tolerance=gap)
     return model, result
-
-
-def _has_function_calls(model: Model) -> bool:
-    """True if the model contains any FunctionCall (JAX-free; LP/MILP -> False).
-
-    Only named functions can lack a rigorous relaxation; pure linear/polynomial
-    models are always globally relaxable. Gating on this keeps LP/MILP solves
-    from importing the (JAX-heavy) relaxation layer.
-    """
-    from discopt.modeling.core import FunctionCall
-
-    def walk(node: object) -> bool:
-        if isinstance(node, FunctionCall):
-            return True
-        for attr in ("left", "right", "operand", "base"):
-            child = getattr(node, attr, None)
-            if child is not None and walk(child):
-                return True
-        for seq_attr in ("args", "terms"):
-            for child in getattr(node, seq_attr, ()) or ():
-                if walk(child):
-                    return True
-        return False
-
-    if model._objective is not None and walk(model._objective.expression):
-        return True
-    return any(walk(c.body) for c in model._constraints)
-
-
-def globally_relaxable(model: Model) -> tuple[bool, set[str]]:
-    """Return ``(is_global, nonrelaxable_function_names)`` for *model*.
-
-    A model is globally relaxable when every nonlinear function in it has a
-    rigorous convex/concave relaxation, so discopt's spatial branch-and-bound
-    yields a *certified global* optimum. Otherwise discopt falls back to a local
-    solve and the GAMS link reports the result as LocallyOptimal.
-    """
-    if not _has_function_calls(model):
-        return True, set()
-    # Nonlinear model -> JAX is loaded for the solve anyway, so importing the
-    # relaxation layer's capability query here is free.
-    from discopt._jax.relaxation_compiler import nonrelaxable_functions
-
-    nonrelax = nonrelaxable_functions(model)
-    return (not nonrelax), nonrelax
 
 
 def _gams_sysdir(control_file: str) -> str | None:
@@ -243,23 +194,11 @@ def solve_from_control_file(
         view = _GmoAdapter(gmo_h, gmo)
         model, result = solve_view(view)
 
-        # Honest globality: if any function lacks a rigorous relaxation, discopt
-        # only produced a local solution -- tell the GAMS user which function(s)
-        # forced that, and report LocallyOptimal (see _write_solution).
-        relaxable, nonrelax = globally_relaxable(model)
-        if not relaxable:
-            gev.gevLogStat(
-                gev_h,
-                "discopt: no rigorous global relaxation for "
-                + ", ".join(sorted(nonrelax))
-                + "; reporting a locally optimal solution.",
-            )
-
         # GAMS requires the solver to open, write, and finalize a status file via
         # the environment object; otherwise it reports solveStat=13 ("SOLVER DID
         # NOT WRITE A STATUS FILE") regardless of the GMO solution we unload.
         gev.gevStatCon(gev_h)
-        _write_solution(gmo_h, gmo, model, result, globally_relaxable=relaxable)
+        _write_solution(gmo_h, gmo, model, result)
         gev.gevStatEOF(gev_h)
         return 0
     finally:
@@ -289,11 +228,9 @@ def _free_handle(mod, handle, created: bool, free_name: str, delete_name: str) -
             pass
 
 
-def _write_solution(
-    gmo_h, gmo, model: Model, result: SolveResult, globally_relaxable: bool = True
-) -> None:  # pragma: no cover
+def _write_solution(gmo_h, gmo, model: Model, result: SolveResult) -> None:  # pragma: no cover
     """Write primal levels and the GAMS model/solve status back into GMO."""
-    model_stat, solve_stat = status_to_gams(result, _has_discrete(model), globally_relaxable)
+    model_stat, solve_stat = status_to_gams(result, _has_discrete(model))
     gmo.gmoModelStatSet(gmo_h, model_stat)
     gmo.gmoSolveStatSet(gmo_h, solve_stat)
 
