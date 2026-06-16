@@ -93,10 +93,46 @@ discopt gams-daemon stop        # ask it to exit
 DISCOPT_GAMS_NO_DAEMON=1 ...     # bypass the daemon, always solve in-process
 ```
 
-Tunables (env vars): `DISCOPT_GAMS_IDLE_TIMEOUT` (default 600 s),
-`DISCOPT_GAMS_MAX_LIFETIME` (3600 s), `DISCOPT_GAMS_MAX_SOLVES` (500),
-`DISCOPT_GAMS_SOCKET` (socket path). Concurrent solves are serialized through
+### Isolation and memory hygiene
+
+Reusing one process across solves is safe because each solve is self-contained:
+`solve_from_control_file` creates **fresh** GMO/GEV handles and `model_from_gmo`
+builds a **new** `Model`, so no mutable problem state is shared between solves
+(the only reuse is the warm interpreter, imported modules, and JAX's
+content-addressed JIT cache). Native handles are released on every solve via
+`try/finally` (`gmoFree`/`gevFree`), so the daemon does not leak GMO memory.
+
+Backstops bound any residual growth (e.g. JAX cache across many problem shapes).
+Every guard treats **0 (or negative) as "no limit"**:
+
+| Env var | Default | Effect |
+|---|---|---|
+| `DISCOPT_GAMS_IDLE_TIMEOUT` | 600 s | exit after this long with no requests |
+| `DISCOPT_GAMS_MAX_LIFETIME` | 3600 s | exit after this wall-clock age |
+| `DISCOPT_GAMS_MAX_SOLVES` | 500 | exit after this many solves |
+| `DISCOPT_GAMS_MAX_RSS_MB` | 0 (off) | exit once resident memory exceeds this |
+| `DISCOPT_GAMS_JAX_CLEAR_EVERY` | 0 (off) | `jax.clear_caches()` every N solves |
+| `DISCOPT_GAMS_SOCKET` | per-user | socket path |
+
+Recycle guards are evaluated only after an actual solve, and the client lazily
+respawns, so recycling is transparent. Concurrent solves are serialized through
 the one warm interpreter.
+
+### Benchmark studies
+
+The count/age guards would otherwise recycle the daemon mid-study and inject
+re-warmup latency into your timings. Set `DISCOPT_GAMS_BENCHMARK=1` to keep one
+warm daemon for the whole run: it disables the solve-count and lifetime limits
+and raises the idle timeout to 30 min, leaving `DISCOPT_GAMS_MAX_RSS_MB` as the
+only (opt-in) backstop. Pre-warm and pin it explicitly for clean measurements:
+
+```bash
+export DISCOPT_GAMS_BENCHMARK=1
+export DISCOPT_GAMS_MAX_RSS_MB=16384   # optional safety net
+discopt gams-daemon serve &            # pre-warm before timing
+# ... run the GAMS benchmark sweep ...
+discopt gams-daemon stop
+```
 
 ## Supported functions
 

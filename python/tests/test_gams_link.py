@@ -383,3 +383,23 @@ def test_smoke_gms_optimum_via_from_gams(entry):
     result = model.solve(time_limit=120)
     assert result.status == "optimal"
     assert result.objective == pytest.approx(entry["objective"], abs=max(entry["tol"], 1e-4))
+
+
+def test_no_cross_problem_contamination():
+    """Solving other problems in the same process must not perturb a result.
+
+    The daemon reuses one warm interpreter across solves; this guards against
+    shared mutable state / order-dependence (each solve builds a fresh Model).
+    """
+
+    def solve(name: str) -> float:
+        m = dm.from_gams(str(_GAMS_DATA / name))
+        return m.solve(time_limit=120).objective
+
+    first = solve("minlp_exp.gms")
+    solve("nlp_circle.gms")  # a different problem in between
+    solve("mip_knapsack.gms")  # ... and another
+    again = solve("minlp_exp.gms")
+    # Bit-for-bit identical: the solve is a pure function of the model, with no
+    # leakage from the intervening solves.
+    assert again == first

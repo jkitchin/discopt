@@ -33,12 +33,41 @@ from pathlib import Path
 
 from discopt import __version__
 
-# Defaults (all overridable via env vars).
-DEFAULT_IDLE_TIMEOUT = float(os.environ.get("DISCOPT_GAMS_IDLE_TIMEOUT", "600"))  # 10 min
-DEFAULT_MAX_LIFETIME = float(os.environ.get("DISCOPT_GAMS_MAX_LIFETIME", "3600"))  # 1 h
-DEFAULT_MAX_SOLVES = int(os.environ.get("DISCOPT_GAMS_MAX_SOLVES", "500"))
 _CONNECT_TIMEOUT = 5.0
 _SPAWN_WAIT = 30.0
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "0").lower() in ("1", "true", "yes", "on")
+
+
+def _resolve(explicit, env_name: str, default, cast):
+    """Pick an explicit arg, else an env override, else a default; ``cast`` typed."""
+    if explicit is not None:
+        return cast(explicit)
+    raw = os.environ.get(env_name)
+    if raw is not None:
+        return cast(raw)
+    return cast(default)
+
+
+def _current_rss_mb() -> float:
+    """Resident set size of this process in MiB (peak; monotonic, no psutil dep)."""
+    import resource
+
+    kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    # Linux reports KiB; macOS reports bytes.
+    return kb / (1024 * 1024) if sys.platform == "darwin" else kb / 1024
+
+
+def _clear_jax_caches() -> None:
+    """Drop JAX's compilation caches if (and only if) JAX is loaded."""
+    mod = sys.modules.get("jax")
+    if mod is not None:
+        try:
+            mod.clear_caches()
+        except Exception:
+            pass
 
 
 def default_socket_path() -> Path:
@@ -85,16 +114,28 @@ class DaemonServer:
         self,
         socket_path: Path | None = None,
         solve_fn: Callable[[str, str | None], int] | None = None,
-        idle_timeout: float = DEFAULT_IDLE_TIMEOUT,
-        max_lifetime: float = DEFAULT_MAX_LIFETIME,
-        max_solves: int = DEFAULT_MAX_SOLVES,
+        idle_timeout: float | None = None,
+        max_lifetime: float | None = None,
+        max_solves: int | None = None,
+        max_rss_mb: int | None = None,
+        jax_clear_every: int | None = None,
         version: str = __version__,
     ):
+        # The benchmark preset disables count/age recycling by default so one
+        # warm daemon spans a whole study (an RSS ceiling remains the backstop).
+        bench = _env_flag("DISCOPT_GAMS_BENCHMARK")
         self.socket_path = Path(socket_path) if socket_path else default_socket_path()
         self._solve_fn = solve_fn or _default_solve_fn
-        self.idle_timeout = idle_timeout
-        self.max_lifetime = max_lifetime
-        self.max_solves = max_solves
+        # 0 / negative means "no limit" for every guard below.
+        self.idle_timeout = _resolve(
+            idle_timeout, "DISCOPT_GAMS_IDLE_TIMEOUT", 1800 if bench else 600, float
+        )
+        self.max_lifetime = _resolve(
+            max_lifetime, "DISCOPT_GAMS_MAX_LIFETIME", 0 if bench else 3600, float
+        )
+        self.max_solves = _resolve(max_solves, "DISCOPT_GAMS_MAX_SOLVES", 0 if bench else 500, int)
+        self.max_rss_mb = _resolve(max_rss_mb, "DISCOPT_GAMS_MAX_RSS_MB", 0, int)
+        self.jax_clear_every = _resolve(jax_clear_every, "DISCOPT_GAMS_JAX_CLEAR_EVERY", 0, int)
         self.version = version
         self.solves = 0
         self._sock: socket.socket | None = None
@@ -118,19 +159,34 @@ class DaemonServer:
         try:
             while True:
                 assert self._sock is not None
-                self._sock.settimeout(self.idle_timeout)
+                # idle_timeout <= 0 means block indefinitely (no idle shutdown).
+                self._sock.settimeout(self.idle_timeout if self.idle_timeout > 0 else None)
                 try:
                     conn, _ = self._sock.accept()
                 except socket.timeout:
                     break  # idle timeout
+                before = self.solves
                 with conn:
                     stop = self._handle(conn)
+                did_solve = self.solves > before
+                # Recycle guards are evaluated only after an actual solve, so
+                # pings/stops never trip them. A purely idle daemon exits via the
+                # accept() idle timeout instead.
+                if (
+                    did_solve
+                    and self.jax_clear_every > 0
+                    and (self.solves % self.jax_clear_every == 0)
+                ):
+                    _clear_jax_caches()
                 if stop:
                     break
-                if self.solves >= self.max_solves:
-                    break
-                if time.monotonic() - started >= self.max_lifetime:
-                    break
+                if did_solve:
+                    if self.max_solves > 0 and self.solves >= self.max_solves:
+                        break
+                    if self.max_lifetime > 0 and time.monotonic() - started >= self.max_lifetime:
+                        break
+                    if self.max_rss_mb > 0 and _current_rss_mb() >= self.max_rss_mb:
+                        break
         finally:
             self._cleanup()
 

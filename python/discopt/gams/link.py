@@ -155,36 +155,68 @@ def solve_from_control_file(
     if not (sysdir and os.path.isdir(sysdir)):
         sysdir = _gams_sysdir(control_file)
 
-    gev_h = gev.new_gevHandle_tp()
-    rc, msg = gev.gevCreateD(gev_h, sysdir, 256) if sysdir else gev.gevCreate(gev_h, 256)
-    if not rc:
-        sys.stderr.write(f"gevCreate failed: {msg}\n")
-        return 1
-    gev.gevInitEnvironmentLegacy(gev_h, control_file)
+    # Handles are created and *always* freed (try/finally) so the warm daemon
+    # does not leak native GMO/GEV memory across solves.
+    gev_h = gmo_h = None
+    gev_ok = gmo_ok = False
+    try:
+        gev_h = gev.new_gevHandle_tp()
+        rc, msg = gev.gevCreateD(gev_h, sysdir, 256) if sysdir else gev.gevCreate(gev_h, 256)
+        if not rc:
+            sys.stderr.write(f"gevCreate failed: {msg}\n")
+            return 1
+        gev_ok = True
+        gev.gevInitEnvironmentLegacy(gev_h, control_file)
 
-    gmo_h = gmo.new_gmoHandle_tp()
-    rc, msg = gmo.gmoCreateD(gmo_h, sysdir, 256) if sysdir else gmo.gmoCreate(gmo_h, 256)
-    if not rc:
-        sys.stderr.write(f"gmoCreate failed: {msg}\n")
-        return 1
-    gmo.gmoRegisterEnvironment(gmo_h, gev.gevHandleToPtr(gev_h))
-    gmo.gmoLoadDataLegacy(gmo_h)
+        gmo_h = gmo.new_gmoHandle_tp()
+        rc, msg = gmo.gmoCreateD(gmo_h, sysdir, 256) if sysdir else gmo.gmoCreate(gmo_h, 256)
+        if not rc:
+            sys.stderr.write(f"gmoCreate failed: {msg}\n")
+            return 1
+        gmo_ok = True
+        gmo.gmoRegisterEnvironment(gmo_h, gev.gevHandleToPtr(gev_h))
+        gmo.gmoLoadDataLegacy(gmo_h)
 
-    # Objective handled as a function (objective variable substituted out), with
-    # 0-based column/row indexing.
-    gmo.gmoObjStyleSet(gmo_h, gmo.gmoObjType_Fun)
-    gmo.gmoIndexBaseSet(gmo_h, 0)
+        # Objective handled as a function (objective variable substituted out),
+        # with 0-based column/row indexing.
+        gmo.gmoObjStyleSet(gmo_h, gmo.gmoObjType_Fun)
+        gmo.gmoIndexBaseSet(gmo_h, 0)
 
-    view = _GmoAdapter(gmo_h, gmo)
-    model, result = solve_view(view)
+        view = _GmoAdapter(gmo_h, gmo)
+        model, result = solve_view(view)
 
-    # GAMS requires the solver to open, write, and finalize a status file via
-    # the environment object; otherwise it reports solveStat=13 ("SOLVER DID NOT
-    # WRITE A STATUS FILE") regardless of the GMO solution we unload.
-    gev.gevStatCon(gev_h)
-    _write_solution(gmo_h, gmo, model, result)
-    gev.gevStatEOF(gev_h)
-    return 0
+        # GAMS requires the solver to open, write, and finalize a status file via
+        # the environment object; otherwise it reports solveStat=13 ("SOLVER DID
+        # NOT WRITE A STATUS FILE") regardless of the GMO solution we unload.
+        gev.gevStatCon(gev_h)
+        _write_solution(gmo_h, gmo, model, result)
+        gev.gevStatEOF(gev_h)
+        return 0
+    finally:
+        _free_handle(gmo, gmo_h, gmo_ok, "gmoFree", "delete_gmoHandle_tp")
+        _free_handle(gev, gev_h, gev_ok, "gevFree", "delete_gevHandle_tp")
+
+
+def _free_handle(mod, handle, created: bool, free_name: str, delete_name: str) -> None:
+    """Release a gamsapi handle: free the native object, then the SWIG wrapper.
+
+    ``gmoFree``/``gevFree`` are called only when the object was actually created
+    (calling them on an uncreated handle can crash); the ``delete_*Handle_tp``
+    wrapper deleter is best-effort and skipped if the binding lacks it.
+    """
+    if handle is None:
+        return
+    if created:
+        try:
+            getattr(mod, free_name)(handle)
+        except Exception:
+            pass
+    deleter = getattr(mod, delete_name, None)
+    if deleter is not None:
+        try:
+            deleter(handle)
+        except Exception:
+            pass
 
 
 def _write_solution(gmo_h, gmo, model: Model, result: SolveResult) -> None:  # pragma: no cover
@@ -224,8 +256,9 @@ class _GmoAdapter:  # pragma: no cover - thin wrapper over gamsapi calls
     def __init__(self, gmo_h, gmo):
         self._h = gmo_h
         self._gmo = gmo
-        self._n = int(gmo.gmoN(gmo_h))
+        self._n: int = int(gmo.gmoN(gmo_h))
         nc = int(gmo.gmoNLConst(gmo_h))
+        self._pool: list[float]
         if nc > 0:
             buf = (ctypes.c_double * nc).from_address(int(gmo.gmoPPool(gmo_h)))
             self._pool = [float(v) for v in buf]

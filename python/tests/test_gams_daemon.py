@@ -141,3 +141,56 @@ def test_reap_stale_socket(sock):
 def test_default_socket_path_env(monkeypatch, tmp_path):
     monkeypatch.setenv("DISCOPT_GAMS_SOCKET", str(tmp_path / "custom.sock"))
     assert d.default_socket_path() == tmp_path / "custom.sock"
+
+
+# ── hardening: RSS guard, unlimited semantics, benchmark preset ──────────────
+def test_rss_guard_recycles(sock):
+    # A 1 MiB ceiling is always exceeded -> daemon exits after one solve.
+    srv = d.DaemonServer(socket_path=sock, solve_fn=lambda cf, sysdir=None: 0, max_rss_mb=1)
+    t = _start(srv)
+    assert d.solve_via_daemon("x", socket_path=sock) == 0
+    t.join(timeout=5)
+    assert not t.is_alive()
+
+
+def test_zero_limits_mean_unlimited(sock):
+    srv = d.DaemonServer(
+        socket_path=sock,
+        solve_fn=lambda cf, sysdir=None: 0,
+        max_solves=0,
+        max_lifetime=0,
+        idle_timeout=0,  # block forever waiting for requests
+    )
+    t = _start(srv)
+    try:
+        for _ in range(5):
+            assert d.solve_via_daemon("x", socket_path=sock) == 0
+        assert d.ping(sock) is not None  # still alive after many solves
+    finally:
+        d.stop_daemon(sock)
+        t.join(timeout=5)
+
+
+def test_benchmark_preset_disables_recycling(monkeypatch, sock):
+    monkeypatch.setenv("DISCOPT_GAMS_BENCHMARK", "1")
+    srv = d.DaemonServer(socket_path=sock, solve_fn=lambda cf, sysdir=None: 0)
+    assert srv.max_solves == 0  # unlimited
+    assert srv.max_lifetime == 0
+    assert srv.idle_timeout == 1800
+
+
+def test_explicit_arg_overrides_benchmark_env(monkeypatch, sock):
+    monkeypatch.setenv("DISCOPT_GAMS_BENCHMARK", "1")
+    srv = d.DaemonServer(socket_path=sock, solve_fn=lambda cf, sysdir=None: 0, max_solves=7)
+    assert srv.max_solves == 7
+
+
+def test_jax_clear_every_is_safe_without_jax(sock):
+    # jax not loaded -> clearing is a no-op and must not crash a solve.
+    srv = d.DaemonServer(socket_path=sock, solve_fn=lambda cf, sysdir=None: 0, jax_clear_every=1)
+    t = _start(srv)
+    try:
+        assert d.solve_via_daemon("x", socket_path=sock) == 0
+    finally:
+        d.stop_daemon(sock)
+        t.join(timeout=5)
