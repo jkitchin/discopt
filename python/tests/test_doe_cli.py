@@ -78,7 +78,7 @@ def test_templates_lists_all():
 # ──────────────────────────────────────────────────────────────────
 
 
-def _new_params(tmpdir, *, template, inputs, n, degree=None, response="y", error=1.0, n_starts=3):
+def _new_params(tmpdir, *, template, inputs, n, degree=None, response="y", error=1.0, n_starts=1):
     return NewParams(
         output=Path(tmpdir) / f"{template}.xlsx",
         n=n,
@@ -220,7 +220,7 @@ def test_extend_appends_new_batch(tmp_path):
     before_status = do_status({"workbook": str(wb_path)})
     assert before_status["n_pending"] == 0
 
-    ext = do_extend(ExtendParams(workbook=wb_path, n=3, n_starts=3))
+    ext = do_extend(ExtendParams(workbook=wb_path, n=3, n_starts=1))
     assert ext["batch"] == 2
     assert len(ext["new_run_ids"]) == 3
     assert sorted(ext["new_run_ids"]) == ext["new_run_ids"]  # contiguous & sorted
@@ -369,16 +369,25 @@ def test_status_missing_workbook(tmp_path):
 
 
 def test_workbook_metadata_roundtrip(tmp_path):
-    out = do_new(
-        _new_params(
-            tmp_path,
-            template="response-surface-2d",
-            inputs=[("x1", 0.0, 10.0), ("x2", -5.0, 5.0)],
-            n=4,
-            error=0.5,
-        )
+    # Metadata is written at workbook *creation*; this test asserts only the
+    # persistence round-trip, not anything about the generated design. Build
+    # the workbook directly rather than paying do_new's ~15s D-optimal search
+    # (the model-based design path is covered by test_new_response_surface_2d).
+    inputs = [("x1", 0.0, 10.0), ("x2", -5.0, 5.0)]
+    wb_path = tmp_path / "response-surface-2d.xlsx"
+    wb = Workbook.create(
+        wb_path,
+        template="response-surface-2d",
+        template_args={},
+        input_specs=[InputSpec(name, lb, ub) for name, lb, ub in inputs],
+        criterion="determinant",
+        measurement_error=0.5,
+        seed=0,
+        response_name="y",
     )
-    wb = Workbook.open(out["workbook_path"])
+    wb.save()
+
+    wb = Workbook.open(wb_path)
     assert wb.template_name() == "response-surface-2d"
     assert wb.response_name() == "y"
     assert wb.measurement_error() == 0.5
@@ -392,11 +401,26 @@ def test_workbook_metadata_roundtrip(tmp_path):
 
 
 def test_fim_persisted_and_used_by_extend(tmp_path):
+    # Asserts the FIM is persisted by do_fit and positive-definite — not that
+    # the design is D-optimal. Build a fixed, well-conditioned 3x3-grid design
+    # directly (as in test_fit_recovers_known_truth_response_surface) to skip
+    # do_new's ~18s D-optimal search, which this test does not exercise.
     inputs = [("x1", 0.0, 10.0), ("x2", -5.0, 5.0)]
-    out = do_new(
-        _new_params(tmp_path, template="response-surface-2d", inputs=inputs, n=6, error=0.5)
+    wb_path = tmp_path / "response-surface-2d.xlsx"
+    wb = Workbook.create(
+        wb_path,
+        template="response-surface-2d",
+        template_args={},
+        input_specs=[InputSpec(name, lb, ub) for name, lb, ub in inputs],
+        criterion="determinant",
+        measurement_error=0.5,
+        seed=0,
+        response_name="y",
     )
-    wb_path = Path(out["workbook_path"])
+    design = [{"x1": x1, "x2": x2} for x1 in (0.0, 5.0, 10.0) for x2 in (-5.0, 0.0, 5.0)]
+    design.append({"x1": 5.0, "x2": 0.0})
+    wb.append_runs(1, design)
+    wb.save()
 
     def predict(row):
         return 1 + 0.5 * row["x1"] - 0.3 * row["x2"]
