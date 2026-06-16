@@ -1,9 +1,12 @@
 # Relaxation Catalog — Coverage for Global Optimality Certification
 
 **Status:** living document · **Last audited:** 2026-06-16 (post #139/#148/#149 + the
-relaxation-coverage work on this branch) · **Scope:** convex/concave relaxations,
-interval/FBBT bound propagation, convexity detection, and the dual-bound soundness rules
-used to certify global optima in spatial branch-and-bound.
+relaxation-coverage work on this branch: full-function-set IR, prod/norm, rigorous α-BB,
+FBBT extensions, convexity-lattice closure, and the exact bilinear→multilinear RLT hull) ·
+**Scope:** convex/concave relaxations, interval/FBBT bound propagation, convexity detection,
+and the dual-bound soundness rules used to certify global optima in spatial branch-and-bound.
+**Bottom line:** relaxation *tightness* is now at SOTA parity for the factorable/polynomial
+core; the remaining distance to BARON/SCIP is bound-tightening orchestration (§7).
 
 This document catalogs every relaxation, operator, and function for which discopt can
 produce a rigorous convex relaxation (and hence a valid bound for global optimality
@@ -95,20 +98,25 @@ The modeling API exposes builders for all of them, including `atan/asin/acos`
 Source: `envelopes.py`, `multivariate_mccormick.py`, `relaxation_compiler.py`,
 `factorable_reform.py`, `milp_relaxation.py`.
 
-- **Trilinear `x·y·z`** — `relax_trilinear` (single ordering) and `relax_trilinear_exact`
-  (permutation-symmetric nested McCormick). Auto-detected via
-  `_try_extract_trilinear_chain`. **Not the true trilinear convex hull** (Rikun 1997 /
-  Meyer–Floudas 2004 facet families are not encoded).
+Two regimes share this section: the compositional **NLP/value-evaluator** (`envelopes.py`,
+`multivariate_mccormick.py`) and the **LP** relaxation (`milp_relaxation.py`). The LP path
+carries explicit lifted product variables and now produces the **exact multilinear hull**
+(§6.D); the NLP-path envelopes below are the compositional (looser) counterparts.
+
+- **Trilinear / multilinear `∏ xᵢ` (NLP path)** — `relax_trilinear` (single ordering) and
+  `relax_trilinear_exact` (permutation-symmetric nested McCormick), auto-detected via
+  `_try_extract_trilinear_chain`, and the recursive `prod` fold. These are sound but **not**
+  the convex hull (at the box-midpoint linearization point recursive McCormick is
+  order-invariant). The exact hull lives on the **LP path** — see §6.D.
 - **Signomial / multilinear `∏ xᵢ^{aᵢ}`** — `relax_signomial_multi` via
   `exp(Σ aᵢ·log xᵢ)`; requires all `lb > 0`. Auto-detected via
   `_try_extract_signomial_factors`.
 - **Repeated-factor lifting (PR #148)** — `factorable_reform.py` lifts mixed
-  repeated-factor monomials (e.g. `x²·y → w·y`, `w == x²`) to bilinear form so the
-  existing pipeline relaxes them; `milp_relaxation.py`
-  (`_collect_lifted_bilinear_products`, `_collect_lifted_higher_products`,
-  `_choose_trilinear_pair`) then collects the lifted bilinear/trilinear products into the
-  LP relaxation. This is sound and compositional but still **not** the exact multilinear
-  hull.
+  repeated-factor monomials (e.g. `x²·y → w·y`, `w == x²`) to bilinear form so the pipeline
+  relaxes them; `milp_relaxation.py` (`_collect_lifted_bilinear_products`,
+  `_collect_lifted_higher_products`, `_choose_trilinear_pair`) collects the lifted products
+  into the LP relaxation, where the RLT cuts (§6.D) then make the **distinct-factor** product
+  exact. (Repeated factors x², x³, … are themselves relaxed by the monomial-secant path.)
 - **Fractional `x/y`** — `relax_fractional`; sign-definite denominator clearing in
   `factorable_reform.py` (issue #130).
 - **Joint `log(x+y)`, `exp`-bilinear** — `relax_log_sum`, `relax_exp_bilinear`.
@@ -187,18 +195,23 @@ arguments — it now reduces over the components.
 `atan/asin/acos` (PR-side) and `sinh/cosh` (this branch) now have `dm.*` builders, so the
 functions that already had relaxations + IR support are writable from native Python.
 
-### D. Relaxation tightness gaps vs BARON — PARTIAL (trilinear hull now exact)
+### D. Relaxation tightness gaps vs BARON — multilinear hull now exact (n ≤ cap)
 
-- **Trilinear `x·y·z`: exact hull implemented (this branch).** The LP path now emits the
-  eight degree-3 RLT bound-factor product cuts on the lifted `(x,y,z,w_xy,w_xz,w_yz,w_xyz)`
-  columns (`milp_relaxation.py`, gated by `DISCOPT_TRILINEAR_RLT`, default on). Together
-  with the pairwise McCormick on all three pairwise products these are the exact
-  convex/concave hull of the trilinear monomial (Rikun 1997 / Meyer & Floudas 2004) —
-  verified to match the 8-vertex convex envelope to 4e-14. Each cut is a product of
-  nonnegative bound factors, so it is individually valid (tightens, never invalidates).
-- **General multilinear (4+ factors): still recursive McCormick.** The same RLT idea
-  generalizes (degree-n bound-factor products over all pairwise/higher lifted columns) but
-  is not yet emitted for n>3; `edge-concave` underestimators are also not generated.
+- **Multilinear `∏ xᵢ` (n distinct factors): exact convex/concave hull implemented (this
+  branch).** The LP path (`milp_relaxation.py`) materializes a lifted column `w_T` for every
+  sub-product `T` and emits the RLT bound-factor product cuts: for every factor-subset `S`
+  with `|S| ≥ 2`, the `2^{|S|}` degree-`|S|` products `∏_{i∈S}(sᵢxᵢ+cᵢ) ≥ 0`
+  (`(x−xL)→(+1,−xL)`, `(xU−x)→(−1,xU)`). The `|S|=2` cuts are the McCormick envelopes; the
+  `|S|≥3` cuts tie the higher products together. The full family is the exact hull (Rikun
+  1997 / Meyer & Floudas 2004) — verified to match the box-vertex convex envelope to ~1e-14
+  for n=3 and n=4. Each cut is a product of nonnegative bound factors, so it is individually
+  valid (tightens, never invalidates). Capped at `DISCOPT_MULTILINEAR_RLT_MAX` factors
+  (default 4) to bound the `2^n` growth; larger products keep the loose recursive chain.
+  Gated by `DISCOPT_TRILINEAR_RLT` (default on).
+- **Remaining multilinear gaps:** products with more than `DISCOPT_MULTILINEAR_RLT_MAX`
+  factors fall back to recursive McCormick; `edge-concave` underestimators (Tardella; an
+  alternative tighter family for some structures) are not generated; and the cuts are added
+  densely rather than separated on demand (a cut-on-violation loop would scale to higher n).
 - **α-BB now wired in (resolved sub-item):** auto-dispatched as a fallback and selectable
   via `arithmetic="alphabb"`, with a rigorous interval-Hessian α.
 - **No automatic relaxation tightening loop:** `obbt.py` and nonlinear bound tightening
@@ -237,37 +250,57 @@ enhancement.
 
 ---
 
-## 7. Remaining work (prioritized)
+## 7. Distance to SOTA — remaining work (prioritized)
 
-1. **General multilinear hull facets, n>3 (D).** The trilinear hull is now exact (RLT
-   bound-factor cuts on the LP path, §6.D). The same construction generalizes to n>3
-   (degree-n bound-factor products over all lifted subset-product columns) but is not yet
-   emitted; `edge-concave` underestimators are also future work. Note this must stay on the
-   **LP** path with explicit lifted variables — in the compositional NLP/value-evaluator it
-   is not expressible (at the box-midpoint linearization point recursive McCormick is
-   order-invariant; `relax_trilinear_exact`'s three orderings coincide there).
-2. **DCP curvature for the n-ary `norm` atom (F).** Any p-norm is convex; adding it to the
-   DCP composition rules (`rules.py`) would let the convex fast-path recognize
-   least-norm/regression models without the interval-Hessian fallback. (Treating
-   `sin/cos/tan` piecewise is a separate, lower-value extension.)
-3. **Range-reduction / OBBT orchestration loop (D).** Coordinate `obbt.py` + nonlinear
-   bound tightening with the relaxation in a probing loop.
-4. **FBBT backward for `Erf`** (needs an `erfinv`) and a periodic-aware inverse for
-   `Sin/Cos`.
-5. **General `norm{p}` certification (`p ∉ {1,2,∞}`).** Would need a payload-carrying
-   `MathFunc` variant (e.g. `NormP(u32)`); low priority — these orders are rarely modeled.
+The **relaxation layer** is now broadly SOTA-competitive: exact bilinear/trilinear/
+multilinear hulls (RLT), factorable McCormick over the full function set, a rigorous
+interval-Hessian α-BB fallback, the OA/Chebyshev/Taylor/ellipsoidal cut family, two
+convexity-detection tracks (x-space + GP, §9), and FBBT in both directions. The remaining
+distance to BARON/SCIP/ANTIGONE/Couenne is concentrated in **bound-tightening orchestration**
+and a few tightness/coverage extensions:
+
+1. **OBBT / range-reduction orchestration loop (highest impact).** `obbt.py`,
+   `nonlinear_bound_tightening.py`, and FBBT exist, but there is no coordinated
+   range-reduction loop (root + selective in-tree probing) the way BARON's bound tightening
+   drives its performance. This is the single largest practical gap vs SOTA — relaxation
+   quality is necessary but range reduction is what closes hard gaps.
+2. **Duality-based bound tightening (DBBT).** Use the relaxation's reduced costs / marginals
+   to tighten variable bounds (BARON's marginals-based BT). Cheap given an LP bound is
+   already solved; complements OBBT.
+3. **Uncapped multilinear via on-demand separation.** The exact multilinear hull is dense
+   (`2^n` columns/cuts) and capped at `DISCOPT_MULTILINEAR_RLT_MAX` (default 4). A
+   cut-on-violation separator (add only RLT cuts the current LP point violates) would scale
+   the exact hull to higher n without the dense blow-up.
+4. **Edge-concave / vertex-polyhedral underestimators** (Tardella; Hasan 2018, cited in
+   `PHASE3_MATH_NOTES.md`). A tighter alternative family for some nonconvex structures beyond
+   the bilinear/multilinear monomials RLT covers.
+5. **Discrete / `sign` / indicator handling.** `sign` and discontinuous atoms get only loose
+   constant-per-regime bounds; SOS1/indicator (big-M or convex-hull) reformulations would
+   make them tight, matching SCIP/BARON's handling of complementarity/indicator structure.
+6. **Convexity-detection completeness (F).** Add the n-ary `norm` atom to the DCP composition
+   rules (`rules.py`) — any p-norm is convex, unlocking least-norm/regression fast-paths — and
+   region-aware curvature for `sin/cos/tan`.
+7. **FBBT backward for `Erf`** (needs an `erfinv`) and a periodic-aware inverse for `Sin/Cos`.
+8. **General `norm{p}` certification (`p ∉ {1,2,∞}`).** Needs a payload-carrying `MathFunc`
+   variant (e.g. `NormP(u32)`); low priority — these orders are rarely modeled.
+
+Items 1–2 are the main SOTA-parity work; 3–5 are tightness wins on specific structures; 6–8
+are coverage completeness.
 
 ## 8. Implementation status (this branch)
 
-Implemented and verified here: gaps **A**, **B**, **C** closed; **D** α-BB sub-item closed
-(rigorous, auto-dispatched); **E** forward Tan + backward monotone-function set; **F** closed
-for smooth unary atoms — `softplus`/`sigmoid` curvature profiles + sound interval enclosures
-added on top of #149, so every smooth unary atom with a definable curvature is now covered
-(verified sound: a zero-spanning `sigmoid` and a concave `-softplus` are *not* misclassified
-convex). The `prod` path uses the proper recursive-McCormick fold; L1/L2/L∞ norms are
-certified and a NaN vector-eval bug in the Rust IR was fixed. The **exact trilinear convex
-hull** is now implemented via RLT bound-factor cuts on the LP path (§6.D); generalizing it to
-n>3 (§7 item 1) and the rest of §7 are open.
+Implemented and verified here: gaps **A**, **B**, **C** closed; **D** — α-BB wired in
+(rigorous, auto-dispatched) **and the exact convex/concave hull for bilinear → multilinear
+(n ≤ cap) products** via RLT bound-factor cuts (§6.D), validated to match the box-vertex
+envelope to ~1e-14; **E** forward Tan + backward monotone-function set; **F** closed for smooth
+unary atoms — `softplus`/`sigmoid` curvature profiles + sound interval enclosures on top of
+#149 (verified sound: a zero-spanning `sigmoid` and a concave `-softplus` are *not*
+misclassified convex). The `prod` path uses the proper recursive-McCormick fold; L1/L2/L∞ norms
+are certified and a NaN vector-eval bug in the Rust IR was fixed.
+
+What remains for SOTA parity is §7 — chiefly the **OBBT/range-reduction and duality-based
+bound-tightening orchestration** (item 1–2), then the tightness/coverage extensions (3–8). The
+relaxation tightness itself is now at parity for the polynomial/factorable core.
 
 ---
 
