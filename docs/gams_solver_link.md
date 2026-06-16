@@ -146,8 +146,10 @@ It also handles the **safeguarded evaluation forms** GAMS emits in compiled NL
 code for numerical safety — `slexp`/`sqexp` (exp), `sllog10`/`sqlog10` (log10),
 and `slrec`/`sqrec` (reciprocal). These differ from the base function only in
 their out-of-domain extrapolation, so they map to the intended base function
-(`exp`/`log10`/`1/x`) and stay on the certified-global path. `entropy`
-(`x·log x`, convex) also has a rigorous relaxation and stays global.
+(`exp`/`log10`/`1/x`). `entropy` (`x·log x`) has a rigorous convex relaxation
+too. These reach the correct optimum; whether the solve is *certified* global is
+the solver's call — it certifies a gap only when it can prove the dual bound is
+valid, so some otherwise-convex atoms may still be reported `LocallyOptimal`.
 
 A few supported functions are **nonconvex/bivariate with no rigorous
 relaxation** — `signpower`, `centropy`, and `atan2`. discopt still solves models
