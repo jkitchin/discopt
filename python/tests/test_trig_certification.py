@@ -37,13 +37,17 @@ os.environ["JAX_PLATFORMS"] = "cpu"
 os.environ["JAX_ENABLE_X64"] = "1"
 
 import math
+from pathlib import Path
 
 import discopt.modeling as dm
 import pytest
+from _optima import known_optimum
 
 # Soundness slack: a valid dual bound must not exceed the known optimum by more
 # than this. Kept tight; periodic terms must not silently produce bound > opt.
 _SOUND_TOL = 1e-3
+
+_DATA = Path(__file__).parent / "data" / "minlplib"
 
 
 @pytest.mark.correctness
@@ -133,6 +137,57 @@ def test_schwefel_restricted_certifies_sound_bound():
     assert abs(r.objective - 0.0) <= 1e-2, f"obj={r.objective} not near the known min 0"
     assert r.bound <= 0.0 + 1e-2, f"unsound dual bound {r.bound} > known optimum 0"
     assert r.bound <= r.objective + 1e-6, "dual bound must not exceed the incumbent"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Real MINLPLib periodic instances (issue #137, second bullet). Surveyed from
+# minlplib.org instancedata.csv for opsin/opcos > 0 with a known optimum; their
+# published optima live in the shared registry (data/known_optima.toml). tan
+# (o38) and the inverse-trig family are absent upstream, and the tanh/erf
+# instances are all unsolved or binary-only, so the periodic ground truth is
+# sin/cos only. Optima are read from the registry — the single source of truth.
+# ──────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.correctness
+@pytest.mark.parametrize("instance", ["ex8_1_1", "mathopt5_2", "mathopt3"])
+def test_minlplib_periodic_instance_certifies_sound_bound(instance):
+    """A real MINLPLib sin/cos instance reaches its published optimum with a
+    sound, certified dual bound (``bound <= opt``)."""
+    nl = _DATA / f"{instance}.nl"
+    assert nl.exists(), f"missing vendored {nl}"
+    opt = known_optimum(instance)
+
+    r = dm.from_nl(str(nl)).solve(time_limit=30, gap_tolerance=1e-4)
+
+    assert r.objective is not None and r.bound is not None, f"[{instance}] no bound produced"
+    assert math.isclose(r.objective, opt, abs_tol=1e-3), f"[{instance}] obj={r.objective} != {opt}"
+    # Soundness invariant (#137): the dual bound never exceeds the optimum.
+    assert r.bound <= opt + _SOUND_TOL, f"[{instance}] unsound dual bound {r.bound} > {opt}"
+    assert r.bound <= r.objective + 1e-6, f"[{instance}] dual bound {r.bound} > incumbent"
+
+
+@pytest.mark.correctness
+def test_minlplib_trig_decline_is_sound():
+    """MINLPLib ``trig`` (single-variable sin/cos) has no periodic envelope yet,
+    so discopt *declines* to bound it (``bound=None``) rather than fabricating
+    one. That is sound: it never reports a false certificate. The registry
+    records the true optimum (−3.7625) so a future periodic envelope can be
+    regression-checked to ``bound <= opt`` instead of ``None``."""
+    nl = _DATA / "trig.nl"
+    assert nl.exists(), f"missing vendored {nl}"
+    opt = known_optimum("trig")
+
+    r = dm.from_nl(str(nl)).solve(time_limit=30, gap_tolerance=1e-4)
+
+    # Incumbent still reaches the true optimum via the local NLP search.
+    assert r.objective is not None
+    assert math.isclose(r.objective, opt, abs_tol=1e-3), f"obj={r.objective} != {opt}"
+    # Sound decline: no fabricated bound, no false certificate.
+    if r.bound is not None:
+        assert r.bound <= opt + _SOUND_TOL, f"unsound dual bound {r.bound} > {opt}"
+    else:
+        assert not r.gap_certified, "declined bound must not be reported as certified"
 
 
 @pytest.mark.correctness
