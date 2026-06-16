@@ -139,7 +139,7 @@ class _Lifter:
         self.aux_constraints: list[Constraint] = []
         self._counter = 0
 
-    def monomial(self, leaf: Expression, flat_index: int, exp: int):
+    def monomial(self, leaf: Expression, flat_index: int, exp: int) -> Variable | None:
         """Return an aux variable equal to ``leaf**exp`` (creating it on first
         use), or ``None`` if a finite bound for it cannot be established."""
         key = (flat_index, exp)
@@ -159,7 +159,7 @@ class _Lifter:
         self.aux_constraints.append(Constraint(BinaryOp("-", w, pow_expr), "==", 0.0))
         return w
 
-    def expression(self, expr: Expression):
+    def expression(self, expr: Expression) -> Variable | None:
         """Return an aux variable equal to *expr* (creating it on first use), or
         ``None`` if a finite bound for it cannot be established.
 
@@ -190,7 +190,7 @@ class _Lifter:
         self.aux_constraints.append(Constraint(body, "==", 0.0))
         return w
 
-    def fractional_power(self, base_var: Variable, p: float):
+    def fractional_power(self, base_var: Variable, p: float) -> Variable | None:
         """Return an aux variable equal to ``base_var ** p`` for a fractional *p*,
         or ``None`` if it cannot be soundly bounded.
 
@@ -308,6 +308,7 @@ def _lift_objective_atoms(expr: Expression, model: Model, lifter: "_Lifter") -> 
             p = float(expr.right.value)
             base = _lift_objective_atoms(expr.left, model, lifter)
             # The fractional power needs a single-variable argument ``t``.
+            t: Variable | IndexExpression | None
             if isinstance(base, (Variable, IndexExpression)):
                 t = base
             else:
