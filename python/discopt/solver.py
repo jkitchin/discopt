@@ -2484,7 +2484,27 @@ def solve_model(
                     # can actually relax.
                     try:
                         _probe_lb, _probe_ub = flat_variable_bounds(model)
-                        _probe = _mc_lp_relaxer.solve_at_node(_probe_lb, _probe_ub)
+                        # Bound the probe's MILP relaxation solve to a SMALL slice
+                        # of the budget. Without any limit it inherited
+                        # solve_at_node's default time_limit=None -> the Rust MILP
+                        # B&B ran unbounded (up to max_nodes=1e6), solving the root
+                        # relaxation to optimality; on a hard MINLP root (e.g.
+                        # du-opt) that single *discarded* probe consumed the whole
+                        # wall-clock (~77s vs a 25s limit) before the spatial search
+                        # even began. The probe only needs to learn whether the
+                        # relaxer yields a usable bound / infeasibility proof — the
+                        # Rust solver returns a valid dual bound even on an early
+                        # timeout — so a brief cap suffices and leaves the bulk of
+                        # the budget for the actual B&B. Mirror the OBBT root-budget
+                        # heuristic above, never exceeding the live remaining time.
+                        _probe_remaining = time_limit - (time.perf_counter() - t_start)
+                        _probe_budget = min(
+                            max(time_limit * 0.1, 2.0),
+                            max(_probe_remaining, _DEADLINE_NODE_FLOOR_S),
+                        )
+                        _probe = _mc_lp_relaxer.solve_at_node(
+                            _probe_lb, _probe_ub, time_limit=_probe_budget
+                        )
                     except Exception as e:  # pragma: no cover - defensive
                         logger.debug("McCormick LP root probe failed: %s", e)
                         _probe = None
@@ -2841,12 +2861,26 @@ def solve_model(
                 for i in range(n_batch):
                     if node_infeasible_mask[i]:
                         continue
+                    # Deadline enforcement (time_limit overrun fix). A single
+                    # McCormick LP solve has an irreducible ~1s floor on a large
+                    # lifted relaxation, so clamping the per-node budget to
+                    # _DEADLINE_NODE_FLOOR_S still lets a batch of N nodes run
+                    # ~N s past the cap. Once the deadline has passed, stop
+                    # solving the rest of the batch: leave each remaining node's
+                    # bound at -inf (unpruned, it is the default) and decertify
+                    # the gap, mirroring the serial path. -inf never fabricates a
+                    # false "optimal"; the loop exits at the next batch top.
+                    _node_remaining = _deadline - time.perf_counter()
+                    if _node_remaining <= 0.0:
+                        if not _model_is_convex:
+                            _gap_certified = False
+                        continue
                     nlp_failed = result_lbs[i] >= _SENTINEL_THRESHOLD
                     try:
                         mc_res = _mc_lp_relaxer.solve_at_node(
                             np.asarray(batch_lb[i]),
                             np.asarray(batch_ub[i]),
-                            time_limit=max(_deadline - time.perf_counter(), _DEADLINE_NODE_FLOOR_S),
+                            time_limit=max(_node_remaining, _DEADLINE_NODE_FLOOR_S),
                         )
                     except Exception as e:
                         logger.debug("McCormick LP failed at node %d: %s", i, e)

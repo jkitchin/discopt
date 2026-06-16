@@ -16,6 +16,7 @@ that fits the per-node call shape in :mod:`discopt.solver`.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -25,6 +26,11 @@ from discopt._jax.discretization import DiscretizationState
 from discopt._jax.milp_relaxation import build_milp_relaxation
 from discopt._jax.term_classifier import NonlinearTerms, classify_nonlinear_terms
 from discopt.modeling.core import Model, VarType
+
+# When a per-node wall-clock budget is threaded through solve_at_node, no single
+# internal re-solve is handed less than this floor (keeps a node that straddles
+# the deadline from receiving a zero/negative budget the backend would reject).
+_SOLVE_DEADLINE_FLOOR_S = 0.05
 
 
 @dataclass
@@ -129,17 +135,33 @@ class MccormickLPRelaxer:
         if not int(milp._integrality.sum()):
             milp._integrality = None
 
-        res = milp.solve(time_limit=time_limit, backend=self._backend)
+        # The caller's ``time_limit`` is the budget for the WHOLE node, but this
+        # method re-solves the relaxation many times (the initial solve, up to
+        # 8+6 cut-separation rounds, and up to two HiGHS soundness re-verifies).
+        # Passing the same duration to each gave every re-solve the full budget,
+        # so one node could run (1 + rounds + verifies) x time_limit — e.g.
+        # du-opt's hard relaxation overshot a 2s budget to 7.3s wall, and the
+        # spatial B&B (one such node per step) blew a 25s limit out to ~75s.
+        # Convert the duration to a single deadline and hand each internal solve
+        # only the time that remains, so the node's TOTAL respects the budget.
+        _deadline = None if time_limit is None else time.perf_counter() + time_limit
+
+        def _remaining() -> Optional[float]:
+            if _deadline is None:
+                return None
+            return max(_deadline - time.perf_counter(), _SOLVE_DEADLINE_FLOOR_S)
+
+        res = milp.solve(time_limit=_remaining(), backend=self._backend)
 
         # On-demand separation of the exact multilinear hull for products with
         # more factors than the dense RLT cap (those carry only the loose
         # recursive chain). Every separated cut is a supporting hyperplane of the
         # convex/concave envelope, hence valid; adding them only tightens the
         # bound, so the loop is sound at any round.
-        res = self._separate_multilinear(milp, varmap, res, time_limit)
+        res = self._separate_multilinear(milp, varmap, res, _deadline)
         # Edge-concave / edge-convex quadratic blocks: tighten the joint
         # vertex-polyhedral envelope (cuts on the existing bilinear/square auxes).
-        res = self._separate_edge_concave(milp, varmap, res, time_limit)
+        res = self._separate_edge_concave(milp, varmap, res, _deadline)
 
         # Soundness guard: a floating-point simplex "infeasible" verdict is NOT
         # a proof that the relaxed feasible set is empty. The spatial-B&B driver
@@ -154,7 +176,7 @@ class MccormickLPRelaxer:
         # before trusting it; on disagreement adopt HiGHS's (valid) bound so the
         # node branches instead of being wrongly pruned.
         if res.status == "infeasible" and self._backend != "auto":
-            verify = milp.solve(time_limit=time_limit, backend="auto")
+            verify = milp.solve(time_limit=_remaining(), backend="auto")
             if verify.status != "infeasible":
                 res = verify
 
@@ -168,7 +190,7 @@ class MccormickLPRelaxer:
         # 2.55 (true optimum 6.06). Re-verify a non-optimal fast-backend result
         # with HiGHS and adopt it only if HiGHS converges to optimality.
         if res.status not in ("optimal", "infeasible") and self._backend != "auto":
-            verify = milp.solve(time_limit=time_limit, backend="auto")
+            verify = milp.solve(time_limit=_remaining(), backend="auto")
             if verify.status == "optimal":
                 res = verify
 
@@ -185,7 +207,7 @@ class MccormickLPRelaxer:
             x=x_orig,
         )
 
-    def _separate_multilinear(self, milp, varmap, res, time_limit):
+    def _separate_multilinear(self, milp, varmap, res, deadline):
         """Tighten products beyond the dense RLT cap by on-demand hull separation.
 
         For each multilinear/trilinear product with more factors than
@@ -233,6 +255,10 @@ class MccormickLPRelaxer:
                     milp._b_ub = np.concatenate([np.asarray(milp._b_ub), b])
 
             for _round in range(8):
+                # Stop separating once the node's wall-clock budget is spent;
+                # each round costs a full MILP re-solve.
+                if deadline is not None and time.perf_counter() >= deadline:
+                    break
                 x = np.asarray(res.x, dtype=np.float64)
                 rows: list[np.ndarray] = []
                 rhs: list[float] = []
@@ -260,7 +286,12 @@ class MccormickLPRelaxer:
                 if not rows:
                     break
                 _append(rows, rhs)
-                new_res = milp.solve(time_limit=time_limit, backend=self._backend)
+                _tl = (
+                    None
+                    if deadline is None
+                    else max(deadline - time.perf_counter(), _SOLVE_DEADLINE_FLOOR_S)
+                )
+                new_res = milp.solve(time_limit=_tl, backend=self._backend)
                 if new_res.status != "optimal" or new_res.objective is None:
                     break
                 res = new_res
@@ -268,7 +299,7 @@ class MccormickLPRelaxer:
         except Exception:
             return res
 
-    def _separate_edge_concave(self, milp, varmap, res, time_limit):
+    def _separate_edge_concave(self, milp, varmap, res, deadline):
         """Tighten edge-concave/edge-convex quadratic blocks by hull separation.
 
         Each block's vertex-hull supporting hyperplane gives a valid cut on the
@@ -338,6 +369,10 @@ class MccormickLPRelaxer:
                     milp._b_ub = np.concatenate([np.asarray(milp._b_ub), b])
 
             for _round in range(6):
+                # Stop separating once the node's wall-clock budget is spent;
+                # each round costs a full MILP re-solve.
+                if deadline is not None and time.perf_counter() >= deadline:
+                    break
                 x = np.asarray(res.x, dtype=np.float64)
                 rows, rhs = [], []
                 for blk, cols_sq, cols_bl in specs:
@@ -384,7 +419,12 @@ class MccormickLPRelaxer:
                 if not rows:
                     break
                 _append(rows, rhs)
-                new_res = milp.solve(time_limit=time_limit, backend=self._backend)
+                _tl = (
+                    None
+                    if deadline is None
+                    else max(deadline - time.perf_counter(), _SOLVE_DEADLINE_FLOOR_S)
+                )
+                new_res = milp.solve(time_limit=_tl, backend=self._backend)
                 if new_res.status != "optimal" or new_res.objective is None:
                     break
                 res = new_res
