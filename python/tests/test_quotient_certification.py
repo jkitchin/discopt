@@ -92,7 +92,9 @@ def test_nvs_ratio_certifies(instance, optimum):
 # soundness guard below: a valid dual lower bound for a minimization can never
 # exceed the true optimum.  These instances are *not* expected to certify on
 # ``main`` — the ratio / fractional-power-of-product term is soundly dropped from
-# the relaxation, so no finite bound is produced yet.
+# the relaxation, so no *tight* bound is produced yet.  ``gear4`` is the exception:
+# it now returns a finite (weak but sound) bound via the separable objective floor
+# (see ``test_gear4_returns_finite_sound_bound``).
 _BUCKET1_WEAK = {
     "gear4": 1.64342847,  # (x0*x1)/(x2*x3) equality, integer — pure integrality gap
     "ex1233": 62.1833,  # linear / (product)^(1/3) plus sqrt-of-product terms
@@ -148,3 +150,26 @@ def test_ex1233_no_spurious_certification():
     assert not (r.gap_certified and r.objective is None), (
         f"ex1233 certified with no incumbent: status={r.status} bound={r.bound} gap={r.gap}"
     )
+
+
+@pytest.mark.correctness
+def test_gear4_returns_finite_sound_bound():
+    """gear4 returns a *finite* sound lower bound, not ``None`` (issue #138).
+
+    gear4 minimizes ``x4 + x5`` (both >= 0) subject to a single trilinear-ratio
+    equality with integer ``x0..x3``; the whole optimality gap is integrality, so
+    the continuous relaxation floor is provably 0 and the spatial tree bound is
+    uncertified (and dropped). The solver now falls back to the rigorous separable
+    objective floor over the root box — here ``min(x4 + x5) = 0`` from ``x4,x5 >=
+    0`` — so a finite, sound dual bound is reported instead of ``None``. The true
+    optimum is ~1.6434, so ``0 <= opt`` holds: weak but never false.
+    """
+    nl = _DATA / "gear4.nl"
+    assert nl.exists(), f"missing {nl}"
+    r = dm.from_nl(str(nl)).solve(time_limit=30, gap_tolerance=1e-4)
+
+    assert r.bound is not None, "gear4 produced no finite bound (regressed to None)"
+    # Sound: a valid lower bound never exceeds the known optimum (~1.6434).
+    assert r.bound <= 1.64342847 + 1e-6, f"gear4 unsound bound {r.bound} > optimum"
+    # The trivial-but-rigorous floor from x4,x5 >= 0 is 0.
+    assert r.bound >= -1e-9, f"gear4 bound {r.bound} below the x4,x5>=0 floor"

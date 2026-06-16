@@ -2138,6 +2138,31 @@ def solve_model(
         except Exception as e:  # pragma: no cover - defensive
             logger.debug("Root OBBT failed: %s", e)
 
+    # --- Sound last-resort objective floor (issue #138) ---
+    # A separable lower bound on the objective over the *root* variable box is a
+    # rigorous global lower bound for a minimization (the root box contains the
+    # whole feasible set), independent of the branch-and-bound search. It is
+    # surfaced at the end only when the spatial relaxation produced no certified
+    # bound — e.g. an un-linearizable or ill-conditioned relaxation whose LP the
+    # backend cannot solve — so a solve that would otherwise report bound=None
+    # still yields a finite, sound dual bound (e.g. gear4: obj = x4 + x5 with
+    # x4,x5 >= 0 -> floor 0). Computed here from the root-tightened bounds, on
+    # purpose *before* the search loop's incumbent-cutoff OBBT, whose bounds
+    # exclude solutions no better than the incumbent and so are not valid for a
+    # global floor.
+    from discopt.modeling.core import ObjectiveSense as _ObjSense
+
+    _separable_obj_floor = None
+    if model._objective is not None and model._objective.sense == _ObjSense.MINIMIZE:
+        try:
+            from discopt._jax.milp_relaxation import _separable_objective_lower_bound
+
+            _sep = _separable_objective_lower_bound(model._objective.expression, model, lb, ub)
+            if _sep is not None and np.isfinite(_sep):
+                _separable_obj_floor = float(_sep)
+        except Exception as _sep_exc:  # pragma: no cover - defensive
+            logger.debug("separable objective floor skipped: %s", _sep_exc)
+
     # --- Create PyTreeManager (Rust) ---
     t_rust_start = time.perf_counter()
     tree = PyTreeManager(
@@ -3527,6 +3552,16 @@ def solve_model(
     if not _gap_certified:
         bound_val = None
         gap_val = None
+
+    # When the tree produced no usable dual bound (uncertified exit, or a
+    # relaxation the LP backend could not solve), fall back to the rigorous
+    # separable objective floor computed over the root box. This is always a
+    # valid global lower bound for a minimization, so the solve reports a finite
+    # sound bound instead of None (issue #138). Never overrides a finite bound.
+    if (bound_val is None or not np.isfinite(bound_val)) and _separable_obj_floor is not None:
+        bound_val = _separable_obj_floor
+        if obj_val is not None and np.isfinite(obj_val):
+            gap_val = max(0.0, obj_val - bound_val) / max(1.0, abs(obj_val))
 
     return SolveResult(
         status=status,
