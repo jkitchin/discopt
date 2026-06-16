@@ -74,15 +74,12 @@ _AFFECTED = [
 
 _BACKENDS = ["simplex", "auto"]
 
-# Per-solve wall-clock cap. The soundness invariant this file locks is about the
-# *value* of a returned finite bound, not about reaching the LP optimum — the
-# docstring explicitly accepts early termination ("looseness and early
-# termination are fine"). On ex1252's FBBT-tightened box the fast simplex grinds
-# ~54s before reporting the same sound ``lb=0.0`` that HiGHS returns instantly;
-# capping the solve preserves every assertion (the capped bound is identical and
-# still sound) while keeping this CI-visible test fast. A non-``optimal`` status
-# from an early stop is already an accepted outcome below.
-_SOLVE_TIME_LIMIT = 5.0
+# No per-solve wall-clock cap is needed. ex1252's FBBT-tightened box used to make
+# the fast simplex grind ~54s (its ill-scaled lifted LP broke the basis
+# factorization, returning a Numerical bound that the MILP B&B could never fathom,
+# so it enumerated the whole tree — issue #170). Equilibration scaling fixed that:
+# every cell here now solves to ``optimal`` in well under a second, so the test
+# runs the relaxer to completion and exercises the full solve path.
 
 
 def _bounds_for(m):
@@ -101,7 +98,7 @@ def _root_bound(m, backend, bounds):
     lb, ub = bounds
     lb = np.asarray(lb, dtype=float).copy()
     ub = np.asarray(ub, dtype=float).copy()
-    return relaxer.solve_at_node(lb, ub, time_limit=_SOLVE_TIME_LIMIT)
+    return relaxer.solve_at_node(lb, ub)
 
 
 @pytest.mark.parametrize("instance, optimum", _AFFECTED)
