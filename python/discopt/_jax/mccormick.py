@@ -640,6 +640,22 @@ def relax_softplus(x, lb, ub):
     return cv, cc
 
 
+def relax_entropy(x, lb, ub):
+    """McCormick relaxation of entropy(x) = x*log(x) on [lb, ub], lb >= 0.
+
+    entropy''(x) = 1/x > 0 for x > 0, so entropy is convex on its domain:
+    cv = x*log(x), cc = secant line. The argument is clamped to a tiny positive
+    value inside the log so the underestimator stays finite at x -> 0+ (where
+    x*log(x) -> 0). Valid only for nonnegative arguments.
+    Returns (cv, cc).
+    """
+    f = lambda t: t * jnp.log(jnp.maximum(t, 1e-300))  # noqa: E731
+
+    cv = f(x)
+    cc = _secant(f, x, lb, ub)
+    return cv, cc
+
+
 # ---------------------------------------------------------------------------
 # Composite: sign, min, max
 # ---------------------------------------------------------------------------

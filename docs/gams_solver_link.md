@@ -146,10 +146,19 @@ It also handles the **safeguarded evaluation forms** GAMS emits in compiled NL
 code for numerical safety — `slexp`/`sqexp` (exp), `sllog10`/`sqlog10` (log10),
 and `slrec`/`sqrec` (reciprocal). These differ from the base function only in
 their out-of-domain extrapolation, so they map to the intended base function
-(`exp`/`log10`/`1/x`) and stay on the certified-global path.
+(`exp`/`log10`/`1/x`) and stay on the certified-global path. `entropy`
+(`x·log x`, convex) also has a rigorous relaxation and stays global.
 
-A GAMS intrinsic outside this set raises a clear `GamsTranslationError` naming
-the function rather than silently producing a wrong model.
+A few supported functions are **nonconvex/bivariate with no rigorous
+relaxation** — `signpower`, `centropy`, and `atan2`. discopt still solves models
+that use them, but only *locally*: the link detects them up front
+(`globally_relaxable`), names them in the GAMS log, and reports the result as
+`LocallyOptimal` (never overstated as global — see Status mapping).
+
+**Discontinuous** intrinsics (`ceil`, `floor`, `round`, `trunc`, `frac`, `mod`,
+`ifthen`) have no valid continuous relaxation and are rejected with a clear
+`GamsTranslationError`; model that behaviour with integer variables instead. Any
+other unsupported intrinsic likewise raises rather than producing a wrong model.
 
 ## Status mapping
 

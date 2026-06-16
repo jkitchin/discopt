@@ -146,9 +146,7 @@ def test_safeguarded_form_solves_globally():
     # slrec(x) == 1/x; minimize 1/x on [1, 4] -> optimum 0.25 at x = 4.
     m = dm.Model("sg")
     x = m.continuous("x", lb=1.0, ub=4.0)
-    expr = translate_instructions(
-        [Op.nlPushV, Op.nlCallArg1], [1, FUNC_CODE["slrec"]], [x], []
-    )
+    expr = translate_instructions([Op.nlPushV, Op.nlCallArg1], [1, FUNC_CODE["slrec"]], [x], [])
     m.minimize(expr)
     result = m.solve(time_limit=30)
     assert result.status == "optimal"
@@ -435,6 +433,88 @@ def test_smoke_gms_optimum_via_from_gams(entry):
     result = model.solve(time_limit=120)
     assert result.status == "optimal"
     assert result.objective == pytest.approx(entry["objective"], abs=max(entry["tol"], 1e-4))
+
+
+def test_translate_entropy_signpower_centropy(vc):
+    v, c = vc
+    e = translate_instructions([Op.nlPushV, Op.nlCallArg1], [1, FUNC_CODE["entropy"]], v, c)
+    assert repr(e) == "entropy(x)"
+    sp = translate_instructions(
+        [Op.nlPushV, Op.nlPushV, Op.nlCallArg2], [1, 2, FUNC_CODE["signpower"]], v, c
+    )
+    assert repr(sp) == "signpower(x, y)"
+    ce = translate_instructions(
+        [Op.nlPushV, Op.nlPushV, Op.nlCallArg2], [1, 2, FUNC_CODE["centropy"]], v, c
+    )
+    assert repr(ce) == "centropy(x, y)"
+
+
+def test_translate_rejects_discontinuous(vc):
+    v, c = vc
+    for name in ("ceil", "floor", "round", "trunc", "frac", "mod"):
+        with pytest.raises(GamsTranslationError, match="discontinuous"):
+            translate_instructions([Op.nlPushV, Op.nlCallArg1], [1, FUNC_CODE[name]], v, c)
+
+
+def test_entropy_solves_globally():
+    # entropy(x) = x*log(x) is convex; min on [0.1, 3] -> -1/e at x = 1/e.
+    import math
+
+    m = dm.Model("ent")
+    x = m.continuous("x", lb=0.1, ub=3.0)
+    expr = translate_instructions([Op.nlPushV, Op.nlCallArg1], [1, FUNC_CODE["entropy"]], [x], [])
+    m.minimize(expr)
+    result = m.solve(time_limit=30)
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(-1.0 / math.e, abs=1e-4)
+    assert result.gap_certified
+
+
+# ── globality classification ─────────────────────────────────────────────────
+def test_globally_relaxable_entropy_is_global():
+    from discopt.gams.link import globally_relaxable
+    from discopt.modeling.core import FunctionCall
+
+    m = dm.Model("e")
+    x = m.continuous("x", lb=0.1, ub=3.0)
+    m.minimize(FunctionCall("entropy", x))
+    is_global, nonrelax = globally_relaxable(m)
+    assert is_global is True
+    assert nonrelax == set()
+
+
+def test_globally_relaxable_atan2_is_local():
+    from discopt.gams.link import globally_relaxable
+    from discopt.modeling.core import FunctionCall
+
+    m = dm.Model("a")
+    y = m.continuous("y", lb=0.5, ub=2.0)
+    z = m.continuous("z", lb=0.5, ub=2.0)
+    m.minimize(FunctionCall("atan2", y, z))
+    is_global, nonrelax = globally_relaxable(m)
+    assert is_global is False
+    assert nonrelax == {"atan2"}
+
+
+def test_linear_model_is_relaxable_without_jax():
+    # No function calls -> globally relaxable, and the JAX-heavy relaxation layer
+    # is not imported (keeps LP/MILP link solves fast).
+
+    from discopt.gams.link import _has_function_calls, globally_relaxable
+
+    m = dm.Model("lp")
+    a = m.continuous("a", lb=0, ub=5)
+    m.minimize(3 * a)
+    assert _has_function_calls(m) is False
+    assert globally_relaxable(m) == (True, set())
+
+
+def test_status_local_when_not_globally_relaxable():
+    # A certified-looking result on a non-relaxable model is reported as local.
+    res = dm.SolveResult(status="optimal", objective=1.0, x={"x": 0.0}, gap_certified=True)
+    assert status_to_gams(res, has_discrete=False, globally_relaxable=False) == (2, 1)
+    assert status_to_gams(res, has_discrete=True, globally_relaxable=False) == (2, 1)
+    assert status_to_gams(res, has_discrete=False, globally_relaxable=True) == (1, 1)
 
 
 def test_no_cross_problem_contamination():

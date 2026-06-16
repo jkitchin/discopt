@@ -261,6 +261,8 @@ _UNARY: dict[str, Callable[[Expression], Expression]] = {
     "sqlog10": dm.log10,
     "slrec": lambda a: dm.Constant(1.0) / a,
     "sqrec": lambda a: dm.Constant(1.0) / a,
+    # entropy(x) = x*log(x): convex on x >= 0, so it stays on the global path.
+    "entropy": lambda a: dm.FunctionCall("entropy", a),
 }
 
 _BINARY: dict[str, Callable[[Expression, Expression], Expression]] = {
@@ -282,6 +284,11 @@ _BINARY: dict[str, Callable[[Expression, Expression], Expression]] = {
     "sqlog10": lambda a, _k: dm.log10(a),
     "slrec": lambda a, _k: dm.Constant(1.0) / a,
     "sqrec": lambda a, _k: dm.Constant(1.0) / a,
+    # signpower(x, a) = sign(x)*|x|**a and centropy(x, y) = x*log(x/y). These are
+    # nonconvex/bivariate with no rigorous relaxation, so discopt solves them on
+    # the local path; the GAMS link reports the result as LocallyOptimal.
+    "signpower": lambda a, b: dm.FunctionCall("signpower", a, b),
+    "centropy": lambda a, b: dm.FunctionCall("centropy", a, b),
 }
 
 
@@ -421,10 +428,25 @@ def translate_instructions(
     return result
 
 
+# GAMS intrinsics that are discontinuous (or piecewise-constant): they have no
+# valid continuous relaxation and meaningless gradients, so they are rejected
+# from the (continuous) global path rather than silently mis-solved. Discrete
+# behaviour must be modelled with integer variables instead.
+_DISCONTINUOUS: frozenset[str] = frozenset(
+    {"ceil", "floor", "round", "trunc", "frac", "mod", "ifthen"}
+)
+
+
 def _apply_func(func_code: int, args: list[Expression]) -> Expression:
     name = FUNC_NAME.get(func_code)
     if name is None:
         raise GamsTranslationError(f"unknown function code {func_code}")
+    if name in _DISCONTINUOUS:
+        raise GamsTranslationError(
+            f"GAMS function '{name}' is discontinuous and not supported for "
+            "continuous optimization; model discrete behaviour with integer "
+            "variables instead."
+        )
     if len(args) == 1 and name in _UNARY:
         return _UNARY[name](args[0])
     if len(args) == 2 and name in _BINARY:

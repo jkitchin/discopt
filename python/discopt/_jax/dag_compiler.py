@@ -163,6 +163,7 @@ def _compile_node(expr: Expression, model: Model, param_index: dict) -> Callable
             "softplus": lambda x: jnp.logaddexp(x, 0.0),
             "abs": jnp.abs,
             "sign": jnp.sign,
+            "entropy": lambda x: x * jnp.log(jnp.maximum(x, 1e-300)),
         }
 
         if name in _unary_funcs:
@@ -179,6 +180,35 @@ def _compile_node(expr: Expression, model: Model, param_index: dict) -> Callable
 
             def fn(x_flat, params):
                 return jnp.minimum(a_fn(x_flat, params), b_fn(x_flat, params))
+
+            return fn
+
+        if name == "atan2":
+            a_fn, b_fn = arg_fns[0], arg_fns[1]
+
+            def fn(x_flat, params):
+                return jnp.arctan2(a_fn(x_flat, params), b_fn(x_flat, params))
+
+            return fn
+
+        if name == "signpower":
+            # GAMS signpower(x, a) = sign(x) * |x|**a.
+            a_fn, b_fn = arg_fns[0], arg_fns[1]
+
+            def fn(x_flat, params):
+                xv = a_fn(x_flat, params)
+                return jnp.sign(xv) * jnp.abs(xv) ** b_fn(x_flat, params)
+
+            return fn
+
+        if name == "centropy":
+            # GAMS centropy(x, y) = x * log(x / y), with the x -> 0+ limit 0.
+            a_fn, b_fn = arg_fns[0], arg_fns[1]
+
+            def fn(x_flat, params):
+                xv = a_fn(x_flat, params)
+                yv = b_fn(x_flat, params)
+                return xv * jnp.log(jnp.maximum(xv, 1e-300) / yv)
 
             return fn
 
