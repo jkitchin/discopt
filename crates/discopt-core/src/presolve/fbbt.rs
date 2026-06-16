@@ -535,6 +535,31 @@ fn eval_node_interval(
 // Backward propagation
 // ─────────────────────────────────────────────────────────────
 
+/// Inverse error function `erf^{-1}(y)` for `y in (-1, 1)`.
+///
+/// A Winitzki closed-form initial guess refined by Newton iterations against
+/// `libm::erf` (which converges to ~machine precision). Backward propagation
+/// widens the result outward by a small margin so the preimage stays a sound
+/// superset despite any residual error.
+fn erfinv(y: f64) -> f64 {
+    use std::f64::consts::PI;
+    let y = y.clamp(-1.0 + 1e-12, 1.0 - 1e-12);
+    let a = 0.147_f64;
+    let ln = (1.0 - y * y).ln();
+    let t1 = 2.0 / (PI * a) + 0.5 * ln;
+    let mut x = y.signum() * ((t1 * t1 - ln / a).sqrt() - t1).sqrt();
+    // Newton refinement: x <- x - (erf(x) - y) / (2/sqrt(pi) * e^{-x^2}).
+    let two_over_sqrt_pi = 2.0 / PI.sqrt();
+    for _ in 0..3 {
+        let deriv = two_over_sqrt_pi * (-x * x).exp();
+        if deriv.abs() < 1e-300 {
+            break;
+        }
+        x -= (libm::erf(x) - y) / deriv;
+    }
+    x
+}
+
 /// Backward-propagate an output bound through the expression DAG to
 /// tighten variable bounds.
 ///
@@ -812,9 +837,86 @@ pub fn backward_propagate(
                         var_bounds,
                     );
                 }
+                MathFunc::Erf => {
+                    // erf increasing onto (-1, 1); invert with erfinv, clamped
+                    // to the open domain and widened by a small margin so the
+                    // preimage is a sound superset despite erfinv's tiny error.
+                    const M: f64 = 1e-9;
+                    let lo = erfinv(tightened.lo) - M;
+                    let hi = erfinv(tightened.hi) + M;
+                    backward_propagate(arena, args[0], Interval::new(lo, hi), node_bounds, var_bounds);
+                }
+                MathFunc::Sin => {
+                    // sin is monotone on each piece between consecutive extrema
+                    // at pi/2 + k*pi. If the forward input lies in one piece,
+                    // invert via asin with the right 2*m*pi offset; otherwise the
+                    // preimage is a union of intervals and we conservatively skip.
+                    use std::f64::consts::{FRAC_PI_2, PI};
+                    let inp = node_bounds[args[0].0];
+                    // Monotone iff no sin-extremum (pi/2 + k*pi) is strictly
+                    // interior to [inp.lo, inp.hi]; extrema at the endpoints are
+                    // fine. Take the smallest extremum >= inp.lo.
+                    let ext = FRAC_PI_2 + ((inp.lo - FRAC_PI_2) / PI).ceil() * PI;
+                    let monotone = !(ext > inp.lo + 1e-12 && ext < inp.hi - 1e-12);
+                    if monotone && (inp.hi - inp.lo) <= PI + 1e-9 {
+                        let mid = 0.5 * (inp.lo + inp.hi);
+                        let ylo = tightened.lo.clamp(-1.0, 1.0);
+                        let yhi = tightened.hi.clamp(-1.0, 1.0);
+                        let (new_lo, new_hi) = if mid.cos() >= 0.0 {
+                            // increasing piece centered at 2*m*pi
+                            let m = (mid / (2.0 * PI)).round();
+                            (ylo.asin() + 2.0 * m * PI, yhi.asin() + 2.0 * m * PI)
+                        } else {
+                            // decreasing piece centered at pi + 2*m*pi
+                            let m = ((mid - PI) / (2.0 * PI)).round();
+                            (
+                                PI - yhi.asin() + 2.0 * m * PI,
+                                PI - ylo.asin() + 2.0 * m * PI,
+                            )
+                        };
+                        backward_propagate(
+                            arena,
+                            args[0],
+                            Interval::new(new_lo, new_hi),
+                            node_bounds,
+                            var_bounds,
+                        );
+                    }
+                }
+                MathFunc::Cos => {
+                    // cos is monotone on each piece [k*pi, (k+1)*pi]: decreasing
+                    // where sin>0, increasing where sin<0. acos(y) in [0, pi].
+                    use std::f64::consts::PI;
+                    let inp = node_bounds[args[0].0];
+                    // Monotone iff no cos-extremum (k*pi) is strictly interior.
+                    let ext = (inp.lo / PI).ceil() * PI;
+                    let monotone = !(ext > inp.lo + 1e-12 && ext < inp.hi - 1e-12);
+                    if monotone && (inp.hi - inp.lo) <= PI + 1e-9 {
+                        let mid = 0.5 * (inp.lo + inp.hi);
+                        let ylo = tightened.lo.clamp(-1.0, 1.0);
+                        let yhi = tightened.hi.clamp(-1.0, 1.0);
+                        let m = (mid / (2.0 * PI)).round();
+                        let (new_lo, new_hi) = if mid.sin() > 0.0 {
+                            // decreasing piece [2m*pi, pi+2m*pi]: x = acos(y) + 2m*pi,
+                            // larger y -> smaller x.
+                            (yhi.acos() + 2.0 * m * PI, ylo.acos() + 2.0 * m * PI)
+                        } else {
+                            // increasing piece [pi+2m'*pi, 2pi+2m'*pi]:
+                            // x = 2*pi*m - acos(y) (m rounds to the piece's right end).
+                            (2.0 * PI * m - ylo.acos(), 2.0 * PI * m - yhi.acos())
+                        };
+                        backward_propagate(
+                            arena,
+                            args[0],
+                            Interval::new(new_lo, new_hi),
+                            node_bounds,
+                            var_bounds,
+                        );
+                    }
+                }
                 _ => {
                     // No backward propagation for the remaining functions
-                    // (periodic sin/cos/tan, erf, sign, min/max, prod, norm).
+                    // (sign, min/max, prod, norm).
                 }
             }
         }
