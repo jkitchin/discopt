@@ -1707,6 +1707,25 @@ def solve_model(
 
     model = reformulate_gdp(model, method=gdp_method)
 
+    # --- Objective-defining-equality relaxation (the SUSPECT "objective
+    # constraint"). When the model is `min/max z` with z a free scalar that
+    # appears only in one equality `z = g(x)` (affinely), relax that equality
+    # to the inequality the objective binds against (`z >= g(x)` for min). The
+    # rewrite is EXACT at the optimum — lowering z to g(x) is always feasible
+    # and improves the objective, so the relaxed optimum satisfies the original
+    # equality — and turns a convex-defining equality (non-convex *as an
+    # equality*) into a convex inequality, unlocking the convex solve path with
+    # a valid lower bound instead of erratic nonconvex NLP-BB (issue: du-opt).
+    # The transform is structurally gated and abstains conservatively, so it is
+    # general and never alters the optimum. Skipped when streaming B&B callbacks
+    # are attached so node/incumbent indices stay aligned with the user's model.
+    if not _has_bb_callbacks:
+        from discopt._jax.objective_epigraph import relax_objective_defining_equality
+
+        model, _epi_changed = relax_objective_defining_equality(model)
+        if _epi_changed:
+            logger.debug("relaxed objective-defining equality to binding inequality")
+
     # --- Factorable reformulation: clear sign-definite denominators and lift
     # mixed repeated-factor products (e.g. x*x*y) into bilinear form via
     # monomial aux variables, so terms the relaxation pipeline would otherwise
