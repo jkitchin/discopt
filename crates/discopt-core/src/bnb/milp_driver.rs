@@ -21,7 +21,10 @@ use crate::lp::basis::{Basis, BASIC};
 use crate::lp::cover::separate_cover;
 use crate::lp::crossover::LpView;
 use crate::lp::gomory::{separate_gomory, GomoryCut};
-use crate::lp::simplex::{solve_lp, solve_lp_warm, tighten_bounds, LpStatus, SimplexOptions};
+use crate::lp::simplex::{
+    solve_lp, solve_lp_scaled, solve_lp_warm_scaled, tighten_bounds, LpStatus, Scaling,
+    SimplexOptions,
+};
 
 const INF: f64 = 1e20;
 const INFEAS_SENTINEL: f64 = 1e30;
@@ -270,6 +273,25 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
         if batch.node_ids.is_empty() {
             break;
         }
+
+        // Equilibration scaling for the working matrix, computed once per batch
+        // and shared by every node solve below. The matrix is constant within a
+        // batch (cuts are folded in only between batches), so re-equilibrating it
+        // per node — as the auto-scaling entry points would — is pure waste. On an
+        // ill-scaled lifted LP this is the dominant per-node cost; sharing it lets
+        // the 64 nodes pay one equilibration. When the matrix is well-conditioned
+        // (`None`) the nodes solve the original LP unchanged.
+        let scaling = Scaling::from_matrix(&a_w, m_w, n_w);
+        let (a_s, c_s, b_s) = match &scaling {
+            Some(s) => (s.scale_matrix(&a_w), s.scale_c(&c_w), s.scale_b(&b_w)),
+            None => (Vec::new(), Vec::new(), Vec::new()),
+        };
+        // Solve-space matrix/objective/rhs: the scaled copies when scaling, else
+        // the originals (borrowed). Node bounds are scaled per node (cheap).
+        let (sa, sc, sb): (&[f64], &[f64], &[f64]) = match &scaling {
+            Some(_) => (&a_s, &c_s, &b_s),
+            None => (&a_w, &c_w, &b_w),
+        };
         let sb_active = opts.strong_branch && tm.stats().total_nodes < opts.sb_node_budget;
         let mut results = Vec::with_capacity(batch.node_ids.len());
         let mut pending_cuts: Vec<GomoryCut> = Vec::new();
@@ -292,6 +314,10 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
                 c_w: &c_w,
                 l_w: &l_w,
                 u_w: &u_w,
+                scaling: scaling.as_ref(),
+                sa,
+                sc,
+                sb,
                 slack_l: &slack_l,
                 slack_u: &slack_u,
                 is_int: &is_int,
@@ -441,6 +467,15 @@ struct NodeCtx<'a> {
     c_w: &'a [f64],
     l_w: &'a [f64],
     u_w: &'a [f64],
+    /// Equilibration for the working matrix (shared across the batch), or `None`
+    /// when it is well-conditioned. When `Some`, the node LP is solved on the
+    /// pre-scaled `sa`/`sc`/`sb` and the solution is unscaled before use.
+    scaling: Option<&'a Scaling>,
+    /// Solve-space matrix / objective / rhs: scaled copies when `scaling` is
+    /// `Some`, else the originals (`a_w`/`c_w`/`b_w`).
+    sa: &'a [f64],
+    sc: &'a [f64],
+    sb: &'a [f64],
     slack_l: &'a [f64],
     slack_u: &'a [f64],
     is_int: &'a [bool],
@@ -494,6 +529,8 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
     full_u[..ctx.ns].copy_from_slice(ub_k);
     full_l[ctx.ns..].copy_from_slice(ctx.slack_l);
     full_u[ctx.ns..].copy_from_slice(ctx.slack_u);
+    // Original-space LP, used by the cut separators, rounding, and strong
+    // branching (which all reason about the model's true coefficients/values).
     let node_lp = LpView {
         a: ctx.a_w,
         m: ctx.m_w,
@@ -503,15 +540,37 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
         u: &full_u,
     };
 
+    // Solve on the batch's shared (pre-scaled, when ill-conditioned) matrix. Only
+    // the per-node bounds are scaled here; the matrix/objective/rhs were scaled
+    // once for the whole batch. The basis is scaling-invariant, so a warm start
+    // and the returned basis transfer across the original/scaled spaces; the
+    // objective is invariant too. We unscale the primal `x` back to the original
+    // space so everything downstream (separation, rounding, branching) is unchanged.
     // Lazily extend a basis stored before later cuts grew the matrix: the
     // appended cut slacks become basic (a valid, dual-repairable starting basis).
-    let sol = match ctx.tm.node_basis(id) {
+    let (sl, su) = match ctx.scaling {
+        Some(s) => (s.scale_lower(&full_l), s.scale_upper(&full_u)),
+        None => (full_l.clone(), full_u.clone()),
+    };
+    let solve_lp_view = LpView {
+        a: ctx.sa,
+        m: ctx.m_w,
+        n: ctx.n_w,
+        c: ctx.sc,
+        l: &sl,
+        u: &su,
+    };
+    let mut sol = match ctx.tm.node_basis(id) {
         Some(basis) => {
             let basis = extend_basis(basis, ctx.n_w);
-            solve_lp_warm(&node_lp, ctx.b_w, &basis, &ctx.opts.simplex)
+            solve_lp_warm_scaled(&solve_lp_view, ctx.sb, &basis, &ctx.opts.simplex)
         }
-        None => solve_lp(&node_lp, ctx.b_w, &ctx.opts.simplex),
+        None => solve_lp_scaled(&solve_lp_view, ctx.sb, &ctx.opts.simplex),
     };
+    if let Some(s) = ctx.scaling {
+        s.unscale_x(&mut sol.x);
+    }
+    let sol = sol;
 
     let mut out = NodeOutput {
         result: NodeResult {
@@ -582,17 +641,8 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                     .unwrap_or(false);
                 if !prunable {
                     let cands = ctx.tm.score_candidates(xs);
-                    let (best, piv) = strong_branch(
-                        &node_lp,
-                        ctx.b_w,
-                        &sol.basis,
-                        &sol.x,
-                        sol.obj,
-                        &cands,
-                        ctx.reliability,
-                        ctx.opts.sb_max_cands,
-                        &ctx.opts.simplex,
-                    );
+                    let (best, piv) =
+                        strong_branch(ctx, &full_l, &full_u, &sol.basis, &sol.x, sol.obj, &cands);
                     out.iters += piv;
                     out.branch_hint = best;
                 }
@@ -638,22 +688,20 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
 /// prunes immediately). Returns the chosen structural variable, if any, and the
 /// simplex pivots spent. Cheap because each probe is a few warm pivots, and it
 /// tapers automatically as pseudocosts mature past the reliability threshold.
-#[allow(clippy::too_many_arguments)]
 fn strong_branch(
-    lp: &LpView<'_>,
-    b: &[f64],
+    ctx: &NodeCtx<'_>,
+    orig_l: &[f64],
+    orig_u: &[f64],
     basis: &Basis,
     x: &[f64],
     node_obj: f64,
     cands: &[(usize, f64, u32, f64)],
-    reliability: u32,
-    max_cands: usize,
-    simplex: &SimplexOptions,
 ) -> (Option<usize>, usize) {
+    let simplex = &ctx.opts.simplex;
     // Unreliable candidates, most-fractional (nearest 0.5) first.
     let mut cand: Vec<(usize, f64)> = cands
         .iter()
-        .filter(|c| c.2 < reliability)
+        .filter(|c| c.2 < ctx.reliability)
         .map(|c| (c.0, c.1))
         .collect();
     if cand.is_empty() {
@@ -665,34 +713,46 @@ fn strong_branch(
             .partial_cmp(&(a.1 - 0.5).abs())
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    cand.truncate(max_cands.max(1));
+    cand.truncate(ctx.opts.sb_max_cands.max(1));
 
     const INFEAS_DELTA: f64 = 1e7; // a pruned child is a strong branching signal
     let eps = 1e-6;
-    let mut l = lp.l.to_vec();
-    let mut u = lp.u.to_vec();
+    // Probes share the batch's pre-scaled matrix (`ctx.sa`/`sc`/`sb`): only the
+    // one perturbed bound is rescaled per probe. Branching bounds (floor/ceil of
+    // the fractional value) are set in the original space, then scaled to match.
+    // The basis is scaling-invariant and the objective gap `obj − node_obj` is
+    // invariant, so the scores are identical to an unscaled probe — and a wrong
+    // score could only pick a worse branching variable, never an unsound bound.
+    let mut l = orig_l.to_vec();
+    let mut u = orig_u.to_vec();
+    let scale_bounds = |l: &[f64], u: &[f64]| -> (Vec<f64>, Vec<f64>) {
+        match ctx.scaling {
+            Some(s) => (s.scale_lower(l), s.scale_upper(u)),
+            None => (l.to_vec(), u.to_vec()),
+        }
+    };
+    let probe = |l: &[f64], u: &[f64]| -> crate::lp::simplex::LpSolve {
+        let (sl, su) = scale_bounds(l, u);
+        let view = LpView {
+            a: ctx.sa,
+            m: ctx.m_w,
+            n: ctx.n_w,
+            c: ctx.sc,
+            l: &sl,
+            u: &su,
+        };
+        solve_lp_warm_scaled(&view, ctx.sb, basis, simplex)
+    };
     let mut best: Option<usize> = None;
     let mut best_score = f64::NEG_INFINITY;
     let mut pivots = 0usize;
     for (idx, _f) in cand {
         let xi = x[idx];
-        let (lo0, hi0) = (lp.l[idx], lp.u[idx]);
+        let (lo0, hi0) = (orig_l[idx], orig_u[idx]);
 
         // Down branch: x_idx ≤ floor(x_idx).
         u[idx] = xi.floor();
-        let dn = solve_lp_warm(
-            &LpView {
-                a: lp.a,
-                m: lp.m,
-                n: lp.n,
-                c: lp.c,
-                l: &l,
-                u: &u,
-            },
-            b,
-            basis,
-            simplex,
-        );
+        let dn = probe(&l, &u);
         u[idx] = hi0;
         pivots += dn.iters;
         let d_dn = match dn.status {
@@ -703,19 +763,7 @@ fn strong_branch(
 
         // Up branch: x_idx ≥ ceil(x_idx).
         l[idx] = xi.ceil();
-        let up = solve_lp_warm(
-            &LpView {
-                a: lp.a,
-                m: lp.m,
-                n: lp.n,
-                c: lp.c,
-                l: &l,
-                u: &u,
-            },
-            b,
-            basis,
-            simplex,
-        );
+        let up = probe(&l, &u);
         l[idx] = lo0;
         pivots += up.iters;
         let d_up = match up.status {

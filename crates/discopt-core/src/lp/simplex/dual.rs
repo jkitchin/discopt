@@ -37,17 +37,20 @@ pub fn solve_lp_warm(lp: &LpView<'_>, b: &[f64], start: &Basis, opts: &SimplexOp
     match ScaledLp::maybe_new(lp, b) {
         Some(scaled) => {
             let view = scaled.view();
-            let mut sol = solve_warm_scaled(&view, scaled.b(), start, opts);
+            let mut sol = solve_lp_warm_scaled(&view, scaled.b(), start, opts);
             scaled.unscale_x(&mut sol.x);
             sol
         }
-        None => solve_warm_scaled(lp, b, start, opts),
+        None => solve_lp_warm_scaled(lp, b, start, opts),
     }
 }
 
-/// Warm dual re-optimization on an already-equilibrated LP, with the cold
-/// primal fallback (also on the scaled matrix, so it is never scaled twice).
-fn solve_warm_scaled(
+/// Warm dual re-optimization on an already-equilibrated (or known well-scaled)
+/// LP, with the cold primal fallback (also on the scaled matrix, so it is never
+/// scaled twice). Like [`solve_lp_scaled`], the B&B driver calls this directly
+/// when it has equilibrated the working matrix once and shares it across nodes;
+/// the caller owns the [`scaling::Scaling`] and unscales the returned `x`.
+pub fn solve_lp_warm_scaled(
     lp: &LpView<'_>,
     b: &[f64],
     start: &Basis,

@@ -44,9 +44,11 @@ pub fn solve_lp(lp: &LpView<'_>, b: &[f64], opts: &SimplexOptions) -> LpSolve {
 }
 
 /// Two-phase primal simplex on an already-equilibrated (or known well-scaled) LP.
-/// The warm dual path's cold fallback calls this directly so the matrix is not
-/// scaled twice.
-pub(super) fn solve_lp_scaled(lp: &LpView<'_>, b: &[f64], opts: &SimplexOptions) -> LpSolve {
+/// The warm dual path's cold fallback and the B&B driver (which equilibrates the
+/// working matrix once and shares it across all node solves) call this directly
+/// so the matrix is not scaled twice; the caller owns the [`scaling::Scaling`]
+/// and unscales the returned `x` itself.
+pub fn solve_lp_scaled(lp: &LpView<'_>, b: &[f64], opts: &SimplexOptions) -> LpSolve {
     Simplex::new(lp, b, opts).run()
 }
 
