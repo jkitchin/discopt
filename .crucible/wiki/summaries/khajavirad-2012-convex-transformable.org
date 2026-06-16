@@ -1,0 +1,70 @@
+#+TITLE: Summary — Relaxations of Factorable Functions with Convex-Transformable Intermediates (Khajavirad, Michalek, Sahinidis 2012)
+#+FILETAGS: :summary:convexity:generalized-convexity:convex-relaxation:factorable:global-optimization:baron:
+
+* Summary — Relaxations of Factorable Functions with Convex-Transformable Intermediates
+:PROPERTIES:
+:ARTICLE_TYPE: summary
+:SOURCE_KEYS: khajavirad2012
+:STATUS: draft
+:CREATED: 2026-06-16
+:END:
+
+citet:khajavirad2012 (Mathematical Programming, Ser. A, 2012) strengthen the
+standard factorable relaxations used in deterministic global optimization by
+exploiting *convex transformability* (G-convexity) of intermediate expressions.
+Rather than recursively decomposing a nonconvex function until every intermediate
+has a known convex/concave envelope, they outer-approximate richer
+sub-expressions after a monotone functional transformation, yielding relaxations
+that are provably tighter than the conventional scheme.
+
+** Key Contributions
+
+1. *Properties of G-convex functions* (Sect. 2): composition rules (scalar,
+   vector, affine) under which G-convexity is preserved; the equivalence to
+   pseudoconvexity and to positive-semidefiniteness of an augmented Hessian; and
+   the *least convexifying transformation* $G^*$, unique up to an increasing
+   affine map and strictly convex for merely pseudoconvex functions.
+2. *Convexification via transformation* (Sect. 3): the relaxation
+   $\tilde{\Phi} = \{(x,t): G(\varphi(x)) \le \mathrm{conc}_I\,G(t)\}$ of the
+   intermediate set $\{\varphi(x) \le t\}$, with a dominance theory
+   (Proposition 8) showing $G^*$ gives the tightest relaxation (Corollary 4), and
+   Proposition 9 characterizing exactly when recursive factorable decomposition
+   already captures the transformation (so it adds nothing) versus when it leaves
+   an exploitable gap.
+3. *Signomials* (Sect. 4): tightest term-wise transforming functions and a new
+   signomial overestimator, with theoretical and computational gap comparisons.
+4. *Products and ratios of convex/concave functions* (Sect. 5): generalization to
+   a large class of composite intermediates.
+5. *Log-concave functions* (Sect. 6): a further application class with large gap
+   reductions.
+6. *Integration into the factorable framework* (Sect. 7): an integrated
+   decomposition strategy and a branch-and-bound demonstration.
+
+** Headline Results
+
+- Transformation relaxations were consistently and often dramatically tighter
+  than a widely used factorable scheme (e.g. 99.72% total-gap reduction for one
+  signomial overestimation example).
+- In Example 8 (sum of two log-concave functions, box constraints), feeding
+  G-convexity cuts to BARON 9.3 cut the search from 99 nodes to 11 — a 99.83%
+  reduction in the root-node relaxation gap and a 90% reduction in total nodes —
+  with similar gains at tighter optimality tolerances.
+- For LP-based spatial branch-and-bound solvers, a recognized G-convex
+  sub-expression contributes a valid supporting-hyperplane cut (gradient of
+  $\tilde{\varphi}^G$), so the more complex convex form is not a barrier to use.
+
+** Significance
+
+The paper is "a step towards bridging the gap between generalized convexity and
+global optimization." Because G-convexity is a strictly larger class than
+DCP-convexity, recognizing it on intermediates is a principled way to obtain
+tighter *valid* lower bounds — exactly the lever that lets a spatial solver
+certify global optimality on more instances without ever compromising soundness.
+
+See [[file:../concepts/convex-transformable-functions.org][Convex-Transformable (G-convex) Functions]]
+for the concept article, and
+[[file:../concepts/convexity-detection.org][Convexity Detection]],
+[[file:../concepts/convex-relaxations.org][Convex Relaxations for Global Optimization]],
+[[file:../methods/mccormick-relaxations.org][McCormick Relaxations]], and
+[[file:../methods/spatial-branch-and-bound.org][Spatial Branch and Bound]] for
+context within the discopt knowledge base.

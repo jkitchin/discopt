@@ -1,0 +1,105 @@
+#+TITLE: Convex-Transformable (G-convex) Functions
+#+FILETAGS: :concept:convexity:generalized-convexity:convex-relaxation:factorable:global-optimization:envelopes:
+
+* Convex-Transformable (G-convex) Functions
+:PROPERTIES:
+:ARTICLE_TYPE: concept
+:SOURCE_KEYS: khajavirad2012
+:STATUS: draft
+:CREATED: 2026-06-16
+:END:
+
+A nonconvex continuous function $\varphi : C \to \mathbb{R}$ over a convex set
+$C \subseteq \mathbb{R}^n$ is *convex-transformable*, or *G-convex*, if there
+exists a continuous increasing univariate function $G$ defined on the image
+$I_\varphi(C)$ such that the composition $G(\varphi)$ is convex over $C$
+citep:khajavirad2012. The class is a cornerstone of generalized convexity: it
+subsumes many functional forms — products and ratios of convex and/or concave
+functions, signomials, and log-concave functions — that appear repeatedly as the
+building blocks of nonconvex expressions, even though the *vast majority* of
+arbitrary nonconvex functions are not convex-transformable.
+
+G-convexity sits between convexity and pseudoconvexity. Every differentiable
+G-convex function is pseudoconvex (so its stationary points are global minima),
+and for twice-differentiable functions $\varphi$ is G-convex iff there is a
+function $\rho(x) \ge 0$ making the *augmented Hessian*
+$H(x;\rho) = \nabla^2\varphi(x) + \rho(x)\,\nabla\varphi(x)\nabla\varphi(x)^T$
+positive semidefinite over $C$ (a result tracing to Fenchel). The smallest
+admissible $\rho$, $\rho_0(x)$, is obtained from a Rayleigh-quotient style
+supremum restricted to the subspace orthogonal to $\nabla\varphi$.
+
+** Least Convexifying Transformation
+
+Among all $G$ that convexify $\varphi$, there is a *least convexifying
+transformation* $G^*$ (unique up to an increasing affine map), introduced by
+Debreu in the economics of concave utility. $G^*$ matters because it yields the
+*tightest* relaxation of the form below: any other convexifier $G$ differs from
+$G^*$ by a convex increasing reparametrization, which can only loosen the outer
+approximation. For a merely pseudoconvex $\varphi$ (nowhere locally convex),
+$G^*$ is strictly convex on the whole image. Convenient calculus rules let $G^*$
+propagate through composition: if $\varphi$ is $G^*$-convex and $f$ is increasing,
+then $f(\varphi)$ is least-convexified by $G^*(f^{-1})$, and affine inner maps
+preserve $G^*$.
+
+** Relaxation via Transformation
+
+The practical payoff is an outer approximation of the intermediate set
+$\Phi = \{(x,t) \in C \times I : \varphi(x) \le t\}$ that arises when an auxiliary
+variable $t$ is introduced for a sub-expression during factorable decomposition
+(see [[file:../concepts/expression-dag-and-ad.org][Expression DAG and AD]] and
+[[file:../methods/auxiliary-variable-reformulation.org][Auxiliary Variable Reformulation]]).
+Because $G$ is increasing, $\Phi = \{G(\varphi(x)) \le G(t)\}$; replacing the
+nonconcave $G(t)$ by a concave overestimator $\bar{G}(t)$ — tightest when
+$\bar{G} = \mathrm{conc}_I\,G$ — gives the convex relaxation
+$\tilde{\Phi} = \{(x,t) : G(\varphi(x)) \le \bar{G}(t)\}$. The induced convex
+underestimator is $\tilde{\varphi}^G(x) = \bar{G}^{-1}(G(\varphi(x)))$. Choosing
+$G = G^*$ with $\bar{G} = \mathrm{conc}_I\,G^*$ is provably the tightest
+relaxation of this form.
+
+A subtle and important caveat (Proposition 9 of citep:khajavirad2012): when the
+outer function $f$ in a composition $h = f(\varphi)$ is *convex* (or $f$ concave
+and $G$ convex), the recursive factorable outer-approximation already captures the
+G-convexity automatically — detecting $\tilde{G}$-convexity of the composite buys
+nothing. The transformation approach only adds strength where the standard
+recursive decomposition leaves a gap, e.g. nonconvex outer compositions,
+signomials, and log-concave forms.
+
+** Application Classes
+
+- *Signomials* (sums of $\prod_k x_k^{a_k}$ terms): the paper derives the
+  tightest term-wise transforming functions and a new overestimator; reported
+  gap reductions versus a conventional factorable scheme are large (in one
+  example a 99.72% reduction in total gap).
+- *Products and ratios of convex/concave functions*: a broad class of composite
+  intermediates is shown G-convex/G-concave with explicit transforming functions.
+- *Log-concave functions*: sums of log-concave terms (e.g. logistic-type
+  expressions) admit much tighter relaxations than recursive factorable
+  decomposition.
+
+** Effect on Branch-and-Bound
+
+Adding G-convexity cuts to a factorable relaxation tightens the root gap and
+shrinks the search tree. In the paper's Example 8 (a sum of two log-concave
+functions maximized over a box), BARON 9.3 needed 99 nodes with the standard
+factorable relaxation but only 11 with the G-convexity relaxation — a 99.83%
+reduction in the root-node gap and a 90% reduction in total nodes. Crucially for
+LP-based spatial solvers (see [[file:../methods/spatial-branch-and-bound.org][Spatial Branch and Bound]]),
+once a G-convex sub-expression is recognized its gradient supplies a valid
+supporting-hyperplane cut, so the more complex functional form of $\tilde{\varphi}^G$
+is no obstacle: it enters the LP relaxation as a linear cut rather than a
+nonlinear convex constraint.
+
+** Relevance to discopt
+
+discopt's [[file:../concepts/convexity-detection.org][Convexity Detection]] is
+currently DCP- and eigenvalue-based, classifying sub-expressions as
+convex/concave/affine/unknown on the
+[[file:../concepts/expression-dag-and-ad.org][expression DAG]]. G-convexity is a
+strictly larger class than DCP-convex, and recognizing it on intermediate
+expressions is a concrete route to tighter per-node
+[[file:../concepts/convex-relaxations.org][convex relaxations]] than
+[[file:../methods/mccormick-relaxations.org][McCormick]] or
+[[file:../methods/alphabb-underestimators.org][alphaBB]] alone — directly relevant
+to certifying more MINLPLib instances soundly, since a tighter valid lower bound
+closes more gaps without ever risking an invalid dual bound. The supporting-cut
+formulation maps naturally onto discopt's LP-relaxation node bounding.
