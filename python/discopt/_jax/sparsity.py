@@ -95,11 +95,27 @@ def _collect_variable_indices(expr: Expression, model: Model) -> set[int]:
         return set()
     if isinstance(expr, IndexExpression):
         if isinstance(expr.base, Variable):
-            offset = _var_offset(expr.base, model)
+            base = expr.base
+            offset = _var_offset(base, model)
             idx = expr.index
             if isinstance(idx, (int, np.integer)):
                 return {offset + int(idx)}
-            return set(range(offset, offset + expr.base.size))
+            # Resolve a multi-dimensional / slice / fancy index (e.g. the 2-D
+            # ``a0[i, j]`` of a collocation variable) to the exact flat element
+            # set, rather than returning the whole variable. Over-reporting here
+            # is amplified by the Hessian-pair collection below: a squared
+            # element ``(a0[i, j] - c)**2`` would otherwise be treated as a dense
+            # block over EVERY entry of ``a0``, spuriously densifying a genuinely
+            # sparse (arrowhead) Hessian and forcing it off the colored-HVP path.
+            shape = base.shape if base.shape else (base.size,)
+            try:
+                flat = np.arange(base.size).reshape(shape)
+                sel = flat[idx]
+                return {offset + int(k) for k in np.atleast_1d(np.asarray(sel)).ravel()}
+            except (IndexError, ValueError, TypeError):
+                # Anything we cannot resolve statically: fall back to the whole
+                # variable (a sound over-approximation for sparsity).
+                return set(range(offset, offset + base.size))
         return _collect_variable_indices(expr.base, model)
     if isinstance(expr, BinaryOp):
         left = _collect_variable_indices(expr.left, model)
@@ -130,6 +146,45 @@ def _collect_variable_indices(expr: Expression, model: Model) -> set[int]:
     return set()
 
 
+def _expr_is_scalar(expr: Expression, model: Model) -> bool:
+    """Best-effort: does ``expr`` evaluate to a single scalar (not an array)?
+
+    This distinguishes a scalar reduction like ``sqr(Σ aₖ xₖ)`` — whose Hessian
+    is a DENSE block over every base variable — from an element-wise array power
+    like ``x**2`` (``x`` a vector), whose Hessian is diagonal. Getting this wrong
+    is only ever an efficiency cost in the SAFE direction: an unrecognized
+    construct defaults to scalar (→ a denser, still-sound Hessian pattern), never
+    to a too-small one that would corrupt the colored-HVP sparse-Hessian values.
+    """
+    if isinstance(expr, Variable):
+        return expr.size == 1
+    if isinstance(expr, Parameter):
+        return int(getattr(expr, "size", 1)) == 1
+    if isinstance(expr, Constant):
+        return np.size(getattr(expr, "value", 0)) == 1
+    if isinstance(expr, IndexExpression):
+        idx = expr.index
+        if isinstance(idx, (int, np.integer)):
+            return True
+        # A tuple of plain integers selects one element of an N-D array.
+        if isinstance(idx, tuple) and all(isinstance(k, (int, np.integer)) for k in idx):
+            return True
+        # Slice / fancy index → still an array.
+        return False
+    if isinstance(expr, (SumExpression, SumOverExpression)):
+        return True
+    if isinstance(expr, UnaryOp):
+        return _expr_is_scalar(expr.operand, model)
+    if isinstance(expr, FunctionCall):
+        return all(_expr_is_scalar(a, model) for a in expr.args)
+    if isinstance(expr, BinaryOp):
+        # ``+ - * / **`` broadcast: scalar only when BOTH sides are scalar.
+        return _expr_is_scalar(expr.left, model) and _expr_is_scalar(expr.right, model)
+    # MatMul / anything unrecognized: assume scalar so the Hessian block is the
+    # dense (sound) over-approximation rather than a potentially-too-small one.
+    return True
+
+
 def _collect_nonlinear_pairs(expr: Expression, model: Model) -> set[tuple[int, int]]:
     """Collect pairs of variable indices that interact nonlinearly.
 
@@ -152,8 +207,25 @@ def _collect_nonlinear_pairs(expr: Expression, model: Model) -> set[tuple[int, i
                     pairs.add((a, b))
 
         if expr.op == "**" and left_vars:
-            for i in left_vars:
-                pairs.add((i, i))
+            # A power g(x)**p whose base g is a SCALAR mixing several variables
+            # has Hessian d²/dxᵢdxⱼ (g^p) = p(p-1) g^(p-2) gᵢ gⱼ + p g^(p-1) gᵢⱼ,
+            # whose first term couples EVERY pair (i, j) in the base (gᵢ gⱼ ≠ 0 in
+            # general). Recording only the diagonal — as this did before — under-
+            # reports the Hessian for squared linear forms like sqr(Σ aₖ xₖ) (e.g.
+            # MINLPLib's du-opt is built entirely from these), whose true Hessian
+            # is the dense 2aaᵀ; a too-small pattern would make the colored-HVP
+            # sparse path recover a diagonal approximation of a dense matrix.
+            # An ELEMENT-WISE array power like ``x**2`` (x a vector), by contrast,
+            # has a genuinely diagonal Hessian — so emit the dense block only when
+            # the base is scalar; otherwise keep the per-variable diagonal.
+            if len(left_vars) > 1 and _expr_is_scalar(expr.left, model):
+                for i in left_vars:
+                    for j in left_vars:
+                        a, b = (i, j) if i <= j else (j, i)
+                        pairs.add((a, b))
+            else:
+                for i in left_vars:
+                    pairs.add((i, i))
 
         pairs |= _collect_nonlinear_pairs(expr.left, model)
         pairs |= _collect_nonlinear_pairs(expr.right, model)
