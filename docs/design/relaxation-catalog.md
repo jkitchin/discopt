@@ -286,12 +286,21 @@ convexity-detection tracks (x-space + GP, §9), and FBBT in both directions.
    Validated sound (0/600 cut violations; a 60-model n=5/6 sweep never exceeds the true min;
    5-linear root −16→−10.375).
 
-**Remaining (research-grade):**
+**Done (this branch), continued:**
 
-4. **Edge-concave / vertex-polyhedral underestimators** (Tardella; Hasan 2018). *Research-grade
-   new relaxation family.* Note: multilinear monomials are already edge-concave and their
-   vertex envelope is exactly what RLT (§6.D) produces — the open value is *other* edge-concave
-   structures, needing a general edge-concavity detector + vertex-envelope construction.
+4. **Edge-concave / vertex-polyhedral underestimators — DONE (quadratic blocks).** The
+   ANTIGONE edge-concave family for the non-multilinear case: quadratic blocks
+   `q = Σaᵢxᵢ² + Σbᵢⱼxᵢxⱼ + …` with sign-definite square coefficients are detected
+   (`edge_concave.py`; exact for a quadratic) and their vertex-polyhedral envelope (Tardella)
+   is separated as a cut **directly on the existing `xᵢ²`/`xᵢxⱼ` auxes** — no lifting. Sound
+   (detection mandatory: a non-edge-concave block's vertex cut is invalid — verified 300/300);
+   tightens coupled quadratics markedly (3-var −19.5→−10.5, 4-var −28→−14.5); 80-model
+   soundness sweep never exceeds the true min. *Open extension:* general (non-quadratic)
+   edge-concave blocks via the interval-Hessian-diagonal detector + epigraph lifting (the
+   separation core already generalizes to arbitrary vertex values).
+
+**Remaining (low value):**
+
 5. **Discrete / `sign` / indicator handling.** *Finding: sign's continuous convex/concave hull
    over a zero-spanning box is already exact* (constant `±1`, since sign equals `−1` across all
    of `[lb, 0)`), so `relax_sign` is not loose in the continuous sense. Tightening genuinely
@@ -310,13 +319,15 @@ misclassified convex). The `prod` path uses the proper recursive-McCormick fold;
 are certified and a NaN vector-eval bug in the Rust IR was fixed.
 
 Also delivered (the §7 SOTA items): **1–2** OBBT-on-relaxation loop + duality-based bound
-tightening; **3** uncapped multilinear hull via on-demand separation; **6** norm-DCP atom +
-region-aware trig certificate; **7** FBBT backward for erf/sin/cos; **8** general `norm{p}` via
-`NormP(u32)`. What remains is **4** (edge-concave underestimators — research-grade) and **5**
-(discrete `sign`/indicator — low value; sign's continuous hull is already exact). The
-relaxation tightness is at parity with SOTA for the polynomial/factorable core (now including
-the *exact* multilinear hull at any factor count); the residual distance is the two
-specialized items above.
+tightening; **3** uncapped multilinear hull via on-demand separation; **4** edge-concave
+quadratic vertex-hull separation; **6** norm-DCP atom + region-aware trig certificate; **7**
+FBBT backward for erf/sin/cos; **8** general `norm{p}` via `NormP(u32)`. The only remaining §7
+item is **5** (discrete `sign`/indicator — low value; sign's continuous hull is already exact,
+so it would need a niche discrete reformulation). The relaxation layer is now at SOTA parity
+for the polynomial/factorable core: exact bilinear/trilinear/multilinear hulls at any factor
+count, the edge-concave family for coupled quadratics, factorable McCormick over the full
+function set, rigorous α-BB, two convexity tracks, FBBT both directions, and OBBT/DBBT
+range reduction.
 
 ---
 
