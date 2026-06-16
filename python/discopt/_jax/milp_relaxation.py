@@ -780,6 +780,94 @@ def _collect_lifted_bilinear_products(
     return sorted(keys)
 
 
+def _collect_lifted_higher_products(
+    model: Model,
+    fractional_power_var_map: dict[tuple[int, float], int],
+    univariate_var_map: dict[object, int],
+    n_orig: int,
+    monomial_var_map: Optional[dict[tuple[int, int], int]] = None,
+    composite_var_map: Optional[dict[int, int]] = None,
+) -> tuple[list[tuple[int, int, int]], list[tuple[int, ...]]]:
+    """Return trilinear/multilinear products that involve a lifted aux column.
+
+    The trilinear/multilinear allocation loops in :func:`build_milp_relaxation`
+    are populated only from ``terms.trilinear`` / ``terms.multilinear``, which
+    the term classifier records over *original* variables. A product such as
+    ``x**2 * y * z`` is dumped into ``general_nl``; after :func:`_decompose_product`
+    collapses ``x*x`` into its monomial aux column it becomes a three-distinct-column
+    product ``[col(x**2), y, z]`` whose key never appears in those classifier
+    sets, so the linearizer raised ``"Trilinear (i,j,k) not in map"`` and the
+    whole objective/constraint dropped (issue #139, bucket 2).
+
+    This collector walks the objective and constraints exactly like
+    :func:`_collect_lifted_bilinear_products` and returns the distinct-column
+    products with no repeated factor (``len(indices) == len(unique)``) where at
+    least one factor is a lifted aux column (``idx >= n_orig``). They are split
+    by arity into trilinear (three columns) and multilinear (four or more).
+    The recursive bilinear chain that relaxes them is already proven sound:
+    each stage is a standard McCormick envelope on interval-arithmetic bounds.
+    """
+    trilinear: set[tuple[int, int, int]] = set()
+    multilinear: set[tuple[int, ...]] = set()
+
+    def visit(expr: Expression) -> None:
+        if isinstance(expr, BinaryOp):
+            if expr.op == "*":
+                decomp = _decompose_product(
+                    expr,
+                    model,
+                    fractional_power_var_map=fractional_power_var_map,
+                    univariate_var_map=univariate_var_map,
+                    monomial_var_map=monomial_var_map,
+                    composite_var_map=composite_var_map,
+                )
+                if decomp is not None:
+                    _scalar, indices = decomp
+                    unique = list(dict.fromkeys(indices))
+                    if (
+                        len(unique) == len(indices)
+                        and len(unique) >= 3
+                        and any(idx >= n_orig for idx in unique)
+                    ):
+                        ordered = tuple(sorted(unique))
+                        if len(ordered) == 3:
+                            trilinear.add(ordered)  # type: ignore[arg-type]
+                        else:
+                            multilinear.add(ordered)
+            visit(expr.left)
+            visit(expr.right)
+            return
+
+        if isinstance(expr, UnaryOp):
+            visit(expr.operand)
+            return
+
+        if isinstance(expr, FunctionCall):
+            for arg in expr.args:
+                visit(arg)
+            return
+
+        if isinstance(expr, IndexExpression):
+            if not isinstance(expr.base, Variable):
+                visit(expr.base)
+            return
+
+        if isinstance(expr, SumExpression):
+            visit(expr.operand)
+            return
+
+        if isinstance(expr, SumOverExpression):
+            for term in expr.terms:
+                visit(term)
+
+    if model._objective is not None:
+        visit(distribute_products(model._objective.expression))
+    for constraint in model._constraints:
+        visit(distribute_products(constraint.body))
+
+    return sorted(trilinear), sorted(multilinear, key=lambda t: (len(t), t))
+
+
 # Univariate functions whose superposition cuts are supported: smooth on any
 # box the lifted aux already validated, so the Chebyshev kernel encloses them
 # rigorously. ``abs`` (non-smooth) and ``tan`` (poles) are deliberately omitted.
@@ -3234,6 +3322,39 @@ def build_milp_relaxation(
     )
     for key in lifted_bilinear_keys:
         bilinear_var_map[key] = _ensure_bilinear_aux(*key)
+
+    # ── Lifted trilinear / multilinear: products such as ``x**2 * y * z`` whose
+    # repeated factor collapses to a lifted aux column. The classifier never
+    # records their distinct-column key, so allocate the recursive bilinear
+    # chain here (after every lifted map — monomial/univariate/fractional-power/
+    # composite — is populated so ``_decompose_product`` resolves each factor).
+    lifted_trilinear_keys, lifted_multilinear_keys = _collect_lifted_higher_products(
+        model,
+        fractional_power_var_map,
+        univariate_var_map,
+        n_orig,
+        monomial_var_map=monomial_var_map,
+        composite_var_map=composite_var_map,
+    )
+    for term in lifted_trilinear_keys:
+        if term in trilinear_var_map:
+            continue
+        pair, remaining = _choose_trilinear_pair(term, partitioned_vars)
+        pair_col = _ensure_bilinear_aux(*pair)
+        final_col = _ensure_bilinear_aux(pair_col, remaining)
+        trilinear_var_map[term] = final_col
+        trilinear_stage_map[term] = {
+            "pair": pair,
+            "pair_col": pair_col,
+            "remaining_var": remaining,
+            "product_col": final_col,
+        }
+    for multi_term in lifted_multilinear_keys:
+        if multi_term in multilinear_var_map:
+            continue
+        final_col, stages = _ensure_multilinear_aux(multi_term)
+        multilinear_var_map[multi_term] = final_col
+        multilinear_stage_map[multi_term] = stages
 
     bilinear_pw_map: dict[tuple[int, int], list] = {}
     bilinear_lambda_map: dict[tuple[int, int], dict] = {}
