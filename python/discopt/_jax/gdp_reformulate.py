@@ -224,11 +224,21 @@ def _compute_big_m_lp(
     default : float
         Fallback M value.
     """
+    # Big-M from an LP optimum must use an EXACT (simplex/vertex) oracle, never
+    # the POUNCE IPM: the LP optimum becomes the disjunct's big-M, so an inexact
+    # optimum (the IPM's analytic-center objective can be grossly wrong on an
+    # ill-conditioned LP while still reporting OPTIMAL — issue #145) can return a
+    # big-M that is *too small* and cut off feasible points of the inactive
+    # disjunct. When no exact oracle is available, fall back to interval
+    # arithmetic, which always over-estimates M and is therefore sound.
     try:
-        from discopt.solvers.lp_backend import get_lp_solver
+        from discopt.solvers import SolveStatus
+        from discopt.solvers.lp_backend import get_exact_lp_solver
 
-        solve_lp = get_lp_solver()
+        solve_lp = get_exact_lp_solver()
     except ImportError:
+        solve_lp = None
+    if solve_lp is None:
         return _compute_big_m(constraint, model, default)
 
     A_ub, b_ub, A_eq, b_eq, n_vars = lp_data
@@ -264,7 +274,7 @@ def _compute_big_m_lp(
                 b_eq=b_eq,
                 bounds=bounds_list,
             )
-            if result.status in ("optimal",) and result.objective is not None:
+            if result.status == SolveStatus.OPTIMAL and result.objective is not None:
                 val = -result.objective if maximize else result.objective
                 return float(val) + offset
         except Exception:

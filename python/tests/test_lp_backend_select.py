@@ -147,12 +147,26 @@ class TestHighspyConsumersRetired:
         assert best in (0, 1)  # picked a candidate via POUNCE LP probes
 
     def test_gdp_big_m_lp_is_highs_free(self, monkeypatch):
-        """Multiple-big-M's LP-based bound tightening runs without HiGHS and
-        matches the HiGHS-computed M."""
+        """Multiple-big-M's LP-based tightening runs without HiGHS, via the
+        exact (Rust simplex) oracle, and is tighter than the interval fallback.
+
+        Big-M from an LP optimum must use an exact oracle, never the POUNCE IPM
+        (#145): a too-small M cuts off the inactive disjunct's feasible points.
+        With HiGHS absent the path must still produce the LP-tight M from the
+        self-hosted simplex.
+        """
         pytest.importorskip("pounce")
-        pytest.importorskip("highspy")
+        from discopt.solvers.lp_backend import get_exact_lp_solver
+
+        _without_highs(monkeypatch)
+        if get_exact_lp_solver() is None:
+            pytest.skip("no exact LP oracle (neither Rust simplex nor HiGHS)")
         import discopt.modeling as dm
-        from discopt._jax.gdp_reformulate import _compute_big_m_lp, _precompute_lp_relaxation
+        from discopt._jax.gdp_reformulate import (
+            _compute_big_m,
+            _compute_big_m_lp,
+            _precompute_lp_relaxation,
+        )
         from discopt.modeling.core import Constraint
 
         m = dm.Model("mbm")
@@ -163,22 +177,26 @@ class TestHighspyConsumersRetired:
         assert lp_data is not None
         con = Constraint(body=x + y - dm.core.Constant(5.0), sense="<=", rhs=0.0)
 
-        m_highs = _compute_big_m_lp(con, m, lp_data)  # HiGHS preferred
-        _without_highs(monkeypatch)
-        m_pounce = _compute_big_m_lp(con, m, lp_data)  # POUNCE only
-        assert np.isfinite(m_highs) and np.isfinite(m_pounce)
-        assert abs(m_highs - m_pounce) < 1e-3
+        # body = x + y - 5, maximized over x + y <= 8 -> 3, so M = 3 * 1.01.
+        m_lp = _compute_big_m_lp(con, m, lp_data)
+        assert np.isfinite(m_lp)
+        assert m_lp == pytest.approx(3.0 * 1.01, abs=1e-3)
+        # The LP-tight M must be a sound under-bound of the interval fallback
+        # (interval: |10 + 10 - 5| = 15) -> strictly tighter, never larger.
+        assert m_lp < _compute_big_m(con, m)
 
 
 class TestObbtRetired:
-    """OBBT bound tightening requires an *exact* LP oracle (HiGHS).
+    """OBBT bound tightening requires an *exact* LP oracle.
 
     OBBT tightens a variable's bound to the optimum of ``min``/``max x_i`` over
     the relaxation polytope, so the subproblem LP must be solved to its true
     optimum to stay sound. The POUNCE IPM returns an analytic-center objective
     that can be wrong on ill-conditioned LPs while reporting ``OPTIMAL`` (#145),
-    so OBBT routes through HiGHS regardless of ``prefer_pounce`` and is a sound
-    no-op when no exact oracle is available.
+    so OBBT routes through ``get_exact_lp_solver()`` — discopt's own pure-Rust
+    simplex (or HiGHS) but never the IPM — regardless of ``prefer_pounce``, and
+    is a sound no-op when no exact oracle is available. The Rust simplex needs no
+    external HiGHS, so these run in a POUNCE-only install.
     """
 
     def _model(self):
@@ -194,9 +212,12 @@ class TestObbtRetired:
         return m
 
     def test_obbt_tightens_via_exact_oracle(self):
-        # Tightening requires the exact (HiGHS) oracle; ``prefer_pounce`` is a
-        # no-op for the solver selection (#145).
-        pytest.importorskip("highspy")
+        # Tightening requires the exact (self-hosted simplex) oracle;
+        # ``prefer_pounce`` is a no-op for the solver selection (#145).
+        from discopt.solvers.lp_backend import get_exact_lp_solver
+
+        if get_exact_lp_solver() is None:
+            pytest.skip("no exact LP oracle (neither Rust simplex nor HiGHS)")
         from discopt._jax.obbt import run_obbt
 
         res = run_obbt(self._model(), prefer_pounce=True, time_limit_per_lp=5.0)
@@ -208,7 +229,10 @@ class TestObbtRetired:
         # Both calls must route through the exact oracle, so the tightened box
         # is identical regardless of ``prefer_pounce`` (it no longer selects the
         # IPM backend for OBBT — #145).
-        pytest.importorskip("highspy")
+        from discopt.solvers.lp_backend import get_exact_lp_solver
+
+        if get_exact_lp_solver() is None:
+            pytest.skip("no exact LP oracle (neither Rust simplex nor HiGHS)")
         from discopt._jax.obbt import run_obbt
 
         rp = run_obbt(self._model(), prefer_pounce=True, time_limit_per_lp=5.0)
