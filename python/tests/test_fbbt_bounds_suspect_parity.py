@@ -67,15 +67,14 @@ pytestmark = pytest.mark.skipif(
 #   - euclidean_norm / norm_le : sqrt(x^2 + y^2); the inner square's exact 0
 #     minimum outward-rounds just below 0, poisoning sqrt's domain to a -inf
 #     lower endpoint (sound, but loose).
-#   - asin / acos / atan       : the interval evaluator has no enclosure for the
-#     inverse-trig atoms and soundly returns (-inf, +inf).
+#
+# The inverse-trig atoms (asin / acos / atan) used to live here; issue #136
+# wired their monotone enclosures into the interval evaluator, so they now
+# produce finite bounds and are no longer pinned.
 DISCOPT_UNBOUNDED: frozenset[str] = frozenset(
     {
         "euclidean_norm::objective",
         "norm_le::soc",
-        "asin_convex_branch::objective",
-        "acos_concave_branch::objective",
-        "atan_concave_branch::objective",
     }
 )
 

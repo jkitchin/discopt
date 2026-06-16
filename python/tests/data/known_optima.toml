@@ -1,0 +1,59 @@
+# Reference global optima for benchmark instances used by the certification
+# test suites — a single source of truth so a soundness regression (a dual
+# bound exceeding the true optimum) is caught against one authoritative value
+# rather than a constant duplicated across test files.
+#
+# Each entry records the published global optimum, where it came from, which
+# nonlinear functions the instance exercises, and whether discopt currently
+# certifies it (vs. produces a sound-but-loose bound or soundly declines).
+#
+# Load via tests/_optima.py:
+#     from _optima import known_optimum
+#     opt = known_optimum("ex8_1_1")          # -> 6 (the float)
+#     entry = known_optimum("ex8_1_1", full=True)   # -> the whole table
+#
+# Soundness convention: tests assert `bound <= optimum + tol`. The optimum is
+# the *true* global minimum, so this is the literal soundness invariant.
+
+schema = 1
+
+# ── Periodic transcendentals (issue #137) — real MINLPLib sin/cos instances ──
+# Surveyed from minlplib.org instancedata.csv (opsin/opcos > 0, gap ~ 0).
+# tan (o38) and inverse-trig are absent upstream; tanh/erf instances upstream
+# are all unsolved (gap = inf) or lack an .nl, so none are imported as ground
+# truth — see test_trig_certification.py / test_monotone_transcendental_*.
+
+[ex8_1_1]
+optimum = -2.021806783
+source = "MINLPLib"
+functions = ["sin", "cos"]
+status = "certifies"
+note = "Floudas-Pardalos ex8_1_1; sin*cos product of 2 vars."
+
+[ex8_1_2]
+optimum = -1.070861019
+source = "MINLPLib"
+functions = ["cos"]
+status = "binary_nl_unsupported"
+note = "Published optimum recorded; MINLPLib ships ex8_1_2 only in binary .nl (b3), which discopt declines to parse, so it is not wired as a live instance."
+
+[mathopt3]
+optimum = 0.0
+source = "MINLPLib"
+functions = ["sin", "cos"]
+status = "certifies"
+note = "Published primalbound ~5e-12; the global minimum is 0."
+
+[mathopt5_2]
+optimum = -1.0
+source = "MINLPLib"
+functions = ["cos"]
+status = "certifies"
+note = "Single-variable cos instance; global minimum -1."
+
+[trig]
+optimum = -3.762500358
+source = "MINLPLib"
+functions = ["sin", "cos"]
+status = "declines"
+note = "discopt produces no dual bound today (sound decline, bound=None); recorded so a future periodic envelope can be regression-checked to bound <= -3.7625."

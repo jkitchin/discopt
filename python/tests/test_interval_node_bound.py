@@ -82,11 +82,12 @@ def test_interval_bound_never_invalid_on_unsupported_ops():
     degrade to ``-inf`` (a no-op) rather than emit an invalid finite bound."""
     m = dm.Model("t")
     x = m.continuous("x", lb=0.1, ub=2.0)
-    # erf is not modelled by the interval evaluator -> unbounded -> -inf.
+    # sigmoid is not modelled by the interval evaluator -> unbounded -> -inf.
+    # (erf, formerly used here, is now modelled per issue #136.)
     try:
-        m.minimize(dm.erf(x))
+        m.minimize(dm.sigmoid(x))
     except AttributeError:
-        pytest.skip("dm.erf not available in this build")
+        pytest.skip("dm.sigmoid not available in this build")
     bound = S._compute_interval_bound(m, np.array([0.1]), np.array([2.0]), negate=False)
     assert bound == -np.inf
 

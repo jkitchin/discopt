@@ -544,7 +544,24 @@ def _classify_function_call(expr: FunctionCall, model: Optional[Model], cache: d
     # Restricted-domain atoms need a strict sign proof on the argument
     # to license the DCP rule. Tighten via the linear relaxation when
     # the syntactic sign alone is too weak.
-    if name in ("log", "log2", "log10", "sqrt") and not is_strict(arg_sign):
+    # Restricted-domain atoms (log/sqrt + the monotone inverse group, #136)
+    # plus the inflect-at-origin atoms whose curvature is sign-split: refining
+    # the argument sign via the linear relaxation lets a one-sided box classify.
+    _sign_refined_atoms = (
+        "log",
+        "log2",
+        "log10",
+        "sqrt",
+        "asin",
+        "acos",
+        "acosh",
+        "atanh",
+        "log1p",
+        "atan",
+        "asinh",
+        "erf",
+    )
+    if name in _sign_refined_atoms and not is_strict(arg_sign):
         arg_sign = _refine_sign(expr.args[0], model, cache, arg_sign)
     profile: Optional[AtomProfile] = unary_atom_profile(name, arg_sign)
 
@@ -593,6 +610,13 @@ def _function_result_sign(name: str, arg_sign: Sign) -> Sign:
         return arg_sign
     if name == "tanh":
         return arg_sign
+    # Monotone inverse atoms through the origin preserve the argument sign
+    # (each is increasing with f(0) = 0): atan, asin, asinh, atanh, erf, log1p.
+    if name in ("atan", "asin", "asinh", "atanh", "erf", "log1p"):
+        return arg_sign
+    # acos / acosh map into a nonnegative range on their domains.
+    if name in ("acos", "acosh"):
+        return Sign.NONNEG
     return Sign.UNKNOWN
 
 

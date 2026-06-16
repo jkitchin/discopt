@@ -36,8 +36,11 @@ from discopt.modeling.core import (
     # Variable types (for isinstance checks, rarely needed)
     Variable,
     VarType,
+    acos,
     acosh,
+    asin,
     asinh,
+    atan,
     atanh,
     # Logical functions
     atleast,
@@ -97,6 +100,9 @@ __all__ = [
     "sin",
     "cos",
     "tan",
+    "atan",
+    "asin",
+    "acos",
     "asinh",
     "acosh",
     "atanh",

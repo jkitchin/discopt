@@ -402,4 +402,48 @@ def unary_atom_profile(name: str, arg_sign: Sign) -> Optional[AtomProfile]:
             return AtomProfile(Curvature.CONVEX, Monotonicity.NONDEC)
         return None
 
+    # ── Monotone inverse-trig / inverse-hyperbolic / error / log1p atoms ──
+    # The "easy group" (issue #136): each is monotone with a single known
+    # inflection at the origin (or concave throughout a restricted domain).
+
+    if name in ("asin", "atanh"):
+        # asin (domain [-1,1]) and atanh (domain (-1,1)) share f'' = +ve·x:
+        # convex on x>=0, concave on x<=0; nondecreasing everywhere.
+        if is_nonneg(arg_sign):
+            return AtomProfile(Curvature.CONVEX, Monotonicity.NONDEC)
+        if is_nonpos(arg_sign):
+            return AtomProfile(Curvature.CONCAVE, Monotonicity.NONDEC)
+        return None
+
+    if name in ("atan", "asinh", "erf"):
+        # atan, asinh, erf share f'' = -ve·x: concave on x>=0, convex on x<=0;
+        # nondecreasing everywhere (atan/asinh/erf are defined on all of R).
+        if is_nonneg(arg_sign):
+            return AtomProfile(Curvature.CONCAVE, Monotonicity.NONDEC)
+        if is_nonpos(arg_sign):
+            return AtomProfile(Curvature.CONVEX, Monotonicity.NONDEC)
+        return None
+
+    if name == "acos":
+        # acos (domain [-1,1]) is nonincreasing; concave on x>=0, convex on x<=0.
+        if is_nonneg(arg_sign):
+            return AtomProfile(Curvature.CONCAVE, Monotonicity.NONINC)
+        if is_nonpos(arg_sign):
+            return AtomProfile(Curvature.CONVEX, Monotonicity.NONINC)
+        return None
+
+    if name == "acosh":
+        # acosh is concave and nondecreasing on its whole domain [1, inf);
+        # a strict-positive argument is necessary to even be in domain.
+        if is_pos(arg_sign):
+            return AtomProfile(Curvature.CONCAVE, Monotonicity.NONDEC)
+        return None
+
+    if name == "log1p":
+        # log1p is concave and nondecreasing on (-1, inf). A nonneg argument is
+        # safely in-domain; weaker/unknown signs abstain (cf. log requiring >0).
+        if is_nonneg(arg_sign):
+            return AtomProfile(Curvature.CONCAVE, Monotonicity.NONDEC)
+        return None
+
     return None
