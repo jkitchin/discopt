@@ -39,10 +39,38 @@ pub trait LinearSolver {
     /// Replace the basic column in slot `leaving_slot` with `entering_col`
     /// (product-form update; the caller refactorizes when updates accumulate).
     fn update(&mut self, leaving_slot: usize, entering_col: &[f64]) -> Result<(), LinError>;
+
+    /// Solve `B X = RHS` for several right-hand sides at once, each `rhs[k]` an
+    /// `m`-vector solved in place. The point is to reuse the single existing
+    /// factorization across all `k` solves (sensitivity / strong-branching probes
+    /// / multi-rhs LPs) instead of refactorizing per system. The default loops
+    /// over [`ftran`](Self::ftran); a backend with a true matrix solve may
+    /// override. On the first failing column it stops and returns the error
+    /// (later columns are left untouched).
+    fn ftran_multi(&mut self, rhs: &mut [&mut [f64]]) -> Result<(), LinError> {
+        for col in rhs.iter_mut() {
+            self.ftran(col)?;
+        }
+        Ok(())
+    }
+
+    /// Solve `Bᵀ Y = RHS` for several right-hand sides at once (see
+    /// [`ftran_multi`](Self::ftran_multi)).
+    fn btran_multi(&mut self, rhs: &mut [&mut [f64]]) -> Result<(), LinError> {
+        for col in rhs.iter_mut() {
+            self.btran(col)?;
+        }
+        Ok(())
+    }
 }
 
 /// Production backend: feral's sparse unsymmetric LU.
-#[derive(Default)]
+///
+/// `Clone` duplicates the factorization itself (feral's `SparseLu` is `Clone`),
+/// so a prepared basis factorization can be cloned and re-optimized from several
+/// times — the dual warm-start reuses one factorization across a node's
+/// strong-branching probes instead of refactorizing the identical basis per probe.
+#[derive(Default, Clone)]
 pub struct FeralLU {
     lu: Option<SparseLu>,
 }
@@ -223,5 +251,49 @@ mod tests {
             close(&bmatvec(&updated, &xf2), &rhs, 1e-9),
             "post-update B·x != rhs"
         );
+    }
+
+    #[test]
+    fn multi_rhs_matches_per_column_solves() {
+        // ftran_multi / btran_multi over one factorization must reproduce
+        // solving each right-hand side individually.
+        let cols = vec![
+            vec![2.0, 1.0, 0.0],
+            vec![1.0, 2.0, 1.0],
+            vec![0.0, 1.0, 2.0],
+        ];
+        let m = 3;
+        let mut fl = FeralLU::new();
+        fl.factorize(m, &cols).unwrap();
+
+        let rhs0 = [1.0, 2.0, 3.0];
+        let rhs1 = [3.0, 0.0, -1.0];
+
+        // Reference: individual ftran.
+        let (mut r0, mut r1) = (rhs0, rhs1);
+        fl.ftran(&mut r0).unwrap();
+        fl.ftran(&mut r1).unwrap();
+
+        // Batched ftran_multi.
+        let (mut b0, mut b1) = (rhs0, rhs1);
+        {
+            let mut batch: [&mut [f64]; 2] = [&mut b0, &mut b1];
+            fl.ftran_multi(&mut batch).unwrap();
+        }
+        assert!(close(&b0, &r0, 1e-12) && close(&b1, &r1, 1e-12));
+        // Each solved system genuinely satisfies B·x = rhs.
+        assert!(close(&bmatvec(&cols, &b0), &rhs0, 1e-9));
+        assert!(close(&bmatvec(&cols, &b1), &rhs1, 1e-9));
+
+        // btran_multi likewise matches individual btran.
+        let (mut y0, mut y1) = (rhs0, rhs1);
+        fl.btran(&mut y0).unwrap();
+        fl.btran(&mut y1).unwrap();
+        let (mut c0, mut c1) = (rhs0, rhs1);
+        {
+            let mut batch: [&mut [f64]; 2] = [&mut c0, &mut c1];
+            fl.btran_multi(&mut batch).unwrap();
+        }
+        assert!(close(&c0, &y0, 1e-12) && close(&c1, &y1, 1e-12));
     }
 }

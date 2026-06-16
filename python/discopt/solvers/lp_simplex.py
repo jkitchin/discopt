@@ -25,7 +25,7 @@ signature compatibility and ignored).
 
 from __future__ import annotations
 
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, cast
 
 import numpy as np
 import scipy.sparse as sp
@@ -84,3 +84,94 @@ def solve_lp(
         basis=None,
         wall_time=res.wall_time,
     )
+
+
+def solve_lp_batch(
+    c: np.ndarray,
+    A_ub: Union[np.ndarray, sp.spmatrix],
+    instances: list[tuple[np.ndarray, list[tuple[float, float]]]],
+    *,
+    tol: float = 1e-9,
+    max_iter: int = 100_000,
+) -> list[LPResult]:
+    """Solve many LPs ``min c^T x s.t. A_ub x <= b_ub, bounds`` that share ``c``
+    and ``A_ub``, one per ``instances`` entry ``(b_ub, bounds)``.
+
+    The shared constraint matrix is marshalled to standard form once and the
+    Rust batch path computes the equilibration scaling a single time, reusing it
+    for every instance and solving them in parallel. The result list is in input
+    order; each is observationally identical to calling :func:`solve_lp` on that
+    instance alone. This is the throughput path for re-solving an LP over many
+    right-hand sides or bound boxes (the B&B / OBBT / scenario pattern).
+
+    Raises :class:`SimplexBackendUnavailable` if the Rust binding is missing.
+    """
+    from discopt.solvers.milp_simplex import SimplexBackendUnavailable
+
+    try:
+        from discopt._rust import solve_lp_batch_py
+    except ImportError as err:  # pragma: no cover - exercised via the selector
+        raise SimplexBackendUnavailable(
+            "discopt._rust.solve_lp_batch_py is unavailable; build the Rust extension"
+        ) from err
+
+    c_arr = np.asarray(c, dtype=np.float64).ravel()
+    n = c_arr.shape[0]
+    a = (
+        cast("sp.spmatrix", A_ub).toarray()
+        if sp.issparse(A_ub)
+        else np.asarray(A_ub, dtype=np.float64)
+    ).reshape(-1, n)
+    m = a.shape[0]
+
+    # Standard form A_eq z = b with one slack per row: [A_ub | I] z = b.
+    a_std = np.zeros((m, n + m), dtype=np.float64)
+    a_std[:, :n] = a
+    a_std[:, n:] = np.eye(m)
+    c_std = np.concatenate([c_arr, np.zeros(m)])
+
+    k = len(instances)
+    b_stack = np.zeros((k, m), dtype=np.float64)
+    lb_stack = np.zeros((k, n + m), dtype=np.float64)
+    ub_stack = np.zeros((k, n + m), dtype=np.float64)
+    for t, (b_ub, bounds) in enumerate(instances):
+        b_stack[t, :] = np.asarray(b_ub, dtype=np.float64).ravel()
+        if bounds is not None:
+            lb_stack[t, :n] = [lo for lo, _ in bounds]
+            ub_stack[t, :n] = [hi for _, hi in bounds]
+        else:
+            ub_stack[t, :n] = 1e20
+        ub_stack[t, n:] = 1e20  # slacks in [0, inf)
+
+    statuses, xs, objs = solve_lp_batch_py(
+        np.ascontiguousarray(c_std),
+        np.ascontiguousarray(a_std),
+        np.ascontiguousarray(b_stack),
+        np.ascontiguousarray(lb_stack),
+        np.ascontiguousarray(ub_stack),
+        tol,
+        int(max_iter),
+    )
+
+    status_map = {
+        "optimal": SolveStatus.OPTIMAL,
+        "infeasible": SolveStatus.INFEASIBLE,
+        "unbounded": SolveStatus.UNBOUNDED,
+        "iter_limit": SolveStatus.ITERATION_LIMIT,
+        "numerical": SolveStatus.ERROR,
+    }
+    results: list[LPResult] = []
+    for t in range(k):
+        st = status_map.get(statuses[t], SolveStatus.ERROR)
+        if st != SolveStatus.OPTIMAL:
+            results.append(LPResult(status=st))
+            continue
+        results.append(
+            LPResult(
+                status=SolveStatus.OPTIMAL,
+                x=np.asarray(xs[t])[:n].copy(),
+                objective=float(objs[t]),
+                basis=None,
+            )
+        )
+    return results

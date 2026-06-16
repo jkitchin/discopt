@@ -16,6 +16,7 @@
 #![allow(clippy::needless_range_loop)]
 
 use super::linsolve::{FeralLU, LinearSolver};
+use super::scaling::ScaledLp;
 use super::sparse::SparseCols;
 use super::{LpSolve, LpStatus, SimplexOptions};
 use crate::lp::basis::{Basis, AT_LOWER, AT_UPPER, BASIC};
@@ -24,7 +25,30 @@ use crate::lp::crossover::LpView;
 const INF: f64 = 1e20;
 
 /// Solve the LP `min cᵀx s.t. A x = b, l ≤ x ≤ u` by two-phase primal simplex.
+///
+/// Ill-scaled matrices (lifted McCormick LPs whose coefficients span many orders
+/// of magnitude) are equilibrated first ([`ScaledLp`]) so the basis
+/// factorization stays well-conditioned; the scaled solution is mapped back to
+/// the original space. Well-conditioned LPs are solved directly (no copy,
+/// bit-identical to the unscaled path).
 pub fn solve_lp(lp: &LpView<'_>, b: &[f64], opts: &SimplexOptions) -> LpSolve {
+    match ScaledLp::maybe_new(lp, b) {
+        Some(scaled) => {
+            let view = scaled.view();
+            let mut sol = solve_lp_scaled(&view, scaled.b(), opts);
+            scaled.unscale_x(&mut sol.x);
+            sol
+        }
+        None => solve_lp_scaled(lp, b, opts),
+    }
+}
+
+/// Two-phase primal simplex on an already-equilibrated (or known well-scaled) LP.
+/// The warm dual path's cold fallback and the B&B driver (which equilibrates the
+/// working matrix once and shares it across all node solves) call this directly
+/// so the matrix is not scaled twice; the caller owns the [`scaling::Scaling`]
+/// and unscales the returned `x` itself.
+pub fn solve_lp_scaled(lp: &LpView<'_>, b: &[f64], opts: &SimplexOptions) -> LpSolve {
     Simplex::new(lp, b, opts).run()
 }
 
@@ -43,7 +67,14 @@ fn solution_within_tolerance(
 ) -> bool {
     const FEAS: f64 = 1e-6;
     for j in 0..n {
-        if x[j] < l[j] - FEAS || x[j] > u[j] + FEAS {
+        // Relative bound tolerance: a variable whose bound (and hence value) is
+        // large carries proportionally larger floating-point drift, so an
+        // absolute 1e-6 would spuriously reject a sound optimum on ill-scaled
+        // lifted LPs (variable magnitudes ~1e9). Scale the slack by the bound
+        // magnitude, mirroring the relative test already used on the row residual.
+        let lo_tol = FEAS * (1.0 + l[j].abs().min(INF));
+        let hi_tol = FEAS * (1.0 + u[j].abs().min(INF));
+        if x[j] < l[j] - lo_tol || x[j] > u[j] + hi_tol {
             return false;
         }
     }

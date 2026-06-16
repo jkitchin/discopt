@@ -16,15 +16,19 @@
 //! a dense oracle [`linsolve::DenseLU`]. The primal/dual simplex drivers build
 //! on this in subsequent increments.
 
+pub mod batch;
 pub mod dual;
 pub mod linsolve;
 pub mod presolve;
 pub mod primal;
+pub mod scaling;
 pub mod sparse;
 
-pub use dual::solve_lp_warm;
+pub use batch::{solve_lp_batch, solve_lp_multi_rhs, LpInstance};
+pub use dual::{solve_lp_warm, solve_lp_warm_scaled, PreparedDual};
 pub use presolve::tighten_bounds;
-pub use primal::solve_lp;
+pub use primal::{solve_lp, solve_lp_scaled};
+pub use scaling::Scaling;
 
 use crate::lp::basis::Basis;
 

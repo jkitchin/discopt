@@ -16,7 +16,9 @@ use discopt_core::lp::basis::recover_basis;
 use discopt_core::lp::crossover::{crossover_to_vertex, LpView};
 use discopt_core::lp::gomory::separate_gomory;
 use discopt_core::lp::mir::separate_mir;
-use discopt_core::lp::simplex::{solve_lp as simplex_solve_lp, LpStatus, SimplexOptions};
+use discopt_core::lp::simplex::{
+    solve_lp as simplex_solve_lp, solve_lp_batch, LpInstance, LpStatus, SimplexOptions,
+};
 use numpy::{
     PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods,
 };
@@ -248,6 +250,83 @@ pub fn solve_lp_py<'py>(
         sol.obj,
         sol.iters,
     ))
+}
+
+/// Solve a batch of LPs that share the constraint matrix `a` (C-contiguous
+/// `m × n`) and objective `c`, each with its own right-hand side and bounds. The
+/// per-instance data are stacked: `b` is `k × m`, `lb`/`ub` are `k × n`. The
+/// equilibration scaling and scaled matrix are computed once and reused across
+/// the batch, and the instances are solved in parallel.
+///
+/// Returns `(statuses, x, objs)` where `statuses` is a length-`k` list of
+/// strings (`optimal`/`infeasible`/`unbounded`/`iter_limit`/`numerical`), `x` is
+/// a `k × n` array of solutions, and `objs` is length `k`.
+#[pyfunction]
+#[pyo3(signature = (c, a, b, lb, ub, tol=1e-9, max_iter=100_000))]
+pub fn solve_lp_batch_py<'py>(
+    py: Python<'py>,
+    c: PyReadonlyArray1<'py, f64>,
+    a: PyReadonlyArray2<'py, f64>,
+    b: PyReadonlyArray2<'py, f64>,
+    lb: PyReadonlyArray2<'py, f64>,
+    ub: PyReadonlyArray2<'py, f64>,
+    tol: f64,
+    max_iter: usize,
+) -> PyResult<(Vec<String>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>)> {
+    let dims = a.shape();
+    let (m, n) = (dims[0], dims[1]);
+    let k = b.shape()[0];
+    if b.shape()[1] != m {
+        return Err(PyValueError::new_err("`b` must be k × m"));
+    }
+    if lb.shape() != [k, n] || ub.shape() != [k, n] {
+        return Err(PyValueError::new_err("`lb`/`ub` must be k × n"));
+    }
+    let a_owned: Vec<f64> = a
+        .as_slice()
+        .map_err(|_| PyValueError::new_err("`a` must be C-contiguous"))?
+        .to_vec();
+    let c_owned: Vec<f64> = c.as_slice()?.to_vec();
+    let b_flat = b
+        .as_slice()
+        .map_err(|_| PyValueError::new_err("`b` must be C-contiguous"))?;
+    let lb_flat = lb
+        .as_slice()
+        .map_err(|_| PyValueError::new_err("`lb` must be C-contiguous"))?;
+    let ub_flat = ub
+        .as_slice()
+        .map_err(|_| PyValueError::new_err("`ub` must be C-contiguous"))?;
+    let instances: Vec<LpInstance> = (0..k)
+        .map(|t| LpInstance {
+            b: b_flat[t * m..(t + 1) * m].to_vec(),
+            l: lb_flat[t * n..(t + 1) * n].to_vec(),
+            u: ub_flat[t * n..(t + 1) * n].to_vec(),
+        })
+        .collect();
+    let opts = SimplexOptions { tol, max_iter };
+    // The solve touches no Python objects, so release the GIL to let the core's
+    // rayon workers run the batch concurrently without contending on it.
+    let sols = py.allow_threads(|| solve_lp_batch(&a_owned, m, n, &c_owned, &instances, &opts));
+
+    let mut statuses = Vec::with_capacity(k);
+    let mut x_flat = vec![0.0f64; k * n];
+    let mut objs = vec![0.0f64; k];
+    for (t, sol) in sols.iter().enumerate() {
+        statuses.push(
+            match sol.status {
+                LpStatus::Optimal => "optimal",
+                LpStatus::Infeasible => "infeasible",
+                LpStatus::Unbounded => "unbounded",
+                LpStatus::IterLimit => "iter_limit",
+                LpStatus::Numerical => "numerical",
+            }
+            .to_string(),
+        );
+        x_flat[t * n..(t + 1) * n].copy_from_slice(&sol.x[..n.min(sol.x.len())]);
+        objs[t] = sol.obj;
+    }
+    let x_arr = PyArray1::from_vec(py, x_flat).reshape([k, n])?;
+    Ok((statuses, x_arr, PyArray1::from_vec(py, objs)))
 }
 
 /// Solve a pure MILP `min cᵀx + obj_const s.t. A x = b, lb ≤ x ≤ ub`, with the
