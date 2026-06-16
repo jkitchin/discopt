@@ -3062,6 +3062,43 @@ def build_milp_relaxation(
         multilinear_var_map[multi_term] = final_col
         multilinear_stage_map[multi_term] = stages
 
+    # Numerical-conditioning guard: a lifted monomial whose auxiliary bound spans
+    # an extreme magnitude (e.g. ``x1**9`` over ``[15, 25]`` → ~3.8e12) injects
+    # coefficients ranging over >1e12 into the LP. The relaxation is still
+    # logically sound — it contains every true feasible point — but the badly
+    # scaled system drives the LP solver to report *spurious* infeasibility
+    # (a false infeasibility, as serious as a false bound: a feasible problem
+    # would look infeasible and produce no dual bound). Such a monomial is not
+    # lifted; the linearizer then raises on the missing aux and the containing
+    # constraint is omitted entirely (omission only enlarges the feasible region,
+    # so the dual bound stays valid). The cap sits far above every monomial any
+    # currently-bounding instance needs (the largest, nvs20/nvs21, peak at
+    # ~1.6e9) and triggers only on pathological high-degree polynomials such as
+    # st_e36's degree-10 equality constraint (issue #139, bucket 2).
+    _MONOMIAL_AUX_BOUND_LIMIT = 1e10
+    _kept_monomial_terms: list[tuple[int, int]] = []
+    for var_idx, n in monomial_terms:
+        lb_i = float(flat_lb[var_idx])
+        ub_i = float(flat_ub[var_idx])
+        blo, bhi = _monomial_aux_bounds(lb_i, ub_i, n)
+        mag = max(
+            abs(blo) if np.isfinite(blo) else 0.0,
+            abs(bhi) if np.isfinite(bhi) else 0.0,
+        )
+        if mag > _MONOMIAL_AUX_BOUND_LIMIT:
+            logger.debug(
+                "AMP: not lifting monomial x%d**%d (aux bound magnitude %.3g exceeds "
+                "%.0e); constraints/terms referencing it are omitted to avoid a "
+                "numerically degenerate LP relaxation.",
+                var_idx,
+                n,
+                mag,
+                _MONOMIAL_AUX_BOUND_LIMIT,
+            )
+            continue
+        _kept_monomial_terms.append((var_idx, n))
+    monomial_terms = _kept_monomial_terms
+
     for var_idx, n in monomial_terms:
         lb_i = float(flat_lb[var_idx])
         ub_i = float(flat_ub[var_idx])

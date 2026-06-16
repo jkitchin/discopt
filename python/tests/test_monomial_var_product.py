@@ -204,3 +204,36 @@ def test_lifted_trilinear_sound_over_mixed_sign_box():
     assert r.objective == pytest.approx(true_min, abs=1e-2)
     assert r.bound is not None, "objective dropped — no dual bound"
     assert r.bound <= true_min + 1e-4, f"unsound bound {r.bound} > {true_min}"
+
+
+@pytest.mark.correctness
+def test_st_e36_extreme_monomial_does_not_false_infeasible():
+    """st_e36 carries a degree-10 polynomial equality constraint. Lifting its
+    high-degree monomial (e.g. ``x1**9`` over ``[15, 25]`` → aux bound ~3.8e12)
+    injects coefficients spanning >1e12 into the McCormick LP. The relaxation is
+    *logically* sound — it contains the true feasible point — but the badly
+    scaled system drives HiGHS to report **spurious infeasibility**, so the root
+    relaxation produced no dual bound at all (issue #139, bucket 2).
+
+    The builder now refuses to lift a monomial whose auxiliary bound magnitude
+    exceeds ``_MONOMIAL_AUX_BOUND_LIMIT`` (1e10). The offending constraint is then
+    omitted (omission only enlarges the feasible region, keeping the dual bound
+    valid), so the root LP solves to a finite, sound lower bound instead of a
+    false ``infeasible``. The bound must underestimate the known optimum -246."""
+    from discopt._jax.mccormick_lp import MccormickLPRelaxer
+    from discopt._jax.model_utils import flat_variable_bounds
+
+    nl = _DATA / "st_e36.nl"
+    assert nl.exists(), f"missing {nl}"
+    m = dm.from_nl(str(nl))
+
+    relaxer = MccormickLPRelaxer(m)
+    lb, ub = flat_variable_bounds(m)
+    res = relaxer.solve_at_node(lb, ub)
+
+    # Must NOT be the spurious infeasible the degree-10 lift used to produce.
+    assert res.status == "optimal", f"root LP status {res.status} (false infeasibility?)"
+    assert res.lower_bound is not None, "no root bound produced"
+    assert math.isfinite(res.lower_bound), f"non-finite root bound {res.lower_bound}"
+    # Soundness: a valid lower bound never exceeds the true optimum (-246).
+    assert res.lower_bound <= -246.0 + 1e-4, f"unsound bound {res.lower_bound} > -246"
