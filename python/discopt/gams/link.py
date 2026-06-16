@@ -65,11 +65,20 @@ def status_to_gams(result: SolveResult, has_discrete: bool) -> tuple[int, int]:
 
     ``has_discrete`` selects between the continuous (``Optimal``) and discrete
     (``Integer``) optimal model-status codes, matching GAMS conventions.
+
+    Globality is reported honestly: a discopt ``"optimal"`` result counts as a
+    *certified global* optimum -- GAMS ``Optimal`` / ``Integer`` -- only when its
+    gap is mathematically certified (``result.gap_certified``).  When discopt
+    falls back to heuristic NLP branch-and-bound on a nonconvex model the result
+    is locally optimal only, so it maps to GAMS ``LocallyOptimal`` rather than
+    overstating it as a global optimum.
     """
     status = (result.status or "").lower()
     has_solution = result.x is not None
 
     if status == "optimal":
+        if not getattr(result, "gap_certified", True):
+            return MODELSTAT_LOCALLY_OPTIMAL, SOLVESTAT_NORMAL
         model_stat = MODELSTAT_INTEGER if has_discrete else MODELSTAT_OPTIMAL
         return model_stat, SOLVESTAT_NORMAL
     if status == "feasible":

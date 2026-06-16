@@ -261,6 +261,21 @@ def test_status_to_gams_optimal_discrete():
     assert status_to_gams(res, has_discrete=True) == (8, 1)  # Integer, Normal
 
 
+def test_status_to_gams_certified_global_default():
+    # SolveResult defaults gap_certified=True -> certified global optimum.
+    res = dm.SolveResult(status="optimal", objective=1.0, x={"x": 0.0})
+    assert res.gap_certified is True
+    assert status_to_gams(res, has_discrete=False) == (1, 1)  # Optimal
+
+
+def test_status_to_gams_uncertified_optimal_is_local():
+    # Heuristic NLP-BB on a nonconvex model: locally optimal only, not global.
+    res = dm.SolveResult(status="optimal", objective=1.0, x={"x": 0.0}, gap_certified=False)
+    # Reported as LocallyOptimal (2), not Optimal/Integer, for both var kinds.
+    assert status_to_gams(res, has_discrete=False) == (2, 1)
+    assert status_to_gams(res, has_discrete=True) == (2, 1)
+
+
 def test_status_to_gams_infeasible():
     res = dm.SolveResult(status="infeasible")
     assert status_to_gams(res, has_discrete=False) == (4, 1)

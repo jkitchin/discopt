@@ -152,6 +152,15 @@ discopt termination statuses are mapped to GAMS `(modelStat, solveStat)` pairs:
 Feasible if an incumbent exists, otherwise No-Solution-Returned), and errors →
 Error/Solver-Error.
 
+**Global vs local.** An `optimal` result is reported as GAMS `Optimal` (or
+`Integer` for discrete models) — a *certified global* optimum — only when
+discopt's gap is mathematically certified (`gap_certified`). When discopt falls
+back to heuristic NLP branch-and-bound on a nonconvex model the result is
+locally optimal only, and maps to GAMS `LocallyOptimal (2)` rather than
+overstating it as global. So `modelStat = Optimal/Integer` from discopt means a
+deterministic global optimum, matching how GAMS users read those codes for
+global solvers.
+
 ## Smoke testing
 
 A small corpus of GAMS models with known optima lives in
