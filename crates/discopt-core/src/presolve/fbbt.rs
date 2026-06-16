@@ -414,6 +414,44 @@ fn eval_node_interval(
                     // tanh is monotonically increasing, range (-1, 1)
                     Interval::new(a0.lo.tanh(), a0.hi.tanh())
                 }
+                MathFunc::Asinh => {
+                    // asinh is monotonically increasing on all of R
+                    Interval::new(a0.lo.asinh(), a0.hi.asinh())
+                }
+                MathFunc::Acosh => {
+                    // acosh defined on [1, inf), monotonically increasing
+                    let lo = a0.lo.max(1.0).acosh();
+                    let hi = a0.hi.max(1.0).acosh();
+                    Interval::new(lo, hi)
+                }
+                MathFunc::Atanh => {
+                    // atanh defined on (-1, 1), monotonically increasing.
+                    // Clamp just inside the domain to avoid +/-inf.
+                    const EPS: f64 = 1e-12;
+                    let lo = a0.lo.clamp(-1.0 + EPS, 1.0 - EPS).atanh();
+                    let hi = a0.hi.clamp(-1.0 + EPS, 1.0 - EPS).atanh();
+                    Interval::new(lo, hi)
+                }
+                MathFunc::Erf => {
+                    // erf is monotonically increasing, range (-1, 1)
+                    Interval::new(libm::erf(a0.lo), libm::erf(a0.hi))
+                }
+                MathFunc::Log1p => {
+                    // log1p(x) = ln(1 + x), defined on (-1, inf), increasing.
+                    let lo = (a0.lo.max(-1.0)).ln_1p();
+                    let hi = (a0.hi.max(-1.0)).ln_1p();
+                    Interval::new(lo, hi)
+                }
+                MathFunc::Sigmoid => {
+                    // sigmoid is monotonically increasing, range (0, 1)
+                    let sig = |x: f64| 0.5 + 0.5 * (0.5 * x).tanh();
+                    Interval::new(sig(a0.lo), sig(a0.hi))
+                }
+                MathFunc::Softplus => {
+                    // softplus is monotonically increasing, range (0, inf)
+                    let sp = |x: f64| x.max(0.0) + (-x.abs()).exp().ln_1p();
+                    Interval::new(sp(a0.lo), sp(a0.hi))
+                }
                 MathFunc::Abs => interval_abs(&a0),
                 MathFunc::Sign => Interval::new(-1.0, 1.0),
                 MathFunc::Min => {

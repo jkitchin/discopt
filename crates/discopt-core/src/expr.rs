@@ -88,6 +88,20 @@ pub enum MathFunc {
     Prod,
     /// L2 norm.
     Norm2,
+    /// Inverse hyperbolic sine (`asinh(x) = ln(x + sqrt(x^2 + 1))`).
+    Asinh,
+    /// Inverse hyperbolic cosine (`acosh(x) = ln(x + sqrt(x^2 - 1))`, x >= 1).
+    Acosh,
+    /// Inverse hyperbolic tangent (`atanh(x) = 0.5 ln((1+x)/(1-x))`, |x| < 1).
+    Atanh,
+    /// Gauss error function.
+    Erf,
+    /// Natural log of one plus the argument (`log1p(x) = ln(1 + x)`).
+    Log1p,
+    /// Logistic sigmoid (`sigmoid(x) = 1 / (1 + e^{-x})`).
+    Sigmoid,
+    /// Softplus (`softplus(x) = ln(1 + e^x)`).
+    Softplus,
 }
 
 /// One axis of a generalized index: either a scalar position or a slice.
@@ -818,6 +832,13 @@ impl ExprArena {
                     | MathFunc::Asin
                     | MathFunc::Acos
                     | MathFunc::Tanh
+                    | MathFunc::Asinh
+                    | MathFunc::Acosh
+                    | MathFunc::Atanh
+                    | MathFunc::Erf
+                    | MathFunc::Log1p
+                    | MathFunc::Sigmoid
+                    | MathFunc::Softplus
                     | MathFunc::Norm2 => usize::MAX,
                     // abs, sign: not strictly polynomial but handled specially
                     MathFunc::Abs | MathFunc::Sign => usize::MAX,
@@ -976,6 +997,15 @@ impl ExprArena {
                     MathFunc::Asin => a0.asin(),
                     MathFunc::Acos => a0.acos(),
                     MathFunc::Tanh => a0.tanh(),
+                    MathFunc::Asinh => a0.asinh(),
+                    MathFunc::Acosh => a0.acosh(),
+                    MathFunc::Atanh => a0.atanh(),
+                    MathFunc::Erf => libm::erf(a0),
+                    MathFunc::Log1p => a0.ln_1p(),
+                    // Numerically stable logistic: 0.5 + 0.5*tanh(x/2).
+                    MathFunc::Sigmoid => 0.5 + 0.5 * (0.5 * a0).tanh(),
+                    // Numerically stable softplus: max(x,0) + ln(1 + e^{-|x|}).
+                    MathFunc::Softplus => a0.max(0.0) + (-a0.abs()).exp().ln_1p(),
                     MathFunc::Abs => a0.abs(),
                     MathFunc::Sign => {
                         if a0 > 0.0 {
@@ -1343,6 +1373,15 @@ impl ModelRepr {
                     MathFunc::Asin => a0.asin(),
                     MathFunc::Acos => a0.acos(),
                     MathFunc::Tanh => a0.tanh(),
+                    MathFunc::Asinh => a0.asinh(),
+                    MathFunc::Acosh => a0.acosh(),
+                    MathFunc::Atanh => a0.atanh(),
+                    MathFunc::Erf => libm::erf(a0),
+                    MathFunc::Log1p => a0.ln_1p(),
+                    // Numerically stable logistic: 0.5 + 0.5*tanh(x/2).
+                    MathFunc::Sigmoid => 0.5 + 0.5 * (0.5 * a0).tanh(),
+                    // Numerically stable softplus: max(x,0) + ln(1 + e^{-|x|}).
+                    MathFunc::Softplus => a0.max(0.0) + (-a0.abs()).exp().ln_1p(),
                     MathFunc::Abs => a0.abs(),
                     MathFunc::Sign => {
                         if a0 > 0.0 {

@@ -286,6 +286,13 @@ impl PyModelRepr {
                         MathFunc::Max => "max",
                         MathFunc::Prod => "prod",
                         MathFunc::Norm2 => "norm2",
+                        MathFunc::Asinh => "asinh",
+                        MathFunc::Acosh => "acosh",
+                        MathFunc::Atanh => "atanh",
+                        MathFunc::Erf => "erf",
+                        MathFunc::Log1p => "log1p",
+                        MathFunc::Sigmoid => "sigmoid",
+                        MathFunc::Softplus => "softplus",
                     },
                 )?;
                 let arg_indices: Vec<usize> = args.iter().map(|a| a.0).collect();
@@ -1131,6 +1138,13 @@ fn convert_expr(
                 "max" => MathFunc::Max,
                 "prod" => MathFunc::Prod,
                 "norm2" => MathFunc::Norm2,
+                "asinh" => MathFunc::Asinh,
+                "acosh" => MathFunc::Acosh,
+                "atanh" => MathFunc::Atanh,
+                "erf" => MathFunc::Erf,
+                "log1p" => MathFunc::Log1p,
+                "sigmoid" => MathFunc::Sigmoid,
+                "softplus" => MathFunc::Softplus,
                 _ => {
                     return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                         "Unknown MathFunc: {func_str}"
