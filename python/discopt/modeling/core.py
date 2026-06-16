@@ -511,6 +511,16 @@ def acos(x: Union[Expression, float]) -> Expression:
     return FunctionCall("acos", _wrap(x))
 
 
+def sinh(x: Union[Expression, float]) -> Expression:
+    """Hyperbolic sine."""
+    return FunctionCall("sinh", _wrap(x))
+
+
+def cosh(x: Union[Expression, float]) -> Expression:
+    """Hyperbolic cosine."""
+    return FunctionCall("cosh", _wrap(x))
+
+
 def asinh(x: Union[Expression, float]) -> Expression:
     """Inverse hyperbolic sine."""
     return FunctionCall("asinh", _wrap(x))
