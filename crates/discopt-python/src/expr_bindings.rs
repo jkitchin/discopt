@@ -293,6 +293,8 @@ impl PyModelRepr {
                         MathFunc::Log1p => "log1p",
                         MathFunc::Sigmoid => "sigmoid",
                         MathFunc::Softplus => "softplus",
+                        MathFunc::Norm1 => "norm1",
+                        MathFunc::NormInf => "norminf",
                     },
                 )?;
                 let arg_indices: Vec<usize> = args.iter().map(|a| a.0).collect();
@@ -1145,6 +1147,8 @@ fn convert_expr(
                 "log1p" => MathFunc::Log1p,
                 "sigmoid" => MathFunc::Sigmoid,
                 "softplus" => MathFunc::Softplus,
+                "norm1" => MathFunc::Norm1,
+                "norminf" => MathFunc::NormInf,
                 _ => {
                     return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                         "Unknown MathFunc: {func_str}"

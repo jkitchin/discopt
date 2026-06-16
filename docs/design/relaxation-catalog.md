@@ -147,14 +147,15 @@ because `sigmoid`/`softplus`/`erf` are common in ML-embedded MINLPs, a stated us
 (`discopt.nn`). **Fix:** add the seven variants to `MathFunc`, the PyO3 match, and the
 FBBT forward/backward interval rules.
 
-### B. No relaxation rule (hard error) for prod / norm
+### B. No relaxation rule (hard error) for prod / norm — RESOLVED
 
-- `dm.prod` → `FunctionCall("prod")` and `dm.norm` → `FunctionCall("norm2"|"normN")`
-  have **no entry** in the relaxation compiler and raise
-  `ValueError("Unknown function")` (`relaxation_compiler.py:892`). `prod` is only
-  relaxed when it happens to decompose into a `*`-tree. `norm` has no relaxation at all
-  (FBBT gives only the loose `[0,∞)`), and `normN` for `N≠2` isn't even in the Rust IR.
-  BARON/Couenne handle norms and general multilinear products natively.
+- `dm.prod` and `dm.norm` previously raised `ValueError("Unknown function")`.
+  Now relaxed (prod via recursive McCormick; norm via norm-equivalence
+  envelopes). The Rust IR carries `Norm1`, `Norm2`, `NormInf`, so **L1, L2, and
+  L∞ norms are globally certified** (`dm.norm(x, ord=1|2|"inf")`); other integer
+  orders are evaluated/relaxed on the JAX path only. A latent bug was also fixed:
+  the Rust IR evaluator for vector `norm2`/`prod` was a scalar stub returning
+  **NaN** for array arguments — it now reduces over the vector components.
 
 ### C. Symmetric API/IR asymmetry
 

@@ -499,14 +499,13 @@ fn eval_node_interval(
                         result
                     }
                 }
-                MathFunc::Norm2 => {
-                    // |x| for single arg.
-                    if args.len() == 1 {
-                        interval_abs(&a0)
-                    } else {
-                        // sqrt(sum(x_i^2)) — conservative.
-                        Interval::new(0.0, f64::INFINITY)
-                    }
+                MathFunc::Norm1 | MathFunc::Norm2 | MathFunc::NormInf => {
+                    // A p-norm is non-negative. The forward pass collapses an
+                    // array argument to a single node interval, so a tight
+                    // component-wise bound is not available here; return the
+                    // sound non-negative enclosure. (Tightening for norms comes
+                    // from the McCormick relaxation, not FBBT.)
+                    Interval::new(0.0, f64::INFINITY)
                 }
             }
         }
