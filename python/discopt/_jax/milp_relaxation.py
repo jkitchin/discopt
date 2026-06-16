@@ -469,6 +469,62 @@ def _constant_value(expr: Expression) -> Optional[float]:
     return float(values[0])
 
 
+def _eval_constant_expr(expr: Expression) -> Optional[float]:
+    """Evaluate a *variable-free* subexpression to a scalar, else return None.
+
+    Unlike :func:`_constant_value` (which only recognizes a literal ``Constant``
+    node), this folds composite constant subexpressions such as ``neg(2.5)``
+    (a unary negation of a literal), ``(-3) * (-3)``, and other arithmetic over
+    constants. It is deliberately conservative: it returns ``None`` the moment a
+    variable, index, function call, or any unhandled node is encountered, so it
+    can never mis-fold an expression that actually depends on a decision
+    variable. Folding such factors is exact (value-preserving), so using it in
+    the product linearizer only ever tightens the relaxation while staying
+    sound.
+    """
+    direct = _constant_value(expr)
+    if direct is not None:
+        return direct
+    if isinstance(expr, UnaryOp):
+        val = _eval_constant_expr(expr.operand)
+        if val is None:
+            return None
+        if expr.op == "neg":
+            return -val
+        if expr.op == "abs":
+            return abs(val)
+        return None
+    if isinstance(expr, BinaryOp):
+        left = _eval_constant_expr(expr.left)
+        if left is None:
+            return None
+        right = _eval_constant_expr(expr.right)
+        if right is None:
+            return None
+        if expr.op == "+":
+            return left + right
+        if expr.op == "-":
+            return left - right
+        if expr.op == "*":
+            return left * right
+        if expr.op == "/":
+            if right == 0.0:
+                return None
+            return left / right
+        if expr.op == "**":
+            try:
+                result = left**right
+            except (ValueError, OverflowError, ZeroDivisionError):
+                return None
+            # A negative base to a fractional power yields a complex result;
+            # that is not a real constant we can fold, so bail conservatively.
+            if isinstance(result, complex):
+                return None
+            return float(result)
+        return None
+    return None
+
+
 def _finite_bound_or_none(value: Optional[float]) -> Optional[float]:
     if value is None:
         return None
@@ -2993,12 +3049,19 @@ def _linearize_expr(
                 raise ValueError(f"Cannot linearize power expression: {e}")
 
             elif e.op == "*":
-                # Constant scaling?
-                if isinstance(e.left, Constant):
-                    visit(e.right, scale * float(e.left.value))
+                # Constant scaling? Fold a variable-free factor (including
+                # composite constants such as ``neg(2.5)`` or ``(-3)*(-3)``)
+                # before attempting product decomposition. Without this, a term
+                # like ``(-2.5) * x`` (parsed as ``neg(2.5) * x``) is treated as
+                # an undecomposable bilinear product and the whole constraint is
+                # dropped from the relaxation, weakening the bound.
+                lconst = _eval_constant_expr(e.left)
+                if lconst is not None:
+                    visit(e.right, scale * lconst)
                     return
-                if isinstance(e.right, Constant):
-                    visit(e.left, scale * float(e.right.value))
+                rconst = _eval_constant_expr(e.right)
+                if rconst is not None:
+                    visit(e.left, scale * rconst)
                     return
                 # Full product decomposition
                 decomp = _decompose_product(

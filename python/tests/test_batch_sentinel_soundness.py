@@ -1,18 +1,22 @@
 """
-Soundness regression: batch-path failure sentinels must decertify the gap.
+Soundness regression: batch-path failure sentinels must never certify a wrong
+objective.
 
 A node whose NLP relaxation solve fails (error, divergence, or *local*
 infeasibility) carries ``INFEASIBILITY_SENTINEL`` as its lower bound and is
 pruned by the Rust tree as soon as an incumbent exists — without any proof
 that the subtree is suboptimal or infeasible. The serial node path already
-decertifies the gap in that case (issue #27a) so the result downgrades from
-"optimal" to "feasible". These tests pin the same guarantee onto the batch
-IPM/POUNCE path, which previously pruned silently and could report a
-certified "optimal" for a wrong objective.
+decertifies the gap in that case (issue #27a); these tests pin the same
+guarantee onto the batch IPM/POUNCE path, which previously pruned silently and
+could report a certified "optimal" for a wrong objective.
 
-The batch solver is monkeypatched to simulate universal node-solve failure;
-the warm-started incumbent then makes every sentinel node prunable, the tree
-exhausts, and an unguarded solver would claim a certified optimum.
+The batch solver is monkeypatched to simulate universal node-solve failure, so
+the *failed nodes themselves* never license a certification. A certification
+may still arise — soundly — from an INDEPENDENT rigorous global bound (the root
+MILP-relaxation fallback, issue #138) when that bound proves the incumbent
+globally optimal. The invariant under test is therefore the soundness one: any
+reported bound is valid (never above the true optimum) and any certification is
+of the TRUE optimum, never of a suboptimal point.
 """
 
 from __future__ import annotations
@@ -97,28 +101,33 @@ class TestBatchSentinelSoundness:
             "Batch path was never exercised; test setup no longer matches "
             "the solver's dispatch (check _use_pounce_batch conditions)."
         )
-        # The incumbent (warm start or better) survives as a feasible point...
+        # The incumbent survives as a feasible point...
         assert result.objective is not None
-        # ...but the gap must NOT be *certified* off failure sentinels: every
-        # pruned node carried a failure sentinel, not an infeasibility proof.
-        assert result.status != "optimal", (
-            f"Unsound certification: status={result.status!r} with "
-            f"obj={result.objective} after pruning failed nodes"
-        )
-        assert not result.gap_certified, "sentinel failures must not certify the gap"
-        # A dual bound MAY now be reported — not from the failed batch nodes, but
-        # from the independent root-relaxation fallback (issue #138); when present
-        # it must be sound (never above the true optimum), never a false bound.
+        # ...and SOUNDNESS is the real invariant: a failed batch node carries a
+        # sentinel, not a proof, so the *failed nodes* may never certify the gap.
+        # Certification is legitimate ONLY when an INDEPENDENT rigorous global
+        # bound — the root-relaxation fallback (issue #138), never the failed
+        # nodes — proves the incumbent globally optimal. Two guarantees, both held:
+        #   (1) any reported dual bound is sound (never above the true optimum);
+        #   (2) any certification is of the TRUE optimum, never a suboptimal point
+        #       (this is exactly the "certified a wrong objective" failure the
+        #       batch path could previously commit).
         assert result.bound is None or result.bound <= _OPT + 1e-6, (
             f"unsound bound {result.bound} > optimum {_OPT}"
         )
+        if result.gap_certified:
+            assert result.status == "optimal"
+            assert abs(result.objective - _OPT) <= 1e-2, (
+                f"certified a non-optimal objective {result.objective} "
+                f"(true optimum {_OPT}) after pruning failed nodes"
+            )
 
         monkeypatch.setattr(S, "_solve_batch_pounce", real_batch)
 
     def test_unpatched_solver_still_certifies(self) -> None:
-        """Control: the real batch solver reaches the optimum with a valid
-        (certified) bound, so the decertification above is attributable to the
-        injected sentinels and not to the model being unsolvable."""
+        """Control: the real batch solver reaches the true optimum with a valid
+        (certified) bound, confirming the model is solvable and that the sentinel
+        test above exercises failure handling on a genuinely tractable problem."""
         m, _ = _build_nonconvex_minlp()
         result = m.solve(
             nlp_solver="pounce",
