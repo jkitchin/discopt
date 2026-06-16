@@ -25,7 +25,7 @@ signature compatibility and ignored).
 
 from __future__ import annotations
 
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, cast
 
 import numpy as np
 import scipy.sparse as sp
@@ -117,7 +117,11 @@ def solve_lp_batch(
 
     c_arr = np.asarray(c, dtype=np.float64).ravel()
     n = c_arr.shape[0]
-    a = (A_ub.toarray() if sp.issparse(A_ub) else np.asarray(A_ub, dtype=np.float64)).reshape(-1, n)
+    a = (
+        cast("sp.spmatrix", A_ub).toarray()
+        if sp.issparse(A_ub)
+        else np.asarray(A_ub, dtype=np.float64)
+    ).reshape(-1, n)
     m = a.shape[0]
 
     # Standard form A_eq z = b with one slack per row: [A_ub | I] z = b.

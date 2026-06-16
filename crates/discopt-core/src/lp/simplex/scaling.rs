@@ -29,6 +29,10 @@
 //! Scaling is applied only when the matrix's dynamic range warrants it
 //! ([`SCALE_TRIGGER`]); a well-conditioned LP is left untouched and bit-identical
 //! to the unscaled solve, so existing behavior is preserved exactly.
+//
+// The equilibration sweeps index the row-major matrix and the row/col factor
+// vectors by the same index, so range loops read clearer than zipping slices.
+#![allow(clippy::needless_range_loop)]
 
 use crate::lp::crossover::LpView;
 

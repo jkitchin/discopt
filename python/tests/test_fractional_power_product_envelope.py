@@ -105,27 +105,35 @@ def test_lift_is_value_preserving():
     max_rel = 0.0
     for _ in range(20):
         env = {v.name: rng.uniform(1.0, 4.0) for v in m0._variables}
-        # Solve each aux from its (cleared, aux-linear) defining constraint.
-        for c in m1._constraints:
-            auxes = set()
 
-            def collect(e):
-                if isinstance(e, Variable) and e.name.startswith("_fr_aux") and e.name not in env:
-                    auxes.add(e.name)
-                if isinstance(e, BinaryOp):
-                    collect(e.left)
-                    collect(e.right)
-                if isinstance(e, UnaryOp):
-                    collect(e.operand)
+        def collect(e, auxes):
+            if isinstance(e, Variable) and e.name.startswith("_fr_aux") and e.name not in env:
+                auxes.add(e.name)
+            if isinstance(e, BinaryOp):
+                collect(e.left, auxes)
+                collect(e.right, auxes)
+            if isinstance(e, UnaryOp):
+                collect(e.operand, auxes)
 
-            collect(c.body)
-            if len(auxes) == 1:
-                an = auxes.pop()
-                env[an] = 0.0
-                b0 = ev(c.body, env)
-                env[an] = 1.0
-                b1 = ev(c.body, env)
-                env[an] = -b0 / (b1 - b0)
+        # Solve each aux from its (cleared, aux-linear) defining constraint. The
+        # constraint list is not guaranteed to be topologically ordered, so an
+        # aux may depend on one defined by a later constraint; iterate to a
+        # fixpoint (each pass resolves every constraint with exactly one still-
+        # unknown aux) rather than assuming a single forward pass suffices.
+        progress = True
+        while progress:
+            progress = False
+            for c in m1._constraints:
+                auxes: set[str] = set()
+                collect(c.body, auxes)
+                if len(auxes) == 1:
+                    an = auxes.pop()
+                    env[an] = 0.0
+                    b0 = ev(c.body, env)
+                    env[an] = 1.0
+                    b1 = ev(c.body, env)
+                    env[an] = -b0 / (b1 - b0)
+                    progress = True
         if any(v.name.startswith("_fr_aux") and v.name not in env for v in m1._variables):
             continue
         o0 = ev(m0._objective.expression, env)
