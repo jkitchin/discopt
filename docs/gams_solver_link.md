@@ -205,20 +205,23 @@ global solvers.
 
 ## Smoke testing
 
-A small corpus of GAMS models with known optima lives in
-`python/tests/data/gams/` (LP, MIP, convex NLP, nonconvex NLP, and a convex
-MINLP), described by `manifest.json`. There are two layers of checking:
+A small corpus of GAMS models with known optima ships **inside the package**
+(`discopt/gams/data/`, located via `discopt.gams.data_dir()`; LP, MIP, convex
+NLP, nonconvex NLP, and a convex MINLP), described by `manifest.json`. There are
+two layers of checking:
 
 - **Reader path (no GAMS needed)** — the unit tests parse each model with
   `from_gams()` and solve it with discopt, asserting the known optimum
   (`pytest python/tests/test_gams_link.py -k smoke`).
-- **Solver-link path (needs a GAMS install)** — `scripts/verify_gams_link.py`
-  runs every model through GAMS with the solver forced to discopt, reads back the
-  objective and GAMS model/solve status, and checks them against the optimum:
+- **Solver-link path (needs a GAMS install)** — `discopt gams-verify` runs every
+  model through GAMS with the solver forced to discopt, reads back the objective
+  and GAMS model/solve status, and checks them against the optimum. Because the
+  corpus ships in the wheel, this works from a plain `pip install` — no repo
+  clone:
 
   ```bash
-  make gams-install   # build + register discopt with GAMS
-  make gams-verify    # python scripts/verify_gams_link.py
+  pip install "discopt[gams]" && discopt gams-register   # install + register
+  discopt gams-verify                                    # or: make gams-verify
   ```
 
 The canonical `lp_transport.gms` (sets/tables) is included for the solver-link

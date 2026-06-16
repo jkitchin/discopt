@@ -231,6 +231,13 @@ def _cmd_gams_daemon(args):
     return daemon.main([args.action])
 
 
+def _cmd_gams_verify(args):
+    """Run the packaged .gms smoke corpus through GAMS with solver=discopt."""
+    from discopt.gams import verify
+
+    sys.exit(verify(gams=args.gams, solver=args.solver, keep=args.keep))
+
+
 def _cmd_install_skills(args):
     """Install packaged Claude Code skills/agents into the user's .claude/ tree.
 
@@ -337,6 +344,15 @@ def main():
         help="serve (run in foreground), stop, or status.",
     )
     p_gamsd.set_defaults(func=_cmd_gams_daemon)
+
+    p_gamsv = subparsers.add_parser(
+        "gams-verify",
+        help="Run the packaged .gms corpus through GAMS with solver=discopt (needs GAMS)",
+    )
+    p_gamsv.add_argument("--gams", default="gams", help="Path to the gams executable.")
+    p_gamsv.add_argument("--solver", default="discopt", help="GAMS solver name to force.")
+    p_gamsv.add_argument("--keep", action="store_true", help="Keep the scratch directory.")
+    p_gamsv.set_defaults(func=_cmd_gams_verify)
 
     p_skills = subparsers.add_parser(
         "install-skills",

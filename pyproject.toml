@@ -87,6 +87,8 @@ include = [
     "crates/**/*.rs",
     "crates/**/*.toml",
     "python/discopt/doe/gui/discopt-logo.png",
+    "python/discopt/gams/data/*.gms",
+    "python/discopt/gams/data/manifest.json",
 ]
 
 [tool.ruff]

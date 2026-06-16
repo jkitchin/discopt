@@ -207,7 +207,7 @@ gams-test:
 
 gams-verify:
 	@echo "==> Verifying the GAMS link end-to-end (requires a GAMS install + registration)..."
-	$(PYTHON) scripts/verify_gams_link.py
+	$(PYTHON) -m discopt.gams.verify
 
 # --- Lint ---------------------------------------------------------------------
 

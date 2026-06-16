@@ -8,11 +8,11 @@ solver registration files.  None of this requires a GAMS installation.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import discopt.modeling as dm
 import pytest
 from discopt.gams import (
+    data_dir,
     gamsconfig_snippet,
     is_available,
     model_from_gmo,
@@ -448,11 +448,11 @@ def test_is_available_returns_bool():
     assert isinstance(is_available(), bool)
 
 
-# ── on-disk .gms smoke corpus ────────────────────────────────────────────────
-# Small GAMS models with known optima (python/tests/data/gams/). The GAMS-side
-# solver link is verified end-to-end by scripts/verify_gams_link.py; here we
+# ── packaged .gms smoke corpus ───────────────────────────────────────────────
+# Small GAMS models with known optima, shipped inside the package
+# (discopt/gams/data/) so `discopt gams-verify` works for pip users. Here we
 # exercise the same corpus through discopt's own from_gams() reader.
-_GAMS_DATA = Path(__file__).parent / "data" / "gams"
+_GAMS_DATA = data_dir()
 _MANIFEST = json.loads((_GAMS_DATA / "manifest.json").read_text())["models"]
 
 

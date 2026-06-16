@@ -36,6 +36,7 @@ from .instructions import (
 )
 from .link import is_available, solve_from_control_file, solve_view, status_to_gams
 from .register import check_gamsapi, gamsconfig_snippet, run_script, write_registration
+from .verify import data_dir, load_manifest, verify
 
 __all__ = [
     "is_available",
@@ -59,4 +60,7 @@ __all__ = [
     "stop_daemon",
     "ping",
     "default_socket_path",
+    "verify",
+    "data_dir",
+    "load_manifest",
 ]
