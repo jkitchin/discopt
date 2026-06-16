@@ -85,10 +85,14 @@ def test_st_e04_certifies_with_sound_bound():
     (~5194.866) and the within-gap incumbent sits just above it; the gap closes
     at the 1e-4 tolerance. The invariant we lock is soundness + certification,
     not the exact incumbent value.
+
+    The time budget matches the sibling corpus locks (60 s): the exact-LP-oracle
+    OBBT path (#145) deliberately trades per-node speed for soundness, which puts
+    this instance's ~33 s solve just over a tighter limit.
     """
     nl = _DATA / "st_e04.nl"
     assert nl.exists(), f"missing {nl}"
-    r = dm.from_nl(str(nl)).solve(time_limit=30, gap_tolerance=1e-4)
+    r = dm.from_nl(str(nl)).solve(time_limit=60, gap_tolerance=1e-4)
 
     assert r.status == "optimal"
     assert r.objective is not None and r.bound is not None

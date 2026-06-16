@@ -31,7 +31,7 @@ from discopt.solvers.lp_backend import get_exact_lp_solver, get_lp_solver
 # When the relaxation's largest magnitude exceeds this limit OBBT returns the
 # box untightened: skipping is always sound, only weaker. Well-conditioned
 # stiff models (e.g. the 1e6-coefficient #145 ratio) stay well under it and are
-# still tightened by the exact (HiGHS) oracle.
+# still tightened by the exact (Rust simplex / HiGHS) oracle.
 _OBBT_COND_LIMIT = 1e10
 
 
@@ -408,8 +408,8 @@ def run_obbt(
 
     # OBBT requires an EXACT LP oracle for sound tightening — see
     # ``run_obbt_on_relaxation`` / ``get_exact_lp_solver`` (issue #145). The IPM
-    # is never used here; if no exact (HiGHS) oracle is available the pass is a
-    # sound no-op. ``prefer_pounce`` is kept for signature compatibility.
+    # is never used here; if no exact (Rust simplex / HiGHS) oracle is available
+    # the pass is a sound no-op. ``prefer_pounce`` is kept for compatibility.
     _lp = get_exact_lp_solver()
     if _lp is None:
         eff_lb = lb if lb is not None else _get_var_bounds(model)[0].copy()
@@ -619,8 +619,8 @@ def run_obbt_on_relaxation(
     # ill-conditioned LPs while still reporting OPTIMAL) yields an unsound
     # tightening that cuts off feasible points (issue #145). ``prefer_pounce``
     # is accepted for signature compatibility but never honoured here — when no
-    # exact (HiGHS) oracle is available we return the box untightened rather
-    # than risk an unsound shrink.
+    # exact (Rust simplex / HiGHS) oracle is available we return the box
+    # untightened rather than risk an unsound shrink.
     _lp = get_exact_lp_solver()
     if _lp is None:
         return ObbtResult(

@@ -32,6 +32,15 @@ def _lp_pounce() -> Callable | None:
     return solve_lp if POUNCE_AVAILABLE else None
 
 
+def _lp_simplex() -> Callable | None:
+    # Pure-Rust warm-started simplex; available iff the binding is built.
+    try:
+        from discopt.solvers.lp_simplex import SIMPLEX_AVAILABLE, solve_lp
+    except ImportError:
+        return None
+    return solve_lp if SIMPLEX_AVAILABLE else None
+
+
 def _qp_highs() -> Callable | None:
     try:
         from discopt.solvers.qp_highs import solve_qp
@@ -70,19 +79,21 @@ def get_lp_solver(prefer_pounce: bool = False) -> Callable:
 def get_exact_lp_solver() -> Callable | None:
     """Return an *exact* (simplex/vertex) LP oracle, or ``None`` if unavailable.
 
-    This is HiGHS only — never the POUNCE IPM. OBBT tightens a variable's bound
-    to the optimum of ``min``/``max x_i`` over the relaxation polytope, which is
-    sound **only when that LP is solved to its true optimum**. POUNCE's
-    interior-point method returns the analytic center of the optimal face; its
-    reported objective normally matches the simplex optimum but can be grossly
-    wrong on ill-conditioned LPs (e.g. a 1e6 coefficient spread) while still
-    reporting ``OPTIMAL`` — an over-tightening that cuts off feasible, even
-    globally-optimal, points (issue #145). HiGHS dual simplex reaches the exact
-    vertex, so its optimum is a rigorous bound. Callers that need a *sound*
-    bound (OBBT) must use this; when it returns ``None`` they must skip
-    tightening rather than fall back to the IPM.
+    Prefers discopt's **own** pure-Rust warm-started simplex, then HiGHS — never
+    the POUNCE IPM. OBBT tightens a variable's bound to the optimum of
+    ``min``/``max x_i`` over the relaxation polytope, which is sound **only when
+    that LP is solved to its true optimum**. POUNCE's interior-point method
+    returns the analytic center of the optimal face; its reported objective
+    normally matches the simplex optimum but can be grossly wrong on
+    ill-conditioned LPs (e.g. a 1e6 coefficient spread) while still reporting
+    ``OPTIMAL`` — an over-tightening that cuts off feasible, even
+    globally-optimal, points (issue #145). A simplex reaches the exact vertex,
+    so its optimum is a rigorous bound; the self-hosted Rust simplex gives this
+    without an external HiGHS dependency. Callers that need a *sound* bound
+    (OBBT) must use this; when it returns ``None`` they must skip tightening
+    rather than fall back to the IPM.
     """
-    return _lp_highs()
+    return _lp_simplex() or _lp_highs()
 
 
 def get_qp_solver(prefer_pounce: bool = False) -> Callable:
