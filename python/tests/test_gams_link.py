@@ -470,7 +470,12 @@ def test_smoke_gms_file_parses(entry):
 )
 def test_smoke_gms_optimum_via_from_gams(entry):
     model = dm.from_gams(str(_GAMS_DATA / entry["file"]))
-    result = model.solve(time_limit=120)
+    # Keep the solver budget well under pytest's --timeout=120: nonconvex
+    # instances (e.g. Rosenbrock) never close their global gap, so they run to
+    # the full time_limit. The correct incumbent is found in the first seconds;
+    # the remaining time is pure gap-closing effort, so a short budget is enough
+    # to validate the optimum without tripping the harness timeout.
+    result = model.solve(time_limit=30)
     # Nonconvex instances may return "feasible" (the solver declines to certify a
     # global gap); either way the reported optimum must match the known value.
     assert result.status in ("optimal", "feasible")
