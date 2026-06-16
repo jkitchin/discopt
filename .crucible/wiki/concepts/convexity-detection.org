@@ -1,10 +1,10 @@
 #+TITLE: Convexity Detection
-#+FILETAGS: :concept:convexity:dcp:classification:optimization:
+#+FILETAGS: :concept:convexity:dcp:classification:optimization:generalized-convexity:
 
 * Convexity Detection
 :PROPERTIES:
 :ARTICLE_TYPE: concept
-:SOURCE_KEYS: adjiman1998 grant2006
+:SOURCE_KEYS: adjiman1998 grant2006 khajavirad2012
 :STATUS: draft
 :CREATED: 2026-04-04
 :END:
@@ -41,3 +41,16 @@ recognizing patterns like exp(affine), sum_of_convex, x**2, and others. When the
 model is detected as convex, the solver auto-selects NLP-BB (which requires
 convexity for valid lower bounds). When convexity cannot be verified, spatial B&B
 with convex relaxations is used instead.
+
+** Generalized Convexity (G-convexity)
+
+DCP and eigenvalue tests certify ordinary convexity. A strictly larger class,
+*convex-transformable* (G-convex) functions, becomes convex after a monotone
+univariate transformation $G$ and still has the property that local minima are
+global. citet:khajavirad2012 show that recognizing G-convexity of intermediate
+sub-expressions yields convex relaxations provably tighter than the standard
+factorable scheme — large root-gap and node-count reductions in branch-and-bound,
+and the relaxation contributes a valid supporting-hyperplane cut usable directly
+in an LP-based node relaxation. This is a concrete avenue for discopt to tighten
+per-node bounds beyond DCP-convex recognition without ever risking an invalid
+dual bound. See [[file:convex-transformable-functions.org][Convex-Transformable (G-convex) Functions]].

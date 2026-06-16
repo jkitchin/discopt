@@ -168,7 +168,19 @@ class NLPEvaluator:
                 return jnp.concatenate(parts)
 
             self._cons_fn_jit = jax.jit(concat_constraints)
-            self._jac_fn_jit = jax.jit(jax.jacobian(concat_constraints, argnums=0))
+            # Dense constraint Jacobian via FORWARD-mode AD. ``jax.jacobian``
+            # defaults to reverse-mode (jacrev); its XLA codegen for the
+            # transpose of certain nonlinear graphs (e.g. fractional powers
+            # x**0.75 in MINLPLib's chakra) blows up super-linearly and a single
+            # compile can hang for >90s — long enough to starve the solver's
+            # own time-limit check, since the compile is an uninterruptible C
+            # call. Forward-mode (jacfwd) produces the identical matrix (AD mode
+            # never changes the value) and compiles the same case in ~0.2s. The
+            # heavy NLP-iteration Jacobian uses the sparse coloring path
+            # (evaluate_sparse_jacobian); this dense form backs FBBT linearity
+            # detection and the sparse fallback, where forward-mode's robust
+            # compile matters far more than its O(n)-vs-O(m) runtime constant.
+            self._jac_fn_jit = jax.jit(jax.jacfwd(concat_constraints, argnums=0))
         else:
             self._constraint_flat_sizes = np.zeros(0, dtype=np.intp)
             self._n_constraints = 0
@@ -184,11 +196,14 @@ class NLPEvaluator:
         gn_obj_hess_fn = self._build_gauss_newton_obj_hessian(model) if gauss_newton else None
         self._gauss_newton = gn_obj_hess_fn is not None
 
-        # Objective Hessian ∇²f(x).
+        # Objective Hessian ∇²f(x). Forward-over-forward for the same compile-
+        # robustness reason as the Lagrangian Hessian below: the default
+        # ``jax.hessian`` reverse inner pass can blow up XLA codegen on large
+        # nonlinear objective graphs. Identical values, faster/robuster compile.
         if gn_obj_hess_fn is not None:
             self._hess_fn_jit = jax.jit(gn_obj_hess_fn)
         else:
-            self._hess_fn_jit = jax.jit(jax.hessian(obj_fn, argnums=0))
+            self._hess_fn_jit = jax.jit(jax.jacfwd(jax.jacfwd(obj_fn, argnums=0), argnums=0))
 
         # Lagrangian Hessian: obj_factor * ∇²f(x) + Σᵢ λᵢ ∇²gᵢ(x).
         if gn_obj_hess_fn is not None:
@@ -218,7 +233,21 @@ class NLPEvaluator:
                     L = L + jnp.dot(lam, cons_fn_jit(x, params))
                 return L
 
-            self._lagrangian_hess_fn_jit = jax.jit(jax.hessian(lagrangian, argnums=0))
+            # Dense Lagrangian Hessian via FORWARD-over-FORWARD AD. ``jax.hessian``
+            # is ``jacfwd(jacrev(...))``; its inner reverse pass hits the same
+            # super-linear XLA transpose codegen documented for the constraint
+            # Jacobian above — on a large lifted DAG (e.g. MINLPLib's du-opt, 21
+            # vars but a heavy constraint graph) that single compile runs ~12s,
+            # and because it is an uninterruptible C call it blows straight past
+            # the solver's per-node time budget. ``jacfwd(jacfwd(...))`` produces
+            # the identical matrix (AD mode never changes the value) and compiles
+            # it in ~half the time. This dense form is only taken when the sparse
+            # colored-HVP path declines (small ``n``, or a dense Hessian), so the
+            # O(n^2)-vs-O(n) forward-mode runtime constant is immaterial while the
+            # compile robustness is what matters.
+            self._lagrangian_hess_fn_jit = jax.jit(
+                jax.jacfwd(jax.jacfwd(lagrangian, argnums=0), argnums=0)
+            )
 
             # Matrix-free Lagrangian Hessian-vector product (forward-over-reverse).
             # Used by the compressed sparse-Hessian path to recover the block-

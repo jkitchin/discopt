@@ -255,6 +255,18 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
     let mut slack_u = u_w[ns..].to_vec();
 
     let t_start = std::time::Instant::now();
+    // Absolute wall-clock deadline. The loop-top check below stops *dispatching*
+    // new batches once it passes, but a 64-node batch with strong branching can
+    // itself run several seconds, so a sub-second `time_limit_s` would overshoot
+    // by that whole batch. `solve_node` reads this deadline to drop each node's
+    // *optional* effort (strong branching, cover separation, rounding) once it is
+    // reached — leaving only the cheap LP solve that yields the node's valid
+    // bound — so the in-flight batch drains quickly instead of running to
+    // completion. Soundness is untouched: those steps only change branching
+    // choice / cut tightness / early incumbents, never a bound's validity.
+    let deadline = opts
+        .time_limit_s
+        .map(|tl| t_start + std::time::Duration::from_secs_f64(tl));
     'search: loop {
         if tm.is_finished() || tm.gap() <= opts.gap_tol {
             break;
@@ -332,6 +344,7 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
                 inc_snapshot: tm.incumbent().map(|(_, inc)| inc),
                 reliability: tm.get_reliability_threshold(),
                 pool_room: pool_sigs.len() < opts.max_pool_cuts,
+                deadline,
                 tm: &tm,
             };
             #[cfg(feature = "parallel")]
@@ -492,6 +505,11 @@ struct NodeCtx<'a> {
     reliability: u32,
     /// Whether the cut pool had room at batch start (gates separation work).
     pool_room: bool,
+    /// Absolute wall-clock deadline. Once passed, each node still computes its
+    /// (valid) LP bound but skips the optional rounding heuristic, cover
+    /// separation, and strong branching — none of which affect bound validity
+    /// or feasibility — so the in-flight batch drains quickly. `None` = no limit.
+    deadline: Option<std::time::Instant>,
     tm: &'a TreeManager,
 }
 
@@ -597,9 +615,19 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                 .iter()
                 .enumerate()
                 .all(|(j, &it)| !it || frac(xs[j]) <= INT_TOL);
+            // Past the deadline, skip every optional per-node effort below. The
+            // LP bound (above) is already computed and valid; the heuristic,
+            // cover separation, and strong branching only sharpen branching /
+            // cuts / early incumbents, never the bound or feasibility. Dropping
+            // them lets the in-flight batch drain in cheap-LP time so the
+            // loop-top deadline check can actually fire instead of being
+            // overshot by a batch of expensive strong-branch probes.
+            let time_up = ctx
+                .deadline
+                .is_some_and(|d| std::time::Instant::now() >= d);
             // Primal heuristic: round this fractional point so the reduce can
             // inject a feasible incumbent early and prune more of the tree.
-            if ctx.opts.heuristics && !feasible {
+            if ctx.opts.heuristics && !feasible && !time_up {
                 out.incumbent = try_rounding(
                     &sol.x,
                     ctx.ns,
@@ -617,7 +645,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
             // Node-level cover separation: a fractional node exposes violated
             // covers the root never sees. These are globally valid; the reduce
             // dedups them into the shared pool to tighten the whole tree.
-            if ctx.opts.node_cuts && !feasible && ctx.pool_room {
+            if ctx.opts.node_cuts && !feasible && ctx.pool_room && !time_up {
                 out.found_cuts = separate_cover(
                     &node_lp,
                     ctx.b_w,
@@ -633,7 +661,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
             // Only the *choice* of variable changes, so this never affects
             // correctness — only the node count. The prunable check uses the
             // batch-start incumbent snapshot (an effort decision, not a bound).
-            if ctx.sb_active && !feasible {
+            if ctx.sb_active && !feasible && !time_up {
                 let node_bound = sol.obj + ctx.obj_const;
                 let prunable = ctx
                     .inc_snapshot

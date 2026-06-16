@@ -749,8 +749,15 @@ def _solve_root_node_multistart(
     """
     starting_points = _generate_starting_points(node_lb, node_ub, n_random=n_random)
 
+    cl = cu = None
+    if constraint_bounds:
+        cl = [b[0] for b in constraint_bounds]
+        cu = [b[1] for b in constraint_bounds]
+
     best_result = None
+    best_feasible = False
     best_obj = np.inf
+    last_result = None
 
     for x0 in starting_points:
         nlp_result = _solve_node_nlp(
@@ -762,15 +769,31 @@ def _solve_root_node_multistart(
             options,
             nlp_solver=nlp_solver,
         )
-        if nlp_result.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
-            if nlp_result.objective < best_obj:
-                best_obj = nlp_result.objective
-                best_result = nlp_result
+        last_result = nlp_result
+        if nlp_result.status not in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
+            continue
+        feasible = cl is None or _check_constraint_feasibility(evaluator, nlp_result.x, cl, cu)
+        obj = nlp_result.objective
+        # Prefer a constraint-FEASIBLE iterate over any infeasible one; within the
+        # same feasibility class, prefer the lower objective. An interior-point
+        # solver can hit ITERATION_LIMIT at a low-objective but constraint-
+        # infeasible point (e.g. division constraints from an interior start).
+        # Selecting that over a feasible higher-objective iterate would mark the
+        # root constraint-infeasible and unsoundly fathom the whole tree as
+        # "infeasible" on a feasible problem.
+        if (
+            best_result is None
+            or (feasible and not best_feasible)
+            or (feasible == best_feasible and obj < best_obj)
+        ):
+            best_result = nlp_result
+            best_feasible = feasible
+            best_obj = obj
 
     if best_result is not None:
         return best_result
     # All failed — return the last result
-    return nlp_result
+    return last_result
 
 
 def _invoke_pre_import_callbacks(
@@ -1684,6 +1707,25 @@ def solve_model(
 
     model = reformulate_gdp(model, method=gdp_method)
 
+    # --- Objective-defining-equality relaxation (the SUSPECT "objective
+    # constraint"). When the model is `min/max z` with z a free scalar that
+    # appears only in one equality `z = g(x)` (affinely), relax that equality
+    # to the inequality the objective binds against (`z >= g(x)` for min). The
+    # rewrite is EXACT at the optimum — lowering z to g(x) is always feasible
+    # and improves the objective, so the relaxed optimum satisfies the original
+    # equality — and turns a convex-defining equality (non-convex *as an
+    # equality*) into a convex inequality, unlocking the convex solve path with
+    # a valid lower bound instead of erratic nonconvex NLP-BB (issue: du-opt).
+    # The transform is structurally gated and abstains conservatively, so it is
+    # general and never alters the optimum. Skipped when streaming B&B callbacks
+    # are attached so node/incumbent indices stay aligned with the user's model.
+    if not _has_bb_callbacks:
+        from discopt._jax.objective_epigraph import relax_objective_defining_equality
+
+        model, _epi_changed = relax_objective_defining_equality(model)
+        if _epi_changed:
+            logger.debug("relaxed objective-defining equality to binding inequality")
+
     # --- Factorable reformulation: clear sign-definite denominators and lift
     # mixed repeated-factor products (e.g. x*x*y) into bilinear form via
     # monomial aux variables, so terms the relaxation pipeline would otherwise
@@ -2461,7 +2503,27 @@ def solve_model(
                     # can actually relax.
                     try:
                         _probe_lb, _probe_ub = flat_variable_bounds(model)
-                        _probe = _mc_lp_relaxer.solve_at_node(_probe_lb, _probe_ub)
+                        # Bound the probe's MILP relaxation solve to a SMALL slice
+                        # of the budget. Without any limit it inherited
+                        # solve_at_node's default time_limit=None -> the Rust MILP
+                        # B&B ran unbounded (up to max_nodes=1e6), solving the root
+                        # relaxation to optimality; on a hard MINLP root (e.g.
+                        # du-opt) that single *discarded* probe consumed the whole
+                        # wall-clock (~77s vs a 25s limit) before the spatial search
+                        # even began. The probe only needs to learn whether the
+                        # relaxer yields a usable bound / infeasibility proof — the
+                        # Rust solver returns a valid dual bound even on an early
+                        # timeout — so a brief cap suffices and leaves the bulk of
+                        # the budget for the actual B&B. Mirror the OBBT root-budget
+                        # heuristic above, never exceeding the live remaining time.
+                        _probe_remaining = time_limit - (time.perf_counter() - t_start)
+                        _probe_budget = min(
+                            max(time_limit * 0.1, 2.0),
+                            max(_probe_remaining, _DEADLINE_NODE_FLOOR_S),
+                        )
+                        _probe = _mc_lp_relaxer.solve_at_node(
+                            _probe_lb, _probe_ub, time_limit=_probe_budget
+                        )
                     except Exception as e:  # pragma: no cover - defensive
                         logger.debug("McCormick LP root probe failed: %s", e)
                         _probe = None
@@ -2818,12 +2880,26 @@ def solve_model(
                 for i in range(n_batch):
                     if node_infeasible_mask[i]:
                         continue
+                    # Deadline enforcement (time_limit overrun fix). A single
+                    # McCormick LP solve has an irreducible ~1s floor on a large
+                    # lifted relaxation, so clamping the per-node budget to
+                    # _DEADLINE_NODE_FLOOR_S still lets a batch of N nodes run
+                    # ~N s past the cap. Once the deadline has passed, stop
+                    # solving the rest of the batch: leave each remaining node's
+                    # bound at -inf (unpruned, it is the default) and decertify
+                    # the gap, mirroring the serial path. -inf never fabricates a
+                    # false "optimal"; the loop exits at the next batch top.
+                    _node_remaining = _deadline - time.perf_counter()
+                    if _node_remaining <= 0.0:
+                        if not _model_is_convex:
+                            _gap_certified = False
+                        continue
                     nlp_failed = result_lbs[i] >= _SENTINEL_THRESHOLD
                     try:
                         mc_res = _mc_lp_relaxer.solve_at_node(
                             np.asarray(batch_lb[i]),
                             np.asarray(batch_ub[i]),
-                            time_limit=max(_deadline - time.perf_counter(), _DEADLINE_NODE_FLOOR_S),
+                            time_limit=max(_node_remaining, _DEADLINE_NODE_FLOOR_S),
                         )
                     except Exception as e:
                         logger.debug("McCormick LP failed at node %d: %s", i, e)
@@ -4010,6 +4086,18 @@ def _solve_nlp_bb(
     # --- Feasibility pump flag ---
     _fp_ran = False
 
+    # --- Soundness: distinguish a PROVEN-infeasible fathom from a merely
+    # UNCONVERGED one. A node whose NLP returns SolveStatus.INFEASIBLE (or whose
+    # FBBT interval arithmetic proves the box empty) is a valid infeasibility
+    # certificate. A node whose NLP merely hit ITERATION_LIMIT / ERROR with a
+    # constraint-violating iterate is NON-convergence, NOT a proof — an
+    # interior-point method can stall at an infeasible point on a perfectly
+    # feasible convex NLP (e.g. division constraints 40/x7 <= x5 need ~5k iters
+    # to reach feasibility; the 3k default stalls). If the tree later empties
+    # with no incumbent, an "infeasible" verdict is only sound when NO node was
+    # fathomed on non-convergence; otherwise feasibility is genuinely UNKNOWN.
+    _unconverged_fathom = False
+
     # --- NLP-BB loop ---
     # POUNCE batches node NLPs via solve_nlp_batch (Phase A, discopt#97); it is
     # a true KKT solver, so its converged objective is a reliable lower bound
@@ -4105,6 +4193,13 @@ def _solve_nlp_bb(
                             evaluator, result_sols[i], cl_list, cu_list
                         ):
                             result_lbs[i] = _INFEASIBILITY_SENTINEL
+                            # Batch IPM returned an objective (not a clean
+                            # infeasibility verdict) but the iterate violates
+                            # constraints: a stall, not a proof. Untrusted nodes
+                            # are unconverged by definition; tainting on any
+                            # constraint-infeasible batch fathom is conservative
+                            # and sound.
+                            _unconverged_fathom = True
             # For nonconvex: NLP objective is NOT a valid lower bound.
             # Keep it for integer-feasible nodes (incumbent candidates),
             # but reset to -inf for others so we don't prune incorrectly.
@@ -4176,6 +4271,11 @@ def _solve_nlp_bb(
                         evaluator, nlp_result.x, cl_list, cu_list
                     ):
                         nlp_lb = _INFEASIBILITY_SENTINEL
+                        # The solver returned OPTIMAL/ITERATION_LIMIT yet the
+                        # iterate violates constraints — this is non-convergence
+                        # (a stall), not a SolveStatus.INFEASIBLE proof. Fathoming
+                        # it cannot certify global infeasibility.
+                        _unconverged_fathom = True
                     # For nonconvex: reset non-integer-feasible to -inf
                     elif not _model_is_convex:
                         sol_is_int_feas = True
@@ -4197,6 +4297,12 @@ def _solve_nlp_bb(
                     result_feas[i] = False
                 else:
                     result_lbs[i] = _INFEASIBILITY_SENTINEL
+                    # A clean SolveStatus.INFEASIBLE is a valid infeasibility
+                    # certificate (for a convex node); ERROR/TIME_LIMIT/UNBOUNDED
+                    # are not — they are solver failures that must not masquerade
+                    # as a proof of global infeasibility.
+                    if nlp_result.status != SolveStatus.INFEASIBLE:
+                        _unconverged_fathom = True
                     lb_c = np.clip(node_lb, -_SPC, _SPC)
                     ub_c = np.clip(node_ub, -_SPC, _SPC)
                     result_sols[i] = 0.5 * (lb_c + ub_c)
@@ -4418,9 +4524,21 @@ def _solve_nlp_bb(
         elif wall_time >= time_limit:
             status = "time_limit"
             _gap_certified = False
+        elif _unconverged_fathom:
+            # Tree exhausted with no incumbent, but at least one node was fathomed
+            # on NLP NON-convergence (a stall), not a valid infeasibility
+            # certificate. We cannot soundly claim the problem is infeasible — its
+            # feasibility is genuinely undetermined. Report "unknown" rather than a
+            # false "infeasible" (the worst-class error: a feasible problem
+            # declared infeasible). Conservative by design: if any fathom was
+            # unconverged we forgo certifying infeasibility we might otherwise have
+            # proven — soundness over capability.
+            status = "unknown"
+            _gap_certified = False
         else:
-            # Tree exhausted with no feasible node: infeasibility *is* a certified
-            # conclusion, so leave _gap_certified untouched.
+            # Tree exhausted with no feasible node and every fathom was a valid
+            # certificate (FBBT-empty box or SolveStatus.INFEASIBLE): infeasibility
+            # *is* a certified conclusion, so leave _gap_certified untouched.
             status = "infeasible"
 
     # Negate bound back for maximization
