@@ -168,7 +168,19 @@ class NLPEvaluator:
                 return jnp.concatenate(parts)
 
             self._cons_fn_jit = jax.jit(concat_constraints)
-            self._jac_fn_jit = jax.jit(jax.jacobian(concat_constraints, argnums=0))
+            # Dense constraint Jacobian via FORWARD-mode AD. ``jax.jacobian``
+            # defaults to reverse-mode (jacrev); its XLA codegen for the
+            # transpose of certain nonlinear graphs (e.g. fractional powers
+            # x**0.75 in MINLPLib's chakra) blows up super-linearly and a single
+            # compile can hang for >90s — long enough to starve the solver's
+            # own time-limit check, since the compile is an uninterruptible C
+            # call. Forward-mode (jacfwd) produces the identical matrix (AD mode
+            # never changes the value) and compiles the same case in ~0.2s. The
+            # heavy NLP-iteration Jacobian uses the sparse coloring path
+            # (evaluate_sparse_jacobian); this dense form backs FBBT linearity
+            # detection and the sparse fallback, where forward-mode's robust
+            # compile matters far more than its O(n)-vs-O(m) runtime constant.
+            self._jac_fn_jit = jax.jit(jax.jacfwd(concat_constraints, argnums=0))
         else:
             self._constraint_flat_sizes = np.zeros(0, dtype=np.intp)
             self._n_constraints = 0
