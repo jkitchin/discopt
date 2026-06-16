@@ -18,7 +18,11 @@ import numpy as np
 
 from discopt.modeling.core import Model
 from discopt.solvers import SolveStatus
-from discopt.solvers.lp_backend import get_exact_lp_solver, get_lp_solver
+from discopt.solvers.lp_backend import (
+    get_exact_dual_lp_solver,
+    get_exact_lp_solver,
+    get_lp_solver,
+)
 
 # Beyond this magnitude the McCormick relaxation's LP is too ill-conditioned for
 # an OBBT tightening to be rigorous. OBBT shrinks a variable's domain to an LP
@@ -752,6 +756,130 @@ def run_obbt_on_relaxation(
     )
 
 
+def dbbt_on_relaxation(
+    relaxation,
+    n_orig: int,
+    incumbent_cutoff: float,
+    *,
+    rc_tol: float = 1e-7,
+    eps: float = 1e-7,
+    time_limit_per_lp: Optional[float] = 1.0,
+) -> ObbtResult:
+    """Duality-based bound tightening (DBBT) from the relaxation LP reduced costs.
+
+    Solves the McCormick LP relaxation once, minimizing the objective, to obtain
+    a valid dual bound ``z_lp`` and exact reduced costs ``d``. With a valid
+    incumbent ``z_inc = incumbent_cutoff`` (an upper bound on the optimum), LP
+    duality gives, for every feasible point with objective ``<= z_inc``,
+
+        d_j * (x_j - bound_j) <= z_inc - z_lp =: gap   (>= 0),
+
+    where complementary slackness presses a variable with ``d_j > 0`` to its
+    lower bound and one with ``d_j < 0`` to its upper bound. Hence
+
+        d_j >  rc_tol:  x_j <= lb_j + gap / d_j
+        d_j < -rc_tol:  x_j >= ub_j - gap / |d_j|.
+
+    This is the continuous analogue of integer reduced-cost fixing. The
+    relaxation is an OUTER approximation and ``z_lp`` / ``z_inc`` are valid
+    bounds, so the true optimum satisfies these — DBBT never removes it. A single
+    LP solve tightens every variable at once, far cheaper than OBBT's ``2n``
+    solves. Tightening only: any failure (no exact oracle, ill-conditioned LP,
+    non-optimal solve, missing reduced costs, or no finite cutoff) returns the
+    box unchanged, so it can never make the solve unsound.
+    """
+    import scipy.sparse as sp
+
+    bounds = list(relaxation._bounds)
+    base_lb = np.array([b[0] for b in bounds[:n_orig]], dtype=np.float64)
+    base_ub = np.array([b[1] for b in bounds[:n_orig]], dtype=np.float64)
+
+    def _noop() -> ObbtResult:
+        return ObbtResult(base_lb.copy(), base_ub.copy(), 0, 0, 0.0)
+
+    if incumbent_cutoff is None or not np.isfinite(incumbent_cutoff):
+        return _noop()
+    # DBBT needs exact *reduced costs*; only a dual-exposing exact oracle (HiGHS)
+    # qualifies. With none available it no-ops soundly (OBBT still runs).
+    _lp = get_exact_dual_lp_solver()
+    if _lp is None:
+        return _noop()
+    c_obj = relaxation._c
+    if c_obj is None:
+        return _noop()
+    A_ub = relaxation._A_ub
+    b_ub = relaxation._b_ub
+    obj_offset = float(relaxation._obj_offset)
+
+    # Same conditioning guard as OBBT: reduced costs from an ill-conditioned LP
+    # are not rigorous, so abstain (sound) rather than risk an unsound tightening.
+    def _max_abs(x) -> float:
+        if x is None:
+            return 0.0
+        if sp.issparse(x):
+            return float(np.abs(x.data).max()) if x.nnz else 0.0
+        arr = np.asarray(x, dtype=np.float64)
+        finite = arr[np.isfinite(arr)] if arr.size else arr
+        return float(np.abs(finite).max()) if finite.size else 0.0
+
+    _bound_vals = np.array([v for pair in bounds for v in pair], dtype=np.float64)
+    if max(_max_abs(A_ub), _max_abs(b_ub), _max_abs(_bound_vals)) > _OBBT_COND_LIMIT:
+        return _noop()
+
+    # One LP: minimize the relaxation objective over the full polytope. We do NOT
+    # append the cutoff row here — we want the relaxation's own reduced costs and
+    # use the cutoff only to size the gap.
+    result = _lp(
+        c=np.asarray(c_obj, dtype=np.float64),
+        A_ub=A_ub,
+        b_ub=b_ub,
+        bounds=list(bounds),
+        time_limit=time_limit_per_lp,
+    )
+    if (
+        result.status != SolveStatus.OPTIMAL
+        or result.objective is None
+        or getattr(result, "reduced_costs", None) is None
+    ):
+        return _noop()
+
+    z_lp = float(result.objective) + obj_offset
+    gap = float(incumbent_cutoff) - z_lp
+    if not np.isfinite(gap) or gap < 0.0:
+        # gap < 0 means the relaxation already excludes the incumbent value; the
+        # caller's OBBT-with-cutoff pass detects emptiness. Stay tightening-only.
+        return _noop()
+    # Safety margin so any residual dual tolerance cannot over-tighten.
+    gap += 1e-6 * (1.0 + abs(float(incumbent_cutoff)))
+
+    d = np.asarray(result.reduced_costs, dtype=np.float64)
+    lb = base_lb.copy()
+    ub = base_ub.copy()
+    n_tightened = 0
+    for j in range(min(n_orig, d.shape[0])):
+        dj = float(d[j])
+        if not np.isfinite(dj):
+            continue
+        if dj > rc_tol:
+            new_ub = lb[j] + gap / dj
+            if new_ub < ub[j] - eps:
+                ub[j] = max(lb[j], new_ub)
+                n_tightened += 1
+        elif dj < -rc_tol:
+            new_lb = ub[j] - gap / (-dj)
+            if new_lb > lb[j] + eps:
+                lb[j] = min(ub[j], new_lb)
+                n_tightened += 1
+
+    return ObbtResult(
+        tightened_lb=lb,
+        tightened_ub=ub,
+        n_lp_solves=1,
+        n_tightened=n_tightened,
+        total_lp_time=float(getattr(result, "wall_time", 0.0)),
+    )
+
+
 @dataclass
 class RootObbtResult:
     """Result of a structural root OBBT pass over the McCormick relaxation."""
@@ -859,6 +987,49 @@ def obbt_tighten_root(
                 )
             except Exception:
                 break
+
+            # Duality-based bound tightening first: one objective LP yields
+            # reduced costs that tighten every variable at once (cheap), before
+            # OBBT's 2n min/max solves. Both tighten against the same relaxation,
+            # so their results intersect soundly. DBBT only fires with a cutoff.
+            if incumbent_cutoff is not None:
+                try:
+                    dbbt_res = dbbt_on_relaxation(
+                        milp,
+                        relaxer._n_orig,
+                        incumbent_cutoff,
+                        eps=eps,
+                        time_limit_per_lp=time_limit_per_lp,
+                    )
+                    total_lp_time += dbbt_res.total_lp_time
+                    if dbbt_res.n_tightened > 0:
+                        m = min(n_orig, len(dbbt_res.tightened_lb))
+                        new_lb = dbbt_res.tightened_lb[:m]
+                        new_ub = dbbt_res.tightened_ub[:m]
+                        if np.any(is_int[:m]):
+                            new_lb = np.where(is_int[:m], np.ceil(new_lb - eps), new_lb)
+                            new_ub = np.where(is_int[:m], np.floor(new_ub + eps), new_ub)
+                        lb[:m] = np.maximum(lb[:m], new_lb)
+                        ub[:m] = np.minimum(ub[:m], new_ub)
+                        total_tight += int(dbbt_res.n_tightened)
+                        if np.any(lb[:m] > ub[:m] + 1e-9):
+                            return RootObbtResult(
+                                lb, ub, total_tight, n_rounds, total_lp_time, True
+                            )
+                        # Rebuild the envelope at the DBBT-tightened box so OBBT
+                        # below sees the strengthened relaxation.
+                        try:
+                            milp, _ = build_milp_relaxation(
+                                relaxer._model,
+                                relaxer._terms,
+                                relaxer._disc,
+                                bound_override=(lb, ub),
+                                superposition=relaxer._superposition,
+                            )
+                        except Exception:
+                            break
+                except Exception:
+                    pass
 
             res = run_obbt_on_relaxation(
                 milp,
