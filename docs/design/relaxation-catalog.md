@@ -187,13 +187,18 @@ arguments — it now reduces over the components.
 `atan/asin/acos` (PR-side) and `sinh/cosh` (this branch) now have `dm.*` builders, so the
 functions that already had relaxations + IR support are writable from native Python.
 
-### D. Relaxation tightness gaps vs BARON — PARTIAL
+### D. Relaxation tightness gaps vs BARON — PARTIAL (trilinear hull now exact)
 
-- **Trilinear / general multilinear:** still nested/recursive McCormick, **not** the exact
-  convex hull (no Rikun/Meyer–Floudas facets, no edge-concave underestimators). PR #148
-  added repeated-factor *lifting* and the LP path carries lifted bilinear aux variables,
-  so the infrastructure for RLT-style tightening now exists, but the literal hull facets
-  are not yet generated. See §7.
+- **Trilinear `x·y·z`: exact hull implemented (this branch).** The LP path now emits the
+  eight degree-3 RLT bound-factor product cuts on the lifted `(x,y,z,w_xy,w_xz,w_yz,w_xyz)`
+  columns (`milp_relaxation.py`, gated by `DISCOPT_TRILINEAR_RLT`, default on). Together
+  with the pairwise McCormick on all three pairwise products these are the exact
+  convex/concave hull of the trilinear monomial (Rikun 1997 / Meyer & Floudas 2004) —
+  verified to match the 8-vertex convex envelope to 4e-14. Each cut is a product of
+  nonnegative bound factors, so it is individually valid (tightens, never invalidates).
+- **General multilinear (4+ factors): still recursive McCormick.** The same RLT idea
+  generalizes (degree-n bound-factor products over all pairwise/higher lifted columns) but
+  is not yet emitted for n>3; `edge-concave` underestimators are also not generated.
 - **α-BB now wired in (resolved sub-item):** auto-dispatched as a fallback and selectable
   via `arithmetic="alphabb"`, with a rigorous interval-Hessian α.
 - **No automatic relaxation tightening loop:** `obbt.py` and nonlinear bound tightening
@@ -234,14 +239,13 @@ enhancement.
 
 ## 7. Remaining work (prioritized)
 
-1. **Exact multilinear hull facets (D).** The lifting infrastructure now exists (#148, LP
-   path with lifted bilinear aux columns), so the next step is to *generate the
-   Rikun/Meyer–Floudas facets* on those lifted variables in the LP relaxation, rather than
-   relying on recursive bilinear envelopes. Note: in the compositional NLP/value-evaluator
-   this is not expressible — at the box-midpoint linearization point recursive McCormick is
-   order-invariant (verified: `relax_trilinear_exact`'s three orderings coincide at the
-   midpoint, so permutation-merging yields no tightening). Tightening must happen on the
-   **LP** path with explicit lifted variables.
+1. **General multilinear hull facets, n>3 (D).** The trilinear hull is now exact (RLT
+   bound-factor cuts on the LP path, §6.D). The same construction generalizes to n>3
+   (degree-n bound-factor products over all lifted subset-product columns) but is not yet
+   emitted; `edge-concave` underestimators are also future work. Note this must stay on the
+   **LP** path with explicit lifted variables — in the compositional NLP/value-evaluator it
+   is not expressible (at the box-midpoint linearization point recursive McCormick is
+   order-invariant; `relax_trilinear_exact`'s three orderings coincide there).
 2. **DCP curvature for the n-ary `norm` atom (F).** Any p-norm is convex; adding it to the
    DCP composition rules (`rules.py`) would let the convex fast-path recognize
    least-norm/regression models without the interval-Hessian fallback. (Treating
@@ -261,5 +265,27 @@ for smooth unary atoms — `softplus`/`sigmoid` curvature profiles + sound inter
 added on top of #149, so every smooth unary atom with a definable curvature is now covered
 (verified sound: a zero-spanning `sigmoid` and a concave `-softplus` are *not* misclassified
 convex). The `prod` path uses the proper recursive-McCormick fold; L1/L2/L∞ norms are
-certified and a NaN vector-eval bug in the Rust IR was fixed. Item 1 of §7 (exact multilinear
-hull) was investigated and deferred to the LP/lifted path; the rest of §7 is open.
+certified and a NaN vector-eval bug in the Rust IR was fixed. The **exact trilinear convex
+hull** is now implemented via RLT bound-factor cuts on the LP path (§6.D); generalizing it to
+n>3 (§7 item 1) and the rest of §7 are open.
+
+---
+
+## 9. Complementary track: log-space / geometric programming (not cataloged above)
+
+This catalog covers **x-space** relaxations and convexity detection. discopt has a second,
+deliberately separate **log-space (`y = log x`) / geometric-programming** track that a reader
+should know exists; it is not part of the mechanisms above:
+
+- **`discopt.gp`** — `is_log_convex(model)` / `classify_gp` (shipped in #113, follow-up to the
+  closed #111): a whole-model GP recognizer that auto-routes a posynomial/monomial program
+  through the exact log-space convex NLP and maps the optimum/bound/gap back to `x`.
+- **Open GP follow-ups:** #114 (mixed-sign **signomial** global solver — the log-space
+  counterpart to the x-space `relax_signomial_multi` in §3), #115 (**per-expression
+  log-curvature lattice** — the log-space analogue of the x-space curvature lattice in §6.F,
+  required by the issue to stay *strictly separate* from it), and #116 (**y-space
+  branching/bound-tightening** for GP-structured MINLPs — a GP-specific bounding backend
+  alongside §4).
+
+These give discopt two convexity-detection lattices (x-space and log-space) and two relaxation
+regimes; only the x-space side is cataloged here.
