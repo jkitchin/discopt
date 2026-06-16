@@ -3770,6 +3770,11 @@ def build_milp_relaxation(
     # to apply the cross-term conditioning guard. Reset before each outer lift.
     cross_term_used = [False]
 
+    # Keeps synthetic ``expr_id`` sentinels for the intermediate reciprocal auxes
+    # created by the nested-division lift (issue #154 increment 3) alive for the
+    # lifetime of this build, so their ``id()`` never collides with a real node's.
+    _nested_div_keepalive: list[object] = []
+
     def _ensure_bounded_bilinear(lhs_col: int, rhs_col: int) -> Optional[int]:
         """Force-create the product aux for two bounded columns (``x*y``, or
         ``x*x`` for a square), or ``None`` if a factor is unbounded or the product
@@ -3937,6 +3942,118 @@ def build_milp_relaxation(
         cross_term_used[0] = True
         return {folded: coeff}, 0.0
 
+    def _try_lift_nested_division(div_expr: BinaryOp) -> None:
+        """Lift ``num / g`` with a *non-constant* numerator (issue #154 increment
+        3). The constant-numerator path scales an existing ``1/g`` aux by the
+        numerator (``_maybe_lift_outer_atom`` + the linearizer at the ``c/g`` site);
+        a non-constant numerator instead hits ``Cannot linearize non-constant
+        division`` and the constraint is dropped. The classic example is nvs05/
+        nvs22 ``(0.5*x3)/x6``.
+
+        We relax it as the factorable product ``num/g = n · (ncoeff/g)`` where the
+        numerator decomposes into ``ncoeff · n`` (a single bounded column ``n`` and
+        a positive scalar ``ncoeff``):
+
+        1. force-lift the reciprocal ``r = ncoeff/g`` with the standard convex
+           reciprocal envelope, folding ``ncoeff`` into the affine argument
+           (``arg = g/ncoeff``) so ``r``'s value is exactly ``ncoeff/g`` and the
+           product below carries coefficient 1;
+        2. force the McCormick product ``P = n · r``;
+        3. map the division node to ``P`` through ``composite_var_map`` so the
+           linearizer substitutes it with coefficient 1.
+
+        Soundness: at any true feasible point ``r = ncoeff/g`` lies in
+        ``[ncoeff/gh, ncoeff/gl]`` and the reciprocal envelope contains it, and the
+        McCormick envelope of ``n · r`` contains ``n · (ncoeff/g) = num/g`` — so the
+        relaxed feasible set is a superset of the true one and the dual bound stays
+        valid. We abstain (drop the cut, which only enlarges the relaxation —
+        always sound) on every shape not provably handled here: a non-monomial or
+        non-positive-coefficient numerator (a sign fold would flip the reciprocal
+        interval negative), a denominator that is not strictly positive / is
+        ill-conditioned for the reciprocal envelope, or a product aux whose bound
+        magnitude is large enough to make the fast simplex backend mis-solve the
+        LP (the #158/increment-2 wrong-"optimal" hazard)."""
+        nonlocal col_idx
+        eid = id(div_expr)
+        if eid in composite_var_map or eid in univariate_var_map:
+            return
+
+        # Numerator → (single bounded column n, positive scalar ncoeff).
+        mono = _lift_monomial_with_coeff(div_expr.left)
+        if mono is None:
+            return
+        ncols, ncoeff = mono
+        if not (np.isfinite(ncoeff) and ncoeff > 0.0):
+            return
+        n_col = _fold_cols_to_aux(ncols)
+        if n_col is None:
+            return
+
+        # Denominator g → affine over the extended column space.
+        g_lifted = _lift_inner_to_affine(div_expr.right)
+        if g_lifted is None:
+            return
+        g_coeffs, g_const = g_lifted
+        if not g_coeffs:
+            return  # constant denominator is not a genuine division
+
+        # Reciprocal argument t = g / ncoeff, so reciprocal(t) = ncoeff / g.
+        arg_coeff = np.zeros(col_idx)
+        for col, val in g_coeffs.items():
+            arg_coeff[col] = val / ncoeff
+        arg_const = g_const / ncoeff
+
+        gl, gh = _extended_affine_interval(arg_coeff, arg_const)
+        if not (np.isfinite(gl) and np.isfinite(gh)) or gh < gl:
+            return
+        # Reciprocal needs a strictly-positive, well-conditioned denominator: the
+        # tangent slope ``-1/gl**2`` is the largest coefficient the envelope emits.
+        if gl <= _RECIP_MIN_DENOM:
+            return
+        if 1.0 / (gl * gl) > _LIFT_MAX_ENVELOPE_SLOPE:
+            return
+        val_lb, val_ub = 1.0 / gh, 1.0 / gl
+        if not (np.isfinite(val_lb) and np.isfinite(val_ub)):
+            return
+
+        # Conditioning guard (issue #154 increment 2/3): a product aux whose bounds
+        # reach the magnitude where the lifted LP is ill-conditioned lets the fast
+        # simplex return a wrong "optimal" — an unsound dual bound. Pre-check the
+        # n·r corner magnitudes and abstain above the limit (sound: drops the cut).
+        n_lo, n_hi = (float(v) for v in all_bounds[n_col])
+        if not (np.isfinite(n_lo) and np.isfinite(n_hi)):
+            return
+        corners = [n_lo * val_lb, n_lo * val_ub, n_hi * val_lb, n_hi * val_ub]
+        if max(abs(min(corners)), abs(max(corners))) > _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE:
+            return
+
+        # 1. reciprocal aux r = ncoeff / g, with the convex reciprocal envelope.
+        sentinel = object()
+        _nested_div_keepalive.append(sentinel)
+        recip_col = col_idx
+        univariate_relaxations.append(
+            UnivariateRelaxation(
+                expr_id=id(sentinel),
+                func_name="reciprocal",
+                aux_col=recip_col,
+                arg_coeff=arg_coeff,
+                arg_const=float(arg_const),
+                arg_lb=float(gl),
+                arg_ub=float(gh),
+            )
+        )
+        all_bounds.append((float(val_lb), float(val_ub)))
+        integrality_flags.append(0)
+        col_idx += 1
+
+        # 2. McCormick product P = n · r.
+        prod_col = _ensure_bounded_bilinear(n_col, recip_col)
+        if prod_col is None:
+            return  # the orphan reciprocal aux is bounded + enveloped, just unused
+
+        # 3. substitute the division node with P (coefficient 1).
+        composite_var_map[eid] = prod_col
+
     def _maybe_lift_outer_atom(expr: Expression) -> None:
         nonlocal col_idx
         eid = id(expr)
@@ -3945,6 +4062,8 @@ def build_milp_relaxation(
         if isinstance(expr, BinaryOp) and expr.op == "/":
             num = _constant_value(expr.left)
             if num is None:
+                # Non-constant numerator: nested-division lift (increment 3).
+                _try_lift_nested_division(expr)
                 return
             func_name, inner = "reciprocal", expr.right
         elif isinstance(expr, FunctionCall) and expr.func_name == "sqrt" and len(expr.args) == 1:
