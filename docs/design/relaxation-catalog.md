@@ -250,42 +250,47 @@ enhancement.
 
 ---
 
-## 7. Distance to SOTA — remaining work (prioritized)
+## 7. Distance to SOTA — status
 
 The **relaxation layer** is now broadly SOTA-competitive: exact bilinear/trilinear/
 multilinear hulls (RLT), factorable McCormick over the full function set, a rigorous
 interval-Hessian α-BB fallback, the OA/Chebyshev/Taylor/ellipsoidal cut family, two
-convexity-detection tracks (x-space + GP, §9), and FBBT in both directions. The remaining
-distance to BARON/SCIP/ANTIGONE/Couenne is concentrated in **bound-tightening orchestration**
-and a few tightness/coverage extensions:
+convexity-detection tracks (x-space + GP, §9), and FBBT in both directions.
 
-1. **OBBT / range-reduction orchestration loop (highest impact).** `obbt.py`,
-   `nonlinear_bound_tightening.py`, and FBBT exist, but there is no coordinated
-   range-reduction loop (root + selective in-tree probing) the way BARON's bound tightening
-   drives its performance. This is the single largest practical gap vs SOTA — relaxation
-   quality is necessary but range reduction is what closes hard gaps.
-2. **Duality-based bound tightening (DBBT).** Use the relaxation's reduced costs / marginals
-   to tighten variable bounds (BARON's marginals-based BT). Cheap given an LP bound is
-   already solved; complements OBBT.
+**Done (this branch):**
+
+1. **OBBT / range-reduction loop — DONE.** `obbt_tighten_root` runs a looped OBBT over the
+   McCormick *relaxation* (not just linear rows) with rounds, an incumbent cutoff, and
+   soundness guarantees; the periodic Phase-C tightening now routes through it.
+2. **Duality-based bound tightening (DBBT) — DONE.** `dbbt_on_relaxation` reads the relaxation
+   LP's reduced costs to bound how far each variable moves from its pressed bound — one LP
+   tightens all variables, interleaved into the OBBT loop. Needs an exact dual-exposing oracle
+   (HiGHS); no-ops soundly otherwise.
+6. **Convexity-detection completeness — DONE.** `norm(affine)` is now a CONVEX DCP atom
+   (`rules.py`); `sin/cos/tan` are region-aware in the interval-Hessian certificate
+   (`interval_ad.py`) — convex/concave on constant-curvature boxes, sound abstention when
+   indefinite.
+7. **FBBT backward for `Erf` + periodic `Sin/Cos` — DONE.** `erfinv` (Winitzki + Newton) and
+   single-monotone-piece inversion for sin/cos, validated sound on a 1196-case sweep.
+8. **General `norm{p}` (`p ∉ {1,2,∞}`) — DONE.** `MathFunc::NormP(u32)` closes the IR
+   round-trip; arbitrary integer orders certify end to end.
+
+**Remaining (substantial / lower value):**
+
 3. **Uncapped multilinear via on-demand separation.** The exact multilinear hull is dense
    (`2^n` columns/cuts) and capped at `DISCOPT_MULTILINEAR_RLT_MAX` (default 4). A
-   cut-on-violation separator (add only RLT cuts the current LP point violates) would scale
-   the exact hull to higher n without the dense blow-up.
-4. **Edge-concave / vertex-polyhedral underestimators** (Tardella; Hasan 2018, cited in
-   `PHASE3_MATH_NOTES.md`). A tighter alternative family for some nonconvex structures beyond
-   the bilinear/multilinear monomials RLT covers.
-5. **Discrete / `sign` / indicator handling.** `sign` and discontinuous atoms get only loose
-   constant-per-regime bounds; SOS1/indicator (big-M or convex-hull) reformulations would
-   make them tight, matching SCIP/BARON's handling of complementarity/indicator structure.
-6. **Convexity-detection completeness (F).** Add the n-ary `norm` atom to the DCP composition
-   rules (`rules.py`) — any p-norm is convex, unlocking least-norm/regression fast-paths — and
-   region-aware curvature for `sin/cos/tan`.
-7. **FBBT backward for `Erf`** (needs an `erfinv`) and a periodic-aware inverse for `Sin/Cos`.
-8. **General `norm{p}` certification (`p ∉ {1,2,∞}`).** Needs a payload-carrying `MathFunc`
-   variant (e.g. `NormP(u32)`); low priority — these orders are rarely modeled.
-
-Items 1–2 are the main SOTA-parity work; 3–5 are tightness wins on specific structures; 6–8
-are coverage completeness.
+   cut-on-violation separator would scale it past the cap. *Sound but needs a separation-loop
+   refactor of the single-shot LP solve flow* — the cuts are always valid (RLT bound-factor
+   products), so the work is integration, not correctness.
+4. **Edge-concave / vertex-polyhedral underestimators** (Tardella; Hasan 2018). *Research-grade
+   new relaxation family.* Note: multilinear monomials are already edge-concave and their
+   vertex envelope is exactly what RLT (§6.D) produces — the open value is *other* edge-concave
+   structures, needing a general edge-concavity detector + vertex-envelope construction.
+5. **Discrete / `sign` / indicator handling.** *Finding: sign's continuous convex/concave hull
+   over a zero-spanning box is already exact* (constant `±1`, since sign equals `−1` across all
+   of `[lb, 0)`), so `relax_sign` is not loose in the continuous sense. Tightening genuinely
+   requires a *discrete* binary-indicator (SOS1/big-M) reformulation — niche (sign is rarely
+   modeled) and ill-posed at `x=0` (`sign(0)=0` vs a `±1` indicator). Deferred as low value.
 
 ## 8. Implementation status (this branch)
 
@@ -298,9 +303,14 @@ unary atoms — `softplus`/`sigmoid` curvature profiles + sound interval enclosu
 misclassified convex). The `prod` path uses the proper recursive-McCormick fold; L1/L2/L∞ norms
 are certified and a NaN vector-eval bug in the Rust IR was fixed.
 
-What remains for SOTA parity is §7 — chiefly the **OBBT/range-reduction and duality-based
-bound-tightening orchestration** (item 1–2), then the tightness/coverage extensions (3–8). The
-relaxation tightness itself is now at parity for the polynomial/factorable core.
+Also delivered (the §7 SOTA items): **1–2** OBBT-on-relaxation loop + duality-based bound
+tightening; **6** norm-DCP atom + region-aware trig certificate; **7** FBBT backward for
+erf/sin/cos; **8** general `norm{p}` via `NormP(u32)`. What remains is **3** (uncapped
+multilinear via on-demand separation — needs a separation-loop refactor), **4** (edge-concave
+underestimators — research-grade), and **5** (discrete `sign`/indicator — low value; sign's
+continuous hull is already exact). The relaxation tightness itself is at parity for the
+polynomial/factorable core; the residual distance to SOTA is bound-tightening *orchestration*
+breadth and those three specialized items.
 
 ---
 
