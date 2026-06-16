@@ -25,7 +25,7 @@ pub mod scaling;
 pub mod sparse;
 
 pub use batch::{solve_lp_batch, solve_lp_multi_rhs, LpInstance};
-pub use dual::{solve_lp_warm, solve_lp_warm_scaled};
+pub use dual::{solve_lp_warm, solve_lp_warm_scaled, PreparedDual};
 pub use presolve::tighten_bounds;
 pub use primal::{solve_lp, solve_lp_scaled};
 pub use scaling::Scaling;

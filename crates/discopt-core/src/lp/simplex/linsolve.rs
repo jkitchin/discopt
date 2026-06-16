@@ -65,7 +65,12 @@ pub trait LinearSolver {
 }
 
 /// Production backend: feral's sparse unsymmetric LU.
-#[derive(Default)]
+///
+/// `Clone` duplicates the factorization itself (feral's `SparseLu` is `Clone`),
+/// so a prepared basis factorization can be cloned and re-optimized from several
+/// times — the dual warm-start reuses one factorization across a node's
+/// strong-branching probes instead of refactorizing the identical basis per probe.
+#[derive(Default, Clone)]
 pub struct FeralLU {
     lu: Option<SparseLu>,
 }

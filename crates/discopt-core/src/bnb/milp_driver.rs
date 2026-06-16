@@ -22,8 +22,8 @@ use crate::lp::cover::separate_cover;
 use crate::lp::crossover::LpView;
 use crate::lp::gomory::{separate_gomory, GomoryCut};
 use crate::lp::simplex::{
-    solve_lp, solve_lp_scaled, solve_lp_warm_scaled, tighten_bounds, LpStatus, Scaling,
-    SimplexOptions,
+    solve_lp, solve_lp_scaled, solve_lp_warm_scaled, tighten_bounds, LpStatus, PreparedDual,
+    Scaling, SimplexOptions,
 };
 
 const INF: f64 = 1e20;
@@ -717,12 +717,16 @@ fn strong_branch(
 
     const INFEAS_DELTA: f64 = 1e7; // a pruned child is a strong branching signal
     let eps = 1e-6;
-    // Probes share the batch's pre-scaled matrix (`ctx.sa`/`sc`/`sb`): only the
-    // one perturbed bound is rescaled per probe. Branching bounds (floor/ceil of
-    // the fractional value) are set in the original space, then scaled to match.
-    // The basis is scaling-invariant and the objective gap `obj − node_obj` is
-    // invariant, so the scores are identical to an unscaled probe — and a wrong
-    // score could only pick a worse branching variable, never an unsound bound.
+    // Every probe re-optimizes from the *same* node basis on the *same* matrix,
+    // differing only in one bound. Prepare (factorize + verify dual feasibility)
+    // that basis once on the batch's pre-scaled matrix (`ctx.sa`/`sc`/`sb`); each
+    // probe then clones the pristine factorization instead of refactorizing the
+    // identical basis ~2·max_cands times. Branching bounds (floor/ceil of the
+    // fractional value) are set in the original space, then scaled to match. The
+    // basis is scaling-invariant and the objective gap `obj − node_obj` is
+    // invariant, so scores match an unscaled probe — and a wrong score could only
+    // pick a worse branching variable, never an unsound bound. If the basis is not
+    // warm-startable, fall back to a per-probe scaled warm solve.
     let mut l = orig_l.to_vec();
     let mut u = orig_u.to_vec();
     let scale_bounds = |l: &[f64], u: &[f64]| -> (Vec<f64>, Vec<f64>) {
@@ -731,17 +735,33 @@ fn strong_branch(
             None => (l.to_vec(), u.to_vec()),
         }
     };
+    // Reference scaled bounds (the node's own) at which the basis is dual-feasible.
+    let (ref_l, ref_u) = scale_bounds(orig_l, orig_u);
+    let prep_view = LpView {
+        a: ctx.sa,
+        m: ctx.m_w,
+        n: ctx.n_w,
+        c: ctx.sc,
+        l: &ref_l,
+        u: &ref_u,
+    };
+    let prepared = PreparedDual::prepare(&prep_view, basis, simplex);
     let probe = |l: &[f64], u: &[f64]| -> crate::lp::simplex::LpSolve {
         let (sl, su) = scale_bounds(l, u);
-        let view = LpView {
-            a: ctx.sa,
-            m: ctx.m_w,
-            n: ctx.n_w,
-            c: ctx.sc,
-            l: &sl,
-            u: &su,
-        };
-        solve_lp_warm_scaled(&view, ctx.sb, basis, simplex)
+        match &prepared {
+            Some(p) => p.reoptimize(&sl, &su, ctx.sb, simplex),
+            None => {
+                let view = LpView {
+                    a: ctx.sa,
+                    m: ctx.m_w,
+                    n: ctx.n_w,
+                    c: ctx.sc,
+                    l: &sl,
+                    u: &su,
+                };
+                solve_lp_warm_scaled(&view, ctx.sb, basis, simplex)
+            }
+        }
     };
     let mut best: Option<usize> = None;
     let mut best_score = f64::NEG_INFINITY;

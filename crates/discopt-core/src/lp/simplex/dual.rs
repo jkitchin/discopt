@@ -56,8 +56,8 @@ pub fn solve_lp_warm_scaled(
     start: &Basis,
     opts: &SimplexOptions,
 ) -> LpSolve {
-    match try_dual(lp, b, start, opts) {
-        Some(sol) => sol,
+    match PreparedDual::prepare(lp, start, opts) {
+        Some(p) => p.reoptimize(lp.l, lp.u, b, opts),
         None => solve_lp_scaled(lp, b, opts), // safe fallback — always correct
     }
 }
@@ -66,223 +66,279 @@ fn col(a: &[f64], m: usize, n: usize, j: usize) -> Vec<f64> {
     (0..m).map(|i| a[i * n + j]).collect()
 }
 
-/// The dual-simplex attempt. Returns `None` to request the cold fallback.
-fn try_dual(lp: &LpView<'_>, b: &[f64], start: &Basis, opts: &SimplexOptions) -> Option<LpSolve> {
-    let (a, m, n, l, u, c) = (lp.a, lp.m, lp.n, lp.l, lp.u, lp.c);
-    if start.basic_vars.len() != m {
-        return None;
-    }
-    let tol = opts.tol;
-    let mut basis = start.basic_vars.clone();
-    let mut slot_of = vec![-1i64; n];
-    for (slot, &j) in basis.iter().enumerate() {
-        slot_of[j] = slot as i64;
-    }
-    let mut stat = start.col_status.clone();
-    if stat.len() != n {
-        return None;
-    }
+/// A basis factorization prepared once for repeated dual re-optimizations that
+/// differ only in their bounds and right-hand side.
+///
+/// `prepare` builds the sparse matrix, factorizes the start basis, and verifies
+/// dual feasibility (the precondition the dual simplex maintains but does not
+/// establish). Each [`reoptimize`](Self::reoptimize) then **clones** the pristine
+/// factorization and runs dual pivots from it, so the expensive factorize and the
+/// sparse-matrix build are paid once rather than per solve. This is what lets the
+/// B&B probe a node's many strong-branching children (one bound each) from the
+/// single node-optimal factorization instead of refactorizing it every probe.
+///
+/// The dual-feasibility check is bound-*value* independent (it depends on the
+/// objective, the basis, and which bound each nonbasic sits at), and the
+/// re-optimizations only perturb bounds of basic variables (a branch tightens the
+/// fractional, hence basic, variable), so the precondition verified at `prepare`
+/// holds for every `reoptimize` from the same basis.
+pub struct PreparedDual<'a> {
+    a: &'a [f64],
+    m: usize,
+    n: usize,
+    c: &'a [f64],
+    sp: SparseCols,
+    lu: FeralLU, // pristine factorization of `basis`
+    basis: Vec<usize>,
+    slot_of: Vec<i64>,
+    stat: Vec<i8>,
+}
 
-    let sp = SparseCols::from_dense(a, m, n);
-    let mut lu = FeralLU::new();
-    let cols: Vec<Vec<f64>> = basis.iter().map(|&j| col(a, m, n, j)).collect();
-    if lu.factorize(m, &cols).is_err() {
-        return None; // singular warm basis → fall back to cold
-    }
-
-    let nb_value = |stat: &[i8], j: usize| -> f64 {
-        if stat[j] == AT_UPPER {
-            u[j]
-        } else if l[j] <= -INF {
-            0.0
-        } else {
-            l[j]
-        }
-    };
-
-    // Verify the starting basis is actually dual-feasible — the precondition
-    // the dual simplex *maintains* but does not *establish*. With y = B⁻ᵀc_B the
-    // reduced cost is d_j = c_j − yᵀA_j; a nonbasic-at-lower needs d_j ≥ −tol, a
-    // nonbasic-at-upper needs d_j ≤ tol, and a nonbasic *free* variable (both
-    // bounds infinite) needs |d_j| ≤ tol. A dual-infeasible start would silently
-    // converge to a wrong Optimal/Infeasible, so request the cold fallback.
-    {
-        let mut y: Vec<f64> = basis.iter().map(|&j| c[j]).collect();
-        if lu.btran(&mut y).is_err() {
+impl<'a> PreparedDual<'a> {
+    /// Factorize `start` for the LP `lp` and verify dual feasibility, or `None`
+    /// if the basis is unusable (wrong size, singular, or dual-infeasible) and the
+    /// caller should cold-solve instead. `lp.l`/`lp.u` are the bounds at which the
+    /// basis is dual-feasible (the reference for the precondition check).
+    pub fn prepare(lp: &LpView<'a>, start: &Basis, opts: &SimplexOptions) -> Option<Self> {
+        let (a, m, n, l, u, c) = (lp.a, lp.m, lp.n, lp.l, lp.u, lp.c);
+        if start.basic_vars.len() != m {
             return None;
         }
-        for j in 0..n {
-            if stat[j] == BASIC || u[j] - l[j] <= tol {
-                continue; // basic or fixed: dual feasibility is unconstrained
+        let tol = opts.tol;
+        let basis = start.basic_vars.clone();
+        let mut slot_of = vec![-1i64; n];
+        for (slot, &j) in basis.iter().enumerate() {
+            slot_of[j] = slot as i64;
+        }
+        let stat = start.col_status.clone();
+        if stat.len() != n {
+            return None;
+        }
+
+        let sp = SparseCols::from_dense(a, m, n);
+        let mut lu = FeralLU::new();
+        let cols: Vec<Vec<f64>> = basis.iter().map(|&j| col(a, m, n, j)).collect();
+        if lu.factorize(m, &cols).is_err() {
+            return None; // singular warm basis → fall back to cold
+        }
+
+        // Verify the starting basis is actually dual-feasible — the precondition
+        // the dual simplex *maintains* but does not *establish*. With y = B⁻ᵀc_B
+        // the reduced cost is d_j = c_j − yᵀA_j; a nonbasic-at-lower needs
+        // d_j ≥ −tol, a nonbasic-at-upper needs d_j ≤ tol, and a nonbasic *free*
+        // variable (both bounds infinite) needs |d_j| ≤ tol. A dual-infeasible
+        // start would silently converge to a wrong Optimal/Infeasible.
+        {
+            let mut y: Vec<f64> = basis.iter().map(|&j| c[j]).collect();
+            if lu.btran(&mut y).is_err() {
+                return None;
             }
-            let dj = c[j] - sp.dot(j, &y);
-            let free = l[j] <= -INF && u[j] >= INF;
-            let ok = if free {
-                dj.abs() <= tol
-            } else if stat[j] == AT_UPPER {
-                dj <= tol
-            } else {
-                dj >= -tol
-            };
-            if !ok {
-                return None; // dual-infeasible warm start → cold fallback
+            for j in 0..n {
+                if stat[j] == BASIC || u[j] - l[j] <= tol {
+                    continue; // basic or fixed: dual feasibility is unconstrained
+                }
+                let dj = c[j] - sp.dot(j, &y);
+                let free = l[j] <= -INF && u[j] >= INF;
+                let ok = if free {
+                    dj.abs() <= tol
+                } else if stat[j] == AT_UPPER {
+                    dj <= tol
+                } else {
+                    dj >= -tol
+                };
+                if !ok {
+                    return None; // dual-infeasible warm start → cold fallback
+                }
+            }
+        }
+
+        Some(PreparedDual {
+            a,
+            m,
+            n,
+            c,
+            sp,
+            lu,
+            basis,
+            slot_of,
+            stat,
+        })
+    }
+
+    /// Dual re-optimization from the prepared basis for bounds `l`/`u` and rhs
+    /// `b`, returning a valid solution. On any numerical difficulty it cold-solves
+    /// the same LP, so the result is always correct.
+    pub fn reoptimize(&self, l: &[f64], u: &[f64], b: &[f64], opts: &SimplexOptions) -> LpSolve {
+        match self.run_dual(l, u, b, opts) {
+            Some(sol) => sol,
+            None => {
+                let lp = LpView {
+                    a: self.a,
+                    m: self.m,
+                    n: self.n,
+                    c: self.c,
+                    l,
+                    u,
+                };
+                solve_lp_scaled(&lp, b, opts)
             }
         }
     }
 
-    let mut updates = 0usize;
-    let mut pivots = 0usize;
-    for _iter in 0..opts.max_iter {
-        // Basic values x_B = B⁻¹(b − Σ_nonbasic A_j x_j).
-        let mut xb = b.to_vec();
-        for j in 0..n {
-            if stat[j] != BASIC {
-                let v = nb_value(&stat, j);
-                if v != 0.0 {
-                    let (rows, vals) = sp.col(j);
-                    for (k, &rr) in rows.iter().enumerate() {
-                        xb[rr] -= vals[k] * v;
+    /// The dual pivots, on a fresh clone of the prepared factorization/basis.
+    /// `None` requests the cold fallback (numerical breakdown or iteration cap).
+    fn run_dual(&self, l: &[f64], u: &[f64], b: &[f64], opts: &SimplexOptions) -> Option<LpSolve> {
+        let (a, m, n, c, sp) = (self.a, self.m, self.n, self.c, &self.sp);
+        let tol = opts.tol;
+        // Clone the pristine prepared state; the loop mutates these in place.
+        let mut lu = self.lu.clone();
+        let mut basis = self.basis.clone();
+        let mut slot_of = self.slot_of.clone();
+        let mut stat = self.stat.clone();
+
+        let nb_value = |stat: &[i8], j: usize| -> f64 {
+            if stat[j] == AT_UPPER {
+                u[j]
+            } else if l[j] <= -INF {
+                0.0
+            } else {
+                l[j]
+            }
+        };
+
+        let mut updates = 0usize;
+        let mut pivots = 0usize;
+        for _iter in 0..opts.max_iter {
+            // Basic values x_B = B⁻¹(b − Σ_nonbasic A_j x_j).
+            let mut xb = b.to_vec();
+            for j in 0..n {
+                if stat[j] != BASIC {
+                    let v = nb_value(&stat, j);
+                    if v != 0.0 {
+                        let (rows, vals) = sp.col(j);
+                        for (k, &rr) in rows.iter().enumerate() {
+                            xb[rr] -= vals[k] * v;
+                        }
                     }
                 }
             }
-        }
-        if lu.ftran(&mut xb).is_err() {
-            return None;
-        }
-
-        // Most primal-infeasible basic variable leaves.
-        let mut r = None;
-        let mut worst = tol;
-        let mut to_lower = true;
-        for i in 0..m {
-            let bi = basis[i];
-            if xb[i] < l[bi] - tol {
-                let viol = l[bi] - xb[i];
-                if viol > worst {
-                    worst = viol;
-                    r = Some(i);
-                    to_lower = true; // leaving var pinned at its lower bound
-                }
-            } else if xb[i] > u[bi] + tol {
-                let viol = xb[i] - u[bi];
-                if viol > worst {
-                    worst = viol;
-                    r = Some(i);
-                    to_lower = false;
-                }
-            }
-        }
-        let r = match r {
-            Some(r) => r,
-            None => {
-                // primal feasible + dual feasible (maintained) ⇒ optimal
-                return Some(assemble(
-                    n,
-                    m,
-                    &basis,
-                    &slot_of,
-                    &stat,
-                    &xb,
-                    c,
-                    l,
-                    u,
-                    LpStatus::Optimal,
-                    pivots,
-                ));
-            }
-        };
-
-        // Pivot row ρ = e_rᵀ B⁻¹ ; alpha_rj = ρ·A_j for nonbasic j.
-        let mut rho = vec![0.0; m];
-        rho[r] = 1.0;
-        if lu.btran(&mut rho).is_err() {
-            return None;
-        }
-
-        // Reduced costs d_j = c_j − yᵀA_j with y = B⁻ᵀ c_B.
-        let mut y: Vec<f64> = basis.iter().map(|&j| c[j]).collect();
-        if lu.btran(&mut y).is_err() {
-            return None;
-        }
-
-        // Dual ratio test. Leaving direction sets which sign of alpha_rj is
-        // eligible; pick the entering j minimizing |d_j / alpha_rj| while
-        // keeping dual feasibility.
-        let mut enter = None;
-        let mut best_ratio = f64::INFINITY;
-        for j in 0..n {
-            if stat[j] == BASIC {
-                continue;
-            }
-            if u[j] - l[j] <= tol {
-                continue; // fixed var can't enter
-            }
-            let arj = sp.dot(j, &rho);
-            // Eligibility: increasing leaving (to_lower) wants the basic var to
-            // rise; the entering var that preserves dual feasibility satisfies:
-            //  - at lower:  arj < 0  (to_lower) /  arj > 0  (to_upper)
-            //  - at upper:  arj > 0  (to_lower) /  arj < 0  (to_upper)
-            let eligible = if stat[j] == AT_LOWER {
-                if to_lower {
-                    arj < -tol
-                } else {
-                    arj > tol
-                }
-            } else if to_lower {
-                arj > tol
-            } else {
-                arj < -tol
-            };
-            if eligible {
-                let dj = c[j] - sp.dot(j, &y);
-                let ratio = (dj / arj).abs();
-                if ratio < best_ratio - tol {
-                    best_ratio = ratio;
-                    enter = Some(j);
-                }
-            }
-        }
-        let q = match enter {
-            Some(q) => q,
-            None => {
-                // No eligible entering column: the LP is primal-infeasible. But
-                // only trust this if the start basis was genuinely dual-feasible;
-                // otherwise fall back to cold to be safe.
-                return Some(assemble(
-                    n,
-                    m,
-                    &basis,
-                    &slot_of,
-                    &stat,
-                    &xb,
-                    c,
-                    l,
-                    u,
-                    LpStatus::Infeasible,
-                    pivots,
-                ));
-            }
-        };
-
-        // Pivot: q enters at slot r; leaving var pinned at the violated bound.
-        let leaving = basis[r];
-        stat[leaving] = if to_lower { AT_LOWER } else { AT_UPPER };
-        slot_of[leaving] = -1;
-        basis[r] = q;
-        slot_of[q] = r as i64;
-        stat[q] = BASIC;
-        pivots += 1;
-        let need_refac = lu.update(r, &col(a, m, n, q)).is_err();
-        updates += 1;
-        if need_refac || updates >= 48 {
-            let cols: Vec<Vec<f64>> = basis.iter().map(|&j| col(a, m, n, j)).collect();
-            if lu.factorize(m, &cols).is_err() {
+            if lu.ftran(&mut xb).is_err() {
                 return None;
             }
-            updates = 0;
+
+            // Most primal-infeasible basic variable leaves.
+            let mut r = None;
+            let mut worst = tol;
+            let mut to_lower = true;
+            for i in 0..m {
+                let bi = basis[i];
+                if xb[i] < l[bi] - tol {
+                    let viol = l[bi] - xb[i];
+                    if viol > worst {
+                        worst = viol;
+                        r = Some(i);
+                        to_lower = true; // leaving var pinned at its lower bound
+                    }
+                } else if xb[i] > u[bi] + tol {
+                    let viol = xb[i] - u[bi];
+                    if viol > worst {
+                        worst = viol;
+                        r = Some(i);
+                        to_lower = false;
+                    }
+                }
+            }
+            let r = match r {
+                Some(r) => r,
+                None => {
+                    // primal feasible + dual feasible (maintained) ⇒ optimal
+                    return Some(assemble(
+                        n, m, &basis, &slot_of, &stat, &xb, c, l, u, LpStatus::Optimal, pivots,
+                    ));
+                }
+            };
+
+            // Pivot row ρ = e_rᵀ B⁻¹ ; alpha_rj = ρ·A_j for nonbasic j.
+            let mut rho = vec![0.0; m];
+            rho[r] = 1.0;
+            if lu.btran(&mut rho).is_err() {
+                return None;
+            }
+
+            // Reduced costs d_j = c_j − yᵀA_j with y = B⁻ᵀ c_B.
+            let mut y: Vec<f64> = basis.iter().map(|&j| c[j]).collect();
+            if lu.btran(&mut y).is_err() {
+                return None;
+            }
+
+            // Dual ratio test. Leaving direction sets which sign of alpha_rj is
+            // eligible; pick the entering j minimizing |d_j / alpha_rj| while
+            // keeping dual feasibility.
+            let mut enter = None;
+            let mut best_ratio = f64::INFINITY;
+            for j in 0..n {
+                if stat[j] == BASIC {
+                    continue;
+                }
+                if u[j] - l[j] <= tol {
+                    continue; // fixed var can't enter
+                }
+                let arj = sp.dot(j, &rho);
+                // Eligibility: increasing leaving (to_lower) wants the basic var to
+                // rise; the entering var that preserves dual feasibility satisfies:
+                //  - at lower:  arj < 0  (to_lower) /  arj > 0  (to_upper)
+                //  - at upper:  arj > 0  (to_lower) /  arj < 0  (to_upper)
+                let eligible = if stat[j] == AT_LOWER {
+                    if to_lower {
+                        arj < -tol
+                    } else {
+                        arj > tol
+                    }
+                } else if to_lower {
+                    arj > tol
+                } else {
+                    arj < -tol
+                };
+                if eligible {
+                    let dj = c[j] - sp.dot(j, &y);
+                    let ratio = (dj / arj).abs();
+                    if ratio < best_ratio - tol {
+                        best_ratio = ratio;
+                        enter = Some(j);
+                    }
+                }
+            }
+            let q = match enter {
+                Some(q) => q,
+                None => {
+                    // No eligible entering column: the LP is primal-infeasible.
+                    // Trustworthy because the start basis was verified dual-feasible.
+                    return Some(assemble(
+                        n, m, &basis, &slot_of, &stat, &xb, c, l, u, LpStatus::Infeasible, pivots,
+                    ));
+                }
+            };
+
+            // Pivot: q enters at slot r; leaving var pinned at the violated bound.
+            let leaving = basis[r];
+            stat[leaving] = if to_lower { AT_LOWER } else { AT_UPPER };
+            slot_of[leaving] = -1;
+            basis[r] = q;
+            slot_of[q] = r as i64;
+            stat[q] = BASIC;
+            pivots += 1;
+            let need_refac = lu.update(r, &col(a, m, n, q)).is_err();
+            updates += 1;
+            if need_refac || updates >= 48 {
+                let cols: Vec<Vec<f64>> = basis.iter().map(|&j| col(a, m, n, j)).collect();
+                if lu.factorize(m, &cols).is_err() {
+                    return None;
+                }
+                updates = 0;
+            }
         }
+        None // iteration cap → cold fallback
     }
-    None // iteration cap → cold fallback
 }
 
 #[allow(clippy::too_many_arguments)]
