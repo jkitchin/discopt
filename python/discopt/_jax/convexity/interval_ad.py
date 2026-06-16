@@ -857,6 +857,12 @@ def _function_call(expr: FunctionCall, model: Model, box: dict, cache: dict, n: 
         return _apply_exp(arg, n)
     if name == "log":
         return _apply_log(arg, n)
+    if name == "sin":
+        return _apply_sin(arg, n)
+    if name == "cos":
+        return _apply_cos(arg, n)
+    if name == "tan":
+        return _apply_tan(arg, n)
     if name == "sqrt":
         # sqrt = x^0.5 on the positive domain.
         if np.any(arg.value.lo < 0):
@@ -908,6 +914,69 @@ def _apply_log(arg: _SparseAD, n: int) -> _SparseAD:
     grad = _dscale(inv_g, arg.grad)
     hess = _dsub(_dscale(inv_g, arg.hess), _dscale(inv_g2, _self_outer(arg.grad)))
     return _SparseAD(value=value, grad=grad, hess=hess, n=n)
+
+
+def _apply_sin(arg: _SparseAD, n: int) -> _SparseAD:
+    """Chain rule through ``sin`` (region-aware via the interval of sin/cos).
+
+    * value    : ``sin(g)``
+    * gradient : ``cos(g) ∇g``
+    * hessian  : ``cos(g) H_g - sin(g) (∇g ∇gᵀ)``
+
+    On a box where ``g`` lies in a constant-curvature region, ``-sin(g)`` keeps
+    a constant sign, so the interval Hessian is sign-definite and the
+    certificate can prove convexity/concavity; a wide (sign-spanning) box yields
+    an indefinite interval and a sound abstention.
+    """
+    if arg.unbounded:
+        return _unbounded(n)
+    g = arg.value
+    sin_g = iv.sin(g)
+    cos_g = iv.cos(g)
+    grad = _dscale(cos_g, arg.grad)
+    hess = _dsub(_dscale(cos_g, arg.hess), _dscale(sin_g, _self_outer(arg.grad)))
+    return _SparseAD(value=sin_g, grad=grad, hess=hess, n=n)
+
+
+def _apply_cos(arg: _SparseAD, n: int) -> _SparseAD:
+    """Chain rule through ``cos``.
+
+    * value    : ``cos(g)``
+    * gradient : ``-sin(g) ∇g``
+    * hessian  : ``-sin(g) H_g - cos(g) (∇g ∇gᵀ)``
+    """
+    if arg.unbounded:
+        return _unbounded(n)
+    g = arg.value
+    sin_g = iv.sin(g)
+    cos_g = iv.cos(g)
+    neg_sin_g = Interval.point(-1.0) * sin_g
+    grad = _dscale(neg_sin_g, arg.grad)
+    hess = _dsub(_dscale(neg_sin_g, arg.hess), _dscale(cos_g, _self_outer(arg.grad)))
+    return _SparseAD(value=cos_g, grad=grad, hess=hess, n=n)
+
+
+def _apply_tan(arg: _SparseAD, n: int) -> _SparseAD:
+    """Chain rule through ``tan``.
+
+    * value    : ``tan(g)``
+    * gradient : ``sec²(g) ∇g``           with ``sec²(g) = 1 + tan²(g)``
+    * hessian  : ``sec²(g) H_g + 2 tan(g) sec²(g) (∇g ∇gᵀ)``
+
+    A box spanning an asymptote makes ``iv.tan`` (hence ``sec²``) unbounded, so
+    the Hessian is unbounded and the certificate abstains — sound.
+    """
+    if arg.unbounded:
+        return _unbounded(n)
+    g = arg.value
+    tan_g = iv.tan(g)
+    sec2 = Interval.point(1.0) + tan_g * tan_g
+    grad = _dscale(sec2, arg.grad)
+    hess = _dadd(
+        _dscale(sec2, arg.hess),
+        _dscale(Interval.point(2.0) * tan_g * sec2, _self_outer(arg.grad)),
+    )
+    return _SparseAD(value=tan_g, grad=grad, hess=hess, n=n)
 
 
 __all__ = ["IntervalAD", "Rank1Factor", "interval_hessian"]

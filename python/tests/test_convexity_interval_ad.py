@@ -207,13 +207,19 @@ class TestUnsupportedFallsThrough:
             ~np.isfinite(np.asarray(ad.hess.hi))
         )
 
-    def test_trig_returns_unbounded(self):
+    def test_trig_has_sound_finite_hessian(self):
+        # sin/cos are now supported region-aware: on a bounded box the interval
+        # Hessian is finite and soundly encloses sin''(x) = -sin(x).
         m = Model("t")
         x = m.continuous("x", lb=-1.0, ub=1.0)
         ad = interval_hessian(dm.sin(x), m)
-        assert np.any(~np.isfinite(np.asarray(ad.hess.lo))) or np.any(
-            ~np.isfinite(np.asarray(ad.hess.hi))
-        )
+        hlo = float(np.asarray(ad.hess.lo).ravel()[0])
+        hhi = float(np.asarray(ad.hess.hi).ravel()[0])
+        assert np.isfinite(hlo) and np.isfinite(hhi)
+        # -sin(x) over [-1,1] ranges within [-sin(1), sin(1)] ≈ [-0.842, 0.842];
+        # the sound enclosure must contain that true range (indefinite here).
+        assert hlo <= -np.sin(1.0) + 1e-9
+        assert hhi >= np.sin(1.0) - 1e-9
 
 
 # ──────────────────────────────────────────────────────────────────────
