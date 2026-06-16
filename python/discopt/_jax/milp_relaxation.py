@@ -23,6 +23,7 @@ from __future__ import annotations
 import itertools
 import logging
 import math
+import os
 from collections import Counter
 from dataclasses import dataclass
 from typing import Optional, Union
@@ -4185,6 +4186,30 @@ def build_milp_relaxation(
     for _constraint in model._constraints:
         _walk_lift(distributed_bodies[id(_constraint)])
 
+    # ── Trilinear RLT convex-hull cuts (setup) ─────────────────────────────
+    # The recursive chain w_xyz = (x*y)*z gives a valid but loose relaxation of
+    # x*y*z. Adding the eight degree-3 bound-factor product inequalities — each
+    # the product of three nonnegative bound factors (x-xL),(xU-x),... hence
+    # individually valid — together with the pairwise McCormick envelopes on
+    # ALL three pairwise products yields the exact convex/concave hull of the
+    # trilinear monomial (RLT; Rikun 1997 / Meyer & Floudas 2004). Here we make
+    # sure the two pairwise aux columns the chain did not create (x*z and y*z)
+    # exist so the cut can reference them; the cut rows are emitted below.
+    trilinear_rlt_specs: list[tuple[int, int, int, int, int, int, int]] = []
+    if os.environ.get("DISCOPT_TRILINEAR_RLT", "1") != "0":
+        for _stage in trilinear_stage_map.values():
+            ci, cj = _stage["pair"]
+            ck = _stage["remaining_var"]
+            # Distinct columns only; repeated-factor products (x*x*y) collapse a
+            # pairwise product onto a monomial aux and are not true trilinears.
+            if len({ci, cj, ck}) != 3:
+                continue
+            w_ij = _stage["pair_col"]
+            w_ijk = _stage["product_col"]
+            w_ik = _ensure_bilinear_aux(ci, ck)
+            w_jk = _ensure_bilinear_aux(cj, ck)
+            trilinear_rlt_specs.append((ci, cj, ck, w_ij, w_ik, w_jk, w_ijk))
+
     bilinear_pw_map: dict[tuple[int, int], list] = {}
     bilinear_lambda_map: dict[tuple[int, int], dict] = {}
 
@@ -4682,6 +4707,37 @@ def build_milp_relaxation(
             row[i] -= xj_ub_g
             row[j] -= xi_lb_g
             _add_row(row, -xi_lb_g * xj_ub_g)
+
+    # ── Trilinear RLT convex-hull cuts (emission) ──────────────────────────
+    # For each lifted trilinear term, emit the eight degree-3 bound-factor
+    # product inequalities. With factor (x - xL) encoded as (sx=+1, c=-xL) and
+    # (xU - x) as (sx=-1, c=+xU), the product
+    #   (sx·x + cx)(sy·y + cy)(sz·z + cz) >= 0
+    # linearizes (x*y -> w_xy, x*y*z -> w_xyz, ...) to a valid cut. Together
+    # with the pairwise McCormick on w_xy/w_xz/w_yz this is the exact trilinear
+    # hull; each cut alone is sound, so a partial set only tightens.
+    for ci, cj, ck, w_ij, w_ik, w_jk, w_ijk in trilinear_rlt_specs:
+        xi_lb, xi_ub = (float(v) for v in all_bounds[ci])
+        xj_lb, xj_ub = (float(v) for v in all_bounds[cj])
+        xk_lb, xk_ub = (float(v) for v in all_bounds[ck])
+        if not all(
+            _is_effectively_finite(v)
+            for v in (xi_lb, xi_ub, xj_lb, xj_ub, xk_lb, xk_ub)
+        ):
+            continue
+        for sx, cx in ((1.0, -xi_lb), (-1.0, xi_ub)):
+            for sy, cy in ((1.0, -xj_lb), (-1.0, xj_ub)):
+                for sz, cz in ((1.0, -xk_lb), (-1.0, xk_ub)):
+                    row = np.zeros(n_total)
+                    # product >= 0  ->  -(linear part) <= constant
+                    row[w_ijk] += -(sx * sy * sz)
+                    row[w_ij] += -(sx * sy * cz)
+                    row[w_ik] += -(sx * sz * cy)
+                    row[w_jk] += -(sy * sz * cx)
+                    row[ci] += -(sx * cy * cz)
+                    row[cj] += -(sy * cx * cz)
+                    row[ck] += -(sz * cx * cy)
+                    _add_row(row, cx * cy * cz)
 
     # Binary interval selectors for partitioned convex monomial overestimators.
     # A local secant is valid only on its own interval, so the selector links the
