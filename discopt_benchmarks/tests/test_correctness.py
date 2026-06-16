@@ -55,7 +55,9 @@ KNOWN_OPTIMA = {
     "ex1223":       4.5796,
     "ex1223a":      4.5796,
     "ex1224":      -0.94347,
-    "ex1225":       0.0,
+    # Corrected from a wrong 0.0: discopt certifies the optimum at 31.0 (bound ==
+    # incumbent, gap closed) and the MINLP literature reports 31.0 for ex1225.
+    "ex1225":       31.0,
     "ex1226":      -17.0,
     # Corrected from a wrong 62.1833 (below a proven rigorous lower bound of
     # ~109649); MINLPLib global optimum, found as a feasible incumbent (#138).

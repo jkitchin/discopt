@@ -70,7 +70,9 @@ def known_optima() -> dict[str, float]:
         "ex1222": 1.0765,
         "ex1223": 4.5796,
         "ex1224": -0.94347,
-        "ex1225": 0.0,
+        # Corrected from a wrong 0.0: discopt certifies the optimum at 31.0 and
+        # the MINLP literature reports 31.0 for ex1225 (issue #138).
+        "ex1225": 31.0,
         "ex1226": -17.0,
         # Corrected from a wrong 62.1833: the spatial relaxation proves a rigorous
         # lower bound of ~109649 on ex1233 and the solver finds a feasible
