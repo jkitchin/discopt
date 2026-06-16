@@ -140,9 +140,16 @@ The translator supports the algebraic operators (`+ - * / **`, unary minus) and
 the intrinsic functions discopt models natively: `exp`, `log`, `log2`, `log10`,
 `sqrt`, `sqr`, `abs`, `sin`, `cos`, `tan`, `arcsin`, `arccos`, `arctan`, `sinh`,
 `cosh`, `tanh`, `sigmoid`, `sign`, `errf`, the `power`/`rpower`/`cvpower`/
-`vcpower` family, `div`, and `min`/`max`. A GAMS intrinsic outside this set
-raises a clear `GamsTranslationError` naming the function rather than silently
-producing a wrong model.
+`vcpower` family, `div`, and `min`/`max`.
+
+It also handles the **safeguarded evaluation forms** GAMS emits in compiled NL
+code for numerical safety — `slexp`/`sqexp` (exp), `sllog10`/`sqlog10` (log10),
+and `slrec`/`sqrec` (reciprocal). These differ from the base function only in
+their out-of-domain extrapolation, so they map to the intended base function
+(`exp`/`log10`/`1/x`) and stay on the certified-global path.
+
+A GAMS intrinsic outside this set raises a clear `GamsTranslationError` naming
+the function rather than silently producing a wrong model.
 
 ## Status mapping
 

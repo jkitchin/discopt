@@ -250,6 +250,17 @@ _UNARY: dict[str, Callable[[Expression], Expression]] = {
     "arctan": lambda a: dm.FunctionCall("atan", a),
     "sinh": lambda a: dm.FunctionCall("sinh", a),
     "cosh": lambda a: dm.FunctionCall("cosh", a),
+    # Safeguarded eval forms GAMS emits in compiled NL for numerical safety
+    # (smooth-linear "sl" / smooth-quadratic "sq" extrapolation beyond a
+    # threshold).  Mathematically they are exp / log10 / reciprocal, which is
+    # what the model intends and what other solvers see, so they map to the base
+    # function (already value- and relaxation-supported -> stays global).
+    "slexp": dm.exp,
+    "sqexp": dm.exp,
+    "sllog10": dm.log10,
+    "sqlog10": dm.log10,
+    "slrec": lambda a: dm.Constant(1.0) / a,
+    "sqrec": lambda a: dm.Constant(1.0) / a,
 }
 
 _BINARY: dict[str, Callable[[Expression, Expression], Expression]] = {
@@ -262,6 +273,15 @@ _BINARY: dict[str, Callable[[Expression, Expression], Expression]] = {
     "min": dm.minimum,
     "max": dm.maximum,
     "arctan2": lambda a, b: dm.FunctionCall("atan2", a, b),
+    # Safeguarded eval forms can also appear with a second argument carrying the
+    # smoothing threshold; it only affects out-of-domain numerical behaviour, so
+    # the intended function is the base form on the first argument.
+    "slexp": lambda a, _k: dm.exp(a),
+    "sqexp": lambda a, _k: dm.exp(a),
+    "sllog10": lambda a, _k: dm.log10(a),
+    "sqlog10": lambda a, _k: dm.log10(a),
+    "slrec": lambda a, _k: dm.Constant(1.0) / a,
+    "sqrec": lambda a, _k: dm.Constant(1.0) / a,
 }
 
 

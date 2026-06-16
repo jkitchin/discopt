@@ -119,6 +119,43 @@ def test_translate_unary_functions(vc):
         assert repr(expr).startswith(name)
 
 
+def test_translate_safeguarded_forms(vc):
+    # GAMS safeguarded eval forms map to their base function (exp / log10 / 1-x).
+    v, c = vc
+    expected = {
+        "slexp": "exp(x)",
+        "sqexp": "exp(x)",
+        "sllog10": "log10(x)",
+        "sqlog10": "log10(x)",
+        "slrec": "(1 / x)",
+        "sqrec": "(1 / x)",
+    }
+    for name, want in expected.items():
+        # unary form: f(x)
+        u = translate_instructions([Op.nlPushV, Op.nlCallArg1], [1, FUNC_CODE[name]], v, c)
+        assert repr(u) == want
+        # binary form f(x, k): the smoothing threshold k is ignored
+        b = translate_instructions(
+            [Op.nlPushV, Op.nlPushI, Op.nlCallArg2], [1, 1, FUNC_CODE[name]], v, c
+        )
+        assert repr(b) == want
+
+
+def test_safeguarded_form_solves_globally():
+    # A model using a safeguarded form must solve to the base function's optimum.
+    # slrec(x) == 1/x; minimize 1/x on [1, 4] -> optimum 0.25 at x = 4.
+    m = dm.Model("sg")
+    x = m.continuous("x", lb=1.0, ub=4.0)
+    expr = translate_instructions(
+        [Op.nlPushV, Op.nlCallArg1], [1, FUNC_CODE["slrec"]], [x], []
+    )
+    m.minimize(expr)
+    result = m.solve(time_limit=30)
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(0.25, abs=1e-4)
+    assert result.gap_certified  # stayed on the certified-global path
+
+
 def test_translate_errors(vc):
     v, c = vc
     with pytest.raises(GamsTranslationError):
