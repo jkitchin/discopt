@@ -29,6 +29,7 @@ All functions are pure JAX and compatible with jax.jit and jax.vmap.
 from __future__ import annotations
 
 import functools
+from typing import Callable
 
 import jax
 import jax.numpy as jnp
@@ -312,7 +313,7 @@ def rigorous_alpha(expr, model, box=None):
     return alpha
 
 
-def compile_alphabb_relaxation(expr, model):
+def compile_alphabb_relaxation(expr, model) -> Callable:
     """Compile a rigorous alphaBB relaxation node for ``expr``.
 
     Returns ``fn(x_cv, x_cc, lb, ub) -> (cv, cc)`` matching the McCormick

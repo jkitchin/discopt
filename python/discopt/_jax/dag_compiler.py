@@ -203,8 +203,10 @@ def _compile_node(expr: Expression, model: Model, param_index: dict) -> Callable
             a_fn = arg_fns[0]
             suffix = name[len("norm") :]
             try:
-                ord_p: float = float(suffix) if suffix not in ("", "inf") else (
-                    jnp.inf if suffix == "inf" else 2.0
+                ord_p: float = (
+                    float(suffix)
+                    if suffix not in ("", "inf")
+                    else (jnp.inf if suffix == "inf" else 2.0)
                 )
             except ValueError as exc:
                 raise ValueError(f"Unsupported norm order: {name!r}") from exc

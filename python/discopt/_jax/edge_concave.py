@@ -123,7 +123,7 @@ def collect_edge_concave_quadratics(model, *, max_factors: int = 12) -> list[Edg
             sense = "over"
         else:
             continue
-        key = (
+        dedup_key = (
             tuple(sorted(varset)),
             tuple(sorted(sq.items())),
             tuple(sorted(bilin.items())),
@@ -131,9 +131,9 @@ def collect_edge_concave_quadratics(model, *, max_factors: int = 12) -> list[Edg
             round(const, 12),
             sense,
         )
-        if key in seen:
+        if dedup_key in seen:
             continue
-        seen.add(key)
+        seen.add(dedup_key)
         blocks.append(
             EdgeConcaveQuadratic(tuple(sorted(varset)), sq, bilin, lin, float(const), sense)
         )

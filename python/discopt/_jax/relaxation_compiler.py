@@ -940,9 +940,7 @@ def _compile_relax_node(
                     cv2, cc2 = relax_bilinear(w_cc, c_mid, w_lb, w_ub, c_lb, c_ub)
                     new_cv = jnp.minimum(cv1, cv2)
                     new_cc = jnp.maximum(cc1, cc2)
-                    corners = jnp.stack(
-                        [w_lb * c_lb, w_lb * c_ub, w_ub * c_lb, w_ub * c_ub]
-                    )
+                    corners = jnp.stack([w_lb * c_lb, w_lb * c_ub, w_ub * c_lb, w_ub * c_ub])
                     w_lb, w_ub = jnp.min(corners), jnp.max(corners)
                     w_cv, w_cc = new_cv, new_cc
                 return w_cv, w_cc

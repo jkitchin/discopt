@@ -4218,9 +4218,7 @@ def build_milp_relaxation(
                 for _comb in itertools.combinations(_vars, _k):
                     _m = max(_comb)
                     _rest = frozenset(c for c in _comb if c != _m)
-                    subset_cols[frozenset(_comb)] = _ensure_bilinear_aux(
-                        subset_cols[_rest], _m
-                    )
+                    subset_cols[frozenset(_comb)] = _ensure_bilinear_aux(subset_cols[_rest], _m)
             rlt_terms.append((_vars, subset_cols))
 
     bilinear_pw_map: dict[tuple[int, int], list] = {}
@@ -5539,7 +5537,7 @@ def build_milp_relaxation(
                 row_exact[:n_orig] = c_exact
                 _add_row(row_exact, rhs_exact)
         try:
-            c, const = _linearize_expr(
+            crow, const = _linearize_expr(
                 body,
                 model,
                 bilinear_var_map,
@@ -5556,10 +5554,10 @@ def build_milp_relaxation(
             )
             # body ≤ 0  →  c @ z + const ≤ 0  →  c @ z ≤ -const
             if sense == "<=":
-                _add_row(c, -const)
+                _add_row(crow, -const)
             elif sense == "==":
-                _add_row(c, -const)
-                _add_row(-c, const)
+                _add_row(crow, -const)
+                _add_row(-crow, const)
             # (">=" is normalized to "<=" by the Expression operators)
         except ValueError as err:
             # Constraint contains terms we can't linearize (e.g. general nonlinear).

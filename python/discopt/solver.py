@@ -3365,8 +3365,7 @@ def solve_model(
                             lb = obbt_result.lb
                             ub = obbt_result.ub
                             logger.info(
-                                "Relaxation OBBT/DBBT tightened %d bounds "
-                                "(incumbent=%.6g)",
+                                "Relaxation OBBT/DBBT tightened %d bounds (incumbent=%.6g)",
                                 obbt_result.n_tightened,
                                 inc_obj,
                             )
