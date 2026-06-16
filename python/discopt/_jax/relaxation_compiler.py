@@ -889,6 +889,57 @@ def _compile_relax_node(
 
             return fn
 
+        if name == "prod":
+            # Multilinear product prod_i x_i over an array argument.
+            # Relax by folding pairwise McCormick bilinear envelopes (the
+            # standard recursive McCormick relaxation of a multilinear term).
+            # Not the convex hull, but a valid relaxation for every factor sign.
+            a_fn = arg_fns[0]
+            n = getattr(expr.args[0], "size", None)
+            if n is None or n < 1:
+                raise ValueError(
+                    "prod relaxation requires a fixed-size array argument; "
+                    f"got {type(expr.args[0]).__name__}"
+                )
+
+            def fn(x_cv, x_cc, lb, ub, _a_fn=a_fn, _n=int(n)):
+                cv_a, cc_a = _a_fn(x_cv, x_cc, lb, ub)
+                cv_a = jnp.reshape(cv_a, (-1,))
+                cc_a = jnp.reshape(cc_a, (-1,))
+                acc_cv, acc_cc = cv_a[0], cc_a[0]
+                for k in range(1, _n):
+                    mid_acc = 0.5 * (acc_cv + acc_cc)
+                    mid_k = 0.5 * (cv_a[k] + cc_a[k])
+                    acc_cv, acc_cc = relax_bilinear(
+                        mid_acc, mid_k, acc_cv, acc_cc, cv_a[k], cc_a[k]
+                    )
+                return acc_cv, acc_cc
+
+            return fn
+
+        if name.startswith("norm"):
+            # p-norm ||x||_p over an array argument (p >= 1, e.g. norm1/norm2).
+            # Valid bounds for every p >= 1 from norm equivalence:
+            #   ||x||_inf <= ||x||_p <= ||x||_1
+            # giving a convex underestimator max_i |x_i| and a concave
+            # overestimator sum_i |x_i|, each built from the per-component
+            # |.| envelope. A scalar argument reduces to |x|.
+            a_fn = arg_fns[0]
+
+            def fn(x_cv, x_cc, lb, ub, _a_fn=a_fn):
+                cv_a, cc_a = _a_fn(x_cv, x_cc, lb, ub)
+                cv_a = jnp.reshape(cv_a, (-1,))
+                cc_a = jnp.reshape(cc_a, (-1,))
+                mid = 0.5 * (cv_a + cc_a)
+                cv_abs, cc_abs = relax_abs(mid, cv_a, cc_a)
+                # ||x||_p >= ||x||_inf = max_i |x_i|  (convex underestimator)
+                cv = jnp.max(cv_abs)
+                # ||x||_p <= ||x||_1 = sum_i |x_i|    (concave overestimator)
+                cc = jnp.sum(cc_abs)
+                return cv, cc
+
+            return fn
+
         raise ValueError(f"Unknown function: {name!r}")
 
     if isinstance(expr, IndexExpression):
