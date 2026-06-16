@@ -208,6 +208,12 @@ impl<'a> PreparedDual<'a> {
 
         let mut updates = 0usize;
         let mut pivots = 0usize;
+        // Dual Devex reference weights γ_i ≥ 1, one per basic slot. The leaving
+        // variable maximizes (bound violation)²/γ_i — a cheap steepest-edge
+        // approximation that cuts dual iterations versus plain largest-violation
+        // pricing. Pricing only chooses *which* primal-infeasible row leaves, never
+        // affects correctness (any infeasible basic var is a valid leaving choice).
+        let mut gamma = vec![1.0f64; m];
         for _iter in 0..opts.max_iter {
             // Basic values x_B = B⁻¹(b − Σ_nonbasic A_j x_j).
             let mut xb = b.to_vec();
@@ -226,25 +232,28 @@ impl<'a> PreparedDual<'a> {
                 return None;
             }
 
-            // Most primal-infeasible basic variable leaves.
+            // Leaving variable: most primal-infeasible basic var by Devex score
+            // (violation²/γ_i). `to_lower` = the bound the leaving var is pinned at.
             let mut r = None;
-            let mut worst = tol;
+            let mut best_score = 0.0f64;
             let mut to_lower = true;
+            let mut delta = 0.0f64; // bound-violation magnitude of the chosen row
             for i in 0..m {
                 let bi = basis[i];
-                if xb[i] < l[bi] - tol {
-                    let viol = l[bi] - xb[i];
-                    if viol > worst {
-                        worst = viol;
-                        r = Some(i);
-                        to_lower = true; // leaving var pinned at its lower bound
-                    }
+                let viol = if xb[i] < l[bi] - tol {
+                    Some((l[bi] - xb[i], true)) // below lower → pin at lower
                 } else if xb[i] > u[bi] + tol {
-                    let viol = xb[i] - u[bi];
-                    if viol > worst {
-                        worst = viol;
+                    Some((xb[i] - u[bi], false)) // above upper → pin at upper
+                } else {
+                    None
+                };
+                if let Some((v, lo)) = viol {
+                    let score = v * v / gamma[i];
+                    if score > best_score {
+                        best_score = score;
                         r = Some(i);
-                        to_lower = false;
+                        to_lower = lo;
+                        delta = v;
                     }
                 }
             }
@@ -271,23 +280,22 @@ impl<'a> PreparedDual<'a> {
                 return None;
             }
 
-            // Dual ratio test. Leaving direction sets which sign of alpha_rj is
-            // eligible; pick the entering j minimizing |d_j / alpha_rj| while
-            // keeping dual feasibility.
-            let mut enter = None;
-            let mut best_ratio = f64::INFINITY;
+            // Bound-flipping (long-step) dual ratio test. Eligible nonbasic columns
+            // are the breakpoints where some d_j would cross zero as the dual step
+            // grows; walking them in increasing |d_j/α_rj| and *flipping* each
+            // finite-bounded one to its opposite bound lets the leaving variable
+            // travel further in a single pivot (each flip closes |α_rj|·(u−l) of the
+            // infeasibility `delta`). The breakpoint that closes the rest — or the
+            // first with an infinite bound gap (can't flip) — is the entering column.
+            // Flips only change which bound a nonbasic sits at (`stat`); the next
+            // iteration's exact x_B/y recompute re-establishes primal values and dual
+            // feasibility, and any difficulty still falls back to the cold solve.
+            let mut cand: Vec<(usize, f64, f64)> = Vec::new(); // (j, ratio, |α_rj|)
             for j in 0..n {
-                if stat[j] == BASIC {
-                    continue;
-                }
-                if u[j] - l[j] <= tol {
-                    continue; // fixed var can't enter
+                if stat[j] == BASIC || u[j] - l[j] <= tol {
+                    continue; // basic or fixed
                 }
                 let arj = sp.dot(j, &rho);
-                // Eligibility: increasing leaving (to_lower) wants the basic var to
-                // rise; the entering var that preserves dual feasibility satisfies:
-                //  - at lower:  arj < 0  (to_lower) /  arj > 0  (to_upper)
-                //  - at upper:  arj > 0  (to_lower) /  arj < 0  (to_upper)
                 let eligible = if stat[j] == AT_LOWER {
                     if to_lower {
                         arj < -tol
@@ -301,23 +309,67 @@ impl<'a> PreparedDual<'a> {
                 };
                 if eligible {
                     let dj = c[j] - sp.dot(j, &y);
-                    let ratio = (dj / arj).abs();
-                    if ratio < best_ratio - tol {
-                        best_ratio = ratio;
-                        enter = Some(j);
+                    cand.push((j, (dj / arj).abs(), arj.abs()));
+                }
+            }
+            if cand.is_empty() {
+                // No eligible entering column: the LP is primal-infeasible.
+                // Trustworthy because the start basis was verified dual-feasible.
+                return Some(assemble(
+                    n, m, &basis, &slot_of, &stat, &xb, c, l, u, LpStatus::Infeasible, pivots,
+                ));
+            }
+            cand.sort_by(|x, y| x.1.partial_cmp(&y.1).unwrap_or(std::cmp::Ordering::Equal));
+            // Walk breakpoints, flipping finite-bounded ones until `delta` is closed.
+            // The last candidate is always taken as the entering column (never
+            // flipped), so even if the bound gaps can't fully close `delta` the step
+            // is a valid dual pivot and the search makes progress.
+            let mut slope = 0.0f64;
+            let mut q = cand[cand.len() - 1].0;
+            let mut flips: Vec<usize> = Vec::new();
+            let last = cand.len() - 1;
+            for (idx, &(j, _ratio, aj)) in cand.iter().enumerate() {
+                let gap = u[j] - l[j];
+                slope += aj * gap;
+                if idx == last || gap >= INF || slope >= delta - tol {
+                    q = j; // this breakpoint enters the basis; stop flipping
+                    break;
+                }
+                flips.push(j); // fully traversed → flip to the opposite bound
+            }
+            // Apply the bound flips (no basis change); their effect on x_B and the
+            // reduced costs is realized by the next iteration's exact recompute.
+            for &j in &flips {
+                stat[j] = if stat[j] == AT_LOWER { AT_UPPER } else { AT_LOWER };
+            }
+
+            // Entering column α = B⁻¹A_q for the Devex weight update (and reused as
+            // the raw column for the product-form basis update).
+            let raw_q = col(a, m, n, q);
+            let mut alpha = raw_q.clone();
+            if lu.ftran(&mut alpha).is_err() {
+                return None;
+            }
+            let piv = alpha[r];
+            if piv.abs() > tol {
+                // Goldfarb–Reid dual Devex update (uses the still-current basis).
+                let gamma_r = gamma[r];
+                for i in 0..m {
+                    if i != r {
+                        let cand = (alpha[i] / piv).powi(2) * gamma_r;
+                        if cand > gamma[i] {
+                            gamma[i] = cand;
+                        }
+                    }
+                }
+                // Slot r now holds the entering variable; give it a fresh weight.
+                gamma[r] = (gamma_r / (piv * piv)).max(1.0);
+                if gamma[r] > 1e10 {
+                    for g in gamma.iter_mut() {
+                        *g = 1.0; // reframe when weights blow up
                     }
                 }
             }
-            let q = match enter {
-                Some(q) => q,
-                None => {
-                    // No eligible entering column: the LP is primal-infeasible.
-                    // Trustworthy because the start basis was verified dual-feasible.
-                    return Some(assemble(
-                        n, m, &basis, &slot_of, &stat, &xb, c, l, u, LpStatus::Infeasible, pivots,
-                    ));
-                }
-            };
 
             // Pivot: q enters at slot r; leaving var pinned at the violated bound.
             let leaving = basis[r];
@@ -327,7 +379,7 @@ impl<'a> PreparedDual<'a> {
             slot_of[q] = r as i64;
             stat[q] = BASIC;
             pivots += 1;
-            let need_refac = lu.update(r, &col(a, m, n, q)).is_err();
+            let need_refac = lu.update(r, &raw_q).is_err();
             updates += 1;
             if need_refac || updates >= 48 {
                 let cols: Vec<Vec<f64>> = basis.iter().map(|&j| col(a, m, n, j)).collect();
