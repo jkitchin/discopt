@@ -275,13 +275,19 @@ convexity-detection tracks (x-space + GP, §9), and FBBT in both directions.
 8. **General `norm{p}` (`p ∉ {1,2,∞}`) — DONE.** `MathFunc::NormP(u32)` closes the IR
    round-trip; arbitrary integer orders certify end to end.
 
-**Remaining (substantial / lower value):**
+**Done (this branch), continued:**
 
-3. **Uncapped multilinear via on-demand separation.** The exact multilinear hull is dense
-   (`2^n` columns/cuts) and capped at `DISCOPT_MULTILINEAR_RLT_MAX` (default 4). A
-   cut-on-violation separator would scale it past the cap. *Sound but needs a separation-loop
-   refactor of the single-shot LP solve flow* — the cuts are always valid (RLT bound-factor
-   products), so the work is integration, not correctness.
+3. **Uncapped multilinear via on-demand separation — DONE.** The hull of a product
+   `w = ∏ xᵢ` is a polytope in `(x, w)` space alone (Rikun 1997), so it separates on demand
+   without intermediate columns: the `2^n`-vertex envelope LP's dual is a supporting
+   hyperplane `w ≥ a·x + b` (`multilinear_separation.py`). `MccormickLPRelaxer` runs a bounded
+   cut-on-violation loop for products beyond `DISCOPT_MULTILINEAR_RLT_MAX`
+   (`DISCOPT_MULTILINEAR_SEPARATE`, default on), scaling the *exact* hull past the dense cap.
+   Validated sound (0/600 cut violations; a 60-model n=5/6 sweep never exceeds the true min;
+   5-linear root −16→−10.375).
+
+**Remaining (research-grade):**
+
 4. **Edge-concave / vertex-polyhedral underestimators** (Tardella; Hasan 2018). *Research-grade
    new relaxation family.* Note: multilinear monomials are already edge-concave and their
    vertex envelope is exactly what RLT (§6.D) produces — the open value is *other* edge-concave
@@ -304,13 +310,13 @@ misclassified convex). The `prod` path uses the proper recursive-McCormick fold;
 are certified and a NaN vector-eval bug in the Rust IR was fixed.
 
 Also delivered (the §7 SOTA items): **1–2** OBBT-on-relaxation loop + duality-based bound
-tightening; **6** norm-DCP atom + region-aware trig certificate; **7** FBBT backward for
-erf/sin/cos; **8** general `norm{p}` via `NormP(u32)`. What remains is **3** (uncapped
-multilinear via on-demand separation — needs a separation-loop refactor), **4** (edge-concave
-underestimators — research-grade), and **5** (discrete `sign`/indicator — low value; sign's
-continuous hull is already exact). The relaxation tightness itself is at parity for the
-polynomial/factorable core; the residual distance to SOTA is bound-tightening *orchestration*
-breadth and those three specialized items.
+tightening; **3** uncapped multilinear hull via on-demand separation; **6** norm-DCP atom +
+region-aware trig certificate; **7** FBBT backward for erf/sin/cos; **8** general `norm{p}` via
+`NormP(u32)`. What remains is **4** (edge-concave underestimators — research-grade) and **5**
+(discrete `sign`/indicator — low value; sign's continuous hull is already exact). The
+relaxation tightness is at parity with SOTA for the polynomial/factorable core (now including
+the *exact* multilinear hull at any factor count); the residual distance is the two
+specialized items above.
 
 ---
 
