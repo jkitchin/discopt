@@ -203,9 +203,7 @@ class NLPEvaluator:
         if gn_obj_hess_fn is not None:
             self._hess_fn_jit = jax.jit(gn_obj_hess_fn)
         else:
-            self._hess_fn_jit = jax.jit(
-                jax.jacfwd(jax.jacfwd(obj_fn, argnums=0), argnums=0)
-            )
+            self._hess_fn_jit = jax.jit(jax.jacfwd(jax.jacfwd(obj_fn, argnums=0), argnums=0))
 
         # Lagrangian Hessian: obj_factor * ∇²f(x) + Σᵢ λᵢ ∇²gᵢ(x).
         if gn_obj_hess_fn is not None:

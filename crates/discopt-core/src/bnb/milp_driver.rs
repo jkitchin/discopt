@@ -624,7 +624,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
             // overshot by a batch of expensive strong-branch probes.
             let time_up = ctx
                 .deadline
-                .map_or(false, |d| std::time::Instant::now() >= d);
+                .is_some_and(|d| std::time::Instant::now() >= d);
             // Primal heuristic: round this fractional point so the reduce can
             // inject a feasible incumbent early and prune more of the tree.
             if ctx.opts.heuristics && !feasible && !time_up {
