@@ -353,6 +353,30 @@ def cosh(x: Interval) -> Interval:
     return Interval(_round_down(lo), _round_up(hi))
 
 
+def entropy(x: Interval) -> Interval:
+    """``entropy(t) = t*log(t)`` is convex on ``t > 0`` with a single interior
+    minimum at ``t = 1/e`` (value ``-1/e``).
+
+    Convexity gives a tight enclosure: the lower endpoint is ``-1/e`` when the
+    minimizer ``1/e`` lies in the box, else the smaller endpoint value; the upper
+    endpoint is the larger endpoint value. When the box is not strictly within
+    the positive domain (``lo <= 0``) the enclosure collapses outward to
+    ``[-inf, +inf]`` so the certificate soundly abstains.
+    """
+    xstar = 1.0 / np.e
+    fstar = -1.0 / np.e
+    in_domain = x.lo > 0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        f_lo = x.lo * np.log(x.lo)
+        f_hi = x.hi * np.log(x.hi)
+    contains_min = (x.lo <= xstar) & (x.hi >= xstar)
+    lo = np.where(contains_min, fstar, np.minimum(f_lo, f_hi))
+    hi = np.maximum(f_lo, f_hi)
+    lo = np.where(in_domain, lo, -np.inf)
+    hi = np.where(in_domain, hi, np.inf)
+    return Interval(_round_down(lo), _round_up(hi))
+
+
 def sin(x: Interval) -> Interval:
     """Sound enclosure of ``sin([lo, hi])``.
 

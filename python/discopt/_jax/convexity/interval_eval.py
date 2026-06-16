@@ -273,6 +273,8 @@ def _eval_function_call(expr: FunctionCall, model: Model, box: dict, cache: dict
         return iv.sigmoid(arg)
     if name == "softplus":
         return iv.softplus(arg)
+    if name == "entropy":
+        return iv.entropy(arg)
     # Unsupported atoms return an unbounded enclosure; the certificate
     # will refuse to prove convexity for expressions that hit this
     # path, preserving soundness.

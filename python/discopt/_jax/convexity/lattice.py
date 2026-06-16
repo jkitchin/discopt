@@ -452,4 +452,12 @@ def unary_atom_profile(name: str, arg_sign: Sign) -> Optional[AtomProfile]:
             return AtomProfile(Curvature.CONCAVE, Monotonicity.NONDEC)
         return None
 
+    if name == "entropy":
+        # entropy(x) = x*log(x): f'' = 1/x > 0, so convex on the strictly
+        # positive domain. Non-monotone (minimum at x = 1/e), so monotonicity is
+        # unknown — sound for DCP composition over an affine argument.
+        if is_pos(arg_sign):
+            return AtomProfile(Curvature.CONVEX, Monotonicity.UNKNOWN)
+        return None
+
     return None

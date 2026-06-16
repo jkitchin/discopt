@@ -460,10 +460,10 @@ def test_translate_rejects_discontinuous(vc):
             translate_instructions([Op.nlPushV, Op.nlCallArg1], [1, FUNC_CODE[name]], v, c)
 
 
-def test_entropy_solves_to_optimum():
-    # entropy(x) = x*log(x); min on [0.1, 3] -> -1/e at x = 1/e. The relaxation's
-    # soundness is checked directly in test_mccormick; here we confirm a model
-    # built from the translated node reaches the correct optimum value.
+def test_entropy_solves_globally():
+    # entropy(x) = x*log(x); min on [0.1, 3] -> -1/e at x = 1/e. entropy is
+    # certified convex (lattice profile + interval enclosure), so the solve is
+    # a *certified* global optimum, not just a feasible incumbent.
     import math
 
     m = dm.Model("ent")
@@ -471,8 +471,9 @@ def test_entropy_solves_to_optimum():
     expr = translate_instructions([Op.nlPushV, Op.nlCallArg1], [1, FUNC_CODE["entropy"]], [x], [])
     m.minimize(expr)
     result = m.solve(time_limit=30)
-    assert result.status in ("optimal", "feasible")
+    assert result.status == "optimal"
     assert result.objective == pytest.approx(-1.0 / math.e, abs=1e-4)
+    assert result.gap_certified  # certified global via the entropy convexity atom
 
 
 # ── globality classification ─────────────────────────────────────────────────
