@@ -749,8 +749,15 @@ def _solve_root_node_multistart(
     """
     starting_points = _generate_starting_points(node_lb, node_ub, n_random=n_random)
 
+    cl = cu = None
+    if constraint_bounds:
+        cl = [b[0] for b in constraint_bounds]
+        cu = [b[1] for b in constraint_bounds]
+
     best_result = None
+    best_feasible = False
     best_obj = np.inf
+    last_result = None
 
     for x0 in starting_points:
         nlp_result = _solve_node_nlp(
@@ -762,15 +769,31 @@ def _solve_root_node_multistart(
             options,
             nlp_solver=nlp_solver,
         )
-        if nlp_result.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
-            if nlp_result.objective < best_obj:
-                best_obj = nlp_result.objective
-                best_result = nlp_result
+        last_result = nlp_result
+        if nlp_result.status not in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
+            continue
+        feasible = cl is None or _check_constraint_feasibility(evaluator, nlp_result.x, cl, cu)
+        obj = nlp_result.objective
+        # Prefer a constraint-FEASIBLE iterate over any infeasible one; within the
+        # same feasibility class, prefer the lower objective. An interior-point
+        # solver can hit ITERATION_LIMIT at a low-objective but constraint-
+        # infeasible point (e.g. division constraints from an interior start).
+        # Selecting that over a feasible higher-objective iterate would mark the
+        # root constraint-infeasible and unsoundly fathom the whole tree as
+        # "infeasible" on a feasible problem.
+        if (
+            best_result is None
+            or (feasible and not best_feasible)
+            or (feasible == best_feasible and obj < best_obj)
+        ):
+            best_result = nlp_result
+            best_feasible = feasible
+            best_obj = obj
 
     if best_result is not None:
         return best_result
     # All failed — return the last result
-    return nlp_result
+    return last_result
 
 
 def _invoke_pre_import_callbacks(
@@ -4010,6 +4033,18 @@ def _solve_nlp_bb(
     # --- Feasibility pump flag ---
     _fp_ran = False
 
+    # --- Soundness: distinguish a PROVEN-infeasible fathom from a merely
+    # UNCONVERGED one. A node whose NLP returns SolveStatus.INFEASIBLE (or whose
+    # FBBT interval arithmetic proves the box empty) is a valid infeasibility
+    # certificate. A node whose NLP merely hit ITERATION_LIMIT / ERROR with a
+    # constraint-violating iterate is NON-convergence, NOT a proof — an
+    # interior-point method can stall at an infeasible point on a perfectly
+    # feasible convex NLP (e.g. division constraints 40/x7 <= x5 need ~5k iters
+    # to reach feasibility; the 3k default stalls). If the tree later empties
+    # with no incumbent, an "infeasible" verdict is only sound when NO node was
+    # fathomed on non-convergence; otherwise feasibility is genuinely UNKNOWN.
+    _unconverged_fathom = False
+
     # --- NLP-BB loop ---
     # POUNCE batches node NLPs via solve_nlp_batch (Phase A, discopt#97); it is
     # a true KKT solver, so its converged objective is a reliable lower bound
@@ -4105,6 +4140,13 @@ def _solve_nlp_bb(
                             evaluator, result_sols[i], cl_list, cu_list
                         ):
                             result_lbs[i] = _INFEASIBILITY_SENTINEL
+                            # Batch IPM returned an objective (not a clean
+                            # infeasibility verdict) but the iterate violates
+                            # constraints: a stall, not a proof. Untrusted nodes
+                            # are unconverged by definition; tainting on any
+                            # constraint-infeasible batch fathom is conservative
+                            # and sound.
+                            _unconverged_fathom = True
             # For nonconvex: NLP objective is NOT a valid lower bound.
             # Keep it for integer-feasible nodes (incumbent candidates),
             # but reset to -inf for others so we don't prune incorrectly.
@@ -4176,6 +4218,11 @@ def _solve_nlp_bb(
                         evaluator, nlp_result.x, cl_list, cu_list
                     ):
                         nlp_lb = _INFEASIBILITY_SENTINEL
+                        # The solver returned OPTIMAL/ITERATION_LIMIT yet the
+                        # iterate violates constraints — this is non-convergence
+                        # (a stall), not a SolveStatus.INFEASIBLE proof. Fathoming
+                        # it cannot certify global infeasibility.
+                        _unconverged_fathom = True
                     # For nonconvex: reset non-integer-feasible to -inf
                     elif not _model_is_convex:
                         sol_is_int_feas = True
@@ -4197,6 +4244,12 @@ def _solve_nlp_bb(
                     result_feas[i] = False
                 else:
                     result_lbs[i] = _INFEASIBILITY_SENTINEL
+                    # A clean SolveStatus.INFEASIBLE is a valid infeasibility
+                    # certificate (for a convex node); ERROR/TIME_LIMIT/UNBOUNDED
+                    # are not — they are solver failures that must not masquerade
+                    # as a proof of global infeasibility.
+                    if nlp_result.status != SolveStatus.INFEASIBLE:
+                        _unconverged_fathom = True
                     lb_c = np.clip(node_lb, -_SPC, _SPC)
                     ub_c = np.clip(node_ub, -_SPC, _SPC)
                     result_sols[i] = 0.5 * (lb_c + ub_c)
@@ -4418,9 +4471,21 @@ def _solve_nlp_bb(
         elif wall_time >= time_limit:
             status = "time_limit"
             _gap_certified = False
+        elif _unconverged_fathom:
+            # Tree exhausted with no incumbent, but at least one node was fathomed
+            # on NLP NON-convergence (a stall), not a valid infeasibility
+            # certificate. We cannot soundly claim the problem is infeasible — its
+            # feasibility is genuinely undetermined. Report "unknown" rather than a
+            # false "infeasible" (the worst-class error: a feasible problem
+            # declared infeasible). Conservative by design: if any fathom was
+            # unconverged we forgo certifying infeasibility we might otherwise have
+            # proven — soundness over capability.
+            status = "unknown"
+            _gap_certified = False
         else:
-            # Tree exhausted with no feasible node: infeasibility *is* a certified
-            # conclusion, so leave _gap_certified untouched.
+            # Tree exhausted with no feasible node and every fathom was a valid
+            # certificate (FBBT-empty box or SolveStatus.INFEASIBLE): infeasibility
+            # *is* a certified conclusion, so leave _gap_certified untouched.
             status = "infeasible"
 
     # Negate bound back for maximization
