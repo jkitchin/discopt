@@ -25,6 +25,20 @@ The release procedure that produces these entries is documented in
   only valid rows tighten, and the un-pin only enlarges the box. Regression
   locks in `test_bucket2_sound_bounds.py`.
 
+- **Objective-gating priority branching** (`feat(bnb)`, #184). Opt-in
+  (`DISCOPT_OBJ_BRANCH_PRIORITY=1`) branching-order heuristic that branches the
+  integer variables gating the objective's nonlinear terms (those appearing in,
+  or equality-linked to, a lifted product/monomial — e.g. ex1252's line-selection
+  binaries `x36/x37/x38`) before other integers. The global dual bound is the
+  minimum over the open frontier, so on problems whose bound is structurally 0
+  until a *set* of binaries is jointly fixed it stays pinned at 0 under
+  most-fractional branching (no single-variable score sees the joint jump);
+  branching the gating binaries first reaches the depth where the per-node
+  relaxation lifts each leaf off 0. Implemented via the existing `set_branch_hints`
+  path in `solve_model` (`discopt.solver`) — pure search reordering over already
+  fractional integer candidates, so it can never affect a bound or feasibility
+  verdict. Detector locked by `test_bucket2_sound_bounds.py`.
+
 - **POUNCE NLP backend declared as a dependency** (`feat(solvers)`). New
   `pounce` optional extra (`pip install discopt[pounce]`, dist `pounce-solver`)
   and a `requires_pounce` test marker. POUNCE is a standalone pure-Rust port of

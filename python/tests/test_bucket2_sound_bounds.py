@@ -244,3 +244,38 @@ def test_bucket2_lifted_fbbt_stays_sound(monkeypatch, instance, optimum):
     assert res.lower_bound <= optimum + 1e-3, (
         f"[{instance}] lifted-FBBT UNSOUND root bound {res.lower_bound} > optimum {optimum}"
     )
+
+
+@pytest.mark.correctness
+def test_ex1252_objective_gating_priority_vars():
+    """The objective-gating branch-priority detector (issue #184) identifies
+    exactly ex1252's line-selection binaries ``x36/x37/x38`` — the integers tied
+    by the equalities ``x18=x36`` etc. to the objective's product factors
+    ``x18/x19/x20``. Branching these first is what lets the global dual bound
+    climb off its structural 0. This is branch-ORDER metadata only (never a bound
+    input), so the lock guards the heuristic, not soundness."""
+    from discopt.solver import _branch_priority_integer_vars, _select_priority_branch_var
+
+    nl = _DATA / "ex1252.nl"
+    assert nl.exists(), f"missing {nl}"
+    m = dm.from_nl(str(nl))
+
+    pri = _branch_priority_integer_vars(m)
+    assert sorted(pri) == [36, 37, 38], (
+        f"expected gating binaries {{36,37,38}}, got {sorted(pri)}"
+    )
+
+    # The selector picks a fractional, unfixed priority var and skips a pinned one.
+    import numpy as np
+
+    n = sum(v.size for v in m._variables)
+    lb, ub = flat_variable_bounds(m)
+    sol = np.zeros(n)
+    sol[37] = 0.5  # fractional gating binary
+    assert _select_priority_branch_var(sol, lb, ub, pri) == 37
+    # Pin x37 (already branched): no priority var is branchable → None.
+    ub_pinned = ub.copy()
+    lb_pinned = lb.copy()
+    lb_pinned[37] = ub_pinned[37] = 0.0
+    sol_pinned = np.zeros(n)  # 36/38 integral, 37 fixed
+    assert _select_priority_branch_var(sol_pinned, lb_pinned, ub_pinned, pri) is None
