@@ -768,6 +768,10 @@ def _tighten_node_bounds_with_status(evaluator, node_lb, node_ub, cl_list, cu_li
                     for k in range(n):
                         if k == i:
                             continue
+                        if abs(J[j, k]) < 1e-12:
+                            # Zero Jacobian entry contributes nothing; skip to
+                            # avoid ``0 * inf = nan`` when var k is unbounded.
+                            continue
                         if J[j, k] > 0:
                             residual -= J[j, k] * (lb[k] - mid[k])
                         else:
@@ -794,6 +798,10 @@ def _tighten_node_bounds_with_status(evaluator, node_lb, node_ub, cl_list, cu_li
                     residual = cl[j] - g[j]
                     for k in range(n):
                         if k == i:
+                            continue
+                        if abs(J[j, k]) < 1e-12:
+                            # Zero Jacobian entry contributes nothing; skip to
+                            # avoid ``0 * inf = nan`` when var k is unbounded.
                             continue
                         if J[j, k] > 0:
                             residual -= J[j, k] * (ub[k] - mid[k])

@@ -892,6 +892,88 @@ def test_supported_univariate_constraint_tightens_relaxation():
     assert varmap["univariate_relaxations"][0].func_name == "exp"
 
 
+def test_entropy_univariate_helpers_interior_minimum():
+    """``entropy(x)=x*log(x)`` value-bounds must capture the interior minimum.
+
+    entropy is convex with a single interior minimum at ``x = 1/e`` (value
+    ``-1/e``); endpoint-only bounds would miss it and could clip the aux column
+    above the true minimum, cutting off the optimum.
+    """
+    from discopt._jax.milp_relaxation import (
+        _univariate_curvature,
+        _univariate_domain_ok,
+        _univariate_value,
+        _univariate_value_bounds,
+    )
+
+    # Box straddles 1/e -> minimum is the interior value -1/e.
+    lo, hi = _univariate_value_bounds("entropy", 0.05, 2.0)
+    assert lo == pytest.approx(-np.exp(-1.0))
+    assert hi == pytest.approx(2.0 * np.log(2.0))
+    # Box entirely right of 1/e -> minimum at the left endpoint.
+    lo2, hi2 = _univariate_value_bounds("entropy", 1.0, 3.0)
+    assert lo2 == pytest.approx(0.0)
+    assert hi2 == pytest.approx(3.0 * np.log(3.0))
+    assert _univariate_value("entropy", 0.0) == 0.0  # x -> 0+ limit
+    assert _univariate_curvature("entropy", lo, hi) == "convex"
+    assert _univariate_domain_ok("entropy", 0.0, 2.0)
+    assert not _univariate_domain_ok("entropy", -0.1, 2.0)  # x < 0 undefined
+    assert not _univariate_domain_ok("entropy", 0.0, 0.0)  # no positive point
+
+
+def test_linear_expr_bounds_zero_coeff_ignores_infinite_var():
+    """A zero coefficient must not poison the interval via ``0 * inf = nan``.
+
+    Regression for ex6_1_4: a univariate term ``f(x0)`` has coefficient vector
+    ``[1, 0, 0, ...]``; when an unrelated variable is unbounded (``ub = inf``),
+    the old ``c >= 0`` branch evaluated ``0.0 * inf = nan`` and the entropy/log
+    argument bound came out NaN, so the term was dropped from the relaxation.
+    """
+    from discopt._jax.milp_relaxation import _linear_expr_bounds
+
+    coeff = np.array([1.0, 0.0, 0.0])
+    lb = np.array([1e-6, 0.0, 0.0])
+    ub = np.array([1.0, np.inf, np.inf])
+    lo, hi = _linear_expr_bounds(coeff, 0.0, lb, ub)
+    assert lo == pytest.approx(1e-6)
+    assert hi == pytest.approx(1.0)
+    assert np.isfinite(hi)
+
+    # Negative zero-adjacent and genuinely contributing infinite bounds still flow.
+    lo2, hi2 = _linear_expr_bounds(np.array([0.0, 1.0]), 0.0, np.array([0.0, 0.0]), ub[:2])
+    assert lo2 == pytest.approx(0.0)
+    assert hi2 == np.inf
+
+
+def test_entropy_objective_linearizes_with_sound_bound(caplog):
+    """``entropy(x)`` objectives must produce a sound finite MILP lower bound.
+
+    Regression for ex6_1_4: the entropy intrinsic (recovered by the factorable
+    canonicalization from ``x*(affine + log(x))``) was unknown to the AMP
+    univariate relaxer, so the objective fell back to a feasibility objective
+    and no bound could be certified.
+    """
+    from discopt._jax.factorable_reform import canonicalize_entropy
+
+    m = Model("entropy_obj")
+    x = m.continuous("x", lb=0.05, ub=2.0)
+    m.minimize(x * dm.log(x))
+    m = canonicalize_entropy(m)
+
+    with caplog.at_level("WARNING", logger="discopt._jax.milp_relaxation"):
+        milp_model, varmap = _build_relaxation_for_test(m)
+        result = milp_model.solve()
+
+    assert result.status == "optimal"
+    assert milp_model._objective_bound_valid is True
+    assert {r.func_name for r in varmap["univariate_relaxations"]} == {"entropy"}
+    # Sound underestimator: the relaxation min must not exceed the true optimum.
+    true_min = -np.exp(-1.0)  # x*log(x) minimized at x = 1/e
+    assert result.objective is not None
+    assert result.objective <= true_min + 1e-8
+    assert "Cannot linearize FunctionCall: entropy" not in caplog.text
+
+
 def test_issue71_log_constraint_is_kept_in_relaxation(caplog):
     """Safe affine log constraints should not be omitted from the AMP relaxation."""
     m = Model("issue71_log_constraint")
