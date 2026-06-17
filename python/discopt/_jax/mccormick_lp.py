@@ -297,6 +297,7 @@ class MccormickLPRelaxer:
             or t.multilinear
             or t.monomial
             or t.fractional_power
+            or t.general_nl
             or self._has_affine_power
         )
 
