@@ -60,9 +60,10 @@ impl PyTreeManager {
         let sel_strategy = match strategy {
             "best_first" => SelectionStrategy::BestFirst,
             "depth_first" => SelectionStrategy::DepthFirst,
+            "best_estimate" => SelectionStrategy::BestEstimate,
             _ => {
                 return Err(PyValueError::new_err(format!(
-                    "Unknown strategy: '{}'. Use 'best_first' or 'depth_first'.",
+                    "Unknown strategy: '{}'. Use 'best_first', 'depth_first', or 'best_estimate'.",
                     strategy
                 )));
             }

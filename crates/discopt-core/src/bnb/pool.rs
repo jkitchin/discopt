@@ -12,6 +12,10 @@ pub enum SelectionStrategy {
     BestFirst,
     /// Select the deepest node, breaking ties by lowest lower bound (depth-first).
     DepthFirst,
+    /// Select the node with the lowest best-estimate of its subtree optimum
+    /// (Forrest/Achterberg best-estimate search). Finds good incumbents earlier;
+    /// falls back to the lower bound when a node's estimate is unset.
+    BestEstimate,
 }
 
 /// Entry in the priority queue, wrapping a NodeId with ordering metadata.
@@ -19,6 +23,9 @@ pub enum SelectionStrategy {
 struct HeapEntry {
     node_id: NodeId,
     lower_bound: f64,
+    /// Best-estimate of the subtree optimum; equals `lower_bound` when the node's
+    /// estimate was never set, so `BestEstimate` degrades to `BestFirst`.
+    estimate: f64,
     depth: usize,
     strategy: SelectionStrategy,
 }
@@ -72,6 +79,21 @@ impl Ord for HeapEntry {
                         self.node_id.0.cmp(&other.node_id.0)
                     })
             }
+            SelectionStrategy::BestEstimate => {
+                // Max-heap: reverse so the lowest estimate is selected first.
+                other
+                    .estimate
+                    .partial_cmp(&self.estimate)
+                    .unwrap_or(Ordering::Equal)
+                    .then_with(|| {
+                        // Tie-break on the (valid) lower bound, then determinism.
+                        other
+                            .lower_bound
+                            .partial_cmp(&self.lower_bound)
+                            .unwrap_or(Ordering::Equal)
+                    })
+                    .then_with(|| other.node_id.0.cmp(&self.node_id.0))
+            }
         }
     }
 }
@@ -102,9 +124,17 @@ impl NodePool {
         let id = node.id;
         assert_eq!(id.0, self.nodes.len(), "Node ID must match insertion order");
         if node.status == NodeStatus::Pending {
+            // An unset estimate (NEG_INFINITY) falls back to the lower bound so
+            // best-estimate ordering matches best-first until pseudocosts exist.
+            let estimate = if node.best_estimate.is_finite() {
+                node.best_estimate
+            } else {
+                node.local_lower_bound
+            };
             self.open.push(HeapEntry {
                 node_id: id,
                 lower_bound: node.local_lower_bound,
+                estimate,
                 depth: node.depth,
                 strategy: self.strategy,
             });
@@ -174,6 +204,12 @@ mod tests {
     fn make_pending_node(id: usize, depth: usize, lb: f64) -> Node {
         let mut node = Node::new(NodeId(id), None, depth, vec![], vec![]);
         node.local_lower_bound = lb;
+        node
+    }
+
+    fn make_estimate_node(id: usize, lb: f64, estimate: f64) -> Node {
+        let mut node = make_pending_node(id, 0, lb);
+        node.best_estimate = estimate;
         node
     }
 
@@ -262,6 +298,43 @@ mod tests {
         pool.add(make_pending_node(0, 0, 1.0));
         pool.add(make_pending_node(1, 0, 2.0));
         assert_eq!(pool.total_count(), 2);
+    }
+
+    #[test]
+    fn test_best_estimate_selects_lowest_estimate() {
+        let mut pool = NodePool::new(SelectionStrategy::BestEstimate);
+        // Lower bounds are equal; only the estimate differentiates the nodes.
+        pool.add(make_estimate_node(0, 5.0, 12.0));
+        pool.add(make_estimate_node(1, 5.0, 7.0));
+        pool.add(make_estimate_node(2, 5.0, 9.0));
+
+        assert_eq!(pool.select_next(), Some(NodeId(1))); // estimate 7
+        assert_eq!(pool.select_next(), Some(NodeId(2))); // estimate 9
+        assert_eq!(pool.select_next(), Some(NodeId(0))); // estimate 12
+        assert_eq!(pool.select_next(), None);
+    }
+
+    #[test]
+    fn test_best_estimate_falls_back_to_lower_bound_when_unset() {
+        // With no estimate set, BestEstimate must behave like BestFirst.
+        let mut pool = NodePool::new(SelectionStrategy::BestEstimate);
+        pool.add(make_pending_node(0, 0, 10.0));
+        pool.add(make_pending_node(1, 0, 5.0));
+        pool.add(make_pending_node(2, 0, 8.0));
+
+        assert_eq!(pool.select_next(), Some(NodeId(1))); // lb 5
+        assert_eq!(pool.select_next(), Some(NodeId(2))); // lb 8
+        assert_eq!(pool.select_next(), Some(NodeId(0))); // lb 10
+    }
+
+    #[test]
+    fn test_best_estimate_differs_from_best_first() {
+        // Node 0 has the lower bound but a worse (higher) estimate; best-estimate
+        // should prefer node 1, whereas best-first would pick node 0.
+        let mut pool = NodePool::new(SelectionStrategy::BestEstimate);
+        pool.add(make_estimate_node(0, 1.0, 20.0));
+        pool.add(make_estimate_node(1, 3.0, 6.0));
+        assert_eq!(pool.select_next(), Some(NodeId(1)));
     }
 
     #[test]
