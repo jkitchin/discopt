@@ -635,26 +635,52 @@ pub fn backward_propagate(
                     if let Some(exp_val) = arena.try_constant_value_pub(*right) {
                         let exp_int = exp_val.round() as i64;
                         if (exp_val - exp_int as f64).abs() < 1e-12 && exp_int > 0 {
-                            // base^n in [lo, hi] => base in [lo^(1/n), hi^(1/n)]
-                            // (for odd n or base >= 0)
-                            if exp_int % 2 == 1 || l.lo >= 0.0 {
-                                let inv = 1.0 / exp_int as f64;
+                            let inv = 1.0 / exp_int as f64;
+                            if exp_int % 2 == 1 {
+                                // Odd power is monotone: base^n in [lo, hi]
+                                // => base in [lo^(1/n), hi^(1/n)], preserving sign.
                                 let new_lo = if tightened.lo >= 0.0 {
                                     tightened.lo.powf(inv)
-                                } else if exp_int % 2 == 1 {
-                                    -((-tightened.lo).powf(inv))
                                 } else {
-                                    0.0
+                                    -((-tightened.lo).powf(inv))
                                 };
                                 let new_hi = if tightened.hi >= 0.0 {
                                     tightened.hi.powf(inv)
-                                } else if exp_int % 2 == 1 {
-                                    -((-tightened.hi).powf(inv))
                                 } else {
-                                    // Even power can't be negative.
-                                    return;
+                                    -((-tightened.hi).powf(inv))
                                 };
                                 let new_base = Interval::new(new_lo, new_hi);
+                                backward_propagate(arena, *left, new_base, node_bounds, var_bounds);
+                            } else {
+                                // Even power: u^n in [lo, hi] with u^n >= 0 always.
+                                // |u| in [root_lo, root_hi] where
+                                //   root_hi = hi^(1/n), root_lo = max(0, lo)^(1/n).
+                                // A negative upper bound on the output is infeasible.
+                                if tightened.hi < 0.0 {
+                                    backward_propagate(
+                                        arena,
+                                        *left,
+                                        Interval::empty(),
+                                        node_bounds,
+                                        var_bounds,
+                                    );
+                                    return;
+                                }
+                                let root_hi = tightened.hi.powf(inv);
+                                let root_lo = tightened.lo.max(0.0).powf(inv);
+                                // Use the forward base bounds to resolve the sign of u.
+                                let new_base = if l.lo >= 0.0 {
+                                    // Base known nonnegative: u in [root_lo, root_hi].
+                                    Interval::new(root_lo, root_hi)
+                                } else if l.hi <= 0.0 {
+                                    // Base known nonpositive: u in [-root_hi, -root_lo].
+                                    Interval::new(-root_hi, -root_lo)
+                                } else {
+                                    // Base straddles zero: the feasible set is
+                                    // [-root_hi, -root_lo] U [root_lo, root_hi]; we
+                                    // soundly relax to the hull [-root_hi, root_hi].
+                                    Interval::new(-root_hi, root_hi)
+                                };
                                 backward_propagate(arena, *left, new_base, node_bounds, var_bounds);
                             }
                         }
@@ -738,7 +764,13 @@ pub fn backward_propagate(
                     const EPS: f64 = 1e-12;
                     let lo = tightened.lo.clamp(-1.0 + EPS, 1.0 - EPS).atanh();
                     let hi = tightened.hi.clamp(-1.0 + EPS, 1.0 - EPS).atanh();
-                    backward_propagate(arena, args[0], Interval::new(lo, hi), node_bounds, var_bounds);
+                    backward_propagate(
+                        arena,
+                        args[0],
+                        Interval::new(lo, hi),
+                        node_bounds,
+                        var_bounds,
+                    );
                 }
                 MathFunc::Atanh => {
                     // atanh increasing on (-1, 1), inverse tanh.
@@ -772,14 +804,26 @@ pub fn backward_propagate(
                     const EPS: f64 = 1e-12;
                     let lo = tightened.lo.clamp(-FRAC_PI_2 + EPS, FRAC_PI_2 - EPS).tan();
                     let hi = tightened.hi.clamp(-FRAC_PI_2 + EPS, FRAC_PI_2 - EPS).tan();
-                    backward_propagate(arena, args[0], Interval::new(lo, hi), node_bounds, var_bounds);
+                    backward_propagate(
+                        arena,
+                        args[0],
+                        Interval::new(lo, hi),
+                        node_bounds,
+                        var_bounds,
+                    );
                 }
                 MathFunc::Asin => {
                     // asin increasing onto [-pi/2, pi/2], inverse sin; preimage in [-1, 1].
                     use std::f64::consts::FRAC_PI_2;
                     let lo = tightened.lo.clamp(-FRAC_PI_2, FRAC_PI_2).sin();
                     let hi = tightened.hi.clamp(-FRAC_PI_2, FRAC_PI_2).sin();
-                    backward_propagate(arena, args[0], Interval::new(lo, hi), node_bounds, var_bounds);
+                    backward_propagate(
+                        arena,
+                        args[0],
+                        Interval::new(lo, hi),
+                        node_bounds,
+                        var_bounds,
+                    );
                 }
                 MathFunc::Acos => {
                     // acos decreasing onto [0, pi], inverse cos; preimage in [-1, 1].
@@ -799,13 +843,25 @@ pub fn backward_propagate(
                     // acosh increasing onto [0, inf), inverse cosh; preimage in [1, inf).
                     let lo = tightened.lo.max(0.0).cosh();
                     let hi = tightened.hi.max(0.0).cosh();
-                    backward_propagate(arena, args[0], Interval::new(lo, hi), node_bounds, var_bounds);
+                    backward_propagate(
+                        arena,
+                        args[0],
+                        Interval::new(lo, hi),
+                        node_bounds,
+                        var_bounds,
+                    );
                 }
                 MathFunc::Cosh => {
                     // cosh(a) in [lo, hi] (hi >= 1) is even; conservative symmetric preimage
                     // a in [-acosh(hi), acosh(hi)].
                     let r = tightened.hi.max(1.0).acosh();
-                    backward_propagate(arena, args[0], Interval::new(-r, r), node_bounds, var_bounds);
+                    backward_propagate(
+                        arena,
+                        args[0],
+                        Interval::new(-r, r),
+                        node_bounds,
+                        var_bounds,
+                    );
                 }
                 MathFunc::Sigmoid => {
                     // sigmoid increasing onto (0, 1), inverse logit a = ln(p/(1-p)).
@@ -844,7 +900,13 @@ pub fn backward_propagate(
                     const M: f64 = 1e-9;
                     let lo = erfinv(tightened.lo) - M;
                     let hi = erfinv(tightened.hi) + M;
-                    backward_propagate(arena, args[0], Interval::new(lo, hi), node_bounds, var_bounds);
+                    backward_propagate(
+                        arena,
+                        args[0],
+                        Interval::new(lo, hi),
+                        node_bounds,
+                        var_bounds,
+                    );
                 }
                 MathFunc::Sin => {
                     // sin is monotone on each piece between consecutive extrema
@@ -1022,7 +1084,10 @@ pub fn fbbt_with_cutoff(
             };
 
             let body_bound = node_bounds[constr.body.0];
-            if body_bound.intersect(&output_bound).is_empty_beyond(FEAS_TOL) {
+            if body_bound
+                .intersect(&output_bound)
+                .is_empty_beyond(FEAS_TOL)
+            {
                 for b in &mut var_bounds {
                     *b = Interval::empty();
                 }
@@ -1105,7 +1170,10 @@ pub fn fbbt(model: &ModelRepr, max_iter: usize, tol: f64) -> Vec<Interval> {
             // Check feasibility: if the forward bound is incompatible
             // with the constraint, the problem is infeasible.
             let body_bound = node_bounds[constr.body.0];
-            if body_bound.intersect(&output_bound).is_empty_beyond(FEAS_TOL) {
+            if body_bound
+                .intersect(&output_bound)
+                .is_empty_beyond(FEAS_TOL)
+            {
                 // Infeasible — mark all bounds as empty.
                 for b in &mut var_bounds {
                     *b = Interval::empty();
@@ -1904,6 +1972,108 @@ mod tests {
         let bounds = fbbt_with_cutoff(&model, 10, 1e-8, Some(cutoff));
         assert!((bounds[0].lo - (-10.0)).abs() < 1e-8);
         assert!((bounds[0].hi - 2.0).abs() < 1e-8);
+    }
+
+    #[test]
+    fn test_fbbt_with_cutoff_even_power_straddling_base() {
+        // min (1 - x)^2 over x in [-4, 11]. The base (1 - x) straddles zero
+        // (forward range [-10, 5]), so the even-power backward rule must still
+        // invert the cutoff: (1-x)^2 <= 0.01 => |1-x| <= 0.1 => x in [0.9, 1.1].
+        // This is the Rosenbrock-style shifted-square pattern: without the fix
+        // the box never collapses and certification is pathologically slow.
+        let mut arena = ExprArena::new();
+        let x = arena.add(ExprNode::Variable {
+            name: "x".into(),
+            index: 0,
+            size: 1,
+            shape: vec![],
+        });
+        let one = arena.add(ExprNode::Constant(1.0));
+        let diff = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Sub,
+            left: one,
+            right: x,
+        });
+        let two = arena.add(ExprNode::Constant(2.0));
+        let sq = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Pow,
+            left: diff,
+            right: two,
+        });
+        let model = ModelRepr {
+            arena,
+            objective: sq,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![],
+            variables: vec![VarInfo {
+                name: "x".into(),
+                var_type: VarType::Continuous,
+                offset: 0,
+                size: 1,
+                shape: vec![],
+                lb: vec![-4.0],
+                ub: vec![11.0],
+            }],
+            n_vars: 1,
+        };
+        let bounds = fbbt_with_cutoff(&model, 10, 1e-8, Some(0.01));
+        assert!(
+            (bounds[0].lo - 0.9).abs() < 1e-6,
+            "expected lo ~0.9, got {}",
+            bounds[0].lo
+        );
+        assert!(
+            (bounds[0].hi - 1.1).abs() < 1e-6,
+            "expected hi ~1.1, got {}",
+            bounds[0].hi
+        );
+    }
+
+    #[test]
+    fn test_backward_even_power_negative_base() {
+        // For a known-nonpositive base, u^2 in [4, 9] => u in [-3, -2].
+        // Model: objective = x^2, x in [-5, -1] (so base x is nonpositive),
+        // cutoff 9 => x^2 <= 9 => x in [-3, -1] (intersect with forward [-5,-1]).
+        let mut arena = ExprArena::new();
+        let x = arena.add(ExprNode::Variable {
+            name: "x".into(),
+            index: 0,
+            size: 1,
+            shape: vec![],
+        });
+        let two = arena.add(ExprNode::Constant(2.0));
+        let sq = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Pow,
+            left: x,
+            right: two,
+        });
+        let model = ModelRepr {
+            arena,
+            objective: sq,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![],
+            variables: vec![VarInfo {
+                name: "x".into(),
+                var_type: VarType::Continuous,
+                offset: 0,
+                size: 1,
+                shape: vec![],
+                lb: vec![-5.0],
+                ub: vec![-1.0],
+            }],
+            n_vars: 1,
+        };
+        let bounds = fbbt_with_cutoff(&model, 10, 1e-8, Some(9.0));
+        assert!(
+            (bounds[0].lo - (-3.0)).abs() < 1e-6,
+            "expected lo ~-3, got {}",
+            bounds[0].lo
+        );
+        assert!(
+            (bounds[0].hi - (-1.0)).abs() < 1e-6,
+            "expected hi ~-1, got {}",
+            bounds[0].hi
+        );
     }
 
     // -- feasibility-tolerance regression tests (issue #27a) --

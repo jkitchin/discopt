@@ -128,6 +128,17 @@ pub fn run(model: crate::expr::ModelRepr, mut opts: OrchestratorOptions) -> Pres
         }
     }
 
+    // NOTE: the tightened bounds are returned in `PresolveResult::bounds`
+    // but deliberately NOT written back into `ctx.model`'s `VarInfo`. The
+    // returned model is consumed downstream for solving, dual recovery,
+    // and feasibility checks; mutating its declared variable bounds there
+    // — even with values that are valid for *optimization* — can flip an
+    // inactive bound to active (changing LP duals) or, if a tightening was
+    // ever cutoff/incumbent-derived, manufacture a false infeasibility on
+    // re-solve. Callers that want the tightened bounds read them from
+    // `bounds`; fixed-point detection within a single `run` already works
+    // because `ctx.bounds` carries across sweeps.
+
     PresolveResult {
         model: ctx.model,
         bounds: ctx.bounds,

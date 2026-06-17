@@ -2054,6 +2054,13 @@ def solve_model(
                 break
         _origin_chk_off += _ov.size
 
+    # Pre-reform model + original variable count, set only when the factorable
+    # lift actually fires (see below). Used by the per-node interval bound to
+    # recover the un-distributed objective's tight enclosure over the original
+    # variables. ``None`` means no lift happened, so the live model IS original.
+    _prereform_model = None
+    _prereform_nvars = 0
+
     if has_factorable_work(model):
         # Tighten variable bounds with FBBT *before* the reform so its interval
         # checks see finite bounds. A fractional-power-of-product lift (issue
@@ -2088,6 +2095,21 @@ def solve_model(
 
         _fr_ok, _fr_convex, _ = _classify_model_convexity(model)
         if _fr_ok and not _fr_convex:
+            # Retain the pre-reform model and its original variable count. The
+            # factorable lift distributes products and replaces repeated factors
+            # with aux columns (``100*(x1-x0**2)**2`` becomes
+            # ``100*x1**2 - 200*x1*_fr_aux + 100*x0**4`` with ``_fr_aux = x1*x0**2``),
+            # which DESTROYS the sum-of-squares structure: naive interval
+            # arithmetic on the distributed/lifted objective is hopelessly loose
+            # (a square that is provably >= 0 enclosed as a large-negative
+            # interval), so the cheap per-node interval bound can no longer prune.
+            # Aux columns are appended after the originals, so the first
+            # ``_prereform_nvars`` flat entries of every node box are exactly the
+            # original-variable sub-box; evaluating the ORIGINAL objective over it
+            # is a valid (and, for sum-of-squares, tight) lower bound. See the
+            # per-node bound loops below.
+            _prereform_model = model
+            _prereform_nvars = sum(v.size for v in model._variables)
             model = factorable_reformulate(model)
         # A *convex* model with a clearable denominator is deliberately left
         # untouched here: many such divisions (e.g. the rotated-SOC ``x**2/z``)
@@ -3195,6 +3217,15 @@ def solve_model(
                         )
                         if np.isfinite(iv_lb):
                             result_lbs[i] = max(result_lbs[i], iv_lb)
+                        # Original (un-distributed) objective over the original-
+                        # variable sub-box — a tight enclosure the lifted model's
+                        # distributed bilinear form cannot give (see serial path).
+                        if _prereform_model is not None:
+                            pr_lb = _compute_interval_bound(
+                                _prereform_model, batch_lb[i], batch_ub[i], _obj_negate
+                            )
+                            if np.isfinite(pr_lb):
+                                result_lbs[i] = max(result_lbs[i], pr_lb)
             # Tighten lower bounds with McCormick relaxation
             if _mc_obj_eval is not None:
                 try:
@@ -3469,6 +3500,19 @@ def solve_model(
                         iv_lb = _compute_interval_bound(model, node_lb, node_ub, _obj_negate)
                         if np.isfinite(iv_lb):
                             convex_lb = max(convex_lb, iv_lb)
+                        # Tighter enclosure from the un-distributed objective: the
+                        # factorable lift turns sum-of-squares into a distributed
+                        # bilinear form whose interval bound is uselessly loose,
+                        # but the ORIGINAL objective over the original-variable
+                        # sub-box (the first _prereform_nvars flat entries) is a
+                        # valid, far tighter bound. This is what lets Rosenbrock-
+                        # style problems certify (obj = sum of squares >= 0).
+                        if _prereform_model is not None:
+                            pr_lb = _compute_interval_bound(
+                                _prereform_model, node_lb, node_ub, _obj_negate
+                            )
+                            if np.isfinite(pr_lb):
+                                convex_lb = max(convex_lb, pr_lb)
 
                     # For nonconvex problems: NLP local min is NOT a valid
                     # lower bound (can exceed global opt → premature pruning).
