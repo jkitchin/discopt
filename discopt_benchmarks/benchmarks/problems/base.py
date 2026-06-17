@@ -17,6 +17,7 @@ _SOLVER_MAP: dict[str, list[str]] = {
     "qp": ["ipm", "pounce", "ipopt"],
     "milp": ["ipm", "pounce", "ipopt"],
     "miqp": ["ipm", "pounce", "ipopt"],
+    "qcqp": ["pounce", "ipopt"],
     "minlp": ["ipm", "pounce", "ipopt"],
     "global_opt": ["ipm", "pounce", "ipopt"],
     "nlp_convex": ["ipm", "pounce", "ipopt"],
@@ -105,4 +106,5 @@ def _ensure_loaded():
     import benchmarks.problems.minlp_problems  # noqa: F401
     import benchmarks.problems.minlptests_problems  # noqa: F401
     import benchmarks.problems.miqp_problems  # noqa: F401
+    import benchmarks.problems.qcqp_problems  # noqa: F401
     import benchmarks.problems.qp_problems  # noqa: F401

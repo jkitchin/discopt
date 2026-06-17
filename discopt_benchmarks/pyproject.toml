@@ -61,6 +61,12 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "TCH"]
 
+[tool.ruff.lint.per-file-ignores]
+# Standard linear-algebra notation: Q (matrix), L/A (factors) are intentionally
+# capitalized in the QCQP problem generators and their reference computations.
+"benchmarks/problems/qcqp_problems.py" = ["N803", "N806"]
+"tests/test_qcqp_scoreboard.py" = ["N806"]
+
 [tool.coverage.run]
 source = ["benchmarks", "utils"]
 branch = true
