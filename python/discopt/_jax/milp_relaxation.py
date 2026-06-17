@@ -143,6 +143,86 @@ _MAX_FINITE_DOMAIN_TRIG_TABLE_VALUES = 256
 # from 1e11 down to 1e6 on the affected instances.
 _RELAX_NUMERIC_CAP = 1e10
 
+# Equilibrate the lifted relaxation before an external LP/MILP solve when its
+# coefficient dynamic range exceeds this (matches the Rust simplex's own scaling
+# trigger). The lifted McCormick rows of a product over a wide variable box mix
+# tiny constants (~1e-9) with large bound-derived coefficients (~1e7), giving a
+# >1e15 spread on ex1252's boundary sub-boxes — HiGHS stalls on it (a 452x96 LP
+# hits its time limit) while the pure-Rust simplex, which equilibrates, solves it
+# in ~0.03s. Geometric-mean row/column scaling brings the spread down so the
+# external (HiGHS) path converges instead of timing out (issue #184).
+_RELAX_EQUILIBRATE_TRIGGER = 1e6
+
+
+def equilibrate_relaxation_lp(
+    c: np.ndarray,
+    A_ub: Optional[Union[np.ndarray, sp.spmatrix]],
+    b_ub: Optional[np.ndarray],
+    bounds: list[tuple[float, float]],
+    integrality: Optional[np.ndarray],
+    *,
+    iters: int = 20,
+) -> tuple[
+    np.ndarray,
+    Optional[sp.spmatrix],
+    Optional[np.ndarray],
+    list[tuple[float, float]],
+    np.ndarray,
+]:
+    """Geometric-mean (Ruiz) equilibration of ``min c·x s.t. A_ub x <= b_ub``.
+
+    Alternating row/column infinity-norm sweeps drive every row and column to unit
+    scale; the factors are snapped to powers of two so the transform is exact in
+    floating point. **Integer columns are never scaled** (that would corrupt
+    integrality), so the conditioning of the integer part is left to the solver.
+
+    Soundness: this is an exact diagonal rescaling ``x = D·x'`` of the LP. Row
+    scaling ``s_r`` rewrites ``A_r x <= b_r`` as ``(s_r A_r) x <= s_r b_r`` — same
+    feasible set. Column scaling ``d_j`` substitutes ``x_j = d_j x'_j`` into the
+    objective and rows consistently. The optimal objective value is therefore
+    **unchanged**, so the LP/MILP bound from the scaled solve is the true bound;
+    only the returned point needs ``x = col_scale · x'`` to map back. Returns
+    ``(c', A', b', bounds', col_scale)``.
+    """
+    if A_ub is None or b_ub is None:
+        return np.asarray(c, dtype=np.float64), A_ub, b_ub, bounds, np.ones(len(c))
+
+    A = sp.csr_matrix(A_ub).astype(np.float64).copy()
+    m, n = A.shape
+    col_scale = np.ones(n)
+    row_scale = np.ones(m)
+    # Columns we are allowed to scale: continuous only (integer cols stay at 1).
+    scalable = np.ones(n, dtype=bool) if integrality is None else (np.asarray(integrality) == 0)
+
+    for _ in range(iters):
+        absA = A.copy()
+        absA.data = np.abs(absA.data)
+        rmax = np.asarray(absA.max(axis=1).todense()).ravel()
+        rmax[rmax == 0.0] = 1.0
+        dr = 2.0 ** np.round(np.log2(1.0 / np.sqrt(rmax)))
+        A = sp.diags(dr) @ A
+        row_scale *= dr
+
+        absA = A.copy()
+        absA.data = np.abs(absA.data)
+        cmax = np.asarray(absA.max(axis=0).todense()).ravel()
+        cmax[cmax == 0.0] = 1.0
+        dc = 2.0 ** np.round(np.log2(1.0 / np.sqrt(cmax)))
+        dc[~scalable] = 1.0
+        A = A @ sp.diags(dc)
+        col_scale *= dc
+
+    b2 = np.asarray(b_ub, dtype=np.float64) * row_scale
+    c2 = np.asarray(c, dtype=np.float64) * col_scale
+    bounds2 = [
+        (
+            lo / d if np.isfinite(lo) else lo,
+            hi / d if np.isfinite(hi) else hi,
+        )
+        for (lo, hi), d in zip(bounds, col_scale)
+    ]
+    return c2, sp.csr_matrix(A), b2, bounds2, col_scale
+
 
 def _warn_once(msg: str, *args) -> None:
     formatted = msg % args if args else msg
@@ -211,15 +291,39 @@ class MilpRelaxationModel:
         # to the warm-started-simplex B&B (falls back to auto if unavailable).
         solve_milp = get_milp_solver(backend=backend)
 
+        # Equilibrate the LP for the external (HiGHS/POUNCE) backends when it is
+        # badly scaled. The pure-Rust simplex already equilibrates internally, so
+        # skip the (redundant) Python pre-scaling there; HiGHS does not cope with
+        # the lifted relaxation's >1e15 coefficient spread and stalls without it
+        # (issue #184). The transform is exact, so the returned bound/objective is
+        # unchanged — only the solution point is mapped back through ``col_scale``.
+        c_s, A_s, b_s, bounds_s = self._c, self._A_ub, self._b_ub, self._bounds
+        col_scale = None
+        if backend != "simplex" and self._A_ub is not None:
+            data = sp.csr_matrix(self._A_ub).data
+            nz = np.abs(data[data != 0.0])
+            ill = bool(
+                nz.size
+                and np.isfinite(nz).all()
+                and nz.max() / nz.min() > _RELAX_EQUILIBRATE_TRIGGER
+            )
+            if ill:
+                c_s, A_s, b_s, bounds_s, col_scale = equilibrate_relaxation_lp(
+                    self._c, self._A_ub, self._b_ub, self._bounds, self._integrality
+                )
+
         result = solve_milp(
-            c=self._c,
-            A_ub=self._A_ub,
-            b_ub=self._b_ub,
-            bounds=self._bounds,
+            c=c_s,
+            A_ub=A_s,
+            b_ub=b_s,
+            bounds=bounds_s,
             integrality=self._integrality,
             time_limit=time_limit,
             gap_tolerance=gap_tolerance,
         )
+        # Map the scaled solution point back to original variables (x = D·x').
+        if col_scale is not None and result.x is not None:
+            result.x = np.asarray(result.x, dtype=np.float64) * col_scale
 
         # Map SolveStatus enum to string
         status_map = {
@@ -2470,45 +2574,104 @@ def _polynomial_lower_bound(
     return min(values)
 
 
+def _reciprocal_term_lower_bound(
+    scaled_numerator: float,
+    denominator: Expression,
+    model: Model,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> Optional[float]:
+    """Rigorous constant lower bound for ``scaled_numerator / denominator(x)``.
+
+    Encloses ``denominator`` over the box via the same separable-polynomial
+    machinery used for objective lifts (``_expression_lower_bound_for_lift`` /
+    ``_expression_upper_bound_for_lift``), which recovers ``D_lo``/``D_hi`` from a
+    distributed quadratic by per-variable vertex minimization — crucially, this
+    works on the live solve's already-distributed denominator (e.g. ``0.1 +
+    x0**2 - 8*x0 + 16 + ...``) where a naive interval evaluation of ``x*x`` on an
+    unbounded box would collapse to ``[-inf, inf]``. When the enclosure is
+    strictly positive (``D_lo > 0``), ``1/D`` is decreasing in ``D`` so the term
+    ``k/D`` is minimized at ``D_hi`` when ``k > 0`` and at ``D_lo`` when
+    ``k < 0``. Returns ``None`` (caller abstains) if the denominator cannot be
+    proven strictly positive or the bound is not finite.
+    """
+    if abs(scaled_numerator) <= 1e-12:
+        return 0.0
+    denom_lo = _expression_lower_bound_for_lift(denominator, model, flat_lb, flat_ub)
+    denom_hi = _expression_upper_bound_for_lift(denominator, model, flat_lb, flat_ub)
+    # A strictly-positive, finite lower end is required for a sound reciprocal;
+    # _expression_lower_bound_for_lift returns None when it cannot prove one.
+    if denom_lo is None or not np.isfinite(denom_lo) or denom_lo <= 1e-12:
+        return None
+    if scaled_numerator > 0.0:
+        # k/D minimized at the largest D; an unbounded/unknown D_hi drives the
+        # positive term toward 0 from above, which is still a valid lower bound.
+        bound = (
+            0.0
+            if (denom_hi is None or not np.isfinite(denom_hi))
+            else (scaled_numerator / denom_hi)
+        )
+    else:
+        bound = scaled_numerator / denom_lo
+    if not np.isfinite(bound):
+        return None
+    return float(bound)
+
+
 def _separable_objective_lower_bound(
     expr: Expression,
     model: Model,
     flat_lb: np.ndarray,
     flat_ub: np.ndarray,
 ) -> Optional[float]:
-    """Compute a conservative constant lower bound for simple separable objectives."""
+    """Compute a conservative constant lower bound for simple separable objectives.
+
+    ``expr`` is flattened additively and matched term-by-term.  Reciprocal terms
+    ``k / D(x)`` are matched on the term's ORIGINAL (un-distributed) structure so
+    the denominator's square/power shape survives for a sound interval enclosure;
+    every other term is distributed individually before the polynomial / affine
+    matchers run (the union over terms equals distributing the whole expression,
+    so non-reciprocal behavior is unchanged).
+    """
     terms: list[tuple[float, Expression]] = []
     _flatten_additive_terms(expr, 1.0, terms)
 
     total = 0.0
     polynomial_terms: dict[int, dict[int, float]] = {}
-    for scale, term in terms:
+
+    def _accumulate_simple_term(scale: float, term: Expression) -> bool:
+        """Fold one already-distributed, non-reciprocal term into the running bound.
+
+        Returns ``False`` (caller abstains entirely) when the term is not one of
+        the recognized separable shapes.
+        """
+        nonlocal total
         if abs(scale) <= 1e-12:
-            continue
+            return True
         const = _constant_value(term)
         if const is not None:
             total += scale * const
-            continue
+            return True
 
         x_exp = _match_x_exp_product(term, model)
         if x_exp is not None:
             scalar, var_idx = x_exp
             term_scale = scale * scalar
             if abs(term_scale) <= 1e-12:
-                continue
+                return True
             if term_scale > 0.0:
                 total += term_scale * (-1.0 / np.e)
-                continue
+                return True
             upper = _x_exp_upper_bound(var_idx, flat_lb, flat_ub)
             if upper is None:
-                return None
+                return False
             total += term_scale * upper
-            continue
+            return True
 
         if _is_cos_call(term):
             integer_lb = _integer_affine_cos_lower_bound(term, scale, model, flat_lb, flat_ub)
             total += integer_lb if integer_lb is not None else -abs(scale)
-            continue
+            return True
 
         monomial = _match_scaled_monomial(term, model)
         if monomial is not None:
@@ -2517,12 +2680,44 @@ def _separable_objective_lower_bound(
             polynomial_terms[var_idx][power] = (
                 polynomial_terms[var_idx].get(power, 0.0) + scale * scalar
             )
-            continue
+            return True
 
         affine_bound = _scaled_affine_lower_bound(term, scale, model, flat_lb, flat_ub)
         if affine_bound is None:
-            return None
+            return False
         total += affine_bound
+        return True
+
+    for scale, term in terms:
+        if abs(scale) <= 1e-12:
+            continue
+
+        # Reciprocal term ``k / D(x)`` with a strictly-positive denominator (e.g.
+        # ex8_1_6's ``-1/(0.1 + (x0-4)**2 + (x1-4)**2)``). The MILP linearizer
+        # cannot relax a non-constant division, so without this the whole
+        # objective is dropped and AMP can never certify. A rigorous interval
+        # enclosure ``D in [D_lo, D_hi]`` with ``D_lo > 0`` yields a valid
+        # constant lower bound for the term: ``k/D_hi`` when ``k > 0`` else
+        # ``k/D_lo`` (``1/D`` is decreasing in ``D``). The bound tightens as B&B
+        # branching shrinks the box, eventually enabling certification. Matched
+        # on the un-distributed term so ``D``'s ``(x-a)**2`` shape survives for a
+        # tight interval enclosure (distribution would expand it to a polynomial
+        # whose naive interval enclosure is uselessly loose on a wide box).
+        recip = _match_scaled_constant_division(term, scale)
+        if recip is not None:
+            recip_bound = _reciprocal_term_lower_bound(recip[0], recip[1], model, flat_lb, flat_ub)
+            if recip_bound is None:
+                return None
+            total += recip_bound
+            continue
+
+        # Distribute this single term and fold each resulting sub-term through the
+        # simple-shape matchers (polynomial path needs the expanded form).
+        sub_terms: list[tuple[float, Expression]] = []
+        _flatten_additive_terms(distribute_products(term), scale, sub_terms)
+        for sub_scale, sub_term in sub_terms:
+            if not _accumulate_simple_term(sub_scale, sub_term):
+                return None
 
     for var_idx, coeffs in polynomial_terms.items():
         lower = _polynomial_lower_bound(coeffs, float(flat_lb[var_idx]), float(flat_ub[var_idx]))
@@ -3506,8 +3701,32 @@ def build_milp_relaxation(
             for var_idx, power in Counter(monomial).items():
                 if power >= 2:
                     affine_square_monomials.add((var_idx, power))
+    # ── Multi-factor univariate products in CONSTRAINTS (st_e40) ────────────
+    # A constraint such as ``(i-1)*(i-2)*...*(i-12) == 0`` (st_e40's degree-7
+    # set-membership polynomials forcing ``i in {1,2,3,5,8,10,12}``) exposes its
+    # monomials ``i**2 .. i**7`` only AFTER distribution. The objective is
+    # already distributed before monomial collection (above), but constraints
+    # were not — so those monomials were never registered, the linearizer raised
+    # ``"Monomial (i, k) not in map"`` and DROPPED THE WHOLE CONSTRAINT from the
+    # relaxation. The result was a uselessly loose dual bound (st_e40: root bound
+    # 4.41 against a true optimum of 30.41, so the spatial B&B never prunes).
+    # Collecting them here registers the aux columns + rigorous monomial power
+    # envelopes so the constraint is KEPT. Sound: re-including a previously
+    # dropped constraint only shrinks the relaxed feasible set toward the true
+    # one, so the bound can only rise toward (never above) the optimum.
+    constraint_lift_monomials: set[tuple[int, int]] = set()
+    for _con in model._constraints:
+        try:
+            constraint_lift_monomials.update(
+                _collect_monomial_terms_for_lift(distribute_products(_con.body), model)
+            )
+        except Exception:  # pragma: no cover - defensive: never break the build
+            continue
     monomial_terms = sorted(
-        set(terms.monomial) | objective_lift_monomials | affine_square_monomials
+        set(terms.monomial)
+        | objective_lift_monomials
+        | affine_square_monomials
+        | constraint_lift_monomials
     )
 
     def _record_generation_guardrail(
@@ -6397,7 +6616,13 @@ def build_milp_relaxation(
     except ValueError as err:
         fallback_lb = None
         if model._objective.sense == ObjectiveSense.MINIMIZE:
-            fallback_lb = _separable_objective_lower_bound(obj_expr, model, flat_lb, flat_ub)
+            # Pass the ORIGINAL (un-distributed) objective: the separable bound
+            # matches reciprocal terms on their native ``k/D(x)`` shape so the
+            # denominator's ``(x-a)**2`` structure survives for a tight interval
+            # enclosure (it distributes the non-reciprocal terms itself).
+            fallback_lb = _separable_objective_lower_bound(
+                model._objective.expression, model, flat_lb, flat_ub
+            )
         if fallback_lb is not None:
             c_obj = np.zeros(n_total)
             const_obj = float(fallback_lb)

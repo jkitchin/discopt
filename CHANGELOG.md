@@ -12,6 +12,48 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **Per-node lifted-LP FBBT** (`feat(relaxation)`, #184). Opt-in
+  (`DISCOPT_LIFTED_FBBT=1`) feasibility-based bound tightening that propagates
+  the McCormick relaxation's *own* rows (`A_ub·z ≤ b_ub`, spanning the lifted
+  product/monomial columns), recovering the bilinear-implied factor bounds that
+  purely linear FBBT misses, then rebuilds the relaxation on the tightened box.
+  This lifts `ex1252`'s structurally-zero node bound off 0 (a branched node goes
+  `bound 0 → ~18987`, sound) so the B&B can certify optimality. Implemented in
+  `discopt._jax.mccormick_lp` (vectorised over the sparse matrix); pinned
+  multilinear factors are un-pinned by a hair so the build keeps the term at
+  full arity and never drops `objective_bound_valid`. Sound by construction —
+  only valid rows tighten, and the un-pin only enlarges the box. Regression
+  locks in `test_bucket2_sound_bounds.py`.
+
+- **Lifted-relaxation LP equilibration** (`feat(relaxation)`, #184). The lifted
+  McCormick rows of a product over a wide variable box mix tiny constants (~1e-9)
+  with large bound-derived coefficients (~1e7), giving a >1e15 coefficient spread
+  on ex1252's boundary sub-boxes. HiGHS stalls on it (a 452×96 LP hits its time
+  limit; the per-node soundness re-verifications then dominate the solve) while
+  the pure-Rust simplex, which equilibrates internally, solves it in ~0.03s.
+  `equilibrate_relaxation_lp` (`discopt._jax.milp_relaxation`) applies
+  geometric-mean (Ruiz) row/column scaling, snapped to powers of two, before the
+  external (HiGHS/POUNCE) backend solve when the spread exceeds 1e6 — turning
+  previously timing-out boundary boxes into ~3-4s converged solves (e.g. the
+  `x36=1,x37=1` box: time-out → 4.5s). The rescaling is exact (bound/feasibility
+  unchanged, integer columns never scaled, solution mapped back through the
+  column scale), so it only ever conditions — never alters — the result.
+  Regression-locked in `test_bucket2_sound_bounds.py`.
+
+- **Objective-gating priority branching** (`feat(bnb)`, #184). Opt-in
+  (`DISCOPT_OBJ_BRANCH_PRIORITY=1`) branching-order heuristic that branches the
+  integer variables gating the objective's nonlinear terms (those appearing in,
+  or equality-linked to, a lifted product/monomial — e.g. ex1252's line-selection
+  binaries `x36/x37/x38`) before other integers. The global dual bound is the
+  minimum over the open frontier, so on problems whose bound is structurally 0
+  until a *set* of binaries is jointly fixed it stays pinned at 0 under
+  most-fractional branching (no single-variable score sees the joint jump);
+  branching the gating binaries first reaches the depth where the per-node
+  relaxation lifts each leaf off 0. Implemented via the existing `set_branch_hints`
+  path in `solve_model` (`discopt.solver`) — pure search reordering over already
+  fractional integer candidates, so it can never affect a bound or feasibility
+  verdict. Detector locked by `test_bucket2_sound_bounds.py`.
+
 - **POUNCE NLP backend declared as a dependency** (`feat(solvers)`). New
   `pounce` optional extra (`pip install discopt[pounce]`, dist `pounce-solver`)
   and a `requires_pounce` test marker. POUNCE is a standalone pure-Rust port of

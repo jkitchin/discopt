@@ -15,6 +15,7 @@ parts:
       - file: notebooks/robust_adjustable
       - file: notebooks/tutorial_multiobjective
       - file: notebooks/complementarity_mpec
+      - file: notebooks/pooling_pq
   - caption: "Tutorials \u2014 Solver Backends"
     chapters:
       - file: notebooks/tutorial_oa
@@ -35,6 +36,7 @@ parts:
       - file: notebooks/advanced_features
       - file: notebooks/solver_internals
       - file: notebooks/presolve
+      - file: notebooks/bound_tightening
       - file: notebooks/sensitivity_analysis
       - file: notebooks/llm_integration
       - file: llm_features

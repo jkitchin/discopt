@@ -283,6 +283,15 @@ impl<'a> TermClassifier<'a> {
                     && self.collect_product_factors_inner(*right, out)
             }
             ExprNode::Constant(_) => true,
+            // Unary negation is just a sign on a scalar factor, never a variable
+            // factor — make it transparent.  A leading negative coefficient such
+            // as ``-c*x*y`` parses as ``((neg(c) * x) * y)``; without this the
+            // whole product term is rejected and silently dropped from
+            // classification (then omitted from the MILP relaxation).
+            ExprNode::UnaryOp {
+                op: UnOp::Neg,
+                operand,
+            } => self.collect_product_factors_inner(*operand, out),
             _ => {
                 if let Some(flat) = self.flat_index(id) {
                     out.push(flat);
@@ -407,6 +416,64 @@ mod tests {
         assert_eq!(terms.term_incidence.get(&0).unwrap().len(), 2);
         assert_eq!(terms.term_incidence.get(&1).unwrap().len(), 1);
         assert_eq!(terms.term_incidence.get(&2).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn negated_constant_product_classifies_as_bilinear() {
+        // A leading negative coefficient ``-c*x0*x1`` parses as
+        // ``((neg(c) * x0) * x1)``.  The ``neg`` over the scalar must be
+        // transparent to the product-factor walker, otherwise the whole term is
+        // rejected and the constraint is dropped from the relaxation (st_e40).
+        let mut arena = ExprArena::new();
+        let x = arena.add(ExprNode::Variable {
+            name: "x".to_string(),
+            index: 0,
+            size: 2,
+            shape: vec![2],
+        });
+        let x0 = arena.add(ExprNode::Index {
+            base: x,
+            index: IndexSpec::Scalar(0),
+        });
+        let x1 = arena.add(ExprNode::Index {
+            base: x,
+            index: IndexSpec::Scalar(1),
+        });
+        let c = arena.add(ExprNode::Constant(0.15));
+        let neg_c = arena.add(ExprNode::UnaryOp {
+            op: UnOp::Neg,
+            operand: c,
+        });
+        let neg_c_x0 = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: neg_c,
+            right: x0,
+        });
+        let objective = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: neg_c_x0,
+            right: x1,
+        });
+
+        let model = ModelRepr {
+            arena,
+            objective,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![],
+            variables: vec![VarInfo {
+                name: "x".to_string(),
+                var_type: VarType::Continuous,
+                offset: 0,
+                size: 2,
+                shape: vec![2],
+                lb: vec![0.0; 2],
+                ub: vec![10.0; 2],
+            }],
+            n_vars: 2,
+        };
+
+        let terms = classify_nonlinear_terms(&model);
+        assert_eq!(terms.bilinear, vec![(0, 1)]);
     }
 
     #[test]
