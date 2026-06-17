@@ -10,6 +10,7 @@ Connects:
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Any, Callable, Optional, cast
 
@@ -3144,6 +3145,17 @@ def solve_model(
             result_sols = np.empty((n_batch, n_vars), dtype=np.float64)
             result_feas = np.empty(n_batch, dtype=bool)
 
+            # Lever 2 (#194): when the LP relaxer supplies each node's dual bound
+            # and the model is nonconvex, the per-node NLP is purely a primal
+            # heuristic — its objective is NOT a valid bound there (the McCormick
+            # LP is). Gate it to a stride so it runs on a fraction of nodes; the
+            # LP relaxer still bounds every node, and the SubNLP heuristic (below)
+            # plus the strided NLP find incumbents. DISCOPT_NODE_NLP_STRIDE=1
+            # restores the per-node NLP. Convex / no-LP-relaxer paths are
+            # unaffected (the NLP bound matters there, so it runs every node).
+            _nlp_stride = int(os.environ.get("DISCOPT_NODE_NLP_STRIDE", "4"))
+            _gate_node_nlp = _mc_lp_relaxer is not None and not _model_is_convex and _nlp_stride > 1
+
             for i in range(n_batch):
                 node_lb = np.array(batch_lb[i])
                 node_ub = np.array(batch_ub[i])
@@ -3169,6 +3181,10 @@ def solve_model(
                     continue
                 opts["max_wall_time"] = max(_node_remaining, _DEADLINE_NODE_FLOOR_S)
 
+                # Strided primal NLP (lever 2): run the per-node NLP only on a
+                # fraction of nodes in the gated regime; every node still gets the
+                # LP relaxer's bound + primal below.
+                _node_nlp_due = (not _gate_node_nlp) or (int(batch_ids[i]) % _nlp_stride == 0)
                 nlp_result = None
                 if iteration == 0 and _mc_lp_relaxer is None:
                     # The root multistart NLP is the only bound source we have.
@@ -3183,7 +3199,7 @@ def solve_model(
                         opts,
                         nlp_solver,
                     )
-                elif iteration > 0:
+                elif iteration > 0 and _node_nlp_due:
                     # Warm-start from parent solution if available
                     psol_i = np.array(batch_psols[i])
                     if not np.any(np.isnan(psol_i)):
