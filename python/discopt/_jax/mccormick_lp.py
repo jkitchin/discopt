@@ -289,6 +289,11 @@ class MccormickLPRelaxer:
         # Edge-concave / edge-convex quadratic blocks: tighten the joint
         # vertex-polyhedral envelope (cuts on the existing bilinear/square auxes).
         res = self._separate_edge_concave(milp, varmap, res, _deadline)
+        # Univariate squares ``s = x**2``: the static envelope cuts only at the box
+        # endpoints, so deep inside a wide box the convex underestimator is slack.
+        # Add the exact supporting tangent at the LP point each round (sound: a
+        # tangent of a convex function is a global underestimator).
+        res = self._separate_univariate_square(milp, varmap, res, _deadline)
 
         # Soundness guard: a floating-point simplex "infeasible" verdict is NOT
         # a proof that the relaxed feasible set is empty. The spatial-B&B driver
@@ -515,6 +520,90 @@ class MccormickLPRelaxer:
                             row[prod_col] += 1.0
                             rows.append(row)
                             rhs.append(float(cut.b))
+                if not rows:
+                    break
+                _append(rows, rhs)
+                _tl = (
+                    None
+                    if deadline is None
+                    else max(deadline - time.perf_counter(), _SOLVE_DEADLINE_FLOOR_S)
+                )
+                new_res = milp.solve(time_limit=_tl, backend=self._backend)
+                if new_res.status != "optimal" or new_res.objective is None:
+                    break
+                res = new_res
+            return res
+        except Exception:
+            return res
+
+    def _separate_univariate_square(self, milp, varmap, res, deadline):
+        """Tighten lifted univariate squares ``s = x**2`` by tangent separation.
+
+        The static relaxation pins ``s`` with tangents only at the box endpoints
+        (and 0), so deep inside a wide box the convex underestimator ``s >= x**2``
+        is slack: on ex9_2_6 each ``s_i - 2 x_i`` is driven down to ~``-|box|``,
+        giving a root LP bound of ~-200 against a true optimum of -1. Each round
+        we add the *exact* supporting tangent at the current LP point ``x0``:
+        ``s >= 2 x0 x - x0**2``. A tangent of a convex function is a global
+        underestimator and every original point has ``s = x**2 >= 2 x0 x - x0**2``,
+        so no feasible point is ever cut -- the bound stays sound at any round.
+        On any failure the input ``res`` is returned unchanged.
+        """
+        import os
+
+        if os.environ.get("DISCOPT_SQUARE_SEPARATE", "1") == "0":
+            return res
+        if res is None or res.status != "optimal" or res.x is None:
+            return res
+        try:
+            import scipy.sparse as sp
+
+            monomial = varmap.get("monomial") or {}
+            # (base_col, aux_col) for every lifted univariate square ``x**2``.
+            specs: list[tuple[int, int]] = []
+            for key, aux in monomial.items():
+                base, power = key
+                if int(power) == 2:
+                    specs.append((int(base), int(aux)))
+            if not specs:
+                return res
+            n_total = len(milp._c)
+
+            def _append(rows: list[np.ndarray], rhs: list[float]) -> None:
+                R = np.asarray(rows, dtype=np.float64)
+                b = np.asarray(rhs, dtype=np.float64)
+                if milp._A_ub is None:
+                    milp._A_ub, milp._b_ub = R, b
+                elif sp.issparse(milp._A_ub):
+                    milp._A_ub = sp.vstack([milp._A_ub, sp.csr_matrix(R)], format="csr")
+                    milp._b_ub = np.concatenate([milp._b_ub, b])
+                else:
+                    milp._A_ub = np.vstack([np.asarray(milp._A_ub), R])
+                    milp._b_ub = np.concatenate([milp._b_ub, b])
+
+            tol = 1e-7
+            for _round in range(8):
+                # Each round costs a full re-solve; stop once the budget is spent.
+                if deadline is not None and time.perf_counter() >= deadline:
+                    break
+                x = np.asarray(res.x, dtype=np.float64)
+                rows: list[np.ndarray] = []
+                rhs: list[float] = []
+                for base, aux in specs:
+                    if base >= x.size or aux >= x.size:
+                        continue
+                    x0 = float(x[base])
+                    s = float(x[aux])
+                    if not (np.isfinite(x0) and np.isfinite(s)):
+                        continue
+                    # Separate only where the convex underestimator is slack:
+                    # the LP put ``s`` below the true parabola at ``x0``.
+                    if x0 * x0 - s > tol * max(1.0, abs(x0 * x0)):
+                        row = np.zeros(n_total)
+                        row[base] += 2.0 * x0
+                        row[aux] += -1.0
+                        rows.append(row)
+                        rhs.append(x0 * x0)
                 if not rows:
                     break
                 _append(rows, rhs)
