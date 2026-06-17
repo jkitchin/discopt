@@ -158,6 +158,170 @@ class TestNLWriterMINLP:
         assert "1 0 0 0 0" in lines[6]  # 1 binary
 
 
+class TestNLWriterDiscreteInNonlinear:
+    """Discrete variables that appear in nonlinear expressions (issue #210).
+
+    AMPL requires nonlinear variables to occupy the lowest indices and declares
+    the discrete ones among them via the header's ``nbv niv nlvbi nlvci nlvoi``
+    line (linear-binary, linear-integer, then integer/binary nonlinear in
+    both / cons-only / objs-only). The previous writer wrote *every* discrete
+    var as linear-discrete (``nbv``/``niv``) with ``nlvbi=nlvci=nlvoi=0``, so an
+    AMPL-compatible solver read a discrete-in-nonlinear var as continuous and
+    silently solved a relaxation.
+    """
+
+    @staticmethod
+    def _disc_line(nl: str) -> str:
+        return nl.split("\n")[6].split("#")[0].strip()
+
+    @staticmethod
+    def _nlvar_line(nl: str) -> str:
+        return nl.split("\n")[4].split("#")[0].strip()
+
+    def test_integer_in_nonlinear_objective(self):
+        """An integer var inside the objective's nonlinear part -> nlvoi."""
+        m = dm.Model("int_in_nl_obj")
+        n = m.integer("n", lb=1, ub=5)
+        m.minimize(n**2)
+        nl = m.to_nl()
+        # 1 nonlinear var in objectives (total), 0 in cons, 0 in both
+        assert self._nlvar_line(nl) == "0 1 0"
+        # nbv niv nlvbi nlvci nlvoi -> the integer is nonlinear-in-obj-only
+        assert self._disc_line(nl) == "0 0 0 0 1"
+
+    def test_binary_in_nonlinear_objective(self):
+        """A binary var in a nonlinear objective counts as nonlinear-integer."""
+        m = dm.Model("bin_in_nl_obj")
+        x = m.continuous("x", lb=0, ub=5)
+        y = m.binary("y")
+        # y appears nonlinearly (product with x) -> nonlinear discrete in obj
+        m.minimize(x * y + dm.exp(x))
+        nl = m.to_nl()
+        # x and y both nonlinear in obj only
+        assert self._nlvar_line(nl) == "0 2 0"
+        # one of the two nonlinear-obj vars is discrete (binary y) -> nlvoi=1
+        assert self._disc_line(nl) == "0 0 0 0 1"
+
+    def test_integer_in_nonlinear_constraint(self):
+        """An integer var nonlinear in a constraint only -> nlvci."""
+        m = dm.Model("int_in_nl_con")
+        x = m.continuous("x", lb=0, ub=10)
+        n = m.integer("n", lb=0, ub=5)
+        m.minimize(x + n)  # n linear in obj
+        m.subject_to(n**2 + x <= 20)  # n nonlinear in constraint
+        nl = m.to_nl()
+        assert self._nlvar_line(nl) == "1 0 0"  # 1 nl var in cons (n)
+        assert self._disc_line(nl) == "0 0 0 1 0"  # nlvci = 1
+
+    def test_integer_nonlinear_in_both(self):
+        """An integer var nonlinear in both obj and a constraint -> nlvbi."""
+        m = dm.Model("int_in_both")
+        n = m.integer("n", lb=1, ub=5)
+        m.minimize(n**2)
+        m.subject_to(n**2 <= 16)
+        nl = m.to_nl()
+        # n is nonlinear in both -> nlvc=1, nlvo=1, nlvb=1
+        assert self._nlvar_line(nl) == "1 1 1"
+        assert self._disc_line(nl) == "0 0 1 0 0"  # nlvbi = 1
+
+    def test_mixed_linear_and_nonlinear_discrete(self):
+        """Discrete vars split correctly between linear (nbv/niv) and nonlinear."""
+        m = dm.Model("mixed")
+        x = m.continuous("x", lb=0, ub=5)
+        y = m.binary("y")  # linear in obj
+        n = m.integer("n", lb=0, ub=4)  # nonlinear in obj
+        m.minimize(n**2 + 3 * y + x)
+        m.subject_to(x <= 10 * y)
+        nl = m.to_nl()
+        # nbv=1 (linear binary y), niv=0, nlvoi=1 (integer n nonlinear in obj)
+        assert self._disc_line(nl) == "1 0 0 0 1"
+
+    def test_nonlinear_var_gets_lowest_index(self):
+        """Variables nonlinear in the objective must occupy the lowest indices."""
+        m = dm.Model("ordering")
+        a = m.binary("a")  # linear
+        n = m.integer("n", lb=0, ub=4)  # nonlinear in obj
+        x = m.continuous("x", lb=0, ub=5)  # nonlinear in obj
+        m.minimize(n**2 + dm.exp(x) + 2 * a)
+        nl = m.to_nl()
+        # The objective's nonlinear section must reference v0 and v1 (the two
+        # nonlinear vars x, n), never v2 (the linear binary a).
+        o_start = nl.index("O0")
+        # objective body runs until the next top-level section (r or b)
+        end = min(i for i in (nl.find("\nr\n", o_start), nl.find("\nb\n", o_start)) if i != -1)
+        o_section = nl[o_start:end]
+        assert "v2" not in o_section  # the linear binary is not in the nl body
+        assert "v0" in o_section and "v1" in o_section
+
+    def test_rust_parser_reads_discrete_in_nonlinear(self, tmp_path):
+        """Round-trip: the Rust parser must read the nonlinear-discrete var as integer."""
+        try:
+            from discopt._rust import parse_nl_file
+        except ImportError:
+            pytest.skip("Rust .nl parser not available")
+        m = dm.Model("rt_disc_nl")
+        x = m.continuous("x", lb=0, ub=5)
+        n = m.integer("n", lb=0, ub=4)
+        m.minimize(n**2 + dm.exp(x))
+        nl_path = tmp_path / "disc_nl.nl"
+        m.to_nl(str(nl_path))
+        rep = parse_nl_file(str(nl_path))
+        # exactly one integer var survives the round-trip
+        vtypes = list(rep.var_types())
+        assert vtypes.count("integer") == 1
+        assert vtypes.count("continuous") == 1
+
+    def test_minlplib_integer_nonlinear_roundtrip_header(self):
+        """to_nl(from_nl(f)) reproduces the original discrete-count header line.
+
+        nvs15's objective is nonlinear in 3 integer variables; the original
+        MINLPLib header declares them as ``0 0 0 0 3`` (nlvoi=3). The export
+        must reproduce that, not bury them in ``niv`` (the #210 regression).
+        """
+        import os
+
+        data = os.path.join(os.path.dirname(__file__), "data", "minlplib", "nvs15.nl")
+        if not os.path.exists(data):
+            pytest.skip("nvs15.nl fixture not available")
+        orig = open(data).read().splitlines()
+        m = dm.from_nl(data)
+        out = m.to_nl().splitlines()
+
+        def discrete(lines):
+            toks = lines[6].split("#")[0].split()
+            return [int(t) for t in toks] + [0] * (5 - len(toks))
+
+        def nlvars(lines):
+            toks = lines[4].split("#")[0].split()
+            return [int(t) for t in toks] + [0] * (3 - len(toks))
+
+        assert discrete(out) == discrete(orig)  # 0 0 0 0 3
+        assert nlvars(out) == nlvars(orig)  # 0 3 0
+
+
+class TestNLWriterMILPRegression:
+    """MILP/LP export must be byte-for-byte unaffected by the #210 reorder.
+
+    When every discrete variable is linear, the canonical reorder must leave
+    the variable order and header exactly as before: discrete vars stay in
+    ``nbv``/``niv`` with ``nlvbi=nlvci=nlvoi=0``.
+    """
+
+    def test_pure_milp_discrete_line_unchanged(self):
+        m = dm.Model("milp")
+        x = m.continuous("x", lb=0, ub=10)
+        y = m.binary("y")
+        z = m.integer("z", lb=0, ub=5)
+        m.minimize(2 * x + 3 * y + z)
+        m.subject_to(x + y + z <= 12)
+        nl = m.to_nl()
+        line6 = nl.split("\n")[6].split("#")[0].strip()
+        # 1 linear binary, 1 linear integer, no nonlinear discrete
+        assert line6 == "1 1 0 0 0"
+        # no nonlinear vars at all
+        assert nl.split("\n")[4].split("#")[0].strip() == "0 0 0"
+
+
 class TestNLWriterArrayVars:
     """Test .nl export for models with array variables."""
 
