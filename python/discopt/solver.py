@@ -1488,6 +1488,56 @@ def _model_contains_custom_call(model: Model) -> bool:
     return False
 
 
+def _model_contains_nonsmooth_node(model: Model) -> bool:
+    """True if any objective/constraint body contains a non-smooth node.
+
+    ``abs``/``min``/``max`` are convex (or concave) but non-differentiable at
+    their kink. A smooth gradient-based NLP can oscillate there and fail to
+    certify (e.g. ``min |x|`` over an interval straddling 0 returns the wrong
+    point with ``iteration_limit``). The solver uses this to route such models
+    to the spatial McCormick B&B, whose exact piecewise relaxation certifies
+    them. ``abs`` is either ``UnaryOp("abs")`` or ``FunctionCall("abs")``;
+    ``min``/``max`` are ``FunctionCall("min"|"max")``.
+    """
+    from discopt.modeling.core import FunctionCall, UnaryOp
+
+    _nonsmooth_funcs = {"abs", "min", "max"}
+
+    def _walk(expr) -> bool:
+        if isinstance(expr, UnaryOp) and expr.op == "abs":
+            return True
+        if isinstance(expr, FunctionCall) and expr.func_name in _nonsmooth_funcs:
+            return True
+        left = getattr(expr, "left", None)
+        if left is not None and _walk(left):
+            return True
+        right = getattr(expr, "right", None)
+        if right is not None and _walk(right):
+            return True
+        operand = getattr(expr, "operand", None)
+        if operand is not None and _walk(operand):
+            return True
+        base = getattr(expr, "base", None)
+        if base is not None and _walk(base):
+            return True
+        for a in getattr(expr, "args", ()) or ():
+            if _walk(a):
+                return True
+        for t in getattr(expr, "terms", ()) or ():
+            if _walk(t):
+                return True
+        return False
+
+    obj = getattr(model, "_objective", None)
+    if obj is not None and getattr(obj, "expression", None) is not None and _walk(obj.expression):
+        return True
+    for c in model._constraints:
+        body = getattr(c, "body", None)
+        if body is not None and _walk(body):
+            return True
+    return False
+
+
 def _classify_model_convexity(
     model: Model,
     *,
@@ -2524,17 +2574,33 @@ def solve_model(
         result.convex_fast_path = True
         if result.status == "optimal":
             return result
-        # The convex NLP did not certify (e.g. an ill-conditioned division whose
-        # denominator reaches toward zero, like st_e17's 0.2458*x0**2/x1 with
-        # x1 down to 1e-5). If the model has a sign-definite non-constant
-        # denominator — which the relaxation otherwise drops to general_nl —
-        # clear it (exact, value-preserving) and fall back to the sound spatial
-        # B&B, which can certify it. Only clearing is applied (no
-        # convexity-destroying mixed-product lift). When nothing is clearable,
-        # return the NLP result unchanged (no regression).
+        # The convex NLP may fail to certify for two reasons handled here.
         from discopt._jax.factorable_reform import has_clearable_denominator
 
-        if has_clearable_denominator(model):
+        if _model_contains_nonsmooth_node(model):
+            # (1) Non-smooth objective/constraints (abs/min/max): a smooth
+            # gradient-based solver oscillates at the kink (e.g. min |x| over
+            # [-1, 1] returns ~0.99 with iteration_limit). The spatial McCormick
+            # B&B has an *exact* piecewise relaxation for these nodes and
+            # certifies them, so fall back to it rather than returning the
+            # unconverged point.
+            logger.info(
+                "Convex NLP did not certify (status=%s) on a non-smooth model; "
+                "retrying via spatial B&B (exact piecewise relaxation)",
+                result.status,
+            )
+            _pure_continuous_is_convex = False
+            _root_is_convex = False
+            _pure_continuous_force_spatial = True
+            # Fall through to the spatial B&B below.
+        elif has_clearable_denominator(model):
+            # (2) An ill-conditioned division whose denominator reaches toward
+            # zero (like st_e17's 0.2458*x0**2/x1 with x1 down to 1e-5). If the
+            # model has a sign-definite non-constant denominator — which the
+            # relaxation otherwise drops to general_nl — clear it (exact,
+            # value-preserving) and fall back to the sound spatial B&B, which can
+            # certify it. Only clearing is applied (no convexity-destroying
+            # mixed-product lift).
             cleared = factorable_reformulate(model, clear_only=True)
             if cleared is not model:
                 logger.info(
@@ -2556,6 +2622,8 @@ def solve_model(
             else:
                 return result
         else:
+            # Nothing clearable and the model is smooth: return the NLP result
+            # unchanged (no regression).
             return result
 
     # --- Pure continuous: solve directly only when spatial search was not requested ---

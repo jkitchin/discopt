@@ -68,9 +68,7 @@ _OPERATORS = [
     ("log1p", dm.log1p, np.log1p, -0.5, 3.0),
     ("sigmoid", dm.sigmoid, lambda x: 1.0 / (1.0 + np.exp(-x)), -3.0, 3.0),
     ("softplus", dm.softplus, lambda x: np.log1p(np.exp(x)), -3.0, 3.0),
-    # abs over a strictly sign-definite box certifies; the zero-crossing case is a
-    # separate convergence gap, pinned by test_abs_zero_crossing_gap below.
-    ("abs", dm.abs, np.abs, 0.5, 2.0),
+    ("abs", dm.abs, np.abs, -2.0, 2.0),
     ("pow2", _pow2, lambda x: x**2, -2.0, 2.0),
     ("pow3", _pow3, lambda x: x**3, -2.0, 2.0),
     ("pow_half", _pow_half, lambda x: x**0.5, 0.1, 4.0),
@@ -126,19 +124,16 @@ def test_bilinear_lifted_moment_bound():
 
 
 @pytest.mark.relaxation
-@pytest.mark.xfail(
-    reason="abs over a zero-crossing box does not yet certify optimality "
-    "(separate convergence gap; the relaxation is exact but B&B iteration-limits)",
-    strict=False,
-)
-def test_abs_zero_crossing_gap():
-    """Documents a known gap: minimize |x| over an interval straddling 0.
+@pytest.mark.parametrize("lb,ub", [(-1.0, 1.0), (-2.0, 2.0), (-2.0, 3.0)])
+def test_abs_zero_crossing_certifies(lb, ub):
+    """Regression guard: minimize |x| over an interval straddling 0 certifies 0.
 
-    The convex-envelope relaxation is exact, yet the spatial loop currently
-    iteration-limits instead of certifying the optimum of 0.  Recorded as xfail so
-    CI flags it the day the convergence gap is closed.
+    A smooth gradient-based NLP oscillates at the kink (it used to return ~0.99
+    with ``iteration_limit``); non-smooth models now fall back to the spatial
+    McCormick B&B, whose exact piecewise ``abs`` relaxation certifies the
+    optimum of 0.
     """
-    res = _solve(dm.abs, -1.0, 1.0, "min")
+    res = _solve(dm.abs, lb, ub, "min")
     assert res.status == "optimal"
     assert abs(float(res.objective)) < _TOL
 
