@@ -14,6 +14,7 @@ parts:
       - file: notebooks/tutorial_robust
       - file: notebooks/robust_adjustable
       - file: notebooks/tutorial_multiobjective
+      - file: notebooks/complementarity_mpec
   - caption: "Tutorials \u2014 Solver Backends"
     chapters:
       - file: notebooks/tutorial_oa
