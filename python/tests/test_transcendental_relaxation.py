@@ -19,6 +19,13 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 import discopt.modeling as dm
 import pytest
 from discopt._jax.mccormick_lp import MccormickLPRelaxer
+from discopt._jax.model_utils import flat_variable_bounds
+
+
+def _root_bound(model):
+    rx = MccormickLPRelaxer(model)
+    lb, ub = flat_variable_bounds(model)
+    return rx.solve_at_node(lb, ub).lower_bound
 
 
 def test_relaxer_engages_on_general_transcendental():
@@ -58,3 +65,62 @@ def test_exp_objective_minimization_bound_is_valid():
     assert abs(float(res.objective) - 0.13533528) < 1e-4
     if res.bound is not None:
         assert float(res.bound) <= float(res.objective) + 1e-4  # valid lower bound
+
+
+# ── FBBT rescue of transcendental envelopes over declared-unbounded args (#219) ──
+#
+# When a univariate operator's argument has a non-finite declared box but is
+# finitely bounded via implied constraints (FBBT), the relaxer used to *drop* the
+# constraint instead of building an envelope. ``_collect_univariate_relaxations``
+# now retries over an FBBT-tightened box before giving up.
+
+
+def _log_unbounded_but_fbbt_bounded():
+    # log of an affine arg whose variable is declared ub=+inf, but a row bounds it
+    # finitely. Before the fix the log row was dropped (root bound trivial / loose);
+    # after, FBBT derives x<=5 and the envelope activates.
+    m = dm.Model("log_rescue")
+    x = m.continuous("x", lb=0.0)  # ub = +inf
+    y = m.continuous("y", lb=-10.0, ub=10.0)
+    m.maximize(y)
+    m.subject_to(y <= dm.log(1 + x))
+    m.subject_to(x <= 5.0)
+    return m
+
+
+def test_fbbt_rescues_dropped_log_envelope_and_bound_is_sound():
+    m = _log_unbounded_but_fbbt_bounded()
+    bound = _root_bound(m)
+    # The relaxer builds a *finite* root bound (constraint not dropped).
+    assert bound is not None
+    # Sound: for the maximize lifted to minimize(-y), the bound never over-states
+    # the true optimum max y = log(6) = 1.7918, i.e. lower_bound <= -1.7918.
+    assert float(bound) <= -1.7918 + 1e-6
+
+
+def test_genuinely_unbounded_arg_is_not_falsely_bounded():
+    # No row bounds x, so FBBT cannot derive a finite argument box; the rescue
+    # must *not* fire and must not invent a bound (soundness over coverage).
+    m = dm.Model("log_truly_unbounded")
+    x = m.continuous("x", lb=0.0)  # ub = +inf, nothing implies a finite bound
+    y = m.continuous("y", lb=-10.0, ub=10.0)
+    m.maximize(y)
+    m.subject_to(y <= dm.log(1 + x))
+    bound = _root_bound(m)
+    # The log row stays dropped; y is bounded only by its box, so the relaxation
+    # cannot certify a finite log-implied bound (no false tightening).
+    assert bound is None or float(bound) <= -1.0 + 1e-9
+
+
+@pytest.mark.slow
+def test_gkocis_certifies_after_fbbt_rescue():
+    import glob
+
+    fns = glob.glob("python/tests/data/**/gkocis.nl", recursive=True)
+    if not fns:
+        pytest.skip("gkocis.nl not available")
+    m = dm.from_nl(fns[0])
+    res = m.solve(time_limit=60, gap_tolerance=1e-4)
+    # Correct optimum (MINLPLib -1.923) AND now provably certified.
+    assert abs(float(res.objective) - (-1.923)) < 1e-2
+    assert res.gap_certified is True

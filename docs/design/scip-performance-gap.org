@@ -1,0 +1,204 @@
+#+TITLE: Closing the discopt-vs-SCIP speed gap: root NLP fixed-cost scaling
+#+AUTHOR: John Kitchin
+#+DATE: 2026-06-17
+
+* Motivation
+
+A 23-instance head-to-head (discopt vs SCIP / Couenne / HiGHS) over vendored
+MINLPLib instances showed discopt correct (0 incorrect, 21/23 solved+proved) but
+~6.5x slower than SCIP at the shifted geometric mean. This document records why,
+and the first fix.
+
+* Diagnosis: the gap is per-solve fixed overhead, not B&B search
+
+On the small/fast instances that dominate the comparison set, discopt pays a
+large *fixed* cost before the tree search even helps. The smoking gun is node
+count vs wall time:
+
+| instance | discopt time | B&B nodes | reading                         |
+|----------+--------------+-----------+---------------------------------|
+| nvs06    | ~1.08 s      |         1 | a single root solve costs ~1 s  |
+| st_e13   | 0.45->0.17 s |         - | ~0.28 s is pure JAX warmup      |
+| alan     | 2.18 s       |        21 | ~0.05 s/node *after* fixed cost |
+| fac2     | 2.06 s       |       101 | the tree itself is cheap        |
+
+SCIP closes these in 0.03-0.3 s. discopt pays ~0.5-1.0 s of root/startup cost, so
+on these instances that fixed cost *is* the gap.
+
+** Where the fixed cost goes (cProfile, nvs06 warmed 0.52 s root solve)
+
+- =solve_nlp= -- 35 calls, 0.359 s (pounce NLP solves). For a 1-node problem.
+  - =_solve_root_node_multistart= -- 0.160 s (3 deterministic anchors + 2 random
+    starts = 5 NLP solves at the root).
+  - =integer_local_search= (primal heuristic) -- 0.195 s (~1 seed solve + up to
+    =max_restarts=24= per-restart =subnlp= NLP solves; on a 2-integer lattice
+    those restarts re-descend to the same handful of points).
+- JAX compilation -- ~0.100 s, with recompiles firing even when warmed.
+
+Both NLP-heavy heuristics are sized by *constants tuned for large problems* and
+paid in full on trivial ones.
+
+* The soundness invariant that makes scaling safe
+
+These are *incumbent-only* heuristics; neither supplies a dual bound:
+
+- Nonconvex (=solver.py= ~L3618-3638): an NLP local min is *not* a valid lower
+  bound, so the multistart NLP value is injected only as an incumbent candidate
+  (=inject_incumbent=); the tree's lower bound comes from the convex relaxation
+  (McCormick / interval / alphaBB). A weaker incumbent only means B&B closes the
+  gap itself -- it can never invalidate the bound or the certification.
+- Convex: =_solve_root_node_multistart= already short-circuits after the first
+  feasible OPTIMAL start.
+- =integer_local_search= is "sound by construction": only =subnlp=-verified
+  feasible points are returned and injected, accepted only if they strictly beat
+  the incumbent.
+
+So reducing the *amount* of search in either can only change incumbent quality,
+never correctness. Effort should therefore scale with the search-space
+dimension, not sit at a fixed constant.
+
+* The fix: scale root NLP effort to problem dimension
+
+General rule -- a search over a d-dimensional space needs effort growing with d;
+a fixed constant tuned for large d is pure overhead at small d. Effort is only
+ever *reduced below* the existing cap, never raised past it, so large models are
+unchanged.
+
+** Root multi-start random starts (=solver.py=)
+
+New =_adaptive_root_random_starts(n_vars)=: the 3 deterministic anchors cover a
+low-dimensional box; extra *random* starts only buy basin diversity as the
+landscape grows.
+
+| n_vars | random starts | total root starts |
+|--------+---------------+-------------------|
+| <= 5   |             0 |                 3 |
+| <= 12  |             1 |                 4 |
+| > 12   |             2 |                 5 |
+
+=_generate_starting_points(..., n_random=None)= and
+=_solve_root_node_multistart(..., n_random=None)= select this automatically; an
+explicit =n_random= still overrides.
+
+** Integer local search budget (=primal_heuristics.py=)
+
+Scale =max_restarts= and =max_steps= to the integer count =n_int=:
+
+: eff_restarts = min(max_restarts, max(3, 3 * n_int))
+: eff_steps    = min(max_steps,    max(8, 4 * n_int))
+
+A descent step moves each integer by at most +-1, so a local minimum is reached
+within O(range) steps; restarts grow ~linearly with the dimension perturbations
+explore. For large =n_int= (>= 8) =eff_restarts= stays at the full 24 -- no
+change for the integer-heavy problems that need it.
+
+* Results
+
+Noise-free NLP-solve counts (objective and =gap_certified= identical in every
+row, before and after):
+
+| instance | NLP solves before | after | change |
+|----------+-------------------+-------+--------|
+| nvs06    |                35 |    16 |  -54%  |
+| ex1221   |                44 |    29 |  -34%  |
+| st_e13   |                33 |    12 |  -64%  |
+| nvs03    |                11 |    11 |    0   |
+| nvs10    |                 7 |     7 |    0   |
+| gbd      |                 0 |     0 |    0   |
+| st_miqp1 |                 0 |     0 |    0   |
+
+Wall-clock (warmed) on nvs06: ~0.52 s -> ~0.35 s.
+
+Correctness checks (all identical to baseline, i.e. no regression):
+- 10 small instances (nvs01/03/06/09/10, alan, gbd, ex1221, st_e13, st_miqp1):
+  same optimum, all =gap_certified=True=.
+- Integer-heavy hard cases nvs15/20/21/23: byte-identical incumbents and
+  certification vs baseline (for large =n_int= the full restart budget is kept).
+- =test_primal_heuristics.py=, =test_improvement_heuristics.py=,
+  =test_no_incumbent_certification.py=: 18 passed.
+
+* Fixed-cost lever 2: JAX persistent compilation cache
+
+Each solve compiles a handful of small XLA kernels (relaxation evaluators, NLP
+residual/Jacobian, McCormick envelopes). Each is only ~15 ms, but they are
+re-traced from scratch in every fresh process, so a short solve pays a fixed
+compile tax on every run -- ~0.1-0.28 s of warmup per instance.
+
+JAX ships an on-disk persistent compilation cache that keys compiled artifacts
+by HLO + backend + XLA version and reuses them across processes. Enabling it is
+*correctness-neutral*: the key is the exact computation, so a cache hit returns
+the identical kernel that fresh compilation would have produced -- it can never
+change a numerical result.
+
+Enabled in =python/discopt/__init__.py= by setting environment variables (no jax
+import, to keep =import discopt= lightweight) right after =JAX_ENABLE_X64=:
+- Default cache dir =$XDG_CACHE_HOME/discopt/jax-cache= (=~/.cache/...=).
+- Respects a user-provided =JAX_COMPILATION_CACHE_DIR= (never overridden).
+- Opt-out via =DISCOPT_DISABLE_JAX_CACHE=1=.
+- =JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS=0= and =..._MIN_ENTRY_SIZE_BYTES=0=
+  -- JAX's defaults (1.0 s / nonzero) would skip discopt's ~15 ms kernels, so
+  the small-but-frequent compiles would never be cached.
+
+Measured (fresh process each, throwaway cache dir): cold run populates 60
+artifacts at 1.62 s; subsequent fresh processes reuse them at 0.84 s -- ~48%
+wall reduction on a cold solve, with identical objective and =gap_certified=.
+
+* Relaxation-coverage fix: rescue dropped transcendental envelopes via FBBT (issue #219)
+
+*Symptom.* =gkocis= (Kocis-Grossmann process synthesis) found the correct optimum
+(-1.923, matches MINLPLib) but could never *certify* it -- it ran the full time
+limit with =gap_certified=False=.
+
+*Root cause.* The AMP relaxer drops a transcendental constraint when the function
+*argument's box* is not finitely bounded. gkocis has two concave logs of an
+affine argument, =x5 <= log(1 + x0)=, =x6 <= 1.2*log(1 + x1)=, with =x0=, =x1=
+declared =lb=0, ub=+inf=. A concave =log= over =[0, +inf)= has no finite secant
+under-estimator, so =_univariate_domain_ok= fails on the non-finite argument box,
+the envelope is never built, and =_collect_univariate_relaxations= skips it -- the
+linearizer then reports =Cannot linearize FunctionCall: log((1 + x0))= and *omits
+both log rows from the LP relaxation*. Root LP bound is then -9.11 (sound but far
+below -1.923); with the rows absent, spatial branching on x0/x1 has nothing to
+tighten and the gap never closes.
+
+(The earlier "only relaxes a *bare variable*" hypothesis was *disproved*: a
+minimal repro shows =log(1 + x)= over a *bounded* =x in [0,5]= relaxes tightly
+(-1.792 = -log 6); the trigger is the *unbounded argument box*, not the affine
+wrapper.)
+
+*Fix* (=_collect_univariate_relaxations= in =_jax/milp_relaxation.py=). When a
+univariate operator's argument is out of domain under the raw node box, *retry
+over an FBBT-tightened box* before dropping the constraint, instead of giving up.
+The tightened box is computed lazily (once per build, only when a rescue is
+actually needed -- zero overhead for all-bounded models) via =fbbt_box(model)=
+and intersected with the node box. Soundness: =fbbt_box= uses constraint
+feasibility only (no objective cutoff), so its box is a valid outer bound on the
+*global* feasible set; every feasible point at any B&B node lies within it, hence
+an envelope built over it is valid for the whole relaxation. The rescue only ever
+*activates* a constraint that would otherwise be dropped -- it never alters an
+already-buildable envelope, so all-bounded models are byte-identical.
+
+For gkocis, FBBT derives the finite argument bounds from the big-M rows
+(=x0 <= 5*x9=, =x1 <= 5*x10=, binaries) plus the log constraints themselves, the
+log envelopes activate, and the root LP bound improves -9.11 -> -6.46. End to end
+gkocis now solves to -1.923 with =gap_certified=True= in ~0.6 s (was: full time
+limit, uncertified).
+
+*Verification.* 564 relaxation/soundness tests pass with no regressions, including
+=test_himmel16_no_false_certification= (guards against false certification on
+genuinely-unbounded relaxations -- the rescue correctly does *not* fire when no
+finite argument bound is derivable). Correctness sweep
+(gkocis/nvs06/st_e13/nvs03/ex1223a): all correct optima, all =gap_certified=True=.
+
+Follow-up (not done): the rescue gives a single secant; piecewise / per-node
+re-derivation of transcendental envelopes plus spatial branching on the log
+arguments would tighten the bound further (gkocis already certifies, so this is
+only relevant for harder transcendental instances).
+
+* Not yet done (follow-ups)
+
+- *Trace-shape stabilization* -- even warmed, some kernels recompile within a run
+  due to unstable trace shapes. The persistent cache amortizes cross-process
+  cost but not in-run churn; stabilizing shapes is a further (orthogonal) lever.
+- =test_ex1252_rlt_stays_sound= takes > 300 s (RLT-enabled simplex on ex1252);
+  pre-existing, independent of this change (it calls =MccormickLPRelaxer= /
+  =milp_simplex= directly, never the B&B primal heuristics).
