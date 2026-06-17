@@ -194,7 +194,7 @@ def solve_mpec(
     result = None
     tv = t0
     for _ in range(max_iter):
-        t.value = tv
+        t.value = np.asarray(tv, dtype=np.float64)
         # Rebuild the evaluator so the updated parameter value is compiled in.
         evaluator = NLPEvaluator(model)
         try:
@@ -220,4 +220,4 @@ def _flat_bounds(model: Model) -> tuple[np.ndarray, np.ndarray]:
 def _midpoint(lb: np.ndarray, ub: np.ndarray) -> np.ndarray:
     lo = np.clip(lb, -1e6, 1e6)
     hi = np.clip(ub, -1e6, 1e6)
-    return 0.5 * (lo + hi)
+    return np.asarray(0.5 * (lo + hi), dtype=np.float64)

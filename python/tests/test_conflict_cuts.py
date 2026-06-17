@@ -14,7 +14,6 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import discopt.modeling.core as dm
 import pytest
-
 from discopt.conflict import add_conflict_cuts, find_conflict_cuts, no_good_cut
 
 
