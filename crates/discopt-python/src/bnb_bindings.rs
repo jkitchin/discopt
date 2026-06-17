@@ -271,6 +271,20 @@ impl PyTreeManager {
         self.inner.set_nonconvex(nonconvex);
     }
 
+    /// Register integer columns (in nonlinear terms) eligible for spatial
+    /// domain-partition branching when no continuous variable remains to bisect
+    /// (issue #194).
+    fn set_spatial_integer_cols(&mut self, cols: PyReadonlyArray1<i64>) -> PyResult<()> {
+        let idx: Vec<usize> = cols
+            .as_slice()
+            .unwrap()
+            .iter()
+            .map(|&c| c as usize)
+            .collect();
+        self.inner.set_spatial_integer_cols(&idx);
+        Ok(())
+    }
+
     /// Score branching candidates for a solution vector.
     ///
     /// Returns (var_indices, frac_parts, obs_counts, scores) as four arrays.

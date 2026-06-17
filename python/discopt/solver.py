@@ -2601,51 +2601,56 @@ def solve_model(
     if _mc_mode == "lp" and model._objective is not None:
         from discopt._jax.mccormick_lp import MccormickLPRelaxer
 
-        # A continuous variable is only useful to the spatial path if it has a
-        # finite box to bisect. A model whose only continuous variables are
-        # *unbounded* slacks (ub=+inf) — e.g. gear4's ``x4, x5`` absorbing the
-        # ratio residual — has nothing to spatial-branch on, exactly like the
-        # integer-only case: the LP relaxer's integer-feasible root point need
-        # not satisfy the original nonlinear constraint, the tree dead-ends after
-        # the root, and a no-incumbent exhaustion would be *falsely* certified
-        # infeasible (the worst failure class, issue #185). Gate on the original
-        # finite-box continuous flag (computed pre-reform so dependent aux vars
-        # never mask the integer-only case), else fall back to NLP/alphaBB.
-        _has_continuous_var = _origin_has_finite_continuous_var
-        if not _has_continuous_var:
-            # Spatial-BB on integer-only (or unbounded-slack-only) models has
-            # nothing to branch on: the LP relaxer's integer-feasible point
-            # doesn't satisfy the original bilinear constraints, and with no
-            # finite continuous var to bisect, the tree dead-ends after the
-            # root. Fall back to NLP.
-            logger.info(
-                "McCormick LP requested but model has no finite-box continuous "
-                "variables; falling back to NLP relaxation."
+        # The spatial path needs at least one variable it can branch on: a
+        # finite-box continuous variable to bisect, or (issue #194) an integer
+        # variable in a nonlinear term whose domain can be partitioned to close a
+        # McCormick gap. A model with neither — e.g. integer-only or
+        # unbounded-slack-only where the integers occur only linearly — would
+        # dead-end after the root and a no-incumbent exhaustion would be *falsely*
+        # certified (the worst failure class, issue #185), so it falls back to the
+        # NLP/alphaBB path below.
+        try:
+            _mc_lp_relaxer = MccormickLPRelaxer(
+                model,
+                superposition=(relaxation_arithmetic == "superposition"),
             )
+        except Exception as e:
+            logger.warning("McCormick LP relaxer setup failed: %s", e)
             _mc_lp_relaxer = None
-            _mc_mode = "nlp"
+            _mc_mode = "none"
         else:
-            try:
-                _mc_lp_relaxer = MccormickLPRelaxer(
-                    model,
-                    superposition=(relaxation_arithmetic == "superposition"),
-                )
-            except Exception as e:
-                logger.warning("McCormick LP relaxer setup failed: %s", e)
+            if not _mc_lp_relaxer.has_relaxable_nonlinearity:
+                # No nonlinear term the LP relaxer can bound (products,
+                # monomials, or fractional powers) → standard LP relaxation
+                # = the model itself for linear parts. Drop back to NLP.
+                # NB: monomial/fractional-power-only nonconvex models DO get
+                # a valid LP dual bound here (issue #120 fix); gating on
+                # has_bilinear alone wrongly routed them to the unsound "nlp"
+                # bound.
                 _mc_lp_relaxer = None
-                _mc_mode = "none"
+                _mc_mode = "nlp"
             else:
-                if not _mc_lp_relaxer.has_relaxable_nonlinearity:
-                    # No nonlinear term the LP relaxer can bound (products,
-                    # monomials, or fractional powers) → standard LP relaxation
-                    # = the model itself for linear parts. Drop back to NLP.
-                    # NB: monomial/fractional-power-only nonconvex models DO get
-                    # a valid LP dual bound here (issue #120 fix); gating on
-                    # has_bilinear alone wrongly routed them to the unsound "nlp"
-                    # bound.
+                # A node is spatial-branchable if there is a finite-box continuous
+                # variable to bisect, OR an integer variable in a nonlinear term
+                # whose domain can be partitioned (issue #194). Register those
+                # integer columns so the Rust tree spatial-branches on them
+                # instead of dead-ending and falsely certifying.
+                _int_cols = {
+                    j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))
+                }
+                _nl_int_cols = sorted(_int_cols & set(_mc_lp_relaxer.nonlinear_columns))
+                _has_branchable = _origin_has_finite_continuous_var or bool(_nl_int_cols)
+                if not _has_branchable:
+                    logger.info(
+                        "McCormick LP requested but model has no spatial-branchable "
+                        "variable (no finite-box continuous var, no nonlinear-term "
+                        "integer); falling back to NLP relaxation."
+                    )
                     _mc_lp_relaxer = None
                     _mc_mode = "nlp"
                 else:
+                    if _nl_int_cols:
+                        tree.set_spatial_integer_cols(np.asarray(_nl_int_cols, dtype=np.int64))
                     # Root probe: keep the LP relaxer only if it actually yields
                     # a valid objective bound (or a rigorous infeasibility proof)
                     # at the root box. When the objective is not LP-linearizable

@@ -446,6 +446,101 @@ pub fn select_spatial_branch_variable(
     })
 }
 
+/// Select an *integer* variable for spatial (domain-partition) branching.
+///
+/// Fallback used by nonconvex spatial B&B when no continuous variable is
+/// available to bisect, yet the convex relaxation still has an open gap on a
+/// product/power involving an integer variable (e.g. gear4's `i1*i2/(i3*i4)`,
+/// whose integers are integer-feasible at the node but whose McCormick envelope
+/// is not tight). Without this the node is fathomed with no incumbent and a
+/// feasible problem can be falsely certified infeasible / falsely optimal.
+///
+/// Only columns flagged in `spatial_int_cols` (integer variables appearing in a
+/// nonlinear term) are eligible. A column qualifies only when its integer domain
+/// can still split into two non-empty halves (`ub - lb >= 1`). Returns
+/// `(var_index, branch_point)` with disjoint children `[lb, bp]` and `[bp+1, ub]`.
+pub fn select_spatial_integer_branch_variable(
+    node_lb: &[f64],
+    node_ub: &[f64],
+    spatial_int_cols: &[bool],
+) -> Option<(usize, f64)> {
+    let n = node_lb.len();
+    let mut best_idx: Option<usize> = None;
+    let mut best_width = 0.0_f64;
+
+    for idx in 0..n {
+        if idx >= spatial_int_cols.len() || !spatial_int_cols[idx] {
+            continue;
+        }
+        let width = node_ub[idx] - node_lb[idx];
+        if width < 1.0 - 1e-9 {
+            continue; // Cannot split into two non-empty integer halves.
+        }
+        if width > best_width {
+            best_width = width;
+            best_idx = Some(idx);
+        }
+    }
+
+    best_idx.map(|idx| {
+        let mut bp = (0.5 * (node_lb[idx] + node_ub[idx])).floor();
+        if bp >= node_ub[idx] {
+            bp = node_ub[idx] - 1.0;
+        }
+        if bp < node_lb[idx] {
+            bp = node_lb[idx];
+        }
+        (idx, bp)
+    })
+}
+
+/// Create two children partitioning an integer variable's domain disjointly:
+/// left `x_idx <= bp`, right `x_idx >= bp + 1`. Unlike
+/// [`create_children_spatial`] (shared branch point, valid for continuous
+/// bisection), integer ranges must not overlap or the right child could fail to
+/// shrink and the search would loop.
+pub fn create_children_spatial_int(
+    parent: &Node,
+    idx: usize,
+    bp: f64,
+    mut next_id: impl FnMut() -> NodeId,
+) -> (Node, Node) {
+    let parent_sol = parent.parent_solution.clone();
+    let inherited_lb = parent.local_lower_bound;
+
+    let mut left_ub = parent.ub.clone();
+    left_ub[idx] = bp;
+    let left = Node {
+        id: next_id(),
+        parent: Some(parent.id),
+        depth: parent.depth + 1,
+        lb: parent.lb.clone(),
+        ub: left_ub,
+        local_lower_bound: inherited_lb,
+        best_estimate: inherited_lb,
+        status: NodeStatus::Pending,
+        parent_solution: parent_sol.clone(),
+        basis: None,
+    };
+
+    let mut right_lb = parent.lb.clone();
+    right_lb[idx] = bp + 1.0;
+    let right = Node {
+        id: next_id(),
+        parent: Some(parent.id),
+        depth: parent.depth + 1,
+        lb: right_lb,
+        ub: parent.ub.clone(),
+        local_lower_bound: inherited_lb,
+        best_estimate: inherited_lb,
+        status: NodeStatus::Pending,
+        parent_solution: parent_sol,
+        basis: None,
+    };
+
+    (left, right)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

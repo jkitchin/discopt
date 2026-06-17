@@ -137,6 +137,14 @@ class MccormickLPRelaxer:
         self._nonlinear_cols = nl_cols
 
     @property
+    def nonlinear_columns(self) -> frozenset[int]:
+        """Original-variable flat columns in any nonlinear term (product,
+        monomial, fractional power). Used by the spatial B&B driver to flag
+        integer variables eligible for spatial domain-partition branching when no
+        continuous variable remains to bisect (issue #194)."""
+        return frozenset(self._nonlinear_cols)
+
+    @property
     def has_bilinear(self) -> bool:
         """True if the model has any bilinear / trilinear / multilinear product."""
         return bool(self._terms.bilinear or self._terms.trilinear or self._terms.multilinear)

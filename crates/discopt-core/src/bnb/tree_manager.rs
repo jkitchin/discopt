@@ -3,9 +3,9 @@
 use std::collections::HashMap;
 
 use crate::bnb::branching::{
-    create_children, create_children_spatial, is_integer_feasible, select_branch_variable,
-    select_branch_variable_pseudocost, select_spatial_branch_variable, BranchDecision, Pseudocosts,
-    VarBranchInfo,
+    create_children, create_children_spatial, create_children_spatial_int, is_integer_feasible,
+    select_branch_variable, select_branch_variable_pseudocost, select_spatial_branch_variable,
+    select_spatial_integer_branch_variable, BranchDecision, Pseudocosts, VarBranchInfo,
 };
 use crate::bnb::node::{Node, NodeId, NodeStatus};
 use crate::bnb::pool::{NodePool, SelectionStrategy};
@@ -115,6 +115,11 @@ pub struct TreeManager {
     /// MINLPs where the NLP local optimum at an integer-feasible node may
     /// not be the global optimum of the continuous subproblem.
     nonconvex: bool,
+    /// Flat columns of integer variables in a nonlinear term, eligible for
+    /// spatial (domain-partition) branching when no continuous variable remains
+    /// to bisect (issue #194). Length `n_vars`; all-false unless registered via
+    /// [`Self::set_spatial_integer_cols`].
+    spatial_integer_cols: Vec<bool>,
 }
 
 impl TreeManager {
@@ -134,6 +139,7 @@ impl TreeManager {
         assert_eq!(lb.len(), n_vars);
         assert_eq!(ub.len(), n_vars);
         let pseudocosts = Pseudocosts::new(n_vars);
+        let spatial_integer_cols = vec![false; n_vars];
         Self {
             pool: NodePool::new(strategy),
             incumbent_value: f64::INFINITY,
@@ -150,6 +156,7 @@ impl TreeManager {
             reliability_threshold: 8,
             branch_records: HashMap::new(),
             nonconvex: false,
+            spatial_integer_cols,
         }
     }
 
@@ -157,6 +164,17 @@ impl TreeManager {
     /// branching on continuous variables instead of being fathomed.
     pub fn set_nonconvex(&mut self, nonconvex: bool) {
         self.nonconvex = nonconvex;
+    }
+
+    /// Register integer columns (in nonlinear terms) eligible for spatial
+    /// domain-partition branching when no continuous variable remains to bisect
+    /// (issue #194). Out-of-range indices are ignored.
+    pub fn set_spatial_integer_cols(&mut self, cols: &[usize]) {
+        for &c in cols {
+            if c < self.spatial_integer_cols.len() {
+                self.spatial_integer_cols[c] = true;
+            }
+        }
     }
 
     /// Allocate a fresh NodeId.
@@ -281,7 +299,8 @@ impl TreeManager {
             // finite, trusted bound first.
             let trusted = node_lb.is_finite();
             let int_feasible = trusted
-                && (result.is_feasible || is_integer_feasible(&result.solution, &self.integer_vars));
+                && (result.is_feasible
+                    || is_integer_feasible(&result.solution, &self.integer_vars));
 
             if int_feasible {
                 if self.nonconvex {
@@ -381,11 +400,18 @@ impl TreeManager {
                 stats.branched += 1;
             } else if self.nonconvex && int_feasible {
                 // No fractional integer variable, but nonconvex mode: try
-                // spatial branching on continuous variables.
-                let node = self.pool.get(result.node_id);
+                // spatial branching on continuous variables, then (last resort)
+                // on integer variables in a nonlinear term (issue #194 — closes
+                // the McCormick gap on integer products like gear4's
+                // i1*i2/(i3*i4) instead of fathoming with no incumbent and
+                // falsely certifying).
+                let (nlb, nub) = {
+                    let node = self.pool.get(result.node_id);
+                    (node.lb.clone(), node.ub.clone())
+                };
                 let spatial = select_spatial_branch_variable(
-                    &node.lb,
-                    &node.ub,
+                    &nlb,
+                    &nub,
                     &self.global_lb,
                     &self.global_ub,
                     &self.integer_vars,
@@ -400,8 +426,20 @@ impl TreeManager {
                     self.pool.add(left);
                     self.pool.add(right);
                     stats.branched += 1;
+                } else if let Some((sidx, sbp)) =
+                    select_spatial_integer_branch_variable(&nlb, &nub, &self.spatial_integer_cols)
+                {
+                    let parent = self.pool.get(result.node_id).clone();
+                    self.pool.get_mut(result.node_id).status = NodeStatus::Branched;
+
+                    let (left, right) =
+                        create_children_spatial_int(&parent, sidx, sbp, || self.next_id());
+
+                    self.pool.add(left);
+                    self.pool.add(right);
+                    stats.branched += 1;
                 } else {
-                    // All continuous domains are tight; fathom.
+                    // All continuous and integer-product domains are tight; fathom.
                     self.pool.get_mut(result.node_id).status = NodeStatus::Fathomed;
                     stats.fathomed += 1;
                 }
