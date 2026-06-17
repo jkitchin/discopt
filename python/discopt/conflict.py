@@ -80,13 +80,9 @@ def no_good_cut(assignment: list[tuple]) -> Constraint:
 
 def _fbbt_infeasible(model: Model, tol: float = 1e-9, max_iter: int = 20) -> bool:
     """True if FBBT proves the current model (with its present bounds) infeasible."""
-    from discopt._rust import model_to_repr
+    from discopt.tightening import fbbt_box
 
-    repr_ = model_to_repr(model)
-    lbs, ubs = repr_.fbbt(max_iter=max_iter, tol=tol)
-    lbs = np.asarray(lbs)
-    ubs = np.asarray(ubs)
-    return bool(np.any(lbs > ubs + tol))
+    return fbbt_box(model, max_iter=max_iter, tol=tol).infeasible
 
 
 def find_conflict_cuts(
