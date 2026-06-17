@@ -17,9 +17,13 @@ from discopt._jax._numeric import is_effectively_finite as _is_effectively_finit
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
+    CustomCall,
     FunctionCall,
     IndexExpression,
+    MatMulExpression,
     Model,
+    Parameter,
+    SumExpression,
     SumOverExpression,
     UnaryOp,
     Variable,
@@ -2221,6 +2225,121 @@ class BilinearProductEqualityRule(NonlinearBoundTighteningRule):
         return tightened_lb, tightened_ub
 
 
+_PERIODIC_FUNCS = frozenset({"sin", "cos"})
+_TWO_PI = 2.0 * np.pi
+
+
+class PeriodicVariableBoundRule(NonlinearBoundTighteningRule):
+    """Restrict a periodic-only variable to a single period (lossless).
+
+    A continuous variable that appears in the model *solely* as the bare argument
+    of ``sin``/``cos`` enters the objective and constraints only through
+    ``(sin x, cos x)``, which is fully covered by any ``2*pi``-wide window. So the
+    box can be shrunk to one period with no loss of feasible behaviour — and a
+    finite, single-period box is what lets spatial branch-and-bound and the local
+    sub-NLP actually converge on otherwise-unbounded angular variables (e.g.
+    ``cos(y)`` over a free ``y``; AC-OPF voltage angles).
+
+    Soundness: the reduction only ever *shrinks* the box (an unbounded side to
+    ``[-pi, pi]`` / one period from the finite anchor; a ``> 2*pi`` finite box to
+    its first period), and a full period preserves every ``(sin, cos)`` value the
+    original box could take. A variable used anywhere outside ``sin``/``cos`` (or
+    inside a non-bare argument such as ``cos(2*y)``) is conservatively skipped.
+    """
+
+    name = "periodic_variable_bound"
+
+    def tighten(self, model, flat_lb, flat_ub, metadata):
+        lb = np.asarray(flat_lb, dtype=np.float64).copy()
+        ub = np.asarray(flat_ub, dtype=np.float64).copy()
+        try:
+            periodic: set[int] = set()
+            disqualified: set[int] = set()
+            complete = [True]  # cleared if an unrecognized node is encountered
+
+            def _subexprs(expr):
+                """Child sub-expressions, or ``None`` if the node type is unknown."""
+                if isinstance(expr, BinaryOp):
+                    return [expr.left, expr.right]
+                if isinstance(expr, UnaryOp):
+                    return [expr.operand]
+                if isinstance(expr, (FunctionCall, CustomCall)):
+                    return list(expr.args)
+                if isinstance(expr, IndexExpression):
+                    return [expr.base]
+                if isinstance(expr, SumExpression):
+                    return [expr.operand]
+                if isinstance(expr, SumOverExpression):
+                    return list(expr.terms)
+                if isinstance(expr, MatMulExpression):
+                    return [expr.left, expr.right]
+                return None
+
+            def walk(expr):
+                if not complete[0]:
+                    return
+                # A bare scalar-variable leaf reached here is a *non-periodic* use
+                # (the sin/cos branch below returns before recursing into its arg).
+                idx = metadata.scalar_flat_index(expr)
+                if idx is not None:
+                    disqualified.add(idx)
+                    return
+                if isinstance(expr, Variable):  # bare vector variable: non-periodic use
+                    off = metadata.base_offsets.get(id(expr))
+                    if off is not None:
+                        for k in range(expr.size):
+                            disqualified.add(off + k)
+                    return
+                if isinstance(expr, (Constant, Parameter)):
+                    return  # childless, no variables
+                if (
+                    isinstance(expr, FunctionCall)
+                    and expr.func_name in _PERIODIC_FUNCS
+                    and len(expr.args) == 1
+                ):
+                    aidx = metadata.scalar_flat_index(expr.args[0])
+                    if aidx is not None:
+                        periodic.add(aidx)
+                        return  # bare var inside sin/cos: accounted for
+                subs = _subexprs(expr)
+                if subs is None:
+                    # Unknown node type: cannot prove the variable is periodic-only,
+                    # so abstain from the whole rule (sound).
+                    complete[0] = False
+                    return
+                for sub in subs:
+                    walk(sub)
+
+            if model._objective is not None:
+                walk(model._objective.expression)
+            for c in model._constraints:
+                walk(c.body)
+
+            if not complete[0]:
+                return lb, ub  # saw an unrecognized node -> change nothing
+
+            for idx in periodic - disqualified:
+                if idx >= len(metadata.flat_var_types):
+                    continue
+                if metadata.flat_var_types[idx] != VarType.CONTINUOUS:
+                    continue
+                lo, hi = float(lb[idx]), float(ub[idx])
+                finite_lo, finite_hi = lo > -1e15, hi < 1e15
+                if finite_lo and finite_hi:
+                    if hi - lo > _TWO_PI + 1e-9:
+                        hi = lo + _TWO_PI
+                elif finite_lo:
+                    hi = lo + _TWO_PI
+                elif finite_hi:
+                    lo = hi - _TWO_PI
+                else:
+                    lo, hi = -np.pi, np.pi
+                lb[idx], ub[idx] = lo, hi
+            return lb, ub
+        except Exception:
+            return np.asarray(flat_lb, dtype=np.float64), np.asarray(flat_ub, dtype=np.float64)
+
+
 DEFAULT_NONLINEAR_BOUND_RULES: tuple[NonlinearBoundTighteningRule, ...] = (
     MonotoneFunctionEqualityRule(),
     QuadraticEqualityBoundsRule(),
@@ -2233,6 +2352,7 @@ DEFAULT_NONLINEAR_BOUND_RULES: tuple[NonlinearBoundTighteningRule, ...] = (
     SqrtSumOfSquaresUpperBoundRule(),
     SumOfSquaresUpperBoundRule(),
     SeparableQuadraticUpperBoundRule(),
+    PeriodicVariableBoundRule(),
 )
 
 

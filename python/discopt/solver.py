@@ -2121,6 +2121,25 @@ def solve_model(
     # root and a no-incumbent exhaustion would be falsely certified infeasible
     # (issue #185). Such models route to the NLP/alphaBB path instead.
     _origin_lb_chk, _origin_ub_chk = flat_variable_bounds(model)
+    # Periodic-variable reduction: a free continuous variable used only inside
+    # sin/cos is restricted to one period [-pi, pi]. Spatial B&B cannot partition
+    # an infinite domain, so an angular variable like cos(y) over a free y never
+    # converges (nlp_001: 237 nodes -> 1). Surgical: only this rule runs here, so
+    # variables the relaxation already handles analytically (e.g. x*exp(x) over a
+    # free x) are left untouched. Sound: the reduction only shrinks the box.
+    try:
+        from discopt._jax.nonlinear_bound_tightening import PeriodicVariableBoundRule
+
+        _per_lb, _per_ub, _per_stats = tighten_nonlinear_bounds(
+            model, _origin_lb_chk, _origin_ub_chk, rules=(PeriodicVariableBoundRule(),)
+        )
+        if _per_stats.n_tightened > 0:
+            from discopt.solvers.amp import _apply_flat_bounds_to_model
+
+            _apply_flat_bounds_to_model(model, _per_lb, _per_ub)
+            _origin_lb_chk, _origin_ub_chk = _per_lb, _per_ub
+    except Exception as _per_exc:  # pragma: no cover - defensive
+        logger.debug("periodic-variable bound reduction skipped: %s", _per_exc)
     _origin_has_finite_continuous_var = False
     _origin_chk_off = 0
     for _ov in model._variables:
