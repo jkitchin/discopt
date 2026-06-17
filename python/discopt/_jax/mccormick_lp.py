@@ -169,12 +169,21 @@ class MccormickLPRelaxer:
     """
 
     def __init__(
-        self, model: Model, *, superposition: bool = False, backend: str = "simplex"
+        self,
+        model: Model,
+        *,
+        superposition: bool = False,
+        backend: str = "simplex",
+        psd_cuts: bool = False,
     ) -> None:
         self._model = model
         self._terms: NonlinearTerms = classify_nonlinear_terms(model)
         # Opt-in M8 superposition cuts for bilinear-of-nonlinear products.
         self._superposition = superposition
+        # Opt-in per-node PSD (moment) cut separation (W2e): enforce the lifted
+        # moment matrix M = [[1, x^T],[x, X]] >= 0 by separating dense clique cuts
+        # at each node, tightening the bound toward the SDP relaxation.
+        self._psd_cuts = psd_cuts
         # LP backend for the per-node relaxation solve: "simplex" routes to the
         # pure-Rust warm-started simplex (no JAX in the spatial-B&B relaxation
         # path); "auto" keeps HiGHS->POUNCE. Falls back automatically if the
@@ -438,6 +447,10 @@ class MccormickLPRelaxer:
         # Add the exact supporting tangent at the LP point each round (sound: a
         # tangent of a convex function is a global underestimator).
         res = self._separate_univariate_square(milp, varmap, res, _deadline)
+        # PSD (moment) cuts: enforce M = [[1,x^T],[x,X]] >= 0 over fully-lifted
+        # cliques. Each cut v^T M v >= 0 is a supporting hyperplane valid for every
+        # feasible point (X = x x^T), so adding them only tightens the bound.
+        res = self._separate_psd(milp, varmap, res, _deadline)
 
         # Soundness guard: a floating-point simplex "infeasible" verdict is NOT
         # a proof that the relaxed feasible set is empty. The spatial-B&B driver
@@ -822,6 +835,61 @@ class MccormickLPRelaxer:
                 if not rows:
                     break
                 _append(rows, rhs)
+                _tl = (
+                    None
+                    if deadline is None
+                    else max(deadline - time.perf_counter(), _SOLVE_DEADLINE_FLOOR_S)
+                )
+                new_res = milp.solve(time_limit=_tl, backend=self._backend)
+                if new_res.status != "optimal" or new_res.objective is None:
+                    break
+                res = new_res
+            return res
+        except Exception:
+            return res
+
+    def _separate_psd(self, milp, varmap, res, deadline):
+        """Separate moment (PSD) cuts on the lifted relaxation at the LP point.
+
+        Enforces ``M = [[1, x^T], [x, X]] >= 0`` over cliques of variables whose
+        pairwise products and squares are all lifted. Each separated cut
+        ``v^T M v >= 0`` is valid for every feasible point (``X = x x^T`` makes
+        ``M`` rank-1 PSD), so the bound only tightens; on any failure the input
+        ``res`` is returned unchanged. Off unless ``psd_cuts=True``.
+        """
+        if not self._psd_cuts:
+            return res
+        if res is None or res.status != "optimal" or res.x is None:
+            return res
+        try:
+            import scipy.sparse as sp
+
+            from discopt._jax.psd_cuts import separate_psd_cuts_on_relaxation
+
+            n_total = len(milp._c)
+
+            def _append(rows: list[np.ndarray], rhs: list[float]) -> None:
+                R = np.asarray(rows, dtype=np.float64)
+                b = np.asarray(rhs, dtype=np.float64)
+                if milp._A_ub is None:
+                    milp._A_ub, milp._b_ub = R, b
+                elif sp.issparse(milp._A_ub):
+                    milp._A_ub = sp.vstack([milp._A_ub, sp.csr_matrix(R)], format="csr")
+                    milp._b_ub = np.concatenate([milp._b_ub, b])
+                else:
+                    milp._A_ub = np.vstack([np.asarray(milp._A_ub), R])
+                    milp._b_ub = np.concatenate([milp._b_ub, b])
+
+            for _round in range(8):
+                if deadline is not None and time.perf_counter() >= deadline:
+                    break
+                cuts = separate_psd_cuts_on_relaxation(
+                    varmap, np.asarray(res.x, dtype=np.float64), n_total
+                )
+                if not cuts:
+                    break
+                # ``coeffs . z >= rhs``  ->  ``(-coeffs) . z <= -rhs`` for A_ub<=b_ub.
+                _append([-c.coeffs for c in cuts], [-c.rhs for c in cuts])
                 _tl = (
                     None
                     if deadline is None
