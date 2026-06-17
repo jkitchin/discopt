@@ -12,6 +12,7 @@ delta log shape, and the legacy-key compatibility shim.
 from __future__ import annotations
 
 import discopt as do
+import pytest
 from discopt._rust import model_to_repr
 
 
@@ -58,12 +59,22 @@ def test_orchestrator_returns_delta_log():
 
 
 def test_orchestrator_terminates_at_fixed_point():
-    """A pass list with no progress on the toy box terminates at NoProgress."""
+    """The toy quartic reaches a fixed point and reports NoProgress.
+
+    FBBT now inverts even powers: from ``x**4 + y <= 5`` with ``y >= -3``
+    it derives ``x**4 <= 8`` and tightens ``x`` to ``[-8**0.25, 8**0.25]``
+    in the first sweep, then finds nothing more in the second. The point
+    of the test is the *termination reason* (a genuine fixed point), not
+    the exact sweep count.
+    """
     repr_ = model_to_repr(_toy_quartic_model())
-    _, stats = repr_.presolve(passes=["eliminate", "simplify", "fbbt", "probing"])
+    new_repr, stats = repr_.presolve(passes=["eliminate", "simplify", "fbbt", "probing"])
     assert stats["terminated_by"] == "NoProgress"
-    # One sweep was enough — no pass made progress, so loop exits.
-    assert stats["iterations"] == 1
+    # One productive sweep (tighten x via the quartic) then convergence.
+    assert stats["iterations"] == 2
+    # The tightening is the sound even-power bound x in [-8**0.25, 8**0.25].
+    assert stats["bounds_lo"][0] == pytest.approx(-(8.0**0.25), rel=1e-6)
+    assert stats["bounds_hi"][0] == pytest.approx(8.0**0.25, rel=1e-6)
 
 
 def test_orchestrator_honors_iteration_cap():

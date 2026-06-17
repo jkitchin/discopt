@@ -2618,6 +2618,121 @@ def _reciprocal_term_lower_bound(
     return float(bound)
 
 
+def _match_scaled_even_power(
+    term: Expression, scale: float
+) -> Optional[tuple[float, Expression, int]]:
+    """Match ``scale * c * (base)**n`` with ``n`` a positive even integer.
+
+    Returns ``(coeff, base, n)`` where ``coeff`` folds ``scale`` and every
+    constant factor of the product. Exactly one even-power factor is allowed;
+    any other non-constant factor (or a second power) disqualifies the match.
+    """
+    factors: list[Expression] = []
+    _flatten_product_factors(term, factors)
+    coeff = scale
+    base: Optional[Expression] = None
+    power = 0
+    for factor in factors:
+        const = _constant_value(factor)
+        if const is not None:
+            coeff *= const
+            continue
+        if (
+            isinstance(factor, BinaryOp)
+            and factor.op == "**"
+            and isinstance(factor.right, Constant)
+        ):
+            exp_val = float(factor.right.value)
+            n_int = int(round(exp_val))
+            if abs(exp_val - n_int) < 1e-12 and n_int >= 2 and n_int % 2 == 0:
+                if base is not None:
+                    return None
+                base = factor.left
+                power = n_int
+                continue
+        return None
+    if base is None:
+        return None
+    return coeff, base, power
+
+
+def _count_distinct_scalar_refs(expr: Expression, model: Model) -> int:
+    """Count distinct scalar variable columns referenced by ``expr``.
+
+    Used to gate the even-power lower bound to genuinely multivariate bases:
+    a single-variable square is handled more tightly by the distribute /
+    polynomial path (which combines it with any linear term in the same
+    variable), so only multivariate bases — which that path cannot bound at
+    all — are routed through the sum-of-squares relaxation.
+    """
+    seen: set = set()
+
+    def visit(e: Expression) -> None:
+        idx = _get_flat_index(e, model)
+        if idx is not None:
+            seen.add(idx)
+            return
+        if isinstance(e, Variable):
+            seen.add(("var", id(e)))
+            return
+        if isinstance(e, IndexExpression):
+            visit(e.base)
+            return
+        if isinstance(e, BinaryOp):
+            visit(e.left)
+            visit(e.right)
+        elif isinstance(e, UnaryOp):
+            visit(e.operand)
+        elif isinstance(e, FunctionCall):
+            for a in e.args:
+                visit(a)
+        elif isinstance(e, SumExpression):
+            visit(e.operand)
+        elif isinstance(e, SumOverExpression):
+            for t in e.terms:
+                visit(t)
+
+    visit(expr)
+    return len(seen)
+
+
+def _even_power_term_lower_bound(
+    coeff: float,
+    base: Expression,
+    n: int,
+    model: Model,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+) -> Optional[float]:
+    """Rigorous constant lower bound for ``coeff * base(x)**n`` with ``n`` even.
+
+    ``base**n >= 0`` always, so for ``coeff >= 0`` the term is nonnegative — a
+    valid lower bound of ``0`` even when ``base`` cannot be enclosed. When the
+    box yields a finite enclosure ``base in [bl, bh]`` the bound tightens to the
+    vertex minimum of ``base**n`` (``0`` if the interval straddles zero, else
+    ``min(|bl|, |bh|)**n``). For ``coeff < 0`` the term is maximized in
+    magnitude at the larger ``|base|`` endpoint, so a finite enclosure is
+    required; ``None`` (caller abstains) when it is unavailable.
+    """
+    bl = _expression_lower_bound_for_lift(base, model, flat_lb, flat_ub)
+    bh = _expression_upper_bound_for_lift(base, model, flat_lb, flat_ub)
+    if coeff >= 0.0:
+        if bl is None or bh is None or not (np.isfinite(bl) and np.isfinite(bh)):
+            return 0.0
+        if bl <= 0.0 <= bh:
+            pow_min = 0.0
+        else:
+            pow_min = min(abs(bl), abs(bh)) ** n
+        return float(coeff * pow_min)
+    if bl is None or bh is None or not (np.isfinite(bl) and np.isfinite(bh)):
+        return None
+    pow_max = max(abs(bl), abs(bh)) ** n
+    bound = coeff * pow_max
+    if not np.isfinite(bound):
+        return None
+    return float(bound)
+
+
 def _separable_objective_lower_bound(
     expr: Expression,
     model: Model,
@@ -2709,6 +2824,25 @@ def _separable_objective_lower_bound(
             if recip_bound is None:
                 return None
             total += recip_bound
+            continue
+
+        # Even-power term ``c * (E(x))**n`` (n even) with a *multivariate* base,
+        # e.g. Rosenbrock's ``100 * (x1 - x0**2)**2``. Distributing it yields a
+        # bilinear/multivariate polynomial whose cross terms no single-variable
+        # matcher accepts, so the whole objective would be dropped. But a square
+        # is nonnegative regardless of its argument's structure: for ``c >= 0``
+        # the term is ``>= 0`` (tightened to the vertex minimum of ``E**n`` when
+        # the box encloses ``E``). Recognizing it on the un-distributed term lets
+        # AMP certify sum-of-squares objectives at the root. Single-variable
+        # bases are left to the polynomial path, which combines them with any
+        # linear term in the same variable for a strictly tighter bound.
+        even_pow = _match_scaled_even_power(term, scale)
+        if even_pow is not None and _count_distinct_scalar_refs(even_pow[1], model) >= 2:
+            coeff, base, power = even_pow
+            ep_bound = _even_power_term_lower_bound(coeff, base, power, model, flat_lb, flat_ub)
+            if ep_bound is None:
+                return None
+            total += ep_bound
             continue
 
         # Distribute this single term and fold each resulting sub-term through the

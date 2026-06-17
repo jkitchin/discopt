@@ -128,6 +128,47 @@ pub fn run(model: crate::expr::ModelRepr, mut opts: OrchestratorOptions) -> Pres
         }
     }
 
+    // Persist the tightened bounds back into the model's variable
+    // metadata so that the returned `ModelRepr` carries the progress
+    // made during this run. Without this, callers that re-presolve the
+    // returned model (e.g. the Python orchestrator's per-sweep loop)
+    // would rebuild the context from the original declared bounds via
+    // `PresolveContext::from_model`, see the same tightening reported
+    // every sweep, and never reach a `NoProgress` fixed point.
+    //
+    // `from_model`/`resync_bounds_after_rewrite` track exactly one
+    // interval per variable *block*, keyed off the block's first scalar
+    // element. For a scalar block (`size == 1`) that interval *is* the
+    // whole variable, so writing it back is exact. For a vector block it
+    // is only a coarse element-0 summary — the per-element bounds may
+    // differ, and `bounds[i]` is not a faithful bound for element 0 in
+    // isolation — so persisting it could wrongly cut feasible values and
+    // even manufacture a false infeasibility. We therefore restrict
+    // write-back to scalar blocks, which is exactly the case that needs
+    // it for the Python orchestrator to reach a `NoProgress` fixed point.
+    // The intersection is defensive: constraint-based FBBT only tightens,
+    // so `bounds[i]` is already a subset of the declared bound.
+    {
+        let n = ctx.bounds.len().min(ctx.model.variables.len());
+        for (v, b) in ctx
+            .model
+            .variables
+            .iter_mut()
+            .zip(ctx.bounds.iter())
+            .take(n)
+        {
+            if v.size != 1 || v.lb.len() != 1 || v.ub.len() != 1 {
+                continue;
+            }
+            if let Some(lb0) = v.lb.first_mut() {
+                *lb0 = lb0.max(b.lo);
+            }
+            if let Some(ub0) = v.ub.first_mut() {
+                *ub0 = ub0.min(b.hi);
+            }
+        }
+    }
+
     PresolveResult {
         model: ctx.model,
         bounds: ctx.bounds,
