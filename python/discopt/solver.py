@@ -287,25 +287,54 @@ def _compute_alphabb_bound(evaluator, node_lb, node_ub, alpha):
 
     L(x) = f(x) - sum_i alpha_i * (x_i - lb_i) * (ub_i - x_i)
 
-    Returns the minimum of L over [node_lb, node_ub], or -inf on failure.
+    The perturbation term is non-negative for x in [node_lb, node_ub], so
+    L(x) <= f(x) there and the minimum of L over the box is a valid lower
+    bound on f. The minimization domain MUST be exactly the true node box and
+    the perturbation MUST use the same lb/ub arrays as the optimizer bounds:
+    evaluating L at any x OUTSIDE [node_lb, node_ub] makes the perturbation
+    NEGATIVE, which flips L into an over-estimator and yields an invalid
+    (too-high) "lower bound".
+
+    Returns the minimum of L over [node_lb, node_ub], or -inf when the box is
+    unbounded / so wide that alphaBB is numerically meaningless (in which case
+    alphaBB abstains and the caller's interval / LP relaxation bounds stand).
     """
+    node_lb = np.asarray(node_lb, dtype=np.float64)
+    node_ub = np.asarray(node_ub, dtype=np.float64)
+
+    # alphaBB is only valid on a finite box. Unbounded or huge dimensions make
+    # the quadratic perturbation astronomically large and scipy's
+    # finite-difference gradient unreliable, so abstain instead of risking an
+    # invalid bound.
+    #
+    # NOTE: a previous implementation instead CLIPPED the optimizer domain to
+    # [-1e4, 1e4] while leaving node_lb/node_ub unclipped in the perturbation.
+    # On any node with a bound outside that range (e.g. a big-M ~1e19 on an
+    # unbounded variable) the clip pushed the optimizer outside the true box,
+    # turned the perturbation negative, and produced a spurious ~1e17 "lower
+    # bound" that fathomed the optimum region and falsely certified suboptimal
+    # incumbents as global. Optimizing over the true box keeps L <= f, so any
+    # value returned here is a sound lower bound.
+    _ALPHABB_BOX_LIMIT = 1e8
+    if not (np.all(np.isfinite(node_lb)) and np.all(np.isfinite(node_ub))):
+        return -np.inf
+    if np.any(np.abs(node_lb) > _ALPHABB_BOX_LIMIT) or np.any(np.abs(node_ub) > _ALPHABB_BOX_LIMIT):
+        return -np.inf
+    if np.any(node_ub < node_lb):
+        return -np.inf
 
     def underestimator(x):
         f_val = evaluator.evaluate_objective(x)
         perturbation = np.sum(alpha * (x - node_lb) * (node_ub - x))
         return f_val - perturbation
 
-    # Multiple starting points for robustness. Clip bounds to a finite range
-    # before forming start points or passing them to scipy: unbounded
-    # variables produce inf*inf or inf-inf in finite-difference gradients,
-    # propagating NaN into L-BFGS-B and silently breaking the bound.
-    lb_clip = np.clip(node_lb, -1e4, 1e4)
-    ub_clip = np.clip(node_ub, -1e4, 1e4)
-    mid = 0.5 * (lb_clip + ub_clip)
-    bounds = list(zip(lb_clip, ub_clip))
+    # Multiple starting points for robustness, all strictly inside the box.
+    width = node_ub - node_lb
+    mid = 0.5 * (node_lb + node_ub)
+    bounds = list(zip(node_lb, node_ub))
 
     best_val = np.inf
-    for x0 in [mid, lb_clip + 0.25 * (ub_clip - lb_clip), lb_clip + 0.75 * (ub_clip - lb_clip)]:
+    for x0 in (mid, node_lb + 0.25 * width, node_lb + 0.75 * width):
         try:
             result = scipy_minimize(underestimator, x0, method="L-BFGS-B", bounds=bounds)
             if result.fun < best_val:
@@ -480,6 +509,33 @@ def _structural_linear_row_mask(model, sizes, m):
     return np.asarray(flags, dtype=bool)
 
 
+def _cached_structural_linear_mask(evaluator, m):
+    """Return the structural linear-row mask for ``evaluator``'s model, cached.
+
+    The mask (a row is structurally affine iff its body has no nonlinear
+    operator) depends only on the constraint bodies, which are invariant across
+    B&B nodes. Recomputing it every node re-walks every constraint DAG, so it is
+    memoized on the evaluator and keyed by the row count ``m`` to stay robust if
+    the row layout ever differs. Returns ``None`` when the mask is unavailable or
+    cannot be aligned to ``m`` rows, so callers fall back to the numeric
+    two-point Jacobian classification.
+    """
+    cached = getattr(evaluator, "_structural_linear_mask_cache", None)
+    if cached is not None and cached[0] == m:
+        return cached[1]
+    mask = None
+    try:
+        sizes = getattr(evaluator, "_constraint_flat_sizes", None)
+        mask = _structural_linear_row_mask(evaluator._model, sizes, m)
+    except Exception:
+        mask = None
+    try:
+        evaluator._structural_linear_mask_cache = (m, mask)
+    except Exception:
+        pass
+    return mask
+
+
 def _tighten_node_bounds_with_status(evaluator, node_lb, node_ub, cl_list, cu_list, max_rounds=3):
     """Constraint-based bound tightening (FBBT) for a single B&B node.
 
@@ -538,13 +594,9 @@ def _tighten_node_bounds_with_status(evaluator, node_lb, node_ub, cl_list, cu_li
     # (max/abs/clamped exprs) when both samples fall in one locally-flat piece;
     # require structural affineness as well so FBBT never linearizes a nonlinear
     # body and over-tightens it (issue #27a).
-    try:
-        _sizes = getattr(evaluator, "_constraint_flat_sizes", None)
-        _structural = _structural_linear_row_mask(evaluator._model, _sizes, len(is_linear))
-        if _structural is not None:
-            is_linear = is_linear & _structural
-    except Exception:
-        pass
+    _structural = _cached_structural_linear_mask(evaluator, len(is_linear))
+    if _structural is not None:
+        is_linear = is_linear & _structural
 
     if not np.any(is_linear):
         return _apply_nonlinear_tightening_with_status(evaluator._model, lb, ub)
@@ -713,6 +765,47 @@ def _infer_constraint_bounds(model: Model, evaluator=None):
     return cl_list, cu_list
 
 
+def _gams_initial_seed(model, node_lb, node_ub):
+    """Build a flat start vector from a model's GAMS-provided initial values.
+
+    ``from_gams`` parses ``x.l`` assignments into ``model._gams_initial_values``
+    (``var_name -> float`` for scalars, ``var_name -> {flat_idx: float}`` for
+    indexed variables) but nothing in the solver consumed them, so a modeler's
+    (often near-optimal) starting point was ignored -- discopt re-derived its
+    primal solely from relaxation/midpoint seeds. For nonconvex models whose good
+    basin is hard to reach from those generic seeds (prob07's true global at
+    154990 sits in a basin only the published start lands in), this left a worse
+    incumbent. Return the provided point, filled with the bound midpoint for any
+    variable the file did not initialize and clipped into ``[node_lb, node_ub]``;
+    return ``None`` when the model carries no initial values (the common case),
+    so callers add no work for models without a start.
+    """
+    iv = getattr(model, "_gams_initial_values", None)
+    if not iv:
+        return None
+    lb_c = np.clip(node_lb, -_SPC, _SPC)
+    ub_c = np.clip(node_ub, -_SPC, _SPC)
+    x0 = 0.5 * (lb_c + ub_c)
+    offset = 0
+    found = False
+    for v in model._variables:
+        sz = v.size
+        entry = iv.get(v.name)
+        if entry is not None:
+            if isinstance(entry, dict):
+                for flat_idx, val in entry.items():
+                    if 0 <= int(flat_idx) < sz:
+                        x0[offset + int(flat_idx)] = float(val)
+                        found = True
+            else:
+                x0[offset : offset + sz] = float(entry)
+                found = True
+        offset += sz
+    if not found:
+        return None
+    return np.clip(x0, node_lb, node_ub)
+
+
 def _generate_starting_points(node_lb, node_ub, n_random=2):
     """Generate diverse starting points for multi-start NLP at root node."""
     lb_clipped = np.clip(node_lb, -_SPC, _SPC)
@@ -740,12 +833,21 @@ def _solve_root_node_multistart(
     options,
     nlp_solver,
     n_random=2,
+    convex=False,
 ):
     """Solve root NLP relaxation from multiple starting points.
 
     On nonconvex problems, different starting points can converge to
     different local minima. Multi-start at the root increases the
     chance of finding the global optimum for the initial bound/incumbent.
+
+    On *convex* problems the relaxation has a unique optimum, so any start that
+    converges to a feasible KKT point has already found the global optimum and
+    further starts only re-find it. With ``convex=True`` the search short-circuits
+    on the first feasible OPTIMAL result (the midpoint start, tried first), while
+    still falling through to additional starts when a start fails to converge or
+    lands constraint-infeasible — so robustness is preserved and only the
+    redundant convex re-solves are skipped.
     """
     starting_points = _generate_starting_points(node_lb, node_ub, n_random=n_random)
 
@@ -789,6 +891,11 @@ def _solve_root_node_multistart(
             best_result = nlp_result
             best_feasible = feasible
             best_obj = obj
+
+        # Convex relaxation: a feasible KKT (OPTIMAL) point is the unique global
+        # optimum, so the remaining starts would only re-converge to it. Stop.
+        if convex and feasible and nlp_result.status == SolveStatus.OPTIMAL:
+            break
 
     if best_result is not None:
         return best_result
@@ -1701,6 +1808,12 @@ def solve_model(
             max_iterations=max_nodes,
             nlp_solver=nlp_solver,
         )
+
+    # Capture any modeler-provided GAMS start (``x.l`` -> _gams_initial_values)
+    # BEFORE the reform passes below rebuild ``model`` into fresh objects that
+    # drop this dynamically-attached attribute. It is re-attached by name to the
+    # working model just before the B&B loop so the root subnlp can seed from it.
+    _captured_gams_initial_values = getattr(model, "_gams_initial_values", None)
 
     # --- GDP reformulation: convert indicator/disjunctive/SOS to standard MINLP ---
     from discopt._jax.gdp_reformulate import reformulate_gdp
@@ -2660,11 +2773,23 @@ def solve_model(
     # Try to find an integer-feasible incumbent before B&B starts.
     _fp_ran = False
 
+    # Re-attach the captured modeler start (by name) to the post-reform working
+    # model so ``_gams_initial_seed`` can build a root subnlp seed from it. Only
+    # set when the reforms did not already carry it forward; a no-op when no
+    # start was provided.
+    if _captured_gams_initial_values and not getattr(model, "_gams_initial_values", None):
+        model._gams_initial_values = _captured_gams_initial_values
+
     # --- SubNLP primal heuristic state ---
     _subnlp_backend_fn = None
     _subnlp_calls = 0
     _subnlp_feasible = 0
     _subnlp_incumbent_updates = 0
+    # Best incumbent value the cutoff-tightening phases (C/C3) have already acted
+    # on. They fire whenever the incumbent strictly improves below this — from
+    # ANY source, including the sub-NLP / binary-seed heuristics that inject
+    # directly and are not counted in proc_stats["incumbent_updates"].
+    _last_tighten_inc = np.inf
     if subnlp_enabled:
         try:
             from typing import cast
@@ -2700,10 +2825,36 @@ def solve_model(
         if n_batch == 0:
             break
 
-        # Tighten node bounds via constraint propagation (FBBT).
         node_infeasible_mask = np.zeros(n_batch, dtype=bool)
+
+        # Apply the current global box to each exported node (issue: cutoff
+        # tightening was dead). Phase C (incumbent-cutoff OBBT) and Phase C3
+        # (incumbent-cutoff FBBT) shrink the global lb/ub once an incumbent is
+        # found, but the Rust tree has no bound-update API and re-exports nodes
+        # with their original (wide) boxes. Intersecting each node box with the
+        # current global lb/ub here is what makes that cutoff tightening
+        # actually prune: a region cut away only holds solutions no better than
+        # the incumbent, so dropping it is sound (open nodes keep lb < inc, so
+        # best_bound stays a valid lower bound <= the true optimum). Before any
+        # incumbent, lb/ub equal the root box and this is a no-op.
+        _gl = np.asarray(lb, dtype=np.float64)
+        _gu = np.asarray(ub, dtype=np.float64)
+        for i in range(n_batch):
+            bl = np.maximum(np.asarray(batch_lb[i], dtype=np.float64), _gl)
+            bu = np.minimum(np.asarray(batch_ub[i], dtype=np.float64), _gu)
+            if np.any(bl > bu + 1e-9):
+                # Empty intersection: node lies entirely outside the cutoff box,
+                # so its subtree cannot improve on the incumbent — fathom it.
+                node_infeasible_mask[i] = True
+                continue
+            batch_lb[i] = bl.tolist()
+            batch_ub[i] = bu.tolist()
+
+        # Tighten node bounds via constraint propagation (FBBT).
         if cl_list:
             for i in range(n_batch):
+                if node_infeasible_mask[i]:
+                    continue
                 node_lb_i = np.array(batch_lb[i])
                 node_ub_i = np.array(batch_ub[i])
                 t_lb, t_ub, node_infeasible = _tighten_node_bounds_with_status(
@@ -3336,6 +3487,7 @@ def solve_model(
                         result_sols[best_root_idx],
                         max_rounds=5,
                         backend=_resolve_heuristic_backend(nlp_solver),
+                        evaluator=evaluator,
                     )
                     if fp_sol is not None:
                         fp_obj = float(evaluator.evaluate_objective(fp_sol))
@@ -3347,6 +3499,48 @@ def solve_model(
                             logger.info("Feasibility pump found incumbent: obj=%.6g", fp_obj)
                 except Exception as e:
                     logger.debug("Feasibility pump failed: %s", e)
+
+                # --- Integer local search (1-opt + 2-opt) ---
+                # Two roles, both at the root:
+                #   (1) Feasibility recovery — if round-and-repair found no
+                #       incumbent, the relaxation's integer assignment is likely
+                #       true-infeasible (common for nonconvex integer-heavy
+                #       problems: the McCormick relaxation's integers satisfy the
+                #       relaxed but not the true constraints).
+                #   (2) Incumbent improvement — round-and-repair (feasibility
+                #       pump / nearest-rounding subnlp) only repairs the
+                #       *continuous* variables around ONE relaxation rounding, so
+                #       it routinely lands on a far-suboptimal integer assignment
+                #       (e.g. nvs23: it parks at obj=-287 while the global is
+                #       -1125). The lattice search seeds from the model's own
+                #       continuous relaxation and descends the integer lattice, so
+                #       it reaches much better integer assignments. Running it
+                #       even when an incumbent already exists lets it IMPROVE that
+                #       incumbent, not just recover feasibility.
+                # Sound either way: only subnlp-verified feasible points are
+                # injected, and inject_incumbent accepts a point only if it
+                # strictly beats the current incumbent.
+                if not _model_is_convex and best_root_idx is not None:
+                    try:
+                        from discopt._jax.primal_heuristics import integer_local_search
+
+                        ils = integer_local_search(
+                            model,
+                            result_sols[best_root_idx],
+                            backend=_resolve_heuristic_backend(nlp_solver),
+                            evaluator=evaluator,
+                            time_budget=min(5.0, 0.15 * max(1.0, time_limit)),
+                        )
+                        if ils is not None:
+                            _x_ils, _obj_ils = ils
+                            if np.isfinite(_obj_ils) and _obj_ils < _SENTINEL_THRESHOLD:
+                                tree.inject_incumbent(_x_ils.copy(), float(_obj_ils))
+                                logger.info(
+                                    "Integer local search found incumbent: obj=%.6g",
+                                    _obj_ils,
+                                )
+                    except Exception as e:
+                        logger.debug("Integer local search failed: %s", e)
 
         # --- SubNLP primal heuristic ---
         # Fix integers in the best relaxation solution, then solve the
@@ -3362,6 +3556,35 @@ def solve_model(
             and (iteration == 0 or iteration % max(1, subnlp_frequency) == 0)
         ):
             from discopt._jax.primal_heuristics import subnlp as _subnlp
+
+            # Root only: seed one subnlp from the modeler's GAMS-provided start
+            # (parsed into model._gams_initial_values). For nonconvex models the
+            # published point often lands in the global basin that generic
+            # relaxation/midpoint seeds miss (prob07: 162070 -> 154990). No-op
+            # when the model carries no initial values. Sound: subnlp re-verifies
+            # feasibility and inject_incumbent enforces strict improvement.
+            if iteration == 0 and _subnlp_calls < subnlp_max_calls:
+                _gseed = _gams_initial_seed(model, lb, ub)
+                if _gseed is not None:
+                    _subnlp_calls += 1
+                    try:
+                        _sn = _subnlp(
+                            model,
+                            _gseed,
+                            backend=_subnlp_backend_fn,
+                            nlp_options=subnlp_options,
+                            evaluator=evaluator,
+                        )
+                    except Exception as _e:
+                        logger.debug("subnlp (gams seed) raised: %s", _e)
+                        _sn = None
+                    if _sn is not None:
+                        _x_sn, _obj_sn = _sn
+                        _subnlp_feasible += 1
+                        if np.isfinite(_obj_sn) and _obj_sn < _SENTINEL_THRESHOLD:
+                            tree.inject_incumbent(_x_sn.copy(), float(_obj_sn))
+                            _subnlp_incumbent_updates += 1
+                            logger.info("SubNLP incumbent (gams seed): obj=%.6g", _obj_sn)
 
             _cands_sn = [
                 (i, float(result_lbs[i]))
@@ -3495,13 +3718,30 @@ def solve_model(
         # Import results back to Rust tree
         t_rust_start = time.perf_counter()
         tree.import_results(result_ids, result_lbs, result_sols, result_feas)
-        proc_stats = tree.process_evaluated()
+        tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
+
+        # Did the incumbent strictly improve this iteration, from ANY source?
+        # proc_stats["incumbent_updates"] counts only incumbents found in the
+        # batch evaluation — NOT the sub-NLP / binary-seed heuristics, which
+        # inject directly via tree.inject_incumbent. For small nonconvex MINLPs
+        # the optimum is routinely found by those heuristics, so gating the
+        # cutoff-tightening phases on the batch counter alone left the tightened
+        # global box (and thus all pruning) on the table and the gap never
+        # closed. Tracking the incumbent value across iterations fires the
+        # tightening once per genuine improvement regardless of who found it.
+        _inc_now = tree.incumbent()
+        _inc_obj_now = (
+            float(_inc_now[1]) if _inc_now is not None and np.isfinite(_inc_now[1]) else np.inf
+        )
+        _incumbent_improved = _inc_obj_now < _last_tighten_inc - 1e-9
+        if _incumbent_improved:
+            _last_tighten_inc = _inc_obj_now
 
         # --- Periodic OBBT with incumbent cutoff (Phase C) ---
         # When a new incumbent is found and bounds are still wide,
         # re-run OBBT with the incumbent objective as a cutoff.
-        if proc_stats["incumbent_updates"] > 0 and n_vars <= 200:
+        if _incumbent_improved and n_vars <= 200:
             incumbent_info = tree.incumbent()
             if incumbent_info is not None:
                 inc_sol, inc_obj = incumbent_info
@@ -3539,8 +3779,8 @@ def solve_model(
 
         # --- FBBT with incumbent cutoff (Phase C3) ---
         # Cheap bound tightening via Rust FBBT (no LP solves).
-        # Run on every incumbent update, complementing OBBT.
-        if _model_repr is not None and proc_stats["incumbent_updates"] > 0:
+        # Run on every incumbent improvement, complementing OBBT.
+        if _model_repr is not None and _incumbent_improved:
             incumbent_info = tree.incumbent()
             if incumbent_info is not None:
                 inc_sol, inc_obj = incumbent_info
@@ -4236,6 +4476,7 @@ def _solve_nlp_bb(
                         constraint_bounds,
                         opts,
                         nlp_solver,
+                        convex=_model_is_convex,
                     )
                 else:
                     psol_i = np.array(batch_psols[i])
@@ -4334,6 +4575,7 @@ def _solve_nlp_bb(
                         result_sols[best_root_idx],
                         max_rounds=5,
                         backend=_resolve_heuristic_backend(nlp_solver),
+                        evaluator=evaluator,
                     )
                     if fp_sol is not None:
                         fp_obj = float(evaluator.evaluate_objective(fp_sol))

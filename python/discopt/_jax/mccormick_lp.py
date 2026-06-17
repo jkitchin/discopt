@@ -16,6 +16,7 @@ that fits the per-node call shape in :mod:`discopt.solver`.
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -25,6 +26,8 @@ import numpy as np
 
 from discopt._jax.discretization import DiscretizationState
 from discopt._jax.milp_relaxation import (
+    _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE,
+    _RELAX_NUMERIC_CAP,
     _collect_affine_powers,
     _linear_constraint_forms,
     build_milp_relaxation,
@@ -32,10 +35,28 @@ from discopt._jax.milp_relaxation import (
 from discopt._jax.term_classifier import NonlinearTerms, classify_nonlinear_terms
 from discopt.modeling.core import Model, VarType
 
+logger = logging.getLogger(__name__)
+# Dedup key set so the oversize-lift fallback warns once per (cols, rows) shape.
+_oversize_warned: set[int] = set()
+
 # When a per-node wall-clock budget is threaded through solve_at_node, no single
 # internal re-solve is handed less than this floor (keeps a node that straddles
 # the deadline from receiving a zero/negative budget the backend would reject).
 _SOLVE_DEADLINE_FLOOR_S = 0.05
+
+# Densification cap for the lifted relaxation. The matrix-form MILP backends
+# (warm-started Rust simplex, POUNCE) materialize a DENSE ``(m, n+m)`` constraint
+# array plus a dense ``m×m`` slack identity, so their footprint scales as
+# ``(n_cols + n_rows) * n_rows`` cells. A binary-multilinear lift explodes the row
+# count -- e.g. autocorr_bern's degree-4 objective lifts to ~3.7k cols × ~85k rows,
+# whose dense form is ~7.5e9 cells (~60 GB): the allocation thrashes swap and never
+# returns (a hang, not a bound). Above this cap the LP relaxer declines the node
+# (returns no bound) and the spatial/integer B&B falls back to the rigorous
+# alphaBB/interval underestimator -- a valid, if weaker, lower bound -- so the
+# solve still returns its incumbent within the time limit instead of hanging.
+# ~1e8 cells ≈ 800 MB dense: far above any well-posed relaxation in practice
+# (typical MINLP lifts are < 1e6 cells) and far below the multi-GB blowup.
+_MAX_RELAX_DENSE_CELLS = 1.0e8
 
 
 @dataclass
@@ -150,6 +171,31 @@ class MccormickLPRelaxer:
         except Exception:
             return MccormickLPResult(status="error")
 
+        # Densification guard: decline nodes whose lifted relaxation would force a
+        # multi-GB dense allocation in the matrix-form backend (see
+        # ``_MAX_RELAX_DENSE_CELLS``). Returning no bound here is sound -- it only
+        # forgoes this node's LP underestimator; the caller keeps the rigorous
+        # alphaBB/interval bound and the incumbent search, so the solve respects
+        # its time limit instead of hanging on the dense solve.
+        n_cols = int(np.size(milp._c))
+        _a_ub = milp._A_ub
+        n_rows = 0 if _a_ub is None else int(_a_ub.shape[0])
+        if (n_cols + n_rows) * n_rows > _MAX_RELAX_DENSE_CELLS:
+            key = (n_cols, n_rows).__hash__()
+            if key not in _oversize_warned:
+                _oversize_warned.add(key)
+                logger.warning(
+                    "McCormick LP relaxation too large to solve densely "
+                    "(%d cols x %d rows ~ %.1e dense cells > cap %.0e); declining "
+                    "the per-node LP bound and falling back to the rigorous "
+                    "alphaBB/interval underestimator.",
+                    n_cols,
+                    n_rows,
+                    float((n_cols + n_rows) * n_rows),
+                    _MAX_RELAX_DENSE_CELLS,
+                )
+            return MccormickLPResult(status="skipped_oversize")
+
         # Pad original integrality flags to the lifted column count; aux cols
         # remain continuous (flag 0). If the model has no integers this is a
         # pure LP anyway.
@@ -169,6 +215,29 @@ class MccormickLPRelaxer:
             milp._integrality = self._orig_integrality
         if milp._integrality is not None and not int(milp._integrality.sum()):
             milp._integrality = None
+
+        # Soundness/conditioning guard (issue #15): the warm-started Rust simplex
+        # mishandles effectively-infinite *finite* variable bounds -- the ``1e20``
+        # sentinel discopt assigns to unbounded variables -- and declares a
+        # premature "optimal" at a wrong value. On ex9_2_6's root McCormick LP the
+        # simplex returns 0.0 where HiGHS returns -406.0; the bogus 0.0 (which
+        # exceeds the true optimum) then prunes the root and certifies a
+        # suboptimal incumbent -- a false-"optimal", the worst failure class.
+        # Clamp any bound whose magnitude reaches the effective-infinity cap to a
+        # true +/-inf before solving. This only WIDENS a variable's box, so it
+        # merely enlarges the relaxed feasible set and the LP optimum stays a
+        # valid (never-too-high) lower bound; it is a no-op on well-scaled boxes
+        # and routes genuine unbounded variables through the simplex's correct
+        # free-variable handling. Mirrors the root path's
+        # ``sanitize_relaxation_for_conditioning``.
+        _cap = _RELAX_NUMERIC_CAP
+        milp._bounds = [
+            (
+                lo if abs(lo) < _cap else (-np.inf if lo < 0 else np.inf),
+                hi if abs(hi) < _cap else (np.inf if hi > 0 else -np.inf),
+            )
+            for (lo, hi) in milp._bounds
+        ]
 
         # The caller's ``time_limit`` is the budget for the WHOLE node, but this
         # method re-solves the relaxation many times (the initial solve, up to
@@ -229,6 +298,31 @@ class MccormickLPRelaxer:
             if verify.status == "optimal":
                 res = verify
 
+        # Soundness guard (residual conditioning): even after the bound clamp
+        # above, an LP whose constraint/coefficient magnitudes remain large can
+        # still fool the fast simplex into a wrong "optimal" -- a dual bound that
+        # is too HIGH, the most dangerous unsoundness (a too-high lower bound
+        # fathoms feasible nodes and certifies a suboptimal incumbent). When the
+        # relaxation is still ill-conditioned above the magnitude where the
+        # simplex is unreliable (the same ``_LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE``
+        # line the cut builders abstain at), cross-check the optimum with HiGHS
+        # and adopt its value whenever it is lower. Adopting only a LOWER bound
+        # can never cause an unsound fathom, and the gate keeps this off the
+        # common well-scaled fast path (no extra solve).
+        if (
+            res.status == "optimal"
+            and self._backend != "auto"
+            and res.objective is not None
+            and self._max_finite_magnitude(milp) > _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE
+        ):
+            verify = milp.solve(time_limit=_remaining(), backend="auto")
+            if (
+                verify.status == "optimal"
+                and verify.objective is not None
+                and verify.objective < res.objective - 1e-6
+            ):
+                res = verify
+
         # A valid lower bound on the original problem requires the relaxation LP
         # to be solved to OPTIMALITY; any other terminal status yields no
         # certified bound, so report the status with no lower bound and let the
@@ -241,6 +335,37 @@ class MccormickLPRelaxer:
             lower_bound=float(res.objective),
             x=x_orig,
         )
+
+    @staticmethod
+    def _max_finite_magnitude(milp) -> float:
+        """Largest finite magnitude across the LP's data (cost, rows, RHS, bounds).
+
+        A cheap conditioning proxy used to gate the HiGHS cross-check: well-scaled
+        relaxations stay on the fast simplex path, ill-conditioned ones get
+        re-verified. Non-finite entries (the +/-inf bounds left by the clamp) are
+        ignored.
+        """
+        import scipy.sparse as sp
+
+        worst = 0.0
+        A = milp._A_ub
+        if A is not None:
+            data = A.data if sp.issparse(A) else np.asarray(A).ravel()
+            if np.size(data):
+                fin = np.abs(data[np.isfinite(data)])
+                if fin.size:
+                    worst = max(worst, float(fin.max()))
+        for arr in (milp._b_ub, milp._c):
+            if arr is not None and np.size(arr):
+                a = np.abs(np.asarray(arr, dtype=np.float64).ravel())
+                fin = a[np.isfinite(a)]
+                if fin.size:
+                    worst = max(worst, float(fin.max()))
+        for lo, hi in milp._bounds:
+            for v in (lo, hi):
+                if np.isfinite(v):
+                    worst = max(worst, abs(float(v)))
+        return worst
 
     def _separate_multilinear(self, milp, varmap, res, deadline):
         """Tighten products beyond the dense RLT cap by on-demand hull separation.

@@ -135,7 +135,16 @@ class _Lifter:
     def __init__(self, model: Model):
         self.model = model
         self._cache: dict[tuple[int, int], Variable] = {}
-        self._expr_cache: dict[int, Variable] = {}
+        # Keyed by a STRUCTURAL representation of the expression, never ``id()``:
+        # CPython recycles the ``id()`` of a garbage-collected object, so a later,
+        # structurally *different* expression can reuse a freed address and score a
+        # false cache hit — returning a stale aux for the wrong sub-expression.
+        # In ex7_2_3 that dropped a ``/x8`` denominator from a lifted ratio,
+        # producing a non-feasibility-preserving reformulation that certified an
+        # infeasible box corner as the global optimum (a false "optimal"). A
+        # structural key can only ever *fail* to dedup (harmless — an extra aux),
+        # never falsely merge two distinct expressions.
+        self._expr_cache: dict[str, Variable] = {}
         self.aux_constraints: list[Constraint] = []
         self._counter = 0
 
@@ -170,7 +179,7 @@ class _Lifter:
         monomial lift so any mixed products inside *base* become bilinear aux too.
         Deduplicated by structural identity of the (already-distributed) node.
         """
-        key = id(expr)
+        key = repr(expr)
         cached = self._expr_cache.get(key)
         if cached is not None:
             return cached

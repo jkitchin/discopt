@@ -1156,6 +1156,16 @@ def _decompose_product(
                 if key in fractional_power_var_map:
                     var_indices.append(fractional_power_var_map[key])
                     return True
+        # Fold a *composite* variable-free factor (e.g. ``neg(1e6)`` from a
+        # parsed ``-1e6*i1*i2``, or ``(-3)*(-3)``) into the scalar. A bare
+        # ``Constant`` is handled above; this catches negations/arithmetic over
+        # constants that would otherwise look like an undecomposable factor and
+        # cause the whole product (and its constraint) to be dropped from the
+        # relaxation. Exact and variable-free, so it only ever tightens.
+        cval = _eval_constant_expr(e)
+        if cval is not None:
+            scalar[0] *= cval
+            return True
         return False
 
     if not visit(expr):

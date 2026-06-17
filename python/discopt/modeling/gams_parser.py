@@ -948,9 +948,19 @@ class _Parser:
         model_name = self._expect(_Tok.IDENT).value
         self._expect(_Tok.IDENT, "using")
         model_type = self._expect(_Tok.IDENT).value.lower()
-        sense_tok = self._expect(_Tok.IDENT)
-        sense = sense_tok.value.lower()
-        obj_var = self._expect(_Tok.IDENT).value
+        # Optimization solves carry a sense keyword + objective variable
+        # ("... minimizing z"). Objectiveless model types — CNS (Constrained
+        # Nonlinear System) and MCP (Mixed Complementarity Problem) — have
+        # neither; they are pure feasibility / square-system solves. Only consume
+        # the sense + objective when a sense keyword actually follows, so an
+        # objectiveless solve parses as a feasibility problem (no objective set)
+        # instead of failing on the missing "minimizing"/"maximizing" token.
+        sense = "minimizing"
+        obj_var = ""
+        cur = self._cur()
+        if cur.kind == _Tok.IDENT and cur.value.lower() in ("minimizing", "maximizing"):
+            sense = self._advance().value.lower()
+            obj_var = self._expect(_Tok.IDENT).value
         self._skip_semi()
         self.solves.append(GamsSolve(model_name, model_type, sense, obj_var))
 
@@ -1045,6 +1055,7 @@ class _Parser:
         "tanh",
         "power",
         "sign",
+        "signpower",
         "min",
         "max",
         "ceil",
@@ -1636,6 +1647,19 @@ class _ModelBuilder:
                 else:
                     m.maximize(obj_var)
 
+        # Objectiveless solves (CNS — Constrained Nonlinear System, MCP — Mixed
+        # Complementarity) and any solve whose objective variable could not be
+        # resolved leave no objective set. GAMS treats CNS/MCP as pure
+        # feasibility / square-system solves ("find x satisfying all equations").
+        # Model that exactly as "minimize 0 subject to the constraints": a
+        # constant objective makes every feasible point optimal, which is the
+        # CNS semantics, and lets the model validate + solve instead of raising
+        # "No objective set". Gated on an EMPTY objective variable so a genuine
+        # optimization solve whose objective var failed to resolve still raises
+        # loudly rather than being silently downgraded to a feasibility solve.
+        if m._objective is None and not obj_var_name:
+            m.minimize(0.0)
+
     def _is_obj_equation(self, eqdef, obj_var_name: str | None) -> bool:
         if obj_var_name is None:
             return False
@@ -1728,22 +1752,25 @@ class _ModelBuilder:
             raise GamsParseError(f"Cannot resolve indexed ref: {name}")
 
         if isinstance(ast_node, ExprBinOp):
-            left = self._build_expr(ast_node.left, env)
-            right = self._build_expr(ast_node.right, env)
-            # handle string returns (index values) — convert to constants
-            left = self._ensure_expr(left)
-            right = self._ensure_expr(right)
-            if ast_node.op == "+":
-                return left + right
-            if ast_node.op == "-":
-                return left - right
-            if ast_node.op == "*":
-                return left * right
-            if ast_node.op == "/":
-                return left / right
-            if ast_node.op == "**":
-                return left**right
-            raise GamsParseError(f"Unknown operator: {ast_node.op}")
+            # Iteratively unwind the LEFT-associative operator spine instead of
+            # recursing into ``ast_node.left``. The precedence-climbing parser
+            # builds long flat chains (e.g. a 1000-term autocorrelation sum) as a
+            # left-deep tree ``(((a+b)+c)+d)``; a naive recursion descends once
+            # per term and overflows the (C) stack on large models — manifesting
+            # as a RecursionError at the default limit or a hard hang/segfault
+            # once the recursion limit is raised. Walking the left spine in a
+            # loop makes this O(N) iterative while preserving exact left-to-right
+            # evaluation order (so ``-``/``/`` and float rounding are unchanged).
+            chain = []  # (op, right_ast), collected top-down
+            node: object = ast_node
+            while isinstance(node, ExprBinOp):
+                chain.append((node.op, node.right))
+                node = node.left
+            acc = self._ensure_expr(self._build_expr(node, env))
+            for op, right_ast in reversed(chain):
+                right = self._ensure_expr(self._build_expr(right_ast, env))
+                acc = self._apply_binop(op, acc, right)
+            return acc
 
         if isinstance(ast_node, ExprUnaryMinus):
             operand = self._build_expr(ast_node.operand, env)
@@ -1777,6 +1804,21 @@ class _ModelBuilder:
             return dm.Constant(1.0)
 
         raise GamsParseError(f"Unknown AST node: {type(ast_node)}")
+
+    @staticmethod
+    def _apply_binop(op, left, right):
+        """Apply a binary operator to two already-built Expression operands."""
+        if op == "+":
+            return left + right
+        if op == "-":
+            return left - right
+        if op == "*":
+            return left * right
+        if op == "/":
+            return left / right
+        if op == "**":
+            return left**right
+        raise GamsParseError(f"Unknown operator: {op}")
 
     def _ensure_expr(self, val):
         """Convert non-Expression values (strings, ints, floats) to Constant."""
@@ -2049,6 +2091,26 @@ class _ModelBuilder:
             return args[0] ** args[1]
         if fn == "sign":
             return dm.sign(args[0])
+        if fn == "signpower":
+            # GAMS signpower(x, p) = sign(x) * |x|^p, exactly equal to the
+            # smooth form x * |x|^(p-1) for all p >= 0 (both are 0 at x=0).
+            # Using x*|x|^(p-1) avoids a spurious sign() discontinuity that
+            # would otherwise wreck the relaxation.  Fold a constant exponent
+            # so the relaxation/FBBT see a clean form (for p=2 this is x*|x|).
+            base = args[0]
+            pexp = args[1]
+            pval: float | None = None
+            if isinstance(pexp, dm.Constant):
+                pval = float(pexp.value)
+            elif isinstance(pexp, (int, float)):
+                pval = float(pexp)
+            if pval is not None:
+                if pval == 2.0:
+                    return base * dm.abs_(base)
+                if pval == 1.0:
+                    return base
+                return base * dm.abs_(base) ** (pval - 1.0)
+            return base * dm.abs_(base) ** (pexp - 1)
         if fn == "min":
             return dm.minimum(args[0], args[1])
         if fn == "max":

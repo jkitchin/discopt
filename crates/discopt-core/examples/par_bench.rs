@@ -122,6 +122,7 @@ fn opts(inst: &Instance) -> MilpOptions {
         simplex: SimplexOptions {
             tol: 1e-9,
             max_iter: 100_000,
+            deadline: None,
         },
     }
 }
