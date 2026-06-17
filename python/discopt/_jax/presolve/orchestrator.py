@@ -112,11 +112,13 @@ def run_orchestrated_presolve(
             # byte-reproducible bound arrays detects that fixed point, and
             # still flags genuine advances when an earlier Python pass
             # tightened a declared bound that this sweep can propagate.
-            if (
-                prev_bounds_lo is None
-                or not np.array_equal(last_bounds_lo, prev_bounds_lo)
-                or not np.array_equal(last_bounds_hi, prev_bounds_hi)
-            ):
+            converged = (
+                prev_bounds_lo is not None
+                and prev_bounds_hi is not None
+                and np.array_equal(last_bounds_lo, prev_bounds_lo)
+                and np.array_equal(last_bounds_hi, prev_bounds_hi)
+            )
+            if not converged:
                 sweep_progress = True
             prev_bounds_lo = last_bounds_lo
             prev_bounds_hi = last_bounds_hi
