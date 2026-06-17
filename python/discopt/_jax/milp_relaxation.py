@@ -192,11 +192,7 @@ def equilibrate_relaxation_lp(
     col_scale = np.ones(n)
     row_scale = np.ones(m)
     # Columns we are allowed to scale: continuous only (integer cols stay at 1).
-    scalable = (
-        np.ones(n, dtype=bool)
-        if integrality is None
-        else (np.asarray(integrality) == 0)
-    )
+    scalable = np.ones(n, dtype=bool) if integrality is None else (np.asarray(integrality) == 0)
 
     for _ in range(iters):
         absA = A.copy()

@@ -261,9 +261,7 @@ def test_ex1252_objective_gating_priority_vars():
     m = dm.from_nl(str(nl))
 
     pri = _branch_priority_integer_vars(m)
-    assert sorted(pri) == [36, 37, 38], (
-        f"expected gating binaries {{36,37,38}}, got {sorted(pri)}"
-    )
+    assert sorted(pri) == [36, 37, 38], f"expected gating binaries {{36,37,38}}, got {sorted(pri)}"
 
     # The selector picks a fractional, unfixed priority var and skips a pinned one.
     import numpy as np
@@ -329,8 +327,13 @@ def test_ex1252_relaxation_equilibration_conditions_and_preserves_bound():
     from discopt._jax.milp_relaxation import MilpRelaxationModel
 
     scaled = MilpRelaxationModel(
-        c=c2, A_ub=A2, b_ub=b2, bounds=bounds2, obj_offset=milp._obj_offset,
-        integrality=None, objective_bound_valid=True,
+        c=c2,
+        A_ub=A2,
+        b_ub=b2,
+        bounds=bounds2,
+        obj_offset=milp._obj_offset,
+        integrality=None,
+        objective_bound_valid=True,
     ).solve(backend="simplex")
     assert raw.status == scaled.status == "optimal"
     assert abs(float(raw.bound) - float(scaled.bound)) <= 1e-6 + 1e-6 * abs(float(raw.bound))
