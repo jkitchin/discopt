@@ -151,11 +151,14 @@ def test_nested_division_backends_agree(xb, yb):
     )
 
 
-def test_nested_division_abstains_on_negative_numerator():
-    """A *negative* numerator coefficient is out of scope — folding it into the
-    reciprocal argument would flip the denominator interval negative (the convex
-    reciprocal envelope needs a positive denominator). The lift must abstain, which
-    leaves the constraint un-lifted (sound: it only enlarges the relaxation)."""
+def test_negative_numerator_ratio_lifts_soundly():
+    """A *negative* numerator coefficient is out of scope for the reciprocal-based
+    nested-division lift (folding it into the reciprocal argument would flip the
+    denominator interval negative). The ratio-of-products lift (issue #185) handles
+    it soundly instead: ``(-0.5*y)/x`` becomes the pure ratio ``r = y/x`` with the
+    bilinear identity ``r*x = y`` and the ``-0.5`` applied as a substitution
+    coefficient (kept out of the envelope rows). The lift therefore *engages* now,
+    and the relaxation stays a valid lower bound."""
     m = dm.Model()
     x = m.continuous("x", lb=1.0, ub=3.0)
     y = m.continuous("y", lb=1.0, ub=3.0)
@@ -169,8 +172,16 @@ def test_nested_division_abstains_on_negative_numerator():
         bound_override=(np.asarray(lb), np.asarray(ub)),
         superposition=relaxer._superposition,
     )
-    # No lift → no aux columns beyond the 2 originals.
-    assert len(milp._c) == 2, "negative-numerator division should not lift"
+    # The ratio-of-products lift adds a pure-ratio aux column (issue #185).
+    assert len(milp._c) > 2, "negative-numerator ratio should lift via the #185 path"
+
+    # Soundness: the root lower bound never exceeds the true minimum, which is
+    # ``-0.5 * max(y/x) = -0.5 * 3 = -1.5`` at (x, y) = (1, 3).
+    res = relaxer.solve_at_node(np.asarray(lb, float), np.asarray(ub, float))
+    assert res.status == "optimal" and res.lower_bound is not None
+    assert res.lower_bound <= -1.5 + _TOL, (
+        f"unsound negative-numerator ratio bound {res.lower_bound} > true min -1.5"
+    )
 
 
 # nvs05/nvs22: constraint C2 = (0.5*x3)/x6 now lifts; (instance, optimum).
