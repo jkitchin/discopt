@@ -1501,6 +1501,39 @@ def _classify_model_convexity(
         return False, False, None
 
 
+# Size gate for the auto cut policy: above this many scalar variables the
+# per-node cut-separation overhead (eigh / extra LP re-solves) outweighs the
+# typical bound gain, so the policy declines to enable cuts (sound: a no-op).
+_AUTO_CUTS_MAX_VARS = 40
+
+
+def _apply_auto_cut_policy(model: "Model", relaxer) -> None:
+    """Choose at most one QCQP cut family by structure + size, in place.
+
+    Data-driven policy (see the W2 A/B sweep): on QCQP *with* linear constraints
+    targeted RLT is the strongest lever and PSD can even add nodes, so prefer
+    RLT; on box-QP (no linear constraints) RLT cannot fire, so use PSD. Never
+    stack the two. Declines (no cuts) on oversize models. Mutates the relaxer's
+    ``_psd_cuts`` / ``_rlt_cuts`` flags; purely a performance choice — every cut
+    family is sound, so this never affects correctness.
+    """
+    from discopt._jax.milp_relaxation import _linear_constraint_forms
+
+    try:
+        n = sum(v.size for v in model._variables)
+        if n > _AUTO_CUTS_MAX_VARS:
+            return  # size gate: leave cuts off
+        has_linear_constraints = bool(_linear_constraint_forms(model, n))
+        if has_linear_constraints:
+            relaxer._rlt_cuts = True
+            relaxer._psd_cuts = False
+        else:
+            relaxer._psd_cuts = True
+            relaxer._rlt_cuts = False
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("auto cut policy skipped: %s", exc)
+
+
 def _root_relaxation_lower_bound(
     model: "Model",
     root_lb: np.ndarray,
@@ -1622,6 +1655,7 @@ def solve_model(
     cutting_planes: bool = False,
     psd_cuts: bool = False,
     rlt_cuts: bool = False,
+    cuts: str = "manual",
     partitions: int = 0,
     branching_policy: str = "fractional",
     use_learned_relaxations: bool = False,
@@ -2831,6 +2865,12 @@ def solve_model(
                 _mc_lp_relaxer = None
                 _mc_mode = "nlp"
             else:
+                # Structure-gated cut policy (cuts="auto"): the A/B sweep showed
+                # RLT dominates on QCQP *with* linear constraints, PSD on box-QP
+                # (no constraints), and stacking the two is counter-productive. So
+                # pick exactly one by structure, gated by size, never both.
+                if cuts == "auto":
+                    _apply_auto_cut_policy(model, _mc_lp_relaxer)
                 # A node is spatial-branchable if there is a finite-box continuous
                 # variable to bisect, OR an integer variable in a nonlinear term
                 # whose domain can be partitioned (issue #194). Register those
