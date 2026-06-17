@@ -2812,6 +2812,7 @@ def solve_model(
             _mc_lp_relaxer = MccormickLPRelaxer(
                 model,
                 superposition=(relaxation_arithmetic == "superposition"),
+                psd_cuts=psd_cuts,
             )
         except Exception as e:
             logger.warning("McCormick LP relaxer setup failed: %s", e)
