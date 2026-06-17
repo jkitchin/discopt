@@ -97,6 +97,9 @@ struct Simplex<'a> {
     na: usize, // n + m (with artificials appended)
     tol: f64,
     max_iter: usize,
+    /// Absolute wall-clock deadline (polled inside the iteration loop); `None`
+    /// disables the check. See [`SimplexOptions::deadline`].
+    deadline: Option<std::time::Instant>,
     lu: FeralLU,
     basis: Vec<usize>, // slot -> column (len m)
     slot_of: Vec<i64>, // column -> slot, or -1
@@ -124,6 +127,7 @@ impl<'a> Simplex<'a> {
             na,
             tol: opts.tol,
             max_iter: opts.max_iter,
+            deadline: opts.deadline,
             lu: FeralLU::new(),
             basis: Vec::new(),
             slot_of: vec![-1; na],
@@ -331,6 +335,20 @@ impl<'a> Simplex<'a> {
             .basic_values(art_sign)
             .map_err(|_| LpStatus::Numerical)?;
         for _iter in 0..self.max_iter {
+            // Poll the wall-clock deadline every 256 pivots (cheap relative to a
+            // pricing+ftran iteration). A dense, degenerate lifted-McCormick LP
+            // can otherwise grind toward `max_iter` and run uninterruptibly for
+            // minutes; bailing as IterLimit keeps the enclosing B&B inside its
+            // time budget, and the caller treats the loose bound soundly (no
+            // prune, gap left uncertified). Checks at _iter == 0 too, so a cold
+            // fallback entered already past the deadline returns immediately.
+            if (_iter & 255) == 0
+                && self
+                    .deadline
+                    .is_some_and(|d| std::time::Instant::now() >= d)
+            {
+                return Err(LpStatus::IterLimit);
+            }
             // price: y = B⁻ᵀ c_B ; reduced cost d_j = c_j − yᵀA_j
             let mut y: Vec<f64> = self.basis.iter().map(|&j| cost[j]).collect();
             if self.lu.btran(&mut y).is_err() {

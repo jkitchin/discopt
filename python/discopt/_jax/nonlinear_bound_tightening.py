@@ -83,6 +83,71 @@ def build_flat_variable_metadata(model: Model) -> FlatVariableMetadata:
     return FlatVariableMetadata(base_offsets=base_offsets, flat_var_types=tuple(flat_var_types))
 
 
+def _model_structural_token(model: Model) -> tuple[int, int]:
+    """Identity token for a model's constraint set, used to validate caches.
+
+    Nonlinear tightening runs once per branch-and-bound node on the *same* model
+    with only the numeric variable box changing; the symbolic constraint DAG is
+    invariant. This token detects the rare case of the model being mutated
+    (constraints rebuilt, added, or removed) between calls so that structural
+    caches are dropped rather than reused stale.
+    """
+    constraints = model._constraints
+    return (id(constraints), len(constraints))
+
+
+def _get_struct_cache(model: Model) -> dict:
+    """Return (building if needed) the per-model structural cache.
+
+    Holds bound-independent decompositions reused across B&B nodes: the flat
+    variable metadata and the additive flattening of constraint bodies. The cache
+    is keyed to a structural token and rebuilt if the model's constraint set
+    changes. If the model cannot store an attribute, a fresh (non-persistent)
+    cache is returned so callers degrade gracefully to recomputation.
+    """
+    token = _model_structural_token(model)
+    cache = getattr(model, "_nl_struct_cache", None)
+    if cache is None or cache.get("token") != token:
+        cache = {
+            "token": token,
+            "flatten": {},
+            "metadata": build_flat_variable_metadata(model),
+        }
+        try:
+            setattr(model, "_nl_struct_cache", cache)
+        except Exception:
+            pass
+    return cache
+
+
+def _cached_flat_metadata(model: Model) -> FlatVariableMetadata:
+    """Return per-model flat-variable metadata, cached across B&B nodes."""
+    metadata: FlatVariableMetadata = _get_struct_cache(model)["metadata"]
+    return metadata
+
+
+def _cached_flat_terms(model: Model, expr) -> list[tuple[float, object]]:
+    """Return the additive flattening of ``expr`` at unit scale, cached per model.
+
+    ``_flatten_sum`` walks the symbolic expression DAG with isinstance dispatch on
+    every node. That structure is invariant across B&B nodes (only the numeric box
+    changes), so the result is memoized keyed by expression identity. The returned
+    list is identical to a fresh ``_flatten_sum`` call — exact-math-preserving.
+
+    Callers MUST treat the returned list as read-only; it is shared with the cache.
+    All current rules iterate it read-only.
+    """
+    cache = _get_struct_cache(model)
+    flatten = cache["flatten"]
+    key = id(expr)
+    terms: Optional[list[tuple[float, object]]] = flatten.get(key)
+    if terms is None:
+        terms = []
+        _flatten_sum(expr, 1.0, terms)
+        flatten[key] = terms
+    return terms
+
+
 @dataclass(frozen=True)
 class NonlinearBoundTighteningStats:
     """Summary of a nonlinear tightening pass."""
@@ -536,8 +601,7 @@ class SumOfSquaresUpperBoundRule(NonlinearBoundTighteningRule):
             if getattr(constraint, "sense", None) not in ("<=", "=="):
                 continue
 
-            terms: list[tuple[float, object]] = []
-            _flatten_sum(constraint.body, 1.0, terms)
+            terms = _cached_flat_terms(model, constraint.body)
 
             constant_term = 0.0
             square_coeffs: dict[int, float] = {}
@@ -689,8 +753,7 @@ class SqrtSumOfSquaresUpperBoundRule(NonlinearBoundTighteningRule):
             if getattr(constraint, "sense", None) not in ("<=", "=="):
                 continue
 
-            terms: list[tuple[float, object]] = []
-            _flatten_sum(constraint.body, 1.0, terms)
+            terms = _cached_flat_terms(model, constraint.body)
 
             constant_term = 0.0
             sqrt_match: Optional[tuple[float, dict[int, float]]] = None
@@ -776,8 +839,7 @@ class SeparableQuadraticUpperBoundRule(NonlinearBoundTighteningRule):
             if getattr(constraint, "sense", None) not in ("<=", "=="):
                 continue
 
-            terms: list[tuple[float, object]] = []
-            _flatten_sum(constraint.body, 1.0, terms)
+            terms = _cached_flat_terms(model, constraint.body)
 
             constant_term = 0.0
             quad_coeffs: dict[int, float] = {}
@@ -1024,8 +1086,7 @@ class MonotoneFunctionEqualityRule(NonlinearBoundTighteningRule):
             if getattr(constraint, "sense", None) != "==":
                 continue
 
-            terms: list[tuple[float, object]] = []
-            _flatten_sum(constraint.body, 1.0, terms)
+            terms = _cached_flat_terms(model, constraint.body)
 
             constant_term = 0.0
             affine_match: Optional[tuple[Optional[int], float, float]] = None
@@ -1208,8 +1269,7 @@ class MonotoneFunctionBoundsRule(NonlinearBoundTighteningRule):
             if getattr(constraint, "sense", None) not in ("<=", "=="):
                 continue
 
-            terms: list[tuple[float, object]] = []
-            _flatten_sum(constraint.body, 1.0, terms)
+            terms = _cached_flat_terms(model, constraint.body)
 
             constant_term = 0.0
             function_match: Optional[tuple[str, float, int, float, float]] = None
@@ -1345,8 +1405,7 @@ class QuadraticEqualityBoundsRule(NonlinearBoundTighteningRule):
             if getattr(constraint, "sense", None) != "==":
                 continue
 
-            terms: list[tuple[float, object]] = []
-            _flatten_sum(constraint.body, 1.0, terms)
+            terms = _cached_flat_terms(model, constraint.body)
 
             constant_term = 0.0
             affine_match: Optional[tuple[Optional[int], float, float]] = None
@@ -1674,8 +1733,7 @@ class PositiveAffineReciprocalBoundsRule(NonlinearBoundTighteningRule):
             if getattr(constraint, "sense", None) not in ("<=", "=="):
                 continue
 
-            terms: list[tuple[float, object]] = []
-            _flatten_sum(constraint.body, 1.0, terms)
+            terms = _cached_flat_terms(model, constraint.body)
 
             constant_term = 0.0
             reciprocal_match: Optional[tuple[float, object]] = None
@@ -1744,8 +1802,7 @@ class NegativePowerBoundsRule(NonlinearBoundTighteningRule):
             if getattr(constraint, "sense", None) not in ("<=", "=="):
                 continue
 
-            terms: list[tuple[float, object]] = []
-            _flatten_sum(constraint.body, 1.0, terms)
+            terms = _cached_flat_terms(model, constraint.body)
 
             power_match: Optional[tuple[int, float, float]] = None
             affine_coeff = np.zeros(n_vars, dtype=np.float64)
@@ -1891,8 +1948,7 @@ class ReciprocalBoundsRule(NonlinearBoundTighteningRule):
             if getattr(constraint, "sense", None) not in ("<=", "=="):
                 continue
 
-            terms: list[tuple[float, object]] = []
-            _flatten_sum(constraint.body, 1.0, terms)
+            terms = _cached_flat_terms(model, constraint.body)
 
             constant_term = 0.0
             reciprocal_match: Optional[tuple[float, int, float, float]] = None
@@ -1992,7 +2048,7 @@ def tighten_nonlinear_bounds(
     tightened_ub = np.asarray(flat_ub, dtype=np.float64).copy()
     initial_lb = tightened_lb.copy()
     initial_ub = tightened_ub.copy()
-    metadata = build_flat_variable_metadata(model)
+    metadata = _cached_flat_metadata(model)
 
     applied_rules: list[str] = []
 

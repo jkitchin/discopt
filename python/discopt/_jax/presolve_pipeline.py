@@ -279,9 +279,34 @@ def propagate_bounds_to_model(model, model_repr) -> int:
 
     n_tightened = 0
     py_blocks = list(model._variables)
-    n_blocks = min(len(py_blocks), model_repr.n_var_blocks)
-    for bi in range(n_blocks):
-        block = py_blocks[bi]
+
+    # Map Rust blocks to Python variable blocks *by name*, not by position.
+    # Variable-eliminating passes (``aggregate``/``eliminate``) call
+    # ``variables.remove(elim_block)`` on the Rust side, which shifts every
+    # subsequent block index down. A positional ``min(len, n_blocks)`` mapping
+    # then silently cross-assigns each surviving block's (tighter) bounds onto
+    # the *wrong* Python variable — for models with adjacent fixed/negatively
+    # bounded variables (e.g. gastransnlp) this fabricates empty boxes and a
+    # false ``infeasible`` verdict. Matching on the Rust-side ``var_names``
+    # keeps the mapping correct regardless of how many variables were removed.
+    try:
+        rust_names = list(model_repr.var_names())
+    except Exception:  # pragma: no cover - older repr without var_names
+        rust_names = None
+
+    if rust_names is not None and len(rust_names) == model_repr.n_var_blocks:
+        py_by_name = {blk.name: blk for blk in py_blocks}
+        block_iter = [(py_by_name[nm], ri) for ri, nm in enumerate(rust_names) if nm in py_by_name]
+    else:
+        # Fallback: only trust positional mapping when the index space is
+        # provably unchanged (no variable was eliminated). Otherwise skip
+        # propagation entirely — forgoing presolve tightening is sound; a
+        # misaligned positional copy is not.
+        if model_repr.n_var_blocks != len(py_blocks):
+            return 0
+        block_iter = [(py_blocks[bi], bi) for bi in range(len(py_blocks))]
+
+    for block, bi in block_iter:
         py_lb = np.asarray(block.lb, dtype=np.float64)
         py_ub = np.asarray(block.ub, dtype=np.float64)
         rust_lb = np.asarray(model_repr.var_lb(bi), dtype=np.float64)

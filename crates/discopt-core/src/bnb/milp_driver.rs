@@ -178,6 +178,22 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
     // the tree are added once and shared by all nodes.
     let mut pool_sigs: HashSet<Vec<(u32, i64)>> = HashSet::new();
 
+    // Absolute wall-clock deadline for the whole solve (root cuts + B&B),
+    // computed up front so even the root-cut LP solves below honour it. The
+    // simplex options carry it into every primal/dual loop, so a single
+    // pathological dense LP cannot run past the budget; `node_simplex` is the
+    // deadline-aware variant used for all LP solves here. See
+    // `SimplexOptions::deadline`.
+    let t_start = std::time::Instant::now();
+    let deadline = opts
+        .time_limit_s
+        .map(|tl| t_start + std::time::Duration::from_secs_f64(tl));
+    let node_simplex = {
+        let mut sx = opts.simplex.clone();
+        sx.deadline = deadline;
+        sx
+    };
+
     // --- P5/P8: multi-round root GMI cuts from the native simplex basis ---
     // Each round re-solves the (growing) root LP and separates GMI cuts off its
     // native basis, adding them as `coeffs·x − s = rhs` surplus rows. Iterating
@@ -199,7 +215,7 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
                 l: &l_w,
                 u: &u_w,
             };
-            let root = solve_lp(&root_lp, &b_w, &opts.simplex);
+            let root = solve_lp(&root_lp, &b_w, &node_simplex);
             lp_iters += root.iters;
             if root.status != LpStatus::Optimal {
                 break;
@@ -254,19 +270,16 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
     let mut slack_l = l_w[ns..].to_vec();
     let mut slack_u = u_w[ns..].to_vec();
 
-    let t_start = std::time::Instant::now();
-    // Absolute wall-clock deadline. The loop-top check below stops *dispatching*
-    // new batches once it passes, but a 64-node batch with strong branching can
-    // itself run several seconds, so a sub-second `time_limit_s` would overshoot
-    // by that whole batch. `solve_node` reads this deadline to drop each node's
+    // `deadline` (computed above, before the root cuts) drives two layers of
+    // budget enforcement: the loop-top check below stops *dispatching* new
+    // batches once it passes; `solve_node` reads it to drop each node's
     // *optional* effort (strong branching, cover separation, rounding) once it is
     // reached — leaving only the cheap LP solve that yields the node's valid
     // bound — so the in-flight batch drains quickly instead of running to
-    // completion. Soundness is untouched: those steps only change branching
-    // choice / cut tightness / early incumbents, never a bound's validity.
-    let deadline = opts
-        .time_limit_s
-        .map(|tl| t_start + std::time::Duration::from_secs_f64(tl));
+    // completion; and `node_simplex.deadline` bounds each individual LP solve
+    // from inside the simplex loop. Soundness is untouched: those steps only
+    // change branching choice / cut tightness / early incumbents, never a
+    // bound's validity.
     'search: loop {
         if tm.is_finished() || tm.gap() <= opts.gap_tol {
             break;
@@ -340,6 +353,7 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
                 n_orig_rows,
                 obj_const,
                 opts,
+                simplex: &node_simplex,
                 sb_active,
                 inc_snapshot: tm.incumbent().map(|(_, inc)| inc),
                 reliability: tm.get_reliability_threshold(),
@@ -377,6 +391,15 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
         for (k, out) in outputs.into_iter().enumerate() {
             let id = batch.node_ids[k];
             lp_iters += out.iters;
+            if out.deferred {
+                // Deadline hit before this node's LP solve. Skip it entirely: do
+                // not import a result, so the node keeps its parent-inherited
+                // bound and stays a valid open node. The gap cannot be certified
+                // once any node went unsolved, and the loop-top deadline check
+                // breaks the search on the next iteration.
+                gap_certified = false;
+                continue;
+            }
             if out.unbounded {
                 hit_unbounded = true;
                 break;
@@ -499,6 +522,10 @@ struct NodeCtx<'a> {
     n_orig_rows: usize,
     obj_const: f64,
     opts: &'a MilpOptions,
+    /// Deadline-aware simplex options (a clone of `opts.simplex` carrying the
+    /// solve's wall-clock `deadline`). Used for every node/strong-branch LP solve
+    /// so a single dense, degenerate relaxation cannot overrun the time budget.
+    simplex: &'a SimplexOptions,
     sb_active: bool,
     /// Incumbent value at batch start (for the strong-branch prunable check).
     inc_snapshot: Option<f64>,
@@ -533,6 +560,13 @@ struct NodeOutput {
     unbounded: bool,
     /// LP hit iter-limit / numerical breakdown — gap can't be certified.
     uncertified: bool,
+    /// The wall-clock deadline had already passed when this node was dequeued, so
+    /// its (expensive) LP solve was skipped entirely. The reduce drops it without
+    /// importing a result, leaving the node Evaluated with its parent-inherited
+    /// bound — so the returned dual bound stays valid (just not sharpened by this
+    /// node) and the in-flight batch drains in O(0) instead of running every
+    /// remaining node's relaxation past the deadline.
+    deferred: bool,
 }
 
 /// Evaluate a single B&B node: solve its LP relaxation (cold, or warm from the
@@ -541,6 +575,37 @@ struct NodeOutput {
 /// plus a read-only tree snapshot), so it is safe to call concurrently across a
 /// batch. Returns a [`NodeOutput`] the caller folds into the tree sequentially.
 fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> NodeOutput {
+    // Deadline guard BEFORE the expensive LP solve. The loop-top check only stops
+    // *dispatching* new batches; a single batch of N nodes whose per-node LP costs
+    // ~seconds (e.g. a dense lifted McCormick relaxation) would otherwise run the
+    // whole batch past the deadline — N x per-node-LP overshoot. Checking here lets
+    // every node dequeued after the deadline return immediately, so the in-flight
+    // batch drains and the loop-top check fires, bounding overshoot to the handful
+    // of nodes already mid-solve. Sound: the node is left Evaluated with its
+    // parent-inherited bound (the reduce skips importing a deferred result), so the
+    // returned dual lower bound stays valid — only sharpening is skipped, never a
+    // bound's validity. gap is decertified on the deadline path regardless.
+    if ctx
+        .deadline
+        .is_some_and(|d| std::time::Instant::now() >= d)
+    {
+        return NodeOutput {
+            result: NodeResult {
+                node_id: id,
+                lower_bound: f64::NEG_INFINITY,
+                solution: Vec::new(),
+                is_feasible: false,
+            },
+            basis: None,
+            incumbent: None,
+            found_cuts: Vec::new(),
+            branch_hint: None,
+            iters: 0,
+            unbounded: false,
+            uncertified: true,
+            deferred: true,
+        };
+    }
     let mut full_l = vec![0.0; ctx.n_w];
     let mut full_u = vec![0.0; ctx.n_w];
     full_l[..ctx.ns].copy_from_slice(lb_k);
@@ -581,9 +646,9 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
     let mut sol = match ctx.tm.node_basis(id) {
         Some(basis) => {
             let basis = extend_basis(basis, ctx.n_w);
-            solve_lp_warm_scaled(&solve_lp_view, ctx.sb, &basis, &ctx.opts.simplex)
+            solve_lp_warm_scaled(&solve_lp_view, ctx.sb, &basis, ctx.simplex)
         }
-        None => solve_lp_scaled(&solve_lp_view, ctx.sb, &ctx.opts.simplex),
+        None => solve_lp_scaled(&solve_lp_view, ctx.sb, ctx.simplex),
     };
     if let Some(s) = ctx.scaling {
         s.unscale_x(&mut sol.x);
@@ -604,6 +669,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
         iters: sol.iters,
         unbounded: false,
         uncertified: false,
+        deferred: false,
     };
 
     match sol.status {
@@ -725,7 +791,7 @@ fn strong_branch(
     node_obj: f64,
     cands: &[(usize, f64, u32, f64)],
 ) -> (Option<usize>, usize) {
-    let simplex = &ctx.opts.simplex;
+    let simplex = ctx.simplex;
     // Unreliable candidates, most-fractional (nearest 0.5) first.
     let mut cand: Vec<(usize, f64)> = cands
         .iter()

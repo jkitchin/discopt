@@ -235,7 +235,11 @@ pub fn solve_lp_py<'py>(
         l: lb.as_slice()?,
         u: ub.as_slice()?,
     };
-    let opts = SimplexOptions { tol, max_iter };
+    let opts = SimplexOptions {
+        tol,
+        max_iter,
+        deadline: None,
+    };
     let sol = simplex_solve_lp(&lp, b.as_slice()?, &opts);
     let status = match sol.status {
         LpStatus::Optimal => "optimal",
@@ -303,7 +307,11 @@ pub fn solve_lp_batch_py<'py>(
             u: ub_flat[t * n..(t + 1) * n].to_vec(),
         })
         .collect();
-    let opts = SimplexOptions { tol, max_iter };
+    let opts = SimplexOptions {
+        tol,
+        max_iter,
+        deadline: None,
+    };
     // The solve touches no Python objects, so release the GIL to let the core's
     // rayon workers run the batch concurrently without contending on it.
     let sols = py.allow_threads(|| solve_lp_batch(&a_owned, m, n, &c_owned, &instances, &opts));
@@ -408,6 +416,9 @@ pub fn solve_milp_py<'py>(
         simplex: SimplexOptions {
             tol,
             max_iter: 100_000,
+            // The MILP driver clones this and injects its own wall-clock deadline
+            // from `time_limit_s`, so the base options leave it unset.
+            deadline: None,
         },
     };
     let res = py.allow_threads(|| {
