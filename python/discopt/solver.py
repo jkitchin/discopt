@@ -2008,6 +2008,21 @@ def solve_model(
 
     model = reformulate_gdp(model, method=gdp_method)
 
+    # --- Entropy canonicalization: recover the ``entropy(x) = x*log(x)``
+    # intrinsic from the raw ``x*log(x)`` product that AMPL/GAMS emit when they
+    # lower the ``entropy`` opcode into a ``.nl`` file. The MILP/McCormick-LP
+    # relaxer cannot decompose ``x*log(x)`` and falls back to a constant
+    # separable objective floor that never tightens under branching, so an
+    # entropy/Gibbs objective (e.g. ``ex6_1_4``) is solved to the global optimum
+    # but cannot be certified (issue #207). discopt already carries a dedicated
+    # convex underestimator for ``entropy``; recovering the intrinsic feeds it,
+    # so the bound tightens (and a separable-entropy objective is detected as
+    # convex). The rewrite is exact and convexity-preserving, so it runs
+    # unconditionally and returns the model unchanged when nothing matches.
+    from discopt._jax.factorable_reform import canonicalize_entropy
+
+    model = canonicalize_entropy(model)
+
     # --- Objective-defining-equality relaxation (the SUSPECT "objective
     # constraint"). When the model is `min/max z` with z a free scalar that
     # appears only in one equality `z = g(x)` (affinely), relax that equality

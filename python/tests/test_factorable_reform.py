@@ -21,8 +21,9 @@ from pathlib import Path
 
 import discopt.modeling as dm
 import pytest
-from discopt._jax.factorable_reform import factorable_reformulate
+from discopt._jax.factorable_reform import canonicalize_entropy, factorable_reformulate
 from discopt._jax.term_classifier import classify_nonlinear_terms
+from discopt.modeling.core import FunctionCall
 
 _DATA = Path(__file__).parent / "data" / "minlplib"
 
@@ -225,6 +226,108 @@ def test_nested_ratio_solve_is_sound():
         f"certified solution violates the original e4 (={e4}); a dropped "
         "denominator would certify an infeasible point"
     )
+    if r.bound is not None:
+        assert r.bound <= r.objective + 1e-4  # sound dual bound
+
+
+# ---------------------------------------------------------------------------
+# Entropy canonicalization: x*log(x) -> entropy(x)  (issue #207)
+# ---------------------------------------------------------------------------
+
+
+def _has_entropy(expr) -> bool:
+    """True if ``entropy(...)`` appears anywhere in the expression DAG."""
+    if isinstance(expr, FunctionCall):
+        return expr.func_name == "entropy" or any(_has_entropy(a) for a in expr.args)
+    for attr in ("left", "right", "operand"):
+        child = getattr(expr, attr, None)
+        if child is not None and _has_entropy(child):
+            return True
+    return False
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda x, y: x * dm.log(x),  # canonical product
+        lambda x, y: dm.log(x) * x,  # reversed factor order
+        lambda x, y: 2.5 * x * dm.log(x),  # with a constant coefficient
+        lambda x, y: -(x * dm.log(x)),  # negated
+        lambda x, y: x * dm.log(x) + y * dm.log(y),  # separable sum
+    ],
+)
+def test_entropy_product_is_canonicalized(build):
+    """``c·x·log(x)`` in the objective is rewritten to ``entropy(x)``."""
+    m = dm.Model("ent")
+    x = m.continuous("x", lb=0.001, ub=10.0)
+    y = m.continuous("y", lb=0.001, ub=10.0)
+    m.minimize(build(x, y))
+    out = canonicalize_entropy(m)
+    assert out is not m
+    assert _has_entropy(out._objective.expression)
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda x, y: x * x * dm.log(x),  # x**2 * log(x) is not entropy
+        lambda x, y: x * dm.log(y),  # log of a different variable
+        lambda x, y: x * dm.log(2 * x),  # log of an affine argument
+        lambda x, y: x * y,  # no log factor at all
+        lambda x, y: x * dm.exp(x),  # transcendental that is not log
+    ],
+)
+def test_non_entropy_products_left_untouched(build):
+    """Structurally-different products must not be (mis)matched as entropy."""
+    m = dm.Model("noent")
+    x = m.continuous("x", lb=0.001, ub=10.0)
+    y = m.continuous("y", lb=0.001, ub=10.0)
+    m.minimize(build(x, y))
+    out = canonicalize_entropy(m)
+    assert out is m  # unchanged: same object
+    assert not _has_entropy(out._objective.expression)
+
+
+def test_entropy_domain_guard_rejects_negative_lb():
+    """``x·log(x)`` is only canonicalized when ``x``'s box is nonnegative —
+    consistent with ``relax_entropy``'s ``lb >= 0`` requirement."""
+    m = dm.Model("negdomain")
+    x = m.continuous("x", lb=-1.0, ub=1.0)
+    m.minimize(x * dm.log(x))
+    out = canonicalize_entropy(m)
+    assert out is m
+    assert not _has_entropy(out._objective.expression)
+
+
+def test_entropy_canonicalized_in_constraint_body():
+    """The rewrite fires in constraint bodies too, not just the objective."""
+    m = dm.Model("entcon")
+    x = m.continuous("x", lb=0.001, ub=1.0)
+    m.minimize(x)
+    m.subject_to(x * dm.log(x) <= -0.1)
+    out = canonicalize_entropy(m)
+    assert out is not m
+    assert any(_has_entropy(c.body) for c in out._constraints)
+
+
+@pytest.mark.correctness
+def test_separable_entropy_objective_certifies():
+    """End-to-end: a separable ``Σ xᵢ·log(xᵢ)`` (entropy/Gibbs) objective is
+    solved to its optimum *and certified*, where the raw product previously left
+    the dual bound stuck at a constant separable floor (issue #207)."""
+    import math
+
+    m = dm.Model("gibbs")
+    xs = [m.continuous(f"x{i}", lb=0.001, ub=1.0) for i in range(3)]
+    m.subject_to(sum(xs) == 1.0)
+    m.minimize(sum(x * dm.log(x) for x in xs))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = m.solve(time_limit=60, gap_tolerance=1e-4)
+    # Optimum of Σ xᵢ log xᵢ on the simplex is uniform xᵢ = 1/3 -> -log(3).
+    assert r.status == "optimal"
+    assert r.gap_certified, "separable entropy objective should certify"
+    assert r.objective == pytest.approx(-math.log(3), abs=1e-3)
     if r.bound is not None:
         assert r.bound <= r.objective + 1e-4  # sound dual bound
 
