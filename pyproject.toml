@@ -229,6 +229,7 @@ markers = [
     "requires_cyipopt: requires the optional cyipopt/Ipopt solver stack",
     "requires_pounce: requires the optional POUNCE (pure-Rust Ipopt port) solver",
     "gpu: requires GPU",
+    "relaxation: theorem-style property tests for relaxation rules (containment, tightening); fast",
     "correctness: known-optima validation tests; usually also `slow`",
     "pr_correctness: small known-optima subset run on every PR; <30 s total",
     "cutest: requires pycutest and CUTEst installation",
