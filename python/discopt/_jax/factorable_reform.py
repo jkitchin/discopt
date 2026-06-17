@@ -591,11 +591,7 @@ def _match_entropy_product(expr: Expression, model: Model) -> Expression | None:
             coeff *= float(factor.value)
             continue
         # log(var)?
-        if (
-            isinstance(factor, FunctionCall)
-            and factor.func_name == "log"
-            and len(factor.args) == 1
-        ):
+        if isinstance(factor, FunctionCall) and factor.func_name == "log" and len(factor.args) == 1:
             idx = _get_flat_index(factor.args[0], model)
             if idx is not None:
                 log_count += 1
@@ -612,7 +608,7 @@ def _match_entropy_product(expr: Expression, model: Model) -> Expression | None:
         # Any other factor (transcendental, product of vars, ...) disqualifies.
         return None
 
-    if log_count != 1 or bare_count != 1 or log_idx is None or log_idx != bare_idx:
+    if log_count != 1 or bare_count != 1 or log_arg is None or log_idx != bare_idx:
         return None
 
     # Domain guard: entropy's underestimator requires a nonnegative, finite box.
@@ -679,7 +675,13 @@ def _match_centropy_product(expr: Expression, model: Model) -> Expression | None
             continue
         return None
 
-    if log_count != 1 or bare_count != 1 or log_num_idx is None or log_num_idx != bare_idx:
+    if (
+        log_count != 1
+        or bare_count != 1
+        or log_num is None
+        or log_den is None
+        or log_num_idx != bare_idx
+    ):
         return None
 
     # Domain guard: x nonnegative & finite (entropy domain), y strictly positive
