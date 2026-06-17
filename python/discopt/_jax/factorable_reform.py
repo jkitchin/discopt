@@ -699,9 +699,156 @@ def _match_centropy_product(expr: Expression, model: Model) -> Expression | None
     return BinaryOp("*", Constant(coeff), centropy)
 
 
+def _split_additive(expr: Expression) -> list[tuple[float, Expression]]:
+    """Flatten a ``+``/``-``/``neg`` tree into ``[(sign, term), ...]`` leaves.
+
+    Only additive structure is peeled — every non-additive node (variable,
+    ``log``, product, ...) becomes one ``(±1.0, node)`` leaf. Used to reach the
+    ``log(x)`` term hidden inside a distributed factor ``(affine + log(x))``.
+    """
+    terms: list[tuple[float, Expression]] = []
+    stack: list[tuple[Expression, float]] = [(expr, 1.0)]
+    while stack:
+        node, s = stack.pop()
+        if isinstance(node, BinaryOp) and node.op == "+":
+            stack.append((node.left, s))
+            stack.append((node.right, s))
+        elif isinstance(node, BinaryOp) and node.op == "-":
+            stack.append((node.left, s))
+            stack.append((node.right, -s))
+        elif isinstance(node, UnaryOp) and node.op == "neg":
+            stack.append((node.operand, -s))
+        else:
+            terms.append((s, node))
+    return terms
+
+
+def _entropy_log_intrinsic(term: Expression, x_idx: int, model: Model) -> Expression | None:
+    """If *term* is ``log(x)`` (-> ``entropy(x)``) or ``log(x/y)`` (-> ``centropy(x,
+    y)``) whose entropy variable is the flat index *x_idx*, return the intrinsic
+    ``FunctionCall`` (domain-guarded); else ``None``.
+
+    The returned intrinsic stands in for ``x · term`` — the caller supplies the
+    bare ``x`` factor, so ``x·log(x) = entropy(x)`` and ``x·log(x/y) =
+    centropy(x, y)``.
+    """
+    if not (isinstance(term, FunctionCall) and term.func_name == "log" and len(term.args) == 1):
+        return None
+    arg = term.args[0]
+    # log(x/y) -> centropy(x, y)
+    if isinstance(arg, BinaryOp) and arg.op == "/":
+        if _get_flat_index(arg.left, model) != x_idx:
+            return None
+        lo_x, hi_x = _bound_expression(arg.left, model)
+        if not (np.isfinite(lo_x) and np.isfinite(hi_x)) or lo_x < 0.0:
+            return None
+        lo_y, hi_y = _bound_expression(arg.right, model)
+        if not (np.isfinite(lo_y) and np.isfinite(hi_y)) or lo_y <= 0.0:
+            return None
+        return FunctionCall("centropy", arg.left, arg.right)
+    # log(x) -> entropy(x)
+    if _get_flat_index(arg, model) != x_idx:
+        return None
+    lo, hi = _bound_expression(arg, model)
+    if not (np.isfinite(lo) and np.isfinite(hi)) or lo < 0.0:
+        return None
+    return FunctionCall("entropy", arg)
+
+
+def _match_entropy_affine_product(expr: Expression, model: Model) -> Expression | None:
+    """Match the *distributed* entropy form ``c · x · (affine + log(x))`` and pull
+    out the intrinsic, returning ``c·(x·affine) + c·entropy(x)`` (or ``centropy``
+    when the log is ``log(x/y)``); else ``None``.
+
+    AMPL/GAMS frequently lower ``x·log(x)`` already folded into an affine wrapper,
+    e.g. ``x·(0.28809 + log(x))`` (the ``ex6_1_4`` Gibbs objective, issue #207).
+    The strict :func:`_match_entropy_product` cannot see the ``log(x)`` because it
+    sits inside a ``+`` factor, so the lowered product reaches the relaxer as an
+    un-decomposable ``x·log(x)`` and the objective falls back to a constant floor.
+
+    This matcher requires exactly one bare variable ``x`` and one other (non-
+    constant) factor that is an additive expression containing exactly one
+    ``log(x)``/``log(x/y)`` term whose entropy variable is that same ``x``. The
+    affine remainder is kept as an ordinary product ``x·affine`` (linear when the
+    remainder is constant, bilinear otherwise) for the existing relaxation, while
+    only the entropy term is replaced. The rewrite is exact:
+    ``x·(affine + log(x)) ≡ x·affine + entropy(x)``.
+    """
+    coeff = 1.0
+    bare_idx: int | None = None
+    bare_expr: Expression | None = None
+    bare_count = 0
+    other_factor: Expression | None = None
+    other_count = 0
+
+    for factor in _flatten_product(expr):
+        sign, factor = _strip_neg(factor)
+        coeff *= sign
+        if isinstance(factor, Constant) and factor.value.ndim == 0:
+            coeff *= float(factor.value)
+            continue
+        idx = _get_flat_index(factor, model)
+        if idx is not None:
+            bare_count += 1
+            bare_idx = idx
+            bare_expr = factor
+            continue
+        other_count += 1
+        other_factor = factor
+
+    if (
+        bare_count != 1
+        or other_count != 1
+        or other_factor is None
+        or bare_idx is None
+        or bare_expr is None
+    ):
+        return None
+
+    # Split the other factor additively and find the single entropy log term.
+    intrinsic: Expression | None = None
+    intrinsic_sign = 1.0
+    rest: list[tuple[float, Expression]] = []
+    for s, term in _split_additive(other_factor):
+        intr = _entropy_log_intrinsic(term, bare_idx, model)
+        if intr is not None:
+            if intrinsic is not None:
+                return None  # more than one entropy-log term -> ambiguous, bail
+            intrinsic = intr
+            intrinsic_sign = s
+        else:
+            rest.append((s, term))
+
+    if intrinsic is None:
+        return None
+
+    # Entropy contribution: (coeff · intrinsic_sign) · entropy(x).
+    intr_coeff = coeff * intrinsic_sign
+    entropy_part: Expression = (
+        intrinsic if intr_coeff == 1.0 else BinaryOp("*", Constant(intr_coeff), intrinsic)
+    )
+
+    if not rest:
+        return entropy_part
+
+    # Affine remainder, kept as an ordinary product coeff · x · rest.
+    rest_expr: Expression | None = None
+    for s, term in rest:
+        node = term if s > 0 else UnaryOp("neg", term)
+        rest_expr = node if rest_expr is None else BinaryOp("+", rest_expr, node)
+    assert rest_expr is not None
+    rest_expr = _canonicalize_entropy_expr(rest_expr, model)
+    product: Expression = BinaryOp("*", bare_expr, rest_expr)
+    if coeff != 1.0:
+        product = BinaryOp("*", Constant(coeff), product)
+
+    return BinaryOp("+", product, entropy_part)
+
+
 def _canonicalize_entropy_expr(expr: Expression, model: Model) -> Expression:
     """Return *expr* with every ``c·x·log(x)`` product rewritten to ``c·entropy(x)``
-    and every ``c·x·log(x/y)`` product rewritten to ``c·centropy(x, y)``.
+    and every ``c·x·log(x/y)`` product rewritten to ``c·centropy(x, y)`` — including
+    the distributed ``c·x·(affine + log(x))`` form (issue #207, ex6_1_4).
     Identity-preserving: unchanged subtrees keep their object identity so
     untouched models are returned byte-for-byte unchanged."""
     if isinstance(expr, BinaryOp):
@@ -709,6 +856,8 @@ def _canonicalize_entropy_expr(expr: Expression, model: Model) -> Expression:
             matched = _match_entropy_product(expr, model)
             if matched is None:
                 matched = _match_centropy_product(expr, model)
+            if matched is None:
+                matched = _match_entropy_affine_product(expr, model)
             if matched is not None:
                 return matched
         left = _canonicalize_entropy_expr(expr.left, model)

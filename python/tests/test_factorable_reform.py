@@ -333,6 +333,114 @@ def test_separable_entropy_objective_certifies():
 
 
 # ---------------------------------------------------------------------------
+# distributed entropy: x*(affine + log(x)) -> x*affine + entropy(x)  (ex6_1_4)
+# ---------------------------------------------------------------------------
+
+
+def _obj_values_match(m_before, m_after, lo=0.01, hi=2.0, n=200, seed=0):
+    """The two objectives must evaluate identically over a random positive box."""
+    import numpy as np
+    from discopt._jax.dag_compiler import compile_expression
+
+    f0 = compile_expression(m_before._objective.expression, m_before)
+    f1 = compile_expression(m_after._objective.expression, m_after)
+    nvar = sum(max(1, int(np.prod(v.shape))) for v in m_before._variables)
+    rng = np.random.default_rng(seed)
+    err = 0.0
+    for _ in range(n):
+        x = rng.uniform(lo, hi, size=nvar)
+        err = max(err, abs(float(f0(x)) - float(f1(x))))
+    return err
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda x, y: x * (0.5 + dm.log(x)),  # constant + log(x)  (ex6_1_4 shape)
+        lambda x, y: x * (dm.log(x) + 0.5),  # log(x) + constant  (order swap)
+        lambda x, y: x * (dm.log(x) - 2.0),  # log(x) - constant
+        lambda x, y: 2.5 * x * (0.5 + dm.log(x)),  # outer constant coefficient
+        lambda x, y: -(x * (0.5 + dm.log(x))),  # negated
+        lambda x, y: x * (3.0 * y + dm.log(x)),  # affine remainder with another var (bilinear)
+    ],
+)
+def test_distributed_entropy_is_canonicalized(build):
+    """``c·x·(affine + log(x))`` recovers ``entropy(x)`` while staying exact."""
+    m = dm.Model("dent")
+    x = m.continuous("x", lb=0.001, ub=10.0)
+    y = m.continuous("y", lb=0.001, ub=10.0)
+    m.minimize(build(x, y))
+    out = canonicalize_entropy(m)
+    assert out is not m
+    assert _has_entropy(out._objective.expression)
+    # The rewrite is algebraically exact, not just structural.
+    assert _obj_values_match(m, out) < 1e-9
+
+
+def test_distributed_entropy_preserves_affine_remainder():
+    """The affine wrapper term must survive: ``x·(c + log(x)) = c·x + entropy(x)``,
+    so the objective value (incl. the linear part) is unchanged."""
+    m = dm.Model("drem")
+    x = m.continuous("x", lb=0.001, ub=5.0)
+    y = m.continuous("y", lb=0.001, ub=5.0)
+    m.minimize(x * (0.28809 + dm.log(x)) + 1.5 * x * y)
+    out = canonicalize_entropy(m)
+    assert _has_entropy(out._objective.expression)
+    assert _obj_values_match(m, out) < 1e-9
+
+
+def test_distributed_entropy_domain_guard():
+    """No rewrite when ``x``'s box admits negatives (entropy domain violated)."""
+    m = dm.Model("dneg")
+    x = m.continuous("x", lb=-1.0, ub=1.0)
+    m.minimize(x * (0.5 + dm.log(x)))
+    out = canonicalize_entropy(m)
+    assert out is m
+    assert not _has_entropy(out._objective.expression)
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda x, y: x * (0.5 + dm.log(y)),  # log of a different variable
+        lambda x, y: x * (0.5 + dm.log(2 * x)),  # log of an affine argument
+        lambda x, y: x * (dm.log(x) + dm.log(x)),  # two entropy-log terms -> ambiguous
+        lambda x, y: x * x * (0.5 + dm.log(x)),  # x**2 wrapper -> not entropy
+    ],
+)
+def test_distributed_entropy_non_matches_left_untouched(build):
+    """Lookalikes of the distributed form must not be (mis)matched."""
+    m = dm.Model("dnoent")
+    x = m.continuous("x", lb=0.001, ub=10.0)
+    y = m.continuous("y", lb=0.001, ub=10.0)
+    m.minimize(build(x, y))
+    out = canonicalize_entropy(m)
+    assert not _has_entropy(out._objective.expression)
+
+
+@pytest.mark.correctness
+def test_distributed_entropy_with_bilinear_certifies():
+    """End-to-end ex6_1_4-shaped repro: a diagonal entropy in the distributed
+    ``x·(c + log(x))`` form plus an off-diagonal bilinear coupling must solve and
+    *certify*. Before the distributed-form recovery the relaxer hit an
+    un-decomposable ``x·log(x)`` product and left the bound at a constant floor
+    (issue #207)."""
+    m = dm.Model("ex6_like")
+    x0 = m.continuous("x0", lb=0.01, ub=1.0)
+    x1 = m.continuous("x1", lb=0.01, ub=1.0)
+    m.subject_to(x0 + x1 == 1.0)
+    # diagonal entropy wrapped in an affine offset + a small bilinear coupling
+    m.minimize(x0 * (0.2 + dm.log(x0)) + x1 * (0.3 + dm.log(x1)) + 0.1 * x0 * x1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = m.solve(time_limit=120, gap_tolerance=1e-4)
+    assert r.status == "optimal"
+    assert r.gap_certified, "distributed entropy + bilinear should certify"
+    if r.bound is not None:
+        assert r.bound <= r.objective + 1e-4  # sound dual bound
+
+
+# ---------------------------------------------------------------------------
 # centropy canonicalization: x*log(x/y) -> centropy(x, y)  (issue #207)
 # ---------------------------------------------------------------------------
 

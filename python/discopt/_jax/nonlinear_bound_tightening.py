@@ -2008,6 +2008,219 @@ class ReciprocalBoundsRule(NonlinearBoundTighteningRule):
         return tightened_lb, tightened_ub
 
 
+def _accumulate_affine(
+    expr,
+    scale: float,
+    metadata: FlatVariableMetadata,
+    coeffs: dict[int, float],
+    const: list[float],
+) -> bool:
+    """Accumulate ``scale * expr`` into ``coeffs``/``const`` as an affine form.
+
+    Returns ``False`` (and leaves the accumulators in an undefined partial state,
+    which the caller discards) the moment a non-affine node is encountered — a
+    variable*variable product, a power, a function call, or a division by a
+    non-constant. This is deliberately conservative so the bilinear rule never
+    mis-reads a nonlinear term as affine.
+    """
+    const_val = _constant_value(expr)
+    if const_val is not None:
+        const[0] += scale * const_val
+        return True
+
+    flat_idx = metadata.scalar_flat_index(expr)
+    if flat_idx is not None:
+        coeffs[flat_idx] = coeffs.get(flat_idx, 0.0) + scale
+        return True
+
+    if isinstance(expr, UnaryOp) and expr.op == "neg":
+        return _accumulate_affine(expr.operand, -scale, metadata, coeffs, const)
+
+    if isinstance(expr, BinaryOp) and expr.op in ("+", "-"):
+        if not _accumulate_affine(expr.left, scale, metadata, coeffs, const):
+            return False
+        right_scale = scale if expr.op == "+" else -scale
+        return _accumulate_affine(expr.right, right_scale, metadata, coeffs, const)
+
+    if isinstance(expr, BinaryOp) and expr.op == "*":
+        left_const = _constant_value(expr.left)
+        if left_const is not None:
+            return _accumulate_affine(expr.right, scale * left_const, metadata, coeffs, const)
+        right_const = _constant_value(expr.right)
+        if right_const is not None:
+            return _accumulate_affine(expr.left, scale * right_const, metadata, coeffs, const)
+        return False
+
+    if isinstance(expr, BinaryOp) and expr.op == "/":
+        denom = _constant_value(expr.right)
+        if denom is not None and abs(denom) > 1e-12:
+            return _accumulate_affine(expr.left, scale / denom, metadata, coeffs, const)
+        return False
+
+    return False
+
+
+def _affine_box_interval(
+    coeffs: dict[int, float],
+    const: float,
+    lb: np.ndarray,
+    ub: np.ndarray,
+) -> tuple[float, float]:
+    """Interval of an affine form over the variable box (``0 * inf = nan`` safe)."""
+    lo = const
+    hi = const
+    for idx, c in coeffs.items():
+        if abs(c) <= 1e-12:
+            # A (numerically) zero coefficient contributes nothing; skipping it
+            # avoids ``0 * inf = nan`` when the variable is unbounded.
+            continue
+        if c > 0.0:
+            lo += c * float(lb[idx])
+            hi += c * float(ub[idx])
+        else:
+            lo += c * float(ub[idx])
+            hi += c * float(lb[idx])
+    return lo, hi
+
+
+class BilinearProductEqualityRule(NonlinearBoundTighteningRule):
+    """Reverse-divide ``v * affine = c`` equalities to bound an otherwise-free ``v``.
+
+    A constraint whose body is ``s·(v · F) + R == 0`` — where ``v`` is a single
+    variable appearing *only* in the bilinear product, ``F`` is an affine form in
+    the other variables that is sign-stable (its interval excludes 0), and ``R``
+    is the affine remainder — pins ``v = (-R/s) / F``. Interval-dividing the
+    numerator box by the (bounded-away-from-zero) ``F`` box yields a sound
+    enclosure of ``v``, which is intersected with its current bounds.
+
+    This is the only mechanism that can bound a variable appearing solely in
+    nonlinear constraints (e.g. the mole-fraction ratios ``x = a/(affine)`` in
+    ex6_1_4), where McCormick cannot even build an envelope without a prior
+    finite bound and linear-constraint OBBT has nothing to act on.
+    """
+
+    name = "bilinear_product_equality"
+
+    def _match_product_term(
+        self, term, metadata: FlatVariableMetadata
+    ) -> Optional[tuple[float, int, dict[int, float], float]]:
+        """Match ``s · (v · F)``; return ``(s, v_idx, F_coeffs, F_const)`` or None."""
+        scale = 1.0
+        expr = term
+        # Peel off leading negations and constant factors.
+        while True:
+            if isinstance(expr, UnaryOp) and expr.op == "neg":
+                scale = -scale
+                expr = expr.operand
+                continue
+            if isinstance(expr, BinaryOp) and expr.op == "*":
+                left_const = _constant_value(expr.left)
+                if left_const is not None:
+                    scale *= left_const
+                    expr = expr.right
+                    continue
+                right_const = _constant_value(expr.right)
+                if right_const is not None:
+                    scale *= right_const
+                    expr = expr.left
+                    continue
+            break
+
+        if not (isinstance(expr, BinaryOp) and expr.op == "*"):
+            return None
+
+        for var_side, affine_side in ((expr.left, expr.right), (expr.right, expr.left)):
+            v_idx = metadata.scalar_flat_index(var_side)
+            if v_idx is None:
+                continue
+            coeffs: dict[int, float] = {}
+            const = [0.0]
+            if not _accumulate_affine(affine_side, 1.0, metadata, coeffs, const):
+                continue
+            # F must be a genuine multi-/single-variable affine form NOT containing
+            # v (else the product is quadratic in v, a different rule's job).
+            coeffs = {i: c for i, c in coeffs.items() if abs(c) > 1e-12}
+            if not coeffs or v_idx in coeffs:
+                continue
+            return scale, v_idx, coeffs, const[0]
+        return None
+
+    def tighten(
+        self,
+        model: Model,
+        flat_lb: np.ndarray,
+        flat_ub: np.ndarray,
+        metadata: FlatVariableMetadata,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        tightened_lb = flat_lb.copy()
+        tightened_ub = flat_ub.copy()
+        eps = 1e-9
+
+        for constraint in model._constraints:
+            if getattr(constraint, "sense", None) != "==":
+                continue
+
+            terms = _cached_flat_terms(model, constraint.body)
+            product: Optional[tuple[float, int, dict[int, float], float]] = None
+            rest_coeffs: dict[int, float] = {}
+            rest_const = [0.0]
+            ok = True
+
+            for scale, term in terms:
+                const_val = _constant_value(term)
+                if const_val is not None:
+                    rest_const[0] += scale * const_val
+                    continue
+                match = self._match_product_term(term, metadata)
+                if match is not None:
+                    if product is not None:
+                        ok = False  # more than one bilinear product: not this pattern
+                        break
+                    p_scale, v_idx, f_coeffs, f_const = match
+                    product = (scale * p_scale, v_idx, f_coeffs, f_const)
+                    continue
+                if not _accumulate_affine(term, scale, metadata, rest_coeffs, rest_const):
+                    ok = False  # a second nonlinear term: bail
+                    break
+
+            if not ok or product is None:
+                continue
+
+            scale_p, v_idx, f_coeffs, f_const = product
+            # v must appear nowhere else (its presence in the remainder would make
+            # the isolation ``v = -R/(s·F)`` circular/unsound).
+            if abs(rest_coeffs.get(v_idx, 0.0)) > 1e-12:
+                continue
+
+            f_lo, f_hi = _affine_box_interval(f_coeffs, f_const, tightened_lb, tightened_ub)
+            if not (f_lo > eps or f_hi < -eps):
+                continue  # F not sign-stable: division by an interval straddling 0
+
+            r_lo, r_hi = _affine_box_interval(
+                rest_coeffs, rest_const[0], tightened_lb, tightened_ub
+            )
+            # s·(v·F) + R == 0  ->  v·F == -R/s. Build the numerator box P.
+            num_endpoints = [-r_hi / scale_p, -r_lo / scale_p]
+            p_lo = min(num_endpoints)
+            p_hi = max(num_endpoints)
+            if not (np.isfinite(p_lo) and np.isfinite(p_hi)):
+                continue  # unbounded remainder: nothing to divide
+
+            # v == P / F with F bounded away from 0; enclose by interval division.
+            candidates = [p_lo / f_lo, p_lo / f_hi, p_hi / f_lo, p_hi / f_hi]
+            if any(not np.isfinite(c) or np.isnan(c) for c in candidates):
+                continue
+            v_lo = min(candidates)
+            v_hi = max(candidates)
+
+            if v_hi < float(tightened_ub[v_idx]) - 1e-10:
+                tightened_ub[v_idx] = max(float(tightened_lb[v_idx]), v_hi)
+            if v_lo > float(tightened_lb[v_idx]) + 1e-10:
+                tightened_lb[v_idx] = min(float(tightened_ub[v_idx]), v_lo)
+
+        return tightened_lb, tightened_ub
+
+
 DEFAULT_NONLINEAR_BOUND_RULES: tuple[NonlinearBoundTighteningRule, ...] = (
     MonotoneFunctionEqualityRule(),
     QuadraticEqualityBoundsRule(),
@@ -2016,6 +2229,7 @@ DEFAULT_NONLINEAR_BOUND_RULES: tuple[NonlinearBoundTighteningRule, ...] = (
     PositiveAffineReciprocalBoundsRule(),
     NegativePowerBoundsRule(),
     ReciprocalBoundsRule(),
+    BilinearProductEqualityRule(),
     SqrtSumOfSquaresUpperBoundRule(),
     SumOfSquaresUpperBoundRule(),
     SeparableQuadraticUpperBoundRule(),

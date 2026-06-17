@@ -599,7 +599,12 @@ def _linear_expr_bounds(
     upper = float(const)
     for c_i, lb_i, ub_i in zip(coeff, lb, ub):
         c = float(c_i)
-        if c >= 0.0:
+        if c == 0.0:
+            # A zero coefficient contributes nothing, regardless of the
+            # variable's bounds. Skipping it avoids ``0 * inf = nan`` poisoning
+            # the interval when an unrelated variable is unbounded.
+            continue
+        if c > 0.0:
             lower += c * float(lb_i)
             upper += c * float(ub_i)
         else:
@@ -1819,7 +1824,18 @@ def _univariate_arg(expr: Expression) -> tuple[str, Expression] | None:
     """Return (operator_name, argument) for supported univariate nodes."""
     if isinstance(expr, FunctionCall) and len(expr.args) == 1:
         name = expr.func_name
-        if name in {"sqrt", "log", "log2", "log10", "exp", "abs", "sin", "cos", "tan"}:
+        if name in {
+            "sqrt",
+            "log",
+            "log2",
+            "log10",
+            "exp",
+            "abs",
+            "sin",
+            "cos",
+            "tan",
+            "entropy",
+        }:
             return name, expr.args[0]
     if isinstance(expr, UnaryOp) and expr.op == "abs":
         return "abs", expr.operand
@@ -1850,6 +1866,11 @@ def _univariate_value(func_name: str, x: float) -> float:
         return float(np.cos(x))
     if func_name == "tan":
         return float(np.tan(x))
+    if func_name == "entropy":
+        # entropy(x) = x*log(x), with the x -> 0+ limit equal to 0.
+        if x <= 0.0:
+            return 0.0
+        return float(x * np.log(x))
     raise ValueError(f"Unsupported univariate function: {func_name}")
 
 
@@ -1874,6 +1895,9 @@ def _univariate_grad(func_name: str, x: float) -> float:
     if func_name == "tan":
         c = float(np.cos(x))
         return float(1.0 / (c * c))
+    if func_name == "entropy":
+        # d/dx [x*log(x)] = log(x) + 1 (finite only for x > 0).
+        return float(np.log(x) + 1.0)
     raise ValueError(f"No smooth derivative for univariate function: {func_name}")
 
 
@@ -1899,6 +1923,10 @@ def _univariate_domain_ok(func_name: str, arg_lb: float, arg_ub: float) -> bool:
         return False
     if func_name in {"sqrt", "log", "log2", "log10"}:
         return True
+    if func_name == "entropy":
+        # entropy(x) = x*log(x) is finite on x >= 0 (limit 0 at x = 0); a smooth
+        # tangent underestimator needs at least one strictly positive point.
+        return bool(arg_lb >= 0.0 and arg_ub > 0.0)
     if func_name == "exp":
         return bool(arg_ub <= _MAX_FINITE_EXP_ARG)
     if func_name == "abs":
@@ -1924,6 +1952,16 @@ def _univariate_value_bounds(func_name: str, arg_lb: float, arg_ub: float) -> tu
         if bounds is None:
             return np.nan, np.nan
         return bounds
+    if func_name == "entropy":
+        # entropy(x) = x*log(x) is convex with a single interior minimum at
+        # x = 1/e (value -1/e). The maximum is at an endpoint.
+        f_lb = _univariate_value("entropy", arg_lb)
+        f_ub = _univariate_value("entropy", arg_ub)
+        inv_e = float(np.exp(-1.0))
+        lo = min(f_lb, f_ub)
+        if arg_lb <= inv_e <= arg_ub:
+            lo = min(lo, -inv_e)
+        return lo, max(f_lb, f_ub)
     values = [_univariate_value(func_name, arg_lb), _univariate_value(func_name, arg_ub)]
     return min(values), max(values)
 
@@ -1935,7 +1973,7 @@ def _tangent_points(func_name: str, lb: float, ub: float) -> list[float]:
     for pt in raw_points:
         if func_name == "sqrt" and pt <= 0.0:
             continue
-        if func_name in {"log", "log2", "log10", "reciprocal"} and pt <= 0.0:
+        if func_name in {"log", "log2", "log10", "reciprocal", "entropy"} and pt <= 0.0:
             continue
         if func_name == "tan" and not _is_effectively_finite(np.tan(pt)):
             continue
@@ -1949,7 +1987,7 @@ def _tangent_points(func_name: str, lb: float, ub: float) -> list[float]:
 def _univariate_curvature(func_name: str, val_lb: float, val_ub: float) -> Optional[str]:
     """Return certified curvature on the interval, or None for mixed curvature."""
     tol = 1e-12
-    if func_name in {"exp", "reciprocal"}:
+    if func_name in {"exp", "reciprocal", "entropy"}:
         return "convex"
     if func_name in {"sqrt", "log", "log2", "log10"}:
         return "concave"

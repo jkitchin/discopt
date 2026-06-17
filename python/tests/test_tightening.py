@@ -16,6 +16,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import discopt.modeling.core as dm
 import numpy as np
+import pytest
 from discopt.tightening import fbbt_box
 
 
@@ -101,3 +102,96 @@ def test_no_constraints_returns_original_box():
     assert res.n_tightened == 0
     np.testing.assert_allclose(res.lb, [-2.0], atol=1e-12)
     np.testing.assert_allclose(res.ub, [7.0], atol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Reverse-division FBBT: bound a variable that appears only in v*affine == c
+# (BilinearProductEqualityRule). This is the only mechanism that can bound a
+# variable living solely in a nonlinear constraint, e.g. the mole-fraction
+# ratios x = a/(affine) in ex6_1_4.
+# ---------------------------------------------------------------------------
+
+
+def _run_bilinear_rule(model):
+    from discopt._jax.nonlinear_bound_tightening import (
+        BilinearProductEqualityRule,
+        build_flat_variable_metadata,
+    )
+
+    lb = np.array([float(v.lb) for v in model._variables], dtype=np.float64)
+    ub = np.array([float(v.ub) for v in model._variables], dtype=np.float64)
+    meta = build_flat_variable_metadata(model)
+    return BilinearProductEqualityRule().tighten(model, lb.copy(), ub.copy(), meta)
+
+
+def test_bilinear_product_equality_bounds_free_variable():
+    """``t * a == 5`` with ``a in [1, 2]`` pins the unbounded ``t`` to ``[2.5, 5]``."""
+    m = dm.Model("ratio")
+    a = m.continuous("a", lb=1.0, ub=2.0)
+    t = m.continuous("t", lb=0.0, ub=np.inf)
+    m.minimize(t)
+    m.subject_to(t * a == 5.0)
+
+    tl, tu = _run_bilinear_rule(m)
+    # t = 5 / a, a in [1, 2]  ->  t in [2.5, 5].
+    assert tu[1] == pytest.approx(5.0, rel=1e-9)
+    assert tl[1] == pytest.approx(2.5, rel=1e-9)
+    # The bounding variable is untouched.
+    assert tl[0] == pytest.approx(1.0)
+    assert tu[0] == pytest.approx(2.0)
+
+
+def test_bilinear_product_equality_multivariate_affine_factor():
+    """``t * (x + 0.5*y) == x`` bounds ``t`` from the affine factor's interval."""
+    m = dm.Model("ratio_multi")
+    x = m.continuous("x", lb=1.0, ub=2.0)
+    y = m.continuous("y", lb=2.0, ub=4.0)
+    t = m.continuous("t", lb=0.0, ub=np.inf)
+    m.minimize(t)
+    m.subject_to(t * (x + 0.5 * y) == x)
+
+    tl, tu = _run_bilinear_rule(m)
+    # F = x + 0.5y in [1+1, 2+2] = [2, 4]; numerator x in [1, 2].
+    # t = x/F in [1/4, 2/2] = [0.25, 1.0].
+    assert tu[2] == pytest.approx(1.0, rel=1e-9)
+    assert tl[2] == pytest.approx(0.25, rel=1e-9)
+
+
+def test_bilinear_product_equality_soundness_keeps_feasible_point():
+    """The tightened box must still contain a genuine feasible solution."""
+    m = dm.Model("ratio_sound")
+    a = m.continuous("a", lb=1.0, ub=4.0)
+    t = m.continuous("t", lb=0.0, ub=np.inf)
+    m.minimize(t)
+    m.subject_to(t * a == 6.0)
+
+    tl, tu = _run_bilinear_rule(m)
+    # Feasible point a=3, t=2 must survive the tightened box.
+    assert tl[0] - 1e-9 <= 3.0 <= tu[0] + 1e-9
+    assert tl[1] - 1e-9 <= 2.0 <= tu[1] + 1e-9
+    # And the never-loosen invariant holds for the bounded var.
+    assert tu[1] <= np.inf
+
+
+def test_bilinear_product_equality_skips_sign_unstable_factor():
+    """An affine factor whose interval straddles 0 cannot be divided: no change."""
+    m = dm.Model("straddle")
+    a = m.continuous("a", lb=-1.0, ub=2.0)  # interval contains 0
+    t = m.continuous("t", lb=0.0, ub=np.inf)
+    m.minimize(t)
+    m.subject_to(t * a == 5.0)
+
+    tl, tu = _run_bilinear_rule(m)
+    assert tu[1] == np.inf  # left unbounded — division by a zero-straddling F is unsafe
+
+
+def test_bilinear_product_equality_skips_when_var_in_remainder():
+    """If the target variable also appears affinely, isolation is unsound: skip."""
+    m = dm.Model("circular")
+    a = m.continuous("a", lb=1.0, ub=2.0)
+    t = m.continuous("t", lb=0.0, ub=np.inf)
+    m.minimize(t)
+    m.subject_to(t * a + t == 5.0)  # t appears in the product AND the remainder
+
+    tl, tu = _run_bilinear_rule(m)
+    assert tu[1] == np.inf  # not this rule's pattern; left for other machinery
