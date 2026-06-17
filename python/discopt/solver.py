@@ -2719,18 +2719,17 @@ def solve_model(
 
     # --- AlphaBB convexification for nonconvex models ---
     # (E2) Skip alphaBB entirely for convex models — NLP gives valid bounds.
+    # Lever 3 (issue #194): the alpha estimate (jax.hessian over a sample grid)
+    # is a ~2s one-time root cost. It is only needed when alphaBB is the bound
+    # source — i.e. when the McCormick LP relaxer is NOT active. So we DEFER it
+    # here and compute it just below, gated on ``_mc_lp_relaxer is None`` (set by
+    # the relaxer block). When the LP relaxer supplies every node's valid dual
+    # bound, alphaBB would only ever be a fallback on nodes the LP relaxer
+    # declines; on the corpus that never changes the certified result (A/B: 0
+    # regressions), so skipping the estimate is sound and removes the ~2s setup.
     _alphabb_alpha = None
     _use_alphabb = False
-    if n_vars <= 50 and not _model_is_convex:
-        if hasattr(evaluator, "_obj_fn"):
-            # JAX-native path: uses jax.hessian + jax.vmap (10-100x faster)
-            try:
-                _alphabb_alpha = np.asarray(
-                    _estimate_alpha_jax(evaluator._obj_fn, lb, ub, n_samples=100)
-                )
-                _use_alphabb = bool(np.any(_alphabb_alpha > 1e-8))
-            except (ValueError, ArithmeticError, RuntimeError) as e:
-                logger.debug("JAX alphaBB estimation failed: %s", e)
+    _alphabb_eligible = n_vars <= 50 and not _model_is_convex and hasattr(evaluator, "_obj_fn")
 
     # --- McCormick relaxation bounds ---
     _mc_obj_eval = None  # BatchRelaxationEvaluator for midpoint bounds
@@ -2873,6 +2872,21 @@ def solve_model(
                     if not _probe_useful:
                         _mc_lp_relaxer = None
                         _mc_mode = "none"
+
+    # AlphaBB alpha estimate (lever 3, issue #194), deferred from above: compute
+    # it only when the LP relaxer is NOT the bound source. When the LP relaxer is
+    # active it supplies every node's valid dual bound, so the ~2s alpha estimate
+    # (and the per-node alphaBB it enables) is skipped. ``DISCOPT_ALPHABB_WITH_LP=1``
+    # forces the estimate even under the LP relaxer (A/B / fallback safety).
+    _alphabb_force = os.environ.get("DISCOPT_ALPHABB_WITH_LP", "0") == "1"
+    if _alphabb_eligible and (_mc_lp_relaxer is None or _alphabb_force):
+        try:
+            _alphabb_alpha = np.asarray(
+                _estimate_alpha_jax(evaluator._obj_fn, lb, ub, n_samples=100)
+            )
+            _use_alphabb = bool(np.any(_alphabb_alpha > 1e-8))
+        except (ValueError, ArithmeticError, RuntimeError) as e:
+            logger.debug("JAX alphaBB estimation failed: %s", e)
 
     # Soundness guard (issue #120): the McCormick "nlp" objective bound is a
     # valid dual bound only for convex models. The bound solver evaluates the
