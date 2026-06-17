@@ -1553,8 +1553,37 @@ def _root_relaxation_lower_bound(
         # unbounded and 0.0 > the true optimum -0.866; surfacing it as the
         # fallback bound would publish an invalid (above-incumbent) dual bound.
         # Gate on optimality so an unbounded/limit solve returns no bound instead.
+        plain_bound: Optional[float] = None
         if result.status == "optimal" and result.bound is not None and np.isfinite(result.bound):
-            return float(result.bound)
+            plain_bound = float(result.bound)
+
+        # The raw ``relax.solve`` above carries only the static envelope cuts; the
+        # per-node spatial relaxation additionally separates the multilinear hull,
+        # edge-concave blocks, and (issue #114) the univariate-square tangents the
+        # static envelope leaves slack deep inside a wide box. Routing the root
+        # box through ``solve_at_node`` applies that same on-demand separation, so
+        # the surfaced fallback bound matches the tree's tight per-node bounds
+        # instead of the loose static value (ex9_2_6: -201.5 -> ~-1.7). Each
+        # separated cut is a supporting hyperplane, so the result is still a
+        # rigorous global lower bound; the relaxer's own guards (himmel16
+        # unbounded cross-check, infeasible/limit re-verify) return no bound on
+        # any unsound solve. ``_objective_bound_valid`` above already certified
+        # the objective is fully linearized, the precondition both paths share.
+        sep_bound: Optional[float] = None
+        try:
+            from discopt._jax.mccormick_lp import MccormickLPRelaxer
+
+            node_res = MccormickLPRelaxer(model).solve_at_node(root_lb, root_ub, time_limit=budget)
+            if node_res.lower_bound is not None and np.isfinite(node_res.lower_bound):
+                sep_bound = float(node_res.lower_bound)
+        except Exception as sep_exc:  # pragma: no cover - defensive
+            logger.debug("root separated-relaxation bound skipped: %s", sep_exc)
+
+        # Both values are valid lower bounds for a minimization, so the larger
+        # (tighter) one is the better rigorous bound.
+        candidates = [b for b in (plain_bound, sep_bound) if b is not None]
+        if candidates:
+            return max(candidates)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("root MILP-relaxation bound skipped: %s", exc)
     return None
