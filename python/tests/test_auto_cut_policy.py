@@ -72,15 +72,27 @@ def test_policy_declines_above_size_gate():
 
 
 @pytest.mark.slow
+def test_auto_is_the_default():
+    """A default solve (no cuts kwarg) applies the auto policy; cuts='manual' opts out."""
+    default = _qcqp(6, 3, constrained=True).solve(time_limit=120)
+    manual = _qcqp(6, 3, constrained=True).solve(cuts="manual", time_limit=120)
+    auto = _qcqp(6, 3, constrained=True).solve(cuts="auto", time_limit=120)
+    assert abs(float(default.objective) - float(manual.objective)) < 1e-3
+    # Default behaves like auto, not like the cut-free manual baseline.
+    assert default.node_count == auto.node_count
+    assert default.node_count < manual.node_count
+
+
+@pytest.mark.slow
 def test_auto_matches_best_family_and_preserves_optimum():
     # Box-QP: auto should match PSD's node count.
-    base_b = _qcqp(6, 0, constrained=False).solve(time_limit=120)
+    base_b = _qcqp(6, 0, constrained=False).solve(cuts="manual", time_limit=120)
     auto_b = _qcqp(6, 0, constrained=False).solve(cuts="auto", time_limit=120)
     assert abs(float(base_b.objective) - float(auto_b.objective)) < 1e-3
     assert auto_b.node_count < base_b.node_count / 2
 
     # Constrained QCQP: auto should match RLT's node count.
-    base_c = _qcqp(6, 3, constrained=True).solve(time_limit=120)
+    base_c = _qcqp(6, 3, constrained=True).solve(cuts="manual", time_limit=120)
     auto_c = _qcqp(6, 3, constrained=True).solve(cuts="auto", time_limit=120)
     assert abs(float(base_c.objective) - float(auto_c.objective)) < 1e-3
     assert auto_c.node_count < base_c.node_count / 2

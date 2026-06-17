@@ -1663,7 +1663,7 @@ def solve_model(
     cutting_planes: bool = False,
     psd_cuts: bool = False,
     rlt_cuts: bool = False,
-    cuts: str = "manual",
+    cuts: str = "auto",
     partitions: int = 0,
     branching_policy: str = "fractional",
     use_learned_relaxations: bool = False,
@@ -2909,11 +2909,14 @@ def solve_model(
                 _mc_lp_relaxer = None
                 _mc_mode = "nlp"
             else:
-                # Structure-gated cut policy (cuts="auto"): the A/B sweep showed
-                # RLT dominates on QCQP *with* linear constraints, PSD on box-QP
-                # (no constraints), and stacking the two is counter-productive. So
-                # pick exactly one by structure, gated by size, never both.
-                if cuts == "auto":
+                # Structure-gated cut policy (cuts="auto", the default): the A/B
+                # sweep showed RLT dominates on QCQP *with* linear constraints, PSD
+                # on box-QP (no constraints), and stacking the two is
+                # counter-productive. So pick exactly one by structure, gated by
+                # size, never both. An explicit psd_cuts/rlt_cuts flag takes
+                # precedence (the user opted into a specific family); cuts="manual"
+                # disables the policy entirely.
+                if cuts == "auto" and not psd_cuts and not rlt_cuts:
                     _apply_auto_cut_policy(model, _mc_lp_relaxer)
                 # A node is spatial-branchable if there is a finite-box continuous
                 # variable to bisect, OR an integer variable in a nonlinear term

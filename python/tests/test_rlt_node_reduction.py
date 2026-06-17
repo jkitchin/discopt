@@ -36,7 +36,7 @@ def _constrained_qcqp(n: int, seed: int) -> dm.Model:
 
 
 def test_rlt_preserves_optimum_and_never_adds_nodes():
-    base = _constrained_qcqp(6, 0).solve(rlt_cuts=False, time_limit=60)
+    base = _constrained_qcqp(6, 0).solve(cuts="manual", time_limit=60)
     rlt = _constrained_qcqp(6, 0).solve(rlt_cuts=True, time_limit=60)
     assert base.status == "optimal" and rlt.status == "optimal"
     assert abs(float(base.objective) - float(rlt.objective)) < 1e-3
@@ -45,7 +45,7 @@ def test_rlt_preserves_optimum_and_never_adds_nodes():
 
 @pytest.mark.slow
 def test_rlt_substantially_reduces_nodes_on_constrained_qcqp():
-    base = _constrained_qcqp(6, 3).solve(rlt_cuts=False, time_limit=120)
+    base = _constrained_qcqp(6, 3).solve(cuts="manual", time_limit=120)
     rlt = _constrained_qcqp(6, 3).solve(rlt_cuts=True, time_limit=120)
     assert abs(float(base.objective) - float(rlt.objective)) < 1e-3
     assert base.node_count > 50  # a genuinely non-trivial tree
