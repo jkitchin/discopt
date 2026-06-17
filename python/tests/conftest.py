@@ -15,3 +15,6 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "integration: solver-dependent integration tests")
     config.addinivalue_line("markers", "amp_benchmark: opt-in AMP benchmark/incidence tests")
     config.addinivalue_line("markers", "requires_cyipopt: requires cyipopt/Ipopt")
+    config.addinivalue_line(
+        "markers", "relaxation: per-operator relaxation soundness/coverage audit"
+    )
