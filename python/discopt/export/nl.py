@@ -141,10 +141,20 @@ class _NLWriter:
         self._con_linear: list[dict[int, float]] = []  # per constraint
         self._con_nonlinear: list[Expression | None] = []
         self._con_bounds: list[tuple[int, float, float]] = []  # (type, lb, ub)
+        # Header discrete/nonlinear counts, filled by _reorder_vars_canonical.
+        self._nlvc_total = 0  # total nonlinear vars in constraints (incl. both)
+        self._nlvo_total = 0  # total nonlinear vars in objectives (incl. both)
+        self._nlvb = 0  # nonlinear vars in both cons + objs
+        self._nlvbi = 0  # integer/binary vars nonlinear in both
+        self._nlvci = 0  # integer/binary vars nonlinear in cons only
+        self._nlvoi = 0  # integer/binary vars nonlinear in objs only
+        self._nbv = 0  # linear binary vars
+        self._niv = 0  # linear integer vars
 
     def write(self) -> str:
         self._build_var_map()
         self._decompose_expressions()
+        self._reorder_vars_canonical()
         buf = io.StringIO()
         self._write_header(buf)
         self._write_C_sections(buf)
@@ -182,6 +192,109 @@ class _NLWriter:
 
         for idx, (var, elem) in enumerate(self._flat_vars):
             self._var_index[(var.name, elem)] = idx
+
+    # ── Reorder variables into canonical AMPL .nl order ──
+
+    def _reorder_vars_canonical(self):
+        """Reorder ``_flat_vars`` into the canonical AMPL ``.nl`` sequence.
+
+        The ``.nl`` format requires nonlinear variables to occupy the lowest
+        indices, grouped as ``[nl in both cons+objs | nl in cons only |
+        nl in objs only | linear]``; within each nonlinear group the integer
+        (and binary) members come **last**, and the linear tail is ordered
+        ``[continuous | binary | integer]``. The header's discrete-count line
+        (``nbv niv nlvbi nlvci nlvoi``) then declares how many of each group
+        are discrete.
+
+        The previous order (all continuous, then all discrete) wrote *every*
+        discrete variable as linear-discrete (``nbv``/``niv``) with
+        ``nlvbi=nlvci=nlvoi=0``. AMPL-compatible solvers (SCIP, BARON, Couenne,
+        Ipopt) read a discrete variable appearing in a nonlinear expression as
+        **continuous** under that encoding and silently solve a relaxation
+        (issue #210). Pure MILP/LP export is unaffected — there the discrete
+        vars are genuinely linear, so ``nbv``/``niv`` are already correct.
+
+        Must run after :meth:`_decompose_expressions` (it needs the nonlinear
+        expressions and the linear-coefficient dicts). It rebuilds
+        ``_var_index`` and remaps the index-keyed ``_obj_linear`` /
+        ``_con_linear`` dicts; nonlinear expressions resolve through
+        ``_var_index`` at write time and so remap automatically.
+        """
+        # Classify variables (by current index) appearing in nonlinear parts.
+        nl_cons: set[int] = set()
+        nl_objs: set[int] = set()
+        for nl in self._con_nonlinear:
+            if nl is not None:
+                self._collect_var_indices(nl, nl_cons)
+        if self._obj_nonlinear is not None:
+            self._collect_var_indices(self._obj_nonlinear, nl_objs)
+        nl_both = nl_cons & nl_objs
+        nl_cons_only = nl_cons - nl_both
+        nl_objs_only = nl_objs - nl_both
+        nl_all = nl_cons | nl_objs
+
+        def is_discrete(old_idx: int) -> bool:
+            var, _ = self._flat_vars[old_idx]
+            return var.var_type in (VarType.BINARY, VarType.INTEGER)
+
+        def split_group(idxs: set[int]) -> tuple[list[int], list[int]]:
+            """Continuous members first, discrete members last (stable by index)."""
+            ordered = sorted(idxs)
+            cont = [i for i in ordered if not is_discrete(i)]
+            disc = [i for i in ordered if is_discrete(i)]
+            return cont, disc
+
+        both_cont, both_disc = split_group(nl_both)
+        cons_cont, cons_disc = split_group(nl_cons_only)
+        objs_cont, objs_disc = split_group(nl_objs_only)
+
+        # Linear tail: continuous, then binary, then integer (preserving order).
+        lin_cont: list[int] = []
+        lin_bin: list[int] = []
+        lin_int: list[int] = []
+        for old_idx, (var, _elem) in enumerate(self._flat_vars):
+            if old_idx in nl_all:
+                continue
+            if var.var_type == VarType.BINARY:
+                lin_bin.append(old_idx)
+            elif var.var_type == VarType.INTEGER:
+                lin_int.append(old_idx)
+            else:
+                lin_cont.append(old_idx)
+
+        new_order = (
+            both_cont
+            + both_disc
+            + cons_cont
+            + cons_disc
+            + objs_cont
+            + objs_disc
+            + lin_cont
+            + lin_bin
+            + lin_int
+        )
+
+        # Rebuild flat var list and the (name, elem) -> index map.
+        old_flat = self._flat_vars
+        self._flat_vars = [old_flat[i] for i in new_order]
+        old2new = {old: new for new, old in enumerate(new_order)}
+        self._var_index = {}
+        for new_idx, (var, elem) in enumerate(self._flat_vars):
+            self._var_index[(var.name, elem)] = new_idx
+
+        # Remap index-keyed linear coefficient dicts.
+        self._obj_linear = {old2new[k]: v for k, v in self._obj_linear.items()}
+        self._con_linear = [{old2new[k]: v for k, v in lin.items()} for lin in self._con_linear]
+
+        # Stash header counts (line 4: nlvc/nlvo totals + nlvb; line 6: discrete).
+        self._nlvc_total = len(nl_cons)
+        self._nlvo_total = len(nl_objs)
+        self._nlvb = len(nl_both)
+        self._nlvbi = len(both_disc)
+        self._nlvci = len(cons_disc)
+        self._nlvoi = len(objs_disc)
+        self._nbv = len(lin_bin)
+        self._niv = len(lin_int)
 
     # ── Decompose expressions into linear + nonlinear parts ──
 
@@ -540,18 +653,6 @@ class _NLWriter:
         n_nl_cons = sum(1 for nl in self._con_nonlinear if nl is not None)
         n_nl_objs = 1 if self._obj_nonlinear is not None else 0
 
-        # Count variables appearing in nonlinear expressions
-        nl_var_set_cons: set[int] = set()
-        nl_var_set_objs: set[int] = set()
-        for nl in self._con_nonlinear:
-            if nl is not None:
-                self._collect_var_indices(nl, nl_var_set_cons)
-        if self._obj_nonlinear is not None:
-            self._collect_var_indices(self._obj_nonlinear, nl_var_set_objs)
-        nl_both = nl_var_set_cons & nl_var_set_objs
-        nl_cons_only = nl_var_set_cons - nl_both
-        nl_objs_only = nl_var_set_objs - nl_both
-
         # Count Jacobian nonzeros (linear + nonlinear vars in each constraint)
         n_jac_nz = sum(len(lin) for lin in self._con_linear)
         # Add nonlinear variable references in constraints
@@ -576,15 +677,20 @@ class _NLWriter:
         buf.write(f" {n_nl_cons} {n_nl_objs}\t# nonlinear constraints, objectives\n")
         # Line 3: network (unused)
         buf.write(" 0 0\t# network constraints\n")
-        # Line 4: nonlinear variable distribution
+        # Line 4: nonlinear variable distribution (nlvc/nlvo are TOTALS, incl. both)
         buf.write(
-            f" {len(nl_cons_only)} {len(nl_objs_only)} {len(nl_both)}"
+            f" {self._nlvc_total} {self._nlvo_total} {self._nlvb}"
             "\t# nonlinear vars in cons, objs, both\n"
         )
         # Line 5: flags
         buf.write(" 0 0 0 1 0\t# flags\n")
-        # Line 6: discrete variable counts
-        buf.write(f" {self._n_binary} {self._n_integer} 0 0 0\t# binary, integer vars\n")
+        # Line 6: discrete variable counts: nbv niv nlvbi nlvci nlvoi
+        # (linear-binary, linear-integer, then integer/binary vars nonlinear in
+        #  both / cons-only / objs-only — see _reorder_vars_canonical, issue #210)
+        buf.write(
+            f" {self._nbv} {self._niv} {self._nlvbi} {self._nlvci} {self._nlvoi}"
+            "\t# nbv niv nlvbi nlvci nlvoi\n"
+        )
         # Line 7: sparsity
         buf.write(f" {n_jac_nz} {n_grad_nz}\t# Jacobian, gradient nonzeros\n")
         # Line 8: name lengths
