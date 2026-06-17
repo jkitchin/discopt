@@ -1496,7 +1496,10 @@ def solve_model(
     batch_size : int, default 16
         Number of B&B nodes to export per iteration.
     strategy : str, default "best_first"
-        Node selection strategy: ``"best_first"`` or ``"depth_first"``.
+        Node selection strategy: ``"best_first"`` (lowest dual bound),
+        ``"depth_first"``, or ``"best_estimate"`` (lowest pseudocost-based
+        estimate of the subtree optimum — finds good incumbents earlier while
+        ``best_first`` still drives the proof of optimality).
     max_nodes : int, default 100_000
         Maximum number of B&B nodes before stopping.
     ipopt_options : dict, optional

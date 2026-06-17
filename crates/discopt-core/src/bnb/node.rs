@@ -36,6 +36,12 @@ pub struct Node {
     pub ub: Vec<f64>,
     /// Relaxation objective bound at this node.
     pub local_lower_bound: f64,
+    /// Best-estimate of the optimal objective in this node's subtree, used by the
+    /// `BestEstimate` selection strategy. Computed from the parent's pseudocosts
+    /// at branch time. `NEG_INFINITY` means "unset" — selection falls back to
+    /// `local_lower_bound`, so best-estimate degrades gracefully to best-first
+    /// before any pseudocost history exists.
+    pub best_estimate: f64,
     /// Current status.
     pub status: NodeStatus,
     /// Parent node's NLP solution, used as warm-start for child solves.
@@ -62,6 +68,7 @@ impl Node {
             lb,
             ub,
             local_lower_bound: f64::NEG_INFINITY,
+            best_estimate: f64::NEG_INFINITY,
             status: NodeStatus::Pending,
             parent_solution: None,
             basis: None,

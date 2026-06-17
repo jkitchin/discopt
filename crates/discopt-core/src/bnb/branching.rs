@@ -306,6 +306,7 @@ pub fn create_children(
         lb: parent.lb.clone(),
         ub: left_ub,
         local_lower_bound: inherited_lb,
+        best_estimate: inherited_lb,
         status: NodeStatus::Pending,
         parent_solution: parent_sol.clone(),
         basis: parent_basis.clone(),
@@ -321,6 +322,7 @@ pub fn create_children(
         lb: right_lb,
         ub: parent.ub.clone(),
         local_lower_bound: inherited_lb,
+        best_estimate: inherited_lb,
         status: NodeStatus::Pending,
         parent_solution: parent_sol,
         basis: parent_basis,
@@ -354,6 +356,7 @@ pub fn create_children_spatial(
         lb: parent.lb.clone(),
         ub: left_ub,
         local_lower_bound: inherited_lb,
+        best_estimate: inherited_lb,
         status: NodeStatus::Pending,
         parent_solution: parent_sol.clone(),
         basis: None, // spatial branching is MINLP-side; no simplex basis
@@ -369,6 +372,7 @@ pub fn create_children_spatial(
         lb: right_lb,
         ub: parent.ub.clone(),
         local_lower_bound: inherited_lb,
+        best_estimate: inherited_lb,
         status: NodeStatus::Pending,
         parent_solution: parent_sol,
         basis: None, // spatial branching is MINLP-side; no simplex basis
