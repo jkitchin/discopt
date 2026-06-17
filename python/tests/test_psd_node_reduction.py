@@ -38,7 +38,7 @@ def _dense_indefinite_qcqp(n: int, seed: int) -> dm.Model:
 
 def test_psd_preserves_optimum_and_never_adds_nodes():
     """Soundness + no-harm: same optimum, and PSD never increases the node count."""
-    base = _dense_indefinite_qcqp(6, 8).solve(psd_cuts=False, time_limit=60)
+    base = _dense_indefinite_qcqp(6, 8).solve(cuts="manual", time_limit=60)
     psd = _dense_indefinite_qcqp(6, 8).solve(psd_cuts=True, time_limit=60)
     assert base.status == "optimal" and psd.status == "optimal"
     assert abs(float(base.objective) - float(psd.objective)) < 1e-3
@@ -48,7 +48,7 @@ def test_psd_preserves_optimum_and_never_adds_nodes():
 @pytest.mark.slow
 def test_psd_substantially_reduces_nodes_on_hard_instance():
     """n6_s0 has a non-trivial tree; per-node PSD cuts cut it down sharply."""
-    base = _dense_indefinite_qcqp(6, 0).solve(psd_cuts=False, time_limit=120)
+    base = _dense_indefinite_qcqp(6, 0).solve(cuts="manual", time_limit=120)
     psd = _dense_indefinite_qcqp(6, 0).solve(psd_cuts=True, time_limit=120)
     assert abs(float(base.objective) - float(psd.objective)) < 1e-3
     # Baseline explores a real tree; PSD cuts more than halve it.
