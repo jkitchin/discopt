@@ -33,7 +33,12 @@ import numpy as np
 
 from discopt._jax.cutting_planes import LinearCut
 
-__all__ = ["psd_cut_from_submatrix", "moment_matrix"]
+__all__ = [
+    "psd_cut_from_submatrix",
+    "moment_matrix",
+    "separate_psd_cuts_on_relaxation",
+    "psd_strengthen_relaxation_bound",
+]
 
 
 def moment_matrix(x_vals: np.ndarray, X_vals: np.ndarray) -> np.ndarray:
@@ -113,3 +118,127 @@ def psd_cut_from_submatrix(
 
     rhs = -(v0 * v0)
     return LinearCut(coeffs=coeffs, rhs=float(rhs), sense=">=")
+
+
+def _diag_col(info: dict, i: int) -> Optional[int]:
+    """Relaxation column holding the lifted square ``X_ii = x_i**2`` (or None)."""
+    mono = info.get("monomial", {})
+    usq = info.get("univariate_square", {})
+    if (i, 2) in mono:
+        return int(mono[(i, 2)])
+    if (i, 2) in usq:
+        return int(usq[(i, 2)])
+    return None
+
+
+def separate_psd_cuts_on_relaxation(
+    info: dict,
+    x_full: np.ndarray,
+    n_total: int,
+    *,
+    tol: float = 1e-7,
+    max_cuts: int = 64,
+) -> list[LinearCut]:
+    """Separate pairwise (3x3) moment PSD cuts from a McCormick relaxation point.
+
+    ``info`` is the column-map dict returned by ``build_milp_relaxation``: it maps
+    ``original`` variables, ``bilinear`` pairs ``(i, j) -> col(X_ij)``, and
+    ``monomial``/``univariate_square`` ``(i, 2) -> col(X_ii)`` to relaxation
+    columns. For each bilinear pair whose two squares are also lifted, the 3x3
+    moment matrix over ``{i, j}``
+
+        [[1, x_i, x_j], [x_i, X_ii, X_ij], [x_j, X_ij, X_jj]]
+
+    is checked for PSD-ness at the current point ``x_full``; a negative eigenvalue
+    yields a valid linear cut (``X_ii X_jj >= X_ij**2`` plus the linkage to
+    ``x_i, x_j``). Pairwise 3x3 cuts are always available when the squares are
+    lifted and capture the core SDP strengthening for each product.
+    """
+    orig = info.get("original", {})
+    bil = info.get("bilinear", {})
+    cuts: list[LinearCut] = []
+    for (i, j), w_col in bil.items():
+        if len(cuts) >= max_cuts:
+            break
+        di = _diag_col(info, i)
+        dj = _diag_col(info, j)
+        if di is None or dj is None or i not in orig or j not in orig:
+            continue
+        ci, cj, w = int(orig[i]), int(orig[j]), int(w_col)
+        x_vals = np.array([x_full[ci], x_full[cj]], dtype=np.float64)
+        X_vals = np.array([[x_full[di], x_full[w]], [x_full[w], x_full[dj]]], dtype=np.float64)
+        prod_cols = np.array([[di, w], [w, dj]], dtype=int)
+        cut = psd_cut_from_submatrix(x_vals, X_vals, [ci, cj], prod_cols, n_total, tol=tol)
+        if cut is not None:
+            cuts.append(cut)
+    return cuts
+
+
+def psd_strengthen_relaxation_bound(
+    milp,
+    info: dict,
+    *,
+    max_rounds: int = 5,
+    tol: float = 1e-7,
+    time_limit_per_lp: Optional[float] = 1.0,
+):
+    """Iteratively add PSD cuts to a McCormick relaxation LP and re-solve.
+
+    Returns ``(z_before, z_after, n_cuts)`` where the ``z`` values are valid dual
+    bounds (``min`` of the relaxation objective, in the user's objective scale).
+    Because every PSD cut is valid for the whole feasible region, ``z_after`` is a
+    *valid* bound that is ``>= z_before`` — a genuine tightening that never
+    excludes the optimum. A sound no-op (``z_after == z_before``, ``0`` cuts) on
+    any failure (no exact LP oracle, non-optimal solve, no separable cut).
+    """
+    import scipy.sparse as sp
+
+    from discopt._jax.obbt import get_exact_lp_solver
+    from discopt.solvers import SolveStatus
+
+    _lp = get_exact_lp_solver()
+    if _lp is None:
+        return (None, None, 0)
+
+    c = np.asarray(milp._c, dtype=np.float64)
+    bounds = list(milp._bounds)
+    n_total = len(bounds)
+    offset = float(milp._obj_offset)
+
+    A_ub = milp._A_ub
+    b_ub = np.asarray(milp._b_ub, dtype=np.float64) if milp._b_ub is not None else np.zeros(0)
+    if A_ub is None:
+        A_ub = sp.csr_matrix((0, n_total))
+
+    def _solve(A, b):
+        return _lp(c=c, A_ub=A, b_ub=b, bounds=bounds, time_limit=time_limit_per_lp)
+
+    res = _solve(A_ub, b_ub)
+    if res.status != SolveStatus.OPTIMAL or res.objective is None or res.x is None:
+        return (None, None, 0)
+    z_before = float(res.objective) + offset
+    z_cur = z_before
+    total_cuts = 0
+
+    A_cur = sp.csr_matrix(A_ub)
+    b_cur = np.asarray(b_ub, dtype=np.float64)
+    for _ in range(max(1, max_rounds)):
+        cuts = separate_psd_cuts_on_relaxation(info, np.asarray(res.x), n_total, tol=tol)
+        if not cuts:
+            break
+        # Cut is coeffs.z >= rhs  ==>  (-coeffs).z <= -rhs for the A_ub<=b_ub form.
+        rows = sp.csr_matrix(np.vstack([-c0.coeffs for c0 in cuts]))
+        rhs = np.array([-c0.rhs for c0 in cuts], dtype=np.float64)
+        A_cur = sp.vstack([A_cur, rows], format="csr")
+        b_cur = np.concatenate([b_cur, rhs])
+        total_cuts += len(cuts)
+
+        res = _solve(A_cur, b_cur)
+        if res.status != SolveStatus.OPTIMAL or res.objective is None or res.x is None:
+            break
+        z_new = float(res.objective) + offset
+        if z_new <= z_cur + 1e-9:
+            z_cur = max(z_cur, z_new)
+            break
+        z_cur = z_new
+    return (z_before, z_cur, total_cuts)
