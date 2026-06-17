@@ -279,3 +279,58 @@ def test_ex1252_objective_gating_priority_vars():
     lb_pinned[37] = ub_pinned[37] = 0.0
     sol_pinned = np.zeros(n)  # 36/38 integral, 37 fixed
     assert _select_priority_branch_var(sol_pinned, lb_pinned, ub_pinned, pri) is None
+
+
+@pytest.mark.correctness
+def test_ex1252_relaxation_equilibration_conditions_and_preserves_bound():
+    """LP conditioning (issue #184). ex1252's lifted relaxation on a boundary
+    sub-box (line 1+2 binaries both fixed) has a >1e12 coefficient spread, on
+    which HiGHS stalls. ``equilibrate_relaxation_lp`` (geometric-mean row/column
+    scaling) brings the spread down so the external LP backend converges instead
+    of timing out — and because the rescaling is exact, the bound is unchanged
+    and integer columns are never scaled.
+    """
+    import numpy as np
+    import scipy.sparse as sp
+    from discopt._jax.milp_relaxation import build_milp_relaxation, equilibrate_relaxation_lp
+
+    nl = _DATA / "ex1252.nl"
+    assert nl.exists(), f"missing {nl}"
+    m = dm.from_nl(str(nl))
+    relaxer = MccormickLPRelaxer(m)
+    lb, ub = flat_variable_bounds(m)
+
+    nlb, nub = lb.copy(), ub.copy()
+    for k, val in zip((36, 37, 38), (1.0, 1.0, 0.0)):
+        nlb[k] = nub[k] = val
+    milp, _ = build_milp_relaxation(m, relaxer._terms, relaxer._disc, bound_override=(nlb, nub))
+
+    def _range(A):
+        d = np.abs(sp.csr_matrix(A).data)
+        d = d[d > 0]
+        return d.max() / d.min()
+
+    raw_range = _range(milp._A_ub)
+    assert raw_range > 1e12, f"expected ill-conditioned box, range only {raw_range:.1e}"
+
+    c2, A2, b2, bounds2, col_scale = equilibrate_relaxation_lp(
+        milp._c, milp._A_ub, milp._b_ub, milp._bounds, milp._integrality
+    )
+    assert _range(A2) < raw_range / 1e4, "equilibration did not materially reduce the spread"
+
+    # Integer columns must never be scaled (would corrupt integrality).
+    integ = np.asarray(milp._integrality)
+    assert np.all(col_scale[integ == 1] == 1.0)
+
+    # Exact rescaling ⇒ identical bound. Solve both the raw and equilibrated LP
+    # with the (fast, equilibrating) Rust simplex and require agreement.
+    milp._integrality = None
+    raw = milp.solve(backend="simplex")
+    from discopt._jax.milp_relaxation import MilpRelaxationModel
+
+    scaled = MilpRelaxationModel(
+        c=c2, A_ub=A2, b_ub=b2, bounds=bounds2, obj_offset=milp._obj_offset,
+        integrality=None, objective_bound_valid=True,
+    ).solve(backend="simplex")
+    assert raw.status == scaled.status == "optimal"
+    assert abs(float(raw.bound) - float(scaled.bound)) <= 1e-6 + 1e-6 * abs(float(raw.bound))

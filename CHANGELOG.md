@@ -25,6 +25,21 @@ The release procedure that produces these entries is documented in
   only valid rows tighten, and the un-pin only enlarges the box. Regression
   locks in `test_bucket2_sound_bounds.py`.
 
+- **Lifted-relaxation LP equilibration** (`feat(relaxation)`, #184). The lifted
+  McCormick rows of a product over a wide variable box mix tiny constants (~1e-9)
+  with large bound-derived coefficients (~1e7), giving a >1e15 coefficient spread
+  on ex1252's boundary sub-boxes. HiGHS stalls on it (a 452×96 LP hits its time
+  limit; the per-node soundness re-verifications then dominate the solve) while
+  the pure-Rust simplex, which equilibrates internally, solves it in ~0.03s.
+  `equilibrate_relaxation_lp` (`discopt._jax.milp_relaxation`) applies
+  geometric-mean (Ruiz) row/column scaling, snapped to powers of two, before the
+  external (HiGHS/POUNCE) backend solve when the spread exceeds 1e6 — turning
+  previously timing-out boundary boxes into ~3-4s converged solves (e.g. the
+  `x36=1,x37=1` box: time-out → 4.5s). The rescaling is exact (bound/feasibility
+  unchanged, integer columns never scaled, solution mapped back through the
+  column scale), so it only ever conditions — never alters — the result.
+  Regression-locked in `test_bucket2_sound_bounds.py`.
+
 - **Objective-gating priority branching** (`feat(bnb)`, #184). Opt-in
   (`DISCOPT_OBJ_BRANCH_PRIORITY=1`) branching-order heuristic that branches the
   integer variables gating the objective's nonlinear terms (those appearing in,
