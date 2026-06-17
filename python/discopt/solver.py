@@ -1416,7 +1416,15 @@ def _root_relaxation_lower_bound(
         relax = sanitize_relaxation_for_conditioning(relax)
         budget = min(10.0, max(1.0, time_limit * 0.1))
         result = relax.solve(time_limit=budget, gap_tolerance=1e-6)
-        if result.bound is not None and np.isfinite(result.bound):
+        # Only an OPTIMAL relaxation solve yields a valid lower bound. An
+        # "unbounded" verdict means the relaxation (e.g. a McCormick envelope over
+        # a box where a nonlinear-term variable is still unbounded) has no finite
+        # lower bound, yet the backend still reports ``bound = 0.0`` — a finite
+        # value that is NOT a valid bound. On himmel16 the root relaxation is
+        # unbounded and 0.0 > the true optimum -0.866; surfacing it as the
+        # fallback bound would publish an invalid (above-incumbent) dual bound.
+        # Gate on optimality so an unbounded/limit solve returns no bound instead.
+        if result.status == "optimal" and result.bound is not None and np.isfinite(result.bound):
             return float(result.bound)
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("root MILP-relaxation bound skipped: %s", exc)
