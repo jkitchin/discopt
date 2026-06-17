@@ -131,6 +131,84 @@ def _diag_col(info: dict, i: int) -> Optional[int]:
     return None
 
 
+def _moment_blocks_for_set(info: dict, S: Sequence[int]):
+    """Column indices needed for the moment submatrix over variables ``S``.
+
+    Returns ``(orig_cols, diag_cols, off_cols)`` or ``None`` if any required
+    lifted column (a square or a cross-product within ``S``) is missing.
+    """
+    orig = info.get("original", {})
+    bil = info.get("bilinear", {})
+    S = list(S)
+    if any(i not in orig for i in S):
+        return None
+    diag_cols = []
+    for i in S:
+        di = _diag_col(info, i)
+        if di is None:
+            return None
+        diag_cols.append(di)
+    k = len(S)
+    off = np.full((k, k), -1, dtype=int)
+    for a in range(k):
+        for b in range(a + 1, k):
+            key = (min(S[a], S[b]), max(S[a], S[b]))
+            if key not in bil:
+                return None
+            off[a, b] = off[b, a] = int(bil[key])
+    return [int(orig[i]) for i in S], diag_cols, off
+
+
+def _moment_clique_cut(
+    info: dict, x_full: np.ndarray, S: Sequence[int], n_total: int, *, tol: float
+) -> Optional[LinearCut]:
+    """Separate a single moment cut over the variable clique ``S`` (size >= 2)."""
+    blocks = _moment_blocks_for_set(info, S)
+    if blocks is None:
+        return None
+    orig_cols, diag_cols, off = blocks
+    k = len(S)
+    x_vals = np.array([x_full[c] for c in orig_cols], dtype=np.float64)
+    X_vals = np.empty((k, k), dtype=np.float64)
+    prod_cols = np.empty((k, k), dtype=int)
+    for a in range(k):
+        prod_cols[a, a] = diag_cols[a]
+        X_vals[a, a] = x_full[diag_cols[a]]
+        for b in range(a + 1, k):
+            prod_cols[a, b] = prod_cols[b, a] = off[a, b]
+            X_vals[a, b] = X_vals[b, a] = x_full[off[a, b]]
+    return psd_cut_from_submatrix(x_vals, X_vals, orig_cols, prod_cols, n_total, tol=tol)
+
+
+def _lifted_cliques(info: dict, max_dim: int) -> list[tuple[int, ...]]:
+    """Greedy cliques of variables whose pairwise products + squares are all lifted.
+
+    A clique ``S`` (all pairs in ``bilinear``, all squares lifted) is exactly the
+    set over which a dense moment submatrix can be formed. Dense ``k>=3`` cliques
+    capture multi-variable moment coupling that pairwise 2x2 minors miss.
+    """
+    bil = info.get("bilinear", {})
+    verts = [i for i in info.get("original", {}) if _diag_col(info, i) is not None]
+    adj: dict[int, set] = {i: set() for i in verts}
+    for i, j in bil:
+        if i in adj and j in adj:
+            adj[i].add(j)
+            adj[j].add(i)
+    cliques: set[tuple[int, ...]] = set()
+    # Seed a greedy clique from each vertex, extending by most-connected neighbours.
+    for seed in sorted(verts, key=lambda v: -len(adj[v])):
+        clique = [seed]
+        cand = sorted(adj[seed], key=lambda v: -len(adj[v]))
+        for v in cand:
+            if len(clique) >= max_dim:
+                break
+            if all(v in adj[u] for u in clique):
+                clique.append(v)
+        if len(clique) >= 2:
+            cliques.add(tuple(sorted(clique)))
+    return sorted(cliques, key=lambda c: (-len(c), c))
+
+
 def separate_psd_cuts_on_relaxation(
     info: dict,
     x_full: np.ndarray,
@@ -138,37 +216,48 @@ def separate_psd_cuts_on_relaxation(
     *,
     tol: float = 1e-7,
     max_cuts: int = 64,
+    max_dim: int = 6,
 ) -> list[LinearCut]:
-    """Separate pairwise (3x3) moment PSD cuts from a McCormick relaxation point.
+    """Separate moment (PSD) cuts from a McCormick relaxation point.
 
     ``info`` is the column-map dict returned by ``build_milp_relaxation``: it maps
     ``original`` variables, ``bilinear`` pairs ``(i, j) -> col(X_ij)``, and
     ``monomial``/``univariate_square`` ``(i, 2) -> col(X_ii)`` to relaxation
-    columns. For each bilinear pair whose two squares are also lifted, the 3x3
-    moment matrix over ``{i, j}``
+    columns. Cuts are separated over **cliques** of variables whose pairwise
+    products and squares are all lifted (up to ``max_dim`` variables): the moment
+    submatrix
 
-        [[1, x_i, x_j], [x_i, X_ii, X_ij], [x_j, X_ij, X_jj]]
+        [[1, x_S^T], [x_S, X_SS]]
 
-    is checked for PSD-ness at the current point ``x_full``; a negative eigenvalue
-    yields a valid linear cut (``X_ii X_jj >= X_ij**2`` plus the linkage to
-    ``x_i, x_j``). Pairwise 3x3 cuts are always available when the squares are
-    lifted and capture the core SDP strengthening for each product.
+    is checked for PSD-ness at the current point; a negative eigenvalue yields a
+    valid cut. Dense ``k>=3`` cliques capture multi-variable moment coupling that
+    pairwise 2x2 minors cannot; pairwise cuts remain the ``k=2`` special case.
     """
-    orig = info.get("original", {})
-    bil = info.get("bilinear", {})
     cuts: list[LinearCut] = []
-    for (i, j), w_col in bil.items():
+    seen_pairs: set[tuple[int, int]] = set()
+    # Dense cliques first (strongest), then any remaining pairwise products.
+    for S in _lifted_cliques(info, max_dim):
         if len(cuts) >= max_cuts:
             break
+        cut = _moment_clique_cut(info, x_full, S, n_total, tol=tol)
+        if cut is not None:
+            cuts.append(cut)
+        for a in range(len(S)):
+            for b in range(a + 1, len(S)):
+                seen_pairs.add((S[a], S[b]))
+
+    orig = info.get("original", {})
+    bil = info.get("bilinear", {})
+    for i, j in bil:
+        if len(cuts) >= max_cuts:
+            break
+        if (min(i, j), max(i, j)) in seen_pairs:
+            continue
         di = _diag_col(info, i)
         dj = _diag_col(info, j)
         if di is None or dj is None or i not in orig or j not in orig:
             continue
-        ci, cj, w = int(orig[i]), int(orig[j]), int(w_col)
-        x_vals = np.array([x_full[ci], x_full[cj]], dtype=np.float64)
-        X_vals = np.array([[x_full[di], x_full[w]], [x_full[w], x_full[dj]]], dtype=np.float64)
-        prod_cols = np.array([[di, w], [w, dj]], dtype=int)
-        cut = psd_cut_from_submatrix(x_vals, X_vals, [ci, cj], prod_cols, n_total, tol=tol)
+        cut = _moment_clique_cut(info, x_full, (i, j), n_total, tol=tol)
         if cut is not None:
             cuts.append(cut)
     return cuts
