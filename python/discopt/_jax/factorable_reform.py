@@ -47,8 +47,11 @@ from discopt.modeling.core import (
     Constant,
     Constraint,
     Expression,
+    FunctionCall,
     IndexExpression,
     Model,
+    SumExpression,
+    SumOverExpression,
     UnaryOp,
     Variable,
     VarType,
@@ -520,6 +523,273 @@ def _scan_for_mixed_product(expr: Expression, model: Model) -> bool:
     if isinstance(expr, UnaryOp):
         return _scan_for_mixed_product(expr.operand, model)
     return False
+
+
+# ---------------------------------------------------------------------------
+# Entropy canonicalization: x*log(x) -> entropy(x)
+# ---------------------------------------------------------------------------
+#
+# AMPL/GAMS lower the ``entropy`` intrinsic into a raw ``x*log(x)`` product
+# when they emit a ``.nl`` file, so a model whose objective is ``Σ xᵢ·log(xᵢ)``
+# (chemical-equilibrium / Gibbs free energy, e.g. globallib ``ex6_1_4``) reaches
+# the relaxer as an undecomposable product. The MILP/McCormick-LP relaxer cannot
+# decompose ``x*log(x)`` and falls back to a *constant* separable objective floor
+# that never tightens under branching — discopt finds the global optimum but
+# cannot certify it (issue #207).
+#
+# discopt already carries a dedicated convex underestimator for the ``entropy``
+# intrinsic (``entropy(x) = x*log(x)``, convex on ``x ≥ 0``): ``relax_entropy``
+# (mccormick.py), the curvature lattice (convexity), and interval arithmetic all
+# recognise it. Recovering the intrinsic from the lowered product — a pure DAG
+# canonicalization — is therefore enough to feed the existing relaxation, so the
+# objective bound tightens under branching (and a separable-entropy objective is
+# detected as convex, unlocking the convex fast path). The rewrite is exact:
+# ``entropy(x)`` and ``x*log(x)`` are the same function, so it is sound for any
+# model, convex or not, and so runs unconditionally.
+
+
+def _strip_neg(expr: Expression) -> tuple[float, Expression]:
+    """Peel leading ``neg(...)`` wrappers, returning ``(sign, inner)``."""
+    sign = 1.0
+    while isinstance(expr, UnaryOp) and expr.op == "neg":
+        sign = -sign
+        expr = expr.operand
+    return sign, expr
+
+
+def _flatten_product(expr: Expression) -> list[Expression]:
+    """Flatten a left/right-nested ``*``-tree into a flat list of factors."""
+    if isinstance(expr, BinaryOp) and expr.op == "*":
+        return _flatten_product(expr.left) + _flatten_product(expr.right)
+    return [expr]
+
+
+def _match_entropy_product(expr: Expression, model: Model) -> Expression | None:
+    """If *expr* is a product equal to ``c · x · log(x)`` for a single variable
+    ``x`` with a nonnegative, finite box, return ``c · entropy(x)``; else ``None``.
+
+    The match is deliberately strict: it fires only when, after folding constant
+    factors, the product's variable content is *exactly* one bare occurrence of a
+    variable ``x`` and one ``log(x)`` of the same variable (so ``x²·log(x)``,
+    ``x·log(a·x)``, ``x·log(y)`` etc. are left untouched). The domain guard
+    (``lb ≥ 0``, finite box) keeps the substitution consistent with
+    ``relax_entropy``'s requirement and never introduces ``entropy`` where the
+    original product was outside the entropy domain.
+    """
+    coeff = 1.0
+    log_idx: int | None = None
+    log_arg: Expression | None = None
+    bare_idx: int | None = None
+    bare_count = 0
+    log_count = 0
+
+    for factor in _flatten_product(expr):
+        sign, factor = _strip_neg(factor)
+        coeff *= sign
+        # Fold scalar-constant factors into the coefficient.
+        if isinstance(factor, Constant) and factor.value.ndim == 0:
+            coeff *= float(factor.value)
+            continue
+        # log(var)?
+        if isinstance(factor, FunctionCall) and factor.func_name == "log" and len(factor.args) == 1:
+            idx = _get_flat_index(factor.args[0], model)
+            if idx is not None:
+                log_count += 1
+                log_idx = idx
+                log_arg = factor.args[0]
+                continue
+            return None
+        # bare variable leaf?
+        idx = _get_flat_index(factor, model)
+        if idx is not None:
+            bare_count += 1
+            bare_idx = idx
+            continue
+        # Any other factor (transcendental, product of vars, ...) disqualifies.
+        return None
+
+    if log_count != 1 or bare_count != 1 or log_arg is None or log_idx != bare_idx:
+        return None
+
+    # Domain guard: entropy's underestimator requires a nonnegative, finite box.
+    lo, hi = _bound_expression(log_arg, model)
+    if not (np.isfinite(lo) and np.isfinite(hi)) or lo < 0.0:
+        return None
+
+    entropy = FunctionCall("entropy", log_arg)
+    if coeff == 1.0:
+        return entropy
+    return BinaryOp("*", Constant(coeff), entropy)
+
+
+def _match_centropy_product(expr: Expression, model: Model) -> Expression | None:
+    """If *expr* is a product equal to ``c · x · log(x/y)`` for a single variable
+    ``x`` (nonnegative, finite box) and a positive divisor ``y``, return
+    ``c · centropy(x, y)``; else ``None``.
+
+    ``centropy(x, y) = x·log(x/y)`` is the GAMS relative-entropy intrinsic, which
+    AMPL/GAMS lower into this product when emitting a ``.nl`` file. It is jointly
+    convex on ``x ≥ 0, y > 0``, so recovering the intrinsic lets the convexity
+    detector certify a Gibbs/KL objective ``Σ nᵢ·log(nᵢ/Σnⱼ)`` on the convex fast
+    path (issue #207). The match is strict: exactly one bare ``x`` and one
+    ``log(x/y)`` whose *numerator* is that same ``x``; ``y`` is any other factor's
+    free expression. The domain guard (``x.lb ≥ 0`` finite, ``y > 0`` finite) keeps
+    the substitution consistent with the entropy domain and never introduces
+    ``centropy`` where the original product was outside it.
+    """
+    coeff = 1.0
+    log_num: Expression | None = None
+    log_num_idx: int | None = None
+    log_den: Expression | None = None
+    bare_idx: int | None = None
+    bare_count = 0
+    log_count = 0
+
+    for factor in _flatten_product(expr):
+        sign, factor = _strip_neg(factor)
+        coeff *= sign
+        if isinstance(factor, Constant) and factor.value.ndim == 0:
+            coeff *= float(factor.value)
+            continue
+        # log(num / den)?
+        if (
+            isinstance(factor, FunctionCall)
+            and factor.func_name == "log"
+            and len(factor.args) == 1
+            and isinstance(factor.args[0], BinaryOp)
+            and factor.args[0].op == "/"
+        ):
+            num_idx = _get_flat_index(factor.args[0].left, model)
+            if num_idx is not None:
+                log_count += 1
+                log_num = factor.args[0].left
+                log_num_idx = num_idx
+                log_den = factor.args[0].right
+                continue
+            return None
+        # bare variable leaf?
+        idx = _get_flat_index(factor, model)
+        if idx is not None:
+            bare_count += 1
+            bare_idx = idx
+            continue
+        return None
+
+    if (
+        log_count != 1
+        or bare_count != 1
+        or log_num is None
+        or log_den is None
+        or log_num_idx != bare_idx
+    ):
+        return None
+
+    # Domain guard: x nonnegative & finite (entropy domain), y strictly positive
+    # & finite (log(y) and the centropy domain).
+    lo_x, hi_x = _bound_expression(log_num, model)
+    if not (np.isfinite(lo_x) and np.isfinite(hi_x)) or lo_x < 0.0:
+        return None
+    lo_y, hi_y = _bound_expression(log_den, model)
+    if not (np.isfinite(lo_y) and np.isfinite(hi_y)) or lo_y <= 0.0:
+        return None
+
+    centropy = FunctionCall("centropy", log_num, log_den)
+    if coeff == 1.0:
+        return centropy
+    return BinaryOp("*", Constant(coeff), centropy)
+
+
+def _canonicalize_entropy_expr(expr: Expression, model: Model) -> Expression:
+    """Return *expr* with every ``c·x·log(x)`` product rewritten to ``c·entropy(x)``
+    and every ``c·x·log(x/y)`` product rewritten to ``c·centropy(x, y)``.
+    Identity-preserving: unchanged subtrees keep their object identity so
+    untouched models are returned byte-for-byte unchanged."""
+    if isinstance(expr, BinaryOp):
+        if expr.op == "*":
+            matched = _match_entropy_product(expr, model)
+            if matched is None:
+                matched = _match_centropy_product(expr, model)
+            if matched is not None:
+                return matched
+        left = _canonicalize_entropy_expr(expr.left, model)
+        right = _canonicalize_entropy_expr(expr.right, model)
+        if left is expr.left and right is expr.right:
+            return expr
+        return BinaryOp(expr.op, left, right)
+    if isinstance(expr, UnaryOp):
+        operand = _canonicalize_entropy_expr(expr.operand, model)
+        if operand is expr.operand:
+            return expr
+        return UnaryOp(expr.op, operand)
+    if isinstance(expr, FunctionCall):
+        new_args = tuple(_canonicalize_entropy_expr(a, model) for a in expr.args)
+        if all(n is o for n, o in zip(new_args, expr.args)):
+            return expr
+        return FunctionCall(expr.func_name, *new_args)
+    if isinstance(expr, SumExpression):
+        operand = _canonicalize_entropy_expr(expr.operand, model)
+        if operand is expr.operand:
+            return expr
+        return SumExpression(operand, axis=expr.axis)
+    if isinstance(expr, SumOverExpression):
+        new_terms = [_canonicalize_entropy_expr(t, model) for t in expr.terms]
+        if all(n is o for n, o in zip(new_terms, expr.terms)):
+            return expr
+        return SumOverExpression(new_terms)
+    return expr
+
+
+def canonicalize_entropy(model: Model) -> Model:
+    """Return a model equivalent to *model* with entropy-family products (in the
+    objective or any constraint) rewritten to their intrinsics (issue #207):
+
+    * ``c·x·log(x)``    -> ``c·entropy(x)``
+    * ``c·x·log(x/y)``  -> ``c·centropy(x, y)``   (relative entropy / Gibbs/KL)
+
+    Both intrinsics carry dedicated relaxation / convexity support, so recovering
+    them from the raw products AMPL/GAMS emit lets the bound tighten (and a
+    separable entropy / relative-entropy objective is detected as convex, taking
+    the convex fast path).
+
+    The rewrites are exact (``entropy(x) ≡ x·log(x)``, ``centropy(x,y) ≡
+    x·log(x/y)``) and convexity-preserving, so they run unconditionally. If
+    nothing matches, *model* is returned unchanged (zero overhead, zero
+    behavioural change). On any unexpected error the original model is returned,
+    so the pass can never break a previously-solvable model.
+    """
+    try:
+        changed = False
+
+        new_objective = model._objective
+        if model._objective is not None:
+            new_expr = _canonicalize_entropy_expr(model._objective.expression, model)
+            if new_expr is not model._objective.expression:
+                from discopt.modeling.core import Objective
+
+                new_objective = Objective(new_expr, model._objective.sense)
+                changed = True
+
+        new_constraints: list = []
+        for c in model._constraints:
+            if isinstance(c, Constraint):
+                new_body = _canonicalize_entropy_expr(c.body, model)
+                if new_body is not c.body:
+                    new_constraints.append(Constraint(new_body, c.sense, c.rhs, c.name))
+                    changed = True
+                    continue
+            new_constraints.append(c)
+
+        if not changed:
+            return model
+
+        new_model = Model(model.name)
+        new_model._variables = list(model._variables)
+        new_model._parameters = list(model._parameters)
+        new_model._objective = new_objective
+        new_model._constraints = new_constraints
+        return new_model
+    except Exception:  # pragma: no cover - defensive: never break a solve
+        return model
 
 
 def factorable_reformulate(model: Model, *, clear_only: bool = False) -> Model:

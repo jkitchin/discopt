@@ -377,6 +377,18 @@ def entropy(x: Interval) -> Interval:
     return Interval(_round_down(lo), _round_up(hi))
 
 
+def centropy(x: Interval, y: Interval) -> Interval:
+    """``centropy(x, y) = x*log(x/y)`` (relative entropy) on ``x >= 0, y > 0``.
+
+    Enclosed soundly (if loosely) via the identity ``centropy = entropy(x) -
+    x*log(y)`` composed in interval arithmetic. The ``x -> 0+`` limit of
+    ``centropy`` is 0, matching ``entropy``'s clamp. When the box leaves the
+    domain (``x.lo < 0`` or ``y.lo <= 0``) the constituent enclosures collapse to
+    ``[-inf, +inf]`` so the certificate soundly abstains.
+    """
+    return entropy(x) - x * log(y)
+
+
 def sin(x: Interval) -> Interval:
     """Sound enclosure of ``sin([lo, hi])``.
 

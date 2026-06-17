@@ -222,6 +222,9 @@ def _eval_function_call(expr: FunctionCall, model: Model, box: dict, cache: dict
             hi = np.minimum(hi, a.hi)
         return Interval(lo, hi)
 
+    if expr.func_name == "centropy" and len(args) == 2:
+        return iv.centropy(args[0], args[1])
+
     if len(args) != 1:
         return _unbounded(args[0].lo.shape)
 
