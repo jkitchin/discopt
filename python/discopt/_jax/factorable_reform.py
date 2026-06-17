@@ -626,13 +626,87 @@ def _match_entropy_product(expr: Expression, model: Model) -> Expression | None:
     return BinaryOp("*", Constant(coeff), entropy)
 
 
+def _match_centropy_product(expr: Expression, model: Model) -> Expression | None:
+    """If *expr* is a product equal to ``c · x · log(x/y)`` for a single variable
+    ``x`` (nonnegative, finite box) and a positive divisor ``y``, return
+    ``c · centropy(x, y)``; else ``None``.
+
+    ``centropy(x, y) = x·log(x/y)`` is the GAMS relative-entropy intrinsic, which
+    AMPL/GAMS lower into this product when emitting a ``.nl`` file. It is jointly
+    convex on ``x ≥ 0, y > 0``, so recovering the intrinsic lets the convexity
+    detector certify a Gibbs/KL objective ``Σ nᵢ·log(nᵢ/Σnⱼ)`` on the convex fast
+    path (issue #207). The match is strict: exactly one bare ``x`` and one
+    ``log(x/y)`` whose *numerator* is that same ``x``; ``y`` is any other factor's
+    free expression. The domain guard (``x.lb ≥ 0`` finite, ``y > 0`` finite) keeps
+    the substitution consistent with the entropy domain and never introduces
+    ``centropy`` where the original product was outside it.
+    """
+    coeff = 1.0
+    log_num: Expression | None = None
+    log_num_idx: int | None = None
+    log_den: Expression | None = None
+    bare_idx: int | None = None
+    bare_count = 0
+    log_count = 0
+
+    for factor in _flatten_product(expr):
+        sign, factor = _strip_neg(factor)
+        coeff *= sign
+        if isinstance(factor, Constant) and factor.value.ndim == 0:
+            coeff *= float(factor.value)
+            continue
+        # log(num / den)?
+        if (
+            isinstance(factor, FunctionCall)
+            and factor.func_name == "log"
+            and len(factor.args) == 1
+            and isinstance(factor.args[0], BinaryOp)
+            and factor.args[0].op == "/"
+        ):
+            num_idx = _get_flat_index(factor.args[0].left, model)
+            if num_idx is not None:
+                log_count += 1
+                log_num = factor.args[0].left
+                log_num_idx = num_idx
+                log_den = factor.args[0].right
+                continue
+            return None
+        # bare variable leaf?
+        idx = _get_flat_index(factor, model)
+        if idx is not None:
+            bare_count += 1
+            bare_idx = idx
+            continue
+        return None
+
+    if log_count != 1 or bare_count != 1 or log_num_idx is None or log_num_idx != bare_idx:
+        return None
+
+    # Domain guard: x nonnegative & finite (entropy domain), y strictly positive
+    # & finite (log(y) and the centropy domain).
+    lo_x, hi_x = _bound_expression(log_num, model)
+    if not (np.isfinite(lo_x) and np.isfinite(hi_x)) or lo_x < 0.0:
+        return None
+    lo_y, hi_y = _bound_expression(log_den, model)
+    if not (np.isfinite(lo_y) and np.isfinite(hi_y)) or lo_y <= 0.0:
+        return None
+
+    centropy = FunctionCall("centropy", log_num, log_den)
+    if coeff == 1.0:
+        return centropy
+    return BinaryOp("*", Constant(coeff), centropy)
+
+
 def _canonicalize_entropy_expr(expr: Expression, model: Model) -> Expression:
-    """Return *expr* with every ``c·x·log(x)`` product rewritten to
-    ``c·entropy(x)``. Identity-preserving: unchanged subtrees keep their object
-    identity so untouched models are returned byte-for-byte unchanged."""
+    """Return *expr* with every ``c·x·log(x)`` product rewritten to ``c·entropy(x)``
+    and every ``c·x·log(x/y)`` product rewritten to ``c·centropy(x, y)``.
+    Identity-preserving: unchanged subtrees keep their object identity so
+    untouched models are returned byte-for-byte unchanged."""
     if isinstance(expr, BinaryOp):
         if expr.op == "*":
             matched = _match_entropy_product(expr, model)
+            if matched is None:
+                matched = _match_centropy_product(expr, model)
             if matched is not None:
                 return matched
         left = _canonicalize_entropy_expr(expr.left, model)
@@ -664,14 +738,22 @@ def _canonicalize_entropy_expr(expr: Expression, model: Model) -> Expression:
 
 
 def canonicalize_entropy(model: Model) -> Model:
-    """Return a model equivalent to *model* with every ``c·x·log(x)`` product
-    (in the objective or any constraint) rewritten to the ``entropy(x)``
-    intrinsic, which the relaxation pipeline can bound tightly (issue #207).
+    """Return a model equivalent to *model* with entropy-family products (in the
+    objective or any constraint) rewritten to their intrinsics (issue #207):
 
-    The rewrite is exact (``entropy(x) ≡ x·log(x)``) and convexity-preserving, so
-    it runs unconditionally. If nothing matches, *model* is returned unchanged
-    (zero overhead, zero behavioural change). On any unexpected error the original
-    model is returned, so the pass can never break a previously-solvable model.
+    * ``c·x·log(x)``    -> ``c·entropy(x)``
+    * ``c·x·log(x/y)``  -> ``c·centropy(x, y)``   (relative entropy / Gibbs/KL)
+
+    Both intrinsics carry dedicated relaxation / convexity support, so recovering
+    them from the raw products AMPL/GAMS emit lets the bound tighten (and a
+    separable entropy / relative-entropy objective is detected as convex, taking
+    the convex fast path).
+
+    The rewrites are exact (``entropy(x) ≡ x·log(x)``, ``centropy(x,y) ≡
+    x·log(x/y)``) and convexity-preserving, so they run unconditionally. If
+    nothing matches, *model* is returned unchanged (zero overhead, zero
+    behavioural change). On any unexpected error the original model is returned,
+    so the pass can never break a previously-solvable model.
     """
     try:
         changed = False

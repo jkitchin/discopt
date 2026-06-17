@@ -535,6 +535,8 @@ def _classify_function_call(expr: FunctionCall, model: Optional[Model], cache: d
         return _classify_nary_max(expr, model, cache)
     if name == "min" and len(expr.args) >= 2:
         return _classify_nary_min(expr, model, cache)
+    if name == "centropy" and len(expr.args) == 2:
+        return _classify_centropy(expr, model, cache)
 
     # Any p-norm ‖·‖_p is convex and nonnegative. The DCP composition rule
     # (convex, nondecreasing-in-each-|arg|) is only sound when the inner
@@ -665,6 +667,27 @@ def _classify_nary_min(expr: FunctionCall, model: Optional[Model], cache: dict) 
                 curv = Curvature.AFFINE
         s = info.sign if i == 0 else _sign_join(s, info.sign)
     return ExprInfo(curv, s)
+
+
+def _classify_centropy(expr: FunctionCall, model: Optional[Model], cache: dict) -> ExprInfo:
+    """``centropy(x, y) = x*log(x/y)`` (relative entropy) is JOINTLY CONVEX on
+    ``x >= 0, y > 0`` (Boyd & Vandenberghe §3.2.6 — the relative entropy; its
+    Hessian ``[[1/x, -1/y], [-1/y, x/y²]]`` is PSD there). The DCP composition
+    rule licenses CONVEX only when both arguments are *affine* (a jointly-convex
+    atom composed with affine maps is convex; a nonconvex inner argument is not
+    sound), and only when the domain ``x >= 0, y > 0`` is provable over the box.
+    Otherwise abstain (UNKNOWN), preserving soundness. This is what makes a
+    Gibbs/KL objective ``Σ nᵢ·log(nᵢ / Σnⱼ)`` — affine numerator, affine
+    denominator — certify on the convex fast path (issue #207)."""
+    x_info = classify_expr_info(expr.args[0], model, cache)
+    y_info = classify_expr_info(expr.args[1], model, cache)
+    if x_info.curvature != Curvature.AFFINE or y_info.curvature != Curvature.AFFINE:
+        return ExprInfo(Curvature.UNKNOWN, Sign.UNKNOWN)
+    x_sign = _refine_sign(expr.args[0], model, cache, x_info.sign)
+    y_sign = _refine_sign(expr.args[1], model, cache, y_info.sign)
+    if is_nonneg(x_sign) and is_pos(y_sign):
+        return ExprInfo(Curvature.CONVEX, Sign.UNKNOWN)
+    return ExprInfo(Curvature.UNKNOWN, Sign.UNKNOWN)
 
 
 def _sign_join(a: Sign, b: Sign) -> Sign:

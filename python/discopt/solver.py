@@ -2008,17 +2008,19 @@ def solve_model(
 
     model = reformulate_gdp(model, method=gdp_method)
 
-    # --- Entropy canonicalization: recover the ``entropy(x) = x*log(x)``
-    # intrinsic from the raw ``x*log(x)`` product that AMPL/GAMS emit when they
-    # lower the ``entropy`` opcode into a ``.nl`` file. The MILP/McCormick-LP
-    # relaxer cannot decompose ``x*log(x)`` and falls back to a constant
-    # separable objective floor that never tightens under branching, so an
-    # entropy/Gibbs objective (e.g. ``ex6_1_4``) is solved to the global optimum
-    # but cannot be certified (issue #207). discopt already carries a dedicated
-    # convex underestimator for ``entropy``; recovering the intrinsic feeds it,
-    # so the bound tightens (and a separable-entropy objective is detected as
-    # convex). The rewrite is exact and convexity-preserving, so it runs
-    # unconditionally and returns the model unchanged when nothing matches.
+    # --- Entropy-family canonicalization: recover the ``entropy(x) = x*log(x)``
+    # and ``centropy(x, y) = x*log(x/y)`` intrinsics from the raw products that
+    # AMPL/GAMS emit when they lower those opcodes into a ``.nl`` file. The
+    # MILP/McCormick-LP relaxer cannot decompose ``x*log(x)`` / ``x*log(x/y)``
+    # and falls back to a constant separable objective floor that never tightens
+    # under branching, so an entropy / Gibbs / relative-entropy objective (e.g.
+    # ``ex6_1_4``) is solved to the global optimum but cannot be certified
+    # (issue #207). discopt carries dedicated convexity support for both
+    # intrinsics (``entropy`` is convex, ``centropy`` is jointly convex on
+    # x≥0,y>0); recovering them lets a separable entropy / relative-entropy
+    # objective be detected as convex and certify on the convex fast path. The
+    # rewrites are exact and convexity-preserving, so they run unconditionally
+    # and return the model unchanged when nothing matches.
     from discopt._jax.factorable_reform import canonicalize_entropy
 
     model = canonicalize_entropy(model)
