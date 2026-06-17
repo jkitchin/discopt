@@ -143,6 +143,86 @@ _MAX_FINITE_DOMAIN_TRIG_TABLE_VALUES = 256
 # from 1e11 down to 1e6 on the affected instances.
 _RELAX_NUMERIC_CAP = 1e10
 
+# Equilibrate the lifted relaxation before an external LP/MILP solve when its
+# coefficient dynamic range exceeds this (matches the Rust simplex's own scaling
+# trigger). The lifted McCormick rows of a product over a wide variable box mix
+# tiny constants (~1e-9) with large bound-derived coefficients (~1e7), giving a
+# >1e15 spread on ex1252's boundary sub-boxes — HiGHS stalls on it (a 452x96 LP
+# hits its time limit) while the pure-Rust simplex, which equilibrates, solves it
+# in ~0.03s. Geometric-mean row/column scaling brings the spread down so the
+# external (HiGHS) path converges instead of timing out (issue #184).
+_RELAX_EQUILIBRATE_TRIGGER = 1e6
+
+
+def equilibrate_relaxation_lp(
+    c: np.ndarray,
+    A_ub: Optional[Union[np.ndarray, sp.spmatrix]],
+    b_ub: Optional[np.ndarray],
+    bounds: list[tuple[float, float]],
+    integrality: Optional[np.ndarray],
+    *,
+    iters: int = 20,
+) -> tuple[
+    np.ndarray,
+    Optional[sp.spmatrix],
+    Optional[np.ndarray],
+    list[tuple[float, float]],
+    np.ndarray,
+]:
+    """Geometric-mean (Ruiz) equilibration of ``min c·x s.t. A_ub x <= b_ub``.
+
+    Alternating row/column infinity-norm sweeps drive every row and column to unit
+    scale; the factors are snapped to powers of two so the transform is exact in
+    floating point. **Integer columns are never scaled** (that would corrupt
+    integrality), so the conditioning of the integer part is left to the solver.
+
+    Soundness: this is an exact diagonal rescaling ``x = D·x'`` of the LP. Row
+    scaling ``s_r`` rewrites ``A_r x <= b_r`` as ``(s_r A_r) x <= s_r b_r`` — same
+    feasible set. Column scaling ``d_j`` substitutes ``x_j = d_j x'_j`` into the
+    objective and rows consistently. The optimal objective value is therefore
+    **unchanged**, so the LP/MILP bound from the scaled solve is the true bound;
+    only the returned point needs ``x = col_scale · x'`` to map back. Returns
+    ``(c', A', b', bounds', col_scale)``.
+    """
+    if A_ub is None or b_ub is None:
+        return np.asarray(c, dtype=np.float64), A_ub, b_ub, bounds, np.ones(len(c))
+
+    A = sp.csr_matrix(A_ub).astype(np.float64).copy()
+    m, n = A.shape
+    col_scale = np.ones(n)
+    row_scale = np.ones(m)
+    # Columns we are allowed to scale: continuous only (integer cols stay at 1).
+    scalable = np.ones(n, dtype=bool) if integrality is None else (np.asarray(integrality) == 0)
+
+    for _ in range(iters):
+        absA = A.copy()
+        absA.data = np.abs(absA.data)
+        rmax = np.asarray(absA.max(axis=1).todense()).ravel()
+        rmax[rmax == 0.0] = 1.0
+        dr = 2.0 ** np.round(np.log2(1.0 / np.sqrt(rmax)))
+        A = sp.diags(dr) @ A
+        row_scale *= dr
+
+        absA = A.copy()
+        absA.data = np.abs(absA.data)
+        cmax = np.asarray(absA.max(axis=0).todense()).ravel()
+        cmax[cmax == 0.0] = 1.0
+        dc = 2.0 ** np.round(np.log2(1.0 / np.sqrt(cmax)))
+        dc[~scalable] = 1.0
+        A = A @ sp.diags(dc)
+        col_scale *= dc
+
+    b2 = np.asarray(b_ub, dtype=np.float64) * row_scale
+    c2 = np.asarray(c, dtype=np.float64) * col_scale
+    bounds2 = [
+        (
+            lo / d if np.isfinite(lo) else lo,
+            hi / d if np.isfinite(hi) else hi,
+        )
+        for (lo, hi), d in zip(bounds, col_scale)
+    ]
+    return c2, sp.csr_matrix(A), b2, bounds2, col_scale
+
 
 def _warn_once(msg: str, *args) -> None:
     formatted = msg % args if args else msg
@@ -211,15 +291,39 @@ class MilpRelaxationModel:
         # to the warm-started-simplex B&B (falls back to auto if unavailable).
         solve_milp = get_milp_solver(backend=backend)
 
+        # Equilibrate the LP for the external (HiGHS/POUNCE) backends when it is
+        # badly scaled. The pure-Rust simplex already equilibrates internally, so
+        # skip the (redundant) Python pre-scaling there; HiGHS does not cope with
+        # the lifted relaxation's >1e15 coefficient spread and stalls without it
+        # (issue #184). The transform is exact, so the returned bound/objective is
+        # unchanged — only the solution point is mapped back through ``col_scale``.
+        c_s, A_s, b_s, bounds_s = self._c, self._A_ub, self._b_ub, self._bounds
+        col_scale = None
+        if backend != "simplex" and self._A_ub is not None:
+            data = sp.csr_matrix(self._A_ub).data
+            nz = np.abs(data[data != 0.0])
+            ill = bool(
+                nz.size
+                and np.isfinite(nz).all()
+                and nz.max() / nz.min() > _RELAX_EQUILIBRATE_TRIGGER
+            )
+            if ill:
+                c_s, A_s, b_s, bounds_s, col_scale = equilibrate_relaxation_lp(
+                    self._c, self._A_ub, self._b_ub, self._bounds, self._integrality
+                )
+
         result = solve_milp(
-            c=self._c,
-            A_ub=self._A_ub,
-            b_ub=self._b_ub,
-            bounds=self._bounds,
+            c=c_s,
+            A_ub=A_s,
+            b_ub=b_s,
+            bounds=bounds_s,
             integrality=self._integrality,
             time_limit=time_limit,
             gap_tolerance=gap_tolerance,
         )
+        # Map the scaled solution point back to original variables (x = D·x').
+        if col_scale is not None and result.x is not None:
+            result.x = np.asarray(result.x, dtype=np.float64) * col_scale
 
         # Map SolveStatus enum to string
         status_map = {

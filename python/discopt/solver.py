@@ -10,6 +10,8 @@ Connects:
 from __future__ import annotations
 
 import logging
+import math
+import os
 import time
 from typing import Any, Callable, Optional, cast
 
@@ -35,6 +37,133 @@ from discopt.solvers import SolveStatus
 from discopt.solvers.nlp_ipopt import solve_nlp
 
 logger = logging.getLogger(__name__)
+
+
+def _branch_priority_integer_vars(model: Model) -> frozenset[int]:
+    """Integer/binary flat indices that *gate* the model's nonlinear terms.
+
+    Branching these before other integers drives the global dual bound up on
+    problems whose relaxation bound is structurally 0 until a *set* of binaries
+    is jointly fixed. The objective products are nonnegative and zeroable on the
+    box boundary; a product's value is forced away from 0 only once the binaries
+    that select/activate it are all pinned (ex1252's line-selection binaries
+    ``x36/x37/x38``, tied to the product factors ``x18/x19/x20`` by the equality
+    constraints ``x18=x36`` ...). Because the bound moves only on the *joint*
+    fixing, no single-variable fractionality or pseudocost score points at these
+    variables, so most-fractional branching wanders with the bound pinned at 0.
+
+    The set is the integer variables that either (a) appear directly in a
+    nonlinear term, or (b) are tied to a nonlinear-term variable by a
+    two-variable linear *equality* constraint (``x_int = c·x_nl``). This is
+    branching-order metadata only — it never enters a bound or feasibility test,
+    so it cannot affect soundness.
+    """
+    from discopt._jax.term_classifier import _get_flat_index, classify_nonlinear_terms
+    from discopt.modeling.core import (
+        BinaryOp,
+        Constant,
+        IndexExpression,
+        UnaryOp,
+        Variable,
+    )
+
+    n = sum(v.size for v in model._variables)
+    is_int = [False] * n
+    fi = 0
+    for v in model._variables:
+        flag = v.var_type in (VarType.BINARY, VarType.INTEGER)
+        for _ in range(v.size):
+            if fi < n:
+                is_int[fi] = flag
+            fi += 1
+
+    # Variables appearing in any lifted nonlinear term (objective or constraint).
+    terms = classify_nonlinear_terms(model)
+    nl: set[int] = set()
+    for group in (terms.bilinear, terms.trilinear, terms.multilinear):
+        for term in group or []:
+            nl.update(int(x) for x in term)
+    for term in terms.monomial or []:
+        nl.add(int(term[0]))
+
+    priority: set[int] = {j for j in nl if 0 <= j < n and is_int[j]}
+
+    # Affine reduction of an expression to ``{idx: coeff}, const`` (None if the
+    # expression is not affine). Used to spot two-variable equality linkages.
+    def _affine(expr: Any, s: float = 1.0):
+        if isinstance(expr, Constant):
+            return ({}, s * float(expr.value))
+        if isinstance(expr, (Variable, IndexExpression)):
+            flat = _get_flat_index(expr, model)
+            if flat is None:
+                return None
+            return ({int(flat): s}, 0.0)
+        if isinstance(expr, UnaryOp) and expr.op == "neg":
+            return _affine(expr.operand, -s)
+        if isinstance(expr, BinaryOp):
+            if expr.op in ("+", "-"):
+                left = _affine(expr.left, s)
+                right = _affine(expr.right, s if expr.op == "+" else -s)
+                if left is None or right is None:
+                    return None
+                d = dict(left[0])
+                for k, val in right[0].items():
+                    d[k] = d.get(k, 0.0) + val
+                return (d, left[1] + right[1])
+            if expr.op == "*":
+                if isinstance(expr.left, Constant):
+                    return _affine(expr.right, s * float(expr.left.value))
+                if isinstance(expr.right, Constant):
+                    return _affine(expr.left, s * float(expr.right.value))
+        return None
+
+    for c in model._constraints:
+        if getattr(c, "sense", None) != "==":
+            continue
+        reduced = _affine(c.body)
+        if reduced is None:
+            continue
+        nz = [(k, v) for k, v in reduced[0].items() if abs(v) > 1e-12]
+        if len(nz) != 2:
+            continue
+        (i, _), (j, _) = nz
+        if is_int[i] and j in nl:
+            priority.add(i)
+        elif is_int[j] and i in nl:
+            priority.add(j)
+
+    return frozenset(priority)
+
+
+def _select_priority_branch_var(
+    solution: np.ndarray,
+    node_lb: np.ndarray,
+    node_ub: np.ndarray,
+    priority_vars: frozenset[int],
+    tol: float = 1e-5,
+) -> Optional[int]:
+    """Most-fractional priority var that is still a viable branch at this node.
+
+    Returns the flat index of the priority variable whose relaxation value is
+    most fractional and that is not already pinned by the node box, or ``None``
+    when no priority variable is branchable here (all fixed or integral — the
+    standard selector then applies). A hint is honoured by the Rust tree only
+    when the variable is fractional, matching this filter.
+    """
+    sol = np.asarray(solution)
+    best: Optional[int] = None
+    best_frac = tol
+    for j in priority_vars:
+        if j >= sol.shape[0] or node_ub[j] - node_lb[j] <= tol:
+            continue
+        val = float(sol[j])
+        frac = val - math.floor(val)
+        f = min(frac, 1.0 - frac)
+        if f > best_frac:
+            best_frac = f
+            best = int(j)
+    return best
+
 
 # --- POUNCE batched-NLP node solver tuning (Phase A, discopt#97) ---
 # The callback-based POUNCE batch path runs node NLPs through Python/JAX
@@ -2849,6 +2978,25 @@ def solve_model(
     _mc_nlp_period = 5  # run McCormick NLP every 5th iteration
     iteration = 0
     _deadline = t_start + time_limit
+
+    # Objective-gating priority branching (issue #184). Opt-in via
+    # ``DISCOPT_OBJ_BRANCH_PRIORITY=1``: branch the binaries that gate the
+    # objective's nonlinear terms first so the global bound can climb off a
+    # structural 0 (see _branch_priority_integer_vars). Empty when disabled or
+    # when the model has no such gating integers, leaving branching unchanged.
+    _branch_priority_vars: frozenset[int] = frozenset()
+    if os.environ.get("DISCOPT_OBJ_BRANCH_PRIORITY", "0") == "1":
+        try:
+            _branch_priority_vars = _branch_priority_integer_vars(model)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("objective-gating priority detection failed: %s", e)
+        if _branch_priority_vars:
+            logger.info(
+                "Objective-gating priority branching: %d integer var(s) %s",
+                len(_branch_priority_vars),
+                sorted(_branch_priority_vars),
+            )
+
     while True:
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
@@ -3395,6 +3543,38 @@ def solve_model(
                 result_lbs[i] = _INFEASIBILITY_SENTINEL
                 result_feas[i] = False
 
+        # --- Objective-gating priority branching (issue #184) ---
+        # The global dual bound is the minimum over the open frontier, so it stays
+        # pinned at a structural 0 until *every* shallow node has had the binaries
+        # gating its objective products fixed. No single-variable fractionality or
+        # pseudocost score sees that joint jump (the bound moves only when a whole
+        # set of binaries is pinned), so most-fractional branching can wander for
+        # thousands of nodes at bound 0. Hinting the B&B to branch the gating
+        # binaries first reaches the depth where the per-node relaxation (lifted-LP
+        # FBBT) lifts each leaf off 0 — which is what raises the global bound. Pure
+        # search reordering over already-fractional integer candidates: it can
+        # never change a bound or a feasibility verdict.
+        priority_hinted: set[int] = set()
+        if _branch_priority_vars:
+            pb_ids: list[int] = []
+            pb_vars: list[int] = []
+            for i in range(n_batch):
+                if result_lbs[i] >= _SENTINEL_THRESHOLD:
+                    continue
+                pick = _select_priority_branch_var(
+                    result_sols[i], batch_lb[i], batch_ub[i], _branch_priority_vars
+                )
+                if pick is not None:
+                    nid = int(batch_ids[i])
+                    pb_ids.append(nid)
+                    pb_vars.append(pick)
+                    priority_hinted.add(nid)
+            if pb_ids:
+                tree.set_branch_hints(
+                    np.array(pb_ids, dtype=np.int64),
+                    np.array(pb_vars, dtype=np.int64),
+                )
+
         # --- Optional GNN branching scoring ---
         # GNN computes variable scores and passes hints to Rust TreeManager,
         # which uses them instead of most-fractional branching.
@@ -3405,7 +3585,7 @@ def solve_model(
             hint_node_ids = []
             hint_var_indices = []
             for i in range(n_batch):
-                if result_lbs[i] < _SENTINEL_THRESHOLD:
+                if result_lbs[i] < _SENTINEL_THRESHOLD and int(batch_ids[i]) not in priority_hinted:
                     node_lb_i = np.array(batch_lb[i])
                     node_ub_i = np.array(batch_ub[i])
                     graph = build_graph(model, result_sols[i], node_lb_i, node_ub_i)
@@ -3430,6 +3610,8 @@ def solve_model(
                 if result_lbs[i] >= _SENTINEL_THRESHOLD:
                     continue  # skip infeasible nodes
                 node_id = int(batch_ids[i])
+                if node_id in priority_hinted:
+                    continue  # gating-binary hint already set for this node
                 sol_i = result_sols[i]
                 var_indices, _frac_parts, obs_counts, _scores = tree.score_candidates(sol_i)
                 if len(var_indices) == 0:

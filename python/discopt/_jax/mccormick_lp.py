@@ -58,6 +58,98 @@ _SOLVE_DEADLINE_FLOOR_S = 0.05
 # (typical MINLP lifts are < 1e6 cells) and far below the multi-GB blowup.
 _MAX_RELAX_DENSE_CELLS = 1.0e8
 
+# Lifted-LP FBBT (issue #184): number of feasibility-propagation sweeps over the
+# relaxation rows, and the width left around a factor that propagation pins to a
+# point so the build path keeps the multilinear term at full arity (see
+# ``solve_at_node`` for why un-pinning is needed and why it stays sound).
+_LIFTED_FBBT_ROUNDS = 30
+_LIFTED_FBBT_TOL = 1e-9
+_LIFTED_FBBT_UNPIN_EPS = 1e-6
+
+
+def _lifted_lp_fbbt(
+    A_ub: "object",
+    b_ub: np.ndarray,
+    lo: np.ndarray,
+    hi: np.ndarray,
+    *,
+    rounds: int = _LIFTED_FBBT_ROUNDS,
+    tol: float = _LIFTED_FBBT_TOL,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Feasibility-based bound tightening on the relaxation's own rows.
+
+    Propagates the lifted relaxation constraints ``A_ub · z <= b_ub`` (where ``z``
+    spans the original variables *and* every McCormick product/monomial column)
+    to tighten the column box ``[lo, hi]``. Because the McCormick rows of a
+    product column ``w = x_i·x_j`` include facets such as ``w <= ub_j·x_i``,
+    propagating a tightened ``w`` back through them recovers the *bilinear-implied*
+    factor bounds that purely linear FBBT on the original model misses (issue
+    #184: ``x18 = 0.0025·x9·x3`` with ``x18`` pinned to 1 forces ``x3 >= 1``).
+
+    Soundness: every row is a valid relaxation inequality, so each derived bound
+    is implied by valid constraints plus the incoming box — the result only ever
+    *tightens* and never excludes a point feasible for the node. Returns the
+    tightened ``(lo, hi)``; an empty result (``lo > hi`` on some column) is a
+    rigorous proof the node's relaxation is infeasible.
+
+    Vectorised over the sparse matrix (the per-row/per-element Python loop in the
+    issue prototype is too slow for the per-node path). Each sweep computes, for
+    every nonzero ``a_{r,j}``, the minimum activity of row ``r`` excluding column
+    ``j`` and back-solves the tightest implied bound on ``z_j``; infinite
+    contributions are handled by an explicit per-row infinity count so a single
+    open bound still propagates.
+    """
+    import scipy.sparse as sp
+
+    coo = sp.csr_matrix(A_ub).tocoo()
+    rows = coo.row
+    cols = coo.col
+    vals = coo.data
+    n_rows = coo.shape[0]
+    lo = lo.copy()
+    hi = hi.copy()
+    pos = vals > 0
+    neg = vals < 0
+
+    for _ in range(rounds):
+        # Bound each nonzero uses for the row's *minimum* activity: the lower
+        # endpoint where the coefficient is positive, the upper where negative.
+        bound_used = np.where(pos, lo[cols], hi[cols])
+        term = vals * bound_used  # may be -inf when a bound is open in that direction
+        is_ninf = ~np.isfinite(term)
+        # Per-row tally of infinite terms and the finite partial sum.
+        n_inf = np.zeros(n_rows)
+        np.add.at(n_inf, rows, is_ninf.astype(np.float64))
+        sum_fin = np.zeros(n_rows)
+        np.add.at(sum_fin, rows, np.where(is_ninf, 0.0, term))
+        # The activity excluding column j is finite iff every *other* term is
+        # finite, i.e. the row's infinity count drops to zero once j is removed.
+        valid = (n_inf[rows] - is_ninf.astype(np.float64)) == 0
+        min_others = sum_fin[rows] - np.where(is_ninf, 0.0, term)
+        nb = (b_ub[rows] - min_others) / vals
+        changed = False
+
+        sel = valid & pos
+        if sel.any():
+            new_hi = np.full(lo.shape[0], np.inf)
+            np.minimum.at(new_hi, cols[sel], nb[sel])
+            upd = new_hi < hi - tol
+            if upd.any():
+                hi = np.where(upd, np.minimum(hi, new_hi), hi)
+                changed = True
+        sel = valid & neg
+        if sel.any():
+            new_lo = np.full(lo.shape[0], -np.inf)
+            np.maximum.at(new_lo, cols[sel], nb[sel])
+            upd = new_lo > lo + tol
+            if upd.any():
+                lo = np.where(upd, np.maximum(lo, new_lo), lo)
+                changed = True
+        if not changed:
+            break
+
+    return lo, hi
+
 
 @dataclass
 class MccormickLPResult:
@@ -112,6 +204,15 @@ class MccormickLPRelaxer:
         self._rlt_applicable = os.environ.get("DISCOPT_RLT", "0") == "1" and bool(
             _linear_constraint_forms(model, self._n_orig)
         )
+        # Per-node lifted-LP FBBT (issue #184): propagate the relaxation's own
+        # McCormick rows to recover bilinear-implied factor bounds (e.g. a pinned
+        # binary forcing a continuous factor >= 1 *through* a bilinear constraint),
+        # then rebuild the relaxation on the tightened box so its envelopes no
+        # longer underestimate the product to zero. This is what lets the global
+        # dual bound climb off a structural 0 on ``ex1252``. Opt-in via
+        # ``DISCOPT_LIFTED_FBBT=1`` — it adds an FBBT sweep plus a conditional
+        # relaxation rebuild per node, so it stays off the default B&B path.
+        self._lifted_fbbt = os.environ.get("DISCOPT_LIFTED_FBBT", "0") == "1"
         # Original columns that participate in a nonlinear (product/power) term.
         # A McCormick/RLT envelope for such a term is only valid when its
         # variables have FINITE bounds: over an unbounded box the lifted aux is
@@ -218,6 +319,28 @@ class MccormickLPRelaxer:
                     _MAX_RELAX_DENSE_CELLS,
                 )
             return MccormickLPResult(status="skipped_oversize")
+
+        # Per-node lifted-LP FBBT (issue #184): tighten the box by propagating the
+        # relaxation's own rows, then rebuild on the tightened original-variable
+        # box. The rebuild is what realises the bound improvement — tightening a
+        # factor's domain (``x0,x3 in [1,3]``) regenerates the McCormick envelope
+        # of ``x0·x3`` so it no longer underestimates the product to 0 in the box
+        # interior. Linear FBBT on the original model cannot reach this because the
+        # forcing runs through *bilinear* constraints; the relaxation's product
+        # rows expose it. Sound at every step (see :func:`_lifted_lp_fbbt`).
+        if self._lifted_fbbt:
+            try:
+                fb = self._lifted_fbbt_rebuild(milp, node_lb, node_ub)
+                if fb is not None:
+                    # Adopt the rebuilt relaxation *and* its varmap together: the
+                    # downstream separation routines index ``milp``'s product
+                    # columns through ``varmap``, so a stale map would address the
+                    # wrong columns of the rebuilt LP.
+                    milp, varmap = fb
+            except Exception:
+                # Tightening is a best-effort accelerator; on any failure keep the
+                # original (already valid) relaxation rather than losing the node.
+                pass
 
         # Pad original integrality flags to the lifted column count; aux cols
         # remain continuous (flag 0). If the model has no integers this is a
@@ -389,6 +512,77 @@ class MccormickLPRelaxer:
             lower_bound=float(res.objective),
             x=x_orig,
         )
+
+    def _lifted_fbbt_rebuild(self, milp, node_lb, node_ub):
+        """Tighten the node box via lifted-LP FBBT and rebuild the relaxation.
+
+        Returns ``(MilpRelaxationModel, varmap)`` built on the FBBT-tightened
+        original-variable box, or ``None`` to keep the input relaxation unchanged
+        (no original bound tightened, an empty box, a rebuild failure, or a
+        rebuild that would *lose* a previously valid objective bound).
+        """
+        if milp._A_ub is None:
+            return None
+
+        bnds = np.asarray(milp._bounds, dtype=np.float64)
+        lo = bnds[:, 0].copy()
+        hi = bnds[:, 1].copy()
+        node_lb = np.asarray(node_lb, dtype=np.float64)
+        node_ub = np.asarray(node_ub, dtype=np.float64)
+
+        lo, hi = _lifted_lp_fbbt(milp._A_ub, milp._b_ub, lo, hi)
+
+        n = self._n_orig
+        new_lb = lo[:n].copy()
+        new_ub = hi[:n].copy()
+
+        # An empty box anywhere is a rigorous infeasibility proof, but routing that
+        # verdict through a non-LP path would bypass the HiGHS re-verification the
+        # caller relies on for "infeasible". Conservatively skip the rebuild and let
+        # the (still valid) original relaxation solve report the node's status.
+        if np.any(new_lb > new_ub + _LIFTED_FBBT_TOL):
+            return None
+
+        # Only rebuild if an *original* variable's domain actually tightened — a
+        # rebuild that reproduces the same box is wasted work, and at shallow nodes
+        # (binaries still relaxed) FBBT typically tightens nothing useful.
+        tol = 1e-7
+        tightened = np.any(new_lb > node_lb[:n] + tol) or np.any(new_ub < node_ub[:n] - tol)
+        if not tightened:
+            return None
+
+        # Un-pin factors FBBT drove to a point. When a multilinear factor (e.g.
+        # ``x18``) is pinned to ``[1, 1]``, ``build_milp_relaxation`` folds the
+        # degree-4 objective term to a lower-arity product whose aux column it never
+        # allocated, and drops ``objective_bound_valid`` ("Trilinear (0,3,15) not in
+        # map"). Leaving a hair of width keeps the term at full arity. Widening a
+        # bound only *enlarges* the relaxation box (a superset of the proven point),
+        # so it stays a valid relaxation — never unsound. Branch-pinned variables
+        # (already a point on entry) are left pinned.
+        for i in range(n):
+            entry_pinned = (node_ub[i] - node_lb[i]) <= _LIFTED_FBBT_TOL
+            now_pinned = (new_ub[i] - new_lb[i]) <= _LIFTED_FBBT_TOL
+            if now_pinned and not entry_pinned:
+                w = max(1.0, abs(new_lb[i])) * _LIFTED_FBBT_UNPIN_EPS
+                if new_lb[i] > node_lb[i] + _LIFTED_FBBT_TOL:
+                    new_lb[i] -= w
+                else:
+                    new_ub[i] += w
+
+        rebuilt, rebuilt_varmap = build_milp_relaxation(
+            self._model,
+            self._terms,
+            self._disc,
+            bound_override=(new_lb, new_ub),
+            superposition=self._superposition,
+            rlt_level1=self._rlt_applicable,
+        )
+
+        # Never let tightening regress a node: if the rebuild would drop the
+        # objective bound that the original relaxation had, keep the original.
+        if milp._objective_bound_valid and not rebuilt._objective_bound_valid:
+            return None
+        return rebuilt, rebuilt_varmap
 
     def _has_unbounded_nonlinear_col(self, milp) -> bool:
         """True if any nonlinear-term original column has a non-finite bound.

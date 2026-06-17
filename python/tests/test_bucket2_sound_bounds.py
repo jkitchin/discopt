@@ -163,3 +163,177 @@ def test_ex1252_rlt_stays_sound(monkeypatch):
     assert res.lower_bound <= 128893.8 + 1e-3, (
         f"ex1252 RLT UNSOUND bound {res.lower_bound} > optimum 128893.8"
     )
+
+
+# Per-node lifted-LP FBBT (issue #184). ``ex1252``'s root bound is structurally 0
+# and no envelope/RLT cut can move it (the objective products are nonnegative and
+# zeroable on the box boundary). The bound only lifts once branching fixes the
+# line-selection binaries ``x36/x37/x38`` (≡ ``x18/x19/x20``): then propagating
+# the relaxation's *own* McCormick rows recovers the bilinear-implied factor
+# bounds (``x18=1`` ⟹ ``x9·x3=400`` ⟹ ``x3>=1``; ``x21=1`` ⟹ ``x0>=1``) that
+# purely linear FBBT misses, and rebuilding on the tightened box gives an
+# envelope that no longer underestimates the product to 0.
+_EX1252_LINE_BINARIES = (36, 37, 38)  # x18=x36, x19=x37, x20=x38 (constraints 40-42)
+
+
+@pytest.mark.correctness
+def test_ex1252_lifted_fbbt_tightens_branched_node(monkeypatch):
+    """At the branched node ``x36=1, x37=0, x38=0`` (line 1 selected), per-node
+    lifted-LP FBBT (``DISCOPT_LIFTED_FBBT=1``) drives the node bound off the
+    structural 0 — to ~18987 — while staying sound (``<= optimum 128893.8``). The
+    root bound is unchanged (binaries still relaxed there, so FBBT derives
+    nothing): the tightening is genuinely per-node, which is what lets the global
+    B&B certify optimality. This is the regression lock for #184.
+    """
+    monkeypatch.setenv("DISCOPT_LIFTED_FBBT", "1")
+    nl = _DATA / "ex1252.nl"
+    assert nl.exists(), f"missing {nl}"
+    m = dm.from_nl(str(nl))
+
+    relaxer = MccormickLPRelaxer(m)
+    lb, ub = flat_variable_bounds(m)
+
+    # Root: binaries relaxed, so lifted FBBT cannot tighten — bound stays ~0.
+    root = relaxer.solve_at_node(lb, ub)
+    assert root.status == "optimal", f"ex1252 root LP status {root.status}"
+    assert root.lower_bound is not None and root.lower_bound <= 1.0, (
+        f"ex1252 root bound unexpectedly {root.lower_bound} (expected ~0)"
+    )
+
+    # Branched node: fix line-selection binaries (x36=1, x37=x38=0).
+    nlb, nub = lb.copy(), ub.copy()
+    for k in _EX1252_LINE_BINARIES:
+        val = 1.0 if k == 36 else 0.0
+        nlb[k] = nub[k] = val
+    node = relaxer.solve_at_node(nlb, nub)
+
+    assert node.status == "optimal", f"ex1252 branched LP status {node.status}"
+    assert node.lower_bound is not None and math.isfinite(node.lower_bound), (
+        "ex1252 branched node dropped its objective bound"
+    )
+    # Tightness lock: the bound must climb well off 0 (validated ~18987).
+    assert node.lower_bound > 1000.0, (
+        f"ex1252 lifted-FBBT bound {node.lower_bound} did not lift off the "
+        "structural 0 — per-node tightening regressed"
+    )
+    # Soundness: a valid lower bound never exceeds the true optimum.
+    assert node.lower_bound <= 128893.8 + 1e-3, (
+        f"ex1252 lifted-FBBT UNSOUND bound {node.lower_bound} > optimum 128893.8"
+    )
+
+
+@pytest.mark.correctness
+@pytest.mark.parametrize("instance, optimum", _SOUND_BOUND_CASES)
+def test_bucket2_lifted_fbbt_stays_sound(monkeypatch, instance, optimum):
+    """Enabling per-node lifted-LP FBBT keeps every bucket-2 root bound sound
+    (finite and ``<= optimum``). Lifted FBBT only ever tightens with valid
+    relaxation rows, so no instance may gain an unsound (over-tight) bound."""
+    monkeypatch.setenv("DISCOPT_LIFTED_FBBT", "1")
+    nl = _DATA / f"{instance}.nl"
+    assert nl.exists(), f"missing {nl}"
+    m = dm.from_nl(str(nl))
+
+    relaxer = MccormickLPRelaxer(m)
+    lb, ub = flat_variable_bounds(m)
+    res = relaxer.solve_at_node(lb, ub)
+
+    assert res.status == "optimal", f"[{instance}] lifted-FBBT root LP status {res.status}"
+    assert res.lower_bound is not None and math.isfinite(res.lower_bound), (
+        f"[{instance}] lifted-FBBT dropped the root bound"
+    )
+    assert res.lower_bound <= optimum + 1e-3, (
+        f"[{instance}] lifted-FBBT UNSOUND root bound {res.lower_bound} > optimum {optimum}"
+    )
+
+
+@pytest.mark.correctness
+def test_ex1252_objective_gating_priority_vars():
+    """The objective-gating branch-priority detector (issue #184) identifies
+    exactly ex1252's line-selection binaries ``x36/x37/x38`` — the integers tied
+    by the equalities ``x18=x36`` etc. to the objective's product factors
+    ``x18/x19/x20``. Branching these first is what lets the global dual bound
+    climb off its structural 0. This is branch-ORDER metadata only (never a bound
+    input), so the lock guards the heuristic, not soundness."""
+    from discopt.solver import _branch_priority_integer_vars, _select_priority_branch_var
+
+    nl = _DATA / "ex1252.nl"
+    assert nl.exists(), f"missing {nl}"
+    m = dm.from_nl(str(nl))
+
+    pri = _branch_priority_integer_vars(m)
+    assert sorted(pri) == [36, 37, 38], f"expected gating binaries {{36,37,38}}, got {sorted(pri)}"
+
+    # The selector picks a fractional, unfixed priority var and skips a pinned one.
+    import numpy as np
+
+    n = sum(v.size for v in m._variables)
+    lb, ub = flat_variable_bounds(m)
+    sol = np.zeros(n)
+    sol[37] = 0.5  # fractional gating binary
+    assert _select_priority_branch_var(sol, lb, ub, pri) == 37
+    # Pin x37 (already branched): no priority var is branchable → None.
+    ub_pinned = ub.copy()
+    lb_pinned = lb.copy()
+    lb_pinned[37] = ub_pinned[37] = 0.0
+    sol_pinned = np.zeros(n)  # 36/38 integral, 37 fixed
+    assert _select_priority_branch_var(sol_pinned, lb_pinned, ub_pinned, pri) is None
+
+
+@pytest.mark.correctness
+def test_ex1252_relaxation_equilibration_conditions_and_preserves_bound():
+    """LP conditioning (issue #184). ex1252's lifted relaxation on a boundary
+    sub-box (line 1+2 binaries both fixed) has a >1e12 coefficient spread, on
+    which HiGHS stalls. ``equilibrate_relaxation_lp`` (geometric-mean row/column
+    scaling) brings the spread down so the external LP backend converges instead
+    of timing out — and because the rescaling is exact, the bound is unchanged
+    and integer columns are never scaled.
+    """
+    import numpy as np
+    import scipy.sparse as sp
+    from discopt._jax.milp_relaxation import build_milp_relaxation, equilibrate_relaxation_lp
+
+    nl = _DATA / "ex1252.nl"
+    assert nl.exists(), f"missing {nl}"
+    m = dm.from_nl(str(nl))
+    relaxer = MccormickLPRelaxer(m)
+    lb, ub = flat_variable_bounds(m)
+
+    nlb, nub = lb.copy(), ub.copy()
+    for k, val in zip((36, 37, 38), (1.0, 1.0, 0.0)):
+        nlb[k] = nub[k] = val
+    milp, _ = build_milp_relaxation(m, relaxer._terms, relaxer._disc, bound_override=(nlb, nub))
+
+    def _range(A):
+        d = np.abs(sp.csr_matrix(A).data)
+        d = d[d > 0]
+        return d.max() / d.min()
+
+    raw_range = _range(milp._A_ub)
+    assert raw_range > 1e12, f"expected ill-conditioned box, range only {raw_range:.1e}"
+
+    c2, A2, b2, bounds2, col_scale = equilibrate_relaxation_lp(
+        milp._c, milp._A_ub, milp._b_ub, milp._bounds, milp._integrality
+    )
+    assert _range(A2) < raw_range / 1e4, "equilibration did not materially reduce the spread"
+
+    # Integer columns must never be scaled (would corrupt integrality).
+    integ = np.asarray(milp._integrality)
+    assert np.all(col_scale[integ == 1] == 1.0)
+
+    # Exact rescaling ⇒ identical bound. Solve both the raw and equilibrated LP
+    # with the (fast, equilibrating) Rust simplex and require agreement.
+    milp._integrality = None
+    raw = milp.solve(backend="simplex")
+    from discopt._jax.milp_relaxation import MilpRelaxationModel
+
+    scaled = MilpRelaxationModel(
+        c=c2,
+        A_ub=A2,
+        b_ub=b2,
+        bounds=bounds2,
+        obj_offset=milp._obj_offset,
+        integrality=None,
+        objective_bound_valid=True,
+    ).solve(backend="simplex")
+    assert raw.status == scaled.status == "optimal"
+    assert abs(float(raw.bound) - float(scaled.bound)) <= 1e-6 + 1e-6 * abs(float(raw.bound))
