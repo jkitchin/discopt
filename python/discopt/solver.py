@@ -1752,6 +1752,26 @@ def solve_model(
     # spatial-branch on" fallback below (which the aux vars otherwise defeat).
     _origin_has_continuous_var = any(v.var_type == VarType.CONTINUOUS for v in model._variables)
 
+    # Whether any *original* continuous decision variable has a finite box to
+    # spatial-branch on, captured (like ``_origin_has_continuous_var``) before the
+    # factorable lift adds dependent continuous aux vars. A model whose only
+    # continuous variables are *unbounded* slacks (gear4's ``x4, x5``) has nothing
+    # to bisect on the spatial McCormick LP path: the tree dead-ends after the
+    # root and a no-incumbent exhaustion would be falsely certified infeasible
+    # (issue #185). Such models route to the NLP/alphaBB path instead.
+    _origin_lb_chk, _origin_ub_chk = flat_variable_bounds(model)
+    _origin_has_finite_continuous_var = False
+    _origin_chk_off = 0
+    for _ov in model._variables:
+        if _ov.var_type == VarType.CONTINUOUS:
+            _ov_seg = slice(_origin_chk_off, _origin_chk_off + _ov.size)
+            if np.all(np.isfinite(_origin_lb_chk[_ov_seg])) and np.all(
+                np.isfinite(_origin_ub_chk[_ov_seg])
+            ):
+                _origin_has_finite_continuous_var = True
+                break
+        _origin_chk_off += _ov.size
+
     if has_factorable_work(model):
         # Tighten variable bounds with FBBT *before* the reform so its interval
         # checks see finite bounds. A fractional-power-of-product lift (issue
@@ -2457,14 +2477,25 @@ def solve_model(
     if _mc_mode == "lp" and model._objective is not None:
         from discopt._jax.mccormick_lp import MccormickLPRelaxer
 
-        _has_continuous_var = _origin_has_continuous_var
+        # A continuous variable is only useful to the spatial path if it has a
+        # finite box to bisect. A model whose only continuous variables are
+        # *unbounded* slacks (ub=+inf) — e.g. gear4's ``x4, x5`` absorbing the
+        # ratio residual — has nothing to spatial-branch on, exactly like the
+        # integer-only case: the LP relaxer's integer-feasible root point need
+        # not satisfy the original nonlinear constraint, the tree dead-ends after
+        # the root, and a no-incumbent exhaustion would be *falsely* certified
+        # infeasible (the worst failure class, issue #185). Gate on the original
+        # finite-box continuous flag (computed pre-reform so dependent aux vars
+        # never mask the integer-only case), else fall back to NLP/alphaBB.
+        _has_continuous_var = _origin_has_finite_continuous_var
         if not _has_continuous_var:
-            # Spatial-BB on integer-only models has nothing to branch on:
-            # the LP relaxer's integer-feasible point doesn't satisfy the
-            # original bilinear constraints, and with no continuous var to
-            # bisect, the tree dead-ends after the root. Fall back to NLP.
+            # Spatial-BB on integer-only (or unbounded-slack-only) models has
+            # nothing to branch on: the LP relaxer's integer-feasible point
+            # doesn't satisfy the original bilinear constraints, and with no
+            # finite continuous var to bisect, the tree dead-ends after the
+            # root. Fall back to NLP.
             logger.info(
-                "McCormick LP requested but model has no continuous "
+                "McCormick LP requested but model has no finite-box continuous "
                 "variables; falling back to NLP relaxation."
             )
             _mc_lp_relaxer = None
