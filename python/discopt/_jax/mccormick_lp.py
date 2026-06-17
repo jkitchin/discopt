@@ -175,6 +175,7 @@ class MccormickLPRelaxer:
         superposition: bool = False,
         backend: str = "simplex",
         psd_cuts: bool = False,
+        rlt_cuts: bool = False,
     ) -> None:
         self._model = model
         self._terms: NonlinearTerms = classify_nonlinear_terms(model)
@@ -184,6 +185,10 @@ class MccormickLPRelaxer:
         # moment matrix M = [[1, x^T],[x, X]] >= 0 by separating dense clique cuts
         # at each node, tightening the bound toward the SDP relaxation.
         self._psd_cuts = psd_cuts
+        # Opt-in per-node targeted RLT (constraint-factor x bound-factor) cuts:
+        # for each linear constraint and variable bound factor, separate the
+        # violated product cut linearized over the lifted columns.
+        self._rlt_cuts = rlt_cuts
         # LP backend for the per-node relaxation solve: "simplex" routes to the
         # pure-Rust warm-started simplex (no JAX in the spatial-B&B relaxation
         # path); "auto" keeps HiGHS->POUNCE. Falls back automatically if the
@@ -451,6 +456,8 @@ class MccormickLPRelaxer:
         # cliques. Each cut v^T M v >= 0 is a supporting hyperplane valid for every
         # feasible point (X = x x^T), so adding them only tightens the bound.
         res = self._separate_psd(milp, varmap, res, _deadline)
+        # Targeted RLT (constraint-factor x bound-factor) cuts.
+        res = self._separate_rlt(milp, varmap, res, _deadline)
 
         # Soundness guard: a floating-point simplex "infeasible" verdict is NOT
         # a proof that the relaxed feasible set is empty. The spatial-B&B driver
@@ -835,6 +842,93 @@ class MccormickLPRelaxer:
                 if not rows:
                     break
                 _append(rows, rhs)
+                _tl = (
+                    None
+                    if deadline is None
+                    else max(deadline - time.perf_counter(), _SOLVE_DEADLINE_FLOOR_S)
+                )
+                new_res = milp.solve(time_limit=_tl, backend=self._backend)
+                if new_res.status != "optimal" or new_res.objective is None:
+                    break
+                res = new_res
+            return res
+        except Exception:
+            return res
+
+    def _separate_rlt(self, milp, varmap, res, deadline):
+        """Separate targeted RLT (constraint-factor x bound-factor) cuts.
+
+        For each linear constraint ``a^T x <= b`` and variable bound factor
+        ``x_j - l >= 0`` / ``u - x_j >= 0``, the product ``(b - a^T x)(factor)``
+        is non-negative; linearized over the lifted columns it is a valid cut.
+        Separates only violated ones (targeted) and re-solves. Each cut is valid
+        for every feasible point, so the bound only tightens; on any failure the
+        input ``res`` is returned unchanged. Off unless ``rlt_cuts=True``.
+        """
+        if not self._rlt_cuts:
+            return res
+        if res is None or res.status != "optimal" or res.x is None:
+            return res
+        try:
+            import scipy.sparse as sp
+
+            from discopt._jax.milp_relaxation import _linear_constraint_forms
+            from discopt._jax.rlt_cuts import rlt_constraint_bound_cut
+
+            forms = _linear_constraint_forms(self._model, self._n_orig)
+            if not forms:
+                return res
+            n_total = len(milp._c)
+            bounds = milp._bounds  # original-variable bounds live in cols 0..n_orig-1
+            max_cuts_per_round = 128
+
+            def _append(rows: list[np.ndarray], rhs: list[float]) -> None:
+                R = np.asarray(rows, dtype=np.float64)
+                bb = np.asarray(rhs, dtype=np.float64)
+                if milp._A_ub is None:
+                    milp._A_ub, milp._b_ub = R, bb
+                elif sp.issparse(milp._A_ub):
+                    milp._A_ub = sp.vstack([milp._A_ub, sp.csr_matrix(R)], format="csr")
+                    milp._b_ub = np.concatenate([milp._b_ub, bb])
+                else:
+                    milp._A_ub = np.vstack([np.asarray(milp._A_ub), R])
+                    milp._b_ub = np.concatenate([milp._b_ub, bb])
+
+            for _round in range(6):
+                if deadline is not None and time.perf_counter() >= deadline:
+                    break
+                x = np.asarray(res.x, dtype=np.float64)
+                rows: list[np.ndarray] = []
+                rhs: list[float] = []
+                for coeff, const in forms:
+                    # coeff . x + const <= 0  ==>  a^T x <= b with a=coeff, b=-const.
+                    a = {i: float(coeff[i]) for i in range(self._n_orig) if coeff[i] != 0.0}
+                    if not a:
+                        continue
+                    b = -float(const)
+                    for j in range(self._n_orig):
+                        if j >= len(bounds):
+                            break
+                        lo, hi = bounds[j]
+                        for lower, bnd in ((True, lo), (False, hi)):
+                            if not np.isfinite(bnd):
+                                continue
+                            cut = rlt_constraint_bound_cut(
+                                a, b, j, float(bnd), lower, varmap, x, n_total
+                            )
+                            if cut is not None:
+                                rows.append(cut.coeffs)
+                                rhs.append(cut.rhs)
+                                if len(rows) >= max_cuts_per_round:
+                                    break
+                        if len(rows) >= max_cuts_per_round:
+                            break
+                    if len(rows) >= max_cuts_per_round:
+                        break
+                if not rows:
+                    break
+                # cut is ``coeffs . z >= rhs`` -> ``(-coeffs) . z <= -rhs``.
+                _append([-r for r in rows], [-v for v in rhs])
                 _tl = (
                     None
                     if deadline is None
