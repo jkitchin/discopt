@@ -1506,6 +1506,7 @@ def _root_relaxation_lower_bound(
     root_lb: np.ndarray,
     root_ub: np.ndarray,
     time_limit: float,
+    psd_cuts: bool = False,
 ) -> Optional[float]:
     """Solve the root MILP relaxation once and return its LP value as a rigorous
     global lower bound, or ``None`` if unavailable.
@@ -1534,7 +1535,7 @@ def _root_relaxation_lower_bound(
 
     try:
         terms = classify_nonlinear_terms(model)
-        relax, _ = build_milp_relaxation(
+        relax, _relax_info = build_milp_relaxation(
             model,
             terms,
             DiscretizationState(),
@@ -1543,6 +1544,23 @@ def _root_relaxation_lower_bound(
         if not relax._objective_bound_valid:
             return None
         relax = sanitize_relaxation_for_conditioning(relax)
+
+        # PSD (moment) cuts strengthen the McCormick relaxation toward the SDP
+        # bound on nonconvex QCQP. `sanitize_*` only drops rows, so the column
+        # map `_relax_info` still matches `relax`. Each cut is valid for the whole
+        # feasible region, so the strengthened LP value is a *valid* lower bound
+        # (>= the plain bound); it joins the candidates below and `max` keeps the
+        # tightest. Opt-in via `psd_cuts=True`; any failure is a sound no-op.
+        psd_bound: Optional[float] = None
+        if psd_cuts:
+            try:
+                from discopt._jax.psd_cuts import psd_strengthen_relaxation_bound
+
+                _zb, _za, _nc = psd_strengthen_relaxation_bound(relax, _relax_info)
+                if _nc and _za is not None and np.isfinite(_za):
+                    psd_bound = float(_za)
+            except Exception as psd_exc:  # pragma: no cover - defensive
+                logger.debug("root PSD-strengthened bound skipped: %s", psd_exc)
         budget = min(10.0, max(1.0, time_limit * 0.1))
         result = relax.solve(time_limit=budget, gap_tolerance=1e-6)
         # Only an OPTIMAL relaxation solve yields a valid lower bound. An
@@ -1581,7 +1599,7 @@ def _root_relaxation_lower_bound(
 
         # Both values are valid lower bounds for a minimization, so the larger
         # (tighter) one is the better rigorous bound.
-        candidates = [b for b in (plain_bound, sep_bound) if b is not None]
+        candidates = [b for b in (plain_bound, sep_bound, psd_bound) if b is not None]
         if candidates:
             return max(candidates)
     except Exception as exc:  # pragma: no cover - defensive
@@ -1602,6 +1620,7 @@ def solve_model(
     nlp_solver: str = "ipm",
     sparse: Optional[bool] = None,
     cutting_planes: bool = False,
+    psd_cuts: bool = False,
     partitions: int = 0,
     branching_policy: str = "fractional",
     use_learned_relaxations: bool = False,
@@ -4297,7 +4316,9 @@ def solve_model(
     if (bound_val is None or not np.isfinite(bound_val)) and (
         model._objective.sense == ObjectiveSense.MINIMIZE
     ):
-        _rr = _root_relaxation_lower_bound(model, _root_lb_snapshot, _root_ub_snapshot, time_limit)
+        _rr = _root_relaxation_lower_bound(
+            model, _root_lb_snapshot, _root_ub_snapshot, time_limit, psd_cuts=psd_cuts
+        )
         if _rr is not None and np.isfinite(_rr):
             bound_val = _rr
             if obj_val is not None and np.isfinite(obj_val):
