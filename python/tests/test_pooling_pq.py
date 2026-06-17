@@ -17,7 +17,6 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import pytest
-
 from discopt.pooling import (
     Input,
     Output,
