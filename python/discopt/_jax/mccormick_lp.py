@@ -204,6 +204,17 @@ class MccormickLPRelaxer:
         self._rlt_applicable = os.environ.get("DISCOPT_RLT", "0") == "1" and bool(
             _linear_constraint_forms(model, self._n_orig)
         )
+        # Lever 1 (issue #194): solve each spatial-B&B node's relaxation as a pure
+        # LP for the dual bound, rather than as a nested integer MILP B&B. The LP
+        # relaxation of the lifted McCormick MILP is still a valid (if looser)
+        # lower bound, is ~5-10x cheaper than re-running an integer branch-and-bound
+        # at every node, and returns a *fractional* solution the OUTER spatial/
+        # integer tree can branch on (the old MILP node solve returned integer
+        # values, which dead-ended the spatial path). Integrality is enforced by
+        # the outer tree, not redundantly at every node. Set
+        # ``DISCOPT_NODE_BOUND_MODE=milp`` to restore the legacy nested-MILP node
+        # bound (for A/B comparison).
+        self._lp_node_bound = os.environ.get("DISCOPT_NODE_BOUND_MODE", "lp") == "lp"
         # Per-node lifted-LP FBBT (issue #184): propagate the relaxation's own
         # McCormick rows to recover bilinear-implied factor bounds (e.g. a pinned
         # binary forcing a continuous factor >= 1 *through* a bilinear constraint),
@@ -236,6 +247,14 @@ class MccormickLPRelaxer:
         for base, _exp in t.fractional_power:
             nl_cols.add(int(base))
         self._nonlinear_cols = nl_cols
+
+    @property
+    def nonlinear_columns(self) -> frozenset[int]:
+        """Original-variable flat columns in any nonlinear term (product,
+        monomial, fractional power). Used by the spatial B&B driver to flag
+        integer variables eligible for spatial domain-partition branching when no
+        continuous variable remains to bisect (issue #194)."""
+        return frozenset(self._nonlinear_cols)
 
     @property
     def has_bilinear(self) -> bool:
@@ -352,7 +371,9 @@ class MccormickLPRelaxer:
         # 91.74) by the product cuts — is far cheaper than the RLT-augmented MILP's
         # branch-and-bound. The bound stays a valid lower bound either way.
         n_total = len(milp._c)
-        if self._rlt_applicable:
+        if self._rlt_applicable or self._lp_node_bound:
+            # Pure-LP node bound (lever 1, issue #194): drop integrality entirely.
+            # A valid lower bound for the outer tree; integrality is branched there.
             milp._integrality = None
         elif n_total > self._n_orig:
             pad = np.zeros(n_total - self._n_orig, dtype=np.int32)
