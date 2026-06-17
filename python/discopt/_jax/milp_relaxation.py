@@ -3610,8 +3610,32 @@ def build_milp_relaxation(
             for var_idx, power in Counter(monomial).items():
                 if power >= 2:
                     affine_square_monomials.add((var_idx, power))
+    # ── Multi-factor univariate products in CONSTRAINTS (st_e40) ────────────
+    # A constraint such as ``(i-1)*(i-2)*...*(i-12) == 0`` (st_e40's degree-7
+    # set-membership polynomials forcing ``i in {1,2,3,5,8,10,12}``) exposes its
+    # monomials ``i**2 .. i**7`` only AFTER distribution. The objective is
+    # already distributed before monomial collection (above), but constraints
+    # were not — so those monomials were never registered, the linearizer raised
+    # ``"Monomial (i, k) not in map"`` and DROPPED THE WHOLE CONSTRAINT from the
+    # relaxation. The result was a uselessly loose dual bound (st_e40: root bound
+    # 4.41 against a true optimum of 30.41, so the spatial B&B never prunes).
+    # Collecting them here registers the aux columns + rigorous monomial power
+    # envelopes so the constraint is KEPT. Sound: re-including a previously
+    # dropped constraint only shrinks the relaxed feasible set toward the true
+    # one, so the bound can only rise toward (never above) the optimum.
+    constraint_lift_monomials: set[tuple[int, int]] = set()
+    for _con in model._constraints:
+        try:
+            constraint_lift_monomials.update(
+                _collect_monomial_terms_for_lift(distribute_products(_con.body), model)
+            )
+        except Exception:  # pragma: no cover - defensive: never break the build
+            continue
     monomial_terms = sorted(
-        set(terms.monomial) | objective_lift_monomials | affine_square_monomials
+        set(terms.monomial)
+        | objective_lift_monomials
+        | affine_square_monomials
+        | constraint_lift_monomials
     )
 
     def _record_generation_guardrail(

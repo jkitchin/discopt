@@ -394,6 +394,73 @@ def test_issue90_unbounded_square_constraint_linearizes_with_lifted_aux(caplog):
     assert "omitting constraint" not in caplog.text
 
 
+def test_negated_constant_product_classifies_as_bilinear_both_paths():
+    """A leading negative coefficient ``-c*x*y`` must still classify as bilinear.
+
+    The term parses as ``((neg(c) * x) * y)`` with a ``UnaryOp('neg')`` wrapping
+    the scalar.  The product-factor walkers (Rust and Python) must treat ``neg``
+    as transparent — a sign on a scalar, never a variable factor — otherwise the
+    whole term is rejected and the constraint is silently dropped from the MILP
+    relaxation, leaving a uselessly loose bound (st_e40 regression).
+    """
+    from discopt._jax.term_classifier import (
+        _classify_nonlinear_terms_python,
+        _classify_nonlinear_terms_rust,
+        classify_nonlinear_terms,
+    )
+
+    m = Model("neg_const_bilinear")
+    x = m.continuous("x", lb=0.0, ub=5.0, shape=(2,))
+    m.minimize(x[0] + x[1])
+    m.subject_to(-0.15 * x[0] * x[1] >= -1.0)
+
+    # Default dispatch (Rust fast path for this product-only model).
+    assert (0, 1) in classify_nonlinear_terms(m).bilinear
+    # Both backends must agree.
+    rust_terms = _classify_nonlinear_terms_rust(m)
+    assert rust_terms is not None
+    assert (0, 1) in rust_terms.bilinear
+    assert (0, 1) in _classify_nonlinear_terms_python(m).bilinear
+
+
+def test_negated_constant_product_constraint_not_omitted(caplog):
+    """The ``-c*x*y`` constraint must survive into the MILP relaxation."""
+    m = Model("neg_const_bilinear_relax")
+    x = m.continuous("x", lb=0.0, ub=5.0, shape=(2,))
+    m.minimize(x[0] + x[1])
+    m.subject_to(-0.15 * x[0] * x[1] >= -1.0)
+
+    with caplog.at_level("WARNING", logger="discopt._jax.milp_relaxation"):
+        milp_model, varmap = _build_relaxation_for_test(m)
+        milp_model.solve()
+
+    assert (0, 1) in set(varmap["bilinear"])
+    assert "omitting constraint" not in caplog.text
+    assert "Bilinear (0, 1) not in map" not in caplog.text
+
+
+def test_distributed_univariate_constraint_monomials_registered(caplog):
+    """High-degree univariate products in a constraint must register their monomials.
+
+    A constraint such as ``(i-1)*(i-2)*...*(i-4) == 0`` exposes its monomials
+    ``i**2..i**4`` only after distribution.  The objective is distributed before
+    monomial collection, but constraints were not — so these monomials went
+    unregistered and the constraint was dropped from the relaxation (st_e40
+    e6/e7/e8 regression).
+    """
+    m = Model("distributed_univariate_constraint")
+    i = m.integer("i", lb=1, ub=4)
+    m.minimize(i)
+    m.subject_to((i - 1) * (i - 2) * (i - 3) * (i - 4) == 0.0)
+
+    with caplog.at_level("WARNING", logger="discopt._jax.milp_relaxation"):
+        milp_model, varmap = _build_relaxation_for_test(m)
+        milp_model.solve()
+
+    assert {(0, 2), (0, 3), (0, 4)} <= set(varmap["monomial"])
+    assert "omitting constraint" not in caplog.text
+
+
 @pytest.mark.memory_heavy
 def test_amp_reports_shifted_square_minlptests_case_infeasible():
     """Regression for MINLPTests nlp_mi_007_020."""

@@ -216,6 +216,12 @@ def _collect_product_factors(expr: Expression, model: Model) -> list[int] | None
     def _visit(e: Expression) -> bool:
         if isinstance(e, BinaryOp) and e.op == "*":
             return _visit(e.left) and _visit(e.right)
+        # Unary negation is just a sign on a scalar factor, never a variable
+        # factor — make it transparent.  A leading negative coefficient such as
+        # ``-c*x*y`` parses as ``((neg(Constant(c)) * x) * y)``; without this the
+        # whole product term is rejected and silently dropped from classification.
+        if isinstance(e, UnaryOp) and e.op == "neg":
+            return _visit(e.operand)
         flat = _get_flat_index(e, model)
         if flat is not None:
             indices.append(flat)
@@ -331,6 +337,11 @@ def _collect_extended_factors(
             return _visit(e.left) and _visit(e.right)
         if isinstance(e, Constant):
             return True
+        # Unary negation is just a sign on a scalar factor (see
+        # ``_collect_product_factors``); make it transparent so a leading
+        # negative coefficient does not drop the whole product term.
+        if isinstance(e, UnaryOp) and e.op == "neg":
+            return _visit(e.operand)
         flat = _get_flat_index(e, model)
         if flat is not None:
             flat_factors.append(flat)
