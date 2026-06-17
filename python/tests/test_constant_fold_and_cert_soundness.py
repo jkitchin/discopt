@@ -61,6 +61,34 @@ def test_eval_constant_expr_returns_none_for_variable_terms():
     assert _eval_constant_expr(2.0 * x) is None
 
 
+def test_decompose_product_folds_composite_constant_factor():
+    """A composite-constant factor inside a *product decomposition* must fold.
+
+    The linearizer's ``*`` handler already folds variable-free factors before
+    decomposition, but :func:`_decompose_product` itself only recognized a bare
+    ``Constant`` leaf — a *composite* constant such as ``neg(1e6)`` (how the
+    GAMS tokenizer emits ``-1000000`` when the term sits inside a quotient, as
+    in MINLPLib ``gear4``'s ``-1e6*i1*i2/(i3*i4)``) made decomposition return
+    ``None`` (``Cannot decompose product: ((neg(1e+06) * i1) * i2)``), dropping
+    the whole constraint. The fold is exact and variable-free, so it only ever
+    lets a product be relaxed that was previously discarded.
+    """
+    from discopt._jax.milp_relaxation import _decompose_product, _get_flat_index
+
+    m = dm.Model("gear")
+    i1 = m.integer("i1", lb=12, ub=60)
+    i2 = m.integer("i2", lb=12, ub=60)
+    # Exactly the AST gear4 produces for the numerator ``-1000000 * i1 * i2``.
+    expr = BinaryOp("*", BinaryOp("*", UnaryOp("neg", Constant(1.0e6)), i1), i2)
+
+    decomp = _decompose_product(expr, m)
+    assert decomp is not None, "composite-constant factor must not abort decomposition"
+    scalar, indices = decomp
+    assert scalar == -1.0e6
+    # The two surviving factors are the bilinear pair (i1, i2).
+    assert sorted(indices) == sorted([_get_flat_index(i1, m), _get_flat_index(i2, m)])
+
+
 @pytest.mark.correctness
 def test_negated_constant_product_keeps_constraint_and_certifies():
     """A nonlinear constraint carrying a ``(-3)*(-3)`` constant term must be kept.

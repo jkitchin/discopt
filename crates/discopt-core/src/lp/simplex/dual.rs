@@ -215,6 +215,19 @@ impl<'a> PreparedDual<'a> {
         // affects correctness (any infeasible basic var is a valid leaving choice).
         let mut gamma = vec![1.0f64; m];
         for _iter in 0..opts.max_iter {
+            // Poll the wall-clock deadline (see SimplexOptions::deadline). On a
+            // timeout we abandon the warm dual re-solve and request the cold
+            // fallback by returning None; the cold primal solve re-checks the
+            // same deadline on its first iteration and returns IterLimit, which
+            // the B&B treats soundly. Polled every 256 pivots to keep the now()
+            // cost negligible against a full ftran iteration.
+            if (_iter & 255) == 0
+                && opts
+                    .deadline
+                    .is_some_and(|d| std::time::Instant::now() >= d)
+            {
+                return None;
+            }
             // Basic values x_B = B⁻¹(b − Σ_nonbasic A_j x_j).
             let mut xb = b.to_vec();
             for j in 0..n {

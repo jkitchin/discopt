@@ -71,6 +71,77 @@ def test_propagate_bounds_to_python_model():
     assert float(np.asarray(x.ub)) == pytest.approx(7.5)
 
 
+class _ShiftedRepr:
+    """Fake ModelRepr that mimics a presolve which *eliminated* a variable.
+
+    When the ``aggregate``/``eliminate`` passes drop a variable block, the Rust
+    repr's block indices shift down by one (``n_var_blocks`` shrinks). The block
+    list here drops ``a`` (the eliminated var), so the surviving blocks are
+    ``[b, c]`` — a positional mapping would cross-assign ``c``'s bounds onto the
+    Python ``b`` variable. ``var_names`` is the signal that keeps the mapping
+    honest.
+    """
+
+    def __init__(self, names, lbs, ubs):
+        self._names = list(names)
+        self._lbs = [np.asarray(v, dtype=np.float64).reshape(-1) for v in lbs]
+        self._ubs = [np.asarray(v, dtype=np.float64).reshape(-1) for v in ubs]
+
+    @property
+    def n_var_blocks(self):
+        return len(self._names)
+
+    def var_names(self):
+        return list(self._names)
+
+    def var_lb(self, bi):
+        return self._lbs[bi]
+
+    def var_ub(self, bi):
+        return self._ubs[bi]
+
+
+def test_propagate_bounds_maps_by_name_after_elimination():
+    """Regression (Issue #19): a variable-eliminating presolve shifts Rust block
+    indices, so bounds must flow back BY NAME — never positionally. A positional
+    map would cross-assign the wrong variable's (tighter) bounds and can fabricate
+    an empty box -> a false ``infeasible`` verdict on a feasible model."""
+    m = discopt.Model("agg_shift")
+    a = m.continuous("a", lb=-100.0, ub=100.0)
+    b = m.continuous("b", lb=-100.0, ub=100.0)
+    # ``c`` has a negative upper bound — exactly the gastransnlp x30 pattern that
+    # turns a cross-assignment into an empty box.
+    c = m.continuous("c", lb=-100.0, ub=-5.0)
+    m.minimize(b * b + c * c)
+
+    # Simulate the post-``aggregate`` repr: ``a`` was eliminated, so only ``b``
+    # and ``c`` survive (indices shifted down by one). ``b``'s lb is legitimately
+    # tightened to -20; ``c`` is unchanged.
+    shifted = _ShiftedRepr(
+        names=["b", "c"],
+        lbs=[-20.0, -100.0],
+        ubs=[100.0, -5.0],
+    )
+
+    n_tightened = propagate_bounds_to_model(m, shifted)
+
+    # ``b`` gets ONLY its own tightened lb; its ub must stay 100 (a positional
+    # map would have cross-assigned c's [-100, -5] onto ``b``).
+    assert float(np.asarray(b.lb)) == pytest.approx(-20.0)
+    assert float(np.asarray(b.ub)) == pytest.approx(100.0)
+    # ``c`` stays exactly as declared — not overwritten, not emptied.
+    assert float(np.asarray(c.lb)) == pytest.approx(-100.0)
+    assert float(np.asarray(c.ub)) == pytest.approx(-5.0)
+    # ``a`` was eliminated on the Rust side; it is simply skipped (untouched).
+    assert float(np.asarray(a.lb)) == pytest.approx(-100.0)
+    assert float(np.asarray(a.ub)) == pytest.approx(100.0)
+    assert n_tightened == 1  # only b.lb moved
+
+    # No variable may end up with an empty box.
+    for v in m._variables:
+        assert float(np.asarray(v.lb)) <= float(np.asarray(v.ub))
+
+
 def test_polynomial_reformulation_runs():
     """Opt-in polynomial reformulation completes and returns stats."""
     m = discopt.Model("poly")

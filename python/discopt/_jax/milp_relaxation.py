@@ -494,6 +494,30 @@ class AffinePowerRelaxation:
 
 
 @dataclass
+class RatioRelaxation:
+    """Linear-fractional envelope for a ratio of products ``coeff·m/q`` (#185).
+
+    ``m`` is the lifted numerator product column and ``q`` the lifted denominator
+    product column (each a standard McCormick-enveloped bilinear/multilinear aux,
+    or an original variable). ``r`` is a fresh column standing for the *pure*
+    ratio ``m/q``; the division node is mapped to ``r`` with the scalar ``coeff``
+    applied by the linearizer (keeping a large numerator constant out of the
+    envelope coefficients). The McCormick envelope of the bilinear identity
+    ``r·q = m`` — emitted over ``[r_lb, r_ub] × [q bounds]`` — outer-approximates
+    the quotient: at any true point ``r = m/q`` so ``r·q = m`` holds exactly and
+    all four inequalities are satisfied, hence the relaxed feasible set is a
+    superset of the true one (sound lower bound). Requires ``q`` strictly
+    sign-definite and bounded away from zero on the node box.
+    """
+
+    r_col: int
+    q_col: int
+    m_col: int
+    r_lb: float
+    r_ub: float
+
+
+@dataclass
 class PiecewiseTrigSquareInterval:
     """Binary-selected interval for a direct trig-square relaxation."""
 
@@ -1209,6 +1233,7 @@ def _decompose_product(
     univariate_var_map: Optional[dict[object, int]] = None,
     monomial_var_map: Optional[dict[tuple[int, int], int]] = None,
     composite_var_map: Optional[dict[int, int]] = None,
+    composite_coeff_map: Optional[dict[int, float]] = None,
 ) -> tuple[float, list[int]] | None:
     """Decompose a product expression into (scalar, [flat_or_aux_idx, ...]).
 
@@ -1245,6 +1270,12 @@ def _decompose_product(
         if composite_var_map:
             aux_col = composite_var_map.get(id(e))
             if aux_col is not None:
+                # A composite node carrying a non-unit substitution coefficient
+                # (e.g. a ratio-of-products aux scaled by the numerator constant,
+                # issue #185) cannot be represented as a plain product factor here;
+                # abstain so the linearizer's coefficient-aware path handles it.
+                if composite_coeff_map and composite_coeff_map.get(id(e), 1.0) != 1.0:
+                    return False
                 var_indices.append(aux_col)
                 return True
         # Recognize var^p (fractional p) when an aux column was allocated.
@@ -1260,6 +1291,16 @@ def _decompose_product(
                 if key in fractional_power_var_map:
                     var_indices.append(fractional_power_var_map[key])
                     return True
+        # Fold a *composite* variable-free factor (e.g. ``neg(1e6)`` from a
+        # parsed ``-1e6*i1*i2``, or ``(-3)*(-3)``) into the scalar. A bare
+        # ``Constant`` is handled above; this catches negations/arithmetic over
+        # constants that would otherwise look like an undecomposable factor and
+        # cause the whole product (and its constraint) to be dropped from the
+        # relaxation. Exact and variable-free, so it only ever tightens.
+        cval = _eval_constant_expr(e)
+        if cval is not None:
+            scalar[0] *= cval
+            return True
         return False
 
     if not visit(expr):
@@ -1296,6 +1337,56 @@ def _decompose_product(
                 var_indices = collapsed
 
     return scalar[0], var_indices
+
+
+def _decompose_signed_monomial(expr: Expression, model: Model) -> tuple[float, list[int]] | None:
+    """Decompose a signed product / quotient-by-constant into ``(coeff, indices)``.
+
+    Folds every variable-free subexpression (including composite constants such as
+    gear4's ``neg(1e6)``) into ``coeff`` and collects the flat indices of the
+    original-variable factors (with repeats for integer powers ``x**n``,
+    ``2 ≤ n ≤ 4``). Returns ``None`` the moment a non-constant, non-variable,
+    non-product/​power leaf — a transcendental call, an additive operand, or a
+    division by a variable — is encountered, so the caller only ever sees a
+    genuine signed monomial in original variables.
+    """
+    const = _eval_constant_expr(expr)
+    if const is not None:
+        return const, []
+    flat = _get_flat_index(expr, model)
+    if flat is not None:
+        return 1.0, [flat]
+    if isinstance(expr, UnaryOp) and expr.op == "neg":
+        sub = _decompose_signed_monomial(expr.operand, model)
+        if sub is None:
+            return None
+        c, idx = sub
+        return -c, idx
+    if isinstance(expr, BinaryOp) and expr.op == "*":
+        left = _decompose_signed_monomial(expr.left, model)
+        if left is None:
+            return None
+        right = _decompose_signed_monomial(expr.right, model)
+        if right is None:
+            return None
+        return left[0] * right[0], left[1] + right[1]
+    if isinstance(expr, BinaryOp) and expr.op == "/":
+        denom = _eval_constant_expr(expr.right)
+        if denom is None or denom == 0.0:
+            return None
+        sub = _decompose_signed_monomial(expr.left, model)
+        if sub is None:
+            return None
+        return sub[0] / denom, sub[1]
+    if isinstance(expr, BinaryOp) and expr.op == "**" and isinstance(expr.right, Constant):
+        p = _eval_constant_expr(expr.right)
+        if p is not None and p.is_integer() and 2 <= int(p) <= 4:
+            base = _decompose_signed_monomial(expr.left, model)
+            if base is None:
+                return None
+            bc, bidx = base
+            return bc ** int(p), bidx * int(p)
+    return None
 
 
 def _collect_lifted_bilinear_products(
@@ -3145,6 +3236,7 @@ def _linearize_expr(
     flat_lb: Optional[np.ndarray] = None,
     flat_ub: Optional[np.ndarray] = None,
     composite_var_map: Optional[dict[int, int]] = None,
+    composite_coeff_map: Optional[dict[int, float]] = None,
 ) -> tuple[np.ndarray, float]:
     """Walk expression tree and return (coeff, constant) for linearized form.
 
@@ -3182,7 +3274,8 @@ def _linearize_expr(
         if composite_var_map is not None:
             aux_col = composite_var_map.get(id(e))
             if aux_col is not None:
-                coeff[aux_col] += scale
+                sub_coeff = composite_coeff_map.get(id(e), 1.0) if composite_coeff_map else 1.0
+                coeff[aux_col] += scale * sub_coeff
                 return
 
         if isinstance(e, Constant):
@@ -3314,6 +3407,7 @@ def _linearize_expr(
                     univariate_var_map=univariate_var_map,
                     monomial_var_map=monomial_var_map,
                     composite_var_map=composite_var_map,
+                    composite_coeff_map=composite_coeff_map,
                 )
                 if decomp is None:
                     raise ValueError(f"Cannot decompose product: {e}")
@@ -3870,6 +3964,12 @@ def build_milp_relaxation(
         all_bounds.append(val_bounds)
         integrality_flags.append(0)
         col_idx += 1
+
+    # Per-node substitution coefficient for composite auxes whose value is a
+    # scalar multiple of the aux column (ratio-of-products lift, issue #185).
+    composite_coeff_map: dict[int, float] = {}
+    # Linear-fractional ``r·q = m`` envelopes accumulated by the ratio lift.
+    ratio_relaxations: list[RatioRelaxation] = []
 
     univariate_square_relaxations, univariate_square_var_map, univariate_square_bounds = (
         _collect_univariate_square_relaxations(
@@ -4441,6 +4541,106 @@ def build_milp_relaxation(
         cross_term_used[0] = True
         return {folded: coeff}, 0.0
 
+    def _try_lift_ratio_of_products(div_expr: BinaryOp) -> None:
+        """Linear-fractional lift of ``coeff·(Π num_i) / (Π den_j)`` (issue #185).
+
+        Without this, a ratio of products (e.g. gear4's ``-1e6·i1·i2/(i3·i4)``)
+        is dumped into ``general_nl`` and the whole enclosing constraint is dropped
+        from the relaxation, leaving a trivial dual bound. We relax it via the
+        bilinear identity ``r·q = m`` where ``m`` is the lifted numerator product,
+        ``q`` the lifted denominator product, and ``r`` a fresh column for the
+        *pure* ratio ``m/q``; the division node is mapped to ``r`` with the scalar
+        ``coeff`` applied by the linearizer (keeping the large numerator constant
+        out of the envelope coefficients, so the relaxation LP stays
+        well-conditioned).
+
+        Soundness: ``r``'s interval is the sign-aware interval product
+        ``[m] · (1/[q])`` which contains the true ``m/q`` at every feasible point
+        (``1/q`` is monotone on a sign-definite ``q``), so the McCormick envelope
+        of ``r·q`` set equal to ``m`` is a valid outer approximation. We *decline*
+        (leaving the constraint to drop, which only enlarges the relaxation — always
+        sound) when the denominator is not strictly sign-definite / bounded away
+        from zero on the node box, when any factor is unbounded, or when the
+        envelope magnitudes exceed the conditioning limit (an ill-conditioned LP
+        could otherwise yield an unsound bound).
+        """
+        nonlocal col_idx
+        eid = id(div_expr)
+        if eid in composite_var_map or eid in univariate_var_map:
+            return
+
+        num = _decompose_signed_monomial(div_expr.left, model)
+        if num is None:
+            return
+        coeff, num_idx = num
+        if not (np.isfinite(coeff) and coeff != 0.0) or not num_idx:
+            return
+
+        den = _decompose_signed_monomial(div_expr.right, model)
+        if den is None:
+            return
+        den_coeff, den_idx = den
+        if not (np.isfinite(den_coeff) and den_coeff != 0.0) or not den_idx:
+            return
+        coeff = coeff / den_coeff
+        if not np.isfinite(coeff):
+            return
+
+        # Fold each side's variable factors into a single bounded product-aux
+        # column (each carries a standard McCormick envelope tying it to the
+        # underlying variables); a single-variable factor maps to its own column.
+        m_col = _fold_cols_to_aux(num_idx)
+        if m_col is None:
+            return
+        q_col = _fold_cols_to_aux(den_idx)
+        if q_col is None or q_col == m_col:
+            return
+
+        q_lo, q_hi = (float(v) for v in all_bounds[q_col])
+        if not (np.isfinite(q_lo) and np.isfinite(q_hi)):
+            return
+        # Must-gate: denominator strictly sign-definite and bounded away from 0,
+        # else 1/q's interval is invalid (→ unsound r bound → false certification).
+        if not (q_lo > _RECIP_MIN_DENOM or q_hi < -_RECIP_MIN_DENOM):
+            return
+        m_lo, m_hi = (float(v) for v in all_bounds[m_col])
+        if not (np.isfinite(m_lo) and np.isfinite(m_hi)):
+            return
+
+        # 1/q is monotone on a sign-definite interval, so its range is exactly
+        # [1/q_hi, 1/q_lo]; the pure ratio r = m/q lies in the interval product.
+        inv_lo, inv_hi = 1.0 / q_hi, 1.0 / q_lo
+        corners = [m_lo * inv_lo, m_lo * inv_hi, m_hi * inv_lo, m_hi * inv_hi]
+        r_lo, r_hi = float(min(corners)), float(max(corners))
+        if not (np.isfinite(r_lo) and np.isfinite(r_hi)):
+            return
+
+        # Conditioning guard: keep every envelope coefficient / RHS below the
+        # cross-term magnitude limit so the fast simplex backend stays reliable.
+        env_mags = [
+            abs(r_lo),
+            abs(r_hi),
+            abs(q_lo),
+            abs(q_hi),
+            abs(r_lo * q_lo),
+            abs(r_hi * q_hi),
+            abs(r_hi * q_lo),
+            abs(r_lo * q_hi),
+        ]
+        if max(env_mags) > _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE:
+            return
+
+        r_col = col_idx
+        all_bounds.append((r_lo, r_hi))
+        integrality_flags.append(0)
+        col_idx += 1
+
+        ratio_relaxations.append(
+            RatioRelaxation(r_col=r_col, q_col=q_col, m_col=m_col, r_lb=r_lo, r_ub=r_hi)
+        )
+        composite_var_map[eid] = r_col
+        composite_coeff_map[eid] = float(coeff)
+
     def _try_lift_nested_division(div_expr: BinaryOp) -> None:
         """Lift ``num / g`` with a *non-constant* numerator (issue #154 increment
         3). The constant-numerator path scales an existing ``1/g`` aux by the
@@ -4561,7 +4761,12 @@ def build_milp_relaxation(
         if isinstance(expr, BinaryOp) and expr.op == "/":
             num = _constant_value(expr.left)
             if num is None:
-                # Non-constant numerator: nested-division lift (increment 3).
+                # Non-constant numerator. Try the ratio-of-products lift first
+                # (handles signed numerators and product denominators via the
+                # r·q = m identity, issue #185); fall back to the reciprocal-based
+                # nested-division lift (issue #154 increment 3). The fallback is a
+                # no-op once the ratio lift has claimed the node.
+                _try_lift_ratio_of_products(expr)
                 _try_lift_nested_division(expr)
                 return
             func_name, inner = "reciprocal", expr.right
@@ -5216,6 +5421,49 @@ def build_milp_relaxation(
             row[i] -= xj_ub_g
             row[j] -= xi_lb_g
             _add_row(row, -xi_lb_g * xj_ub_g)
+
+    # ── Ratio-of-products linear-fractional envelopes (issue #185) ──────────
+    # Each lifted ratio carries the bilinear identity ``r·q = m`` (m the lifted
+    # numerator product, q the lifted denominator product, r the pure ratio).
+    # Emitting the four McCormick inequalities of the product ``r·q`` with the
+    # product value substituted by the linear term ``m`` outer-approximates the
+    # quotient: at any true point r = m/q so r·q = m holds and every row is
+    # satisfied, so the relaxed region is a superset of the true one (sound).
+    for rr in ratio_relaxations:
+        r_col, q_col, m_col = rr.r_col, rr.q_col, rr.m_col
+        r_lb, r_ub = (float(v) for v in all_bounds[r_col])
+        q_lb, q_ub = (float(v) for v in all_bounds[q_col])
+        if not (
+            _is_effectively_finite(r_lb)
+            and _is_effectively_finite(r_ub)
+            and _is_effectively_finite(q_lb)
+            and _is_effectively_finite(q_ub)
+        ):
+            continue
+        # m ≥ r_lb·q + q_lb·r − r_lb·q_lb  →  −m + r_lb·q + q_lb·r ≤ r_lb·q_lb
+        row = np.zeros(n_total)
+        row[m_col] += -1.0
+        row[q_col] += r_lb
+        row[r_col] += q_lb
+        _add_row(row, r_lb * q_lb)
+        # m ≥ r_ub·q + q_ub·r − r_ub·q_ub
+        row = np.zeros(n_total)
+        row[m_col] += -1.0
+        row[q_col] += r_ub
+        row[r_col] += q_ub
+        _add_row(row, r_ub * q_ub)
+        # m ≤ r_ub·q + q_lb·r − r_ub·q_lb  →  m − r_ub·q − q_lb·r ≤ −r_ub·q_lb
+        row = np.zeros(n_total)
+        row[m_col] += 1.0
+        row[q_col] += -r_ub
+        row[r_col] += -q_lb
+        _add_row(row, -r_ub * q_lb)
+        # m ≤ r_lb·q + q_ub·r − r_lb·q_ub
+        row = np.zeros(n_total)
+        row[m_col] += 1.0
+        row[q_col] += -r_lb
+        row[r_col] += -q_ub
+        _add_row(row, -r_lb * q_ub)
 
     # ── Multilinear RLT convex-hull cuts (emission) ────────────────────────
     # For each recorded term, emit the |S|-degree bound-factor product cuts for
@@ -6130,6 +6378,7 @@ def build_milp_relaxation(
                     flat_lb=flat_lb,
                     flat_ub=flat_ub,
                     composite_var_map=composite_var_map,
+                    composite_coeff_map=composite_coeff_map,
                 )
             except ValueError as err:
                 logger.debug(
@@ -6176,6 +6425,7 @@ def build_milp_relaxation(
                 flat_lb=flat_lb,
                 flat_ub=flat_ub,
                 composite_var_map=composite_var_map,
+                composite_coeff_map=composite_coeff_map,
             )
             # body ≤ 0  →  c @ z + const ≤ 0  →  c @ z ≤ -const
             if sense == "<=":
@@ -6245,6 +6495,7 @@ def build_milp_relaxation(
                 flat_lb=flat_lb,
                 flat_ub=flat_ub,
                 composite_var_map=composite_var_map,
+                composite_coeff_map=composite_coeff_map,
             )
         objective_bound_valid = True
     except ValueError as err:

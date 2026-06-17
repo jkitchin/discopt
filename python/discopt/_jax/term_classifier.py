@@ -91,6 +91,14 @@ class NonlinearTerms:
     # the fractional power to an aux column and adds a McCormick envelope on the
     # resulting (linear, aux) bilinear product.
     bilinear_with_fp: list[tuple[_VarIdx, tuple[_VarIdx, float]]] = field(default_factory=list)
+    # Ratios of products ``(c·Πx_i)/(Πy_j)`` recorded as
+    # ``((num_var_indices), (den_var_indices))`` (sorted, distinct).  The MILP
+    # relaxation lifts each via the linear-fractional ``r·q = m`` identity
+    # (issue #185); the embedded numerator/denominator products are also recorded
+    # as bilinear/trilinear/multilinear terms so they receive McCormick envelopes.
+    ratio_of_products: list[tuple[tuple[_VarIdx, ...], tuple[_VarIdx, ...]]] = field(
+        default_factory=list
+    )
     general_nl: list[Expression] = field(default_factory=list)
     term_incidence: dict[_VarIdx, set[int]] = field(default_factory=dict)
     partition_candidates: list[_VarIdx] = field(default_factory=list)
@@ -389,6 +397,109 @@ def extract_single_var_power(expr: Expression, model: Model) -> tuple[int, float
     return _visit(expr)
 
 
+def _ratio_fold_const(expr: Expression) -> float | None:
+    """Fold a variable-free subexpression to a scalar, else ``None``.
+
+    Handles literal constants and composite constants (``neg(1e6)``, ``-3*-3``,
+    arithmetic over constants) so a numerator scale factor such as gear4's
+    ``-1000000`` does not abort product recognition. Conservative: returns
+    ``None`` the moment a variable / unhandled node is seen.
+    """
+    if isinstance(expr, Constant):
+        try:
+            return float(expr.value)
+        except (TypeError, ValueError):
+            return None
+    if isinstance(expr, UnaryOp):
+        sub = _ratio_fold_const(expr.operand)
+        if sub is None:
+            return None
+        if expr.op == "neg":
+            return -sub
+        if expr.op == "abs":
+            return abs(sub)
+        return None
+    if isinstance(expr, BinaryOp):
+        left = _ratio_fold_const(expr.left)
+        if left is None:
+            return None
+        right = _ratio_fold_const(expr.right)
+        if right is None:
+            return None
+        if expr.op == "+":
+            return left + right
+        if expr.op == "-":
+            return left - right
+        if expr.op == "*":
+            return left * right
+        if expr.op == "/":
+            return None if right == 0.0 else left / right
+        if expr.op == "**":
+            try:
+                result = left**right
+            except (ValueError, OverflowError, ZeroDivisionError):
+                return None
+            return None if isinstance(result, complex) else float(result)
+    return None
+
+
+def _collect_ratio_product_vars(expr: Expression, model: Model) -> list[int] | None:
+    """Flat variable indices of a pure product ``c·Πx_i`` (constants folded away).
+
+    Returns the list of flat indices (with repeats for integer powers ``x**n``,
+    ``2 ≤ n ≤ 4``) or ``None`` if any leaf is not a constant, a flat-indexable
+    variable, an integer power thereof, or a division by a constant.
+    """
+    indices: list[int] = []
+
+    def visit(e: Expression) -> bool:
+        if _ratio_fold_const(e) is not None:
+            return True
+        flat = _get_flat_index(e, model)
+        if flat is not None:
+            indices.append(flat)
+            return True
+        if isinstance(e, UnaryOp) and e.op == "neg":
+            return visit(e.operand)
+        if isinstance(e, BinaryOp) and e.op == "*":
+            return visit(e.left) and visit(e.right)
+        if isinstance(e, BinaryOp) and e.op == "**" and isinstance(e.right, Constant):
+            p = _ratio_fold_const(e.right)
+            base = _get_flat_index(e.left, model)
+            if base is not None and p is not None and p.is_integer() and 2 <= int(p) <= 4:
+                indices.extend([base] * int(p))
+                return True
+        if isinstance(e, BinaryOp) and e.op == "/":
+            d = _ratio_fold_const(e.right)
+            if d is not None and d != 0.0:
+                return visit(e.left)
+            return False
+        return False
+
+    if not visit(expr):
+        return None
+    return indices
+
+
+def extract_ratio_of_products(expr: Expression, model: Model) -> tuple[list[int], list[int]] | None:
+    """Recognize ``(c·Πx_i)/(Πy_j)`` and return ``(num_indices, den_indices)``.
+
+    Both numerator and denominator must reduce to a product of bounded original
+    variables (constant scale factors folded away); the denominator must contain
+    at least one variable (a constant denominator is plain scaling). Returns
+    ``None`` for anything else (e.g. a transcendental or additive operand).
+    """
+    if not (isinstance(expr, BinaryOp) and expr.op == "/"):
+        return None
+    num = _collect_ratio_product_vars(expr.left, model)
+    if not num:
+        return None
+    den = _collect_ratio_product_vars(expr.right, model)
+    if not den:
+        return None
+    return num, den
+
+
 def extract_reciprocal_power(expr: Expression, model: Model) -> tuple[int, float, float] | None:
     """Recognize ``expr`` as ``c / (x**p)`` → ``(flat_idx, -p, c)``.
 
@@ -547,6 +658,21 @@ def _classify_nonlinear_terms_python(model: Model) -> NonlinearTerms:
             result.bilinear_with_fp.append(key)
         _record_fractional_power(*fp_norm)
 
+    def _record_product_indices(indices: list[int]) -> None:
+        """Record a distinct-variable product as a bilinear/trilinear/multilinear
+        term so it receives a McCormick envelope. Repeated-factor products (powers)
+        are skipped here; their variables still become partition candidates via the
+        ``ratio_of_products`` record."""
+        unique = list(dict.fromkeys(indices))
+        if len(unique) != len(indices):
+            return
+        if len(unique) == 2:
+            _record_bilinear(unique[0], unique[1])
+        elif len(unique) == 3:
+            _record_trilinear(unique[0], unique[1], unique[2])
+        elif len(unique) >= 4:
+            _record_multilinear(unique)
+
     def _classify_node(expr: Expression) -> None:
         """Recursively classify all nonlinear nodes in the expression tree."""
         if isinstance(expr, Constant):
@@ -660,6 +786,23 @@ def _classify_nonlinear_terms_python(model: Model) -> NonlinearTerms:
                     _record_fractional_power(flat_idx, neg_exp)
                     result.general_nl.append(expr)
                     return
+                # (c·Πx)/(Πy) → ratio of products (issue #185). Register the
+                # numerator and denominator products so they receive McCormick
+                # envelopes and their variables become partition candidates; the
+                # MILP relaxation lifts the quotient via the r·q = m identity.
+                ratio = extract_ratio_of_products(expr, model)
+                if ratio is not None:
+                    num_idx, den_idx = ratio
+                    _record_product_indices(num_idx)
+                    _record_product_indices(den_idx)
+                    result.ratio_of_products.append(
+                        (
+                            tuple(sorted(dict.fromkeys(num_idx))),
+                            tuple(sorted(dict.fromkeys(den_idx))),
+                        )
+                    )
+                    result.general_nl.append(expr)
+                    return
                 # c / x or x / y → general nonlinear
                 result.general_nl.append(expr)
                 return
@@ -733,6 +876,11 @@ def _classify_nonlinear_terms_python(model: Model) -> NonlinearTerms:
         candidates.add(fp_base)
     for fp_base, _exp in result.fractional_power:
         candidates.add(fp_base)
+    # Ratio-of-products variables (numerator and denominator) drive the
+    # linear-fractional envelope; partitioning them tightens it (issue #185).
+    for num_vars, den_vars in result.ratio_of_products:
+        candidates.update(num_vars)
+        candidates.update(den_vars)
     result.partition_candidates = sorted(candidates)
 
     return result

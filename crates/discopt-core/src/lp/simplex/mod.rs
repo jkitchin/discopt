@@ -54,6 +54,17 @@ pub struct SimplexOptions {
     pub tol: f64,
     /// Maximum pivots before declaring [`LpStatus::IterLimit`].
     pub max_iter: usize,
+    /// Optional absolute wall-clock deadline. When set, the primal and dual
+    /// iteration loops poll it every few hundred pivots and bail out with
+    /// [`LpStatus::IterLimit`] once it passes. This bounds the cost of a *single*
+    /// pathological LP solve — e.g. a dense, degenerate lifted-McCormick
+    /// relaxation that would otherwise grind all the way to `max_iter` and blow
+    /// past the enclosing MILP/B&B time budget. The bail is reported exactly like
+    /// the iteration cap, which every caller already treats soundly: the node
+    /// gets a non-pruning bound and the gap is left uncertified, so optimality is
+    /// never falsely claimed. `None` (the default) disables the check, leaving
+    /// short LP solves bit-identical to before.
+    pub deadline: Option<std::time::Instant>,
 }
 
 impl Default for SimplexOptions {
@@ -61,6 +72,7 @@ impl Default for SimplexOptions {
         Self {
             tol: 1e-9,
             max_iter: 100_000,
+            deadline: None,
         }
     }
 }

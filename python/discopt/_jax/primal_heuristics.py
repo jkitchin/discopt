@@ -181,6 +181,7 @@ def feasibility_pump(
     max_rounds: int = 5,
     ipopt_options: Optional[dict] = None,
     backend: Optional[Callable] = None,
+    evaluator: Optional[NLPEvaluator] = None,
 ) -> Optional[np.ndarray]:
     """Try to find an integer-feasible solution via rounding + re-solve.
 
@@ -197,6 +198,12 @@ def feasibility_pump(
         backend: ``solve_nlp(evaluator, x0, options=...)`` callable. If None,
             resolves to ``get_nlp_solver("auto")``
             (POUNCE-preferred, falling back to cyipopt).
+        evaluator: Optional prebuilt :class:`NLPEvaluator` for ``model``. Reusing
+            the caller's evaluator avoids rebuilding (and recompiling, ~3s) the
+            JAX sparse-Hessian/Jacobian kernels for the same model structure.
+            The evaluator reads variable bounds from the model on each solve, so
+            the integer-pinning below is honoured regardless of which evaluator
+            is used. If None, a fresh one is constructed.
 
     Returns:
         An integer-feasible solution vector, or None if not found.
@@ -207,7 +214,8 @@ def feasibility_pump(
         return x_nlp.copy()
 
     lb, ub = _get_variable_bounds(model)
-    evaluator = NLPEvaluator(model)
+    if evaluator is None:
+        evaluator = NLPEvaluator(model)
 
     opts = dict(ipopt_options) if ipopt_options else {}
     opts.setdefault("print_level", 0)
@@ -232,20 +240,54 @@ def feasibility_pump(
 
         # Clip to bounds
         x_try = np.clip(x_try, lb, ub)
-
-        # Fix integer variables: set lb = ub for them in a modified evaluator
-        # Instead of rebuilding the evaluator, we fix by tightening bounds on x0
-        # and re-solving with the original evaluator. The rounded integer values
-        # are used as the starting point. Ipopt will respect variable bounds.
         x0 = x_try.copy()
 
-        nlp_result = backend(evaluator, x0, options=opts)
-        if not _is_nlp_feasible(nlp_result):
+        # Actually FIX the integer variables at their rounded values by pinning
+        # lb = ub = rounded value on the model (NLPEvaluator reads bounds from the
+        # model each call), then re-solve only the continuous variables. Without
+        # this, the re-solve uses the original (open) bounds and drifts the
+        # integers straight back to their fractional relaxation values, so the
+        # rounding — and the perturbation below — accomplishes nothing. Bounds are
+        # always restored in the finally so the search tree is left untouched.
+        saved_bounds: list[tuple[np.ndarray, np.ndarray]] = []
+        try:
+            offset = 0
+            for v in model._variables:
+                sz = v.size
+                saved_bounds.append((v.lb.copy(), v.ub.copy()))
+                if v.var_type in (VarType.BINARY, VarType.INTEGER):
+                    fixed = x0[offset : offset + sz].reshape(v.lb.shape)
+                    v.lb = fixed.copy()
+                    v.ub = fixed.copy()
+                offset += sz
+            try:
+                nlp_result = backend(evaluator, x0, options=opts)
+            except BaseException:
+                # Some NLP backends (pounce via PyO3) raise PanicException, which
+                # is not a subclass of Exception; treat any failure as this round
+                # producing no point and perturb on the next round.
+                continue
+        finally:
+            for v, (lb_v, ub_v) in zip(model._variables, saved_bounds):
+                v.lb = lb_v
+                v.ub = ub_v
+
+        if not _is_nlp_feasible(nlp_result) or nlp_result.x is None:
             continue
 
-        assert nlp_result.x is not None
-        if _is_integer_feasible(nlp_result.x, int_mask):
-            return nlp_result.x.copy()
+        x_cand = np.asarray(nlp_result.x).copy()
+        # Snap any tiny drift on the pinned integers, then require BOTH integer
+        # and constraint feasibility. Checking constraints here (not just
+        # integrality, which is trivially satisfied once integers are pinned) is
+        # what makes the perturbation loop useful: an infeasible rounding is
+        # rejected and the next round tries a perturbed neighbour instead of
+        # returning a point the caller will only discard.
+        x_cand[int_mask] = np.round(x_cand[int_mask])
+        if not _is_integer_feasible(x_cand, int_mask):
+            continue
+        if not _check_constraint_feasibility(evaluator, x_cand):
+            continue
+        return x_cand
 
     return None
 
@@ -254,15 +296,46 @@ def _check_constraint_feasibility(
     evaluator: NLPEvaluator,
     x: np.ndarray,
     tol: float = 1e-6,
+    rtol: float = 1e-9,
 ) -> bool:
-    """Check that ``x`` satisfies the model's constraints to within ``tol``."""
+    """Check that ``x`` satisfies the model's constraints to within tolerance.
+
+    A pure ABSOLUTE tolerance (``tol``) is too strict for constraints built from
+    large-magnitude nonlinear terms: an objective-linking row such as
+    ``592*x1**0.65 + ... - objvar <= 0`` evaluates as the difference of two
+    quantities near 1.5e5, so its floating-point cancellation noise alone is
+    ~1e-6 -- exactly the absolute tolerance. discopt then rejects a genuinely
+    optimal point (prob07: the true global basin at obj 154990 carries a 2.4e-6
+    residual on that one row and was discarded, leaving a worse 162070 incumbent)
+    while BARON, which scales feasibility by constraint magnitude, accepts it.
+
+    Use the conventional combined test ``|viol| <= tol + rtol*scale`` where the
+    per-row ``scale`` is the absolute linearized magnitude ``sum_j |J_ij|*|x_j|``
+    -- the size of the row's additive terms, derived from the Jacobian and NOT
+    from the (possibly +/-1e20 sentinel) bound values, so an unbounded row cannot
+    inflate the tolerance. ``rtol`` is kept extremely tight (1e-9) so this only
+    ever forgives cancellation noise proportional to the terms; any violation of
+    real consequence is still rejected. The absolute test is tried first and the
+    Jacobian (the only added cost) is evaluated only for rows that fail it, so
+    well-scaled feasible points keep the original cheap path unchanged.
+    """
     if evaluator.n_constraints == 0:
         return True
     g = np.asarray(evaluator.evaluate_constraints(x))
     from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
 
-    cl, cu = _infer_constraint_bounds(evaluator)
-    return bool(np.all(g >= cl - tol) and np.all(g <= cu + tol))
+    cl, cu = (np.asarray(b, dtype=np.float64) for b in _infer_constraint_bounds(evaluator))
+    viol = np.maximum(np.maximum(cl - g, 0.0), np.maximum(g - cu, 0.0))
+    if bool(np.all(viol <= tol)):
+        return True
+    # Some row exceeds the absolute tolerance: re-test those rows against a
+    # term-magnitude-scaled tolerance before declaring infeasibility.
+    try:
+        jac = np.abs(np.asarray(evaluator.evaluate_jacobian(x), dtype=np.float64))
+        scale = jac @ np.abs(np.asarray(x, dtype=np.float64))
+    except Exception:
+        return False
+    return bool(np.all(viol <= tol + rtol * scale))
 
 
 def subnlp(
@@ -345,7 +418,17 @@ def subnlp(
             v.lb = lb_v
             v.ub = ub_v
 
-    if not _is_nlp_feasible(nlp_result):
+    # Accept either a converged (OPTIMAL) solve or an ITERATION_LIMIT one: an
+    # interior-point solver routinely caps out one step short of its convergence
+    # test at a point that is already constraint-feasible (prob07's true-global
+    # basin terminates at ITERATION_LIMIT, obj 154990). The shared
+    # ``_is_nlp_feasible`` gate accepts OPTIMAL only and so discarded that point,
+    # leaving a worse incumbent. Trusting the returned point is sound here only
+    # because subnlp re-verifies genuine constraint- and integer-feasibility
+    # below (``_check_constraint_feasibility`` / ``_is_integer_feasible``), and
+    # ``inject_incumbent`` enforces strict improvement -- this mirrors the
+    # acceptance set ``_solve_root_node_multistart`` already uses.
+    if nlp_result.status not in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
         return None
     if nlp_result.x is None or nlp_result.objective is None:
         return None
@@ -366,6 +449,210 @@ def subnlp(
     # Recompute objective at the snapped point to keep it consistent.
     obj = float(evaluator.evaluate_objective(x_out))
     return x_out, obj
+
+
+def integer_local_search(
+    model: Model,
+    x_relax: np.ndarray,
+    backend: Optional[Callable] = None,
+    evaluator: Optional[NLPEvaluator] = None,
+    nlp_options: Optional[dict] = None,
+    max_restarts: int = 24,
+    max_steps: int = 60,
+    pair_cap: int = 40,
+    time_budget: float = 3.0,
+    feas_tol: float = 1e-6,
+    seed: int = 0,
+) -> Optional[tuple[np.ndarray, float]]:
+    """Constraint-violation-guided integer local search (1-opt + 2-opt).
+
+    The round-and-repair heuristics (:func:`feasibility_pump`, :func:`subnlp`)
+    only repair the *continuous* variables — they take the relaxation's integer
+    assignment as given. For integer-heavy nonconvex problems the relaxation's
+    integers are optimal for the *relaxed* (e.g. McCormick) constraints yet
+    violate the TRUE constraints, and no continuous re-solve fixes that. This
+    heuristic instead searches the integer lattice directly: it descends the
+    total true-constraint violation by unit moves (1-opt steepest descent; with
+    pairwise 2-opt moves when 1-opt stalls — essential for bilinear constraints
+    such as ``x*y >= c`` where a single variable cannot move the product), then
+    repairs the continuous variables and verifies true feasibility via
+    :func:`subnlp` at each local minimum. A few perturbation restarts escape
+    shallow local minima.
+
+    Sound by construction: only points that pass subnlp's integer- and
+    constraint-feasibility checks are returned, so the caller may inject them as
+    incumbents without affecting any dual bound or certification. The cost is
+    bounded by ``time_budget`` (wall-clock), ``max_restarts`` and ``max_steps``;
+    2-opt is skipped when the integer count exceeds ``pair_cap`` to avoid the
+    O(n^2) neighbourhood blowing up on large models.
+
+    Args:
+        model: The optimization model.
+        x_relax: Relaxation point (a B&B node's relaxed solution).
+        backend: NLP backend for the continuous repair; resolved via
+            ``get_nlp_solver('auto')`` when None.
+        evaluator: Pre-built NLPEvaluator; one is constructed if omitted.
+        nlp_options: Options forwarded to the NLP backend during repair.
+        max_restarts: Number of perturbation restarts.
+        max_steps: Max descent steps per restart.
+        pair_cap: Max integer count for which 2-opt is enabled.
+        time_budget: Wall-clock budget in seconds (the whole call returns early
+            once exceeded).
+        feas_tol: Constraint feasibility tolerance.
+        seed: RNG seed for reproducible perturbations.
+
+    Returns:
+        ``(x, obj)`` for the best feasible point found, else ``None``.
+    """
+    import time
+
+    if evaluator is None:
+        evaluator = NLPEvaluator(model)
+    int_mask = _get_integer_mask(model)
+    if not np.any(int_mask) or evaluator.n_constraints == 0:
+        # Pure-continuous or unconstrained: nothing for an integer lattice
+        # search to do — the continuous repair heuristics cover those.
+        return None
+
+    if backend is None:
+        from discopt.solvers.nlp_backend import get_nlp_solver
+
+        backend = get_nlp_solver("auto")
+
+    from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
+
+    lb, ub = _get_variable_bounds(model)
+    cl, cu = _infer_constraint_bounds(evaluator)
+    cl = np.asarray(cl, dtype=np.float64)
+    cu = np.asarray(cu, dtype=np.float64)
+    int_idx = np.where(int_mask)[0]
+    n_int = int(int_idx.size)
+    use_2opt = n_int <= pair_cap
+
+    def violation(x: np.ndarray) -> float:
+        g = np.asarray(evaluator.evaluate_constraints(x))
+        return float(np.sum(np.maximum(0.0, cl - g)) + np.sum(np.maximum(0.0, g - cu)))
+
+    deadline = time.perf_counter() + max(0.0, time_budget)
+
+    def _round_clip(x: np.ndarray) -> np.ndarray:
+        y = np.asarray(x, dtype=np.float64).copy()
+        y[int_mask] = np.round(y[int_mask])
+        return np.clip(y, lb, ub)
+
+    # Seed pool. The caller's relaxation point can be a degenerate vertex of a
+    # *different* relaxation (e.g. a McCormick node solution that parks integer
+    # multipliers at a bound, killing every bilinear product) — a dead basin for
+    # local moves. So also seed from the model's own continuous relaxation: the
+    # NLPEvaluator treats integers as continuous in [lb, ub], so a single NLP
+    # solve from the box midpoint yields a balanced fractional point that rounds
+    # into a far better basin. Both are rounded and used as restart bases.
+    seeds: list[np.ndarray] = [_round_clip(x_relax)]
+    try:
+        mid = np.clip(0.5 * (lb + ub), -1e3, 1e3)
+        relax_opts = dict(nlp_options) if nlp_options else {}
+        relax_opts.setdefault("print_level", 0)
+        relax_res = backend(evaluator, mid, options=relax_opts)
+        if relax_res is not None and relax_res.x is not None:
+            seeds.append(_round_clip(np.asarray(relax_res.x)))
+    except BaseException:
+        # Backend may panic (pounce/PyO3); fall back to the caller's seed alone.
+        pass
+
+    rng = np.random.default_rng(seed)
+    best: Optional[tuple[np.ndarray, float]] = None
+    n_seeds = len(seeds)
+
+    for restart in range(max(max_restarts, n_seeds)):
+        if time.perf_counter() >= deadline:
+            break
+        # Try each seed clean first (descent alone often suffices), then spend
+        # remaining restarts perturbing — from a feasible base once one is found,
+        # else cycling the seed pool to diversify the basin.
+        if restart < n_seeds:
+            xc = seeds[restart].copy()
+        else:
+            base = best[0] if best is not None else seeds[restart % n_seeds]
+            xc = _round_clip(base)
+            sel = rng.choice(int_idx, size=int(rng.integers(1, n_int + 1)), replace=False)
+            if rng.random() < 0.5:
+                # Local ±1 nudge: explore the current basin's neighbourhood.
+                step = rng.choice([-1.0, 0.0, 1.0], size=sel.size)
+                xc[sel] = np.clip(xc[sel] + step, lb[sel], ub[sel])
+            else:
+                # Full-domain random resample: a global jump that can reach a
+                # disconnected feasible well. Essential when feasibility lives on
+                # an isolated discrete set — e.g. integers pinned by a high-degree
+                # equality (i-1)(i-2)...(i-k)=0, where every ±1 step off a root
+                # explodes the violation, so local moves can never hop roots.
+                # Descent from the random point then drives each integer to its
+                # nearest root, so diverse random draws cover diverse root combos.
+                for j in sel:
+                    xc[j] = float(rng.integers(int(lb[j]), int(ub[j]) + 1))
+
+        cur = violation(xc)
+        for _ in range(max_steps):
+            if cur <= feas_tol or time.perf_counter() >= deadline:
+                break
+            best_v = cur
+            best_move: Optional[tuple[tuple[int, float], ...]] = None
+            # 1-opt steepest descent.
+            for j in int_idx:
+                for d in (-1.0, 1.0):
+                    nv = xc[j] + d
+                    if nv < lb[j] - 1e-9 or nv > ub[j] + 1e-9:
+                        continue
+                    xt = xc.copy()
+                    xt[j] = nv
+                    v = violation(xt)
+                    if v < best_v - 1e-9:
+                        best_v, best_move = v, ((j, nv),)
+            # 2-opt fallback only when 1-opt cannot improve (bilinear coupling).
+            if best_move is None and use_2opt and time.perf_counter() < deadline:
+                for a in range(n_int):
+                    ja = int_idx[a]
+                    for b in range(a + 1, n_int):
+                        jb = int_idx[b]
+                        for da in (-1.0, 1.0):
+                            na = xc[ja] + da
+                            if na < lb[ja] - 1e-9 or na > ub[ja] + 1e-9:
+                                continue
+                            for db in (-1.0, 1.0):
+                                nb = xc[jb] + db
+                                if nb < lb[jb] - 1e-9 or nb > ub[jb] + 1e-9:
+                                    continue
+                                xt = xc.copy()
+                                xt[ja] = na
+                                xt[jb] = nb
+                                v = violation(xt)
+                                if v < best_v - 1e-9:
+                                    best_v, best_move = v, ((ja, na), (jb, nb))
+            if best_move is None:
+                break  # local minimum
+            for j, nv in best_move:
+                xc[j] = nv
+            cur = best_v
+
+        # Repair the continuous variables at this (locally good) integer
+        # assignment and verify TRUE feasibility. subnlp only returns feasible,
+        # integer-consistent points, so anything it gives back is a valid
+        # incumbent candidate.
+        repaired = subnlp(
+            model,
+            xc,
+            backend=backend,
+            nlp_options=nlp_options,
+            evaluator=evaluator,
+            feas_tol=feas_tol,
+        )
+        if repaired is not None:
+            x_ok, obj_ok = repaired
+            if best is None or obj_ok < best[1]:
+                best = (np.asarray(x_ok).copy(), float(obj_ok))
+            # Once feasible, later perturbed restarts dive from this point's
+            # neighbourhood (see the restart-base selection above) to improve it.
+
+    return best
 
 
 def enumerate_binary_seeds_subnlp(
@@ -468,3 +755,299 @@ def enumerate_binary_seeds_subnlp(
             if found is not None:
                 results.append(found)
     return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Improvement heuristics: diving, RINS, local branching
+#
+# These follow the SOTA rule inventory's "incumbent search" component. They only
+# ever *propose* feasible incumbents; they never alter the dual (lower) bound, so
+# they cannot weaken the global optimality certificate. All bound mutations on
+# the model are temporary and restored in a ``finally`` block.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _flat_slot_map(model: Model) -> list[tuple[object, int]]:
+    """Map each flat variable index to ``(variable, local_offset)``.
+
+    Lets a heuristic fix a single scalar slot of a (possibly vector) variable by
+    writing into ``v.lb.flat[local]`` / ``v.ub.flat[local]``.
+    """
+    slots: list[tuple[object, int]] = []
+    for v in model._variables:
+        for local in range(v.size):
+            slots.append((v, local))
+    return slots
+
+
+def _resolve_backend(backend: Optional[Callable]) -> Callable:
+    if backend is None:
+        from discopt.solvers.nlp_backend import get_nlp_solver
+
+        return get_nlp_solver("auto")
+    return backend
+
+
+def _fix_slot(v: object, local: int, value: float) -> None:
+    """Fix scalar slot ``local`` of variable ``v`` to ``value``.
+
+    Variable bound arrays are read-only, so we replace them with writable copies
+    (the caller saves/restores the originals).
+    """
+    new_lb = np.array(v.lb, dtype=np.float64)  # type: ignore[attr-defined]
+    new_ub = np.array(v.ub, dtype=np.float64)  # type: ignore[attr-defined]
+    new_lb.flat[local] = value
+    new_ub.flat[local] = value
+    v.lb = new_lb  # type: ignore[attr-defined]
+    v.ub = new_ub  # type: ignore[attr-defined]
+
+
+def _finalize_candidate(
+    evaluator: NLPEvaluator,
+    x: np.ndarray,
+    int_mask: np.ndarray,
+    integer_tol: float,
+    feas_tol: float,
+) -> Optional[tuple[np.ndarray, float]]:
+    """Snap integers, verify integer + constraint feasibility, return (x, obj)."""
+    x_out = np.asarray(x, dtype=np.float64).copy()
+    if np.any(int_mask):
+        x_out[int_mask] = np.round(x_out[int_mask])
+        if not _is_integer_feasible(x_out, int_mask, tol=integer_tol):
+            return None
+    if not _check_constraint_feasibility(evaluator, x_out, tol=feas_tol):
+        return None
+    obj = float(evaluator.evaluate_objective(x_out))
+    return x_out, obj
+
+
+def diving(
+    model: Model,
+    x_relax: np.ndarray,
+    *,
+    mode: str = "fractional",
+    backend: Optional[Callable] = None,
+    nlp_options: Optional[dict] = None,
+    max_dives: Optional[int] = None,
+    integer_tol: float = 1e-5,
+    feas_tol: float = 1e-6,
+    evaluator: Optional[NLPEvaluator] = None,
+) -> Optional[tuple[np.ndarray, float]]:
+    """Diving heuristic: progressively fix one fractional integer and re-solve.
+
+    Starting from a relaxation point, each dive step selects one fractional
+    integer variable, fixes it to a rounded value, and re-solves the continuous
+    NLP relaxation under the accumulated fixings. The dive ends when all integers
+    are integral (success) or a sub-NLP is infeasible (failure).
+
+    ``mode`` selects the variable/direction rule:
+
+    * ``"fractional"`` — fix the most fractional integer (closest to 0.5),
+      rounding to the nearest integer.
+    * ``"objective"`` — fix the most fractional integer, rounding in the
+      direction the objective gradient prefers (down where ``dF/dx_i > 0`` for a
+      minimization, i.e. toward the cheaper neighbour).
+
+    Returns ``(x, obj)`` for a feasible incumbent, else ``None``. The dual bound
+    is never touched.
+    """
+    int_mask = _get_integer_mask(model)
+    int_idx = np.nonzero(int_mask)[0]
+    if int_idx.size == 0:
+        return None
+
+    backend = _resolve_backend(backend)
+    if evaluator is None:
+        evaluator = NLPEvaluator(model)
+    lb0, ub0 = _get_variable_bounds(model)
+    slot_map = _flat_slot_map(model)
+
+    opts = dict(nlp_options) if nlp_options else {}
+    opts.setdefault("print_level", 0)
+
+    fixed = np.zeros(int_mask.shape[0], dtype=bool)
+    x_cur = np.clip(np.asarray(x_relax, dtype=np.float64), lb0, ub0)
+    saved = [(v.lb.copy(), v.ub.copy()) for v in model._variables]
+    budget = max_dives if max_dives is not None else int(int_idx.size) + 1
+
+    try:
+        for _ in range(budget):
+            try:
+                res = backend(evaluator, x_cur, options=opts)
+            except BaseException:
+                return None
+            if not _is_nlp_feasible(res):
+                return None
+            x = np.asarray(res.x, dtype=np.float64)
+
+            frac = np.abs(x - np.round(x))
+            cand = [i for i in int_idx if not fixed[i] and frac[i] > integer_tol]
+            if not cand:
+                return _finalize_candidate(evaluator, x, int_mask, integer_tol, feas_tol)
+
+            # Select the most fractional unfixed integer (closest to 0.5).
+            sel = min(cand, key=lambda i: abs(frac[i] - 0.5))
+
+            if mode == "objective":
+                try:
+                    grad = np.asarray(evaluator.evaluate_gradient(x))
+                    # Minimization: round toward the cheaper neighbour.
+                    rounded = np.floor(x[sel]) if grad[sel] > 0 else np.ceil(x[sel])
+                except BaseException:
+                    rounded = np.round(x[sel])
+            else:
+                rounded = np.round(x[sel])
+            rounded = float(np.clip(rounded, lb0[sel], ub0[sel]))
+
+            v, local = slot_map[sel]
+            _fix_slot(v, local, rounded)
+            fixed[sel] = True
+            x_cur = x.copy()
+            x_cur[sel] = rounded
+            x_cur = np.clip(x_cur, lb0, ub0)
+        return None
+    finally:
+        for v, (lb_v, ub_v) in zip(model._variables, saved):
+            v.lb = lb_v
+            v.ub = ub_v
+
+
+def fractional_diving(
+    model: Model, x_relax: np.ndarray, **kwargs
+) -> Optional[tuple[np.ndarray, float]]:
+    """Diving that fixes the most fractional integer, rounding to nearest."""
+    return diving(model, x_relax, mode="fractional", **kwargs)
+
+
+def objective_diving(
+    model: Model, x_relax: np.ndarray, **kwargs
+) -> Optional[tuple[np.ndarray, float]]:
+    """Diving that rounds toward the objective-preferred neighbour."""
+    return diving(model, x_relax, mode="objective", **kwargs)
+
+
+def rins(
+    model: Model,
+    x_incumbent: np.ndarray,
+    x_relax: np.ndarray,
+    *,
+    backend: Optional[Callable] = None,
+    nlp_options: Optional[dict] = None,
+    integer_tol: float = 1e-5,
+    feas_tol: float = 1e-6,
+    evaluator: Optional[NLPEvaluator] = None,
+) -> Optional[tuple[np.ndarray, float]]:
+    """RINS (Relaxation Induced Neighborhood Search).
+
+    Fix every integer variable on which the incumbent and the relaxation agree,
+    then dive on the remaining (disagreeing) integers. This searches the
+    neighbourhood "between" the incumbent and the relaxation — often where better
+    incumbents hide — at the cost of one restricted dive. Returns ``(x, obj)`` or
+    ``None``; the dual bound is never touched.
+    """
+    int_mask = _get_integer_mask(model)
+    int_idx = np.nonzero(int_mask)[0]
+    if int_idx.size == 0:
+        return None
+
+    if evaluator is None:
+        evaluator = NLPEvaluator(model)
+    lb0, ub0 = _get_variable_bounds(model)
+    slot_map = _flat_slot_map(model)
+
+    x_inc = np.asarray(x_incumbent, dtype=np.float64)
+    x_rel = np.asarray(x_relax, dtype=np.float64)
+
+    agree = [
+        i
+        for i in int_idx
+        if abs(np.round(x_inc[i]) - np.round(x_rel[i])) <= integer_tol
+        and abs(x_rel[i] - np.round(x_rel[i])) <= integer_tol
+    ]
+    # Nothing fixed (full disagreement) degenerates to a plain dive; nothing free
+    # (full agreement) means RINS has no neighbourhood to explore.
+    if len(agree) == int_idx.size:
+        return None
+
+    saved = [(v.lb.copy(), v.ub.copy()) for v in model._variables]
+    try:
+        for i in agree:
+            val = float(np.clip(np.round(x_inc[i]), lb0[i], ub0[i]))
+            v, local = slot_map[i]
+            _fix_slot(v, local, val)
+        # Dive on the restricted model (fresh evaluator reads the tightened bounds).
+        return diving(
+            model,
+            x_rel,
+            mode="fractional",
+            backend=backend,
+            nlp_options=nlp_options,
+            integer_tol=integer_tol,
+            feas_tol=feas_tol,
+        )
+    finally:
+        for v, (lb_v, ub_v) in zip(model._variables, saved):
+            v.lb = lb_v
+            v.ub = ub_v
+
+
+def local_branching(
+    model: Model,
+    x_incumbent: np.ndarray,
+    *,
+    k: int = 2,
+    backend: Optional[Callable] = None,
+    nlp_options: Optional[dict] = None,
+    integer_tol: float = 1e-5,
+    feas_tol: float = 1e-6,
+    evaluator: Optional[NLPEvaluator] = None,
+    max_binaries: int = 12,
+) -> Optional[tuple[np.ndarray, float]]:
+    """Local branching: search the Hamming-radius-``k`` neighbourhood of a binary
+    incumbent for a better feasible point.
+
+    Classic local branching adds the constraint ``sum_{j: x*_j=0} x_j +
+    sum_{j: x*_j=1}(1 - x_j) <= k`` and re-solves a sub-MIP. We realise the same
+    neighbourhood directly: enumerate every flip of up to ``k`` binaries, fix
+    them, and solve the continuous sub-NLP (via :func:`subnlp`) for each. This is
+    exact for the neighbourhood and self-contained (no recursive MIP solve),
+    which keeps it cheap and certifiable for the small/medium binary blocks where
+    local branching pays off.
+
+    Returns the best feasible ``(x, obj)`` found in the neighbourhood, or
+    ``None``. Only proposes incumbents — the dual bound is untouched.
+    """
+    int_mask = _get_integer_mask(model)
+    lb0, ub0 = _get_variable_bounds(model)
+    binary_idx = [i for i in np.nonzero(int_mask)[0] if lb0[i] >= -1e-9 and ub0[i] <= 1.0 + 1e-9]
+    if not binary_idx or len(binary_idx) > max_binaries:
+        return None
+
+    if evaluator is None:
+        evaluator = NLPEvaluator(model)
+
+    x_inc = np.asarray(x_incumbent, dtype=np.float64)
+    incumbent_bits = {i: float(np.round(x_inc[i])) for i in binary_idx}
+    k = max(1, min(k, len(binary_idx)))
+
+    best: Optional[tuple[np.ndarray, float]] = None
+    # Enumerate flip sets of size 0..k (size 0 re-evaluates the incumbent itself).
+    for radius in range(k + 1):
+        for flip in itertools.combinations(binary_idx, radius):
+            seed = x_inc.copy()
+            for i in binary_idx:
+                seed[i] = incumbent_bits[i]
+            for i in flip:
+                seed[i] = 1.0 - incumbent_bits[i]
+            found = subnlp(
+                model,
+                seed,
+                backend=backend,
+                nlp_options=nlp_options,
+                evaluator=evaluator,
+                integer_tol=integer_tol,
+                feas_tol=feas_tol,
+            )
+            if found is not None and (best is None or found[1] < best[1]):
+                best = found
+    return best

@@ -355,7 +355,17 @@ impl TreeManager {
                 let parent = self.pool.get(result.node_id).clone();
                 self.pool.get_mut(result.node_id).status = NodeStatus::Branched;
 
-                let (left, right) = create_children(&parent, decision, || self.next_id());
+                let (mut left, mut right) = create_children(&parent, decision, || self.next_id());
+
+                // Best-estimate: predict each child's bound from pseudocosts so
+                // the BestEstimate strategy can order the open set. The down child
+                // (left, x <= floor) is charged the down pseudocost over the
+                // rounded-off fraction; the up child (right) the up pseudocost.
+                // Harmless for other strategies, which ignore best_estimate.
+                left.best_estimate =
+                    node_lb + self.pseudocosts.down_cost(decision.var_index) * frac_part;
+                right.best_estimate =
+                    node_lb + self.pseudocosts.up_cost(decision.var_index) * (1.0 - frac_part);
 
                 // Record branch info for both children.
                 let record = BranchRecord {

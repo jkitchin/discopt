@@ -155,6 +155,80 @@ def test_lifted_model_preserves_optimum():
         assert r.bound <= r.objective + 1e-4
 
 
+def test_lifter_expression_dedups_by_structure_not_identity():
+    """Regression for the ex7_2_3 false-"optimal" SUSPECT.
+
+    ``_Lifter.expression`` deduplicates lifted sub-expressions by a *structural*
+    key (``repr``), never ``id()``. CPython recycles the ``id`` of a
+    garbage-collected node, so an ``id()``-keyed cache could hand a later,
+    structurally *different* ratio the aux of a freed one — silently dropping a
+    denominator. In MINLPLib ``ex7_2_3`` that made the constraint
+    ``1.25e6/(x3*x8) + x5/x8 - 2500*x5/x3/x8 <= 1`` satisfiable at the infeasible
+    box corner ``x_i = lb_i``, so spatial B&B certified the corner (objvar = sum
+    of lower bounds = 2100) as the global optimum — a false "optimal" (the true
+    optimum is 7049.2479).
+
+    The structural contract: two distinct objects with identical structure share
+    one aux; structurally different expressions never do. The first assertion
+    deterministically fails under ``id()`` keying — two distinct objects have
+    distinct ids and would each allocate their own aux instead of deduping.
+    """
+    from discopt._jax.factorable_reform import _Lifter
+    from discopt._jax.term_classifier import distribute_products
+    from discopt.modeling.core import BinaryOp, Constant
+
+    m = dm.Model("dedup")
+    x5 = m.continuous("x5", lb=10, ub=1000)
+    x3 = m.continuous("x3", lb=1000, ub=10000)
+    x8 = m.continuous("x8", lb=10, ub=1000)
+    lifter = _Lifter(m)
+
+    def ratio_2500_x5_over_x3():
+        return distribute_products(BinaryOp("/", BinaryOp("*", Constant(2500.0), x5), x3))
+
+    e1, e2 = ratio_2500_x5_over_x3(), ratio_2500_x5_over_x3()
+    assert e1 is not e2 and repr(e1) == repr(e2)
+    a1 = lifter.expression(e1)
+    a2 = lifter.expression(e2)
+    # Structurally identical -> one shared aux. Fails under id(): the two distinct
+    # objects miss each other's cache entry and allocate separate auxes.
+    assert a1 is a2
+
+    # A structurally different ratio gets its own aux, never the stale one.
+    a3 = lifter.expression(distribute_products(BinaryOp("/", x5, x8)))
+    assert a3 is not a1
+
+
+@pytest.mark.correctness
+def test_nested_ratio_solve_is_sound():
+    """End-to-end soundness for nested ratios (ex7_2_3's e4 shape).
+
+    A certified-global solution MUST satisfy the *original* constraint. Before
+    the structural-key fix the lifted reform dropped a denominator and the solver
+    certified an infeasible point; here we solve the constraint's small sibling
+    and assert the returned, certified optimum honors the original e4.
+    """
+    m = dm.Model("nested_ratio_solve")
+    x3 = m.continuous("x3", lb=1000, ub=10000)
+    x5 = m.continuous("x5", lb=10, ub=1000)
+    x8 = m.continuous("x8", lb=10, ub=1000)
+    m.subject_to(1.25e6 / (x3 * x8) + x5 / x8 - 2500 * x5 / x3 / x8 <= 1)
+    m.minimize(x3 + x5)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = m.solve(time_limit=60, gap_tolerance=1e-4)
+    assert r.status == "optimal"
+    assert r.gap_certified, "small nested-ratio model should certify global"
+    x3v, x5v, x8v = (float(r.x[n]) for n in ("x3", "x5", "x8"))
+    e4 = 1.25e6 / (x3v * x8v) + x5v / x8v - 2500 * x5v / x3v / x8v
+    assert e4 <= 1 + 1e-4, (
+        f"certified solution violates the original e4 (={e4}); a dropped "
+        "denominator would certify an infeasible point"
+    )
+    if r.bound is not None:
+        assert r.bound <= r.objective + 1e-4  # sound dual bound
+
+
 @pytest.mark.correctness
 @pytest.mark.slow
 def test_nvs01_certifies_with_sound_bound():
