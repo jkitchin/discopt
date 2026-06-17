@@ -1834,6 +1834,9 @@ def _univariate_arg(expr: Expression) -> tuple[str, Expression] | None:
             "sin",
             "cos",
             "tan",
+            "asin",
+            "acos",
+            "acosh",
             "entropy",
         }:
             return name, expr.args[0]
@@ -1866,6 +1869,12 @@ def _univariate_value(func_name: str, x: float) -> float:
         return float(np.cos(x))
     if func_name == "tan":
         return float(np.tan(x))
+    if func_name == "asin":
+        return float(np.arcsin(x))
+    if func_name == "acos":
+        return float(np.arccos(x))
+    if func_name == "acosh":
+        return float(np.arccosh(x))
     if func_name == "entropy":
         # entropy(x) = x*log(x), with the x -> 0+ limit equal to 0.
         if x <= 0.0:
@@ -1895,6 +1904,12 @@ def _univariate_grad(func_name: str, x: float) -> float:
     if func_name == "tan":
         c = float(np.cos(x))
         return float(1.0 / (c * c))
+    if func_name == "asin":
+        return float(1.0 / np.sqrt(1.0 - x * x))
+    if func_name == "acos":
+        return float(-1.0 / np.sqrt(1.0 - x * x))
+    if func_name == "acosh":
+        return float(1.0 / np.sqrt(x * x - 1.0))
     if func_name == "entropy":
         # d/dx [x*log(x)] = log(x) + 1 (finite only for x > 0).
         return float(np.log(x) + 1.0)
@@ -1937,6 +1952,13 @@ def _univariate_domain_ok(func_name: str, arg_lb: float, arg_ub: float) -> bool:
         return True
     if func_name == "tan":
         return _tan_range(arg_lb, arg_ub) is not None
+    if func_name in {"asin", "acos"}:
+        # Defined on [-1, 1]; the relaxation is built on the closed interval and
+        # the singular endpoint slopes are skipped (see ``_tangent_points``).
+        return bool(arg_lb >= -1.0 and arg_ub <= 1.0)
+    if func_name == "acosh":
+        # acosh is defined and real on x >= 1 (concave there).
+        return bool(arg_lb >= 1.0)
     return False
 
 
@@ -1977,6 +1999,13 @@ def _tangent_points(func_name: str, lb: float, ub: float) -> list[float]:
             continue
         if func_name == "tan" and not _is_effectively_finite(np.tan(pt)):
             continue
+        if func_name in {"asin", "acos"} and abs(pt) >= 1.0 - 1e-9:
+            # Slope diverges at +/-1; the secant still bounds the convex/concave
+            # branch, so we simply omit the singular endpoint tangent.
+            continue
+        if func_name == "acosh" and pt <= 1.0 + 1e-12:
+            # Slope diverges at x = 1; omit the singular endpoint tangent.
+            continue
         if not np.isfinite(pt):
             continue
         if all(abs(pt - seen) > 1e-12 for seen in points):
@@ -2002,6 +2031,26 @@ def _univariate_curvature(func_name: str, val_lb: float, val_ub: float) -> Optio
             return "convex"
         if val_ub <= tol:
             return "concave"
+    if func_name == "asin":
+        # asin is odd and increasing: value >= 0 <=> arg >= 0 (convex branch),
+        # value <= 0 <=> arg <= 0 (concave branch); mixed across the inflection.
+        if val_lb >= -tol:
+            return "convex"
+        if val_ub <= tol:
+            return "concave"
+        return None
+    if func_name == "acos":
+        # acos is decreasing with an inflection at arg = 0 (value = pi/2):
+        # arg >= 0 <=> value <= pi/2 (concave); arg <= 0 <=> value >= pi/2 (convex).
+        half_pi = 0.5 * math.pi
+        if val_ub <= half_pi + tol:
+            return "concave"
+        if val_lb >= half_pi - tol:
+            return "convex"
+        return None
+    if func_name == "acosh":
+        # acosh is concave on its entire domain x >= 1.
+        return "concave"
     return None
 
 
@@ -2083,6 +2132,37 @@ def _trig_piecewise_interval_specs(
         curvature = None
         if local_bounds is not None:
             curvature = _univariate_curvature(relax.func_name, local_bounds[0], local_bounds[1])
+        intervals.append((float(a), float(b), curvature))
+    if sum(1 for _a, _b, curvature in intervals if curvature is not None) < 2:
+        return []
+    return intervals
+
+
+def _inverse_trig_piecewise_interval_specs(
+    relax: UnivariateRelaxation,
+) -> list[tuple[float, float, Optional[str]]]:
+    """Build certified curvature subintervals for asin/acos across the inflection.
+
+    ``asin``/``acos`` change curvature at the argument value 0 (the inflection
+    point).  When the argument interval straddles 0 we split it there into two
+    sign-definite, single-curvature pieces; otherwise the single-curvature path
+    in the main builder already applies.
+    """
+    if relax.func_name not in {"asin", "acos"}:
+        return []
+    lb = float(relax.arg_lb)
+    ub = float(relax.arg_ub)
+    if not (np.isfinite(lb) and np.isfinite(ub)):
+        return []
+    if not (lb < -1e-12 and ub > 1e-12):
+        return []
+
+    intervals: list[tuple[float, float, Optional[str]]] = []
+    for a, b in ((lb, 0.0), (0.0, ub)):
+        if b <= a + 1e-12:
+            continue
+        val_lb, val_ub = _univariate_value_bounds(relax.func_name, a, b)
+        curvature = _univariate_curvature(relax.func_name, val_lb, val_ub)
         intervals.append((float(a), float(b), curvature))
     if sum(1 for _a, _b, curvature in intervals if curvature is not None) < 2:
         return []
@@ -4351,6 +4431,8 @@ def build_milp_relaxation(
     piecewise_univariate_relaxations: list[PiecewiseUnivariateRelaxation] = []
     for relax in univariate_relaxations:
         interval_specs = _trig_piecewise_interval_specs(relax, disc_state, n_orig)
+        if not interval_specs:
+            interval_specs = _inverse_trig_piecewise_interval_specs(relax)
         if not interval_specs:
             continue
 
