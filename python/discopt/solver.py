@@ -1621,6 +1621,7 @@ def solve_model(
     sparse: Optional[bool] = None,
     cutting_planes: bool = False,
     psd_cuts: bool = False,
+    rlt_cuts: bool = False,
     partitions: int = 0,
     branching_policy: str = "fractional",
     use_learned_relaxations: bool = False,
@@ -2812,6 +2813,7 @@ def solve_model(
                 model,
                 superposition=(relaxation_arithmetic == "superposition"),
                 psd_cuts=psd_cuts,
+                rlt_cuts=rlt_cuts,
             )
         except Exception as e:
             logger.warning("McCormick LP relaxer setup failed: %s", e)
