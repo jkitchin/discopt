@@ -5768,7 +5768,7 @@ def build_milp_relaxation(
     # dropped (only enlarging the feasible region) and the dual bound stays sound.
     for ap in affine_power_relaxations:
         n = ap.power
-        r_lb, r_ub, s, w_col, v = ap.r_lb, ap.r_ub, ap.scale, ap.aux_col, ap.var_idx
+        r_lb, r_ub, s, w_col, v_idx = ap.r_lb, ap.r_ub, ap.scale, ap.aux_col, ap.var_idx
         pts = _sorted_unique_points([r_lb, r_ub] + ([0.0] if r_lb < 0.0 < r_ub else []))
 
         under_lines: list[tuple[float, float]] = []
@@ -5798,13 +5798,13 @@ def build_milp_relaxation(
         for slope, intercept in under_lines:
             row = np.zeros(n_total)
             row[w_col] = -1.0
-            row[v] += slope * s
+            row[v_idx] += slope * s
             if _affine_square_row_ok(row, -intercept):
                 _add_row(row, -intercept)
         for slope, intercept in over_lines:
             row = np.zeros(n_total)
             row[w_col] = 1.0
-            row[v] += -slope * s
+            row[v_idx] += -slope * s
             if _affine_square_row_ok(row, intercept):
                 _add_row(row, intercept)
 
@@ -5823,11 +5823,11 @@ def build_milp_relaxation(
         col: var_idx for (var_idx, power), col in monomial_var_map.items() if power == 2
     }
     for (ci, cj), w_col in list(bilinear_var_map.items()):
-        i = _sq_base_by_col.get(ci)
-        j = _sq_base_by_col.get(cj)
-        if i is None or j is None or i == j:
+        base_i = _sq_base_by_col.get(ci)
+        base_j = _sq_base_by_col.get(cj)
+        if base_i is None or base_j is None or base_i == base_j:
             continue
-        p_col = bilinear_var_map.get((min(i, j), max(i, j)))
+        p_col = bilinear_var_map.get((min(base_i, base_j), max(base_i, base_j)))
         if p_col is None:
             continue
         p_lb, p_ub = (float(v) for v in all_bounds[p_col])
