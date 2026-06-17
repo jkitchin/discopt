@@ -12,6 +12,19 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **Per-node lifted-LP FBBT** (`feat(relaxation)`, #184). Opt-in
+  (`DISCOPT_LIFTED_FBBT=1`) feasibility-based bound tightening that propagates
+  the McCormick relaxation's *own* rows (`A_ub·z ≤ b_ub`, spanning the lifted
+  product/monomial columns), recovering the bilinear-implied factor bounds that
+  purely linear FBBT misses, then rebuilds the relaxation on the tightened box.
+  This lifts `ex1252`'s structurally-zero node bound off 0 (a branched node goes
+  `bound 0 → ~18987`, sound) so the B&B can certify optimality. Implemented in
+  `discopt._jax.mccormick_lp` (vectorised over the sparse matrix); pinned
+  multilinear factors are un-pinned by a hair so the build keeps the term at
+  full arity and never drops `objective_bound_valid`. Sound by construction —
+  only valid rows tighten, and the un-pin only enlarges the box. Regression
+  locks in `test_bucket2_sound_bounds.py`.
+
 - **POUNCE NLP backend declared as a dependency** (`feat(solvers)`). New
   `pounce` optional extra (`pip install discopt[pounce]`, dist `pounce-solver`)
   and a `requires_pounce` test marker. POUNCE is a standalone pure-Rust port of
