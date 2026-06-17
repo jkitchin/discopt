@@ -461,6 +461,40 @@ def test_distributed_univariate_constraint_monomials_registered(caplog):
     assert "omitting constraint" not in caplog.text
 
 
+def test_reciprocal_of_positive_quadratic_objective_lower_bound():
+    """``min -1/(0.1+(x0-4)**2+(x1-4)**2)`` must get a finite, sound lower bound.
+
+    The MILP linearizer cannot relax a non-constant division, so the whole
+    objective is dropped and AMP would abstain (``bound=None``, can never
+    certify — the ex8_1_6 capability gap).  The separable fallback recognizes the
+    reciprocal term and bounds the denominator via the polynomial-vertex
+    machinery, which works even on the live solve's already-DISTRIBUTED
+    denominator ``0.1 + x0**2 - 8*x0 + 16 + ...`` (a naive interval evaluation of
+    ``x*x`` on a wide box collapses to ``[-inf, inf]``).  ``1/D`` is decreasing in
+    ``D`` so for ``k<0`` the term floor is ``k/D_lo``; the bound must never exceed
+    the true optimum.
+    """
+    from discopt._jax.milp_relaxation import _separable_objective_lower_bound
+    from discopt._jax.term_classifier import distribute_products
+
+    m = Model("reciprocal_quadratic")
+    x = m.continuous("x", lb=0.0, ub=8.0, shape=(2,))
+    m.minimize(-1.0 / (0.1 + (x[0] - 4.0) ** 2 + (x[1] - 4.0) ** 2))
+
+    flat_lb = np.array([0.0, 0.0])
+    flat_ub = np.array([8.0, 8.0])
+
+    # Match the live solve, whose objective arrives already distributed.
+    distributed = distribute_products(m._objective.expression)
+    bound = _separable_objective_lower_bound(distributed, m, flat_lb, flat_ub)
+
+    assert bound is not None
+    assert np.isfinite(bound)
+    # True optimum is -10 (denominator floor 0.1 at x=(4,4), inside the box).
+    # A valid lower bound for minimization must not exceed it.
+    assert bound <= -10.0 + 1e-6
+
+
 @pytest.mark.memory_heavy
 def test_amp_reports_shifted_square_minlptests_case_infeasible():
     """Regression for MINLPTests nlp_mi_007_020."""
