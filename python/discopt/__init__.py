@@ -71,8 +71,10 @@ if (
     try:
         _os.makedirs(_jax_cache, exist_ok=True)
     except OSError:
-        _jax_cache = None
-    if _jax_cache is not None:
+        # Unwritable cache location (read-only home, sandbox): skip silently —
+        # the cache is a pure optimization, absence only costs recompilation.
+        pass
+    else:
         _os.environ["JAX_COMPILATION_CACHE_DIR"] = _jax_cache
         _os.environ.setdefault("JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS", "0")
         _os.environ.setdefault("JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES", "0")
