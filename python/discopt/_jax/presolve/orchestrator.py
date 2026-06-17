@@ -73,12 +73,16 @@ def run_orchestrated_presolve(
             "probing",
         ]
 
+    import numpy as np
+
     started = time.monotonic()
     deltas: list[dict] = []
     terminated_by = "IterationCap"
     last_iter = 0
     last_bounds_lo = None
     last_bounds_hi = None
+    prev_bounds_lo = None
+    prev_bounds_hi = None
 
     for sweep in range(max_iterations):
         last_iter = sweep + 1
@@ -96,10 +100,28 @@ def run_orchestrated_presolve(
             model_repr = new_repr
             last_bounds_lo = raw["bounds_lo"]
             last_bounds_hi = raw["bounds_hi"]
+            # Real Rust progress is whether the *emitted* bounds actually
+            # moved versus the previous sweep — NOT the per-pass
+            # `made_progress` flag. The Rust orchestrator restarts every
+            # sweep from the model's *declared* bounds (tightenings are
+            # deliberately not persisted into VarInfo, since doing so
+            # corrupts LP duals and can manufacture false infeasibility
+            # downstream). A pass that re-derives the same tightening each
+            # sweep therefore reports per-sweep progress while actually
+            # sitting at a fixed point. Comparing the deterministic,
+            # byte-reproducible bound arrays detects that fixed point, and
+            # still flags genuine advances when an earlier Python pass
+            # tightened a declared bound that this sweep can propagate.
+            if (
+                prev_bounds_lo is None
+                or not np.array_equal(last_bounds_lo, prev_bounds_lo)
+                or not np.array_equal(last_bounds_hi, prev_bounds_hi)
+            ):
+                sweep_progress = True
+            prev_bounds_lo = last_bounds_lo
+            prev_bounds_hi = last_bounds_hi
             for d in raw["deltas"]:
                 deltas.append(d)
-                if delta_made_progress(d):
-                    sweep_progress = True
             # Rust orchestrator may itself terminate early (Infeasible,
             # TimeBudget). Honour that by exiting outer loop.
             if raw["terminated_by"] == "Infeasible":
@@ -142,8 +164,6 @@ def run_orchestrated_presolve(
 
     # Rebuild bounds arrays if Python passes ran but Rust did not.
     if last_bounds_lo is None:
-        import numpy as np
-
         n = model_repr.n_var_blocks
         last_bounds_lo = np.array(
             [model_repr.var_lb(i)[0] if model_repr.var_lb(i) else 0.0 for i in range(n)],
