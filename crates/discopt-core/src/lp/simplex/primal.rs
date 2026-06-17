@@ -230,14 +230,46 @@ impl<'a> Simplex<'a> {
         let art_sign: Vec<f64> = (0..m)
             .map(|i| if r[i] >= 0.0 { 1.0 } else { -1.0 })
             .collect();
-        // artificial basis: slot i = column n+i
+        // Crash basis: in each row prefer a basic-feasible structural *singleton*
+        // (a slack column is one nonzero) over the artificial, so rows already
+        // satisfied at the bound point start feasible and skip phase-1 pivots.
+        // Each crashed column is the unique nonzero in its row, so the basis stays
+        // a permuted (sign-scaled) identity — nonsingular — and any row left with
+        // an artificial is still driven feasible by phase-1; the crash only
+        // warm-starts and can never change the result. It is what keeps the
+        // heavily degenerate lifted relaxations of issue #175 (RLT, affine-power)
+        // from stalling phase-1 with thousands of zero-step pivots.
         self.basis = (0..m).map(|i| self.n + i).collect();
+        let mut crashed = vec![false; m];
+        for j in 0..self.n {
+            let (rows, vals) = self.cols.col(j);
+            if rows.len() != 1 {
+                continue;
+            }
+            let i = rows[0];
+            let a = vals[0];
+            if crashed[i] || a == 0.0 {
+                continue;
+            }
+            let xj = self.nb_value(j) + r[i] / a;
+            if xj >= self.lb[j] - 1e-9 && xj <= self.ub[j] + 1e-9 {
+                crashed[i] = true;
+                self.basis[i] = j;
+            }
+        }
         for i in 0..m {
-            let col = self.n + i;
-            self.slot_of[col] = i as i64;
-            self.stat[col] = BASIC;
-            self.lb[col] = 0.0;
-            self.ub[col] = INF; // phase 1
+            let art = self.n + i;
+            self.lb[art] = 0.0;
+            self.ub[art] = INF; // phase 1 allows artificials to be positive
+            let bcol = self.basis[i];
+            self.stat[bcol] = BASIC;
+            self.slot_of[bcol] = i as i64;
+            if bcol != art {
+                // a structural singleton was crashed in; its artificial stays
+                // nonbasic at zero.
+                self.stat[art] = AT_LOWER;
+                self.slot_of[art] = -1;
+            }
         }
         if self.refactorize(&art_sign).is_err() {
             return self.failed();
