@@ -274,11 +274,16 @@ def distribute_products(
     node's identity also lets the linearizer resolve it through its id-keyed map.
     """
     if isinstance(expr, BinaryOp):
-        if expr.op == "**" and isinstance(expr.right, Constant) and float(expr.right.value) == 2.0:
+        if expr.op == "**" and isinstance(expr.right, Constant):
+            # A protected power node (an issue-#155 affine square, or an affine
+            # ``(c*x)**n`` lifted to its own scaled-residual envelope column) is
+            # returned intact so its ``id()`` still resolves through the
+            # linearizer's composite-aux map.
             if protected_squares is not None and id(expr) in protected_squares:
                 return expr
-            left = distribute_products(expr.left, protected_squares)
-            return _distribute_mul(left, left)
+            if float(expr.right.value) == 2.0:
+                left = distribute_products(expr.left, protected_squares)
+                return _distribute_mul(left, left)
         left = distribute_products(expr.left, protected_squares)
         right = distribute_products(expr.right, protected_squares)
         if expr.op == "*":

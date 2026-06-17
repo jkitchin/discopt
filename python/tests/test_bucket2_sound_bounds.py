@@ -100,3 +100,66 @@ def test_nvs16_produces_sound_finite_bound():
     assert -1e-6 <= res.lower_bound <= 0.703125 + 1e-3, (
         f"nvs16 bound {res.lower_bound} outside sound range [0, 0.703125]"
     )
+
+
+# Recorded baselines: the standard McCormick root bound (RLT off) for the two
+# bucket-1 instances #175 targets. The tightness lock below guards against
+# silently reverting below these.
+_NVS20_BASELINE = 87.3485625
+
+
+@pytest.mark.correctness
+def test_nvs20_rlt_tightens_root_bound(monkeypatch):
+    """Level-1 RLT (``DISCOPT_RLT=1``) — multiplying the linear constraints by
+    variable bound factors and lifting the products — strictly improves nvs20's
+    root bound over the standard McCormick baseline (87.35) while staying sound
+    (``<= optimum 230.922``). This is the bucket-1 tightening of issue #175; it
+    also exercises the warm-started simplex on the wide-magnitude RLT system,
+    which the tiny-pivot stability fix made solvable and the slack crash made
+    fast.
+    """
+    monkeypatch.setenv("DISCOPT_RLT", "1")
+    nl = _DATA / "nvs20.nl"
+    assert nl.exists(), f"missing {nl}"
+    m = dm.from_nl(str(nl))
+
+    relaxer = MccormickLPRelaxer(m)
+    lb, ub = flat_variable_bounds(m)
+    res = relaxer.solve_at_node(lb, ub)
+
+    assert res.status == "optimal", f"nvs20 RLT root LP status {res.status}"
+    assert res.lower_bound is not None and math.isfinite(res.lower_bound)
+    # Strict improvement over the recorded baseline (the regression lock).
+    assert res.lower_bound > _NVS20_BASELINE + 1.0, (
+        f"nvs20 RLT bound {res.lower_bound} did not improve on baseline {_NVS20_BASELINE}"
+    )
+    # Still a valid (sound) lower bound on the true optimum.
+    assert res.lower_bound <= 230.922 + 1e-3, (
+        f"nvs20 RLT UNSOUND bound {res.lower_bound} > optimum 230.922"
+    )
+
+
+@pytest.mark.correctness
+def test_ex1252_rlt_stays_sound(monkeypatch):
+    """``ex1252`` does **not** tighten under level-1 RLT: its objective is a sum
+    of products of nonnegative factors that the relaxation can drive to zero
+    while satisfying the (loosely relaxed) coupling constraints, so the root
+    bound is structurally ~0 regardless of envelope/RLT strength (tightening it
+    needs spatial branching). What we lock here is that enabling RLT keeps the
+    bound *sound* — finite and ``<= optimum`` — i.e. the RLT product cuts never
+    over-cut into a bound exceeding the true optimum.
+    """
+    monkeypatch.setenv("DISCOPT_RLT", "1")
+    nl = _DATA / "ex1252.nl"
+    assert nl.exists(), f"missing {nl}"
+    m = dm.from_nl(str(nl))
+
+    relaxer = MccormickLPRelaxer(m)
+    lb, ub = flat_variable_bounds(m)
+    res = relaxer.solve_at_node(lb, ub)
+
+    assert res.status == "optimal", f"ex1252 RLT root LP status {res.status}"
+    assert res.lower_bound is not None and math.isfinite(res.lower_bound)
+    assert res.lower_bound <= 128893.8 + 1e-3, (
+        f"ex1252 RLT UNSOUND bound {res.lower_bound} > optimum 128893.8"
+    )

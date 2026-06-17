@@ -26,7 +26,7 @@ import math
 import os
 from collections import Counter
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 import scipy.sparse as sp
@@ -370,6 +370,26 @@ class AffineSquareRelaxation:
 
 
 @dataclass
+class AffinePowerRelaxation:
+    """Univariate power envelope on a scaled single-variable residual.
+
+    ``r = scale * x_var`` (``x_var`` is the original flat column ``var_idx``) and
+    ``w`` is the lifted ``r**power`` for an integer ``power >= 3``.  The envelope
+    is built in well-conditioned ``r`` space, so a base variable ranging over a
+    wide box (e.g. ``x in [0, 2950]`` in ex1252, deliberately scaled by
+    ``1/2950`` so ``r in [0, 1]``) does not produce the ``~1e10`` aux column the
+    raw ``x**power`` monomial would and the magnitude cap would drop.
+    """
+
+    aux_col: int
+    var_idx: int
+    scale: float
+    power: int
+    r_lb: float
+    r_ub: float
+
+
+@dataclass
 class PiecewiseTrigSquareInterval:
     """Binary-selected interval for a direct trig-square relaxation."""
 
@@ -522,6 +542,44 @@ def _eval_constant_expr(expr: Expression) -> Optional[float]:
                 return None
             return float(result)
         return None
+    return None
+
+
+def _affine_var_base(expr: Expression, model: Model) -> Optional[tuple[float, int]]:
+    """Return ``(coeff, flat_idx)`` if ``expr`` is a single scaled variable.
+
+    Matches ``coeff * x`` in any of: a bare scalar variable, a constant-scaled
+    variable (``c*x`` / ``x*c``), a variable divided by a constant (``x/c``), or
+    a negation thereof.  Returns ``None`` for anything with additive structure or
+    more than one variable.  Used to recognize an affine single-variable power
+    base ``(c*x)**n`` so it can be lifted in well-conditioned scaled ``r = c*x``
+    space rather than as a raw ``x**n`` monomial.
+    """
+    flat = _get_flat_index(expr, model)
+    if flat is not None:
+        return 1.0, flat
+    if isinstance(expr, UnaryOp) and expr.op == "neg":
+        inner = _affine_var_base(expr.operand, model)
+        if inner is not None:
+            return -inner[0], inner[1]
+        return None
+    if isinstance(expr, BinaryOp):
+        if expr.op == "*":
+            lc = _constant_value(expr.left)
+            if lc is not None:
+                inner = _affine_var_base(expr.right, model)
+                return (lc * inner[0], inner[1]) if inner is not None else None
+            rc = _constant_value(expr.right)
+            if rc is not None:
+                inner = _affine_var_base(expr.left, model)
+                return (rc * inner[0], inner[1]) if inner is not None else None
+            return None
+        if expr.op == "/":
+            rc = _constant_value(expr.right)
+            if rc is not None and rc != 0.0:
+                inner = _affine_var_base(expr.left, model)
+                return (inner[0] / rc, inner[1]) if inner is not None else None
+            return None
     return None
 
 
@@ -781,6 +839,59 @@ def _collect_affine_squares(model: Model) -> list[tuple[Expression, _AffineSquar
             found.append((e, info))
             # The residual is lifted wholesale; do not descend into it.
             return
+        if isinstance(e, BinaryOp):
+            visit(e.left)
+            visit(e.right)
+        elif isinstance(e, UnaryOp):
+            visit(e.operand)
+        elif isinstance(e, FunctionCall):
+            for arg in e.args:
+                visit(arg)
+        elif isinstance(e, IndexExpression):
+            if not isinstance(e.base, Variable):
+                visit(e.base)
+        elif isinstance(e, SumExpression):
+            visit(e.operand)
+        elif isinstance(e, SumOverExpression):
+            for term in e.terms:
+                visit(term)
+
+    if model._objective is not None:
+        visit(model._objective.expression)
+    for constraint in model._constraints:
+        visit(constraint.body)
+    return found
+
+
+def _collect_affine_powers(
+    model: Model, already_lifted: set[int]
+) -> list[tuple[Expression, float, int, int]]:
+    """Find ``(c*x)**n`` nodes (integer ``n >= 3``, ``c*x`` a scaled variable).
+
+    Returns ``(node, scale, var_idx, power)`` for each distinct node whose base
+    is a *non-bare* scaled single variable — a bare ``x**n`` is left to the
+    standard monomial machinery (scaling it would not improve the aux-column
+    conditioning).  Nodes already claimed by an issue-#155 affine-square lift
+    (``already_lifted``) are skipped.
+    """
+    found: list[tuple[Expression, float, int, int]] = []
+    seen: set[int] = set()
+
+    def visit(e: Expression) -> None:
+        if id(e) in already_lifted:
+            return
+        if isinstance(e, BinaryOp) and e.op == "**" and isinstance(e.right, Constant):
+            exp_f = float(e.right.value)
+            n = int(exp_f)
+            # Only a genuinely scaled base benefits: a bare variable base lifts
+            # identically in raw space, so leave it to the monomial path.
+            if exp_f == n and n >= 3 and _get_flat_index(e.left, model) is None:
+                base = _affine_var_base(e.left, model)
+                if base is not None and id(e) not in seen:
+                    scale, var_idx = base
+                    seen.add(id(e))
+                    found.append((e, float(scale), int(var_idx), n))
+                    return  # the whole node is lifted; do not descend
         if isinstance(e, BinaryOp):
             visit(e.left)
             visit(e.right)
@@ -1392,6 +1503,34 @@ def _collect_distinct_multilinear_products(model: Model) -> list[tuple[int, ...]
         visit(constraint.body)
 
     return sorted(terms)
+
+
+def _linear_constraint_forms(model: Model, n_vars: int) -> list[tuple[np.ndarray, float]]:
+    """Return each *linear* model constraint as ``(coeff, const)`` meaning the
+    valid inequality ``coeff . x + const <= 0``.
+
+    Constraints are stored as ``body <= 0`` or ``body == 0`` (``>=`` is
+    normalized to ``<=`` by the expression operators), so a ``<=`` constraint
+    contributes one form and an ``==`` constraint contributes both ``g <= 0`` and
+    ``-g <= 0``. Nonlinear constraint bodies are skipped (they have no affine
+    form). These are the factors level-1 RLT multiplies by variable bound
+    factors to generate valid product cuts.
+    """
+    forms: list[tuple[np.ndarray, float]] = []
+    for constraint in model._constraints:
+        try:
+            coeff, const = _linearize_affine_expr(constraint.body, model, n_vars)
+        except ValueError:
+            continue  # nonlinear body — not an affine factor
+        if not (np.all(np.isfinite(coeff)) and np.isfinite(const)):
+            continue
+        sense = constraint.sense
+        if sense == "<=":
+            forms.append((coeff, float(const)))
+        elif sense == "==":
+            forms.append((coeff, float(const)))
+            forms.append((-coeff, -float(const)))
+    return forms
 
 
 def _linearize_affine_expr(expr: Expression, model: Model, n_vars: int) -> tuple[np.ndarray, float]:
@@ -3182,6 +3321,7 @@ def build_milp_relaxation(
     convhull_ebd_encoding: str = "gray",
     bound_override: Optional[tuple[np.ndarray, np.ndarray]] = None,
     superposition: bool = False,
+    rlt_level1: bool = False,
 ) -> tuple["MilpRelaxationModel", dict]:
     """Build a MILP relaxation with piecewise McCormick for bilinear/monomial terms.
 
@@ -3498,6 +3638,67 @@ def build_milp_relaxation(
         all_bounds.append(_monomial_aux_bounds(lb_i, ub_i, n))
         integrality_flags.append(0)
         col_idx += 1
+
+    # ── Level-1 RLT product-column setup (issue #175) ───────────────────────
+    # Multiplying each linear constraint factor ``g(x) <= 0`` by a variable bound
+    # factor (``x_m - l_m >= 0`` and ``u_m - x_m >= 0``) yields a valid product
+    # inequality. Linearizing it replaces every ``x_i*x_m`` by a lifted product
+    # column (its McCormick envelope auto-emits through ``bilinear_relation_map``);
+    # the resulting cut couples the loose product relaxation to the model's linear
+    # structure and tightens the root bound for high-degree-product instances whose
+    # variable boxes include 0 (nvs20). The cut value at any true ``(x, x∘x)`` point
+    # equals ``g(x)·(bound factor) <= 0``, so each row is a valid relaxation cut and
+    # can never exclude a feasible point. Resolved here (before the column count is
+    # frozen) so the product columns exist; the rows are emitted with the others.
+    rlt_cut_specs: list[dict[str, Any]] = []
+    if rlt_level1:
+
+        def _rlt_product_col(i: int, mm: int) -> Optional[int]:
+            lo_i, hi_i = float(flat_lb[i]), float(flat_ub[i])
+            lo_m, hi_m = float(flat_lb[mm]), float(flat_ub[mm])
+            if not (
+                _is_effectively_finite(lo_i)
+                and _is_effectively_finite(hi_i)
+                and _is_effectively_finite(lo_m)
+                and _is_effectively_finite(hi_m)
+            ):
+                return None
+            if i == mm:
+                # Prefer the tighter convex monomial envelope for x_m**2 when present.
+                mono_col = monomial_var_map.get((mm, 2))
+                if mono_col is not None:
+                    return mono_col
+            return _ensure_bilinear_aux(i, mm)
+
+        for coeff_form, const_form in _linear_constraint_forms(model, n_orig):
+            support = [i for i in range(n_orig) if coeff_form[i] != 0.0]
+            if not support:
+                continue
+            for mm in range(n_orig):
+                lo_m, hi_m = float(flat_lb[mm]), float(flat_ub[mm])
+                if not (_is_effectively_finite(lo_m) and _is_effectively_finite(hi_m)):
+                    continue
+                prod_cols: dict[int, int] = {}
+                ok = True
+                for i in support:
+                    col = _rlt_product_col(i, mm)
+                    if col is None:
+                        ok = False
+                        break
+                    prod_cols[i] = col
+                if not ok:
+                    continue
+                rlt_cut_specs.append(
+                    {
+                        "coeff": coeff_form,
+                        "const": float(const_form),
+                        "m": mm,
+                        "lm": lo_m,
+                        "um": hi_m,
+                        "support": support,
+                        "prod_cols": prod_cols,
+                    }
+                )
 
     monomial_pw_map: dict[tuple[int, int], list[tuple[int, float, float]]] = {}
     for var_idx, n in monomial_terms:
@@ -3869,6 +4070,57 @@ def build_milp_relaxation(
             )
         )
         composite_var_map[id(node)] = s_col
+        affine_square_protected_ids.add(id(node))
+
+    # ── Scaled single-variable power envelopes ``(c*x)**n`` (n >= 3) ─────────
+    # A power of a *scaled* variable (e.g. ``(0.000338983*x6)**3`` with
+    # x6 in [0, 2950]) is lifted on the well-conditioned residual ``r = c*x``
+    # (here r in [0, 1]) instead of as the raw ``x**3`` monomial whose aux bound
+    # (~2.6e10) trips the magnitude cap and, if forced through, yields a
+    # numerically degenerate LP. The aux column ``w = r**n`` carries the
+    # univariate power envelope below; ``id(node)`` resolves through
+    # ``composite_var_map`` so the linearizer references ``w`` directly.
+    affine_power_relaxations: list[AffinePowerRelaxation] = []
+    for node, scale, var_idx, power in _collect_affine_powers(model, affine_square_protected_ids):
+        lb_i = float(flat_lb[var_idx])
+        ub_i = float(flat_ub[var_idx])
+        if not (np.isfinite(lb_i) and np.isfinite(ub_i)):
+            continue
+        r_lo = scale * lb_i
+        r_hi = scale * ub_i
+        r_lb = min(r_lo, r_hi)
+        r_ub = max(r_lo, r_hi)
+        if not (np.isfinite(r_lb) and np.isfinite(r_ub)) or r_ub - r_lb <= 1e-12:
+            continue
+        # ``w = r**power`` value range over [r_lb, r_ub] (monotone for odd power;
+        # the spanning-zero minimum of an even power is 0).
+        w_vals = [r_lb**power, r_ub**power]
+        if r_lb < 0.0 < r_ub:
+            w_vals.append(0.0)
+        w_lb = min(w_vals)
+        w_ub = max(w_vals)
+        # Cap an extreme upper bound to keep the LP well-conditioned; the
+        # tangent/secant rows below still bound ``w`` soundly (an unbounded-above
+        # aux only enlarges the feasible region).
+        if not np.isfinite(w_ub) or abs(w_ub) > _MONOMIAL_AUX_BOUND_LIMIT:
+            w_ub = np.inf
+        if not np.isfinite(w_lb) or abs(w_lb) > _MONOMIAL_AUX_BOUND_LIMIT:
+            w_lb = -np.inf
+        w_col = col_idx
+        all_bounds.append((float(w_lb), float(w_ub)))
+        integrality_flags.append(0)
+        col_idx += 1
+        affine_power_relaxations.append(
+            AffinePowerRelaxation(
+                aux_col=w_col,
+                var_idx=var_idx,
+                scale=float(scale),
+                power=power,
+                r_lb=float(r_lb),
+                r_ub=float(r_ub),
+            )
+        )
+        composite_var_map[id(node)] = w_col
         affine_square_protected_ids.add(id(node))
 
     # ── Lifted reciprocal / sqrt of a bounded inner expression (issue #154) ──
@@ -5506,6 +5758,133 @@ def build_milp_relaxation(
             rhs = slope * sq.const - r_lb * r_ub
             if _affine_square_row_ok(row, rhs):
                 _add_row(row, rhs)
+
+    # ── Scaled single-variable power envelopes ``w = (scale*x)**n`` ─────────
+    # ``w = r**n`` over the residual ``r = scale*x`` with ``r ∈ [r_lb, r_ub]``.
+    # All rows are written in the original ``x`` column (``r = scale*x``), so the
+    # underestimator ``w ≥ a·r + b`` becomes ``a·scale·x − w ≤ −b`` and the
+    # overestimator ``w ≤ a·r + b`` becomes ``w − a·scale·x ≤ b``. Each row is an
+    # individually valid global bound, so any that exceeds the magnitude cap is
+    # dropped (only enlarging the feasible region) and the dual bound stays sound.
+    for ap in affine_power_relaxations:
+        n = ap.power
+        r_lb, r_ub, s, w_col, v_idx = ap.r_lb, ap.r_ub, ap.scale, ap.aux_col, ap.var_idx
+        pts = _sorted_unique_points([r_lb, r_ub] + ([0.0] if r_lb < 0.0 < r_ub else []))
+
+        under_lines: list[tuple[float, float]] = []
+        over_lines: list[tuple[float, float]] = []
+        if _power_is_convex_on_box(n, r_lb):
+            # Convex: tangent under-estimators, secant over-estimator.
+            under_lines = [_power_tangent_line(t, n) for t in pts]
+            over_lines = [_power_secant_line(r_lb, r_ub, n)]
+        elif r_ub <= 0.0:
+            # Concave (odd power, all-nonpositive box): secant under, tangent over.
+            under_lines = [_power_secant_line(r_lb, r_ub, n)]
+            over_lines = [_power_tangent_line(t, n) for t in pts]
+        else:
+            # Odd power spanning zero: neither convex nor concave — keep only the
+            # tangents that are globally valid under/over-estimators on the box.
+            under_lines = [
+                _power_tangent_line(t, n)
+                for t in pts
+                if _odd_mixed_tangent_is_valid(t, r_lb, r_ub, n, "under")
+            ]
+            over_lines = [
+                _power_tangent_line(t, n)
+                for t in pts
+                if _odd_mixed_tangent_is_valid(t, r_lb, r_ub, n, "over")
+            ]
+
+        for slope, intercept in under_lines:
+            row = np.zeros(n_total)
+            row[w_col] = -1.0
+            row[v_idx] += slope * s
+            if _affine_square_row_ok(row, -intercept):
+                _add_row(row, -intercept)
+        for slope, intercept in over_lines:
+            row = np.zeros(n_total)
+            row[w_col] = 1.0
+            row[v_idx] += -slope * s
+            if _affine_square_row_ok(row, intercept):
+                _add_row(row, intercept)
+
+    # ── Product-of-squares RLT: w = x_i^2 * x_j^2 = (x_i * x_j)^2 ────────────
+    # The McCormick lift of a degree-4 ``x_i^2 * x_j^2`` term as the product of
+    # the two square columns ``col(i,2) * col(j,2)`` has the trivial convex
+    # under-estimator ``w >= 0`` (both squares are nonnegative), which is very
+    # loose. Coupling ``w`` to the bilinear ``p = x_i * x_j`` through the exact
+    # identity ``w = p**2`` adds the univariate square envelope on ``p`` —
+    # tangent under-estimators ``w >= 2*t*p - t**2`` and a secant over-estimator
+    # — every row of which is valid on the true manifold ``w = p**2`` and
+    # strictly tighter wherever ``p`` is driven away from zero. Both ``p`` and
+    # ``w`` are already lifted columns, so no auxiliary is introduced (nvs20's
+    # objective is a sum of such products of one-variable quadratics, issue #175).
+    _sq_base_by_col = {
+        col: var_idx for (var_idx, power), col in monomial_var_map.items() if power == 2
+    }
+    for (ci, cj), w_col in list(bilinear_var_map.items()):
+        base_i = _sq_base_by_col.get(ci)
+        base_j = _sq_base_by_col.get(cj)
+        if base_i is None or base_j is None or base_i == base_j:
+            continue
+        p_col = bilinear_var_map.get((min(base_i, base_j), max(base_i, base_j)))
+        if p_col is None:
+            continue
+        p_lb, p_ub = (float(v) for v in all_bounds[p_col])
+        if not (np.isfinite(p_lb) and np.isfinite(p_ub)) or p_ub - p_lb <= 1e-12:
+            continue
+        tangent_pts = _sorted_unique_points([p_lb, p_ub] + ([0.0] if p_lb < 0.0 < p_ub else []))
+        for t in tangent_pts:
+            slope, intercept = _power_tangent_line(t, 2)
+            row = np.zeros(n_total)
+            row[p_col] += slope
+            row[w_col] += -1.0
+            if _affine_square_row_ok(row, -intercept):
+                _add_row(row, -intercept)
+        slope, intercept = _power_secant_line(p_lb, p_ub, 2)
+        row = np.zeros(n_total)
+        row[w_col] += 1.0
+        row[p_col] += -slope
+        if _affine_square_row_ok(row, intercept):
+            _add_row(row, intercept)
+
+    # ── Level-1 RLT product cuts (issue #175) ───────────────────────────────
+    # For a linear factor ``g(x) = const + coeff·x <= 0`` and variable ``x_m`` with
+    # finite box ``[l_m, u_m]``, both bound-factor products are valid:
+    #   g·(x_m - l_m) <= 0  and  g·(u_m - x_m) <= 0
+    # (a nonpositive times a nonnegative). Expanding and substituting the lifted
+    # product column for each ``x_i*x_m`` gives a linear cut whose value at any true
+    # ``(x, x∘x)`` equals the product above, so it never excludes a feasible point.
+    for spec in rlt_cut_specs:
+        coeff_form = spec["coeff"]
+        const_form = spec["const"]
+        mm = spec["m"]
+        lm = spec["lm"]
+        um = spec["um"]
+        support = spec["support"]
+        prod_cols = spec["prod_cols"]
+
+        # Lower factor (x_m - l_m): const·x_m + Σ coeff_i·w_{i,m}
+        #                            − l_m·Σ coeff_i·x_i ≤ const·l_m
+        row = np.zeros(n_total)
+        row[mm] += const_form
+        for i in support:
+            coef_i = float(coeff_form[i])
+            row[prod_cols[i]] += coef_i
+            row[i] += -lm * coef_i
+        if _affine_square_row_ok(row, const_form * lm):
+            _add_row(row, const_form * lm)
+
+        # Upper factor (u_m - x_m): −const·x_m + u_m·Σ coeff_i·x_i
+        #                            − Σ coeff_i·w_{i,m} ≤ −const·u_m
+        row = np.zeros(n_total)
+        row[mm] += -const_form
+        for i in support:
+            coef_i = float(coeff_form[i])
+            row[i] += um * coef_i
+            row[prod_cols[i]] += -coef_i
+        if _affine_square_row_ok(row, -const_form * um):
+            _add_row(row, -const_form * um)
 
     # ── Fractional-power envelope constraints ──────────────────────────────
     # For a = x^p with x in [lb, ub], lb ≥ 0:

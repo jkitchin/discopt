@@ -16,6 +16,7 @@ that fits the per-node call shape in :mod:`discopt.solver`.
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -23,7 +24,11 @@ from typing import Optional
 import numpy as np
 
 from discopt._jax.discretization import DiscretizationState
-from discopt._jax.milp_relaxation import build_milp_relaxation
+from discopt._jax.milp_relaxation import (
+    _collect_affine_powers,
+    _linear_constraint_forms,
+    build_milp_relaxation,
+)
 from discopt._jax.term_classifier import NonlinearTerms, classify_nonlinear_terms
 from discopt.modeling.core import Model, VarType
 
@@ -72,6 +77,20 @@ class MccormickLPRelaxer:
             flag = 1 if v.var_type in (VarType.BINARY, VarType.INTEGER) else 0
             flags.extend([flag] * v.size)
         self._orig_integrality = np.asarray(flags, dtype=np.int32)
+        # A scaled affine power ``(c*x)**n`` (n>=3) is lifted by the build path but
+        # is not catalogued in :class:`NonlinearTerms`; record its presence so the
+        # rigorous LP relaxer engages on a model whose *only* nonlinearity is such a
+        # power (issue #175) instead of falling back to an unsound nonconvex bound.
+        self._has_affine_power = bool(_collect_affine_powers(model, set()))
+        # Level-1 RLT (issue #175): multiply the model's linear constraints by
+        # variable bound factors and lift the products, tightening the root bound
+        # for high-degree-product instances (nvs20: 87.35 -> 91.74). Opt-in via
+        # ``DISCOPT_RLT=1`` — it ~doubles the relaxation size, so it is a root-bound
+        # tightener rather than a per-node B&B default. Only applicable when the
+        # model has at least one linear constraint to multiply.
+        self._rlt_applicable = os.environ.get("DISCOPT_RLT", "0") == "1" and bool(
+            _linear_constraint_forms(model, self._n_orig)
+        )
 
     @property
     def has_bilinear(self) -> bool:
@@ -94,7 +113,14 @@ class MccormickLPRelaxer:
         rather than an unsound one).
         """
         t = self._terms
-        return bool(t.bilinear or t.trilinear or t.multilinear or t.monomial or t.fractional_power)
+        return bool(
+            t.bilinear
+            or t.trilinear
+            or t.multilinear
+            or t.monomial
+            or t.fractional_power
+            or self._has_affine_power
+        )
 
     def solve_at_node(
         self,
@@ -119,6 +145,7 @@ class MccormickLPRelaxer:
                     np.asarray(node_ub, dtype=np.float64),
                 ),
                 superposition=self._superposition,
+                rlt_level1=self._rlt_applicable,
             )
         except Exception:
             return MccormickLPResult(status="error")
@@ -126,13 +153,21 @@ class MccormickLPRelaxer:
         # Pad original integrality flags to the lifted column count; aux cols
         # remain continuous (flag 0). If the model has no integers this is a
         # pure LP anyway.
+        #
+        # Under level-1 RLT the relaxation is solved as a pure LP (integrality
+        # dropped): RLT is an opt-in root-bound tightener whose LP bound — made
+        # tighter than the integer-aware relaxation without it (nvs20: 87.35 ->
+        # 91.74) by the product cuts — is far cheaper than the RLT-augmented MILP's
+        # branch-and-bound. The bound stays a valid lower bound either way.
         n_total = len(milp._c)
-        if n_total > self._n_orig:
+        if self._rlt_applicable:
+            milp._integrality = None
+        elif n_total > self._n_orig:
             pad = np.zeros(n_total - self._n_orig, dtype=np.int32)
             milp._integrality = np.concatenate([self._orig_integrality, pad])
         else:
             milp._integrality = self._orig_integrality
-        if not int(milp._integrality.sum()):
+        if milp._integrality is not None and not int(milp._integrality.sum()):
             milp._integrality = None
 
         # The caller's ``time_limit`` is the budget for the WHOLE node, but this
