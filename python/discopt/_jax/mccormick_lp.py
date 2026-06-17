@@ -112,6 +112,29 @@ class MccormickLPRelaxer:
         self._rlt_applicable = os.environ.get("DISCOPT_RLT", "0") == "1" and bool(
             _linear_constraint_forms(model, self._n_orig)
         )
+        # Original columns that participate in a nonlinear (product/power) term.
+        # A McCormick/RLT envelope for such a term is only valid when its
+        # variables have FINITE bounds: over an unbounded box the lifted aux is
+        # effectively free, so the relaxation has no valid finite lower bound for
+        # that term and is genuinely unbounded. The fast Rust simplex nonetheless
+        # fabricates a finite "optimal" there (himmel16: simplex says 0.0 / RLT
+        # cuts -0.6749 where HiGHS correctly says "unbounded"), which would be
+        # trusted as a too-high lower bound and certify a suboptimal incumbent.
+        # We record these columns to gate a HiGHS unboundedness cross-check in
+        # ``solve_at_node`` whenever any of them is still unbounded at a node.
+        nl_cols: set[int] = set()
+        t = self._terms
+        for i, j in t.bilinear:
+            nl_cols.update((int(i), int(j)))
+        for i, j, k in t.trilinear:
+            nl_cols.update((int(i), int(j), int(k)))
+        for term in t.multilinear:
+            nl_cols.update(int(c) for c in term)
+        for base, _power in t.monomial:
+            nl_cols.add(int(base))
+        for base, _exp in t.fractional_power:
+            nl_cols.add(int(base))
+        self._nonlinear_cols = nl_cols
 
     @property
     def has_bilinear(self) -> bool:
@@ -323,6 +346,37 @@ class MccormickLPRelaxer:
             ):
                 res = verify
 
+        # Soundness guard (unbounded relaxation): a McCormick/RLT envelope is only
+        # a valid relaxation when the participating variables have FINITE bounds.
+        # When a nonlinear-term variable is still unbounded at this node (e.g. the
+        # root box before FBBT could not bound it), the lifted aux is effectively
+        # free and the relaxation is genuinely UNBOUNDED — it carries no valid
+        # finite lower bound. The fast Rust simplex mis-handles the unbounded ray
+        # and fabricates a finite "optimal" (himmel16: simplex returns 0.0 / RLT
+        # cuts -0.6749 where HiGHS correctly returns "unbounded"); trusting that
+        # finite value as a lower bound is a too-high bound that fathoms feasible
+        # nodes and certifies a suboptimal incumbent — a false-"optimal", the
+        # worst failure class. When any nonlinear-participating column is
+        # unbounded, cross-check the fast "optimal" with HiGHS and adopt HiGHS's
+        # verdict; on "unbounded" the no-bound result below lets the driver
+        # branch (and decertify the gap) instead of certifying a fabricated
+        # bound. Gated on free nonlinear columns, so it is a no-op once FBBT /
+        # branching has bounded the box (the common case).
+        if (
+            res.status == "optimal"
+            and self._backend != "auto"
+            and self._nonlinear_cols
+            and self._has_unbounded_nonlinear_col(milp)
+        ):
+            verify = milp.solve(time_limit=_remaining(), backend="auto")
+            if verify.status == "unbounded" or (
+                verify.status == "optimal"
+                and verify.objective is not None
+                and res.objective is not None
+                and verify.objective < res.objective - 1e-6
+            ):
+                res = verify
+
         # A valid lower bound on the original problem requires the relaxation LP
         # to be solved to OPTIMALITY; any other terminal status yields no
         # certified bound, so report the status with no lower bound and let the
@@ -335,6 +389,24 @@ class MccormickLPRelaxer:
             lower_bound=float(res.objective),
             x=x_orig,
         )
+
+    def _has_unbounded_nonlinear_col(self, milp) -> bool:
+        """True if any nonlinear-term original column has a non-finite bound.
+
+        After the ``solve_at_node`` clamp, a variable that was effectively
+        unbounded (``|bound| >= _RELAX_NUMERIC_CAP``) carries a true ``+/-inf``
+        bound. A McCormick/RLT envelope over such a column is not a valid finite
+        relaxation, so the LP is genuinely unbounded and the fast simplex's
+        finite "optimal" cannot be trusted.
+        """
+        bounds = milp._bounds
+        for col in self._nonlinear_cols:
+            if col >= len(bounds):
+                continue
+            lo, hi = bounds[col]
+            if not (np.isfinite(lo) and np.isfinite(hi)):
+                return True
+        return False
 
     @staticmethod
     def _max_finite_magnitude(milp) -> float:
