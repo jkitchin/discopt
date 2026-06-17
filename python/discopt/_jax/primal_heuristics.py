@@ -529,6 +529,20 @@ def integer_local_search(
     n_int = int(int_idx.size)
     use_2opt = n_int <= pair_cap
 
+    # Scale the search budget to the integer dimensionality. ``max_restarts`` and
+    # ``max_steps`` default to constants sized for large lattices; on a small
+    # integer space every restart re-descends to the same handful of points, so
+    # each surplus restart is a wasted ``subnlp`` NLP solve — the dominant fixed
+    # cost on tiny instances (see the SCIP head-to-head). One descent step can
+    # move each integer at most ±1, so a local minimum is reached within O(range)
+    # steps; restarts grow ~linearly with the dimension that perturbations
+    # explore. Effort is only ever *reduced* below the caller's cap (never raised
+    # past it), and this is a pure incumbent heuristic — subnlp-verified points
+    # only, injected as candidates — so fewer restarts can only weaken the
+    # incumbent (which B&B then closes), never the dual bound or certification.
+    eff_restarts = min(max_restarts, max(3, 3 * n_int))
+    eff_steps = min(max_steps, max(8, 4 * n_int))
+
     def violation(x: np.ndarray) -> float:
         g = np.asarray(evaluator.evaluate_constraints(x))
         return float(np.sum(np.maximum(0.0, cl - g)) + np.sum(np.maximum(0.0, g - cu)))
@@ -563,7 +577,7 @@ def integer_local_search(
     best: Optional[tuple[np.ndarray, float]] = None
     n_seeds = len(seeds)
 
-    for restart in range(max(max_restarts, n_seeds)):
+    for restart in range(max(eff_restarts, n_seeds)):
         if time.perf_counter() >= deadline:
             break
         # Try each seed clean first (descent alone often suffices), then spend
@@ -591,7 +605,7 @@ def integer_local_search(
                     xc[j] = float(rng.integers(int(lb[j]), int(ub[j]) + 1))
 
         cur = violation(xc)
-        for _ in range(max_steps):
+        for _ in range(eff_steps):
             if cur <= feas_tol or time.perf_counter() >= deadline:
                 break
             best_v = cur

@@ -943,8 +943,34 @@ def _gams_initial_seed(model, node_lb, node_ub):
     return np.clip(x0, node_lb, node_ub)
 
 
+def _adaptive_root_random_starts(n_vars):
+    """Random multi-start count scaled to the problem dimension.
+
+    The three deterministic anchors (midpoint, lower/upper quarter) already cover
+    a low-dimensional box well; extra *random* starts only buy basin diversity as
+    the nonconvex landscape grows. Each start is a full NLP solve, so on tiny
+    models the fixed ``n_random=2`` is pure per-solve overhead (the dominant cost
+    on small instances — see the SCIP head-to-head). Effort grows with dimension:
+    none for tiny boxes, the full two random starts once the model is large enough
+    to harbour distinct local minima the anchors miss. This only affects the root
+    *incumbent* (on nonconvex problems the multistart NLP value is injected as an
+    incumbent candidate, never as a dual bound — so the gap/certification is
+    untouched; a weaker incumbent only means the B&B tree closes it instead).
+    """
+    if n_vars <= 5:
+        return 0
+    if n_vars <= 12:
+        return 1
+    return 2
+
+
 def _generate_starting_points(node_lb, node_ub, n_random=2):
-    """Generate diverse starting points for multi-start NLP at root node."""
+    """Generate diverse starting points for multi-start NLP at root node.
+
+    ``n_random=None`` selects :func:`_adaptive_root_random_starts` for the count.
+    """
+    if n_random is None:
+        n_random = _adaptive_root_random_starts(int(np.size(node_lb)))
     lb_clipped = np.clip(node_lb, -_SPC, _SPC)
     ub_clipped = np.clip(node_ub, -_SPC, _SPC)
     span = ub_clipped - lb_clipped
@@ -969,7 +995,7 @@ def _solve_root_node_multistart(
     constraint_bounds,
     options,
     nlp_solver,
-    n_random=2,
+    n_random=None,
     convex=False,
 ):
     """Solve root NLP relaxation from multiple starting points.

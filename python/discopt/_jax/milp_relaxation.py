@@ -3407,6 +3407,33 @@ def _collect_univariate_relaxations(
     seen: set[int] = set()
     col_idx = start_col
 
+    # Lazily-computed FBBT-tightened box, used only to *rescue* a univariate
+    # operator whose argument is non-finite (out of domain) under the raw node
+    # box and would otherwise be dropped from the relaxation (issue #219).
+    # ``None`` until first needed; ``(None, None)`` if FBBT is unavailable or
+    # proves infeasibility. The tightened box is a sound outer bound on the
+    # *global* feasible set (FBBT only removes provably-infeasible regions and
+    # uses no objective cutoff), so every feasible point — at any B&B node — lies
+    # within it; an envelope built over it is therefore valid for the whole
+    # relaxation. We intersect with the node box for extra tightness.
+    fbbt_cache: list[tuple[Optional[np.ndarray], Optional[np.ndarray]]] = []
+
+    def _fbbt_argument_box() -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        if not fbbt_cache:
+            tightened: tuple[Optional[np.ndarray], Optional[np.ndarray]] = (None, None)
+            try:
+                from discopt.tightening import fbbt_box
+
+                res = fbbt_box(model)
+                if not res.infeasible and len(res.lb) == len(flat_lb):
+                    t_lb = np.maximum(np.asarray(res.lb, dtype=np.float64), flat_lb)
+                    t_ub = np.minimum(np.asarray(res.ub, dtype=np.float64), flat_ub)
+                    tightened = (t_lb, t_ub)
+            except Exception:
+                tightened = (None, None)
+            fbbt_cache.append(tightened)
+        return fbbt_cache[0]
+
     def maybe_add(expr: Expression) -> None:
         nonlocal col_idx
         expr_id = id(expr)
@@ -3421,15 +3448,26 @@ def _collect_univariate_relaxations(
             arg_lb, arg_ub = _linear_expr_bounds(arg_coeff, arg_const, flat_lb, flat_ub)
         except ValueError:
             return
+        eff_lb, eff_ub = flat_lb, flat_ub
         if not _univariate_domain_ok(func_name, arg_lb, arg_ub):
-            return
+            # The raw node box leaves the argument out of domain (e.g. ``log`` of
+            # an argument with a ``+inf`` upper bound). Implied bounds — big-M
+            # rows, other constraints — may finitely bound it; retry over the
+            # FBBT-tightened box before giving up and dropping the constraint.
+            t_lb, t_ub = _fbbt_argument_box()
+            if t_lb is None or t_ub is None:
+                return
+            arg_lb, arg_ub = _linear_expr_bounds(arg_coeff, arg_const, t_lb, t_ub)
+            if not _univariate_domain_ok(func_name, arg_lb, arg_ub):
+                return
+            eff_lb, eff_ub = t_lb, t_ub
         exact_integer_range = _integer_affine_trig_range(
             func_name,
             arg_coeff,
             arg_const,
             model,
-            flat_lb,
-            flat_ub,
+            eff_lb,
+            eff_ub,
         )
         if exact_integer_range is not None:
             val_lb, val_ub = exact_integer_range
