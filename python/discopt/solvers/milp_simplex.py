@@ -110,6 +110,21 @@ def solve_milp(
     else:
         int_cols = np.zeros(0, dtype=np.int64)
 
+    # Snap floating-point bound inversions before the Rust solver. FBBT /
+    # McCormick rounding can leave a variable with ``lb`` a few ULPs above ``ub``
+    # (e.g. 0.5000000000000002 > 0.5); ``solve_milp_py`` then panics with
+    # "min > max". A tiny inversion is numerical noise — fix the variable at the
+    # bound; a genuine inversion means an empty box — the MILP is infeasible.
+    _inv = lb_std > ub_std
+    if np.any(_inv):
+        _gap = lb_std[_inv] - ub_std[_inv]
+        _tol = 1e-7 * np.maximum(1.0, np.abs(ub_std[_inv]))
+        if np.any(_gap > _tol):
+            return MILPResult(status=SolveStatus.INFEASIBLE, node_count=0)
+        _mid = 0.5 * (lb_std[_inv] + ub_std[_inv])
+        lb_std[_inv] = _mid
+        ub_std[_inv] = _mid
+
     status, x_full, obj, bound, nodes, _iters = solve_milp_py(
         np.ascontiguousarray(c_std),
         np.ascontiguousarray(a_std),

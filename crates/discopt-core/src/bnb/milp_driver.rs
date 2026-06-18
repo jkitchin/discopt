@@ -1019,7 +1019,11 @@ fn try_rounding(
         (0..ns)
             .map(|j| {
                 let v = if is_int[j] { round(x[j]) } else { x[j] };
-                v.clamp(glb[j], gub[j])
+                // Order-correct the bounds: FBBT / McCormick rounding can leave a
+                // variable with `glb` a few ULPs above `gub`, and `f64::clamp`
+                // panics when min > max. A tiny inversion is numerical noise, so
+                // clamp to [min(glb,gub), max(glb,gub)] (effectively fixing the var).
+                v.clamp(glb[j].min(gub[j]), glb[j].max(gub[j]))
             })
             .collect()
     };
@@ -1226,5 +1230,25 @@ mod tests {
         let r = solve_milp(&lp, &[9.0], 100.0, &opts(4, vec![0, 1, 2, 3]));
         assert_eq!(r.status, MilpStatus::Optimal);
         assert!((r.obj - 90.0).abs() < 1e-6, "obj {}", r.obj);
+    }
+
+    #[test]
+    fn try_rounding_tolerates_ulp_inverted_bounds() {
+        // Regression: the rounding heuristic clamps each rounded value into the
+        // node's global box. FBBT / McCormick bound rounding can leave a variable
+        // with `glb` a few ULPs ABOVE `gub` (e.g. 0.5000000000000002 > 0.5), and
+        // `f64::clamp(min, max)` *panics* when min > max — observed crashing the
+        // casctanks root relaxation solve. `try_rounding` must order-correct the
+        // clamp bounds (fixing the variable) rather than panic. We assert the call
+        // returns normally; the heuristic may or may not produce an incumbent.
+        let x = [0.5_f64];
+        let is_int = [true];
+        let a_w = [1.0_f64]; // 1 row × 1 column working matrix
+        let b_w = [1.0_f64];
+        let c_w = [1.0_f64];
+        let glb = [0.5000000000000002_f64]; // a single ULP above...
+        let gub = [0.5_f64]; // ...the upper bound — an inverted (empty) box
+        // Pre-fix this panicked inside `make`'s `v.clamp(glb, gub)`.
+        let _ = try_rounding(&x, 1, &is_int, &a_w, &b_w, &c_w, &glb, &gub, 1, 1, 0.0);
     }
 }

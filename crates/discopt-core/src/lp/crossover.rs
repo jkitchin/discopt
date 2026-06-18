@@ -232,7 +232,8 @@ pub fn crossover_to_vertex(x: &[f64], lp: &LpView<'_>, tol: f64, max_iter: usize
 
         for j in 0..n {
             let xj = x[j] + t * d[j];
-            x[j] = xj.clamp(l[j], u[j]);
+            // Order-correct bounds: `f64::clamp` panics on a (numerical) l > u.
+            x[j] = xj.clamp(l[j].min(u[j]), l[j].max(u[j]));
         }
     }
     x
@@ -414,5 +415,29 @@ mod tests {
             }
             assert!(is_vertex(&xv, &a, m, n, &c, &l, &u));
         }
+    }
+
+    #[test]
+    fn tolerates_ulp_inverted_bounds() {
+        // Regression: the crossover clamps each updated coordinate back into
+        // `[l, u]`. A numerical inversion (`l` a few ULPs above `u`, from FBBT /
+        // McCormick bound rounding) made `f64::clamp(l, u)` panic (min > max).
+        // The clamp must order-correct the bounds instead of crashing.
+        let a = [1.0, 1.0];
+        let c = [-1.0, -1.0];
+        let l = [0.5000000000000002_f64, 0.0]; // col 0 lower a ULP above its upper
+        let u = [0.5_f64, 1.0];
+        let x = [0.5, 0.5];
+        let lp = LpView {
+            a: &a,
+            m: 1,
+            n: 2,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        // Pre-fix this panicked inside the coordinate clamp.
+        let xv = crossover_to_vertex(&x, &lp, 1e-7, 4);
+        assert_eq!(xv.len(), 2);
     }
 }

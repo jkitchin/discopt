@@ -200,3 +200,40 @@ class TestMILPBoundChannel:
         assert res.bound == -3.0 and res.objective == 5.0
         # The result type carries both channels independently.
         assert res.bound < res.objective
+
+
+class TestBoundInversionSnap:
+    """`solve_milp` snaps ULP-scale bound inversions before the Rust solver.
+
+    FBBT / McCormick bound rounding can leave a variable with ``lb`` a few ULPs
+    above ``ub``. Passing such a box straight to ``solve_milp_py`` previously
+    panicked (``min > max`` in an internal ``f64::clamp``). The Python adapter
+    now snaps a *tiny* inversion (numerical noise) to a fixed variable, and
+    reports a *genuine* inversion (an empty box) as infeasible.
+    """
+
+    def test_ulp_inversion_is_snapped_and_solves(self):
+        from discopt.solvers.milp_simplex import solve_milp
+
+        # One continuous variable whose lower bound sits a single ULP above its
+        # upper bound. min x s.t. x <= 1, x in [0.5000000000000002, 0.5].
+        c = np.array([1.0])
+        A = np.array([[1.0]])
+        b = np.array([1.0])
+        bounds = [(0.5000000000000002, 0.5)]
+        r = solve_milp(c=c, A_ub=A, b_ub=b, bounds=bounds)
+        # The tiny inversion is snapped to a fixed variable, so the LP solves to
+        # optimality at x ≈ 0.5 rather than crashing or reporting infeasible.
+        assert r.status == SolveStatus.OPTIMAL
+        assert r.x is not None and abs(float(r.x[0]) - 0.5) < 1e-6
+
+    def test_genuine_inversion_is_infeasible(self):
+        from discopt.solvers.milp_simplex import solve_milp
+
+        # A real (non-ULP) inversion is an empty box: lb=1.0 well above ub=0.0.
+        c = np.array([1.0])
+        A = np.array([[1.0]])
+        b = np.array([10.0])
+        bounds = [(1.0, 0.0)]
+        r = solve_milp(c=c, A_ub=A, b_ub=b, bounds=bounds)
+        assert r.status == SolveStatus.INFEASIBLE
