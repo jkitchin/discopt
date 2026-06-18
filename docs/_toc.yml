@@ -16,6 +16,7 @@ parts:
       - file: notebooks/tutorial_multiobjective
       - file: notebooks/complementarity_mpec
       - file: notebooks/pooling_pq
+      - file: notebooks/geometric_programming
   - caption: "Tutorials \u2014 Solver Backends"
     chapters:
       - file: notebooks/tutorial_oa
@@ -30,15 +31,20 @@ parts:
     chapters:
       - file: notebooks/quickstart
       - file: notebooks/modeling_guide
+      - file: notebooks/tutor_course
       - file: notebooks/minlp_examples
       - file: notebooks/problem_classes
   - caption: Advanced Features
     chapters:
+      - file: global_optimization
       - file: notebooks/advanced_features
       - file: notebooks/solver_internals
       - file: notebooks/presolve
       - file: notebooks/bound_tightening
       - file: notebooks/infeasibility_iis
+      - file: notebooks/conflict_analysis
+      - file: notebooks/primal_heuristics
+      - file: notebooks/gnn_branching
       - file: notebooks/sensitivity_analysis
       - file: notebooks/llm_integration
       - file: llm_features
@@ -53,11 +59,13 @@ parts:
     chapters:
       - file: notebooks/qp_solver
       - file: notebooks/ipm_vs_ipopt
+      - file: notebooks/cutest_interface
       - file: notebooks/benchmarks_by_class
       - file: notebooks/benchmark_dashboard
   - caption: Applications
     chapters:
       - file: notebooks/nn_embedding
+      - file: notebooks/ac_opf
       - file: notebooks/decision_focused_learning
       - file: notebooks/estimation_and_doe
       - file: notebooks/tutorial_estimation

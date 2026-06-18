@@ -17,20 +17,25 @@ A hybrid Mixed-Integer Nonlinear Programming (MINLP) solver combining a Rust bac
 - **Algebraic modeling API** -- continuous, binary, and integer variables with operator overloading
 - **Spatial Branch and Bound** -- Rust-powered node pool, branching, and pruning
 - **JIT-compiled NLP evaluation** -- objective, gradient, Hessian, and constraint Jacobian via JAX
-- **Three NLP backends** -- pure-JAX interior-point method (default, vmap-batched), POUNCE (pure-Rust Ipopt port), cyipopt (Ipopt)
-- **Convex relaxations** -- McCormick envelopes (21 functions including sigmoid/softplus/tanh), piecewise McCormick, alphaBB underestimators
+- **Three NLP backends** -- POUNCE (pure-Rust Ipopt port; default for single solves), pure-JAX interior-point method (vmap-batched B&B node engine), cyipopt (Ipopt)
+- **Convex relaxations** -- McCormick envelopes (28 functions including sigmoid/softplus/tanh and the trig/inverse-trig/`erf` families), piecewise McCormick, alphaBB underestimators
 - **Neural network embedding** -- embed trained feedforward networks (ReLU, sigmoid, tanh, softplus) as MINLP constraints via big-M, full-space, and reduced-space strategies; interval arithmetic bound propagation; ONNX import (`pip install discopt[nn]`)
 - **Generalized disjunctive programming** -- `BooleanVar`, propositional logic operators (`land`, `lor`, `lnot`, `atleast`, `atmost`, `exactly`), `either_or()`, `if_then()`; reformulated via big-M, multiple big-M (LP-tightened), hull, or Logic-based Outer Approximation (`gdp_method="loa"`)
-- **Presolve** -- FBBT (interval arithmetic, probing, Big-M simplification), OBBT with LP warm-start
-- **Cutting planes** -- reformulation-linearization (RLT) and outer approximation (OA)
-- **GNN branching policy** -- bipartite graph neural network trained on strong branching data
-- **Primal heuristics** -- multi-start NLP, feasibility pump
-- **Differentiable optimization** -- parameter sensitivity via envelope theorem and KKT implicit differentiation
+- **Complementarity / MPEC** -- `Model.complementarity(x, y)` reformulated via GDP disjunction (default), Scholtes regularization, or SOS1
+- **Specialized problem classes** -- pooling problem (pq-formulation), geometric programming (posynomial detection + log-space convex reformulation), AC optimal power flow (rectangular QCQP)
+- **Robust & multi-objective optimization** -- uncertainty sets with affine decision rules; scalarization (weighted-sum, ε-constraint, Tchebycheff, NBI, NNC) with Pareto-front analysis
+- **Parameter estimation & MBDoE** -- weighted-least-squares estimation and model-based design of experiments (D/A/E-optimality, identifiability, model discrimination) with exact JAX Fisher-information Jacobians
+- **Presolve** -- FBBT (interval arithmetic, probing, Big-M simplification, integrality-aware snapping, periodic-variable reduction), OBBT with LP warm-start
+- **Cutting planes** -- reformulation-linearization (RLT, a first-class `rlt_cuts=True` option), PSD/SOC cuts for QCQP, and outer approximation (OA); `cuts='auto'` by default
+- **Primal heuristics** -- multi-start NLP, feasibility pump, diving, RINS, local branching
+- **Infeasibility diagnosis** -- irreducible infeasible subsystem (`compute_iis`) and conflict analysis / no-good cuts
+- **GNN branching policy** -- bipartite graph-neural-network scaffold for learned branching (experimental; ships untrained, see #236)
+- **Differentiable optimization** -- parameter sensitivity via envelope theorem and KKT implicit differentiation, including differentiable MILP/MIQP (fix-and-differentiate)
 - **.nl file import** -- read AMPL-format models via Rust parser
 - **Dynamic optimization** -- DAE collocation (Radau/Legendre) and finite differences for optimal control, parameter estimation, and PDE-constrained optimization
 - **CUTEst interface** -- NLP benchmarking against the CUTEst test set
 - **LLM integration** (optional) -- conversational model building, diagnostics, and reformulation suggestions
-- **1650+ tests** -- 141 Rust + 1510+ Python
+- **Extensive test suite** -- 339 Rust + 3,700+ Python test functions
 
 ## Quick Start
 
@@ -59,8 +64,8 @@ Model.solve()  -->  Python orchestrator  -->  Rust TreeManager (B&B engine)
                         |                          |
                   JAX NLPEvaluator           Node pool / branching / pruning
                   NLP backends:              Zero-copy numpy arrays (PyO3)
-                    pounce  (pure-Rust Ipopt port)
-                    ipm     (pure-JAX, vmap batch)  [default]
+                    pounce  (pure-Rust Ipopt port)  [default single solve]
+                    ipm     (pure-JAX, vmap batch)  [B&B node relaxations]
                     cyipopt (Ipopt)
 ```
 
@@ -68,7 +73,7 @@ Model.solve()  -->  Python orchestrator  -->  Rust TreeManager (B&B engine)
 
 **Rust-Python bindings** (`crates/discopt-python`): PyO3 bindings with zero-copy numpy array transfer for the B&B tree manager, expression IR, batch dispatch, and .nl parser.
 
-**JAX layer** (`python/discopt/_jax`): DAG compiler mapping modeling expressions to JAX primitives, JIT-compiled NLP evaluator (objective, gradient, Hessian, constraint Jacobian), McCormick convex/concave relaxations (21 functions), and a relaxation compiler with vmap support.
+**JAX layer** (`python/discopt/_jax`): DAG compiler mapping modeling expressions to JAX primitives, JIT-compiled NLP evaluator (objective, gradient, Hessian, constraint Jacobian), McCormick convex/concave relaxations (28 functions), and a relaxation compiler with vmap support.
 
 **Solver wrappers** (`python/discopt/solvers`): POUNCE (pure-Rust Ipopt port), cyipopt NLP wrapper for Ipopt, HiGHS LP and MILP wrappers with warm-start support.
 
@@ -78,19 +83,21 @@ Model.solve()  -->  Python orchestrator  -->  Rust TreeManager (B&B engine)
 
 ## NLP Backends
 
-| Backend         | Implementation    | Use Case                                   |
-|-----------------|-------------------|--------------------------------------------|
-| `ipm` (default) | Pure-JAX IPM      | B&B inner loop; GPU-batched via `jax.vmap` |
-| `pounce`        | Pure-Rust Ipopt port | Single-problem NLP; fastest wall-clock  |
-| `cyipopt`       | Ipopt via cyipopt | Single-problem NLP; most robust            |
+| Backend              | Implementation       | Use Case                                   |
+|----------------------|----------------------|--------------------------------------------|
+| `pounce` (default)   | Pure-Rust Ipopt port | Single-problem NLP; fastest wall-clock     |
+| `ipm`                | Pure-JAX IPM         | B&B inner loop; GPU-batched via `jax.vmap`  |
+| `cyipopt`            | Ipopt via cyipopt    | Single-problem NLP; most robust            |
 
-For single continuous solves the `ipm` default is promoted to a KKT-valid
-backend, resolving to POUNCE when installed and falling back to cyipopt.
+For single continuous solves the default NLP backend resolves to a KKT-valid
+solver -- POUNCE when installed, falling back to cyipopt, then to the pure-JAX
+IPM. The pure-JAX `ipm` remains the vmap-batched engine for B&B node relaxations.
 
 ```python
-result = model.solve(nlp_solver="ipm")      # Pure-JAX (default)
-result = model.solve(nlp_solver="pounce")   # POUNCE (pure-Rust Ipopt port)
-result = model.solve(nlp_solver="cyipopt")  # Ipopt
+result = model.solve()                       # default: POUNCE when installed
+result = model.solve(nlp_solver="pounce")    # POUNCE (pure-Rust Ipopt port)
+result = model.solve(nlp_solver="ipm")       # Pure-JAX IPM
+result = model.solve(nlp_solver="cyipopt")   # Ipopt
 ```
 
 ## Benchmarks
@@ -108,8 +115,7 @@ Performance measured on Apple M4 Pro (CPU, JAX 0.8.2). "Warm" times exclude JIT 
 
 See the benchmark notebooks for full scaling plots and details:
 - [Benchmarks by Problem Class](docs/notebooks/benchmarks_by_class.ipynb) -- LP, QP, MILP, MIQP, NLP (3 backends), MINLP
-- [IPM vs POUNCE vs Ipopt](docs/notebooks/ipm_vs_ipopt.ipynb) -- detailed NLP backend comparison
-- [Batch IPM vs Ipopt](docs/notebooks/batch_ipm_vs_ipopt.ipynb) -- vmap-batched IPM for B&B inner loops
+- [IPM vs POUNCE vs Ipopt](docs/notebooks/ipm_vs_ipopt.ipynb) -- detailed NLP backend comparison (incl. vmap-batched IPM for B&B inner loops)
 
 ## Installation
 
@@ -305,8 +311,8 @@ Tutorial notebooks are available in `docs/notebooks/`:
 - **Quickstart** -- basic modeling and solving
 - **MINLP Examples** -- mixed-integer nonlinear programs
 - **Advanced Features** -- relaxations, presolve, cutting planes, branching policies
-- **IPM vs Ipopt** -- backend comparison
-- **Batch IPM** -- vmap-batched interior-point solving
+- **Global Optimization** -- which problems discopt can and can't certify as global
+- **IPM vs Ipopt** -- backend comparison (incl. vmap-batched IPM)
 - **Dynamic Optimization** -- DAE collocation for optimal control, parameter estimation, and PDEs
 - **Neural Network Embedding** -- optimize over trained ML surrogates as MINLP constraints
 - **Decision-Focused Learning** -- differentiable optimization in ML pipelines
@@ -316,18 +322,17 @@ Full documentation is built with Jupyter Book: `jupyter-book build docs/`
 
 ## Project Statistics
 
-*Last updated: 2026-02-16*
+*Last updated: 2026-06-18*
 
 | Category | Count |
 |----------|-------|
-| **Python source** (`python/discopt/`) | 65 files, ~27,200 lines |
-| **Rust source** (`crates/`) | 19 files, ~10,700 lines |
-| **Test code** (`python/tests/`) | 41 files, ~24,500 lines |
-| **Total source + tests** | 125 files, ~62,400 lines |
-| **Python tests** | 1,510+ |
-| **Rust tests** | 141 |
-| **Tutorial notebooks** (`docs/notebooks/`) | 21 |
-| **Git commits** | 99 |
+| **Python source** (`python/discopt/`) | 226 files, ~103,700 lines |
+| **Rust source** (`crates/`) | 55 files, ~29,000 lines |
+| **Test code** (`python/tests/`) | 222 files, ~72,100 lines |
+| **Total source + tests** | ~500 files, ~205,000 lines |
+| **Python tests** | 3,700+ |
+| **Rust tests** | 339 |
+| **Tutorial notebooks** (`docs/notebooks/`) | 63 |
 
 ## Development History
 
