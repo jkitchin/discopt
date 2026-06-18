@@ -277,6 +277,13 @@ class MilpRelaxationModel:
         self._obj_offset = obj_offset
         self._integrality = integrality
         self._objective_bound_valid = objective_bound_valid
+        # Warm-start state for the pure-LP simplex fast path (cutting-plane loop):
+        # the previous solve's optimal basis and the (structural-cols, rows) it was
+        # produced at, so the next ``.solve()`` on the SAME columns with rows only
+        # appended can dual-simplex re-optimize from it. See ``_solve_lp_warm``.
+        self._warm_basis: Optional[tuple[np.ndarray, np.ndarray]] = None
+        self._warm_struct_n: Optional[int] = None
+        self._warm_rows: Optional[int] = None
 
     def solve(
         self,
@@ -286,6 +293,23 @@ class MilpRelaxationModel:
     ) -> MilpRelaxationResult:
         from discopt.solvers import SolveStatus
         from discopt.solvers.lp_backend import get_milp_solver
+
+        # Warm-startable pure-LP fast path: the spatial cut-separation loop
+        # re-solves the SAME structural columns with only rows (cuts) appended, so
+        # the previous optimal basis is an ideal dual-simplex warm start. Engage
+        # only for the Rust simplex backend on a pure LP (no integrality). A
+        # bad/mismatched basis is ignored inside Rust (cold fallback) and the dual
+        # simplex converges to the same LP optimum, so the bound is unchanged --
+        # warm-start only changes speed. Disable with ``DISCOPT_LP_WARMSTART=0``.
+        if (
+            backend == "simplex"
+            and self._integrality is None
+            and self._A_ub is not None
+            and os.environ.get("DISCOPT_LP_WARMSTART", "1") != "0"
+        ):
+            warm = self._solve_lp_warm()
+            if warm is not None:
+                return warm
 
         # backend="auto": HiGHS if present, else POUNCE. backend="simplex" routes
         # to the warm-started-simplex B&B (falls back to auto if unavailable).
@@ -347,6 +371,70 @@ class MilpRelaxationModel:
         if result.bound is not None and self._objective_bound_valid:
             bound = float(result.bound) + self._obj_offset
 
+        return MilpRelaxationResult(status=status_str, objective=obj, bound=bound, x=result.x)
+
+    def _solve_lp_warm(self) -> Optional["MilpRelaxationResult"]:
+        """Pure-LP warm-started re-solve via the Rust dual simplex.
+
+        Reuses the cached optimal basis from the previous ``.solve()`` when the
+        structural column set is unchanged and rows have only grown (the
+        cutting-plane case), extending it for the appended slacks. Returns the
+        mapped :class:`MilpRelaxationResult`, or ``None`` to defer to the generic
+        path (binding unavailable, or an ``iter_limit``/``numerical`` exit). The
+        returned objective/bound is the true LP optimum — warm-start is a pure
+        speed optimization, never a correctness one.
+        """
+        from discopt.solvers import SolveStatus
+
+        try:
+            from discopt.solvers.milp_simplex import solve_lp_warm_std
+        except Exception:  # pragma: no cover - binding absent
+            return None
+
+        n_struct = np.asarray(self._c, dtype=np.float64).ravel().shape[0]
+        m_now = 0 if self._A_ub is None else sp.csr_matrix(self._A_ub).shape[0]
+        in_basis = None
+        if (
+            self._warm_basis is not None
+            and self._warm_struct_n == n_struct
+            and self._warm_rows is not None
+            and self._warm_rows <= m_now
+        ):
+            in_basis = self._warm_basis
+
+        try:
+            result, out_basis = solve_lp_warm_std(
+                self._c, self._A_ub, self._b_ub, self._bounds, in_basis=in_basis
+            )
+        except Exception:  # pragma: no cover - defensive; fall back to generic path
+            return None
+        if result is None:
+            # iter_limit / numerical: let the generic path (with its HiGHS option)
+            # handle it; drop the stale basis so the next round cold-starts.
+            self._warm_basis = None
+            return None
+        if out_basis is not None:
+            self._warm_basis = out_basis
+            self._warm_struct_n = n_struct
+            self._warm_rows = m_now
+        else:
+            self._warm_basis = None
+
+        status_map = {
+            SolveStatus.OPTIMAL: "optimal",
+            SolveStatus.INFEASIBLE: "infeasible",
+            SolveStatus.UNBOUNDED: "unbounded",
+            SolveStatus.TIME_LIMIT: "time_limit",
+            SolveStatus.ITERATION_LIMIT: "iteration_limit",
+            SolveStatus.ERROR: "error",
+        }
+        status_str = status_map.get(result.status, str(result.status))
+        obj = None
+        if result.objective is not None and self._objective_bound_valid:
+            obj = float(result.objective) + self._obj_offset
+        bound = None
+        if result.bound is not None and self._objective_bound_valid:
+            bound = float(result.bound) + self._obj_offset
         return MilpRelaxationResult(status=status_str, objective=obj, bound=bound, x=result.x)
 
 

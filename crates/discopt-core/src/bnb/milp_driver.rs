@@ -1019,7 +1019,13 @@ fn try_rounding(
         (0..ns)
             .map(|j| {
                 let v = if is_int[j] { round(x[j]) } else { x[j] };
-                v.clamp(glb[j], gub[j])
+                // Guard against rounding-induced bound inversion (glb[j] a few ULP
+                // above gub[j] on a near-fixed variable): f64::clamp panics when
+                // min > max. Clamp into the well-ordered interval — identical to
+                // the direct clamp when bounds are ordered, and collapses to the
+                // degenerate (ULP-wide) box when they cross.
+                let (lo, hi) = if glb[j] <= gub[j] { (glb[j], gub[j]) } else { (gub[j], glb[j]) };
+                v.clamp(lo, hi)
             })
             .collect()
     };

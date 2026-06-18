@@ -572,10 +572,51 @@ impl<'a> Simplex<'a> {
             status
         };
 
-        // basis over the real columns (artificials excluded; if a real-var basis
-        // is wanted the caller post-processes — here basic_vars lists real basics)
-        let basic_vars: Vec<usize> = self.basis.iter().copied().filter(|&j| j < self.n).collect();
-        let col_status: Vec<i8> = (0..self.n).map(|j| self.stat[j]).collect();
+        // Export a *complete*, row-ordered basis of real columns (length m).
+        //
+        // Phase 2 can leave an artificial (column ≥ self.n) basic at value 0 on a
+        // degenerate/redundant row — common on the heavily-redundant lifted
+        // McCormick relaxations. Naively dropping those slots (the old behaviour)
+        // returned fewer than m basic vars, which the warm-start consumer and the
+        // dual simplex both reject (they require exactly m), so every
+        // cutting-plane re-solve silently cold-started. Substitute that row's own
+        // zero-valued structural singleton — its slack column in the [A_ub|I]
+        // standard form the warm path uses. Swapping the basic artificial (±eᵢ at
+        // 0) for a nonbasic singleton that sits in the same row at value 0 leaves
+        // B's support and x_B bit-identical (the entering column was contributing
+        // 0 to the RHS and its new basic value is 0), so this is a pure
+        // representation fix — the optimum and bound are unchanged.
+        let mut slack_for_row: Vec<i64> = vec![-1; self.m];
+        for j in 0..self.n {
+            if self.stat[j] == BASIC || self.nb_value(j) != 0.0 {
+                continue;
+            }
+            let (rows, _) = self.cols.col(j);
+            if rows.len() == 1 && slack_for_row[rows[0]] < 0 {
+                slack_for_row[rows[0]] = j as i64;
+            }
+        }
+        let mut col_status: Vec<i8> = (0..self.n).map(|j| self.stat[j]).collect();
+        let mut basic_vars: Vec<usize> = Vec::with_capacity(self.m);
+        for i in 0..self.m {
+            let bcol = self.basis[i];
+            if bcol < self.n {
+                basic_vars.push(bcol);
+                continue;
+            }
+            // Basic artificial in this slot: it covers constraint row
+            // `r = bcol - self.n` (column n+r is ±eᵣ), which need not equal the
+            // slot index `i` once pivots have permuted the basis. Substitute that
+            // row's zero-valued singleton (its slack).
+            let r = bcol - self.n;
+            if slack_for_row[r] >= 0 {
+                let s = slack_for_row[r] as usize;
+                col_status[s] = BASIC;
+                basic_vars.push(s);
+            }
+            // else: no real substitute available (non-[A_ub|I] caller); the basis
+            // stays short and the warm path declines it, exactly as before.
+        }
         LpSolve {
             status,
             x,
