@@ -443,26 +443,41 @@ class MccormickLPRelaxer:
 
         res = milp.solve(time_limit=_remaining(), backend=self._backend)
 
+        # Optional envelope-tightening cut separation. Each round below adds valid
+        # cuts (only tightens the bound) but costs one or more extra LP solves; on
+        # a large relaxation a single solve can take seconds. They are pure
+        # enhancements, so once the node's wall-clock budget is spent we skip the
+        # remaining rounds rather than overrun ``time_limit`` by ~one LP solve
+        # each. (The soundness *verify* guards further down are NOT gated — they
+        # prevent false-optimal/false-infeasible verdicts and must always run.)
+        def _separation_budget_left() -> bool:
+            return _deadline is None or time.perf_counter() < _deadline
+
         # On-demand separation of the exact multilinear hull for products with
         # more factors than the dense RLT cap (those carry only the loose
         # recursive chain). Every separated cut is a supporting hyperplane of the
         # convex/concave envelope, hence valid; adding them only tightens the
         # bound, so the loop is sound at any round.
-        res = self._separate_multilinear(milp, varmap, res, _deadline)
+        if _separation_budget_left():
+            res = self._separate_multilinear(milp, varmap, res, _deadline)
         # Edge-concave / edge-convex quadratic blocks: tighten the joint
         # vertex-polyhedral envelope (cuts on the existing bilinear/square auxes).
-        res = self._separate_edge_concave(milp, varmap, res, _deadline)
+        if _separation_budget_left():
+            res = self._separate_edge_concave(milp, varmap, res, _deadline)
         # Univariate squares ``s = x**2``: the static envelope cuts only at the box
         # endpoints, so deep inside a wide box the convex underestimator is slack.
         # Add the exact supporting tangent at the LP point each round (sound: a
         # tangent of a convex function is a global underestimator).
-        res = self._separate_univariate_square(milp, varmap, res, _deadline)
+        if _separation_budget_left():
+            res = self._separate_univariate_square(milp, varmap, res, _deadline)
         # PSD (moment) cuts: enforce M = [[1,x^T],[x,X]] >= 0 over fully-lifted
         # cliques. Each cut v^T M v >= 0 is a supporting hyperplane valid for every
         # feasible point (X = x x^T), so adding them only tightens the bound.
-        res = self._separate_psd(milp, varmap, res, _deadline)
+        if _separation_budget_left():
+            res = self._separate_psd(milp, varmap, res, _deadline)
         # Targeted RLT (constraint-factor x bound-factor) cuts.
-        res = self._separate_rlt(milp, varmap, res, _deadline)
+        if _separation_budget_left():
+            res = self._separate_rlt(milp, varmap, res, _deadline)
 
         # Soundness guard: a floating-point simplex "infeasible" verdict is NOT
         # a proof that the relaxed feasible set is empty. The spatial-B&B driver

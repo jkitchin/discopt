@@ -2398,6 +2398,12 @@ def solve_model(
                 eliminate=True,
                 polynomial=presolve_polynomial,
                 fbbt=True,
+                # Budget root presolve to a fraction of the solve's time limit so
+                # its (deadline-aware, Rust-side) passes cannot, on a large model,
+                # consume seconds before search even starts. Bound-tightening has
+                # diminishing returns, so a partial presolve under a tight limit
+                # still seeds a usable relaxation.
+                time_limit_ms=int(min(max(0.3 * float(time_limit), 1.0), 30.0) * 1000),
             )
             n_tightened = propagate_bounds_to_model(model, _model_repr)
             elim = _presolve_stats.get("elimination", {})
