@@ -44,8 +44,8 @@
 
 use std::collections::VecDeque;
 
-use super::fbbt::{backward_propagate, forward_propagate, Interval};
-use crate::expr::{ConstraintSense, ExprArena, ExprId, ExprNode, ModelRepr};
+use super::fbbt::{backward_propagate, forward_propagate, snap_integral_interval, Interval};
+use crate::expr::{ConstraintSense, ExprArena, ExprId, ExprNode, ModelRepr, VarType};
 
 /// Per-pass statistics from watch-list FBBT.
 #[derive(Debug, Clone, Default)]
@@ -169,8 +169,14 @@ pub fn fbbt_fixed_point(
             bounds,
         );
 
-        // Detect changes; queue downstream constraints.
+        // Detect changes; queue downstream constraints. Integer/binary vars
+        // are snapped inward to integrality first, so an indicator fixing
+        // counts as a tightening and requeues its watchers (indicator-aware
+        // propagation, consistent with the iterative FBBT loops).
         for (v, prev) in snapshot {
+            if model.variables[v].var_type != VarType::Continuous {
+                bounds[v] = snap_integral_interval(bounds[v]);
+            }
             let cur = bounds[v];
             if cur.is_empty() {
                 stats.infeasible = true;
@@ -371,6 +377,40 @@ mod tests {
         assert_eq!(stats.bound_updates, 0);
         assert_eq!(bounds[0].lo, 0.0);
         assert_eq!(bounds[0].hi, 10.0);
+    }
+
+    /// Indicator inference through the watch queue: guard `x ≤ 10·b` with x
+    /// branched to [3, 10] forces b ≥ 0.3, which snaps to b = 1.
+    #[test]
+    fn infers_binary_through_watch_queue() {
+        let mut arena = ExprArena::new();
+        let x = scalar_var(&mut arena, "x", 0);
+        let b = scalar_var(&mut arena, "b", 1);
+        let mb = lin(&mut arena, 10.0, b);
+        let body = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Sub,
+            left: x,
+            right: mb,
+        });
+        let mut bvar = vinfo("b", 1, 0.0, 1.0);
+        bvar.var_type = VarType::Binary;
+        let model = ModelRepr {
+            arena,
+            objective: x,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![ConstraintRepr {
+                body,
+                sense: ConstraintSense::Le,
+                rhs: 0.0,
+                name: None,
+            }],
+            variables: vec![vinfo("x", 0, 3.0, 10.0), bvar],
+            n_vars: 2,
+        };
+        let mut bounds = vec![Interval::new(3.0, 10.0), Interval::new(0.0, 1.0)];
+        let stats = fbbt_fixed_point(&model, &mut bounds, FbbtFpOptions::default());
+        assert!(!stats.infeasible);
+        assert!((bounds[1].lo - 1.0).abs() < 1e-9 && (bounds[1].hi - 1.0).abs() < 1e-9);
     }
 
     /// Infeasibility detection: `x + 1 ≤ 0` with `x ∈ [0, 10]`.
