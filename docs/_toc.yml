@@ -38,6 +38,7 @@ parts:
       - file: notebooks/solver_internals
       - file: notebooks/presolve
       - file: notebooks/bound_tightening
+      - file: notebooks/infeasibility_iis
       - file: notebooks/sensitivity_analysis
       - file: notebooks/llm_integration
       - file: llm_features
