@@ -73,6 +73,16 @@ def test_sos1_reaches_global_optimum():
     assert min(abs(xv), abs(yv)) < 1e-4  # exact complementarity
 
 
+def test_gdp_reaches_global_optimum():
+    m, x, y = _distance_model()
+    res = solve_mpec(m, [complementarity(x, y)], method="gdp")
+    assert res.objective is not None
+    assert abs(float(res.objective) - 1.0) < 1e-3
+    xv = float(np.asarray(res.x["x"]))
+    yv = float(np.asarray(res.x["y"]))
+    assert min(abs(xv), abs(yv)) < 1e-3  # exact complementarity
+
+
 def test_scholtes_and_sos1_agree():
     m1, x1, y1 = _distance_model()
     r1 = solve_mpec(m1, [complementarity(x1, y1)], method="scholtes")

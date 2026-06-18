@@ -1334,6 +1334,9 @@ class Model:
         self._objective: Optional[Objective] = None
         self._builder = None  # Optional PyModelBuilder, lazy-initialized
         self._aux_counter = 0  # monotonic suffix for if_else auxiliary names
+        # Complementarity conditions added via ``complementarity()``; recorded
+        # for introspection and bound tightening (see ``discopt.mpec``).
+        self._complementarities: list = []
 
     # ── Variable constructors ──
 
@@ -1852,72 +1855,65 @@ class Model:
         x: "Expression",
         y: "Expression",
         *,
+        method: str = "gdp",
         name: Optional[str] = None,
     ):
         r"""Add a complementarity constraint :math:`0 \le x \perp y \ge 0`.
 
         Enforces ``x >= 0``, ``y >= 0`` and ``x * y == 0`` — at least one of
         ``x``, ``y`` is zero. This is the defining structure of MPCCs/MPECs,
-        KKT-reformulated bilevel programs, and equilibrium models.
+        KKT-reformulated bilevel programs, and equilibrium models. The smooth
+        bilinear equality ``x * y == 0`` is avoided: its relaxation cannot
+        capture the either/or structure and it is degenerate at the solution
+        (standard constraint qualifications fail).
 
-        Rather than the smooth bilinear equality ``x * y == 0`` (whose convex
-        relaxation cannot capture the either/or structure and is degenerate at
-        the solution — it violates standard constraint qualifications), this
-        lowers to the exact disjunction ``(x == 0) ∨ (y == 0)`` via
-        :meth:`either_or`. The GDP pass then reformulates it to a big-M / hull
-        model with a selector binary, so branch-and-bound branches on the
-        finite disjunction and FBBT can infer the partner is zero whenever one
-        side is bounded away from zero.
+        This is the fluent front-end for the reformulations in
+        :mod:`discopt.mpec`; the condition is recorded on the model (see
+        ``Model._complementarities``) and immediately reformulated into ordinary
+        constraints solved by :meth:`solve`.
 
         Parameters
         ----------
         x, y : Expression
             The complementary pair. Both are constrained non-negative.
+        method : {"gdp", "sos1"}, default "gdp"
+            Reformulation. ``"gdp"`` lowers to the exact disjunction
+            ``(x == 0) ∨ (y == 0)`` (big-M with a selector binary), so
+            branch-and-bound branches on the finite either/or choice and the
+            integrality-aware FBBT infers the partner is zero when one side is
+            bounded away from zero — markedly fewer nodes than the bilinear
+            encoding. ``"sos1"`` encodes the pair as a Special Ordered Set of
+            type 1. For the Scholtes regularization homotopy (a *solve-time*
+            algorithm, not a static reformulation), use
+            :func:`discopt.mpec.solve_mpec` with ``method="scholtes"``.
         name : str, optional
-            Base name for the generated non-negativity constraints and
-            disjunction.
+            Base name for the generated constraints.
 
         Examples
         --------
         >>> # min (x-1)^2 + (y-1)^2  s.t.  0 <= x ⊥ y >= 0
         >>> m.complementarity(x, y)
         """
-        xv = self._complementarity_operand(x, name, "x")
-        yv = self._complementarity_operand(y, name, "y")
-        self.subject_to(xv >= 0, name=f"{name}_x_nonneg" if name else None)
-        self.subject_to(yv >= 0, name=f"{name}_y_nonneg" if name else None)
-        # Both disjunct bodies are now linear (bare variables for nonlinear
-        # operands, after lifting), so big-M is exact and keeps the selector
-        # binary as a plain linear row — which the integrality-aware FBBT relies
-        # on to infer the partner is zero when one side is bounded away from
-        # zero (the backward complementarity rule). ``method=None`` defers to
-        # the solver-wide ``gdp_method`` (default big-M).
-        self.either_or([[xv == 0], [yv == 0]], name=name)
+        from discopt import mpec
 
-    def _complementarity_operand(
-        self, expr: "Expression", base: Optional[str], tag: str
-    ) -> "Expression":
-        """Return a linear operand for a complementarity disjunct.
-
-        Linear expressions are used directly, so the disjunct ``expr == 0``
-        stays linear and big-M is exact. A *nonlinear* body is lifted into an
-        auxiliary variable ``u`` with ``u == expr``: the disjunction is then
-        linear in ``u`` (exact big-M, working FBBT backward rule), while the
-        nonlinear part becomes an ordinary smooth equality handled natively by
-        the NLP relaxation pipeline — avoiding the perspective of a nonlinear
-        equality, whose relaxation the big-M form bounds unreliably and the
-        hull form often cannot linearize.
-        """
-        from discopt._jax.gdp_reformulate import _is_linear
-
-        ew = _wrap(expr)
-        if _is_linear(ew):
-            return ew
-        lo, hi = self._branch_bounds(ew, ew)
-        self._aux_counter += 1
-        u = self.continuous(f"_{base or 'comp'}_{tag}_{self._aux_counter}", lb=lo, ub=hi)
-        self.subject_to(u == ew, name=f"{base}_{tag}_lift" if base else None)
-        return u
+        pair = mpec.Complementarity(_wrap(x), _wrap(y), name)
+        self._complementarities.append(pair)
+        if method == "gdp":
+            mpec.reformulate_gdp(self, [pair])
+        elif method == "sos1":
+            mpec.reformulate_sos1(self, [pair])
+        elif method == "scholtes":
+            raise ValueError(
+                "method='scholtes' is a solve-time regularization homotopy, not "
+                "a static reformulation. Build the pair with "
+                "discopt.mpec.complementarity(...) and call "
+                "discopt.mpec.solve_mpec(model, pairs, method='scholtes')."
+            )
+        else:
+            raise ValueError(
+                f"unknown complementarity method {method!r}; use 'gdp' or 'sos1' "
+                "(or discopt.mpec.solve_mpec for 'scholtes')."
+            )
 
     def _branch_bounds(
         self, then_expr: "Expression", else_expr: "Expression"

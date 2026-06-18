@@ -1480,3 +1480,55 @@ class TestComplementarity:
         assert rd.node_count < rb.node_count
         # and its optimality gap is certified to (near) zero.
         assert rd.gap == pytest.approx(0.0, abs=1e-6)
+
+    def test_records_pair_and_delegates_to_mpec(self):
+        # The fluent front-end records the condition (for introspection /
+        # bound tightening) and is backed by discopt.mpec.
+        from discopt.mpec import Complementarity
+
+        m = dm.Model("rec")
+        x = m.continuous("x", lb=0, ub=10)
+        y = m.continuous("y", lb=0, ub=10)
+        m.complementarity(x, y, name="cc")
+        assert len(m._complementarities) == 1
+        assert isinstance(m._complementarities[0], Complementarity)
+
+    def test_sos1_method_routes_to_sos_and_solves(self):
+        from discopt.modeling.core import _SOSConstraint
+
+        m = dm.Model("cc_sos1")
+        x = m.continuous("x", lb=0, ub=10)
+        y = m.continuous("y", lb=0, ub=10)
+        m.minimize((x - 1) ** 2 + (y - 1) ** 2)
+        m.complementarity(x, y, method="sos1")
+        # An SOS1 set was added rather than a disjunction.
+        assert any(isinstance(c, _SOSConstraint) for c in m._constraints)
+
+    @pytest.mark.slow
+    def test_gdp_and_sos1_reach_same_optimum(self):
+        def build(method):
+            m = dm.Model(f"cc_{method}")
+            x = m.continuous("x", lb=0, ub=10)
+            y = m.continuous("y", lb=0, ub=10)
+            m.minimize((x - 1) ** 2 + (y - 1) ** 2)
+            m.complementarity(x, y, method=method)
+            return m
+
+        rg = build("gdp").solve(time_limit=30.0, gap_tolerance=1e-6)
+        rs = build("sos1").solve(time_limit=30.0, gap_tolerance=1e-6)
+        assert rg.objective == pytest.approx(1.0, abs=1e-3)
+        assert rs.objective == pytest.approx(1.0, abs=1e-3)
+
+    def test_scholtes_method_points_to_solve_mpec(self):
+        m = dm.Model("cc_sch")
+        x = m.continuous("x", lb=0, ub=10)
+        y = m.continuous("y", lb=0, ub=10)
+        with pytest.raises(ValueError, match="solve_mpec"):
+            m.complementarity(x, y, method="scholtes")
+
+    def test_unknown_method_raises(self):
+        m = dm.Model("cc_bad")
+        x = m.continuous("x", lb=0, ub=10)
+        y = m.continuous("y", lb=0, ub=10)
+        with pytest.raises(ValueError, match="unknown complementarity method"):
+            m.complementarity(x, y, method="nope")
