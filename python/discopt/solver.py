@@ -992,6 +992,20 @@ def _generate_starting_points(node_lb, node_ub, n_random=2):
         lb_clipped + 0.75 * span,  # upper-quarter
     ]
 
+    # Near-lower-bound start (small *absolute* offset, not a span fraction).
+    # Half-bounded variables (finite lb, +inf ub) get clipped to ``[lb, _SPC]``,
+    # so every span-fraction start (midpoint, quarters, randoms) lands tens of
+    # units above the lower bound -- a poor interior-point seed for flows /
+    # areas / temperatures whose natural feasible scale is O(1) near their lower
+    # bound (heatexch_gen3: the clip-midpoint seed plateaus constraint-
+    # infeasible at viol~3e-4, while a seed 0.1 above the lower bound converges
+    # to viol~4e-7). The absolute offset reaches feasibility where a 0.25-span
+    # offset (== lb+25 here) does not. Added once, tried before the random
+    # starts; multistart keeps the best constraint-feasible iterate, so this
+    # only ever adds a start -- it cannot worsen the returned point.
+    _near_lb_offset = np.minimum(0.1, 0.25 * np.where(span > 0.0, span, 0.1))
+    points.append(lb_clipped + _near_lb_offset)
+
     rng = np.random.RandomState(42)
     for _ in range(n_random):
         points.append(lb_clipped + rng.uniform(size=lb_clipped.shape) * span)
@@ -1008,6 +1022,7 @@ def _solve_root_node_multistart(
     nlp_solver,
     n_random=None,
     convex=False,
+    deadline=None,
 ):
     """Solve root NLP relaxation from multiple starting points.
 
@@ -1035,7 +1050,19 @@ def _solve_root_node_multistart(
     best_obj = np.inf
     last_result = None
 
-    for x0 in starting_points:
+    for _start_idx, x0 in enumerate(starting_points):
+        # Deadline enforcement: each NLP start is a full local solve (seconds on
+        # large models). Without a stop the multistart can run all ~N starts well
+        # past a tight ``time_limit`` (heatexch_gen3: 14 starts × ~4.4 s = 62 s
+        # under a 15 s budget). Always run the first start (we must return some
+        # iterate), then stop launching new starts once the deadline has passed,
+        # and shrink each start's own wall budget to the time actually left.
+        if deadline is not None and _start_idx > 0:
+            _ms_remaining = deadline - time.perf_counter()
+            if _ms_remaining <= 0.0:
+                break
+            options = dict(options)
+            options["max_wall_time"] = max(_ms_remaining, _DEADLINE_NODE_FLOOR_S)
         nlp_result = _solve_node_nlp(
             evaluator,
             x0,
@@ -1974,13 +2001,28 @@ def solve_model(
             "by 'pounce', a pure-Rust port of Ipopt.)"
         )
 
+    # Anchor the whole-solve clock HERE, before any reformulation / presolve /
+    # relaxation-build work — not at the B&B loop entry below. Preprocessing
+    # (root presolve, OBBT, relaxation build) can take tens of seconds on large
+    # models; counting it from a clock that only starts at the loop let a
+    # ``solve(time_limit=N)`` overrun to several×N. ``t_start`` is set to this
+    # anchor at the loop entry so every downstream deadline check
+    # (``now - t_start > time_limit``) and the reported wall time include the
+    # preprocessing, and ``_remaining_budget()`` lets each preprocessing phase
+    # clamp its own internal budget to the time actually left.
+    _solve_t0 = time.perf_counter()
+
+    def _remaining_budget() -> float:
+        return max(0.0, float(time_limit) - (time.perf_counter() - _solve_t0))
+
     # Reset the per-solve convexity-classification memo (a previous solve, or an
     # IIS feasibility probe, may have cached a verdict for a different constraint
     # set), and budget classification to a fraction of the time limit so it
     # cannot, on its own, overrun ``time_limit`` (issue: tens of seconds of
     # eigenvalue work on large quadratic models before search even starts).
     model._convexity_classification_cache = None
-    model._convexity_time_budget = min(max(0.2 * float(time_limit), 0.5), 20.0)
+    _convexity_time_budget = min(max(0.2 * float(time_limit), 0.5), 20.0)
+    model._convexity_time_budget = _convexity_time_budget
 
     # --- AMP (Adaptive Multivariate Partitioning) global solver ---
     _solver = solver if solver is not None else kwargs.pop("solver", None)
@@ -2364,6 +2406,14 @@ def solve_model(
             _prereform_model = model
             _prereform_nvars = sum(v.size for v in model._variables)
             model = factorable_reformulate(model)
+            # factorable_reformulate builds a FRESH model object that does not
+            # carry the convexity-classification budget attribute. Without this
+            # the dispatch classify below reads the 15 s default instead of the
+            # intended fraction of ``time_limit`` and can overrun a tight budget
+            # on the (larger) lifted model — heatexch_gen3: 12 s classify under a
+            # 15 s solve budget. Re-assert the budget (and clear any stale cache).
+            model._convexity_classification_cache = None
+            model._convexity_time_budget = _convexity_time_budget
         # A *convex* model with a clearable denominator is deliberately left
         # untouched here: many such divisions (e.g. the rotated-SOC ``x**2/z``)
         # are solved exactly by the convex NLP fast path, and clearing would
@@ -2393,11 +2443,22 @@ def solve_model(
                 run_root_presolve,
             )
 
+            # Cap presolve to a fraction of the time limit, further clamped to
+            # the time actually left. Without a cap the Rust orchestrator runs
+            # to its iteration cap (16 sweeps, ~1s each on large models), which
+            # on its own can overrun a tight ``time_limit`` before search starts
+            # (e.g. contvar: 17.5s of presolve under a 15s budget). The Rust
+            # side honours ``time_limit_ms`` between sweeps, so the overrun is
+            # bounded by a single sweep.
+            _presolve_budget_s = min(
+                min(max(0.25 * float(time_limit), 2.0), 30.0), _remaining_budget()
+            )
             _model_repr, _presolve_stats = run_root_presolve(
                 _model_repr,
                 eliminate=True,
                 polynomial=presolve_polynomial,
                 fbbt=True,
+                time_limit_ms=int(_presolve_budget_s * 1000),
             )
             n_tightened = propagate_bounds_to_model(model, _model_repr)
             elim = _presolve_stats.get("elimination", {})
@@ -2488,7 +2549,10 @@ def solve_model(
                 stacklevel=2,
             )
 
-    t_start = time.perf_counter()
+    # Anchor at the whole-solve clock (set before reformulation/presolve above)
+    # so every ``now - t_start > time_limit`` deadline check and the reported
+    # wall time account for the preprocessing already spent.
+    t_start = _solve_t0
     rust_time = 0.0
     jax_time = 0.0
 
@@ -2833,7 +2897,7 @@ def solve_model(
         try:
             from discopt._jax.obbt import obbt_tighten_root
 
-            _obbt_budget = min(max(time_limit * 0.1, 2.0), 15.0)
+            _obbt_budget = min(min(max(time_limit * 0.1, 2.0), 15.0), _remaining_budget())
             _obbt_res = obbt_tighten_root(
                 model,
                 lb,
@@ -3731,6 +3795,7 @@ def solve_model(
                         _active_cb,
                         opts,
                         nlp_solver,
+                        deadline=_deadline,
                     )
                 elif iteration > 0 and _node_nlp_due:
                     # Warm-start from parent solution if available
@@ -4131,6 +4196,7 @@ def solve_model(
                         max_rounds=5,
                         backend=_resolve_heuristic_backend(nlp_solver),
                         evaluator=evaluator,
+                        deadline=t_start + time_limit,
                     )
                     if fp_sol is not None:
                         fp_obj = float(evaluator.evaluate_objective(fp_sol))
@@ -4217,6 +4283,10 @@ def solve_model(
                             backend=_subnlp_backend_fn,
                             nlp_options=subnlp_options,
                             evaluator=evaluator,
+                            # Single root attempt (no loop): give it a fair budget
+                            # so it can converge to a feasible incumbent even if
+                            # preprocessing already consumed the deadline.
+                            time_budget=min(3.0, float(time_limit)),
                         )
                     except Exception as _e:
                         logger.debug("subnlp (gams seed) raised: %s", _e)
@@ -4248,6 +4318,10 @@ def solve_model(
                         backend=_subnlp_backend_fn,
                         nlp_options=subnlp_options,
                         evaluator=evaluator,
+                        # Single root fallback attempt (no loop): give it a fair
+                        # budget so it can converge even if preprocessing already
+                        # consumed the deadline.
+                        time_budget=min(3.0, float(time_limit)),
                     )
                 except Exception as _e:
                     logger.debug("subnlp raised: %s", _e)
@@ -4263,10 +4337,30 @@ def solve_model(
                 _try_idxs = (
                     [i for i, _ in _cands_sn] if iteration == 0 else [i for i, _ in _cands_sn[:1]]
                 )
-                for _i in _try_idxs:
+                for _loop_idx, _i in enumerate(_try_idxs):
                     if _subnlp_calls >= subnlp_max_calls:
                         break
+                    # Deadline enforcement: each subnlp is a round-and-repair NLP
+                    # search (seconds on large models). At the root ``_try_idxs``
+                    # can hold many candidates, so without a stop the loop runs
+                    # well past a tight ``time_limit``. Always attempt the first
+                    # candidate (a feasible incumbent is the primary goal, worth a
+                    # small overrun); only the *extra* candidates are deadline-gated
+                    # so the loop cannot run well past a tight ``time_limit``. Each
+                    # call's own wall budget is clamped to the time left (floored).
+                    _sn_remaining = _deadline - time.perf_counter()
+                    if _loop_idx > 0 and _sn_remaining <= 0.0:
+                        break
                     _subnlp_calls += 1
+                    # The first candidate gets a full (un-clamped) budget so one
+                    # NLP solve can actually converge to a feasible incumbent even
+                    # if the deadline just passed; later candidates are clamped to
+                    # the remaining time so the loop cannot keep overrunning.
+                    _sn_budget = (
+                        3.0
+                        if _loop_idx == 0
+                        else min(3.0, max(_DEADLINE_NODE_FLOOR_S, _sn_remaining))
+                    )
                     try:
                         _sn = _subnlp(
                             model,
@@ -4274,6 +4368,7 @@ def solve_model(
                             backend=_subnlp_backend_fn,
                             nlp_options=subnlp_options,
                             evaluator=evaluator,
+                            time_budget=_sn_budget,
                         )
                     except Exception as _e:
                         logger.debug("subnlp raised: %s", _e)
@@ -5130,6 +5225,7 @@ def _solve_nlp_bb(
                         opts,
                         nlp_solver,
                         convex=_model_is_convex,
+                        deadline=t_start + time_limit,
                     )
                 else:
                     psol_i = np.array(batch_psols[i])
@@ -5229,6 +5325,7 @@ def _solve_nlp_bb(
                         max_rounds=5,
                         backend=_resolve_heuristic_backend(nlp_solver),
                         evaluator=evaluator,
+                        deadline=t_start + time_limit,
                     )
                     if fp_sol is not None:
                         fp_obj = float(evaluator.evaluate_objective(fp_sol))

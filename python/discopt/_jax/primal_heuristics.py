@@ -9,6 +9,7 @@ and re-solves the resulting NLP.
 from __future__ import annotations
 
 import itertools
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -182,6 +183,7 @@ def feasibility_pump(
     ipopt_options: Optional[dict] = None,
     backend: Optional[Callable] = None,
     evaluator: Optional[NLPEvaluator] = None,
+    deadline: Optional[float] = None,
 ) -> Optional[np.ndarray]:
     """Try to find an integer-feasible solution via rounding + re-solve.
 
@@ -198,6 +200,11 @@ def feasibility_pump(
         backend: ``solve_nlp(evaluator, x0, options=...)`` callable. If None,
             resolves to ``get_nlp_solver("auto")``
             (POUNCE-preferred, falling back to cyipopt).
+        deadline: Optional ``time.perf_counter()`` wall-clock deadline. When the
+            current time reaches it, the pump stops at the start of the next
+            round and returns the best feasible solution found so far (or None).
+            Keeps a tight global ``time_limit`` from being overrun by the root
+            heuristic's per-round NLP solves.
         evaluator: Optional prebuilt :class:`NLPEvaluator` for ``model``. Reusing
             the caller's evaluator avoids rebuilding (and recompiling, ~3s) the
             JAX sparse-Hessian/Jacobian kernels for the same model structure.
@@ -227,6 +234,11 @@ def feasibility_pump(
     rng = np.random.default_rng(42)
 
     for round_idx in range(max_rounds):
+        # Always run the first round (a feasible incumbent is the primary goal,
+        # worth a small overrun); only the *extra* perturbation rounds are
+        # deadline-gated so the pump cannot loop well past a tight ``time_limit``.
+        if deadline is not None and round_idx > 0 and time.perf_counter() >= deadline:
+            break
         x_try = x_nlp.copy()
 
         # Round integer variables
@@ -346,6 +358,7 @@ def subnlp(
     integer_tol: float = 1e-5,
     feas_tol: float = 1e-6,
     evaluator: Optional[NLPEvaluator] = None,
+    time_budget: Optional[float] = None,
 ) -> Optional[tuple[np.ndarray, float]]:
     """SubNLP-style primal heuristic: fix integers, re-solve continuous NLP.
 
@@ -366,6 +379,12 @@ def subnlp(
         integer_tol: Tolerance for declaring integer feasibility.
         feas_tol: Tolerance for declaring constraint feasibility.
         evaluator: Pre-built NLPEvaluator; one is constructed if omitted.
+        time_budget: Optional wall-clock cap (seconds) for the inner NLP solve.
+            When set (and positive), it is forwarded to the backend as the
+            ``max_wall_time`` option so a single subNLP solve cannot run past the
+            caller's deadline. Unaccepted by backends that ignore the key (it is
+            silently skipped there). An explicit ``max_wall_time`` already in
+            ``nlp_options`` takes precedence.
 
     Returns:
         ``(x, obj)`` if the heuristic produced a usable integer- and
@@ -406,6 +425,8 @@ def subnlp(
 
         opts = dict(nlp_options) if nlp_options else {}
         opts.setdefault("print_level", 0)
+        if time_budget is not None and time_budget > 0.0:
+            opts.setdefault("max_wall_time", float(time_budget))
 
         try:
             nlp_result = backend(evaluator, x0, options=opts)
