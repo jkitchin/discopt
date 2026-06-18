@@ -209,6 +209,57 @@ mod tests {
     }
 
     #[test]
+    fn infers_indicator_binary_at_node() {
+        // Guard x ≤ 10·b, x ∈ [0, 10], b binary. At a node where branching has
+        // tightened x to [3, 10], FBBT infers b ≥ 0.3 and snaps it to b = 1 —
+        // per-node indicator propagation (issue #230). This is the integration
+        // the root-only probing pass cannot deliver inside the tree.
+        let mut arena = ExprArena::new();
+        let x = scalar_var(&mut arena, "x", 0);
+        let b = scalar_var(&mut arena, "b", 1);
+        let m = arena.add(ExprNode::Constant(10.0));
+        let mb = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: m,
+            right: b,
+        });
+        let body = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Sub,
+            left: x,
+            right: mb,
+        });
+        let mut bvar = vinfo("b", 0.0, 1.0);
+        bvar.var_type = VarType::Binary;
+        let model = ModelRepr {
+            arena,
+            objective: x,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![ConstraintRepr {
+                body,
+                sense: ConstraintSense::Le,
+                rhs: 0.0,
+                name: None,
+            }],
+            variables: vec![vinfo("x", 0.0, 10.0), bvar],
+            n_vars: 2,
+        };
+        let opts = InTreePresolveOptions {
+            depth_stride: 1,
+            max_iter: 16,
+            tol: 1e-9,
+        };
+        let delta = run_in_tree_presolve(&model, &[3.0, 0.0], &[10.0, 1.0], 1, None, &opts);
+        assert!(delta.ran);
+        assert!(!delta.infeasible);
+        assert!(
+            (delta.lb[1] - 1.0).abs() <= 1e-6,
+            "binary should be fixed to 1 at the node, got [{}, {}]",
+            delta.lb[1],
+            delta.ub[1]
+        );
+    }
+
+    #[test]
     fn skips_when_depth_stride_zero() {
         let model = x_plus_y_le_5();
         let opts = InTreePresolveOptions {

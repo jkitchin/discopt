@@ -1334,3 +1334,201 @@ class TestIfElse:
         assert r.status in ("optimal", "feasible")
         assert r.objective == pytest.approx(1.0, abs=1e-3)
         assert r.x["x"] == pytest.approx(1.0, abs=1e-2)
+
+
+# ── Complementarity constraints (0 <= x ⊥ y >= 0) ──
+
+
+class TestComplementarity:
+    """``Model.complementarity`` lowers ``0 <= x ⊥ y >= 0`` to the exact
+    disjunction ``(x == 0) ∨ (y == 0)`` (issue #231), avoiding the weak,
+    degenerate smooth ``x*y == 0`` encoding."""
+
+    def test_lowers_to_nonneg_plus_disjunction(self):
+        m = dm.Model("comp")
+        x = m.continuous("x", lb=0, ub=10)
+        y = m.continuous("y", lb=0, ub=10)
+        m.minimize(x + y)
+        m.complementarity(x, y, name="cc")
+
+        # Two non-negativity inequalities plus one disjunction.
+        from discopt.modeling.core import _DisjunctiveConstraint
+
+        disjunctions = [c for c in m._constraints if isinstance(c, _DisjunctiveConstraint)]
+        plain = [c for c in m._constraints if isinstance(c, Constraint)]
+        assert len(disjunctions) == 1
+        assert len(disjunctions[0].disjuncts) == 2
+        assert len(plain) == 2
+
+        # After GDP reformulation: selector binaries appear and the disjunction
+        # becomes big-M rows (no disjunction objects remain).
+        new_m = reformulate_gdp(m)
+        assert not any(isinstance(c, _DisjunctiveConstraint) for c in new_m._constraints)
+        n_aux = len(new_m._variables) - len(m._variables)
+        assert n_aux == 2  # one selector per disjunct
+
+    @pytest.mark.slow
+    def test_mpcc_solves_to_global_optimum(self):
+        # min (x-1)^2 + (y-1)^2  s.t.  0 <= x ⊥ y >= 0.
+        # The unconstrained minimiser (1, 1) is complementarity-infeasible;
+        # the global optimum is 1.0 at (0, 1) or (1, 0).
+        m = dm.Model("mpcc")
+        x = m.continuous("x", lb=0, ub=10)
+        y = m.continuous("y", lb=0, ub=10)
+        m.minimize((x - 1) ** 2 + (y - 1) ** 2)
+        m.complementarity(x, y)
+
+        r = m.solve(time_limit=30.0, gap_tolerance=1e-6)
+        assert r.status in ("optimal", "feasible")
+        assert r.objective == pytest.approx(1.0, abs=1e-3)
+        # Complementarity holds: at least one side is zero.
+        assert r.x["x"] * r.x["y"] == pytest.approx(0.0, abs=1e-4)
+        assert min(r.x["x"], r.x["y"]) == pytest.approx(0.0, abs=1e-3)
+
+    @pytest.mark.slow
+    def test_partner_forced_zero_when_one_side_bounded_away(self):
+        # x is bounded away from 0 (x >= 2), so complementarity forces y = 0,
+        # even though the objective would prefer y = 5. This is the backward
+        # complementarity rule (x_L > 0 => y = 0) realised through the
+        # disjunction + indicator FBBT.
+        m = dm.Model("comp_backward")
+        x = m.continuous("x", lb=2, ub=10)
+        y = m.continuous("y", lb=0, ub=10)
+        m.minimize((y - 5) ** 2)
+        m.complementarity(x, y)
+
+        r = m.solve(time_limit=30.0, gap_tolerance=1e-6)
+        assert r.status in ("optimal", "feasible")
+        assert r.x["y"] == pytest.approx(0.0, abs=1e-3)
+        assert r.objective == pytest.approx(25.0, abs=1e-2)
+
+    def test_nonlinear_operand_is_lifted_to_keep_disjunction_linear(self):
+        # A nonlinear complementary body is lifted into an auxiliary variable
+        # u == x**2 so the disjunction stays linear (u == 0) -- big-M is then
+        # exact rather than relaxing the perspective of a nonlinear equality.
+        from discopt.modeling.core import _DisjunctiveConstraint
+
+        m = dm.Model("nl_lift")
+        x = m.continuous("x", lb=-3, ub=3)
+        y = m.continuous("y", lb=0, ub=3)
+        m.complementarity(x**2, y, name="cc")
+
+        # One auxiliary variable (the lift) was introduced for x**2; y is a bare
+        # variable and is used directly.
+        assert len(m._variables) == 3
+        # The disjunction defers to the solver-wide gdp_method (big-M), not hull.
+        disj = next(c for c in m._constraints if isinstance(c, _DisjunctiveConstraint))
+        assert disj.method is None
+        # A nonlinear lift equality u == x**2 was added.
+        lift = [
+            c
+            for c in m._constraints
+            if isinstance(c, Constraint) and c.sense == "==" and not _is_linear(c.body)
+        ]
+        assert len(lift) == 1
+
+    @pytest.mark.slow
+    def test_nonlinear_mpcc_solves_to_global_optimum(self):
+        # min (x-2)^2 + (y-2)^2  s.t.  0 <= x^2 ⊥ y >= 0.
+        # Either x^2 == 0 (x == 0, giving (0, 2) at value 4) or y == 0
+        # (giving (2, 0) at value 4); global optimum is 4.0.
+        m = dm.Model("nl_mpcc")
+        x = m.continuous("x", lb=-3, ub=3)
+        y = m.continuous("y", lb=0, ub=3)
+        m.minimize((x - 2) ** 2 + (y - 2) ** 2)
+        m.complementarity(x**2, y)
+
+        r = m.solve(time_limit=30.0, gap_tolerance=1e-6)
+        assert r.status in ("optimal", "feasible")
+        assert r.objective == pytest.approx(4.0, abs=1e-2)
+        # Complementarity holds: x^2 * y == 0.
+        assert (r.x["x"] ** 2) * r.x["y"] == pytest.approx(0.0, abs=1e-3)
+
+    @pytest.mark.slow
+    def test_disjunctive_encoding_explores_fewer_nodes_than_bilinear(self):
+        # Performance: the disjunctive encoding branches on the finite
+        # (x == 0) ∨ (y == 0) choice and prunes with the integrality-aware FBBT,
+        # so it explores far fewer B&B nodes -- and certifies a zero gap --
+        # versus the smooth x*y == 0 encoding, which needs spatial branching on
+        # the bilinear term and stalls against MPCC constraint-qualification
+        # failures.
+        def disjunctive():
+            m = dm.Model("disj")
+            x = m.continuous("x", lb=0, ub=10)
+            y = m.continuous("y", lb=0, ub=10)
+            m.minimize((x - 1) ** 2 + (y - 1) ** 2)
+            m.complementarity(x, y)
+            return m
+
+        def bilinear():
+            m = dm.Model("bilin")
+            x = m.continuous("x", lb=0, ub=10)
+            y = m.continuous("y", lb=0, ub=10)
+            m.minimize((x - 1) ** 2 + (y - 1) ** 2)
+            m.subject_to(x >= 0)
+            m.subject_to(y >= 0)
+            m.subject_to(x * y == 0)
+            return m
+
+        rd = disjunctive().solve(time_limit=30.0, gap_tolerance=1e-6)
+        rb = bilinear().solve(time_limit=30.0, gap_tolerance=1e-6)
+
+        # Both reach the same global optimum (1.0)...
+        assert rd.objective == pytest.approx(1.0, abs=1e-3)
+        assert rb.objective == pytest.approx(1.0, abs=1e-3)
+        # ...but the disjunctive tree is markedly smaller.
+        assert rd.node_count < rb.node_count
+        # and its optimality gap is certified to (near) zero.
+        assert rd.gap == pytest.approx(0.0, abs=1e-6)
+
+    def test_records_pair_and_delegates_to_mpec(self):
+        # The fluent front-end records the condition (for introspection /
+        # bound tightening) and is backed by discopt.mpec.
+        from discopt.mpec import Complementarity
+
+        m = dm.Model("rec")
+        x = m.continuous("x", lb=0, ub=10)
+        y = m.continuous("y", lb=0, ub=10)
+        m.complementarity(x, y, name="cc")
+        assert len(m._complementarities) == 1
+        assert isinstance(m._complementarities[0], Complementarity)
+
+    def test_sos1_method_routes_to_sos_and_solves(self):
+        from discopt.modeling.core import _SOSConstraint
+
+        m = dm.Model("cc_sos1")
+        x = m.continuous("x", lb=0, ub=10)
+        y = m.continuous("y", lb=0, ub=10)
+        m.minimize((x - 1) ** 2 + (y - 1) ** 2)
+        m.complementarity(x, y, method="sos1")
+        # An SOS1 set was added rather than a disjunction.
+        assert any(isinstance(c, _SOSConstraint) for c in m._constraints)
+
+    @pytest.mark.slow
+    def test_gdp_and_sos1_reach_same_optimum(self):
+        def build(method):
+            m = dm.Model(f"cc_{method}")
+            x = m.continuous("x", lb=0, ub=10)
+            y = m.continuous("y", lb=0, ub=10)
+            m.minimize((x - 1) ** 2 + (y - 1) ** 2)
+            m.complementarity(x, y, method=method)
+            return m
+
+        rg = build("gdp").solve(time_limit=30.0, gap_tolerance=1e-6)
+        rs = build("sos1").solve(time_limit=30.0, gap_tolerance=1e-6)
+        assert rg.objective == pytest.approx(1.0, abs=1e-3)
+        assert rs.objective == pytest.approx(1.0, abs=1e-3)
+
+    def test_scholtes_method_points_to_solve_mpec(self):
+        m = dm.Model("cc_sch")
+        x = m.continuous("x", lb=0, ub=10)
+        y = m.continuous("y", lb=0, ub=10)
+        with pytest.raises(ValueError, match="solve_mpec"):
+            m.complementarity(x, y, method="scholtes")
+
+    def test_unknown_method_raises(self):
+        m = dm.Model("cc_bad")
+        x = m.continuous("x", lb=0, ub=10)
+        y = m.continuous("y", lb=0, ub=10)
+        with pytest.raises(ValueError, match="unknown complementarity method"):
+            m.complementarity(x, y, method="nope")

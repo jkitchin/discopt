@@ -5,6 +5,7 @@
 
 use crate::expr::{
     BinOp, ConstraintSense, ExprArena, ExprId, ExprNode, MathFunc, ModelRepr, ObjectiveSense, UnOp,
+    VarType,
 };
 use std::f64::consts::PI;
 
@@ -1033,6 +1034,56 @@ impl ExprArena {
 }
 
 // ─────────────────────────────────────────────────────────────
+// Integrality-aware snapping (binary-indicator propagation)
+// ─────────────────────────────────────────────────────────────
+
+/// Integrality margin for snapping FBBT-derived bounds on integer and binary
+/// variables. A derived bound must cross an integer by more than this before
+/// we round inward, so eps-scale residuals (GDP hull perspective / McCormick
+/// noise at integer faces, ~1e-8) cannot fix a variable wrongly and cut off a
+/// feasible point. Matches the soundness margin used elsewhere ([`FEAS_TOL`]).
+pub(crate) const INTEGRALITY_SNAP_TOL: f64 = FEAS_TOL;
+
+/// Round one FBBT-derived interval inward to integrality.
+///
+/// For an integer-constrained variable, a continuous lower bound `lo` implies
+/// the integer bound `ceil(lo)` and an upper bound `hi` implies `floor(hi)`,
+/// since every feasible value is integral. This is always a sound tightening:
+/// it can only discard non-integer slack, never a feasible integer point. The
+/// `INTEGRALITY_SNAP_TOL` pullback makes it conservative — a bound a hair past
+/// an integer is treated as that integer rather than rounded to the next one,
+/// so eps-scale residuals can't fix a variable wrongly. `ceil`/`floor` of ±inf
+/// stay ±inf, so unbounded sides pass through. An empty input is returned
+/// unchanged; a value squeezed to neither 0 nor 1 (for a binary) yields an
+/// empty interval — a genuine integer infeasibility the caller detects.
+pub(crate) fn snap_integral_interval(iv: Interval) -> Interval {
+    if iv.is_empty() {
+        return iv;
+    }
+    Interval::new(
+        (iv.lo - INTEGRALITY_SNAP_TOL).ceil(),
+        (iv.hi + INTEGRALITY_SNAP_TOL).floor(),
+    )
+}
+
+/// Snap derived bounds to integrality for every integer and binary variable.
+///
+/// This is what makes FBBT *indicator-aware*. A big-M guard
+/// `g(x) ≤ M·(1 − b)` back-propagates an interval onto the binary `b`; snapping
+/// that interval to `{0, 1}` fixes `b` whenever the guarded body is forced
+/// feasible/infeasible (the backward indicator rule). Once `b` is fixed, the
+/// next forward sweep evaluates `M·(1 − b)` exactly, activating or deactivating
+/// the guard and tightening the guarded continuous variables (the forward
+/// indicator rule).
+fn snap_integral_bounds(model: &ModelRepr, var_bounds: &mut [Interval]) {
+    for (i, v) in model.variables.iter().enumerate() {
+        if v.var_type != VarType::Continuous {
+            var_bounds[i] = snap_integral_interval(var_bounds[i]);
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
 // Fixed-point FBBT
 // ─────────────────────────────────────────────────────────────
 
@@ -1122,6 +1173,11 @@ pub fn fbbt_with_cutoff(
             );
         }
 
+        // Snap derived bounds to integrality (indicator-aware propagation).
+        // Done before the convergence check so a freshly-fixed binary is fed
+        // back into the next forward sweep within this same call.
+        snap_integral_bounds(model, &mut var_bounds);
+
         let mut max_change = 0.0_f64;
         for i in 0..n_vars {
             let dlo = (var_bounds[i].lo - old_bounds[i].lo).abs();
@@ -1190,6 +1246,9 @@ pub fn fbbt(model: &ModelRepr, max_iter: usize, tol: f64) -> Vec<Interval> {
                 &mut var_bounds,
             );
         }
+
+        // Snap derived bounds to integrality (indicator-aware propagation).
+        snap_integral_bounds(model, &mut var_bounds);
 
         // Check convergence.
         let mut max_change = 0.0_f64;
@@ -2154,6 +2213,174 @@ mod tests {
         assert!(
             bounds.iter().all(|b| b.is_empty()),
             "a violation beyond the feasibility tolerance must be infeasible"
+        );
+    }
+
+    // ── Integrality-aware (binary-indicator) propagation ──────────
+
+    fn scalar(arena: &mut ExprArena, name: &str, index: usize) -> ExprId {
+        arena.add(ExprNode::Variable {
+            name: name.into(),
+            index,
+            size: 1,
+            shape: vec![],
+        })
+    }
+
+    fn ivar(name: &str, vt: VarType, lb: f64, ub: f64) -> VarInfo {
+        VarInfo {
+            name: name.into(),
+            var_type: vt,
+            offset: 0,
+            size: 1,
+            shape: vec![],
+            lb: vec![lb],
+            ub: vec![ub],
+        }
+    }
+
+    /// Build `x - coeff*b ≤ 0` with x continuous and b binary.
+    /// With coeff = M this is the big-M guard `x ≤ M·b`.
+    fn make_indicator_model(x_lb: f64, x_ub: f64, coeff: f64) -> ModelRepr {
+        let mut arena = ExprArena::new();
+        let x = scalar(&mut arena, "x", 0);
+        let b = scalar(&mut arena, "b", 1);
+        let c = arena.add(ExprNode::Constant(coeff));
+        let mb = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: c,
+            right: b,
+        });
+        let body = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Sub,
+            left: x,
+            right: mb,
+        });
+        ModelRepr {
+            arena,
+            objective: x,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![ConstraintRepr {
+                body,
+                sense: ConstraintSense::Le,
+                rhs: 0.0,
+                name: Some("guard".into()),
+            }],
+            variables: vec![
+                ivar("x", VarType::Continuous, x_lb, x_ub),
+                ivar("b", VarType::Binary, 0.0, 1.0),
+            ],
+            n_vars: 2,
+        }
+    }
+
+    #[test]
+    fn test_indicator_backward_infers_binary() {
+        // Guard x ≤ 10·b, with branching already forcing x ∈ [3, 10].
+        // Then b ≥ x/10 ≥ 0.3, and since b ∈ {0,1}, b must be 1.
+        let model = make_indicator_model(3.0, 10.0, 10.0);
+        let bounds = fbbt(&model, 8, 1e-9);
+        assert!(!bounds.iter().any(|b| b.is_empty()));
+        assert!(
+            (bounds[1].lo - 1.0).abs() < 1e-9 && (bounds[1].hi - 1.0).abs() < 1e-9,
+            "binary should be inferred = 1, got {:?}",
+            bounds[1]
+        );
+    }
+
+    #[test]
+    fn test_indicator_forward_activates_guard() {
+        // Guard x ≤ 10·b with b fixed to 0 (e.g. by branching). The guard then
+        // forces x ≤ 0; combined with x ≥ 0 this pins x to 0.
+        let mut model = make_indicator_model(0.0, 10.0, 10.0);
+        model.variables[1].lb = vec![0.0];
+        model.variables[1].ub = vec![0.0]; // b = 0
+        let bounds = fbbt(&model, 8, 1e-9);
+        assert!(!bounds.iter().any(|b| b.is_empty()));
+        assert!(
+            bounds[0].hi <= 1e-6,
+            "deactivated guard should force x ≤ 0, got {:?}",
+            bounds[0]
+        );
+    }
+
+    #[test]
+    fn test_indicator_infeasible_when_binary_squeezed_out() {
+        // A binary forced to the fractional value 0.5 has no integer realisation:
+        // snapping yields the empty interval [1, 0], a genuine infeasibility.
+        let mut arena = ExprArena::new();
+        let b = scalar(&mut arena, "b", 0);
+        let model = ModelRepr {
+            arena,
+            objective: b,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![ConstraintRepr {
+                body: b,
+                sense: ConstraintSense::Eq,
+                rhs: 0.5,
+                name: Some("pin".into()),
+            }],
+            variables: vec![ivar("b", VarType::Binary, 0.0, 1.0)],
+            n_vars: 1,
+        };
+        let bounds = fbbt(&model, 8, 1e-9);
+        assert!(
+            bounds.iter().any(|b| b.is_empty()),
+            "a binary squeezed to neither 0 nor 1 must be infeasible, got {:?}",
+            bounds
+        );
+    }
+
+    #[test]
+    fn test_integer_bounds_snapped_inward() {
+        // A general integer variable: 3·n ∈ [7, 17] ⇒ n ∈ [2.33, 5.67],
+        // which snaps to the integer hull [3, 5].
+        let mut arena = ExprArena::new();
+        let n = scalar(&mut arena, "n", 0);
+        let c = arena.add(ExprNode::Constant(3.0));
+        let body = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: c,
+            right: n,
+        });
+        let model = ModelRepr {
+            arena,
+            objective: n,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![
+                ConstraintRepr {
+                    body,
+                    sense: ConstraintSense::Ge,
+                    rhs: 7.0,
+                    name: Some("lo".into()),
+                },
+                ConstraintRepr {
+                    body,
+                    sense: ConstraintSense::Le,
+                    rhs: 17.0,
+                    name: Some("hi".into()),
+                },
+            ],
+            variables: vec![ivar("n", VarType::Integer, 0.0, 100.0)],
+            n_vars: 1,
+        };
+        let bounds = fbbt(&model, 8, 1e-9);
+        assert!((bounds[0].lo - 3.0).abs() < 1e-9, "lo {:?}", bounds[0]);
+        assert!((bounds[0].hi - 5.0).abs() < 1e-9, "hi {:?}", bounds[0]);
+    }
+
+    #[test]
+    fn test_eps_residual_does_not_fix_binary() {
+        // Guard x ≤ 1e-9·b with x ∈ [0, 0]. Backward leaves b only an eps-scale
+        // lower bound; the integrality pullback must NOT fix b to 1 — doing so
+        // would wrongly eliminate the b = 0 disjunct and yield an unsound bound.
+        let model = make_indicator_model(0.0, 0.0, 1e-9);
+        let bounds = fbbt(&model, 8, 1e-9);
+        assert!(!bounds.iter().any(|b| b.is_empty()));
+        assert!(
+            bounds[1].lo <= 1e-9 && bounds[1].hi >= 1.0 - 1e-9,
+            "eps residual must leave the binary free, got {:?}",
+            bounds[1]
         );
     }
 }

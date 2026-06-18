@@ -45,6 +45,7 @@ from discopt.modeling.core import Expression, Model, Variable
 __all__ = [
     "Complementarity",
     "complementarity",
+    "reformulate_gdp",
     "reformulate_scholtes",
     "reformulate_sos1",
     "tighten_complementarity_bounds",
@@ -108,6 +109,50 @@ def reformulate_sos1(model: Model, pairs: list[Complementarity]) -> None:
         model.sos1(members, name=f"{tag}_sos1")
 
 
+def reformulate_gdp(model: Model, pairs: list[Complementarity]) -> None:
+    """Encode each complementarity exactly as a disjunction ``(f==0) ∨ (g==0)``.
+
+    With ``f, g >= 0`` this is equivalent to ``f·g == 0``. The disjunction is
+    added via :meth:`Model.either_or` and lowered to a big-M model with a
+    selector binary by the GDP pass at solve time, so branch-and-bound branches
+    on the finite either/or choice and the integrality-aware FBBT can infer one
+    side is zero when the other is bounded away from zero (the backward
+    complementarity rule).
+
+    Nonlinear or vector operands are lifted into a scalar auxiliary variable
+    ``u == expr`` (with finite interval bounds) so the disjunct ``u == 0`` stays
+    linear and big-M is exact; plain scalar variables enter the disjunction
+    directly. Lifting also keeps the nonlinear part as an ordinary smooth
+    equality handled natively by the NLP relaxation — avoiding the perspective
+    of a nonlinear equality, whose big-M relaxation is bounded unreliably and
+    whose hull form often cannot be linearized.
+    """
+    for i, p in enumerate(pairs):
+        tag = p.name or f"compl{i}"
+        fv = _gdp_operand(model, p.f, tag, "f")
+        gv = _gdp_operand(model, p.g, tag, "g")
+        model.subject_to(fv >= 0, name=f"{tag}_f_nonneg")
+        model.subject_to(gv >= 0, name=f"{tag}_g_nonneg")
+        model.either_or([[fv == 0], [gv == 0]], name=tag)
+
+
+def _gdp_operand(model: Model, expr: Expression, tag: str, side: str) -> Expression:
+    """Return a linear operand for a GDP complementarity disjunct.
+
+    Linear expressions are used directly; nonlinear bodies are lifted to a
+    scalar auxiliary variable with finite interval bounds.
+    """
+    from discopt._jax.gdp_reformulate import _is_linear
+
+    if _is_linear(expr):
+        return expr
+    lo, hi = model._branch_bounds(expr, expr)
+    model._aux_counter += 1
+    u = model.continuous(f"_{tag}_{side}_{model._aux_counter}", lb=lo, ub=hi)
+    model.subject_to(u == expr, name=f"{tag}_{side}_lift")
+    return u
+
+
 def tighten_complementarity_bounds(model: Model, pairs: list[Complementarity]) -> int:
     """Complementarity bound propagation for plain variable pairs.
 
@@ -156,24 +201,31 @@ def solve_mpec(
         augmented in place with the reformulation constraints.
     pairs : list[Complementarity]
         The complementarity conditions ``0 <= f ⊥ g >= 0``.
-    method : {"scholtes", "sos1"}
+    method : {"scholtes", "sos1", "gdp"}
         ``"scholtes"`` runs a homotopy of *local* NLP solves with the
         regularization ``t`` shrinking ``t0 -> t0·sigma -> ...`` until ``t_min``.
-        ``"sos1"`` builds the exact disjunctive model and calls the global
-        MINLP solver (``solve_kwargs`` forwarded to :meth:`Model.solve`).
+        ``"sos1"`` encodes each pair as a Special Ordered Set of type 1 and
+        ``"gdp"`` as the exact disjunction ``(f==0) ∨ (g==0)``; both build a
+        standard model and call the global MINLP solver (``solve_kwargs``
+        forwarded to :meth:`Model.solve`). ``"gdp"`` typically explores far
+        fewer nodes than the smooth bilinear encoding.
 
     Returns
     -------
     The solver result. For ``"scholtes"`` this is the final NLP result
-    (with ``.x`` and ``.objective``); for ``"sos1"`` it is the
+    (with ``.x`` and ``.objective``); for ``"sos1"`` / ``"gdp"`` it is the
     :meth:`Model.solve` result.
     """
     if method == "sos1":
         reformulate_sos1(model, pairs)
         return model.solve(**solve_kwargs)
 
+    if method == "gdp":
+        reformulate_gdp(model, pairs)
+        return model.solve(**solve_kwargs)
+
     if method != "scholtes":
-        raise ValueError(f"unknown MPEC method {method!r}; use 'scholtes' or 'sos1'")
+        raise ValueError(f"unknown MPEC method {method!r}; use 'scholtes', 'sos1', or 'gdp'")
 
     # Scholtes regularization homotopy via local NLP solves.
     from discopt._jax.nlp_evaluator import NLPEvaluator
