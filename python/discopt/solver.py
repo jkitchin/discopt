@@ -13,15 +13,19 @@ import logging
 import math
 import os
 import time
-from typing import Any, Callable, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Optional, cast
 
 import numpy as np
 from scipy.optimize import minimize as scipy_minimize
 
-from discopt._jax.alphabb import estimate_alpha as _estimate_alpha_jax
+# ``flat_variable_bounds`` lives in a JAX-free helper module, so importing it
+# does not pull in JAX. The JAX-dependent helpers (NLPEvaluator, alphaBB,
+# nonlinear bound tightening) are imported lazily at their nonlinear-path call
+# sites, so a pure LP/MILP/MIQP solve never pays JAX/XLA cold-start.
 from discopt._jax.model_utils import flat_variable_bounds
-from discopt._jax.nlp_evaluator import NLPEvaluator
-from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+
+if TYPE_CHECKING:
+    from discopt._jax.nlp_evaluator import NLPEvaluator
 from discopt._rust import PyTreeManager
 from discopt.constants import INFEASIBILITY_SENTINEL as _INFEASIBILITY_SENTINEL
 from discopt.constants import SENTINEL_THRESHOLD as _SENTINEL_THRESHOLD
@@ -34,7 +38,10 @@ from discopt.modeling.core import (
     VarType,
 )
 from discopt.solvers import SolveStatus
-from discopt.solvers.nlp_ipopt import solve_nlp
+
+# ``solve_nlp`` (cyipopt) is imported lazily at its nonlinear-path call site in
+# ``_solve_continuous`` so a pure LP/MILP/MIQP solve does not pull in the JAX-
+# backed NLPEvaluator that ``nlp_ipopt`` imports at module scope.
 
 logger = logging.getLogger(__name__)
 
@@ -349,6 +356,8 @@ def _make_evaluator(model: Model):
     objects (and their XLA caches) are preserved across solves. Parameter
     value changes are threaded through at call time as a runtime pytree.
     """
+    from discopt._jax.nlp_evaluator import NLPEvaluator
+
     fingerprint = _evaluator_fingerprint(model)
     cached = getattr(model, "_nlp_evaluator_cache", None)
     if cached is not None:
@@ -840,6 +849,8 @@ def _apply_nonlinear_tightening_with_status(
 ) -> tuple[np.ndarray, np.ndarray, bool]:
     """Apply opportunistic nonlinear bound tightening without aborting node processing."""
     try:
+        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+
         tightened_lb, tightened_ub, stats = tighten_nonlinear_bounds(model, lb, ub)
     except Exception as exc:
         logger.debug("Skipping nonlinear tightening after error: %s", exc)
@@ -1420,6 +1431,8 @@ def _check_finite_bounds(model: Model) -> None:
 
     tightening_note = ""
     try:
+        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+
         _tightened_lb, _tightened_ub, bt_stats = tighten_nonlinear_bounds(model, raw_lb, raw_ub)
         if bt_stats.infeasible:
             logger.info(
@@ -1454,6 +1467,8 @@ def _detect_nonlinear_bound_infeasibility(model: Model) -> Optional[str]:
     """Return a nonlinear bound-tightening infeasibility proof when available."""
     flat_lb, flat_ub = flat_variable_bounds(model)
     try:
+        from discopt._jax.nonlinear_bound_tightening import tighten_nonlinear_bounds
+
         _tightened_lb, _tightened_ub, stats = tighten_nonlinear_bounds(model, flat_lb, flat_ub)
     except Exception as exc:
         logger.debug("Skipping nonlinear infeasibility precheck after error: %s", exc)
@@ -1884,19 +1899,26 @@ def solve_model(
     """
     # --- Enforce float64 precision ---
     # JAX defaults to float32 unless JAX_ENABLE_X64=1 is set *before* importing
-    # JAX.  All solver tolerances assume float64; float32 silently degrades
-    # convergence and may return incorrect solutions.
-    import jax.numpy as jnp
+    # JAX.  ``discopt/__init__.py`` sets that env var at import time, so x64 is
+    # guaranteed whenever JAX is first imported through discopt.  We only need to
+    # *warn* about the pathological case where the user imported JAX themselves
+    # (in float32) before discopt — which means JAX is already in ``sys.modules``.
+    # Gating on that avoids forcing a JAX/XLA import (and its cold-start cost) on
+    # pure LP/MILP/MIQP solves that never touch JAX.
+    import sys
 
-    if jnp.zeros(1).dtype != jnp.float64:
-        import warnings
+    if "jax" in sys.modules:
+        import jax.numpy as jnp
 
-        warnings.warn(
-            "JAX is running in float32 mode.  Set the environment variable "
-            "JAX_ENABLE_X64=1 *before* importing JAX for full solver precision.  "
-            "Results may be inaccurate.",
-            stacklevel=2,
-        )
+        if jnp.zeros(1).dtype != jnp.float64:
+            import warnings
+
+            warnings.warn(
+                "JAX is running in float32 mode.  Set the environment variable "
+                "JAX_ENABLE_X64=1 *before* importing JAX for full solver precision.  "
+                "Results may be inaccurate.",
+                stacklevel=2,
+            )
 
     _valid_nlp_solvers = {"ipm", "pounce", "ipopt", "cyipopt", "sparse_ipm", "simplex"}
     if nlp_solver not in _valid_nlp_solvers:
@@ -2204,7 +2226,10 @@ def solve_model(
     # variables the relaxation already handles analytically (e.g. x*exp(x) over a
     # free x) are left untouched. Sound: the reduction only shrinks the box.
     try:
-        from discopt._jax.nonlinear_bound_tightening import PeriodicVariableBoundRule
+        from discopt._jax.nonlinear_bound_tightening import (
+            PeriodicVariableBoundRule,
+            tighten_nonlinear_bounds,
+        )
 
         _per_lb, _per_ub, _per_stats = tighten_nonlinear_bounds(
             model, _origin_lb_chk, _origin_ub_chk, rules=(PeriodicVariableBoundRule(),)
@@ -3084,6 +3109,8 @@ def solve_model(
     _alphabb_force = os.environ.get("DISCOPT_ALPHABB_WITH_LP", "0") == "1"
     if _alphabb_eligible and (_mc_lp_relaxer is None or _alphabb_force):
         try:
+            from discopt._jax.alphabb import estimate_alpha as _estimate_alpha_jax
+
             _alphabb_alpha = np.asarray(
                 _estimate_alpha_jax(evaluator._obj_fn, lb, ub, n_samples=100)
             )
@@ -4672,7 +4699,7 @@ def _solve_continuous(
     opts["max_wall_time"] = max(remaining, 0.1)
 
     constraint_bounds = None
-    backend_evaluator = cast(NLPEvaluator, _BoundOverrideEvaluator(evaluator, lb, ub))
+    backend_evaluator = cast("NLPEvaluator", _BoundOverrideEvaluator(evaluator, lb, ub))
 
     t_jax_start = time.perf_counter()
     if nlp_solver == "pounce":
@@ -4684,6 +4711,8 @@ def _solve_continuous(
     else:
         # "ipm"/"sparse_ipm" resolve to POUNCE upstream (the JAX IPM is retired);
         # only "ipopt"/"cyipopt" reach this branch.
+        from discopt.solvers.nlp_ipopt import solve_nlp
+
         nlp_result = solve_nlp(
             backend_evaluator, x0, constraint_bounds=constraint_bounds, options=opts
         )
