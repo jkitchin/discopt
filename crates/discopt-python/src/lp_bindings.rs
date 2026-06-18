@@ -12,12 +12,13 @@
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
 use discopt_core::bnb::milp_driver::{solve_milp as core_solve_milp, MilpOptions, MilpStatus};
-use discopt_core::lp::basis::recover_basis;
+use discopt_core::lp::basis::{recover_basis, Basis, BASIC};
 use discopt_core::lp::crossover::{crossover_to_vertex, LpView};
 use discopt_core::lp::gomory::separate_gomory;
 use discopt_core::lp::mir::separate_mir;
 use discopt_core::lp::simplex::{
-    solve_lp as simplex_solve_lp, solve_lp_batch, LpInstance, LpStatus, SimplexOptions,
+    solve_lp as simplex_solve_lp, solve_lp_batch, solve_lp_warm, LpInstance, LpStatus,
+    SimplexOptions,
 };
 use numpy::{
     PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods,
@@ -253,6 +254,135 @@ pub fn solve_lp_py<'py>(
         PyArray1::from_vec(py, sol.x),
         sol.obj,
         sol.iters,
+    ))
+}
+
+/// Build a dual-simplex warm-start basis from a previous solve's
+/// `(col_status, basic_vars)`, extending it for rows/columns appended since.
+///
+/// The cutting-plane loop re-solves the SAME structural columns with only rows
+/// (cuts) appended, and the standard form is `[A_ub | I]` — one slack column per
+/// row — so each appended row adds exactly one trailing slack column. A starting
+/// basis with `n_old` columns / `m_old` rows is therefore valid for the current
+/// `n`/`m` iff `n - n_old == m - m_old >= 0`: the new columns are the appended
+/// slacks, which we make basic (the previous vertex stays a basis of the larger
+/// system, dual-feasible, so the dual simplex re-optimizes). Any inconsistency
+/// returns `None`, and the caller cold-starts — so this only affects speed.
+fn build_extended_basis(cs: &[i8], bv: &[i64], n: usize, m: usize) -> Option<Basis> {
+    let n_old = cs.len();
+    let m_old = bv.len();
+    if n_old > n || m_old > m {
+        return None;
+    }
+    let dn = n - n_old;
+    let dm = m - m_old;
+    if dn != dm {
+        return None; // not a clean one-slack-per-appended-row growth
+    }
+    let mut col_status: Vec<i8> = Vec::with_capacity(n);
+    col_status.extend_from_slice(cs);
+    col_status.resize(n, BASIC); // appended slacks (cols n_old..n) enter the basis
+    let mut basic_vars: Vec<usize> = Vec::with_capacity(m);
+    for &v in bv {
+        if v < 0 || (v as usize) >= n_old {
+            return None;
+        }
+        basic_vars.push(v as usize);
+    }
+    for j in n_old..n {
+        basic_vars.push(j);
+    }
+    // Enforce col_status/basic_vars consistency in case the incoming pair was
+    // slightly stale; `PreparedDual::prepare` validates further and the warm
+    // solver cold-falls-back on any residual inconsistency.
+    for &v in &basic_vars {
+        col_status[v] = BASIC;
+    }
+    Some(Basis {
+        col_status,
+        basic_vars,
+    })
+}
+
+/// Warm-startable standard-form LP solve: same problem as [`solve_lp_py`]
+/// (`min cᵀx s.t. A x = b, lb ≤ x ≤ ub`), but it accepts an optional starting
+/// basis (`start_col_status` length `n'`, `start_basic_vars` length `m'`) and
+/// returns the final basis alongside the solution. When the starting basis has
+/// fewer rows/columns than the current LP (rows appended since — the
+/// cutting-plane case), it is extended by making the appended slack columns
+/// basic so the dual simplex re-optimizes from the previous vertex.
+///
+/// Soundness: a missing/mismatched/singular basis is silently ignored
+/// (`solve_lp_warm` cold-falls-back internally), and the dual simplex converges
+/// to the LP optimum just like a cold solve — so the returned objective (hence
+/// any relaxation bound built on it) is unchanged; the basis only changes speed.
+/// Returns `(status, x, obj, iters, col_status, basic_vars)`.
+#[pyfunction]
+#[pyo3(signature = (c, a, b, lb, ub, start_col_status=None, start_basic_vars=None,
+                    tol=1e-9, max_iter=100_000))]
+#[allow(clippy::too_many_arguments)]
+pub fn solve_lp_warm_py<'py>(
+    py: Python<'py>,
+    c: PyReadonlyArray1<'py, f64>,
+    a: PyReadonlyArray2<'py, f64>,
+    b: PyReadonlyArray1<'py, f64>,
+    lb: PyReadonlyArray1<'py, f64>,
+    ub: PyReadonlyArray1<'py, f64>,
+    start_col_status: Option<PyReadonlyArray1<'py, i8>>,
+    start_basic_vars: Option<PyReadonlyArray1<'py, i64>>,
+    tol: f64,
+    max_iter: usize,
+) -> PyResult<(
+    String,
+    Bound<'py, PyArray1<f64>>,
+    f64,
+    usize,
+    Bound<'py, PyArray1<i8>>,
+    Bound<'py, PyArray1<i64>>,
+)> {
+    let dims = a.shape();
+    let (m, n) = (dims[0], dims[1]);
+    let a_flat = a
+        .as_slice()
+        .map_err(|_| PyValueError::new_err("`a` must be C-contiguous"))?;
+    let lp = LpView {
+        a: a_flat,
+        m,
+        n,
+        c: c.as_slice()?,
+        l: lb.as_slice()?,
+        u: ub.as_slice()?,
+    };
+    let opts = SimplexOptions {
+        tol,
+        max_iter,
+        deadline: None,
+    };
+    let b_slice = b.as_slice()?;
+
+    let start = match (start_col_status, start_basic_vars) {
+        (Some(cs), Some(bv)) => build_extended_basis(cs.as_slice()?, bv.as_slice()?, n, m),
+        _ => None,
+    };
+    let sol = match start {
+        Some(basis) => solve_lp_warm(&lp, b_slice, &basis, &opts),
+        None => simplex_solve_lp(&lp, b_slice, &opts),
+    };
+    let status = match sol.status {
+        LpStatus::Optimal => "optimal",
+        LpStatus::Infeasible => "infeasible",
+        LpStatus::Unbounded => "unbounded",
+        LpStatus::IterLimit => "iter_limit",
+        LpStatus::Numerical => "numerical",
+    };
+    let basic_vars_i64: Vec<i64> = sol.basis.basic_vars.iter().map(|&v| v as i64).collect();
+    Ok((
+        status.to_string(),
+        PyArray1::from_vec(py, sol.x),
+        sol.obj,
+        sol.iters,
+        PyArray1::from_vec(py, sol.basis.col_status),
+        PyArray1::from_vec(py, basic_vars_i64),
     ))
 }
 
