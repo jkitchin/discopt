@@ -6806,6 +6806,76 @@ def _pounce_recover_node_bound(
     return None
 
 
+def _pounce_qp_relaxation_nodes(qp_data, batch_lb, batch_ub, n_orig, t_start, time_limit):
+    """Solve a batch of MIQP B&B node QP relaxations with POUNCE (JAX-free).
+
+    Each node solves the augmented standard-form QP
+    ``min 0.5 x'Qx + c'x  s.t. A_eq x = b_eq, lb <= x <= ub`` (x includes the
+    inequality slacks; their bounds are ``[0, +inf)``) over the node's variable
+    box. POUNCE is a true filter IPM on the *convex* relaxation (the same
+    convexity assumption the JAX QP IPM made), so:
+
+    * ``OPTIMAL`` -> KKT-valid relaxation optimum -> a valid node lower bound,
+    * ``INFEASIBLE`` -> Phase-1-certified empty box -> a sound prune,
+    * anything else -> untrusted; the caller keeps the node open (never a
+      false-infeasible prune).
+
+    Returns numpy arrays ``(clean, infeasible, obj_vals, x_vals)`` indexed by
+    node: ``clean[i]`` marks a trustworthy OPTIMAL solve, ``infeasible[i]`` a
+    certified empty box, ``obj_vals[i]`` the augmented objective (without
+    ``obj_const``), and ``x_vals[i]`` the full primal iterate (with slacks).
+    """
+    from discopt.solvers.qp_pounce import solve_qp as _pounce_qp
+
+    n_batch = len(batch_lb)
+    Q = np.asarray(qp_data.Q, dtype=np.float64)
+    c = np.asarray(qp_data.c, dtype=np.float64)
+    A_eq = np.asarray(qp_data.A_eq, dtype=np.float64)
+    b_eq = np.asarray(qp_data.b_eq, dtype=np.float64)
+    n_total = int(qp_data.x_l.shape[0])
+    n_slack = n_total - n_orig
+
+    clean = np.zeros(n_batch, dtype=bool)
+    infeasible = np.zeros(n_batch, dtype=bool)
+    obj_vals = np.full(n_batch, np.nan, dtype=np.float64)
+    x_vals = np.full((n_batch, n_total), np.nan, dtype=np.float64)
+
+    slack_lb = np.zeros(n_slack, dtype=np.float64)
+    slack_ub = np.full(n_slack, 1e20, dtype=np.float64)
+
+    for i in range(n_batch):
+        time_left = max(0.5, time_limit - (time.perf_counter() - t_start))
+        lb_full = np.concatenate([np.asarray(batch_lb[i], dtype=np.float64), slack_lb])
+        ub_full = np.concatenate([np.asarray(batch_ub[i], dtype=np.float64), slack_ub])
+        bounds = list(zip(lb_full.tolist(), ub_full.tolist()))
+        try:
+            res = _pounce_qp(
+                Q=Q,
+                c=c,
+                A_eq=A_eq,
+                b_eq=b_eq,
+                bounds=bounds,
+                time_limit=min(30.0, time_left),
+            )
+        except Exception as e:  # noqa: BLE001 - a crashed node solve is "untrusted"
+            logger.debug("POUNCE node QP solve failed: %s", e)
+            continue
+        if (
+            res.status == SolveStatus.OPTIMAL
+            and res.x is not None
+            and res.objective is not None
+            and np.isfinite(res.objective)
+        ):
+            x_full = np.asarray(res.x, dtype=np.float64)
+            if x_full.shape[0] == n_total and np.all(np.isfinite(x_full)):
+                clean[i] = True
+                obj_vals[i] = float(res.objective)
+                x_vals[i] = x_full
+        elif res.status == SolveStatus.INFEASIBLE:
+            infeasible[i] = True
+    return clean, infeasible, obj_vals, x_vals
+
+
 def _solve_node_lp_pounce(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, time_limit):
     """Solve one MILP-B&B node relaxation with POUNCE on the augmented
     standard-form LP (Path B: POUNCE as the *primary* node engine in POUNCE
@@ -8146,10 +8216,7 @@ def _solve_miqp_bb(
     ``prefer_pounce`` (POUNCE-only mode) routes the incumbent dual recovery
     through POUNCE instead of HiGHS so the whole solve is HiGHS-free.
     """
-    import jax.numpy as jnp
-
     from discopt._jax.problem_classifier import extract_qp_data
-    from discopt._jax.qp_ipm import qp_ipm_solve
 
     rust_time = 0.0
     jax_time = 0.0
@@ -8324,140 +8391,40 @@ def _solve_miqp_bb(
 
         t_jax_start = time.perf_counter()
         result_ids = np.array(batch_ids, dtype=np.int64)
-        n_slack = qp_data.x_l.shape[0] - n_orig
+        # Solve every node's convex QP relaxation with POUNCE (JAX-free). The
+        # batched JAX QP IPM was the last JAX dependency on the MIQP path; POUNCE
+        # gives the same KKT-valid bound / Phase-1 infeasibility verdict per node.
+        clean, infeasible, obj_vals, x_vals = _pounce_qp_relaxation_nodes(
+            qp_data, batch_lb, batch_ub, n_orig, t_start, time_limit
+        )
+        result_lbs = np.full(n_batch, _INFEASIBILITY_SENTINEL, dtype=np.float64)
+        result_sols = np.empty((n_batch, n_vars), dtype=np.float64)
+        result_feas = np.zeros(n_batch, dtype=bool)
 
-        if n_batch > 1:
-            # Batch QP solve via vmap
-            from discopt._jax.qp_ipm import qp_ipm_solve_batch
+        for i in range(n_batch):
+            node_lb = np.array(batch_lb[i])
+            node_ub = np.array(batch_ub[i])
+            lb_c = np.clip(node_lb, -_SPC, _SPC)
+            ub_c = np.clip(node_ub, -_SPC, _SPC)
 
-            xl_arr = jnp.array(batch_lb, dtype=jnp.float64)
-            xu_arr = jnp.array(batch_ub, dtype=jnp.float64)
-            slack_l = jnp.zeros((n_batch, n_slack), dtype=jnp.float64)
-            slack_u = jnp.full((n_batch, n_slack), 1e20, dtype=jnp.float64)
-            xl_full = jnp.concatenate([xl_arr, slack_l], axis=1)
-            xu_full = jnp.concatenate([xu_arr, slack_u], axis=1)
-
-            try:
-                state = qp_ipm_solve_batch(
-                    qp_data.Q,
-                    qp_data.c,
-                    qp_data.A_eq,
-                    qp_data.b_eq,
-                    xl_full,
-                    xu_full,
+            if infeasible[i]:
+                # POUNCE Phase-1-certified empty box: a sound infeasibility prune.
+                result_sols[i] = 0.5 * (lb_c + ub_c)
+            elif clean[i] and _check_lp_solution_feasibility(qp_data.A_eq, qp_data.b_eq, x_vals[i]):
+                # KKT-valid relaxation optimum -> a valid node lower bound.
+                result_lbs[i] = obj_vals[i] + float(qp_data.obj_const)
+                result_sols[i] = x_vals[i, :n_vars]
+                if result_lbs[i] < _SENTINEL_THRESHOLD:
+                    _maybe_inject_snapped(result_sols[i], node_lb, node_ub)
+            else:
+                # OPTIMAL-but-inconsistent or non-clean (iteration limit / crash):
+                # an untrusted bound. Keep the node open (POUNCE recovery), never a
+                # false-infeasible prune (issue #127).
+                x_seed = x_vals[i] if np.all(np.isfinite(x_vals[i])) else None
+                obj_seed = (
+                    obj_vals[i] + float(qp_data.obj_const) if np.isfinite(obj_vals[i]) else np.nan
                 )
-                converged = np.asarray(state.converged)
-                obj_vals = np.asarray(state.obj)
-                x_vals = np.asarray(state.x)
-
-                # Only a cleanly converged (KKT) QP with a finite iterate is a
-                # trustworthy bound or infeasibility verdict. conv==3 (max-iter)
-                # and non-finite iterates are routed to POUNCE recovery instead
-                # of being pruned as infeasible (issue #127).
-                finite_rows = np.all(np.isfinite(x_vals), axis=1)
-                clean = ((converged == 1) | (converged == 2)) & finite_rows
-                result_lbs = np.full(n_batch, _INFEASIBILITY_SENTINEL, dtype=np.float64)
-                result_sols = np.empty((n_batch, n_vars), dtype=np.float64)
-                for i in range(n_batch):
-                    lb_c = np.clip(np.array(batch_lb[i]), -_SPC, _SPC)
-                    ub_c = np.clip(np.array(batch_ub[i]), -_SPC, _SPC)
-                    if clean[i] and _check_lp_solution_feasibility(
-                        qp_data.A_eq, qp_data.b_eq, x_vals[i]
-                    ):
-                        result_lbs[i] = obj_vals[i] + float(qp_data.obj_const)
-                        result_sols[i] = x_vals[i, :n_vars]
-                        _maybe_inject_snapped(
-                            result_sols[i], np.array(batch_lb[i]), np.array(batch_ub[i])
-                        )
-                    elif clean[i]:
-                        # Converged + finite but the node box is genuinely
-                        # infeasible: a sound prune.
-                        result_sols[i] = 0.5 * (lb_c + ub_c)
-                    else:
-                        # Non-KKT / non-finite: untrusted bound, never a
-                        # false-infeasible prune (issue #127).
-                        _handle_nonclean(
-                            i,
-                            result_lbs,
-                            result_sols,
-                            x_vals[i],
-                            obj_vals[i] + float(qp_data.obj_const),
-                            np.array(batch_lb[i]),
-                            np.array(batch_ub[i]),
-                        )
-            except Exception as e:
-                logger.debug("Batch QP solve failed: %s", e)
-                result_lbs = np.full(n_batch, _INFEASIBILITY_SENTINEL, dtype=np.float64)
-                result_sols = np.empty((n_batch, n_vars), dtype=np.float64)
-                for i in range(n_batch):
-                    lb_c = np.clip(np.array(batch_lb[i]), -_SPC, _SPC)
-                    ub_c = np.clip(np.array(batch_ub[i]), -_SPC, _SPC)
-                    result_sols[i] = 0.5 * (lb_c + ub_c)
-            result_feas = np.zeros(n_batch, dtype=bool)
-        else:
-            result_lbs = np.empty(n_batch, dtype=np.float64)
-            result_sols = np.empty((n_batch, n_vars), dtype=np.float64)
-            result_feas = np.zeros(n_batch, dtype=bool)
-
-            for i in range(n_batch):
-                node_lb = np.array(batch_lb[i])
-                node_ub = np.array(batch_ub[i])
-
-                x_l_node = jnp.array(node_lb, dtype=jnp.float64)
-                x_u_node = jnp.array(node_ub, dtype=jnp.float64)
-
-                x_l_full = jnp.concatenate([x_l_node, jnp.zeros(n_slack)])
-                x_u_full = jnp.concatenate([x_u_node, jnp.full(n_slack, 1e20)])
-
-                try:
-                    state = qp_ipm_solve(
-                        qp_data.Q,
-                        qp_data.c,
-                        qp_data.A_eq,
-                        qp_data.b_eq,
-                        x_l_full,
-                        x_u_full,
-                    )
-                    conv = int(state.converged)
-                    x_np = np.asarray(state.x)
-                    # Only a cleanly converged (KKT) QP with a finite iterate is
-                    # trustworthy as a bound or an infeasibility verdict. conv==3
-                    # (max-iter) and non-finite iterates go to POUNCE recovery
-                    # rather than being pruned as infeasible (issue #127).
-                    clean = conv in (1, 2) and bool(np.all(np.isfinite(x_np)))
-                    lb_c = np.clip(node_lb, -_SPC, _SPC)
-                    ub_c = np.clip(node_ub, -_SPC, _SPC)
-                    if clean and _check_lp_solution_feasibility(
-                        qp_data.A_eq, qp_data.b_eq, state.x
-                    ):
-                        result_lbs[i] = float(state.obj) + qp_data.obj_const
-                        result_sols[i] = x_np[:n_vars]
-                        if result_lbs[i] < _SENTINEL_THRESHOLD:
-                            _maybe_inject_snapped(result_sols[i], node_lb, node_ub)
-                    elif clean:
-                        # Converged, finite, yet the node box admits no point
-                        # satisfying the equalities: a sound infeasibility prune.
-                        result_lbs[i] = _INFEASIBILITY_SENTINEL
-                        result_sols[i] = 0.5 * (lb_c + ub_c)
-                    else:
-                        # Non-KKT / non-finite: untrusted bound, never a
-                        # false-infeasible prune (issue #127).
-                        result_lbs[i] = _INFEASIBILITY_SENTINEL
-                        _handle_nonclean(
-                            i,
-                            result_lbs,
-                            result_sols,
-                            x_np,
-                            float(state.obj) + qp_data.obj_const,
-                            node_lb,
-                            node_ub,
-                        )
-                except Exception as e:
-                    logger.debug("Per-node LP/QP solve failed: %s", e)
-                    # No usable iterate from a crashed solve: recover or keep
-                    # open, never a false-infeasible prune (issue #127).
-                    result_lbs[i] = _INFEASIBILITY_SENTINEL
-                    _handle_nonclean(i, result_lbs, result_sols, None, np.nan, node_lb, node_ub)
+                _handle_nonclean(i, result_lbs, result_sols, x_seed, obj_seed, node_lb, node_ub)
 
         jax_time += time.perf_counter() - t_jax_start
 

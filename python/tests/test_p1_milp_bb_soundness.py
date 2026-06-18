@@ -154,10 +154,18 @@ class TestNonKKTDecertifiesWhenUnrecoverable:
         assert abs(r.objective - (-8.0)) < 1e-4
 
     def test_miqp_batch_decertifies(self, monkeypatch):
-        import discopt._jax.qp_ipm as qp_ipm
+        # MIQP node relaxations now solve via POUNCE (the JAX QP IPM is gone).
+        # Force every POUNCE node solve to be reported as non-clean (untrusted) —
+        # keeping the real bound/iterate so the incumbent is still found — and
+        # disable recovery. The untrusted bounds must not certify the gap.
+        _real_nodes = S._pounce_qp_relaxation_nodes
+
+        def _untrusted(*a, **k):
+            clean, infeasible, obj_vals, x_vals = _real_nodes(*a, **k)
+            return np.zeros_like(clean), infeasible, obj_vals, x_vals
 
         monkeypatch.setattr(S, "_solve_qp_highs", lambda *a, **k: None)
-        _force_code3(monkeypatch, qp_ipm, "qp_ipm_solve_batch")
+        monkeypatch.setattr(S, "_pounce_qp_relaxation_nodes", _untrusted)
         monkeypatch.setattr(S, "_pounce_recover_node_bound", lambda *a, **k: None)
         r = _miqp().solve(time_limit=60, batch_size=8)
         assert r.gap_certified is False
