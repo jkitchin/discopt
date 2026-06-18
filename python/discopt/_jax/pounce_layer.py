@@ -179,3 +179,79 @@ def make_nlp_layer(
 
     solve.defvjp(solve_fwd, solve_bwd)
     return solve
+
+
+def make_milp_objective_layer(
+    model,
+    parameters: list,
+    solver_options: Optional[dict] = None,
+) -> Callable:
+    """Build a differentiable MILP/MIQP objective layer over ``parameters``.
+
+    Returns ``solve(p) -> obj`` differentiable w.r.t. the JAX vector ``p`` of
+    parameter values. The forward solve runs the integer branch-and-bound; the
+    VJP is the **fix-and-differentiate** sensitivity — the integers are fixed at
+    the optimum and the envelope theorem is applied to the continuous restriction
+    (see :func:`discopt._jax.differentiable._differentiable_solve_integer`).
+
+    This is the JAX-composable form of ``differentiable_solve(...).gradient(...)``
+    for integer models: it slots into ``jax.grad``/``jax.jit``/``jax.vmap``
+    pipelines, which is what decision-focused learning needs. The gradient is
+    exact wherever the optimal integer assignment is locally stable in ``p``; at
+    breakpoints it is the incumbent assignment's one-sided value.
+
+    Scope: objective sensitivity ``d(obj*)/dp`` (the headline use case).
+    Solution sensitivity ``dx*/dp`` through the integers is a follow-on.
+
+    Parameters
+    ----------
+    model : dm.Model
+        A model with integer/binary variables, objective, and constraints set.
+    parameters : list of dm.Parameter
+        Scalar parameters to differentiate with respect to.
+    solver_options : dict, optional
+        Options forwarded to the continuous sensitivity solve.
+    """
+    from discopt._jax.differentiable import differentiable_solve
+
+    params = list(parameters)
+    n_p = len(params)
+
+    def _set_params(p_np: np.ndarray) -> None:
+        for k, prm in enumerate(params):
+            prm.value = np.float64(p_np[k])
+
+    def _host_solve(p_np):
+        _set_params(np.asarray(p_np, dtype=np.float64))
+        res = differentiable_solve(model, solver_options=solver_options)
+        obj = float(res.objective) if res.objective is not None else 0.0
+        # Per-parameter envelope sensitivity (gradient() applies the correct
+        # parameter offset, so this is robust to the layer's parameter ordering).
+        sens = np.array([float(res.gradient(prm)) for prm in params], dtype=np.float64)
+        return (np.float64(obj), sens)
+
+    @jax.custom_vjp
+    def solve(p):
+        obj, _ = jax.pure_callback(
+            _host_solve,
+            (jax.ShapeDtypeStruct((), _F64), jax.ShapeDtypeStruct((n_p,), _F64)),
+            p,
+            vmap_method="sequential",
+        )
+        return obj
+
+    def solve_fwd(p):
+        obj, sens = jax.pure_callback(
+            _host_solve,
+            (jax.ShapeDtypeStruct((), _F64), jax.ShapeDtypeStruct((n_p,), _F64)),
+            p,
+            vmap_method="sequential",
+        )
+        return obj, sens
+
+    def solve_bwd(sens, g):
+        # d(loss)/dp = g * d(obj*)/dp.
+        return (g * sens,)
+
+    solve.defvjp(solve_fwd, solve_bwd)
+    return solve

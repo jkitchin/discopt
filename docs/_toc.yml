@@ -23,6 +23,7 @@ parts:
       - file: notebooks/tutorial_solver_pounce
       - file: notebooks/tutorial_pounce_sipopt
       - file: notebooks/differentiable_pounce_layer
+      - file: notebooks/differentiable_milp
       - file: notebooks/tutorial_solver_cyipopt
       - file: notebooks/tutorial_solver_selection
   - caption: Tutorials
