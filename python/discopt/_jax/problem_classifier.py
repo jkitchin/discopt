@@ -10,10 +10,14 @@ from __future__ import annotations
 from enum import Enum
 from typing import NamedTuple
 
-import jax
-import jax.numpy as jnp
 import numpy as np
 
+# NOTE: ``jax`` is imported lazily inside the ``extract_*`` data functions that
+# build jnp arrays. ``classify_problem`` and the dataclasses are purely
+# structural (annotations are strings under ``from __future__ import
+# annotations``), so importing this module — done on every ``Model.solve`` to
+# route the problem class — does not pull in JAX. That keeps LP/MILP/MIQP solves
+# free of JAX/XLA cold-start.
 from discopt.modeling.core import (
     BinaryOp,
     Constant,
@@ -80,23 +84,23 @@ def classify_problem(model: Model) -> ProblemClass:
 class LPData(NamedTuple):
     """Standard-form LP data: min c'x + d s.t. A_eq x = b_eq, x_l <= x <= x_u."""
 
-    c: jnp.ndarray  # (n,) objective coefficients
-    A_eq: jnp.ndarray  # (m, n) equality constraint matrix
-    b_eq: jnp.ndarray  # (m,) equality RHS
-    x_l: jnp.ndarray  # (n,) lower bounds
-    x_u: jnp.ndarray  # (n,) upper bounds
+    c: np.ndarray  # (n,) objective coefficients
+    A_eq: np.ndarray  # (m, n) equality constraint matrix
+    b_eq: np.ndarray  # (m,) equality RHS
+    x_l: np.ndarray  # (n,) lower bounds
+    x_u: np.ndarray  # (n,) upper bounds
     obj_const: float = 0.0  # constant term in objective
 
 
 class QPData(NamedTuple):
     """Standard-form QP: min 0.5 x'Qx + c'x + d s.t. A_eq x = b_eq, bounds."""
 
-    Q: jnp.ndarray  # (n, n) quadratic objective matrix (symmetric)
-    c: jnp.ndarray  # (n,) linear objective coefficients
-    A_eq: jnp.ndarray  # (m, n) equality constraint matrix
-    b_eq: jnp.ndarray  # (m,) equality RHS
-    x_l: jnp.ndarray  # (n,) lower bounds
-    x_u: jnp.ndarray  # (n,) upper bounds
+    Q: np.ndarray  # (n, n) quadratic objective matrix (symmetric)
+    c: np.ndarray  # (n,) linear objective coefficients
+    A_eq: np.ndarray  # (m, n) equality constraint matrix
+    b_eq: np.ndarray  # (m,) equality RHS
+    x_l: np.ndarray  # (n,) lower bounds
+    x_u: np.ndarray  # (n,) upper bounds
     obj_const: float = 0.0  # constant term in objective
 
 
@@ -620,6 +624,7 @@ def extract_lp_data_algebraic(model: Model) -> LPData:
 
     Raises _NotLinearError if the model is not linear.
     """
+
     from discopt.modeling.core import ObjectiveSense
 
     n_orig = sum(v.size for v in model._variables)
@@ -637,7 +642,7 @@ def extract_lp_data_algebraic(model: Model) -> LPData:
         obj_const = -obj_const
 
     return LPData(
-        c=jnp.asarray(c_full),  # type: ignore[arg-type]
+        c=np.asarray(c_full),  # type: ignore[arg-type]
         A_eq=A_eq,
         b_eq=b_eq,
         x_l=x_l,
@@ -654,6 +659,7 @@ def extract_qp_data_algebraic(model: Model) -> QPData:
 
     Raises _NotQuadraticError if the objective is not quadratic.
     """
+
     from discopt.modeling.core import ObjectiveSense
 
     n_orig = sum(v.size for v in model._variables)
@@ -680,8 +686,8 @@ def extract_qp_data_algebraic(model: Model) -> QPData:
         obj_const = -obj_const
 
     return QPData(
-        Q=jnp.asarray(Q_full),  # type: ignore[arg-type]
-        c=jnp.asarray(c_full),  # type: ignore[arg-type]
+        Q=np.asarray(Q_full),  # type: ignore[arg-type]
+        c=np.asarray(c_full),  # type: ignore[arg-type]
         A_eq=A_eq,
         b_eq=b_eq,
         x_l=x_l,
@@ -696,6 +702,7 @@ def _extract_lp_data_from_repr(model: Model) -> LPData:
     For linear functions, c_j = f(e_j) - f(0) and A_ij = g_i(e_j) - g_i(0).
     This works for fast-API models where Python expression trees don't exist.
     """
+
     from discopt._rust import model_to_repr
 
     _builder = getattr(model, "_builder", None)
@@ -787,11 +794,11 @@ def _extract_lp_data_from_repr(model: Model) -> LPData:
         obj_at_zero = -obj_at_zero
 
     return LPData(
-        c=jnp.asarray(c_full),
-        A_eq=jnp.asarray(A_eq),
-        b_eq=jnp.asarray(b_eq),
-        x_l=jnp.asarray(x_l),
-        x_u=jnp.asarray(x_u),
+        c=np.asarray(c_full),
+        A_eq=np.asarray(A_eq),
+        b_eq=np.asarray(b_eq),
+        x_l=np.asarray(x_l),
+        x_u=np.asarray(x_u),
         obj_const=obj_at_zero,
     )
 
@@ -806,6 +813,7 @@ def _extract_qp_data_from_repr(model: Model) -> QPData:
 
     Constraints are extracted as in the LP case.
     """
+
     from discopt._rust import model_to_repr
 
     _builder = getattr(model, "_builder", None)
@@ -860,8 +868,8 @@ def _extract_qp_data_from_repr(model: Model) -> QPData:
         c_full = c_vec
 
     return QPData(
-        Q=jnp.asarray(Q_full),
-        c=jnp.asarray(c_full),
+        Q=np.asarray(Q_full),
+        c=np.asarray(c_full),
         A_eq=lp_data.A_eq,
         b_eq=lp_data.b_eq,
         x_l=lp_data.x_l,
@@ -911,6 +919,9 @@ def _extract_lp_data_autodiff(model: Model) -> LPData:
     are handled the same way as scalar bodies: each component contributes
     one row in the LP matrix, and inequalities get one slack per row.
     """
+    import jax
+    import jax.numpy as jnp
+
     from discopt._jax.dag_compiler import compile_constraint, compile_objective
 
     n_orig = sum(v.size for v in model._variables)
@@ -934,9 +945,9 @@ def _extract_lp_data_autodiff(model: Model) -> LPData:
         con_fn = compile_constraint(con, model)
         # Flatten any vector / matrix constraint body into a length-k vector;
         # each component becomes its own LP row.
-        body0 = jnp.asarray(con_fn(x_zero), dtype=jnp.float64).reshape(-1)
+        body0 = np.asarray(con_fn(x_zero), dtype=jnp.float64).reshape(-1)
         jac_raw = jax.jacobian(lambda x, _f=con_fn: jnp.asarray(_f(x)).reshape(-1))(x_zero)
-        jac = jnp.asarray(jac_raw, dtype=jnp.float64).reshape(body0.shape[0], n_orig)
+        jac = np.asarray(jac_raw, dtype=jnp.float64).reshape(body0.shape[0], n_orig)
         if con.sense == "==":
             eq_blocks.append((jac, body0))
         elif con.sense == "<=":
@@ -1022,6 +1033,9 @@ def extract_qp_data(model: Model) -> QPData:
 
 def _extract_qp_data_autodiff(model: Model) -> QPData:
     """Extract QP standard form using autodiff (original slow path)."""
+    import jax
+    import jax.numpy as jnp
+
     from discopt._jax.dag_compiler import compile_objective
     from discopt.modeling.core import ObjectiveSense
 
