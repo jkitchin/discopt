@@ -2381,6 +2381,25 @@ class Model:
         """Streaming solve that yields updates during B&B."""
         raise NotImplementedError("Streaming solve requires solver backend")
 
+    # ── Infeasibility analysis ──
+
+    def compute_iis(self, *, include_bounds: bool = True, time_limit: float = 30.0):
+        """Compute an Irreducible Infeasible Subsystem explaining infeasibility.
+
+        Returns an :class:`~discopt.infeasibility.IISResult` — a minimal set of
+        constraints (and, by default, variable bounds) that is infeasible but
+        becomes feasible if any single member is removed. Use it to debug *why*
+        ``solve()`` returned ``"infeasible"``. Raises ``ValueError`` if the model
+        is not provably infeasible.
+
+        >>> res = m.solve()
+        >>> if res.status == "infeasible":
+        ...     print(m.compute_iis().summary())
+        """
+        from discopt.infeasibility import compute_iis
+
+        return compute_iis(self, include_bounds=include_bounds, time_limit=time_limit)
+
     # ── Validation ──
 
     def validate(self):

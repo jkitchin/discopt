@@ -85,6 +85,12 @@ from discopt.callbacks import (
 from discopt.callbacks import (
     CutResult as CutResult,
 )
+from discopt.infeasibility import (
+    IISResult as IISResult,
+)
+from discopt.infeasibility import (
+    compute_iis as compute_iis,
+)
 from discopt.modeling import (
     Constraint as Constraint,
 )
