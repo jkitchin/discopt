@@ -91,7 +91,7 @@ CUTEST_ENV      := $(CUTEST_PREFIX)/env.sh
         gams-build gams-register gams-install gams-test gams-verify \
         bench-lp-smoke bench-qp-smoke bench-milp-smoke bench-miqp-smoke bench-minlp-smoke bench-global-smoke \
         bench-lp-full bench-qp-full bench-milp-full bench-miqp-full bench-minlp-full bench-global-full \
-        bench-smoke-all bench-full-all bench-all
+        bench-smoke-all bench-full-all bench-all bench-global-baron bench-global-nlsolvers
 
 all: benchmarks
 
@@ -641,6 +641,32 @@ bench-global-full: build | $(RESULTS_DIR)
 	$(PYTHON) discopt_benchmarks/run_category_benchmarks.py \
 		--category global_opt --level full --report --html \
 		--output $(RESULTS_DIR)/global_full_$(TS)
+
+# Global-opt head-to-head vs full-license BARON (GAMS). Unlike the *-compare
+# targets (which drive the demo-limited AMPL-ASL BARON off the .nl), this fetches
+# minlplib .gms and runs `gams ... minlp=baron`, the only path to the CMU-license
+# BARON. Covers all 62 vendored .nl; correctness vs MINLPLib primalbound.
+# Override the budget with GLOBAL_BARON_TL (seconds, default 60).
+GLOBAL_BARON_TL ?= 60
+
+bench-global-baron: build
+	@echo "==> Global-opt head-to-head: discopt vs BARON (GAMS), 62 instances, $(GLOBAL_BARON_TL)s each"
+	$(PYTHON) -m discopt_benchmarks.scripts.global_opt_baron_vs_discopt \
+		--time-limit $(GLOBAL_BARON_TL) --out-dir $(BENCH_OUT_DIR)
+
+# Global-opt head-to-head vs the .nl-native open-source solvers: HiGHS, SCIP,
+# Couenne. All read the vendored .nl directly (no GAMS), reusing the runner's
+# command-builder + per-solver parsers. Correctness vs MINLPLib primalbound over
+# all 62 vendored instances. (HiGHS is LP/MILP-only and errors on nonlinear
+# instances by design — included as a reference for the linear subset.)
+# Override the budget with GLOBAL_NL_TL, the solver set with GLOBAL_NL_SOLVERS.
+GLOBAL_NL_TL ?= 60
+GLOBAL_NL_SOLVERS ?= highs,scip,couenne
+
+bench-global-nlsolvers: build
+	@echo "==> Global-opt head-to-head: discopt vs $(GLOBAL_NL_SOLVERS), 62 instances, $(GLOBAL_NL_TL)s each"
+	$(PYTHON) -m discopt_benchmarks.scripts.global_opt_nl_solvers \
+		--time-limit $(GLOBAL_NL_TL) --solvers $(GLOBAL_NL_SOLVERS) --out-dir $(BENCH_OUT_DIR)
 
 bench-smoke-all: bench-lp-smoke bench-qp-smoke bench-milp-smoke bench-miqp-smoke bench-minlp-smoke bench-global-smoke
 	@echo "==> All smoke benchmarks complete"
