@@ -1443,3 +1443,40 @@ class TestComplementarity:
         assert r.objective == pytest.approx(4.0, abs=1e-2)
         # Complementarity holds: x^2 * y == 0.
         assert (r.x["x"] ** 2) * r.x["y"] == pytest.approx(0.0, abs=1e-3)
+
+    @pytest.mark.slow
+    def test_disjunctive_encoding_explores_fewer_nodes_than_bilinear(self):
+        # Performance: the disjunctive encoding branches on the finite
+        # (x == 0) ∨ (y == 0) choice and prunes with the integrality-aware FBBT,
+        # so it explores far fewer B&B nodes -- and certifies a zero gap --
+        # versus the smooth x*y == 0 encoding, which needs spatial branching on
+        # the bilinear term and stalls against MPCC constraint-qualification
+        # failures.
+        def disjunctive():
+            m = dm.Model("disj")
+            x = m.continuous("x", lb=0, ub=10)
+            y = m.continuous("y", lb=0, ub=10)
+            m.minimize((x - 1) ** 2 + (y - 1) ** 2)
+            m.complementarity(x, y)
+            return m
+
+        def bilinear():
+            m = dm.Model("bilin")
+            x = m.continuous("x", lb=0, ub=10)
+            y = m.continuous("y", lb=0, ub=10)
+            m.minimize((x - 1) ** 2 + (y - 1) ** 2)
+            m.subject_to(x >= 0)
+            m.subject_to(y >= 0)
+            m.subject_to(x * y == 0)
+            return m
+
+        rd = disjunctive().solve(time_limit=30.0, gap_tolerance=1e-6)
+        rb = bilinear().solve(time_limit=30.0, gap_tolerance=1e-6)
+
+        # Both reach the same global optimum (1.0)...
+        assert rd.objective == pytest.approx(1.0, abs=1e-3)
+        assert rb.objective == pytest.approx(1.0, abs=1e-3)
+        # ...but the disjunctive tree is markedly smaller.
+        assert rd.node_count < rb.node_count
+        # and its optimality gap is certified to (near) zero.
+        assert rd.gap == pytest.approx(0.0, abs=1e-6)
