@@ -232,7 +232,13 @@ pub fn crossover_to_vertex(x: &[f64], lp: &LpView<'_>, tol: f64, max_iter: usize
 
         for j in 0..n {
             let xj = x[j] + t * d[j];
-            x[j] = xj.clamp(l[j], u[j]);
+            // Guard against rounding-induced bound inversion (l[j] a few ULP above
+            // u[j] on a near-fixed variable): f64::clamp panics when min > max.
+            // Clamp into the well-ordered interval instead — identical to the
+            // direct clamp when bounds are ordered, and collapses to the degenerate
+            // (ULP-wide) box when they cross, which is the correct projection.
+            let (lo, hi) = if l[j] <= u[j] { (l[j], u[j]) } else { (u[j], l[j]) };
+            x[j] = xj.clamp(lo, hi);
         }
     }
     x
