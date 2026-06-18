@@ -22,7 +22,7 @@ Model.solve()  -->  Python orchestrator  -->  Rust TreeManager (B&B engine)
 
 **Rust backend** (`crates/discopt-core`): Expression IR, Branch & Bound tree (node pool, branching, pruning), .nl file parser, FBBT/presolve (interval arithmetic, probing, Big-M simplification).
 
-**JAX layer** (`python/discopt/_jax`): DAG compiler mapping modeling expressions to JAX primitives, JIT-compiled NLP evaluator (objective, gradient, Hessian, constraint Jacobian), McCormick convex/concave relaxations {cite:p}`McCormick1976` (21 functions including sigmoid, softplus, tanh), and a relaxation compiler with vmap support.
+**JAX layer** (`python/discopt/_jax`): DAG compiler mapping modeling expressions to JAX primitives, JIT-compiled NLP evaluator (objective, gradient, Hessian, constraint Jacobian), McCormick convex/concave relaxations {cite:p}`McCormick1976` (28 functions including sigmoid, softplus, tanh), and a relaxation compiler with vmap support.
 
 **Solver wrappers** (`python/discopt/solvers`): POUNCE (pure-Rust Ipopt port), cyipopt NLP wrapper for Ipopt {cite:p}`Wachter2006`, HiGHS LP and MILP wrappers with warm-start support (MILP used by the LOA decomposition solver).
 
