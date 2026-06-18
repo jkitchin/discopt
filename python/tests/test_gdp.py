@@ -1334,3 +1334,70 @@ class TestIfElse:
         assert r.status in ("optimal", "feasible")
         assert r.objective == pytest.approx(1.0, abs=1e-3)
         assert r.x["x"] == pytest.approx(1.0, abs=1e-2)
+
+
+# ── Complementarity constraints (0 <= x ⊥ y >= 0) ──
+
+
+class TestComplementarity:
+    """``Model.complementarity`` lowers ``0 <= x ⊥ y >= 0`` to the exact
+    disjunction ``(x == 0) ∨ (y == 0)`` (issue #231), avoiding the weak,
+    degenerate smooth ``x*y == 0`` encoding."""
+
+    def test_lowers_to_nonneg_plus_disjunction(self):
+        m = dm.Model("comp")
+        x = m.continuous("x", lb=0, ub=10)
+        y = m.continuous("y", lb=0, ub=10)
+        m.minimize(x + y)
+        m.complementarity(x, y, name="cc")
+
+        # Two non-negativity inequalities plus one disjunction.
+        from discopt.modeling.core import _DisjunctiveConstraint
+
+        disjunctions = [c for c in m._constraints if isinstance(c, _DisjunctiveConstraint)]
+        plain = [c for c in m._constraints if isinstance(c, Constraint)]
+        assert len(disjunctions) == 1
+        assert len(disjunctions[0].disjuncts) == 2
+        assert len(plain) == 2
+
+        # After GDP reformulation: selector binaries appear and the disjunction
+        # becomes big-M rows (no disjunction objects remain).
+        new_m = reformulate_gdp(m)
+        assert not any(isinstance(c, _DisjunctiveConstraint) for c in new_m._constraints)
+        n_aux = len(new_m._variables) - len(m._variables)
+        assert n_aux == 2  # one selector per disjunct
+
+    @pytest.mark.slow
+    def test_mpcc_solves_to_global_optimum(self):
+        # min (x-1)^2 + (y-1)^2  s.t.  0 <= x ⊥ y >= 0.
+        # The unconstrained minimiser (1, 1) is complementarity-infeasible;
+        # the global optimum is 1.0 at (0, 1) or (1, 0).
+        m = dm.Model("mpcc")
+        x = m.continuous("x", lb=0, ub=10)
+        y = m.continuous("y", lb=0, ub=10)
+        m.minimize((x - 1) ** 2 + (y - 1) ** 2)
+        m.complementarity(x, y)
+
+        r = m.solve(time_limit=30.0, gap_tolerance=1e-6)
+        assert r.status in ("optimal", "feasible")
+        assert r.objective == pytest.approx(1.0, abs=1e-3)
+        # Complementarity holds: at least one side is zero.
+        assert r.x["x"] * r.x["y"] == pytest.approx(0.0, abs=1e-4)
+        assert min(r.x["x"], r.x["y"]) == pytest.approx(0.0, abs=1e-3)
+
+    @pytest.mark.slow
+    def test_partner_forced_zero_when_one_side_bounded_away(self):
+        # x is bounded away from 0 (x >= 2), so complementarity forces y = 0,
+        # even though the objective would prefer y = 5. This is the backward
+        # complementarity rule (x_L > 0 => y = 0) realised through the
+        # disjunction + indicator FBBT.
+        m = dm.Model("comp_backward")
+        x = m.continuous("x", lb=2, ub=10)
+        y = m.continuous("y", lb=0, ub=10)
+        m.minimize((y - 5) ** 2)
+        m.complementarity(x, y)
+
+        r = m.solve(time_limit=30.0, gap_tolerance=1e-6)
+        assert r.status in ("optimal", "feasible")
+        assert r.x["y"] == pytest.approx(0.0, abs=1e-3)
+        assert r.objective == pytest.approx(25.0, abs=1e-2)

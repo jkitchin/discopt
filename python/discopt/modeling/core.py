@@ -1847,6 +1847,47 @@ class Model:
             )
         )
 
+    def complementarity(
+        self,
+        x: "Expression",
+        y: "Expression",
+        *,
+        name: Optional[str] = None,
+    ):
+        r"""Add a complementarity constraint :math:`0 \le x \perp y \ge 0`.
+
+        Enforces ``x >= 0``, ``y >= 0`` and ``x * y == 0`` — at least one of
+        ``x``, ``y`` is zero. This is the defining structure of MPCCs/MPECs,
+        KKT-reformulated bilevel programs, and equilibrium models.
+
+        Rather than the smooth bilinear equality ``x * y == 0`` (whose convex
+        relaxation cannot capture the either/or structure and is degenerate at
+        the solution — it violates standard constraint qualifications), this
+        lowers to the exact disjunction ``(x == 0) ∨ (y == 0)`` via
+        :meth:`either_or`. The GDP pass then reformulates it to a big-M / hull
+        model with a selector binary, so branch-and-bound branches on the
+        finite disjunction and FBBT can infer the partner is zero whenever one
+        side is bounded away from zero.
+
+        Parameters
+        ----------
+        x, y : Expression
+            The complementary pair. Both are constrained non-negative.
+        name : str, optional
+            Base name for the generated non-negativity constraints and
+            disjunction.
+
+        Examples
+        --------
+        >>> # min (x-1)^2 + (y-1)^2  s.t.  0 <= x ⊥ y >= 0
+        >>> m.complementarity(x, y)
+        """
+        xw = _wrap(x)
+        yw = _wrap(y)
+        self.subject_to(xw >= 0, name=f"{name}_x_nonneg" if name else None)
+        self.subject_to(yw >= 0, name=f"{name}_y_nonneg" if name else None)
+        self.either_or([[xw == 0], [yw == 0]], name=name)
+
     def _branch_bounds(
         self, then_expr: "Expression", else_expr: "Expression"
     ) -> tuple[float, float]:
