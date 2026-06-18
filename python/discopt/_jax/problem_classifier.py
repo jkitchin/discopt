@@ -801,11 +801,11 @@ def _extract_lp_data_from_repr(model: Model) -> LPData:
         obj_at_zero = -obj_at_zero
 
     return LPData(
-        c=np.asarray(c_full),
-        A_eq=np.asarray(A_eq),
-        b_eq=np.asarray(b_eq),
-        x_l=np.asarray(x_l),
-        x_u=np.asarray(x_u),
+        c=np.asarray(c_full),  # type: ignore[arg-type]
+        A_eq=np.asarray(A_eq),  # type: ignore[arg-type]
+        b_eq=np.asarray(b_eq),  # type: ignore[arg-type]
+        x_l=np.asarray(x_l),  # type: ignore[arg-type]
+        x_u=np.asarray(x_u),  # type: ignore[arg-type]
         obj_const=obj_at_zero,
     )
 
@@ -875,8 +875,8 @@ def _extract_qp_data_from_repr(model: Model) -> QPData:
         c_full = c_vec
 
     return QPData(
-        Q=np.asarray(Q_full),
-        c=np.asarray(c_full),
+        Q=np.asarray(Q_full),  # type: ignore[arg-type]
+        c=np.asarray(c_full),  # type: ignore[arg-type]
         A_eq=lp_data.A_eq,
         b_eq=lp_data.b_eq,
         x_l=lp_data.x_l,
@@ -952,9 +952,9 @@ def _extract_lp_data_autodiff(model: Model) -> LPData:
         con_fn = compile_constraint(con, model)
         # Flatten any vector / matrix constraint body into a length-k vector;
         # each component becomes its own LP row.
-        body0 = np.asarray(con_fn(x_zero), dtype=jnp.float64).reshape(-1)
+        body0 = jnp.asarray(con_fn(x_zero), dtype=jnp.float64).reshape(-1)
         jac_raw = jax.jacobian(lambda x, _f=con_fn: jnp.asarray(_f(x)).reshape(-1))(x_zero)
-        jac = np.asarray(jac_raw, dtype=jnp.float64).reshape(body0.shape[0], n_orig)
+        jac = jnp.asarray(jac_raw, dtype=jnp.float64).reshape(body0.shape[0], n_orig)
         if con.sense == "==":
             eq_blocks.append((jac, body0))
         elif con.sense == "<=":
