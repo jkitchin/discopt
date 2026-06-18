@@ -1503,8 +1503,17 @@ class TestAmpPhase4Coverage:
         assert len(varmap["multilinear_stages"][(3, 4, 5, 6)]) == 3
         assert milp_model._objective_bound_valid is True
 
-    def test_multilinear_build_avoids_unused_original_pairwise_lifts(self):
-        """A pure 4-factor product should build only the recursive product chain."""
+    def test_multilinear_build_materializes_subset_product_lifts_for_exact_hull(self):
+        """A pure 4-factor product builds the exact RLT multilinear hull.
+
+        Commit 60888b1 ("generalize RLT convex-hull cuts from trilinear to
+        multilinear") replaced the minimal recursive-chain relaxation with the
+        exact Sherali-Adams hull: for a product of n factors every factor-subset
+        of size >= 2 gets a lifted column, and the |S| >= 3 subsets emit RLT
+        cuts that tighten the relaxation. So the pairwise lifts that the old
+        design called "unused" are now materialized *and consumed* by the
+        higher-degree cuts. This test pins that contract.
+        """
         m = Model("multilinear_chain_only")
         x = m.continuous("x", lb=0.1, ub=4.0, shape=(4,))
         m.maximize(x[0] * x[1] * x[2] * x[3])
@@ -1520,7 +1529,8 @@ class TestAmpPhase4Coverage:
 
         stages = varmap["multilinear_stages"][(0, 1, 2, 3)]
         chain_pairs = {tuple(sorted((stage["lhs_col"], stage["rhs_col"]))) for stage in stages}
-        unused_original_pairs = {
+        all_original_pairs = {
+            (0, 1),
             (0, 2),
             (0, 3),
             (1, 2),
@@ -1528,9 +1538,16 @@ class TestAmpPhase4Coverage:
             (2, 3),
         }
 
+        # The top-level 4-factor subset is lifted as a multilinear column.
+        assert (0, 1, 2, 3) in varmap["multilinear"]
+        # All bilinear lifts route through the piecewise-McCormick map, not the
+        # plain bilinear map (partitioning is active on every factor here).
         assert varmap["bilinear"] == {}
-        assert set(varmap["bilinear_pw"]) == chain_pairs
-        assert not unused_original_pairs & set(varmap["bilinear_pw"])
+        # The recursive-chain pairs are a subset of the materialized pairwise lifts.
+        assert chain_pairs <= set(varmap["bilinear_pw"])
+        # The exact hull materializes *every* original factor-pair lift, not just
+        # the chain, because the size-3/size-4 RLT cuts reference them.
+        assert all_original_pairs <= set(varmap["bilinear_pw"])
 
     def test_alpine_multi4n_milp_relaxation_solves_with_objective_bound(self):
         """The recursive multi4N relaxation should solve with a real objective bound."""
@@ -3225,9 +3242,14 @@ class TestCurrentCodeWeaknesses:
             amp_mod,
             "_solve_milp_with_oa_recovery",
             lambda **kwargs: (
+                # be4cbf7 made the AMP lower bound read the rigorous dual `bound`
+                # rather than the incumbent `objective` (the latter is only an upper
+                # bound on a node-limited solve). Supply both so the LB update sees a
+                # real dual bound to propagate.
                 MilpRelaxationResult(
                     status="optimal",
                     objective=0.0,
+                    bound=0.0,
                     x=np.array([0.0], dtype=np.float64),
                 ),
                 {},
