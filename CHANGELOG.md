@@ -12,6 +12,57 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **Irreducible Infeasible Subsystem (IIS)** (`feat(infeasibility)`, #227). New
+  `compute_iis(model)` returns a minimal infeasible subset of constraints/bounds
+  via deletion filtering — exact for LP/MILP/convex, best-effort for nonconvex.
+  Exposed as `discopt.compute_iis` / `IISResult`; documented in
+  `docs/notebooks/infeasibility_iis.ipynb`.
+- **Complementarity constraints via GDP disjunction** (`feat(modeling)`, #231).
+  `Model.complementarity(x, y)` now reformulates through a GDP disjunction by
+  default (`method="gdp"`), alongside the existing Scholtes regularization and
+  SOS1/disjunctive paths, all unified behind one front-end and the
+  `discopt.mpec` reformulation module. Documented in
+  `docs/notebooks/complementarity_mpec.ipynb`.
+- **RLT as a first-class solve option** (`feat(rlt)`, #223, #212). Level-1
+  Reformulation-Linearization-Technique cuts are now a first-class solver choice
+  (`rlt_cuts=True`) with per-node targeted RLT cut separation.
+- **PSD / SOC cuts for QCQP + AC optimal power flow** (`feat(cuts)`, #203, #209).
+  Dense-moment (PSD) eigenvalue cut separator and second-order-cone cuts for
+  QCQP structure, plus a rectangular AC-OPF builder (`discopt.opf`:
+  `build_ac_opf_rectangular`, `Bus`, `Line`, `ACOPF`) as the capstone target.
+- **Differentiable MILP / MIQP** (`feat(diff)`, #221). Fix-and-differentiate
+  framework propagates parameter sensitivities through integer programs via
+  implicit (KKT) differentiation of the fixed continuous subproblem.
+- **Conflict analysis / no-good cuts** (`feat(conflict)`). FBBT-driven conflict
+  analysis derives no-good cuts from infeasible nodes.
+- **Standard pooling problem + pq-formulation** (`feat(pooling)`). Bilinear
+  quality-blending model builder with pq-cuts that tighten the McCormick
+  relaxation; documented in `docs/notebooks/pooling_pq.ipynb`.
+- **Geometric programming detection + log-space reformulation** (`feat(gp)`).
+  `discopt.gp` recognizes posynomial structure (`classify_gp`) and solves via the
+  convex log-space transformation (`as_geometric_program`, `solve_gp`).
+- **Primal improvement heuristics** (`feat(heuristics)`). Diving, RINS, and
+  local-branching heuristics added to the B&B primal-side search.
+- **Public FBBT bound-tightening API** (`feat(tightening)`, #198). `discopt.tightening`
+  exposes feasibility-based bound tightening for manual use; documented in
+  `docs/notebooks/bound_tightening.ipynb`.
+- **Integrality-aware FBBT bound snapping** (`feat(fbbt)`). Binary-indicator
+  propagation snaps tightened bounds to integer values for sharper inference.
+- **Periodic-variable bound reduction** (`feat(presolve)`, #215). Presolve pass
+  reduces bounds of variables that only enter through periodic functions
+  (`sin`/`cos`), unblocking otherwise-free angular variables.
+- **`cuts='auto'` is the solver default** (`feat(cuts)`, #217). Auto cut
+  selection balances bound tightening against node-count reduction.
+- **Best-estimate node selection** (`feat(bnb)`) and **objective-gating priority
+  branching** (`feat(bnb)`, #184) B&B search strategies.
+- **Transcendental relaxation coverage** (`feat(relax)`, #216, #218). LP relaxer
+  engaged for general transcendental nonlinearity; `asin`/`acos`/`acosh` gaps
+  closed; non-smooth `abs`/`min`/`max` fixed; relaxation coverage audit added.
+- **Run discopt as a GAMS solver** (`feat(gams)`, #119). GMO/GEV control-file
+  link lets GAMS call discopt as an external solver; see `docs/gams_solver_link.md`.
+- **Batched / multiple-RHS LP solving** (`feat(simplex)`). Shared-matrix batched
+  ftran/btran for solving many RHS over one factorization, used by node-relaxation
+  and DoE batches.
 - **Per-node lifted-LP FBBT** (`feat(relaxation)`, #184). Opt-in
   (`DISCOPT_LIFTED_FBBT=1`) feasibility-based bound tightening that propagates
   the McCormick relaxation's *own* rows (`A_ub·z ≤ b_ub`, spanning the lifted
@@ -68,6 +119,13 @@ The release procedure that produces these entries is documented in
   backend via `_default_nlp_solver()`, resolving to POUNCE when installed and
   falling back to cyipopt. B&B convex-polish / dual-recovery passes likewise
   prefer POUNCE through the new `_solve_node_nlp_kkt` wrapper.
+- **LP / MILP / QP / MIQP solves stay JAX-free** (`perf(solver)`, #224, #225).
+  Linear and quadratic solve paths no longer import JAX, removing the cold-start
+  compile tax on fresh solves; node QP relaxations now route through POUNCE.
+- **Faster simplex** (`perf(simplex)`, #178, #180). Dual Devex pricing and a
+  bound-flipping ratio test; one LU factorization is reused across a node's
+  strong-branch probes, and one equilibration is shared across each batch of
+  node solves.
 
 ### Removed
 
@@ -79,6 +137,24 @@ The release procedure that produces these entries is documented in
   `discopt_ripopt` benchmark key. Use `pounce` / `pounce_sensitivity` instead.
 
 ### Fixed
+
+- **Relaxation soundness hardening** across the global-opt loop: reject a
+  fabricated finite bound on an unbounded McCormick relaxation (`himmel16`,
+  `fix(soundness)`); never trust an unconverged simplex objective as an LP lower
+  bound (`gear4`, `fix(soundness)`); tangent-separate lifted univariate squares
+  (#199); pre-reform interval bound + even-power FBBT (`rbrock` 43s→1.3s, #204);
+  fold variable-free product factors and emit sound feasible-exit certificates
+  (#179); reject denominator clearing that fabricates a false infeasibility;
+  certify `du-opt` globally via epigraph relaxation + rank-1 Hessian (#182).
+- **Bound convexity classification can no longer blow the time limit**
+  (`fix(solver)`, #228).
+- **Preserve integrality for discrete vars in nonlinear `.nl` export**
+  (`fix(export)`, #214).
+- **`from_gams` correctness on real GAMS files** (`fix(gams)`, #176): 1-D
+  parameters and embedded objective variables now translate correctly.
+- **Keep wrongly-omitted constraints in the AMP MILP relaxation** (`fix(amp)`, #200).
+- **Corrected 9 wrong known-optima** in the benchmark set against MINLPLib
+  `minlplib.solu` (`fix(benchmarks)`).
 
 ## [0.4.0] - 2026-05-17
 

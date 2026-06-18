@@ -15,8 +15,8 @@ Model.solve()  -->  Python orchestrator  -->  Rust TreeManager (B&B engine)
                         |                          |
                   JAX NLPEvaluator           Node pool / branching / pruning
                   NLP backends:              Zero-copy numpy arrays (PyO3)
-                    pounce  (pure-Rust Ipopt port)
-                    ipm     (pure-JAX, vmap batch)  [default]
+                    pounce  (pure-Rust Ipopt port)  [default single solve]
+                    ipm     (pure-JAX, vmap batch)  [B&B node relaxations]
                     cyipopt (Ipopt)
 ```
 
@@ -101,19 +101,21 @@ print(design.summary())
 
 discopt supports three NLP solver backends, each with different strengths:
 
-| Backend         | Implementation    | Use Case                                   |
-|-----------------|-------------------|--------------------------------------------|
-| `ipm` (default) | Pure-JAX IPM      | B&B inner loop; GPU-batched via `jax.vmap` |
-| `pounce`        | Pure-Rust Ipopt port | Single-problem NLP; fastest wall-clock  |
-| `cyipopt`       | Ipopt via cyipopt | Single-problem NLP; most robust            |
+| Backend              | Implementation       | Use Case                                   |
+|----------------------|----------------------|--------------------------------------------|
+| `pounce` (default)   | Pure-Rust Ipopt port | Single-problem NLP; fastest wall-clock     |
+| `ipm`                | Pure-JAX IPM         | B&B inner loop; GPU-batched via `jax.vmap`  |
+| `cyipopt`            | Ipopt via cyipopt    | Single-problem NLP; most robust            |
 
-For single continuous solves the `ipm` default is promoted to a KKT-valid
-backend, resolving to POUNCE when installed and falling back to cyipopt.
+For single continuous solves the default NLP backend resolves to a KKT-valid
+solver — POUNCE when installed, falling back to cyipopt, then to the pure-JAX
+IPM. The pure-JAX `ipm` remains the vmap-batched engine for B&B node relaxations.
 
 ```python
-result = model.solve(nlp_solver="pounce")   # POUNCE (pure-Rust Ipopt port)
-result = model.solve(nlp_solver="ipm")      # Pure-JAX (default)
-result = model.solve(nlp_solver="cyipopt")  # Ipopt
+result = model.solve()                       # default: POUNCE when installed
+result = model.solve(nlp_solver="pounce")    # POUNCE (pure-Rust Ipopt port)
+result = model.solve(nlp_solver="ipm")       # Pure-JAX IPM
+result = model.solve(nlp_solver="cyipopt")   # Ipopt
 ```
 
 ## Contents
