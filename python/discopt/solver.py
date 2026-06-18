@@ -1585,19 +1585,52 @@ def _classify_model_convexity(
     failure_label: str = "Convexity detection failed",
     log_nonconvex_continuous: bool = False,
 ) -> tuple[bool, bool, list[bool] | None]:
-    """Run the sound model convexity classifier once for solver dispatch."""
+    """Run the sound model convexity classifier once for solver dispatch.
+
+    The result is memoized on the model (``solve_model`` clears the cache at the
+    start of every solve), so the classifier — which is eigenvalue-heavy and can
+    cost tens of seconds on large quadratic models — runs at most once per solve
+    instead of at each of its several dispatch call sites.
+
+    Classification is also bounded by ``model._convexity_time_budget`` (a fraction
+    of ``time_limit``, set by ``solve_model``): if the per-constraint walk would
+    overrun that budget it is abandoned and the model is reported as
+    convexity-unknown, which routes to the sound spatial Branch and Bound. This
+    keeps a tight ``time_limit`` from being blown by classification alone.
+    """
+    cached = getattr(model, "_convexity_classification_cache", None)
+    if cached is not None:
+        return cast("tuple[bool, bool, list[bool] | None]", cached)
+
+    from discopt._jax.convexity.rules import ConvexityBudgetExceeded
+
+    # Default cap (15 s) bounds classification even when called outside a budgeted
+    # solve_model (e.g. on a model produced by factorable reformulation).
+    budget = getattr(model, "_convexity_time_budget", 15.0)
+    deadline = (time.perf_counter() + budget) if budget else None
+    result: tuple[bool, bool, list[bool] | None]
     try:
         from discopt._jax.convexity import classify_model as _classify_convexity
 
         # use_certificate=True enables the sound interval-Hessian fallback
         # for constraints/objective the syntactic walker leaves unproven.
-        is_convex, constraint_mask = _classify_convexity(model, use_certificate=True)
+        is_convex, constraint_mask = _classify_convexity(
+            model, use_certificate=True, deadline=deadline
+        )
         if log_nonconvex_continuous and not is_convex:
             logger.info("Nonconvex continuous model detected — using spatial Branch and Bound")
-        return True, bool(is_convex), list(constraint_mask)
+        result = (True, bool(is_convex), list(constraint_mask))
+    except ConvexityBudgetExceeded as exc:
+        logger.info("Convexity classification skipped (time budget): %s", exc)
+        result = (False, False, None)
     except Exception as exc:
         logger.debug("%s: %s", failure_label, exc)
-        return False, False, None
+        result = (False, False, None)
+    try:
+        model._convexity_classification_cache = result
+    except Exception:
+        pass
+    return result
 
 
 # Size gate for the auto cut policy: above this many scalar variables the
@@ -1940,6 +1973,14 @@ def solve_model(
             f"{sorted(_valid_nlp_solvers)}. (The 'ripopt' backend was replaced "
             "by 'pounce', a pure-Rust port of Ipopt.)"
         )
+
+    # Reset the per-solve convexity-classification memo (a previous solve, or an
+    # IIS feasibility probe, may have cached a verdict for a different constraint
+    # set), and budget classification to a fraction of the time limit so it
+    # cannot, on its own, overrun ``time_limit`` (issue: tens of seconds of
+    # eigenvalue work on large quadratic models before search even starts).
+    model._convexity_classification_cache = None
+    model._convexity_time_budget = min(max(0.2 * float(time_limit), 0.5), 20.0)
 
     # --- AMP (Adaptive Multivariate Partitioning) global solver ---
     _solver = solver if solver is not None else kwargs.pop("solver", None)
@@ -4579,11 +4620,17 @@ def solve_model(
     # MILP path already seeds such a root bound; this brings the spatial path to
     # parity. Surfaced lazily — only when the search yielded nothing — and never
     # overrides an existing finite bound.
-    if (bound_val is None or not np.isfinite(bound_val)) and (
-        model._objective.sense == ObjectiveSense.MINIMIZE
+    _rr_remaining = time_limit - (time.perf_counter() - t_start)
+    if (
+        (bound_val is None or not np.isfinite(bound_val))
+        and (model._objective.sense == ObjectiveSense.MINIMIZE)
+        and _rr_remaining > 0.0
     ):
+        # Budget the fallback to the time actually left: it runs *after* the B&B
+        # loop already consumed the limit, so passing the full ``time_limit`` here
+        # would let it overrun by a second whole budget.
         _rr = _root_relaxation_lower_bound(
-            model, _root_lb_snapshot, _root_ub_snapshot, time_limit, psd_cuts=psd_cuts
+            model, _root_lb_snapshot, _root_ub_snapshot, _rr_remaining, psd_cuts=psd_cuts
         )
         if _rr is not None and np.isfinite(_rr):
             bound_val = _rr

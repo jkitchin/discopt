@@ -786,7 +786,19 @@ def _constraint_convex_from_curvature(curv: Curvature, sense: str) -> bool:
     return False
 
 
-def classify_model(model: Model, *, use_certificate: bool = False) -> tuple[bool, list[bool]]:
+class ConvexityBudgetExceeded(Exception):
+    """Raised when convexity classification exceeds its wall-clock ``deadline``.
+
+    The classifier is per-constraint eigenvalue-heavy and on large quadratic
+    models can take tens of seconds; under a tight solver ``time_limit`` that
+    would blow the budget before search even starts. Callers catch this and treat
+    the model as convexity-unknown (sound: it routes to the spatial B&B).
+    """
+
+
+def classify_model(
+    model: Model, *, use_certificate: bool = False, deadline: float | None = None
+) -> tuple[bool, list[bool]]:
     """Classify a model's convexity.
 
     Returns ``(is_convex, per_constraint_mask)``. ``max f`` is treated
@@ -800,7 +812,14 @@ def classify_model(model: Model, *, use_certificate: bool = False) -> tuple[bool
     unproven. The certificate only tightens UNKNOWN verdicts; it never
     overrides an already-proven CONVEX/CONCAVE, preserving the
     soundness invariant.
+
+    ``deadline`` is an optional ``time.perf_counter()`` timestamp; if the
+    per-constraint walk crosses it, :class:`ConvexityBudgetExceeded` is raised so
+    the solver can fall back to the spatial path rather than overrun its
+    ``time_limit``.
     """
+    import time as _time
+
     cache: dict = {}
     ctx = build_linear_context(model)
     if ctx is not None:
@@ -831,6 +850,11 @@ def classify_model(model: Model, *, use_certificate: bool = False) -> tuple[bool
     constraint_mask: list[bool] = []
     all_convex = obj_convex
     for c in model._constraints:
+        if deadline is not None and _time.perf_counter() > deadline:
+            raise ConvexityBudgetExceeded(
+                f"convexity classification exceeded its time budget after "
+                f"{len(constraint_mask)}/{len(model._constraints)} constraints"
+            )
         if isinstance(c, Constraint):
             is_cvx = classify_constraint(c, model, cache, use_certificate=use_certificate)
             constraint_mask.append(is_cvx)
