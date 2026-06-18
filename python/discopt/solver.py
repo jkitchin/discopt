@@ -13,7 +13,7 @@ import logging
 import math
 import os
 import time
-from typing import TYPE_CHECKING, Any, Callable, Optional, cast
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union, cast
 
 import numpy as np
 from scipy.optimize import minimize as scipy_minimize
@@ -1754,6 +1754,7 @@ def solve_model(
     cutting_planes: bool = False,
     psd_cuts: bool = False,
     rlt_cuts: bool = False,
+    rlt: Union[bool, str] = "auto",
     cuts: str = "auto",
     partitions: int = 0,
     branching_policy: str = "fractional",
@@ -1826,6 +1827,18 @@ def solve_model(
         If None, auto-selects based on problem size and density.
     cutting_planes : bool, default False
         Enable outer-approximation cut generation after NLP relaxation solves.
+    rlt : bool or str, default "auto"
+        Reformulation-Linearization Technique (RLT) control for the McCormick
+        LP relaxation. ``"auto"`` lets the structure-gated cut policy decide
+        per-node RLT cut separation (RLT on QCQP with linear constraints, PSD on
+        box-QP) and leaves build-time level-1 RLT off. ``True`` (or ``"on"``)
+        engages RLT in full: build-time level-1 constraint×bound products tighten
+        the root bound *and* per-node RLT cuts are separated, overriding the auto
+        policy. ``False`` (or ``"off"``) forces every RLT lever off. This is the
+        first-class replacement for the legacy ``DISCOPT_RLT=1`` environment
+        variable (still honored as a force-on override). Every RLT family is
+        sound — a constraint×bound product is non-negative at every feasible
+        point — so this only trades bound tightness for relaxation size.
     partitions : int, default 0
         Number of piecewise McCormick partitions (0 = standard convex
         relaxation, k > 0 = k partitions for tighter relaxations).
@@ -2997,6 +3010,29 @@ def solve_model(
     if _mc_mode == "lp" and model._objective is not None:
         from discopt._jax.mccormick_lp import MccormickLPRelaxer
 
+        # Resolve the high-level ``rlt`` switch into the two concrete RLT levers:
+        # build-time level-1 RLT (``rlt_level1``, which tightens the root bound)
+        # and per-node RLT cut separation (``rlt_cuts``). ``rlt`` is the
+        # user-facing control that replaces the legacy ``DISCOPT_RLT`` env gate:
+        #   * "auto" (default): defer to the structure-gated cut policy for the
+        #     per-node cuts; build-time level-1 stays off unless the env var
+        #     forces it (back-compat). This is the historical default behaviour.
+        #   * True / "on": engage RLT in full — build-time level-1 *and* per-node
+        #     cuts — overriding the auto policy (an explicit opt-in to a family).
+        #   * False / "off": force every RLT lever off, even the per-node cuts the
+        #     auto policy would otherwise pick.
+        # Every RLT family is sound (a constraint×bound product is non-negative at
+        # every feasible point), so this switch only ever trades bound tightness
+        # for relaxation size — never correctness.
+        _rlt_on: Optional[bool]
+        if rlt is True or (isinstance(rlt, str) and rlt.lower() in ("on", "true")):
+            _rlt_on = True
+        elif rlt is False or (isinstance(rlt, str) and rlt.lower() in ("off", "false")):
+            _rlt_on = False
+        else:  # "auto" (or any unrecognized value) → let the policy decide
+            _rlt_on = None
+        _eff_rlt_cuts = True if _rlt_on else rlt_cuts
+
         # The spatial path needs at least one variable it can branch on: a
         # finite-box continuous variable to bisect, or (issue #194) an integer
         # variable in a nonlinear term whose domain can be partitioned to close a
@@ -3010,7 +3046,8 @@ def solve_model(
                 model,
                 superposition=(relaxation_arithmetic == "superposition"),
                 psd_cuts=psd_cuts,
-                rlt_cuts=rlt_cuts,
+                rlt_cuts=_eff_rlt_cuts,
+                rlt_level1=bool(_rlt_on),
             )
         except Exception as e:
             logger.warning("McCormick LP relaxer setup failed: %s", e)
@@ -3032,10 +3069,14 @@ def solve_model(
                 # sweep showed RLT dominates on QCQP *with* linear constraints, PSD
                 # on box-QP (no constraints), and stacking the two is
                 # counter-productive. So pick exactly one by structure, gated by
-                # size, never both. An explicit psd_cuts/rlt_cuts flag takes
-                # precedence (the user opted into a specific family); cuts="manual"
-                # disables the policy entirely.
-                if cuts == "auto" and not psd_cuts and not rlt_cuts:
+                # size, never both. An explicit psd_cuts/rlt_cuts flag, or an
+                # explicit rlt=True/False, takes precedence (the user opted into or
+                # out of a specific family); cuts="manual" disables the policy
+                # entirely. ``rlt=True`` already forced rlt_cuts on above, so the
+                # policy is skipped; ``rlt=False`` skips it and pins RLT cuts off.
+                if _rlt_on is False:
+                    _mc_lp_relaxer._rlt_cuts = False
+                elif cuts == "auto" and not psd_cuts and not rlt_cuts and _rlt_on is None:
                     _apply_auto_cut_policy(model, _mc_lp_relaxer)
                 # A node is spatial-branchable if there is a finite-box continuous
                 # variable to bisect, OR an integer variable in a nonlinear term

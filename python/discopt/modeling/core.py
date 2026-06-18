@@ -2214,6 +2214,14 @@ class Model:
         partitions : int, default 0
             Number of piecewise McCormick partitions (0 = standard convex
             relaxation, k > 0 = k partitions for tighter relaxations).
+        rlt : bool or str, default "auto"
+            Reformulation-Linearization Technique control for the McCormick LP
+            relaxation. ``"auto"`` defers per-node RLT cuts to the structure-gated
+            cut policy; ``True`` engages RLT in full (build-time level-1 root-bound
+            tightening plus per-node cuts); ``False`` forces it off. Replaces the
+            legacy ``DISCOPT_RLT=1`` environment variable. Sound regardless of
+            setting (a constraint×bound product never removes a feasible point).
+            Passed through to :func:`discopt.solver.solve_model`.
         branching_policy : str, default "fractional"
             Variable selection policy: ``"fractional"`` (most-fractional)
             or ``"gnn"`` (GNN scoring, future hook).

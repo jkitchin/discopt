@@ -176,6 +176,7 @@ class MccormickLPRelaxer:
         backend: str = "simplex",
         psd_cuts: bool = False,
         rlt_cuts: bool = False,
+        rlt_level1: bool = False,
     ) -> None:
         self._model = model
         self._terms: NonlinearTerms = classify_nonlinear_terms(model)
@@ -211,11 +212,14 @@ class MccormickLPRelaxer:
         self._has_affine_power = bool(_collect_affine_powers(model, set()))
         # Level-1 RLT (issue #175): multiply the model's linear constraints by
         # variable bound factors and lift the products, tightening the root bound
-        # for high-degree-product instances (nvs20: 87.35 -> 91.74). Opt-in via
-        # ``DISCOPT_RLT=1`` — it ~doubles the relaxation size, so it is a root-bound
-        # tightener rather than a per-node B&B default. Only applicable when the
-        # model has at least one linear constraint to multiply.
-        self._rlt_applicable = os.environ.get("DISCOPT_RLT", "0") == "1" and bool(
+        # for high-degree-product instances (nvs20: 87.35 -> 91.74). It ~doubles
+        # the relaxation size, so it is a root-bound tightener rather than a
+        # per-node B&B default. Enabled via the first-class ``rlt_level1=True``
+        # constructor argument (threaded from ``Model.solve(rlt=...)``), with the
+        # legacy ``DISCOPT_RLT=1`` environment variable kept as a force-on
+        # override for benchmarking. Only applicable when the model has at least
+        # one linear constraint to multiply.
+        self._rlt_applicable = (rlt_level1 or os.environ.get("DISCOPT_RLT", "0") == "1") and bool(
             _linear_constraint_forms(model, self._n_orig)
         )
         # Lever 1 (issue #194): solve each spatial-B&B node's relaxation as a pure
