@@ -1401,3 +1401,45 @@ class TestComplementarity:
         assert r.status in ("optimal", "feasible")
         assert r.x["y"] == pytest.approx(0.0, abs=1e-3)
         assert r.objective == pytest.approx(25.0, abs=1e-2)
+
+    def test_nonlinear_operand_is_lifted_to_keep_disjunction_linear(self):
+        # A nonlinear complementary body is lifted into an auxiliary variable
+        # u == x**2 so the disjunction stays linear (u == 0) -- big-M is then
+        # exact rather than relaxing the perspective of a nonlinear equality.
+        from discopt.modeling.core import _DisjunctiveConstraint
+
+        m = dm.Model("nl_lift")
+        x = m.continuous("x", lb=-3, ub=3)
+        y = m.continuous("y", lb=0, ub=3)
+        m.complementarity(x**2, y, name="cc")
+
+        # One auxiliary variable (the lift) was introduced for x**2; y is a bare
+        # variable and is used directly.
+        assert len(m._variables) == 3
+        # The disjunction defers to the solver-wide gdp_method (big-M), not hull.
+        disj = next(c for c in m._constraints if isinstance(c, _DisjunctiveConstraint))
+        assert disj.method is None
+        # A nonlinear lift equality u == x**2 was added.
+        lift = [
+            c
+            for c in m._constraints
+            if isinstance(c, Constraint) and c.sense == "==" and not _is_linear(c.body)
+        ]
+        assert len(lift) == 1
+
+    @pytest.mark.slow
+    def test_nonlinear_mpcc_solves_to_global_optimum(self):
+        # min (x-2)^2 + (y-2)^2  s.t.  0 <= x^2 ⊥ y >= 0.
+        # Either x^2 == 0 (x == 0, giving (0, 2) at value 4) or y == 0
+        # (giving (2, 0) at value 4); global optimum is 4.0.
+        m = dm.Model("nl_mpcc")
+        x = m.continuous("x", lb=-3, ub=3)
+        y = m.continuous("y", lb=0, ub=3)
+        m.minimize((x - 2) ** 2 + (y - 2) ** 2)
+        m.complementarity(x**2, y)
+
+        r = m.solve(time_limit=30.0, gap_tolerance=1e-6)
+        assert r.status in ("optimal", "feasible")
+        assert r.objective == pytest.approx(4.0, abs=1e-2)
+        # Complementarity holds: x^2 * y == 0.
+        assert (r.x["x"] ** 2) * r.x["y"] == pytest.approx(0.0, abs=1e-3)

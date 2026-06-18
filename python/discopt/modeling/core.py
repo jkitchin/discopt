@@ -1882,11 +1882,42 @@ class Model:
         >>> # min (x-1)^2 + (y-1)^2  s.t.  0 <= x ⊥ y >= 0
         >>> m.complementarity(x, y)
         """
-        xw = _wrap(x)
-        yw = _wrap(y)
-        self.subject_to(xw >= 0, name=f"{name}_x_nonneg" if name else None)
-        self.subject_to(yw >= 0, name=f"{name}_y_nonneg" if name else None)
-        self.either_or([[xw == 0], [yw == 0]], name=name)
+        xv = self._complementarity_operand(x, name, "x")
+        yv = self._complementarity_operand(y, name, "y")
+        self.subject_to(xv >= 0, name=f"{name}_x_nonneg" if name else None)
+        self.subject_to(yv >= 0, name=f"{name}_y_nonneg" if name else None)
+        # Both disjunct bodies are now linear (bare variables for nonlinear
+        # operands, after lifting), so big-M is exact and keeps the selector
+        # binary as a plain linear row — which the integrality-aware FBBT relies
+        # on to infer the partner is zero when one side is bounded away from
+        # zero (the backward complementarity rule). ``method=None`` defers to
+        # the solver-wide ``gdp_method`` (default big-M).
+        self.either_or([[xv == 0], [yv == 0]], name=name)
+
+    def _complementarity_operand(
+        self, expr: "Expression", base: Optional[str], tag: str
+    ) -> "Expression":
+        """Return a linear operand for a complementarity disjunct.
+
+        Linear expressions are used directly, so the disjunct ``expr == 0``
+        stays linear and big-M is exact. A *nonlinear* body is lifted into an
+        auxiliary variable ``u`` with ``u == expr``: the disjunction is then
+        linear in ``u`` (exact big-M, working FBBT backward rule), while the
+        nonlinear part becomes an ordinary smooth equality handled natively by
+        the NLP relaxation pipeline — avoiding the perspective of a nonlinear
+        equality, whose relaxation the big-M form bounds unreliably and the
+        hull form often cannot linearize.
+        """
+        from discopt._jax.gdp_reformulate import _is_linear
+
+        ew = _wrap(expr)
+        if _is_linear(ew):
+            return ew
+        lo, hi = self._branch_bounds(ew, ew)
+        self._aux_counter += 1
+        u = self.continuous(f"_{base or 'comp'}_{tag}_{self._aux_counter}", lb=lo, ub=hi)
+        self.subject_to(u == ew, name=f"{base}_{tag}_lift" if base else None)
+        return u
 
     def _branch_bounds(
         self, then_expr: "Expression", else_expr: "Expression"
