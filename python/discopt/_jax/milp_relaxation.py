@@ -1733,6 +1733,68 @@ def _linear_constraint_forms(model: Model, n_vars: int) -> list[tuple[np.ndarray
     return forms
 
 
+# A quadratic constraint factor for level-1 RLT (issue #15, Phase 2): the body
+# ``g(x) = const + sum_i lin_i x_i + sum_{(k,l)} quad_{kl} x_k x_l`` with the sense
+# of the parent constraint. ``quad`` keys are sorted index pairs ``(k, l)``,
+# ``k <= l`` (``(k, k)`` is the square ``x_k**2``).
+_QuadForm = tuple[dict[tuple[int, int], float], dict[int, float], float, str]
+
+
+def _quadratic_constraint_forms(model: Model, n_vars: int) -> list[_QuadForm]:
+    """Return each *genuinely quadratic* (degree-exactly-2 polynomial) model
+    constraint as ``(quad, lin, const, sense)``.
+
+    These are the nonlinear factors that Phase-2 level-1 RLT multiplies by
+    variable bound factors. Purely linear bodies are skipped (the affine path in
+    :func:`_linear_constraint_forms` already handles them); cubic-or-higher and
+    non-polynomial (transcendental, fractional-power) bodies are skipped because
+    their RLT products are out of scope for the degree-3 lifting implemented
+    here. The parent ``sense`` (``"<="`` or ``"=="``) is carried so an equality
+    parent can emit a two-sided equality product row.
+    """
+    forms: list[_QuadForm] = []
+    for constraint in model._constraints:
+        if constraint.sense not in ("<=", "=="):
+            continue
+        poly = _expr_to_polynomial(distribute_products(constraint.body), model)
+        if poly is None:
+            continue
+        const, terms = poly
+        quad: dict[tuple[int, int], float] = {}
+        lin: dict[int, float] = {}
+        const_acc = float(const)
+        max_degree = 0
+        ok = True
+        for coeff, monomial in terms:
+            degree = len(monomial)
+            max_degree = max(max_degree, degree)
+            if degree == 0:
+                const_acc += coeff
+            elif degree == 1:
+                idx = monomial[0]
+                if idx >= n_vars:
+                    ok = False
+                    break
+                lin[idx] = lin.get(idx, 0.0) + coeff
+            elif degree == 2:
+                ka, kb = monomial  # already sorted by _product_to_monomial
+                if ka >= n_vars or kb >= n_vars:
+                    ok = False
+                    break
+                quad[(ka, kb)] = quad.get((ka, kb), 0.0) + coeff
+            else:
+                ok = False  # degree >= 3 body: out of scope for quadratic-factor RLT
+                break
+        if not ok or max_degree != 2:
+            continue
+        if not (np.isfinite(const_acc) and all(np.isfinite(v) for v in lin.values())):
+            continue
+        if not all(np.isfinite(v) for v in quad.values()):
+            continue
+        forms.append((quad, lin, const_acc, constraint.sense))
+    return forms
+
+
 def _linearize_affine_expr(expr: Expression, model: Model, n_vars: int) -> tuple[np.ndarray, float]:
     """Linearize an affine expression over original variables.
 
@@ -4254,6 +4316,7 @@ def build_milp_relaxation(
     # can never exclude a feasible point. Resolved here (before the column count is
     # frozen) so the product columns exist; the rows are emitted with the others.
     rlt_cut_specs: list[dict[str, Any]] = []
+    rlt_quad_specs: list[dict[str, Any]] = []
     if rlt_level1:
 
         def _rlt_product_col(i: int, mm: int) -> Optional[int]:
@@ -4302,6 +4365,130 @@ def build_milp_relaxation(
                         "prod_cols": prod_cols,
                     }
                 )
+
+        # ── Phase 2: nonlinear (quadratic) constraint-factor RLT (issue #15) ──
+        # Multiply a *quadratic* constraint factor ``g(x) {<=,==} 0`` by a variable
+        # bound factor and lift the resulting degree-3 monomials on demand. This is
+        # the textbook gap for nonconvex quadratic (e.g. Weymouth) equalities. The
+        # product columns (bilinears, mixed ``x_i**2 x_j``, distinct triples, pure
+        # cubes) are allocated here while the column count is still growing; the
+        # rows are assembled at emission time by the single-sourced
+        # ``rlt_quadratic_bound_cut_row`` so the deployed math is exactly what the
+        # soundness audit exercises. Selective (only constraints whose variables
+        # touch the model's nonlinear support) and capped (bounded new columns) so
+        # the LP does not blow up. Disable with ``DISCOPT_RLT_QUAD=0``.
+        if os.environ.get("DISCOPT_RLT_QUAD", "1") != "0":
+            nonconvex_vars: set[int] = set()
+            for bi, bj in terms.bilinear:
+                nonconvex_vars.update((bi, bj))
+            for tri in terms.trilinear:
+                nonconvex_vars.update(tri)
+            for multi in terms.multilinear or ():
+                nonconvex_vars.update(multi)
+            for mono_idx, _mono_pow in monomial_terms:
+                nonconvex_vars.add(mono_idx)
+
+            _quad_col_cap = int(os.environ.get("DISCOPT_RLT_QUAD_MAX", "256"))
+            _quad_cols_start = col_idx
+
+            def _ensure_monomial_aux(i: int, p: int) -> Optional[int]:
+                """Lift ``x_i**p`` on demand (registering its power envelope)."""
+                nonlocal col_idx
+                key = (i, p)
+                existing = monomial_var_map.get(key)
+                if existing is not None:
+                    return existing
+                lb_i = float(flat_lb[i])
+                ub_i = float(flat_ub[i])
+                if not (_is_effectively_finite(lb_i) and _is_effectively_finite(ub_i)):
+                    return None
+                blo, bhi = _monomial_aux_bounds(lb_i, ub_i, p)
+                mag = max(
+                    abs(blo) if np.isfinite(blo) else 0.0,
+                    abs(bhi) if np.isfinite(bhi) else 0.0,
+                )
+                if mag > _MONOMIAL_AUX_BOUND_LIMIT:
+                    return None
+                if col_idx - _quad_cols_start >= _quad_col_cap:
+                    return None
+                monomial_var_map[key] = col_idx
+                all_bounds.append((blo, bhi))
+                integrality_flags.append(0)
+                col_idx += 1
+                # Register so the secant/tangent power envelope is emitted later.
+                monomial_terms.append(key)
+                return monomial_var_map[key]
+
+            def _ensure_product_col(idxs: tuple[int, ...]) -> Optional[int]:
+                """Column for a degree-1..3 monomial given as a multiset of vars."""
+                key = tuple(sorted(idxs))
+                if col_idx - _quad_cols_start >= _quad_col_cap:
+                    # Still allow products whose columns already exist.
+                    pass
+                if len(key) == 1:
+                    return key[0]
+                if len(key) == 2:
+                    a, b = key
+                    if a == b:
+                        return _ensure_monomial_aux(a, 2)
+                    return _ensure_bilinear_aux(a, b)
+                if len(key) == 3:
+                    a, b, c = key
+                    if a == b == c:
+                        return _ensure_monomial_aux(a, 3)
+                    if a == b:  # x_a**2 * x_c
+                        sq = _ensure_monomial_aux(a, 2)
+                        if sq is None or col_idx - _quad_cols_start >= _quad_col_cap:
+                            return None
+                        return _ensure_bilinear_aux(sq, c)
+                    if b == c:  # x_a * x_b**2
+                        sq = _ensure_monomial_aux(b, 2)
+                        if sq is None or col_idx - _quad_cols_start >= _quad_col_cap:
+                            return None
+                        return _ensure_bilinear_aux(a, sq)
+                    if col_idx - _quad_cols_start >= _quad_col_cap:
+                        return None
+                    final_col, _stages = _ensure_multilinear_aux((a, b, c))
+                    return final_col
+                return None
+
+            for quad, lin, qconst, sense in _quadratic_constraint_forms(model, n_orig):
+                support_vars = set(lin) | {k for k, _l in quad} | {_l for _k, _l in quad}
+                if not support_vars & nonconvex_vars:
+                    continue  # selective: only factors touching nonlinear structure
+                for mm in sorted(support_vars):
+                    lo_m, hi_m = float(flat_lb[mm]), float(flat_ub[mm])
+                    if not (_is_effectively_finite(lo_m) and _is_effectively_finite(hi_m)):
+                        continue
+                    # Enumerate and lift every product the cut row will reference.
+                    required: set[tuple[int, ...]] = set()
+                    for i in lin:
+                        required.add(tuple(sorted((i, mm))))
+                    for ka, kb in quad:
+                        required.add((ka, kb))
+                        required.add(tuple(sorted((ka, kb, mm))))
+                    prod_map: dict[tuple[int, ...], int] = {}
+                    ok = True
+                    for req in required:
+                        col = _ensure_product_col(req)
+                        if col is None:
+                            ok = False
+                            break
+                        prod_map[req] = col
+                    if not ok:
+                        continue
+                    rlt_quad_specs.append(
+                        {
+                            "quad": quad,
+                            "lin": lin,
+                            "const": qconst,
+                            "m": mm,
+                            "lm": lo_m,
+                            "um": hi_m,
+                            "sense": sense,
+                            "prod_map": prod_map,
+                        }
+                    )
 
     monomial_pw_map: dict[tuple[int, int], list[tuple[int, float, float]]] = {}
     for var_idx, n in monomial_terms:
@@ -6644,6 +6831,48 @@ def build_milp_relaxation(
             row[prod_cols[i]] += -coef_i
         if _affine_square_row_ok(row, -const_form * um):
             _add_row(row, -const_form * um)
+
+    # ── Phase 2: quadratic constraint-factor RLT product rows (issue #15) ────
+    # Each spec is a quadratic factor ``g {<=,==} 0`` times a bound factor on
+    # ``x_m``. ``rlt_quadratic_bound_cut_row`` returns the valid inequality
+    # ``coeffs·z ≥ rhs`` (the product ``(-g)·factor ≥ 0``); for ``A_ub z ≤ b`` we
+    # add ``-coeffs·z ≤ -rhs``. An equality parent (``g == 0``) also gets the
+    # reverse row, pinning the product to zero (strictly tighter than one-sided).
+    if rlt_quad_specs:
+        from discopt._jax.rlt_cuts import rlt_quadratic_bound_cut_row
+
+        def _orig_col(i: int) -> Optional[int]:
+            return i if 0 <= i < n_orig else None
+
+        for spec in rlt_quad_specs:
+            prod_map = spec["prod_map"]
+
+            def _prod_col(
+                key: tuple[int, ...], _pm: dict[tuple[int, ...], int] = prod_map
+            ) -> Optional[int]:
+                return _pm.get(tuple(sorted(key)))
+
+            for lower, bnd in ((True, spec["lm"]), (False, spec["um"])):
+                assembled = rlt_quadratic_bound_cut_row(
+                    spec["quad"],
+                    spec["lin"],
+                    spec["const"],
+                    spec["m"],
+                    float(bnd),
+                    lower,
+                    _orig_col,
+                    _prod_col,
+                    n_total,
+                )
+                if assembled is None:
+                    continue
+                coeffs, rhs = assembled
+                # coeffs·z ≥ rhs  ->  -coeffs·z ≤ -rhs.
+                if _affine_square_row_ok(-coeffs, -rhs):
+                    _add_row(-coeffs, -rhs)
+                # Equality parent: also enforce coeffs·z ≤ rhs (two-sided = 0).
+                if spec["sense"] == "==" and _affine_square_row_ok(coeffs, rhs):
+                    _add_row(coeffs, rhs)
 
     # ── Fractional-power envelope constraints ──────────────────────────────
     # For a = x^p with x in [lb, ub], lb ≥ 0:
