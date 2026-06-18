@@ -326,6 +326,37 @@ def test_weymouth_like_squares_extend_builtin_partition_selection():
     }
 
 
+def test_self_product_difference_classifies_cross_term():
+    """``(a-b)*(a-b)`` (a squared difference written WITHOUT ``**2``) must expand.
+
+    MINLPLib's circle-packing distance constraints write the squared difference as
+    an explicit self-product ``(x_i - x_j) * (x_i - x_j)`` rather than ``(x_i -
+    x_j)**2``. The Rust arena classifier does not distribute the ``-`` inside the
+    product, so it misses the ``x_i*x_j`` cross-term; the linearizer then raises
+    "Bilinear (i,j) not in map" and DROPS the whole constraint, collapsing the
+    relaxation bound to a trivial value (kall_congruentcircles_* never certified).
+    The expandable-product gate must route such models to the Python classifier.
+    """
+    from discopt._jax.term_classifier import (
+        _contains_expandable_square,
+        classify_nonlinear_terms,
+    )
+
+    m = Model("self_product_distance")
+    x = m.continuous("x", lb=-2.0, ub=2.0, shape=(2,))
+    m.minimize(x[0] + x[1])
+    # squared distance written as a self-product, not (x0-x1)**2
+    m.subject_to((x[0] - x[1]) * (x[0] - x[1]) >= 1.0)
+
+    assert _contains_expandable_square(m) is True
+
+    terms = classify_nonlinear_terms(m)
+    # the cross-term and both squares must be recovered, not dropped
+    assert (0, 1) in terms.bilinear
+    assert (0, 2) in terms.monomial
+    assert (1, 2) in terms.monomial
+
+
 def test_partitioned_square_secants_tighten_circle_superlevel_bound():
     """Local square secants should close the Alpine circle MILP lower bound."""
     m = _make_circle()

@@ -167,7 +167,28 @@ def _get_flat_index(expr: Expression, model: Model) -> int | None:
 
 
 def _contains_expandable_square(model: Model) -> bool:
-    """Return True if Python classification should expand a non-leaf square."""
+    """Return True if Python classification should distribute a non-leaf product.
+
+    Covers two shapes the Rust arena classifier does NOT distribute, both of
+    which hide bilinear/monomial cross-terms behind an additive composite:
+
+    * ``(expr)**2`` with a non-leaf base, e.g. ``(x_i - x_j)**2``; and
+    * an explicit self-/cross-product of additive composites written without the
+      power operator, e.g. ``(x_i - x_j) * (x_i - x_j)`` (the form MINLPLib's
+      circle-packing distance constraints use). The Rust classifier sees the
+      ``*`` but never expands the ``-`` inside, so it misses the ``x_i*x_j``
+      cross-term; the linearizer then raises "Bilinear (i,j) not in map" and the
+      whole constraint is dropped, collapsing the relaxation bound to a trivial
+      value (kall_congruentcircles_* never certified for exactly this reason).
+
+    Routing such models to the Python classifier, which distributes via
+    ``_distribute_mul``, recovers the full term set. Classification runs once per
+    solve (not per node), so the cost of the Python path here is negligible.
+    """
+
+    def _is_additive_composite(e: Expression) -> bool:
+        """A ``+``/``-`` node whose distribution can expose product cross-terms."""
+        return isinstance(e, BinaryOp) and e.op in ("+", "-")
 
     def visit(expr: Expression) -> bool:
         if isinstance(expr, BinaryOp):
@@ -176,6 +197,10 @@ def _contains_expandable_square(model: Model) -> bool:
                 and isinstance(expr.right, Constant)
                 and float(expr.right.value) == 2.0
                 and _get_flat_index(expr.left, model) is None
+            ):
+                return True
+            if expr.op == "*" and (
+                _is_additive_composite(expr.left) or _is_additive_composite(expr.right)
             ):
                 return True
             return visit(expr.left) or visit(expr.right)
