@@ -6,10 +6,12 @@ that tax — the import path is kept JAX-free (lazy ``_jax`` package, lazy
 ``deadline`` jax, JAX-free ``problem_classifier`` + numpy ``LPData``/``QPData``,
 and deferred ``solver`` imports).
 
+MIQP is included too: its B&B node QP relaxations now solve via POUNCE (the
+pure-Rust IPM) instead of the JAX QP IPM, so the whole MIQP solve is JAX-free.
+
 Each case runs in a *fresh subprocess* and asserts ``'jax' not in sys.modules``
 after the solve, so a regression that reintroduces an eager JAX import on the
-linear path fails here. (MIQP still uses the JAX QP IPM for node relaxations and
-is intentionally excluded — see the parity-push notes.)
+LP/MILP/QP/MIQP path fails here.
 """
 
 from __future__ import annotations
@@ -38,6 +40,17 @@ _CASES = {
         x = m.continuous('x', shape=(5,), lb=0, ub=1)
         m.minimize(dm.sum([x[i] * x[i] for i in range(5)]) - dm.sum([x[i] for i in range(5)]))
         m.subject_to(dm.sum([x[i] for i in range(5)]) >= 1.5)
+    """,
+    "miqp": """
+        m = dm.Model('miqp')
+        x = m.continuous('x', shape=(4,), lb=0, ub=1)
+        y = m.binary('y', shape=(3,))
+        m.minimize(
+            dm.sum([x[i] * x[i] for i in range(4)])
+            - dm.sum([x[i] for i in range(4)])
+            + dm.sum([float(i + 1) * y[i] for i in range(3)])
+        )
+        m.subject_to(dm.sum([x[i] for i in range(4)]) + dm.sum([y[i] for i in range(3)]) >= 1.5)
     """,
 }
 
