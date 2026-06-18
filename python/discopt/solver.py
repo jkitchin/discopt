@@ -1600,7 +1600,7 @@ def _classify_model_convexity(
     """
     cached = getattr(model, "_convexity_classification_cache", None)
     if cached is not None:
-        return cached
+        return cast("tuple[bool, bool, list[bool] | None]", cached)
 
     from discopt._jax.convexity.rules import ConvexityBudgetExceeded
 
