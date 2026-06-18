@@ -8,9 +8,16 @@ to classify problems, then extracts standard-form data using the JAX DAG compile
 from __future__ import annotations
 
 from enum import Enum
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import numpy as np
+
+if TYPE_CHECKING:
+    # Annotation-only: ``LPData``/``QPData`` are typed as jnp arrays to match the
+    # JAX IPM consumers (``lp_ipm_solve`` etc.); at runtime they hold numpy from
+    # the JAX-free extractors. ``from __future__ import annotations`` keeps these
+    # strings, so no JAX import happens at module load.
+    import jax.numpy as jnp
 
 # NOTE: ``jax`` is imported lazily inside the ``extract_*`` data functions that
 # build jnp arrays. ``classify_problem`` and the dataclasses are purely
@@ -84,23 +91,23 @@ def classify_problem(model: Model) -> ProblemClass:
 class LPData(NamedTuple):
     """Standard-form LP data: min c'x + d s.t. A_eq x = b_eq, x_l <= x <= x_u."""
 
-    c: np.ndarray  # (n,) objective coefficients
-    A_eq: np.ndarray  # (m, n) equality constraint matrix
-    b_eq: np.ndarray  # (m,) equality RHS
-    x_l: np.ndarray  # (n,) lower bounds
-    x_u: np.ndarray  # (n,) upper bounds
+    c: jnp.ndarray  # (n,) objective coefficients
+    A_eq: jnp.ndarray  # (m, n) equality constraint matrix
+    b_eq: jnp.ndarray  # (m,) equality RHS
+    x_l: jnp.ndarray  # (n,) lower bounds
+    x_u: jnp.ndarray  # (n,) upper bounds
     obj_const: float = 0.0  # constant term in objective
 
 
 class QPData(NamedTuple):
     """Standard-form QP: min 0.5 x'Qx + c'x + d s.t. A_eq x = b_eq, bounds."""
 
-    Q: np.ndarray  # (n, n) quadratic objective matrix (symmetric)
-    c: np.ndarray  # (n,) linear objective coefficients
-    A_eq: np.ndarray  # (m, n) equality constraint matrix
-    b_eq: np.ndarray  # (m,) equality RHS
-    x_l: np.ndarray  # (n,) lower bounds
-    x_u: np.ndarray  # (n,) upper bounds
+    Q: jnp.ndarray  # (n, n) quadratic objective matrix (symmetric)
+    c: jnp.ndarray  # (n,) linear objective coefficients
+    A_eq: jnp.ndarray  # (m, n) equality constraint matrix
+    b_eq: jnp.ndarray  # (m,) equality RHS
+    x_l: jnp.ndarray  # (n,) lower bounds
+    x_u: jnp.ndarray  # (n,) upper bounds
     obj_const: float = 0.0  # constant term in objective
 
 
