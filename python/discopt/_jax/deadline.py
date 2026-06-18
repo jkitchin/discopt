@@ -24,11 +24,19 @@ The deadline is cleared on scope exit; if no deadline is set,
 from __future__ import annotations
 
 import time
+from typing import TYPE_CHECKING
 
-import jax
-import jax.numpy as jnp
 import numpy as np
-from jax.experimental import io_callback
+
+if TYPE_CHECKING:
+    import jax.numpy as jnp
+
+# NOTE: ``jax`` is intentionally NOT imported at module scope. Only the
+# JAX-side predicate ``deadline_exceeded_jax`` needs it, and it imports jax
+# lazily inside the function body. This keeps the pure-Python deadline plumbing
+# (``deadline_scope``/``set_deadline``/...) — imported on every ``Model.solve``
+# — free of the heavy JAX/XLA initialization, so LP/MILP/MIQP solves that never
+# touch JAX do not pay its cold-start cost.
 
 _deadline_monotonic: float | None = None
 
@@ -92,6 +100,10 @@ def deadline_exceeded_jax() -> jnp.ndarray:
     means the predicate cannot be used under ``jax.vmap`` — call sites
     that vmap must compile the cond_fn without the deadline check.
     """
+    import jax
+    import jax.numpy as jnp
+    from jax.experimental import io_callback
+
     result: jnp.ndarray = io_callback(
         _host_check,
         jax.ShapeDtypeStruct((), jnp.bool_),
