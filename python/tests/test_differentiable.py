@@ -227,16 +227,24 @@ class TestDifferentiableSolve:
         # d(obj*)/dp = x* = 2.0 (by envelope theorem)
         assert float(grad) == pytest.approx(2.0, abs=1e-2)
 
-    def test_rejects_integer_variables(self):
-        """differentiable_solve should raise for models with integer vars."""
-        m = dm.Model("int_model")
-        m.parameter("p", value=1.0)
-        m.binary("y")
-        m.continuous("x", lb=0, ub=10)
-        m.minimize(m._variables[1])
+    def test_supports_integer_variables_via_fix_and_diff(self):
+        """Integer models are now differentiated by fixing integers at the optimum.
 
-        with pytest.raises(ValueError, match="continuous"):
-            differentiable_solve(m)
+        (Previously rejected; see test_differentiable_milp.py for FD-validated
+        gradient coverage of the fix-and-differentiate path.)
+        """
+        m = dm.Model("int_model")
+        p = m.parameter("p", value=0.5)
+        y = m.binary("y")
+        x = m.continuous("x", lb=0, ub=10)
+        m.subject_to(x >= 3 - y)
+        m.minimize(p * y + x)
+
+        result = differentiable_solve(m)
+        assert result.status == "optimal"
+        # p=0.5 < 1 -> y = 1, x = 2; obj = p + 2, so d(obj)/dp = 1.
+        assert float(result.objective) == pytest.approx(2.5, abs=1e-4)
+        assert float(result.gradient(p)) == pytest.approx(1.0, abs=1e-3)
 
 
 # ──────────────────────────────────────────────────────────

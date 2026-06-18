@@ -394,13 +394,14 @@ def differentiable_solve(
 
     model.validate()
 
-    # Check all variables are continuous
-    for v in model._variables:
-        if v.var_type != VarType.CONTINUOUS:
-            raise ValueError(
-                "differentiable_solve only supports continuous models. "
-                f"Variable '{v.name}' is {v.var_type.value}."
-            )
+    # Models with integer/binary variables are differentiated by fixing the
+    # integers at their optimal values and differentiating the resulting
+    # continuous restriction at the incumbent (the integer assignment is locally
+    # piecewise-constant in the parameters, so the envelope theorem gives the
+    # exact gradient wherever that optimum is stable). See
+    # ``_differentiable_solve_integer``.
+    if any(v.var_type != VarType.CONTINUOUS for v in model._variables):
+        return _differentiable_solve_integer(model, nlp_solver=nlp_solver, solver_options=opts)
 
     # Solve the NLP
     evaluator = NLPEvaluator(model)
@@ -467,6 +468,81 @@ def differentiable_solve(
     return DiffSolveResult(
         status="optimal",
         objective=nlp_result.objective,
+        x=x_dict,
+        _model=model,
+        _sensitivity=sensitivity,
+    )
+
+
+def _differentiable_solve_integer(
+    model: Model,
+    *,
+    nlp_solver: str = "pounce",
+    solver_options: Optional[dict] = None,
+) -> "DiffSolveResult":
+    """Differentiable solve for models with integer/binary variables.
+
+    Uses **fix-and-differentiate**: solve the MILP/MIQP/MINLP to optimality,
+    fix the integer variables at their optimal integer values, and apply the
+    continuous envelope-theorem sensitivity (:func:`_compute_sensitivity_at_solution`)
+    to the resulting continuous restriction.
+
+    Validity: at a parameter value where the optimal integer assignment is
+    *locally stable*, the optimal objective is a smooth function of the
+    parameter through the continuous restriction, and the envelope theorem at
+    the fixed-integer optimum gives the exact gradient ``d(obj*)/dp``. At
+    parameter values where the integer optimum switches (breakpoints) the
+    gradient is one-sided / undefined; the analytic value returned is that of
+    the incumbent assignment's restriction (the right object for decision-focused
+    learning, where the discrete decision is held).
+
+    Parameters in *variable bounds* are not differentiated through here (the
+    envelope term covers the objective and explicit constraints); parameters in
+    the objective or constraints — the headline case — are.
+    """
+    from discopt.modeling.core import VarType
+    from discopt.solver import solve_model
+
+    # 1. Solve the integer problem to optimality.
+    result = solve_model(model)
+    if result.status != "optimal" or result.x is None:
+        return DiffSolveResult(
+            status=result.status,
+            objective=result.objective,
+            x=result.x,
+            _model=model,
+            _sensitivity=np.zeros(_param_total_size(model)),
+        )
+
+    x_dict = {name: np.asarray(val, dtype=np.float64) for name, val in result.x.items()}
+
+    # 2. Fix integer/binary variables at their (rounded) optimal values, in
+    #    place, so the model becomes a continuous restriction. Bounds are
+    #    restored in the finally block.
+    saved_bounds: list[tuple[np.ndarray, np.ndarray]] = []
+    try:
+        for v in model._variables:
+            saved_bounds.append((v.lb.copy(), v.ub.copy()))
+            if v.var_type in (VarType.BINARY, VarType.INTEGER):
+                fixed = np.round(x_dict[v.name]).reshape(v.lb.shape)
+                v.lb = fixed.copy()
+                v.ub = fixed.copy()
+
+        # 3. Envelope-theorem sensitivity on the continuous restriction.
+        sensitivity = _compute_sensitivity_at_solution(
+            model,
+            x_dict,
+            nlp_solver=nlp_solver,
+            solver_options=solver_options,
+        )
+    finally:
+        for v, (lb_v, ub_v) in zip(model._variables, saved_bounds):
+            v.lb = lb_v
+            v.ub = ub_v
+
+    return DiffSolveResult(
+        status="optimal",
+        objective=result.objective,
         x=x_dict,
         _model=model,
         _sensitivity=sensitivity,
