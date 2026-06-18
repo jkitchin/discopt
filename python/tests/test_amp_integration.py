@@ -2446,6 +2446,7 @@ class TestCurrentCodeWeaknesses:
         import time
 
         import discopt.solver as solver_mod
+        import discopt.solvers.nlp_ipopt as nlp_ipopt_mod
         from discopt.solvers import NLPResult, SolveStatus
 
         captured: dict[str, np.ndarray] = {}
@@ -2458,7 +2459,13 @@ class TestCurrentCodeWeaknesses:
             captured["x0"] = np.asarray(x0, dtype=np.float64).copy()
             return NLPResult(status=SolveStatus.OPTIMAL, x=captured["x0"], objective=0.0)
 
-        monkeypatch.setattr(solver_mod, "solve_nlp", fake_solve_nlp)
+        # The JAX-free refactor (#224) made ``_solve_continuous`` import
+        # ``solve_nlp`` lazily from its backend module at the call site
+        # (``from discopt.solvers.nlp_ipopt import solve_nlp`` for
+        # nlp_solver="ipopt"), so it is no longer an attribute of
+        # ``discopt.solver``. Patch the name on the origin module the lazy
+        # import reads from.
+        monkeypatch.setattr(nlp_ipopt_mod, "solve_nlp", fake_solve_nlp)
 
         m = Model("bt_sqrt_backend_bounds")
         x = m.continuous("x", lb=-1e20, ub=1e20)
