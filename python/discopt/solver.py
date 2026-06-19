@@ -7186,9 +7186,9 @@ def _solve_node_lp_pounce(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, ti
         # relaxation solution cannot seed a spurious incumbent or node bound.
         tol = 1e-5
         feasible = True
-        if A_ub_m is not None and A_ub_m.shape[0]:
+        if A_ub_m is not None and b_ub_m is not None and A_ub_m.shape[0]:
             feasible = bool(np.all(A_ub_m @ x_sol <= b_ub_m + tol * (1.0 + np.abs(b_ub_m))))
-        if feasible and A_eq_m is not None and A_eq_m.shape[0]:
+        if feasible and A_eq_m is not None and b_eq_m is not None and A_eq_m.shape[0]:
             feasible = bool(np.all(np.abs(A_eq_m @ x_sol - b_eq_m) <= tol * (1.0 + np.abs(b_eq_m))))
         if not feasible:
             logger.debug("POUNCE convex node solution violates its rows; rejecting")
@@ -7257,9 +7257,9 @@ def _solve_node_lp_simplex(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, t
         # violates its own rows so a bad relaxation cannot seed a spurious bound.
         tol = 1e-5
         feasible = True
-        if A_ub_m is not None and A_ub_m.shape[0]:
+        if A_ub_m is not None and b_ub_m is not None and A_ub_m.shape[0]:
             feasible = bool(np.all(A_ub_m @ x_sol <= b_ub_m + tol * (1.0 + np.abs(b_ub_m))))
-        if feasible and A_eq_m is not None and A_eq_m.shape[0]:
+        if feasible and A_eq_m is not None and b_eq_m is not None and A_eq_m.shape[0]:
             feasible = bool(np.all(np.abs(A_eq_m @ x_sol - b_eq_m) <= tol * (1.0 + np.abs(b_eq_m))))
         if not feasible:
             logger.debug("simplex node solution violates its rows; rejecting")
