@@ -119,7 +119,7 @@ Two in-house engines, one dispatch seam:
 | Engine | Role |
 |---|---|
 | **POUNCE** (Rust) | The workhorse. All production LP/QP/NLP relaxation solves, single and CPU-batch. The only third-party-visible numerical solver. |
-| **JAX IPM** (T17/T24) | The differentiable path only: custom_jvp / KKT implicit differentiation (T22/T23), and vmap-compatible evaluation kept alive for opportunistic GPU use (§4). Not a packaging dependency — it ships with discopt. |
+| **JAX LP/QP IPM** (`_jax/lp_ipm.py`, `_jax/qp_ipm.py`) | The differentiable LP/QP path only: custom_jvp / KKT implicit differentiation (T22/T23), and vmap-compatible evaluation kept alive for opportunistic GPU use (§4). Not a packaging dependency — it ships with discopt. The general **NLP** JAX IPM (`_jax/ipm.py`) has been deleted (see the header note and §12); NLP relaxations run on POUNCE. |
 
 The existing seam `python/discopt/solvers/nlp_backend.py` extends to cover
 LP and QP dispatch, so no call site knows which engine is in use.
@@ -484,10 +484,14 @@ competitive performance) lives in Phases 2–3.
   A size guard (`_MAX_CROSSOVER_VARS = 400`) falls back to interior-point
   separation on very wide problems. A pure-Rust port (with basis recovery, the
   prerequisite for Gomory/MIR) remains future work. (`test_crossover.py`)
+- **Heuristics + conflict analysis — DONE (since superseded the list below).**
+  RINS, diving (fractional/objective), local branching, and a feasibility pump
+  ship in `_jax/primal_heuristics.py`; conflict analysis (no-good / FBBT-seeded
+  conflict cuts) ships in `conflict.py`. These were listed as open here in an
+  earlier draft.
 - **Open (Phase 2 keystone, Rust):** the Rust crossover port with *basis*
-  recovery, the path to basis-derived Gomory/MIR cuts. Also: RINS (sub-MILP
-  neighborhood search) and conflict analysis. These are the remaining
-  "compete" items; the tractable Python-side cut/heuristic pieces are now done.
+  recovery landed (see Phase 2 below); the remaining basis-derived strengthening
+  items are c-MIR aggregation and cross-round GMI/MIR re-separation.
 
 ### Phase 4 — Retire remaining HiGHS consumers (in progress)
 
@@ -945,12 +949,17 @@ being an analytic-center point — keeps the sensitivity system nonsingular (unl
 degenerate simplex vertex). The OA/GDP/AMP NLP subproblems and the differentiable
 test suite were repointed off the JAX IPM (and off cyipopt) onto POUNCE.
 
-**Retirement status.** The JAX IPM is retired as a *user-facing NLP solver*; JAX
-remains the indispensable **autodiff substrate** (model Hessians/Jacobians/∂p,
-McCormick envelopes, the custom_vjp adjoint solves). Its `ipm_solve` core is *not*
-deleted, because it powers the jit-fused McCormick-NLP relaxation engine
-(`mccormick_nlp.py`) used for tight spatial-B&B bounds — a GPU/vmap-capable path
-POUNCE (a host callback) cannot fuse per node.
+**Retirement status.** The general **NLP** JAX IPM (`_jax/ipm.py` and its
+`ipm_solve` core) is **deleted**, not merely demoted: `mccormick_nlp.py` now
+solves each McCormick relaxation through POUNCE (`_solve_relaxation_with_pounce`),
+so the NLP interior-point stack has no remaining consumer. JAX remains the
+indispensable **autodiff substrate** (model Hessians/Jacobians/∂p, McCormick
+envelopes, the custom_vjp adjoint solves), and the **LP/QP** IPM kernels
+(`_jax/lp_ipm.py`, `_jax/qp_ipm.py`) survive solely to provide the differentiable
+LP/QP relaxation-gradient path (`differentiable_solve.py`) — they are no longer a
+production node-solve engine. (Earlier drafts of this section claimed the
+`ipm_solve` core was kept to fuse the McCormick-NLP relaxation on GPU/vmap; that
+was superseded when the relaxation moved to POUNCE.)
 
 ## 13. All-Rust spatial-B&B relaxation (in progress)
 
