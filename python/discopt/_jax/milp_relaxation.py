@@ -3748,9 +3748,7 @@ def _collect_composite_multivar_relaxations(
                 continue
             if not np.isfinite(gval) or not np.all(np.isfinite(grad[idxs])):
                 continue
-            coeffs = tuple(
-                (int(j), float(grad[j])) for j in idxs if abs(float(grad[j])) > 1e-12
-            )
+            coeffs = tuple((int(j), float(grad[j])) for j in idxs if abs(float(grad[j])) > 1e-12)
             intercept = gval - float(sum(grad[j] * p[j] for j in idxs))
             if not np.isfinite(intercept):
                 continue
@@ -3763,9 +3761,7 @@ def _collect_composite_multivar_relaxations(
         # yields the same tangent at several reference points).
         uniq: list[tuple[tuple[tuple[int, float], ...], float]] = []
         for line in lines:
-            if not any(
-                line[0] == prev[0] and abs(line[1] - prev[1]) <= 1e-12 for prev in uniq
-            ):
+            if not any(line[0] == prev[0] and abs(line[1] - prev[1]) <= 1e-12 for prev in uniq):
                 uniq.append(line)
 
         if curvature == "convex":

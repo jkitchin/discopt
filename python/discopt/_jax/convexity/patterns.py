@@ -514,11 +514,7 @@ def _affine_square_sum_matrix(
             and abs(float(term.right.value) - 2.0) < 1e-12
         ):
             base = term.left
-        elif (
-            isinstance(term, BinaryOp)
-            and term.op == "*"
-            and _same_expr(term.left, term.right)
-        ):
+        elif isinstance(term, BinaryOp) and term.op == "*" and _same_expr(term.left, term.right):
             base = term.left
         if base is None:
             return None
