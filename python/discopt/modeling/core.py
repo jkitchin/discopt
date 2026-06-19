@@ -1579,10 +1579,21 @@ class Model:
         var = Variable(name, VarType.INTEGER, shape, lb, ub, self)
         return self._register_variable(var)
 
+    def _make_indexed_param(self, name, index_set, value):
+        """Build an :class:`IndexedParam` backed by one flat parameter over *index_set*."""
+        from discopt.modeling.indexed import IndexedParam, resolve_indexed_values
+
+        arr = resolve_indexed_values(index_set, value, 0.0, np.float64)
+        self._check_name(name)
+        flat = Parameter(name, arr, self)
+        self._parameters.append(flat)
+        return IndexedParam(flat, index_set)
+
     def parameter(
         self,
         name: str,
         value: Union[float, np.ndarray],
+        over=None,
     ) -> Parameter:
         """
         Create a parameter for parametric optimization / sensitivity.
@@ -1606,7 +1617,14 @@ class Model:
         --------
         >>> price = m.parameter("price", value=50.0)
         >>> demand = m.parameter("demand", value=np.array([100, 200, 150]))
+        >>> cap = m.parameter("cap", over=plants, value={"pitt": 10, "sf": 20})
+
+        When *over* is given (a :class:`~discopt.modeling.sets.Set`), an
+        :class:`~discopt.modeling.indexed.IndexedParam` is returned and *value*
+        may be a scalar, a ``dict`` keyed by member, or a callable ``fn(member)``.
         """
+        if over is not None:
+            return self._make_indexed_param(name, over, value)
         self._check_name(name)
         param = Parameter(name, value, self)
         self._parameters.append(param)
