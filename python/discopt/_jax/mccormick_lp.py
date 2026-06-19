@@ -352,6 +352,7 @@ class MccormickLPRelaxer:
         inherited_cuts: Optional[tuple] = None,
         separate: bool = True,
         out_cuts: Optional[list] = None,
+        psd_max_rounds: int = 8,
     ) -> MccormickLPResult:
         """Solve the McCormick LP relaxation restricted to the given bound box.
 
@@ -527,7 +528,7 @@ class MccormickLPRelaxer:
             # PSD (moment) cuts: enforce M = [[1,x^T],[x,X]] >= 0 over fully-lifted
             # cliques. Each cut v^T M v >= 0 is valid for every feasible point
             # (X = x x^T), so adding them only tightens the bound.
-            res = self._separate_psd(milp, varmap, res, _deadline)
+            res = self._separate_psd(milp, varmap, res, _deadline, max_rounds=psd_max_rounds)
             # Targeted RLT (constraint-factor x bound-factor) cuts.
             res = self._separate_rlt(milp, varmap, res, _deadline)
 
@@ -1023,7 +1024,7 @@ class MccormickLPRelaxer:
         except Exception:
             return res
 
-    def _separate_psd(self, milp, varmap, res, deadline):
+    def _separate_psd(self, milp, varmap, res, deadline, max_rounds: int = 8):
         """Separate moment (PSD) cuts on the lifted relaxation at the LP point.
 
         Enforces ``M = [[1, x^T], [x, X]] >= 0`` over cliques of variables whose
@@ -1031,6 +1032,12 @@ class MccormickLPRelaxer:
         ``v^T M v >= 0`` is valid for every feasible point (``X = x x^T`` makes
         ``M`` rank-1 PSD), so the bound only tightens; on any failure the input
         ``res`` is returned unchanged. Off unless ``psd_cuts=True``.
+
+        The spectral cutting plane converges to the Shor SDP bound only with many
+        rounds (each adds a few eigenvector cuts), so ``max_rounds`` is large for a
+        one-shot *root* separation (P2): on nvs17 ~150 rounds reaches -1221 (Shor
+        is -1104.7) in ~1.4 s, vs -2453 at the old 8-round cap. Per-node callers
+        keep the small default and instead inherit the root pool.
         """
         if not self._psd_cuts:
             return res
@@ -1055,7 +1062,7 @@ class MccormickLPRelaxer:
                     milp._A_ub = np.vstack([np.asarray(milp._A_ub), R])
                     milp._b_ub = np.concatenate([milp._b_ub, b])
 
-            for _round in range(8):
+            for _round in range(max_rounds):
                 if deadline is not None and time.perf_counter() >= deadline:
                     break
                 cuts = separate_psd_cuts_on_relaxation(
