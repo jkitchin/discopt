@@ -7314,9 +7314,15 @@ def _pounce_qp_relaxation_nodes(qp_data, batch_lb, batch_ub, n_orig, t_start, ti
     node: ``clean[i]`` marks a trustworthy OPTIMAL solve, ``infeasible[i]`` a
     certified empty box, ``obj_vals[i]`` the augmented objective (without
     ``obj_const``), and ``x_vals[i]`` the full primal iterate (with slacks).
-    """
-    from discopt.solvers.qp_pounce import solve_qp as _pounce_qp
 
+    Node waves are solved in one ``pounce.solve_qp_batch`` call (one parallel
+    Rayon wave across nodes) over POUNCE's *structured convex* QP form, which —
+    like ``_solve_node_lp_pounce`` for MILP — presolves/scales the native
+    ``min ½x'Qx + c'x s.t. A_eq x = b_eq, A_ub x <= b_ub, lb <= x <= ub`` and
+    converges in ~20 IPM iterations, versus the callback TNLP path's ~100
+    (the slacks are reconstructed, not solved for). Falls back to the serial
+    callback path if ``solve_qp_batch`` is unavailable or the wave raises.
+    """
     n_batch = len(batch_lb)
     Q = np.asarray(qp_data.Q, dtype=np.float64)
     c = np.asarray(qp_data.c, dtype=np.float64)
@@ -7329,6 +7335,78 @@ def _pounce_qp_relaxation_nodes(qp_data, batch_lb, batch_ub, n_orig, t_start, ti
     infeasible = np.zeros(n_batch, dtype=bool)
     obj_vals = np.full(n_batch, np.nan, dtype=np.float64)
     x_vals = np.full((n_batch, n_total), np.nan, dtype=np.float64)
+
+    # --- Batched structured-QP path (pounce-solver >= 0.5) ---
+    solve_qp_batch = None
+    try:
+        import pounce
+
+        solve_qp_batch = getattr(pounce, "solve_qp_batch", None)
+    except ImportError:
+        solve_qp_batch = None
+
+    if solve_qp_batch is not None:
+        try:
+            from discopt.solvers.lp_pounce import _snap_inverted_bounds
+
+            # The structural inequality/equality blocks are shared across the
+            # wave; only the variable box (lb/ub) varies per node. The
+            # decomposition returns ``None`` for an absent block (no pure
+            # equalities or no inequalities), which POUNCE's ``solve_qp``
+            # accepts directly.
+            A_ub_m, b_ub_m, A_eq_m, b_eq_m = _decompose_eq_slack_form(
+                A_eq, b_eq, n_orig, n_slack
+            )
+            P_s = Q[:n_orig, :n_orig]
+            c_s = c[:n_orig]
+            A_struct = A_eq[:, :n_orig]
+            # Exact slack reconstruction: the slack columns ``S`` are shared, so
+            # given a structural ``x_s`` the original equality-slack iterate has
+            # slacks ``z = S^+ (b_eq - A_struct x_s)``. Then
+            # ``A_eq_full [x_s, z] = b_eq`` exactly (rhs lies in range(S) for a
+            # feasible slack form), so the caller's n_total feasibility check
+            # and snapping see a byte-faithful full iterate.
+            S_pinv = np.linalg.pinv(A_eq[:, n_orig:]) if n_slack > 0 else None
+
+            problems = []
+            for i in range(n_batch):
+                lb_n = np.asarray(batch_lb[i], dtype=np.float64)
+                ub_n = np.asarray(batch_ub[i], dtype=np.float64)
+                lb_n, ub_n = _snap_inverted_bounds(lb_n, ub_n)
+                problems.append(
+                    {"P": P_s, "c": c_s, "A": A_eq_m, "b": b_eq_m,
+                     "G": A_ub_m, "h": b_ub_m, "lb": lb_n, "ub": ub_n}
+                )
+
+            # Q is shared and convex by assumption (same as the JAX QP IPM);
+            # skip the per-problem O(n^3) PSD check.
+            results = solve_qp_batch(problems, check_psd=False)
+
+            for i in range(n_batch):
+                res = results[i]
+                if res.status == "optimal" and res.x is not None and np.isfinite(res.obj):
+                    x_s = np.asarray(res.x, dtype=np.float64)
+                    if x_s.shape[0] == n_orig and np.all(np.isfinite(x_s)):
+                        if n_slack > 0:
+                            z = S_pinv @ (b_eq - A_struct @ x_s)
+                            x_full = np.concatenate([x_s, z])
+                        else:
+                            x_full = x_s
+                        clean[i] = True
+                        obj_vals[i] = float(res.obj)
+                        x_vals[i] = x_full
+                elif res.status == "primal_infeasible":
+                    infeasible[i] = True
+            return clean, infeasible, obj_vals, x_vals
+        except Exception as e:  # noqa: BLE001 - any wave failure -> serial fallback
+            logger.debug("Batched POUNCE QP wave failed (%s); serial fallback", e)
+            clean[:] = False
+            infeasible[:] = False
+            obj_vals[:] = np.nan
+            x_vals[:] = np.nan
+
+    # --- Serial callback fallback (older wheels / batch failure) ---
+    from discopt.solvers.qp_pounce import solve_qp as _pounce_qp
 
     slack_lb = np.zeros(n_slack, dtype=np.float64)
     slack_ub = np.full(n_slack, 1e20, dtype=np.float64)

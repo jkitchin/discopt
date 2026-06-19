@@ -326,9 +326,23 @@ is a trustworthy LP/dual engine. Work breakdown:
   already calls `pounce.solve_nlp_batch(problems, x0s=..., share_structure=True)`
   with a graceful serial fallback, so the **batch NLP node-wave path is live on
   ≥0.5.0** (it degrades to serial only on older wheels or if the call raises).
-  Remaining: bump the dependency pin to `>=0.5` so batch is guaranteed rather
-  than version-dependent, and wire **batch QP** node waves through the new
-  `solve_qp_batch`/`solve_qp_multi_rhs` (NLP batch is wired; QP batch is not).
+  - **Dependency pin bumped to `>=0.5` — DONE.** `pyproject.toml` core deps and
+    the `[pounce]` alias extra now require `pounce-solver>=0.5`, so the batch
+    APIs are guaranteed present rather than version-dependent.
+  - **Batch QP node waves — DONE.** `_pounce_qp_relaxation_nodes` (the MIQP B&B
+    node-relaxation solver) now solves each wave in one `pounce.solve_qp_batch`
+    call over POUNCE's *structured convex* QP form (shared `P/c/A/b/G/h`,
+    per-node `lb/ub`), replacing the per-node serial loop over the callback
+    TNLP path. Equality slacks are reconstructed exactly from the shared slack
+    sub-block (`z = S⁺(b_eq − A_struct x_s)`), so the caller's slack-form
+    feasibility check and incumbent snapping are unchanged; the serial callback
+    loop is kept as a fallback for older wheels / wave failures. Validated
+    bit-for-bit on objective and **identical B&B node counts** vs the serial
+    path (the search is unchanged; only the node engine differs), with a
+    **geomean ~8× wall-clock speedup** on a convex integer-quadratic battery
+    (n=10–18), the gain widening with size (~15× at n=18) as the structured
+    path's ~20-iteration presolve+scale converges where the callback path took
+    ~100 iterations per node.
 
   *Status / implementation notes:*
   - **LP seam — DONE.** `_solve_lp` now tries matrix-form engines in order
@@ -364,10 +378,11 @@ is a trustworthy LP/dual engine. Work breakdown:
     (`_matrix_solution_feasible`) and fall through to the next engine on
     violation — no engine's "optimal" is taken on faith (P0.5 in both
     directions: the oracle itself can lie).
-  - **Open:** batch *QP* node waves (NLP batch is live on `pounce-solver`
-    ≥0.5.0 via `solve_nlp_batch`; QP batch wiring through `solve_qp_batch` is
-    the remaining piece) and bumping the dependency pin to `>=0.5`. The
-    OBBT/McCormick-LP consumers were retired in Phase 4.
+  - **Done:** NLP batch (`solve_nlp_batch`) and QP batch (`solve_qp_batch`,
+    MIQP node waves, ~8× geomean) are both live on `pounce-solver` ≥0.5.0, and
+    the dependency pin is bumped to `>=0.5`. The OBBT/McCormick-LP consumers
+    were retired in Phase 4. (LP node waves already run through POUNCE's
+    structured `solve_qp`/P=0 path in `_solve_node_lp_pounce`.)
 - **P0.5 HiGHS as CI oracle.** From this phase on, cross-check every POUNCE
   LP/QP result against HiGHS in CI (test-only dependency). HiGHS stops
   being a runtime engine long before it stops being a correctness guard.

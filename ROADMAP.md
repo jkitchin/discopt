@@ -115,7 +115,7 @@ gates, and risk register: [docs/design/pounce-only-roadmap.md](docs/design/pounc
 
 | Task                                   | Status      | Description                                                              |
 |----------------------------------------|-------------|--------------------------------------------------------------------------|
-| P0 POUNCE universal continuous engine  | Done        | Pure-LP path, Farkas-certificate infeasibility, bound trust-gate, HiGHS demoted to CI oracle. Batch NLP node waves live on `pounce-solver` ≥0.5.0. Open: wire batch QP (`solve_qp_batch`); bump pin to `>=0.5` |
+| P0 POUNCE universal continuous engine  | Done        | Pure-LP path, Farkas-certificate infeasibility, bound trust-gate, HiGHS demoted to CI oracle. Batch NLP and QP node waves live on `pounce-solver` ≥0.5.0 (MIQP node QP waves via `solve_qp_batch`, ~8× geomean) |
 | P1 Self-hosted integer B&B             | Done        | MILP/MIQP via Rust B&B + POUNCE relaxations; incumbent purification; root reduced-cost fixing; HiGHS-free in POUNCE-only mode |
 | P2 Crossover + root cuts               | Done        | Pure-Rust IPM-to-basis crossover + basis recovery; GMI/MIR cuts wired and correct. Open: c-MIR aggregation + upper-bound complementation; cross-round re-separation |
 | P3 Cut and heuristic suite             | Mostly done | Cover/lifted-cover/clique cuts, diving/RINS/local-branching/feasibility-pump, conflict analysis all shipped. Open: flow-cover and implied-bound cuts |
