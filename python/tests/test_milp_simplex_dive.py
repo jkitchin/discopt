@@ -102,3 +102,25 @@ class TestFeasibilityGate:
         r = m.solve(nlp_solver="simplex", time_limit=30)
         assert r.status == "optimal"
         assert abs(r.objective - (-4.0)) < 1e-4  # pick any 2 -> -4
+
+
+class TestEqualityRowSoundness:
+    """The rounding heuristic must respect *equality* rows.
+
+    A zero-objective feasibility MILP ``Σx == k`` is the failure that motivated
+    the fix: the old heuristic checked only ``act <= b`` (a `<=` test), so
+    all-zeros (``0 <= k``) passed and was injected as a bogus "optimal" even
+    though ``0 != k``. The check now tests the residual against each row's slack
+    range, which is empty ([0,0]) for an equality row — so all-zeros is correctly
+    rejected and the engine returns a genuinely feasible point.
+    """
+
+    def test_whole_search_sound_on_equality_feasibility(self):
+        m = dm.Model("eqfeas")
+        x = m.binary("x", shape=(8,))
+        m.minimize(0.0 * x[0])  # pure feasibility (constant objective)
+        m.subject_to(sum(x[i] for i in range(8)) == 4)
+        r = m.solve(nlp_solver="simplex", time_limit=30)
+        assert r.status in ("optimal", "feasible")
+        xv = np.round(np.asarray(r.x["x"]).ravel())
+        assert int(xv.sum()) == 4  # feasible — not the bogus all-zeros

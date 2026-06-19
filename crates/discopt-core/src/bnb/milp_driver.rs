@@ -700,8 +700,8 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                     ctx.a_w,
                     ctx.b_w,
                     ctx.c_w,
-                    &ctx.l_w[..ctx.ns],
-                    &ctx.u_w[..ctx.ns],
+                    ctx.l_w,
+                    ctx.u_w,
                     ctx.n_orig_rows,
                     ctx.n_w,
                     ctx.obj_const,
@@ -1006,8 +1006,8 @@ fn try_rounding(
     a_w: &[f64],
     b_w: &[f64],
     c_w: &[f64],
-    glb: &[f64],
-    gub: &[f64],
+    l_w: &[f64],
+    u_w: &[f64],
     n_orig_rows: usize,
     n_w: usize,
     obj_const: f64,
@@ -1018,7 +1018,28 @@ fn try_rounding(
             for j in 0..ns {
                 act += a_w[i * n_w + j] * xc[j];
             }
-            if act > b_w[i] + 1e-6 {
+            // The row's slack columns must cover the residual `b - act`. Sum the
+            // achievable range of the slack contributions over this row: an
+            // equality row has no slack (range [0, 0], so `act` must equal `b`);
+            // a `<=` row a non-negative slack (range [0, +∞), so `act <= b`); a
+            // `>=` row a non-positive one. A plain `act <= b` test is unsound for
+            // equality rows — it wrongly accepts e.g. all-zeros for `Σx == k`,
+            // injecting an infeasible incumbent (the zero-objective feasibility
+            // MILP failure). Using the slack bounds makes the check correct for
+            // every row sense.
+            let resid = b_w[i] - act;
+            let mut lo = 0.0;
+            let mut hi = 0.0;
+            for k in ns..n_w {
+                let aik = a_w[i * n_w + k];
+                if aik == 0.0 {
+                    continue;
+                }
+                let (c1, c2) = (aik * l_w[k], aik * u_w[k]);
+                lo += c1.min(c2);
+                hi += c1.max(c2);
+            }
+            if resid < lo - 1e-6 || resid > hi + 1e-6 {
                 return false;
             }
         }
@@ -1030,15 +1051,15 @@ fn try_rounding(
         (0..ns)
             .map(|j| {
                 let v = if is_int[j] { round(x[j]) } else { x[j] };
-                // Guard against rounding-induced bound inversion (glb[j] a few ULP
-                // above gub[j] on a near-fixed variable): f64::clamp panics when
+                // Guard against rounding-induced bound inversion (l_w[j] a few ULP
+                // above u_w[j] on a near-fixed variable): f64::clamp panics when
                 // min > max. Clamp into the well-ordered interval — identical to
                 // the direct clamp when bounds are ordered, and collapses to the
                 // degenerate (ULP-wide) box when they cross.
-                let (lo, hi) = if glb[j] <= gub[j] {
-                    (glb[j], gub[j])
+                let (lo, hi) = if l_w[j] <= u_w[j] {
+                    (l_w[j], u_w[j])
                 } else {
-                    (gub[j], glb[j])
+                    (u_w[j], l_w[j])
                 };
                 v.clamp(lo, hi)
             })
