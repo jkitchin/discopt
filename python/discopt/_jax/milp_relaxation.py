@@ -3194,6 +3194,10 @@ class CompositeMultivarRelaxation:
 
 _COMPOSITE_CURV_TOL = 1e-9
 _COMPOSITE_MAX_SUBDIV = 256
+# Max sub-boxes a multivariate box-convexity certificate may enumerate across all
+# refinement levels of its partition (keeps the interval-Hessian sweep bounded for
+# high-dimensional nodes; pinned axes are excluded from the product).
+_MULTIVAR_MAX_SUBBOXES = 64
 
 
 def _build_convexity_box(model: Model, flat_lb: np.ndarray, flat_ub: np.ndarray) -> dict:
@@ -3651,6 +3655,133 @@ def _should_claim_composite_multivar(expr: Expression, model: Model, n_orig: int
     return False
 
 
+def _multivar_box_curvature(
+    expr: Expression,
+    model: Model,
+    idxs: list[int],
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+    box: dict,
+) -> Optional[str]:
+    """Sound box-restricted ``"convex"``/``"concave"`` certificate for a node.
+
+    The multivariate analogue of :func:`_subdivision_curvature`. ``expr`` is C²,
+    so it is convex on the (convex) box iff ``∇²expr ⪰ 0`` at *every* point of the
+    box, and concave iff ``∇²expr ⪯ 0`` everywhere. We enclose the Hessian with
+    interval AD on each sub-box of an axis-aligned partition and apply a per-row
+    interval-Gershgorin eigenvalue bound (identical math to
+    :func:`alphabb.rigorous_alpha`): for the dependent submatrix ``H``,
+
+        λ_min(H) ≥ min_i ( H[i,i].lo − Σ_{j≠i} max(|H[i,j].lo|, |H[i,j].hi|) )
+        λ_max(H) ≤ max_i ( H[i,i].hi + Σ_{j≠i} max(|H[i,j].lo|, |H[i,j].hi|) ).
+
+    Because PSD-ness is a *pointwise* condition and the sub-boxes cover the box,
+    certifying the sign on every sub-box certifies it on the whole box — so a
+    function that is only *locally* convex (nonconvex elsewhere, e.g. a ``sqrt`` of
+    an indefinite polynomial) is still soundly certified over the region the
+    relaxation actually uses. Refines the partition until conclusive or the
+    sub-box budget is hit; abstains (returns ``None``) otherwise. This certificate
+    is general: it depends on no algebraic shape, only on the interval Hessian, so
+    it covers every twice-differentiable multivariate node, not one problem class.
+
+    Only certifies when the dependent axes are finitely bounded (the interval
+    Hessian needs a finite box). Off-diagonal couplings to non-dependent variables
+    are exactly zero (``expr`` does not depend on them), so restricting Gershgorin
+    to the dependent submatrix loses nothing.
+    """
+    import itertools
+
+    from discopt._jax.convexity.interval import Interval
+    from discopt._jax.convexity.interval_ad import interval_hessian
+
+    dep = [int(j) for j in idxs]
+    d = len(dep)
+    if d == 0:
+        return None
+    los = np.array([float(flat_lb[j]) for j in dep], dtype=np.float64)
+    his = np.array([float(flat_ub[j]) for j in dep], dtype=np.float64)
+    if not (np.all(np.isfinite(los)) and np.all(np.isfinite(his))) or np.any(his < los):
+        return None
+    widths = his - los
+
+    # Locate each dependent flat index within its (possibly vector) Variable.
+    var_at: dict[int, tuple[Variable, int]] = {}
+    offset = 0
+    for v in model._variables:
+        for c in range(v.size):
+            var_at[offset + c] = (v, c)
+        offset += v.size
+    if any(j not in var_at for j in dep):
+        return None
+    loc = {j: var_at[j] for j in dep}
+    affected_vars = {loc[j][0] for j in dep}
+    saved = {v: box[v] for v in affected_vars}
+
+    tol = _COMPOSITE_CURV_TOL
+    non_pinned = [i for i in range(d) if widths[i] > tol]
+    ix = np.ix_(dep, dep)
+
+    def _verdict_at(k: int) -> Optional[str]:
+        edges = [
+            np.linspace(los[i], his[i], k + 1) if widths[i] > tol else np.array([los[i], his[i]])
+            for i in range(d)
+        ]
+        all_convex = True
+        all_concave = True
+        for combo in itertools.product(*[range(len(e) - 1) for e in edges]):
+            lo_arr = {v: np.array(saved[v].lo, dtype=np.float64).reshape(-1) for v in affected_vars}
+            hi_arr = {v: np.array(saved[v].hi, dtype=np.float64).reshape(-1) for v in affected_vars}
+            for i, j in enumerate(dep):
+                v, c = loc[j]
+                lo_arr[v][c] = float(edges[i][combo[i]])
+                hi_arr[v][c] = float(edges[i][combo[i] + 1])
+            for v in affected_vars:
+                box[v] = Interval(
+                    lo_arr[v].reshape(saved[v].lo.shape), hi_arr[v].reshape(saved[v].hi.shape)
+                )
+            try:
+                ad = interval_hessian(expr, model, box=box)
+            except Exception:
+                return None
+            h_lo = np.asarray(ad.hess.lo, dtype=np.float64)[ix]
+            h_hi = np.asarray(ad.hess.hi, dtype=np.float64)[ix]
+            if not (np.all(np.isfinite(h_lo)) and np.all(np.isfinite(h_hi))):
+                return None
+            abs_max = np.maximum(np.abs(h_lo), np.abs(h_hi))
+            row_radius = abs_max.sum(axis=1) - np.abs(np.diag(abs_max))
+            gersh_lo = np.diag(h_lo) - row_radius  # ≤ λ_min(H)
+            gersh_hi = np.diag(h_hi) + row_radius  # ≥ λ_max(H)
+            if np.any(gersh_lo < -tol):
+                all_convex = False
+            if np.any(gersh_hi > tol):
+                all_concave = False
+            if not all_convex and not all_concave:
+                break
+        if all_convex:
+            return "convex"
+        if all_concave:
+            return "concave"
+        return ""  # inconclusive at this refinement → keep refining
+
+    try:
+        if not non_pinned:
+            return _verdict_at(1) or None
+        k = 1
+        while True:
+            verdict = _verdict_at(k)
+            if verdict is None:
+                return None  # non-finite Hessian / AD failure → abstain
+            if verdict:
+                return verdict
+            next_k = k * 2
+            if next_k ** len(non_pinned) > _MULTIVAR_MAX_SUBBOXES:
+                return None
+            k = next_k
+    finally:
+        for v in affected_vars:
+            box[v] = saved[v]
+
+
 def _collect_composite_multivar_relaxations(
     model: Model,
     n_orig: int,
@@ -3708,7 +3839,14 @@ def _collect_composite_multivar_relaxations(
         elif curv == Curvature.CONCAVE:
             curvature = "concave"
         else:
-            return
+            # Global DCP is UNKNOWN (e.g. sqrt/power of an indefinite polynomial
+            # that is convex only on this box). Fall back to the sound
+            # box-restricted interval-Hessian PSD certificate, which lifts any
+            # locally convex/concave multivariate node, not one problem class.
+            box_curv = _multivar_box_curvature(expr, model, idxs, flat_lb, flat_ub, box)
+            if box_curv is None:
+                return
+            curvature = box_curv
 
         # Sound interval enclosure of g over the box → finite column bounds the
         # bilinear McCormick envelope of d·x needs.

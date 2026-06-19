@@ -505,27 +505,73 @@ def _affine_square_sum_matrix(
     rows: list[np.ndarray] = []
     consts: list[float] = []
     for term in terms:
+        # Peel a nonnegative scalar coefficient: ``c * s**2`` with ``c >= 0`` is the
+        # square ``(sqrt(c) * s)**2``, so a *weighted* sum of affine squares is still
+        # ``||A x + b||^2`` (absorb ``sqrt(c)`` into the affine row). A negative
+        # coefficient would break the sum-of-squares/PSD structure, so it abstains.
+        scale, core = _peel_nonneg_scale(term)
+        if scale is None:
+            return None
+        # A bare nonnegative constant term ``c`` is the square ``(sqrt(c))**2`` of a
+        # zero affine form — a valid constant row, so ``sqrt(sum affine^2 + c)`` is
+        # still ``||A x + b||`` (e.g. smoothed/regularized distances).
+        if isinstance(core, Constant) and core.value.ndim == 0:
+            cval = scale * float(core.value)
+            if cval < 0.0:
+                return None
+            rows.append(np.zeros(n_total, dtype=np.float64))
+            consts.append(float(np.sqrt(cval)))
+            continue
         base: Optional[Expression] = None
         if (
-            isinstance(term, BinaryOp)
-            and term.op == "**"
-            and isinstance(term.right, Constant)
-            and term.right.value.ndim == 0
-            and abs(float(term.right.value) - 2.0) < 1e-12
+            isinstance(core, BinaryOp)
+            and core.op == "**"
+            and isinstance(core.right, Constant)
+            and core.right.value.ndim == 0
+            and abs(float(core.right.value) - 2.0) < 1e-12
         ):
-            base = term.left
-        elif isinstance(term, BinaryOp) and term.op == "*" and _same_expr(term.left, term.right):
-            base = term.left
+            base = core.left
+        elif isinstance(core, BinaryOp) and core.op == "*" and _same_expr(core.left, core.right):
+            base = core.left
         if base is None:
             return None
         try:
             coeffs, const = _extract_linear_coefficients(base, model, n_total)
         except Exception:
             return None
-        rows.append(coeffs)
-        consts.append(const)
+        root = float(np.sqrt(scale))
+        rows.append(root * coeffs)
+        consts.append(root * const)
 
     return np.asarray(rows, dtype=np.float64), np.asarray(consts, dtype=np.float64)
+
+
+def _peel_nonneg_scale(term: Expression) -> tuple[Optional[float], Expression]:
+    """Peel a product of nonnegative constant factors off ``term``.
+
+    Returns ``(scale, core)`` where ``term == scale * core`` and ``scale >= 0``,
+    or ``(None, term)`` if a constant factor is negative (which would invalidate
+    the sum-of-squares structure the caller relies on). Constants may appear on
+    either side and may be nested (``c1 * (c2 * s**2))``.
+    """
+    scale = 1.0
+    node = term
+    while isinstance(node, BinaryOp) and node.op == "*":
+        if isinstance(node.left, Constant) and node.left.value.ndim == 0:
+            c = float(node.left.value)
+            if c < 0.0:
+                return None, term
+            scale *= c
+            node = node.right
+        elif isinstance(node.right, Constant) and node.right.value.ndim == 0:
+            c = float(node.right.value)
+            if c < 0.0:
+                return None, term
+            scale *= c
+            node = node.left
+        else:
+            break
+    return scale, node
 
 
 def is_affine_norm_square(expr: Expression, model: Model) -> bool:
