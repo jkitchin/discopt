@@ -101,7 +101,7 @@ New problem types to make discopt competitive across the full optimization lands
 | Warm-starting API                 | Done    | `m.solve(initial_solution=...)` with validation                              |
 | Export formats (MPS/LP)           | Done    | `to_mps()`, `to_lp()` in `discopt.export`, GAMS writer                      |
 | Callback and cut generation API   | Done    | Lazy constraint, incumbent, and node callbacks in B&B                        |
-| Infeasibility analysis (IIS)      | Planned | Algorithmic irreducible infeasible subsystem computation                     |
+| Infeasibility analysis (IIS)      | Done    | `compute_iis()` via deletion filtering in `discopt.infeasibility`            |
 | Pyomo import                      | Done    | `from_pyomo()` converter for Var, Constraint, Objective, GDP constructs      |
 | GAMS import                       | Done    | `from_gams()` reader for .gms scalar models                                 |
 | GAMS solver link                  | Done    | `discopt.gams`: run discopt *as* a GAMS solver via the GMO/GEV control-file link |
