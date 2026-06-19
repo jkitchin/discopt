@@ -40,6 +40,37 @@ logger = logging.getLogger(__name__)
 # Dedup key set so the oversize-lift fallback warns once per (cols, rows) shape.
 _oversize_warned: set[int] = set()
 
+
+# ── Cut-pool row helpers (P1: global cut pool) ──────────────────────────────
+def _as_csr(A):
+    import scipy.sparse as sp
+
+    return A if sp.issparse(A) else sp.csr_matrix(A)
+
+
+def _sparse_rows(A) -> int:
+    return int(_as_csr(A).shape[0]) if A is not None else 0
+
+
+def _sparse_cols(A) -> int:
+    return int(_as_csr(A).shape[1]) if A is not None else 0
+
+
+def _append_relax_rows(milp, A_rows, b_rows) -> None:
+    """Append ``A_rows z <= b_rows`` to a relaxation model's inequality block."""
+    import scipy.sparse as sp
+
+    R = _as_csr(A_rows)
+    b = np.asarray(b_rows, dtype=np.float64)
+    if milp._A_ub is None:
+        milp._A_ub, milp._b_ub = R, b
+    elif sp.issparse(milp._A_ub):
+        milp._A_ub = sp.vstack([milp._A_ub, R], format="csr")
+        milp._b_ub = np.concatenate([np.asarray(milp._b_ub), b])
+    else:
+        milp._A_ub = np.vstack([np.asarray(milp._A_ub), R.toarray()])
+        milp._b_ub = np.concatenate([np.asarray(milp._b_ub), b])
+
 # When a per-node wall-clock budget is threaded through solve_at_node, no single
 # internal re-solve is handed less than this floor (keeps a node that straddles
 # the deadline from receiving a zero/negative budget the backend would reject).
@@ -317,6 +348,10 @@ class MccormickLPRelaxer:
         node_lb: np.ndarray,
         node_ub: np.ndarray,
         time_limit: Optional[float] = None,
+        *,
+        inherited_cuts: Optional[tuple] = None,
+        separate: bool = True,
+        out_cuts: Optional[list] = None,
     ) -> MccormickLPResult:
         """Solve the McCormick LP relaxation restricted to the given bound box.
 
@@ -324,6 +359,19 @@ class MccormickLPRelaxer:
         bound on the original problem within this box (for minimization).
         ``x`` is the LP solution projected to the original variable columns.
         On any solver failure, ``status != "optimal"`` and the LB is ``None``.
+
+        Global cut pool (P1, see ``docs/design/global-cut-pool.md``):
+
+        * ``inherited_cuts``: ``(A_rows, b_rows)`` of globally-valid cut rows
+          separated once at the root, appended to this node's relaxation before
+          solving. Applied only when the lifted column layout matches the pool's
+          (a tightened child box can pin/fold columns); a mismatch skips them,
+          which is sound (fewer cuts only loosens the bound).
+        * ``separate``: when ``False`` skip the per-node cut-separation chain (use
+          the inherited pool instead of re-deriving cuts every node).
+        * ``out_cuts``: when a list is supplied, the rows the separation chain
+          appended at THIS call are pushed onto it as ``(A_rows, b_rows)`` — used
+          to capture the root pool once and replay it at every node.
         """
         try:
             milp, varmap = build_milp_relaxation(
@@ -448,28 +496,49 @@ class MccormickLPRelaxer:
                 return None
             return max(_deadline - time.perf_counter(), _SOLVE_DEADLINE_FLOOR_S)
 
+        # Root cut-pool inheritance (P1): append globally-valid cut rows separated
+        # once at the root instead of re-separating them every node. Sound — each
+        # pool row is a valid inequality at every feasible point regardless of the
+        # node box — but only column-aligned when the lifted layout is unchanged
+        # (a pinned child variable can fold columns), so gate on a matching
+        # ``n_total`` and otherwise skip (fewer cuts only loosens the bound).
+        if inherited_cuts is not None:
+            _ia, _ib = inherited_cuts
+            if _ia is not None and _sparse_cols(_ia) == n_total:
+                _append_relax_rows(milp, _ia, _ib)
+        _n_base_rows = 0 if milp._A_ub is None else _sparse_rows(milp._A_ub)
+
         res = milp.solve(time_limit=_remaining(), backend=self._backend)
 
-        # On-demand separation of the exact multilinear hull for products with
-        # more factors than the dense RLT cap (those carry only the loose
-        # recursive chain). Every separated cut is a supporting hyperplane of the
-        # convex/concave envelope, hence valid; adding them only tightens the
-        # bound, so the loop is sound at any round.
-        res = self._separate_multilinear(milp, varmap, res, _deadline)
-        # Edge-concave / edge-convex quadratic blocks: tighten the joint
-        # vertex-polyhedral envelope (cuts on the existing bilinear/square auxes).
-        res = self._separate_edge_concave(milp, varmap, res, _deadline)
-        # Univariate squares ``s = x**2``: the static envelope cuts only at the box
-        # endpoints, so deep inside a wide box the convex underestimator is slack.
-        # Add the exact supporting tangent at the LP point each round (sound: a
-        # tangent of a convex function is a global underestimator).
-        res = self._separate_univariate_square(milp, varmap, res, _deadline)
-        # PSD (moment) cuts: enforce M = [[1,x^T],[x,X]] >= 0 over fully-lifted
-        # cliques. Each cut v^T M v >= 0 is a supporting hyperplane valid for every
-        # feasible point (X = x x^T), so adding them only tightens the bound.
-        res = self._separate_psd(milp, varmap, res, _deadline)
-        # Targeted RLT (constraint-factor x bound-factor) cuts.
-        res = self._separate_rlt(milp, varmap, res, _deadline)
+        if separate:
+            # On-demand separation of the exact multilinear hull for products with
+            # more factors than the dense RLT cap (those carry only the loose
+            # recursive chain). Every separated cut is a supporting hyperplane of
+            # the convex/concave envelope, hence valid; adding them only tightens
+            # the bound, so the loop is sound at any round.
+            res = self._separate_multilinear(milp, varmap, res, _deadline)
+            # Edge-concave / edge-convex quadratic blocks: tighten the joint
+            # vertex-polyhedral envelope (cuts on bilinear/square auxes).
+            res = self._separate_edge_concave(milp, varmap, res, _deadline)
+            # Univariate squares ``s = x**2``: the static envelope cuts only at the
+            # box endpoints, so deep inside a wide box the convex underestimator is
+            # slack. Add the exact supporting tangent at the LP point each round.
+            res = self._separate_univariate_square(milp, varmap, res, _deadline)
+            # PSD (moment) cuts: enforce M = [[1,x^T],[x,X]] >= 0 over fully-lifted
+            # cliques. Each cut v^T M v >= 0 is valid for every feasible point
+            # (X = x x^T), so adding them only tightens the bound.
+            res = self._separate_psd(milp, varmap, res, _deadline)
+            # Targeted RLT (constraint-factor x bound-factor) cuts.
+            res = self._separate_rlt(milp, varmap, res, _deadline)
+
+        # Capture the rows the separation chain just appended, for the root cut
+        # pool. Stated over this node's lifted column space (``n_total`` columns).
+        if out_cuts is not None and milp._A_ub is not None:
+            _A = _as_csr(milp._A_ub)
+            if _A.shape[0] > _n_base_rows:
+                out_cuts.append(
+                    (_A[_n_base_rows:].copy(), np.asarray(milp._b_ub)[_n_base_rows:].copy())
+                )
 
         # Soundness guard: a floating-point simplex "infeasible" verdict is NOT
         # a proof that the relaxed feasible set is empty. The spatial-B&B driver
