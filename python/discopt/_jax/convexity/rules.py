@@ -58,7 +58,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, cast
 
 import numpy as np
 
@@ -199,7 +199,7 @@ def _struct_hash(expr: Expression, hcache: dict) -> int:
     hid = id(expr)
     cached = hcache.get(hid)
     if cached is not None:
-        return cached
+        return cast(int, cached)
     if isinstance(expr, Constant):
         v = np.asarray(expr.value)
         if v.ndim == 0:
@@ -297,7 +297,7 @@ def classify_expr_info(
         for cand_expr, cand_info in bucket:
             if _expr_struct_eq(expr, cand_expr):
                 _cache[eid] = cand_info
-                return cand_info
+                return cast(ExprInfo, cand_info)
 
     info = _classify_impl(expr, model, _cache)
     # Whole-expression quadratic fallback: when the recursive walker

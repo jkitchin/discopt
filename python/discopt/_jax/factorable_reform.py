@@ -287,7 +287,7 @@ def _estimate_distributed_terms(expr: Expression) -> int:
             n = float(expr.right.value)
             n_int = int(n)
             if n == n_int and n_int >= 1:
-                return min(_estimate_distributed_terms(expr.left) ** n_int, _TERM_CAP)
+                return min(int(_estimate_distributed_terms(expr.left) ** n_int), _TERM_CAP)
         return 1
     if isinstance(expr, UnaryOp):
         return _estimate_distributed_terms(expr.operand)
