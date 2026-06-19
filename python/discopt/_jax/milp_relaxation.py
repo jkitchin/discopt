@@ -3375,13 +3375,25 @@ def _subdivision_curvature(
     hi: float,
     box: dict,
 ) -> Optional[str]:
-    """Sound curvature via a subdivided interval Hessian.
+    """Sound curvature via an *adaptively refined* interval Hessian.
 
     ``f`` is C² and depends on one variable, so its Hessian is the scalar
     ``f''`` in entry ``(flat_idx, flat_idx)``. Covering ``[lo, hi]`` with
     sub-intervals and enclosing ``f''`` on each tightens the dependency-induced
     looseness of a single whole-box enclosure: if every piece has ``f'' ≥ 0``
     the function is convex on the union ``[lo, hi]`` (symmetrically for concave).
+
+    Rather than re-evaluating a *uniform* grid at escalating densities
+    (4, 16, 64, … sub-intervals, each level recomputed from scratch — so a term
+    resolving only at the finest level paid for every coarser one), this refines
+    adaptively: check the whole box first (a convex/concave term with a tight
+    enclosure resolves in a single evaluation), and otherwise bisect *only* the
+    sub-intervals whose enclosure is still sign-ambiguous, down to the same
+    finest width ``(hi - lo) / _COMPOSITE_MAX_SUBDIV``. A depth-first descent fails
+    fast — the first finest-width piece that violates the target curvature refutes
+    it immediately. The finest resolution is unchanged, so any term the old
+    uniform sweep certified is still certified (no soundness or detection
+    regression); localized looseness just costs far fewer Hessian evaluations.
     """
     from discopt._jax.convexity.interval import Interval
     from discopt._jax.convexity.interval_ad import interval_hessian
@@ -3389,45 +3401,68 @@ def _subdivision_curvature(
     if hi - lo <= _COMPOSITE_CURV_TOL:
         return None  # pinned — handled by the exact pin value, not an envelope
     shape = var.shape if var.shape else (1,)
-    n_sub = 4
-    while n_sub <= _COMPOSITE_MAX_SUBDIV:
-        edges = np.linspace(lo, hi, n_sub + 1)
-        all_convex = True
-        all_concave = True
-        finite = True
-        for k in range(n_sub):
-            box[var] = Interval(
-                np.full(shape, edges[k], dtype=np.float64),
-                np.full(shape, edges[k + 1], dtype=np.float64),
-            )
-            try:
-                ad = interval_hessian(expr, model, box=box)
-            except Exception:
-                finite = False
-                break
-            h = ad.hess
-            h_lo = float(h.lo[flat_idx, flat_idx])
-            h_hi = float(h.hi[flat_idx, flat_idx])
-            if not (np.isfinite(h_lo) and np.isfinite(h_hi)):
-                finite = False
-                break
-            if h_lo < -_COMPOSITE_CURV_TOL:
-                all_convex = False
-            if h_hi > _COMPOSITE_CURV_TOL:
-                all_concave = False
-            if not all_convex and not all_concave:
-                break
+    tol = _COMPOSITE_CURV_TOL
+    min_width = (hi - lo) / _COMPOSITE_MAX_SUBDIV
+    _ABSTAIN = object()  # sentinel: a non-finite enclosure → give up entirely
+
+    def _hess(a: float, b: float):
+        box[var] = Interval(
+            np.full(shape, a, dtype=np.float64), np.full(shape, b, dtype=np.float64)
+        )
+        try:
+            ad = interval_hessian(expr, model, box=box)
+        except Exception:
+            return None
+        h = ad.hess
+        h_lo = float(h.lo[flat_idx, flat_idx])
+        h_hi = float(h.hi[flat_idx, flat_idx])
+        if not (np.isfinite(h_lo) and np.isfinite(h_hi)):
+            return None
+        return h_lo, h_hi
+
+    def _prove(want_convex: bool):
+        """True if ``f`` is convex (resp. concave) over ``[lo, hi]``, False if
+        refuted at the finest width, ``_ABSTAIN`` on a non-finite enclosure."""
+        stack = [(lo, hi)]
+        while stack:
+            a, b = stack.pop()
+            r = _hess(a, b)
+            if r is None:
+                return _ABSTAIN
+            h_lo, h_hi = r
+            ok = (h_lo >= -tol) if want_convex else (h_hi <= tol)
+            if ok:
+                continue  # this piece does not threaten the target curvature
+            if (b - a) <= min_width * (1.0 + 1e-9):
+                return False  # genuine sign change at the finest resolution
+            m = 0.5 * (a + b)
+            stack.append((a, m))
+            stack.append((m, b))
+        return True
+
+    try:
+        whole = _hess(lo, hi)
+        if whole is None:
+            return None
+        h_lo, h_hi = whole
+        if h_lo >= -tol:
+            return "convex"
+        if h_hi <= tol:
+            return "concave"
+        # Genuine straddle on the whole box: refine, trying the leaning direction
+        # first (positive-leaning enclosure → convex) then the other.
+        lean_convex = (h_lo + h_hi) >= 0.0
+        for want_convex in (lean_convex, not lean_convex):
+            res = _prove(want_convex)
+            if res is _ABSTAIN:
+                return None
+            if res is True:
+                return "convex" if want_convex else "concave"
+        return None
+    finally:
         box[var] = Interval(
             np.full(shape, lo, dtype=np.float64), np.full(shape, hi, dtype=np.float64)
         )
-        if not finite:
-            return None
-        if all_convex:
-            return "convex"
-        if all_concave:
-            return "concave"
-        n_sub *= 4
-    return None
 
 
 def _composite_curvature(
