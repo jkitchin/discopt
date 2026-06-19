@@ -11,7 +11,7 @@ class TestModelConstraint:
         m = dm.Model()
         plants = m.set("plants", ["pitt", "sf", "nyc"])
         x = m.continuous("x", over=plants, lb=0)
-        ic = m.constraint(plants, lambda p: x[p] <= 100, name="cap")
+        ic = m.constraint(plants, lambda p: x[p] <= 100, name="cap", fast=False)
         assert isinstance(ic, IndexedConstraint)
         assert len(ic) == 3
         assert len(m._constraints) == 3
@@ -20,7 +20,7 @@ class TestModelConstraint:
         m = dm.Model()
         plants = m.set("plants", ["pitt", "sf"])
         x = m.continuous("x", over=plants, lb=0)
-        m.constraint(plants, lambda p: x[p] <= 100, name="cap")
+        m.constraint(plants, lambda p: x[p] <= 100, name="cap", fast=False)
         names = {c.name for c in m._constraints}
         assert names == {"cap[pitt]", "cap[sf]"}
 
@@ -28,7 +28,7 @@ class TestModelConstraint:
         m = dm.Model()
         links = m.set("links", [("pitt", "a"), ("sf", "b")])
         x = m.continuous("x", over=links, lb=0)
-        m.constraint(links, lambda p, k: x[p, k] <= 10, name="flow")
+        m.constraint(links, lambda p, k: x[p, k] <= 10, name="flow", fast=False)
         names = {c.name for c in m._constraints}
         assert names == {"flow[pitt,a]", "flow[sf,b]"}
 
@@ -36,7 +36,7 @@ class TestModelConstraint:
         m = dm.Model()
         s = m.set("s", [1, 2, 3, 4])
         x = m.continuous("x", over=s, lb=0)
-        ic = m.constraint(s, lambda i: (x[i] <= 1) if i % 2 == 0 else Skip, name="even")
+        ic = m.constraint(s, lambda i: (x[i] <= 1) if i % 2 == 0 else Skip, name="even", fast=False)
         assert len(ic) == 2
         assert set(ic.keys()) == {2, 4}
         assert len(m._constraints) == 2
@@ -74,6 +74,7 @@ class TestModelConstraint:
             plants,
             lambda p: dm.sum(ship[p, k] for k in markets) <= 100,
             name="supply",
+            fast=False,
         )
         assert len(ic) == 2
         assert len(m._constraints) == 2

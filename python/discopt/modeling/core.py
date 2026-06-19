@@ -1716,7 +1716,7 @@ class Model:
             c.name = f"{name}_{k}" if name else None
             self._constraints.append(c)
 
-    def constraint(self, index_set, rule, name: Optional[str] = None):
+    def constraint(self, index_set, rule, name: Optional[str] = None, fast: bool = True):
         """Add a family of constraints indexed by a named set.
 
         For each member of *index_set* the *rule* is evaluated to produce a
@@ -1724,6 +1724,14 @@ class Model:
         (``rule(i, j)`` for a ``dimen == 2`` set, ``rule(i)`` otherwise). A rule
         may return :data:`~discopt.modeling.indexed.Skip` to omit that member.
         Generated constraints are named ``name[key]`` (e.g. ``capacity[pitt]``).
+
+        When ``fast`` is ``True`` (default) and every generated constraint is
+        affine in a single backing variable with a uniform sense, the whole
+        family is emitted as one sparse-matrix call into the Rust builder instead
+        of thousands of Python expression objects. This is purely a performance
+        path: the resulting model is identical, and any family that is not
+        single-variable-affine transparently falls back to the general path.
+        Pass ``fast=False`` to force the general path (e.g. for debugging).
 
         Parameters
         ----------
@@ -1733,6 +1741,8 @@ class Model:
             ``rule(member)`` -> Constraint (or ``Skip``).
         name : str, optional
             Prefix for the per-key constraint names.
+        fast : bool, default True
+            Allow linear fast-path emission into the Rust builder.
 
         Returns
         -------
@@ -1746,7 +1756,7 @@ class Model:
         from discopt.modeling.indexed import IndexedConstraint, Skip, key_label
         from discopt.modeling.sets import call_member
 
-        members: dict = {}
+        generated: list[tuple] = []
         for member in index_set:
             c = call_member(rule, member, index_set.dimen)
             if c is Skip:
@@ -1757,9 +1767,71 @@ class Model:
                     "expected a Constraint (from <=, >=, == on expressions) or Skip."
                 )
             c.name = f"{name}[{key_label(member)}]" if name else None
+            generated.append((member, c))
+
+        members = {m: c for m, c in generated}
+        if fast and self._try_fast_linear_family([c for _, c in generated], name):
+            # Rows were emitted into the Rust builder; keep the Constraint
+            # objects only for introspection (not in self._constraints).
+            return IndexedConstraint(name, index_set, members, fast=True)
+        for _, c in generated:
             self._constraints.append(c)
-            members[member] = c
-        return IndexedConstraint(name, index_set, members)
+        return IndexedConstraint(name, index_set, members, fast=False)
+
+    def _try_fast_linear_family(self, constraints: list, name: Optional[str]) -> bool:
+        """Emit a single-variable-affine, uniform-sense family into the builder.
+
+        Returns ``True`` if the whole family was emitted as one
+        ``add_linear_constraints`` call, ``False`` if it is ineligible (caller
+        then uses the general expression path).
+        """
+        from discopt.modeling.indexed import affine_form
+
+        if not constraints:
+            return False
+        sense = constraints[0].sense
+        if any(c.sense != sense for c in constraints):
+            return False
+
+        rows = []
+        var = None
+        for c in constraints:
+            aff = affine_form(c.body)
+            if aff is None or aff.var is None:
+                return False
+            if var is None:
+                var = aff.var
+            elif aff.var is not var:
+                return False
+            rows.append(aff)
+
+        import scipy.sparse as sp
+
+        m_rows = len(rows)
+        n_cols = var.size
+        data: list[float] = []
+        indices: list[int] = []
+        indptr = [0]
+        b = np.empty(m_rows, dtype=np.float64)
+        for r, aff in enumerate(rows):
+            for pos in sorted(aff.coeffs):
+                coeff = aff.coeffs[pos]
+                if coeff != 0.0:
+                    data.append(coeff)
+                    indices.append(pos)
+            indptr.append(len(data))
+            # body sense 0  ==>  A x sense (-const)
+            b[r] = -aff.const
+        A = sp.csr_matrix(
+            (
+                np.asarray(data, dtype=np.float64),
+                np.asarray(indices, dtype=np.int64),
+                np.asarray(indptr, dtype=np.int64),
+            ),
+            shape=(m_rows, n_cols),
+        )
+        self.add_linear_constraints(A, var, sense, b, name)
+        return True
 
     # ── Fast construction API (direct arena building) ──
 

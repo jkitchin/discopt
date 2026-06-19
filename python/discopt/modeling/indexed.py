@@ -149,10 +149,14 @@ class IndexedConstraint:
     (members whose rule returned :data:`Skip` are absent).
     """
 
-    def __init__(self, name, index_set: Set, members: dict):
+    def __init__(self, name, index_set: Set, members: dict, fast: bool = False):
         self.name = name
         self.index_set = index_set
         self._members: dict = members
+        #: True when the family was emitted via the linear fast path (rows live
+        #: in the Rust builder; the held Constraint objects are for introspection
+        #: only and are not in ``model._constraints``).
+        self.fast = fast
 
     def __getitem__(self, key) -> "Constraint":
         from discopt.modeling.sets import _normalize_member
@@ -174,6 +178,117 @@ class IndexedConstraint:
 
     def __repr__(self) -> str:
         return f"IndexedConstraint({self.name!r}, len={len(self)})"
+
+
+class _Affine:
+    """Affine form ``sum(coeffs[pos] * var[pos]) + const`` over a single variable."""
+
+    __slots__ = ("const", "var", "coeffs")
+
+    def __init__(self):
+        self.const: float = 0.0
+        self.var = None  # a single core.Variable, or None for a pure constant
+        self.coeffs: dict = {}  # position -> coefficient
+
+
+def _aff_scale(a, s: float):
+    if a is None:
+        return None
+    b = _Affine()
+    b.const = a.const * s
+    b.var = a.var
+    b.coeffs = {pos: c * s for pos, c in a.coeffs.items()}
+    return b
+
+
+def _aff_add(left, right):
+    if left is None or right is None:
+        return None
+    if left.var is not None and right.var is not None and left.var is not right.var:
+        return None  # two distinct variables -> not single-variable affine
+    out = _Affine()
+    out.const = left.const + right.const
+    out.var = left.var if left.var is not None else right.var
+    out.coeffs = dict(left.coeffs)
+    for pos, c in right.coeffs.items():
+        out.coeffs[pos] = out.coeffs.get(pos, 0.0) + c
+    return out
+
+
+def affine_form(expr):
+    """Reduce a scalar expression to a single-variable :class:`_Affine`, or ``None``.
+
+    Returns ``None`` (caller should fall back to the general path) for anything
+    that is not affine in a single backing variable: nonlinear nodes, bilinear
+    products, array nodes, or any reference to a :class:`Parameter` (whose value
+    must stay symbolic for sensitivity) or to a second distinct variable.
+    """
+    from discopt.modeling.core import (
+        BinaryOp,
+        Constant,
+        IndexExpression,
+        SumOverExpression,
+        UnaryOp,
+        Variable,
+    )
+
+    if isinstance(expr, Constant):
+        if expr.value.ndim != 0:
+            return None
+        a = _Affine()
+        a.const = float(expr.value)
+        return a
+    if isinstance(expr, IndexExpression):
+        base = expr.base
+        if not isinstance(base, Variable) or not isinstance(expr.index, int):
+            return None
+        a = _Affine()
+        a.var = base
+        a.coeffs = {expr.index: 1.0}
+        return a
+    if isinstance(expr, Variable):
+        if expr.size != 1:
+            return None
+        a = _Affine()
+        a.var = expr
+        a.coeffs = {0: 1.0}
+        return a
+    if isinstance(expr, UnaryOp):
+        if expr.op != "neg":
+            return None
+        return _aff_scale(affine_form(expr.operand), -1.0)
+    if isinstance(expr, BinaryOp):
+        if expr.op in ("+", "-"):
+            left = affine_form(expr.left)
+            right = affine_form(expr.right)
+            if expr.op == "-":
+                right = _aff_scale(right, -1.0)
+            return _aff_add(left, right)
+        if expr.op == "*":
+            left = affine_form(expr.left)
+            right = affine_form(expr.right)
+            if left is None or right is None:
+                return None
+            if left.var is None:
+                return _aff_scale(right, left.const)
+            if right.var is None:
+                return _aff_scale(left, right.const)
+            return None  # bilinear
+        if expr.op == "/":
+            left = affine_form(expr.left)
+            right = affine_form(expr.right)
+            if left is None or right is None or right.var is not None or right.const == 0:
+                return None
+            return _aff_scale(left, 1.0 / right.const)
+        return None
+    if isinstance(expr, SumOverExpression):
+        acc = _Affine()
+        for term in expr.terms:
+            acc = _aff_add(acc, affine_form(term))
+            if acc is None:
+                return None
+        return acc
+    return None
 
 
 def resolve_indexed_values(index_set: Set, spec, default, dtype) -> "np.ndarray":
