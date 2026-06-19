@@ -12,6 +12,14 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **Named index sets & set algebra** (`feat(modeling)`). New
+  `discopt.Set` / `discopt.RangeSet` (and `ProductSet`) plus `Model.set(...)` add
+  a Pyomo/JuMP-style named-set layer for sparse models: arbitrary hashable
+  members with inferred/declared `dimen`, set algebra (`|`, `&`, `-`, `*`), and
+  filtering (`Set.where`, `with_first`, `with_last`). This is milestone M1 of the
+  Phase 7 "set & index abstractions" roadmap item — a pure-Python desugaring
+  layer; indexed variables/constraints land in later milestones. Design in
+  `docs/design/sets-and-indexing.md`.
 - **Irreducible Infeasible Subsystem (IIS)** (`feat(infeasibility)`, #227). New
   `compute_iis(model)` returns a minimal infeasible subset of constraints/bounds
   via deletion filtering — exact for LP/MILP/convex, best-effort for nonconvex.

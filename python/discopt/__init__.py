@@ -113,6 +113,12 @@ from discopt.modeling import (
     VarType as VarType,
 )
 from discopt.modeling import (
+    RangeSet as RangeSet,
+)
+from discopt.modeling import (
+    Set as Set,
+)
+from discopt.modeling import (
     cos as cos,
 )
 from discopt.modeling import (

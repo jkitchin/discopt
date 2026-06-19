@@ -1337,6 +1337,49 @@ class Model:
         # Complementarity conditions added via ``complementarity()``; recorded
         # for introspection and bound tightening (see ``discopt.mpec``).
         self._complementarities: list = []
+        # Named index sets registered via ``set()`` (see ``discopt.modeling.sets``).
+        self._sets: list = []
+
+    # ── Index sets ──
+
+    def set(self, name: str, members, dimen: Optional[int] = None):
+        """Declare a named index set.
+
+        A :class:`~discopt.modeling.sets.Set` is the authoritative index for
+        indexed variables, parameters, and constraints. Members may be scalars
+        (``dimen == 1``) or fixed-arity tuples; duplicates are removed and
+        first-occurrence order is preserved.
+
+        Parameters
+        ----------
+        name : str
+            Identifier for the set, unique among the model's sets.
+        members : iterable
+            The set members.
+        dimen : int, optional
+            Declared dimensionality; inferred from *members* when omitted.
+
+        Returns
+        -------
+        Set
+            The registered set, supporting algebra (``|``, ``&``, ``-``, ``*``)
+            and filtering (``where``).
+
+        Examples
+        --------
+        >>> m = Model()
+        >>> plants = m.set("plants", ["pitt", "sf", "nyc"])
+        >>> markets = m.set("markets", ["a", "b"])
+        >>> len(plants * markets)
+        6
+        """
+        from discopt.modeling.sets import Set
+
+        if any(s.name == name for s in self._sets):
+            raise ValueError(f"Set name '{name}' already used in model")
+        s = Set(name, members, dimen=dimen)
+        self._sets.append(s)
+        return s
 
     # ── Variable constructors ──
 
