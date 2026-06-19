@@ -33,6 +33,13 @@ The release procedure that produces these entries is documented in
   `docs/design/sets-and-indexing.md`; examples
   `example_transportation` / `example_assignment` /
   `example_multicommodity_flow`.
+- **Decomposition structure layer** (`feat(decomposition)`). Foundation for the
+  upcoming Benders / Lagrangian solvers: a `Model` annotation API
+  (`first_stage`/`second_stage`/`set_stage`/`set_block`/`mark_coupling`) and
+  `discopt.detect_decomposition(model)`, which resolves annotations and
+  auto-detects block structure (complicating variables default to integers;
+  coupling constraints via a bridge heuristic reusing the separability scan).
+  Exposed as `discopt.detect_decomposition` / `DecompositionStructure`.
 - **Irreducible Infeasible Subsystem (IIS)** (`feat(infeasibility)`, #227). New
   `compute_iis(model)` returns a minimal infeasible subset of constraints/bounds
   via deletion filtering — exact for LP/MILP/convex, best-effort for nonconvex.

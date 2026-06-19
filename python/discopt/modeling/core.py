@@ -1395,6 +1395,13 @@ class Model:
         # Complementarity conditions added via ``complementarity()``; recorded
         # for introspection and bound tightening (see ``discopt.mpec``).
         self._complementarities: list = []
+        # Decomposition annotations (Benders / Lagrangian). Populated by
+        # ``set_stage``/``first_stage``/``second_stage``/``set_block``/
+        # ``mark_coupling``; consumed by ``discopt.decomposition``. Empty by
+        # default, in which case structure is auto-detected.
+        self._decomp_stages: dict[str, int] = {}
+        self._decomp_blocks: dict[str, int] = {}
+        self._coupling_keys: set = set()
         # Named index sets registered via ``set()`` (see ``discopt.modeling.sets``).
         self._sets: list = []
         # Linear constraint blocks emitted directly into the Rust builder
@@ -1934,6 +1941,54 @@ class Model:
         )
         self.add_linear_constraints(A, var, sense, b, name)
         return True
+
+    # ── Decomposition annotations (Benders / Lagrangian) ──
+
+    def set_stage(self, var: "Variable", stage: int) -> "Model":
+        """Tag a variable with a decomposition stage.
+
+        Stage ``1`` denotes a *complicating* / first-stage variable (held in
+        the Benders master); higher stages denote recourse/subproblem
+        variables. Consumed by :func:`discopt.decomposition.detect_decomposition`.
+        Returns ``self`` for chaining.
+        """
+        name = var.name if isinstance(var, Variable) else str(var)
+        self._decomp_stages[name] = int(stage)
+        return self
+
+    def first_stage(self, *vars: "Variable") -> "Model":
+        """Mark variables as first-stage (complicating) for Benders."""
+        for v in vars:
+            self.set_stage(v, 1)
+        return self
+
+    def second_stage(self, *vars: "Variable") -> "Model":
+        """Mark variables as second-stage (recourse/subproblem) for Benders."""
+        for v in vars:
+            self.set_stage(v, 2)
+        return self
+
+    def set_block(self, var: "Variable", block_id: int) -> "Model":
+        """Assign a variable to an explicit decomposition block."""
+        name = var.name if isinstance(var, Variable) else str(var)
+        self._decomp_blocks[name] = int(block_id)
+        return self
+
+    def mark_coupling(self, constraint: Union[Constraint, str]) -> "Model":
+        """Mark a constraint as *coupling* (to dualize in Lagrangian relaxation).
+
+        Accepts the :class:`Constraint` object added via :meth:`subject_to`, or
+        its name string. Coupling constraints are the linking rows whose removal
+        separates the model into independent blocks.
+        """
+        if isinstance(constraint, str):
+            self._coupling_keys.add(constraint)
+        else:
+            self._coupling_keys.add(id(constraint))
+            cname = getattr(constraint, "name", None)
+            if cname:
+                self._coupling_keys.add(cname)
+        return self
 
     # ── Fast construction API (direct arena building) ──
 

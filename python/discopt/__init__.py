@@ -85,6 +85,12 @@ from discopt.callbacks import (
 from discopt.callbacks import (
     CutResult as CutResult,
 )
+from discopt.decomposition import (
+    DecompositionStructure as DecompositionStructure,
+)
+from discopt.decomposition import (
+    detect_decomposition as detect_decomposition,
+)
 from discopt.infeasibility import (
     IISResult as IISResult,
 )
