@@ -3402,6 +3402,12 @@ def solve_model(
     _subnlp_calls = 0
     _subnlp_feasible = 0
     _subnlp_incumbent_updates = 0
+    # Best incumbent value the integer-neighbourhood box search has already been
+    # run from. The box search re-enumerates the integer lattice around the
+    # incumbent, so it is only worth re-running when the incumbent itself moved
+    # to a new integer assignment; tracking its objective avoids redundant
+    # re-enumeration of the same neighbourhood every scheduled iteration.
+    _last_box_inc_obj = np.inf
     # Best incumbent value the cutoff-tightening phases (C/C3) have already acted
     # on. They fire whenever the incumbent strictly improves below this — from
     # ANY source, including the sub-NLP / binary-seed heuristics that inject
@@ -4433,6 +4439,50 @@ def solve_model(
                     tree.inject_incumbent(_x_en.copy(), float(_obj_en))
                     _subnlp_incumbent_updates += 1
                     logger.info("SubNLP enum incumbent: obj=%.6g", _obj_en)
+
+        # --- Incumbent integer-neighbourhood search (general-integer LB) ---
+        # A feasible incumbent of a nonconvex general-integer model can sit next
+        # to a far better feasible integer assignment that no unit (1-opt/2-opt)
+        # violation-descent move reaches, because the connecting lattice path is
+        # objective-increasing or threads through infeasible cells (nvs05 parks at
+        # (3,2)->7.75 while the global (5,1)->5.47 is two coupled steps away over an
+        # objective-increasing ridge). When the relaxation drops the cross-terms
+        # that would supply a lower bound, B&B has nothing to steer it there in
+        # time. integer_box_search re-solves the fixed-integer sub-NLP over the
+        # +/-radius box around the incumbent with warm-start propagation, so the
+        # better assignment is found directly. Fire whenever the incumbent strictly
+        # improves to a new value (the ``_last_box_inc_obj`` guard is the throttle —
+        # NOT the subnlp iteration schedule, which can skip the window in which the
+        # improving incumbent first appears and was leaving the better assignment on
+        # the table on small instances that finish before the next scheduled tick).
+        if _subnlp_backend_fn is not None and not _model_is_convex:
+            _inc_box = tree.incumbent()
+            if (
+                _inc_box is not None
+                and np.isfinite(_inc_box[1])
+                and _inc_box[1] < _last_box_inc_obj - 1e-9
+            ):
+                _last_box_inc_obj = float(_inc_box[1])
+                from discopt._jax.primal_heuristics import integer_box_search
+
+                _box_budget = min(4.0, max(_DEADLINE_NODE_FLOOR_S, _deadline - time.perf_counter()))
+                try:
+                    _bx = integer_box_search(
+                        model,
+                        _inc_box[0],
+                        backend=_subnlp_backend_fn,
+                        nlp_options=subnlp_options,
+                        evaluator=evaluator,
+                        time_budget=_box_budget,
+                    )
+                except Exception as _e:
+                    logger.debug("integer_box_search raised: %s", _e)
+                    _bx = None
+                if _bx is not None and np.isfinite(_bx[1]) and _bx[1] < _inc_box[1] - 1e-9:
+                    tree.inject_incumbent(_bx[0].copy(), float(_bx[1]))
+                    _subnlp_incumbent_updates += 1
+                    _last_box_inc_obj = float(_bx[1])
+                    logger.info("Box-search incumbent: obj=%.6g (iter=%d)", _bx[1], iteration)
 
         # --- User callbacks: lazy constraints and incumbent filtering ---
         if lazy_constraints is not None or incumbent_callback is not None:

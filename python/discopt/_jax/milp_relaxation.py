@@ -3158,6 +3158,40 @@ class CompositeUnivariateRelaxation:
     pin_value: Optional[float]
 
 
+@dataclass
+class CompositeMultivarRelaxation:
+    """Outer relaxation for a *multivariate* convex/concave nonlinear node.
+
+    Generalizes :class:`CompositeUnivariateRelaxation` to a node ``g(x)`` that
+    depends on **more than one** original variable but whose global curvature is
+    certified by the DCP classifier — e.g. the Euclidean distance
+    ``sqrt((x0-x2)**2 + (x1-x3)**2) = ||A x + b||`` of a TSP-with-neighbourhoods
+    objective (MINLPLib ``tspn*``). The aux column ``d`` replaces ``g(x)`` so a
+    product such as ``g(x) * x10`` decomposes through the standard McCormick
+    bilinear envelope (``d`` registered in ``composite_var_map``).
+
+    Soundness:
+
+    * **CONVEX** ``g`` — each gradient cut ``d ≥ g(x_k) + ∇g(x_k)·(x − x_k)`` is
+      a supporting hyperplane, valid *everywhere* for a convex function (no
+      finiteness of bounds required for the cut itself), and the column upper
+      bound ``d ≤ U`` uses a sound interval over-enclosure of ``g`` on the box.
+      Together the tangent cuts (below) and the constant cap (above) form a
+      rigorous outer band.
+    * **CONCAVE** ``g`` — the roles swap: gradient cuts over-estimate
+      (``d ≤ …``) and the constant column lower bound ``d ≥ L`` bounds below.
+
+    Each line is sparse: ``((col, coeff), …), intercept`` meaning
+    ``d (≥|≤) Σ coeff·x_col + intercept``.
+    """
+
+    expr_id: int
+    aux_col: int
+    curvature: str
+    lower_lines: tuple[tuple[tuple[tuple[int, float], ...], float], ...]
+    upper_lines: tuple[tuple[tuple[tuple[int, float], ...], float], ...]
+
+
 _COMPOSITE_CURV_TOL = 1e-9
 _COMPOSITE_MAX_SUBDIV = 256
 
@@ -3514,6 +3548,245 @@ def _collect_composite_univariate_relaxations(
             )
         )
         bounds.append(col_bounds)
+        col_idx += 1
+
+    def visit(expr: Expression) -> None:
+        maybe_add(expr)
+        if isinstance(expr, BinaryOp):
+            visit(expr.left)
+            visit(expr.right)
+        elif isinstance(expr, UnaryOp):
+            visit(expr.operand)
+        elif isinstance(expr, FunctionCall):
+            for arg in expr.args:
+                visit(arg)
+        elif isinstance(expr, IndexExpression):
+            if not isinstance(expr.base, Variable):
+                visit(expr.base)
+        elif isinstance(expr, SumExpression):
+            visit(expr.operand)
+        elif isinstance(expr, SumOverExpression):
+            for term in expr.terms:
+                visit(term)
+
+    if model._objective is not None:
+        visit(model._objective.expression)
+    for constraint in model._constraints:
+        visit(constraint.body)
+
+    return relaxations, var_map, bounds
+
+
+def _referenced_flat_indices(expr: Expression, model: Model) -> list[int]:
+    """Sorted distinct flat column indices of the scalar variables in ``expr``."""
+    found: set[int] = set()
+
+    def visit(e: Expression) -> None:
+        if isinstance(e, Variable):
+            offset = _compute_var_offset(e, model)
+            for j in range(e.size):
+                found.add(offset + j)
+            return
+        if isinstance(e, IndexExpression):
+            if isinstance(e.base, Variable):
+                idx = _get_flat_index(e, model)
+                if idx is not None:
+                    found.add(idx)
+                else:
+                    offset = _compute_var_offset(e.base, model)
+                    for j in range(e.base.size):
+                        found.add(offset + j)
+            else:
+                visit(e.base)
+            return
+        if isinstance(e, BinaryOp):
+            visit(e.left)
+            visit(e.right)
+        elif isinstance(e, UnaryOp):
+            visit(e.operand)
+        elif isinstance(e, FunctionCall):
+            for a in e.args:
+                visit(a)
+        elif isinstance(e, SumExpression):
+            visit(e.operand)
+        elif isinstance(e, SumOverExpression):
+            for t in e.terms:
+                visit(t)
+
+    visit(expr)
+    return sorted(found)
+
+
+def _should_claim_composite_multivar(expr: Expression, model: Model, n_orig: int) -> bool:
+    """True when ``expr`` is a multivariate nonlinear node a gradient lift can cover.
+
+    Mirrors :func:`_should_claim_composite` but for the *multi-variable* case the
+    single-variable composite path skips (its :func:`_composite_referenced_var`
+    returns ``None`` for >1 variable). Claim only a leaf-like nonlinear unit that
+    the bilinear/monomial/fractional-power builders do not already lift:
+
+    * a named univariate call (``sqrt``/``exp``/``log``/…) whose single argument
+      is *non-affine* and references **two or more** original variables, or
+    * ``(base)**p`` with a non-integer constant ``p`` and a non-bare,
+      multivariate base.
+    """
+    if isinstance(expr, FunctionCall) and len(expr.args) == 1:
+        op_info = _univariate_arg(expr)
+        if op_info is None:
+            return False
+        _name, arg = op_info
+        try:
+            _linearize_affine_expr(arg, model, n_orig)
+            return False  # affine argument → ordinary univariate path
+        except ValueError:
+            pass
+        return len(_referenced_flat_indices(arg, model)) >= 2
+    if isinstance(expr, BinaryOp) and expr.op == "**" and isinstance(expr.right, Constant):
+        p = float(expr.right.value)
+        if p == int(p):
+            return False
+        if _get_flat_index(expr.left, model) is not None:
+            return False  # bare-variable base → fractional-power path
+        return len(_referenced_flat_indices(expr.left, model)) >= 2
+    return False
+
+
+def _collect_composite_multivar_relaxations(
+    model: Model,
+    n_orig: int,
+    flat_lb: np.ndarray,
+    flat_ub: np.ndarray,
+    start_col: int,
+    claimed_ids: set[int],
+) -> tuple[list[CompositeMultivarRelaxation], dict[int, int], list[tuple[float, float]]]:
+    """Collect multivariate convex/concave nonlinear nodes via a gradient lift.
+
+    Returns ``(relaxations, var_map, bounds)`` where ``var_map`` maps the node's
+    ``id(expr)`` to its aux column. Each node's curvature is certified by the DCP
+    classifier (globally CONVEX/CONCAVE), so the supporting-hyperplane cuts are a
+    rigorous outer approximation. Abstains silently (no entry) whenever curvature
+    is not certified, the value enclosure on the box is not finite, or autodiff
+    fails — abstention preserves the existing warn-and-omit behaviour and never
+    emits an unsound cut.
+    """
+    relaxations: list[CompositeMultivarRelaxation] = []
+    var_map: dict[int, int] = {}
+    bounds: list[tuple[float, float]] = []
+    seen: set[int] = set()
+    col_idx = start_col
+
+    try:
+        import jax
+        import jax.numpy as jnp
+
+        from discopt._jax.convexity import Curvature, classify_expr
+        from discopt._jax.convexity.interval_eval import evaluate_interval
+        from discopt._jax.dag_compiler import compile_expression
+    except Exception:
+        return relaxations, var_map, bounds
+
+    box = _build_convexity_box(model, flat_lb, flat_ub)
+
+    def maybe_add(expr: Expression) -> None:
+        nonlocal col_idx
+        eid = id(expr)
+        if eid in seen or eid in claimed_ids:
+            return
+        if not _should_claim_composite_multivar(expr, model, n_orig):
+            return
+        idxs = _referenced_flat_indices(expr, model)
+        if len(idxs) < 2:
+            return
+        lo = flat_lb[idxs]
+        hi = flat_ub[idxs]
+        if not (np.all(np.isfinite(lo)) and np.all(np.isfinite(hi))) or np.any(hi < lo):
+            return
+
+        curv = classify_expr(expr, model)
+        if curv == Curvature.CONVEX:
+            curvature = "convex"
+        elif curv == Curvature.CONCAVE:
+            curvature = "concave"
+        else:
+            return
+
+        # Sound interval enclosure of g over the box → finite column bounds the
+        # bilinear McCormick envelope of d·x needs.
+        try:
+            iv = evaluate_interval(expr, model, box=box)
+        except Exception:
+            return
+        col_lo = float(np.asarray(iv.lo).ravel()[0])
+        col_hi = float(np.asarray(iv.hi).ravel()[0])
+        if not (np.isfinite(col_lo) and np.isfinite(col_hi)) or col_hi < col_lo:
+            return
+
+        try:
+            f = compile_expression(expr, model)
+            grad_f = jax.grad(lambda xv: jnp.reshape(f(xv), ()))
+        except Exception:
+            return
+
+        # Gradient-cut reference points: box center plus, for each dependent
+        # variable, the center pushed to that coordinate's lower and upper bound.
+        center = np.zeros(n_orig, dtype=np.float64)
+        for j in idxs:
+            center[j] = 0.5 * (float(flat_lb[j]) + float(flat_ub[j]))
+        points: list[np.ndarray] = [center.copy()]
+        for j in idxs:
+            for edge in (float(flat_lb[j]), float(flat_ub[j])):
+                p = center.copy()
+                p[j] = edge
+                points.append(p)
+
+        lines: list[tuple[tuple[tuple[int, float], ...], float]] = []
+        for p in points:
+            try:
+                gval = float(jnp.reshape(f(jnp.asarray(p)), ()))
+                grad = np.asarray(grad_f(jnp.asarray(p)), dtype=np.float64).ravel()
+            except Exception:
+                continue
+            if not np.isfinite(gval) or not np.all(np.isfinite(grad[idxs])):
+                continue
+            coeffs = tuple(
+                (int(j), float(grad[j])) for j in idxs if abs(float(grad[j])) > 1e-12
+            )
+            intercept = gval - float(sum(grad[j] * p[j] for j in idxs))
+            if not np.isfinite(intercept):
+                continue
+            lines.append((coeffs, float(intercept)))
+
+        if not lines:
+            return
+
+        # Dedup structurally-identical cuts (e.g. a linear-along-one-axis node
+        # yields the same tangent at several reference points).
+        uniq: list[tuple[tuple[tuple[int, float], ...], float]] = []
+        for line in lines:
+            if not any(
+                line[0] == prev[0] and abs(line[1] - prev[1]) <= 1e-12 for prev in uniq
+            ):
+                uniq.append(line)
+
+        if curvature == "convex":
+            lower_lines = tuple(uniq)
+            upper_lines: tuple = ()
+        else:
+            lower_lines = ()
+            upper_lines = tuple(uniq)
+
+        seen.add(eid)
+        var_map[eid] = col_idx
+        relaxations.append(
+            CompositeMultivarRelaxation(
+                expr_id=eid,
+                aux_col=col_idx,
+                curvature=curvature,
+                lower_lines=lower_lines,
+                upper_lines=upper_lines,
+            )
+        )
+        bounds.append((col_lo, col_hi))
         col_idx += 1
 
     def visit(expr: Expression) -> None:
@@ -4641,6 +4914,28 @@ def build_milp_relaxation(
         )
     )
     for val_bounds in composite_bounds:
+        all_bounds.append(val_bounds)
+        integrality_flags.append(0)
+        col_idx += 1
+
+    # Multivariate convex/concave composite nodes (Euclidean distance / norm,
+    # other DCP-certified multivariate functions) lifted by supporting-hyperplane
+    # gradient cuts so a product such as ``||A x + b|| * x_k`` decomposes through
+    # the standard McCormick bilinear envelope. The aux columns are registered
+    # into the shared ``composite_var_map`` consulted by ``_decompose_product``.
+    _multivar_claimed_ids = set(_univariate_claimed_ids) | set(composite_var_map)
+    composite_multivar_relaxations, composite_multivar_var_map, composite_multivar_bounds = (
+        _collect_composite_multivar_relaxations(
+            model,
+            n_orig,
+            flat_lb,
+            flat_ub,
+            col_idx,
+            _multivar_claimed_ids,
+        )
+    )
+    composite_var_map.update(composite_multivar_var_map)
+    for val_bounds in composite_multivar_bounds:
         all_bounds.append(val_bounds)
         integrality_flags.append(0)
         col_idx += 1
@@ -6569,6 +6864,26 @@ def build_milp_relaxation(
             row[crelax.aux_col] = 1.0
             _add_row(row, intercept)
 
+    # ── Multivariate composite relaxations (gradient cuts) ──────────────────
+    # d is the aux column for g(x); each line is sparse over the original cols.
+    # lower_lines give ``d ≥ Σ coeff·x_col + intercept`` (convex tangents) and
+    # upper_lines give ``d ≤ Σ coeff·x_col + intercept`` (concave tangents). The
+    # complementary constant bound (d ≤ U convex, d ≥ L concave) is carried by
+    # the aux column box bounds, so no extra row is needed for it.
+    for mrelax in composite_multivar_relaxations:
+        for coeffs, intercept in mrelax.lower_lines:
+            row = np.zeros(n_total)
+            for col, coeff in coeffs:
+                row[col] += coeff
+            row[mrelax.aux_col] = -1.0
+            _add_row(row, -intercept)
+        for coeffs, intercept in mrelax.upper_lines:
+            row = np.zeros(n_total)
+            for col, coeff in coeffs:
+                row[col] += -coeff
+            row[mrelax.aux_col] = 1.0
+            _add_row(row, intercept)
+
     for table in finite_domain_trig_square_tables:
         base_col = table.square.base_col
         square_col = table.square.aux_col
@@ -7302,6 +7617,7 @@ def build_milp_relaxation(
         },
         "univariate_relaxations": univariate_relaxations,
         "composite_relaxations": composite_relaxations,
+        "composite_multivar_relaxations": composite_multivar_relaxations,
         "univariate_piecewise_relaxations": piecewise_univariate_relaxations,
         "univariate_square": univariate_square_var_map,
         "univariate_square_relaxations": univariate_square_relaxations,

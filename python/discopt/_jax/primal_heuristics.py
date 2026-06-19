@@ -584,7 +584,13 @@ def integer_local_search(
     # into a far better basin. Both are rounded and used as restart bases.
     seeds: list[np.ndarray] = [_round_clip(x_relax)]
     try:
-        mid = np.clip(0.5 * (lb + ub), -1e3, 1e3)
+        # Clip the bounds to a finite window BEFORE averaging: unbounded
+        # variables (lb=-inf and/or ub=+inf, common once a model has free
+        # continuous vars like nvs05's x4..x7) make ``0.5*(lb+ub)`` evaluate to
+        # +/-inf or NaN, which poisons the whole midpoint seed and silently
+        # discards this second (relaxation) restart base. Clip first so every
+        # coordinate is a finite, usable start.
+        mid = np.clip(0.5 * (np.clip(lb, -1e3, 1e3) + np.clip(ub, -1e3, 1e3)), -1e3, 1e3)
         relax_opts = dict(nlp_options) if nlp_options else {}
         relax_opts.setdefault("print_level", 0)
         relax_res = backend(evaluator, mid, options=relax_opts)
@@ -687,6 +693,133 @@ def integer_local_search(
             # Once feasible, later perturbed restarts dive from this point's
             # neighbourhood (see the restart-base selection above) to improve it.
 
+    return best
+
+
+def integer_box_search(
+    model: Model,
+    x_incumbent: np.ndarray,
+    *,
+    radius: int = 2,
+    backend: Optional[Callable] = None,
+    nlp_options: Optional[dict] = None,
+    evaluator: Optional[NLPEvaluator] = None,
+    max_int_vars: int = 3,
+    max_combos: int = 128,
+    integer_tol: float = 1e-5,
+    feas_tol: float = 1e-6,
+    time_budget: float = 4.0,
+) -> Optional[tuple[np.ndarray, float]]:
+    """Objective-improving integer *box* search around an incumbent.
+
+    :func:`local_branching` only flips *binary* variables, and
+    :func:`integer_local_search` descends constraint *violation* — it stops at
+    the first feasible integer point and never makes an objective-improving move
+    among feasible neighbours. For general-integer models a feasible incumbent
+    can sit next to a far better feasible assignment that no unit (1-opt/2-opt)
+    move reaches, because the connecting lattice path is objective-*increasing*
+    or threads through infeasible points. Concretely, nvs05 parks at the feasible
+    ``(i1=3, i2=2) -> 7.75`` while the global ``(i1=5, i2=1) -> 5.47`` is two
+    coupled integer steps away over an objective-increasing ridge, with
+    ``(3,1)``/``(4,1)`` infeasible (``i1**2*i2 >= 16.8``).
+
+    This enumerates the ``+/-radius`` integer box around the incumbent's integer
+    assignment, fixes each combination, and re-solves the continuous sub-NLP via
+    :func:`subnlp`, returning the best *strictly improving* feasible point (or
+    ``None``). It is the general-integer analogue of local branching.
+
+    Bounded and sound: it only fires for a small integer count
+    (``n_int <= max_int_vars``) and a small grid (``<= max_combos`` cells, capped
+    further by each variable's own ``[lb, ub]``), every returned point is
+    subnlp-verified feasible, and the caller injects it only on strict
+    improvement — so the dual bound and certification are untouched.
+    """
+    import time
+
+    int_mask = _get_integer_mask(model)
+    int_idx = np.where(int_mask)[0]
+    n_int = int(int_idx.size)
+    if n_int == 0 or n_int > max_int_vars:
+        return None
+
+    lb, ub = _get_variable_bounds(model)
+    x_inc = np.asarray(x_incumbent, dtype=np.float64)
+    if x_inc.size <= int(int_idx.max()):
+        return None
+    centers = np.round(x_inc[int_idx])
+
+    # Per-variable candidate values, clamped to the box AND to [lb, ub].
+    axes: list[list[float]] = []
+    for k, j in enumerate(int_idx):
+        lo = max(int(np.ceil(lb[j] - 1e-9)), int(centers[k]) - radius)
+        hi = min(int(np.floor(ub[j] + 1e-9)), int(centers[k]) + radius)
+        if hi < lo:
+            return None
+        axes.append([float(v) for v in range(lo, hi + 1)])
+
+    n_combos = 1
+    for ax in axes:
+        n_combos *= len(ax)
+    # A single-cell grid means the incumbent is pinned with no neighbours to try.
+    if n_combos <= 1 or n_combos > max_combos:
+        return None
+
+    if evaluator is None:
+        evaluator = NLPEvaluator(model)
+
+    # Warm-start propagation. The continuous sub-NLP at a *neighbour* integer
+    # assignment often has a narrow nonconvex feasible basin that the incumbent's
+    # continuous values (a poor start once the integers shift by more than a step)
+    # or a generic midpoint/random start miss entirely — so a better feasible
+    # assignment a few integer steps away is never reached. Instead, expand the
+    # box in rings of increasing Chebyshev distance from the incumbent and seed
+    # each cell from an ALREADY-SOLVED feasible lattice-neighbour's continuous
+    # values. Every hop is then a single integer step from a feasible point, so
+    # the NLP stays in-basin and walks outward one ring at a time (e.g. nvs05
+    # (3,2) -> (4,2) -> (5,2) -> (5,1) reaches the global 5.47). One NLP per cell,
+    # deterministic, deadline-bounded. Sound: subnlp-verified feasible points only.
+    center_key = tuple(int(centers[k]) for k in range(n_int))
+    cont_at: dict[tuple[int, ...], np.ndarray] = {center_key: x_inc.copy()}
+
+    def cheby(combo: tuple[int, ...]) -> int:
+        return max(abs(combo[k] - center_key[k]) for k in range(n_int))
+
+    combos = sorted(
+        (tuple(int(v) for v in c) for c in itertools.product(*axes)),
+        key=lambda c: (cheby(c), sum(abs(c[k] - center_key[k]) for k in range(n_int))),
+    )
+
+    deadline = time.perf_counter() + max(0.0, time_budget)
+    best: Optional[tuple[np.ndarray, float]] = None
+    for combo in combos:
+        if time.perf_counter() >= deadline:
+            break
+        if combo == center_key:
+            continue  # the incumbent's own cell — nothing to improve on
+        # Seed from the nearest already-solved feasible neighbour (smallest L1
+        # gap), falling back to the incumbent's continuous values.
+        seed_src = x_inc
+        best_gap = None
+        for key, cont in cont_at.items():
+            gap = sum(abs(combo[k] - key[k]) for k in range(n_int))
+            if best_gap is None or gap < best_gap:
+                best_gap, seed_src = gap, cont
+        seed = seed_src.copy()
+        for k, j in enumerate(int_idx):
+            seed[j] = float(combo[k])
+        found = subnlp(
+            model,
+            seed,
+            backend=backend,
+            nlp_options=nlp_options,
+            evaluator=evaluator,
+            integer_tol=integer_tol,
+            feas_tol=feas_tol,
+        )
+        if found is not None:
+            cont_at[combo] = np.asarray(found[0]).copy()
+            if best is None or found[1] < best[1]:
+                best = (np.asarray(found[0]).copy(), float(found[1]))
     return best
 
 

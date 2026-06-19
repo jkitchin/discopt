@@ -465,6 +465,85 @@ def _sum_of_squares_linear_matrix(expr: Expression, model: Model) -> Optional[np
     return left
 
 
+def _affine_square_sum_matrix(
+    expr: Expression, model: Model
+) -> Optional[tuple[np.ndarray, np.ndarray]]:
+    """Return ``(A, b)`` when ``expr == sum_i (a_i . x + b_i)**2 == ||A x + b||^2``.
+
+    Each summand of the top-level ``+`` tree must be a perfect square of a
+    *scalar affine* form: either ``(affine)**2`` or ``affine * affine`` with
+    both factors structurally identical. Rows of ``A`` are the affine
+    coefficient vectors and ``b`` the affine constants. Returns ``None`` if the
+    expression does not have this shape.
+
+    Because ``sqrt`` of this is the Euclidean norm ``||A x + b||_2`` of an
+    affine map, it is convex for *any* ``A`` and ``b`` — no PSD/eigenvalue
+    check is needed (the sum-of-squares structure makes it PSD by
+    construction, and a nonzero constant ``b`` is still convex). This is the
+    affine-difference generalization of :func:`_sum_of_squares_linear_matrix`,
+    which only matched homogeneous ``sum((A@x)*(A@x))`` MatMul forms.
+    """
+    from discopt._jax.problem_classifier import _extract_linear_coefficients
+
+    n_total = _total_scalar_variables(model)
+
+    terms: list[Expression] = []
+
+    def _flatten_sum(node: Expression) -> None:
+        if isinstance(node, BinaryOp) and node.op == "+":
+            _flatten_sum(node.left)
+            _flatten_sum(node.right)
+        elif isinstance(node, SumExpression):
+            _flatten_sum(node.operand)
+        else:
+            terms.append(node)
+
+    _flatten_sum(expr)
+    if not terms:
+        return None
+
+    rows: list[np.ndarray] = []
+    consts: list[float] = []
+    for term in terms:
+        base: Optional[Expression] = None
+        if (
+            isinstance(term, BinaryOp)
+            and term.op == "**"
+            and isinstance(term.right, Constant)
+            and term.right.value.ndim == 0
+            and abs(float(term.right.value) - 2.0) < 1e-12
+        ):
+            base = term.left
+        elif (
+            isinstance(term, BinaryOp)
+            and term.op == "*"
+            and _same_expr(term.left, term.right)
+        ):
+            base = term.left
+        if base is None:
+            return None
+        try:
+            coeffs, const = _extract_linear_coefficients(base, model, n_total)
+        except Exception:
+            return None
+        rows.append(coeffs)
+        consts.append(const)
+
+    return np.asarray(rows, dtype=np.float64), np.asarray(consts, dtype=np.float64)
+
+
+def is_affine_norm_square(expr: Expression, model: Model) -> bool:
+    """True when ``expr == ||A x + b||_2^2`` for some affine map ``A x + b``.
+
+    Recognises a sum of squares of scalar affine forms (see
+    :func:`_affine_square_sum_matrix`). ``sqrt`` of such an expression is a
+    convex Euclidean norm regardless of the constant term, which covers
+    ``sqrt((x0-x2)**2 + (x1-x3)**2)``-style neighbourhood/distance objectives
+    (MINLPLib ``tspn*``) that the homogeneous quadratic recognizer misses.
+    """
+    return _affine_square_sum_matrix(expr, model) is not None
+
+
 def is_homogeneous_psd_quadratic(expr: Expression, model: Model) -> bool:
     """True when ``expr`` is ``x^T Q x`` (no linear/constant term) with Q PSD."""
     mat = _sum_of_squares_linear_matrix(expr, model)
@@ -641,6 +720,12 @@ def classify_sqrt_pattern(
       bases are affine; skipped when they are not supplied.
     """
     if is_homogeneous_psd_quadratic(arg, model):
+        return Curvature.CONVEX
+
+    # Euclidean norm of an affine map: sqrt(sum_i (a_i.x + b_i)^2) = ||A x + b||,
+    # convex for any affine map (the homogeneous PSD recognizer above only
+    # catches the b == 0 / MatMul cases).
+    if is_affine_norm_square(arg, model):
         return Curvature.CONVEX
 
     # Geometric-mean concavity: sqrt of a product of nonneg affine powers.
