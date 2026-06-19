@@ -75,6 +75,47 @@ def test_bucket2_instance_has_sound_root_bound(instance, optimum):
 
 
 @pytest.mark.correctness
+def test_ex1226_closes_to_global_optimum():
+    """``ex1226`` constraint e1 carries the product ``x1**0.5 * x2**2`` (a
+    fractional-power factor times an integer-power monomial). The McCormick
+    linearizer's product decomposer recognized the fractional-power factor via
+    ``fractional_power_var_map`` but **not** the integer-power monomial via
+    ``monomial_var_map`` — so the product failed to decompose ("Cannot decompose
+    product"), e1 dropped from the MILP relaxation, and the dual bound froze at
+    the relaxation-without-e1 value (~-21, a 23.5% gap) no matter how many nodes
+    B&B explored (observed: 11107 nodes, time-limit, never proved).
+
+    Resolving the integer-power factor through ``monomial_var_map`` keeps e1 in
+    the relaxation: the two lifted columns (``x1**0.5`` and ``x2**2``) get a
+    bilinear McCormick envelope, which spatial branching then tightens. The
+    instance now certifies the global optimum (-17) in a handful of nodes. This
+    is the convergence (tightness) lock; the sound-root-bound parametrization
+    above only guards that the *loose* bound never exceeds the optimum, which a
+    dropped constraint trivially satisfied.
+    """
+    nl = _DATA / "ex1226.nl"
+    assert nl.exists(), f"missing {nl}"
+    m = dm.from_nl(str(nl))
+
+    res = m.solve(time_limit=60, gap_tolerance=1e-4, max_nodes=100_000)
+
+    assert res.status == "optimal", (
+        f"ex1226 did not certify optimality (status={res.status}); e1 may have "
+        "dropped from the relaxation again, freezing the dual bound"
+    )
+    assert abs(res.objective - (-17.0)) <= 1e-3, (
+        f"ex1226 objective {res.objective} != known optimum -17.0"
+    )
+    # Convergence lock: with e1 in the relaxation this closes in ~3 nodes. The old
+    # dropped-constraint behavior never closed (11107 nodes → time-limit). A
+    # generous ceiling guards the deficiency without being brittle on node order.
+    assert res.node_count <= 200, (
+        f"ex1226 took {res.node_count} nodes to close — far above the ~3 expected "
+        "with e1 lifted; the constraint-drop regression may have returned"
+    )
+
+
+@pytest.mark.correctness
 def test_nvs16_produces_sound_finite_bound():
     """``nvs16`` (Beale sum-of-squares, integer box [0,200]^2) used to distribute
     into ~1e18-magnitude monomials and drop its objective. The

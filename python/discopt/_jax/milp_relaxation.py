@@ -881,9 +881,21 @@ def _collect_monomial_terms_for_lift(expr: Expression, model: Model) -> set[tupl
                 decomp = _decompose_product(node, model)
                 if decomp is not None:
                     _scalar, indices = decomp
-                    unique = list(dict.fromkeys(indices))
-                    if len(unique) == 1 and len(indices) >= 2:
-                        terms.add((unique[0], len(indices)))
+                    # Register EVERY repeated original-variable factor as a monomial,
+                    # not only a pure single-variable product. A multi-repeated mixed
+                    # product such as ``x*x*y*y`` decomposes to ``[x, x, y, y]``; the
+                    # constraint-linearization collapse needs both ``(x,2)`` and
+                    # ``(y,2)`` to rebuild it as the bilinear ``aux(x**2)*aux(y**2)``.
+                    # Catching only the ``len(unique)==1`` (pure ``x*x``) case missed
+                    # ``(y,2)`` because tree associativity (``((x*x)*y)*y``) never
+                    # presents ``y*y`` as a standalone subproduct — so the collapse
+                    # failed and the whole constraint dropped from the relaxation.
+                    counts: dict[int, int] = {}
+                    for i in indices:
+                        counts[i] = counts.get(i, 0) + 1
+                    for i, c in counts.items():
+                        if c >= 2:
+                            terms.add((i, c))
             elif node.op == "**":
                 flat = _get_flat_index(node.left, model)
                 exp = _constant_value(node.right)
@@ -1395,6 +1407,19 @@ def _decompose_product(
                 if fractional_power_var_map and key in fractional_power_var_map:
                     var_indices.append(fractional_power_var_map[key])
                     return True
+                # Integer power x**n (n >= 2) → monomial aux column. Without this
+                # an integer-power factor inside a product (e.g. ``x**0.5 * y**2``
+                # in ex1226's e1) makes the whole product undecomposable and the
+                # constraint drops from the relaxation, freezing the dual bound.
+                # The monomial aux carries a rigorous power envelope and the
+                # bilinear envelope between the two lifted columns is registered by
+                # ``_collect_lifted_bilinear_products``, so resolving it here only
+                # ever shrinks the relaxed set toward the true one (sound).
+                if monomial_var_map and exp_val == int(exp_val) and int(exp_val) >= 2:
+                    mono_key = (base_flat, int(exp_val))
+                    if mono_key in monomial_var_map:
+                        var_indices.append(monomial_var_map[mono_key])
+                        return True
                 if pinned_value is not None:
                     pv = pinned_value(base_flat)
                     # x^p is real only for x >= 0 (fractional p) or any integer p.

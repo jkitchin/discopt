@@ -73,6 +73,109 @@ def test_mixed_repeated_product_is_lifted_to_bilinear():
     assert not post.general_nl
 
 
+def test_fractional_power_of_product_base_triggers_reform():
+    """``(x*y)**0.5`` — a fractional power over a *composite* (product) base — must
+    be detected by ``has_factorable_work`` so the reform fires and lifts it.
+
+    The lift capability (``_lift_objective_atoms``: ``t == x*y`` then ``d == t**0.5``)
+    is applied to constraint bodies, but the gate scanner only recognized mixed
+    repeated-factor products and sqrt/exp *calls* — a fractional power of a product
+    is neither, so ``has_factorable_work`` returned False, the pass never ran, the
+    term dropped from the relaxation, and the dual bound froze (feasible but never
+    proved; the ex1226 failure mode for a composite-base power). After detection
+    the instance certifies optimality in a handful of nodes.
+    """
+    m = dm.Model("fracpow_prod")
+    x = m.continuous("x", lb=1, ub=3)
+    y = m.continuous("y", lb=1, ub=3)
+    m.minimize(-x - y)
+    m.subject_to((x * y) ** 0.5 <= 2.0)
+
+    assert has_factorable_work(m), "fractional power of a product base must be liftable work"
+
+    out = factorable_reformulate(m)
+    assert out is not m
+    assert _aux_names(out), "expected aux variables from the composite-base power lift"
+
+    res = m.solve(time_limit=30, gap_tolerance=1e-4, max_nodes=20_000)
+    assert res.status == "optimal", (
+        f"(x*y)**0.5 did not certify optimality (status={res.status}); the "
+        "composite-base fractional power likely dropped from the relaxation"
+    )
+    assert res.node_count <= 200, (
+        f"(x*y)**0.5 took {res.node_count} nodes — far above the ~3 expected; the "
+        "dropped-term / frozen-bound regression may have returned"
+    )
+
+
+def test_fractional_power_simple_base_not_lifted_but_call_form_untouched():
+    """The gate detector matches only composite-base **power-form** fractional
+    powers. A single-variable base (``x**0.5``) is relaxed natively via
+    ``fractional_power_var_map``, so it must NOT be promoted to factorable work.
+    The ``sqrt(...)`` **call** form is a FunctionCall reached by the existing
+    composite-univariate path, so it must likewise be left to that path (the
+    fractional-power scanner only walks ``**`` nodes)."""
+    m1 = dm.Model("fracpow_simple")
+    x = m1.continuous("x", lb=1, ub=3)
+    m1.minimize(-x)
+    m1.subject_to(x**0.5 <= 1.5)
+    assert not has_factorable_work(m1), "simple-base fractional power needs no reform"
+
+    # sqrt(affine) call form: handled by the composite-univariate envelope, not the
+    # power-form scanner — must remain undetected so its tight path is preserved.
+    m2 = dm.Model("sqrt_call_affine")
+    a = m2.continuous("a", lb=1, ub=3)
+    b = m2.continuous("b", lb=1, ub=3)
+    m2.minimize(-a - b)
+    m2.subject_to(dm.sqrt(a + b) <= 2.0)
+    assert not has_factorable_work(m2), "sqrt(affine) call form must stay on its own path"
+
+
+def test_fractional_power_of_affine_base_in_power_form_closes():
+    """``(x+y)**0.5`` (affine base, power form, 0<p<1) is concave and *kept* by the
+    relaxation, but its native power-form envelope is too loose to close — it
+    churned 3503 nodes while the equivalent call ``sqrt(x+y)`` closed in ~251.
+    Detecting the composite-base power triggers the lift (``t == x+y`` then
+    ``d == t**0.5``), routing it through the same single-variable fractional-power
+    envelope the call form uses, so it now certifies optimality in a few nodes."""
+    m = dm.Model("fracpow_affine_power")
+    a = m.continuous("a", lb=1, ub=3)
+    b = m.continuous("b", lb=1, ub=3)
+    m.minimize(-a - b)
+    m.subject_to((a + b) ** 0.5 <= 2.0)
+
+    assert has_factorable_work(m), "affine-base power-form fractional power must be liftable"
+
+    res = m.solve(time_limit=30, gap_tolerance=1e-4, max_nodes=20_000)
+    assert res.status == "optimal", (
+        f"(x+y)**0.5 did not certify optimality (status={res.status})"
+    )
+    assert res.node_count <= 200, (
+        f"(x+y)**0.5 took {res.node_count} nodes — the loose power-form envelope "
+        "regression may have returned"
+    )
+
+
+def test_multi_repeated_factor_product_all_monomials_lifted():
+    """``x*x*y*y`` (= ``x**2 * y**2``) must lift BOTH monomials. Left-associated
+    parsing ``((x*x)*y)*y`` never presents ``y*y`` as a standalone subproduct, so
+    the monomial collector previously registered only ``x**2`` and the constraint
+    dropped. Both ``(x,2)`` and ``(y,2)`` must now be lifted so the product becomes
+    the bilinear ``aux(x**2)*aux(y**2)`` the relaxer keeps."""
+    m = dm.Model("multi_repeat")
+    x = m.continuous("x", lb=1, ub=3)
+    y = m.continuous("y", lb=1, ub=3)
+    m.minimize(-x - y)
+    m.subject_to(x * x * y * y <= 16.0)
+
+    res = m.solve(time_limit=30, gap_tolerance=1e-4, max_nodes=20_000)
+    assert res.status == "optimal", (
+        f"x*x*y*y did not certify optimality (status={res.status}); a repeated-factor "
+        "monomial may have been missed, dropping the constraint"
+    )
+    assert res.node_count <= 200, f"x*x*y*y took {res.node_count} nodes — regression"
+
+
 def _inequality_sense(model):
     """The (single) non-equality constraint sense, as stored after discopt's
     internal canonicalisation."""
