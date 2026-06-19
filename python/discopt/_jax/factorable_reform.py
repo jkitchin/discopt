@@ -57,7 +57,7 @@ from discopt.modeling.core import (
     VarType,
 )
 
-from .gdp_reformulate import _bound_expression
+from .gdp_reformulate import _bound_expression, _collect_variables, _is_linear
 from .term_classifier import _get_flat_index, distribute_products
 
 # A denominator counts as sign-definite only when its interval is bounded away
@@ -147,7 +147,7 @@ class _Lifter:
         # infeasible box corner as the global optimum (a false "optimal"). A
         # structural key can only ever *fail* to dedup (harmless — an extra aux),
         # never falsely merge two distinct expressions.
-        self._expr_cache: dict[str, Variable] = {}
+        self._expr_cache: dict[tuple[str, float | None], Variable] = {}
         self.aux_constraints: list[Constraint] = []
         self._counter = 0
 
@@ -171,7 +171,7 @@ class _Lifter:
         self.aux_constraints.append(Constraint(BinaryOp("-", w, pow_expr), "==", 0.0))
         return w
 
-    def expression(self, expr: Expression) -> Variable | None:
+    def expression(self, expr: Expression, *, lb_floor: float | None = None) -> Variable | None:
         """Return an aux variable equal to *expr* (creating it on first use), or
         ``None`` if a finite bound for it cannot be established.
 
@@ -181,13 +181,25 @@ class _Lifter:
         polynomial). The defining equality ``t == base`` is itself run through the
         monomial lift so any mixed products inside *base* become bilinear aux too.
         Deduplicated by structural identity of the (already-distributed) node.
+
+        *lb_floor*, when given, raises the aux lower bound to ``max(lo, lb_floor)``.
+        Used by the transcendental-argument lift: ``sqrt(g)`` is real only where
+        ``g >= 0``, so flooring the aux for ``t == g`` at 0 is feasibility-
+        preserving and is required for the univariate sqrt envelope to apply (it
+        abstains on an argument whose lower bound is negative). The floor is part
+        of the cache key so a floored aux is never reused where an unfloored one
+        is expected (which would unsoundly tighten the other use site).
         """
-        key = repr(expr)
+        key = (repr(expr), lb_floor)
         cached = self._expr_cache.get(key)
         if cached is not None:
             return cached
         lo, hi = _bound_expression(expr, self.model)
+        if lb_floor is not None:
+            lo = max(lo, lb_floor)
         if not (np.isfinite(lo) and np.isfinite(hi)) or max(abs(lo), abs(hi)) >= _INF_THRESH:
+            return None
+        if lo > hi:
             return None
         name = f"_fr_aux_{self._counter}"
         self._counter += 1
@@ -239,6 +251,52 @@ def _rebuild_product(coeff: float, atoms: list[Expression]) -> Expression:
     return expr if expr is not None else Constant(coeff)
 
 
+# Univariate transcendentals whose argument may be lifted into an aux variable.
+# ``sqrt``/``exp`` are domain-safe to relax over a finite box once their argument
+# is a single variable (sqrt needs ``arg >= 0``, supplied by the lb floor below;
+# exp is defined on all reals).  ``log``-family is excluded: it needs a strictly
+# positive argument lower bound that interval arithmetic does not always certify.
+_LIFTABLE_CALL_OUTER = {"sqrt", "exp"}
+
+
+def _should_lift_call_arg(call: Expression, model: Model) -> Expression | None:
+    """If *call* is a univariate transcendental over a non-affine, multivariate
+    argument whose whole-node curvature is UNKNOWN, return its argument (the
+    sub-expression to lift); otherwise ``None``.
+
+    Lifting ``outer(g(x))`` -> ``outer(t)`` with ``t == g(x)`` decomposes a node
+    the relaxation drops (a transcendental over a factorable polynomial with
+    cross terms — e.g. ``sqrt(x4**2 + 2*x4*x5*x7 + x5**2)``) into a polynomial
+    equality (relaxed by the existing McCormick/RLT machinery) plus a univariate
+    envelope (the existing secant/tangent relaxation of ``outer``).
+
+    Gated so it never *downgrades* a node the pipeline already relaxes tightly:
+
+    * Affine argument -> skip: ``outer`` of an affine expression is already
+      handled directly by the univariate envelope; an aux buys nothing.
+    * Single-variable argument -> skip: ``sqrt(x**2 + c)`` is reached by the
+      composite-univariate path; the lift targets genuinely multivariate args.
+    * Proven CONVEX/CONCAVE node -> skip: e.g. an affine 2-norm ``sqrt(xᵀQx)``
+      recognised by the convexity detector is relaxed exactly by its own tight
+      envelope; lifting would replace that with the looser concave-sqrt secant.
+    """
+    if not isinstance(call, FunctionCall):
+        return None
+    if call.func_name not in _LIFTABLE_CALL_OUTER or len(call.args) != 1:
+        return None
+    arg = call.args[0]
+    if _is_linear(arg):
+        return None
+    if len(_collect_variables(arg)) < 2:
+        return None
+    from .convexity.lattice import Curvature
+    from .convexity.rules import classify_expr
+
+    if classify_expr(call, model) != Curvature.UNKNOWN:
+        return None
+    return arg
+
+
 def _lift_expr(expr: Expression, model: Model, lifter: _Lifter) -> Expression:
     """Return *expr* with every mixed repeated-factor polynomial product lifted
     to bilinear form via monomial aux variables.  Identity-preserving: returns
@@ -276,9 +334,27 @@ def _lift_expr(expr: Expression, model: Model, lifter: _Lifter) -> Expression:
         if operand is expr.operand:
             return expr
         return UnaryOp(expr.op, operand)
-    # Do not descend into FunctionCall args: lifting inside a transcendental
-    # does not help the relaxation (the call is general_nl regardless) and must
-    # not disturb composite/univariate handling of e.g. sqrt(x**2 + c).
+    if isinstance(expr, FunctionCall):
+        # Auxiliary-variable factorization of ``outer(g(x))`` (issue #130 follow-up):
+        # when ``g`` is a multivariate non-affine argument the univariate envelope
+        # cannot reach (cross terms), lift ``t == g(x)`` and rewrite the node as
+        # ``outer(t)``.  The defining equality is itself run through the lift inside
+        # ``_Lifter.expression`` so any mixed products in ``g`` become bilinear aux.
+        # For sqrt the aux is floored at 0 (``sqrt`` is real only where ``g >= 0``),
+        # which is feasibility-preserving and lets the univariate sqrt envelope
+        # apply.  Gated by ``_should_lift_call_arg`` so a node already proven convex
+        # (an affine 2-norm) keeps its tight envelope rather than being downgraded.
+        arg = _should_lift_call_arg(expr, model)
+        if arg is not None:
+            lb_floor = 0.0 if expr.func_name == "sqrt" else None
+            t = lifter.expression(distribute_products(arg), lb_floor=lb_floor)
+            if t is not None:
+                return FunctionCall(expr.func_name, t)
+        # Otherwise do not descend into FunctionCall args: lifting inside a
+        # transcendental does not help the relaxation (the call is general_nl
+        # regardless) and must not disturb composite/univariate handling of e.g.
+        # sqrt(x**2 + c).
+        return expr
     return expr
 
 
@@ -483,7 +559,9 @@ def has_factorable_work(model: Model) -> bool:
         if _find_clearable_denominator(expr, model) is not None:
             return True
         dist = distribute_products(expr)
-        return _scan_for_mixed_product(dist, model)
+        if _scan_for_mixed_product(dist, model):
+            return True
+        return _scan_for_liftable_call(dist, model)
 
     if model._objective is not None and scan(model._objective.expression):
         return True
@@ -522,6 +600,22 @@ def _scan_for_mixed_product(expr: Expression, model: Model) -> bool:
         )
     if isinstance(expr, UnaryOp):
         return _scan_for_mixed_product(expr.operand, model)
+    return False
+
+
+def _scan_for_liftable_call(expr: Expression, model: Model) -> bool:
+    """True if *expr* contains a transcendental node whose argument the
+    auxiliary-variable factorization would lift (see ``_should_lift_call_arg``)."""
+    if isinstance(expr, FunctionCall):
+        if _should_lift_call_arg(expr, model) is not None:
+            return True
+        return any(_scan_for_liftable_call(a, model) for a in expr.args)
+    if isinstance(expr, BinaryOp):
+        return _scan_for_liftable_call(expr.left, model) or _scan_for_liftable_call(
+            expr.right, model
+        )
+    if isinstance(expr, UnaryOp):
+        return _scan_for_liftable_call(expr.operand, model)
     return False
 
 

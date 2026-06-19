@@ -21,9 +21,14 @@ from pathlib import Path
 
 import discopt.modeling as dm
 import pytest
-from discopt._jax.factorable_reform import canonicalize_entropy, factorable_reformulate
+from discopt._jax.factorable_reform import (
+    _should_lift_call_arg,
+    canonicalize_entropy,
+    factorable_reformulate,
+    has_factorable_work,
+)
 from discopt._jax.term_classifier import classify_nonlinear_terms
-from discopt.modeling.core import FunctionCall
+from discopt.modeling.core import FunctionCall, Variable
 
 _DATA = Path(__file__).parent / "data" / "minlplib"
 
@@ -135,6 +140,119 @@ def test_transcendental_product_not_lifted():
     m.subject_to(x + y >= 3)
     out = factorable_reformulate(m)
     assert out is m
+
+
+# ---------------------------------------------------------------------------
+# Auxiliary-variable factorization of ``outer(g(x))`` (transcendental over a
+# multivariate factorable argument) — the general lift for nodes such as
+# ``sqrt(x4**2 + 2*x4*x5*x7 + x5**2)`` that the univariate envelope cannot reach.
+# ---------------------------------------------------------------------------
+
+
+def _outer_sqrt_node(model):
+    """Return the (single) sqrt FunctionCall in *model*'s objective, or None."""
+    found: list[FunctionCall] = []
+
+    def walk(e):
+        if isinstance(e, FunctionCall):
+            found.append(e)
+        for attr in ("left", "right", "operand"):
+            if hasattr(e, attr):
+                walk(getattr(e, attr))
+        if hasattr(e, "args"):
+            for a in e.args:
+                walk(a)
+
+    walk(model._objective.expression)
+    return found[0] if found else None
+
+
+def test_multivar_sqrt_arg_is_lifted():
+    """``sqrt(x*x + 2*x*y*z + y*y)`` — a non-affine, multivariate argument the
+    univariate envelope cannot reach — is lifted to ``sqrt(t)`` with ``t == g``.
+    The gate fires and the rewritten node is a sqrt over a single aux Variable."""
+    m = dm.Model("multivar_sqrt")
+    x = m.continuous("x", lb=0.5, ub=3.0)
+    y = m.continuous("y", lb=0.5, ub=3.0)
+    z = m.continuous("z", lb=0.5, ub=3.0)
+    m.minimize(dm.sqrt(x * x + 2.0 * x * y * z + y * y))
+
+    node = _outer_sqrt_node(m)
+    assert _should_lift_call_arg(node, m) is not None, "gate should select the multivar arg"
+    assert has_factorable_work(m)
+
+    out = factorable_reformulate(m)
+    assert out is not m
+    assert len(_aux_names(out)) >= 1, "expected an aux variable for t == g(x)"
+    lifted = _outer_sqrt_node(out)
+    assert lifted is not None and lifted.func_name == "sqrt"
+    assert len(lifted.args) == 1 and isinstance(lifted.args[0], Variable), (
+        "sqrt argument should now be a single aux variable"
+    )
+
+
+def test_affine_norm_sqrt_not_lifted():
+    """An affine 2-norm ``sqrt(0.25*x**2 + (0.5*y+0.5*z)**2)`` is proven convex by
+    the detector and relaxed exactly by its own envelope — the lift must NOT
+    downgrade it to the looser concave-sqrt form."""
+    m = dm.Model("affine_norm")
+    x = m.continuous("x", lb=-2.0, ub=2.0)
+    y = m.continuous("y", lb=-2.0, ub=2.0)
+    z = m.continuous("z", lb=-2.0, ub=2.0)
+    m.minimize(dm.sqrt(0.25 * x**2 + (0.5 * y + 0.5 * z) ** 2))
+
+    node = _outer_sqrt_node(m)
+    assert _should_lift_call_arg(node, m) is None, "convex affine norm must not be lifted"
+
+
+def test_univariate_sqrt_arg_not_lifted():
+    """``sqrt(x*x + 3)`` has a single-variable argument reached by the existing
+    composite-univariate path; the multivariate lift must abstain."""
+    m = dm.Model("univar_sqrt")
+    x = m.continuous("x", lb=0.5, ub=3.0)
+    m.minimize(dm.sqrt(x * x + 3.0))
+
+    node = _outer_sqrt_node(m)
+    assert _should_lift_call_arg(node, m) is None, "single-variable arg must not be lifted"
+
+
+def test_exp_multivar_arg_is_lifted():
+    """The lift generalizes beyond sqrt: ``exp(x*y)`` (a transcendental over a
+    bilinear, UNKNOWN-curvature argument) is lifted to ``exp(t)`` with ``t == x*y``."""
+    m = dm.Model("exp_bilinear")
+    x = m.continuous("x", lb=0.5, ub=2.0)
+    y = m.continuous("y", lb=0.5, ub=2.0)
+    m.minimize(dm.exp(x * y))
+
+    node = _outer_sqrt_node(m)
+    assert node is not None and node.func_name == "exp"
+    assert _should_lift_call_arg(node, m) is not None
+    out = factorable_reformulate(m)
+    assert out is not m
+    lifted = _outer_sqrt_node(out)
+    assert lifted.func_name == "exp"
+    assert len(lifted.args) == 1 and isinstance(lifted.args[0], Variable)
+
+
+@pytest.mark.correctness
+def test_lifted_multivar_sqrt_is_sound_and_optimal():
+    """End-to-end: a well-conditioned multivariate cross-term sqrt objective
+    certifies to its true optimum with a sound dual bound after the lift.
+
+    ``min sqrt(x*x + 2*x*y*z + y*y)`` over ``x,y,z in [1,3]`` is minimized at the
+    box corner ``x=y=z=1``: ``sqrt(1 + 2 + 1) = 2``."""
+    m = dm.Model("sound_multivar_sqrt")
+    m.continuous("x", lb=1.0, ub=3.0)
+    m.continuous("y", lb=1.0, ub=3.0)
+    m.continuous("z", lb=1.0, ub=3.0)
+    xv, yv, zv = (v for v in m._variables)
+    m.minimize(dm.sqrt(xv * xv + 2.0 * xv * yv * zv + yv * yv))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r = m.solve(time_limit=60, gap_tolerance=1e-4)
+    assert r.objective == pytest.approx(2.0, abs=1e-3)
+    if r.bound is not None:
+        assert r.bound <= r.objective + 1e-4, "dual bound must not exceed the optimum"
 
 
 @pytest.mark.correctness
