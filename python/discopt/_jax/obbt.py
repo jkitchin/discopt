@@ -38,6 +38,81 @@ from discopt.solvers.lp_backend import (
 # still tightened by the exact (Rust simplex / HiGHS) oracle.
 _OBBT_COND_LIMIT = 1e10
 
+# OBBT tightens to the LP vertex objective, which is accurate on a well-conditioned
+# basis but can drift a few ``ulp * cond`` *above* the true optimum when the
+# McCormick coefficient spread makes the basis ill-conditioned (the nvs22
+# false-certificate: a 1.000996 vertex for a true min of 1.0, rounded inward to
+# prune the optimum). The Neumaier-Shcherbina safe dual bound is a rigorous lower
+# bound on that LP min; when the vertex sits this far *above* it (relative), the
+# vertex is untrustworthy and OBBT falls back to the safe bound instead of
+# over-tightening. The threshold is far above honest vertex noise (~1e-9 on
+# well-conditioned LPs) so trustworthy tightenings are preserved bit-for-bit —
+# avoiding spurious box perturbations on knife-edge instances (st_e11) — while the
+# gross ill-conditioned drift that prunes a feasible optimum is caught.
+_OBBT_NS_GUARD = 1e-6
+
+
+def _ns_safe_lp_lower_bound(c, dual_values, A_ub, b_ub, lo, hi):
+    """Neumaier-Shcherbina rigorous lower bound on ``min c^T x`` over the box LP.
+
+    The LP is ``min c^T x  s.t.  A_ub x <= b_ub,  lo <= x <= hi``. For *any*
+    ``y >= 0`` (multipliers on the ``<=`` rows), weak duality gives
+
+        g(y) = -b^T y + sum_j  min_{x_j in [lo_j, hi_j]} (c + A^T y)_j x_j
+
+    and ``g(y) <= true min c^T x``. We take ``y = max(-row_dual, 0)`` from the
+    LP's reported duals: HiGHS returns ``row_dual <= 0`` on an active ``<=`` row,
+    so ``-row_dual`` is the non-negative multiplier and ``g(y)`` reproduces the
+    LP optimum *exactly* on a well-conditioned solve. The crucial property is
+    that ``g(y) <= true min`` holds for the clamped ``y`` regardless of how the
+    duals were obtained, so when the simplex basis is ill-conditioned (a wide
+    McCormick coefficient spread) and the reported vertex objective drifts a few
+    ``ulp * cond`` *above* the true minimum, ``g(y)`` stays a sound under-estimate
+    rather than an over-tightening that could prune the global optimum (the
+    nvs22 false-certificate). Tightening OBBT bounds to ``g(y)`` instead of the
+    raw vertex objective is therefore sound at any conditioning, and loses no
+    tightness where the LP is well-behaved.
+
+    A magnitude-scaled margin is subtracted to dominate the floating-point error
+    of the dual evaluation itself (done in plain float64, not directed-rounding
+    interval arithmetic). Returns ``None`` when no usable lower bound exists.
+    """
+    import scipy.sparse as sp
+
+    if dual_values is None:
+        return None
+    y = np.array(dual_values, dtype=np.float64)  # copy: must not mutate caller's duals
+    if y.size == 0:
+        return None
+    np.clip(-y, 0.0, None, out=y)  # y := max(-row_dual, 0) >= 0
+    c = np.asarray(c, dtype=np.float64)
+    if A_ub is None or b_ub is None:
+        rc = c.copy()
+        const = 0.0
+    else:
+        b_arr = np.asarray(b_ub, dtype=np.float64)
+        if y.shape[0] != b_arr.shape[0]:
+            return None
+        At_y = (A_ub.T @ y) if sp.issparse(A_ub) else (np.asarray(A_ub).T @ y)
+        rc = c + np.asarray(At_y).ravel()
+        const = -float(b_arr @ y)
+    lo = np.asarray(lo, dtype=np.float64)
+    hi = np.asarray(hi, dtype=np.float64)
+    # min_{x_j in [lo_j,hi_j]} rc_j x_j  = lo_j if rc_j>0, hi_j if rc_j<0, else 0
+    # (the rc_j==0 case contributes 0 even when that bound is infinite).
+    contrib = np.zeros_like(rc)
+    pos = rc > 0.0
+    neg = rc < 0.0
+    contrib[pos] = rc[pos] * lo[pos]
+    contrib[neg] = rc[neg] * hi[neg]
+    g = const + float(contrib.sum())
+    if not np.isfinite(g):
+        return None
+    # Margin >> the float64 rounding error of the two dot products above
+    # (~n * eps * magnitude); keeps g a rigorous under-estimate.
+    margin = 1e-10 * (1.0 + abs(const) + float(np.abs(contrib).sum()))
+    return g - margin
+
 
 def solve_lp(**kwargs):
     """Module-level default LP solve (HiGHS-first, POUNCE fallback).
@@ -625,7 +700,15 @@ def run_obbt_on_relaxation(
     # is accepted for signature compatibility but never honoured here — when no
     # exact (Rust simplex / HiGHS) oracle is available we return the box
     # untightened rather than risk an unsound shrink.
-    _lp = get_exact_lp_solver()
+    # Prefer the dual-exposing (HiGHS) oracle: OBBT tightens to a Neumaier-
+    # Shcherbina *safe* dual bound (``_ns_safe_lp_lower_bound``) rather than the
+    # raw vertex objective, which is sound at any conditioning and cannot prune a
+    # feasible optimum (the nvs22 false-certificate). Without a dual oracle we
+    # fall back to the exact vertex value (the conditioning guard below keeps that
+    # path from over-tightening on the worst LPs).
+    _dual_lp = get_exact_dual_lp_solver()
+    _lp = _dual_lp or get_exact_lp_solver()
+    _use_ns = _dual_lp is not None
     if _lp is None:
         return ObbtResult(
             tightened_lb=np.array([b[0] for b in relaxation._bounds[:n_orig]], dtype=np.float64),
@@ -657,7 +740,20 @@ def run_obbt_on_relaxation(
 
     _bound_vals = np.array([v for pair in bounds for v in pair], dtype=np.float64)
     _cond = max(_max_abs(A_ub), _max_abs(b_ub), _max_abs(_bound_vals))
-    if _cond > _OBBT_COND_LIMIT:
+    # Conditioning guard. The raw vertex objective from an ill-conditioned LP can
+    # drift *above* the true minimum and over-tighten (the nvs22 false-certificate),
+    # so without a rigorous safe-bound oracle we abstain entirely. WITH the NS-safe
+    # dual path (``_use_ns``) every tightening below is clamped to the rigorous
+    # Neumaier-Shcherbina bound ``g`` -- valid for any dual ``y >= 0`` by weak
+    # duality, hence sound at ANY conditioning. So rather than abstain we only
+    # *require* that rigorous bound (``require_ns``): a variable whose safe bound is
+    # unavailable is left untightened instead of being trusted to its vertex. This
+    # lets OBBT engage on ill-conditioned factorable relaxations the bare guard
+    # disabled -- e.g. nvs05, whose 1e15-coefficient term drives ``_cond ~ 2e13``
+    # yet whose boxes (x5,x6 spanning [~0, 1.36e4]) only shrink once OBBT runs --
+    # while never tightening from a non-rigorous value.
+    require_ns = _cond > _OBBT_COND_LIMIT
+    if require_ns and not _use_ns:
         return ObbtResult(
             tightened_lb=np.array([b[0] for b in bounds[:n_orig]], dtype=np.float64),
             tightened_ub=np.array([b[1] for b in bounds[:n_orig]], dtype=np.float64),
@@ -720,7 +816,20 @@ def run_obbt_on_relaxation(
         if result.status == SolveStatus.OPTIMAL and result.objective is not None:
             warm_basis = result.basis
             new_lb = float(result.objective)
-            if new_lb > lb_arr[var_idx] + eps:
+            if _use_ns:
+                # Distrust the vertex only when the rigorous safe bound sits well
+                # below it (ill-conditioned basis); otherwise keep it bit-for-bit.
+                g = _ns_safe_lp_lower_bound(
+                    c, getattr(result, "dual_values", None), A_ub, b_ub, lb_arr, ub_arr
+                )
+                if g is None:
+                    if require_ns:
+                        # Ill-conditioned LP and no rigorous safe bound available:
+                        # the raw vertex is untrustworthy here, so do not tighten.
+                        new_lb = None
+                elif new_lb > g + _OBBT_NS_GUARD * (1.0 + abs(new_lb)):
+                    new_lb = g
+            if new_lb is not None and new_lb > lb_arr[var_idx] + eps:
                 # Don't cross the upper bound.
                 lb_arr[var_idx] = min(new_lb, ub_arr[var_idx])
                 n_tightened += 1
@@ -742,10 +851,24 @@ def run_obbt_on_relaxation(
         total_lp_time += result.wall_time
         if result.status == SolveStatus.OPTIMAL and result.objective is not None:
             warm_basis = result.basis
-            new_ub = -float(result.objective)
-            if new_ub < ub_arr[var_idx] - eps:
-                ub_arr[var_idx] = max(new_ub, lb_arr[var_idx])
-                n_tightened += 1
+            lp_min = float(result.objective)  # = min(-x_i) = -max(x_i)
+            if _use_ns:
+                # Same guard: ``g`` bounds ``min(-x_i)`` from below, so when the
+                # vertex sits well above it the basis is ill-conditioned and the
+                # safe bound ``-g`` is the sound (looser) upper bound on ``x_i``.
+                g = _ns_safe_lp_lower_bound(
+                    c, getattr(result, "dual_values", None), A_ub, b_ub, lb_arr, ub_arr
+                )
+                if g is None:
+                    if require_ns:
+                        lp_min = None
+                elif lp_min > g + _OBBT_NS_GUARD * (1.0 + abs(lp_min)):
+                    lp_min = g
+            if lp_min is not None:
+                new_ub = -lp_min
+                if new_ub < ub_arr[var_idx] - eps:
+                    ub_arr[var_idx] = max(new_ub, lb_arr[var_idx])
+                    n_tightened += 1
 
     return ObbtResult(
         tightened_lb=lb_arr[:n_orig].copy(),
@@ -892,6 +1015,436 @@ class RootObbtResult:
     infeasible: bool = False
 
 
+def _scalar_flat_index(expr, model) -> Optional[int]:
+    """Flat column index if *expr* is a single scalar variable reference.
+
+    Returns the flat index (matching :func:`_get_var_bounds` ordering) for a
+    scalar ``Variable`` or a scalar ``IndexExpression`` over a variable, else
+    ``None``.
+    """
+    from discopt.modeling.core import IndexExpression, Variable
+
+    def _offset(var) -> int:
+        off = 0
+        for v in model._variables[: var._index]:
+            off += v.size
+        return off
+
+    if isinstance(expr, Variable) and expr.size == 1:
+        return _offset(expr)
+    if isinstance(expr, IndexExpression) and isinstance(expr.base, Variable):
+        idx = expr.index
+        if isinstance(idx, int):
+            return _offset(expr.base) + idx
+        if isinstance(idx, tuple) and len(idx) == 1 and isinstance(idx[0], int):
+            return _offset(expr.base) + idx[0]
+    return None
+
+
+def _flat_indices(expr, model) -> set:
+    """Conservative set of flat variable indices referenced anywhere in *expr*.
+
+    A scalar reference contributes its single index; a whole multi-element
+    variable or an unresolved index contributes its entire flat range.  Used to
+    verify the isolated variable appears in no other additive term — erring
+    toward *over*-inclusion (it may skip a valid isolation, never assert a false
+    one).
+    """
+    from discopt.modeling.core import (
+        BinaryOp,
+        FunctionCall,
+        IndexExpression,
+        SumExpression,
+        SumOverExpression,
+        UnaryOp,
+        Variable,
+    )
+
+    def _offset(var) -> int:
+        off = 0
+        for v in model._variables[: var._index]:
+            off += v.size
+        return off
+
+    out: set = set()
+
+    def walk(e) -> None:
+        scalar = _scalar_flat_index(e, model)
+        if scalar is not None:
+            out.add(scalar)
+            return
+        if isinstance(e, Variable):
+            base = _offset(e)
+            out.update(range(base, base + e.size))
+            return
+        if isinstance(e, IndexExpression) and isinstance(e.base, Variable):
+            base = _offset(e.base)
+            out.update(range(base, base + e.base.size))
+            return
+        if isinstance(e, BinaryOp):
+            walk(e.left)
+            walk(e.right)
+            return
+        if isinstance(e, UnaryOp):
+            walk(e.operand)
+            return
+        if isinstance(e, FunctionCall):
+            for a in e.args:
+                walk(a)
+            return
+        if isinstance(e, SumExpression):
+            walk(e.operand)
+            return
+        if isinstance(e, SumOverExpression):
+            for t in e.terms:
+                walk(t)
+            return
+
+    walk(expr)
+    return out
+
+
+def _additive_terms(expr, sign: float = 1.0):
+    """Flatten the top-level additive structure into ``(coeff, subexpr)`` pairs.
+
+    Descends through ``+``, ``-`` and unary ``neg`` only; a ``coeff * leaf`` or
+    ``leaf * coeff`` product contributes its constant scale.  Anything else is
+    returned as a single ``(sign, expr)`` leaf.  Used to spot a constraint of
+    the form ``c*v + g(other vars) == rhs`` so ``v`` can be isolated.
+    """
+    from discopt.modeling.core import BinaryOp, Constant, UnaryOp
+
+    if isinstance(expr, BinaryOp):
+        if expr.op == "+":
+            return _additive_terms(expr.left, sign) + _additive_terms(expr.right, sign)
+        if expr.op == "-":
+            return _additive_terms(expr.left, sign) + _additive_terms(expr.right, -sign)
+        if expr.op == "*":
+            if isinstance(expr.left, Constant) and expr.left.value.ndim == 0:
+                return _additive_terms(expr.right, sign * float(expr.left.value))
+            if isinstance(expr.right, Constant) and expr.right.value.ndim == 0:
+                return _additive_terms(expr.left, sign * float(expr.right.value))
+    if isinstance(expr, UnaryOp) and expr.op == "neg":
+        return _additive_terms(expr.operand, -sign)
+    return [(sign, expr)]
+
+
+def propagate_equality_defined_bounds(
+    model: Model,
+    lb: np.ndarray,
+    ub: np.ndarray,
+    *,
+    max_passes: int = 3,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Finitize equality-defined variables by forward interval propagation.
+
+    A ``.nl`` model commonly defines an intermediate quantity with an equality
+    ``v == g(x)`` (encoded as ``c*v + (-g) == rhs``), where ``g`` is a division,
+    log, exp or other expression that interval FBBT in the Rust core does not
+    propagate through — so ``v`` keeps its declared ``±inf`` bound even though
+    ``g`` has a finite range once the variables it depends on are bounded.  This
+    pass closes that gap: for every equality constraint that is *linear in a
+    single open variable* ``v`` (``c*v + g == rhs`` with ``v`` appearing nowhere
+    else in the row), it bounds ``v == (rhs - g)/c`` by evaluating ``g``'s
+    interval over the current box and tightens ``v``.
+
+    This is sound: the equality is exact, so the propagated interval is the
+    variable's true reachable range under that constraint — the pass can only
+    shrink the box.  It runs to a fixpoint (``max_passes``) because finitizing
+    one variable can unlock another (e.g. ``v == g(w)`` once ``w`` is finite).
+
+    Pairs with :func:`bootstrap_finite_bounds`: the bootstrap finitizes the
+    variables reachable from *linear* constraints, which then become finite
+    inputs to the ``g`` expressions this pass propagates through.
+
+    Returns ``(lb, ub, n_finitized)``.  Any failure leaves the box unchanged.
+    """
+    lb = np.asarray(lb, dtype=np.float64).copy()
+    ub = np.asarray(ub, dtype=np.float64).copy()
+    n_vars = len(lb)
+
+    if np.all(np.isfinite(lb)) and np.all(np.isfinite(ub)):
+        return lb, ub, 0
+
+    try:
+        from discopt._jax.gdp_reformulate import _bound_expression
+        from discopt.modeling.core import Constraint, VarType
+
+        # _bound_expression reads bounds off the model's Variable nodes, so drive
+        # it with the current box by temporarily writing (lb, ub) onto the model
+        # and restoring the originals afterwards.
+        saved = [(v.lb, v.ub) for v in model._variables]
+        is_int = np.zeros(n_vars, dtype=bool)
+
+        def _apply_box() -> None:
+            off = 0
+            for v in model._variables:
+                sz = v.size
+                v.lb = lb[off : off + sz].reshape(v.lb.shape)
+                v.ub = ub[off : off + sz].reshape(v.ub.shape)
+                off += sz
+
+        off = 0
+        for v in model._variables:
+            flag = v.var_type in (VarType.BINARY, VarType.INTEGER)
+            for _ in range(v.size):
+                if off < n_vars:
+                    is_int[off] = flag
+                off += 1
+
+        eq_constraints = [
+            c for c in model._constraints if isinstance(c, Constraint) and c.sense == "=="
+        ]
+
+        n_finitized = 0
+        try:
+            for _ in range(max(1, max_passes)):
+                _apply_box()
+                changed = False
+                for c in eq_constraints:
+                    terms = _additive_terms(c.body)
+                    rhs = float(c.rhs) if np.ndim(c.rhs) == 0 else None
+                    if rhs is None:
+                        continue
+                    for pos, (coeff, sub) in enumerate(terms):
+                        if abs(coeff) < 1e-30:
+                            continue
+                        vi = _scalar_flat_index(sub, model)
+                        if vi is None or vi >= n_vars:
+                            continue
+                        if np.isfinite(lb[vi]) and np.isfinite(ub[vi]):
+                            continue
+                        # v must not appear in any other term of the row.
+                        others = [t for k, t in enumerate(terms) if k != pos]
+                        if any(vi in _flat_indices(t[1], model) for t in others):
+                            continue
+                        # v == (rhs - sum(others)) / coeff
+                        rest_lo, rest_hi = 0.0, 0.0
+                        ok = True
+                        for ocoeff, oexpr in others:
+                            elo, ehi = _bound_expression(oexpr, model)
+                            if ocoeff >= 0:
+                                rest_lo += ocoeff * elo
+                                rest_hi += ocoeff * ehi
+                            else:
+                                rest_lo += ocoeff * ehi
+                                rest_hi += ocoeff * elo
+                            if not (np.isfinite(rest_lo) and np.isfinite(rest_hi)):
+                                ok = False
+                                break
+                        if not ok:
+                            continue
+                        num_lo = rhs - rest_hi
+                        num_hi = rhs - rest_lo
+                        if coeff > 0:
+                            v_lo, v_hi = num_lo / coeff, num_hi / coeff
+                        else:
+                            v_lo, v_hi = num_hi / coeff, num_lo / coeff
+                        if not (np.isfinite(v_lo) and np.isfinite(v_hi)):
+                            continue
+                        margin = 1e-6 * (1.0 + max(abs(v_lo), abs(v_hi)))
+                        v_lo -= margin
+                        v_hi += margin
+                        if is_int[vi]:
+                            v_lo = np.ceil(v_lo - 1e-7)
+                            v_hi = np.floor(v_hi + 1e-7)
+                        new_lb = max(lb[vi], v_lo) if np.isfinite(lb[vi]) else v_lo
+                        new_ub = min(ub[vi], v_hi) if np.isfinite(ub[vi]) else v_hi
+                        if (
+                            new_lb > lb[vi] + 1e-12
+                            or new_ub < ub[vi] - 1e-12
+                            or (not np.isfinite(lb[vi]) or not np.isfinite(ub[vi]))
+                        ):
+                            if (np.isfinite(new_lb) != np.isfinite(lb[vi])) or (
+                                np.isfinite(new_ub) != np.isfinite(ub[vi])
+                            ):
+                                changed = True
+                            lb[vi] = new_lb
+                            ub[vi] = new_ub
+                            n_finitized += 1
+                if not changed:
+                    break
+        finally:
+            for v, (olb, oub) in zip(model._variables, saved):
+                v.lb = olb
+                v.ub = oub
+
+        return lb, ub, n_finitized
+    except Exception:
+        return lb, ub, 0
+
+
+def bootstrap_finite_bounds(
+    model: Model,
+    lb: np.ndarray,
+    ub: np.ndarray,
+    *,
+    deadline: Optional[float] = None,
+    time_limit_per_lp: float = 0.2,
+    incumbent_cutoff: Optional[float] = None,
+    eps: float = 1e-7,
+) -> tuple[np.ndarray, np.ndarray, int, float]:
+    """Finitize open variable bounds via LP over the model's linear subsystem.
+
+    Both OBBT and the rounding/diving primal heuristics need a finite box:
+    :func:`obbt_tighten_root` bails the moment any bound is ``±inf`` (it cannot
+    build McCormick envelopes on an open variable), and a heuristic cannot
+    sample an unbounded box.  A model whose only finite information about a
+    variable flows through *nonlinear* constraints (which interval FBBT cannot
+    propagate tightly) therefore stalls — OBBT could derive a finite bound, but
+    it refuses to start because the box is not already finite.
+
+    This bootstrap breaks that chicken-and-egg by deriving finite bounds for
+    the open variables directly from the model's *linear* constraints.  The
+    linear feasible region is a polyhedral OUTER approximation of the MINLP
+    feasible set, so ``max x_i`` / ``min x_i`` over it is a rigorously valid
+    bound on the true problem — the pass can only ever shrink the admissible
+    region, never cut off a feasible point.
+
+    For each variable with ``ub == +inf`` we maximize ``x_i``; for ``lb ==
+    -inf`` we minimize ``x_i``.  A bounded LP optimum (plus a small outward
+    safety margin that keeps the bound rigorous under float / LP-conditioning
+    error) becomes the new finite bound; an unbounded direction leaves the
+    bound open.  Integer bounds are rounded inward.
+
+    Returns ``(lb, ub, n_finitized, total_lp_time)``.  Any internal failure
+    returns the input box unchanged — it can never make the solve unsound.
+    """
+    lb = np.asarray(lb, dtype=np.float64).copy()
+    ub = np.asarray(ub, dtype=np.float64).copy()
+    n_vars = len(lb)
+
+    open_lb = ~np.isfinite(lb)
+    open_ub = ~np.isfinite(ub)
+    if not (open_lb.any() or open_ub.any()):
+        # Common case: box already finite, nothing to bootstrap.
+        return lb, ub, 0, 0.0
+
+    # OBBT-grade soundness requires an EXACT LP oracle: the finitized bound is
+    # the LP optimum, so an inexact optimum could cut off a feasible point
+    # (issue #145).  Without one this is a sound no-op.
+    _lp = get_exact_lp_solver()
+    if _lp is None:
+        return lb, ub, 0, 0.0
+
+    try:
+        from discopt.modeling.core import VarType
+
+        A_ub, b_ub, A_eq, b_eq, _ = _extract_linear_constraints(model)
+
+        # Optimality-based finitization: fold the incumbent cutoff into the
+        # polytope so an open variable that can only grow by worsening the
+        # objective gets a finite bound from the cutoff alone.
+        if incumbent_cutoff is not None and model._objective is not None:
+            from discopt.modeling.core import ObjectiveSense
+
+            obj_coeffs = _extract_linear_objective(model, n_vars)
+            if obj_coeffs is not None and np.any(obj_coeffs):
+                if model._objective.sense == ObjectiveSense.MAXIMIZE:
+                    cutoff_row = -obj_coeffs.reshape(1, -1)
+                    cutoff_rhs = np.array([-incumbent_cutoff])
+                else:
+                    cutoff_row = obj_coeffs.reshape(1, -1)
+                    cutoff_rhs = np.array([incumbent_cutoff])
+                if A_ub is not None and b_ub is not None:
+                    A_ub = np.vstack([A_ub, cutoff_row])
+                    b_ub = np.concatenate([b_ub, cutoff_rhs])
+                else:
+                    A_ub = cutoff_row
+                    b_ub = cutoff_rhs
+
+        if A_ub is None and A_eq is None:
+            # No linear structure to bound against.
+            return lb, ub, 0, 0.0
+
+        is_int = np.zeros(n_vars, dtype=bool)
+        flat_idx = 0
+        for v in model._variables:
+            flag = v.var_type in (VarType.BINARY, VarType.INTEGER)
+            for _ in range(v.size):
+                if flat_idx < n_vars:
+                    is_int[flat_idx] = flag
+                flat_idx += 1
+
+        bounds_list = [(float(lb[i]), float(ub[i])) for i in range(n_vars)]
+        n_finitized = 0
+        total_lp_time = 0.0
+        warm_basis = None
+
+        # Only variables that are open in at least one direction are targets.
+        targets = np.where(open_lb | open_ub)[0]
+        for var_idx in targets:
+            if deadline is not None and time.perf_counter() >= deadline:
+                break
+
+            # Lower bound: minimize x_i (only when currently open below).
+            if open_lb[var_idx]:
+                c = np.zeros(n_vars, dtype=np.float64)
+                c[var_idx] = 1.0
+                result = _lp(
+                    c=c,
+                    A_ub=A_ub,
+                    b_ub=b_ub,
+                    A_eq=A_eq,
+                    b_eq=b_eq,
+                    bounds=bounds_list,
+                    warm_basis=warm_basis,
+                    time_limit=time_limit_per_lp,
+                )
+                total_lp_time += result.wall_time
+                if (
+                    result.status == SolveStatus.OPTIMAL
+                    and result.objective is not None
+                    and np.isfinite(result.objective)
+                ):
+                    warm_basis = result.basis
+                    margin = 1e-6 * (1.0 + abs(result.objective))
+                    new_lb = result.objective - margin
+                    if is_int[var_idx]:
+                        new_lb = np.ceil(new_lb - eps)
+                    lb[var_idx] = new_lb
+                    bounds_list[var_idx] = (float(lb[var_idx]), float(ub[var_idx]))
+                    n_finitized += 1
+
+            if deadline is not None and time.perf_counter() >= deadline:
+                break
+
+            # Upper bound: maximize x_i (minimize -x_i) when currently open above.
+            if open_ub[var_idx]:
+                c = np.zeros(n_vars, dtype=np.float64)
+                c[var_idx] = -1.0
+                result = _lp(
+                    c=c,
+                    A_ub=A_ub,
+                    b_ub=b_ub,
+                    A_eq=A_eq,
+                    b_eq=b_eq,
+                    bounds=bounds_list,
+                    warm_basis=warm_basis,
+                    time_limit=time_limit_per_lp,
+                )
+                total_lp_time += result.wall_time
+                if (
+                    result.status == SolveStatus.OPTIMAL
+                    and result.objective is not None
+                    and np.isfinite(result.objective)
+                ):
+                    warm_basis = result.basis
+                    new_ub = -result.objective
+                    margin = 1e-6 * (1.0 + abs(new_ub))
+                    new_ub = new_ub + margin
+                    if is_int[var_idx]:
+                        new_ub = np.floor(new_ub + eps)
+                    ub[var_idx] = new_ub
+                    bounds_list[var_idx] = (float(lb[var_idx]), float(ub[var_idx]))
+                    n_finitized += 1
+
+        return lb, ub, n_finitized, total_lp_time
+    except Exception:
+        # Bootstrap is best-effort: never let it break the solve.
+        return lb, ub, 0, 0.0
+
+
 def obbt_tighten_root(
     model: Model,
     lb: np.ndarray,
@@ -960,6 +1513,37 @@ def obbt_tighten_root(
     total_tight = 0
     total_lp_time = 0.0
     n_rounds = 0
+
+    # Bootstrap: if the box is not fully finite, derive finite bounds for the
+    # open variables before the round loop, which otherwise bails immediately on
+    # its finite-box guard (it cannot build a McCormick envelope on an open
+    # variable).  Two complementary rigorous passes, interleaved to a fixpoint
+    # because each unlocks the other:
+    #   * ``bootstrap_finite_bounds`` — LP over the linear subsystem, finitizing
+    #     variables reachable from linear constraints;
+    #   * ``propagate_equality_defined_bounds`` — forward interval propagation
+    #     through equality-defined quantities (``v == g(x)``: divisions, logs,
+    #     …) whose inputs the bootstrap just made finite.
+    # Both only shrink the box, so the result is always a sound subset.
+    for _ in range(2):
+        if np.all(np.isfinite(lb)) and np.all(np.isfinite(ub)):
+            break
+        lb, ub, n_boot, boot_time = bootstrap_finite_bounds(
+            model,
+            lb,
+            ub,
+            deadline=deadline,
+            time_limit_per_lp=time_limit_per_lp,
+            incumbent_cutoff=incumbent_cutoff,
+            eps=eps,
+        )
+        total_tight += n_boot
+        total_lp_time += boot_time
+        lb, ub, n_prop = propagate_equality_defined_bounds(model, lb, ub)
+        total_tight += n_prop
+        if n_boot == 0 and n_prop == 0:
+            break
+
     try:
         from discopt._jax.mccormick_lp import (
             MccormickLPRelaxer,
