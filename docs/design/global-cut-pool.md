@@ -203,6 +203,50 @@ At the root, after the relaxation is built and solved:
 
 ---
 
+## 7b. Status / results (P1, P2 landed; P3 blocked on dispatch)
+
+**P1 — cut-pool mechanism (landed, commit on the feature branch).**
+`MccormickLPRelaxer.solve_at_node` gained `out_cuts` (capture the separated rows
+once at the root), `inherited_cuts` (append the pool at a node, column-aligned),
+and `separate` (skip per-node re-separation). Measured on nvs17: a node inherits
+the 80-row pool and reproduces the root bound in **~16 ms vs ~0.5 s** to
+re-separate — the ~30× per-node speedup that makes pool-everywhere viable. Purely
+additive; default args = prior behaviour; 31 relaxation/soundness tests pass.
+
+**P2 — near-Shor root pool (landed).** The spectral cutting plane converges to
+Shor only with many rounds, and `_separate_psd` was capped at 8. Made it a
+parameter (`psd_max_rounds`, threaded through `solve_at_node`). On nvs17:
+8 rounds → −2453; ~150 rounds → −1221 (1.4 s); ~400 rounds → **−1114** (Shor is
+−1104.7), 1235 cuts. A standalone cut-pool B&B (P1 inheritance + P2 root pool)
+then drove nvs17 from the frozen −65842 to **14 nodes, incumbent −1100 (= opt),
+bound −1110, 0.9 % gap** — SCIP's node regime (SCIP ~75). Not formally certified
+only because the 0.9 % gap is just over 1e-4 (needs full Shor −1104 or a few more
+nodes), and the 1235-cut pool makes nodes heavy (~7 s) → motivates a cut cap.
+
+**P3 — solver integration: BLOCKED on dispatch (the real remaining work).**
+A first hookup (separate the root pool after the usefulness probe; pass
+`inherited_cuts`/`separate=False` to the per-node `solve_at_node` calls at
+`solver.py:~3918` and `~4180`; cap the pool at `_ROOT_CUT_POOL_MAX`) was written
+and then reverted because it **does not reach the integer `nvs*` class**: an
+end-to-end `m.solve` left nvs17's bound at −65843 (unchanged McCormick) and the
+"Root PSD cut pool" log never fired. Root cause — the integer `nvs*` search
+**dispatches away from the Python McCormick-LP node path entirely** (it never
+enters the `_mc_mode == "lp"` relaxer-setup block; its 2621 nodes are bounded on a
+different, cut-less path — the Rust integer B&B / compiled-relaxation route). So
+the hookup is correct for *continuous* nonconvex QCQP that uses the spatial
+McCormick-LP loop, but the integer class needs one of:
+
+1. **Route the integer nonconvex-QCQP class through the McCormick-LP node path**
+   (so the per-node bound is `solve_at_node` + inherited pool). Smallest change if
+   the dispatch gate can be widened; must confirm the per-node LP cost is
+   acceptable vs the Rust path it replaces.
+2. **Inject the pool rows into the Rust integer B&B node relaxation** (a
+   Python→Rust row-append seam), so the existing fast path inherits the cuts.
+
+Both are bounded but real; (1) is the cheaper experiment. Determining the exact
+dispatch gate that sends `nvs*` to the Rust path (and whether it can opt into the
+LP node path when a cut pool exists) is the first concrete P3 task.
+
 ## 8. Success criteria
 
 `nvs17` (and ≥ 6 of the `nvs*` set) certified within 60 s, `incorrect_count == 0`
