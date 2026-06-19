@@ -1436,6 +1436,44 @@ def _optimal_relative_gap(objective: float) -> Optional[float]:
     return None if abs(float(objective)) <= 1e-10 else 0.0
 
 
+# Absolute B&B gap tolerance, decoupled from the relative ``gap_tolerance``.
+# Matches the AMP path's ``abs_tol`` (and SCIP's default absolute gap). The tree's
+# hybrid ``gap()`` floors its denominator at 1.0, so for an optimum with magnitude
+# below 1 the relative ``gap_tolerance`` silently degenerates into an *absolute*
+# tolerance — letting a coarse 1e-4 certify a near-zero optimum that is nowhere
+# near the true value (gear: returned 3.7e-05 against a trivial 0 bound while the
+# true optimum is ~4e-12). A separate, tighter absolute tolerance keeps the search
+# going until the absolute gap genuinely closes.
+_DEFAULT_ABS_GAP_TOL = 1e-6
+
+
+def _gap_converged(
+    tree, gap_tolerance: float, abs_gap_tol: float = _DEFAULT_ABS_GAP_TOL
+) -> bool:
+    """B&B gap convergence with decoupled absolute and relative tolerances.
+
+    Converges when the *relative* gap ``(UB-LB)/max(|UB|,|LB|,eps) <= gap_tolerance``
+    OR the *absolute* gap ``UB-LB <= abs_gap_tol``. This replaces the bare
+    ``tree.gap() <= gap_tolerance`` check: ``tree.gap()`` floors its denominator at
+    1.0, collapsing both tolerances into one, so a loose relative ``gap_tolerance``
+    certified a near-zero optimum sitting on a trivial 0 bound (the gear pathology).
+    Computing the relative gap without the 1.0 floor keeps it meaningful near zero,
+    and the independent absolute tolerance provides the only sound way to certify a
+    genuinely-zero optimum. ``tree.is_finished()`` remains the exhaustive-search
+    terminator at the call sites.
+    """
+    stats = tree.stats()
+    ub = float(stats.get("incumbent_value", float("inf")))
+    lb = float(stats.get("global_lower_bound", float("-inf")))
+    if not np.isfinite(ub) or not np.isfinite(lb):
+        return False
+    abs_gap = max(0.0, ub - lb)
+    if abs_gap <= abs_gap_tol:
+        return True
+    denom = max(abs(ub), abs(lb), 1e-10)
+    return abs_gap / denom <= gap_tolerance
+
+
 def _format_bad_bound_entries(
     model: Model,
     flat_lb: np.ndarray,
@@ -4887,7 +4925,7 @@ def solve_model(
         # Check termination
         if tree.is_finished():
             break
-        if tree.gap() <= gap_tolerance:
+        if _gap_converged(tree, gap_tolerance):
             break
 
         stats = tree.stats()
@@ -4958,7 +4996,7 @@ def solve_model(
         if model._objective.sense == ObjectiveSense.MAXIMIZE:
             obj_val = -obj_val
 
-        search_closed = tree.gap() <= gap_tolerance or tree.is_finished()
+        search_closed = _gap_converged(tree, gap_tolerance) or tree.is_finished()
         if search_closed and _gap_certified:
             status = "optimal"
         else:
@@ -5702,7 +5740,7 @@ def _solve_nlp_bb(
         # Check termination
         if tree.is_finished():
             break
-        if tree.gap() <= gap_tolerance:
+        if _gap_converged(tree, gap_tolerance):
             break
         stats = tree.stats()
         if stats["total_nodes"] >= max_nodes:
@@ -5804,7 +5842,7 @@ def _solve_nlp_bb(
         # "optimal" requires both a closed search AND a certified gap: a node
         # whose convex relaxation was not KKT-valid (roadmap P0.3) leaves the
         # bound uncertified, so the search closing does not prove optimality.
-        if (tree.gap() <= gap_tolerance or tree.is_finished()) and _gap_certified:
+        if (_gap_converged(tree, gap_tolerance) or tree.is_finished()) and _gap_certified:
             status = "optimal"
         else:
             status = "feasible"
@@ -8838,7 +8876,7 @@ def _solve_milp_bb(
         iteration += 1
         if tree.is_finished():
             break
-        if tree.gap() <= gap_tolerance:
+        if _gap_converged(tree, gap_tolerance):
             break
         stats = tree.stats()
         if stats["total_nodes"] >= max_nodes:
@@ -8892,7 +8930,7 @@ def _solve_milp_bb(
         # "optimal" needs a closed search AND a certified gap: a stalled
         # (non-KKT) node bound leaves optimality unproven even when the tree
         # appears finished.
-        if (tree.gap() <= gap_tolerance or tree.is_finished()) and _gap_certified:
+        if (_gap_converged(tree, gap_tolerance) or tree.is_finished()) and _gap_certified:
             status = "optimal"
         else:
             status = "feasible"
@@ -9199,7 +9237,7 @@ def _solve_miqp_bb(
         iteration += 1
         if tree.is_finished():
             break
-        if tree.gap() <= gap_tolerance:
+        if _gap_converged(tree, gap_tolerance):
             break
         stats = tree.stats()
         if stats["total_nodes"] >= max_nodes:
@@ -9260,7 +9298,7 @@ def _solve_miqp_bb(
         # "optimal" needs a closed search AND a certified gap: a stalled
         # (non-KKT) node bound leaves optimality unproven even when the tree
         # appears finished.
-        if (tree.gap() <= gap_tolerance or tree.is_finished()) and _gap_certified:
+        if (_gap_converged(tree, gap_tolerance) or tree.is_finished()) and _gap_certified:
             status = "optimal"
         else:
             status = "feasible"
