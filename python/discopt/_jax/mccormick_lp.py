@@ -30,6 +30,7 @@ from discopt._jax.milp_relaxation import (
     _RELAX_NUMERIC_CAP,
     _collect_affine_powers,
     _linear_constraint_forms,
+    _quadratic_constraint_forms,
     build_milp_relaxation,
 )
 from discopt._jax.term_classifier import NonlinearTerms, classify_nonlinear_terms
@@ -217,10 +218,16 @@ class MccormickLPRelaxer:
         # per-node B&B default. Enabled via the first-class ``rlt_level1=True``
         # constructor argument (threaded from ``Model.solve(rlt=...)``), with the
         # legacy ``DISCOPT_RLT=1`` environment variable kept as a force-on
-        # override for benchmarking. Only applicable when the model has at least
-        # one linear constraint to multiply.
-        self._rlt_applicable = (rlt_level1 or os.environ.get("DISCOPT_RLT", "0") == "1") and bool(
-            _linear_constraint_forms(model, self._n_orig)
+        # override for benchmarking. Applicable when the model has any constraint
+        # to multiply by a bound factor — a *linear* constraint (Phase-1 RLT) OR a
+        # *quadratic* one (Phase-2 quadratic-constraint RLT, issue #15). The old
+        # gate required a linear constraint, which silently excluded pure-quadratic
+        # models (e.g. the indefinite integer QPs nvs17/nvs24, whose constraints
+        # are all quadratic) from RLT entirely — exactly the dense-QP instances
+        # whose McCormick bound is hopelessly loose without it.
+        self._rlt_applicable = (rlt_level1 or os.environ.get("DISCOPT_RLT", "0") == "1") and (
+            bool(_linear_constraint_forms(model, self._n_orig))
+            or bool(_quadratic_constraint_forms(model, self._n_orig))
         )
         # Lever 1 (issue #194): solve each spatial-B&B node's relaxation as a pure
         # LP for the dual bound, rather than as a nested integer MILP B&B. The LP
