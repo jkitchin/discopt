@@ -320,10 +320,15 @@ is a trustworthy LP/dual engine. Work breakdown:
     (`TestTrustedMaskPOUNCE::test_stalled_convex_is_rescued_by_polish_retry`).
 - **P0.4 Batch LP/QP + LP seam.** Extend the `solve_nlp_batch` path to LP/QP
   node waves; extend the backend seam so LP/QP dispatch is engine-agnostic.
-  Note: the published `pounce-solver` wheel (0.4.0) exposes
-  `pounce.Problem`/`.solve` but **not** `solve_nlp_batch`, so
-  `_solve_batch_pounce` currently falls back to serial per-node solves;
-  batch LP/QP depends on that POUNCE API landing.
+  Note: **`solve_nlp_batch` landed in `pounce-solver` 0.5.0** (alongside
+  `solve_qp_batch` and `solve_qp_multi_rhs`), superseding the earlier note that
+  the 0.4.0 wheel exposed only `pounce.Problem`/`.solve`. `_solve_batch_pounce`
+  already calls `pounce.solve_nlp_batch(problems, x0s=..., share_structure=True)`
+  with a graceful serial fallback, so the **batch NLP node-wave path is live on
+  ≥0.5.0** (it degrades to serial only on older wheels or if the call raises).
+  Remaining: bump the dependency pin to `>=0.5` so batch is guaranteed rather
+  than version-dependent, and wire **batch QP** node waves through the new
+  `solve_qp_batch`/`solve_qp_multi_rhs` (NLP batch is wired; QP batch is not).
 
   *Status / implementation notes:*
   - **LP seam — DONE.** `_solve_lp` now tries matrix-form engines in order
@@ -359,8 +364,10 @@ is a trustworthy LP/dual engine. Work breakdown:
     (`_matrix_solution_feasible`) and fall through to the next engine on
     violation — no engine's "optimal" is taken on faith (P0.5 in both
     directions: the oracle itself can lie).
-  - **Open:** batch LP/QP waves (blocked on POUNCE `solve_nlp_batch`),
-    OBBT/McCormick-LP consumers (Phase 4).
+  - **Open:** batch *QP* node waves (NLP batch is live on `pounce-solver`
+    ≥0.5.0 via `solve_nlp_batch`; QP batch wiring through `solve_qp_batch` is
+    the remaining piece) and bumping the dependency pin to `>=0.5`. The
+    OBBT/McCormick-LP consumers were retired in Phase 4.
 - **P0.5 HiGHS as CI oracle.** From this phase on, cross-check every POUNCE
   LP/QP result against HiGHS in CI (test-only dependency). HiGHS stops
   being a runtime engine long before it stops being a correctness guard.
