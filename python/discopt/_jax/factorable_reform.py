@@ -275,14 +275,12 @@ def _estimate_distributed_terms(expr: Expression) -> int:
     if isinstance(expr, BinaryOp):
         if expr.op in ("+", "-"):
             return min(
-                _estimate_distributed_terms(expr.left)
-                + _estimate_distributed_terms(expr.right),
+                _estimate_distributed_terms(expr.left) + _estimate_distributed_terms(expr.right),
                 _TERM_CAP,
             )
         if expr.op == "*":
             return min(
-                _estimate_distributed_terms(expr.left)
-                * _estimate_distributed_terms(expr.right),
+                _estimate_distributed_terms(expr.left) * _estimate_distributed_terms(expr.right),
                 _TERM_CAP,
             )
         if expr.op == "**" and isinstance(expr.right, Constant):
@@ -1254,9 +1252,7 @@ def factorable_reformulate(model: Model, *, clear_only: bool = False) -> Model:
         # power of a polynomial base); division clearing is meaningless for an
         # objective so only the lifts apply.
         if not clear_only and new_model._objective is not None:
-            obj_expr = _prelift_blowup_products(
-                new_model._objective.expression, new_model, lifter
-            )
+            obj_expr = _prelift_blowup_products(new_model._objective.expression, new_model, lifter)
             obj_expr = distribute_products(obj_expr)
             obj_expr = _lift_objective_atoms(obj_expr, new_model, lifter)
             lifted_obj = _lift_expr(obj_expr, new_model, lifter)
