@@ -1301,6 +1301,15 @@ class SolveResult:
 # ─────────────────────────────────────────────────────────────
 
 
+def _require_no_shape(shape, ctor: str) -> None:
+    """Reject ``shape=`` when ``over=`` is given (they are mutually exclusive)."""
+    if shape not in ((), 0):
+        raise ValueError(
+            f"{ctor}(): 'over=' (named-set index) and 'shape=' are mutually "
+            "exclusive; an indexed variable's size is determined by its set."
+        )
+
+
 class Model:
     """
     A Mixed-Integer Nonlinear Program.
@@ -1383,12 +1392,37 @@ class Model:
 
     # ── Variable constructors ──
 
+    def _register_variable(self, var: "Variable") -> "Variable":
+        """Append a variable and register it with the Rust builder if active."""
+        self._variables.append(var)
+        if self._builder is not None:
+            var._builder_idx = self._builder.add_variable(
+                var.name,
+                var.var_type.value,
+                list(var.shape),
+                var.lb.flatten().astype(np.float64),
+                var.ub.flatten().astype(np.float64),
+            )
+        return var
+
+    def _make_indexed_var(self, name, var_type, index_set, lb, ub, default_lb, default_ub):
+        """Build an :class:`IndexedVar` backed by one flat variable over *index_set*."""
+        from discopt.modeling.indexed import IndexedVar, resolve_indexed_values
+
+        lb_arr = resolve_indexed_values(index_set, lb, default_lb, np.float64)
+        ub_arr = resolve_indexed_values(index_set, ub, default_ub, np.float64)
+        self._check_name(name)
+        flat = Variable(name, var_type, (len(index_set),), lb_arr, ub_arr, self)
+        self._register_variable(flat)
+        return IndexedVar(flat, index_set)
+
     def continuous(
         self,
         name: str,
         shape: Union[int, tuple[int, ...]] = (),
         lb: Union[float, np.ndarray] = -9.999e19,
         ub: Union[float, np.ndarray] = 9.999e19,
+        over=None,
     ) -> Variable:
         """
         Create continuous decision variable(s).
@@ -1427,26 +1461,29 @@ class Model:
         >>> x = m.continuous("x")                           # scalar, unbounded
         >>> flow = m.continuous("flow", shape=(5,), lb=0)   # 5-vector, non-negative
         >>> X = m.continuous("X", shape=(3, 4), lb=0, ub=1) # 3x4 matrix
+        >>> ship = m.continuous("ship", over=links, lb=0)   # indexed over a named set
+
+        When *over* is given (a :class:`~discopt.modeling.sets.Set`), an
+        :class:`~discopt.modeling.indexed.IndexedVar` is returned: ``ship[key]``
+        indexes by set member, and ``lb``/``ub`` may be a scalar, a ``dict``
+        keyed by member, or a callable ``fn(member)``.
         """
+        if over is not None:
+            _require_no_shape(shape, "continuous")
+            return self._make_indexed_var(
+                name, VarType.CONTINUOUS, over, lb, ub, -9.999e19, 9.999e19
+            )
         if isinstance(shape, int):
             shape = (shape,)
         self._check_name(name)
         var = Variable(name, VarType.CONTINUOUS, shape, lb, ub, self)
-        self._variables.append(var)
-        if self._builder is not None:
-            var._builder_idx = self._builder.add_variable(
-                var.name,
-                var.var_type.value,
-                list(var.shape),
-                var.lb.flatten().astype(np.float64),
-                var.ub.flatten().astype(np.float64),
-            )
-        return var
+        return self._register_variable(var)
 
     def binary(
         self,
         name: str,
         shape: Union[int, tuple[int, ...]] = (),
+        over=None,
     ) -> Variable:
         """
         Create binary (0/1) decision variable(s).
@@ -1467,21 +1504,16 @@ class Model:
         --------
         >>> use = m.binary("use")                    # single binary
         >>> active = m.binary("active", shape=(5,))  # 5 binary indicators
+        >>> assign = m.binary("assign", over=workers * tasks)  # indexed binary
         """
+        if over is not None:
+            _require_no_shape(shape, "binary")
+            return self._make_indexed_var(name, VarType.BINARY, over, 0.0, 1.0, 0.0, 1.0)
         if isinstance(shape, int):
             shape = (shape,)
         self._check_name(name)
         var = Variable(name, VarType.BINARY, shape, 0.0, 1.0, self)
-        self._variables.append(var)
-        if self._builder is not None:
-            var._builder_idx = self._builder.add_variable(
-                var.name,
-                var.var_type.value,
-                list(var.shape),
-                var.lb.flatten().astype(np.float64),
-                var.ub.flatten().astype(np.float64),
-            )
-        return var
+        return self._register_variable(var)
 
     def integer(
         self,
@@ -1489,6 +1521,7 @@ class Model:
         shape: Union[int, tuple[int, ...]] = (),
         lb: Union[float, np.ndarray] = 0,
         ub: Union[float, np.ndarray] = 1e6,
+        over=None,
     ) -> Variable:
         """
         Create general integer decision variable(s).
@@ -1513,21 +1546,16 @@ class Model:
         --------
         >>> n = m.integer("n_units", lb=0, ub=10)
         >>> batch = m.integer("batch", shape=(3,), lb=1, ub=100)
+        >>> n = m.integer("n", over=plants, lb=0, ub=10)  # indexed integer
         """
+        if over is not None:
+            _require_no_shape(shape, "integer")
+            return self._make_indexed_var(name, VarType.INTEGER, over, lb, ub, 0.0, 1e6)
         if isinstance(shape, int):
             shape = (shape,)
         self._check_name(name)
         var = Variable(name, VarType.INTEGER, shape, lb, ub, self)
-        self._variables.append(var)
-        if self._builder is not None:
-            var._builder_idx = self._builder.add_variable(
-                var.name,
-                var.var_type.value,
-                list(var.shape),
-                var.lb.flatten().astype(np.float64),
-                var.ub.flatten().astype(np.float64),
-            )
-        return var
+        return self._register_variable(var)
 
     def parameter(
         self,

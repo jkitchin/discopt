@@ -61,12 +61,22 @@ def _arity(member: Member) -> int:
     return len(member) if isinstance(member, tuple) else 1
 
 
+def call_member(fn: Callable, member: Member, dimen: int):
+    """Call ``fn`` on a member, unpacking tuple members for ``dimen > 1``.
+
+    For ``dimen == 1`` this is ``fn(member)``; for ``dimen > 1`` the components
+    are unpacked, ``fn(*member)``. Shared by predicates (``where``), indexed
+    bound/value rules, and aggregation over sets.
+    """
+    if dimen == 1:
+        return fn(member)
+    assert isinstance(member, tuple)
+    return fn(*member)
+
+
 def _apply_pred(pred: Callable, member: Member, dimen: int) -> bool:
     """Call a predicate on a member, unpacking tuple members for ``dimen > 1``."""
-    if dimen == 1:
-        return bool(pred(member))
-    assert isinstance(member, tuple)
-    return bool(pred(*member))
+    return bool(call_member(pred, member, dimen))
 
 
 class _SetBase:
