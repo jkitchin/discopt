@@ -69,6 +69,90 @@ def test_st_e11_certifies_with_sound_bound():
 
 
 @pytest.mark.correctness
+@pytest.mark.parametrize(
+    "arity,pins",
+    [
+        (4, 1),  # 4-way -> trilinear  (unpinned == 3)
+        (4, 2),  # 4-way -> bilinear   (unpinned == 2)
+        (5, 1),  # 5-way -> 4-way      (unpinned >= 4: collapsed subset still multilinear)
+        (5, 2),  # 5-way -> trilinear
+        (6, 2),  # 6-way -> 4-way      (unpinned >= 4)
+    ],
+)
+def test_multilinear_pinned_collapse_keeps_objective_bound(arity, pins):
+    """A k-way product that pins factors must still linearize at that node.
+
+    During B&B a factor of a multilinear term can pin (lb==ub), and
+    ``_linearize_expr`` folds it into the coefficient — collapsing the term to a
+    lower-arity product *keyed by the unpinned subset*. Unless that collapsed
+    bilinear/trilinear/multilinear key is pre-registered, the linearizer raises
+    ``"... not in map"`` and the whole constraint (here the objective) drops,
+    sinking the node's dual bound. The collapse target follows the linearizer's
+    arity dispatch exactly: 2 -> bilinear, 3 -> trilinear, >=4 -> multilinear.
+    """
+    m = dm.Model(f"multi{arity}")
+    xs = [m.continuous(f"x{i}", lb=0.5, ub=2.0) for i in range(arity)]
+    prod = xs[0]
+    for x in xs[1:]:
+        prod = prod * x
+    m.minimize(prod)
+    terms = classify_nonlinear_terms(m)
+    disc = DiscretizationState(partitions={})
+    lb, ub = flat_variable_bounds(m)
+
+    # Root box: the full k-way term linearizes (baseline).
+    root, _ = build_milp_relaxation(m, terms, disc, bound_override=(lb.copy(), ub.copy()))
+    assert root._objective_bound_valid
+
+    # Pin the first ``pins`` factors (lb==ub) and confirm the collapsed
+    # (k-pins)-ary product still linearizes rather than dropping the objective.
+    lb_pin, ub_pin = lb.copy(), ub.copy()
+    for i in range(pins):
+        lb_pin[i] = 1.0
+        ub_pin[i] = 1.0
+    milp, _ = build_milp_relaxation(m, terms, disc, bound_override=(lb_pin, ub_pin))
+    assert milp._objective_bound_valid, (
+        f"pinning {pins} of {arity} factors dropped the objective bound"
+    )
+
+
+@pytest.mark.correctness
+@pytest.mark.parametrize("pin_base", [True, False])
+def test_bilinear_with_pinned_fractional_power_keeps_objective_bound(pin_base):
+    """``y * x**p`` must still linearize when the power base ``x`` pins.
+
+    A variable times a fractional power (the gas-network compressor objective
+    ``w * beta**0.2857``) is relaxed via the bilinear-with-fractional-power path:
+    an aux ``z = x**p`` plus a McCormick envelope on ``y * z``. When ``x`` pins
+    (lb==ub from branching/OBBT) the builder skips the ``z`` aux for the
+    degenerate domain, so the product reaches ``_decompose_product`` with no aux
+    column. Without folding the pinned power to its exact constant the product is
+    undecomposable and the whole objective drops to the feasibility fallback,
+    sinking the node's dual bound. Pinning the *other* factor (``y``) must
+    likewise keep the term (it collapses to the pure power ``x**p``).
+    """
+    m = dm.Model("bilinear_fp")
+    y = m.continuous("y", lb=0.0, ub=10.0)
+    x = m.continuous("x", lb=1.0, ub=2.0)
+    m.minimize(y * (x**0.2857))
+    terms = classify_nonlinear_terms(m)
+    assert terms.bilinear_with_fp, "expected a bilinear-with-fractional-power term"
+    disc = DiscretizationState(partitions={})
+    lb, ub = flat_variable_bounds(m)
+
+    root, _ = build_milp_relaxation(m, terms, disc, bound_override=(lb.copy(), ub.copy()))
+    assert root._objective_bound_valid
+
+    lb_pin, ub_pin = lb.copy(), ub.copy()
+    idx = 1 if pin_base else 0  # x is var 1 (power base), y is var 0
+    val = 1.5 if pin_base else 4.0
+    lb_pin[idx] = ub_pin[idx] = val
+    milp, _ = build_milp_relaxation(m, terms, disc, bound_override=(lb_pin, ub_pin))
+    which = "power base x" if pin_base else "factor y"
+    assert milp._objective_bound_valid, f"pinning {which} dropped the objective bound"
+
+
+@pytest.mark.correctness
 def test_pinned_value_is_exact_not_relaxed():
     """A fully pinned univariate-power objective term equals the exact value."""
     # min x**0.6 with x pinned to 16 → exactly 16**0.6, no relaxation slack.

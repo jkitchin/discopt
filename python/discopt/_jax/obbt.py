@@ -38,6 +38,81 @@ from discopt.solvers.lp_backend import (
 # still tightened by the exact (Rust simplex / HiGHS) oracle.
 _OBBT_COND_LIMIT = 1e10
 
+# OBBT tightens to the LP vertex objective, which is accurate on a well-conditioned
+# basis but can drift a few ``ulp * cond`` *above* the true optimum when the
+# McCormick coefficient spread makes the basis ill-conditioned (the nvs22
+# false-certificate: a 1.000996 vertex for a true min of 1.0, rounded inward to
+# prune the optimum). The Neumaier-Shcherbina safe dual bound is a rigorous lower
+# bound on that LP min; when the vertex sits this far *above* it (relative), the
+# vertex is untrustworthy and OBBT falls back to the safe bound instead of
+# over-tightening. The threshold is far above honest vertex noise (~1e-9 on
+# well-conditioned LPs) so trustworthy tightenings are preserved bit-for-bit —
+# avoiding spurious box perturbations on knife-edge instances (st_e11) — while the
+# gross ill-conditioned drift that prunes a feasible optimum is caught.
+_OBBT_NS_GUARD = 1e-6
+
+
+def _ns_safe_lp_lower_bound(c, dual_values, A_ub, b_ub, lo, hi):
+    """Neumaier-Shcherbina rigorous lower bound on ``min c^T x`` over the box LP.
+
+    The LP is ``min c^T x  s.t.  A_ub x <= b_ub,  lo <= x <= hi``. For *any*
+    ``y >= 0`` (multipliers on the ``<=`` rows), weak duality gives
+
+        g(y) = -b^T y + sum_j  min_{x_j in [lo_j, hi_j]} (c + A^T y)_j x_j
+
+    and ``g(y) <= true min c^T x``. We take ``y = max(-row_dual, 0)`` from the
+    LP's reported duals: HiGHS returns ``row_dual <= 0`` on an active ``<=`` row,
+    so ``-row_dual`` is the non-negative multiplier and ``g(y)`` reproduces the
+    LP optimum *exactly* on a well-conditioned solve. The crucial property is
+    that ``g(y) <= true min`` holds for the clamped ``y`` regardless of how the
+    duals were obtained, so when the simplex basis is ill-conditioned (a wide
+    McCormick coefficient spread) and the reported vertex objective drifts a few
+    ``ulp * cond`` *above* the true minimum, ``g(y)`` stays a sound under-estimate
+    rather than an over-tightening that could prune the global optimum (the
+    nvs22 false-certificate). Tightening OBBT bounds to ``g(y)`` instead of the
+    raw vertex objective is therefore sound at any conditioning, and loses no
+    tightness where the LP is well-behaved.
+
+    A magnitude-scaled margin is subtracted to dominate the floating-point error
+    of the dual evaluation itself (done in plain float64, not directed-rounding
+    interval arithmetic). Returns ``None`` when no usable lower bound exists.
+    """
+    import scipy.sparse as sp
+
+    if dual_values is None:
+        return None
+    y = np.array(dual_values, dtype=np.float64)  # copy: must not mutate caller's duals
+    if y.size == 0:
+        return None
+    np.clip(-y, 0.0, None, out=y)  # y := max(-row_dual, 0) >= 0
+    c = np.asarray(c, dtype=np.float64)
+    if A_ub is None or b_ub is None:
+        rc = c.copy()
+        const = 0.0
+    else:
+        b_arr = np.asarray(b_ub, dtype=np.float64)
+        if y.shape[0] != b_arr.shape[0]:
+            return None
+        At_y = (A_ub.T @ y) if sp.issparse(A_ub) else (np.asarray(A_ub).T @ y)
+        rc = c + np.asarray(At_y).ravel()
+        const = -float(b_arr @ y)
+    lo = np.asarray(lo, dtype=np.float64)
+    hi = np.asarray(hi, dtype=np.float64)
+    # min_{x_j in [lo_j,hi_j]} rc_j x_j  = lo_j if rc_j>0, hi_j if rc_j<0, else 0
+    # (the rc_j==0 case contributes 0 even when that bound is infinite).
+    contrib = np.zeros_like(rc)
+    pos = rc > 0.0
+    neg = rc < 0.0
+    contrib[pos] = rc[pos] * lo[pos]
+    contrib[neg] = rc[neg] * hi[neg]
+    g = const + float(contrib.sum())
+    if not np.isfinite(g):
+        return None
+    # Margin >> the float64 rounding error of the two dot products above
+    # (~n * eps * magnitude); keeps g a rigorous under-estimate.
+    margin = 1e-10 * (1.0 + abs(const) + float(np.abs(contrib).sum()))
+    return g - margin
+
 
 def solve_lp(**kwargs):
     """Module-level default LP solve (HiGHS-first, POUNCE fallback).
@@ -625,7 +700,15 @@ def run_obbt_on_relaxation(
     # is accepted for signature compatibility but never honoured here — when no
     # exact (Rust simplex / HiGHS) oracle is available we return the box
     # untightened rather than risk an unsound shrink.
-    _lp = get_exact_lp_solver()
+    # Prefer the dual-exposing (HiGHS) oracle: OBBT tightens to a Neumaier-
+    # Shcherbina *safe* dual bound (``_ns_safe_lp_lower_bound``) rather than the
+    # raw vertex objective, which is sound at any conditioning and cannot prune a
+    # feasible optimum (the nvs22 false-certificate). Without a dual oracle we
+    # fall back to the exact vertex value (the conditioning guard below keeps that
+    # path from over-tightening on the worst LPs).
+    _dual_lp = get_exact_dual_lp_solver()
+    _lp = _dual_lp or get_exact_lp_solver()
+    _use_ns = _dual_lp is not None
     if _lp is None:
         return ObbtResult(
             tightened_lb=np.array([b[0] for b in relaxation._bounds[:n_orig]], dtype=np.float64),
@@ -657,7 +740,20 @@ def run_obbt_on_relaxation(
 
     _bound_vals = np.array([v for pair in bounds for v in pair], dtype=np.float64)
     _cond = max(_max_abs(A_ub), _max_abs(b_ub), _max_abs(_bound_vals))
-    if _cond > _OBBT_COND_LIMIT:
+    # Conditioning guard. The raw vertex objective from an ill-conditioned LP can
+    # drift *above* the true minimum and over-tighten (the nvs22 false-certificate),
+    # so without a rigorous safe-bound oracle we abstain entirely. WITH the NS-safe
+    # dual path (``_use_ns``) every tightening below is clamped to the rigorous
+    # Neumaier-Shcherbina bound ``g`` -- valid for any dual ``y >= 0`` by weak
+    # duality, hence sound at ANY conditioning. So rather than abstain we only
+    # *require* that rigorous bound (``require_ns``): a variable whose safe bound is
+    # unavailable is left untightened instead of being trusted to its vertex. This
+    # lets OBBT engage on ill-conditioned factorable relaxations the bare guard
+    # disabled -- e.g. nvs05, whose 1e15-coefficient term drives ``_cond ~ 2e13``
+    # yet whose boxes (x5,x6 spanning [~0, 1.36e4]) only shrink once OBBT runs --
+    # while never tightening from a non-rigorous value.
+    require_ns = _cond > _OBBT_COND_LIMIT
+    if require_ns and not _use_ns:
         return ObbtResult(
             tightened_lb=np.array([b[0] for b in bounds[:n_orig]], dtype=np.float64),
             tightened_ub=np.array([b[1] for b in bounds[:n_orig]], dtype=np.float64),
@@ -720,7 +816,20 @@ def run_obbt_on_relaxation(
         if result.status == SolveStatus.OPTIMAL and result.objective is not None:
             warm_basis = result.basis
             new_lb = float(result.objective)
-            if new_lb > lb_arr[var_idx] + eps:
+            if _use_ns:
+                # Distrust the vertex only when the rigorous safe bound sits well
+                # below it (ill-conditioned basis); otherwise keep it bit-for-bit.
+                g = _ns_safe_lp_lower_bound(
+                    c, getattr(result, "dual_values", None), A_ub, b_ub, lb_arr, ub_arr
+                )
+                if g is None:
+                    if require_ns:
+                        # Ill-conditioned LP and no rigorous safe bound available:
+                        # the raw vertex is untrustworthy here, so do not tighten.
+                        new_lb = None
+                elif new_lb > g + _OBBT_NS_GUARD * (1.0 + abs(new_lb)):
+                    new_lb = g
+            if new_lb is not None and new_lb > lb_arr[var_idx] + eps:
                 # Don't cross the upper bound.
                 lb_arr[var_idx] = min(new_lb, ub_arr[var_idx])
                 n_tightened += 1
@@ -742,10 +851,24 @@ def run_obbt_on_relaxation(
         total_lp_time += result.wall_time
         if result.status == SolveStatus.OPTIMAL and result.objective is not None:
             warm_basis = result.basis
-            new_ub = -float(result.objective)
-            if new_ub < ub_arr[var_idx] - eps:
-                ub_arr[var_idx] = max(new_ub, lb_arr[var_idx])
-                n_tightened += 1
+            lp_min = float(result.objective)  # = min(-x_i) = -max(x_i)
+            if _use_ns:
+                # Same guard: ``g`` bounds ``min(-x_i)`` from below, so when the
+                # vertex sits well above it the basis is ill-conditioned and the
+                # safe bound ``-g`` is the sound (looser) upper bound on ``x_i``.
+                g = _ns_safe_lp_lower_bound(
+                    c, getattr(result, "dual_values", None), A_ub, b_ub, lb_arr, ub_arr
+                )
+                if g is None:
+                    if require_ns:
+                        lp_min = None
+                elif lp_min > g + _OBBT_NS_GUARD * (1.0 + abs(lp_min)):
+                    lp_min = g
+            if lp_min is not None:
+                new_ub = -lp_min
+                if new_ub < ub_arr[var_idx] - eps:
+                    ub_arr[var_idx] = max(new_ub, lb_arr[var_idx])
+                    n_tightened += 1
 
     return ObbtResult(
         tightened_lb=lb_arr[:n_orig].copy(),

@@ -287,6 +287,45 @@ def _distribute_mul(left: Expression, right: Expression) -> Expression:
     return BinaryOp("*", left, right)
 
 
+def _distribute_power_over_product(base: Expression, n: int) -> Expression | None:
+    """Expand ``(a * b)**n`` → ``a**n * b**n`` for integer ``n >= 2`` over a
+    purely multiplicative ``base``.
+
+    This is an *exact* algebraic identity only because the factors are
+    multiplied — it must never be applied across a sum, so a sum (or any
+    non-multiplicative node: division, transcendental call, negation) makes the
+    function return ``None`` and the caller leaves the original power node
+    intact.  Folding a power of a product into a product of powers lets the
+    downstream factor collector (``_collect_extended_factors``) expand each
+    ``x**k`` into its repeated flat-variable factors instead of stranding the
+    whole power-of-product in the un-linearizable ``extra`` bucket — which is
+    what silently dropped nvs06's defining constraint ``w * (x0*x1)**4 == …``.
+
+    Constants fold to ``value**n``; a flat-indexable leaf becomes ``leaf**n``; a
+    nested integer power ``(b**m)**n`` collapses to ``b**(m*n)`` (recursing so a
+    nested product base also expands).
+    """
+    if isinstance(base, Constant):
+        return Constant(float(base.value) ** n)
+    if isinstance(base, (Variable, IndexExpression)):
+        return BinaryOp("**", base, Constant(float(n)))
+    if isinstance(base, BinaryOp):
+        if base.op == "*":
+            left = _distribute_power_over_product(base.left, n)
+            right = _distribute_power_over_product(base.right, n)
+            if left is None or right is None:
+                return None
+            return BinaryOp("*", left, right)
+        if base.op == "**" and isinstance(base.right, Constant):
+            m = float(base.right.value)
+            m_int = int(m)
+            if m == m_int and m_int >= 1:
+                # (b**m)**n → b**(m*n); recurse so a product base under the
+                # inner power still expands to a product of powers.
+                return _distribute_power_over_product(base.left, m_int * n)
+    return None
+
+
 def distribute_products(
     expr: Expression, protected_squares: frozenset[int] | None = None
 ) -> Expression:
@@ -320,7 +359,17 @@ def distribute_products(
             # linearizer's composite-aux map.
             if protected_squares is not None and id(expr) in protected_squares:
                 return expr
-            if float(expr.right.value) == 2.0:
+            exp_val = float(expr.right.value)
+            n_int = int(exp_val)
+            if exp_val == n_int and n_int >= 2:
+                # (a*b)**n → a**n * b**n when the base is a pure product; leaves a
+                # sum base (e.g. (a+b)**n) untouched (helper returns None) so the
+                # ``**2`` square-of-sum path and higher sum-powers are unaffected.
+                base = distribute_products(expr.left, protected_squares)
+                expanded = _distribute_power_over_product(base, n_int)
+                if expanded is not None:
+                    return expanded
+            if exp_val == 2.0:
                 left = distribute_products(expr.left, protected_squares)
                 return _distribute_mul(left, left)
         left = distribute_products(expr.left, protected_squares)

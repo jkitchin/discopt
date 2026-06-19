@@ -26,7 +26,7 @@ import math
 import os
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import Any, Callable, Optional, Union
 
 import numpy as np
 import scipy.sparse as sp
@@ -1327,6 +1327,7 @@ def _decompose_product(
     monomial_var_map: Optional[dict[tuple[int, int], int]] = None,
     composite_var_map: Optional[dict[int, int]] = None,
     composite_coeff_map: Optional[dict[int, float]] = None,
+    pinned_value: Optional[Callable[[int], Optional[float]]] = None,
 ) -> tuple[float, list[int]] | None:
     """Decompose a product expression into (scalar, [flat_or_aux_idx, ...]).
 
@@ -1341,6 +1342,13 @@ def _decompose_product(
     — a lifted bilinear pair. This lets the standard McCormick pipeline relax
     ``x**2 * y`` (one monomial envelope + one bilinear envelope) instead of
     rejecting it as an unsupported repeated-factor term.
+
+    When ``pinned_value`` is supplied (a ``flat_idx -> exact value or None``
+    lookup over the node's bounds), a power factor ``x**p`` whose base is pinned
+    (lb==ub) is folded into the scalar as the exact constant ``x**p`` rather than
+    requiring a fractional-power aux column — which the builder skips on a
+    degenerate domain — so a branch/OBBT-pinned ``y * x**p`` term still decomposes
+    (to ``[col(y)]`` scaled by ``x**p``) instead of dropping from the relaxation.
     """
     scalar: list[float] = [1.0]
     var_indices: list[int] = []
@@ -1371,19 +1379,31 @@ def _decompose_product(
                     return False
                 var_indices.append(aux_col)
                 return True
-        # Recognize var^p (fractional p) when an aux column was allocated.
-        if (
-            fractional_power_var_map
-            and isinstance(e, BinaryOp)
-            and e.op == "**"
-            and isinstance(e.right, Constant)
-        ):
+        # Recognize var^p (fractional p) when an aux column was allocated, or
+        # fold it to an exact constant when the base is pinned (lb==ub) at this
+        # node. The pinned fold matters because the fractional-power aux column
+        # is *skipped* for a degenerate [lb==ub] domain (the builder's bounds
+        # guard), so without it a branched/OBBT-pinned base turns ``y * x^p``
+        # into an undecomposable product and the whole term — or the objective —
+        # drops from the relaxation, sinking the node's dual bound. Folding the
+        # pinned power is variable-free and exact, so it only ever tightens.
+        if isinstance(e, BinaryOp) and e.op == "**" and isinstance(e.right, Constant):
             base_flat = _get_flat_index(e.left, model)
             if base_flat is not None:
-                key = (base_flat, float(e.right.value))
-                if key in fractional_power_var_map:
+                exp_val = float(e.right.value)
+                key = (base_flat, exp_val)
+                if fractional_power_var_map and key in fractional_power_var_map:
                     var_indices.append(fractional_power_var_map[key])
                     return True
+                if pinned_value is not None:
+                    pv = pinned_value(base_flat)
+                    # x^p is real only for x >= 0 (fractional p) or any integer p.
+                    if pv is not None and (pv >= 0.0 or exp_val == int(exp_val)):
+                        try:
+                            scalar[0] *= float(pv) ** exp_val
+                        except (ValueError, OverflowError):
+                            return False
+                        return True
         # Fold a *composite* variable-free factor (e.g. ``neg(1e6)`` from a
         # parsed ``-1e6*i1*i2``, or ``(-3)*(-3)``) into the scalar. A bare
         # ``Constant`` is handled above; this catches negations/arithmetic over
@@ -4346,6 +4366,7 @@ def _linearize_expr(
                     monomial_var_map=monomial_var_map,
                     composite_var_map=composite_var_map,
                     composite_coeff_map=composite_coeff_map,
+                    pinned_value=_pinned_value,
                 )
                 if decomp is None:
                     raise ValueError(f"Cannot decompose product: {e}")
@@ -4724,6 +4745,49 @@ def build_milp_relaxation(
             return False
         return float(flat_ub[idx]) - float(flat_lb[idx]) <= 1e-9
 
+    def _register_pinned_collapse(factors: tuple[int, ...]) -> None:
+        """Pre-register the aux for a product term's pinned-factor collapse.
+
+        When a factor of a k-ary product pins (lb==ub) during B&B,
+        ``_linearize_expr`` folds it into the coefficient and looks up the key of
+        the *unpinned distinct subset* — bilinear at arity 2, trilinear at 3,
+        multilinear at >=4 (mirroring its own arity dispatch at lines ~4382-4407).
+        Unless that collapsed key is registered the linearizer raises
+        "... not in map" and the whole constraint drops at that node, sinking its
+        dual bound (issue #139: nvs22 ``x**2*y``; nvs05 ``x0*x1*x5*x2**2`` →
+        trilinear ``x0*x1*x5`` once ``x2`` is branch-fixed). The build reruns per
+        node, so ``factors`` minus the currently-pinned ones is exactly the
+        collapsed arity; ``_builder_pinned`` is the same bound source the
+        linearizer's pin test uses, so the registered key is the one it looks up.
+        Called from every product-registration site — classifier *and* lifted —
+        so no source/arity combination can silently reintroduce the gap.
+        """
+        unpinned = [v for v in factors if not _builder_pinned(v)]
+        k = len(unpinned)
+        if k == 2:
+            bkey = (min(unpinned), max(unpinned))
+            if bkey not in bilinear_var_map:
+                bilinear_var_map[bkey] = _ensure_bilinear_aux(*bkey)
+        elif k == 3:
+            tkey = (min(unpinned), sorted(unpinned)[1], max(unpinned))
+            if tkey not in trilinear_var_map:
+                pair, remaining = _choose_trilinear_pair(tkey, partitioned_vars)
+                pair_col = _ensure_bilinear_aux(*pair)
+                collapsed_col = _ensure_bilinear_aux(pair_col, remaining)
+                trilinear_var_map[tkey] = collapsed_col
+                trilinear_stage_map[tkey] = {
+                    "pair": pair,
+                    "pair_col": pair_col,
+                    "remaining_var": remaining,
+                    "product_col": collapsed_col,
+                }
+        elif k >= 4:
+            mkey = tuple(sorted(unpinned))
+            if mkey not in multilinear_var_map:
+                sub_col, sub_stages = _ensure_multilinear_aux(mkey)
+                multilinear_var_map[mkey] = sub_col
+                multilinear_stage_map[mkey] = sub_stages
+
     for term in sorted(trilinear_terms):
         pair, remaining = _choose_trilinear_pair(term, partitioned_vars)
         pair_col = _ensure_bilinear_aux(*pair)
@@ -4735,24 +4799,30 @@ def build_milp_relaxation(
             "remaining_var": remaining,
             "product_col": final_col,
         }
-        # Pinned-factor collapse: when exactly one factor is pinned at this node
-        # (lb==ub from branching/OBBT), ``_linearize_expr`` folds that factor's
-        # exact value into the coefficient, leaving a *bilinear* in the other two
-        # factors. Pre-allocate that bilinear's aux column + McCormick envelope so
-        # the collapsed term still linearizes; otherwise the linearizer raises
-        # "Bilinear (i,j) not in map" and the whole objective/constraint drops
-        # (issue #139: surfaces on nvs22 once its x**2*y objective term lifts).
-        unpinned = [v for v in term if not _builder_pinned(v)]
-        if len(unpinned) == 2:
-            bkey = (min(unpinned), max(unpinned))
-            if bkey not in bilinear_var_map:
-                bilinear_var_map[bkey] = _ensure_bilinear_aux(*bkey)
+        _register_pinned_collapse(term)
 
-    multilinear_terms = terms.multilinear or _collect_distinct_multilinear_products(model)
+    # Union, not ``or``: the classifier set and the structural scan are not
+    # interchangeable. ``terms.multilinear`` records >=4-way products of distinct
+    # *original* variables; ``_collect_distinct_multilinear_products`` decomposes
+    # the expression tree and also catches products the classifier dumps into
+    # ``general_nl``. A short-circuiting ``or`` would skip the scan whenever the
+    # classifier happened to find *any* multilinear, silently dropping a second
+    # >=4-way term the scan alone would surface — its constraint then omitted at
+    # linearization. Registering an unused key only costs one aux column, so the
+    # union is the safe superset. (The lifted-aux path at ~5317 is a third source
+    # but only fires when a factor is itself a lifted column ``idx >= n_orig``.)
+    _multi_seen: set[tuple[int, ...]] = set()
+    multilinear_terms: list[tuple[int, ...]] = []
+    for _mt in list(terms.multilinear) + _collect_distinct_multilinear_products(model):
+        _canon = tuple(sorted(_mt))
+        if _canon not in _multi_seen:
+            _multi_seen.add(_canon)
+            multilinear_terms.append(_canon)
     for multi_term in multilinear_terms:
         final_col, stages = _ensure_multilinear_aux(multi_term)
         multilinear_var_map[multi_term] = final_col
         multilinear_stage_map[multi_term] = stages
+        _register_pinned_collapse(multi_term)
 
     # Numerical-conditioning guard: a lifted monomial whose auxiliary bound spans
     # an extreme magnitude (e.g. ``x1**9`` over ``[15, 25]`` → ~3.8e12) injects
@@ -5283,6 +5353,7 @@ def build_milp_relaxation(
     )
     for term in lifted_trilinear_keys:
         if term in trilinear_var_map:
+            _register_pinned_collapse(term)
             continue
         pair, remaining = _choose_trilinear_pair(term, partitioned_vars)
         pair_col = _ensure_bilinear_aux(*pair)
@@ -5294,12 +5365,15 @@ def build_milp_relaxation(
             "remaining_var": remaining,
             "product_col": final_col,
         }
+        _register_pinned_collapse(term)
     for multi_term in lifted_multilinear_keys:
         if multi_term in multilinear_var_map:
+            _register_pinned_collapse(multi_term)
             continue
         final_col, stages = _ensure_multilinear_aux(multi_term)
         multilinear_var_map[multi_term] = final_col
         multilinear_stage_map[multi_term] = stages
+        _register_pinned_collapse(multi_term)
 
     # ── Square-of-affine-in-lifted-vars envelopes (issue #155) ──────────────
     # For each recognized ``E**2`` residual, lift every product factor to a

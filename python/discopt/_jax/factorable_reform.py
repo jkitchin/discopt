@@ -251,6 +251,112 @@ def _rebuild_product(coeff: float, atoms: list[Expression]) -> Expression:
     return expr if expr is not None else Constant(coeff)
 
 
+# Distributing a product whose factors are multi-term sums multiplies their term
+# counts.  A product of several sum-of-squares (st_e36: 5 factors → a 12.6 MB,
+# degree-~17 polynomial when distributed) both explodes memory/time and forces
+# high-degree univariate monomial lifts (``x1**8`` over [15,25] is 1.5e11, past
+# the relaxation's 1e10 aux-bound limit) whose columns are then dropped — gutting
+# the relaxation and leaving the constraint effectively unrelaxed.  The standard
+# factorable cure (BARON, Couenne) is to NOT distribute: lift each multi-term
+# factor to a bounded aux ``w_i == f_i`` and relax the resulting bilinear /
+# multilinear product of variables directly.
+_DISTRIBUTE_TERM_LIMIT = 1024  # est. distributed-term count above which a product is lifted
+_TERM_CAP = 1 << 40  # saturate the estimate so deep blowups can't overflow
+
+
+def _estimate_distributed_terms(expr: Expression) -> int:
+    """Estimate how many additive terms ``distribute_products(expr)`` would yield.
+
+    A product multiplies its operands' term counts, an integer power raises the
+    base's, a sum adds them; every opaque leaf (variable, call, division,
+    constant) counts as one.  Saturated at ``_TERM_CAP`` so a deeply nested
+    blowup cannot overflow before it trips the limit.
+    """
+    if isinstance(expr, BinaryOp):
+        if expr.op in ("+", "-"):
+            return min(
+                _estimate_distributed_terms(expr.left)
+                + _estimate_distributed_terms(expr.right),
+                _TERM_CAP,
+            )
+        if expr.op == "*":
+            return min(
+                _estimate_distributed_terms(expr.left)
+                * _estimate_distributed_terms(expr.right),
+                _TERM_CAP,
+            )
+        if expr.op == "**" and isinstance(expr.right, Constant):
+            n = float(expr.right.value)
+            n_int = int(n)
+            if n == n_int and n_int >= 1:
+                return min(_estimate_distributed_terms(expr.left) ** n_int, _TERM_CAP)
+        return 1
+    if isinstance(expr, UnaryOp):
+        return _estimate_distributed_terms(expr.operand)
+    return 1
+
+
+def _collect_mul_factors(expr: Expression) -> list[Expression]:
+    """Flatten a left/right-nested ``*`` chain into its factor list."""
+    if isinstance(expr, BinaryOp) and expr.op == "*":
+        return _collect_mul_factors(expr.left) + _collect_mul_factors(expr.right)
+    return [expr]
+
+
+def _prelift_blowup_products(expr: Expression, model: Model, lifter: "_Lifter") -> Expression:
+    """Lift the factors of any product whose naive distribution would explode.
+
+    Walks *expr*; at each ``*``-rooted product whose estimated distributed term
+    count exceeds :data:`_DISTRIBUTE_TERM_LIMIT`, lifts every multi-term-sum
+    factor ``f`` to an aux ``w == f`` (an exact equality) and rebuilds the
+    product over the auxes, so the relaxation sees a bilinear/multilinear product
+    of bounded variables instead of a high-degree expanded polynomial.  Sound:
+    each ``w == f`` is exact and the lifted product is McCormick-relaxable.
+    Identity-preserving for every node under the limit, so non-blowup
+    constraints/objectives are byte-for-byte unchanged.
+    """
+    if isinstance(expr, BinaryOp):
+        if expr.op == "*" and _estimate_distributed_terms(expr) > _DISTRIBUTE_TERM_LIMIT:
+            new_factors: list[Expression] = []
+            changed = False
+            for f in _collect_mul_factors(expr):
+                # Only a genuine multi-term sum drives the blowup; a constant,
+                # variable, or monomial power distributes to one term and is left
+                # for the normal monomial/bilinear path.
+                if (
+                    isinstance(f, BinaryOp)
+                    and f.op in ("+", "-")
+                    and _estimate_distributed_terms(f) >= 2
+                ):
+                    # Recurse first so a factor that is *itself* a blowup product
+                    # has its inner factors lifted before this one is bounded.
+                    f_lifted = _prelift_blowup_products(f, model, lifter)
+                    w = lifter.expression(f_lifted)
+                    if w is not None:
+                        new_factors.append(w)
+                        changed = True
+                        continue
+                    new_factors.append(f_lifted)
+                else:
+                    new_factors.append(_prelift_blowup_products(f, model, lifter))
+            if changed:
+                return _rebuild_product(1.0, new_factors)
+            # Couldn't bound any factor (unbounded box): leave the product to the
+            # existing distribute/monomial path rather than alter it.
+            return expr
+        left = _prelift_blowup_products(expr.left, model, lifter)
+        right = _prelift_blowup_products(expr.right, model, lifter)
+        if left is expr.left and right is expr.right:
+            return expr
+        return BinaryOp(expr.op, left, right)
+    if isinstance(expr, UnaryOp):
+        operand = _prelift_blowup_products(expr.operand, model, lifter)
+        if operand is expr.operand:
+            return expr
+        return UnaryOp(expr.op, operand)
+    return expr
+
+
 # Univariate transcendentals whose argument may be lifted into an aux variable.
 # ``sqrt``/``exp`` are domain-safe to relax over a finite box once their argument
 # is a single variable (sqrt needs ``arg >= 0``, supplied by the lb floor below;
@@ -297,6 +403,47 @@ def _should_lift_call_arg(call: Expression, model: Model) -> Expression | None:
     return arg
 
 
+def _simplify_sqrt_monomial(call: Expression, model: Model) -> Expression | None:
+    """Rewrite ``sqrt(c * prod x_i**e_i)`` via the root-of-perfect-power identity.
+
+    On a non-negative domain ``sqrt(x**(2k)) == x**k`` *exactly*, so a ``sqrt``
+    whose argument is a monomial with all-even exponents and a non-negative
+    constant factor collapses to a plain monomial — no transcendental, no
+    envelope at all. Being an algebraic identity (not a relaxation) it is sound
+    for any curvature, and it sidesteps the extreme-magnitude abstention that
+    otherwise *drops the whole constraint*: nvs05's omitted
+    ``sqrt(1e15*x2**2*x3**6)`` becomes ``3.16e7*x2*x3**3`` — the 2.5e33-wide
+    argument turns into a 3.16e7 coefficient on a benign monomial the existing
+    monomial/bilinear machinery relaxes tightly.
+
+    The all-even / non-negative-base requirement is necessary, not conservative:
+    ``sqrt(x**(2k)) == |x|**k``, which equals ``x**k`` only when ``x >= 0`` (or
+    ``k`` even). Returns the rewritten monomial, or ``None`` when the argument is
+    not a non-negative all-even-exponent monomial (the caller then tries the
+    general aux-variable lift).
+    """
+    if not isinstance(call, FunctionCall):
+        return None
+    if call.func_name != "sqrt" or len(call.args) != 1:
+        return None
+    decomp = _decompose_poly_product(distribute_products(call.args[0]), model)
+    if decomp is None:
+        return None
+    coeff, powers, extra = decomp
+    if extra or not powers or coeff < 0.0:
+        return None
+    atoms: list[Expression] = []
+    for _idx, (leaf, exp) in powers.items():
+        if exp % 2 != 0:
+            return None  # residual odd power -> argument is not a perfect square
+        lo, _hi = _bound_expression(leaf, model)
+        if not np.isfinite(lo) or lo < 0.0:
+            return None  # sqrt(leaf**exp) == |leaf|**(exp/2) != leaf**(exp/2) for lo<0
+        half = exp // 2
+        atoms.append(leaf if half == 1 else BinaryOp("**", leaf, Constant(float(half))))
+    return _rebuild_product(float(np.sqrt(coeff)), atoms)
+
+
 def _lift_expr(expr: Expression, model: Model, lifter: _Lifter) -> Expression:
     """Return *expr* with every mixed repeated-factor polynomial product lifted
     to bilinear form via monomial aux variables.  Identity-preserving: returns
@@ -335,6 +482,14 @@ def _lift_expr(expr: Expression, model: Model, lifter: _Lifter) -> Expression:
             return expr
         return UnaryOp(expr.op, operand)
     if isinstance(expr, FunctionCall):
+        # Root-of-perfect-power simplification first: ``sqrt(c * perfect-square
+        # monomial)`` is an exact monomial, strictly better than any envelope and
+        # immune to the extreme-magnitude abstention. Recurse so the resulting
+        # monomial gets its own mixed-product lift (e.g. ``x2*x3**3`` -> bilinear
+        # ``x2 * aux(x3**3)``).
+        simplified = _simplify_sqrt_monomial(expr, model)
+        if simplified is not None:
+            return _lift_expr(simplified, model, lifter)
         # Auxiliary-variable factorization of ``outer(g(x))`` (issue #130 follow-up):
         # when ``g`` is a multivariate non-affine argument the univariate envelope
         # cannot reach (cross terms), lift ``t == g(x)`` and rewrite the node as
@@ -1086,6 +1241,7 @@ def factorable_reformulate(model: Model, *, clear_only: bool = False) -> Model:
                 else:
                     rebuilt.append(Constraint(distribute_products(body), sense, c.rhs, c.name))
                 continue
+            body = _prelift_blowup_products(body, new_model, lifter)
             body = distribute_products(body)
             body = _lift_objective_atoms(body, new_model, lifter)
             body = _lift_expr(body, new_model, lifter)
@@ -1098,7 +1254,10 @@ def factorable_reformulate(model: Model, *, clear_only: bool = False) -> Model:
         # power of a polynomial base); division clearing is meaningless for an
         # objective so only the lifts apply.
         if not clear_only and new_model._objective is not None:
-            obj_expr = distribute_products(new_model._objective.expression)
+            obj_expr = _prelift_blowup_products(
+                new_model._objective.expression, new_model, lifter
+            )
+            obj_expr = distribute_products(obj_expr)
             obj_expr = _lift_objective_atoms(obj_expr, new_model, lifter)
             lifted_obj = _lift_expr(obj_expr, new_model, lifter)
             if lifted_obj is not new_model._objective.expression:

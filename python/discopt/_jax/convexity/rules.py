@@ -56,6 +56,7 @@ Ceccon, Siirola, Misener (2020), "SUSPECT," TOP.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -103,6 +104,18 @@ from .linear_context import LinearContext, build_linear_context, extract_affine
 
 _LINEAR_CONTEXT_KEY = "__linear_context__"
 
+# Deadline (a ``time.perf_counter()`` timestamp) and a shared mutable visit
+# counter, stashed in the classification ``cache`` by :func:`classify_model`.
+# Checking the deadline inside :func:`classify_expr_info` — not merely between
+# constraints — lets a single pathological expression (whose product/quadratic
+# pattern matching explores exponentially many transient sub-structures) abort
+# promptly rather than blow the solver's whole time budget before search starts.
+_DEADLINE_KEY = "__classify_deadline__"
+_VISIT_COUNT_KEY = "__classify_visits__"
+# perf_counter() is comparatively expensive, so only sample the clock once per
+# this many node visits; the counter increment itself is a cheap int add.
+_DEADLINE_CHECK_STRIDE = 2048
+
 
 def _get_linear_context(cache: dict) -> Optional[LinearContext]:
     """Return the cached linear context, if one was stashed."""
@@ -141,6 +154,78 @@ def _refine_sign(
 
 
 # ──────────────────────────────────────────────────────────────────────
+# Structural memoization
+# ──────────────────────────────────────────────────────────────────────
+#
+# ``from_nl`` reconstruction rebuilds shared subexpressions as *distinct*
+# objects, so an ``id(expr)``-keyed cache never hits across structurally
+# identical nodes: a DAG materialised as a tree re-classifies the same
+# subtrees an exponential number of times (st_e36 produced ~5e5 classify
+# calls — and seconds of wall time — for a 2-variable model). The
+# structural cache below buckets results by a structural hash and confirms
+# every candidate with :func:`patterns._expr_struct_eq` before reuse, so a
+# hash collision can only cost a recomputation, never return a wrong
+# curvature. This preserves the soundness invariant exactly.
+
+_STRUCT_CACHE_KEY = "__struct_cache__"
+_STRUCT_HASH_KEY = "__struct_hash_cache__"
+
+
+def _hash_index(index: object) -> object:
+    """A hashable, structurally-faithful surrogate for an index key."""
+    try:
+        hash(index)
+        return index
+    except TypeError:
+        pass
+    if isinstance(index, slice):
+        return ("slice", index.start, index.stop, index.step)
+    try:
+        arr = np.asarray(index)
+        return ("arr", arr.shape, tuple(arr.ravel().tolist()))
+    except Exception:
+        return ("id", id(index))
+
+
+def _struct_hash(expr: Expression, hcache: dict) -> int:
+    """Structural hash consistent with :func:`patterns._expr_struct_eq`.
+
+    Memoised by ``id(expr)`` so the hash of a tree is computed once per
+    object (otherwise the hash itself would re-walk the DAG exponentially).
+    Structurally equal expressions hash equally; node types the equality
+    checker does not handle are isolated by object identity so they never
+    share a bucket (avoiding O(n^2) equality scans).
+    """
+    hid = id(expr)
+    cached = hcache.get(hid)
+    if cached is not None:
+        return cached
+    if isinstance(expr, Constant):
+        v = np.asarray(expr.value)
+        if v.ndim == 0:
+            h = hash(("c", round(float(v), 12)))
+        else:
+            h = hash(("c", v.shape, tuple(np.round(v.ravel(), 12).tolist())))
+    elif isinstance(expr, Variable):
+        h = hash(("v", expr.name))
+    elif isinstance(expr, Parameter):
+        h = hash(("p", expr.name))
+    elif isinstance(expr, IndexExpression):
+        h = hash(("i", _struct_hash(expr.base, hcache), _hash_index(expr.index)))
+    elif isinstance(expr, BinaryOp):
+        h = hash(("b", expr.op, _struct_hash(expr.left, hcache), _struct_hash(expr.right, hcache)))
+    elif isinstance(expr, UnaryOp):
+        h = hash(("u", expr.op, _struct_hash(expr.operand, hcache)))
+    else:
+        # FunctionCall / SumExpression / MatMulExpression / ... are not
+        # handled by _expr_struct_eq, so they can never match structurally;
+        # isolate each in its own bucket.
+        h = hid
+    hcache[hid] = h
+    return h
+
+
+# ──────────────────────────────────────────────────────────────────────
 # Public API
 # ──────────────────────────────────────────────────────────────────────
 
@@ -172,9 +257,47 @@ def classify_expr_info(
     if _cache is None:
         _cache = {}
 
+    # Deadline guard: abort a pathological classification (exponential
+    # transient-subexpression exploration) promptly. Sound because an aborted
+    # classification reports UNKNOWN, routing the model to the spatial Branch
+    # and Bound / McCormick relaxation — a valid, if looser, treatment.
+    deadline = _cache.get(_DEADLINE_KEY)
+    if deadline is not None:
+        counter = _cache[_VISIT_COUNT_KEY]
+        counter[0] += 1
+        if counter[0] % _DEADLINE_CHECK_STRIDE == 0 and time.perf_counter() > deadline:
+            raise ConvexityBudgetExceeded(
+                f"convexity classification exceeded its time budget after "
+                f"{counter[0]} expression visits"
+            )
+
     eid = id(expr)
-    if eid in _cache:
-        return _cache[eid]  # type: ignore[no-any-return]
+    cached = _cache.get(eid)
+    if cached is not None:
+        return cached  # type: ignore[no-any-return]
+
+    # Structural memoization: collapse the exponential re-classification of
+    # ``from_nl``-rebuilt, structurally-identical-but-distinct nodes. A hash
+    # collision is resolved by an exact structural-equality check, so reuse
+    # can never substitute a wrong curvature (see module note above).
+    struct_cache = _cache.get(_STRUCT_CACHE_KEY)
+    if struct_cache is None:
+        struct_cache = {}
+        _cache[_STRUCT_CACHE_KEY] = struct_cache
+    hash_cache = _cache.get(_STRUCT_HASH_KEY)
+    if hash_cache is None:
+        hash_cache = {}
+        _cache[_STRUCT_HASH_KEY] = hash_cache
+
+    from .patterns import _expr_struct_eq
+
+    struct_key = _struct_hash(expr, hash_cache)
+    bucket = struct_cache.get(struct_key)
+    if bucket is not None:
+        for cand_expr, cand_info in bucket:
+            if _expr_struct_eq(expr, cand_expr):
+                _cache[eid] = cand_info
+                return cand_info
 
     info = _classify_impl(expr, model, _cache)
     # Whole-expression quadratic fallback: when the recursive walker
@@ -188,6 +311,10 @@ def classify_expr_info(
         if qc is not None and qc != Curvature.UNKNOWN:
             info = ExprInfo(qc, info.sign)
     _cache[eid] = info
+    if bucket is None:
+        bucket = []
+        struct_cache[struct_key] = bucket
+    bucket.append((expr, info))
     return info
 
 
@@ -824,6 +951,12 @@ def classify_model(
     ctx = build_linear_context(model)
     if ctx is not None:
         cache[_LINEAR_CONTEXT_KEY] = ctx
+    if deadline is not None:
+        # Stash the deadline + a shared visit counter so classify_expr_info can
+        # abort mid-walk (not only between constraints, which is too coarse when
+        # a single expression is pathological).
+        cache[_DEADLINE_KEY] = deadline
+        cache[_VISIT_COUNT_KEY] = [0]
 
     obj_convex = True
     if model._objective is not None:
