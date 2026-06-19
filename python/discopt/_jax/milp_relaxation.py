@@ -153,6 +153,17 @@ _RELAX_NUMERIC_CAP = 1e10
 # external (HiGHS) path converges instead of timing out (issue #184).
 _RELAX_EQUILIBRATE_TRIGGER = 1e6
 
+# Coefficient-spread above which an ``infeasible`` verdict from the (numerically
+# fragile) Rust simplex is *distrusted* and re-verified with exact equilibration.
+# The Rust simplex's internal equilibration is insufficient for the lifted
+# relaxation's worst conditioning — RLT cuts on a wide box yield degree-3 monomial
+# coefficients with a ~1e5 spread, on which the simplex returns a *false*
+# infeasible even though the LP (and HiGHS / the Python-equilibrated simplex) is
+# feasible. A false-infeasible at a B&B node would prune the region containing the
+# optimum, so re-solving is a soundness guard, not just speed. Set well below the
+# (HiGHS-tuned) 1e6 trigger above because the simplex fails at lower spreads.
+_RELAX_FALSE_INFEAS_TRIGGER = 1e3
+
 
 def equilibrate_relaxation_lp(
     c: np.ndarray,
@@ -308,7 +319,11 @@ class MilpRelaxationModel:
             and os.environ.get("DISCOPT_LP_WARMSTART", "1") != "0"
         ):
             warm = self._solve_lp_warm()
-            if warm is not None:
+            # A warm-start ``infeasible`` on an ill-conditioned LP can be a
+            # numerical false-negative; fall through to the equilibrated re-verify
+            # below rather than trust it (a false-infeasible would unsoundly prune
+            # a B&B node). Any other warm verdict is the true LP optimum.
+            if warm is not None and warm.status != "infeasible":
                 return warm
 
         # backend="auto": HiGHS if present, else POUNCE. backend="simplex" routes
@@ -345,6 +360,42 @@ class MilpRelaxationModel:
             time_limit=time_limit,
             gap_tolerance=gap_tolerance,
         )
+
+        # Re-verify a possible *false* infeasible. The Rust simplex can report an
+        # ill-conditioned relaxation LP infeasible when it is actually feasible
+        # (RLT cuts on a wide box produce a ~1e5 coefficient spread on which the
+        # simplex's internal scaling is insufficient). Accepting that verdict at a
+        # B&B node would prune a region that may contain the optimum — unsound. The
+        # raw solve was NOT Python-equilibrated above for ``backend="simplex"``, so
+        # re-solve once with exact geometric-mean equilibration before accepting
+        # ``infeasible``. Equilibration preserves the feasible set exactly, so a
+        # genuinely infeasible LP stays infeasible; only a numerical false-negative
+        # flips to optimal.
+        if (
+            result.status == SolveStatus.INFEASIBLE
+            and col_scale is None
+            and self._A_ub is not None
+        ):
+            _nz = np.abs(sp.csr_matrix(self._A_ub).data)
+            _nz = _nz[_nz != 0.0]
+            if (
+                _nz.size
+                and np.isfinite(_nz).all()
+                and _nz.max() / _nz.min() > _RELAX_FALSE_INFEAS_TRIGGER
+            ):
+                c_s, A_s, b_s, bounds_s, col_scale = equilibrate_relaxation_lp(
+                    self._c, self._A_ub, self._b_ub, self._bounds, self._integrality
+                )
+                result = solve_milp(
+                    c=c_s,
+                    A_ub=A_s,
+                    b_ub=b_s,
+                    bounds=bounds_s,
+                    integrality=self._integrality,
+                    time_limit=time_limit,
+                    gap_tolerance=gap_tolerance,
+                )
+
         # Map the scaled solution point back to original variables (x = D·x').
         if col_scale is not None and result.x is not None:
             result.x = np.asarray(result.x, dtype=np.float64) * col_scale

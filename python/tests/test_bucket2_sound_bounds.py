@@ -378,3 +378,52 @@ def test_ex1252_relaxation_equilibration_conditions_and_preserves_bound():
     ).solve(backend="simplex")
     assert raw.status == scaled.status == "optimal"
     assert abs(float(raw.bound) - float(scaled.bound)) <= 1e-6 + 1e-6 * abs(float(raw.bound))
+
+
+@pytest.mark.correctness
+def test_rlt_wide_box_lp_not_false_infeasible(monkeypatch):
+    """Level-1 RLT cuts on a wide integer box must not provoke a *false* infeasible
+    from the Rust simplex.
+
+    ``nvs17`` is a pure-integer indefinite quadratic over ``[0,200]^7``. Its
+    quadratic-constraint RLT cuts (issue #15) lift degree-3 monomials whose
+    coefficients span ~1e5 — a conditioning the Rust simplex's internal scaling
+    cannot handle, so it returned ``infeasible`` on an LP that is in fact feasible
+    (HiGHS and the Python-equilibrated simplex both solve it to ~-553676). A
+    false-infeasible relaxation LP at a B&B node would prune the region containing
+    the optimum, so this is a soundness bug, not just a speed one. ``solve`` now
+    re-verifies an ``infeasible`` verdict on an ill-conditioned LP with exact
+    geometric-mean equilibration, recovering the true optimum.
+    """
+    import numpy as np
+    import scipy.sparse as sp
+    from discopt._jax.milp_relaxation import build_milp_relaxation
+
+    monkeypatch.setenv("DISCOPT_RLT_QUAD", "1")
+    nl = _DATA / "nvs17.nl"
+    assert nl.exists(), f"missing {nl}"
+    m = dm.from_nl(str(nl))
+    relaxer = MccormickLPRelaxer(m)
+    lb, ub = flat_variable_bounds(m)
+
+    milp, _ = build_milp_relaxation(
+        m, relaxer._terms, relaxer._disc, bound_override=(lb, ub), rlt_level1=True
+    )
+    milp._integrality = None
+
+    # The cuts genuinely make the LP ill-conditioned (else the test proves nothing).
+    nz = np.abs(sp.csr_matrix(milp._A_ub).data)
+    nz = nz[nz > 0]
+    spread = nz.max() / nz.min()
+    assert spread > 1e4, f"expected ill-conditioned RLT LP, got spread {spread:.1e}"
+
+    simplex = milp.solve(backend="simplex")
+    assert simplex.status == "optimal", (
+        f"RLT wide-box LP false-infeasible from the simplex (status={simplex.status}); "
+        "the equilibration re-verify did not engage"
+    )
+    # The recovered bound must match the HiGHS reference (a valid, sound relaxation
+    # bound — far below the -1100 optimum, but finite and correct).
+    highs = milp.solve(backend="highs")
+    assert highs.status == "optimal"
+    assert abs(float(simplex.bound) - float(highs.bound)) <= 1e-3 + 1e-6 * abs(float(highs.bound))
