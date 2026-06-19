@@ -31,6 +31,7 @@ parts:
     chapters:
       - file: notebooks/quickstart
       - file: notebooks/modeling_guide
+      - file: notebooks/sets_and_indexing
       - file: notebooks/tutor_course
       - file: notebooks/minlp_examples
       - file: notebooks/problem_classes

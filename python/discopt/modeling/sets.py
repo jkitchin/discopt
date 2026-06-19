@@ -61,6 +61,23 @@ def _arity(member: Member) -> int:
     return len(member) if isinstance(member, tuple) else 1
 
 
+def _deep_flatten(key) -> tuple:
+    """Flatten nested tuples into a flat tuple of scalar components.
+
+    Lets a product-set key be written flat (``flow[i, j, c]``) or nested
+    (``flow[(i, j), c]``) interchangeably.
+    """
+    if isinstance(key, tuple):
+        out: list = []
+        for part in key:
+            if isinstance(part, tuple):
+                out.extend(_deep_flatten(part))
+            else:
+                out.append(part)
+        return tuple(out)
+    return (key,)
+
+
 def call_member(fn: Callable, member: Member, dimen: int):
     """Call ``fn`` on a member, unpacking tuple members for ``dimen > 1``.
 
@@ -292,8 +309,7 @@ class ProductSet(_SetBase):
         return total
 
     def __contains__(self, member: object) -> bool:
-        key = _normalize_member(member)
-        comps = self._as_components(key)
+        comps = _deep_flatten(member)
         if len(comps) != self.dimen:
             return False
         pos = 0
@@ -313,8 +329,7 @@ class ProductSet(_SetBase):
 
         Computed from factor ordinals without materializing the product.
         """
-        key = _normalize_member(member)
-        comps = self._as_components(key)
+        comps = _deep_flatten(member)
         if len(comps) != self.dimen:
             raise KeyError(f"{member!r} is not a member of set '{self.name}'")
         idx = 0

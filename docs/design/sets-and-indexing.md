@@ -1,6 +1,6 @@
 # Set & Index Abstractions — Design
 
-**Status:** planned · **Last updated:** 2026-06-19 ·
+**Status:** implemented (M1–M7) · **Last updated:** 2026-06-19 ·
 **Scope:** named index sets, set algebra, indexed (dense + sparse) variables/parameters/
 constraints, aggregation over sets, and the performance routing that maps these
 abstractions onto the existing flat model representation.

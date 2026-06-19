@@ -12,14 +12,27 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
-- **Named index sets & set algebra** (`feat(modeling)`). New
-  `discopt.Set` / `discopt.RangeSet` (and `ProductSet`) plus `Model.set(...)` add
-  a Pyomo/JuMP-style named-set layer for sparse models: arbitrary hashable
-  members with inferred/declared `dimen`, set algebra (`|`, `&`, `-`, `*`), and
-  filtering (`Set.where`, `with_first`, `with_last`). This is milestone M1 of the
-  Phase 7 "set & index abstractions" roadmap item — a pure-Python desugaring
-  layer; indexed variables/constraints land in later milestones. Design in
-  `docs/design/sets-and-indexing.md`.
+- **Set & index abstractions** (`feat(modeling)`). A Pyomo/JuMP-style named-set
+  layer for sparse models, implemented as a pure-Python desugaring over the
+  existing flat model (no solver/backend changes). Completes the Phase 7
+  roadmap item. New public API:
+  - `discopt.Set` / `discopt.RangeSet` (+ `ProductSet`) and `Model.set(...)`:
+    arbitrary hashable members with inferred/declared `dimen`, set algebra
+    (`|`, `&`, `-`, `*`), and filtering (`Set.where`, `with_first`,
+    `with_last`). Product sets are lazy and accept flat or nested keys.
+  - `Model.continuous/binary/integer/parameter(..., over=SET)` returning
+    `IndexedVar` / `IndexedParam` backed by a single flat variable/parameter;
+    per-key bounds/values via scalar, `dict`, or callable.
+  - `Model.constraint(SET, rule, name=)` generating one constraint per member
+    (named `name[key]`), with a `Skip` sentinel; `subject_to` now accepts
+    generators of constraints. `dm.sum`/`dm.prod` aggregate over sets.
+  - A transparent **linear fast path**: single-variable-affine, uniform-sense
+    families are emitted as one sparse-matrix builder call (`fast=True`
+    default) with identical results, falling back automatically otherwise.
+  Documented in `docs/notebooks/sets_and_indexing.ipynb`; design in
+  `docs/design/sets-and-indexing.md`; examples
+  `example_transportation` / `example_assignment` /
+  `example_multicommodity_flow`.
 - **Irreducible Infeasible Subsystem (IIS)** (`feat(infeasibility)`, #227). New
   `compute_iis(model)` returns a minimal infeasible subset of constraints/bounds
   via deletion filtering — exact for LP/MILP/convex, best-effort for nonconvex.

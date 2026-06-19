@@ -194,6 +194,17 @@ class TestProductSet:
         for i, m in enumerate(p):
             assert p.ordinal(m) == i
 
+    def test_ordinal_accepts_nested_and_flat_keys(self):
+        # arcs (dimen 2) crossed with commodities (dimen 1) -> dimen 3
+        arcs = Set("arcs", [("s", "u"), ("u", "t")])
+        comm = Set("comm", ["c1", "c2"])
+        prod = arcs * comm
+        # flat key, nested key, and fully nested key all resolve identically
+        assert prod.ordinal(("s", "u", "c1")) == prod.ordinal((("s", "u"), "c1"))
+        assert prod.ordinal(("u", "t", "c2")) == 3
+        assert (("s", "u"), "c1") in prod
+        assert ("s", "u", "c1") in prod
+
 
 class TestFilter:
     def test_where_dimen1(self):
