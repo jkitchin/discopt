@@ -1,7 +1,7 @@
 """
 Benchmark five MINLPLib instances across NLP solvers and MINLP strategies.
 
-Instances: gbd, ex1223a, fuel, alan, portfol_robust050_34
+Instances: gbd, ex1223a, fuel, alan
 NLP solvers: jax_ipm, pounce, ipopt
 Strategies: B&B only, B&B + OA (cutting planes)
 
