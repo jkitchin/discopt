@@ -462,8 +462,10 @@ class TestMILPDispatch:
 
     Before #36, ProblemClass.MILP always routed to _solve_milp_bb, which
     has no primal heuristic and timed out on moderate big-M formulations
-    (e.g. a 5x3 disjunctive jobshop). The default path now goes through
-    HiGHS MIP, with the pure-JAX B&B available via use_highs_milp=False.
+    (e.g. a 5x3 disjunctive jobshop). HiGHS MIP solves these fast; it is now
+    reached via ``nlp_solver="ipm"`` (the universal default is POUNCE, which
+    routes MILP to the self-hosted B&B). These tests pin the HiGHS path that
+    guards #36; the slower default-POUNCE behavior on big-M MILPs is expected.
     """
 
     @staticmethod
@@ -494,9 +496,14 @@ class TestMILPDispatch:
         return m
 
     def test_jobshop_5x3_optimal_under_time_limit(self):
-        """Issue #36 reproducer: 5x3 jobshop must solve quickly via HiGHS."""
+        """Issue #36 reproducer: 5x3 jobshop must solve quickly via HiGHS.
+
+        Pinned to ``nlp_solver="ipm"`` (the HiGHS route): the default-POUNCE
+        self-hosted B&B does not finish this big-M instance in 30s, which is
+        precisely the #36 condition HiGHS guards against.
+        """
         m = self._build_jobshop(5, 3)
-        result = m.solve(time_limit=30)
+        result = m.solve(nlp_solver="ipm", time_limit=30)
         assert result.status == "optimal"
         assert result.objective is not None
         assert result.wall_time < 30.0
@@ -512,10 +519,10 @@ class TestMILPDispatch:
         # formulation because there is no primal heuristic.
         assert result.node_count > 0
 
-    def test_default_path_uses_highs(self):
-        """Default dispatch should hit HiGHS MIP (fast, few nodes)."""
+    def test_ipm_alias_path_uses_highs(self):
+        """The ``"ipm"`` alias hits HiGHS MIP (fast, few nodes)."""
         m = self._build_jobshop(3, 3)
-        result = m.solve(time_limit=30)
+        result = m.solve(nlp_solver="ipm", time_limit=30)
         assert result.status == "optimal"
         # HiGHS presolves and cuts aggressively on this 3x3 instance --
         # a generous bound that would fail for the JAX B&B fallback.

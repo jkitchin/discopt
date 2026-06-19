@@ -585,10 +585,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
     // parent-inherited bound (the reduce skips importing a deferred result), so the
     // returned dual lower bound stays valid — only sharpening is skipped, never a
     // bound's validity. gap is decertified on the deadline path regardless.
-    if ctx
-        .deadline
-        .is_some_and(|d| std::time::Instant::now() >= d)
-    {
+    if ctx.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
         return NodeOutput {
             result: NodeResult {
                 node_id: id,
@@ -643,6 +640,10 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
         l: &sl,
         u: &su,
     };
+    // The root is the only node solved cold (no inherited basis); the diving
+    // heuristic runs there once so its cost (up to n_int warm re-solves) is paid
+    // a single time for the whole search.
+    let is_root = ctx.tm.node_basis(id).is_none();
     let mut sol = match ctx.tm.node_basis(id) {
         Some(basis) => {
             let basis = extend_basis(basis, ctx.n_w);
@@ -688,9 +689,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
             // them lets the in-flight batch drain in cheap-LP time so the
             // loop-top deadline check can actually fire instead of being
             // overshot by a batch of expensive strong-branch probes.
-            let time_up = ctx
-                .deadline
-                .is_some_and(|d| std::time::Instant::now() >= d);
+            let time_up = ctx.deadline.is_some_and(|d| std::time::Instant::now() >= d);
             // Primal heuristic: round this fractional point so the reduce can
             // inject a feasible incumbent early and prune more of the tree.
             if ctx.opts.heuristics && !feasible && !time_up {
@@ -701,12 +700,24 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                     ctx.a_w,
                     ctx.b_w,
                     ctx.c_w,
-                    &ctx.l_w[..ctx.ns],
-                    &ctx.u_w[..ctx.ns],
+                    ctx.l_w,
+                    ctx.u_w,
                     ctx.n_orig_rows,
                     ctx.n_w,
                     ctx.obj_const,
                 );
+                // Continuous-repair fractional dive at the root: plain rounding
+                // never re-solves the continuous variables for the rounded
+                // integer assignment, so on weak-relaxation (big-M) models it
+                // finds no incumbent at all and the search runs with no
+                // bound-based pruning (tree explosion). The dive fixes integers
+                // one at a time and re-solves between fixes, repairing the
+                // continuous variables and avoiding infeasible combinations. Run
+                // only at the root (when rounding found nothing) so its cost is
+                // bounded; the warm-started search + cuts take over thereafter.
+                if out.incumbent.is_none() && is_root {
+                    out.incumbent = try_dive_repair(ctx, lb_k, ub_k, &sol.x);
+                }
             }
             // Node-level cover separation: a fractional node exposes violated
             // covers the root never sees. These are globally valid; the reduce
@@ -995,8 +1006,8 @@ fn try_rounding(
     a_w: &[f64],
     b_w: &[f64],
     c_w: &[f64],
-    glb: &[f64],
-    gub: &[f64],
+    l_w: &[f64],
+    u_w: &[f64],
     n_orig_rows: usize,
     n_w: usize,
     obj_const: f64,
@@ -1007,7 +1018,28 @@ fn try_rounding(
             for j in 0..ns {
                 act += a_w[i * n_w + j] * xc[j];
             }
-            if act > b_w[i] + 1e-6 {
+            // The row's slack columns must cover the residual `b - act`. Sum the
+            // achievable range of the slack contributions over this row: an
+            // equality row has no slack (range [0, 0], so `act` must equal `b`);
+            // a `<=` row a non-negative slack (range [0, +∞), so `act <= b`); a
+            // `>=` row a non-positive one. A plain `act <= b` test is unsound for
+            // equality rows — it wrongly accepts e.g. all-zeros for `Σx == k`,
+            // injecting an infeasible incumbent (the zero-objective feasibility
+            // MILP failure). Using the slack bounds makes the check correct for
+            // every row sense.
+            let resid = b_w[i] - act;
+            let mut lo = 0.0;
+            let mut hi = 0.0;
+            for k in ns..n_w {
+                let aik = a_w[i * n_w + k];
+                if aik == 0.0 {
+                    continue;
+                }
+                let (c1, c2) = (aik * l_w[k], aik * u_w[k]);
+                lo += c1.min(c2);
+                hi += c1.max(c2);
+            }
+            if resid < lo - 1e-6 || resid > hi + 1e-6 {
                 return false;
             }
         }
@@ -1019,12 +1051,16 @@ fn try_rounding(
         (0..ns)
             .map(|j| {
                 let v = if is_int[j] { round(x[j]) } else { x[j] };
-                // Guard against rounding-induced bound inversion (glb[j] a few ULP
-                // above gub[j] on a near-fixed variable): f64::clamp panics when
+                // Guard against rounding-induced bound inversion (l_w[j] a few ULP
+                // above u_w[j] on a near-fixed variable): f64::clamp panics when
                 // min > max. Clamp into the well-ordered interval — identical to
                 // the direct clamp when bounds are ordered, and collapses to the
                 // degenerate (ULP-wide) box when they cross.
-                let (lo, hi) = if glb[j] <= gub[j] { (glb[j], gub[j]) } else { (gub[j], glb[j]) };
+                let (lo, hi) = if l_w[j] <= u_w[j] {
+                    (l_w[j], u_w[j])
+                } else {
+                    (u_w[j], l_w[j])
+                };
                 v.clamp(lo, hi)
             })
             .collect()
@@ -1042,6 +1078,129 @@ fn try_rounding(
     consider(make(&|v: f64| v.round()));
     consider(make(&|v: f64| v.floor()));
     best
+}
+
+/// Fractional-diving primal heuristic with continuous repair: repeatedly fix the
+/// most-fractional unfixed integer to its nearest integer and **re-solve the LP**
+/// (warm-started — the bound-change case the dual simplex re-optimizes cheaply),
+/// until every integer is integral (a feasible incumbent) or a fix makes the LP
+/// infeasible (dive abandoned). Returns the incumbent (structural `x`, true
+/// objective) or `None`.
+///
+/// Re-solving *between* fixes is the whole point: it repairs the continuous
+/// variables to each partial integer assignment and keeps the remaining
+/// relaxed integers feasible-fractional, so the dive avoids the infeasible
+/// combinations (e.g. cyclic big-M precedences) that defeat one-shot rounding.
+/// Plain [`try_rounding`] fixes nothing and never re-solves, so on weak-
+/// relaxation (big-M) models it finds no incumbent at all — leaving the search
+/// with no bound-based pruning. Up to `n_int` warm solves; run once at the root
+/// so the cost is bounded. Sound: integers land on integer values and the final
+/// LP optimum satisfies every row, so the point is feasible; the caller's
+/// `inject_incumbent` enforces strict improvement.
+fn try_dive_repair(
+    ctx: &NodeCtx<'_>,
+    lb_k: &[f64],
+    ub_k: &[f64],
+    x_start: &[f64],
+) -> Option<(Vec<f64>, f64)> {
+    let ns = ctx.ns;
+    // Structural bounds, progressively fixed; slacks keep their bounds.
+    let mut l = lb_k.to_vec();
+    let mut u = ub_k.to_vec();
+    let mut x = x_start.to_vec();
+    let max_steps = ctx.is_int.iter().filter(|&&it| it).count() + 1;
+    for _ in 0..max_steps {
+        // Most-fractional unfixed integer column.
+        let mut pick: Option<usize> = None;
+        let mut best = INT_TOL;
+        for j in 0..ns {
+            if ctx.is_int[j] && l[j] != u[j] {
+                let f = frac(x[j]);
+                if f > best {
+                    best = f;
+                    pick = Some(j);
+                }
+            }
+        }
+        let j = match pick {
+            // No fractional integer remains: round the (near-integral) integers
+            // exactly and return the repaired point.
+            None => {
+                let mut xc = x[..ns].to_vec();
+                for (k, xk) in xc.iter_mut().enumerate() {
+                    if ctx.is_int[k] {
+                        *xk = xk.round();
+                    }
+                }
+                let obj = (0..ns).map(|k| ctx.c_w[k] * xc[k]).sum::<f64>() + ctx.obj_const;
+                return Some((xc, obj));
+            }
+            Some(j) => j,
+        };
+        // Fix the picked integer and re-solve. Try the nearest integer first; if
+        // that makes the LP infeasible (the rounded assignment is part of an
+        // infeasible combination, e.g. a cyclic big-M precedence), try the other
+        // rounding direction before abandoning the dive — a cheap single-variable
+        // backtrack that rescues many big-M dives.
+        let (lo, hi) = if l[j] <= u[j] {
+            (l[j], u[j])
+        } else {
+            (u[j], l[j])
+        };
+        let nearest = x[j].round().clamp(lo, hi);
+        let other = if x[j] >= nearest {
+            (nearest + 1.0).min(hi)
+        } else {
+            (nearest - 1.0).max(lo)
+        };
+        let mut next_x: Option<Vec<f64>> = None;
+        let mut tried = Vec::with_capacity(2);
+        for &v in &[nearest, other] {
+            if tried.contains(&v.to_bits()) {
+                continue;
+            }
+            tried.push(v.to_bits());
+            // Re-solve on the batch's shared (pre-scaled, when ill-conditioned)
+            // matrix — the same robust recipe as the node LP solve — then
+            // unscale. Cold per step (≤ n_int total, root-only) is robust on the
+            // ill-conditioned big-M LPs where a warm re-solve can stall.
+            let mut full_l = vec![0.0; ctx.n_w];
+            let mut full_u = vec![0.0; ctx.n_w];
+            full_l[..ns].copy_from_slice(&l);
+            full_u[..ns].copy_from_slice(&u);
+            full_l[j] = v;
+            full_u[j] = v;
+            full_l[ns..].copy_from_slice(ctx.slack_l);
+            full_u[ns..].copy_from_slice(ctx.slack_u);
+            let (sl, su) = match ctx.scaling {
+                Some(s) => (s.scale_lower(&full_l), s.scale_upper(&full_u)),
+                None => (full_l.clone(), full_u.clone()),
+            };
+            let view = LpView {
+                a: ctx.sa,
+                m: ctx.m_w,
+                n: ctx.n_w,
+                c: ctx.sc,
+                l: &sl,
+                u: &su,
+            };
+            let mut sol = solve_lp_scaled(&view, ctx.sb, ctx.simplex);
+            if sol.status == LpStatus::Optimal {
+                if let Some(s) = ctx.scaling {
+                    s.unscale_x(&mut sol.x);
+                }
+                l[j] = v;
+                u[j] = v;
+                next_x = Some(sol.x);
+                break;
+            }
+        }
+        match next_x {
+            Some(xx) => x = xx,
+            None => return None, // both roundings infeasible -> abandon the dive
+        }
+    }
+    None
 }
 
 fn frac(v: f64) -> f64 {

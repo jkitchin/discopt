@@ -116,11 +116,31 @@ class TestEndToEnd:
 
     def test_crossover_makes_cuts_bite_on_symmetric_problem(self, monkeypatch):
         pytest.importorskip("pounce")
-        # With crossover + cuts the symmetric knapsack solves at/near the root;
-        # without cuts it needs many more nodes. Optimum preserved either way.
-        r_cut = self._sym_knapsack().solve(use_highs_milp=False, time_limit=60)
+        import time as _time
+
+        # This validates the Python self-hosted B&B crossover + cover-cut
+        # machinery (_solve_milp_bb with IPM nodes), where the interior relaxation
+        # point needs crossover for cover cuts to bite. That path is now only a
+        # *fallback* for the default MILP route (the Rust whole-search is
+        # primary), so call it directly to keep the _root_cover_cut_loop
+        # monkeypatch meaningful. With crossover + cuts the symmetric knapsack
+        # solves at/near the root; without cuts it needs more nodes.
+        def _run():
+            return S._solve_milp_bb(
+                self._sym_knapsack(),
+                60.0,
+                1e-4,
+                16,
+                "best_first",
+                100_000,
+                _time.perf_counter(),
+                prefer_pounce=True,
+                node_engine="pounce",
+            )
+
+        r_cut = _run()
         monkeypatch.setattr(S, "_root_cover_cut_loop", lambda ld, *a, **k: (ld, 0))
-        r_nocut = self._sym_knapsack().solve(use_highs_milp=False, time_limit=60)
+        r_nocut = _run()
 
         assert r_cut.status == "optimal" and r_nocut.status == "optimal"
         assert abs(r_cut.objective - r_nocut.objective) < 1e-4

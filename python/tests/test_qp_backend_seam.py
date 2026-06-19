@@ -1,9 +1,10 @@
 """Routing tests for the QP backend seam (roadmap P0.4, mirrors the LP seam).
 
-``_solve_qp`` tries matrix-form engines in order HiGHS -> POUNCE -> JAX QP
-IPM, flipped to POUNCE-first on ``nlp_solver="pounce"``. The POUNCE engine
+``_solve_qp`` tries matrix-form engines POUNCE-first by default (``nlp_solver``
+now defaults to ``"pounce"``); the ``"ipm"`` back-compat alias opts back into
+the HiGHS-first order (HiGHS -> POUNCE -> JAX QP IPM). The POUNCE engine
 handles pure-continuous QPs only; models with integer variables are declined
-so MIQPs stay on HiGHS / the B&B path.
+so MIQPs stay on the B&B path (or HiGHS under the ``"ipm"`` alias).
 """
 
 from __future__ import annotations
@@ -43,11 +44,22 @@ def _spy(monkeypatch, name):
 
 
 class TestQPBackendSeam:
-    def test_default_routes_to_highs(self, monkeypatch):
-        pytest.importorskip("highspy")
+    def test_default_routes_to_pounce(self, monkeypatch):
+        # POUNCE is now the universal default.
         highs_calls = _spy(monkeypatch, "_solve_qp_highs")
         pounce_calls = _spy(monkeypatch, "_solve_qp_pounce")
         res = _build_qp().solve(time_limit=30)
+        assert res.status == "optimal"
+        assert abs(res.objective - 0.5) < 1e-4
+        assert pounce_calls == [True]
+        assert highs_calls == []  # POUNCE is default; HiGHS never consulted
+
+    def test_ipm_alias_routes_to_highs(self, monkeypatch):
+        # The "ipm" back-compat alias opts back into the HiGHS-first route.
+        pytest.importorskip("highspy")
+        highs_calls = _spy(monkeypatch, "_solve_qp_highs")
+        pounce_calls = _spy(monkeypatch, "_solve_qp_pounce")
+        res = _build_qp().solve(nlp_solver="ipm", time_limit=30)
         assert res.status == "optimal"
         assert abs(res.objective - 0.5) < 1e-4
         assert highs_calls == [True]
@@ -75,7 +87,7 @@ class TestQPBackendSeam:
 
     def test_routes_agree_with_each_other(self):
         pytest.importorskip("highspy")
-        r_h = _build_qp().solve(time_limit=30)
+        r_h = _build_qp().solve(nlp_solver="ipm", time_limit=30)  # HiGHS route
         r_p = _build_qp().solve(nlp_solver="pounce", time_limit=30)
         assert abs(r_h.objective - r_p.objective) < 1e-4
         for name in ("x", "y"):

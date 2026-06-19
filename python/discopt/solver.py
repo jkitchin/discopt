@@ -1829,7 +1829,7 @@ def solve_model(
     strategy: str = "best_first",
     max_nodes: int = 100_000,
     ipopt_options: Optional[dict] = None,
-    nlp_solver: str = "ipm",
+    nlp_solver: str = "pounce",
     sparse: Optional[bool] = None,
     cutting_planes: bool = False,
     psd_cuts: bool = False,
@@ -1896,12 +1896,17 @@ def solve_model(
         Maximum number of B&B nodes before stopping.
     ipopt_options : dict, optional
         Options passed to cyipopt (only used when ``nlp_solver="ipopt"``).
-    nlp_solver : str, default "ipm"
-        NLP solver backend: ``"pounce"`` (POUNCE — pure-Rust Ipopt port),
-        ``"ipopt"`` (cyipopt), ``"ipm"`` (pure-JAX IPM), or
-        ``"sparse_ipm"`` (sparse KKT + scipy direct solve). For single
-        continuous solves the ``"ipm"`` default is promoted to a KKT-valid
-        backend, resolving to POUNCE when available and falling back to cyipopt.
+    nlp_solver : str, default "pounce"
+        Numerical engine for every problem class. The default ``"pounce"``
+        (POUNCE — pure-Rust Ipopt port) is now the universal default: it
+        routes LP/QP/MILP/MIQP/NLP/MINLP through POUNCE (and the self-hosted
+        B&B for the integer classes), bypassing HiGHS entirely. Other values:
+        ``"ipopt"`` (cyipopt for the NLP node/continuous solves), or ``"ipm"``
+        / ``"sparse_ipm"`` (back-compat aliases — these now *prefer HiGHS* for
+        the matrix classes LP/QP/MILP/MIQP when ``highspy`` is installed, and
+        resolve to POUNCE for NLP/MINLP; pass one of these to opt back into the
+        HiGHS-first routing). ``"simplex"`` selects the pure-Rust
+        warm-started-simplex MILP B&B.
     sparse : bool or None, default None
         Force sparse (True) or dense (False) Jacobian evaluation.
         If None, auto-selects based on problem size and density.
@@ -2720,10 +2725,15 @@ def solve_model(
                 )
                 if _simplex_res is not None:
                     return _simplex_res
-            # POUNCE-only mode (nlp_solver="pounce") routes to the self-hosted
-            # B&B and bypasses HiGHS entirely (Phase 1 increment 5); the
-            # self-hosted path is sound (incr 1), POUNCE-recovers stalled
-            # nodes (2), purifies incumbents (3), and reduced-cost-fixes (4).
+            # POUNCE-only mode (nlp_solver="pounce", the universal default)
+            # routes to the self-hosted B&B and bypasses HiGHS entirely. An
+            # interior-point method is the wrong tool for the *linear* node LPs
+            # (no warm-start across branches, interior smearing, no basis), so
+            # the per-node engine defaults to the exact-vertex warm-started
+            # **simplex** (node_engine="simplex"); it degrades to the POUNCE IPM
+            # node path inside _solve_milp_bb if the simplex binding is absent.
+            # The B&B itself is sound, runs the continuous-repair root dive for
+            # an early incumbent, recovers stalled nodes, and reduced-cost-fixes.
             _pounce_only = nlp_solver == "pounce"
             if use_highs_milp and not _pounce_only:
                 highs_result = _solve_milp_highs(model, t_start, time_limit, gap_tolerance)
@@ -2738,6 +2748,7 @@ def solve_model(
                 max_nodes,
                 t_start,
                 prefer_pounce=_pounce_only,
+                node_engine="simplex" if _pounce_only else "pounce",
             )
         elif problem_class == ProblemClass.MIQP:
             # Try HiGHS MIQP first (unless POUNCE-only), fall back to B&B.
@@ -7419,9 +7430,9 @@ def _solve_node_lp_pounce(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, ti
         # relaxation solution cannot seed a spurious incumbent or node bound.
         tol = 1e-5
         feasible = True
-        if A_ub_m is not None and A_ub_m.shape[0]:
+        if A_ub_m is not None and b_ub_m is not None and A_ub_m.shape[0]:
             feasible = bool(np.all(A_ub_m @ x_sol <= b_ub_m + tol * (1.0 + np.abs(b_ub_m))))
-        if feasible and A_eq_m is not None and A_eq_m.shape[0]:
+        if feasible and A_eq_m is not None and b_eq_m is not None and A_eq_m.shape[0]:
             feasible = bool(np.all(np.abs(A_eq_m @ x_sol - b_eq_m) <= tol * (1.0 + np.abs(b_eq_m))))
         if not feasible:
             logger.debug("POUNCE convex node solution violates its rows; rejecting")
@@ -7429,6 +7440,77 @@ def _solve_node_lp_pounce(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, ti
         bound = float(res.obj) + float(lp_data.obj_const)
         return (bound, x_sol[:n_vars], "optimal")
     if res.status == "primal_infeasible":
+        return (_INFEASIBILITY_SENTINEL, None, "infeasible")
+    return None
+
+
+def _solve_node_lp_simplex(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, time_limit):
+    """Solve one MILP-B&B node relaxation with the pure-Rust warm-started
+    simplex (exact vertex) — the default node engine for pure MILP.
+
+    An interior-point method is the wrong tool for the *linear* node LPs in MILP
+    B&B: it cannot cheaply warm-start across a branch, returns the analytic
+    centre (so integer coordinates come back smeared and need purification), and
+    yields no basis. The simplex reaches an exact basic-feasible vertex, so its
+    objective is a rigorous node lower bound (no trust-gate decertification),
+    integer coordinates are exact, and node throughput is far higher (issue: the
+    POUNCE-IPM MILP node path was ~300 nodes/s vs the simplex's tens of
+    thousands). Differentiability is unaffected — it is a post-solve IFT layer
+    over (x*, λ*), independent of which engine produced them.
+
+    Same contract as :func:`_solve_node_lp_pounce`: returns
+    ``(lower_bound, solution_over_n_vars, "optimal")``,
+    ``(sentinel, None, "infeasible")``, or ``None`` when the simplex backend is
+    unavailable or could not settle the node (caller falls back / decertifies).
+    """
+    try:
+        from discopt.solvers import SolveStatus
+        from discopt.solvers.lp_simplex import SIMPLEX_AVAILABLE, solve_lp
+    except ImportError:
+        return None
+    if not SIMPLEX_AVAILABLE:
+        return None
+    # Decompose the slack-expanded standard form back to native A_ub/A_eq over
+    # the structural columns (the simplex adapter's matrix form), matching
+    # _solve_node_lp_pounce so node bounds apply to the structural columns.
+    n_slack = int(lp_data.A_eq.shape[1]) - n_orig
+    try:
+        A_ub_m, b_ub_m, A_eq_m, b_eq_m = _decompose_eq_slack_form(
+            np.asarray(lp_data.A_eq, dtype=np.float64),
+            np.asarray(lp_data.b_eq, dtype=np.float64),
+            n_orig,
+            n_slack,
+        )
+        lb_n = np.asarray(node_lb, dtype=np.float64)
+        ub_n = np.asarray(node_ub, dtype=np.float64)
+        bounds = list(zip(lb_n.tolist(), ub_n.tolist()))
+        res = solve_lp(
+            np.asarray(lp_data.c[:n_orig], dtype=np.float64),
+            A_ub=A_ub_m,
+            b_ub=b_ub_m,
+            A_eq=A_eq_m,
+            b_eq=b_eq_m,
+            bounds=bounds,
+        )
+    except Exception as e:
+        logger.debug("simplex node solve failed: %s", e)
+        return None
+    if res.status == SolveStatus.OPTIMAL and res.x is not None and np.isfinite(res.objective):
+        x_sol = np.asarray(res.x, dtype=np.float64)
+        # Soundness gate (mirror _solve_node_lp_pounce): reject a point that
+        # violates its own rows so a bad relaxation cannot seed a spurious bound.
+        tol = 1e-5
+        feasible = True
+        if A_ub_m is not None and b_ub_m is not None and A_ub_m.shape[0]:
+            feasible = bool(np.all(A_ub_m @ x_sol <= b_ub_m + tol * (1.0 + np.abs(b_ub_m))))
+        if feasible and A_eq_m is not None and b_eq_m is not None and A_eq_m.shape[0]:
+            feasible = bool(np.all(np.abs(A_eq_m @ x_sol - b_eq_m) <= tol * (1.0 + np.abs(b_eq_m))))
+        if not feasible:
+            logger.debug("simplex node solution violates its rows; rejecting")
+            return None
+        bound = float(res.objective) + float(lp_data.obj_const)
+        return (bound, x_sol[:n_vars], "optimal")
+    if res.status == SolveStatus.INFEASIBLE:
         return (_INFEASIBILITY_SENTINEL, None, "infeasible")
     return None
 
@@ -8071,7 +8153,19 @@ def _root_cover_cut_loop(
     return lp_data, total
 
 
-def _root_dive(lp_data, n_orig, int_idx, t_start, time_limit, max_steps=None, prefer_pounce=False):
+def _root_dive(
+    lp_data,
+    n_orig,
+    int_idx,
+    t_start,
+    time_limit,
+    max_steps=None,
+    prefer_pounce=False,
+    n_vars=None,
+    lb=None,
+    ub=None,
+    node_engine="pounce",
+):
     """Fractional diving from the root LP to find an early incumbent (Phase 3).
 
     Repeatedly solve the LP relaxation, fix the most-fractional unfixed integer
@@ -8080,23 +8174,50 @@ def _root_dive(lp_data, n_orig, int_idx, t_start, time_limit, max_steps=None, pr
     Returns ``(objective, x_orig)`` in minimization sense, or ``None``. An early
     incumbent front-loads pruning and reduced-cost fixing.
 
-    In POUNCE-only mode (``prefer_pounce``) the dive LPs are solved with POUNCE
-    on the native inequality form instead of the pure-JAX IPM (Phase 8: no JAX
-    IPM on the POUNCE LP/MILP path; the JAX IPM stalls on the slack-expanded
-    standard form anyway).
+    On the self-hosted path (``prefer_pounce`` and/or ``node_engine="simplex"``)
+    the dive LPs are solved with the structured node engine
+    (``_solve_node_lp_simplex`` — exact vertex — or ``_solve_node_lp_pounce``)
+    on the cut-augmented standard form, fixing one integer per re-solve and
+    *re-solving the continuous variables each step*. This continuous repair is
+    why the dive finds incumbents where plain rounding fails: on weak-relaxation
+    (big-M) models the relaxation's integer coordinates are fractional and a
+    rounded point violates the constraints, so without the dive the search runs
+    to the time limit with **no incumbent** at all (no bound-based pruning →
+    tree explosion). A few dozen fast solves at the root is cheap next to that.
+    Requires ``n_vars``/``lb``/``ub`` (the structural node bounds).
     """
     if not int_idx:
         return None
 
     steps = max_steps if max_steps is not None else len(int_idx) + 1
 
-    if prefer_pounce:
-        # POUNCE-only mode (Phase 8: no pure-JAX IPM on this path). The dive is
-        # an optional early-incumbent heuristic; a faithful POUNCE port would
-        # need one LP solve per fixed integer (dozens of sequential solves),
-        # which can starve the main B&B budget on larger relaxations. Skipping
-        # it is sound — node solves and small-integer recovery still find
-        # incumbents — and removes the last JAX-IPM call from the POUNCE path.
+    if prefer_pounce or node_engine == "simplex":
+        if n_vars is None or lb is None or ub is None:
+            return None
+        node_solve = _solve_node_lp_simplex if node_engine == "simplex" else _solve_node_lp_pounce
+        xl = np.asarray(lb, dtype=np.float64).copy()
+        xu = np.asarray(ub, dtype=np.float64).copy()
+        for _ in range(steps):
+            if time.perf_counter() - t_start >= time_limit:
+                return None
+            out = node_solve(lp_data, xl, xu, n_vars, n_orig, t_start, time_limit)
+            if out is None or out[2] != "optimal" or out[1] is None:
+                return None  # infeasible/stalled fix -> abandon the dive
+            obj, x, _ = out
+            x = np.asarray(x, dtype=np.float64)
+            fracs = [
+                (j, abs(x[j] - round(x[j])))
+                for j in int_idx
+                if xl[j] != xu[j] and abs(x[j] - round(x[j])) > 1e-6
+            ]
+            if not fracs:
+                # ``obj`` already includes ``lp_data.obj_const`` (added by the
+                # node solver); ``x`` spans the structural columns.
+                return float(obj), x
+            j = max(fracs, key=lambda t: t[1])[0]
+            v = float(round(x[j]))
+            xl[j] = v
+            xu[j] = v
         return None
 
     import jax.numpy as jnp
@@ -8138,13 +8259,14 @@ def _solve_milp_simplex(
     t_start: float,
 ) -> Optional[SolveResult]:
     """Solve a pure MILP with the Rust-internal warm-started-simplex B&B
-    (``nlp_solver="simplex"``).
+    (``nlp_solver="simplex"`` and the POUNCE-only default MILP path).
 
     The whole search runs in Rust: the existing tree manager with each node's LP
     solved by the bounded simplex (root cold, children dual-warm-started from the
-    inherited basis). Returns ``None`` to defer to the default path when the
-    binding is unavailable or the model has no constraints. Pure-MILP only;
-    MINLP/MIQP keep the POUNCE/IPM path."""
+    inherited basis), with a continuous-repair root dive for an early incumbent.
+    Returns ``None`` to defer to the default path when the binding is unavailable,
+    the model has no constraints, or the returned point fails the feasibility
+    gate. Pure-MILP only; MINLP/MIQP keep the POUNCE/IPM path."""
     from discopt._jax.problem_classifier import extract_lp_data
     from discopt.modeling.core import ObjectiveSense
 
@@ -8177,7 +8299,44 @@ def _solve_milp_simplex(
     maximize = model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE
 
     if status in ("optimal", "feasible"):
-        x_dict = _unpack_solution(model, np.asarray(x_struct, dtype=np.float64))
+        x_arr = np.asarray(x_struct, dtype=np.float64)
+        xo = x_arr[:n_orig]
+        # Feasibility gate: never take an engine's "optimal"/"feasible" on faith.
+        # The Rust whole-search can return an infeasible point — e.g. all-zeros
+        # on a zero-objective feasibility MILP, where the simplex can terminate
+        # at the (infeasible) starting point instead of driving phase-1 to
+        # feasibility. Verify the returned point against the model's own rows,
+        # bounds, and integrality; on violation defer (return None) so the
+        # caller falls back to a sound engine rather than returning a wrong
+        # "optimal".
+        n_slack = int(lp_data.A_eq.shape[1]) - n_orig
+        _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m = _decompose_eq_slack_form(
+            np.asarray(lp_data.A_eq), np.asarray(lp_data.b_eq), n_orig, n_slack
+        )
+        _tol = 1e-5
+        _feas = True
+        if _A_ub_m is not None and _b_ub_m is not None and _A_ub_m.shape[0]:
+            _feas = bool(np.all(_A_ub_m @ xo <= _b_ub_m + _tol * (1.0 + np.abs(_b_ub_m))))
+        if _feas and _A_eq_m is not None and _b_eq_m is not None and _A_eq_m.shape[0]:
+            _feas = bool(np.all(np.abs(_A_eq_m @ xo - _b_eq_m) <= _tol * (1.0 + np.abs(_b_eq_m))))
+        if _feas:
+            _xl = np.asarray(lp_data.x_l[:n_orig], dtype=np.float64)
+            _xu = np.asarray(lp_data.x_u[:n_orig], dtype=np.float64)
+            _feas = bool(np.all(xo >= _xl - _tol) and np.all(xo <= _xu + _tol))
+        if _feas:
+            for _off, _sz in zip(int_offsets, int_sizes):
+                seg = xo[_off : _off + int(_sz)]
+                if np.any(np.abs(seg - np.round(seg)) > 1e-4):
+                    _feas = False
+                    break
+        if not _feas:
+            logger.warning(
+                "Rust simplex MILP returned an infeasible point labeled %s; "
+                "deferring to a sound engine",
+                status,
+            )
+            return None
+        x_dict = _unpack_solution(model, x_arr)
         obj_val = -obj if maximize else obj
         bound_val = None
         gap_val = None
@@ -8192,11 +8351,14 @@ def _solve_milp_simplex(
             x=x_dict,
             wall_time=wall_time,
             node_count=nodes,
+            gap_certified=status == "optimal",
         )
     if status == "unbounded":
         return SolveResult(status="unbounded", wall_time=wall_time, node_count=nodes)
     if status == "node_limit":
-        return SolveResult(status="node_limit", wall_time=wall_time, node_count=nodes)
+        return SolveResult(
+            status="node_limit", wall_time=wall_time, node_count=nodes, gap_certified=False
+        )
     return SolveResult(status="infeasible", wall_time=wall_time, node_count=nodes)
 
 
@@ -8209,11 +8371,20 @@ def _solve_milp_bb(
     max_nodes: int,
     t_start: float,
     prefer_pounce: bool = False,
+    node_engine: str = "pounce",
 ) -> SolveResult:
     """Solve a MILP via B&B with LP relaxation solves at each node.
 
     ``prefer_pounce`` (POUNCE-only mode) routes the incumbent dual recovery
     through POUNCE instead of HiGHS so the whole solve is HiGHS-free.
+
+    ``node_engine`` selects the per-node LP relaxation engine in POUNCE-only
+    mode: ``"simplex"`` (the default for pure MILP — exact-vertex warm-started
+    simplex, far faster than the IPM on linear nodes and free of interior
+    smearing / trust-gate decertification) or ``"pounce"`` (the POUNCE IPM,
+    used as a fallback when the simplex binding is unavailable). The
+    auxiliary root cut-loop / dual recovery stay on POUNCE either way; only the
+    hot per-node solve changes.
     """
     import jax.numpy as jnp
 
@@ -8229,6 +8400,24 @@ def _solve_milp_bb(
 
     n_vars, lb, ub, int_offsets, int_sizes = _extract_variable_info(model)
     n_orig = sum(v.size for v in model._variables)
+
+    # Resolve the per-node LP engine. ``node_engine="simplex"`` (the pure-MILP
+    # default) uses the exact-vertex warm-started simplex; it degrades to the
+    # POUNCE IPM node path if the simplex binding is unavailable. The chosen
+    # engine drives the root LP-bound seed, the root dive, and the node loop.
+    _simplex_nodes = False
+    if node_engine == "simplex":
+        try:
+            from discopt.solvers.lp_simplex import SIMPLEX_AVAILABLE as _SXA
+
+            _simplex_nodes = bool(_SXA)
+        except ImportError:
+            _simplex_nodes = False
+    _node_solve = _solve_node_lp_simplex if _simplex_nodes else _solve_node_lp_pounce
+    _node_engine_resolved = "simplex" if _simplex_nodes else "pounce"
+    # The self-hosted structured node path runs when POUNCE-only mode is on
+    # (either engine) — i.e. whenever we are not on the legacy JAX-IPM path.
+    _use_structured_nodes = prefer_pounce or _simplex_nodes
 
     # Root reduced-cost fixing (increment 4): best-effort integer-bound
     # tightening from the root LP duals + a purified incumbent. Sound and
@@ -8296,9 +8485,9 @@ def _solve_milp_bb(
     # as the relaxation gains partitions/cuts. POUNCE-only (the convex engine);
     # left at -inf otherwise so behavior is unchanged on the JAX-IPM path.
     _root_lp_bound = -np.inf
-    if prefer_pounce:
+    if _use_structured_nodes:
         try:
-            _root_out = _solve_node_lp_pounce(lp_data, lb, ub, n_vars, n_orig, t_start, time_limit)
+            _root_out = _node_solve(lp_data, lb, ub, n_vars, n_orig, t_start, time_limit)
             if _root_out is not None and _root_out[2] == "optimal" and np.isfinite(_root_out[0]):
                 _root_lp_bound = float(_root_out[0])
         except Exception as _rlb_exc:
@@ -8315,7 +8504,16 @@ def _solve_milp_bb(
     try:
         _int_idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
         _dive = _root_dive(
-            lp_data, n_orig, _int_idx, t_start, time_limit, prefer_pounce=prefer_pounce
+            lp_data,
+            n_orig,
+            _int_idx,
+            t_start,
+            time_limit,
+            prefer_pounce=prefer_pounce,
+            n_vars=n_vars,
+            lb=lb,
+            ub=ub,
+            node_engine=_node_engine_resolved,
         )
         if _dive is not None:
             _dz, _dx = _dive
@@ -8381,8 +8579,10 @@ def _solve_milp_bb(
                 np.asarray(inc[1][:n_vars], dtype=np.float64).copy(), float(inc[0])
             )
 
-    # Path B: in POUNCE-only mode, POUNCE solves node relaxations directly
-    # (no JAX recompile on cut-augmented shapes). Checked once here.
+    # Path B: in POUNCE-only mode the structured engine solves node relaxations
+    # directly (no JAX recompile on cut-augmented shapes): the exact-vertex
+    # simplex by default, or the POUNCE IPM. Checked once here. POUNCE
+    # availability is still tracked because the dual recovery path uses it.
     _pounce_nodes_avail = False
     if prefer_pounce:
         try:
@@ -8391,6 +8591,7 @@ def _solve_milp_bb(
             _pounce_nodes_avail = bool(_PNA)
         except ImportError:
             _pounce_nodes_avail = False
+    _structured_avail = _simplex_nodes or (prefer_pounce and _pounce_nodes_avail)
 
     iteration = 0
     while True:
@@ -8410,11 +8611,12 @@ def _solve_milp_bb(
         result_ids = np.array(batch_ids, dtype=np.int64)
         n_slack = lp_data.x_l.shape[0] - n_orig
 
-        if prefer_pounce and _pounce_nodes_avail:
-            # Path B: solve each node's relaxation with POUNCE (Rust) instead of
-            # the JAX IPM. POUNCE takes the cut-augmented LP at any shape with no
-            # per-shape recompile, and its OPTIMAL bound is KKT-valid. The rare
-            # stall/unavailable node defers to the existing recovery/decertify.
+        if _structured_avail:
+            # Path B: solve each node's relaxation with the structured engine
+            # (exact-vertex simplex by default, else POUNCE IPM) instead of the
+            # JAX IPM. It takes the cut-augmented LP at any shape with no
+            # per-shape recompile, and its OPTIMAL bound is exact/KKT-valid. The
+            # rare stall/unavailable node defers to the existing recovery path.
             result_lbs = np.empty(n_batch, dtype=np.float64)
             result_sols = np.empty((n_batch, n_vars), dtype=np.float64)
             result_feas = np.zeros(n_batch, dtype=bool)
@@ -8422,9 +8624,7 @@ def _solve_milp_bb(
                 node_lb = np.array(batch_lb[i])
                 node_ub = np.array(batch_ub[i])
                 _mid = 0.5 * (np.clip(node_lb, -_SPC, _SPC) + np.clip(node_ub, -_SPC, _SPC))
-                out = _solve_node_lp_pounce(
-                    lp_data, node_lb, node_ub, n_vars, n_orig, t_start, time_limit
-                )
+                out = _node_solve(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, time_limit)
                 if out is not None and out[2] == "optimal":
                     result_lbs[i] = out[0]
                     result_sols[i] = out[1]

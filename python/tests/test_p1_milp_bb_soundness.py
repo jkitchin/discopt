@@ -135,7 +135,11 @@ class TestNonKKTDecertifiesWhenUnrecoverable:
         monkeypatch.setattr(S, "_root_cover_cut_loop", lambda ld, *a, **k: (ld, 0))
         _force_code3(monkeypatch, lp_ipm, "lp_ipm_solve_batch")
         monkeypatch.setattr(S, "_pounce_recover_node_bound", lambda *a, **k: None)
-        r = _knapsack_milp().solve(use_highs_milp=False, time_limit=60, batch_size=8)
+        # nlp_solver="ipm" exercises the JAX-IPM node path under test (the new
+        # default, "pounce", solves nodes via POUNCE, bypassing lp_ipm).
+        r = _knapsack_milp().solve(
+            nlp_solver="ipm", use_highs_milp=False, time_limit=60, batch_size=8
+        )
         # Bounds are the real LP optima (just relabeled non-KKT), so the answer
         # is still found, but optimality must not be certified.
         assert r.gap_certified is False
@@ -148,7 +152,11 @@ class TestNonKKTDecertifiesWhenUnrecoverable:
 
         _force_code3(monkeypatch, lp_ipm, "lp_ipm_solve")
         monkeypatch.setattr(S, "_pounce_recover_node_bound", lambda *a, **k: None)
-        r = _knapsack_milp().solve(use_highs_milp=False, time_limit=60, batch_size=1)
+        # nlp_solver="ipm" exercises the JAX-IPM node path under test (the new
+        # default, "pounce", solves nodes via POUNCE, bypassing lp_ipm).
+        r = _knapsack_milp().solve(
+            nlp_solver="ipm", use_highs_milp=False, time_limit=60, batch_size=1
+        )
         assert r.gap_certified is False
         assert r.status == "feasible"
         assert abs(r.objective - (-8.0)) < 1e-4
@@ -395,7 +403,16 @@ class TestPounceOnlyRouting:
         assert r.gap_certified is True
         assert abs(r.objective - 0.18) < 1e-3
 
-    def test_default_milp_still_routes_to_highs(self, monkeypatch):
+    def test_default_milp_routes_to_pounce_not_highs(self, monkeypatch):
+        # POUNCE is now the universal default: a default MILP solve must NOT
+        # touch HiGHS (it routes straight to the self-hosted B&B).
+        self._no_highs(monkeypatch)
+        r = _knapsack_milp().solve(time_limit=60)  # default nlp_solver="pounce"
+        assert r.status == "optimal"
+        assert abs(r.objective - (-8.0)) < 1e-4
+
+    def test_ipm_alias_milp_routes_to_highs(self, monkeypatch):
+        # The "ipm" back-compat alias opts back into HiGHS-first MILP routing.
         pytest_highs = __import__("pytest")
         pytest_highs.importorskip("highspy")
         calls = []
@@ -403,5 +420,5 @@ class TestPounceOnlyRouting:
         monkeypatch.setattr(
             S, "_solve_milp_highs", lambda *a, **k: (calls.append(1), orig(*a, **k))[1]
         )
-        _knapsack_milp().solve(time_limit=60)  # default: use_highs_milp=True
-        assert calls, "default MILP must still try HiGHS first"
+        _knapsack_milp().solve(nlp_solver="ipm", time_limit=60)
+        assert calls, "nlp_solver='ipm' MILP must still try HiGHS first"

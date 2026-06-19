@@ -14,7 +14,7 @@
 //!   it refactorizes on every solve, so it is for bring-up, tiny bases, and
 //!   cross-checking `FeralLU` in tests — not performance.
 
-use feral::{LuParams, SparseColMatrix, SparseLu, SparseLuSymbolic};
+use feral::{should_use_dense_lu, DenseLu, LuParams, SparseColMatrix, SparseLu, SparseLuSymbolic};
 
 /// Error from a basis factorization/solve.
 #[derive(Debug, Clone)]
@@ -64,15 +64,38 @@ pub trait LinearSolver {
     }
 }
 
-/// Production backend: feral's sparse unsymmetric LU.
+/// Production backend: feral's unsymmetric LU, routed dense-or-sparse per basis.
 ///
-/// `Clone` duplicates the factorization itself (feral's `SparseLu` is `Clone`),
-/// so a prepared basis factorization can be cloned and re-optimized from several
+/// B&B node bases are small and often dense (design / balance / big-M rows).
+/// feral's *dense* LU factorizes in O(m³) with tiny constants and **no**
+/// symbolic-analysis phase, while the sparse path re-runs
+/// `SparseLuSymbolic::analyze` on every refactorization — measured at
+/// ~440 µs/iteration (≈100× too slow) on a ~130-row dense basis, with healthy
+/// iteration counts (so the cost was the LU, not pricing/degeneracy). We
+/// therefore route small bases (and feral-judged dense ones) to `DenseLu`, and
+/// leave genuinely large/sparse bases on `SparseLu`.
+///
+/// `Clone` duplicates the factorization itself (both feral LUs are `Clone`), so
+/// a prepared basis factorization can be cloned and re-optimized from several
 /// times — the dual warm-start reuses one factorization across a node's
 /// strong-branching probes instead of refactorizing the identical basis per probe.
+#[derive(Debug, Clone)]
+enum Factored {
+    Sparse(SparseLu),
+    Dense(DenseLu),
+}
+
+/// Force-dense cutoff: at or below this `m`, a dense LU is always at least as
+/// fast as sparse (the O(m³) factor is cheap and there is no symbolic phase),
+/// regardless of density — so route there even when feral's density test, which
+/// also gates on sparsity, would not. Above it we defer to feral's heuristic.
+const FORCE_DENSE_M: usize = 256;
+
+/// Basis factorization backend: feral's LU, dispatched dense-or-sparse per
+/// basis at factorize time (see the [`Factored`] docs for the rationale).
 #[derive(Default, Clone)]
 pub struct FeralLU {
-    lu: Option<SparseLu>,
+    lu: Option<Factored>,
 }
 
 impl FeralLU {
@@ -89,35 +112,42 @@ fn feral_err(e: feral::FeralError) -> LinError {
 impl LinearSolver for FeralLU {
     fn factorize(&mut self, m: usize, cols: &[Vec<f64>]) -> Result<(), LinError> {
         debug_assert_eq!(cols.len(), m);
-        let a = SparseColMatrix::from_dense_columns(m, cols).map_err(feral_err)?;
-        let sym = SparseLuSymbolic::analyze(&a).map_err(feral_err)?;
-        let lu = SparseLu::factor(&a, &sym, LuParams::default()).map_err(feral_err)?;
-        self.lu = Some(lu);
+        let params = LuParams::default();
+        let nnz: usize = cols
+            .iter()
+            .map(|c| c.iter().filter(|&&v| v != 0.0).count())
+            .sum();
+        self.lu = Some(
+            if m <= FORCE_DENSE_M || should_use_dense_lu(m, nnz, &params) {
+                Factored::Dense(DenseLu::factor(cols, m, params).map_err(feral_err)?)
+            } else {
+                let a = SparseColMatrix::from_dense_columns(m, cols).map_err(feral_err)?;
+                let sym = SparseLuSymbolic::analyze(&a).map_err(feral_err)?;
+                Factored::Sparse(SparseLu::factor(&a, &sym, params).map_err(feral_err)?)
+            },
+        );
         Ok(())
     }
 
     fn ftran(&mut self, rhs: &mut [f64]) -> Result<(), LinError> {
-        self.lu
-            .as_mut()
-            .ok_or(LinError::NotFactorized)?
-            .ftran(rhs)
-            .map_err(feral_err)
+        match self.lu.as_mut().ok_or(LinError::NotFactorized)? {
+            Factored::Sparse(lu) => lu.ftran(rhs).map_err(feral_err),
+            Factored::Dense(lu) => lu.ftran(rhs).map_err(feral_err),
+        }
     }
 
     fn btran(&mut self, rhs: &mut [f64]) -> Result<(), LinError> {
-        self.lu
-            .as_mut()
-            .ok_or(LinError::NotFactorized)?
-            .btran(rhs)
-            .map_err(feral_err)
+        match self.lu.as_mut().ok_or(LinError::NotFactorized)? {
+            Factored::Sparse(lu) => lu.btran(rhs).map_err(feral_err),
+            Factored::Dense(lu) => lu.btran(rhs).map_err(feral_err),
+        }
     }
 
     fn update(&mut self, leaving_slot: usize, entering_col: &[f64]) -> Result<(), LinError> {
-        self.lu
-            .as_mut()
-            .ok_or(LinError::NotFactorized)?
-            .update(leaving_slot, entering_col)
-            .map_err(feral_err)
+        match self.lu.as_mut().ok_or(LinError::NotFactorized)? {
+            Factored::Sparse(lu) => lu.update(leaving_slot, entering_col).map_err(feral_err),
+            Factored::Dense(lu) => lu.update(leaving_slot, entering_col).map_err(feral_err),
+        }
     }
 }
 
