@@ -83,7 +83,7 @@ New problem types to make discopt competitive across the full optimization lands
 | Task                              | Status  | Description                                                                  |
 |-----------------------------------|---------|------------------------------------------------------------------------------|
 | QP-specific solver                | Done    | HiGHS QP wrapper + JAX IPM QP path; convex QP fast path                      |
-| Benders decomposition             | Planned | Classical and generalized Benders for block-structured MILP/MINLP            |
+| Benders decomposition             | Done    | Classical Benders for two-stage (MI)LP via `solve(decomposition="benders")`; generalized Benders planned |
 | Lagrangian relaxation             | Planned | Dantzig-Wolfe, column generation, subgradient/bundle methods                 |
 | Global optimization beyond B&B    | Done    | AMP (Adaptive Multivariate Partitioning) global MINLP solver (#23, #86)      |
 | Convex NLP fast path              | Done    | SUSPECT-style convexity detector + convex-NLP fast path (#46)                |

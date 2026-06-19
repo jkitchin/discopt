@@ -33,6 +33,14 @@ The release procedure that produces these entries is documented in
   `docs/design/sets-and-indexing.md`; examples
   `example_transportation` / `example_assignment` /
   `example_multicommodity_flow`.
+- **Benders decomposition solver** (`feat(decomposition)`). Classical Benders
+  for two-stage / block-angular (mixed-integer) linear programs via
+  `model.solve(decomposition="benders")` / `discopt.solve_benders`. The master
+  holds the complicating variables; the recourse LP's HiGHS duals generate
+  optimality cuts and a slack-penalized feasibility LP generates feasibility
+  cuts. Every cut is a global under-estimator, so the master objective is a
+  rigorous lower bound (gap is certified on convergence). Documented in
+  `docs/notebooks/tutorial_benders.ipynb`.
 - **Decomposition structure layer** (`feat(decomposition)`). Foundation for the
   upcoming Benders / Lagrangian solvers: a `Model` annotation API
   (`first_stage`/`second_stage`/`set_stage`/`set_block`/`mark_coupling`) and

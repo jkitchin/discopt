@@ -14,6 +14,12 @@ which resolves user annotations (``model.first_stage(...)``,
 
 from __future__ import annotations
 
+from discopt.decomposition.benders import (
+    BendersConfig as BendersConfig,
+)
+from discopt.decomposition.benders import (
+    solve_benders as solve_benders,
+)
 from discopt.decomposition.structure import (
     DecompositionStructure as DecompositionStructure,
 )
@@ -28,8 +34,10 @@ from discopt.decomposition.structure import (
 )
 
 __all__ = [
+    "BendersConfig",
     "DecompositionStructure",
     "detect_decomposition",
     "flat_bounds",
     "restricted_bounds",
+    "solve_benders",
 ]

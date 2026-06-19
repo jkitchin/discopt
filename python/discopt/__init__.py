@@ -91,6 +91,9 @@ from discopt.decomposition import (
 from discopt.decomposition import (
     detect_decomposition as detect_decomposition,
 )
+from discopt.decomposition import (
+    solve_benders as solve_benders,
+)
 from discopt.infeasibility import (
     IISResult as IISResult,
 )

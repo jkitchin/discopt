@@ -1893,6 +1893,7 @@ def solve_model(
     use_learned_relaxations: bool = False,
     mccormick_bounds: str = "auto",
     gdp_method: str = "big-m",
+    decomposition: Optional[str] = None,
     initial_point: Optional[np.ndarray] = None,
     skip_convex_check: bool = False,
     nlp_bb: Optional[bool] = None,
@@ -2279,6 +2280,32 @@ def solve_model(
             )
             if gp_result is not None:
                 return gp_result
+
+    # --- Benders / Lagrangian decomposition: opt-in, structure-exploiting ---
+    if decomposition is not None:
+        if decomposition == "benders":
+            from discopt.decomposition.benders import solve_benders
+
+            return solve_benders(
+                model,
+                time_limit=time_limit,
+                gap_tolerance=gap_tolerance,
+                max_iterations=max_nodes,
+                nlp_solver=nlp_solver,
+            )
+        if decomposition == "lagrangian":
+            from discopt.decomposition.lagrangian import solve_lagrangian
+
+            return solve_lagrangian(
+                model,
+                time_limit=time_limit,
+                gap_tolerance=gap_tolerance,
+                max_iterations=max_nodes,
+                nlp_solver=nlp_solver,
+            )
+        raise ValueError(
+            f"Unknown decomposition={decomposition!r}; choose 'benders' or 'lagrangian'."
+        )
 
     # --- OA decomposition: general-purpose Outer Approximation ---
     if gdp_method == "oa":
