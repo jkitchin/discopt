@@ -12,7 +12,7 @@
 
 * Abstract
 
-We present discopt, a hybrid Rust/JAX/Python solver for mixed-integer nonlinear programming (MINLP) problems, which integrates POUNCE, a separate companion project providing a faithful Rust translation of Ipopt's interior point algorithm, as one of its NLP backends. The system makes five contributions: (1) differentiable MINLP solving via implicit differentiation of the KKT system, enabling decision-focused learning through nonconvex optimization layers; (2) batched node evaluation using =jax.vmap= for data-parallel branch-and-bound; (3) a pure-JAX interior point method with Mehrotra predictor-corrector steps and Ipopt-style filter line search that is JIT-compilable and vmappable; (4) integration of POUNCE, a memory-safe Rust IPM with zero C/Fortran dependencies that implements Ipopt's numerical hardening through a source-level translation; (5) a compositional relaxation compiler supporting McCormick, \alpha BB, piecewise McCormick, and ICNN-learned relaxations; and (6) a neural network embedding module that formulates trained feedforward networks as algebraic MINLP constraints via full-space, big-M, and reduced-space strategies, enabling optimization over ML surrogates. All three NLP backends (pure-JAX IPM, POUNCE, Ipopt) produce identical optimal solutions on a suite of 9 NLP and 24 MINLP benchmark problems with zero incorrect results. On a decision-focused learning task, differentiating through the solver achieves 36% regret reduction versus two-stage predict-then-optimize. The algebraic coefficient extraction path provides 17--226\times speedups for LP and QP subproblems. discopt is available under the EPL-2.0 license, and POUNCE is available as a separate project (https://github.com/jkitchin/pounce) under the EPL-2.0 license.
+We present discopt, a hybrid Rust/JAX/Python solver for mixed-integer nonlinear programming (MINLP) problems, which integrates POUNCE, a separate companion project providing a faithful Rust translation of Ipopt's interior point algorithm, as one of its NLP backends. The system makes five contributions: (1) differentiable MINLP solving via implicit differentiation of the KKT system, enabling decision-focused learning through nonconvex optimization layers; (2) batched node evaluation using =jax.vmap= for data-parallel branch-and-bound; (3) a pure-JAX interior point method with Mehrotra predictor-corrector steps and Ipopt-style filter line search that is JIT-compilable and vmappable; (4) integration of POUNCE, a memory-safe Rust IPM with zero C/Fortran dependencies that implements Ipopt's numerical hardening through a source-level translation; (5) a compositional relaxation compiler supporting McCormick, \alpha BB, piecewise McCormick, and ICNN-learned relaxations; and (6) a neural network embedding module that formulates trained feedforward networks as algebraic MINLP constraints via full-space, big-M, and reduced-space strategies, enabling optimization over ML surrogates. The global solver couples spatial branch and bound with a cutting-plane framework (reformulation-linearization, second-order-cone, and moment/PSD separators under a structure-gated =cuts='auto'= policy), complementarity/MPEC reformulations, automatic geometric-program detection with log-space convex routing, and irreducible-infeasible-subsystem diagnosis; differentiability extends to mixed-integer programs via a fix-and-differentiate restriction. All three NLP backends (pure-JAX IPM, POUNCE, Ipopt) produce identical optimal solutions on a suite of 9 NLP and 24 MINLP benchmark problems with zero incorrect results. On a decision-focused learning task, differentiating through the solver achieves 36% regret reduction versus two-stage predict-then-optimize. The algebraic coefficient extraction path provides 17--226\times speedups for LP and QP subproblems. discopt is available under the EPL-2.0 license, and POUNCE is available as a separate project (https://github.com/jkitchin/pounce) under the EPL-2.0 license.
 
 * Introduction
 
@@ -37,8 +37,12 @@ This paper describes discopt and its integration with POUNCE, which together add
 7. *Adaptive Multivariate Partitioning* cite:&Nagarajan2016;&Nagarajan2019, a complementary global MINLP solver that iterates piecewise-McCormick MILP relaxations with adaptive partition refinement, with the soundness guarantee $LB_k \le f^* \le UB_k$ at every iteration.
 8. *Model-based design of experiments* under =discopt.doe=: D / A / E / ME-optimal designs on a shared =Experiment= interface, batch / parallel MBDoE cite:&Galvanin2007;&Sandrin2025, identifiability and estimability diagnostics including profile likelihood cite:&Raue2009 and the Yao orthogonalisation cite:&Yao2003 / Brun collinearity index cite:&Brun2001, and a five-criterion model-discrimination loop covering Hunter--Reiner cite:&Hunter1965, Buzzi-Ferraris--Forzatti cite:&BuzziFerraris1984, Jensen--R{\'e}nyi cite:&Olofsson2019, Lindley mutual information cite:&Lindley1956;&Foster2019, and DT-compound cite:&Atkinson1998 designs.
 9. *Multi-objective optimisation* under =discopt.mo=: scalarisation-based Pareto front tracing via weighted sum, AUGMECON2 $\varepsilon$-constraint cite:&Mavrotas2009, weighted Tchebycheff, NBI cite:&DasDennis1998, and NNC cite:&Messac2003, with hypervolume / IGD / spread / $\varepsilon$-indicator quality metrics cite:&ZitzlerThiele1998;&Bosman2003 and full inheritance of the MINLP / differentiable / global-solver stack on every scalarised subproblem.
+10. *Cutting-plane framework* with reformulation-linearization (RLT) cite:&Sherali1990, second-order-cone, and moment/PSD eigenvalue separators cite:&Lasserre2001, governed by a structure-gated =cuts='auto'= policy that selects the separator family from the detected problem structure.
+11. *Complementarity constraints (MPEC)* under =discopt.mpec=: a =complementarity(f, g)= declaration with three exact reformulations --- Scholtes regularisation cite:&Scholtes2001, SOS1 cite:&Beale1970, and generalized-disjunctive lowering cite:&Luo1996 --- each reducing to a standard discopt =Model=.
+12. *Automatic geometric-program detection* under =discopt.gp=: a sound log-convexity verdict cite:&Boyd2007;&Maranas1997 that recognises posynomial programs and routes them through a single log-space convex solve.
+13. *Differentiable mixed-integer programming* via fix-and-differentiate, and *infeasibility analysis* (irreducible infeasible subsystems cite:&Chinneck1991 and conflict-driven no-good cuts cite:&Achterberg2007).
 
-The remainder of this paper is organised as follows. Section ref:sec-arch describes the discopt architecture, including the modelling API, DAE collocation, neural network embedding, and compiler infrastructure. Section ref:sec-nlp-backends presents the three NLP solver backends. Section ref:sec-relax details the convex relaxation framework, including the structural convexity certifier of Section ref:sec-convexity. Section ref:sec-amp introduces the AMP global solver. Section ref:sec-diff covers differentiable optimisation. Section ref:sec-dyn discusses dynamic optimisation, Section ref:sec-estimate parameter estimation, Section ref:sec-doe model-based design of experiments (with identifiability / estimability / discrimination diagnostics), and Section ref:sec-mo multi-objective optimisation. Section 10 reports computational experiments. Section 11 discusses limitations and future work, and Section 12 concludes.
+The remainder of this paper is organised as follows. Section ref:sec-arch describes the discopt architecture, including the modelling API, DAE collocation, neural network embedding, and compiler infrastructure. Section ref:sec-nlp-backends presents the three NLP solver backends. Section ref:sec-relax details the convex relaxation framework, including the structural convexity certifier of Section ref:sec-convexity. Section ref:sec-amp introduces the AMP global solver, and Section ref:sec-search the branch-and-bound search enhancements (primal heuristics, node selection, conflict cuts, and infeasibility analysis). Section ref:sec-diff covers differentiable optimisation, including differentiable mixed-integer programs. Section ref:sec-dyn discusses dynamic optimisation, Section ref:sec-estimate parameter estimation, Section ref:sec-doe model-based design of experiments (with identifiability / estimability / discrimination diagnostics), and Section ref:sec-mo multi-objective optimisation. Section ref:sec-experiments reports computational experiments. The final two sections discuss limitations and future work, and conclude.
 
 * Background and Related Work
 
@@ -267,6 +271,22 @@ The DAG substitution walks every constraint and objective node, replacing Variab
 
 A call to =AffineDecisionRule.apply()= followed by =RobustCounterpart.formulate()= leaves the model fully deterministic with (1) no recourse variables, (2) no uncertain parameters, and (3) new intercept and policy-column variables in their place.  For simple problems (e.g., a two-variable LP with a single uncertain parameter), the affine decision rule typically matches the static robust optimal value, because the static solution already adapts optimally.  The theoretical advantage of ADR emerges in problems with structural asymmetry: multiple constraints, integer first-stage variables, or high-dimensional uncertainty where the static worst case is overly conservative.
 
+** Complementarity Constraints and MPEC
+   :PROPERTIES:
+   :CUSTOM_ID: sec-mpec
+   :END:
+#+LATEX: \label{sec-mpec}
+
+Mathematical programs with equilibrium (complementarity) constraints (MPECs) cite:&Luo1996 arise whenever an inner equilibrium --- contact mechanics, Karush--Kuhn--Tucker conditions of a lower-level problem, piecewise-linear device characteristics, or economic complementary slackness --- is embedded in an outer optimisation. The defining relation is the complementarity condition $0 \le f(x) \perp g(x) \ge 0$, requiring $f, g \ge 0$ component-wise together with $f_i\, g_i = 0$. The product constraint violates every standard constraint qualification at the origin, so a naive nonlinear formulation stalls at spurious stationary points.
+
+The =discopt.mpec= module exposes a single declarative primitive, =complementarity(f, g, name=...)=, and lowers a set of such conditions to a standard discopt =Model= through three exact reformulations selected by =solve_mpec(model, pairs, method=...)=:
+
+- *Scholtes regularisation* (=method="scholtes"=, the default). The exact product $f_i\, g_i = 0$ is relaxed to $f_i\, g_i \le t$ and a homotopy drives $t \downarrow 0$ through a short sequence of local NLP solves cite:&Scholtes2001. Scholtes established that limit points of this scheme are C-stationary, and B-stationary under mild conditions, making it the method of choice when a fast locally-optimal MPEC solution suffices.
+- *SOS1* (=method="sos1"=). The pair $(f_i, g_i)$ is placed in a special-ordered-set-of-type-1 cite:&Beale1970, encoding "at most one of $f_i, g_i$ is nonzero" exactly; branch and bound then resolves the discrete choice, yielding a globally valid solution.
+- *Disjunctive lowering* (=method="gdp"=). The condition is expressed as the disjunction $(f_i = 0) \lor (g_i = 0)$ and handed to the existing GDP machinery (Section ref:sec-arch), which applies big-M or convex-hull reformulation with the same bound-tightening used elsewhere.
+
+Because all three reformulations emit an ordinary =Model=, an MPEC inherits the full solver stack: the regularised path uses any NLP backend, while the SOS1 and disjunctive paths are solved to global optimality by spatial branch and bound with the relaxations of Section ref:sec-relax. Nonlinear complementarity operands $f, g$ are lifted to auxiliary variables so the disjunctive and big-M encodings remain exact on bilinear and higher-degree expressions.
+
 ** JAX DAG Compiler
 
 The DAG compiler walks the expression tree and produces pure JAX functions compatible with =jax.jit=, =jax.grad=, and =jax.vmap=. Each expression node type (=Variable=, =Constant=, =BinaryOp=, =FunctionCall=, etc.) maps to a corresponding JAX operation. The compiler handles:
@@ -464,6 +484,21 @@ On representative test functions, piecewise McCormick with $k=8$ partitions achi
 | $x^2$          |        2.664 |         0.167 |     93.7% |
 | bilinear $xy$ |      varies  |       varies  |     >30%  |
 
+** Cutting Planes: RLT, SOC, and Moment/PSD Separators
+   :PROPERTIES:
+   :CUSTOM_ID: sec-cuts
+   :END:
+#+LATEX: \label{sec-cuts}
+
+Envelope-based relaxations bound each nonlinear term in isolation; cutting planes tighten the relaxation by exploiting the *joint* structure of several terms. discopt separates four cut families, each as a JIT-compatible separator that returns violated inequalities at the current relaxation point:
+
+- *Reformulation-linearization (RLT)* cite:&Sherali1990. Level-1 RLT multiplies pairs of constraint and bound factors and linearises the resulting products against the lifted bilinear variables, tightening the root bound on quadratically-constrained problems; the same products are also separated per node as targeted RLT cuts. The recursive McCormick fold for $n$-ary products is augmented by exact multilinear convex-envelope cuts cite:&Rikun1997 up to a capped arity.
+- *Second-order-cone (SOC)* cuts. For a rotated or standard cone $\lVert y \rVert_2 \le t$, gradient (outer-approximation) cuts at the relaxation point provide a polyhedral outer approximation that sharpens the bound without a conic solver. The SOC and moment/PSD separators together target the quadratically-constrained relaxations that arise in alternating-current optimal power flow cite:&Molzahn2019, which serves as a capstone stress test for the cut framework.
+- *Moment / PSD eigenvalue* cuts cite:&Lasserre2001. For box-QP and QCQP substructure, the lifted moment matrix $M(x, X) = \begin{psmallmatrix} 1 & x^\top \\ x & X \end{psmallmatrix}$ must be positive semidefinite; the separator computes its most negative eigenvalue and adds the corresponding eigenvector cut $v^\top M v \ge 0$, the first-order semidefinite relaxation.
+- *Cover and clique* cuts for $0$--$1$ knapsack substructure.
+
+Rather than expose this machinery as a tuning burden, discopt defaults to a structure-gated policy: =Model.solve(cuts="auto")= inspects the detected problem class and separates RLT on quadratically-constrained problems that carry linear constraints, PSD cuts on constraint-free box-QPs, and neither when no structure is present, so that the two strong but redundant families are never run together. An explicit =rlt_cuts=, =psd_cuts=, or =rlt=True/False= flag overrides the policy for controlled experiments, and =cuts="manual"= disables it entirely.
+
 ** Learned Relaxations via ICNN
 
 As an experimental feature, discopt supports learned convex relaxations using input convex neural networks (ICNNs) cite:&Amos2017icnn. An ICNN architecture with softplus non-negative weight constraints is trained to approximate tighter-than-McCormick underestimators for specific operations, with a soundness loss term that penalizes violations of the convexity and underestimation properties.
@@ -487,6 +522,16 @@ Three downstream consumers benefit from a CONVEX verdict:
 - *Multi-objective scalarization* (Section [[#sec-mo]]) inherits the same convex fast path on each subproblem when the scalarised model certifies convex, e.g. weighted-sum on a sum of certified-convex objectives with non-negative weights.
 
 The detector is conservative by design: it underclaims rather than overclaims. Every CONVEX or CONCAVE verdict is a mathematical proof, never a heuristic; sampling-based methods that could produce false positives are not used.
+
+** Geometric Programs
+   :PROPERTIES:
+   :CUSTOM_ID: sec-gp
+   :END:
+#+LATEX: \label{sec-gp}
+
+A geometric program (GP) cite:&Boyd2007;&Maranas1997 minimises a posynomial subject to posynomial-$\le$-monomial and monomial-$=$-monomial constraints over strictly positive variables. A GP is generally *nonconvex* in the original variables, so a curvature certificate in $x$-space (Section ref:sec-convexity) abstains; yet under the change of variables $y = \log x$ every monomial becomes the exponential of an affine form and every posynomial a convex sum of exponentials, rendering the whole program convex. discopt treats this as a distinct, sound verdict --- *log-convexity* --- computed by =discopt.gp.is_log_convex= without disturbing the $x$-space convexity detector.
+
+When =classify_gp= recognises the standard GP form, =solve_model= routes the problem automatically through =as_geometric_program=, which builds the log-space convex NLP, solves it once with the convex fast path (a single global solve, no spatial branch and bound), and maps the optimiser back to $x$-space; soundness of the log-convex reformulation guarantees the recovered point is the global optimum. The routing is automatic for recognised GPs but can be forced with =solver="gp"= or bypassed with =solver="bb"=, and it is suppressed when streaming callbacks require the branch-and-bound path. Recognising log-convex structure converts an otherwise nonconvex global-optimisation problem into a single convex solve, the same payoff the convexity certifier delivers for $x$-space-convex models.
 
 * Adaptive Multivariate Partitioning (AMP)
   :PROPERTIES:
@@ -512,6 +557,8 @@ so termination at the first $k$ with closed gap is a certified $\varepsilon$-opt
 
 Compared with the default sBB, AMP trades branching combinatorics for relaxation tightness: the MILP at each iteration is larger (one binary per partition cell per branched variable) but the tree is shallow because partitions, not subregions, are refined. On problems where the optimum lives on a few active partition cells --- pooling problems, water-network synthesis, generalised disjunctive programs with bilinear terms --- AMP closes the gap in tens of iterations where sBB would explore thousands of nodes.
 
+The pooling problem cite:&Haverly1978;&Misener2010 --- blending streams of differing quality through intermediate pools to meet output specifications --- is the canonical bilinear test of relaxation strength. The =discopt.pooling= module builds the *pq-formulation* via =build_pq_formulation=, which introduces proportion variables $q_{i\ell}$ (the fraction of pool $\ell$'s inflow drawn from input $i$) together with reformulation-linearization equalities $\sum_i w_{i\ell j} = y_{\ell j}$ for the bilinear products $w_{i\ell j} = q_{i\ell}\, y_{\ell j}$. These redundant-but-tightening constraints make the pq relaxation provably at least as tight as the textbook p- and q-formulations; on the classic Haverly instances (=haverly_hpp1=) the root relaxation is already exact, so the global optimum is certified at the root node.
+
 *v0.4 hardening.* The first AMP release covered the core piecewise-McCormick / disaggregated-convex-hull path on bilinear and trilinear terms. The v0.4 line extends term coverage and relaxation tightness in four directions:
 
 1. *Fractional-power lifting.* Fractional powers $x^p$ with $p \in \mathbb{Q} \setminus \mathbb{Z}$ are lifted to MILP auxiliary variables with piecewise-secant under- and over-estimators, removing the previous restriction to integer monomial degrees.
@@ -520,6 +567,24 @@ Compared with the default sBB, AMP trades branching combinatorics for relaxation
 4. *Optimisation-based bound tightening on the relaxation.* An opt-in OBBT pass on the active MILP relaxation tightens variable bounds before each MILP solve. When an incumbent is available, the cutoff is added as a constraint during OBBT, and live partition state =disc_state= is passed through so the tightening reflects the current $\mathcal P^{(k)}$ rather than the root box.
 
 The convex-hull formulation can be selected via =convhull_formulation \in \{=disaggregated=, =sos2=, =facet=\}= with the optional logarithmic Gray-code embedding =convhull_ebd=True= (giving $\log_2 |\mathcal P|$ binaries per branched variable instead of $|\mathcal P|$). The algorithm also exposes =rel_gap=, =max_iter=, =time_limit=, =n_init_partitions=, =partition_method= (=adaptive=, default; =longest-edge=; =equal-bisection=), =presolve_bt=, =obbt_at_root=, =obbt_with_cutoff=, =alphabb_cutoff_obbt=, and an =iteration_callback= hook receiving =(iteration, lower_bound, upper_bound)= for live convergence inspection on =Model.solve(solver="amp", ...)=.
+
+* Branch-and-Bound Search Enhancements
+  :PROPERTIES:
+  :CUSTOM_ID: sec-search
+  :END:
+#+LATEX: \label{sec-search}
+
+The lower bound at each node is only half of branch and bound; a strong incumbent prunes the tree, a good node ordering reaches it sooner, and learning from infeasible subtrees avoids repeating mistakes. discopt implements a set of search enhancements that, by construction, never weaken the global bound or the optimality certificate.
+
+*Primal heuristics.* Beyond the feasibility pump cite:&Fischetti2005, =discopt._jax.primal_heuristics= provides three improvement heuristics that take the relaxation solution (and, where applicable, the incumbent) and return candidate integer-feasible points. *Diving* progressively fixes one fractional integer at a time and re-solves the node NLP, in either a fractional (nearest-integer) or objective-guided rounding mode. *RINS* cite:&Danna2005 fixes every integer on which the incumbent and the relaxation agree and searches the small sub-MINLP over the disagreeing integers. *Local branching* cite:&Fischetti2003 adds a $k$-flip Hamming-distance constraint around the incumbent and solves the resulting neighbourhood exactly. All three only propose incumbents; every bound mutation they make is temporary and restored, so they cannot affect the dual bound. They are opt-in and invoked at controlled points in the search rather than run unconditionally.
+
+*Node selection.* In addition to best-first and depth-first, discopt offers a best-estimate strategy that orders open nodes by a pseudocost-style estimate of the integer optimum reachable below them, and an objective-gating priority rule that biases branching toward variables most likely to raise the dual bound. Because selection only reorders an exhaustive enumeration, any strategy preserves correctness; the strategies differ only in how quickly the gap closes.
+
+*Conflict analysis.* When a node is proved infeasible, =discopt.conflict= analyses the responsible bound changes to extract a minimal infeasible assignment of binary variables and emits a no-good cut that excludes it tree-wide cite:&Achterberg2007. Because the excluded assignment is genuinely infeasible, the cut removes no feasible point and the global bound is unaffected.
+
+*Bound tightening as a public API.* The feasibility-based bound tightening used internally in presolve is also exposed directly as =discopt.tightening.fbbt_box(model)=, which returns tightened variable bounds (or a proof of infeasibility when constraint propagation yields an empty interval) via row-activity interval arithmetic with no LP solve, supporting both standalone model analysis and reuse inside custom search loops.
+
+*Infeasibility analysis.* For models that are proved infeasible, =discopt.infeasibility.compute_iis= returns an irreducible infeasible subsystem (IIS): a subset of constraints and variable bounds that is itself infeasible but becomes feasible if any single member is removed. The implementation uses deletion filtering cite:&Chinneck1991, tentatively dropping one member at a time and retaining it only when the remainder is *provably* infeasible. This guard makes the procedure sound under an incomplete solver: the returned set is always genuinely infeasible, and it is certified irreducible exactly when every drop-probe was conclusive. Together with the convergence and limit diagnostics, the IIS turns a bare =INFEASIBLE= status into an actionable, human-readable explanation of which constraints conflict.
 
 * Differentiable Optimization
   :PROPERTIES:
@@ -570,6 +635,12 @@ The =DiffSolveResultL3= class provides:
 - =sensitivity(dp)=: fast re-query with cached KKT factorization (analogous to sIPOPT cite:&Pirnay2012)
 
 If the KKT system is ill-conditioned, discopt falls back to finite-perturbation smoothing, and then to L1 envelope theorem gradients.
+
+** Differentiable Mixed-Integer Programs via Fix-and-Differentiate
+
+The envelope and implicit-KKT sensitivities above assume a continuous solution manifold, which the integer variables of a MILP, MIQP, or MINLP break. discopt extends differentiability to the mixed-integer case through a *fix-and-differentiate* restriction: the problem is first solved to global optimality, the integer variables are then pinned at their optimal values, and the continuous restriction --- now an ordinary parametric NLP --- is differentiated by the Level 1 or Level 3 machinery above. This is exact wherever it matters: the optimal integer assignment is piecewise-constant in the parameters, so on the (open, full-measure) set where that assignment is locally stable the objective is smooth through the continuous restriction and $d f^*/dp$ is the true gradient; at the measure-zero breakpoints where the assignment switches, the procedure returns the one-sided sensitivity of the incumbent assignment, which is the appropriate convention for the gradient-descent updates of decision-focused learning.
+
+A single entry point =differentiable_solve(model, method="auto")= detects the problem class (LP, QP, NLP, MILP, MIQP, MINLP) and dispatches automatically, returning a =UnifiedDiffResult= that carries the optimal objective and solution, the detected =problem_class=, a =gradient(param)= method, and the continuous-relaxation objective for mixed-integer problems. The continuous paths reduce to the envelope/implicit-KKT results of the preceding subsections, so a user differentiating a model need not know in advance whether it contains integers.
 
 ** Application: Decision-Focused Learning
 
@@ -746,6 +817,10 @@ For comparing two front approximations, =discopt.mo.indicators= provides four st
 Out of scope in the current release and left to future work: evolutionary MO algorithms (NSGA-II, MOEA/D), Bayesian MO acquisition functions over Gaussian-process surrogates, and interactive / preference-articulation methods that elicit the decision-maker's value function during the search rather than offering a static front.
 
 * Computational Experiments
+  :PROPERTIES:
+  :CUSTOM_ID: sec-experiments
+  :END:
+#+LATEX: \label{sec-experiments}
 
 ** NLP Backend Comparison
 
@@ -797,7 +872,9 @@ We further validate on instances from MINLPLib cite:&Bussieck2003, imported via 
 | nvs04    |   2 |   0 | optimal  | 0.720      | 0.720      |    0.078 |      9 |
 | nvs06    |   2 |   0 | optimal  | 1.770      | 1.770      |    0.022 |      9 |
 
-Of the 9 solvable instances, 7 reach optimal status (matching known optima to $10^{-3}$), while 2 reach feasible solutions at the time limit. The =gear= instance finds a near-zero objective ($2.3 \times 10^{-11}$, matching the known optimum $0.0$) but cannot prove optimality without convex relaxations for the =.nl= import path. Instance =nvs01= reaches a local optimum for the same reason. The JAX computation accounts for 92--99.9% of solver time, with Rust tree management contributing $< 1\%$ and Python overhead $< 2\%$.
+Of the 9 solvable instances, 7 reach optimal status (matching known optima to $10^{-3}$), while 2 reach feasible solutions at the time limit. The =gear= instance finds a near-zero objective ($2.3 \times 10^{-11}$, matching the known optimum $0.0$) but, *at the time of this smoke test*, could not prove optimality because the =.nl= import path did not yet build convex relaxations; instance =nvs01= reached a local optimum for the same reason. The JAX computation accounts for 92--99.9% of solver time, with Rust tree management contributing $< 1\%$ and Python overhead $< 2\%$.
+
+Subsequent to this table, the =.nl= import path was given the full relaxation and dual-bound machinery of Sections ref:sec-relax and ref:sec-cuts, so the solver now closes the gap and certifies global optimality on the majority of these instances rather than stopping at a feasible point. We have validated this expanded path head-to-head against BARON cite:&Tawarmalani2005 on the subset of MINLPLib instances with a proven global optimum, matching the known optimum (to the $10^{-4}$ correctness tolerance) with zero incorrect results; the residual cases where discopt finds the optimum but does not yet prove it are concentrated in high-degree factorable products whose lifted relaxation is loose, consistent with the limitation noted in the Discussion.
 
 ** Neural Network Embedding Validation
 
@@ -828,11 +905,15 @@ Table ref:tab-piecewise reports piecewise McCormick gap reduction. Additionally:
 
 *Time breakdown.* Across the MINLPLib smoke test, JAX numerical computation dominates at 92--99.9% of wall time. Rust tree management accounts for 0.05--7.3%, and Python orchestration overhead is 0.02--0.6%. This confirms that the multi-language architecture introduces negligible overhead.
 
+*JAX-free linear and quadratic paths.* The 92--99.9% JAX share above is specific to nonlinear models. Because JAX import and first-trace compilation impose a fixed cold-start cost (~0.5--1 s) that dominates small solves, the LP, MILP, QP, and MIQP paths are now kept JAX-free: the relaxation compiler, NLP evaluator, and $\alpha$BB modules are imported lazily and only when a genuinely nonlinear relaxation is built. MIQP node relaxations are solved as quadratic programs through POUNCE rather than the JAX QP IPM, so an integer-quadratic solve never touches JAX. The result is that a purely linear or quadratic model pays none of the cold-start tax that the differentiable nonlinear path requires.
+
+*Simplex pivoting.* The Rust dual simplex used for LP and MILP node relaxations replaces Dantzig pricing with dual Devex reference-weight pricing cite:&Harris1973, a steepest-edge approximation that reduces the dual iteration count, and replaces the single-breakpoint dual ratio test with a bound-flipping (long-step) ratio test that resolves more infeasibility per pivot by flipping finite-bounded nonbasic variables to their opposite bound as it walks the breakpoints. Both are standard ingredients of production simplex codes and are paired with the LP equilibration and shared-factorization reuse described earlier to keep the LU well-conditioned across a node's strong-branching probes.
+
 * Discussion
 
 discopt demonstrates that a modern, multi-language MINLP solver can provide capabilities absent from existing monolithic solvers: differentiability, batch evaluation, and memory safety. Several limitations and directions for future work deserve discussion.
 
-*Limitations.* The pure-JAX IPM uses dense linear algebra, which limits scalability to problems with $n \lesssim 5000$ variables. For larger problems, the sparse IPM backend (using scipy sparse factorization) or Ipopt should be used. The =.nl= file import path does not yet compute convex relaxations, limiting global optimality guarantees on imported MINLPLib instances. The JAX Metal backend (Apple GPU) is currently broken in JAX 0.8.2, so GPU acceleration is CPU-only on macOS.
+*Limitations.* The pure-JAX IPM uses dense linear algebra, which limits scalability to problems with $n \lesssim 5000$ variables. For larger problems, the sparse IPM backend (using scipy sparse factorization) or Ipopt should be used. The =.nl= import path now constructs convex relaxations and surfaces a valid dual bound (the earlier smoke-test table predates this capability), so global optimality can be certified on many imported MINLPLib instances; the remaining gap is concentrated in high-degree factorable structure, where the lifted relaxation can be loose or expensive to build. The JAX Metal backend (Apple GPU) is currently broken in JAX 0.8.2, so GPU acceleration is CPU-only on macOS.
 
 *Comparison with existing solvers.* discopt is not intended to replace BARON or SCIP on their core strength---solving large-scale MINLP to global optimality via decades-tuned sparse algorithms. Rather, discopt targets a complementary niche: problems where differentiability, batch solving, or Python-native modeling are primary requirements. The multi-backend architecture means users can start with the pure-JAX IPM for rapid prototyping and differentiable workflows, then switch to POUNCE or Ipopt for production performance.
 

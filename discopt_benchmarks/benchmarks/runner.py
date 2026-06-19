@@ -438,8 +438,12 @@ class BenchmarkRunner:
         Lower/Upper bounds in internal-minimization sense, so we need this to
         recover the original-sense objective.
         """
+        # The ``O`` header is ASCII, but some vendored ``.nl`` files carry
+        # non-UTF-8 bytes elsewhere (binary-format payloads, latin-1 comments).
+        # Read tolerantly so a stray byte can't crash the whole sweep
+        # (UnicodeDecodeError under the default utf-8 codec, observed mid-sweep).
         try:
-            with open(nl_path) as fh:
+            with open(nl_path, encoding="utf-8", errors="replace") as fh:
                 for line in fh:
                     if line.startswith("O"):
                         parts = line.split()
