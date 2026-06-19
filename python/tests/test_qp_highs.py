@@ -222,8 +222,12 @@ class TestDispatchRouting:
         m.subject_to(x + y >= 3)
         assert classify_problem(m) == ProblemClass.MIQP
 
-    def test_qp_uses_highs_solver(self):
-        """Check that the QP path calls HiGHS solve_qp."""
+    def test_qp_ipm_alias_uses_highs_solver(self):
+        """The QP path calls HiGHS solve_qp under the ``"ipm"`` alias.
+
+        POUNCE is now the universal default, so HiGHS is reached only when the
+        user opts back in via ``nlp_solver="ipm"``.
+        """
         from discopt.solvers.qp_highs import solve_qp as _raw_solve
 
         m = dm.Model("highs_check")
@@ -231,7 +235,7 @@ class TestDispatchRouting:
         m.minimize(x**2)
 
         with patch("discopt.solvers.qp_highs.solve_qp", wraps=_raw_solve) as mock_solve:
-            result = m.solve()
+            result = m.solve(nlp_solver="ipm")
             assert result.status == "optimal"
             # If HiGHS path is used, solve_qp should have been called
             assert mock_solve.call_count >= 1

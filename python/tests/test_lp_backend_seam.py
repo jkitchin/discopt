@@ -1,11 +1,12 @@
 """Routing tests for the LP backend seam (roadmap P0.4).
 
-``_solve_lp`` tries matrix-form engines in order HiGHS -> POUNCE -> JAX IPM,
-flipped to POUNCE-first when the user passes ``nlp_solver="pounce"`` (asking
-for POUNCE everywhere). These tests pin:
+``_solve_lp`` tries matrix-form engines in POUNCE-first order by default
+(``nlp_solver`` now defaults to ``"pounce"`` — POUNCE everywhere), and flips
+to HiGHS-first when the user opts into the back-compat ``nlp_solver="ipm"``
+alias. These tests pin:
 
-  - default LP solves keep using HiGHS (no behavior change from the seam),
-  - ``nlp_solver="pounce"`` routes the LP to the POUNCE engine,
+  - default LP solves route to POUNCE (the universal default),
+  - ``nlp_solver="ipm"`` opts back into the HiGHS-first route,
   - when HiGHS is unavailable the LP falls back to POUNCE (not the JAX IPM),
   - all routes agree on the optimum, and duals are exposed either way.
 """
@@ -46,11 +47,23 @@ def _spy(monkeypatch, name):
 
 
 class TestLPBackendSeam:
-    def test_default_routes_to_highs(self, monkeypatch):
-        pytest.importorskip("highspy")
+    def test_default_routes_to_pounce(self, monkeypatch):
+        # POUNCE is now the universal default: the default solve must route to
+        # the POUNCE engine and must NOT consult HiGHS.
         highs_calls = _spy(monkeypatch, "_solve_lp_highs")
         pounce_calls = _spy(monkeypatch, "_solve_lp_pounce")
         res = _build_lp().solve(time_limit=30)
+        assert res.status == "optimal"
+        assert abs(res.objective - 12.0) < 1e-5
+        assert pounce_calls == [True]
+        assert highs_calls == []  # POUNCE is default; HiGHS never consulted
+
+    def test_ipm_alias_routes_to_highs(self, monkeypatch):
+        # The "ipm" back-compat alias opts back into the HiGHS-first route.
+        pytest.importorskip("highspy")
+        highs_calls = _spy(monkeypatch, "_solve_lp_highs")
+        pounce_calls = _spy(monkeypatch, "_solve_lp_pounce")
+        res = _build_lp().solve(nlp_solver="ipm", time_limit=30)
         assert res.status == "optimal"
         assert abs(res.objective - 12.0) < 1e-5
         assert highs_calls == [True]
@@ -78,7 +91,7 @@ class TestLPBackendSeam:
 
     def test_routes_agree_with_each_other(self):
         pytest.importorskip("highspy")
-        r_h = _build_lp().solve(time_limit=30)
+        r_h = _build_lp().solve(nlp_solver="ipm", time_limit=30)  # HiGHS route
         r_p = _build_lp().solve(nlp_solver="pounce", time_limit=30)
         assert abs(r_h.objective - r_p.objective) < 1e-5
         for name in ("x", "y"):

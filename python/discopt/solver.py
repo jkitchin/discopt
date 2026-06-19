@@ -1809,7 +1809,7 @@ def solve_model(
     strategy: str = "best_first",
     max_nodes: int = 100_000,
     ipopt_options: Optional[dict] = None,
-    nlp_solver: str = "ipm",
+    nlp_solver: str = "pounce",
     sparse: Optional[bool] = None,
     cutting_planes: bool = False,
     psd_cuts: bool = False,
@@ -1876,12 +1876,17 @@ def solve_model(
         Maximum number of B&B nodes before stopping.
     ipopt_options : dict, optional
         Options passed to cyipopt (only used when ``nlp_solver="ipopt"``).
-    nlp_solver : str, default "ipm"
-        NLP solver backend: ``"pounce"`` (POUNCE — pure-Rust Ipopt port),
-        ``"ipopt"`` (cyipopt), ``"ipm"`` (pure-JAX IPM), or
-        ``"sparse_ipm"`` (sparse KKT + scipy direct solve). For single
-        continuous solves the ``"ipm"`` default is promoted to a KKT-valid
-        backend, resolving to POUNCE when available and falling back to cyipopt.
+    nlp_solver : str, default "pounce"
+        Numerical engine for every problem class. The default ``"pounce"``
+        (POUNCE — pure-Rust Ipopt port) is now the universal default: it
+        routes LP/QP/MILP/MIQP/NLP/MINLP through POUNCE (and the self-hosted
+        B&B for the integer classes), bypassing HiGHS entirely. Other values:
+        ``"ipopt"`` (cyipopt for the NLP node/continuous solves), or ``"ipm"``
+        / ``"sparse_ipm"`` (back-compat aliases — these now *prefer HiGHS* for
+        the matrix classes LP/QP/MILP/MIQP when ``highspy`` is installed, and
+        resolve to POUNCE for NLP/MINLP; pass one of these to opt back into the
+        HiGHS-first routing). ``"simplex"`` selects the pure-Rust
+        warm-started-simplex MILP B&B.
     sparse : bool or None, default None
         Force sparse (True) or dense (False) Jacobian evaluation.
         If None, auto-selects based on problem size and density.
@@ -7827,7 +7832,18 @@ def _root_cover_cut_loop(
     return lp_data, total
 
 
-def _root_dive(lp_data, n_orig, int_idx, t_start, time_limit, max_steps=None, prefer_pounce=False):
+def _root_dive(
+    lp_data,
+    n_orig,
+    int_idx,
+    t_start,
+    time_limit,
+    max_steps=None,
+    prefer_pounce=False,
+    n_vars=None,
+    lb=None,
+    ub=None,
+):
     """Fractional diving from the root LP to find an early incumbent (Phase 3).
 
     Repeatedly solve the LP relaxation, fix the most-fractional unfixed integer
@@ -7836,10 +7852,16 @@ def _root_dive(lp_data, n_orig, int_idx, t_start, time_limit, max_steps=None, pr
     Returns ``(objective, x_orig)`` in minimization sense, or ``None``. An early
     incumbent front-loads pruning and reduced-cost fixing.
 
-    In POUNCE-only mode (``prefer_pounce``) the dive LPs are solved with POUNCE
-    on the native inequality form instead of the pure-JAX IPM (Phase 8: no JAX
-    IPM on the POUNCE LP/MILP path; the JAX IPM stalls on the slack-expanded
-    standard form anyway).
+    In POUNCE-only mode (``prefer_pounce``) the dive LPs are solved with the
+    *structured convex* POUNCE engine (``_solve_node_lp_pounce``, ~0.03 s/solve
+    with presolve) on the cut-augmented standard form, fixing one integer per
+    re-solve. This is the only early-incumbent heuristic on the POUNCE MILP
+    path: on weak-relaxation (big-M) models the interior-point node solutions
+    are fractional and snap-purification cannot recover a feasible point, so
+    without the dive the search may run to the time limit with **no incumbent**
+    at all (no bound-based pruning → tree explosion). A few dozen 0.03 s solves
+    at the root is cheap next to that. Requires ``n_vars``/``lb``/``ub`` (the
+    structural node bounds); returns ``None`` if they are not supplied.
     """
     if not int_idx:
         return None
@@ -7847,12 +7869,31 @@ def _root_dive(lp_data, n_orig, int_idx, t_start, time_limit, max_steps=None, pr
     steps = max_steps if max_steps is not None else len(int_idx) + 1
 
     if prefer_pounce:
-        # POUNCE-only mode (Phase 8: no pure-JAX IPM on this path). The dive is
-        # an optional early-incumbent heuristic; a faithful POUNCE port would
-        # need one LP solve per fixed integer (dozens of sequential solves),
-        # which can starve the main B&B budget on larger relaxations. Skipping
-        # it is sound — node solves and small-integer recovery still find
-        # incumbents — and removes the last JAX-IPM call from the POUNCE path.
+        if n_vars is None or lb is None or ub is None:
+            return None
+        xl = np.asarray(lb, dtype=np.float64).copy()
+        xu = np.asarray(ub, dtype=np.float64).copy()
+        for _ in range(steps):
+            if time.perf_counter() - t_start >= time_limit:
+                return None
+            out = _solve_node_lp_pounce(lp_data, xl, xu, n_vars, n_orig, t_start, time_limit)
+            if out is None or out[2] != "optimal" or out[1] is None:
+                return None  # infeasible/stalled fix -> abandon the dive
+            obj, x, _ = out
+            x = np.asarray(x, dtype=np.float64)
+            fracs = [
+                (j, abs(x[j] - round(x[j])))
+                for j in int_idx
+                if xl[j] != xu[j] and abs(x[j] - round(x[j])) > 1e-6
+            ]
+            if not fracs:
+                # ``obj`` already includes ``lp_data.obj_const`` (added by
+                # _solve_node_lp_pounce); ``x`` spans the structural columns.
+                return float(obj), x
+            j = max(fracs, key=lambda t: t[1])[0]
+            v = float(round(x[j]))
+            xl[j] = v
+            xu[j] = v
         return None
 
     import jax.numpy as jnp
@@ -8071,7 +8112,15 @@ def _solve_milp_bb(
     try:
         _int_idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
         _dive = _root_dive(
-            lp_data, n_orig, _int_idx, t_start, time_limit, prefer_pounce=prefer_pounce
+            lp_data,
+            n_orig,
+            _int_idx,
+            t_start,
+            time_limit,
+            prefer_pounce=prefer_pounce,
+            n_vars=n_vars,
+            lb=lb,
+            ub=ub,
         )
         if _dive is not None:
             _dz, _dx = _dive
