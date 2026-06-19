@@ -94,6 +94,9 @@ from discopt.decomposition import (
 from discopt.decomposition import (
     solve_benders as solve_benders,
 )
+from discopt.decomposition import (
+    solve_lagrangian as solve_lagrangian,
+)
 from discopt.infeasibility import (
     IISResult as IISResult,
 )

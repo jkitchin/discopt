@@ -84,7 +84,9 @@ New problem types to make discopt competitive across the full optimization lands
 |-----------------------------------|---------|------------------------------------------------------------------------------|
 | QP-specific solver                | Done    | HiGHS QP wrapper + JAX IPM QP path; convex QP fast path                      |
 | Benders decomposition             | Done    | Classical Benders for two-stage (MI)LP via `solve(decomposition="benders")`; generalized Benders planned |
-| Lagrangian relaxation             | Planned | Dantzig-Wolfe, column generation, subgradient/bundle methods                 |
+| Lagrangian relaxation             | Done    | Coupling-constraint dual via `solve(decomposition="lagrangian")`; subgradient + bundle, primal recovery |
+| Lagrangian B&B node-bound hook    | Planned | Feed Lagrangian dual bounds into the spatial B&B node bounding loop          |
+| Dantzig-Wolfe / branch-and-price  | Planned | Column generation and branch-and-price on the dualized blocks                 |
 | Global optimization beyond B&B    | Done    | AMP (Adaptive Multivariate Partitioning) global MINLP solver (#23, #86)      |
 | Convex NLP fast path              | Done    | SUSPECT-style convexity detector + convex-NLP fast path (#46)                |
 | Structural presolve pipeline      | Done    | 22 structural passes wired into the root presolve pipeline (#53)             |

@@ -30,15 +30,14 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from discopt.decomposition._linear import extract_linear, solution_dict
 from discopt.decomposition.structure import (
     DecompositionStructure,
     detect_decomposition,
     flat_bounds,
 )
 from discopt.modeling.core import (
-    Constraint,
     Model,
-    ObjectiveSense,
     SolveResult,
     VarType,
 )
@@ -63,78 +62,6 @@ class BendersConfig:
     prefer_pounce: bool = False
     feas_tol: float = 1e-6
     eta_floor: float = _ETA_FLOOR
-
-
-# ── Linear data extraction ────────────────────────────────────
-
-
-@dataclass
-class _LinearModel:
-    n: int
-    rows_coeff: list[np.ndarray]  # each shape (n,)
-    rows_rhs: list[float]  # <= rhs
-    c: np.ndarray  # objective (minimization), shape (n,)
-    c_offset: float
-    minimize: bool
-
-
-def _extract_linear(model: Model) -> _LinearModel:
-    """Extract <=-canonical linear rows and a linear objective (minimization)."""
-    from discopt._jax.gdp_reformulate import _extract_body_coeffs, _is_linear
-
-    n = sum(v.size for v in model._variables)
-
-    rows_coeff: list[np.ndarray] = []
-    rows_rhs: list[float] = []
-
-    def _add(vec: np.ndarray, rhs: float, sense: str) -> None:
-        if sense == "<=":
-            rows_coeff.append(vec)
-            rows_rhs.append(rhs)
-        elif sense == ">=":
-            rows_coeff.append(-vec)
-            rows_rhs.append(-rhs)
-        else:  # "==" -> two inequalities
-            rows_coeff.append(vec)
-            rows_rhs.append(rhs)
-            rows_coeff.append(-vec)
-            rows_rhs.append(-rhs)
-
-    for c in model._constraints:
-        if not isinstance(c, Constraint):
-            raise NotImplementedError(
-                "Benders v1 supports only algebraic linear constraints "
-                f"(got {type(c).__name__}). Use Model.solve() or method='oa'."
-            )
-        if not _is_linear(c.body):
-            raise NotImplementedError(
-                "Benders v1 supports linear constraints only; the model has a "
-                "nonlinear constraint. Generalized Benders (convex NLP recourse) "
-                "is planned. Use Model.solve() or method='oa' meanwhile."
-            )
-        coeffs = _extract_body_coeffs(c.body, model, n)
-        if coeffs is None:
-            raise NotImplementedError("Could not extract linear coefficients from a constraint.")
-        vec, off = coeffs
-        _add(np.asarray(vec, dtype=np.float64), -float(off), c.sense)
-
-    obj = model._objective
-    if obj is None:
-        c_vec = np.zeros(n)
-        c_off = 0.0
-        minimize = True
-    else:
-        oc = _extract_body_coeffs(obj.expression, model, n)
-        if oc is None:
-            raise NotImplementedError("Benders v1 requires a linear objective.")
-        c_vec = np.asarray(oc[0], dtype=np.float64)
-        c_off = float(oc[1])
-        minimize = obj.sense == ObjectiveSense.MINIMIZE
-    if not minimize:
-        c_vec = -c_vec
-        c_off = -c_off
-
-    return _LinearModel(n, rows_coeff, rows_rhs, c_vec, c_off, minimize)
 
 
 # ── Column partition ──────────────────────────────────────────
@@ -177,16 +104,6 @@ def _partition_columns(model: Model, structure: DecompositionStructure) -> _Part
 
 
 # ── Solver ────────────────────────────────────────────────────
-
-
-def _solution_dict(model: Model, x_full: np.ndarray) -> dict[str, np.ndarray]:
-    out: dict[str, np.ndarray] = {}
-    off = 0
-    for v in model._variables:
-        vals = x_full[off : off + v.size]
-        out[v.name] = np.asarray(vals).reshape(v.shape) if v.shape else vals.reshape(())
-        off += v.size
-    return out
 
 
 def solve_benders(
@@ -238,7 +155,7 @@ def solve_benders(
     if structure is None:
         structure = detect_decomposition(model)
 
-    lin = _extract_linear(model)
+    lin = extract_linear(model)
     part = _partition_columns(model, structure)
     mcols, scols = part.master_cols, part.sub_cols
     n_master = len(mcols)
@@ -448,7 +365,7 @@ def solve_benders(
     if reported_obj is not None and reported_bound is not None:
         gap = abs(reported_obj - reported_bound) / (abs(reported_obj) + 1e-10)
 
-    x_dict = _solution_dict(model, incumbent_full) if incumbent_full is not None else None
+    x_dict = solution_dict(model, incumbent_full) if incumbent_full is not None else None
 
     return SolveResult(
         status=status,

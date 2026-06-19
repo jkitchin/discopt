@@ -33,6 +33,13 @@ The release procedure that produces these entries is documented in
   `docs/design/sets-and-indexing.md`; examples
   `example_transportation` / `example_assignment` /
   `example_multicommodity_flow`.
+- **Lagrangian relaxation solver** (`feat(decomposition)`). Dualizes coupling
+  constraints (annotate with `model.mark_coupling(...)`) to produce a rigorous
+  dual lower bound via `model.solve(decomposition="lagrangian")` /
+  `discopt.solve_lagrangian`. The dual is maximized by a subgradient method
+  (Polyak step) or a bundle / cutting-plane method, and a Lagrangian heuristic
+  recovers a feasible primal incumbent. Documented in
+  `docs/notebooks/tutorial_lagrangian.ipynb`.
 - **Benders decomposition solver** (`feat(decomposition)`). Classical Benders
   for two-stage / block-angular (mixed-integer) linear programs via
   `model.solve(decomposition="benders")` / `discopt.solve_benders`. The master

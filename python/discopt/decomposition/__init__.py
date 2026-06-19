@@ -20,6 +20,12 @@ from discopt.decomposition.benders import (
 from discopt.decomposition.benders import (
     solve_benders as solve_benders,
 )
+from discopt.decomposition.lagrangian import (
+    LagrangianConfig as LagrangianConfig,
+)
+from discopt.decomposition.lagrangian import (
+    solve_lagrangian as solve_lagrangian,
+)
 from discopt.decomposition.structure import (
     DecompositionStructure as DecompositionStructure,
 )
@@ -36,8 +42,10 @@ from discopt.decomposition.structure import (
 __all__ = [
     "BendersConfig",
     "DecompositionStructure",
+    "LagrangianConfig",
     "detect_decomposition",
     "flat_bounds",
     "restricted_bounds",
     "solve_benders",
+    "solve_lagrangian",
 ]
