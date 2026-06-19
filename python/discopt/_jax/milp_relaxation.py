@@ -6867,15 +6867,15 @@ def build_milp_relaxation(
     # complementary constant bound (d ≤ U convex, d ≥ L concave) is carried by
     # the aux column box bounds, so no extra row is needed for it.
     for mrelax in composite_multivar_relaxations:
-        for coeffs, intercept in mrelax.lower_lines:
+        for line_coeffs, intercept in mrelax.lower_lines:
             row = np.zeros(n_total)
-            for col, coeff in coeffs:
+            for col, coeff in line_coeffs:
                 row[col] += coeff
             row[mrelax.aux_col] = -1.0
             _add_row(row, -intercept)
-        for coeffs, intercept in mrelax.upper_lines:
+        for line_coeffs, intercept in mrelax.upper_lines:
             row = np.zeros(n_total)
-            for col, coeff in coeffs:
+            for col, coeff in line_coeffs:
                 row[col] += -coeff
             row[mrelax.aux_col] = 1.0
             _add_row(row, intercept)
