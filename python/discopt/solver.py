@@ -8015,13 +8015,14 @@ def _solve_milp_simplex(
     t_start: float,
 ) -> Optional[SolveResult]:
     """Solve a pure MILP with the Rust-internal warm-started-simplex B&B
-    (``nlp_solver="simplex"``).
+    (``nlp_solver="simplex"`` and the POUNCE-only default MILP path).
 
     The whole search runs in Rust: the existing tree manager with each node's LP
     solved by the bounded simplex (root cold, children dual-warm-started from the
-    inherited basis). Returns ``None`` to defer to the default path when the
-    binding is unavailable or the model has no constraints. Pure-MILP only;
-    MINLP/MIQP keep the POUNCE/IPM path."""
+    inherited basis), with a continuous-repair root dive for an early incumbent.
+    Returns ``None`` to defer to the default path when the binding is unavailable,
+    the model has no constraints, or the returned point fails the feasibility
+    gate. Pure-MILP only; MINLP/MIQP keep the POUNCE/IPM path."""
     from discopt._jax.problem_classifier import extract_lp_data
     from discopt.modeling.core import ObjectiveSense
 
@@ -8054,7 +8055,44 @@ def _solve_milp_simplex(
     maximize = model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE
 
     if status in ("optimal", "feasible"):
-        x_dict = _unpack_solution(model, np.asarray(x_struct, dtype=np.float64))
+        x_arr = np.asarray(x_struct, dtype=np.float64)
+        xo = x_arr[:n_orig]
+        # Feasibility gate: never take an engine's "optimal"/"feasible" on faith.
+        # The Rust whole-search can return an infeasible point — e.g. all-zeros
+        # on a zero-objective feasibility MILP, where the simplex can terminate
+        # at the (infeasible) starting point instead of driving phase-1 to
+        # feasibility. Verify the returned point against the model's own rows,
+        # bounds, and integrality; on violation defer (return None) so the
+        # caller falls back to a sound engine rather than returning a wrong
+        # "optimal".
+        n_slack = int(lp_data.A_eq.shape[1]) - n_orig
+        _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m = _decompose_eq_slack_form(
+            np.asarray(lp_data.A_eq), np.asarray(lp_data.b_eq), n_orig, n_slack
+        )
+        _tol = 1e-5
+        _feas = True
+        if _A_ub_m is not None and _A_ub_m.shape[0]:
+            _feas = bool(np.all(_A_ub_m @ xo <= _b_ub_m + _tol * (1.0 + np.abs(_b_ub_m))))
+        if _feas and _A_eq_m is not None and _A_eq_m.shape[0]:
+            _feas = bool(np.all(np.abs(_A_eq_m @ xo - _b_eq_m) <= _tol * (1.0 + np.abs(_b_eq_m))))
+        if _feas:
+            _xl = np.asarray(lp_data.x_l[:n_orig], dtype=np.float64)
+            _xu = np.asarray(lp_data.x_u[:n_orig], dtype=np.float64)
+            _feas = bool(np.all(xo >= _xl - _tol) and np.all(xo <= _xu + _tol))
+        if _feas:
+            for _off, _sz in zip(int_offsets, int_sizes):
+                seg = xo[_off : _off + int(_sz)]
+                if np.any(np.abs(seg - np.round(seg)) > 1e-4):
+                    _feas = False
+                    break
+        if not _feas:
+            logger.warning(
+                "Rust simplex MILP returned an infeasible point labeled %s; "
+                "deferring to a sound engine",
+                status,
+            )
+            return None
+        x_dict = _unpack_solution(model, x_arr)
         obj_val = -obj if maximize else obj
         bound_val = None
         gap_val = None
@@ -8069,11 +8107,14 @@ def _solve_milp_simplex(
             x=x_dict,
             wall_time=wall_time,
             node_count=nodes,
+            gap_certified=status == "optimal",
         )
     if status == "unbounded":
         return SolveResult(status="unbounded", wall_time=wall_time, node_count=nodes)
     if status == "node_limit":
-        return SolveResult(status="node_limit", wall_time=wall_time, node_count=nodes)
+        return SolveResult(
+            status="node_limit", wall_time=wall_time, node_count=nodes, gap_certified=False
+        )
     return SolveResult(status="infeasible", wall_time=wall_time, node_count=nodes)
 
 
