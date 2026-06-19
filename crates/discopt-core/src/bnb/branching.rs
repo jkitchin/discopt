@@ -390,16 +390,36 @@ const SPATIAL_MIN_WIDTH: f64 = 1e-6;
 /// Picks the variable with the widest domain relative to its global range.
 /// Only considers variables whose current domain width exceeds
 /// [`SPATIAL_MIN_WIDTH`] times the global width.
+///
+/// `deprioritized` (length `n_vars`, or empty to disable) flags continuous
+/// variables that are *functionally dependent* — each is pinned by a single
+/// equality `x_i = f(others)`, so branching on it merely re-splits a value the
+/// relaxation already determines from the independent variables. Spatial B&B
+/// makes no progress bisecting such a variable: the McCormick gap is driven by
+/// the independent inputs, not the dependent output.
+///
+/// `allow_dependent` controls whether those deprioritized columns are eligible.
+/// The caller branches in stages — independent continuous first
+/// (`allow_dependent = false`), then *independent integer* domain-partition
+/// branching (see [`select_spatial_integer_branch_variable`]), and only if both
+/// of those are exhausted does it call again with `allow_dependent = true` as a
+/// completeness-preserving last resort. This ordering matters: on the
+/// welded-beam class (nvs05) the objective gap is driven by an integer product
+/// (`i1*i2`), so the *integer* domain partition must run before any dependent
+/// continuous output is bisected — otherwise the search wastes branches on the
+/// pinned stress intermediates and the bound never climbs. The dependent
+/// fallback never refuses to branch when a branchable dimension remains, so the
+/// search stays complete.
 pub fn select_spatial_branch_variable(
     node_lb: &[f64],
     node_ub: &[f64],
     global_lb: &[f64],
     global_ub: &[f64],
     integer_vars: &[VarBranchInfo],
-) -> Option<BranchDecision> {
+    deprioritized: &[bool],
+    allow_dependent: bool,
+) -> Option<(BranchDecision, f64)> {
     let n = node_lb.len();
-    let mut best_idx: Option<usize> = None;
-    let mut best_width = 0.0_f64;
 
     // Build a quick lookup of which flat indices are integer variables.
     let mut is_int = vec![false; n];
@@ -412,9 +432,14 @@ pub fn select_spatial_branch_variable(
         }
     }
 
+    let mut best_idx: Option<usize> = None;
+    let mut best_width = 0.0_f64;
     for idx in 0..n {
         if is_int[idx] {
             continue;
+        }
+        if !allow_dependent && idx < deprioritized.len() && deprioritized[idx] {
+            continue; // Dependent variable, skip unless this is the fallback pass.
         }
         let width = node_ub[idx] - node_lb[idx];
         let global_width = global_ub[idx] - global_lb[idx];
@@ -439,10 +464,13 @@ pub fn select_spatial_branch_variable(
 
     best_idx.map(|idx| {
         let mid = 0.5 * (node_lb[idx] + node_ub[idx]);
-        BranchDecision {
-            var_index: idx,
-            branch_point: mid,
-        }
+        (
+            BranchDecision {
+                var_index: idx,
+                branch_point: mid,
+            },
+            best_width,
+        )
     })
 }
 
@@ -458,15 +486,28 @@ pub fn select_spatial_branch_variable(
 /// Only columns flagged in `spatial_int_cols` (integer variables appearing in a
 /// nonlinear term) are eligible. A column qualifies only when its integer domain
 /// can still split into two non-empty halves (`ub - lb >= 1`). Returns
-/// `(var_index, branch_point)` with disjoint children `[lb, bp]` and `[bp+1, ub]`.
+/// `(var_index, branch_point, relative_width)` with disjoint children `[lb, bp]`
+/// and `[bp+1, ub]`.
+///
+/// The returned `relative_width` (current width / global width) lets the caller
+/// compare an integer candidate against a continuous one *on equal footing*:
+/// nonconvex spatial B&B branches on whichever dimension — integer or continuous
+/// — has shrunk least relative to its root domain. This is essential on the
+/// welded-beam class (nvs05), where the objective gap is driven by an integer
+/// product `i1*i2` with `i1,i2 ∈ [1,200]`: if integers were always relegated
+/// behind continuous bisection, the continuous variables (infinitely bisectable)
+/// would never exhaust and the integer partition would never fire, freezing the
+/// bound.
 pub fn select_spatial_integer_branch_variable(
     node_lb: &[f64],
     node_ub: &[f64],
+    global_lb: &[f64],
+    global_ub: &[f64],
     spatial_int_cols: &[bool],
-) -> Option<(usize, f64)> {
+) -> Option<(usize, f64, f64)> {
     let n = node_lb.len();
     let mut best_idx: Option<usize> = None;
-    let mut best_width = 0.0_f64;
+    let mut best_rel_width = 0.0_f64;
 
     for idx in 0..n {
         if idx >= spatial_int_cols.len() || !spatial_int_cols[idx] {
@@ -476,8 +517,13 @@ pub fn select_spatial_integer_branch_variable(
         if width < 1.0 - 1e-9 {
             continue; // Cannot split into two non-empty integer halves.
         }
-        if width > best_width {
-            best_width = width;
+        let global_width = global_ub[idx] - global_lb[idx];
+        if global_width < 1e-15 {
+            continue; // Fixed at root, skip.
+        }
+        let relative_width = width / global_width;
+        if relative_width > best_rel_width {
+            best_rel_width = relative_width;
             best_idx = Some(idx);
         }
     }
@@ -490,7 +536,7 @@ pub fn select_spatial_integer_branch_variable(
         if bp < node_lb[idx] {
             bp = node_lb[idx];
         }
-        (idx, bp)
+        (idx, bp, best_rel_width)
     })
 }
 

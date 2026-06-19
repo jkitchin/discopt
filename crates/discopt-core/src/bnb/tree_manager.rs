@@ -120,6 +120,13 @@ pub struct TreeManager {
     /// to bisect (issue #194). Length `n_vars`; all-false unless registered via
     /// [`Self::set_spatial_integer_cols`].
     spatial_integer_cols: Vec<bool>,
+    /// Flat columns of *functionally-dependent* continuous variables — each
+    /// pinned by a single equality `x_i = f(others)` — that spatial branching
+    /// should deprioritize. Branching on a dependent output makes no progress;
+    /// the McCormick gap is driven by the independent inputs. Length `n_vars`;
+    /// all-false unless registered via [`Self::set_branch_deprioritized`].
+    /// Fallback in [`select_spatial_branch_variable`] preserves completeness.
+    branch_deprioritized: Vec<bool>,
 }
 
 impl TreeManager {
@@ -140,6 +147,7 @@ impl TreeManager {
         assert_eq!(ub.len(), n_vars);
         let pseudocosts = Pseudocosts::new(n_vars);
         let spatial_integer_cols = vec![false; n_vars];
+        let branch_deprioritized = vec![false; n_vars];
         Self {
             pool: NodePool::new(strategy),
             incumbent_value: f64::INFINITY,
@@ -157,6 +165,7 @@ impl TreeManager {
             branch_records: HashMap::new(),
             nonconvex: false,
             spatial_integer_cols,
+            branch_deprioritized,
         }
     }
 
@@ -173,6 +182,17 @@ impl TreeManager {
         for &c in cols {
             if c < self.spatial_integer_cols.len() {
                 self.spatial_integer_cols[c] = true;
+            }
+        }
+    }
+
+    /// Register functionally-dependent continuous columns that spatial
+    /// branching should deprioritize (branch on them only when no independent
+    /// continuous variable still qualifies). Out-of-range indices are ignored.
+    pub fn set_branch_deprioritized(&mut self, cols: &[usize]) {
+        for &c in cols {
+            if c < self.branch_deprioritized.len() {
+                self.branch_deprioritized[c] = true;
             }
         }
     }
@@ -399,49 +419,107 @@ impl TreeManager {
                 self.pool.add(right);
                 stats.branched += 1;
             } else if self.nonconvex && int_feasible {
-                // No fractional integer variable, but nonconvex mode: try
-                // spatial branching on continuous variables, then (last resort)
-                // on integer variables in a nonlinear term (issue #194 — closes
-                // the McCormick gap on integer products like gear4's
-                // i1*i2/(i3*i4) instead of fathoming with no incumbent and
-                // falsely certifying).
+                // No fractional integer variable, but nonconvex mode: branch
+                // spatially. Independent continuous variables and integer
+                // variables appearing in a nonlinear term *compete on equal
+                // footing*: each candidate reports its relative width (current
+                // width / root width) and we branch on whichever has shrunk
+                // least relative to its root domain.
+                //
+                // This relative-width competition is the fix for the welded-beam
+                // class (nvs05): the objective gap is driven by an integer
+                // product `i1*i2` with `i1,i2 ∈ [1,200]`. If integers were
+                // relegated behind continuous bisection (the previous staged
+                // ordering), the continuous drivers — infinitely bisectable —
+                // would never exhaust, the integer domain-partition would never
+                // fire, and the bound would freeze (it stalled at 2.022 vs the
+                // true 5.471). Letting the integer partition win whenever its
+                // normalized edge is the longest unfreezes the bound.
+                //
+                // Functionally-dependent continuous outputs (deprioritized) are
+                // excluded from the competition and used only as a
+                // completeness-preserving last resort: bisecting a pinned output
+                // never raises the objective bound, so it must not pre-empt the
+                // integer partition. The dependent fallback never refuses to
+                // branch when a branchable dimension remains, so the search stays
+                // complete; the final fathom is reached only when every dimension
+                // is tight.
                 let (nlb, nub) = {
                     let node = self.pool.get(result.node_id);
                     (node.lb.clone(), node.ub.clone())
                 };
-                let spatial = select_spatial_branch_variable(
+                let cont = select_spatial_branch_variable(
                     &nlb,
                     &nub,
                     &self.global_lb,
                     &self.global_ub,
                     &self.integer_vars,
+                    &self.branch_deprioritized,
+                    false, // independent continuous only
                 );
-                if let Some(ref spatial_decision) = spatial {
+                let spatial_int = select_spatial_integer_branch_variable(
+                    &nlb,
+                    &nub,
+                    &self.global_lb,
+                    &self.global_ub,
+                    &self.spatial_integer_cols,
+                );
+
+                // Pick the candidate with the larger relative width. Continuous
+                // is `(decision, w)`, integer is `(idx, bp, w)`. On a tie, prefer
+                // the integer partition: it strictly shrinks a discrete domain
+                // (guaranteed finite progress) whereas continuous bisection can
+                // be re-split indefinitely.
+                let cont_w = cont.as_ref().map(|(_, w)| *w).unwrap_or(-1.0);
+                let int_w = spatial_int.as_ref().map(|(_, _, w)| *w).unwrap_or(-1.0);
+
+                if cont_w < 0.0 && int_w < 0.0 {
+                    // No independent continuous or integer-product dimension is
+                    // branchable. Try the dependent (deprioritized) continuous
+                    // columns as a last resort so the search never refuses to
+                    // branch when a dimension still has width.
+                    let dependent = select_spatial_branch_variable(
+                        &nlb,
+                        &nub,
+                        &self.global_lb,
+                        &self.global_ub,
+                        &self.integer_vars,
+                        &self.branch_deprioritized,
+                        true,
+                    );
+                    if let Some((ref dep_decision, _)) = dependent {
+                        let parent = self.pool.get(result.node_id).clone();
+                        self.pool.get_mut(result.node_id).status = NodeStatus::Branched;
+                        let (left, right) =
+                            create_children_spatial(&parent, dep_decision, || self.next_id());
+                        self.pool.add(left);
+                        self.pool.add(right);
+                        stats.branched += 1;
+                    } else {
+                        // Every domain is tight; fathom.
+                        self.pool.get_mut(result.node_id).status = NodeStatus::Fathomed;
+                        stats.fathomed += 1;
+                    }
+                } else if int_w >= cont_w {
+                    // Integer domain-partition wins (or ties).
+                    let (sidx, sbp, _) = spatial_int.unwrap();
                     let parent = self.pool.get(result.node_id).clone();
                     self.pool.get_mut(result.node_id).status = NodeStatus::Branched;
-
-                    let (left, right) =
-                        create_children_spatial(&parent, spatial_decision, || self.next_id());
-
-                    self.pool.add(left);
-                    self.pool.add(right);
-                    stats.branched += 1;
-                } else if let Some((sidx, sbp)) =
-                    select_spatial_integer_branch_variable(&nlb, &nub, &self.spatial_integer_cols)
-                {
-                    let parent = self.pool.get(result.node_id).clone();
-                    self.pool.get_mut(result.node_id).status = NodeStatus::Branched;
-
                     let (left, right) =
                         create_children_spatial_int(&parent, sidx, sbp, || self.next_id());
-
                     self.pool.add(left);
                     self.pool.add(right);
                     stats.branched += 1;
                 } else {
-                    // All continuous and integer-product domains are tight; fathom.
-                    self.pool.get_mut(result.node_id).status = NodeStatus::Fathomed;
-                    stats.fathomed += 1;
+                    // Continuous bisection wins.
+                    let (cont_decision, _) = cont.unwrap();
+                    let parent = self.pool.get(result.node_id).clone();
+                    self.pool.get_mut(result.node_id).status = NodeStatus::Branched;
+                    let (left, right) =
+                        create_children_spatial(&parent, &cont_decision, || self.next_id());
+                    self.pool.add(left);
+                    self.pool.add(right);
+                    stats.branched += 1;
                 }
             } else {
                 // No fractional variable found — treat as fathomed.

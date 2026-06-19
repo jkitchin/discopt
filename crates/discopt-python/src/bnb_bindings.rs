@@ -285,6 +285,21 @@ impl PyTreeManager {
         Ok(())
     }
 
+    /// Register functionally-dependent continuous columns (each pinned by a
+    /// single equality `x_i = f(others)`) that spatial branching should
+    /// deprioritize. Branching falls back to them only when no independent
+    /// continuous variable still qualifies, preserving completeness.
+    fn set_branch_deprioritized(&mut self, cols: PyReadonlyArray1<i64>) -> PyResult<()> {
+        let idx: Vec<usize> = cols
+            .as_slice()
+            .unwrap()
+            .iter()
+            .map(|&c| c as usize)
+            .collect();
+        self.inner.set_branch_deprioritized(&idx);
+        Ok(())
+    }
+
     /// Score branching candidates for a solution vector.
     ///
     /// Returns (var_indices, frac_parts, obs_counts, scores) as four arrays.

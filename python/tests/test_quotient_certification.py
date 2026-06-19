@@ -60,11 +60,10 @@ def test_gear_ratio_certifies_near_zero(instance):
     "instance, optimum",
     [
         ("nvs01", 12.46966882),  # (18505*x1**2 + ...) / (x0**2 + 7200) quadratic/quadratic
-        ("nvs06", 1.7703125),  # variable/variable ratio
     ],
 )
 def test_nvs_ratio_certifies(instance, optimum):
-    """nvs01 / nvs06 variable/variable ratios certify their optimum soundly."""
+    """nvs01 variable/variable ratio certifies its optimum soundly."""
     nl = _DATA / f"{instance}.nl"
     assert nl.exists(), f"missing {nl}"
     r = dm.from_nl(str(nl)).solve(time_limit=60, gap_tolerance=1e-4)
@@ -74,3 +73,34 @@ def test_nvs_ratio_certifies(instance, optimum):
     # Soundness: a valid dual bound never exceeds the known global optimum.
     assert r.bound <= optimum + 1e-2, f"[{instance}] unsound dual bound {r.bound} > {optimum}"
     assert r.gap_certified, f"[{instance}] expected certified optimality"
+
+
+@pytest.mark.correctness
+@pytest.mark.parametrize(
+    "instance, optimum",
+    [
+        ("nvs06", 1.7703125),  # variable/variable ratio, ill-conditioned denominator-clearing
+    ],
+)
+def test_nvs_ratio_sound_uncertified(instance, optimum):
+    """nvs06 reaches its optimum with a SOUND (never over-tight) bound.
+
+    nvs06 is nvs22's ill-conditioned sibling: clearing its variable/variable
+    denominator yields McCormick rows whose LP relaxation has a badly conditioned
+    optimal basis. The Neumaier-Shcherbina safe dual-bounding discriminator in
+    ``run_obbt_on_relaxation`` (see obbt.py ``_ns_safe_lp_lower_bound``) refuses to
+    trust the inaccurate LP vertex here, so OBBT no longer over-tightens and the
+    root no longer prunes toward a spurious tight bound. The incumbent still reaches
+    the true optimum and the surfaced bound stays a valid under-estimate, but the
+    gap is not closed to tolerance. We assert soundness, NOT certification: the prior
+    "certified" status relied on the untrustworthy vertex and was the same mechanism
+    that produced nvs22's false certificate (certified 47.56 vs true 6.0582).
+    """
+    nl = _DATA / f"{instance}.nl"
+    assert nl.exists(), f"missing {nl}"
+    r = dm.from_nl(str(nl)).solve(time_limit=60, gap_tolerance=1e-4)
+
+    assert r.objective is not None and r.bound is not None, f"[{instance}] no bound produced"
+    assert abs(r.objective - optimum) <= 1e-2, f"[{instance}] obj={r.objective} != {optimum}"
+    # Soundness is the invariant: a valid dual bound never exceeds the optimum.
+    assert r.bound <= optimum + 1e-2, f"[{instance}] unsound dual bound {r.bound} > {optimum}"

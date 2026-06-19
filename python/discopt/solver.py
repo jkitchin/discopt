@@ -188,6 +188,26 @@ _POUNCE_BATCH_MIN_VARS = 50
 # budget. Nodes that start fully past the deadline are skipped (see the serial
 # loop), so at most one node per batch can overrun by this floor.
 _DEADLINE_NODE_FLOOR_S = 0.1
+# Per-node OBBT (Lever A) gates. Per-node optimization-based bound tightening is
+# powerful but costs O(n_vars) LPs per node, so it is enabled only for the
+# functionally-dependent-intermediate structural class and on small models, and
+# its cumulative wall time is capped to a fraction of the solve budget. These
+# defaults keep it inert on the broad corpus while letting the welded-beam
+# (nvs05) class certify (see ``dependent_vars`` and the batch loop).
+_PER_NODE_OBBT_MAX_VARS = 100
+_PER_NODE_OBBT_BUDGET_FRAC = 0.6
+_PER_NODE_OBBT_PER_NODE_S = 3.0
+_PER_NODE_OBBT_PER_LP_S = 0.3
+_PER_NODE_OBBT_ROUNDS = 3
+# Floor on the time budget handed to the end-of-solve root-relaxation fallback
+# bound (issue #138). On a hard nonconvex minimize the B&B loop can consume the
+# entire `time_limit` and exit uncertified, leaving no time for the rigorous
+# root MILP-relaxation bound — so a sound dual bound is dropped to None. This
+# floor lets the fallback still run a small, bounded solve so an uncertified exit
+# reports a finite *sound* bound instead of None. It is paid only when the search
+# produced no usable bound at all (never on a clean/certified solve), and the
+# fallback's own internal budget (~10% of this) keeps the overrun small.
+_ROOT_FALLBACK_FLOOR_S = 3.0
 # Multistart runs 3 starts per nonconvex node (warm/midpoint/random) and keeps
 # the best — better incumbents on nonconvex models, but ~3x the node-solve cost.
 # Off by default; flip to opt in (or pass multistart=True to _solve_batch_pounce).
@@ -2354,6 +2374,24 @@ def solve_model(
                 break
         _origin_chk_off += _ov.size
 
+    # Functionally-dependent continuous variables (each pinned by a nonlinear
+    # defining equality x_i = f(others)). Detected on the ORIGINAL model, before
+    # the factorable reform rewrites those equalities into product form (which
+    # would hide the affine isolation of the output). The dependency is
+    # invariant under that rewrite, so the names captured here remain correct to
+    # deprioritize in the lifted/solved model. Spatial branching deprioritizes
+    # these — branching on a pinned output wastes effort the McCormick gap on
+    # the independent inputs would not (welded-beam / nvs05). Names are mapped
+    # to flat columns of the live model at tree setup; deprioritization carries
+    # a completeness-preserving fallback, so an empty or imperfect set is safe.
+    _dependent_var_names: set = set()
+    try:
+        from discopt._jax.dependent_vars import find_functionally_dependent_names
+
+        _dependent_var_names = find_functionally_dependent_names(model)
+    except Exception as _dep_exc:  # pragma: no cover - defensive
+        logger.debug("functional-dependency detection skipped: %s", _dep_exc)
+
     # Pre-reform model + original variable count, set only when the factorable
     # lift actually fires (see below). Used by the per-node interval bound to
     # recover the un-distributed objective's tight enclosure over the original
@@ -3215,6 +3253,55 @@ def solve_model(
                 else:
                     if _nl_int_cols:
                         tree.set_spatial_integer_cols(np.asarray(_nl_int_cols, dtype=np.int64))
+                    # Deprioritize functionally-dependent continuous columns in
+                    # spatial branching. Two disjoint sources, both of which are
+                    # *outputs* pinned by the independent variables, so bisecting
+                    # them never tightens the McCormick gap (which is driven by the
+                    # independent inputs):
+                    #   (a) lifted auxiliaries introduced by the factorable reform
+                    #       (every aux is ``w = g(x)`` by construction — appended
+                    #       after the originals, so columns ``>= _prereform_nvars``).
+                    #       Branching a product aux ``w = x_i*x_j`` cannot shrink
+                    #       that product's envelope; only bisecting ``x_i``/``x_j``
+                    #       can. Without this, the relaxer's wide-domain aux columns
+                    #       win the relative-width competition and the integer
+                    #       product never gets partitioned (welded-beam / nvs05:
+                    #       bound frozen at 2.022 vs the true 5.471).
+                    #   (b) original continuous outputs pinned by a nonlinear
+                    #       equality ``x_i = f(others)`` (detected pre-reform).
+                    # Restricting spatial branching to the original *independent*
+                    # variables matches BARON/Couenne practice and is complete: when
+                    # every independent domain is a point, all dependents are exact
+                    # and the relaxation is tight. The Rust selector's last-resort
+                    # fallback still branches a deprioritized column if no
+                    # independent one remains, preserving completeness.
+                    try:
+                        _dep_cols_set: set = set()
+                        if _prereform_model is not None and n_vars > _prereform_nvars:
+                            _dep_cols_set.update(range(_prereform_nvars, n_vars))
+                        if _dependent_var_names:
+                            from discopt._jax.dependent_vars import (
+                                dependent_columns_for_model,
+                            )
+
+                            _dep_cols_set.update(
+                                dependent_columns_for_model(model, _dependent_var_names)
+                            )
+                        _dep_cols = sorted(_dep_cols_set)
+                        if _dep_cols:
+                            tree.set_branch_deprioritized(np.asarray(_dep_cols, dtype=np.int64))
+                            logger.debug(
+                                "spatial branching deprioritizes %d "
+                                "functionally-dependent continuous columns "
+                                "(%d lifted aux + %d original outputs)",
+                                len(_dep_cols),
+                                max(0, n_vars - _prereform_nvars)
+                                if _prereform_model is not None
+                                else 0,
+                                len(_dependent_var_names),
+                            )
+                    except Exception as _dep_exc:  # pragma: no cover - defensive
+                        logger.debug("branch-deprioritization wiring skipped: %s", _dep_exc)
                     # Root probe: keep the LP relaxer only if it actually yields
                     # a valid objective bound (or a rigorous infeasibility proof)
                     # at the root box. When the objective is not LP-linearizable
@@ -3460,6 +3547,36 @@ def solve_model(
                 sorted(_branch_priority_vars),
             )
 
+    # --- Per-node OBBT (Lever A) setup ---
+    # Tighten each node's box against its McCormick relaxation (with the
+    # incumbent objective as a cutoff when available). Per-node bounds are
+    # subtree-local and rigorous. This is gated to the SAME structural class as
+    # branch-deprioritization — models with functionally-dependent continuous
+    # intermediates (defining equalities x_i = f(others)) — so models without
+    # that structure incur zero overhead. The two levers are complementary:
+    # deprioritization stops branching from wasting effort on dependent outputs,
+    # while per-node OBBT pins those outputs from the relaxation + cutoff so a
+    # node can fathom once its independent drivers are fixed. Neither alone
+    # certifies the welded-beam (nvs05) class; together they do (~23 nodes).
+    # A cumulative time budget caps total cost so a deep tree can never let
+    # per-node OBBT dominate wall clock.
+    _per_node_obbt_enabled = (
+        _mc_lp_relaxer is not None
+        and bool(_dependent_var_names)
+        and n_vars <= _PER_NODE_OBBT_MAX_VARS
+    )
+    _pn_obbt_spent = 0.0
+    _pn_obbt_budget_total = time_limit * _PER_NODE_OBBT_BUDGET_FRAC
+    if _per_node_obbt_enabled:
+        from discopt._jax.obbt import obbt_tighten_root
+
+        logger.debug(
+            "per-node OBBT enabled (n_vars=%d, dependent=%d, budget=%.1fs)",
+            n_vars,
+            len(_dependent_var_names),
+            _pn_obbt_budget_total,
+        )
+
     while True:
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
@@ -3518,6 +3635,57 @@ def solve_model(
                     continue
                 batch_lb[i] = t_lb.tolist()
                 batch_ub[i] = t_ub.tolist()
+
+        # --- Per-node OBBT (Lever A) ---
+        # Tighten each surviving node's box against its own McCormick relaxation
+        # (optionally with the incumbent objective as a cutoff). The relaxation
+        # is built over the node box, so the resulting bounds are valid for the
+        # node's subtree — rigorous, not heuristic. For the dependent-
+        # intermediate class this pins the functionally-dependent outputs from
+        # the relaxation, which is what lets a node fathom once its independent
+        # drivers are branched (welded-beam / nvs05). Gated + budgeted at setup;
+        # here we additionally stop as soon as the cumulative budget is spent.
+        if _per_node_obbt_enabled and _pn_obbt_spent < _pn_obbt_budget_total:
+            _pn_inc = tree.incumbent()
+            _pn_cutoff = (
+                float(_pn_inc[1])
+                if _pn_inc is not None
+                and np.isfinite(_pn_inc[1])
+                and _pn_inc[1] < _SENTINEL_THRESHOLD
+                else None
+            )
+            for i in range(n_batch):
+                if node_infeasible_mask[i]:
+                    continue
+                if _pn_obbt_spent >= _pn_obbt_budget_total:
+                    break
+                _t_pn = time.perf_counter()
+                if time_limit - (_t_pn - t_start) < _DEADLINE_NODE_FLOOR_S:
+                    break
+                try:
+                    _pn_res = obbt_tighten_root(
+                        model,
+                        np.asarray(batch_lb[i], dtype=np.float64),
+                        ub=np.asarray(batch_ub[i], dtype=np.float64),
+                        rounds=_PER_NODE_OBBT_ROUNDS,
+                        incumbent_cutoff=_pn_cutoff,
+                        deadline=_t_pn + _PER_NODE_OBBT_PER_NODE_S,
+                        time_limit_per_lp=_PER_NODE_OBBT_PER_LP_S,
+                        prefer_pounce=nlp_solver == "pounce",
+                    )
+                except Exception as _pn_exc:  # pragma: no cover - defensive
+                    logger.debug("per-node OBBT failed: %s", _pn_exc)
+                    _pn_res = None
+                finally:
+                    _pn_obbt_spent += time.perf_counter() - _t_pn
+                if _pn_res is None:
+                    continue
+                if _pn_res.infeasible:
+                    node_infeasible_mask[i] = True
+                    continue
+                if _pn_res.n_tightened > 0:
+                    batch_lb[i] = np.asarray(_pn_res.lb, dtype=np.float64).tolist()
+                    batch_ub[i] = np.asarray(_pn_res.ub, dtype=np.float64).tolist()
 
         # Solve NLP relaxation for each node in the batch
         t_jax_start = time.perf_counter()
@@ -4226,6 +4394,75 @@ def solve_model(
                 except Exception as e:
                     logger.debug("Feasibility pump failed: %s", e)
 
+                # --- NLP-relaxation-seeded feasibility pump ---
+                # The pump above rounds ``result_sols[best_root_idx]``. When the
+                # relaxation bound is supplied by the McCormick *LP* relaxer that
+                # seed is an LP vertex, and for integer-heavy nonconvex models an
+                # LP vertex can round into a far-suboptimal integer assignment even
+                # though the genuine continuous NLP relaxation rounds straight into
+                # the global basin (st_e31: LP-vertex rounding parks the incumbent
+                # at obj=-1.0 for >100 s while a single NLP-relaxation rounding
+                # reaches the true optimum -2.0 immediately). When the LP relaxer is
+                # active the root multistart NLP is otherwise skipped (it is not a
+                # bound source there), so the pump never sees that point. Solve one
+                # root NLP relaxation now purely to supply a better rounding seed.
+                # General: any integer-heavy nonconvex MINLP on the LP-relaxer path
+                # benefits; no-op for convex models and when no NLP backend exists.
+                # Sound: only pump-verified feasible incumbents that strictly
+                # improve the current incumbent are injected (``inject_incumbent``
+                # enforces strict improvement), so a worse seed can never regress
+                # the reported solution.
+                if _mc_lp_relaxer is not None and not _model_is_convex:
+                    try:
+                        from discopt._jax.primal_heuristics import feasibility_pump
+
+                        _relax_opts = dict(opts)
+                        _relax_opts["max_wall_time"] = max(
+                            _DEADLINE_NODE_FLOOR_S,
+                            min(3.0, _deadline - time.perf_counter()),
+                        )
+                        _root_relax = _solve_root_node_multistart(
+                            _active_evaluator,
+                            np.array(batch_lb[best_root_idx]),
+                            np.array(batch_ub[best_root_idx]),
+                            _active_cb,
+                            _relax_opts,
+                            nlp_solver,
+                            n_random=0,
+                            deadline=_deadline,
+                        )
+                        if (
+                            _root_relax is not None
+                            and _root_relax.x is not None
+                            and _root_relax.status
+                            in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT)
+                        ):
+                            fp_sol2 = feasibility_pump(
+                                model,
+                                np.asarray(_root_relax.x, dtype=float),
+                                max_rounds=5,
+                                backend=_resolve_heuristic_backend(nlp_solver),
+                                evaluator=evaluator,
+                                deadline=t_start + time_limit,
+                            )
+                            if fp_sol2 is not None:
+                                fp_obj2 = float(evaluator.evaluate_objective(fp_sol2))
+                                fp_feas2 = not cl_list or _check_constraint_feasibility(
+                                    evaluator, fp_sol2, cl_list, cu_list
+                                )
+                                if (
+                                    np.isfinite(fp_obj2)
+                                    and fp_obj2 < _SENTINEL_THRESHOLD
+                                    and fp_feas2
+                                ):
+                                    tree.inject_incumbent(fp_sol2, fp_obj2)
+                                    logger.info(
+                                        "NLP-relaxation feasibility pump found incumbent: obj=%.6g",
+                                        fp_obj2,
+                                    )
+                    except Exception as e:
+                        logger.debug("NLP-relaxation feasibility pump failed: %s", e)
+
                 # --- Integer local search (1-opt + 2-opt) ---
                 # Two roles, both at the root:
                 #   (1) Feasibility recovery — if round-and-repair found no
@@ -4777,6 +5014,13 @@ def solve_model(
     # parity. Surfaced lazily — only when the search yielded nothing — and never
     # overrides an existing finite bound.
     _rr_remaining = time_limit - (time.perf_counter() - t_start)
+    if (bound_val is None or not np.isfinite(bound_val)) and _rr_remaining <= 0.0:
+        # B&B consumed the whole limit and surfaced no bound. Spend a small bounded
+        # slice on the rigorous root-relaxation fallback anyway so an uncertified
+        # minimize exit reports a sound dual bound instead of None (issue #138).
+        # Only ever reached when the search produced nothing usable; the floor's
+        # own ~10% internal budget keeps the wall-time overrun small.
+        _rr_remaining = _ROOT_FALLBACK_FLOOR_S
     if (
         (bound_val is None or not np.isfinite(bound_val))
         and (model._objective.sense == ObjectiveSense.MINIMIZE)
