@@ -176,6 +176,24 @@ class TestProductSet:
         b = Set("b", range(4))
         assert len(a * b) == len(a) * len(b)
 
+    def test_ordinal_row_major(self):
+        a = Set("a", ["p", "q"])
+        b = Set("b", [1, 2, 3])
+        p = a * b
+        # row-major: ordinal matches position in iteration order
+        for i, m in enumerate(p):
+            assert p.ordinal(m) == i
+
+    def test_ordinal_bad_member_raises(self):
+        p = Set("a", ["p", "q"]) * Set("b", [1, 2])
+        with pytest.raises(KeyError, match="not a member"):
+            p.ordinal(("z", 1))
+
+    def test_ordinal_nested_product(self):
+        p = (Set("a", [1, 2]) * Set("b", [3, 4])) * Set("c", [5, 6])
+        for i, m in enumerate(p):
+            assert p.ordinal(m) == i
+
 
 class TestFilter:
     def test_where_dimen1(self):

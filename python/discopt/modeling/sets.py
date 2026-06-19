@@ -307,3 +307,25 @@ class ProductSet(_SetBase):
 
     def __mul__(self, other: "_SetBase") -> "ProductSet":
         return ProductSet(self, other)
+
+    def ordinal(self, member: object) -> int:
+        """Zero-based position of ``member`` in iteration order (row-major).
+
+        Computed from factor ordinals without materializing the product.
+        """
+        key = _normalize_member(member)
+        comps = self._as_components(key)
+        if len(comps) != self.dimen:
+            raise KeyError(f"{member!r} is not a member of set '{self.name}'")
+        idx = 0
+        pos = 0
+        for f in self.factors:
+            part = comps[pos : pos + f.dimen]
+            sub = part[0] if len(part) == 1 else part
+            try:
+                o = f.ordinal(sub)  # type: ignore[attr-defined]
+            except (KeyError, AttributeError):
+                raise KeyError(f"{member!r} is not a member of set '{self.name}'") from None
+            idx = idx * len(f) + o
+            pos += f.dimen
+        return idx

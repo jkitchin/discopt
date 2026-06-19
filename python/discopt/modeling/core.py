@@ -361,6 +361,20 @@ def _wrap(x) -> Expression:
     return Constant(x)
 
 
+def _is_term_iterable(x) -> bool:
+    """True for a generator/iterable of terms (not a scalar Expression/array/str)."""
+    if isinstance(x, (Expression, np.ndarray, str, bytes)):
+        return False
+    return hasattr(x, "__iter__")
+
+
+def _call_over(fn: Callable, member, over):
+    """Call ``fn`` on a set member, unpacking tuple members for ``dimen > 1`` sets."""
+    if getattr(over, "dimen", 1) > 1 and isinstance(member, tuple):
+        return fn(*member)
+    return fn(member)
+
+
 # ─────────────────────────────────────────────────────────────
 # Mathematical Functions (dm.exp, dm.log, dm.sin, etc.)
 # ─────────────────────────────────────────────────────────────
@@ -861,10 +875,12 @@ def sum(
     >>> dm.sum(lambda i: cost[i] * x[i], over=range(n))  # indexed sum
     """
     if over is not None and callable(x):
-        # Indexed summation: dm.sum(lambda i: expr(i), over=index_set)
-        terms = [_wrap(x(i)) for i in over]
+        # Indexed summation: dm.sum(lambda i: expr(i), over=index_set). Tuple
+        # members of dimen>1 named sets are unpacked: ``lambda i, j: ...``.
+        terms = [_wrap(_call_over(x, i, over)) for i in over]
         return SumOverExpression(terms)
-    if isinstance(x, list):
+    if isinstance(x, list) or _is_term_iterable(x):
+        # list/tuple/generator of terms: dm.sum(x[i] for i in S)
         terms = [_wrap(t) for t in x]
         return SumOverExpression(terms)
     return SumExpression(_wrap(x), axis=axis)
@@ -887,7 +903,13 @@ def prod(x: Union[Expression, list, Callable], *, over: Optional[Sequence] = Non
     Expression
     """
     if over is not None and callable(x):
-        terms = [_wrap(x(i)) for i in over]
+        terms = [_wrap(_call_over(x, i, over)) for i in over]
+        result = terms[0]
+        for t in terms[1:]:
+            result = result * t
+        return result
+    if isinstance(x, list) or _is_term_iterable(x):
+        terms = [_wrap(t) for t in x]
         result = terms[0]
         for t in terms[1:]:
             result = result * t
@@ -1650,19 +1672,76 @@ class Model:
         >>> m.subject_to([x[i] + x[i+1] <= limits[i] for i in range(n-1)],
         ...              name="adjacent_limits")
         """
-        if isinstance(constraint, list):
-            for k, c in enumerate(constraint):
-                if isinstance(c, Constraint):
-                    c.name = f"{name}_{k}" if name else None
-                    self._constraints.append(c)
-        elif isinstance(constraint, Constraint):
+        if isinstance(constraint, Constraint):
             constraint.name = name
             self._constraints.append(constraint)
-        else:
+            return
+        if isinstance(constraint, bool):
             raise TypeError(
                 f"Expected Constraint (from <=, >=, == on expressions), "
                 f"got {type(constraint)}. Did you mean to compare expressions?"
             )
+        # list / tuple / generator / any iterable of constraints (named
+        # by ordinal: ``name_0``, ``name_1``, ...).
+        try:
+            items = list(constraint)
+        except TypeError:
+            raise TypeError(
+                f"Expected Constraint or an iterable of Constraints, got {type(constraint)}."
+            ) from None
+        for k, c in enumerate(items):
+            if not isinstance(c, Constraint):
+                raise TypeError(
+                    f"Expected Constraint (from <=, >=, == on expressions), "
+                    f"got {type(c)} at position {k}."
+                )
+            c.name = f"{name}_{k}" if name else None
+            self._constraints.append(c)
+
+    def constraint(self, index_set, rule, name: Optional[str] = None):
+        """Add a family of constraints indexed by a named set.
+
+        For each member of *index_set* the *rule* is evaluated to produce a
+        constraint; tuple members are unpacked into positional arguments
+        (``rule(i, j)`` for a ``dimen == 2`` set, ``rule(i)`` otherwise). A rule
+        may return :data:`~discopt.modeling.indexed.Skip` to omit that member.
+        Generated constraints are named ``name[key]`` (e.g. ``capacity[pitt]``).
+
+        Parameters
+        ----------
+        index_set : Set
+            The set to iterate.
+        rule : callable
+            ``rule(member)`` -> Constraint (or ``Skip``).
+        name : str, optional
+            Prefix for the per-key constraint names.
+
+        Returns
+        -------
+        IndexedConstraint
+            A keyed view of the generated constraints.
+
+        Examples
+        --------
+        >>> m.constraint(plants, lambda p: ship_out(p) <= cap[p], name="capacity")
+        """
+        from discopt.modeling.indexed import IndexedConstraint, Skip, key_label
+        from discopt.modeling.sets import call_member
+
+        members: dict = {}
+        for member in index_set:
+            c = call_member(rule, member, index_set.dimen)
+            if c is Skip:
+                continue
+            if not isinstance(c, Constraint):
+                raise TypeError(
+                    f"constraint rule for key {member!r} returned {type(c)}, "
+                    "expected a Constraint (from <=, >=, == on expressions) or Skip."
+                )
+            c.name = f"{name}[{key_label(member)}]" if name else None
+            self._constraints.append(c)
+            members[member] = c
+        return IndexedConstraint(name, index_set, members)
 
     # ── Fast construction API (direct arena building) ──
 

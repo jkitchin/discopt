@@ -20,7 +20,39 @@ from discopt.modeling.sets import Set
 if TYPE_CHECKING:  # pragma: no cover
     import numpy as np
 
-    from discopt.modeling.core import IndexExpression, Parameter, SolveResult, Variable
+    from discopt.modeling.core import (
+        Constraint,
+        IndexExpression,
+        Parameter,
+        SolveResult,
+        Variable,
+    )
+
+
+class _SkipType:
+    """Singleton sentinel returned from a constraint rule to omit that key."""
+
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:  # pragma: no cover - trivial
+        return "Skip"
+
+
+#: Sentinel a ``Model.constraint`` rule may return to skip a member
+#: (Pyomo ``Constraint.Skip`` parity).
+Skip = _SkipType()
+
+
+def key_label(member) -> str:
+    """Render a set member as a constraint-name label, e.g. ``pitt`` or ``pitt,a``."""
+    if isinstance(member, tuple):
+        return ",".join(str(p) for p in member)
+    return str(member)
 
 
 class IndexedVar:
@@ -107,6 +139,41 @@ class IndexedParam:
 
     def __repr__(self) -> str:
         return f"IndexedParam({self.name!r}, over={self.index_set.name}, len={len(self)})"
+
+
+class IndexedConstraint:
+    """A family of constraints generated over a named set, keyed by member.
+
+    Returned by :meth:`Model.constraint`. Each present member maps to the flat
+    :class:`~discopt.modeling.core.Constraint` that was added to the model
+    (members whose rule returned :data:`Skip` are absent).
+    """
+
+    def __init__(self, name, index_set: Set, members: dict):
+        self.name = name
+        self.index_set = index_set
+        self._members: dict = members
+
+    def __getitem__(self, key) -> "Constraint":
+        from discopt.modeling.sets import _normalize_member
+
+        norm = _normalize_member(key)
+        if norm not in self._members:
+            raise KeyError(f"no constraint for key {key!r} in '{self.name}'")
+        return cast("Constraint", self._members[norm])
+
+    def __iter__(self):
+        return iter(self._members)
+
+    def __len__(self) -> int:
+        return len(self._members)
+
+    def keys(self):
+        """Members for which a constraint was generated (Skip omitted)."""
+        return tuple(self._members.keys())
+
+    def __repr__(self) -> str:
+        return f"IndexedConstraint({self.name!r}, len={len(self)})"
 
 
 def resolve_indexed_values(index_set: Set, spec, default, dtype) -> "np.ndarray":
