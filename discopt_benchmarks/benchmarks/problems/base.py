@@ -99,6 +99,7 @@ def _ensure_loaded():
     if _LOADED:
         return
     _LOADED = True
+    import benchmarks.problems.decomposition_problems  # noqa: F401
     import benchmarks.problems.global_opt  # noqa: F401
     import benchmarks.problems.lp_problems  # noqa: F401
     import benchmarks.problems.m1_regression  # noqa: F401

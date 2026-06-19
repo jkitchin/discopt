@@ -33,6 +33,11 @@ The release procedure that produces these entries is documented in
   `docs/design/sets-and-indexing.md`; examples
   `example_transportation` / `example_assignment` /
   `example_multicommodity_flow`.
+- **Decomposition benchmark instances** (`test(decomposition)`). Block-structured
+  / two-stage MILP instances with known optima (`decomposition_problems.py`,
+  registered in the `milp` suite) plus a consolidated correctness gate
+  (`test_decomposition_benchmarks.py`) that checks Benders and Lagrangian
+  against the known optima and the monolithic solver.
 - **Lagrangian relaxation solver** (`feat(decomposition)`). Dualizes coupling
   constraints (annotate with `model.mark_coupling(...)`) to produce a rigorous
   dual lower bound via `model.solve(decomposition="lagrangian")` /
