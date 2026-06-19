@@ -8315,9 +8315,9 @@ def _solve_milp_simplex(
         )
         _tol = 1e-5
         _feas = True
-        if _A_ub_m is not None and _A_ub_m.shape[0]:
+        if _A_ub_m is not None and _b_ub_m is not None and _A_ub_m.shape[0]:
             _feas = bool(np.all(_A_ub_m @ xo <= _b_ub_m + _tol * (1.0 + np.abs(_b_ub_m))))
-        if _feas and _A_eq_m is not None and _A_eq_m.shape[0]:
+        if _feas and _A_eq_m is not None and _b_eq_m is not None and _A_eq_m.shape[0]:
             _feas = bool(np.all(np.abs(_A_eq_m @ xo - _b_eq_m) <= _tol * (1.0 + np.abs(_b_eq_m))))
         if _feas:
             _xl = np.asarray(lp_data.x_l[:n_orig], dtype=np.float64)
