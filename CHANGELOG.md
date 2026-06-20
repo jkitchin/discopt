@@ -213,6 +213,10 @@ The release procedure that produces these entries is documented in
   integer incumbent — returning a wrong (too-low) optimum on some
   generalized-assignment-style MILPs. Regression covered in
   `python/tests/test_milp_node_bound_soundness.py`.
+- **Clean errors for unsupported decomposition models** (`fix(decomposition)`).
+  `solve_benders` / `solve_lagrangian` (and the B&B hook) now raise a clear
+  `NotImplementedError` on models the linear extractor cannot handle — e.g.
+  multi-dimensional indexed variables — instead of a stray internal `TypeError`.
 - **Simplex equilibration over-scaling on noise entries** (`fix(simplex)`). The
   root cause of the MILP wrong-optimum bug below: the geometric-mean
   equilibration treated a numerically-negligible matrix entry (e.g. a ~1e-16 cut

@@ -79,6 +79,18 @@ def test_unknown_method_raises():
         solve_lagrangian(_knapsack(), method="nope", time_limit=10)
 
 
+def test_multidim_index_rejected_cleanly():
+    """A 2-D indexed model raises a clean NotImplementedError, not a stray error."""
+    m = dm.Model("twod")
+    x = m.binary("x", shape=(2, 3))
+    m.minimize(sum(x[k, i] for k in range(2) for i in range(3)))
+    c = sum(x[0, i] for i in range(3)) >= 1
+    m.subject_to(c)
+    m.mark_coupling(c)
+    with pytest.raises(NotImplementedError):
+        solve_lagrangian(m, time_limit=10)
+
+
 def test_recovered_primal_is_feasible():
     r = solve_lagrangian(_two_block_conflict(), time_limit=30)
     assert r.x is not None

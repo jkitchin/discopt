@@ -124,6 +124,17 @@ def test_nonlinear_rejected():
         solve_benders(m, time_limit=10)
 
 
+def test_multidim_index_rejected_cleanly():
+    """A 2-D indexed model raises a clean NotImplementedError, not a stray error."""
+    m = dm.Model("twod")
+    x = m.binary("x", shape=(2, 3))
+    m.first_stage(x)
+    m.minimize(sum(x[k, i] for k in range(2) for i in range(3)))
+    m.subject_to(sum(x[0, i] for i in range(3)) >= 1)
+    with pytest.raises(NotImplementedError):
+        solve_benders(m, time_limit=10)
+
+
 @pytest.mark.slow
 def test_matches_monolithic_random():
     """Benders matches brute-force enumeration over the binary master."""

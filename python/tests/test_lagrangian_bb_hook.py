@@ -199,3 +199,45 @@ def test_hook_flag_noop_on_coupling_free_model():
     r = m.solve(time_limit=30, lagrangian_bound=True)
     assert r.status == "optimal"
     assert r.objective == pytest.approx(1.0, abs=1e-3)
+
+
+def _branching_instance():
+    """A covering instance that makes the MILP B&B actually branch (node_count
+    > 1), so the hook's *in-tree* per-node bound path is exercised, not just the
+    root. min c.x s.t. sum (i+1) x_i >= 35, coupling sum x_i <= 5, x binary."""
+    n = 11
+    rng = np.random.default_rng(2)
+    c = rng.integers(1, 7, n)
+    m = dm.Model("branch")
+    x = m.binary("x", shape=(n,))
+    m.minimize(sum(int(c[i]) * x[i] for i in range(n)))
+    m.subject_to(sum((i + 1) * x[i] for i in range(n)) >= 35)
+    cpl = sum(x[i] for i in range(n)) <= 5
+    m.subject_to(cpl)
+    m.mark_coupling(cpl)
+    return m, c, n
+
+
+def _branching_brute(c, n, cap=5, target=35):
+    best = np.inf
+    for bits in itertools.product([0, 1], repeat=n):
+        z = np.array(bits)
+        if sum((i + 1) * z[i] for i in range(n)) >= target and z.sum() <= cap:
+            best = min(best, float(sum(int(c[i]) * z[i] for i in range(n))))
+    return best
+
+
+@pytest.mark.correctness
+def test_hook_sound_and_helpful_on_a_branching_tree():
+    """In-tree coverage: the instance branches deeply; the hook must stay sound
+    (same optimum as hook-off and brute force) and must not *increase* nodes."""
+    m_off, c, n = _branching_instance()
+    opt = _branching_brute(c, n)
+    off = m_off.solve(time_limit=60)
+    on = _branching_instance()[0].solve(time_limit=60, lagrangian_bound=True)
+    # The hook path is genuinely exercised in the tree, not just at the root.
+    assert off.node_count > 1, "instance no longer branches; pick a harder one"
+    assert off.objective == pytest.approx(opt, abs=1e-3)
+    assert on.objective == pytest.approx(opt, abs=1e-3)
+    # A valid extra lower bound can only prune more (or tie), never explore more.
+    assert on.node_count <= off.node_count

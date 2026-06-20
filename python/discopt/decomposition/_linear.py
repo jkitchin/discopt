@@ -60,6 +60,25 @@ def extract_linear(model: Model) -> LinearModel:
             rows_rhs.append(-rhs)
             rows_source.append(src)
 
+    def _coeffs(expr, what: str):
+        # ``_extract_body_coeffs`` raises (e.g. a TypeError on multi-dimensional
+        # indexed variables) rather than returning None for some unsupported
+        # constructs; normalize every failure to a clean NotImplementedError so
+        # the solvers report "unsupported", not a stray internal error.
+        try:
+            res = _extract_body_coeffs(expr, model, n)
+        except Exception as exc:
+            raise NotImplementedError(
+                f"Decomposition v1 could not extract linear coefficients from {what} "
+                "(unsupported construct, e.g. a multi-dimensional indexed variable). "
+                "Use a 1-D flattened formulation, or Model.solve()."
+            ) from exc
+        if res is None:
+            raise NotImplementedError(
+                f"Decomposition v1 requires a linear {what}; could not extract coefficients."
+            )
+        return res
+
     for src, c in enumerate(model._constraints):
         if not isinstance(c, Constraint):
             raise NotImplementedError(
@@ -71,10 +90,7 @@ def extract_linear(model: Model) -> LinearModel:
                 "Decomposition v1 supports linear constraints only; the model "
                 "has a nonlinear constraint."
             )
-        coeffs = _extract_body_coeffs(c.body, model, n)
-        if coeffs is None:
-            raise NotImplementedError("Could not extract linear coefficients from a constraint.")
-        vec, off = coeffs
+        vec, off = _coeffs(c.body, "a constraint")
         _add(np.asarray(vec, dtype=np.float64), -float(off), c.sense, src)
 
     obj = model._objective
@@ -83,9 +99,7 @@ def extract_linear(model: Model) -> LinearModel:
         c_off = 0.0
         minimize = True
     else:
-        oc = _extract_body_coeffs(obj.expression, model, n)
-        if oc is None:
-            raise NotImplementedError("Decomposition v1 requires a linear objective.")
+        oc = _coeffs(obj.expression, "the objective")
         c_vec = np.asarray(oc[0], dtype=np.float64)
         c_off = float(oc[1])
         minimize = obj.sense == ObjectiveSense.MINIMIZE

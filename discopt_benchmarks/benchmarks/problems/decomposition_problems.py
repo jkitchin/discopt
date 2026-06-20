@@ -11,6 +11,7 @@ checks live in ``python/tests/test_decomposition_benchmarks.py``.
 from __future__ import annotations
 
 import discopt.modeling as dm
+import numpy as np
 
 from benchmarks.problems.base import TestProblem, register
 
@@ -77,6 +78,51 @@ def build_capacitated_two_stage() -> dm.Model:
     m.subject_to(x[1] + x[3] <= 5 * b)
     return m
 
+
+def build_gap_mixed_eq_ineq() -> dm.Model:
+    """Generalized-assignment instance with mixed equality + inequality rows.
+
+    This is the exact instance that exposed a MILP soundness bug: the simplex
+    equilibration over-scaled a column carrying a ~1e-16 noise (cut) coefficient,
+    so a binary came back at -1 and the solver returned 16 instead of the true
+    optimum 17. Registered so the correctness gate guards that regression with
+    the default solver. min cost.x ; per-agent knapsack `<=` blocks ; each task
+    assigned exactly once (`==` coupling).
+    """
+    rng = np.random.default_rng(0)
+    nk, ni = 3, 6
+    cost = rng.integers(1, 10, (nk, ni))
+    w = rng.integers(3, 9, (nk, ni))
+    cap = [int(w[k].sum() * 0.45) for k in range(nk)]
+    m = dm.Model("dec_gap_mixed_eq_ineq")
+    x = m.binary("x", shape=(nk * ni,))
+
+    def xi(k, i):
+        return x[k * ni + i]
+
+    m.minimize(sum(int(cost[k, i]) * xi(k, i) for k in range(nk) for i in range(ni)))
+    for k in range(nk):
+        m.subject_to(sum(int(w[k, i]) * xi(k, i) for i in range(ni)) <= cap[k])
+    for i in range(ni):
+        c = sum(xi(k, i) for k in range(nk)) == 1
+        m.subject_to(c)
+        m.mark_coupling(c)
+    return m
+
+
+register(
+    TestProblem(
+        name="dec_gap_mixed_eq_ineq",
+        category="milp",
+        level="smoke",
+        build_fn=build_gap_mixed_eq_ineq,
+        known_optimum=17.0,
+        applicable_solvers=_SOLVERS,
+        n_vars=18,
+        n_constraints=9,
+        tags=["decomposable", "coupling", "regression"],
+    )
+)
 
 register(
     TestProblem(
