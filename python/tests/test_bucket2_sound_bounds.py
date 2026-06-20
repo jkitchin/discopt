@@ -470,3 +470,33 @@ def test_negated_bilinear_two_vars_sound_bound():
     res = relaxer.solve_at_node(lb, ub, time_limit=10.0)
     assert res.lower_bound is not None, "neg(x)*y dropped from the relaxation"
     assert float(res.lower_bound) <= -16.0 + 1e-6
+
+
+@pytest.mark.slow
+def test_root_pool_bound_propagates_to_global_bound(monkeypatch):
+    """The root cut-pool's strong dual bound must reach the reported global bound.
+
+    The pool is separated for its cut rows, which prune child nodes but never lift
+    the tree's frontier minimum — so before this fix an uncertified feasible exit
+    on nvs19 reported the cut-less McCormick bound (~-88237, a ~99% gap) while the
+    strengthened root relaxation had already proved a far tighter one (~-1156).
+    The fix captures that root bound and adopts it at the exit.
+
+    Asserts the two invariants that matter, both robust to machine speed:
+      * SOUND — the reported bound never exceeds the true optimum (-1098.4).
+      * PROPAGATED — it is far tighter than the cut-less McCormick value, i.e. the
+        pool bound actually reached `r.bound` instead of being discarded.
+    """
+    monkeypatch.setenv("DISCOPT_ROOT_CUT_ROUNDS", "80")
+    nl = _DATA / "nvs19.nl"
+    assert nl.exists(), f"missing {nl}"
+    m = dm.from_nl(str(nl))
+    r = m.solve(time_limit=25.0)
+    assert r.bound is not None and math.isfinite(r.bound), "no dual bound reported"
+    # Sound: a valid lower bound for a MINIMIZE never exceeds the optimum.
+    assert r.bound <= -1098.4 + 1e-3, f"UNSOUND bound {r.bound} > optimum -1098.4"
+    # Propagated: the cut-less McCormick bound is ~-88237; the pool bound is ~-1.3e3.
+    # A bound tighter than -10000 proves the pool bound reached the global bound.
+    assert r.bound > -10000.0, (
+        f"pool bound did not propagate: r.bound={r.bound} (cut-less McCormick ~ -88237)"
+    )
