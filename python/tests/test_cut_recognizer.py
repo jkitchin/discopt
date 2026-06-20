@@ -137,7 +137,12 @@ def test_inject_all_graceful_on_plain_model():
     m.minimize(z**2)
     m.subject_to(z >= 2.0)
     counts = R.inject_all_patterns(m)
-    assert counts == {"square_diff_network": 0, "binary_product": 0, "complementarity": 0}
+    assert counts == {
+        "square_diff_network": 0,
+        "binary_product": 0,
+        "complementarity": 0,
+        "gp_monomial": 0,
+    }
 
 
 def test_inject_all_fires_square_diff_on_gas():
@@ -145,3 +150,52 @@ def test_inject_all_fires_square_diff_on_gas():
     assert counts["square_diff_network"] == 2
     assert counts["binary_product"] == 0
     assert counts["complementarity"] == 0
+    assert counts["gp_monomial"] == 0
+
+
+def test_gp_cut_is_sound():
+    """The GP log-lift cut t >= exp(s0)(1+s-s0) lower-bounds the true monomial."""
+    import math
+
+    import numpy as np
+
+    c, a = 2.5, np.array([1.5, 0.7, 0.3])
+    xlb, xub = np.array([0.5, 0.4, 0.6]), np.array([4.0, 3.0, 5.0])
+    sL = math.log(c) + float(a @ np.log(xlb))
+    sU = math.log(c) + float(a @ np.log(xub))
+    grid = np.linspace(sL, sU, 6)
+    rng = np.random.default_rng(0)
+    worst = -1e9
+    for _ in range(20000):
+        x = rng.uniform(xlb, xub)
+        u = np.array([rng.uniform(math.log(xlb[j]), math.log(x[j])) for j in range(3)])
+        s = math.log(c) + float(a @ u)
+        t = c * np.prod(x**a)
+        worst = max(worst, max(math.exp(s0) * (1 + s - s0) - t for s0 in grid))
+    assert worst <= 1e-9  # cut never exceeds the true monomial
+
+
+def test_gp_cut_fires_and_is_value_preserving():
+    def build(inject):
+        m = dm.Model("gp")
+        x = m.continuous("x", lb=0.5, ub=4.0)
+        y = m.continuous("y", lb=0.5, ub=4.0)
+        m.minimize(2.0 * x**1.5 * y**0.5)
+        m.subject_to(x * y >= 4.0)
+        n = R.inject_gp_cuts(m) if inject else 0
+        return m, n
+
+    m0, _ = build(False)
+    m1, n = build(True)
+    assert n == 1
+    r0 = m0.solve(time_limit=30, gap_tolerance=1e-4)
+    r1 = m1.solve(time_limit=30, gap_tolerance=1e-4)
+    assert r1.objective == pytest.approx(r0.objective, abs=1e-2)  # value-preserving
+
+
+def test_gp_cut_skips_single_variable_monomial():
+    m = dm.Model("single")
+    x = m.continuous("x", lb=0.5, ub=4.0)
+    m.minimize(3.0 * x**1.5)  # single-variable: engine already tight
+    m.subject_to(x >= 1.0)
+    assert R.inject_gp_cuts(m) == 0

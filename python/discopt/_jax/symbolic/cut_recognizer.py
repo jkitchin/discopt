@@ -610,4 +610,81 @@ def inject_all_patterns(model, **kwargs) -> dict:
     counts["square_diff_network"] = recognize_and_inject(model, **kwargs)
     counts["binary_product"] = inject_binary_products(model)
     counts["complementarity"] = inject_complementarity(model)
+    counts["gp_monomial"] = inject_gp_cuts(model)
     return counts
+
+
+def inject_gp_cuts(model, *, samples: int = 6) -> int:
+    """Auto-fire the GP log-lift on multivariate monomial objective terms (P14).
+
+    For an objective term ``c * prod_j x_j^{a_j}`` with ``c>0``, every exponent
+    ``a_j > 0`` and every ``x_j`` positively bounded, introduce log-domain
+    auxiliaries ``u_j`` with the **convex** link ``u_j <= log(x_j)`` and bounds
+    ``[log x_j^L, log x_j^U]``, an auxiliary ``t == c*prod x_j^{a_j}``, and
+    tangent cuts ``t >= exp(s0)*(1 + s - s0)`` where ``s = log c + sum_j a_j u_j``.
+    The objective is rewritten to use ``t`` (value-preserving).
+
+    Soundness: ``u_j <= log x_j`` with ``a_j > 0`` gives ``s <= log t`` so
+    ``exp(s) <= t``; ``exp`` is convex so ``exp(s0)(1 + s - s0) <= exp(s) <= t``.
+    The lift makes the joint monomial GP-convex in ``u`` (tighter than the
+    compositional product relaxation). Returns the count applied.
+    """
+    import math
+
+    import discopt.modeling as dm
+    from discopt._jax.symbolic.log_curvature import is_monomial
+
+    sm = model_to_sympy(model)
+    handles = _handle_map(model)
+    reverse = {sym: key for key, sym in sm.symbols.items()}
+    obj = model._objective.expression
+    u_for: dict = {}
+    applied = 0
+    for term in sp.Add.make_args(sm.objective):
+        ok, log_c, exps = is_monomial(term)
+        if not ok or log_c is None or len(exps) < 2:
+            continue  # single-variable monomials are already tight via the engine
+        info = []
+        valid = True
+        for s, a in exps.items():
+            a = float(a)
+            b = sm.bounds.get(s)
+            key = reverse.get(s, "")
+            if a <= 0 or b is None or b[0] is None or b[0] <= 0 or not b[1] or not key:
+                valid = False
+                break
+            info.append((s, key, a, b[0], b[1]))
+        if not valid:
+            continue
+
+        s_expr = float(log_c)
+        s_lo = float(log_c)
+        s_hi = float(log_c)
+        for s, key, a, xl, xu in info:
+            if key not in u_for:
+                u = model.continuous(f"u_gp_{len(u_for)}", lb=math.log(xl), ub=math.log(xu))
+                model.subject_to(u <= dm.log(handles[key]), name=f"gp_link_{key}")
+                u_for[key] = u
+            s_expr = s_expr + a * u_for[key]
+            s_lo += a * math.log(xl)
+            s_hi += a * math.log(xu)
+
+        c = math.exp(float(log_c))
+        mono_h = c
+        for s, key, a, _xl, _xu in info:
+            mono_h = mono_h * handles[key] ** a
+        t = model.continuous(f"t_gp_{applied}", lb=0.0, ub=1e12)
+        model.subject_to(t == mono_h, name=f"gp_def_{applied}")
+        grid = (
+            [s_lo]
+            if s_hi <= s_lo
+            else [s_lo + (s_hi - s_lo) * i / (samples - 1) for i in range(samples)]
+        )
+        for k, s0 in enumerate(grid):
+            e0 = math.exp(s0)
+            model.subject_to(t >= e0 * (1.0 + (s_expr - s0)), name=f"gp_tan_{applied}_{k}")
+        obj = obj - mono_h + t
+        applied += 1
+    if applied:
+        model.minimize(obj)
+    return applied
