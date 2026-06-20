@@ -330,12 +330,16 @@ class _GamsWriter:
 
         if isinstance(expr, IndexExpression):
             base = self._expr_to_gams(expr.base)
+            # GAMS is 1-based and requires quoted set labels for concrete element
+            # references (f_pipe('1'), not f_pipe(1)). Symbolic indices (set/alias
+            # names from a loop) are emitted bare via _expr_to_gams.
             if isinstance(expr.index, tuple):
                 idx_str = ", ".join(
-                    str(i + 1) if isinstance(i, int) else self._expr_to_gams(i) for i in expr.index
+                    f"'{i + 1}'" if isinstance(i, int) else self._expr_to_gams(i)
+                    for i in expr.index
                 )
             elif isinstance(expr.index, int):
-                idx_str = str(expr.index + 1)  # GAMS is 1-based
+                idx_str = f"'{expr.index + 1}'"
             else:
                 idx_str = self._expr_to_gams(expr.index)
             return f"{base}({idx_str})"
@@ -344,7 +348,13 @@ class _GamsWriter:
             left = self._expr_to_gams(expr.left)
             right = self._expr_to_gams(expr.right)
             if expr.op == "**":
-                return f"power({left}, {right})"
+                # GAMS power(x, n) requires an INTEGER exponent; a fractional or
+                # symbolic exponent must use rPower(x, r) (== x ** r, base >= 0).
+                if isinstance(expr.right, Constant) and float(expr.right.value) == int(
+                    float(expr.right.value)
+                ):
+                    return f"power({left}, {right})"
+                return f"rPower({left}, {right})"
             return f"({left} {expr.op} {right})"
 
         if isinstance(expr, UnaryOp):

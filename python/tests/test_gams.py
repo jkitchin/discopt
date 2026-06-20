@@ -566,6 +566,37 @@ class TestGamsExport:
         content = outpath.read_text()
         assert "Solve filetest" in content
 
+    def test_indexed_var_refs_are_quoted(self):
+        """Regression (#250): element references in equations must use quoted
+        GAMS labels (f('1')), not bare numbers (f(1)) which raise Error 145/148."""
+        import re
+
+        m = dm.Model("idx")
+        x = m.continuous("x", shape=(3,), lb=0, ub=10)
+        m.minimize(x[0] + x[1] + x[2])
+        m.subject_to(x[0] + 2 * x[1] >= 4)
+
+        gms = m.to_gams()
+        # The declaration is over a set name (x(s1)); only equation-body element
+        # refs are concrete. No bare-integer index like name(0)/name(1) may remain.
+        assert not re.search(r"[A-Za-z_]\w*\(\d+\)", gms), gms
+        assert "x('1')" in gms and "x('2')" in gms
+
+    def test_fractional_power_uses_rpower(self):
+        """Regression (#250): GAMS power(x, n) is integer-only; a fractional
+        exponent must export as rPower(x, r), while integer powers stay power()."""
+        m = dm.Model("pw")
+        x = m.continuous("x", lb=0.5, ub=4.0)
+        m.minimize(x**0.2857 + x**2)
+
+        gms = m.to_gams()
+        assert "rPower(x, 0.2857)" in gms
+        assert "power(x, 2)" in gms  # integer exponent unchanged
+        # no fractional literal inside a power() call
+        import re
+
+        assert not re.search(r"power\([^,]+,\s*\d*\.\d+", gms), gms
+
 
 # ── Round-trip tests ───────────────────────────────────────────
 
