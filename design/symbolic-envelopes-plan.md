@@ -1,7 +1,15 @@
 # SymPy-driven envelopes & relaxations + certified learned envelopes — design / plan
 
-**Status:** Phase 1 implemented and tested (`python/discopt/_jax/symbolic/`). Later
-phases planned. Branch: `claude/sympy-envelopes-relaxations-4d3vwz`.
+**Status:** Phases 1–5, 7, 8 implemented and tested
+(`python/discopt/_jax/symbolic/`). Phase 6 (tight multivariate hulls) is the
+remaining research frontier — scoped below. Branch:
+`claude/sympy-envelopes-relaxations-4d3vwz`.
+
+**Done:** univariate engine (closed-form + numeric tangent solver, secant
+fallback), sympy-free runtime, code-gen, verification, atom registry, gas /
+power / chemeng domain packs, certified-learned prototype (+ICNN convexity fix),
+docs notebook. ~110 tests across `test_symbolic_*`, `test_certified_learned`,
+`test_symbolic_gas`, `test_symbolic_domains`.
 
 **Goal:** use SymPy as a *design-time* engine to derive, verify, and code-generate
 tight convex/concave envelopes for nonlinear atoms that the hand-written McCormick
@@ -26,15 +34,16 @@ guaranteed-convex / guaranteed-monotone neural networks.
 ```
 python/discopt/_jax/symbolic/
   envelope_deriver.py   # univariate curvature analysis + envelope synthesis  [DONE]
+  runtime.py            # sympy-free JAX envelope assembly (hot path)         [DONE]
   codegen.py            # SymPy -> JAX (x,lb,ub)->(cv,cc) closures             [DONE]
   verification.py       # soundness + curvature + tightness certification     [DONE]
-  certified_learned.py  # certify guaranteed-convex ML nets as envelopes      [Phase 8]
-  registry.py           # register generated atoms into relaxation_compiler   [Phase 2]
+  certified_learned.py  # certify guaranteed-convex ML nets as envelopes      [DONE]
+  registry.py           # catalogue + certification gate for atoms            [DONE]
   structured.py         # bi/tri-variate structured envelopes                 [Phase 6]
   domains/
-    gas.py              # Weymouth f|f|, compressor terms                     [Phase 3]
-    power.py            # cos/sin envelopes, V_iV_j(cos/sin), QC atoms        [Phase 4]
-    chemeng.py          # LMTD, Arrhenius, Langmuir, entropy                  [Phase 5]
+    gas.py              # Weymouth f|f|, signed-power flow                    [DONE]
+    power.py            # cos/sin angle envelopes (QC building blocks)        [DONE]
+    chemeng.py          # Arrhenius, Langmuir/Monod, x ln x                   [DONE]
 ```
 
 ## Phase 1 — Foundations (DONE)
@@ -79,10 +88,26 @@ envelopes (QC relaxation, Coffrin et al.). Cross-check tightness vs. a known QC 
 
 LMTD (log-mean ΔT), Arrhenius `exp(-E/RT)`, Langmuir `x/(1+x)`, entropy refinements.
 
-## Phase 6 — Structured multivariate envelopes
+## Phase 6 — Structured multivariate envelopes (remaining frontier)
 
-SymPy-derived vertex-polyhedral / edge-concave facets for trilinear and product
-terms (generalizes `relax_trilinear_exact`).
+The univariate engine and the compiler already compose multivariate terms via
+McCormick (e.g. `V_i * cos(theta)` relaxes `cos` with the power pack and
+bilinear-composes with `V_i`). The open work is the **simultaneous convex hull**,
+which is strictly tighter than this compositional bound:
+
+* AC-OPF `w_ij = V_i V_j cos(theta_ij)` / `V_i V_j sin(theta_ij)` — the QC
+  relaxation's lifted-trilinear hull {cite}`Coffrin2016`, derived by SymPy via
+  vertex enumeration over the `(V_i, V_j, theta)` box and certified with
+  `verify_envelope` (multivariate sampling).
+* Edge-concave / vertex-polyhedral facets for general trilinear and signomial
+  terms, generalizing `relax_trilinear_exact`.
+
+Integration surface (existing infra): `_jax/envelopes.py::relax_trilinear_exact`,
+`_jax/edge_concave.py`, `_jax/multivariate_mccormick.py`. The deliverable is a
+`symbolic/structured.py` that derives the facet coefficients symbolically and a
+multivariate extension of the verifier. This is deferred deliberately — a shallow
+re-wrap of compositional McCormick would add no tightness, and an unsound hull
+would violate the project's correctness invariant.
 
 ## Phase 7 — Docs & dissemination
 
