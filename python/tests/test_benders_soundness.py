@@ -25,9 +25,7 @@ except ImportError:
     HAS_HIGHS = False
 
 pytestmark = [
-    pytest.mark.skipif(
-        not (POUNCE_AVAILABLE or HAS_HIGHS), reason="no LP/MILP backend available"
-    ),
+    pytest.mark.skipif(not (POUNCE_AVAILABLE or HAS_HIGHS), reason="no LP/MILP backend available"),
     pytest.mark.correctness,
 ]
 
@@ -91,6 +89,32 @@ def test_no_false_optimal_certification():
             assert r.bound is not None
             assert r.bound <= r.objective + 1e-4
             assert r.gap_certified
+
+
+@pytest.mark.parametrize("vub", [10.0, 1000.0, 1e6])
+def test_bound_active_recourse_is_sound(vub):
+    """Regression: recourse optimum set by a variable bound coinciding with a
+    coupling row.
+
+    ``min y - v`` s.t. ``v <= vub*y``, ``v in [0, vub]``. At y=1 the row
+    ``v <= vub`` and the bound ``v <= vub`` both bind; an interior-point LP
+    splits the marginal between them, so the recourse *row* dual is only half
+    the true sensitivity. A cut anchored at the reconstructed dual value
+    ``lam^T r`` then lands at ``-vub/2`` instead of the true ``Q = -vub`` and
+    prunes the optimum (reported lower bound ``-vub/2`` > optimum ``-vub``).
+    Primal-anchored cuts (``eta >= Q(x̂) + s^T(x-x̂)``) stay sound.
+    """
+    m = dm.Model("bnd")
+    y = m.binary("y")
+    v = m.continuous("v", lb=0, ub=vub)
+    m.first_stage(y)
+    m.minimize(y - v)
+    m.subject_to(v <= vub * y)
+    r = solve_benders(m, time_limit=30)
+    opt = 1.0 - vub  # y=1, v=vub
+    assert r.objective == pytest.approx(opt, rel=1e-4)
+    assert r.bound is not None
+    assert r.bound <= opt + 1e-3 * (1 + abs(opt)), f"unsound bound {r.bound} > optimum {opt}"
 
 
 def test_bound_is_valid_for_maximize():

@@ -67,10 +67,11 @@ The release procedure that produces these entries is documented in
   `model.solve(decomposition="benders")` / `discopt.solve_benders`. The master
   holds the complicating variables; the recourse-LP duals generate optimality
   cuts and a slack-penalized feasibility LP generates feasibility cuts. Cuts are
-  **anchored at the dual value**, so they stay valid with POUNCE's interior-point
-  duals — **no HiGHS dependency** (runs on the POUNCE LP/MILP stack). Every cut
-  is a global under-estimator, so the master objective is a rigorous lower bound
-  (gap certified on convergence). Documented in
+  **anchored at the primal recourse value** with a row-dual slope, so they stay
+  sound even when the recourse optimum is set by variable bounds and with
+  POUNCE's interior-point duals — **no HiGHS dependency** (runs on the POUNCE
+  LP/MILP stack). Every cut is a global under-estimator, so the master objective
+  is a rigorous lower bound (gap certified on convergence). Documented in
   `docs/notebooks/tutorial_benders.ipynb`.
 - **Decomposition structure layer** (`feat(decomposition)`). Foundation for the
   upcoming Benders / Lagrangian solvers: a `Model` annotation API

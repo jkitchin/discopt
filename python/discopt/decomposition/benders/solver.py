@@ -10,16 +10,18 @@ Algorithm (minimization, internally):
 Master:  min c_x^T x + eta   s.t. A_m x <= r_m  +  accumulated Benders cuts.
 Subproblem at x̂:  min c_y^T y  s.t. A_y y <= r - A_x x̂.
 
-- Feasible subproblem → **optimality cut** ``eta >= lam^T r - (A_x^T lam)^T x``
-  from the recourse-LP row duals ``lam`` (shadow prices ``lam = dQ*/d rhs``).
-- Infeasible subproblem → **feasibility cut** from a slack-penalized
-  always-feasible LP, excluding x̂.
+- Feasible subproblem → **optimality cut** ``eta >= Q(x̂) + s^T (x - x̂)`` with
+  slope ``s = -A_x^T lam`` from the recourse-LP row duals ``lam``.
+- Infeasible subproblem → **feasibility cut** ``v(x̂) + s^T (x - x̂) <= 0`` from a
+  slack-penalized always-feasible LP, excluding x̂.
 
-Every cut is anchored at the **dual value** (``lam^T r``), so it stays a valid
-global underestimator for *any* dual-feasible ``lam`` — including POUNCE's
-interior-point (analytic-centre) duals. The solver therefore runs on whichever
-LP/MILP backend is installed (**no HiGHS dependency**: the POUNCE stack does it
-all), and the master objective is a rigorous lower bound.
+Every cut is anchored at the **primal** recourse value (``Q(x̂)`` / ``v(x̂)``),
+which is exact at x̂; the row-dual slope is a subgradient of the convex LP value
+function. Primal anchoring stays sound even when the recourse optimum is partly
+set by variable bounds (where the row duals are an *incomplete* dual solution)
+and with POUNCE's interior-point duals — so the solver runs on whichever LP/MILP
+backend is installed (**no HiGHS dependency**: the POUNCE stack does it all), and
+the master objective is a rigorous lower bound.
 
 A *nonlinear* model is routed to Generalized Benders (:mod:`.gbd`), which
 handles a convex-NLP recourse subproblem with KKT-multiplier cuts.
@@ -304,31 +306,35 @@ def solve_benders(
         return "infeas", v, None, lam
 
     def _add_opt_cut(x_hat, Q, lam):
-        # Optimality cut anchored at the dual value (not the primal Q*): for any
-        # dual-feasible lam, eta >= lam^T (r - A_x x) <= Q(x) for all x (weak
-        # duality). Anchoring at lam^T r keeps the cut valid even when lam is an
-        # interior-point dual with a small gap (lam^T b(x̂) <= Q*), where using
-        # Q* as the anchor could over-cut. For an exact vertex dual the two
-        # anchors coincide.  eta >= lam^T r - (A_x^T lam)^T x.
-        del Q  # anchor is dual-based, not primal
-        g = -(A_x.T @ lam) if A_x.shape[0] else np.zeros(n_master)
-        rhs = float(lam @ r) if A_x.shape[0] else 0.0
-        # eta - g^T x >= lam^T r  ->  -eta + g^T x <= -lam^T r
-        cut_x.append(g.copy())
+        # Optimality cut anchored at the **primal** recourse value Q(x̂) (exact),
+        # with slope s = -A_x^T lam from the recourse row duals:
+        #     eta >= Q(x̂) + s^T (x - x̂).
+        # Primal anchoring is required for soundness. The reconstructed dual
+        # value lam^T (r - A_x x̂) equals Q(x̂) only for a *complete* dual
+        # solution; when the recourse optimum is partly set by variable bounds
+        # the row duals lam are incomplete (their bound-multiplier counterpart is
+        # omitted), so lam^T r can *exceed* Q(x̂) — e.g. POUNCE's interior-point
+        # solver splits a marginal between a row and a coinciding variable bound,
+        # returning a half-magnitude row dual. Anchoring at that dual value would
+        # push the cut above the true value and prune the optimum. The primal
+        # anchor is exact at x̂; the row-dual slope is a valid subgradient of the
+        # convex (piecewise-linear) LP value function regardless of the split.
+        # eta >= Q + s^T (x - x̂)  ->  s^T x - eta <= s^T x̂ - Q.
+        s = -(A_x.T @ lam) if A_x.shape[0] else np.zeros(n_master)
+        cut_x.append(s.copy())
         cut_eta.append(-1.0)
-        cut_rhs.append(-rhs)
+        cut_rhs.append(float(s @ x_hat) - Q)
 
     def _add_feas_cut(x_hat, v, lam):
-        # Feasibility cut from the slack-min subproblem's dual: lam^T (r - A_x x)
-        # <= 0 excludes x̂ (where the min infeasibility v > 0). Dual-value
-        # anchored for the same interior-point soundness reason as the opt cut.
-        del v, x_hat
-        g = -(A_x.T @ lam) if A_x.shape[0] else np.zeros(n_master)
-        rhs = float(lam @ r) if A_x.shape[0] else 0.0
-        # lam^T r + g^T x <= 0  ->  g^T x <= -lam^T r
-        cut_x.append(g.copy())
+        # Feasibility cut anchored at the primal min-infeasibility v(x̂) > 0 of
+        # the slack-min subproblem, slope s = -A_x^T lam_feas:
+        #     v(x̂) + s^T (x - x̂) <= 0      (drive the infeasibility to 0).
+        # Primal-anchored for the same soundness reason as the optimality cut;
+        # excludes x̂ since v(x̂) > 0.  s^T x <= s^T x̂ - v.
+        s = -(A_x.T @ lam) if A_x.shape[0] else np.zeros(n_master)
+        cut_x.append(s.copy())
         cut_eta.append(0.0)
-        cut_rhs.append(-rhs)
+        cut_rhs.append(float(s @ x_hat) - v)
 
     # ── initialize: feasible master point (no eta) ──
     init = _solve_master(with_eta=False)
