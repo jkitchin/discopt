@@ -14,7 +14,7 @@ import logging
 import math
 import os
 import time
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar, Union, cast
 
 import numpy as np
 from scipy.optimize import minimize as scipy_minimize
@@ -1886,13 +1886,20 @@ def _root_relaxation_lower_bound(
     return None
 
 
-def _scoped_tuning(fn):
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def _scoped_tuning(fn: _F) -> _F:
     """Publish the ``tuning`` kwarg as the active :class:`SolverTuning` for the
     call, then restore the previous context. Relaxer read sites consult
     ``solver_tuning.current()`` instead of ``os.environ`` — so the levers are
     per-call and typed. ``tuning=None`` resolves to a fresh env-default instance
     (the prior global behavior), and the reset prevents one solve's overrides from
-    leaking into a later relaxer built outside any solve (e.g. in tests)."""
+    leaking into a later relaxer built outside any solve (e.g. in tests).
+
+    Typed as ``(_F) -> _F`` so the decorated function keeps its original
+    signature/return type for callers and the type checker.
+    """
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
@@ -1902,7 +1909,7 @@ def _scoped_tuning(fn):
         finally:
             _reset_tuning(token)
 
-    return wrapper
+    return cast(_F, wrapper)
 
 
 @_scoped_tuning
