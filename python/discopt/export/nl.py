@@ -334,21 +334,31 @@ class _NLWriter:
         self._decompose_builder_blocks()
 
     def _decompose_builder_objective(self):
-        """Recover a linear objective that lives only in the Rust builder.
+        """Recover a linear or quadratic objective that lives only in the builder.
 
-        ``add_linear_objective`` sets the real ``c'x + constant`` objective in the
-        builder and leaves a zero placeholder in ``model._objective``. Reconstruct
-        ``_obj_linear`` (and a constant offset as the objective's nonlinear part)
-        so ``.nl`` export carries the true objective. Only applies when the
-        current objective is that placeholder, so a real expression objective set
-        afterwards is never overwritten.
+        ``add_linear_objective`` / ``add_quadratic_objective`` set the real
+        ``0.5 x'Qx + c'x + constant`` objective in the builder and leave a zero
+        placeholder in ``model._objective``. Reconstruct ``_obj_linear`` (the
+        ``c'x`` gradient) and ``_obj_nonlinear`` (the quadratic part plus any
+        constant offset) so ``.nl`` export carries the true objective. Only
+        applies when the current objective is that placeholder, so a real
+        expression objective set afterwards is never overwritten.
         """
-        blk = getattr(self.model, "_builder_linear_objective", None)
-        if blk is None:
-            return
         if not getattr(self.model._objective, "_is_placeholder", False):
             return
-        c, x, constant, _sense = blk
+        lin_blk = getattr(self.model, "_builder_linear_objective", None)
+        quad_blk = getattr(self.model, "_builder_quadratic_objective", None)
+        if lin_blk is not None:
+            c, x, constant, _sense = lin_blk
+            self._obj_linear = self._linear_obj_from_c(c, x)
+            self._obj_nonlinear = Constant(float(constant)) if constant != 0.0 else None
+        elif quad_blk is not None:
+            Q, c, x, constant, _sense = quad_blk
+            self._obj_linear = self._linear_obj_from_c(c, x)
+            self._obj_nonlinear = self._quadratic_obj_expr(Q, x, float(constant))
+
+    def _linear_obj_from_c(self, c, x) -> dict[int, float]:
+        """Map a cost vector over variable ``x`` to ``{global_var_index: coeff}``."""
         lin: dict[int, float] = {}
         for j, coeff in enumerate(np.asarray(c, dtype=np.float64).ravel()):
             coeff = float(coeff)
@@ -357,8 +367,35 @@ class _NLWriter:
             gidx = self._var_index.get((x.name, j))
             if gidx is not None:
                 lin[gidx] = lin.get(gidx, 0.0) + coeff
-        self._obj_linear = lin
-        self._obj_nonlinear = Constant(float(constant)) if constant != 0.0 else None
+        return lin
+
+    def _quadratic_obj_expr(self, Q, x, constant: float) -> Expression | None:
+        """Build ``0.5 x'Qx + constant`` as an n-ary sum expression (or ``None``).
+
+        ``Q`` is a symmetric CSR matrix stored in full, so each stored nonzero
+        ``Q[i, j]`` contributes ``0.5 Q[i, j] x[i] x[j]`` (diagonal entries give
+        the ``x[i]^2`` terms). The sum is emitted as a single ``SUMLIST`` node so
+        the writer never recurses through a deep ``+`` chain.
+        """
+        indptr = Q.indptr
+        indices = Q.indices
+        data = Q.data
+        terms: list[Expression] = []
+        for i in range(Q.shape[0]):
+            for k in range(int(indptr[i]), int(indptr[i + 1])):
+                q = float(data[k])
+                if q == 0.0:
+                    continue
+                j = int(indices[k])
+                prod = BinaryOp("*", IndexExpression(x, i), IndexExpression(x, j))
+                terms.append(BinaryOp("*", Constant(0.5 * q), prod))
+        if constant != 0.0:
+            terms.append(Constant(constant))
+        if not terms:
+            return None
+        if len(terms) == 1:
+            return terms[0]
+        return SumOverExpression(terms)
 
     def _decompose_builder_blocks(self):
         """Emit linear constraints that live only in the Rust builder.

@@ -1378,8 +1378,11 @@ class Model:
         # Linear objective emitted directly into the Rust builder via
         # ``add_linear_objective``: ``(c, x, constant, sense)`` or ``None``. Kept
         # so .nl export can recover an objective that bypasses ``_objective``
-        # (which only holds a zero placeholder in that case).
+        # (which only holds a zero placeholder in that case). Linear is
+        # ``(c, x, constant, sense)``; quadratic is ``(Q_csr, c, x, constant,
+        # sense)`` for ``0.5 x'Qx + c'x + constant``. At most one is set.
         self._builder_linear_objective: Optional[tuple] = None
+        self._builder_quadratic_objective: Optional[tuple] = None
 
     # ── Index sets ──
 
@@ -1975,6 +1978,7 @@ class Model:
         # Record the block so .nl export can recover the objective that lives
         # only in the Rust builder (``_objective`` holds a zero placeholder).
         self._builder_linear_objective = (c, x, float(constant), sense)
+        self._builder_quadratic_objective = None
 
     def add_quadratic_objective(
         self,
@@ -2034,6 +2038,10 @@ class Model:
             ObjectiveSense.MINIMIZE if sense == "minimize" else ObjectiveSense.MAXIMIZE,
         )
         self._objective._is_placeholder = True
+        # Record the block so .nl export can recover the quadratic objective
+        # that lives only in the Rust builder.
+        self._builder_quadratic_objective = (Q, c, x, float(constant), sense)
+        self._builder_linear_objective = None
 
     # ── Logical constraints (GDP) ──
 

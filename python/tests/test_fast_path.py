@@ -187,6 +187,57 @@ class TestNlExportFastObjective:
         assert "G0 3" in txt
 
 
+class TestNlExportQuadraticObjective:
+    @staticmethod
+    def _build(Q, c, constant=0.0):
+        import numpy as np
+
+        m = dm.Model("qp")
+        x = m.continuous("x", shape=(2,), lb=-10, ub=10)
+        m.add_quadratic_objective(np.asarray(Q), np.asarray(c), x, constant=constant)
+        m.add_linear_constraints(np.array([[1.0, 1.0]]), x, "<=", np.array([10.0]), name="c")
+        return m
+
+    def test_diagonal_q_roundtrips(self, tmp_path):
+        # 0.5 x'Qx + c'x with Q=2I, c=(-2,-6) -> min at (1,3), obj -10.
+        m = self._build([[2.0, 0.0], [0.0, 2.0]], [-2.0, -6.0])
+        r0 = m.solve()
+        path = tmp_path / "qp.nl"
+        m.to_nl(str(path))
+        r1 = dm.from_nl(str(path)).solve()
+        assert r1.status == "optimal"
+        assert r1.objective == pytest.approx(r0.objective, rel=1e-5, abs=1e-5)
+
+    def test_constant_offset_roundtrips(self, tmp_path):
+        m = self._build([[2.0, 0.0], [0.0, 2.0]], [-2.0, -6.0], constant=7.5)
+        r0 = m.solve()
+        path = tmp_path / "qp.nl"
+        m.to_nl(str(path))
+        r1 = dm.from_nl(str(path)).solve()
+        assert r1.objective == pytest.approx(r0.objective, rel=1e-5, abs=1e-5)
+
+    def test_coupled_cross_terms_roundtrip(self, tmp_path):
+        # Off-diagonal Q exercises the x_i x_j cross terms.
+        import numpy as np
+
+        m = dm.Model("qp2")
+        x = m.continuous("x", shape=(2,), lb=-10, ub=10)
+        m.add_quadratic_objective(np.array([[2.0, 1.0], [1.0, 2.0]]), np.zeros(2), x)
+        m.add_linear_constraints(np.array([[1.0, 1.0]]), x, ">=", np.array([2.0]), name="c")
+        r0 = m.solve()
+        path = tmp_path / "qp2.nl"
+        m.to_nl(str(path))
+        r1 = dm.from_nl(str(path)).solve()
+        assert r1.objective == pytest.approx(r0.objective, rel=1e-5, abs=1e-5)
+
+    def test_objective_is_nonlinear_in_nl(self):
+        # The quadratic objective must export a nonlinear O-segment, not n0.
+        m = self._build([[2.0, 0.0], [0.0, 2.0]], [-2.0, -6.0])
+        lines = m.to_nl(None).splitlines()
+        o_idx = next(i for i, ln in enumerate(lines) if ln.startswith("O0"))
+        assert lines[o_idx + 1] != "n0"  # has a real nonlinear body
+
+
 class TestFastPathEquivalence:
     def test_same_solution_fast_vs_slow(self):
         m_fast, ship_fast = build_transportation(fast=True)
