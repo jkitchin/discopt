@@ -33,6 +33,57 @@ The release procedure that produces these entries is documented in
   `docs/design/sets-and-indexing.md`; examples
   `example_transportation` / `example_assignment` /
   `example_multicommodity_flow`.
+- **Decomposition benchmark instances** (`test(decomposition)`). Block-structured
+  / two-stage MILP instances with known optima (`decomposition_problems.py`,
+  registered in the `milp` suite) plus a consolidated correctness gate
+  (`test_decomposition_benchmarks.py`) that checks Benders and Lagrangian
+  against the known optima and the monolithic solver.
+- **Generalized Benders Decomposition** (`feat(decomposition)`, Geoffrion 1972).
+  `solve_benders` now handles a **convex nonlinear recourse** subproblem, not
+  just a linear LP: when the model has a nonlinear objective or constraints it
+  dispatches to `solve_gbd` (`discopt.solve_gbd`). Each optimality cut is the
+  **Lagrangian dual value** as an affine function of the first-stage variables —
+  `eta >= [L(x̂,ŷ) + m_y] + ∇_x L^T (x − x̂)` with sign-projected (dual-feasible)
+  multipliers and the closed-form recourse-box correction `m_y` — which is a
+  valid lower bound for *any* recourse point by the joint-subgradient inequality,
+  so it stays sound even if the recourse NLP returns an inexact primal (the
+  analogue of classical Benders' complete-dual cut). Recourse infeasibility at a
+  0/1 first-stage point is excluded with a no-good cut. The reported lower bound
+  is rigorous when the model is convex (gated on `classify_oa_cut_convexity`); on
+  a nonconvex model GBD runs heuristically and reports `bound=None` so the
+  `incorrect_count <= 0` gate is never threatened. POUNCE-only (no HiGHS).
+- **Lagrangian B&B node-bound hook** (`feat(decomposition)`). `model.solve(
+  lagrangian_bound=True)` fixes Lagrangian multipliers at the root and, at each
+  MILP branch-and-bound node, combines a valid Lagrangian dual lower bound with
+  the node's LP relaxation bound (`max()`), tightening pruning when the block
+  subproblems lack the integrality property. Opt-in (default off), applies to
+  linear minimization models with coupling structure, and no-ops cleanly
+  otherwise; bounds are verified sound against brute-force enumeration.
+- **Lagrangian relaxation solver** (`feat(decomposition)`). Dualizes coupling
+  constraints (annotate with `model.mark_coupling(...)`) to produce a rigorous
+  dual lower bound via `model.solve(decomposition="lagrangian")` /
+  `discopt.solve_lagrangian`. The dual is maximized by a subgradient method
+  (Polyak step) or a bundle / cutting-plane method, and a Lagrangian heuristic
+  recovers a feasible primal incumbent. Documented in
+  `docs/notebooks/tutorial_lagrangian.ipynb`.
+- **Benders decomposition solver** (`feat(decomposition)`). Classical Benders
+  for two-stage / block-angular (mixed-integer) linear programs via
+  `model.solve(decomposition="benders")` / `discopt.solve_benders`. The master
+  holds the complicating variables; the recourse-LP duals generate optimality
+  cuts and a slack-penalized feasibility LP generates feasibility cuts. Cuts are
+  **anchored at the primal recourse value** with a row-dual slope, so they stay
+  sound even when the recourse optimum is set by variable bounds and with
+  POUNCE's interior-point duals — **no HiGHS dependency** (runs on the POUNCE
+  LP/MILP stack). Every cut is a global under-estimator, so the master objective
+  is a rigorous lower bound (gap certified on convergence). Documented in
+  `docs/notebooks/tutorial_benders.ipynb`.
+- **Decomposition structure layer** (`feat(decomposition)`). Foundation for the
+  upcoming Benders / Lagrangian solvers: a `Model` annotation API
+  (`first_stage`/`second_stage`/`set_stage`/`set_block`/`mark_coupling`) and
+  `discopt.detect_decomposition(model)`, which resolves annotations and
+  auto-detects block structure (complicating variables default to integers;
+  coupling constraints via a bridge heuristic reusing the separability scan).
+  Exposed as `discopt.detect_decomposition` / `DecompositionStructure`.
 - **Irreducible Infeasible Subsystem (IIS)** (`feat(infeasibility)`, #227). New
   `compute_iis(model)` returns a minimal infeasible subset of constraints/bounds
   via deletion filtering — exact for LP/MILP/convex, best-effort for nonconvex.
@@ -159,6 +210,15 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **Decomposition stage annotation on indexed variables** (`fix(decomposition)`).
+  `model.first_stage(y[i])` / `set_stage` / `set_block` on an indexed element
+  (`y[i]`) stringified to a stray key (`"y[3][0]"`) that never matched the
+  variable name, so the annotated variable silently fell into the recourse
+  subproblem and tripped the "integer in recourse" guard. The annotation now
+  resolves an indexed reference (or single-variable expression) to its base
+  variable name. Surfaced by the new curated adversarial example suite
+  (`test_decomposition_adversarial.py`), which carries hand-crafted Benders/GBD
+  instances with analytically known optima for each correctness hazard.
 - **`.nl` export of builder constraints and objectives** (`fix(export)`). Linear
   constraints built directly into the Rust builder — via the fast-construction
   `add_linear_constraints` API and the indexed-constraint fast path — were
@@ -170,6 +230,36 @@ The release procedure that produces these entries is documented in
   objective term — so a fast-construction model round-trips through `.nl` with
   all constraints and the correct linear/quadratic objective (including a
   constant offset and `maximize` sense) intact.
+- **MILP B&B node bound soundness** (`fix(solver)`). The per-node LP soundness
+  gate now also rejects a relaxation point that violates the node's variable
+  bounds, not only its constraint rows. The pure-Rust simplex adapter (and the
+  POUNCE IPM) could return a basic point that violated the variable box on mixed
+  equality/inequality nodes; such a point can be integral but off-bound (e.g. a
+  binary at -1), pass the row check, and be accepted by the tree as a spurious
+  integer incumbent — returning a wrong (too-low) optimum on some
+  generalized-assignment-style MILPs. Regression covered in
+  `python/tests/test_milp_node_bound_soundness.py`.
+- **Clean errors for unsupported decomposition models** (`fix(decomposition)`).
+  `solve_benders` / `solve_lagrangian` (and the B&B hook) now raise a clear
+  `NotImplementedError` on models the linear extractor cannot handle — e.g.
+  multi-dimensional indexed variables — instead of a stray internal `TypeError`.
+- **Simplex equilibration over-scaling on noise entries** (`fix(simplex)`). The
+  root cause of the MILP wrong-optimum bug below: the geometric-mean
+  equilibration treated a numerically-negligible matrix entry (e.g. a ~1e-16 cut
+  coefficient that is float noise, not structure) as a genuine nonzero, so a
+  column's scale factor blew up to ~1e8. That pinned the variable's *scaled*
+  bounds to ~0; the scaled simplex returned a within-tolerance value that
+  unscaled into a gross original-space bound violation (a `[0,1]` variable at
+  -1), accepted as a spurious integer incumbent. The equilibration now ignores
+  entries more than ten orders of magnitude below a line's maximum when forming
+  the factor, bounding the per-line dynamic range. The simplex now returns the
+  correct vertex (verified against brute-force enumeration and HiGHS). Rust
+  regression in `scaling::tests::noise_entry_does_not_overscale_column`.
+- **MILP B&B node bound soundness** (`fix(solver)`). Defense in depth for the
+  above: the per-node LP soundness gate now also rejects a relaxation point that
+  violates the node's variable bounds, not only its constraint rows, so a
+  bound-violating point can never seed a spurious integer incumbent. Regression
+  covered in `python/tests/test_milp_node_bound_soundness.py`.
 - **Relaxation soundness hardening** across the global-opt loop: reject a
   fabricated finite bound on an unbounded McCormick relaxation (`himmel16`,
   `fix(soundness)`); never trust an unconverged simplex objective as an LP lower

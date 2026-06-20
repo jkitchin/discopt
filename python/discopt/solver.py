@@ -1893,6 +1893,9 @@ def solve_model(
     use_learned_relaxations: bool = False,
     mccormick_bounds: str = "auto",
     gdp_method: str = "big-m",
+    decomposition: Optional[str] = None,
+    lagrangian_bound: bool = False,
+    lagrangian_frequency: int = 1,
     initial_point: Optional[np.ndarray] = None,
     skip_convex_check: bool = False,
     nlp_bb: Optional[bool] = None,
@@ -2279,6 +2282,32 @@ def solve_model(
             )
             if gp_result is not None:
                 return gp_result
+
+    # --- Benders / Lagrangian decomposition: opt-in, structure-exploiting ---
+    if decomposition is not None:
+        if decomposition == "benders":
+            from discopt.decomposition.benders import solve_benders
+
+            return solve_benders(
+                model,
+                time_limit=time_limit,
+                gap_tolerance=gap_tolerance,
+                max_iterations=max_nodes,
+                nlp_solver=nlp_solver,
+            )
+        if decomposition == "lagrangian":
+            from discopt.decomposition.lagrangian import solve_lagrangian
+
+            return solve_lagrangian(
+                model,
+                time_limit=time_limit,
+                gap_tolerance=gap_tolerance,
+                max_iterations=max_nodes,
+                nlp_solver=nlp_solver,
+            )
+        raise ValueError(
+            f"Unknown decomposition={decomposition!r}; choose 'benders' or 'lagrangian'."
+        )
 
     # --- OA decomposition: general-purpose Outer Approximation ---
     if gdp_method == "oa":
@@ -2778,6 +2807,12 @@ def solve_model(
             # B&B runs in Rust with dual-warm-started simplex node solves. Opt-in;
             # falls through to the default path if unavailable.
             if nlp_solver == "simplex":
+                if lagrangian_bound:
+                    logger.warning(
+                        "lagrangian_bound is ignored with nlp_solver='simplex' (the "
+                        "monolithic Rust MILP engine has no per-node hook); use the "
+                        "default nlp_solver='pounce' MILP path to enable it."
+                    )
                 _simplex_res = _solve_milp_simplex(
                     model, time_limit, gap_tolerance, max_nodes, t_start
                 )
@@ -2807,6 +2842,8 @@ def solve_model(
                 t_start,
                 prefer_pounce=_pounce_only,
                 node_engine="simplex" if _pounce_only else "pounce",
+                lagrangian_bound=lagrangian_bound,
+                lagrangian_frequency=lagrangian_frequency,
             )
         elif problem_class == ProblemClass.MIQP:
             # A convex MIQP may use the fast convex QP/MIQP solvers; a NONCONVEX
@@ -7712,6 +7749,12 @@ def _solve_node_lp_pounce(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, ti
         # relaxation solution cannot seed a spurious incumbent or node bound.
         tol = 1e-5
         feasible = True
+        # An LP optimum must respect the node's variable box; an off-bound point
+        # can be integral (e.g. a binary at -1) and otherwise pass the row checks,
+        # seeding a spurious integer incumbent in the tree.
+        if np.any(x_sol < lb_n - tol) or np.any(x_sol > ub_n + tol):
+            logger.debug("POUNCE convex node solution violates variable bounds; rejecting")
+            return None
         if A_ub_m is not None and b_ub_m is not None and A_ub_m.shape[0]:
             feasible = bool(np.all(A_ub_m @ x_sol <= b_ub_m + tol * (1.0 + np.abs(b_ub_m))))
         if feasible and A_eq_m is not None and b_eq_m is not None and A_eq_m.shape[0]:
@@ -7783,6 +7826,14 @@ def _solve_node_lp_simplex(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, t
         # violates its own rows so a bad relaxation cannot seed a spurious bound.
         tol = 1e-5
         feasible = True
+        # An LP optimum must respect the node's variable bounds. The simplex
+        # adapter can occasionally return a basic point that violates the box it
+        # was given on mixed equality/inequality nodes; such a point is integral
+        # off-bound (e.g. a binary at -1) and would otherwise pass the row checks
+        # below and be accepted by the tree as a spurious integer incumbent.
+        if np.any(x_sol < lb_n - tol) or np.any(x_sol > ub_n + tol):
+            logger.debug("simplex node solution violates variable bounds; rejecting")
+            return None
         if A_ub_m is not None and b_ub_m is not None and A_ub_m.shape[0]:
             feasible = bool(np.all(A_ub_m @ x_sol <= b_ub_m + tol * (1.0 + np.abs(b_ub_m))))
         if feasible and A_eq_m is not None and b_eq_m is not None and A_eq_m.shape[0]:
@@ -8654,6 +8705,8 @@ def _solve_milp_bb(
     t_start: float,
     prefer_pounce: bool = False,
     node_engine: str = "pounce",
+    lagrangian_bound: bool = False,
+    lagrangian_frequency: int = 1,
 ) -> SolveResult:
     """Solve a MILP via B&B with LP relaxation solves at each node.
 
@@ -8781,6 +8834,29 @@ def _solve_milp_bb(
     if _root_incumbent is not None:
         _z_inc, _x_inc = _root_incumbent
         tree.inject_incumbent(np.asarray(_x_inc[:n_vars], dtype=np.float64).copy(), float(_z_inc))
+
+    # Opt-in Lagrangian node-bound hook: dualize coupling constraints and combine
+    # a valid per-node dual lower bound with the LP relaxation bound (max() never
+    # weakens a valid bound). Applies only to linear, minimization models with
+    # coupling structure; otherwise it cleanly no-ops. Multipliers are fixed once
+    # at the root from the root box.
+    _lag_bounder = None
+    _lag_freq = max(1, int(lagrangian_frequency))
+    if lagrangian_bound:
+        try:
+            from discopt.decomposition.lagrangian.node_bounder import LagrangianNodeBounder
+
+            _lag_bounder = LagrangianNodeBounder.try_build(model, prefer_pounce=prefer_pounce)
+            if _lag_bounder is not None:
+                _lag_bounder.solve_root_dual(lb, ub)
+            else:
+                logger.info(
+                    "lagrangian_bound: model is not a linear minimization with coupling "
+                    "structure; node-bound hook disabled."
+                )
+        except Exception as _lag_exc:
+            logger.debug("lagrangian_bound setup failed: %s", _lag_exc)
+            _lag_bounder = None
     # Root fractional diving (Phase 3): an early incumbent front-loads pruning
     # and reduced-cost fixing. The tree keeps the best of any injected points.
     try:
@@ -9025,6 +9101,19 @@ def _solve_milp_bb(
                     lb_c = np.clip(node_lb, -_SPC, _SPC)
                     ub_c = np.clip(node_ub, -_SPC, _SPC)
                     result_sols[i] = 0.5 * (lb_c + ub_c)
+
+        # Lagrangian node bounds: combine a valid dual lower bound with each
+        # node's LP relaxation bound. Gated by cadence and applied only to nodes
+        # that produced a real (non-sentinel) bound; max() keeps soundness.
+        if _lag_bounder is not None and (iteration % _lag_freq == 0):
+            for i in range(n_batch):
+                if result_lbs[i] < _SENTINEL_THRESHOLD:
+                    _lag_lb = _lag_bounder.node_bound(
+                        np.asarray(batch_lb[i], dtype=np.float64),
+                        np.asarray(batch_ub[i], dtype=np.float64),
+                    )
+                    if _lag_lb is not None and np.isfinite(_lag_lb):
+                        result_lbs[i] = max(result_lbs[i], _lag_lb)
 
         jax_time += time.perf_counter() - t_jax_start
 

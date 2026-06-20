@@ -39,6 +39,12 @@ try:
 except ImportError:
     SIMPLEX_AVAILABLE = False
 
+# Largest bound violation that is snapped back onto the box as numerical noise
+# (see ``solve_lp``). Comfortably above observed simplex round-off (~1e-4 on
+# wide-range LPs) yet far below any meaningful constraint scale, so a genuine
+# solver defect (a large off-box value) is left intact to surface in tests.
+_BOUND_SNAP_TOL = 1e-3
+
 
 def solve_lp(
     c: np.ndarray,
@@ -77,9 +83,31 @@ def solve_lp(
     # A pure LP solved to optimality has objective == bound == the true optimum;
     # ``bound`` is the rigorous dual value, so prefer it when present.
     obj = res.bound if res.bound is not None else res.objective
+
+    # Snap small numerical bound violations onto the box. An LP optimum is a
+    # vertex sitting on its active bounds; on some platforms (observed on
+    # darwin/arm64 for genuinely wide-range coefficients) the scaled simplex can
+    # return a component a hair outside its bound (e.g. x=-1.3e-4 at lb=0). The
+    # variable bounds are hard box constraints, so projecting a *small* violation
+    # back to the bound restores feasibility without changing the optimum. Only
+    # near-bound violations are snapped; a large violation is left intact so a
+    # genuine solver defect still surfaces rather than being masked.
+    x = res.x
+    if x is not None and bounds is not None:
+        x = np.asarray(x, dtype=np.float64).copy()
+        m = min(len(x), len(bounds))
+        lo = np.array([bounds[i][0] for i in range(m)], dtype=np.float64)
+        hi = np.array([bounds[i][1] for i in range(m)], dtype=np.float64)
+        xm = x[:m]
+        below = (xm < lo) & (xm >= lo - _BOUND_SNAP_TOL)
+        above = (xm > hi) & (xm <= hi + _BOUND_SNAP_TOL)
+        xm[below] = lo[below]
+        xm[above] = hi[above]
+        x[:m] = xm
+
     return LPResult(
         status=SolveStatus.OPTIMAL,
-        x=res.x,
+        x=x,
         objective=float(obj) if obj is not None else None,
         basis=None,
         wall_time=res.wall_time,

@@ -1,0 +1,326 @@
+"""Decomposition structure: annotation resolution + auto-detection.
+
+Both Benders decomposition and Lagrangian relaxation key off problem
+*structure*:
+
+- **Benders** partitions variables into *complicating* (first-stage / master)
+  and *subproblem* (recourse) sets. Fixing the complicating variables leaves a
+  tractable subproblem whose dual yields cuts.
+- **Lagrangian relaxation** dualizes *coupling* constraints — the linking rows
+  whose removal separates the model into independent blocks that can be solved
+  in parallel.
+
+This module resolves explicit user annotations (set on the :class:`Model` via
+``first_stage`` / ``second_stage`` / ``set_block`` / ``mark_coupling``) and
+falls back to auto-detection when none are supplied:
+
+- *Complicating variables* default to the integer/binary variables — the
+  canonical Benders split for two-stage (mixed-)integer programs.
+- *Coupling constraints* are auto-detected with a guarded **bridge-constraint**
+  heuristic: a constraint is coupling when removing it alone disconnects the
+  variable-incidence graph. Multi-constraint cuts are not auto-found in v1;
+  annotate ``mark_coupling`` for those cases.
+
+Block membership is computed from the **constraint** incidence graph only (the
+objective is assumed separable across blocks, the standard Lagrangian setup).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+
+from discopt.modeling.core import Model, VarType
+
+# Guard for the O(m·(V+E)) bridge scan; above this, skip auto coupling
+# detection and rely on annotations instead of burning time.
+_BRIDGE_SCAN_BUDGET = 200_000
+
+
+@dataclass(frozen=True)
+class DecompositionStructure:
+    """Resolved decomposition structure consumed by the decomposition solvers.
+
+    Attributes
+    ----------
+    blocks : list[list[str]]
+        Variable names per block (connected components of the non-coupling
+        constraint graph). Deterministic in declared variable order.
+    block_of_var : dict[str, int]
+        Maps each variable name to its block index.
+    block_of_constraint : list[int]
+        ``block_of_constraint[i]`` is the block of constraint ``i``, or ``-1``
+        if the constraint is coupling or references no variables.
+    complicating_vars : list[str]
+        Variable names held in the Benders master (first-stage).
+    coupling_constraints : list[int]
+        Indices (into ``model._constraints``) of the dualized coupling rows.
+    is_separable : bool
+        True iff there are ≥2 blocks once coupling constraints are removed.
+    source : str
+        ``"annotated"``, ``"detected"``, or ``"mixed"`` — provenance of the
+        partition, for diagnostics.
+    """
+
+    blocks: list[list[str]]
+    block_of_var: dict[str, int]
+    block_of_constraint: list[int]
+    complicating_vars: list[str]
+    coupling_constraints: list[int]
+    is_separable: bool
+    source: str
+
+    @property
+    def num_blocks(self) -> int:
+        return len(self.blocks)
+
+    def summary(self) -> str:
+        lines = [
+            f"DecompositionStructure ({self.source})",
+            f"  blocks: {self.num_blocks} (separable={self.is_separable})",
+            f"  complicating vars: {len(self.complicating_vars)}",
+            f"  coupling constraints: {len(self.coupling_constraints)}",
+        ]
+        return "\n".join(lines)
+
+
+def _vars_in(expr, name_to_idx: dict[str, int]) -> list[int]:
+    """Flat variable indices referenced by *expr* (deduplicated, ordered)."""
+    if expr is None:
+        return []
+    from discopt._jax.gdp_reformulate import _collect_variables
+
+    out: list[int] = []
+    for nm in _collect_variables(expr):
+        idx = name_to_idx.get(nm)
+        if idx is not None:
+            out.append(idx)
+    return out
+
+
+def _components(
+    n: int,
+    cliques: list[list[int]],
+) -> tuple[list[int], int]:
+    """Union-find connected components over variable-index *cliques*.
+
+    Returns ``(root_block_id_per_var, num_blocks)`` with block ids assigned in
+    ascending variable order for determinism.
+    """
+    parent = list(range(n))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i: int, j: int) -> None:
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+
+    for clique in cliques:
+        if len(clique) <= 1:
+            continue
+        anchor = clique[0]
+        for i in clique[1:]:
+            union(anchor, i)
+
+    root_to_block: dict[int, int] = {}
+    block_of = [0] * n
+    for i in range(n):
+        r = find(i)
+        if r not in root_to_block:
+            root_to_block[r] = len(root_to_block)
+        block_of[i] = root_to_block[r]
+    return block_of, len(root_to_block)
+
+
+def _annotated_coupling(model: Model) -> set[int]:
+    """Resolve ``mark_coupling`` annotations to constraint indices."""
+    keys: set = getattr(model, "_coupling_keys", set())
+    if not keys:
+        return set()
+    out: set[int] = set()
+    for i, c in enumerate(model._constraints):
+        cname = getattr(c, "name", None)
+        if id(c) in keys or (cname is not None and cname in keys):
+            out.add(i)
+    return out
+
+
+def _bearing_blocks(n: int, cliques: list[list[int]]) -> int:
+    """Number of connected components that contain at least one constraint.
+
+    Counting *constraint-bearing* components (rather than raw variable
+    components) avoids spurious singletons: a variable that appears in only one
+    constraint becomes isolated when that constraint is dropped, which must not
+    be mistaken for a genuine block split.
+    """
+    block_of, _ = _components(n, cliques)
+    bearing = {block_of[c[0]] for c in cliques if c}
+    return len(bearing)
+
+
+def _detect_bridge_coupling(
+    model: Model,
+    constraint_cliques: list[list[int]],
+    n: int,
+) -> set[int]:
+    """Bridge-constraint heuristic: a constraint whose sole removal disconnects.
+
+    A constraint is coupling when dropping it raises the number of
+    constraint-bearing components. Guarded by ``_BRIDGE_SCAN_BUDGET``; returns
+    ``set()`` when the model is already separable, when nothing qualifies, or
+    when the scan is too large.
+    """
+    nontrivial = [c for c in constraint_cliques if len(c) >= 2]
+    base = _bearing_blocks(n, constraint_cliques)
+    if base >= 2:
+        # Already separable with no coupling rows needed.
+        return set()
+    budget = len(nontrivial) * (n + sum(len(c) for c in nontrivial))
+    if budget > _BRIDGE_SCAN_BUDGET:
+        return set()
+    coupling: set[int] = set()
+    for i, clique in enumerate(constraint_cliques):
+        if len(clique) < 2:
+            continue
+        without = [c for j, c in enumerate(constraint_cliques) if j != i]
+        if _bearing_blocks(n, without) > base:
+            coupling.add(i)
+    return coupling
+
+
+def detect_decomposition(
+    model: Model,
+    *,
+    complicating: list[str] | None = None,
+    coupling: list[int] | None = None,
+) -> DecompositionStructure:
+    """Resolve the decomposition structure of *model*.
+
+    Annotations on the model take precedence; explicit ``complicating`` /
+    ``coupling`` arguments override both. See the module docstring for the
+    auto-detection rules.
+    """
+    var_names = [v.name for v in model._variables]
+    name_to_idx = {nm: i for i, nm in enumerate(var_names)}
+    n = len(var_names)
+
+    constraint_cliques = [
+        _vars_in(getattr(c, "body", None), name_to_idx) for c in model._constraints
+    ]
+
+    # ── coupling constraints ──
+    src_parts = []
+    if coupling is not None:
+        coupling_set = set(coupling)
+        src_parts.append("annotated")
+    else:
+        coupling_set = _annotated_coupling(model)
+        if coupling_set:
+            src_parts.append("annotated")
+        else:
+            coupling_set = _detect_bridge_coupling(model, constraint_cliques, n)
+            if coupling_set:
+                src_parts.append("detected")
+
+    # ── blocks from non-coupling constraints ──
+    block_cliques = [clique for i, clique in enumerate(constraint_cliques) if i not in coupling_set]
+    block_of, num_blocks = _components(n, block_cliques)
+
+    blocks: list[list[str]] = [[] for _ in range(num_blocks)]
+    for i, nm in enumerate(var_names):
+        blocks[block_of[i]].append(nm)
+    block_of_var = {nm: block_of[i] for i, nm in enumerate(var_names)}
+
+    def _block_of_constraint(i: int) -> int:
+        if i in coupling_set:
+            return -1
+        clique = constraint_cliques[i]
+        return block_of[clique[0]] if clique else -1
+
+    block_of_constraint = [_block_of_constraint(i) for i in range(len(model._constraints))]
+
+    # ── complicating variables ──
+    if complicating is not None:
+        complicating_vars = list(complicating)
+        src_parts.append("annotated")
+    else:
+        stages = getattr(model, "_decomp_stages", {})
+        annotated = [nm for nm, st in stages.items() if st == 1]
+        if annotated:
+            complicating_vars = annotated
+            src_parts.append("annotated")
+        else:
+            complicating_vars = [
+                v.name for v in model._variables if v.var_type in (VarType.BINARY, VarType.INTEGER)
+            ]
+            if complicating_vars:
+                src_parts.append("detected")
+
+    if not src_parts:
+        source = "detected"
+    elif len(set(src_parts)) == 1:
+        source = src_parts[0]
+    else:
+        source = "mixed"
+
+    return DecompositionStructure(
+        blocks=blocks,
+        block_of_var=block_of_var,
+        block_of_constraint=block_of_constraint,
+        complicating_vars=complicating_vars,
+        coupling_constraints=sorted(coupling_set),
+        is_separable=num_blocks >= 2,
+        source=source,
+    )
+
+
+def flat_bounds(model: Model) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``(lb, ub)`` of the flat variable vector in declared order."""
+    lbs, ubs = [], []
+    for v in model._variables:
+        lbs.append(np.asarray(v.lb, dtype=np.float64).reshape(-1))
+        ubs.append(np.asarray(v.ub, dtype=np.float64).reshape(-1))
+    if not lbs:
+        return np.zeros(0), np.zeros(0)
+    return np.concatenate(lbs), np.concatenate(ubs)
+
+
+def restricted_bounds(
+    model: Model,
+    fixed: dict[str, float | np.ndarray],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Flat ``(lb, ub)`` with the named variables pinned to *fixed* values.
+
+    Used to form Benders subproblems: pinning ``lb == ub`` fixes a variable so
+    the relaxation/presolve treats it as a constant. Indices follow the flat
+    vector implied by declared variable order (the convention used by the
+    evaluators and the Rust B&B tree).
+    """
+    lb, ub = flat_bounds(model)
+    offset = 0
+    for v in model._variables:
+        size = int(np.prod(v.shape)) if v.shape else 1
+        if v.name in fixed:
+            val = np.asarray(fixed[v.name], dtype=np.float64).reshape(-1)
+            if val.size == 1:
+                val = np.full(size, val.item())
+            if val.size != size:
+                raise ValueError(f"fixed value for {v.name!r} has size {val.size}, expected {size}")
+            lb[offset : offset + size] = val
+            ub[offset : offset + size] = val
+        offset += size
+    return lb, ub
+
+
+__all__ = [
+    "DecompositionStructure",
+    "detect_decomposition",
+    "flat_bounds",
+    "restricted_bounds",
+]

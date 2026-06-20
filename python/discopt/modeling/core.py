@@ -1395,6 +1395,13 @@ class Model:
         # Complementarity conditions added via ``complementarity()``; recorded
         # for introspection and bound tightening (see ``discopt.mpec``).
         self._complementarities: list = []
+        # Decomposition annotations (Benders / Lagrangian). Populated by
+        # ``set_stage``/``first_stage``/``second_stage``/``set_block``/
+        # ``mark_coupling``; consumed by ``discopt.decomposition``. Empty by
+        # default, in which case structure is auto-detected.
+        self._decomp_stages: dict[str, int] = {}
+        self._decomp_blocks: dict[str, int] = {}
+        self._coupling_keys: set = set()
         # Named index sets registered via ``set()`` (see ``discopt.modeling.sets``).
         self._sets: list = []
         # Linear constraint blocks emitted directly into the Rust builder
@@ -1934,6 +1941,88 @@ class Model:
         )
         self.add_linear_constraints(A, var, sense, b, name)
         return True
+
+    # ── Decomposition annotations (Benders / Lagrangian) ──
+
+    def _decomp_var_name(self, var) -> str:
+        """Resolve a decomposition annotation target to a variable name.
+
+        Accepts a :class:`Variable`, a name string, or an indexed reference
+        (``y[i]``) / single-variable expression — resolving the latter to its
+        *base variable name*, since decomposition staging is whole-variable.
+        Resolving ``y[i]`` to ``"y"`` (rather than the stray ``str(y[i])``, e.g.
+        ``"y[3][0]"``, which silently never matches) prevents an annotated
+        variable from being misclassified into the recourse subproblem.
+        """
+        if isinstance(var, Variable):
+            return var.name
+        if isinstance(var, str):
+            return var
+        base = getattr(var, "base", None)
+        if isinstance(base, Variable):
+            return base.name
+        try:
+            from discopt._jax.gdp_reformulate import _collect_variables
+
+            names = list(_collect_variables(var).keys())
+        except Exception:
+            names = []
+        if len(names) == 1:
+            return names[0]
+        raise TypeError(
+            f"Cannot resolve a decomposition variable from {var!r}; pass a Variable "
+            "(e.g. model.first_stage(y)). Staging is per whole variable, so an "
+            "expression spanning zero or multiple variables is ambiguous."
+        )
+
+    def set_stage(self, var: "Variable", stage: int) -> "Model":
+        """Tag a variable with a decomposition stage.
+
+        Stage ``1`` denotes a *complicating* / first-stage variable (held in
+        the Benders master); higher stages denote recourse/subproblem
+        variables. Consumed by :func:`discopt.decomposition.detect_decomposition`.
+        Accepts a :class:`Variable`, a name string, or an indexed reference
+        (``y[i]``, resolved to the whole variable). Returns ``self`` for chaining.
+        """
+        self._decomp_stages[self._decomp_var_name(var)] = int(stage)
+        return self
+
+    def first_stage(self, *vars: "Variable") -> "Model":
+        """Mark variables as first-stage (complicating) for Benders."""
+        for v in vars:
+            self.set_stage(v, 1)
+        return self
+
+    def second_stage(self, *vars: "Variable") -> "Model":
+        """Mark variables as second-stage (recourse/subproblem) for Benders."""
+        for v in vars:
+            self.set_stage(v, 2)
+        return self
+
+    def set_block(self, var: "Variable", block_id: int) -> "Model":
+        """Assign a variable to an explicit decomposition block.
+
+        Accepts a :class:`Variable`, a name string, or an indexed reference
+        (``y[i]``, resolved to the whole variable).
+        """
+        self._decomp_blocks[self._decomp_var_name(var)] = int(block_id)
+        return self
+
+    def mark_coupling(self, constraint: Union[Constraint, str]) -> "Model":
+        """Mark a constraint as *coupling* (to dualize in Lagrangian relaxation).
+
+        Accepts the :class:`Constraint` object added via :meth:`subject_to`, or
+        its name string. Coupling constraints are the linking rows whose removal
+        separates the model into independent blocks.
+        """
+        if isinstance(constraint, str):
+            self._coupling_keys.add(constraint)
+        else:
+            self._coupling_keys.add(id(constraint))
+            cname = getattr(constraint, "name", None)
+            if cname:
+                self._coupling_keys.add(cname)
+        return self
 
     # ── Fast construction API (direct arena building) ──
 

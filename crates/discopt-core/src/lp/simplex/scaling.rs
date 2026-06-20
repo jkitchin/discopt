@@ -50,6 +50,13 @@ const SCALE_TRIGGER: f64 = 1e6;
 /// fully settles).
 const MAX_PASSES: usize = 4;
 
+/// Entries smaller than this fraction of a line's maximum magnitude are treated
+/// as numerical noise (not structure) when computing the equilibration factor,
+/// so a spurious ~1e-16 coefficient cannot collapse the geometric mean and
+/// over-scale the line. 1e-10 spans ten orders of magnitude — far wider than any
+/// genuine per-line coefficient range, well above float noise.
+const MAX_LINE_RANGE: f64 = 1e-10;
+
 /// Round `v > 0` to the nearest power of two (an exact float scale factor).
 #[inline]
 fn nearest_pow2(v: f64) -> f64 {
@@ -202,14 +209,7 @@ fn equilibrate(a: &[f64], m: usize, n: usize) -> (Vec<f64>, Vec<f64>) {
         let mut changed = false;
         // Column sweep.
         for j in 0..n {
-            let (mut lo, mut hi) = (f64::INFINITY, 0.0f64);
-            for i in 0..m {
-                let v = (row[i] * a[i * n + j] * col[j]).abs();
-                if v > 0.0 {
-                    lo = lo.min(v);
-                    hi = hi.max(v);
-                }
-            }
+            let (lo, hi) = line_lo_hi((0..m).map(|i| row[i] * a[i * n + j] * col[j]));
             if hi > 0.0 {
                 let f = nearest_pow2(1.0 / (lo * hi).sqrt());
                 if f != 1.0 {
@@ -220,15 +220,8 @@ fn equilibrate(a: &[f64], m: usize, n: usize) -> (Vec<f64>, Vec<f64>) {
         }
         // Row sweep.
         for i in 0..m {
-            let (mut lo, mut hi) = (f64::INFINITY, 0.0f64);
             let base = i * n;
-            for j in 0..n {
-                let v = (row[i] * a[base + j] * col[j]).abs();
-                if v > 0.0 {
-                    lo = lo.min(v);
-                    hi = hi.max(v);
-                }
-            }
+            let (lo, hi) = line_lo_hi((0..n).map(|j| row[i] * a[base + j] * col[j]));
             if hi > 0.0 {
                 let f = nearest_pow2(1.0 / (lo * hi).sqrt());
                 if f != 1.0 {
@@ -242,6 +235,30 @@ fn equilibrate(a: &[f64], m: usize, n: usize) -> (Vec<f64>, Vec<f64>) {
         }
     }
     (row, col)
+}
+
+/// Smallest and largest *significant* magnitudes along a matrix line (row or
+/// column). The equilibration factor is `1/sqrt(lo·hi)`, so a spurious
+/// near-zero entry — e.g. a ~1e-16 cut coefficient that is numerical noise, not
+/// structure — would otherwise collapse `lo` and blow the factor up to ~1e8,
+/// over-scaling the column and pinning its variable's bounds to ~0 in scaled
+/// space (then unscaling a within-tolerance scaled value into a gross
+/// bound violation). Ignoring entries more than [`MAX_LINE_RANGE`] below the
+/// line's max bounds the per-line dynamic range and keeps the factor sane;
+/// genuinely structural small coefficients are unaffected.
+fn line_lo_hi(vals: impl Iterator<Item = f64>) -> (f64, f64) {
+    let mags: Vec<f64> = vals.map(f64::abs).filter(|v| *v > 0.0).collect();
+    let hi = mags.iter().copied().fold(0.0f64, f64::max);
+    if hi == 0.0 {
+        return (f64::INFINITY, 0.0);
+    }
+    let floor = hi * MAX_LINE_RANGE;
+    let lo = mags
+        .iter()
+        .copied()
+        .filter(|v| *v >= floor)
+        .fold(f64::INFINITY, f64::min);
+    (lo, hi)
 }
 
 #[cfg(test)]
@@ -298,6 +315,28 @@ mod tests {
         }
         // Raw range was 1e9/1e-3 = 1e12; equilibration must shrink it sharply.
         assert!(hi / lo < 1e4, "post-scale range {} too wide", hi / lo);
+    }
+
+    #[test]
+    fn noise_entry_does_not_overscale_column() {
+        // Column 0 has a genuine unit entry and a ~1e-16 noise entry (e.g. a cut
+        // coefficient that is float noise). The noise must not collapse the
+        // column's geometric-mean factor: without the dynamic-range floor it
+        // would scale the column by ~1e8, pinning the variable's scaled bounds to
+        // ~0 so a feasible scaled point unscales far out of its box (a [0,1] var
+        // returned at -1). The structural entry is 1.0, so the factor must stay
+        // O(1).
+        let a = [
+            1.0, 1.0, // row 0
+            1e-16, 1.0, // row 1: col 0's entry here is pure noise
+        ];
+        let scaling = Scaling::from_matrix(&a, 2, 2).expect("noise widens range past the trigger");
+        let su = scaling.scale_upper(&[1.0, 1.0]);
+        assert!(
+            su[0] > 1e-3,
+            "column 0 over-scaled by a noise entry: scaled upper bound {}",
+            su[0]
+        );
     }
 
     #[test]
