@@ -143,3 +143,145 @@ def test_sin_angle_matches_engine_construction_on_single_inflection_proxy():
     cv_s, cc_s = relax_s(xs, lbs, ubs)
     assert jnp.allclose(cv_h, cv_s, atol=1e-7)
     assert jnp.allclose(cc_h, cc_s, atol=1e-7)
+
+
+# --------------------------------------------------------------------------
+# End-to-end: relaxation compiler auto-routes x*log(x) to the tight envelope
+# --------------------------------------------------------------------------
+
+
+def test_compiler_routes_xlogx_pattern():
+    """The compiler detects ``x * log(x)`` and routes it to the dedicated convex
+    envelope (tighter than the generic bilinear of ``x`` and ``log(x)``), end to
+    end, on a positive box. Asserts soundness (``cv <= f <= cc``) and that the
+    routed result matches the standalone ``xlogx_relax`` closure."""
+    import discopt.modeling as M
+    import numpy as np
+    from discopt._jax.relaxation_compiler import compile_relaxation
+    from discopt.modeling.core import Model
+
+    m = Model("entropy")
+    x = m.continuous("x", lb=0.5, ub=5.0)
+    m.minimize(x * M.log(x))
+    expr = x * M.log(x)
+
+    relax_fn = compile_relaxation(expr.expression if hasattr(expr, "expression") else expr, m)
+    lb = jnp.array([0.5])
+    ub = jnp.array([5.0])
+    for xv in np.linspace(0.5, 5.0, 60):
+        xa = jnp.array([float(xv)])
+        cv, cc = relax_fn(xa, xa, lb, ub)
+        true = float(xv) * np.log(float(xv))
+        assert float(cv) <= true + 1e-6, f"unsound cv at x={xv}: {float(cv)} > {true}"
+        assert float(cc) >= true - 1e-6, f"unsound cc at x={xv}: {float(cc)} < {true}"
+        # Routed result == standalone closure (i.e. the dispatch fired).
+        cv_x, cc_x = chemeng.xlogx_relax(jnp.array(float(xv)), 0.5, 5.0)
+        assert float(cv) == pytest.approx(float(cv_x), abs=1e-7)
+        assert float(cc) == pytest.approx(float(cc_x), abs=1e-7)
+
+
+def test_compiler_xlogx_detector_no_misfire():
+    """The x*log(x) detector fires only on a bare variable times log of the SAME
+    variable — not on different variables, squares, or other transcendentals."""
+    import discopt.modeling as M
+    from discopt._jax.relaxation_compiler import _try_extract_xlogx
+    from discopt.modeling.core import Model
+
+    m = Model("t")
+    x = m.continuous("x", lb=0.5, ub=5.0)
+    y = m.continuous("y", lb=0.5, ub=5.0)
+
+    def ex(e):
+        return e.expression if hasattr(e, "expression") else e
+
+    assert _try_extract_xlogx(ex(x * M.log(x)), m) is not None
+    assert _try_extract_xlogx(ex(M.log(x) * x), m) is not None
+    assert _try_extract_xlogx(ex(x * M.log(y)), m) is None  # different variable
+    assert _try_extract_xlogx(ex(x * x), m) is None  # no log
+    assert _try_extract_xlogx(ex(x * M.exp(x)), m) is None  # not log
+    assert _try_extract_xlogx(ex(M.log(x) * M.log(x)), m) is None  # no bare var
+
+
+def test_compiler_routes_monod_pattern():
+    """The compiler detects x/(K+x) on a nonneg-domain variable and routes it to
+    the dedicated concave envelope; sound, and matches the standalone closure."""
+    import numpy as np
+    from discopt._jax.relaxation_compiler import compile_relaxation
+    from discopt.modeling.core import Model
+
+    m = Model("monod")
+    x = m.continuous("x", lb=0.1, ub=5.0)
+    m.maximize(x / (2.0 + x))
+    relax_fn = compile_relaxation(x / (2.0 + x), m)
+    sat = chemeng.saturating_relax(2.0)
+    lb = jnp.array([0.1])
+    ub = jnp.array([5.0])
+    for xv in np.linspace(0.1, 5.0, 60):
+        xa = jnp.array([float(xv)])
+        cv, cc = relax_fn(xa, xa, lb, ub)
+        f = float(xv) / (2.0 + float(xv))
+        assert float(cv) <= f + 1e-6
+        assert float(cc) >= f - 1e-6
+        cv_s, cc_s = sat(jnp.array(float(xv)), 0.1, 5.0)
+        assert float(cv) == pytest.approx(float(cv_s), abs=1e-7)
+        assert float(cc) == pytest.approx(float(cc_s), abs=1e-7)
+
+
+def test_monod_detector_guards_and_no_misfire():
+    from discopt._jax.relaxation_compiler import _try_extract_monod
+    from discopt.modeling.core import Model
+
+    m = Model("t")
+    x = m.continuous("x", lb=0.1, ub=5.0)
+    y = m.continuous("y", lb=0.1, ub=5.0)
+    assert _try_extract_monod(x / (2.0 + x), m) == (0, pytest.approx(2.0))
+    assert _try_extract_monod(x / (x + 2.0), m) == (0, pytest.approx(2.0))
+    assert _try_extract_monod(x / (2.0 + y), m) is None  # different variable
+    assert _try_extract_monod(x / (2.0 * x), m) is None  # denominator not K+x
+    # Negative declared lower bound: envelope invalid -> must not engage.
+    mn = Model("n")
+    xn = mn.continuous("x", lb=-1.0, ub=5.0)
+    assert _try_extract_monod(xn / (2.0 + xn), mn) is None
+
+
+def test_compiler_routes_arrhenius_pattern():
+    """The compiler detects exp(-c/T) on a positive-domain variable and routes it
+    to the dedicated single-inflection envelope; sound across the inflection."""
+    import discopt.modeling as M
+    import numpy as np
+    from discopt._jax.relaxation_compiler import compile_relaxation
+    from discopt.modeling.core import Model
+
+    # c = 800 -> inflection at T = c/2 = 400, inside [300, 600] (straddling).
+    m = Model("arr")
+    T = m.continuous("T", lb=300.0, ub=600.0)
+    m.maximize(M.exp(-800.0 / T))
+    relax_fn = compile_relaxation(M.exp(-800.0 / T), m)
+    arr = chemeng.arrhenius_relax(800.0)
+    lb = jnp.array([300.0])
+    ub = jnp.array([600.0])
+    for tv in np.linspace(300.0, 600.0, 80):
+        ta = jnp.array([float(tv)])
+        cv, cc = relax_fn(ta, ta, lb, ub)
+        f = float(np.exp(-800.0 / float(tv)))
+        assert float(cv) <= f + 1e-6
+        assert float(cc) >= f - 1e-6
+        cv_a, cc_a = arr(jnp.array(float(tv)), 300.0, 600.0)
+        assert float(cv) == pytest.approx(float(cv_a), abs=1e-7)
+        assert float(cc) == pytest.approx(float(cc_a), abs=1e-7)
+
+
+def test_arrhenius_detector_guards_and_no_misfire():
+    import discopt.modeling as M
+    from discopt._jax.relaxation_compiler import _try_extract_arrhenius
+    from discopt.modeling.core import Model
+
+    m = Model("t")
+    T = m.continuous("T", lb=300.0, ub=600.0)
+    assert _try_extract_arrhenius(M.exp(-8000.0 / T), m) == (0, pytest.approx(8000.0))
+    assert _try_extract_arrhenius(M.exp(8000.0 / T), m) is None  # +c/T (c<0), not Arrhenius
+    assert _try_extract_arrhenius(M.exp(T), m) is None  # not -c/T
+    # Non-positive declared lower bound: pole/invalid -> must not engage.
+    m0 = Model("z")
+    T0 = m0.continuous("T", lb=0.0, ub=600.0)
+    assert _try_extract_arrhenius(M.exp(-8000.0 / T0), m0) is None

@@ -166,6 +166,137 @@ def _try_extract_signed_abs_product(expr: Expression, model: Model) -> int | Non
     return None
 
 
+def _try_extract_signed_power(expr: Expression, model: Model) -> tuple[int, float] | None:
+    """Detect the signed-power flow term ``f * |f|**(beta-1)`` over one scalar var.
+
+    Matches ``Mul(v, Pow(Abs(v), p))`` / ``Mul(Pow(Abs(v), p), v)`` with ``p`` a
+    positive constant and both factors the *same* scalar variable. Returns
+    ``(offset, beta)`` with ``beta = p + 1`` on match, else ``None``. This is the
+    Panhandle generalization of the Weymouth term (``beta == 2``, handled by
+    :func:`_try_extract_signed_abs_product`); it routes to
+    :func:`discopt._jax.symbolic.domains.gas.signed_power_relax`, which is a tight
+    single-inflection envelope valid over any box (no domain restriction).
+    """
+    if not (isinstance(expr, BinaryOp) and expr.op == "*"):
+        return None
+    for factor, other in ((expr.left, expr.right), (expr.right, expr.left)):
+        if (
+            isinstance(other, BinaryOp)
+            and other.op == "**"
+            and isinstance(other.right, Constant)
+            and isinstance(other.left, UnaryOp)
+            and other.left.op == "abs"
+        ):
+            try:
+                p = float(other.right.value)
+            except (TypeError, ValueError):
+                continue
+            if p <= 0.0:
+                continue
+            off = _resolve_scalar_var_offset(factor, model)
+            off_abs = _resolve_scalar_var_offset(other.left.operand, model)
+            if off is not None and off == off_abs:
+                return (off, p + 1.0)
+    return None
+
+
+def _try_extract_xlogx(expr: Expression, model: Model) -> int | None:
+    """Detect the entropy/mixing term ``x * log(x)`` over a single scalar variable.
+
+    Matches ``Mul(v, log(v))`` and ``Mul(log(v), v)`` where the bare variable factor
+    and the ``log`` argument resolve to the *same* scalar offset. Returns that flat
+    offset on match, else ``None``. Routes to the dedicated convex envelope of
+    ``x ln x`` (:func:`discopt._jax.symbolic.domains.chemeng.xlogx_relax`) — tighter
+    than the generic bilinear product of ``v`` and ``log(v)``. The envelope is valid
+    only for ``v > 0`` (the term's natural domain), so the runtime dispatch uses it
+    only when the node's lower bound is positive and otherwise falls back to the
+    bilinear.
+    """
+    if not (isinstance(expr, BinaryOp) and expr.op == "*"):
+        return None
+    for factor, other in ((expr.left, expr.right), (expr.right, expr.left)):
+        if isinstance(other, FunctionCall) and other.func_name == "log" and len(other.args) == 1:
+            off = _resolve_scalar_var_offset(factor, model)
+            off_log = _resolve_scalar_var_offset(other.args[0], model)
+            if off is not None and off == off_log:
+                return off
+    return None
+
+
+def _try_extract_monod(expr: Expression, model: Model) -> tuple[int, float] | None:
+    """Detect the Monod / saturating term ``x/(K+x)`` over a single scalar var.
+
+    Matches ``Div(v, Add(K, v))`` / ``Div(v, Add(v, K))`` with ``K`` a positive
+    constant and the numerator and the additive variable the SAME scalar var.
+    Returns ``(offset, K)`` on match, else ``None``, routing to the dedicated
+    concave envelope (:func:`...chemeng.saturating_relax`).
+
+    The envelope is valid only for ``v >= 0``. That is enforced at COMPILE time by
+    requiring the variable's *declared* lower bound to be ``>= 0``: spatial B&B only
+    tightens bounds, so every node box then keeps ``v >= 0`` and no per-node guard
+    is needed. When the declared lower bound can be negative the term is left to the
+    generic division relaxation.
+    """
+    if not (isinstance(expr, BinaryOp) and expr.op == "/"):
+        return None
+    num_off = _resolve_scalar_var_offset(expr.left, model)
+    if num_off is None:
+        return None
+    den = expr.right
+    if not (isinstance(den, BinaryOp) and den.op == "+"):
+        return None
+    for kside, vside in ((den.left, den.right), (den.right, den.left)):
+        if not _is_constant_expr(kside):
+            continue
+        try:
+            kval = float(_get_constant_value(kside))
+        except (TypeError, ValueError):
+            continue
+        v_off = _resolve_scalar_var_offset(vside, model)
+        if kval > 0.0 and v_off is not None and v_off == num_off:
+            from discopt._jax.model_utils import flat_variable_bounds
+
+            lb0, _ = flat_variable_bounds(model)
+            if float(lb0[num_off]) >= 0.0:
+                return (num_off, kval)
+    return None
+
+
+def _try_extract_arrhenius(expr: Expression, model: Model) -> tuple[int, float] | None:
+    """Detect the Arrhenius rate term ``exp(-c/T)`` over a single scalar variable.
+
+    Matches ``exp(Div(Constant(neg), v))`` with ``neg < 0`` (so the term is
+    ``exp(-c/T)`` with ``c = -neg > 0``) and ``v`` a scalar variable. Returns
+    ``(offset, c)`` on match, else ``None``, routing to the dedicated
+    single-inflection envelope (:func:`...chemeng.arrhenius_relax`).
+
+    The term (and its envelope) require ``T > 0`` (a pole at ``T = 0``). That is
+    enforced at COMPILE time by requiring the variable's declared lower bound to be
+    strictly positive; spatial B&B only tightens bounds, so every node box keeps
+    ``T > 0`` and no per-node guard is needed.
+    """
+    if not (isinstance(expr, FunctionCall) and expr.func_name == "exp" and len(expr.args) == 1):
+        return None
+    arg = expr.args[0]
+    if not (isinstance(arg, BinaryOp) and arg.op == "/" and _is_constant_expr(arg.left)):
+        return None
+    try:
+        neg = float(_get_constant_value(arg.left))
+    except (TypeError, ValueError):
+        return None
+    if neg >= 0.0:  # need exp(-c/T) with c > 0
+        return None
+    v_off = _resolve_scalar_var_offset(arg.right, model)
+    if v_off is None:
+        return None
+    from discopt._jax.model_utils import flat_variable_bounds
+
+    lb0, _ = flat_variable_bounds(model)
+    if float(lb0[v_off]) > 0.0:
+        return (v_off, -neg)
+    return None
+
+
 def _try_extract_signomial_factors(
     expr: Expression, model: Model
 ) -> list[tuple[int, float]] | None:
@@ -367,6 +498,72 @@ def _compile_relax_node(
 
                     return fn
 
+            # Signed-power (Panhandle) flow term f*|f|**(beta-1) over a single
+            # scalar variable — the general-exponent sibling of Weymouth. Like
+            # Weymouth it is a single-inflection function valid over any box, so the
+            # tight envelope needs no domain guard. Falls through to the generic
+            # bilinear when the optional [sympy] domain pack is absent.
+            sp_match = _try_extract_signed_power(expr, model)
+            if sp_match is not None:
+                _sp_off, _sp_beta = sp_match
+                try:
+                    from discopt._jax.symbolic.domains.gas import signed_power_relax
+                except ImportError:
+                    signed_power_relax = None  # type: ignore[assignment]
+                if signed_power_relax is not None:
+                    _sp_fn = signed_power_relax(_sp_beta)
+
+                    def fn(x_cv, x_cc, lb, ub, _off=_sp_off, _wr=_sp_fn):
+                        return _wr(x_cv[_off], lb[_off], ub[_off])
+
+                    return fn
+
+            # x*log(x) entropy/mixing term over a single scalar variable. Routes to
+            # the dedicated convex envelope (tighter than the bilinear of x and
+            # log(x)) when x is provably positive at this node; otherwise — and when
+            # the optional [sympy]-derived domain pack is absent — falls back to the
+            # generic bilinear. Sound by construction: the tight branch is taken only
+            # where the envelope is valid (lb > _XLOGX_POS_FLOOR), so the positivity
+            # clamp below is always a no-op there and never shrinks the actual box.
+            xlogx_off = _try_extract_xlogx(expr, model)
+            if xlogx_off is not None:
+                try:
+                    from discopt._jax.symbolic.domains.chemeng import xlogx_relax
+                except ImportError:
+                    xlogx_relax = None  # type: ignore[assignment]
+                if xlogx_relax is not None:
+                    _XLOGX_POS_FLOOR = 1e-9
+
+                    def fn(
+                        x_cv,
+                        x_cc,
+                        lb,
+                        ub,
+                        _off=xlogx_off,
+                        _xl=xlogx_relax,
+                        _flo=_XLOGX_POS_FLOOR,
+                    ):
+                        # Tight branch is used only where lb > _flo, so flooring the
+                        # inputs at _flo is a no-op exactly when this value is kept;
+                        # it exists solely to keep the jnp.where-discarded branch from
+                        # evaluating log of a non-positive number and NaN-poisoning the
+                        # gradient on an lb<=0 node. The box is never shrunk where used.
+                        _x = jnp.maximum(x_cv[_off], _flo)
+                        _l = jnp.maximum(lb[_off], _flo)
+                        _u = jnp.maximum(ub[_off], _l)
+                        cv_t, cc_t = _xl(_x, _l, _u)
+                        # Generic bilinear fallback (the status-quo relaxation of
+                        # x*log(x)) for non-positive / undefined-domain nodes.
+                        cv_l, cc_l = left_fn(x_cv, x_cc, lb, ub)
+                        cv_r, cc_r = right_fn(x_cv, x_cc, lb, ub)
+                        mid_l = 0.5 * (cv_l + cc_l)
+                        mid_r = 0.5 * (cv_r + cc_r)
+                        cv_bl, cc_bl = relax_bilinear(mid_l, mid_r, cv_l, cc_l, cv_r, cc_r)
+                        pos = lb[_off] > _flo
+                        return jnp.where(pos, cv_t, cv_bl), jnp.where(pos, cc_t, cc_bl)
+
+                    return fn
+
             # Trilinear pattern detection: x*y*z over 3 distinct scalar
             # Variables. Routes to permutation-symmetric nested McCormick
             # (relax_trilinear_exact) which is strictly tighter than the
@@ -499,6 +696,25 @@ def _compile_relax_node(
                     return new_cv, new_cc
 
                 return fn
+
+            # Monod / saturating term x/(K+x) over a single scalar variable with a
+            # nonneg declared domain. Routes to the dedicated concave envelope
+            # (tighter than the generic division relaxation); falls through to the
+            # generic path when the optional [sympy] domain pack is absent.
+            monod = _try_extract_monod(expr, model)
+            if monod is not None:
+                _mo_off, _mo_k = monod
+                try:
+                    from discopt._jax.symbolic.domains.chemeng import saturating_relax
+                except ImportError:
+                    saturating_relax = None  # type: ignore[assignment]
+                if saturating_relax is not None:
+                    _mo_fn = saturating_relax(_mo_k)
+
+                    def fn(x_cv, x_cc, lb, ub, _off=_mo_off, _wr=_mo_fn):
+                        return _wr(x_cv[_off], lb[_off], ub[_off])
+
+                    return fn
 
             def fn(x_cv, x_cc, lb, ub):
                 cv_l, cc_l = left_fn(x_cv, x_cc, lb, ub)
@@ -723,6 +939,27 @@ def _compile_relax_node(
                             return _tf(x_cv[_fi], lb[_fi], ub[_fi])
 
                         return fn
+
+        # Arrhenius rate term exp(-c/T) over a single positive-domain scalar var.
+        # Routes the whole exp(-c/T) node to the dedicated single-inflection
+        # envelope (tighter than composing relax_exp with the relaxed reciprocal);
+        # falls through to the generic exp path when the optional [sympy] domain
+        # pack is absent.
+        if name == "exp" and len(expr.args) == 1:
+            arr = _try_extract_arrhenius(expr, model)
+            if arr is not None:
+                _ar_off, _ar_c = arr
+                try:
+                    from discopt._jax.symbolic.domains.chemeng import arrhenius_relax
+                except ImportError:
+                    arrhenius_relax = None  # type: ignore[assignment]
+                if arrhenius_relax is not None:
+                    _ar_fn = arrhenius_relax(_ar_c)
+
+                    def fn(x_cv, x_cc, lb, ub, _off=_ar_off, _wr=_ar_fn):
+                        return _wr(x_cv[_off], lb[_off], ub[_off])
+
+                    return fn
 
         # Piecewise-capable univariate operations
         _piecewise_relax = {
