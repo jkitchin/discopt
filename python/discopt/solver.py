@@ -7354,9 +7354,7 @@ def _pounce_qp_relaxation_nodes(qp_data, batch_lb, batch_ub, n_orig, t_start, ti
             # decomposition returns ``None`` for an absent block (no pure
             # equalities or no inequalities), which POUNCE's ``solve_qp``
             # accepts directly.
-            A_ub_m, b_ub_m, A_eq_m, b_eq_m = _decompose_eq_slack_form(
-                A_eq, b_eq, n_orig, n_slack
-            )
+            A_ub_m, b_ub_m, A_eq_m, b_eq_m = _decompose_eq_slack_form(A_eq, b_eq, n_orig, n_slack)
             P_s = Q[:n_orig, :n_orig]
             c_s = c[:n_orig]
             A_struct = A_eq[:, :n_orig]
@@ -7374,8 +7372,16 @@ def _pounce_qp_relaxation_nodes(qp_data, batch_lb, batch_ub, n_orig, t_start, ti
                 ub_n = np.asarray(batch_ub[i], dtype=np.float64)
                 lb_n, ub_n = _snap_inverted_bounds(lb_n, ub_n)
                 problems.append(
-                    {"P": P_s, "c": c_s, "A": A_eq_m, "b": b_eq_m,
-                     "G": A_ub_m, "h": b_ub_m, "lb": lb_n, "ub": ub_n}
+                    {
+                        "P": P_s,
+                        "c": c_s,
+                        "A": A_eq_m,
+                        "b": b_eq_m,
+                        "G": A_ub_m,
+                        "h": b_ub_m,
+                        "lb": lb_n,
+                        "ub": ub_n,
+                    }
                 )
 
             # Q is shared and convex by assumption (same as the JAX QP IPM);
