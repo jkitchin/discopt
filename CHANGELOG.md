@@ -38,6 +38,13 @@ The release procedure that produces these entries is documented in
   registered in the `milp` suite) plus a consolidated correctness gate
   (`test_decomposition_benchmarks.py`) that checks Benders and Lagrangian
   against the known optima and the monolithic solver.
+- **Lagrangian B&B node-bound hook** (`feat(decomposition)`). `model.solve(
+  lagrangian_bound=True)` fixes Lagrangian multipliers at the root and, at each
+  MILP branch-and-bound node, combines a valid Lagrangian dual lower bound with
+  the node's LP relaxation bound (`max()`), tightening pruning when the block
+  subproblems lack the integrality property. Opt-in (default off), applies to
+  linear minimization models with coupling structure, and no-ops cleanly
+  otherwise; bounds are verified sound against brute-force enumeration.
 - **Lagrangian relaxation solver** (`feat(decomposition)`). Dualizes coupling
   constraints (annotate with `model.mark_coupling(...)`) to produce a rigorous
   dual lower bound via `model.solve(decomposition="lagrangian")` /

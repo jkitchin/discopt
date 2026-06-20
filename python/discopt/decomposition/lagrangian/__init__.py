@@ -12,6 +12,9 @@ lower bound. Dantzig-Wolfe / column generation / branch-and-price are planned.
 
 from __future__ import annotations
 
+from discopt.decomposition.lagrangian.node_bounder import (
+    LagrangianNodeBounder as LagrangianNodeBounder,
+)
 from discopt.decomposition.lagrangian.solver import (
     LagrangianConfig as LagrangianConfig,
 )
@@ -19,4 +22,4 @@ from discopt.decomposition.lagrangian.solver import (
     solve_lagrangian as solve_lagrangian,
 )
 
-__all__ = ["LagrangianConfig", "solve_lagrangian"]
+__all__ = ["LagrangianConfig", "LagrangianNodeBounder", "solve_lagrangian"]
