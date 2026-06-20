@@ -7749,6 +7749,12 @@ def _solve_node_lp_pounce(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, ti
         # relaxation solution cannot seed a spurious incumbent or node bound.
         tol = 1e-5
         feasible = True
+        # An LP optimum must respect the node's variable box; an off-bound point
+        # can be integral (e.g. a binary at -1) and otherwise pass the row checks,
+        # seeding a spurious integer incumbent in the tree.
+        if np.any(x_sol < lb_n - tol) or np.any(x_sol > ub_n + tol):
+            logger.debug("POUNCE convex node solution violates variable bounds; rejecting")
+            return None
         if A_ub_m is not None and b_ub_m is not None and A_ub_m.shape[0]:
             feasible = bool(np.all(A_ub_m @ x_sol <= b_ub_m + tol * (1.0 + np.abs(b_ub_m))))
         if feasible and A_eq_m is not None and b_eq_m is not None and A_eq_m.shape[0]:
@@ -7820,6 +7826,14 @@ def _solve_node_lp_simplex(lp_data, node_lb, node_ub, n_vars, n_orig, t_start, t
         # violates its own rows so a bad relaxation cannot seed a spurious bound.
         tol = 1e-5
         feasible = True
+        # An LP optimum must respect the node's variable bounds. The simplex
+        # adapter can occasionally return a basic point that violates the box it
+        # was given on mixed equality/inequality nodes; such a point is integral
+        # off-bound (e.g. a binary at -1) and would otherwise pass the row checks
+        # below and be accepted by the tree as a spurious integer incumbent.
+        if np.any(x_sol < lb_n - tol) or np.any(x_sol > ub_n + tol):
+            logger.debug("simplex node solution violates variable bounds; rejecting")
+            return None
         if A_ub_m is not None and b_ub_m is not None and A_ub_m.shape[0]:
             feasible = bool(np.all(A_ub_m @ x_sol <= b_ub_m + tol * (1.0 + np.abs(b_ub_m))))
         if feasible and A_eq_m is not None and b_eq_m is not None and A_eq_m.shape[0]:

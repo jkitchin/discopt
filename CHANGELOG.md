@@ -204,6 +204,15 @@ The release procedure that produces these entries is documented in
   objective term — so a fast-construction model round-trips through `.nl` with
   all constraints and the correct linear/quadratic objective (including a
   constant offset and `maximize` sense) intact.
+- **MILP B&B node bound soundness** (`fix(solver)`). The per-node LP soundness
+  gate now also rejects a relaxation point that violates the node's variable
+  bounds, not only its constraint rows. The pure-Rust simplex adapter (and the
+  POUNCE IPM) could return a basic point that violated the variable box on mixed
+  equality/inequality nodes; such a point can be integral but off-bound (e.g. a
+  binary at -1), pass the row check, and be accepted by the tree as a spurious
+  integer incumbent — returning a wrong (too-low) optimum on some
+  generalized-assignment-style MILPs. Regression covered in
+  `python/tests/test_milp_node_bound_soundness.py`.
 - **Relaxation soundness hardening** across the global-opt loop: reject a
   fabricated finite bound on an unbounded McCormick relaxation (`himmel16`,
   `fix(soundness)`); never trust an unconverged simplex objective as an LP lower
