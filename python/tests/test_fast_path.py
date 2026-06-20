@@ -116,6 +116,31 @@ class TestFastPathFallback:
         ic = m.constraint(s, lambda i: x[i] >= 1, name="lb", fast=True)
         assert ic.fast is True
 
+    def test_division_by_variable_falls_back(self):
+        m = dm.Model()
+        s = m.set("s", [1, 2])
+        z = m.continuous("z", over=s, lb=1, ub=10)
+        ic = m.constraint(s, lambda i: 5 / z[i] <= 2, name="bad", fast=True)
+        assert ic.fast is False  # nonlinear -> general path
+
+    def test_neg_and_division_by_constant_fast_matches_slow(self):
+        # Body uses unary neg, divide-by-constant, and a constant offset.
+        def build(fast):
+            m = dm.Model()
+            s = m.set("s", [0, 1])
+            x = m.continuous("x", over=s, lb=0, ub=10)
+            ic = m.constraint(s, lambda i: -x[i] / 2 + 3 <= 0, name="r", fast=fast)
+            m.minimize(dm.sum(x[i] for i in s))
+            return m, x, ic
+
+        mf, xf, icf = build(True)
+        ms, xs, ics = build(False)
+        assert icf.fast is True and ics.fast is False
+        rf, rs = mf.solve(), ms.solve()
+        assert rf.objective == pytest.approx(rs.objective, abs=1e-5)
+        # x >= 6 from -x/2 + 3 <= 0
+        assert all(v == pytest.approx(6.0, abs=1e-4) for v in xf.value(rf).values())
+
 
 class TestNlExportFastPath:
     def test_fast_model_nl_has_all_constraints(self):
@@ -236,6 +261,36 @@ class TestNlExportQuadraticObjective:
         lines = m.to_nl(None).splitlines()
         o_idx = next(i for i, ln in enumerate(lines) if ln.startswith("O0"))
         assert lines[o_idx + 1] != "n0"  # has a real nonlinear body
+
+    @pytest.mark.parametrize(
+        "Q",
+        [
+            [[2.0, 1.0], [1.0, 2.0]],  # full symmetric
+            [[2.0, 2.0], [0.0, 2.0]],  # upper-triangular
+            [[2.0, 0.0], [2.0, 2.0]],  # lower-triangular (lower must be ignored)
+            [[2.0, 3.0], [-1.0, 2.0]],  # asymmetric (indefinite)
+        ],
+    )
+    def test_objective_function_matches_builder_at_fixed_point(self, tmp_path, Q):
+        # The builder reads only triu(Q) and reflects it; export must reproduce
+        # the SAME objective FUNCTION for any Q form. Compare at a fixed point
+        # (tight bounds) so the check is valid even for nonconvex Q.
+        import numpy as np
+
+        pt = np.array([1.3, -0.7])
+
+        def f(reimport):
+            m = dm.Model("q")
+            x = m.continuous("x", shape=(2,), lb=pt, ub=pt)
+            m.add_quadratic_objective(np.asarray(Q), np.zeros(2), x)
+            m.add_linear_constraints(np.ones((1, 2)), x, ">=", np.array([-1e9]), name="c")
+            if not reimport:
+                return m.solve().objective
+            p = tmp_path / "q.nl"
+            m.to_nl(str(p))
+            return dm.from_nl(str(p)).solve().objective
+
+        assert f(reimport=True) == pytest.approx(f(reimport=False), abs=1e-6)
 
 
 class TestFastPathEquivalence:

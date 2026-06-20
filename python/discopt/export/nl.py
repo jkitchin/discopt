@@ -370,18 +370,25 @@ class _NLWriter:
         return lin
 
     def _quadratic_obj_expr(self, Q, x, constant: float) -> Expression | None:
-        """Build ``0.5 x'Qx + constant`` as an n-ary sum expression (or ``None``).
+        """Build ``0.5 x'Sx + constant`` as an n-ary sum expression (or ``None``).
 
-        ``Q`` is a symmetric CSR matrix stored in full, so each stored nonzero
-        ``Q[i, j]`` contributes ``0.5 Q[i, j] x[i] x[j]`` (diagonal entries give
-        the ``x[i]^2`` terms). The sum is emitted as a single ``SUMLIST`` node so
-        the writer never recurses through a deep ``+`` chain.
+        The Rust builder reads only the **upper triangle** of ``Q`` and reflects
+        it, i.e. it optimizes ``0.5 x'Sx`` with ``S = triu(Q) + striu(Q).T``
+        (the strictly-lower triangle of the input is ignored). The export mirrors
+        that exactly so it matches the solved model for any ``Q`` — symmetric,
+        triangular, or asymmetric. Each stored entry ``S[i, j]`` contributes
+        ``0.5 S[i, j] x[i] x[j]`` (diagonals give the ``x[i]^2`` terms). The sum
+        is emitted as a single ``SUMLIST`` node so the writer never recurses
+        through a deep ``+`` chain.
         """
-        indptr = Q.indptr
-        indices = Q.indices
-        data = Q.data
+        import scipy.sparse as sp
+
+        S = (sp.triu(Q, 0) + sp.triu(Q, 1).T).tocsr()
+        indptr = S.indptr
+        indices = S.indices
+        data = S.data
         terms: list[Expression] = []
-        for i in range(Q.shape[0]):
+        for i in range(S.shape[0]):
             for k in range(int(indptr[i]), int(indptr[i + 1])):
                 q = float(data[k])
                 if q == 0.0:
