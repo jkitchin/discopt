@@ -163,6 +163,34 @@ def test_try_build_disabled_for_maximize():
     assert LagrangianNodeBounder.try_build(m) is None
 
 
+@pytest.mark.correctness
+def test_hook_flag_noops_on_maximize_end_to_end():
+    """End-to-end: ``lagrangian_bound=True`` on a *maximize* model is a harmless
+    no-op (the bounder is minimization-only) and the optimum is still correct."""
+    val = [3, 5, 4, 2]
+    w = [3, 4, 2, 3]
+    cap = 6
+
+    def build():
+        m = dm.Model("maxhook")
+        x = m.binary("x", shape=(4,))
+        m.maximize(sum(val[i] * x[i] for i in range(4)))
+        c = sum(w[i] * x[i] for i in range(4)) <= cap
+        m.subject_to(c)
+        m.mark_coupling(c)
+        return m
+
+    best = max(
+        sum(val[i] * b[i] for i in range(4))
+        for b in itertools.product([0, 1], repeat=4)
+        if sum(w[i] * b[i] for i in range(4)) <= cap
+    )
+    off = build().solve(time_limit=30)
+    on = build().solve(time_limit=30, lagrangian_bound=True)
+    assert off.objective == pytest.approx(best, abs=1e-3)
+    assert on.objective == pytest.approx(best, abs=1e-3)
+
+
 def test_try_build_disabled_for_multidim_index():
     """2D-indexed models aren't supported by the linear extractor -> clean no-op."""
     m = dm.Model("twod")

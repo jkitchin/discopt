@@ -203,3 +203,91 @@ def test_integer_recourse_rejected():
     m.subject_to(z + y >= 2)
     with pytest.raises(NotImplementedError):
         solve_gbd(m, time_limit=10)
+
+
+def test_integer_first_stage_feasible_recourse():
+    """General-integer (non-binary) first stage with nonlinear recourse.
+
+    ``min z + (x-5)^2`` s.t. ``x+z>=6``, z integer in [0,4]. z=1, x=5 -> 1.
+    """
+    m = dm.Model("intfs")
+    z = m.integer("z", lb=0, ub=4)
+    x = m.continuous("x", lb=0, ub=10)
+    m.first_stage(z)
+    m.minimize(z + (x - 5) ** 2)
+    m.subject_to(x + z >= 6)
+    r = solve_benders(m, time_limit=30)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(1.0, abs=ABS_TOL)
+    assert r.bound is not None and r.bound <= r.objective + 1e-3
+
+
+def test_integer_first_stage_infeasible_recourse_clean_error():
+    """Non-binary integer first stage with infeasible recourse: no-good cuts only
+    exist for 0/1 masters, so GBD must raise a clean NotImplementedError (rather
+    than crash or silently mis-solve)."""
+    m = dm.Model("intinf")
+    z = m.integer("z", lb=0, ub=3)
+    x = m.continuous("x", lb=0, ub=5)
+    m.first_stage(z)
+    m.minimize(z + x * x)
+    m.subject_to(x >= 2)
+    m.subject_to(x <= 2 * z - 4)  # needs z>=3; z<3 -> infeasible recourse
+    with pytest.raises(NotImplementedError):
+        solve_gbd(m, time_limit=20)
+
+
+def test_master_only_nonlinear_constraint():
+    """A master-only *nonlinear* constraint (binary master) is enforced via
+    recourse infeasibility / no-good cuts, not added as a master row.
+
+    ``min y0+y1+x^2`` s.t. ``y0^2+y1^2<=1`` (master-only, = y0+y1<=1 for binaries),
+    ``x>=2``, ``x<=5(y0+y1)``. Optimum: open one facility -> 1 + 4 = 5.
+    """
+    m = dm.Model("monl")
+    y = m.binary("y", shape=(2,))
+    x = m.continuous("x", lb=0, ub=5)
+    m.first_stage(y[0])
+    m.first_stage(y[1])
+    m.minimize(y[0] + y[1] + x * x)
+    m.subject_to(y[0] * y[0] + y[1] * y[1] <= 1)
+    m.subject_to(x >= 2)
+    m.subject_to(x <= 5 * (y[0] + y[1]))
+    r = solve_benders(m, time_limit=30)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(5.0, abs=ABS_TOL)
+
+
+def test_free_recourse_variable():
+    """A recourse variable that appears only in the (nonlinear) objective, with
+    no coupling constraint, must be handled (box-only recourse min).
+
+    ``min 2y + (x-3)^2`` with x free in [0,5] -> x=3 -> 0.
+    """
+    m = dm.Model("free")
+    y = m.binary("y")
+    x = m.continuous("x", lb=0, ub=5)
+    m.first_stage(y)
+    m.minimize(2 * y + (x - 3) ** 2)
+    m.subject_to(y >= 0)
+    r = solve_benders(m, time_limit=30)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(0.0, abs=ABS_TOL)
+    assert r.bound is not None and r.bound <= r.objective + 1e-3
+
+
+def test_linear_objective_nonlinear_constraint():
+    """A *linear* objective with a nonlinear convex constraint still routes to GBD.
+
+    ``min 3y - x0 - x1`` s.t. ``x0^2+x1^2 <= 8y``. y=1 -> x0=x1=2 -> -4+3 = -1.
+    """
+    m = dm.Model("linnl")
+    y = m.binary("y")
+    x = m.continuous("x", shape=(2,), lb=0, ub=5)
+    m.first_stage(y)
+    m.minimize(3 * y - x[0] - x[1])
+    m.subject_to(x[0] * x[0] + x[1] * x[1] <= 8 * y)
+    r = solve_benders(m, time_limit=30)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(-1.0, abs=ABS_TOL)
+    assert r.bound is not None and r.bound <= r.objective + 1e-3
