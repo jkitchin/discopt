@@ -81,8 +81,13 @@ pub trait LinearSolver {
 /// strong-branching probes instead of refactorizing the identical basis per probe.
 #[derive(Debug, Clone)]
 enum Factored {
-    Sparse(SparseLu),
-    Dense(DenseLu),
+    // Both boxed: feral v0.11.2 grew `SparseLu` to ~736 B (vs `DenseLu` ~424 B),
+    // so an unboxed enum trips clippy's `large_enum_variant` on the size gap (and
+    // reserves the larger size for every `Factored`). Boxing both keeps the enum
+    // to two pointers; method calls in ftran/btran/update auto-deref through the
+    // boxes, so only the construction sites add `Box::new`.
+    Sparse(Box<SparseLu>),
+    Dense(Box<DenseLu>),
 }
 
 /// Force-dense cutoff: at or below this `m`, a dense LU is always at least as
@@ -119,11 +124,11 @@ impl LinearSolver for FeralLU {
             .sum();
         self.lu = Some(
             if m <= FORCE_DENSE_M || should_use_dense_lu(m, nnz, &params) {
-                Factored::Dense(DenseLu::factor(cols, m, params).map_err(feral_err)?)
+                Factored::Dense(Box::new(DenseLu::factor(cols, m, params).map_err(feral_err)?))
             } else {
                 let a = SparseColMatrix::from_dense_columns(m, cols).map_err(feral_err)?;
                 let sym = SparseLuSymbolic::analyze(&a).map_err(feral_err)?;
-                Factored::Sparse(SparseLu::factor(&a, &sym, params).map_err(feral_err)?)
+                Factored::Sparse(Box::new(SparseLu::factor(&a, &sym, params).map_err(feral_err)?))
             },
         );
         Ok(())
