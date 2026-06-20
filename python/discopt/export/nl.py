@@ -305,6 +305,7 @@ class _NLWriter:
             linear, nonlinear = self._split_expr(obj.expression)
             self._obj_linear = linear
             self._obj_nonlinear = nonlinear
+        self._decompose_builder_objective()
 
         for con in self.model._constraints:
             # Determine constraint bound type (shared by every scalar row this
@@ -331,6 +332,33 @@ class _NLWriter:
                 self._con_bounds.append(bnd)
 
         self._decompose_builder_blocks()
+
+    def _decompose_builder_objective(self):
+        """Recover a linear objective that lives only in the Rust builder.
+
+        ``add_linear_objective`` sets the real ``c'x + constant`` objective in the
+        builder and leaves a zero placeholder in ``model._objective``. Reconstruct
+        ``_obj_linear`` (and a constant offset as the objective's nonlinear part)
+        so ``.nl`` export carries the true objective. Only applies when the
+        current objective is that placeholder, so a real expression objective set
+        afterwards is never overwritten.
+        """
+        blk = getattr(self.model, "_builder_linear_objective", None)
+        if blk is None:
+            return
+        if not getattr(self.model._objective, "_is_placeholder", False):
+            return
+        c, x, constant, _sense = blk
+        lin: dict[int, float] = {}
+        for j, coeff in enumerate(np.asarray(c, dtype=np.float64).ravel()):
+            coeff = float(coeff)
+            if coeff == 0.0:
+                continue
+            gidx = self._var_index.get((x.name, j))
+            if gidx is not None:
+                lin[gidx] = lin.get(gidx, 0.0) + coeff
+        self._obj_linear = lin
+        self._obj_nonlinear = Constant(float(constant)) if constant != 0.0 else None
 
     def _decompose_builder_blocks(self):
         """Emit linear constraints that live only in the Rust builder.

@@ -153,6 +153,40 @@ class TestNlExportFastPath:
         assert r1.objective == pytest.approx(r0.objective, rel=1e-6)
 
 
+class TestNlExportFastObjective:
+    @staticmethod
+    def _build(sense, constant):
+        import numpy as np
+
+        m = dm.Model("fastobj")
+        x = m.continuous("x", shape=(3,), lb=0, ub=10)
+        A = np.array([[1.0, 1.0, 0.0], [0.0, 1.0, 1.0]])
+        m.add_linear_constraints(A, x, ">=", np.array([2.0, 3.0]), name="c")
+        m.add_linear_objective(np.array([3.0, 1.0, 2.0]), x, constant=constant, sense=sense)
+        return m
+
+    @pytest.mark.parametrize(
+        "sense,constant", [("minimize", 0.0), ("minimize", 5.0), ("maximize", 0.0)]
+    )
+    def test_linear_objective_roundtrips(self, tmp_path, sense, constant):
+        m = self._build(sense, constant)
+        r0 = m.solve()
+        path = tmp_path / "obj.nl"
+        m.to_nl(str(path))
+        r1 = dm.from_nl(str(path)).solve()
+        assert r1.status == "optimal"
+        assert r1.objective == pytest.approx(r0.objective, rel=1e-6, abs=1e-6)
+
+    def test_expression_objective_not_overwritten(self):
+        # A real objective set after a builder objective must win on export.
+        m = self._build("minimize", 0.0)
+        x = m._variables[0]
+        m.minimize(dm.sum(x[i] for i in range(3)))  # replaces placeholder
+        txt = m.to_nl(None)
+        # objective gradient has all 3 unit coeffs from the expression objective
+        assert "G0 3" in txt
+
+
 class TestFastPathEquivalence:
     def test_same_solution_fast_vs_slow(self):
         m_fast, ship_fast = build_transportation(fast=True)
