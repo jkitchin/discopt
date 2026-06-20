@@ -23,7 +23,6 @@ from __future__ import annotations
 import itertools
 import logging
 import math
-import os
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Union
@@ -68,6 +67,7 @@ from discopt.modeling.core import (
     Variable,
     VarType,
 )
+from discopt.solver_tuning import current as _tuning
 
 logger = logging.getLogger(__name__)
 
@@ -316,7 +316,7 @@ class MilpRelaxationModel:
             backend == "simplex"
             and self._integrality is None
             and self._A_ub is not None
-            and os.environ.get("DISCOPT_LP_WARMSTART", "1") != "0"
+            and _tuning().lp_warmstart
         ):
             warm = self._solve_lp_warm()
             # A warm-start ``infeasible`` on an ill-conditioned LP can be a
@@ -5062,7 +5062,7 @@ def build_milp_relaxation(
         # soundness audit exercises. Selective (only constraints whose variables
         # touch the model's nonlinear support) and capped (bounded new columns) so
         # the LP does not blow up. Disable with ``DISCOPT_RLT_QUAD=0``.
-        if os.environ.get("DISCOPT_RLT_QUAD", "1") != "0":
+        if _tuning().rlt_quad:
             nonconvex_vars: set[int] = set()
             for bi, bj in terms.bilinear:
                 nonconvex_vars.update((bi, bj))
@@ -5073,7 +5073,7 @@ def build_milp_relaxation(
             for mono_idx, _mono_pow in monomial_terms:
                 nonconvex_vars.add(mono_idx)
 
-            _quad_col_cap = int(os.environ.get("DISCOPT_RLT_QUAD_MAX", "256"))
+            _quad_col_cap = _tuning().rlt_quad_max
             _quad_cols_start = col_idx
 
             def _ensure_monomial_aux(i: int, p: int) -> Optional[int]:
@@ -6211,8 +6211,8 @@ def build_milp_relaxation(
     # factors (default 4) to bound the 2^n column/row growth; larger products
     # keep the loose recursive chain.
     rlt_terms: list[tuple[tuple[int, ...], dict[frozenset, int]]] = []
-    if os.environ.get("DISCOPT_TRILINEAR_RLT", "1") != "0":
-        _rlt_cap = int(os.environ.get("DISCOPT_MULTILINEAR_RLT_MAX", "4"))
+    if _tuning().trilinear_rlt:
+        _rlt_cap = _tuning().multilinear_rlt_max
         _candidate_terms = set(trilinear_stage_map.keys()) | set(multilinear_stage_map.keys())
         for _term in _candidate_terms:
             _vars = tuple(sorted(set(_term)))

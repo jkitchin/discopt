@@ -9,11 +9,12 @@ Connects:
 
 from __future__ import annotations
 
+import functools
 import logging
 import math
 import os
 import time
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar, Union, cast
 
 import numpy as np
 from scipy.optimize import minimize as scipy_minimize
@@ -37,6 +38,9 @@ from discopt.modeling.core import (
     SolveResult,
     VarType,
 )
+from discopt.solver_tuning import current as _tuning
+from discopt.solver_tuning import reset_current as _reset_tuning
+from discopt.solver_tuning import set_current as _set_tuning
 from discopt.solvers import SolveStatus
 
 # ``solve_nlp`` (cyipopt) is imported lazily at its nonlinear-path call site in
@@ -1882,6 +1886,33 @@ def _root_relaxation_lower_bound(
     return None
 
 
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def _scoped_tuning(fn: _F) -> _F:
+    """Publish the ``tuning`` kwarg as the active :class:`SolverTuning` for the
+    call, then restore the previous context. Relaxer read sites consult
+    ``solver_tuning.current()`` instead of ``os.environ`` — so the levers are
+    per-call and typed. ``tuning=None`` resolves to a fresh env-default instance
+    (the prior global behavior), and the reset prevents one solve's overrides from
+    leaking into a later relaxer built outside any solve (e.g. in tests).
+
+    Typed as ``(_F) -> _F`` so the decorated function keeps its original
+    signature/return type for callers and the type checker.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        token = _set_tuning(kwargs.pop("tuning", None))
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _reset_tuning(token)
+
+    return cast(_F, wrapper)
+
+
+@_scoped_tuning
 def solve_model(
     model: Model,
     time_limit: float = 3600.0,
@@ -3634,7 +3665,7 @@ def solve_model(
     # active it supplies every node's valid dual bound, so the ~2s alpha estimate
     # (and the per-node alphaBB it enables) is skipped. ``DISCOPT_ALPHABB_WITH_LP=1``
     # forces the estimate even under the LP relaxer (A/B / fallback safety).
-    _alphabb_force = os.environ.get("DISCOPT_ALPHABB_WITH_LP", "0") == "1"
+    _alphabb_force = _tuning().alphabb_with_lp
     if _alphabb_eligible and (_mc_lp_relaxer is None or _alphabb_force):
         try:
             from discopt._jax.alphabb import estimate_alpha as _estimate_alpha_jax
@@ -3819,7 +3850,7 @@ def solve_model(
     # structural 0 (see _branch_priority_integer_vars). Empty when disabled or
     # when the model has no such gating integers, leaving branching unchanged.
     _branch_priority_vars: frozenset[int] = frozenset()
-    if os.environ.get("DISCOPT_OBJ_BRANCH_PRIORITY", "0") == "1":
+    if _tuning().obj_branch_priority:
         try:
             _branch_priority_vars = _branch_priority_integer_vars(model)
         except Exception as e:  # pragma: no cover - defensive
@@ -4221,7 +4252,7 @@ def solve_model(
             # plus the strided NLP find incumbents. DISCOPT_NODE_NLP_STRIDE=1
             # restores the per-node NLP. Convex / no-LP-relaxer paths are
             # unaffected (the NLP bound matters there, so it runs every node).
-            _nlp_stride = int(os.environ.get("DISCOPT_NODE_NLP_STRIDE", "4"))
+            _nlp_stride = _tuning().node_nlp_stride
             _gate_node_nlp = _mc_lp_relaxer is not None and not _model_is_convex and _nlp_stride > 1
 
             for i in range(n_batch):

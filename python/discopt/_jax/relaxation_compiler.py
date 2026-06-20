@@ -9,7 +9,6 @@ jax.vmap.
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING, Callable, Optional
 
 import jax.numpy as jnp
@@ -71,6 +70,7 @@ from discopt.modeling.core import (
     UnaryOp,
     Variable,
 )
+from discopt.solver_tuning import current as _tuning
 
 
 def _compute_var_offset(var: Variable, model: Model) -> int:
@@ -575,7 +575,7 @@ def _compile_relax_node(
             # skips this dispatch and uses the original nested-bilinear
             # path. This is for debug / parity testing only and is not a
             # public API.
-            _trilinear_disabled = os.environ.get("DISCOPT_TRILINEAR") == "nested"
+            _trilinear_disabled = _tuning().trilinear_nested
             tri_offsets = None if _trilinear_disabled else _try_extract_trilinear_chain(expr, model)
             if tri_offsets is not None:
                 from discopt._jax.envelopes import relax_trilinear_exact
