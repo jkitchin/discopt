@@ -1,6 +1,6 @@
 # Design: Global Cut Pool — make strong relaxation cuts reach the per-node bound
 
-**Status:** proposed
+**Status:** implemented (P1+P2 landed; P3 gate fix landed, certifies nvs17; root pool opt-in)
 **Author:** (drafted with Claude)
 **Date:** 2026-06-19
 **Tracking the gap:** certifying the `nvs*` dense indefinite integer-QP instances
@@ -223,29 +223,36 @@ bound −1110, 0.9 % gap** — SCIP's node regime (SCIP ~75). Not formally certi
 only because the 0.9 % gap is just over 1e-4 (needs full Shor −1104 or a few more
 nodes), and the 1235-cut pool makes nodes heavy (~7 s) → motivates a cut cap.
 
-**P3 — solver integration: BLOCKED on dispatch (the real remaining work).**
-A first hookup (separate the root pool after the usefulness probe; pass
-`inherited_cuts`/`separate=False` to the per-node `solve_at_node` calls at
-`solver.py:~3918` and `~4180`; cap the pool at `_ROOT_CUT_POOL_MAX`) was written
-and then reverted because it **does not reach the integer `nvs*` class**: an
-end-to-end `m.solve` left nvs17's bound at −65843 (unchanged McCormick) and the
-"Root PSD cut pool" log never fired. Root cause — the integer `nvs*` search
-**dispatches away from the Python McCormick-LP node path entirely** (it never
-enters the `_mc_mode == "lp"` relaxer-setup block; its 2621 nodes are bounded on a
-different, cut-less path — the Rust integer B&B / compiled-relaxation route). So
-the hookup is correct for *continuous* nonconvex QCQP that uses the spatial
-McCormick-LP loop, but the integer class needs one of:
+**P3 — solver integration: LANDED (the dispatch gate was the blocker).**
+The blocker was located precisely: a pure-integer nonconvex model never entered
+the `_mc_mode == "lp"` relaxer-setup block at all. The gate in `solver.py`
+(`if not _model_is_convex and _has_continuous_var and model._objective is not
+None: _mc_mode = "lp"`) **required a continuous variable**, on the premise that
+integer-only models have "nothing to spatial-branch on." That conflates *spatial*
+branching with *integer* branching: nvs17's integers are branched by the standard
+B&B while the McCormick+PSD LP supplies the per-node bound. So its 2621 nodes were
+bounded by the cut-less compiled relaxation, the bound stayed frozen at McCormick
+−65842, and the relaxer + its auto PSD policy + `solve_at_node` were all gated off
+(empirically: **1** `solve_at_node` call across the whole solve).
 
-1. **Route the integer nonconvex-QCQP class through the McCormick-LP node path**
-   (so the per-node bound is `solve_at_node` + inherited pool). Smallest change if
-   the dispatch gate can be widened; must confirm the per-node LP cost is
-   acceptable vs the Rust path it replaces.
-2. **Inject the pool rows into the Rust integer B&B node relaxation** (a
-   Python→Rust row-append seam), so the existing fast path inherits the cuts.
+Fix (option 1 — widen the gate): admit nonconvex-with-objective models onto the LP
+path without requiring a continuous variable, and route the
+`has_relaxable_nonlinearity` / `_has_branchable` / probe **fallbacks** to the sound
+alphaBB `"none"` (never the integer-unsound `"nlp"` bound, issue #120) for
+pure-discrete models. Result — nvs17: **frozen −65842 → status=optimal −1100.4,
+CERTIFIED in ~41 s** (SCIP regime), now **833** `solve_at_node` calls each
+bounding + branching a node. Validated sound: smoke 10/10 proved / 0 incorrect; a
+pure-integer batch (nvs04/06/07/10/11/12/15/16/17/19/23) shows zero false-optimals
+(the uncertified ones honestly report `feasible`).
 
-Both are bounded but real; (1) is the cheaper experiment. Determining the exact
-dispatch gate that sends `nvs*` to the Rust path (and whether it can opt into the
-LP node path when a cut pool exists) is the first concrete P3 task.
+The P1/P2 root pool ships as an **opt-in** lever (`DISCOPT_ROOT_CUT_ROUNDS=N`,
+default 0 = off). With the gate fix the per-node separation already certifies
+nvs17 in ~41 s; inheriting the root pool *in addition* (sound — every PSD cut is
+globally valid) cuts the node count ~5× (833 → 161) but its per-node LP overhead
+makes wall-clock ~30 % worse on a problem this small, so it is retained for larger
+instances where re-separation — not LP size — dominates, not enabled by default.
+With the pool off the per-node path (`inherited_cuts=None`, `separate=True`) is
+byte-for-byte the prior behaviour, so the only default-config change is the gate.
 
 ## 8. Success criteria
 
