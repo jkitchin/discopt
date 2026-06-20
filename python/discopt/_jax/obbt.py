@@ -650,6 +650,7 @@ def run_obbt_on_relaxation(
     eps: float = 1e-7,
     deadline: Optional[float] = None,
     prefer_pounce: bool = False,
+    full_result: bool = False,
 ) -> ObbtResult:
     """OBBT over the LP relaxation of a MILP relaxation envelope.
 
@@ -682,11 +683,12 @@ def run_obbt_on_relaxation(
         Skip variables whose box width is below this.
     deadline : float, optional
         Absolute ``time.perf_counter()`` deadline; pass to abort early.
-
-    Returns
-    -------
-    ObbtResult
-        ``tightened_lb`` and ``tightened_ub`` are length-``n_orig`` arrays.
+    full_result : bool, optional
+        When ``True`` the returned ``tightened_lb`` / ``tightened_ub`` span all
+        ``n_total`` columns (original + auxiliary), not just the first ``n_orig``.
+        Used by the OBBT-on-aux diagnostic (#208) to *capture* the tightening of
+        the lifted (product/ratio) aux columns that the default path discards.
+        Does not change the default (``False``) behavior for solve-path callers.
     """
     import time as _time
 
@@ -870,9 +872,10 @@ def run_obbt_on_relaxation(
                     ub_arr[var_idx] = max(new_ub, lb_arr[var_idx])
                     n_tightened += 1
 
+    keep = n_total if full_result else n_orig
     return ObbtResult(
-        tightened_lb=lb_arr[:n_orig].copy(),
-        tightened_ub=ub_arr[:n_orig].copy(),
+        tightened_lb=lb_arr[:keep].copy(),
+        tightened_ub=ub_arr[:keep].copy(),
         n_lp_solves=n_lp_solves,
         n_tightened=n_tightened,
         total_lp_time=total_lp_time,
@@ -1458,6 +1461,7 @@ def obbt_tighten_root(
     incumbent_cutoff: Optional[float] = None,
     superposition: bool = False,
     prefer_pounce: bool = False,
+    cascade_aux: bool = False,
 ) -> RootObbtResult:
     """Structural root OBBT over the LP-form McCormick relaxation.
 
@@ -1493,6 +1497,20 @@ def obbt_tighten_root(
     incumbent_cutoff : float, optional
         If a feasible objective is known, add ``obj <= cutoff`` to the polytope
         (optimality-based tightening) — often a much larger reduction.
+    cascade_aux : bool, default False
+        Capture OBBT's tightening of the lifted *auxiliary* (product/ratio)
+        columns and propagate it back onto the original variables through the
+        nonlinear term definitions — reverse FBBT (#208). This recovers the
+        hyperbolic/root bounds the linear McCormick rows cannot express, and is
+        sound by construction (an OBBT aux bound is valid over the relaxation
+        polytope, which outer-approximates the MINLP feasible set, and reverse
+        FBBT only removes term-infeasible points). **Opt-in (default off):** on
+        the vendored corpus it is sound (every optimum preserved) and measurably
+        shrinks the root box on several instances (e.g. nvs11/12/13: box
+        log-volume −4 nats), but it did **not** yield a net node-count / wall
+        reduction and slightly regressed one instance (nvs13 39→53 nodes), so it
+        does not meet #208's "the extra OBBT cost must pay for itself" bar yet. It
+        is kept available behind this flag for a future targeted-budget A/B.
     """
     from discopt.modeling.core import VarType
 
@@ -1554,6 +1572,41 @@ def obbt_tighten_root(
         if not relaxer.has_relaxable_nonlinearity:
             return RootObbtResult(lb, ub, 0, 0, 0.0)
 
+        # #208 cascade: carry OBBT-tightened auxiliary-column bounds across rounds,
+        # keyed by (stable) column index. The aux columns are a fixed function of
+        # the model's nonlinear terms, so their indices are identical across
+        # rebuilds even as the original box shrinks. Intersecting a previously
+        # captured (valid) aux bound into a freshly built relaxation keeps it a
+        # valid outer approximation and lets the tighter aux box cascade onto the
+        # original variables via the McCormick rows.
+        carried_aux: dict[int, list[float]] = {}
+
+        def _apply_carried_aux(milp) -> None:
+            if not (cascade_aux and carried_aux):
+                return
+            n_total = len(milp._bounds)
+            for col, (alb, aub) in carried_aux.items():
+                if n_orig <= col < n_total:
+                    lo, hi = milp._bounds[col]
+                    milp._bounds[col] = (max(float(lo), alb), min(float(hi), aub))
+
+        def _capture_aux(milp, res) -> None:
+            if not cascade_aux:
+                return
+            n_total = len(milp._bounds)
+            tl, tu = res.tightened_lb, res.tightened_ub
+            if len(tl) < n_total:  # not a full_result run; nothing to capture
+                return
+            for col in range(n_orig, n_total):
+                alo, ahi = float(tl[col]), float(tu[col])
+                if not (np.isfinite(alo) and np.isfinite(ahi)):
+                    continue
+                if col in carried_aux:
+                    cur = carried_aux[col]
+                    carried_aux[col] = [max(cur[0], alo), min(cur[1], ahi)]
+                else:
+                    carried_aux[col] = [alo, ahi]
+
         for _ in range(max(1, rounds)):
             if deadline is not None and time.perf_counter() >= deadline:
                 break
@@ -1562,7 +1615,7 @@ def obbt_tighten_root(
             if not (np.all(np.isfinite(lb)) and np.all(np.isfinite(ub))):
                 break
             try:
-                milp, _ = build_milp_relaxation(
+                milp, varmap = build_milp_relaxation(
                     relaxer._model,
                     relaxer._terms,
                     relaxer._disc,
@@ -1571,6 +1624,7 @@ def obbt_tighten_root(
                 )
             except Exception:
                 break
+            _apply_carried_aux(milp)
 
             # Duality-based bound tightening first: one objective LP yields
             # reduced costs that tighten every variable at once (cheap), before
@@ -1610,23 +1664,32 @@ def obbt_tighten_root(
                                 bound_override=(lb, ub),
                                 superposition=relaxer._superposition,
                             )
+                            _apply_carried_aux(milp)
                         except Exception:
                             break
                 except Exception:
                     pass
 
+            # Include the aux columns as OBBT candidates (and request the full
+            # column vector) when cascading, so their tightening is captured and
+            # carried instead of discarded.
+            n_total = len(milp._bounds)
+            obbt_candidates = list(range(n_total)) if cascade_aux else None
             res = run_obbt_on_relaxation(
                 milp,
                 relaxer._n_orig,
+                candidate_idxs=obbt_candidates,
                 time_limit_per_lp=time_limit_per_lp,
                 incumbent_cutoff=incumbent_cutoff,
                 min_width=min_width,
                 eps=eps,
                 deadline=deadline,
                 prefer_pounce=prefer_pounce,
+                full_result=cascade_aux,
             )
             total_lp_time += res.total_lp_time
             n_rounds += 1
+            _capture_aux(milp, res)
 
             sweep_tight = 0
             for i in range(min(n_orig, len(res.tightened_lb))):
@@ -1647,6 +1710,27 @@ def obbt_tighten_root(
                         lb, ub, total_tight + sweep_tight, n_rounds, total_lp_time, True
                     )
 
+            # #208 cascade: propagate the freshly tightened aux-column bounds back
+            # through the nonlinear term definitions (reverse FBBT). This is the
+            # step that actually shrinks the *original* box — the hyperbolic/root
+            # bounds the linear McCormick rows can't express — turning the captured
+            # aux tightening into a real reduction instead of a self-implied no-op.
+            if cascade_aux and len(res.tightened_lb) >= len(milp._bounds):
+                fb = reverse_fbbt_from_aux(
+                    lb,
+                    ub,
+                    np.asarray(res.tightened_lb, dtype=np.float64),
+                    np.asarray(res.tightened_ub, dtype=np.float64),
+                    varmap,
+                    is_int=is_int,
+                    eps=eps,
+                )
+                sweep_tight += fb
+                if np.any(lb[:n_orig] > ub[:n_orig] + 1e-9):
+                    return RootObbtResult(
+                        lb, ub, total_tight + sweep_tight, n_rounds, total_lp_time, True
+                    )
+
             total_tight += sweep_tight
             if sweep_tight == 0:
                 break
@@ -1655,3 +1739,229 @@ def obbt_tighten_root(
         return RootObbtResult(lb, ub, total_tight, n_rounds, total_lp_time)
 
     return RootObbtResult(lb, ub, total_tight, n_rounds, total_lp_time)
+
+
+# ---------------------------------------------------------------------------
+# Reverse FBBT from tightened auxiliary bounds (#208 cascade)
+# ---------------------------------------------------------------------------
+
+
+def _interval_mul(al: float, au: float, bl: float, bu: float) -> tuple[float, float]:
+    ps = (al * bl, al * bu, au * bl, au * bu)
+    return min(ps), max(ps)
+
+
+def _interval_div(nl: float, nu: float, dl: float, du: float) -> Optional[tuple[float, float]]:
+    """``[nl, nu] / [dl, du]`` when ``0`` is not in the denominator interval."""
+    if dl <= 0.0 <= du:
+        return None  # denominator straddles zero -> unbounded, no tightening
+    return _interval_mul(nl, nu, 1.0 / du, 1.0 / dl)
+
+
+def reverse_fbbt_from_aux(
+    lb: np.ndarray,
+    ub: np.ndarray,
+    aux_lb: np.ndarray,
+    aux_ub: np.ndarray,
+    varmap: dict,
+    *,
+    is_int: Optional[np.ndarray] = None,
+    eps: float = 1e-7,
+) -> int:
+    """Propagate tightened aux-column bounds back onto the original variables.
+
+    The McCormick LP relaxation links a lifted aux ``w`` to its arguments only
+    through *linear* envelope rows, so a tightened ``w`` box does not, on its own,
+    tighten the arguments inside that same LP (the bound is self-implied — this is
+    the "frozen envelope blocks the cascade" gap of #208). Propagating it back
+    through the *nonlinear definition* of the term, however, yields **hyperbolic /
+    root** bounds the linear rows cannot represent:
+
+    * bilinear ``w = a*b`` with ``w in [wl, wu]`` and ``0`` not in ``[bl, bu]``
+      gives ``a in [wl, wu] / [bl, bu]`` (interval division), and symmetrically
+      for ``b``;
+    * monomial ``w = a**p`` with ``w in [wl, wu]`` gives the ``p``-th-root box
+      (sign-aware for even ``p``).
+
+    Every such deduction is a sound FBBT step (it only removes ``a`` values that
+    cannot satisfy the term equation for any admissible partner), so the box stays
+    a valid enclosure. Mutates ``lb`` / ``ub`` in place over the original columns
+    and returns the number of bounds tightened.
+    """
+    n_orig = len(lb)
+
+    def _tighten(col: int, lo: float, hi: float) -> int:
+        if col >= n_orig or not (np.isfinite(lo) and np.isfinite(hi)):
+            return 0
+        if is_int is not None and is_int[col]:
+            lo = np.ceil(lo - eps)
+            hi = np.floor(hi + eps)
+        c = 0
+        if lo > lb[col] + eps:
+            lb[col] = min(lo, ub[col])
+            c += 1
+        if hi < ub[col] - eps:
+            ub[col] = max(hi, lb[col])
+            c += 1
+        return c
+
+    n_tight = 0
+    for (i, j), cw in varmap.get("bilinear", {}).items():
+        if not (0 <= i < n_orig and 0 <= j < n_orig and 0 <= cw < len(aux_lb)):
+            continue
+        wl, wu = float(aux_lb[cw]), float(aux_ub[cw])
+        if not (np.isfinite(wl) and np.isfinite(wu)):
+            continue
+        # a = w / b
+        d = _interval_div(wl, wu, float(lb[j]), float(ub[j]))
+        if d is not None:
+            n_tight += _tighten(i, d[0], d[1])
+        # b = w / a
+        d = _interval_div(wl, wu, float(lb[i]), float(ub[i]))
+        if d is not None:
+            n_tight += _tighten(j, d[0], d[1])
+
+    for (i, p), cw in varmap.get("monomial", {}).items():
+        if not (0 <= i < n_orig and 0 <= cw < len(aux_lb)):
+            continue
+        wl, wu = float(aux_lb[cw]), float(aux_ub[cw])
+        if not (np.isfinite(wl) and np.isfinite(wu)) or p < 2:
+            continue
+        if p % 2 == 0:
+            if wu < 0:
+                continue  # a**even < 0 infeasible; leave it to the LP/feasibility
+            root = wu ** (1.0 / p)
+            inner = (max(wl, 0.0)) ** (1.0 / p)  # |a| >= inner
+            al, au = float(lb[i]), float(ub[i])
+            if al >= 0:
+                n_tight += _tighten(i, inner, root)
+            elif au <= 0:
+                n_tight += _tighten(i, -root, -inner)
+            else:
+                n_tight += _tighten(i, -root, root)  # straddles 0: only |a| <= root
+        else:
+            lo = -((-wl) ** (1.0 / p)) if wl < 0 else wl ** (1.0 / p)
+            hi = -((-wu) ** (1.0 / p)) if wu < 0 else wu ** (1.0 / p)
+            n_tight += _tighten(i, lo, hi)
+    return n_tight
+
+
+# ---------------------------------------------------------------------------
+# OBBT-on-auxiliaries diagnostic (#208 decision gate)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AuxTighteningReport:
+    """How much OBBT *would* tighten the lifted (aux) columns, currently discarded.
+
+    The McCormick envelope rows are baked over the build-time aux bounds and never
+    regenerated, so any OBBT tightening of an aux column (e.g. a ratio aux ``r``)
+    is thrown away. This report measures that discarded tightening **without
+    touching the solve path** — it is a pure diagnostic for the #208 decision gate
+    ("is the envelope-rebuild worth building?"). Soundness is not at stake: nothing
+    here feeds back into the relaxation.
+
+    Attributes:
+        n_aux: Number of auxiliary (lifted) columns in the relaxation.
+        n_aux_tightened: Aux columns whose lb or ub strictly tightened.
+        mean_rel_reduction: Mean over *finite-width* aux columns of
+            ``(old_width - new_width) / old_width`` in ``[0, 1]``.
+        max_rel_reduction: Worst-case relative width reduction.
+        aux_rel_reductions: Per-aux relative width reduction (finite-width only).
+        n_lp_solves: OBBT LP solves spent on the aux columns.
+        lp_time: Wall time of those LP solves.
+    """
+
+    n_aux: int
+    n_aux_tightened: int
+    mean_rel_reduction: float
+    max_rel_reduction: float
+    aux_rel_reductions: list[float]
+    n_lp_solves: int
+    lp_time: float
+
+
+def measure_discarded_aux_tightening(
+    model: Model,
+    lb: np.ndarray,
+    ub: np.ndarray,
+    *,
+    time_limit_per_lp: float = 0.2,
+    incumbent_cutoff: Optional[float] = None,
+    deadline: Optional[float] = None,
+    superposition: bool = False,
+) -> Optional[AuxTighteningReport]:
+    """Measure the OBBT tightening of the lifted aux columns that #208 discards.
+
+    Builds the McCormick relaxation at the box ``[lb, ub]``, runs OBBT over the
+    **auxiliary** columns (indices ``n_orig .. n_total``), and reports how much
+    their bounds shrink. This is the cheap, no-risk decision-gate step the issue
+    prescribes before investing in the envelope-rebuild (part 2): if many aux
+    columns shrink a lot, the discarded tightening is worth cascading back.
+
+    Returns ``None`` when the model has no relaxable nonlinearity / no aux columns
+    / the box is not finite (nothing to measure), else an
+    :class:`AuxTighteningReport`. Never raises into the caller (pure diagnostic).
+    """
+    lb = np.asarray(lb, dtype=np.float64).copy()
+    ub = np.asarray(ub, dtype=np.float64).copy()
+    if not (np.all(np.isfinite(lb)) and np.all(np.isfinite(ub))):
+        return None
+    try:
+        from discopt._jax.mccormick_lp import MccormickLPRelaxer, build_milp_relaxation
+
+        relaxer = MccormickLPRelaxer(model, superposition=superposition)
+        if not relaxer.has_relaxable_nonlinearity:
+            return None
+        milp, _ = build_milp_relaxation(
+            relaxer._model,
+            relaxer._terms,
+            relaxer._disc,
+            bound_override=(lb, ub),
+            superposition=relaxer._superposition,
+        )
+        n_orig = relaxer._n_orig
+        n_total = len(milp._bounds)
+        if n_total <= n_orig:
+            return None  # no auxiliary columns
+
+        old = np.asarray(milp._bounds, dtype=np.float64)
+        old_w = old[:, 1] - old[:, 0]
+        aux_idxs = list(range(n_orig, n_total))
+
+        res = run_obbt_on_relaxation(
+            milp,
+            n_orig,
+            candidate_idxs=aux_idxs,
+            time_limit_per_lp=time_limit_per_lp,
+            incumbent_cutoff=incumbent_cutoff,
+            deadline=deadline,
+            full_result=True,
+        )
+        new_lb = np.asarray(res.tightened_lb, dtype=np.float64)
+        new_ub = np.asarray(res.tightened_ub, dtype=np.float64)
+        new_w = new_ub - new_lb
+
+        rels: list[float] = []
+        n_tight = 0
+        for j in aux_idxs:
+            ow = old_w[j]
+            if not np.isfinite(ow) or ow <= 1e-12:
+                continue
+            r = float((ow - new_w[j]) / ow)
+            r = max(0.0, min(1.0, r))  # clamp round-off
+            rels.append(r)
+            if r > 1e-6:
+                n_tight += 1
+        return AuxTighteningReport(
+            n_aux=len(aux_idxs),
+            n_aux_tightened=n_tight,
+            mean_rel_reduction=float(np.mean(rels)) if rels else 0.0,
+            max_rel_reduction=float(np.max(rels)) if rels else 0.0,
+            aux_rel_reductions=rels,
+            n_lp_solves=res.n_lp_solves,
+            lp_time=res.total_lp_time,
+        )
+    except Exception:
+        return None

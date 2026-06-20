@@ -54,6 +54,7 @@ parts:
       - file: notebooks/warm_start
       - file: notebooks/convex_fast_path
       - file: notebooks/convexity_detection
+      - file: notebooks/symbolic_envelopes
       - file: notebooks/suspect_head_to_head
       - file: notebooks/nlp_bb
       - file: notebooks/export_formats

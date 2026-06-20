@@ -9,8 +9,10 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import numpy as np
 from discopt._jax.obbt import (
+    AuxTighteningReport,
     ObbtResult,
     _extract_linear_constraints,
+    measure_discarded_aux_tightening,
     obbt_tighten_root,
     run_obbt,
 )
@@ -610,3 +612,167 @@ class TestRootObbt:
         assert not r.infeasible
         # Must not loosen and must not crash.
         assert np.all(r.lb >= lb - 1e-9)
+
+
+# ─────────────────────────────────────────────────────────────
+# OBBT-on-auxiliaries diagnostic (#208 decision gate)
+# ─────────────────────────────────────────────────────────────
+
+
+class TestMeasureDiscardedAuxTightening:
+    """The pure-diagnostic measurement of aux-column tightening (#208)."""
+
+    def _bilinear(self):
+        m = Model("bil")
+        m.continuous("x", lb=0, ub=4)
+        m.continuous("y", lb=0, ub=4)
+        m.minimize(m._variables[0] * m._variables[1])
+        m.subject_to(m._variables[0] + m._variables[1] <= 5)
+        return m
+
+    def test_reports_aux_tightening_on_bilinear(self):
+        m = self._bilinear()
+        lb = np.array([0.0, 0.0])
+        ub = np.array([4.0, 4.0])
+        rep = measure_discarded_aux_tightening(m, lb, ub)
+        assert isinstance(rep, AuxTighteningReport)
+        # One product aux w = x*y, and the x+y<=5 facet shrinks its envelope box.
+        assert rep.n_aux >= 1
+        assert rep.n_aux_tightened >= 1
+        assert 0.0 < rep.mean_rel_reduction <= 1.0
+        assert rep.max_rel_reduction >= rep.mean_rel_reduction
+        assert len(rep.aux_rel_reductions) == rep.n_aux
+
+    def test_cutoff_tightens_at_least_as_much(self):
+        m = self._bilinear()
+        lb = np.array([0.0, 0.0])
+        ub = np.array([4.0, 4.0])
+        struct = measure_discarded_aux_tightening(m, lb, ub)
+        withcut = measure_discarded_aux_tightening(m, lb, ub, incumbent_cutoff=6.0)
+        # Adding an objective cutoff can only add constraints -> >= tightening.
+        assert withcut.max_rel_reduction >= struct.max_rel_reduction - 1e-9
+
+    def test_none_on_linear_model(self):
+        # No relaxable nonlinearity -> no aux columns -> nothing to measure.
+        m = Model("lin")
+        m.continuous("x", lb=0, ub=10)
+        m.continuous("y", lb=0, ub=10)
+        m.minimize(m._variables[0] + m._variables[1])
+        m.subject_to(m._variables[0] + m._variables[1] <= 5)
+        lb = np.array([0.0, 0.0])
+        ub = np.array([10.0, 10.0])
+        assert measure_discarded_aux_tightening(m, lb, ub) is None
+
+    def test_none_on_open_box(self):
+        # An open box can't build finite McCormick envelopes -> None (no crash).
+        m = self._bilinear()
+        lb = np.array([0.0, 0.0])
+        ub = np.array([4.0, np.inf])
+        assert measure_discarded_aux_tightening(m, lb, ub) is None
+
+    def test_full_result_returns_aux_columns(self):
+        # full_result=True must expose the aux columns the default path slices off.
+        from discopt._jax.mccormick_lp import MccormickLPRelaxer, build_milp_relaxation
+        from discopt._jax.obbt import run_obbt_on_relaxation
+
+        m = self._bilinear()
+        lb = np.array([0.0, 0.0])
+        ub = np.array([4.0, 4.0])
+        relaxer = MccormickLPRelaxer(m)
+        milp, _ = build_milp_relaxation(
+            relaxer._model, relaxer._terms, relaxer._disc, bound_override=(lb, ub)
+        )
+        n_orig = relaxer._n_orig
+        n_total = len(milp._bounds)
+        default = run_obbt_on_relaxation(milp, n_orig)
+        full = run_obbt_on_relaxation(milp, n_orig, full_result=True)
+        assert len(default.tightened_lb) == n_orig
+        assert len(full.tightened_lb) == n_total
+        # The original-column block is identical between the two return modes.
+        np.testing.assert_allclose(full.tightened_lb[:n_orig], default.tightened_lb)
+        np.testing.assert_allclose(full.tightened_ub[:n_orig], default.tightened_ub)
+
+
+# ─────────────────────────────────────────────────────────────
+# Reverse-FBBT aux cascade (#208 part 2)
+# ─────────────────────────────────────────────────────────────
+
+
+class TestReverseFbbtFromAux:
+    """The reverse-FBBT propagation of tightened aux bounds (#208)."""
+
+    def test_bilinear_hyperbolic_bound(self):
+        # w = x*y, y in [2,4], a tightened w <= 6 implies x <= 6/2 = 3 (a bound
+        # the linear McCormick rows cannot express). x starts at [0,10].
+        from discopt._jax.obbt import reverse_fbbt_from_aux
+
+        lb = np.array([0.0, 2.0, 0.0])  # x, y, w-col placeholder (orig only uses 0,1)
+        ub = np.array([10.0, 4.0, 0.0])
+        # varmap: bilinear (x=0, y=1) -> aux col 2
+        varmap = {"bilinear": {(0, 1): 2}, "monomial": {}}
+        aux_lb = np.array([0.0, 0.0, 0.0])
+        aux_ub = np.array([0.0, 0.0, 6.0])
+        n = reverse_fbbt_from_aux(lb[:2], ub[:2], aux_lb, aux_ub, varmap)
+        assert n >= 1
+        assert ub[0] <= 3.0 + 1e-9  # x <= w_ub/y_lb = 6/2 = 3
+        # y = w/x is NOT tightened: x in [0,10] straddles 0 -> division undefined.
+        assert ub[1] == 4.0
+
+    def test_bilinear_skips_zero_straddling_denominator(self):
+        from discopt._jax.obbt import reverse_fbbt_from_aux
+
+        lb = np.array([-5.0, -3.0])
+        ub = np.array([5.0, 3.0])  # both straddle 0 -> division undefined
+        varmap = {"bilinear": {(0, 1): 2}, "monomial": {}}
+        aux_lb = np.array([0.0, 0.0, -4.0])
+        aux_ub = np.array([0.0, 0.0, 4.0])
+        n = reverse_fbbt_from_aux(lb, ub, aux_lb, aux_ub, varmap)
+        assert n == 0  # cannot divide by a zero-straddling interval
+        assert ub[0] == 5.0 and lb[0] == -5.0
+
+    def test_monomial_square_root_bound(self):
+        # w = x**2, x in [0,10], tightened w <= 9 implies x <= 3.
+        from discopt._jax.obbt import reverse_fbbt_from_aux
+
+        lb = np.array([0.0])
+        ub = np.array([10.0])
+        varmap = {"bilinear": {}, "monomial": {(0, 2): 1}}
+        aux_lb = np.array([0.0, 0.0])
+        aux_ub = np.array([0.0, 9.0])
+        n = reverse_fbbt_from_aux(lb, ub, aux_lb, aux_ub, varmap)
+        assert n >= 1
+        assert abs(ub[0] - 3.0) <= 1e-9
+
+    def test_reverse_fbbt_only_tightens(self):
+        # A loose aux bound must never loosen the original box.
+        from discopt._jax.obbt import reverse_fbbt_from_aux
+
+        lb = np.array([1.0, 2.0])
+        ub = np.array([3.0, 4.0])
+        varmap = {"bilinear": {(0, 1): 2}, "monomial": {}}
+        aux_lb = np.array([0.0, 0.0, -100.0])
+        aux_ub = np.array([0.0, 0.0, 100.0])  # very loose
+        reverse_fbbt_from_aux(lb, ub, aux_lb, aux_ub, varmap)
+        assert lb[0] >= 1.0 - 1e-12 and ub[0] <= 3.0 + 1e-12
+        assert lb[1] >= 2.0 - 1e-12 and ub[1] <= 4.0 + 1e-12
+
+    def test_cascade_preserves_box_subset_and_optimum(self):
+        # End to end: cascade_aux must keep the box a subset and never remove the
+        # bilinear optimum. min x+y s.t. x*y >= 4, x,y in [0.5,4].
+        m = Model("bil")
+        m.continuous("x", lb=0.5, ub=4.0)
+        m.continuous("y", lb=0.5, ub=4.0)
+        x, y = m._variables[0], m._variables[1]
+        m.minimize(x + y)
+        m.subject_to(x * y >= 4.0)
+        lb = np.array([0.5, 0.5])
+        ub = np.array([4.0, 4.0])
+        off = obbt_tighten_root(m, lb.copy(), ub.copy(), cascade_aux=False)
+        on = obbt_tighten_root(m, lb.copy(), ub.copy(), cascade_aux=True)
+        # Both are sound subsets of the input box.
+        for r in (off, on):
+            assert np.all(r.lb >= lb - 1e-9) and np.all(r.ub <= ub + 1e-9)
+            assert not r.infeasible
+        # The true optimum x=y=2 (obj 4) must remain inside the cascade box.
+        assert on.lb[0] <= 2.0 + 1e-6 <= on.ub[0]
+        assert on.lb[1] <= 2.0 + 1e-6 <= on.ub[1]

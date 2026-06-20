@@ -56,6 +56,11 @@ xgboost = ["xgboost>=1.7"]
 lightgbm = ["lightgbm>=4.0"]
 gnn = ["equinox>=0.13.8", "optax>=0.1"]
 learned = ["equinox>=0.13.8", "optax>=0.1"]
+# Design-time symbolic envelope/relaxation derivation toolkit
+# (discopt._jax.symbolic). SymPy is used to *derive*, *verify*, and
+# *code-generate* JAX relaxation closures offline; it is never imported on the
+# solver hot path. See docs/notebooks/symbolic_envelopes.ipynb.
+sympy = ["sympy>=1.12"]
 doe = ["openpyxl>=3.1"]
 doe-gui = ["discopt[doe]", "streamlit>=1.30", "pandas>=2.0"]
 dev = [
@@ -68,7 +73,7 @@ dev = [
     "highspy",
     "pre-commit",
 ]
-all = ["discopt[pounce,ipopt,highs,cutest,llm,gnn,nn,ml,doe,doe-gui]"]
+all = ["discopt[pounce,ipopt,highs,cutest,llm,gnn,nn,ml,doe,doe-gui,sympy]"]
 
 [project.scripts]
 discopt = "discopt.cli:main"

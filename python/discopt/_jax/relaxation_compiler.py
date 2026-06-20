@@ -146,6 +146,26 @@ def _try_extract_trilinear_chain(expr: Expression, model: Model) -> tuple[int, i
     return (a, b, c)
 
 
+def _try_extract_signed_abs_product(expr: Expression, model: Model) -> int | None:
+    """Detect the Weymouth term ``f * |f|`` over a single scalar variable.
+
+    Matches ``Mul(v, Abs(v))`` and ``Mul(Abs(v), v)`` where both factors resolve
+    to the *same* scalar variable offset. Returns that flat offset on match, else
+    ``None``. Routes to the tight single-inflection envelope
+    (:func:`discopt._jax.symbolic.domains.gas.weymouth_relax`) instead of the
+    loose bilinear product of ``f`` and ``|f|``.
+    """
+    if not (isinstance(expr, BinaryOp) and expr.op == "*"):
+        return None
+    for factor, other in ((expr.left, expr.right), (expr.right, expr.left)):
+        if isinstance(other, UnaryOp) and other.op == "abs":
+            off = _resolve_scalar_var_offset(factor, model)
+            off_abs = _resolve_scalar_var_offset(other.operand, model)
+            if off is not None and off == off_abs:
+                return off
+    return None
+
+
 def _try_extract_signomial_factors(
     expr: Expression, model: Model
 ) -> list[tuple[int, float]] | None:
@@ -329,6 +349,23 @@ def _compile_relax_node(
                     return new_cv, new_cc
 
                 return fn
+
+            # Weymouth pattern detection: f * |f| over a single scalar variable.
+            # Routes to the tight single-inflection envelope (gas networks) when
+            # the symbolic-derived JAX closure is importable; otherwise falls
+            # through to the generic bilinear product of f and |f|.
+            gas_off = _try_extract_signed_abs_product(expr, model)
+            if gas_off is not None:
+                try:
+                    from discopt._jax.symbolic.domains.gas import weymouth_relax
+                except ImportError:
+                    weymouth_relax = None  # type: ignore[assignment]
+                if weymouth_relax is not None:
+
+                    def fn(x_cv, x_cc, lb, ub, _off=gas_off, _wr=weymouth_relax):
+                        return _wr(x_cv[_off], lb[_off], ub[_off])
+
+                    return fn
 
             # Trilinear pattern detection: x*y*z over 3 distinct scalar
             # Variables. Routes to permutation-symmetric nested McCormick
