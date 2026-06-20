@@ -674,6 +674,110 @@ def example_streaming():
 
 
 # ═══════════════════════════════════════════════════════════════
+# EXAMPLE: Transportation (named sets, sparse-friendly indexing)
+#
+#   minimize    Σ_{(p,k)} cost[p,k] · ship[p,k]
+#   subject to  Σ_k ship[p,k] ≤ supply[p]     ∀ p ∈ PLANTS
+#               Σ_p ship[p,k] ≥ demand[k]     ∀ k ∈ MARKETS
+#               ship[p,k] ≥ 0
+# ═══════════════════════════════════════════════════════════════
+
+
+def example_transportation():
+    """Balanced transportation problem indexed by named sets."""
+    m = dm.Model("transportation")
+
+    plants = m.set("plants", ["pitt", "sf"])
+    markets = m.set("markets", ["a", "b", "c"])
+
+    supply = {"pitt": 20.0, "sf": 30.0}
+    demand = {"a": 10.0, "b": 25.0, "c": 15.0}
+    cost = {
+        ("pitt", "a"): 4.0,
+        ("pitt", "b"): 6.0,
+        ("pitt", "c"): 8.0,
+        ("sf", "a"): 5.0,
+        ("sf", "b"): 3.0,
+        ("sf", "c"): 7.0,
+    }
+
+    ship = m.continuous("ship", over=plants * markets, lb=0, ub=1000)
+    m.minimize(dm.sum(cost[(p, k)] * ship[p, k] for p in plants for k in markets))
+    m.constraint(plants, lambda p: dm.sum(ship[p, k] for k in markets) <= supply[p], name="supply")
+    m.constraint(markets, lambda k: dm.sum(ship[p, k] for p in plants) >= demand[k], name="demand")
+
+    print(m)
+    return m
+
+
+# ═══════════════════════════════════════════════════════════════
+# EXAMPLE: Assignment (indexed binaries over a product set)
+# ═══════════════════════════════════════════════════════════════
+
+
+def example_assignment():
+    """Assign workers to tasks one-to-one at minimum cost."""
+    m = dm.Model("assignment")
+
+    workers = m.set("workers", ["w1", "w2", "w3"])
+    tasks = m.set("tasks", ["a", "b", "c"])
+    cost = {
+        ("w1", "a"): 9,
+        ("w1", "b"): 2,
+        ("w1", "c"): 7,
+        ("w2", "a"): 6,
+        ("w2", "b"): 4,
+        ("w2", "c"): 3,
+        ("w3", "a"): 5,
+        ("w3", "b"): 8,
+        ("w3", "c"): 1,
+    }
+
+    assign = m.binary("assign", over=workers * tasks)
+    m.minimize(dm.sum(cost[(w, t)] * assign[w, t] for w in workers for t in tasks))
+    m.constraint(workers, lambda w: dm.sum(assign[w, t] for t in tasks) == 1, name="one_task")
+    m.constraint(tasks, lambda t: dm.sum(assign[w, t] for w in workers) == 1, name="one_worker")
+
+    print(m)
+    return m
+
+
+# ═══════════════════════════════════════════════════════════════
+# EXAMPLE: Multi-commodity flow (set algebra: product + filter)
+# ═══════════════════════════════════════════════════════════════
+
+
+def example_multicommodity_flow():
+    """Min-cost multi-commodity flow on a small sparse network.
+
+    Demonstrates set algebra: arcs are a *sparse* subset of node×node, and the
+    variable is indexed over arcs × commodities (a product set).
+    """
+    m = dm.Model("mcf")
+
+    nodes = m.set("nodes", ["s", "u", "v", "t"])
+    # Arcs are a *sparse* subset of the dense node-pair set ``nodes * nodes``.
+    arcs = (nodes * nodes).where(
+        lambda i, j: (i, j) in {("s", "u"), ("s", "v"), ("u", "t"), ("v", "t"), ("u", "v")}
+    )
+    commodities = m.set("commodities", ["c1", "c2"])
+
+    cap = {a: 10.0 for a in arcs}
+    flow = m.continuous("flow", over=arcs * commodities, lb=0, ub=1000)
+
+    # Arc capacity shared across commodities.
+    m.constraint(
+        arcs,
+        lambda i, j: dm.sum(flow[(i, j), c] for c in commodities) <= cap[(i, j)],
+        name="capacity",
+    )
+    m.minimize(dm.sum(flow[a, c] for a in arcs for c in commodities))
+
+    print(m)
+    return m
+
+
+# ═══════════════════════════════════════════════════════════════
 # Run all examples that don't require the solver backend
 # ═══════════════════════════════════════════════════════════════
 
@@ -692,6 +796,9 @@ if __name__ == "__main__":
         ("Parametric / Sensitivity", example_parametric),
         ("Logical Constraints / GDP", example_logical_constraints),
         ("NN Surrogate Optimization", example_nn_surrogate),
+        ("Transportation (named sets)", example_transportation),
+        ("Assignment (indexed binaries)", example_assignment),
+        ("Multi-commodity Flow (set algebra)", example_multicommodity_flow),
     ]
 
     for name, func in examples:

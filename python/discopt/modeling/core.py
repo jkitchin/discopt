@@ -30,14 +30,20 @@ import builtins as _builtins
 from dataclasses import dataclass
 from enum import Enum
 from typing import (
+    TYPE_CHECKING,
     Callable,
     Iterator,
     Optional,
     Sequence,
     Union,
+    overload,
 )
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from discopt.modeling.indexed import IndexedParam, IndexedVar
+    from discopt.modeling.sets import _SetBase
 
 builtins_sum = _builtins.sum
 
@@ -359,6 +365,35 @@ def _wrap(x) -> Expression:
     if isinstance(x, Expression):
         return x
     return Constant(x)
+
+
+def _is_term_iterable(x) -> bool:
+    """True for a generator/iterable of terms (not a scalar Expression/array/str).
+
+    Indexed containers (:class:`IndexedVar` / :class:`IndexedParam`) are excluded
+    even though they are iterable: their iterator yields index *keys*, not term
+    expressions, so treating them as a term-iterable would silently fold the keys
+    in as constants. ``sum``/``prod`` expand them explicitly instead.
+    """
+    if isinstance(x, (Expression, np.ndarray, str, bytes)):
+        return False
+    if getattr(x, "_is_indexed_container", False):
+        return False
+    return hasattr(x, "__iter__")
+
+
+def _expand_indexed_container(x):
+    """If *x* is an IndexedVar/IndexedParam, return its element expressions."""
+    if getattr(x, "_is_indexed_container", False):
+        return [x[k] for k in x.index_set]
+    return x
+
+
+def _call_over(fn: Callable, member, over):
+    """Call ``fn`` on a set member, unpacking tuple members for ``dimen > 1`` sets."""
+    if getattr(over, "dimen", 1) > 1 and isinstance(member, tuple):
+        return fn(*member)
+    return fn(member)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -860,11 +895,14 @@ def sum(
     >>> dm.sum(x, axis=0)                          # sum along axis 0
     >>> dm.sum(lambda i: cost[i] * x[i], over=range(n))  # indexed sum
     """
+    x = _expand_indexed_container(x)  # dm.sum(indexed_var) -> sum of its elements
     if over is not None and callable(x):
-        # Indexed summation: dm.sum(lambda i: expr(i), over=index_set)
-        terms = [_wrap(x(i)) for i in over]
+        # Indexed summation: dm.sum(lambda i: expr(i), over=index_set). Tuple
+        # members of dimen>1 named sets are unpacked: ``lambda i, j: ...``.
+        terms = [_wrap(_call_over(x, i, over)) for i in over]
         return SumOverExpression(terms)
-    if isinstance(x, list):
+    if isinstance(x, list) or _is_term_iterable(x):
+        # list/tuple/generator of terms: dm.sum(x[i] for i in S)
         terms = [_wrap(t) for t in x]
         return SumOverExpression(terms)
     return SumExpression(_wrap(x), axis=axis)
@@ -886,13 +924,24 @@ def prod(x: Union[Expression, list, Callable], *, over: Optional[Sequence] = Non
     -------
     Expression
     """
+    x = _expand_indexed_container(x)  # dm.prod(indexed_var) -> product of elements
     if over is not None and callable(x):
-        terms = [_wrap(x(i)) for i in over]
-        result = terms[0]
-        for t in terms[1:]:
-            result = result * t
-        return result
+        terms = [_wrap(_call_over(x, i, over)) for i in over]
+        return _multiply_terms(terms)
+    if isinstance(x, list) or _is_term_iterable(x):
+        terms = [_wrap(t) for t in x]
+        return _multiply_terms(terms)
     return FunctionCall("prod", _wrap(x))
+
+
+def _multiply_terms(terms: list["Expression"]) -> Expression:
+    """Fold a list of terms into a product; the empty product is the identity 1."""
+    if not terms:
+        return Constant(1.0)
+    result: Expression = terms[0]
+    for t in terms[1:]:
+        result = result * t
+    return result
 
 
 def norm(x: Expression, ord: Union[int, float, str] = 2) -> Expression:
@@ -1301,6 +1350,15 @@ class SolveResult:
 # ─────────────────────────────────────────────────────────────
 
 
+def _require_no_shape(shape, ctor: str) -> None:
+    """Reject ``shape=`` when ``over=`` is given (they are mutually exclusive)."""
+    if shape not in ((), 0):
+        raise ValueError(
+            f"{ctor}(): 'over=' (named-set index) and 'shape=' are mutually "
+            "exclusive; an indexed variable's size is determined by its set."
+        )
+
+
 class Model:
     """
     A Mixed-Integer Nonlinear Program.
@@ -1337,8 +1395,111 @@ class Model:
         # Complementarity conditions added via ``complementarity()``; recorded
         # for introspection and bound tightening (see ``discopt.mpec``).
         self._complementarities: list = []
+        # Named index sets registered via ``set()`` (see ``discopt.modeling.sets``).
+        self._sets: list = []
+        # Linear constraint blocks emitted directly into the Rust builder
+        # (fast-API ``add_linear_constraints`` and the indexed fast path). Each
+        # entry is ``(A_csr, x, sense, b, name)``. Kept so .nl export and
+        # introspection can recover constraints that bypass ``_constraints``.
+        self._builder_linear_blocks: list = []
+        # Linear objective emitted directly into the Rust builder via
+        # ``add_linear_objective``: ``(c, x, constant, sense)`` or ``None``. Kept
+        # so .nl export can recover an objective that bypasses ``_objective``
+        # (which only holds a zero placeholder in that case). Linear is
+        # ``(c, x, constant, sense)``; quadratic is ``(Q_csr, c, x, constant,
+        # sense)`` for ``0.5 x'Qx + c'x + constant``. At most one is set.
+        self._builder_linear_objective: Optional[tuple] = None
+        self._builder_quadratic_objective: Optional[tuple] = None
+
+    # ── Index sets ──
+
+    def set(self, name: str, members, dimen: Optional[int] = None):
+        """Declare a named index set.
+
+        A :class:`~discopt.modeling.sets.Set` is the authoritative index for
+        indexed variables, parameters, and constraints. Members may be scalars
+        (``dimen == 1``) or fixed-arity tuples; duplicates are removed and
+        first-occurrence order is preserved.
+
+        Parameters
+        ----------
+        name : str
+            Identifier for the set, unique among the model's sets.
+        members : iterable
+            The set members.
+        dimen : int, optional
+            Declared dimensionality; inferred from *members* when omitted.
+
+        Returns
+        -------
+        Set
+            The registered set, supporting algebra (``|``, ``&``, ``-``, ``*``)
+            and filtering (``where``).
+
+        Examples
+        --------
+        >>> m = Model()
+        >>> plants = m.set("plants", ["pitt", "sf", "nyc"])
+        >>> markets = m.set("markets", ["a", "b"])
+        >>> len(plants * markets)
+        6
+        """
+        from discopt.modeling.sets import Set
+
+        if any(s.name == name for s in self._sets):
+            raise ValueError(f"Set name '{name}' already used in model")
+        s = Set(name, members, dimen=dimen)
+        self._sets.append(s)
+        return s
 
     # ── Variable constructors ──
+
+    def _register_variable(self, var: "Variable") -> "Variable":
+        """Append a variable and register it with the Rust builder if active."""
+        self._variables.append(var)
+        if self._builder is not None:
+            var._builder_idx = self._builder.add_variable(
+                var.name,
+                var.var_type.value,
+                list(var.shape),
+                var.lb.flatten().astype(np.float64),
+                var.ub.flatten().astype(np.float64),
+            )
+        return var
+
+    def _make_indexed_var(
+        self, name, var_type, index_set, lb, ub, default_lb, default_ub
+    ) -> "IndexedVar":
+        """Build an :class:`IndexedVar` backed by one flat variable over *index_set*."""
+        from discopt.modeling.indexed import IndexedVar, resolve_indexed_values
+
+        lb_arr = resolve_indexed_values(index_set, lb, default_lb, np.float64)
+        ub_arr = resolve_indexed_values(index_set, ub, default_ub, np.float64)
+        self._check_name(name)
+        flat = Variable(name, var_type, (len(index_set),), lb_arr, ub_arr, self)
+        self._register_variable(flat)
+        return IndexedVar(flat, index_set)
+
+    @overload
+    def continuous(
+        self,
+        name: str,
+        shape: Union[int, tuple[int, ...]] = ...,
+        lb: Union[float, np.ndarray] = ...,
+        ub: Union[float, np.ndarray] = ...,
+        over: None = ...,
+    ) -> Variable: ...
+
+    @overload
+    def continuous(
+        self,
+        name: str,
+        shape: Union[int, tuple[int, ...]] = ...,
+        lb: Union[float, np.ndarray] = ...,
+        ub: Union[float, np.ndarray] = ...,
+        *,
+        over: "_SetBase",
+    ) -> "IndexedVar": ...
 
     def continuous(
         self,
@@ -1346,7 +1507,8 @@ class Model:
         shape: Union[int, tuple[int, ...]] = (),
         lb: Union[float, np.ndarray] = -9.999e19,
         ub: Union[float, np.ndarray] = 9.999e19,
-    ) -> Variable:
+        over=None,
+    ) -> Union[Variable, "IndexedVar"]:
         """
         Create continuous decision variable(s).
 
@@ -1384,27 +1546,40 @@ class Model:
         >>> x = m.continuous("x")                           # scalar, unbounded
         >>> flow = m.continuous("flow", shape=(5,), lb=0)   # 5-vector, non-negative
         >>> X = m.continuous("X", shape=(3, 4), lb=0, ub=1) # 3x4 matrix
+        >>> ship = m.continuous("ship", over=links, lb=0)   # indexed over a named set
+
+        When *over* is given (a :class:`~discopt.modeling.sets.Set`), an
+        :class:`~discopt.modeling.indexed.IndexedVar` is returned: ``ship[key]``
+        indexes by set member, and ``lb``/``ub`` may be a scalar, a ``dict``
+        keyed by member, or a callable ``fn(member)``.
         """
+        if over is not None:
+            _require_no_shape(shape, "continuous")
+            return self._make_indexed_var(
+                name, VarType.CONTINUOUS, over, lb, ub, -9.999e19, 9.999e19
+            )
         if isinstance(shape, int):
             shape = (shape,)
         self._check_name(name)
         var = Variable(name, VarType.CONTINUOUS, shape, lb, ub, self)
-        self._variables.append(var)
-        if self._builder is not None:
-            var._builder_idx = self._builder.add_variable(
-                var.name,
-                var.var_type.value,
-                list(var.shape),
-                var.lb.flatten().astype(np.float64),
-                var.ub.flatten().astype(np.float64),
-            )
-        return var
+        return self._register_variable(var)
+
+    @overload
+    def binary(
+        self, name: str, shape: Union[int, tuple[int, ...]] = ..., over: None = ...
+    ) -> Variable: ...
+
+    @overload
+    def binary(
+        self, name: str, shape: Union[int, tuple[int, ...]] = ..., *, over: "_SetBase"
+    ) -> "IndexedVar": ...
 
     def binary(
         self,
         name: str,
         shape: Union[int, tuple[int, ...]] = (),
-    ) -> Variable:
+        over=None,
+    ) -> Union[Variable, "IndexedVar"]:
         """
         Create binary (0/1) decision variable(s).
 
@@ -1424,21 +1599,37 @@ class Model:
         --------
         >>> use = m.binary("use")                    # single binary
         >>> active = m.binary("active", shape=(5,))  # 5 binary indicators
+        >>> assign = m.binary("assign", over=workers * tasks)  # indexed binary
         """
+        if over is not None:
+            _require_no_shape(shape, "binary")
+            return self._make_indexed_var(name, VarType.BINARY, over, 0.0, 1.0, 0.0, 1.0)
         if isinstance(shape, int):
             shape = (shape,)
         self._check_name(name)
         var = Variable(name, VarType.BINARY, shape, 0.0, 1.0, self)
-        self._variables.append(var)
-        if self._builder is not None:
-            var._builder_idx = self._builder.add_variable(
-                var.name,
-                var.var_type.value,
-                list(var.shape),
-                var.lb.flatten().astype(np.float64),
-                var.ub.flatten().astype(np.float64),
-            )
-        return var
+        return self._register_variable(var)
+
+    @overload
+    def integer(
+        self,
+        name: str,
+        shape: Union[int, tuple[int, ...]] = ...,
+        lb: Union[float, np.ndarray] = ...,
+        ub: Union[float, np.ndarray] = ...,
+        over: None = ...,
+    ) -> Variable: ...
+
+    @overload
+    def integer(
+        self,
+        name: str,
+        shape: Union[int, tuple[int, ...]] = ...,
+        lb: Union[float, np.ndarray] = ...,
+        ub: Union[float, np.ndarray] = ...,
+        *,
+        over: "_SetBase",
+    ) -> "IndexedVar": ...
 
     def integer(
         self,
@@ -1446,7 +1637,8 @@ class Model:
         shape: Union[int, tuple[int, ...]] = (),
         lb: Union[float, np.ndarray] = 0,
         ub: Union[float, np.ndarray] = 1e6,
-    ) -> Variable:
+        over=None,
+    ) -> Union[Variable, "IndexedVar"]:
         """
         Create general integer decision variable(s).
 
@@ -1470,27 +1662,41 @@ class Model:
         --------
         >>> n = m.integer("n_units", lb=0, ub=10)
         >>> batch = m.integer("batch", shape=(3,), lb=1, ub=100)
+        >>> n = m.integer("n", over=plants, lb=0, ub=10)  # indexed integer
         """
+        if over is not None:
+            _require_no_shape(shape, "integer")
+            return self._make_indexed_var(name, VarType.INTEGER, over, lb, ub, 0.0, 1e6)
         if isinstance(shape, int):
             shape = (shape,)
         self._check_name(name)
         var = Variable(name, VarType.INTEGER, shape, lb, ub, self)
-        self._variables.append(var)
-        if self._builder is not None:
-            var._builder_idx = self._builder.add_variable(
-                var.name,
-                var.var_type.value,
-                list(var.shape),
-                var.lb.flatten().astype(np.float64),
-                var.ub.flatten().astype(np.float64),
-            )
-        return var
+        return self._register_variable(var)
+
+    def _make_indexed_param(self, name, index_set, value) -> "IndexedParam":
+        """Build an :class:`IndexedParam` backed by one flat parameter over *index_set*."""
+        from discopt.modeling.indexed import IndexedParam, resolve_indexed_values
+
+        arr = resolve_indexed_values(index_set, value, 0.0, np.float64)
+        self._check_name(name)
+        flat = Parameter(name, arr, self)
+        self._parameters.append(flat)
+        return IndexedParam(flat, index_set)
+
+    @overload
+    def parameter(
+        self, name: str, value: Union[float, np.ndarray], over: None = ...
+    ) -> Parameter: ...
+
+    @overload
+    def parameter(self, name: str, value, *, over: "_SetBase") -> "IndexedParam": ...
 
     def parameter(
         self,
         name: str,
         value: Union[float, np.ndarray],
-    ) -> Parameter:
+        over=None,
+    ) -> Union[Parameter, "IndexedParam"]:
         """
         Create a parameter for parametric optimization / sensitivity.
 
@@ -1513,7 +1719,14 @@ class Model:
         --------
         >>> price = m.parameter("price", value=50.0)
         >>> demand = m.parameter("demand", value=np.array([100, 200, 150]))
+        >>> cap = m.parameter("cap", over=plants, value={"pitt": 10, "sf": 20})
+
+        When *over* is given (a :class:`~discopt.modeling.sets.Set`), an
+        :class:`~discopt.modeling.indexed.IndexedParam` is returned and *value*
+        may be a scalar, a ``dict`` keyed by member, or a callable ``fn(member)``.
         """
+        if over is not None:
+            return self._make_indexed_param(name, over, value)
         self._check_name(name)
         param = Parameter(name, value, self)
         self._parameters.append(param)
@@ -1579,19 +1792,148 @@ class Model:
         >>> m.subject_to([x[i] + x[i+1] <= limits[i] for i in range(n-1)],
         ...              name="adjacent_limits")
         """
-        if isinstance(constraint, list):
-            for k, c in enumerate(constraint):
-                if isinstance(c, Constraint):
-                    c.name = f"{name}_{k}" if name else None
-                    self._constraints.append(c)
-        elif isinstance(constraint, Constraint):
+        if isinstance(constraint, Constraint):
             constraint.name = name
             self._constraints.append(constraint)
-        else:
+            return
+        if isinstance(constraint, bool):
             raise TypeError(
                 f"Expected Constraint (from <=, >=, == on expressions), "
                 f"got {type(constraint)}. Did you mean to compare expressions?"
             )
+        # list / tuple / generator / any iterable of constraints (named
+        # by ordinal: ``name_0``, ``name_1``, ...).
+        try:
+            items = list(constraint)
+        except TypeError:
+            raise TypeError(
+                f"Expected Constraint or an iterable of Constraints, got {type(constraint)}."
+            ) from None
+        for k, c in enumerate(items):
+            if not isinstance(c, Constraint):
+                raise TypeError(
+                    f"Expected Constraint (from <=, >=, == on expressions), "
+                    f"got {type(c)} at position {k}."
+                )
+            c.name = f"{name}_{k}" if name else None
+            self._constraints.append(c)
+
+    def constraint(self, index_set, rule, name: Optional[str] = None, fast: bool = True):
+        """Add a family of constraints indexed by a named set.
+
+        For each member of *index_set* the *rule* is evaluated to produce a
+        constraint; tuple members are unpacked into positional arguments
+        (``rule(i, j)`` for a ``dimen == 2`` set, ``rule(i)`` otherwise). A rule
+        may return :data:`~discopt.modeling.indexed.Skip` to omit that member.
+        Generated constraints are named ``name[key]`` (e.g. ``capacity[pitt]``).
+
+        When ``fast`` is ``True`` (default) and every generated constraint is
+        affine in a single backing variable with a uniform sense, the whole
+        family is emitted as one sparse-matrix call into the Rust builder instead
+        of thousands of Python expression objects. This is purely a performance
+        path: the resulting model is identical, and any family that is not
+        single-variable-affine transparently falls back to the general path.
+        Pass ``fast=False`` to force the general path (e.g. for debugging).
+
+        Parameters
+        ----------
+        index_set : Set
+            The set to iterate.
+        rule : callable
+            ``rule(member)`` -> Constraint (or ``Skip``).
+        name : str, optional
+            Prefix for the per-key constraint names.
+        fast : bool, default True
+            Allow linear fast-path emission into the Rust builder.
+
+        Returns
+        -------
+        IndexedConstraint
+            A keyed view of the generated constraints.
+
+        Examples
+        --------
+        >>> m.constraint(plants, lambda p: ship_out(p) <= cap[p], name="capacity")
+        """
+        from discopt.modeling.indexed import IndexedConstraint, Skip, key_label
+        from discopt.modeling.sets import call_member
+
+        generated: list[tuple] = []
+        for member in index_set:
+            c = call_member(rule, member, index_set.dimen)
+            if c is Skip:
+                continue
+            if not isinstance(c, Constraint):
+                raise TypeError(
+                    f"constraint rule for key {member!r} returned {type(c)}, "
+                    "expected a Constraint (from <=, >=, == on expressions) or Skip."
+                )
+            c.name = f"{name}[{key_label(member)}]" if name else None
+            generated.append((member, c))
+
+        members = {m: c for m, c in generated}
+        if fast and self._try_fast_linear_family([c for _, c in generated], name):
+            # Rows were emitted into the Rust builder; keep the Constraint
+            # objects only for introspection (not in self._constraints).
+            return IndexedConstraint(name, index_set, members, fast=True)
+        for _, c in generated:
+            self._constraints.append(c)
+        return IndexedConstraint(name, index_set, members, fast=False)
+
+    def _try_fast_linear_family(self, constraints: list, name: Optional[str]) -> bool:
+        """Emit a single-variable-affine, uniform-sense family into the builder.
+
+        Returns ``True`` if the whole family was emitted as one
+        ``add_linear_constraints`` call, ``False`` if it is ineligible (caller
+        then uses the general expression path).
+        """
+        from discopt.modeling.indexed import affine_form
+
+        if not constraints:
+            return False
+        sense = constraints[0].sense
+        if any(c.sense != sense for c in constraints):
+            return False
+
+        rows = []
+        var = None
+        for c in constraints:
+            aff = affine_form(c.body)
+            if aff is None or aff.var is None:
+                return False
+            if var is None:
+                var = aff.var
+            elif aff.var is not var:
+                return False
+            rows.append(aff)
+
+        import scipy.sparse as sp
+
+        m_rows = len(rows)
+        n_cols = var.size
+        data: list[float] = []
+        indices: list[int] = []
+        indptr = [0]
+        b = np.empty(m_rows, dtype=np.float64)
+        for r, aff in enumerate(rows):
+            for pos in sorted(aff.coeffs):
+                coeff = aff.coeffs[pos]
+                if coeff != 0.0:
+                    data.append(coeff)
+                    indices.append(pos)
+            indptr.append(len(data))
+            # body sense 0  ==>  A x sense (-const)
+            b[r] = -aff.const
+        A = sp.csr_matrix(
+            (
+                np.asarray(data, dtype=np.float64),
+                np.asarray(indices, dtype=np.int64),
+                np.asarray(indptr, dtype=np.int64),
+            ),
+            shape=(m_rows, n_cols),
+        )
+        self.add_linear_constraints(A, var, sense, b, name)
+        return True
 
     # ── Fast construction API (direct arena building) ──
 
@@ -1681,6 +2023,10 @@ class Model:
             b,
             name,
         )
+        # Record the block so exporters (.nl) and introspection can recover the
+        # constraints that live only in the Rust builder. CSR ``A`` and ``b`` are
+        # already in their final float form here.
+        self._builder_linear_blocks.append((A, x, sense, b, name))
 
     def add_linear_objective(
         self,
@@ -1718,6 +2064,10 @@ class Model:
             ObjectiveSense.MINIMIZE if sense == "minimize" else ObjectiveSense.MAXIMIZE,
         )
         self._objective._is_placeholder = True
+        # Record the block so .nl export can recover the objective that lives
+        # only in the Rust builder (``_objective`` holds a zero placeholder).
+        self._builder_linear_objective = (c, x, float(constant), sense)
+        self._builder_quadratic_objective = None
 
     def add_quadratic_objective(
         self,
@@ -1777,6 +2127,10 @@ class Model:
             ObjectiveSense.MINIMIZE if sense == "minimize" else ObjectiveSense.MAXIMIZE,
         )
         self._objective._is_placeholder = True
+        # Record the block so .nl export can recover the quadratic objective
+        # that lives only in the Rust builder.
+        self._builder_quadratic_objective = (Q, c, x, float(constant), sense)
+        self._builder_linear_objective = None
 
     # ── Logical constraints (GDP) ──
 

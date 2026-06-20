@@ -85,6 +85,13 @@ from discopt.modeling.core import (
 from discopt.modeling.core import (
     abs_ as abs,
 )
+from discopt.modeling.indexed import (
+    IndexedConstraint,
+    IndexedParam,
+    IndexedVar,
+    Skip,
+)
+from discopt.modeling.sets import ProductSet, RangeSet, Set
 
 __all__ = [
     "Model",
@@ -141,4 +148,11 @@ __all__ = [
     "atleast",
     "atmost",
     "exactly",
+    "Set",
+    "RangeSet",
+    "ProductSet",
+    "IndexedVar",
+    "IndexedParam",
+    "IndexedConstraint",
+    "Skip",
 ]

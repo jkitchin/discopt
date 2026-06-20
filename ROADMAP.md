@@ -95,7 +95,7 @@ New problem types to make discopt competitive across the full optimization lands
 
 | Task                              | Status  | Description                                                                  |
 |-----------------------------------|---------|------------------------------------------------------------------------------|
-| Set and index abstractions        | Planned | Named sets, indexed variables/constraints, set algebra for sparse models     |
+| Set and index abstractions        | Done    | Named sets, indexed variables/constraints, set algebra for sparse models     |
 | Piecewise-linear functions        | Done    | SOS2 constraints in modeling API                                             |
 | Native indicator constraints      | Done    | `_IndicatorConstraint` class in modeling API                                 |
 | Warm-starting API                 | Done    | `m.solve(initial_solution=...)` with validation                              |

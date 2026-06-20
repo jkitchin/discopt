@@ -305,6 +305,7 @@ class _NLWriter:
             linear, nonlinear = self._split_expr(obj.expression)
             self._obj_linear = linear
             self._obj_nonlinear = nonlinear
+        self._decompose_builder_objective()
 
         for con in self.model._constraints:
             # Determine constraint bound type (shared by every scalar row this
@@ -328,6 +329,117 @@ class _NLWriter:
                 linear, nonlinear = self._split_expr(body)
                 self._con_linear.append(linear)
                 self._con_nonlinear.append(nonlinear)
+                self._con_bounds.append(bnd)
+
+        self._decompose_builder_blocks()
+
+    def _decompose_builder_objective(self):
+        """Recover a linear or quadratic objective that lives only in the builder.
+
+        ``add_linear_objective`` / ``add_quadratic_objective`` set the real
+        ``0.5 x'Qx + c'x + constant`` objective in the builder and leave a zero
+        placeholder in ``model._objective``. Reconstruct ``_obj_linear`` (the
+        ``c'x`` gradient) and ``_obj_nonlinear`` (the quadratic part plus any
+        constant offset) so ``.nl`` export carries the true objective. Only
+        applies when the current objective is that placeholder, so a real
+        expression objective set afterwards is never overwritten.
+        """
+        if not getattr(self.model._objective, "_is_placeholder", False):
+            return
+        lin_blk = getattr(self.model, "_builder_linear_objective", None)
+        quad_blk = getattr(self.model, "_builder_quadratic_objective", None)
+        if lin_blk is not None:
+            c, x, constant, _sense = lin_blk
+            self._obj_linear = self._linear_obj_from_c(c, x)
+            self._obj_nonlinear = Constant(float(constant)) if constant != 0.0 else None
+        elif quad_blk is not None:
+            Q, c, x, constant, _sense = quad_blk
+            self._obj_linear = self._linear_obj_from_c(c, x)
+            self._obj_nonlinear = self._quadratic_obj_expr(Q, x, float(constant))
+
+    def _linear_obj_from_c(self, c, x) -> dict[int, float]:
+        """Map a cost vector over variable ``x`` to ``{global_var_index: coeff}``."""
+        lin: dict[int, float] = {}
+        for j, raw in enumerate(np.asarray(c, dtype=np.float64).ravel()):
+            coeff = float(raw)
+            if coeff == 0.0:
+                continue
+            gidx = self._var_index.get((x.name, j))
+            if gidx is not None:
+                lin[gidx] = lin.get(gidx, 0.0) + coeff
+        return lin
+
+    def _quadratic_obj_expr(self, Q, x, constant: float) -> Expression | None:
+        """Build ``0.5 x'Sx + constant`` as an n-ary sum expression (or ``None``).
+
+        The Rust builder reads only the **upper triangle** of ``Q`` and reflects
+        it, i.e. it optimizes ``0.5 x'Sx`` with ``S = triu(Q) + striu(Q).T``
+        (the strictly-lower triangle of the input is ignored). The export mirrors
+        that exactly so it matches the solved model for any ``Q`` — symmetric,
+        triangular, or asymmetric. Each stored entry ``S[i, j]`` contributes
+        ``0.5 S[i, j] x[i] x[j]`` (diagonals give the ``x[i]^2`` terms). The sum
+        is emitted as a single ``SUMLIST`` node so the writer never recurses
+        through a deep ``+`` chain.
+        """
+        import scipy.sparse as sp
+
+        S = (sp.triu(Q, 0) + sp.triu(Q, 1).T).tocsr()
+        indptr = S.indptr
+        indices = S.indices
+        data = S.data
+        terms: list[Expression] = []
+        for i in range(S.shape[0]):
+            for k in range(int(indptr[i]), int(indptr[i + 1])):
+                q = float(data[k])
+                if q == 0.0:
+                    continue
+                j = int(indices[k])
+                prod = BinaryOp("*", IndexExpression(x, i), IndexExpression(x, j))
+                terms.append(BinaryOp("*", Constant(0.5 * q), prod))
+        if constant != 0.0:
+            terms.append(Constant(constant))
+        if not terms:
+            return None
+        if len(terms) == 1:
+            return terms[0]
+        return SumOverExpression(terms)
+
+    def _decompose_builder_blocks(self):
+        """Emit linear constraints that live only in the Rust builder.
+
+        The fast-construction API (``add_linear_constraints``) and the indexed
+        constraint fast path build rows directly into the builder, bypassing
+        ``model._constraints``. Each recorded ``(A, x, sense, b, name)`` block is
+        reconstructed here as purely linear rows so ``.nl`` export sees the same
+        model the solver does.
+        """
+        blocks = getattr(self.model, "_builder_linear_blocks", None)
+        if not blocks:
+            return
+        for A, x, sense, b, _name in blocks:
+            indptr = A.indptr
+            indices = A.indices
+            data = A.data
+            for r in range(A.shape[0]):
+                lin: dict[int, float] = {}
+                for k in range(int(indptr[r]), int(indptr[r + 1])):
+                    coeff = float(data[k])
+                    if coeff == 0.0:
+                        continue
+                    gidx = self._var_index.get((x.name, int(indices[k])))
+                    if gidx is not None:
+                        lin[gidx] = lin.get(gidx, 0.0) + coeff
+                rhs = float(b[r])
+                if sense == "<=":
+                    bnd = (1, 0.0, rhs)  # A x <= b
+                elif sense == ">=":
+                    bnd = (2, rhs, 0.0)  # A x >= b
+                elif sense == "==":
+                    bnd = (4, rhs, rhs)
+                else:  # pragma: no cover - sense is validated upstream
+                    bnd = (3, 0.0, 0.0)
+                self._con_linear.append(lin)
+                self._con_nonlinear.append(None)
                 self._con_bounds.append(bnd)
 
     def _scalarize_body(self, expr: Expression) -> list[Expression]:
