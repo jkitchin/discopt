@@ -109,6 +109,23 @@ multivariate extension of the verifier. This is deferred deliberately — a shal
 re-wrap of compositional McCormick would add no tightness, and an unsound hull
 would violate the project's correctness invariant.
 
+### Automated constraint-chain cut derivation (delivered)
+
+`symbolic/constraint_cuts.py` is the first concrete piece of this frontier aimed
+at issue #15 (gas-network bound gap). It automates: symbolic elimination of a
+chain of equality constraints to derive a sound coupling
+(`eliminate_chain_coupling`), conversion of that coupling + a product objective
+term into a univariate convex underestimator with tangent cuts
+(`power_term_underestimator`), and soundness certification (`verify_cut`).
+
+On the issue-#15 gas benchmark the **fully automated** pipeline reproduces the
+hand-derived cut and closes discopt's relaxation gap from **66.7% to 0%** (root
+bound 1.0 → 3.0026 = global optimum; 805 nodes / 92 s timeout → 5 nodes / 7 s
+certified). For reference, SCIP 10.0 solves the same instance in 0.31 s — the
+remaining distance is generality of the automatic derivation, not the math. Next
+step: wire the derived cuts into the relaxation compiler / OBBT so the derivation
+fires automatically from the model graph (no per-instance script).
+
 ## Phase 7 — Docs & dissemination
 
 `docs/notebooks/symbolic_envelopes.ipynb` with `{cite:p}` citations + new
