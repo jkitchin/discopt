@@ -90,8 +90,16 @@ class ICNN(eqx.Module):
             bias: jax.Array = w_z.bias if w_z.bias is not None else jnp.zeros(w_z.weight.shape[0])
             z = jax.nn.relu(jnp.dot(z, jax.nn.softplus(w_z.weight.T)) + bias + w_x(x))
 
-        # Final scalar output
-        out: jnp.ndarray = self.output_layer(z).squeeze(-1)
+        # Final scalar output. The output projection must also use non-negative
+        # weights: z is a vector of functions convex in the input, and a linear
+        # combination of convex functions is convex only with non-negative
+        # coefficients. Without this, the network is NOT convex by construction.
+        out_bias: jax.Array = (
+            self.output_layer.bias if self.output_layer.bias is not None else jnp.zeros(1)
+        )
+        out: jnp.ndarray = (
+            jnp.dot(z, jax.nn.softplus(self.output_layer.weight.T)) + out_bias
+        ).squeeze(-1)
         return out
 
 

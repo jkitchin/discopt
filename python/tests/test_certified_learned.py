@@ -114,3 +114,8 @@ def test_learned_adapter_certifies_to_sound():
         raw_fn, lambda x: x**2, domain=(-2.0, 2.0), n_boxes=200, seed=2, safety_factor=1.5
     )
     assert cert.certified_report.sound
+    # Regression guard: the ICNN must be convex-in-x by construction (its output
+    # layer was previously unconstrained, breaking the guarantee). cv stays convex
+    # and cc stays concave under the constant margin.
+    assert cert.certified_report.max_convexity_violation <= 1e-6
+    assert cert.certified_report.max_concavity_violation <= 1e-6
