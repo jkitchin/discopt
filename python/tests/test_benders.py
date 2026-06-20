@@ -1,6 +1,8 @@
 """Tests for the classical Benders decomposition solver.
 
-Requires highspy for rigorous dual cut generation and the MILP master.
+POUNCE-only: the solver needs no HiGHS, and these tests use ``scipy.linprog`` as
+an independent oracle (not discopt's own solvers), so they run in a HiGHS-free
+install.
 """
 
 import itertools
@@ -11,15 +13,29 @@ import pytest
 from discopt.decomposition.benders import solve_benders
 
 try:
+    from discopt.solvers.lp_pounce import POUNCE_AVAILABLE
+except ImportError:
+    POUNCE_AVAILABLE = False
+try:
     import highspy  # noqa: F401
 
     HAS_HIGHS = True
 except ImportError:
     HAS_HIGHS = False
 
-pytestmark = pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
+pytestmark = pytest.mark.skipif(
+    not (POUNCE_AVAILABLE or HAS_HIGHS), reason="no LP/MILP backend (POUNCE or HiGHS) available"
+)
 
 ABS_TOL = 1e-3
+
+
+def _recourse_lp_opt(c, A_ub, b_ub, ub):
+    """Independent recourse-LP oracle via scipy (no discopt solver, no HiGHS)."""
+    from scipy.optimize import linprog
+
+    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=[(0, ub)] * len(c), method="highs")
+    return float(res.fun) if res.success else None
 
 
 def _two_stage_milp():
@@ -138,9 +154,6 @@ def test_multidim_index_rejected_cleanly():
 @pytest.mark.slow
 def test_matches_monolithic_random():
     """Benders matches brute-force enumeration over the binary master."""
-    from discopt.solvers import SolveStatus
-    from discopt.solvers.lp_highs import solve_lp
-
     rng = np.random.default_rng(7)
     n_y, n_x = 2, 3
     for _ in range(15):
@@ -164,7 +177,28 @@ def test_matches_monolithic_random():
                 row[j] = 1.0
                 rows.append(row)
                 rhs.append(5 * yv[j % n_y])
-            lp = solve_lp(cx, A_ub=np.array(rows), b_ub=np.array(rhs), bounds=[(0, 5)] * n_x)
-            if lp.status == SolveStatus.OPTIMAL:
-                best = min(best, float(cy @ np.array(yv) + lp.objective))
+            q = _recourse_lp_opt(cx, np.array(rows), np.array(rhs), 5)
+            if q is not None:
+                best = min(best, float(cy @ np.array(yv) + q))
         assert rb.objective == pytest.approx(best, abs=ABS_TOL)
+
+
+def test_pounce_only_no_highspy(monkeypatch):
+    """Benders solves correctly with the ``highspy`` package unavailable."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _no_highspy(name, *args, **kwargs):
+        if name == "highspy" or name.startswith("highspy."):
+            raise ImportError("simulated: highspy unavailable")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _no_highspy)
+    for mod in [m for m in list(__import__("sys").modules) if "highs" in m]:
+        monkeypatch.delitem(__import__("sys").modules, mod, raising=False)
+
+    r = _two_stage_milp().solve(decomposition="benders", time_limit=30)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(5.0, abs=ABS_TOL)
+    assert r.bound is not None and r.bound <= r.objective + 1e-4

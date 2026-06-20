@@ -14,6 +14,10 @@ import pytest
 from discopt.decomposition.benders import solve_benders
 
 try:
+    from discopt.solvers.lp_pounce import POUNCE_AVAILABLE
+except ImportError:
+    POUNCE_AVAILABLE = False
+try:
     import highspy  # noqa: F401
 
     HAS_HIGHS = True
@@ -21,14 +25,16 @@ except ImportError:
     HAS_HIGHS = False
 
 pytestmark = [
-    pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed"),
+    pytest.mark.skipif(
+        not (POUNCE_AVAILABLE or HAS_HIGHS), reason="no LP/MILP backend available"
+    ),
     pytest.mark.correctness,
 ]
 
 
 def _brute_force_optimum(cy, cx, demand, n_y, n_x):
-    from discopt.solvers import SolveStatus
-    from discopt.solvers.lp_highs import solve_lp
+    # Independent oracle via scipy (no discopt solver, no highspy package).
+    from scipy.optimize import linprog
 
     best = np.inf
     for yv in itertools.product([0, 1], repeat=n_y):
@@ -39,9 +45,9 @@ def _brute_force_optimum(cy, cx, demand, n_y, n_x):
             row[j] = 1.0
             rows.append(row)
             rhs.append(5.0 * yv[j % n_y])
-        lp = solve_lp(cx, A_ub=np.array(rows), b_ub=np.array(rhs), bounds=[(0, 5)] * n_x)
-        if lp.status == SolveStatus.OPTIMAL:
-            best = min(best, float(cy @ np.array(yv) + lp.objective))
+        res = linprog(cx, A_ub=np.array(rows), b_ub=np.array(rhs), bounds=[(0, 5)] * n_x)
+        if res.success:
+            best = min(best, float(cy @ np.array(yv) + res.fun))
     return best
 
 

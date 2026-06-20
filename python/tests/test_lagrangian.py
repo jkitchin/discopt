@@ -5,13 +5,19 @@ import pytest
 from discopt.decomposition.lagrangian import solve_lagrangian
 
 try:
+    from discopt.solvers.lp_pounce import POUNCE_AVAILABLE
+except ImportError:
+    POUNCE_AVAILABLE = False
+try:
     import highspy  # noqa: F401
 
     HAS_HIGHS = True
 except ImportError:
     HAS_HIGHS = False
 
-pytestmark = pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
+pytestmark = pytest.mark.skipif(
+    not (POUNCE_AVAILABLE or HAS_HIGHS), reason="no LP/MILP backend available"
+)
 
 ABS_TOL = 1e-3
 

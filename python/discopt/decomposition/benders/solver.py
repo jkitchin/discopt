@@ -135,7 +135,7 @@ def solve_benders(
     SolveResult
         With a rigorous lower ``bound`` (the master objective) on convergence.
     """
-    from discopt.solvers.lp_backend import get_exact_dual_lp_solver, get_milp_solver
+    from discopt.solvers.lp_backend import get_lp_solver, get_milp_solver
 
     cfg = config or BendersConfig(
         time_limit=time_limit,
@@ -145,11 +145,11 @@ def solve_benders(
     )
     t0 = time.time()
 
-    dual_lp = get_exact_dual_lp_solver()
-    if dual_lp is None:
-        raise RuntimeError(
-            "Benders v1 requires highspy for rigorous dual cut generation (pip install highspy)."
-        )
+    # Recourse-LP dual generator. POUNCE and HiGHS share the dual sign
+    # convention, and the cuts below are anchored at the *dual value* so they
+    # stay valid even for POUNCE's interior-point (analytic-centre) duals — no
+    # HiGHS dependency. Whichever LP backend is installed is used.
+    dual_lp = get_lp_solver(prefer_pounce=cfg.prefer_pounce)
     milp = get_milp_solver(prefer_pounce=cfg.prefer_pounce)
 
     if structure is None:
@@ -269,18 +269,31 @@ def solve_benders(
         return "infeas", v, None, lam
 
     def _add_opt_cut(x_hat, Q, lam):
+        # Optimality cut anchored at the dual value (not the primal Q*): for any
+        # dual-feasible lam, eta >= lam^T (r - A_x x) <= Q(x) for all x (weak
+        # duality). Anchoring at lam^T r keeps the cut valid even when lam is an
+        # interior-point dual with a small gap (lam^T b(x̂) <= Q*), where using
+        # Q* as the anchor could over-cut. For an exact vertex dual the two
+        # anchors coincide.  eta >= lam^T r - (A_x^T lam)^T x.
+        del Q  # anchor is dual-based, not primal
         g = -(A_x.T @ lam) if A_x.shape[0] else np.zeros(n_master)
-        # eta >= Q + g^T (x - x_hat)  ->  -eta + g^T x <= g^T x_hat - Q
+        rhs = float(lam @ r) if A_x.shape[0] else 0.0
+        # eta - g^T x >= lam^T r  ->  -eta + g^T x <= -lam^T r
         cut_x.append(g.copy())
         cut_eta.append(-1.0)
-        cut_rhs.append(float(g @ x_hat - Q))
+        cut_rhs.append(-rhs)
 
     def _add_feas_cut(x_hat, v, lam):
+        # Feasibility cut from the slack-min subproblem's dual: lam^T (r - A_x x)
+        # <= 0 excludes x̂ (where the min infeasibility v > 0). Dual-value
+        # anchored for the same interior-point soundness reason as the opt cut.
+        del v, x_hat
         g = -(A_x.T @ lam) if A_x.shape[0] else np.zeros(n_master)
-        # v + g^T (x - x_hat) <= 0  ->  g^T x <= g^T x_hat - v
+        rhs = float(lam @ r) if A_x.shape[0] else 0.0
+        # lam^T r + g^T x <= 0  ->  g^T x <= -lam^T r
         cut_x.append(g.copy())
         cut_eta.append(0.0)
-        cut_rhs.append(float(g @ x_hat - v))
+        cut_rhs.append(-rhs)
 
     # ── initialize: feasible master point (no eta) ──
     init = _solve_master(with_eta=False)
