@@ -86,3 +86,8 @@ docs/_build/
 
 # DoE demo workbook artifacts
 docs/notebooks/*.xlsx
+
+# Solver-written .sol files (POUNCE / AMPL solvers like couenne/scip write a
+# <stub>.sol next to the input .nl when run over the vendored instance tree).
+# These are run artifacts, never fixtures (0 are tracked) — keep them out.
+*.sol
