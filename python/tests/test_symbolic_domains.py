@@ -242,3 +242,46 @@ def test_monod_detector_guards_and_no_misfire():
     mn = Model("n")
     xn = mn.continuous("x", lb=-1.0, ub=5.0)
     assert _try_extract_monod(xn / (2.0 + xn), mn) is None
+
+
+def test_compiler_routes_arrhenius_pattern():
+    """The compiler detects exp(-c/T) on a positive-domain variable and routes it
+    to the dedicated single-inflection envelope; sound across the inflection."""
+    import discopt.modeling as M
+    import numpy as np
+    from discopt._jax.relaxation_compiler import compile_relaxation
+    from discopt.modeling.core import Model
+
+    # c = 800 -> inflection at T = c/2 = 400, inside [300, 600] (straddling).
+    m = Model("arr")
+    T = m.continuous("T", lb=300.0, ub=600.0)
+    m.maximize(M.exp(-800.0 / T))
+    relax_fn = compile_relaxation(M.exp(-800.0 / T), m)
+    arr = chemeng.arrhenius_relax(800.0)
+    lb = jnp.array([300.0])
+    ub = jnp.array([600.0])
+    for tv in np.linspace(300.0, 600.0, 80):
+        ta = jnp.array([float(tv)])
+        cv, cc = relax_fn(ta, ta, lb, ub)
+        f = float(np.exp(-800.0 / float(tv)))
+        assert float(cv) <= f + 1e-6
+        assert float(cc) >= f - 1e-6
+        cv_a, cc_a = arr(jnp.array(float(tv)), 300.0, 600.0)
+        assert float(cv) == pytest.approx(float(cv_a), abs=1e-7)
+        assert float(cc) == pytest.approx(float(cc_a), abs=1e-7)
+
+
+def test_arrhenius_detector_guards_and_no_misfire():
+    import discopt.modeling as M
+    from discopt._jax.relaxation_compiler import _try_extract_arrhenius
+    from discopt.modeling.core import Model
+
+    m = Model("t")
+    T = m.continuous("T", lb=300.0, ub=600.0)
+    assert _try_extract_arrhenius(M.exp(-8000.0 / T), m) == (0, pytest.approx(8000.0))
+    assert _try_extract_arrhenius(M.exp(8000.0 / T), m) is None  # +c/T (c<0), not Arrhenius
+    assert _try_extract_arrhenius(M.exp(T), m) is None  # not -c/T
+    # Non-positive declared lower bound: pole/invalid -> must not engage.
+    m0 = Model("z")
+    T0 = m0.continuous("T", lb=0.0, ub=600.0)
+    assert _try_extract_arrhenius(M.exp(-8000.0 / T0), m0) is None

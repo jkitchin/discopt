@@ -262,6 +262,41 @@ def _try_extract_monod(expr: Expression, model: Model) -> tuple[int, float] | No
     return None
 
 
+def _try_extract_arrhenius(expr: Expression, model: Model) -> tuple[int, float] | None:
+    """Detect the Arrhenius rate term ``exp(-c/T)`` over a single scalar variable.
+
+    Matches ``exp(Div(Constant(neg), v))`` with ``neg < 0`` (so the term is
+    ``exp(-c/T)`` with ``c = -neg > 0``) and ``v`` a scalar variable. Returns
+    ``(offset, c)`` on match, else ``None``, routing to the dedicated
+    single-inflection envelope (:func:`...chemeng.arrhenius_relax`).
+
+    The term (and its envelope) require ``T > 0`` (a pole at ``T = 0``). That is
+    enforced at COMPILE time by requiring the variable's declared lower bound to be
+    strictly positive; spatial B&B only tightens bounds, so every node box keeps
+    ``T > 0`` and no per-node guard is needed.
+    """
+    if not (isinstance(expr, FunctionCall) and expr.func_name == "exp" and len(expr.args) == 1):
+        return None
+    arg = expr.args[0]
+    if not (isinstance(arg, BinaryOp) and arg.op == "/" and _is_constant_expr(arg.left)):
+        return None
+    try:
+        neg = float(_get_constant_value(arg.left))
+    except (TypeError, ValueError):
+        return None
+    if neg >= 0.0:  # need exp(-c/T) with c > 0
+        return None
+    v_off = _resolve_scalar_var_offset(arg.right, model)
+    if v_off is None:
+        return None
+    from discopt._jax.model_utils import flat_variable_bounds
+
+    lb0, _ = flat_variable_bounds(model)
+    if float(lb0[v_off]) > 0.0:
+        return (v_off, -neg)
+    return None
+
+
 def _try_extract_signomial_factors(
     expr: Expression, model: Model
 ) -> list[tuple[int, float]] | None:
@@ -904,6 +939,27 @@ def _compile_relax_node(
                             return _tf(x_cv[_fi], lb[_fi], ub[_fi])
 
                         return fn
+
+        # Arrhenius rate term exp(-c/T) over a single positive-domain scalar var.
+        # Routes the whole exp(-c/T) node to the dedicated single-inflection
+        # envelope (tighter than composing relax_exp with the relaxed reciprocal);
+        # falls through to the generic exp path when the optional [sympy] domain
+        # pack is absent.
+        if name == "exp" and len(expr.args) == 1:
+            arr = _try_extract_arrhenius(expr, model)
+            if arr is not None:
+                _ar_off, _ar_c = arr
+                try:
+                    from discopt._jax.symbolic.domains.chemeng import arrhenius_relax
+                except ImportError:
+                    arrhenius_relax = None  # type: ignore[assignment]
+                if arrhenius_relax is not None:
+                    _ar_fn = arrhenius_relax(_ar_c)
+
+                    def fn(x_cv, x_cc, lb, ub, _off=_ar_off, _wr=_ar_fn):
+                        return _wr(x_cv[_off], lb[_off], ub[_off])
+
+                    return fn
 
         # Piecewise-capable univariate operations
         _piecewise_relax = {
