@@ -3211,6 +3211,13 @@ def solve_model(
     # warm LP solve instead of re-separating the PSD/RLT cuts from scratch. Stays
     # None unless the relaxer carries PSD cuts (the nvs* / box-QP regime).
     _root_cut_pool = None
+    # The dual bound the root cut-pool relaxation proves over the whole feasible
+    # region (a valid global lower bound for a MINIMIZE). The pool is separated for
+    # its CUT ROWS, but the strengthened relaxation also yields a far tighter root
+    # bound than the cut-less tree path (nvs19: -1156 vs the McCormick -88237);
+    # captured here so the final bound / certification can use it instead of
+    # discarding it. ``None`` when no pool is separated.
+    _root_pool_bound = None
 
     if _mc_mode == "auto":
         # The McCormick "nlp" objective bound is a *valid* dual bound only when
@@ -3489,6 +3496,17 @@ def solve_model(
                                     _A_pool = _A_pool[-_ROOT_CUT_POOL_MAX:]
                                     _b_pool = _b_pool[-_ROOT_CUT_POOL_MAX:]
                                 _root_cut_pool = (_A_pool, _b_pool)
+                                # Keep the strengthened root bound: it is a valid
+                                # global lower bound (the pool relaxation holds over
+                                # the whole feasible region) and is far tighter than
+                                # the cut-less tree path — so the final certificate
+                                # should use it rather than recomputing from scratch.
+                                if (
+                                    _pool_res is not None
+                                    and _pool_res.lower_bound is not None
+                                    and np.isfinite(_pool_res.lower_bound)
+                                ):
+                                    _root_pool_bound = float(_pool_res.lower_bound)
                                 logger.info(
                                     "Root PSD cut pool: %d cuts (of %d separated, "
                                     "%d rounds), root bound %s — inherited at every node",
@@ -5167,6 +5185,24 @@ def solve_model(
     if not _gap_certified:
         bound_val = None
         gap_val = None
+
+    # Root cut-pool bound: a rigorous global lower bound the strengthened root
+    # relaxation already proved during setup (nvs19: -1156 vs the cut-less tree's
+    # -88237). The tree's per-node cuts prune children but never lift the frontier
+    # minimum, so an uncertified feasible exit reports the loose McCormick bound
+    # and a ~99% gap while we have a far tighter one in hand. Adopt it here (for a
+    # MINIMIZE, mirroring the recompute-fallback's soundness gate) before that
+    # fallback recomputes from scratch — it is both stronger and free. If it meets
+    # the incumbent, the re-certification below upgrades the exit to "optimal".
+    if (
+        _root_pool_bound is not None
+        and np.isfinite(_root_pool_bound)
+        and model._objective.sense == ObjectiveSense.MINIMIZE
+        and (bound_val is None or not np.isfinite(bound_val) or _root_pool_bound > bound_val)
+    ):
+        bound_val = _root_pool_bound
+        if obj_val is not None and np.isfinite(obj_val):
+            gap_val = max(0.0, obj_val - bound_val) / max(1.0, abs(obj_val))
 
     # When the tree produced no usable dual bound (uncertified exit, or a
     # relaxation the LP backend could not solve), fall back to a rigorous global
