@@ -213,6 +213,23 @@ The release procedure that produces these entries is documented in
   integer incumbent — returning a wrong (too-low) optimum on some
   generalized-assignment-style MILPs. Regression covered in
   `python/tests/test_milp_node_bound_soundness.py`.
+- **Simplex equilibration over-scaling on noise entries** (`fix(simplex)`). The
+  root cause of the MILP wrong-optimum bug below: the geometric-mean
+  equilibration treated a numerically-negligible matrix entry (e.g. a ~1e-16 cut
+  coefficient that is float noise, not structure) as a genuine nonzero, so a
+  column's scale factor blew up to ~1e8. That pinned the variable's *scaled*
+  bounds to ~0; the scaled simplex returned a within-tolerance value that
+  unscaled into a gross original-space bound violation (a `[0,1]` variable at
+  -1), accepted as a spurious integer incumbent. The equilibration now ignores
+  entries more than ten orders of magnitude below a line's maximum when forming
+  the factor, bounding the per-line dynamic range. The simplex now returns the
+  correct vertex (verified against brute-force enumeration and HiGHS). Rust
+  regression in `scaling::tests::noise_entry_does_not_overscale_column`.
+- **MILP B&B node bound soundness** (`fix(solver)`). Defense in depth for the
+  above: the per-node LP soundness gate now also rejects a relaxation point that
+  violates the node's variable bounds, not only its constraint rows, so a
+  bound-violating point can never seed a spurious integer incumbent. Regression
+  covered in `python/tests/test_milp_node_bound_soundness.py`.
 - **Relaxation soundness hardening** across the global-opt loop: reject a
   fabricated finite bound on an unbounded McCormick relaxation (`himmel16`,
   `fix(soundness)`); never trust an unconverged simplex objective as an LP lower
