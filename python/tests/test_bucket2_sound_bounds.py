@@ -75,6 +75,47 @@ def test_bucket2_instance_has_sound_root_bound(instance, optimum):
 
 
 @pytest.mark.correctness
+def test_ex1226_closes_to_global_optimum():
+    """``ex1226`` constraint e1 carries the product ``x1**0.5 * x2**2`` (a
+    fractional-power factor times an integer-power monomial). The McCormick
+    linearizer's product decomposer recognized the fractional-power factor via
+    ``fractional_power_var_map`` but **not** the integer-power monomial via
+    ``monomial_var_map`` — so the product failed to decompose ("Cannot decompose
+    product"), e1 dropped from the MILP relaxation, and the dual bound froze at
+    the relaxation-without-e1 value (~-21, a 23.5% gap) no matter how many nodes
+    B&B explored (observed: 11107 nodes, time-limit, never proved).
+
+    Resolving the integer-power factor through ``monomial_var_map`` keeps e1 in
+    the relaxation: the two lifted columns (``x1**0.5`` and ``x2**2``) get a
+    bilinear McCormick envelope, which spatial branching then tightens. The
+    instance now certifies the global optimum (-17) in a handful of nodes. This
+    is the convergence (tightness) lock; the sound-root-bound parametrization
+    above only guards that the *loose* bound never exceeds the optimum, which a
+    dropped constraint trivially satisfied.
+    """
+    nl = _DATA / "ex1226.nl"
+    assert nl.exists(), f"missing {nl}"
+    m = dm.from_nl(str(nl))
+
+    res = m.solve(time_limit=60, gap_tolerance=1e-4, max_nodes=100_000)
+
+    assert res.status == "optimal", (
+        f"ex1226 did not certify optimality (status={res.status}); e1 may have "
+        "dropped from the relaxation again, freezing the dual bound"
+    )
+    assert abs(res.objective - (-17.0)) <= 1e-3, (
+        f"ex1226 objective {res.objective} != known optimum -17.0"
+    )
+    # Convergence lock: with e1 in the relaxation this closes in ~3 nodes. The old
+    # dropped-constraint behavior never closed (11107 nodes → time-limit). A
+    # generous ceiling guards the deficiency without being brittle on node order.
+    assert res.node_count <= 200, (
+        f"ex1226 took {res.node_count} nodes to close — far above the ~3 expected "
+        "with e1 lifted; the constraint-drop regression may have returned"
+    )
+
+
+@pytest.mark.correctness
 def test_nvs16_produces_sound_finite_bound():
     """``nvs16`` (Beale sum-of-squares, integer box [0,200]^2) used to distribute
     into ~1e18-magnitude monomials and drop its objective. The
@@ -337,3 +378,95 @@ def test_ex1252_relaxation_equilibration_conditions_and_preserves_bound():
     ).solve(backend="simplex")
     assert raw.status == scaled.status == "optimal"
     assert abs(float(raw.bound) - float(scaled.bound)) <= 1e-6 + 1e-6 * abs(float(raw.bound))
+
+
+@pytest.mark.correctness
+def test_rlt_wide_box_lp_not_false_infeasible(monkeypatch):
+    """Level-1 RLT cuts on a wide integer box must not provoke a *false* infeasible
+    from the Rust simplex.
+
+    ``nvs17`` is a pure-integer indefinite quadratic over ``[0,200]^7``. Its
+    quadratic-constraint RLT cuts (issue #15) lift degree-3 monomials whose
+    coefficients span ~1e5 — a conditioning the Rust simplex's internal scaling
+    cannot handle, so it returned ``infeasible`` on an LP that is in fact feasible
+    (HiGHS and the Python-equilibrated simplex both solve it to ~-553676). A
+    false-infeasible relaxation LP at a B&B node would prune the region containing
+    the optimum, so this is a soundness bug, not just a speed one. ``solve`` now
+    re-verifies an ``infeasible`` verdict on an ill-conditioned LP with exact
+    geometric-mean equilibration, recovering the true optimum.
+    """
+    import numpy as np
+    import scipy.sparse as sp
+    from discopt._jax.milp_relaxation import build_milp_relaxation
+
+    monkeypatch.setenv("DISCOPT_RLT_QUAD", "1")
+    nl = _DATA / "nvs17.nl"
+    assert nl.exists(), f"missing {nl}"
+    m = dm.from_nl(str(nl))
+    relaxer = MccormickLPRelaxer(m)
+    lb, ub = flat_variable_bounds(m)
+
+    milp, _ = build_milp_relaxation(
+        m, relaxer._terms, relaxer._disc, bound_override=(lb, ub), rlt_level1=True
+    )
+    milp._integrality = None
+
+    # The cuts genuinely make the LP ill-conditioned (else the test proves nothing).
+    nz = np.abs(sp.csr_matrix(milp._A_ub).data)
+    nz = nz[nz > 0]
+    spread = nz.max() / nz.min()
+    assert spread > 1e4, f"expected ill-conditioned RLT LP, got spread {spread:.1e}"
+
+    simplex = milp.solve(backend="simplex")
+    assert simplex.status == "optimal", (
+        f"RLT wide-box LP false-infeasible from the simplex (status={simplex.status}); "
+        "the equilibration re-verify did not engage"
+    )
+    # The recovered bound must match the HiGHS reference (a valid, sound relaxation
+    # bound — far below the -1100 optimum, but finite and correct).
+    highs = milp.solve(backend="highs")
+    assert highs.status == "optimal"
+    assert abs(float(simplex.bound) - float(highs.bound)) <= 1e-3 + 1e-6 * abs(float(highs.bound))
+
+
+# ---------------------------------------------------------------------------
+# Negated-factor products: ``neg(x) * y`` must decompose, not drop.
+#
+# A product carrying a negated factor — ``-a*b`` parsed as ``neg(a)*b``, and the
+# internal form a maximize->minimize flip produces for ``-x**2`` — was rejected by
+# the product decomposer ("Cannot decompose product: (neg(x) * x)"). The term then
+# dropped from the McCormick relaxation, yielding NO dual bound. The decomposer now
+# peels the sign (``neg(g) == -1 * g``) and decomposes the operand, so the existing
+# square/bilinear envelopes fire. This is the relaxation layer behind a real
+# false-optimal: ``max x**2`` over integer [-3,3] (internally ``min -x**2``) had no
+# valid bound, so the search could certify a stationary incumbent.
+# ---------------------------------------------------------------------------
+def test_negated_square_decomposes_to_sound_bound():
+    """min -x*x over integer [-3,3]: -x^2 in [-9,0], true min -9; bound must be <= -9.
+
+    Before the sign-peel the term dropped ("Cannot decompose product: (neg(x)*x)")
+    and the relaxer returned no bound at all.
+    """
+    m = dm.Model("neg_sq")
+    x = m.integer("x", lb=-3, ub=3)
+    m.minimize(-x * x)
+    relaxer = MccormickLPRelaxer(m)
+    lb, ub = flat_variable_bounds(m)
+    res = relaxer.solve_at_node(lb, ub, time_limit=10.0)
+    assert res.lower_bound is not None, (
+        "negated-factor product dropped from the relaxation -> no dual bound"
+    )
+    assert float(res.lower_bound) <= -9.0 + 1e-6
+
+
+def test_negated_bilinear_two_vars_sound_bound():
+    """min -x*y over [0,4]^2: -x*y in [-16, 0], true min -16; bound must be <= -16."""
+    m = dm.Model("neg_bilin")
+    x = m.continuous("x", lb=0.0, ub=4.0)
+    y = m.continuous("y", lb=0.0, ub=4.0)
+    m.minimize(-x * y)
+    relaxer = MccormickLPRelaxer(m)
+    lb, ub = flat_variable_bounds(m)
+    res = relaxer.solve_at_node(lb, ub, time_limit=10.0)
+    assert res.lower_bound is not None, "neg(x)*y dropped from the relaxation"
+    assert float(res.lower_bound) <= -16.0 + 1e-6

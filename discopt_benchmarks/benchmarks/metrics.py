@@ -78,11 +78,16 @@ class SolveResult:
 
     @property
     def relative_gap(self) -> Optional[float]:
+        # Hybrid abs/rel gap with the denominator floored at 1.0 (standard MIP
+        # convention; mirrors the solver's decoupled abs/rel termination). Without
+        # the floor, a near-zero optimum is degenerate: gear converges to
+        # obj=1.8e-08 against a trivial 0 bound, and a plain |obj-bound|/|obj| ratio
+        # reports 100% even though the *absolute* gap (1.8e-08) is tiny and the
+        # solver certified it optimal. Flooring the denominator measures such an
+        # optimum by its absolute gap, so it reads ~0% (proved) instead of 100%.
         if self.objective is None or self.bound is None:
             return None
-        if abs(self.objective) < 1e-10:
-            return abs(self.objective - self.bound)
-        return abs(self.objective - self.bound) / max(abs(self.objective), 1e-10)
+        return abs(self.objective - self.bound) / max(abs(self.objective), abs(self.bound), 1.0)
 
     @property
     def nodes_per_second(self) -> Optional[float]:

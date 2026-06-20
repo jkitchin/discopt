@@ -714,7 +714,9 @@ def has_factorable_work(model: Model) -> bool:
         dist = distribute_products(expr)
         if _scan_for_mixed_product(dist, model):
             return True
-        return _scan_for_liftable_call(dist, model)
+        if _scan_for_liftable_call(dist, model):
+            return True
+        return _scan_for_liftable_fractional_power(dist, model)
 
     if model._objective is not None and scan(model._objective.expression):
         return True
@@ -769,6 +771,47 @@ def _scan_for_liftable_call(expr: Expression, model: Model) -> bool:
         )
     if isinstance(expr, UnaryOp):
         return _scan_for_liftable_call(expr.operand, model)
+    return False
+
+
+def _scan_for_liftable_fractional_power(expr: Expression, model: Model) -> bool:
+    """True if *expr* contains a fractional power ``base**p`` (non-integer *p*)
+    over a *composite* base — a product, sum/affine, or other multi-leaf
+    sub-expression — but NOT a single variable or an integer power of one.
+
+    ``_lift_objective_atoms`` lifts such a node to ``d == t**p`` with ``t == base``
+    an auxiliary variable (a bilinear/monomial/affine aux for the base, then a
+    fractional-power aux for the outer power), which the McCormick pipeline relaxes
+    via the same single-variable fractional-power envelope that ``sqrt(t)`` gets.
+    But that lift is only *applied* when ``has_factorable_work`` triggers the
+    reform pass, and the existing scanners look only for mixed repeated-factor
+    products and sqrt/exp *calls*. A fractional power written in **power form** —
+    ``(x*y)**0.5`` (product base) or ``(x+y)**0.5`` (affine base) — is none of
+    those, so the gate returned False, the pass never ran, and the term either
+    dropped from the relaxation (product base → frozen bound, the ex1226 failure
+    mode) or got a loose envelope (affine base → never closed: ``(x+y)**0.5``
+    churned 3503 nodes while the equivalent *call* ``sqrt(x+y)`` closed in 251).
+
+    Only the **power form** is matched here: ``sqrt(...)``/``exp(...)`` *calls* are
+    FunctionCall nodes reached by the composite-univariate envelope (and
+    ``_scan_for_liftable_call``), so they are untouched. A single-variable base
+    (``x**0.5``) is relaxed natively via ``fractional_power_var_map`` and is
+    excluded by ``_is_simple_power_base``.
+    """
+    if isinstance(expr, BinaryOp):
+        if (
+            expr.op == "**"
+            and isinstance(expr.right, Constant)
+            and float(expr.right.value) != int(float(expr.right.value))
+            and not _is_simple_power_base(expr.left, model)
+            and len(_collect_variables(expr.left)) >= 1
+        ):
+            return True
+        return _scan_for_liftable_fractional_power(
+            expr.left, model
+        ) or _scan_for_liftable_fractional_power(expr.right, model)
+    if isinstance(expr, UnaryOp):
+        return _scan_for_liftable_fractional_power(expr.operand, model)
     return False
 
 

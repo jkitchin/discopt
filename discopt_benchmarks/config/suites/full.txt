@@ -1032,7 +1032,6 @@ portfol_buyin
 portfol_card
 portfol_classical050_1
 portfol_classical200_2
-portfol_robust050_34
 portfol_robust100_09
 portfol_robust200_03
 portfol_roundlot
@@ -1384,7 +1383,6 @@ st_miqp1
 st_miqp2
 st_miqp3
 st_miqp4
-st_miqp5
 st_pan1
 st_ph1
 st_ph10

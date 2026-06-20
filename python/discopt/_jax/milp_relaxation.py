@@ -153,6 +153,17 @@ _RELAX_NUMERIC_CAP = 1e10
 # external (HiGHS) path converges instead of timing out (issue #184).
 _RELAX_EQUILIBRATE_TRIGGER = 1e6
 
+# Coefficient-spread above which an ``infeasible`` verdict from the (numerically
+# fragile) Rust simplex is *distrusted* and re-verified with exact equilibration.
+# The Rust simplex's internal equilibration is insufficient for the lifted
+# relaxation's worst conditioning — RLT cuts on a wide box yield degree-3 monomial
+# coefficients with a ~1e5 spread, on which the simplex returns a *false*
+# infeasible even though the LP (and HiGHS / the Python-equilibrated simplex) is
+# feasible. A false-infeasible at a B&B node would prune the region containing the
+# optimum, so re-solving is a soundness guard, not just speed. Set well below the
+# (HiGHS-tuned) 1e6 trigger above because the simplex fails at lower spreads.
+_RELAX_FALSE_INFEAS_TRIGGER = 1e3
+
 
 def equilibrate_relaxation_lp(
     c: np.ndarray,
@@ -308,7 +319,11 @@ class MilpRelaxationModel:
             and os.environ.get("DISCOPT_LP_WARMSTART", "1") != "0"
         ):
             warm = self._solve_lp_warm()
-            if warm is not None:
+            # A warm-start ``infeasible`` on an ill-conditioned LP can be a
+            # numerical false-negative; fall through to the equilibrated re-verify
+            # below rather than trust it (a false-infeasible would unsoundly prune
+            # a B&B node). Any other warm verdict is the true LP optimum.
+            if warm is not None and warm.status != "infeasible":
                 return warm
 
         # backend="auto": HiGHS if present, else POUNCE. backend="simplex" routes
@@ -345,6 +360,38 @@ class MilpRelaxationModel:
             time_limit=time_limit,
             gap_tolerance=gap_tolerance,
         )
+
+        # Re-verify a possible *false* infeasible. The Rust simplex can report an
+        # ill-conditioned relaxation LP infeasible when it is actually feasible
+        # (RLT cuts on a wide box produce a ~1e5 coefficient spread on which the
+        # simplex's internal scaling is insufficient). Accepting that verdict at a
+        # B&B node would prune a region that may contain the optimum — unsound. The
+        # raw solve was NOT Python-equilibrated above for ``backend="simplex"``, so
+        # re-solve once with exact geometric-mean equilibration before accepting
+        # ``infeasible``. Equilibration preserves the feasible set exactly, so a
+        # genuinely infeasible LP stays infeasible; only a numerical false-negative
+        # flips to optimal.
+        if result.status == SolveStatus.INFEASIBLE and col_scale is None and self._A_ub is not None:
+            _nz = np.abs(sp.csr_matrix(self._A_ub).data)
+            _nz = _nz[_nz != 0.0]
+            if (
+                _nz.size
+                and np.isfinite(_nz).all()
+                and _nz.max() / _nz.min() > _RELAX_FALSE_INFEAS_TRIGGER
+            ):
+                c_s, A_s, b_s, bounds_s, col_scale = equilibrate_relaxation_lp(
+                    self._c, self._A_ub, self._b_ub, self._bounds, self._integrality
+                )
+                result = solve_milp(
+                    c=c_s,
+                    A_ub=A_s,
+                    b_ub=b_s,
+                    bounds=bounds_s,
+                    integrality=self._integrality,
+                    time_limit=time_limit,
+                    gap_tolerance=gap_tolerance,
+                )
+
         # Map the scaled solution point back to original variables (x = D·x').
         if col_scale is not None and result.x is not None:
             result.x = np.asarray(result.x, dtype=np.float64) * col_scale
@@ -881,9 +928,21 @@ def _collect_monomial_terms_for_lift(expr: Expression, model: Model) -> set[tupl
                 decomp = _decompose_product(node, model)
                 if decomp is not None:
                     _scalar, indices = decomp
-                    unique = list(dict.fromkeys(indices))
-                    if len(unique) == 1 and len(indices) >= 2:
-                        terms.add((unique[0], len(indices)))
+                    # Register EVERY repeated original-variable factor as a monomial,
+                    # not only a pure single-variable product. A multi-repeated mixed
+                    # product such as ``x*x*y*y`` decomposes to ``[x, x, y, y]``; the
+                    # constraint-linearization collapse needs both ``(x,2)`` and
+                    # ``(y,2)`` to rebuild it as the bilinear ``aux(x**2)*aux(y**2)``.
+                    # Catching only the ``len(unique)==1`` (pure ``x*x``) case missed
+                    # ``(y,2)`` because tree associativity (``((x*x)*y)*y``) never
+                    # presents ``y*y`` as a standalone subproduct — so the collapse
+                    # failed and the whole constraint dropped from the relaxation.
+                    counts: dict[int, int] = {}
+                    for i in indices:
+                        counts[i] = counts.get(i, 0) + 1
+                    for i, c in counts.items():
+                        if c >= 2:
+                            terms.add((i, c))
             elif node.op == "**":
                 flat = _get_flat_index(node.left, model)
                 exp = _constant_value(node.right)
@@ -1356,6 +1415,19 @@ def _decompose_product(
     def visit(e: Expression) -> bool:
         if isinstance(e, BinaryOp) and e.op == "*":
             return visit(e.left) and visit(e.right)
+        if isinstance(e, UnaryOp) and e.op == "neg":
+            # A negated factor ``neg(g)`` is ``-1 * g``: peel the sign into the
+            # scalar and decompose ``g``. Without this, ``neg(x) * x`` — the
+            # internal form a maximize→minimize flip produces for ``-x**2``, and
+            # the shape the parser builds for any ``-a*b`` — is an undecomposable
+            # product, so the whole term drops from the relaxation and the dual
+            # bound freezes. For a pure-integer maximize-of-a-convex objective the
+            # spatial B&B then certifies a stationary incumbent (x=0 for x**2) as
+            # the optimum: a false-optimal (e.g. ``max x**2`` over integer [-3,3]
+            # returned 0 instead of 9). Peeling is exact and sign-only, so it only
+            # ever lets the existing envelopes fire.
+            scalar[0] *= -1.0
+            return visit(e.operand)
         if isinstance(e, Constant):
             scalar[0] *= float(e.value)
             return True
@@ -1395,6 +1467,19 @@ def _decompose_product(
                 if fractional_power_var_map and key in fractional_power_var_map:
                     var_indices.append(fractional_power_var_map[key])
                     return True
+                # Integer power x**n (n >= 2) → monomial aux column. Without this
+                # an integer-power factor inside a product (e.g. ``x**0.5 * y**2``
+                # in ex1226's e1) makes the whole product undecomposable and the
+                # constraint drops from the relaxation, freezing the dual bound.
+                # The monomial aux carries a rigorous power envelope and the
+                # bilinear envelope between the two lifted columns is registered by
+                # ``_collect_lifted_bilinear_products``, so resolving it here only
+                # ever shrinks the relaxed set toward the true one (sound).
+                if monomial_var_map and exp_val == int(exp_val) and int(exp_val) >= 2:
+                    mono_key = (base_flat, int(exp_val))
+                    if mono_key in monomial_var_map:
+                        var_indices.append(monomial_var_map[mono_key])
+                        return True
                 if pinned_value is not None:
                     pv = pinned_value(base_flat)
                     # x^p is real only for x >= 0 (fractional p) or any integer p.
@@ -3350,13 +3435,25 @@ def _subdivision_curvature(
     hi: float,
     box: dict,
 ) -> Optional[str]:
-    """Sound curvature via a subdivided interval Hessian.
+    """Sound curvature via an *adaptively refined* interval Hessian.
 
     ``f`` is C² and depends on one variable, so its Hessian is the scalar
     ``f''`` in entry ``(flat_idx, flat_idx)``. Covering ``[lo, hi]`` with
     sub-intervals and enclosing ``f''`` on each tightens the dependency-induced
     looseness of a single whole-box enclosure: if every piece has ``f'' ≥ 0``
     the function is convex on the union ``[lo, hi]`` (symmetrically for concave).
+
+    Rather than re-evaluating a *uniform* grid at escalating densities
+    (4, 16, 64, … sub-intervals, each level recomputed from scratch — so a term
+    resolving only at the finest level paid for every coarser one), this refines
+    adaptively: check the whole box first (a convex/concave term with a tight
+    enclosure resolves in a single evaluation), and otherwise bisect *only* the
+    sub-intervals whose enclosure is still sign-ambiguous, down to the same
+    finest width ``(hi - lo) / _COMPOSITE_MAX_SUBDIV``. A depth-first descent fails
+    fast — the first finest-width piece that violates the target curvature refutes
+    it immediately. The finest resolution is unchanged, so any term the old
+    uniform sweep certified is still certified (no soundness or detection
+    regression); localized looseness just costs far fewer Hessian evaluations.
     """
     from discopt._jax.convexity.interval import Interval
     from discopt._jax.convexity.interval_ad import interval_hessian
@@ -3364,45 +3461,68 @@ def _subdivision_curvature(
     if hi - lo <= _COMPOSITE_CURV_TOL:
         return None  # pinned — handled by the exact pin value, not an envelope
     shape = var.shape if var.shape else (1,)
-    n_sub = 4
-    while n_sub <= _COMPOSITE_MAX_SUBDIV:
-        edges = np.linspace(lo, hi, n_sub + 1)
-        all_convex = True
-        all_concave = True
-        finite = True
-        for k in range(n_sub):
-            box[var] = Interval(
-                np.full(shape, edges[k], dtype=np.float64),
-                np.full(shape, edges[k + 1], dtype=np.float64),
-            )
-            try:
-                ad = interval_hessian(expr, model, box=box)
-            except Exception:
-                finite = False
-                break
-            h = ad.hess
-            h_lo = float(h.lo[flat_idx, flat_idx])
-            h_hi = float(h.hi[flat_idx, flat_idx])
-            if not (np.isfinite(h_lo) and np.isfinite(h_hi)):
-                finite = False
-                break
-            if h_lo < -_COMPOSITE_CURV_TOL:
-                all_convex = False
-            if h_hi > _COMPOSITE_CURV_TOL:
-                all_concave = False
-            if not all_convex and not all_concave:
-                break
+    tol = _COMPOSITE_CURV_TOL
+    min_width = (hi - lo) / _COMPOSITE_MAX_SUBDIV
+    _ABSTAIN = object()  # sentinel: a non-finite enclosure → give up entirely
+
+    def _hess(a: float, b: float):
+        box[var] = Interval(
+            np.full(shape, a, dtype=np.float64), np.full(shape, b, dtype=np.float64)
+        )
+        try:
+            ad = interval_hessian(expr, model, box=box)
+        except Exception:
+            return None
+        h = ad.hess
+        h_lo = float(h.lo[flat_idx, flat_idx])
+        h_hi = float(h.hi[flat_idx, flat_idx])
+        if not (np.isfinite(h_lo) and np.isfinite(h_hi)):
+            return None
+        return h_lo, h_hi
+
+    def _prove(want_convex: bool):
+        """True if ``f`` is convex (resp. concave) over ``[lo, hi]``, False if
+        refuted at the finest width, ``_ABSTAIN`` on a non-finite enclosure."""
+        stack = [(lo, hi)]
+        while stack:
+            a, b = stack.pop()
+            r = _hess(a, b)
+            if r is None:
+                return _ABSTAIN
+            h_lo, h_hi = r
+            ok = (h_lo >= -tol) if want_convex else (h_hi <= tol)
+            if ok:
+                continue  # this piece does not threaten the target curvature
+            if (b - a) <= min_width * (1.0 + 1e-9):
+                return False  # genuine sign change at the finest resolution
+            m = 0.5 * (a + b)
+            stack.append((a, m))
+            stack.append((m, b))
+        return True
+
+    try:
+        whole = _hess(lo, hi)
+        if whole is None:
+            return None
+        h_lo, h_hi = whole
+        if h_lo >= -tol:
+            return "convex"
+        if h_hi <= tol:
+            return "concave"
+        # Genuine straddle on the whole box: refine, trying the leaning direction
+        # first (positive-leaning enclosure → convex) then the other.
+        lean_convex = (h_lo + h_hi) >= 0.0
+        for want_convex in (lean_convex, not lean_convex):
+            res = _prove(want_convex)
+            if res is _ABSTAIN:
+                return None
+            if res is True:
+                return "convex" if want_convex else "concave"
+        return None
+    finally:
         box[var] = Interval(
             np.full(shape, lo, dtype=np.float64), np.full(shape, hi, dtype=np.float64)
         )
-        if not finite:
-            return None
-        if all_convex:
-            return "convex"
-        if all_concave:
-            return "concave"
-        n_sub *= 4
-    return None
 
 
 def _composite_curvature(
