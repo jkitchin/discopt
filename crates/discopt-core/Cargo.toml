@@ -10,7 +10,7 @@ description = "Core MINLP solver: B&B engine, expression IR, presolve"
 # feral: pure-Rust sparse linear algebra. Provides the unsymmetric LU basis
 # engine (ftran/btran + product-form column updates) that backs the warm-started
 # simplex node engine for MILP. Pure-Rust, so clean-wheel builds are preserved.
-feral = { git = "https://github.com/jkitchin/feral", tag = "v0.11.1" }
+feral = { git = "https://github.com/jkitchin/feral", tag = "v0.11.2" }
 # rayon: data-parallel iterators. Used (behind the `parallel` feature) to solve
 # the independent per-node LP relaxations of a B&B batch concurrently. Pinned to
 # 1.10 to keep the crate's MSRV (1.75); 1.12+ requires rustc 1.80.
