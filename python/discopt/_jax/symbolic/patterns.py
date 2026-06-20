@@ -20,7 +20,7 @@ from typing import Callable, Optional
 
 import jax.numpy as jnp
 
-from discopt._jax.symbolic import runtime
+from discopt._jax.symbolic import gp_hull, runtime, signed_signomial
 
 # ---------------------------------------------------------------------------
 # P3. Bilinear x*y — McCormick / Al-Khayyal-Falk convex hull
@@ -275,7 +275,8 @@ PATTERNS: dict[str, Pattern] = {
         ("geometric/signomial programming", "RF/circuit design", "process design"),
         "+/- c * prod_j x_j^{a_j} (mixed-sign) via log-domain DC",
         "Lundell & Westerlund (SGO); Khajavirad-Michalek-Sahinidis (2012)",
-        "roadmap",
+        "done",
+        signed_signomial.signed_signomial_dc_envelope,
     ),
     "euclidean_separation": Pattern(
         "euclidean_separation",
@@ -289,7 +290,8 @@ PATTERNS: dict[str, Pattern] = {
         ("geometric programming", "chemical/process design"),
         "prod_j x_j^{a_j} joint hull (tighter than compositional McCormick)",
         "Khajavirad & Sahinidis (2018)",
-        "roadmap",
+        "done",
+        gp_hull.monomial_log_envelope,
     ),
     "ac_power_qc": Pattern(
         "ac_power_qc",

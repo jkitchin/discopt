@@ -114,12 +114,12 @@ elsewhere), **new-pattern** (needs a pattern not yet implemented), **search/infr
 
 | Pattern | Issues | Kind | Status |
 |---|---|---|---|
-| P10 Fortet/Glover binary-product linearization | #187 | exact | implement first |
-| P11 Signed signomial / G-convex transform | #114, #181, #189 | relaxation | partial (posynomial done) |
-| P12 Complementarity `x·y=0` | #231 | relaxation + disjunction | new |
-| P13 Squared-difference / Euclidean separation | #188 | relaxation (RLT) | new |
-| P14 Multivariate signomial joint hull | #189 | relaxation | roadmap |
-| (detection) log-curvature lattice | #115 | analysis | roadmap |
+| P10 Fortet/Glover binary-product linearization | #187 | exact | **done** (`patterns.binary_product_linearization`) |
+| P11 Signed signomial (log-domain DC) | #114, #181, #189 | relaxation | **done** (`signed_signomial.signed_signomial_dc_envelope`) |
+| P12 Complementarity `x·y=0` | #231 | relaxation + disjunction | **done** (`patterns.complementarity_cut`) |
+| P13 Squared-difference / Euclidean separation | #188 | relaxation (RLT) | roadmap |
+| P14 Multivariate signomial joint hull (GP log-lift) | #189, #181 | relaxation | **done** (`gp_hull.monomial_log_envelope`) |
+| log-curvature classifier (detection layer) | #115, #181 | analysis | **done** (`log_curvature.log_curvature`) |
 | (presolve) OBBT-on-aux, transcendental FBBT | #208, #219 | presolve | amplifier |
 
 ## Fix-and-comment workflow
