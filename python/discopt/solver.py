@@ -2809,22 +2809,45 @@ def solve_model(
                 node_engine="simplex" if _pounce_only else "pounce",
             )
         elif problem_class == ProblemClass.MIQP:
-            # Try HiGHS MIQP first (unless POUNCE-only), fall back to B&B.
-            _pounce_only = nlp_solver == "pounce"
-            if not _pounce_only:
-                highs_result = _solve_qp_highs(model, t_start, time_limit)
-                if highs_result is not None:
-                    return highs_result
-            return _solve_miqp_bb(
-                model,
-                time_limit,
-                gap_tolerance,
-                batch_size,
-                strategy,
-                max_nodes,
-                t_start,
-                prefer_pounce=_pounce_only,
+            # A convex MIQP may use the fast convex QP/MIQP solvers; a NONCONVEX
+            # one must NOT. Both `_solve_qp_highs` and `_solve_miqp_bb` assume a
+            # convex node QP (a convex relaxation solved to global optimality), so
+            # on an indefinite or concave-maximize objective they return a local
+            # stationary point and certify it as global — a false-optimal (e.g.
+            # `max x**2` over integer [-3,3] returned 0 instead of 9). The
+            # pure-continuous QP path already guards this (it forces the spatial
+            # path on an indefinite QP); MIQP did not. Mirror it: classify
+            # convexity (eigenvalue-sound, sense-aware, memoized) and use the
+            # convex solvers only when the model is KNOWN convex. Otherwise fall
+            # through (no return) to the sound spatial McCormick Branch-and-Bound
+            # below, which branches the integers and bounds each node with a valid
+            # outer relaxation.
+            (
+                _root_convexity_known,
+                _root_is_convex,
+                _root_constraint_mask,
+            ) = _classify_model_convexity(model, failure_label="MIQP convexity detection failed")
+            if _root_convexity_known and _root_is_convex:
+                _pounce_only = nlp_solver == "pounce"
+                if not _pounce_only:
+                    highs_result = _solve_qp_highs(model, t_start, time_limit)
+                    if highs_result is not None:
+                        return highs_result
+                return _solve_miqp_bb(
+                    model,
+                    time_limit,
+                    gap_tolerance,
+                    batch_size,
+                    strategy,
+                    max_nodes,
+                    t_start,
+                    prefer_pounce=_pounce_only,
+                )
+            logger.info(
+                "Nonconvex MIQP detected — routing to spatial Branch-and-Bound "
+                "(convex MIQP solvers would certify a local stationary point)"
             )
+            # Fall through to the spatial/McCormick path below.
 
     # The pure-JAX interior-point method ("ipm") and its sparse variant
     # ("sparse_ipm") are retired as NLP solvers. From here on (the NLP/MINLP
