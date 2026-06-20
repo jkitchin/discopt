@@ -473,7 +473,7 @@ def test_negated_bilinear_two_vars_sound_bound():
 
 
 @pytest.mark.slow
-def test_root_pool_bound_propagates_to_global_bound(monkeypatch):
+def test_root_pool_bound_propagates_to_global_bound():
     """The root cut-pool's strong dual bound must reach the reported global bound.
 
     The pool is separated for its cut rows, which prune child nodes but never lift
@@ -482,16 +482,21 @@ def test_root_pool_bound_propagates_to_global_bound(monkeypatch):
     strengthened root relaxation had already proved a far tighter one (~-1156).
     The fix captures that root bound and adopts it at the exit.
 
+    Engages the pool via the explicit ``root_cut_rounds`` argument (not the
+    ``DISCOPT_ROOT_CUT_ROUNDS`` env var): the env default is resolved at the
+    first solve's lazy ``discopt.solver`` import, so a post-import ``setenv`` is
+    order-dependent — a prior solve in the same process freezes it. The kwarg is
+    per-call and deterministic regardless of import order.
+
     Asserts the two invariants that matter, both robust to machine speed:
       * SOUND — the reported bound never exceeds the true optimum (-1098.4).
       * PROPAGATED — it is far tighter than the cut-less McCormick value, i.e. the
         pool bound actually reached `r.bound` instead of being discarded.
     """
-    monkeypatch.setenv("DISCOPT_ROOT_CUT_ROUNDS", "80")
     nl = _DATA / "nvs19.nl"
     assert nl.exists(), f"missing {nl}"
     m = dm.from_nl(str(nl))
-    r = m.solve(time_limit=25.0)
+    r = m.solve(time_limit=25.0, root_cut_rounds=80)
     assert r.bound is not None and math.isfinite(r.bound), "no dual bound reported"
     # Sound: a valid lower bound for a MINIMIZE never exceeds the optimum.
     assert r.bound <= -1098.4 + 1e-3, f"UNSOUND bound {r.bound} > optimum -1098.4"
@@ -500,3 +505,27 @@ def test_root_pool_bound_propagates_to_global_bound(monkeypatch):
     assert r.bound > -10000.0, (
         f"pool bound did not propagate: r.bound={r.bound} (cut-less McCormick ~ -88237)"
     )
+
+
+def test_root_cut_rounds_kwarg_resolves_and_validates():
+    """The root cut-pool levers are real per-call args, not frozen env constants.
+
+    ``DISCOPT_ROOT_CUT_ROUNDS`` / ``DISCOPT_ROOT_CUT_MAX`` are resolved at the
+    first lazy ``discopt.solver`` import, so a post-import ``setenv`` is a no-op.
+    ``root_cut_rounds`` / ``root_cut_max`` are honoured per call regardless of
+    import order, and out-of-range values are rejected up front.
+    """
+    m = dm.Model("rc")
+    x = m.continuous("x", lb=-2.0, ub=2.0)
+    y = m.continuous("y", lb=-2.0, ub=2.0)
+    m.minimize(x * y + x * x)
+    m.subject_to(x + y >= -1.0)
+
+    # Honoured per call (no env var set in this already-imported process).
+    r = m.solve(time_limit=10.0, root_cut_rounds=2, root_cut_max=50)
+    assert r.objective is not None
+
+    with pytest.raises(ValueError, match="root_cut_rounds must be >= 0"):
+        m.solve(time_limit=2.0, root_cut_rounds=-1)
+    with pytest.raises(ValueError, match="root_cut_max must be >= 1"):
+        m.solve(time_limit=2.0, root_cut_max=0)

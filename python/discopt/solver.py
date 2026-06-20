@@ -1737,11 +1737,16 @@ _STRUCTURE_CUTS_MAX_SIZE = 100
 # (nvs17, 7 vars) the gate that now routes pure-integer nonconvex models onto the
 # McCormick-LP path already certifies via per-node separation (~41s); the
 # inherited pool cuts the node count ~5x but its per-node LP overhead makes
-# wall-clock ~30% worse there. Retained as an opt-in lever
-# (``DISCOPT_ROOT_CUT_ROUNDS=N``) for larger instances where per-node
-# re-separation, not LP size, dominates.
-_ROOT_CUT_POOL_ROUNDS = int(os.environ.get("DISCOPT_ROOT_CUT_ROUNDS", "0"))
-_ROOT_CUT_POOL_MAX = int(os.environ.get("DISCOPT_ROOT_CUT_MAX", "200"))
+# wall-clock ~30% worse there. Retained as an opt-in lever (the ``root_cut_rounds``
+# / ``root_cut_max`` arguments to :func:`solve_model`, defaulting to the
+# ``DISCOPT_ROOT_CUT_ROUNDS`` / ``DISCOPT_ROOT_CUT_MAX`` env vars) for larger
+# instances where per-node re-separation, not LP size, dominates.
+#
+# These env reads are *defaults only*: they are resolved per call inside
+# ``solve_model`` (kwarg wins when given), so unlike module-frozen constants they
+# can be set after ``import discopt`` and differ per Model/per solve.
+_ROOT_CUT_POOL_ROUNDS_ENV = int(os.environ.get("DISCOPT_ROOT_CUT_ROUNDS", "0"))
+_ROOT_CUT_POOL_MAX_ENV = int(os.environ.get("DISCOPT_ROOT_CUT_MAX", "200"))
 
 
 def _apply_auto_cut_policy(model: "Model", relaxer) -> None:
@@ -1922,6 +1927,8 @@ def solve_model(
     subnlp_max_calls: int = 200,
     subnlp_options: Optional[dict] = None,
     structure_cuts: bool = True,
+    root_cut_rounds: Optional[int] = None,
+    root_cut_max: Optional[int] = None,
     **kwargs,
 ) -> SolveResult:
     """
@@ -1989,6 +1996,17 @@ def solve_model(
     partitions : int, default 0
         Number of piecewise McCormick partitions (0 = standard convex
         relaxation, k > 0 = k partitions for tighter relaxations).
+    root_cut_rounds : int, optional
+        Opt-in root PSD cut-pool separation rounds: when > 0 and the relaxer
+        carries PSD cuts, a strong cut pool is separated once at the root box
+        and inherited at every node (sound; never removes a feasible point).
+        ``None`` (default) falls back to the ``DISCOPT_ROOT_CUT_ROUNDS`` env
+        var (default 0 = off). Resolved per call, so it can be set after import
+        and can differ per solve.
+    root_cut_max : int, optional
+        Cap on the number of inherited root-pool cut rows (keeps per-node LP
+        size bounded). ``None`` (default) falls back to ``DISCOPT_ROOT_CUT_MAX``
+        (default 200).
     branching_policy : str, default "fractional"
         Variable selection: ``"fractional"`` (most-fractional, default)
         or ``"gnn"`` (GNN scoring hook; Rust handles actual branching).
@@ -2087,6 +2105,20 @@ def solve_model(
             f"{sorted(_valid_nlp_solvers)}. (The 'ripopt' backend was replaced "
             "by 'pounce', a pure-Rust port of Ipopt.)"
         )
+
+    # Root PSD cut-pool levers: resolve the explicit kwargs against the env-var
+    # defaults (kwarg wins). Threading them here — instead of reading frozen
+    # module constants — means they can be set after ``import discopt`` and can
+    # differ per Model/per solve, while ``DISCOPT_ROOT_CUT_ROUNDS`` /
+    # ``DISCOPT_ROOT_CUT_MAX`` remain as deprecated process-wide defaults.
+    _root_cut_rounds = (
+        _ROOT_CUT_POOL_ROUNDS_ENV if root_cut_rounds is None else int(root_cut_rounds)
+    )
+    _root_cut_max = _ROOT_CUT_POOL_MAX_ENV if root_cut_max is None else int(root_cut_max)
+    if _root_cut_rounds < 0:
+        raise ValueError(f"root_cut_rounds must be >= 0, got {_root_cut_rounds}")
+    if _root_cut_max < 1:
+        raise ValueError(f"root_cut_max must be >= 1, got {_root_cut_max}")
 
     # Anchor the whole-solve clock HERE, before any reformulation / presolve /
     # relaxation-build work — not at the B&B loop entry below. Preprocessing
@@ -3533,7 +3565,7 @@ def solve_model(
                     if not _probe_useful:
                         _mc_lp_relaxer = None
                         _mc_mode = "none"
-                    elif _ROOT_CUT_POOL_ROUNDS > 0 and getattr(_mc_lp_relaxer, "_psd_cuts", False):
+                    elif _root_cut_rounds > 0 and getattr(_mc_lp_relaxer, "_psd_cuts", False):
                         # Root cut pool (P3, opt-in): the relaxer carries PSD cuts, so
                         # separate a strong pool ONCE at the root box (many
                         # rounds, near the Shor SDP bound) and capture its rows.
@@ -3555,7 +3587,7 @@ def solve_model(
                                 _probe_ub,
                                 time_limit=_pool_budget,
                                 out_cuts=_pool_chunks,
-                                psd_max_rounds=_ROOT_CUT_POOL_ROUNDS,
+                                psd_max_rounds=_root_cut_rounds,
                             )
                             if _pool_chunks and _pool_chunks[0] is not None:
                                 # solve_at_node captures each separated chunk as a
@@ -3564,13 +3596,13 @@ def solve_model(
                                 # takes the same (A, b) form.
                                 _A_pool, _b_pool = _pool_chunks[0]
                                 _n_pool = _A_pool.shape[0]
-                                if _n_pool > _ROOT_CUT_POOL_MAX:
+                                if _n_pool > _root_cut_max:
                                     # Keep the last (most-recently separated, i.e.
                                     # deepest-round) rows; they target the tightest
                                     # residual violation. Capping bounds per-node LP
                                     # size so inheritance stays cheap.
-                                    _A_pool = _A_pool[-_ROOT_CUT_POOL_MAX:]
-                                    _b_pool = _b_pool[-_ROOT_CUT_POOL_MAX:]
+                                    _A_pool = _A_pool[-_root_cut_max:]
+                                    _b_pool = _b_pool[-_root_cut_max:]
                                 _root_cut_pool = (_A_pool, _b_pool)
                                 # Keep the strengthened root bound: it is a valid
                                 # global lower bound (the pool relaxation holds over
@@ -3588,7 +3620,7 @@ def solve_model(
                                     "%d rounds), root bound %s — inherited at every node",
                                     _A_pool.shape[0],
                                     _n_pool,
-                                    _ROOT_CUT_POOL_ROUNDS,
+                                    _root_cut_rounds,
                                     f"{_pool_res.lower_bound:.4g}"
                                     if _pool_res is not None and _pool_res.lower_bound is not None
                                     else "n/a",
