@@ -210,6 +210,15 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **Decomposition stage annotation on indexed variables** (`fix(decomposition)`).
+  `model.first_stage(y[i])` / `set_stage` / `set_block` on an indexed element
+  (`y[i]`) stringified to a stray key (`"y[3][0]"`) that never matched the
+  variable name, so the annotated variable silently fell into the recourse
+  subproblem and tripped the "integer in recourse" guard. The annotation now
+  resolves an indexed reference (or single-variable expression) to its base
+  variable name. Surfaced by the new curated adversarial example suite
+  (`test_decomposition_adversarial.py`), which carries hand-crafted Benders/GBD
+  instances with analytically known optima for each correctness hazard.
 - **`.nl` export of builder constraints and objectives** (`fix(export)`). Linear
   constraints built directly into the Rust builder — via the fast-construction
   `add_linear_constraints` API and the indexed-constraint fast path — were

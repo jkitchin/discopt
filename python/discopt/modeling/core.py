@@ -1944,16 +1944,47 @@ class Model:
 
     # ── Decomposition annotations (Benders / Lagrangian) ──
 
+    def _decomp_var_name(self, var) -> str:
+        """Resolve a decomposition annotation target to a variable name.
+
+        Accepts a :class:`Variable`, a name string, or an indexed reference
+        (``y[i]``) / single-variable expression — resolving the latter to its
+        *base variable name*, since decomposition staging is whole-variable.
+        Resolving ``y[i]`` to ``"y"`` (rather than the stray ``str(y[i])``, e.g.
+        ``"y[3][0]"``, which silently never matches) prevents an annotated
+        variable from being misclassified into the recourse subproblem.
+        """
+        if isinstance(var, Variable):
+            return var.name
+        if isinstance(var, str):
+            return var
+        base = getattr(var, "base", None)
+        if isinstance(base, Variable):
+            return base.name
+        try:
+            from discopt._jax.gdp_reformulate import _collect_variables
+
+            names = list(_collect_variables(var).keys())
+        except Exception:
+            names = []
+        if len(names) == 1:
+            return names[0]
+        raise TypeError(
+            f"Cannot resolve a decomposition variable from {var!r}; pass a Variable "
+            "(e.g. model.first_stage(y)). Staging is per whole variable, so an "
+            "expression spanning zero or multiple variables is ambiguous."
+        )
+
     def set_stage(self, var: "Variable", stage: int) -> "Model":
         """Tag a variable with a decomposition stage.
 
         Stage ``1`` denotes a *complicating* / first-stage variable (held in
         the Benders master); higher stages denote recourse/subproblem
         variables. Consumed by :func:`discopt.decomposition.detect_decomposition`.
-        Returns ``self`` for chaining.
+        Accepts a :class:`Variable`, a name string, or an indexed reference
+        (``y[i]``, resolved to the whole variable). Returns ``self`` for chaining.
         """
-        name = var.name if isinstance(var, Variable) else str(var)
-        self._decomp_stages[name] = int(stage)
+        self._decomp_stages[self._decomp_var_name(var)] = int(stage)
         return self
 
     def first_stage(self, *vars: "Variable") -> "Model":
@@ -1969,9 +2000,12 @@ class Model:
         return self
 
     def set_block(self, var: "Variable", block_id: int) -> "Model":
-        """Assign a variable to an explicit decomposition block."""
-        name = var.name if isinstance(var, Variable) else str(var)
-        self._decomp_blocks[name] = int(block_id)
+        """Assign a variable to an explicit decomposition block.
+
+        Accepts a :class:`Variable`, a name string, or an indexed reference
+        (``y[i]``, resolved to the whole variable).
+        """
+        self._decomp_blocks[self._decomp_var_name(var)] = int(block_id)
         return self
 
     def mark_coupling(self, constraint: Union[Constraint, str]) -> "Model":

@@ -26,6 +26,23 @@ def test_stage_annotations_recorded():
     assert m._decomp_stages == {"y": 1, "x": 2}
 
 
+def test_indexed_stage_annotation_resolves_to_whole_variable():
+    """Annotating an indexed element (``y[i]``) must resolve to the base variable.
+
+    Regression: ``str(y[0])`` is ``"y[3][0]"``, which silently never matches the
+    variable name ``"y"`` — so the annotated variable used to fall into the
+    recourse subproblem and trip the "integer in recourse" guard.
+    """
+    m = dm.Model("idx")
+    y = m.binary("y", shape=(3,))
+    x = m.continuous("x", shape=(2,), lb=0, ub=5)
+    m.first_stage(y[0])  # indexed element -> whole variable "y"
+    m.second_stage(x[1])
+    assert m._decomp_stages == {"y": 1, "x": 2}
+    s = detect_decomposition(m)
+    assert "y" in set(s.complicating_vars)
+
+
 def test_set_stage_and_block_chainable():
     m = dm.Model("chain")
     x = m.continuous("x", lb=0, ub=1)
