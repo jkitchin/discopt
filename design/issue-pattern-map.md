@@ -66,9 +66,22 @@ elsewhere), **new-pattern** (needs a pattern not yet implemented), **search/infr
 - Pattern: the **detection layer** that powers P7/P11 (which terms are GP-convex).
   Mirrors the existing convexity lattice but in log-space.
 
-### #116 — y-space (log) branching/bound-tightening for GP — **search/infra (GP)**
+### #116 — y-space (log) branching/bound-tightening for GP — **search/infra (GP)** — **constraint lift done (P16)**
 - The branching/OBBT counterpart of the GP patterns; pairs with P7/P11 but is a
   presolve/branching feature, not an envelope.
+- **P16 (`inject_gp_constraint_cuts`)** implements the *constraint-level* y-space
+  substitution: a posynomial `<=` constraint `P(x) <= b` (all `c_k>0`, exponents
+  `a_kj>=0`) is convex after `u_j=log x_j` → `Σ_k exp(s_k) <= b`. The pass adds the
+  convex link `u_j <= log x_j`, log-domain bounds, and OA tangent cuts
+  `Σ_k exp(s_k0)(1+s_k−s_k0) <= b`. Sound (no feasible `x` removed: at
+  `u_j=log x_j` the cut underestimates `P(x)`), value-preserving, and a no-op on
+  `>=`/affine/negative-exponent/signomial rows. **Honest:** does **not** fire on
+  `cvxnonsep_nsig30` (its single constraint is a *signomial* — a negative term —
+  so it needs the signed-signomial DC lift, P11, not the posynomial lift); and on
+  synthetic posynomial-constraint GPs discopt's native McCormick relaxation is
+  already root-tight (≈3 nodes), so the lift is correct but exposes no measurable
+  root gap there. Its value is on instances where the *separable* box relaxation of
+  a coupled posynomial constraint is genuinely loose.
 
 ### #231 — complementarity `x·y = 0`, `x,y >= 0` — **new-pattern**
 - Structure: complementarity / disjunctive `x·y = 0`.
@@ -133,6 +146,7 @@ elsewhere), **new-pattern** (needs a pattern not yet implemented), **search/infr
 | `inject_binary_products` (Fortet/Glover) | #187 | objective `coef·∏ b_i` (n>=3) → aux `z` + Fortet linearization (tighter than nested McCormick); value-preserving |
 | `inject_complementarity` | #231 | `x·y = 0` (or `<= 0`), `x,y>=0` → cut `x/x_ub + y/y_ub <= 1` |
 | `inject_gp_cuts` (GP log-lift) | #189, #181 | objective monomial `c·∏ x_j^{a_j}` (n>=2, a_j>0) → `u_j <= log x_j` lift + aux `t` + tangent cuts `t >= exp(s0)(1+s-s0)` |
+| `inject_gp_constraint_cuts` (P16 constraint GP) | #116 | posynomial `<=` constraint `Σ_k c_k∏ x_j^{a_kj} <= b` (a_kj>=0) → `u_j <= log x_j` lift + OA cuts `Σ_k exp(s_k0)(1+s_k−s_k0) <= b` |
 
 Bilinear (P3) and linear-fractional (P4) are intentionally **not** wired: the
 relaxation compiler already emits those envelopes, so a detector would be

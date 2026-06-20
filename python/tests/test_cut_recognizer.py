@@ -164,6 +164,7 @@ def test_inject_all_graceful_on_plain_model():
         "binary_product": 0,
         "complementarity": 0,
         "gp_monomial": 0,
+        "gp_constraint": 0,
     }
 
 
@@ -173,6 +174,7 @@ def test_inject_all_fires_square_diff_on_gas():
     assert counts["binary_product"] == 0
     assert counts["complementarity"] == 0
     assert counts["gp_monomial"] == 0
+    assert counts["gp_constraint"] == 0
 
 
 def test_gp_cut_is_sound():
@@ -221,3 +223,98 @@ def test_gp_cut_skips_single_variable_monomial():
     m.minimize(3.0 * x**1.5)  # single-variable: engine already tight
     m.subject_to(x >= 1.0)
     assert R.inject_gp_cuts(m) == 0
+
+
+# ---------------------------------------------------------------------------
+# Constraint-level GP reformulation (#116)
+# ---------------------------------------------------------------------------
+
+
+def _gp_constraint_model():
+    m = dm.Model("gpc")
+    x = m.continuous("x", lb=0.5, ub=4.0)
+    y = m.continuous("y", lb=0.5, ub=4.0)
+    # Push the optimum against the nonconvex posynomial constraint boundary.
+    m.minimize(-(x + y))
+    m.subject_to(2.0 * x * y + 3.0 * x**0.5 * y**0.5 <= 20.0)
+    return m
+
+
+def test_gp_constraint_oa_cut_is_sound():
+    """The constraint OA cut sum_k exp(s_k0)(1+s_k-s_k0) <= b never removes a
+    feasible x: at u_j = log x_j it reduces to a tangent under-estimate of P(x)."""
+    import math
+
+    import numpy as np
+
+    # P(x) = 2 x y + 3 x^.5 y^.5 ; exponents [[1,1],[.5,.5]], log-coeffs log2, log3.
+    monos = [(math.log(2.0), np.array([1.0, 1.0])), (math.log(3.0), np.array([0.5, 0.5]))]
+    xlb, xub = np.array([0.5, 0.5]), np.array([4.0, 4.0])
+    uL, uU = np.log(xlb), np.log(xub)
+    # diagonal grid of expansion points
+    grid = [uL + t * (uU - uL) for t in np.linspace(0, 1, 5)]
+    rng = np.random.default_rng(1)
+    worst = -1e9
+    for _ in range(40000):
+        x = rng.uniform(xlb, xub)
+        # any link-feasible u: u_j <= log x_j
+        u = np.array([rng.uniform(uL[j], math.log(x[j])) for j in range(2)])
+        P = sum(math.exp(lc + e @ np.log(x)) for lc, e in monos)  # = true P(x)
+        for u0 in grid:
+            cut = sum(
+                math.exp(lc + e @ u0) * (1.0 + (lc + e @ u - (lc + e @ u0))) for lc, e in monos
+            )
+            worst = max(worst, cut - P)  # cut <= sum exp(s_k) <= P(x)
+    assert worst <= 1e-9
+
+
+def test_gp_constraint_fires_and_preserves_optimum():
+    m0 = _gp_constraint_model()
+    m1 = _gp_constraint_model()
+    n = R.inject_gp_constraint_cuts(m1)
+    assert n == 1
+    r0 = m0.solve(time_limit=40, gap_tolerance=1e-4)
+    r1 = m1.solve(time_limit=40, gap_tolerance=1e-4)
+    assert r0.objective is not None and r1.objective is not None
+    assert r1.objective == pytest.approx(r0.objective, abs=1e-2)  # optimum unchanged
+
+
+def test_gp_constraint_skips_signomial():
+    """A negative coefficient (signomial) is not a posynomial -> must not fire."""
+    m = dm.Model("sig")
+    x = m.continuous("x", lb=0.5, ub=4.0)
+    y = m.continuous("y", lb=0.5, ub=4.0)
+    m.minimize(-(x + y))
+    m.subject_to(2.0 * x * y - 0.5 * x**0.5 * y**0.5 <= 20.0)
+    assert R.inject_gp_constraint_cuts(m) == 0
+
+
+def test_gp_constraint_skips_negative_exponent():
+    """x*y/z has a negative exponent on z -> single-direction link unsound, skip."""
+    m = dm.Model("negexp")
+    x = m.continuous("x", lb=0.5, ub=4.0)
+    y = m.continuous("y", lb=0.5, ub=4.0)
+    z = m.continuous("z", lb=0.5, ub=4.0)
+    m.minimize(-(x + y))
+    m.subject_to(x * y / z <= 20.0)
+    assert R.inject_gp_constraint_cuts(m) == 0
+
+
+def test_gp_constraint_skips_geq_posynomial():
+    """P(x) >= b is the concave side -> not this convex lift, must not fire."""
+    m = dm.Model("geq")
+    x = m.continuous("x", lb=0.5, ub=4.0)
+    y = m.continuous("y", lb=0.5, ub=4.0)
+    m.minimize(x + y)
+    m.subject_to(2.0 * x * y + 3.0 * x**0.5 * y**0.5 >= 5.0)
+    assert R.inject_gp_constraint_cuts(m) == 0
+
+
+def test_gp_constraint_skips_linear():
+    """An affine <= constraint is already convex -> nothing to lift."""
+    m = dm.Model("lin")
+    x = m.continuous("x", lb=0.5, ub=4.0)
+    y = m.continuous("y", lb=0.5, ub=4.0)
+    m.minimize(-(x + y))
+    m.subject_to(2.0 * x + 3.0 * y <= 20.0)
+    assert R.inject_gp_constraint_cuts(m) == 0

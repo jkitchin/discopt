@@ -130,6 +130,25 @@ the envelope engine), **roadmap** (proof given here, implementation pending).
 - `symbolic.patterns.posynomial_logconvex`; convexity certified in
   `test_patterns.py`.
 
+### P16. Constraint-level GP reformulation `P(x) ≤ b` (`x_j>0`) — **done** (#116)
+- **Fields:** geometric programming feasibility regions — the constraint analog of
+  P7/P14, in chemical process, structural and RF circuit design.
+- **Template:** a `≤` constraint whose body is a posynomial
+  `Σ_k c_k·∏_j x_j^{a_kj}` with `c_k>0` and **non-negative** exponents `a_kj`.
+- **Relaxation:** substitute `u_j = log x_j`. Each monomial becomes `exp(s_k)` with
+  `s_k = log c_k + Σ_j a_kj u_j` affine in `u`, so the constraint reads
+  `Σ_k exp(s_k) ≤ b` — convex in `u`. Inject the **convex** link `u_j ≤ log x_j`
+  (hypograph of the concave `log`), log-domain bounds, and outer-approximation
+  tangent cuts `Σ_k exp(s_k0)(1 + s_k − s_k0) ≤ b` over a grid of expansion points.
+- **Correctness (no feasible `x` removed):** with `a_kj ≥ 0`, `u_j ≤ log x_j` gives
+  `s_k ≤ log(monomial_k)`, hence `Σ_k exp(s_k) ≤ P(x)`; so for any feasible `x` the
+  choice `u_j = log x_j` satisfies the link with equality and makes every OA cut
+  `Σ_k exp(s_k0)(1+s_k−s_k0) ≤ Σ_k exp(s_k) = P(x) ≤ b` hold. `>=`, affine,
+  negative-exponent and signomial (negative-coefficient) rows are skipped — those
+  need the signed-signomial DC lift (P11), not this single-direction link.
+- `cut_recognizer.inject_gp_constraint_cuts`; soundness, firing, optimum-
+  preservation and skip-cases certified in `test_cut_recognizer.py`.
+
 ---
 
 ## Tier 5 — Domain-specific (roadmap, proven here)

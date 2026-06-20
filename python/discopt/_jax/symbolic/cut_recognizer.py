@@ -632,6 +632,7 @@ def inject_all_patterns(model, **kwargs) -> dict:
     counts["binary_product"] = inject_binary_products(model)
     counts["complementarity"] = inject_complementarity(model)
     counts["gp_monomial"] = inject_gp_cuts(model)
+    counts["gp_constraint"] = inject_gp_constraint_cuts(model)
     return counts
 
 
@@ -708,4 +709,152 @@ def inject_gp_cuts(model, *, samples: int = 6) -> int:
         applied += 1
     if applied:
         model.minimize(obj)
+    return applied
+
+
+# ---------------------------------------------------------------------------
+# Constraint-level GP reformulation (P16, issue #116): y-space convexification
+# ---------------------------------------------------------------------------
+
+
+def _posynomial_monomials(body_pos):
+    """Decompose a non-constant posynomial into ``[(log_c, {sym: exp}), ...]``.
+
+    Returns ``None`` unless every additive term is a positive monomial with all
+    exponents ``>= 0`` (the regime in which the single convex link
+    ``u_j <= log x_j`` certifies the log-lift, see :func:`inject_gp_constraint_cuts`).
+    A pure-constant term is not allowed here — constants are folded into the RHS
+    before this is called.
+    """
+    from discopt._jax.symbolic.log_curvature import is_monomial
+
+    monos = []
+    nonlinear = False
+    for term in sp.Add.make_args(body_pos):
+        ok, log_c, exps = is_monomial(term)
+        if not ok or log_c is None or not exps:
+            return None  # constant or non-monomial term -> not a clean posynomial
+        ex = {s: float(a) for s, a in exps.items()}
+        if any(a < 0 for a in ex.values()):
+            return None  # negative exponent breaks the single-direction link
+        if len(ex) >= 2 or any(abs(a - 1.0) > 1e-12 for a in ex.values()):
+            nonlinear = True  # a product or a true power term -> worth lifting
+        monos.append((float(log_c), ex))
+    if not nonlinear:
+        return None  # affine/linear body: already convex, nothing to gain
+    return monos
+
+
+def inject_gp_constraint_cuts(model, *, samples: int = 5, max_cuts: int = 12) -> int:
+    """Convexify posynomial ``<=`` constraints via the GP change of variables (#116).
+
+    A constraint ``P(x) <= b`` whose body ``P`` is a posynomial
+    ``sum_k c_k * prod_j x_j^{a_kj}`` (all ``c_k > 0``, all ``a_kj >= 0``, every
+    ``x_j`` positively bounded) is *nonconvex* in ``x`` but **convex** after the
+    substitution ``u_j = log x_j``: each monomial becomes ``exp(s_k)`` with
+    ``s_k = log c_k + sum_j a_kj u_j`` affine in ``u``, so the constraint reads
+    ``sum_k exp(s_k) <= b`` (a sum of exp-of-affine terms, convex in ``u``).
+
+    For each such constraint this introduces log-domain auxiliaries ``u_j`` with
+    the **convex** link ``u_j <= log x_j`` (the hypograph of the concave ``log``),
+    bounds ``[log x_j^L, log x_j^U]``, and a family of outer-approximation tangent
+    cuts of the convex constraint, expanded at a grid of points ``s0``::
+
+        sum_k exp(s_k0) * (1 + s_k - s_k0) <= b .
+
+    Returns the number of constraints reformulated.
+
+    Soundness (no feasible ``x`` removed). With ``a_kj >= 0`` the link
+    ``u_j <= log x_j`` gives ``s_k <= log c_k + sum_j a_kj log x_j = log(monomial_k)``,
+    hence ``exp(s_k) <= monomial_k`` and ``sum_k exp(s_k) <= P(x)``. So for any
+    original-feasible ``x`` the choice ``u_j = log x_j`` satisfies the link with
+    equality and makes ``sum_k exp(s_k) = P(x) <= b`` — every OA cut
+    ``sum_k exp(s_k0)(1 + s_k - s_k0) <= sum_k exp(s_k) <= b`` then holds, so the
+    augmented model still contains ``x``. The cuts only *tighten the relaxation*:
+    in ``x``-space ``P(x) <= b`` is nonconvex, but the linear OA cuts in ``(x, u)``
+    expose the convex log-domain shape that the box relaxation otherwise misses.
+
+    Scope. Only ``<=`` posynomials with non-negative exponents fire; ``>=`` rows
+    (concave side) and signomials/negative-exponent terms are skipped (they need
+    the signed-signomial DC treatment, not this single-direction link).
+    """
+    import math
+
+    import discopt.modeling as dm
+
+    sm = model_to_sympy(model)
+    handles = _handle_map(model)
+    reverse = {sym: key for key, sym in sm.symbols.items()}
+    applied = 0
+    for _name, expr in sm.inequalities:
+        free = list(expr.free_symbols)
+        if not free:
+            continue
+        # Move the additive constant to the RHS:  body_pos + const <= 0  =>
+        # body_pos <= b  with b = -const. ``body_pos`` is the variable monomials.
+        const_part, body_pos = expr.as_independent(*free, as_Add=True)
+        if const_part.free_symbols:
+            continue  # could not separate a numeric constant
+        b = -float(const_part)
+        if not (b > 0) or not math.isfinite(b):
+            continue  # posynomial > 0; b <= 0 is infeasible -> leave it to the solver
+
+        monos = _posynomial_monomials(body_pos)
+        if monos is None:
+            continue
+
+        # Every participating variable must be strictly-positively bounded.
+        var_syms = sorted({s for _lc, ex in monos for s in ex}, key=str)
+        info = {}
+        valid = True
+        for s in var_syms:
+            bnd = sm.bounds.get(s)
+            key = reverse.get(s, "")
+            if bnd is None or bnd[0] is None or bnd[0] <= 0 or not bnd[1] or not key:
+                valid = False
+                break
+            info[s] = (key, float(bnd[0]), float(bnd[1]))
+        if not valid:
+            continue
+
+        # Log-domain auxiliaries with the convex link u_j <= log x_j.
+        u_for: dict = {}
+        for s in var_syms:
+            key, xl, xu = info[s]
+            u = model.continuous(f"u_gpc_{applied}_{len(u_for)}", lb=math.log(xl), ub=math.log(xu))
+            model.subject_to(u <= dm.log(handles[key]), name=f"gpc_link_{applied}_{key}")
+            u_for[s] = u
+
+        # s_k(u) = log c_k + sum_j a_kj u_j  (affine model expression in the u's).
+        def s_expr_of(log_c, ex):
+            e = float(log_c)
+            for s, a in ex.items():
+                e = e + float(a) * u_for[s]
+            return e
+
+        # Expansion points: a diagonal grid plus one per-variable "high" point.
+        u_lo = {s: math.log(info[s][1]) for s in var_syms}
+        u_hi = {s: math.log(info[s][2]) for s in var_syms}
+        u_mid = {s: 0.5 * (u_lo[s] + u_hi[s]) for s in var_syms}
+        points = []
+        diag = samples if samples > 1 else 1
+        for i in range(diag):
+            tau = 0.0 if diag == 1 else i / (diag - 1)
+            points.append({s: u_lo[s] + tau * (u_hi[s] - u_lo[s]) for s in var_syms})
+        for s in var_syms:
+            if len(points) >= max_cuts:
+                break
+            pt = dict(u_mid)
+            pt[s] = u_hi[s]
+            points.append(pt)
+
+        for c_idx, pt in enumerate(points[:max_cuts]):
+            # OA cut: sum_k exp(s_k0) (1 + s_k - s_k0) <= b.
+            cut = 0.0
+            for log_c, ex in monos:
+                s0 = float(log_c) + sum(float(a) * pt[s] for s, a in ex.items())
+                e0 = math.exp(s0)
+                cut = cut + e0 * (1.0 + (s_expr_of(log_c, ex) - s0))
+            model.subject_to(cut <= b, name=f"gpc_oa_{applied}_{c_idx}")
+        applied += 1
     return applied
