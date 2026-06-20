@@ -29,7 +29,7 @@ cuts (the solver falls back to its normal relaxation). It is design-time
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import sympy as sp
@@ -93,19 +93,27 @@ class SympyModel:
     equalities: list  # list of (name, sympy.Eq)
     symbols: dict  # key -> Symbol
     bounds: dict  # Symbol -> (lb, ub)
+    binaries: set = field(default_factory=set)  # binary symbols
+    inequalities: list = field(default_factory=list)  # list of (name, expr) with expr <= 0
 
 
 def model_to_sympy(model) -> SympyModel:
-    """Translate a model's objective and ``==`` constraints to SymPy."""
+    """Translate a model's objective, ``==`` and ``<=``/``>=`` constraints to SymPy."""
+    from discopt.modeling import core
 
     syms: dict = {}
     obj = _to_sympy(model._objective.expression, syms)
     eqs = []
+    ineqs = []
     for c in model._constraints:
         if c.sense == "==":
             eqs.append((c.name, sp.Eq(_to_sympy(c.body, syms), sp.Float(c.rhs))))
+        elif c.sense == "<=":
+            ineqs.append((c.name, _to_sympy(c.body, syms) - sp.Float(c.rhs)))
+        elif c.sense == ">=":
+            ineqs.append((c.name, sp.Float(c.rhs) - _to_sympy(c.body, syms)))
 
-    # Variable bounds, keyed by the per-element symbol.
+    # Variable bounds + binary set, keyed by the per-element symbol.
     import numpy as np
 
     def _elem(bnd, i, size):
@@ -117,15 +125,26 @@ def model_to_sympy(model) -> SympyModel:
         return float(arr.reshape(-1)[i])
 
     bounds: dict = {}
+    binaries: set = set()
     for v in model._variables:
         size = int(getattr(v, "size", 1) or 1)
         lb = getattr(v, "lb", None)
         ub = getattr(v, "ub", None)
+        is_bin = getattr(v, "var_type", None) == core.VarType.BINARY
         for i in range(size):
             key = v.name if size == 1 else f"{v.name}[{i}]"
             if key in syms:
                 bounds[syms[key]] = (_elem(lb, i, size), _elem(ub, i, size))
-    return SympyModel(objective=obj, equalities=eqs, symbols=syms, bounds=bounds)
+                if is_bin:
+                    binaries.add(syms[key])
+    return SympyModel(
+        objective=obj,
+        equalities=eqs,
+        symbols=syms,
+        bounds=bounds,
+        binaries=binaries,
+        inequalities=ineqs,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -472,3 +491,123 @@ def recognize_and_inject(model, **kwargs) -> int:
 
 def under_domain_of(under: TermUnderestimator) -> tuple[float, float]:
     return (0.0, 74.0)
+
+
+# ---------------------------------------------------------------------------
+# Additional auto-firing detectors (complementarity, Fortet/Glover binaries)
+# ---------------------------------------------------------------------------
+
+
+def _as_single_bilinear(expr):
+    """If ``expr`` is ``coeff * x * y`` (two distinct symbols), return (coeff, x, y)."""
+    expr = sp.expand(expr)
+    syms = list(expr.free_symbols)
+    if len(syms) != 2:
+        return None
+    x, y = syms
+    quo = sp.simplify(expr / (x * y))
+    if quo.free_symbols or quo == 0:
+        return None
+    return float(quo), x, y
+
+
+def inject_complementarity(model) -> int:
+    """Detect ``x*y = 0`` (or ``x*y <= 0``) with ``x,y >= 0`` and add the valid cut
+    ``x/x_ub + y/y_ub <= 1`` (P12). Returns the number of cuts added.
+
+    Proof of validity: the McCormick underestimator of ``xy`` over the box gives
+    ``x_ub*y + x*y_ub - x_ub*y_ub <= xy``; with ``xy <= 0`` this yields
+    ``x/x_ub + y/y_ub <= 1`` after dividing by ``x_ub*y_ub > 0``.
+    """
+    sm = model_to_sympy(model)
+    handles = _handle_map(model)
+    reverse = {sym: key for key, sym in sm.symbols.items()}
+    candidates = [e for (_, e) in sm.equalities if isinstance(e, sp.Eq)]
+    sources = [(e.lhs - e.rhs) for e in candidates] + [ex for (_, ex) in sm.inequalities]
+    applied = 0
+    seen = set()
+    for expr in sources:
+        bil = _as_single_bilinear(expr)
+        if bil is None:
+            continue
+        _, x, y = bil
+        key = frozenset((reverse.get(x, ""), reverse.get(y, "")))
+        if "" in key or key in seen:
+            continue
+        bx, by = sm.bounds.get(x), sm.bounds.get(y)
+        if bx is None or by is None:
+            continue
+        x_lb, x_ub = bx
+        y_lb, y_ub = by
+        if not (x_lb is not None and x_lb >= 0 and y_lb is not None and y_lb >= 0):
+            continue
+        if not (x_ub and y_ub and x_ub > 0 and y_ub > 0):
+            continue
+        xh, yh = handles[reverse[x]], handles[reverse[y]]
+        model.subject_to(xh / x_ub + yh / y_ub <= 1.0, name=f"cut_compl_{applied}")
+        seen.add(key)
+        applied += 1
+    return applied
+
+
+def inject_binary_products(model, *, min_factors: int = 3) -> int:
+    """Detect objective terms ``coef * prod_i b_i`` over >=``min_factors`` binaries
+    and replace them by an auxiliary ``z`` with the exact Fortet/Glover
+    linearization (P10): ``z <= b_i``, ``z >= sum b_i - (n-1)``, ``z >= 0``.
+
+    The objective value is unchanged at binary-feasible points (where ``z`` equals
+    the product) but the relaxation uses the Fortet hull, which is tighter than the
+    nested-bilinear McCormick relaxation for ``n >= 3``. Returns the count applied.
+    """
+    sm = model_to_sympy(model)
+    handles = _handle_map(model)
+    reverse = {sym: key for key, sym in sm.symbols.items()}
+    obj = model._objective.expression
+    applied = 0
+    for term in sp.Add.make_args(sm.objective):
+        syms = list(term.free_symbols)
+        if len(syms) < min_factors or not all(s in sm.binaries for s in syms):
+            continue
+        coeff = sp.simplify(term / sp.Mul(*syms))
+        if coeff.free_symbols:
+            continue
+        keys = [reverse.get(s, "") for s in syms]
+        if "" in keys:
+            continue
+        bhs = [handles[k] for k in keys]
+        n = len(bhs)
+        z = model.continuous(f"z_bin_{applied}", lb=0.0, ub=1.0)
+        for i, bh in enumerate(bhs):
+            model.subject_to(z <= bh, name=f"fortet_{applied}_{i}")
+        s = bhs[0]
+        for bh in bhs[1:]:
+            s = s + bh
+        model.subject_to(z >= s - (n - 1), name=f"fortet_lb_{applied}")
+        obj = obj - _sympy_term_to_handle(term, syms, handles, reverse) + float(coeff) * z
+        applied += 1
+    if applied:
+        model.minimize(obj)
+    return applied
+
+
+def _sympy_term_to_handle(term, syms, handles, reverse):
+    """Rebuild ``coef * prod b_i`` as a model expression from handles."""
+    coeff = float(sp.simplify(term / sp.Mul(*[s for s in syms])))
+    expr = coeff
+    for s in syms:
+        expr = expr * handles[reverse[s]]
+    return expr
+
+
+def inject_all_patterns(model, **kwargs) -> dict:
+    """Run every auto-firing detector in turn; returns ``{pattern: count}``.
+
+    Order: square-difference network (objective aux rewrite) first, then
+    Fortet/Glover binary products (objective aux rewrite), then complementarity
+    (adds linear cuts). Each detector is sound and a no-op on non-matching models.
+    """
+    counts = {}
+    counts["square_diff_network"] = recognize_and_inject(model, **kwargs)
+    counts["binary_product"] = inject_binary_products(model)
+    counts["complementarity"] = inject_complementarity(model)
+    return counts

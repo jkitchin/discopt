@@ -122,6 +122,22 @@ elsewhere), **new-pattern** (needs a pattern not yet implemented), **search/infr
 | log-curvature classifier (detection layer) | #115, #181 | analysis | **done** (`log_curvature.log_curvature`) |
 | (presolve) OBBT-on-aux, transcendental FBBT | #208, #219 | presolve | amplifier |
 
+## Auto-firing detectors wired into `cut_recognizer`
+
+`inject_all_patterns(model)` runs every detector in turn and returns
+`{pattern: count}`; each is sound and a no-op on non-matching models:
+
+| Detector | Issue | What it does |
+|---|---|---|
+| `recognize_and_inject` (square-diff network) | #15 | gas/water Weymouth chain → objective aux + `u >= K·h(w)` |
+| `inject_binary_products` (Fortet/Glover) | #187 | objective `coef·∏ b_i` (n>=3) → aux `z` + Fortet linearization (tighter than nested McCormick); value-preserving |
+| `inject_complementarity` | #231 | `x·y = 0` (or `<= 0`), `x,y>=0` → cut `x/x_ub + y/y_ub <= 1` |
+
+Bilinear (P3) and linear-fractional (P4) are intentionally **not** wired: the
+relaxation compiler already emits those envelopes, so a detector would be
+redundant. The signomial/GP patterns (P7/P11/P14) need a log-domain lifting pass
+before they can auto-fire; tracked as the next wiring step.
+
 ## Fix-and-comment workflow
 
 As each pattern lands: (1) implement + prove + certify in `symbolic/patterns.py`
