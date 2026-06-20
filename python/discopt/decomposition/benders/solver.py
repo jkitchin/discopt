@@ -468,9 +468,9 @@ def solve_benders(
     sense_flip = 1.0 if lin.minimize else -1.0
     reported_obj = None if objective is None else objective * sense_flip
     reported_bound = None if bound is None else bound * sense_flip
-    gap = None
+    reported_gap: float | None = None
     if reported_obj is not None and reported_bound is not None:
-        gap = abs(reported_obj - reported_bound) / (abs(reported_obj) + 1e-10)
+        reported_gap = abs(reported_obj - reported_bound) / (abs(reported_obj) + 1e-10)
 
     x_dict = solution_dict(model, incumbent_full) if incumbent_full is not None else None
 
@@ -478,7 +478,7 @@ def solve_benders(
         status=status,
         objective=reported_obj,
         bound=reported_bound,
-        gap=gap,
+        gap=reported_gap,
         x=x_dict,
         wall_time=time.time() - t0,
         node_count=0,

@@ -192,7 +192,7 @@ def solve_gbd(
         only_lower = upper_inf & ~lower_inf  # g_raw >= cl  -> mu <= 0
         out[only_upper] = np.maximum(out[only_upper], 0.0)
         out[only_lower] = np.minimum(out[only_lower], 0.0)
-        return out
+        return np.asarray(out, dtype=np.float64)
 
     sense = model._objective.sense if model._objective is not None else ObjectiveSense.MINIMIZE
     sense_flip = 1.0 if sense == ObjectiveSense.MINIMIZE else -1.0
@@ -461,7 +461,7 @@ def solve_gbd(
                 break
 
     # Final master lower bound — reported only when rigorous.
-    bound = None
+    bound: float | None = None
     if is_convex and bound_rigorous:
         final = _solve_master(with_eta=True)
         if final.status == SolveStatus.OPTIMAL:
@@ -479,9 +479,9 @@ def solve_gbd(
 
     reported_obj = None if objective is None else objective * sense_flip
     reported_bound = None if bound is None else bound * sense_flip
-    gap = None
+    reported_gap: float | None = None
     if reported_obj is not None and reported_bound is not None:
-        gap = abs(reported_obj - reported_bound) / (abs(reported_obj) + 1e-10)
+        reported_gap = abs(reported_obj - reported_bound) / (abs(reported_obj) + 1e-10)
 
     x_dict = solution_dict(model, incumbent_full) if incumbent_full is not None else None
 
@@ -489,7 +489,7 @@ def solve_gbd(
         status=status,
         objective=reported_obj,
         bound=reported_bound,
-        gap=gap,
+        gap=reported_gap,
         x=x_dict,
         wall_time=time.time() - t0,
         node_count=0,

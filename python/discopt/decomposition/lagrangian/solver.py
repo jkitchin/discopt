@@ -174,7 +174,7 @@ def solve_lagrangian(
 
     def _recover(z: np.ndarray):
         """Fix integers at z, solve the full LP, return (UB, z_full) or (None, None)."""
-        fixed = {}
+        fixed: dict[str, float | np.ndarray] = {}
         offp = 0
         for v in model._variables:
             if v.var_type in (VarType.BINARY, VarType.INTEGER):
@@ -255,12 +255,12 @@ def solve_lagrangian(
 
     sense_flip = 1.0 if lin.minimize else -1.0
     objective = None if not np.isfinite(best_UB) else best_UB
-    bound = None if best_L == -np.inf else best_L
+    bound: float | None = None if best_L == -np.inf else best_L
     reported_obj = None if objective is None else objective * sense_flip
     reported_bound = None if bound is None else bound * sense_flip
-    gap = None
+    reported_gap: float | None = None
     if reported_obj is not None and reported_bound is not None:
-        gap = abs(reported_obj - reported_bound) / (abs(reported_obj) + 1e-10)
+        reported_gap = abs(reported_obj - reported_bound) / (abs(reported_obj) + 1e-10)
     x_dict = solution_dict(model, incumbent) if incumbent is not None else None
     if x_dict is None and objective is not None:
         status = "iteration_limit"  # have a bound but no recovered primal
@@ -269,7 +269,7 @@ def solve_lagrangian(
         status=status,
         objective=reported_obj,
         bound=reported_bound,
-        gap=gap,
+        gap=reported_gap,
         x=x_dict,
         wall_time=time.time() - t0,
         node_count=0,
@@ -277,7 +277,7 @@ def solve_lagrangian(
     )
 
 
-def _bundle_step(lp, cuts, m_coup: int) -> np.ndarray:
+def _bundle_step(lp, cuts: list[tuple[float, np.ndarray, np.ndarray]], m_coup: int) -> np.ndarray:
     """Maximize the cutting-plane model of L over the multiplier box [0, λmax].
 
     max_{λ∈[0,λmax], η}  η   s.t.  η <= L_k + g_k^T (λ - λ_k)  for each cut k.
