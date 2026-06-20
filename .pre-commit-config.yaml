@@ -3,17 +3,24 @@ repos:
     rev: v0.14.6
     hooks:
       - id: ruff
+        # Scope to the library/tests exactly like CI's `ruff check python/`
+        # (CI runs this hook). Excludes benchmarks, one-off scripts, docs
+        # notebooks, etc. — none of which CI lints today.
         args: [--fix]
-        exclude: ^discopt_benchmarks/
+        files: ^python/
       - id: ruff-format
-        exclude: ^discopt_benchmarks/
+        files: ^python/
   - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.13.0
+    rev: v2.1.0
     hooks:
       - id: mypy
+        # Single source of truth for the typecheck: the same mypy version, import
+        # deps, and whole-package scope CI uses (CI runs this very hook). mypy
+        # errors are cross-file, so run on the whole package, not per changed file.
         files: ^python/discopt/
-        additional_dependencies: [numpy, jax]
-        args: [--ignore-missing-imports]
+        pass_filenames: false
+        additional_dependencies: [numpy, scipy, jax, jaxlib]
+        args: [python/discopt/, --ignore-missing-imports]
   - repo: local
     hooks:
       - id: cargo-fmt

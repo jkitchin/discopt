@@ -68,8 +68,11 @@ dev = [
     "pytest-timeout",
     "pytest-cov",
     "pytest-xdist",
-    "ruff",
-    "mypy",
+    # Pin the lint/typecheck toolchain to the exact versions in
+    # .pre-commit-config.yaml (the single source of truth CI also runs), so a
+    # local `pip install -e .[dev]` cannot drift from CI.
+    "ruff==0.14.6",
+    "mypy==2.1.0",
     "highspy",
     "pre-commit",
 ]
