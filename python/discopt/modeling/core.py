@@ -30,6 +30,7 @@ import builtins as _builtins
 from dataclasses import dataclass
 from enum import Enum
 from typing import (
+    TYPE_CHECKING,
     Callable,
     Iterator,
     Optional,
@@ -38,6 +39,9 @@ from typing import (
 )
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from discopt.modeling.indexed import IndexedParam, IndexedVar
 
 builtins_sum = _builtins.sum
 
@@ -1440,7 +1444,9 @@ class Model:
             )
         return var
 
-    def _make_indexed_var(self, name, var_type, index_set, lb, ub, default_lb, default_ub):
+    def _make_indexed_var(
+        self, name, var_type, index_set, lb, ub, default_lb, default_ub
+    ) -> "IndexedVar":
         """Build an :class:`IndexedVar` backed by one flat variable over *index_set*."""
         from discopt.modeling.indexed import IndexedVar, resolve_indexed_values
 
@@ -1505,7 +1511,9 @@ class Model:
         """
         if over is not None:
             _require_no_shape(shape, "continuous")
-            return self._make_indexed_var(
+            # Returns an IndexedVar in the over= case (documented); the static
+            # return type stays Variable for the common positional case.
+            return self._make_indexed_var(  # type: ignore[return-value]
                 name, VarType.CONTINUOUS, over, lb, ub, -9.999e19, 9.999e19
             )
         if isinstance(shape, int):
@@ -1543,7 +1551,9 @@ class Model:
         """
         if over is not None:
             _require_no_shape(shape, "binary")
-            return self._make_indexed_var(name, VarType.BINARY, over, 0.0, 1.0, 0.0, 1.0)
+            return self._make_indexed_var(  # type: ignore[return-value]
+                name, VarType.BINARY, over, 0.0, 1.0, 0.0, 1.0
+            )
         if isinstance(shape, int):
             shape = (shape,)
         self._check_name(name)
@@ -1585,14 +1595,16 @@ class Model:
         """
         if over is not None:
             _require_no_shape(shape, "integer")
-            return self._make_indexed_var(name, VarType.INTEGER, over, lb, ub, 0.0, 1e6)
+            return self._make_indexed_var(  # type: ignore[return-value]
+                name, VarType.INTEGER, over, lb, ub, 0.0, 1e6
+            )
         if isinstance(shape, int):
             shape = (shape,)
         self._check_name(name)
         var = Variable(name, VarType.INTEGER, shape, lb, ub, self)
         return self._register_variable(var)
 
-    def _make_indexed_param(self, name, index_set, value):
+    def _make_indexed_param(self, name, index_set, value) -> "IndexedParam":
         """Build an :class:`IndexedParam` backed by one flat parameter over *index_set*."""
         from discopt.modeling.indexed import IndexedParam, resolve_indexed_values
 
@@ -1637,7 +1649,7 @@ class Model:
         may be a scalar, a ``dict`` keyed by member, or a callable ``fn(member)``.
         """
         if over is not None:
-            return self._make_indexed_param(name, over, value)
+            return self._make_indexed_param(name, over, value)  # type: ignore[return-value]
         self._check_name(name)
         param = Parameter(name, value, self)
         self._parameters.append(param)
