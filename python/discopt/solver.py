@@ -1447,9 +1447,7 @@ def _optimal_relative_gap(objective: float) -> Optional[float]:
 _DEFAULT_ABS_GAP_TOL = 1e-6
 
 
-def _gap_converged(
-    tree, gap_tolerance: float, abs_gap_tol: float = _DEFAULT_ABS_GAP_TOL
-) -> bool:
+def _gap_converged(tree, gap_tolerance: float, abs_gap_tol: float = _DEFAULT_ABS_GAP_TOL) -> bool:
     """B&B gap convergence with decoupled absolute and relative tolerances.
 
     Converges when the *relative* gap ``(UB-LB)/max(|UB|,|LB|,eps) <= gap_tolerance``
@@ -1722,6 +1720,22 @@ def _classify_model_convexity(
 # per-node cut-separation overhead (eigh / extra LP re-solves) outweighs the
 # typical bound gain, so the policy declines to enable cuts (sound: a no-op).
 _AUTO_CUTS_MAX_VARS = 40
+
+# Root cut pool (P3). Rounds of spectral PSD separation to run once at the root
+# to build the inherited pool; more rounds drive the root bound toward the Shor
+# SDP bound (nvs17: 8 rounds -> -2453, ~60 -> -1300, ~150 -> -1221). The pool is
+# appended (sound — every PSD cut is globally valid) to each node's relaxation IN
+# ADDITION to its own per-node separation, so it only ever tightens the bound.
+#
+# DEFAULT OFF (rounds=0): on the small dense integer QCQP that motivated it
+# (nvs17, 7 vars) the gate that now routes pure-integer nonconvex models onto the
+# McCormick-LP path already certifies via per-node separation (~41s); the
+# inherited pool cuts the node count ~5x but its per-node LP overhead makes
+# wall-clock ~30% worse there. Retained as an opt-in lever
+# (``DISCOPT_ROOT_CUT_ROUNDS=N``) for larger instances where per-node
+# re-separation, not LP size, dominates.
+_ROOT_CUT_POOL_ROUNDS = int(os.environ.get("DISCOPT_ROOT_CUT_ROUNDS", "0"))
+_ROOT_CUT_POOL_MAX = int(os.environ.get("DISCOPT_ROOT_CUT_MAX", "200"))
 
 
 def _apply_auto_cut_policy(model: "Model", relaxer) -> None:
@@ -2369,6 +2383,12 @@ def solve_model(
     # spatial path, mirroring the existing "integer-only models have nothing to
     # spatial-branch on" fallback below (which the aux vars otherwise defeat).
     _origin_has_continuous_var = any(v.var_type == VarType.CONTINUOUS for v in model._variables)
+    # A model with no continuous decision variable is pure-discrete: when it
+    # routes onto the McCormick-LP path and the relaxer turns out unusable, its
+    # fallback must be the sound alphaBB ("none"), never the integer-unsound
+    # nonconvex "nlp" objective bound. Defined here (not just in the auto block)
+    # so the lp-path fallbacks see it even under an explicit mccormick_bounds="lp".
+    _pure_discrete = not _origin_has_continuous_var
 
     # Whether any *original* continuous decision variable has a finite box to
     # spatial-branch on, captured (like ``_origin_has_continuous_var``) before the
@@ -3163,6 +3183,11 @@ def solve_model(
     _mc_negate = False
     _mc_mode = mccormick_bounds
     _mc_lp_relaxer = None  # MccormickLPRelaxer instance when _mc_mode == "lp"
+    # Global root cut pool (P3): separated once at the root, then inherited at
+    # every node so each node reproduces the strong root bound for the cost of a
+    # warm LP solve instead of re-separating the PSD/RLT cuts from scratch. Stays
+    # None unless the relaxer carries PSD cuts (the nvs* / box-QP regime).
+    _root_cut_pool = None
 
     if _mc_mode == "auto":
         # The McCormick "nlp" objective bound is a *valid* dual bound only when
@@ -3194,7 +3219,24 @@ def solve_model(
         # continuous lift aux vars do not spuriously route a combinatorial model
         # onto the spatial path and stall its incumbent search (nvs16).
         _has_continuous_var = _origin_has_continuous_var
-        if not _model_is_convex and _has_continuous_var and model._objective is not None:
+        # A nonconvex model qualifies for the LP-form McCormick path when it has
+        # something to branch on that the relaxation can tighten:
+        #   * a continuous variable (spatial branching), OR
+        #   * (nvs* gap) a pure-/mixed-integer model whose integers appear in
+        #     nonlinear terms — the integers are branched by the standard B&B
+        #     while the McCormick+PSD relaxation supplies a valid, far tighter
+        #     per-node dual bound than the interval alphaBB floor. The prototype
+        #     for the global cut-pool proved this closes nvs17 (frozen -65842 ->
+        #     14 nodes, bound -1110), the SCIP regime.
+        # Pure-integer models were historically pinned to alphaBB ("none") on the
+        # premise they had "nothing to spatial-branch on" — that conflates spatial
+        # with integer branching. Admit them and let the downstream
+        # has_relaxable_nonlinearity / _has_branchable / probe gates fall a model
+        # back when the LP relaxer is unusable. ``_pure_discrete`` routes those
+        # fallbacks to the sound alphaBB "none" rather than the integer-unsound
+        # "nlp" objective bound (issue #120: a local NLP solve of a nonconvex
+        # surface can certify a value ABOVE the true optimum).
+        if not _model_is_convex and model._objective is not None:
             _mc_mode = "lp"
         else:
             _mc_mode = "none"
@@ -3253,9 +3295,11 @@ def solve_model(
                 # NB: monomial/fractional-power-only nonconvex models DO get
                 # a valid LP dual bound here (issue #120 fix); gating on
                 # has_bilinear alone wrongly routed them to the unsound "nlp"
-                # bound.
+                # bound. For a pure-discrete model fall to the sound alphaBB
+                # "none" instead — the nonconvex "nlp" objective bound is not
+                # valid there (issue #120).
                 _mc_lp_relaxer = None
-                _mc_mode = "nlp"
+                _mc_mode = "none" if _pure_discrete else "nlp"
             else:
                 # Structure-gated cut policy (cuts="auto", the default): the A/B
                 # sweep showed RLT dominates on QCQP *with* linear constraints, PSD
@@ -3284,10 +3328,11 @@ def solve_model(
                     logger.info(
                         "McCormick LP requested but model has no spatial-branchable "
                         "variable (no finite-box continuous var, no nonlinear-term "
-                        "integer); falling back to NLP relaxation."
+                        "integer); falling back to %s relaxation.",
+                        "alphaBB" if _pure_discrete else "NLP",
                     )
                     _mc_lp_relaxer = None
-                    _mc_mode = "nlp"
+                    _mc_mode = "none" if _pure_discrete else "nlp"
                 else:
                     if _nl_int_cols:
                         tree.set_spatial_integer_cols(np.asarray(_nl_int_cols, dtype=np.int64))
@@ -3382,6 +3427,58 @@ def solve_model(
                     if not _probe_useful:
                         _mc_lp_relaxer = None
                         _mc_mode = "none"
+                    elif _ROOT_CUT_POOL_ROUNDS > 0 and getattr(_mc_lp_relaxer, "_psd_cuts", False):
+                        # Root cut pool (P3, opt-in): the relaxer carries PSD cuts, so
+                        # separate a strong pool ONCE at the root box (many
+                        # rounds, near the Shor SDP bound) and capture its rows.
+                        # Every node then inherits the pool for a warm LP solve
+                        # instead of re-separating from scratch — the standalone
+                        # prototype showed this drops nvs17's per-node cost ~30x
+                        # (0.5s -> 16ms) while reproducing the strong root bound.
+                        # Sound: each PSD cut is valid for the whole feasible set,
+                        # so an inherited row never cuts off a feasible point.
+                        try:
+                            _pool_chunks: list = []
+                            _root_remaining = time_limit - (time.perf_counter() - t_start)
+                            _pool_budget = min(
+                                max(time_limit * 0.25, 5.0),
+                                max(_root_remaining, _DEADLINE_NODE_FLOOR_S),
+                            )
+                            _pool_res = _mc_lp_relaxer.solve_at_node(
+                                _probe_lb,
+                                _probe_ub,
+                                time_limit=_pool_budget,
+                                out_cuts=_pool_chunks,
+                                psd_max_rounds=_ROOT_CUT_POOL_ROUNDS,
+                            )
+                            if _pool_chunks and _pool_chunks[0] is not None:
+                                # solve_at_node captures each separated chunk as a
+                                # (A, b) pair of upper-bound rows ``A x <= b`` over
+                                # the node's lifted column space; inherited_cuts
+                                # takes the same (A, b) form.
+                                _A_pool, _b_pool = _pool_chunks[0]
+                                _n_pool = _A_pool.shape[0]
+                                if _n_pool > _ROOT_CUT_POOL_MAX:
+                                    # Keep the last (most-recently separated, i.e.
+                                    # deepest-round) rows; they target the tightest
+                                    # residual violation. Capping bounds per-node LP
+                                    # size so inheritance stays cheap.
+                                    _A_pool = _A_pool[-_ROOT_CUT_POOL_MAX:]
+                                    _b_pool = _b_pool[-_ROOT_CUT_POOL_MAX:]
+                                _root_cut_pool = (_A_pool, _b_pool)
+                                logger.info(
+                                    "Root PSD cut pool: %d cuts (of %d separated, "
+                                    "%d rounds), root bound %s — inherited at every node",
+                                    _A_pool.shape[0],
+                                    _n_pool,
+                                    _ROOT_CUT_POOL_ROUNDS,
+                                    f"{_pool_res.lower_bound:.4g}"
+                                    if _pool_res is not None and _pool_res.lower_bound is not None
+                                    else "n/a",
+                                )
+                        except Exception as _pool_exc:  # pragma: no cover - defensive
+                            logger.debug("root cut pool separation skipped: %s", _pool_exc)
+                            _root_cut_pool = None
 
     # AlphaBB alpha estimate (lever 3, issue #194), deferred from above: compute
     # it only when the LP relaxer is NOT the bound source. When the LP relaxer is
@@ -3919,6 +4016,8 @@ def solve_model(
                             np.asarray(batch_lb[i]),
                             np.asarray(batch_ub[i]),
                             time_limit=max(_node_remaining, _DEADLINE_NODE_FLOOR_S),
+                            inherited_cuts=_root_cut_pool,
+                            separate=True,
                         )
                     except Exception as e:
                         logger.debug("McCormick LP failed at node %d: %s", i, e)
@@ -4181,6 +4280,8 @@ def solve_model(
                             node_lb,
                             node_ub,
                             time_limit=max(_deadline - time.perf_counter(), _DEADLINE_NODE_FLOOR_S),
+                            inherited_cuts=_root_cut_pool,
+                            separate=True,
                         )
                     except Exception as e:
                         logger.debug("McCormick LP failed at node %d: %s", int(batch_ids[i]), e)
