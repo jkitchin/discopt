@@ -45,6 +45,15 @@ Soundness is gated on convexity: the reported ``bound`` is valid only when the
 objective and all constraints are convex (checked with
 ``classify_oa_cut_convexity``); otherwise the solver runs heuristically and
 reports ``bound=None`` so the ``incorrect_count <= 0`` gate is never threatened.
+The bound is also withheld (``bound=None``) when a recourse variable is unbounded
+in the active descent direction — the closed-form ``m_y`` is then ``-inf`` (no
+finite rigorous cut), so the cut falls back to the primal anchor purely to keep
+the search progressing, and the solve is flagged non-rigorous rather than
+reporting an unsound bound. The remaining dependency, shared with every convex
+(MI)NLP method here (e.g. Outer Approximation), is the convexity classifier
+itself: a model the classifier wrongly accepts as convex would get an
+unwarranted bound. The classifier is conservative (it errs toward ``bound=None``)
+and is exercised by the decomposition test suite.
 """
 
 from __future__ import annotations
@@ -315,13 +324,13 @@ def solve_gbd(
         try:
             res = solve_nlp(proxy, x0, options={"print_level": 0, "max_iter": 300})  # type: ignore[arg-type]
         except Exception:
-            return "infeas", None, None, None, None
+            return "infeas", None, None, None, None, True
 
         feasible = res.x is not None and (
             res.status == SolveStatus.OPTIMAL or _is_primal_feasible(evaluator, res.x)
         )
         if not feasible:
-            return "infeas", None, None, None, None
+            return "infeas", None, None, None, None, True
 
         x_full = np.asarray(res.x, dtype=np.float64)
         v = float(evaluator.evaluate_objective(x_full))
@@ -356,8 +365,13 @@ def solve_gbd(
             m_y += gj * (target - x_full[j])
         # Rigorous anchor when the box minimum is finite; otherwise fall back to
         # the primal value (no worse than the pre-Lagrangian behaviour).
+        # Rigorous anchor when the box minimum is finite. When a recourse
+        # variable is unbounded in the active descent direction the box minimum
+        # is -inf (no finite rigorous cut), so we fall back to the primal value
+        # to keep the search progressing and flag ``rigorous=False`` — the
+        # reported bound is then withheld (heuristic mode), never an unsound one.
         anchor = (l0 + m_y) if finite_anchor else v
-        return "opt", v, x_full, anchor, s
+        return "opt", v, x_full, anchor, s, finite_anchor
 
     def _add_opt_cut(x_hat, anchor, s):
         # eta >= anchor + s^T (x - x̂)  ->  s^T x - eta <= s^T x̂ - anchor
@@ -389,10 +403,15 @@ def solve_gbd(
     best_ub = np.inf
     incumbent_full: np.ndarray | None = None
     status = "iteration_limit"
+    # The reported bound is rigorous only if every optimality cut used the
+    # closed-form Lagrangian anchor; an unbounded-recourse fallback to the primal
+    # anchor downgrades the solve to heuristic mode (bound withheld).
+    bound_rigorous = True
 
-    kind, v, x_full, anchor, s = _recourse(x_hat)
+    kind, v, x_full, anchor, s, rigorous = _recourse(x_hat)
     if kind == "opt":
         _add_opt_cut(x_hat, anchor, s)
+        bound_rigorous = bound_rigorous and rigorous
         best_ub = v
         incumbent_full = x_full
     elif not _add_nogood_cut(x_hat):
@@ -419,27 +438,31 @@ def solve_gbd(
         lb = mres.bound if mres.bound is not None else mres.objective
         lower_bound = float(lb) if lb is not None else None
 
-        kind, v, x_full, anchor, s = _recourse(x_hat)
+        kind, v, x_full, anchor, s, rigorous = _recourse(x_hat)
         if kind == "opt":
             if v < best_ub:
                 best_ub = v
                 incumbent_full = x_full
             _add_opt_cut(x_hat, anchor, s)
+            bound_rigorous = bound_rigorous and rigorous
         elif not _add_nogood_cut(x_hat):
             raise NotImplementedError(
                 "GBD recourse infeasible at a non-binary first-stage point; "
                 "no feasibility cut available (GBD v1)."
             )
 
-        if np.isfinite(best_ub) and lower_bound is not None:
+        # Certify optimality from the gap only when the master bound is rigorous
+        # (convex model, no primal-anchor fallback) — otherwise the lower bound
+        # may be contaminated and could prematurely certify a suboptimal point.
+        if is_convex and bound_rigorous and np.isfinite(best_ub) and lower_bound is not None:
             gap = (best_ub - lower_bound) / (abs(best_ub) + 1e-10)
             if gap <= gap_tolerance:
                 status = "optimal"
                 break
 
-    # Final master lower bound.
+    # Final master lower bound — reported only when rigorous.
     bound = None
-    if is_convex:
+    if is_convex and bound_rigorous:
         final = _solve_master(with_eta=True)
         if final.status == SolveStatus.OPTIMAL:
             lb = final.bound if final.bound is not None else final.objective
