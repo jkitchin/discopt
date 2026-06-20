@@ -71,6 +71,7 @@ def _append_relax_rows(milp, A_rows, b_rows) -> None:
         milp._A_ub = np.vstack([np.asarray(milp._A_ub), R.toarray()])
         milp._b_ub = np.concatenate([np.asarray(milp._b_ub), b])
 
+
 # When a per-node wall-clock budget is threaded through solve_at_node, no single
 # internal re-solve is handed less than this floor (keeps a node that straddles
 # the deadline from receiving a zero/negative budget the backend would reject).

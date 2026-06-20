@@ -147,9 +147,7 @@ def test_fractional_power_of_affine_base_in_power_form_closes():
     assert has_factorable_work(m), "affine-base power-form fractional power must be liftable"
 
     res = m.solve(time_limit=30, gap_tolerance=1e-4, max_nodes=20_000)
-    assert res.status == "optimal", (
-        f"(x+y)**0.5 did not certify optimality (status={res.status})"
-    )
+    assert res.status == "optimal", f"(x+y)**0.5 did not certify optimality (status={res.status})"
     assert res.node_count <= 200, (
         f"(x+y)**0.5 took {res.node_count} nodes — the loose power-form envelope "
         "regression may have returned"
