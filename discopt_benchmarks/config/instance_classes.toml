@@ -33,9 +33,9 @@ nvs16 = "nonconvex_minlp"
 nvs21 = "nonconvex_minlp"
 
 # MILP/QP instances
-gear = "milp"
-gear3 = "milp"
-gear4 = "milp"
+gear = "nonconvex_minlp"  # corrected: nonlinear gear-ratio obj + integers
+gear3 = "nonconvex_minlp"  # corrected: nonlinear gear-ratio obj + integers
+gear4 = "nonconvex_minlp"  # corrected: nonlinear gear-ratio obj + integers
 chance = "nonconvex_minlp"
 dispatch = "nonconvex_minlp"
 meanvar = "qp"
