@@ -165,6 +165,7 @@ def test_inject_all_graceful_on_plain_model():
         "complementarity": 0,
         "gp_monomial": 0,
         "gp_constraint": 0,
+        "signed_signomial_constraint": 0,
     }
 
 
@@ -175,6 +176,7 @@ def test_inject_all_fires_square_diff_on_gas():
     assert counts["complementarity"] == 0
     assert counts["gp_monomial"] == 0
     assert counts["gp_constraint"] == 0
+    assert counts["signed_signomial_constraint"] == 0
 
 
 def test_gp_cut_is_sound():
@@ -318,3 +320,126 @@ def test_gp_constraint_skips_linear():
     m.minimize(-(x + y))
     m.subject_to(2.0 * x + 3.0 * y <= 20.0)
     assert R.inject_gp_constraint_cuts(m) == 0
+
+
+# ---------------------------------------------------------------------------
+# Constraint-level signed-signomial DC reformulation (#114/#116)
+# ---------------------------------------------------------------------------
+
+
+def test_signed_signomial_dc_cut_is_sound():
+    """T_plus(u) - S_minus(u) <= s(x) at u=log x: the DC cut never removes a
+    feasible point (tangent under Pplus, chord over Pminus)."""
+    import math
+
+    import numpy as np
+
+    # s(x) = 2 x y - 0.5 x^.5 y^.5 ; one + term, one - term.
+    plus = [(math.log(2.0), np.array([1.0, 1.0]))]
+    minus = [(math.log(0.5), np.array([0.5, 0.5]))]
+    xlb, xub = np.array([0.5, 0.5]), np.array([4.0, 4.0])
+    uL, uU = np.log(xlb), np.log(xub)
+    grid = [uL + t * (uU - uL) for t in np.linspace(0, 1, 5)]
+
+    def s_int(lc, e):
+        lo = lc + sum(a * (uL[j] if a >= 0 else uU[j]) for j, a in enumerate(e))
+        hi = lc + sum(a * (uU[j] if a >= 0 else uL[j]) for j, a in enumerate(e))
+        return lo, hi
+
+    rng = np.random.default_rng(3)
+    worst = -1e9
+    for _ in range(40000):
+        x = rng.uniform(xlb, xub)
+        u = np.array([rng.uniform(uL[j], math.log(x[j])) for j in range(2)])
+        sx = 2 * x[0] * x[1] - 0.5 * x[0] ** 0.5 * x[1] ** 0.5  # true s(x)
+        # affine secant over-estimator S_minus(u)
+        s_minus = 0.0
+        for lc, e in minus:
+            slo, shi = s_int(lc, e)
+            elo, ehi = math.exp(slo), math.exp(shi)
+            slope = (ehi - elo) / (shi - slo) if shi - slo > 1e-12 else 0.0
+            s_minus += elo + slope * (lc + e @ u - slo)
+        for u0 in grid:
+            t_plus = sum(
+                math.exp(lc + e @ u0) * (1 + (lc + e @ u - (lc + e @ u0))) for lc, e in plus
+            )
+            worst = max(worst, (t_plus - s_minus) - sx)
+    assert worst <= 1e-9  # DC cut underestimates the true s(x)
+
+
+def test_signed_signomial_constraint_fires_and_preserves_optimum():
+    def build():
+        m = dm.Model("ssg")
+        x = m.continuous("x", lb=0.5, ub=4.0)
+        y = m.continuous("y", lb=0.5, ub=4.0)
+        m.minimize(-(x + y))
+        m.subject_to(2.0 * x * y - 0.5 * x**0.5 * y**0.5 <= 20.0)
+        return m
+
+    m0, m1 = build(), build()
+    n = R.inject_signed_signomial_constraint_cuts(m1)
+    assert n == 1
+    r0 = m0.solve(time_limit=40, gap_tolerance=1e-4)
+    r1 = m1.solve(time_limit=40, gap_tolerance=1e-4)
+    assert r0.objective is not None and r1.objective is not None
+    assert r1.objective == pytest.approx(r0.objective, abs=1e-2)  # optimum unchanged
+
+
+def test_signed_signomial_fires_on_pure_negative_monomial():
+    """A single negative monomial constraint (-c*prod x^a <= b, i.e. the concave
+    monomial lower bound) is a degenerate signomial and still fires soundly."""
+
+    def build():
+        m = dm.Model("mono")
+        x = m.continuous("x", lb=0.5, ub=4.0)
+        y = m.continuous("y", lb=0.5, ub=4.0)
+        m.minimize(x + y)  # minimize -> the >=-style monomial bound is active
+        m.subject_to(-2.0 * x**0.5 * y**0.5 <= -3.0)  # i.e. 2 sqrt(xy) >= 3
+        return m
+
+    m0, m1 = build(), build()
+    n = R.inject_signed_signomial_constraint_cuts(m1)
+    assert n == 1
+    r0 = m0.solve(time_limit=40, gap_tolerance=1e-4)
+    r1 = m1.solve(time_limit=40, gap_tolerance=1e-4)
+    assert r0.objective is not None and r1.objective is not None
+    assert r1.objective == pytest.approx(r0.objective, abs=1e-2)
+
+
+def test_signed_signomial_skips_pure_posynomial():
+    """No negative term -> left to inject_gp_constraint_cuts, this pass is a no-op."""
+    m = dm.Model("pos")
+    x = m.continuous("x", lb=0.5, ub=4.0)
+    y = m.continuous("y", lb=0.5, ub=4.0)
+    m.minimize(-(x + y))
+    m.subject_to(2.0 * x * y + 3.0 * x**0.5 * y**0.5 <= 20.0)
+    assert R.inject_signed_signomial_constraint_cuts(m) == 0
+
+
+def test_signed_signomial_handles_geq_via_flip():
+    """A ``>=`` signomial is normalized to ``<= 0`` on ingest (signs flipped), so
+    it is still a signed signomial and is handled soundly (optimum preserved)."""
+
+    def build():
+        m = dm.Model("geq")
+        x = m.continuous("x", lb=0.5, ub=4.0)
+        y = m.continuous("y", lb=0.5, ub=4.0)
+        m.minimize(x + y)
+        m.subject_to(2.0 * x * y - 0.5 * x**0.5 * y**0.5 >= 1.0)
+        return m
+
+    m0, m1 = build(), build()
+    n = R.inject_signed_signomial_constraint_cuts(m1)
+    assert n == 1  # flipped body -2xy + 0.5 sqrt(xy) has a negative term -> fires
+    r0 = m0.solve(time_limit=40, gap_tolerance=1e-4)
+    r1 = m1.solve(time_limit=40, gap_tolerance=1e-4)
+    assert r0.objective is not None and r1.objective is not None
+    assert r1.objective == pytest.approx(r0.objective, abs=1e-2)
+
+
+def test_signed_signomial_fires_on_cvxnonsep_nsig30():
+    """The vendored #189 instance is a single negative monomial constraint; the
+    DC pass engages it (where the objective/posynomial passes could not)."""
+    m = dm.from_nl("python/tests/data/minlplib_nl/cvxnonsep_nsig30.nl")
+    n = R.inject_signed_signomial_constraint_cuts(m)
+    assert n == 1

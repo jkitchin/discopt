@@ -147,6 +147,7 @@ elsewhere), **new-pattern** (needs a pattern not yet implemented), **search/infr
 | `inject_complementarity` | #231 | `x·y = 0` (or `<= 0`), `x,y>=0` → cut `x/x_ub + y/y_ub <= 1` |
 | `inject_gp_cuts` (GP log-lift) | #189, #181 | objective monomial `c·∏ x_j^{a_j}` (n>=2, a_j>0) → `u_j <= log x_j` lift + aux `t` + tangent cuts `t >= exp(s0)(1+s-s0)` |
 | `inject_gp_constraint_cuts` (P16 constraint GP) | #116 | posynomial `<=` constraint `Σ_k c_k∏ x_j^{a_kj} <= b` (a_kj>=0) → `u_j <= log x_j` lift + OA cuts `Σ_k exp(s_k0)(1+s_k−s_k0) <= b` |
+| `inject_signed_signomial_constraint_cuts` (P17 DC) | #114, #116 | signed-signomial `<=` constraint with a negative term → DC log-lift: OA tangents under `Pplus`, affine secant over `Pminus`, cut `T_plus − S_minus <= b` (any real exponents; both senses) |
 
 Bilinear (P3) and linear-fractional (P4) are intentionally **not** wired: the
 relaxation compiler already emits those envelopes, so a detector would be
@@ -171,6 +172,26 @@ bilinear); its looseness is an OBBT / separable-quadratic-cut problem (#208), no
 one of the implemented patterns. The earlier "GP closes the relaxation part of
 #189" hope is **retracted** — the implemented pass does not help these
 instances.
+
+**Constraint-level passes P16/P17 — built, and the honest measurement.** The
+constraint-level GP (P16, `inject_gp_constraint_cuts`) and signed-signomial DC
+(P17, `inject_signed_signomial_constraint_cuts`) passes now close the "objective
+only" gap above. On inspection `cvxnonsep_nsig30`'s single constraint is **one
+negative monomial** `−0.2·∏ x_j^{a_j} ≤ −1` (i.e. the concave bound
+`0.2·∏ x_j^{a_j} ≥ 1`), not a posynomial — so P16 correctly skips it and **P17
+fires** (it is a degenerate signed signomial). Measured before/after:
+
+| Instance | P16 | P17 | obj | bound | nodes | note |
+|---|---|---|---|---|---|---|
+| `cvxnonsep_nsig30` | skip | **fires (1)** | 130.6287 (unchanged) | 130.6287 (unchanged) | 263 → 263 | sound + optimum-preserving, but **no bound/node gain** — discopt already relaxes this single concave-monomial constraint tightly |
+| synthetic posynomial `≤` GP | fires | skip | unchanged | root-tight (~3 nodes) | — | sound; no measurable root gap (native McCormick already tight) |
+
+Honest conclusion: P16/P17 are **sound, optimum-preserving, and fire on the right
+structures**, but on the vendored corpus instances discopt's native relaxation is
+already tight enough that the lift adds no measurable bound/node improvement. Their
+payoff is on instances where the *separable* box relaxation of a coupled
+posynomial/signomial constraint is genuinely loose; the corpus instances here are
+not that case. No correctness claim is overstated.
 
 ## Fix-and-comment workflow
 

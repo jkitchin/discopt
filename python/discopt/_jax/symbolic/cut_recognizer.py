@@ -633,6 +633,7 @@ def inject_all_patterns(model, **kwargs) -> dict:
     counts["complementarity"] = inject_complementarity(model)
     counts["gp_monomial"] = inject_gp_cuts(model)
     counts["gp_constraint"] = inject_gp_constraint_cuts(model)
+    counts["signed_signomial_constraint"] = inject_signed_signomial_constraint_cuts(model)
     return counts
 
 
@@ -856,5 +857,202 @@ def inject_gp_constraint_cuts(model, *, samples: int = 5, max_cuts: int = 12) ->
                 e0 = math.exp(s0)
                 cut = cut + e0 * (1.0 + (s_expr_of(log_c, ex) - s0))
             model.subject_to(cut <= b, name=f"gpc_oa_{applied}_{c_idx}")
+        applied += 1
+    return applied
+
+
+# ---------------------------------------------------------------------------
+# Constraint-level signed-signomial DC reformulation (P17, issues #114/#116)
+# ---------------------------------------------------------------------------
+
+
+def _signed_monomial(term):
+    """Decompose one additive term into ``(coeff, {sym: exp})`` or ``None``.
+
+    Unlike :func:`log_curvature.is_monomial` this accepts a **signed** coefficient
+    (the sign is what makes a signomial differ from a posynomial). Returns
+    ``None`` if the term is not ``coeff * prod_j sym_j**a_j`` over symbols.
+    """
+    coeff, rest = term.as_coeff_Mul()
+    if not (coeff.is_number and coeff.is_real) or float(coeff) == 0.0:
+        return None
+    c = float(coeff)
+    exps: dict = {}
+    for f in rest.args if isinstance(rest, sp.Mul) else (rest,):
+        if f == 1:
+            continue
+        if isinstance(f, sp.Symbol):
+            exps[f] = exps.get(f, 0.0) + 1.0
+        elif isinstance(f, sp.Pow) and isinstance(f.base, sp.Symbol):
+            if not (f.exp.is_number and f.exp.is_real):
+                return None
+            exps[f.base] = exps.get(f.base, 0.0) + float(f.exp)
+        else:
+            return None  # a transcendental / compound factor -> not a monomial
+    exps = {s: e for s, e in exps.items() if e != 0.0}
+    return c, exps
+
+
+def _signomial_terms(body):
+    """Decompose ``body`` into signed monomials ``[(coeff, {sym: exp}), ...]``.
+
+    Returns ``None`` unless every additive term is a signed monomial and at least
+    one term is genuinely nonlinear (a product of >=2 variables or a non-unit
+    power) — a purely affine body needs no lift.
+    """
+    out = []
+    nonlinear = False
+    for term in sp.Add.make_args(body):
+        sm = _signed_monomial(term)
+        if sm is None:
+            return None
+        c, ex = sm
+        if not ex:
+            return None  # a bare constant should have been folded into the RHS
+        if len(ex) >= 2 or any(abs(a - 1.0) > 1e-12 for a in ex.values()):
+            nonlinear = True
+        out.append((c, ex))
+    return out if nonlinear else None
+
+
+def inject_signed_signomial_constraint_cuts(model, *, samples: int = 5, max_cuts: int = 12) -> int:
+    """Convexify signed-signomial ``<=`` constraints via a DC log-lift (#114/#116).
+
+    A constraint ``s(x) <= b`` whose body is a *signed* signomial
+    ``s(x) = sum_k sigma_k c_k prod_j x_j^{a_kj}`` (``c_k > 0``, ``sigma_k = +/-1``,
+    ``x_j > 0``) is, after ``u_j = log x_j``, a **difference of convex** functions
+
+        s(u) = Pplus(u) - Pminus(u),     Pplus, Pminus convex (sums of exp-affine),
+
+    where ``Pplus`` collects the ``+`` monomials and ``Pminus`` the ``-`` monomials.
+    The constraint ``Pplus(u) - Pminus(u) <= b`` is relaxed convexly by
+
+    * **under**-estimating the convex ``Pplus`` with outer-approximation tangents
+      ``T_plus(u) = sum_{k in +} exp(s_k0)(1 + s_k - s_k0) <= Pplus(u)`` at a grid
+      of expansion points, and
+    * **over**-estimating the convex ``Pminus`` with its affine box **secant**
+      ``S_minus(u) = sum_{k in -} [exp(s_k^lo) + slope_k (s_k - s_k^lo)] >= Pminus(u)``
+      (the chord of each 1-D convex ``exp(s_k)`` over ``s_k in [s_k^lo, s_k^hi]``;
+      a chord of a convex function lies above it),
+
+    giving the valid linear cut ``T_plus(u) - S_minus(u) <= b``.
+
+    Returns the number of constraints reformulated.
+
+    Soundness (no feasible ``x`` removed). Add the convex link ``u_j <= log x_j``
+    (admits ``u_j = log x_j``). At ``u_j = log x_j`` every monomial ``exp(s_k)``
+    equals the true ``x``-monomial, so ``T_plus <= Pplus(x)`` (tangent under a
+    convex function) and ``S_minus >= Pminus(x)`` (chord over a convex function);
+    hence ``T_plus - S_minus <= Pplus(x) - Pminus(x) = s(x) <= b``. So for any
+    feasible ``x`` the witness ``u = log x`` satisfies the link and every cut —
+    the augmented model still contains ``x``. This holds for **any** real
+    exponents (the secant/tangent bounds do not depend on exponent sign), unlike
+    the pure-posynomial pass which needs ``a_kj >= 0``.
+
+    Scope. Every inequality row is normalized to ``expr <= 0`` on ingest (a ``>=``
+    row is sign-flipped), so this fires on **either** sense whenever the
+    normalized body is a signed signomial with at least one negative term and at
+    least one nonlinear monomial. Pure posynomials (no negative term) are left to
+    :func:`inject_gp_constraint_cuts`; a flipped ``>=`` posynomial keeps a negative
+    term and so is handled here.
+    """
+    import math
+
+    import discopt.modeling as dm
+
+    sm = model_to_sympy(model)
+    handles = _handle_map(model)
+    reverse = {sym: key for key, sym in sm.symbols.items()}
+    applied = 0
+    for _name, expr in sm.inequalities:
+        free = list(expr.free_symbols)
+        if not free:
+            continue
+        const_part, body = expr.as_independent(*free, as_Add=True)
+        if const_part.free_symbols:
+            continue
+        b = -float(const_part)
+        if not math.isfinite(b):
+            continue
+
+        terms = _signomial_terms(body)
+        if terms is None:
+            continue
+        if not any(c < 0 for c, _ in terms):
+            continue  # pure posynomial -> inject_gp_constraint_cuts handles it
+
+        var_syms = sorted({s for _c, ex in terms for s in ex}, key=str)
+        info = {}
+        valid = True
+        for s in var_syms:
+            bnd = sm.bounds.get(s)
+            key = reverse.get(s, "")
+            if bnd is None or bnd[0] is None or bnd[0] <= 0 or not bnd[1] or not key:
+                valid = False
+                break
+            info[s] = (key, float(bnd[0]), float(bnd[1]))
+        if not valid:
+            continue
+
+        u_for: dict = {}
+        for s in var_syms:
+            key, xl, xu = info[s]
+            u = model.continuous(f"u_ssg_{applied}_{len(u_for)}", lb=math.log(xl), ub=math.log(xu))
+            model.subject_to(u <= dm.log(handles[key]), name=f"ssg_link_{applied}_{key}")
+            u_for[s] = u
+
+        u_lo = {s: math.log(info[s][1]) for s in var_syms}
+        u_hi = {s: math.log(info[s][2]) for s in var_syms}
+
+        def s_expr_of(log_c, ex):  # affine model expr  log c_k + sum_j a_kj u_j
+            e = float(log_c)
+            for s, a in ex.items():
+                e = e + float(a) * u_for[s]
+            return e
+
+        def s_interval(log_c, ex):  # [s_lo, s_hi] of s_k over the u-box
+            lo = hi = float(log_c)
+            for s, a in ex.items():
+                a = float(a)
+                lo += a * (u_lo[s] if a >= 0 else u_hi[s])
+                hi += a * (u_hi[s] if a >= 0 else u_lo[s])
+            return lo, hi
+
+        plus = [(math.log(c), ex) for c, ex in terms if c > 0]
+        minus = [(math.log(-c), ex) for c, ex in terms if c < 0]
+
+        # Affine secant over-estimator of the convex Pminus (a single expression).
+        s_minus = 0.0
+        for log_c, ex in minus:
+            slo, shi = s_interval(log_c, ex)
+            elo, ehi = math.exp(slo), math.exp(shi)
+            slope = (ehi - elo) / (shi - slo) if shi - slo > 1e-12 else 0.0
+            s_minus = s_minus + (elo + slope * (s_expr_of(log_c, ex) - slo))
+
+        # Expansion points for the Pplus OA: diagonal grid + per-variable "high".
+        # With no ``+`` part there is nothing convex to expand: one secant-only cut
+        # (an empty expansion point ``{}`` makes ``T_plus`` collapse to 0).
+        points: list[dict] = [{}]
+        if plus:
+            u_mid = {s: 0.5 * (u_lo[s] + u_hi[s]) for s in var_syms}
+            points = []
+            diag = samples if samples > 1 else 1
+            for i in range(diag):
+                tau = 0.0 if diag == 1 else i / (diag - 1)
+                points.append({s: u_lo[s] + tau * (u_hi[s] - u_lo[s]) for s in var_syms})
+            for s in var_syms:
+                if len(points) >= max_cuts:
+                    break
+                pt = dict(u_mid)
+                pt[s] = u_hi[s]
+                points.append(pt)
+
+        for c_idx, pt in enumerate(points[:max_cuts]):
+            t_plus = 0.0
+            for log_c, ex in plus:
+                s0 = float(log_c) + sum(float(a) * pt[s] for s, a in ex.items())
+                e0 = math.exp(s0)
+                t_plus = t_plus + e0 * (1.0 + (s_expr_of(log_c, ex) - s0))
+            model.subject_to(t_plus - s_minus <= b, name=f"ssg_dc_{applied}_{c_idx}")
         applied += 1
     return applied

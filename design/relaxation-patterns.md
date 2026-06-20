@@ -149,6 +149,31 @@ the envelope engine), **roadmap** (proof given here, implementation pending).
 - `cut_recognizer.inject_gp_constraint_cuts`; soundness, firing, optimum-
   preservation and skip-cases certified in `test_cut_recognizer.py`.
 
+### P17. Constraint-level signed-signomial DC `s(x) ≤ b` (`x_j>0`) — **done** (#114/#116)
+- **Fields:** signomial global optimization — chemical process synthesis, structural
+  design, RF/analog circuits, anywhere a constraint mixes posynomial growth with
+  negative (subtractive) signomial terms.
+- **Template:** a `≤` (or sign-flipped `≥`) constraint whose body is a *signed*
+  signomial `s(x) = Σ_k σ_k c_k·∏_j x_j^{a_kj}`, `c_k>0`, `σ_k=±1`, with at least
+  one `σ_k = −1` term (pure posynomials go to P16) and any real exponents.
+- **Relaxation:** lift `u_j = log x_j`; `s(u) = Pplus(u) − Pminus(u)` is a
+  **difference of convex** functions (each monomial `exp(s_k)`, `s_k` affine, is
+  convex). Relax convexly by **under**-estimating `Pplus` with OA tangents
+  `T_plus(u) = Σ_{+} exp(s_k0)(1+s_k−s_k0)` and **over**-estimating `Pminus` with
+  its affine box **secant** `S_minus(u) = Σ_{−}[exp(s_k^lo)+slope_k(s_k−s_k^lo)]`,
+  giving the linear cut `T_plus(u) − S_minus(u) ≤ b` plus the convex link
+  `u_j ≤ log x_j`.
+- **Correctness:** at `u_j = log x_j` each monomial is exact, the tangent
+  underestimates the convex `Pplus` and the chord overestimates the convex
+  `Pminus`, so `T_plus − S_minus ≤ Pplus(x) − Pminus(x) = s(x) ≤ b`; the witness
+  `u = log x` satisfies link + every cut, so no feasible `x` is removed. Holds for
+  **any** real exponents (the bound directions are exponent-sign-independent),
+  generalizing P16. *Lundell & Westerlund, signomial global optimization (SGO);
+  Khajavirad, Michalek & Sahinidis (2012), convex-transformable intermediates.*
+- `cut_recognizer.inject_signed_signomial_constraint_cuts`; soundness (40k-point
+  sampling), firing, optimum-preservation, both-sense and skip-case tests in
+  `test_cut_recognizer.py`. The secant scales linearly (no `2^n` corner blowup).
+
 ---
 
 ## Tier 5 — Domain-specific (roadmap, proven here)
