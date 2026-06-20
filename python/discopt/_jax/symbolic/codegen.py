@@ -33,7 +33,8 @@ def _to_jax(expr: sp.Expr, args: list[sp.Symbol]) -> Callable:
     ``Abs``, ``Heaviside``) and transcendentals render to ``jax.numpy`` calls
     rather than Python conditionals — the latter break under ``jax.vmap``.
     """
-    return sp.lambdify(args, expr, modules="jax")
+    fn: Callable = sp.lambdify(args, expr, modules="jax")
+    return fn
 
 
 def lambdify_envelope(result: EnvelopeResult) -> Callable:
@@ -65,6 +66,11 @@ def lambdify_envelope(result: EnvelopeResult) -> Callable:
 
     # Single-inflection: lambdify the closed-form tangent points when available,
     # else leave them None so the runtime solves them numerically per box.
+    assert (
+        result.inflection is not None
+        and result.cv_tangent is not None
+        and result.cc_tangent is not None
+    )
     c = float(result.inflection)
     cv_tan: Tangent = result.cv_tangent
     cc_tan: Tangent = result.cc_tangent
