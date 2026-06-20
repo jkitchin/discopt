@@ -168,6 +168,24 @@ def test_nvs16_full_solve_does_not_anchor_on_garbage_bound():
     assert r.bound <= 0.703125 + 1e-3, f"unsound bound {r.bound} > optimum 0.703125"
 
 
+@pytest.mark.slow
+def test_nvs05_certifies_under_default_via_auto_rlt():
+    """Build-time level-1 RLT is auto-engaged for *small* nonconvex models under
+    the default ``rlt="auto"`` (gated by ``_AUTO_RLT_LEVEL1_MAX_VARS``). Its
+    root-bound tightening lifts nvs05's bound from the cut-less ~2.02 to the
+    optimum, so nvs05 now certifies under the DEFAULT solve config — previously it
+    stalled at a 6.94 incumbent against a 2.02 bound (a frozen ~63% gap) unless
+    ``rlt=True`` was passed explicitly. Large models stay excluded (the
+    constraint×bound product rows blow up the per-node LP — casctanks, 500 vars)."""
+    m = dm.from_nl(str(_DATA / "nvs05.nl"))
+    r = m.solve(time_limit=60)  # DEFAULT config (no rlt kwarg)
+    assert r.objective is not None and abs(r.objective - 5.4709) < 1e-2
+    assert r.bound is not None and math.isfinite(r.bound)
+    assert r.bound <= 5.4709 + 1e-3, f"unsound bound {r.bound}"
+    # Auto-RLT engaged: the bound is far past the ~2.02 cut-less baseline.
+    assert r.bound >= 5.0, f"auto level-1 RLT did not tighten nvs05's bound: {r.bound}"
+
+
 # Recorded baselines: the standard McCormick root bound (RLT off) for the two
 # bucket-1 instances #175 targets. The tightness lock below guards against
 # silently reverting below these.

@@ -203,6 +203,13 @@ _PER_NODE_OBBT_BUDGET_FRAC = 0.6
 _PER_NODE_OBBT_PER_NODE_S = 3.0
 _PER_NODE_OBBT_PER_LP_S = 0.3
 _PER_NODE_OBBT_ROUNDS = 3
+# Auto build-time level-1 RLT gate. ``rlt="auto"`` (the default) leaves build-time
+# level-1 RLT off, but its root-bound tightening certifies several small nonconvex
+# instances the per-node-only policy leaves open (nvs05: a 6.94 incumbent with a
+# 2.02 bound -> certified 5.4709). The constraint×bound product rows make the
+# per-node LP catastrophically slow on large models (casctanks, 500 vars: 359 s
+# for one node), so it is auto-engaged only at or below this lifted-variable count.
+_AUTO_RLT_LEVEL1_MAX_VARS = 50
 # Floor on the time budget handed to the end-of-solve root-relaxation fallback
 # bound (issue #138). On a hard nonconvex minimize the B&B loop can consume the
 # entire `time_limit` and exit uncertified, leaving no time for the rigorous
@@ -3435,6 +3442,15 @@ def solve_model(
         else:  # "auto" (or any unrecognized value) → let the policy decide
             _rlt_on = None
         _eff_rlt_cuts = True if _rlt_on else rlt_cuts
+        # Under "auto", additionally engage build-time level-1 RLT (root-bound
+        # tightening) on small models — it certifies instances the per-node cut
+        # policy alone leaves open (nvs05) at negligible LP cost, while staying off
+        # large models where the product rows blow up the per-node LP (casctanks).
+        # The per-node cut family is untouched (this only adds the root tightening),
+        # and RLT is sound, so this trades bound tightness for size, never
+        # correctness. An explicit rlt=True/False still wins.
+        _auto_rlt_level1 = _rlt_on is None and n_vars <= _AUTO_RLT_LEVEL1_MAX_VARS
+        _eff_rlt_level1 = bool(_rlt_on) or _auto_rlt_level1
 
         # The spatial path needs at least one variable it can branch on: a
         # finite-box continuous variable to bisect, or (issue #194) an integer
@@ -3450,7 +3466,7 @@ def solve_model(
                 superposition=(relaxation_arithmetic == "superposition"),
                 psd_cuts=psd_cuts,
                 rlt_cuts=_eff_rlt_cuts,
-                rlt_level1=bool(_rlt_on),
+                rlt_level1=_eff_rlt_level1,
             )
         except Exception as e:
             logger.warning("McCormick LP relaxer setup failed: %s", e)
