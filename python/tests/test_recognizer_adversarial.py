@@ -31,7 +31,12 @@ TL = 25
 
 
 def _opt(model):
-    r = model.solve(time_limit=TL, gap_tolerance=1e-4)
+    # Disable the auto-engaged structure-cut presolve so these tests isolate the
+    # MANUAL inject_all_patterns under test: otherwise the presolve also injects on
+    # the baseline solve and accumulates with the manual cuts across the helper's
+    # repeated solve+inject on one model object. The auto-presolve has its own
+    # dedicated tests in test_cut_recognizer.py.
+    r = model.solve(time_limit=TL, gap_tolerance=1e-4, structure_cuts=False)
     return r.status, (None if r.objective is None else float(r.objective))
 
 
