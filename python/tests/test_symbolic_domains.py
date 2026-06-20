@@ -143,3 +143,60 @@ def test_sin_angle_matches_engine_construction_on_single_inflection_proxy():
     cv_s, cc_s = relax_s(xs, lbs, ubs)
     assert jnp.allclose(cv_h, cv_s, atol=1e-7)
     assert jnp.allclose(cc_h, cc_s, atol=1e-7)
+
+
+# --------------------------------------------------------------------------
+# End-to-end: relaxation compiler auto-routes x*log(x) to the tight envelope
+# --------------------------------------------------------------------------
+
+
+def test_compiler_routes_xlogx_pattern():
+    """The compiler detects ``x * log(x)`` and routes it to the dedicated convex
+    envelope (tighter than the generic bilinear of ``x`` and ``log(x)``), end to
+    end, on a positive box. Asserts soundness (``cv <= f <= cc``) and that the
+    routed result matches the standalone ``xlogx_relax`` closure."""
+    import discopt.modeling as M
+    import numpy as np
+    from discopt._jax.relaxation_compiler import compile_relaxation
+    from discopt.modeling.core import Model
+
+    m = Model("entropy")
+    x = m.continuous("x", lb=0.5, ub=5.0)
+    m.minimize(x * M.log(x))
+    expr = x * M.log(x)
+
+    relax_fn = compile_relaxation(expr.expression if hasattr(expr, "expression") else expr, m)
+    lb = jnp.array([0.5])
+    ub = jnp.array([5.0])
+    for xv in np.linspace(0.5, 5.0, 60):
+        xa = jnp.array([float(xv)])
+        cv, cc = relax_fn(xa, xa, lb, ub)
+        true = float(xv) * np.log(float(xv))
+        assert float(cv) <= true + 1e-6, f"unsound cv at x={xv}: {float(cv)} > {true}"
+        assert float(cc) >= true - 1e-6, f"unsound cc at x={xv}: {float(cc)} < {true}"
+        # Routed result == standalone closure (i.e. the dispatch fired).
+        cv_x, cc_x = chemeng.xlogx_relax(jnp.array(float(xv)), 0.5, 5.0)
+        assert float(cv) == pytest.approx(float(cv_x), abs=1e-7)
+        assert float(cc) == pytest.approx(float(cc_x), abs=1e-7)
+
+
+def test_compiler_xlogx_detector_no_misfire():
+    """The x*log(x) detector fires only on a bare variable times log of the SAME
+    variable — not on different variables, squares, or other transcendentals."""
+    import discopt.modeling as M
+    from discopt._jax.relaxation_compiler import _try_extract_xlogx
+    from discopt.modeling.core import Model
+
+    m = Model("t")
+    x = m.continuous("x", lb=0.5, ub=5.0)
+    y = m.continuous("y", lb=0.5, ub=5.0)
+
+    def ex(e):
+        return e.expression if hasattr(e, "expression") else e
+
+    assert _try_extract_xlogx(ex(x * M.log(x)), m) is not None
+    assert _try_extract_xlogx(ex(M.log(x) * x), m) is not None
+    assert _try_extract_xlogx(ex(x * M.log(y)), m) is None  # different variable
+    assert _try_extract_xlogx(ex(x * x), m) is None  # no log
+    assert _try_extract_xlogx(ex(x * M.exp(x)), m) is None  # not log
+    assert _try_extract_xlogx(ex(M.log(x) * M.log(x)), m) is None  # no bare var

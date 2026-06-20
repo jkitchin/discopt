@@ -166,6 +166,29 @@ def _try_extract_signed_abs_product(expr: Expression, model: Model) -> int | Non
     return None
 
 
+def _try_extract_xlogx(expr: Expression, model: Model) -> int | None:
+    """Detect the entropy/mixing term ``x * log(x)`` over a single scalar variable.
+
+    Matches ``Mul(v, log(v))`` and ``Mul(log(v), v)`` where the bare variable factor
+    and the ``log`` argument resolve to the *same* scalar offset. Returns that flat
+    offset on match, else ``None``. Routes to the dedicated convex envelope of
+    ``x ln x`` (:func:`discopt._jax.symbolic.domains.chemeng.xlogx_relax`) — tighter
+    than the generic bilinear product of ``v`` and ``log(v)``. The envelope is valid
+    only for ``v > 0`` (the term's natural domain), so the runtime dispatch uses it
+    only when the node's lower bound is positive and otherwise falls back to the
+    bilinear.
+    """
+    if not (isinstance(expr, BinaryOp) and expr.op == "*"):
+        return None
+    for factor, other in ((expr.left, expr.right), (expr.right, expr.left)):
+        if isinstance(other, FunctionCall) and other.func_name == "log" and len(other.args) == 1:
+            off = _resolve_scalar_var_offset(factor, model)
+            off_log = _resolve_scalar_var_offset(other.args[0], model)
+            if off is not None and off == off_log:
+                return off
+    return None
+
+
 def _try_extract_signomial_factors(
     expr: Expression, model: Model
 ) -> list[tuple[int, float]] | None:
@@ -364,6 +387,52 @@ def _compile_relax_node(
 
                     def fn(x_cv, x_cc, lb, ub, _off=gas_off, _wr=weymouth_relax):
                         return _wr(x_cv[_off], lb[_off], ub[_off])
+
+                    return fn
+
+            # x*log(x) entropy/mixing term over a single scalar variable. Routes to
+            # the dedicated convex envelope (tighter than the bilinear of x and
+            # log(x)) when x is provably positive at this node; otherwise — and when
+            # the optional [sympy]-derived domain pack is absent — falls back to the
+            # generic bilinear. Sound by construction: the tight branch is taken only
+            # where the envelope is valid (lb > _XLOGX_POS_FLOOR), so the positivity
+            # clamp below is always a no-op there and never shrinks the actual box.
+            xlogx_off = _try_extract_xlogx(expr, model)
+            if xlogx_off is not None:
+                try:
+                    from discopt._jax.symbolic.domains.chemeng import xlogx_relax
+                except ImportError:
+                    xlogx_relax = None  # type: ignore[assignment]
+                if xlogx_relax is not None:
+                    _XLOGX_POS_FLOOR = 1e-9
+
+                    def fn(
+                        x_cv,
+                        x_cc,
+                        lb,
+                        ub,
+                        _off=xlogx_off,
+                        _xl=xlogx_relax,
+                        _flo=_XLOGX_POS_FLOOR,
+                    ):
+                        # Tight branch is used only where lb > _flo, so flooring the
+                        # inputs at _flo is a no-op exactly when this value is kept;
+                        # it exists solely to keep the jnp.where-discarded branch from
+                        # evaluating log of a non-positive number and NaN-poisoning the
+                        # gradient on an lb<=0 node. The box is never shrunk where used.
+                        _x = jnp.maximum(x_cv[_off], _flo)
+                        _l = jnp.maximum(lb[_off], _flo)
+                        _u = jnp.maximum(ub[_off], _l)
+                        cv_t, cc_t = _xl(_x, _l, _u)
+                        # Generic bilinear fallback (the status-quo relaxation of
+                        # x*log(x)) for non-positive / undefined-domain nodes.
+                        cv_l, cc_l = left_fn(x_cv, x_cc, lb, ub)
+                        cv_r, cc_r = right_fn(x_cv, x_cc, lb, ub)
+                        mid_l = 0.5 * (cv_l + cc_l)
+                        mid_r = 0.5 * (cv_r + cc_r)
+                        cv_bl, cc_bl = relax_bilinear(mid_l, mid_r, cv_l, cc_l, cv_r, cc_r)
+                        pos = lb[_off] > _flo
+                        return jnp.where(pos, cv_t, cv_bl), jnp.where(pos, cc_t, cc_bl)
 
                     return fn
 
