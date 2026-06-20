@@ -122,9 +122,26 @@ On the issue-#15 gas benchmark the **fully automated** pipeline reproduces the
 hand-derived cut and closes discopt's relaxation gap from **66.7% to 0%** (root
 bound 1.0 → 3.0026 = global optimum; 805 nodes / 92 s timeout → 5 nodes / 7 s
 certified). For reference, SCIP 10.0 solves the same instance in 0.31 s — the
-remaining distance is generality of the automatic derivation, not the math. Next
-step: wire the derived cuts into the relaxation compiler / OBBT so the derivation
-fires automatically from the model graph (no per-instance script).
+remaining distance is generality of the automatic derivation, not the math.
+
+### Recognizer presolve pass (delivered)
+
+`symbolic/cut_recognizer.py` adds the recognition layer that supplies the chain
+to `constraint_cuts` **automatically from the model graph** — no hand-fed
+equations. It (1) translates the objective + `==` constraints to SymPy, (2)
+union-finds flow aliases and detects fixed flows, (3) finds bilinear-concave
+objective terms `coef·x·(y^k−1)`, (4) locates `y`'s ratio equality, expresses the
+inlet/outlet pressure squares in the flow via their Weymouth rows, and FBBTs the
+terminal pressure's lower bound from a fixed-flow demand row, then (5) derives +
+certifies the cut and rewrites the objective with auxiliary lower-bounding
+variables (`recognize_and_inject`).
+
+On the **unmodified** `build_gas_network_minlp()`, `recognize_and_inject(m)`
+auto-derives and injects 2 cuts and the solve closes **66.7% → 0%** (bound 1.0 →
+3.0026, 809 → 5 nodes, 96 s timeout → 12 s certified). Non-matching models yield
+no cuts (graceful fallback). Scope is the square-difference-network class
+(gas/water pipe+compressor/pump networks); broadening the recognizer and hooking
+it as an opt-in presolve in `solver.py` is the next step.
 
 ## Phase 7 — Docs & dissemination
 
