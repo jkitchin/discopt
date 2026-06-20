@@ -99,10 +99,10 @@ def test_bound_active_recourse_is_sound(vub):
     ``min y - v`` s.t. ``v <= vub*y``, ``v in [0, vub]``. At y=1 the row
     ``v <= vub`` and the bound ``v <= vub`` both bind; an interior-point LP
     splits the marginal between them, so the recourse *row* dual is only half
-    the true sensitivity. A cut anchored at the reconstructed dual value
-    ``lam^T r`` then lands at ``-vub/2`` instead of the true ``Q = -vub`` and
-    prunes the optimum (reported lower bound ``-vub/2`` > optimum ``-vub``).
-    Primal-anchored cuts (``eta >= Q(x̂) + s^T(x-x̂)``) stay sound.
+    the true sensitivity. A cut from the row duals alone lands at ``-vub/2``
+    instead of the true ``-vub`` and prunes the optimum — the complete-dual cut
+    (row duals + variable reduced costs) restores the missing bound term and
+    stays sound.
     """
     m = dm.Model("bnd")
     y = m.binary("y")
@@ -115,6 +115,40 @@ def test_bound_active_recourse_is_sound(vub):
     assert r.objective == pytest.approx(opt, rel=1e-4)
     assert r.bound is not None
     assert r.bound <= opt + 1e-3 * (1 + abs(opt)), f"unsound bound {r.bound} > optimum {opt}"
+
+
+def test_equality_coupling_suboptimal_primal_is_sound():
+    """Regression: equality coupling + a degenerate recourse where an
+    interior-point solve can return a slightly *suboptimal* primal.
+
+    With an equality constraint (split into two ``<=`` rows that both bind) and
+    tight capacity coupling, POUNCE occasionally returns a recourse primal a hair
+    above the true optimum together with a near-zero coupling-row dual, yielding a
+    nearly-flat optimality cut ``eta >= Q_suboptimal``. Anchored at that primal it
+    over-cuts (reported lower bound exceeds the incumbent — a false ``optimal``
+    certificate). The complete-dual cut (``<= Q_true`` by weak duality) stays
+    sound. Instance is the seed-555 t=37 case found by adversarial testing.
+    """
+    cy = np.array([2.83085168, 1.49786461])
+    cx = np.array([1.48384495, 2.21570648, 2.6325476])
+    cap = np.array([2.16214416, 2.85835275, 3.08819464])
+    dem = 4.746103
+    m = dm.Model("eqc")
+    y = m.binary("y", shape=(2,))
+    x = m.continuous("x", shape=(3,), lb=0, ub=5)
+    m.first_stage(y)
+    m.minimize(
+        sum(float(cy[i]) * y[i] for i in range(2)) + sum(float(cx[j]) * x[j] for j in range(3))
+    )
+    m.subject_to(sum(x[j] for j in range(3)) == dem)
+    for j in range(3):
+        m.subject_to(x[j] <= float(cap[j]) * y[j % 2])
+    r = solve_benders(m, time_limit=60)
+    assert r.status == "optimal"
+    assert r.bound is not None
+    # The reported lower bound must never exceed the incumbent objective.
+    assert r.bound <= r.objective + 1e-4, f"unsound bound {r.bound} > incumbent {r.objective}"
+    assert r.objective == pytest.approx(12.84146, abs=1e-3)
 
 
 def test_bound_is_valid_for_maximize():

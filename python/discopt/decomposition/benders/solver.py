@@ -10,18 +10,22 @@ Algorithm (minimization, internally):
 Master:  min c_x^T x + eta   s.t. A_m x <= r_m  +  accumulated Benders cuts.
 Subproblem at x̂:  min c_y^T y  s.t. A_y y <= r - A_x x̂.
 
-- Feasible subproblem → **optimality cut** ``eta >= Q(x̂) + s^T (x - x̂)`` with
-  slope ``s = -A_x^T lam`` from the recourse-LP row duals ``lam``.
-- Infeasible subproblem → **feasibility cut** ``v(x̂) + s^T (x - x̂) <= 0`` from a
-  slack-penalized always-feasible LP, excluding x̂.
+- Feasible subproblem → **optimality cut** ``eta >= lam^T(r - A_x x) + bt``.
+- Infeasible subproblem → **feasibility cut** ``lam_f^T(r - A_x x) + bt_f <= 0``
+  from a slack-penalized always-feasible LP, excluding x̂.
 
-Every cut is anchored at the **primal** recourse value (``Q(x̂)`` / ``v(x̂)``),
-which is exact at x̂; the row-dual slope is a subgradient of the convex LP value
-function. Primal anchoring stays sound even when the recourse optimum is partly
-set by variable bounds (where the row duals are an *incomplete* dual solution)
-and with POUNCE's interior-point duals — so the solver runs on whichever LP/MILP
-backend is installed (**no HiGHS dependency**: the POUNCE stack does it all), and
-the master objective is a rigorous lower bound.
+Every cut is the **complete LP dual objective** as an affine function of the
+master variables: the row-dual term ``lam^T(r - A_x x)`` plus the variable
+reduced-cost term ``bt = sum_j rc_j·(lb_j if rc_j>0 else ub_j)``. By LP weak
+duality this is a lower bound on the recourse value for *every* master point and
+*any* dual-feasible ``(lam, rc)``, so the cut is always a valid global
+underestimator. This is robust to two failure modes that simpler anchors have:
+an interior-point recourse solve returning a slightly *suboptimal* primal
+(anchoring at that primal would over-cut), and the row duals alone being an
+*incomplete* dual when a variable bound is active (the ``rc`` term restores the
+missing contribution). The solver therefore runs soundly on whichever LP/MILP
+backend is installed, including POUNCE's interior-point duals (**no HiGHS
+dependency**), and the master objective is a rigorous lower bound.
 
 A *nonlinear* model is routed to Generalized Benders (:mod:`.gbd`), which
 handles a convex-NLP recourse subproblem with KKT-multiplier cuts.
@@ -169,10 +173,11 @@ def solve_benders(
     )
     t0 = time.time()
 
-    # Recourse-LP dual generator. POUNCE and HiGHS share the dual sign
-    # convention, and the cuts below are anchored at the *dual value* so they
-    # stay valid even for POUNCE's interior-point (analytic-centre) duals — no
-    # HiGHS dependency. Whichever LP backend is installed is used.
+    # Recourse-LP dual generator. The cuts below use the *complete* LP dual
+    # objective (row duals + variable reduced costs), which is a valid lower
+    # bound by weak duality for any dual-feasible point — so it stays sound even
+    # with POUNCE's interior-point (analytic-centre) duals and an inexact primal,
+    # with no HiGHS dependency. Whichever LP backend is installed is used.
     dual_lp = get_lp_solver(prefer_pounce=cfg.prefer_pounce)
     milp = get_milp_solver(prefer_pounce=cfg.prefer_pounce)
 
@@ -273,7 +278,12 @@ def solve_benders(
         return res
 
     def _recourse(x_hat: np.ndarray):
-        """Return ('opt', Q, y, lam) or ('infeas', v, None, lam)."""
+        """Return ('opt', Q, y, lam, rc, bnds) or ('infeas', v, None, lam, rc, bnds).
+
+        ``lam`` are the recourse row duals, ``rc`` the variable reduced costs,
+        and ``bnds`` the recourse column bounds — together they reconstruct the
+        *complete* LP dual objective for a soundly-anchored cut.
+        """
         rhs = r - (A_x @ x_hat if A_x.shape[0] else np.zeros(0))
         res = dual_lp(
             c_sub,
@@ -287,7 +297,19 @@ def solve_benders(
                 if res.dual_values is not None
                 else np.zeros(A_y.shape[0])
             )
-            return "opt", float(res.objective), np.asarray(res.x, dtype=np.float64), lam
+            rc = (
+                np.asarray(res.reduced_costs, dtype=np.float64)
+                if res.reduced_costs is not None
+                else None
+            )
+            return (
+                "opt",
+                float(res.objective),
+                np.asarray(res.x, dtype=np.float64),
+                lam,
+                rc,
+                sub_bounds,
+            )
         # Feasibility subproblem: min 1^T s s.t. A_y y - s <= rhs, s >= 0.
         m_rec = A_y.shape[0]
         ny = len(scols)
@@ -302,39 +324,64 @@ def solve_benders(
             if fres.dual_values is not None
             else np.zeros(m_rec)
         )
+        rc = (
+            np.asarray(fres.reduced_costs, dtype=np.float64)
+            if fres.reduced_costs is not None
+            else None
+        )
         v = float(fres.objective) if fres.objective is not None else 0.0
-        return "infeas", v, None, lam
+        return "infeas", v, None, lam, rc, bnds
 
-    def _add_opt_cut(x_hat, Q, lam):
-        # Optimality cut anchored at the **primal** recourse value Q(x̂) (exact),
-        # with slope s = -A_x^T lam from the recourse row duals:
-        #     eta >= Q(x̂) + s^T (x - x̂).
-        # Primal anchoring is required for soundness. The reconstructed dual
-        # value lam^T (r - A_x x̂) equals Q(x̂) only for a *complete* dual
-        # solution; when the recourse optimum is partly set by variable bounds
-        # the row duals lam are incomplete (their bound-multiplier counterpart is
-        # omitted), so lam^T r can *exceed* Q(x̂) — e.g. POUNCE's interior-point
-        # solver splits a marginal between a row and a coinciding variable bound,
-        # returning a half-magnitude row dual. Anchoring at that dual value would
-        # push the cut above the true value and prune the optimum. The primal
-        # anchor is exact at x̂; the row-dual slope is a valid subgradient of the
-        # convex (piecewise-linear) LP value function regardless of the split.
-        # eta >= Q + s^T (x - x̂)  ->  s^T x - eta <= s^T x̂ - Q.
+    def _dual_const(lam, rc, col_bounds) -> float:
+        """The y-independent part of the *complete* LP dual objective,
+        ``lam^T r + sum_j rc_j * (lb_j if rc_j>0 else ub_j)``.
+
+        By LP weak duality the full dual objective ``D(y) = lam^T(r - A_x y) +
+        bound_terms`` is a lower bound on the recourse value ``Q(y)`` for *every*
+        master point y and *any* dual-feasible (lam, rc) — so a cut anchored at
+        ``D`` is always a valid global underestimator. This is robust to two
+        failure modes a naive anchor has: (1) an interior-point recourse solve
+        returns a slightly *suboptimal* primal ``Q`` (anchoring there would
+        over-cut), and (2) the row duals alone are an *incomplete* dual when a
+        variable bound is active (the ``rc`` term restores the missing
+        contribution).
+        """
+        d = float(lam @ r) if lam.size and r.size else 0.0
+        if rc is not None:
+            for j, rcj in enumerate(rc):
+                if rcj > 0:
+                    lbj = col_bounds[j][0]
+                    if np.isfinite(lbj):
+                        d += rcj * lbj
+                elif rcj < 0:
+                    ubj = col_bounds[j][1]
+                    if np.isfinite(ubj):
+                        d += rcj * ubj
+        return d
+
+    def _add_opt_cut(lam, rc, col_bounds):
+        # Optimality cut = the complete LP dual objective as a function of y:
+        #     eta >= lam^T(r - A_x y) + bound_terms = const + s^T y,
+        # with s = -A_x^T lam and const = _dual_const(...). Valid for any
+        # dual-feasible (lam, rc) by weak duality, so it never over-cuts even
+        # with POUNCE's interior-point duals.  s^T y - eta <= -const.
         s = -(A_x.T @ lam) if A_x.shape[0] else np.zeros(n_master)
+        const = _dual_const(lam, rc, col_bounds)
         cut_x.append(s.copy())
         cut_eta.append(-1.0)
-        cut_rhs.append(float(s @ x_hat) - Q)
+        cut_rhs.append(-const)
 
-    def _add_feas_cut(x_hat, v, lam):
-        # Feasibility cut anchored at the primal min-infeasibility v(x̂) > 0 of
-        # the slack-min subproblem, slope s = -A_x^T lam_feas:
-        #     v(x̂) + s^T (x - x̂) <= 0      (drive the infeasibility to 0).
-        # Primal-anchored for the same soundness reason as the optimality cut;
-        # excludes x̂ since v(x̂) > 0.  s^T x <= s^T x̂ - v.
+    def _add_feas_cut(lam, rc, col_bounds):
+        # Feasibility cut = the complete dual objective of the slack-min
+        # subproblem (the min infeasibility v(y)) as a function of y:
+        #     v_D(y) = lam^T(r - A_x y) + bound_terms <= 0.
+        # v_D <= v(y) (weak duality) and v_D(ŷ) = v(ŷ) > 0 excludes ŷ, while every
+        # recourse-feasible y (v(y) = 0) satisfies it.  s^T y <= -const.
         s = -(A_x.T @ lam) if A_x.shape[0] else np.zeros(n_master)
+        const = _dual_const(lam, rc, col_bounds)
         cut_x.append(s.copy())
         cut_eta.append(0.0)
-        cut_rhs.append(float(s @ x_hat) - v)
+        cut_rhs.append(-const)
 
     # ── initialize: feasible master point (no eta) ──
     init = _solve_master(with_eta=False)
@@ -344,11 +391,11 @@ def solve_benders(
         return SolveResult(status="error", wall_time=time.time() - t0)
     x_hat = np.asarray(init.x[:n_master], dtype=np.float64)
 
-    kind, val, y_star, lam = _recourse(x_hat)
+    kind, val, y_star, lam, rc, bnds = _recourse(x_hat)
     if kind == "opt":
-        _add_opt_cut(x_hat, val, lam)
+        _add_opt_cut(lam, rc, bnds)
     else:
-        _add_feas_cut(x_hat, val, lam)
+        _add_feas_cut(lam, rc, bnds)
 
     best_ub = np.inf
     incumbent_full: np.ndarray | None = None
@@ -371,7 +418,7 @@ def solve_benders(
         lb = mres.bound if mres.bound is not None else mres.objective
         lower_bound = (float(lb) + lin.c_offset) if lb is not None else None
 
-        kind, val, y_star, lam = _recourse(x_hat)
+        kind, val, y_star, lam, rc, bnds = _recourse(x_hat)
         if kind == "opt":
             full_obj = float(c_master @ x_hat + val + lin.c_offset)
             if full_obj < best_ub:
@@ -381,9 +428,9 @@ def solve_benders(
                 if len(scols):
                     x_full[scols] = y_star
                 incumbent_full = x_full
-            _add_opt_cut(x_hat, val, lam)
+            _add_opt_cut(lam, rc, bnds)
         else:
-            _add_feas_cut(x_hat, val, lam)
+            _add_feas_cut(lam, rc, bnds)
 
         if np.isfinite(best_ub) and lower_bound is not None:
             gap = (best_ub - lower_bound) / (abs(best_ub) + 1e-10)
