@@ -105,6 +105,50 @@ def test_matches_monolithic_convex(seed):
         assert r.bound <= mono.objective + 1e-3
 
 
+def test_lagrangian_anchor_sound_under_inexact_recourse(monkeypatch):
+    """The GBD cut anchors at the Lagrangian dual value, not the NLP primal, so a
+    *suboptimal* recourse solve cannot produce an unsound bound.
+
+    We inject a feasible-but-suboptimal recourse primal (nudge the recourse
+    variable off its optimum, raising the objective) into every NLP solve — the
+    exact failure mode that an over-cutting primal anchor would mis-certify. The
+    Lagrangian anchor's box-min correction (``m_y``) pulls the cut back down, so
+    the reported lower bound must stay <= the true optimum (2.0) and must not be
+    falsely certified above it.
+    """
+    import discopt.solvers.nlp_pounce as nlp_pounce
+
+    real = nlp_pounce.solve_nlp
+
+    def perturbed(ev, x0, **kw):
+        res = real(ev, x0, **kw)
+        if res.x is not None and res.status.name == "OPTIMAL":
+            lb, ub = ev.variable_bounds
+            xnew = np.asarray(res.x, dtype=float).copy()
+            for j in range(len(xnew)):
+                if ub[j] - lb[j] > 1e-6 and ub[j] < 1e18:  # a bounded recourse var
+                    xnew[j] = min(xnew[j] + 0.6, ub[j])
+            res.x = xnew
+            res.objective = float(ev.evaluate_objective(xnew))
+        return res
+
+    monkeypatch.setattr(nlp_pounce, "solve_nlp", perturbed)
+
+    m = dm.Model("inj")
+    y = m.binary("y")
+    x = m.continuous("x", lb=0, ub=5)
+    m.first_stage(y)
+    m.minimize((x - 3) ** 2 + 2 * y)  # y=1 -> x=3 -> 2.0 optimum
+    m.subject_to(x <= 5 * y)
+    r = solve_benders(m, time_limit=20)
+    true_opt = 2.0
+    # The reported lower bound is never above the true optimum, and the broken
+    # solve is never falsely certified optimal at the inflated value.
+    if r.bound is not None:
+        assert r.bound <= true_opt + 1e-3, f"unsound bound {r.bound} > optimum {true_opt}"
+    assert not (r.status == "optimal" and r.objective is not None and r.objective > true_opt + 1e-2)
+
+
 def test_nonconvex_reports_no_bound():
     """A nonconvex (concave) objective must not produce a numeric lower bound;
     soundness gate -> bound is None even though a heuristic incumbent is found."""

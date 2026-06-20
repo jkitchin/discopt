@@ -14,17 +14,26 @@ For a fixed first-stage point ``x̂`` the **recourse value function** is
     v(x̂) = min_y f(x̂, y)  s.t.  g(x̂, y) <= 0,
 
 a *convex* function of ``x`` when ``f`` and every ``g_i`` are jointly convex.
-Solving the recourse NLP yields the optimal recourse ``ŷ`` and KKT multipliers
-``μ >= 0``. By the envelope theorem a subgradient of ``v`` at ``x̂`` is the
-gradient of the Lagrangian w.r.t. the first-stage variables,
+Solving the recourse NLP yields a recourse point ``ŷ`` and (sign-projected,
+dual-feasible) multipliers ``μ``. The **optimality cut** is built from the
+**Lagrangian dual value**, not the NLP primal ``f(x̂, ŷ)``. With the Lagrangian
+``L(x, y) = f(x, y) + μ^T g(x, y)`` (jointly convex on a convex model), the
+joint-subgradient inequality at ``(x̂, ŷ)`` gives, for *every* master point x,
 
-    s = ∇_x [ f(x, y) + μ^T g(x, y) ] |_(x̂, ŷ),
+    v(x) >= min_y L(x, y) >= [L(x̂, ŷ) + m_y] + ∇_x L^T (x - x̂),
 
-so the **optimality cut**
+    where  m_y = min over the recourse box of  ∇_y L^T (y - ŷ)   (closed form),
 
-    eta >= v(x̂) + s^T (x - x̂)
+so the cut
 
-is a valid global underestimator of the convex value function. The master
+    eta >= [L(x̂, ŷ) + m_y] + ∇_x L^T (x - x̂)
+
+is a valid global underestimator for *any* recourse point ``ŷ`` — it does not
+require the NLP to have solved to optimality. This mirrors classical Benders'
+complete-dual cut and is the analogue that closes the theoretical gap an anchor
+at the (possibly inexact) NLP primal would leave: ``L(x̂, ŷ) <= f(x̂, ŷ)`` and
+``m_y <= 0``, so the anchor never exceeds the primal, and both corrections vanish
+at a converged KKT point (``anchor = v(x̂)``, tight). The master
 
     min_x  eta   s.t.  master-only rows,  GBD cuts,  x integral,  eta >= floor
 
@@ -126,6 +135,7 @@ def solve_gbd(
     from discopt._jax.nlp_evaluator import NLPEvaluator
     from discopt.modeling.core import Constraint
     from discopt.solvers.lp_backend import get_milp_solver
+    from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
 
     t0 = time.time()
     prefer_pounce = nlp_solver == "pounce"
@@ -149,6 +159,31 @@ def solve_gbd(
     evaluator = NLPEvaluator(model)
     n_vars = evaluator.n_variables
     lb_all, ub_all = flat_bounds(model)
+
+    # Per-constraint-row (cl, cu) for projecting recourse multipliers into the
+    # dual-feasible orthant. discopt normalizes constraints to ``g_raw <= 0``
+    # form (cu=0, cl=-inf), so the projection is mu >= 0 for inequalities and
+    # free for equalities (cl=cu) — see ``_project_mu``.
+    if evaluator.n_constraints:
+        _cl, _cu = _infer_constraint_bounds(evaluator)
+    else:
+        _cl = _cu = np.zeros(0)
+
+    def _project_mu(mu: np.ndarray) -> np.ndarray:
+        """Project recourse multipliers into the dual-feasible orthant so that
+        ``mu^T g_raw <= 0`` holds on the feasible set (weak-duality requirement
+        for a rigorous Lagrangian cut). For ``g_raw <= cu`` (cl=-inf): mu >= 0;
+        for ``g_raw >= cl`` (cu=+inf): mu <= 0; equality (cl=cu): free."""
+        if mu.size != _cl.size:
+            return mu
+        out = mu.copy()
+        lower_inf = _cl <= -1e19
+        upper_inf = _cu >= 1e19
+        only_upper = lower_inf & ~upper_inf  # g_raw <= cu  -> mu >= 0
+        only_lower = upper_inf & ~lower_inf  # g_raw >= cl  -> mu <= 0
+        out[only_upper] = np.maximum(out[only_upper], 0.0)
+        out[only_lower] = np.minimum(out[only_lower], 0.0)
+        return out
 
     sense = model._objective.sense if model._objective is not None else ObjectiveSense.MINIMIZE
     sense_flip = 1.0 if sense == ObjectiveSense.MINIMIZE else -1.0
@@ -242,9 +277,27 @@ def solve_gbd(
     def _recourse(x_hat: np.ndarray):
         """Fix master vars at x̂, solve the recourse NLP.
 
-        Returns ('opt', v, x_full, s) with v = recourse value, x_full the full
-        primal, s the value-function subgradient over master cols; or
-        ('infeas', None, None, None).
+        Returns ('opt', v, x_full, anchor, s) where ``v`` is the recourse primal
+        value (a real feasible cost, used for the incumbent), and ``(anchor, s)``
+        define the **rigorous Lagrangian-dual cut** ``eta >= anchor + s^T(x-x̂)``;
+        or ('infeas', None, None, None, None).
+
+        Cut soundness — the Lagrangian dual value, not the primal. With
+        sign-projected (dual-feasible) multipliers ``mu`` and the Lagrangian
+        ``L(x,y) = f(x,y) + mu^T g(x,y)`` (jointly convex on a convex model), the
+        joint-subgradient inequality at the returned point ``(x̂, y*)`` gives, for
+        *every* master point x,
+
+            v_true(x) >= min_y L(x,y) >= [L(x̂,y*) + m_y] + grad_x L^T (x - x̂),
+
+        where ``m_y = min over the recourse box of grad_y L^T (y - y*)`` is the
+        closed-form box minimum. So ``anchor = L(x̂,y*) + m_y`` is a valid lower
+        bound on the recourse value for any *approximate* recourse solution —
+        robust to an inexact NLP primal/multipliers, the analogue of the
+        complete-dual cut used by classical Benders. ``L(x̂,y*) <= f(x̂,y*)`` (the
+        penalty ``mu^T g <= 0`` on the feasible point) and ``m_y <= 0``, so the
+        anchor never exceeds the primal; at a converged KKT point both terms
+        vanish and ``anchor = v``.
         """
         sub_lb = lb_all.copy()
         sub_ub = ub_all.copy()
@@ -262,13 +315,13 @@ def solve_gbd(
         try:
             res = solve_nlp(proxy, x0, options={"print_level": 0, "max_iter": 300})  # type: ignore[arg-type]
         except Exception:
-            return "infeas", None, None, None
+            return "infeas", None, None, None, None
 
         feasible = res.x is not None and (
             res.status == SolveStatus.OPTIMAL or _is_primal_feasible(evaluator, res.x)
         )
         if not feasible:
-            return "infeas", None, None, None
+            return "infeas", None, None, None, None
 
         x_full = np.asarray(res.x, dtype=np.float64)
         v = float(evaluator.evaluate_objective(x_full))
@@ -279,18 +332,38 @@ def solve_gbd(
         )
         grad = np.asarray(evaluator.evaluate_gradient(x_full), dtype=np.float64)
         if evaluator.n_constraints and mu.size == evaluator.n_constraints:
+            mu_p = _project_mu(mu)
             jac = np.asarray(evaluator.evaluate_jacobian(x_full), dtype=np.float64)
-            grad_lag = grad + jac.T @ mu
+            grad_lag = grad + jac.T @ mu_p
+            g_raw = np.asarray(evaluator.evaluate_constraints(x_full), dtype=np.float64)
+            l0 = v + float(mu_p @ g_raw)
         else:
             grad_lag = grad
+            l0 = v
         s = grad_lag[mcols]
-        return "opt", v, x_full, s
 
-    def _add_opt_cut(x_hat, v, s):
-        # eta >= v + s^T (x - x̂)  ->  s^T x - eta <= s^T x̂ - v
+        # m_y = min over the recourse box of grad_y L^T (y - y*) (closed form).
+        m_y = 0.0
+        finite_anchor = True
+        for j in scols:
+            gj = float(grad_lag[j])
+            if abs(gj) < 1e-9:  # stationary component: no contribution
+                continue
+            target = lb_all[j] if gj > 0 else ub_all[j]
+            if not np.isfinite(target) or abs(target) >= 1e19:
+                finite_anchor = False  # unbounded descent direction: no finite cut
+                break
+            m_y += gj * (target - x_full[j])
+        # Rigorous anchor when the box minimum is finite; otherwise fall back to
+        # the primal value (no worse than the pre-Lagrangian behaviour).
+        anchor = (l0 + m_y) if finite_anchor else v
+        return "opt", v, x_full, anchor, s
+
+    def _add_opt_cut(x_hat, anchor, s):
+        # eta >= anchor + s^T (x - x̂)  ->  s^T x - eta <= s^T x̂ - anchor
         cut_x.append(s.copy())
         cut_eta.append(-1.0)
-        cut_rhs.append(float(s @ x_hat) - v)
+        cut_rhs.append(float(s @ x_hat) - anchor)
 
     def _add_nogood_cut(x_hat) -> bool:
         # Exclude a 0/1 master point with infeasible recourse:
@@ -317,9 +390,9 @@ def solve_gbd(
     incumbent_full: np.ndarray | None = None
     status = "iteration_limit"
 
-    kind, v, x_full, s = _recourse(x_hat)
+    kind, v, x_full, anchor, s = _recourse(x_hat)
     if kind == "opt":
-        _add_opt_cut(x_hat, v, s)
+        _add_opt_cut(x_hat, anchor, s)
         best_ub = v
         incumbent_full = x_full
     elif not _add_nogood_cut(x_hat):
@@ -346,12 +419,12 @@ def solve_gbd(
         lb = mres.bound if mres.bound is not None else mres.objective
         lower_bound = float(lb) if lb is not None else None
 
-        kind, v, x_full, s = _recourse(x_hat)
+        kind, v, x_full, anchor, s = _recourse(x_hat)
         if kind == "opt":
             if v < best_ub:
                 best_ub = v
                 incumbent_full = x_full
-            _add_opt_cut(x_hat, v, s)
+            _add_opt_cut(x_hat, anchor, s)
         elif not _add_nogood_cut(x_hat):
             raise NotImplementedError(
                 "GBD recourse infeasible at a non-binary first-stage point; "

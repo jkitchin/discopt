@@ -41,12 +41,16 @@ The release procedure that produces these entries is documented in
 - **Generalized Benders Decomposition** (`feat(decomposition)`, Geoffrion 1972).
   `solve_benders` now handles a **convex nonlinear recourse** subproblem, not
   just a linear LP: when the model has a nonlinear objective or constraints it
-  dispatches to `solve_gbd` (`discopt.solve_gbd`). Each optimality cut comes
-  from the recourse NLP's KKT multipliers via the envelope theorem
-  (`eta >= v(x̂) + ∇_x[f + μ^T g]^T (x − x̂)`); recourse infeasibility at a 0/1
-  first-stage point is excluded with a no-good cut. The reported lower bound is
-  rigorous when the model is convex (gated on `classify_oa_cut_convexity`); on a
-  nonconvex model GBD runs heuristically and reports `bound=None` so the
+  dispatches to `solve_gbd` (`discopt.solve_gbd`). Each optimality cut is the
+  **Lagrangian dual value** as an affine function of the first-stage variables —
+  `eta >= [L(x̂,ŷ) + m_y] + ∇_x L^T (x − x̂)` with sign-projected (dual-feasible)
+  multipliers and the closed-form recourse-box correction `m_y` — which is a
+  valid lower bound for *any* recourse point by the joint-subgradient inequality,
+  so it stays sound even if the recourse NLP returns an inexact primal (the
+  analogue of classical Benders' complete-dual cut). Recourse infeasibility at a
+  0/1 first-stage point is excluded with a no-good cut. The reported lower bound
+  is rigorous when the model is convex (gated on `classify_oa_cut_convexity`); on
+  a nonconvex model GBD runs heuristically and reports `bound=None` so the
   `incorrect_count <= 0` gate is never threatened. POUNCE-only (no HiGHS).
 - **Lagrangian B&B node-bound hook** (`feat(decomposition)`). `model.solve(
   lagrangian_bound=True)` fixes Lagrangian multipliers at the root and, at each
