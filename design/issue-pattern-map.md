@@ -138,14 +138,25 @@ Bilinear (P3) and linear-fractional (P4) are intentionally **not** wired: the
 relaxation compiler already emits those envelopes, so a detector would be
 redundant.
 
-**GP log-lift caveat (honest):** `inject_gp_cuts` is *sound* (certified: the cut
-never exceeds the true monomial over 20k+ feasible points) and *value-preserving*
-(the aux equals the monomial). Its **bound benefit is problem-dependent** — it
-tightens loose multivariate-monomial relaxations but is neutral (small node
-overhead) when the compiler's relaxation is already tight, as on easy toys.
-Demonstrating a bound improvement on a genuinely loose instance
-(`cvxnonsep_nsig30`) is the pending validation step before claiming it closes the
-relaxation part of #189.
+**GP log-lift — validated, and it does NOT apply to #189's instances (honest).**
+`inject_gp_cuts` is *sound* (cut never exceeds the true monomial over 20k+
+feasible points) and *value-preserving*, but it targets **objective** monomials
+`c·∏ x_j^{a_j}` (n>=2). Measured on the two vendored #189 instances it fires
+**nothing**:
+
+| Instance | structure | `inject_all` | baseline |
+|---|---|---|---|
+| `cvxnonsep_nsig30` | linear objective; signomial in 1 *constraint* | `{}` (all 0) | already optimal+certified, 6.2 s |
+| `clay0303hfsg` | separable-quadratic + bilinear layout, big-M binaries | `{}` (all 0) | optimal+certified, 52 s |
+
+Conclusions: (1) `cvxnonsep_nsig30` already certifies fast — no gap to close —
+and its signomial is a *constraint*, so an objective-monomial pass can't apply; a
+**constraint-level GP reformulation** (the #116 y-space substitution) would be
+needed. (2) `clay0303hfsg` is a different structure (separable quadratics +
+bilinear); its looseness is an OBBT / separable-quadratic-cut problem (#208), not
+one of the implemented patterns. The earlier "GP closes the relaxation part of
+#189" hope is **retracted** — the implemented pass does not help these
+instances.
 
 ## Fix-and-comment workflow
 
