@@ -152,3 +152,52 @@ def test_signed_power_panhandle_sound(beta):
     cv, cc = jax.vmap(fn, in_axes=(0, None, None))(xs, lb, ub)
     assert jnp.all(cv <= f + 1e-6)
     assert jnp.all(cc >= f - 1e-6)
+
+
+# --------------------------------------------------------------------------
+# Signed-power (Panhandle) generalization of Weymouth, auto-engaged
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("beta", [1.5, 1.85, 1.95])
+def test_compiler_routes_signed_power_pattern(beta):
+    """The compiler detects ``f * |f|**(beta-1)`` and routes it to the tight
+    signed-power envelope end to end; sound over a box straddling 0."""
+    import numpy as np
+    from discopt._jax.relaxation_compiler import compile_relaxation
+    from discopt._jax.symbolic.domains.gas import signed_power_relax
+    from discopt.modeling.core import Model
+
+    p = beta - 1.0
+    m = Model("gas")
+    f = m.continuous("f", lb=-6.0, ub=6.0)
+    m.minimize(f)
+    expr = f * abs(f) ** p
+
+    relax_fn = compile_relaxation(expr, m)
+    lb = jnp.array([-6.0])
+    ub = jnp.array([6.0])
+    _sp = signed_power_relax(beta)
+    for xv in np.linspace(-6.0, 6.0, 60):
+        xa = jnp.array([float(xv)])
+        cv, cc = relax_fn(xa, xa, lb, ub)
+        true = float(np.sign(xv) * abs(float(xv)) ** beta)
+        assert float(cv) <= true + 1e-6
+        assert float(cc) >= true - 1e-6
+        cv_s, cc_s = _sp(xv, -6.0, 6.0)
+        assert float(cv) == pytest.approx(float(cv_s), abs=1e-7)
+        assert float(cc) == pytest.approx(float(cc_s), abs=1e-7)
+
+
+def test_signed_power_detector_no_misfire():
+    from discopt._jax.relaxation_compiler import _try_extract_signed_power
+    from discopt.modeling.core import Model
+
+    m = Model("t")
+    f = m.continuous("f", lb=-5.0, ub=5.0)
+    g = m.continuous("g", lb=-5.0, ub=5.0)
+    assert _try_extract_signed_power(f * abs(f) ** 0.85, m) == (0, pytest.approx(1.85))
+    assert _try_extract_signed_power(abs(f) ** 0.85 * f, m) == (0, pytest.approx(1.85))
+    assert _try_extract_signed_power(f * abs(g) ** 0.85, m) is None  # different variable
+    assert _try_extract_signed_power(f * f**0.85, m) is None  # no abs
+    assert _try_extract_signed_power(f * abs(f), m) is None  # Weymouth shape (no power)

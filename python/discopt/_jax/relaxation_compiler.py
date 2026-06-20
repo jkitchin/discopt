@@ -166,6 +166,40 @@ def _try_extract_signed_abs_product(expr: Expression, model: Model) -> int | Non
     return None
 
 
+def _try_extract_signed_power(expr: Expression, model: Model) -> tuple[int, float] | None:
+    """Detect the signed-power flow term ``f * |f|**(beta-1)`` over one scalar var.
+
+    Matches ``Mul(v, Pow(Abs(v), p))`` / ``Mul(Pow(Abs(v), p), v)`` with ``p`` a
+    positive constant and both factors the *same* scalar variable. Returns
+    ``(offset, beta)`` with ``beta = p + 1`` on match, else ``None``. This is the
+    Panhandle generalization of the Weymouth term (``beta == 2``, handled by
+    :func:`_try_extract_signed_abs_product`); it routes to
+    :func:`discopt._jax.symbolic.domains.gas.signed_power_relax`, which is a tight
+    single-inflection envelope valid over any box (no domain restriction).
+    """
+    if not (isinstance(expr, BinaryOp) and expr.op == "*"):
+        return None
+    for factor, other in ((expr.left, expr.right), (expr.right, expr.left)):
+        if (
+            isinstance(other, BinaryOp)
+            and other.op == "**"
+            and isinstance(other.right, Constant)
+            and isinstance(other.left, UnaryOp)
+            and other.left.op == "abs"
+        ):
+            try:
+                p = float(other.right.value)
+            except (TypeError, ValueError):
+                continue
+            if p <= 0.0:
+                continue
+            off = _resolve_scalar_var_offset(factor, model)
+            off_abs = _resolve_scalar_var_offset(other.left.operand, model)
+            if off is not None and off == off_abs:
+                return (off, p + 1.0)
+    return None
+
+
 def _try_extract_xlogx(expr: Expression, model: Model) -> int | None:
     """Detect the entropy/mixing term ``x * log(x)`` over a single scalar variable.
 
@@ -386,6 +420,26 @@ def _compile_relax_node(
                 if weymouth_relax is not None:
 
                     def fn(x_cv, x_cc, lb, ub, _off=gas_off, _wr=weymouth_relax):
+                        return _wr(x_cv[_off], lb[_off], ub[_off])
+
+                    return fn
+
+            # Signed-power (Panhandle) flow term f*|f|**(beta-1) over a single
+            # scalar variable — the general-exponent sibling of Weymouth. Like
+            # Weymouth it is a single-inflection function valid over any box, so the
+            # tight envelope needs no domain guard. Falls through to the generic
+            # bilinear when the optional [sympy] domain pack is absent.
+            sp_match = _try_extract_signed_power(expr, model)
+            if sp_match is not None:
+                _sp_off, _sp_beta = sp_match
+                try:
+                    from discopt._jax.symbolic.domains.gas import signed_power_relax
+                except ImportError:
+                    signed_power_relax = None  # type: ignore[assignment]
+                if signed_power_relax is not None:
+                    _sp_fn = signed_power_relax(_sp_beta)
+
+                    def fn(x_cv, x_cc, lb, ub, _off=_sp_off, _wr=_sp_fn):
                         return _wr(x_cv[_off], lb[_off], ub[_off])
 
                     return fn

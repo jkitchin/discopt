@@ -79,6 +79,41 @@ def weymouth_relax(x, lb, ub):
     )
 
 
+def signed_power_relax(beta: float):
+    """Envelope factory for the signed-power (Panhandle) flow term.
+
+    Relaxes ``f * |f|**(beta-1) = sign(f) |f|**beta`` over ``[lb, ub]``. This
+    generalizes :func:`weymouth_relax` (the ``beta == 2`` case). For ``beta > 1``
+    the term is concave for ``f < 0`` and convex for ``f > 0`` with a single
+    inflection at ``0``, so it has a tight single-inflection envelope valid over
+    any box. The tangent point is transcendental for non-integer ``beta`` and is
+    solved numerically by the shared runtime construction.
+
+    Args:
+        beta: Flow exponent (Panhandle ~1.85-1.95; Weymouth = 2). Must be > 1.
+
+    Returns:
+        A closure ``(x, lb, ub) -> (cv, cc)`` with
+        ``cv <= sign(x)|x|**beta <= cc``; ``cv`` convex and ``cc`` concave.
+    """
+    b = float(beta)
+    if b <= 1.0:
+        raise ValueError("signed-power exponent beta must be > 1")
+    p = b - 1.0
+
+    def f(x):
+        return x * jnp.abs(x) ** p
+
+    def fp(x):
+        # d/dx (x|x|^p) = |x|^p + x*p*|x|^(p-1)*sign(x) = (1+p)|x|^p = beta*|x|^p
+        return b * jnp.abs(x) ** p
+
+    def relax(x, lb, ub):
+        return runtime.single_inflection_envelope(x, lb, ub, f=f, fp=fp, c=0.0, concavo_convex=True)
+
+    return relax
+
+
 def derive_weymouth_symbolic():
     """Return the SymPy-derived envelope closure for ``f|f|`` (design-time only).
 
