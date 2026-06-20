@@ -1721,6 +1721,12 @@ def _classify_model_convexity(
 # typical bound gain, so the policy declines to enable cuts (sound: a no-op).
 _AUTO_CUTS_MAX_VARS = 40
 
+# Structure-cut presolve size gate: the symbolic recognizer runs `model_to_sympy`
+# (and SymPy `solve`/`simplify` when objective product terms are present)
+# unconditionally, so it is only auto-engaged on models small enough that this is
+# cheap. Counted as (sum of scalar variable sizes) + (number of constraints).
+_STRUCTURE_CUTS_MAX_SIZE = 100
+
 # Root cut pool (P3). Rounds of spectral PSD separation to run once at the root
 # to build the inherited pool; more rounds drive the root bound toward the Shor
 # SDP bound (nvs17: 8 rounds -> -2453, ~60 -> -1300, ~150 -> -1221). The pool is
@@ -1915,6 +1921,7 @@ def solve_model(
     subnlp_frequency: int = 20,
     subnlp_max_calls: int = 200,
     subnlp_options: Optional[dict] = None,
+    structure_cuts: bool = True,
     **kwargs,
 ) -> SolveResult:
     """
@@ -2103,6 +2110,38 @@ def solve_model(
     model._convexity_classification_cache = None
     _convexity_time_budget = min(max(0.2 * float(time_limit), 0.5), 20.0)
     model._convexity_time_budget = _convexity_time_budget
+
+    # --- Structure-cut presolve (auto-engaged square-difference-network cuts) ---
+    # The symbolic cut recognizer auto-derives sound coupling cuts for the
+    # square-difference (Weymouth gas/water) network structure directly from the
+    # model graph, collapsing the otherwise-catastrophic McCormick relaxation gap
+    # on those models (gas-network MINLP, issue #15: bound 1.0 vs optimum 3.0026 ->
+    # bound = optimum; 2821 nodes / 182 s -> 5 nodes / ~3 s). Each injected cut is a
+    # verified valid underestimator (sound), and the pass is a genuine no-op on a
+    # model without the structure. It is auto-engaged but gated, because it runs
+    # SymPy analysis: opt out with ``structure_cuts=False``; only when SymPy is
+    # importable; only on small models (so ``model_to_sympy`` stays cheap); only
+    # with budget remaining. Runs *before* the relaxation build so the tightened
+    # model flows through the normal pipeline. Only the square-difference detector
+    # is auto-engaged here — the broader ``inject_all_patterns`` battery stays
+    # opt-in. Any failure is swallowed so the recognizer can never break a solve.
+    if structure_cuts and model._objective is not None and _remaining_budget() > 1.0:
+        _struct_size = sum(v.size for v in model._variables) + len(model._constraints)
+        if _struct_size <= _STRUCTURE_CUTS_MAX_SIZE:
+            try:
+                from discopt._jax.symbolic.cut_recognizer import recognize_and_inject
+
+                _n_struct_cuts = recognize_and_inject(model)
+                if _n_struct_cuts:
+                    logger.info(
+                        "Structure-cut presolve: injected %d square-difference-network "
+                        "coupling cut(s) (auto-engaged; opt out with structure_cuts=False)",
+                        _n_struct_cuts,
+                    )
+            except ImportError:
+                pass  # optional [sympy] extra not installed -> skip silently
+            except Exception as _sc_exc:  # pragma: no cover - defensive
+                logger.debug("structure-cut presolve skipped: %s", _sc_exc)
 
     # --- AMP (Adaptive Multivariate Partitioning) global solver ---
     _solver = solver if solver is not None else kwargs.pop("solver", None)

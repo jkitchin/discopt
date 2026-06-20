@@ -443,3 +443,57 @@ def test_signed_signomial_fires_on_cvxnonsep_nsig30():
     m = dm.from_nl("python/tests/data/minlplib_nl/cvxnonsep_nsig30.nl")
     n = R.inject_signed_signomial_constraint_cuts(m)
     assert n == 1
+
+
+# --------------------------------------------------------------------------
+# Auto-engaged structure-cut presolve in solve_model (issue #15)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_structure_cuts_presolve_auto_closes_gas_network():
+    """The default `m.solve()` auto-runs the square-difference recognizer as a
+    presolve and closes the gas-network gap (issue #15): the bound reaches the
+    optimum and the search is tiny — without any manual `inject_all_patterns`."""
+    from discopt.benchmarks.problems.gas_network_minlp import build_gas_network_minlp
+
+    m = build_gas_network_minlp()
+    r = m.solve(time_limit=90, gap_tolerance=1e-4)
+    assert r.status == "optimal", f"auto structure-cuts did not certify (status={r.status})"
+    assert r.objective == pytest.approx(3.0026, abs=1e-2)
+    # Bound reached the optimum (gap closed) — the cut tightened the relaxation.
+    assert r.bound is not None and r.bound == pytest.approx(3.0026, abs=1e-2)
+    assert r.node_count <= 100, f"expected a tiny search after the cut, got {r.node_count} nodes"
+
+
+@pytest.mark.slow
+def test_structure_cuts_optout_leaves_gap_open():
+    """`structure_cuts=False` disables the presolve: the gas network then exits
+    uncertified on the loose McCormick bound (the pre-fix behaviour)."""
+    from discopt.benchmarks.problems.gas_network_minlp import build_gas_network_minlp
+
+    m = build_gas_network_minlp()
+    r = m.solve(time_limit=20, gap_tolerance=1e-4, structure_cuts=False)
+    # No cut -> bound stuck far below the optimum (loose), search does not close.
+    assert r.bound is None or r.bound < 2.0
+
+
+def test_structure_cuts_presolve_noop_on_unrelated_model():
+    """The presolve is a sound no-op on a model without the square-difference
+    structure: same result with and without it, no spurious cuts."""
+    m = dm.Model("nc")
+    x = m.continuous("x", lb=-3.0, ub=3.0)
+    y = m.continuous("y", lb=-3.0, ub=3.0)
+    m.minimize(x * y)
+    m.subject_to(x * x + y * y <= 4.0)
+    r_on = m.solve(time_limit=20)
+
+    m2 = dm.Model("nc")
+    x2 = m2.continuous("x", lb=-3.0, ub=3.0)
+    y2 = m2.continuous("y", lb=-3.0, ub=3.0)
+    m2.minimize(x2 * y2)
+    m2.subject_to(x2 * x2 + y2 * y2 <= 4.0)
+    r_off = m2.solve(time_limit=20, structure_cuts=False)
+
+    assert r_on.objective == pytest.approx(r_off.objective, abs=1e-3)
+    assert r_on.objective == pytest.approx(-2.0, abs=1e-3)
