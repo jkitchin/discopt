@@ -200,3 +200,45 @@ def test_compiler_xlogx_detector_no_misfire():
     assert _try_extract_xlogx(ex(x * x), m) is None  # no log
     assert _try_extract_xlogx(ex(x * M.exp(x)), m) is None  # not log
     assert _try_extract_xlogx(ex(M.log(x) * M.log(x)), m) is None  # no bare var
+
+
+def test_compiler_routes_monod_pattern():
+    """The compiler detects x/(K+x) on a nonneg-domain variable and routes it to
+    the dedicated concave envelope; sound, and matches the standalone closure."""
+    import numpy as np
+    from discopt._jax.relaxation_compiler import compile_relaxation
+    from discopt.modeling.core import Model
+
+    m = Model("monod")
+    x = m.continuous("x", lb=0.1, ub=5.0)
+    m.maximize(x / (2.0 + x))
+    relax_fn = compile_relaxation(x / (2.0 + x), m)
+    sat = chemeng.saturating_relax(2.0)
+    lb = jnp.array([0.1])
+    ub = jnp.array([5.0])
+    for xv in np.linspace(0.1, 5.0, 60):
+        xa = jnp.array([float(xv)])
+        cv, cc = relax_fn(xa, xa, lb, ub)
+        f = float(xv) / (2.0 + float(xv))
+        assert float(cv) <= f + 1e-6
+        assert float(cc) >= f - 1e-6
+        cv_s, cc_s = sat(jnp.array(float(xv)), 0.1, 5.0)
+        assert float(cv) == pytest.approx(float(cv_s), abs=1e-7)
+        assert float(cc) == pytest.approx(float(cc_s), abs=1e-7)
+
+
+def test_monod_detector_guards_and_no_misfire():
+    from discopt._jax.relaxation_compiler import _try_extract_monod
+    from discopt.modeling.core import Model
+
+    m = Model("t")
+    x = m.continuous("x", lb=0.1, ub=5.0)
+    y = m.continuous("y", lb=0.1, ub=5.0)
+    assert _try_extract_monod(x / (2.0 + x), m) == (0, pytest.approx(2.0))
+    assert _try_extract_monod(x / (x + 2.0), m) == (0, pytest.approx(2.0))
+    assert _try_extract_monod(x / (2.0 + y), m) is None  # different variable
+    assert _try_extract_monod(x / (2.0 * x), m) is None  # denominator not K+x
+    # Negative declared lower bound: envelope invalid -> must not engage.
+    mn = Model("n")
+    xn = mn.continuous("x", lb=-1.0, ub=5.0)
+    assert _try_extract_monod(xn / (2.0 + xn), mn) is None

@@ -223,6 +223,45 @@ def _try_extract_xlogx(expr: Expression, model: Model) -> int | None:
     return None
 
 
+def _try_extract_monod(expr: Expression, model: Model) -> tuple[int, float] | None:
+    """Detect the Monod / saturating term ``x/(K+x)`` over a single scalar var.
+
+    Matches ``Div(v, Add(K, v))`` / ``Div(v, Add(v, K))`` with ``K`` a positive
+    constant and the numerator and the additive variable the SAME scalar var.
+    Returns ``(offset, K)`` on match, else ``None``, routing to the dedicated
+    concave envelope (:func:`...chemeng.saturating_relax`).
+
+    The envelope is valid only for ``v >= 0``. That is enforced at COMPILE time by
+    requiring the variable's *declared* lower bound to be ``>= 0``: spatial B&B only
+    tightens bounds, so every node box then keeps ``v >= 0`` and no per-node guard
+    is needed. When the declared lower bound can be negative the term is left to the
+    generic division relaxation.
+    """
+    if not (isinstance(expr, BinaryOp) and expr.op == "/"):
+        return None
+    num_off = _resolve_scalar_var_offset(expr.left, model)
+    if num_off is None:
+        return None
+    den = expr.right
+    if not (isinstance(den, BinaryOp) and den.op == "+"):
+        return None
+    for kside, vside in ((den.left, den.right), (den.right, den.left)):
+        if not _is_constant_expr(kside):
+            continue
+        try:
+            kval = float(_get_constant_value(kside))
+        except (TypeError, ValueError):
+            continue
+        v_off = _resolve_scalar_var_offset(vside, model)
+        if kval > 0.0 and v_off is not None and v_off == num_off:
+            from discopt._jax.model_utils import flat_variable_bounds
+
+            lb0, _ = flat_variable_bounds(model)
+            if float(lb0[num_off]) >= 0.0:
+                return (num_off, kval)
+    return None
+
+
 def _try_extract_signomial_factors(
     expr: Expression, model: Model
 ) -> list[tuple[int, float]] | None:
@@ -622,6 +661,25 @@ def _compile_relax_node(
                     return new_cv, new_cc
 
                 return fn
+
+            # Monod / saturating term x/(K+x) over a single scalar variable with a
+            # nonneg declared domain. Routes to the dedicated concave envelope
+            # (tighter than the generic division relaxation); falls through to the
+            # generic path when the optional [sympy] domain pack is absent.
+            monod = _try_extract_monod(expr, model)
+            if monod is not None:
+                _mo_off, _mo_k = monod
+                try:
+                    from discopt._jax.symbolic.domains.chemeng import saturating_relax
+                except ImportError:
+                    saturating_relax = None  # type: ignore[assignment]
+                if saturating_relax is not None:
+                    _mo_fn = saturating_relax(_mo_k)
+
+                    def fn(x_cv, x_cc, lb, ub, _off=_mo_off, _wr=_mo_fn):
+                        return _wr(x_cv[_off], lb[_off], ub[_off])
+
+                    return fn
 
             def fn(x_cv, x_cc, lb, ub):
                 cv_l, cc_l = left_fn(x_cv, x_cc, lb, ub)
