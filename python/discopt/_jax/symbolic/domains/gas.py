@@ -68,14 +68,16 @@ def weymouth_relax(x, lb, ub):
     concave_box = ub <= 0.0  # f|f| = -f^2, concave -> cv = secant, cc = f
 
     # Convex underestimator: tangent from the lower bound onto the convex branch.
+    # When the box is strongly asymmetric the tangent point exits the convex
+    # branch (t_cv >= ub); there the secant is the convex envelope.
     t_cv = lb * _ONE_MINUS_SQRT2
     line_cv = _f(t_cv) + _fp(t_cv) * (x - t_cv)
-    cv_straddle = jnp.where(x >= t_cv, _f(x), line_cv)
+    cv_straddle = jnp.where(t_cv < ub, jnp.where(x >= t_cv, _f(x), line_cv), sec)
 
     # Concave overestimator: tangent from the upper bound onto the concave branch.
     t_cc = ub * _ONE_MINUS_SQRT2
     line_cc = _f(t_cc) + _fp(t_cc) * (x - t_cc)
-    cc_straddle = jnp.where(x <= t_cc, _f(x), line_cc)
+    cc_straddle = jnp.where(t_cc > lb, jnp.where(x <= t_cc, _f(x), line_cc), sec)
 
     cv = jnp.where(convex_box, _f(x), jnp.where(straddle, cv_straddle, sec))
     cc = jnp.where(concave_box, _f(x), jnp.where(straddle, cc_straddle, sec))

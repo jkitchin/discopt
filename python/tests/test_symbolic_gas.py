@@ -27,7 +27,17 @@ def _f(x):
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("lb, ub", [(-50.0, 50.0), (-10.0, 30.0), (-5.0, 0.0), (0.0, 20.0)])
+@pytest.mark.parametrize(
+    "lb, ub",
+    [
+        (-50.0, 50.0),
+        (-10.0, 30.0),
+        (-5.0, 0.0),
+        (0.0, 20.0),
+        (-40.0, 2.0),  # strongly asymmetric: tangent exits the convex branch
+        (-1.0, 25.0),  # strongly asymmetric: tangent exits the concave branch
+    ],
+)
 def test_weymouth_sound(lb, ub):
     xs = jnp.linspace(lb, ub, 200)
     cv, cc = jax.vmap(weymouth_relax, in_axes=(0, None, None))(xs, lb, ub)
@@ -128,18 +138,17 @@ def test_compiler_routes_weymouth_pattern():
 # --------------------------------------------------------------------------
 
 
-def test_signed_power_panhandle_sound():
+@pytest.mark.parametrize("beta", [1.85, 1.95])
+def test_signed_power_panhandle_sound(beta):
+    """Panhandle exponents have a transcendental tangent equation; the numeric
+    tangent solver in code-gen handles them (no closed form needed)."""
     pytest.importorskip("sympy")
     from discopt._jax.symbolic.domains.gas import derive_signed_power_symbolic
-    from discopt._jax.symbolic.envelope_deriver import EnvelopeDerivationError
 
-    try:
-        fn = derive_signed_power_symbolic(1.85)
-    except EnvelopeDerivationError:
-        pytest.skip("closed-form tangent unavailable for beta=1.85")
+    fn = derive_signed_power_symbolic(beta)
     lb, ub = -6.0, 9.0
-    xs = jnp.linspace(lb, ub, 150)
-    f = xs * jnp.abs(xs) ** 0.85
+    xs = jnp.linspace(lb, ub, 200)
+    f = xs * jnp.abs(xs) ** (beta - 1.0)
     cv, cc = jax.vmap(fn, in_axes=(0, None, None))(xs, lb, ub)
     assert jnp.all(cv <= f + 1e-6)
     assert jnp.all(cc >= f - 1e-6)

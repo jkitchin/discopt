@@ -170,6 +170,36 @@ def test_single_inflection_one_sided_box_is_sound(a, b):
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "expr, domain",
+    [
+        (1 / (1 + sp.exp(-X)), (-5.0, 5.0)),  # sigmoid (convexo-concave, numeric)
+        (sp.tanh(X), (-4.0, 4.0)),
+        (sp.atan(X), (-5.0, 5.0)),
+        (X * sp.Abs(X) ** sp.Rational(85, 100), (-6.0, 9.0)),  # Panhandle (concavo-convex)
+    ],
+)
+def test_numeric_tangent_solver_is_sound(expr, domain):
+    """Transcendental single-inflection atoms use the JAX bisection fallback."""
+    r = derive_envelope(expr, X)
+    assert r.is_single_inflection
+    assert r.cv_tangent.point is None  # no closed form -> numeric path
+    fn = lambdify_envelope(r)
+    f_num = sp.lambdify([X], expr, "jax")
+    report = verify_envelope(fn, f_num, domain=domain, n_boxes=500, seed=11)
+    assert report.sound
+    assert report.max_convexity_violation <= 1e-6
+    assert report.max_concavity_violation <= 1e-6
+
+
+def test_asymmetric_box_falls_back_to_secant():
+    """When the tangent point exits its branch, the secant is the envelope."""
+    fn = lambdify_envelope(derive_envelope(X**3, X))
+    f_num = sp.lambdify([X], X**3, "jax")
+    report = verify_envelope(fn, f_num, domain=(-10.0, 1.0), n_boxes=300, seed=2)
+    assert report.sound
+
+
 def test_diracdelta_derivative_rejected():
     """sign(x)*x^2 has a DiracDelta gradient; engine rejects with guidance."""
     with pytest.raises(EnvelopeDerivationError):

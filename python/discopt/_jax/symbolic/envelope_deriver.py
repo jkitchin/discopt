@@ -56,17 +56,21 @@ class Tangent:
     """A tangent-line component of a single-inflection envelope.
 
     Attributes:
-        point: SymPy expression for the tangent point ``t``, in terms of the
-            supporting endpoint symbol (``from_lower`` selects which).
+        point: Closed-form SymPy expression for the tangent point ``t`` in terms
+            of the supporting endpoint symbol, or ``None`` when no closed form was
+            found (the code generator then solves it numerically per box).
         from_lower: ``True`` if the tangent line emanates from the lower bound
             ``a``; ``False`` if it emanates from the upper bound ``b``.
         f_on_left: ``True`` if ``f`` itself is used on ``[a, t]`` and the tangent
             line on ``[t, b]``; ``False`` for the mirror image.
+        tangent_positive_side: ``True`` if the tangent point lies on the branch
+            ``t > c`` (above the inflection). Needed for the numeric solve.
     """
 
-    point: sp.Expr
+    point: Optional[sp.Expr]
     from_lower: bool
     f_on_left: bool
+    tangent_positive_side: bool
 
 
 @dataclass(frozen=True)
@@ -217,8 +221,10 @@ def _solve_tangent_point(
     Args:
         tangent_positive_side: ``True`` if the tangent point satisfies ``t > c``.
 
-    Raises:
-        EnvelopeDerivationError: if a unique real tangent point cannot be found.
+    Returns:
+        The closed-form tangent point, or ``None`` if SymPy could not isolate a
+        unique real one (the caller then falls back to a numeric solve at
+        code-gen time).
     """
     u = sp.Dummy("u", positive=True)
     if tangent_positive_side:
@@ -235,10 +241,8 @@ def _solve_tangent_point(
     residual = sp.expand(fp_t * (t - e_sub) - (f_t - f_e))
     try:
         sols = sp.solve(sp.Eq(residual, 0), t, dict=False)
-    except (NotImplementedError, sp.PolynomialError) as exc:
-        raise EnvelopeDerivationError(
-            f"could not solve tangent equation for {f} in closed form"
-        ) from exc
+    except (NotImplementedError, sp.PolynomialError):
+        return None
 
     c_val = float(inflection)
     keep: list[sp.Expr] = []
@@ -247,7 +251,10 @@ def _solve_tangent_point(
         if s.is_real is False:
             continue
         # Evaluate at u=1 to test the side and reject the trivial endpoint root.
-        probe = complex(s.subs(u, 1.0))
+        try:
+            probe = complex(s.subs(u, 1.0))
+        except (TypeError, ValueError):
+            continue
         if abs(probe.imag) > 1e-12:
             continue
         tv = probe.real
@@ -262,10 +269,7 @@ def _solve_tangent_point(
             dedup.append(s)
 
     if len(dedup) != 1:
-        raise EnvelopeDerivationError(
-            f"expected exactly one tangent point for {f} on the "
-            f"{'right' if tangent_positive_side else 'left'} side, got {dedup}"
-        )
+        return None
     return sp.simplify(dedup[0].subs(u, u_back))
 
 
@@ -373,7 +377,9 @@ def derive_envelope(
             inflection=c,
             tangent_positive_side=True,
         )
-        cv_tangent = Tangent(point=cv_pt, from_lower=True, f_on_left=False)
+        cv_tangent = Tangent(
+            point=cv_pt, from_lower=True, f_on_left=False, tangent_positive_side=True
+        )
         # cc: tangent from upper endpoint b (on right), point on the left (concave).
         cc_pt = _solve_tangent_point(
             f,
@@ -384,7 +390,9 @@ def derive_envelope(
             inflection=c,
             tangent_positive_side=False,
         )
-        cc_tangent = Tangent(point=cc_pt, from_lower=False, f_on_left=True)
+        cc_tangent = Tangent(
+            point=cc_pt, from_lower=False, f_on_left=True, tangent_positive_side=False
+        )
     else:
         curvature = Curvature.CONVEXO_CONCAVE
         # cv: tangent from upper endpoint b (on right), point on the left (convex).
@@ -397,7 +405,9 @@ def derive_envelope(
             inflection=c,
             tangent_positive_side=False,
         )
-        cv_tangent = Tangent(point=cv_pt, from_lower=False, f_on_left=True)
+        cv_tangent = Tangent(
+            point=cv_pt, from_lower=False, f_on_left=True, tangent_positive_side=False
+        )
         # cc: tangent from lower endpoint a (on left), point on the right (concave).
         cc_pt = _solve_tangent_point(
             f,
@@ -408,7 +418,9 @@ def derive_envelope(
             inflection=c,
             tangent_positive_side=True,
         )
-        cc_tangent = Tangent(point=cc_pt, from_lower=True, f_on_left=False)
+        cc_tangent = Tangent(
+            point=cc_pt, from_lower=True, f_on_left=False, tangent_positive_side=True
+        )
 
     return EnvelopeResult(
         expr=f,
