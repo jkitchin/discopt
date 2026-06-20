@@ -54,21 +54,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install ruff + mypy + lightweight deps for type resolution
-        run: |
-          python -m pip install --upgrade pip
-          pip install uv
-          # mypy needs the actual numpy/scipy/jax wheels so it can resolve
-          # array-returning functions to concrete types instead of Any.
-          # (Skipping cyipopt/highspy — neither ships type stubs and mypy
-          # treats them as Any either way.)
-          uv pip install --system "ruff==0.14.6" mypy numpy scipy jax jaxlib
-      - name: Ruff check
-        run: ruff check python/
-      - name: Ruff format
-        run: ruff format --check python/
-      - name: Mypy
-        run: mypy python/discopt/
+      # Run the SAME hooks (and the pinned ruff/mypy versions + mypy
+      # type-resolution deps) that developers run locally — .pre-commit-config.yaml
+      # is the single source of truth, so the local and CI toolchains can never
+      # drift. cargo-fmt is skipped here (the Rust job covers fmt; no Rust
+      # toolchain on this runner).
+      - name: pre-commit (ruff, ruff-format, mypy)
+        uses: pre-commit/action@v3.0.1
+        env:
+          SKIP: cargo-fmt
+        with:
+          extra_args: --all-files
 
   python-fast:
     name: Python fast (3.12, ubuntu)
