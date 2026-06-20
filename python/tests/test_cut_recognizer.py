@@ -108,6 +108,28 @@ def test_inject_complementarity_detects_and_cut_is_valid():
         assert xv / 6.0 + yv / 4.0 <= 1.0 + 1e-9
 
 
+def test_complementarity_does_not_fire_on_xy_ge_0():
+    """x*y >= 0 makes the whole non-negative box feasible: the cut must NOT fire
+    (regression for the sign-flip false-optimal found in PR #245 review)."""
+    m = dm.Model("ge")
+    x = m.continuous("x", lb=0.0, ub=6.0)
+    y = m.continuous("y", lb=0.0, ub=4.0)
+    m.minimize(-(x + y))  # true optimum -10 at (6, 4)
+    m.subject_to(x * y >= 0)  # vacuous on the non-negative box
+    assert R.inject_complementarity(m) == 0
+    r = m.solve(time_limit=20, gap_tolerance=1e-4)
+    assert r.objective == pytest.approx(-10.0, abs=1e-3)  # optimum preserved
+
+
+def test_complementarity_fires_on_xy_le_0():
+    m = dm.Model("le")
+    x = m.continuous("x", lb=0.0, ub=6.0)
+    y = m.continuous("y", lb=0.0, ub=4.0)
+    m.minimize(x + y)
+    m.subject_to(x * y <= 0)  # encodes x*y = 0 on the non-negative box
+    assert R.inject_complementarity(m) == 1
+
+
 def test_inject_binary_products_value_preserving():
     def build(inject):
         m = dm.Model("bp")

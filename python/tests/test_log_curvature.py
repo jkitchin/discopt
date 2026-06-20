@@ -1,8 +1,10 @@
 """Tests for log-curvature classification (GP change of variables)."""
 
 import pytest
-import sympy as sp
-from discopt._jax.symbolic.log_curvature import (
+
+sp = pytest.importorskip("sympy")  # design-time [sympy] extra; skip if absent
+
+from discopt._jax.symbolic.log_curvature import (  # noqa: E402
     is_monomial,
     is_posynomial,
     log_curvature,

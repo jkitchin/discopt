@@ -29,7 +29,8 @@ class VerificationReport:
     """Result of certifying an envelope over a family of random boxes.
 
     Attributes:
-        sound: ``True`` if no containment violation exceeded ``tol``.
+        sound: ``True`` if no containment *or curvature* violation exceeded
+            ``tol`` (``cv <= f <= cc`` with ``cv`` convex and ``cc`` concave).
         max_lower_violation: Worst ``cv(x) - f(x)`` (>0 means cv overshot f).
         max_upper_violation: Worst ``f(x) - cc(x)`` (>0 means cc undershot f).
         max_convexity_violation: Worst non-convexity of ``cv`` (>0 is bad).
@@ -123,7 +124,12 @@ def verify_envelope(
     convexity_viol = float(jnp.max(cvm - 0.5 * (cv1 + cv2)))  # should be <= 0
     concavity_viol = float(jnp.max(0.5 * (cc1 + cc2) - ccm))  # should be <= 0
 
-    sound = (lower_viol <= tol) and (upper_viol <= tol)
+    # A valid envelope must both *contain* f and have the right *curvature*: a
+    # non-convex underestimator that merely contains f is not a usable convex
+    # relaxation, so curvature violations also fail soundness.
+    sound = (
+        lower_viol <= tol and upper_viol <= tol and convexity_viol <= tol and concavity_viol <= tol
+    )
 
     return VerificationReport(
         sound=sound,

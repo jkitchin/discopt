@@ -51,6 +51,10 @@ def _var_key(node) -> Optional[str]:
     from discopt.modeling import core
 
     if isinstance(node, core.IndexExpression):
+        # Only a plain indexed Variable (e.g. x[0]) has a stable key; an indexed
+        # compound expression like (x+y)[0] has no Variable base -> skip.
+        if not isinstance(node.base, core.Variable):
+            return None
         idx = node.index
         i = idx if isinstance(idx, int) else (idx[0] if isinstance(idx, tuple) else idx)
         return f"{node.base.name}[{i}]"
@@ -66,6 +70,11 @@ def _to_sympy(node, syms: dict):
         return sp.Float(float(node.value))
     if isinstance(node, (core.Variable, core.IndexExpression)):
         key = _var_key(node)
+        if key is None:
+            # Compound/opaque indexed node (e.g. (x+y)[0]); represent as a fresh
+            # dummy so translation continues — the recognizer treats it as an
+            # unknown leaf and simply does not match patterns involving it.
+            return sp.Dummy("opaque")
         if key not in syms:
             syms[key] = sp.Symbol(key.replace("[", "_").replace("]", ""), real=True)
         return syms[key]
@@ -518,19 +527,31 @@ def inject_complementarity(model) -> int:
     Proof of validity: the McCormick underestimator of ``xy`` over the box gives
     ``x_ub*y + x*y_ub - x_ub*y_ub <= xy``; with ``xy <= 0`` this yields
     ``x/x_ub + y/y_ub <= 1`` after dividing by ``x_ub*y_ub > 0``.
+
+    Sign discipline (critical for soundness): the cut requires ``xy <= 0``.
+    Equality sources ``c*x*y == 0`` imply ``xy == 0`` regardless of the sign of
+    ``c``. Inequality sources are stored as ``expr <= 0`` (``>=`` rows are
+    sign-flipped on ingest), so a single-bilinear ``expr = c*x*y`` encodes
+    ``xy <= 0`` only when ``c > 0``; an ``x*y >= 0`` row arrives as ``-x*y <= 0``
+    (``c < 0``) and must be rejected — it makes the whole non-negative box
+    feasible, so the cut would illegally remove feasible points.
     """
     sm = model_to_sympy(model)
     handles = _handle_map(model)
     reverse = {sym: key for key, sym in sm.symbols.items()}
-    candidates = [e for (_, e) in sm.equalities if isinstance(e, sp.Eq)]
-    sources = [(e.lhs - e.rhs) for e in candidates] + [ex for (_, ex) in sm.inequalities]
+    # (expr, is_equality): equalities are sign-agnostic; inequalities are expr<=0.
+    sources = [(e.lhs - e.rhs, True) for (_, e) in sm.equalities if isinstance(e, sp.Eq)]
+    sources += [(ex, False) for (_, ex) in sm.inequalities]
     applied = 0
     seen = set()
-    for expr in sources:
+    for expr, is_equality in sources:
         bil = _as_single_bilinear(expr)
         if bil is None:
             continue
-        _, x, y = bil
+        coeff, x, y = bil
+        # For a `<= 0` inequality, only a positive coefficient encodes xy <= 0.
+        if not is_equality and coeff <= 0:
+            continue
         key = frozenset((reverse.get(x, ""), reverse.get(y, "")))
         if "" in key or key in seen:
             continue

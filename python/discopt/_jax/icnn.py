@@ -127,30 +127,38 @@ def verify_convexity(
     icnn: ICNN,
     x_samples: jnp.ndarray,
     eps: float = 1e-4,
-    tol: float = -1e-6,
+    tol: float = 1e-6,
 ) -> bool:
-    """Verify convexity of an ICNN by checking Hessian PSD on sample points.
+    """Verify convexity of an ICNN via the Jensen midpoint inequality.
+
+    A ReLU ICNN is piecewise-linear, so a Hessian/eigenvalue test is **blind**:
+    the Hessian is identically zero within each linear region, so it reports
+    "convex" for *any* ReLU net, including non-convex ones (e.g. one with an
+    unconstrained output layer). The chord test below detects genuine
+    non-convexity across region boundaries: for random pairs ``(a, b)`` a convex
+    ``f`` satisfies ``f(0.5(a+b)) <= 0.5(f(a)+f(b))``.
 
     Args:
         icnn: The ICNN to verify.
-        x_samples: Sample points of shape ``(n_samples, input_dim)``.
-        eps: Not used (kept for API compatibility).
-        tol: Minimum eigenvalue tolerance — eigenvalues above this are
-            considered non-negative.
+        x_samples: Sample points of shape ``(n_samples, input_dim)`` defining the
+            region; pairs of them form the test chords.
+        eps: Unused (kept for API compatibility).
+        tol: Absolute slack on the Jensen inequality (for float round-off).
 
     Returns:
-        True if all Hessian eigenvalues are >= tol at every sample point.
+        ``True`` if no sampled chord violates convexity by more than ``tol``.
     """
     fn = eqx.filter_jit(lambda x: icnn(x))
-    hess_fn = jax.hessian(fn)
-
-    for i in range(x_samples.shape[0]):
-        x = x_samples[i]
-        H = hess_fn(x)
-        eigvals = jnp.linalg.eigvalsh(H)
-        if jnp.any(eigvals < tol):
-            return False
-    return True
+    n = int(x_samples.shape[0])
+    half = n // 2
+    if half == 0:
+        return True
+    a = x_samples[:half]
+    b = x_samples[half : 2 * half]
+    fa = jax.vmap(fn)(a)
+    fb = jax.vmap(fn)(b)
+    fm = jax.vmap(fn)(0.5 * (a + b))
+    return bool(jnp.all(fm <= 0.5 * (fa + fb) + abs(tol)))
 
 
 def enforce_nonneg(icnn: ICNN) -> ICNN:

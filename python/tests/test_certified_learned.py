@@ -80,21 +80,26 @@ def test_margin_is_constant_in_x_so_curvature_cannot_change():
 
 
 def test_clamping_against_f_destroys_convexity():
-    """Contrast: pointwise min/max clamp against f is sound but non-convex."""
+    """Pointwise min/max clamp against f *contains* f but is non-convex — and the
+    curvature-aware ``sound`` gate correctly rejects it (PR #245 review)."""
     f = lambda x: x**2  # noqa: E731
 
     def clamped(x, lb, ub):
         # A flat convex "prediction" cv_pred = 1.0 that exceeds f near 0; the
         # existing learned wrapper would clamp cv = min(cv_pred, f). min(const, x^2)
-        # is sound but has a concave kink -> non-convex.
+        # contains f but has a concave kink -> non-convex.
         cv = jnp.minimum(jnp.ones_like(x), f(x))
         cc = jnp.maximum(-jnp.ones_like(x), f(x))
         return cv, cc
 
     rep = verify_envelope(clamped, f, domain=(-2.0, 2.0), n_boxes=300, seed=5)
-    assert rep.sound  # clamping bounds pointwise
-    # ...but min(1, x^2) is non-convex: a positive convexity violation appears.
+    # Containment holds...
+    assert rep.max_lower_violation <= 1e-7
+    assert rep.max_upper_violation <= 1e-7
+    # ...but min(1, x^2) is non-convex, so the curvature-aware soundness gate
+    # rejects it (this is exactly the blind-spot the review asked us to close).
     assert rep.max_convexity_violation > 1e-3
+    assert not rep.sound
 
 
 # --------------------------------------------------------------------------

@@ -359,7 +359,7 @@ def _compile_relax_node(
                 try:
                     from discopt._jax.symbolic.domains.gas import weymouth_relax
                 except ImportError:
-                    weymouth_relax = None
+                    weymouth_relax = None  # type: ignore[assignment]
                 if weymouth_relax is not None:
 
                     def fn(x_cv, x_cc, lb, ub, _off=gas_off, _wr=weymouth_relax):
