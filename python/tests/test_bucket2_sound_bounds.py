@@ -143,6 +143,31 @@ def test_nvs16_produces_sound_finite_bound():
     )
 
 
+@pytest.mark.correctness
+def test_nvs16_full_solve_does_not_anchor_on_garbage_bound():
+    """#248: the live solve factorable-reforms nvs16 into aux vars including
+    ``_fr_aux == x1**6``, whose defining equality the relaxer cannot linearize
+    (x1**6 over [0,200] spans [0, 6.4e13], past the monomial magnitude cap) and
+    therefore DROPS. Dropping the sole constraint on a wide-boxed aux variable
+    that the objective depends on frees it, and minimizing drove the dual bound to
+    a garbage **-5.08e11** (~100% gap, never certifies) — even though the
+    objective is a sum of squares trivially ``>= 0``.
+
+    The relaxer now detects that the omitted constraint frees an objective-linked,
+    otherwise-unconstrained, wide-boxed variable, marks the objective bound
+    invalid, and falls back to the rigorous alphaBB / prereform-interval bound.
+    The raw-model root-bound test above never caught this because it does not run
+    the factorable reform — the bug only appears in the full solve pipeline."""
+    m = dm.from_nl(str(_DATA / "nvs16.nl"))
+    r = m.solve(time_limit=20)
+    assert r.objective is not None and abs(r.objective - 0.703125) < 1e-3
+    assert r.bound is not None and math.isfinite(r.bound), f"nvs16 bound dropped: {r.bound}"
+    # The regression: the bound must never again be the -5e11 garbage.
+    assert r.bound > -1e6, f"#248 garbage dual bound returned: {r.bound}"
+    # And it stays sound (a valid lower bound never exceeds the true optimum).
+    assert r.bound <= 0.703125 + 1e-3, f"unsound bound {r.bound} > optimum 0.703125"
+
+
 # Recorded baselines: the standard McCormick root bound (RLT off) for the two
 # bucket-1 instances #175 targets. The tightness lock below guards against
 # silently reverting below these.
