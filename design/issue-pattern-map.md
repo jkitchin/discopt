@@ -103,10 +103,30 @@ elsewhere), **new-pattern** (needs a pattern not yet implemented), **search/infr
   box so the existing envelopes (P1/P2) can fire. A bound-propagation pass, not a
   new envelope.
 
-### #208 — OBBT-on-auxiliaries — **search/infra (presolve, amplifies all envelopes)**
+### #208 — OBBT-on-auxiliaries — **search/infra (presolve)** — **decision-gate measured + reverse-FBBT built (opt-in)**
 - Rebuild McCormick from OBBT-tightened aux bounds. Not a pattern itself, but it
   *tightens every envelope pattern* (P3/P4/P5/P7…) by shrinking boxes. Directly
   amplifies #189, #188.
+- **Decision gate (done).** `obbt.measure_discarded_aux_tightening` +
+  `design/measure_aux_obbt.py` measure the aux tightening currently discarded.
+  On the vendored corpus (structural-only): of 32 instances with aux columns, 25
+  tighten, 18 have mean aux reduction > 10% (corpus mean of per-instance means
+  34.6%; several ~99% — nvs03/10/11/12/13/15, ex1221). This **flips** the issue's
+  gate — the earlier gear4-only "no-op" was an integrality-needle outlier.
+- **Part 2 built (opt-in, `obbt_tighten_root(cascade_aux=True)`).** The generic
+  aux-column *intersection* alone is a **no-op** (reproduces the issue's Part-1
+  finding — a captured aux bound is self-implied within the same LP). The real
+  lever is **reverse FBBT** (`obbt.reverse_fbbt_from_aux`): propagate the
+  OBBT-tightened aux bound back through the term definition
+  (`w=a·b ⟹ a∈[w]/[b]`; `w=a^p ⟹ p`-th root), recovering the hyperbolic/root
+  bounds the linear rows can't express. **Honest status:** sound (every corpus
+  optimum preserved exactly) and it measurably shrinks the root box (nvs11/12/13
+  box log-volume −4 nats), but across the tested corpus it gave **no net
+  node-count / wall reduction** and slightly regressed nvs13 (39→53 nodes). It
+  therefore does **not** meet #208's "the extra OBBT cost must pay for itself"
+  acceptance bar, so it ships **default-off** behind `cascade_aux`, pending a
+  targeted-budget A/B. The root-box reduction lands on integer-heavy instances
+  whose bottleneck is the integer search, not the continuous relaxation box.
 
 ---
 
