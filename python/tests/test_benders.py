@@ -129,15 +129,22 @@ def test_integer_recourse_rejected():
         solve_benders(m, time_limit=10)
 
 
-def test_nonlinear_rejected():
+def test_nonlinear_recourse_dispatches_to_gbd():
+    """A convex nonlinear model routes through Generalized Benders, not an error.
+
+    min x^2 + y, y binary first-stage, x continuous recourse, x + y >= 1.
+    y=1 -> x=0 -> 1 ; y=0 -> x=1 -> 1. Optimum 1.0.
+    """
     m = dm.Model("nl")
     y = m.binary("y")
     x = m.continuous("x", lb=0, ub=5)
     m.first_stage(y)
     m.minimize(x**2 + y)
     m.subject_to(x + y >= 1)
-    with pytest.raises(NotImplementedError):
-        solve_benders(m, time_limit=10)
+    r = solve_benders(m, time_limit=30)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(1.0, abs=ABS_TOL)
+    assert r.bound is not None and r.bound <= r.objective + 1e-3
 
 
 def test_multidim_index_rejected_cleanly():

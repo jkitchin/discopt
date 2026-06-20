@@ -10,16 +10,19 @@ Algorithm (minimization, internally):
 Master:  min c_x^T x + eta   s.t. A_m x <= r_m  +  accumulated Benders cuts.
 Subproblem at x̂:  min c_y^T y  s.t. A_y y <= r - A_x x̂.
 
-- Feasible subproblem → **optimality cut** ``eta >= Q(x̂) + g^T (x - x̂)`` with
-  ``g = -A_x^T λ`` from the HiGHS row duals (shadow prices ``λ = dQ*/d rhs``).
+- Feasible subproblem → **optimality cut** ``eta >= lam^T r - (A_x^T lam)^T x``
+  from the recourse-LP row duals ``lam`` (shadow prices ``lam = dQ*/d rhs``).
 - Infeasible subproblem → **feasibility cut** from a slack-penalized
   always-feasible LP, excluding x̂.
 
-Every cut is a valid global underestimator (LP weak duality holds for the
-fixed dual point at *every* x), so the master objective is a rigorous lower
-bound. Rigorous dual cut generation uses HiGHS (well-defined ``row_dual`` sign
-convention); when HiGHS is absent the solver raises rather than risk an unsound
-cut.
+Every cut is anchored at the **dual value** (``lam^T r``), so it stays a valid
+global underestimator for *any* dual-feasible ``lam`` — including POUNCE's
+interior-point (analytic-centre) duals. The solver therefore runs on whichever
+LP/MILP backend is installed (**no HiGHS dependency**: the POUNCE stack does it
+all), and the master objective is a rigorous lower bound.
+
+A *nonlinear* model is routed to Generalized Benders (:mod:`.gbd`), which
+handles a convex-NLP recourse subproblem with KKT-multiplier cuts.
 """
 
 from __future__ import annotations
@@ -62,6 +65,25 @@ class BendersConfig:
     prefer_pounce: bool = False
     feas_tol: float = 1e-6
     eta_floor: float = _ETA_FLOOR
+
+
+def _model_is_linear(model: Model) -> bool:
+    """True iff every constraint body and the objective are linear.
+
+    Used to route between classical Benders (linear recourse LP) and Generalized
+    Benders (convex-NLP recourse).
+    """
+    from discopt._jax.gdp_reformulate import _is_linear
+    from discopt.modeling.core import Constraint
+
+    for c in model._constraints:
+        if not isinstance(c, Constraint):
+            return False
+        if not _is_linear(c.body):
+            return False
+    if model._objective is not None and not _is_linear(model._objective.expression):
+        return False
+    return True
 
 
 # ── Column partition ──────────────────────────────────────────
@@ -154,6 +176,19 @@ def solve_benders(
 
     if structure is None:
         structure = detect_decomposition(model)
+
+    # Nonlinear objective/constraint -> Generalized Benders (convex-NLP recourse).
+    if not _model_is_linear(model):
+        from discopt.decomposition.benders.gbd import solve_gbd
+
+        return solve_gbd(
+            model,
+            structure=structure,
+            time_limit=time_limit,
+            gap_tolerance=gap_tolerance,
+            max_iterations=max_iterations,
+            nlp_solver=nlp_solver,
+        )
 
     lin = extract_linear(model)
     part = _partition_columns(model, structure)

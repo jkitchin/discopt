@@ -83,7 +83,7 @@ New problem types to make discopt competitive across the full optimization lands
 | Task                              | Status  | Description                                                                  |
 |-----------------------------------|---------|------------------------------------------------------------------------------|
 | QP-specific solver                | Done    | HiGHS QP wrapper + JAX IPM QP path; convex QP fast path                      |
-| Benders decomposition             | Done    | Classical Benders for two-stage (MI)LP via `solve(decomposition="benders")`; generalized Benders planned |
+| Benders decomposition             | Done    | Classical (linear recourse) **and Generalized** (convex-NLP recourse, KKT-multiplier cuts) Benders via `solve(decomposition="benders")`; nonlinear models auto-dispatch to GBD |
 | Lagrangian relaxation             | Done    | Coupling-constraint dual via `solve(decomposition="lagrangian")`; subgradient + bundle, primal recovery |
 | Lagrangian B&B node-bound hook    | Done    | `solve(lagrangian_bound=True)` combines per-node Lagrangian dual bounds with the MILP B&B node LP bound |
 | Dantzig-Wolfe / branch-and-price  | Planned | Column generation and branch-and-price on the dualized blocks                 |

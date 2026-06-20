@@ -3,7 +3,10 @@
 This package provides decomposition algorithms that exploit problem structure:
 
 - **Benders decomposition** (:mod:`discopt.decomposition.benders`) — for
-  block-angular / two-stage problems with complicating variables.
+  block-angular / two-stage problems with complicating variables. Classical
+  Benders handles a linear recourse LP; **Generalized Benders** (``solve_gbd``)
+  handles a convex nonlinear recourse subproblem and is dispatched automatically
+  when the model is nonlinear.
 - **Lagrangian relaxation** (:mod:`discopt.decomposition.lagrangian`) — dual
   bounds and primal recovery for problems with coupling constraints.
 
@@ -19,6 +22,9 @@ from discopt.decomposition.benders import (
 )
 from discopt.decomposition.benders import (
     solve_benders as solve_benders,
+)
+from discopt.decomposition.benders import (
+    solve_gbd as solve_gbd,
 )
 from discopt.decomposition.lagrangian import (
     LagrangianConfig as LagrangianConfig,
@@ -47,5 +53,6 @@ __all__ = [
     "flat_bounds",
     "restricted_bounds",
     "solve_benders",
+    "solve_gbd",
     "solve_lagrangian",
 ]
