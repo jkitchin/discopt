@@ -35,6 +35,7 @@ from discopt._jax._numeric import is_effectively_finite as _is_effectively_finit
 from discopt._jax.discretization import DiscretizationState
 from discopt._jax.embedding import EmbeddingMap, build_embedding_map
 from discopt._jax.model_utils import flat_variable_bounds
+from discopt._jax.objective_epigraph import _collect_var_names
 from discopt._jax.operator_relaxations import (
     critical_points_in_interval as _critical_points_in_interval,
 )
@@ -7766,6 +7767,32 @@ def build_milp_relaxation(
                 row[objective_lift.aux_col] += 1.0
                 _add_row(row, const_branch)
 
+    # Omitting a generic constraint we cannot linearize only enlarges the feasible
+    # region → still a valid bound. But omitting the *defining* equality of an
+    # aux/lifted variable that the objective depends on (e.g. nvs16's
+    # ``_fr_aux == x1**6``, dropped because x1**6 over [0,200] exceeds the monomial
+    # magnitude cap) frees that variable, so the relaxed objective sinks to a
+    # garbage lower bound (nvs16: -5e11) even though the objective row itself
+    # linearized. Track that case so we can mark the bound invalid below and let
+    # the solver fall back to the rigorous alphaBB / prereform-interval bound.
+    _obj_var_names = (
+        _collect_var_names(model._objective.expression) if model._objective is not None else set()
+    )
+    # name -> flat column slice, so the omit handler can check the bound magnitude
+    # of any objective-shared variable a dropped constraint would free.
+    _var_flat_slice: dict = {}
+    _vfs_off = 0
+    for _vfs_v in model._variables:
+        _var_flat_slice[_vfs_v.name] = slice(_vfs_off, _vfs_off + _vfs_v.size)
+        _vfs_off += _vfs_v.size
+    # How many model constraints each variable appears in — to tell a genuinely
+    # *freed* variable (defined only by the dropped constraint, e.g. nvs16's
+    # ``_fr_aux``) from one still pinned by other kept constraints (e.g. chance's
+    # ``x_i`` held by the simplex equality). Built lazily on the first omission
+    # (omissions are rare, so most builds never pay for it).
+    _var_con_count: Optional[dict] = None
+    _omitted_obj_linked = False
+
     # Model constraints
     for constraint in model._constraints:
         body = distributed_bodies[id(constraint)]
@@ -7810,6 +7837,42 @@ def build_milp_relaxation(
                 constraint.name or "<unnamed>",
                 err,
             )
+            # The objective bound goes *garbage* (vs. merely a bit looser) only
+            # when this dropped constraint truly FREES a variable the objective
+            # depends on — i.e. one that (a) appears in no other constraint, so
+            # nothing else pins it, and (b) has an astronomically wide box. nvs16's
+            # ``_fr_aux == x1**6`` is the sole constraint on ``_fr_aux`` and its box
+            # spans [0, 200**6 ≈ 6.4e13], so minimizing drives the objective to
+            # -5e11. chance's ``x_i`` are also wide (unbounded) but stay pinned by
+            # the kept simplex equality, and nvs05/nvs22/st_e36's freed vars have
+            # moderate boxes — all fine to keep. ``None`` from _collect_var_names is
+            # an opaque node → treat as possibly-freed+wide, the sound direction.
+            _con_names = _collect_var_names(body)
+            if _obj_var_names is None or _con_names is None:
+                _omitted_obj_linked = True
+            else:
+                if _var_con_count is None:
+                    _var_con_count = {}
+                    for _cc in model._constraints:
+                        _cc_names = _collect_var_names(distributed_bodies[id(_cc)])
+                        for _cn in _cc_names or ():
+                            _var_con_count[_cn] = _var_con_count.get(_cn, 0) + 1
+                for _nm in _obj_var_names & _con_names:
+                    # Pinned by another constraint? then dropping this one only
+                    # loosens — keep the bound.
+                    if _var_con_count.get(_nm, 0) > 1:
+                        continue
+                    _sl = _var_flat_slice.get(_nm)
+                    if _sl is None or _sl.stop <= _sl.start:
+                        _omitted_obj_linked = True
+                        break
+                    _mag = max(
+                        float(np.max(np.abs(flat_lb[_sl]))),
+                        float(np.max(np.abs(flat_ub[_sl]))),
+                    )
+                    if not np.isfinite(_mag) or _mag > _MONOMIAL_AUX_BOUND_LIMIT:
+                        _omitted_obj_linked = True
+                        break
 
     # ── OA tangent cuts from NLP incumbent ──────────────────────────────────
     # These are outer-approximation linearizations of the original nonlinear
@@ -7898,6 +7961,18 @@ def build_milp_relaxation(
             const_obj = 0.0
             objective_bound_valid = False
             logger.debug("AMP: objective is not linearizable; MILP relaxation bound is unavailable")
+
+    # An omitted constraint that shares a variable with the objective leaves that
+    # variable under-constrained, so the LP value is not a trustworthy global
+    # bound even though the objective row itself linearized. Refuse the bound (the
+    # solver then falls back to the rigorous alphaBB / prereform-interval bound)
+    # rather than anchor the tree on a garbage value (nvs16: -5e11). #248.
+    if _omitted_obj_linked and objective_bound_valid:
+        objective_bound_valid = False
+        logger.debug(
+            "AMP: objective bound invalidated — an omitted constraint shares a "
+            "variable with the objective (under-constrained relaxation)."
+        )
 
     # Negate for maximization
     if model._objective.sense == ObjectiveSense.MAXIMIZE:
