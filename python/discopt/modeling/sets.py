@@ -177,6 +177,19 @@ class _SetBase:
             raise ValueError("with_last requires a set with dimen >= 2")
         return self.where(lambda *m: m[-1] == key)
 
+    def __eq__(self, other: object) -> bool:
+        """Value equality: same dimensionality and same members, in order.
+
+        The set is the source of truth for which index tuples exist, so two sets
+        with identical members are equal regardless of name (name is metadata).
+        """
+        if not isinstance(other, _SetBase):
+            return NotImplemented
+        return self.dimen == other.dimen and self.members == other.members
+
+    def __hash__(self) -> int:
+        return hash((self.dimen, self.members))
+
     def __repr__(self) -> str:
         return f"Set({self.name!r}, dimen={self.dimen}, len={len(self)})"
 

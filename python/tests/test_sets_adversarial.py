@@ -9,6 +9,101 @@ indices, mixed builder/expression export, and three-way solve equivalence.
 import discopt.modeling as dm
 import numpy as np
 import pytest
+from discopt.modeling.core import Constant
+from discopt.modeling.sets import ProductSet, Set
+
+
+class TestSumProdOverIndexedContainer:
+    """Regression: dm.sum/prod on a bare indexed container must sum the VARIABLES,
+    not the index keys (PR #243 review blocker)."""
+
+    def test_sum_indexed_var_sums_variables_not_keys(self):
+        m = dm.Model()
+        s = m.set("S", [10, 20, 30])  # integer keys that previously leaked in
+        y = m.continuous("y", lb=1, ub=5, over=s)
+        m.minimize(dm.sum(y))
+        r = m.solve()
+        # vars at lb=1 -> 3.0, NOT 60.0 (= the keys 10+20+30)
+        assert r.objective == pytest.approx(3.0, abs=1e-5)
+
+    def test_sum_indexed_var_equals_sum_flat(self):
+        m = dm.Model()
+        s = m.set("S", [10, 20, 30])
+        y = m.continuous("y", lb=1, ub=5, over=s)
+        m.minimize(dm.sum(y))
+        r0 = m.solve()
+        m2 = dm.Model()
+        s2 = m2.set("S", [10, 20, 30])
+        y2 = m2.continuous("y", lb=1, ub=5, over=s2)
+        m2.minimize(dm.sum(y2.flat))
+        assert r0.objective == pytest.approx(m2.solve().objective, abs=1e-9)
+
+    def test_prod_indexed_var(self):
+        m = dm.Model()
+        s = m.set("s", [0, 1])
+        z = m.continuous("z", over=s, lb=2, ub=2)
+        assert dm.prod(z) is not None
+
+    def test_sum_indexed_param(self):
+        m = dm.Model()
+        s = m.set("s", ["a", "b", "c"])
+        p = m.parameter("p", over=s, value={"a": 1.0, "b": 2.0, "c": 3.0})
+        x = m.continuous("x", over=s, lb=0, ub=1)
+        m.maximize(dm.sum(p[k] * x[k] for k in s))
+        # also ensure dm.sum(p) doesn't crash / leak keys
+        assert dm.sum(p) is not None
+
+    def test_prod_over_empty_is_identity(self):
+        m = dm.Model()
+        e = m.set("e", [])
+        xe = m.continuous("xe", over=e)
+        result = dm.prod(xe[i] for i in e)
+        assert isinstance(result, Constant)
+        assert float(result.value) == 1.0
+
+
+class TestSetValueEquality:
+    def test_equal_sets_compare_equal(self):
+        assert Set("a", [1, 2, 3]) == Set("a", [1, 2, 3])
+
+    def test_name_irrelevant_to_equality(self):
+        assert Set("a", [1, 2, 3]) == Set("b", [1, 2, 3])
+
+    def test_different_members_not_equal(self):
+        assert Set("a", [1, 2, 3]) != Set("a", [1, 2])
+
+    def test_different_dimen_not_equal(self):
+        assert Set("a", [1, 2]) != Set("a", [(1, 2)])
+
+    def test_hashable_and_usable_in_set(self):
+        a = Set("a", [1, 2, 3])
+        b = Set("b", [1, 2, 3])
+        assert hash(a) == hash(b)
+        assert len({a, b}) == 1
+
+    def test_product_set_value_equality(self):
+        p = Set("x", [1, 2]) * Set("y", ["a", "b"])
+        materialized = Set("z", [(1, "a"), (1, "b"), (2, "a"), (2, "b")])
+        assert isinstance(p, ProductSet)
+        assert p == materialized
+
+    def test_not_equal_to_non_set(self):
+        assert Set("a", [1, 2, 3]) != [1, 2, 3]
+
+
+class TestTopLevelExports:
+    def test_product_set_exported(self):
+        assert dm.ProductSet is ProductSet
+        import discopt
+
+        assert discopt.ProductSet is ProductSet
+
+    def test_examples_exported_at_top_level(self):
+        import discopt
+
+        assert callable(discopt.example_assignment)
+        assert callable(discopt.example_multicommodity_flow)
+        assert callable(discopt.example_transportation)
 
 
 class TestLabelsVsPositions:

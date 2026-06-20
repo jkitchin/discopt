@@ -104,6 +104,9 @@ from discopt.modeling import (
     Parameter as Parameter,
 )
 from discopt.modeling import (
+    ProductSet as ProductSet,
+)
+from discopt.modeling import (
     RangeSet as RangeSet,
 )
 from discopt.modeling import (
@@ -135,6 +138,12 @@ from discopt.modeling import (
 )
 from discopt.modeling import (
     tan as tan,
+)
+from discopt.modeling.examples import (
+    example_assignment as example_assignment,
+)
+from discopt.modeling.examples import (
+    example_multicommodity_flow as example_multicommodity_flow,
 )
 from discopt.modeling.examples import (
     example_simple_minlp as example_simple_minlp,

@@ -360,8 +360,8 @@ class _NLWriter:
     def _linear_obj_from_c(self, c, x) -> dict[int, float]:
         """Map a cost vector over variable ``x`` to ``{global_var_index: coeff}``."""
         lin: dict[int, float] = {}
-        for j, coeff in enumerate(np.asarray(c, dtype=np.float64).ravel()):
-            coeff = float(coeff)
+        for j, raw in enumerate(np.asarray(c, dtype=np.float64).ravel()):
+            coeff = float(raw)
             if coeff == 0.0:
                 continue
             gidx = self._var_index.get((x.name, j))

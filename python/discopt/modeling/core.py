@@ -36,12 +36,14 @@ from typing import (
     Optional,
     Sequence,
     Union,
+    overload,
 )
 
 import numpy as np
 
 if TYPE_CHECKING:
     from discopt.modeling.indexed import IndexedParam, IndexedVar
+    from discopt.modeling.sets import _SetBase
 
 builtins_sum = _builtins.sum
 
@@ -366,10 +368,25 @@ def _wrap(x) -> Expression:
 
 
 def _is_term_iterable(x) -> bool:
-    """True for a generator/iterable of terms (not a scalar Expression/array/str)."""
+    """True for a generator/iterable of terms (not a scalar Expression/array/str).
+
+    Indexed containers (:class:`IndexedVar` / :class:`IndexedParam`) are excluded
+    even though they are iterable: their iterator yields index *keys*, not term
+    expressions, so treating them as a term-iterable would silently fold the keys
+    in as constants. ``sum``/``prod`` expand them explicitly instead.
+    """
     if isinstance(x, (Expression, np.ndarray, str, bytes)):
         return False
+    if getattr(x, "_is_indexed_container", False):
+        return False
     return hasattr(x, "__iter__")
+
+
+def _expand_indexed_container(x):
+    """If *x* is an IndexedVar/IndexedParam, return its element expressions."""
+    if getattr(x, "_is_indexed_container", False):
+        return [x[k] for k in x.index_set]
+    return x
 
 
 def _call_over(fn: Callable, member, over):
@@ -878,6 +895,7 @@ def sum(
     >>> dm.sum(x, axis=0)                          # sum along axis 0
     >>> dm.sum(lambda i: cost[i] * x[i], over=range(n))  # indexed sum
     """
+    x = _expand_indexed_container(x)  # dm.sum(indexed_var) -> sum of its elements
     if over is not None and callable(x):
         # Indexed summation: dm.sum(lambda i: expr(i), over=index_set). Tuple
         # members of dimen>1 named sets are unpacked: ``lambda i, j: ...``.
@@ -906,19 +924,24 @@ def prod(x: Union[Expression, list, Callable], *, over: Optional[Sequence] = Non
     -------
     Expression
     """
+    x = _expand_indexed_container(x)  # dm.prod(indexed_var) -> product of elements
     if over is not None and callable(x):
         terms = [_wrap(_call_over(x, i, over)) for i in over]
-        result = terms[0]
-        for t in terms[1:]:
-            result = result * t
-        return result
+        return _multiply_terms(terms)
     if isinstance(x, list) or _is_term_iterable(x):
         terms = [_wrap(t) for t in x]
-        result = terms[0]
-        for t in terms[1:]:
-            result = result * t
-        return result
+        return _multiply_terms(terms)
     return FunctionCall("prod", _wrap(x))
+
+
+def _multiply_terms(terms: list["Expression"]) -> Expression:
+    """Fold a list of terms into a product; the empty product is the identity 1."""
+    if not terms:
+        return Constant(1.0)
+    result: Expression = terms[0]
+    for t in terms[1:]:
+        result = result * t
+    return result
 
 
 def norm(x: Expression, ord: Union[int, float, str] = 2) -> Expression:
@@ -1457,6 +1480,27 @@ class Model:
         self._register_variable(flat)
         return IndexedVar(flat, index_set)
 
+    @overload
+    def continuous(
+        self,
+        name: str,
+        shape: Union[int, tuple[int, ...]] = ...,
+        lb: Union[float, np.ndarray] = ...,
+        ub: Union[float, np.ndarray] = ...,
+        over: None = ...,
+    ) -> Variable: ...
+
+    @overload
+    def continuous(
+        self,
+        name: str,
+        shape: Union[int, tuple[int, ...]] = ...,
+        lb: Union[float, np.ndarray] = ...,
+        ub: Union[float, np.ndarray] = ...,
+        *,
+        over: "_SetBase",
+    ) -> "IndexedVar": ...
+
     def continuous(
         self,
         name: str,
@@ -1464,7 +1508,7 @@ class Model:
         lb: Union[float, np.ndarray] = -9.999e19,
         ub: Union[float, np.ndarray] = 9.999e19,
         over=None,
-    ) -> Variable:
+    ) -> Union[Variable, "IndexedVar"]:
         """
         Create continuous decision variable(s).
 
@@ -1511,9 +1555,7 @@ class Model:
         """
         if over is not None:
             _require_no_shape(shape, "continuous")
-            # Returns an IndexedVar in the over= case (documented); the static
-            # return type stays Variable for the common positional case.
-            return self._make_indexed_var(  # type: ignore[return-value]
+            return self._make_indexed_var(
                 name, VarType.CONTINUOUS, over, lb, ub, -9.999e19, 9.999e19
             )
         if isinstance(shape, int):
@@ -1522,12 +1564,22 @@ class Model:
         var = Variable(name, VarType.CONTINUOUS, shape, lb, ub, self)
         return self._register_variable(var)
 
+    @overload
+    def binary(
+        self, name: str, shape: Union[int, tuple[int, ...]] = ..., over: None = ...
+    ) -> Variable: ...
+
+    @overload
+    def binary(
+        self, name: str, shape: Union[int, tuple[int, ...]] = ..., *, over: "_SetBase"
+    ) -> "IndexedVar": ...
+
     def binary(
         self,
         name: str,
         shape: Union[int, tuple[int, ...]] = (),
         over=None,
-    ) -> Variable:
+    ) -> Union[Variable, "IndexedVar"]:
         """
         Create binary (0/1) decision variable(s).
 
@@ -1551,14 +1603,33 @@ class Model:
         """
         if over is not None:
             _require_no_shape(shape, "binary")
-            return self._make_indexed_var(  # type: ignore[return-value]
-                name, VarType.BINARY, over, 0.0, 1.0, 0.0, 1.0
-            )
+            return self._make_indexed_var(name, VarType.BINARY, over, 0.0, 1.0, 0.0, 1.0)
         if isinstance(shape, int):
             shape = (shape,)
         self._check_name(name)
         var = Variable(name, VarType.BINARY, shape, 0.0, 1.0, self)
         return self._register_variable(var)
+
+    @overload
+    def integer(
+        self,
+        name: str,
+        shape: Union[int, tuple[int, ...]] = ...,
+        lb: Union[float, np.ndarray] = ...,
+        ub: Union[float, np.ndarray] = ...,
+        over: None = ...,
+    ) -> Variable: ...
+
+    @overload
+    def integer(
+        self,
+        name: str,
+        shape: Union[int, tuple[int, ...]] = ...,
+        lb: Union[float, np.ndarray] = ...,
+        ub: Union[float, np.ndarray] = ...,
+        *,
+        over: "_SetBase",
+    ) -> "IndexedVar": ...
 
     def integer(
         self,
@@ -1567,7 +1638,7 @@ class Model:
         lb: Union[float, np.ndarray] = 0,
         ub: Union[float, np.ndarray] = 1e6,
         over=None,
-    ) -> Variable:
+    ) -> Union[Variable, "IndexedVar"]:
         """
         Create general integer decision variable(s).
 
@@ -1595,9 +1666,7 @@ class Model:
         """
         if over is not None:
             _require_no_shape(shape, "integer")
-            return self._make_indexed_var(  # type: ignore[return-value]
-                name, VarType.INTEGER, over, lb, ub, 0.0, 1e6
-            )
+            return self._make_indexed_var(name, VarType.INTEGER, over, lb, ub, 0.0, 1e6)
         if isinstance(shape, int):
             shape = (shape,)
         self._check_name(name)
@@ -1614,12 +1683,20 @@ class Model:
         self._parameters.append(flat)
         return IndexedParam(flat, index_set)
 
+    @overload
+    def parameter(
+        self, name: str, value: Union[float, np.ndarray], over: None = ...
+    ) -> Parameter: ...
+
+    @overload
+    def parameter(self, name: str, value, *, over: "_SetBase") -> "IndexedParam": ...
+
     def parameter(
         self,
         name: str,
         value: Union[float, np.ndarray],
         over=None,
-    ) -> Parameter:
+    ) -> Union[Parameter, "IndexedParam"]:
         """
         Create a parameter for parametric optimization / sensitivity.
 
@@ -1649,7 +1726,7 @@ class Model:
         may be a scalar, a ``dict`` keyed by member, or a callable ``fn(member)``.
         """
         if over is not None:
-            return self._make_indexed_param(name, over, value)  # type: ignore[return-value]
+            return self._make_indexed_param(name, over, value)
         self._check_name(name)
         param = Parameter(name, value, self)
         self._parameters.append(param)

@@ -71,6 +71,10 @@ class IndexedVar:
         Same as ``flat.name``.
     """
 
+    #: Marker so ``dm.sum``/``dm.prod`` expand this to its element expressions
+    #: instead of iterating it (its iterator yields index keys, not terms).
+    _is_indexed_container = True
+
     def __init__(self, flat: "Variable", index_set: Set):
         self.flat = flat
         self.index_set = index_set
@@ -109,6 +113,9 @@ class IndexedParam:
     Backed by a single flat :class:`~discopt.modeling.core.Parameter`; ``ip[key]``
     returns the scalar element at the key's position.
     """
+
+    #: See :attr:`IndexedVar._is_indexed_container`.
+    _is_indexed_container = True
 
     def __init__(self, flat: "Parameter", index_set: Set):
         self.flat = flat
@@ -319,4 +326,4 @@ def resolve_indexed_values(index_set: Set, spec, default, dtype) -> "np.ndarray"
                 f"no entry for member {exc.args[0]!r} of set '{index_set.name}'"
             ) from None
         return np.asarray(vals, dtype=dtype)
-    return np.broadcast_to(np.asarray(spec, dtype=dtype), (n,)).copy()
+    return cast("np.ndarray", np.broadcast_to(np.asarray(spec, dtype=dtype), (n,)).copy())
