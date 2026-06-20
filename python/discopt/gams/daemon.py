@@ -37,6 +37,44 @@ _CONNECT_TIMEOUT = 5.0
 _SPAWN_WAIT = 30.0
 
 
+def _source_fingerprint() -> str:
+    """A staleness key that changes whenever the installed discopt source changes.
+
+    Returns ``__version__`` plus the newest modification time across the discopt
+    package's Python and compiled-extension files. In a released / site-packages
+    install those mtimes are fixed at install time, so the key is stable and the
+    warm daemon is reused across solves. In an editable / development install,
+    editing any source file (or rebuilding the Rust extension) bumps the max mtime,
+    so a client built from the edited tree no longer matches a daemon spawned
+    *before* the edit -- the solve handshake (:meth:`DaemonServer._handle`) then
+    evicts and respawns it, and the change takes effect on the next solve without a
+    manual ``daemon stop``. Falls back to ``__version__`` alone if the package tree
+    cannot be scanned, so the handshake never breaks.
+    """
+    try:
+        import discopt
+
+        root = Path(discopt.__file__).resolve().parent
+        latest = 0
+        for pattern in ("*.py", "*.so", "*.pyd"):
+            for p in root.rglob(pattern):
+                try:
+                    m = p.stat().st_mtime_ns
+                except OSError:
+                    continue
+                if m > latest:
+                    latest = m
+        return f"{__version__}+{latest}" if latest else __version__
+    except Exception:
+        return __version__
+
+
+# Computed once at import. The daemon stamps this as its version when it spawns;
+# a client built from a newer source tree computes a different value and the
+# version handshake recycles the stale daemon (see _source_fingerprint).
+_FINGERPRINT = _source_fingerprint()
+
+
 def _env_flag(name: str) -> bool:
     return os.environ.get(name, "0").lower() in ("1", "true", "yes", "on")
 
@@ -119,7 +157,7 @@ class DaemonServer:
         max_solves: int | None = None,
         max_rss_mb: int | None = None,
         jax_clear_every: int | None = None,
-        version: str = __version__,
+        version: str = _FINGERPRINT,
     ):
         # The benchmark preset disables count/age recycling by default so one
         # warm daemon spans a whole study (an RSS ceiling remains the backstop).
@@ -319,11 +357,22 @@ def solve_via_daemon(
     could not be started -- the caller should then solve in-process.
     """
     path = socket_path or default_socket_path()
+    # Recycle a daemon running stale code BEFORE solving, so the current code is
+    # used on this very solve (not one solve later). A running daemon stamps the
+    # source fingerprint it was spawned with; if ours differs -- e.g. an editable
+    # install was edited, or the package upgraded -- stop it and spawn fresh first.
+    # In a stable install the fingerprint never changes, so this is a one-ping
+    # no-op. (The daemon's own version check in ``_handle`` remains as a backstop
+    # for older clients that do not pre-check.)
+    info = ping(path)
+    if info is not None and info.get("version") not in (None, _FINGERPRINT):
+        stop_daemon(path)
+        spawn_daemon(path)
     payload = {
         "cmd": "solve",
         "control_file": control_file,
         "sysdir": sysdir,
-        "version": __version__,
+        "version": _FINGERPRINT,
     }
     resp = _request(path, payload)
     if resp is None:

@@ -113,12 +113,32 @@ def test_max_solves(sock):
     assert not t.is_alive()  # stopped after hitting the cap
 
 
-def test_version_eviction(sock):
+def test_version_eviction(sock, monkeypatch):
+    # A daemon advertising a different fingerprint is running stale code. The
+    # client must recycle it BEFORE solving, rather than trusting its handshake
+    # to serve-then-stop one solve later. Stub spawn so no real daemon launches;
+    # we only assert the stale one was stopped and a fresh spawn was attempted.
     srv = d.DaemonServer(socket_path=sock, solve_fn=lambda cf, sysdir=None: 0, version="9.9.9")
     t = _start(srv)
-    # client __version__ != server version -> daemon serves then exits
+    spawns = []
+    monkeypatch.setattr(d, "spawn_daemon", lambda *a, **k: (spawns.append(True), False)[1])
     rc = d.solve_via_daemon("x", socket_path=sock)
-    assert rc == 0
+    t.join(timeout=5)
+    assert not t.is_alive()  # the stale daemon was stopped by the pre-check
+    assert spawns  # client attempted to spawn a fresh daemon
+    assert rc is None  # no live daemon after the stubbed spawn -> in-process fallback
+    assert d.ping(sock) is None
+
+
+def test_handle_serves_then_stops_on_version_mismatch(sock):
+    # Server-side backstop for older clients that do NOT pre-check: a solve
+    # request carrying a mismatched version is served, then the daemon exits.
+    srv = d.DaemonServer(socket_path=sock, solve_fn=lambda cf, sysdir=None: 0)
+    t = _start(srv)
+    resp = d._request(
+        sock, {"cmd": "solve", "control_file": "x", "sysdir": None, "version": "0.0.0"}
+    )
+    assert resp is not None and resp.get("rc") == 0
     t.join(timeout=5)
     assert not t.is_alive()
 
@@ -194,3 +214,23 @@ def test_jax_clear_every_is_safe_without_jax(sock):
     finally:
         d.stop_daemon(sock)
         t.join(timeout=5)
+
+
+def test_source_fingerprint_is_stable_and_edit_sensitive(tmp_path):
+    """The daemon's staleness key (its handshake ``version``) is stable across
+    calls but changes when a discopt source file is edited -- so a warm daemon
+    spawned from an editable install is recycled after an edit instead of serving
+    stale code. Socket-free (no AF_UNIX bind)."""
+    import os
+
+    import discopt
+
+    fp = d._source_fingerprint()
+    assert fp == d._source_fingerprint()  # deterministic across calls
+    assert fp.startswith(d.__version__)  # carries the package version
+    # A fresh DaemonServer stamps the fingerprint as its handshake version.
+    assert d.DaemonServer(socket_path=tmp_path / "x.sock").version == d._FINGERPRINT
+    # Bumping a discopt source file's mtime changes the fingerprint -> recycle.
+    src = os.path.join(os.path.dirname(discopt.__file__), "gams", "daemon.py")
+    os.utime(src, None)
+    assert d._source_fingerprint() != fp
