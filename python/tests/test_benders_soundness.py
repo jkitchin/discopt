@@ -151,6 +151,37 @@ def test_equality_coupling_suboptimal_primal_is_sound():
     assert r.objective == pytest.approx(12.84146, abs=1e-3)
 
 
+def test_unbounded_recourse_var_with_feasibility_cuts_is_sound():
+    """Regression: a recourse variable with a ``_BIG`` (1e20) open upper bound
+    must not corrupt the complete-dual cut constant.
+
+    ``np.isfinite(1e20)`` is ``True``, so a tiny reduced-cost noise at the
+    sentinel bound would inject a ``rc * 1e20`` term into the cut. The guard
+    skips ``|bound| >= _BIG``. Feasibility cuts fire (y=0 makes ``z`` infeasible),
+    exercising the slack columns whose upper bound is the sentinel.
+    """
+    import warnings
+
+    m = dm.Model("unb")
+    y = m.binary("y")
+    x = m.continuous("x", lb=0, ub=1e20)  # open upper sentinel
+    z = m.continuous("z", lb=0, ub=5)
+    m.first_stage(y)
+    m.minimize(y + 0.001 * x + z)
+    m.subject_to(z >= 3)
+    m.subject_to(z <= 5 * y)  # infeasible when y=0 -> feasibility cut
+    m.subject_to(x >= 2 * y)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # large-bound advisory
+        r = solve_benders(m, time_limit=30)
+        mono = m.solve(time_limit=30)
+    assert r.status == "optimal"
+    assert mono.objective is not None
+    assert r.bound is not None
+    assert r.bound <= mono.objective + 1e-3, f"unsound bound {r.bound} > optimum {mono.objective}"
+    assert r.objective == pytest.approx(mono.objective, rel=1e-3)
+
+
 def test_bound_is_valid_for_maximize():
     """For maximize, the reported bound is an upper bound on the optimum."""
     m = dm.Model("maxb")

@@ -345,17 +345,23 @@ def solve_benders(
         over-cut), and (2) the row duals alone are an *incomplete* dual when a
         variable bound is active (the ``rc`` term restores the missing
         contribution).
+
+        A bound at the ``_BIG`` open sentinel (or any ``|bound| >= _BIG``) is
+        treated as infinite and skipped: ``np.isfinite(1e20)`` is ``True``, so a
+        tiny reduced-cost noise at a sentinel-bounded column (e.g. a feasibility
+        slack's ``_BIG`` upper bound) would otherwise inject a ``rc * 1e20``
+        term and corrupt the cut constant.
         """
         d = float(lam @ r) if lam.size and r.size else 0.0
         if rc is not None:
             for j, rcj in enumerate(rc):
                 if rcj > 0:
                     lbj = col_bounds[j][0]
-                    if np.isfinite(lbj):
+                    if np.isfinite(lbj) and abs(lbj) < _BIG:
                         d += rcj * lbj
                 elif rcj < 0:
                     ubj = col_bounds[j][1]
-                    if np.isfinite(ubj):
+                    if np.isfinite(ubj) and abs(ubj) < _BIG:
                         d += rcj * ubj
         return d
 
