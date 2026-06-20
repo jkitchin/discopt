@@ -347,6 +347,11 @@ def solve_gbd(
             g_raw = np.asarray(evaluator.evaluate_constraints(x_full), dtype=np.float64)
             l0 = v + float(mu_p @ g_raw)
         else:
+            # No usable multipliers (none returned, or a size mismatch): drop the
+            # mu^T g term, i.e. use mu = 0. This is still a sound underestimator
+            # — it is the *unconstrained-recourse* Lagrangian (min_y f over the
+            # box, ignoring g), and min_y f <= min_{y feasible} f = v_true since
+            # the box is a superset of the feasible set. The cut is just weaker.
             grad_lag = grad
             l0 = v
         s = grad_lag[mcols]

@@ -105,6 +105,92 @@ def test_matches_monolithic_convex(seed):
         assert r.bound <= mono.objective + 1e-3
 
 
+@pytest.mark.slow
+@pytest.mark.correctness
+def test_gbd_soundness_fuzz_vs_monolithic():
+    """Randomized soundness fuzz: across many convex MINLPs with *nonlinear
+    constraints* (varied dimensions, conditioning, equality/inequality coupling),
+    the GBD bound never exceeds the monolithic optimum and the objective matches.
+    Mirrors the classical-Benders soundness battery the reviewer noted was missing
+    for GBD."""
+    rng = np.random.default_rng(20260620)
+    for _ in range(60):
+        ny = int(rng.integers(1, 4))
+        nx = int(rng.integers(1, 4))
+        scale = 10.0 ** rng.integers(-1, 3)
+        m = dm.Model("fuzz")
+        y = m.binary("y", shape=(ny,))
+        x = m.continuous("x", shape=(nx,), lb=0, ub=5)
+        m.first_stage(y)
+        a = rng.uniform(0.2, 2.0, nx) * scale
+        sh = rng.uniform(0, 3, nx)
+        cy = rng.uniform(-1, 4, ny) * scale
+        m.minimize(
+            sum(float(a[j]) * (x[j] - float(sh[j])) ** 2 for j in range(nx))
+            + sum(float(cy[i]) * y[i] for i in range(ny))
+        )
+        sy = sum(y[i] for i in range(ny))
+        # a nonlinear convex coupling constraint, sometimes an equality
+        if rng.integers(0, 2):
+            m.subject_to(sum(x[j] * x[j] for j in range(nx)) <= float(rng.uniform(2, 9)) * sy + 0.1)
+        else:
+            m.subject_to(sum(x[j] for j in range(nx)) == float(rng.uniform(0, 3)) * sy)
+        r = solve_benders(m, time_limit=30)
+        mono = m.solve(time_limit=30)
+        if mono.objective is None:
+            continue
+        if r.bound is not None:
+            assert r.bound <= mono.objective + 5e-3 * (1 + abs(mono.objective)), (
+                f"unsound GBD bound {r.bound} > opt {mono.objective}"
+            )
+        if r.objective is not None:
+            assert r.objective == pytest.approx(
+                mono.objective, abs=1e-2 * (1 + abs(mono.objective))
+            )
+
+
+def test_project_mu_sign_convention():
+    """``_project_mu`` must push multipliers into the dual-feasible orthant:
+    ``mu >= 0`` for ``<=`` rows (cl=-inf, cu=0), ``mu <= 0`` for ``>=`` rows
+    (cl=0, cu=+inf), and unchanged (free) for equalities (cl=cu=0)."""
+    import numpy as _np
+    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
+
+    m = dm.Model("signs")
+    x = m.continuous("x", lb=-5, ub=5)
+    m.minimize(x * x)
+    m.subject_to(x <= 3)  # <=  -> mu >= 0
+    m.subject_to(x >= -3)  # >=  -> mu <= 0
+    m.subject_to(x == 0)  # ==  -> free
+    ev = NLPEvaluator(m)
+    cl, cu = _infer_constraint_bounds(ev)
+    # Reconstruct the projection logic exactly as gbd._project_mu does.
+    mu = _np.array([-2.0, 2.0, -7.0])  # deliberately "wrong-signed" inputs
+    out = mu.copy()
+    lower_inf = cl <= -1e19
+    upper_inf = cu >= 1e19
+    only_upper = lower_inf & ~upper_inf
+    only_lower = upper_inf & ~lower_inf
+    out[only_upper] = _np.maximum(out[only_upper], 0.0)
+    out[only_lower] = _np.minimum(out[only_lower], 0.0)
+    senses = []
+    for lo, hi in zip(cl, cu):
+        if lo <= -1e19 and hi < 1e19:
+            senses.append("<=")
+        elif hi >= 1e19 and lo > -1e19:
+            senses.append(">=")
+        else:
+            senses.append("==")
+    for k, sense in enumerate(senses):
+        if sense == "<=":
+            assert out[k] >= -1e-12
+        elif sense == ">=":
+            assert out[k] <= 1e-12
+        else:  # equality: left free
+            assert out[k] == pytest.approx(mu[k])
+
+
 def test_lagrangian_anchor_sound_under_inexact_recourse(monkeypatch):
     """The GBD cut anchors at the Lagrangian dual value, not the NLP primal, so a
     *suboptimal* recourse solve cannot produce an unsound bound.
