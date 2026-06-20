@@ -133,6 +133,55 @@ def posynomial_logconvex(log_coeff, exps, logs):
 
 
 # ---------------------------------------------------------------------------
+# P10. Fortet / Glover linearization of a product of binaries  z = prod_i b_i
+# ---------------------------------------------------------------------------
+
+
+def binary_product_linearization(bs):
+    """Exact linearization bounds for ``z = prod_i b_i`` with ``b_i`` binary.
+
+    Args:
+        bs: sequence of the binary values ``b_i`` (or their LP relaxations in
+            ``[0,1]``).
+
+    Returns:
+        ``(cv, cc)`` with ``cv = max(0, sum_i b_i - (n-1))`` and
+        ``cc = min_i b_i``. At binary vertices ``cv == cc == prod_i b_i`` (exact);
+        over ``[0,1]^n`` they bound the multilinear product (the Fortet/McCormick
+        hull).
+
+    Proof of exactness on binaries: if every ``b_i = 1`` then
+    ``sum b_i - (n-1) = 1`` so ``z >= 1`` and ``z <= min b_i = 1`` ⇒ ``z = 1``;
+    if some ``b_k = 0`` then ``z <= b_k = 0`` and ``z >= 0`` ⇒ ``z = 0``. Either
+    way ``z = prod_i b_i``. For ``n = 2`` these are exactly the bilinear hull on
+    ``[0,1]^2`` (Fortet 1960; Glover & Woolsey 1974).
+    """
+    arr = jnp.asarray(bs)
+    cv = jnp.maximum(0.0, jnp.sum(arr, axis=0) - (arr.shape[0] - 1))
+    cc = jnp.min(arr, axis=0)
+    return cv, cc
+
+
+# ---------------------------------------------------------------------------
+# P12. Complementarity  x*y = 0,  x,y >= 0
+# ---------------------------------------------------------------------------
+
+
+def complementarity_cut(x, y, x_ub, y_ub):
+    """Valid linear cut for the complementarity ``x*y = 0`` with ``x,y >= 0``.
+
+    Returns ``(lhs, rhs)`` of the sound inequality ``x/x_ub + y/y_ub <= 1``.
+
+    Proof: the McCormick convex underestimator of ``xy`` over
+    ``[0,x_ub]x[0,y_ub]`` is ``x_ub*y + x*y_ub - x_ub*y_ub <= xy``. With the
+    complementarity ``xy = 0`` this gives ``x_ub*y + x*y_ub <= x_ub*y_ub``;
+    dividing by ``x_ub*y_ub > 0`` yields ``x/x_ub + y/y_ub <= 1``. This linear cut
+    is implied by the disjunction ``x=0 or y=0`` and tightens the box relaxation.
+    """
+    return x / x_ub + y / y_ub, 1.0
+
+
+# ---------------------------------------------------------------------------
 # Pattern registry (metadata for enumeration / documentation)
 # ---------------------------------------------------------------------------
 
@@ -204,6 +253,43 @@ PATTERNS: dict[str, Pattern] = {
         "Boyd et al. (2007)",
         "done",
         posynomial_logconvex,
+    ),
+    "binary_product": Pattern(
+        "binary_product",
+        ("0-1 polynomial programming", "autocorrelation", "boolean/QUBO products"),
+        "z = prod_i b_i with b_i binary",
+        "Fortet (1960); Glover & Woolsey (1974)",
+        "done",
+        binary_product_linearization,
+    ),
+    "complementarity": Pattern(
+        "complementarity",
+        ("MPEC/equilibrium", "contact mechanics", "KKT systems", "disjunctive"),
+        "x*y = 0 with x,y >= 0",
+        "Sherali & Adams (1990)",
+        "done",
+        complementarity_cut,
+    ),
+    "signed_signomial": Pattern(
+        "signed_signomial",
+        ("geometric/signomial programming", "RF/circuit design", "process design"),
+        "+/- c * prod_j x_j^{a_j} (mixed-sign) via log-domain DC",
+        "Lundell & Westerlund (SGO); Khajavirad-Michalek-Sahinidis (2012)",
+        "roadmap",
+    ),
+    "euclidean_separation": Pattern(
+        "euclidean_separation",
+        ("circle/sphere packing", "facility layout", "molecular conformation"),
+        "(x_i-x_j)^2 + (y_i-y_j)^2 >= d^2 via squared-difference expansion + RLT",
+        "Anstreicher (2009)",
+        "roadmap",
+    ),
+    "multivariate_signomial_hull": Pattern(
+        "multivariate_signomial_hull",
+        ("geometric programming", "chemical/process design"),
+        "prod_j x_j^{a_j} joint hull (tighter than compositional McCormick)",
+        "Khajavirad & Sahinidis (2018)",
+        "roadmap",
     ),
     "ac_power_qc": Pattern(
         "ac_power_qc",

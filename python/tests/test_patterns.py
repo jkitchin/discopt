@@ -152,13 +152,72 @@ def test_posynomial_is_convex_in_log_domain():
 
 
 # ---------------------------------------------------------------------------
+# P10. Fortet/Glover binary-product linearization
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("n", [2, 3, 4])
+def test_binary_product_exact_on_binaries(n):
+    import itertools
+
+    for bits in itertools.product([0.0, 1.0], repeat=n):
+        cv, cc = P.binary_product_linearization(list(bits))
+        prod = float(np.prod(bits))
+        assert float(cv) == pytest.approx(prod, abs=1e-9)
+        assert float(cc) == pytest.approx(prod, abs=1e-9)
+
+
+def test_binary_product_bounds_multilinear_relaxation():
+    """Over [0,1]^n the Fortet bounds enclose the multilinear product."""
+    rng = np.random.default_rng(7)
+    for n in (2, 3):
+        b = rng.uniform(0, 1, size=(5000, n))
+        cv, cc = P.binary_product_linearization([b[:, i] for i in range(n)])
+        prod = np.prod(b, axis=1)
+        assert np.all(np.asarray(cv) <= prod + 1e-9)
+        assert np.all(np.asarray(cc) >= prod - 1e-9)
+
+
+# ---------------------------------------------------------------------------
+# P12. Complementarity cut
+# ---------------------------------------------------------------------------
+
+
+def test_complementarity_cut_valid():
+    """x/x_ub + y/y_ub <= 1 holds for every (x,y) with x*y=0, x,y in box."""
+    x_ub, y_ub = 8.0, 5.0
+    rng = np.random.default_rng(8)
+    for _ in range(2000):
+        if rng.random() < 0.5:
+            x, y = 0.0, rng.uniform(0, y_ub)  # x = 0 branch
+        else:
+            x, y = rng.uniform(0, x_ub), 0.0  # y = 0 branch
+        lhs, rhs = P.complementarity_cut(x, y, x_ub, y_ub)
+        assert float(lhs) <= rhs + 1e-9
+
+
+def test_complementarity_cut_separates_interior():
+    """An interior (x,y) with xy>0 can violate the cut (so it is informative)."""
+    x_ub, y_ub = 8.0, 5.0
+    lhs, rhs = P.complementarity_cut(7.0, 4.0, x_ub, y_ub)  # xy = 28 > 0
+    assert float(lhs) > rhs  # 7/8 + 4/5 = 1.675 > 1 -> cut excludes this point
+
+
+# ---------------------------------------------------------------------------
 # Registry sanity
 # ---------------------------------------------------------------------------
 
 
 def test_registry_covers_fields_and_status():
     done = set(P.available("done"))
-    assert {"bilinear", "linear_fractional", "rlt_sum_constant", "posynomial"} <= done
+    assert {
+        "bilinear",
+        "linear_fractional",
+        "rlt_sum_constant",
+        "posynomial",
+        "binary_product",
+        "complementarity",
+    } <= done
     # every entry has fields and a citation
     for name in P.available():
         pat = P.PATTERNS[name]

@@ -162,6 +162,31 @@ the envelope engine), **roadmap** (proof given here, implementation pending).
 
 ---
 
+## Tier 6 — Combinatorial / disjunctive
+
+### P10. Fortet/Glover product-of-binaries `z = ∏_i b_i` — **done**
+- **Fields:** 0-1 polynomial programming, autocorrelation/QUBO, boolean products.
+- **Template:** a product of binary variables.
+- **Linearization (exact):** `z <= b_i ∀i`, `z >= Σ_i b_i − (n−1)`, `z >= 0`,
+  equivalently `cv = max(0, Σ b_i − (n−1))`, `cc = min_i b_i`.
+- **Correctness:** if all `b_i = 1`, `Σ b_i − (n−1) = 1` ⇒ `z = 1`; if some
+  `b_k = 0`, `z <= b_k = 0` ⇒ `z = 0`; so `z = ∏ b_i` exactly at binary vertices.
+  For `n = 2` these are the bilinear hull on `[0,1]^2`. *Fortet (1960); Glover &
+  Woolsey (1974).* Issue #187.
+- `patterns.binary_product_linearization`; certified in `test_patterns.py`.
+
+### P12. Complementarity `x·y = 0`, `x,y >= 0` — **done**
+- **Fields:** MPEC/equilibrium, contact mechanics, KKT systems, disjunctive.
+- **Template:** a complementarity product equal to zero.
+- **Cut:** `x/x_ub + y/y_ub <= 1`.
+- **Correctness:** McCormick `xy >= x_ub y + x y_ub − x_ub y_ub`; with `xy = 0`,
+  `x_ub y + x y_ub <= x_ub y_ub`; divide by `x_ub y_ub > 0`. The cut is implied by
+  the disjunction `x=0 ∨ y=0` and excludes interior points with `xy > 0`.
+  *Sherali & Adams (1990).* Issue #231.
+- `patterns.complementarity_cut`; certified in `test_patterns.py`.
+
+---
+
 ## How a pattern is "proven correct" here
 
 1. **Analytic proof** — the entry above gives the validity argument (bound-factor
