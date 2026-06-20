@@ -427,3 +427,46 @@ def test_rlt_wide_box_lp_not_false_infeasible(monkeypatch):
     highs = milp.solve(backend="highs")
     assert highs.status == "optimal"
     assert abs(float(simplex.bound) - float(highs.bound)) <= 1e-3 + 1e-6 * abs(float(highs.bound))
+
+
+# ---------------------------------------------------------------------------
+# Negated-factor products: ``neg(x) * y`` must decompose, not drop.
+#
+# A product carrying a negated factor — ``-a*b`` parsed as ``neg(a)*b``, and the
+# internal form a maximize->minimize flip produces for ``-x**2`` — was rejected by
+# the product decomposer ("Cannot decompose product: (neg(x) * x)"). The term then
+# dropped from the McCormick relaxation, yielding NO dual bound. The decomposer now
+# peels the sign (``neg(g) == -1 * g``) and decomposes the operand, so the existing
+# square/bilinear envelopes fire. This is the relaxation layer behind a real
+# false-optimal: ``max x**2`` over integer [-3,3] (internally ``min -x**2``) had no
+# valid bound, so the search could certify a stationary incumbent.
+# ---------------------------------------------------------------------------
+def test_negated_square_decomposes_to_sound_bound():
+    """min -x*x over integer [-3,3]: -x^2 in [-9,0], true min -9; bound must be <= -9.
+
+    Before the sign-peel the term dropped ("Cannot decompose product: (neg(x)*x)")
+    and the relaxer returned no bound at all.
+    """
+    m = dm.Model("neg_sq")
+    x = m.integer("x", lb=-3, ub=3)
+    m.minimize(-x * x)
+    relaxer = MccormickLPRelaxer(m)
+    lb, ub = flat_variable_bounds(m)
+    res = relaxer.solve_at_node(lb, ub, time_limit=10.0)
+    assert res.lower_bound is not None, (
+        "negated-factor product dropped from the relaxation -> no dual bound"
+    )
+    assert float(res.lower_bound) <= -9.0 + 1e-6
+
+
+def test_negated_bilinear_two_vars_sound_bound():
+    """min -x*y over [0,4]^2: -x*y in [-16, 0], true min -16; bound must be <= -16."""
+    m = dm.Model("neg_bilin")
+    x = m.continuous("x", lb=0.0, ub=4.0)
+    y = m.continuous("y", lb=0.0, ub=4.0)
+    m.minimize(-x * y)
+    relaxer = MccormickLPRelaxer(m)
+    lb, ub = flat_variable_bounds(m)
+    res = relaxer.solve_at_node(lb, ub, time_limit=10.0)
+    assert res.lower_bound is not None, "neg(x)*y dropped from the relaxation"
+    assert float(res.lower_bound) <= -16.0 + 1e-6

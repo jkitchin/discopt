@@ -371,11 +371,7 @@ class MilpRelaxationModel:
         # ``infeasible``. Equilibration preserves the feasible set exactly, so a
         # genuinely infeasible LP stays infeasible; only a numerical false-negative
         # flips to optimal.
-        if (
-            result.status == SolveStatus.INFEASIBLE
-            and col_scale is None
-            and self._A_ub is not None
-        ):
+        if result.status == SolveStatus.INFEASIBLE and col_scale is None and self._A_ub is not None:
             _nz = np.abs(sp.csr_matrix(self._A_ub).data)
             _nz = _nz[_nz != 0.0]
             if (
@@ -1419,6 +1415,19 @@ def _decompose_product(
     def visit(e: Expression) -> bool:
         if isinstance(e, BinaryOp) and e.op == "*":
             return visit(e.left) and visit(e.right)
+        if isinstance(e, UnaryOp) and e.op == "neg":
+            # A negated factor ``neg(g)`` is ``-1 * g``: peel the sign into the
+            # scalar and decompose ``g``. Without this, ``neg(x) * x`` — the
+            # internal form a maximize→minimize flip produces for ``-x**2``, and
+            # the shape the parser builds for any ``-a*b`` — is an undecomposable
+            # product, so the whole term drops from the relaxation and the dual
+            # bound freezes. For a pure-integer maximize-of-a-convex objective the
+            # spatial B&B then certifies a stationary incumbent (x=0 for x**2) as
+            # the optimum: a false-optimal (e.g. ``max x**2`` over integer [-3,3]
+            # returned 0 instead of 9). Peeling is exact and sign-only, so it only
+            # ever lets the existing envelopes fire.
+            scalar[0] *= -1.0
+            return visit(e.operand)
         if isinstance(e, Constant):
             scalar[0] *= float(e.value)
             return True
