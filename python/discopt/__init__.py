@@ -166,6 +166,9 @@ from discopt.modeling.examples import (
 from discopt.modeling.examples import (
     example_transportation as example_transportation,
 )
+from discopt.solver_tuning import (
+    SolverTuning as SolverTuning,
+)
 
 # Lazy imports for optional modules (avoid import overhead at startup)
 

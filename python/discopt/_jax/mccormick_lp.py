@@ -17,7 +17,6 @@ that fits the per-node call shape in :mod:`discopt.solver`.
 from __future__ import annotations
 
 import logging
-import os
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -35,6 +34,7 @@ from discopt._jax.milp_relaxation import (
 )
 from discopt._jax.term_classifier import NonlinearTerms, classify_nonlinear_terms
 from discopt.modeling.core import Model, VarType
+from discopt.solver_tuning import current as _tuning
 
 logger = logging.getLogger(__name__)
 # Dedup key set so the oversize-lift fallback warns once per (cols, rows) shape.
@@ -257,7 +257,7 @@ class MccormickLPRelaxer:
         # models (e.g. the indefinite integer QPs nvs17/nvs24, whose constraints
         # are all quadratic) from RLT entirely — exactly the dense-QP instances
         # whose McCormick bound is hopelessly loose without it.
-        self._rlt_applicable = (rlt_level1 or os.environ.get("DISCOPT_RLT", "0") == "1") and (
+        self._rlt_applicable = (rlt_level1 or _tuning().rlt) and (
             bool(_linear_constraint_forms(model, self._n_orig))
             or bool(_quadratic_constraint_forms(model, self._n_orig))
         )
@@ -271,7 +271,7 @@ class MccormickLPRelaxer:
         # the outer tree, not redundantly at every node. Set
         # ``DISCOPT_NODE_BOUND_MODE=milp`` to restore the legacy nested-MILP node
         # bound (for A/B comparison).
-        self._lp_node_bound = os.environ.get("DISCOPT_NODE_BOUND_MODE", "lp") == "lp"
+        self._lp_node_bound = _tuning().node_bound_mode == "lp"
         # Per-node lifted-LP FBBT (issue #184): propagate the relaxation's own
         # McCormick rows to recover bilinear-implied factor bounds (e.g. a pinned
         # binary forcing a continuous factor >= 1 *through* a bilinear constraint),
@@ -280,7 +280,7 @@ class MccormickLPRelaxer:
         # dual bound climb off a structural 0 on ``ex1252``. Opt-in via
         # ``DISCOPT_LIFTED_FBBT=1`` — it adds an FBBT sweep plus a conditional
         # relaxation rebuild per node, so it stays off the default B&B path.
-        self._lifted_fbbt = os.environ.get("DISCOPT_LIFTED_FBBT", "0") == "1"
+        self._lifted_fbbt = _tuning().lifted_fbbt
         # Original columns that participate in a nonlinear (product/power) term.
         # A McCormick/RLT envelope for such a term is only valid when its
         # variables have FINITE bounds: over an unbounded box the lifted aux is
@@ -773,9 +773,7 @@ class MccormickLPRelaxer:
         returned bound is always sound; on any failure the input ``res`` is
         returned unchanged.
         """
-        import os
-
-        if os.environ.get("DISCOPT_MULTILINEAR_SEPARATE", "1") == "0":
+        if not _tuning().multilinear_separate:
             return res
         if res is None or res.status != "optimal" or res.x is None:
             return res
@@ -784,7 +782,7 @@ class MccormickLPRelaxer:
 
             from discopt._jax.multilinear_separation import separate_multilinear_envelope
 
-            cap = int(os.environ.get("DISCOPT_MULTILINEAR_RLT_MAX", "4"))
+            cap = _tuning().multilinear_rlt_max
             n_total = len(milp._c)
             # Build (factor-columns, product-column) specs for over-cap products.
             specs: list[tuple[list[int], int]] = []
@@ -867,9 +865,7 @@ class MccormickLPRelaxer:
         so no feasible point is ever cut -- the bound stays sound at any round.
         On any failure the input ``res`` is returned unchanged.
         """
-        import os
-
-        if os.environ.get("DISCOPT_SQUARE_SEPARATE", "1") == "0":
+        if not _tuning().square_separate:
             return res
         if res is None or res.status != "optimal" or res.x is None:
             return res
@@ -1093,9 +1089,7 @@ class MccormickLPRelaxer:
         existing ``x_i^2`` / ``x_i x_j`` auxiliary columns (no lifting). Sound at
         any round; any failure returns the input ``res`` unchanged.
         """
-        import os
-
-        if os.environ.get("DISCOPT_EDGE_CONCAVE", "1") == "0":
+        if not _tuning().edge_concave:
             return res
         if res is None or res.status != "optimal" or res.x is None:
             return res

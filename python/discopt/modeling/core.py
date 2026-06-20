@@ -44,6 +44,7 @@ import numpy as np
 if TYPE_CHECKING:
     from discopt.modeling.indexed import IndexedParam, IndexedVar
     from discopt.modeling.sets import _SetBase
+    from discopt.solver_tuning import SolverTuning
 
 builtins_sum = _builtins.sum
 
@@ -2696,6 +2697,7 @@ class Model:
         solver: Optional[str] = None,
         validate: bool = False,
         gauss_newton: bool = False,
+        tuning: Optional["SolverTuning"] = None,
         **kwargs,
     ) -> Union[SolveResult, Iterator["SolveUpdate"]]:
         r"""
@@ -2785,6 +2787,14 @@ class Model:
             point and attach the :class:`~discopt.validation.ExaminerReport`
             to ``result.validation_report``. Errors during validation are
             swallowed and leave ``validation_report`` as ``None``.
+        tuning : SolverTuning, optional
+            Advanced relaxation / branch-and-bound tuning (RLT families, McCormick
+            separation toggles, node-bound mode, …) as a single typed, validated,
+            per-call object — the supported replacement for the legacy
+            ``DISCOPT_*`` environment variables (which remain as deprecated
+            defaults). ``None`` resolves each field from its env default, exactly
+            reproducing the prior behavior. Example:
+            ``model.solve(tuning=SolverTuning(rlt_quad=False, node_bound_mode="milp"))``.
         gauss_newton : bool, default False
             If True and the objective is a non-negative-weighted sum of squares
             (e.g. ``dm.sum((C @ S - D) ** 2)`` or an explicit
@@ -2867,6 +2877,7 @@ class Model:
                 incumbent_callback=incumbent_callback,
                 node_callback=node_callback,
                 solver=solver,
+                tuning=tuning,
                 **kwargs,
             )
 
