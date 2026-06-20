@@ -330,6 +330,46 @@ class _NLWriter:
                 self._con_nonlinear.append(nonlinear)
                 self._con_bounds.append(bnd)
 
+        self._decompose_builder_blocks()
+
+    def _decompose_builder_blocks(self):
+        """Emit linear constraints that live only in the Rust builder.
+
+        The fast-construction API (``add_linear_constraints``) and the indexed
+        constraint fast path build rows directly into the builder, bypassing
+        ``model._constraints``. Each recorded ``(A, x, sense, b, name)`` block is
+        reconstructed here as purely linear rows so ``.nl`` export sees the same
+        model the solver does.
+        """
+        blocks = getattr(self.model, "_builder_linear_blocks", None)
+        if not blocks:
+            return
+        for A, x, sense, b, _name in blocks:
+            indptr = A.indptr
+            indices = A.indices
+            data = A.data
+            for r in range(A.shape[0]):
+                lin: dict[int, float] = {}
+                for k in range(int(indptr[r]), int(indptr[r + 1])):
+                    coeff = float(data[k])
+                    if coeff == 0.0:
+                        continue
+                    gidx = self._var_index.get((x.name, int(indices[k])))
+                    if gidx is not None:
+                        lin[gidx] = lin.get(gidx, 0.0) + coeff
+                rhs = float(b[r])
+                if sense == "<=":
+                    bnd = (1, 0.0, rhs)  # A x <= b
+                elif sense == ">=":
+                    bnd = (2, rhs, 0.0)  # A x >= b
+                elif sense == "==":
+                    bnd = (4, rhs, rhs)
+                else:  # pragma: no cover - sense is validated upstream
+                    bnd = (3, 0.0, 0.0)
+                self._con_linear.append(lin)
+                self._con_nonlinear.append(None)
+                self._con_bounds.append(bnd)
+
     def _scalarize_body(self, expr: Expression) -> list[Expression]:
         """Return the scalar constraint bodies a (possibly array) body expands to.
 

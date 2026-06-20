@@ -1370,6 +1370,11 @@ class Model:
         self._complementarities: list = []
         # Named index sets registered via ``set()`` (see ``discopt.modeling.sets``).
         self._sets: list = []
+        # Linear constraint blocks emitted directly into the Rust builder
+        # (fast-API ``add_linear_constraints`` and the indexed fast path). Each
+        # entry is ``(A_csr, x, sense, b, name)``. Kept so .nl export and
+        # introspection can recover constraints that bypass ``_constraints``.
+        self._builder_linear_blocks: list = []
 
     # ── Index sets ──
 
@@ -1921,6 +1926,10 @@ class Model:
             b,
             name,
         )
+        # Record the block so exporters (.nl) and introspection can recover the
+        # constraints that live only in the Rust builder. CSR ``A`` and ``b`` are
+        # already in their final float form here.
+        self._builder_linear_blocks.append((A, x, sense, b, name))
 
     def add_linear_objective(
         self,

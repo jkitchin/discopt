@@ -115,9 +115,10 @@ class TestTransportationEquivalence:
 
 
 class TestNlRoundTrip:
-    def test_roundtrip_preserves_optimum(self, tmp_path):
-        # .nl export reads model._constraints, so use the general path.
-        m, _ = _assignment(fast=False)
+    @pytest.mark.parametrize("fast", [False, True])
+    def test_roundtrip_preserves_optimum(self, tmp_path, fast):
+        # .nl export recovers both general-path and fast-path (builder) rows.
+        m, _ = _assignment(fast=fast)
         r0 = m.solve()
         path = tmp_path / "assign.nl"
         m.to_nl(str(path))

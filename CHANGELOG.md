@@ -159,6 +159,13 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **`.nl` export of builder constraints** (`fix(export)`). Linear constraints
+  built directly into the Rust builder — via the fast-construction
+  `add_linear_constraints` API and the indexed-constraint fast path — were
+  silently omitted from `to_nl` / `to_mps`-adjacent `.nl` output, which reads
+  `model._constraints`. The model now records each emitted block and the `.nl`
+  writer reconstructs those rows, so a fast-path model round-trips through `.nl`
+  with all constraints intact.
 - **Relaxation soundness hardening** across the global-opt loop: reject a
   fabricated finite bound on an unbounded McCormick relaxation (`himmel16`,
   `fix(soundness)`); never trust an unconverged simplex objective as an LP lower

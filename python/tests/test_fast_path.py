@@ -117,6 +117,42 @@ class TestFastPathFallback:
         assert ic.fast is True
 
 
+class TestNlExportFastPath:
+    def test_fast_model_nl_has_all_constraints(self):
+        m_fast, _ = build_transportation(fast=True)
+        m_slow, _ = build_transportation(fast=False)
+        # header line 2: "<nvars> <ncons> <nobjs> ..."
+        nfast = int(m_fast.to_nl(None).splitlines()[1].split()[1])
+        nslow = int(m_slow.to_nl(None).splitlines()[1].split()[1])
+        assert nfast == nslow == len(SUPPLY) + len(DEMAND)
+
+    def test_fast_model_nl_roundtrip_preserves_optimum(self, tmp_path):
+        m_fast, _ = build_transportation(fast=True)
+        r0 = m_fast.solve()
+        path = tmp_path / "fast.nl"
+        m_fast.to_nl(str(path))
+        m2 = dm.from_nl(str(path))
+        r1 = m2.solve()
+        assert r1.status == "optimal"
+        assert r1.objective == pytest.approx(r0.objective, rel=1e-6)
+
+    def test_direct_add_linear_constraints_exported(self, tmp_path):
+        # The pre-existing fast-construction API also bypassed _constraints.
+        import numpy as np
+
+        m = dm.Model("direct")
+        x = m.continuous("x", shape=(3,), lb=0, ub=10)
+        A = np.array([[1.0, 1.0, 0.0], [0.0, 1.0, 1.0]])
+        m.add_linear_constraints(A, x, ">=", np.array([2.0, 3.0]), name="c")
+        m.minimize(dm.sum(x[i] for i in range(3)))
+        r0 = m.solve()
+        path = tmp_path / "direct.nl"
+        m.to_nl(str(path))
+        r1 = dm.from_nl(str(path)).solve()
+        assert int(m.to_nl(None).splitlines()[1].split()[1]) == 2  # both rows exported
+        assert r1.objective == pytest.approx(r0.objective, rel=1e-6)
+
+
 class TestFastPathEquivalence:
     def test_same_solution_fast_vs_slow(self):
         m_fast, ship_fast = build_transportation(fast=True)
