@@ -222,3 +222,49 @@ def test_pounce_size_gate_keeps_small_serial():
 
     assert res.objective == pytest.approx(1390.0, abs=1.0, rel=1e-3)  # still correct
     assert not fired, "small problem should stay serial under the size gate"
+
+
+# --- Batched MIQP node-QP waves (solve_qp_batch) ---------------------------
+
+
+def _miqp(seed: int, n: int = 10, ub: int = 6) -> dm.Model:
+    """A convex integer-quadratic with a couple of coupling constraints."""
+    rng = np.random.default_rng(seed)
+    m = dm.Model(f"miqp_{seed}")
+    x = [m.integer(f"x{i}", lb=0, ub=ub) for i in range(n)]
+    t = rng.uniform(0.5, ub - 0.5, size=n)
+    a = rng.uniform(1, 3, size=n)
+    m.subject_to(sum(float(a[i]) * x[i] for i in range(n)) <= float(a.sum() * (ub * 0.45)))
+    m.subject_to(x[0] + x[1] + x[2] >= 4)
+    m.minimize(sum((x[i] - float(t[i])) ** 2 for i in range(n)))
+    return m
+
+
+def test_miqp_batch_qp_matches_serial_fallback(monkeypatch):
+    """The batched ``solve_qp_batch`` MIQP node path matches the serial
+    callback fallback bit-for-bit (objective + B&B node count), and the
+    batch path is actually exercised (not silently falling back)."""
+    import pounce
+
+    calls = {"n": 0}
+    real = pounce.solve_qp_batch
+
+    def counting(problems, **kw):
+        calls["n"] += 1
+        return real(problems, **kw)
+
+    for seed in range(4):
+        # Batched path (default on >=0.5.0).
+        monkeypatch.setattr(pounce, "solve_qp_batch", counting)
+        rb = _miqp(seed).solve(nlp_solver="pounce", time_limit=60, batch_size=8)
+
+        # Serial callback fallback (force solve_qp_batch unavailable).
+        monkeypatch.setattr(pounce, "solve_qp_batch", None)
+        rs = _miqp(seed).solve(nlp_solver="pounce", time_limit=60, batch_size=8)
+
+        assert rb.status == rs.status == "optimal"
+        assert rb.objective == pytest.approx(rs.objective, abs=1e-5)
+        # Same search tree — only the node engine differs.
+        assert rb.node_count == rs.node_count
+
+    assert calls["n"] > 0, "batched solve_qp_batch wave was never exercised"

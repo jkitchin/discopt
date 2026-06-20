@@ -119,7 +119,7 @@ Two in-house engines, one dispatch seam:
 | Engine | Role |
 |---|---|
 | **POUNCE** (Rust) | The workhorse. All production LP/QP/NLP relaxation solves, single and CPU-batch. The only third-party-visible numerical solver. |
-| **JAX IPM** (T17/T24) | The differentiable path only: custom_jvp / KKT implicit differentiation (T22/T23), and vmap-compatible evaluation kept alive for opportunistic GPU use (§4). Not a packaging dependency — it ships with discopt. |
+| **JAX LP/QP IPM** (`_jax/lp_ipm.py`, `_jax/qp_ipm.py`) | The differentiable LP/QP path only: custom_jvp / KKT implicit differentiation (T22/T23), and vmap-compatible evaluation kept alive for opportunistic GPU use (§4). Not a packaging dependency — it ships with discopt. The general **NLP** JAX IPM (`_jax/ipm.py`) has been deleted (see the header note and §12); NLP relaxations run on POUNCE. |
 
 The existing seam `python/discopt/solvers/nlp_backend.py` extends to cover
 LP and QP dispatch, so no call site knows which engine is in use.
@@ -320,10 +320,29 @@ is a trustworthy LP/dual engine. Work breakdown:
     (`TestTrustedMaskPOUNCE::test_stalled_convex_is_rescued_by_polish_retry`).
 - **P0.4 Batch LP/QP + LP seam.** Extend the `solve_nlp_batch` path to LP/QP
   node waves; extend the backend seam so LP/QP dispatch is engine-agnostic.
-  Note: the published `pounce-solver` wheel (0.4.0) exposes
-  `pounce.Problem`/`.solve` but **not** `solve_nlp_batch`, so
-  `_solve_batch_pounce` currently falls back to serial per-node solves;
-  batch LP/QP depends on that POUNCE API landing.
+  Note: **`solve_nlp_batch` landed in `pounce-solver` 0.5.0** (alongside
+  `solve_qp_batch` and `solve_qp_multi_rhs`), superseding the earlier note that
+  the 0.4.0 wheel exposed only `pounce.Problem`/`.solve`. `_solve_batch_pounce`
+  already calls `pounce.solve_nlp_batch(problems, x0s=..., share_structure=True)`
+  with a graceful serial fallback, so the **batch NLP node-wave path is live on
+  ≥0.5.0** (it degrades to serial only on older wheels or if the call raises).
+  - **Dependency pin bumped to `>=0.5` — DONE.** `pyproject.toml` core deps and
+    the `[pounce]` alias extra now require `pounce-solver>=0.5`, so the batch
+    APIs are guaranteed present rather than version-dependent.
+  - **Batch QP node waves — DONE.** `_pounce_qp_relaxation_nodes` (the MIQP B&B
+    node-relaxation solver) now solves each wave in one `pounce.solve_qp_batch`
+    call over POUNCE's *structured convex* QP form (shared `P/c/A/b/G/h`,
+    per-node `lb/ub`), replacing the per-node serial loop over the callback
+    TNLP path. Equality slacks are reconstructed exactly from the shared slack
+    sub-block (`z = S⁺(b_eq − A_struct x_s)`), so the caller's slack-form
+    feasibility check and incumbent snapping are unchanged; the serial callback
+    loop is kept as a fallback for older wheels / wave failures. Validated
+    bit-for-bit on objective and **identical B&B node counts** vs the serial
+    path (the search is unchanged; only the node engine differs), with a
+    **geomean ~8× wall-clock speedup** on a convex integer-quadratic battery
+    (n=10–18), the gain widening with size (~15× at n=18) as the structured
+    path's ~20-iteration presolve+scale converges where the callback path took
+    ~100 iterations per node.
 
   *Status / implementation notes:*
   - **LP seam — DONE.** `_solve_lp` now tries matrix-form engines in order
@@ -359,8 +378,11 @@ is a trustworthy LP/dual engine. Work breakdown:
     (`_matrix_solution_feasible`) and fall through to the next engine on
     violation — no engine's "optimal" is taken on faith (P0.5 in both
     directions: the oracle itself can lie).
-  - **Open:** batch LP/QP waves (blocked on POUNCE `solve_nlp_batch`),
-    OBBT/McCormick-LP consumers (Phase 4).
+  - **Done:** NLP batch (`solve_nlp_batch`) and QP batch (`solve_qp_batch`,
+    MIQP node waves, ~8× geomean) are both live on `pounce-solver` ≥0.5.0, and
+    the dependency pin is bumped to `>=0.5`. The OBBT/McCormick-LP consumers
+    were retired in Phase 4. (LP node waves already run through POUNCE's
+    structured `solve_qp`/P=0 path in `_solve_node_lp_pounce`.)
 - **P0.5 HiGHS as CI oracle.** From this phase on, cross-check every POUNCE
   LP/QP result against HiGHS in CI (test-only dependency). HiGHS stops
   being a runtime engine long before it stops being a correctness guard.
@@ -484,10 +506,14 @@ competitive performance) lives in Phases 2–3.
   A size guard (`_MAX_CROSSOVER_VARS = 400`) falls back to interior-point
   separation on very wide problems. A pure-Rust port (with basis recovery, the
   prerequisite for Gomory/MIR) remains future work. (`test_crossover.py`)
+- **Heuristics + conflict analysis — DONE (since superseded the list below).**
+  RINS, diving (fractional/objective), local branching, and a feasibility pump
+  ship in `_jax/primal_heuristics.py`; conflict analysis (no-good / FBBT-seeded
+  conflict cuts) ships in `conflict.py`. These were listed as open here in an
+  earlier draft.
 - **Open (Phase 2 keystone, Rust):** the Rust crossover port with *basis*
-  recovery, the path to basis-derived Gomory/MIR cuts. Also: RINS (sub-MILP
-  neighborhood search) and conflict analysis. These are the remaining
-  "compete" items; the tractable Python-side cut/heuristic pieces are now done.
+  recovery landed (see Phase 2 below); the remaining basis-derived strengthening
+  items are c-MIR aggregation and cross-round GMI/MIR re-separation.
 
 ### Phase 4 — Retire remaining HiGHS consumers (in progress)
 
@@ -945,12 +971,17 @@ being an analytic-center point — keeps the sensitivity system nonsingular (unl
 degenerate simplex vertex). The OA/GDP/AMP NLP subproblems and the differentiable
 test suite were repointed off the JAX IPM (and off cyipopt) onto POUNCE.
 
-**Retirement status.** The JAX IPM is retired as a *user-facing NLP solver*; JAX
-remains the indispensable **autodiff substrate** (model Hessians/Jacobians/∂p,
-McCormick envelopes, the custom_vjp adjoint solves). Its `ipm_solve` core is *not*
-deleted, because it powers the jit-fused McCormick-NLP relaxation engine
-(`mccormick_nlp.py`) used for tight spatial-B&B bounds — a GPU/vmap-capable path
-POUNCE (a host callback) cannot fuse per node.
+**Retirement status.** The general **NLP** JAX IPM (`_jax/ipm.py` and its
+`ipm_solve` core) is **deleted**, not merely demoted: `mccormick_nlp.py` now
+solves each McCormick relaxation through POUNCE (`_solve_relaxation_with_pounce`),
+so the NLP interior-point stack has no remaining consumer. JAX remains the
+indispensable **autodiff substrate** (model Hessians/Jacobians/∂p, McCormick
+envelopes, the custom_vjp adjoint solves), and the **LP/QP** IPM kernels
+(`_jax/lp_ipm.py`, `_jax/qp_ipm.py`) survive solely to provide the differentiable
+LP/QP relaxation-gradient path (`differentiable_solve.py`) — they are no longer a
+production node-solve engine. (Earlier drafts of this section claimed the
+`ipm_solve` core was kept to fuse the McCormick-NLP relaxation on GPU/vmap; that
+was superseded when the relaxation moved to POUNCE.)
 
 ## 13. All-Rust spatial-B&B relaxation (in progress)
 

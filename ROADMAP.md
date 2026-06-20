@@ -113,11 +113,14 @@ solver on a single in-house engine (POUNCE), with end-to-end differentiability a
 batch-first (CPU multicore; GPU opportunistic) architecture. Detailed plan, phase exit
 gates, and risk register: [docs/design/pounce-only-roadmap.md](docs/design/pounce-only-roadmap.md).
 
-| Task                                   | Status  | Description                                                              |
-|----------------------------------------|---------|--------------------------------------------------------------------------|
-| P0 POUNCE universal continuous engine  | Planned | Pure-LP path, Farkas-certificate infeasibility, bound trust-gate, batch LP/QP, HiGHS demoted to CI oracle |
-| P1 Self-hosted integer B&B             | Planned | MILP/MIQP via Rust B&B + POUNCE relaxations; solution purification; dual-driven fixing/OBBT |
-| P2 Crossover + root cuts               | Planned | Pure-Rust IPM-to-basis crossover; Gomory MIR/lift-and-project at root and periodic re-solves |
-| P3 Cut and heuristic suite             | Planned | Cover/clique/flow cuts, batched diving/RINS/local branching, conflict analysis |
-| P4 Retire remaining HiGHS consumers    | Planned | OA/GDP masters, OBBT, McCormick-LP, DOE, RO subproblems → POUNCE; drop `highspy` from runtime deps |
-| P5 Parity push + differentiable MILP   | Planned | Benchmark-gated gap closing vs HiGHS/BARON; KKT implicit diff through integer solves |
+| Task                                   | Status      | Description                                                              |
+|----------------------------------------|-------------|--------------------------------------------------------------------------|
+| P0 POUNCE universal continuous engine  | Done        | Pure-LP path, Farkas-certificate infeasibility, bound trust-gate, HiGHS demoted to CI oracle. Batch NLP and QP node waves live on `pounce-solver` ≥0.5.0 (MIQP node QP waves via `solve_qp_batch`, ~8× geomean) |
+| P1 Self-hosted integer B&B             | Done        | MILP/MIQP via Rust B&B + POUNCE relaxations; incumbent purification; root reduced-cost fixing; HiGHS-free in POUNCE-only mode |
+| P2 Crossover + root cuts               | Done        | Pure-Rust IPM-to-basis crossover + basis recovery; GMI/MIR cuts wired and correct. Open: c-MIR aggregation + upper-bound complementation; cross-round re-separation |
+| P3 Cut and heuristic suite             | Mostly done | Cover/lifted-cover/clique cuts, diving/RINS/local-branching/feasibility-pump, conflict analysis all shipped. Open: flow-cover and implied-bound cuts |
+| P4 Retire remaining HiGHS consumers    | Done        | OA/GDP masters, OBBT, McCormick-LP, partition-selection, DOE, RO → selector/POUNCE; `[pounce]`-only install fully functional. End state: HiGHS-optional at runtime (kept as default-when-installed + CI oracle) |
+| P5 Parity push + differentiable MILP   | Mostly done | Differentiable MILP/MIQP shipped (KKT implicit diff through fixed-integer relaxation); warm-started Rust simplex closed the MILP gap to ~1–4× HiGHS on knapsack-class. Open: benchmark-gated parity at MIPLIB/MINLPLib scale |
+
+Detailed status, increment-level history, and the remaining open items for each
+task live in [docs/design/pounce-only-roadmap.md](docs/design/pounce-only-roadmap.md).
