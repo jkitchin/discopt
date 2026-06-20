@@ -28,11 +28,12 @@ from __future__ import annotations
 
 import jax.numpy as jnp
 
+from discopt._jax.symbolic import runtime
+
 # 1 - sqrt(2): the tangent-point coefficient for the f|f| envelope, derived
 # symbolically (see derive_weymouth_symbolic). Tangent from endpoint e touches
 # the opposite-curvature branch at t = e * (1 - sqrt(2)).
 _ONE_MINUS_SQRT2 = 1.0 - 1.4142135623730951
-_DEGENERATE = 1e-15
 
 
 def _f(x):
@@ -44,15 +45,18 @@ def _fp(x):
     return 2.0 * jnp.abs(x)
 
 
-def _secant(x, lb, ub):
-    f_lb, f_ub = _f(lb), _f(ub)
-    denom = jnp.where(jnp.abs(ub - lb) < _DEGENERATE, 1.0, ub - lb)
-    line = f_lb + (f_ub - f_lb) / denom * (x - lb)
-    return jnp.where(jnp.abs(ub - lb) < _DEGENERATE, _f(x), line)
+def _tangent_point(e):
+    return e * _ONE_MINUS_SQRT2
 
 
 def weymouth_relax(x, lb, ub):
     """Tight convex/concave envelope of the Weymouth term ``f|f|`` on ``[lb, ub]``.
+
+    ``f|f|`` is concave for ``f < 0`` and convex for ``f > 0`` (kink at 0). The
+    tangent from each box endpoint touches the opposite branch at ``e*(1-√2)``;
+    on a strongly asymmetric box the tangent leaves its branch and the secant is
+    the envelope. The shared :mod:`~discopt._jax.symbolic.runtime` construction
+    handles all of these cases.
 
     Args:
         x: Flow value(s) ``f``.
@@ -62,26 +66,17 @@ def weymouth_relax(x, lb, ub):
         ``(cv, cc)`` with ``cv <= f|f| <= cc`` over ``[lb, ub]``; ``cv`` convex
         and ``cc`` concave.
     """
-    sec = _secant(x, lb, ub)
-    straddle = (lb < 0.0) & (ub > 0.0)
-    convex_box = lb >= 0.0  # f|f| = f^2, convex -> cv = f, cc = secant
-    concave_box = ub <= 0.0  # f|f| = -f^2, concave -> cv = secant, cc = f
-
-    # Convex underestimator: tangent from the lower bound onto the convex branch.
-    # When the box is strongly asymmetric the tangent point exits the convex
-    # branch (t_cv >= ub); there the secant is the convex envelope.
-    t_cv = lb * _ONE_MINUS_SQRT2
-    line_cv = _f(t_cv) + _fp(t_cv) * (x - t_cv)
-    cv_straddle = jnp.where(t_cv < ub, jnp.where(x >= t_cv, _f(x), line_cv), sec)
-
-    # Concave overestimator: tangent from the upper bound onto the concave branch.
-    t_cc = ub * _ONE_MINUS_SQRT2
-    line_cc = _f(t_cc) + _fp(t_cc) * (x - t_cc)
-    cc_straddle = jnp.where(t_cc > lb, jnp.where(x <= t_cc, _f(x), line_cc), sec)
-
-    cv = jnp.where(convex_box, _f(x), jnp.where(straddle, cv_straddle, sec))
-    cc = jnp.where(concave_box, _f(x), jnp.where(straddle, cc_straddle, sec))
-    return cv, cc
+    return runtime.single_inflection_envelope(
+        x,
+        lb,
+        ub,
+        f=_f,
+        fp=_fp,
+        c=0.0,
+        concavo_convex=True,
+        cv_tangent_point=_tangent_point,
+        cc_tangent_point=_tangent_point,
+    )
 
 
 def derive_weymouth_symbolic():
