@@ -650,6 +650,7 @@ def run_obbt_on_relaxation(
     eps: float = 1e-7,
     deadline: Optional[float] = None,
     prefer_pounce: bool = False,
+    full_result: bool = False,
 ) -> ObbtResult:
     """OBBT over the LP relaxation of a MILP relaxation envelope.
 
@@ -682,11 +683,12 @@ def run_obbt_on_relaxation(
         Skip variables whose box width is below this.
     deadline : float, optional
         Absolute ``time.perf_counter()`` deadline; pass to abort early.
-
-    Returns
-    -------
-    ObbtResult
-        ``tightened_lb`` and ``tightened_ub`` are length-``n_orig`` arrays.
+    full_result : bool, optional
+        When ``True`` the returned ``tightened_lb`` / ``tightened_ub`` span all
+        ``n_total`` columns (original + auxiliary), not just the first ``n_orig``.
+        Used by the OBBT-on-aux diagnostic (#208) to *capture* the tightening of
+        the lifted (product/ratio) aux columns that the default path discards.
+        Does not change the default (``False``) behavior for solve-path callers.
     """
     import time as _time
 
@@ -870,9 +872,10 @@ def run_obbt_on_relaxation(
                     ub_arr[var_idx] = max(new_ub, lb_arr[var_idx])
                     n_tightened += 1
 
+    keep = n_total if full_result else n_orig
     return ObbtResult(
-        tightened_lb=lb_arr[:n_orig].copy(),
-        tightened_ub=ub_arr[:n_orig].copy(),
+        tightened_lb=lb_arr[:keep].copy(),
+        tightened_ub=ub_arr[:keep].copy(),
         n_lp_solves=n_lp_solves,
         n_tightened=n_tightened,
         total_lp_time=total_lp_time,
@@ -1655,3 +1658,124 @@ def obbt_tighten_root(
         return RootObbtResult(lb, ub, total_tight, n_rounds, total_lp_time)
 
     return RootObbtResult(lb, ub, total_tight, n_rounds, total_lp_time)
+
+
+# ---------------------------------------------------------------------------
+# OBBT-on-auxiliaries diagnostic (#208 decision gate)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AuxTighteningReport:
+    """How much OBBT *would* tighten the lifted (aux) columns, currently discarded.
+
+    The McCormick envelope rows are baked over the build-time aux bounds and never
+    regenerated, so any OBBT tightening of an aux column (e.g. a ratio aux ``r``)
+    is thrown away. This report measures that discarded tightening **without
+    touching the solve path** — it is a pure diagnostic for the #208 decision gate
+    ("is the envelope-rebuild worth building?"). Soundness is not at stake: nothing
+    here feeds back into the relaxation.
+
+    Attributes:
+        n_aux: Number of auxiliary (lifted) columns in the relaxation.
+        n_aux_tightened: Aux columns whose lb or ub strictly tightened.
+        mean_rel_reduction: Mean over *finite-width* aux columns of
+            ``(old_width - new_width) / old_width`` in ``[0, 1]``.
+        max_rel_reduction: Worst-case relative width reduction.
+        aux_rel_reductions: Per-aux relative width reduction (finite-width only).
+        n_lp_solves: OBBT LP solves spent on the aux columns.
+        lp_time: Wall time of those LP solves.
+    """
+
+    n_aux: int
+    n_aux_tightened: int
+    mean_rel_reduction: float
+    max_rel_reduction: float
+    aux_rel_reductions: list[float]
+    n_lp_solves: int
+    lp_time: float
+
+
+def measure_discarded_aux_tightening(
+    model: Model,
+    lb: np.ndarray,
+    ub: np.ndarray,
+    *,
+    time_limit_per_lp: float = 0.2,
+    incumbent_cutoff: Optional[float] = None,
+    deadline: Optional[float] = None,
+    superposition: bool = False,
+) -> Optional[AuxTighteningReport]:
+    """Measure the OBBT tightening of the lifted aux columns that #208 discards.
+
+    Builds the McCormick relaxation at the box ``[lb, ub]``, runs OBBT over the
+    **auxiliary** columns (indices ``n_orig .. n_total``), and reports how much
+    their bounds shrink. This is the cheap, no-risk decision-gate step the issue
+    prescribes before investing in the envelope-rebuild (part 2): if many aux
+    columns shrink a lot, the discarded tightening is worth cascading back.
+
+    Returns ``None`` when the model has no relaxable nonlinearity / no aux columns
+    / the box is not finite (nothing to measure), else an
+    :class:`AuxTighteningReport`. Never raises into the caller (pure diagnostic).
+    """
+    lb = np.asarray(lb, dtype=np.float64).copy()
+    ub = np.asarray(ub, dtype=np.float64).copy()
+    if not (np.all(np.isfinite(lb)) and np.all(np.isfinite(ub))):
+        return None
+    try:
+        from discopt._jax.mccormick_lp import MccormickLPRelaxer, build_milp_relaxation
+
+        relaxer = MccormickLPRelaxer(model, superposition=superposition)
+        if not relaxer.has_relaxable_nonlinearity:
+            return None
+        milp, _ = build_milp_relaxation(
+            relaxer._model,
+            relaxer._terms,
+            relaxer._disc,
+            bound_override=(lb, ub),
+            superposition=relaxer._superposition,
+        )
+        n_orig = relaxer._n_orig
+        n_total = len(milp._bounds)
+        if n_total <= n_orig:
+            return None  # no auxiliary columns
+
+        old = np.asarray(milp._bounds, dtype=np.float64)
+        old_w = old[:, 1] - old[:, 0]
+        aux_idxs = list(range(n_orig, n_total))
+
+        res = run_obbt_on_relaxation(
+            milp,
+            n_orig,
+            candidate_idxs=aux_idxs,
+            time_limit_per_lp=time_limit_per_lp,
+            incumbent_cutoff=incumbent_cutoff,
+            deadline=deadline,
+            full_result=True,
+        )
+        new_lb = np.asarray(res.tightened_lb, dtype=np.float64)
+        new_ub = np.asarray(res.tightened_ub, dtype=np.float64)
+        new_w = new_ub - new_lb
+
+        rels: list[float] = []
+        n_tight = 0
+        for j in aux_idxs:
+            ow = old_w[j]
+            if not np.isfinite(ow) or ow <= 1e-12:
+                continue
+            r = float((ow - new_w[j]) / ow)
+            r = max(0.0, min(1.0, r))  # clamp round-off
+            rels.append(r)
+            if r > 1e-6:
+                n_tight += 1
+        return AuxTighteningReport(
+            n_aux=len(aux_idxs),
+            n_aux_tightened=n_tight,
+            mean_rel_reduction=float(np.mean(rels)) if rels else 0.0,
+            max_rel_reduction=float(np.max(rels)) if rels else 0.0,
+            aux_rel_reductions=rels,
+            n_lp_solves=res.n_lp_solves,
+            lp_time=res.total_lp_time,
+        )
+    except Exception:
+        return None

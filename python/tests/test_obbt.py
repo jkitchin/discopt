@@ -9,8 +9,10 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 import numpy as np
 from discopt._jax.obbt import (
+    AuxTighteningReport,
     ObbtResult,
     _extract_linear_constraints,
+    measure_discarded_aux_tightening,
     obbt_tighten_root,
     run_obbt,
 )
@@ -610,3 +612,82 @@ class TestRootObbt:
         assert not r.infeasible
         # Must not loosen and must not crash.
         assert np.all(r.lb >= lb - 1e-9)
+
+
+# ─────────────────────────────────────────────────────────────
+# OBBT-on-auxiliaries diagnostic (#208 decision gate)
+# ─────────────────────────────────────────────────────────────
+
+
+class TestMeasureDiscardedAuxTightening:
+    """The pure-diagnostic measurement of aux-column tightening (#208)."""
+
+    def _bilinear(self):
+        m = Model("bil")
+        m.continuous("x", lb=0, ub=4)
+        m.continuous("y", lb=0, ub=4)
+        m.minimize(m._variables[0] * m._variables[1])
+        m.subject_to(m._variables[0] + m._variables[1] <= 5)
+        return m
+
+    def test_reports_aux_tightening_on_bilinear(self):
+        m = self._bilinear()
+        lb = np.array([0.0, 0.0])
+        ub = np.array([4.0, 4.0])
+        rep = measure_discarded_aux_tightening(m, lb, ub)
+        assert isinstance(rep, AuxTighteningReport)
+        # One product aux w = x*y, and the x+y<=5 facet shrinks its envelope box.
+        assert rep.n_aux >= 1
+        assert rep.n_aux_tightened >= 1
+        assert 0.0 < rep.mean_rel_reduction <= 1.0
+        assert rep.max_rel_reduction >= rep.mean_rel_reduction
+        assert len(rep.aux_rel_reductions) == rep.n_aux
+
+    def test_cutoff_tightens_at_least_as_much(self):
+        m = self._bilinear()
+        lb = np.array([0.0, 0.0])
+        ub = np.array([4.0, 4.0])
+        struct = measure_discarded_aux_tightening(m, lb, ub)
+        withcut = measure_discarded_aux_tightening(m, lb, ub, incumbent_cutoff=6.0)
+        # Adding an objective cutoff can only add constraints -> >= tightening.
+        assert withcut.max_rel_reduction >= struct.max_rel_reduction - 1e-9
+
+    def test_none_on_linear_model(self):
+        # No relaxable nonlinearity -> no aux columns -> nothing to measure.
+        m = Model("lin")
+        m.continuous("x", lb=0, ub=10)
+        m.continuous("y", lb=0, ub=10)
+        m.minimize(m._variables[0] + m._variables[1])
+        m.subject_to(m._variables[0] + m._variables[1] <= 5)
+        lb = np.array([0.0, 0.0])
+        ub = np.array([10.0, 10.0])
+        assert measure_discarded_aux_tightening(m, lb, ub) is None
+
+    def test_none_on_open_box(self):
+        # An open box can't build finite McCormick envelopes -> None (no crash).
+        m = self._bilinear()
+        lb = np.array([0.0, 0.0])
+        ub = np.array([4.0, np.inf])
+        assert measure_discarded_aux_tightening(m, lb, ub) is None
+
+    def test_full_result_returns_aux_columns(self):
+        # full_result=True must expose the aux columns the default path slices off.
+        from discopt._jax.mccormick_lp import MccormickLPRelaxer, build_milp_relaxation
+        from discopt._jax.obbt import run_obbt_on_relaxation
+
+        m = self._bilinear()
+        lb = np.array([0.0, 0.0])
+        ub = np.array([4.0, 4.0])
+        relaxer = MccormickLPRelaxer(m)
+        milp, _ = build_milp_relaxation(
+            relaxer._model, relaxer._terms, relaxer._disc, bound_override=(lb, ub)
+        )
+        n_orig = relaxer._n_orig
+        n_total = len(milp._bounds)
+        default = run_obbt_on_relaxation(milp, n_orig)
+        full = run_obbt_on_relaxation(milp, n_orig, full_result=True)
+        assert len(default.tightened_lb) == n_orig
+        assert len(full.tightened_lb) == n_total
+        # The original-column block is identical between the two return modes.
+        np.testing.assert_allclose(full.tightened_lb[:n_orig], default.tightened_lb)
+        np.testing.assert_allclose(full.tightened_ub[:n_orig], default.tightened_ub)
