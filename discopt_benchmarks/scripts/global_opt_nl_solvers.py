@@ -43,14 +43,18 @@ if str(_DB) not in sys.path:
     sys.path.insert(0, str(_DB))
 
 from discopt_benchmarks.scripts.global_opt_baron_vs_discopt import (  # noqa: E402
+    GAP,
+    NA,
+    OK,
     REPO,
+    VIOLATION,
     SolverRun,
     all_instances,
+    classify,
     fmt,
-    is_correct,
     load_known_optima,
+    nl_is_maximize,
     run_discopt,
-    tri,
 )
 
 from benchmarks.runner import (  # noqa: E402
@@ -113,15 +117,11 @@ def write_report(
     md = out_dir / f"global_opt_nl_solvers_{ts}.md"
     n_oracle = sum(r["known"] is not None for r in rows)
 
-    # per-solver correctness tallies
-    tallies = {s: {"ok": 0, "wrong": 0} for s in solver_order}
+    # per-solver verdict tallies (honest OK / GAP / VIOLATION / n/a)
+    tallies = {s: {OK: 0, GAP: 0, VIOLATION: 0, NA: 0} for s in solver_order}
     for r in rows:
         for s in solver_order:
-            c = r["runs"][s]["correct"]
-            if c is True:
-                tallies[s]["ok"] += 1
-            elif c is False:
-                tallies[s]["wrong"] += 1
+            tallies[s][r["runs"][s]["verdict"]] += 1
 
     lines = [
         "# Global Optimization Benchmark — discopt vs HiGHS / SCIP / Couenne",
@@ -140,24 +140,35 @@ def write_report(
         "",
         "## Correctness summary (vs known optimum)",
         "",
-        "| solver | correct | wrong |",
-        "|---|---|---|",
+        "| verdict | meaning |",
+        "|---|---|",
+        "| `ok` | incumbent matches the known global within tolerance |",
+        "| `GAP` | honest feasible incumbent **worse** than the global — a "
+        "convergence gap in the time budget, *not* a correctness bug |",
+        "| `VIOLATION` | **the red line**: claimed a certified global with the "
+        "wrong value, or returned an incumbent strictly *better* than the proven "
+        "global (impossible → bug) |",
+        "| `n/a` | no oracle, or no incumbent returned |",
+        "",
+        "| solver | ok | GAP | VIOLATION | n/a |",
+        "|---|---|---|---|---|",
     ]
     for s in solver_order:
-        lines.append(f"| {s} | {tallies[s]['ok']}/{n_oracle} | {tallies[s]['wrong']} |")
+        t = tallies[s]
+        lines.append(f"| {s} | {t[OK]}/{n_oracle} | {t[GAP]} | {t[VIOLATION]} | {t[NA]} |")
 
-    # per-instance: obj+correct+time per solver
+    # per-instance: obj+verdict+time per solver
     head = "| instance | known |"
     sep = "|---|---|"
     for s in solver_order:
-        head += f" {s} obj | ? | t |"
+        head += f" {s} obj | v | t |"
         sep += "---|---|---|"
     lines += ["", "## Per-instance results", "", head, sep]
     for r in sorted(rows, key=lambda x: x["instance"]):
         cells = f"| {r['instance']} | {fmt(r['known'])} |"
         for s in solver_order:
             run = r["runs"][s]
-            cells += f" {fmt(run['objective'])} | {tri(run['correct'])} | {run['wall_time']:.2f} |"
+            cells += f" {fmt(run['objective'])} | {run['verdict']} | {run['wall_time']:.2f} |"
         lines.append(cells)
 
     md.write_text("\n".join(lines) + "\n")
@@ -215,24 +226,26 @@ def main() -> int:
     rows: list[dict] = []
     for i, name in enumerate(insts, 1):
         kn = known.get(name)
+        mx = nl_is_maximize(name)
         runs: dict[str, dict] = {}
         d = run_discopt(name, args.time_limit)
-        runs["discopt"] = {**vars(d), "correct": is_correct(d.objective, kn)}
+        runs["discopt"] = {**vars(d), "verdict": classify(d.status, d.objective, kn, mx)}
         for nm in ext_names:
             r = run_external(runner, ext_cfgs[nm], name, args.time_limit)
-            runs[nm] = {**vars(r), "correct": is_correct(r.objective, kn)}
-        rows.append({"instance": name, "known": kn, "runs": runs})
+            runs[nm] = {**vars(r), "verdict": classify(r.status, r.objective, kn, mx)}
+        rows.append({"instance": name, "known": kn, "maximize": mx, "runs": runs})
         cells = " | ".join(
-            f"{s}:{fmt(runs[s]['objective'], 8)} {tri(runs[s]['correct'])} "
-            f"{runs[s]['wall_time']:.1f}s"
+            f"{s}:{fmt(runs[s]['objective'], 8)} {runs[s]['verdict']:9} {runs[s]['wall_time']:.1f}s"
             for s in solver_order
         )
         print(f"[{i:2}/{len(insts)}] {name:20} {cells}", flush=True)
 
     md = write_report(rows, solver_order, args.time_limit, out_dir, ts)
-    wrong = sum(r["runs"]["discopt"]["correct"] is False for r in rows)
-    print(f"\n# DONE. discopt wrong {wrong}. Report: {md}", flush=True)
-    return 1 if wrong else 0
+    # The red line is a VIOLATION (wrong certified value / impossible bound), NOT
+    # an honest GAP (feasible incumbent that simply didn't converge in budget).
+    violations = sum(r["runs"]["discopt"]["verdict"] == VIOLATION for r in rows)
+    print(f"\n# DONE. discopt VIOLATIONS {violations}. Report: {md}", flush=True)
+    return 1 if violations else 0
 
 
 if __name__ == "__main__":
