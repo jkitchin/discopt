@@ -975,6 +975,74 @@ def _collect_monomial_terms_for_lift(expr: Expression, model: Model) -> set[tupl
     return terms
 
 
+def _collect_repeated_var_monomials_in_products(
+    expr: Expression, model: Model
+) -> set[tuple[int, int]]:
+    """Register monomials for original variables that repeat as factors of a
+    product *even when a sibling factor is an opaque transcendental* (issue #267).
+
+    ``sqrt(x) * y * y`` decomposes (after the univariate lift) to
+    ``[col(sqrt), y, y]``; the constraint-linearization collapse then needs the
+    ``(y, 2)`` monomial aux to rebuild it as ``aux(sqrt) * aux(y**2)``. The plain
+    :func:`_collect_monomial_terms_for_lift` misses it because the whole product
+    does not decompose without ``univariate_var_map`` (the ``sqrt`` factor is
+    unresolved there). This structural pass walks each maximal ``*`` tree and
+    counts the original-variable factors directly, ignoring (but tolerating) the
+    opaque factors, so the repeated-variable monomial is registered regardless of
+    what the other factors are. Registering an unused monomial only costs one aux
+    column and a rigorous power envelope, so it is always sound."""
+    terms: set[tuple[int, int]] = set()
+
+    def factor_counts(node: Expression, counts: dict[int, int]) -> None:
+        if isinstance(node, BinaryOp) and node.op == "*":
+            factor_counts(node.left, counts)
+            factor_counts(node.right, counts)
+            return
+        if isinstance(node, UnaryOp) and node.op == "neg":
+            factor_counts(node.operand, counts)
+            return
+        if isinstance(node, BinaryOp) and node.op == "**" and isinstance(node.right, Constant):
+            base = _get_flat_index(node.left, model)
+            p = _constant_value(node.right)
+            if base is not None and p is not None and p == int(p) and int(p) >= 1:
+                counts[base] = counts.get(base, 0) + int(p)
+            return
+        flat = _get_flat_index(node, model)
+        if flat is not None:
+            counts[flat] = counts.get(flat, 0) + 1
+
+    def visit(node: Expression) -> None:
+        if isinstance(node, BinaryOp):
+            if node.op == "*":
+                counts: dict[int, int] = {}
+                factor_counts(node, counts)
+                for v, c in counts.items():
+                    if c >= 2:
+                        terms.add((v, c))
+            visit(node.left)
+            visit(node.right)
+            return
+        if isinstance(node, UnaryOp):
+            visit(node.operand)
+            return
+        if isinstance(node, FunctionCall):
+            for arg in node.args:
+                visit(arg)
+            return
+        if isinstance(node, IndexExpression) and not isinstance(node.base, Variable):
+            visit(node.base)
+            return
+        if isinstance(node, SumExpression):
+            visit(node.operand)
+            return
+        if isinstance(node, SumOverExpression):
+            for term in node.terms:
+                visit(term)
+
+    visit(expr)
+    return terms
+
+
 # Flat-variable monomial: a sorted tuple of original variable indices, repeated
 # by power (e.g. ``x1**2 * x0`` → ``(0, 1, 1)``).  An affine-square residual is
 # represented as ``(const, [(coeff, monomial), ...])``.
@@ -4706,11 +4774,25 @@ def build_milp_relaxation(
     constraint_lift_monomials: set[tuple[int, int]] = set()
     for _con in model._constraints:
         try:
+            _dist_body = distribute_products(_con.body)
+            constraint_lift_monomials.update(_collect_monomial_terms_for_lift(_dist_body, model))
+            # Also register repeated-variable monomials of products whose sibling
+            # factor is an opaque univariate function (``sqrt(x)*y*y``, issue #267)
+            # so the lifted-product collapse finds the ``(y, 2)`` aux it needs.
             constraint_lift_monomials.update(
-                _collect_monomial_terms_for_lift(distribute_products(_con.body), model)
+                _collect_repeated_var_monomials_in_products(_dist_body, model)
             )
         except Exception:  # pragma: no cover - defensive: never break the build
             continue
+    if model._objective is not None:
+        try:
+            constraint_lift_monomials.update(
+                _collect_repeated_var_monomials_in_products(
+                    distribute_products(model._objective.expression), model
+                )
+            )
+        except Exception:  # pragma: no cover - defensive
+            pass
     monomial_terms = sorted(
         set(terms.monomial)
         | objective_lift_monomials
@@ -6059,6 +6141,77 @@ def build_milp_relaxation(
         # 3. substitute the division node with P (coefficient 1).
         composite_var_map[eid] = prod_col
 
+    def _lift_general_univariate(eid: int, func_name: str, inner: Expression) -> None:
+        """Lift a supported univariate function ``f(g)`` whose argument ``g`` is
+        itself a liftable (aux-referencing) expression — e.g. ``cos(x - x*x)`` —
+        to its own aux column with the existing univariate envelope machinery
+        (issue #267). The inner argument is force-lifted to an affine form over the
+        extended column space (its monomial / product factors become aux columns),
+        then the standard smooth tangent/secant rows enclose ``f`` over the
+        argument's interval. Mixed-curvature trig falls back to its (sound) box
+        bounds. Lets ``_decompose_product`` resolve this node as a product factor
+        so a product of univariate functions relaxes through McCormick instead of
+        being dropped. Abstains (sound omission) on unbounded / degenerate
+        arguments or out-of-domain / numerically degenerate envelopes."""
+        nonlocal col_idx
+        cross_term_used[0] = False
+        lifted = _lift_inner_to_affine(inner)
+        if lifted is None:
+            return
+        coeffs, arg_const = lifted
+        # A purely-affine inner over original variables is already handled by the
+        # standard univariate path (``_collect_univariate_relaxations``); only
+        # claim genuinely lifted (aux-referencing) arguments so we never shadow or
+        # double-count that path.
+        if not any(col >= n_orig for col in coeffs):
+            return
+
+        arg_coeff = np.zeros(col_idx)
+        for col, val in coeffs.items():
+            arg_coeff[col] = val
+
+        gl, gh = _extended_affine_interval(arg_coeff, arg_const)
+        if not (np.isfinite(gl) and np.isfinite(gh)) or gh < gl:
+            return
+        # Cross-term conditioning guard (issue #154 increment 2): abstain (drop the
+        # lift, enlarging the relaxation — always sound) when the lifted argument
+        # magnitude is large enough to make the LP ill-conditioned.
+        if cross_term_used[0] and max(abs(gl), abs(gh)) > _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE:
+            return
+        if not _univariate_domain_ok(func_name, gl, gh):
+            return
+        val_lb, val_ub = _univariate_value_bounds(func_name, gl, gh)
+        if not (np.isfinite(val_lb) and np.isfinite(val_ub)):
+            return
+        # Numerical-conditioning guard: refuse a degenerate envelope whose worst
+        # emitted tangent slope would inject an ill-conditioned coefficient. The
+        # smooth emission places tangents at ``[lb, mid, ub]`` (``_tangent_points``
+        # skips singular endpoints), so the worst slope is the max over those.
+        for pt in _tangent_points(func_name, gl, gh):
+            try:
+                slope = _univariate_grad(func_name, pt)
+            except ValueError:
+                slope = 0.0
+            if not (np.isfinite(slope) and abs(slope) <= _LIFT_MAX_ENVELOPE_SLOPE):
+                return
+
+        aux_col = col_idx
+        univariate_var_map[eid] = aux_col
+        univariate_relaxations.append(
+            UnivariateRelaxation(
+                expr_id=eid,
+                func_name=func_name,
+                aux_col=aux_col,
+                arg_coeff=arg_coeff,
+                arg_const=float(arg_const),
+                arg_lb=float(gl),
+                arg_ub=float(gh),
+            )
+        )
+        all_bounds.append((float(val_lb), float(val_ub)))
+        integrality_flags.append(0)
+        col_idx += 1
+
     def _maybe_lift_outer_atom(expr: Expression) -> None:
         nonlocal col_idx
         eid = id(expr)
@@ -6079,6 +6232,20 @@ def build_milp_relaxation(
         elif isinstance(expr, FunctionCall) and expr.func_name == "sqrt" and len(expr.args) == 1:
             func_name, inner = "sqrt", expr.args[0]
         else:
+            # General univariate function with a liftable (non-affine) argument —
+            # e.g. ``cos(x - x*x)`` (issue #267). The reciprocal/sqrt cases above
+            # keep their bespoke conditioning guards; every other supported
+            # univariate atom goes through the shared smooth-envelope lift.
+            op_info = _univariate_arg(expr)
+            if op_info is None:
+                return
+            gen_name, gen_inner = op_info
+            # ``abs`` is exactly linear (and already enveloped by the standard
+            # path); skip it here to avoid a redundant aux. Reciprocal via the
+            # ``c/g`` form is handled by the division branch above.
+            if gen_name in {"abs", "reciprocal"}:
+                return
+            _lift_general_univariate(eid, gen_name, gen_inner)
             return
 
         cross_term_used[0] = False
@@ -6194,6 +6361,62 @@ def build_milp_relaxation(
         _walk_lift(distributed_objective)
     for _constraint in model._constraints:
         _walk_lift(distributed_bodies[id(_constraint)])
+
+    # ── Re-collect lifted products after the lift walk (issue #267) ─────────
+    # ``_walk_lift`` may have just lifted univariate-function factors of a product
+    # — ``sin(x)*cos(x - x*x)``, ``exp(x)*log(y)``, ``sqrt(x)*y*y`` — into their own
+    # ``univariate_var_map`` aux columns. The earlier bilinear/higher-product
+    # collection ran before that walk, so the McCormick envelopes coupling those
+    # new aux columns were never allocated and ``_decompose_product`` would resolve
+    # the factors but the linearizer would raise "... not in map" and drop the
+    # whole constraint. Re-run the collectors now: every univariate node is a
+    # ``FunctionCall`` whose ``id()`` is stable across ``distribute_products`` (the
+    # collectors re-distribute internally), so they resolve the freshly lifted
+    # factors and register the column-keyed product envelopes. Both passes are
+    # idempotent — ``_ensure_bilinear_aux`` and the map assignments dedup — so the
+    # second pass only ever *adds* the previously-missing product columns.
+    _post_lift_bilinear_keys = _collect_lifted_bilinear_products(
+        model,
+        fractional_power_var_map,
+        univariate_var_map,
+        n_orig,
+        monomial_var_map=monomial_var_map,
+        composite_var_map=composite_var_map,
+    )
+    for key in _post_lift_bilinear_keys:
+        if key not in bilinear_var_map:
+            bilinear_var_map[key] = _ensure_bilinear_aux(*key)
+    _post_lift_tri_keys, _post_lift_multi_keys = _collect_lifted_higher_products(
+        model,
+        fractional_power_var_map,
+        univariate_var_map,
+        n_orig,
+        monomial_var_map=monomial_var_map,
+        composite_var_map=composite_var_map,
+    )
+    for term in _post_lift_tri_keys:
+        if term in trilinear_var_map:
+            _register_pinned_collapse(term)
+            continue
+        pair, remaining = _choose_trilinear_pair(term, partitioned_vars)
+        pair_col = _ensure_bilinear_aux(*pair)
+        final_col = _ensure_bilinear_aux(pair_col, remaining)
+        trilinear_var_map[term] = final_col
+        trilinear_stage_map[term] = {
+            "pair": pair,
+            "pair_col": pair_col,
+            "remaining_var": remaining,
+            "product_col": final_col,
+        }
+        _register_pinned_collapse(term)
+    for multi_term in _post_lift_multi_keys:
+        if multi_term in multilinear_var_map:
+            _register_pinned_collapse(multi_term)
+            continue
+        final_col, stages = _ensure_multilinear_aux(multi_term)
+        multilinear_var_map[multi_term] = final_col
+        multilinear_stage_map[multi_term] = stages
+        _register_pinned_collapse(multi_term)
 
     # ── Multilinear RLT convex-hull cuts (setup) ───────────────────────────
     # The recursive chain w = (((x0*x1)*x2)*...) gives a valid but loose
