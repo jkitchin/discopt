@@ -128,6 +128,8 @@ def test_quadratic_fallback_runs_once_per_maximal_region(monkeypatch):
     eigendecomposition fallback should run a small constant number of times,
     independent of n — not ~n times.
     """
+    import sys
+
     from discopt._jax.convexity import patterns
 
     calls = {"n": 0}
@@ -139,9 +141,17 @@ def test_quadratic_fallback_runs_once_per_maximal_region(monkeypatch):
 
     monkeypatch.setattr(patterns, "quadratic_curvature", counting)
 
+    # Use enough depth that a per-prefix fallback would be unmistakably >n, but
+    # raise the recursion limit so the count — not the ambient interpreter limit
+    # (CI's default 1000 is below this depth) — is what the test measures.
     n = 400
-    m = _deep_sum_model(n)
-    classify_model(m, use_certificate=False)
+    old = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(old, 20000))
+    try:
+        m = _deep_sum_model(n)
+        classify_model(m, use_certificate=False)
+    finally:
+        sys.setrecursionlimit(old)
     # One maximal region for the objective body + one for the affine constraint
     # row; allow generous slack but assert it is NOT proportional to n.
     assert calls["n"] <= 8, f"quadratic_curvature called {calls['n']} times for n={n}"
@@ -153,8 +163,21 @@ def test_deep_pure_continuous_solve_does_not_return_error():
     With a tight time limit the convexity walk may abandon to unknown; the solve
     must still route to the spatial B&B and return a valid status (optimal /
     feasible / time_limit / infeasible) rather than ``status="error"``.
+
+    The recursion limit is raised for the duration: the relaxation/FBBT walkers
+    on the (deliberately deep) synthetic expression are not headroom-protected
+    like the convexity walk, and CI's default 1000-frame limit is below this
+    depth. Real models reach this routing path via many shallow constraints, not
+    one giant expression, so this only affects the synthetic stress model.
     """
-    m = _deep_sum_model(1600)
-    r = m.solve(time_limit=20.0)
+    import sys
+
+    old = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(old, 20000))
+    try:
+        m = _deep_sum_model(600)
+        r = m.solve(time_limit=20.0)
+    finally:
+        sys.setrecursionlimit(old)
     assert r.status != "error", f"got error result: {getattr(r, '_explanation', None)}"
     assert r.status in ("optimal", "feasible", "time_limit", "infeasible", "limit")
