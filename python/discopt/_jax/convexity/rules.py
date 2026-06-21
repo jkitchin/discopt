@@ -1133,9 +1133,7 @@ def classify_model(
     of demoting to convexity-unknown (issue #266).
     """
     return _run_with_deep_recursion(
-        lambda: _classify_model_inner(
-            model, use_certificate=use_certificate, deadline=deadline
-        ),
+        lambda: _classify_model_inner(model, use_certificate=use_certificate, deadline=deadline),
         depth_need=_recursion_headroom_need(model),
     )
 
