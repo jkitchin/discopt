@@ -5628,24 +5628,27 @@ def solve_model(
 
     # When the tree produced no usable dual bound (uncertified exit, or a
     # relaxation the LP backend could not solve), fall back to a rigorous global
-    # lower bound from the root MILP relaxation over the root box, so a
-    # minimization reports a finite sound bound instead of None (issue #138). The
-    # MILP path already seeds such a root bound; this brings the spatial path to
-    # parity. Surfaced lazily — only when the search yielded nothing — and never
-    # overrides an existing finite bound.
+    # bound from the root MILP relaxation over the root box, so the search reports
+    # a finite sound bound instead of None (issue #138). The MILP path already
+    # seeds such a root bound; this brings the spatial path to parity. Surfaced
+    # lazily — only when the search yielded nothing — and never overrides an
+    # existing finite bound. ``_root_relaxation_lower_bound`` always returns a
+    # valid lower bound of the *internally minimized* objective: for a MINIMIZE it
+    # is the dual lower bound directly; for a MAXIMIZE the builder minimizes
+    # ``-obj`` so a lower bound ``L`` on ``-obj`` means ``obj <= -L`` — a valid
+    # *upper* bound, surfaced by negating (issue #267: inscribedsquare02, whose
+    # objective square is finite only after FBBT bounds the free auxiliaries, used
+    # to report ``bound=None`` because no maximize-side fallback existed).
     _rr_remaining = time_limit - (time.perf_counter() - t_start)
     if (bound_val is None or not np.isfinite(bound_val)) and _rr_remaining <= 0.0:
         # B&B consumed the whole limit and surfaced no bound. Spend a small bounded
         # slice on the rigorous root-relaxation fallback anyway so an uncertified
-        # minimize exit reports a sound dual bound instead of None (issue #138).
-        # Only ever reached when the search produced nothing usable; the floor's
-        # own ~10% internal budget keeps the wall-time overrun small.
+        # exit reports a sound dual bound instead of None (issue #138). Only ever
+        # reached when the search produced nothing usable; the floor's own ~10%
+        # internal budget keeps the wall-time overrun small.
         _rr_remaining = _ROOT_FALLBACK_FLOOR_S
-    if (
-        (bound_val is None or not np.isfinite(bound_val))
-        and (model._objective.sense == ObjectiveSense.MINIMIZE)
-        and _rr_remaining > 0.0
-    ):
+    if (bound_val is None or not np.isfinite(bound_val)) and _rr_remaining > 0.0:
+        _is_maximize = model._objective.sense == ObjectiveSense.MAXIMIZE
         # Budget the fallback to the time actually left: it runs *after* the B&B
         # loop already consumed the limit, so passing the full ``time_limit`` here
         # would let it overrun by a second whole budget.
@@ -5653,22 +5656,34 @@ def solve_model(
             model, _root_lb_snapshot, _root_ub_snapshot, _rr_remaining, psd_cuts=psd_cuts
         )
         if _rr is not None and np.isfinite(_rr):
-            bound_val = _rr
+            # Negate for MAXIMIZE: a lower bound on ``-obj`` is an upper bound on
+            # ``obj``. The relaxation is a valid outer approximation either way, so
+            # the surfaced bound is rigorous and on the correct side of the
+            # incumbent (a maximize upper bound is ``>= obj``).
+            bound_val = -_rr if _is_maximize else _rr
             if obj_val is not None and np.isfinite(obj_val):
-                gap_val = max(0.0, obj_val - bound_val) / max(1.0, abs(obj_val))
+                gap_val = abs(bound_val - obj_val) / max(1.0, abs(obj_val))
 
-    # Re-earn certification on a feasible exit iff a *rigorous* global lower bound
-    # (here the root-relaxation fallback, itself only returned when the objective
-    # is validly linearized) meets the incumbent within tolerance — then the
-    # incumbent is provably global and the honest status is "optimal". The
-    # bound <= incumbent guard stops a spurious above-incumbent bound (which the
-    # max(0, …) gap clamp would otherwise read as gap 0) from certifying.
+    # Re-earn certification on a feasible exit iff a *rigorous* global bound (here
+    # the root-relaxation fallback, itself only returned when the objective is
+    # validly linearized) meets the incumbent within tolerance — then the
+    # incumbent is provably global and the honest status is "optimal". For a
+    # MINIMIZE the bound is a lower bound (``bound <= incumbent``); for a MAXIMIZE
+    # it is an upper bound (``bound >= incumbent``). The on-correct-side guard
+    # stops a spurious wrong-side bound (which the abs-gap clamp would otherwise
+    # read as gap 0) from certifying.
+    _is_max = model._objective.sense == ObjectiveSense.MAXIMIZE
+    _bound_on_correct_side = (
+        bound_val is not None
+        and np.isfinite(bound_val)
+        and (bound_val >= obj_val - 1e-9 if _is_max else bound_val <= obj_val + 1e-9)
+        if obj_val is not None
+        else False
+    )
     if (
         status == "feasible"
         and obj_val is not None
-        and bound_val is not None
-        and np.isfinite(bound_val)
-        and bound_val <= obj_val + 1e-9
+        and _bound_on_correct_side
         and gap_val is not None
         and gap_val <= gap_tolerance
     ):
