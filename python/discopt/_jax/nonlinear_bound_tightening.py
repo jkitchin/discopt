@@ -2225,6 +2225,92 @@ class BilinearProductEqualityRule(NonlinearBoundTighteningRule):
         return tightened_lb, tightened_ub
 
 
+class FunctionDomainBoundRule(NonlinearBoundTighteningRule):
+    """Apply a monotone function's natural domain to its single-variable argument.
+
+    ``log``/``log2``/``log10`` require a strictly positive argument, ``sqrt`` a
+    non-negative one, ``log1p`` an argument ``>= -1`` (see ``_MONOTONE_DOMAINS``).
+    Wherever such a function appears in the model — objective *or* constraint, and
+    inside *any* surrounding expression (e.g. the ``log(x)`` in ``x*log(x)``) — its
+    argument must lie in the domain at every evaluable point, so the implied bound
+    on the argument variable holds globally.
+
+    :class:`MonotoneFunctionBoundsRule` only derives domain bounds for a function
+    that is the *whole* body of a ``<=``/``==`` constraint; it misses functions in
+    the objective or nested in products. A free variable fed to ``log`` (e.g.
+    MINLPLib ``ex8_5_4``'s ``log(x0)*x0`` objective with all-free variables) then
+    keeps an unbounded, sign-unconstrained box: the local NLP wanders into
+    ``x <= 0`` where ``log`` is undefined, every node solve fails, and the search
+    exhausts with no incumbent — falsely reported ``infeasible`` (issue #265).
+
+    This rule closes that gap for any single-variable affine argument. Soundness:
+    the domain bound never removes a point where the function is defined, so no
+    feasible solution is cut; multi-variable arguments (``log(x1 - x2)``) and
+    non-affine ones are conservatively skipped.
+    """
+
+    name = "function_domain_bound"
+
+    def tighten(self, model, flat_lb, flat_ub, metadata):
+        lb = np.asarray(flat_lb, dtype=np.float64).copy()
+        ub = np.asarray(flat_ub, dtype=np.float64).copy()
+
+        def _subexprs(expr):
+            if isinstance(expr, BinaryOp):
+                return [expr.left, expr.right]
+            if isinstance(expr, UnaryOp):
+                return [expr.operand]
+            if isinstance(expr, (FunctionCall, CustomCall)):
+                return list(expr.args)
+            if isinstance(expr, IndexExpression):
+                return [expr.base]
+            if isinstance(expr, SumExpression):
+                return [expr.operand]
+            if isinstance(expr, SumOverExpression):
+                return list(expr.terms)
+            if isinstance(expr, MatMulExpression):
+                return [expr.left, expr.right]
+            return []
+
+        def walk(expr):
+            if (
+                isinstance(expr, FunctionCall)
+                and expr.func_name in _MONOTONE_DOMAINS
+                and len(expr.args) == 1
+            ):
+                domain_lb, domain_ub = _MONOTONE_DOMAINS[expr.func_name]
+                if domain_lb is not None or domain_ub is not None:
+                    match = _match_affine_var(expr.args[0], 1.0, metadata)
+                    if match is not None:
+                        flat_idx, coeff, offset = match
+                        if flat_idx is not None and abs(coeff) > 1e-12:
+                            _tighten_affine_argument_interval(
+                                lb,
+                                ub,
+                                metadata,
+                                flat_idx,
+                                coeff,
+                                offset,
+                                arg_lb=domain_lb,
+                                arg_ub=domain_ub,
+                            )
+            for sub in _subexprs(expr):
+                walk(sub)
+
+        try:
+            if model._objective is not None:
+                walk(model._objective.expression)
+            for c in model._constraints:
+                walk(c.body)
+        except NonlinearBoundTighteningInfeasible:
+            # An empty argument domain is a genuine infeasibility proof; let it
+            # propagate so the caller can certify it.
+            raise
+        except Exception:
+            return np.asarray(flat_lb, dtype=np.float64), np.asarray(flat_ub, dtype=np.float64)
+        return lb, ub
+
+
 _PERIODIC_FUNCS = frozenset({"sin", "cos"})
 _TWO_PI = 2.0 * np.pi
 
