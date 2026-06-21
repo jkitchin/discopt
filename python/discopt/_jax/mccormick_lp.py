@@ -388,6 +388,12 @@ class MccormickLPRelaxer:
                 rlt_level1=self._rlt_applicable,
             )
         except Exception:
+            # Build failures here are otherwise invisible: the result silently
+            # becomes status="error", which propagates up to a top-level
+            # status="error" SolveResult with no diagnostic. Log the full
+            # traceback at DEBUG (this is a per-node hot path, so keep it off the
+            # default log level) so the underlying cause is recoverable.
+            logger.debug("McCormick LP relaxation build failed", exc_info=True)
             return MccormickLPResult(status="error")
 
         # Densification guard: decline nodes whose lifted relaxation would force a
