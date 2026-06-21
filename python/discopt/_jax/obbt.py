@@ -114,6 +114,47 @@ def _ns_safe_lp_lower_bound(c, dual_values, A_ub, b_ub, lo, hi):
     return g - margin
 
 
+def _equilibrate_rows(A_ub, b_ub):
+    """Row-equilibrate an inequality system ``A x <= b`` for an OBBT projection LP.
+
+    Returns ``(A_s, b_s)`` where each row ``i`` is scaled by a positive factor
+    ``d_i = 1 / max(||A[i,:]||_inf, |b_i|, 1)``. Multiplying a ``<=`` row by a
+    positive constant is an *exact equivalence* — it leaves the feasible set, and
+    therefore the optimum of every ``min/max x_j`` projection, unchanged in exact
+    arithmetic. What it changes is the *floating-point* conditioning of the
+    simplex basis: an OBBT relaxation can mix coefficients spanning many orders of
+    magnitude (cleared-denominator / lifted-monomial rows reach ~1e9), and solving
+    an ill-conditioned basis ``B y = b`` amplifies the unit roundoff by ``cond(B)``,
+    so the reported vertex — and hence ``min/max x_j`` — can sit ~``cond(B)*u`` past
+    the true projection. On an *integer* variable that sub-unit slack rounds inward
+    to a full unit and can prune the global optimum, producing a certified-WRONG
+    answer (nvs22). Equilibrating the rows to unit infinity-norm removes that
+    spurious spread before the exact solve, so the vertex the simplex returns is
+    accurate and the tightening is rigorous. The objective ``c`` (a unit ``±e_j``)
+    and the variable bounds are untouched, so the returned objective is directly
+    the bound; a warm basis stays valid because row scaling does not change which
+    constraints are active.
+    """
+    import scipy.sparse as sp
+
+    if A_ub is None or b_ub is None:
+        return A_ub, b_ub
+    b_arr = np.asarray(b_ub, dtype=np.float64)
+    if sp.issparse(A_ub):
+        A_csr = A_ub.tocsr()
+        # Per-row infinity norm: abs() makes all stored entries non-negative, so
+        # the row max (which also accounts for implicit zeros) is ||A[i,:]||_inf.
+        row_inf = np.abs(A_csr).max(axis=1).toarray().ravel()
+        scale = np.maximum.reduce([row_inf, np.abs(b_arr), np.ones_like(row_inf)])
+        d = 1.0 / scale
+        return (sp.diags(d) @ A_csr).tocsr(), b_arr * d
+    A_arr = np.asarray(A_ub, dtype=np.float64)
+    row_inf = np.abs(A_arr).max(axis=1) if A_arr.size else np.zeros(A_arr.shape[0])
+    scale = np.maximum.reduce([row_inf, np.abs(b_arr), np.ones_like(row_inf)])
+    d = 1.0 / scale
+    return A_arr * d[:, None], b_arr * d
+
+
 def solve_lp(**kwargs):
     """Module-level default LP solve (HiGHS-first, POUNCE fallback).
 
@@ -776,6 +817,14 @@ def run_obbt_on_relaxation(
         else:
             A_ub = cutoff_row
             b_ub = cutoff_rhs
+
+    # Row-equilibrate the projection LP so an ill-conditioned (wide-coefficient)
+    # relaxation cannot return an inaccurate vertex that over-tightens — and, on
+    # an integer variable, rounds inward to prune the global optimum (the nvs22
+    # false-certificate). Exact equivalence on the feasible set; see
+    # ``_equilibrate_rows``. Done once here (after the cutoff row is appended) and
+    # reused for every min/max solve in this box.
+    A_ub, b_ub = _equilibrate_rows(A_ub, b_ub)
 
     lb_arr = np.array([b[0] for b in bounds], dtype=np.float64)
     ub_arr = np.array([b[1] for b in bounds], dtype=np.float64)
