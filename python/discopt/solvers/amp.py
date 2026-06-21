@@ -512,6 +512,8 @@ def _solve_nlp_subproblem(
         # try cyipopt before falling back to POUNCE.
         solver_sequence = _normalize_nlp_solver_sequence(nlp_solver)
 
+        from discopt.solvers import SolveStatus
+
         result = None
         for solver_name in solver_sequence:
             remaining = _remaining_wall_time(local_deadline)
@@ -520,31 +522,32 @@ def _solve_nlp_subproblem(
             options: dict[str, float | int] = {"print_level": 0, "max_iter": 300}
             if remaining is not None:
                 options["max_wall_time"] = max(remaining, 0.05)
-            if solver_name == "ipopt":
-                from discopt.solvers.nlp_ipopt import solve_nlp
+            try:
+                if solver_name == "ipopt":
+                    from discopt.solvers.nlp_ipopt import solve_nlp
 
-                if remaining is not None:
-                    options["max_cpu_time"] = max(remaining, 0.05)
-                trial = solve_nlp(
-                    cast(Any, backend_evaluator),
-                    x0_clipped,
-                    options=options,
-                )
-            else:
-                from discopt.solvers.nlp_pounce import solve_nlp
+                    if remaining is not None:
+                        options["max_cpu_time"] = max(remaining, 0.05)
+                    trial = solve_nlp(
+                        cast(Any, backend_evaluator),
+                        x0_clipped,
+                        options=options,
+                    )
+                else:
+                    from discopt.solvers.nlp_pounce import solve_nlp
 
-                trial = solve_nlp(
-                    cast(Any, backend_evaluator),
-                    x0_clipped,
-                    options=options,
-                )
+                    trial = solve_nlp(
+                        cast(Any, backend_evaluator),
+                        x0_clipped,
+                        options=options,
+                    )
+            except Exception as e:
+                logger.debug("AMP NLP subproblem backend %s failed: %s", solver_name, e)
+                continue
             result = trial
-            from discopt.solvers import SolveStatus
 
             if trial.status == SolveStatus.OPTIMAL:
                 break
-
-        from discopt.solvers import SolveStatus
 
         if result is not None and result.status == SolveStatus.OPTIMAL:
             x_opt = np.asarray(result.x, dtype=np.float64)
