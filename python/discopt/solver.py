@@ -1586,31 +1586,34 @@ def _model_contains_custom_call(model: Model) -> bool:
     branch-and-bound (see ``solve_model``). See issue #27b.
     """
 
-    def _walk(expr) -> bool:
-        if isinstance(expr, CustomCall):
-            return True
-        # Generic child traversal mirroring the DAG node fields used elsewhere
-        # (e.g. discopt._jax.cutting_planes): BinaryOp/MatMul -> left/right,
-        # UnaryOp/SumExpression -> operand, FunctionCall/CustomCall -> args,
-        # SumOverExpression -> terms, IndexExpression -> base.
-        left = getattr(expr, "left", None)
-        if left is not None and _walk(left):
-            return True
-        right = getattr(expr, "right", None)
-        if right is not None and _walk(right):
-            return True
-        operand = getattr(expr, "operand", None)
-        if operand is not None and _walk(operand):
-            return True
-        base = getattr(expr, "base", None)
-        if base is not None and _walk(base):
-            return True
-        for a in getattr(expr, "args", ()) or ():
-            if _walk(a):
+    def _walk(root) -> bool:
+        # Explicit-stack DFS (not Python recursion): ``from_nl`` can build a
+        # single body tens of thousands of nodes deep, which a per-node recursive
+        # walk would overflow the default recursion limit on (issue #271).
+        stack = [root]
+        while stack:
+            expr = stack.pop()
+            if isinstance(expr, CustomCall):
                 return True
-        for t in getattr(expr, "terms", ()) or ():
-            if _walk(t):
-                return True
+            # Generic child traversal mirroring the DAG node fields used
+            # elsewhere (e.g. discopt._jax.cutting_planes): BinaryOp/MatMul ->
+            # left/right, UnaryOp/SumExpression -> operand,
+            # FunctionCall/CustomCall -> args, SumOverExpression -> terms,
+            # IndexExpression -> base.
+            left = getattr(expr, "left", None)
+            if left is not None:
+                stack.append(left)
+            right = getattr(expr, "right", None)
+            if right is not None:
+                stack.append(right)
+            operand = getattr(expr, "operand", None)
+            if operand is not None:
+                stack.append(operand)
+            base = getattr(expr, "base", None)
+            if base is not None:
+                stack.append(base)
+            stack.extend(getattr(expr, "args", ()) or ())
+            stack.extend(getattr(expr, "terms", ()) or ())
         return False
 
     obj = getattr(model, "_objective", None)
@@ -1919,6 +1922,50 @@ def _scoped_tuning(fn: _F) -> _F:
     return cast(_F, wrapper)
 
 
+# Several walkers along the solve path (factorable reformulation, the relaxation
+# compiler's ``_compile_node``, FBBT, ...) recurse one Python frame per
+# expression node. ``from_nl`` can rebuild a *single* constraint body tens of
+# thousands of nodes deep (watercontamination0202r ~53k, graphpart_clique-30
+# ~7.6k), overrunning CPython's default 1000-frame recursion limit and raising an
+# uncaught ``RecursionError`` (issue #271). Mirroring the convexity walk's fix
+# (issue #266), the whole solve runs with a depth-scaled recursion limit on a
+# large-stack worker thread when — and only when — the model has such a deep
+# expression. Shallow models (the overwhelming majority) run inline at the
+# default limit, byte-for-byte unchanged.
+_DEEP_SOLVE_DEPTH_GATE = 700
+
+
+def _scoped_deep_recursion(fn: _F) -> _F:
+    """Run ``fn(model, ...)`` with size-scaled recursion headroom so a model with
+    a very deep expression graph cannot crash the solve with ``RecursionError``.
+
+    The headroom is gated on the deepest single expression in the model, so the
+    common shallow case keeps the default limit and runs inline with no worker
+    thread (zero behavioural change). Deep models run on a large-stack worker
+    thread with a raised limit, the proven mechanism from issue #266.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(model, *args, **kwargs):
+        from discopt._jax.convexity.rules import _run_with_deep_recursion
+        from discopt._jax.factorable_reform import _max_expr_node_count
+
+        try:
+            depth = _max_expr_node_count(model)
+        except Exception:
+            depth = 0
+        if depth <= _DEEP_SOLVE_DEPTH_GATE:
+            return fn(model, *args, **kwargs)
+        # A handful of Python frames are entered per node along the deepest path
+        # (factorable walk, then the compiler's node walk); cushion generously and
+        # cap so a pathological size can't request an unsatisfiable limit.
+        depth_need = min(4000 + 8 * depth, 1_000_000)
+        return _run_with_deep_recursion(lambda: fn(model, *args, **kwargs), depth_need=depth_need)
+
+    return cast(_F, wrapper)
+
+
+@_scoped_deep_recursion
 @_scoped_tuning
 def solve_model(
     model: Model,
