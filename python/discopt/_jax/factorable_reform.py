@@ -582,17 +582,19 @@ def _lift_objective_atoms(expr: Expression, model: Model, lifter: "_Lifter") -> 
     return expr
 
 
-def _find_clearable_denominator(expr: Expression, model: Model):
+def _find_clearable_denominator(expr: Expression, model: Model, _depth: int = 0, _max_depth: int = 500):
     """Return the denominator ``D`` of the first division term ``N/D`` in
     *expr*'s additive structure whose ``D`` is non-constant and sign-definite
     over the variable box, as ``(D, sign, dmin)`` where ``sign`` is +1/-1 and
     ``dmin = min |D|`` over the box.  ``None`` if no such division exists."""
+    if _depth >= _max_depth:
+        return None
     if isinstance(expr, BinaryOp):
         if expr.op in ("+", "-"):
-            found = _find_clearable_denominator(expr.left, model)
+            found = _find_clearable_denominator(expr.left, model, _depth + 1, _max_depth)
             if found is not None:
                 return found
-            return _find_clearable_denominator(expr.right, model)
+            return _find_clearable_denominator(expr.right, model, _depth + 1, _max_depth)
         if expr.op == "/":
             d = expr.right
             if not isinstance(d, Constant):
@@ -602,9 +604,9 @@ def _find_clearable_denominator(expr: Expression, model: Model):
                 if hi < -_ZERO_MARGIN:
                     return d, -1, -hi
             # Search the numerator for a nested division.
-            return _find_clearable_denominator(expr.left, model)
+            return _find_clearable_denominator(expr.left, model, _depth + 1, _max_depth)
     if isinstance(expr, UnaryOp) and expr.op == "neg":
-        return _find_clearable_denominator(expr.operand, model)
+        return _find_clearable_denominator(expr.operand, model, _depth + 1, _max_depth)
     return None
 
 
