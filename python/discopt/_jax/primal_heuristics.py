@@ -19,6 +19,18 @@ from discopt._jax.nlp_evaluator import NLPEvaluator
 from discopt.modeling.core import Model, VarType
 from discopt.solvers import NLPResult, SolveStatus
 
+# Iteration cap for the *sub-NLP* solves inside the primal heuristics (issue #268).
+# These solves only need an approximately feasible point (the heuristic then checks
+# integrality + constraints and lets B&B certify); they do NOT need a tight optimum.
+# Left uncapped, a single pump/local-search projection can grind to the backend's
+# full iteration limit (one ex1263 solve hit ~1225 IPM iterations) and burn the
+# wall-clock budget that the branch-and-bound search needs. A generous cap bounds
+# the pathological cases while leaving normal projections (well under it) untouched;
+# the caller can still override via ``ipopt_options``/``nlp_options``. Sound: a
+# capped, unconverged point simply fails the feasibility check and yields no
+# incumbent — it can never inject a wrong one (inject_incumbent re-verifies).
+_HEURISTIC_NLP_MAX_ITER = 300
+
 
 @dataclass
 class MultiStartResult:
@@ -140,6 +152,7 @@ class MultiStartNLP:
 
         opts = dict(ipopt_options) if ipopt_options else {}
         opts.setdefault("print_level", 0)
+        opts.setdefault("max_iter", _HEURISTIC_NLP_MAX_ITER)
         if backend is None:
             from discopt.solvers.nlp_backend import get_nlp_solver
 
@@ -226,6 +239,7 @@ def feasibility_pump(
 
     opts = dict(ipopt_options) if ipopt_options else {}
     opts.setdefault("print_level", 0)
+    opts.setdefault("max_iter", _HEURISTIC_NLP_MAX_ITER)
     if backend is None:
         from discopt.solvers.nlp_backend import get_nlp_solver
 
@@ -425,6 +439,7 @@ def subnlp(
 
         opts = dict(nlp_options) if nlp_options else {}
         opts.setdefault("print_level", 0)
+        opts.setdefault("max_iter", _HEURISTIC_NLP_MAX_ITER)
         if time_budget is not None and time_budget > 0.0:
             opts.setdefault("max_wall_time", float(time_budget))
 
@@ -593,6 +608,7 @@ def integer_local_search(
         mid = np.clip(0.5 * (np.clip(lb, -1e3, 1e3) + np.clip(ub, -1e3, 1e3)), -1e3, 1e3)
         relax_opts = dict(nlp_options) if nlp_options else {}
         relax_opts.setdefault("print_level", 0)
+        relax_opts.setdefault("max_iter", _HEURISTIC_NLP_MAX_ITER)
         relax_res = backend(evaluator, mid, options=relax_opts)
         if relax_res is not None and relax_res.x is not None:
             seeds.append(_round_clip(np.asarray(relax_res.x)))
@@ -1032,6 +1048,7 @@ def diving(
 
     opts = dict(nlp_options) if nlp_options else {}
     opts.setdefault("print_level", 0)
+    opts.setdefault("max_iter", _HEURISTIC_NLP_MAX_ITER)
 
     fixed = np.zeros(int_mask.shape[0], dtype=bool)
     x_cur = np.clip(np.asarray(x_relax, dtype=np.float64), lb0, ub0)
