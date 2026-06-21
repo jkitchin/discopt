@@ -2544,12 +2544,21 @@ def solve_model(
     # free x) are left untouched. Sound: the reduction only shrinks the box.
     try:
         from discopt._jax.nonlinear_bound_tightening import (
+            FunctionDomainBoundRule,
             PeriodicVariableBoundRule,
             tighten_nonlinear_bounds,
         )
 
+        # Two domain/period reductions that hand the spatial+NLP paths a valid
+        # box on otherwise-free nonlinear variables: restrict sin/cos-only angles
+        # to one period, and clamp log/sqrt arguments to their natural domain so
+        # the local NLP never wanders into the undefined region (issue #265's
+        # false-infeasible from a free log argument).
         _per_lb, _per_ub, _per_stats = tighten_nonlinear_bounds(
-            model, _origin_lb_chk, _origin_ub_chk, rules=(PeriodicVariableBoundRule(),)
+            model,
+            _origin_lb_chk,
+            _origin_ub_chk,
+            rules=(PeriodicVariableBoundRule(), FunctionDomainBoundRule()),
         )
         if _per_stats.n_tightened > 0:
             from discopt.solvers.amp import _apply_flat_bounds_to_model
