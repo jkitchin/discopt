@@ -3,6 +3,8 @@
 Usage:
     discopt about
     discopt test
+    discopt solve model.nl [--profile NAME] [--time-limit S] [--json] [--sol] ...
+    discopt daemon {serve|stop|status}    # warm solve daemon (auto-spawned by solve)
     discopt convert input.gms output.nl
     discopt install-skills [--project-scope] [--dev] [--force]
     discopt tutor [list|start|resume|next|reset|install] ...
@@ -299,6 +301,154 @@ def _cmd_install_skills(args):
         print(f"  {verb_counts['skip']} already existed; pass --force to overwrite.")
 
 
+def _cmd_daemon(args):
+    """Control the warm ``discopt solve`` daemon (serve/stop/status)."""
+    from discopt import daemon
+
+    return daemon.main([args.action])
+
+
+def _coerce_tuning_value(s: str, type_hint):
+    """Coerce a ``--tuning key=value`` string by a SolverTuning field's type."""
+    name = type_hint if isinstance(type_hint, str) else getattr(type_hint, "__name__", "str")
+    if name == "bool":
+        low = s.lower()
+        if low in ("true", "1", "yes", "on"):
+            return True
+        if low in ("false", "0", "no", "off"):
+            return False
+        raise ValueError(f"expected a boolean, got {s!r}")
+    if name == "int":
+        return int(s)
+    if name == "float":
+        return float(s)
+    return s
+
+
+def _parse_tuning(pairs):
+    """``["key=val", ...]`` -> dict, validated/coerced against SolverTuning fields."""
+    import dataclasses
+
+    from discopt.solver_tuning import SolverTuning
+
+    types = {f.name: f.type for f in dataclasses.fields(SolverTuning)}
+    out = {}
+    for p in pairs or []:
+        if "=" not in p:
+            print(f"Error: --tuning expects key=value, got {p!r}", file=sys.stderr)
+            sys.exit(2)
+        k, v = p.split("=", 1)
+        k = k.strip()
+        if k not in types:
+            print(f"Error: unknown tuning field {k!r}; valid: {sorted(types)}", file=sys.stderr)
+            sys.exit(2)
+        try:
+            out[k] = _coerce_tuning_value(v.strip(), types[k])
+        except ValueError as exc:
+            print(f"Error: --tuning {k}: {exc}", file=sys.stderr)
+            sys.exit(2)
+    return out
+
+
+def _cmd_solve(args):
+    """Solve a ``.nl`` model, warm-routed through the solve daemon when available."""
+    import json
+
+    nl = os.path.abspath(args.file)
+    if not os.path.exists(nl):
+        print(f"Error: no such file: {args.file}", file=sys.stderr)
+        sys.exit(1)
+    if os.path.splitext(nl)[1].lower() != ".nl":
+        print(f"Error: discopt solve expects a .nl file, got {args.file!r}", file=sys.stderr)
+        sys.exit(1)
+
+    # Only the flags the user explicitly set become overrides (so a profile's
+    # values are not clobbered by argparse defaults). CLI > profile > defaults.
+    overrides = {}
+    if args.time_limit is not None:
+        overrides["time_limit"] = args.time_limit
+    if args.gap is not None:
+        overrides["gap_tolerance"] = args.gap
+    if args.threads is not None:
+        overrides["threads"] = args.threads
+    if args.solver is not None:
+        overrides["solver"] = args.solver
+    if args.partitions is not None:
+        overrides["partitions"] = args.partitions
+    if args.branching_policy is not None:
+        overrides["branching_policy"] = args.branching_policy
+    if args.rlt is not None:
+        overrides["rlt"] = args.rlt
+    if args.nlp_bb is not None:
+        overrides["nlp_bb"] = args.nlp_bb
+    tuning = _parse_tuning(args.tuning)
+    if tuning:
+        overrides["tuning"] = tuning
+
+    from discopt.profiles import resolve_options
+
+    try:
+        options = resolve_options(args.profile, overrides)
+    except KeyError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+    from discopt.result_io import (
+        deserialize_result,
+        options_from_payload,
+        options_to_payload,
+        serialize_result,
+        summary_text,
+        write_json,
+        write_sol,
+    )
+
+    payload = options_to_payload(options)
+
+    # Solve: warm daemon when available, in-process fallback otherwise.
+    result = None
+    if not args.no_daemon:
+        from discopt import daemon
+
+        resp = daemon.solve_via_daemon(nl, payload, hard_deadline=args.hard_timeout)
+        if resp is not None:
+            if not resp.get("ok"):
+                print(f"Error (daemon): {resp.get('error')}", file=sys.stderr)
+                sys.exit(1)
+            result = deserialize_result(resp["result"])
+    if result is None:
+        if not args.no_daemon and not args.quiet:
+            print("daemon unavailable; solving in-process", file=sys.stderr)
+        from discopt.modeling.core import from_nl
+
+        result = from_nl(nl).solve(**options_from_payload(payload))
+
+    # Outputs: stdout by default; files only when explicitly requested.
+    stub = os.path.splitext(os.path.basename(nl))[0]
+    base_dir = Path(args.out_dir) if args.out_dir else Path(os.path.dirname(nl) or ".")
+    wrote = []
+    if args.json:
+        p = base_dir / f"{stub}.result.json"
+        write_json(result, p)
+        wrote.append(str(p))
+    if args.sol:
+        from discopt.modeling.core import from_nl
+
+        var_names = [v.name for v in from_nl(nl)._variables]
+        p = base_dir / f"{stub}.sol"
+        write_sol(result, var_names, p)
+        wrote.append(str(p))
+
+    if args.format == "json":
+        print(json.dumps(serialize_result(result), indent=2))
+    elif not args.quiet:
+        print(summary_text(result))
+    for w in wrote:
+        print(f"-> wrote {w}", file=sys.stderr)
+
+    sys.exit(0 if result.status in ("optimal", "feasible") else 1)
+
+
 def main():
     parser = argparse.ArgumentParser(prog="discopt", description="discopt CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -334,14 +484,72 @@ def main():
     )
     p_gams.set_defaults(func=_cmd_gams_register)
 
+    p_solve = subparsers.add_parser(
+        "solve",
+        help="Solve a .nl model (warm-routed through the solve daemon)",
+    )
+    p_solve.add_argument("file", help="Input model file (.nl)")
+    p_solve.add_argument("--profile", default=None, help="Named option profile (e.g. fast, exact).")
+    p_solve.add_argument("--time-limit", type=float, default=None, help="Wall-clock limit (s).")
+    p_solve.add_argument("--gap", type=float, default=None, help="Relative optimality gap tol.")
+    p_solve.add_argument("--threads", type=int, default=None, help="Rust threads.")
+    p_solve.add_argument("--solver", default=None, help="Backend selector (e.g. amp, gp).")
+    p_solve.add_argument("--partitions", type=int, default=None, help="McCormick partitions.")
+    p_solve.add_argument(
+        "--branching-policy",
+        default=None,
+        choices=["fractional", "gnn"],
+        help="Variable selection.",
+    )
+    p_solve.add_argument("--rlt", default=None, choices=["auto", "on", "off"], help="RLT control.")
+    p_solve.add_argument(
+        "--nlp-bb", action=argparse.BooleanOptionalAction, default=None, help="Force NLP-BB on/off."
+    )
+    p_solve.add_argument(
+        "--tuning",
+        action="append",
+        metavar="KEY=VAL",
+        help="SolverTuning field override (repeatable), e.g. --tuning rlt_quad=false.",
+    )
+    p_solve.add_argument(
+        "--no-daemon", action="store_true", help="Solve in-process (do not use the daemon)."
+    )
+    p_solve.add_argument(
+        "--hard-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Daemon-side hard wall: the daemon SIGKILLs itself if this solve "
+        "overruns (enforced independently of the solver/client). Default: no limit.",
+    )
+    p_solve.add_argument(
+        "--format", default="text", choices=["text", "json"], help="Stdout format (default text)."
+    )
+    p_solve.add_argument("--json", action="store_true", help="Write <stub>.result.json.")
+    p_solve.add_argument("--sol", action="store_true", help="Write an AMPL-style <stub>.sol.")
+    p_solve.add_argument("--out-dir", default=None, help="Directory for --json/--sol output.")
+    p_solve.add_argument("--quiet", action="store_true", help="Suppress the stdout summary.")
+    p_solve.set_defaults(func=_cmd_solve)
+
+    p_daemon = subparsers.add_parser(
+        "daemon",
+        help="Control the warm discopt solve daemon (serve/stop/status)",
+    )
+    p_daemon.add_argument(
+        "action",
+        choices=["serve", "stop", "kill", "status"],
+        help="serve (foreground), stop (graceful), kill (force, for a wedged daemon), or status.",
+    )
+    p_daemon.set_defaults(func=_cmd_daemon)
+
     p_gamsd = subparsers.add_parser(
         "gams-daemon",
         help="Control the warm GAMS solver daemon (serve/stop/status)",
     )
     p_gamsd.add_argument(
         "action",
-        choices=["serve", "stop", "status"],
-        help="serve (run in foreground), stop, or status.",
+        choices=["serve", "stop", "kill", "status"],
+        help="serve (run in foreground), stop, kill (force), or status.",
     )
     p_gamsd.set_defaults(func=_cmd_gams_daemon)
 
@@ -375,13 +583,20 @@ def main():
     )
     p_skills.set_defaults(func=_cmd_install_skills)
 
-    from discopt.tutor import add_subparser as _add_tutor_subparser
+    # The tutor and (especially) DOE subparsers pull heavy optional deps
+    # (``discopt.doe.cli`` ~0.4 s: streamlit/pandas), so register them lazily --
+    # only for their own command or when full help is requested. This keeps every
+    # other command (notably ``discopt solve``) at the light CLI floor.
+    _argv1 = sys.argv[1] if len(sys.argv) > 1 else None
+    _want_all = _argv1 in (None, "help", "-h", "--help")
+    if _want_all or _argv1 == "tutor":
+        from discopt.tutor import add_subparser as _add_tutor_subparser
 
-    _add_tutor_subparser(subparsers)
+        _add_tutor_subparser(subparsers)
+    if _want_all or _argv1 == "doe":
+        from discopt.doe.cli import add_subparser as _add_doe_subparser
 
-    from discopt.doe.cli import add_subparser as _add_doe_subparser
-
-    _add_doe_subparser(subparsers)
+        _add_doe_subparser(subparsers)
 
     p_help = subparsers.add_parser("help", help="Show this help message and exit")
     p_help.set_defaults(func=lambda _args: parser.print_help())
