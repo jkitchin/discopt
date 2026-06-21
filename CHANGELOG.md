@@ -208,6 +208,21 @@ The release procedure that produces these entries is documented in
   `DISCOPT_MCCORMICK_BACKEND=ripopt`, `sipopt.ripopt_sensitivity`, and the
   `discopt_ripopt` benchmark key. Use `pounce` / `pounce_sensitivity` instead.
 
+### Documentation
+
+- **Clarified the scope of the `discopt[sympy]` symbolic extra** (`docs`, #262).
+  Made explicit, in the README/notebook and the `[sympy]` extra description, that
+  the symbolic machinery is a **design-time derivation, verification, and
+  code-generation toolkit plus a deliberately narrow runtime recognizer** — not a
+  general arbitrary-expression global-relaxation oracle. AMPL/native syntax is an
+  input representation only; once parsed, terms are relaxed by the internal
+  expression DAG through the existing univariate, McCormick, polynomial/quadratic,
+  and piecewise machinery. The SymPy cut generator recognizes supported
+  atoms/structures and is otherwise a safe no-op (the solver falls back to its
+  normal relaxation), and derived relaxations are committed as pure-JAX closures
+  so the solver hot path never invokes SymPy. New "Scope and design contract"
+  section in `docs/notebooks/symbolic_envelopes.ipynb`.
+
 ### Fixed
 
 - **Decomposition stage annotation on indexed variables** (`fix(decomposition)`).

@@ -59,7 +59,9 @@ learned = ["equinox>=0.13.8", "optax>=0.1"]
 # Design-time symbolic envelope/relaxation derivation toolkit
 # (discopt._jax.symbolic). SymPy is used to *derive*, *verify*, and
 # *code-generate* JAX relaxation closures offline; it is never imported on the
-# solver hot path. See docs/notebooks/symbolic_envelopes.ipynb.
+# solver hot path. This enables supported symbolic derivation/recognition paths
+# for known atoms/structures (with a safe no-op fallback) -- not arbitrary
+# nonlinear-expression support. See docs/notebooks/symbolic_envelopes.ipynb.
 sympy = ["sympy>=1.12"]
 doe = ["openpyxl>=3.1"]
 doe-gui = ["discopt[doe]", "streamlit>=1.30", "pandas>=2.0"]
