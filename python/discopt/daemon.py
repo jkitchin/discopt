@@ -126,7 +126,10 @@ def _recv_timeout_for(options: dict | None) -> float:
 
 
 def solve_via_daemon(
-    nl_file: str, options: dict | None = None, socket_path: Path | None = None
+    nl_file: str,
+    options: dict | None = None,
+    socket_path: Path | None = None,
+    hard_deadline: float | None = None,
 ) -> dict | None:
     """Solve ``nl_file`` through the warm daemon, spawning it if needed.
 
@@ -136,6 +139,11 @@ def solve_via_daemon(
     runaway solve past ``time_limit + grace`` -- in which case it is killed and the
     caller falls back to an in-process solve, so one stuck model can never block a
     run.
+
+    ``hard_deadline`` (seconds, default ``None`` = no limit) additionally asks the
+    *daemon* to fork a watchdog that ``SIGKILL``s itself if this solve overruns,
+    enforcing the limit even with no client waiting (orphaned worker) and even for
+    a solver wedged in a C extension.
     """
     path = socket_path or default_socket_path()
     recv_timeout = _recv_timeout_for(options)
@@ -153,12 +161,17 @@ def solve_via_daemon(
     if info is not None and info.get("version") not in (None, _FINGERPRINT):
         stop_daemon(path)
         spawn_daemon(path)
-    payload = {
+    payload: dict[str, object] = {
         "cmd": "solve",
         "nl_file": nl_file,
         "options": options or {},
         "version": _FINGERPRINT,
     }
+    if hard_deadline is not None and hard_deadline > 0:
+        payload["hard_deadline"] = float(hard_deadline)
+        # The client must wait at least as long as the daemon's own deadline,
+        # else the client would give up (and kill) before the watchdog fires.
+        recv_timeout = max(recv_timeout, float(hard_deadline) + 5.0)
     try:
         resp = _request(path, payload, recv_timeout=recv_timeout)
     except SolveTimeout:

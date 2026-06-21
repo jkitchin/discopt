@@ -125,6 +125,54 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+class _DeadlineWatchdog:
+    """Fork a child that ``SIGKILL``s *this* process after ``deadline`` seconds
+    unless cancelled. The killer is a separate process, so it stops even a solve
+    wedged deep in a C extension (XLA / Rust) that no in-process signal or thread
+    could interrupt -- making the deadline hard and independent of the solver.
+
+    The child only sleeps, checks parentage, and kills (no JAX/locks touched), so
+    forking it from the warm JAX process is safe. On normal completion the daemon
+    cancels it (``__exit__``); on overrun the child kills the daemon, its socket
+    drops, and the client falls back. ``deadline <= 0`` (or no ``os.fork``) is a
+    no-op -- the default, so there is no hard limit unless one is requested.
+    """
+
+    def __init__(self, deadline: float):
+        self.deadline = float(deadline)
+        self.pid: int | None = None
+
+    def __enter__(self) -> "_DeadlineWatchdog":
+        if self.deadline <= 0 or not hasattr(os, "fork"):
+            return self
+        parent = os.getpid()
+        pid = os.fork()
+        if pid == 0:  # watchdog child
+            try:
+                time.sleep(self.deadline)
+                # Guard against PID reuse: only kill if the daemon is still our
+                # parent (if it already exited we were reparented away from it).
+                if os.getppid() == parent:
+                    os.kill(parent, signal.SIGKILL)
+            except BaseException:
+                pass
+            finally:
+                os._exit(0)
+        self.pid = pid
+        return self
+
+    def __exit__(self, *exc) -> None:
+        if self.pid:
+            try:
+                os.kill(self.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                os.waitpid(self.pid, 0)
+            except OSError:
+                pass
+
+
 def _recv_line(conn: socket.socket) -> bytes:
     chunks: list[bytes] = []
     while True:
@@ -248,8 +296,16 @@ class DaemonServer:
             # A client built against a different discopt evicts the daemon so the
             # upgrade takes effect; it serves this request first.
             stop = req.get("version") not in (None, self.version)
+            # Optional daemon-side hard deadline (default: none -> no limit). A
+            # forked watchdog SIGKILLs the daemon if this solve overruns, enforcing
+            # the limit independently of the solver AND of any waiting client.
             try:
-                reply = self._solve_fn(req)
+                deadline = float(req.get("hard_deadline") or 0.0)
+            except (TypeError, ValueError):
+                deadline = 0.0
+            try:
+                with _DeadlineWatchdog(deadline):
+                    reply = self._solve_fn(req)
             except Exception as exc:  # never let one model take the daemon down
                 reply = {"ok": False, "error": repr(exc)}
             self._reply(conn, reply)

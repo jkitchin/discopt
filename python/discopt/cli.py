@@ -410,7 +410,7 @@ def _cmd_solve(args):
     if not args.no_daemon:
         from discopt import daemon
 
-        resp = daemon.solve_via_daemon(nl, payload)
+        resp = daemon.solve_via_daemon(nl, payload, hard_deadline=args.hard_timeout)
         if resp is not None:
             if not resp.get("ok"):
                 print(f"Error (daemon): {resp.get('error')}", file=sys.stderr)
@@ -513,6 +513,14 @@ def main():
     )
     p_solve.add_argument(
         "--no-daemon", action="store_true", help="Solve in-process (do not use the daemon)."
+    )
+    p_solve.add_argument(
+        "--hard-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Daemon-side hard wall: the daemon SIGKILLs itself if this solve "
+        "overruns (enforced independently of the solver/client). Default: no limit.",
     )
     p_solve.add_argument(
         "--format", default="text", choices=["text", "json"], help="Stdout format (default text)."

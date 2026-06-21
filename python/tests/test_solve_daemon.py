@@ -144,3 +144,82 @@ def test_solve_via_daemon_kills_wedged_and_falls_back(sock, monkeypatch):
     finally:
         core.stop_daemon(sock)
         t.join(timeout=5)
+
+
+# ── daemon-side forked watchdog (hard deadline, default off) ──────────────────
+def test_watchdog_kills_overrunning_process():
+    """A process that overruns its watchdog deadline is SIGKILLed by the forked
+    child -- run in a subprocess so the signal never reaches the test runner."""
+    code = (
+        "import time\n"
+        "from discopt._daemon_core import _DeadlineWatchdog\n"
+        "with _DeadlineWatchdog(0.3):\n"
+        "    time.sleep(30)\n"
+        "print('REACHED')\n"
+    )
+    t0 = time.monotonic()
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=20)
+    dt = time.monotonic() - t0
+    assert proc.returncode == -9  # SIGKILL
+    assert dt < 5.0  # killed at ~0.3 s, not after 30 s
+    assert "REACHED" not in proc.stdout
+
+
+def test_watchdog_cancels_on_completion():
+    """On normal completion the watchdog child is killed and reaped, so it never
+    fires. A long deadline guarantees the child cannot kill the test process."""
+    with core._DeadlineWatchdog(60.0) as wd:
+        child = wd.pid
+        assert child is not None and core._pid_alive(child)
+    time.sleep(0.1)
+    assert not core._pid_alive(child)  # cancelled (killed + reaped) on exit
+
+
+def test_watchdog_disabled_when_no_deadline():
+    with core._DeadlineWatchdog(0.0) as wd:
+        assert wd.pid is None  # deadline <= 0 -> no fork, no limit (the default)
+
+
+def test_handle_arms_watchdog_with_request_deadline(sock, monkeypatch):
+    armed = {}
+
+    class _FakeWD:
+        def __init__(self, deadline):
+            armed["deadline"] = deadline
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(core, "_DeadlineWatchdog", _FakeWD)
+    srv = core.DaemonServer(
+        sock, lambda req: {"ok": True, "result": {}}, env_prefix="DISCOPT_SOLVE"
+    )
+    t = _start(srv)
+    try:
+        core.request(sock, {"cmd": "solve", "version": core._FINGERPRINT, "hard_deadline": 12.5})
+        assert armed.get("deadline") == 12.5
+    finally:
+        core.stop_daemon(sock)
+        t.join(timeout=5)
+
+
+def test_solve_via_daemon_sends_hard_deadline(monkeypatch):
+    sent = {}
+
+    def fake_request(path, payload, timeout=5.0, recv_timeout=None):
+        if payload.get("cmd") == "solve":
+            sent.update(payload)
+            sent["_recv_timeout"] = recv_timeout
+            return {"ok": True, "result": {}}
+        return {"ok": True}  # ping (no version mismatch)
+
+    monkeypatch.setattr(d, "_request", fake_request)
+    d.solve_via_daemon(
+        "x.nl", {"time_limit": 1.0}, socket_path=Path("/tmp/x.sock"), hard_deadline=7.0
+    )
+    assert sent["hard_deadline"] == 7.0
+    # client must wait at least the daemon's own deadline before giving up.
+    assert sent["_recv_timeout"] >= 7.0
