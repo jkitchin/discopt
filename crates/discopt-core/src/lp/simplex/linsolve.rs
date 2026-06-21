@@ -32,6 +32,28 @@ pub trait LinearSolver {
     /// Factorize the `m × m` basis whose columns are `cols[0..m]` (each an
     /// `m`-vector of that basic column's dense entries).
     fn factorize(&mut self, m: usize, cols: &[Vec<f64>]) -> Result<(), LinError>;
+
+    /// Factorize the `m × m` basis from its **sparse** columns: `cols[slot]` lists
+    /// the `(row, value)` nonzeros of basis slot `slot` (`0..m`). This avoids
+    /// materializing the dense `m × m` basis (the O(m²) column build + nnz scan +
+    /// dense→sparse conversion that dominated refactorization of row-heavy
+    /// lifted-McCormick bases — see feral#87 / discopt#229/#268). The matrix built
+    /// here is exactly the one [`factorize`](Self::factorize) would build from the
+    /// same columns, so the factorization — and every downstream pivot — is
+    /// bit-identical.
+    ///
+    /// The default scatters to dense and delegates to [`factorize`](Self::factorize)
+    /// so backends without a native sparse path keep working; [`FeralLU`] overrides
+    /// it to build feral's sparse matrix from the sparse columns directly.
+    fn factorize_sparse(&mut self, m: usize, cols: &[Vec<(usize, f64)>]) -> Result<(), LinError> {
+        let mut dense = vec![vec![0.0; m]; m];
+        for (slot, col) in cols.iter().enumerate() {
+            for &(row, v) in col {
+                dense[slot][row] = v;
+            }
+        }
+        self.factorize(m, &dense)
+    }
     /// Solve `B x = rhs` in place.
     fn ftran(&mut self, rhs: &mut [f64]) -> Result<(), LinError>;
     /// Solve `Bᵀ y = rhs` in place.
@@ -108,6 +130,28 @@ impl FeralLU {
     pub fn new() -> Self {
         Self { lu: None }
     }
+
+    /// Cumulative Forrest–Tomlin bump-update work (feral's `eta_ops`) accumulated
+    /// on the current factorization since it was built. `0` for the dense backend
+    /// (its updates are not product-form etas) and when unfactorized. The simplex
+    /// uses this to refactorize *before* wide-bump updates compound into the
+    /// O(bump²) FT blowup that dominates row-heavy McCormick bases
+    /// (discopt#268 / feral#87).
+    pub fn ft_update_work(&self) -> usize {
+        match &self.lu {
+            Some(Factored::Sparse(lu)) => lu.eta_ops(),
+            _ => 0,
+        }
+    }
+
+    /// nnz of the current sparse factor (`0` for the dense backend / unfactorized).
+    /// The work budget the FT-update accumulation is compared against.
+    pub fn factor_nnz(&self) -> usize {
+        match &self.lu {
+            Some(Factored::Sparse(lu)) => lu.factor_nnz(),
+            _ => 0,
+        }
+    }
 }
 
 fn feral_err(e: feral::FeralError) -> LinError {
@@ -127,6 +171,35 @@ impl LinearSolver for FeralLU {
                 Factored::Dense(Box::new(DenseLu::factor(cols, m, params).map_err(feral_err)?))
             } else {
                 let a = SparseColMatrix::from_dense_columns(m, cols).map_err(feral_err)?;
+                let sym = SparseLuSymbolic::analyze(&a).map_err(feral_err)?;
+                Factored::Sparse(Box::new(SparseLu::factor(&a, &sym, params).map_err(feral_err)?))
+            },
+        );
+        Ok(())
+    }
+
+    fn factorize_sparse(&mut self, m: usize, cols: &[Vec<(usize, f64)>]) -> Result<(), LinError> {
+        let params = LuParams::default();
+        // nnz is the sum of column lengths — O(m), not the O(m²) dense scan the
+        // `Vec<Vec<f64>>` path pays.
+        let nnz: usize = cols.iter().map(|c| c.len()).sum();
+        self.lu = Some(
+            if m <= FORCE_DENSE_M || should_use_dense_lu(m, nnz, &params) {
+                // Small/dense basis: feral's dense LU wins and there is no symbolic
+                // phase. Densifying is O(m² + nnz), affordable only because this
+                // branch is gated to small `m` (<= FORCE_DENSE_M) or feral-judged-
+                // dense bases.
+                let mut dense = vec![vec![0.0; m]; m];
+                for (slot, col) in cols.iter().enumerate() {
+                    for &(row, v) in col {
+                        dense[slot][row] = v;
+                    }
+                }
+                Factored::Dense(Box::new(DenseLu::factor(&dense, m, params).map_err(feral_err)?))
+            } else {
+                // Build feral's sparse matrix directly from the sparse columns —
+                // O(nnz), no dense m×m intermediate.
+                let a = SparseColMatrix::from_sparse_columns(m, cols).map_err(feral_err)?;
                 let sym = SparseLuSymbolic::analyze(&a).map_err(feral_err)?;
                 Factored::Sparse(Box::new(SparseLu::factor(&a, &sym, params).map_err(feral_err)?))
             },
