@@ -3077,13 +3077,26 @@ def solve_model(
         and not _pure_continuous_force_spatial
         and (skip_convex_check or not _pure_continuous_convexity_known)
     ):
-        return _solve_continuous(
+        _cont_result = _solve_continuous(
             model,
             time_limit,
             ipopt_options,
             t_start,
             nlp_solver,
             initial_point=initial_point,
+        )
+        # A local NLP on a model we could NOT certify convex (classification
+        # failed/timed out, leaving convexity unknown) is best-effort only. If it
+        # errors outright (e.g. the NLP backend failed on a large/ill-conditioned
+        # problem), don't surface a bare status="error": fall through to the sound
+        # spatial McCormick B&B below, which returns a valid bound / feasible point
+        # under the time limit. The user-requested skip_convex_check path keeps its
+        # local-only result on any non-error status. (issue #266)
+        if _cont_result.status != "error":
+            return _cont_result
+        logger.info(
+            "Local NLP on convexity-unknown continuous model returned error; "
+            "falling back to spatial Branch-and-Bound (issue #266)"
         )
 
     # --- NLP-BB auto-select for convex MINLPs (nlp_bb=None) ---

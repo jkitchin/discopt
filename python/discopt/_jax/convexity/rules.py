@@ -56,9 +56,11 @@ Ceccon, Siirola, Misener (2020), "SUSPECT," TOP.
 
 from __future__ import annotations
 
+import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Optional, cast
+from typing import Optional, TypeVar, cast
 
 import numpy as np
 
@@ -101,6 +103,8 @@ from .lattice import (
     unary_atom_profile,
 )
 from .linear_context import LinearContext, build_linear_context, extract_affine
+
+_T = TypeVar("_T")
 
 _LINEAR_CONTEXT_KEY = "__linear_context__"
 
@@ -169,6 +173,75 @@ def _refine_sign(
 
 _STRUCT_CACHE_KEY = "__struct_cache__"
 _STRUCT_HASH_KEY = "__struct_hash_cache__"
+# Set in the classification ``cache`` while walking the children of a maximal
+# polynomial subtree, so descendant polynomial nodes skip the (redundant) whole-
+# expression quadratic fallback their ancestor already covers (issue #266).
+_UNDER_POLY_KEY = "__under_poly__"
+_POLY_PRED_KEY = "__poly_pred_cache__"
+
+
+def _is_polynomial(expr: Expression, cache: dict) -> bool:
+    """Whether ``expr`` is a polynomial in the model variables.
+
+    Conservative: only ``+ - * / **`` over variables/parameters/constants (with
+    division by a constant and non-negative-integer powers) count as polynomial;
+    any other atom (``exp``/``log``/``sqrt``/``abs``/trig/…) makes it ``False``.
+    Memoised per classification by ``id(expr)``.
+
+    Used purely to gate *where* the expensive quadratic-form fallback runs — a
+    ``False`` only forgoes that optimisation, never changes a curvature verdict,
+    so over-conservatism here is harmless.
+    """
+    memo = cache.get(_POLY_PRED_KEY)
+    if memo is None:
+        memo = {}
+        cache[_POLY_PRED_KEY] = memo
+    return _is_polynomial_impl(expr, memo)
+
+
+def _is_polynomial_impl(expr: Expression, memo: dict) -> bool:
+    eid = id(expr)
+    hit = memo.get(eid)
+    if hit is not None:
+        return cast(bool, hit)
+    r: bool
+    if isinstance(expr, (Constant, Variable, Parameter)):
+        r = True
+    elif isinstance(expr, IndexExpression):
+        r = _is_polynomial_impl(expr.base, memo)
+    elif isinstance(expr, UnaryOp):
+        r = expr.op == "neg" and _is_polynomial_impl(expr.operand, memo)
+    elif isinstance(expr, BinaryOp):
+        if expr.op in ("+", "-", "*"):
+            r = _is_polynomial_impl(expr.left, memo) and _is_polynomial_impl(expr.right, memo)
+        elif expr.op == "/":
+            # Division by a constant scales a polynomial; division by a
+            # non-constant is generally not polynomial.
+            r = isinstance(expr.right, Constant) and _is_polynomial_impl(expr.left, memo)
+        elif expr.op == "**":
+            r = (
+                isinstance(expr.right, Constant)
+                and _is_nonneg_int_constant(expr.right)
+                and _is_polynomial_impl(expr.left, memo)
+            )
+        else:
+            r = False
+    else:
+        # FunctionCall / SumExpression / MatMul / … — not a plain polynomial.
+        r = False
+    memo[eid] = r
+    return r
+
+
+def _is_nonneg_int_constant(expr: Constant) -> bool:
+    try:
+        v = np.asarray(expr.value)
+    except Exception:
+        return False
+    if v.ndim != 0:
+        return False
+    f = float(v)
+    return f >= 0.0 and float(int(round(f))) == f
 
 
 def _hash_index(index: object) -> object:
@@ -299,12 +372,32 @@ def classify_expr_info(
                 _cache[eid] = cand_info
                 return cast(ExprInfo, cand_info)
 
-    info = _classify_impl(expr, model, _cache)
-    # Whole-expression quadratic fallback: when the recursive walker
-    # leaves a polynomial at UNKNOWN (e.g., because an intermediate
-    # bilinear node defeats local reasoning), the full quadratic form
-    # may still classify via eigendecomposition of a symmetrised Q.
-    if info.curvature == Curvature.UNKNOWN and model is not None:
+    # Whole-expression quadratic fallback: when the recursive walker leaves a
+    # polynomial at UNKNOWN (e.g. an intermediate bilinear node defeats local
+    # reasoning), the full quadratic form may still classify via eigendecomposition
+    # of a symmetrised Q. ``quadratic_curvature`` builds Q over *all* model
+    # variables and eigendecomposes it (O(N^3)); running it at every node of a deep
+    # additive polynomial would cost O(nodes * N^3) and made classification
+    # super-linear in model size (issue #266). It is redundant on a node whose
+    # ancestor is itself an extractable polynomial — that ancestor's Q already
+    # covers this node — so attempt it only at *maximal* polynomial subtrees (a
+    # polynomial node with no polynomial ancestor). While classifying the children
+    # of such a node, ``_UNDER_POLY_KEY`` is set so descendants skip their own
+    # redundant eigendecomposition. Skipping is sound: it can only forgo a
+    # convexity proof (-> spatial B&B), never assert a false one.
+    under_poly = _cache.get(_UNDER_POLY_KEY, False)
+    maximal_poly = (not under_poly) and model is not None and _is_polynomial(expr, _cache)
+
+    if maximal_poly:
+        _cache[_UNDER_POLY_KEY] = True
+        try:
+            info = _classify_impl(expr, model, _cache)
+        finally:
+            _cache[_UNDER_POLY_KEY] = False
+    else:
+        info = _classify_impl(expr, model, _cache)
+
+    if maximal_poly and model is not None and info.curvature == Curvature.UNKNOWN:
         from .patterns import quadratic_curvature
 
         qc = quadratic_curvature(expr, model)
@@ -923,6 +1016,95 @@ class ConvexityBudgetExceeded(Exception):
     """
 
 
+# The syntactic curvature walker (``classify_expr_info`` -> ``_classify_impl`` ->
+# children) recurses one Python frame per expression node. ``from_nl`` rebuilds a
+# sum/product of N terms as a left-deep binary tree of depth ~N, so a large model
+# (e.g. pooling problems with thousands of bilinear terms) can exceed CPython's
+# default 1000-frame recursion limit and raise ``RecursionError`` mid-classify.
+# That is caught upstream and demotes the model to convexity-unknown, which on a
+# pure-continuous model routes to a best-effort local NLP that can return
+# ``status="error"`` — a silently degraded solve (issue #266). To classify these
+# correctly we raise the recursion limit in proportion to model size, but a high
+# Python limit can overflow the C stack and hard-crash the process, so the walk
+# runs on a worker thread with a large stack. This is gated on model size: the
+# common (shallow) case keeps running inline with the default limit.
+_DEEP_RECURSION_SIZE_GATE = 700
+_DEEP_RECURSION_LIMIT_CAP = 200_000
+_DEEP_RECURSION_STACK_BYTES = 256 * 1024 * 1024
+
+
+def _recursion_headroom_need(model: Model) -> int:
+    """Estimate the recursion-limit headroom a model's classification may need.
+
+    Returns 0 when the model is small enough that the default limit is safe.
+    The estimate is a deliberate over-approximation (depth is bounded by node
+    count); it only affects whether the deep-stack path engages, never the
+    classification result.
+    """
+    size = len(getattr(model, "_constraints", []) or [])
+    try:
+        size += sum(int(np.size(v.lb)) for v in model._variables)
+    except Exception:
+        pass
+    if size <= _DEEP_RECURSION_SIZE_GATE:
+        return 0
+    return min(2000 + 60 * size, _DEEP_RECURSION_LIMIT_CAP)
+
+
+def _run_with_deep_recursion(fn: Callable[[], _T], *, depth_need: int) -> _T:
+    """Run ``fn`` with an enlarged recursion limit + C stack when ``fn`` may recurse
+    deeper than the default limit allows.
+
+    When ``depth_need`` does not exceed the current limit, ``fn`` runs inline (no
+    thread overhead). Otherwise it runs on a worker thread with a large stack so a
+    raised Python recursion limit cannot overflow the C stack and crash the
+    process. The recursion limit is restored afterward; exceptions propagate.
+    """
+    import threading
+
+    current = sys.getrecursionlimit()
+    if depth_need <= current:
+        return fn()
+
+    box: dict[str, object] = {}
+
+    def _worker() -> None:
+        old = sys.getrecursionlimit()
+        sys.setrecursionlimit(depth_need)
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller thread
+            box["error"] = exc
+        finally:
+            sys.setrecursionlimit(old)
+
+    old_stack = threading.stack_size()
+    try:
+        threading.stack_size(_DEEP_RECURSION_STACK_BYTES)
+    except (ValueError, RuntimeError, OverflowError):
+        # Platform rejected the requested stack size: fall back to inline with a
+        # raised limit. Best effort — may still RecursionError, which is caught
+        # upstream and is no worse than before.
+        old = sys.getrecursionlimit()
+        sys.setrecursionlimit(depth_need)
+        try:
+            return fn()
+        finally:
+            sys.setrecursionlimit(old)
+    try:
+        t = threading.Thread(target=_worker, name="convexity-classify")
+        t.start()
+        t.join()
+    finally:
+        try:
+            threading.stack_size(old_stack)
+        except (ValueError, RuntimeError, OverflowError):
+            pass
+    if "error" in box:
+        raise cast(BaseException, box["error"])
+    return cast(_T, box["value"])
+
+
 def classify_model(
     model: Model, *, use_certificate: bool = False, deadline: float | None = None
 ) -> tuple[bool, list[bool]]:
@@ -944,7 +1126,23 @@ def classify_model(
     per-constraint walk crosses it, :class:`ConvexityBudgetExceeded` is raised so
     the solver can fall back to the spatial path rather than overrun its
     ``time_limit``.
+
+    On large models the syntactic walk can recurse past CPython's default
+    recursion limit; the walk runs with size-scaled recursion headroom (see
+    :func:`_run_with_deep_recursion`) so deep expression graphs classify instead
+    of demoting to convexity-unknown (issue #266).
     """
+    return _run_with_deep_recursion(
+        lambda: _classify_model_inner(
+            model, use_certificate=use_certificate, deadline=deadline
+        ),
+        depth_need=_recursion_headroom_need(model),
+    )
+
+
+def _classify_model_inner(
+    model: Model, *, use_certificate: bool = False, deadline: float | None = None
+) -> tuple[bool, list[bool]]:
     import time as _time
 
     cache: dict = {}
