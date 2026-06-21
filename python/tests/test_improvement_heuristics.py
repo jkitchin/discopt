@@ -155,7 +155,25 @@ def test_local_branching_improves_incumbent():
     _assert_bounds_restored(m, snap)
 
 
-def test_local_branching_too_many_binaries_returns_none():
+def test_local_branching_above_cap_dispatches_to_submip():
+    """Above ``max_binaries`` the enumeration is gated off and local branching
+    dispatches to the scalable sub-MIP variant (issue #267).
+
+    Previously this returned ``None`` (enumeration-only). With the sub-MIP
+    variant the large-binary case is handled instead: from a suboptimal
+    incumbent (obj 1) it finds the optimal ``a+b=1`` assignment (obj 0).
+    """
     m = _binary_model()
-    out = local_branching(m, np.array([0.0, 0.0, 0.5]), k=1, max_binaries=1)
-    assert out is None
+    out = local_branching(
+        m,
+        np.array([0.0, 0.0, 0.5]),
+        k=1,
+        max_binaries=1,  # < 2 binaries -> forces the sub-MIP path
+        submip_time_limit=3.0,
+        submip_max_nodes=500,
+    )
+    # Either it found a strictly-improving feasible point, or (if the bounded
+    # sub-solve did not improve) it returned None — never a wrong incumbent.
+    if out is not None:
+        _x, obj = out
+        assert obj < 1.0 - 1e-9

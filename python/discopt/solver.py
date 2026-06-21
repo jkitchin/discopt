@@ -1967,6 +1967,7 @@ def solve_model(
     structure_cuts: bool = True,
     root_cut_rounds: Optional[int] = None,
     root_cut_max: Optional[int] = None,
+    _lns_enabled: bool = True,
     **kwargs,
 ) -> SolveResult:
     """
@@ -3859,6 +3860,14 @@ def solve_model(
     # to a new integer assignment; tracking its objective avoids redundant
     # re-enumeration of the same neighbourhood every scheduled iteration.
     _last_box_inc_obj = np.inf
+    # --- Adaptive LNS primal-improvement layer state (issue #267) ---
+    # Counts of LNS improver calls, used to escalate the local-branching radius
+    # k across calls and to throttle node-diving. The whole layer is disabled
+    # when ``_lns_enabled`` is False (the recursion guard for sub-MIP re-solves).
+    _lns_lb_calls = 0
+    _lns_dive_calls = 0
+    _lns_k_schedule = (2, 5, 10)
+    _lns_has_integers = bool(int_sizes) and int(np.sum(int_sizes)) > 0
     # Best incumbent value the cutoff-tightening phases (C/C3) have already acted
     # on. They fire whenever the incumbent strictly improves below this — from
     # ANY source, including the sub-NLP / binary-seed heuristics that inject
@@ -5124,6 +5133,159 @@ def solve_model(
                     _subnlp_incumbent_updates += 1
                     _last_box_inc_obj = float(_bx[1])
                     logger.info("Box-search incumbent: obj=%.6g (iter=%d)", _bx[1], iteration)
+
+        # --- Adaptive LNS primal-improvement layer (issue #267) ---
+        # On nonconvex MIQPs (the graphpart family) the dual bound is already
+        # tight while the incumbent is poor: the optimum is a different INTEGER
+        # assignment that root rounding/diving never reaches. This scheduler runs
+        # at NON-root nodes too, where tree branching has produced diverse node
+        # relaxations, and applies three structured neighbourhoods:
+        #   * node-diving (diversify) — dive from this node's best relaxation;
+        #   * RINS (improve) — search between incumbent and node relaxation;
+        #   * local branching (improve) — Hamming-ball sub-MIP around the
+        #     incumbent, escalating k across calls.
+        # Adaptive gating keeps it inert where it cannot help: it is skipped for
+        # convex / no-integer models and whenever the relative gap is already
+        # closed (near-optimal), and every call is bounded by a small time slice
+        # and the remaining wall budget. ``_lns_enabled`` is the recursion guard —
+        # the local-branching sub-solve sets it False so this layer never nests.
+        # Sound: every candidate is re-verified integer- and constraint-feasible
+        # and injected only on strict improvement; the dual bound is untouched.
+        if (
+            _lns_enabled
+            and _subnlp_backend_fn is not None
+            and not _model_is_convex
+            and _lns_has_integers
+            and iteration > 0
+        ):
+            _lns_remaining = _deadline - time.perf_counter()
+            if _lns_remaining > _DEADLINE_NODE_FLOOR_S:
+                # Best relaxation point at the current batch (lowest node bound).
+                _lns_best_idx = None
+                _lns_best_obj = np.inf
+                for _i in range(n_batch):
+                    if result_lbs[_i] < _SENTINEL_THRESHOLD and result_lbs[_i] < _lns_best_obj:
+                        _lns_best_obj = result_lbs[_i]
+                        _lns_best_idx = _i
+
+                _lns_inc = tree.incumbent()
+                _lns_have_inc = (
+                    _lns_inc is not None
+                    and np.isfinite(_lns_inc[1])
+                    and _lns_inc[1] < _SENTINEL_THRESHOLD
+                )
+                # Is the gap still open? Compute the relative gap against the
+                # current dual bound; only run the IMPROVERS when it is open.
+                _lns_stats = tree.stats()
+                _lns_lb = float(_lns_stats.get("global_lower_bound", float("-inf")))
+                _lns_gap_open = True
+                if _lns_have_inc and np.isfinite(_lns_lb):
+                    _ub = float(_lns_inc[1])
+                    _abs_gap = max(0.0, _ub - _lns_lb)
+                    _denom = max(abs(_ub), abs(_lns_lb), 1e-10)
+                    _lns_gap_open = (_abs_gap > _DEFAULT_ABS_GAP_TOL) and (
+                        _abs_gap / _denom > gap_tolerance
+                    )
+
+                _lns_backend = _resolve_heuristic_backend(nlp_solver)
+
+                # (1) Node-diving (diversify/find). Dive from this node's best
+                # relaxation on a frequency schedule; tree branching supplies the
+                # diversity that root-only diving cannot.
+                if (
+                    _lns_best_idx is not None
+                    and iteration % max(1, subnlp_frequency) == 0
+                    and (_deadline - time.perf_counter()) > _DEADLINE_NODE_FLOOR_S
+                ):
+                    _lns_dive_calls += 1
+                    try:
+                        from discopt._jax.primal_heuristics import fractional_diving
+
+                        _dv = fractional_diving(
+                            model,
+                            result_sols[_lns_best_idx],
+                            backend=_lns_backend,
+                            evaluator=evaluator,
+                        )
+                        if _dv is not None:
+                            _x_dv, _obj_dv = _dv
+                            _obj_dv = float(_obj_dv)
+                            _dv_feas = not cl_list or _check_constraint_feasibility(
+                                evaluator, _x_dv, cl_list, cu_list
+                            )
+                            if np.isfinite(_obj_dv) and _obj_dv < _SENTINEL_THRESHOLD and _dv_feas:
+                                tree.inject_incumbent(np.asarray(_x_dv).copy(), _obj_dv)
+                                logger.info("LNS node-diving incumbent: obj=%.6g", _obj_dv)
+                    except Exception as _e:
+                        logger.debug("LNS node-diving failed: %s", _e)
+
+                # (2) RINS (improve). Only when an incumbent exists and the gap is
+                # open — search the neighbourhood between incumbent and the node
+                # relaxation.
+                if (
+                    _lns_have_inc
+                    and _lns_gap_open
+                    and _lns_best_idx is not None
+                    and (_deadline - time.perf_counter()) > _DEADLINE_NODE_FLOOR_S
+                ):
+                    try:
+                        from discopt._jax.primal_heuristics import rins
+
+                        _ri = rins(
+                            model,
+                            np.asarray(_lns_inc[0], dtype=np.float64),
+                            result_sols[_lns_best_idx],
+                            backend=_lns_backend,
+                            evaluator=evaluator,
+                        )
+                        if _ri is not None:
+                            _x_ri, _obj_ri = _ri
+                            _obj_ri = float(_obj_ri)
+                            _ri_feas = not cl_list or _check_constraint_feasibility(
+                                evaluator, _x_ri, cl_list, cu_list
+                            )
+                            if np.isfinite(_obj_ri) and _obj_ri < _SENTINEL_THRESHOLD and _ri_feas:
+                                tree.inject_incumbent(np.asarray(_x_ri).copy(), _obj_ri)
+                                logger.info("LNS RINS incumbent: obj=%.6g", _obj_ri)
+                    except Exception as _e:
+                        logger.debug("LNS RINS failed: %s", _e)
+
+                # (3) Local branching (improve). Scalable Hamming-ball sub-MIP
+                # around the incumbent, escalating k across calls. Bounded by a
+                # small per-call time slice and the remaining budget. The sub-solve
+                # carries the recursion guard internally (``_lns_enabled=False``).
+                if _lns_have_inc and _lns_gap_open and (_deadline - time.perf_counter()) > 1.0:
+                    _lb_k = _lns_k_schedule[min(_lns_lb_calls, len(_lns_k_schedule) - 1)]
+                    _lns_lb_calls += 1
+                    _lb_slice = min(2.0, max(0.5, _deadline - time.perf_counter() - 0.2))
+                    try:
+                        from discopt._jax.primal_heuristics import local_branching
+
+                        _lb = local_branching(
+                            model,
+                            np.asarray(_lns_inc[0], dtype=np.float64),
+                            k=_lb_k,
+                            backend=_lns_backend,
+                            evaluator=evaluator,
+                            submip_time_limit=_lb_slice,
+                            submip_max_nodes=1000,
+                            submip_gap_tolerance=gap_tolerance,
+                        )
+                        if _lb is not None:
+                            _x_lb, _obj_lb = _lb
+                            _obj_lb = float(_obj_lb)
+                            _lb_feas = not cl_list or _check_constraint_feasibility(
+                                evaluator, _x_lb, cl_list, cu_list
+                            )
+                            if np.isfinite(_obj_lb) and _obj_lb < _SENTINEL_THRESHOLD and _lb_feas:
+                                tree.inject_incumbent(np.asarray(_x_lb).copy(), _obj_lb)
+                                logger.info(
+                                    "LNS local-branching incumbent: obj=%.6g (k=%d)",
+                                    _obj_lb,
+                                    _lb_k,
+                                )
+                    except Exception as _e:
+                        logger.debug("LNS local-branching failed: %s", _e)
 
         # --- User callbacks: lazy constraints and incumbent filtering ---
         if lazy_constraints is not None or incumbent_callback is not None:

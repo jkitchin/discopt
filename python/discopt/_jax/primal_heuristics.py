@@ -1176,6 +1176,121 @@ def rins(
             v.ub = ub_v
 
 
+def _binary_slot_term(model: Model, flat_idx: int):
+    """Build a scalar modeling Expression for binary flat slot ``flat_idx``.
+
+    Maps the flat index to its backing :class:`Variable` and component and
+    returns either the scalar variable itself (``size == 1``) or the indexed
+    component ``v[unravel(local)]``, suitable for assembling a linear cut.
+    """
+    slot_map = _flat_slot_map(model)
+    v, local = slot_map[flat_idx]
+    if v.size == 1:  # type: ignore[attr-defined]
+        return v
+    shape = v.shape  # type: ignore[attr-defined]
+    if len(shape) <= 1:
+        return v[local]  # type: ignore[index]
+    return v[tuple(int(i) for i in np.unravel_index(local, shape))]  # type: ignore[index]
+
+
+def _local_branching_submip(
+    model: Model,
+    x_incumbent: np.ndarray,
+    binary_idx: list[int],
+    *,
+    k: int,
+    backend: Optional[Callable],
+    nlp_options: Optional[dict],
+    integer_tol: float,
+    feas_tol: float,
+    evaluator: NLPEvaluator,
+    time_limit: float,
+    max_nodes: int,
+    gap_tolerance: float,
+) -> Optional[tuple[np.ndarray, float]]:
+    """Scalable local branching via a bounded sub-MIP (Fischetti–Lodi 2003).
+
+    Adds the Hamming-distance cut
+
+        ``sum_{j: xbar_j=0} x_j + sum_{j: xbar_j=1} (1 - x_j) <= k``
+
+    over the binary variables as a single linear constraint, then re-solves the
+    restricted problem with a SMALL budget. Unlike the enumeration variant in
+    :func:`local_branching`, the cost is independent of the binary count, so this
+    works for the ``graphpart`` family (108 binaries) where enumerating ``C(n,k)``
+    flip sets is hopeless.
+
+    The cut is appended to ``model._constraints`` and removed in a ``finally`` so
+    the caller's model is left byte-for-byte unchanged. The sub-solve is launched
+    with ``_lns_enabled=False`` so it can NEVER re-enter this LNS layer (recursion
+    guard), and is bounded by ``time_limit`` / ``max_nodes``.
+
+    Returns the best feasible ``(x, obj)`` strictly improving the incumbent's
+    objective, else ``None``. Heuristic only: the returned point is re-verified
+    integer- and constraint-feasible and the dual bound is never touched.
+    """
+    import discopt.modeling as dm
+
+    x_inc = np.asarray(x_incumbent, dtype=np.float64)
+    incumbent_bits = {i: float(np.round(x_inc[i])) for i in binary_idx}
+
+    # Assemble the symbolic Hamming-distance expression over the binaries.
+    terms = []
+    for i in binary_idx:
+        term = _binary_slot_term(model, i)
+        if incumbent_bits[i] >= 0.5:
+            terms.append(1 - term)
+        else:
+            terms.append(term)
+    cut = dm.sum(terms) <= float(k)
+
+    inc_obj = float(evaluator.evaluate_objective(x_inc))
+
+    n_constraints_before = len(model._constraints)
+    model._constraints.append(cut)
+    try:
+        from discopt.solver import solve_model
+
+        result = solve_model(
+            model,
+            time_limit=max(0.0, float(time_limit)),
+            gap_tolerance=float(gap_tolerance),
+            max_nodes=int(max_nodes),
+            # Seed the sub-solve at the incumbent so it starts feasible for the cut.
+            initial_point=x_inc.copy(),
+            # CRITICAL recursion guard: the sub-solve must not re-enter this layer.
+            _lns_enabled=False,
+        )
+    except Exception:
+        return None
+    finally:
+        # Restore the model exactly: drop the appended cut (append-then-pop).
+        del model._constraints[n_constraints_before:]
+
+    x_dict = getattr(result, "x", None)
+    if not isinstance(x_dict, dict):
+        return None
+    # SolveResult.x is keyed by variable name; flatten back to the model's flat
+    # variable order to match the incumbent / evaluator layout.
+    chunks: list[np.ndarray] = []
+    for v in model._variables:
+        if v.name not in x_dict:
+            return None
+        chunks.append(np.asarray(x_dict[v.name], dtype=np.float64).reshape(-1))
+    x_out = np.concatenate(chunks) if chunks else np.array([], dtype=np.float64)
+    if x_out.shape[0] != x_inc.shape[0]:
+        return None
+
+    cand = _finalize_candidate(evaluator, x_out, _get_integer_mask(model), integer_tol, feas_tol)
+    if cand is None:
+        return None
+    _, obj_cand = cand
+    # Strict improvement only — never propose a non-improving incumbent.
+    if not np.isfinite(obj_cand) or obj_cand >= inc_obj - 1e-9:
+        return None
+    return cand
+
+
 def local_branching(
     model: Model,
     x_incumbent: np.ndarray,
@@ -1187,26 +1302,56 @@ def local_branching(
     feas_tol: float = 1e-6,
     evaluator: Optional[NLPEvaluator] = None,
     max_binaries: int = 12,
+    submip_time_limit: float = 2.0,
+    submip_max_nodes: int = 1000,
+    submip_gap_tolerance: float = 1e-4,
 ) -> Optional[tuple[np.ndarray, float]]:
     """Local branching: search the Hamming-radius-``k`` neighbourhood of a binary
     incumbent for a better feasible point.
 
     Classic local branching adds the constraint ``sum_{j: x*_j=0} x_j +
-    sum_{j: x*_j=1}(1 - x_j) <= k`` and re-solves a sub-MIP. We realise the same
-    neighbourhood directly: enumerate every flip of up to ``k`` binaries, fix
-    them, and solve the continuous sub-NLP (via :func:`subnlp`) for each. This is
-    exact for the neighbourhood and self-contained (no recursive MIP solve),
-    which keeps it cheap and certifiable for the small/medium binary blocks where
-    local branching pays off.
+    sum_{j: x*_j=1}(1 - x_j) <= k`` and re-solves a sub-MIP. For up to
+    ``max_binaries`` binaries we realise the same neighbourhood directly by
+    enumeration: every flip of up to ``k`` binaries is fixed and the continuous
+    sub-NLP (via :func:`subnlp`) is solved for each — exact and self-contained.
+
+    For MORE than ``max_binaries`` binaries (e.g. the ``graphpart`` family's 108)
+    the enumeration is hopeless, so we dispatch to :func:`_local_branching_submip`,
+    which adds the Hamming cut as a single linear constraint and re-solves the
+    restricted problem with a bounded budget (with a recursion guard so the
+    sub-solve never re-enters the LNS layer).
 
     Returns the best feasible ``(x, obj)`` found in the neighbourhood, or
     ``None``. Only proposes incumbents — the dual bound is untouched.
     """
     int_mask = _get_integer_mask(model)
     lb0, ub0 = _get_variable_bounds(model)
-    binary_idx = [i for i in np.nonzero(int_mask)[0] if lb0[i] >= -1e-9 and ub0[i] <= 1.0 + 1e-9]
-    if not binary_idx or len(binary_idx) > max_binaries:
+    binary_idx = [
+        int(i) for i in np.nonzero(int_mask)[0] if lb0[i] >= -1e-9 and ub0[i] <= 1.0 + 1e-9
+    ]
+    if not binary_idx:
         return None
+
+    k = max(1, min(k, len(binary_idx)))
+
+    # Scalable sub-MIP variant for large binary blocks.
+    if len(binary_idx) > max_binaries:
+        if evaluator is None:
+            evaluator = NLPEvaluator(model)
+        return _local_branching_submip(
+            model,
+            x_incumbent,
+            binary_idx,
+            k=k,
+            backend=backend,
+            nlp_options=nlp_options,
+            integer_tol=integer_tol,
+            feas_tol=feas_tol,
+            evaluator=evaluator,
+            time_limit=submip_time_limit,
+            max_nodes=submip_max_nodes,
+            gap_tolerance=submip_gap_tolerance,
+        )
 
     if evaluator is None:
         evaluator = NLPEvaluator(model)
