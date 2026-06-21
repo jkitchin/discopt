@@ -40,6 +40,8 @@ unconditional once invoked.
 
 from __future__ import annotations
 
+from typing import Callable, TypeVar
+
 import numpy as np
 
 from discopt.modeling.core import (
@@ -67,6 +69,96 @@ _ZERO_MARGIN = 1e-9
 # Reject an aux lift whose induced bound magnitude is effectively infinite: an
 # unbounded monomial aux would make the relaxation/NLP unbounded.
 _INF_THRESH = 1e15
+
+
+# The factorable-reform walkers (``_find_clearable_denominator``, ``_lift_expr``,
+# the ``has_factorable_work`` scanners, ...) recurse one Python frame per
+# expression node.  ``from_nl`` rebuilds a sum/product of N terms as a left-deep
+# binary tree of depth ~N, so a *single* constraint body can be tens of
+# thousands of nodes deep (watercontamination0202r: ~53k, graphpart_clique-30:
+# ~7.6k) and overrun CPython's default 1000-frame recursion limit, raising an
+# *uncaught* ``RecursionError`` (issue #271).  Mirroring the convexity walk's fix
+# (issue #266), the public entry points run the walk with a depth-scaled
+# recursion limit on a large-stack worker thread; this is gated on the deepest
+# expression so the common (shallow) case still runs inline with the default
+# limit, leaving behaviour byte-for-byte identical there.
+#
+# NOTE: the gate is driven by the *maximum single-expression node count*, not the
+# constraint/variable count used by the convexity walk's gate — the hazard here
+# is depth concentrated in one giant body, which a constraint count misses
+# entirely (this model has only ~280 constraints but a 53k-node body).
+_DEEP_RECURSION_SIZE_GATE = 700
+
+
+def _expr_node_count(expr: Expression) -> int:
+    """Count the nodes in *expr* iteratively (so this measurement never itself
+    recurses into the very depth it is trying to size)."""
+    count = 0
+    stack: list[Expression] = [expr]
+    while stack:
+        node = stack.pop()
+        count += 1
+        if isinstance(node, BinaryOp):
+            stack.append(node.left)
+            stack.append(node.right)
+        elif isinstance(node, UnaryOp):
+            stack.append(node.operand)
+        elif isinstance(node, FunctionCall):
+            stack.extend(node.args)
+        elif isinstance(node, SumExpression):
+            stack.append(node.operand)
+        elif isinstance(node, SumOverExpression):
+            stack.extend(node.terms)
+    return count
+
+
+def _max_expr_node_count(model: Model) -> int:
+    """Largest single-expression node count across the objective and constraint
+    bodies — an upper bound on how deep the per-expression walk can recurse."""
+    largest = 0
+    obj = getattr(model, "_objective", None)
+    if obj is not None:
+        largest = _expr_node_count(obj.expression)
+    for c in getattr(model, "_constraints", []) or []:
+        if isinstance(c, Constraint):
+            largest = max(largest, _expr_node_count(c.body))
+    return largest
+
+
+def _recursion_headroom_need(model: Model) -> int:
+    """Estimate the recursion-limit headroom the factorable walk may need.
+
+    Returns 0 when the deepest expression is small enough that the default limit
+    is safe. The estimate is a deliberate over-approximation (recursion depth is
+    bounded by node count); it only affects whether the deep-stack path engages,
+    never what the walk detects.
+    """
+    try:
+        size = _max_expr_node_count(model)
+    except Exception:
+        return 0
+    if size <= _DEEP_RECURSION_SIZE_GATE:
+        return 0
+    # A few Python frames are entered per expression node along the deepest path;
+    # add a fixed cushion for the surrounding call stack.  Capped (matching the
+    # convexity walk's, issue #266) so a pathological size can't request an
+    # unsatisfiable limit.
+    return min(2000 + 6 * size, 600_000)
+
+
+_T = TypeVar("_T")
+
+
+def _run_factorable_with_headroom(model: Model, fn: Callable[[], _T]) -> _T:
+    """Run ``fn`` (a factorable-reform walk over *model*) with size-scaled
+    recursion headroom so deep expression graphs don't ``RecursionError``.
+
+    Delegates to the proven worker-thread runner from the convexity module
+    (issue #266); shallow models run ``fn`` inline at the default limit.
+    """
+    from .convexity.rules import _run_with_deep_recursion
+
+    return _run_with_deep_recursion(fn, depth_need=_recursion_headroom_need(model))
 
 
 def _leaf_index_and_exp(expr: Expression, model: Model):
@@ -706,8 +798,15 @@ def has_factorable_work(model: Model) -> bool:
     expensive convexity classification used to gate the (convexity-destroying)
     rewrite: only nonconvex models that actually have liftable terms pay for
     convexity detection.
-    """
 
+    The structural scan recurses one frame per expression node; on a deep
+    ``from_nl`` graph that can exceed the default recursion limit, so it runs
+    with size-scaled recursion headroom (issue #271).
+    """
+    return _run_factorable_with_headroom(model, lambda: _has_factorable_work_inner(model))
+
+
+def _has_factorable_work_inner(model: Model) -> bool:
     def scan(expr: Expression) -> bool:
         if _find_clearable_denominator(expr, model) is not None:
             return True
@@ -735,10 +834,17 @@ def has_clearable_denominator(model: Model) -> bool:
     a strict improvement for such models, unlike the mixed-product lift which can
     only destroy convexity.  Objective ratios are excluded: clearing multiplies a
     *constraint* through by its denominator and has no analogue for an objective.
+
+    ``_find_clearable_denominator`` recurses one frame per additive node; on a
+    deep ``from_nl`` graph that can exceed the default recursion limit, so the
+    scan runs with size-scaled recursion headroom (issue #271).
     """
-    return any(
-        isinstance(c, Constraint) and _find_clearable_denominator(c.body, model) is not None
-        for c in model._constraints
+    return _run_factorable_with_headroom(
+        model,
+        lambda: any(
+            isinstance(c, Constraint) and _find_clearable_denominator(c.body, model) is not None
+            for c in model._constraints
+        ),
     )
 
 
@@ -1245,9 +1351,19 @@ def factorable_reformulate(model: Model, *, clear_only: bool = False) -> Model:
     even where it was unnecessary; clearing alone is the right rewrite for a
     *convex* model that merely needs its non-constant division exposed to the
     relaxation (see ``has_clearable_denominator``).
+
+    The rewrite walkers recurse one frame per expression node; on a deep
+    ``from_nl`` graph that can exceed the default recursion limit, so the whole
+    pass runs with size-scaled recursion headroom (issue #271).
     """
+    return _run_factorable_with_headroom(
+        model, lambda: _factorable_reformulate_inner(model, clear_only=clear_only)
+    )
+
+
+def _factorable_reformulate_inner(model: Model, *, clear_only: bool = False) -> Model:
     try:
-        if not has_factorable_work(model):
+        if not _has_factorable_work_inner(model):
             return model
 
         new_model = Model(model.name)

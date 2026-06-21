@@ -1030,7 +1030,10 @@ class ConvexityBudgetExceeded(Exception):
 # common (shallow) case keeps running inline with the default limit.
 _DEEP_RECURSION_SIZE_GATE = 700
 _DEEP_RECURSION_LIMIT_CAP = 200_000
-_DEEP_RECURSION_STACK_BYTES = 256 * 1024 * 1024
+# 512 MiB: large enough for the deepest MINLPLib expression graphs that drive the
+# headroom path (issue #271's whole-solve walk can need a recursion limit of a few
+# hundred thousand frames; 256 MiB grazed the C-stack ceiling at that depth).
+_DEEP_RECURSION_STACK_BYTES = 512 * 1024 * 1024
 
 
 def _recursion_headroom_need(model: Model) -> int:
