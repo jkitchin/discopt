@@ -1,11 +1,16 @@
 title: discopt
 author: John Kitchin
+copyright: "2026, John Kitchin"
 logo: discopt-logo.png
 execute:
   execute_notebooks: "off"
 repository:
   url: https://github.com/jkitchin/discopt
   branch: main
+  path_to_book: docs
+html:
+  use_repository_button: true
+  use_issues_button: true
 sphinx:
   extra_extensions:
     - sphinxcontrib.bibtex
