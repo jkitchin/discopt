@@ -39,9 +39,20 @@ __version__ = "0.4.1.dev0"
 # discopt`` free of the multi-second jax import for code paths (e.g. the GAMS
 # link's LP/MILP solves) that never touch jax.
 import os as _os
+import sys as _sys
 
 if _os.environ.get("JAX_ENABLE_X64", "1") != "0":
     _os.environ.setdefault("JAX_ENABLE_X64", "1")
+    # The env var only takes effect if jax has not been imported yet. If the
+    # caller did ``import jax`` *before* ``import discopt``, jax already read the
+    # (unset) variable and is in float32 — silently the wrong precision. Update
+    # its live config directly in that case. Guarded on ``jax in sys.modules`` so
+    # this never forces the multi-second jax import on jax-free code paths.
+    if "jax" in _sys.modules:
+        try:
+            _sys.modules["jax"].config.update("jax_enable_x64", True)
+        except Exception:
+            pass
 
 # Enable JAX's persistent (on-disk) compilation cache. A solve recompiles a
 # handful of small XLA kernels (relaxation evaluators, NLP residual/Jacobian,
