@@ -37,6 +37,9 @@ from discopt._daemon_core import (
     DaemonServer as _CoreDaemonServer,
 )
 from discopt._daemon_core import (
+    kill_daemon as _core_kill,
+)
+from discopt._daemon_core import (
     ping as _core_ping,
 )
 from discopt._daemon_core import (
@@ -143,6 +146,11 @@ def stop_daemon(socket_path: Path | None = None) -> bool:
     return _core_stop(socket_path or default_socket_path())
 
 
+def kill_daemon(socket_path: Path | None = None) -> bool:
+    """SIGTERM/SIGKILL the daemon by its PID file (use when it is wedged)."""
+    return _core_kill(socket_path or default_socket_path())
+
+
 def spawn_daemon(socket_path: Path | None = None, wait: float = _SPAWN_WAIT) -> bool:
     """Start a detached GAMS daemon and wait until its socket answers."""
     return _core_spawn(socket_path or default_socket_path(), _MODULE, _SOCKET_ENV, wait)
@@ -194,6 +202,10 @@ def main(argv: list[str] | None = None) -> int:
         ok = stop_daemon()
         print("stopped" if ok else "no running daemon")
         return 0 if ok else 1
+    if cmd == "kill":
+        ok = kill_daemon()
+        print("killed" if ok else "no running daemon")
+        return 0 if ok else 1
     if cmd == "status":
         info = ping()
         if info:
@@ -201,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         print("not running")
         return 1
-    sys.stderr.write("usage: python -m discopt.gams.daemon {serve,stop,status}\n")
+    sys.stderr.write("usage: python -m discopt.gams.daemon {serve,stop,kill,status}\n")
     return 2
 
 

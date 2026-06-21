@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -275,16 +276,40 @@ class DaemonServer:
 
 
 # ── Client ───────────────────────────────────────────────────────────────────
-def request(socket_path: Path, payload: dict, timeout: float = _CONNECT_TIMEOUT) -> dict | None:
-    """Send one request to a daemon socket, return its reply (or ``None``)."""
+class SolveTimeout(Exception):
+    """The daemon accepted a request but did not reply within ``recv_timeout`` --
+    a wedged or runaway solve. The caller should kill and recycle the daemon
+    rather than wait forever (a single-threaded daemon serves one solve at a time,
+    so one hang blocks every other client too)."""
+
+
+def request(
+    socket_path: Path,
+    payload: dict,
+    timeout: float = _CONNECT_TIMEOUT,
+    recv_timeout: float | None = None,
+) -> dict | None:
+    """Send one request to a daemon socket, return its reply (or ``None``).
+
+    ``timeout`` bounds the connect (so an absent daemon returns ``None`` fast).
+    ``recv_timeout`` bounds the wait for the reply *after* sending: ``None`` (the
+    default, used by fast ping/stop) blocks indefinitely; a value raises
+    :class:`SolveTimeout` if no reply arrives in time -- distinct from an
+    unreachable daemon -- so a stuck solve can be killed instead of hanging.
+    """
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
             s.settimeout(timeout)
             s.connect(str(socket_path))
             s.sendall((json.dumps(payload) + "\n").encode())
-            s.settimeout(None)  # the solve itself may take a while
-            data = _recv_line(s)
+            s.settimeout(recv_timeout)  # None -> block; else bound the solve wait
+            try:
+                data = _recv_line(s)
+            except socket.timeout:
+                raise SolveTimeout() from None
         return json.loads(data.decode()) if data else None
+    except SolveTimeout:
+        raise
     except (OSError, ValueError):
         return None
 
@@ -295,9 +320,48 @@ def ping(socket_path: Path) -> dict | None:
 
 
 def stop_daemon(socket_path: Path) -> bool:
-    """Ask a running daemon to shut down. Returns True if it acknowledged."""
+    """Ask a running daemon to shut down. Returns True if it acknowledged.
+
+    Graceful but cooperative: a daemon wedged in a solve is not accepting
+    connections and will not hear this. Use :func:`kill_daemon` for that case.
+    """
     resp = request(socket_path, {"cmd": "stop"})
     return bool(resp and resp.get("ok"))
+
+
+def kill_daemon(socket_path: Path) -> bool:
+    """Forcibly terminate a daemon by its PID file (SIGTERM, then SIGKILL).
+
+    Works when the daemon is wedged in a runaway solve and cannot answer
+    :func:`stop`. Reaps the socket/PID files afterward. Returns True if a live
+    process was signalled.
+    """
+    pid_file = _pid_path(socket_path)
+    try:
+        pid = int(pid_file.read_text())
+    except (OSError, ValueError):
+        pid = None
+    killed = False
+    if pid is not None and _pid_alive(pid):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline and _pid_alive(pid):
+            time.sleep(0.05)
+        if _pid_alive(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        killed = True
+    for p in (socket_path, pid_file):
+        try:
+            p.unlink()
+        except OSError:
+            pass
+    return killed
 
 
 def _reap_stale(socket_path: Path) -> None:

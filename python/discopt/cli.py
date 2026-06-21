@@ -528,7 +528,9 @@ def main():
         help="Control the warm discopt solve daemon (serve/stop/status)",
     )
     p_daemon.add_argument(
-        "action", choices=["serve", "stop", "status"], help="serve (foreground), stop, or status."
+        "action",
+        choices=["serve", "stop", "kill", "status"],
+        help="serve (foreground), stop (graceful), kill (force, for a wedged daemon), or status.",
     )
     p_daemon.set_defaults(func=_cmd_daemon)
 
@@ -538,8 +540,8 @@ def main():
     )
     p_gamsd.add_argument(
         "action",
-        choices=["serve", "stop", "status"],
-        help="serve (run in foreground), stop, or status.",
+        choices=["serve", "stop", "kill", "status"],
+        help="serve (run in foreground), stop, kill (force), or status.",
     )
     p_gamsd.set_defaults(func=_cmd_gams_daemon)
 
