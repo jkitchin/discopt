@@ -2441,6 +2441,47 @@ def test_best_nlp_candidate_prioritizes_incumbent_start_then_model_start_then_mi
     assert seen_starts[:3] == [2.0, 4.0, 6.0]
 
 
+def test_best_nlp_candidate_uses_ipopt_fallback_for_pure_continuous_ipm(monkeypatch):
+    """Pure-continuous AMP candidates should try Ipopt before POUNCE when available."""
+    from discopt.solvers import amp as amp_mod
+
+    m = Model("continuous_candidate_backend")
+    m.continuous("x", lb=-1.0, ub=1.0)
+    seen = {}
+
+    monkeypatch.setattr(amp_mod, "_has_cyipopt", lambda: True)
+
+    def fake_select(
+        candidates,
+        model,
+        evaluator,
+        flat_lb,
+        flat_ub,
+        constraint_lb,
+        constraint_ub,
+        nlp_solver,
+        deadline=None,
+    ):
+        del candidates, model, evaluator, flat_lb, flat_ub, constraint_lb, constraint_ub, deadline
+        seen["nlp_solver"] = nlp_solver
+        return np.array([0.0], dtype=np.float64), 0.0
+
+    monkeypatch.setattr(amp_mod, "_select_best_nlp_candidate", fake_select)
+
+    amp_mod._solve_best_nlp_candidate(
+        np.array([0.25], dtype=np.float64),
+        m,
+        evaluator=object(),
+        flat_lb=np.array([-1.0], dtype=np.float64),
+        flat_ub=np.array([1.0], dtype=np.float64),
+        constraint_lb=np.array([], dtype=np.float64),
+        constraint_ub=np.array([], dtype=np.float64),
+        nlp_solver="ipm",
+    )
+
+    assert seen["nlp_solver"] == ("ipopt", "ipm")
+
+
 def test_best_nlp_candidate_rejects_noninteger_nlp_return(monkeypatch):
     """NLP candidates that violate integrality should be discarded."""
     from discopt.solvers import amp as amp_mod
