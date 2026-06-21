@@ -4862,6 +4862,42 @@ def solve_model(
                     except Exception as e:
                         logger.debug("Integer local search failed: %s", e)
 
+                # Fractional-diving fallback (issue #268). When neither pump nor
+                # local search produced an incumbent, dive: fix one fractional
+                # integer at a time and re-solve the NLP between fixings. This
+                # finds feasible integer assignments that all-at-once rounding
+                # misses on combinatorial MINLPs (m7 and the syn/clay/flay family),
+                # so the search returns a feasible incumbent instead of exhausting
+                # with nothing. Only when nothing else found one and time remains;
+                # bounded by ~n_int sub-NLP solves. Sound: diving re-verifies
+                # integer + constraint feasibility and inject_incumbent enforces
+                # strict improvement, so the dual bound / gap are untouched.
+                if (
+                    best_root_idx is not None
+                    and tree.incumbent() is None
+                    and (time.perf_counter() - t_start) < time_limit
+                ):
+                    try:
+                        from discopt._jax.primal_heuristics import fractional_diving
+
+                        dv = fractional_diving(
+                            model,
+                            result_sols[best_root_idx],
+                            backend=_resolve_heuristic_backend(nlp_solver),
+                            evaluator=evaluator,
+                        )
+                        if dv is not None:
+                            _x_dv, _obj_dv = dv
+                            _obj_dv = float(_obj_dv)
+                            _dv_feas = not cl_list or _check_constraint_feasibility(
+                                evaluator, _x_dv, cl_list, cu_list
+                            )
+                            if np.isfinite(_obj_dv) and _obj_dv < _SENTINEL_THRESHOLD and _dv_feas:
+                                tree.inject_incumbent(np.asarray(_x_dv).copy(), _obj_dv)
+                                logger.info("Fractional diving found incumbent: obj=%.6g", _obj_dv)
+                    except Exception as e:
+                        logger.debug("Fractional diving failed: %s", e)
+
         # --- SubNLP primal heuristic ---
         # Fix integers in the best relaxation solution, then solve the
         # resulting continuous NLP. Useful for nonconvex problems whose
@@ -5996,6 +6032,7 @@ def _solve_nlp_bb(
                     best_root_obj = result_lbs[i]
                     best_root_idx = i
             if best_root_idx is not None:
+                _root_incumbent = False
                 try:
                     from discopt._jax.primal_heuristics import feasibility_pump
 
@@ -6014,9 +6051,45 @@ def _solve_nlp_bb(
                         )
                         if np.isfinite(fp_obj) and fp_obj < _SENTINEL_THRESHOLD and fp_feas:
                             tree.inject_incumbent(fp_sol, fp_obj)
+                            _root_incumbent = True
                             logger.info("NLP-BB feasibility pump incumbent: obj=%.6g", fp_obj)
                 except Exception as e:
                     logger.debug("Feasibility pump failed: %s", e)
+
+                # Fractional-diving fallback (issue #268). The feasibility pump
+                # rounds every integer at once, which lands on a constraint-
+                # infeasible assignment on facility-location / set-partitioning
+                # MINLPs (clay*/flay*/syn*) whose relaxation parks every binary
+                # near 0.5 — the pump then returns nothing and the convex NLP-BB
+                # exhausts with no incumbent (reported as a no-solution time_limit).
+                # Diving fixes integers one at a time, re-solving the NLP between
+                # fixings, so it finds a feasible incumbent where all-at-once
+                # rounding cannot. Only tried when the pump found no incumbent;
+                # bounded by ~n_int sub-NLP solves and the remaining time budget.
+                # Sound: diving re-verifies integer + constraint feasibility and
+                # inject_incumbent enforces strict improvement, so the dual bound
+                # and gap certification are untouched.
+                if not _root_incumbent and (time.perf_counter() - t_start) < time_limit:
+                    try:
+                        from discopt._jax.primal_heuristics import fractional_diving
+
+                        dv = fractional_diving(
+                            model,
+                            result_sols[best_root_idx],
+                            backend=_resolve_heuristic_backend(nlp_solver),
+                            evaluator=evaluator,
+                        )
+                        if dv is not None:
+                            dv_sol, dv_obj = dv
+                            dv_obj = float(dv_obj)
+                            dv_feas = not cl_list or _check_constraint_feasibility(
+                                evaluator, dv_sol, cl_list, cu_list
+                            )
+                            if np.isfinite(dv_obj) and dv_obj < _SENTINEL_THRESHOLD and dv_feas:
+                                tree.inject_incumbent(np.asarray(dv_sol).copy(), dv_obj)
+                                logger.info("NLP-BB fractional diving incumbent: obj=%.6g", dv_obj)
+                    except Exception as e:
+                        logger.debug("Fractional diving failed: %s", e)
 
         # --- User callbacks ---
         if lazy_constraints is not None or incumbent_callback is not None:

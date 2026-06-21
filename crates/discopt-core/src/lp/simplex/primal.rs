@@ -201,12 +201,24 @@ impl<'a> Simplex<'a> {
     }
 
     fn refactorize(&mut self, art_sign: &[f64]) -> Result<(), ()> {
-        let cols: Vec<Vec<f64>> = self
+        // Build the basis as *sparse* columns (slot -> (row, value) nonzeros) so
+        // the factorization never materializes the dense m×m basis: structural
+        // columns come straight from the CSC `cols`, artificials are a single
+        // signed unit entry. Bit-identical to the dense `column()` build, O(nnz)
+        // instead of O(m²) (discopt#268 / feral#87).
+        let cols: Vec<Vec<(usize, f64)>> = self
             .basis
             .iter()
-            .map(|&j| self.column(j, art_sign))
+            .map(|&j| {
+                if j < self.n {
+                    let (rows, vals) = self.cols.col(j);
+                    rows.iter().zip(vals).map(|(&r, &v)| (r, v)).collect()
+                } else {
+                    vec![(j - self.n, art_sign[j - self.n])]
+                }
+            })
             .collect();
-        self.lu.factorize(self.m, &cols).map_err(|_| ())
+        self.lu.factorize_sparse(self.m, &cols).map_err(|_| ())
     }
 
     fn run(mut self) -> LpSolve {
@@ -322,6 +334,18 @@ impl<'a> Simplex<'a> {
         let m = self.m;
         let mut updates = 0usize;
         let mut stall = 0usize;
+        // Adaptive refactorization budget (discopt#268 / feral#87): the FT basis
+        // update is O(bump²) on non-localized spikes — on a wide lifted-McCormick
+        // basis (dense structural columns) a single `update` can cost as much as a
+        // full refactorization, and the eta-replay in every subsequent solve grows
+        // with the chain. Refactorize once the accumulated update work
+        // (`ft_update_work`) exceeds the factor's own nnz, so wide-bump bases
+        // refactor often (now O(nnz), not O(m²)) instead of compounding the FT
+        // blowup, while narrow-bump bases — whose eta work stays tiny — keep all 48
+        // cheap updates between refactorizations. Sound: a refactorization yields
+        // the same basis inverse (only fresher), so pivots and the optimum are
+        // unchanged. `0` (dense backend, or feral not reporting) disables the gate.
+        let mut refac_work_budget = self.lu.factor_nnz();
         // Devex reference weights γⱼ ≥ 1 for nonbasic pricing, reset per loop
         // (the basis composition differs between Phase 1 and Phase 2). Devex
         // selects the entering column maximizing dⱼ²/γⱼ — a cheap steepest-edge
@@ -528,7 +552,11 @@ impl<'a> Simplex<'a> {
                     let col = self.column(q, art_sign);
                     let need_refac = self.lu.update(slot, &col).is_err();
                     updates += 1;
-                    if need_refac || updates >= 48 {
+                    // Refactorize on: a failed FT update, the hard 48-update cap, or
+                    // the adaptive work gate (accumulated bump-update work exceeded
+                    // the factor's nnz — the wide-McCormick-bump regime).
+                    let work_gate = refac_work_budget > 0 && self.lu.ft_update_work() > refac_work_budget;
+                    if need_refac || updates >= 48 || work_gate {
                         if self.refactorize(art_sign).is_err() {
                             return Err(LpStatus::Numerical);
                         }
@@ -536,6 +564,7 @@ impl<'a> Simplex<'a> {
                             .basic_values(art_sign)
                             .map_err(|_| LpStatus::Numerical)?;
                         updates = 0;
+                        refac_work_budget = self.lu.factor_nnz();
                     }
                 }
             }

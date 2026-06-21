@@ -117,8 +117,16 @@ impl<'a> PreparedDual<'a> {
 
         let sp = SparseCols::from_dense(a, m, n);
         let mut lu = FeralLU::new();
-        let cols: Vec<Vec<f64>> = basis.iter().map(|&j| col(a, m, n, j)).collect();
-        if lu.factorize(m, &cols).is_err() {
+        // Sparse basis columns straight from the CSC view — O(nnz) factorize, no
+        // dense m×m basis (discopt#268 / feral#87). Bit-identical to `col()`.
+        let cols: Vec<Vec<(usize, f64)>> = basis
+            .iter()
+            .map(|&j| {
+                let (rows, vals) = sp.col(j);
+                rows.iter().zip(vals).map(|(&r, &v)| (r, v)).collect()
+            })
+            .collect();
+        if lu.factorize_sparse(m, &cols).is_err() {
             return None; // singular warm basis → fall back to cold
         }
 
@@ -395,8 +403,14 @@ impl<'a> PreparedDual<'a> {
             let need_refac = lu.update(r, &raw_q).is_err();
             updates += 1;
             if need_refac || updates >= 48 {
-                let cols: Vec<Vec<f64>> = basis.iter().map(|&j| col(a, m, n, j)).collect();
-                if lu.factorize(m, &cols).is_err() {
+                let cols: Vec<Vec<(usize, f64)>> = basis
+                    .iter()
+                    .map(|&j| {
+                        let (rows, vals) = sp.col(j);
+                        rows.iter().zip(vals).map(|(&r, &v)| (r, v)).collect()
+                    })
+                    .collect();
+                if lu.factorize_sparse(m, &cols).is_err() {
                     return None;
                 }
                 updates = 0;
