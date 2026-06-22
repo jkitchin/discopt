@@ -1,0 +1,18 @@
+# OA vs NLP-BB+RENS on convex-MINLP instances (lever-3 routing study, #281).
+# Each line: instance features + both engines' (status, objective, wall) at 20s budget.
+# Conclusion: no static gate safely separates OA-wins from OA-losses (see miqp-incumbent-latency.md).
+{"name": "batch", "nint": 24, "nvars": 46, "ncons": 73, "trans": true, "sense": "MINIMIZE", "bb": {"status": "optimal", "obj": 285506.50468, "t": 11.3, "nlp_bb": true}, "oa": {"status": "optimal", "obj": 285506.50428, "t": 0.6, "nlp_bb": false}}
+{"name": "batchdes", "nint": 9, "nvars": 19, "ncons": 19, "trans": true, "sense": "MINIMIZE", "bb": {"status": "optimal", "obj": 167427.64981, "t": 0.5, "nlp_bb": true}, "oa": {"status": "optimal", "obj": 167427.64976, "t": 0.2, "nlp_bb": false}}
+{"name": "batchs201210m", "nint": 251, "nvars": 558, "ncons": 2327, "trans": true, "sense": "MINIMIZE", "bb": {"status": "time_limit", "obj": null, "t": 47.7, "nlp_bb": true}, "oa": {"status": "infeasible", "obj": null, "t": 47.5, "nlp_bb": false}}
+{"name": "clay0203hfsg", "nint": 18, "nvars": 90, "ncons": 132, "trans": false, "sense": "MINIMIZE", "bb": {"status": "feasible", "obj": 41709.76922, "t": 20.3, "nlp_bb": true}, "oa": {"status": "optimal", "obj": 3559.99998, "t": 2.9, "nlp_bb": false}}
+{"name": "clay0303hfsg", "nint": 21, "nvars": 99, "ncons": 150, "trans": false, "sense": "MINIMIZE", "bb": {"status": "feasible", "obj": 26669.10955, "t": 20.4, "nlp_bb": true}, "oa": {"status": "optimal", "obj": 3559.99998, "t": 3.5, "nlp_bb": false}}
+{"name": "clay0305m", "nint": 55, "nvars": 85, "ncons": 155, "trans": false, "sense": "MINIMIZE", "bb": {"status": "time_limit", "obj": null, "t": 20.3, "nlp_bb": true}, "oa": {"status": "feasible", "obj": 8278.47052, "t": 20.0, "nlp_bb": false}}
+{"name": "du-opt", "error": "load:ValueError"}
+{"name": "du-opt5", "error": "load:ValueError"}
+{"name": "ex1223", "nint": 4, "nvars": 11, "ncons": 13, "trans": true, "sense": "MINIMIZE", "bb": {"status": "optimal", "obj": 4.57958, "t": 0.4, "nlp_bb": true}, "oa": {"status": "optimal", "obj": 4.57958, "t": 0.2, "nlp_bb": false}}
+{"name": "ex1223a", "nint": 4, "nvars": 7, "ncons": 9, "trans": false, "sense": "MINIMIZE", "bb": {"status": "optimal", "obj": 4.57958, "t": 0.3, "nlp_bb": true}, "oa": {"status": "optimal", "obj": 4.57958, "t": 0.1, "nlp_bb": false}}
+{"name": "ex1223b", "nint": 4, "nvars": 7, "ncons": 9, "trans": true, "sense": "MINIMIZE", "bb": {"status": "optimal", "obj": 4.57958, "t": 0.3, "nlp_bb": true}, "oa": {"status": "optimal", "obj": 4.57958, "t": 0.2, "nlp_bb": false}}
+{"name": "ex1224", "nint": 8, "nvars": 11, "ncons": 7, "trans": true, "sense": "MINIMIZE", "bb": {"status": "feasible", "obj": -0.94347, "t": 20.0, "nlp_bb": false}, "oa": {"status": "feasible", "obj": -0.6392, "t": 20.0, "nlp_bb": false}}
+{"name": "ex1225", "nint": 6, "nvars": 8, "ncons": 10, "trans": true, "sense": "MINIMIZE", "bb": {"status": "optimal", "obj": 31.0, "t": 1.4, "nlp_bb": false}, "oa": {"status": "optimal", "obj": 31.0, "t": 0.1, "nlp_bb": false}}
+{"name": "ex1226", "nint": 3, "nvars": 5, "ncons": 5, "trans": true, "sense": "MINIMIZE", "bb": {"status": "optimal", "obj": -17.0, "t": 0.7, "nlp_bb": false}, "oa": {"status": "feasible", "obj": -3.3353, "t": 20.0, "nlp_bb": false}}
+{"name": "fac1", "nint": 6, "nvars": 22, "ncons": 18, "trans": true, "sense": "MINIMIZE", "bb": {"status": "optimal", "obj": 160912612.35016, "t": 0.5, "nlp_bb": true}, "oa": {"status": "optimal", "obj": 160912612.34991, "t": 0.4, "nlp_bb": false}}

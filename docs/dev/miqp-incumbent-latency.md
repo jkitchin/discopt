@@ -86,12 +86,35 @@ with a one-line fix). The latency is distributed across compile + primal + searc
      handling meant maximize problems were optimized in the wrong direction and
      certified wrong (syn05m: −831 "optimal" vs true 837.73). Fixed in #301.
 
-   Conclusion: a blanket "route convex MINLP to OA" would *regress* the QP and
-   non-convex-objective classes. Safe auto-routing needs a structural gate (route
-   to OA only for transcendental/expensive-NLP convex MINLP with an OA-valid
-   master bound, i.e. `master_bound_valid` true and non-quadratic nonlinearity),
-   validated on the full convex-MINLP benchmark. *That gate is the remaining
-   lever-3 work; the engine and its correctness are ready.*
+   **Auto-routing investigated and found unsafe (no static gate).** A
+   convex-MINLP benchmark (NLP-BB+RENS vs OA, both engines, ~per-instance
+   features) was run to design a routing gate. Every candidate static
+   discriminator regresses some class:
+
+   | instance | objective | nl-constraints | transcendental | OA vs NLP-BB+RENS |
+   |---|---|---|---|---|
+   | batch, batchdes, ex1223, ex1225 | lin/cvx | 1–4 | mixed | **OA wins** (≤0.6 s vs 11 s) |
+   | clay0203hfsg/0303hfsg/0305m | linear | 24–60 | no | **OA wins** (NLP-BB times out / 41709 vs 3560) |
+   | smallinvDAX (QCQP) | linear | 1 (quadratic) | no | **OA regresses** — false `infeasible` @3 s vs RENS 0.40 |
+   | syn05hfsg | concave (max) | yes | yes | **OA regresses** — 837.44 vs 837.73 |
+   | rsyn0805hfsg | linear | yes | yes | **OA regresses** — feasible 1272 vs NLP-BB optimal 1136 |
+   | ex1224, ex1226, alan | — | — | — | not OA-convex → NLP-BB (correctly) |
+
+   The discriminators all fail: "has nonlinear constraint" routes smallinvDAX
+   (regress); "transcendental" routes syn/rsyn (regress); "fully-OA-convex" admits
+   both winners and losers; a nl-constraint *count* threshold is fragile and
+   unvalidated. OA's advantage is **convergence-dependent (problem-specific)**, not
+   predictable from structure — when OA is a poor fit it stalls and, at a tight
+   budget, returns a false `infeasible`/suboptimal incumbent, reintroducing the
+   exact #281 symptom. So a blanket or simple-structural auto-route is *not* safe.
+
+   **Decision: keep OA opt-in (`m.solve(gdp_method="oa")`), now soundness-correct
+   (#301).** The only zero-regression auto-route would be *dynamic*: give OA a
+   short bounded slice and adopt it only if it proves optimality quickly, else
+   fall back to NLP-BB+RENS — but even a short wasted slice causes a bounded
+   tight-budget regression on the RENS-favourable QCQP class (smallinvDAX@5 s:
+   0.3988 → ~0.40), so it is deferred pending a budget-adaptive design that avoids
+   that cost. The engine and its correctness are ready for whoever takes that on.
 
 ## Recommendation
 
@@ -101,10 +124,12 @@ This is SCIP-gap-class work, not a one-liner. Sequence by payoff/risk:
   broadly across the short tier.
 - **Lever 2 (convex-MINLP primal) — DONE.** RENS lands near-optimal incumbents at
   tight budgets where the pump returned none/poor ones (#281, #302).
-- **Lever 3 (OA) — engine ready, correctness fixed (#301); structural auto-routing
-  gate is the remaining work.** OA is a large win on transcendental convex MINLP
-  but regresses QP / non-convex-objective classes, so routing must be gated and
-  benchmark-validated rather than blanket-enabled.
+- **Lever 3 (OA) — engine ready, correctness fixed (#301); auto-routing
+  investigated and shelved (no safe static gate).** OA is a large win on some
+  convex MINLPs (batch, clay) but regresses others (smallinvDAX false-infeasible,
+  syn/rsyn suboptimal); the win is convergence-dependent, not statically
+  predictable, so OA stays opt-in. A budget-adaptive dynamic probe is the only
+  candidate for safe auto-routing and is left as future work.
 
 Each lever is gated on the existing short-tier benchmark harness
 (`discopt-minlp-benchmark`), tracking per-instance incumbent-latency and gap so
