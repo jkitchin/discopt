@@ -1,13 +1,16 @@
 """Regression for issue #286: a nonconvex MINLP must never be declared globally
 ``unbounded`` because the *linear projection* of its relaxation is unbounded.
 
-carton7 (=opt= 191.73) was reported ``unbounded`` after one node: it reached the
-Rust pure-MILP simplex engine, whose ``extract_lp_data`` silently drops nonlinear
-terms — including the very constraints that bound its infinite-upper-bound
-continuous variables — so the dropped-down LP was genuinely unbounded. Two guards
-now prevent this: the integer-bilinear reformulation is adopted (and routed to the
-MILP engine) only when the *reformulated* model is a genuinely pure MILP, and
-``_solve_milp_simplex`` itself defers on any model carrying nonlinear terms.
+carton7 (=opt= 191.73, 64 variables with infinite upper bounds) was reported
+``unbounded`` after one node. The integer-bilinear reformulation linearized every
+``binary * other`` product with a big-M equal to ``other``'s bounds; for the
+infinite-upper-bound factors that big-M is infinite, making the linearized rows
+vacuous, so the reformulated "pure MILP" was spuriously unbounded although the
+original problem is bounded. The reformulation now ABORTS (returns the original
+model -> solver keeps the bound-aware spatial path) when any product factor has an
+infinite/astronomical bound. Two earlier guards remain as defense-in-depth: the
+reformulation is adopted only when the result is a genuinely pure MILP, and
+``_solve_milp_simplex`` defers on any model carrying nonlinear terms.
 """
 
 from __future__ import annotations
@@ -73,3 +76,53 @@ def test_pure_milp_still_uses_simplex():
     out = _solve_milp_simplex(m, 10.0, 1e-4, 100000, time.perf_counter())
     assert out is not None and out.status == "optimal"
     assert out.objective == pytest.approx(-16.0, abs=1e-6)
+
+
+# --------------------------------------------------------------------------- #
+# the actual carton7 root cause: big-M reformulation of a product whose other
+# factor has an infinite (or astronomical) bound is invalid -> must abort
+# --------------------------------------------------------------------------- #
+
+
+def _int_times_unbounded(ub):
+    """``k * x`` with k integer in [1,5] and continuous x in [0, ub]; the
+    reformulation would big-M-linearize ``binary * x`` with M = ub."""
+    m = dm.Model("ib")
+    k = m.integer("k", lb=1, ub=5)
+    x = m.continuous("x", lb=0, ub=ub)
+    m.minimize(k)
+    m.subject_to(k * x >= 10)
+    return m
+
+
+@pytest.mark.parametrize("ub", [float("inf"), 1e20])
+def test_reformulation_aborts_on_unbounded_factor(ub):
+    """An infinite/astronomical other-factor bound makes the big-M vacuous, so the
+    reformulation must abort (return the input model unchanged) rather than emit a
+    spuriously unbounded MILP (carton7, issue #286)."""
+    from discopt._jax.integer_product_reform import reformulate_integer_bilinear
+
+    m = _int_times_unbounded(ub)
+    assert reformulate_integer_bilinear(m) is m
+
+
+def test_reformulation_still_fires_on_finite_factor():
+    """The guard is not over-broad: a finitely-bounded other factor is still
+    reformulated (a new model is returned)."""
+    from discopt._jax.integer_product_reform import reformulate_integer_bilinear
+
+    m = _int_times_unbounded(20.0)
+    assert reformulate_integer_bilinear(m) is not m
+
+
+@pytest.mark.requires_pounce
+def test_inf_bound_bilinear_not_unbounded():
+    """End-to-end: an integer*continuous product with an unbounded continuous factor
+    must not yield a global ``unbounded`` verdict (the spatial path bounds it)."""
+    m = dm.Model("e2e")
+    k = m.integer("k", lb=1, ub=5)
+    x = m.continuous("x", lb=0, ub=float("inf"))
+    m.minimize(k + x)
+    m.subject_to(k * x >= 10)  # x >= 10/k > 0, objective bounded below
+    r = m.solve(time_limit=15, gap_tolerance=1e-4)
+    assert r.status != "unbounded"

@@ -59,6 +59,10 @@ from .term_classifier import distribute_products
 # blow up the model for no practical gain (and such a variable is better left to
 # spatial branching). 12 bits covers ranges up to 4095.
 _MAX_BITS = 12
+# Beyond this magnitude a big-M coefficient is numerically meaningless (matches the
+# solver's large-bound warning threshold); products with such a factor are not
+# big-M-linearizable and the reformulation aborts (issue #286).
+_BIGM_BOUND_CAP = 1e15
 
 
 def _scalar_var_ref(expr: Expression) -> Optional[tuple[Variable, int]]:
@@ -147,6 +151,17 @@ class _Expander:
         At ``e in {0,1}`` these force ``v = 0`` (e=0) or ``v = other`` (e=1), so the
         product is reproduced exactly — no McCormick gap, and no bilinear term
         remains in the model."""
+        # The big-M coefficients ARE the other factor's bounds; an infinite (or
+        # astronomically large) bound makes the rows ``v <= hi_o*e`` /
+        # ``v >= other - hi_o*(1-e)`` vacuous, so the aux ``v`` (hence the product) is
+        # left unbounded and the reformulated "MILP" is spuriously unbounded though
+        # the original problem is bounded (carton7, issue #286). Abort the whole
+        # pass; the caller's guard returns the original model and the solver keeps
+        # the (bound-aware) spatial path. ``_BIGM_BOUND_CAP`` matches discopt's
+        # large-bound warning threshold — beyond it the big-M is numerically
+        # meaningless, not just at true infinity.
+        if not (abs(lo_o) <= _BIGM_BOUND_CAP and abs(hi_o) <= _BIGM_BOUND_CAP):
+            raise ValueError("cannot big-M-linearize a product with an unbounded factor")
         v = Variable(
             f"_ipx_v{self._counter}",
             VarType.CONTINUOUS,
