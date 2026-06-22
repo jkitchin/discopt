@@ -46,7 +46,6 @@ def _cmir_row(a, b, xstar, lb, ub, is_int) -> Optional[tuple[np.ndarray, float, 
     ``(coeffs, rhs, violation)`` for a cut ``coeffs·x <= rhs`` violated at
     ``xstar``, or ``None``. Variables must be bounded (finite lb/ub)."""
     a = _snap(np.asarray(a, dtype=np.float64))
-    width = ub - lb
     # complement variables sitting nearer their upper bound -> y_j = u_j - x_j >= 0,
     # else y_j = x_j - l_j >= 0. y* is then small, which strengthens the MIR cut.
     comp = xstar > 0.5 * (lb + ub)
