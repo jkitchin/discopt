@@ -166,19 +166,58 @@ def solve_lp_spatial_bb(
     counter = 1
     nodes = 0
 
-    def collapsed_incumbent(x):
-        """Round integers, verify exactly via the collapsed (singleton) box (where
-        the products are fixed, so the McCormick LP value is the true objective)."""
-        xr = np.minimum(np.maximum(np.round(x[:n]), lb0), ub0)
+    # pseudocosts: average objective gain per unit of branched fractionality, for
+    # up/down branches on each variable (Achterberg). Score = product of the two
+    # estimated gains -> a reliable variable-selection rule that converges far
+    # faster than most-fractional. Uninitialized entries use the running average.
+    psi_d = np.zeros(n)
+    psi_u = np.zeros(n)
+    cnt_d = np.zeros(n, dtype=int)
+    cnt_u = np.zeros(n, dtype=int)
+
+    def _avg_psi(arr, cnt):
+        m = cnt > 0
+        return float(arr[m].mean()) if m.any() else 1.0
+
+    def _branch_var(x, lb, ub):
+        """Pseudocost-scored fractional integer variable, or None if all integral."""
+        cand = [i for i in INT if abs(x[i] - round(x[i])) > _INT_TOL and ub[i] - lb[i] > 0.5]
+        if not cand:
+            return None
+        ad, au = _avg_psi(psi_d, cnt_d), _avg_psi(psi_u, cnt_u)
+        best_s, best_i = -1.0, cand[0]
+        for i in cand:
+            fd = x[i] - np.floor(x[i])
+            fu = np.ceil(x[i]) - x[i]
+            sd = (psi_d[i] if cnt_d[i] else ad) * fd
+            su = (psi_u[i] if cnt_u[i] else au) * fu
+            s = max(sd, 1e-6) * max(su, 1e-6)
+            if s > best_s:
+                best_s, best_i = s, i
+        return best_i
+
+    def _update_pc(i, direction, parent_b, child_b, frac):
+        if child_b is None or frac < 1e-6:
+            return
+        gain = max(0.0, child_b - parent_b) / frac
+        if direction == "d":
+            psi_d[i] = (psi_d[i] * cnt_d[i] + gain) / (cnt_d[i] + 1)
+            cnt_d[i] += 1
+        else:
+            psi_u[i] = (psi_u[i] * cnt_u[i] + gain) / (cnt_u[i] + 1)
+            cnt_u[i] += 1
+
+    def verify(xhat):
+        """True objective at integer point xhat (products fixed -> McCormick exact),
+        or None if xhat is infeasible."""
+        xr = np.minimum(np.maximum(np.round(xhat), lb0), ub0)
         b_, _x, _bas = relax(xr, xr, None)
         return (b_, xr) if b_ is not None else None
 
     def dive(lb_d, ub_d):
-        """Fix-and-dive rounding heuristic: from the node box, repeatedly fix the
-        most-fractional integer to its rounded LP value and re-solve, until all
-        integers are fixed (a feasible candidate verified by the collapsed box) or
-        the LP turns infeasible. Robust where one-shot rounding misses (e.g. nvs19/
-        24, where no single rounding of the relaxation optimum is feasible)."""
+        """Fix-and-dive: repeatedly fix the most-fractional free integer to its
+        rounded LP value and re-solve, until all are fixed (a feasible candidate via
+        the collapsed box) or the LP turns infeasible. Cheap, found nvs17's primal."""
         lo, hi = lb_d.copy(), ub_d.copy()
         for _ in range(2 * n + 2):
             b_, xx, _bas = relax(lo, hi, None)
@@ -186,26 +225,63 @@ def solve_lp_spatial_bb(
                 return None
             free = [(abs(xx[i] - round(xx[i])), i) for i in INT if hi[i] - lo[i] > 0.5]
             if not free:
-                return collapsed_incumbent(xx)
-            # fix the most-fractional still-free integer to its rounded value
+                return verify(xx[:n])
             _, bi = max(free)
             v = min(max(round(xx[bi]), lo[bi]), hi[bi])
             lo[bi] = hi[bi] = v
         return None
 
-    def push(lb, ub, parent_basis):
+    def feasibility_pump(lb, ub, x_seed, max_iter=30):
+        """Objective feasibility pump (Fischetti-Glover-Lodi): alternate between the
+        relaxation and rounding, each step re-solving the McCormick LP with a linear
+        objective that pushes it toward the current rounded point, until the rounded
+        integers are feasible (verified by the collapsed box). Finds incumbents where
+        one-shot rounding / diving fail (e.g. nvs19/24)."""
+        if not _inc.ok:
+            return None
+        x = np.asarray(x_seed, dtype=float)
+        xhat = np.minimum(np.maximum(np.round(x[:n]), lb), ub)
+        seen: set = set()
+        for _ in range(max_iter):
+            h = verify(xhat)
+            if h is not None:
+                return h
+            key = tuple(xhat.tolist())
+            if key in seen:  # cycle -> perturb the most-fractional coordinates
+                order = np.argsort(-np.abs(x[:n] - xhat))
+                for j in order[: max(1, n // 4)]:
+                    step = 1.0 if x[j] > xhat[j] else -1.0
+                    xhat[j] = min(max(xhat[j] + step, lb[j]), ub[j])
+            seen.add(key)
+            c_fp = np.zeros(_inc.ncol)
+            c_fp[:n] = np.where(x[:n] > xhat, 1.0, -1.0)  # minimize -> pull x to xhat
+            _b, x_, _bas = _inc.solve(lb, ub, c_override=c_fp)
+            if x_ is None:
+                return None
+            x = x_
+            xhat = np.minimum(np.maximum(np.round(x[:n]), lb), ub)
+        return None
+
+    def consider(cand):
+        nonlocal inc_val, inc_x
+        if cand is not None and cand[0] < inc_val:
+            inc_val, inc_x = cand[0], cand[1].copy()
+
+    def child(lb, ub, parent_basis):
+        """Solve a child node; push if promising. Returns its bound (or None)."""
         nonlocal counter
         if np.any(lb > ub + 1e-9):
-            return
+            return None
         b_, x_, basis_ = relax(lb, ub, parent_basis)
         if b_ is not None and b_ < inc_val - 1e-9:
             heapq.heappush(heap, (b_, counter, lb, ub, x_, basis_))
             counter += 1
+        return b_
 
-    # seed an incumbent with a root dive (robust primal)
-    seed = dive(lb0, ub0)
-    if seed is not None:
-        inc_val, inc_x = seed[0], seed[1].copy()
+    # seed an incumbent: root dive (cheap) then a root feasibility pump (catches
+    # cases diving misses). Both are rate-limited below so they never dominate.
+    consider(dive(lb0, ub0))
+    consider(feasibility_pump(lb0, ub0, root_x))
 
     status = "infeasible"
     while heap:
@@ -214,42 +290,37 @@ def solve_lp_spatial_bb(
             break
         bound, _, lb, ub, x, basis = heapq.heappop(heap)
         nodes += 1
-        # fathom by bound (the frontier is a valid global lower bound)
         if bound >= inc_val - 1e-9 * (1 + abs(inc_val)):
             continue
-        # gap check against the best open bound (this node has the min bound)
         if inc_x is not None and abs(inc_val - bound) <= gap_tolerance * (1 + abs(inc_val)):
             status = "optimal"
             break
-        # primal: cheap one-shot rounding every node, a deeper dive periodically
-        h = collapsed_incumbent(x)
-        if h is not None and h[0] < inc_val:
-            inc_val, inc_x = h[0], h[1].copy()
+        # primal: cheap one-shot rounding every node; dive / pump rate-limited so
+        # they never dominate the node throughput (the earlier every-node bug).
+        consider(verify(x[:n]))
         if nodes % 64 == 0:
-            hd = dive(lb, ub)
-            if hd is not None and hd[0] < inc_val:
-                inc_val, inc_x = hd[0], hd[1].copy()
-        widths = ub - lb
-        # branch: integer-fractional first (children warm-start from this basis)
-        frac = [(abs(x[i] - round(x[i])), i) for i in INT]
-        frac = [(f, i) for f, i in frac if f > _INT_TOL]
-        if frac:
-            _, bi = max(frac)
-            push(lb, _set(ub, bi, np.floor(x[bi])), basis)
-            push(_set(lb, bi, np.ceil(x[bi])), ub, basis)
+            consider(dive(lb, ub))
+        if nodes % 512 == 0:
+            consider(feasibility_pump(lb, ub, x))
+        # branch: pseudocost-scored integer-fractional variable
+        bi = _branch_var(x, lb, ub)
+        if bi is not None:
+            fd = x[bi] - np.floor(x[bi])
+            fu = np.ceil(x[bi]) - x[bi]
+            bd = child(lb, _set(ub, bi, np.floor(x[bi])), basis)
+            bu = child(_set(lb, bi, np.ceil(x[bi])), ub, basis)
+            _update_pc(bi, "d", bound, bd, fd)
+            _update_pc(bi, "u", bound, bu, fu)
             continue
-        # integral assignment: spatial-bisect the worst-violated product var
-        bv = _worst_product_var(x, info, widths)
+        # integral assignment: spatial-bisect the worst-violated product variable
+        bv = _worst_product_var(x, info, ub - lb)
         if bv is None:
-            # all products tight at an integral point => true feasible solution
-            if bound < inc_val:
-                inc_val, inc_x = bound, x[:n].copy()
+            consider((bound, x[:n].copy()))  # all products tight -> true solution
             continue
         mid = np.floor((lb[bv] + ub[bv]) / 2)
-        push(lb, _set(ub, bv, mid), basis)
-        push(_set(lb, bv, mid + 1.0), ub, basis)
+        child(lb, _set(ub, bv, mid), basis)
+        child(_set(lb, bv, mid + 1.0), ub, basis)
     else:
-        # frontier exhausted: incumbent is proven optimal
         status = "optimal" if inc_x is not None else "infeasible"
 
     gbound = min([h[0] for h in heap], default=inc_val)

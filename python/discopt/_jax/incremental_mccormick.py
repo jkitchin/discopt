@@ -187,16 +187,20 @@ class IncrementalMcCormickLP:
 
     # -- solve ------------------------------------------------------------- #
 
-    def solve(self, lb, ub, in_basis=None):
+    def solve(self, lb, ub, in_basis=None, c_override=None):
         """Solve the McCormick LP over [lb,ub]; return (bound, x, out_basis) or
-        (None, None, None). Warm-starts from ``in_basis`` when given."""
+        (None, None, None). Warm-starts from ``in_basis`` when given. ``c_override``
+        replaces the objective (used by the feasibility pump to minimize distance to
+        a rounded point); the returned bound is then the surrogate objective, so the
+        caller must not use it as a dual bound."""
         from discopt.solvers import SolveStatus
         from discopt.solvers.milp_simplex import solve_lp_warm_std
 
         A, b, bounds = self._patch(lb, ub)
+        cobj = self.c if c_override is None else np.asarray(c_override, dtype=np.float64)
         try:
             result, out_basis = solve_lp_warm_std(
-                self.c, sp.csr_matrix(A), b, bounds, in_basis=in_basis
+                cobj, sp.csr_matrix(A), b, bounds, in_basis=in_basis
             )
         except Exception:
             return None, None, None
