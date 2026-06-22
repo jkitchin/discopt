@@ -2773,8 +2773,27 @@ def solve_model(
             # no benefit — so the reformulation is discarded and the original model
             # is solved unchanged. This keeps the pass a strict improvement.
             from discopt._jax.problem_classifier import ProblemClass, classify_problem
+            from discopt._jax.term_classifier import classify_nonlinear_terms
 
-            if _ipx is not model and classify_problem(_ipx) == ProblemClass.MILP:
+            # Require the reformulation to be a *genuinely* pure MILP: classify_problem
+            # is largely extract_lp_data-based and can report MILP while nonlinear
+            # terms remain (which that linear projection silently drops). Confirm with
+            # the DAG-walking term classifier, else adopting + routing to the MILP
+            # engine would solve a lossy linear projection — falsely unbounded when a
+            # dropped nonlinear constraint was what bounded an open variable
+            # (carton7, issue #286).
+            _ipx_nl = classify_nonlinear_terms(_ipx) if _ipx is not model else None
+            _ipx_pure_milp = _ipx_nl is not None and not (
+                _ipx_nl.bilinear
+                or _ipx_nl.trilinear
+                or _ipx_nl.multilinear
+                or _ipx_nl.monomial
+                or _ipx_nl.fractional_power
+                or _ipx_nl.bilinear_with_fp
+                or _ipx_nl.ratio_of_products
+                or _ipx_nl.general_nl
+            )
+            if _ipx_pure_milp and classify_problem(_ipx) == ProblemClass.MILP:
                 model = _ipx
                 model._convexity_classification_cache = None
                 model._convexity_time_budget = _convexity_time_budget
@@ -9160,6 +9179,29 @@ def _solve_milp_simplex(
     try:
         from discopt._rust import solve_milp_py
     except ImportError:
+        return None
+
+    # ``extract_lp_data`` captures only the LINEAR part of the model; any nonlinear
+    # term is silently dropped. Solving that linear projection as if exact is sound
+    # ONLY for a genuinely linear model. Otherwise a dropped *bounding* nonlinear
+    # constraint can make the projection falsely unbounded/optimal — carton7
+    # (issue #286): continuous variables with infinite upper bounds, bounded only
+    # by the dropped nonlinear constraints, were reported as a false global
+    # ``unbounded`` at the root. Defer any model carrying nonlinear terms to the
+    # spatial / NLP path (which keeps those constraints).
+    from discopt._jax.term_classifier import classify_nonlinear_terms
+
+    _nl = classify_nonlinear_terms(model)
+    if (
+        _nl.bilinear
+        or _nl.trilinear
+        or _nl.multilinear
+        or _nl.monomial
+        or _nl.fractional_power
+        or _nl.bilinear_with_fp
+        or _nl.ratio_of_products
+        or _nl.general_nl
+    ):
         return None
 
     lp_data = extract_lp_data(model)
