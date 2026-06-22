@@ -1,0 +1,221 @@
+"""Tests for the optional Gurobi LP/MILP backend."""
+
+from __future__ import annotations
+
+import sys
+import types
+
+import discopt.modeling as dm
+import numpy as np
+import pytest
+from discopt.modeling.core import SolveResult
+from discopt.solvers import MILPResult, SolveStatus
+from discopt.solvers import gurobi as gurobi_backend
+
+
+def _install_fake_rust_classifier(monkeypatch, problem_kind: str) -> None:
+    """Install just enough of discopt._rust for solver dispatch tests.
+
+    The local source worktree used by these tests may not have a compiled PyO3
+    extension, while CI builds it before running the broader suite.
+    """
+
+    class _FakeRepr:
+        n_constraints = 0
+
+        def is_objective_linear(self):
+            return problem_kind in {"lp", "milp"}
+
+        def is_objective_quadratic(self):
+            return problem_kind == "qp"
+
+        def is_constraint_linear(self, _idx):
+            return True
+
+    fake_rust = types.SimpleNamespace(
+        PyTreeManager=object,
+        model_to_repr=lambda _model, _builder=None: _FakeRepr(),
+    )
+    monkeypatch.setitem(sys.modules, "discopt._rust", fake_rust)
+
+
+def _require_gurobi():
+    gp = pytest.importorskip("gurobipy")
+    try:
+        env = gp.Env(empty=True)
+        env.setParam("OutputFlag", 0)
+        env.start()
+        env.dispose()
+    except Exception as exc:
+        pytest.skip(f"Gurobi is installed but no usable license is available: {exc}")
+
+
+def test_gurobi_lp_validates_dimensions_without_importing_gurobipy():
+    with pytest.raises(ValueError, match="columns"):
+        gurobi_backend.solve_lp(
+            c=np.array([1.0, 2.0]),
+            A_ub=np.array([[1.0, 2.0, 3.0]]),
+            b_ub=np.array([1.0]),
+        )
+
+
+def test_gurobi_lp_reports_missing_gurobipy(monkeypatch):
+    monkeypatch.setitem(sys.modules, "gurobipy", None)
+    with pytest.raises(ImportError, match="gurobipy is required"):
+        gurobi_backend.solve_lp(c=np.array([1.0]), bounds=[(0.0, 1.0)])
+
+
+def test_model_solve_gurobi_dispatches_lp(monkeypatch):
+    _install_fake_rust_classifier(monkeypatch, "lp")
+    import discopt.solver as solver
+
+    calls = {}
+
+    def fake_gurobi_lp(model, t_start, time_limit=None, threads=None, options=None):
+        calls["model"] = model
+        calls["time_limit"] = time_limit
+        calls["threads"] = threads
+        calls["options"] = options
+        return SolveResult(status="optimal", objective=1.0, bound=1.0, gap=0.0)
+
+    monkeypatch.setattr(solver, "_solve_lp_gurobi", fake_gurobi_lp)
+
+    m = dm.Model("lp_dispatch_gurobi")
+    x = m.continuous("x", lb=0, ub=5)
+    m.minimize(x + 1)
+
+    result = m.solve(
+        solver="gurobi",
+        time_limit=12.0,
+        threads=3,
+        gurobi_options={"Method": 1},
+    )
+
+    assert result.status == "optimal"
+    assert calls["model"] is m
+    assert calls["time_limit"] == 12.0
+    assert calls["threads"] == 3
+    assert calls["options"] == {"Method": 1}
+
+
+def test_model_solve_gurobi_dispatches_milp(monkeypatch):
+    _install_fake_rust_classifier(monkeypatch, "milp")
+    import discopt.solver as solver
+
+    calls = {}
+
+    def fake_gurobi_milp(
+        model,
+        t_start,
+        time_limit=None,
+        gap_tolerance=1e-4,
+        threads=None,
+        options=None,
+    ):
+        calls["model"] = model
+        calls["gap_tolerance"] = gap_tolerance
+        calls["threads"] = threads
+        calls["options"] = options
+        return SolveResult(status="optimal", objective=2.0, bound=2.0, gap=0.0)
+
+    monkeypatch.setattr(solver, "_solve_milp_gurobi", fake_gurobi_milp)
+
+    m = dm.Model("milp_dispatch_gurobi")
+    y = m.integer("y", lb=0, ub=2)
+    m.minimize(y)
+
+    result = m.solve(
+        solver="gurobi",
+        gap_tolerance=1e-5,
+        threads=2,
+        gurobi_options={"MIPFocus": 1},
+    )
+
+    assert result.status == "optimal"
+    assert calls["model"] is m
+    assert calls["gap_tolerance"] == 1e-5
+    assert calls["threads"] == 2
+    assert calls["options"] == {"MIPFocus": 1}
+
+
+def test_model_solve_gurobi_rejects_qp_for_stage_one(monkeypatch):
+    _install_fake_rust_classifier(monkeypatch, "qp")
+    m = dm.Model("qp_rejected_by_gurobi_stage_one")
+    x = m.continuous("x", lb=0, ub=2)
+    m.minimize(x**2)
+
+    with pytest.raises(NotImplementedError, match="LP and MILP"):
+        m.solve(solver="gurobi")
+
+
+def test_gurobi_milp_maximize_time_limit_maps_dual_bound(monkeypatch):
+    _install_fake_rust_classifier(monkeypatch, "milp")
+    import discopt.solver as solver
+    from discopt._jax import problem_classifier
+
+    m = dm.Model("gurobi_max_milp_bound_mapping")
+    y = m.integer("y", lb=0, ub=10)
+    m.maximize(y)
+
+    lp_data = problem_classifier.LPData(
+        c=np.array([-1.0]),
+        A_eq=np.zeros((0, 1)),
+        b_eq=np.zeros(0),
+        x_l=np.array([0.0]),
+        x_u=np.array([10.0]),
+        obj_const=0.0,
+    )
+    monkeypatch.setattr(problem_classifier, "extract_lp_data", lambda _model: lp_data)
+
+    def fake_solve_milp(**_kwargs):
+        return MILPResult(
+            status=SolveStatus.TIME_LIMIT,
+            x=np.array([8.0]),
+            objective=-8.0,
+            bound=-10.0,
+            gap=0.25,
+            node_count=7,
+        )
+
+    monkeypatch.setattr(gurobi_backend, "solve_milp", fake_solve_milp)
+
+    result = solver._solve_milp_gurobi(m, t_start=0.0, time_limit=1.0)
+
+    assert result.status == "time_limit"
+    assert result.objective == pytest.approx(8.0)
+    assert result.bound == pytest.approx(10.0)
+    assert result.gap == pytest.approx(0.25)
+    assert result.node_count == 7
+
+
+def test_gurobi_lp_smoke_if_available():
+    _require_gurobi()
+
+    result = gurobi_backend.solve_lp(
+        c=np.array([-1.0, -2.0]),
+        A_ub=np.array([[1.0, 1.0]]),
+        b_ub=np.array([10.0]),
+        bounds=[(0.0, float("inf")), (0.0, float("inf"))],
+    )
+
+    assert result.status == SolveStatus.OPTIMAL
+    assert result.x is not None
+    np.testing.assert_allclose(result.x, [0.0, 10.0], atol=1e-6)
+    assert result.objective == pytest.approx(-20.0)
+
+
+def test_gurobi_milp_smoke_if_available():
+    _require_gurobi()
+
+    result = gurobi_backend.solve_milp(
+        c=np.array([-1.0, -2.0]),
+        A_ub=np.array([[1.0, 1.0]]),
+        b_ub=np.array([4.0]),
+        bounds=[(0.0, 4.0), (0.0, 4.0)],
+        integrality=np.array([0, 1], dtype=np.int32),
+    )
+
+    assert result.status == SolveStatus.OPTIMAL
+    assert result.x is not None
+    np.testing.assert_allclose(result.x, [0.0, 4.0], atol=1e-6)
+    assert result.objective == pytest.approx(-8.0)

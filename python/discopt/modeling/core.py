@@ -2782,6 +2782,12 @@ class Model:
             ``convhull_ebd_encoding``, ``use_start_as_incumbent``,
             ``obbt_at_root``, ``obbt_with_cutoff``, ``alphabb_cutoff_obbt``,
             and ``obbt_time_limit``.
+            Use ``solver="gurobi"`` to select the optional Gurobi backend for
+            LP and MILP models. Stage-1 Gurobi support is intentionally limited
+            to linear continuous and mixed-integer models; unsupported model
+            classes raise ``NotImplementedError`` instead of silently falling
+            back to another backend. Pass Gurobi parameters through
+            ``gurobi_options={...}``.
         validate : bool, default False
             If True, run Examiner-style KKT validation on the returned
             point and attach the :class:`~discopt.validation.ExaminerReport`

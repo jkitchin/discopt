@@ -2131,6 +2131,10 @@ def solve_model(
     solver : str or None, default None
         Optional global-solver selector. Use ``"amp"`` to dispatch to
         Adaptive Multivariate Partitioning instead of branch-and-bound.
+        Use ``"gurobi"`` to dispatch LP/MILP models to the optional Gurobi
+        backend. Stage-1 Gurobi support is intentionally limited to linear
+        continuous and mixed-integer models; unsupported classes raise a clear
+        ``NotImplementedError`` instead of falling back silently.
         Use ``"gp"`` to dispatch to the geometric-programming fast path:
         the model is checked for GP structure (posynomial/monomial
         objective and constraints over strictly-positive continuous
@@ -2264,12 +2268,15 @@ def solve_model(
     # --- AMP (Adaptive Multivariate Partitioning) global solver ---
     _solver = solver if solver is not None else kwargs.pop("solver", None)
     # Recognised global-solver selectors: ``None`` (default branch-and-bound,
-    # with the automatic GP fast path below), ``"amp"``, ``"gp"`` (force the GP
-    # log-space path), and ``"bb"`` (force classic branch-and-bound, opting out
-    # of the automatic GP fast path). Reject anything else rather than silently
-    # falling through to B&B.
-    if _solver not in (None, "amp", "gp", "bb"):
-        raise ValueError(f"Unknown solver={_solver!r}. Choose one of None, 'amp', 'gp', 'bb'.")
+    # with the automatic GP fast path below), ``"amp"``, ``"gurobi"``,
+    # ``"gp"`` (force the GP log-space path), and ``"bb"`` (force classic
+    # branch-and-bound, opting out of the automatic GP fast path). Reject
+    # anything else rather than silently falling through to B&B.
+    if _solver not in (None, "amp", "gurobi", "gp", "bb"):
+        raise ValueError(
+            f"Unknown solver={_solver!r}. Choose one of None, 'amp', 'gurobi', 'gp', 'bb'."
+        )
+    gurobi_options = kwargs.pop("gurobi_options", None) if _solver == "gurobi" else None
     if _solver == "amp":
         import warnings
 
@@ -2956,6 +2963,23 @@ def solve_model(
     except Exception as e:
         logger.debug("Problem classification failed: %s", e)
         problem_class = None
+
+    if _solver == "gurobi":
+        if problem_class is None:
+            raise NotImplementedError(
+                "solver='gurobi' requires problem classification and currently "
+                "supports LP and MILP models only."
+            )
+        if problem_class == ProblemClass.LP:
+            return _solve_lp_gurobi(model, t_start, time_limit, threads, gurobi_options)
+        if problem_class == ProblemClass.MILP:
+            return _solve_milp_gurobi(
+                model, t_start, time_limit, gap_tolerance, threads, gurobi_options
+            )
+        raise NotImplementedError(
+            f"solver='gurobi' stage 1 supports LP and MILP models only; "
+            f"classified this model as {problem_class.value!r}."
+        )
 
     _pure_continuous_force_spatial = False
     if problem_class is not None:
@@ -7424,12 +7448,39 @@ def _solve_lp_pounce(
     return _solve_lp_matrix(model, t_start, time_limit, solve_fn, "POUNCE")
 
 
+def _solve_lp_gurobi(
+    model: Model,
+    t_start: float,
+    time_limit: float | None = None,
+    threads: int | None = None,
+    options: Optional[dict] = None,
+) -> SolveResult:
+    """Solve an LP using the explicit Gurobi backend."""
+    import functools
+
+    from discopt.solvers.gurobi import solve_lp as _gurobi_solve_lp
+
+    solve_fn = functools.partial(_gurobi_solve_lp, threads=threads, options=options)
+    result = _solve_lp_matrix(
+        model,
+        t_start,
+        time_limit,
+        solve_fn,
+        "Gurobi",
+        strict=True,
+    )
+    if result is None:  # pragma: no cover - strict mode raises before this
+        raise RuntimeError("Gurobi LP solve failed without returning a result.")
+    return result
+
+
 def _solve_lp_matrix(
     model: Model,
     t_start: float,
     time_limit: float | None,
     solve_lp_fn,
     engine: str,
+    strict: bool = False,
 ) -> SolveResult | None:
     """Solve a pure LP through a matrix-form ``solve_lp`` backend.
 
@@ -7467,6 +7518,8 @@ def _solve_lp_matrix(
             time_limit=time_limit,
         )
     except Exception as e:
+        if strict:
+            raise
         logger.debug("%s LP solve failed: %s", engine, e)
         return None
 
@@ -7846,6 +7899,134 @@ def _solve_milp_highs(
         return SolveResult(status="time_limit", wall_time=wall_time, node_count=result.node_count)
 
     return None
+
+
+def _solve_milp_gurobi(
+    model: Model,
+    t_start: float,
+    time_limit: float | None = None,
+    gap_tolerance: float = 1e-4,
+    threads: int | None = None,
+    options: Optional[dict] = None,
+) -> SolveResult:
+    """Solve a MILP using the explicit Gurobi backend."""
+    from discopt._jax.problem_classifier import extract_lp_data
+    from discopt.modeling.core import ObjectiveSense
+    from discopt.solvers import SolveStatus
+    from discopt.solvers.gurobi import solve_milp as _gurobi_solve_milp
+
+    lp_data = extract_lp_data(model)
+    n_orig = sum(v.size for v in model._variables)
+
+    bounds = list(
+        zip(
+            np.asarray(lp_data.x_l[:n_orig]).tolist(),
+            np.asarray(lp_data.x_u[:n_orig]).tolist(),
+        )
+    )
+
+    n_total = lp_data.A_eq.shape[1] if lp_data.A_eq.shape[0] > 0 else n_orig
+    n_slack = n_total - n_orig
+    A_eq_full = np.asarray(lp_data.A_eq)
+    b_eq_full = np.asarray(lp_data.b_eq)
+    A_ub, b_ub, A_eq, b_eq = _decompose_eq_slack_form(A_eq_full, b_eq_full, n_orig, n_slack)
+
+    int_arr = np.zeros(n_orig, dtype=np.int32)
+    offset = 0
+    for v in model._variables:
+        if v.var_type in (VarType.BINARY, VarType.INTEGER):
+            int_arr[offset : offset + v.size] = 1
+        offset += v.size
+
+    result = _gurobi_solve_milp(
+        c=np.asarray(lp_data.c[:n_orig]),
+        A_ub=A_ub,
+        b_ub=b_ub,
+        A_eq=A_eq,
+        b_eq=b_eq,
+        bounds=bounds,
+        integrality=int_arr,
+        time_limit=time_limit,
+        gap_tolerance=gap_tolerance,
+        threads=threads,
+        options=options,
+    )
+
+    wall_time = time.perf_counter() - t_start
+    assert model._objective is not None
+    sense = model._objective.sense
+
+    objective = None
+    if result.objective is not None:
+        objective = float(result.objective) + float(lp_data.obj_const)
+        if sense == ObjectiveSense.MAXIMIZE:
+            objective = -objective
+
+    # ``result.bound`` is a valid lower bound for the internal minimization.
+    # Map it back to the original sense: lower bound for minimize, upper bound
+    # for maximize (matching discopt's existing SolveResult convention).
+    bound = None
+    if result.status == SolveStatus.OPTIMAL and objective is not None:
+        bound = objective
+    elif result.bound is not None:
+        bound = float(result.bound) + float(lp_data.obj_const)
+        if sense == ObjectiveSense.MAXIMIZE:
+            bound = -bound
+
+    if result.status == SolveStatus.OPTIMAL:
+        assert result.x is not None and objective is not None
+        cd, bdl, bdu = _mip_recover_relaxation_duals(
+            model,
+            lp_data=lp_data,
+            x_flat=np.asarray(result.x[:n_orig], dtype=float),
+            n_orig=n_orig,
+            A_ub=A_ub,
+            b_ub=b_ub,
+            A_eq=A_eq,
+            b_eq=b_eq,
+            time_limit=time_limit,
+        )
+        return SolveResult(
+            status="optimal",
+            objective=objective,
+            bound=bound,
+            gap=result.gap if result.gap is not None else 0.0,
+            x=_unpack_solution(model, result.x[:n_orig]),
+            wall_time=wall_time,
+            node_count=result.node_count,
+            rust_time=0.0,
+            jax_time=0.0,
+            python_time=wall_time,
+            constraint_duals=cd,
+            bound_duals_lower=bdl,
+            bound_duals_upper=bdu,
+        )
+
+    if result.status == SolveStatus.INFEASIBLE:
+        return SolveResult(status="infeasible", wall_time=wall_time, node_count=result.node_count)
+    if result.status == SolveStatus.UNBOUNDED:
+        return SolveResult(status="unbounded", wall_time=wall_time, node_count=result.node_count)
+    if result.status == SolveStatus.TIME_LIMIT:
+        return SolveResult(
+            status="time_limit",
+            objective=objective,
+            bound=bound,
+            gap=result.gap,
+            x=_unpack_solution(model, result.x[:n_orig]) if result.x is not None else None,
+            wall_time=wall_time,
+            node_count=result.node_count,
+        )
+    if result.status == SolveStatus.ITERATION_LIMIT:
+        return SolveResult(
+            status="iteration_limit",
+            objective=objective,
+            bound=bound,
+            gap=result.gap,
+            x=_unpack_solution(model, result.x[:n_orig]) if result.x is not None else None,
+            wall_time=wall_time,
+            node_count=result.node_count,
+        )
+    return SolveResult(status="error", wall_time=wall_time, node_count=result.node_count)
 
 
 def _solve_qp_jax(model: Model, t_start: float) -> SolveResult:
