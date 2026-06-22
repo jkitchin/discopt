@@ -329,3 +329,37 @@ class TestOAMatchesBnB:
         # Objectives should be close (within tolerance)
         if result_oa.objective is not None and result_bb.objective is not None:
             assert result_oa.objective == pytest.approx(result_bb.objective, abs=0.5)
+
+
+# ── Maximize objective (sense handling) ───────────────────────
+# Regression for the OA minimization-convention bug: the master MILP minimized
+# the raw objective coefficients while the NLP subproblems and epigraph cuts ran
+# in the evaluator's minimization convention (which negates a MAXIMIZE
+# objective). The two disagreed on direction, so OA converged to — and reported
+# as "optimal" — the *minimum* of a maximize problem (syn05m: -831 vs the true
+# maximum 837.73). These guard that OA optimizes the correct direction.
+
+
+def test_oa_maximize_linear_objective_is_not_the_minimum():
+    """A MAXIMIZE model must return the maximum, not the (certified-wrong) min."""
+    m = dm.Model("oa_max")
+    x = m.integer("x", lb=0, ub=5)
+    y = m.integer("y", lb=0, ub=5)
+    m.maximize(x + y)
+    m.subject_to(x**2 + y**2 <= 10)
+    r = _solve_oa(m)
+    assert r.status == "optimal"
+    _assert_optimal(r, 4.0)  # max x+y over integers with x^2+y^2 <= 10
+    _assert_integer_feasible(r, ["x", "y"], m)
+    # For a maximization the dual bound sits at/above the optimum.
+    assert r.bound is None or r.bound >= r.objective - ABS_TOL
+
+
+def test_oa_maximize_scalar_reaches_true_max():
+    """The pre-fix bug returned 0 (the minimum) as 'optimal'; the true max is 9."""
+    m = dm.Model("oa_max2")
+    x = m.integer("x", lb=0, ub=4)
+    m.maximize(3 * x)
+    m.subject_to(x**2 <= 9)  # x <= 3
+    r = _solve_oa(m)
+    assert r.objective == pytest.approx(9.0, abs=ABS_TOL)
