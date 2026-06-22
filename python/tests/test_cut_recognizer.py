@@ -497,3 +497,52 @@ def test_structure_cuts_presolve_noop_on_unrelated_model():
 
     assert r_on.objective == pytest.approx(r_off.objective, abs=1e-3)
     assert r_on.objective == pytest.approx(-2.0, abs=1e-3)
+
+
+# --------------------------------------------------------------------------
+# Cheap structural gate: skip the SymPy translation when nothing can match
+# (perf #281 — a dense-objective MIQP with no nonlinear equality was paying
+# ~1 s building SymPy for a guaranteed-empty recognition).
+# --------------------------------------------------------------------------
+
+
+def test_square_difference_candidate_gate_discriminates():
+    """The cheap necessary-condition gate is True only when a nonlinear equality
+    is present (the pattern's prerequisite), and False for a dense-objective MIQP
+    whose constraints are all linear/inequalities."""
+    # Dense quadratic objective, only an inequality constraint -> cannot match.
+    miqp = dm.Model("miqp")
+    x = miqp.continuous("x", lb=0.0, ub=1.0)
+    y = miqp.continuous("y", lb=0.0, ub=1.0)
+    miqp.minimize(x * x + 2.0 * x * y + y * y)
+    miqp.subject_to(x + y <= 1.0)
+    assert R.has_square_difference_candidate(miqp) is False
+
+    # A nonlinear equality (square-difference shape) -> candidate.
+    gas_like = dm.Model("gas_like")
+    p = gas_like.continuous("p", lb=1.0, ub=5.0)
+    q = gas_like.continuous("q", lb=1.0, ub=5.0)
+    f = gas_like.continuous("f", lb=0.0, ub=10.0)
+    gas_like.minimize(f)
+    gas_like.subject_to(p * p - q * q == 1.5 * f * f)
+    assert R.has_square_difference_candidate(gas_like) is True
+
+
+def test_gate_skips_sympy_translation_for_unmatchable_model(monkeypatch):
+    """`recognize_and_derive_cuts` must short-circuit to [] *without* calling the
+    expensive `model_to_sympy` when the model has no nonlinear equality — the
+    perf fix. Proven by making `model_to_sympy` raise: it must never be reached."""
+
+    def _boom(_model):
+        raise AssertionError("model_to_sympy must not run for an unmatchable model")
+
+    monkeypatch.setattr(R, "model_to_sympy", _boom)
+
+    miqp = dm.Model("miqp")
+    x = miqp.continuous("x", lb=0.0, ub=1.0)
+    y = miqp.continuous("y", lb=0.0, ub=1.0)
+    miqp.minimize(x * x + 2.0 * x * y + y * y)
+    miqp.subject_to(x + y <= 1.0)
+
+    assert R.recognize_and_derive_cuts(miqp) == []
+    assert R.recognize_and_inject(miqp) == 0

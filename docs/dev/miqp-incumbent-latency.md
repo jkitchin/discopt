@@ -43,11 +43,21 @@ with a one-line fix). The latency is distributed across compile + primal + searc
 
 ## Levers (ranked by breadth × impact ÷ effort)
 
-1. **Per-solve JAX-compile / startup overhead (~1.5 s, broadest).** Hits *every*
-   short-tier instance, not just MIQPs. Directions: cache compiled node-NLP
-   evaluators across the tree and across solves; lazy/avoid JAX for tiny models;
-   trim the convexity-routing trace. First experiment: attribute the 1.5 s precisely
-   (trace vs compile vs convexity) before optimizing. *Medium effort, wide payoff.*
+1. **Per-solve startup overhead (~1.5 s, broadest). — DONE (#281, structure-cut
+   gate).** Attribution (measured, warm process so JAX/SymPy import is amortized)
+   found the ~1.5 s was *not* JAX compile but the **SymPy structure-cut presolve**
+   (`recognize_and_inject` -> `model_to_sympy`), auto-engaged by default since #253
+   to close the gas-network gap (#15). Its size gate (vars+constraints <= 100)
+   wrongly assumed `model_to_sympy` cost tracks variable count; it actually tracks
+   *objective expression complexity*, so a dense-objective MIQP (smallinvDAX: 31
+   vars but a 465-term quadratic) paid ~1.0 s translating SymPy for a
+   guaranteed-empty recognition (no equality constraints -> the square-difference
+   pattern can never match). Fixed with a microsecond native-DAG necessary
+   condition (`has_square_difference_candidate`): skip `model_to_sympy` unless the
+   model has a nonlinear equality. Measured: recognizer 1.07 s -> 0.000 s,
+   end-to-end ~7.0 s -> ~5.7 s to the same optimum; gas-network (#15) keeps its
+   cuts. Any *residual* JAX-trace/compile cost (the original lever-1 hypothesis)
+   is now a smaller, separate follow-up if it proves to matter.
 2. **Stronger convex-MINLP primal (~2.7 s FP → 0.4%-off).** The FP finds wrong
    integers; a RENS / NLP-relaxation-rounding / diving heuristic that exploits the
    convex relaxation would land the optimal integers earlier (within budget).
@@ -60,8 +70,9 @@ with a one-line fix). The latency is distributed across compile + primal + searc
 ## Recommendation
 
 This is SCIP-gap-class work, not a one-liner. Sequence by payoff/risk:
-- **Start with lever 1** (JAX-compile/startup) — broadest (all short-tier), and the
-  first step is a measurement (attribute the 1.5 s) before any build.
+- **Lever 1 (startup overhead) — DONE.** The measurement showed it was the SymPy
+  structure-cut presolve, not JAX compile; gated cheaply (#281). ~1.3 s recovered
+  broadly across the short tier.
 - Then **lever 2** (convex-MINLP primal) to land good incumbents within budget.
 - **Lever 3 (OA)** last — the deep, highest-ceiling effort.
 
