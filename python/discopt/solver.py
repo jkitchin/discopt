@@ -1447,6 +1447,20 @@ def _optimal_relative_gap(objective: float) -> Optional[float]:
     return None if abs(float(objective)) <= 1e-10 else 0.0
 
 
+def _relative_gap_from_objective_bound(
+    objective: Optional[float],
+    bound: Optional[float],
+) -> Optional[float]:
+    """Return the public relative gap between a mapped incumbent and bound."""
+    if objective is None or bound is None:
+        return None
+    obj = float(objective)
+    bnd = float(bound)
+    if not np.isfinite(obj) or not np.isfinite(bnd):
+        return None
+    return abs(obj - bnd) / max(abs(obj), abs(bnd), 1e-10)
+
+
 # Absolute B&B gap tolerance, decoupled from the relative ``gap_tolerance``.
 # Matches the AMP path's ``abs_tol`` (and SCIP's default absolute gap). The tree's
 # hybrid ``gap()`` floors its denominator at 1.0, so for an optimum with magnitude
@@ -2968,7 +2982,7 @@ def solve_model(
         if problem_class is None:
             raise NotImplementedError(
                 "solver='gurobi' requires problem classification and currently "
-                "supports LP and MILP models only."
+                "supports LP, MILP, QP, and MIQP models only."
             )
         if problem_class == ProblemClass.LP:
             return _solve_lp_gurobi(model, t_start, time_limit, threads, gurobi_options)
@@ -2976,8 +2990,16 @@ def solve_model(
             return _solve_milp_gurobi(
                 model, t_start, time_limit, gap_tolerance, threads, gurobi_options
             )
+        if problem_class == ProblemClass.QP:
+            return _solve_qp_gurobi(
+                model, t_start, time_limit, gap_tolerance, threads, gurobi_options
+            )
+        if problem_class == ProblemClass.MIQP:
+            return _solve_qp_gurobi(
+                model, t_start, time_limit, gap_tolerance, threads, gurobi_options
+            )
         raise NotImplementedError(
-            f"solver='gurobi' stage 1 supports LP and MILP models only; "
+            f"solver='gurobi' supports LP, MILP, QP, and MIQP models only; "
             f"classified this model as {problem_class.value!r}."
         )
 
@@ -7632,6 +7654,38 @@ def _solve_qp_pounce(
     return _solve_qp_matrix(model, t_start, time_limit, solve_fn, "POUNCE")
 
 
+def _solve_qp_gurobi(
+    model: Model,
+    t_start: float,
+    time_limit: float | None = None,
+    gap_tolerance: float = 1e-4,
+    threads: int | None = None,
+    options: Optional[dict] = None,
+) -> SolveResult:
+    """Solve a QP/MIQP using the explicit Gurobi backend."""
+    import functools
+
+    from discopt.solvers.gurobi import solve_qp as _gurobi_solve_qp
+
+    solve_fn = functools.partial(
+        _gurobi_solve_qp,
+        threads=threads,
+        options=options,
+    )
+    result = _solve_qp_matrix(
+        model,
+        t_start,
+        time_limit,
+        solve_fn,
+        "Gurobi",
+        gap_tolerance=gap_tolerance,
+        strict=True,
+    )
+    if result is None:  # pragma: no cover - strict mode raises before this
+        raise RuntimeError("Gurobi QP/MIQP solve failed without returning a result.")
+    return result
+
+
 def _matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, bounds, tol=1e-6) -> bool:
     """Check a matrix-form LP/QP solution against its own constraints.
 
@@ -7663,6 +7717,8 @@ def _solve_qp_matrix(
     time_limit: float | None,
     solve_qp_fn,
     engine: str,
+    gap_tolerance: float = 1e-4,
+    strict: bool = False,
 ) -> SolveResult | None:
     """Solve a QP/MIQP through a matrix-form ``solve_qp`` backend.
 
@@ -7717,12 +7773,32 @@ def _solve_qp_matrix(
             bounds=bounds,
             integrality=integrality,
             time_limit=time_limit,
+            gap_tolerance=gap_tolerance,
         )
     except Exception as e:
+        if strict:
+            raise
         logger.debug("%s QP solve failed: %s", engine, e)
         return None
 
     wall_time = time.perf_counter() - t_start
+    assert model._objective is not None
+    sense = model._objective.sense
+
+    objective = None
+    if result.objective is not None:
+        objective = float(result.objective) + float(qp_data.obj_const)
+        if sense == ObjectiveSense.MAXIMIZE:
+            objective = -objective
+
+    bound = None
+    result_bound = getattr(result, "bound", None)
+    if result.status == SolveStatus.OPTIMAL and objective is not None:
+        bound = objective
+    elif result_bound is not None:
+        bound = float(result_bound) + float(qp_data.obj_const)
+        if sense == ObjectiveSense.MAXIMIZE:
+            bound = -bound
 
     if result.status == SolveStatus.OPTIMAL:
         assert result.x is not None and result.objective is not None
@@ -7734,11 +7810,7 @@ def _solve_qp_matrix(
             )
             return None
         x_flat = result.x[:n_orig]
-        obj_val = result.objective + qp_data.obj_const
-
-        assert model._objective is not None
-        if model._objective.sense == ObjectiveSense.MAXIMIZE:
-            obj_val = -obj_val
+        assert objective is not None
 
         n_eq_rows = A_eq.shape[0] if A_eq is not None else 0
         n_ub_rows = A_ub.shape[0] if A_ub is not None else 0
@@ -7769,9 +7841,9 @@ def _solve_qp_matrix(
 
         sr = SolveResult(
             status="optimal",
-            objective=obj_val,
-            bound=obj_val,
-            gap=_optimal_relative_gap(obj_val),
+            objective=objective,
+            bound=objective,
+            gap=result.gap if result.gap is not None else _optimal_relative_gap(objective),
             x=_unpack_solution(model, x_flat),
             wall_time=wall_time,
             node_count=result.node_count,
@@ -7793,8 +7865,28 @@ def _solve_qp_matrix(
             wall_time=wall_time,
             infeasibility_certificate=getattr(result, "infeasibility_certificate", None),
         )
+    elif result.status == SolveStatus.UNBOUNDED:
+        return SolveResult(status="unbounded", wall_time=wall_time, node_count=result.node_count)
     elif result.status == SolveStatus.TIME_LIMIT:
-        return SolveResult(status="time_limit", wall_time=wall_time)
+        return SolveResult(
+            status="time_limit",
+            objective=objective,
+            bound=bound,
+            gap=_relative_gap_from_objective_bound(objective, bound),
+            x=_unpack_solution(model, result.x[:n_orig]) if result.x is not None else None,
+            wall_time=wall_time,
+            node_count=result.node_count,
+        )
+    elif result.status == SolveStatus.ITERATION_LIMIT:
+        return SolveResult(
+            status="iteration_limit",
+            objective=objective,
+            bound=bound,
+            gap=_relative_gap_from_objective_bound(objective, bound),
+            x=_unpack_solution(model, result.x[:n_orig]) if result.x is not None else None,
+            wall_time=wall_time,
+            node_count=result.node_count,
+        )
 
     return None
 
