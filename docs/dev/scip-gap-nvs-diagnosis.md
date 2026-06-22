@@ -131,10 +131,21 @@ concrete discoveries on nvs17, both data-backed:
    row-aggregation MIR**. Gomory's basis recovery on the augmented McCormick LP is
    also finicky (returns no cut).
 
-**Implication.** Closing nvs17/19/24 needs **stronger cuts than discopt currently
-has** — a row-aggregation/complemented-MIR separator (SCIP's `aggregation`), or an
-RLT/multilinear strengthening of the envelope itself — applied to the McCormick LP
-with the product vars marked integer. Wiring the *existing* single-row separators is
-not sufficient (verified). This is a real separator-implementation subproject, not a
-wire-up; it should precede Step 2 (throughput) since without it the engine cannot
-close the family regardless of node rate.
+Extending the test: feeding GMI a *proper simplex basic vertex* (not a crossover
+point) does make it separate (9 cuts), but a full GMI+MIR root loop **plateaus** —
+the bound moves −27,795 → −27,291 in two rounds then stalls (still 25× loose, ~2%
+total). So even the textbook bound-improving cut (GMI from the optimal basis) is too
+weak on this McCormick LP; discopt genuinely lacks SCIP's `aggregation` (multi-row
+complemented MIR).
+
+**Synthesis / corrected priority.** The cut path is a dead end *with discopt's
+current separators*. But the SCIP ablation already showed **no-cut SCIP closes
+nvs17 in 6,796 nodes via branching alone** (4.7 s). The Step-1 LP-node engine is
+exactly that no-cut analog and already reached bound −1,157 in 652 nodes — it simply
+can't reach ~6,800 nodes at ~92 ms/node. Therefore the correct, general, performant
+closer is **node throughput** (Step 2: incremental warm-started LP nodes →
+~1–2 ms/node → tens of thousands of nodes → close by branching, matching no-cut
+SCIP), **not** cuts. Cuts (a future c-MIR/aggregation separator) are a node-count
+optimization (6,796 → 70), valuable later but neither necessary nor currently
+attainable. **Step 2 is therefore the real next step; Step 3 is deferred** until a
+proper aggregation-MIR separator exists.
