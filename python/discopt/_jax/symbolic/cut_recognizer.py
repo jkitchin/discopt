@@ -331,12 +331,64 @@ def _derive_terminal_pressure_lb(p5, eqs, classes, fixed, bounds):
     return best
 
 
+def _expr_is_nonlinear(node) -> bool:
+    """True if a model-graph expression contains a nonlinear sub-term.
+
+    A cheap, SymPy-free walk over the native DAG: a power with a non-{0,1}
+    exponent, a product/quotient of two non-constant operands, or any function
+    call (``sqrt``/``exp``/...) makes the expression nonlinear. Used as a guard so
+    the (expensive) ``model_to_sympy`` translation is skipped on models that
+    cannot match the pattern.
+    """
+    from discopt.modeling import core
+
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if isinstance(n, core.BinaryOp):
+            if n.op == "**":
+                r = n.right
+                if not (isinstance(r, core.Constant) and float(r.value) in (0.0, 1.0)):
+                    return True
+            elif n.op in ("*", "/"):
+                if not (isinstance(n.left, core.Constant) or isinstance(n.right, core.Constant)):
+                    return True
+            stack.append(n.left)
+            stack.append(n.right)
+        elif isinstance(n, core.UnaryOp):
+            stack.append(n.operand)
+        elif isinstance(n, core.FunctionCall):
+            return True
+    return False
+
+
+def has_square_difference_candidate(model) -> bool:
+    """Cheap necessary condition for the square-difference-network recognizer.
+
+    The recognizer (:func:`recognize_and_derive_cuts`) can only derive cuts when
+    the model carries the Weymouth-style square-difference *equality* constraints
+    (``p_in**2 - p_out**2 = c*f**2``); :func:`_square_diff_eq` searches exactly
+    those. A model whose ``==`` constraints are all linear (or which has none —
+    e.g. a portfolio MIQP, where the quadratic lives in the objective) can never
+    match, so we can skip the ~1 s ``model_to_sympy`` translation of a dense
+    objective entirely. This is a microsecond native-DAG scan, not a SymPy build.
+    """
+    return any(
+        c.sense == "==" and _expr_is_nonlinear(c.body) for c in getattr(model, "_constraints", [])
+    )
+
+
 def recognize_and_derive_cuts(model, *, verify: bool = True) -> list[RecognizedCut]:
     """Auto-derive structured underestimator cuts from a model's graph.
 
     Returns a list of :class:`RecognizedCut` (possibly empty if the model does not
     match the square-difference-network pattern).
     """
+    # Cheap pre-check before the expensive SymPy translation: the pattern needs a
+    # nonlinear equality constraint. Without one (e.g. a dense-objective MIQP) the
+    # recognizer is a guaranteed no-op, so skip ``model_to_sympy`` outright.
+    if not has_square_difference_candidate(model):
+        return []
     sm = model_to_sympy(model)
     classes, fixed = _canonicalize(sm.equalities, sm.symbols)
     reverse = {sym: key for key, sym in sm.symbols.items()}
