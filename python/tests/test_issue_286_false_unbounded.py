@@ -9,6 +9,7 @@ now prevent this: the integer-bilinear reformulation is adopted (and routed to t
 MILP engine) only when the *reformulated* model is a genuinely pure MILP, and
 ``_solve_milp_simplex`` itself defers on any model carrying nonlinear terms.
 """
+
 from __future__ import annotations
 
 import os
