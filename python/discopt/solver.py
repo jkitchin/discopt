@@ -224,6 +224,24 @@ _ROOT_FALLBACK_FLOOR_S = 3.0
 # Off by default; flip to opt in (or pass multistart=True to _solve_batch_pounce).
 _POUNCE_BATCH_MULTISTART = False
 
+# Native-AD node NLP solves (discopt#281): route the per-node NLP through
+# POUNCE's own AD on the .nl problem instead of the JAX callback bridge. Enabled
+# by default; an env override and a per-solve ``options["nlp_native"]`` key allow
+# opting out. Falls back to the JAX path automatically whenever a native base
+# cannot be built/validated for the model (see solvers.nlp_native).
+_NLP_NATIVE_DEFAULT = os.environ.get("DISCOPT_NLP_NATIVE", "1").lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
+
+
+def _native_nlp_enabled(options: dict) -> bool:
+    """Whether to attempt the POUNCE-native node NLP path for this solve."""
+    val = options.get("nlp_native") if options else None
+    return _NLP_NATIVE_DEFAULT if val is None else bool(val)
+
 
 class _AugmentedEvaluator:
     """Wraps an NLPEvaluator with additional linear cut constraints.
@@ -2716,6 +2734,50 @@ def solve_model(
         # needlessly destroy that structure. Only if the convex NLP later *fails*
         # to certify do we clear and fall back to spatial B&B (see the convex
         # fast-path block below).
+
+    # --- Integer-bilinear exact reformulation ---
+    # When a bilinear term ``x_i*x_j`` has an integer (declared or implied)
+    # factor, binary-expand it and big-M-linearize the resulting binary*var
+    # products, turning the bilinear MINLP into an *equivalent pure MILP* whose
+    # relaxation is exact. discopt's single McCormick envelope over a wide integer
+    # box is loose (its integer optimum can sit below the true optimum — the
+    # ``ex126x`` trim-loss family: 19.1 vs 19.6); the exact linearization closes
+    # that gap and routes through the MILP branch-and-bound (cover/clique/Gomory/
+    # MIR cuts). Value-preserving and gated to integer-bilinear models, so it is a
+    # no-op everywhere else.
+    try:
+        from discopt._jax.integer_product_reform import (
+            has_reformulation_work,
+            reformulate_integer_bilinear,
+        )
+
+        if has_reformulation_work(model):
+            _ipx = reformulate_integer_bilinear(model)
+            # Adopt the reformulation ONLY when it eliminates *all* nonlinearity,
+            # i.e. yields an equivalent pure MILP. If other nonlinear terms remain
+            # (e.g. the transcendentals in gear), the model would still go through
+            # the spatial path — now merely carrying the extra big-M variables for
+            # no benefit — so the reformulation is discarded and the original model
+            # is solved unchanged. This keeps the pass a strict improvement.
+            from discopt._jax.problem_classifier import ProblemClass, classify_problem
+
+            if _ipx is not model and classify_problem(_ipx) == ProblemClass.MILP:
+                model = _ipx
+                model._convexity_classification_cache = None
+                model._convexity_time_budget = _convexity_time_budget
+                # The reformulated big-M MILP is best handled by a real MILP
+                # engine. discopt's FBBT root presolve is both redundant (the MILP
+                # engines presolve internally) and pathologically slow on the
+                # lifted big-M structure (ex1263: ~10s presolve vs ~1s solve), so
+                # skip it; and route off the self-hosted IPM B&B (no MILP cuts,
+                # ~60s) onto the monolithic Rust simplex MILP engine (~1s,
+                # pure-Rust), which falls back to HiGHS / the IPM path if the
+                # simplex binding is unavailable.
+                presolve = False
+                if nlp_solver == "pounce":
+                    nlp_solver = "simplex"
+    except Exception as _ipx_exc:  # pragma: no cover - defensive
+        logger.debug("integer-bilinear reformulation skipped: %s", _ipx_exc)
 
     # --- Build Rust model representation for FBBT ---
     _model_repr = None
@@ -6609,6 +6671,19 @@ def _solve_node_nlp(
     if nlp_solver in ("pounce", "ipm", "sparse_ipm"):
         # "ipm"/"sparse_ipm" are deprecated aliases — the JAX IPM is retired as a
         # node NLP solver, so all route to POUNCE (the pure-Rust Ipopt port).
+        # Native path (discopt#281): solve the .nl directly via POUNCE's own AD,
+        # bypassing the JAX callbacks. On a non-accept status fall through to the
+        # JAX path, which carries the alternative-start retry / convex polish
+        # robustness layer; this never loses a usable result.
+        if _native_nlp_enabled(options):
+            from discopt.solvers import SolveStatus as _SS
+            from discopt.solvers.nlp_native import get_native_base, solve_node_native
+
+            nb = get_native_base(evaluator)
+            if nb is not None:
+                res = solve_node_native(nb, x0, node_lb, node_ub, options)
+                if res.status in (_SS.OPTIMAL, _SS.ITERATION_LIMIT):
+                    return res
         return _solve_node_nlp_pounce(
             evaluator, x0, node_lb, node_ub, constraint_bounds, options, convex=convex
         )
@@ -6778,6 +6853,17 @@ def _solve_batch_pounce(
     n_starts = 3 if do_multistart else 1
     rng = np.random.RandomState(42) if do_multistart else None
 
+    # Native-AD path (discopt#281): when available, each (node, start) becomes a
+    # cheap bound variant of one parsed .nl problem solved by POUNCE's own AD —
+    # no JAX callbacks. ``native_base`` is None (→ JAX callback Problems) when the
+    # model has no usable .nl representation. Result vectors come back in .nl
+    # column order and are mapped to evaluator order via ``to_eval_order``.
+    native_base = None
+    if _native_nlp_enabled(options):
+        from discopt.solvers.nlp_native import get_native_base
+
+        native_base = get_native_base(evaluator)
+
     # Flatten (node, start) into one problem list; node i occupies the slice
     # [i * n_starts : (i + 1) * n_starts].
     problems = []
@@ -6807,22 +6893,29 @@ def _solve_batch_pounce(
             node_starts = [warm]
 
         for x0 in node_starts:
-            # One callbacks proxy per problem so concurrent Rayon workers never
-            # share mutable Python state. The JAX evaluator is pure/reentrant.
-            proxy = _BoundOverrideEvaluator(evaluator, node_lb, node_ub)
-            callbacks = _IpoptCallbacks(proxy)
-            problems.append(
-                pounce.Problem(
-                    n=n_vars,
-                    m=m,
-                    problem_obj=callbacks,
-                    lb=node_lb,
-                    ub=node_ub,
-                    cl=cl,
-                    cu=cu,
+            if native_base is not None:
+                # Native .nl problem: a per-node bound variant (shares the parsed
+                # DAG / AD tapes). Bounds and start go in .nl column order.
+                problems.append(native_base.variant(node_lb, node_ub, x0))
+                x0s.append(native_base.to_nl_order(np.asarray(x0, dtype=np.float64)))
+            else:
+                # One callbacks proxy per problem so concurrent Rayon workers
+                # never share mutable Python state. The JAX evaluator is
+                # pure/reentrant.
+                proxy = _BoundOverrideEvaluator(evaluator, node_lb, node_ub)
+                callbacks = _IpoptCallbacks(proxy)
+                problems.append(
+                    pounce.Problem(
+                        n=n_vars,
+                        m=m,
+                        problem_obj=callbacks,
+                        lb=node_lb,
+                        ub=node_ub,
+                        cl=cl,
+                        cu=cu,
+                    )
                 )
-            )
-            x0s.append(np.asarray(x0, dtype=np.float64))
+                x0s.append(np.asarray(x0, dtype=np.float64))
 
     result_ids = np.array(batch_ids, dtype=np.int64)
     result_sols = np.empty((n_batch, n_vars), dtype=np.float64)
@@ -6849,9 +6942,14 @@ def _solve_batch_pounce(
         logger.debug("Batch POUNCE failed (%s); falling back to serial nodes", e)
         for i in range(n_batch):
             node_lb, node_ub = node_bounds[i]
+            # x0s are in .nl column order when native; the JAX serial path wants
+            # evaluator order.
+            warm0 = x0s[i * n_starts]
+            if native_base is not None:
+                warm0 = native_base.to_eval_order(warm0)
             res = _solve_node_nlp_pounce(
                 evaluator,
-                x0s[i * n_starts],
+                warm0,
                 node_lb,
                 node_ub,
                 constraint_bounds,
@@ -6876,7 +6974,13 @@ def _solve_batch_pounce(
         best_status = None
         for s in range(n_starts):
             x, info = results[i * n_starts + s]
-            x_arr = np.asarray(x, dtype=np.float64)
+            # Native results come back in .nl column order; map to evaluator
+            # order so downstream bound clips and the returned solution align.
+            x_arr = (
+                native_base.to_eval_order(x)
+                if native_base is not None
+                else np.asarray(x, dtype=np.float64)
+            )
             if best_x is None:
                 best_x = x_arr  # placeholder if no start is accepted
             status = _IPOPT_STATUS_MAP.get(info.get("status", -100), SolveStatus.ERROR)
