@@ -139,7 +139,7 @@ def _decompose_model(model: Model) -> _DecomposedProblem:
     # Without this the master MILP minimizes ``+f`` while the subproblems maximize
     # it, and OA converges to — and certifies as optimal — a wrong point
     # (e.g. syn05m: returned -831 as "optimal" vs the true maximum 837.73).
-    if obj_is_linear and raw_obj is not None and raw_obj.sense == ObjectiveSense.MAXIMIZE:
+    if obj_coeffs is not None and raw_obj is not None and raw_obj.sense == ObjectiveSense.MAXIMIZE:
         _c_vec, _c_off = obj_coeffs
         obj_coeffs = (-_c_vec, -_c_off)
 
@@ -945,7 +945,7 @@ def solve_oa(
     bound = LB if decomp.master_bound_valid and LB > -1e19 else None
     reported_gap = gap if bound is not None and UB < 1e19 else None
 
-    if incumbent is not None:
+    if incumbent is not None and incumbent_obj is not None:
         status = "optimal" if gap <= gap_tolerance else "feasible"
         return SolveResult(
             status=status,
