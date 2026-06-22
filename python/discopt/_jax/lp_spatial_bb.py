@@ -132,39 +132,87 @@ def solve_lp_spatial_bb(
         except Exception:
             pass
 
-    root = _relax_bound(model, terms, lb0, ub0)
-    if root is None:
+    # Fast path: incremental McCormick LP (structure built once, box-dependent rows
+    # patched per node, warm-started). Guarded by its own validation against
+    # build_milp_relaxation; on any failure fall back to the trusted per-node
+    # builder (correct, ~30x slower). This is what gives the throughput to close by
+    # branching (the no-cut-SCIP regime).
+    from discopt._jax.incremental_mccormick import IncrementalMcCormickLP
+
+    _inc = IncrementalMcCormickLP(model, terms)
+    if _inc.ok:
+        info = {"bilinear": _inc.bilinear, "monomial": _inc.monomial}
+
+        def relax(lb, ub, basis):
+            return _inc.solve(lb, ub, in_basis=basis)
+    else:
+        _r0 = _relax_bound(model, terms, lb0, ub0)
+        if _r0 is None:
+            return None
+        info = _r0[2]
+
+        def relax(lb, ub, basis):
+            c = _relax_bound(model, terms, lb, ub)
+            return (c[0], c[1], None) if c is not None else (None, None, None)
+
+    root_b, root_x, root_basis = relax(lb0, ub0, None)
+    if root_b is None:
         return None
-    info = root[2]  # column map is structural -> constant across boxes
 
     inc_val = float("inf")
     inc_x: Optional[np.ndarray] = None
-    # frontier entries: (bound, tiebreak, lb, ub, x)
-    heap = [(root[0], 0, lb0, ub0, root[1])]
+    # frontier entries: (bound, tiebreak, lb, ub, x, warm_basis)
+    heap = [(root_b, 0, lb0, ub0, root_x, root_basis)]
     counter = 1
     nodes = 0
 
     def collapsed_incumbent(x):
-        """Round integers, verify exactly via the collapsed (singleton) box."""
+        """Round integers, verify exactly via the collapsed (singleton) box (where
+        the products are fixed, so the McCormick LP value is the true objective)."""
         xr = np.minimum(np.maximum(np.round(x[:n]), lb0), ub0)
-        c = _relax_bound(model, terms, xr, xr)
-        return (c[0], xr) if c is not None else None
+        b_, _x, _bas = relax(xr, xr, None)
+        return (b_, xr) if b_ is not None else None
 
-    def push(lb, ub):
+    def dive(lb_d, ub_d):
+        """Fix-and-dive rounding heuristic: from the node box, repeatedly fix the
+        most-fractional integer to its rounded LP value and re-solve, until all
+        integers are fixed (a feasible candidate verified by the collapsed box) or
+        the LP turns infeasible. Robust where one-shot rounding misses (e.g. nvs19/
+        24, where no single rounding of the relaxation optimum is feasible)."""
+        lo, hi = lb_d.copy(), ub_d.copy()
+        for _ in range(2 * n + 2):
+            b_, xx, _bas = relax(lo, hi, None)
+            if b_ is None:
+                return None
+            free = [(abs(xx[i] - round(xx[i])), i) for i in INT if hi[i] - lo[i] > 0.5]
+            if not free:
+                return collapsed_incumbent(xx)
+            # fix the most-fractional still-free integer to its rounded value
+            _, bi = max(free)
+            v = min(max(round(xx[bi]), lo[bi]), hi[bi])
+            lo[bi] = hi[bi] = v
+        return None
+
+    def push(lb, ub, parent_basis):
         nonlocal counter
         if np.any(lb > ub + 1e-9):
             return
-        c = _relax_bound(model, terms, lb, ub)
-        if c is not None and c[0] < inc_val - 1e-9:
-            heapq.heappush(heap, (c[0], counter, lb, ub, c[1]))
+        b_, x_, basis_ = relax(lb, ub, parent_basis)
+        if b_ is not None and b_ < inc_val - 1e-9:
+            heapq.heappush(heap, (b_, counter, lb, ub, x_, basis_))
             counter += 1
+
+    # seed an incumbent with a root dive (robust primal)
+    seed = dive(lb0, ub0)
+    if seed is not None:
+        inc_val, inc_x = seed[0], seed[1].copy()
 
     status = "infeasible"
     while heap:
         if (time.perf_counter() - t0) >= time_limit or nodes >= max_nodes:
             status = "time_limit"
             break
-        bound, _, lb, ub, x = heapq.heappop(heap)
+        bound, _, lb, ub, x, basis = heapq.heappop(heap)
         nodes += 1
         # fathom by bound (the frontier is a valid global lower bound)
         if bound >= inc_val - 1e-9 * (1 + abs(inc_val)):
@@ -173,18 +221,22 @@ def solve_lp_spatial_bb(
         if inc_x is not None and abs(inc_val - bound) <= gap_tolerance * (1 + abs(inc_val)):
             status = "optimal"
             break
-        # primal: rounding heuristic
+        # primal: cheap one-shot rounding every node, a deeper dive periodically
         h = collapsed_incumbent(x)
         if h is not None and h[0] < inc_val:
             inc_val, inc_x = h[0], h[1].copy()
+        if nodes % 64 == 0:
+            hd = dive(lb, ub)
+            if hd is not None and hd[0] < inc_val:
+                inc_val, inc_x = hd[0], hd[1].copy()
         widths = ub - lb
-        # branch: integer-fractional first
+        # branch: integer-fractional first (children warm-start from this basis)
         frac = [(abs(x[i] - round(x[i])), i) for i in INT]
         frac = [(f, i) for f, i in frac if f > _INT_TOL]
         if frac:
             _, bi = max(frac)
-            push(lb, _set(ub, bi, np.floor(x[bi])))
-            push(_set(lb, bi, np.ceil(x[bi])), ub)
+            push(lb, _set(ub, bi, np.floor(x[bi])), basis)
+            push(_set(lb, bi, np.ceil(x[bi])), ub, basis)
             continue
         # integral assignment: spatial-bisect the worst-violated product var
         bv = _worst_product_var(x, info, widths)
@@ -194,8 +246,8 @@ def solve_lp_spatial_bb(
                 inc_val, inc_x = bound, x[:n].copy()
             continue
         mid = np.floor((lb[bv] + ub[bv]) / 2)
-        push(lb, _set(ub, bv, mid))
-        push(_set(lb, bv, mid + 1.0), ub)
+        push(lb, _set(ub, bv, mid), basis)
+        push(_set(lb, bv, mid + 1.0), ub, basis)
     else:
         # frontier exhausted: incumbent is proven optimal
         status = "optimal" if inc_x is not None else "infeasible"
