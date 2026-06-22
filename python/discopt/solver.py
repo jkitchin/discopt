@@ -4192,6 +4192,17 @@ def solve_model(
                 else None
             )
             for i in range(n_batch):
+                # Skip per-node OBBT on the ROOT batch (iteration 0). It is redundant
+                # there with the global root OBBT just run, and — at up to 60% of the
+                # time budget (4.8s on an 8s limit) — it runs *before* the root
+                # primal heuristic, pushing time-to-first-incumbent past the limit on
+                # nonconvex models (issue #287: kall's first incumbent landed at
+                # 10.4s on an 8s budget). Its value is on *branched* nodes, where it
+                # pins the functionally-dependent outputs once the independent
+                # drivers are fixed (welded-beam / nvs05 fathoming) — those run from
+                # iteration 1 on, so deferring the root costs nothing there.
+                if iteration == 0:
+                    break
                 if node_infeasible_mask[i]:
                     continue
                 if _pn_obbt_spent >= _pn_obbt_budget_total:
