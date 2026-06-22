@@ -457,6 +457,15 @@ def expand_integer_products(model: Model, implied=frozenset()) -> Model:
                 new_obj.expression = new_expr
                 new_model._objective = new_obj
 
+        # Blowup guard. ``distribute_products`` can expand a handful of product
+        # terms into a combinatorial number of monomials (nvs17: 7 vars -> 2751),
+        # each spawning a big-M aux. The result is a valid pure MILP but far too
+        # large to solve, so discard it and keep the original model (the solver
+        # falls back to the normal nonconvex path — no regression). Legitimate
+        # reforms stay well under the cap (ex126x ~2x, nvs14 ~20x at 160 vars).
+        cap = max(1000, 6 * len(model._variables))
+        if len(new_model._variables) > cap:
+            return model
         new_model._constraints = rebuilt + exp.aux_constraints
         return new_model
     except Exception:

@@ -182,6 +182,19 @@ def test_noop_on_continuous_bilinear():
     assert reformulate_integer_bilinear(m) is m
 
 
+def test_blowup_guard_falls_back():
+    """When ``distribute_products`` would explode (nvs17: 7 vars -> 2751), the
+    size guard discards the reformulation and returns the original model, so the
+    solver falls back to the normal path instead of building an intractable MILP.
+    (nvs14, a small sibling, is still adopted — see the value-preservation tests.)"""
+    path = os.path.join(_DATA, "nvs17.nl")
+    if not os.path.exists(path):
+        pytest.skip("nvs17 instance unavailable")
+    m = dm.from_nl(path)
+    assert has_reformulation_work(m)  # it does contain integer bilinear/squares
+    assert reformulate_integer_bilinear(m) is m  # ...but the reform is too large -> fall back
+
+
 # --------------------------------------------------------------------------- #
 # end-to-end: the ex126x family discopt previously could not solve at all
 # --------------------------------------------------------------------------- #
