@@ -2251,6 +2251,40 @@ def solve_model(
     _convexity_time_budget = min(max(0.2 * float(time_limit), 0.5), 20.0)
     model._convexity_time_budget = _convexity_time_budget
 
+    # Opt-in LP-node spatial branch-and-cut engine (discopt#280) for pure-integer
+    # product MINLPs. The default NLP-per-node spatial path freezes its dual bound
+    # on dense integer-bilinear problems (e.g. nvs17: stuck at -65842, times out);
+    # this engine solves a pure McCormick LP per node (incremental + warm-started),
+    # branches on integers/products and runs a feasibility-pump primal, closing
+    # nvs17 to proven optimality. Opt-in via ``solve(lp_spatial=True)``; returns
+    # ``None`` (falls through to the default path, no behavior change) for any model
+    # out of its scope (non-pure-integer, maximize, unbounded box) or on any error.
+    if kwargs.get("lp_spatial", False):
+        try:
+            from discopt._jax.lp_spatial_bb import solve_lp_spatial_bb
+
+            _lps = solve_lp_spatial_bb(
+                model,
+                time_limit=time_limit,
+                gap_tolerance=gap_tolerance,
+                max_nodes=max_nodes,
+                root_cut_rounds=int(kwargs.get("lp_spatial_cut_rounds", 0)),
+            )
+        except Exception as _lps_exc:  # pragma: no cover - defensive
+            logger.debug("lp_spatial engine failed, falling back: %s", _lps_exc)
+            _lps = None
+        if _lps is not None:
+            return SolveResult(
+                status=_lps.status,
+                objective=_lps.objective,
+                bound=_lps.bound,
+                gap=_lps.gap,
+                x=(None if _lps.x is None else _unpack_solution(model, np.asarray(_lps.x))),
+                wall_time=time.perf_counter() - _solve_t0,
+                node_count=_lps.node_count,
+                gap_certified=(_lps.status == "optimal"),
+            )
+
     # --- Structure-cut presolve (auto-engaged square-difference-network cuts) ---
     # The symbolic cut recognizer auto-derives sound coupling cuts for the
     # square-difference (Weymouth gas/water) network structure directly from the
