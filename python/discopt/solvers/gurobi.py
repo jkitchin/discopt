@@ -110,7 +110,9 @@ def _has_nonconvex_objective(Q: np.ndarray) -> bool:
 
 
 def _has_explicit_nonconvex_option(options: Optional[dict]) -> bool:
-    return bool(options) and any(str(key).lower() == "nonconvex" for key in options)
+    if not options:
+        return False
+    return any(str(key).lower() == "nonconvex" for key in options)
 
 
 def _normalise_bounds(
@@ -410,7 +412,9 @@ def solve_qp(
     if _has_nonconvex_objective(Q_arr) and not _has_explicit_nonconvex_option(options):
         raise ValueError(
             "Gurobi QP/MIQP nonconvex objective detected. Pass "
-            "options={'NonConvex': 2} to solver='gurobi' if Gurobi should solve it."
+            "gurobi_options={'NonConvex': 2} to Model.solve(solver='gurobi'), "
+            "or options={'NonConvex': 2} when calling "
+            "discopt.solvers.gurobi.solve_qp directly."
         )
 
     gp, GRB = _load_gurobi()

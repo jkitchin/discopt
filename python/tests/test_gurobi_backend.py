@@ -81,7 +81,7 @@ def test_gurobi_qp_reports_missing_gurobipy(monkeypatch):
 
 
 def test_gurobi_qp_requires_explicit_nonconvex_option_without_importing_gurobipy():
-    with pytest.raises(ValueError, match="NonConvex"):
+    with pytest.raises(ValueError, match="gurobi_options.*options"):
         gurobi_backend.solve_qp(
             Q=np.array([[-2.0]]),
             c=np.array([0.0]),
@@ -365,7 +365,7 @@ def test_gurobi_miqp_time_limit_maps_incumbent_bound_and_gap(monkeypatch):
     assert result.status == "time_limit"
     assert result.objective == pytest.approx(7.0)
     assert result.bound == pytest.approx(6.5)
-    assert result.gap == pytest.approx(0.25)
+    assert result.gap == pytest.approx(0.5 / 7.0)
     assert result.node_count == 5
     assert result.x["y"] == pytest.approx(1.0)
 

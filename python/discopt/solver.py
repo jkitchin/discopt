@@ -1447,6 +1447,20 @@ def _optimal_relative_gap(objective: float) -> Optional[float]:
     return None if abs(float(objective)) <= 1e-10 else 0.0
 
 
+def _relative_gap_from_objective_bound(
+    objective: Optional[float],
+    bound: Optional[float],
+) -> Optional[float]:
+    """Return the public relative gap between a mapped incumbent and bound."""
+    if objective is None or bound is None:
+        return None
+    obj = float(objective)
+    bnd = float(bound)
+    if not np.isfinite(obj) or not np.isfinite(bnd):
+        return None
+    return abs(obj - bnd) / max(abs(obj), abs(bnd), 1e-10)
+
+
 # Absolute B&B gap tolerance, decoupled from the relative ``gap_tolerance``.
 # Matches the AMP path's ``abs_tol`` (and SCIP's default absolute gap). The tree's
 # hybrid ``gap()`` floors its denominator at 1.0, so for an optimum with magnitude
@@ -7858,7 +7872,7 @@ def _solve_qp_matrix(
             status="time_limit",
             objective=objective,
             bound=bound,
-            gap=result.gap,
+            gap=_relative_gap_from_objective_bound(objective, bound),
             x=_unpack_solution(model, result.x[:n_orig]) if result.x is not None else None,
             wall_time=wall_time,
             node_count=result.node_count,
@@ -7868,7 +7882,7 @@ def _solve_qp_matrix(
             status="iteration_limit",
             objective=objective,
             bound=bound,
-            gap=result.gap,
+            gap=_relative_gap_from_objective_bound(objective, bound),
             x=_unpack_solution(model, result.x[:n_orig]) if result.x is not None else None,
             wall_time=wall_time,
             node_count=result.node_count,
