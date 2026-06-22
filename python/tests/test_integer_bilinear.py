@@ -146,6 +146,31 @@ def test_knife_range_needs_enough_bits():
     assert o1 == pytest.approx(o0, rel=1e-4, abs=1e-4)
 
 
+@pytest.mark.parametrize("ub", [3, 5, 6, 7])
+def test_integer_square_reformulation_value_preserving(ub):
+    """An integer square ``x**2`` is exactly linearized (binary expansion + AND
+    products) — value-preserving and yields a pure MILP."""
+    m = dm.Model("sq")
+    x = m.integer("x", lb=0, ub=ub)
+    m.minimize(x * x - 4 * x)  # (x-2)^2 - 4, optimum at x=2 -> -4
+    o0 = m.solve(time_limit=10).objective
+    rm = reformulate_integer_bilinear(m)
+    t = classify_nonlinear_terms(rm)
+    assert len(t.bilinear) == 0 and len(t.monomial) == 0
+    o1 = rm.solve(time_limit=10).objective
+    assert o1 == pytest.approx(o0, rel=1e-4, abs=1e-4)
+
+
+def test_pow_two_form_is_handled():
+    """The ``x ** 2`` (power) form, not just ``x*x``, is linearized."""
+    m = dm.Model("p2")
+    x = m.integer("x", lb=0, ub=6)
+    m.minimize(x**2 - 4 * x)
+    rm = reformulate_integer_bilinear(m)
+    assert len(classify_nonlinear_terms(rm).monomial) == 0
+    assert rm.solve(time_limit=10).objective == pytest.approx(-4.0, abs=1e-3)
+
+
 def test_noop_on_continuous_bilinear():
     """A bilinear term with no integer factor is left untouched (no-op)."""
     m = dm.Model("c")

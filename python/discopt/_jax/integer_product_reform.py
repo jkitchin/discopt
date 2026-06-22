@@ -175,7 +175,9 @@ class _Expander:
         return v
 
 
-def _expand_product(lo: int, bits, other: Expression, lo_o: float, hi_o: float, exp: "_Expander"):
+def _expand_product(
+    lo: int, bits, other: Expression, lo_o: float, hi_o: float, exp: "_Expander"
+) -> Expression:
     """Build ``lo*other + sum_k 2^k v_k`` with ``v_k == e_k*other`` big-M-lifted —
     a purely *linear* expression (no bilinear term survives)."""
     out: Optional[Expression] = None
@@ -186,6 +188,47 @@ def _expand_product(lo: int, bits, other: Expression, lo_o: float, hi_o: float, 
         term = v if coef == 1 else BinaryOp("*", Constant(float(coef)), v)
         out = term if out is None else BinaryOp("+", out, term)
     return out if out is not None else Constant(0.0)
+
+
+def _expand_square(lo: int, bits, exp: "_Expander") -> Expression:
+    """Build the exact linear form of ``x^2`` for ``x = lo + sum_k c_k e_k`` (``e_k``
+    binary, ``c_k = 2^k``):
+
+        x^2 = lo^2 + sum_k (2*lo*c_k + c_k^2) e_k + 2 sum_{k<j} c_k c_j (e_k e_j)
+
+    using ``e_k^2 = e_k`` (binary) and lifting each binary-AND ``e_k e_j`` via the
+    exact big-M product. Purely linear — no monomial term survives."""
+    out: Optional[Expression] = None
+    if lo != 0:
+        out = Constant(float(lo * lo))
+    for ck, ek in bits:
+        coef = 2.0 * lo * ck + ck * ck
+        term = BinaryOp("*", Constant(coef), ek)
+        out = term if out is None else BinaryOp("+", out, term)
+    for a in range(len(bits)):
+        ca, ea = bits[a]
+        for b in range(a + 1, len(bits)):
+            cb, eb = bits[b]
+            w = exp.bigm_product(ea, eb, 0.0, 1.0)  # binary AND e_a*e_b, exact
+            term = BinaryOp("*", Constant(2.0 * ca * cb), w)
+            out = term if out is None else BinaryOp("+", out, term)
+    return out if out is not None else Constant(0.0)
+
+
+def _try_expand_square(node: BinaryOp, exp: "_Expander") -> Optional[Expression]:
+    """If *node* is ``x**2`` with ``x`` an integer scalar variable, return its exact
+    binary-expansion linearization, else ``None``. (Higher powers are left to the
+    monomial relaxation; only the square is handled exactly here.)"""
+    if not (isinstance(node.right, Constant) and abs(float(node.right.value) - 2.0) < 1e-12):
+        return None
+    ref = _scalar_var_ref(node.left)
+    if ref is None:
+        return None
+    rng = _int_factor_range(ref[0], ref[1], exp.implied)
+    if rng is None:
+        return None
+    lo, bits = exp.expansion(ref[0], ref[1], rng[0], rng[1])
+    return _expand_square(lo, bits, exp)
 
 
 def _try_expand_mul(node: BinaryOp, model: Model, exp: _Expander) -> Optional[Expression]:
@@ -207,7 +250,13 @@ def _try_expand_mul(node: BinaryOp, model: Model, exp: _Expander) -> Optional[Ex
         return None
     (e0, v0, el0), (e1, v1, el1) = var_refs
     if v0._index == v1._index and el0 == el1:
-        return None  # square term (x^2), handled by the monomial lift
+        # x*x square: exact-linearize when x is an integer scalar variable.
+        rng = _int_factor_range(v0, el0, exp.implied)
+        if rng is None:
+            return None
+        lo, bits = exp.expansion(v0, el0, rng[0], rng[1])
+        sq = _expand_square(lo, bits, exp)
+        return BinaryOp("*", Constant(const), sq) if const != 1.0 else sq
     # Each expanded bit adds one big-M aux per product, so expanding the
     # smaller-range factor (fewer bits) minimizes added variables; use product
     # sharing only as a tiebreaker (a cached factor avoids re-adding its bits).
@@ -236,6 +285,10 @@ def _try_expand_mul(node: BinaryOp, model: Model, exp: _Expander) -> Optional[Ex
 def _rewrite(expr: Expression, model: Model, exp: _Expander) -> Expression:
     """Recursively rewrite integer-factor bilinear products in *expr*."""
     if isinstance(expr, BinaryOp):
+        if expr.op == "**":
+            sq = _try_expand_square(expr, exp)
+            if sq is not None:
+                return sq
         if expr.op == "*":
             replaced = _try_expand_mul(expr, model, exp)
             if replaced is not None:
@@ -309,14 +362,48 @@ def _bodies(model: Model):
         yield distribute_products(model._objective.expression)
 
 
+def _has_int_square(expr: Expression, implied) -> bool:
+    """True if *expr* contains an integer ``x**2`` (or ``x*x``) term this pass can
+    exactly linearize."""
+    if isinstance(expr, BinaryOp):
+        if (
+            expr.op == "**"
+            and isinstance(expr.right, Constant)
+            and abs(float(expr.right.value) - 2.0) < 1e-12
+        ):
+            ref = _scalar_var_ref(expr.left)
+            if ref is not None and _int_factor_range(ref[0], ref[1], implied):
+                return True
+        if expr.op == "*":
+            refs = [
+                _scalar_var_ref(f)
+                for f in _collect_mul_factors(expr)
+                if not isinstance(f, Constant)
+            ]
+            if len(refs) == 2 and all(r is not None for r in refs):
+                (v0, e0), (v1, e1) = refs  # type: ignore[misc]
+                if v0._index == v1._index and e0 == e1 and _int_factor_range(v0, e0, implied):
+                    return True
+        return _has_int_square(expr.left, implied) or _has_int_square(expr.right, implied)
+    c = getattr(expr, "operand", None)
+    if isinstance(c, Expression) and _has_int_square(c, implied):
+        return True
+    for attr in ("args", "terms"):
+        seq = getattr(expr, attr, None)
+        if isinstance(seq, (list, tuple)):
+            if any(isinstance(x, Expression) and _has_int_square(x, implied) for x in seq):
+                return True
+    return False
+
+
 def has_integer_product_work(model: Model, implied=frozenset()) -> bool:
-    """True if any constraint/objective has an integer-factor bilinear product
-    (with integer or *implied*-integer factor) this pass can exactly linearize."""
-    found = []
+    """True if any constraint/objective has an integer-factor bilinear product or
+    integer square (integer or *implied*-integer factor) this pass can linearize."""
     try:
         for body in _bodies(model):
+            found = []
             _for_each_int_bilinear(body, implied, lambda ints: found.append(True))
-            if found:
+            if found or _has_int_square(body, implied):
                 return True
     except Exception:
         return False
