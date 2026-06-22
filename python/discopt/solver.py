@@ -5700,7 +5700,16 @@ def solve_model(
                 # completion is a valid MINLP point), so an improving-but-divergent
                 # re-solve can never report a false optimum.
                 _unchanged = abs(_pobj - obj_val) <= 1e-4 * (1.0 + abs(obj_val))
-                _improved = _pobj < obj_val - 1e-9 * (1.0 + abs(obj_val))
+                # An objective improvement from the re-solve is adopted ONLY for
+                # convex models, where the integer-fixed continuous relaxation is
+                # exact (no spatial-envelope slack) so a KKT completion is a genuine
+                # MINLP point — the smallinvDAX MIQP case #281 targets. For
+                # nonconvex/spatial models the terminal re-solve runs against loose
+                # McCormick envelopes, so an "improved" point can satisfy the relaxed
+                # constraint system yet be infeasible for the true model (st_e35:
+                # fractional power of a ratio jumped 176.17 -> 0.0). There we keep
+                # only the always-safe purification (unchanged objective).
+                _improved = _model_is_convex and _pobj < obj_val - 1e-9 * (1.0 + abs(obj_val))
                 _accept = _unchanged or (
                     _improved
                     and (
