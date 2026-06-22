@@ -225,11 +225,15 @@ _ROOT_FALLBACK_FLOOR_S = 3.0
 _POUNCE_BATCH_MULTISTART = False
 
 # Native-AD node NLP solves (discopt#281): route the per-node NLP through
-# POUNCE's own AD on the .nl problem instead of the JAX callback bridge. Enabled
-# by default; an env override and a per-solve ``options["nlp_native"]`` key allow
-# opting out. Falls back to the JAX path automatically whenever a native base
-# cannot be built/validated for the model (see solvers.nlp_native).
-_NLP_NATIVE_DEFAULT = os.environ.get("DISCOPT_NLP_NATIVE", "1").lower() not in (
+# POUNCE's own AD on the .nl problem instead of the JAX callback bridge. Opt-in
+# (DISCOPT_NLP_NATIVE / options["nlp_native"]); falls back to the JAX path
+# automatically whenever a native base cannot be built/validated for the model
+# (see solvers.nlp_native). Default OFF: POUNCE's PyNlProblem is unsendable
+# (pyo3), so caching it on the model and using it across the batch/parallel paths
+# trips "unsendable ... dropped on another thread" under pytest-xdist and can
+# perturb MIQP-batch certification; and the speedup is neutral-to-modest. Enable
+# explicitly once PyNlProblem is made Send-safe.
+_NLP_NATIVE_DEFAULT = os.environ.get("DISCOPT_NLP_NATIVE", "0").lower() not in (
     "0",
     "false",
     "no",
@@ -2747,11 +2751,20 @@ def solve_model(
     # no-op everywhere else.
     try:
         from discopt._jax.integer_product_reform import (
-            has_reformulation_work,
+            has_nonconvex_integer_bilinear,
             reformulate_integer_bilinear,
         )
 
-        if has_reformulation_work(model):
+        # Gate on a *distinct-variable* integer-bilinear term ``x_i*x_j`` (i != j).
+        # Its Hessian is indefinite, so this is a cheap, sound *nonconvexity*
+        # witness — and exactly the loose-relaxation structure the pass fixes.
+        # Convex MIQPs (only ``x**2`` squares, PSD curvature) have no such term
+        # and are left to the convex QP/NLP fast paths: binary-expanding them
+        # would merely bloat the model and divert it off those paths (which broke
+        # the MIQP-batch certification path). This witness is far cheaper than a
+        # full convexity classification (~6s on ex1263), so the common path and
+        # the reformulated path both stay fast.
+        if has_nonconvex_integer_bilinear(model):
             _ipx = reformulate_integer_bilinear(model)
             # Adopt the reformulation ONLY when it eliminates *all* nonlinearity,
             # i.e. yields an equivalent pure MILP. If other nonlinear terms remain

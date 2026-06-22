@@ -410,6 +410,29 @@ def has_integer_product_work(model: Model, implied=frozenset()) -> bool:
     return False
 
 
+def has_nonconvex_integer_bilinear(model: Model) -> bool:
+    """True if the model contains a *distinct-variable* integer-factor bilinear
+    product ``x_i*x_j`` (``i != j``). Such a term has an indefinite Hessian, so it
+    is a cheap, sound **nonconvexity** witness — and it is exactly the structure
+    whose loose McCormick relaxation this pass fixes. Used to gate the
+    reformulation to nonconvex models (a convex MIQP with only ``x**2`` squares
+    has no distinct bilinear term and is left to the convex fast paths) without
+    paying for a full convexity classification.
+    """
+    try:
+        from .implied_integer import detect_implied_integers
+
+        implied = frozenset(detect_implied_integers(model))
+        found: list[bool] = []
+        for body in _bodies(model):
+            _for_each_int_bilinear(body, implied, lambda ints: found.append(True))
+            if found:
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def _participation(model: Model, implied) -> dict:
     """Count, per integer factor ``(var._index, elem)``, the number of bilinear
     products it appears in — used to pick the most-shared factor to expand."""
