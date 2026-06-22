@@ -4,6 +4,53 @@
 (`solve(lp_spatial=True)`, PR #290) and the diagnosis in
 `scip-gap-nvs-diagnosis.md`.
 
+---
+
+## 0. Reassessment against the live issues 280–287 (priority correction)
+
+The sections below (§1–§5) optimize the **nvs17/19/24 dense-integer-product
+SCIP-speed gap**. Checked against the actual open issues, that target is the wrong
+anchor: nvs is issue **#283, which is CLOSED**. The structure of the *live* issues
+(measured — `classify_nonlinear_terms` + the engine's scope test + reproduction):
+
+| issue | family / class | integer-bilinear (c-MIR target)? | engine in-scope? | real need |
+|---|---|---|---|---|
+| **#280** | graphpart_* binary-QP (240 int-bilinear, 96 int) | **yes** | yes | global-search gap (≫ nvs17 size) |
+| **#281** | smallinvDAX_* MIQP (+1 continuous) | present | **no** | **incumbent polish / gap-tol**, not search |
+| **#282** | syn_*/rsyn_* MINLP (0 bilinear, general-NL, max) | **no** | **no** | search gap, different relaxation |
+| **#287** | kall_*/graphpart_* (kall: 0 integers, continuous) | **no** | **no** | **incumbent latency** regression |
+
+So the §1–§5 priorities **do not map onto 280–287**:
+- **Priority 1 (native c-MIR for integer-bilinear)** is relevant to **only #280**.
+  #282 has *no* bilinear; #287's kall is *continuous*; #281 is polish, not search.
+- **Priority 2 (native node loop)** is throughput on an **opt-in** engine that 3 of
+  the 4 live issues don't even use.
+- **#287 reproduces on `main`'s *default* path** (kall first incumbent 10.9 s vs the
+  prior ~6 s, soft 8 s limit overrun) — a **primal-latency + time-limit** regression
+  (same class as the #291 deadline fix), untouched by making the engine opt-in.
+
+**Corrected priority order for resolving 280–287:**
+1. **#287 — incumbent latency + honor the soft `time_limit`** (default path). Live,
+   broad (kall/graphpart/tln4/flay04h → `hard_timeout`, no incumbent), cheap. Fix:
+   surface the root/dive incumbent early; check time between per-node phases.
+2. **#281 — incumbent polish** (terminal NLP polish on the best incumbent +
+   absolute-gap tolerance for near-zero optima). The cheapest win per the issue.
+3. **#280 — integer-bilinear binary-QP search gap.** *Here* the c-MIR/engine work of
+   §1–§5 genuinely applies — but re-aimed at **graphpart** (96 vars / 240 products),
+   not nvs17, and the §1.5 gate (do the cuts reduce nodes?) must be validated **on
+   graphpart**. Higher-risk/effort; after the cheap primal wins above.
+4. **#282 — general-NL MINLP (syn/rsyn) search gap.** c-MIR irrelevant (0 bilinear);
+   needs general-NL relaxation strengthening + LNS heuristics — a separate track.
+
+**Sequencing:** the LP-node engine has been shedding regressions (#286, #291, #287);
+the primal-side wins (#287, #281) should land before any multi-week native cut
+separator, which is one track (for #280) among several — not the headline.
+
+The §1–§5 evidence (per-node profile, SCIP ablations, the cut gate) remains valid
+and is retained below as the substantiation for the #280 track specifically.
+
+---
+
 **Problem.** The LP-node spatial branch-and-cut engine *closes* nvs17 to proven
 optimality (78 s) but is **~90× slower than SCIP** (0.88 s) and does **not** close
 the larger siblings nvs19/nvs24 within 300 s. This plan identifies, with measured
