@@ -9191,6 +9191,12 @@ def _root_dive(
     return None
 
 
+# Wall-clock cap (seconds) for the fast Rust simplex MILP engine before it defers
+# to the robust fallback. Bounds time wasted on a stalled reformulation regardless
+# of the overall time_limit (issue #291).
+_SIMPLEX_MILP_BUDGET_CAP_S = 10.0
+
+
 def _solve_milp_simplex(
     model: Model,
     time_limit: float,
@@ -9246,6 +9252,21 @@ def _solve_milp_simplex(
     _, _, _, int_offsets, int_sizes = _extract_variable_info(model)
     int_idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
 
+    # Pass the remaining wall-clock budget so the Rust B&B's deadline (loop-top,
+    # per-node and per-LP) fires. Without it ``time_limit_s`` defaults to 0.0 -> no
+    # deadline, so a single node whose simplex fails to converge (or a degenerate
+    # cycle) runs unbounded, ignoring the user's ``time_limit`` entirely (issue
+    # #291: nvs12's integer-bilinear reformulation hung > 40 s on a 15 s limit).
+    # Bound the fast simplex engine to a modest slice of the remaining budget, so a
+    # stall on a pathological reformulation (issue #291) defers quickly (status
+    # node_limit -> None below) and leaves the rest for the robust spatial/POUNCE
+    # fallback. The absolute cap matters: with the default time_limit=3600 a plain
+    # fraction would let a stalled solve burn ~1800 s before falling back. The
+    # engine is the *fast* path — a well-behaved reformulation (ex126x) solves in
+    # ~1 s, far inside this cap — so capping costs nothing on the common case while
+    # bounding the wasted time before fallback to a few seconds.
+    _remaining = float(time_limit) - (time.perf_counter() - t_start)
+    _milp_budget = max(0.5, min(0.5 * _remaining, _SIMPLEX_MILP_BUDGET_CAP_S))
     status, x_struct, obj, bound, nodes, _lp_iters = solve_milp_py(
         np.ascontiguousarray(lp_data.c, dtype=np.float64),
         A,
@@ -9257,6 +9278,7 @@ def _solve_milp_simplex(
         float(lp_data.obj_const),
         int(max_nodes),
         float(gap_tolerance),
+        time_limit_s=float(_milp_budget),
     )
     wall_time = time.perf_counter() - t_start
     maximize = model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE
@@ -9319,9 +9341,14 @@ def _solve_milp_simplex(
     if status == "unbounded":
         return SolveResult(status="unbounded", wall_time=wall_time, node_count=nodes)
     if status == "node_limit":
-        return SolveResult(
-            status="node_limit", wall_time=wall_time, node_count=nodes, gap_certified=False
-        )
+        # The simplex MILP engine exhausted its node/time budget without proving
+        # optimality and found no usable incumbent here. Rather than surface a
+        # bare ``node_limit`` (no solution), defer (return None) so the caller falls
+        # back to the robust spatial / POUNCE path — which, e.g., solves nvs12's
+        # integer-bilinear reformulation in ~0.4 s where this engine stalls
+        # (issue #291). A genuine incumbent is returned via the optimal/feasible
+        # branch above, so deferral only discards a no-solution result.
+        return None
     return SolveResult(status="infeasible", wall_time=wall_time, node_count=nodes)
 
 
