@@ -58,14 +58,40 @@ with a one-line fix). The latency is distributed across compile + primal + searc
    end-to-end ~7.0 s -> ~5.7 s to the same optimum; gas-network (#15) keeps its
    cuts. Any *residual* JAX-trace/compile cost (the original lever-1 hypothesis)
    is now a smaller, separate follow-up if it proves to matter.
-2. **Stronger convex-MINLP primal (~2.7 s FP → 0.4%-off).** The FP finds wrong
-   integers; a RENS / NLP-relaxation-rounding / diving heuristic that exploits the
-   convex relaxation would land the optimal integers earlier (within budget).
-   *Medium effort; directly closes #281's incumbent quality.*
-3. **Outer approximation (OA) for convex MINLP (the SCIP method).** Replace
-   NLP-per-node with an LP master + NLP subproblems: orders of magnitude fewer/cheaper
-   nodes (SCIP's 0.3 s vs our 249-node 2.8 s). *Largest effort; the principled fix
-   for convex-MINLP search efficiency.*
+2. **Stronger convex-MINLP primal (~2.7 s FP → 0.4%-off). — DONE (#281 lever 2,
+   RENS).** The feasibility pump rounds every integer at once and lands wrong
+   integers (or, at a tight budget, none). RENS (Relaxation Enforced Neighborhood
+   Search) instead solves the relaxation's rounding neighbourhood *exactly*: fix
+   the integers already integral in the root relaxation, restrict each fractional
+   one to its `{floor, ceil}` box, solve the small sub-MINLP. Measured across the
+   smallinvDAX family at tight budgets: at 2 s the baseline returns no incumbent
+   on 4/5 instances while RENS is near-optimal on all 5; at 3 s baseline
+   incumbents are 1.4–12 % off while RENS is optimal-or-better. A 74-instance
+   soundness sweep showed 0 optimal-vs-optimal mismatches. Note: lever 1 already
+   recovered enough budget that the *small* smallinvDAX solve to the proven
+   optimum is unchanged — RENS's win is incumbent *quality at tight budgets* and
+   on larger instances. *Done.*
+3. **Outer approximation (OA) for convex MINLP (the SCIP method). — engine exists;
+   correctness fixed (#301); auto-routing deferred (evidence-based).** `solve_oa`
+   (opt-in via `gdp_method="oa"`) already implements OA. Measured vs NLP-BB+RENS:
+   - **OA wins big on transcendental convex MINLP**: batch 0.6 s vs 11.4 s (19×);
+     clay0203m 1.4 s vs *NLP-BB times out with no incumbent* in 31 s.
+   - **OA ties/loses on convex QPs** (smallinvDAX: ~6 s vs ~5 s) — the NLP-per-node
+     is cheap there, so OA's LP master adds no leverage, and it forfeits RENS's
+     tight-budget incumbent.
+   - **OA loses on non-convex-objective models** (alan: returns 3.6 *feasible* in
+     25 s vs NLP-BB's 2.925 *optimal* in 0.3 s — its objective is not OA-convex,
+     so the master bound is disabled and it cannot certify).
+   - Found and fixed an OA **soundness bug** along the way: no objective-sense
+     handling meant maximize problems were optimized in the wrong direction and
+     certified wrong (syn05m: −831 "optimal" vs true 837.73). Fixed in #301.
+
+   Conclusion: a blanket "route convex MINLP to OA" would *regress* the QP and
+   non-convex-objective classes. Safe auto-routing needs a structural gate (route
+   to OA only for transcendental/expensive-NLP convex MINLP with an OA-valid
+   master bound, i.e. `master_bound_valid` true and non-quadratic nonlinearity),
+   validated on the full convex-MINLP benchmark. *That gate is the remaining
+   lever-3 work; the engine and its correctness are ready.*
 
 ## Recommendation
 
@@ -73,8 +99,12 @@ This is SCIP-gap-class work, not a one-liner. Sequence by payoff/risk:
 - **Lever 1 (startup overhead) — DONE.** The measurement showed it was the SymPy
   structure-cut presolve, not JAX compile; gated cheaply (#281). ~1.3 s recovered
   broadly across the short tier.
-- Then **lever 2** (convex-MINLP primal) to land good incumbents within budget.
-- **Lever 3 (OA)** last — the deep, highest-ceiling effort.
+- **Lever 2 (convex-MINLP primal) — DONE.** RENS lands near-optimal incumbents at
+  tight budgets where the pump returned none/poor ones (#281, #302).
+- **Lever 3 (OA) — engine ready, correctness fixed (#301); structural auto-routing
+  gate is the remaining work.** OA is a large win on transcendental convex MINLP
+  but regresses QP / non-convex-objective classes, so routing must be gated and
+  benchmark-validated rather than blanket-enabled.
 
 Each lever is gated on the existing short-tier benchmark harness
 (`discopt-minlp-benchmark`), tracking per-instance incumbent-latency and gap so
