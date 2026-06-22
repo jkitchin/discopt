@@ -113,6 +113,7 @@ def test_continuous_neighbor_not_implied_integer():
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.slow  # does end-to-end solves; kept out of the fast xdist suite
 @pytest.mark.parametrize(
     "ux,uy,rhs,coef",
     [(5, 4, 7, 1), (6, 6, 20, 2), (5, 5, 13, 2), (8, 4, 15, 1), (7, 3, 11, 3)],
@@ -133,6 +134,7 @@ def test_reformulation_value_preserving(ux, uy, rhs, coef):
     assert o1 == pytest.approx(o0, rel=1e-4, abs=1e-4)
 
 
+@pytest.mark.slow  # does end-to-end solves; kept out of the fast xdist suite
 def test_knife_range_needs_enough_bits():
     """A factor whose value exceeds a few bits is expanded exactly (the 'knife=11'
     regression: too few bits truncates the product and over-constrains)."""
@@ -146,6 +148,7 @@ def test_knife_range_needs_enough_bits():
     assert o1 == pytest.approx(o0, rel=1e-4, abs=1e-4)
 
 
+@pytest.mark.slow  # does end-to-end solves; kept out of the fast xdist suite
 @pytest.mark.parametrize("ub", [3, 5, 6, 7])
 def test_integer_square_reformulation_value_preserving(ub):
     """An integer square ``x**2`` is exactly linearized (binary expansion + AND
@@ -161,6 +164,7 @@ def test_integer_square_reformulation_value_preserving(ub):
     assert o1 == pytest.approx(o0, rel=1e-4, abs=1e-4)
 
 
+@pytest.mark.slow  # does end-to-end solves; kept out of the fast xdist suite
 def test_pow_two_form_is_handled():
     """The ``x ** 2`` (power) form, not just ``x*x``, is linearized."""
     m = dm.Model("p2")

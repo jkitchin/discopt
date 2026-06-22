@@ -33,7 +33,13 @@ import pytest  # noqa: E402
 from discopt._jax.nlp_evaluator import NLPEvaluator  # noqa: E402
 from discopt.solvers import nlp_native as N  # noqa: E402
 
-pytestmark = [pytest.mark.unit, pytest.mark.requires_pounce]
+# `slow`, not `unit`: these build a POUNCE native base directly, which creates a
+# pounce PyNlProblem. That object is unsendable (pyo3); under the fast suite's
+# pytest-xdist parallelism it can be GC'd on a different worker thread than it was
+# created on, raising "unsendable ... dropped on another thread" and tipping
+# co-scheduled CPU-bound batch tests over the timeout. Native-AD is opt-in
+# (default off), so this opt-in path belongs in the serial slow suite.
+pytestmark = [pytest.mark.slow, pytest.mark.requires_pounce]
 
 if not N._POUNCE_OK:  # pragma: no cover
     pytest.skip("pounce native API unavailable", allow_module_level=True)
