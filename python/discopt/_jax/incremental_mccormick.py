@@ -187,16 +187,27 @@ class IncrementalMcCormickLP:
 
     # -- solve ------------------------------------------------------------- #
 
-    def solve(self, lb, ub, in_basis=None, c_override=None):
-        """Solve the McCormick LP over [lb,ub]; return (bound, x, out_basis) or
-        (None, None, None). Warm-starts from ``in_basis`` when given. ``c_override``
-        replaces the objective (used by the feasibility pump to minimize distance to
-        a rounded point); the returned bound is then the surrogate objective, so the
-        caller must not use it as a dual bound."""
+    def assemble(self, lb, ub, cut_rows=None):
+        """Patched McCormick LP rows over [lb,ub] with optional appended cut rows.
+
+        ``cut_rows`` is a list of ``(coeffs, rhs)`` inequalities ``coeffs·x <= rhs``
+        over the structural+aux columns (length ``ncol``). Returns ``(A, b, bounds)``.
+        """
+        A, b, bounds = self._patch(lb, ub)
+        if cut_rows:
+            extra_A = np.array(
+                [np.asarray(co, dtype=np.float64)[: self.ncol] for co, _ in cut_rows]
+            )
+            extra_b = np.array([float(r) for _, r in cut_rows])
+            A = np.vstack([A, extra_A])
+            b = np.concatenate([b, extra_b])
+        return A, b, bounds
+
+    def solve_assembled(self, A, b, bounds, in_basis=None, c_override=None):
+        """Solve a pre-assembled LP ``min c·x s.t. A x <= b, bounds``."""
         from discopt.solvers import SolveStatus
         from discopt.solvers.milp_simplex import solve_lp_warm_std
 
-        A, b, bounds = self._patch(lb, ub)
         cobj = self.c if c_override is None else np.asarray(c_override, dtype=np.float64)
         try:
             result, out_basis = solve_lp_warm_std(
@@ -207,3 +218,11 @@ class IncrementalMcCormickLP:
         if result is None or result.status != SolveStatus.OPTIMAL or result.objective is None:
             return None, None, None
         return float(result.objective), np.asarray(result.x, dtype=float), out_basis
+
+    def solve(self, lb, ub, in_basis=None, c_override=None, cut_rows=None):
+        """Solve the McCormick LP over [lb,ub] (plus optional cut rows); return
+        (bound, x, out_basis) or (None, None, None). Warm-starts from ``in_basis``.
+        ``c_override`` replaces the objective (feasibility pump) — the returned bound
+        is then the surrogate, not a dual bound."""
+        A, b, bounds = self.assemble(lb, ub, cut_rows)
+        return self.solve_assembled(A, b, bounds, in_basis=in_basis, c_override=c_override)

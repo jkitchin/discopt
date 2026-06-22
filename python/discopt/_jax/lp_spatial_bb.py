@@ -97,6 +97,52 @@ def _set(a, i, v):
     return b
 
 
+def _separate_node_cuts(A, b, bounds, x, ncol, c, max_cuts=12):
+    """Separate integer cuts from the assembled node LP at solution ``x``: GMI from
+    the optimal basis (via crossover) plus complemented-MIR. Every structural AND
+    product-aux column is marked integer — ``w_ij = x_i*x_j`` is integer-valued when
+    the factors are, so the fractional envelope values of ``w`` become cut targets
+    (the key to separating the McCormick optimum at all). Each returned cut
+    ``coeffs·x <= rhs`` is a valid MIR/GMI inequality of the node relaxation, hence
+    valid for every integer-feasible point in the node's box (and its subtree)."""
+    cuts: list = []
+    try:
+        from discopt._jax.cmir_cuts import separate_cmir
+        from discopt._jax.crossover import crossover_to_vertex
+        from discopt._jax.problem_classifier import LPData
+        from discopt.solver import _separate_gomory_cuts
+    except Exception:
+        return cuts
+
+    lb = bounds[:, 0]
+    ub = bounds[:, 1]
+    is_int = np.ones(ncol, dtype=bool)  # original + product aux are integer-valued
+    # GMI from the optimal basis (equality standard form with explicit slacks)
+    try:
+        m = A.shape[0]
+        A_eq = np.hstack([A, np.eye(m)])
+        b_eq = b.copy()
+        cc = np.concatenate([np.asarray(c, dtype=np.float64)[:ncol], np.zeros(m)])
+        xl = np.concatenate([lb, np.zeros(m)])
+        xu = np.concatenate([ub, np.full(m, 1e20)])
+        xrelax = np.concatenate([x, b - A @ x])
+        xv = crossover_to_vertex(xrelax, A_eq, b_eq, cc, xl, xu)
+        lp = LPData(cc, A_eq, b_eq, xl, xu, 0.0)
+        gc = _separate_gomory_cuts(lp, xv, ncol, list(range(ncol)), max_cuts=max_cuts)
+        if gc is not None:
+            for i in range(len(gc[1])):  # GMI returns coeffs·x >= rhs -> negate to <=
+                cuts.append((-np.asarray(gc[0][i])[:ncol], -float(gc[1][i])))
+    except Exception:
+        pass
+    # complemented-MIR (multi-row aggregation)
+    try:
+        mc = separate_cmir(A, b, x, lb, ub, is_int, max_cuts=max_cuts)
+        cuts.extend(mc)
+    except Exception:
+        pass
+    return cuts
+
+
 def solve_lp_spatial_bb(
     model: Model,
     *,
@@ -104,8 +150,15 @@ def solve_lp_spatial_bb(
     gap_tolerance: float = 1e-4,
     max_nodes: int = 500_000,
     use_obbt: bool = True,
+    root_cut_rounds: int = 0,
 ) -> Optional[LpSpatialResult]:
-    """LP-node spatial branch-and-bound. Returns ``None`` if out of scope."""
+    """LP-node spatial branch-and-bound. Returns ``None`` if out of scope.
+
+    ``root_cut_rounds`` enables GMI + complemented-MIR separation at the root (cuts
+    inherited by all nodes). Default 0 (off): with discopt's current Python-level
+    separators the per-round crossover/GMI cost and the larger inherited LP at every
+    node outweigh the modest tightening — measured net-negative on nvs17/19/24. The
+    machinery is sound and kept opt-in for when a fast native separator exists."""
     if not _is_in_scope(model):
         return None
 
@@ -155,14 +208,52 @@ def solve_lp_spatial_bb(
             c = _relax_bound(model, terms, lb, ub)
             return (c[0], c[1], None) if c is not None else (None, None, None)
 
-    root_b, root_x, root_basis = relax(lb0, ub0, None)
+    # Branch-and-cut: separate integer cuts (GMI + complemented-MIR, product aux
+    # vars marked integer) at each node and re-solve, tightening the node bound
+    # before branching. Cuts derived over a node's box are valid for its whole
+    # subtree, so children inherit them; their cumulative effect across the tree is
+    # what converges the McCormick bound (the no-cut engine stalls). Only available
+    # on the incremental path (needs the explicit row system).
+    cut_enabled = _inc.ok
+    _MAX_INHERITED_CUTS = 400
+
+    def node_relax(lb, ub, basis, inherited, rounds):
+        """Solve the node LP with inherited cuts, then run ``rounds`` of cut
+        separation (add only bound-improving cuts), returning
+        (bound, x, basis, cuts)."""
+        if not cut_enabled:
+            b_, x_, bas = relax(lb, ub, basis)
+            return b_, x_, bas, ()
+        cuts = list(inherited)
+        A, b, bounds = _inc.assemble(lb, ub, cuts)
+        b_, x_, bas = _inc.solve_assembled(A, b, bounds, in_basis=basis)
+        if b_ is None:
+            return None, None, None, tuple(cuts)
+        for _r in range(rounds):
+            if len(cuts) >= _MAX_INHERITED_CUTS:
+                break
+            new = _separate_node_cuts(A, b, bounds, x_, _inc.ncol, _inc.c)
+            if not new:
+                break
+            cuts.extend(new)
+            A, b, bounds = _inc.assemble(lb, ub, cuts)
+            nb, nx, nbas = _inc.solve_assembled(A, b, bounds, in_basis=bas)
+            if nb is None or nx is None:
+                break
+            improved = nb > b_ + 1e-7 * (1 + abs(b_))
+            b_, x_, bas = nb, nx, nbas
+            if not improved:
+                break
+        return b_, x_, bas, tuple(cuts)
+
+    root_b, root_x, root_basis, root_cuts = node_relax(lb0, ub0, None, (), root_cut_rounds)
     if root_b is None:
         return None
 
     inc_val = float("inf")
     inc_x: Optional[np.ndarray] = None
-    # frontier entries: (bound, tiebreak, lb, ub, x, warm_basis)
-    heap = [(root_b, 0, lb0, ub0, root_x, root_basis)]
+    # frontier entries: (bound, tiebreak, lb, ub, x, warm_basis, inherited_cuts)
+    heap = [(root_b, 0, lb0, ub0, root_x, root_basis, root_cuts)]
     counter = 1
     nodes = 0
 
@@ -267,14 +358,15 @@ def solve_lp_spatial_bb(
         if cand is not None and cand[0] < inc_val:
             inc_val, inc_x = cand[0], cand[1].copy()
 
-    def child(lb, ub, parent_basis):
-        """Solve a child node; push if promising. Returns its bound (or None)."""
+    def child(lb, ub, parent_basis, parent_cuts, rounds):
+        """Solve a child node (inheriting parent cuts, separating ``rounds`` more);
+        push if promising. Returns its bound (or None)."""
         nonlocal counter
         if np.any(lb > ub + 1e-9):
             return None
-        b_, x_, basis_ = relax(lb, ub, parent_basis)
+        b_, x_, basis_, cuts_ = node_relax(lb, ub, parent_basis, parent_cuts, rounds)
         if b_ is not None and b_ < inc_val - 1e-9:
-            heapq.heappush(heap, (b_, counter, lb, ub, x_, basis_))
+            heapq.heappush(heap, (b_, counter, lb, ub, x_, basis_, cuts_))
             counter += 1
         return b_
 
@@ -288,7 +380,7 @@ def solve_lp_spatial_bb(
         if (time.perf_counter() - t0) >= time_limit or nodes >= max_nodes:
             status = "time_limit"
             break
-        bound, _, lb, ub, x, basis = heapq.heappop(heap)
+        bound, _, lb, ub, x, basis, ncuts = heapq.heappop(heap)
         nodes += 1
         if bound >= inc_val - 1e-9 * (1 + abs(inc_val)):
             continue
@@ -302,13 +394,18 @@ def solve_lp_spatial_bb(
             consider(dive(lb, ub))
         if nodes % 512 == 0:
             consider(feasibility_pump(lb, ub, x))
+        # Per-node separation (crossover + GMI + c-MIR) costs ~seconds/node and
+        # crashes throughput; the cuts are too weak to pay for it. Cut only at the
+        # root (the main locus in SCIP too) — every node inherits those globally
+        # valid root cuts, tightening its LP at no per-node separation cost.
+        _rounds = 0
         # branch: pseudocost-scored integer-fractional variable
         bi = _branch_var(x, lb, ub)
         if bi is not None:
             fd = x[bi] - np.floor(x[bi])
             fu = np.ceil(x[bi]) - x[bi]
-            bd = child(lb, _set(ub, bi, np.floor(x[bi])), basis)
-            bu = child(_set(lb, bi, np.ceil(x[bi])), ub, basis)
+            bd = child(lb, _set(ub, bi, np.floor(x[bi])), basis, ncuts, _rounds)
+            bu = child(_set(lb, bi, np.ceil(x[bi])), ub, basis, ncuts, _rounds)
             _update_pc(bi, "d", bound, bd, fd)
             _update_pc(bi, "u", bound, bu, fu)
             continue
@@ -318,8 +415,8 @@ def solve_lp_spatial_bb(
             consider((bound, x[:n].copy()))  # all products tight -> true solution
             continue
         mid = np.floor((lb[bv] + ub[bv]) / 2)
-        child(lb, _set(ub, bv, mid), basis)
-        child(_set(lb, bv, mid + 1.0), ub, basis)
+        child(lb, _set(ub, bv, mid), basis, ncuts, _rounds)
+        child(_set(lb, bv, mid + 1.0), ub, basis, ncuts, _rounds)
     else:
         status = "optimal" if inc_x is not None else "infeasible"
 
