@@ -1,8 +1,13 @@
-"""Gurobi LP/MILP solver wrappers.
+"""Gurobi LP/MILP/QP/MIQP solver wrappers.
 
 This module mirrors the matrix-form HiGHS wrappers: callers pass extracted
 standard-form arrays and receive discopt result dataclasses. ``gurobipy`` stays
 optional and is imported only inside the solver path.
+
+Quadratic objectives use the discopt/HiGHS convention
+``0.5 * x.T @ Q @ x + c.T @ x``. Nonconvex ``Q`` matrices are rejected by
+default; pass an explicit Gurobi ``NonConvex`` parameter through ``options`` to
+delegate nonconvex QP/MIQP handling to Gurobi.
 """
 
 from __future__ import annotations
@@ -12,7 +17,7 @@ from typing import Optional, Union
 import numpy as np
 import scipy.sparse as sp
 
-from discopt.solvers import LPResult, MILPResult, SolveStatus
+from discopt.solvers import LPResult, MILPResult, QPResult, SolveStatus
 
 _FINITE_BOUND_THRESHOLD = 1e15
 
@@ -68,6 +73,44 @@ def _validate_linear_data(
         raise ValueError(f"bounds has {len(bounds)} entries but c has {n} elements")
 
     return c_arr, n
+
+
+def _validate_qp_data(
+    Q: Union[np.ndarray, sp.spmatrix],
+    c: np.ndarray,
+    A_ub: Optional[Union[np.ndarray, sp.spmatrix]],
+    b_ub: Optional[np.ndarray],
+    A_eq: Optional[Union[np.ndarray, sp.spmatrix]],
+    b_eq: Optional[np.ndarray],
+    bounds: Optional[list[tuple[float, float]]],
+) -> tuple[np.ndarray, np.ndarray, int]:
+    c_arr, n = _validate_linear_data(c, A_ub, b_ub, A_eq, b_eq, bounds)
+    if sp.issparse(Q):
+        Q_arr = sp.csr_matrix(Q, dtype=np.float64).toarray()
+    else:
+        Q_arr = np.asarray(Q, dtype=np.float64)
+    if Q_arr.shape != (n, n):
+        raise ValueError(f"Q has shape {Q_arr.shape} but c has {n} elements")
+    if not np.all(np.isfinite(Q_arr)) or not np.all(np.isfinite(c_arr)):
+        raise ValueError("Q and c must contain only finite values")
+    if not np.allclose(Q_arr, Q_arr.T, rtol=1e-10, atol=1e-12):
+        Q_arr = 0.5 * (Q_arr + Q_arr.T)
+    return Q_arr, c_arr, n
+
+
+def _has_nonconvex_objective(Q: np.ndarray) -> bool:
+    if Q.size == 0:
+        return False
+    try:
+        min_eig = float(np.min(np.linalg.eigvalsh(Q)))
+    except np.linalg.LinAlgError:
+        return True
+    scale = max(1.0, float(np.max(np.abs(Q))))
+    return min_eig < -1e-9 * scale
+
+
+def _has_explicit_nonconvex_option(options: Optional[dict]) -> bool:
+    return bool(options) and any(str(key).lower() == "nonconvex" for key in options)
 
 
 def _normalise_bounds(
@@ -335,6 +378,122 @@ def solve_milp(
             bound=bound,
             gap=gap,
             node_count=node_count,
+            wall_time=wall_time,
+        )
+    finally:
+        model.dispose()
+        env.dispose()
+
+
+def solve_qp(
+    Q: Union[np.ndarray, sp.spmatrix],
+    c: np.ndarray,
+    A_ub: Optional[Union[np.ndarray, sp.spmatrix]] = None,
+    b_ub: Optional[np.ndarray] = None,
+    A_eq: Optional[Union[np.ndarray, sp.spmatrix]] = None,
+    b_eq: Optional[np.ndarray] = None,
+    bounds: Optional[list[tuple[float, float]]] = None,
+    integrality: Optional[np.ndarray] = None,
+    time_limit: Optional[float] = None,
+    gap_tolerance: float = 1e-4,
+    threads: Optional[int] = None,
+    options: Optional[dict] = None,
+) -> QPResult:
+    """Solve a continuous or mixed-integer quadratic program using Gurobi.
+
+    The objective is ``0.5 * x.T @ Q @ x + c.T @ x``. Convex QP/MIQP models
+    solve without extra options. Nonconvex objectives require an explicit
+    ``NonConvex`` Gurobi parameter in ``options`` so users opt into Gurobi's
+    nonconvex quadratic machinery intentionally.
+    """
+    Q_arr, c_arr, n = _validate_qp_data(Q, c, A_ub, b_ub, A_eq, b_eq, bounds)
+    if _has_nonconvex_objective(Q_arr) and not _has_explicit_nonconvex_option(options):
+        raise ValueError(
+            "Gurobi QP/MIQP nonconvex objective detected. Pass "
+            "options={'NonConvex': 2} to solver='gurobi' if Gurobi should solve it."
+        )
+
+    gp, GRB = _load_gurobi()
+
+    has_integer = integrality is not None and np.any(np.asarray(integrality, dtype=np.int32) == 1)
+    qp_bounds = bounds
+    if qp_bounds is None:
+        qp_bounds = [(-GRB.INFINITY, GRB.INFINITY)] * n
+
+    env, model, x, ub_con, eq_con = _build_model(
+        gp,
+        GRB,
+        name="discopt_miqp" if has_integer else "discopt_qp",
+        c=c_arr,
+        A_ub=A_ub,
+        b_ub=b_ub,
+        A_eq=A_eq,
+        b_eq=b_eq,
+        bounds=qp_bounds,
+        integrality=integrality,
+        time_limit=time_limit,
+        gap_tolerance=gap_tolerance if has_integer else None,
+        threads=threads,
+        options=options,
+    )
+    try:
+        model.setObjective(0.5 * (x @ Q_arr @ x) + c_arr @ x, GRB.MINIMIZE)
+        status_code = _optimize(model, GRB)
+        status = _status_map(GRB).get(status_code, SolveStatus.ERROR)
+        iters = int(_safe_attr(model, "IterCount") or 0)
+        node_count = int(_safe_attr(model, "NodeCount") or 0)
+        wall_time = float(_safe_attr(model, "Runtime") or 0.0)
+
+        objective = None
+        x_val = None
+        if int(_safe_attr(model, "SolCount") or 0) > 0:
+            objective = float(model.ObjVal)
+            x_val = np.asarray(x.X, dtype=np.float64).ravel()
+
+        bound = _safe_attr(model, "ObjBound")
+        bound = float(bound) if bound is not None and np.isfinite(bound) else None
+        gap = _safe_attr(model, "MIPGap")
+        gap = float(gap) if gap is not None and np.isfinite(gap) else None
+
+        if status == SolveStatus.OPTIMAL:
+            assert objective is not None and x_val is not None
+            row_duals = None
+            reduced_costs = None
+            if not has_integer:
+                dual_values = []
+                if ub_con is not None:
+                    pi = _safe_attr(ub_con, "Pi")
+                    if pi is not None:
+                        dual_values.extend(np.asarray(pi, dtype=np.float64).ravel().tolist())
+                if eq_con is not None:
+                    pi = _safe_attr(eq_con, "Pi")
+                    if pi is not None:
+                        dual_values.extend(np.asarray(pi, dtype=np.float64).ravel().tolist())
+                row_duals = np.asarray(dual_values, dtype=np.float64) if dual_values else None
+                rc = _safe_attr(x, "RC")
+                reduced_costs = np.asarray(rc, dtype=np.float64).ravel() if rc is not None else None
+
+            return QPResult(
+                status=status,
+                x=x_val,
+                objective=objective,
+                bound=objective if bound is None else bound,
+                gap=0.0 if gap is None else gap,
+                dual_values=row_duals,
+                reduced_costs=reduced_costs,
+                node_count=node_count,
+                iterations=iters,
+                wall_time=wall_time,
+            )
+
+        return QPResult(
+            status=status,
+            x=x_val,
+            objective=objective,
+            bound=bound,
+            gap=gap,
+            node_count=node_count,
+            iterations=iters,
             wall_time=wall_time,
         )
     finally:
