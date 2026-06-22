@@ -106,3 +106,46 @@ Verify node-count drop on nvs17/19/24 toward SCIP's 70–468.
 
 **Non-goal:** matching SCIP's raw LP speed (~µs). Target is *solving* the family
 in seconds, not microsecond LP throughput.
+
+## Step 3 findings (cuts on the McCormick LP) — measured
+
+Step 1 landed (`_jax/lp_spatial_bb.py`); Step 3 (cuts) was investigated next because
+the SCIP ablation showed cuts are the *closing* lever (70 vs 6,796 nodes). Two
+concrete discoveries on nvs17, both data-backed:
+
+1. **The fractionality is in the product vars, not the originals.** The McCormick
+   LP optimum has *integral* original variables `x` (30/35 columns integral); the
+   looseness lives in the continuous product columns `w_ij`. So Gomory/MIR keyed on
+   the original integers find nothing. Fix: mark the product aux columns **integer**
+   (`w_ij = x_i*x_j` is integer-valued when the factors are — a sound implied
+   integrality). Then `w_ij`'s fractional envelope value becomes a cut target and
+   MIR begins to separate.
+
+2. **discopt's single-row MIR/Gomory don't tighten the bound here.** With a
+   crossover vertex + aux integrality, MIR separates a cut that is valid and cuts
+   off the *vertex* (16.5 > 16) but **not the LP optimum** (16.0 = 16.0). The
+   McCormick LP has a large optimal face; trimming a vertex leaves the optimal
+   *value* unchanged, so the bound does not move. This matches SCIP's separator
+   stats exactly: the work there is done by the **`aggregation`** separator
+   (multi-row *complemented* MIR), not plain Gomory — and discopt has **no
+   row-aggregation MIR**. Gomory's basis recovery on the augmented McCormick LP is
+   also finicky (returns no cut).
+
+Extending the test: feeding GMI a *proper simplex basic vertex* (not a crossover
+point) does make it separate (9 cuts), but a full GMI+MIR root loop **plateaus** —
+the bound moves −27,795 → −27,291 in two rounds then stalls (still 25× loose, ~2%
+total). So even the textbook bound-improving cut (GMI from the optimal basis) is too
+weak on this McCormick LP; discopt genuinely lacks SCIP's `aggregation` (multi-row
+complemented MIR).
+
+**Synthesis / corrected priority.** The cut path is a dead end *with discopt's
+current separators*. But the SCIP ablation already showed **no-cut SCIP closes
+nvs17 in 6,796 nodes via branching alone** (4.7 s). The Step-1 LP-node engine is
+exactly that no-cut analog and already reached bound −1,157 in 652 nodes — it simply
+can't reach ~6,800 nodes at ~92 ms/node. Therefore the correct, general, performant
+closer is **node throughput** (Step 2: incremental warm-started LP nodes →
+~1–2 ms/node → tens of thousands of nodes → close by branching, matching no-cut
+SCIP), **not** cuts. Cuts (a future c-MIR/aggregation separator) are a node-count
+optimization (6,796 → 70), valuable later but neither necessary nor currently
+attainable. **Step 2 is therefore the real next step; Step 3 is deferred** until a
+proper aggregation-MIR separator exists.
