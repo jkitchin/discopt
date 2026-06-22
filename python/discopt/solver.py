@@ -1272,6 +1272,19 @@ def _unpack_solution(model: Model, x_flat: np.ndarray):
     return result
 
 
+def _pack_solution(model: Model, x_dict: dict, n_vars: int) -> np.ndarray:
+    """Inverse of :func:`_unpack_solution`: pack a ``{var_name: array}`` dict into
+    the flat solution vector, using the same per-variable layout (each variable
+    occupies ``v.size`` consecutive slots in ``model._variables`` order)."""
+    flat = np.zeros(int(n_vars), dtype=np.float64)
+    offset = 0
+    for v in model._variables:
+        size = int(v.size)
+        flat[offset : offset + size] = np.asarray(x_dict[v.name], dtype=np.float64).reshape(-1)
+        offset += size
+    return flat
+
+
 def _unpack_constraint_duals(
     evaluator, mult_g: Optional[np.ndarray]
 ) -> Optional[dict[str, np.ndarray]]:
@@ -1763,6 +1776,12 @@ _AUTO_CUTS_MAX_VARS = 40
 # cheap. Counted as (sum of scalar variable sizes) + (number of constraints).
 _STRUCTURE_CUTS_MAX_SIZE = 100
 
+# RENS root primal heuristic (#281): fraction of the remaining wall budget granted
+# to the bound-restricted sub-MINLP solve, and an absolute cap so it can never
+# starve the surrounding proof on a long overall budget.
+_RENS_BUDGET_FRAC = 0.5
+_RENS_BUDGET_CAP_S = 8.0
+
 # Root cut pool (P3). Rounds of spectral PSD separation to run once at the root
 # to build the inherited pool; more rounds drive the root bound toward the Shor
 # SDP bound (nvs17: 8 rounds -> -2453, ~60 -> -1300, ~150 -> -1221). The pool is
@@ -2037,6 +2056,7 @@ def solve_model(
     root_cut_rounds: Optional[int] = None,
     root_cut_max: Optional[int] = None,
     _lns_enabled: bool = True,
+    rens: bool = True,
     **kwargs,
 ) -> SolveResult:
     """
@@ -3074,6 +3094,7 @@ def solve_model(
             node_callback=node_callback,
             in_tree_presolve_stride=in_tree_presolve_stride,
             in_tree_presolve_repr=_model_repr,
+            rens_enabled=rens,
         )
 
     # --- Problem classification: dispatch LP/QP to specialized solvers ---
@@ -3315,6 +3336,7 @@ def solve_model(
                 node_callback=node_callback,
                 in_tree_presolve_stride=in_tree_presolve_stride,
                 in_tree_presolve_repr=_model_repr,
+                rens_enabled=rens,
             )
 
     # --- Extract variable info ---
@@ -6069,6 +6091,7 @@ def _solve_nlp_bb(
     node_callback=None,
     in_tree_presolve_stride: int = 0,
     in_tree_presolve_repr=None,
+    rens_enabled: bool = True,
 ) -> SolveResult:
     """Solve a MINLP via nonlinear Branch & Bound (NLP-BB).
 
@@ -6428,28 +6451,92 @@ def _solve_nlp_bb(
                     best_root_idx = i
             if best_root_idx is not None:
                 _root_incumbent = False
-                try:
-                    from discopt._jax.primal_heuristics import feasibility_pump
+                # --- RENS (Relaxation Enforced Neighborhood Search), primary ---
+                # Solve the relaxation's rounding neighbourhood EXACTLY (fix the
+                # integers already integral in the relaxation; restrict each
+                # fractional one to {floor, ceil}; solve the small sub-MINLP). On a
+                # near-integral convex relaxation this lands the *optimal* integers
+                # at the root, where the feasibility pump's all-at-once rounding
+                # settles for a feasible-but-suboptimal assignment (#281:
+                # smallinvDAX 0.4004 -> 0.3988). It returns cheaply when too many
+                # integers are fractional, so the pump/diving fallback below still
+                # covers set-partitioning-style relaxations parked at 0.5.
+                if rens_enabled:
+                    try:
+                        from discopt._jax.primal_heuristics import rens as _rens_heuristic
 
-                    fp_sol = feasibility_pump(
-                        model,
-                        result_sols[best_root_idx],
-                        max_rounds=5,
-                        backend=_resolve_heuristic_backend(nlp_solver),
-                        evaluator=evaluator,
-                        deadline=t_start + time_limit,
-                    )
-                    if fp_sol is not None:
-                        fp_obj = float(evaluator.evaluate_objective(fp_sol))
-                        fp_feas = not cl_list or _check_constraint_feasibility(
-                            evaluator, fp_sol, cl_list, cu_list
+                        _rens_budget = max(
+                            0.5,
+                            min(
+                                _RENS_BUDGET_FRAC * (time_limit - (time.perf_counter() - t_start)),
+                                _RENS_BUDGET_CAP_S,
+                            ),
                         )
-                        if np.isfinite(fp_obj) and fp_obj < _SENTINEL_THRESHOLD and fp_feas:
-                            tree.inject_incumbent(fp_sol, fp_obj)
-                            _root_incumbent = True
-                            logger.info("NLP-BB feasibility pump incumbent: obj=%.6g", fp_obj)
-                except Exception as e:
-                    logger.debug("Feasibility pump failed: %s", e)
+
+                        def _rens_sub_solver(_restricted, _tl=_rens_budget):
+                            # Solve the bound-restricted sub-MINLP with the full
+                            # engine (rens=False prevents nested RENS; structure_cuts
+                            # off — the SymPy presolve cannot help a bound-tightened
+                            # MIQP). Returns a flat solution aligned to the evaluator.
+                            sub = solve_model(
+                                _restricted,
+                                time_limit=_tl,
+                                gap_tolerance=gap_tolerance,
+                                nlp_solver=nlp_solver,
+                                rens=False,
+                                structure_cuts=False,
+                            )
+                            if sub.objective is None or sub.x is None:
+                                return None
+                            return _pack_solution(_restricted, sub.x, n_vars), float(sub.objective)
+
+                        rens_res = _rens_heuristic(
+                            model,
+                            result_sols[best_root_idx],
+                            sub_solver=_rens_sub_solver,
+                        )
+                        if rens_res is not None:
+                            rens_sol = np.asarray(rens_res[0], dtype=np.float64).copy()
+                            rens_obj = float(evaluator.evaluate_objective(rens_sol))
+                            rens_feas = not cl_list or _check_constraint_feasibility(
+                                evaluator, rens_sol, cl_list, cu_list
+                            )
+                            if (
+                                np.isfinite(rens_obj)
+                                and rens_obj < _SENTINEL_THRESHOLD
+                                and rens_feas
+                                and _is_integer_feasible_solution(rens_sol, int_offsets, int_sizes)
+                            ):
+                                tree.inject_incumbent(rens_sol, rens_obj)
+                                _root_incumbent = True
+                                logger.info("NLP-BB RENS incumbent: obj=%.6g", rens_obj)
+                    except Exception as e:
+                        logger.debug("RENS failed: %s", e)
+
+                # --- Feasibility pump (fallback when RENS does not apply) ---
+                if not _root_incumbent:
+                    try:
+                        from discopt._jax.primal_heuristics import feasibility_pump
+
+                        fp_sol = feasibility_pump(
+                            model,
+                            result_sols[best_root_idx],
+                            max_rounds=5,
+                            backend=_resolve_heuristic_backend(nlp_solver),
+                            evaluator=evaluator,
+                            deadline=t_start + time_limit,
+                        )
+                        if fp_sol is not None:
+                            fp_obj = float(evaluator.evaluate_objective(fp_sol))
+                            fp_feas = not cl_list or _check_constraint_feasibility(
+                                evaluator, fp_sol, cl_list, cu_list
+                            )
+                            if np.isfinite(fp_obj) and fp_obj < _SENTINEL_THRESHOLD and fp_feas:
+                                tree.inject_incumbent(fp_sol, fp_obj)
+                                _root_incumbent = True
+                                logger.info("NLP-BB feasibility pump incumbent: obj=%.6g", fp_obj)
+                    except Exception as e:
+                        logger.debug("Feasibility pump failed: %s", e)
 
                 # Fractional-diving fallback (issue #268). The feasibility pump
                 # rounds every integer at once, which lands on a constraint-
