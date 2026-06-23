@@ -548,6 +548,112 @@ def test_gurobi_qcp_maximize_maps_objective(monkeypatch):
     assert result.x["x"] == pytest.approx(1.0)
 
 
+def test_gurobi_qcp_maximize_time_limit_maps_incumbent_bound_and_gap(monkeypatch):
+    import discopt.solver as solver
+    from discopt._jax import problem_classifier
+
+    m = dm.Model("gurobi_max_qcp_time_limit_mapping")
+    x = m.continuous("x", lb=-2, ub=2)
+    m.maximize(x)
+    m.subject_to(x**2 <= 1)
+
+    qcp_data = problem_classifier.QCPData(
+        Q=np.zeros((1, 1)),
+        c=np.array([-1.0]),
+        A_ub=np.zeros((0, 1)),
+        b_ub=np.zeros(0),
+        A_eq=np.zeros((0, 1)),
+        b_eq=np.zeros(0),
+        quadratic_constraints=(
+            problem_classifier.QuadraticConstraintData(
+                Q=np.array([[2.0]]),
+                c=np.array([0.0]),
+                sense="<=",
+                rhs=1.0,
+            ),
+        ),
+        x_l=np.array([-2.0]),
+        x_u=np.array([2.0]),
+        obj_const=0.0,
+    )
+    monkeypatch.setattr(problem_classifier, "extract_qcp_data", lambda _model: qcp_data)
+
+    def fake_solve_qcp(**_kwargs):
+        return QPResult(
+            status=SolveStatus.TIME_LIMIT,
+            x=np.array([0.75]),
+            objective=-0.75,
+            bound=-1.0,
+            gap=0.2,
+            node_count=9,
+        )
+
+    monkeypatch.setattr(gurobi_backend, "solve_qcp", fake_solve_qcp)
+
+    result = solver._solve_qcp_gurobi(m, t_start=0.0, time_limit=1.0)
+
+    assert result.status == "time_limit"
+    assert result.objective == pytest.approx(0.75)
+    assert result.bound == pytest.approx(1.0)
+    assert result.gap == pytest.approx(0.25)
+    assert result.node_count == 9
+    assert result.x["x"] == pytest.approx(0.75)
+
+
+@pytest.mark.parametrize(
+    ("backend_status", "public_status"),
+    [
+        (SolveStatus.INFEASIBLE, "infeasible"),
+        (SolveStatus.UNBOUNDED, "unbounded"),
+        (SolveStatus.ITERATION_LIMIT, "iteration_limit"),
+        (SolveStatus.ERROR, "error"),
+    ],
+)
+def test_gurobi_qcp_no_incumbent_status_mapping(monkeypatch, backend_status, public_status):
+    import discopt.solver as solver
+    from discopt._jax import problem_classifier
+
+    m = dm.Model("gurobi_qcp_no_incumbent_status_mapping")
+    x = m.continuous("x", lb=-2, ub=2)
+    m.minimize(x)
+    m.subject_to(x**2 <= 1)
+
+    qcp_data = problem_classifier.QCPData(
+        Q=np.zeros((1, 1)),
+        c=np.array([1.0]),
+        A_ub=np.zeros((0, 1)),
+        b_ub=np.zeros(0),
+        A_eq=np.zeros((0, 1)),
+        b_eq=np.zeros(0),
+        quadratic_constraints=(
+            problem_classifier.QuadraticConstraintData(
+                Q=np.array([[2.0]]),
+                c=np.array([0.0]),
+                sense="<=",
+                rhs=1.0,
+            ),
+        ),
+        x_l=np.array([-2.0]),
+        x_u=np.array([2.0]),
+        obj_const=0.0,
+    )
+    monkeypatch.setattr(problem_classifier, "extract_qcp_data", lambda _model: qcp_data)
+
+    def fake_solve_qcp(**_kwargs):
+        return QPResult(status=backend_status, node_count=6)
+
+    monkeypatch.setattr(gurobi_backend, "solve_qcp", fake_solve_qcp)
+
+    result = solver._solve_qcp_gurobi(m, t_start=0.0, time_limit=1.0)
+
+    assert result.status == public_status
+    assert result.objective is None
+    assert result.bound is None
+    assert result.gap is None
+    assert result.x is None
+    assert result.node_count == 6
+
+
 def test_gurobi_lp_smoke_if_available():
     _require_gurobi()
 
