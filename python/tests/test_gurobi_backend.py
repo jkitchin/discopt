@@ -1,4 +1,4 @@
-"""Tests for the optional Gurobi LP/MILP backend."""
+"""Tests for the optional Gurobi LP/MILP/QP/QCP backend."""
 
 from __future__ import annotations
 
@@ -20,17 +20,32 @@ def _install_fake_rust_classifier(monkeypatch, problem_kind: str) -> None:
     extension, while CI builds it before running the broader suite.
     """
 
+    linear_constraint_kinds = {"lp", "milp", "qp", "miqp"}
+    quadratic_constraint_kinds = {"qcp", "qcqp", "miqcp", "miqcqp"}
+
     class _FakeRepr:
-        n_constraints = 0
+        n_constraints = 1 if problem_kind in quadratic_constraint_kinds else 0
 
         def is_objective_linear(self):
-            return problem_kind in {"lp", "milp"}
+            return problem_kind in {"lp", "milp", "qcp", "miqcp"}
 
         def is_objective_quadratic(self):
-            return problem_kind in {"qp", "miqp"}
+            return problem_kind in {
+                "lp",
+                "milp",
+                "qp",
+                "miqp",
+                "qcp",
+                "miqcp",
+                "qcqp",
+                "miqcqp",
+            }
 
         def is_constraint_linear(self, _idx):
-            return True
+            return problem_kind in linear_constraint_kinds
+
+        def is_constraint_quadratic(self, _idx):
+            return problem_kind in linear_constraint_kinds | quadratic_constraint_kinds
 
     fake_rust = types.SimpleNamespace(
         PyTreeManager=object,
@@ -86,6 +101,30 @@ def test_gurobi_qp_requires_explicit_nonconvex_option_without_importing_gurobipy
             Q=np.array([[-2.0]]),
             c=np.array([0.0]),
             bounds=[(-1.0, 1.0)],
+        )
+
+
+def test_gurobi_qcp_validates_quadratic_constraint_dimensions_without_importing_gurobipy():
+    with pytest.raises(ValueError, match="quadratic constraint 0 Q has shape"):
+        gurobi_backend.solve_qcp(
+            Q=np.zeros((2, 2)),
+            c=np.array([1.0, 2.0]),
+            bounds=[(-1.0, 1.0), (-1.0, 1.0)],
+            quadratic_constraints=[
+                (np.eye(3), np.zeros(2), "<=", 1.0),
+            ],
+        )
+
+
+def test_gurobi_qcp_requires_explicit_nonconvex_option_without_importing_gurobipy():
+    with pytest.raises(ValueError, match="gurobi_options.*options"):
+        gurobi_backend.solve_qcp(
+            Q=np.zeros((1, 1)),
+            c=np.array([0.0]),
+            bounds=[(-2.0, 2.0)],
+            quadratic_constraints=[
+                (np.array([[-2.0]]), np.array([0.0]), "<=", 1.0),
+            ],
         )
 
 
@@ -248,6 +287,95 @@ def test_model_solve_gurobi_dispatches_miqp(monkeypatch):
     assert calls["options"] == {"MIPFocus": 1}
 
 
+def test_model_solve_gurobi_dispatches_qcp(monkeypatch):
+    _install_fake_rust_classifier(monkeypatch, "qcp")
+    import discopt.solver as solver
+
+    calls = {}
+
+    def fake_gurobi_qcp(
+        model,
+        t_start,
+        time_limit=None,
+        gap_tolerance=1e-4,
+        threads=None,
+        options=None,
+    ):
+        calls["model"] = model
+        calls["time_limit"] = time_limit
+        calls["gap_tolerance"] = gap_tolerance
+        calls["threads"] = threads
+        calls["options"] = options
+        return SolveResult(status="optimal", objective=-1.0, bound=-1.0, gap=0.0)
+
+    monkeypatch.setattr(solver, "_solve_qcp_gurobi", fake_gurobi_qcp)
+
+    m = dm.Model("qcp_dispatch_gurobi")
+    x = m.continuous("x", lb=-2, ub=2)
+    m.minimize(x)
+    m.subject_to(x**2 <= 1)
+
+    result = m.solve(
+        solver="gurobi",
+        time_limit=7.0,
+        gap_tolerance=1e-6,
+        threads=2,
+        gurobi_options={"BarConvTol": 1e-8},
+    )
+
+    assert result.status == "optimal"
+    assert calls["model"] is m
+    assert calls["time_limit"] == 7.0
+    assert calls["gap_tolerance"] == 1e-6
+    assert calls["threads"] == 2
+    assert calls["options"] == {"BarConvTol": 1e-8}
+
+
+def test_model_solve_gurobi_dispatches_miqcqp(monkeypatch):
+    _install_fake_rust_classifier(monkeypatch, "miqcqp")
+    import discopt.solver as solver
+
+    calls = {}
+
+    def fake_gurobi_qcp(
+        model,
+        t_start,
+        time_limit=None,
+        gap_tolerance=1e-4,
+        threads=None,
+        options=None,
+    ):
+        calls["model"] = model
+        calls["time_limit"] = time_limit
+        calls["gap_tolerance"] = gap_tolerance
+        calls["threads"] = threads
+        calls["options"] = options
+        return SolveResult(status="optimal", objective=0.0, bound=0.0, gap=0.0)
+
+    monkeypatch.setattr(solver, "_solve_qcp_gurobi", fake_gurobi_qcp)
+
+    m = dm.Model("miqcqp_dispatch_gurobi")
+    x = m.binary("x")
+    y = m.continuous("y", lb=-2, ub=2)
+    m.minimize((y - 1) ** 2 + x)
+    m.subject_to(y**2 <= x)
+
+    result = m.solve(
+        solver="gurobi",
+        time_limit=6.0,
+        gap_tolerance=1e-5,
+        threads=1,
+        gurobi_options={"MIPFocus": 1},
+    )
+
+    assert result.status == "optimal"
+    assert calls["model"] is m
+    assert calls["time_limit"] == 6.0
+    assert calls["gap_tolerance"] == 1e-5
+    assert calls["threads"] == 1
+    assert calls["options"] == {"MIPFocus": 1}
+
+
 def test_gurobi_milp_maximize_time_limit_maps_dual_bound(monkeypatch):
     _install_fake_rust_classifier(monkeypatch, "milp")
     import discopt.solver as solver
@@ -370,6 +498,56 @@ def test_gurobi_miqp_time_limit_maps_incumbent_bound_and_gap(monkeypatch):
     assert result.x["y"] == pytest.approx(1.0)
 
 
+def test_gurobi_qcp_maximize_maps_objective(monkeypatch):
+    import discopt.solver as solver
+    from discopt._jax import problem_classifier
+
+    m = dm.Model("gurobi_max_qcp_objective_mapping")
+    x = m.continuous("x", lb=-2, ub=2)
+    m.maximize(x)
+    m.subject_to(x**2 <= 1)
+
+    qcp_data = problem_classifier.QCPData(
+        Q=np.zeros((1, 1)),
+        c=np.array([-1.0]),
+        A_ub=np.zeros((0, 1)),
+        b_ub=np.zeros(0),
+        A_eq=np.zeros((0, 1)),
+        b_eq=np.zeros(0),
+        quadratic_constraints=(
+            problem_classifier.QuadraticConstraintData(
+                Q=np.array([[2.0]]),
+                c=np.array([0.0]),
+                sense="<=",
+                rhs=1.0,
+            ),
+        ),
+        x_l=np.array([-2.0]),
+        x_u=np.array([2.0]),
+        obj_const=0.0,
+    )
+    monkeypatch.setattr(problem_classifier, "extract_qcp_data", lambda _model: qcp_data)
+
+    def fake_solve_qcp(**kwargs):
+        assert len(kwargs["quadratic_constraints"]) == 1
+        return QPResult(
+            status=SolveStatus.OPTIMAL,
+            x=np.array([1.0]),
+            objective=-1.0,
+            bound=-1.0,
+            gap=0.0,
+        )
+
+    monkeypatch.setattr(gurobi_backend, "solve_qcp", fake_solve_qcp)
+
+    result = solver._solve_qcp_gurobi(m, t_start=0.0)
+
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(1.0)
+    assert result.bound == pytest.approx(1.0)
+    assert result.x["x"] == pytest.approx(1.0)
+
+
 def test_gurobi_lp_smoke_if_available():
     _require_gurobi()
 
@@ -436,6 +614,62 @@ def test_gurobi_miqp_smoke_if_available():
     assert result.objective == pytest.approx(-5.0)
 
 
+def test_gurobi_qcp_smoke_if_available():
+    _require_gurobi()
+
+    result = gurobi_backend.solve_qcp(
+        Q=np.zeros((1, 1)),
+        c=np.array([1.0]),
+        bounds=[(-2.0, 2.0)],
+        quadratic_constraints=[
+            (np.array([[2.0]]), np.array([0.0]), "<=", 1.0),
+        ],
+    )
+
+    assert result.status == SolveStatus.OPTIMAL
+    assert result.x is not None
+    assert result.x[0] == pytest.approx(-1.0, abs=1e-6)
+    assert result.objective == pytest.approx(-1.0, abs=1e-6)
+
+
+def test_gurobi_miqcp_smoke_if_available():
+    _require_gurobi()
+
+    result = gurobi_backend.solve_qcp(
+        Q=np.zeros((2, 2)),
+        c=np.array([-1.0, 0.0]),
+        bounds=[(0.0, 2.0), (0.0, 1.0)],
+        quadratic_constraints=[
+            (np.array([[2.0, 0.0], [0.0, 0.0]]), np.array([0.0, -1.0]), "<=", 0.0),
+        ],
+        integrality=np.array([0, 1], dtype=np.int32),
+    )
+
+    assert result.status == SolveStatus.OPTIMAL
+    assert result.x is not None
+    np.testing.assert_allclose(result.x, [1.0, 1.0], atol=1e-6)
+    assert result.objective == pytest.approx(-1.0, abs=1e-6)
+
+
+def test_gurobi_nonconvex_qcp_smoke_if_available():
+    _require_gurobi()
+
+    result = gurobi_backend.solve_qcp(
+        Q=np.zeros((1, 1)),
+        c=np.array([1.0]),
+        bounds=[(-2.0, 2.0)],
+        quadratic_constraints=[
+            (np.array([[2.0]]), np.array([0.0]), ">=", 1.0),
+        ],
+        options={"NonConvex": 2},
+    )
+
+    assert result.status == SolveStatus.OPTIMAL
+    assert result.x is not None
+    assert result.x[0] == pytest.approx(-2.0, abs=1e-6)
+    assert result.objective == pytest.approx(-2.0, abs=1e-6)
+
+
 def test_model_solve_gurobi_qp_smoke_if_available():
     _require_gurobi()
 
@@ -467,3 +701,18 @@ def test_model_solve_gurobi_miqp_smoke_if_available():
     assert result.objective == pytest.approx(0.0, abs=1e-7)
     assert result.x["x"] == pytest.approx(1.0, abs=1e-6)
     assert result.x["y"] == pytest.approx(2.0, abs=1e-6)
+
+
+def test_model_solve_gurobi_qcp_smoke_if_available():
+    _require_gurobi()
+
+    m = dm.Model("gurobi_qcp_model_solve_smoke")
+    x = m.continuous("x", lb=-2, ub=2)
+    m.minimize(x)
+    m.subject_to(x**2 <= 1)
+
+    result = m.solve(solver="gurobi", time_limit=30.0)
+
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(-1.0, abs=1e-6)
+    assert result.x["x"] == pytest.approx(-1.0, abs=1e-6)

@@ -2783,9 +2783,10 @@ class Model:
             ``obbt_at_root``, ``obbt_with_cutoff``, ``alphabb_cutoff_obbt``,
             and ``obbt_time_limit``.
             Use ``solver="gurobi"`` to select the optional Gurobi backend for
-            LP, MILP, QP, and MIQP models. Quadratic objectives use the
-            ``0.5 * x.T @ Q @ x + c.T @ x`` convention; nonconvex QP/MIQP
-            objectives require opting into Gurobi's nonconvex mode explicitly,
+            LP, MILP, QP, MIQP, QCP, and MIQCP models. Quadratic objectives
+            and quadratic constraints use the ``0.5 * x.T @ Q @ x + c.T @ x``
+            convention; nonconvex quadratic objectives or constraints require
+            opting into Gurobi's nonconvex mode explicitly,
             for example ``gurobi_options={"NonConvex": 2}``. Unsupported model
             classes raise ``NotImplementedError`` instead of silently falling
             back to another backend. Pass Gurobi parameters through
