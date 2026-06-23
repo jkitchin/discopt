@@ -8087,6 +8087,17 @@ def _solve_milp_highs(
 
     c_orig = np.asarray(lp_data.c[:n_orig])
 
+    # Charge already-elapsed time against the budget so HiGHS finishes by the
+    # SHARED deadline (t_start + time_limit), not a fresh full time_limit. A
+    # deferred upstream MILP attempt (e.g. _solve_milp_simplex burning its ~10 s
+    # slice before returning None) otherwise stacks on top of HiGHS's full
+    # budget, overrunning the user's time_limit by the upstream cost: tln6 /
+    # rsyn0810m03hfsg ran ~40 s on a 30 s limit (10 s simplex + a *fresh* 30 s
+    # HiGHS). Floor at a small positive value so HiGHS still returns its best
+    # incumbent rather than 0.0 (which HiGHS reads as "stop immediately").
+    if time_limit is not None:
+        time_limit = max(0.5, time_limit - (time.perf_counter() - t_start))
+
     try:
         result = _highs_solve_milp(
             c=c_orig,
