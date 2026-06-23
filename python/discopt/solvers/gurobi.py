@@ -143,7 +143,7 @@ def _has_explicit_nonconvex_option(options: Optional[dict]) -> bool:
 
 
 def _validate_quadratic_constraints(quadratic_constraints, n: int):
-    rows = []
+    rows: list[tuple[np.ndarray, np.ndarray, str, float]] = []
     if quadratic_constraints is None:
         return rows
     for k, row in enumerate(quadratic_constraints):
