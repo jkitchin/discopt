@@ -148,3 +148,52 @@ def test_synthetic_unbounded_slack_quotient_not_false_infeasible():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ── Spatial branching on nonlinear-term integers (issue #194 / PR #202) ──────
+# The fix above only removed the *false-infeasible*. The positive win — gear4
+# now *certifies* because the spatial tree branches on its integer-valued
+# integers (i1..i4) that carry an open McCormick gap — was unguarded: a
+# regression in nonlinear-term-integer detection or spatial-integer branching
+# would drop gear4 back to feasible-uncertified and the soundness test above
+# would still pass. These guard the win.
+
+
+def test_nonlinear_term_integers_are_detected_for_spatial_branching():
+    """A bilinear product of two *integer* variables must expose those integer
+    columns as nonlinear columns, so the solver registers them for spatial
+    branching (the `_nl_int_cols` step in solve_model)."""
+
+    from discopt._jax.mccormick_lp import MccormickLPRelaxer
+    from discopt.solver import _extract_variable_info
+
+    m = dm.Model("int_bilinear")
+    i = m.integer("i", lb=1, ub=10)
+    j = m.integer("j", lb=1, ub=10)
+    m.minimize(i * j)
+    m.subject_to(i + j >= 5)
+
+    _, _, _, int_offsets, int_sizes = _extract_variable_info(m)
+    int_cols = {c for off, sz in zip(int_offsets, int_sizes) for c in range(off, off + int(sz))}
+    relaxer = MccormickLPRelaxer(m)
+    assert relaxer.has_relaxable_nonlinearity
+    nl_int_cols = int_cols & set(relaxer.nonlinear_columns)
+    assert nl_int_cols, (
+        "integer variables inside a bilinear product were not flagged as nonlinear "
+        "columns; spatial-integer branching (#194) would not engage"
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.requires_pounce
+def test_gear4_certifies_via_spatial_integer_branching():
+    """gear4's integers (i1..i4) are integer-valued at the root but carry an open
+    McCormick gap on i1*i2 / i3*i4. Spatial branching on those integer columns
+    (#194 / PR #202) closes the gap and certifies the global optimum 1.64342847.
+    Without it the node dead-ends and gear4 stays feasible-but-uncertified."""
+    r = from_nl(str(_DATA / "gear4.nl")).solve(time_limit=180, gap_tolerance=1e-4)
+    assert r.status == "optimal", f"gear4 did not certify (status={r.status})"
+    assert r.gap_certified, "gear4 reached optimum but gap was not certified"
+    assert r.objective == pytest.approx(_GEAR4_OPT, abs=1e-2)
+    # The dual bound must have actually risen to meet the incumbent.
+    assert r.bound is not None and r.bound <= _GEAR4_OPT + 1e-3
