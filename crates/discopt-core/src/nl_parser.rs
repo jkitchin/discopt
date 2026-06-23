@@ -754,12 +754,25 @@ pub fn parse_nl(content: &str) -> Result<ModelRepr, NlParseError> {
         }
     }
 
-    // Last nlvoi of the (nlvo - nlvb) group (starts at max(nlvc, nlvb))
+    // Last nlvoi of the objective-only nonlinear group. The group's bounds depend
+    // on whether more nonlinear variables live in objectives than in constraints:
+    //   * nlvc >= nlvo (common): block = [max(nlvc,nlvb), max(nlvc,nlvb)+(nlvo-nlvb))
+    //   * nlvo  >  nlvc (AMPL edge case): the whole nonlinear block is [0, nlvo) and
+    //     the objective-only group is [nlvc, nlvo); its integer tail is
+    //     [nlvo-nlvoi, nlvo).  The old `(nlvo - nlvb)`-sized formula placed that tail
+    //     out of range here, silently leaving the variables continuous — which on
+    //     ex1252a relaxed its 3 binaries (b22..b24) to [0,1], enlarging the feasible
+    //     set and yielding a *false-feasible* incumbent below the true optimum.
     if nlvoi > 0 && nlvo > nlvb {
-        let obj_start = std::cmp::max(nlvc, nlvb);
-        let group_size = nlvo - nlvb;
-        if group_size >= nlvoi {
-            let start = obj_start + group_size - nlvoi;
+        let (obj_only_start, obj_only_end) = if nlvo > nlvc {
+            (nlvc, nlvo)
+        } else {
+            let s = std::cmp::max(nlvc, nlvb);
+            (s, s + (nlvo - nlvb))
+        };
+        let group_size = obj_only_end.saturating_sub(obj_only_start);
+        if group_size >= nlvoi && obj_only_end <= n_vars {
+            let start = obj_only_end - nlvoi;
             for vt in var_types.iter_mut().skip(start).take(nlvoi) {
                 *vt = VarType::Integer;
             }
