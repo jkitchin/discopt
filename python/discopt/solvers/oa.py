@@ -46,7 +46,6 @@ class OAConfig:
     feasibility_cuts: bool = True
     add_nogood_cuts: bool = True
     log_iterations: bool = True
-    milp_solver: str = "auto"
 
 
 # ── Problem Decomposition ─────────────────────────────────────
