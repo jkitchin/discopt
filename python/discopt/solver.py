@@ -2982,7 +2982,7 @@ def solve_model(
         if problem_class is None:
             raise NotImplementedError(
                 "solver='gurobi' requires problem classification and currently "
-                "supports LP, MILP, QP, and MIQP models only."
+                "supports LP, MILP, QP, MIQP, QCP, and MIQCP models only."
             )
         if problem_class == ProblemClass.LP:
             return _solve_lp_gurobi(model, t_start, time_limit, threads, gurobi_options)
@@ -2998,8 +2998,17 @@ def solve_model(
             return _solve_qp_gurobi(
                 model, t_start, time_limit, gap_tolerance, threads, gurobi_options
             )
+        if problem_class in (
+            ProblemClass.QCP,
+            ProblemClass.QCQP,
+            ProblemClass.MIQCP,
+            ProblemClass.MIQCQP,
+        ):
+            return _solve_qcp_gurobi(
+                model, t_start, time_limit, gap_tolerance, threads, gurobi_options
+            )
         raise NotImplementedError(
-            f"solver='gurobi' supports LP, MILP, QP, and MIQP models only; "
+            f"solver='gurobi' supports LP, MILP, QP, MIQP, QCP, and MIQCP models only; "
             f"classified this model as {problem_class.value!r}."
         )
 
@@ -7684,6 +7693,149 @@ def _solve_qp_gurobi(
     if result is None:  # pragma: no cover - strict mode raises before this
         raise RuntimeError("Gurobi QP/MIQP solve failed without returning a result.")
     return result
+
+
+def _quadratic_rows_solution_feasible(x, quadratic_constraints, tol=1e-6) -> bool:
+    x = np.asarray(x, dtype=np.float64)
+    if not np.all(np.isfinite(x)):
+        return False
+    x_scale = 1.0 + float(np.max(np.abs(x))) if x.size else 1.0
+    for row in quadratic_constraints:
+        Q = np.asarray(row.Q, dtype=np.float64)
+        c = np.asarray(row.c, dtype=np.float64)
+        rhs = float(row.rhs)
+        value = float(0.5 * x @ Q @ x + c @ x)
+        scale = x_scale + abs(rhs) + abs(value)
+        if row.sense == "<=" and value > rhs + tol * scale:
+            return False
+        if row.sense == ">=" and value < rhs - tol * scale:
+            return False
+        if row.sense == "==" and abs(value - rhs) > tol * scale:
+            return False
+    return True
+
+
+def _solve_qcp_gurobi(
+    model: Model,
+    t_start: float,
+    time_limit: float | None = None,
+    gap_tolerance: float = 1e-4,
+    threads: int | None = None,
+    options: Optional[dict] = None,
+) -> SolveResult:
+    """Solve a QCP/QCQP/MIQCP/MIQCQP using the explicit Gurobi backend."""
+    from discopt._jax.problem_classifier import extract_qcp_data
+    from discopt.modeling.core import ObjectiveSense
+    from discopt.solvers import SolveStatus
+    from discopt.solvers.gurobi import solve_qcp as _gurobi_solve_qcp
+
+    qcp_data = extract_qcp_data(model)
+    n_orig = sum(v.size for v in model._variables)
+
+    bounds = list(
+        zip(
+            np.asarray(qcp_data.x_l[:n_orig]).tolist(),
+            np.asarray(qcp_data.x_u[:n_orig]).tolist(),
+        )
+    )
+
+    A_ub = np.asarray(qcp_data.A_ub, dtype=np.float64)
+    b_ub = np.asarray(qcp_data.b_ub, dtype=np.float64)
+    A_eq = np.asarray(qcp_data.A_eq, dtype=np.float64)
+    b_eq = np.asarray(qcp_data.b_eq, dtype=np.float64)
+    A_ub_arg = A_ub if A_ub.shape[0] else None
+    b_ub_arg = b_ub if b_ub.shape[0] else None
+    A_eq_arg = A_eq if A_eq.shape[0] else None
+    b_eq_arg = b_eq if b_eq.shape[0] else None
+
+    integrality = None
+    if any(v.var_type in (VarType.BINARY, VarType.INTEGER) for v in model._variables):
+        int_arr = np.zeros(n_orig, dtype=np.int32)
+        offset = 0
+        for v in model._variables:
+            if v.var_type in (VarType.BINARY, VarType.INTEGER):
+                int_arr[offset : offset + v.size] = 1
+            offset += v.size
+        integrality = int_arr
+
+    result = _gurobi_solve_qcp(
+        Q=np.asarray(qcp_data.Q[:n_orig, :n_orig]),
+        c=np.asarray(qcp_data.c[:n_orig]),
+        A_ub=A_ub_arg,
+        b_ub=b_ub_arg,
+        A_eq=A_eq_arg,
+        b_eq=b_eq_arg,
+        bounds=bounds,
+        quadratic_constraints=qcp_data.quadratic_constraints,
+        integrality=integrality,
+        time_limit=time_limit,
+        gap_tolerance=gap_tolerance,
+        threads=threads,
+        options=options,
+    )
+
+    wall_time = time.perf_counter() - t_start
+    assert model._objective is not None
+    sense = model._objective.sense
+
+    objective = None
+    if result.objective is not None:
+        objective = float(result.objective) + float(qcp_data.obj_const)
+        if sense == ObjectiveSense.MAXIMIZE:
+            objective = -objective
+
+    bound = None
+    if result.status == SolveStatus.OPTIMAL and objective is not None:
+        bound = objective
+    elif result.bound is not None:
+        bound = float(result.bound) + float(qcp_data.obj_const)
+        if sense == ObjectiveSense.MAXIMIZE:
+            bound = -bound
+
+    if result.status == SolveStatus.OPTIMAL:
+        assert result.x is not None and objective is not None
+        x_flat = np.asarray(result.x[:n_orig], dtype=np.float64)
+        if not _matrix_solution_feasible(x_flat, A_ub_arg, b_ub_arg, A_eq_arg, b_eq_arg, bounds):
+            raise RuntimeError("Gurobi QCP returned an infeasible point labeled optimal.")
+        if not _quadratic_rows_solution_feasible(x_flat, qcp_data.quadratic_constraints):
+            raise RuntimeError("Gurobi QCP returned a quadratic-row-infeasible optimal point.")
+        return SolveResult(
+            status="optimal",
+            objective=objective,
+            bound=objective,
+            gap=result.gap if result.gap is not None else _optimal_relative_gap(objective),
+            x=_unpack_solution(model, x_flat),
+            wall_time=wall_time,
+            node_count=result.node_count,
+            rust_time=0.0,
+            jax_time=0.0,
+            python_time=wall_time,
+        )
+    if result.status == SolveStatus.INFEASIBLE:
+        return SolveResult(status="infeasible", wall_time=wall_time, node_count=result.node_count)
+    if result.status == SolveStatus.UNBOUNDED:
+        return SolveResult(status="unbounded", wall_time=wall_time, node_count=result.node_count)
+    if result.status == SolveStatus.TIME_LIMIT:
+        return SolveResult(
+            status="time_limit",
+            objective=objective,
+            bound=bound,
+            gap=_relative_gap_from_objective_bound(objective, bound),
+            x=_unpack_solution(model, result.x[:n_orig]) if result.x is not None else None,
+            wall_time=wall_time,
+            node_count=result.node_count,
+        )
+    if result.status == SolveStatus.ITERATION_LIMIT:
+        return SolveResult(
+            status="iteration_limit",
+            objective=objective,
+            bound=bound,
+            gap=_relative_gap_from_objective_bound(objective, bound),
+            x=_unpack_solution(model, result.x[:n_orig]) if result.x is not None else None,
+            wall_time=wall_time,
+            node_count=result.node_count,
+        )
+    return SolveResult(status="error", wall_time=wall_time, node_count=result.node_count)
 
 
 def _matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, bounds, tol=1e-6) -> bool:

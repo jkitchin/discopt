@@ -1,5 +1,6 @@
 """
-Problem classification and standard-form extraction for LP, QP, MILP, MIQP, NLP, MINLP.
+Problem classification and standard-form extraction for LP, QP, QCP, MILP,
+MIQP, MIQCP, NLP, MINLP.
 
 Uses existing Rust structure detection (is_linear, is_quadratic) via PyO3 bindings
 to classify problems, then extracts standard-form data using the JAX DAG compiler.
@@ -45,14 +46,18 @@ class ProblemClass(Enum):
 
     LP = "lp"  # linear obj + linear constraints + all continuous
     QP = "qp"  # ≤quadratic obj + linear constraints + all continuous
+    QCP = "qcp"  # linear obj + at least one quadratic constraint + all continuous
+    QCQP = "qcqp"  # ≤quadratic obj + at least one quadratic constraint + all continuous
     MILP = "milp"  # linear obj + linear constraints + has integer/binary
     MIQP = "miqp"  # ≤quadratic obj + linear constraints + has integer/binary
+    MIQCP = "miqcp"  # linear obj + at least one quadratic constraint + has integer/binary
+    MIQCQP = "miqcqp"  # ≤quadratic obj + quadratic constraints + has integer/binary
     NLP = "nlp"  # general nonlinear + all continuous
     MINLP = "minlp"  # general nonlinear + has integer/binary
 
 
 def classify_problem(model: Model) -> ProblemClass:
-    """Classify a model into LP, QP, MILP, MIQP, NLP, or MINLP.
+    """Classify a model into LP, QP, QCP, MILP, MIQP, MIQCP, NLP, or MINLP.
 
     Uses Rust structure detection for degree analysis of the objective
     and constraints. Falls back to NLP/MINLP if Rust bindings unavailable.
@@ -75,6 +80,12 @@ def classify_problem(model: Model) -> ProblemClass:
         all_constraints_linear = all(
             repr.is_constraint_linear(i) for i in range(repr.n_constraints)
         )
+        if hasattr(repr, "is_constraint_quadratic"):
+            all_constraints_quadratic = all(
+                repr.is_constraint_quadratic(i) for i in range(repr.n_constraints)
+            )
+        else:
+            all_constraints_quadratic = all_constraints_linear
     except (ImportError, Exception):
         # Rust bindings unavailable — fall back to NLP/MINLP
         return ProblemClass.MINLP if has_integer else ProblemClass.NLP
@@ -84,6 +95,12 @@ def classify_problem(model: Model) -> ProblemClass:
             return ProblemClass.MILP if has_integer else ProblemClass.LP
         if obj_quadratic:
             return ProblemClass.MIQP if has_integer else ProblemClass.QP
+
+    if all_constraints_quadratic:
+        if obj_linear:
+            return ProblemClass.MIQCP if has_integer else ProblemClass.QCP
+        if obj_quadratic:
+            return ProblemClass.MIQCQP if has_integer else ProblemClass.QCQP
 
     return ProblemClass.MINLP if has_integer else ProblemClass.NLP
 
@@ -106,6 +123,30 @@ class QPData(NamedTuple):
     c: jnp.ndarray  # (n,) linear objective coefficients
     A_eq: jnp.ndarray  # (m, n) equality constraint matrix
     b_eq: jnp.ndarray  # (m,) equality RHS
+    x_l: jnp.ndarray  # (n,) lower bounds
+    x_u: jnp.ndarray  # (n,) upper bounds
+    obj_const: float = 0.0  # constant term in objective
+
+
+class QuadraticConstraintData(NamedTuple):
+    """Quadratic row data: 0.5 x'Qx + c'x sense rhs."""
+
+    Q: jnp.ndarray
+    c: jnp.ndarray
+    sense: str
+    rhs: float
+
+
+class QCPData(NamedTuple):
+    """Standard-form QCP/QCQP data with explicit linear and quadratic rows."""
+
+    Q: jnp.ndarray  # (n, n) quadratic objective matrix (symmetric)
+    c: jnp.ndarray  # (n,) linear objective coefficients
+    A_ub: jnp.ndarray  # (m_ub, n) linear inequality matrix
+    b_ub: jnp.ndarray  # (m_ub,) linear inequality RHS
+    A_eq: jnp.ndarray  # (m_eq, n) linear equality matrix
+    b_eq: jnp.ndarray  # (m_eq,) linear equality RHS
+    quadratic_constraints: tuple[QuadraticConstraintData, ...]
     x_l: jnp.ndarray  # (n,) lower bounds
     x_u: jnp.ndarray  # (n,) upper bounds
     obj_const: float = 0.0  # constant term in objective
@@ -623,6 +664,61 @@ def _extract_constraints_algebraic(model: Model, n_orig: int):
     return A_eq, b_eq, x_l, x_u, n_slack
 
 
+def _quadratic_row_has_terms(Q: np.ndarray, tol: float = 1e-12) -> bool:
+    return bool(np.any(np.abs(Q) > tol))
+
+
+def _empty_matrix(n_cols: int) -> np.ndarray:
+    return np.zeros((0, n_cols), dtype=np.float64)
+
+
+def _extract_qcp_constraints_algebraic(
+    model: Model,
+    n_orig: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, tuple[QuadraticConstraintData, ...]]:
+    """Extract linear and quadratic rows without introducing slack variables."""
+
+    constraints = [con for con in model._constraints if isinstance(con, Constraint)]
+
+    ub_rows: list[np.ndarray] = []
+    ub_rhs: list[float] = []
+    eq_rows: list[np.ndarray] = []
+    eq_rhs: list[float] = []
+    q_rows: list[QuadraticConstraintData] = []
+
+    for con in constraints:
+        Q, c_vec, const = _extract_quadratic_coefficients(con.body, model, n_orig)
+        rhs = float(con.rhs) - float(const)
+        if _quadratic_row_has_terms(Q):
+            q_rows.append(
+                QuadraticConstraintData(
+                    Q=np.asarray(Q),  # type: ignore[arg-type]
+                    c=np.asarray(c_vec),  # type: ignore[arg-type]
+                    sense=con.sense,
+                    rhs=rhs,
+                )
+            )
+            continue
+
+        if con.sense == "==":
+            eq_rows.append(c_vec)
+            eq_rhs.append(rhs)
+        elif con.sense == "<=":
+            ub_rows.append(c_vec)
+            ub_rhs.append(rhs)
+        elif con.sense == ">=":
+            ub_rows.append(-c_vec)
+            ub_rhs.append(-rhs)
+        else:
+            raise _NotQuadraticError(f"Unknown constraint sense: {con.sense}")
+
+    A_ub = np.stack(ub_rows).astype(np.float64) if ub_rows else _empty_matrix(n_orig)
+    b_ub = np.asarray(ub_rhs, dtype=np.float64)
+    A_eq = np.stack(eq_rows).astype(np.float64) if eq_rows else _empty_matrix(n_orig)
+    b_eq = np.asarray(eq_rhs, dtype=np.float64)
+    return A_ub, b_ub, A_eq, b_eq, tuple(q_rows)
+
+
 def extract_lp_data_algebraic(model: Model) -> LPData:
     """Extract LP standard form by walking the expression DAG algebraically.
 
@@ -699,6 +795,38 @@ def extract_qp_data_algebraic(model: Model) -> QPData:
         b_eq=b_eq,
         x_l=x_l,
         x_u=x_u,
+        obj_const=obj_const,
+    )
+
+
+def extract_qcp_data_algebraic(model: Model) -> QCPData:
+    """Extract QCP/QCQP data by walking the expression DAG algebraically."""
+
+    from discopt.modeling.core import ObjectiveSense
+
+    n_orig = sum(v.size for v in model._variables)
+    assert model._objective is not None
+    obj_expr = model._objective.expression
+
+    Q, c_vec, obj_const = _extract_quadratic_coefficients(obj_expr, model, n_orig)
+    A_ub, b_ub, A_eq, b_eq, q_rows = _extract_qcp_constraints_algebraic(model, n_orig)
+    x_l, x_u = _get_variable_bounds(model)
+
+    if model._objective.sense == ObjectiveSense.MAXIMIZE:
+        Q = -Q
+        c_vec = -c_vec
+        obj_const = -obj_const
+
+    return QCPData(
+        Q=np.asarray(Q),  # type: ignore[arg-type]
+        c=np.asarray(c_vec),  # type: ignore[arg-type]
+        A_ub=np.asarray(A_ub),  # type: ignore[arg-type]
+        b_ub=np.asarray(b_ub),  # type: ignore[arg-type]
+        A_eq=np.asarray(A_eq),  # type: ignore[arg-type]
+        b_eq=np.asarray(b_eq),  # type: ignore[arg-type]
+        quadratic_constraints=q_rows,
+        x_l=np.asarray(x_l),  # type: ignore[arg-type]
+        x_u=np.asarray(x_u),  # type: ignore[arg-type]
         obj_const=obj_const,
     )
 
@@ -885,6 +1013,114 @@ def _extract_qp_data_from_repr(model: Model) -> QPData:
     )
 
 
+def _extract_quadratic_coefficients_from_values(evaluate, n_vars: int):
+    """Extract 0.5*x'Q*x + c'x + d from a quadratic scalar evaluator."""
+
+    x_zero = np.zeros(n_vars, dtype=np.float64)
+    d = float(evaluate(x_zero))
+
+    f_ej = np.zeros(n_vars, dtype=np.float64)
+    f_neg_ej = np.zeros(n_vars, dtype=np.float64)
+    for j in range(n_vars):
+        ej = np.zeros(n_vars, dtype=np.float64)
+        ej[j] = 1.0
+        f_ej[j] = float(evaluate(ej))
+        ej[j] = -1.0
+        f_neg_ej[j] = float(evaluate(ej))
+
+    Q = np.zeros((n_vars, n_vars), dtype=np.float64)
+    for j in range(n_vars):
+        Q[j, j] = f_ej[j] + f_neg_ej[j] - 2.0 * d
+
+    for i in range(n_vars):
+        for j in range(i + 1, n_vars):
+            eij = np.zeros(n_vars, dtype=np.float64)
+            eij[i] = 1.0
+            eij[j] = 1.0
+            f_eij = float(evaluate(eij))
+            qij = f_eij - f_ej[i] - f_ej[j] + d
+            Q[i, j] = qij
+            Q[j, i] = qij
+
+    c_vec = np.zeros(n_vars, dtype=np.float64)
+    for j in range(n_vars):
+        c_vec[j] = f_ej[j] - d - 0.5 * Q[j, j]
+
+    return Q, c_vec, d
+
+
+def _extract_qcp_data_from_repr(model: Model) -> QCPData:
+    """Extract QCP/QCQP data by evaluating the Rust ModelRepr."""
+
+    from discopt._rust import model_to_repr
+
+    _builder = getattr(model, "_builder", None)
+    repr_ = model_to_repr(model, _builder)
+
+    n_orig = repr_.n_vars
+    Q, c_vec, obj_const = _extract_quadratic_coefficients_from_values(
+        repr_.evaluate_objective,
+        n_orig,
+    )
+
+    ub_rows: list[np.ndarray] = []
+    ub_rhs: list[float] = []
+    eq_rows: list[np.ndarray] = []
+    eq_rhs: list[float] = []
+    q_rows: list[QuadraticConstraintData] = []
+
+    for i in range(repr_.n_constraints):
+        row_Q, row_c, row_const = _extract_quadratic_coefficients_from_values(
+            lambda x, _i=i: repr_.evaluate_constraint(_i, x),
+            n_orig,
+        )
+        sense = repr_.constraint_sense(i)
+        rhs = float(repr_.constraint_rhs(i)) - float(row_const)
+        if _quadratic_row_has_terms(row_Q):
+            q_rows.append(
+                QuadraticConstraintData(
+                    Q=np.asarray(row_Q),  # type: ignore[arg-type]
+                    c=np.asarray(row_c),  # type: ignore[arg-type]
+                    sense=sense,
+                    rhs=rhs,
+                )
+            )
+            continue
+        if sense == "==":
+            eq_rows.append(row_c)
+            eq_rhs.append(rhs)
+        elif sense == "<=":
+            ub_rows.append(row_c)
+            ub_rhs.append(rhs)
+        elif sense == ">=":
+            ub_rows.append(-row_c)
+            ub_rhs.append(-rhs)
+
+    x_l, x_u = _get_variable_bounds(model)
+    A_ub = np.stack(ub_rows).astype(np.float64) if ub_rows else _empty_matrix(n_orig)
+    b_ub = np.asarray(ub_rhs, dtype=np.float64)
+    A_eq = np.stack(eq_rows).astype(np.float64) if eq_rows else _empty_matrix(n_orig)
+    b_eq = np.asarray(eq_rhs, dtype=np.float64)
+
+    if repr_.objective_sense == "maximize":
+        Q = -Q
+        c_vec = -c_vec
+        obj_const = -obj_const
+
+    return QCPData(
+        Q=np.asarray(Q),  # type: ignore[arg-type]
+        c=np.asarray(c_vec),  # type: ignore[arg-type]
+        A_ub=np.asarray(A_ub),  # type: ignore[arg-type]
+        b_ub=np.asarray(b_ub),  # type: ignore[arg-type]
+        A_eq=np.asarray(A_eq),  # type: ignore[arg-type]
+        b_eq=np.asarray(b_eq),  # type: ignore[arg-type]
+        quadratic_constraints=tuple(q_rows),
+        x_l=np.asarray(x_l),  # type: ignore[arg-type]
+        x_u=np.asarray(x_u),  # type: ignore[arg-type]
+        obj_const=float(obj_const),
+    )
+
+
 def extract_lp_data(model: Model) -> LPData:
     """Extract LP standard form from a model classified as LP.
 
@@ -1036,6 +1272,18 @@ def extract_qp_data(model: Model) -> QPData:
         pass
 
     return _extract_qp_data_autodiff(model)
+
+
+def extract_qcp_data(model: Model) -> QCPData:
+    """Extract QCP/QCQP data from a model classified as QCP/QCQP/MIQCP/MIQCQP."""
+    _builder = getattr(model, "_builder", None)
+    if _builder is not None:
+        try:
+            return _extract_qcp_data_from_repr(model)
+        except Exception:
+            pass
+
+    return extract_qcp_data_algebraic(model)
 
 
 def _extract_qp_data_autodiff(model: Model) -> QPData:

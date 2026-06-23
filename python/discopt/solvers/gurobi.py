@@ -1,13 +1,13 @@
-"""Gurobi LP/MILP/QP/MIQP solver wrappers.
+"""Gurobi LP/MILP/QP/MIQP/QCP/MIQCP solver wrappers.
 
 This module mirrors the matrix-form HiGHS wrappers: callers pass extracted
 standard-form arrays and receive discopt result dataclasses. ``gurobipy`` stays
 optional and is imported only inside the solver path.
 
-Quadratic objectives use the discopt/HiGHS convention
+Quadratic objectives and quadratic constraints use the discopt/HiGHS convention
 ``0.5 * x.T @ Q @ x + c.T @ x``. Nonconvex ``Q`` matrices are rejected by
 default; pass an explicit Gurobi ``NonConvex`` parameter through ``options`` to
-delegate nonconvex QP/MIQP handling to Gurobi.
+delegate nonconvex quadratic handling to Gurobi.
 """
 
 from __future__ import annotations
@@ -109,10 +109,74 @@ def _has_nonconvex_objective(Q: np.ndarray) -> bool:
     return min_eig < -1e-9 * scale
 
 
+def _eigenvalue_span(Q: np.ndarray) -> tuple[float, float]:
+    if Q.size == 0:
+        return 0.0, 0.0
+    try:
+        eigvals = np.linalg.eigvalsh(Q)
+    except np.linalg.LinAlgError:
+        return -np.inf, np.inf
+    return float(np.min(eigvals)), float(np.max(eigvals))
+
+
+def _quadratic_constraint_requires_nonconvex(Q: np.ndarray, sense: str) -> bool:
+    """Return true when the quadratic row is not a convex Gurobi QCP row."""
+
+    if not np.any(np.abs(Q) > 1e-12):
+        return False
+    min_eig, max_eig = _eigenvalue_span(Q)
+    scale = max(1.0, float(np.max(np.abs(Q))))
+    tol = 1e-9 * scale
+    if sense == "<=":
+        return min_eig < -tol
+    if sense == ">=":
+        return max_eig > tol
+    if sense == "==":
+        return True
+    raise ValueError(f"Unknown quadratic constraint sense: {sense!r}")
+
+
 def _has_explicit_nonconvex_option(options: Optional[dict]) -> bool:
     if not options:
         return False
     return any(str(key).lower() == "nonconvex" for key in options)
+
+
+def _validate_quadratic_constraints(quadratic_constraints, n: int):
+    rows = []
+    if quadratic_constraints is None:
+        return rows
+    for k, row in enumerate(quadratic_constraints):
+        if hasattr(row, "Q"):
+            Q_raw = row.Q
+            c_raw = row.c
+            sense = str(row.sense)
+            rhs = float(row.rhs)
+        else:
+            Q_raw, c_raw, sense_raw, rhs_raw = row
+            sense = str(sense_raw)
+            rhs = float(rhs_raw)
+        if sp.issparse(Q_raw):
+            Q_arr = sp.csr_matrix(Q_raw, dtype=np.float64).toarray()
+        else:
+            Q_arr = np.asarray(Q_raw, dtype=np.float64)
+        c_arr = np.asarray(c_raw, dtype=np.float64).ravel()
+        if Q_arr.shape != (n, n):
+            raise ValueError(
+                f"quadratic constraint {k} Q has shape {Q_arr.shape} but c has {n} elements"
+            )
+        if c_arr.shape[0] != n:
+            raise ValueError(
+                f"quadratic constraint {k} c has {c_arr.shape[0]} entries but objective c has {n}"
+            )
+        if sense not in {"<=", ">=", "=="}:
+            raise ValueError(f"quadratic constraint {k} has unknown sense {sense!r}")
+        if not np.all(np.isfinite(Q_arr)) or not np.all(np.isfinite(c_arr)):
+            raise ValueError(f"quadratic constraint {k} contains non-finite coefficients")
+        if not np.allclose(Q_arr, Q_arr.T, rtol=1e-10, atol=1e-12):
+            Q_arr = 0.5 * (Q_arr + Q_arr.T)
+        rows.append((Q_arr, c_arr, sense, rhs))
+    return rows
 
 
 def _normalise_bounds(
@@ -485,6 +549,124 @@ def solve_qp(
                 gap=0.0 if gap is None else gap,
                 dual_values=row_duals,
                 reduced_costs=reduced_costs,
+                node_count=node_count,
+                iterations=iters,
+                wall_time=wall_time,
+            )
+
+        return QPResult(
+            status=status,
+            x=x_val,
+            objective=objective,
+            bound=bound,
+            gap=gap,
+            node_count=node_count,
+            iterations=iters,
+            wall_time=wall_time,
+        )
+    finally:
+        model.dispose()
+        env.dispose()
+
+
+def solve_qcp(
+    Q: Union[np.ndarray, sp.spmatrix],
+    c: np.ndarray,
+    A_ub: Optional[Union[np.ndarray, sp.spmatrix]] = None,
+    b_ub: Optional[np.ndarray] = None,
+    A_eq: Optional[Union[np.ndarray, sp.spmatrix]] = None,
+    b_eq: Optional[np.ndarray] = None,
+    bounds: Optional[list[tuple[float, float]]] = None,
+    quadratic_constraints=None,
+    integrality: Optional[np.ndarray] = None,
+    time_limit: Optional[float] = None,
+    gap_tolerance: float = 1e-4,
+    threads: Optional[int] = None,
+    options: Optional[dict] = None,
+) -> QPResult:
+    """Solve a continuous or mixed-integer quadratically constrained program.
+
+    The objective and each quadratic row use ``0.5 * x.T @ Q @ x + c.T @ x``.
+    Convex QCP/MIQCP rows solve without extra options. Nonconvex objectives,
+    indefinite ``<=`` rows, non-concave ``>=`` rows, and quadratic equalities
+    require an explicit ``NonConvex`` Gurobi parameter in ``options``.
+    """
+    Q_arr, c_arr, n = _validate_qp_data(Q, c, A_ub, b_ub, A_eq, b_eq, bounds)
+    q_rows = _validate_quadratic_constraints(quadratic_constraints, n)
+
+    has_nonconvex_quadratic = _has_nonconvex_objective(Q_arr) or any(
+        _quadratic_constraint_requires_nonconvex(row_Q, sense)
+        for row_Q, _row_c, sense, _rhs in q_rows
+    )
+    if has_nonconvex_quadratic and not _has_explicit_nonconvex_option(options):
+        raise ValueError(
+            "Gurobi QCP/MIQCP nonconvex quadratic detected. Pass "
+            "gurobi_options={'NonConvex': 2} to Model.solve(solver='gurobi'), "
+            "or options={'NonConvex': 2} when calling "
+            "discopt.solvers.gurobi.solve_qcp directly."
+        )
+
+    gp, GRB = _load_gurobi()
+
+    has_integer = integrality is not None and np.any(np.asarray(integrality, dtype=np.int32) == 1)
+    qcp_bounds = bounds
+    if qcp_bounds is None:
+        qcp_bounds = [(-GRB.INFINITY, GRB.INFINITY)] * n
+
+    env, model, x, _ub_con, _eq_con = _build_model(
+        gp,
+        GRB,
+        name="discopt_miqcp" if has_integer else "discopt_qcp",
+        c=c_arr,
+        A_ub=A_ub,
+        b_ub=b_ub,
+        A_eq=A_eq,
+        b_eq=b_eq,
+        bounds=qcp_bounds,
+        integrality=integrality,
+        time_limit=time_limit,
+        gap_tolerance=gap_tolerance if has_integer else None,
+        threads=threads,
+        options=options,
+    )
+    try:
+        model.setObjective(0.5 * (x @ Q_arr @ x) + c_arr @ x, GRB.MINIMIZE)
+        for k, (row_Q, row_c, sense, rhs) in enumerate(q_rows):
+            expr = 0.5 * (x @ row_Q @ x) + row_c @ x
+            if sense == "<=":
+                model.addQConstr(expr <= rhs, name=f"qcp_{k}")
+            elif sense == ">=":
+                model.addQConstr(expr >= rhs, name=f"qcp_{k}")
+            elif sense == "==":
+                model.addQConstr(expr == rhs, name=f"qcp_{k}")
+            else:  # pragma: no cover - validated before model construction
+                raise ValueError(f"Unknown quadratic constraint sense: {sense!r}")
+
+        status_code = _optimize(model, GRB)
+        status = _status_map(GRB).get(status_code, SolveStatus.ERROR)
+        iters = int(_safe_attr(model, "IterCount") or 0)
+        node_count = int(_safe_attr(model, "NodeCount") or 0)
+        wall_time = float(_safe_attr(model, "Runtime") or 0.0)
+
+        objective = None
+        x_val = None
+        if int(_safe_attr(model, "SolCount") or 0) > 0:
+            objective = float(model.ObjVal)
+            x_val = np.asarray(x.X, dtype=np.float64).ravel()
+
+        bound = _safe_attr(model, "ObjBound")
+        bound = float(bound) if bound is not None and np.isfinite(bound) else None
+        gap = _safe_attr(model, "MIPGap")
+        gap = float(gap) if gap is not None and np.isfinite(gap) else None
+
+        if status == SolveStatus.OPTIMAL:
+            assert objective is not None and x_val is not None
+            return QPResult(
+                status=status,
+                x=x_val,
+                objective=objective,
+                bound=objective if bound is None else bound,
+                gap=0.0 if gap is None else gap,
                 node_count=node_count,
                 iterations=iters,
                 wall_time=wall_time,
