@@ -2355,12 +2355,14 @@ def solve_model(
         _note_ignored("branching_policy", branching_policy != "fractional")
         _note_ignored("use_learned_relaxations", use_learned_relaxations is not False)
         _note_ignored("mccormick_bounds", mccormick_bounds != "auto")
-        _note_ignored("gdp_method", gdp_method != "big-m")
         _note_ignored("nlp_bb", nlp_bb is not None)
         _note_ignored("lazy_constraints", lazy_constraints is not None)
         _note_ignored("incumbent_callback", incumbent_callback is not None)
         _note_ignored("node_callback", node_callback is not None)
         _note_ignored("use_highs_milp", use_highs_milp is not True)
+        amp_gdp_methods = {"big-m", "hull", "mbigm", "auto"}
+        amp_gdp_method = gdp_method if gdp_method in amp_gdp_methods else "big-m"
+        _note_ignored("gdp_method", gdp_method not in amp_gdp_methods)
         if kwargs:
             ignored_amp_options.extend(sorted(kwargs))
         if ignored_amp_options:
@@ -2373,6 +2375,14 @@ def solve_model(
         # rel_gap defaults to gap_tolerance if not separately provided
         if "rel_gap" not in amp_kwargs:
             amp_kwargs["rel_gap"] = gap_tolerance
+
+        from discopt._jax.gdp_reformulate import reformulate_gdp
+
+        model = reformulate_gdp(
+            model,
+            method=amp_gdp_method,
+            respect_disjunction_methods=False,
+        )
 
         return solve_amp(
             model,
