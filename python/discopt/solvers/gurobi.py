@@ -634,11 +634,11 @@ def solve_qcp(
         for k, (row_Q, row_c, sense, rhs) in enumerate(q_rows):
             expr = 0.5 * (x @ row_Q @ x) + row_c @ x
             if sense == "<=":
-                model.addQConstr(expr <= rhs, name=f"qcp_{k}")
+                model.addConstr(expr <= rhs, name=f"qcp_{k}")
             elif sense == ">=":
-                model.addQConstr(expr >= rhs, name=f"qcp_{k}")
+                model.addConstr(expr >= rhs, name=f"qcp_{k}")
             elif sense == "==":
-                model.addQConstr(expr == rhs, name=f"qcp_{k}")
+                model.addConstr(expr == rhs, name=f"qcp_{k}")
             else:  # pragma: no cover - validated before model construction
                 raise ValueError(f"Unknown quadratic constraint sense: {sense!r}")
 
