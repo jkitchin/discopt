@@ -3,6 +3,8 @@
 //! For each binary variable, temporarily fix it to 0 and 1, run FBBT,
 //! and use the results to detect fixings, tightened bounds, and implications.
 
+use std::time::Instant;
+
 use super::fbbt::{fbbt, Interval, FEAS_TOL};
 use crate::expr::{ModelRepr, VarType};
 
@@ -37,6 +39,20 @@ pub struct Implication {
 /// - Tighter bounds from intersecting the two cases.
 /// - Implications for bound tightening.
 pub fn probe_binary_vars(model: &ModelRepr, var_bounds: &[Interval]) -> ProbingResult {
+    probe_binary_vars_until(model, var_bounds, None)
+}
+
+/// Like [`probe_binary_vars`] but stops once `deadline` passes, returning the
+/// implications gathered so far. Probing clones the model and runs FBBT per
+/// binary variable, so a full pass on a large model can take minutes — far
+/// past the orchestrator's *between-passes* time check. Bailing mid-loop only
+/// performs *fewer* tightenings; every implication already found stays valid,
+/// so the early exit is sound.
+pub fn probe_binary_vars_until(
+    model: &ModelRepr,
+    var_bounds: &[Interval],
+    deadline: Option<Instant>,
+) -> ProbingResult {
     let n = var_bounds.len();
     let mut fixed_vars: Vec<(usize, f64)> = Vec::new();
     let mut best_bounds = var_bounds.to_vec();
@@ -46,6 +62,11 @@ pub fn probe_binary_vars(model: &ModelRepr, var_bounds: &[Interval]) -> ProbingR
     let fbbt_tol = 1e-8;
 
     for (i, vinfo) in model.variables.iter().enumerate() {
+        if let Some(dl) = deadline {
+            if Instant::now() >= dl {
+                break;
+            }
+        }
         if vinfo.var_type != VarType::Binary {
             continue;
         }
@@ -231,6 +252,92 @@ mod tests {
         assert_eq!(result.fixed_vars.len(), 1);
         assert_eq!(result.fixed_vars[0].0, 1);
         assert!((result.fixed_vars[0].1 - 0.0).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_probing_honors_past_deadline() {
+        // Same model as `test_probing_fixes_binary_var` (probing would fix y=0),
+        // but with a deadline already in the past. The orchestrator only checks
+        // the time budget *between* passes, so probing — which clones the model
+        // and runs FBBT per binary — must poll the deadline itself and bail
+        // before doing work. Returning fewer tightenings is always sound.
+        let mut arena = ExprArena::new();
+        let x = arena.add(ExprNode::Variable {
+            name: "x".into(),
+            index: 0,
+            size: 1,
+            shape: vec![],
+        });
+        let y = arena.add(ExprNode::Variable {
+            name: "y".into(),
+            index: 1,
+            size: 1,
+            shape: vec![],
+        });
+        let c10 = arena.add(ExprNode::Constant(10.0));
+        let prod = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: c10,
+            right: y,
+        });
+        let sum = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Add,
+            left: x,
+            right: prod,
+        });
+        let model = ModelRepr {
+            arena,
+            objective: ExprId(0),
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![ConstraintRepr {
+                body: sum,
+                sense: ConstraintSense::Le,
+                rhs: 5.0,
+                name: Some("c1".into()),
+            }],
+            variables: vec![
+                VarInfo {
+                    name: "x".into(),
+                    var_type: VarType::Continuous,
+                    offset: 0,
+                    size: 1,
+                    shape: vec![],
+                    lb: vec![0.0],
+                    ub: vec![10.0],
+                },
+                VarInfo {
+                    name: "y".into(),
+                    var_type: VarType::Binary,
+                    offset: 1,
+                    size: 1,
+                    shape: vec![],
+                    lb: vec![0.0],
+                    ub: vec![1.0],
+                },
+            ],
+            n_vars: 2,
+        };
+
+        let var_bounds = vec![Interval::new(0.0, 10.0), Interval::new(0.0, 1.0)];
+
+        // No deadline: probing does its work and fixes y=0 (control).
+        let unbounded = probe_binary_vars_until(&model, &var_bounds, None);
+        assert_eq!(unbounded.fixed_vars.len(), 1);
+
+        // Deadline already in the past: probing bails at the first loop check,
+        // before probing any binary, so no fixings are reported.
+        let past = std::time::Instant::now();
+        let bailed = probe_binary_vars_until(&model, &var_bounds, Some(past));
+        assert!(
+            bailed.fixed_vars.is_empty(),
+            "probing must bail before any work once the deadline has passed"
+        );
+        // Bounds pass through unchanged on the early exit.
+        assert_eq!(bailed.tightened_bounds.len(), var_bounds.len());
+        for (got, want) in bailed.tightened_bounds.iter().zip(var_bounds.iter()) {
+            assert_eq!(got.lo, want.lo);
+            assert_eq!(got.hi, want.hi);
+        }
     }
 
     #[test]

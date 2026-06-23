@@ -192,6 +192,17 @@ _POUNCE_BATCH_MIN_VARS = 50
 # budget. Nodes that start fully past the deadline are skipped (see the serial
 # loop), so at most one node per batch can overrun by this floor.
 _DEADLINE_NODE_FLOOR_S = 0.1
+# Dense-Jacobian compilation guard. ``NLPEvaluator.evaluate_jacobian`` uses
+# ``jax.jit(jax.jacfwd(...))`` — a forward-mode dense Jacobian whose compiled XLA
+# program replicates the whole constraint system once per input variable. For a
+# large model (n inputs x m constraints) that jaxpr explodes during MLIR
+# lowering and XLA aborts the *process* with a native SIGBUS/SIGILL — not a
+# catchable Python exception. Above this many dense entries (n * m), code paths
+# that only need the Jacobian as an optimization skip the dense compile and use
+# a Jacobian-free fallback. rsyn0810m03hfsg (1185 x 1935 ~ 2.3M) crashed here
+# once presolve was fast enough to reach node bound-tightening; tln6 (~1.7k) and
+# the broad corpus sit far below the cap, so this is inert on normal models.
+_MAX_DENSE_JACOBIAN_ELEMS = 1_000_000
 # Per-node OBBT (Lever A) gates. Per-node optimization-based bound tightening is
 # powerful but costs O(n_vars) LPs per node, so it is enabled only for the
 # functionally-dependent-intermediate structural class and on small models, and
@@ -763,6 +774,17 @@ def _tighten_node_bounds_with_status(evaluator, node_lb, node_ub, cl_list, cu_li
     m = len(cl_list)
     cu = np.array(cu_list, dtype=np.float64)
     cl = np.array(cl_list, dtype=np.float64)
+
+    # Dense-Jacobian compilation guard (see _MAX_DENSE_JACOBIAN_ELEMS). The
+    # two-point linearity test below calls evaluate_jacobian, which JIT-compiles
+    # a forward-mode dense Jacobian; on a large model that XLA lowering aborts
+    # the process with a native SIGBUS/SIGILL the try/except cannot catch. Above
+    # the cap, skip the linearity test entirely and fall back to the structural
+    # / interval nonlinear tightening (the same fallback taken when no
+    # constraint is detected linear) — it needs no monolithic Jacobian compile,
+    # so it only forgoes an optimization and never changes a bound unsoundly.
+    if n * m > _MAX_DENSE_JACOBIAN_ELEMS:
+        return _apply_nonlinear_tightening_with_status(evaluator._model, lb, ub)
 
     # Detect which constraints are linear by checking if the Jacobian
     # changes between two distinct evaluation points.  FBBT via Jacobian
