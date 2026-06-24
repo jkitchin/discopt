@@ -3488,6 +3488,11 @@ def from_nl(path: str) -> Model:
 
     # Keep nl_repr for backward compatibility (Rust evaluator for validation)
     m._nl_repr = nl_repr
+    # Record the source path so the solver can hand POUNCE the original .nl for
+    # native-AD node NLP solves (discopt.solvers.nlp_native), bypassing the JAX
+    # callback bridge. The .nl column order is the model's variable order here,
+    # so the native problem aligns with the evaluator's flat x (identity map).
+    m._source_nl_path = os.path.abspath(path)
 
     return m
 

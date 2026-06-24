@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 
-from discopt.modeling.core import Constraint, Model, SolveResult, VarType
+from discopt.modeling.core import Constraint, Model, ObjectiveSense, SolveResult, VarType
 
 if TYPE_CHECKING:
     from discopt._jax.nlp_evaluator import NLPEvaluator
@@ -133,6 +133,15 @@ def _decompose_model(model: Model) -> _DecomposedProblem:
         _extract_body_coeffs(raw_obj.expression, model, n_vars) if raw_obj is not None else None
     )
     obj_is_linear = obj_coeffs is not None
+    # The NLPEvaluator works in minimization convention: it negates a MAXIMIZE
+    # objective, so the NLP subproblems and the epigraph objective OA cuts all
+    # optimize ``-f``. Put the *linear* master objective in the same convention.
+    # Without this the master MILP minimizes ``+f`` while the subproblems maximize
+    # it, and OA converges to — and certifies as optimal — a wrong point
+    # (e.g. syn05m: returned -831 as "optimal" vs the true maximum 837.73).
+    if obj_coeffs is not None and raw_obj is not None and raw_obj.sense == ObjectiveSense.MAXIMIZE:
+        _c_vec, _c_off = obj_coeffs
+        obj_coeffs = (-_c_vec, -_c_off)
 
     return _DecomposedProblem(
         evaluator=evaluator,
@@ -656,6 +665,14 @@ def solve_oa(
     evaluator = decomp.evaluator
     n_vars = decomp.n_vars
     n_cons = decomp.n_cons
+    # The whole OA loop runs in the evaluator's minimization convention (it
+    # negates a MAXIMIZE objective). Un-negate the user-facing objective/bound at
+    # the return sites with this sign; the gap is convention-invariant.
+    _obj_sign = (
+        -1.0
+        if (model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE)
+        else 1.0
+    )
     if decomp.oa_constraint_mask is not None and not all(decomp.oa_constraint_mask):
         logger.warning(
             "OA: generating OA cuts only for %d of %d constraints classified convex",
@@ -675,8 +692,8 @@ def solve_oa(
         if x_sol is not None:
             return SolveResult(
                 status="optimal",
-                objective=obj,
-                bound=obj,
+                objective=_obj_sign * obj,
+                bound=_obj_sign * obj,
                 gap=0.0,
                 x=_build_x_dict(x_sol, model),
                 wall_time=wall_time,
@@ -933,12 +950,12 @@ def solve_oa(
     bound = LB if decomp.master_bound_valid and LB > -1e19 else None
     reported_gap = gap if bound is not None and UB < 1e19 else None
 
-    if incumbent is not None:
+    if incumbent is not None and incumbent_obj is not None:
         status = "optimal" if gap <= gap_tolerance else "feasible"
         return SolveResult(
             status=status,
-            objective=incumbent_obj,
-            bound=bound,
+            objective=_obj_sign * incumbent_obj,
+            bound=(_obj_sign * bound if bound is not None else None),
             gap=reported_gap,
             x=_build_x_dict(incumbent, model),
             wall_time=wall_time,
@@ -947,7 +964,7 @@ def solve_oa(
     return SolveResult(
         status="infeasible",
         objective=None,
-        bound=bound,
+        bound=(_obj_sign * bound if bound is not None else None),
         gap=None,
         x={},
         wall_time=wall_time,

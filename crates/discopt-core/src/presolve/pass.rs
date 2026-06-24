@@ -26,6 +26,8 @@
 //! unsorted `HashMap` iteration in the result path). New passes added
 //! later must preserve this.
 
+use std::time::Instant;
+
 use super::delta::PresolveDelta;
 use super::fbbt::Interval;
 use crate::expr::ModelRepr;
@@ -62,6 +64,13 @@ pub struct PresolveContext {
     pub work_units_used: u64,
     /// Cumulative wall time consumed by passes in this run.
     pub time_used_ms: f64,
+    /// Absolute wall-clock deadline for the whole presolve run, if set.
+    /// The orchestrator only checks the time budget *between* passes, so a
+    /// single long pass (e.g. probing, which clones the model and runs FBBT
+    /// per binary variable) can overrun it badly on large models. Passes that
+    /// loop over variables poll this to bail early with partial — and still
+    /// sound — results.
+    pub deadline: Option<Instant>,
 }
 
 impl PresolveContext {
@@ -85,6 +94,7 @@ impl PresolveContext {
             iter: 0,
             work_units_used: 0,
             time_used_ms: 0.0,
+            deadline: None,
         }
     }
 

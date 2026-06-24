@@ -3397,10 +3397,19 @@ def test_alphabb_cutoff_obbt_prerequisite_respects_expired_deadline(monkeypatch)
 
     cutoff_obbt_calls = []
 
-    monkeypatch.setattr(
-        amp_mod,
-        "_solve_milp_with_oa_recovery",
-        lambda **kwargs: (
+    # Expire the global deadline by *logical phase*, not by perf_counter() call
+    # count: the relaxation result is produced in-budget (so the solve returns a
+    # feasible incumbent), and the deadline reads as expired only once that result
+    # exists — which is exactly when the cutoff-OBBT prerequisite runs (it needs the
+    # incumbent UB). This is robust to how many perf_counter() calls the solve makes
+    # before reaching the prerequisite; the previous fixed [0.0, 0.1, 2.0] clock
+    # sequence broke when that call count shifted (the "expired" reading landed
+    # after the check, which then ran with a stale in-budget value).
+    relax_solved = {"done": False}
+
+    def fake_milp(**kwargs):
+        relax_solved["done"] = True
+        return (
             MilpRelaxationResult(
                 status="optimal",
                 objective=-1.0,
@@ -3409,12 +3418,19 @@ def test_alphabb_cutoff_obbt_prerequisite_respects_expired_deadline(monkeypatch)
             {},
             [],
             1,
-        ),
-    )
+        )
+
+    monkeypatch.setattr(amp_mod, "_solve_milp_with_oa_recovery", fake_milp)
     monkeypatch.setattr(
         amp_mod,
         "_solve_best_nlp_candidate",
         lambda *args, **kwargs: (np.array([0.0, 0.0], dtype=np.float64), 0.0),
+    )
+    # In budget until the relaxation result exists, expired thereafter.
+    monkeypatch.setattr(
+        amp_mod,
+        "_remaining_wall_time",
+        lambda deadline: 0.0 if relax_solved["done"] else 100.0,
     )
 
     def fake_cutoff_obbt(**kwargs):
@@ -3428,13 +3444,6 @@ def test_alphabb_cutoff_obbt_prerequisite_respects_expired_deadline(monkeypatch)
         )
 
     monkeypatch.setattr(amp_mod, "_run_cutoff_obbt", fake_cutoff_obbt)
-
-    clock_values = iter([0.0, 0.1, 2.0])
-
-    def fake_perf_counter():
-        return next(clock_values, 2.0)
-
-    monkeypatch.setattr(amp_mod.time, "perf_counter", fake_perf_counter)
 
     m = Model("alphabb_cutoff_obbt_expired_deadline")
     x = m.continuous("x")

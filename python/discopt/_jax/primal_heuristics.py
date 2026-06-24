@@ -15,7 +15,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from discopt._jax.nlp_evaluator import NLPEvaluator
+from discopt._jax.nlp_evaluator import NLPEvaluator, cached_evaluator
 from discopt.modeling.core import Model, VarType
 from discopt.solvers import NLPResult, SolveStatus
 
@@ -142,7 +142,7 @@ class MultiStartNLP:
             MultiStartResult with best solution and statistics.
         """
         model = self._model
-        evaluator = NLPEvaluator(model)
+        evaluator = cached_evaluator(model)
         lb, ub = evaluator.variable_bounds
         int_mask = _get_integer_mask(model)
         has_integers = np.any(int_mask)
@@ -235,7 +235,7 @@ def feasibility_pump(
 
     lb, ub = _get_variable_bounds(model)
     if evaluator is None:
-        evaluator = NLPEvaluator(model)
+        evaluator = cached_evaluator(model)
 
     opts = dict(ipopt_options) if ipopt_options else {}
     opts.setdefault("print_level", 0)
@@ -410,7 +410,7 @@ def subnlp(
         backend = get_nlp_solver("auto")
 
     if evaluator is None:
-        evaluator = NLPEvaluator(model)
+        evaluator = cached_evaluator(model)
 
     int_mask = _get_integer_mask(model)
     lb_orig, ub_orig = _get_variable_bounds(model)
@@ -543,7 +543,7 @@ def integer_local_search(
     import time
 
     if evaluator is None:
-        evaluator = NLPEvaluator(model)
+        evaluator = cached_evaluator(model)
     int_mask = _get_integer_mask(model)
     if not np.any(int_mask) or evaluator.n_constraints == 0:
         # Pure-continuous or unconstrained: nothing for an integer lattice
@@ -781,7 +781,7 @@ def integer_box_search(
         return None
 
     if evaluator is None:
-        evaluator = NLPEvaluator(model)
+        evaluator = cached_evaluator(model)
 
     # Warm-start propagation. The continuous sub-NLP at a *neighbour* integer
     # assignment often has a narrow nonconvex feasible basin that the incumbent's
@@ -1042,7 +1042,7 @@ def diving(
 
     backend = _resolve_backend(backend)
     if evaluator is None:
-        evaluator = NLPEvaluator(model)
+        evaluator = cached_evaluator(model)
     lb0, ub0 = _get_variable_bounds(model)
     slot_map = _flat_slot_map(model)
 
@@ -1136,7 +1136,7 @@ def rins(
         return None
 
     if evaluator is None:
-        evaluator = NLPEvaluator(model)
+        evaluator = cached_evaluator(model)
     lb0, ub0 = _get_variable_bounds(model)
     slot_map = _flat_slot_map(model)
 
@@ -1170,6 +1170,82 @@ def rins(
             integer_tol=integer_tol,
             feas_tol=feas_tol,
         )
+    finally:
+        for v, (lb_v, ub_v) in zip(model._variables, saved):
+            v.lb = lb_v
+            v.ub = ub_v
+
+
+def _restrict_slot(v: object, local: int, lo: float, hi: float) -> None:
+    """Restrict scalar slot ``local`` of ``v`` to the range ``[lo, hi]``.
+
+    Like :func:`_fix_slot` but sets a (possibly non-degenerate) bound range; the
+    caller saves/restores the originals.
+    """
+    new_lb = np.array(v.lb, dtype=np.float64)  # type: ignore[attr-defined]
+    new_ub = np.array(v.ub, dtype=np.float64)  # type: ignore[attr-defined]
+    new_lb.flat[local] = lo
+    new_ub.flat[local] = hi
+    v.lb = new_lb  # type: ignore[attr-defined]
+    v.ub = new_ub  # type: ignore[attr-defined]
+
+
+def rens(
+    model: Model,
+    x_relax: np.ndarray,
+    *,
+    sub_solver: Callable[[Model], Optional[tuple[np.ndarray, float]]],
+    integer_tol: float = 1e-5,
+    max_free: int = 24,
+) -> Optional[tuple[np.ndarray, float]]:
+    """RENS (Relaxation Enforced Neighborhood Search).
+
+    Fix every integer that is (near-)integral in the relaxation ``x_relax`` and
+    restrict each *fractional* integer to its ``{floor, ceil}`` unit box. The
+    resulting sub-MINLP — far smaller than the original, since only the fractional
+    integers stay free — is solved *exactly* by ``sub_solver(model)``, which sees
+    the tightened bounds and returns ``(x_flat, obj)`` or ``None``.
+
+    RENS thus lands the **optimal** integer assignment in the relaxation's
+    rounding neighbourhood, where all-at-once rounding (the feasibility pump) and
+    greedy single-direction diving settle for a feasible-but-suboptimal one. On a
+    near-integral convex relaxation (the typical MIQP case) the neighbourhood is
+    tiny and its optimum is usually the global optimum, so injecting it early
+    collapses the surrounding branch-and-bound search to a quick optimality proof.
+
+    Returns ``None`` (cheaply, after only a fractionality count) when more than
+    ``max_free`` integers are fractional — the neighbourhood is then too large to
+    be worth an exact sub-solve, and the caller should fall back to the pump /
+    diving. The model's bounds are always restored before returning; the dual
+    bound is never touched (the caller injects the result only on improvement).
+
+    Reference: Berthold, "RENS — the optimal rounding", Math. Prog. Comp. 2014.
+    """
+    int_mask = _get_integer_mask(model)
+    int_idx = np.nonzero(int_mask)[0]
+    if int_idx.size == 0:
+        return None
+    x = np.asarray(x_relax, dtype=np.float64)
+    if x.size <= int(int_idx.max()):
+        return None
+    lb0, ub0 = _get_variable_bounds(model)
+    frac = np.abs(x[int_idx] - np.round(x[int_idx]))
+    if int((frac > integer_tol).sum()) > max_free:
+        return None
+
+    slot_map = _flat_slot_map(model)
+    saved = [(v.lb.copy(), v.ub.copy()) for v in model._variables]
+    try:
+        for k, i in enumerate(int_idx):
+            xi = float(x[i])
+            if frac[k] <= integer_tol:
+                lo = hi = float(np.clip(np.round(xi), lb0[i], ub0[i]))
+            else:
+                lo = float(np.clip(np.floor(xi), lb0[i], ub0[i]))
+                hi = float(np.clip(np.ceil(xi), lb0[i], ub0[i]))
+            v, local = slot_map[i]
+            _restrict_slot(v, local, lo, hi)
+        return sub_solver(model)
     finally:
         for v, (lb_v, ub_v) in zip(model._variables, saved):
             v.lb = lb_v
@@ -1337,7 +1413,7 @@ def local_branching(
     # Scalable sub-MIP variant for large binary blocks.
     if len(binary_idx) > max_binaries:
         if evaluator is None:
-            evaluator = NLPEvaluator(model)
+            evaluator = cached_evaluator(model)
         return _local_branching_submip(
             model,
             x_incumbent,
@@ -1354,7 +1430,7 @@ def local_branching(
         )
 
     if evaluator is None:
-        evaluator = NLPEvaluator(model)
+        evaluator = cached_evaluator(model)
 
     x_inc = np.asarray(x_incumbent, dtype=np.float64)
     incumbent_bits = {i: float(np.round(x_inc[i])) for i in binary_idx}

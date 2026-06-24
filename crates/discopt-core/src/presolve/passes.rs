@@ -23,13 +23,13 @@ use super::coefficient_strengthening::coefficient_strengthening;
 use super::delta::{count_tightened, Implication as DeltaImpl, PresolveDelta, VarAggregation};
 use super::duality::{reduced_cost_fixing, ReducedCostInfo};
 use super::eliminate::eliminate_variables;
-use super::factorable_elim::factorable_eliminate;
+use super::factorable_elim::factorable_eliminate_until;
 use super::fbbt::{fbbt_with_cutoff, Interval};
 use super::fbbt_fp::{fbbt_fixed_point, FbbtFpOptions};
 use super::implied_bounds::propagate_implied_bounds;
 use super::pass::{PassCategory, PresolveContext, PresolvePass};
 use super::polynomial::reformulate_polynomial;
-use super::probing::probe_binary_vars;
+use super::probing::probe_binary_vars_until;
 use super::reduction_constraints::detect_reduction_constraints;
 use super::redundancy::detect_row_redundancy;
 use super::scaling::compute_equilibration;
@@ -136,7 +136,7 @@ impl PresolvePass for ProbingPass {
     }
     fn run(&mut self, ctx: &mut PresolveContext) -> PresolveDelta {
         let before = ctx.bounds.clone();
-        let result = probe_binary_vars(&ctx.model, &ctx.bounds);
+        let result = probe_binary_vars_until(&ctx.model, &ctx.bounds, ctx.deadline);
         // probing returns full tightened-bounds vector; intersect with
         // existing.
         let n = ctx.bounds.len().min(result.tightened_bounds.len());
@@ -627,7 +627,7 @@ impl PresolvePass for FactorableElimPass {
         PassCategory::RewritesModel
     }
     fn run(&mut self, ctx: &mut PresolveContext) -> PresolveDelta {
-        let (new_model, stats) = factorable_eliminate(&ctx.model);
+        let (new_model, stats) = factorable_eliminate_until(&ctx.model, ctx.deadline);
         ctx.model = new_model;
 
         let mut delta = PresolveDelta::empty("factorable_elim", ctx.iter);

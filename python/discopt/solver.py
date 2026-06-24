@@ -192,6 +192,17 @@ _POUNCE_BATCH_MIN_VARS = 50
 # budget. Nodes that start fully past the deadline are skipped (see the serial
 # loop), so at most one node per batch can overrun by this floor.
 _DEADLINE_NODE_FLOOR_S = 0.1
+# Dense-Jacobian compilation guard. ``NLPEvaluator.evaluate_jacobian`` uses
+# ``jax.jit(jax.jacfwd(...))`` — a forward-mode dense Jacobian whose compiled XLA
+# program replicates the whole constraint system once per input variable. For a
+# large model (n inputs x m constraints) that jaxpr explodes during MLIR
+# lowering and XLA aborts the *process* with a native SIGBUS/SIGILL — not a
+# catchable Python exception. Above this many dense entries (n * m), code paths
+# that only need the Jacobian as an optimization skip the dense compile and use
+# a Jacobian-free fallback. rsyn0810m03hfsg (1185 x 1935 ~ 2.3M) crashed here
+# once presolve was fast enough to reach node bound-tightening; tln6 (~1.7k) and
+# the broad corpus sit far below the cap, so this is inert on normal models.
+_MAX_DENSE_JACOBIAN_ELEMS = 1_000_000
 # Per-node OBBT (Lever A) gates. Per-node optimization-based bound tightening is
 # powerful but costs O(n_vars) LPs per node, so it is enabled only for the
 # functionally-dependent-intermediate structural class and on small models, and
@@ -223,6 +234,28 @@ _ROOT_FALLBACK_FLOOR_S = 3.0
 # the best — better incumbents on nonconvex models, but ~3x the node-solve cost.
 # Off by default; flip to opt in (or pass multistart=True to _solve_batch_pounce).
 _POUNCE_BATCH_MULTISTART = False
+
+# Native-AD node NLP solves (discopt#281): route the per-node NLP through
+# POUNCE's own AD on the .nl problem instead of the JAX callback bridge. Opt-in
+# (DISCOPT_NLP_NATIVE / options["nlp_native"]); falls back to the JAX path
+# automatically whenever a native base cannot be built/validated for the model
+# (see solvers.nlp_native). Default OFF: POUNCE's PyNlProblem is unsendable
+# (pyo3), so caching it on the model and using it across the batch/parallel paths
+# trips "unsendable ... dropped on another thread" under pytest-xdist and can
+# perturb MIQP-batch certification; and the speedup is neutral-to-modest. Enable
+# explicitly once PyNlProblem is made Send-safe.
+_NLP_NATIVE_DEFAULT = os.environ.get("DISCOPT_NLP_NATIVE", "0").lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
+
+
+def _native_nlp_enabled(options: dict) -> bool:
+    """Whether to attempt the POUNCE-native node NLP path for this solve."""
+    val = options.get("nlp_native") if options else None
+    return _NLP_NATIVE_DEFAULT if val is None else bool(val)
 
 
 class _AugmentedEvaluator:
@@ -364,40 +397,24 @@ class _BoundOverrideEvaluator:
 def _evaluator_fingerprint(model: Model) -> tuple:
     """Structural fingerprint of a model for evaluator-cache validity.
 
-    Captures identity of the objective, constraints, variables, and parameters.
-    Mutating ``Parameter.value`` does NOT change the fingerprint, so repeated
-    solves that only rebind parameter values reuse the same JITed callables
-    and hit the XLA cache.
+    Thin alias for the canonical :func:`nlp_evaluator.evaluator_fingerprint`; kept
+    here for the existing importers (e.g. ``solvers.nlp_native``).
     """
-    return (
-        id(model._objective),
-        tuple(id(c) for c in model._constraints),
-        tuple(id(v) for v in model._variables),
-        tuple(id(p) for p in model._parameters),
-        bool(getattr(model, "_gauss_newton_hessian", False)),
-    )
+    from discopt._jax.nlp_evaluator import evaluator_fingerprint
+
+    return evaluator_fingerprint(model)
 
 
 def _make_evaluator(model: Model):
     """Create or reuse a cached NLPEvaluator for the model.
 
-    The first call builds a fresh ``NLPEvaluator`` (which JITs obj/grad/hess/
-    cons/jac/lag_hess). Subsequent calls return the same evaluator as long as
-    the model's structural fingerprint is unchanged, so the underlying jit
-    objects (and their XLA caches) are preserved across solves. Parameter
-    value changes are threaded through at call time as a runtime pytree.
+    Delegates to the canonical :func:`nlp_evaluator.cached_evaluator` so the B&B
+    loop, the primal heuristics, and the POUNCE node solves all share one cache
+    (and one set of compiled callables) instead of each rebuilding the evaluator.
     """
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._jax.nlp_evaluator import cached_evaluator
 
-    fingerprint = _evaluator_fingerprint(model)
-    cached = getattr(model, "_nlp_evaluator_cache", None)
-    if cached is not None:
-        ev, cached_fp = cached
-        if cached_fp == fingerprint:
-            return ev
-    ev = NLPEvaluator(model, gauss_newton=getattr(model, "_gauss_newton_hessian", False))
-    model._nlp_evaluator_cache = (ev, fingerprint)
-    return ev
+    return cached_evaluator(model)
 
 
 def _estimate_alpha_fd(evaluator, lb, ub, n_samples=30):
@@ -741,6 +758,17 @@ def _tighten_node_bounds_with_status(evaluator, node_lb, node_ub, cl_list, cu_li
     m = len(cl_list)
     cu = np.array(cu_list, dtype=np.float64)
     cl = np.array(cl_list, dtype=np.float64)
+
+    # Dense-Jacobian compilation guard (see _MAX_DENSE_JACOBIAN_ELEMS). The
+    # two-point linearity test below calls evaluate_jacobian, which JIT-compiles
+    # a forward-mode dense Jacobian; on a large model that XLA lowering aborts
+    # the process with a native SIGBUS/SIGILL the try/except cannot catch. Above
+    # the cap, skip the linearity test entirely and fall back to the structural
+    # / interval nonlinear tightening (the same fallback taken when no
+    # constraint is detected linear) — it needs no monolithic Jacobian compile,
+    # so it only forgoes an optimization and never changes a bound unsoundly.
+    if n * m > _MAX_DENSE_JACOBIAN_ELEMS:
+        return _apply_nonlinear_tightening_with_status(evaluator._model, lb, ub)
 
     # Detect which constraints are linear by checking if the Jacobian
     # changes between two distinct evaluation points.  FBBT via Jacobian
@@ -1250,6 +1278,19 @@ def _unpack_solution(model: Model, x_flat: np.ndarray):
     return result
 
 
+def _pack_solution(model: Model, x_dict: dict, n_vars: int) -> np.ndarray:
+    """Inverse of :func:`_unpack_solution`: pack a ``{var_name: array}`` dict into
+    the flat solution vector, using the same per-variable layout (each variable
+    occupies ``v.size`` consecutive slots in ``model._variables`` order)."""
+    flat = np.zeros(int(n_vars), dtype=np.float64)
+    offset = 0
+    for v in model._variables:
+        size = int(v.size)
+        flat[offset : offset + size] = np.asarray(x_dict[v.name], dtype=np.float64).reshape(-1)
+        offset += size
+    return flat
+
+
 def _unpack_constraint_duals(
     evaluator, mult_g: Optional[np.ndarray]
 ) -> Optional[dict[str, np.ndarray]]:
@@ -1755,6 +1796,12 @@ _AUTO_CUTS_MAX_VARS = 40
 # cheap. Counted as (sum of scalar variable sizes) + (number of constraints).
 _STRUCTURE_CUTS_MAX_SIZE = 100
 
+# RENS root primal heuristic (#281): fraction of the remaining wall budget granted
+# to the bound-restricted sub-MINLP solve, and an absolute cap so it can never
+# starve the surrounding proof on a long overall budget.
+_RENS_BUDGET_FRAC = 0.5
+_RENS_BUDGET_CAP_S = 8.0
+
 # Root cut pool (P3). Rounds of spectral PSD separation to run once at the root
 # to build the inherited pool; more rounds drive the root bound toward the Shor
 # SDP bound (nvs17: 8 rounds -> -2453, ~60 -> -1300, ~150 -> -1221). The pool is
@@ -2029,6 +2076,7 @@ def solve_model(
     root_cut_rounds: Optional[int] = None,
     root_cut_max: Optional[int] = None,
     _lns_enabled: bool = True,
+    rens: bool = True,
     **kwargs,
 ) -> SolveResult:
     """
@@ -2251,6 +2299,40 @@ def solve_model(
     model._convexity_classification_cache = None
     _convexity_time_budget = min(max(0.2 * float(time_limit), 0.5), 20.0)
     model._convexity_time_budget = _convexity_time_budget
+
+    # Opt-in LP-node spatial branch-and-cut engine (discopt#280) for pure-integer
+    # product MINLPs. The default NLP-per-node spatial path freezes its dual bound
+    # on dense integer-bilinear problems (e.g. nvs17: stuck at -65842, times out);
+    # this engine solves a pure McCormick LP per node (incremental + warm-started),
+    # branches on integers/products and runs a feasibility-pump primal, closing
+    # nvs17 to proven optimality. Opt-in via ``solve(lp_spatial=True)``; returns
+    # ``None`` (falls through to the default path, no behavior change) for any model
+    # out of its scope (non-pure-integer, maximize, unbounded box) or on any error.
+    if kwargs.get("lp_spatial", False):
+        try:
+            from discopt._jax.lp_spatial_bb import solve_lp_spatial_bb
+
+            _lps = solve_lp_spatial_bb(
+                model,
+                time_limit=time_limit,
+                gap_tolerance=gap_tolerance,
+                max_nodes=max_nodes,
+                root_cut_rounds=int(kwargs.get("lp_spatial_cut_rounds", 0)),
+            )
+        except Exception as _lps_exc:  # pragma: no cover - defensive
+            logger.debug("lp_spatial engine failed, falling back: %s", _lps_exc)
+            _lps = None
+        if _lps is not None:
+            return SolveResult(
+                status=_lps.status,
+                objective=_lps.objective,
+                bound=_lps.bound,
+                gap=_lps.gap,
+                x=(None if _lps.x is None else _unpack_solution(model, np.asarray(_lps.x))),
+                wall_time=time.perf_counter() - _solve_t0,
+                node_count=_lps.node_count,
+                gap_certified=(_lps.status == "optimal"),
+            )
 
     # --- Structure-cut presolve (auto-engaged square-difference-network cuts) ---
     # The symbolic cut recognizer auto-derives sound coupling cuts for the
@@ -2758,6 +2840,78 @@ def solve_model(
         # to certify do we clear and fall back to spatial B&B (see the convex
         # fast-path block below).
 
+    # --- Integer-bilinear exact reformulation ---
+    # When a bilinear term ``x_i*x_j`` has an integer (declared or implied)
+    # factor, binary-expand it and big-M-linearize the resulting binary*var
+    # products, turning the bilinear MINLP into an *equivalent pure MILP* whose
+    # relaxation is exact. discopt's single McCormick envelope over a wide integer
+    # box is loose (its integer optimum can sit below the true optimum — the
+    # ``ex126x`` trim-loss family: 19.1 vs 19.6); the exact linearization closes
+    # that gap and routes through the MILP branch-and-bound (cover/clique/Gomory/
+    # MIR cuts). Value-preserving and gated to integer-bilinear models, so it is a
+    # no-op everywhere else.
+    try:
+        from discopt._jax.integer_product_reform import (
+            has_nonconvex_integer_bilinear,
+            reformulate_integer_bilinear,
+        )
+
+        # Gate on a *distinct-variable* integer-bilinear term ``x_i*x_j`` (i != j).
+        # Its Hessian is indefinite, so this is a cheap, sound *nonconvexity*
+        # witness — and exactly the loose-relaxation structure the pass fixes.
+        # Convex MIQPs (only ``x**2`` squares, PSD curvature) have no such term
+        # and are left to the convex QP/NLP fast paths: binary-expanding them
+        # would merely bloat the model and divert it off those paths (which broke
+        # the MIQP-batch certification path). This witness is far cheaper than a
+        # full convexity classification (~6s on ex1263), so the common path and
+        # the reformulated path both stay fast.
+        if has_nonconvex_integer_bilinear(model):
+            _ipx = reformulate_integer_bilinear(model)
+            # Adopt the reformulation ONLY when it eliminates *all* nonlinearity,
+            # i.e. yields an equivalent pure MILP. If other nonlinear terms remain
+            # (e.g. the transcendentals in gear), the model would still go through
+            # the spatial path — now merely carrying the extra big-M variables for
+            # no benefit — so the reformulation is discarded and the original model
+            # is solved unchanged. This keeps the pass a strict improvement.
+            from discopt._jax.problem_classifier import ProblemClass, classify_problem
+            from discopt._jax.term_classifier import classify_nonlinear_terms
+
+            # Require the reformulation to be a *genuinely* pure MILP: classify_problem
+            # is largely extract_lp_data-based and can report MILP while nonlinear
+            # terms remain (which that linear projection silently drops). Confirm with
+            # the DAG-walking term classifier, else adopting + routing to the MILP
+            # engine would solve a lossy linear projection — falsely unbounded when a
+            # dropped nonlinear constraint was what bounded an open variable
+            # (carton7, issue #286).
+            _ipx_nl = classify_nonlinear_terms(_ipx) if _ipx is not model else None
+            _ipx_pure_milp = _ipx_nl is not None and not (
+                _ipx_nl.bilinear
+                or _ipx_nl.trilinear
+                or _ipx_nl.multilinear
+                or _ipx_nl.monomial
+                or _ipx_nl.fractional_power
+                or _ipx_nl.bilinear_with_fp
+                or _ipx_nl.ratio_of_products
+                or _ipx_nl.general_nl
+            )
+            if _ipx_pure_milp and classify_problem(_ipx) == ProblemClass.MILP:
+                model = _ipx
+                model._convexity_classification_cache = None
+                model._convexity_time_budget = _convexity_time_budget
+                # The reformulated big-M MILP is best handled by a real MILP
+                # engine. discopt's FBBT root presolve is both redundant (the MILP
+                # engines presolve internally) and pathologically slow on the
+                # lifted big-M structure (ex1263: ~10s presolve vs ~1s solve), so
+                # skip it; and route off the self-hosted IPM B&B (no MILP cuts,
+                # ~60s) onto the monolithic Rust simplex MILP engine (~1s,
+                # pure-Rust), which falls back to HiGHS / the IPM path if the
+                # simplex binding is unavailable.
+                presolve = False
+                if nlp_solver == "pounce":
+                    nlp_solver = "simplex"
+    except Exception as _ipx_exc:  # pragma: no cover - defensive
+        logger.debug("integer-bilinear reformulation skipped: %s", _ipx_exc)
+
     # --- Build Rust model representation for FBBT ---
     _model_repr = None
     try:
@@ -2987,6 +3141,7 @@ def solve_model(
             node_callback=node_callback,
             in_tree_presolve_stride=in_tree_presolve_stride,
             in_tree_presolve_repr=_model_repr,
+            rens_enabled=rens,
         )
 
     # --- Problem classification: dispatch LP/QP to specialized solvers ---
@@ -3263,6 +3418,7 @@ def solve_model(
                 node_callback=node_callback,
                 in_tree_presolve_stride=in_tree_presolve_stride,
                 in_tree_presolve_repr=_model_repr,
+                rens_enabled=rens,
             )
 
     # --- Extract variable info ---
@@ -4140,6 +4296,17 @@ def solve_model(
                 else None
             )
             for i in range(n_batch):
+                # Skip per-node OBBT on the ROOT batch (iteration 0). It is redundant
+                # there with the global root OBBT just run, and — at up to 60% of the
+                # time budget (4.8s on an 8s limit) — it runs *before* the root
+                # primal heuristic, pushing time-to-first-incumbent past the limit on
+                # nonconvex models (issue #287: kall's first incumbent landed at
+                # 10.4s on an 8s budget). Its value is on *branched* nodes, where it
+                # pins the functionally-dependent outputs once the independent
+                # drivers are fixed (welded-beam / nvs05 fathoming) — those run from
+                # iteration 1 on, so deferring the root costs nothing there.
+                if iteration == 0:
+                    break
                 if node_infeasible_mask[i]:
                     continue
                 if _pn_obbt_spent >= _pn_obbt_budget_total:
@@ -5617,15 +5784,47 @@ def solve_model(
                 and _polished.x is not None
                 and np.all(np.isfinite(_polished.x))
                 and _polished.objective is not None
-                and abs(float(_polished.objective) - obj_val) <= 1e-4 * (1.0 + abs(obj_val))
             ):
+                _pobj = float(_polished.objective)
                 _refined = np.asarray(_polished.x, dtype=float).copy()
                 for _off, _sz in zip(int_offsets, int_sizes):
                     for _k in range(int(_sz)):
                         _refined[_off + _k] = round(float(sol_flat[_off + _k]))
-                sol_flat = _refined
-                x_dict = _unpack_solution(model, sol_flat)
-                obj_val = float(_polished.objective)
+                # Two reasons to adopt the integer-fixed continuous completion:
+                #   (a) purification — objective ~unchanged, just tighter continuous
+                #       values (the original behavior, always safe), and
+                #   (b) improvement (#281) — it is strictly better than the B&B
+                #       incumbent's continuous completion. The smallinvDAX-style MIQPs
+                #       reach the right integer assignment but the batched IPM leaves
+                #       the continuous part short of optimal, so the reported gap sits
+                #       a fraction of a percent (sometimes more) above the optimum; a
+                #       KKT-accurate completion closes it.
+                # An improvement is adopted ONLY after verifying the refined point is
+                # genuinely feasible (fixed integers + a feasible continuous
+                # completion is a valid MINLP point), so an improving-but-divergent
+                # re-solve can never report a false optimum.
+                _unchanged = abs(_pobj - obj_val) <= 1e-4 * (1.0 + abs(obj_val))
+                # An objective improvement from the re-solve is adopted ONLY for
+                # convex models, where the integer-fixed continuous relaxation is
+                # exact (no spatial-envelope slack) so a KKT completion is a genuine
+                # MINLP point — the smallinvDAX MIQP case #281 targets. For
+                # nonconvex/spatial models the terminal re-solve runs against loose
+                # McCormick envelopes, so an "improved" point can satisfy the relaxed
+                # constraint system yet be infeasible for the true model (st_e35:
+                # fractional power of a ratio jumped 176.17 -> 0.0). There we keep
+                # only the always-safe purification (unchanged objective).
+                _improved = _model_is_convex and _pobj < obj_val - 1e-9 * (1.0 + abs(obj_val))
+                _accept = _unchanged or (
+                    _improved
+                    and (
+                        not cl_list
+                        or _check_constraint_feasibility(evaluator, _refined, cl_list, cu_list)
+                    )
+                )
+                if _accept:
+                    sol_flat = _refined
+                    x_dict = _unpack_solution(model, sol_flat)
+                    obj_val = _pobj
         except Exception as _exc:
             logger.debug("Incumbent KKT polish failed: %s", _exc)
 
@@ -5974,6 +6173,7 @@ def _solve_nlp_bb(
     node_callback=None,
     in_tree_presolve_stride: int = 0,
     in_tree_presolve_repr=None,
+    rens_enabled: bool = True,
 ) -> SolveResult:
     """Solve a MINLP via nonlinear Branch & Bound (NLP-BB).
 
@@ -6333,28 +6533,92 @@ def _solve_nlp_bb(
                     best_root_idx = i
             if best_root_idx is not None:
                 _root_incumbent = False
-                try:
-                    from discopt._jax.primal_heuristics import feasibility_pump
+                # --- RENS (Relaxation Enforced Neighborhood Search), primary ---
+                # Solve the relaxation's rounding neighbourhood EXACTLY (fix the
+                # integers already integral in the relaxation; restrict each
+                # fractional one to {floor, ceil}; solve the small sub-MINLP). On a
+                # near-integral convex relaxation this lands the *optimal* integers
+                # at the root, where the feasibility pump's all-at-once rounding
+                # settles for a feasible-but-suboptimal assignment (#281:
+                # smallinvDAX 0.4004 -> 0.3988). It returns cheaply when too many
+                # integers are fractional, so the pump/diving fallback below still
+                # covers set-partitioning-style relaxations parked at 0.5.
+                if rens_enabled:
+                    try:
+                        from discopt._jax.primal_heuristics import rens as _rens_heuristic
 
-                    fp_sol = feasibility_pump(
-                        model,
-                        result_sols[best_root_idx],
-                        max_rounds=5,
-                        backend=_resolve_heuristic_backend(nlp_solver),
-                        evaluator=evaluator,
-                        deadline=t_start + time_limit,
-                    )
-                    if fp_sol is not None:
-                        fp_obj = float(evaluator.evaluate_objective(fp_sol))
-                        fp_feas = not cl_list or _check_constraint_feasibility(
-                            evaluator, fp_sol, cl_list, cu_list
+                        _rens_budget = max(
+                            0.5,
+                            min(
+                                _RENS_BUDGET_FRAC * (time_limit - (time.perf_counter() - t_start)),
+                                _RENS_BUDGET_CAP_S,
+                            ),
                         )
-                        if np.isfinite(fp_obj) and fp_obj < _SENTINEL_THRESHOLD and fp_feas:
-                            tree.inject_incumbent(fp_sol, fp_obj)
-                            _root_incumbent = True
-                            logger.info("NLP-BB feasibility pump incumbent: obj=%.6g", fp_obj)
-                except Exception as e:
-                    logger.debug("Feasibility pump failed: %s", e)
+
+                        def _rens_sub_solver(_restricted, _tl=_rens_budget):
+                            # Solve the bound-restricted sub-MINLP with the full
+                            # engine (rens=False prevents nested RENS; structure_cuts
+                            # off — the SymPy presolve cannot help a bound-tightened
+                            # MIQP). Returns a flat solution aligned to the evaluator.
+                            sub = solve_model(
+                                _restricted,
+                                time_limit=_tl,
+                                gap_tolerance=gap_tolerance,
+                                nlp_solver=nlp_solver,
+                                rens=False,
+                                structure_cuts=False,
+                            )
+                            if sub.objective is None or sub.x is None:
+                                return None
+                            return _pack_solution(_restricted, sub.x, n_vars), float(sub.objective)
+
+                        rens_res = _rens_heuristic(
+                            model,
+                            result_sols[best_root_idx],
+                            sub_solver=_rens_sub_solver,
+                        )
+                        if rens_res is not None:
+                            rens_sol = np.asarray(rens_res[0], dtype=np.float64).copy()
+                            rens_obj = float(evaluator.evaluate_objective(rens_sol))
+                            rens_feas = not cl_list or _check_constraint_feasibility(
+                                evaluator, rens_sol, cl_list, cu_list
+                            )
+                            if (
+                                np.isfinite(rens_obj)
+                                and rens_obj < _SENTINEL_THRESHOLD
+                                and rens_feas
+                                and _is_integer_feasible_solution(rens_sol, int_offsets, int_sizes)
+                            ):
+                                tree.inject_incumbent(rens_sol, rens_obj)
+                                _root_incumbent = True
+                                logger.info("NLP-BB RENS incumbent: obj=%.6g", rens_obj)
+                    except Exception as e:
+                        logger.debug("RENS failed: %s", e)
+
+                # --- Feasibility pump (fallback when RENS does not apply) ---
+                if not _root_incumbent:
+                    try:
+                        from discopt._jax.primal_heuristics import feasibility_pump
+
+                        fp_sol = feasibility_pump(
+                            model,
+                            result_sols[best_root_idx],
+                            max_rounds=5,
+                            backend=_resolve_heuristic_backend(nlp_solver),
+                            evaluator=evaluator,
+                            deadline=t_start + time_limit,
+                        )
+                        if fp_sol is not None:
+                            fp_obj = float(evaluator.evaluate_objective(fp_sol))
+                            fp_feas = not cl_list or _check_constraint_feasibility(
+                                evaluator, fp_sol, cl_list, cu_list
+                            )
+                            if np.isfinite(fp_obj) and fp_obj < _SENTINEL_THRESHOLD and fp_feas:
+                                tree.inject_incumbent(fp_sol, fp_obj)
+                                _root_incumbent = True
+                                logger.info("NLP-BB feasibility pump incumbent: obj=%.6g", fp_obj)
+                    except Exception as e:
+                        logger.debug("Feasibility pump failed: %s", e)
 
                 # Fractional-diving fallback (issue #268). The feasibility pump
                 # rounds every integer at once, which lands on a constraint-
@@ -6685,6 +6949,19 @@ def _solve_node_nlp(
     if nlp_solver in ("pounce", "ipm", "sparse_ipm"):
         # "ipm"/"sparse_ipm" are deprecated aliases — the JAX IPM is retired as a
         # node NLP solver, so all route to POUNCE (the pure-Rust Ipopt port).
+        # Native path (discopt#281): solve the .nl directly via POUNCE's own AD,
+        # bypassing the JAX callbacks. On a non-accept status fall through to the
+        # JAX path, which carries the alternative-start retry / convex polish
+        # robustness layer; this never loses a usable result.
+        if _native_nlp_enabled(options):
+            from discopt.solvers import SolveStatus as _SS
+            from discopt.solvers.nlp_native import get_native_base, solve_node_native
+
+            nb = get_native_base(evaluator)
+            if nb is not None:
+                res = solve_node_native(nb, x0, node_lb, node_ub, options)
+                if res.status in (_SS.OPTIMAL, _SS.ITERATION_LIMIT):
+                    return res
         return _solve_node_nlp_pounce(
             evaluator, x0, node_lb, node_ub, constraint_bounds, options, convex=convex
         )
@@ -6854,6 +7131,17 @@ def _solve_batch_pounce(
     n_starts = 3 if do_multistart else 1
     rng = np.random.RandomState(42) if do_multistart else None
 
+    # Native-AD path (discopt#281): when available, each (node, start) becomes a
+    # cheap bound variant of one parsed .nl problem solved by POUNCE's own AD —
+    # no JAX callbacks. ``native_base`` is None (→ JAX callback Problems) when the
+    # model has no usable .nl representation. Result vectors come back in .nl
+    # column order and are mapped to evaluator order via ``to_eval_order``.
+    native_base = None
+    if _native_nlp_enabled(options):
+        from discopt.solvers.nlp_native import get_native_base
+
+        native_base = get_native_base(evaluator)
+
     # Flatten (node, start) into one problem list; node i occupies the slice
     # [i * n_starts : (i + 1) * n_starts].
     problems = []
@@ -6883,22 +7171,29 @@ def _solve_batch_pounce(
             node_starts = [warm]
 
         for x0 in node_starts:
-            # One callbacks proxy per problem so concurrent Rayon workers never
-            # share mutable Python state. The JAX evaluator is pure/reentrant.
-            proxy = _BoundOverrideEvaluator(evaluator, node_lb, node_ub)
-            callbacks = _IpoptCallbacks(proxy)
-            problems.append(
-                pounce.Problem(
-                    n=n_vars,
-                    m=m,
-                    problem_obj=callbacks,
-                    lb=node_lb,
-                    ub=node_ub,
-                    cl=cl,
-                    cu=cu,
+            if native_base is not None:
+                # Native .nl problem: a per-node bound variant (shares the parsed
+                # DAG / AD tapes). Bounds and start go in .nl column order.
+                problems.append(native_base.variant(node_lb, node_ub, x0))
+                x0s.append(native_base.to_nl_order(np.asarray(x0, dtype=np.float64)))
+            else:
+                # One callbacks proxy per problem so concurrent Rayon workers
+                # never share mutable Python state. The JAX evaluator is
+                # pure/reentrant.
+                proxy = _BoundOverrideEvaluator(evaluator, node_lb, node_ub)
+                callbacks = _IpoptCallbacks(proxy)
+                problems.append(
+                    pounce.Problem(
+                        n=n_vars,
+                        m=m,
+                        problem_obj=callbacks,
+                        lb=node_lb,
+                        ub=node_ub,
+                        cl=cl,
+                        cu=cu,
+                    )
                 )
-            )
-            x0s.append(np.asarray(x0, dtype=np.float64))
+                x0s.append(np.asarray(x0, dtype=np.float64))
 
     result_ids = np.array(batch_ids, dtype=np.int64)
     result_sols = np.empty((n_batch, n_vars), dtype=np.float64)
@@ -6925,9 +7220,14 @@ def _solve_batch_pounce(
         logger.debug("Batch POUNCE failed (%s); falling back to serial nodes", e)
         for i in range(n_batch):
             node_lb, node_ub = node_bounds[i]
+            # x0s are in .nl column order when native; the JAX serial path wants
+            # evaluator order.
+            warm0 = x0s[i * n_starts]
+            if native_base is not None:
+                warm0 = native_base.to_eval_order(warm0)
             res = _solve_node_nlp_pounce(
                 evaluator,
-                x0s[i * n_starts],
+                warm0,
                 node_lb,
                 node_ub,
                 constraint_bounds,
@@ -6952,7 +7252,13 @@ def _solve_batch_pounce(
         best_status = None
         for s in range(n_starts):
             x, info = results[i * n_starts + s]
-            x_arr = np.asarray(x, dtype=np.float64)
+            # Native results come back in .nl column order; map to evaluator
+            # order so downstream bound clips and the returned solution align.
+            x_arr = (
+                native_base.to_eval_order(x)
+                if native_base is not None
+                else np.asarray(x, dtype=np.float64)
+            )
             if best_x is None:
                 best_x = x_arr  # placeholder if no start is accepted
             status = _IPOPT_STATUS_MAP.get(info.get("status", -100), SolveStatus.ERROR)
@@ -8104,6 +8410,17 @@ def _solve_milp_highs(
         offset += v.size
 
     c_orig = np.asarray(lp_data.c[:n_orig])
+
+    # Charge already-elapsed time against the budget so HiGHS finishes by the
+    # SHARED deadline (t_start + time_limit), not a fresh full time_limit. A
+    # deferred upstream MILP attempt (e.g. _solve_milp_simplex burning its ~10 s
+    # slice before returning None) otherwise stacks on top of HiGHS's full
+    # budget, overrunning the user's time_limit by the upstream cost: tln6 /
+    # rsyn0810m03hfsg ran ~40 s on a 30 s limit (10 s simplex + a *fresh* 30 s
+    # HiGHS). Floor at a small positive value so HiGHS still returns its best
+    # incumbent rather than 0.0 (which HiGHS reads as "stop immediately").
+    if time_limit is not None:
+        time_limit = max(0.5, time_limit - (time.perf_counter() - t_start))
 
     try:
         result = _highs_solve_milp(
@@ -9467,6 +9784,12 @@ def _root_dive(
     return None
 
 
+# Wall-clock cap (seconds) for the fast Rust simplex MILP engine before it defers
+# to the robust fallback. Bounds time wasted on a stalled reformulation regardless
+# of the overall time_limit (issue #291).
+_SIMPLEX_MILP_BUDGET_CAP_S = 10.0
+
+
 def _solve_milp_simplex(
     model: Model,
     time_limit: float,
@@ -9491,6 +9814,29 @@ def _solve_milp_simplex(
     except ImportError:
         return None
 
+    # ``extract_lp_data`` captures only the LINEAR part of the model; any nonlinear
+    # term is silently dropped. Solving that linear projection as if exact is sound
+    # ONLY for a genuinely linear model. Otherwise a dropped *bounding* nonlinear
+    # constraint can make the projection falsely unbounded/optimal — carton7
+    # (issue #286): continuous variables with infinite upper bounds, bounded only
+    # by the dropped nonlinear constraints, were reported as a false global
+    # ``unbounded`` at the root. Defer any model carrying nonlinear terms to the
+    # spatial / NLP path (which keeps those constraints).
+    from discopt._jax.term_classifier import classify_nonlinear_terms
+
+    _nl = classify_nonlinear_terms(model)
+    if (
+        _nl.bilinear
+        or _nl.trilinear
+        or _nl.multilinear
+        or _nl.monomial
+        or _nl.fractional_power
+        or _nl.bilinear_with_fp
+        or _nl.ratio_of_products
+        or _nl.general_nl
+    ):
+        return None
+
     lp_data = extract_lp_data(model)
     A = np.ascontiguousarray(lp_data.A_eq, dtype=np.float64)
     if A.shape[0] == 0:
@@ -9499,6 +9845,21 @@ def _solve_milp_simplex(
     _, _, _, int_offsets, int_sizes = _extract_variable_info(model)
     int_idx = [j for off, sz in zip(int_offsets, int_sizes) for j in range(off, off + int(sz))]
 
+    # Pass the remaining wall-clock budget so the Rust B&B's deadline (loop-top,
+    # per-node and per-LP) fires. Without it ``time_limit_s`` defaults to 0.0 -> no
+    # deadline, so a single node whose simplex fails to converge (or a degenerate
+    # cycle) runs unbounded, ignoring the user's ``time_limit`` entirely (issue
+    # #291: nvs12's integer-bilinear reformulation hung > 40 s on a 15 s limit).
+    # Bound the fast simplex engine to a modest slice of the remaining budget, so a
+    # stall on a pathological reformulation (issue #291) defers quickly (status
+    # node_limit -> None below) and leaves the rest for the robust spatial/POUNCE
+    # fallback. The absolute cap matters: with the default time_limit=3600 a plain
+    # fraction would let a stalled solve burn ~1800 s before falling back. The
+    # engine is the *fast* path — a well-behaved reformulation (ex126x) solves in
+    # ~1 s, far inside this cap — so capping costs nothing on the common case while
+    # bounding the wasted time before fallback to a few seconds.
+    _remaining = float(time_limit) - (time.perf_counter() - t_start)
+    _milp_budget = max(0.5, min(0.5 * _remaining, _SIMPLEX_MILP_BUDGET_CAP_S))
     status, x_struct, obj, bound, nodes, _lp_iters = solve_milp_py(
         np.ascontiguousarray(lp_data.c, dtype=np.float64),
         A,
@@ -9510,6 +9871,7 @@ def _solve_milp_simplex(
         float(lp_data.obj_const),
         int(max_nodes),
         float(gap_tolerance),
+        time_limit_s=float(_milp_budget),
     )
     wall_time = time.perf_counter() - t_start
     maximize = model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE
@@ -9572,9 +9934,14 @@ def _solve_milp_simplex(
     if status == "unbounded":
         return SolveResult(status="unbounded", wall_time=wall_time, node_count=nodes)
     if status == "node_limit":
-        return SolveResult(
-            status="node_limit", wall_time=wall_time, node_count=nodes, gap_certified=False
-        )
+        # The simplex MILP engine exhausted its node/time budget without proving
+        # optimality and found no usable incumbent here. Rather than surface a
+        # bare ``node_limit`` (no solution), defer (return None) so the caller falls
+        # back to the robust spatial / POUNCE path — which, e.g., solves nvs12's
+        # integer-bilinear reformulation in ~0.4 s where this engine stalls
+        # (issue #291). A genuine incumbent is returned via the optimal/feasible
+        # branch above, so deferral only discards a no-solution result.
+        return None
     return SolveResult(status="infeasible", wall_time=wall_time, node_count=nodes)
 
 

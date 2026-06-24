@@ -28,6 +28,61 @@ from discopt._jax.dag_compiler import (
 )
 from discopt.modeling.core import Constraint, Model, ObjectiveSense
 
+# Above this many dense Jacobian entries (m * n), ``evaluate_jacobian`` routes
+# through the sparse coloring path instead of compiling the dense
+# ``jax.jacfwd``. The dense compile replicates the whole constraint program once
+# per input variable, so for a large model its XLA jaxpr explodes during MLIR
+# lowering and aborts the *process* with a native SIGBUS/SIGILL (rsyn0810m03hfsg:
+# 1935 x 1185 ~ 2.3M entries, yet only ~0.2% nonzero). The cap sits well above
+# any small/medium model — which keep the faster dense path with no behavior
+# change — and below the crash regime, where the dense compile is not a viable
+# option anyway, so sparse is strictly safer.
+_DENSE_JACOBIAN_COMPILE_LIMIT = 1_000_000
+
+
+def evaluator_fingerprint(model: Model) -> tuple:
+    """Structural fingerprint of a model for evaluator-cache validity.
+
+    Captures the object identity of the objective, constraints, variables, and
+    parameters, plus the Gauss-Newton flag — but NOT mutable variable bounds or
+    ``Parameter.value`` (the evaluator reads those live on each call). Two models
+    with the same fingerprint can therefore share one compiled ``NLPEvaluator``
+    across bound changes (every B&B node) and parameter re-binds.
+    """
+    return (
+        id(model._objective),
+        tuple(id(c) for c in model._constraints),
+        tuple(id(v) for v in model._variables),
+        tuple(id(p) for p in model._parameters),
+        bool(getattr(model, "_gauss_newton_hessian", False)),
+    )
+
+
+def cached_evaluator(model: Model) -> "NLPEvaluator":
+    """Return a per-model cached ``NLPEvaluator``, reusing its compiled JAX
+    callables across repeated constructions as long as the model's *structure* is
+    unchanged.
+
+    Constructing an ``NLPEvaluator`` re-traces and re-compiles the model's
+    constraint / objective / Jacobian functions — a real per-call Python cost.
+    The B&B loop, primal heuristics, and POUNCE node solves all evaluate the *same*
+    model (only bounds and parameter values change, which the evaluator reads
+    live), so they can share one evaluator. This centralizes the cache that was
+    previously only used by ``solver._make_evaluator``; call sites that built a
+    fresh ``NLPEvaluator(model)`` per call (e.g. the diving heuristic, ~110×/solve
+    on gear4) re-paid that construction cost on every call. Keyed on
+    :func:`evaluator_fingerprint`, so a structurally different model rebuilds.
+    """
+    fp = evaluator_fingerprint(model)
+    cached = getattr(model, "_nlp_evaluator_cache", None)
+    if cached is not None:
+        ev, cached_fp = cached
+        if cached_fp == fp:
+            return ev
+    ev = NLPEvaluator(model, gauss_newton=bool(getattr(model, "_gauss_newton_hessian", False)))
+    model._nlp_evaluator_cache = (ev, fp)  # type: ignore[attr-defined]
+    return ev
+
 
 def validate_sparse_values(evaluator, x: np.ndarray, atol: float = 1e-8) -> bool:
     """Check that sparse COO values agree with dense evaluation.
@@ -388,29 +443,20 @@ class NLPEvaluator:
             return np.array([], dtype=np.float64)
         return np.asarray(self._cons_fn_jit(x, self._current_params()))
 
-    def evaluate_jacobian(self, x: np.ndarray) -> np.ndarray:
-        """Evaluate Jacobian of constraints at x. Returns (m, n) array."""
+    def _evaluate_dense_jacobian(self, x: np.ndarray) -> np.ndarray:
+        """Raw dense Jacobian via the compiled ``jax.jacfwd``. Callers must size-
+        gate this: on a large model the dense compile aborts the process (see
+        ``_DENSE_JACOBIAN_COMPILE_LIMIT``). Use :meth:`evaluate_jacobian` for the
+        guarded, size-aware entry point."""
         if self._jac_fn_jit is None:
             return np.empty((0, self._n_variables), dtype=np.float64)
         return np.asarray(self._jac_fn_jit(x, self._current_params()))
 
-    def evaluate_sparse_jacobian(self, x: np.ndarray):
-        """Evaluate Jacobian as a sparse CSC matrix using compressed JVPs.
-
-        Uses sparsity detection and graph coloring to evaluate the Jacobian
-        in O(p) JVPs where p is the chromatic number (typically 5-20).
-        Falls back to dense evaluation if sparsity infrastructure is unavailable.
-
-        Returns:
-            scipy.sparse.csc_matrix of shape (m, n), or dense (m, n) ndarray
-            if sparse evaluation is not applicable.
-        """
+    def _ensure_sparse_jac_fn(self) -> bool:
+        """Lazily build the sparse (coloring-based) Jacobian function. Returns
+        True when a sparse evaluator is available for this model. Idempotent."""
         if self._cons_fn_jit is None:
-            import scipy.sparse as sp
-
-            return sp.csc_matrix((0, self._n_variables), dtype=np.float64)
-
-        # Lazy-initialize sparse infrastructure
+            return False
         if not hasattr(self, "_sparse_jac_fn"):
             self._sparse_jac_fn = None
             try:
@@ -430,12 +476,57 @@ class NLPEvaluator:
                     self._sparse_jac_fn = make_sparse_jac_fn(self._cons_fn, pattern, colors, seed)
             except Exception:
                 pass
+        return self._sparse_jac_fn is not None
 
-        if self._sparse_jac_fn is not None:
+    def evaluate_jacobian(self, x: np.ndarray) -> np.ndarray:
+        """Evaluate Jacobian of constraints at x. Returns a dense (m, n) array.
+
+        For a large model the dense ``jax.jacfwd`` compile explodes XLA — it
+        replicates the constraint program once per input variable — and aborts
+        the *process* with a native crash that no ``try/except`` can catch. Above
+        ``_DENSE_JACOBIAN_COMPILE_LIMIT`` (m * n) this routes through the sparse
+        coloring path (O(chromatic-number) JVPs) and densifies, so any caller
+        needing a full-model Jacobian at scale stays safe while still receiving
+        the same dense (m, n) array. Small/medium models keep the faster dense
+        path unchanged. Only triggers when the sparse evaluator is actually
+        available; otherwise the dense path is used as before.
+        """
+        if self._jac_fn_jit is None:
+            return np.empty((0, self._n_variables), dtype=np.float64)
+        if (
+            self._n_constraints * self._n_variables > _DENSE_JACOBIAN_COMPILE_LIMIT
+            and self._ensure_sparse_jac_fn()
+        ):
+            import scipy.sparse as sp
+
+            J = self._sparse_jac_fn(x)
+            if sp.issparse(J):
+                return np.asarray(J.toarray(), dtype=np.float64)
+            return np.asarray(J, dtype=np.float64)
+        return self._evaluate_dense_jacobian(x)
+
+    def evaluate_sparse_jacobian(self, x: np.ndarray):
+        """Evaluate Jacobian as a sparse CSC matrix using compressed JVPs.
+
+        Uses sparsity detection and graph coloring to evaluate the Jacobian
+        in O(p) JVPs where p is the chromatic number (typically 5-20).
+        Falls back to dense evaluation if sparsity infrastructure is unavailable.
+
+        Returns:
+            scipy.sparse.csc_matrix of shape (m, n), or dense (m, n) ndarray
+            if sparse evaluation is not applicable.
+        """
+        if self._cons_fn_jit is None:
+            import scipy.sparse as sp
+
+            return sp.csc_matrix((0, self._n_variables), dtype=np.float64)
+
+        if self._ensure_sparse_jac_fn():
             return self._sparse_jac_fn(x)
 
-        # Fallback to dense
-        return self.evaluate_jacobian(x)
+        # Fallback to the RAW dense path (not evaluate_jacobian, which would
+        # re-enter this method for a large model and recurse).
+        return self._evaluate_dense_jacobian(x)
 
     @property
     def sparsity_pattern(self):

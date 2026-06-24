@@ -376,6 +376,15 @@ def _tighten_affine_argument_interval(
         tightened_ub[flat_idx] = new_ub
         return
 
+    if new_lb - new_ub <= _EMPTY_INTERVAL_FEAS_TOL:
+        # Sub-tolerance crossover (floating-point rounding on a degenerate box):
+        # snap to a degenerate point and let the node NLP validate, rather than
+        # certify a false infeasibility (issue #27a; hda fixed-value at ~68930).
+        mid = 0.5 * (new_lb + new_ub)
+        tightened_lb[flat_idx] = mid
+        tightened_ub[flat_idx] = mid
+        return
+
     raise NonlinearBoundTighteningInfeasible(
         f"tightened interval is empty for flat variable {flat_idx}: [{new_lb}, {new_ub}]"
     )
@@ -503,6 +512,14 @@ def _tighten_affine_upper_bound(
         if new_lb <= new_ub:
             tightened_lb[idx] = new_lb
             tightened_ub[idx] = new_ub
+            continue
+
+        if new_lb - new_ub <= _EMPTY_INTERVAL_FEAS_TOL:
+            # Sub-tolerance crossover: snap to a degenerate point rather than
+            # certify a false infeasibility (issue #27a).
+            mid = 0.5 * (new_lb + new_ub)
+            tightened_lb[idx] = mid
+            tightened_ub[idx] = mid
             continue
 
         raise NonlinearBoundTighteningInfeasible(

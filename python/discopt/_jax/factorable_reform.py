@@ -254,6 +254,11 @@ class _Lifter:
         lo, hi = _bound_expression(pow_expr, self.model)
         if not (np.isfinite(lo) and np.isfinite(hi)) or max(abs(lo), abs(hi)) >= _INF_THRESH:
             return None
+        if lo > hi:
+            # Never seed an inverted aux box (matches ``.expression``); an empty
+            # interval would make the nonlinear bound-tightening wrongly prove
+            # infeasibility.
+            return None
         name = f"_fr_aux_{self._counter}"
         self._counter += 1
         w = Variable(name, VarType.CONTINUOUS, (), lo, hi, self.model)
@@ -315,13 +320,24 @@ class _Lifter:
         *variable* — which the relaxation can bound. Lifting the *value* of the
         power (not just its base) turns e.g. ``N / g**(1/3)`` into ``N / d`` with
         ``d`` a plain variable, the ratio form the objective linearizer accepts.
-        Requires ``base_var >= 0`` so the power is real and monotone increasing.
+        Requires ``base_var >= 0`` so the power is real and monotone (increasing
+        for ``p > 0``, decreasing for ``p < 0``); the induced box is taken over the
+        endpoints in either case.
         """
         lo = float(np.min(base_var.lb))
         hi = float(np.max(base_var.ub))
         if not (np.isfinite(lo) and np.isfinite(hi)) or lo < 0.0:
             return None
         d_lo, d_hi = lo**p, hi**p
+        # ``base_var >= 0`` makes ``base**p`` monotone on ``[lo, hi]``, so the
+        # interval extremes are at the endpoints — but for a NEGATIVE power it is
+        # *decreasing* (``lo**p > hi**p``), so the raw ``(lo**p, hi**p)`` is
+        # inverted. Order the endpoints. An unordered (inverted) pair would seed an
+        # aux box with ``lb > ub`` that the nonlinear bound-tightening reads as an
+        # empty interval and wrongly proves the model infeasible (hda: known
+        # optimum -5964.5 was returned as `infeasible`).
+        if d_lo > d_hi:
+            d_lo, d_hi = d_hi, d_lo
         if not (np.isfinite(d_lo) and np.isfinite(d_hi)) or max(d_lo, d_hi) >= _INF_THRESH:
             return None
         name = f"_fr_aux_{self._counter}"

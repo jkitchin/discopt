@@ -70,6 +70,13 @@ pub struct PresolveResult {
 pub fn run(model: crate::expr::ModelRepr, mut opts: OrchestratorOptions) -> PresolveResult {
     let started = Instant::now();
     let mut ctx = PresolveContext::from_model(model);
+    // Expose the run deadline so long passes (probing) can bail mid-loop
+    // instead of only being stopped by the between-passes check below.
+    ctx.deadline = if opts.time_limit_ms > 0 {
+        Some(started + std::time::Duration::from_millis(opts.time_limit_ms))
+    } else {
+        None
+    };
     let mut deltas: Vec<PresolveDelta> = Vec::new();
     let mut terminated_by = TerminationReason::IterationCap;
     let mut last_iter: u32 = 0;

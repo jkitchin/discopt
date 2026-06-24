@@ -84,6 +84,7 @@ CUTEST_ENV      := $(CUTEST_PREFIX)/env.sh
 .PHONY: all benchmarks build test test-fast test-all test-quick test-slow test-correctness \
         test-modeling test-solvers test-amp test-amp-fast test-amp-integration \
         test-nn test-convexity test-jax test-llm \
+        perf-gate perf-baseline \
         lint hooks clean help \
         bench-notebook bench-smoke bench-phase3-gate bench-tests \
         bench-cutest bench-cutest-smoke setup-cutest check-cutest \
@@ -104,6 +105,8 @@ help:
 	@echo "  make test-all           Full pytest suite (slow + correctness)"
 	@echo "  make test-quick         unit + smoke only (dev loop, target <60s)"
 	@echo "  make test-slow          Only the slow-marked tests"
+	@echo "  make perf-gate          Perf regression gate: panel vs baseline (~5 min)"
+	@echo "  make perf-baseline      Regenerate the committed perf baseline"
 	@echo "  make test-correctness   Known-optima validation suite"
 	@echo "  make test-modeling      Modeling layer slice"
 	@echo "  make test-solvers       Solver/B&B/OA slice"
@@ -370,6 +373,21 @@ test-slow: build
 	@echo "==> Running slow-marked tests..."
 	$(PYTEST_CAPPED) python/tests/ -v --tb=short -q -m "slow"
 	@echo "==> Slow tests passed"
+
+# Performance regression gate (perf plan Stage 0). Runs the fixed vendored panel
+# and fails on any correctness violation or deterministic perf regression (>15%
+# node_count / compiles-per-node) vs docs/dev/data/perf-baseline.jsonl. Nightly /
+# pre-merge, NOT on the PR-fast path (~4-5 min). See docs/dev/performance-plan.md.
+perf-gate: build
+	@echo "==> Running performance gate (panel vs committed baseline)..."
+	$(PYTHON) -m discopt_benchmarks.perf.gate
+	@echo "==> Perf gate passed"
+
+# Regenerate the committed baseline (run after an intended perf change; review the
+# docs/dev/data/perf-baseline.jsonl diff before committing).
+perf-baseline: build
+	@echo "==> Regenerating perf baseline..."
+	$(PYTHON) -m discopt_benchmarks.perf.gate --update-baseline
 
 # Full known-optima validation. Heavy; not in PR gate.
 test-correctness: build
