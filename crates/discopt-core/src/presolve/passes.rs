@@ -23,7 +23,7 @@ use super::coefficient_strengthening::coefficient_strengthening;
 use super::delta::{count_tightened, Implication as DeltaImpl, PresolveDelta, VarAggregation};
 use super::duality::{reduced_cost_fixing, ReducedCostInfo};
 use super::eliminate::eliminate_variables;
-use super::factorable_elim::factorable_eliminate;
+use super::factorable_elim::factorable_eliminate_until;
 use super::fbbt::{fbbt_with_cutoff, Interval};
 use super::fbbt_fp::{fbbt_fixed_point, FbbtFpOptions};
 use super::implied_bounds::propagate_implied_bounds;
@@ -627,7 +627,7 @@ impl PresolvePass for FactorableElimPass {
         PassCategory::RewritesModel
     }
     fn run(&mut self, ctx: &mut PresolveContext) -> PresolveDelta {
-        let (new_model, stats) = factorable_eliminate(&ctx.model);
+        let (new_model, stats) = factorable_eliminate_until(&ctx.model, ctx.deadline);
         ctx.model = new_model;
 
         let mut delta = PresolveDelta::empty("factorable_elim", ctx.iter);
