@@ -1,7 +1,7 @@
 """GDPopt-style Logic-based Outer Approximation (LOA) solver for GDP.
 
 Decomposes a GDP/MINLP into alternating MILP master + NLP subproblems.
-Requires highspy for the MILP master problem solver.
+Requires a matrix MILP backend for the master problem solver.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ def solve_gdpopt_loa(
     gap_tolerance: float = 1e-4,
     max_iterations: int = 100,
     nlp_solver: str = "ipm",
+    milp_solver: str = "auto",
 ) -> SolveResult:
     """Solve a GDP model via Logic-based Outer Approximation.
 
@@ -44,6 +45,9 @@ def solve_gdpopt_loa(
         Maximum LOA iterations.
     nlp_solver : str
         NLP solver backend for subproblems (``"ipm"``, ``"pounce"``, ``"ipopt"``).
+    milp_solver : str
+        MILP backend for LOA master problems: ``"auto"``, ``"highs"``,
+        ``"pounce"``, ``"simplex"``, or ``"gurobi"``.
 
     Returns
     -------
@@ -173,6 +177,7 @@ def solve_gdpopt_loa(
             master_bound_valid,
             time_limit=time_limit - elapsed,
             gap_tolerance=gap_tolerance,
+            milp_solver=milp_solver,
         )
 
         if master_result is None or master_result.x is None:
@@ -497,17 +502,17 @@ def _solve_master_milp(
     objective_bound_valid,
     time_limit,
     gap_tolerance,
+    milp_solver="auto",
 ):
     """Build and solve the master MILP."""
     try:
         from discopt.solvers.lp_backend import get_milp_solver
 
-        # HiGHS if present, else POUNCE (self-hosted B&B) — HiGHS-free path.
-        solve_milp = get_milp_solver()
+        solve_milp = get_milp_solver(backend=milp_solver)
     except ImportError as e:
         raise ImportError(
             "LOA solver requires a MILP backend for the master. Install one of: "
-            "pip install highspy  |  pip install pounce-solver"
+            "pip install highspy  |  pip install pounce-solver  |  pip install gurobipy"
         ) from e
 
     # Determine master problem dimensions

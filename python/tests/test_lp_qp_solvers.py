@@ -68,6 +68,48 @@ class TestProblemClassifier:
         m.subject_to(x + y <= 5)
         assert classify_problem(m) == ProblemClass.MIQP
 
+    def test_qcp_detection(self):
+        """Linear obj + quadratic constraints + continuous = QCP."""
+        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+
+        m = dm.Model("qcp_test")
+        x = m.continuous("x", lb=-2, ub=2)
+        m.minimize(x)
+        m.subject_to(x**2 <= 1)
+        assert classify_problem(m) == ProblemClass.QCP
+
+    def test_qcqp_detection(self):
+        """Quadratic obj + quadratic constraints + continuous = QCQP."""
+        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+
+        m = dm.Model("qcqp_test")
+        x = m.continuous("x", lb=-2, ub=2)
+        m.minimize((x - 1) ** 2)
+        m.subject_to(x**2 <= 1)
+        assert classify_problem(m) == ProblemClass.QCQP
+
+    def test_miqcp_detection(self):
+        """Linear obj + quadratic constraints + integer = MIQCP."""
+        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+
+        m = dm.Model("miqcp_test")
+        x = m.continuous("x", lb=-2, ub=2)
+        y = m.binary("y")
+        m.minimize(x + y)
+        m.subject_to(x**2 <= y)
+        assert classify_problem(m) == ProblemClass.MIQCP
+
+    def test_miqcqp_detection(self):
+        """Quadratic obj + quadratic constraints + integer = MIQCQP."""
+        from discopt._jax.problem_classifier import ProblemClass, classify_problem
+
+        m = dm.Model("miqcqp_test")
+        x = m.continuous("x", lb=-2, ub=2)
+        y = m.binary("y")
+        m.minimize((x - 1) ** 2 + y)
+        m.subject_to(x**2 <= y)
+        assert classify_problem(m) == ProblemClass.MIQCQP
+
     def test_nlp_detection(self):
         """Nonlinear constraints + continuous = NLP."""
         from discopt._jax.problem_classifier import ProblemClass, classify_problem
@@ -80,7 +122,7 @@ class TestProblemClassifier:
         assert classify_problem(m) == ProblemClass.NLP
 
     def test_minlp_detection(self):
-        """Nonlinear + integer = MINLP."""
+        """Quadratic constraints with integers classify as MIQCQP."""
         from discopt._jax.problem_classifier import ProblemClass, classify_problem
 
         m = dm.Model("minlp_test")
@@ -88,10 +130,7 @@ class TestProblemClassifier:
         y = m.binary("y")
         m.minimize(x**2 + y)
         m.subject_to(x * x + y <= 5)
-        # x*x is quadratic in constraint but together with non-linear structure
-        # this should be detected properly
-        result = classify_problem(m)
-        assert result in (ProblemClass.MIQP, ProblemClass.MINLP)
+        assert classify_problem(m) == ProblemClass.MIQCQP
 
 
 # ---------------------------------------------------------------
@@ -128,6 +167,28 @@ class TestLPExtraction:
         assert jnp.allclose(qp_data.Q[:2, :2], 2.0 * jnp.eye(2), atol=1e-6)
         # c should be [3, 0]
         assert jnp.allclose(qp_data.c[:2], jnp.array([3.0, 0.0]), atol=1e-6)
+
+    def test_qcp_extraction(self):
+        """Extract QCP data with linear and quadratic rows preserved."""
+        from discopt._jax.problem_classifier import extract_qcp_data
+
+        m = dm.Model("test_qcp")
+        x = m.continuous("x", shape=(2,), lb=-2, ub=2)
+        m.minimize(3 * x[0] + x[1])
+        m.subject_to(x[0] + x[1] <= 5)
+        m.subject_to(x[0] ** 2 + x[1] <= 1)
+
+        qcp_data = extract_qcp_data(m)
+
+        assert jnp.allclose(qcp_data.c, jnp.array([3.0, 1.0]), atol=1e-10)
+        assert jnp.allclose(qcp_data.A_ub, jnp.array([[1.0, 1.0]]), atol=1e-10)
+        assert jnp.allclose(qcp_data.b_ub, jnp.array([5.0]), atol=1e-10)
+        assert len(qcp_data.quadratic_constraints) == 1
+        row = qcp_data.quadratic_constraints[0]
+        assert row.sense == "<="
+        assert row.rhs == pytest.approx(1.0)
+        assert jnp.allclose(row.Q, jnp.array([[2.0, 0.0], [0.0, 0.0]]), atol=1e-10)
+        assert jnp.allclose(row.c, jnp.array([0.0, 1.0]), atol=1e-10)
 
 
 # ---------------------------------------------------------------
