@@ -86,6 +86,14 @@ compiles) is a separate, smaller-scoped investigation and is where #187's
 
 ## 2. Stage 0 — Observability & the perf gate (prerequisite, ~1 PR)
 
+> **Implemented.** `discopt_benchmarks/perf/` (`measure.py`, `panel.py`,
+> `gate.py`), baseline at `docs/dev/data/perf-baseline.jsonl`, `make perf-gate` /
+> `make perf-baseline`. The two previously-missing metrics — `xla_compile_count`
+> and `time_to_first_incumbent` — are now recorded per solve. The baseline already
+> shows the Stage-1 win: gear4 went from **810 → 5** XLA compiles
+> (`compiles/node` ~0.0008). Gate logic is unit-tested in
+> `discopt_benchmarks/tests/test_perf_gate.py`.
+
 **Work items**
 - **Perf panel**: version-controlled ~25 instances spanning CC1–CC4 (gear4,
   ex1252/ex1252a, kall_*/graphpart_* latency set, syn*/rsyn*, nvs17/19/24,
