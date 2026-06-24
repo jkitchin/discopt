@@ -15,7 +15,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from discopt._jax.nlp_evaluator import NLPEvaluator
+from discopt._jax.nlp_evaluator import NLPEvaluator, cached_evaluator
 from discopt.modeling.core import Model, VarType
 from discopt.solvers import NLPResult, SolveStatus
 
@@ -142,7 +142,7 @@ class MultiStartNLP:
             MultiStartResult with best solution and statistics.
         """
         model = self._model
-        evaluator = NLPEvaluator(model)
+        evaluator = cached_evaluator(model)
         lb, ub = evaluator.variable_bounds
         int_mask = _get_integer_mask(model)
         has_integers = np.any(int_mask)
@@ -235,7 +235,7 @@ def feasibility_pump(
 
     lb, ub = _get_variable_bounds(model)
     if evaluator is None:
-        evaluator = NLPEvaluator(model)
+        evaluator = cached_evaluator(model)
 
     opts = dict(ipopt_options) if ipopt_options else {}
     opts.setdefault("print_level", 0)
@@ -410,7 +410,7 @@ def subnlp(
         backend = get_nlp_solver("auto")
 
     if evaluator is None:
-        evaluator = NLPEvaluator(model)
+        evaluator = cached_evaluator(model)
 
     int_mask = _get_integer_mask(model)
     lb_orig, ub_orig = _get_variable_bounds(model)
@@ -543,7 +543,7 @@ def integer_local_search(
     import time
 
     if evaluator is None:
-        evaluator = NLPEvaluator(model)
+        evaluator = cached_evaluator(model)
     int_mask = _get_integer_mask(model)
     if not np.any(int_mask) or evaluator.n_constraints == 0:
         # Pure-continuous or unconstrained: nothing for an integer lattice
@@ -781,7 +781,7 @@ def integer_box_search(
         return None
 
     if evaluator is None:
-        evaluator = NLPEvaluator(model)
+        evaluator = cached_evaluator(model)
 
     # Warm-start propagation. The continuous sub-NLP at a *neighbour* integer
     # assignment often has a narrow nonconvex feasible basin that the incumbent's
@@ -1042,7 +1042,7 @@ def diving(
 
     backend = _resolve_backend(backend)
     if evaluator is None:
-        evaluator = NLPEvaluator(model)
+        evaluator = cached_evaluator(model)
     lb0, ub0 = _get_variable_bounds(model)
     slot_map = _flat_slot_map(model)
 
@@ -1136,7 +1136,7 @@ def rins(
         return None
 
     if evaluator is None:
-        evaluator = NLPEvaluator(model)
+        evaluator = cached_evaluator(model)
     lb0, ub0 = _get_variable_bounds(model)
     slot_map = _flat_slot_map(model)
 
@@ -1413,7 +1413,7 @@ def local_branching(
     # Scalable sub-MIP variant for large binary blocks.
     if len(binary_idx) > max_binaries:
         if evaluator is None:
-            evaluator = NLPEvaluator(model)
+            evaluator = cached_evaluator(model)
         return _local_branching_submip(
             model,
             x_incumbent,
@@ -1430,7 +1430,7 @@ def local_branching(
         )
 
     if evaluator is None:
-        evaluator = NLPEvaluator(model)
+        evaluator = cached_evaluator(model)
 
     x_inc = np.asarray(x_incumbent, dtype=np.float64)
     incumbent_bits = {i: float(np.round(x_inc[i])) for i in binary_idx}
