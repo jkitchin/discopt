@@ -397,40 +397,24 @@ class _BoundOverrideEvaluator:
 def _evaluator_fingerprint(model: Model) -> tuple:
     """Structural fingerprint of a model for evaluator-cache validity.
 
-    Captures identity of the objective, constraints, variables, and parameters.
-    Mutating ``Parameter.value`` does NOT change the fingerprint, so repeated
-    solves that only rebind parameter values reuse the same JITed callables
-    and hit the XLA cache.
+    Thin alias for the canonical :func:`nlp_evaluator.evaluator_fingerprint`; kept
+    here for the existing importers (e.g. ``solvers.nlp_native``).
     """
-    return (
-        id(model._objective),
-        tuple(id(c) for c in model._constraints),
-        tuple(id(v) for v in model._variables),
-        tuple(id(p) for p in model._parameters),
-        bool(getattr(model, "_gauss_newton_hessian", False)),
-    )
+    from discopt._jax.nlp_evaluator import evaluator_fingerprint
+
+    return evaluator_fingerprint(model)
 
 
 def _make_evaluator(model: Model):
     """Create or reuse a cached NLPEvaluator for the model.
 
-    The first call builds a fresh ``NLPEvaluator`` (which JITs obj/grad/hess/
-    cons/jac/lag_hess). Subsequent calls return the same evaluator as long as
-    the model's structural fingerprint is unchanged, so the underlying jit
-    objects (and their XLA caches) are preserved across solves. Parameter
-    value changes are threaded through at call time as a runtime pytree.
+    Delegates to the canonical :func:`nlp_evaluator.cached_evaluator` so the B&B
+    loop, the primal heuristics, and the POUNCE node solves all share one cache
+    (and one set of compiled callables) instead of each rebuilding the evaluator.
     """
-    from discopt._jax.nlp_evaluator import NLPEvaluator
+    from discopt._jax.nlp_evaluator import cached_evaluator
 
-    fingerprint = _evaluator_fingerprint(model)
-    cached = getattr(model, "_nlp_evaluator_cache", None)
-    if cached is not None:
-        ev, cached_fp = cached
-        if cached_fp == fingerprint:
-            return ev
-    ev = NLPEvaluator(model, gauss_newton=getattr(model, "_gauss_newton_hessian", False))
-    model._nlp_evaluator_cache = (ev, fingerprint)
-    return ev
+    return cached_evaluator(model)
 
 
 def _estimate_alpha_fd(evaluator, lb, ub, n_samples=30):

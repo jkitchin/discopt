@@ -40,6 +40,50 @@ from discopt.modeling.core import Constraint, Model, ObjectiveSense
 _DENSE_JACOBIAN_COMPILE_LIMIT = 1_000_000
 
 
+def evaluator_fingerprint(model: Model) -> tuple:
+    """Structural fingerprint of a model for evaluator-cache validity.
+
+    Captures the object identity of the objective, constraints, variables, and
+    parameters, plus the Gauss-Newton flag — but NOT mutable variable bounds or
+    ``Parameter.value`` (the evaluator reads those live on each call). Two models
+    with the same fingerprint can therefore share one compiled ``NLPEvaluator``
+    across bound changes (every B&B node) and parameter re-binds.
+    """
+    return (
+        id(model._objective),
+        tuple(id(c) for c in model._constraints),
+        tuple(id(v) for v in model._variables),
+        tuple(id(p) for p in model._parameters),
+        bool(getattr(model, "_gauss_newton_hessian", False)),
+    )
+
+
+def cached_evaluator(model: Model) -> "NLPEvaluator":
+    """Return a per-model cached ``NLPEvaluator``, reusing its compiled JAX
+    callables across repeated constructions as long as the model's *structure* is
+    unchanged.
+
+    Constructing an ``NLPEvaluator`` re-traces and re-compiles the model's
+    constraint / objective / Jacobian functions — a real per-call Python cost.
+    The B&B loop, primal heuristics, and POUNCE node solves all evaluate the *same*
+    model (only bounds and parameter values change, which the evaluator reads
+    live), so they can share one evaluator. This centralizes the cache that was
+    previously only used by ``solver._make_evaluator``; call sites that built a
+    fresh ``NLPEvaluator(model)`` per call (e.g. the diving heuristic, ~110×/solve
+    on gear4) re-paid that construction cost on every call. Keyed on
+    :func:`evaluator_fingerprint`, so a structurally different model rebuilds.
+    """
+    fp = evaluator_fingerprint(model)
+    cached = getattr(model, "_nlp_evaluator_cache", None)
+    if cached is not None:
+        ev, cached_fp = cached
+        if cached_fp == fp:
+            return ev
+    ev = NLPEvaluator(model, gauss_newton=bool(getattr(model, "_gauss_newton_hessian", False)))
+    model._nlp_evaluator_cache = (ev, fp)  # type: ignore[attr-defined]
+    return ev
+
+
 def validate_sparse_values(evaluator, x: np.ndarray, atol: float = 1e-8) -> bool:
     """Check that sparse COO values agree with dense evaluation.
 
