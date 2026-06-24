@@ -2782,6 +2782,11 @@ class Model:
             ``convhull_ebd_encoding``, ``use_start_as_incumbent``,
             ``obbt_at_root``, ``obbt_with_cutoff``, ``alphabb_cutoff_obbt``,
             and ``obbt_time_limit``.
+            Use ``solver="mip-nlp"`` to select the MIP-NLP decomposition
+            family. Current implemented ``mip_nlp_method`` values are ``"oa"``
+            and ``"ecp"``; ``"goa"``, ``"roa"``, ``"fp"``, and
+            ``"lp_nlp_bb"`` are reserved until their dedicated implementations
+            land.
         validate : bool, default False
             If True, run Examiner-style KKT validation on the returned
             point and attach the :class:`~discopt.validation.ExaminerReport`

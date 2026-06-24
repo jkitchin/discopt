@@ -2179,6 +2179,8 @@ def solve_model(
     solver : str or None, default None
         Optional global-solver selector. Use ``"amp"`` to dispatch to
         Adaptive Multivariate Partitioning instead of branch-and-bound.
+        Use ``"mip-nlp"`` to dispatch to the MIP-NLP decomposition family
+        (OA/ECP now; GOA/ROA/FP/LP-NLP-BB are reserved method selectors).
         Use ``"gp"`` to dispatch to the geometric-programming fast path:
         the model is checked for GP structure (posynomial/monomial
         objective and constraints over strictly-positive continuous
@@ -2202,6 +2204,13 @@ def solve_model(
         ``disc_abs_width_tol``, ``convhull_formulation``, ``convhull_ebd``,
         ``convhull_ebd_encoding``, ``use_start_as_incumbent``, ``obbt_at_root``,
         ``obbt_with_cutoff``, ``alphabb_cutoff_obbt``, and ``obbt_time_limit``.
+    solver="mip-nlp" options
+        The MIP-NLP backend accepts ``mip_nlp_method`` and
+        ``mip_nlp_options``. Current implemented methods are ``"oa"`` and
+        ``"ecp"``; ``"goa"``, ``"roa"``, ``"fp"``, and ``"lp_nlp_bb"`` raise
+        ``NotImplementedError`` until their dedicated implementations land.
+        Existing OA options ``equality_relaxation``, ``ecp_mode``, and
+        ``feasibility_cuts`` may be passed as top-level aliases.
 
     Returns
     -------
@@ -2343,15 +2352,74 @@ def solve_model(
             except Exception as _sc_exc:  # pragma: no cover - defensive
                 logger.debug("structure-cut presolve skipped: %s", _sc_exc)
 
-    # --- AMP (Adaptive Multivariate Partitioning) global solver ---
+    # --- Solver-family dispatch ---
     _solver = solver if solver is not None else kwargs.pop("solver", None)
     # Recognised global-solver selectors: ``None`` (default branch-and-bound,
-    # with the automatic GP fast path below), ``"amp"``, ``"gp"`` (force the GP
-    # log-space path), and ``"bb"`` (force classic branch-and-bound, opting out
-    # of the automatic GP fast path). Reject anything else rather than silently
-    # falling through to B&B.
-    if _solver not in (None, "amp", "gp", "bb"):
-        raise ValueError(f"Unknown solver={_solver!r}. Choose one of None, 'amp', 'gp', 'bb'.")
+    # with the automatic GP fast path below), ``"amp"``, ``"mip-nlp"``,
+    # ``"gp"`` (force the GP log-space path), and ``"bb"`` (force classic
+    # branch-and-bound, opting out of the automatic GP fast path). Reject
+    # anything else rather than silently falling through to B&B.
+    if _solver not in (None, "amp", "mip-nlp", "gp", "bb"):
+        raise ValueError(
+            f"Unknown solver={_solver!r}. Choose one of None, 'amp', 'mip-nlp', 'gp', 'bb'."
+        )
+
+    # --- MIP-NLP decomposition solver family ---
+    if _solver == "mip-nlp":
+        import warnings
+
+        from discopt.solvers.mip_nlp import solve_mip_nlp
+
+        mip_nlp_method = kwargs.pop("mip_nlp_method", "oa")
+        mip_nlp_options = kwargs.pop("mip_nlp_options", None)
+        mip_nlp_kwargs = {}
+        for key in ("equality_relaxation", "ecp_mode", "feasibility_cuts"):
+            if key in kwargs:
+                mip_nlp_kwargs[key] = kwargs.pop(key)
+
+        gdp_methods = {"big-m", "hull", "mbigm", "auto"}
+        if gdp_method == "oa":
+            warnings.warn(
+                "gdp_method='oa' is deprecated for selecting MINLP OA. Use "
+                "solver='mip-nlp', mip_nlp_method='oa'. Interpreting gdp_method "
+                "as 'big-m' for GDP reformulation in this solve.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            resolved_gdp_method = "big-m"
+        elif gdp_method in gdp_methods:
+            resolved_gdp_method = gdp_method
+        else:
+            warnings.warn(
+                f"solver='mip-nlp' does not use gdp_method={gdp_method!r} as a "
+                "MINLP algorithm selector; using 'big-m' for GDP reformulation.",
+                stacklevel=2,
+            )
+            resolved_gdp_method = "big-m"
+
+        if kwargs:
+            warnings.warn(
+                "MIP-NLP solver ignores solve_model options: "
+                + ", ".join(sorted(dict.fromkeys(kwargs))),
+                stacklevel=2,
+            )
+
+        from discopt._jax.gdp_reformulate import reformulate_gdp
+
+        model = reformulate_gdp(model, method=resolved_gdp_method)
+
+        return solve_mip_nlp(
+            model,
+            method=mip_nlp_method,
+            mip_nlp_options=mip_nlp_options,
+            time_limit=time_limit,
+            gap_tolerance=gap_tolerance,
+            max_iterations=max_nodes,
+            nlp_solver=nlp_solver,
+            **mip_nlp_kwargs,
+        )
+
+    # --- AMP (Adaptive Multivariate Partitioning) global solver ---
     if _solver == "amp":
         import warnings
 
@@ -2548,23 +2616,33 @@ def solve_model(
             f"Unknown decomposition={decomposition!r}; choose 'benders' or 'lagrangian'."
         )
 
-    # --- OA decomposition: general-purpose Outer Approximation ---
+    # --- Deprecated compatibility route: OA is a MINLP solver strategy, not a GDP method. ---
     if gdp_method == "oa":
-        from discopt.solvers.oa import solve_oa
+        import warnings
+
+        from discopt.solvers.mip_nlp import solve_mip_nlp
+
+        warnings.warn(
+            "gdp_method='oa' is deprecated for selecting MINLP OA. Use "
+            "solver='mip-nlp', mip_nlp_method='oa' instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
         # Extract OA-specific kwargs that solve_model doesn't understand
-        oa_kwargs = {}
+        mip_nlp_kwargs = {}
         for key in ("equality_relaxation", "ecp_mode", "feasibility_cuts"):
             if key in kwargs:
-                oa_kwargs[key] = kwargs.pop(key)
+                mip_nlp_kwargs[key] = kwargs.pop(key)
 
-        return solve_oa(
+        return solve_mip_nlp(
             model,
+            method="ecp" if mip_nlp_kwargs.get("ecp_mode", False) else "oa",
             time_limit=time_limit,
             gap_tolerance=gap_tolerance,
             max_iterations=max_nodes,
             nlp_solver=nlp_solver,
-            **oa_kwargs,
+            **mip_nlp_kwargs,
         )
 
     # --- LOA decomposition: intercept before GDP reformulation ---
