@@ -26,7 +26,7 @@ INTEGRALITY_TOL = 1e-5
 
 def _solve_oa(model, **kwargs):
     """Solve model with OA and return result."""
-    defaults = dict(gdp_method="oa", time_limit=60)
+    defaults = dict(solver="mip-nlp", mip_nlp_method="oa", time_limit=60)
     defaults.update(kwargs)
     return model.solve(**defaults)
 
