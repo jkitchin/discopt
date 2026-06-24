@@ -201,10 +201,158 @@ bound (`gap_certified` discipline). Low correctness risk.
 
 ## 6. Stage 4 — Node-count reduction (CC3; highest leverage, strictest gate)
 
-CC3 multiplies CC1+CC2: gear4's 5921 nodes are *why* it pays 810 recompiles and
-47.7 s of Python. Fewer nodes wins on all three axes at once — but a tighter bound
-or a mis-scored branch is exactly how a **false certificate** (nvs22 #277 / st_ph10
-#306) is born, so this carries the heaviest correctness gate.
+> **Entry experiment (2026-06-24) — falsified the framing below; read this first.**
+> I measured the bound trajectory (`node_callback` → `best_bound`/`incumbent`) and
+> the solve path/wall for the node-heavy panel. Three results overturn "branching
+> is the safe node-count win":
+>
+> | instance | nodes | wall | bound behavior | reading |
+> |---|---|---|---|---|
+> | gear4 | 5921 | **70 s** | **best_bound pinned at 0** for all 5921 nodes, jumps to opt only at the end | bound problem, not branching |
+> | nvs17 | 43 | — | bound diverges below opt (uninformative) | bound problem |
+> | ex1263 | **15335** | **0.9 s** | Rust MILP B&B ~17 000 nodes/s | node_count ≠ wall — *not slow* |
+> | tln4 | 6970 | 13.8 s | Rust MILP path | MILP-side, separate |
+> | nvs22 / clay0303hfsg | 103 / 229 | 16 / 30 s | bound *climbs* to opt | branching-lever, but tiny |
+>
+> 1. **node_count ≠ wall.** ex1263's 15 335 nodes solve in **0.9 s** — chasing its
+>    node count would optimize a non-problem. The metric that matters is wall, and
+>    the gate must read it that way (it gates node_count only for *slow* certifying
+>    instances).
+> 2. **The one slow node-heavy instance (gear4) is bound-pinned at 0** — no branch
+>    order can fathom against a 0 bound, which is why the *already-implemented*
+>    strong/pseudocost/reliability branching does not help it. This is the hard,
+>    partially-unsolved **#196** relaxation problem (lift the pinned bound via
+>    per-node lifted-FBBT / OBBT-on-aux / SOS1 recognition), **not** branching.
+> 3. Where the bound *does* climb (nvs22, clay), node counts are small — modest
+>    wins, not the lever.
+>
+> **Consequence:** there is no clean, safe, high-impact Stage-4 win via branching.
+> The real lever is **bound-strengthening on the pinned-bound class** (#196/#208) —
+> high value but high risk (a wrong bound is a false certificate, the nvs22 #277 /
+> st_ph10 #306 failure mode), so it is a scoped, differential-bound-gated,
+> multi-PR effort, not a quick change. A branching PR was **not** shipped because
+> the measurement shows it would not move the slow instances.
+>
+> **Bound-lifting follow-up (2026-06-24) — the one *ready* lever is measured-dead.**
+> `obbt.obbt_tighten_root(cascade_aux=True)` already implements OBBT-on-aux (#208):
+> capture OBBT's tightening of the lifted product/ratio aux columns and reverse-FBBT
+> it back onto the originals. It is **sound** (every optimum preserved). But an A/B
+> with the Stage-0 harness confirms it does **not** pay off — neutral on nvs11/nvs12,
+> and a regression on nvs13 (35→37 nodes), nvs17 (43→61), and **nvs22 (optimal/103
+> nodes → feasible/9.907, fails to certify)**. The perf gate would reject it. So
+> `cascade_aux` stays default-off; OBBT-on-aux is **not** the win.
+>
+> | instance | cascade off | cascade on (#208) |
+> |---|---|---|
+> | nvs11 / nvs12 | 33 / 13 nodes | 33 / 13 (no change) |
+> | nvs13 | 35 nodes, optimal | 37 nodes, optimal |
+> | nvs17 | 43 nodes, feasible | 61 nodes, feasible |
+> | nvs22 | **optimal, 6.058, 103 nodes** | **feasible, 9.907, did not certify** |
+>
+> **Correction (2026-06-24, after "SCIP/BARON manage this" pushback) — the
+> framing above mis-diagnosed *why* BARON wins.** BARON solves gear4 in 0.18 s.
+> It does **not** lift the continuous bound either — gear4's continuous bound is
+> genuinely 0 (the continuous ratio can hit the target exactly), confirmed: full
+> RLT + all separators + optimal cutoff still give bound 0. BARON wins by
+> **branch-and-reduce**: a tight relaxation + *aggressive range reduction*
+> collapses the integer box, then the tiny remainder is enumerated. The
+> certificate is "no better integer point exists in the reduced box," **not** a
+> lifted LP bound.
+>
+> The measured gap is therefore **range-reduction strength**, not bound-lifting:
+> - gear4 optimum is `x0=19, x1=16, x2=49, x3=43`.
+> - discopt's cutoff-OBBT collapses x0,x1 to [12,43] but leaves x2,x3 at [12,60]
+>   → a ~32×32×49×49 ≈ **2.5 M** box → 5921 nodes of mostly-unfathomable spatial
+>   branching.
+> - It stalls there because the ratio-of-products McCormick envelope is too loose
+>   for OBBT to bite further (5 OBBT rounds tighten nothing more; cutoff=50 and
+>   cutoff=1.6434 give the *same* box).
+>
+> So Stage 4 **is** bridgeable, via the SOTA **branch-and-reduce** stack, which
+> discopt has only weakly:
+> 1. **Tighter ratio-of-products / bilinear relaxation** (#185 `r·q=m` envelope,
+>    #201 reciprocal-quadratic, integer-aware products) so range reduction bites.
+> 2. **Aggressive range reduction at every node** — integer-rounded cutoff-OBBT,
+>    **probing on integer values**, and **duality/marginal-based reduction
+>    (DBBT)** — to collapse the box the way BARON does.
+> 3. (1) and (2) **compound**: a tighter relaxation makes reduction cut deeper,
+>    which tightens the relaxation again.
+>
+> This corrects two earlier errors: over-generalizing from the one `cascade_aux`
+> negative result to "no win," and conflating "continuous bound is 0" with
+> "unsolvable fast" (BARON is fast *without* lifting that bound). The work is
+> substantial and still strictly correctness-gated (every reduction must be valid
+> over the relaxation polytope — a wrong reduction cuts the optimum = a false
+> certificate), but it is **identifiable, SOTA-aligned work, not a dead end**.
+>
+> **Recommended first step (measured spike, with a kill criterion):** prototype
+> integer probing + integer-rounded cutoff-OBBT to a fixpoint on gear4 and confirm
+> the box collapses well below 2.5 M (kill the spike if it does not), then add the
+> #185 ratio envelope and re-measure. Ship only what the perf gate shows reduces
+> nodes/wall while staying 0-incorrect + differential-bound-sound.
+>
+> **SPIKE RESULT (2026-06-24) — kill criterion fired, and it relocated the lever.**
+> Range reduction (cutoff-OBBT + integer probing/shaving to a fixpoint) on gear4
+> with the *optimal* cutoff **stalls at a 2.46 M box** (5.76 M → 2.46 M, then
+> fixpoint; probing matched OBBT exactly — they share the loose McCormick
+> relaxation). And a tighter continuous ratio envelope would not help either:
+> x0=43 is genuinely continuously feasible at the target ratio (x1=12, x2≈x3≈59.8).
+> So **neither reduction nor bound-lifting is gear4's lever.**
+>
+> The per-node measurement reveals the real gap — **per-node speed, not node count:**
+>
+> | instance | path | nodes | wall | **ms/node** | split |
+> |---|---|---|---|---|---|
+> | gear4 | spatial / JAX | 5921 | 54.9 s | **9.28** | 40 % JAX, 59 % Python, 0 % Rust |
+> | ex1263 | Rust MILP B&B | 15335 | 0.9 s | **0.059** | ~all Rust |
+>
+> gear4's nodes are **~157× slower** than the Rust path's. At Rust-path speed its
+> 5921 nodes would take **~0.35 s ≈ BARON's 0.18 s** — i.e. **per-node speed alone
+> closes the gap**, regardless of BARON's exact node count. gear4 is on the slow
+> spatial/JAX path (per-node McCormick-LP rebuild + JAX eval + Python orchestration
+> at ~9 ms/node); ex1263 is on the fast native path.
+>
+> **Corrected lever (measured): CC1/CC2 — speed up the spatial per-node path**, not
+> CC3 (node count) and not bound-lifting.
+>
+> **ROUTING SPIKE (2026-06-24) — found the precise bottleneck, and corrected a
+> magnitude error.** The per-node LP *solve* is **already** routed through the Rust
+> warm-started simplex (`MccormickLPRelaxer(backend="simplex")` is the default —
+> that's why `rust_time ≈ 0`: the solve is already fast). So "route the solve to
+> Rust" is done and is *not* the remaining cost. A cProfile of gear4's per-node
+> path shows the real bottleneck: **the McCormick relaxation is rebuilt from
+> scratch every node.** `solve_at_node` calls `build_milp_relaxation(...)` per
+> call — 6244 times (≈ once/node):
+>
+> | per-node hot spot | cumtime |
+> |---|---|
+> | `build_milp_relaxation` (DAG walk → rows) | 5.3 s |
+> | `equilibrate_relaxation_lp` (Ruiz scaling) | 8.3 s |
+> | constraint-matrix build + product decompose | ~3 s |
+>
+> ≈ **half the wall is rebuilding the same relaxation structure** (only the bound
+> box changes node-to-node). The lever is therefore **incremental relaxation
+> reuse**: build the structure once, and per node update only the bound-dependent
+> McCormick envelope coefficients (reuse/cheap-refresh the equilibration). This is
+> exactly the #316 pattern (stop rebuilding per call), applied to the node-LP.
+> Bound-neutral (identical relaxation math → identical bound → identical search),
+> so low correctness risk, gate-validated on node_count-unchanged + wall-down.
+>
+> **Honest magnitude (correcting the earlier "→0.35 s ≈ BARON" claim):** that
+> comparison was apples-to-oranges — ex1263's 0.06 ms/node is a *pure-MILP* node
+> (no McCormick relaxation at all, because #285 linearizes it); gear4 is a genuine
+> ratio that **cannot** be reformulated to a pure MILP, so it will always carry a
+> per-node McCormick LP. Incremental reuse is a realistic **~2× per-node win
+> (gear4 ~55 s → ~25–30 s)**, not full BARON closure. It is a real, low-risk,
+> measurable improvement for the whole spatial-nonconvex class — but the residual
+> gap to BARON also involves tighter relaxations/reduction that compound, which
+> remain harder, separate work.
+
+CC3 multiplies CC1+CC2: gear4's 5921 nodes are *why* it pays its Python cost. But
+per the entry experiment, fathoming those nodes needs a non-zero bound first — so
+the work below is gated on the bound lifting off 0, and a tighter bound or a
+mis-scored branch is exactly how a **false certificate** (nvs22 #277 / st_ph10
+#306) is born, hence the heaviest correctness gate.
 
 **Work items** (each behind a flag, each gated by node-count *and* the cert invariant)
 1. **Pseudocost / reliability branching** on the spatial + integer columns (#309).
