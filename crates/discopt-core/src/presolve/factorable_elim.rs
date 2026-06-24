@@ -65,6 +65,7 @@
 //! equations and will simply drop them.
 
 use std::collections::HashSet;
+use std::time::Instant;
 
 use super::fbbt::{forward_propagate, Interval};
 use super::polynomial::try_polynomial;
@@ -90,12 +91,31 @@ pub struct FactorableElimStats {
 /// Pure function: input is not modified. The caller decides whether
 /// to swap in the result.
 pub fn factorable_eliminate(model: &ModelRepr) -> (ModelRepr, FactorableElimStats) {
+    factorable_eliminate_until(model, None)
+}
+
+/// Like [`factorable_eliminate`] but stops once `deadline` passes, returning the
+/// eliminations performed so far. Each outer iteration re-scans every candidate
+/// leaf against every constraint (an O(K · leaves · constraints · body) loop to a
+/// fixed point), so on a large model a single pass can run for tens of seconds —
+/// far past the orchestrator's *between-passes* time check. Bailing mid-loop only
+/// performs *fewer* sound eliminations: the returned model keeps the not-yet-
+/// eliminated constraints, so it remains equivalent to the input.
+pub fn factorable_eliminate_until(
+    model: &ModelRepr,
+    deadline: Option<Instant>,
+) -> (ModelRepr, FactorableElimStats) {
     let mut out = model.clone();
     let mut stats = FactorableElimStats::default();
 
     // Iterate to a fixed point — dropping a constraint may expose
     // another newly-singleton variable.
     loop {
+        if let Some(dl) = deadline {
+            if Instant::now() >= dl {
+                break;
+            }
+        }
         let removed_before = stats.constraints_removed;
         let leaves = scalar_continuous_var_leaves(&out);
         stats.candidates_examined += leaves.len();
@@ -103,6 +123,14 @@ pub fn factorable_eliminate(model: &ModelRepr) -> (ModelRepr, FactorableElimStat
         let mut victim_ci: Option<usize> = None;
 
         'cands: for (vblock, leaf) in &leaves {
+            // A single re-scan over all candidates can itself be slow on a large
+            // model (per candidate it walks every constraint body); poll the
+            // deadline here too so one outer iteration cannot overrun unbounded.
+            if let Some(dl) = deadline {
+                if Instant::now() >= dl {
+                    break 'cands;
+                }
+            }
             // Skip variables already pinned (lb == ub).
             let lb = out.variables[*vblock].lb[0];
             let ub = out.variables[*vblock].ub[0];
@@ -349,6 +377,66 @@ mod tests {
         assert_eq!(stats.variables_freed, 1);
         assert_eq!(out.constraints.len(), 0);
         assert_eq!(stats.removed_constraint_indices, vec![0]);
+    }
+
+    #[test]
+    fn honors_past_deadline() {
+        // Same eliminable model as `drops_equation_with_nonlinear_other_term`,
+        // but with a deadline already in the past. The fixed-point loop re-scans
+        // every candidate against every constraint, so on a large model a single
+        // pass overruns the orchestrator's between-passes time check; it must poll
+        // the deadline and bail. Bailing performs *fewer* sound eliminations, so
+        // the returned model keeps the (still-valid) constraint.
+        let mut arena = ExprArena::new();
+        let v = scalar_var(&mut arena, "v", 0);
+        let x = scalar_var(&mut arena, "x", 1);
+        let y = scalar_var(&mut arena, "y", 2);
+        let xy = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: x,
+            right: y,
+        });
+        let neg_xy = arena.add(ExprNode::UnaryOp {
+            op: crate::expr::UnOp::Neg,
+            operand: xy,
+        });
+        let body = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Add,
+            left: v,
+            right: neg_xy,
+        });
+        let obj = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Add,
+            left: x,
+            right: y,
+        });
+        let model = ModelRepr {
+            arena,
+            objective: obj,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![ConstraintRepr {
+                body,
+                sense: ConstraintSense::Eq,
+                rhs: 0.0,
+                name: None,
+            }],
+            variables: vec![
+                vinfo("v", -100.0, 100.0),
+                vinfo("x", 0.0, 2.0),
+                vinfo("y", 0.0, 3.0),
+            ],
+            n_vars: 3,
+        };
+
+        // No deadline: the equation is eliminated (control).
+        let (_out, stats) = factorable_eliminate_until(&model, None);
+        assert_eq!(stats.constraints_removed, 1);
+
+        // Deadline already passed: bail before any elimination; model unchanged.
+        let past = std::time::Instant::now();
+        let (out, stats) = factorable_eliminate_until(&model, Some(past));
+        assert_eq!(stats.constraints_removed, 0);
+        assert_eq!(out.constraints.len(), 1);
     }
 
     #[test]
