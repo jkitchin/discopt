@@ -3101,6 +3101,7 @@ def solve_model(
             in_tree_presolve_stride=in_tree_presolve_stride,
             in_tree_presolve_repr=_model_repr,
             rens_enabled=rens,
+            _lns_enabled=_lns_enabled,
         )
 
     # --- Problem classification: dispatch LP/QP to specialized solvers ---
@@ -3343,6 +3344,7 @@ def solve_model(
                 in_tree_presolve_stride=in_tree_presolve_stride,
                 in_tree_presolve_repr=_model_repr,
                 rens_enabled=rens,
+                _lns_enabled=_lns_enabled,
             )
 
     # --- Extract variable info ---
@@ -6098,6 +6100,7 @@ def _solve_nlp_bb(
     in_tree_presolve_stride: int = 0,
     in_tree_presolve_repr=None,
     rens_enabled: bool = True,
+    _lns_enabled: bool = True,
 ) -> SolveResult:
     """Solve a MINLP via nonlinear Branch & Bound (NLP-BB).
 
@@ -6234,6 +6237,16 @@ def _solve_nlp_bb(
     # serial path.
     _use_pounce_batch = nlp_solver == "pounce" and n_vars >= _POUNCE_BATCH_MIN_VARS
     iteration = 0
+    # Adaptive LNS primal-improvement state (RINS + local branching). These
+    # improvers existed only in solve_model's loop; syn/rsyn/clay take THIS path,
+    # so they never got polished past the root incumbent (issue #267/#282). Wire
+    # them in here. ``_lns_enabled`` is the recursion guard (local_branching's
+    # sub-solve sets it False); soundness is preserved because every candidate is
+    # re-verified feasible and injected only on strict improvement.
+    _lns_has_integers = bool(int_sizes) and int(np.sum(int_sizes)) > 0
+    _lns_k_schedule = (2, 5, 10)
+    _lns_lb_calls = 0
+    _lns_deadline = t_start + time_limit
     while True:
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
@@ -6632,6 +6645,113 @@ def _solve_nlp_bb(
                 node_callback(ctx, model)
             except Exception as e:
                 logger.warning("Node callback raised an exception: %s", e)
+
+        # --- LNS primal-improvement layer (RINS + local branching) ---
+        # Runs at non-root nodes when an incumbent exists and the gap is still
+        # open. Sound by construction: each candidate is re-verified integer- and
+        # constraint-feasible and injected only on strict improvement, so the dual
+        # bound is never touched. Gated off in the local-branching sub-solve via
+        # ``_lns_enabled=False`` so it can never recurse.
+        if (
+            _lns_enabled
+            and _lns_has_integers
+            and iteration > 0
+            and (_lns_deadline - time.perf_counter()) > _DEADLINE_NODE_FLOOR_S
+        ):
+            _lns_inc = tree.incumbent()
+            if (
+                _lns_inc is not None
+                and np.isfinite(_lns_inc[1])
+                and _lns_inc[1] < _SENTINEL_THRESHOLD
+            ):
+                _lns_stats = tree.stats()
+                _lns_lb = float(_lns_stats.get("global_lower_bound", float("-inf")))
+                _lns_ub = float(_lns_inc[1])
+                _lns_abs_gap = max(0.0, _lns_ub - _lns_lb)
+                _lns_denom = max(abs(_lns_ub), abs(_lns_lb), 1e-10)
+                _lns_gap_open = (not np.isfinite(_lns_lb)) or (
+                    _lns_abs_gap > _DEFAULT_ABS_GAP_TOL
+                    and _lns_abs_gap / _lns_denom > gap_tolerance
+                )
+                if _lns_gap_open:
+                    _lns_backend = _resolve_heuristic_backend(nlp_solver)
+                    _lns_best_idx = None
+                    _lns_best = np.inf
+                    for _i in range(n_batch):
+                        if result_lbs[_i] < _SENTINEL_THRESHOLD and result_lbs[_i] < _lns_best:
+                            _lns_best = result_lbs[_i]
+                            _lns_best_idx = _i
+                    # (1) RINS — search between incumbent and the node relaxation.
+                    if (
+                        _lns_best_idx is not None
+                        and (_lns_deadline - time.perf_counter()) > _DEADLINE_NODE_FLOOR_S
+                    ):
+                        try:
+                            from discopt._jax.primal_heuristics import rins
+
+                            _ri = rins(
+                                model,
+                                np.asarray(_lns_inc[0], dtype=np.float64),
+                                result_sols[_lns_best_idx],
+                                backend=_lns_backend,
+                                evaluator=evaluator,
+                            )
+                            if _ri is not None:
+                                _x_ri, _obj_ri = _ri
+                                _obj_ri = float(_obj_ri)
+                                if (
+                                    np.isfinite(_obj_ri)
+                                    and _obj_ri < _SENTINEL_THRESHOLD
+                                    and (
+                                        not cl_list
+                                        or _check_constraint_feasibility(
+                                            evaluator, _x_ri, cl_list, cu_list
+                                        )
+                                    )
+                                ):
+                                    tree.inject_incumbent(np.asarray(_x_ri).copy(), _obj_ri)
+                                    logger.info("NLP-BB LNS RINS incumbent: obj=%.6g", _obj_ri)
+                        except Exception as _e:
+                            logger.debug("NLP-BB LNS RINS failed: %s", _e)
+                    # (2) Local branching — Hamming-ball sub-MIP, escalating k.
+                    if (_lns_deadline - time.perf_counter()) > 1.0:
+                        _lb_k = _lns_k_schedule[min(_lns_lb_calls, len(_lns_k_schedule) - 1)]
+                        _lns_lb_calls += 1
+                        _lb_slice = min(2.0, max(0.5, _lns_deadline - time.perf_counter() - 0.2))
+                        try:
+                            from discopt._jax.primal_heuristics import local_branching
+
+                            _lb = local_branching(
+                                model,
+                                np.asarray(_lns_inc[0], dtype=np.float64),
+                                k=_lb_k,
+                                backend=_lns_backend,
+                                evaluator=evaluator,
+                                submip_time_limit=_lb_slice,
+                                submip_max_nodes=1000,
+                                submip_gap_tolerance=gap_tolerance,
+                            )
+                            if _lb is not None:
+                                _x_lb, _obj_lb = _lb
+                                _obj_lb = float(_obj_lb)
+                                if (
+                                    np.isfinite(_obj_lb)
+                                    and _obj_lb < _SENTINEL_THRESHOLD
+                                    and (
+                                        not cl_list
+                                        or _check_constraint_feasibility(
+                                            evaluator, _x_lb, cl_list, cu_list
+                                        )
+                                    )
+                                ):
+                                    tree.inject_incumbent(np.asarray(_x_lb).copy(), _obj_lb)
+                                    logger.info(
+                                        "NLP-BB LNS local-branching incumbent: obj=%.6g (k=%d)",
+                                        _obj_lb,
+                                        _lb_k,
+                                    )
+                        except Exception as _e:
+                            logger.debug("NLP-BB LNS local-branching failed: %s", _e)
 
         iteration += 1
 
