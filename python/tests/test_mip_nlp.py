@@ -73,4 +73,3 @@ def test_mip_nlp_rejects_unsupported_oa_options():
             method="oa",
             mip_nlp_options={"add_slack": True},
         )
-
