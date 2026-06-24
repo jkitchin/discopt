@@ -2397,10 +2397,56 @@ def solve_model(
             )
             resolved_gdp_method = "big-m"
 
+        ignored_mip_nlp_options = []
+
+        def _note_ignored_mip_nlp(name: str, should_warn: bool) -> None:
+            if should_warn:
+                ignored_mip_nlp_options.append(name)
+
+        _note_ignored_mip_nlp("threads", threads != 1)
+        _note_ignored_mip_nlp("deterministic", deterministic is not True)
+        _note_ignored_mip_nlp("batch_size", batch_size != 16)
+        _note_ignored_mip_nlp("strategy", strategy != "best_first")
+        _note_ignored_mip_nlp("ipopt_options", ipopt_options is not None)
+        _note_ignored_mip_nlp("sparse", sparse is not None)
+        _note_ignored_mip_nlp("cutting_planes", cutting_planes is not False)
+        _note_ignored_mip_nlp("psd_cuts", psd_cuts is not False)
+        _note_ignored_mip_nlp("rlt_cuts", rlt_cuts is not False)
+        _note_ignored_mip_nlp("rlt", rlt != "auto")
+        _note_ignored_mip_nlp("cuts", cuts != "auto")
+        _note_ignored_mip_nlp("partitions", partitions != 0)
+        _note_ignored_mip_nlp("branching_policy", branching_policy != "fractional")
+        _note_ignored_mip_nlp("use_learned_relaxations", use_learned_relaxations is not False)
+        _note_ignored_mip_nlp("mccormick_bounds", mccormick_bounds != "auto")
+        _note_ignored_mip_nlp("decomposition", decomposition is not None)
+        _note_ignored_mip_nlp("lagrangian_bound", lagrangian_bound is not False)
+        _note_ignored_mip_nlp("lagrangian_frequency", lagrangian_frequency != 1)
+        _note_ignored_mip_nlp("initial_point", initial_point is not None)
+        _note_ignored_mip_nlp("skip_convex_check", skip_convex_check is not False)
+        _note_ignored_mip_nlp("nlp_bb", nlp_bb is not None)
+        _note_ignored_mip_nlp("lazy_constraints", lazy_constraints is not None)
+        _note_ignored_mip_nlp("incumbent_callback", incumbent_callback is not None)
+        _note_ignored_mip_nlp("node_callback", node_callback is not None)
+        _note_ignored_mip_nlp("use_highs_milp", use_highs_milp is not True)
+        _note_ignored_mip_nlp("presolve", presolve is not True)
+        _note_ignored_mip_nlp("presolve_polynomial", presolve_polynomial is not False)
+        _note_ignored_mip_nlp("presolve_reverse_ad", presolve_reverse_ad is not False)
+        _note_ignored_mip_nlp("in_tree_presolve_stride", in_tree_presolve_stride != 0)
+        _note_ignored_mip_nlp("eigenvalue_root_bound", eigenvalue_root_bound is not False)
+        _note_ignored_mip_nlp("relaxation_arithmetic", relaxation_arithmetic != "mccormick")
+        _note_ignored_mip_nlp("subnlp_enabled", subnlp_enabled is not True)
+        _note_ignored_mip_nlp("subnlp_backend", subnlp_backend != "auto")
+        _note_ignored_mip_nlp("subnlp_frequency", subnlp_frequency != 20)
+        _note_ignored_mip_nlp("subnlp_max_calls", subnlp_max_calls != 200)
+        _note_ignored_mip_nlp("subnlp_options", subnlp_options is not None)
+        _note_ignored_mip_nlp("root_cut_rounds", root_cut_rounds is not None)
+        _note_ignored_mip_nlp("root_cut_max", root_cut_max is not None)
         if kwargs:
+            ignored_mip_nlp_options.extend(sorted(kwargs))
+        if ignored_mip_nlp_options:
             warnings.warn(
                 "MIP-NLP solver ignores solve_model options: "
-                + ", ".join(sorted(dict.fromkeys(kwargs))),
+                + ", ".join(sorted(dict.fromkeys(ignored_mip_nlp_options))),
                 stacklevel=2,
             )
 
@@ -2620,11 +2666,13 @@ def solve_model(
     if gdp_method == "oa":
         import warnings
 
+        from discopt._jax.gdp_reformulate import reformulate_gdp
         from discopt.solvers.mip_nlp import solve_mip_nlp
 
         warnings.warn(
             "gdp_method='oa' is deprecated for selecting MINLP OA. Use "
-            "solver='mip-nlp', mip_nlp_method='oa' instead.",
+            "solver='mip-nlp', mip_nlp_method='oa' instead. Interpreting "
+            "gdp_method as 'big-m' for GDP reformulation in this solve.",
             DeprecationWarning,
             stacklevel=2,
         )
@@ -2634,6 +2682,8 @@ def solve_model(
         for key in ("equality_relaxation", "ecp_mode", "feasibility_cuts"):
             if key in kwargs:
                 mip_nlp_kwargs[key] = kwargs.pop(key)
+
+        model = reformulate_gdp(model, method="big-m")
 
         return solve_mip_nlp(
             model,
