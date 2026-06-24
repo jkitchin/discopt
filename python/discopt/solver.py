@@ -2372,7 +2372,7 @@ def solve_model(
 
         mip_nlp_method = kwargs.pop("mip_nlp_method", "oa")
         mip_nlp_options = kwargs.pop("mip_nlp_options", None)
-        mip_nlp_kwargs = {}
+        mip_nlp_kwargs: dict[str, Any] = {}
         for key in ("equality_relaxation", "ecp_mode", "feasibility_cuts"):
             if key in kwargs:
                 mip_nlp_kwargs[key] = kwargs.pop(key)

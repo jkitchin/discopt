@@ -72,4 +72,3 @@ def solve_mip_nlp(
         f"mip_nlp_method={method!r} is reserved for the MIP-NLP decomposition "
         "family but is not implemented yet."
     )
-
