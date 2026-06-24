@@ -2197,6 +2197,13 @@ def _solve_amp_impl(
     obbt_time_limit : float, default 30.0
         Total wall-clock budget for OBBT calls (in seconds).  Per-LP budget is
         ``min(1.0, obbt_time_limit / max(1, 2*n_candidates))``.
+    milp_solver : str, default "auto"
+        MILP backend for AMP master relaxations and MILP-based bound
+        tightening. Choose ``"auto"``, ``"highs"``, ``"pounce"``,
+        ``"simplex"``, or ``"gurobi"``. The explicit Gurobi option uses
+        discopt's global AMP algorithm with Gurobi as the matrix MILP subsolver;
+        it does not translate general nonlinear expressions into Gurobi
+        nonlinear constraints.
 
     Returns
     -------
@@ -2239,7 +2246,7 @@ def _solve_amp_impl(
     convhull_mode = _normalize_convhull_formulation(convhull_formulation)
     if convhull_ebd and convhull_mode != "sos2":
         raise ValueError("convhull_ebd requires convhull_formulation='sos2' or the 'lambda' alias.")
-    _valid_milp_solvers = {"auto", "highs", "pounce", "simplex"}
+    _valid_milp_solvers = {"auto", "highs", "pounce", "simplex", "gurobi"}
     if milp_solver not in _valid_milp_solvers:
         raise ValueError(
             f"Unknown milp_solver={milp_solver!r}. Choose one of {sorted(_valid_milp_solvers)}."

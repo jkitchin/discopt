@@ -128,6 +128,118 @@ def test_gurobi_qcp_requires_explicit_nonconvex_option_without_importing_gurobip
         )
 
 
+def test_milp_backend_selector_accepts_gurobi_without_importing_gurobipy(monkeypatch):
+    from discopt.solvers.lp_backend import get_milp_solver
+
+    monkeypatch.setitem(sys.modules, "gurobipy", None)
+
+    solve_milp = get_milp_solver(backend="gurobi")
+
+    assert solve_milp is gurobi_backend.solve_milp
+    with pytest.raises(ImportError, match="gurobipy is required"):
+        solve_milp(
+            c=np.array([1.0]),
+            bounds=[(0.0, 1.0)],
+            integrality=np.array([1]),
+        )
+
+
+def test_milp_backend_selector_lists_gurobi_in_invalid_backend_error():
+    from discopt.solvers.lp_backend import get_milp_solver
+
+    with pytest.raises(ValueError, match="gurobi"):
+        get_milp_solver(backend="not-a-backend")
+
+
+def test_model_solve_amp_forwards_gurobi_milp_solver(monkeypatch):
+    import discopt.solvers.amp as amp_module
+
+    calls = {}
+
+    def fake_solve_amp(model, **kwargs):
+        calls["model"] = model
+        calls["milp_solver"] = kwargs["milp_solver"]
+        calls["rel_gap"] = kwargs["rel_gap"]
+        return SolveResult(status="optimal", objective=0.0, bound=0.0, gap=0.0)
+
+    monkeypatch.setattr(amp_module, "solve_amp", fake_solve_amp)
+
+    m = dm.Model("amp_gurobi_milp_solver_forwarding")
+    x = m.binary("x")
+    m.minimize(x)
+
+    result = m.solve(solver="amp", milp_solver="gurobi", rel_gap=1e-5)
+
+    assert result.status == "optimal"
+    assert calls["model"] is m
+    assert calls["milp_solver"] == "gurobi"
+    assert calls["rel_gap"] == 1e-5
+
+
+def test_model_solve_oa_forwards_gurobi_milp_solver(monkeypatch):
+    import discopt.solvers.oa as oa_module
+
+    calls = {}
+
+    def fake_solve_oa(model, **kwargs):
+        calls["model"] = model
+        calls["milp_solver"] = kwargs["milp_solver"]
+        return SolveResult(status="optimal", objective=0.0, bound=0.0, gap=0.0)
+
+    monkeypatch.setattr(oa_module, "solve_oa", fake_solve_oa)
+
+    m = dm.Model("oa_gurobi_milp_solver_forwarding")
+    x = m.binary("x")
+    m.minimize(x)
+
+    result = m.solve(gdp_method="oa", milp_solver="gurobi", skip_convex_check=True)
+
+    assert result.status == "optimal"
+    assert calls["model"] is m
+    assert calls["milp_solver"] == "gurobi"
+
+
+def test_model_solve_loa_forwards_gurobi_milp_solver(monkeypatch):
+    import discopt.solvers.gdpopt_loa as loa_module
+
+    calls = {}
+
+    def fake_solve_gdpopt_loa(model, **kwargs):
+        calls["model"] = model
+        calls["milp_solver"] = kwargs["milp_solver"]
+        return SolveResult(status="optimal", objective=0.0, bound=0.0, gap=0.0)
+
+    monkeypatch.setattr(loa_module, "solve_gdpopt_loa", fake_solve_gdpopt_loa)
+
+    m = dm.Model("loa_gurobi_milp_solver_forwarding")
+    x = m.binary("x")
+    m.minimize(x)
+
+    result = m.solve(gdp_method="loa", milp_solver="gurobi", skip_convex_check=True)
+
+    assert result.status == "optimal"
+    assert calls["model"] is m
+    assert calls["milp_solver"] == "gurobi"
+
+
+@pytest.mark.parametrize(
+    ("problem_kind", "make_var"),
+    [
+        ("nlp", lambda m: m.continuous("x", lb=-2, ub=2)),
+        ("minlp", lambda m: m.binary("x")),
+    ],
+)
+def test_model_solve_gurobi_rejects_general_nonlinear_classes(monkeypatch, problem_kind, make_var):
+    _install_fake_rust_classifier(monkeypatch, problem_kind)
+
+    m = dm.Model(f"gurobi_rejects_{problem_kind}")
+    x = make_var(m)
+    m.minimize(x)
+
+    with pytest.raises(NotImplementedError, match=f"classified this model as {problem_kind!r}"):
+        m.solve(solver="gurobi")
+
+
 def test_model_solve_gurobi_dispatches_lp(monkeypatch):
     _install_fake_rust_classifier(monkeypatch, "lp")
     import discopt.solver as solver

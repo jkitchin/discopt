@@ -484,17 +484,17 @@ def _solve_master_milp(
     objective_bound_valid,
     time_limit,
     gap_tolerance,
+    milp_solver="auto",
 ):
     """Build and solve the master MILP."""
     try:
         from discopt.solvers.lp_backend import get_milp_solver
 
-        # HiGHS if present, else POUNCE (self-hosted B&B) — HiGHS-free path.
-        solve_milp = get_milp_solver()
+        solve_milp = get_milp_solver(backend=milp_solver)
     except ImportError as e:
         raise ImportError(
             "OA solver requires a MILP backend for the master. Install one of: "
-            "pip install highspy  |  pip install pounce-solver"
+            "pip install highspy  |  pip install pounce-solver  |  pip install gurobipy"
         ) from e
 
     use_objective_epigraph = (not obj_is_linear) and objective_bound_valid
@@ -609,6 +609,7 @@ def solve_oa(
     equality_relaxation: bool = False,
     ecp_mode: bool = False,
     feasibility_cuts: bool = True,
+    milp_solver: str = "auto",
     **kwargs,
 ) -> SolveResult:
     """Solve a MINLP via Outer Approximation.
@@ -640,6 +641,9 @@ def solve_oa(
     feasibility_cuts : bool
         Use gradient-based feasibility cuts (Fletcher & Leyffer 1994)
         when the NLP subproblem is infeasible. Stronger than no-good cuts.
+    milp_solver : str
+        MILP backend for OA master problems: ``"auto"``, ``"highs"``,
+        ``"pounce"``, ``"simplex"``, or ``"gurobi"``.
 
     Returns
     -------
@@ -761,6 +765,7 @@ def solve_oa(
             decomp.master_bound_valid,
             time_limit=time_limit - elapsed,
             gap_tolerance=gap_tolerance,
+            milp_solver=milp_solver,
         )
 
         from discopt.solvers import SolveStatus

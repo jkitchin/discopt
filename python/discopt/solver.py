@@ -2145,10 +2145,13 @@ def solve_model(
     solver : str or None, default None
         Optional global-solver selector. Use ``"amp"`` to dispatch to
         Adaptive Multivariate Partitioning instead of branch-and-bound.
-        Use ``"gurobi"`` to dispatch LP/MILP models to the optional Gurobi
-        backend. Stage-1 Gurobi support is intentionally limited to linear
-        continuous and mixed-integer models; unsupported classes raise a clear
-        ``NotImplementedError`` instead of falling back silently.
+        Use ``"gurobi"`` to dispatch LP, MILP, QP, MIQP, QCP, QCQP, MIQCP,
+        and MIQCQP models to the optional Gurobi backend. General NLP/MINLP
+        expressions are not translated into Gurobi nonlinear expressions by
+        this selector; unsupported classes raise a clear ``NotImplementedError``
+        instead of falling back silently. For global MINLP through discopt's
+        AMP algorithm with Gurobi as the MILP-master subsolver, use
+        ``solver="amp", milp_solver="gurobi"``.
         Use ``"gp"`` to dispatch to the geometric-programming fast path:
         the model is checked for GP structure (posynomial/monomial
         objective and constraints over strictly-positive continuous
@@ -2171,7 +2174,9 @@ def solve_model(
         ``partition_scaling_factor_update``, ``disc_add_partition_method``,
         ``disc_abs_width_tol``, ``convhull_formulation``, ``convhull_ebd``,
         ``convhull_ebd_encoding``, ``use_start_as_incumbent``, ``obbt_at_root``,
-        ``obbt_with_cutoff``, ``alphabb_cutoff_obbt``, and ``obbt_time_limit``.
+        ``obbt_with_cutoff``, ``alphabb_cutoff_obbt``, ``obbt_time_limit``, and
+        ``milp_solver``. ``milp_solver`` accepts ``"auto"``, ``"highs"``,
+        ``"pounce"``, ``"simplex"``, or ``"gurobi"``.
 
     Returns
     -------
@@ -2350,12 +2355,14 @@ def solve_model(
         _note_ignored("branching_policy", branching_policy != "fractional")
         _note_ignored("use_learned_relaxations", use_learned_relaxations is not False)
         _note_ignored("mccormick_bounds", mccormick_bounds != "auto")
-        _note_ignored("gdp_method", gdp_method != "big-m")
         _note_ignored("nlp_bb", nlp_bb is not None)
         _note_ignored("lazy_constraints", lazy_constraints is not None)
         _note_ignored("incumbent_callback", incumbent_callback is not None)
         _note_ignored("node_callback", node_callback is not None)
         _note_ignored("use_highs_milp", use_highs_milp is not True)
+        amp_gdp_methods = {"big-m", "hull", "mbigm", "auto"}
+        amp_gdp_method = gdp_method if gdp_method in amp_gdp_methods else "big-m"
+        _note_ignored("gdp_method", gdp_method not in amp_gdp_methods)
         if kwargs:
             ignored_amp_options.extend(sorted(kwargs))
         if ignored_amp_options:
@@ -2368,6 +2375,14 @@ def solve_model(
         # rel_gap defaults to gap_tolerance if not separately provided
         if "rel_gap" not in amp_kwargs:
             amp_kwargs["rel_gap"] = gap_tolerance
+
+        from discopt._jax.gdp_reformulate import reformulate_gdp
+
+        model = reformulate_gdp(
+            model,
+            method=amp_gdp_method,
+            respect_disjunction_methods=False,
+        )
 
         return solve_amp(
             model,
@@ -2493,7 +2508,7 @@ def solve_model(
 
         # Extract OA-specific kwargs that solve_model doesn't understand
         oa_kwargs = {}
-        for key in ("equality_relaxation", "ecp_mode", "feasibility_cuts"):
+        for key in ("equality_relaxation", "ecp_mode", "feasibility_cuts", "milp_solver"):
             if key in kwargs:
                 oa_kwargs[key] = kwargs.pop(key)
 
@@ -2510,12 +2525,17 @@ def solve_model(
     if gdp_method == "loa":
         from discopt.solvers.gdpopt_loa import solve_gdpopt_loa
 
+        loa_kwargs = {}
+        if "milp_solver" in kwargs:
+            loa_kwargs["milp_solver"] = kwargs.pop("milp_solver")
+
         return solve_gdpopt_loa(
             model,
             time_limit=time_limit,
             gap_tolerance=gap_tolerance,
             max_iterations=max_nodes,
             nlp_solver=nlp_solver,
+            **loa_kwargs,
         )
 
     # Capture any modeler-provided GAMS start (``x.l`` -> _gams_initial_values)
@@ -2982,7 +3002,7 @@ def solve_model(
         if problem_class is None:
             raise NotImplementedError(
                 "solver='gurobi' requires problem classification and currently "
-                "supports LP, MILP, QP, MIQP, QCP, and MIQCP models only."
+                "supports LP, MILP, QP, MIQP, QCP, QCQP, MIQCP, and MIQCQP models only."
             )
         if problem_class == ProblemClass.LP:
             return _solve_lp_gurobi(model, t_start, time_limit, threads, gurobi_options)
@@ -3008,7 +3028,8 @@ def solve_model(
                 model, t_start, time_limit, gap_tolerance, threads, gurobi_options
             )
         raise NotImplementedError(
-            f"solver='gurobi' supports LP, MILP, QP, MIQP, QCP, and MIQCP models only; "
+            f"solver='gurobi' supports LP, MILP, QP, MIQP, QCP, QCQP, MIQCP, "
+            f"and MIQCQP models only; "
             f"classified this model as {problem_class.value!r}."
         )
 
