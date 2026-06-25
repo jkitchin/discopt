@@ -3,11 +3,25 @@ import numpy as np
 import pytest
 from discopt.modeling.core import SolveResult, _DisjunctiveConstraint
 
+try:
+    import highspy  # noqa: F401
+
+    HAS_HIGHS = True
+except ImportError:
+    HAS_HIGHS = False
+
 
 def _binary_model(name="mip_nlp_route"):
     m = dm.Model(name)
     x = m.binary("x")
     m.minimize(x)
+    return m
+
+
+def _continuous_model(name="mip_nlp_continuous"):
+    m = dm.Model(name)
+    x = m.continuous("x", lb=0, ub=4)
+    m.minimize((x - 2) ** 2)
     return m
 
 
@@ -25,6 +39,22 @@ def _mixed_discrete_model(name="mip_nlp_init_strategy"):
     y = m.binary("y", shape=(2,))
     z = m.integer("z", lb=-2, ub=3)
     m.minimize(x + y[0] + y[1] + z)
+    return m
+
+
+def _mindtpy_simple_minlp(name="mindtpy_init_strategy"):
+    m = dm.Model(name)
+    x = m.continuous("x", shape=(2,), lb=0, ub=4)
+    y = m.binary("y", shape=(3,))
+
+    m.subject_to((x[0] - 2) ** 2 - x[1] <= 0)
+    m.subject_to(x[0] - 2 * y[0] >= 0)
+    m.subject_to(x[0] - x[1] - 4 * (1 - y[1]) <= 0)
+    m.subject_to(x[0] - (1 - y[0]) >= 0)
+    m.subject_to(x[1] - y[1] >= 0)
+    m.subject_to(x[0] + x[1] >= 3 * y[2])
+    m.subject_to(y[0] + y[1] + y[2] >= 1)
+    m.minimize(y[0] + 1.5 * y[1] + 0.5 * y[2] + x[0] ** 2 + x[1] ** 2)
     return m
 
 
@@ -367,11 +397,14 @@ def test_oa_rnlp_initialization_adds_cuts_at_relaxation_point(monkeypatch):
     import discopt.solvers.oa as oa_module
 
     model = _mixed_discrete_model("rnlp_init_point")
+    initial_point = np.array([1.25, 1.0, 0.0, 2.0], dtype=float)
     relaxation_point = np.array([0.25, 0.5, 0.5, 1.5], dtype=float)
     cut_points = []
 
     def fake_solve_nlp_relaxation(evaluator, lb, ub, nlp_solver, initial_point=None):
-        assert initial_point is None
+        assert np.asarray(initial_point, dtype=float).tolist() == pytest.approx(
+            [1.25, 1.0, 0.0, 2.0]
+        )
         return relaxation_point, 0.0
 
     def fake_add_oa_cuts(evaluator, x_star, *args, **kwargs):
@@ -380,10 +413,35 @@ def test_oa_rnlp_initialization_adds_cuts_at_relaxation_point(monkeypatch):
     monkeypatch.setattr(oa_module, "_solve_nlp_relaxation", fake_solve_nlp_relaxation)
     monkeypatch.setattr(oa_module, "_add_oa_cuts", fake_add_oa_cuts)
 
-    result = oa_module.solve_oa(model, init_strategy="rNLP", max_iterations=0)
+    result = oa_module.solve_oa(
+        model,
+        init_strategy="rNLP",
+        initial_point=initial_point,
+        max_iterations=0,
+    )
 
     assert result.status == "infeasible"
     assert cut_points[0].tolist() == pytest.approx(relaxation_point.tolist())
+
+
+def test_oa_no_discrete_relaxation_uses_initial_point(monkeypatch):
+    import discopt.solvers.oa as oa_module
+
+    initial_point = np.array([3.0], dtype=float)
+
+    def fake_solve_nlp_relaxation(evaluator, lb, ub, nlp_solver, initial_point=None):
+        assert np.asarray(initial_point, dtype=float).tolist() == pytest.approx([3.0])
+        return np.asarray(initial_point, dtype=float), 1.0
+
+    monkeypatch.setattr(oa_module, "_solve_nlp_relaxation", fake_solve_nlp_relaxation)
+
+    result = oa_module.solve_oa(
+        _continuous_model("no_discrete_initial_point"),
+        initial_point=initial_point,
+    )
+
+    assert result.status == "optimal"
+    assert result.x["x"] == pytest.approx(3.0)
 
 
 @pytest.mark.parametrize(
@@ -429,3 +487,22 @@ def test_oa_fixed_integer_initializers_seed_first_nlp(monkeypatch, strategy, sta
     assert result.status == "feasible"
     assert fixed_points[0].tolist() == pytest.approx(expected_fixed)
     assert cut_points[0].tolist() == pytest.approx(expected_fixed)
+
+
+@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
+@pytest.mark.parametrize("method", ["oa", "ecp"])
+@pytest.mark.parametrize("strategy", ["rNLP", "initial_binary", "max_binary"])
+def test_mip_nlp_init_strategies_solve_mindtpy_baseline_to_optimum(method, strategy):
+    result = _mindtpy_simple_minlp(f"mindtpy_{method}_{strategy}").solve(
+        solver="mip-nlp",
+        mip_nlp_method=method,
+        init_strategy=strategy,
+        time_limit=60,
+        max_nodes=100,
+    )
+
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(3.5, abs=1e-3)
+    assert result.bound == pytest.approx(3.5, abs=1e-3)
+    assert result.gap == pytest.approx(0.0, abs=1e-9)
+    assert np.asarray(result.x["y"]).tolist() == pytest.approx([0.0, 1.0, 0.0])

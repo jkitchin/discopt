@@ -131,7 +131,6 @@ class OAConfig:
     gap_tolerance: float = 1e-4
     max_iterations: int = 100
     nlp_solver: str = "ipm"
-    init_strategy: str = "rNLP"
     equality_relaxation: bool = False
     ecp_mode: bool = False
     feasibility_cuts: bool = True
@@ -759,8 +758,9 @@ def solve_oa(
         when no practical finite upper bound exists.
     initial_point : numpy.ndarray, optional
         Flat model start produced from ``Model.solve(initial_solution=...)``.
-        Used by ``init_strategy="initial_binary"`` and as the continuous part
-        of ``"max_binary"``.
+        Used to warm-start the continuous relaxation for ``init_strategy="rNLP"``,
+        by ``init_strategy="initial_binary"``, and as the continuous part of
+        ``"max_binary"``.
     equality_relaxation : bool
         Relax nonlinear equalities to inequalities in OA cuts
         (Viswanathan & Grossmann 1990). Helps when nonlinear equalities
@@ -807,7 +807,13 @@ def solve_oa(
 
     # If no integer variables, just solve the NLP directly
     if len(decomp.int_indices) == 0:
-        x_sol, obj = _solve_nlp_relaxation(evaluator, decomp.lb, decomp.ub, nlp_solver)
+        x_sol, obj = _solve_nlp_relaxation(
+            evaluator,
+            decomp.lb,
+            decomp.ub,
+            nlp_solver,
+            initial_point=initial_point,
+        )
         wall_time = time.perf_counter() - t_start
         if x_sol is not None:
             return SolveResult(
@@ -837,7 +843,13 @@ def solve_oa(
     incumbent_obj = None
 
     if init_strategy == "rNLP":
-        x_relax, obj_relax = _solve_nlp_relaxation(evaluator, decomp.lb, decomp.ub, nlp_solver)
+        x_relax, obj_relax = _solve_nlp_relaxation(
+            evaluator,
+            decomp.lb,
+            decomp.ub,
+            nlp_solver,
+            initial_point=initial_point,
+        )
 
         if x_relax is not None:
             _add_oa_cuts(
