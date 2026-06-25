@@ -17,7 +17,7 @@ SUPPORTED_METHODS = _IMPLEMENTED_METHODS | frozenset(_RESERVED_METHOD_ISSUES)
 _METHOD_ALIASES = {
     "lp/nlp-bb": "lp_nlp_bb",
 }
-_OA_OPTION_KEYS = {"equality_relaxation", "ecp_mode", "feasibility_cuts"}
+_OA_OPTION_KEYS = {"equality_relaxation", "ecp_mode", "feasibility_cuts", "init_strategy"}
 
 
 def _normalize_method(method: Any) -> str:
@@ -43,6 +43,7 @@ def solve_mip_nlp(
     gap_tolerance: float = 1e-4,
     max_iterations: int = 100,
     nlp_solver: str = "pounce",
+    initial_point=None,
     **kwargs: Any,
 ) -> SolveResult:
     """Solve a MINLP with a MIP-NLP decomposition method."""
@@ -67,7 +68,7 @@ def solve_mip_nlp(
                 + ", ".join(sorted(_OA_OPTION_KEYS))
             )
 
-        from discopt.solvers.oa import solve_oa
+        from discopt.solvers.oa import _normalize_init_strategy, solve_oa
 
         if "ecp_mode" in kwargs:
             alias_method = "ecp" if bool(kwargs["ecp_mode"]) else "oa"
@@ -77,6 +78,7 @@ def solve_mip_nlp(
                     f"mip_nlp_method={method!r} and ecp_mode={kwargs['ecp_mode']!r}."
                 )
         options["ecp_mode"] = method == "ecp"
+        options["init_strategy"] = _normalize_init_strategy(options.get("init_strategy", "rNLP"))
 
         return solve_oa(
             model,
@@ -84,6 +86,7 @@ def solve_mip_nlp(
             gap_tolerance=gap_tolerance,
             max_iterations=max_iterations,
             nlp_solver=nlp_solver,
+            initial_point=initial_point,
             **options,
         )
 

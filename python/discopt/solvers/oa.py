@@ -29,6 +29,96 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_INIT_STRATEGIES = frozenset({"rNLP", "initial_binary", "max_binary"})
+_START_BOUND_CLIP = 1e8
+
+
+def _normalize_init_strategy(init_strategy: str) -> str:
+    """Normalize and validate the MindtPy-style initialization strategy."""
+    if not isinstance(init_strategy, str):
+        raise ValueError(f"init_strategy must be a string, got {type(init_strategy).__name__}.")
+    key = init_strategy.strip().lower().replace("-", "_")
+    if key == "rnlp":
+        return "rNLP"
+    if key in {"initial_binary", "max_binary"}:
+        return key
+    raise ValueError(
+        f"Unknown init_strategy={init_strategy!r}. Choose one of: "
+        + ", ".join(sorted(_INIT_STRATEGIES))
+        + "."
+    )
+
+
+def _default_nlp_start(lb: np.ndarray, ub: np.ndarray) -> np.ndarray:
+    """Return the existing deterministic midpoint NLP start."""
+    lb_clip = np.clip(np.asarray(lb, dtype=np.float64), -_START_BOUND_CLIP, _START_BOUND_CLIP)
+    ub_clip = np.clip(np.asarray(ub, dtype=np.float64), -_START_BOUND_CLIP, _START_BOUND_CLIP)
+    return np.asarray(0.5 * (lb_clip + ub_clip), dtype=np.float64)
+
+
+def _round_integral_to_bounds(value: float, lb: float, ub: float) -> float:
+    """Round half-up, then clamp to the nearest integer-compatible bounds."""
+    rounded = float(np.floor(float(value) + 0.5))
+    lo = float(np.ceil(lb))
+    hi = float(np.floor(ub))
+    if lo <= hi:
+        return float(np.clip(rounded, lo, hi))
+    return float(np.clip(rounded, lb, ub))
+
+
+def _max_integral_seed(lb: float, ub: float, fallback: float) -> float:
+    """Largest practical integer seed; fallback handles effectively unbounded uppers."""
+    hi = float(np.floor(ub))
+    lo = float(np.ceil(lb))
+    if lo <= hi and np.isfinite(hi) and abs(hi) <= _START_BOUND_CLIP:
+        return hi
+    return _round_integral_to_bounds(fallback, lb, ub)
+
+
+def _build_initial_strategy_point(
+    decomp: _DecomposedProblem,
+    init_strategy: str,
+    initial_point: Optional[np.ndarray],
+) -> np.ndarray:
+    """Build the deterministic fixed-integer seed for non-rNLP strategies.
+
+    ``initial_binary`` starts from the user/model start when supplied and rounds
+    discrete variables half-up after bound clamping. ``max_binary`` activates
+    binary variables at their largest feasible value; for general integers it
+    uses the largest practical finite upper-bound value, falling back to the
+    rounded clipped midpoint when the upper bound is effectively unbounded.
+    """
+    x_seed = _default_nlp_start(decomp.lb, decomp.ub)
+    if initial_point is not None:
+        x0 = np.asarray(initial_point, dtype=np.float64)
+        if x0.shape != (decomp.n_vars,):
+            raise ValueError(
+                f"initial_point has shape {x0.shape}; expected ({decomp.n_vars},) "
+                "for MIP-NLP initialization."
+            )
+        x_seed = np.clip(x0, decomp.lb, decomp.ub)
+
+    if init_strategy == "initial_binary":
+        for idx in decomp.int_indices:
+            x_seed[idx] = _round_integral_to_bounds(x_seed[idx], decomp.lb[idx], decomp.ub[idx])
+        return x_seed
+
+    if init_strategy == "max_binary":
+        midpoint = _default_nlp_start(decomp.lb, decomp.ub)
+        for idx in decomp.binary_indices:
+            x_seed[idx] = _max_integral_seed(decomp.lb[idx], decomp.ub[idx], fallback=1.0)
+        for idx in decomp.general_integer_indices:
+            x_seed[idx] = _max_integral_seed(
+                decomp.lb[idx],
+                decomp.ub[idx],
+                fallback=midpoint[idx],
+            )
+        return x_seed
+
+    raise ValueError(
+        f"Internal error: non-rNLP initializer received init_strategy={init_strategy!r}."
+    )
+
 
 # ── Configuration ──────────────────────────────────────────────
 
@@ -61,6 +151,8 @@ class _DecomposedProblem:
     lb: np.ndarray
     ub: np.ndarray
     int_indices: list[int]
+    binary_indices: list[int]
+    general_integer_indices: list[int]
     integrality: np.ndarray
     linear_A_rows: list[np.ndarray]
     linear_b_rows: list[float]
@@ -89,11 +181,20 @@ def _decompose_model(model: Model) -> _DecomposedProblem:
 
     # Identify integer/binary variable indices
     int_indices = []
+    binary_indices = []
+    general_integer_indices = []
     offset = 0
     for v in model._variables:
-        if v.var_type in (VarType.BINARY, VarType.INTEGER):
+        if v.var_type == VarType.BINARY:
             for i in range(v.size):
-                int_indices.append(offset + i)
+                idx = offset + i
+                int_indices.append(idx)
+                binary_indices.append(idx)
+        elif v.var_type == VarType.INTEGER:
+            for i in range(v.size):
+                idx = offset + i
+                int_indices.append(idx)
+                general_integer_indices.append(idx)
         offset += v.size
 
     integrality = np.zeros(n_vars, dtype=np.int32)
@@ -150,6 +251,8 @@ def _decompose_model(model: Model) -> _DecomposedProblem:
         lb=lb,
         ub=ub,
         int_indices=int_indices,
+        binary_indices=binary_indices,
+        general_integer_indices=general_integer_indices,
         integrality=integrality,
         linear_A_rows=linear_A_rows,
         linear_b_rows=linear_b_rows,
@@ -206,11 +309,17 @@ def _is_primal_feasible(evaluator, x, tol: float = 1e-4) -> bool:
         return False
 
 
-def _solve_nlp(evaluator, lb, ub, nlp_solver: str, max_iter: int = 200):
+def _solve_nlp(evaluator, lb, ub, nlp_solver: str, max_iter: int = 200, x0=None):
     """Solve an NLP with given bounds. Returns (x, obj) or (None, None)."""
-    lb_clip = np.clip(lb, -1e8, 1e8)
-    ub_clip = np.clip(ub, -1e8, 1e8)
-    x0 = 0.5 * (lb_clip + ub_clip)
+    if x0 is None:
+        x0 = _default_nlp_start(lb, ub)
+    else:
+        x0 = np.asarray(x0, dtype=np.float64)
+        if x0.shape != (evaluator.n_variables,):
+            raise ValueError(
+                f"NLP initial point has shape {x0.shape}; expected ({evaluator.n_variables},)."
+            )
+        x0 = np.clip(x0, lb, ub)
 
     try:
         if nlp_solver == "ipopt":
@@ -236,22 +345,22 @@ def _solve_nlp(evaluator, lb, ub, nlp_solver: str, max_iter: int = 200):
     return None, None
 
 
-def _solve_nlp_relaxation(evaluator, lb, ub, nlp_solver: str):
+def _solve_nlp_relaxation(evaluator, lb, ub, nlp_solver: str, initial_point=None):
     """Solve the continuous NLP relaxation (all integers relaxed)."""
-    return _solve_nlp(evaluator, lb, ub, nlp_solver)
+    return _solve_nlp(evaluator, lb, ub, nlp_solver, x0=initial_point)
 
 
-def _solve_nlp_subproblem(evaluator, lb, ub, int_indices, x_master, nlp_solver):
+def _solve_nlp_subproblem(evaluator, lb, ub, int_indices, x_master, nlp_solver, initial_point=None):
     """Fix integers at master values and solve NLP subproblem."""
     sub_lb = lb.copy()
     sub_ub = ub.copy()
     for idx in int_indices:
-        val = round(x_master[idx])
+        val = _round_integral_to_bounds(x_master[idx], lb[idx], ub[idx])
         sub_lb[idx] = val
         sub_ub[idx] = val
 
     proxy = _BoundsProxy(evaluator, sub_lb, sub_ub)
-    return _solve_nlp(proxy, sub_lb, sub_ub, nlp_solver)
+    return _solve_nlp(proxy, sub_lb, sub_ub, nlp_solver, x0=initial_point)
 
 
 def _solve_feasibility_subproblem(evaluator, lb, ub, int_indices, x_master, nlp_solver):
@@ -265,15 +374,13 @@ def _solve_feasibility_subproblem(evaluator, lb, ub, int_indices, x_master, nlp_
     sub_lb = lb.copy()
     sub_ub = ub.copy()
     for idx in int_indices:
-        val = round(x_master[idx])
+        val = _round_integral_to_bounds(x_master[idx], lb[idx], ub[idx])
         sub_lb[idx] = val
         sub_ub[idx] = val
 
     # Try solving the NLP from the master point as initial guess
     proxy = _BoundsProxy(evaluator, sub_lb, sub_ub)
-    lb_clip = np.clip(sub_lb, -1e8, 1e8)
-    ub_clip = np.clip(sub_ub, -1e8, 1e8)
-    x0 = np.clip(x_master[: evaluator.n_variables], lb_clip, ub_clip)
+    x0 = np.clip(x_master[: evaluator.n_variables], sub_lb, sub_ub)
 
     try:
         if nlp_solver == "ipopt":
@@ -428,7 +535,7 @@ def _add_no_good_cut(x_master, int_indices, oa_A_rows, oa_b_rows, n_vars):
     coeffs = np.zeros(n_vars)
     count_ones = 0
     for idx in int_indices:
-        val = round(x_master[idx])
+        val = _round_integral_to_bounds(x_master[idx], 0.0, 1.0)
         if val >= 0.5:
             coeffs[idx] = 1.0
             count_ones += 1
@@ -615,6 +722,8 @@ def solve_oa(
     gap_tolerance: float = 1e-4,
     max_iterations: int = 100,
     nlp_solver: str = "ipm",
+    init_strategy: str = "rNLP",
+    initial_point: Optional[np.ndarray] = None,
     equality_relaxation: bool = False,
     ecp_mode: bool = False,
     feasibility_cuts: bool = True,
@@ -638,6 +747,20 @@ def solve_oa(
         Maximum OA iterations.
     nlp_solver : str
         NLP backend: ``"ipm"``, ``"ipopt"``, ``"pounce"``.
+    init_strategy : {"rNLP", "initial_binary", "max_binary"}
+        Initialization strategy for the first master cuts and fixed-integer
+        NLP seed. ``"rNLP"`` solves the continuous relaxation and generates
+        cuts at that point. ``"initial_binary"`` rounds and clamps discrete
+        variables from ``initial_point`` when supplied, otherwise from the
+        deterministic midpoint start. ``"max_binary"`` starts binary variables
+        at their largest feasible values; general integers use their largest
+        practical finite upper-bound value, or the rounded clipped midpoint
+        when no practical finite upper bound exists.
+    initial_point : numpy.ndarray, optional
+        Flat model start produced from ``Model.solve(initial_solution=...)``.
+        Used to warm-start the continuous relaxation for ``init_strategy="rNLP"``,
+        by ``init_strategy="initial_binary"``, and as the continuous part of
+        ``"max_binary"``.
     equality_relaxation : bool
         Relax nonlinear equalities to inequalities in OA cuts
         (Viswanathan & Grossmann 1990). Helps when nonlinear equalities
@@ -655,6 +778,7 @@ def solve_oa(
     SolveResult
     """
     t_start = time.perf_counter()
+    init_strategy = _normalize_init_strategy(init_strategy)
 
     # 1. Decompose model
     decomp = _decompose_model(model)
@@ -683,7 +807,13 @@ def solve_oa(
 
     # If no integer variables, just solve the NLP directly
     if len(decomp.int_indices) == 0:
-        x_sol, obj = _solve_nlp_relaxation(evaluator, decomp.lb, decomp.ub, nlp_solver)
+        x_sol, obj = _solve_nlp_relaxation(
+            evaluator,
+            decomp.lb,
+            decomp.ub,
+            nlp_solver,
+            initial_point=initial_point,
+        )
         wall_time = time.perf_counter() - t_start
         if x_sol is not None:
             return SolveResult(
@@ -703,57 +833,110 @@ def solve_oa(
             wall_time=wall_time,
         )
 
-    # 2. Solve initial NLP relaxation for first linearization point
+    # 2. Generate initial linearization cuts.
     oa_A_rows: list[np.ndarray] = []
     oa_b_rows: list[float] = []
-
-    x_relax, obj_relax = _solve_nlp_relaxation(evaluator, decomp.lb, decomp.ub, nlp_solver)
 
     UB = 1e20
     LB = -1e20
     incumbent = None
     incumbent_obj = None
 
-    if x_relax is not None:
-        _add_oa_cuts(
+    if init_strategy == "rNLP":
+        x_relax, obj_relax = _solve_nlp_relaxation(
             evaluator,
-            x_relax,
-            n_vars,
-            n_cons,
-            decomp.constraint_senses,
-            oa_A_rows,
-            oa_b_rows,
-            decomp.obj_is_linear,
-            decomp.oa_constraint_mask,
-            decomp.oa_objective_is_convex,
-            equality_relaxation=equality_relaxation,
+            decomp.lb,
+            decomp.ub,
+            nlp_solver,
+            initial_point=initial_point,
         )
-        # Check if relaxation solution is already integer-feasible
-        is_int_feasible = all(
-            abs(x_relax[idx] - round(x_relax[idx])) < 1e-5 for idx in decomp.int_indices
-        )
-        if is_int_feasible and obj_relax is not None:
-            UB = obj_relax
-            incumbent = x_relax.copy()
-            incumbent_obj = obj_relax
+
+        if x_relax is not None:
+            _add_oa_cuts(
+                evaluator,
+                x_relax,
+                n_vars,
+                n_cons,
+                decomp.constraint_senses,
+                oa_A_rows,
+                oa_b_rows,
+                decomp.obj_is_linear,
+                decomp.oa_constraint_mask,
+                decomp.oa_objective_is_convex,
+                equality_relaxation=equality_relaxation,
+            )
+            # Check if relaxation solution is already integer-feasible.
+            is_int_feasible = all(
+                abs(x_relax[idx] - round(x_relax[idx])) < 1e-5 for idx in decomp.int_indices
+            )
+            if is_int_feasible and obj_relax is not None:
+                UB = obj_relax
+                incumbent = x_relax.copy()
+                incumbent_obj = obj_relax
+        else:
+            # NLP relaxation failed; generate initial cuts at the deterministic midpoint.
+            x_mid = _default_nlp_start(decomp.lb, decomp.ub)
+            _add_oa_cuts(
+                evaluator,
+                x_mid,
+                n_vars,
+                n_cons,
+                decomp.constraint_senses,
+                oa_A_rows,
+                oa_b_rows,
+                decomp.obj_is_linear,
+                decomp.oa_constraint_mask,
+                decomp.oa_objective_is_convex,
+                equality_relaxation=equality_relaxation,
+            )
     else:
-        # NLP relaxation failed — generate initial cuts at midpoint
-        lb_clip = np.clip(decomp.lb, -1e8, 1e8)
-        ub_clip = np.clip(decomp.ub, -1e8, 1e8)
-        x_mid = 0.5 * (lb_clip + ub_clip)
-        _add_oa_cuts(
-            evaluator,
-            x_mid,
-            n_vars,
-            n_cons,
-            decomp.constraint_senses,
-            oa_A_rows,
-            oa_b_rows,
-            decomp.obj_is_linear,
-            decomp.oa_constraint_mask,
-            decomp.oa_objective_is_convex,
-            equality_relaxation=equality_relaxation,
-        )
+        x_seed = _build_initial_strategy_point(decomp, init_strategy, initial_point)
+        if ecp_mode:
+            _add_oa_cuts(
+                evaluator,
+                x_seed,
+                n_vars,
+                n_cons,
+                decomp.constraint_senses,
+                oa_A_rows,
+                oa_b_rows,
+                decomp.obj_is_linear,
+                decomp.oa_constraint_mask,
+                decomp.oa_objective_is_convex,
+                equality_relaxation=equality_relaxation,
+            )
+            if _is_primal_feasible(evaluator, x_seed):
+                UB = float(evaluator.evaluate_objective(x_seed))
+                incumbent = x_seed.copy()
+                incumbent_obj = UB
+        else:
+            x_init, obj_init = _solve_nlp_subproblem(
+                evaluator,
+                decomp.lb,
+                decomp.ub,
+                decomp.int_indices,
+                x_seed,
+                nlp_solver,
+                initial_point=x_seed,
+            )
+            x_cut = x_init if x_init is not None else x_seed
+            _add_oa_cuts(
+                evaluator,
+                x_cut,
+                n_vars,
+                n_cons,
+                decomp.constraint_senses,
+                oa_A_rows,
+                oa_b_rows,
+                decomp.obj_is_linear,
+                decomp.oa_constraint_mask,
+                decomp.oa_objective_is_convex,
+                equality_relaxation=equality_relaxation,
+            )
+            if x_init is not None and obj_init is not None:
+                UB = obj_init
+                incumbent = x_init.copy()
+                incumbent_obj = obj_init
 
     # 3. Main OA loop
     for iteration in range(max_iterations):

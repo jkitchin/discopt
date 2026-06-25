@@ -2210,8 +2210,10 @@ def solve_model(
         ``"ecp"``; ``"goa"``, ``"roa"``, ``"fp"``, and ``"lp_nlp_bb"`` raise
         ``NotImplementedError`` until their dedicated implementations land.
         Existing OA options ``equality_relaxation``, ``ecp_mode``, and
-        ``feasibility_cuts`` may be passed as top-level aliases and take
-        precedence over duplicate keys in ``mip_nlp_options``. The
+        ``feasibility_cuts`` and initialization option ``init_strategy`` may
+        be passed as top-level aliases and take precedence over duplicate keys
+        in ``mip_nlp_options``. Supported ``init_strategy`` values are
+        ``"rNLP"``, ``"initial_binary"``, and ``"max_binary"``. The
         ``mip_nlp_method`` selector determines the effective ``ecp_mode`` and
         cannot be overridden by ``mip_nlp_options``; a conflicting top-level
         ``ecp_mode`` and explicit ``mip_nlp_method`` raises ``ValueError``.
@@ -2377,7 +2379,7 @@ def solve_model(
         mip_nlp_method = kwargs.pop("mip_nlp_method", None)
         mip_nlp_options = kwargs.pop("mip_nlp_options", None)
         mip_nlp_kwargs: dict[str, Any] = {}
-        for key in ("equality_relaxation", "ecp_mode", "feasibility_cuts"):
+        for key in ("equality_relaxation", "ecp_mode", "feasibility_cuts", "init_strategy"):
             if key in kwargs:
                 mip_nlp_kwargs[key] = kwargs.pop(key)
         if mip_nlp_method is None:
@@ -2433,7 +2435,6 @@ def solve_model(
         _note_ignored_mip_nlp("decomposition", decomposition is not None)
         _note_ignored_mip_nlp("lagrangian_bound", lagrangian_bound is not False)
         _note_ignored_mip_nlp("lagrangian_frequency", lagrangian_frequency != 1)
-        _note_ignored_mip_nlp("initial_point", initial_point is not None)
         _note_ignored_mip_nlp("skip_convex_check", skip_convex_check is not False)
         _note_ignored_mip_nlp("nlp_bb", nlp_bb is not None)
         _note_ignored_mip_nlp("lazy_constraints", lazy_constraints is not None)
@@ -2474,6 +2475,7 @@ def solve_model(
             gap_tolerance=gap_tolerance,
             max_iterations=max_nodes,
             nlp_solver=nlp_solver,
+            initial_point=initial_point,
             **mip_nlp_kwargs,
         )
 
