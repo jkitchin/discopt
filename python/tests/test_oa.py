@@ -454,6 +454,59 @@ class TestOARobustnessOptions:
         assert captured["bounds"] == [(0.0, 10.0), (0.0, 5.0)]
         assert captured["integrality"].tolist() == [0, 0]
 
+    def test_master_slack_does_not_relax_no_good_cuts(self, monkeypatch):
+        from discopt.solvers import MILPResult, SolveStatus, lp_backend
+        from discopt.solvers.oa import _add_no_good_cut, _solve_master_milp
+
+        captured = {}
+
+        def fake_solve_milp(**kwargs):
+            captured.update(kwargs)
+            return MILPResult(
+                status=SolveStatus.OPTIMAL,
+                x=np.zeros(2),
+                objective=0.0,
+                bound=0.0,
+            )
+
+        monkeypatch.setattr(lp_backend, "get_milp_solver", lambda: fake_solve_milp)
+
+        oa_A_rows = []
+        oa_b_rows = []
+        oa_cut_relaxable = []
+        _add_no_good_cut(
+            np.array([1.0]),
+            [0],
+            oa_A_rows,
+            oa_b_rows,
+            n_vars=1,
+            oa_cut_relaxable=oa_cut_relaxable,
+        )
+
+        _solve_master_milp(
+            linear_A_rows=[],
+            linear_b_rows=[],
+            linear_senses=[],
+            oa_A_rows=oa_A_rows,
+            oa_b_rows=oa_b_rows,
+            n_vars=1,
+            integrality=np.array([1], dtype=np.int32),
+            lb=np.array([0.0]),
+            ub=np.array([1.0]),
+            obj_coeffs=(np.array([0.0]), 0.0),
+            obj_is_linear=True,
+            objective_bound_valid=True,
+            time_limit=10,
+            gap_tolerance=1e-4,
+            add_slack=True,
+            max_slack=5.0,
+            oa_penalty_factor=17.0,
+            oa_cut_relaxable=oa_cut_relaxable,
+        )
+
+        np.testing.assert_allclose(captured["A_ub"], np.array([[1.0, 0.0]]))
+        assert captured["b_ub"].tolist() == pytest.approx([0.0])
+
     @pytest.mark.parametrize(("enabled", "expected_calls"), [(False, 0), (True, 1)])
     def test_no_good_cut_option_controls_infeasible_assignment(
         self,
@@ -647,6 +700,69 @@ class TestOARobustnessOptions:
         assert result.gap is None
         assert cut_kwargs[0]["equality_relaxation"] is True
         assert master_kwargs[0]["add_slack"] is True
+
+    def test_heuristic_nonconvex_nonlinear_objective_is_uncertified_end_to_end(self):
+        result = _solve_oa(
+            _mindtpy_simple_minlp(),
+            heuristic_nonconvex=True,
+            max_nodes=10,
+        )
+
+        assert result.status == "feasible"
+        assert result.objective == pytest.approx(3.5, abs=1e-3)
+        assert result.bound is None
+        assert result.gap is None
+
+    def test_no_good_cuts_preserve_certified_convex_bound(self, monkeypatch):
+        import discopt.solvers.oa as oa_module
+        from discopt.solvers import MILPResult, SolveStatus
+
+        m = dm.Model("no_good_certified_bound")
+        y = m.binary("y")
+        m.minimize(y)
+
+        master_points = [np.array([1.0]), np.array([0.0])]
+        master_bounds = [0.0, 0.0]
+
+        def fake_master(*args, **kwargs):
+            idx = min(fake_master.calls, len(master_points) - 1)
+            fake_master.calls += 1
+            return MILPResult(
+                status=SolveStatus.OPTIMAL,
+                x=master_points[idx],
+                objective=float(master_points[idx][0]),
+                bound=master_bounds[idx],
+            )
+
+        fake_master.calls = 0
+
+        def fake_nlp(*args, **kwargs):
+            x_master = np.asarray(args[4], dtype=float)
+            if x_master[0] > 0.5:
+                return None, None
+            return np.array([0.0]), 0.0
+
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_nlp_relaxation",
+            lambda *args, **kwargs: (np.array([0.5]), 0.5),
+        )
+        monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+        monkeypatch.setattr(oa_module, "_add_feasibility_cuts", lambda *args, **kwargs: None)
+        monkeypatch.setattr(oa_module, "_solve_master_milp", fake_master)
+        monkeypatch.setattr(oa_module, "_solve_nlp_subproblem", fake_nlp)
+
+        result = oa_module.solve_oa(
+            m,
+            max_iterations=2,
+            feasibility_cuts=False,
+            add_no_good_cuts=True,
+        )
+
+        assert result.status == "optimal"
+        assert result.objective == pytest.approx(0.0)
+        assert result.bound == pytest.approx(0.0)
+        assert result.gap == pytest.approx(0.0)
 
 
 # ── Regression vs B&B ────────────────────────────────────────

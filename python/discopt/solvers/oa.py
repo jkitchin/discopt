@@ -546,6 +546,21 @@ def _solve_feasibility_subproblem(
 # ── Cut Generation ────────────────────────────────────────────
 
 
+def _append_master_cut(
+    oa_A_rows,
+    oa_b_rows,
+    coeffs,
+    rhs,
+    oa_cut_relaxable=None,
+    relaxable=True,
+):
+    """Append a master cut and optional slack-relaxability metadata."""
+    oa_A_rows.append(coeffs)
+    oa_b_rows.append(rhs)
+    if oa_cut_relaxable is not None:
+        oa_cut_relaxable.append(bool(relaxable))
+
+
 def _add_oa_cuts(
     evaluator,
     x_star,
@@ -558,6 +573,7 @@ def _add_oa_cuts(
     constraint_convex_mask,
     objective_is_convex,
     equality_relaxation=False,
+    oa_cut_relaxable=None,
 ):
     """Generate OA cuts at x_star and append to cut lists.
 
@@ -588,24 +604,26 @@ def _add_oa_cuts(
                 sense = "<="
 
             if sense == "<=":
-                oa_A_rows.append(coeffs)
-                oa_b_rows.append(cut.rhs)
+                _append_master_cut(oa_A_rows, oa_b_rows, coeffs, cut.rhs, oa_cut_relaxable)
             elif sense == ">=":
-                oa_A_rows.append(-coeffs)
-                oa_b_rows.append(-cut.rhs)
+                _append_master_cut(oa_A_rows, oa_b_rows, -coeffs, -cut.rhs, oa_cut_relaxable)
             elif sense == "==":
                 # Equality: add both <= and >= cuts
-                oa_A_rows.append(coeffs)
-                oa_b_rows.append(cut.rhs)
-                oa_A_rows.append(-coeffs)
-                oa_b_rows.append(-cut.rhs)
+                _append_master_cut(oa_A_rows, oa_b_rows, coeffs, cut.rhs, oa_cut_relaxable)
+                _append_master_cut(oa_A_rows, oa_b_rows, -coeffs, -cut.rhs, oa_cut_relaxable)
 
     # Objective OA cut (only if nonlinear): grad^T x - eta <= rhs
     if not obj_is_linear and objective_is_convex:
         n_master = n_vars + 1
         obj_cut = generate_objective_oa_cut(evaluator, x_star, n_master, z_index=n_vars)
-        oa_A_rows.append(obj_cut.coeffs.copy())
-        oa_b_rows.append(obj_cut.rhs)
+        _append_master_cut(
+            oa_A_rows,
+            oa_b_rows,
+            obj_cut.coeffs.copy(),
+            obj_cut.rhs,
+            oa_cut_relaxable,
+            relaxable=False,
+        )
 
 
 def _add_ecp_cuts(
@@ -619,6 +637,7 @@ def _add_ecp_cuts(
     constraint_convex_mask,
     objective_is_convex,
     equality_relaxation=False,
+    oa_cut_relaxable=None,
 ):
     """Generate ECP cuts: OA cuts only for violated constraints at x_master."""
     from discopt._jax.cutting_planes import (
@@ -644,31 +663,40 @@ def _add_ecp_cuts(
                 sense = "<="
 
             if sense == "<=":
-                oa_A_rows.append(coeffs)
-                oa_b_rows.append(cut.rhs)
+                _append_master_cut(oa_A_rows, oa_b_rows, coeffs, cut.rhs, oa_cut_relaxable)
                 n_added += 1
             elif sense == ">=":
-                oa_A_rows.append(-coeffs)
-                oa_b_rows.append(-cut.rhs)
+                _append_master_cut(oa_A_rows, oa_b_rows, -coeffs, -cut.rhs, oa_cut_relaxable)
                 n_added += 1
             elif sense == "==":
-                oa_A_rows.append(coeffs)
-                oa_b_rows.append(cut.rhs)
-                oa_A_rows.append(-coeffs)
-                oa_b_rows.append(-cut.rhs)
+                _append_master_cut(oa_A_rows, oa_b_rows, coeffs, cut.rhs, oa_cut_relaxable)
+                _append_master_cut(oa_A_rows, oa_b_rows, -coeffs, -cut.rhs, oa_cut_relaxable)
                 n_added += 2
 
     if not obj_is_linear and objective_is_convex:
         n_master = n_vars + 1
         obj_cut = generate_objective_oa_cut(evaluator, x_master, n_master, z_index=n_vars)
-        oa_A_rows.append(obj_cut.coeffs.copy())
-        oa_b_rows.append(obj_cut.rhs)
+        _append_master_cut(
+            oa_A_rows,
+            oa_b_rows,
+            obj_cut.coeffs.copy(),
+            obj_cut.rhs,
+            oa_cut_relaxable,
+            relaxable=False,
+        )
         n_added += 1
 
     return n_added
 
 
-def _add_no_good_cut(x_master, int_indices, oa_A_rows, oa_b_rows, n_vars):
+def _add_no_good_cut(
+    x_master,
+    int_indices,
+    oa_A_rows,
+    oa_b_rows,
+    n_vars,
+    oa_cut_relaxable=None,
+):
     """Add an integer-exclusion (no-good) cut.
 
     sum_{i: y_i*=1} (1-y_i) + sum_{i: y_i*=0} y_i >= 1
@@ -684,8 +712,14 @@ def _add_no_good_cut(x_master, int_indices, oa_A_rows, oa_b_rows, n_vars):
             count_ones += 1
         else:
             coeffs[idx] = -1.0
-    oa_A_rows.append(coeffs)
-    oa_b_rows.append(float(count_ones - 1))
+    _append_master_cut(
+        oa_A_rows,
+        oa_b_rows,
+        coeffs,
+        float(count_ones - 1),
+        oa_cut_relaxable,
+        relaxable=False,
+    )
 
 
 def _add_feasibility_cuts(
@@ -696,6 +730,7 @@ def _add_feasibility_cuts(
     oa_A_rows,
     oa_b_rows,
     constraint_convex_mask,
+    oa_cut_relaxable=None,
 ):
     """Add gradient-based feasibility cuts (Fletcher-Leyffer 1994).
 
@@ -718,11 +753,9 @@ def _add_feasibility_cuts(
         if np.linalg.norm(coeffs) < 1e-12:
             continue
         if cut.sense == "<=":
-            oa_A_rows.append(coeffs)
-            oa_b_rows.append(cut.rhs)
+            _append_master_cut(oa_A_rows, oa_b_rows, coeffs, cut.rhs, oa_cut_relaxable)
         elif cut.sense == ">=":
-            oa_A_rows.append(-coeffs)
-            oa_b_rows.append(-cut.rhs)
+            _append_master_cut(oa_A_rows, oa_b_rows, -coeffs, -cut.rhs, oa_cut_relaxable)
 
 
 # ── MILP Master Problem ──────────────────────────────────────
@@ -746,6 +779,8 @@ def _solve_master_milp(
     add_slack=False,
     max_slack=1000.0,
     oa_penalty_factor=1000.0,
+    oa_cut_relaxable=None,
+    use_objective_epigraph=None,
 ):
     """Build and solve the master MILP."""
     try:
@@ -759,12 +794,20 @@ def _solve_master_milp(
             "pip install highspy  |  pip install pounce-solver"
         ) from e
 
-    use_objective_epigraph = (not obj_is_linear) and objective_bound_valid
+    if use_objective_epigraph is None:
+        use_objective_epigraph = (not obj_is_linear) and objective_bound_valid
+    if oa_cut_relaxable is not None and len(oa_cut_relaxable) != len(oa_A_rows):
+        raise ValueError(
+            "oa_cut_relaxable must match oa_A_rows length; "
+            f"got {len(oa_cut_relaxable)} flags for {len(oa_A_rows)} cuts."
+        )
     n_master = n_vars
     if use_objective_epigraph:
         n_master += 1  # epigraph variable eta
     slack_index = None
     if add_slack:
+        # A single shared slack intentionally keeps the master compact. It is a
+        # MindtPy-inspired heuristic simplification, not a per-cut slack model.
         slack_index = n_master
         n_master += 1
 
@@ -794,9 +837,12 @@ def _solve_master_milp(
             row = np.append(row, 0.0)  # extend constraint cuts with 0 for eta
         if add_slack:
             # Relax only constraint OA/feasibility cuts. Objective epigraph cuts
-            # already carry eta and must remain unrelaxed to preserve the
-            # penalized master objective semantics.
-            slack_coeff = -1.0 if original_len == n_vars else 0.0
+            # and hard integer-exclusion cuts must remain unrelaxed.
+            if oa_cut_relaxable is None:
+                relax_cut = original_len == n_vars
+            else:
+                relax_cut = bool(oa_cut_relaxable[i])
+            slack_coeff = -1.0 if relax_cut else 0.0
             row = np.append(row, slack_coeff)
         A_ub_rows.append(row)
         b_ub_vals.append(oa_b_rows[i])
@@ -1038,12 +1084,12 @@ def solve_oa(
     # 2. Generate initial linearization cuts.
     oa_A_rows: list[np.ndarray] = []
     oa_b_rows: list[float] = []
+    oa_cut_relaxable: list[bool] = []
 
     UB = 1e20
     LB = -1e20
     incumbent = None
     incumbent_obj = None
-    no_good_cuts_added = False
     integer_assignments_seen: set[tuple[float, ...]] = set()
     incumbent_progress: list[float] = []
     termination_reason = None
@@ -1070,6 +1116,7 @@ def solve_oa(
                 decomp.oa_constraint_mask,
                 decomp.oa_objective_is_convex,
                 equality_relaxation=equality_relaxation,
+                oa_cut_relaxable=oa_cut_relaxable,
             )
             # Check if relaxation solution is already integer-feasible.
             is_int_feasible = all(
@@ -1094,6 +1141,7 @@ def solve_oa(
                 decomp.oa_constraint_mask,
                 decomp.oa_objective_is_convex,
                 equality_relaxation=equality_relaxation,
+                oa_cut_relaxable=oa_cut_relaxable,
             )
     else:
         x_seed = _build_initial_strategy_point(decomp, init_strategy, initial_point)
@@ -1110,6 +1158,7 @@ def solve_oa(
                 decomp.oa_constraint_mask,
                 decomp.oa_objective_is_convex,
                 equality_relaxation=equality_relaxation,
+                oa_cut_relaxable=oa_cut_relaxable,
             )
             if _is_primal_feasible(evaluator, x_seed):
                 UB = float(evaluator.evaluate_objective(x_seed))
@@ -1138,6 +1187,7 @@ def solve_oa(
                 decomp.oa_constraint_mask,
                 decomp.oa_objective_is_convex,
                 equality_relaxation=equality_relaxation,
+                oa_cut_relaxable=oa_cut_relaxable,
             )
             if x_init is not None and obj_init is not None:
                 UB = obj_init
@@ -1170,6 +1220,8 @@ def solve_oa(
             add_slack=add_slack,
             max_slack=max_slack,
             oa_penalty_factor=oa_penalty_factor,
+            oa_cut_relaxable=oa_cut_relaxable,
+            use_objective_epigraph=(not decomp.obj_is_linear and decomp.oa_objective_is_convex),
         )
 
         from discopt.solvers import SolveStatus
@@ -1201,6 +1253,7 @@ def solve_oa(
                 decomp.oa_constraint_mask,
                 decomp.oa_objective_is_convex,
                 equality_relaxation=equality_relaxation,
+                oa_cut_relaxable=oa_cut_relaxable,
             )
             continue
 
@@ -1238,6 +1291,7 @@ def solve_oa(
                 decomp.oa_constraint_mask,
                 decomp.oa_objective_is_convex,
                 equality_relaxation=equality_relaxation,
+                oa_cut_relaxable=oa_cut_relaxable,
             )
             # In ECP, use master objective as heuristic UB
             master_obj = float(evaluator.evaluate_objective(x_master))
@@ -1296,6 +1350,7 @@ def solve_oa(
                 decomp.oa_constraint_mask,
                 decomp.oa_objective_is_convex,
                 equality_relaxation=equality_relaxation,
+                oa_cut_relaxable=oa_cut_relaxable,
             )
         else:
             # NLP infeasible for this integer assignment
@@ -1318,11 +1373,18 @@ def solve_oa(
                         oa_A_rows,
                         oa_b_rows,
                         decomp.oa_constraint_mask,
+                        oa_cut_relaxable=oa_cut_relaxable,
                     )
 
             if add_no_good_cuts:
-                _add_no_good_cut(x_master, decomp.int_indices, oa_A_rows, oa_b_rows, n_vars)
-                no_good_cuts_added = True
+                _add_no_good_cut(
+                    x_master,
+                    decomp.int_indices,
+                    oa_A_rows,
+                    oa_b_rows,
+                    n_vars,
+                    oa_cut_relaxable=oa_cut_relaxable,
+                )
 
             # Also add OA cuts at master point
             _add_oa_cuts(
@@ -1337,6 +1399,7 @@ def solve_oa(
                 decomp.oa_constraint_mask,
                 decomp.oa_objective_is_convex,
                 equality_relaxation=equality_relaxation,
+                oa_cut_relaxable=oa_cut_relaxable,
             )
 
         # d. Check convergence
@@ -1363,14 +1426,14 @@ def solve_oa(
                     termination_reason = "stalling"
                     break
 
-        if master_bound_valid and not no_good_cuts_added and gap <= gap_tolerance:
+        if master_bound_valid and gap <= gap_tolerance:
             termination_reason = "gap"
             break
 
     # 4. Build result
     wall_time = time.perf_counter() - t_start
     gap = _compute_gap(LB, UB)
-    bound_certified = master_bound_valid and not no_good_cuts_added
+    bound_certified = master_bound_valid
     bound = LB if bound_certified and LB > -1e19 else None
     reported_gap = gap if bound is not None and UB < 1e19 else None
 
