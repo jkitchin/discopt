@@ -446,7 +446,15 @@ def differentiable_solve(
             # Ipopt convention: multipliers for g(x) in [cl, cu]
             # For <= constraints (body <= 0): mult >= 0 when active
             # The envelope theorem gives dL/dp = df/dp + lambda^T dg/dp
-            con_vals = jnp.array([cf(x_star_jax, p_flat_arg) for cf in constraint_fns])
+            # Ravel + concatenate (NOT jnp.array/stack): the multipliers vector is
+            # per constraint *row* (the evaluator solves over concat_constraints,
+            # which ravels each constraint with reshape(-1)). Stacking per-
+            # constraint breaks on vector constraints — mixed shapes fail to stack,
+            # equal shapes mis-align the lambda·g dot (issue #324). Raveling matches
+            # the multiplier ordering row-for-row and is a no-op for scalar rows.
+            con_vals = jnp.concatenate(
+                [jnp.ravel(cf(x_star_jax, p_flat_arg)) for cf in constraint_fns]
+            )
             return obj_val + jnp.dot(mults, con_vals)
     else:
 
@@ -615,7 +623,15 @@ def _compute_sensitivity_at_solution(
 
         def lagrangian_p(p_flat_arg):
             obj_val = obj_fn(x_star_jax, p_flat_arg)
-            con_vals = jnp.array([cf(x_star_jax, p_flat_arg) for cf in constraint_fns])
+            # Ravel + concatenate (NOT jnp.array/stack): the multipliers vector is
+            # per constraint *row* (the evaluator solves over concat_constraints,
+            # which ravels each constraint with reshape(-1)). Stacking per-
+            # constraint breaks on vector constraints — mixed shapes fail to stack,
+            # equal shapes mis-align the lambda·g dot (issue #324). Raveling matches
+            # the multiplier ordering row-for-row and is a no-op for scalar rows.
+            con_vals = jnp.concatenate(
+                [jnp.ravel(cf(x_star_jax, p_flat_arg)) for cf in constraint_fns]
+            )
             return obj_val + jnp.dot(mults, con_vals)
     else:
 
@@ -794,7 +810,11 @@ def _make_jax_differentiable_solve(
 
             def lagrangian_p(p_arg):
                 obj_val = obj_fn_parametric(x_star, p_arg)
-                con_vals = jnp.array([cf(x_star, p_arg) for cf in constraint_fns_parametric])
+                # Ravel + concatenate to match the per-row multiplier ordering
+                # (vector/mixed-shape constraints, issue #324).
+                con_vals = jnp.concatenate(
+                    [jnp.ravel(cf(x_star, p_arg)) for cf in constraint_fns_parametric]
+                )
                 return obj_val + jnp.dot(mults, con_vals)
         else:
 
@@ -952,7 +972,9 @@ def implicit_differentiate(
 
         def lagrangian(x, p):
             obj_val = obj_fn(x, p)
-            con_vals = jnp.array([cf(x, p) for cf in constraint_fns])
+            # Ravel + concatenate to match the per-row multiplier ordering
+            # (vector/mixed-shape constraints, issue #324).
+            con_vals = jnp.concatenate([jnp.ravel(cf(x, p)) for cf in constraint_fns])
             return obj_val + jnp.dot(mults, con_vals)
     else:
 
@@ -1409,7 +1431,9 @@ def differentiable_solve_l3(
 
         def lagrangian_p(p_flat_arg):
             obj_val = obj_fn(x_star, p_flat_arg)
-            con_vals = jnp.array([cf(x_star, p_flat_arg) for cf in constraint_fns])
+            # Ravel + concatenate to match the per-row multiplier ordering
+            # (vector/mixed-shape constraints, issue #324).
+            con_vals = jnp.concatenate([jnp.ravel(cf(x_star, p_flat_arg)) for cf in constraint_fns])
             return obj_val + jnp.dot(mults, con_vals)
     else:
 
