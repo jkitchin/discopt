@@ -752,6 +752,8 @@ def _add_feasibility_cuts(
         coeffs = cut.coeffs.copy()
         if np.linalg.norm(coeffs) < 1e-12:
             continue
+        # Feasibility cuts are gradient cuts, not hard integer exclusions, so
+        # the shared OA slack may relax them to keep the heuristic master robust.
         if cut.sense == "<=":
             _append_master_cut(oa_A_rows, oa_b_rows, coeffs, cut.rhs, oa_cut_relaxable)
         elif cut.sense == ">=":
@@ -794,6 +796,8 @@ def _solve_master_milp(
             "pip install highspy  |  pip install pounce-solver"
         ) from e
 
+    # ``use_objective_epigraph`` controls master layout when supplied; the
+    # certification flag remains only as the compatibility fallback.
     if use_objective_epigraph is None:
         use_objective_epigraph = (not obj_is_linear) and objective_bound_valid
     if oa_cut_relaxable is not None and len(oa_cut_relaxable) != len(oa_A_rows):
