@@ -47,6 +47,53 @@ def _assert_integer_feasible(result, int_var_names, model):
             assert abs(v - round(v)) < INTEGRALITY_TOL, f"Variable {name} = {v} is not integral"
 
 
+def _assert_complete_optimal_result(result, expected_obj, var_names, abs_tol=ABS_TOL):
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(expected_obj, abs=abs_tol)
+    assert result.bound is not None
+    assert result.bound == pytest.approx(expected_obj, abs=abs_tol)
+    assert result.gap == pytest.approx(0.0, abs=1e-9)
+    for name in var_names:
+        assert name in result.x
+
+
+def _mindtpy_simple_minlp():
+    """Native version of Pyomo MindtPy's small APSE convex MINLP baseline."""
+    m = dm.Model("mindtpy_simple_minlp")
+    x = m.continuous("x", shape=(2,), lb=0, ub=4)
+    y = m.binary("y", shape=(3,))
+
+    m.subject_to((x[0] - 2) ** 2 - x[1] <= 0)
+    m.subject_to(x[0] - 2 * y[0] >= 0)
+    m.subject_to(x[0] - x[1] - 4 * (1 - y[1]) <= 0)
+    m.subject_to(x[0] - (1 - y[0]) >= 0)
+    m.subject_to(x[1] - y[1] >= 0)
+    m.subject_to(x[0] + x[1] >= 3 * y[2])
+    m.subject_to(y[0] + y[1] + y[2] >= 1)
+    m.minimize(y[0] + 1.5 * y[1] + 0.5 * y[2] + x[0] ** 2 + x[1] ** 2)
+    return m
+
+
+def _mindtpy_duran_grossmann_minlp():
+    """Native version of Pyomo MindtPy's Duran-Grossmann OA/ECP baseline."""
+    m = dm.Model("mindtpy_duran_grossmann")
+    x = m.continuous("x", shape=(4,), lb=0, ub=[2, 2, 1, 100])
+    y = m.binary("y", shape=(3,))
+
+    m.subject_to(0.8 * dm.log(x[1] + 1) + 0.96 * dm.log(x[0] - x[1] + 1) - 0.8 * x[2] >= 0)
+    m.subject_to(dm.log(x[1] + 1) + 1.2 * dm.log(x[0] - x[1] + 1) - x[2] - 2 * y[2] >= -2)
+    m.subject_to(
+        10 * x[0] - 7 * x[2] - 18 * dm.log(x[1] + 1) - 19.2 * dm.log(x[0] - x[1] + 1) + 10 - x[3]
+        <= 0
+    )
+    m.subject_to(x[1] - x[0] <= 0)
+    m.subject_to(x[1] - 2 * y[0] <= 0)
+    m.subject_to(x[0] - x[1] - 2 * y[1] <= 0)
+    m.subject_to(y[0] + y[1] <= 1)
+    m.minimize(5 * y[0] + 6 * y[1] + 8 * y[2] + x[3])
+    return m
+
+
 # ── Convex MINLP ─────────────────────────────────────────────
 
 
@@ -122,6 +169,33 @@ class TestOAConvexMINLP:
         assert result.x["y"] == pytest.approx(1.0, abs=INTEGRALITY_TOL)
 
 
+class TestMindtPyBaselineParity:
+    """Native discopt coverage for the small Pyomo MindtPy OA/ECP baselines."""
+
+    @pytest.mark.parametrize(
+        ("builder", "expected_obj", "abs_tol"),
+        [
+            (_mindtpy_simple_minlp, 3.5, 1e-3),
+            (_mindtpy_duran_grossmann_minlp, 6.00976, 1e-3),
+        ],
+    )
+    @pytest.mark.parametrize("method", ["oa", "ecp"])
+    def test_small_mindtpy_baselines_report_complete_results(
+        self, builder, expected_obj, abs_tol, method
+    ):
+        model = builder()
+        result = model.solve(
+            solver="mip-nlp",
+            mip_nlp_method=method,
+            time_limit=60,
+            max_nodes=100,
+        )
+
+        _assert_complete_optimal_result(result, expected_obj, ["x", "y"], abs_tol=abs_tol)
+        _assert_integer_feasible(result, ["y"], model)
+        assert np.asarray(result.x["y"]).tolist() == pytest.approx([0.0, 1.0, 0.0])
+
+
 # ── Non-convex MINLP ─────────────────────────────────────────
 
 
@@ -181,14 +255,16 @@ class TestOANonConvex:
 class TestOAEdgeCases:
     """Edge cases and degenerate problems."""
 
-    def test_pure_nlp_no_integers(self):
-        """No integer variables: OA should solve a single NLP."""
-        m = dm.Model("pure_nlp")
-        x = m.continuous("x", lb=-5, ub=5)
-        m.minimize(x**2)
+    def test_no_discrete_short_circuit(self):
+        """No integer variables: MIP-NLP should solve one continuous NLP."""
+        m = dm.Model("no_discrete_short_circuit")
+        x = m.continuous("x", lb=0, ub=10)
+        m.subject_to(x**2 >= 1)
+        m.minimize(x)
 
         result = _solve_oa(m)
-        _assert_optimal(result, 0.0, abs_tol=0.01)
+        _assert_complete_optimal_result(result, 1.0, ["x"], abs_tol=0.01)
+        assert result.x["x"] == pytest.approx(1.0, abs=0.01)
 
     def test_pure_milp_all_linear(self):
         """All-linear MINLP: OA should converge in one iteration."""
@@ -212,6 +288,9 @@ class TestOAEdgeCases:
 
         result = _solve_oa(m)
         assert result.status == "infeasible"
+        assert result.objective is None
+        assert result.gap is None
+        assert result.x == {}
 
     @pytest.mark.slow
     def test_single_iteration_optimal(self):
