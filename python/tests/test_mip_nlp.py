@@ -82,12 +82,26 @@ def test_model_solve_routes_mip_nlp_options(monkeypatch):
             solver="mip-nlp",
             mip_nlp_method="ecp",
             equality_relaxation=True,
+            add_slack=True,
+            max_slack=12.0,
+            oa_penalty_factor=34.0,
+            add_no_good_cuts=False,
+            feasibility_norm="L2",
+            stalling_limit=3,
+            cycling_check=False,
             skip_convex_check=True,
         )
 
     assert result.status == "optimal"
     assert calls["method"] == "ecp"
     assert calls["equality_relaxation"] is True
+    assert calls["add_slack"] is True
+    assert calls["max_slack"] == pytest.approx(12.0)
+    assert calls["oa_penalty_factor"] == pytest.approx(34.0)
+    assert calls["add_no_good_cuts"] is False
+    assert calls["feasibility_norm"] == "L2"
+    assert calls["stalling_limit"] == 3
+    assert calls["cycling_check"] is False
 
 
 def test_model_solve_ecp_alias_derives_method(monkeypatch):
@@ -159,6 +173,46 @@ def test_mip_nlp_init_strategy_precedence(monkeypatch):
 
     assert result.status == "optimal"
     assert calls["init_strategy"] == "initial_binary"
+
+
+def test_mip_nlp_new_oa_options_precedence_and_alias(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    calls = {}
+
+    def fake_solve_oa(model, **kwargs):
+        calls.update(kwargs)
+        return SolveResult(status="optimal", objective=0.0, bound=0.0, gap=0.0)
+
+    monkeypatch.setattr(oa_module, "solve_oa", fake_solve_oa)
+
+    result = solve_mip_nlp(
+        _binary_model("new_options_precedence"),
+        method="oa",
+        mip_nlp_options={
+            "add_slack": False,
+            "OA_penalty_factor": 11.0,
+            "feasibility_norm": "L1",
+            "cycling_check": True,
+        },
+        add_slack=True,
+        oa_penalty_factor=17.0,
+        feasibility_norm="L_infinity",
+        add_no_good_cuts=False,
+        stalling_limit=4,
+        heuristic_nonconvex=True,
+        cycling_check=False,
+    )
+
+    assert result.status == "optimal"
+    assert calls["add_slack"] is True
+    assert calls["oa_penalty_factor"] == pytest.approx(17.0)
+    assert calls["feasibility_norm"] == "L_infinity"
+    assert calls["add_no_good_cuts"] is False
+    assert calls["stalling_limit"] == 4
+    assert calls["heuristic_nonconvex"] is True
+    assert calls["cycling_check"] is False
 
 
 def test_model_solve_passes_initial_solution_to_mip_nlp(monkeypatch):
@@ -352,7 +406,7 @@ def test_mip_nlp_rejects_unsupported_oa_options():
         solve_mip_nlp(
             _binary_model("unsupported_oa_option"),
             method="oa",
-            mip_nlp_options={"add_slack": True},
+            mip_nlp_options={"not_an_oa_option": True},
         )
 
 

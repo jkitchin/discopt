@@ -30,6 +30,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _INIT_STRATEGIES = frozenset({"rNLP", "initial_binary", "max_binary"})
+_FEASIBILITY_NORMS = {
+    "l1": "L1",
+    "l2": "L2",
+    "linfinity": "L_infinity",
+    "l_infinity": "L_infinity",
+    "l-inf": "L_infinity",
+    "l_inf": "L_infinity",
+}
 _START_BOUND_CLIP = 1e8
 
 
@@ -47,6 +55,39 @@ def _normalize_init_strategy(init_strategy: str) -> str:
         + ", ".join(sorted(_INIT_STRATEGIES))
         + "."
     )
+
+
+def _normalize_feasibility_norm(feasibility_norm: str) -> str:
+    """Normalize and validate the MindtPy-style feasibility norm."""
+    if not isinstance(feasibility_norm, str):
+        raise ValueError(
+            f"feasibility_norm must be a string, got {type(feasibility_norm).__name__}."
+        )
+    key = feasibility_norm.strip().lower().replace(" ", "_")
+    normalized = _FEASIBILITY_NORMS.get(key)
+    if normalized is not None:
+        return normalized
+    raise ValueError(
+        f"Unknown feasibility_norm={feasibility_norm!r}. Choose one of: L1, L2, L_infinity."
+    )
+
+
+def _normalize_positive_float(name: str, value: float) -> float:
+    """Validate a strictly positive finite float option."""
+    out = float(value)
+    if not np.isfinite(out) or out <= 0:
+        raise ValueError(f"{name} must be a positive finite number, got {value!r}.")
+    return out
+
+
+def _normalize_optional_positive_int(name: str, value: Optional[int]) -> Optional[int]:
+    """Validate a positive integer option, allowing None to disable it."""
+    if value is None:
+        return None
+    out = int(value)
+    if out <= 0:
+        raise ValueError(f"{name} must be a positive integer or None, got {value!r}.")
+    return out
 
 
 def _default_nlp_start(lb: np.ndarray, ub: np.ndarray) -> np.ndarray:
@@ -134,7 +175,14 @@ class OAConfig:
     equality_relaxation: bool = False
     ecp_mode: bool = False
     feasibility_cuts: bool = True
-    add_nogood_cuts: bool = True
+    heuristic_nonconvex: bool = False
+    add_slack: bool = False
+    max_slack: float = 1000.0
+    oa_penalty_factor: float = 1000.0
+    add_no_good_cuts: bool = False
+    feasibility_norm: str = "L_infinity"
+    stalling_limit: Optional[int] = None
+    cycling_check: bool = False
     log_iterations: bool = True
 
 
@@ -363,13 +411,112 @@ def _solve_nlp_subproblem(evaluator, lb, ub, int_indices, x_master, nlp_solver, 
     return _solve_nlp(proxy, sub_lb, sub_ub, nlp_solver, x0=initial_point)
 
 
-def _solve_feasibility_subproblem(evaluator, lb, ub, int_indices, x_master, nlp_solver):
+def _constraint_violation_data(evaluator, x) -> tuple[np.ndarray, np.ndarray]:
+    """Return nonnegative row violations and active derivative signs."""
+    if evaluator.n_constraints == 0:
+        return np.empty(0, dtype=np.float64), np.empty(0, dtype=np.float64)
+
+    from discopt.solvers.nlp_ipopt import _infer_constraint_bounds
+
+    vals = np.asarray(evaluator.evaluate_constraints(x), dtype=np.float64)
+    cl, cu = _infer_constraint_bounds(evaluator)
+    lower = np.zeros_like(vals)
+    upper = np.zeros_like(vals)
+
+    finite_lb = cl > -1e19
+    finite_ub = cu < 1e19
+    lower[finite_lb] = np.maximum(cl[finite_lb] - vals[finite_lb], 0.0)
+    upper[finite_ub] = np.maximum(vals[finite_ub] - cu[finite_ub], 0.0)
+
+    use_upper = upper >= lower
+    violations = np.where(use_upper, upper, lower)
+    signs = np.where(violations > 0, np.where(use_upper, 1.0, -1.0), 0.0)
+    return violations, signs
+
+
+def _constraint_violation_merit(evaluator, x, feasibility_norm: str) -> float:
+    """Compute the selected feasibility violation merit at ``x``."""
+    violations, _signs = _constraint_violation_data(evaluator, x)
+    if violations.size == 0:
+        return 0.0
+    if feasibility_norm == "L1":
+        return float(np.sum(violations))
+    if feasibility_norm == "L2":
+        return float(np.dot(violations, violations))
+    return float(np.max(violations))
+
+
+class _FeasibilityEvaluator:
+    """Bounds-only NLP evaluator that minimizes constraint violation merit."""
+
+    def __init__(self, evaluator, lb, ub, feasibility_norm: str):
+        self._eval = evaluator
+        self._lb = np.asarray(lb, dtype=np.float64)
+        self._ub = np.asarray(ub, dtype=np.float64)
+        self._feasibility_norm = feasibility_norm
+
+    @property
+    def n_variables(self):
+        return self._eval.n_variables
+
+    @property
+    def n_constraints(self):
+        return 0
+
+    @property
+    def variable_bounds(self):
+        return self._lb, self._ub
+
+    def evaluate_objective(self, x):
+        return _constraint_violation_merit(self._eval, x, self._feasibility_norm)
+
+    def evaluate_gradient(self, x):
+        violations, signs = _constraint_violation_data(self._eval, x)
+        if violations.size == 0 or np.all(violations <= 0):
+            return np.zeros(self.n_variables, dtype=np.float64)
+
+        try:
+            jac = np.asarray(self._eval.evaluate_jacobian(x), dtype=np.float64)
+        except Exception:
+            return np.zeros(self.n_variables, dtype=np.float64)
+
+        if self._feasibility_norm == "L1":
+            weights = signs
+        elif self._feasibility_norm == "L2":
+            weights = 2.0 * violations * signs
+        else:
+            weights = np.zeros_like(violations)
+            weights[int(np.argmax(violations))] = signs[int(np.argmax(violations))]
+        return np.asarray(weights @ jac, dtype=np.float64)
+
+    def evaluate_hessian(self, x):
+        return np.zeros((self.n_variables, self.n_variables), dtype=np.float64)
+
+    def evaluate_lagrangian_hessian(self, x, obj_factor, lagrange):
+        return np.zeros((self.n_variables, self.n_variables), dtype=np.float64)
+
+    def evaluate_constraints(self, x):
+        return np.empty(0, dtype=np.float64)
+
+    def evaluate_jacobian(self, x):
+        return np.empty((0, self.n_variables), dtype=np.float64)
+
+
+def _solve_feasibility_subproblem(
+    evaluator,
+    lb,
+    ub,
+    int_indices,
+    x_master,
+    nlp_solver,
+    feasibility_norm,
+):
     """Solve feasibility problem with fixed integers.
 
-    Evaluates constraint violations at the master point and returns the
-    point for generating feasibility cuts. When a full feasibility NLP
-    cannot be constructed, falls back to returning the master point itself
-    so that OA cuts can still be generated there.
+    Minimizes the selected violation norm over the continuous variables with
+    the master integer assignment fixed. If that bounded feasibility NLP cannot
+    improve the master point, return the clipped master point so OA can still
+    generate cuts deterministically.
     """
     sub_lb = lb.copy()
     sub_ub = ub.copy()
@@ -378,26 +525,22 @@ def _solve_feasibility_subproblem(evaluator, lb, ub, int_indices, x_master, nlp_
         sub_lb[idx] = val
         sub_ub[idx] = val
 
-    # Try solving the NLP from the master point as initial guess
-    proxy = _BoundsProxy(evaluator, sub_lb, sub_ub)
     x0 = np.clip(x_master[: evaluator.n_variables], sub_lb, sub_ub)
+    best_x = x0
+    best_merit = _constraint_violation_merit(evaluator, x0, feasibility_norm)
 
     try:
-        if nlp_solver == "ipopt":
-            from discopt.solvers.nlp_ipopt import solve_nlp
-        else:
-            from discopt.solvers.nlp_pounce import solve_nlp
-
-        result = solve_nlp(proxy, x0, options={"print_level": 0, "max_iter": 200})
-
-        # Even if infeasible, return the point for cut generation
-        if result.x is not None:
-            return result.x
+        proxy = _FeasibilityEvaluator(evaluator, sub_lb, sub_ub, feasibility_norm)
+        x_feas, _obj_feas = _solve_nlp(proxy, sub_lb, sub_ub, nlp_solver, x0=x0)
+        if x_feas is not None:
+            candidate = np.clip(np.asarray(x_feas, dtype=np.float64), sub_lb, sub_ub)
+            candidate_merit = _constraint_violation_merit(evaluator, candidate, feasibility_norm)
+            if candidate_merit <= best_merit + 1e-9:
+                best_x = candidate
     except Exception:
         pass
 
-    # Fallback: return master point (clipped to bounds)
-    return x0
+    return best_x
 
 
 # ── Cut Generation ────────────────────────────────────────────
@@ -600,6 +743,9 @@ def _solve_master_milp(
     objective_bound_valid,
     time_limit,
     gap_tolerance,
+    add_slack=False,
+    max_slack=1000.0,
+    oa_penalty_factor=1000.0,
 ):
     """Build and solve the master MILP."""
     try:
@@ -617,6 +763,10 @@ def _solve_master_milp(
     n_master = n_vars
     if use_objective_epigraph:
         n_master += 1  # epigraph variable eta
+    slack_index = None
+    if add_slack:
+        slack_index = n_master
+        n_master += 1
 
     # Build A_ub, b_ub from linear <= constraints + OA cuts
     A_ub_rows = []
@@ -626,6 +776,8 @@ def _solve_master_milp(
         row = linear_A_rows[i]
         if use_objective_epigraph:
             row = np.append(row, 0.0)
+        if add_slack:
+            row = np.append(row, 0.0)
         if sense == "<=":
             A_ub_rows.append(row)
             b_ub_vals.append(linear_b_rows[i])
@@ -634,11 +786,18 @@ def _solve_master_milp(
             b_ub_vals.append(-linear_b_rows[i])
 
     # OA cuts (all in <= form already)
-    # Constraint cuts have length n_vars; objective cuts have length n_master
+    # Constraint cuts have length n_vars; objective cuts carry the eta column.
     for i in range(len(oa_A_rows)):
-        row = oa_A_rows[i]
+        row = np.asarray(oa_A_rows[i], dtype=np.float64)
+        original_len = len(row)
         if use_objective_epigraph and len(row) == n_vars:
             row = np.append(row, 0.0)  # extend constraint cuts with 0 for eta
+        if add_slack:
+            # Relax only constraint OA/feasibility cuts. Objective epigraph cuts
+            # already carry eta and must remain unrelaxed to preserve the
+            # penalized master objective semantics.
+            slack_coeff = -1.0 if original_len == n_vars else 0.0
+            row = np.append(row, slack_coeff)
         A_ub_rows.append(row)
         b_ub_vals.append(oa_b_rows[i])
 
@@ -650,6 +809,8 @@ def _solve_master_milp(
             row = linear_A_rows[i]
             if use_objective_epigraph:
                 row = np.append(row, 0.0)
+            if add_slack:
+                row = np.append(row, 0.0)
             A_eq_rows.append(row)
             b_eq_vals.append(linear_b_rows[i])
 
@@ -659,19 +820,21 @@ def _solve_master_milp(
     b_eq = np.array(b_eq_vals) if b_eq_vals else None
 
     # Objective
+    c = np.zeros(n_master)
     if obj_is_linear:
         c_vec, _off = obj_coeffs
-        c = c_vec.copy()
+        c[:n_vars] = c_vec
     elif use_objective_epigraph:
-        c = np.zeros(n_master)
-        c[-1] = 1.0  # minimize eta
-    else:
-        c = np.zeros(n_master)
+        c[n_vars] = 1.0  # minimize eta
+    if slack_index is not None:
+        c[slack_index] = oa_penalty_factor
 
     # Bounds
     bounds_list = list(zip(lb.tolist(), ub.tolist()))
     if use_objective_epigraph:
         bounds_list.append((-1e20, 1e20))  # eta unbounded
+    if slack_index is not None:
+        bounds_list.append((0.0, max_slack))
 
     # Integrality
     int_vec = np.zeros(n_master, dtype=np.int32)
@@ -727,6 +890,14 @@ def solve_oa(
     equality_relaxation: bool = False,
     ecp_mode: bool = False,
     feasibility_cuts: bool = True,
+    heuristic_nonconvex: bool = False,
+    add_slack: bool = False,
+    max_slack: float = 1000.0,
+    oa_penalty_factor: float = 1000.0,
+    add_no_good_cuts: bool = False,
+    feasibility_norm: str = "L_infinity",
+    stalling_limit: Optional[int] = None,
+    cycling_check: bool = False,
     **kwargs,
 ) -> SolveResult:
     """Solve a MINLP via Outer Approximation.
@@ -772,6 +943,25 @@ def solve_oa(
     feasibility_cuts : bool
         Use gradient-based feasibility cuts (Fletcher & Leyffer 1994)
         when the NLP subproblem is infeasible. Stronger than no-good cuts.
+    heuristic_nonconvex : bool
+        Enable MindtPy-style heuristic handling for nonconvex cases. This turns
+        on equality relaxation and slack handling and suppresses certified
+        bound/gap reporting.
+    add_slack : bool
+        Relax OA constraint cuts with one nonnegative master slack variable.
+    max_slack : float
+        Upper bound for the OA master slack variable.
+    oa_penalty_factor : float
+        Positive objective penalty applied to the OA master slack variable.
+    add_no_good_cuts : bool
+        Add integer-exclusion cuts after infeasible fixed-integer NLP solves.
+    feasibility_norm : {"L1", "L2", "L_infinity"}
+        Violation norm minimized by the feasibility subproblem heuristic.
+    stalling_limit : int, optional
+        Stop after this many consecutive incumbent-objective records without
+        material progress.
+    cycling_check : bool
+        Stop when the master repeats a fixed-integer assignment.
 
     Returns
     -------
@@ -779,6 +969,17 @@ def solve_oa(
     """
     t_start = time.perf_counter()
     init_strategy = _normalize_init_strategy(init_strategy)
+    feasibility_norm = _normalize_feasibility_norm(feasibility_norm)
+    max_slack = _normalize_positive_float("max_slack", max_slack)
+    oa_penalty_factor = _normalize_positive_float("oa_penalty_factor", oa_penalty_factor)
+    stalling_limit = _normalize_optional_positive_int("stalling_limit", stalling_limit)
+    heuristic_nonconvex = bool(heuristic_nonconvex)
+    if heuristic_nonconvex:
+        equality_relaxation = True
+        add_slack = True
+    add_slack = bool(add_slack)
+    add_no_good_cuts = bool(add_no_good_cuts)
+    cycling_check = bool(cycling_check)
 
     # 1. Decompose model
     decomp = _decompose_model(model)
@@ -804,6 +1005,7 @@ def solve_oa(
             "OA: nonlinear objective is not convex in the optimization sense; "
             "disabling master lower-bound updates and skipping objective OA cuts"
         )
+    master_bound_valid = decomp.master_bound_valid and not heuristic_nonconvex
 
     # If no integer variables, just solve the NLP directly
     if len(decomp.int_indices) == 0:
@@ -841,6 +1043,10 @@ def solve_oa(
     LB = -1e20
     incumbent = None
     incumbent_obj = None
+    no_good_cuts_added = False
+    integer_assignments_seen: set[tuple[float, ...]] = set()
+    incumbent_progress: list[float] = []
+    termination_reason = None
 
     if init_strategy == "rNLP":
         x_relax, obj_relax = _solve_nlp_relaxation(
@@ -958,9 +1164,12 @@ def solve_oa(
             decomp.ub,
             decomp.obj_coeffs,
             decomp.obj_is_linear,
-            decomp.master_bound_valid,
+            master_bound_valid,
             time_limit=time_limit - elapsed,
             gap_tolerance=gap_tolerance,
+            add_slack=add_slack,
+            max_slack=max_slack,
+            oa_penalty_factor=oa_penalty_factor,
         )
 
         from discopt.solvers import SolveStatus
@@ -971,6 +1180,7 @@ def solve_oa(
 
         if master_result.status == SolveStatus.INFEASIBLE:
             logger.info("OA: Master MILP infeasible at iteration %d", iteration)
+            termination_reason = "master_infeasible"
             break
 
         if master_result.status == SolveStatus.UNBOUNDED or master_result.x is None:
@@ -995,9 +1205,24 @@ def solve_oa(
             continue
 
         x_master = master_result.x[:n_vars]
+        if cycling_check:
+            int_assignment = tuple(
+                _round_integral_to_bounds(x_master[idx], decomp.lb[idx], decomp.ub[idx])
+                for idx in decomp.int_indices
+            )
+            if int_assignment in integer_assignments_seen:
+                logger.info(
+                    "OA: cycling detected at iteration %d for integer assignment %s",
+                    iteration,
+                    int_assignment,
+                )
+                termination_reason = "cycling"
+                break
+            integer_assignments_seen.add(int_assignment)
+
         # The master gives a valid LB only via its dual ``bound`` (never the
         # incumbent ``objective``, which is an upper bound on a limited solve).
-        if decomp.master_bound_valid and master_result.bound is not None:
+        if master_bound_valid and master_result.bound is not None:
             LB = max(LB, master_result.bound)
 
         # b. ECP mode: add cuts at master point, skip NLP
@@ -1034,7 +1259,11 @@ def solve_oa(
                 n_violated,
             )
 
-            if n_violated == 0 or gap <= gap_tolerance:
+            if n_violated == 0:
+                termination_reason = "ecp_feasible"
+                break
+            if master_bound_valid and gap <= gap_tolerance:
+                termination_reason = "gap"
                 break
             continue
 
@@ -1078,6 +1307,7 @@ def solve_oa(
                     decomp.int_indices,
                     x_master,
                     nlp_solver,
+                    feasibility_norm,
                 )
                 if x_feas is not None:
                     _add_feasibility_cuts(
@@ -1090,8 +1320,9 @@ def solve_oa(
                         decomp.oa_constraint_mask,
                     )
 
-            # Always add no-good cut as fallback to avoid cycling
-            _add_no_good_cut(x_master, decomp.int_indices, oa_A_rows, oa_b_rows, n_vars)
+            if add_no_good_cuts:
+                _add_no_good_cut(x_master, decomp.int_indices, oa_A_rows, oa_b_rows, n_vars)
+                no_good_cuts_added = True
 
             # Also add OA cuts at master point
             _add_oa_cuts(
@@ -1119,17 +1350,34 @@ def solve_oa(
             len(oa_A_rows),
         )
 
-        if gap <= gap_tolerance:
+        if incumbent_obj is not None:
+            incumbent_progress.append(float(UB))
+            if stalling_limit is not None and len(incumbent_progress) >= stalling_limit:
+                prev = incumbent_progress[-stalling_limit]
+                if abs(incumbent_progress[-1] - prev) <= 1e-12:
+                    logger.info(
+                        "OA: stalling detected after %d incumbent records; best objective %.6f",
+                        stalling_limit,
+                        UB,
+                    )
+                    termination_reason = "stalling"
+                    break
+
+        if master_bound_valid and not no_good_cuts_added and gap <= gap_tolerance:
+            termination_reason = "gap"
             break
 
     # 4. Build result
     wall_time = time.perf_counter() - t_start
     gap = _compute_gap(LB, UB)
-    bound = LB if decomp.master_bound_valid and LB > -1e19 else None
+    bound_certified = master_bound_valid and not no_good_cuts_added
+    bound = LB if bound_certified and LB > -1e19 else None
     reported_gap = gap if bound is not None and UB < 1e19 else None
 
     if incumbent is not None and incumbent_obj is not None:
-        status = "optimal" if gap <= gap_tolerance else "feasible"
+        status = "optimal" if bound_certified and gap <= gap_tolerance else "feasible"
+        if termination_reason in {"cycling", "stalling"}:
+            status = "feasible"
         return SolveResult(
             status=status,
             objective=_obj_sign * incumbent_obj,
