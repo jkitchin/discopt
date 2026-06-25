@@ -2,9 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/mip-nlp-solver]
   pull_request:
-    branches: [main]
+    branches: [main, feature/mip-nlp-solver]
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
 
 # Cancel superseded runs on the same PR/branch — saves CI minutes when
 # pushes land in quick succession.
