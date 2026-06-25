@@ -51,9 +51,9 @@ def _normalize_init_strategy(init_strategy: str) -> str:
 
 def _default_nlp_start(lb: np.ndarray, ub: np.ndarray) -> np.ndarray:
     """Return the existing deterministic midpoint NLP start."""
-    lb_clip = np.clip(lb, -_START_BOUND_CLIP, _START_BOUND_CLIP)
-    ub_clip = np.clip(ub, -_START_BOUND_CLIP, _START_BOUND_CLIP)
-    return 0.5 * (lb_clip + ub_clip)
+    lb_clip = np.clip(np.asarray(lb, dtype=np.float64), -_START_BOUND_CLIP, _START_BOUND_CLIP)
+    ub_clip = np.clip(np.asarray(ub, dtype=np.float64), -_START_BOUND_CLIP, _START_BOUND_CLIP)
+    return np.asarray(0.5 * (lb_clip + ub_clip), dtype=np.float64)
 
 
 def _round_integral_to_bounds(value: float, lb: float, ub: float) -> float:
