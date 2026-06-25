@@ -50,6 +50,76 @@ def test_model_solve_routes_mip_nlp_options(monkeypatch):
     assert calls["equality_relaxation"] is True
 
 
+def test_model_solve_ecp_alias_derives_method(monkeypatch):
+    import discopt.solvers.mip_nlp as mip_nlp_module
+
+    calls = {}
+
+    def fake_solve_mip_nlp(model, **kwargs):
+        calls.update(kwargs)
+        return SolveResult(status="optimal", objective=0.0, bound=0.0, gap=0.0)
+
+    monkeypatch.setattr(mip_nlp_module, "solve_mip_nlp", fake_solve_mip_nlp)
+
+    result = _binary_model("ecp_alias").solve(solver="mip-nlp", ecp_mode=True)
+
+    assert result.status == "optimal"
+    assert calls["method"] == "ecp"
+    assert calls["ecp_mode"] is True
+
+
+def test_mip_nlp_options_precedence(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    calls = {}
+
+    def fake_solve_oa(model, **kwargs):
+        calls.update(kwargs)
+        return SolveResult(status="optimal", objective=0.0, bound=0.0, gap=0.0)
+
+    monkeypatch.setattr(oa_module, "solve_oa", fake_solve_oa)
+
+    result = solve_mip_nlp(
+        _binary_model("option_precedence"),
+        method="oa",
+        mip_nlp_options={
+            "equality_relaxation": False,
+            "feasibility_cuts": False,
+            "ecp_mode": True,
+        },
+        equality_relaxation=True,
+        feasibility_cuts=True,
+    )
+
+    assert result.status == "optimal"
+    assert calls["equality_relaxation"] is True
+    assert calls["feasibility_cuts"] is True
+    assert calls["ecp_mode"] is False
+
+
+def test_mip_nlp_method_ecp_overrides_nested_ecp_mode(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    calls = {}
+
+    def fake_solve_oa(model, **kwargs):
+        calls.update(kwargs)
+        return SolveResult(status="optimal", objective=0.0, bound=0.0, gap=0.0)
+
+    monkeypatch.setattr(oa_module, "solve_oa", fake_solve_oa)
+
+    result = solve_mip_nlp(
+        _binary_model("ecp_overrides_nested"),
+        method="ecp",
+        mip_nlp_options={"ecp_mode": False},
+    )
+
+    assert result.status == "optimal"
+    assert calls["ecp_mode"] is True
+
+
 def test_gdp_method_oa_deprecated_alias_routes_to_mip_nlp(monkeypatch):
     import discopt.solvers.mip_nlp as mip_nlp_module
 
@@ -73,6 +143,24 @@ def test_gdp_method_oa_deprecated_alias_routes_to_mip_nlp(monkeypatch):
     assert calls["equality_relaxation"] is True
 
 
+def test_mip_nlp_rejects_native_gdp_solver_method(monkeypatch):
+    import discopt.solvers.mip_nlp as mip_nlp_module
+
+    called = False
+
+    def fake_solve_mip_nlp(model, **kwargs):
+        nonlocal called
+        called = True
+        return SolveResult(status="optimal")
+
+    monkeypatch.setattr(mip_nlp_module, "solve_mip_nlp", fake_solve_mip_nlp)
+
+    with pytest.raises(ValueError, match="conflicts with solver='mip-nlp'"):
+        _binary_model("native_gdp_method").solve(solver="mip-nlp", gdp_method="loa")
+
+    assert called is False
+
+
 def test_mip_nlp_and_deprecated_oa_alias_reformulate_gdp(monkeypatch):
     import discopt.solvers.mip_nlp as mip_nlp_module
 
@@ -93,11 +181,61 @@ def test_mip_nlp_and_deprecated_oa_alias_reformulate_gdp(monkeypatch):
     assert not _has_disjunctions(captured[1])
 
 
-def test_mip_nlp_reserved_methods_raise():
+@pytest.mark.parametrize(
+    ("method", "issue"),
+    [
+        ("fp", "#115"),
+        ("roa", "#116/#117"),
+        ("goa", "#118"),
+        ("lp_nlp_bb", "#119"),
+        ("lp/nlp-bb", "#119"),
+    ],
+)
+def test_mip_nlp_reserved_methods_raise(method, issue):
     from discopt.solvers.mip_nlp import solve_mip_nlp
 
-    with pytest.raises(NotImplementedError, match="mip_nlp_method='fp'"):
-        solve_mip_nlp(_binary_model("fp_reserved"), method="fp")
+    with pytest.raises(NotImplementedError, match=issue):
+        solve_mip_nlp(_binary_model(f"{method}_reserved"), method=method)
+
+
+def test_mip_nlp_unknown_method_fails_before_oa(monkeypatch):
+    import discopt.solvers.oa as oa_module
+
+    called = False
+
+    def fake_solve_oa(model, **kwargs):
+        nonlocal called
+        called = True
+        return SolveResult(status="optimal")
+
+    monkeypatch.setattr(oa_module, "solve_oa", fake_solve_oa)
+
+    with pytest.raises(ValueError, match="Unknown mip_nlp_method"):
+        _binary_model("unknown_method").solve(solver="mip-nlp", mip_nlp_method="not-a-method")
+
+    assert called is False
+
+
+def test_mip_nlp_conflicting_ecp_alias_fails_before_oa(monkeypatch):
+    import discopt.solvers.oa as oa_module
+
+    called = False
+
+    def fake_solve_oa(model, **kwargs):
+        nonlocal called
+        called = True
+        return SolveResult(status="optimal")
+
+    monkeypatch.setattr(oa_module, "solve_oa", fake_solve_oa)
+
+    with pytest.raises(ValueError, match="Conflicting MIP-NLP method selectors"):
+        _binary_model("conflicting_ecp_alias").solve(
+            solver="mip-nlp",
+            mip_nlp_method="oa",
+            ecp_mode=True,
+        )
+
+    assert called is False
 
 
 def test_mip_nlp_rejects_unsupported_oa_options():
@@ -108,4 +246,15 @@ def test_mip_nlp_rejects_unsupported_oa_options():
             _binary_model("unsupported_oa_option"),
             method="oa",
             mip_nlp_options={"add_slack": True},
+        )
+
+
+def test_mip_nlp_options_must_be_dict():
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    with pytest.raises(TypeError, match="mip_nlp_options must be a dict"):
+        solve_mip_nlp(
+            _binary_model("bad_options_type"),
+            method="oa",
+            mip_nlp_options=[("ecp_mode", True)],
         )

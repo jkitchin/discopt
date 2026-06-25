@@ -2210,7 +2210,11 @@ def solve_model(
         ``"ecp"``; ``"goa"``, ``"roa"``, ``"fp"``, and ``"lp_nlp_bb"`` raise
         ``NotImplementedError`` until their dedicated implementations land.
         Existing OA options ``equality_relaxation``, ``ecp_mode``, and
-        ``feasibility_cuts`` may be passed as top-level aliases.
+        ``feasibility_cuts`` may be passed as top-level aliases and take
+        precedence over duplicate keys in ``mip_nlp_options``. The
+        ``mip_nlp_method`` selector determines the effective ``ecp_mode`` and
+        cannot be overridden by ``mip_nlp_options``; a conflicting top-level
+        ``ecp_mode`` and explicit ``mip_nlp_method`` raises ``ValueError``.
 
     Returns
     -------
@@ -2370,14 +2374,17 @@ def solve_model(
 
         from discopt.solvers.mip_nlp import solve_mip_nlp
 
-        mip_nlp_method = kwargs.pop("mip_nlp_method", "oa")
+        mip_nlp_method = kwargs.pop("mip_nlp_method", None)
         mip_nlp_options = kwargs.pop("mip_nlp_options", None)
         mip_nlp_kwargs: dict[str, Any] = {}
         for key in ("equality_relaxation", "ecp_mode", "feasibility_cuts"):
             if key in kwargs:
                 mip_nlp_kwargs[key] = kwargs.pop(key)
+        if mip_nlp_method is None:
+            mip_nlp_method = "ecp" if bool(mip_nlp_kwargs.get("ecp_mode", False)) else "oa"
 
         gdp_methods = {"big-m", "hull", "mbigm", "auto"}
+        native_gdp_methods = {"loa"}
         if gdp_method == "oa":
             warnings.warn(
                 "gdp_method='oa' is deprecated for selecting MINLP OA. Use "
@@ -2389,13 +2396,18 @@ def solve_model(
             resolved_gdp_method = "big-m"
         elif gdp_method in gdp_methods:
             resolved_gdp_method = gdp_method
-        else:
-            warnings.warn(
-                f"solver='mip-nlp' does not use gdp_method={gdp_method!r} as a "
-                "MINLP algorithm selector; using 'big-m' for GDP reformulation.",
-                stacklevel=2,
+        elif gdp_method in native_gdp_methods:
+            allowed = ", ".join(sorted(gdp_methods))
+            raise ValueError(
+                f"gdp_method={gdp_method!r} conflicts with solver='mip-nlp'. "
+                "Use mip_nlp_method to select the MIP-NLP algorithm and reserve "
+                f"gdp_method for GDP reformulation methods: {allowed}."
             )
-            resolved_gdp_method = "big-m"
+        else:
+            allowed = ", ".join(sorted(gdp_methods | {"oa"}))
+            raise ValueError(
+                f"Unknown gdp_method={gdp_method!r} for solver='mip-nlp'. Choose one of: {allowed}."
+            )
 
         ignored_mip_nlp_options = []
 

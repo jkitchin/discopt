@@ -34,6 +34,12 @@ BUILTIN_PROFILES: dict[str, dict[str, Any]] = {
         "gap_tolerance": 1e-2,
         "tuning": {"node_bound_mode": "lp", "node_nlp_stride": 8},
     },
+    "mip-nlp-fast": {
+        "solver": "mip-nlp",
+        "mip_nlp_method": "oa",
+        "time_limit": 10.0,
+        "gap_tolerance": 1e-2,
+    },
     "exact": {
         "time_limit": 3600.0,
         "gap_tolerance": 1e-6,

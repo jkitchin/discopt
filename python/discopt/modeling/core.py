@@ -2786,7 +2786,11 @@ class Model:
             family. Current implemented ``mip_nlp_method`` values are ``"oa"``
             and ``"ecp"``; ``"goa"``, ``"roa"``, ``"fp"``, and
             ``"lp_nlp_bb"`` are reserved until their dedicated implementations
-            land.
+            land. Top-level OA/ECP options such as ``equality_relaxation``,
+            ``ecp_mode``, and ``feasibility_cuts`` take precedence over
+            duplicate keys in ``mip_nlp_options``. The ``mip_nlp_method``
+            selector determines the effective ``ecp_mode`` and cannot be
+            overridden by ``mip_nlp_options``.
         validate : bool, default False
             If True, run Examiner-style KKT validation on the returned
             point and attach the :class:`~discopt.validation.ExaminerReport`
