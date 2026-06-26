@@ -17,7 +17,23 @@ SUPPORTED_METHODS = _IMPLEMENTED_METHODS | frozenset(_RESERVED_METHOD_ISSUES)
 _METHOD_ALIASES = {
     "lp/nlp-bb": "lp_nlp_bb",
 }
-_OA_OPTION_KEYS = {"equality_relaxation", "ecp_mode", "feasibility_cuts", "init_strategy"}
+_OA_OPTION_KEYS = {
+    "equality_relaxation",
+    "ecp_mode",
+    "feasibility_cuts",
+    "init_strategy",
+    "heuristic_nonconvex",
+    "add_slack",
+    "max_slack",
+    "oa_penalty_factor",
+    "add_no_good_cuts",
+    "feasibility_norm",
+    "stalling_limit",
+    "cycling_check",
+}
+_OA_OPTION_ALIASES = {
+    "OA_penalty_factor": "oa_penalty_factor",
+}
 
 
 def _normalize_method(method: Any) -> str:
@@ -57,6 +73,11 @@ def solve_mip_nlp(
             )
         options.update(mip_nlp_options)
     options.update(kwargs)
+    for alias, canonical in _OA_OPTION_ALIASES.items():
+        if alias in options:
+            if canonical not in options:
+                options[canonical] = options[alias]
+            del options[alias]
 
     if method in _IMPLEMENTED_METHODS:
         unexpected = sorted(set(options) - _OA_OPTION_KEYS)

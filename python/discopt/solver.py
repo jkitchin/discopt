@@ -2209,11 +2209,14 @@ def solve_model(
         ``mip_nlp_options``. Current implemented methods are ``"oa"`` and
         ``"ecp"``; ``"goa"``, ``"roa"``, ``"fp"``, and ``"lp_nlp_bb"`` raise
         ``NotImplementedError`` until their dedicated implementations land.
-        Existing OA options ``equality_relaxation``, ``ecp_mode``, and
-        ``feasibility_cuts`` and initialization option ``init_strategy`` may
-        be passed as top-level aliases and take precedence over duplicate keys
-        in ``mip_nlp_options``. Supported ``init_strategy`` values are
-        ``"rNLP"``, ``"initial_binary"``, and ``"max_binary"``. The
+        Existing OA options ``equality_relaxation``, ``ecp_mode``,
+        ``feasibility_cuts``, ``heuristic_nonconvex``, ``add_slack``,
+        ``max_slack``, ``oa_penalty_factor``, ``add_no_good_cuts``,
+        ``feasibility_norm``, ``stalling_limit``, and ``cycling_check`` plus
+        initialization option ``init_strategy`` may be passed as top-level
+        aliases and take precedence over duplicate keys in ``mip_nlp_options``.
+        Supported ``init_strategy`` values are ``"rNLP"``,
+        ``"initial_binary"``, and ``"max_binary"``. The
         ``mip_nlp_method`` selector determines the effective ``ecp_mode`` and
         cannot be overridden by ``mip_nlp_options``; a conflicting top-level
         ``ecp_mode`` and explicit ``mip_nlp_method`` raises ``ValueError``.
@@ -2379,7 +2382,21 @@ def solve_model(
         mip_nlp_method = kwargs.pop("mip_nlp_method", None)
         mip_nlp_options = kwargs.pop("mip_nlp_options", None)
         mip_nlp_kwargs: dict[str, Any] = {}
-        for key in ("equality_relaxation", "ecp_mode", "feasibility_cuts", "init_strategy"):
+        for key in (
+            "equality_relaxation",
+            "ecp_mode",
+            "feasibility_cuts",
+            "init_strategy",
+            "heuristic_nonconvex",
+            "add_slack",
+            "max_slack",
+            "oa_penalty_factor",
+            "OA_penalty_factor",
+            "add_no_good_cuts",
+            "feasibility_norm",
+            "stalling_limit",
+            "cycling_check",
+        ):
             if key in kwargs:
                 mip_nlp_kwargs[key] = kwargs.pop(key)
         if mip_nlp_method is None:
@@ -2693,7 +2710,21 @@ def solve_model(
 
         # Extract OA-specific kwargs that solve_model doesn't understand
         mip_nlp_kwargs = {}
-        for key in ("equality_relaxation", "ecp_mode", "feasibility_cuts"):
+        for key in (
+            "equality_relaxation",
+            "ecp_mode",
+            "feasibility_cuts",
+            "init_strategy",
+            "heuristic_nonconvex",
+            "add_slack",
+            "max_slack",
+            "oa_penalty_factor",
+            "OA_penalty_factor",
+            "add_no_good_cuts",
+            "feasibility_norm",
+            "stalling_limit",
+            "cycling_check",
+        ):
             if key in kwargs:
                 mip_nlp_kwargs[key] = kwargs.pop(key)
 

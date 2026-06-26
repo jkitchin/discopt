@@ -2787,11 +2787,14 @@ class Model:
             and ``"ecp"``; ``"goa"``, ``"roa"``, ``"fp"``, and
             ``"lp_nlp_bb"`` are reserved until their dedicated implementations
             land. Top-level OA/ECP options such as ``equality_relaxation``,
-            ``ecp_mode``, ``feasibility_cuts``, and ``init_strategy`` take
-            precedence over duplicate keys in ``mip_nlp_options``. Supported
-            initialization strategies are ``"rNLP"``, ``"initial_binary"``,
-            and ``"max_binary"``. The ``mip_nlp_method`` selector determines
-            the effective ``ecp_mode`` and cannot be overridden by
+            ``ecp_mode``, ``feasibility_cuts``, ``heuristic_nonconvex``,
+            ``add_slack``, ``max_slack``, ``oa_penalty_factor``,
+            ``add_no_good_cuts``, ``feasibility_norm``, ``stalling_limit``,
+            ``cycling_check``, and ``init_strategy`` take precedence over
+            duplicate keys in ``mip_nlp_options``. Supported initialization
+            strategies are ``"rNLP"``, ``"initial_binary"``, and
+            ``"max_binary"``. The ``mip_nlp_method`` selector determines the
+            effective ``ecp_mode`` and cannot be overridden by
             ``mip_nlp_options``.
         validate : bool, default False
             If True, run Examiner-style KKT validation on the returned
