@@ -585,6 +585,9 @@ def _append_binary_no_good_projection_cut(
 ) -> bool:
     """Append a binary assignment exclusion cut to the projection MILP."""
     if decomp.general_integer_indices:
+        # General-integer assignment exclusion needs an orthogonality cut or
+        # auxiliary encoding. Keep this projection cut binary-only for now; the
+        # pump still detects repeats and returns the best feasible point found.
         return False
 
     coeffs = np.zeros(n_master, dtype=np.float64)
@@ -611,7 +614,8 @@ def _solve_integer_projection_mip(
     """Project the current point to a new integer assignment with a small MILP.
 
     The projection objective is L1 for ``L1`` and as a MILP-compatible surrogate
-    for ``L2``. ``L_infinity`` uses one shared deviation variable.
+    for ``L2``. The fixed-integer feasibility NLP still scores candidates with
+    the requested L2 merit. ``L_infinity`` uses one shared deviation variable.
     """
     try:
         from discopt.solvers import SolveStatus
@@ -1256,12 +1260,13 @@ def solve_feasibility_pump(
         wall_time = time.perf_counter() - t_start
         if x_sol is not None:
             return SolveResult(
-                status="optimal",
+                status="feasible",
                 objective=obj_sign * obj,
-                bound=obj_sign * obj,
-                gap=0.0,
+                bound=None,
+                gap=None,
                 x=_build_x_dict(x_sol, model),
                 wall_time=wall_time,
+                gap_certified=False,
             )
         return SolveResult(
             status="no_feasible_point",

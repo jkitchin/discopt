@@ -364,6 +364,20 @@ def test_mip_nlp_method_fp_routes_to_standalone_feasibility_pump(monkeypatch):
     assert calls["add_no_good_cuts"] is False
 
 
+def test_mip_nlp_feasibility_pump_continuous_only_is_uncertified():
+    result = _continuous_model("fp_continuous_uncertified").solve(
+        solver="mip-nlp",
+        mip_nlp_method="fp",
+    )
+
+    assert result.status == "feasible"
+    assert result.objective == pytest.approx(0.0, abs=1e-6)
+    assert result.bound is None
+    assert result.gap is None
+    assert result.gap_certified is False
+    assert result.x["x"] == pytest.approx(2.0, abs=1e-3)
+
+
 def test_mip_nlp_unknown_method_fails_before_oa(monkeypatch):
     import discopt.solvers.oa as oa_module
 

@@ -141,5 +141,5 @@ def solve_mip_nlp(
     raise NotImplementedError(
         f"mip_nlp_method={method!r} is reserved for a future MIP-NLP "
         f"implementation tracked in {_RESERVED_METHOD_ISSUES[method]}; currently "
-        "implemented methods are 'oa' and 'ecp'."
+        "implemented methods are 'oa', 'ecp', and 'fp'."
     )
