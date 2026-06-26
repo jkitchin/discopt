@@ -326,7 +326,6 @@ def test_mip_nlp_and_deprecated_oa_alias_reformulate_gdp(monkeypatch):
 @pytest.mark.parametrize(
     ("method", "issue"),
     [
-        ("fp", "#115"),
         ("roa", "#116/#117"),
         ("goa", "#118"),
         ("lp_nlp_bb", "#119"),
@@ -338,6 +337,31 @@ def test_mip_nlp_reserved_methods_raise(method, issue):
 
     with pytest.raises(NotImplementedError, match=issue):
         solve_mip_nlp(_binary_model(f"{method}_reserved"), method=method)
+
+
+def test_mip_nlp_method_fp_routes_to_standalone_feasibility_pump(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    calls = {}
+
+    def fake_solve_fp(model, **kwargs):
+        calls.update(kwargs)
+        return SolveResult(status="feasible", objective=1.0, x={"x": np.array(1.0)})
+
+    monkeypatch.setattr(oa_module, "solve_feasibility_pump", fake_solve_fp)
+
+    result = solve_mip_nlp(
+        _binary_model("fp_route"),
+        method="fp",
+        init_strategy="fp",
+        feasibility_norm="L1",
+        add_no_good_cuts=False,
+    )
+
+    assert result.status == "feasible"
+    assert calls["feasibility_norm"] == "L1"
+    assert calls["add_no_good_cuts"] is False
 
 
 def test_mip_nlp_unknown_method_fails_before_oa(monkeypatch):
@@ -402,7 +426,7 @@ def test_mip_nlp_invalid_init_strategy_fails_before_oa(monkeypatch):
 def test_mip_nlp_rejects_unsupported_oa_options():
     from discopt.solvers.mip_nlp import solve_mip_nlp
 
-    with pytest.raises(ValueError, match="Unsupported MIP-NLP OA/ECP option"):
+    with pytest.raises(ValueError, match="Unsupported MIP-NLP oa option"):
         solve_mip_nlp(
             _binary_model("unsupported_oa_option"),
             method="oa",
@@ -478,6 +502,40 @@ def test_oa_rnlp_initialization_adds_cuts_at_relaxation_point(monkeypatch):
     assert cut_points[0].tolist() == pytest.approx(relaxation_point.tolist())
 
 
+def test_oa_fp_initialization_adds_cuts_at_best_pump_point(monkeypatch):
+    import discopt.solvers.oa as oa_module
+
+    model = _mixed_discrete_model("fp_init_point")
+    pump_point = np.array([0.5, 1.0, 0.0, 2.0], dtype=float)
+    cut_points = []
+
+    def fake_run_fp(*args, **kwargs):
+        return oa_module._FeasibilityPumpResult(
+            best_x=pump_point,
+            best_obj=3.5,
+            best_near_x=pump_point,
+            best_near_merit=0.0,
+            iterations=1,
+            mip_count=1,
+        )
+
+    def fake_add_oa_cuts(evaluator, x_star, *args, **kwargs):
+        cut_points.append(np.asarray(x_star, dtype=float).copy())
+
+    monkeypatch.setattr(oa_module, "_run_feasibility_pump", fake_run_fp)
+    monkeypatch.setattr(oa_module, "_add_oa_cuts", fake_add_oa_cuts)
+
+    result = oa_module.solve_oa(
+        model,
+        init_strategy="fp",
+        max_iterations=0,
+    )
+
+    assert result.status == "feasible"
+    assert result.objective == pytest.approx(3.5)
+    assert cut_points[0].tolist() == pytest.approx(pump_point.tolist())
+
+
 def test_oa_no_discrete_relaxation_uses_initial_point(monkeypatch):
     import discopt.solvers.oa as oa_module
 
@@ -551,6 +609,42 @@ def test_mip_nlp_init_strategies_solve_mindtpy_baseline_to_optimum(method, strat
         solver="mip-nlp",
         mip_nlp_method=method,
         init_strategy=strategy,
+        time_limit=60,
+        max_nodes=100,
+    )
+
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(3.5, abs=1e-3)
+    assert result.bound == pytest.approx(3.5, abs=1e-3)
+    assert result.gap == pytest.approx(0.0, abs=1e-9)
+    assert np.asarray(result.x["y"]).tolist() == pytest.approx([0.0, 1.0, 0.0])
+
+
+@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
+@pytest.mark.parametrize("feasibility_norm", ["L_infinity", "L1"])
+def test_mip_nlp_feasibility_pump_solves_mindtpy_baseline(feasibility_norm):
+    result = _mindtpy_simple_minlp(f"mindtpy_fp_{feasibility_norm}").solve(
+        solver="mip-nlp",
+        mip_nlp_method="fp",
+        feasibility_norm=feasibility_norm,
+        time_limit=60,
+        max_nodes=20,
+    )
+
+    assert result.status == "feasible"
+    assert result.objective == pytest.approx(3.5, abs=1e-3)
+    assert result.bound is None
+    assert result.gap is None
+    assert result.gap_certified is False
+    assert np.asarray(result.x["y"]).tolist() == pytest.approx([0.0, 1.0, 0.0])
+
+
+@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
+def test_mip_nlp_oa_fp_init_strategy_solves_mindtpy_baseline_to_optimum():
+    result = _mindtpy_simple_minlp("mindtpy_oa_fp_init").solve(
+        solver="mip-nlp",
+        mip_nlp_method="oa",
+        init_strategy="fp",
         time_limit=60,
         max_nodes=100,
     )

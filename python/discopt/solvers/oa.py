@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_INIT_STRATEGIES = frozenset({"rNLP", "initial_binary", "max_binary"})
+_INIT_STRATEGIES = frozenset({"rNLP", "initial_binary", "max_binary", "fp"})
 _FEASIBILITY_NORMS = {
     "l1": "L1",
     "l2": "L2",
@@ -48,7 +48,7 @@ def _normalize_init_strategy(init_strategy: str) -> str:
     key = init_strategy.strip().lower().replace("-", "_")
     if key == "rnlp":
         return "rNLP"
-    if key in {"initial_binary", "max_binary"}:
+    if key in {"initial_binary", "max_binary", "fp"}:
         return key
     raise ValueError(
         f"Unknown init_strategy={init_strategy!r}. Choose one of: "
@@ -184,6 +184,18 @@ class OAConfig:
     stalling_limit: Optional[int] = None
     cycling_check: bool = False
     log_iterations: bool = True
+
+
+@dataclass
+class _FeasibilityPumpResult:
+    """Best point produced by the MIP-NLP feasibility pump."""
+
+    best_x: Optional[np.ndarray]
+    best_obj: Optional[float]
+    best_near_x: Optional[np.ndarray]
+    best_near_merit: float
+    iterations: int = 0
+    mip_count: int = 0
 
 
 # ── Problem Decomposition ─────────────────────────────────────
@@ -541,6 +553,291 @@ def _solve_feasibility_subproblem(
         pass
 
     return best_x
+
+
+def _is_integer_feasible(decomp: _DecomposedProblem, x: np.ndarray, tol: float = 1e-5) -> bool:
+    """Return True when all discrete coordinates are integral within tolerance."""
+    return all(abs(float(x[idx]) - round(float(x[idx]))) <= tol for idx in decomp.int_indices)
+
+
+def _snap_integer_assignment(decomp: _DecomposedProblem, x: np.ndarray) -> np.ndarray:
+    """Clip a point to bounds and round discrete variables to valid integer values."""
+    snapped = np.clip(np.asarray(x, dtype=np.float64), decomp.lb, decomp.ub)
+    for idx in decomp.int_indices:
+        snapped[idx] = _round_integral_to_bounds(snapped[idx], decomp.lb[idx], decomp.ub[idx])
+    return snapped
+
+
+def _integer_assignment_key(decomp: _DecomposedProblem, x: np.ndarray) -> tuple[float, ...]:
+    """Return a stable rounded assignment key for the model's discrete variables."""
+    return tuple(
+        _round_integral_to_bounds(float(x[idx]), decomp.lb[idx], decomp.ub[idx])
+        for idx in decomp.int_indices
+    )
+
+
+def _append_binary_no_good_projection_cut(
+    decomp: _DecomposedProblem,
+    assignment: tuple[float, ...],
+    n_master: int,
+    a_rows: list[np.ndarray],
+    b_rows: list[float],
+) -> bool:
+    """Append a binary assignment exclusion cut to the projection MILP."""
+    if decomp.general_integer_indices:
+        return False
+
+    coeffs = np.zeros(n_master, dtype=np.float64)
+    count_ones = 0
+    for idx, val in zip(decomp.int_indices, assignment):
+        if val >= 0.5:
+            coeffs[idx] = 1.0
+            count_ones += 1
+        else:
+            coeffs[idx] = -1.0
+    a_rows.append(coeffs)
+    b_rows.append(float(count_ones - 1))
+    return True
+
+
+def _solve_integer_projection_mip(
+    decomp: _DecomposedProblem,
+    target: np.ndarray,
+    seen_assignments: set[tuple[float, ...]],
+    feasibility_norm: str,
+    time_limit: float,
+    gap_tolerance: float,
+) -> Optional[np.ndarray]:
+    """Project the current point to a new integer assignment with a small MILP.
+
+    The projection objective is L1 for ``L1`` and as a MILP-compatible surrogate
+    for ``L2``. ``L_infinity`` uses one shared deviation variable.
+    """
+    try:
+        from discopt.solvers import SolveStatus
+        from discopt.solvers.lp_backend import get_milp_solver
+
+        solve_milp = get_milp_solver()
+    except ImportError:
+        return None
+
+    target = np.clip(np.asarray(target, dtype=np.float64), decomp.lb, decomp.ub)
+    n_vars = decomp.n_vars
+    use_linf = feasibility_norm == "L_infinity"
+
+    a_ub_rows: list[np.ndarray] = []
+    b_ub_vals: list[float] = []
+    a_eq_rows: list[np.ndarray] = []
+    b_eq_vals: list[float] = []
+
+    if use_linf:
+        deviation_index = n_vars
+        n_master = n_vars + 1
+        c = np.zeros(n_master, dtype=np.float64)
+        c[deviation_index] = 1.0
+        bounds = list(zip(decomp.lb.tolist(), decomp.ub.tolist()))
+        bounds.append((0.0, 1e20))
+
+        for idx in decomp.int_indices:
+            row = np.zeros(n_master, dtype=np.float64)
+            row[idx] = 1.0
+            row[deviation_index] = -1.0
+            a_ub_rows.append(row)
+            b_ub_vals.append(float(target[idx]))
+
+            row = np.zeros(n_master, dtype=np.float64)
+            row[idx] = -1.0
+            row[deviation_index] = -1.0
+            a_ub_rows.append(row)
+            b_ub_vals.append(float(-target[idx]))
+    else:
+        n_dev = len(decomp.int_indices)
+        n_master = n_vars + n_dev
+        c = np.zeros(n_master, dtype=np.float64)
+        bounds = list(zip(decomp.lb.tolist(), decomp.ub.tolist()))
+        for j, idx in enumerate(decomp.int_indices):
+            dev_idx = n_vars + j
+            c[dev_idx] = 1.0
+            width = max(float(decomp.ub[idx] - decomp.lb[idx]), 1.0)
+            bounds.append((0.0, width))
+
+            row = np.zeros(n_master, dtype=np.float64)
+            row[idx] = 1.0
+            row[dev_idx] = -1.0
+            a_ub_rows.append(row)
+            b_ub_vals.append(float(target[idx]))
+
+            row = np.zeros(n_master, dtype=np.float64)
+            row[idx] = -1.0
+            row[dev_idx] = -1.0
+            a_ub_rows.append(row)
+            b_ub_vals.append(float(-target[idx]))
+
+    for row, rhs, sense in zip(
+        decomp.linear_A_rows,
+        decomp.linear_b_rows,
+        decomp.linear_senses,
+    ):
+        master_row = np.zeros(n_master, dtype=np.float64)
+        master_row[:n_vars] = row
+        if sense == "<=":
+            a_ub_rows.append(master_row)
+            b_ub_vals.append(rhs)
+        elif sense == ">=":
+            a_ub_rows.append(-master_row)
+            b_ub_vals.append(-rhs)
+        elif sense == "==":
+            a_eq_rows.append(master_row)
+            b_eq_vals.append(rhs)
+
+    for assignment in seen_assignments:
+        _append_binary_no_good_projection_cut(decomp, assignment, n_master, a_ub_rows, b_ub_vals)
+
+    integrality = np.zeros(n_master, dtype=np.int32)
+    integrality[:n_vars] = decomp.integrality
+    result = solve_milp(
+        c=c,
+        A_ub=np.asarray(a_ub_rows, dtype=np.float64) if a_ub_rows else None,
+        b_ub=np.asarray(b_ub_vals, dtype=np.float64) if b_ub_vals else None,
+        A_eq=np.asarray(a_eq_rows, dtype=np.float64) if a_eq_rows else None,
+        b_eq=np.asarray(b_eq_vals, dtype=np.float64) if b_eq_vals else None,
+        bounds=bounds,
+        integrality=integrality,
+        time_limit=max(float(time_limit), 0.0),
+        gap_tolerance=gap_tolerance,
+    )
+    if result.status not in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT):
+        return None
+    if result.x is None:
+        return None
+    return _snap_integer_assignment(decomp, result.x[:n_vars])
+
+
+def _run_feasibility_pump(
+    model: Model,
+    decomp: _DecomposedProblem,
+    *,
+    nlp_solver: str,
+    initial_point: Optional[np.ndarray],
+    time_limit: float,
+    gap_tolerance: float,
+    max_iterations: int,
+    feasibility_norm: str,
+    add_no_good_cuts: bool,
+) -> _FeasibilityPumpResult:
+    """Run a bounded MindtPy-style feasibility pump."""
+    t_start = time.perf_counter()
+    evaluator = decomp.evaluator
+    x_relax, obj_relax = _solve_nlp_relaxation(
+        evaluator,
+        decomp.lb,
+        decomp.ub,
+        nlp_solver,
+        initial_point=initial_point,
+    )
+    if x_relax is None:
+        current = _default_nlp_start(decomp.lb, decomp.ub)
+    else:
+        current = np.clip(np.asarray(x_relax, dtype=np.float64), decomp.lb, decomp.ub)
+
+    best_x: Optional[np.ndarray] = None
+    best_obj: Optional[float] = None
+    best_near_x: Optional[np.ndarray] = current.copy()
+    best_near_merit = _constraint_violation_merit(evaluator, current, feasibility_norm)
+
+    def consider(point: np.ndarray, objective: Optional[float] = None) -> bool:
+        nonlocal best_x, best_obj, best_near_x, best_near_merit
+        x = np.clip(np.asarray(point, dtype=np.float64), decomp.lb, decomp.ub)
+        merit = _constraint_violation_merit(evaluator, x, feasibility_norm)
+        if merit < best_near_merit - 1e-9:
+            best_near_merit = merit
+            best_near_x = x.copy()
+        if not _is_integer_feasible(decomp, x):
+            return False
+        if not _is_primal_feasible(evaluator, x):
+            return False
+        obj = float(evaluator.evaluate_objective(x)) if objective is None else float(objective)
+        if best_obj is None or obj < best_obj:
+            best_x = x.copy()
+            best_obj = obj
+        return True
+
+    if x_relax is not None and consider(current, obj_relax):
+        return _FeasibilityPumpResult(
+            best_x=best_x,
+            best_obj=best_obj,
+            best_near_x=best_near_x,
+            best_near_merit=best_near_merit,
+        )
+
+    seen_assignments: set[tuple[float, ...]] = set()
+    iterations = 0
+    mip_count = 0
+    max_rounds = max(1, int(max_iterations))
+
+    for iteration in range(max_rounds):
+        if time.perf_counter() - t_start >= time_limit:
+            break
+        remaining = max(0.0, time_limit - (time.perf_counter() - t_start))
+        projected = None
+        if add_no_good_cuts:
+            projected = _solve_integer_projection_mip(
+                decomp,
+                current,
+                seen_assignments,
+                feasibility_norm,
+                remaining,
+                gap_tolerance,
+            )
+            mip_count += 1
+        if projected is None:
+            projected = _snap_integer_assignment(decomp, current)
+
+        assignment = _integer_assignment_key(decomp, projected)
+        if assignment in seen_assignments:
+            break
+        seen_assignments.add(assignment)
+
+        x_nlp, obj_nlp = _solve_nlp_subproblem(
+            evaluator,
+            decomp.lb,
+            decomp.ub,
+            decomp.int_indices,
+            projected,
+            nlp_solver,
+            initial_point=projected,
+        )
+        iterations = iteration + 1
+        if x_nlp is not None:
+            current = x_nlp
+            if consider(x_nlp, obj_nlp) and not add_no_good_cuts:
+                break
+            continue
+
+        x_feas = _solve_feasibility_subproblem(
+            evaluator,
+            decomp.lb,
+            decomp.ub,
+            decomp.int_indices,
+            projected,
+            nlp_solver,
+            feasibility_norm,
+        )
+        if x_feas is not None:
+            current = x_feas
+            if consider(x_feas) and not add_no_good_cuts:
+                break
+        else:
+            current = projected
+
+    return _FeasibilityPumpResult(
+        best_x=best_x,
+        best_obj=best_obj,
+        best_near_x=best_near_x,
+        best_near_merit=best_near_merit,
+        iterations=iterations,
+        mip_count=mip_count,
+    )
 
 
 # ── Cut Generation ────────────────────────────────────────────
@@ -926,6 +1223,91 @@ def _compute_gap(lb: float, ub: float) -> float:
     return abs_gap / denom
 
 
+def solve_feasibility_pump(
+    model: Model,
+    time_limit: float = 3600.0,
+    gap_tolerance: float = 1e-4,
+    max_iterations: int = 100,
+    nlp_solver: str = "ipm",
+    initial_point: Optional[np.ndarray] = None,
+    feasibility_norm: str = "L_infinity",
+    add_no_good_cuts: bool = True,
+    **kwargs,
+) -> SolveResult:
+    """Run the MIP-NLP feasibility pump as a standalone heuristic method."""
+    t_start = time.perf_counter()
+    feasibility_norm = _normalize_feasibility_norm(feasibility_norm)
+    decomp = _decompose_model(model)
+    evaluator = decomp.evaluator
+    obj_sign = (
+        -1.0
+        if (model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE)
+        else 1.0
+    )
+
+    if len(decomp.int_indices) == 0:
+        x_sol, obj = _solve_nlp_relaxation(
+            evaluator,
+            decomp.lb,
+            decomp.ub,
+            nlp_solver,
+            initial_point=initial_point,
+        )
+        wall_time = time.perf_counter() - t_start
+        if x_sol is not None:
+            return SolveResult(
+                status="optimal",
+                objective=obj_sign * obj,
+                bound=obj_sign * obj,
+                gap=0.0,
+                x=_build_x_dict(x_sol, model),
+                wall_time=wall_time,
+            )
+        return SolveResult(
+            status="no_feasible_point",
+            objective=None,
+            bound=None,
+            gap=None,
+            x={},
+            wall_time=wall_time,
+            gap_certified=False,
+        )
+
+    fp = _run_feasibility_pump(
+        model,
+        decomp,
+        nlp_solver=nlp_solver,
+        initial_point=initial_point,
+        time_limit=time_limit,
+        gap_tolerance=gap_tolerance,
+        max_iterations=max_iterations,
+        feasibility_norm=feasibility_norm,
+        add_no_good_cuts=bool(add_no_good_cuts),
+    )
+    wall_time = time.perf_counter() - t_start
+    if fp.best_x is not None and fp.best_obj is not None:
+        return SolveResult(
+            status="feasible",
+            objective=obj_sign * fp.best_obj,
+            bound=None,
+            gap=None,
+            x=_build_x_dict(fp.best_x, model),
+            wall_time=wall_time,
+            mip_count=fp.mip_count,
+            gap_certified=False,
+        )
+    return SolveResult(
+        status="no_feasible_point",
+        objective=None,
+        bound=None,
+        gap=None,
+        x={},
+        wall_time=wall_time,
+        mip_count=fp.mip_count,
+        gap_certified=False,
+    )
+
+
 # ── Main Algorithm ────────────────────────────────────────────
 
 
@@ -968,7 +1350,7 @@ def solve_oa(
         Maximum OA iterations.
     nlp_solver : str
         NLP backend: ``"ipm"``, ``"ipopt"``, ``"pounce"``.
-    init_strategy : {"rNLP", "initial_binary", "max_binary"}
+    init_strategy : {"rNLP", "initial_binary", "max_binary", "fp"}
         Initialization strategy for the first master cuts and fixed-integer
         NLP seed. ``"rNLP"`` solves the continuous relaxation and generates
         cuts at that point. ``"initial_binary"`` rounds and clamps discrete
@@ -976,7 +1358,9 @@ def solve_oa(
         deterministic midpoint start. ``"max_binary"`` starts binary variables
         at their largest feasible values; general integers use their largest
         practical finite upper-bound value, or the rounded clipped midpoint
-        when no practical finite upper bound exists.
+        when no practical finite upper bound exists. ``"fp"`` runs a bounded
+        feasibility pump and generates cuts at its best feasible or near-feasible
+        point.
     initial_point : numpy.ndarray, optional
         Flat model start produced from ``Model.solve(initial_solution=...)``.
         Used to warm-start the continuous relaxation for ``init_strategy="rNLP"``,
@@ -1147,6 +1531,40 @@ def solve_oa(
                 equality_relaxation=equality_relaxation,
                 oa_cut_relaxable=oa_cut_relaxable,
             )
+    elif init_strategy == "fp":
+        fp_iterations = max(1, min(max_iterations if max_iterations > 0 else 1, 10))
+        fp_result = _run_feasibility_pump(
+            model,
+            decomp,
+            nlp_solver=nlp_solver,
+            initial_point=initial_point,
+            time_limit=max(time_limit - (time.perf_counter() - t_start), 0.0),
+            gap_tolerance=gap_tolerance,
+            max_iterations=fp_iterations,
+            feasibility_norm=feasibility_norm,
+            add_no_good_cuts=True,
+        )
+        x_cut = fp_result.best_x if fp_result.best_x is not None else fp_result.best_near_x
+        if x_cut is None:
+            x_cut = _default_nlp_start(decomp.lb, decomp.ub)
+        _add_oa_cuts(
+            evaluator,
+            x_cut,
+            n_vars,
+            n_cons,
+            decomp.constraint_senses,
+            oa_A_rows,
+            oa_b_rows,
+            decomp.obj_is_linear,
+            decomp.oa_constraint_mask,
+            decomp.oa_objective_is_convex,
+            equality_relaxation=equality_relaxation,
+            oa_cut_relaxable=oa_cut_relaxable,
+        )
+        if fp_result.best_x is not None and fp_result.best_obj is not None:
+            UB = fp_result.best_obj
+            incumbent = fp_result.best_x.copy()
+            incumbent_obj = fp_result.best_obj
     else:
         x_seed = _build_initial_strategy_point(decomp, init_strategy, initial_point)
         if ecp_mode:
