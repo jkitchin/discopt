@@ -529,6 +529,19 @@ def test_oa_regularization_rejects_ecp_mode():
         )
 
 
+@pytest.mark.parametrize("level_coef", [0.0, 1.0, 1.5])
+def test_oa_regularization_level_coef_requires_open_unit_interval(level_coef):
+    from discopt.solvers.oa import solve_oa
+
+    with pytest.raises(ValueError, match="level_coef must be a finite number"):
+        solve_oa(
+            _binary_model(f"bad_level_coef_{level_coef}"),
+            add_regularization="level_L1",
+            level_coef=level_coef,
+            max_iterations=0,
+        )
+
+
 @pytest.mark.parametrize(
     ("mode", "expected_aux"),
     [
@@ -566,6 +579,40 @@ def test_oa_regularized_master_builds_linear_distance_objective(monkeypatch, mod
     assert len(captured["c"]) == 4 + expected_aux
     assert captured["c"][4:].tolist() == pytest.approx([1.0] * expected_aux)
     assert captured["integrality"][:4].tolist() == decomp.integrality.tolist()
+    assert captured["A_ub"][0, :4].tolist() == pytest.approx([1.0, 1.0, 1.0, 1.0])
+    assert captured["b_ub"][0] == pytest.approx(2.0)
+
+
+def test_oa_regularized_master_builds_l2_qp_distance_objective(monkeypatch):
+    import discopt.solvers.lp_backend as lp_backend
+    from discopt.solvers import QPResult, SolveStatus
+    from discopt.solvers.oa import _decompose_model, _solve_regularized_master
+
+    decomp = _decompose_model(_mixed_discrete_model("regularized_level_l2"))
+    captured = {}
+
+    def fake_qp(**kwargs):
+        captured.update(kwargs)
+        return QPResult(status=SolveStatus.OPTIMAL, x=np.array([0.0, 1.0, 0.0, 0.0]))
+
+    monkeypatch.setattr(lp_backend, "get_qp_solver", lambda: fake_qp)
+
+    x_regularized = _solve_regularized_master(
+        decomp,
+        [],
+        [],
+        add_regularization="level_L2",
+        target=np.array([0.5, 1.0, 0.0, 2.0], dtype=float),
+        objective_level=2.0,
+        time_limit=10.0,
+        gap_tolerance=1e-4,
+    )
+
+    assert x_regularized.tolist() == pytest.approx([0.0, 1.0, 0.0, 0.0])
+    assert captured["Q"].shape == (4, 4)
+    assert np.diag(captured["Q"]).tolist() == pytest.approx([2.0, 2.0, 2.0, 2.0])
+    assert captured["c"].tolist() == pytest.approx([-1.0, -2.0, 0.0, -4.0])
+    assert captured["integrality"].tolist() == decomp.integrality.tolist()
     assert captured["A_ub"][0, :4].tolist() == pytest.approx([1.0, 1.0, 1.0, 1.0])
     assert captured["b_ub"][0] == pytest.approx(2.0)
 
@@ -609,6 +656,63 @@ def test_oa_l2_regularization_checks_backend_before_iterations(monkeypatch):
             add_regularization="level_L2",
             max_iterations=0,
         )
+
+
+def test_oa_regularization_seeds_nlp_without_replacing_master_assignment(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers import MILPResult, SolveStatus
+
+    model = _mixed_discrete_model("regularized_seed_only")
+    relaxation_point = np.array([0.0, 1.0, 0.0, 3.0], dtype=float)
+    master_point = np.array([0.25, 0.0, 1.0, -1.0], dtype=float)
+    regularized_point = np.array([1.25, 1.0, 0.0, 2.0], dtype=float)
+    subproblem_calls = []
+
+    def fake_solve_nlp_relaxation(evaluator, lb, ub, nlp_solver, initial_point=None):
+        return relaxation_point, 4.0
+
+    def fake_add_oa_cuts(*args, **kwargs):
+        return None
+
+    def fake_solve_master_milp(*args, **kwargs):
+        return MILPResult(status=SolveStatus.OPTIMAL, x=master_point, bound=1.0)
+
+    def fake_solve_regularized_master(*args, **kwargs):
+        return regularized_point
+
+    def fake_solve_nlp_subproblem(
+        evaluator,
+        lb,
+        ub,
+        int_indices,
+        x_master,
+        nlp_solver,
+        initial_point=None,
+    ):
+        subproblem_calls.append(
+            (
+                np.asarray(x_master, dtype=float).copy(),
+                np.asarray(initial_point, dtype=float).copy(),
+            )
+        )
+        return np.asarray(x_master, dtype=float), 4.0
+
+    monkeypatch.setattr(oa_module, "_solve_nlp_relaxation", fake_solve_nlp_relaxation)
+    monkeypatch.setattr(oa_module, "_add_oa_cuts", fake_add_oa_cuts)
+    monkeypatch.setattr(oa_module, "_solve_master_milp", fake_solve_master_milp)
+    monkeypatch.setattr(oa_module, "_solve_regularized_master", fake_solve_regularized_master)
+    monkeypatch.setattr(oa_module, "_solve_nlp_subproblem", fake_solve_nlp_subproblem)
+
+    result = oa_module.solve_oa(
+        model,
+        add_regularization="level_L1",
+        max_iterations=1,
+    )
+
+    assert result.status == "feasible"
+    assert len(subproblem_calls) == 1
+    assert subproblem_calls[0][0].tolist() == pytest.approx(master_point.tolist())
+    assert subproblem_calls[0][1].tolist() == pytest.approx(regularized_point.tolist())
 
 
 def test_oa_rnlp_initialization_adds_cuts_at_relaxation_point(monkeypatch):

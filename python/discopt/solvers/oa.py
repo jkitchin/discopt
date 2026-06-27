@@ -106,6 +106,16 @@ def _normalize_positive_float(name: str, value: float) -> float:
     return out
 
 
+def _normalize_open_unit_float(name: str, value: float) -> float:
+    """Validate a finite float in the open interval ``(0, 1)``."""
+    out = float(value)
+    if not np.isfinite(out) or out <= 0 or out >= 1:
+        raise ValueError(
+            f"{name} must be a finite number in the open interval (0, 1), got {value!r}."
+        )
+    return out
+
+
 def _normalize_optional_positive_int(name: str, value: Optional[int]) -> Optional[int]:
     """Validate a positive integer option, allowing None to disable it."""
     if value is None:
@@ -1668,8 +1678,9 @@ def solve_oa(
         L1 and L-infinity are solved as MILPs; L2 requires a MIQP-capable QP
         backend.
     level_coef : float
-        Positive coefficient for the regularization level constraint. The level
-        is ``(1 - level_coef) * incumbent_UB + level_coef * master_LB``.
+        Coefficient in the open interval ``(0, 1)`` for the regularization
+        level constraint. The level is
+        ``(1 - level_coef) * incumbent_UB + level_coef * master_LB``.
     stalling_limit : int, optional
         Stop after this many consecutive incumbent-objective records without
         material progress.
@@ -1686,7 +1697,7 @@ def solve_oa(
     add_regularization = _normalize_regularization(add_regularization)
     max_slack = _normalize_positive_float("max_slack", max_slack)
     oa_penalty_factor = _normalize_positive_float("oa_penalty_factor", oa_penalty_factor)
-    level_coef = _normalize_positive_float("level_coef", level_coef)
+    level_coef = _normalize_open_unit_float("level_coef", level_coef)
     stalling_limit = _normalize_optional_positive_int("stalling_limit", stalling_limit)
     heuristic_nonconvex = bool(heuristic_nonconvex)
     if add_regularization is not None and ecp_mode:
@@ -1985,6 +1996,7 @@ def solve_oa(
         if master_bound_valid and master_result.bound is not None:
             LB = max(LB, master_result.bound)
 
+        nlp_initial_point = None
         if (
             add_regularization is not None
             and incumbent is not None
@@ -2016,9 +2028,9 @@ def solve_oa(
                 use_objective_epigraph=(not decomp.obj_is_linear and decomp.oa_objective_is_convex),
             )
             if x_regularized is not None:
-                x_master = x_regularized
+                nlp_initial_point = x_regularized
                 logger.info(
-                    "OA: %s regularized master selected fixed-integer candidate",
+                    "OA: %s regularized master selected fixed-NLP initial point",
                     add_regularization,
                 )
 
@@ -2073,6 +2085,7 @@ def solve_oa(
             decomp.int_indices,
             x_master,
             nlp_solver,
+            initial_point=nlp_initial_point,
         )
 
         if x_nlp is not None:
