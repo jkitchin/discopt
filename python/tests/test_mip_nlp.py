@@ -600,6 +600,39 @@ def test_mip_nlp_method_goa_routes_to_global_relaxation(monkeypatch):
     assert calls["rel_gap"] == pytest.approx(0.05)
 
 
+def test_goa_warns_when_amp_only_options_ignored_on_convex_handoff(monkeypatch):
+    import discopt.solvers.oa as oa_module
+
+    calls = {}
+
+    def fake_solve_oa(model, **kwargs):
+        calls.update(kwargs)
+        return SolveResult(
+            status="optimal",
+            objective=0.0,
+            bound=0.0,
+            gap=0.0,
+            x={"x": np.array(0.0)},
+            gap_certified=True,
+        )
+
+    monkeypatch.setattr(oa_module, "solve_oa", fake_solve_oa)
+
+    with pytest.warns(
+        UserWarning,
+        match="AMP-only GOA option\\(s\\).*n_init_partitions.*presolve_bt",
+    ):
+        result = oa_module.solve_goa(
+            _binary_model("goa_convex_ignores_amp_options"),
+            rel_gap=0.05,
+            n_init_partitions=3,
+            presolve_bt=False,
+        )
+
+    assert result.status == "optimal"
+    assert calls["gap_tolerance"] == pytest.approx(0.05)
+
+
 def test_goa_fp_seed_uses_no_good_cuts_without_certifying_seed_bound(monkeypatch):
     import discopt.solvers.amp as amp_module
     import discopt.solvers.oa as oa_module

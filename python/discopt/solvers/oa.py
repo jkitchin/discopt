@@ -23,12 +23,14 @@ from __future__ import annotations
 
 import logging
 import time
+import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 
 from discopt.modeling.core import Constraint, Model, ObjectiveSense, SolveResult, VarType
+from discopt.solvers.mip_nlp_options import GOA_AMP_ONLY_OPTION_KEYS, GOA_AMP_OPTION_DEFAULTS
 
 if TYPE_CHECKING:
     from discopt._jax.nlp_evaluator import NLPEvaluator
@@ -1826,40 +1828,23 @@ def solve_goa(
     AMP/McCormick global-relaxation path. The MIP-NLP feasibility pump, with
     no-good cuts enabled by default, is only an incumbent-start heuristic for
     the nonconvex AMP path, so its exclusions never taint certified bounds.
+    AMP-only options are honored on the nonconvex path; if supplied for a model
+    that certifies convex and is handed to OA, they are ignored with a warning.
     """
     t_start = time.perf_counter()
+    provided_option_keys = frozenset(amp_options)
 
     rel_gap = amp_options.pop("rel_gap", gap_tolerance)
-    abs_tol = amp_options.pop("abs_tol", 1e-6)
     max_iter = amp_options.pop("max_iter", max_iterations)
     init_strategy = _normalize_init_strategy(amp_options.pop("init_strategy", "fp"))
     feasibility_norm = _normalize_feasibility_norm(
         amp_options.pop("feasibility_norm", "L_infinity")
     )
-    use_start_as_incumbent = bool(amp_options.pop("use_start_as_incumbent", False))
-    n_init_partitions = amp_options.pop("n_init_partitions", 2)
-    partition_method = amp_options.pop("partition_method", "auto")
-    iteration_callback = amp_options.pop("iteration_callback", None)
-    milp_time_limit = amp_options.pop("milp_time_limit", None)
-    milp_gap_tolerance = amp_options.pop("milp_gap_tolerance", None)
-    apply_partitioning = amp_options.pop("apply_partitioning", True)
-    disc_var_pick = amp_options.pop("disc_var_pick", None)
-    partition_scaling_factor = amp_options.pop("partition_scaling_factor", 10.0)
-    partition_scaling_factor_update = amp_options.pop("partition_scaling_factor_update", None)
-    disc_add_partition_method = amp_options.pop("disc_add_partition_method", "adaptive")
-    disc_abs_width_tol = amp_options.pop("disc_abs_width_tol", 1e-3)
-    convhull_formulation = amp_options.pop("convhull_formulation", "disaggregated")
-    convhull_ebd = amp_options.pop("convhull_ebd", False)
-    convhull_ebd_encoding = amp_options.pop("convhull_ebd_encoding", "gray")
-    presolve_bt = amp_options.pop("presolve_bt", True)
-    presolve_bt_algo = amp_options.pop("presolve_bt_algo", 1)
-    presolve_bt_time_limit = amp_options.pop("presolve_bt_time_limit", None)
-    presolve_bt_mip_time_limit = amp_options.pop("presolve_bt_mip_time_limit", None)
-    obbt_at_root = amp_options.pop("obbt_at_root", False)
-    obbt_with_cutoff = amp_options.pop("obbt_with_cutoff", False)
-    alphabb_cutoff_obbt = amp_options.pop("alphabb_cutoff_obbt", True)
-    obbt_time_limit = amp_options.pop("obbt_time_limit", 30.0)
-    milp_solver = amp_options.pop("milp_solver", "auto")
+    amp_kwargs = dict(GOA_AMP_OPTION_DEFAULTS)
+    for key in GOA_AMP_OPTION_DEFAULTS:
+        if key in amp_options:
+            amp_kwargs[key] = amp_options.pop(key)
+    use_start_as_incumbent = bool(amp_kwargs["use_start_as_incumbent"])
     if amp_options:
         raise ValueError(
             "Unsupported GOA option(s): "
@@ -1871,6 +1856,14 @@ def solve_goa(
 
     oa_convexity = classify_oa_cut_convexity(model)
     if oa_convexity.objective_is_convex and all(oa_convexity.constraint_mask):
+        ignored_amp_options = sorted(provided_option_keys.intersection(GOA_AMP_ONLY_OPTION_KEYS))
+        if ignored_amp_options:
+            warnings.warn(
+                "GOA routed a convexity-certified model to OA; AMP-only GOA "
+                "option(s) are ignored on this path: " + ", ".join(ignored_amp_options),
+                UserWarning,
+                stacklevel=2,
+            )
         elapsed = time.perf_counter() - t_start
         remaining_time = max(0.0, float(time_limit) - elapsed)
         result = solve_oa(
@@ -1963,38 +1956,15 @@ def solve_goa(
 
     from discopt.solvers.amp import solve_amp
 
+    amp_kwargs["use_start_as_incumbent"] = use_start_as_incumbent
     result = solve_amp(
         model,
         rel_gap=rel_gap,
-        abs_tol=abs_tol,
         time_limit=remaining_time,
         max_iter=max_iter,
-        n_init_partitions=n_init_partitions,
-        partition_method=partition_method,
         nlp_solver=nlp_solver,
-        iteration_callback=iteration_callback,
-        milp_time_limit=milp_time_limit,
-        milp_gap_tolerance=milp_gap_tolerance,
-        apply_partitioning=apply_partitioning,
-        disc_var_pick=disc_var_pick,
-        partition_scaling_factor=partition_scaling_factor,
-        partition_scaling_factor_update=partition_scaling_factor_update,
-        disc_add_partition_method=disc_add_partition_method,
-        disc_abs_width_tol=disc_abs_width_tol,
-        convhull_formulation=convhull_formulation,
-        convhull_ebd=convhull_ebd,
-        convhull_ebd_encoding=convhull_ebd_encoding,
-        presolve_bt=presolve_bt,
-        presolve_bt_algo=presolve_bt_algo,
-        presolve_bt_time_limit=presolve_bt_time_limit,
-        presolve_bt_mip_time_limit=presolve_bt_mip_time_limit,
         initial_point=goa_initial_point,
-        use_start_as_incumbent=use_start_as_incumbent,
-        obbt_at_root=obbt_at_root,
-        obbt_with_cutoff=obbt_with_cutoff,
-        alphabb_cutoff_obbt=alphabb_cutoff_obbt,
-        obbt_time_limit=obbt_time_limit,
-        milp_solver=milp_solver,
+        **amp_kwargs,
     )
     result.wall_time += elapsed
     result.mip_count += pre_amp_mip_count

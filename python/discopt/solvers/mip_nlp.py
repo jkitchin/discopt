@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from discopt.modeling.core import Model, SolveResult
+from discopt.solvers.mip_nlp_options import GOA_OPTION_KEYS
 
 _IMPLEMENTED_METHODS = frozenset({"oa", "ecp", "fp", "goa"})
 _RESERVED_METHOD_ISSUES = {
@@ -15,63 +16,35 @@ SUPPORTED_METHODS = _IMPLEMENTED_METHODS | frozenset(_RESERVED_METHOD_ISSUES)
 _METHOD_ALIASES = {
     "lp/nlp-bb": "lp_nlp_bb",
 }
-_OA_OPTION_KEYS = {
-    "equality_relaxation",
-    "ecp_mode",
-    "feasibility_cuts",
-    "init_strategy",
-    "heuristic_nonconvex",
-    "add_slack",
-    "max_slack",
-    "oa_penalty_factor",
-    "add_no_good_cuts",
-    "feasibility_norm",
-    "add_regularization",
-    "level_coef",
-    "stalling_limit",
-    "cycling_check",
-    "milp_solver",
-}
+_OA_OPTION_KEYS = frozenset(
+    {
+        "equality_relaxation",
+        "ecp_mode",
+        "feasibility_cuts",
+        "init_strategy",
+        "heuristic_nonconvex",
+        "add_slack",
+        "max_slack",
+        "oa_penalty_factor",
+        "add_no_good_cuts",
+        "feasibility_norm",
+        "add_regularization",
+        "level_coef",
+        "stalling_limit",
+        "cycling_check",
+        "milp_solver",
+    }
+)
 _OA_OPTION_ALIASES = {
     "OA_penalty_factor": "oa_penalty_factor",
 }
-_FP_OPTION_KEYS = {
-    "add_no_good_cuts",
-    "feasibility_norm",
-    "init_strategy",
-}
-_GOA_OPTION_KEYS = {
-    "abs_tol",
-    "add_no_good_cuts",
-    "alphabb_cutoff_obbt",
-    "apply_partitioning",
-    "convhull_ebd",
-    "convhull_ebd_encoding",
-    "convhull_formulation",
-    "disc_abs_width_tol",
-    "disc_add_partition_method",
-    "disc_var_pick",
-    "feasibility_norm",
-    "init_strategy",
-    "iteration_callback",
-    "max_iter",
-    "milp_gap_tolerance",
-    "milp_solver",
-    "milp_time_limit",
-    "n_init_partitions",
-    "obbt_at_root",
-    "obbt_time_limit",
-    "obbt_with_cutoff",
-    "partition_method",
-    "partition_scaling_factor",
-    "partition_scaling_factor_update",
-    "presolve_bt",
-    "presolve_bt_algo",
-    "presolve_bt_mip_time_limit",
-    "presolve_bt_time_limit",
-    "rel_gap",
-    "use_start_as_incumbent",
-}
+_FP_OPTION_KEYS = frozenset(
+    {
+        "add_no_good_cuts",
+        "feasibility_norm",
+        "init_strategy",
+    }
+)
 
 
 def _normalize_method(method: Any) -> str:
@@ -130,7 +103,7 @@ def solve_mip_nlp(
         if method == "fp":
             supported_keys = _FP_OPTION_KEYS
         elif method == "goa":
-            supported_keys = _GOA_OPTION_KEYS
+            supported_keys = GOA_OPTION_KEYS
         else:
             supported_keys = _OA_OPTION_KEYS
         unexpected = sorted(set(options) - supported_keys)

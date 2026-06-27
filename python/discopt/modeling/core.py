@@ -2807,7 +2807,9 @@ class Model:
             ``abs_tol``, ``max_iter``, ``n_init_partitions``,
             ``partition_method``, ``milp_time_limit``, ``milp_gap_tolerance``,
             ``presolve_bt``, and ``convhull_formulation`` may also be passed as
-            top-level aliases.
+            top-level aliases. AMP-only options apply only on the nonconvex AMP
+            path and are ignored with a warning when GOA automatically hands a
+            convexity-certified model to OA.
             Supported ``add_regularization`` values are
             ``"level_L1"``, ``"level_L2"``, ``"level_L_infinity"``,
             ``"grad_lag"``, ``"hess_lag"``, ``"hess_only_lag"``, and

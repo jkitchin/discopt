@@ -2244,7 +2244,10 @@ def solve_model(
         AMP options such as ``rel_gap``, ``abs_tol``, ``max_iter``,
         ``n_init_partitions``, ``partition_method``, ``milp_time_limit``,
         ``milp_gap_tolerance``, ``presolve_bt``, and
-        ``convhull_formulation`` may also be passed as top-level aliases.
+        ``convhull_formulation`` may also be passed as top-level aliases;
+        AMP-only options apply only on the nonconvex AMP path and are ignored
+        with a warning when GOA automatically hands a convexity-certified model
+        to OA.
         Supported ``add_regularization`` values are ``"level_L1"``,
         ``"level_L2"``, ``"level_L_infinity"``, ``"grad_lag"``,
         ``"hess_lag"``, ``"hess_only_lag"``, and ``"sqp_lag"``.
@@ -2414,6 +2417,7 @@ def solve_model(
         import warnings
 
         from discopt.solvers.mip_nlp import solve_mip_nlp
+        from discopt.solvers.mip_nlp_options import GOA_OPTION_KEYS
 
         mip_nlp_method = kwargs.pop("mip_nlp_method", None)
         mip_nlp_options = kwargs.pop("mip_nlp_options", None)
@@ -2447,35 +2451,7 @@ def solve_model(
             else mip_nlp_method
         )
         if mip_nlp_method_key == "goa":
-            for key in (
-                "rel_gap",
-                "abs_tol",
-                "max_iter",
-                "n_init_partitions",
-                "partition_method",
-                "iteration_callback",
-                "milp_time_limit",
-                "milp_gap_tolerance",
-                "presolve_bt",
-                "presolve_bt_algo",
-                "presolve_bt_time_limit",
-                "presolve_bt_mip_time_limit",
-                "apply_partitioning",
-                "disc_var_pick",
-                "partition_scaling_factor",
-                "partition_scaling_factor_update",
-                "disc_add_partition_method",
-                "disc_abs_width_tol",
-                "convhull_formulation",
-                "convhull_ebd",
-                "convhull_ebd_encoding",
-                "use_start_as_incumbent",
-                "obbt_at_root",
-                "obbt_with_cutoff",
-                "alphabb_cutoff_obbt",
-                "obbt_time_limit",
-                "milp_solver",
-            ):
+            for key in sorted(GOA_OPTION_KEYS):
                 if key in kwargs:
                     mip_nlp_kwargs[key] = kwargs.pop(key)
 
