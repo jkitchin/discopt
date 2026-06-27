@@ -46,6 +46,12 @@ def _assert_integer_feasible(result, int_var_names, model):
             assert abs(v - round(v)) < INTEGRALITY_TOL, f"Variable {name} = {v} is not integral"
 
 
+def test_compute_gap_uses_absolute_scale_near_zero():
+    from discopt.solvers.oa import _compute_gap
+
+    assert _compute_gap(-1.99e-8, 9e-18) == pytest.approx(1.99e-8)
+
+
 # ── Convex MINLP ─────────────────────────────────────────────
 
 

@@ -602,7 +602,7 @@ def _compute_gap(lb: float, ub: float) -> float:
     abs_gap = max(0.0, ub - lb)
     if abs_gap <= 1e-9:
         return 0.0
-    denom = max(abs(ub), abs(lb), 1e-10)
+    denom = max(abs(ub), abs(lb), 1.0)
     return abs_gap / denom
 
 
