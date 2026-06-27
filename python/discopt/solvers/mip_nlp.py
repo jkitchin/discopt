@@ -6,10 +6,9 @@ from typing import Any, Optional
 
 from discopt.modeling.core import Model, SolveResult
 
-_IMPLEMENTED_METHODS = frozenset({"oa", "ecp", "fp"})
+_IMPLEMENTED_METHODS = frozenset({"oa", "ecp", "fp", "goa"})
 _RESERVED_METHOD_ISSUES = {
     "roa": "#116/#117",
-    "goa": "#118",
     "lp_nlp_bb": "#119",
 }
 SUPPORTED_METHODS = _IMPLEMENTED_METHODS | frozenset(_RESERVED_METHOD_ISSUES)
@@ -41,6 +40,38 @@ _FP_OPTION_KEYS = {
     "feasibility_norm",
     "init_strategy",
 }
+_GOA_OPTION_KEYS = {
+    "abs_tol",
+    "add_no_good_cuts",
+    "alphabb_cutoff_obbt",
+    "apply_partitioning",
+    "convhull_ebd",
+    "convhull_ebd_encoding",
+    "convhull_formulation",
+    "disc_abs_width_tol",
+    "disc_add_partition_method",
+    "disc_var_pick",
+    "feasibility_norm",
+    "init_strategy",
+    "iteration_callback",
+    "max_iter",
+    "milp_gap_tolerance",
+    "milp_solver",
+    "milp_time_limit",
+    "n_init_partitions",
+    "obbt_at_root",
+    "obbt_time_limit",
+    "obbt_with_cutoff",
+    "partition_method",
+    "partition_scaling_factor",
+    "partition_scaling_factor_update",
+    "presolve_bt",
+    "presolve_bt_algo",
+    "presolve_bt_mip_time_limit",
+    "presolve_bt_time_limit",
+    "rel_gap",
+    "use_start_as_incumbent",
+}
 
 
 def _normalize_method(method: Any) -> str:
@@ -48,10 +79,16 @@ def _normalize_method(method: Any) -> str:
         raise ValueError(f"mip_nlp_method must be a string, got {type(method).__name__}.")
     raw = method.strip().lower()
     normalized = _METHOD_ALIASES.get(raw, raw.replace("-", "_"))
+    if normalized == "gloa":
+        raise ValueError(
+            "mip_nlp_method='gloa' is reserved for future GDP logic-based global "
+            "outer approximation. Use mip_nlp_method='goa' for MIP-NLP global "
+            "outer approximation, and use gdp_method only for GDP reformulation."
+        )
     if normalized not in SUPPORTED_METHODS:
         reserved = ", ".join(sorted(_RESERVED_METHOD_ISSUES))
         raise ValueError(
-            f"Unknown mip_nlp_method={method!r}. Choose 'oa', 'ecp', or 'fp'. "
+            f"Unknown mip_nlp_method={method!r}. Choose 'oa', 'ecp', 'fp', or 'goa'. "
             f"Reserved future methods are: {reserved}."
         )
     return normalized
@@ -90,7 +127,12 @@ def solve_mip_nlp(
             del options[alias]
 
     if method in _IMPLEMENTED_METHODS:
-        supported_keys = _FP_OPTION_KEYS if method == "fp" else _OA_OPTION_KEYS
+        if method == "fp":
+            supported_keys = _FP_OPTION_KEYS
+        elif method == "goa":
+            supported_keys = _GOA_OPTION_KEYS
+        else:
+            supported_keys = _OA_OPTION_KEYS
         unexpected = sorted(set(options) - supported_keys)
         if unexpected:
             raise ValueError(
@@ -122,6 +164,20 @@ def solve_mip_nlp(
                 feasibility_norm=options.get("feasibility_norm", "L_infinity"),
             )
 
+        if method == "goa":
+            from discopt.solvers.oa import solve_goa
+
+            return solve_goa(
+                model,
+                time_limit=time_limit,
+                gap_tolerance=gap_tolerance,
+                max_iterations=max_iterations,
+                nlp_solver=nlp_solver,
+                initial_point=initial_point,
+                add_no_good_cuts=bool(options.pop("add_no_good_cuts", True)),
+                **options,
+            )
+
         from discopt.solvers.oa import _normalize_init_strategy, solve_oa
 
         if "ecp_mode" in kwargs:
@@ -147,5 +203,5 @@ def solve_mip_nlp(
     raise NotImplementedError(
         f"mip_nlp_method={method!r} is reserved for a future MIP-NLP "
         f"implementation tracked in {_RESERVED_METHOD_ISSUES[method]}; currently "
-        "implemented methods are 'oa', 'ecp', and 'fp'."
+        "implemented methods are 'oa', 'ecp', 'fp', and 'goa'."
     )

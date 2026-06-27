@@ -2435,6 +2435,44 @@ def solve_model(
         if mip_nlp_method is None:
             mip_nlp_method = "ecp" if bool(mip_nlp_kwargs.get("ecp_mode", False)) else "oa"
 
+        mip_nlp_method_key = (
+            mip_nlp_method.strip().lower().replace("-", "_")
+            if isinstance(mip_nlp_method, str)
+            else mip_nlp_method
+        )
+        if mip_nlp_method_key == "goa":
+            for key in (
+                "rel_gap",
+                "abs_tol",
+                "max_iter",
+                "n_init_partitions",
+                "partition_method",
+                "iteration_callback",
+                "milp_time_limit",
+                "milp_gap_tolerance",
+                "presolve_bt",
+                "presolve_bt_algo",
+                "presolve_bt_time_limit",
+                "presolve_bt_mip_time_limit",
+                "apply_partitioning",
+                "disc_var_pick",
+                "partition_scaling_factor",
+                "partition_scaling_factor_update",
+                "disc_add_partition_method",
+                "disc_abs_width_tol",
+                "convhull_formulation",
+                "convhull_ebd",
+                "convhull_ebd_encoding",
+                "use_start_as_incumbent",
+                "obbt_at_root",
+                "obbt_with_cutoff",
+                "alphabb_cutoff_obbt",
+                "obbt_time_limit",
+                "milp_solver",
+            ):
+                if key in kwargs:
+                    mip_nlp_kwargs[key] = kwargs.pop(key)
+
         gdp_methods = {"big-m", "hull", "mbigm", "auto"}
         native_gdp_methods = {"loa"}
         if gdp_method == "oa":

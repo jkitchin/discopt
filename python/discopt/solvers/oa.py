@@ -1809,6 +1809,177 @@ def solve_feasibility_pump(
     )
 
 
+def solve_goa(
+    model: Model,
+    time_limit: float = 3600.0,
+    gap_tolerance: float = 1e-4,
+    max_iterations: int = 100,
+    nlp_solver: str = "ipm",
+    initial_point: Optional[np.ndarray] = None,
+    add_no_good_cuts: bool = True,
+    **amp_options,
+) -> SolveResult:
+    """Solve a nonconvex MINLP through the global OA/relaxation stack.
+
+    GOA uses the MIP-NLP feasibility pump, with no-good cuts enabled by
+    default, only as an incumbent-start heuristic. Certified bounds and gaps
+    come from AMP's McCormick/global-relaxation MILP solves, which do not carry
+    those no-good exclusions and therefore remain valid for the original model.
+    """
+    t_start = time.perf_counter()
+
+    rel_gap = amp_options.pop("rel_gap", gap_tolerance)
+    abs_tol = amp_options.pop("abs_tol", 1e-6)
+    max_iter = amp_options.pop("max_iter", max_iterations)
+    init_strategy = _normalize_init_strategy(amp_options.pop("init_strategy", "fp"))
+    feasibility_norm = _normalize_feasibility_norm(
+        amp_options.pop("feasibility_norm", "L_infinity")
+    )
+    use_start_as_incumbent = bool(amp_options.pop("use_start_as_incumbent", False))
+    n_init_partitions = amp_options.pop("n_init_partitions", 2)
+    partition_method = amp_options.pop("partition_method", "auto")
+    iteration_callback = amp_options.pop("iteration_callback", None)
+    milp_time_limit = amp_options.pop("milp_time_limit", None)
+    milp_gap_tolerance = amp_options.pop("milp_gap_tolerance", None)
+    apply_partitioning = amp_options.pop("apply_partitioning", True)
+    disc_var_pick = amp_options.pop("disc_var_pick", None)
+    partition_scaling_factor = amp_options.pop("partition_scaling_factor", 10.0)
+    partition_scaling_factor_update = amp_options.pop("partition_scaling_factor_update", None)
+    disc_add_partition_method = amp_options.pop("disc_add_partition_method", "adaptive")
+    disc_abs_width_tol = amp_options.pop("disc_abs_width_tol", 1e-3)
+    convhull_formulation = amp_options.pop("convhull_formulation", "disaggregated")
+    convhull_ebd = amp_options.pop("convhull_ebd", False)
+    convhull_ebd_encoding = amp_options.pop("convhull_ebd_encoding", "gray")
+    presolve_bt = amp_options.pop("presolve_bt", True)
+    presolve_bt_algo = amp_options.pop("presolve_bt_algo", 1)
+    presolve_bt_time_limit = amp_options.pop("presolve_bt_time_limit", None)
+    presolve_bt_mip_time_limit = amp_options.pop("presolve_bt_mip_time_limit", None)
+    obbt_at_root = amp_options.pop("obbt_at_root", False)
+    obbt_with_cutoff = amp_options.pop("obbt_with_cutoff", False)
+    alphabb_cutoff_obbt = amp_options.pop("alphabb_cutoff_obbt", True)
+    obbt_time_limit = amp_options.pop("obbt_time_limit", 30.0)
+    milp_solver = amp_options.pop("milp_solver", "auto")
+    if amp_options:
+        raise ValueError(
+            "Unsupported GOA option(s): "
+            + ", ".join(sorted(amp_options))
+            + ". Pass AMP/global-relaxation options supported by solve_goa."
+        )
+
+    goa_initial_point = initial_point
+    pre_amp_mip_count = 0
+
+    decomp: Optional[_DecomposedProblem] = None
+    if init_strategy in {"fp", "initial_binary", "max_binary"}:
+        decomp = _decompose_model(model)
+
+    if init_strategy == "fp" and decomp is not None and decomp.int_indices:
+        elapsed = time.perf_counter() - t_start
+        remaining = max(0.0, float(time_limit) - elapsed)
+        if np.isfinite(remaining) and np.isfinite(time_limit):
+            pump_budget = min(remaining, max(0.0, 0.1 * float(time_limit)), 10.0)
+        else:
+            pump_budget = 10.0
+        fp_iterations = max(1, min(int(max_iterations) if max_iterations > 0 else 1, 10))
+        if pump_budget > 0.0:
+            fp_result = _run_feasibility_pump(
+                model,
+                decomp,
+                nlp_solver=nlp_solver,
+                initial_point=initial_point,
+                time_limit=pump_budget,
+                gap_tolerance=gap_tolerance,
+                max_iterations=fp_iterations,
+                feasibility_norm=feasibility_norm,
+                add_no_good_cuts=bool(add_no_good_cuts),
+            )
+            pre_amp_mip_count += fp_result.mip_count
+            if fp_result.best_x is not None:
+                goa_initial_point = fp_result.best_x
+                use_start_as_incumbent = True
+            elif fp_result.best_near_x is not None:
+                goa_initial_point = fp_result.best_near_x
+    elif init_strategy in {"initial_binary", "max_binary"} and decomp is not None:
+        goa_initial_point = _build_initial_strategy_point(decomp, init_strategy, initial_point)
+
+    elapsed = time.perf_counter() - t_start
+    remaining_time = max(0.0, float(time_limit) - elapsed)
+    if remaining_time <= 0.0:
+        if goa_initial_point is not None and decomp is not None:
+            candidate = np.asarray(goa_initial_point, dtype=np.float64)
+            if _is_integer_feasible(decomp, candidate) and _is_primal_feasible(
+                decomp.evaluator, candidate
+            ):
+                obj = float(decomp.evaluator.evaluate_objective(candidate))
+                obj_sign = (
+                    -1.0
+                    if (
+                        model._objective is not None
+                        and model._objective.sense == ObjectiveSense.MAXIMIZE
+                    )
+                    else 1.0
+                )
+                return SolveResult(
+                    status="feasible",
+                    objective=obj_sign * obj,
+                    bound=None,
+                    gap=None,
+                    x=_build_x_dict(candidate, model),
+                    wall_time=elapsed,
+                    mip_count=pre_amp_mip_count,
+                    gap_certified=False,
+                )
+        return SolveResult(
+            status="time_limit",
+            objective=None,
+            bound=None,
+            gap=None,
+            x=None,
+            wall_time=elapsed,
+            mip_count=pre_amp_mip_count,
+            gap_certified=False,
+        )
+
+    from discopt.solvers.amp import solve_amp
+
+    result = solve_amp(
+        model,
+        rel_gap=rel_gap,
+        abs_tol=abs_tol,
+        time_limit=remaining_time,
+        max_iter=max_iter,
+        n_init_partitions=n_init_partitions,
+        partition_method=partition_method,
+        nlp_solver=nlp_solver,
+        iteration_callback=iteration_callback,
+        milp_time_limit=milp_time_limit,
+        milp_gap_tolerance=milp_gap_tolerance,
+        apply_partitioning=apply_partitioning,
+        disc_var_pick=disc_var_pick,
+        partition_scaling_factor=partition_scaling_factor,
+        partition_scaling_factor_update=partition_scaling_factor_update,
+        disc_add_partition_method=disc_add_partition_method,
+        disc_abs_width_tol=disc_abs_width_tol,
+        convhull_formulation=convhull_formulation,
+        convhull_ebd=convhull_ebd,
+        convhull_ebd_encoding=convhull_ebd_encoding,
+        presolve_bt=presolve_bt,
+        presolve_bt_algo=presolve_bt_algo,
+        presolve_bt_time_limit=presolve_bt_time_limit,
+        presolve_bt_mip_time_limit=presolve_bt_mip_time_limit,
+        initial_point=goa_initial_point,
+        use_start_as_incumbent=use_start_as_incumbent,
+        obbt_at_root=obbt_at_root,
+        obbt_with_cutoff=obbt_with_cutoff,
+        alphabb_cutoff_obbt=alphabb_cutoff_obbt,
+        obbt_time_limit=obbt_time_limit,
+        milp_solver=milp_solver,
+    )
+    result.wall_time += elapsed
+    result.mip_count += pre_amp_mip_count
+    return result
+
+
 # ── Main Algorithm ────────────────────────────────────────────
 
 
