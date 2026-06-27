@@ -27,6 +27,8 @@ _OA_OPTION_KEYS = {
     "oa_penalty_factor",
     "add_no_good_cuts",
     "feasibility_norm",
+    "add_regularization",
+    "level_coef",
     "stalling_limit",
     "cycling_check",
 }

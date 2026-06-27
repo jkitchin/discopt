@@ -2394,6 +2394,8 @@ def solve_model(
             "OA_penalty_factor",
             "add_no_good_cuts",
             "feasibility_norm",
+            "add_regularization",
+            "level_coef",
             "stalling_limit",
             "cycling_check",
         ):
@@ -2722,6 +2724,8 @@ def solve_model(
             "OA_penalty_factor",
             "add_no_good_cuts",
             "feasibility_norm",
+            "add_regularization",
+            "level_coef",
             "stalling_limit",
             "cycling_check",
         ):

@@ -87,6 +87,8 @@ def test_model_solve_routes_mip_nlp_options(monkeypatch):
             oa_penalty_factor=34.0,
             add_no_good_cuts=False,
             feasibility_norm="L2",
+            add_regularization="level_L1",
+            level_coef=0.4,
             stalling_limit=3,
             cycling_check=False,
             skip_convex_check=True,
@@ -100,6 +102,8 @@ def test_model_solve_routes_mip_nlp_options(monkeypatch):
     assert calls["oa_penalty_factor"] == pytest.approx(34.0)
     assert calls["add_no_good_cuts"] is False
     assert calls["feasibility_norm"] == "L2"
+    assert calls["add_regularization"] == "level_L1"
+    assert calls["level_coef"] == pytest.approx(0.4)
     assert calls["stalling_limit"] == 3
     assert calls["cycling_check"] is False
 
@@ -194,11 +198,15 @@ def test_mip_nlp_new_oa_options_precedence_and_alias(monkeypatch):
             "add_slack": False,
             "OA_penalty_factor": 11.0,
             "feasibility_norm": "L1",
+            "add_regularization": "level_L1",
+            "level_coef": 0.4,
             "cycling_check": True,
         },
         add_slack=True,
         oa_penalty_factor=17.0,
         feasibility_norm="L_infinity",
+        add_regularization="level_L_infinity",
+        level_coef=0.6,
         add_no_good_cuts=False,
         stalling_limit=4,
         heuristic_nonconvex=True,
@@ -209,6 +217,8 @@ def test_mip_nlp_new_oa_options_precedence_and_alias(monkeypatch):
     assert calls["add_slack"] is True
     assert calls["oa_penalty_factor"] == pytest.approx(17.0)
     assert calls["feasibility_norm"] == "L_infinity"
+    assert calls["add_regularization"] == "level_L_infinity"
+    assert calls["level_coef"] == pytest.approx(0.6)
     assert calls["add_no_good_cuts"] is False
     assert calls["stalling_limit"] == 4
     assert calls["heuristic_nonconvex"] is True
@@ -485,6 +495,122 @@ def test_oa_max_binary_seed_sets_binaries_and_general_integer_fallback():
     assert seed.tolist() == pytest.approx([1.25, 1.0, 1.0, 3.0])
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("level_L1", "level_L1"),
+        ("level-l2", "level_L2"),
+        ("level_Linf", "level_L_infinity"),
+        ("level_L_infinity", "level_L_infinity"),
+    ],
+)
+def test_oa_regularization_normalizes_supported_level_modes(raw, expected):
+    from discopt.solvers.oa import _normalize_regularization
+
+    assert _normalize_regularization(raw) == expected
+
+
+def test_oa_regularization_rejects_reserved_future_modes():
+    from discopt.solvers.oa import _normalize_regularization
+
+    with pytest.raises(ValueError, match="Unknown add_regularization"):
+        _normalize_regularization("hess_lag")
+
+
+def test_oa_regularization_rejects_ecp_mode():
+    from discopt.solvers.oa import solve_oa
+
+    with pytest.raises(ValueError, match="only supported for OA"):
+        solve_oa(
+            _binary_model("regularized_ecp"),
+            ecp_mode=True,
+            add_regularization="level_L1",
+            max_iterations=0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_aux"),
+    [
+        ("level_L1", 4),
+        ("level_L_infinity", 1),
+    ],
+)
+def test_oa_regularized_master_builds_linear_distance_objective(monkeypatch, mode, expected_aux):
+    import discopt.solvers.lp_backend as lp_backend
+    from discopt.solvers import MILPResult, SolveStatus
+    from discopt.solvers.oa import _decompose_model, _solve_regularized_master
+
+    decomp = _decompose_model(_mixed_discrete_model(f"regularized_{mode}"))
+    captured = {}
+    fake_x = np.concatenate([np.array([0.0, 1.0, 0.0, 0.0], dtype=float), np.zeros(expected_aux)])
+
+    def fake_milp(**kwargs):
+        captured.update(kwargs)
+        return MILPResult(status=SolveStatus.OPTIMAL, x=fake_x)
+
+    monkeypatch.setattr(lp_backend, "get_milp_solver", lambda: fake_milp)
+
+    x_regularized = _solve_regularized_master(
+        decomp,
+        [],
+        [],
+        add_regularization=mode,
+        target=np.array([0.5, 1.0, 0.0, 2.0], dtype=float),
+        objective_level=2.0,
+        time_limit=10.0,
+        gap_tolerance=1e-4,
+    )
+
+    assert x_regularized.tolist() == pytest.approx([0.0, 1.0, 0.0, 0.0])
+    assert len(captured["c"]) == 4 + expected_aux
+    assert captured["c"][4:].tolist() == pytest.approx([1.0] * expected_aux)
+    assert captured["integrality"][:4].tolist() == decomp.integrality.tolist()
+    assert captured["A_ub"][0, :4].tolist() == pytest.approx([1.0, 1.0, 1.0, 1.0])
+    assert captured["b_ub"][0] == pytest.approx(2.0)
+
+
+def test_oa_l2_regularization_requires_miqp_backend(monkeypatch):
+    import discopt.solvers.lp_backend as lp_backend
+    from discopt.solvers.oa import _decompose_model, _solve_regularized_master
+
+    decomp = _decompose_model(_mixed_discrete_model("regularized_l2_no_backend"))
+
+    def missing_qp():
+        raise ImportError("no qp backend")
+
+    monkeypatch.setattr(lp_backend, "get_qp_solver", missing_qp)
+
+    with pytest.raises(RuntimeError, match="QP/MIQP-capable backend"):
+        _solve_regularized_master(
+            decomp,
+            [],
+            [],
+            add_regularization="level_L2",
+            target=np.array([0.5, 1.0, 0.0, 2.0], dtype=float),
+            objective_level=2.0,
+            time_limit=10.0,
+            gap_tolerance=1e-4,
+        )
+
+
+def test_oa_l2_regularization_checks_backend_before_iterations(monkeypatch):
+    import discopt.solvers.lp_backend as lp_backend
+    from discopt.solvers.oa import solve_oa
+
+    def missing_qp():
+        raise ImportError("no qp backend")
+
+    monkeypatch.setattr(lp_backend, "get_qp_solver", missing_qp)
+
+    with pytest.raises(RuntimeError, match="QP/MIQP-capable backend"):
+        solve_oa(
+            _binary_model("regularized_l2_no_backend_solve"),
+            add_regularization="level_L2",
+            max_iterations=0,
+        )
+
+
 def test_oa_rnlp_initialization_adds_cuts_at_relaxation_point(monkeypatch):
     import discopt.solvers.oa as oa_module
 
@@ -659,6 +785,24 @@ def test_mip_nlp_oa_fp_init_strategy_solves_mindtpy_baseline_to_optimum():
         solver="mip-nlp",
         mip_nlp_method="oa",
         init_strategy="fp",
+        time_limit=60,
+        max_nodes=100,
+    )
+
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(3.5, abs=1e-3)
+    assert result.bound == pytest.approx(3.5, abs=1e-3)
+    assert result.gap == pytest.approx(0.0, abs=1e-9)
+    assert np.asarray(result.x["y"]).tolist() == pytest.approx([0.0, 1.0, 0.0])
+
+
+@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
+@pytest.mark.parametrize("add_regularization", ["level_L1", "level_L2", "level_L_infinity"])
+def test_mip_nlp_regularized_oa_level_variants_solve_mindtpy_baseline(add_regularization):
+    result = _mindtpy_simple_minlp(f"mindtpy_roa_{add_regularization}").solve(
+        solver="mip-nlp",
+        mip_nlp_method="oa",
+        add_regularization=add_regularization,
         time_limit=60,
         max_nodes=100,
     )
