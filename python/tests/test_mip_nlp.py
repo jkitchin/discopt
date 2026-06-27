@@ -640,6 +640,18 @@ def test_oa_regularization_rejects_ecp_mode():
         )
 
 
+def test_oa_derivative_regularization_rejects_fp_init_on_constrained_models():
+    from discopt.solvers.oa import solve_oa
+
+    with pytest.raises(ValueError, match="init_strategy='fp'.*does not provide"):
+        solve_oa(
+            _mindtpy_simple_minlp("regularized_grad_lag_fp_init"),
+            add_regularization="grad_lag",
+            init_strategy="fp",
+            max_iterations=0,
+        )
+
+
 @pytest.mark.parametrize("level_coef", [0.0, 1.0, 1.5])
 def test_oa_regularization_level_coef_requires_open_unit_interval(level_coef):
     from discopt.solvers.oa import solve_oa
@@ -821,6 +833,73 @@ def test_oa_regularized_master_builds_derivative_qp_objectives(
     assert captured["integrality"].tolist() == decomp.integrality.tolist()
 
 
+def test_oa_derivative_regularization_data_assembles_lagrangian_terms():
+    from discopt.solvers.oa import (
+        _build_derivative_regularization_data,
+        _DecomposedProblem,
+    )
+
+    class FakeEvaluator:
+        def evaluate_gradient(self, x):
+            return np.array([1.0, 2.0, 3.0, 4.0])
+
+        def evaluate_jacobian(self, x):
+            return np.array(
+                [
+                    [1.0, 0.0, 2.0, -1.0],
+                    [0.5, 3.0, 0.0, 2.0],
+                ]
+            )
+
+        def evaluate_lagrangian_hessian(self, x, obj_factor, multipliers):
+            return np.array(
+                [
+                    [1.0, 2.0, 3.0, 4.0],
+                    [0.0, 5.0, 6.0, 7.0],
+                    [0.0, 0.0, 9.0, 8.0],
+                    [0.0, 0.0, 0.0, 13.0],
+                ]
+            )
+
+    decomp = _DecomposedProblem(
+        evaluator=FakeEvaluator(),
+        n_vars=4,
+        n_cons=2,
+        lb=np.zeros(4),
+        ub=np.ones(4),
+        int_indices=[1, 3],
+        binary_indices=[1],
+        general_integer_indices=[3],
+        integrality=np.array([0, 1, 0, 1], dtype=np.int32),
+        linear_A_rows=[],
+        linear_b_rows=[],
+        linear_senses=[],
+        nonlinear_indices=[0, 1],
+        constraint_senses=["<=", "<="],
+    )
+
+    data = _build_derivative_regularization_data(
+        decomp,
+        "hess_lag",
+        np.array([0.25, 1.0, 0.5, 2.0], dtype=float),
+        np.array([10.0, -2.0], dtype=float),
+    )
+
+    assert data.target.tolist() == pytest.approx([0.25, 1.0, 0.5, 2.0])
+    assert data.gradient.tolist() == pytest.approx([0.0, -4.0, 0.0, -10.0])
+    np.testing.assert_allclose(
+        data.hessian,
+        np.array(
+            [
+                [1.0, 1.0, 1.5, 2.0],
+                [1.0, 5.0, 3.0, 3.5],
+                [1.5, 3.0, 9.0, 4.0],
+                [2.0, 3.5, 4.0, 13.0],
+            ]
+        ),
+    )
+
+
 def test_oa_derivative_regularization_requires_duals_from_initial_incumbent(monkeypatch):
     import discopt.solvers.oa as oa_module
 
@@ -897,6 +976,42 @@ def test_oa_l2_regularization_requires_miqp_backend(monkeypatch):
             time_limit=10.0,
             gap_tolerance=1e-4,
         )
+
+
+def test_oa_qp_regularization_reports_backend_rejection_separately(monkeypatch):
+    import discopt.solvers.lp_backend as lp_backend
+    from discopt.solvers.oa import (
+        _decompose_model,
+        _DerivativeRegularizationData,
+        _solve_regularized_master,
+    )
+
+    decomp = _decompose_model(_mixed_discrete_model("regularized_hess_rejected"))
+    data = _DerivativeRegularizationData(
+        target=np.array([0.5, 1.0, 0.0, 2.0], dtype=float),
+        gradient=np.zeros(4),
+        hessian=np.diag([1.0, -1.0, 1.0, 1.0]),
+    )
+
+    def rejected_qp(**kwargs):
+        raise ValueError("Hessian is not positive semidefinite")
+
+    monkeypatch.setattr(lp_backend, "get_qp_solver", lambda: rejected_qp)
+
+    with pytest.raises(RuntimeError, match="rejected by the QP/MIQP backend") as excinfo:
+        _solve_regularized_master(
+            decomp,
+            [],
+            [],
+            add_regularization="hess_lag",
+            target=data.target,
+            objective_level=2.0,
+            time_limit=10.0,
+            gap_tolerance=1e-4,
+            derivative_data=data,
+        )
+
+    assert "requires a QP/MIQP-capable backend" not in str(excinfo.value)
 
 
 def test_oa_l2_regularization_checks_backend_before_iterations(monkeypatch):
@@ -986,6 +1101,91 @@ def test_oa_regularization_seeds_nlp_without_replacing_master_assignment(monkeyp
     )
 
     assert result.status == "feasible"
+    assert len(subproblem_calls) == 1
+    assert subproblem_calls[0][0].tolist() == pytest.approx(master_point.tolist())
+    assert subproblem_calls[0][1].tolist() == pytest.approx(regularized_point.tolist())
+
+
+def test_oa_derivative_regularization_seeds_nlp_from_regularized_point(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers import MILPResult, SolveStatus
+
+    model = _mixed_discrete_model("derivative_regularized_seed_only")
+    relaxation_point = np.array([0.0, 1.0, 0.0, 3.0], dtype=float)
+    master_point = np.array([0.25, 0.0, 1.0, -1.0], dtype=float)
+    regularized_point = np.array([1.25, 1.0, 0.0, 2.0], dtype=float)
+    regularized_calls = []
+    subproblem_calls = []
+
+    def fake_solve_nlp_relaxation(
+        evaluator,
+        lb,
+        ub,
+        nlp_solver,
+        initial_point=None,
+        return_attempt=False,
+    ):
+        attempt = oa_module._NLPAttempt(
+            x=relaxation_point,
+            objective=4.0,
+            multipliers=np.empty(0, dtype=float),
+        )
+        if return_attempt:
+            return attempt
+        return attempt.x, attempt.objective
+
+    def fake_add_oa_cuts(*args, **kwargs):
+        return None
+
+    def fake_solve_master_milp(*args, **kwargs):
+        return MILPResult(status=SolveStatus.OPTIMAL, x=master_point, bound=1.0)
+
+    def fake_solve_regularized_master(*args, **kwargs):
+        regularized_calls.append(kwargs)
+        return regularized_point
+
+    def fake_solve_nlp_subproblem(
+        evaluator,
+        lb,
+        ub,
+        int_indices,
+        x_master,
+        nlp_solver,
+        initial_point=None,
+        return_attempt=False,
+    ):
+        subproblem_calls.append(
+            (
+                np.asarray(x_master, dtype=float).copy(),
+                np.asarray(initial_point, dtype=float).copy(),
+            )
+        )
+        attempt = oa_module._NLPAttempt(
+            x=np.asarray(x_master, dtype=float),
+            objective=3.0,
+            multipliers=np.empty(0, dtype=float),
+        )
+        if return_attempt:
+            return attempt
+        return attempt.x, attempt.objective
+
+    monkeypatch.setattr(oa_module, "_solve_nlp_relaxation", fake_solve_nlp_relaxation)
+    monkeypatch.setattr(oa_module, "_add_oa_cuts", fake_add_oa_cuts)
+    monkeypatch.setattr(oa_module, "_solve_master_milp", fake_solve_master_milp)
+    monkeypatch.setattr(oa_module, "_solve_regularized_master", fake_solve_regularized_master)
+    monkeypatch.setattr(oa_module, "_solve_nlp_subproblem", fake_solve_nlp_subproblem)
+
+    result = oa_module.solve_oa(
+        model,
+        add_regularization="grad_lag",
+        max_iterations=1,
+    )
+
+    assert result.status == "feasible"
+    assert len(regularized_calls) == 1
+    assert regularized_calls[0]["derivative_data"].gradient.tolist() == pytest.approx(
+        [0.0, 1.0, 1.0, 1.0]
+    )
     assert len(subproblem_calls) == 1
     assert subproblem_calls[0][0].tolist() == pytest.approx(master_point.tolist())
     assert subproblem_calls[0][1].tolist() == pytest.approx(regularized_point.tolist())

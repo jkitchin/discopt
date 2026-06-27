@@ -150,6 +150,15 @@ def _qp_regularization_backend_error(add_regularization: str) -> RuntimeError:
     )
 
 
+def _qp_regularization_solve_error(add_regularization: str) -> RuntimeError:
+    return RuntimeError(
+        f"OA {add_regularization} regularized master was rejected by the QP/MIQP "
+        "backend. The regularization Hessian may be nonconvex or indefinite; "
+        "use a convex test model, add_regularization='sqp_lag' for a proximal "
+        "QP, or a linear derivative mode such as add_regularization='grad_lag'."
+    )
+
+
 def _l2_regularization_backend_error() -> RuntimeError:
     return _qp_regularization_backend_error("level_L2")
 
@@ -1623,6 +1632,9 @@ def _solve_regularized_master(
                     c[:n_vars] += derivative_data.gradient
             elif add_regularization == "sqp_lag":
                 assert derivative_data is not None  # guarded above
+                # First-slice MindtPy-compatible SQP regularization: keep a
+                # fixed unit proximal weight until a public tuning option is
+                # justified by solver behavior across more benchmark cases.
                 rho = 1.0
                 for idx in range(n_vars):
                     Q[idx, idx] = 2.0 * rho
@@ -1641,8 +1653,10 @@ def _solve_regularized_master(
                 time_limit=max(float(time_limit), 0.0),
                 gap_tolerance=gap_tolerance,
             )
-        except (ImportError, ValueError) as exc:
+        except ImportError as exc:
             raise _qp_regularization_backend_error(add_regularization) from exc
+        except ValueError as exc:
+            raise _qp_regularization_solve_error(add_regularization) from exc
     else:
         from discopt.solvers.lp_backend import get_milp_solver
 
@@ -1922,6 +1936,11 @@ def solve_oa(
     n_vars = decomp.n_vars
     n_cons = decomp.n_cons
     derivative_regularization = _regularization_requires_derivatives(add_regularization)
+    if derivative_regularization and init_strategy == "fp" and n_cons > 0:
+        raise ValueError(
+            "OA derivative regularization needs an NLP-based initialization that returns "
+            "duals; init_strategy='fp' does not provide constraint multipliers."
+        )
     if add_regularization in _QP_REGULARIZATION_MODES and decomp.int_indices:
         _require_qp_regularization_backend(add_regularization)
     # The whole OA loop runs in the evaluator's minimization convention (it
