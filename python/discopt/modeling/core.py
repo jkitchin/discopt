@@ -2793,7 +2793,7 @@ class Model:
             ``gurobi_options={...}``.
             Use ``solver="mip-nlp"`` to select the MIP-NLP decomposition
             family. Current implemented ``mip_nlp_method`` values are ``"oa"``,
-            ``"ecp"``, and ``"fp"``; ``"goa"``, ``"roa"``, and
+            ``"ecp"``, ``"fp"``, and ``"goa"``; ``"roa"`` and
             ``"lp_nlp_bb"`` are reserved until their dedicated implementations
             land. Top-level OA/ECP options such as ``equality_relaxation``,
             ``ecp_mode``, ``feasibility_cuts``, ``heuristic_nonconvex``,
@@ -2801,7 +2801,12 @@ class Model:
             ``add_no_good_cuts``, ``feasibility_norm``, ``add_regularization``,
             ``level_coef``, ``stalling_limit``, ``cycling_check``, and
             ``init_strategy`` take precedence over duplicate keys in
-            ``mip_nlp_options``. Supported ``add_regularization`` values are
+            ``mip_nlp_options``. For ``mip_nlp_method="goa"``, AMP/global-
+            relaxation options such as ``rel_gap``, ``abs_tol``, ``max_iter``,
+            ``n_init_partitions``, ``partition_method``, ``milp_time_limit``,
+            ``milp_gap_tolerance``, ``presolve_bt``, and
+            ``convhull_formulation`` may also be passed as top-level aliases.
+            Supported ``add_regularization`` values are
             ``"level_L1"``, ``"level_L2"``, ``"level_L_infinity"``,
             ``"grad_lag"``, ``"hess_lag"``, ``"hess_only_lag"``, and
             ``"sqp_lag"``. Supported initialization strategies are ``"rNLP"``,
