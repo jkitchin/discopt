@@ -151,6 +151,116 @@ def test_milp_backend_selector_lists_gurobi_in_invalid_backend_error():
         get_milp_solver(backend="not-a-backend")
 
 
+def test_set_common_params_keeps_explicit_threads_over_options():
+    class Recorder:
+        def __init__(self):
+            self.params = {}
+
+        def setParam(self, key, value):
+            self.params[key] = value
+
+    model = Recorder()
+
+    gurobi_backend._set_common_params(
+        model,
+        time_limit=7.0,
+        threads=2,
+        options={"TimeLimit": 3.0, "Threads": 8},
+    )
+
+    assert model.params["TimeLimit"] == 7.0
+    assert model.params["Threads"] == 2
+
+
+def test_gurobi_milp_optimal_result_reports_zero_gap(monkeypatch):
+    class FakeGRB:
+        CONTINUOUS = "C"
+        BINARY = "B"
+        INTEGER = "I"
+        MINIMIZE = 1
+        INFINITY = 1e100
+        OPTIMAL = 2
+        INFEASIBLE = 3
+        UNBOUNDED = 5
+        INF_OR_UNBD = 4
+        ITERATION_LIMIT = 7
+        TIME_LIMIT = 9
+
+    class FakeEnv:
+        def __init__(self, empty=True):
+            self.empty = empty
+
+        def setParam(self, *_args):
+            pass
+
+        def start(self):
+            pass
+
+        def dispose(self):
+            pass
+
+    class FakeMVar:
+        __array_priority__ = 1000
+        X = np.array([1.0])
+
+        def __rmatmul__(self, _other):
+            return 0.0
+
+    class FakeModel:
+        Status = FakeGRB.OPTIMAL
+        NodeCount = 0
+        Runtime = 0.0
+        SolCount = 1
+        ObjVal = 0.94
+        ObjBound = 0.940002
+        MIPGap = 0.25
+
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def setParam(self, *_args):
+            pass
+
+        def addMVar(self, **_kwargs):
+            return FakeMVar()
+
+        def setObjective(self, *_args):
+            pass
+
+        def optimize(self):
+            pass
+
+        def dispose(self):
+            pass
+
+    fake_gp = types.SimpleNamespace(Env=FakeEnv, Model=FakeModel)
+    monkeypatch.setattr(gurobi_backend, "_load_gurobi", lambda: (fake_gp, FakeGRB))
+
+    result = gurobi_backend.solve_milp(
+        c=np.array([1.0]),
+        bounds=[(0.0, 1.0)],
+        integrality=np.array([1], dtype=np.int32),
+    )
+
+    assert result.status == SolveStatus.OPTIMAL
+    assert result.objective == pytest.approx(0.94)
+    assert result.bound == pytest.approx(result.objective)
+    assert result.gap == 0.0
+
+
+def test_amp_bound_tolerance_closes_small_master_bound_inversion():
+    from discopt.solvers import amp as amp_module
+
+    abs_gap, order_ok = amp_module._amp_abs_gap_with_bound_tolerance(
+        lower_bound=0.940002,
+        upper_bound=0.94,
+        abs_tol=1e-6,
+    )
+
+    assert order_ok is True
+    assert abs_gap == 0.0
+
+
 def test_model_solve_amp_forwards_gurobi_milp_solver(monkeypatch):
     import discopt.solvers.amp as amp_module
 
@@ -934,3 +1044,47 @@ def test_model_solve_gurobi_qcp_smoke_if_available():
     assert result.status == "optimal"
     assert result.objective == pytest.approx(-1.0, abs=1e-6)
     assert result.x["x"] == pytest.approx(-1.0, abs=1e-6)
+
+
+@pytest.mark.slow
+def test_oa_gurobi_converges_on_degenerate_convex_minlp_if_available():
+    _require_gurobi()
+
+    m = dm.Model("oa_gurobi_degenerate_minlp")
+    x = m.integer("x", lb=0, ub=5)
+    y = m.continuous("y", lb=0, ub=5)
+    m.subject_to(x + y >= 3)
+    m.minimize((x - 2) ** 2 + (y - 1.5) ** 2)
+
+    result = m.solve(
+        gdp_method="oa",
+        milp_solver="gurobi",
+        skip_convex_check=True,
+        max_nodes=20,
+        time_limit=30,
+    )
+
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(0.0, abs=1e-6)
+    assert result.gap is not None
+    assert result.gap <= 1e-6
+
+
+@pytest.mark.slow
+def test_amp_gurobi_certifies_convex_minlp_if_available():
+    _require_gurobi()
+
+    m = dm.Model("amp_gurobi_bound_tolerance")
+    x = m.integer("x", lb=0, ub=6)
+    y = m.continuous("y", lb=0, ub=6)
+    m.subject_to(x + y >= 4)
+    m.minimize((x - 3.2) ** 2 + 2 * (y - 2.1) ** 2 + 0.3 * x)
+
+    result = m.solve(solver="amp", milp_solver="gurobi", rel_gap=1e-6, time_limit=30)
+
+    assert result.status == "optimal"
+    assert result.gap_certified is True
+    assert result.objective == pytest.approx(0.94, abs=1e-5)
+    assert result.bound is not None
+    assert result.gap is not None
+    assert result.gap <= 1e-6

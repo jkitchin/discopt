@@ -223,13 +223,13 @@ def _optimize(model, GRB) -> int:
 
 def _set_common_params(model, time_limit, threads, options) -> None:
     model.setParam("OutputFlag", 0)
+    if options:
+        for key, value in options.items():
+            model.setParam(str(key), value)
     if time_limit is not None:
         model.setParam("TimeLimit", float(time_limit))
     if threads is not None:
         model.setParam("Threads", int(threads))
-    if options:
-        for key, value in options.items():
-            model.setParam(str(key), value)
 
 
 def _safe_attr(obj, name: str):
@@ -431,8 +431,8 @@ def solve_milp(
                 status=status,
                 x=x_val,
                 objective=objective,
-                bound=objective if bound is None else bound,
-                gap=0.0 if gap is None else gap,
+                bound=objective,
+                gap=0.0,
                 node_count=node_count,
                 wall_time=wall_time,
             )
@@ -545,8 +545,8 @@ def solve_qp(
                 status=status,
                 x=x_val,
                 objective=objective,
-                bound=objective if bound is None else bound,
-                gap=0.0 if gap is None else gap,
+                bound=objective,
+                gap=0.0,
                 dual_values=row_duals,
                 reduced_costs=reduced_costs,
                 node_count=node_count,
@@ -665,8 +665,8 @@ def solve_qcp(
                 status=status,
                 x=x_val,
                 objective=objective,
-                bound=objective if bound is None else bound,
-                gap=0.0 if gap is None else gap,
+                bound=objective,
+                gap=0.0,
                 node_count=node_count,
                 iterations=iters,
                 wall_time=wall_time,
