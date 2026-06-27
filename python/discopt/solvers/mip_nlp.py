@@ -12,7 +12,7 @@ _METHOD_ALIASES = {
     "lp/nlp-bb": "lp_nlp_bb",
     "lp_nlp_bb": "lp_nlp_bb",
 }
-_OA_OPTION_KEYS = {"equality_relaxation", "ecp_mode", "feasibility_cuts"}
+_OA_OPTION_KEYS = {"equality_relaxation", "ecp_mode", "feasibility_cuts", "milp_solver"}
 
 
 def _normalize_method(method: str) -> str:

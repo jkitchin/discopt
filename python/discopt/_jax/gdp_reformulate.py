@@ -43,7 +43,12 @@ from discopt.modeling.core import (
 _DEFAULT_BIG_M = 1e4
 
 
-def reformulate_gdp(model: Model, method: str = "big-m") -> Model:
+def reformulate_gdp(
+    model: Model,
+    method: str = "big-m",
+    *,
+    respect_disjunction_methods: bool = True,
+) -> Model:
     """Replace GDP constraints with standard MINLP constraints.
 
     Parameters
@@ -59,6 +64,10 @@ def reformulate_gdp(model: Model, method: str = "big-m") -> Model:
         :mod:`discopt._jax.gdp_advisor` (each disjunction independently
         gets the structurally-best of the three).
         Indicator and SOS constraints always use big-M regardless.
+    respect_disjunction_methods : bool, default True
+        Whether a disjunction-local ``method`` override should take precedence
+        over the solver-wide ``method``. Set to ``False`` for solver frontends
+        that need a specific GDP lowering, such as AMP's MILP relaxations.
 
     Returns
     -------
@@ -122,7 +131,7 @@ def reformulate_gdp(model: Model, method: str = "big-m") -> Model:
         elif isinstance(c, _DisjunctiveConstraint):
             # A per-disjunction ``method`` override (set e.g. by Model.if_else)
             # takes precedence over the solver-wide method / auto advice.
-            override = getattr(c, "method", None)
+            override = getattr(c, "method", None) if respect_disjunction_methods else None
             if override is not None:
                 chosen = override
             else:

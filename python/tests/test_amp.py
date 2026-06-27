@@ -1730,6 +1730,35 @@ def test_solve_model_forwards_alpine_amp_aliases(monkeypatch):
     assert captured["presolve_bt_mip_time_limit"] == pytest.approx(0.5)
 
 
+def test_solve_model_reformulates_if_else_before_amp(monkeypatch):
+    """AMP should receive big-M GDP rows, not raw or hull if_else disjunctions."""
+    from discopt.modeling.core import _DisjunctiveConstraint
+    from discopt.solver import solve_model
+    from discopt.solvers import amp as amp_mod
+
+    captured = {}
+
+    def fake_solve_amp(model, **kwargs):
+        del kwargs
+        captured["model"] = model
+        return SolveResult(status="optimal", objective=0.0, bound=0.0, gap=0.0)
+
+    monkeypatch.setattr(amp_mod, "solve_amp", fake_solve_amp)
+
+    m = Model("amp_if_else_gdp")
+    x = m.continuous("x", lb=-1.0, ub=1.0)
+    w = m.if_else(x >= 0.0, x, -x)
+    m.minimize(w)
+
+    solve_model(m, solver="amp", time_limit=1.0)
+
+    amp_model = captured["model"]
+    assert not any(isinstance(c, _DisjunctiveConstraint) for c in amp_model._constraints)
+    names = [getattr(c, "name", "") or "" for c in amp_model._constraints]
+    assert any(name.startswith("_gdp_") for name in names)
+    assert not any(name.startswith("_hull_") for name in names)
+
+
 def test_amp_custom_partition_hooks_run_inside_amp(monkeypatch):
     """AMP should expose callable selection, scaling, and refinement hooks."""
     import discopt._jax.discretization as disc_mod

@@ -258,6 +258,16 @@ Surface availability through `available_backends()`-style helpers so
    registry is purely additive — no change to the `incorrect_count ≤ 0`
    invariant or the POUNCE-only install story.
 
+### 7.1 Gurobi integration update
+
+As of issue #102, Gurobi has a narrower in-process role than the external-solver
+registry proposed above. `Model.solve(solver="gurobi")` is a direct matrix
+backend for LP/MILP/QP/QCP-family models only. General nonlinear expression DAGs
+are not compiled to Gurobi nonlinear expressions. For global NLP/MINLP workflows,
+discopt remains responsible for AMP/OA/LOA relaxations and certification, while
+`milp_solver="gurobi"` selects Gurobi as the matrix MILP master subsolver. The
+default spatial branch-and-bound path remains unchanged.
+
 ### Effort sketch
 
 - `read_sol` + tests: small (~1 file).

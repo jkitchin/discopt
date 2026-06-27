@@ -179,7 +179,18 @@ Common tuning knobs (all keyword-only on `Model.solve(solver="amp", ...)`):
 | `convhull_ebd` | `False` | Logarithmic Gray-code embedded SOS2 binaries |
 | `presolve_bt` | `True` | OBBT/FBBT bound tightening before the first MILP |
 | `obbt_at_root` | `True` | Strengthen variable bounds at the root |
+| `milp_solver` | `"auto"` | MILP master backend: `"auto"`, `"highs"`, `"pounce"`, `"simplex"`, or `"gurobi"` |
 | `partition_method` | `"adaptive"` | How to pick which variable/interval to refine |
+
+Gurobi can be used as AMP's MILP-master subsolver without changing the global
+algorithm:
+
+```python
+result = m.solve(solver="amp", milp_solver="gurobi", rel_gap=1e-4)
+```
+
+This does not translate general nonlinear expressions into Gurobi nonlinear
+constraints; discopt still builds and certifies the global MINLP relaxation.
 
 A worked end-to-end example with a non-trivially nonconvex model and the
 tuning knobs above is in `docs/notebooks/amp_global_minlp.ipynb`.

@@ -1963,6 +1963,24 @@ def _compute_relative_gap(
     return abs(abs_gap) / abs(upper_bound)
 
 
+def _amp_abs_gap_with_bound_tolerance(
+    lower_bound: float,
+    upper_bound: float,
+    abs_tol: float,
+) -> tuple[Optional[float], bool]:
+    """Return a nonnegative gap unless the bound ordering is materially invalid."""
+
+    raw_abs_gap = upper_bound - lower_bound
+    if raw_abs_gap >= 0.0:
+        return raw_abs_gap, True
+
+    scale = max(1.0, abs(lower_bound), abs(upper_bound))
+    inversion_tol = max(10.0 * abs_tol, 1e-8 * scale)
+    if raw_abs_gap >= -inversion_tol:
+        return 0.0, True
+    return None, False
+
+
 def _prune_oa_cuts(oa_cuts: list, max_cuts: int = _DEFAULT_MAX_OA_CUTS) -> None:
     """Keep only the most recent OA cuts to cap MILP growth."""
     overflow = len(oa_cuts) - max_cuts
@@ -2218,6 +2236,13 @@ def _solve_amp_impl(
     obbt_time_limit : float, default 30.0
         Total wall-clock budget for OBBT calls (in seconds).  Per-LP budget is
         ``min(1.0, obbt_time_limit / max(1, 2*n_candidates))``.
+    milp_solver : str, default "auto"
+        MILP backend for AMP master relaxations and MILP-based bound
+        tightening. Choose ``"auto"``, ``"highs"``, ``"pounce"``,
+        ``"simplex"``, or ``"gurobi"``. The explicit Gurobi option uses
+        discopt's global AMP algorithm with Gurobi as the matrix MILP subsolver;
+        it does not translate general nonlinear expressions into Gurobi
+        nonlinear constraints.
 
     Returns
     -------
@@ -2260,7 +2285,7 @@ def _solve_amp_impl(
     convhull_mode = _normalize_convhull_formulation(convhull_formulation)
     if convhull_ebd and convhull_mode != "sos2":
         raise ValueError("convhull_ebd requires convhull_formulation='sos2' or the 'lambda' alias.")
-    _valid_milp_solvers = {"auto", "highs", "pounce", "simplex"}
+    _valid_milp_solvers = {"auto", "highs", "pounce", "simplex", "gurobi"}
     if milp_solver not in _valid_milp_solvers:
         raise ValueError(
             f"Unknown milp_solver={milp_solver!r}. Choose one of {sorted(_valid_milp_solvers)}."
@@ -3086,14 +3111,14 @@ def _solve_amp_impl(
             )
 
         if UB < np.inf and LB > -np.inf:
-            raw_abs_gap = UB - LB
             if maximize:
                 display_lb = _from_minimization_space(UB)
                 display_ub = _from_minimization_space(LB)
             else:
                 display_lb = LB
                 display_ub = UB
-            if raw_abs_gap < -abs_tol:
+            abs_gap, bound_order_ok = _amp_abs_gap_with_bound_tolerance(LB, UB, abs_tol)
+            if not bound_order_ok:
                 logger.warning(
                     "AMP iter %d: invalid bound ordering LB=%.6g, UB=%.6g; "
                     "skipping gap certification",
@@ -3102,7 +3127,7 @@ def _solve_amp_impl(
                     display_ub,
                 )
             else:
-                abs_gap = max(0.0, raw_abs_gap)
+                assert abs_gap is not None
                 rel_g = _compute_relative_gap(abs_gap, UB)
                 if rel_g is None:
                     logger.info(
@@ -3297,28 +3322,32 @@ def _solve_amp_impl(
 
     if incumbent is not None:
         raw_abs_gap_final = UB - LB if LB > -np.inf else None
-        bound_is_trustworthy = raw_abs_gap_final is None or raw_abs_gap_final >= -abs_tol
-        if not bound_is_trustworthy and raw_abs_gap_final is not None:
+        if raw_abs_gap_final is None:
+            abs_gap_final = None
+            bound_is_trustworthy = True
+        else:
+            abs_gap_final, bound_is_trustworthy = _amp_abs_gap_with_bound_tolerance(LB, UB, abs_tol)
+        if not bound_is_trustworthy:
             logger.warning(
                 "AMP: final bound ordering invalid (LB=%.6g, UB=%.6g); omitting bound and gap",
                 _from_minimization_space(LB),
                 _from_minimization_space(UB),
             )
 
-        abs_gap_final = (
-            None
-            if raw_abs_gap_final is None or not bound_is_trustworthy
-            else max(0.0, raw_abs_gap_final)
-        )
         rel_gap_final = _compute_relative_gap(abs_gap_final, UB)
         status = "optimal" if gap_certified else "feasible"
+        reported_lb = LB
+        if raw_abs_gap_final is not None and raw_abs_gap_final < 0.0 and bound_is_trustworthy:
+            reported_lb = UB
 
         return _finish(
             SolveResult(
                 status=status,
                 objective=_from_minimization_space(UB),
                 bound=(
-                    _from_minimization_space(LB) if LB > -np.inf and bound_is_trustworthy else None
+                    _from_minimization_space(reported_lb)
+                    if LB > -np.inf and bound_is_trustworthy
+                    else None
                 ),
                 gap=float(rel_gap_final) if rel_gap_final is not None else None,
                 x=_build_x_dict(incumbent, model),
