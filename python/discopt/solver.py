@@ -2216,6 +2216,9 @@ def solve_model(
         ``stalling_limit``, and ``cycling_check`` plus initialization option
         ``init_strategy`` may be passed as top-level aliases and take
         precedence over duplicate keys in ``mip_nlp_options``.
+        Supported ``add_regularization`` values are ``"level_L1"``,
+        ``"level_L2"``, ``"level_L_infinity"``, ``"grad_lag"``,
+        ``"hess_lag"``, ``"hess_only_lag"``, and ``"sqp_lag"``.
         Supported ``init_strategy`` values are ``"rNLP"``,
         ``"initial_binary"``, ``"max_binary"``, and ``"fp"``. The
         ``mip_nlp_method`` selector determines the effective ``ecp_mode`` and

@@ -6,6 +6,12 @@ with extensions for feasibility cuts, equality relaxation, and ECP mode.
 Decomposes MINLP into alternating NLP subproblems (with fixed integers)
 and MILP master problems (with accumulated linearization cuts).
 
+The convex-case OA guarantee applies when the minimization objective is
+convex, nonlinear inequalities are written in their convex orientation, and
+equalities are affine. Nonlinear equalities such as process equations make the
+model nonconvex for OA purposes; equality relaxation is a robustness heuristic
+and must not be read as restoring the convex-case convergence guarantee.
+
 References:
     Duran & Grossmann, Math. Prog. 36, 1986. DOI: 10.1007/BF02592064
     Fletcher & Leyffer, Math. Prog. 66, 1994. DOI: 10.1007/BF01581153
@@ -37,7 +43,15 @@ _REGULARIZATION_MODES = {
     "level_l_infinity": "level_L_infinity",
     "level_linf": "level_L_infinity",
     "level_l_inf": "level_L_infinity",
+    "grad_lag": "grad_lag",
+    "hess_lag": "hess_lag",
+    "hess_only_lag": "hess_only_lag",
+    "sqp_lag": "sqp_lag",
 }
+_DERIVATIVE_REGULARIZATION_MODES = frozenset({"grad_lag", "hess_lag", "hess_only_lag", "sqp_lag"})
+_HESSIAN_REGULARIZATION_MODES = frozenset({"hess_lag", "hess_only_lag"})
+_QP_REGULARIZATION_MODES = frozenset({"level_L2", "hess_lag", "hess_only_lag", "sqp_lag"})
+_LINEAR_REGULARIZATION_MODES = frozenset({"level_L1", "level_L_infinity", "grad_lag"})
 _FEASIBILITY_NORMS = {
     "l1": "L1",
     "l2": "L2",
@@ -94,7 +108,8 @@ def _normalize_regularization(add_regularization: Optional[str]) -> Optional[str
         return normalized
     raise ValueError(
         "Unknown add_regularization="
-        f"{add_regularization!r}. Choose one of: level_L1, level_L2, level_L_infinity."
+        f"{add_regularization!r}. Choose one of: grad_lag, hess_lag, hess_only_lag, "
+        "level_L1, level_L2, level_L_infinity, sqp_lag."
     )
 
 
@@ -126,24 +141,42 @@ def _normalize_optional_positive_int(name: str, value: Optional[int]) -> Optiona
     return out
 
 
-def _l2_regularization_backend_error() -> RuntimeError:
+def _qp_regularization_backend_error(add_regularization: str) -> RuntimeError:
     return RuntimeError(
-        "OA level_L2 regularization requires a QP/MIQP-capable backend "
+        f"OA {add_regularization} regularization requires a QP/MIQP-capable backend "
         "for the regularized master. Install highspy or choose "
-        "add_regularization='level_L1'/'level_L_infinity'."
+        "a linear regularization mode such as add_regularization='level_L1', "
+        "'level_L_infinity', or 'grad_lag'."
     )
 
 
-def _require_l2_regularization_backend() -> None:
+def _qp_regularization_solve_error(add_regularization: str) -> RuntimeError:
+    return RuntimeError(
+        f"OA {add_regularization} regularized master was rejected by the QP/MIQP "
+        "backend. The regularization Hessian may be nonconvex or indefinite; "
+        "use a convex test model, add_regularization='sqp_lag' for a proximal "
+        "QP, or a linear derivative mode such as add_regularization='grad_lag'."
+    )
+
+
+def _l2_regularization_backend_error() -> RuntimeError:
+    return _qp_regularization_backend_error("level_L2")
+
+
+def _require_qp_regularization_backend(add_regularization: str) -> None:
     """Raise when the active QP backend cannot solve mixed-integer QPs."""
     try:
         from discopt.solvers.lp_backend import get_qp_solver
 
         solve_qp = get_qp_solver()
     except ImportError as exc:
-        raise _l2_regularization_backend_error() from exc
+        raise _qp_regularization_backend_error(add_regularization) from exc
     if getattr(solve_qp, "__module__", "").endswith("qp_pounce"):
-        raise _l2_regularization_backend_error()
+        raise _qp_regularization_backend_error(add_regularization)
+
+
+def _require_l2_regularization_backend() -> None:
+    _require_qp_regularization_backend("level_L2")
 
 
 def _default_nlp_start(lb: np.ndarray, ub: np.ndarray) -> np.ndarray:
@@ -254,6 +287,25 @@ class _FeasibilityPumpResult:
     best_near_merit: float
     iterations: int = 0
     mip_count: int = 0
+
+
+@dataclass
+class _NLPAttempt:
+    """Internal NLP solve result with derivative data retained when available."""
+
+    x: Optional[np.ndarray]
+    objective: Optional[float]
+    multipliers: Optional[np.ndarray]
+    status: Optional[object] = None
+
+
+@dataclass
+class _DerivativeRegularizationData:
+    """Lagrangian derivative data used by derivative-based ROA modes."""
+
+    target: np.ndarray
+    gradient: np.ndarray
+    hessian: Optional[np.ndarray] = None
 
 
 # ── Problem Decomposition ─────────────────────────────────────
@@ -427,8 +479,15 @@ def _is_primal_feasible(evaluator, x, tol: float = 1e-4) -> bool:
         return False
 
 
-def _solve_nlp(evaluator, lb, ub, nlp_solver: str, max_iter: int = 200, x0=None):
-    """Solve an NLP with given bounds. Returns (x, obj) or (None, None)."""
+def _solve_nlp_attempt(
+    evaluator,
+    lb,
+    ub,
+    nlp_solver: str,
+    max_iter: int = 200,
+    x0=None,
+) -> _NLPAttempt:
+    """Solve an NLP with given bounds, retaining solver multipliers."""
     if x0 is None:
         x0 = _default_nlp_start(lb, ub)
     else:
@@ -450,25 +509,64 @@ def _solve_nlp(evaluator, lb, ub, nlp_solver: str, max_iter: int = 200, x0=None)
         from discopt.solvers import SolveStatus
 
         if result.status == SolveStatus.OPTIMAL:
-            return result.x, float(evaluator.evaluate_objective(result.x))
+            return _NLPAttempt(
+                x=result.x,
+                objective=float(evaluator.evaluate_objective(result.x)),
+                multipliers=result.multipliers,
+                status=result.status,
+            )
 
         # Accept iteration-limited results if the solution is primal feasible.
         # The IPM may not certify dual convergence (code 4: stalled) yet still
         # find a valid primal point, which is sufficient for OA linearization cuts.
         if result.status == SolveStatus.ITERATION_LIMIT and result.x is not None:
             if _is_primal_feasible(evaluator, result.x):
-                return result.x, float(evaluator.evaluate_objective(result.x))
+                return _NLPAttempt(
+                    x=result.x,
+                    objective=float(evaluator.evaluate_objective(result.x)),
+                    multipliers=result.multipliers,
+                    status=result.status,
+                )
     except Exception:
         pass
-    return None, None
+    return _NLPAttempt(x=None, objective=None, multipliers=None)
 
 
-def _solve_nlp_relaxation(evaluator, lb, ub, nlp_solver: str, initial_point=None):
+def _solve_nlp(evaluator, lb, ub, nlp_solver: str, max_iter: int = 200, x0=None):
+    """Solve an NLP with given bounds. Returns (x, obj) or (None, None)."""
+    attempt = _solve_nlp_attempt(evaluator, lb, ub, nlp_solver, max_iter=max_iter, x0=x0)
+    return attempt.x, attempt.objective
+
+
+def _maybe_return_nlp_attempt(attempt: _NLPAttempt, return_attempt: bool):
+    if return_attempt:
+        return attempt
+    return attempt.x, attempt.objective
+
+
+def _solve_nlp_relaxation(
+    evaluator,
+    lb,
+    ub,
+    nlp_solver: str,
+    initial_point=None,
+    return_attempt: bool = False,
+):
     """Solve the continuous NLP relaxation (all integers relaxed)."""
-    return _solve_nlp(evaluator, lb, ub, nlp_solver, x0=initial_point)
+    attempt = _solve_nlp_attempt(evaluator, lb, ub, nlp_solver, x0=initial_point)
+    return _maybe_return_nlp_attempt(attempt, return_attempt)
 
 
-def _solve_nlp_subproblem(evaluator, lb, ub, int_indices, x_master, nlp_solver, initial_point=None):
+def _solve_nlp_subproblem(
+    evaluator,
+    lb,
+    ub,
+    int_indices,
+    x_master,
+    nlp_solver,
+    initial_point=None,
+    return_attempt: bool = False,
+):
     """Fix integers at master values and solve NLP subproblem."""
     sub_lb = lb.copy()
     sub_ub = ub.copy()
@@ -478,7 +576,93 @@ def _solve_nlp_subproblem(evaluator, lb, ub, int_indices, x_master, nlp_solver, 
         sub_ub[idx] = val
 
     proxy = _BoundsProxy(evaluator, sub_lb, sub_ub)
-    return _solve_nlp(proxy, sub_lb, sub_ub, nlp_solver, x0=initial_point)
+    attempt = _solve_nlp_attempt(proxy, sub_lb, sub_ub, nlp_solver, x0=initial_point)
+    return _maybe_return_nlp_attempt(attempt, return_attempt)
+
+
+def _regularization_requires_derivatives(add_regularization: Optional[str]) -> bool:
+    return add_regularization in _DERIVATIVE_REGULARIZATION_MODES
+
+
+def _constraint_multipliers_for_regularization(
+    decomp: _DecomposedProblem,
+    add_regularization: str,
+    multipliers: Optional[np.ndarray],
+) -> np.ndarray:
+    if multipliers is None:
+        if decomp.n_cons == 0:
+            return np.empty(0, dtype=np.float64)
+        raise RuntimeError(
+            f"OA {add_regularization} regularization requires NLP dual multipliers, "
+            "but the selected NLP backend did not return constraint duals."
+        )
+    lam = np.asarray(multipliers, dtype=np.float64).reshape(-1)
+    if lam.shape != (decomp.n_cons,):
+        raise RuntimeError(
+            f"OA {add_regularization} regularization received {lam.size} NLP dual "
+            f"multipliers for {decomp.n_cons} constraint rows."
+        )
+    return lam
+
+
+def _build_derivative_regularization_data(
+    decomp: _DecomposedProblem,
+    add_regularization: str,
+    x_star: np.ndarray,
+    multipliers: Optional[np.ndarray],
+) -> _DerivativeRegularizationData:
+    """Build Lagrangian gradient/Hessian data for derivative ROA modes."""
+    x = np.asarray(x_star, dtype=np.float64)
+    if x.shape != (decomp.n_vars,):
+        raise ValueError(
+            f"regularization reference point has shape {x.shape}; expected ({decomp.n_vars},)."
+        )
+
+    lam = _constraint_multipliers_for_regularization(decomp, add_regularization, multipliers)
+    try:
+        grad = np.asarray(decomp.evaluator.evaluate_gradient(x), dtype=np.float64).reshape(-1)
+        if decomp.n_cons:
+            jac = np.asarray(decomp.evaluator.evaluate_jacobian(x), dtype=np.float64)
+            grad = grad + jac.T @ lam
+    except Exception as exc:
+        raise RuntimeError(
+            f"OA {add_regularization} regularization requires NLP gradient and Jacobian "
+            "access for the Lagrangian."
+        ) from exc
+    if grad.shape != (decomp.n_vars,):
+        raise RuntimeError(
+            f"OA {add_regularization} regularization produced a Lagrangian gradient "
+            f"with shape {grad.shape}; expected ({decomp.n_vars},)."
+        )
+
+    # A fixed-integer NLP is already first-order stationary in continuous
+    # variables up to bound multipliers. Match MindtPy's intent by using the
+    # reduced Lagrangian gradient to guide only discrete moves.
+    if decomp.int_indices:
+        reduced_grad = np.zeros_like(grad)
+        reduced_grad[np.asarray(decomp.int_indices, dtype=np.intp)] = grad[decomp.int_indices]
+        grad = reduced_grad
+
+    hess = None
+    if add_regularization in _HESSIAN_REGULARIZATION_MODES:
+        try:
+            hess = np.asarray(
+                decomp.evaluator.evaluate_lagrangian_hessian(x, 1.0, lam),
+                dtype=np.float64,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"OA {add_regularization} regularization requires NLP Hessian access "
+                "for the Lagrangian."
+            ) from exc
+        if hess.shape != (decomp.n_vars, decomp.n_vars):
+            raise RuntimeError(
+                f"OA {add_regularization} regularization received a Lagrangian Hessian "
+                f"with shape {hess.shape}; expected ({decomp.n_vars}, {decomp.n_vars})."
+            )
+        hess = 0.5 * (hess + hess.T)
+
+    return _DerivativeRegularizationData(target=x.copy(), gradient=grad, hessian=hess)
 
 
 def _constraint_violation_data(evaluator, x) -> tuple[np.ndarray, np.ndarray]:
@@ -1277,14 +1461,15 @@ def _solve_regularized_master(
     oa_penalty_factor: float = 1000.0,
     oa_cut_relaxable=None,
     use_objective_epigraph: Optional[bool] = None,
+    derivative_data: Optional[_DerivativeRegularizationData] = None,
 ) -> Optional[np.ndarray]:
     """Solve the ROA level-set master and return its original-variable point.
 
     The regularized master keeps the current linear/OA master constraints,
-    adds a level constraint on the master objective estimate, and minimizes
-    distance from ``target`` over the original model variables. ``level_L1`` and
-    ``level_L_infinity`` are MILPs; ``level_L2`` is a convex MIQP and therefore
-    requires a QP backend that supports integrality.
+    adds a level constraint on the master objective estimate, and optimizes the
+    selected regularization objective. ``level_L1``, ``level_L_infinity``, and
+    ``grad_lag`` are MILPs; quadratic modes require a QP backend that supports
+    integrality.
     """
     from discopt.solvers import SolveStatus
 
@@ -1300,6 +1485,10 @@ def _solve_regularized_master(
 
     n_vars = decomp.n_vars
     target = np.clip(np.asarray(target, dtype=np.float64), decomp.lb, decomp.ub)
+    if add_regularization in _DERIVATIVE_REGULARIZATION_MODES and derivative_data is None:
+        raise RuntimeError(
+            f"OA {add_regularization} regularization requires Lagrangian derivative data."
+        )
     eta_index = n_vars if use_objective_epigraph else None
     n_base = n_vars + (1 if use_objective_epigraph else 0)
     slack_index = None
@@ -1307,14 +1496,14 @@ def _solve_regularized_master(
         slack_index = n_base
         n_base += 1
 
+    aux_start = None
     if add_regularization == "level_L1":
         aux_start = n_base
         n_master = n_base + n_vars
     elif add_regularization == "level_L_infinity":
         aux_start = n_base
         n_master = n_base + 1
-    elif add_regularization == "level_L2":
-        aux_start = n_base
+    elif add_regularization in {"level_L2", "grad_lag", "hess_lag", "hess_only_lag", "sqp_lag"}:
         n_master = n_base
     else:  # pragma: no cover - guarded by _normalize_regularization
         raise ValueError(f"Unsupported regularization mode {add_regularization!r}.")
@@ -1374,6 +1563,7 @@ def _solve_regularized_master(
     b_ub_vals.append(level_rhs)
 
     if add_regularization == "level_L1":
+        assert aux_start is not None
         for idx in range(n_vars):
             dev_idx = aux_start + idx
             row = np.zeros(n_master, dtype=np.float64)
@@ -1388,6 +1578,7 @@ def _solve_regularized_master(
             a_ub_rows.append(row)
             b_ub_vals.append(float(-target[idx]))
     elif add_regularization == "level_L_infinity":
+        assert aux_start is not None
         dev_idx = aux_start
         for idx in range(n_vars):
             row = np.zeros(n_master, dtype=np.float64)
@@ -1419,16 +1610,35 @@ def _solve_regularized_master(
     A_eq = np.asarray(a_eq_rows, dtype=np.float64) if a_eq_rows else None
     b_eq = np.asarray(b_eq_vals, dtype=np.float64) if b_eq_vals else None
 
-    if add_regularization == "level_L2":
+    if add_regularization in _QP_REGULARIZATION_MODES:
         try:
             from discopt.solvers.lp_backend import get_qp_solver
 
             solve_qp = get_qp_solver()
             Q = np.zeros((n_master, n_master), dtype=np.float64)
             c = np.zeros(n_master, dtype=np.float64)
-            for idx in range(n_vars):
-                Q[idx, idx] = 2.0
-                c[idx] = -2.0 * target[idx]
+            if add_regularization == "level_L2":
+                for idx in range(n_vars):
+                    Q[idx, idx] = 2.0
+                    c[idx] = -2.0 * target[idx]
+            elif add_regularization in {"hess_lag", "hess_only_lag"}:
+                assert derivative_data is not None  # guarded above
+                assert derivative_data.hessian is not None  # guarded by data builder
+                hess = derivative_data.hessian
+                ref = derivative_data.target
+                Q[:n_vars, :n_vars] = hess
+                c[:n_vars] = -hess @ ref
+                if add_regularization == "hess_lag":
+                    c[:n_vars] += derivative_data.gradient
+            elif add_regularization == "sqp_lag":
+                assert derivative_data is not None  # guarded above
+                # First-slice MindtPy-compatible SQP regularization: keep a
+                # fixed unit proximal weight until a public tuning option is
+                # justified by solver behavior across more benchmark cases.
+                rho = 1.0
+                for idx in range(n_vars):
+                    Q[idx, idx] = 2.0 * rho
+                c[:n_vars] = derivative_data.gradient - 2.0 * rho * derivative_data.target
             if slack_index is not None:
                 c[slack_index] = oa_penalty_factor
             result = solve_qp(
@@ -1443,17 +1653,24 @@ def _solve_regularized_master(
                 time_limit=max(float(time_limit), 0.0),
                 gap_tolerance=gap_tolerance,
             )
-        except (ImportError, ValueError) as exc:
-            raise _l2_regularization_backend_error() from exc
+        except ImportError as exc:
+            raise _qp_regularization_backend_error(add_regularization) from exc
+        except ValueError as exc:
+            raise _qp_regularization_solve_error(add_regularization) from exc
     else:
         from discopt.solvers.lp_backend import get_milp_solver
 
         solve_milp = get_milp_solver()
         c = np.zeros(n_master, dtype=np.float64)
         if add_regularization == "level_L1":
+            assert aux_start is not None
             c[aux_start : aux_start + n_vars] = 1.0
-        else:
+        elif add_regularization == "level_L_infinity":
+            assert aux_start is not None
             c[aux_start] = 1.0
+        elif add_regularization == "grad_lag":
+            assert derivative_data is not None  # guarded above
+            c[:n_vars] = derivative_data.gradient
         if slack_index is not None:
             c[slack_index] = oa_penalty_factor
         result = solve_milp(
@@ -1651,7 +1868,9 @@ def solve_oa(
     equality_relaxation : bool
         Relax nonlinear equalities to inequalities in OA cuts
         (Viswanathan & Grossmann 1990). Helps when nonlinear equalities
-        cause the MILP master to become infeasible.
+        cause the MILP master to become infeasible. This is a robustness
+        heuristic; nonlinear equalities do not satisfy the convex MINLP OA
+        guarantee unless they are affine.
     ecp_mode : bool
         Extended Cutting Plane mode (Westerlund & Pettersson 1995):
         skip NLP subproblems entirely, only add cuts at MILP master
@@ -1673,10 +1892,12 @@ def solve_oa(
         Add integer-exclusion cuts after infeasible fixed-integer NLP solves.
     feasibility_norm : {"L1", "L2", "L_infinity"}
         Violation norm minimized by the feasibility subproblem heuristic.
-    add_regularization : {None, "level_L1", "level_L2", "level_L_infinity"}
+    add_regularization : {None, "level_L1", "level_L2", "level_L_infinity",
+            "grad_lag", "hess_lag", "hess_only_lag", "sqp_lag"}
         Optional level-set regularized OA master before fixed-integer NLP solves.
-        L1 and L-infinity are solved as MILPs; L2 requires a MIQP-capable QP
-        backend.
+        L1, L-infinity, and ``grad_lag`` are solved as MILPs; quadratic modes
+        require a MIQP-capable QP backend. Derivative modes require NLP duals,
+        and Hessian modes require Lagrangian Hessian access.
     level_coef : float
         Coefficient in the open interval ``(0, 1)`` for the regularization
         level constraint. The level is
@@ -1714,8 +1935,14 @@ def solve_oa(
     evaluator = decomp.evaluator
     n_vars = decomp.n_vars
     n_cons = decomp.n_cons
-    if add_regularization == "level_L2" and decomp.int_indices:
-        _require_l2_regularization_backend()
+    derivative_regularization = _regularization_requires_derivatives(add_regularization)
+    if derivative_regularization and init_strategy == "fp" and n_cons > 0:
+        raise ValueError(
+            "OA derivative regularization needs an NLP-based initialization that returns "
+            "duals; init_strategy='fp' does not provide constraint multipliers."
+        )
+    if add_regularization in _QP_REGULARIZATION_MODES and decomp.int_indices:
+        _require_qp_regularization_backend(add_regularization)
     # The whole OA loop runs in the evaluator's minimization convention (it
     # negates a MAXIMIZE objective). Un-negate the user-facing objective/bound at
     # the return sites with this sign; the gap is convention-invariant.
@@ -1777,15 +2004,46 @@ def solve_oa(
     integer_assignments_seen: set[tuple[float, ...]] = set()
     incumbent_progress: list[float] = []
     termination_reason = None
+    incumbent_derivative_data: Optional[_DerivativeRegularizationData] = None
+
+    def accept_incumbent(
+        x: np.ndarray,
+        obj: float,
+        multipliers: Optional[np.ndarray],
+    ) -> None:
+        nonlocal UB, incumbent, incumbent_obj, incumbent_derivative_data
+        UB = float(obj)
+        incumbent = np.asarray(x, dtype=np.float64).copy()
+        incumbent_obj = float(obj)
+        if derivative_regularization:
+            assert add_regularization is not None
+            incumbent_derivative_data = _build_derivative_regularization_data(
+                decomp,
+                add_regularization,
+                incumbent,
+                multipliers,
+            )
 
     if init_strategy == "rNLP":
-        x_relax, obj_relax = _solve_nlp_relaxation(
-            evaluator,
-            decomp.lb,
-            decomp.ub,
-            nlp_solver,
-            initial_point=initial_point,
-        )
+        relax_attempt = None
+        if derivative_regularization:
+            relax_attempt = _solve_nlp_relaxation(
+                evaluator,
+                decomp.lb,
+                decomp.ub,
+                nlp_solver,
+                initial_point=initial_point,
+                return_attempt=True,
+            )
+            x_relax, obj_relax = relax_attempt.x, relax_attempt.objective
+        else:
+            x_relax, obj_relax = _solve_nlp_relaxation(
+                evaluator,
+                decomp.lb,
+                decomp.ub,
+                nlp_solver,
+                initial_point=initial_point,
+            )
 
         if x_relax is not None:
             _add_oa_cuts(
@@ -1807,9 +2065,8 @@ def solve_oa(
                 abs(x_relax[idx] - round(x_relax[idx])) < 1e-5 for idx in decomp.int_indices
             )
             if is_int_feasible and obj_relax is not None:
-                UB = obj_relax
-                incumbent = x_relax.copy()
-                incumbent_obj = obj_relax
+                multipliers = relax_attempt.multipliers if relax_attempt is not None else None
+                accept_incumbent(x_relax, obj_relax, multipliers)
         else:
             # NLP relaxation failed; generate initial cuts at the deterministic midpoint.
             x_mid = _default_nlp_start(decomp.lb, decomp.ub)
@@ -1858,9 +2115,7 @@ def solve_oa(
             oa_cut_relaxable=oa_cut_relaxable,
         )
         if fp_result.best_x is not None and fp_result.best_obj is not None:
-            UB = fp_result.best_obj
-            incumbent = fp_result.best_x.copy()
-            incumbent_obj = fp_result.best_obj
+            accept_incumbent(fp_result.best_x, fp_result.best_obj, None)
     else:
         x_seed = _build_initial_strategy_point(decomp, init_strategy, initial_point)
         if ecp_mode:
@@ -1879,19 +2134,31 @@ def solve_oa(
                 oa_cut_relaxable=oa_cut_relaxable,
             )
             if _is_primal_feasible(evaluator, x_seed):
-                UB = float(evaluator.evaluate_objective(x_seed))
-                incumbent = x_seed.copy()
-                incumbent_obj = UB
+                accept_incumbent(x_seed, float(evaluator.evaluate_objective(x_seed)), None)
         else:
-            x_init, obj_init = _solve_nlp_subproblem(
-                evaluator,
-                decomp.lb,
-                decomp.ub,
-                decomp.int_indices,
-                x_seed,
-                nlp_solver,
-                initial_point=x_seed,
-            )
+            init_attempt = None
+            if derivative_regularization:
+                init_attempt = _solve_nlp_subproblem(
+                    evaluator,
+                    decomp.lb,
+                    decomp.ub,
+                    decomp.int_indices,
+                    x_seed,
+                    nlp_solver,
+                    initial_point=x_seed,
+                    return_attempt=True,
+                )
+                x_init, obj_init = init_attempt.x, init_attempt.objective
+            else:
+                x_init, obj_init = _solve_nlp_subproblem(
+                    evaluator,
+                    decomp.lb,
+                    decomp.ub,
+                    decomp.int_indices,
+                    x_seed,
+                    nlp_solver,
+                    initial_point=x_seed,
+                )
             x_cut = x_init if x_init is not None else x_seed
             _add_oa_cuts(
                 evaluator,
@@ -1908,9 +2175,8 @@ def solve_oa(
                 oa_cut_relaxable=oa_cut_relaxable,
             )
             if x_init is not None and obj_init is not None:
-                UB = obj_init
-                incumbent = x_init.copy()
-                incumbent_obj = obj_init
+                multipliers = init_attempt.multipliers if init_attempt is not None else None
+                accept_incumbent(x_init, obj_init, multipliers)
 
     # 3. Main OA loop
     for iteration in range(max_iterations):
@@ -2012,6 +2278,14 @@ def solve_oa(
                 regularization_lb += float(decomp.obj_coeffs[1])
             objective_level = (1.0 - level_coef) * float(UB) + level_coef * float(regularization_lb)
             remaining_time = max(0.0, time_limit - (time.perf_counter() - t_start))
+            derivative_data = None
+            if derivative_regularization:
+                if incumbent_derivative_data is None:
+                    raise RuntimeError(
+                        f"OA {add_regularization} regularization requires Lagrangian "
+                        "derivative data from an incumbent NLP solve."
+                    )
+                derivative_data = incumbent_derivative_data
             x_regularized = _solve_regularized_master(
                 decomp,
                 oa_A_rows,
@@ -2026,6 +2300,7 @@ def solve_oa(
                 oa_penalty_factor=oa_penalty_factor,
                 oa_cut_relaxable=oa_cut_relaxable,
                 use_objective_epigraph=(not decomp.obj_is_linear and decomp.oa_objective_is_convex),
+                derivative_data=derivative_data,
             )
             if x_regularized is not None:
                 nlp_initial_point = x_regularized
@@ -2078,21 +2353,34 @@ def solve_oa(
             continue
 
         # c. Fix integers, solve NLP subproblem
-        x_nlp, obj_nlp = _solve_nlp_subproblem(
-            evaluator,
-            decomp.lb,
-            decomp.ub,
-            decomp.int_indices,
-            x_master,
-            nlp_solver,
-            initial_point=nlp_initial_point,
-        )
+        nlp_attempt = None
+        if derivative_regularization:
+            nlp_attempt = _solve_nlp_subproblem(
+                evaluator,
+                decomp.lb,
+                decomp.ub,
+                decomp.int_indices,
+                x_master,
+                nlp_solver,
+                initial_point=nlp_initial_point,
+                return_attempt=True,
+            )
+            x_nlp, obj_nlp = nlp_attempt.x, nlp_attempt.objective
+        else:
+            x_nlp, obj_nlp = _solve_nlp_subproblem(
+                evaluator,
+                decomp.lb,
+                decomp.ub,
+                decomp.int_indices,
+                x_master,
+                nlp_solver,
+                initial_point=nlp_initial_point,
+            )
 
         if x_nlp is not None:
             if obj_nlp < UB:
-                UB = obj_nlp
-                incumbent = x_nlp.copy()
-                incumbent_obj = obj_nlp
+                multipliers = nlp_attempt.multipliers if nlp_attempt is not None else None
+                accept_incumbent(x_nlp, obj_nlp, multipliers)
 
             # Generate OA cuts at NLP solution
             _add_oa_cuts(
