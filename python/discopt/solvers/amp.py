@@ -78,6 +78,17 @@ def _normalize_nlp_solver_sequence(nlp_solver: str | Sequence[str]) -> list[str]
     return list(nlp_solver)
 
 
+def _continuous_nlp_backend_sequence(nlp_solver: str) -> list[str]:
+    """Ordered NLP backends for a pure-continuous candidate.
+
+    When ``nlp_solver`` is ``"ipm"`` and cyipopt is available, try Ipopt first
+    and fall back to POUNCE; otherwise keep the single requested backend.
+    """
+    if nlp_solver == "ipm" and _has_cyipopt():
+        return ["ipopt", "ipm"]
+    return [nlp_solver]
+
+
 def _build_x_dict(x_flat: np.ndarray, model: Model) -> dict:
     """Convert flat solution vector to {var_name: array} dict."""
     result = {}
@@ -587,9 +598,7 @@ def _recover_pure_continuous_solution(
     if remaining <= 0.0:
         return None
 
-    solver_sequence = [nlp_solver]
-    if nlp_solver == "ipm" and _has_cyipopt():
-        solver_sequence = ["ipopt", "ipm"]
+    solver_sequence = _continuous_nlp_backend_sequence(nlp_solver)
 
     best_x: Optional[np.ndarray] = None
     best_obj: Optional[float] = None
@@ -847,9 +856,7 @@ def _solve_best_nlp_candidate(
 ) -> tuple[Optional[np.ndarray], Optional[float]]:
     """Improve the incumbent from Alpine-ordered local NLP starts."""
     if all(v.var_type == VarType.CONTINUOUS for v in model._variables):
-        local_nlp_solver: str | Sequence[str] = nlp_solver
-        if nlp_solver == "ipm" and _has_cyipopt():
-            local_nlp_solver = ("ipopt", "ipm")
+        local_nlp_solver: str | Sequence[str] = _continuous_nlp_backend_sequence(nlp_solver)
         starts: list[np.ndarray] = []
         for seed in (incumbent, initial_point, x0):
             if seed is not None:

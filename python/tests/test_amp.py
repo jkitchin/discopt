@@ -2526,7 +2526,7 @@ def test_best_nlp_candidate_uses_ipopt_fallback_for_pure_continuous_ipm(monkeypa
         nlp_solver="ipm",
     )
 
-    assert seen["nlp_solver"] == ("ipopt", "ipm")
+    assert seen["nlp_solver"] == ["ipopt", "ipm"]
 
 
 def test_best_nlp_candidate_rejects_noninteger_nlp_return(monkeypatch):
