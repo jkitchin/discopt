@@ -6,6 +6,12 @@ with extensions for feasibility cuts, equality relaxation, and ECP mode.
 Decomposes MINLP into alternating NLP subproblems (with fixed integers)
 and MILP master problems (with accumulated linearization cuts).
 
+The convex-case OA guarantee applies when the minimization objective is
+convex, nonlinear inequalities are written in their convex orientation, and
+equalities are affine. Nonlinear equalities such as process equations make the
+model nonconvex for OA purposes; equality relaxation is a robustness heuristic
+and must not be read as restoring the convex-case convergence guarantee.
+
 References:
     Duran & Grossmann, Math. Prog. 36, 1986. DOI: 10.1007/BF02592064
     Fletcher & Leyffer, Math. Prog. 66, 1994. DOI: 10.1007/BF01581153
@@ -1848,7 +1854,9 @@ def solve_oa(
     equality_relaxation : bool
         Relax nonlinear equalities to inequalities in OA cuts
         (Viswanathan & Grossmann 1990). Helps when nonlinear equalities
-        cause the MILP master to become infeasible.
+        cause the MILP master to become infeasible. This is a robustness
+        heuristic; nonlinear equalities do not satisfy the convex MINLP OA
+        guarantee unless they are affine.
     ecp_mode : bool
         Extended Cutting Plane mode (Westerlund & Pettersson 1995):
         skip NLP subproblems entirely, only add cuts at MILP master

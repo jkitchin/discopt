@@ -70,8 +70,8 @@ def _mindtpy_constraint_qualification_example(name="mindtpy_constraint_qualifica
     return m
 
 
-def _mindtpy_eight_process_flowsheet(name="mindtpy_eight_process"):
-    """Native port of Pyomo MindtPy's convex eight-process flowsheet fixture."""
+def _mindtpy_eight_process_flowsheet(name="mindtpy_eight_process", *, convex=True):
+    """Native port of Pyomo MindtPy's eight-process flowsheet fixture."""
     m = dm.Model(name)
     stream_ubs = np.full(24, 10.0, dtype=float)
     for stream, ub in {
@@ -100,11 +100,18 @@ def _mindtpy_eight_process_flowsheet(name="mindtpy_eight_process"):
     m.subject_to(1.25 * (x_stream(12) + x_stream(14)) == x_stream(13))
     m.subject_to(x_stream(15) == 2 * x_stream(16))
 
-    m.subject_to(dm.exp(x_stream(3)) - 1 <= x_stream(2))
-    m.subject_to(dm.exp(x_stream(5) / 1.2) - 1 <= x_stream(4))
-    m.subject_to(dm.exp(x_stream(22)) - 1 <= x_stream(21))
-    m.subject_to(dm.exp(x_stream(18)) - 1 <= x_stream(10) + x_stream(17))
-    m.subject_to(dm.exp(x_stream(20) / 1.5) - 1 <= x_stream(19))
+    if convex:
+        m.subject_to(dm.exp(x_stream(3)) - 1 <= x_stream(2))
+        m.subject_to(dm.exp(x_stream(5) / 1.2) - 1 <= x_stream(4))
+        m.subject_to(dm.exp(x_stream(22)) - 1 <= x_stream(21))
+        m.subject_to(dm.exp(x_stream(18)) - 1 <= x_stream(10) + x_stream(17))
+        m.subject_to(dm.exp(x_stream(20) / 1.5) - 1 <= x_stream(19))
+    else:
+        m.subject_to(dm.exp(x_stream(3)) - 1 == x_stream(2))
+        m.subject_to(dm.exp(x_stream(5) / 1.2) - 1 == x_stream(4))
+        m.subject_to(dm.exp(x_stream(22)) - 1 == x_stream(21))
+        m.subject_to(dm.exp(x_stream(18)) - 1 == x_stream(10) + x_stream(17))
+        m.subject_to(dm.exp(x_stream(20) / 1.5) - 1 == x_stream(19))
 
     m.subject_to(x_stream(13) == x_stream(19) + x_stream(21))
     m.subject_to(x_stream(17) == x_stream(9) + x_stream(16) + x_stream(25))
@@ -1213,6 +1220,20 @@ _MINDTPY_REGULARIZATION_MODES = [
     "hess_only_lag",
     "sqp_lag",
 ]
+
+
+def test_mip_nlp_mindtpy_eight_process_convex_flag_controls_oa_guarantee():
+    from discopt._jax.convexity import classify_oa_cut_convexity
+
+    convex = _mindtpy_eight_process_flowsheet("mindtpy_eight_process_convex", convex=True)
+    equality = _mindtpy_eight_process_flowsheet("mindtpy_eight_process_eq", convex=False)
+
+    convex_oa = classify_oa_cut_convexity(convex)
+    equality_oa = classify_oa_cut_convexity(equality)
+
+    assert all(convex_oa.constraint_mask)
+    assert sum(equality_oa.constraint_mask) == len(equality_oa.constraint_mask) - 5
+    assert [equality_oa.constraint_mask[i] for i in range(3, 8)] == [False] * 5
 
 
 @pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
