@@ -502,19 +502,23 @@ def test_oa_max_binary_seed_sets_binaries_and_general_integer_fallback():
         ("level-l2", "level_L2"),
         ("level_Linf", "level_L_infinity"),
         ("level_L_infinity", "level_L_infinity"),
+        ("grad-lag", "grad_lag"),
+        ("hess_lag", "hess_lag"),
+        ("hess-only-lag", "hess_only_lag"),
+        ("sqp_lag", "sqp_lag"),
     ],
 )
-def test_oa_regularization_normalizes_supported_level_modes(raw, expected):
+def test_oa_regularization_normalizes_supported_modes(raw, expected):
     from discopt.solvers.oa import _normalize_regularization
 
     assert _normalize_regularization(raw) == expected
 
 
-def test_oa_regularization_rejects_reserved_future_modes():
+def test_oa_regularization_rejects_unknown_modes():
     from discopt.solvers.oa import _normalize_regularization
 
     with pytest.raises(ValueError, match="Unknown add_regularization"):
-        _normalize_regularization("hess_lag")
+        _normalize_regularization("not_a_regularization")
 
 
 def test_oa_regularization_rejects_ecp_mode():
@@ -617,6 +621,153 @@ def test_oa_regularized_master_builds_l2_qp_distance_objective(monkeypatch):
     assert captured["b_ub"][0] == pytest.approx(2.0)
 
 
+def test_oa_regularized_master_builds_grad_lag_objective(monkeypatch):
+    import discopt.solvers.lp_backend as lp_backend
+    from discopt.solvers import MILPResult, SolveStatus
+    from discopt.solvers.oa import (
+        _decompose_model,
+        _DerivativeRegularizationData,
+        _solve_regularized_master,
+    )
+
+    decomp = _decompose_model(_mixed_discrete_model("regularized_grad_lag"))
+    captured = {}
+    data = _DerivativeRegularizationData(
+        target=np.array([0.5, 1.0, 0.0, 2.0], dtype=float),
+        gradient=np.array([1.0, -2.0, 3.0, -4.0], dtype=float),
+    )
+
+    def fake_milp(**kwargs):
+        captured.update(kwargs)
+        return MILPResult(status=SolveStatus.OPTIMAL, x=np.array([0.0, 1.0, 0.0, 0.0]))
+
+    monkeypatch.setattr(lp_backend, "get_milp_solver", lambda: fake_milp)
+
+    x_regularized = _solve_regularized_master(
+        decomp,
+        [],
+        [],
+        add_regularization="grad_lag",
+        target=data.target,
+        objective_level=2.0,
+        time_limit=10.0,
+        gap_tolerance=1e-4,
+        derivative_data=data,
+    )
+
+    assert x_regularized.tolist() == pytest.approx([0.0, 1.0, 0.0, 0.0])
+    assert captured["c"].tolist() == pytest.approx([1.0, -2.0, 3.0, -4.0])
+    assert captured["integrality"].tolist() == decomp.integrality.tolist()
+    assert captured["A_ub"][0, :4].tolist() == pytest.approx([1.0, 1.0, 1.0, 1.0])
+    assert captured["b_ub"][0] == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_diag", "expected_c"),
+    [
+        ("hess_lag", [2.0, 4.0, 6.0, 8.0], [0.0, -6.0, 3.0, -20.0]),
+        ("hess_only_lag", [2.0, 4.0, 6.0, 8.0], [-1.0, -4.0, 0.0, -16.0]),
+        ("sqp_lag", [2.0, 2.0, 2.0, 2.0], [0.0, -4.0, 3.0, -8.0]),
+    ],
+)
+def test_oa_regularized_master_builds_derivative_qp_objectives(
+    monkeypatch, mode, expected_diag, expected_c
+):
+    import discopt.solvers.lp_backend as lp_backend
+    from discopt.solvers import QPResult, SolveStatus
+    from discopt.solvers.oa import (
+        _decompose_model,
+        _DerivativeRegularizationData,
+        _solve_regularized_master,
+    )
+
+    decomp = _decompose_model(_mixed_discrete_model(f"regularized_{mode}"))
+    captured = {}
+    data = _DerivativeRegularizationData(
+        target=np.array([0.5, 1.0, 0.0, 2.0], dtype=float),
+        gradient=np.array([1.0, -2.0, 3.0, -4.0], dtype=float),
+        hessian=np.diag([2.0, 4.0, 6.0, 8.0]),
+    )
+
+    def fake_qp(**kwargs):
+        captured.update(kwargs)
+        return QPResult(status=SolveStatus.OPTIMAL, x=np.array([0.0, 1.0, 0.0, 0.0]))
+
+    monkeypatch.setattr(lp_backend, "get_qp_solver", lambda: fake_qp)
+
+    x_regularized = _solve_regularized_master(
+        decomp,
+        [],
+        [],
+        add_regularization=mode,
+        target=data.target,
+        objective_level=2.0,
+        time_limit=10.0,
+        gap_tolerance=1e-4,
+        derivative_data=data,
+    )
+
+    assert x_regularized.tolist() == pytest.approx([0.0, 1.0, 0.0, 0.0])
+    assert captured["Q"].shape == (4, 4)
+    assert np.diag(captured["Q"]).tolist() == pytest.approx(expected_diag)
+    assert captured["c"].tolist() == pytest.approx(expected_c)
+    assert captured["integrality"].tolist() == decomp.integrality.tolist()
+
+
+def test_oa_derivative_regularization_requires_duals_from_initial_incumbent(monkeypatch):
+    import discopt.solvers.oa as oa_module
+
+    model = _binary_model("regularized_missing_duals")
+    y = model._variables[0]
+    model.subject_to(y >= 0)
+
+    def fake_solve_nlp_relaxation(
+        evaluator,
+        lb,
+        ub,
+        nlp_solver,
+        initial_point=None,
+        return_attempt=False,
+    ):
+        attempt = oa_module._NLPAttempt(
+            x=np.array([0.0], dtype=float),
+            objective=0.0,
+            multipliers=None,
+        )
+        if return_attempt:
+            return attempt
+        return attempt.x, attempt.objective
+
+    monkeypatch.setattr(oa_module, "_solve_nlp_relaxation", fake_solve_nlp_relaxation)
+    monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+
+    with pytest.raises(RuntimeError, match="requires NLP dual multipliers"):
+        oa_module.solve_oa(
+            model,
+            add_regularization="grad_lag",
+            max_iterations=0,
+        )
+
+
+def test_oa_hessian_regularization_requires_hessian_access(monkeypatch):
+    from discopt.solvers.oa import _build_derivative_regularization_data, _decompose_model
+
+    decomp = _decompose_model(_mixed_discrete_model("regularized_missing_hessian"))
+
+    def missing_hessian(*args, **kwargs):
+        raise AttributeError("no hessian")
+
+    monkeypatch.setattr(decomp.evaluator, "evaluate_lagrangian_hessian", missing_hessian)
+
+    with pytest.raises(RuntimeError, match="requires NLP Hessian access"):
+        _build_derivative_regularization_data(
+            decomp,
+            "hess_only_lag",
+            np.array([0.5, 1.0, 0.0, 2.0], dtype=float),
+            np.empty(0, dtype=float),
+        )
+
+
 def test_oa_l2_regularization_requires_miqp_backend(monkeypatch):
     import discopt.solvers.lp_backend as lp_backend
     from discopt.solvers.oa import _decompose_model, _solve_regularized_master
@@ -654,6 +805,24 @@ def test_oa_l2_regularization_checks_backend_before_iterations(monkeypatch):
         solve_oa(
             _binary_model("regularized_l2_no_backend_solve"),
             add_regularization="level_L2",
+            max_iterations=0,
+        )
+
+
+@pytest.mark.parametrize("mode", ["hess_lag", "hess_only_lag", "sqp_lag"])
+def test_oa_derivative_qp_regularization_checks_backend_before_iterations(monkeypatch, mode):
+    import discopt.solvers.lp_backend as lp_backend
+    from discopt.solvers.oa import solve_oa
+
+    def missing_qp():
+        raise ImportError("no qp backend")
+
+    monkeypatch.setattr(lp_backend, "get_qp_solver", missing_qp)
+
+    with pytest.raises(RuntimeError, match="QP/MIQP-capable backend"):
+        solve_oa(
+            _binary_model(f"regularized_{mode}_no_backend_solve"),
+            add_regularization=mode,
             max_iterations=0,
         )
 
@@ -907,6 +1076,23 @@ def test_mip_nlp_regularized_oa_level_variants_solve_mindtpy_baseline(add_regula
         solver="mip-nlp",
         mip_nlp_method="oa",
         add_regularization=add_regularization,
+        time_limit=60,
+        max_nodes=100,
+    )
+
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(3.5, abs=1e-3)
+    assert result.bound == pytest.approx(3.5, abs=1e-3)
+    assert result.gap == pytest.approx(0.0, abs=1e-9)
+    assert np.asarray(result.x["y"]).tolist() == pytest.approx([0.0, 1.0, 0.0])
+
+
+@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
+def test_mip_nlp_regularized_oa_grad_lag_solves_mindtpy_baseline():
+    result = _mindtpy_simple_minlp("mindtpy_roa_grad_lag").solve(
+        solver="mip-nlp",
+        mip_nlp_method="oa",
+        add_regularization="grad_lag",
         time_limit=60,
         max_nodes=100,
     )

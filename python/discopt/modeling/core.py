@@ -2792,8 +2792,11 @@ class Model:
             ``add_no_good_cuts``, ``feasibility_norm``, ``add_regularization``,
             ``level_coef``, ``stalling_limit``, ``cycling_check``, and
             ``init_strategy`` take precedence over duplicate keys in
-            ``mip_nlp_options``. Supported initialization strategies are
-            ``"rNLP"``, ``"initial_binary"``, ``"max_binary"``, and ``"fp"``.
+            ``mip_nlp_options``. Supported ``add_regularization`` values are
+            ``"level_L1"``, ``"level_L2"``, ``"level_L_infinity"``,
+            ``"grad_lag"``, ``"hess_lag"``, ``"hess_only_lag"``, and
+            ``"sqp_lag"``. Supported initialization strategies are ``"rNLP"``,
+            ``"initial_binary"``, ``"max_binary"``, and ``"fp"``.
             The ``mip_nlp_method`` selector determines the
             effective ``ecp_mode`` and cannot be overridden by
             ``mip_nlp_options``.
