@@ -5071,6 +5071,40 @@ def solve_model(
                     _cut_pool.age_cuts(result_sols[i])
             _cut_pool.purge_inactive(max_age=15)
 
+        # --- Root-optimality short-circuit for primal heuristics (#330) ---
+        # At the root the minimum finite relaxation bound in this batch is a
+        # valid *global* dual bound. Once a heuristic has injected an incumbent
+        # that meets it (same gap test as ``_gap_converged``), the optimum is
+        # certified and every remaining root primal heuristic is provably-wasted
+        # work — no feasible point exists below the bound, so none can improve
+        # the incumbent. Skipping them changes neither the returned optimum nor
+        # its certification, and only fires on instances already solved at the
+        # root (the trivially-easy ones); on harder instances the root gap stays
+        # open and every heuristic runs exactly as before, so there is no
+        # large-instance regression. Restricted to ``iteration == 0`` because the
+        # batch minimum is a valid global bound only there.
+        _batch_relax_lb = np.inf
+        if iteration == 0:
+            for _ii in range(n_batch):
+                _lb_ii = result_lbs[_ii]
+                if _lb_ii >= _SENTINEL_THRESHOLD or not np.isfinite(_lb_ii):
+                    continue
+                if _lb_ii < _batch_relax_lb:
+                    _batch_relax_lb = float(_lb_ii)
+
+        def _root_optimum_proven() -> bool:
+            if iteration != 0 or not np.isfinite(_batch_relax_lb):
+                return False
+            _inc = tree.incumbent()
+            if _inc is None or not np.isfinite(_inc[1]):
+                return False
+            _ub = float(_inc[1])
+            _abs_gap = max(0.0, _ub - _batch_relax_lb)
+            if _abs_gap <= _DEFAULT_ABS_GAP_TOL:
+                return True
+            _denom = max(abs(_ub), abs(_batch_relax_lb), 1e-10)
+            return _abs_gap / _denom <= gap_tolerance
+
         # --- Feasibility pump after root node ---
         if iteration == 0 and not _fp_ran:
             _fp_ran = True
@@ -5263,6 +5297,7 @@ def solve_model(
             and not _model_is_convex
             and _subnlp_calls < subnlp_max_calls
             and (iteration == 0 or iteration % max(1, subnlp_frequency) == 0)
+            and not _root_optimum_proven()
         ):
             from discopt._jax.primal_heuristics import subnlp as _subnlp
 
@@ -5340,6 +5375,11 @@ def solve_model(
                 for _loop_idx, _i in enumerate(_try_idxs):
                     if _subnlp_calls >= subnlp_max_calls:
                         break
+                    # The root tries every relaxation candidate to cover all
+                    # disjuncts; once one has certified the optimum (incumbent ==
+                    # global root bound) the rest are wasted (#330).
+                    if _loop_idx > 0 and _root_optimum_proven():
+                        break
                     # Deadline enforcement: each subnlp is a round-and-repair NLP
                     # search (seconds on large models). At the root ``_try_idxs``
                     # can hold many candidates, so without a stop the loop runs
@@ -5395,6 +5435,7 @@ def solve_model(
             and _subnlp_backend_fn is not None
             and not _model_is_convex
             and _subnlp_calls < subnlp_max_calls
+            and not _root_optimum_proven()
         ):
             from discopt._jax.primal_heuristics import enumerate_binary_seeds_subnlp
 
@@ -5449,7 +5490,7 @@ def solve_model(
         # NOT the subnlp iteration schedule, which can skip the window in which the
         # improving incumbent first appears and was leaving the better assignment on
         # the table on small instances that finish before the next scheduled tick).
-        if _subnlp_backend_fn is not None and not _model_is_convex:
+        if _subnlp_backend_fn is not None and not _model_is_convex and not _root_optimum_proven():
             _inc_box = tree.incumbent()
             if (
                 _inc_box is not None
