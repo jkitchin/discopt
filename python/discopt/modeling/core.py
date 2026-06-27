@@ -2783,8 +2783,8 @@ class Model:
             ``obbt_at_root``, ``obbt_with_cutoff``, ``alphabb_cutoff_obbt``,
             and ``obbt_time_limit``.
             Use ``solver="mip-nlp"`` to select the MIP-NLP decomposition
-            family. Current implemented ``mip_nlp_method`` values are ``"oa"``
-            and ``"ecp"``; ``"goa"``, ``"roa"``, ``"fp"``, and
+            family. Current implemented ``mip_nlp_method`` values are ``"oa"``,
+            ``"ecp"``, and ``"fp"``; ``"goa"``, ``"roa"``, and
             ``"lp_nlp_bb"`` are reserved until their dedicated implementations
             land. Top-level OA/ECP options such as ``equality_relaxation``,
             ``ecp_mode``, ``feasibility_cuts``, ``heuristic_nonconvex``,
@@ -2792,8 +2792,8 @@ class Model:
             ``add_no_good_cuts``, ``feasibility_norm``, ``stalling_limit``,
             ``cycling_check``, and ``init_strategy`` take precedence over
             duplicate keys in ``mip_nlp_options``. Supported initialization
-            strategies are ``"rNLP"``, ``"initial_binary"``, and
-            ``"max_binary"``. The ``mip_nlp_method`` selector determines the
+            strategies are ``"rNLP"``, ``"initial_binary"``, ``"max_binary"``,
+            and ``"fp"``. The ``mip_nlp_method`` selector determines the
             effective ``ecp_mode`` and cannot be overridden by
             ``mip_nlp_options``.
         validate : bool, default False

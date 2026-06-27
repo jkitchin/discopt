@@ -2180,7 +2180,7 @@ def solve_model(
         Optional global-solver selector. Use ``"amp"`` to dispatch to
         Adaptive Multivariate Partitioning instead of branch-and-bound.
         Use ``"mip-nlp"`` to dispatch to the MIP-NLP decomposition family
-        (OA/ECP now; GOA/ROA/FP/LP-NLP-BB are reserved method selectors).
+        (OA/ECP/FP now; GOA/ROA/LP-NLP-BB are reserved method selectors).
         Use ``"gp"`` to dispatch to the geometric-programming fast path:
         the model is checked for GP structure (posynomial/monomial
         objective and constraints over strictly-positive continuous
@@ -2206,8 +2206,8 @@ def solve_model(
         ``obbt_with_cutoff``, ``alphabb_cutoff_obbt``, and ``obbt_time_limit``.
     solver="mip-nlp" options
         The MIP-NLP backend accepts ``mip_nlp_method`` and
-        ``mip_nlp_options``. Current implemented methods are ``"oa"`` and
-        ``"ecp"``; ``"goa"``, ``"roa"``, ``"fp"``, and ``"lp_nlp_bb"`` raise
+        ``mip_nlp_options``. Current implemented methods are ``"oa"``,
+        ``"ecp"``, and ``"fp"``; ``"goa"``, ``"roa"``, and ``"lp_nlp_bb"`` raise
         ``NotImplementedError`` until their dedicated implementations land.
         Existing OA options ``equality_relaxation``, ``ecp_mode``,
         ``feasibility_cuts``, ``heuristic_nonconvex``, ``add_slack``,
@@ -2216,7 +2216,7 @@ def solve_model(
         initialization option ``init_strategy`` may be passed as top-level
         aliases and take precedence over duplicate keys in ``mip_nlp_options``.
         Supported ``init_strategy`` values are ``"rNLP"``,
-        ``"initial_binary"``, and ``"max_binary"``. The
+        ``"initial_binary"``, ``"max_binary"``, and ``"fp"``. The
         ``mip_nlp_method`` selector determines the effective ``ecp_mode`` and
         cannot be overridden by ``mip_nlp_options``; a conflicting top-level
         ``ecp_mode`` and explicit ``mip_nlp_method`` raises ``ValueError``.

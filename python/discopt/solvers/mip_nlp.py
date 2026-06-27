@@ -6,9 +6,8 @@ from typing import Any, Optional
 
 from discopt.modeling.core import Model, SolveResult
 
-_IMPLEMENTED_METHODS = frozenset({"oa", "ecp"})
+_IMPLEMENTED_METHODS = frozenset({"oa", "ecp", "fp"})
 _RESERVED_METHOD_ISSUES = {
-    "fp": "#115",
     "roa": "#116/#117",
     "goa": "#118",
     "lp_nlp_bb": "#119",
@@ -34,6 +33,11 @@ _OA_OPTION_KEYS = {
 _OA_OPTION_ALIASES = {
     "OA_penalty_factor": "oa_penalty_factor",
 }
+_FP_OPTION_KEYS = {
+    "add_no_good_cuts",
+    "feasibility_norm",
+    "init_strategy",
+}
 
 
 def _normalize_method(method: Any) -> str:
@@ -44,7 +48,7 @@ def _normalize_method(method: Any) -> str:
     if normalized not in SUPPORTED_METHODS:
         reserved = ", ".join(sorted(_RESERVED_METHOD_ISSUES))
         raise ValueError(
-            f"Unknown mip_nlp_method={method!r}. Choose 'oa' or 'ecp'. "
+            f"Unknown mip_nlp_method={method!r}. Choose 'oa', 'ecp', or 'fp'. "
             f"Reserved future methods are: {reserved}."
         )
     return normalized
@@ -80,13 +84,36 @@ def solve_mip_nlp(
             del options[alias]
 
     if method in _IMPLEMENTED_METHODS:
-        unexpected = sorted(set(options) - _OA_OPTION_KEYS)
+        supported_keys = _FP_OPTION_KEYS if method == "fp" else _OA_OPTION_KEYS
+        unexpected = sorted(set(options) - supported_keys)
         if unexpected:
             raise ValueError(
-                "Unsupported MIP-NLP OA/ECP option(s): "
+                f"Unsupported MIP-NLP {method} option(s): "
                 + ", ".join(unexpected)
                 + ". Supported options are: "
-                + ", ".join(sorted(_OA_OPTION_KEYS))
+                + ", ".join(sorted(supported_keys))
+            )
+
+        if method == "fp":
+            from discopt.solvers.oa import _normalize_init_strategy, solve_feasibility_pump
+
+            if "init_strategy" in options:
+                init_strategy = _normalize_init_strategy(options["init_strategy"])
+                if init_strategy != "fp":
+                    raise ValueError(
+                        "mip_nlp_method='fp' only accepts init_strategy='fp' when "
+                        "an initialization strategy is supplied."
+                    )
+
+            return solve_feasibility_pump(
+                model,
+                time_limit=time_limit,
+                gap_tolerance=gap_tolerance,
+                max_iterations=max_iterations,
+                nlp_solver=nlp_solver,
+                initial_point=initial_point,
+                add_no_good_cuts=bool(options.get("add_no_good_cuts", True)),
+                feasibility_norm=options.get("feasibility_norm", "L_infinity"),
             )
 
         from discopt.solvers.oa import _normalize_init_strategy, solve_oa
@@ -114,5 +141,5 @@ def solve_mip_nlp(
     raise NotImplementedError(
         f"mip_nlp_method={method!r} is reserved for a future MIP-NLP "
         f"implementation tracked in {_RESERVED_METHOD_ISSUES[method]}; currently "
-        "implemented methods are 'oa' and 'ecp'."
+        "implemented methods are 'oa', 'ecp', and 'fp'."
     )
