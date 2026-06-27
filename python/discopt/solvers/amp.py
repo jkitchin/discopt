@@ -27,7 +27,7 @@ import time
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib.util import find_spec
-from typing import Any, Callable, Optional, cast
+from typing import Any, Callable, Optional, Sequence, cast
 
 import numpy as np
 
@@ -69,6 +69,13 @@ _SMALL_INT_FALLBACK_MAX_ASSIGNMENTS = 128
 def _has_cyipopt() -> bool:
     """Return True when cyipopt is importable in the active environment."""
     return find_spec("cyipopt") is not None
+
+
+def _normalize_nlp_solver_sequence(nlp_solver: str | Sequence[str]) -> list[str]:
+    """Return the ordered local NLP backends to try for one candidate."""
+    if isinstance(nlp_solver, str):
+        return [nlp_solver]
+    return list(nlp_solver)
 
 
 def _build_x_dict(x_flat: np.ndarray, model: Model) -> dict:
@@ -483,7 +490,7 @@ def _solve_nlp_subproblem(
     x0: np.ndarray,
     lb: np.ndarray,
     ub: np.ndarray,
-    nlp_solver: str = "ipm",
+    nlp_solver: str | Sequence[str] = "ipm",
     time_limit: Optional[float] = None,
 ) -> tuple[Optional[np.ndarray], Optional[float]]:
     """Solve the NLP relaxation with given bounds.
@@ -500,10 +507,12 @@ def _solve_nlp_subproblem(
         from discopt.solver import _BoundOverrideEvaluator
 
         backend_evaluator = _BoundOverrideEvaluator(evaluator, lb, ub)
-        # "ipm"/"pounce" both route to POUNCE (a robust pure-Rust Ipopt port),
-        # so no separate Ipopt retry is needed for AMP's tightly-fixed integer
-        # subproblems. An explicit nlp_solver="ipopt" still uses cyipopt.
-        solver_sequence = [nlp_solver]
+        # "ipm"/"pounce" both route to POUNCE (a robust pure-Rust Ipopt port).
+        # Callers may pass a sequence when a pure-continuous AMP candidate should
+        # try cyipopt before falling back to POUNCE.
+        solver_sequence = _normalize_nlp_solver_sequence(nlp_solver)
+
+        from discopt.solvers import SolveStatus
 
         result = None
         for solver_name in solver_sequence:
@@ -513,31 +522,32 @@ def _solve_nlp_subproblem(
             options: dict[str, float | int] = {"print_level": 0, "max_iter": 300}
             if remaining is not None:
                 options["max_wall_time"] = max(remaining, 0.05)
-            if solver_name == "ipopt":
-                from discopt.solvers.nlp_ipopt import solve_nlp
+            try:
+                if solver_name == "ipopt":
+                    from discopt.solvers.nlp_ipopt import solve_nlp
 
-                if remaining is not None:
-                    options["max_cpu_time"] = max(remaining, 0.05)
-                trial = solve_nlp(
-                    cast(Any, backend_evaluator),
-                    x0_clipped,
-                    options=options,
-                )
-            else:
-                from discopt.solvers.nlp_pounce import solve_nlp
+                    if remaining is not None:
+                        options["max_cpu_time"] = max(remaining, 0.05)
+                    trial = solve_nlp(
+                        cast(Any, backend_evaluator),
+                        x0_clipped,
+                        options=options,
+                    )
+                else:
+                    from discopt.solvers.nlp_pounce import solve_nlp
 
-                trial = solve_nlp(
-                    cast(Any, backend_evaluator),
-                    x0_clipped,
-                    options=options,
-                )
+                    trial = solve_nlp(
+                        cast(Any, backend_evaluator),
+                        x0_clipped,
+                        options=options,
+                    )
+            except Exception as e:
+                logger.debug("AMP NLP subproblem backend %s failed: %s", solver_name, e)
+                continue
             result = trial
-            from discopt.solvers import SolveStatus
 
             if trial.status == SolveStatus.OPTIMAL:
                 break
-
-        from discopt.solvers import SolveStatus
 
         if result is not None and result.status == SolveStatus.OPTIMAL:
             x_opt = np.asarray(result.x, dtype=np.float64)
@@ -782,7 +792,7 @@ def _select_best_nlp_candidate(
     flat_ub: np.ndarray,
     constraint_lb: np.ndarray,
     constraint_ub: np.ndarray,
-    nlp_solver: str,
+    nlp_solver: str | Sequence[str],
     deadline: Optional[float] = None,
 ) -> tuple[Optional[np.ndarray], Optional[float]]:
     """Return the best feasible NLP candidate from a prioritized candidate list."""
@@ -837,6 +847,9 @@ def _solve_best_nlp_candidate(
 ) -> tuple[Optional[np.ndarray], Optional[float]]:
     """Improve the incumbent from Alpine-ordered local NLP starts."""
     if all(v.var_type == VarType.CONTINUOUS for v in model._variables):
+        local_nlp_solver: str | Sequence[str] = nlp_solver
+        if nlp_solver == "ipm" and _has_cyipopt():
+            local_nlp_solver = ("ipopt", "ipm")
         starts: list[np.ndarray] = []
         for seed in (incumbent, initial_point, x0):
             if seed is not None:
@@ -844,6 +857,7 @@ def _solve_best_nlp_candidate(
         starts.extend(_continuous_recovery_starts(flat_lb, flat_ub))
         candidates = _dedupe_candidate_points(starts)
     else:
+        local_nlp_solver = nlp_solver
         candidates = []
         for seed in (incumbent, initial_point, x0, _default_nlp_start(flat_lb, flat_ub)):
             if seed is not None:
@@ -858,7 +872,7 @@ def _solve_best_nlp_candidate(
         flat_ub,
         constraint_lb,
         constraint_ub,
-        nlp_solver,
+        local_nlp_solver,
         deadline=deadline,
     )
 
