@@ -30,6 +30,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _INIT_STRATEGIES = frozenset({"rNLP", "initial_binary", "max_binary", "fp"})
+_REGULARIZATION_MODES = {
+    "level_l1": "level_L1",
+    "level_l2": "level_L2",
+    "level_linfinity": "level_L_infinity",
+    "level_l_infinity": "level_L_infinity",
+    "level_linf": "level_L_infinity",
+    "level_l_inf": "level_L_infinity",
+}
 _FEASIBILITY_NORMS = {
     "l1": "L1",
     "l2": "L2",
@@ -72,11 +80,39 @@ def _normalize_feasibility_norm(feasibility_norm: str) -> str:
     )
 
 
+def _normalize_regularization(add_regularization: Optional[str]) -> Optional[str]:
+    """Normalize and validate the supported regularized-OA modes."""
+    if add_regularization is None:
+        return None
+    if not isinstance(add_regularization, str):
+        raise ValueError(
+            f"add_regularization must be a string or None, got {type(add_regularization).__name__}."
+        )
+    key = add_regularization.strip().lower().replace(" ", "_").replace("-", "_")
+    normalized = _REGULARIZATION_MODES.get(key)
+    if normalized is not None:
+        return normalized
+    raise ValueError(
+        "Unknown add_regularization="
+        f"{add_regularization!r}. Choose one of: level_L1, level_L2, level_L_infinity."
+    )
+
+
 def _normalize_positive_float(name: str, value: float) -> float:
     """Validate a strictly positive finite float option."""
     out = float(value)
     if not np.isfinite(out) or out <= 0:
         raise ValueError(f"{name} must be a positive finite number, got {value!r}.")
+    return out
+
+
+def _normalize_open_unit_float(name: str, value: float) -> float:
+    """Validate a finite float in the open interval ``(0, 1)``."""
+    out = float(value)
+    if not np.isfinite(out) or out <= 0 or out >= 1:
+        raise ValueError(
+            f"{name} must be a finite number in the open interval (0, 1), got {value!r}."
+        )
     return out
 
 
@@ -88,6 +124,26 @@ def _normalize_optional_positive_int(name: str, value: Optional[int]) -> Optiona
     if out <= 0:
         raise ValueError(f"{name} must be a positive integer or None, got {value!r}.")
     return out
+
+
+def _l2_regularization_backend_error() -> RuntimeError:
+    return RuntimeError(
+        "OA level_L2 regularization requires a QP/MIQP-capable backend "
+        "for the regularized master. Install highspy or choose "
+        "add_regularization='level_L1'/'level_L_infinity'."
+    )
+
+
+def _require_l2_regularization_backend() -> None:
+    """Raise when the active QP backend cannot solve mixed-integer QPs."""
+    try:
+        from discopt.solvers.lp_backend import get_qp_solver
+
+        solve_qp = get_qp_solver()
+    except ImportError as exc:
+        raise _l2_regularization_backend_error() from exc
+    if getattr(solve_qp, "__module__", "").endswith("qp_pounce"):
+        raise _l2_regularization_backend_error()
 
 
 def _default_nlp_start(lb: np.ndarray, ub: np.ndarray) -> np.ndarray:
@@ -181,6 +237,8 @@ class OAConfig:
     oa_penalty_factor: float = 1000.0
     add_no_good_cuts: bool = False
     feasibility_norm: str = "L_infinity"
+    add_regularization: Optional[str] = None
+    level_coef: float = 0.5
     stalling_limit: Optional[int] = None
     cycling_check: bool = False
     log_iterations: bool = True
@@ -1204,6 +1262,223 @@ def _solve_master_milp(
     )
 
 
+def _solve_regularized_master(
+    decomp: _DecomposedProblem,
+    oa_A_rows,
+    oa_b_rows,
+    *,
+    add_regularization: str,
+    target: np.ndarray,
+    objective_level: float,
+    time_limit: float,
+    gap_tolerance: float,
+    add_slack: bool = False,
+    max_slack: float = 1000.0,
+    oa_penalty_factor: float = 1000.0,
+    oa_cut_relaxable=None,
+    use_objective_epigraph: Optional[bool] = None,
+) -> Optional[np.ndarray]:
+    """Solve the ROA level-set master and return its original-variable point.
+
+    The regularized master keeps the current linear/OA master constraints,
+    adds a level constraint on the master objective estimate, and minimizes
+    distance from ``target`` over the original model variables. ``level_L1`` and
+    ``level_L_infinity`` are MILPs; ``level_L2`` is a convex MIQP and therefore
+    requires a QP backend that supports integrality.
+    """
+    from discopt.solvers import SolveStatus
+
+    if use_objective_epigraph is None:
+        use_objective_epigraph = (not decomp.obj_is_linear) and decomp.oa_objective_is_convex
+    if not decomp.obj_is_linear and not use_objective_epigraph:
+        return None
+    if oa_cut_relaxable is not None and len(oa_cut_relaxable) != len(oa_A_rows):
+        raise ValueError(
+            "oa_cut_relaxable must match oa_A_rows length; "
+            f"got {len(oa_cut_relaxable)} flags for {len(oa_A_rows)} cuts."
+        )
+
+    n_vars = decomp.n_vars
+    target = np.clip(np.asarray(target, dtype=np.float64), decomp.lb, decomp.ub)
+    eta_index = n_vars if use_objective_epigraph else None
+    n_base = n_vars + (1 if use_objective_epigraph else 0)
+    slack_index = None
+    if add_slack:
+        slack_index = n_base
+        n_base += 1
+
+    if add_regularization == "level_L1":
+        aux_start = n_base
+        n_master = n_base + n_vars
+    elif add_regularization == "level_L_infinity":
+        aux_start = n_base
+        n_master = n_base + 1
+    elif add_regularization == "level_L2":
+        aux_start = n_base
+        n_master = n_base
+    else:  # pragma: no cover - guarded by _normalize_regularization
+        raise ValueError(f"Unsupported regularization mode {add_regularization!r}.")
+
+    a_ub_rows: list[np.ndarray] = []
+    b_ub_vals: list[float] = []
+    a_eq_rows: list[np.ndarray] = []
+    b_eq_vals: list[float] = []
+
+    def base_row(coeffs: np.ndarray) -> np.ndarray:
+        row = np.zeros(n_master, dtype=np.float64)
+        row[: len(coeffs)] = coeffs
+        return row
+
+    for row, rhs, sense in zip(
+        decomp.linear_A_rows,
+        decomp.linear_b_rows,
+        decomp.linear_senses,
+    ):
+        master_row = base_row(np.asarray(row, dtype=np.float64))
+        if sense == "<=":
+            a_ub_rows.append(master_row)
+            b_ub_vals.append(float(rhs))
+        elif sense == ">=":
+            a_ub_rows.append(-master_row)
+            b_ub_vals.append(float(-rhs))
+        elif sense == "==":
+            a_eq_rows.append(master_row)
+            b_eq_vals.append(float(rhs))
+
+    for i, cut_row in enumerate(oa_A_rows):
+        row = np.asarray(cut_row, dtype=np.float64)
+        original_len = len(row)
+        if use_objective_epigraph and original_len == n_vars:
+            row = np.append(row, 0.0)
+        master_row = base_row(row)
+        if slack_index is not None:
+            if oa_cut_relaxable is None:
+                relax_cut = original_len == n_vars
+            else:
+                relax_cut = bool(oa_cut_relaxable[i])
+            master_row[slack_index] = -1.0 if relax_cut else 0.0
+        a_ub_rows.append(master_row)
+        b_ub_vals.append(float(oa_b_rows[i]))
+
+    level_row = np.zeros(n_master, dtype=np.float64)
+    level_rhs = float(objective_level)
+    if decomp.obj_is_linear and decomp.obj_coeffs is not None:
+        c_vec, c_off = decomp.obj_coeffs
+        level_row[:n_vars] = c_vec
+        level_rhs -= float(c_off)
+    elif eta_index is not None:
+        level_row[eta_index] = 1.0
+    else:
+        return None
+    a_ub_rows.append(level_row)
+    b_ub_vals.append(level_rhs)
+
+    if add_regularization == "level_L1":
+        for idx in range(n_vars):
+            dev_idx = aux_start + idx
+            row = np.zeros(n_master, dtype=np.float64)
+            row[idx] = 1.0
+            row[dev_idx] = -1.0
+            a_ub_rows.append(row)
+            b_ub_vals.append(float(target[idx]))
+
+            row = np.zeros(n_master, dtype=np.float64)
+            row[idx] = -1.0
+            row[dev_idx] = -1.0
+            a_ub_rows.append(row)
+            b_ub_vals.append(float(-target[idx]))
+    elif add_regularization == "level_L_infinity":
+        dev_idx = aux_start
+        for idx in range(n_vars):
+            row = np.zeros(n_master, dtype=np.float64)
+            row[idx] = 1.0
+            row[dev_idx] = -1.0
+            a_ub_rows.append(row)
+            b_ub_vals.append(float(target[idx]))
+
+            row = np.zeros(n_master, dtype=np.float64)
+            row[idx] = -1.0
+            row[dev_idx] = -1.0
+            a_ub_rows.append(row)
+            b_ub_vals.append(float(-target[idx]))
+
+    bounds = list(zip(decomp.lb.tolist(), decomp.ub.tolist()))
+    if use_objective_epigraph:
+        bounds.append((-1e20, 1e20))
+    if slack_index is not None:
+        bounds.append((0.0, max_slack))
+    if add_regularization == "level_L1":
+        bounds.extend((0.0, 1e20) for _ in range(n_vars))
+    elif add_regularization == "level_L_infinity":
+        bounds.append((0.0, 1e20))
+
+    integrality = np.zeros(n_master, dtype=np.int32)
+    integrality[:n_vars] = decomp.integrality
+    A_ub = np.asarray(a_ub_rows, dtype=np.float64) if a_ub_rows else None
+    b_ub = np.asarray(b_ub_vals, dtype=np.float64) if b_ub_vals else None
+    A_eq = np.asarray(a_eq_rows, dtype=np.float64) if a_eq_rows else None
+    b_eq = np.asarray(b_eq_vals, dtype=np.float64) if b_eq_vals else None
+
+    if add_regularization == "level_L2":
+        try:
+            from discopt.solvers.lp_backend import get_qp_solver
+
+            solve_qp = get_qp_solver()
+            Q = np.zeros((n_master, n_master), dtype=np.float64)
+            c = np.zeros(n_master, dtype=np.float64)
+            for idx in range(n_vars):
+                Q[idx, idx] = 2.0
+                c[idx] = -2.0 * target[idx]
+            if slack_index is not None:
+                c[slack_index] = oa_penalty_factor
+            result = solve_qp(
+                Q=Q,
+                c=c,
+                A_ub=A_ub,
+                b_ub=b_ub,
+                A_eq=A_eq,
+                b_eq=b_eq,
+                bounds=bounds,
+                integrality=integrality,
+                time_limit=max(float(time_limit), 0.0),
+                gap_tolerance=gap_tolerance,
+            )
+        except (ImportError, ValueError) as exc:
+            raise _l2_regularization_backend_error() from exc
+    else:
+        from discopt.solvers.lp_backend import get_milp_solver
+
+        solve_milp = get_milp_solver()
+        c = np.zeros(n_master, dtype=np.float64)
+        if add_regularization == "level_L1":
+            c[aux_start : aux_start + n_vars] = 1.0
+        else:
+            c[aux_start] = 1.0
+        if slack_index is not None:
+            c[slack_index] = oa_penalty_factor
+        result = solve_milp(
+            c=c,
+            A_ub=A_ub,
+            b_ub=b_ub,
+            A_eq=A_eq,
+            b_eq=b_eq,
+            bounds=bounds,
+            integrality=integrality,
+            time_limit=max(float(time_limit), 0.0),
+            gap_tolerance=gap_tolerance,
+        )
+
+    if result.status not in (
+        SolveStatus.OPTIMAL,
+        SolveStatus.ITERATION_LIMIT,
+        SolveStatus.TIME_LIMIT,
+    ):
+        return None
+    if result.x is None:
+        return None
+    return np.asarray(result.x[:n_vars], dtype=np.float64)
+
+
 # ── Result Construction ───────────────────────────────────────
 
 
@@ -1333,6 +1608,8 @@ def solve_oa(
     oa_penalty_factor: float = 1000.0,
     add_no_good_cuts: bool = False,
     feasibility_norm: str = "L_infinity",
+    add_regularization: Optional[str] = None,
+    level_coef: float = 0.5,
     stalling_limit: Optional[int] = None,
     cycling_check: bool = False,
     **kwargs,
@@ -1396,6 +1673,14 @@ def solve_oa(
         Add integer-exclusion cuts after infeasible fixed-integer NLP solves.
     feasibility_norm : {"L1", "L2", "L_infinity"}
         Violation norm minimized by the feasibility subproblem heuristic.
+    add_regularization : {None, "level_L1", "level_L2", "level_L_infinity"}
+        Optional level-set regularized OA master before fixed-integer NLP solves.
+        L1 and L-infinity are solved as MILPs; L2 requires a MIQP-capable QP
+        backend.
+    level_coef : float
+        Coefficient in the open interval ``(0, 1)`` for the regularization
+        level constraint. The level is
+        ``(1 - level_coef) * incumbent_UB + level_coef * master_LB``.
     stalling_limit : int, optional
         Stop after this many consecutive incumbent-objective records without
         material progress.
@@ -1409,10 +1694,14 @@ def solve_oa(
     t_start = time.perf_counter()
     init_strategy = _normalize_init_strategy(init_strategy)
     feasibility_norm = _normalize_feasibility_norm(feasibility_norm)
+    add_regularization = _normalize_regularization(add_regularization)
     max_slack = _normalize_positive_float("max_slack", max_slack)
     oa_penalty_factor = _normalize_positive_float("oa_penalty_factor", oa_penalty_factor)
+    level_coef = _normalize_open_unit_float("level_coef", level_coef)
     stalling_limit = _normalize_optional_positive_int("stalling_limit", stalling_limit)
     heuristic_nonconvex = bool(heuristic_nonconvex)
+    if add_regularization is not None and ecp_mode:
+        raise ValueError("add_regularization is only supported for OA, not ECP mode.")
     if heuristic_nonconvex:
         equality_relaxation = True
         add_slack = True
@@ -1425,6 +1714,8 @@ def solve_oa(
     evaluator = decomp.evaluator
     n_vars = decomp.n_vars
     n_cons = decomp.n_cons
+    if add_regularization == "level_L2" and decomp.int_indices:
+        _require_l2_regularization_backend()
     # The whole OA loop runs in the evaluator's minimization convention (it
     # negates a MAXIMIZE objective). Un-negate the user-facing objective/bound at
     # the return sites with this sign; the gap is convention-invariant.
@@ -1705,6 +1996,44 @@ def solve_oa(
         if master_bound_valid and master_result.bound is not None:
             LB = max(LB, master_result.bound)
 
+        nlp_initial_point = None
+        if (
+            add_regularization is not None
+            and incumbent is not None
+            and incumbent_obj is not None
+            and master_bound_valid
+            and np.isfinite(LB)
+            and np.isfinite(UB)
+            and LB > -1e19
+            and UB < 1e19
+        ):
+            regularization_lb = LB
+            if decomp.obj_is_linear and decomp.obj_coeffs is not None:
+                regularization_lb += float(decomp.obj_coeffs[1])
+            objective_level = (1.0 - level_coef) * float(UB) + level_coef * float(regularization_lb)
+            remaining_time = max(0.0, time_limit - (time.perf_counter() - t_start))
+            x_regularized = _solve_regularized_master(
+                decomp,
+                oa_A_rows,
+                oa_b_rows,
+                add_regularization=add_regularization,
+                target=incumbent,
+                objective_level=objective_level,
+                time_limit=remaining_time,
+                gap_tolerance=gap_tolerance,
+                add_slack=add_slack,
+                max_slack=max_slack,
+                oa_penalty_factor=oa_penalty_factor,
+                oa_cut_relaxable=oa_cut_relaxable,
+                use_objective_epigraph=(not decomp.obj_is_linear and decomp.oa_objective_is_convex),
+            )
+            if x_regularized is not None:
+                nlp_initial_point = x_regularized
+                logger.info(
+                    "OA: %s regularized master selected fixed-NLP initial point",
+                    add_regularization,
+                )
+
         # b. ECP mode: add cuts at master point, skip NLP
         if ecp_mode:
             n_violated = _add_ecp_cuts(
@@ -1756,6 +2085,7 @@ def solve_oa(
             decomp.int_indices,
             x_master,
             nlp_solver,
+            initial_point=nlp_initial_point,
         )
 
         if x_nlp is not None:

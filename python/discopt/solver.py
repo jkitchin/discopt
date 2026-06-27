@@ -2212,9 +2212,10 @@ def solve_model(
         Existing OA options ``equality_relaxation``, ``ecp_mode``,
         ``feasibility_cuts``, ``heuristic_nonconvex``, ``add_slack``,
         ``max_slack``, ``oa_penalty_factor``, ``add_no_good_cuts``,
-        ``feasibility_norm``, ``stalling_limit``, and ``cycling_check`` plus
-        initialization option ``init_strategy`` may be passed as top-level
-        aliases and take precedence over duplicate keys in ``mip_nlp_options``.
+        ``feasibility_norm``, ``add_regularization``, ``level_coef``,
+        ``stalling_limit``, and ``cycling_check`` plus initialization option
+        ``init_strategy`` may be passed as top-level aliases and take
+        precedence over duplicate keys in ``mip_nlp_options``.
         Supported ``init_strategy`` values are ``"rNLP"``,
         ``"initial_binary"``, ``"max_binary"``, and ``"fp"``. The
         ``mip_nlp_method`` selector determines the effective ``ecp_mode`` and
@@ -2394,6 +2395,8 @@ def solve_model(
             "OA_penalty_factor",
             "add_no_good_cuts",
             "feasibility_norm",
+            "add_regularization",
+            "level_coef",
             "stalling_limit",
             "cycling_check",
         ):
@@ -2722,6 +2725,8 @@ def solve_model(
             "OA_penalty_factor",
             "add_no_good_cuts",
             "feasibility_norm",
+            "add_regularization",
+            "level_coef",
             "stalling_limit",
             "cycling_check",
         ):
