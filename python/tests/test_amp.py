@@ -594,6 +594,53 @@ def test_solve_nlp_subproblem_uses_pounce_and_restores_bounds(monkeypatch):
     np.testing.assert_allclose(x.ub, original_ub)
 
 
+def test_solve_nlp_subproblem_continues_after_backend_exception(monkeypatch):
+    """A failing first NLP backend should not suppress later fallback backends."""
+    import discopt.solvers.nlp_ipopt as ipopt_mod
+    import discopt.solvers.nlp_pounce as pounce_mod
+    from discopt.solvers import NLPResult, SolveStatus
+    from discopt.solvers import amp as amp_mod
+
+    m = Model("nlp_backend_exception_fallback")
+    x = m.continuous("x", lb=-1.0, ub=1.0)
+    m.minimize((x - 0.25) ** 2)
+
+    class FakeEvaluator:
+        _model = m
+        _obj_fn = object()
+
+        def evaluate_objective(self, x_flat):
+            return float((x_flat[0] - 0.25) ** 2)
+
+    calls = []
+
+    def fake_ipopt(evaluator, x0, options=None):
+        del evaluator, x0, options
+        calls.append("ipopt")
+        raise RuntimeError("simulated ipopt failure")
+
+    def fake_pounce(evaluator, x0, options=None):
+        del evaluator, x0, options
+        calls.append("pounce")
+        return NLPResult(status=SolveStatus.OPTIMAL, x=np.array([0.25]), objective=0.0)
+
+    monkeypatch.setattr(ipopt_mod, "solve_nlp", fake_ipopt)
+    monkeypatch.setattr(pounce_mod, "solve_nlp", fake_pounce)
+
+    x_opt, obj = amp_mod._solve_nlp_subproblem(
+        FakeEvaluator(),
+        x0=np.array([0.0], dtype=np.float64),
+        lb=np.array([-1.0], dtype=np.float64),
+        ub=np.array([1.0], dtype=np.float64),
+        nlp_solver=("ipopt", "ipm"),
+        time_limit=10.0,
+    )
+
+    assert calls == ["ipopt", "pounce"]
+    np.testing.assert_allclose(x_opt, np.array([0.25]))
+    assert obj == pytest.approx(0.0)
+
+
 def test_repair_inverted_bounds_snaps_to_midpoint():
     from discopt.solvers import amp as amp_mod
 
@@ -2439,6 +2486,47 @@ def test_best_nlp_candidate_prioritizes_incumbent_start_then_model_start_then_mi
     )
 
     assert seen_starts[:3] == [2.0, 4.0, 6.0]
+
+
+def test_best_nlp_candidate_uses_ipopt_fallback_for_pure_continuous_ipm(monkeypatch):
+    """Pure-continuous AMP candidates should try Ipopt before POUNCE when available."""
+    from discopt.solvers import amp as amp_mod
+
+    m = Model("continuous_candidate_backend")
+    m.continuous("x", lb=-1.0, ub=1.0)
+    seen = {}
+
+    monkeypatch.setattr(amp_mod, "_has_cyipopt", lambda: True)
+
+    def fake_select(
+        candidates,
+        model,
+        evaluator,
+        flat_lb,
+        flat_ub,
+        constraint_lb,
+        constraint_ub,
+        nlp_solver,
+        deadline=None,
+    ):
+        del candidates, model, evaluator, flat_lb, flat_ub, constraint_lb, constraint_ub, deadline
+        seen["nlp_solver"] = nlp_solver
+        return np.array([0.0], dtype=np.float64), 0.0
+
+    monkeypatch.setattr(amp_mod, "_select_best_nlp_candidate", fake_select)
+
+    amp_mod._solve_best_nlp_candidate(
+        np.array([0.25], dtype=np.float64),
+        m,
+        evaluator=object(),
+        flat_lb=np.array([-1.0], dtype=np.float64),
+        flat_ub=np.array([1.0], dtype=np.float64),
+        constraint_lb=np.array([], dtype=np.float64),
+        constraint_ub=np.array([], dtype=np.float64),
+        nlp_solver="ipm",
+    )
+
+    assert seen["nlp_solver"] == ("ipopt", "ipm")
 
 
 def test_best_nlp_candidate_rejects_noninteger_nlp_return(monkeypatch):
