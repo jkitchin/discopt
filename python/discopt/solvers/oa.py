@@ -1548,6 +1548,7 @@ def _solve_regularized_master(
     b_ub_vals.append(level_rhs)
 
     if add_regularization == "level_L1":
+        assert aux_start is not None
         for idx in range(n_vars):
             dev_idx = aux_start + idx
             row = np.zeros(n_master, dtype=np.float64)
@@ -1562,6 +1563,7 @@ def _solve_regularized_master(
             a_ub_rows.append(row)
             b_ub_vals.append(float(-target[idx]))
     elif add_regularization == "level_L_infinity":
+        assert aux_start is not None
         dev_idx = aux_start
         for idx in range(n_vars):
             row = np.zeros(n_master, dtype=np.float64)
