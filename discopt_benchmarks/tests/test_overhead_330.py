@@ -81,3 +81,50 @@ def test_alan_solve_does_not_recompile_per_node():
         r = model.solve(time_limit=60, gap_tolerance=1e-4)
     assert abs(float(r.objective) - 2.925) < 1e-3  # MINLPLib optimum
     assert compiles.count < 30, f"expected the autodiff compile storm gone, saw {compiles.count}"
+
+
+# ── SCIP-style heuristic effort budget (the Python-orchestration half) ──────
+_EX1226 = os.path.join(DATA_DIR, "ex1226.nl")
+
+
+def _solve_counting_nlp(path: str, budget_on: bool):
+    """Solve ``path`` and return (objective, n_nlp_solves) with the heuristic
+    budget toggled via the env switch the solver reads."""
+    import discopt.solvers.nlp_pounce as npn
+
+    calls = {"n": 0}
+    orig = npn.solve_nlp
+
+    def _counted(*a, **k):
+        calls["n"] += 1
+        return orig(*a, **k)
+
+    prev = os.environ.get("DISCOPT_HEUR_BUDGET")
+    os.environ["DISCOPT_HEUR_BUDGET"] = "1" if budget_on else "0"
+    npn.solve_nlp = _counted
+    try:
+        r = dm.from_nl(path).solve(time_limit=60, gap_tolerance=1e-4)
+    finally:
+        npn.solve_nlp = orig
+        if prev is None:
+            os.environ.pop("DISCOPT_HEUR_BUDGET", None)
+        else:
+            os.environ["DISCOPT_HEUR_BUDGET"] = prev
+    return (None if r.objective is None else float(r.objective)), calls["n"]
+
+
+@pytest.mark.regression
+def test_heuristic_budget_cuts_solves_without_changing_optimum():
+    """The success-weighted node-proportional budget must defer the heavy
+    standalone-strength improvers on an easy nonconvex MINLP — fewer sub-NLP
+    solves — while returning the *same* certified optimum (it changes speed, not
+    the answer). ex1226 (3 nodes, optimum -17) fires the enumeration phase + LNS
+    unconditionally without the budget."""
+    _require(_EX1226)
+    obj_off, n_off = _solve_counting_nlp(_EX1226, budget_on=False)
+    obj_on, n_on = _solve_counting_nlp(_EX1226, budget_on=True)
+    # Same optimum either way — soundness/correctness is never traded.
+    assert obj_off is not None and abs(obj_off - (-17.0)) < 1e-2
+    assert obj_on is not None and abs(obj_on - (-17.0)) < 1e-2
+    # The budget strictly reduces the heuristic sub-NLP volume on this instance.
+    assert n_on < n_off, f"budget did not cut sub-NLP solves: on={n_on} off={n_off}"
