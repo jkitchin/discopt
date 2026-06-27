@@ -70,6 +70,9 @@ def solve_mip_nlp(
 ) -> SolveResult:
     """Solve a MINLP with a MIP-NLP decomposition method."""
     method = _normalize_method(method)
+    from discopt._jax.factorable_reform import canonicalize_entropy
+
+    model = canonicalize_entropy(model)
     options: dict[str, Any] = {}
     if mip_nlp_options is not None:
         if not isinstance(mip_nlp_options, dict):

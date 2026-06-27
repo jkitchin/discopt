@@ -58,6 +58,106 @@ def _mindtpy_simple_minlp(name="mindtpy_init_strategy"):
     return m
 
 
+def _mindtpy_constraint_qualification_example(name="mindtpy_constraint_qualification"):
+    """Native port of Pyomo MindtPy's constraint-qualification fixture."""
+    m = dm.Model(name)
+    x = m.continuous("x", lb=1.0, ub=10.0)
+    y = m.binary("y")
+
+    m.subject_to((x - 3.0) ** 2 <= 50.0 * (1 - y))
+    m.subject_to(x * dm.log(x) + 5.0 <= 50.0 * y)
+    m.minimize(x)
+    return m
+
+
+def _mindtpy_eight_process_flowsheet(name="mindtpy_eight_process"):
+    """Native port of Pyomo MindtPy's convex eight-process flowsheet fixture."""
+    m = dm.Model(name)
+    stream_ubs = np.full(24, 10.0, dtype=float)
+    for stream, ub in {
+        3: 2.0,
+        5: 2.0,
+        9: 2.0,
+        10: 1.0,
+        14: 1.0,
+        17: 2.0,
+        19: 2.0,
+        21: 2.0,
+        25: 3.0,
+    }.items():
+        stream_ubs[stream - 2] = ub
+
+    x = m.continuous("x", shape=(24,), lb=0.0, ub=stream_ubs)
+    y = m.binary("y", shape=(8,))
+
+    def x_stream(stream):
+        return x[stream - 2]
+
+    def y_unit(unit):
+        return y[unit - 1]
+
+    m.subject_to(1.5 * x_stream(9) + x_stream(10) == x_stream(8))
+    m.subject_to(1.25 * (x_stream(12) + x_stream(14)) == x_stream(13))
+    m.subject_to(x_stream(15) == 2 * x_stream(16))
+
+    m.subject_to(dm.exp(x_stream(3)) - 1 <= x_stream(2))
+    m.subject_to(dm.exp(x_stream(5) / 1.2) - 1 <= x_stream(4))
+    m.subject_to(dm.exp(x_stream(22)) - 1 <= x_stream(21))
+    m.subject_to(dm.exp(x_stream(18)) - 1 <= x_stream(10) + x_stream(17))
+    m.subject_to(dm.exp(x_stream(20) / 1.5) - 1 <= x_stream(19))
+
+    m.subject_to(x_stream(13) == x_stream(19) + x_stream(21))
+    m.subject_to(x_stream(17) == x_stream(9) + x_stream(16) + x_stream(25))
+    m.subject_to(x_stream(11) == x_stream(12) + x_stream(15))
+    m.subject_to(x_stream(3) + x_stream(5) == x_stream(6) + x_stream(11))
+    m.subject_to(x_stream(6) == x_stream(7) + x_stream(8))
+    m.subject_to(x_stream(23) == x_stream(20) + x_stream(22))
+    m.subject_to(x_stream(23) == x_stream(14) + x_stream(24))
+
+    m.subject_to(x_stream(10) <= 0.8 * x_stream(17))
+    m.subject_to(x_stream(10) >= 0.4 * x_stream(17))
+    m.subject_to(x_stream(12) <= 5 * x_stream(14))
+    m.subject_to(x_stream(12) >= 2 * x_stream(14))
+
+    m.subject_to(x_stream(2) <= 10 * y_unit(1))
+    m.subject_to(x_stream(4) <= 10 * y_unit(2))
+    m.subject_to(x_stream(9) <= 10 * y_unit(3))
+    m.subject_to(x_stream(12) + x_stream(14) <= 10 * y_unit(4))
+    m.subject_to(x_stream(15) <= 10 * y_unit(5))
+    m.subject_to(x_stream(19) <= 10 * y_unit(6))
+    m.subject_to(x_stream(21) <= 10 * y_unit(7))
+    m.subject_to(x_stream(10) + x_stream(17) <= 10 * y_unit(8))
+
+    m.subject_to(y_unit(1) + y_unit(2) == 1)
+    m.subject_to(y_unit(4) + y_unit(5) <= 1)
+    m.subject_to(y_unit(6) + y_unit(7) - y_unit(4) == 0)
+    m.subject_to(y_unit(3) - y_unit(8) <= 0)
+
+    fixed_cost = np.array([5.0, 8.0, 6.0, 10.0, 6.0, 7.0, 4.0, 5.0])
+    variable_cost = {
+        2: 1.0,
+        3: -10.0,
+        4: 1.0,
+        5: -15.0,
+        9: -40.0,
+        10: 15.0,
+        14: 15.0,
+        17: 80.0,
+        18: -65.0,
+        19: 25.0,
+        20: -60.0,
+        21: 35.0,
+        22: -80.0,
+        25: -35.0,
+    }
+    m.minimize(
+        122.0
+        + sum(fixed_cost[unit] * y[unit] for unit in range(8))
+        + sum(variable_cost.get(stream, 0.0) * x_stream(stream) for stream in range(2, 26))
+    )
+    return m
+
+
 def _has_disjunctions(model):
     return any(isinstance(c, _DisjunctiveConstraint) for c in model._constraints)
 
@@ -1102,3 +1202,61 @@ def test_mip_nlp_regularized_oa_grad_lag_solves_mindtpy_baseline():
     assert result.bound == pytest.approx(3.5, abs=1e-3)
     assert result.gap == pytest.approx(0.0, abs=1e-9)
     assert np.asarray(result.x["y"]).tolist() == pytest.approx([0.0, 1.0, 0.0])
+
+
+_MINDTPY_REGULARIZATION_MODES = [
+    "level_L1",
+    "level_L2",
+    "level_L_infinity",
+    "grad_lag",
+    "hess_lag",
+    "hess_only_lag",
+    "sqp_lag",
+]
+
+
+@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
+@pytest.mark.parametrize("add_regularization", _MINDTPY_REGULARIZATION_MODES)
+def test_mip_nlp_regularized_oa_matches_mindtpy_constraint_qualification(
+    add_regularization,
+):
+    result = _mindtpy_constraint_qualification_example(f"mindtpy_cq_{add_regularization}").solve(
+        solver="mip-nlp",
+        mip_nlp_method="oa",
+        add_regularization=add_regularization,
+        time_limit=60,
+        max_nodes=100,
+    )
+
+    assert result.status in ("optimal", "feasible")
+    assert result.objective == pytest.approx(3.0, abs=1e-3)
+    if result.status == "optimal":
+        assert result.bound == pytest.approx(3.0, abs=1e-3)
+        assert result.gap == pytest.approx(0.0, abs=1e-9)
+    assert result.x["x"] == pytest.approx(3.0, abs=1e-3)
+    assert result.x["y"] == pytest.approx(1.0, abs=1e-5)
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
+@pytest.mark.parametrize("add_regularization", _MINDTPY_REGULARIZATION_MODES)
+def test_mip_nlp_regularized_oa_matches_mindtpy_eight_process_flowsheet(
+    add_regularization,
+):
+    result = _mindtpy_eight_process_flowsheet(f"mindtpy_eight_process_{add_regularization}").solve(
+        solver="mip-nlp",
+        mip_nlp_method="oa",
+        add_regularization=add_regularization,
+        time_limit=120,
+        max_nodes=200,
+    )
+
+    assert result.status in ("optimal", "feasible")
+    assert result.objective == pytest.approx(68.0097, abs=2e-2)
+    if result.status == "optimal":
+        assert result.bound == pytest.approx(result.objective, abs=2e-2)
+        assert result.gap == pytest.approx(0.0, abs=1e-9)
+    assert np.asarray(result.x["y"]).tolist() == pytest.approx(
+        [0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+        abs=1e-5,
+    )
