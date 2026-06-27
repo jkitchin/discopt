@@ -183,6 +183,19 @@ def _has_disjunctions(model):
     return any(isinstance(c, _DisjunctiveConstraint) for c in model._constraints)
 
 
+def _expr_has_function(expr, func_name):
+    if getattr(expr, "func_name", None) == func_name:
+        return True
+    for child_name in ("left", "right", "operand"):
+        child = getattr(expr, child_name, None)
+        if child is not None and _expr_has_function(child, func_name):
+            return True
+    return any(
+        _expr_has_function(child, func_name)
+        for child in tuple(getattr(expr, "args", ())) + tuple(getattr(expr, "terms", ()))
+    )
+
+
 def test_model_solve_routes_mip_nlp_options(monkeypatch):
     import discopt.solvers.mip_nlp as mip_nlp_module
 
@@ -227,6 +240,44 @@ def test_model_solve_routes_mip_nlp_options(monkeypatch):
     assert calls["level_coef"] == pytest.approx(0.4)
     assert calls["stalling_limit"] == 3
     assert calls["cycling_check"] is False
+
+
+def test_model_solve_mip_nlp_path_runs_entropy_canonicalization(monkeypatch):
+    import discopt._jax.factorable_reform as reform_module
+    import discopt.solvers.oa as oa_module
+
+    real_canonicalize_entropy = reform_module.canonicalize_entropy
+    calls = {}
+
+    def spy_canonicalize_entropy(model):
+        out = real_canonicalize_entropy(model)
+        calls["canonicalize_called"] = True
+        calls["input_had_entropy"] = _expr_has_function(model._objective.expression, "entropy")
+        calls["output_had_entropy"] = _expr_has_function(out._objective.expression, "entropy")
+        return out
+
+    def fake_solve_oa(model, **kwargs):
+        calls["solve_oa_had_entropy"] = _expr_has_function(model._objective.expression, "entropy")
+        return SolveResult(status="optimal", objective=0.0, bound=0.0, gap=0.0)
+
+    monkeypatch.setattr(reform_module, "canonicalize_entropy", spy_canonicalize_entropy)
+    monkeypatch.setattr(oa_module, "solve_oa", fake_solve_oa)
+
+    m = dm.Model("mip_nlp_entropy_canonicalization")
+    x = m.continuous("x", lb=0.1, ub=4.0)
+    y = m.binary("y")
+    m.subject_to(x >= y)
+    m.minimize(x * dm.log(x) + y)
+
+    result = m.solve(solver="mip-nlp", mip_nlp_method="oa")
+
+    assert result.status == "optimal"
+    assert calls == {
+        "canonicalize_called": True,
+        "input_had_entropy": False,
+        "output_had_entropy": True,
+        "solve_oa_had_entropy": True,
+    }
 
 
 def test_model_solve_ecp_alias_derives_method(monkeypatch):
