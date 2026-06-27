@@ -1819,12 +1819,13 @@ def solve_goa(
     add_no_good_cuts: bool = True,
     **amp_options,
 ) -> SolveResult:
-    """Solve a nonconvex MINLP through the global OA/relaxation stack.
+    """Solve a MINLP through the global OA/relaxation stack.
 
-    GOA uses the MIP-NLP feasibility pump, with no-good cuts enabled by
-    default, only as an incumbent-start heuristic. Certified bounds and gaps
-    come from AMP's McCormick/global-relaxation MILP solves, which do not carry
-    those no-good exclusions and therefore remain valid for the original model.
+    Convexity-certified MINLPs are handed to the OA algorithm, whose master
+    lower bounds are globally valid in that case. Other models use the
+    AMP/McCormick global-relaxation path. The MIP-NLP feasibility pump, with
+    no-good cuts enabled by default, is only an incumbent-start heuristic for
+    the nonconvex AMP path, so its exclusions never taint certified bounds.
     """
     t_start = time.perf_counter()
 
@@ -1865,6 +1866,26 @@ def solve_goa(
             + ", ".join(sorted(amp_options))
             + ". Pass AMP/global-relaxation options supported by solve_goa."
         )
+
+    from discopt._jax.convexity import classify_oa_cut_convexity
+
+    oa_convexity = classify_oa_cut_convexity(model)
+    if oa_convexity.objective_is_convex and all(oa_convexity.constraint_mask):
+        elapsed = time.perf_counter() - t_start
+        remaining_time = max(0.0, float(time_limit) - elapsed)
+        result = solve_oa(
+            model,
+            time_limit=remaining_time,
+            gap_tolerance=rel_gap,
+            max_iterations=max_iter,
+            nlp_solver=nlp_solver,
+            init_strategy=init_strategy,
+            initial_point=initial_point,
+            add_no_good_cuts=bool(add_no_good_cuts),
+            feasibility_norm=feasibility_norm,
+        )
+        result.wall_time += elapsed
+        return result
 
     goa_initial_point = initial_point
     pre_amp_mip_count = 0

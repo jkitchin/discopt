@@ -2239,11 +2239,12 @@ def solve_model(
         ``stalling_limit``, ``cycling_check``, and ``milp_solver`` plus
         initialization option ``init_strategy`` may be passed as top-level
         aliases and take precedence over duplicate keys in ``mip_nlp_options``.
-        For ``mip_nlp_method="goa"``, AMP/global-relaxation options such as
-        ``rel_gap``, ``abs_tol``, ``max_iter``, ``n_init_partitions``,
-        ``partition_method``, ``milp_time_limit``, ``milp_gap_tolerance``,
-        ``presolve_bt``, and ``convhull_formulation`` may also be passed as
-        top-level aliases.
+        For ``mip_nlp_method="goa"``, convexity-certified MINLPs use OA's
+        valid master bounds and other models use AMP/global relaxations.
+        AMP options such as ``rel_gap``, ``abs_tol``, ``max_iter``,
+        ``n_init_partitions``, ``partition_method``, ``milp_time_limit``,
+        ``milp_gap_tolerance``, ``presolve_bt``, and
+        ``convhull_formulation`` may also be passed as top-level aliases.
         Supported ``add_regularization`` values are ``"level_L1"``,
         ``"level_L2"``, ``"level_L_infinity"``, ``"grad_lag"``,
         ``"hess_lag"``, ``"hess_only_lag"``, and ``"sqp_lag"``.

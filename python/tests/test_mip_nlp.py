@@ -72,6 +72,19 @@ def _mindtpy_simple3_minlp(name="mindtpy_simple3"):
     return m
 
 
+def _mindtpy_simple5_minlp(name="mindtpy_simple5"):
+    """Native port of Pyomo MindtPy's MINLP5_simple convex MINLP fixture."""
+    m = dm.Model(name)
+    x = m.continuous("x", lb=1.0, ub=20.0)
+    y = m.integer("y", lb=1, ub=20)
+
+    m.subject_to(6.0 * x + y <= 60.0)
+    m.subject_to(1.0 / x + 1.0 / x - (x**0.5) * (y**0.5) <= -1.0)
+    m.subject_to(2.0 * x - 5.0 * y <= -1.0)
+    m.minimize(0.3 * (x - 8.0) ** 2 + 0.04 * (y - 6.0) ** 4 + 0.1 * dm.exp(2.0 * x) * (y ** (-4.0)))
+    return m
+
+
 def _mindtpy_constraint_qualification_example(name="mindtpy_constraint_qualification"):
     """Native port of Pyomo MindtPy's constraint-qualification fixture."""
     m = dm.Model(name)
@@ -592,11 +605,15 @@ def test_goa_fp_seed_uses_no_good_cuts_without_certifying_seed_bound(monkeypatch
     import discopt.solvers.oa as oa_module
 
     calls = {}
+    m = dm.Model("goa_fp_seed_nonconvex")
+    x = m.continuous("x", lb=0.0, ub=2.0)
+    y = m.binary("y")
+    m.minimize(x * y - x)
 
     def fake_run_fp(model, decomp, **kwargs):
         calls["fp"] = kwargs
         return oa_module._FeasibilityPumpResult(
-            best_x=np.array([1.0]),
+            best_x=np.array([1.0, 1.0]),
             best_obj=1.0,
             best_near_x=None,
             best_near_merit=0.0,
@@ -619,10 +636,10 @@ def test_goa_fp_seed_uses_no_good_cuts_without_certifying_seed_bound(monkeypatch
     monkeypatch.setattr(oa_module, "_run_feasibility_pump", fake_run_fp)
     monkeypatch.setattr(amp_module, "solve_amp", fake_solve_amp)
 
-    result = oa_module.solve_goa(_binary_model("goa_fp_seed"), time_limit=10, max_iterations=5)
+    result = oa_module.solve_goa(m, time_limit=10, max_iterations=5)
 
     assert calls["fp"]["add_no_good_cuts"] is True
-    assert calls["amp"]["initial_point"].tolist() == pytest.approx([1.0])
+    assert calls["amp"]["initial_point"].tolist() == pytest.approx([1.0, 1.0])
     assert calls["amp"]["use_start_as_incumbent"] is True
     assert result.mip_count == 5
     assert result.gap_certified is False
@@ -1512,6 +1529,25 @@ def test_mip_nlp_goa_certifies_native_bilinear_minlp():
     assert result.gap_certified is True
     assert result.x["x"] == pytest.approx(2.0, abs=1e-6)
     assert result.x["y"] == pytest.approx(0.0, abs=1e-6)
+
+
+@pytest.mark.smoke
+@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
+def test_mip_nlp_goa_certifies_mindtpy_minlp5_convex_fixture():
+    result = _mindtpy_simple5_minlp("goa_mindtpy_minlp5").solve(
+        solver="mip-nlp",
+        mip_nlp_method="goa",
+        time_limit=30,
+        rel_gap=1e-4,
+    )
+
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(3.6572, abs=5e-4)
+    assert result.bound == pytest.approx(result.objective, abs=5e-4)
+    assert result.gap == pytest.approx(0.0, abs=1e-4)
+    assert result.gap_certified is True
+    assert result.x["x"] == pytest.approx(4.99179784, abs=1e-4)
+    assert result.x["y"] == pytest.approx(7.0, abs=1e-6)
 
 
 @pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
