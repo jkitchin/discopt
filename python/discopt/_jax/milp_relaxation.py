@@ -3439,7 +3439,9 @@ def _should_claim_composite(expr: Expression, model: Model, n_orig: int) -> bool
     * ``(base)**p`` with a *non-bare* base and either a non-integer constant
       exponent or an integer exponent ``p >= 3``.  A bare variable base is a
       monomial / fractional-power column, and integer squares of non-bare bases
-      stay on the dedicated square lift.
+      stay on the dedicated square lift.  Non-affine integer-power bases are
+      only claimed here; they still need certified curvature before any
+      envelope is emitted.
     """
     if isinstance(expr, FunctionCall) and len(expr.args) == 1:
         op_info = _univariate_arg(expr)
@@ -3473,6 +3475,10 @@ def _affine_base_power_curvature(expr: Expression, model: Model, box: dict) -> O
         return None
     p = float(expr.right.value)
     if p in (0.0, 1.0):
+        return None
+    try:
+        _linearize_affine_expr(expr.left, model, sum(v.size for v in model._variables))
+    except ValueError:
         return None
     from discopt._jax.convexity.interval_eval import evaluate_interval
 

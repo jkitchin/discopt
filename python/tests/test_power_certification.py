@@ -61,6 +61,28 @@ def test_shifted_even_integer_power_certifies():
     assert r.gap_certified
 
 
+def test_nonaffine_even_integer_power_abstains_from_affine_curvature_shortcut():
+    from discopt._jax.milp_relaxation import _affine_base_power_curvature
+
+    m = dm.Model()
+    x = m.continuous("x", lb=math.pi / 2.0 - 1.0, ub=math.pi / 2.0 + 1.0)
+
+    assert _affine_base_power_curvature(dm.sin(x) ** 4, m, {}) is None
+
+
+def test_nonaffine_even_integer_power_bound_remains_sound():
+    m = dm.Model()
+    x = m.continuous("x", lb=math.pi / 2.0 - 1.0, ub=math.pi / 2.0 + 1.0)
+    m.minimize(dm.sin(x) ** 4)
+    r = m.solve(time_limit=15, gap_tolerance=1e-4)
+
+    true_min = math.cos(1.0) ** 4
+    assert r.status == "optimal"
+    assert r.objective is not None and r.bound is not None
+    assert math.isclose(r.objective, true_min, abs_tol=1e-3)
+    assert r.bound <= true_min + 1e-3, "dual bound must not exceed the true optimum"
+
+
 @pytest.mark.correctness
 def test_product_base_fractional_power_certifies():
     """``(x*y)**0.75`` (product base) certifies soundly with a valid bound."""
