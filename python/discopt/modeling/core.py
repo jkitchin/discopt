@@ -2791,6 +2791,11 @@ class Model:
             classes raise ``NotImplementedError`` instead of silently falling
             back to another backend. Pass Gurobi parameters through
             ``gurobi_options={...}``.
+            Use ``solver="mip-nlp"`` to select the MIP-NLP decomposition
+            family. Current implemented ``mip_nlp_method`` values are ``"oa"``
+            and ``"ecp"``; ``"goa"``, ``"roa"``, ``"fp"``, and
+            ``"lp_nlp_bb"`` are reserved until their dedicated implementations
+            land.
         validate : bool, default False
             If True, run Examiner-style KKT validation on the returned
             point and attach the :class:`~discopt.validation.ExaminerReport`
