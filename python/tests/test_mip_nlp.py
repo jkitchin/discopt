@@ -58,6 +58,20 @@ def _mindtpy_simple_minlp(name="mindtpy_init_strategy"):
     return m
 
 
+def _mindtpy_simple3_minlp(name="mindtpy_simple3"):
+    """Native port of Pyomo MindtPy's MINLP3_simple fixture."""
+    m = dm.Model(name)
+    x = m.continuous("x", shape=(2,), lb=-0.9, ub=50.0)
+    y = m.binary("y")
+
+    m.subject_to(-x[1] + 5.0 * dm.log(x[0] + 1.0) + 3.0 * y >= 0.0)
+    m.subject_to(-x[1] + x[0] ** 2 - y <= 1.0)
+    m.subject_to(x[0] + x[1] + 20.0 * y <= 24.0)
+    m.subject_to(2.0 * x[1] + 3.0 * x[0] <= 10.0)
+    m.minimize(10.0 * x[0] ** 2 - x[1] + 5.0 * (y - 1.0))
+    return m
+
+
 def _mindtpy_constraint_qualification_example(name="mindtpy_constraint_qualification"):
     """Native port of Pyomo MindtPy's constraint-qualification fixture."""
     m = dm.Model(name)
@@ -1456,6 +1470,28 @@ def test_mip_nlp_regularized_oa_matches_mindtpy_constraint_qualification(
         assert result.gap == pytest.approx(0.0, abs=1e-9)
     assert result.x["x"] == pytest.approx(3.0, abs=1e-3)
     assert result.x["y"] == pytest.approx(1.0, abs=1e-5)
+
+
+@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
+@pytest.mark.parametrize("add_regularization", _MINDTPY_REGULARIZATION_MODES)
+def test_mip_nlp_regularized_oa_matches_mindtpy_minlp3_simple(add_regularization):
+    result = _mindtpy_simple3_minlp(f"mindtpy_simple3_{add_regularization}").solve(
+        solver="mip-nlp",
+        mip_nlp_method="oa",
+        add_regularization=add_regularization,
+        time_limit=60,
+        max_nodes=100,
+    )
+
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(-5.5122, abs=1e-3)
+    assert result.bound == pytest.approx(result.objective, abs=1e-3)
+    assert result.gap == pytest.approx(0.0, abs=1e-9)
+    assert np.asarray(result.x["x"]).tolist() == pytest.approx(
+        [0.2071068, 0.9411321],
+        abs=1e-3,
+    )
+    assert result.x["y"] == pytest.approx(0.0, abs=1e-5)
 
 
 @pytest.mark.slow
