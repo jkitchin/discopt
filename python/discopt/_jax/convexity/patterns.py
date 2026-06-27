@@ -14,6 +14,9 @@ shapes where a dedicated proof exists:
   a homogeneous PSD quadratic.
 * **Perspective of exp: ``y * exp(x / y)`` with ``y > 0``**
   (:func:`classify_product_pattern`).
+* **Exp times reciprocal powers: ``exp(affine) * prod_i g_i(x)**a_i``**
+  with each ``g_i`` affine, strictly positive, and ``a_i <= 0``
+  (:func:`classify_product_pattern`).
 * **Weighted geometric mean ``prod_i x_i^{a_i}``** with ``x_i >= 0``,
   ``0 <= a_i <= 1``, and ``sum_i a_i == 1`` (:func:`classify_product_pattern`).
 * **Norm ``sqrt(x^T Q x)`` with Q PSD**
@@ -644,6 +647,9 @@ def classify_product_pattern(
 
     * ``y * exp(x / y)`` with ``y > 0`` and ``x`` affine — perspective of
       ``exp``: CONVEX.
+    * ``exp(affine) * prod_i g_i(x)**a_i`` where every ``g_i`` is affine and
+      strictly positive and every ``a_i <= 0``: CONVEX because it is
+      ``exp(affine + Σ a_i log(g_i(x)))`` with a convex exponent.
     * **Signomial monomial** ``c * prod_i base_i ** a_i`` with every base
       affine, classified by exponent sign pattern on the positive orthant
       (Boyd & Vandenberghe §3.1.5):
@@ -674,9 +680,8 @@ def classify_product_pattern(
                 ):
                     return Curvature.CONVEX
 
-    # Signomial monomial: c * prod_i base_i ** a_i, each base affine.
-    # Peel the leading scalar constant, then classify the product of powers
-    # by its exponent sign pattern (see the function docstring). A negative
+    # Peel the leading scalar constant. The remaining product is inspected by
+    # the exp-times-reciprocal-power and signomial recognizers below. A negative
     # constant flips the curvature.
     const, core = _split_const_mul(expr)
     if core is None or abs(const) <= 1e-12:
@@ -685,6 +690,37 @@ def classify_product_pattern(
     _flatten_product(core, factors)
     if len(factors) < 2:
         return None
+
+    exp_factor_count = 0
+    power_factors: list[tuple[Expression, float]] = []
+    exp_power_candidate = True
+    for factor in factors:
+        if (
+            isinstance(factor, FunctionCall)
+            and factor.func_name == "exp"
+            and len(factor.args) == 1
+            and classify_expr(factor.args[0], model, cache) == Curvature.AFFINE
+        ):
+            exp_factor_count += 1
+            continue
+        extracted = _extract_power_factor(factor)
+        if extracted is None:
+            exp_power_candidate = False
+            break
+        base, exponent = extracted
+        if classify_expr(base, model, cache) != Curvature.AFFINE:
+            exp_power_candidate = False
+            break
+        power_factors.append((base, exponent))
+
+    tol = 1e-10
+    if (
+        exp_power_candidate
+        and exp_factor_count >= 1
+        and all(exp <= tol for _base, exp in power_factors)
+        and all(_affine_strictly_positive(base, model) for base, _exp in power_factors)
+    ):
+        return Curvature.CONCAVE if const < 0 else Curvature.CONVEX
 
     parsed: list[tuple[Expression, float]] = []
     for factor in factors:
@@ -699,7 +735,6 @@ def classify_product_pattern(
     exps = [exp for _, exp in parsed]
     bases = [base for base, _ in parsed]
     total = sum(exps)
-    tol = 1e-10
 
     base_curv: Optional[Curvature] = None
     if (

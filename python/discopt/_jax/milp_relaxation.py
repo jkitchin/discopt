@@ -3436,10 +3436,10 @@ def _should_claim_composite(expr: Expression, model: Model, n_orig: int) -> bool
 
     * a named univariate call whose argument is *non-affine* (the affine case is
       handled by :func:`_collect_univariate_relaxations`), or
-    * ``(base)**p`` with a *non-integer* constant exponent ``p`` and a *non-bare*
-      base (a bare variable base is a monomial / fractional power; integer powers
-      of a non-bare base are squares/monomials handled by the dedicated square and
-      ``distribute_products`` machinery, so claiming them duplicates aux columns).
+    * ``(base)**p`` with a *non-bare* base and either a non-integer constant
+      exponent or an integer exponent ``p >= 3``.  A bare variable base is a
+      monomial / fractional-power column, and integer squares of non-bare bases
+      stay on the dedicated square lift.
     """
     if isinstance(expr, FunctionCall) and len(expr.args) == 1:
         op_info = _univariate_arg(expr)
@@ -3453,11 +3453,11 @@ def _should_claim_composite(expr: Expression, model: Model, n_orig: int) -> bool
         return False
     if isinstance(expr, BinaryOp) and expr.op == "**" and isinstance(expr.right, Constant):
         p = float(expr.right.value)
-        if p == int(p):
-            return False  # integer powers → monomial / square / distribute machinery
         # Bare variable / indexed base is a fractional power already.
         if _get_flat_index(expr.left, model) is not None:
             return False
+        if p == int(p):
+            return int(p) >= 3
         return True
     return False
 
@@ -3486,6 +3486,10 @@ def _affine_base_power_curvature(expr: Expression, model: Model, box: dict) -> O
     # Outward interval rounding can render a true 0 as a tiny negative; a small
     # tolerance keeps the nonnegativity test from spuriously abstaining.
     tol = 1e-9
+    p_int = int(round(p))
+    p_is_int = abs(p - p_int) <= 1e-12
+    if p_is_int and p_int >= 2 and p_int % 2 == 0:
+        return "convex"
     if p < 0.0:
         return "convex" if base_lo > tol else None
     if base_lo < -tol:

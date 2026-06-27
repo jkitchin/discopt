@@ -47,6 +47,21 @@ def test_affine_base_fractional_power_certifies():
 
 
 @pytest.mark.correctness
+def test_shifted_even_integer_power_certifies():
+    """``(x - 1)**4`` uses the composite power lift and certifies soundly."""
+    m = dm.Model()
+    x = m.continuous("x", lb=-2.0, ub=3.0)
+    m.minimize((x - 1.0) ** 4)
+    r = m.solve(time_limit=15, gap_tolerance=1e-4)
+
+    assert r.status == "optimal"
+    assert r.objective is not None and r.bound is not None
+    assert math.isclose(r.objective, 0.0, abs_tol=1e-4)
+    assert r.bound <= r.objective + 1e-4, "dual bound must not exceed the optimum"
+    assert r.gap_certified
+
+
+@pytest.mark.correctness
 def test_product_base_fractional_power_certifies():
     """``(x*y)**0.75`` (product base) certifies soundly with a valid bound."""
     m = dm.Model()
