@@ -98,6 +98,34 @@ def gen_mdk(n: int, m: int) -> MdkInstance:
     return MdkInstance(mdk_name(n, m), n, m, weights, values, cap)
 
 
+# Sparse-row instance family — added once Regime C (#334, sparse-fast simplex)
+# landed, per the issue's third acceptance item, so node-efficiency is validated
+# where per-node LP cost is also realistic (each row touches only ~`density` of
+# the items, unlike the dense `gen_mdk` rows).
+SPARSE_MDK_SIZES: list[tuple[int, int]] = [(50, 15), (60, 20), (70, 20), (80, 25)]
+
+
+def sparse_mdk_name(n: int, m: int) -> str:
+    return f"smdk{n}x{m}"
+
+
+def gen_sparse_mdk(n: int, m: int, density: float = 0.25) -> MdkInstance:
+    """Deterministic *sparse-row* 0/1 multidim knapsack: each row constrains only
+    ``max(2, ⌊density·n⌋)`` randomly chosen items (weights elsewhere zero), so the
+    constraint matrix is sparse. Same half-sum capacities and uncorrelated values
+    as :func:`gen_mdk`. Reproducible (seed a pure function of ``(n, m)``)."""
+    rng = np.random.default_rng(seed=7_000 * n + m)
+    weights = np.zeros((m, n), dtype=np.float64)
+    k = max(2, int(density * n))
+    for i in range(m):
+        cols = rng.choice(n, size=k, replace=False)
+        weights[i, cols] = rng.integers(1, 101, size=k)
+    cap = np.floor(0.5 * weights.sum(axis=1))
+    cap[cap < 1] = 1.0
+    values = rng.integers(1, 101, size=n).astype(np.float64)
+    return MdkInstance(sparse_mdk_name(n, m), n, m, weights, values, cap)
+
+
 # ── Standard-form marshalling for solve_milp_py ──────────────────────────────
 def _std_form(inst: MdkInstance) -> dict:
     """Build the engine's standard form ``A z = b, l ≤ z ≤ u`` (one slack/row).
@@ -475,20 +503,18 @@ def run_instance(
 
 
 def run(
-    sizes: list[tuple[int, int]] | None = None,
+    instances: list[MdkInstance] | None = None,
     *,
     max_nodes: int = 2_000_000,
     time_limit_s: float = 30.0,
     do_scip: bool = True,
 ) -> list[InstanceResult]:
-    sizes = sizes or MDK_SIZES
-    out: list[InstanceResult] = []
-    for n, m in sizes:
-        inst = gen_mdk(n, m)
-        out.append(
-            run_instance(inst, max_nodes=max_nodes, time_limit_s=time_limit_s, do_scip=do_scip)
-        )
-    return out
+    if instances is None:
+        instances = [gen_mdk(n, m) for n, m in MDK_SIZES]
+    return [
+        run_instance(inst, max_nodes=max_nodes, time_limit_s=time_limit_s, do_scip=do_scip)
+        for inst in instances
+    ]
 
 
 # ── Reporting ────────────────────────────────────────────────────────────────
@@ -587,14 +613,20 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--quick", action="store_true", help="small sizes only (fast smoke)")
     ap.add_argument("--no-scip", action="store_true", help="skip SCIP reference")
+    ap.add_argument("--no-sparse", action="store_true", help="dense instances only")
     ap.add_argument("--max-nodes", type=int, default=2_000_000)
     ap.add_argument("--time-limit", type=float, default=30.0, help="per-solve wall cap (s)")
     ap.add_argument("--out", type=str, default=None, help="dir to write report.md / report.json")
     args = ap.parse_args(argv)
 
-    sizes = MDK_SIZES[:4] if args.quick else MDK_SIZES
+    if args.quick:
+        instances = [gen_mdk(n, m) for n, m in MDK_SIZES[:4]]
+    else:
+        instances = [gen_mdk(n, m) for n, m in MDK_SIZES]
+        if not args.no_sparse:
+            instances += [gen_sparse_mdk(n, m) for n, m in SPARSE_MDK_SIZES]
     results = run(
-        sizes,
+        instances,
         max_nodes=args.max_nodes,
         time_limit_s=args.time_limit,
         do_scip=not args.no_scip,

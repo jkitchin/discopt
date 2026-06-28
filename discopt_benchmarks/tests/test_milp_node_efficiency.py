@@ -36,6 +36,52 @@ def test_gen_mdk_is_deterministic():
     np.testing.assert_array_equal(a.cap, np.floor(0.5 * a.weights.sum(axis=1)))
 
 
+def test_gen_sparse_mdk_is_deterministic_and_sparse():
+    a = milp_ne.gen_sparse_mdk(60, 20)
+    b = milp_ne.gen_sparse_mdk(60, 20)
+    assert a.name == b.name == "smdk60x20"
+    np.testing.assert_array_equal(a.weights, b.weights)
+    # Each row constrains only ~25% of the items (the rest are exactly zero).
+    nnz_frac = (a.weights != 0).mean()
+    assert 0.15 <= nnz_frac <= 0.35, nnz_frac
+
+
+def test_reduced_cost_fixing_is_sound_and_reduces_nodes():
+    inst = milp_ne.gen_mdk(90, 12)
+    std = milp_ne._std_form(inst)
+    off = milp_ne.solve_discopt(
+        std,
+        milp_ne._cfg(
+            root_cuts=16,
+            cut_rounds=1,
+            max_pool_cuts=128,
+            heuristics=True,
+            presolve=True,
+            strong_branch=True,
+            reduced_cost_fixing=False,
+        ),
+        max_nodes=2_000_000,
+    )
+    on = milp_ne.solve_discopt(
+        std,
+        milp_ne._cfg(
+            root_cuts=16,
+            cut_rounds=1,
+            max_pool_cuts=128,
+            heuristics=True,
+            presolve=True,
+            strong_branch=True,
+            reduced_cost_fixing=True,
+        ),
+        max_nodes=2_000_000,
+    )
+    assert off.status == "optimal" and on.status == "optimal"
+    # Sound: same optimum.
+    assert abs(off.obj - on.obj) <= 1e-6 * (1 + abs(off.obj))
+    # Reduces (or at least never inflates) the node count.
+    assert on.nodes <= off.nodes
+
+
 def test_engine_proves_optimum_and_root_bounds_are_ordered():
     inst = milp_ne.gen_mdk(30, 5)
     std = milp_ne._std_form(inst)
