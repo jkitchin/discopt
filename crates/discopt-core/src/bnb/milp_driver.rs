@@ -93,6 +93,14 @@ pub struct MilpOptions {
     pub root_cuts: usize,
     /// Max root cut rounds (separate → re-solve → separate). 1 = single pass.
     pub cut_rounds: usize,
+    /// Separate Gomory mixed-integer cuts (off the tableau) in the root loop.
+    /// GMI cuts are typically **dense** (a tableau row `B⁻¹A` mixes all columns),
+    /// so on a sparse-row model they densify the cut-augmented matrix and make
+    /// every node's LP re-solve expensive — erasing the cut benefit in wall time.
+    /// Disable to keep cuts sparse (cover cuts are row-local), preserving the
+    /// sparse-LP fast path. `true` keeps GMI (good on dense models where tableau
+    /// cuts add bound the sparse cover cuts miss).
+    pub gmi_cuts: bool,
     /// Apply efficacy + orthogonality cut selection ([`crate::lp::cut_select`])
     /// to each round's candidate cuts: keep only the strongest, most diverse few
     /// (up to the remaining `root_cuts` budget) instead of every cut found. With
@@ -292,7 +300,7 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
                     opts.simplex.tol,
                 )
             };
-            {
+            if opts.gmi_cuts {
                 let _t = crate::profile::Timer::new(crate::profile::Phase::SepGomory);
                 cuts.extend(separate_gomory(
                     &root_lp,
@@ -1670,6 +1678,7 @@ mod tests {
             gap_tol: 1e-9,
             root_cuts: 16,
             cut_rounds: 3,
+            gmi_cuts: true,
             cut_select: true,
             node_cuts: true,
             max_pool_cuts: 500,

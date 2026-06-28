@@ -82,6 +82,25 @@ def test_reduced_cost_fixing_is_sound_and_reduces_nodes():
     assert on.nodes <= off.nodes
 
 
+def test_sparse_cut_profile_is_sound():
+    """The sparse cut profile (`gmi_cuts` off + `cut_select` on) only *chooses
+    among* valid cuts, so it must reach the same optimum as prod — the levers can
+    change the node count but never the proven objective. (Step 7: the profile is
+    a difficulty-keyed wall win on the hardest sparse instance only, so it is a
+    caller-tunable lever, not a default — here we lock its soundness.)"""
+    inst = milp_ne.gen_sparse_mdk(60, 20)
+    std = milp_ne._std_form(inst)
+    prod = milp_ne.solve_discopt(std, milp_ne.ABLATION["prod"], max_nodes=2_000_000)
+    profile_cfg = dict(milp_ne.ABLATION["prod"])
+    profile_cfg.update(
+        gmi_cuts=False, cut_select=True, cut_rounds=3,
+        root_cuts=2 * inst.m, max_pool_cuts=4 * inst.m,
+    )
+    profile = milp_ne.solve_discopt(std, profile_cfg, max_nodes=2_000_000)
+    assert prod.status == "optimal" and profile.status == "optimal"
+    assert abs(prod.obj - profile.obj) <= 1e-6 * (1 + abs(prod.obj))
+
+
 def test_engine_proves_optimum_and_root_bounds_are_ordered():
     inst = milp_ne.gen_mdk(30, 5)
     std = milp_ne._std_form(inst)

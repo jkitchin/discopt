@@ -13,60 +13,60 @@
     "scip_root_gap_closed": 0.8375091008623169,
     "discopt_status": "optimal",
     "discopt_nodes": 47,
-    "discopt_wall_s": 0.006523830000332964,
+    "discopt_wall_s": 0.007632059998286422,
     "scip_status": "optimal",
     "scip_nodes": 1,
-    "scip_wall_s": 0.09319486000003963,
+    "scip_wall_s": 0.09594919600021967,
     "node_ratio": 47.0,
     "ablation": {
       "baseline": {
         "nodes": 1319,
-        "wall_s": 0.010548154999924009,
+        "wall_s": 0.009897497000565636,
         "status": "optimal"
       },
       "presolve": {
         "nodes": 1319,
-        "wall_s": 0.0091028679998999,
+        "wall_s": 0.008781119000559556,
         "status": "optimal"
       },
       "root_cuts": {
         "nodes": 1415,
-        "wall_s": 0.013097277000269969,
+        "wall_s": 0.013516402001187089,
         "status": "optimal"
       },
       "cut_rounds": {
         "nodes": 1565,
-        "wall_s": 0.1374018510005044,
+        "wall_s": 0.13852740100082883,
         "status": "optimal"
       },
       "node_cuts": {
         "nodes": 1451,
-        "wall_s": 0.32654068100055156,
+        "wall_s": 0.31809393000003183,
         "status": "optimal"
       },
       "strong_branch": {
         "nodes": 1461,
-        "wall_s": 0.01198776999990514,
+        "wall_s": 0.010296097998434561,
         "status": "optimal"
       },
       "heuristics": {
         "nodes": 147,
-        "wall_s": 0.0036209429999871645,
+        "wall_s": 0.0028402490006556036,
         "status": "optimal"
       },
       "reduced_cost_fixing": {
         "nodes": 89,
-        "wall_s": 0.0019871750000675092,
+        "wall_s": 0.0016365800001949538,
         "status": "optimal"
       },
       "prod": {
         "nodes": 47,
-        "wall_s": 0.0055560529999638675,
+        "wall_s": 0.005320595999364741,
         "status": "optimal"
       },
       "full": {
         "nodes": 33,
-        "wall_s": 0.15294583100057935,
+        "wall_s": 0.1530331579997437,
         "status": "optimal"
       }
     }
@@ -85,60 +85,60 @@
     "scip_root_gap_closed": 1.0,
     "discopt_status": "optimal",
     "discopt_nodes": 63,
-    "discopt_wall_s": 0.0045495109998228145,
+    "discopt_wall_s": 0.004572563999317936,
     "scip_status": "optimal",
     "scip_nodes": 1,
-    "scip_wall_s": 0.012345795000328508,
+    "scip_wall_s": 0.013120592999257497,
     "node_ratio": 63.0,
     "ablation": {
       "baseline": {
         "nodes": 1547,
-        "wall_s": 0.011633606999566837,
+        "wall_s": 0.010166976000618888,
         "status": "optimal"
       },
       "presolve": {
         "nodes": 1547,
-        "wall_s": 0.012189714999294665,
+        "wall_s": 0.009537863999867113,
         "status": "optimal"
       },
       "root_cuts": {
         "nodes": 1287,
-        "wall_s": 0.015294502999495307,
+        "wall_s": 0.012964531000761781,
         "status": "optimal"
       },
       "cut_rounds": {
         "nodes": 769,
-        "wall_s": 0.10800567400019645,
+        "wall_s": 0.10985737299961329,
         "status": "optimal"
       },
       "node_cuts": {
         "nodes": 1027,
-        "wall_s": 0.19377262099988002,
+        "wall_s": 0.1942037299995718,
         "status": "optimal"
       },
       "strong_branch": {
         "nodes": 1671,
-        "wall_s": 0.014274498000304447,
+        "wall_s": 0.014552242999343434,
         "status": "optimal"
       },
       "heuristics": {
         "nodes": 191,
-        "wall_s": 0.0031276219997380394,
+        "wall_s": 0.002701752999200835,
         "status": "optimal"
       },
       "reduced_cost_fixing": {
         "nodes": 31,
-        "wall_s": 0.0008101449993773713,
+        "wall_s": 0.0007155379989853827,
         "status": "optimal"
       },
       "prod": {
         "nodes": 63,
-        "wall_s": 0.004081218999999692,
+        "wall_s": 0.0040013099987845635,
         "status": "optimal"
       },
       "full": {
         "nodes": 31,
-        "wall_s": 0.10427184499985742,
+        "wall_s": 0.10617747200012673,
         "status": "optimal"
       }
     }
@@ -157,60 +157,60 @@
     "scip_root_gap_closed": 1.0139495310926598,
     "discopt_status": "optimal",
     "discopt_nodes": 61,
-    "discopt_wall_s": 0.008107839999865973,
+    "discopt_wall_s": 0.009544836000713985,
     "scip_status": "optimal",
     "scip_nodes": 1,
-    "scip_wall_s": 0.017758549999598472,
+    "scip_wall_s": 0.018514846000471152,
     "node_ratio": 61.0,
     "ablation": {
       "baseline": {
         "nodes": 131,
-        "wall_s": 0.002336977999220835,
+        "wall_s": 0.0023859180000727065,
         "status": "optimal"
       },
       "presolve": {
         "nodes": 131,
-        "wall_s": 0.0024886870005502715,
+        "wall_s": 0.0023422680005751317,
         "status": "optimal"
       },
       "root_cuts": {
         "nodes": 641,
-        "wall_s": 0.009300065000388713,
+        "wall_s": 0.009219189998475485,
         "status": "optimal"
       },
       "cut_rounds": {
         "nodes": 35,
-        "wall_s": 0.060647303000223474,
+        "wall_s": 0.060031200000594254,
         "status": "optimal"
       },
       "node_cuts": {
         "nodes": 255,
-        "wall_s": 0.07688579599926015,
+        "wall_s": 0.07350708400008443,
         "status": "optimal"
       },
       "strong_branch": {
         "nodes": 259,
-        "wall_s": 0.009299125999859825,
+        "wall_s": 0.008455467999738175,
         "status": "optimal"
       },
       "heuristics": {
         "nodes": 41,
-        "wall_s": 0.0015739559994472074,
+        "wall_s": 0.0015265340007317718,
         "status": "optimal"
       },
       "reduced_cost_fixing": {
         "nodes": 41,
-        "wall_s": 0.0012967310003659804,
+        "wall_s": 0.0012205950006318744,
         "status": "optimal"
       },
       "prod": {
         "nodes": 61,
-        "wall_s": 0.008764137999605737,
+        "wall_s": 0.009261985998819,
         "status": "optimal"
       },
       "full": {
         "nodes": 35,
-        "wall_s": 0.18813835700075288,
+        "wall_s": 0.18815896399974008,
         "status": "optimal"
       }
     }
@@ -229,60 +229,60 @@
     "scip_root_gap_closed": 0.39033386443830576,
     "discopt_status": "optimal",
     "discopt_nodes": 213,
-    "discopt_wall_s": 0.024358657999982825,
+    "discopt_wall_s": 0.023010315000647097,
     "scip_status": "optimal",
     "scip_nodes": 27,
-    "scip_wall_s": 0.2295733040000414,
+    "scip_wall_s": 0.23677670899996883,
     "node_ratio": 7.888888888888889,
     "ablation": {
       "baseline": {
         "nodes": 1037,
-        "wall_s": 0.018733906999841565,
+        "wall_s": 0.017149584000435425,
         "status": "optimal"
       },
       "presolve": {
         "nodes": 1037,
-        "wall_s": 0.017600565000066126,
+        "wall_s": 0.017976085999180214,
         "status": "optimal"
       },
       "root_cuts": {
         "nodes": 1221,
-        "wall_s": 0.032287859999996726,
+        "wall_s": 0.03174389600098948,
         "status": "optimal"
       },
       "cut_rounds": {
         "nodes": 1309,
-        "wall_s": 0.28935857099986606,
+        "wall_s": 0.2869943389996479,
         "status": "optimal"
       },
       "node_cuts": {
         "nodes": 1101,
-        "wall_s": 0.38101573299991287,
+        "wall_s": 0.3915289529995789,
         "status": "optimal"
       },
       "strong_branch": {
         "nodes": 1997,
-        "wall_s": 0.04001027799949952,
+        "wall_s": 0.04927540399876307,
         "status": "optimal"
       },
       "heuristics": {
         "nodes": 605,
-        "wall_s": 0.01321536700015713,
+        "wall_s": 0.013614736000818084,
         "status": "optimal"
       },
       "reduced_cost_fixing": {
         "nodes": 257,
-        "wall_s": 0.004359386000032828,
+        "wall_s": 0.0042902959994535195,
         "status": "optimal"
       },
       "prod": {
         "nodes": 213,
-        "wall_s": 0.022788807999859273,
+        "wall_s": 0.023675161000937806,
         "status": "optimal"
       },
       "full": {
         "nodes": 135,
-        "wall_s": 0.8464835619997757,
+        "wall_s": 0.8205654339999455,
         "status": "optimal"
       }
     }
@@ -301,60 +301,60 @@
     "scip_root_gap_closed": 0.646695083714555,
     "discopt_status": "optimal",
     "discopt_nodes": 57,
-    "discopt_wall_s": 0.012274155999875802,
+    "discopt_wall_s": 0.012151996001193766,
     "scip_status": "optimal",
     "scip_nodes": 1,
-    "scip_wall_s": 0.2007958519998283,
+    "scip_wall_s": 0.2080270209989976,
     "node_ratio": 57.0,
     "ablation": {
       "baseline": {
         "nodes": 4607,
-        "wall_s": 0.049516954999489826,
+        "wall_s": 0.045648174000234576,
         "status": "optimal"
       },
       "presolve": {
         "nodes": 4607,
-        "wall_s": 0.05079411099995923,
+        "wall_s": 0.048055072000352084,
         "status": "optimal"
       },
       "root_cuts": {
         "nodes": 4607,
-        "wall_s": 0.06779480600016541,
+        "wall_s": 0.06930959999954212,
         "status": "optimal"
       },
       "cut_rounds": {
         "nodes": 3457,
-        "wall_s": 0.3902966189998551,
+        "wall_s": 0.39959393900062423,
         "status": "optimal"
       },
       "node_cuts": {
         "nodes": 4863,
-        "wall_s": 0.9039529470001071,
+        "wall_s": 0.8202592010002263,
         "status": "optimal"
       },
       "strong_branch": {
         "nodes": 4869,
-        "wall_s": 0.07530981200034148,
+        "wall_s": 0.07534176300032414,
         "status": "optimal"
       },
       "heuristics": {
         "nodes": 195,
-        "wall_s": 0.007293716000276618,
+        "wall_s": 0.007382644000244909,
         "status": "optimal"
       },
       "reduced_cost_fixing": {
         "nodes": 91,
-        "wall_s": 0.003150016000290634,
+        "wall_s": 0.0031131729992921464,
         "status": "optimal"
       },
       "prod": {
         "nodes": 57,
-        "wall_s": 0.013098440999783634,
+        "wall_s": 0.011663446999591542,
         "status": "optimal"
       },
       "full": {
         "nodes": 47,
-        "wall_s": 0.3392596080002477,
+        "wall_s": 0.34386855699995067,
         "status": "optimal"
       }
     }
@@ -373,60 +373,60 @@
     "scip_root_gap_closed": 0.32082883855065664,
     "discopt_status": "optimal",
     "discopt_nodes": 197,
-    "discopt_wall_s": 0.027610711000306765,
+    "discopt_wall_s": 0.02687512299962691,
     "scip_status": "optimal",
     "scip_nodes": 66,
-    "scip_wall_s": 0.2708430020002197,
+    "scip_wall_s": 0.2759385610006575,
     "node_ratio": 2.984848484848485,
     "ablation": {
       "baseline": {
         "nodes": 2311,
-        "wall_s": 0.05585407800026587,
+        "wall_s": 0.058940377000908484,
         "status": "optimal"
       },
       "presolve": {
         "nodes": 2311,
-        "wall_s": 0.0569495959998676,
+        "wall_s": 0.057238938999944367,
         "status": "optimal"
       },
       "root_cuts": {
         "nodes": 2551,
-        "wall_s": 0.09101591499984352,
+        "wall_s": 0.08657789999961096,
         "status": "optimal"
       },
       "cut_rounds": {
         "nodes": 2757,
-        "wall_s": 0.5879281339994122,
+        "wall_s": 0.7041548329998477,
         "status": "optimal"
       },
       "node_cuts": {
         "nodes": 2479,
-        "wall_s": 0.9045789309993779,
+        "wall_s": 0.9259149710014754,
         "status": "optimal"
       },
       "strong_branch": {
         "nodes": 2673,
-        "wall_s": 0.0976751210000657,
+        "wall_s": 0.09649012100089749,
         "status": "optimal"
       },
       "heuristics": {
         "nodes": 673,
-        "wall_s": 0.02242864500021824,
+        "wall_s": 0.0234468709986686,
         "status": "optimal"
       },
       "reduced_cost_fixing": {
         "nodes": 315,
-        "wall_s": 0.007021174999863433,
+        "wall_s": 0.007281046000571223,
         "status": "optimal"
       },
       "prod": {
         "nodes": 197,
-        "wall_s": 0.026981703999808815,
+        "wall_s": 0.027634744999886607,
         "status": "optimal"
       },
       "full": {
         "nodes": 313,
-        "wall_s": 1.1059545649995925,
+        "wall_s": 1.1166685330008477,
         "status": "optimal"
       }
     }
@@ -445,60 +445,60 @@
     "scip_root_gap_closed": 0.1991322112696488,
     "discopt_status": "optimal",
     "discopt_nodes": 4713,
-    "discopt_wall_s": 0.27569485799995164,
+    "discopt_wall_s": 0.2996259169995028,
     "scip_status": "optimal",
     "scip_nodes": 2330,
-    "scip_wall_s": 3.451019768000151,
+    "scip_wall_s": 3.6263180049991206,
     "node_ratio": 2.0227467811158797,
     "ablation": {
       "baseline": {
         "nodes": 20735,
-        "wall_s": 0.4108746069996414,
+        "wall_s": 0.4552812679994531,
         "status": "optimal"
       },
       "presolve": {
         "nodes": 20735,
-        "wall_s": 0.40074081900002056,
+        "wall_s": 0.4120669349995296,
         "status": "optimal"
       },
       "root_cuts": {
         "nodes": 20585,
-        "wall_s": 0.5776154810000662,
+        "wall_s": 0.7010121629991772,
         "status": "optimal"
       },
       "cut_rounds": {
         "nodes": 21503,
-        "wall_s": 2.9709565139992264,
+        "wall_s": 2.991771876999337,
         "status": "optimal"
       },
       "node_cuts": {
         "nodes": 19841,
-        "wall_s": 4.527531817999261,
+        "wall_s": 4.769246974001362,
         "status": "optimal"
       },
       "strong_branch": {
         "nodes": 16895,
-        "wall_s": 0.39684289499928127,
+        "wall_s": 0.4044095749995904,
         "status": "optimal"
       },
       "heuristics": {
         "nodes": 10299,
-        "wall_s": 0.33833641599994735,
+        "wall_s": 0.35083339199991315,
         "status": "optimal"
       },
       "reduced_cost_fixing": {
         "nodes": 6331,
-        "wall_s": 0.17508682399966347,
+        "wall_s": 0.16517465600009018,
         "status": "optimal"
       },
       "prod": {
         "nodes": 4713,
-        "wall_s": 0.285024730999794,
+        "wall_s": 0.27909783299946866,
         "status": "optimal"
       },
       "full": {
         "nodes": 4879,
-        "wall_s": 5.33062113699998,
+        "wall_s": 5.398552599999675,
         "status": "optimal"
       }
     }
@@ -517,60 +517,60 @@
     "scip_root_gap_closed": 0.24457398259569654,
     "discopt_status": "optimal",
     "discopt_nodes": 1797,
-    "discopt_wall_s": 0.3290541469996242,
+    "discopt_wall_s": 0.3350980690011056,
     "scip_status": "optimal",
     "scip_nodes": 579,
-    "scip_wall_s": 1.4432397290001973,
+    "scip_wall_s": 1.4361874040005205,
     "node_ratio": 3.1036269430051813,
     "ablation": {
       "baseline": {
         "nodes": 10751,
-        "wall_s": 0.3024524880001991,
+        "wall_s": 0.3157823340006871,
         "status": "optimal"
       },
       "presolve": {
         "nodes": 10751,
-        "wall_s": 0.31239026700131944,
+        "wall_s": 0.3112971029986511,
         "status": "optimal"
       },
       "root_cuts": {
         "nodes": 10623,
-        "wall_s": 0.4565770760000305,
+        "wall_s": 0.4641406549999374,
         "status": "optimal"
       },
       "cut_rounds": {
         "nodes": 11007,
-        "wall_s": 1.9880895109999983,
+        "wall_s": 2.0527802879987576,
         "status": "optimal"
       },
       "node_cuts": {
         "nodes": 10239,
-        "wall_s": 2.91232700799992,
+        "wall_s": 2.931237988999783,
         "status": "optimal"
       },
       "strong_branch": {
         "nodes": 10879,
-        "wall_s": 0.45699068200156034,
+        "wall_s": 0.45646608700008073,
         "status": "optimal"
       },
       "heuristics": {
         "nodes": 3125,
-        "wall_s": 0.17886284299856925,
+        "wall_s": 0.18333021600119537,
         "status": "optimal"
       },
       "reduced_cost_fixing": {
         "nodes": 1973,
-        "wall_s": 0.07728405099987867,
+        "wall_s": 0.0794581409991224,
         "status": "optimal"
       },
       "prod": {
         "nodes": 1797,
-        "wall_s": 0.3304636719985865,
+        "wall_s": 0.33716558900050586,
         "status": "optimal"
       },
       "full": {
         "nodes": 1931,
-        "wall_s": 3.484588396999243,
+        "wall_s": 3.5347150429988687,
         "status": "optimal"
       }
     }
@@ -589,60 +589,60 @@
     "scip_root_gap_closed": 0.10879085199125525,
     "discopt_status": "optimal",
     "discopt_nodes": 17935,
-    "discopt_wall_s": 2.110224701000334,
+    "discopt_wall_s": 2.1891817549985717,
     "scip_status": "optimal",
     "scip_nodes": 12688,
-    "scip_wall_s": 16.264108381999904,
+    "scip_wall_s": 17.02339094800118,
     "node_ratio": 1.4135403530895334,
     "ablation": {
       "baseline": {
         "nodes": 58885,
-        "wall_s": 2.7984606070003792,
+        "wall_s": 2.7340372359994944,
         "status": "optimal"
       },
       "presolve": {
         "nodes": 58885,
-        "wall_s": 2.801848766999683,
+        "wall_s": 2.8010253590000502,
         "status": "optimal"
       },
       "root_cuts": {
         "nodes": 57855,
-        "wall_s": 4.129314161000366,
+        "wall_s": 4.107751040999574,
         "status": "optimal"
       },
       "cut_rounds": {
         "nodes": 57229,
-        "wall_s": 14.30648479500087,
+        "wall_s": 14.420430538999426,
         "status": "optimal"
       },
       "node_cuts": {
         "nodes": 57855,
-        "wall_s": 23.95058462199995,
+        "wall_s": 24.554636947999825,
         "status": "optimal"
       },
       "strong_branch": {
         "nodes": 57089,
-        "wall_s": 2.847822821999216,
+        "wall_s": 2.9309866020012123,
         "status": "optimal"
       },
       "heuristics": {
         "nodes": 29451,
-        "wall_s": 2.2988348270009737,
+        "wall_s": 2.35402043799877,
         "status": "optimal"
       },
       "reduced_cost_fixing": {
         "nodes": 20235,
-        "wall_s": 1.1527248269994743,
+        "wall_s": 1.181787389999954,
         "status": "optimal"
       },
       "prod": {
         "nodes": 17935,
-        "wall_s": 2.1119280279999657,
+        "wall_s": 2.1738883849993726,
         "status": "optimal"
       },
       "full": {
         "nodes": 19361,
-        "wall_s": 23.761335936998876,
+        "wall_s": 23.798916955000095,
         "status": "optimal"
       }
     }
@@ -661,60 +661,60 @@
     "scip_root_gap_closed": 0.8139179491108564,
     "discopt_status": "optimal",
     "discopt_nodes": 703,
-    "discopt_wall_s": 0.12048626999967382,
+    "discopt_wall_s": 0.13647210399903997,
     "scip_status": "optimal",
     "scip_nodes": 21,
-    "scip_wall_s": 0.19196128899966425,
+    "scip_wall_s": 0.17888911199952418,
     "node_ratio": 33.476190476190474,
     "ablation": {
       "baseline": {
         "nodes": 17643,
-        "wall_s": 0.22513814000012644,
+        "wall_s": 0.23182631899908301,
         "status": "optimal"
       },
       "presolve": {
         "nodes": 17643,
-        "wall_s": 0.2312907310006267,
+        "wall_s": 0.22310194400051842,
         "status": "optimal"
       },
       "root_cuts": {
         "nodes": 4397,
-        "wall_s": 0.14144214699990698,
+        "wall_s": 0.130581732999417,
         "status": "optimal"
       },
       "cut_rounds": {
         "nodes": 3257,
-        "wall_s": 0.5827476399990701,
+        "wall_s": 0.588834140000472,
         "status": "optimal"
       },
       "node_cuts": {
         "nodes": 517,
-        "wall_s": 0.7300235749989952,
+        "wall_s": 0.7323381770002015,
         "status": "optimal"
       },
       "strong_branch": {
         "nodes": 5197,
-        "wall_s": 0.1125840929998958,
+        "wall_s": 0.1106796950007265,
         "status": "optimal"
       },
       "heuristics": {
         "nodes": 9193,
-        "wall_s": 0.19566548200054967,
+        "wall_s": 0.1952508089998446,
         "status": "optimal"
       },
       "reduced_cost_fixing": {
         "nodes": 7239,
-        "wall_s": 0.13540111099973728,
+        "wall_s": 0.14550767000037013,
         "status": "optimal"
       },
       "prod": {
         "nodes": 703,
-        "wall_s": 0.11771317400052794,
+        "wall_s": 0.11802496299969789,
         "status": "optimal"
       },
       "full": {
         "nodes": 183,
-        "wall_s": 3.7785856919999787,
+        "wall_s": 3.738310918000934,
         "status": "optimal"
       }
     }
@@ -733,60 +733,60 @@
     "scip_root_gap_closed": 0.8123184106062128,
     "discopt_status": "optimal",
     "discopt_nodes": 1025,
-    "discopt_wall_s": 0.31689134599946556,
+    "discopt_wall_s": 0.31930167300015455,
     "scip_status": "optimal",
     "scip_nodes": 43,
-    "scip_wall_s": 0.4129997430009098,
+    "scip_wall_s": 0.43467918599890254,
     "node_ratio": 23.837209302325583,
     "ablation": {
       "baseline": {
         "nodes": 12125,
-        "wall_s": 0.21539851099987573,
+        "wall_s": 0.21564690400009567,
         "status": "optimal"
       },
       "presolve": {
         "nodes": 12125,
-        "wall_s": 0.21518374600054813,
+        "wall_s": 0.21765284299908672,
         "status": "optimal"
       },
       "root_cuts": {
         "nodes": 4223,
-        "wall_s": 0.19047673099885287,
+        "wall_s": 0.19292750199929287,
         "status": "optimal"
       },
       "cut_rounds": {
         "nodes": 2047,
-        "wall_s": 0.4757457900013833,
+        "wall_s": 0.4975019240009715,
         "status": "optimal"
       },
       "node_cuts": {
         "nodes": 395,
-        "wall_s": 0.8297816689992032,
+        "wall_s": 0.8084707590005564,
         "status": "optimal"
       },
       "strong_branch": {
         "nodes": 8395,
-        "wall_s": 0.2619364330003009,
+        "wall_s": 0.2629472379994695,
         "status": "optimal"
       },
       "heuristics": {
         "nodes": 6339,
-        "wall_s": 0.20577351900101348,
+        "wall_s": 0.19627003999994486,
         "status": "optimal"
       },
       "reduced_cost_fixing": {
         "nodes": 4741,
-        "wall_s": 0.13613778100079799,
+        "wall_s": 0.13164155000049504,
         "status": "optimal"
       },
       "prod": {
         "nodes": 1025,
-        "wall_s": 0.33288346599874785,
+        "wall_s": 0.32888735000051383,
         "status": "optimal"
       },
       "full": {
         "nodes": 377,
-        "wall_s": 7.061755389000609,
+        "wall_s": 6.865427454000383,
         "status": "optimal"
       }
     }
@@ -805,60 +805,60 @@
     "scip_root_gap_closed": 0.6294727130965264,
     "discopt_status": "optimal",
     "discopt_nodes": 7643,
-    "discopt_wall_s": 0.9355561770007625,
+    "discopt_wall_s": 0.9312690910010133,
     "scip_status": "optimal",
     "scip_nodes": 145,
-    "scip_wall_s": 0.943553630999304,
+    "scip_wall_s": 0.9581553409989283,
     "node_ratio": 52.710344827586205,
     "ablation": {
       "baseline": {
         "nodes": 24961,
-        "wall_s": 0.5595028650004679,
+        "wall_s": 0.565965904001132,
         "status": "optimal"
       },
       "presolve": {
         "nodes": 24961,
-        "wall_s": 0.560679614000037,
+        "wall_s": 0.5653523989985842,
         "status": "optimal"
       },
       "root_cuts": {
         "nodes": 32471,
-        "wall_s": 1.4840279950003605,
+        "wall_s": 1.5064889639998,
         "status": "optimal"
       },
       "cut_rounds": {
         "nodes": 10725,
-        "wall_s": 2.8442553079985373,
+        "wall_s": 2.8927049369995075,
         "status": "optimal"
       },
       "node_cuts": {
         "nodes": 2303,
-        "wall_s": 2.609783062000133,
+        "wall_s": 2.6292127699998673,
         "status": "optimal"
       },
       "strong_branch": {
         "nodes": 25495,
-        "wall_s": 0.6841789879999851,
+        "wall_s": 0.6743347970004834,
         "status": "optimal"
       },
       "heuristics": {
         "nodes": 12733,
-        "wall_s": 0.5184804040000017,
+        "wall_s": 0.5274690520000149,
         "status": "optimal"
       },
       "reduced_cost_fixing": {
         "nodes": 11717,
-        "wall_s": 0.40029767800115224,
+        "wall_s": 0.3883062799995969,
         "status": "optimal"
       },
       "prod": {
         "nodes": 7643,
-        "wall_s": 0.9325026550013717,
+        "wall_s": 0.9307966149990534,
         "status": "optimal"
       },
       "full": {
         "nodes": 1183,
-        "wall_s": 14.990623436000533,
+        "wall_s": 15.118066222999914,
         "status": "optimal"
       }
     }
@@ -877,60 +877,60 @@
     "scip_root_gap_closed": 0.5185792987039793,
     "discopt_status": "optimal",
     "discopt_nodes": 29147,
-    "discopt_wall_s": 3.7466464059998543,
+    "discopt_wall_s": 3.7989228739988903,
     "scip_status": "optimal",
     "scip_nodes": 753,
-    "scip_wall_s": 1.8536133329998847,
+    "scip_wall_s": 1.9324693029993796,
     "node_ratio": 38.7078353253652,
     "ablation": {
       "baseline": {
         "nodes": 124497,
-        "wall_s": 4.520557266998367,
+        "wall_s": 4.640008268001111,
         "status": "optimal"
       },
       "presolve": {
         "nodes": 124497,
-        "wall_s": 4.585765383999387,
+        "wall_s": 4.668827699000758,
         "status": "optimal"
       },
       "root_cuts": {
         "nodes": 162313,
-        "wall_s": 11.453313113999684,
+        "wall_s": 11.816440317001252,
         "status": "optimal"
       },
       "cut_rounds": {
         "nodes": 92435,
-        "wall_s": 26.105207733000498,
+        "wall_s": 26.401147538999794,
         "status": "optimal"
       },
       "node_cuts": {
         "nodes": 6783,
-        "wall_s": 6.983248098998956,
+        "wall_s": 7.019073796998782,
         "status": "optimal"
       },
       "strong_branch": {
         "nodes": 105297,
-        "wall_s": 3.9373481399998127,
+        "wall_s": 3.942214583999885,
         "status": "optimal"
       },
       "heuristics": {
         "nodes": 67033,
-        "wall_s": 4.044108558999142,
+        "wall_s": 4.167740311000671,
         "status": "optimal"
       },
       "reduced_cost_fixing": {
         "nodes": 72531,
-        "wall_s": 3.903672768999968,
+        "wall_s": 3.9911030969997228,
         "status": "optimal"
       },
       "prod": {
         "nodes": 29147,
-        "wall_s": 3.7851405149995117,
+        "wall_s": 3.8465428190011153,
         "status": "optimal"
       },
       "full": {
         "nodes": 1885,
-        "wall_s": 22.6582813290006,
+        "wall_s": 22.801961313998618,
         "status": "optimal"
       }
     }
