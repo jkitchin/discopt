@@ -11,6 +11,7 @@ pub mod expr;
 pub mod lp;
 pub mod nl_parser;
 pub mod presolve;
+pub mod profile;
 
 /// Returns the version string.
 pub fn version() -> &'static str {

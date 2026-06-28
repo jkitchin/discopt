@@ -560,7 +560,12 @@ pub fn solve_milp_py<'py>(
             l: &l_owned,
             u: &u_owned,
         };
-        core_solve_milp(&lp, &b_owned, obj_const, &opts)
+        let r = core_solve_milp(&lp, &b_owned, obj_const, &opts);
+        // Emit the per-phase / pivot profile to stderr when DISCOPT_PROFILE is set
+        // (no-op otherwise). solve_milp has returned, so its function-scoped phase
+        // timers have recorded. Engine perf work (issue #332) reads this.
+        discopt_core::profile::dump();
+        r
     });
     let status = match res.status {
         MilpStatus::Optimal => "optimal",

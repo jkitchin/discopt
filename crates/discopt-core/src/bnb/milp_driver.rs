@@ -108,6 +108,8 @@ pub struct MilpOptions {
 /// Solve `min cᵀx + obj_const s.t. A x = b, l ≤ x ≤ u` with `integer_cols`
 /// integer-constrained, by Rust-internal warm-started-simplex branch and bound.
 pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions) -> MilpResult {
+    crate::profile::init_from_env();
+    crate::profile::reset();
     let n = lp.n;
     let ns = opts.n_struct;
     let is_int = {
@@ -201,7 +203,12 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
     // rounds (Gomory's classic approach) tightens the relaxation far more than a
     // single pass; we stop on the cut cap, when no violated cut is found, or when
     // the bound stops improving (tailing off).
+    // Optimal basis from the last successful root-cut solve, with the matrix size
+    // (`n_w`) it was computed at. Reused to warm-start the root B&B node so it does
+    // not re-derive the augmented LP from a cold slack basis. See `root_warm_basis`.
+    let mut root_basis: Option<(Basis, usize)> = None;
     if opts.root_cuts > 0 {
+        let _t = crate::profile::Timer::new(crate::profile::Phase::RootCutLoop);
         let mut total_cuts = 0usize;
         let mut prev_obj = f64::NEG_INFINITY;
         for _round in 0..opts.cut_rounds {
@@ -216,11 +223,19 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
                 l: &l_w,
                 u: &u_w,
             };
-            let root = solve_lp_root(&root_lp, &b_w, &node_simplex);
+            let root = {
+                let _t = crate::profile::Timer::new(crate::profile::Phase::RootSolve);
+                solve_lp_root(&root_lp, &b_w, &node_simplex)
+            };
             lp_iters += root.iters;
             if root.status != LpStatus::Optimal {
                 break;
             }
+            // Keep this round's optimal basis for the root B&B node. If the loop
+            // exits now (tailing off / no cuts) it already spans the final matrix;
+            // if more cuts are appended below it is extended to the new size after
+            // the loop. The clone is cheap next to the solve it came from.
+            root_basis = Some((root.basis.clone(), n_w));
             // Tailing off: stop once added cuts barely move the bound.
             if root.obj <= prev_obj + 1e-7 * (1.0 + prev_obj.abs()) && prev_obj > f64::NEG_INFINITY
             {
@@ -230,23 +245,29 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
 
             // Knapsack cover cuts (sparse, strong on knapsack structure) plus
             // Gomory mixed-integer cuts off the native basis.
-            let mut cuts = separate_cover(
-                &root_lp,
-                &b_w,
-                &root.x,
-                ns,
-                &is_int_full,
-                n_orig_rows,
-                opts.simplex.tol,
-            );
-            cuts.extend(separate_gomory(
-                &root_lp,
-                &b_w,
-                &root.basis,
-                &is_int_full,
-                opts.simplex.tol,
-                1e7,
-            ));
+            let mut cuts = {
+                let _t = crate::profile::Timer::new(crate::profile::Phase::SepCover);
+                separate_cover(
+                    &root_lp,
+                    &b_w,
+                    &root.x,
+                    ns,
+                    &is_int_full,
+                    n_orig_rows,
+                    opts.simplex.tol,
+                )
+            };
+            {
+                let _t = crate::profile::Timer::new(crate::profile::Phase::SepGomory);
+                cuts.extend(separate_gomory(
+                    &root_lp,
+                    &b_w,
+                    &root.basis,
+                    &is_int_full,
+                    opts.simplex.tol,
+                    1e7,
+                ));
+            }
             cuts.truncate(opts.root_cuts - total_cuts);
             let new_cuts = dedup_new_cuts(cuts, &mut pool_sigs, usize::MAX);
             if new_cuts.is_empty() {
@@ -271,6 +292,18 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
     let mut slack_l = l_w[ns..].to_vec();
     let mut slack_u = u_w[ns..].to_vec();
 
+    // Extend the kept root basis to the final matrix size: rounds after the last
+    // solve appended cut rows/slacks, and `extend_basis` makes those new slacks
+    // basic (a valid, dual-repairable starting basis). When the last solve already
+    // spanned the final matrix this is a no-op. The root node warm-starts from it.
+    let root_warm_basis: Option<Basis> = root_basis.map(|(b, basis_n)| {
+        if basis_n < n_w {
+            extend_basis(b, n_w)
+        } else {
+            b
+        }
+    });
+
     // `deadline` (computed above, before the root cuts) drives two layers of
     // budget enforcement: the loop-top check below stops *dispatching* new
     // batches once it passes; `solve_node` reads it to drop each node's
@@ -281,6 +314,7 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
     // from inside the simplex loop. Soundness is untouched: those steps only
     // change branching choice / cut tightness / early incumbents, never a
     // bound's validity.
+    let _t_search = crate::profile::Timer::new(crate::profile::Phase::SearchLoop);
     'search: loop {
         if tm.is_finished() || tm.gap() <= opts.gap_tol {
             break;
@@ -359,6 +393,7 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
                 inc_snapshot: tm.incumbent().map(|(_, inc)| inc),
                 reliability: tm.get_reliability_threshold(),
                 pool_room: pool_sigs.len() < opts.max_pool_cuts,
+                root_warm_basis: root_warm_basis.as_ref(),
                 deadline,
                 tm: &tm,
             };
@@ -533,6 +568,12 @@ struct NodeCtx<'a> {
     reliability: u32,
     /// Whether the cut pool had room at batch start (gates separation work).
     pool_room: bool,
+    /// Optimal basis of the (final) root-cut LP, extended to the current matrix
+    /// size. The root B&B node — the only node solved cold — warm-starts from it
+    /// instead of the slack basis, so it pivots in just the few cut rows added
+    /// after the last root solve rather than re-deriving the whole augmented LP.
+    /// `None` when no root cuts ran (then the root falls back to the slack basis).
+    root_warm_basis: Option<&'a Basis>,
     /// Absolute wall-clock deadline. Once passed, each node still computes its
     /// (valid) LP bound but skips the optional rounding heuristic, cover
     /// separation, and strong branching — none of which affect bound validity
@@ -645,32 +686,49 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
     // heuristic runs there once so its cost (up to n_int warm re-solves) is paid
     // a single time for the whole search.
     let is_root = ctx.tm.node_basis(id).is_none();
+    let _t_node = crate::profile::Timer::new(crate::profile::Phase::NodeLpSolve);
     let mut sol = match ctx.tm.node_basis(id) {
         Some(basis) => {
             let basis = extend_basis(basis, ctx.n_w);
             solve_lp_warm_scaled(&solve_lp_view, ctx.sb, &basis, ctx.simplex)
         }
-        // The only node solved cold is the root. Try the dual simplex from the
-        // slack basis (built from the unscaled working matrix — scaling-invariant,
-        // dual feasibility preserved) before the cold primal, the same covering-LP
-        // speedup the root-cut loop gets. `solve_lp_warm_scaled` cold-solves if the
-        // slack basis is unavailable or not dual-feasible, so the result is unchanged.
-        None => match dual_slack_basis(
-            ctx.a_w,
-            ctx.m_w,
-            ctx.n_w,
-            ctx.c_w,
-            &full_l,
-            &full_u,
-            ctx.simplex.tol,
-        ) {
-            Some(basis) => solve_lp_warm_scaled(&solve_lp_view, ctx.sb, &basis, ctx.simplex),
-            None => solve_lp_scaled(&solve_lp_view, ctx.sb, ctx.simplex),
-        },
+        // The only node solved cold is the root. Prefer the root-cut loop's own
+        // optimal basis (extended over any cuts added after its last solve): the
+        // augmented LP is already solved there, so the root node just pivots in the
+        // few trailing cut rows instead of re-deriving it. Failing that, try the
+        // dual simplex from the slack basis (built from the unscaled working matrix
+        // — scaling-invariant, dual feasibility preserved) before the cold primal,
+        // the same covering-LP speedup the root-cut loop gets. `solve_lp_warm_scaled`
+        // re-verifies the start basis and cold-solves on any difficulty, so the
+        // optimal objective — hence the node's bound — is identical either way; only
+        // which optimal vertex is reached (and thus branching) can differ, exactly
+        // as the existing slack-basis path already does.
+        None => {
+            if let Some(rb) = ctx.root_warm_basis {
+                let basis = extend_basis(rb.clone(), ctx.n_w);
+                solve_lp_warm_scaled(&solve_lp_view, ctx.sb, &basis, ctx.simplex)
+            } else {
+                match dual_slack_basis(
+                    ctx.a_w,
+                    ctx.m_w,
+                    ctx.n_w,
+                    ctx.c_w,
+                    &full_l,
+                    &full_u,
+                    ctx.simplex.tol,
+                ) {
+                    Some(basis) => {
+                        solve_lp_warm_scaled(&solve_lp_view, ctx.sb, &basis, ctx.simplex)
+                    }
+                    None => solve_lp_scaled(&solve_lp_view, ctx.sb, ctx.simplex),
+                }
+            }
+        }
     };
     if let Some(s) = ctx.scaling {
         s.unscale_x(&mut sol.x);
     }
+    drop(_t_node);
     let sol = sol;
 
     let mut out = NodeOutput {
@@ -733,6 +791,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                 // only at the root (when rounding found nothing) so its cost is
                 // bounded; the warm-started search + cuts take over thereafter.
                 if out.incumbent.is_none() && is_root {
+                    let _t = crate::profile::Timer::new(crate::profile::Phase::DiveRepair);
                     out.incumbent = try_dive_repair(ctx, lb_k, ub_k, &sol.x, &sol.basis);
                 }
             }
@@ -740,6 +799,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
             // covers the root never sees. These are globally valid; the reduce
             // dedups them into the shared pool to tighten the whole tree.
             if ctx.opts.node_cuts && !feasible && ctx.pool_room && !time_up {
+                let _t = crate::profile::Timer::new(crate::profile::Phase::SepCover);
                 out.found_cuts = separate_cover(
                     &node_lp,
                     ctx.b_w,
@@ -762,6 +822,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                     .map(|inc| node_bound >= inc - 1e-9)
                     .unwrap_or(false);
                 if !prunable {
+                    let _t = crate::profile::Timer::new(crate::profile::Phase::StrongBranch);
                     let cands = ctx.tm.score_candidates(xs);
                     let (best, piv) =
                         strong_branch(ctx, &full_l, &full_u, &sol.basis, &sol.x, sol.obj, &cands);
@@ -942,6 +1003,7 @@ fn augment_with_cuts(
     if k == 0 {
         return (m_w, n_w);
     }
+    let _t = crate::profile::Timer::new(crate::profile::Phase::Augment);
     let (m_old, n_old) = (m_w, n_w);
     let (m_new, n_new) = (m_old + k, n_old + k);
     let mut a_new = vec![0.0; m_new * n_new];
