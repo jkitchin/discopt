@@ -24,7 +24,7 @@ use crate::lp::cut_select::select_cuts;
 use crate::lp::gomory::{separate_gomory, solve_dense, GomoryCut};
 use crate::lp::simplex::sparse::SparseCols;
 use crate::lp::simplex::{
-    solve_lp, solve_lp_scaled, solve_lp_warm, solve_lp_warm_scaled, tighten_bounds, LpStatus,
+    solve_lp, solve_lp_scaled, solve_lp_warm, solve_lp_warm_scaled_csc, tighten_bounds, LpStatus,
     PreparedDual, Scaling, SimplexOptions,
 };
 
@@ -403,6 +403,10 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
             Some(_) => (&a_s, &c_s, &b_s),
             None => (&a_w, &c_w, &b_w),
         };
+        // CSC of the solve-space matrix, built once and shared by every node solve
+        // in this batch (the matrix is constant within a batch). This lifts the
+        // per-node `SparseCols::from_dense` O(m·n) rebuild out of the warm solve.
+        let csc_batch = SparseCols::from_dense(sa, m_w, n_w);
         let sb_active = opts.strong_branch && tm.stats().total_nodes < opts.sb_node_budget;
         let mut results = Vec::with_capacity(batch.node_ids.len());
         let mut pending_cuts: Vec<GomoryCut> = Vec::new();
@@ -429,6 +433,7 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
                 sa,
                 sc,
                 sb,
+                csc: &csc_batch,
                 slack_l: &slack_l,
                 slack_u: &slack_u,
                 is_int: &is_int,
@@ -615,6 +620,13 @@ struct NodeCtx<'a> {
     sa: &'a [f64],
     sc: &'a [f64],
     sb: &'a [f64],
+    /// CSC view of the solve-space matrix `sa`, built **once per batch** and
+    /// shared by every node/strong-branch/dive LP solve in the batch. The working
+    /// matrix is constant within a batch (cuts fold in only between batches), so
+    /// this removes the per-node `SparseCols::from_dense` rebuild from the warm
+    /// solve. Built from `sa`, so it matches whichever (scaled or raw) matrix the
+    /// node solves see.
+    csc: &'a SparseCols,
     slack_l: &'a [f64],
     slack_u: &'a [f64],
     is_int: &'a [bool],
@@ -814,7 +826,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
     let mut sol = match ctx.tm.node_basis(id) {
         Some(basis) => {
             let basis = extend_basis(basis, ctx.n_w);
-            solve_lp_warm_scaled(&solve_lp_view, ctx.sb, &basis, ctx.simplex)
+            solve_lp_warm_scaled_csc(&solve_lp_view, ctx.sb, &basis, ctx.simplex, ctx.csc)
         }
         // The only node solved cold is the root. Prefer the root-cut loop's own
         // optimal basis (extended over any cuts added after its last solve): the
@@ -822,15 +834,16 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
         // few trailing cut rows instead of re-deriving it. Failing that, try the
         // dual simplex from the slack basis (built from the unscaled working matrix
         // — scaling-invariant, dual feasibility preserved) before the cold primal,
-        // the same covering-LP speedup the root-cut loop gets. `solve_lp_warm_scaled`
+        // the same covering-LP speedup the root-cut loop gets. The warm solve
         // re-verifies the start basis and cold-solves on any difficulty, so the
         // optimal objective — hence the node's bound — is identical either way; only
         // which optimal vertex is reached (and thus branching) can differ, exactly
-        // as the existing slack-basis path already does.
+        // as the existing slack-basis path already does. The batch CSC (`ctx.csc`)
+        // is reused so this cold-root warm solve also skips the per-solve rebuild.
         None => {
             if let Some(rb) = ctx.root_warm_basis {
                 let basis = extend_basis(rb.clone(), ctx.n_w);
-                solve_lp_warm_scaled(&solve_lp_view, ctx.sb, &basis, ctx.simplex)
+                solve_lp_warm_scaled_csc(&solve_lp_view, ctx.sb, &basis, ctx.simplex, ctx.csc)
             } else {
                 match dual_slack_basis(
                     ctx.a_w,
@@ -841,9 +854,13 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                     &full_u,
                     ctx.simplex.tol,
                 ) {
-                    Some(basis) => {
-                        solve_lp_warm_scaled(&solve_lp_view, ctx.sb, &basis, ctx.simplex)
-                    }
+                    Some(basis) => solve_lp_warm_scaled_csc(
+                        &solve_lp_view,
+                        ctx.sb,
+                        &basis,
+                        ctx.simplex,
+                        ctx.csc,
+                    ),
                     None => solve_lp_scaled(&solve_lp_view, ctx.sb, ctx.simplex),
                 }
             }
@@ -1098,7 +1115,7 @@ fn strong_branch(
         l: &ref_l,
         u: &ref_u,
     };
-    let prepared = PreparedDual::prepare(&prep_view, basis, simplex);
+    let prepared = PreparedDual::prepare(&prep_view, basis, simplex, ctx.csc);
     let probe = |l: &[f64], u: &[f64]| -> crate::lp::simplex::LpSolve {
         let (sl, su) = scale_bounds(l, u);
         match &prepared {
@@ -1112,7 +1129,7 @@ fn strong_branch(
                     l: &sl,
                     u: &su,
                 };
-                solve_lp_warm_scaled(&view, ctx.sb, basis, simplex)
+                solve_lp_warm_scaled_csc(&view, ctx.sb, basis, simplex, ctx.csc)
             }
         }
     };
@@ -1546,7 +1563,7 @@ fn try_dive_repair(
                 l: &sl,
                 u: &su,
             };
-            let mut sol = solve_lp_warm_scaled(&view, ctx.sb, &cur_basis, ctx.simplex);
+            let mut sol = solve_lp_warm_scaled_csc(&view, ctx.sb, &cur_basis, ctx.simplex, ctx.csc);
             if sol.status == LpStatus::Optimal {
                 if let Some(s) = ctx.scaling {
                     s.unscale_x(&mut sol.x);

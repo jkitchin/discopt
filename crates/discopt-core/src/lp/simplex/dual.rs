@@ -56,7 +56,26 @@ pub fn solve_lp_warm_scaled(
     start: &Basis,
     opts: &SimplexOptions,
 ) -> LpSolve {
-    match PreparedDual::prepare(lp, start, opts) {
+    let sp = SparseCols::from_dense(lp.a, lp.m, lp.n);
+    solve_lp_warm_scaled_csc(lp, b, start, opts, &sp)
+}
+
+/// As [`solve_lp_warm_scaled`], but reusing a caller-built CSC view of `lp.a`
+/// instead of rebuilding it. The B&B driver solves a whole batch of nodes
+/// against one constant working matrix (cuts are folded in only between batches),
+/// so it builds the CSC **once per batch** and shares it across every node solve
+/// here — eliminating the per-node `SparseCols::from_dense` O(m·n) rebuild, which
+/// is otherwise pure repeated work (it scans the same dense matrix each node).
+/// `sp` must be the CSC of exactly `lp.a` (same `m`, `n`, row-major); a mismatch
+/// would silently solve the wrong system, so the entry point is internal.
+pub fn solve_lp_warm_scaled_csc(
+    lp: &LpView<'_>,
+    b: &[f64],
+    start: &Basis,
+    opts: &SimplexOptions,
+    sp: &SparseCols,
+) -> LpSolve {
+    match PreparedDual::prepare(lp, start, opts, sp) {
         Some(p) => p.reoptimize(lp.l, lp.u, b, opts),
         None => solve_lp_scaled(lp, b, opts), // safe fallback — always correct
     }
@@ -87,7 +106,7 @@ pub struct PreparedDual<'a> {
     m: usize,
     n: usize,
     c: &'a [f64],
-    sp: SparseCols,
+    sp: &'a SparseCols,
     lu: FeralLU, // pristine factorization of `basis`
     basis: Vec<usize>,
     slot_of: Vec<i64>,
@@ -99,7 +118,12 @@ impl<'a> PreparedDual<'a> {
     /// if the basis is unusable (wrong size, singular, or dual-infeasible) and the
     /// caller should cold-solve instead. `lp.l`/`lp.u` are the bounds at which the
     /// basis is dual-feasible (the reference for the precondition check).
-    pub fn prepare(lp: &LpView<'a>, start: &Basis, opts: &SimplexOptions) -> Option<Self> {
+    pub fn prepare(
+        lp: &LpView<'a>,
+        start: &Basis,
+        opts: &SimplexOptions,
+        sp: &'a SparseCols,
+    ) -> Option<Self> {
         let (a, m, n, l, u, c) = (lp.a, lp.m, lp.n, lp.l, lp.u, lp.c);
         if start.basic_vars.len() != m {
             return None;
@@ -115,7 +139,6 @@ impl<'a> PreparedDual<'a> {
             return None;
         }
 
-        let sp = SparseCols::from_dense(a, m, n);
         let mut lu = FeralLU::new();
         // Sparse basis columns straight from the CSC view — O(nnz) factorize, no
         // dense m×m basis (discopt#268 / feral#87). Bit-identical to `col()`.
@@ -519,6 +542,54 @@ mod tests {
             warm.iters >= 1,
             "dual warm-start did not run (fell back to cold)"
         );
+    }
+
+    // The batch-cached-CSC entry point must be bit-identical to rebuilding the CSC
+    // per solve: it is the same math, only sharing the constant matrix's CSC across
+    // a B&B batch. A mismatch would mean the cache desynced from `lp.a`.
+    #[test]
+    fn csc_path_matches_rebuild_path() {
+        let a = [1.0, 1.0, 1.0, 0.0, 1.0, 3.0, 0.0, 1.0];
+        let (m, n) = (2, 4);
+        let b = [4.0, 6.0];
+        let c = [-1.0, -2.0, 0.0, 0.0];
+        let l = [0.0; 4];
+        let u = [5.0, 5.0, INF, INF];
+        let lp0 = LpView {
+            a: &a,
+            m,
+            n,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let cold = solve_lp(&lp0, &b, &opts());
+        assert_eq!(cold.status, LpStatus::Optimal);
+
+        // A handful of distinct bound perturbations (like sibling B&B nodes sharing
+        // one batch matrix); each must agree between the two warm entry points.
+        let sp = SparseCols::from_dense(&a, m, n);
+        for ub1 in [0.0, 0.5, 1.0, 2.0, 5.0] {
+            let u2 = [5.0, ub1, INF, INF];
+            let lp = LpView {
+                a: &a,
+                m,
+                n,
+                c: &c,
+                l: &l,
+                u: &u2,
+            };
+            let rebuilt = solve_lp_warm_scaled(&lp, &b, &cold.basis, &opts());
+            let cached = solve_lp_warm_scaled_csc(&lp, &b, &cold.basis, &opts(), &sp);
+            assert_eq!(rebuilt.status, cached.status);
+            assert_eq!(rebuilt.iters, cached.iters);
+            assert!(
+                (rebuilt.obj - cached.obj).abs() < 1e-12,
+                "ub1={ub1}: rebuilt {} vs cached {}",
+                rebuilt.obj,
+                cached.obj
+            );
+        }
     }
 
     #[test]

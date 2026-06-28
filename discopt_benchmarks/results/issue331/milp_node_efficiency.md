@@ -6,19 +6,19 @@ SCIP version: `10.0` · discopt config: `prod` defaults
 
 | instance | discopt nodes | discopt wall | SCIP nodes | SCIP wall | node ratio | obj match |
 |---|---|---|---|---|---|---|
-| mdk30x5 | 47 | 0.008s | 1 | 0.096s | 47.0x | True |
-| mdk40x5 | 63 | 0.005s | 1 | 0.013s | 63.0x | True |
-| mdk50x8 | 61 | 0.010s | 1 | 0.019s | 61.0x | True |
-| mdk60x8 | 213 | 0.023s | 27 | 0.237s | 7.9x | True |
-| mdk70x10 | 57 | 0.012s | 1 | 0.208s | 57.0x | True |
-| mdk90x12 | 197 | 0.027s | 66 | 0.276s | 3.0x | True |
-| mdk120x15 | 4713 | 0.300s | 2330 | 3.626s | 2.0x | True |
-| mdk150x20 | 1797 | 0.335s | 579 | 1.436s | 3.1x | True |
-| mdk200x25 | 17935 | 2.189s | 12688 | 17.023s | 1.4x | True |
-| smdk50x15 | 703 | 0.136s | 21 | 0.179s | 33.5x | True |
-| smdk60x20 | 1025 | 0.319s | 43 | 0.435s | 23.8x | True |
-| smdk70x20 | 7643 | 0.931s | 145 | 0.958s | 52.7x | True |
-| smdk80x25 | 29147 | 3.799s | 753 | 1.932s | 38.7x | True |
+| mdk30x5 | 47 | 0.014s | 1 | 0.094s | 47.0x | True |
+| mdk40x5 | 63 | 0.004s | 1 | 0.012s | 63.0x | True |
+| mdk50x8 | 61 | 0.009s | 1 | 0.022s | 61.0x | True |
+| mdk60x8 | 213 | 0.022s | 27 | 0.228s | 7.9x | True |
+| mdk70x10 | 57 | 0.012s | 1 | 0.206s | 57.0x | True |
+| mdk90x12 | 197 | 0.026s | 66 | 0.273s | 3.0x | True |
+| mdk120x15 | 4713 | 0.251s | 2330 | 3.500s | 2.0x | True |
+| mdk150x20 | 1797 | 0.317s | 579 | 1.392s | 3.1x | True |
+| mdk200x25 | 17935 | 1.980s | 12688 | 16.044s | 1.4x | True |
+| smdk50x15 | 703 | 0.145s | 21 | 0.178s | 33.5x | True |
+| smdk60x20 | 1025 | 0.322s | 43 | 0.420s | 23.8x | True |
+| smdk70x20 | 7643 | 0.884s | 145 | 0.941s | 52.7x | True |
+| smdk80x25 | 29147 | 3.641s | 753 | 1.853s | 38.7x | True |
 
 `*` = hit per-solve time/node cap (not proven optimal); `obj match = n/a` when a solver did not prove optimality.
 
