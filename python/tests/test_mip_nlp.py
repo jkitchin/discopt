@@ -42,12 +42,14 @@ def test_model_solve_routes_mip_nlp_options(monkeypatch):
             solver="mip-nlp",
             mip_nlp_method="ecp",
             equality_relaxation=True,
+            milp_solver="gurobi",
             skip_convex_check=True,
         )
 
     assert result.status == "optimal"
     assert calls["method"] == "ecp"
     assert calls["equality_relaxation"] is True
+    assert calls["milp_solver"] == "gurobi"
 
 
 def test_gdp_method_oa_deprecated_alias_routes_to_mip_nlp(monkeypatch):

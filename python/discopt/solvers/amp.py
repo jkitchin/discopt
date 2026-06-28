@@ -27,7 +27,7 @@ import time
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib.util import find_spec
-from typing import Any, Callable, Optional, cast
+from typing import Any, Callable, Optional, Sequence, cast
 
 import numpy as np
 
@@ -69,6 +69,24 @@ _SMALL_INT_FALLBACK_MAX_ASSIGNMENTS = 128
 def _has_cyipopt() -> bool:
     """Return True when cyipopt is importable in the active environment."""
     return find_spec("cyipopt") is not None
+
+
+def _normalize_nlp_solver_sequence(nlp_solver: str | Sequence[str]) -> list[str]:
+    """Return the ordered local NLP backends to try for one candidate."""
+    if isinstance(nlp_solver, str):
+        return [nlp_solver]
+    return list(nlp_solver)
+
+
+def _continuous_nlp_backend_sequence(nlp_solver: str) -> list[str]:
+    """Ordered NLP backends for a pure-continuous candidate.
+
+    When ``nlp_solver`` is ``"ipm"`` and cyipopt is available, try Ipopt first
+    and fall back to POUNCE; otherwise keep the single requested backend.
+    """
+    if nlp_solver == "ipm" and _has_cyipopt():
+        return ["ipopt", "ipm"]
+    return [nlp_solver]
 
 
 def _build_x_dict(x_flat: np.ndarray, model: Model) -> dict:
@@ -483,7 +501,7 @@ def _solve_nlp_subproblem(
     x0: np.ndarray,
     lb: np.ndarray,
     ub: np.ndarray,
-    nlp_solver: str = "ipm",
+    nlp_solver: str | Sequence[str] = "ipm",
     time_limit: Optional[float] = None,
 ) -> tuple[Optional[np.ndarray], Optional[float]]:
     """Solve the NLP relaxation with given bounds.
@@ -500,10 +518,12 @@ def _solve_nlp_subproblem(
         from discopt.solver import _BoundOverrideEvaluator
 
         backend_evaluator = _BoundOverrideEvaluator(evaluator, lb, ub)
-        # "ipm"/"pounce" both route to POUNCE (a robust pure-Rust Ipopt port),
-        # so no separate Ipopt retry is needed for AMP's tightly-fixed integer
-        # subproblems. An explicit nlp_solver="ipopt" still uses cyipopt.
-        solver_sequence = [nlp_solver]
+        # "ipm"/"pounce" both route to POUNCE (a robust pure-Rust Ipopt port).
+        # Callers may pass a sequence when a pure-continuous AMP candidate should
+        # try cyipopt before falling back to POUNCE.
+        solver_sequence = _normalize_nlp_solver_sequence(nlp_solver)
+
+        from discopt.solvers import SolveStatus
 
         result = None
         for solver_name in solver_sequence:
@@ -513,31 +533,32 @@ def _solve_nlp_subproblem(
             options: dict[str, float | int] = {"print_level": 0, "max_iter": 300}
             if remaining is not None:
                 options["max_wall_time"] = max(remaining, 0.05)
-            if solver_name == "ipopt":
-                from discopt.solvers.nlp_ipopt import solve_nlp
+            try:
+                if solver_name == "ipopt":
+                    from discopt.solvers.nlp_ipopt import solve_nlp
 
-                if remaining is not None:
-                    options["max_cpu_time"] = max(remaining, 0.05)
-                trial = solve_nlp(
-                    cast(Any, backend_evaluator),
-                    x0_clipped,
-                    options=options,
-                )
-            else:
-                from discopt.solvers.nlp_pounce import solve_nlp
+                    if remaining is not None:
+                        options["max_cpu_time"] = max(remaining, 0.05)
+                    trial = solve_nlp(
+                        cast(Any, backend_evaluator),
+                        x0_clipped,
+                        options=options,
+                    )
+                else:
+                    from discopt.solvers.nlp_pounce import solve_nlp
 
-                trial = solve_nlp(
-                    cast(Any, backend_evaluator),
-                    x0_clipped,
-                    options=options,
-                )
+                    trial = solve_nlp(
+                        cast(Any, backend_evaluator),
+                        x0_clipped,
+                        options=options,
+                    )
+            except Exception as e:
+                logger.debug("AMP NLP subproblem backend %s failed: %s", solver_name, e)
+                continue
             result = trial
-            from discopt.solvers import SolveStatus
 
             if trial.status == SolveStatus.OPTIMAL:
                 break
-
-        from discopt.solvers import SolveStatus
 
         if result is not None and result.status == SolveStatus.OPTIMAL:
             x_opt = np.asarray(result.x, dtype=np.float64)
@@ -577,9 +598,7 @@ def _recover_pure_continuous_solution(
     if remaining <= 0.0:
         return None
 
-    solver_sequence = [nlp_solver]
-    if nlp_solver == "ipm" and _has_cyipopt():
-        solver_sequence = ["ipopt", "ipm"]
+    solver_sequence = _continuous_nlp_backend_sequence(nlp_solver)
 
     best_x: Optional[np.ndarray] = None
     best_obj: Optional[float] = None
@@ -782,7 +801,7 @@ def _select_best_nlp_candidate(
     flat_ub: np.ndarray,
     constraint_lb: np.ndarray,
     constraint_ub: np.ndarray,
-    nlp_solver: str,
+    nlp_solver: str | Sequence[str],
     deadline: Optional[float] = None,
 ) -> tuple[Optional[np.ndarray], Optional[float]]:
     """Return the best feasible NLP candidate from a prioritized candidate list."""
@@ -837,6 +856,7 @@ def _solve_best_nlp_candidate(
 ) -> tuple[Optional[np.ndarray], Optional[float]]:
     """Improve the incumbent from Alpine-ordered local NLP starts."""
     if all(v.var_type == VarType.CONTINUOUS for v in model._variables):
+        local_nlp_solver: str | Sequence[str] = _continuous_nlp_backend_sequence(nlp_solver)
         starts: list[np.ndarray] = []
         for seed in (incumbent, initial_point, x0):
             if seed is not None:
@@ -844,6 +864,7 @@ def _solve_best_nlp_candidate(
         starts.extend(_continuous_recovery_starts(flat_lb, flat_ub))
         candidates = _dedupe_candidate_points(starts)
     else:
+        local_nlp_solver = nlp_solver
         candidates = []
         for seed in (incumbent, initial_point, x0, _default_nlp_start(flat_lb, flat_ub)):
             if seed is not None:
@@ -858,7 +879,7 @@ def _solve_best_nlp_candidate(
         flat_ub,
         constraint_lb,
         constraint_ub,
-        nlp_solver,
+        local_nlp_solver,
         deadline=deadline,
     )
 
@@ -1942,6 +1963,24 @@ def _compute_relative_gap(
     return abs(abs_gap) / abs(upper_bound)
 
 
+def _amp_abs_gap_with_bound_tolerance(
+    lower_bound: float,
+    upper_bound: float,
+    abs_tol: float,
+) -> tuple[Optional[float], bool]:
+    """Return a nonnegative gap unless the bound ordering is materially invalid."""
+
+    raw_abs_gap = upper_bound - lower_bound
+    if raw_abs_gap >= 0.0:
+        return raw_abs_gap, True
+
+    scale = max(1.0, abs(lower_bound), abs(upper_bound))
+    inversion_tol = max(10.0 * abs_tol, 1e-8 * scale)
+    if raw_abs_gap >= -inversion_tol:
+        return 0.0, True
+    return None, False
+
+
 def _prune_oa_cuts(oa_cuts: list, max_cuts: int = _DEFAULT_MAX_OA_CUTS) -> None:
     """Keep only the most recent OA cuts to cap MILP growth."""
     overflow = len(oa_cuts) - max_cuts
@@ -2197,6 +2236,13 @@ def _solve_amp_impl(
     obbt_time_limit : float, default 30.0
         Total wall-clock budget for OBBT calls (in seconds).  Per-LP budget is
         ``min(1.0, obbt_time_limit / max(1, 2*n_candidates))``.
+    milp_solver : str, default "auto"
+        MILP backend for AMP master relaxations and MILP-based bound
+        tightening. Choose ``"auto"``, ``"highs"``, ``"pounce"``,
+        ``"simplex"``, or ``"gurobi"``. The explicit Gurobi option uses
+        discopt's global AMP algorithm with Gurobi as the matrix MILP subsolver;
+        it does not translate general nonlinear expressions into Gurobi
+        nonlinear constraints.
 
     Returns
     -------
@@ -2239,7 +2285,7 @@ def _solve_amp_impl(
     convhull_mode = _normalize_convhull_formulation(convhull_formulation)
     if convhull_ebd and convhull_mode != "sos2":
         raise ValueError("convhull_ebd requires convhull_formulation='sos2' or the 'lambda' alias.")
-    _valid_milp_solvers = {"auto", "highs", "pounce", "simplex"}
+    _valid_milp_solvers = {"auto", "highs", "pounce", "simplex", "gurobi"}
     if milp_solver not in _valid_milp_solvers:
         raise ValueError(
             f"Unknown milp_solver={milp_solver!r}. Choose one of {sorted(_valid_milp_solvers)}."
@@ -3065,14 +3111,14 @@ def _solve_amp_impl(
             )
 
         if UB < np.inf and LB > -np.inf:
-            raw_abs_gap = UB - LB
             if maximize:
                 display_lb = _from_minimization_space(UB)
                 display_ub = _from_minimization_space(LB)
             else:
                 display_lb = LB
                 display_ub = UB
-            if raw_abs_gap < -abs_tol:
+            abs_gap, bound_order_ok = _amp_abs_gap_with_bound_tolerance(LB, UB, abs_tol)
+            if not bound_order_ok:
                 logger.warning(
                     "AMP iter %d: invalid bound ordering LB=%.6g, UB=%.6g; "
                     "skipping gap certification",
@@ -3081,7 +3127,7 @@ def _solve_amp_impl(
                     display_ub,
                 )
             else:
-                abs_gap = max(0.0, raw_abs_gap)
+                assert abs_gap is not None
                 rel_g = _compute_relative_gap(abs_gap, UB)
                 if rel_g is None:
                     logger.info(
@@ -3276,28 +3322,32 @@ def _solve_amp_impl(
 
     if incumbent is not None:
         raw_abs_gap_final = UB - LB if LB > -np.inf else None
-        bound_is_trustworthy = raw_abs_gap_final is None or raw_abs_gap_final >= -abs_tol
-        if not bound_is_trustworthy and raw_abs_gap_final is not None:
+        if raw_abs_gap_final is None:
+            abs_gap_final = None
+            bound_is_trustworthy = True
+        else:
+            abs_gap_final, bound_is_trustworthy = _amp_abs_gap_with_bound_tolerance(LB, UB, abs_tol)
+        if not bound_is_trustworthy:
             logger.warning(
                 "AMP: final bound ordering invalid (LB=%.6g, UB=%.6g); omitting bound and gap",
                 _from_minimization_space(LB),
                 _from_minimization_space(UB),
             )
 
-        abs_gap_final = (
-            None
-            if raw_abs_gap_final is None or not bound_is_trustworthy
-            else max(0.0, raw_abs_gap_final)
-        )
         rel_gap_final = _compute_relative_gap(abs_gap_final, UB)
         status = "optimal" if gap_certified else "feasible"
+        reported_lb = LB
+        if raw_abs_gap_final is not None and raw_abs_gap_final < 0.0 and bound_is_trustworthy:
+            reported_lb = UB
 
         return _finish(
             SolveResult(
                 status=status,
                 objective=_from_minimization_space(UB),
                 bound=(
-                    _from_minimization_space(LB) if LB > -np.inf and bound_is_trustworthy else None
+                    _from_minimization_space(reported_lb)
+                    if LB > -np.inf and bound_is_trustworthy
+                    else None
                 ),
                 gap=float(rel_gap_final) if rel_gap_final is not None else None,
                 x=_build_x_dict(incumbent, model),

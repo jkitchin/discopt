@@ -160,22 +160,36 @@ def _milp_simplex() -> Callable | None:
         return None
 
 
+def _milp_gurobi() -> Callable | None:
+    try:
+        from discopt.solvers.gurobi import solve_milp
+
+        return solve_milp
+    except ImportError:
+        return None
+
+
 def get_milp_solver(prefer_pounce: bool = False, backend: str = "auto") -> Callable:
     """Return a matrix-form ``solve_milp(c, A_ub, ..., integrality, ...)``.
 
     ``backend`` selects the preferred engine: ``"auto"`` (HiGHS-first, or
-    POUNCE-first under ``prefer_pounce``), ``"highs"``, ``"pounce"``, or
-    ``"simplex"`` (the pure-Rust warm-started-simplex B&B). The preferred engine
-    is tried first and the call falls back to the standard order if it is
-    unavailable, so selection never fails when *any* backend is importable.
+    POUNCE-first under ``prefer_pounce``), ``"highs"``, ``"pounce"``,
+    ``"simplex"`` (the pure-Rust warm-started-simplex B&B), or ``"gurobi"``.
+    The preferred engine is tried first and the call falls back to the standard
+    order if it is unavailable, so selection never fails when *any* backend is
+    importable. An explicit Gurobi selection returns the optional wrapper; a
+    missing ``gurobipy`` installation or license is reported when the wrapper is
+    called.
     Raises :class:`ImportError` only when none is available.
     """
-    valid = {"auto", "highs", "pounce", "simplex"}
+    valid = {"auto", "highs", "pounce", "simplex", "gurobi"}
     if backend not in valid:
         raise ValueError(f"Unknown MILP backend {backend!r}; choose from {sorted(valid)}.")
     base = (_milp_pounce, _milp_highs) if prefer_pounce else (_milp_highs, _milp_pounce)
     if backend == "simplex":
         order: tuple[Callable[[], Callable | None], ...] = (_milp_simplex, *base)
+    elif backend == "gurobi":
+        order = (_milp_gurobi, *base)
     elif backend == "highs":
         order = (_milp_highs, *base)
     elif backend == "pounce":
@@ -189,7 +203,8 @@ def get_milp_solver(prefer_pounce: bool = False, backend: str = "auto") -> Calla
     raise ImportError(
         "No MILP backend available. Install one of:\n"
         "  pip install pounce-solver   (POUNCE, via the self-hosted B&B)\n"
-        "  pip install highspy         (HiGHS)"
+        "  pip install highspy         (HiGHS)\n"
+        "  pip install gurobipy        (Gurobi, requires a working license)"
     )
 
 

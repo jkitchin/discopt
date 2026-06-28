@@ -196,8 +196,15 @@ If all five are "yes," `solve()` should return `status="optimal"` with
 |-----------|------------------|
 | Convex, or bounded factorable nonconvex (default) | `model.solve()` |
 | Hard nonconvex MINLP, default B&B stalls | `model.solve(solver="amp")` |
+| Hard nonconvex MINLP with Gurobi available for MILP masters | `model.solve(solver="amp", milp_solver="gurobi")` |
 | Stubborn bilinear/QCQP gap | `model.solve(rlt_cuts=True)` (+ PSD/SOC cuts) |
 | Only a feasible/local point is needed quickly | `model.solve(time_limit=...)`, read the incumbent |
+
+`solver="gurobi"` is a direct matrix backend for LP/MILP/QP/QCP-family models.
+It intentionally does not translate arbitrary nonlinear expression DAGs into
+Gurobi nonlinear constraints. For general NLP/MINLP, use discopt's global
+algorithms and select Gurobi only where it is a matrix subsolver, for example
+`solver="amp", milp_solver="gurobi"`.
 
 The throughline: discopt gives a **sound global certificate exactly when the model
 is bounded and algebraically factorable from supported intrinsics**. Keep your

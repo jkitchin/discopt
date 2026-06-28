@@ -90,6 +90,13 @@ class TestConvexExpressions:
         x = m.continuous("x", lb=-5, ub=5)
         assert classify_expr(dm.exp(2.0 * x + 1.0), m) == Curvature.CONVEX
 
+    def test_exp_affine_times_reciprocal_power(self):
+        m = Model("test")
+        x = m.continuous("x", lb=-5, ub=5)
+        y = m.continuous("y", lb=1, ub=10)
+        expr = dm.exp(2.0 * x) * (y ** (-4.0))
+        assert classify_expr(expr, m) == Curvature.CONVEX
+
     def test_exp_of_convex(self):
         """exp(convex) = convex because exp is convex & nondecreasing."""
         m = Model("test")

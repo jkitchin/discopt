@@ -2899,7 +2899,7 @@ class TestCurrentCodeWeaknesses:
         assert abs(result.objective - instance.expected_obj) <= tol
 
     def test_amp_certifies_tan_abs_nlp_004_010_at_issue_gap(self):
-        """The continuous tan/abs nlp_004 case should certify the issue-79 gap."""
+        """The continuous tan/abs nlp_004 case should certify the issue-89 gap."""
         instance = MINLPTESTS_NLP_BY_ID["nlp_004_010"]
         m = instance.build_fn()
 
