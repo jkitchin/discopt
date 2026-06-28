@@ -95,6 +95,8 @@ class QPResult:
     status: SolveStatus
     x: Optional[np.ndarray] = None
     objective: Optional[float] = None
+    bound: Optional[float] = None
+    gap: Optional[float] = None
     dual_values: Optional[np.ndarray] = None
     reduced_costs: Optional[np.ndarray] = None
     node_count: int = 0

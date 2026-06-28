@@ -225,6 +225,7 @@ def test_model_solve_routes_mip_nlp_options(monkeypatch):
             level_coef=0.4,
             stalling_limit=3,
             cycling_check=False,
+            milp_solver="gurobi",
             skip_convex_check=True,
         )
 
@@ -240,6 +241,7 @@ def test_model_solve_routes_mip_nlp_options(monkeypatch):
     assert calls["level_coef"] == pytest.approx(0.4)
     assert calls["stalling_limit"] == 3
     assert calls["cycling_check"] is False
+    assert calls["milp_solver"] == "gurobi"
 
 
 def test_model_solve_mip_nlp_path_runs_entropy_canonicalization(monkeypatch):
@@ -750,7 +752,7 @@ def test_oa_regularized_master_builds_linear_distance_objective(monkeypatch, mod
         captured.update(kwargs)
         return MILPResult(status=SolveStatus.OPTIMAL, x=fake_x)
 
-    monkeypatch.setattr(lp_backend, "get_milp_solver", lambda: fake_milp)
+    monkeypatch.setattr(lp_backend, "get_milp_solver", lambda backend="auto": fake_milp)
 
     x_regularized = _solve_regularized_master(
         decomp,
@@ -825,7 +827,7 @@ def test_oa_regularized_master_builds_grad_lag_objective(monkeypatch):
         captured.update(kwargs)
         return MILPResult(status=SolveStatus.OPTIMAL, x=np.array([0.0, 1.0, 0.0, 0.0]))
 
-    monkeypatch.setattr(lp_backend, "get_milp_solver", lambda: fake_milp)
+    monkeypatch.setattr(lp_backend, "get_milp_solver", lambda backend="auto": fake_milp)
 
     x_regularized = _solve_regularized_master(
         decomp,

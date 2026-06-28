@@ -852,6 +852,7 @@ def _solve_integer_projection_mip(
     feasibility_norm: str,
     time_limit: float,
     gap_tolerance: float,
+    milp_solver: str = "auto",
 ) -> Optional[np.ndarray]:
     """Project the current point to a new integer assignment with a small MILP.
 
@@ -863,7 +864,7 @@ def _solve_integer_projection_mip(
         from discopt.solvers import SolveStatus
         from discopt.solvers.lp_backend import get_milp_solver
 
-        solve_milp = get_milp_solver()
+        solve_milp = get_milp_solver(backend=milp_solver)
     except ImportError:
         return None
 
@@ -970,6 +971,7 @@ def _run_feasibility_pump(
     max_iterations: int,
     feasibility_norm: str,
     add_no_good_cuts: bool,
+    milp_solver: str = "auto",
 ) -> _FeasibilityPumpResult:
     """Run a bounded MindtPy-style feasibility pump."""
     t_start = time.perf_counter()
@@ -1034,6 +1036,7 @@ def _run_feasibility_pump(
                 feasibility_norm,
                 remaining,
                 gap_tolerance,
+                milp_solver=milp_solver,
             )
             mip_count += 1
         if projected is None:
@@ -1326,17 +1329,17 @@ def _solve_master_milp(
     oa_penalty_factor=1000.0,
     oa_cut_relaxable=None,
     use_objective_epigraph=None,
+    milp_solver="auto",
 ):
     """Build and solve the master MILP."""
     try:
         from discopt.solvers.lp_backend import get_milp_solver
 
-        # HiGHS if present, else POUNCE (self-hosted B&B) — HiGHS-free path.
-        solve_milp = get_milp_solver()
+        solve_milp = get_milp_solver(backend=milp_solver)
     except ImportError as e:
         raise ImportError(
             "OA solver requires a MILP backend for the master. Install one of: "
-            "pip install highspy  |  pip install pounce-solver"
+            "pip install highspy  |  pip install pounce-solver  |  pip install gurobipy"
         ) from e
 
     # ``use_objective_epigraph`` controls master layout when supplied; the
@@ -1462,6 +1465,7 @@ def _solve_regularized_master(
     oa_cut_relaxable=None,
     use_objective_epigraph: Optional[bool] = None,
     derivative_data: Optional[_DerivativeRegularizationData] = None,
+    milp_solver: str = "auto",
 ) -> Optional[np.ndarray]:
     """Solve the ROA level-set master and return its original-variable point.
 
@@ -1660,7 +1664,7 @@ def _solve_regularized_master(
     else:
         from discopt.solvers.lp_backend import get_milp_solver
 
-        solve_milp = get_milp_solver()
+        solve_milp = get_milp_solver(backend=milp_solver)
         c = np.zeros(n_master, dtype=np.float64)
         if add_regularization == "level_L1":
             assert aux_start is not None
@@ -1715,7 +1719,7 @@ def _compute_gap(lb: float, ub: float) -> float:
     abs_gap = max(0.0, ub - lb)
     if abs_gap <= 1e-9:
         return 0.0
-    denom = max(abs(ub), abs(lb), 1e-10)
+    denom = max(abs(ub), abs(lb), 1.0)
     return abs_gap / denom
 
 
@@ -1829,6 +1833,7 @@ def solve_oa(
     level_coef: float = 0.5,
     stalling_limit: Optional[int] = None,
     cycling_check: bool = False,
+    milp_solver: str = "auto",
     **kwargs,
 ) -> SolveResult:
     """Solve a MINLP via Outer Approximation.
@@ -1907,6 +1912,9 @@ def solve_oa(
         material progress.
     cycling_check : bool
         Stop when the master repeats a fixed-integer assignment.
+    milp_solver : str
+        MILP backend for OA master problems: ``"auto"``, ``"highs"``,
+        ``"pounce"``, ``"simplex"``, or ``"gurobi"``.
 
     Returns
     -------
@@ -2096,6 +2104,7 @@ def solve_oa(
             max_iterations=fp_iterations,
             feasibility_norm=feasibility_norm,
             add_no_good_cuts=True,
+            milp_solver=milp_solver,
         )
         x_cut = fp_result.best_x if fp_result.best_x is not None else fp_result.best_near_x
         if x_cut is None:
@@ -2206,6 +2215,7 @@ def solve_oa(
             oa_penalty_factor=oa_penalty_factor,
             oa_cut_relaxable=oa_cut_relaxable,
             use_objective_epigraph=(not decomp.obj_is_linear and decomp.oa_objective_is_convex),
+            milp_solver=milp_solver,
         )
 
         from discopt.solvers import SolveStatus
@@ -2301,6 +2311,7 @@ def solve_oa(
                 oa_cut_relaxable=oa_cut_relaxable,
                 use_objective_epigraph=(not decomp.obj_is_linear and decomp.oa_objective_is_convex),
                 derivative_data=derivative_data,
+                milp_solver=milp_solver,
             )
             if x_regularized is not None:
                 nlp_initial_point = x_regularized

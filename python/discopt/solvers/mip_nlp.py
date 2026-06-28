@@ -31,6 +31,7 @@ _OA_OPTION_KEYS = {
     "level_coef",
     "stalling_limit",
     "cycling_check",
+    "milp_solver",
 }
 _OA_OPTION_ALIASES = {
     "OA_penalty_factor": "oa_penalty_factor",

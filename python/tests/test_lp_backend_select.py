@@ -69,7 +69,11 @@ class TestPounceOnlyInstall:
         from discopt.solvers import lp_backend as lb
         from discopt.solvers.milp_pounce import solve_milp as _pounce_milp
 
-        monkeypatch.setattr(lb, "get_milp_solver", lambda prefer_pounce=False: _pounce_milp)
+        monkeypatch.setattr(
+            lb,
+            "get_milp_solver",
+            lambda prefer_pounce=False, backend="auto": _pounce_milp,
+        )
         m = dm.Model("oa_highsfree")
         x = m.integer("x", lb=0, ub=3)
         y = m.continuous("y", lb=0, ub=10)

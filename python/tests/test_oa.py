@@ -94,6 +94,12 @@ def _mindtpy_duran_grossmann_minlp():
     return m
 
 
+def test_compute_gap_uses_absolute_scale_near_zero():
+    from discopt.solvers.oa import _compute_gap
+
+    assert _compute_gap(-1.99e-8, 9e-18) == pytest.approx(1.99e-8)
+
+
 # ── Convex MINLP ─────────────────────────────────────────────
 
 
@@ -426,7 +432,11 @@ class TestOARobustnessOptions:
                 bound=0.0,
             )
 
-        monkeypatch.setattr(lp_backend, "get_milp_solver", lambda: fake_solve_milp)
+        monkeypatch.setattr(
+            lp_backend,
+            "get_milp_solver",
+            lambda backend="auto": fake_solve_milp,
+        )
 
         _solve_master_milp(
             linear_A_rows=[],
@@ -469,7 +479,11 @@ class TestOARobustnessOptions:
                 bound=0.0,
             )
 
-        monkeypatch.setattr(lp_backend, "get_milp_solver", lambda: fake_solve_milp)
+        monkeypatch.setattr(
+            lp_backend,
+            "get_milp_solver",
+            lambda backend="auto": fake_solve_milp,
+        )
 
         oa_A_rows = []
         oa_b_rows = []

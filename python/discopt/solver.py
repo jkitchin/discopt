@@ -1488,6 +1488,20 @@ def _optimal_relative_gap(objective: float) -> Optional[float]:
     return None if abs(float(objective)) <= 1e-10 else 0.0
 
 
+def _relative_gap_from_objective_bound(
+    objective: Optional[float],
+    bound: Optional[float],
+) -> Optional[float]:
+    """Return the public relative gap between a mapped incumbent and bound."""
+    if objective is None or bound is None:
+        return None
+    obj = float(objective)
+    bnd = float(bound)
+    if not np.isfinite(obj) or not np.isfinite(bnd):
+        return None
+    return abs(obj - bnd) / max(abs(obj), abs(bnd), 1e-10)
+
+
 # Absolute B&B gap tolerance, decoupled from the relative ``gap_tolerance``.
 # Matches the AMP path's ``abs_tol`` (and SCIP's default absolute gap). The tree's
 # hybrid ``gap()`` floors its denominator at 1.0, so for an optimum with magnitude
@@ -2179,6 +2193,13 @@ def solve_model(
     solver : str or None, default None
         Optional global-solver selector. Use ``"amp"`` to dispatch to
         Adaptive Multivariate Partitioning instead of branch-and-bound.
+        Use ``"gurobi"`` to dispatch LP, MILP, QP, MIQP, QCP, QCQP, MIQCP,
+        and MIQCQP models to the optional Gurobi backend. General NLP/MINLP
+        expressions are not translated into Gurobi nonlinear expressions by
+        this selector; unsupported classes raise a clear ``NotImplementedError``
+        instead of falling back silently. For global MINLP through discopt's
+        AMP algorithm with Gurobi as the MILP-master subsolver, use
+        ``solver="amp", milp_solver="gurobi"``.
         Use ``"mip-nlp"`` to dispatch to the MIP-NLP decomposition family
         (OA/ECP/FP now; GOA/ROA/LP-NLP-BB are reserved method selectors).
         Use ``"gp"`` to dispatch to the geometric-programming fast path:
@@ -2203,7 +2224,9 @@ def solve_model(
         ``partition_scaling_factor_update``, ``disc_add_partition_method``,
         ``disc_abs_width_tol``, ``convhull_formulation``, ``convhull_ebd``,
         ``convhull_ebd_encoding``, ``use_start_as_incumbent``, ``obbt_at_root``,
-        ``obbt_with_cutoff``, ``alphabb_cutoff_obbt``, and ``obbt_time_limit``.
+        ``obbt_with_cutoff``, ``alphabb_cutoff_obbt``, ``obbt_time_limit``, and
+        ``milp_solver``. ``milp_solver`` accepts ``"auto"``, ``"highs"``,
+        ``"pounce"``, ``"simplex"``, or ``"gurobi"``.
     solver="mip-nlp" options
         The MIP-NLP backend accepts ``mip_nlp_method`` and
         ``mip_nlp_options``. Current implemented methods are ``"oa"``,
@@ -2213,9 +2236,9 @@ def solve_model(
         ``feasibility_cuts``, ``heuristic_nonconvex``, ``add_slack``,
         ``max_slack``, ``oa_penalty_factor``, ``add_no_good_cuts``,
         ``feasibility_norm``, ``add_regularization``, ``level_coef``,
-        ``stalling_limit``, and ``cycling_check`` plus initialization option
-        ``init_strategy`` may be passed as top-level aliases and take
-        precedence over duplicate keys in ``mip_nlp_options``.
+        ``stalling_limit``, ``cycling_check``, and ``milp_solver`` plus
+        initialization option ``init_strategy`` may be passed as top-level
+        aliases and take precedence over duplicate keys in ``mip_nlp_options``.
         Supported ``add_regularization`` values are ``"level_L1"``,
         ``"level_L2"``, ``"level_L_infinity"``, ``"grad_lag"``,
         ``"hess_lag"``, ``"hess_only_lag"``, and ``"sqp_lag"``.
@@ -2368,14 +2391,17 @@ def solve_model(
     # --- Solver-family dispatch ---
     _solver = solver if solver is not None else kwargs.pop("solver", None)
     # Recognised global-solver selectors: ``None`` (default branch-and-bound,
-    # with the automatic GP fast path below), ``"amp"``, ``"mip-nlp"``,
+    # with the automatic GP fast path below), ``"amp"``, ``"gurobi"``,
+    # ``"mip-nlp"``,
     # ``"gp"`` (force the GP log-space path), and ``"bb"`` (force classic
     # branch-and-bound, opting out of the automatic GP fast path). Reject
     # anything else rather than silently falling through to B&B.
-    if _solver not in (None, "amp", "mip-nlp", "gp", "bb"):
+    if _solver not in (None, "amp", "gurobi", "mip-nlp", "gp", "bb"):
         raise ValueError(
-            f"Unknown solver={_solver!r}. Choose one of None, 'amp', 'mip-nlp', 'gp', 'bb'."
+            f"Unknown solver={_solver!r}. Choose one of None, 'amp', 'gurobi', "
+            "'mip-nlp', 'gp', 'bb'."
         )
+    gurobi_options = kwargs.pop("gurobi_options", None) if _solver == "gurobi" else None
 
     # --- MIP-NLP decomposition solver family ---
     if _solver == "mip-nlp":
@@ -2402,6 +2428,7 @@ def solve_model(
             "level_coef",
             "stalling_limit",
             "cycling_check",
+            "milp_solver",
         ):
             if key in kwargs:
                 mip_nlp_kwargs[key] = kwargs.pop(key)
@@ -2562,12 +2589,14 @@ def solve_model(
         _note_ignored("branching_policy", branching_policy != "fractional")
         _note_ignored("use_learned_relaxations", use_learned_relaxations is not False)
         _note_ignored("mccormick_bounds", mccormick_bounds != "auto")
-        _note_ignored("gdp_method", gdp_method != "big-m")
         _note_ignored("nlp_bb", nlp_bb is not None)
         _note_ignored("lazy_constraints", lazy_constraints is not None)
         _note_ignored("incumbent_callback", incumbent_callback is not None)
         _note_ignored("node_callback", node_callback is not None)
         _note_ignored("use_highs_milp", use_highs_milp is not True)
+        amp_gdp_methods = {"big-m", "hull", "mbigm", "auto"}
+        amp_gdp_method = gdp_method if gdp_method in amp_gdp_methods else "big-m"
+        _note_ignored("gdp_method", gdp_method not in amp_gdp_methods)
         if kwargs:
             ignored_amp_options.extend(sorted(kwargs))
         if ignored_amp_options:
@@ -2580,6 +2609,14 @@ def solve_model(
         # rel_gap defaults to gap_tolerance if not separately provided
         if "rel_gap" not in amp_kwargs:
             amp_kwargs["rel_gap"] = gap_tolerance
+
+        from discopt._jax.gdp_reformulate import reformulate_gdp
+
+        model = reformulate_gdp(
+            model,
+            method=amp_gdp_method,
+            respect_disjunction_methods=False,
+        )
 
         return solve_amp(
             model,
@@ -2732,6 +2769,7 @@ def solve_model(
             "level_coef",
             "stalling_limit",
             "cycling_check",
+            "milp_solver",
         ):
             if key in kwargs:
                 mip_nlp_kwargs[key] = kwargs.pop(key)
@@ -2752,12 +2790,17 @@ def solve_model(
     if gdp_method == "loa":
         from discopt.solvers.gdpopt_loa import solve_gdpopt_loa
 
+        loa_kwargs = {}
+        if "milp_solver" in kwargs:
+            loa_kwargs["milp_solver"] = kwargs.pop("milp_solver")
+
         return solve_gdpopt_loa(
             model,
             time_limit=time_limit,
             gap_tolerance=gap_tolerance,
             max_iterations=max_nodes,
             nlp_solver=nlp_solver,
+            **loa_kwargs,
         )
 
     # Capture any modeler-provided GAMS start (``x.l`` -> _gams_initial_values)
@@ -3293,6 +3336,41 @@ def solve_model(
     except Exception as e:
         logger.debug("Problem classification failed: %s", e)
         problem_class = None
+
+    if _solver == "gurobi":
+        if problem_class is None:
+            raise NotImplementedError(
+                "solver='gurobi' requires problem classification and currently "
+                "supports LP, MILP, QP, MIQP, QCP, QCQP, MIQCP, and MIQCQP models only."
+            )
+        if problem_class == ProblemClass.LP:
+            return _solve_lp_gurobi(model, t_start, time_limit, threads, gurobi_options)
+        if problem_class == ProblemClass.MILP:
+            return _solve_milp_gurobi(
+                model, t_start, time_limit, gap_tolerance, threads, gurobi_options
+            )
+        if problem_class == ProblemClass.QP:
+            return _solve_qp_gurobi(
+                model, t_start, time_limit, gap_tolerance, threads, gurobi_options
+            )
+        if problem_class == ProblemClass.MIQP:
+            return _solve_qp_gurobi(
+                model, t_start, time_limit, gap_tolerance, threads, gurobi_options
+            )
+        if problem_class in (
+            ProblemClass.QCP,
+            ProblemClass.QCQP,
+            ProblemClass.MIQCP,
+            ProblemClass.MIQCQP,
+        ):
+            return _solve_qcp_gurobi(
+                model, t_start, time_limit, gap_tolerance, threads, gurobi_options
+            )
+        raise NotImplementedError(
+            f"solver='gurobi' supports LP, MILP, QP, MIQP, QCP, QCQP, MIQCP, "
+            f"and MIQCQP models only; "
+            f"classified this model as {problem_class.value!r}."
+        )
 
     _pure_continuous_force_spatial = False
     if problem_class is not None:
@@ -4259,6 +4337,66 @@ def solve_model(
     # ANY source, including the sub-NLP / binary-seed heuristics that inject
     # directly and are not counted in proc_stats["incumbent_updates"].
     _last_tighten_inc = np.inf
+
+    # --- SCIP-style heuristic effort budget (#330) ---
+    # The heaviest standalone-strength primal heuristics — the root binary-seed
+    # *enumeration* phase and the sub-MIP LNS (RINS, local branching) — dominate
+    # wall time on easy instances when run unconditionally inside a global solver
+    # (40–104 sub-NLP solves on ≤7-node models; issue #330) without changing the
+    # proven optimum. Following SCIP's ``heur_subnlp`` budgeting, gate *those* by a
+    # *contingent* that grows with the search effort already spent (B&B nodes) and
+    # is weighted by their demonstrated success — the same shape as SCIP's
+    # ``iterquot·nodes·[gain·(found+1)/(calls+1)] + offset``. So they are deferred
+    # on trivially-easy models and only fire once the search is hard enough to
+    # afford them; a productive improver stays funded while one that keeps finding
+    # nothing is smoothly defunded. NOT gated: the cheap incumbent *finders*
+    # (feasibility pump, a single root sub-NLP) that supply the first incumbent for
+    # pruning, and the lighter integer lattice searches (integer local / box
+    # search) that discopt's often-weak McCormick relaxation genuinely leans on to
+    # reach the global assignment (nvs05/nvs23). The MINLP literature endorses
+    # exactly this trade for in-solver heuristics: "it is often worth sacrificing
+    # success on a small number of instances for a significant saving in average
+    # running time" (e.g. the FP enumeration phase is dropped inside a global
+    # solver). Soundness is unaffected: B&B remains exhaustive, so a deferred or
+    # skipped improver can never yield a wrong optimum — at worst a handful of
+    # instances take more nodes. ``DISCOPT_HEUR_BUDGET=0`` restores the prior
+    # always-on behaviour.
+    _heur_budget_on = os.environ.get("DISCOPT_HEUR_BUDGET", "1") != "0"
+    _HEUR_BUDGET_OFFSET = float(os.environ.get("DISCOPT_HEUR_OFFSET", "0"))  # root contingent
+    _HEUR_BUDGET_QUOT = float(os.environ.get("DISCOPT_HEUR_QUOT", "0.5"))  # per processed node
+    _HEUR_SUCCESS_GAIN = 3.0  # SCIP's 3·(found+1)/(calls+1) success weighting
+    # Cost (sub-NLP-solve-equivalents) of each *budgeted* improver — the heavier
+    # standalone-strength components: the binary-seed *enumeration* phase and the
+    # sub-MIP LNS (RINS, local branching). The lighter lattice searches
+    # (integer local / box search) are left ungated above.
+    _HEUR_COST = {"enumerate": 12.0, "rins": 5.0, "lbranch": 10.0}
+    # Mutable container so the nested gate/record helpers can update it without a
+    # ``nonlocal`` dance. ``cost`` is sub-NLP-solve-equivalents already spent on
+    # the (improver-role) heuristics; ``found`` counts those that strictly
+    # improved the incumbent — the success signal in the contingent.
+    _heur_state = {"calls": 0, "found": 0, "cost": 0.0}
+
+    def _improver_allowed(cost: float) -> bool:
+        """Whether an *improver*-role heuristic costing ``cost`` may run now.
+
+        The finder role is never gated: when there is no incumbent yet, securing
+        the first one (for pruning) takes priority. Once an incumbent exists the
+        call is an improver and must fit the success-weighted, node-proportional
+        contingent (SCIP ``heur_subnlp`` shape)."""
+        if not _heur_budget_on or tree.incumbent() is None:
+            return True
+        _nodes = float(tree.stats().get("total_nodes", 0))
+        _weight = _HEUR_SUCCESS_GAIN * (_heur_state["found"] + 1) / (_heur_state["calls"] + 1)
+        _contingent = _HEUR_BUDGET_OFFSET + _HEUR_BUDGET_QUOT * _nodes * _weight
+        return (_heur_state["cost"] + cost) <= _contingent
+
+    def _record_improver(cost: float, improved: bool) -> None:
+        """Charge an improver-role run against the contingent and note success."""
+        _heur_state["calls"] += 1
+        _heur_state["cost"] += cost
+        if improved:
+            _heur_state["found"] += 1
+
     if subnlp_enabled:
         try:
             from typing import cast
@@ -5124,6 +5262,40 @@ def solve_model(
                     _cut_pool.age_cuts(result_sols[i])
             _cut_pool.purge_inactive(max_age=15)
 
+        # --- Root-optimality short-circuit for primal heuristics (#330) ---
+        # At the root the minimum finite relaxation bound in this batch is a
+        # valid *global* dual bound. Once a heuristic has injected an incumbent
+        # that meets it (same gap test as ``_gap_converged``), the optimum is
+        # certified and every remaining root primal heuristic is provably-wasted
+        # work — no feasible point exists below the bound, so none can improve
+        # the incumbent. Skipping them changes neither the returned optimum nor
+        # its certification, and only fires on instances already solved at the
+        # root (the trivially-easy ones); on harder instances the root gap stays
+        # open and every heuristic runs exactly as before, so there is no
+        # large-instance regression. Restricted to ``iteration == 0`` because the
+        # batch minimum is a valid global bound only there.
+        _batch_relax_lb = np.inf
+        if iteration == 0:
+            for _ii in range(n_batch):
+                _lb_ii = result_lbs[_ii]
+                if _lb_ii >= _SENTINEL_THRESHOLD or not np.isfinite(_lb_ii):
+                    continue
+                if _lb_ii < _batch_relax_lb:
+                    _batch_relax_lb = float(_lb_ii)
+
+        def _root_optimum_proven() -> bool:
+            if iteration != 0 or not np.isfinite(_batch_relax_lb):
+                return False
+            _inc = tree.incumbent()
+            if _inc is None or not np.isfinite(_inc[1]):
+                return False
+            _ub = float(_inc[1])
+            _abs_gap = max(0.0, _ub - _batch_relax_lb)
+            if _abs_gap <= _DEFAULT_ABS_GAP_TOL:
+                return True
+            _denom = max(abs(_ub), abs(_batch_relax_lb), 1e-10)
+            return _abs_gap / _denom <= gap_tolerance
+
         # --- Feasibility pump after root node ---
         if iteration == 0 and not _fp_ran:
             _fp_ran = True
@@ -5246,6 +5418,11 @@ def solve_model(
                 # Sound either way: only subnlp-verified feasible points are
                 # injected, and inject_incumbent accepts a point only if it
                 # strictly beats the current incumbent.
+                # NOT budget-gated: the 1-opt/2-opt lattice search is one of the
+                # lighter improvers discopt's (often weak) McCormick relaxation
+                # genuinely relies on to reach the global integer assignment
+                # (nvs23: -287 → -1125), so it stays on at the root. The budget
+                # targets the heavier standalone-strength components below.
                 if not _model_is_convex and best_root_idx is not None:
                     try:
                         from discopt._jax.primal_heuristics import integer_local_search
@@ -5316,6 +5493,7 @@ def solve_model(
             and not _model_is_convex
             and _subnlp_calls < subnlp_max_calls
             and (iteration == 0 or iteration % max(1, subnlp_frequency) == 0)
+            and not _root_optimum_proven()
         ):
             from discopt._jax.primal_heuristics import subnlp as _subnlp
 
@@ -5393,6 +5571,11 @@ def solve_model(
                 for _loop_idx, _i in enumerate(_try_idxs):
                     if _subnlp_calls >= subnlp_max_calls:
                         break
+                    # The root tries every relaxation candidate to cover all
+                    # disjuncts; once one has certified the optimum (incumbent ==
+                    # global root bound) the rest are wasted (#330).
+                    if _loop_idx > 0 and _root_optimum_proven():
+                        break
                     # Deadline enforcement: each subnlp is a round-and-repair NLP
                     # search (seconds on large models). At the root ``_try_idxs``
                     # can hold many candidates, so without a stop the loop runs
@@ -5448,7 +5631,12 @@ def solve_model(
             and _subnlp_backend_fn is not None
             and not _model_is_convex
             and _subnlp_calls < subnlp_max_calls
+            and not _root_optimum_proven()
+            and _improver_allowed(_HEUR_COST["enumerate"])
         ):
+            _enum_inc0 = tree.incumbent()
+            _enum_had_inc = _enum_inc0 is not None and np.isfinite(_enum_inc0[1])
+            _enum_obj0 = float(_enum_inc0[1]) if _enum_had_inc else np.inf
             from discopt._jax.primal_heuristics import enumerate_binary_seeds_subnlp
 
             # Seed the enumeration from the best root relaxation point when one
@@ -5486,6 +5674,10 @@ def solve_model(
                     tree.inject_incumbent(_x_en.copy(), float(_obj_en))
                     _subnlp_incumbent_updates += 1
                     logger.info("SubNLP enum incumbent: obj=%.6g", _obj_en)
+            if _enum_had_inc:
+                _enum_inc1 = tree.incumbent()
+                _enum_improved = _enum_inc1 is not None and float(_enum_inc1[1]) < _enum_obj0 - 1e-9
+                _record_improver(_HEUR_COST["enumerate"], _enum_improved)
 
         # --- Incumbent integer-neighbourhood search (general-integer LB) ---
         # A feasible incumbent of a nonconvex general-integer model can sit next
@@ -5502,7 +5694,12 @@ def solve_model(
         # NOT the subnlp iteration schedule, which can skip the window in which the
         # improving incumbent first appears and was leaving the better assignment on
         # the table on small instances that finish before the next scheduled tick).
-        if _subnlp_backend_fn is not None and not _model_is_convex:
+        if _subnlp_backend_fn is not None and not _model_is_convex and not _root_optimum_proven():
+            # NOT budget-gated: like the lattice search above, the integer box
+            # search is a light improver discopt leans on where the relaxation
+            # drops the cross-terms that would otherwise bound the search
+            # (nvs05: (3,2)→7.75 vs the global (5,1)→5.47). It already self-
+            # throttles on ``_last_box_inc_obj`` (one run per new incumbent value).
             _inc_box = tree.incumbent()
             if (
                 _inc_box is not None
@@ -5624,7 +5821,10 @@ def solve_model(
                     and _lns_gap_open
                     and _lns_best_idx is not None
                     and (_deadline - time.perf_counter()) > _DEADLINE_NODE_FLOOR_S
+                    and _improver_allowed(_HEUR_COST["rins"])
                 ):
+                    _rins_obj0 = float(_lns_inc[1])
+                    _rins_improved = False
                     try:
                         from discopt._jax.primal_heuristics import rins
 
@@ -5643,18 +5843,27 @@ def solve_model(
                             )
                             if np.isfinite(_obj_ri) and _obj_ri < _SENTINEL_THRESHOLD and _ri_feas:
                                 tree.inject_incumbent(np.asarray(_x_ri).copy(), _obj_ri)
+                                _rins_improved = _obj_ri < _rins_obj0 - 1e-9
                                 logger.info("LNS RINS incumbent: obj=%.6g", _obj_ri)
                     except Exception as _e:
                         logger.debug("LNS RINS failed: %s", _e)
+                    _record_improver(_HEUR_COST["rins"], _rins_improved)
 
                 # (3) Local branching (improve). Scalable Hamming-ball sub-MIP
                 # around the incumbent, escalating k across calls. Bounded by a
                 # small per-call time slice and the remaining budget. The sub-solve
                 # carries the recursion guard internally (``_lns_enabled=False``).
-                if _lns_have_inc and _lns_gap_open and (_deadline - time.perf_counter()) > 1.0:
+                if (
+                    _lns_have_inc
+                    and _lns_gap_open
+                    and (_deadline - time.perf_counter()) > 1.0
+                    and _improver_allowed(_HEUR_COST["lbranch"])
+                ):
                     _lb_k = _lns_k_schedule[min(_lns_lb_calls, len(_lns_k_schedule) - 1)]
                     _lns_lb_calls += 1
                     _lb_slice = min(2.0, max(0.5, _deadline - time.perf_counter() - 0.2))
+                    _lb_obj0 = float(_lns_inc[1])
+                    _lb_improved = False
                     try:
                         from discopt._jax.primal_heuristics import local_branching
 
@@ -5676,6 +5885,7 @@ def solve_model(
                             )
                             if np.isfinite(_obj_lb) and _obj_lb < _SENTINEL_THRESHOLD and _lb_feas:
                                 tree.inject_incumbent(np.asarray(_x_lb).copy(), _obj_lb)
+                                _lb_improved = _obj_lb < _lb_obj0 - 1e-9
                                 logger.info(
                                     "LNS local-branching incumbent: obj=%.6g (k=%d)",
                                     _obj_lb,
@@ -5683,6 +5893,7 @@ def solve_model(
                                 )
                     except Exception as _e:
                         logger.debug("LNS local-branching failed: %s", _e)
+                    _record_improver(_HEUR_COST["lbranch"], _lb_improved)
 
         # --- User callbacks: lazy constraints and incumbent filtering ---
         if lazy_constraints is not None or incumbent_callback is not None:
@@ -8031,12 +8242,39 @@ def _solve_lp_pounce(
     return _solve_lp_matrix(model, t_start, time_limit, solve_fn, "POUNCE")
 
 
+def _solve_lp_gurobi(
+    model: Model,
+    t_start: float,
+    time_limit: float | None = None,
+    threads: int | None = None,
+    options: Optional[dict] = None,
+) -> SolveResult:
+    """Solve an LP using the explicit Gurobi backend."""
+    import functools
+
+    from discopt.solvers.gurobi import solve_lp as _gurobi_solve_lp
+
+    solve_fn = functools.partial(_gurobi_solve_lp, threads=threads, options=options)
+    result = _solve_lp_matrix(
+        model,
+        t_start,
+        time_limit,
+        solve_fn,
+        "Gurobi",
+        strict=True,
+    )
+    if result is None:  # pragma: no cover - strict mode raises before this
+        raise RuntimeError("Gurobi LP solve failed without returning a result.")
+    return result
+
+
 def _solve_lp_matrix(
     model: Model,
     t_start: float,
     time_limit: float | None,
     solve_lp_fn,
     engine: str,
+    strict: bool = False,
 ) -> SolveResult | None:
     """Solve a pure LP through a matrix-form ``solve_lp`` backend.
 
@@ -8074,6 +8312,8 @@ def _solve_lp_matrix(
             time_limit=time_limit,
         )
     except Exception as e:
+        if strict:
+            raise
         logger.debug("%s LP solve failed: %s", engine, e)
         return None
 
@@ -8186,6 +8426,181 @@ def _solve_qp_pounce(
     return _solve_qp_matrix(model, t_start, time_limit, solve_fn, "POUNCE")
 
 
+def _solve_qp_gurobi(
+    model: Model,
+    t_start: float,
+    time_limit: float | None = None,
+    gap_tolerance: float = 1e-4,
+    threads: int | None = None,
+    options: Optional[dict] = None,
+) -> SolveResult:
+    """Solve a QP/MIQP using the explicit Gurobi backend."""
+    import functools
+
+    from discopt.solvers.gurobi import solve_qp as _gurobi_solve_qp
+
+    solve_fn = functools.partial(
+        _gurobi_solve_qp,
+        threads=threads,
+        options=options,
+    )
+    result = _solve_qp_matrix(
+        model,
+        t_start,
+        time_limit,
+        solve_fn,
+        "Gurobi",
+        gap_tolerance=gap_tolerance,
+        strict=True,
+    )
+    if result is None:  # pragma: no cover - strict mode raises before this
+        raise RuntimeError("Gurobi QP/MIQP solve failed without returning a result.")
+    return result
+
+
+def _quadratic_rows_solution_feasible(x, quadratic_constraints, tol=1e-6) -> bool:
+    x = np.asarray(x, dtype=np.float64)
+    if not np.all(np.isfinite(x)):
+        return False
+    x_scale = 1.0 + float(np.max(np.abs(x))) if x.size else 1.0
+    for row in quadratic_constraints:
+        Q = np.asarray(row.Q, dtype=np.float64)
+        c = np.asarray(row.c, dtype=np.float64)
+        rhs = float(row.rhs)
+        value = float(0.5 * x @ Q @ x + c @ x)
+        scale = x_scale + abs(rhs) + abs(value)
+        if row.sense == "<=" and value > rhs + tol * scale:
+            return False
+        if row.sense == ">=" and value < rhs - tol * scale:
+            return False
+        if row.sense == "==" and abs(value - rhs) > tol * scale:
+            return False
+    return True
+
+
+def _solve_qcp_gurobi(
+    model: Model,
+    t_start: float,
+    time_limit: float | None = None,
+    gap_tolerance: float = 1e-4,
+    threads: int | None = None,
+    options: Optional[dict] = None,
+) -> SolveResult:
+    """Solve a QCP/QCQP/MIQCP/MIQCQP using the explicit Gurobi backend."""
+    from discopt._jax.problem_classifier import extract_qcp_data
+    from discopt.modeling.core import ObjectiveSense
+    from discopt.solvers import SolveStatus
+    from discopt.solvers.gurobi import solve_qcp as _gurobi_solve_qcp
+
+    qcp_data = extract_qcp_data(model)
+    n_orig = sum(v.size for v in model._variables)
+
+    bounds = list(
+        zip(
+            np.asarray(qcp_data.x_l[:n_orig]).tolist(),
+            np.asarray(qcp_data.x_u[:n_orig]).tolist(),
+        )
+    )
+
+    A_ub = np.asarray(qcp_data.A_ub, dtype=np.float64)
+    b_ub = np.asarray(qcp_data.b_ub, dtype=np.float64)
+    A_eq = np.asarray(qcp_data.A_eq, dtype=np.float64)
+    b_eq = np.asarray(qcp_data.b_eq, dtype=np.float64)
+    A_ub_arg = A_ub if A_ub.shape[0] else None
+    b_ub_arg = b_ub if b_ub.shape[0] else None
+    A_eq_arg = A_eq if A_eq.shape[0] else None
+    b_eq_arg = b_eq if b_eq.shape[0] else None
+
+    integrality = None
+    if any(v.var_type in (VarType.BINARY, VarType.INTEGER) for v in model._variables):
+        int_arr = np.zeros(n_orig, dtype=np.int32)
+        offset = 0
+        for v in model._variables:
+            if v.var_type in (VarType.BINARY, VarType.INTEGER):
+                int_arr[offset : offset + v.size] = 1
+            offset += v.size
+        integrality = int_arr
+
+    result = _gurobi_solve_qcp(
+        Q=np.asarray(qcp_data.Q[:n_orig, :n_orig]),
+        c=np.asarray(qcp_data.c[:n_orig]),
+        A_ub=A_ub_arg,
+        b_ub=b_ub_arg,
+        A_eq=A_eq_arg,
+        b_eq=b_eq_arg,
+        bounds=bounds,
+        quadratic_constraints=qcp_data.quadratic_constraints,
+        integrality=integrality,
+        time_limit=time_limit,
+        gap_tolerance=gap_tolerance,
+        threads=threads,
+        options=options,
+    )
+
+    wall_time = time.perf_counter() - t_start
+    assert model._objective is not None
+    sense = model._objective.sense
+
+    objective = None
+    if result.objective is not None:
+        objective = float(result.objective) + float(qcp_data.obj_const)
+        if sense == ObjectiveSense.MAXIMIZE:
+            objective = -objective
+
+    bound = None
+    if result.status == SolveStatus.OPTIMAL and objective is not None:
+        bound = objective
+    elif result.bound is not None:
+        bound = float(result.bound) + float(qcp_data.obj_const)
+        if sense == ObjectiveSense.MAXIMIZE:
+            bound = -bound
+
+    if result.status == SolveStatus.OPTIMAL:
+        assert result.x is not None and objective is not None
+        x_flat = np.asarray(result.x[:n_orig], dtype=np.float64)
+        if not _matrix_solution_feasible(x_flat, A_ub_arg, b_ub_arg, A_eq_arg, b_eq_arg, bounds):
+            raise RuntimeError("Gurobi QCP returned an infeasible point labeled optimal.")
+        if not _quadratic_rows_solution_feasible(x_flat, qcp_data.quadratic_constraints):
+            raise RuntimeError("Gurobi QCP returned a quadratic-row-infeasible optimal point.")
+        return SolveResult(
+            status="optimal",
+            objective=objective,
+            bound=objective,
+            gap=result.gap if result.gap is not None else _optimal_relative_gap(objective),
+            x=_unpack_solution(model, x_flat),
+            wall_time=wall_time,
+            node_count=result.node_count,
+            rust_time=0.0,
+            jax_time=0.0,
+            python_time=wall_time,
+        )
+    if result.status == SolveStatus.INFEASIBLE:
+        return SolveResult(status="infeasible", wall_time=wall_time, node_count=result.node_count)
+    if result.status == SolveStatus.UNBOUNDED:
+        return SolveResult(status="unbounded", wall_time=wall_time, node_count=result.node_count)
+    if result.status == SolveStatus.TIME_LIMIT:
+        return SolveResult(
+            status="time_limit",
+            objective=objective,
+            bound=bound,
+            gap=_relative_gap_from_objective_bound(objective, bound),
+            x=_unpack_solution(model, result.x[:n_orig]) if result.x is not None else None,
+            wall_time=wall_time,
+            node_count=result.node_count,
+        )
+    if result.status == SolveStatus.ITERATION_LIMIT:
+        return SolveResult(
+            status="iteration_limit",
+            objective=objective,
+            bound=bound,
+            gap=_relative_gap_from_objective_bound(objective, bound),
+            x=_unpack_solution(model, result.x[:n_orig]) if result.x is not None else None,
+            wall_time=wall_time,
+            node_count=result.node_count,
+        )
+    return SolveResult(status="error", wall_time=wall_time, node_count=result.node_count)
+
+
 def _matrix_solution_feasible(x, A_ub, b_ub, A_eq, b_eq, bounds, tol=1e-6) -> bool:
     """Check a matrix-form LP/QP solution against its own constraints.
 
@@ -8217,6 +8632,8 @@ def _solve_qp_matrix(
     time_limit: float | None,
     solve_qp_fn,
     engine: str,
+    gap_tolerance: float = 1e-4,
+    strict: bool = False,
 ) -> SolveResult | None:
     """Solve a QP/MIQP through a matrix-form ``solve_qp`` backend.
 
@@ -8271,12 +8688,32 @@ def _solve_qp_matrix(
             bounds=bounds,
             integrality=integrality,
             time_limit=time_limit,
+            gap_tolerance=gap_tolerance,
         )
     except Exception as e:
+        if strict:
+            raise
         logger.debug("%s QP solve failed: %s", engine, e)
         return None
 
     wall_time = time.perf_counter() - t_start
+    assert model._objective is not None
+    sense = model._objective.sense
+
+    objective = None
+    if result.objective is not None:
+        objective = float(result.objective) + float(qp_data.obj_const)
+        if sense == ObjectiveSense.MAXIMIZE:
+            objective = -objective
+
+    bound = None
+    result_bound = getattr(result, "bound", None)
+    if result.status == SolveStatus.OPTIMAL and objective is not None:
+        bound = objective
+    elif result_bound is not None:
+        bound = float(result_bound) + float(qp_data.obj_const)
+        if sense == ObjectiveSense.MAXIMIZE:
+            bound = -bound
 
     if result.status == SolveStatus.OPTIMAL:
         assert result.x is not None and result.objective is not None
@@ -8288,11 +8725,7 @@ def _solve_qp_matrix(
             )
             return None
         x_flat = result.x[:n_orig]
-        obj_val = result.objective + qp_data.obj_const
-
-        assert model._objective is not None
-        if model._objective.sense == ObjectiveSense.MAXIMIZE:
-            obj_val = -obj_val
+        assert objective is not None
 
         n_eq_rows = A_eq.shape[0] if A_eq is not None else 0
         n_ub_rows = A_ub.shape[0] if A_ub is not None else 0
@@ -8323,9 +8756,9 @@ def _solve_qp_matrix(
 
         sr = SolveResult(
             status="optimal",
-            objective=obj_val,
-            bound=obj_val,
-            gap=_optimal_relative_gap(obj_val),
+            objective=objective,
+            bound=objective,
+            gap=result.gap if result.gap is not None else _optimal_relative_gap(objective),
             x=_unpack_solution(model, x_flat),
             wall_time=wall_time,
             node_count=result.node_count,
@@ -8347,8 +8780,28 @@ def _solve_qp_matrix(
             wall_time=wall_time,
             infeasibility_certificate=getattr(result, "infeasibility_certificate", None),
         )
+    elif result.status == SolveStatus.UNBOUNDED:
+        return SolveResult(status="unbounded", wall_time=wall_time, node_count=result.node_count)
     elif result.status == SolveStatus.TIME_LIMIT:
-        return SolveResult(status="time_limit", wall_time=wall_time)
+        return SolveResult(
+            status="time_limit",
+            objective=objective,
+            bound=bound,
+            gap=_relative_gap_from_objective_bound(objective, bound),
+            x=_unpack_solution(model, result.x[:n_orig]) if result.x is not None else None,
+            wall_time=wall_time,
+            node_count=result.node_count,
+        )
+    elif result.status == SolveStatus.ITERATION_LIMIT:
+        return SolveResult(
+            status="iteration_limit",
+            objective=objective,
+            bound=bound,
+            gap=_relative_gap_from_objective_bound(objective, bound),
+            x=_unpack_solution(model, result.x[:n_orig]) if result.x is not None else None,
+            wall_time=wall_time,
+            node_count=result.node_count,
+        )
 
     return None
 
@@ -8464,6 +8917,134 @@ def _solve_milp_highs(
         return SolveResult(status="time_limit", wall_time=wall_time, node_count=result.node_count)
 
     return None
+
+
+def _solve_milp_gurobi(
+    model: Model,
+    t_start: float,
+    time_limit: float | None = None,
+    gap_tolerance: float = 1e-4,
+    threads: int | None = None,
+    options: Optional[dict] = None,
+) -> SolveResult:
+    """Solve a MILP using the explicit Gurobi backend."""
+    from discopt._jax.problem_classifier import extract_lp_data
+    from discopt.modeling.core import ObjectiveSense
+    from discopt.solvers import SolveStatus
+    from discopt.solvers.gurobi import solve_milp as _gurobi_solve_milp
+
+    lp_data = extract_lp_data(model)
+    n_orig = sum(v.size for v in model._variables)
+
+    bounds = list(
+        zip(
+            np.asarray(lp_data.x_l[:n_orig]).tolist(),
+            np.asarray(lp_data.x_u[:n_orig]).tolist(),
+        )
+    )
+
+    n_total = lp_data.A_eq.shape[1] if lp_data.A_eq.shape[0] > 0 else n_orig
+    n_slack = n_total - n_orig
+    A_eq_full = np.asarray(lp_data.A_eq)
+    b_eq_full = np.asarray(lp_data.b_eq)
+    A_ub, b_ub, A_eq, b_eq = _decompose_eq_slack_form(A_eq_full, b_eq_full, n_orig, n_slack)
+
+    int_arr = np.zeros(n_orig, dtype=np.int32)
+    offset = 0
+    for v in model._variables:
+        if v.var_type in (VarType.BINARY, VarType.INTEGER):
+            int_arr[offset : offset + v.size] = 1
+        offset += v.size
+
+    result = _gurobi_solve_milp(
+        c=np.asarray(lp_data.c[:n_orig]),
+        A_ub=A_ub,
+        b_ub=b_ub,
+        A_eq=A_eq,
+        b_eq=b_eq,
+        bounds=bounds,
+        integrality=int_arr,
+        time_limit=time_limit,
+        gap_tolerance=gap_tolerance,
+        threads=threads,
+        options=options,
+    )
+
+    wall_time = time.perf_counter() - t_start
+    assert model._objective is not None
+    sense = model._objective.sense
+
+    objective = None
+    if result.objective is not None:
+        objective = float(result.objective) + float(lp_data.obj_const)
+        if sense == ObjectiveSense.MAXIMIZE:
+            objective = -objective
+
+    # ``result.bound`` is a valid lower bound for the internal minimization.
+    # Map it back to the original sense: lower bound for minimize, upper bound
+    # for maximize (matching discopt's existing SolveResult convention).
+    bound = None
+    if result.status == SolveStatus.OPTIMAL and objective is not None:
+        bound = objective
+    elif result.bound is not None:
+        bound = float(result.bound) + float(lp_data.obj_const)
+        if sense == ObjectiveSense.MAXIMIZE:
+            bound = -bound
+
+    if result.status == SolveStatus.OPTIMAL:
+        assert result.x is not None and objective is not None
+        cd, bdl, bdu = _mip_recover_relaxation_duals(
+            model,
+            lp_data=lp_data,
+            x_flat=np.asarray(result.x[:n_orig], dtype=float),
+            n_orig=n_orig,
+            A_ub=A_ub,
+            b_ub=b_ub,
+            A_eq=A_eq,
+            b_eq=b_eq,
+            time_limit=time_limit,
+        )
+        return SolveResult(
+            status="optimal",
+            objective=objective,
+            bound=bound,
+            gap=result.gap if result.gap is not None else 0.0,
+            x=_unpack_solution(model, result.x[:n_orig]),
+            wall_time=wall_time,
+            node_count=result.node_count,
+            rust_time=0.0,
+            jax_time=0.0,
+            python_time=wall_time,
+            constraint_duals=cd,
+            bound_duals_lower=bdl,
+            bound_duals_upper=bdu,
+        )
+
+    if result.status == SolveStatus.INFEASIBLE:
+        return SolveResult(status="infeasible", wall_time=wall_time, node_count=result.node_count)
+    if result.status == SolveStatus.UNBOUNDED:
+        return SolveResult(status="unbounded", wall_time=wall_time, node_count=result.node_count)
+    if result.status == SolveStatus.TIME_LIMIT:
+        return SolveResult(
+            status="time_limit",
+            objective=objective,
+            bound=bound,
+            gap=result.gap,
+            x=_unpack_solution(model, result.x[:n_orig]) if result.x is not None else None,
+            wall_time=wall_time,
+            node_count=result.node_count,
+        )
+    if result.status == SolveStatus.ITERATION_LIMIT:
+        return SolveResult(
+            status="iteration_limit",
+            objective=objective,
+            bound=bound,
+            gap=result.gap,
+            x=_unpack_solution(model, result.x[:n_orig]) if result.x is not None else None,
+            wall_time=wall_time,
+            node_count=result.node_count,
+        )
+    return SolveResult(status="error", wall_time=wall_time, node_count=result.node_count)
 
 
 def _solve_qp_jax(model: Model, t_start: float) -> SolveResult:
