@@ -1151,6 +1151,16 @@ def extract_lp_data(model: Model) -> LPData:
     except (_NotLinearError, Exception):
         pass
 
+    # Fast numeric repr probe before the expensive autodiff fallback. The Rust
+    # ``ModelRepr`` evaluates fine without a ``_builder`` (same as
+    # ``classify_problem``), so ``from_nl`` / repr-only models — where the
+    # algebraic DAG walk can't run — skip the per-primitive eager-JAX autodiff
+    # path (orders of magnitude faster on small instances; see #330).
+    try:
+        return _extract_lp_data_from_repr(model)
+    except Exception:
+        pass
+
     return _extract_lp_data_autodiff(model)
 
 
@@ -1269,6 +1279,16 @@ def extract_qp_data(model: Model) -> QPData:
     try:
         return extract_qp_data_algebraic(model)
     except (_NotQuadraticError, _NotLinearError, Exception):
+        pass
+
+    # Fast numeric repr probe before the expensive autodiff fallback. The Rust
+    # ``ModelRepr`` evaluates fine without a ``_builder`` (same as
+    # ``classify_problem``), so ``from_nl`` / repr-only models — where the
+    # algebraic DAG walk can't run — skip the per-primitive eager-JAX autodiff
+    # path (orders of magnitude faster on small instances; see #330).
+    try:
+        return _extract_qp_data_from_repr(model)
+    except Exception:
         pass
 
     return _extract_qp_data_autodiff(model)

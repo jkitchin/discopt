@@ -4283,6 +4283,66 @@ def solve_model(
     # ANY source, including the sub-NLP / binary-seed heuristics that inject
     # directly and are not counted in proc_stats["incumbent_updates"].
     _last_tighten_inc = np.inf
+
+    # --- SCIP-style heuristic effort budget (#330) ---
+    # The heaviest standalone-strength primal heuristics — the root binary-seed
+    # *enumeration* phase and the sub-MIP LNS (RINS, local branching) — dominate
+    # wall time on easy instances when run unconditionally inside a global solver
+    # (40–104 sub-NLP solves on ≤7-node models; issue #330) without changing the
+    # proven optimum. Following SCIP's ``heur_subnlp`` budgeting, gate *those* by a
+    # *contingent* that grows with the search effort already spent (B&B nodes) and
+    # is weighted by their demonstrated success — the same shape as SCIP's
+    # ``iterquot·nodes·[gain·(found+1)/(calls+1)] + offset``. So they are deferred
+    # on trivially-easy models and only fire once the search is hard enough to
+    # afford them; a productive improver stays funded while one that keeps finding
+    # nothing is smoothly defunded. NOT gated: the cheap incumbent *finders*
+    # (feasibility pump, a single root sub-NLP) that supply the first incumbent for
+    # pruning, and the lighter integer lattice searches (integer local / box
+    # search) that discopt's often-weak McCormick relaxation genuinely leans on to
+    # reach the global assignment (nvs05/nvs23). The MINLP literature endorses
+    # exactly this trade for in-solver heuristics: "it is often worth sacrificing
+    # success on a small number of instances for a significant saving in average
+    # running time" (e.g. the FP enumeration phase is dropped inside a global
+    # solver). Soundness is unaffected: B&B remains exhaustive, so a deferred or
+    # skipped improver can never yield a wrong optimum — at worst a handful of
+    # instances take more nodes. ``DISCOPT_HEUR_BUDGET=0`` restores the prior
+    # always-on behaviour.
+    _heur_budget_on = os.environ.get("DISCOPT_HEUR_BUDGET", "1") != "0"
+    _HEUR_BUDGET_OFFSET = float(os.environ.get("DISCOPT_HEUR_OFFSET", "0"))  # root contingent
+    _HEUR_BUDGET_QUOT = float(os.environ.get("DISCOPT_HEUR_QUOT", "0.5"))  # per processed node
+    _HEUR_SUCCESS_GAIN = 3.0  # SCIP's 3·(found+1)/(calls+1) success weighting
+    # Cost (sub-NLP-solve-equivalents) of each *budgeted* improver — the heavier
+    # standalone-strength components: the binary-seed *enumeration* phase and the
+    # sub-MIP LNS (RINS, local branching). The lighter lattice searches
+    # (integer local / box search) are left ungated above.
+    _HEUR_COST = {"enumerate": 12.0, "rins": 5.0, "lbranch": 10.0}
+    # Mutable container so the nested gate/record helpers can update it without a
+    # ``nonlocal`` dance. ``cost`` is sub-NLP-solve-equivalents already spent on
+    # the (improver-role) heuristics; ``found`` counts those that strictly
+    # improved the incumbent — the success signal in the contingent.
+    _heur_state = {"calls": 0, "found": 0, "cost": 0.0}
+
+    def _improver_allowed(cost: float) -> bool:
+        """Whether an *improver*-role heuristic costing ``cost`` may run now.
+
+        The finder role is never gated: when there is no incumbent yet, securing
+        the first one (for pruning) takes priority. Once an incumbent exists the
+        call is an improver and must fit the success-weighted, node-proportional
+        contingent (SCIP ``heur_subnlp`` shape)."""
+        if not _heur_budget_on or tree.incumbent() is None:
+            return True
+        _nodes = float(tree.stats().get("total_nodes", 0))
+        _weight = _HEUR_SUCCESS_GAIN * (_heur_state["found"] + 1) / (_heur_state["calls"] + 1)
+        _contingent = _HEUR_BUDGET_OFFSET + _HEUR_BUDGET_QUOT * _nodes * _weight
+        return (_heur_state["cost"] + cost) <= _contingent
+
+    def _record_improver(cost: float, improved: bool) -> None:
+        """Charge an improver-role run against the contingent and note success."""
+        _heur_state["calls"] += 1
+        _heur_state["cost"] += cost
+        if improved:
+            _heur_state["found"] += 1
+
     if subnlp_enabled:
         try:
             from typing import cast
@@ -5148,6 +5208,40 @@ def solve_model(
                     _cut_pool.age_cuts(result_sols[i])
             _cut_pool.purge_inactive(max_age=15)
 
+        # --- Root-optimality short-circuit for primal heuristics (#330) ---
+        # At the root the minimum finite relaxation bound in this batch is a
+        # valid *global* dual bound. Once a heuristic has injected an incumbent
+        # that meets it (same gap test as ``_gap_converged``), the optimum is
+        # certified and every remaining root primal heuristic is provably-wasted
+        # work — no feasible point exists below the bound, so none can improve
+        # the incumbent. Skipping them changes neither the returned optimum nor
+        # its certification, and only fires on instances already solved at the
+        # root (the trivially-easy ones); on harder instances the root gap stays
+        # open and every heuristic runs exactly as before, so there is no
+        # large-instance regression. Restricted to ``iteration == 0`` because the
+        # batch minimum is a valid global bound only there.
+        _batch_relax_lb = np.inf
+        if iteration == 0:
+            for _ii in range(n_batch):
+                _lb_ii = result_lbs[_ii]
+                if _lb_ii >= _SENTINEL_THRESHOLD or not np.isfinite(_lb_ii):
+                    continue
+                if _lb_ii < _batch_relax_lb:
+                    _batch_relax_lb = float(_lb_ii)
+
+        def _root_optimum_proven() -> bool:
+            if iteration != 0 or not np.isfinite(_batch_relax_lb):
+                return False
+            _inc = tree.incumbent()
+            if _inc is None or not np.isfinite(_inc[1]):
+                return False
+            _ub = float(_inc[1])
+            _abs_gap = max(0.0, _ub - _batch_relax_lb)
+            if _abs_gap <= _DEFAULT_ABS_GAP_TOL:
+                return True
+            _denom = max(abs(_ub), abs(_batch_relax_lb), 1e-10)
+            return _abs_gap / _denom <= gap_tolerance
+
         # --- Feasibility pump after root node ---
         if iteration == 0 and not _fp_ran:
             _fp_ran = True
@@ -5270,6 +5364,11 @@ def solve_model(
                 # Sound either way: only subnlp-verified feasible points are
                 # injected, and inject_incumbent accepts a point only if it
                 # strictly beats the current incumbent.
+                # NOT budget-gated: the 1-opt/2-opt lattice search is one of the
+                # lighter improvers discopt's (often weak) McCormick relaxation
+                # genuinely relies on to reach the global integer assignment
+                # (nvs23: -287 → -1125), so it stays on at the root. The budget
+                # targets the heavier standalone-strength components below.
                 if not _model_is_convex and best_root_idx is not None:
                     try:
                         from discopt._jax.primal_heuristics import integer_local_search
@@ -5340,6 +5439,7 @@ def solve_model(
             and not _model_is_convex
             and _subnlp_calls < subnlp_max_calls
             and (iteration == 0 or iteration % max(1, subnlp_frequency) == 0)
+            and not _root_optimum_proven()
         ):
             from discopt._jax.primal_heuristics import subnlp as _subnlp
 
@@ -5417,6 +5517,11 @@ def solve_model(
                 for _loop_idx, _i in enumerate(_try_idxs):
                     if _subnlp_calls >= subnlp_max_calls:
                         break
+                    # The root tries every relaxation candidate to cover all
+                    # disjuncts; once one has certified the optimum (incumbent ==
+                    # global root bound) the rest are wasted (#330).
+                    if _loop_idx > 0 and _root_optimum_proven():
+                        break
                     # Deadline enforcement: each subnlp is a round-and-repair NLP
                     # search (seconds on large models). At the root ``_try_idxs``
                     # can hold many candidates, so without a stop the loop runs
@@ -5472,7 +5577,12 @@ def solve_model(
             and _subnlp_backend_fn is not None
             and not _model_is_convex
             and _subnlp_calls < subnlp_max_calls
+            and not _root_optimum_proven()
+            and _improver_allowed(_HEUR_COST["enumerate"])
         ):
+            _enum_inc0 = tree.incumbent()
+            _enum_had_inc = _enum_inc0 is not None and np.isfinite(_enum_inc0[1])
+            _enum_obj0 = float(_enum_inc0[1]) if _enum_had_inc else np.inf
             from discopt._jax.primal_heuristics import enumerate_binary_seeds_subnlp
 
             # Seed the enumeration from the best root relaxation point when one
@@ -5510,6 +5620,10 @@ def solve_model(
                     tree.inject_incumbent(_x_en.copy(), float(_obj_en))
                     _subnlp_incumbent_updates += 1
                     logger.info("SubNLP enum incumbent: obj=%.6g", _obj_en)
+            if _enum_had_inc:
+                _enum_inc1 = tree.incumbent()
+                _enum_improved = _enum_inc1 is not None and float(_enum_inc1[1]) < _enum_obj0 - 1e-9
+                _record_improver(_HEUR_COST["enumerate"], _enum_improved)
 
         # --- Incumbent integer-neighbourhood search (general-integer LB) ---
         # A feasible incumbent of a nonconvex general-integer model can sit next
@@ -5526,7 +5640,12 @@ def solve_model(
         # NOT the subnlp iteration schedule, which can skip the window in which the
         # improving incumbent first appears and was leaving the better assignment on
         # the table on small instances that finish before the next scheduled tick).
-        if _subnlp_backend_fn is not None and not _model_is_convex:
+        if _subnlp_backend_fn is not None and not _model_is_convex and not _root_optimum_proven():
+            # NOT budget-gated: like the lattice search above, the integer box
+            # search is a light improver discopt leans on where the relaxation
+            # drops the cross-terms that would otherwise bound the search
+            # (nvs05: (3,2)→7.75 vs the global (5,1)→5.47). It already self-
+            # throttles on ``_last_box_inc_obj`` (one run per new incumbent value).
             _inc_box = tree.incumbent()
             if (
                 _inc_box is not None
@@ -5648,7 +5767,10 @@ def solve_model(
                     and _lns_gap_open
                     and _lns_best_idx is not None
                     and (_deadline - time.perf_counter()) > _DEADLINE_NODE_FLOOR_S
+                    and _improver_allowed(_HEUR_COST["rins"])
                 ):
+                    _rins_obj0 = float(_lns_inc[1])
+                    _rins_improved = False
                     try:
                         from discopt._jax.primal_heuristics import rins
 
@@ -5667,18 +5789,27 @@ def solve_model(
                             )
                             if np.isfinite(_obj_ri) and _obj_ri < _SENTINEL_THRESHOLD and _ri_feas:
                                 tree.inject_incumbent(np.asarray(_x_ri).copy(), _obj_ri)
+                                _rins_improved = _obj_ri < _rins_obj0 - 1e-9
                                 logger.info("LNS RINS incumbent: obj=%.6g", _obj_ri)
                     except Exception as _e:
                         logger.debug("LNS RINS failed: %s", _e)
+                    _record_improver(_HEUR_COST["rins"], _rins_improved)
 
                 # (3) Local branching (improve). Scalable Hamming-ball sub-MIP
                 # around the incumbent, escalating k across calls. Bounded by a
                 # small per-call time slice and the remaining budget. The sub-solve
                 # carries the recursion guard internally (``_lns_enabled=False``).
-                if _lns_have_inc and _lns_gap_open and (_deadline - time.perf_counter()) > 1.0:
+                if (
+                    _lns_have_inc
+                    and _lns_gap_open
+                    and (_deadline - time.perf_counter()) > 1.0
+                    and _improver_allowed(_HEUR_COST["lbranch"])
+                ):
                     _lb_k = _lns_k_schedule[min(_lns_lb_calls, len(_lns_k_schedule) - 1)]
                     _lns_lb_calls += 1
                     _lb_slice = min(2.0, max(0.5, _deadline - time.perf_counter() - 0.2))
+                    _lb_obj0 = float(_lns_inc[1])
+                    _lb_improved = False
                     try:
                         from discopt._jax.primal_heuristics import local_branching
 
@@ -5700,6 +5831,7 @@ def solve_model(
                             )
                             if np.isfinite(_obj_lb) and _obj_lb < _SENTINEL_THRESHOLD and _lb_feas:
                                 tree.inject_incumbent(np.asarray(_x_lb).copy(), _obj_lb)
+                                _lb_improved = _obj_lb < _lb_obj0 - 1e-9
                                 logger.info(
                                     "LNS local-branching incumbent: obj=%.6g (k=%d)",
                                     _obj_lb,
@@ -5707,6 +5839,7 @@ def solve_model(
                                 )
                     except Exception as _e:
                         logger.debug("LNS local-branching failed: %s", _e)
+                    _record_improver(_HEUR_COST["lbranch"], _lb_improved)
 
         # --- User callbacks: lazy constraints and incumbent filtering ---
         if lazy_constraints is not None or incumbent_callback is not None:
