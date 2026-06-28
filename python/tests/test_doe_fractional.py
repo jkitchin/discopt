@@ -65,8 +65,15 @@ def test_2pow5_resolution5_full_clearance():
     assert np.all(G - np.diag(np.diag(G)) == 0)
 
 
+@pytest.mark.slow
 def test_k7_resolution4_breaks_8_factor_cap():
-    """k=7 at R=IV: 16 runs — beyond the full-factorial implementation's k<=8 cap."""
+    """k=7 at R=IV: 16 runs — beyond the full-factorial implementation's k<=8 cap.
+
+    Selecting 16 of the 2^7=128 candidate rows is a combinatorial orthogonality
+    MILP (`_solve_row_milp`) that takes ~70s locally and exceeds the 120s PR-fast
+    budget on the slower CI runner, so it lives in the slow tier rather than the
+    per-commit suite. Not a regression — timing is identical on main.
+    """
     factors = {f"X{i}": (0.0, 1.0) for i in range(7)}
     d = fractional_factorial_design(factors, n_runs=16, resolution=4, seed=1)
     M = _coded(d)
