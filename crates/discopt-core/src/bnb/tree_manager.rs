@@ -675,17 +675,18 @@ impl TreeManager {
         self.reliability_threshold
     }
 
-    /// Seed pseudocosts from strong-branch probe observations (reliability
-    /// branching). Each entry is `(var_index, frac_part, gain, is_down)` where
-    /// `gain = max(child_obj − node_obj, 0)` from an optimal strong-branch probe;
-    /// it is recorded as a pseudocost observation (gain per unit of variable
-    /// change), so a probed variable becomes reliable immediately with an exact
-    /// measurement rather than waiting for noisy retroactive child-bound updates.
-    pub fn seed_pseudocosts(&mut self, obs: &[(usize, f64, f64, bool)]) {
-        for &(idx, frac, gain, is_down) in obs {
-            // `Pseudocosts::update` records (child_lb − parent_lb)/delta_var; pass
-            // parent_lb = 0, child_lb = gain so the contribution is gain/delta_var.
-            self.pseudocosts.update(idx, 0.0, gain, frac, is_down);
+    /// Fold strong-branching probe results into the pseudocost tracker. Each
+    /// optimal probe is an exact pseudocost observation `(var, frac, Δobj,
+    /// is_down)`; recording them (in addition to the retroactive child-result
+    /// updates) is the reliability-branching feedback loop that lets a probed
+    /// variable reach the reliability threshold and stop being re-probed. The
+    /// delta is passed as `child_lb - parent_lb` with `parent_lb = 0`, matching
+    /// `Pseudocosts::update`'s use of only the difference. Affects branching
+    /// variable *selection* only — never a bound — so soundness is untouched.
+    pub fn record_sb_observations(&mut self, obs: &[(usize, f64, f64, bool)]) {
+        for &(var_index, frac, delta, is_down) in obs {
+            self.pseudocosts
+                .update(var_index, 0.0, delta, frac, is_down);
         }
     }
 

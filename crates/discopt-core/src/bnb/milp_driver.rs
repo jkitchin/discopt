@@ -117,13 +117,10 @@ pub struct MilpOptions {
     /// Root feasibility-based bound tightening (sound, dimension-preserving).
     pub presolve: bool,
     /// Limited strong branching on unreliable candidates (reliability branching).
+    /// Probe objective degradations are fed back into the shared pseudocosts (see
+    /// [`TreeManager::record_sb_observations`]) so probed variables graduate and
+    /// stop being re-probed — the reliability-branching feedback loop.
     pub strong_branch: bool,
-    /// Feed strong-branch probe gains back into the tree's pseudocosts (true
-    /// reliability branching). Without this, strong branching only picks the
-    /// current node's variable and its measured gains are discarded, so deeper
-    /// nodes fall back to slowly/noisily seeded pseudocosts. Requires
-    /// `strong_branch`.
-    pub seed_pseudocosts: bool,
     /// Run feasibility-based bound tightening (FBBT) at every node, not just the
     /// root. Deep in the tree, branching tightens constraint slacks, so FBBT
     /// fixes/contracts further integer variables that the LP relaxation leaves
@@ -480,10 +477,6 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
 
         // --- sequential reduce: apply tree mutations in batch order ---
         let mut hit_unbounded = false;
-        // Strong-branch pseudocost observations, collected in batch order and
-        // applied before `process_evaluated` (which makes the branching decisions)
-        // so the seeding is deterministic and available to this batch's nodes.
-        let mut pending_sb_obs: Vec<SbObservation> = Vec::new();
         for (k, out) in outputs.into_iter().enumerate() {
             let id = batch.node_ids[k];
             lp_iters += out.iters;
@@ -514,8 +507,12 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
             if let Some(v) = out.branch_hint {
                 tm.set_branch_hint(id, v);
             }
-            if !out.sb_obs.is_empty() {
-                pending_sb_obs.extend(out.sb_obs);
+            // Feed this node's strong-branch probes into the shared pseudocosts,
+            // in batch order, so the reliability mechanism graduates those
+            // variables and stops re-probing them at later nodes. Selection-only:
+            // never affects a bound, so determinism and soundness hold.
+            if !out.sb_observations.is_empty() {
+                tm.record_sb_observations(&out.sb_observations);
             }
             // Store node-propagation tightened bounds so children inherit them.
             if let Some((tl, tu)) = out.tightened {
@@ -537,11 +534,6 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
             break 'search;
         }
         tm.import_results(&results);
-        // Reliability branching: seed pseudocosts from this batch's strong-branch
-        // probes *before* the branching decisions in `process_evaluated`.
-        if !pending_sb_obs.is_empty() {
-            tm.seed_pseudocosts(&pending_sb_obs);
-        }
         tm.process_evaluated();
 
         // Fold this batch's newly-found global cuts into the shared matrix.
@@ -661,6 +653,11 @@ struct NodeCtx<'a> {
     tm: &'a TreeManager,
 }
 
+/// One strong-branch pseudocost sample harvested from a probe:
+/// `(var_index, frac, Δobj, is_down)`. Fed into the shared pseudocost tracker so
+/// the reliability mechanism can graduate the variable. See [`strong_branch`].
+type SbObservation = (usize, f64, f64, bool);
+
 /// The product of one node's evaluation, applied to the tree later in the
 /// sequential reduce (in batch order). Keeping every tree mutation out of the
 /// parallel region is what preserves determinism: parallelism changes only
@@ -675,9 +672,12 @@ struct NodeOutput {
     found_cuts: Vec<GomoryCut>,
     /// Strong-branching variable hint.
     branch_hint: Option<usize>,
-    /// Strong-branch probe observations to seed the tree's pseudocosts
-    /// (reliability branching). Empty unless strong branching ran this node.
-    sb_obs: Vec<SbObservation>,
+    /// Pseudocost samples harvested from the strong-branch probes at this node,
+    /// each `(var, frac, Δobj, is_down)`. Applied to the shared pseudocost tracker
+    /// in the sequential reduce (batch order) so the reliability mechanism can
+    /// graduate these variables and stop re-probing them. Empty when the node did
+    /// no strong branching.
+    sb_observations: Vec<SbObservation>,
     /// Node-propagation result: tightened structural bounds `(lb, ub)` to store
     /// on the node so its children inherit them. `None` when propagation is off
     /// or changed nothing.
@@ -725,7 +725,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
             incumbent: None,
             found_cuts: Vec::new(),
             branch_hint: None,
-            sb_obs: Vec::new(),
+            sb_observations: Vec::new(),
             tightened: None,
             iters: 0,
             unbounded: false,
@@ -771,7 +771,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                 incumbent: None,
                 found_cuts: Vec::new(),
                 branch_hint: None,
-                sb_obs: Vec::new(),
+                sb_observations: Vec::new(),
                 tightened: None,
                 iters: 0,
                 unbounded: false,
@@ -883,7 +883,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
         incumbent: None,
         found_cuts: Vec::new(),
         branch_hint: None,
-        sb_obs: Vec::new(),
+        sb_observations: Vec::new(),
         tightened,
         iters: sol.iters,
         unbounded: false,
@@ -1002,9 +1002,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                         strong_branch(ctx, &full_l, &full_u, &sol.basis, &sol.x, sol.obj, &cands);
                     out.iters += piv;
                     out.branch_hint = best;
-                    if ctx.opts.seed_pseudocosts {
-                        out.sb_obs = sb_obs;
-                    }
+                    out.sb_observations = sb_obs;
                 }
             }
             out.result = NodeResult {
@@ -1048,14 +1046,6 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
 /// prunes immediately). Returns the chosen structural variable, if any, and the
 /// simplex pivots spent. Cheap because each probe is a few warm pivots, and it
 /// tapers automatically as pseudocosts mature past the reliability threshold.
-/// One strong-branch probe observation: `(var_index, frac_part, gain, is_down)`,
-/// where `gain = max(child_obj − node_obj, 0)` from an *optimal* child probe.
-/// Fed back into the tree's pseudocosts (reliability branching) so a probed
-/// variable becomes reliable immediately with an exact, isolated measurement —
-/// instead of waiting for noisy retroactive child-bound updates. Infeasible
-/// probes are excluded (they are a pruning signal, not a per-unit cost).
-type SbObservation = (usize, f64, f64, bool);
-
 fn strong_branch(
     ctx: &NodeCtx<'_>,
     orig_l: &[f64],
@@ -1085,8 +1075,6 @@ fn strong_branch(
 
     const INFEAS_DELTA: f64 = 1e7; // a pruned child is a strong branching signal
     let eps = 1e-6;
-    // Per-probe pseudocost observations (only for optimal children).
-    let mut obs: Vec<SbObservation> = Vec::new();
     // Every probe re-optimizes from the *same* node basis on the *same* matrix,
     // differing only in one bound. Prepare (factorize + verify dual feasibility)
     // that basis once on the batch's pre-scaled matrix (`ctx.sa`/`sc`/`sb`); each
@@ -1136,21 +1124,29 @@ fn strong_branch(
     let mut best: Option<usize> = None;
     let mut best_score = f64::NEG_INFINITY;
     let mut pivots = 0usize;
+    // Exact pseudocost samples harvested from the probes: `(var, frac, Δobj,
+    // is_down)`. Each optimal probe *is* a pseudocost observation (the canonical
+    // reliability-branching feedback); recording them lets a variable reach the
+    // reliability threshold and drop out of strong branching at later nodes,
+    // instead of being re-probed every time it turns up fractional. Infeasible /
+    // non-optimal probes are excluded — a pruned child is a branching signal, not
+    // a finite degradation sample, and feeding it would corrupt the average.
+    let mut obs: Vec<SbObservation> = Vec::new();
     for (idx, _f) in cand {
         let xi = x[idx];
         let (lo0, hi0) = (orig_l[idx], orig_u[idx]);
+        let frac = xi - xi.floor();
 
         // Down branch: x_idx ≤ floor(x_idx).
         u[idx] = xi.floor();
         let dn = probe(&l, &u);
         u[idx] = hi0;
         pivots += dn.iters;
-        let frac = xi - xi.floor();
         let d_dn = match dn.status {
             LpStatus::Optimal => {
-                let g = (dn.obj - node_obj).max(0.0);
-                obs.push((idx, frac, g, true)); // seed down pseudocost
-                g
+                let d = (dn.obj - node_obj).max(0.0);
+                obs.push((idx, frac, d, true));
+                d
             }
             LpStatus::Infeasible => INFEAS_DELTA,
             _ => 0.0,
@@ -1163,9 +1159,9 @@ fn strong_branch(
         pivots += up.iters;
         let d_up = match up.status {
             LpStatus::Optimal => {
-                let g = (up.obj - node_obj).max(0.0);
-                obs.push((idx, frac, g, false)); // seed up pseudocost
-                g
+                let d = (up.obj - node_obj).max(0.0);
+                obs.push((idx, frac, d, false));
+                d
             }
             LpStatus::Infeasible => INFEAS_DELTA,
             _ => 0.0,
@@ -1702,7 +1698,6 @@ mod tests {
             heuristics: true,
             presolve: true,
             strong_branch: true,
-            seed_pseudocosts: true,
             node_propagation: true,
             reduced_cost_fixing: true,
             sb_max_cands: 8,

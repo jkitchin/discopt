@@ -406,7 +406,11 @@ pub fn solve_lp_batch_py<'py>(
     ub: PyReadonlyArray2<'py, f64>,
     tol: f64,
     max_iter: usize,
-) -> PyResult<(Vec<String>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>)> {
+) -> PyResult<(
+    Vec<String>,
+    Bound<'py, PyArray2<f64>>,
+    Bound<'py, PyArray1<f64>>,
+)> {
     let dims = a.shape();
     let (m, n) = (dims[0], dims[1]);
     let k = b.shape()[0];
@@ -476,10 +480,10 @@ pub fn solve_lp_batch_py<'py>(
 #[pyfunction]
 #[pyo3(signature = (c, a, b, lb, ub, integer_cols, n_struct, obj_const=0.0,
                     max_nodes=1_000_000, gap_tol=1e-6, tol=1e-9, root_cuts=16,
-                    cut_rounds=1, gmi_cuts=true, cut_select=false, node_cuts=false, max_pool_cuts=128, heuristics=true,
-                    presolve=true, strong_branch=true, seed_pseudocosts=false,
+                    cut_rounds=1, gmi_cuts=true, cut_select=false, node_cuts=false,
+                    max_pool_cuts=128, heuristics=true, presolve=true, strong_branch=true,
                     node_propagation=false, reduced_cost_fixing=true,
-                    sb_max_cands=8, sb_node_budget=128,
+                    sb_max_cands=6, sb_node_budget=48,
                     time_limit_s=0.0))]
 pub fn solve_milp_py<'py>(
     py: Python<'py>,
@@ -503,7 +507,6 @@ pub fn solve_milp_py<'py>(
     heuristics: bool,
     presolve: bool,
     strong_branch: bool,
-    seed_pseudocosts: bool,
     node_propagation: bool,
     reduced_cost_fixing: bool,
     sb_max_cands: usize,
@@ -550,7 +553,6 @@ pub fn solve_milp_py<'py>(
         heuristics,
         presolve,
         strong_branch,
-        seed_pseudocosts,
         node_propagation,
         reduced_cost_fixing,
         sb_max_cands,
