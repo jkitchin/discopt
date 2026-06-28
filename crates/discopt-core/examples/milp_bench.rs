@@ -155,6 +155,7 @@ fn opts(n_struct: usize, integer_cols: Vec<usize>, tl: f64) -> MilpOptions {
         strong_branch: true,
         seed_pseudocosts: false,
         node_propagation: false,
+        reduced_cost_fixing: false,
         sb_max_cands: 8,
         sb_node_budget: 128,
         simplex: SimplexOptions {

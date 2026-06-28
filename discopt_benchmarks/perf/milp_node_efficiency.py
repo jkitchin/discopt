@@ -137,6 +137,9 @@ _OFF = {
     "heuristics": False,
     "presolve": False,
     "strong_branch": False,
+    # New levers are set explicitly so the ablation baseline is truly all-off
+    # regardless of the binding's defaults (reduced_cost_fixing defaults true).
+    "reduced_cost_fixing": False,
     "sb_max_cands": 8,
     "sb_node_budget": 1024,
 }
@@ -159,6 +162,7 @@ ABLATION: dict[str, dict] = {
     "node_cuts": _cfg(node_cuts=True, max_pool_cuts=256),
     "strong_branch": _cfg(strong_branch=True),
     "heuristics": _cfg(heuristics=True),
+    "reduced_cost_fixing": _cfg(heuristics=True, reduced_cost_fixing=True),
     "prod": _cfg(
         root_cuts=16,
         cut_rounds=1,
@@ -167,6 +171,7 @@ ABLATION: dict[str, dict] = {
         heuristics=True,
         presolve=True,
         strong_branch=True,
+        reduced_cost_fixing=True,
     ),
     "full": _cfg(
         root_cuts=64,
@@ -176,6 +181,7 @@ ABLATION: dict[str, dict] = {
         heuristics=True,
         presolve=True,
         strong_branch=True,
+        reduced_cost_fixing=True,
     ),
 }
 

@@ -1,13 +1,19 @@
 # Issue #331 — Step 1: reproduce & attribute the MILP node gap
 
-> ⚠️ **Superseded conclusion — read `STEP3_correction_branching.md`.** This Step 1
-> writeup attributed the node gap to *weak bounds*, based on a SCIP root-gap number
-> measured with `getDualboundRoot()` on a full solve — which includes SCIP's
-> restarts and so overstated SCIP's root strength ~2×. Corrected, apples-to-apples:
-> discopt's root bound is close to SCIP's, closing the residual difference does not
-> reduce discopt's node count, and **the node gap is driven by branching, not
-> bounds.** The reproduction (node counts, objectives) below is still valid; the
-> *attribution* is corrected in Step 3.
+> ⚠️ **Read the later steps for the current state.** This Step 1 writeup
+> attributed the node gap to *weak bounds*, based on a SCIP root-gap number from
+> `getDualboundRoot()` on a full solve — which includes restarts and overstated
+> SCIP's root strength ~2× (corrected in `STEP3_correction_branching.md`). The
+> attribution evolved with the data:
+> - **Step 3:** root bounds are close to SCIP's; the gap is in the tree search.
+> - **Step 4:** even full strong branching can't close it — the lever is
+>   incumbent/objective-based variable fixing (`STEP4_branching_prototype.md`).
+> - **Step 5 (shipped):** **reduced-cost fixing** cuts nodes 30–64 % and wall
+>   time 30–73 %, putting the branching-dominated instances at/under the ≤3×-SCIP
+>   target — on by default (`STEP5_reduced_cost_fixing.md`).
+>
+> The reproduction (node counts, objectives) below is valid; the production
+> numbers in the regenerated tables now include reduced-cost fixing.
 
 This directory holds the committed output of the node-efficiency micro-bench for
 the pure-MILP simplex engine (`nlp_solver="simplex"` →

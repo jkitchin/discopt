@@ -478,7 +478,8 @@ pub fn solve_lp_batch_py<'py>(
                     max_nodes=1_000_000, gap_tol=1e-6, tol=1e-9, root_cuts=16,
                     cut_rounds=1, node_cuts=false, max_pool_cuts=128, heuristics=true,
                     presolve=true, strong_branch=true, seed_pseudocosts=false,
-                    node_propagation=false, sb_max_cands=8, sb_node_budget=128,
+                    node_propagation=false, reduced_cost_fixing=true,
+                    sb_max_cands=8, sb_node_budget=128,
                     time_limit_s=0.0))]
 pub fn solve_milp_py<'py>(
     py: Python<'py>,
@@ -502,6 +503,7 @@ pub fn solve_milp_py<'py>(
     strong_branch: bool,
     seed_pseudocosts: bool,
     node_propagation: bool,
+    reduced_cost_fixing: bool,
     sb_max_cands: usize,
     sb_node_budget: usize,
     time_limit_s: f64,
@@ -546,6 +548,7 @@ pub fn solve_milp_py<'py>(
         strong_branch,
         seed_pseudocosts,
         node_propagation,
+        reduced_cost_fixing,
         sb_max_cands,
         sb_node_budget,
         simplex: SimplexOptions {
