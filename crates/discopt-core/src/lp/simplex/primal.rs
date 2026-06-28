@@ -296,7 +296,7 @@ impl<'a> Simplex<'a> {
         for i in 0..m {
             cost1[self.n + i] = 1.0;
         }
-        match self.simplex_loop(&cost1, &art_sign) {
+        match self.simplex_loop(&cost1, &art_sign, true) {
             Ok(_) => {}
             Err(st) => return self.assemble(st, &art_sign),
         }
@@ -321,7 +321,7 @@ impl<'a> Simplex<'a> {
         }
         let mut cost2 = vec![0.0; self.na];
         cost2[..self.n].copy_from_slice(self.c);
-        let st = match self.simplex_loop(&cost2, &art_sign) {
+        let st = match self.simplex_loop(&cost2, &art_sign, false) {
             Ok(()) => LpStatus::Optimal,
             Err(s) => s,
         };
@@ -330,7 +330,12 @@ impl<'a> Simplex<'a> {
 
     /// Primal simplex iterations for the given `cost`. Returns Ok(()) at
     /// optimality, Err(Unbounded/IterLimit/Numerical) otherwise.
-    fn simplex_loop(&mut self, cost: &[f64], art_sign: &[f64]) -> Result<(), LpStatus> {
+    fn simplex_loop(
+        &mut self,
+        cost: &[f64],
+        art_sign: &[f64],
+        is_phase1: bool,
+    ) -> Result<(), LpStatus> {
         let m = self.m;
         let mut updates = 0usize;
         let mut stall = 0usize;
@@ -375,14 +380,18 @@ impl<'a> Simplex<'a> {
             }
             // price: y = B⁻ᵀ c_B ; reduced cost d_j = c_j − yᵀA_j
             let mut y: Vec<f64> = self.basis.iter().map(|&j| cost[j]).collect();
-            if self.lu.btran(&mut y).is_err() {
-                return Err(LpStatus::Numerical);
+            {
+                let _t = crate::profile::Timer::new(crate::profile::Phase::PriceBtran);
+                if self.lu.btran(&mut y).is_err() {
+                    return Err(LpStatus::Numerical);
+                }
             }
             let bland = stall > 2 * (self.na + 1);
             // choose entering: Devex (max dⱼ²/γⱼ over improving cols), with a
             // Bland's-rule fallback (first improving) once a stall is detected.
             let mut enter: Option<usize> = None;
             let mut best_score = 0.0f64;
+            let _t_sweep = crate::profile::Timer::new(crate::profile::Phase::PriceSweep);
             for j in 0..self.na {
                 if self.stat[j] == BASIC {
                     continue;
@@ -402,6 +411,7 @@ impl<'a> Simplex<'a> {
                     }
                 }
             }
+            drop(_t_sweep);
             let q = match enter {
                 Some(q) => q,
                 None => return Ok(()), // optimal
@@ -410,8 +420,11 @@ impl<'a> Simplex<'a> {
 
             // direction α = B⁻¹ A_q
             let mut alpha = self.column(q, art_sign);
-            if self.lu.ftran(&mut alpha).is_err() {
-                return Err(LpStatus::Numerical);
+            {
+                let _t = crate::profile::Timer::new(crate::profile::Phase::AlphaFtran);
+                if self.lu.ftran(&mut alpha).is_err() {
+                    return Err(LpStatus::Numerical);
+                }
             }
 
             // Harris two-pass bounded ratio test. Entering moves by t≥0; basic
@@ -491,8 +504,17 @@ impl<'a> Simplex<'a> {
             }
             if t_max <= self.tol {
                 stall += 1;
+                crate::profile::incr(crate::profile::Ctr::DegeneratePivots);
             } else {
                 stall = 0;
+            }
+            crate::profile::incr(if is_phase1 {
+                crate::profile::Ctr::Phase1Pivots
+            } else {
+                crate::profile::Ctr::Phase2Pivots
+            });
+            if bland {
+                crate::profile::incr(crate::profile::Ctr::BlandActivations);
             }
 
             // Incremental x_B step: basic values move along −dir·α by t_max.
@@ -503,6 +525,7 @@ impl<'a> Simplex<'a> {
 
             match leave_slot {
                 None => {
+                    crate::profile::incr(crate::profile::Ctr::BoundFlips);
                     // bound flip: entering goes to its other bound, no basis change
                     self.stat[q] = if self.stat[q] == AT_LOWER {
                         AT_UPPER
@@ -550,13 +573,19 @@ impl<'a> Simplex<'a> {
                     xb[slot] = q_val + dir * t_max;
                     // factorization update with the entering column
                     let col = self.column(q, art_sign);
-                    let need_refac = self.lu.update(slot, &col).is_err();
+                    let need_refac = {
+                        let _t = crate::profile::Timer::new(crate::profile::Phase::FtUpdate);
+                        self.lu.update(slot, &col).is_err()
+                    };
                     updates += 1;
                     // Refactorize on: a failed FT update, the hard 48-update cap, or
                     // the adaptive work gate (accumulated bump-update work exceeded
                     // the factor's nnz — the wide-McCormick-bump regime).
-                    let work_gate = refac_work_budget > 0 && self.lu.ft_update_work() > refac_work_budget;
+                    let work_gate =
+                        refac_work_budget > 0 && self.lu.ft_update_work() > refac_work_budget;
                     if need_refac || updates >= 48 || work_gate {
+                        crate::profile::incr(crate::profile::Ctr::Refactorizations);
+                        let _t = crate::profile::Timer::new(crate::profile::Phase::Refactorize);
                         if self.refactorize(art_sign).is_err() {
                             return Err(LpStatus::Numerical);
                         }
@@ -767,11 +796,35 @@ mod tests {
         // Exact feasible point passes.
         assert!(solution_within_tolerance(&a, 1, 2, &b, &l, &u, &[1.0, 3.0]));
         // Ax=b drift beyond tolerance is rejected (would be a false "Optimal").
-        assert!(!solution_within_tolerance(&a, 1, 2, &b, &l, &u, &[1.0, 3.1]));
+        assert!(!solution_within_tolerance(
+            &a,
+            1,
+            2,
+            &b,
+            &l,
+            &u,
+            &[1.0, 3.1]
+        ));
         // A bound excursion beyond tolerance is rejected.
-        assert!(!solution_within_tolerance(&a, 1, 2, &b, &l, &u, &[-1.0, 5.0]));
+        assert!(!solution_within_tolerance(
+            &a,
+            1,
+            2,
+            &b,
+            &l,
+            &u,
+            &[-1.0, 5.0]
+        ));
         // Tiny within-tolerance noise still passes.
-        assert!(solution_within_tolerance(&a, 1, 2, &b, &l, &u, &[1.0, 3.0 + 1e-9]));
+        assert!(solution_within_tolerance(
+            &a,
+            1,
+            2,
+            &b,
+            &l,
+            &u,
+            &[1.0, 3.0 + 1e-9]
+        ));
     }
 
     #[test]
@@ -784,6 +837,14 @@ mod tests {
         let r = solve(&a, 2, 4, &[4.0, 6.0], &c, &l, &u);
         assert_eq!(r.status, LpStatus::Optimal);
         // The returned optimum genuinely satisfies the audit predicate.
-        assert!(solution_within_tolerance(&a, 2, 4, &[4.0, 6.0], &l, &u, &r.x));
+        assert!(solution_within_tolerance(
+            &a,
+            2,
+            4,
+            &[4.0, 6.0],
+            &l,
+            &u,
+            &r.x
+        ));
     }
 }

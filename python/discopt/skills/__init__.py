@@ -14,7 +14,7 @@ Examples
 --------
 >>> from discopt.skills import iter_commands
 >>> [p.name for p in iter_commands()]          # doctest: +ELLIPSIS
-['adversary.md', 'benchmark-report.md', ...]
+['benchmark-report.md', 'convert.md', ...]
 """
 
 from __future__ import annotations

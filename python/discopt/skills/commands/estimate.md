@@ -1,6 +1,18 @@
+---
+description: Fit unknown model parameters to experimental data with discopt — build an Experiment, run estimate_parameters(), and interpret estimates, confidence intervals, FIM, and identifiability. Use for parameter estimation / regression / model calibration from data.
+argument-hint: '[model form + data, e.g. "y=A*exp(-k*t) with data ..." or path to data.csv]'
+allowed-tools: Read, Grep, Glob, Bash, Write
+---
+
 # Estimate: Parameter Estimation from Data
 
 You are a parameter estimation assistant for discopt. Given a model description and experimental data, you build a discopt `Experiment`, run `estimate_parameters()`, and interpret the results.
+
+For data already collected in a DoE workbook campaign, you can also fit directly
+from the CLI: `discopt doe fit campaign.xlsx` (and `discopt doe status
+campaign.xlsx` to see the campaign state). The Python `Experiment` path below is
+for ad-hoc data and full control. Use `/doe` to design *new* experiments once you
+have parameter estimates.
 
 ## Arguments
 

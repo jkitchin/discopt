@@ -78,6 +78,43 @@ def test_pure_milp_still_uses_simplex():
     assert out.objective == pytest.approx(-16.0, abs=1e-6)
 
 
+def test_milp_simplex_defers_on_power_of_sum():
+    """Regression: a power of a *sum of variables* — e.g. fac2's
+    ``(x36+…+x41)**2.5`` objective — was missed by both the Rust and Python term
+    classifiers (they only catalogue powers over a single variable), so the
+    simplex engine accepted the model and certified a WRONG 'optimal' on the
+    linear projection, which silently drops the power. The term classifier must
+    now flag it and the engine must defer."""
+    from discopt._jax.term_classifier import classify_nonlinear_terms
+    from discopt.solver import _solve_milp_simplex
+
+    m = dm.Model("powsum")
+    x = m.integer("x", lb=0, ub=5)
+    y = m.integer("y", lb=0, ub=5)
+    m.minimize((x + y) ** 2.5)
+    m.subject_to(x + y >= 2)
+    assert classify_nonlinear_terms(m).general_nl, "power-of-sum not flagged nonlinear"
+    assert _solve_milp_simplex(m, 10.0, 1e-4, 100000, time.perf_counter()) is None
+
+
+def test_milp_simplex_authoritative_linearity_backstop():
+    """Defense-in-depth: the engine defers unless the model is provably linear in
+    its objective and every constraint per the degree analysis the router uses,
+    so a nonlinear term slipping past the term classifier can never be certified
+    'optimal' on the lossy linear projection. Verified on fac2, whose
+    ``(sum)**2.5`` objective made the projection optimum 2_476_128 vs the true
+    331_837_498."""
+    import os.path
+
+    from discopt.solver import _solve_milp_simplex
+
+    path = os.path.join(os.path.dirname(__file__), "data", "minlplib_nl", "fac2.nl")
+    if not os.path.exists(path):
+        pytest.skip("fac2 instance unavailable")
+    m = dm.from_nl(path)
+    assert _solve_milp_simplex(m, 30.0, 1e-4, 1_000_000, time.perf_counter()) is None
+
+
 # --------------------------------------------------------------------------- #
 # the actual carton7 root cause: big-M reformulation of a product whose other
 # factor has an infinite (or astronomical) bound is invalid -> must abort

@@ -10273,6 +10273,30 @@ def _solve_milp_simplex(
     ):
         return None
 
+    # Authoritative linearity backstop (defense-in-depth). The term classifier
+    # above can have blind spots: a power/product over a *non-variable* base —
+    # e.g. fac2's ``(x36+…+x41)**2.5`` objective — is missed by both the Rust and
+    # Python term classifiers, yet ``extract_lp_data`` still silently drops it,
+    # so the engine would certify a wrong 'optimal' on the linear projection
+    # (off by 134x on fac2). The degree analysis behind ``is_objective_linear`` /
+    # ``is_constraint_linear`` (the same check the router trusts to reach this
+    # MILP branch) catches every such term, so defer unless the model is provably
+    # linear in its objective and every constraint. For models that reach here
+    # through the normal MILP route this is a no-op (the router already proved
+    # linearity); it only guards direct calls, future re-routing, and any
+    # router/extractor representation discrepancy.
+    try:
+        from discopt._rust import model_to_repr
+
+        _repr = model_to_repr(model, getattr(model, "_builder", None))
+        _fully_linear = bool(_repr.is_objective_linear()) and all(
+            _repr.is_constraint_linear(i) for i in range(_repr.n_constraints)
+        )
+    except Exception:
+        _fully_linear = False
+    if not _fully_linear:
+        return None
+
     lp_data = extract_lp_data(model)
     A = np.ascontiguousarray(lp_data.A_eq, dtype=np.float64)
     if A.shape[0] == 0:

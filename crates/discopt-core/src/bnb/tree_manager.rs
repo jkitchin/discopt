@@ -675,6 +675,36 @@ impl TreeManager {
         self.reliability_threshold
     }
 
+    /// Fold strong-branching probe results into the pseudocost tracker. Each
+    /// optimal probe is an exact pseudocost observation `(var, frac, Δobj,
+    /// is_down)`; recording them (in addition to the retroactive child-result
+    /// updates) is the reliability-branching feedback loop that lets a probed
+    /// variable reach the reliability threshold and stop being re-probed. The
+    /// delta is passed as `child_lb - parent_lb` with `parent_lb = 0`, matching
+    /// `Pseudocosts::update`'s use of only the difference. Affects branching
+    /// variable *selection* only — never a bound — so soundness is untouched.
+    pub fn record_sb_observations(&mut self, obs: &[(usize, f64, f64, bool)]) {
+        for &(var_index, frac, delta, is_down) in obs {
+            self.pseudocosts
+                .update(var_index, 0.0, delta, frac, is_down);
+        }
+    }
+
+    /// Replace a node's structural variable bounds with node-propagation
+    /// (FBBT) tightened ones, so its children inherit the contracted box. A
+    /// sound contraction (the tightened box is a subset of the original), so no
+    /// feasible integer point is lost. Called in the batch reduce before
+    /// `process_evaluated` branches the node.
+    pub fn set_node_bounds(&mut self, node_id: NodeId, lb: Vec<f64>, ub: Vec<f64>) {
+        let node = self.pool.get_mut(node_id);
+        if lb.len() == node.lb.len() {
+            node.lb = lb;
+        }
+        if ub.len() == node.ub.len() {
+            node.ub = ub;
+        }
+    }
+
     /// Inject an externally-found incumbent (e.g. from a primal heuristic).
     ///
     /// Updates the incumbent only if `obj_val` is strictly better than the
