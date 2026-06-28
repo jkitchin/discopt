@@ -222,6 +222,28 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
     // the tree are added once and shared by all nodes.
     let mut pool_sigs: HashSet<Vec<(u32, i64)>> = HashSet::new();
 
+    // Node-cut policy (issue #331 node-count sweep). Separating cover cuts at
+    // fractional nodes closes the integrality gap deep in the tree and cuts the
+    // node count hard (−70–80% on sparse knapsacks, toward SCIP). Two grounded
+    // guardrails make it a *wall* win rather than a 2× regression:
+    //   * Density gate. A cover cut spans the support of its source row, so on
+    //     dense-row models it is itself dense and bloats every node's LP for no
+    //     node benefit (measured: dense knapsacks +2× wall, ~0 node change). Only
+    //     separate when the structural rows are sparse, where cover cuts are
+    //     row-local and cheap. (Set-covering ≥-rows yield no knapsack covers, so
+    //     this is a no-op there regardless.)
+    //   * Tight pool cap ≈ 2× the original row count. The win is at a small active
+    //     set; loose caps (≈8×) drive the per-node LP cost up and erase it. Cuts
+    //     are kept globally valid and never removed, so a tight cap is the cheap
+    //     stand-in for SCIP-style aging.
+    let struct_nnz: usize = (0..m_w)
+        .map(|i| (0..ns).filter(|&j| a_w[i * n_w + j] != 0.0).count())
+        .sum();
+    let row_density = struct_nnz as f64 / (m_w.max(1) * ns.max(1)) as f64;
+    const NODE_CUT_MAX_DENSITY: f64 = 0.5;
+    let node_cuts_on = opts.node_cuts && row_density < NODE_CUT_MAX_DENSITY;
+    let node_cut_cap = (2 * n_orig_rows).min(opts.max_pool_cuts);
+
     // Absolute wall-clock deadline for the whole solve (root cuts + B&B),
     // computed up front so even the root-cut LP solves below honour it. The
     // simplex options carry it into every primal/dual loop, so a single
@@ -455,7 +477,7 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
                 sb_active,
                 inc_snapshot: tm.incumbent().map(|(_, inc)| inc),
                 reliability: tm.get_reliability_threshold(),
-                pool_room: pool_sigs.len() < opts.max_pool_cuts,
+                pool_room: node_cuts_on && pool_sigs.len() < node_cut_cap,
                 root_warm_basis: root_warm_basis.as_ref(),
                 deadline,
                 tm: &tm,
@@ -530,12 +552,8 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
             }
             // Dedup this node's cuts against the shared pool *in order*, with the
             // same room check the serial path applied, so the pool is identical.
-            if !out.found_cuts.is_empty() && pool_sigs.len() < opts.max_pool_cuts {
-                pending_cuts.extend(dedup_new_cuts(
-                    out.found_cuts,
-                    &mut pool_sigs,
-                    opts.max_pool_cuts,
-                ));
+            if !out.found_cuts.is_empty() && pool_sigs.len() < node_cut_cap {
+                pending_cuts.extend(dedup_new_cuts(out.found_cuts, &mut pool_sigs, node_cut_cap));
             }
             results.push(out.result);
         }
@@ -988,7 +1006,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
             // Node-level cover separation: a fractional node exposes violated
             // covers the root never sees. These are globally valid; the reduce
             // dedups them into the shared pool to tighten the whole tree.
-            if ctx.opts.node_cuts && !feasible && ctx.pool_room && !time_up {
+            if !feasible && ctx.pool_room && !time_up {
                 let _t = crate::profile::Timer::new(crate::profile::Phase::SepCover);
                 out.found_cuts = separate_cover(
                     &node_lp,
