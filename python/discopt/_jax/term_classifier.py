@@ -634,7 +634,8 @@ def _classify_nonlinear_terms_rust(model: Model) -> NonlinearTerms | None:
         return None
 
     try:
-        payload = model_to_repr(model).classify_nonlinear_terms()
+        repr = model_to_repr(model)
+        payload = repr.classify_nonlinear_terms()
     except Exception:
         return None
 
@@ -643,7 +644,41 @@ def _classify_nonlinear_terms_rust(model: Model) -> NonlinearTerms | None:
     if int(payload.get("general_nl_count", 0)) != 0:
         return None
 
-    return _terms_from_rust_payload(payload)
+    terms = _terms_from_rust_payload(payload)
+
+    # Cross-check against the authoritative degree analysis. The Rust term
+    # classifier has blind spots — a power/product over a *non-variable* base
+    # (e.g. fac2's ``(x36+…+x41)**2.5``) is not categorised and reports zero
+    # general_nl. If the model is provably *not* linear (objective or some
+    # constraint has degree > 1 per ``max_degree``) yet the payload caught no
+    # terms at all, the classification is incomplete: defer to the thorough
+    # Python walk, which records the term in ``general_nl`` so the relaxation
+    # builder and the simplex engine guard both see it.
+    if not _terms_are_empty(terms):
+        return terms
+    try:
+        fully_linear = repr.is_objective_linear() and all(
+            repr.is_constraint_linear(i) for i in range(repr.n_constraints)
+        )
+    except Exception:
+        return None
+    if not fully_linear:
+        return None  # nonlinear but nothing catalogued → Python path
+    return terms
+
+
+def _terms_are_empty(terms: NonlinearTerms) -> bool:
+    """True if no nonlinear term of any category was recorded."""
+    return not (
+        terms.bilinear
+        or terms.trilinear
+        or terms.multilinear
+        or terms.monomial
+        or terms.fractional_power
+        or terms.bilinear_with_fp
+        or terms.ratio_of_products
+        or terms.general_nl
+    )
 
 
 def _terms_from_rust_payload(payload: dict[str, Any]) -> NonlinearTerms:
@@ -789,7 +824,21 @@ def _classify_nonlinear_terms_python(model: Model) -> NonlinearTerms:
                         _record_fractional_power(flat, exp_val)
                         result.general_nl.append(expr)
                         return
-                # Recurse for complex bases
+                # Power whose base is NOT a single variable (or whose exponent is
+                # not constant). Anything other than a variable-free constant power
+                # or a degree-1 passthrough is genuinely nonlinear and would be
+                # SILENTLY DROPPED by the linear projection (extract_lp_data),
+                # making the simplex engine certify a wrong 'optimal' — e.g. fac2's
+                # ``(x36+…+x41)**2.5`` objective (carton7/#286 class). Flag it as
+                # general_nl so the engine guard defers and the relaxation lifts it.
+                exp_const = _ratio_fold_const(expr.right)
+                whole_is_const = _ratio_fold_const(expr.left) is not None and exp_const is not None
+                if whole_is_const:
+                    return  # variable-free → folds to a constant
+                if exp_const is not None and exp_const == 1.0:
+                    _classify_node(expr.left)  # base**1 == base (linear iff base is)
+                    return
+                result.general_nl.append(expr)
                 _classify_node(expr.left)
                 _classify_node(expr.right)
                 return
@@ -846,7 +895,15 @@ def _classify_nonlinear_terms_python(model: Model) -> NonlinearTerms:
                     _classify_node(expr.left)
                     _classify_node(expr.right)
                     return
-                # If product decomposition failed, recurse on children
+                # Product decomposition failed. A product of two non-constant
+                # sub-expressions — e.g. (x+y)*(z+w) or (x+y)*z — is nonlinear and
+                # would be silently dropped by the linear projection; flag it.
+                # If either side folds to a constant the product is just linear
+                # scaling, so only recurse (the existing behaviour).
+                left_const = _ratio_fold_const(expr.left) is not None
+                right_const = _ratio_fold_const(expr.right) is not None
+                if not left_const and not right_const:
+                    result.general_nl.append(expr)
                 _classify_node(expr.left)
                 _classify_node(expr.right)
                 return

@@ -1,6 +1,31 @@
+---
+description: Design optimal experiments with discopt — check identifiability, explore the design space, and recommend D/A/E-optimal conditions for a model with unknown parameters. Supports sequential/active-learning DoE. Use to decide which experiments to run next; use /estimate to fit parameters from data.
+argument-hint: '[model + design vars + nominal params, e.g. "y=A*exp(-Ea/(R*T)) design T in [300,500]"]'
+allowed-tools: Read, Grep, Glob, Bash, Write
+---
+
 # DoE: Optimal Design of Experiments
 
 You are a design of experiments assistant for discopt. Given a model with unknown parameters, you use the `discopt.doe` module to analyze identifiability, explore the design space, and recommend optimal experimental conditions.
+
+## Two entry points
+
+- **Python API** (`discopt.doe`) — full programmatic control; the workflow below.
+- **Workbook CLI** (`discopt doe ...`) — Excel-driven campaigns, ideal when the
+  user runs real experiments and records results in a spreadsheet:
+  ```bash
+  discopt doe templates                       # list built-in design templates
+  discopt doe new response-surface-2d -o c.xlsx --input T:300:500 --input P:1:5 --n 8
+  discopt doe status c.xlsx                    # campaign state + suggested next step
+  discopt doe fit c.xlsx                       # estimate params from completed runs
+  discopt doe extend c.xlsx --n 4              # append optimal runs using cumulative FIM
+  discopt doe anova c.xlsx                     # ANOVA for Latin-family designs
+  discopt doe optimize c.xlsx --batch-size 4  # one active-learning round (surrogate + acquisition)
+  discopt doe gui c.xlsx                       # Streamlit GUI (needs discopt[doe-gui])
+  ```
+  Recommend the CLI when the user mentions a spreadsheet/workbook, a screening
+  design (factorial, Latin square, response surface, mixture/Scheffé), or
+  active-learning/Bayesian optimization rounds.
 
 ## Arguments
 

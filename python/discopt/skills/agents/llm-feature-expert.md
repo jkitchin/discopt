@@ -87,7 +87,12 @@ When **extending** with a new LLM feature:
 4. Never pass raw LLM output into solver-affecting code.
 
 ### Slash-command integration
-The project ships `.claude/commands/formulate.md`, `diagnose.md`, `reformulate.md`, `explain-model.md`, `adversary.md`, `discoptbot.md`, `doe.md`, `estimate.md`, `convert.md`, `benchmark-report.md` — some of these (formulate/diagnose/reformulate/explain-model) call into `discopt.llm` behind the scenes when `llm=True`.
+The package ships these slash commands (`discopt install-skills` → `.claude/commands/`):
+`formulate.md`, `diagnose.md`, `debug.md`, `reformulate.md`, `explain-model.md`,
+`doe.md`, `estimate.md`, `convert.md`, `benchmark-report.md` — some of these
+(formulate/diagnose/reformulate/explain-model) call into `discopt.llm` behind the
+scenes when `llm=True`. (The dev-only `adversary.md` / `discoptbot.md` commands are
+installed separately by `discopt-dev`, not bundled with the package.)
 
 ## Context: Crucible Knowledge Base
 

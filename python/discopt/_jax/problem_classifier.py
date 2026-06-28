@@ -928,6 +928,22 @@ def _extract_lp_data_from_repr(model: Model) -> LPData:
         c_full = -c_full
         obj_at_zero = -obj_at_zero
 
+    # This evaluator reduces each constraint to a single scalar row by probing
+    # the Rust repr at unit vectors. Vector-/matrix-valued constraints (DAE
+    # collocation residuals, `Variable @ Constant` MOL stencils) cannot be
+    # represented that way — `evaluate_constraint` returns NaN for them — so a
+    # non-finite coefficient here means the repr path silently mis-extracted the
+    # model. Decline instead of returning corrupt data: `extract_lp_data` then
+    # falls through to the autodiff path, which expands such constraints into one
+    # row per component. (A NaN reaching the LP solver otherwise crashes/hangs
+    # HiGHS — issue surfaced via test_mol_collocation_solves.)
+    for _name, _arr in (("c", c_full), ("A_eq", A_eq), ("b_eq", b_eq)):
+        if _arr.size and not np.isfinite(_arr).all():
+            raise _NotLinearError(
+                f"repr-based LP extraction produced non-finite {_name}; the model "
+                "has vector-valued constraints that are not scalar-representable"
+            )
+
     return LPData(
         c=np.asarray(c_full),  # type: ignore[arg-type]
         A_eq=np.asarray(A_eq),  # type: ignore[arg-type]
@@ -1001,6 +1017,18 @@ def _extract_qp_data_from_repr(model: Model) -> QPData:
     else:
         Q_full = Q
         c_full = c_vec
+
+    # Maximize → minimize -f: the QP backends always minimize, so negate the
+    # whole quadratic (Q, c, constant). Without this the repr path returns the
+    # raw maximize form — an indefinite Q for a concave-maximize objective — which
+    # the QP solver rejects (and the autodiff fallback would have handled
+    # correctly), silently yielding a wrong optimum. Mirrors the negation in
+    # `_extract_lp_data_from_repr` and `_extract_qp_data_autodiff`. (Surfaced via
+    # test_maximize_objective_sign_not_negated, issue #28.)
+    if repr_.objective_sense == "maximize":
+        Q_full = -Q_full
+        c_full = -c_full
+        d = -d
 
     return QPData(
         Q=np.asarray(Q_full),  # type: ignore[arg-type]

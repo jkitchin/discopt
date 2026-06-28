@@ -406,7 +406,11 @@ pub fn solve_lp_batch_py<'py>(
     ub: PyReadonlyArray2<'py, f64>,
     tol: f64,
     max_iter: usize,
-) -> PyResult<(Vec<String>, Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>)> {
+) -> PyResult<(
+    Vec<String>,
+    Bound<'py, PyArray2<f64>>,
+    Bound<'py, PyArray1<f64>>,
+)> {
     let dims = a.shape();
     let (m, n) = (dims[0], dims[1]);
     let k = b.shape()[0];
@@ -476,8 +480,10 @@ pub fn solve_lp_batch_py<'py>(
 #[pyfunction]
 #[pyo3(signature = (c, a, b, lb, ub, integer_cols, n_struct, obj_const=0.0,
                     max_nodes=1_000_000, gap_tol=1e-6, tol=1e-9, root_cuts=16,
-                    cut_rounds=1, node_cuts=false, max_pool_cuts=128, heuristics=true,
-                    presolve=true, strong_branch=true, sb_max_cands=8, sb_node_budget=128,
+                    cut_rounds=1, gmi_cuts=true, cut_select=false, node_cuts=false,
+                    max_pool_cuts=128, heuristics=true, presolve=true, strong_branch=true,
+                    node_propagation=false, reduced_cost_fixing=true,
+                    sb_max_cands=6, sb_node_budget=48,
                     time_limit_s=0.0))]
 pub fn solve_milp_py<'py>(
     py: Python<'py>,
@@ -494,11 +500,15 @@ pub fn solve_milp_py<'py>(
     tol: f64,
     root_cuts: usize,
     cut_rounds: usize,
+    gmi_cuts: bool,
+    cut_select: bool,
     node_cuts: bool,
     max_pool_cuts: usize,
     heuristics: bool,
     presolve: bool,
     strong_branch: bool,
+    node_propagation: bool,
+    reduced_cost_fixing: bool,
     sb_max_cands: usize,
     sb_node_budget: usize,
     time_limit_s: f64,
@@ -536,11 +546,15 @@ pub fn solve_milp_py<'py>(
         gap_tol,
         root_cuts,
         cut_rounds,
+        gmi_cuts,
+        cut_select,
         node_cuts,
         max_pool_cuts,
         heuristics,
         presolve,
         strong_branch,
+        node_propagation,
+        reduced_cost_fixing,
         sb_max_cands,
         sb_node_budget,
         simplex: SimplexOptions {
@@ -560,7 +574,12 @@ pub fn solve_milp_py<'py>(
             l: &l_owned,
             u: &u_owned,
         };
-        core_solve_milp(&lp, &b_owned, obj_const, &opts)
+        let r = core_solve_milp(&lp, &b_owned, obj_const, &opts);
+        // Emit the per-phase / pivot profile to stderr when DISCOPT_PROFILE is set
+        // (no-op otherwise). solve_milp has returned, so its function-scoped phase
+        // timers have recorded. Engine perf work (issue #332) reads this.
+        discopt_core::profile::dump();
+        r
     });
     let status = match res.status {
         MilpStatus::Optimal => "optimal",

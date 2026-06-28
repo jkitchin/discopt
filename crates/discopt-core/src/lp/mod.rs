@@ -14,6 +14,7 @@
 pub mod basis;
 pub mod cover;
 pub mod crossover;
+pub mod cut_select;
 pub mod gomory;
 pub mod mir;
 pub mod simplex;

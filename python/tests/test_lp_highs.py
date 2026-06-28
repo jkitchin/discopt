@@ -269,6 +269,53 @@ class TestDimensionMismatch:
 
 
 # ---------------------------------------------------------------------------
+# 9b. Non-finite data rejection (issue #342)
+# ---------------------------------------------------------------------------
+class TestNonFiniteRejection:
+    """`solve_lp` must reject NaN/Inf LP data with a clear ValueError instead of
+    handing it to HiGHS, which has no defined behaviour for it (segfault on macOS,
+    unbounded simplex spin on Linux). NaN in the LP extraction reaches here as a
+    real upstream bug; failing loudly beats a native crash. Infinite *bounds* are
+    legitimate (free / one-sided variables and constraints) and must be accepted.
+    """
+
+    def test_nan_objective_rejected(self):
+        with pytest.raises(ValueError, match="non-finite|objective"):
+            solve_lp(c=np.array([1.0, np.nan]), bounds=[(0.0, 1.0), (0.0, 1.0)])
+
+    def test_nan_matrix_rejected(self):
+        with pytest.raises(ValueError, match="non-finite|matrix"):
+            solve_lp(
+                c=np.array([1.0, 1.0]),
+                A_ub=np.array([[1.0, np.nan]]),
+                b_ub=np.array([1.0]),
+            )
+
+    def test_nan_rhs_rejected(self):
+        with pytest.raises(ValueError, match="non-finite|NaN|bound"):
+            solve_lp(
+                c=np.array([1.0, 1.0]),
+                A_eq=np.array([[1.0, 1.0]]),
+                b_eq=np.array([np.nan]),
+            )
+
+    def test_infinite_bounds_accepted(self):
+        """Inf bounds are valid (one-sided variables) — must NOT be rejected.
+
+        min x, x in [0, +inf), s.t. x >= 2 (as -x <= -2). Optimal at x=2; the
+        infinite upper bound passes the guard and the solve succeeds.
+        """
+        result = solve_lp(
+            c=np.array([1.0]),
+            A_ub=np.array([[-1.0]]),
+            b_ub=np.array([-2.0]),
+            bounds=[(0.0, float("inf"))],
+        )
+        assert result.status == SolveStatus.OPTIMAL
+        assert result.x[0] == pytest.approx(2.0, abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
 # 10. Dual values
 # ---------------------------------------------------------------------------
 class TestDualValues:
