@@ -151,6 +151,39 @@ def solve_lp(
     # ---- build constraint matrix ---------------------------------------------
     row_lower, row_upper, csc, m = _build_constraint_matrix(A_ub, b_ub, A_eq, b_eq, n)
 
+    # ---- non-finite guard ----------------------------------------------------
+    # HiGHS has no defined behaviour for NaN in the model: depending on platform
+    # it either crashes (SIGBUS) or spins forever in the simplex (NaN comparisons
+    # never satisfy the termination test, and the time limit check is bypassed),
+    # which manifests as a multi-hour CI hang rather than a failure. A NaN here is
+    # always an upstream modelling/linearisation bug, so fail loudly and
+    # immediately instead of handing undefined data to the native solver. Inf is
+    # legitimate in column bounds (free / one-sided variables) and row bounds
+    # (one-sided constraints), so only NaN is rejected for those; objective and
+    # matrix coefficients must be fully finite.
+    def _reject_nonfinite(name: str, arr: np.ndarray, *, allow_inf: bool) -> None:
+        if arr.size == 0:
+            return
+        bad = ~np.isfinite(arr)
+        if allow_inf:
+            bad &= ~np.isinf(arr)  # keep only NaN
+        if bad.any():
+            k = int(bad.sum())
+            idx = np.argmax(bad)
+            kind = "non-finite" if not allow_inf else "NaN"
+            raise ValueError(
+                f"LP {name} contains {k} {kind} value(s) (first at index {idx}); "
+                "refusing to pass to HiGHS. This indicates an upstream modelling "
+                "or linearisation bug producing NaN/Inf coefficients."
+            )
+
+    _reject_nonfinite("objective (c)", c_arr, allow_inf=False)
+    _reject_nonfinite("column lower bounds", col_lower, allow_inf=True)
+    _reject_nonfinite("column upper bounds", col_upper, allow_inf=True)
+    _reject_nonfinite("row lower bounds", np.asarray(row_lower), allow_inf=True)
+    _reject_nonfinite("row upper bounds", np.asarray(row_upper), allow_inf=True)
+    _reject_nonfinite("constraint matrix", np.asarray(csc.data), allow_inf=False)
+
     # ---- build HighsLp object ------------------------------------------------
     lp = highspy.HighsLp()
     lp.num_col_ = n
