@@ -23,12 +23,14 @@ from __future__ import annotations
 
 import logging
 import time
+import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 import numpy as np
 
 from discopt.modeling.core import Constraint, Model, ObjectiveSense, SolveResult, VarType
+from discopt.solvers.mip_nlp_options import GOA_AMP_ONLY_OPTION_KEYS, GOA_AMP_OPTION_DEFAULTS
 
 if TYPE_CHECKING:
     from discopt._jax.nlp_evaluator import NLPEvaluator
@@ -1807,6 +1809,166 @@ def solve_feasibility_pump(
         mip_count=fp.mip_count,
         gap_certified=False,
     )
+
+
+def solve_goa(
+    model: Model,
+    time_limit: float = 3600.0,
+    gap_tolerance: float = 1e-4,
+    max_iterations: int = 100,
+    nlp_solver: str = "ipm",
+    initial_point: Optional[np.ndarray] = None,
+    add_no_good_cuts: bool = True,
+    **amp_options,
+) -> SolveResult:
+    """Solve a MINLP through the global OA/relaxation stack.
+
+    Convexity-certified MINLPs are handed to the OA algorithm, whose master
+    lower bounds are globally valid in that case. Other models use the
+    AMP/McCormick global-relaxation path. The MIP-NLP feasibility pump, with
+    no-good cuts enabled by default, is only an incumbent-start heuristic for
+    the nonconvex AMP path, so its exclusions never taint certified bounds.
+    AMP-only options are honored on the nonconvex path; if supplied for a model
+    that certifies convex and is handed to OA, they are ignored with a warning.
+    """
+    t_start = time.perf_counter()
+    provided_option_keys = frozenset(amp_options)
+
+    rel_gap = amp_options.pop("rel_gap", gap_tolerance)
+    max_iter = amp_options.pop("max_iter", max_iterations)
+    init_strategy = _normalize_init_strategy(amp_options.pop("init_strategy", "fp"))
+    feasibility_norm = _normalize_feasibility_norm(
+        amp_options.pop("feasibility_norm", "L_infinity")
+    )
+    amp_kwargs = dict(GOA_AMP_OPTION_DEFAULTS)
+    for key in GOA_AMP_OPTION_DEFAULTS:
+        if key in amp_options:
+            amp_kwargs[key] = amp_options.pop(key)
+    use_start_as_incumbent = bool(amp_kwargs["use_start_as_incumbent"])
+    if amp_options:
+        raise ValueError(
+            "Unsupported GOA option(s): "
+            + ", ".join(sorted(amp_options))
+            + ". Pass AMP/global-relaxation options supported by solve_goa."
+        )
+
+    from discopt._jax.convexity import classify_oa_cut_convexity
+
+    oa_convexity = classify_oa_cut_convexity(model)
+    if oa_convexity.objective_is_convex and all(oa_convexity.constraint_mask):
+        ignored_amp_options = sorted(provided_option_keys.intersection(GOA_AMP_ONLY_OPTION_KEYS))
+        if ignored_amp_options:
+            warnings.warn(
+                "GOA routed a convexity-certified model to OA; AMP-only GOA "
+                "option(s) are ignored on this path: " + ", ".join(ignored_amp_options),
+                UserWarning,
+                stacklevel=2,
+            )
+        elapsed = time.perf_counter() - t_start
+        remaining_time = max(0.0, float(time_limit) - elapsed)
+        result = solve_oa(
+            model,
+            time_limit=remaining_time,
+            gap_tolerance=rel_gap,
+            max_iterations=max_iter,
+            nlp_solver=nlp_solver,
+            init_strategy=init_strategy,
+            initial_point=initial_point,
+            add_no_good_cuts=bool(add_no_good_cuts),
+            feasibility_norm=feasibility_norm,
+        )
+        result.wall_time += elapsed
+        return result
+
+    goa_initial_point = initial_point
+    pre_amp_mip_count = 0
+
+    decomp: Optional[_DecomposedProblem] = None
+    if init_strategy in {"fp", "initial_binary", "max_binary"}:
+        decomp = _decompose_model(model)
+
+    if init_strategy == "fp" and decomp is not None and decomp.int_indices:
+        elapsed = time.perf_counter() - t_start
+        remaining = max(0.0, float(time_limit) - elapsed)
+        if np.isfinite(remaining) and np.isfinite(time_limit):
+            pump_budget = min(remaining, max(0.0, 0.1 * float(time_limit)), 10.0)
+        else:
+            pump_budget = 10.0
+        fp_iterations = max(1, min(int(max_iterations) if max_iterations > 0 else 1, 10))
+        if pump_budget > 0.0:
+            fp_result = _run_feasibility_pump(
+                model,
+                decomp,
+                nlp_solver=nlp_solver,
+                initial_point=initial_point,
+                time_limit=pump_budget,
+                gap_tolerance=gap_tolerance,
+                max_iterations=fp_iterations,
+                feasibility_norm=feasibility_norm,
+                add_no_good_cuts=bool(add_no_good_cuts),
+            )
+            pre_amp_mip_count += fp_result.mip_count
+            if fp_result.best_x is not None:
+                goa_initial_point = fp_result.best_x
+                use_start_as_incumbent = True
+            elif fp_result.best_near_x is not None:
+                goa_initial_point = fp_result.best_near_x
+    elif init_strategy in {"initial_binary", "max_binary"} and decomp is not None:
+        goa_initial_point = _build_initial_strategy_point(decomp, init_strategy, initial_point)
+
+    elapsed = time.perf_counter() - t_start
+    remaining_time = max(0.0, float(time_limit) - elapsed)
+    if remaining_time <= 0.0:
+        if goa_initial_point is not None and decomp is not None:
+            candidate = np.asarray(goa_initial_point, dtype=np.float64)
+            if _is_integer_feasible(decomp, candidate) and _is_primal_feasible(
+                decomp.evaluator, candidate
+            ):
+                obj = float(decomp.evaluator.evaluate_objective(candidate))
+                obj_sign = (
+                    -1.0
+                    if (
+                        model._objective is not None
+                        and model._objective.sense == ObjectiveSense.MAXIMIZE
+                    )
+                    else 1.0
+                )
+                return SolveResult(
+                    status="feasible",
+                    objective=obj_sign * obj,
+                    bound=None,
+                    gap=None,
+                    x=_build_x_dict(candidate, model),
+                    wall_time=elapsed,
+                    mip_count=pre_amp_mip_count,
+                    gap_certified=False,
+                )
+        return SolveResult(
+            status="time_limit",
+            objective=None,
+            bound=None,
+            gap=None,
+            x=None,
+            wall_time=elapsed,
+            mip_count=pre_amp_mip_count,
+            gap_certified=False,
+        )
+
+    from discopt.solvers.amp import solve_amp
+
+    amp_kwargs["use_start_as_incumbent"] = use_start_as_incumbent
+    result = solve_amp(
+        model,
+        rel_gap=rel_gap,
+        time_limit=remaining_time,
+        max_iter=max_iter,
+        nlp_solver=nlp_solver,
+        initial_point=goa_initial_point,
+        **amp_kwargs,
+    )
+    result.wall_time += elapsed
+    result.mip_count += pre_amp_mip_count
+    return result
 
 
 # ── Main Algorithm ────────────────────────────────────────────

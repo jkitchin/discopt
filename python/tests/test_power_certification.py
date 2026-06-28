@@ -46,6 +46,31 @@ def test_affine_base_fractional_power_certifies():
     assert r.bound <= 1.0 + 1e-3, "dual bound must not exceed the true optimum"
 
 
+def test_shifted_integer_power_lift_guards():
+    from discopt._jax.milp_relaxation import _should_claim_composite
+
+    m = dm.Model()
+    x = m.continuous("x", lb=-2.0, ub=3.0)
+    n_orig = 1
+
+    assert _should_claim_composite((x - 1.0) ** 4, m, n_orig)
+    assert not _should_claim_composite((x - 1.0) ** 2, m, n_orig)
+    assert not _should_claim_composite(x**4, m, n_orig)
+
+
+def test_affine_power_curvature_guards_crossing_zero_base():
+    from discopt._jax.milp_relaxation import _affine_base_power_curvature
+
+    m = dm.Model()
+    x = m.continuous("x", lb=-2.0, ub=3.0)
+    box = {}
+
+    assert _affine_base_power_curvature((x - 1.0) ** 4, m, box) == "convex"
+    assert _affine_base_power_curvature((x - 1.0) ** 3, m, box) is None
+    assert _affine_base_power_curvature((x - 1.0) ** 1.5, m, box) is None
+    assert _affine_base_power_curvature((x - 1.0) ** (-1.0), m, box) is None
+
+
 @pytest.mark.correctness
 def test_shifted_even_integer_power_certifies():
     """``(x - 1)**4`` uses the composite power lift and certifies soundly."""

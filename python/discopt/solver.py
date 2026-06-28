@@ -2201,7 +2201,7 @@ def solve_model(
         AMP algorithm with Gurobi as the MILP-master subsolver, use
         ``solver="amp", milp_solver="gurobi"``.
         Use ``"mip-nlp"`` to dispatch to the MIP-NLP decomposition family
-        (OA/ECP/FP now; GOA/ROA/LP-NLP-BB are reserved method selectors).
+        (OA/ECP/FP/GOA now; ROA/LP-NLP-BB are reserved method selectors).
         Use ``"gp"`` to dispatch to the geometric-programming fast path:
         the model is checked for GP structure (posynomial/monomial
         objective and constraints over strictly-positive continuous
@@ -2230,7 +2230,7 @@ def solve_model(
     solver="mip-nlp" options
         The MIP-NLP backend accepts ``mip_nlp_method`` and
         ``mip_nlp_options``. Current implemented methods are ``"oa"``,
-        ``"ecp"``, and ``"fp"``; ``"goa"``, ``"roa"``, and ``"lp_nlp_bb"`` raise
+        ``"ecp"``, ``"fp"``, and ``"goa"``; ``"roa"`` and ``"lp_nlp_bb"`` raise
         ``NotImplementedError`` until their dedicated implementations land.
         Existing OA options ``equality_relaxation``, ``ecp_mode``,
         ``feasibility_cuts``, ``heuristic_nonconvex``, ``add_slack``,
@@ -2239,6 +2239,15 @@ def solve_model(
         ``stalling_limit``, ``cycling_check``, and ``milp_solver`` plus
         initialization option ``init_strategy`` may be passed as top-level
         aliases and take precedence over duplicate keys in ``mip_nlp_options``.
+        For ``mip_nlp_method="goa"``, convexity-certified MINLPs use OA's
+        valid master bounds and other models use AMP/global relaxations.
+        AMP options such as ``rel_gap``, ``abs_tol``, ``max_iter``,
+        ``n_init_partitions``, ``partition_method``, ``milp_time_limit``,
+        ``milp_gap_tolerance``, ``presolve_bt``, and
+        ``convhull_formulation`` may also be passed as top-level aliases;
+        AMP-only options apply only on the nonconvex AMP path and are ignored
+        with a warning when GOA automatically hands a convexity-certified model
+        to OA.
         Supported ``add_regularization`` values are ``"level_L1"``,
         ``"level_L2"``, ``"level_L_infinity"``, ``"grad_lag"``,
         ``"hess_lag"``, ``"hess_only_lag"``, and ``"sqp_lag"``.
@@ -2408,6 +2417,7 @@ def solve_model(
         import warnings
 
         from discopt.solvers.mip_nlp import solve_mip_nlp
+        from discopt.solvers.mip_nlp_options import GOA_OPTION_KEYS
 
         mip_nlp_method = kwargs.pop("mip_nlp_method", None)
         mip_nlp_options = kwargs.pop("mip_nlp_options", None)
@@ -2434,6 +2444,16 @@ def solve_model(
                 mip_nlp_kwargs[key] = kwargs.pop(key)
         if mip_nlp_method is None:
             mip_nlp_method = "ecp" if bool(mip_nlp_kwargs.get("ecp_mode", False)) else "oa"
+
+        mip_nlp_method_key = (
+            mip_nlp_method.strip().lower().replace("-", "_")
+            if isinstance(mip_nlp_method, str)
+            else mip_nlp_method
+        )
+        if mip_nlp_method_key == "goa":
+            for key in sorted(GOA_OPTION_KEYS):
+                if key in kwargs:
+                    mip_nlp_kwargs[key] = kwargs.pop(key)
 
         gdp_methods = {"big-m", "hull", "mbigm", "auto"}
         native_gdp_methods = {"loa"}

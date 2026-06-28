@@ -97,6 +97,27 @@ class TestConvexExpressions:
         expr = dm.exp(2.0 * x) * (y ** (-4.0))
         assert classify_expr(expr, m) == Curvature.CONVEX
 
+    def test_exp_affine_times_positive_power_not_classified_convex(self):
+        m = Model("test")
+        x = m.continuous("x", lb=-5, ub=5)
+        y = m.continuous("y", lb=1, ub=10)
+        expr = dm.exp(2.0 * x) * (y**2.0)
+        assert classify_expr(expr, m) != Curvature.CONVEX
+
+    def test_exp_affine_times_power_without_positive_base_not_classified_convex(self):
+        m = Model("test")
+        x = m.continuous("x", lb=-5, ub=5)
+        y = m.continuous("y", lb=-1, ub=10)
+        expr = dm.exp(2.0 * x) * (y ** (-4.0))
+        assert classify_expr(expr, m) != Curvature.CONVEX
+
+    def test_exp_affine_times_nonaffine_reciprocal_not_classified_convex(self):
+        m = Model("test")
+        x = m.continuous("x", lb=-5, ub=5)
+        y = m.continuous("y", lb=-2, ub=2)
+        expr = dm.exp(2.0 * x) * ((y**2 + 1.0) ** (-1.0))
+        assert classify_expr(expr, m) != Curvature.CONVEX
+
     def test_exp_of_convex(self):
         """exp(convex) = convex because exp is convex & nondecreasing."""
         m = Model("test")
