@@ -6585,6 +6585,43 @@ def _solve_nlp_bb(
     _lns_k_schedule = (2, 5, 10)
     _lns_lb_calls = 0
     _lns_deadline = t_start + time_limit
+    # Adaptive cost/benefit governor for the improver-role LNS heuristics, mirrored
+    # from solve_model (see the _improver_allowed/_record_improver pair there). #321
+    # ported the improvers into this path but NOT this governor, so on instances
+    # where LNS never improves (e.g. clay0303hfsg, whose optimum is found early) the
+    # sub-MIPs fired at every node and starved the tree — certified-in-~21 s became a
+    # timeout with no bound (issue #347). The contingent is SCIP heur_subnlp-shaped:
+    # once an incumbent exists an improver may run only if it fits a success-weighted,
+    # node-proportional budget, so improvers that stop paying off shut themselves off.
+    # Soundness is untouched: B&B stays exhaustive, so a skipped improver can only
+    # cost nodes, never a wrong optimum. DISCOPT_HEUR_BUDGET=0 restores always-on.
+    _heur_budget_on = os.environ.get("DISCOPT_HEUR_BUDGET", "1") != "0"
+    _HEUR_BUDGET_OFFSET = float(os.environ.get("DISCOPT_HEUR_OFFSET", "0"))
+    _HEUR_BUDGET_QUOT = float(os.environ.get("DISCOPT_HEUR_QUOT", "0.5"))
+    _HEUR_SUCCESS_GAIN = 3.0
+    _HEUR_COST = {"rins": 5.0, "lbranch": 10.0}
+    _heur_state = {"calls": 0, "found": 0, "cost": 0.0}
+
+    def _improver_allowed(cost: float) -> bool:
+        """Whether an improver-role LNS heuristic costing ``cost`` may run now.
+
+        Never gated before the first incumbent (securing one for pruning wins).
+        Once an incumbent exists the call must fit the success-weighted,
+        node-proportional contingent (SCIP ``heur_subnlp`` shape)."""
+        if not _heur_budget_on or tree.incumbent() is None:
+            return True
+        _nodes = float(tree.stats().get("total_nodes", 0))
+        _weight = _HEUR_SUCCESS_GAIN * (_heur_state["found"] + 1) / (_heur_state["calls"] + 1)
+        _contingent = _HEUR_BUDGET_OFFSET + _HEUR_BUDGET_QUOT * _nodes * _weight
+        return (_heur_state["cost"] + cost) <= _contingent
+
+    def _record_improver(cost: float, improved: bool) -> None:
+        """Charge an improver-role run against the contingent and note success."""
+        _heur_state["calls"] += 1
+        _heur_state["cost"] += cost
+        if improved:
+            _heur_state["found"] += 1
+
     while True:
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
@@ -7023,7 +7060,10 @@ def _solve_nlp_bb(
                     if (
                         _lns_best_idx is not None
                         and (_lns_deadline - time.perf_counter()) > _DEADLINE_NODE_FLOOR_S
+                        and _improver_allowed(_HEUR_COST["rins"])
                     ):
+                        _rins_obj0 = float(_lns_inc[1])
+                        _rins_improved = False
                         try:
                             from discopt._jax.primal_heuristics import rins
 
@@ -7048,14 +7088,20 @@ def _solve_nlp_bb(
                                     )
                                 ):
                                     tree.inject_incumbent(np.asarray(_x_ri).copy(), _obj_ri)
+                                    _rins_improved = _obj_ri < _rins_obj0 - 1e-9
                                     logger.info("NLP-BB LNS RINS incumbent: obj=%.6g", _obj_ri)
                         except Exception as _e:
                             logger.debug("NLP-BB LNS RINS failed: %s", _e)
+                        _record_improver(_HEUR_COST["rins"], _rins_improved)
                     # (2) Local branching — Hamming-ball sub-MIP, escalating k.
-                    if (_lns_deadline - time.perf_counter()) > 1.0:
+                    if (_lns_deadline - time.perf_counter()) > 1.0 and _improver_allowed(
+                        _HEUR_COST["lbranch"]
+                    ):
                         _lb_k = _lns_k_schedule[min(_lns_lb_calls, len(_lns_k_schedule) - 1)]
                         _lns_lb_calls += 1
                         _lb_slice = min(2.0, max(0.5, _lns_deadline - time.perf_counter() - 0.2))
+                        _lb_obj0 = float(_lns_inc[1])
+                        _lb_improved = False
                         try:
                             from discopt._jax.primal_heuristics import local_branching
 
@@ -7083,6 +7129,7 @@ def _solve_nlp_bb(
                                     )
                                 ):
                                     tree.inject_incumbent(np.asarray(_x_lb).copy(), _obj_lb)
+                                    _lb_improved = _obj_lb < _lb_obj0 - 1e-9
                                     logger.info(
                                         "NLP-BB LNS local-branching incumbent: obj=%.6g (k=%d)",
                                         _obj_lb,
@@ -7090,6 +7137,7 @@ def _solve_nlp_bb(
                                     )
                         except Exception as _e:
                             logger.debug("NLP-BB LNS local-branching failed: %s", _e)
+                        _record_improver(_HEUR_COST["lbranch"], _lb_improved)
 
         iteration += 1
 
