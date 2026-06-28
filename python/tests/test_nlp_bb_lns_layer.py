@@ -68,7 +68,31 @@ def test_lns_layer_terminates_and_is_sound(monkeypatch):
         assert r.objective <= 9.0 + 1e-4, f"FALSE-FEASIBLE: {r.objective} > opt 9"
 
 
-if __name__ == "__main__":
-    import pytest
+from pathlib import Path  # noqa: E402
 
+import pytest  # noqa: E402
+from discopt.modeling.core import from_nl  # noqa: E402
+
+_DATA = Path(__file__).parent / "data" / "minlplib_nl"
+_CLAY0303_OPT = 26669.10955143
+
+
+@pytest.mark.slow
+@pytest.mark.requires_pounce
+def test_clay0303hfsg_certifies_with_lns_governor():
+    """Regression for issue #347. The LNS improvement layer wired into
+    `_solve_nlp_bb` by #321 had no cost/benefit governor, so on clay0303hfsg —
+    whose optimum is found early, so LNS never improves — the per-node sub-MIPs
+    starved the tree: a ~21 s certify became a timeout with no dual bound. The
+    governor (ported from `solve_model`) must shut the improvers off so the tree
+    certifies again. Without it this times out at `status='feasible', bound=None`.
+    """
+    r = from_nl(str(_DATA / "clay0303hfsg.nl")).solve(time_limit=90, gap_tolerance=1e-4)
+    assert r.status == "optimal", f"clay0303hfsg did not certify (status={r.status})"
+    assert r.gap_certified, "clay0303hfsg reached optimum but gap was not certified"
+    assert r.bound is not None, "no dual bound — the LNS layer starved the tree (regression)"
+    assert r.objective == pytest.approx(_CLAY0303_OPT, rel=1e-4)
+
+
+if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v", "-s"]))
