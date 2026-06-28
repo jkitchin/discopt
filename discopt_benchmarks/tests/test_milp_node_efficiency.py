@@ -101,6 +101,38 @@ def test_sparse_cut_profile_is_sound():
     assert abs(prod.obj - profile.obj) <= 1e-6 * (1 + abs(prod.obj))
 
 
+def test_node_cuts_sound_gated_and_reduce_sparse_nodes():
+    """Node cuts (Step 10): density-gated cover separation at fractional nodes.
+
+    * Sound everywhere — same proven optimum with cuts on vs off.
+    * Density-gated: on a *dense*-row model the gate suppresses node cuts, so the
+      tree (node count) is identical to off — they cannot bloat dense LPs.
+    * Effective: on a *sparse*-row model they cut the node count.
+    """
+    base = {
+        "root_cuts": 16, "cut_rounds": 1, "max_pool_cuts": 128, "heuristics": True,
+        "presolve": True, "strong_branch": True, "reduced_cost_fixing": True,
+    }
+
+    # Dense rows → density gate suppresses node cuts → identical tree.
+    dense = milp_ne._std_form(milp_ne.gen_mdk(60, 8))
+    d_off = milp_ne.solve_discopt(dense, milp_ne._cfg(**base, node_cuts=False), max_nodes=2_000_000)
+    d_on = milp_ne.solve_discopt(dense, milp_ne._cfg(**base, node_cuts=True), max_nodes=2_000_000)
+    assert d_off.status == "optimal" and d_on.status == "optimal"
+    assert abs(d_off.obj - d_on.obj) <= 1e-6 * (1 + abs(d_off.obj))
+    assert d_on.nodes == d_off.nodes, "density gate should make node cuts inert on dense rows"
+
+    # Sparse rows → node cuts are sound and reduce the node count.
+    sparse = milp_ne._std_form(milp_ne.gen_sparse_mdk(80, 25))
+    cfg_off = milp_ne._cfg(**base, node_cuts=False)
+    cfg_on = milp_ne._cfg(**base, node_cuts=True)
+    s_off = milp_ne.solve_discopt(sparse, cfg_off, max_nodes=2_000_000)
+    s_on = milp_ne.solve_discopt(sparse, cfg_on, max_nodes=2_000_000)
+    assert s_off.status == "optimal" and s_on.status == "optimal"
+    assert abs(s_off.obj - s_on.obj) <= 1e-6 * (1 + abs(s_off.obj))
+    assert s_on.nodes < s_off.nodes, "node cuts should reduce sparse-row node count"
+
+
 def test_engine_proves_optimum_and_root_bounds_are_ordered():
     inst = milp_ne.gen_mdk(30, 5)
     std = milp_ne._std_form(inst)
