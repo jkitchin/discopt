@@ -21,7 +21,8 @@ use crate::lp::basis::{Basis, AT_LOWER, AT_UPPER, BASIC};
 use crate::lp::cover::separate_cover;
 use crate::lp::crossover::LpView;
 use crate::lp::cut_select::select_cuts;
-use crate::lp::gomory::{separate_gomory, solve_dense, GomoryCut};
+use crate::lp::gomory::{separate_gomory, GomoryCut};
+use crate::lp::simplex::linsolve::{FeralLU, LinearSolver};
 use crate::lp::simplex::sparse::SparseCols;
 use crate::lp::simplex::{
     solve_lp, solve_lp_scaled, solve_lp_warm, solve_lp_warm_scaled_csc, tighten_bounds, LpStatus,
@@ -404,6 +405,14 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
         // in this batch (the matrix is constant within a batch). This lifts the
         // per-node `SparseCols::from_dense` O(m·n) rebuild out of the warm solve.
         let csc_batch = SparseCols::from_dense(sa, m_w, n_w);
+        // Reduced-cost fixing needs the *unscaled* duals/reduced costs (the integer
+        // bound fixing reasons in true objective units), so it gets the CSC of the
+        // unscaled working matrix. When the matrix isn't scaled this is exactly
+        // `csc_batch` (no second build); otherwise build it once for the batch.
+        let csc_unscaled_owned = scaling
+            .as_ref()
+            .map(|_| SparseCols::from_dense(&a_w, m_w, n_w));
+        let csc_rc: &SparseCols = csc_unscaled_owned.as_ref().unwrap_or(&csc_batch);
         let sb_active = opts.strong_branch && tm.stats().total_nodes < opts.sb_node_budget;
         let mut results = Vec::with_capacity(batch.node_ids.len());
         let mut pending_cuts: Vec<GomoryCut> = Vec::new();
@@ -431,6 +440,7 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
                 sc,
                 sb,
                 csc: &csc_batch,
+                csc_rc,
                 slack_l: &slack_l,
                 slack_u: &slack_u,
                 is_int: &is_int,
@@ -619,6 +629,13 @@ struct NodeCtx<'a> {
     /// solve. Built from `sa`, so it matches whichever (scaled or raw) matrix the
     /// node solves see.
     csc: &'a SparseCols,
+    /// CSC view of the **unscaled** working matrix `a_w`, for reduced-cost fixing
+    /// (which reasons in true objective units, so it needs unscaled duals/reduced
+    /// costs). Equals `csc` when the matrix isn't scaled. Lets `reduced_cost_fix`
+    /// compute the node duals via the sparse LU (btran, O(nnz)) instead of a dense
+    /// O(m³) refactor — the asymmetry that made it cheap on knapsack but ruinous
+    /// on many-row covering LPs.
+    csc_rc: &'a SparseCols,
     slack_l: &'a [f64],
     slack_u: &'a [f64],
     is_int: &'a [bool],
@@ -914,9 +931,8 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
             // contraction — never touches the node's own valid LP bound.
             if ctx.opts.reduced_cost_fixing && !feasible {
                 if let Some((rl, ru)) = reduced_cost_fix(
-                    ctx.a_w,
+                    ctx.csc_rc,
                     ctx.m_w,
-                    ctx.n_w,
                     ctx.c_w,
                     &sol.basis,
                     sol.obj + ctx.obj_const,
@@ -1193,9 +1209,8 @@ fn strong_branch(
 /// a singular/ill-conditioned basis solve returns `None` (no fixing).
 #[allow(clippy::too_many_arguments)]
 fn reduced_cost_fix(
-    a: &[f64],
+    sp: &SparseCols,
     m: usize,
-    n: usize,
     c: &[f64],
     basis: &Basis,
     node_obj: f64,
@@ -1216,17 +1231,26 @@ fn reduced_cost_fix(
         return None; // node should be pruned anyway; nothing improving here
     }
 
-    // Bᵀ (row-major m×m): row k is basis column basic_vars[k]; rhs is c_B.
-    let mut bt = vec![0.0_f64; m * m];
-    let mut c_b = vec![0.0_f64; m];
-    for (k, &bv) in basis.basic_vars.iter().enumerate() {
-        c_b[k] = c[bv];
-        for i in 0..m {
-            bt[k * m + i] = a[i * n + bv];
-        }
+    // Node duals y = B⁻ᵀ c_B via the *sparse* LU (factorize O(nnz) + btran), the
+    // same path the dual simplex uses — not a dense m×m refactor. The earlier dense
+    // `solve_dense` was O(m³) per node: trivial on few-row knapsacks but ruinous on
+    // 800–1500-row covering LPs, where it dominated the whole solve. The basis is
+    // scaling-invariant and `sp`/`c` are unscaled, so `y` is the unscaled dual the
+    // integer bound fixing needs. A singular basis ⇒ `None` (sound: just no fixing).
+    let mut lu = FeralLU::new();
+    let cols: Vec<Vec<(usize, f64)>> = basis
+        .basic_vars
+        .iter()
+        .map(|&bv| {
+            let (rows, vals) = sp.col(bv);
+            rows.iter().zip(vals).map(|(&r, &v)| (r, v)).collect()
+        })
+        .collect();
+    if lu.factorize_sparse(m, &cols).is_err() {
+        return None;
     }
-    let y = solve_dense(&bt, m, &c_b, tol)?;
-    if !y.iter().all(|v| v.is_finite()) {
+    let mut y: Vec<f64> = basis.basic_vars.iter().map(|&bv| c[bv]).collect();
+    if lu.btran(&mut y).is_err() || !y.iter().all(|v| v.is_finite()) {
         return None;
     }
 
@@ -1237,8 +1261,8 @@ fn reduced_cost_fix(
         if !is_int[j] || basis.col_status[j] == BASIC {
             continue;
         }
-        // Reduced cost d_j = c_j − A_jᵀ y.
-        let dj = c[j] - (0..m).map(|i| a[i * n + j] * y[i]).sum::<f64>();
+        // Reduced cost d_j = c_j − A_jᵀ y (sparse dot over column j's nonzeros).
+        let dj = c[j] - sp.dot(j, &y);
         match basis.col_status[j] {
             x if x == AT_LOWER && dj > tol => {
                 let maxk = (gap / dj).floor();

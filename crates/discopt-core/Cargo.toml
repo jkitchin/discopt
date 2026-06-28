@@ -11,14 +11,14 @@ description = "Core MINLP solver: B&B engine, expression IR, presolve"
 # engine (ftran/btran + product-form column updates) that backs the warm-started
 # simplex node engine for MILP.
 #
-# PINNED to this git rev — do NOT move to the crates.io release (currently 0.11.2)
-# without re-benchmarking sparse MILP. This rev carries the issue-#89 fix
-# (`u_above` reindex, O(m³)→O(m²) on many-row bases) that the published 0.11.x
-# does not. #341 switched to `feral = "0.11"` and silently regressed set-covering
-# from ~3s to a >30s timeout (sc2000/sc4000) — the LU refactor went quadratic→cubic
-# in the row count, invisible on few-row knapsacks but catastrophic on 800–1500-row
-# covering LPs. Re-point at crates.io only once a release includes the #89 fix.
-feral = { git = "https://github.com/jkitchin/feral", rev = "a5c789f92d928446b2373af434268adb800c2f10" }
+# Floor is 0.11.3 — do NOT downgrade below it. 0.11.3 is the first crates.io
+# release carrying the issue-#89 fix (`u_above` reindex, O(m³)→O(m²) on many-row
+# bases). Earlier 0.11.x (≤0.11.2) lack it: #341 used `feral = "0.11"`, picked up
+# 0.11.2, and silently regressed set-covering from ~3s to a >30s timeout
+# (sc2000/sc4000) — the LU refactor went quadratic→cubic in the row count,
+# invisible on few-row knapsacks but catastrophic on 800–1500-row covering LPs.
+# `test_setcover_lp_regression.py` guards against a re-downgrade.
+feral = "0.11.3"
 # rayon: data-parallel iterators. Used (behind the `parallel` feature) to solve
 # the independent per-node LP relaxations of a B&B batch concurrently. Pinned to
 # 1.10 to keep the crate's MSRV (1.75); 1.12+ requires rustc 1.80.
