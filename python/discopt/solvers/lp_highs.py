@@ -71,6 +71,15 @@ def _build_constraint_matrix(
     return row_lower, row_upper, combined, m
 
 
+def _require_finite(name: str, value: Union[np.ndarray, sp.spmatrix]) -> None:
+    if sp.issparse(value):
+        arr = np.asarray(value.data, dtype=np.float64)
+    else:
+        arr = np.asarray(value, dtype=np.float64)
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"{name} contains non-finite values")
+
+
 def solve_lp(
     c: np.ndarray,
     A_ub: Optional[Union[np.ndarray, sp.spmatrix]] = None,
@@ -107,6 +116,7 @@ def solve_lp(
     """
     c_arr = np.asarray(c, dtype=np.float64).ravel()
     n = len(c_arr)
+    _require_finite("c", c_arr)
 
     # ---- validate dimensions ------------------------------------------------
     if A_ub is not None:
@@ -118,6 +128,8 @@ def solve_lp(
         b_ub_arr = np.asarray(b_ub).ravel()
         if b_ub_arr.shape[0] != shape[0]:
             raise ValueError(f"A_ub has {shape[0]} rows but b_ub has {b_ub_arr.shape[0]} elements")
+        _require_finite("A_ub", A_ub)
+        _require_finite("b_ub", b_ub_arr)
     if A_eq is not None:
         shape = A_eq.shape if sp.issparse(A_eq) else np.asarray(A_eq).shape
         if len(shape) != 2 or shape[1] != n:
@@ -127,6 +139,8 @@ def solve_lp(
         b_eq_arr = np.asarray(b_eq).ravel()
         if b_eq_arr.shape[0] != shape[0]:
             raise ValueError(f"A_eq has {shape[0]} rows but b_eq has {b_eq_arr.shape[0]} elements")
+        _require_finite("A_eq", A_eq)
+        _require_finite("b_eq", b_eq_arr)
     if bounds is not None and len(bounds) != n:
         raise ValueError(f"bounds has {len(bounds)} entries but c has {n} elements")
 
@@ -138,6 +152,8 @@ def solve_lp(
     else:
         col_lower = np.zeros(n, dtype=np.float64)
         col_upper = np.full(n, inf, dtype=np.float64)
+    if np.any(np.isnan(col_lower)) or np.any(np.isnan(col_upper)):
+        raise ValueError("bounds contain NaN values")
 
     # Very large finite bounds (~1e19) fall just below HiGHS's internal
     # infinity threshold (~1e20) and can cause numerical issues. Translate

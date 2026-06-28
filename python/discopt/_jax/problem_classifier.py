@@ -116,6 +116,24 @@ class LPData(NamedTuple):
     obj_const: float = 0.0  # constant term in objective
 
 
+def _validate_lp_data(data: LPData) -> LPData:
+    """Reject LP data that is unsafe to pass to native solver backends."""
+    finite_fields = {
+        "c": np.asarray(data.c),
+        "A_eq": np.asarray(data.A_eq),
+        "b_eq": np.asarray(data.b_eq),
+    }
+    for name, arr in finite_fields.items():
+        if not np.all(np.isfinite(arr)):
+            raise _NotLinearError(f"LP extraction produced non-finite {name}.")
+    if not np.isfinite(float(data.obj_const)):
+        raise _NotLinearError("LP extraction produced non-finite objective constant.")
+    for name, arr in (("x_l", np.asarray(data.x_l)), ("x_u", np.asarray(data.x_u))):
+        if np.any(np.isnan(arr)):
+            raise _NotLinearError(f"LP extraction produced NaN {name}.")
+    return data
+
+
 class QPData(NamedTuple):
     """Standard-form QP: min 0.5 x'Qx + c'x + d s.t. A_eq x = b_eq, bounds."""
 
@@ -1170,12 +1188,12 @@ def extract_lp_data(model: Model) -> LPData:
     _builder = getattr(model, "_builder", None)
     if _builder is not None:
         try:
-            return _extract_lp_data_from_repr(model)
+            return _validate_lp_data(_extract_lp_data_from_repr(model))
         except Exception:
             pass
 
     try:
-        return extract_lp_data_algebraic(model)
+        return _validate_lp_data(extract_lp_data_algebraic(model))
     except (_NotLinearError, Exception):
         pass
 
@@ -1185,11 +1203,11 @@ def extract_lp_data(model: Model) -> LPData:
     # algebraic DAG walk can't run — skip the per-primitive eager-JAX autodiff
     # path (orders of magnitude faster on small instances; see #330).
     try:
-        return _extract_lp_data_from_repr(model)
+        return _validate_lp_data(_extract_lp_data_from_repr(model))
     except Exception:
         pass
 
-    return _extract_lp_data_autodiff(model)
+    return _validate_lp_data(_extract_lp_data_autodiff(model))
 
 
 def _extract_lp_data_autodiff(model: Model) -> LPData:

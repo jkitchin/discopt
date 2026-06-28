@@ -267,6 +267,14 @@ class TestDimensionMismatch:
                 A_eq=np.array([[1.0]]),
             )
 
+    def test_non_finite_matrix_rejected_before_highs(self):
+        with pytest.raises(ValueError, match="A_eq contains non-finite values"):
+            solve_lp(
+                c=np.array([1.0]),
+                A_eq=np.array([[np.nan]]),
+                b_eq=np.array([0.0]),
+            )
+
 
 # ---------------------------------------------------------------------------
 # 10. Dual values
