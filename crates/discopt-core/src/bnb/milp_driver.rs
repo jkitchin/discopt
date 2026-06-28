@@ -108,6 +108,8 @@ pub struct MilpOptions {
 /// Solve `min cᵀx + obj_const s.t. A x = b, l ≤ x ≤ u` with `integer_cols`
 /// integer-constrained, by Rust-internal warm-started-simplex branch and bound.
 pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions) -> MilpResult {
+    crate::profile::init_from_env();
+    crate::profile::reset();
     let n = lp.n;
     let ns = opts.n_struct;
     let is_int = {
@@ -202,6 +204,7 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
     // single pass; we stop on the cut cap, when no violated cut is found, or when
     // the bound stops improving (tailing off).
     if opts.root_cuts > 0 {
+        let _t = crate::profile::Timer::new(crate::profile::Phase::RootCutLoop);
         let mut total_cuts = 0usize;
         let mut prev_obj = f64::NEG_INFINITY;
         for _round in 0..opts.cut_rounds {
@@ -216,7 +219,10 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
                 l: &l_w,
                 u: &u_w,
             };
-            let root = solve_lp_root(&root_lp, &b_w, &node_simplex);
+            let root = {
+                let _t = crate::profile::Timer::new(crate::profile::Phase::RootSolve);
+                solve_lp_root(&root_lp, &b_w, &node_simplex)
+            };
             lp_iters += root.iters;
             if root.status != LpStatus::Optimal {
                 break;
@@ -230,23 +236,29 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
 
             // Knapsack cover cuts (sparse, strong on knapsack structure) plus
             // Gomory mixed-integer cuts off the native basis.
-            let mut cuts = separate_cover(
-                &root_lp,
-                &b_w,
-                &root.x,
-                ns,
-                &is_int_full,
-                n_orig_rows,
-                opts.simplex.tol,
-            );
-            cuts.extend(separate_gomory(
-                &root_lp,
-                &b_w,
-                &root.basis,
-                &is_int_full,
-                opts.simplex.tol,
-                1e7,
-            ));
+            let mut cuts = {
+                let _t = crate::profile::Timer::new(crate::profile::Phase::SepCover);
+                separate_cover(
+                    &root_lp,
+                    &b_w,
+                    &root.x,
+                    ns,
+                    &is_int_full,
+                    n_orig_rows,
+                    opts.simplex.tol,
+                )
+            };
+            {
+                let _t = crate::profile::Timer::new(crate::profile::Phase::SepGomory);
+                cuts.extend(separate_gomory(
+                    &root_lp,
+                    &b_w,
+                    &root.basis,
+                    &is_int_full,
+                    opts.simplex.tol,
+                    1e7,
+                ));
+            }
             cuts.truncate(opts.root_cuts - total_cuts);
             let new_cuts = dedup_new_cuts(cuts, &mut pool_sigs, usize::MAX);
             if new_cuts.is_empty() {
@@ -281,6 +293,7 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
     // from inside the simplex loop. Soundness is untouched: those steps only
     // change branching choice / cut tightness / early incumbents, never a
     // bound's validity.
+    let _t_search = crate::profile::Timer::new(crate::profile::Phase::SearchLoop);
     'search: loop {
         if tm.is_finished() || tm.gap() <= opts.gap_tol {
             break;
@@ -645,6 +658,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
     // heuristic runs there once so its cost (up to n_int warm re-solves) is paid
     // a single time for the whole search.
     let is_root = ctx.tm.node_basis(id).is_none();
+    let _t_node = crate::profile::Timer::new(crate::profile::Phase::NodeLpSolve);
     let mut sol = match ctx.tm.node_basis(id) {
         Some(basis) => {
             let basis = extend_basis(basis, ctx.n_w);
@@ -671,6 +685,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
     if let Some(s) = ctx.scaling {
         s.unscale_x(&mut sol.x);
     }
+    drop(_t_node);
     let sol = sol;
 
     let mut out = NodeOutput {
@@ -733,6 +748,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                 // only at the root (when rounding found nothing) so its cost is
                 // bounded; the warm-started search + cuts take over thereafter.
                 if out.incumbent.is_none() && is_root {
+                    let _t = crate::profile::Timer::new(crate::profile::Phase::DiveRepair);
                     out.incumbent = try_dive_repair(ctx, lb_k, ub_k, &sol.x, &sol.basis);
                 }
             }
@@ -740,6 +756,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
             // covers the root never sees. These are globally valid; the reduce
             // dedups them into the shared pool to tighten the whole tree.
             if ctx.opts.node_cuts && !feasible && ctx.pool_room && !time_up {
+                let _t = crate::profile::Timer::new(crate::profile::Phase::SepCover);
                 out.found_cuts = separate_cover(
                     &node_lp,
                     ctx.b_w,
@@ -762,6 +779,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                     .map(|inc| node_bound >= inc - 1e-9)
                     .unwrap_or(false);
                 if !prunable {
+                    let _t = crate::profile::Timer::new(crate::profile::Phase::StrongBranch);
                     let cands = ctx.tm.score_candidates(xs);
                     let (best, piv) =
                         strong_branch(ctx, &full_l, &full_u, &sol.basis, &sol.x, sol.obj, &cands);
@@ -942,6 +960,7 @@ fn augment_with_cuts(
     if k == 0 {
         return (m_w, n_w);
     }
+    let _t = crate::profile::Timer::new(crate::profile::Phase::Augment);
     let (m_old, n_old) = (m_w, n_w);
     let (m_new, n_new) = (m_old + k, n_old + k);
     let mut a_new = vec![0.0; m_new * n_new];
