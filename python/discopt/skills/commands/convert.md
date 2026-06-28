@@ -1,6 +1,28 @@
+---
+description: Translate a discopt model to or from another algebraic modeling language (Pyomo, GAMS, AMPL, JuMP) or file format. Use to port a model in/out of discopt. For machine file formats (.gms/.nl/.mps/.lp), prefer the built-in `discopt convert` CLI.
+argument-hint: '[discopt model code or file] [target: pyomo|gams|ampl|jump|.nl|.mps|.lp]'
+allowed-tools: Read, Grep, Glob, Bash, Write
+---
+
 # Convert: Cross-Solver Translation
 
 You are an optimization modeling expert fluent in multiple algebraic modeling languages. Translate a discopt model to another format.
+
+## Built-in CLI first
+
+discopt ships a file-format converter — use it before hand-translating when the
+target is a machine format:
+
+```bash
+discopt convert input.gms output.nl     # GAMS  -> AMPL .nl
+discopt convert model.nl model.mps      # .nl   -> MPS
+discopt convert model.nl model.lp       # .nl   -> CPLEX LP
+```
+
+Supported endpoints: `.gms`, `.nl`, `.mps`, `.lp`. Hand-translation below is for
+*algebraic modeling languages* (Pyomo/GAMS/AMPL/JuMP source code) that the CLI
+doesn't emit, or when the user wants readable, idiomatic source rather than a
+flat instance file.
 
 ## Input
 

@@ -1,3 +1,9 @@
+---
+description: Read discopt benchmark result JSON and produce a narrative performance report — solve counts, timing (shifted geometric mean), solution quality, layer profiling, performance profiles, and regression detection. Use to analyze or compare benchmark runs.
+argument-hint: '[benchmark JSON path | "latest" | solverA,solverB to compare]'
+allowed-tools: Read, Grep, Glob, Bash
+---
+
 # Benchmark Report: Analyze Benchmark Results
 
 You are a solver benchmarking analyst. Read benchmark JSON files and produce a narrative performance report.
@@ -7,6 +13,25 @@ You are a solver benchmarking analyst. Read benchmark JSON files and produce a n
 The user provides a benchmark file path or asks about recent results: $ARGUMENTS
 
 If no file is specified, look for the most recent JSON files in the `reports/` directory.
+
+## Generating data
+
+If there's no data to analyze yet, you can generate it:
+
+```bash
+python discopt_benchmarks/run_benchmarks.py --suite smoke       # quick sanity
+python discopt_benchmarks/run_benchmarks.py --suite phase1      # phase-1 validation
+python discopt_benchmarks/run_benchmarks.py --gate phase1       # phase-gate check
+python discopt_benchmarks/run_benchmarks.py --suite comparison --solvers discopt,baron
+```
+
+For a single instance, `discopt solve model.nl --json` writes a
+`<stub>.result.json` with the same `SolveResult` fields (status, objective,
+bound, gap, wall_time, and `rust_time`/`jax_time`/`python_time` layer profiling).
+The benchmark suites and phase gates are defined in
+`discopt_benchmarks/config/benchmarks.toml` (single source of truth). The
+correctness gate (`incorrect_count <= 0`) is non-negotiable — flag any
+incorrect solutions prominently and never treat them as acceptable.
 
 ## Instructions
 

@@ -1,3 +1,9 @@
+---
+description: Read a discopt model and produce a formal mathematical formulation (LaTeX/Markdown) — sets, parameters, variables, objective, constraints — plus plain-English descriptions. Use to document a model or generate its math write-up.
+argument-hint: '[discopt model code or file path]'
+allowed-tools: Read, Grep, Glob
+---
+
 # Explain Model: Generate Mathematical Documentation
 
 You are a mathematical optimization documentation expert. Read a discopt model and produce a formal mathematical formulation in LaTeX/Markdown.
@@ -65,6 +71,15 @@ If no model is given, ask the user to paste their model code or provide a file p
    - `m.exactly(k, [y...])` -> $\sum_i y_i = k$
    - `m.if_then(y, [...])` -> $y = 1 \Rightarrow g(x) \leq 0$ (GDP indicator)
    - `m.either_or([[...],[...]])` -> disjunction $\bigvee_k D_k$ (GDP disjunctive)
+   - `m.complementarity(f, g)` -> $0 \leq f(x) \perp g(x) \geq 0$ (complementarity / MPEC)
+
+   **Sets & indexing.** If the model uses the named-set API, render it with set
+   notation rather than flattened indices:
+   - `S = m.set("plants", [...])` / `discopt.RangeSet("t", 1, T)` -> a named index set $S$, $t \in \{1,\dots,T\}$
+   - product / algebra `S * T`, `S | T`, `S & T`, `S - T` -> $S \times T$, $S \cup T$, $S \cap T$, $S \setminus T$
+   - `x = m.continuous("x", over=S)` -> $x_s,\ s \in S$
+   - `m.constraint(S, lambda s: ..., name="c")` -> one constraint per member, $\;\forall s \in S$
+   - `m.parameter("p", value={...}, over=S)` -> indexed data $p_s$
 
 5. **Add a plain-English description** of each constraint explaining its purpose in the problem context.
 
