@@ -1,0 +1,605 @@
+[
+  {
+    "name": "mdk30x5",
+    "n": 30,
+    "m": 5,
+    "opt_value": 902.0,
+    "scip_value": 902.0,
+    "objectives_match": true,
+    "z_lp": -921.4050006978646,
+    "z_opt": -902.0,
+    "discopt_root_bound": -912.570738296488,
+    "discopt_root_gap_closed": 0.4552569999314013,
+    "scip_root_gap_closed": null,
+    "discopt_status": "optimal",
+    "discopt_nodes": 87,
+    "discopt_wall_s": 0.02016805299990665,
+    "scip_status": "optimal",
+    "scip_nodes": 1,
+    "scip_wall_s": 0.09859592199973122,
+    "node_ratio": 87.0,
+    "ablation": {
+      "baseline": {
+        "nodes": 1317,
+        "wall_s": 0.00941678400067758,
+        "status": "optimal"
+      },
+      "presolve": {
+        "nodes": 1317,
+        "wall_s": 0.007864697000513843,
+        "status": "optimal"
+      },
+      "root_cuts": {
+        "nodes": 1415,
+        "wall_s": 0.011545756000487017,
+        "status": "optimal"
+      },
+      "cut_rounds": {
+        "nodes": 1407,
+        "wall_s": 0.11584399799994571,
+        "status": "optimal"
+      },
+      "node_cuts": {
+        "nodes": 1151,
+        "wall_s": 0.2655889389998265,
+        "status": "optimal"
+      },
+      "strong_branch": {
+        "nodes": 1461,
+        "wall_s": 0.010052368999822647,
+        "status": "optimal"
+      },
+      "heuristics": {
+        "nodes": 147,
+        "wall_s": 0.0028431539994926425,
+        "status": "optimal"
+      },
+      "prod": {
+        "nodes": 87,
+        "wall_s": 0.008909889000278781,
+        "status": "optimal"
+      },
+      "full": {
+        "nodes": 59,
+        "wall_s": 0.2810323519997837,
+        "status": "optimal"
+      }
+    }
+  },
+  {
+    "name": "mdk40x5",
+    "n": 40,
+    "m": 5,
+    "opt_value": 1620.0,
+    "scip_value": 1620.0,
+    "objectives_match": true,
+    "z_lp": -1633.4579718815435,
+    "z_opt": -1620.0,
+    "discopt_root_bound": -1628.9893341582952,
+    "discopt_root_gap_closed": 0.33204391884461426,
+    "scip_root_gap_closed": null,
+    "discopt_status": "optimal",
+    "discopt_nodes": 147,
+    "discopt_wall_s": 0.009673756999291072,
+    "scip_status": "optimal",
+    "scip_nodes": 1,
+    "scip_wall_s": 0.012568754000312765,
+    "node_ratio": 147.0,
+    "ablation": {
+      "baseline": {
+        "nodes": 1547,
+        "wall_s": 0.010532154999964405,
+        "status": "optimal"
+      },
+      "presolve": {
+        "nodes": 1547,
+        "wall_s": 0.011345832999722916,
+        "status": "optimal"
+      },
+      "root_cuts": {
+        "nodes": 1287,
+        "wall_s": 0.015788304999659886,
+        "status": "optimal"
+      },
+      "cut_rounds": {
+        "nodes": 769,
+        "wall_s": 0.12435755600017728,
+        "status": "optimal"
+      },
+      "node_cuts": {
+        "nodes": 899,
+        "wall_s": 0.1822258829997736,
+        "status": "optimal"
+      },
+      "strong_branch": {
+        "nodes": 1671,
+        "wall_s": 0.012815944999601925,
+        "status": "optimal"
+      },
+      "heuristics": {
+        "nodes": 191,
+        "wall_s": 0.0035897110001315014,
+        "status": "optimal"
+      },
+      "prod": {
+        "nodes": 147,
+        "wall_s": 0.007341846999224799,
+        "status": "optimal"
+      },
+      "full": {
+        "nodes": 65,
+        "wall_s": 0.23971448300017073,
+        "status": "optimal"
+      }
+    }
+  },
+  {
+    "name": "mdk50x8",
+    "n": 50,
+    "m": 8,
+    "opt_value": 1759.0,
+    "scip_value": 1759.0,
+    "objectives_match": true,
+    "z_lp": -1769.4533140159197,
+    "z_opt": -1759.1438127090303,
+    "discopt_root_bound": -1764.0408682668508,
+    "discopt_root_gap_closed": 0.5249958836953602,
+    "scip_root_gap_closed": null,
+    "discopt_status": "optimal",
+    "discopt_nodes": 61,
+    "discopt_wall_s": 0.009876135000013164,
+    "scip_status": "optimal",
+    "scip_nodes": 1,
+    "scip_wall_s": 0.018984440000167524,
+    "node_ratio": 61.0,
+    "ablation": {
+      "baseline": {
+        "nodes": 131,
+        "wall_s": 0.0022389140003724606,
+        "status": "optimal"
+      },
+      "presolve": {
+        "nodes": 131,
+        "wall_s": 0.0022375260004992015,
+        "status": "optimal"
+      },
+      "root_cuts": {
+        "nodes": 641,
+        "wall_s": 0.009002189000057115,
+        "status": "optimal"
+      },
+      "cut_rounds": {
+        "nodes": 35,
+        "wall_s": 0.058999439000217535,
+        "status": "optimal"
+      },
+      "node_cuts": {
+        "nodes": 255,
+        "wall_s": 0.07207453999944846,
+        "status": "optimal"
+      },
+      "strong_branch": {
+        "nodes": 259,
+        "wall_s": 0.009614794000299298,
+        "status": "optimal"
+      },
+      "heuristics": {
+        "nodes": 41,
+        "wall_s": 0.001671869999881892,
+        "status": "optimal"
+      },
+      "prod": {
+        "nodes": 61,
+        "wall_s": 0.008761052000409109,
+        "status": "optimal"
+      },
+      "full": {
+        "nodes": 35,
+        "wall_s": 0.1817154529999243,
+        "status": "optimal"
+      }
+    }
+  },
+  {
+    "name": "mdk60x8",
+    "n": 60,
+    "m": 8,
+    "opt_value": 2276.0,
+    "scip_value": 2276.0,
+    "objectives_match": true,
+    "z_lp": -2300.1396791063153,
+    "z_opt": -2276.156862745098,
+    "discopt_root_bound": -2294.1902719898844,
+    "discopt_root_gap_closed": 0.24806957726831605,
+    "scip_root_gap_closed": 0.48570000527255147,
+    "discopt_status": "optimal",
+    "discopt_nodes": 497,
+    "discopt_wall_s": 0.03994006600078137,
+    "scip_status": "optimal",
+    "scip_nodes": 27,
+    "scip_wall_s": 0.23276943099972414,
+    "node_ratio": 18.40740740740741,
+    "ablation": {
+      "baseline": {
+        "nodes": 1037,
+        "wall_s": 0.016828265999720315,
+        "status": "optimal"
+      },
+      "presolve": {
+        "nodes": 1037,
+        "wall_s": 0.015163588000177697,
+        "status": "optimal"
+      },
+      "root_cuts": {
+        "nodes": 1221,
+        "wall_s": 0.031798639000044204,
+        "status": "optimal"
+      },
+      "cut_rounds": {
+        "nodes": 1309,
+        "wall_s": 0.292686515999776,
+        "status": "optimal"
+      },
+      "node_cuts": {
+        "nodes": 1095,
+        "wall_s": 0.3884144630001174,
+        "status": "optimal"
+      },
+      "strong_branch": {
+        "nodes": 1997,
+        "wall_s": 0.0445727309997892,
+        "status": "optimal"
+      },
+      "heuristics": {
+        "nodes": 605,
+        "wall_s": 0.012899629999992612,
+        "status": "optimal"
+      },
+      "prod": {
+        "nodes": 497,
+        "wall_s": 0.040965205999782484,
+        "status": "optimal"
+      },
+      "full": {
+        "nodes": 207,
+        "wall_s": 1.323050369000157,
+        "status": "optimal"
+      }
+    }
+  },
+  {
+    "name": "mdk70x10",
+    "n": 70,
+    "m": 10,
+    "opt_value": 2336.0,
+    "scip_value": 2336.0,
+    "objectives_match": true,
+    "z_lp": -2349.740892954023,
+    "z_opt": -2336.2115384615386,
+    "discopt_root_bound": -2346.3775335904043,
+    "discopt_root_gap_closed": 0.24859717922884103,
+    "scip_root_gap_closed": null,
+    "discopt_status": "optimal",
+    "discopt_nodes": 123,
+    "discopt_wall_s": 0.030286444000012125,
+    "scip_status": "optimal",
+    "scip_nodes": 1,
+    "scip_wall_s": 0.2033896430002642,
+    "node_ratio": 123.0,
+    "ablation": {
+      "baseline": {
+        "nodes": 4607,
+        "wall_s": 0.04464997900049639,
+        "status": "optimal"
+      },
+      "presolve": {
+        "nodes": 4607,
+        "wall_s": 0.044151696999506385,
+        "status": "optimal"
+      },
+      "root_cuts": {
+        "nodes": 4607,
+        "wall_s": 0.06331134799984284,
+        "status": "optimal"
+      },
+      "cut_rounds": {
+        "nodes": 3457,
+        "wall_s": 0.39564024199989944,
+        "status": "optimal"
+      },
+      "node_cuts": {
+        "nodes": 4353,
+        "wall_s": 0.736113858999488,
+        "status": "optimal"
+      },
+      "strong_branch": {
+        "nodes": 4869,
+        "wall_s": 0.07515620300000592,
+        "status": "optimal"
+      },
+      "heuristics": {
+        "nodes": 195,
+        "wall_s": 0.00789478600017901,
+        "status": "optimal"
+      },
+      "prod": {
+        "nodes": 123,
+        "wall_s": 0.031705055000202265,
+        "status": "optimal"
+      },
+      "full": {
+        "nodes": 77,
+        "wall_s": 1.6773755619997246,
+        "status": "optimal"
+      }
+    }
+  },
+  {
+    "name": "mdk90x12",
+    "n": 90,
+    "m": 12,
+    "opt_value": 3329.0,
+    "scip_value": 3329.0,
+    "objectives_match": true,
+    "z_lp": -3350.983904146518,
+    "z_opt": -3329.3275862068967,
+    "discopt_root_bound": -3347.9158523776096,
+    "discopt_root_gap_closed": 0.14167005570671143,
+    "scip_root_gap_closed": 0.45867883691198097,
+    "discopt_status": "optimal",
+    "discopt_nodes": 597,
+    "discopt_wall_s": 0.06430285399983404,
+    "scip_status": "optimal",
+    "scip_nodes": 66,
+    "scip_wall_s": 0.2705565589994876,
+    "node_ratio": 9.045454545454545,
+    "ablation": {
+      "baseline": {
+        "nodes": 2311,
+        "wall_s": 0.05555195500073751,
+        "status": "optimal"
+      },
+      "presolve": {
+        "nodes": 2311,
+        "wall_s": 0.056127709999600484,
+        "status": "optimal"
+      },
+      "root_cuts": {
+        "nodes": 2551,
+        "wall_s": 0.10226231799970265,
+        "status": "optimal"
+      },
+      "cut_rounds": {
+        "nodes": 2757,
+        "wall_s": 0.5831198510004469,
+        "status": "optimal"
+      },
+      "node_cuts": {
+        "nodes": 2617,
+        "wall_s": 0.9294211330006874,
+        "status": "optimal"
+      },
+      "strong_branch": {
+        "nodes": 2673,
+        "wall_s": 0.09356483400006255,
+        "status": "optimal"
+      },
+      "heuristics": {
+        "nodes": 673,
+        "wall_s": 0.022229848000279162,
+        "status": "optimal"
+      },
+      "prod": {
+        "nodes": 597,
+        "wall_s": 0.0632662319994779,
+        "status": "optimal"
+      },
+      "full": {
+        "nodes": 435,
+        "wall_s": 1.4228197319998799,
+        "status": "optimal"
+      }
+    }
+  },
+  {
+    "name": "mdk120x15",
+    "n": 120,
+    "m": 15,
+    "opt_value": 4614.0,
+    "scip_value": 4614.0,
+    "objectives_match": true,
+    "z_lp": -4638.867870051714,
+    "z_opt": -4614.422222222222,
+    "discopt_root_bound": -4636.581755473104,
+    "discopt_root_gap_closed": 0.09351826527796402,
+    "scip_root_gap_closed": 0.22366701247500873,
+    "discopt_status": "optimal",
+    "discopt_nodes": 8387,
+    "discopt_wall_s": 0.5264761710004677,
+    "scip_status": "optimal",
+    "scip_nodes": 2330,
+    "scip_wall_s": 3.5545706680004514,
+    "node_ratio": 3.599570815450644,
+    "ablation": {
+      "baseline": {
+        "nodes": 20735,
+        "wall_s": 0.4272369560003426,
+        "status": "optimal"
+      },
+      "presolve": {
+        "nodes": 20735,
+        "wall_s": 0.4137013849995128,
+        "status": "optimal"
+      },
+      "root_cuts": {
+        "nodes": 20585,
+        "wall_s": 0.5729460289994677,
+        "status": "optimal"
+      },
+      "cut_rounds": {
+        "nodes": 21503,
+        "wall_s": 3.0841315410007155,
+        "status": "optimal"
+      },
+      "node_cuts": {
+        "nodes": 19967,
+        "wall_s": 4.572860056000536,
+        "status": "optimal"
+      },
+      "strong_branch": {
+        "nodes": 16895,
+        "wall_s": 0.394019947999368,
+        "status": "optimal"
+      },
+      "heuristics": {
+        "nodes": 10299,
+        "wall_s": 0.3752863720001187,
+        "status": "optimal"
+      },
+      "prod": {
+        "nodes": 8387,
+        "wall_s": 0.5557691149997481,
+        "status": "optimal"
+      },
+      "full": {
+        "nodes": 8415,
+        "wall_s": 8.223682330999509,
+        "status": "optimal"
+      }
+    }
+  },
+  {
+    "name": "mdk150x20",
+    "n": 150,
+    "m": 20,
+    "opt_value": 5635.0,
+    "scip_value": 5635.0,
+    "objectives_match": true,
+    "z_lp": -5655.694469631282,
+    "z_opt": -5635.5625,
+    "discopt_root_bound": -5653.019859722736,
+    "discopt_root_gap_closed": 0.1328538616703375,
+    "scip_root_gap_closed": 0.27079267319593475,
+    "discopt_status": "optimal",
+    "discopt_nodes": 2335,
+    "discopt_wall_s": 0.45962980300009804,
+    "scip_status": "optimal",
+    "scip_nodes": 579,
+    "scip_wall_s": 1.4045395510001981,
+    "node_ratio": 4.032815198618308,
+    "ablation": {
+      "baseline": {
+        "nodes": 10751,
+        "wall_s": 0.3244985440005621,
+        "status": "optimal"
+      },
+      "presolve": {
+        "nodes": 10751,
+        "wall_s": 0.31946150499970827,
+        "status": "optimal"
+      },
+      "root_cuts": {
+        "nodes": 10495,
+        "wall_s": 0.46590783600004215,
+        "status": "optimal"
+      },
+      "cut_rounds": {
+        "nodes": 11007,
+        "wall_s": 2.0253641669996796,
+        "status": "optimal"
+      },
+      "node_cuts": {
+        "nodes": 10497,
+        "wall_s": 3.030416927999795,
+        "status": "optimal"
+      },
+      "strong_branch": {
+        "nodes": 10879,
+        "wall_s": 0.47189505100050155,
+        "status": "optimal"
+      },
+      "heuristics": {
+        "nodes": 3125,
+        "wall_s": 0.1737580250000974,
+        "status": "optimal"
+      },
+      "prod": {
+        "nodes": 2335,
+        "wall_s": 0.4441507109995655,
+        "status": "optimal"
+      },
+      "full": {
+        "nodes": 2333,
+        "wall_s": 5.920453222000106,
+        "status": "optimal"
+      }
+    }
+  },
+  {
+    "name": "mdk200x25",
+    "n": 200,
+    "m": 25,
+    "opt_value": 7397.0,
+    "scip_value": 7397.0,
+    "objectives_match": true,
+    "z_lp": -7428.072227443716,
+    "z_opt": -7397.729502289842,
+    "discopt_root_bound": -7426.548041738406,
+    "discopt_root_gap_closed": 0.050232327438628536,
+    "scip_root_gap_closed": 0.13850453382393388,
+    "discopt_status": "optimal",
+    "discopt_nodes": 27117,
+    "discopt_wall_s": 3.86494973400022,
+    "scip_status": "optimal",
+    "scip_nodes": 12688,
+    "scip_wall_s": 15.99279429499984,
+    "node_ratio": 2.1372162673392183,
+    "ablation": {
+      "baseline": {
+        "nodes": 58885,
+        "wall_s": 2.7846055740001248,
+        "status": "optimal"
+      },
+      "presolve": {
+        "nodes": 58885,
+        "wall_s": 2.8655759709999984,
+        "status": "optimal"
+      },
+      "root_cuts": {
+        "nodes": 57855,
+        "wall_s": 4.185378301000128,
+        "status": "optimal"
+      },
+      "cut_rounds": {
+        "nodes": 57229,
+        "wall_s": 14.305376068999976,
+        "status": "optimal"
+      },
+      "node_cuts": {
+        "nodes": 56833,
+        "wall_s": 23.37694999999985,
+        "status": "optimal"
+      },
+      "strong_branch": {
+        "nodes": 57089,
+        "wall_s": 2.968851943000118,
+        "status": "optimal"
+      },
+      "heuristics": {
+        "nodes": 29451,
+        "wall_s": 2.306871422999393,
+        "status": "optimal"
+      },
+      "prod": {
+        "nodes": 27117,
+        "wall_s": 3.7802202459997716,
+        "status": "optimal"
+      },
+      "full": {
+        "nodes": 28051,
+        "wall_s": 37.75875509300022,
+        "status": "optimal"
+      }
+    }
+  }
+]
