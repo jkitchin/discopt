@@ -57,8 +57,45 @@ INSTANCES: list[OverheadInstance] = [
 ]
 
 
-def run(gap_tolerance: float = 1e-4) -> list[dict]:
-    """Solve every overhead instance and return one result dict per instance."""
+def scip_wall(nl_path: str, time_limit: float, gap_tolerance: float = 1e-4) -> float | None:
+    """Solve a ``.nl`` instance with SCIP (PySCIPOpt) and return its wall time, or
+    ``None`` when PySCIPOpt is not installed. Lets the slowdown ratio be measured
+    on the *same* machine instead of relying on the baked-in #330 reference."""
+    try:
+        from pyscipopt import Model as _ScipModel
+    except Exception:
+        return None
+    import time
+
+    m = _ScipModel()
+    m.hideOutput()
+    m.readProblem(nl_path)
+    m.setRealParam("limits/gap", gap_tolerance)
+    m.setRealParam("limits/time", time_limit)
+    t0 = time.perf_counter()
+    m.optimize()
+    return time.perf_counter() - t0
+
+
+def run(gap_tolerance: float = 1e-4, live_scip: bool = False) -> list[dict]:
+    """Solve every overhead instance and return one result dict per instance.
+
+    When ``live_scip`` is set and PySCIPOpt is installed, the SCIP wall is
+    measured on this machine; otherwise the #330 reference (SCIP 10.0.2) is used.
+    """
+    # Warm the JAX/XLA stack once on a throwaway solve so the first measured
+    # instance is not charged the one-time import + cold-compile cost (which
+    # otherwise shows up as a ~15 s outlier on whichever instance runs first).
+    _first = next(
+        (i for i in INSTANCES if os.path.exists(os.path.join(DATA_DIR, f"{i.name}.nl"))), None
+    )
+    if _first is not None:
+        measure_solve(
+            os.path.join(DATA_DIR, f"{_first.name}.nl"),
+            time_limit=_first.time_limit,
+            gap_tolerance=gap_tolerance,
+        )
+
     rows: list[dict] = []
     for inst in INSTANCES:
         path = os.path.join(DATA_DIR, f"{inst.name}.nl")
@@ -67,11 +104,15 @@ def run(gap_tolerance: float = 1e-4) -> list[dict]:
         rec = measure_solve(path, time_limit=inst.time_limit, gap_tolerance=gap_tolerance)
         wall = rec.wall_time or 0.0
         row = rec.to_json()
-        row["scip_wall"] = inst.scip_wall
+        _scip = None
+        if live_scip:
+            _scip = scip_wall(path, inst.time_limit, gap_tolerance)
+        row["scip_wall"] = inst.scip_wall if _scip is None else _scip
+        row["scip_source"] = "reference" if _scip is None else "live"
         row["rust_pct"] = 100.0 * rec.rust_time / wall if wall else 0.0
         row["jax_pct"] = 100.0 * rec.jax_time / wall if wall else 0.0
         row["python_pct"] = 100.0 * rec.python_time / wall if wall else 0.0
-        row["slowdown_vs_scip"] = wall / inst.scip_wall if inst.scip_wall else None
+        row["slowdown_vs_scip"] = wall / row["scip_wall"] if row["scip_wall"] else None
         rows.append(row)
     return rows
 
@@ -103,10 +144,17 @@ def main() -> int:
     ap.add_argument("--gap", type=float, default=1e-4, help="relative gap tolerance")
     ap.add_argument("--json", type=str, default=None, help="write per-instance records as JSONL")
     ap.add_argument("--no-scip", action="store_true", help="drop the SCIP reference column")
+    ap.add_argument(
+        "--live-scip",
+        action="store_true",
+        help="measure SCIP wall on this machine via PySCIPOpt (else use #330 reference)",
+    )
     args = ap.parse_args()
 
-    rows = run(gap_tolerance=args.gap)
+    rows = run(gap_tolerance=args.gap, live_scip=args.live_scip)
     print(format_table(rows, with_scip=not args.no_scip))
+    if rows and any(r.get("scip_source") == "live" for r in rows):
+        print("(SCIP wall measured live on this machine)")
 
     if args.json:
         with open(args.json, "w") as fh:
