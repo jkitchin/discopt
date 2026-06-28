@@ -203,6 +203,10 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
     // rounds (Gomory's classic approach) tightens the relaxation far more than a
     // single pass; we stop on the cut cap, when no violated cut is found, or when
     // the bound stops improving (tailing off).
+    // Optimal basis from the last successful root-cut solve, with the matrix size
+    // (`n_w`) it was computed at. Reused to warm-start the root B&B node so it does
+    // not re-derive the augmented LP from a cold slack basis. See `root_warm_basis`.
+    let mut root_basis: Option<(Basis, usize)> = None;
     if opts.root_cuts > 0 {
         let _t = crate::profile::Timer::new(crate::profile::Phase::RootCutLoop);
         let mut total_cuts = 0usize;
@@ -227,6 +231,11 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
             if root.status != LpStatus::Optimal {
                 break;
             }
+            // Keep this round's optimal basis for the root B&B node. If the loop
+            // exits now (tailing off / no cuts) it already spans the final matrix;
+            // if more cuts are appended below it is extended to the new size after
+            // the loop. The clone is cheap next to the solve it came from.
+            root_basis = Some((root.basis.clone(), n_w));
             // Tailing off: stop once added cuts barely move the bound.
             if root.obj <= prev_obj + 1e-7 * (1.0 + prev_obj.abs()) && prev_obj > f64::NEG_INFINITY
             {
@@ -282,6 +291,18 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
     }
     let mut slack_l = l_w[ns..].to_vec();
     let mut slack_u = u_w[ns..].to_vec();
+
+    // Extend the kept root basis to the final matrix size: rounds after the last
+    // solve appended cut rows/slacks, and `extend_basis` makes those new slacks
+    // basic (a valid, dual-repairable starting basis). When the last solve already
+    // spanned the final matrix this is a no-op. The root node warm-starts from it.
+    let root_warm_basis: Option<Basis> = root_basis.map(|(b, basis_n)| {
+        if basis_n < n_w {
+            extend_basis(b, n_w)
+        } else {
+            b
+        }
+    });
 
     // `deadline` (computed above, before the root cuts) drives two layers of
     // budget enforcement: the loop-top check below stops *dispatching* new
@@ -372,6 +393,7 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
                 inc_snapshot: tm.incumbent().map(|(_, inc)| inc),
                 reliability: tm.get_reliability_threshold(),
                 pool_room: pool_sigs.len() < opts.max_pool_cuts,
+                root_warm_basis: root_warm_basis.as_ref(),
                 deadline,
                 tm: &tm,
             };
@@ -546,6 +568,12 @@ struct NodeCtx<'a> {
     reliability: u32,
     /// Whether the cut pool had room at batch start (gates separation work).
     pool_room: bool,
+    /// Optimal basis of the (final) root-cut LP, extended to the current matrix
+    /// size. The root B&B node — the only node solved cold — warm-starts from it
+    /// instead of the slack basis, so it pivots in just the few cut rows added
+    /// after the last root solve rather than re-deriving the whole augmented LP.
+    /// `None` when no root cuts ran (then the root falls back to the slack basis).
+    root_warm_basis: Option<&'a Basis>,
     /// Absolute wall-clock deadline. Once passed, each node still computes its
     /// (valid) LP bound but skips the optional rounding heuristic, cover
     /// separation, and strong branching — none of which affect bound validity
@@ -664,23 +692,38 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
             let basis = extend_basis(basis, ctx.n_w);
             solve_lp_warm_scaled(&solve_lp_view, ctx.sb, &basis, ctx.simplex)
         }
-        // The only node solved cold is the root. Try the dual simplex from the
-        // slack basis (built from the unscaled working matrix — scaling-invariant,
-        // dual feasibility preserved) before the cold primal, the same covering-LP
-        // speedup the root-cut loop gets. `solve_lp_warm_scaled` cold-solves if the
-        // slack basis is unavailable or not dual-feasible, so the result is unchanged.
-        None => match dual_slack_basis(
-            ctx.a_w,
-            ctx.m_w,
-            ctx.n_w,
-            ctx.c_w,
-            &full_l,
-            &full_u,
-            ctx.simplex.tol,
-        ) {
-            Some(basis) => solve_lp_warm_scaled(&solve_lp_view, ctx.sb, &basis, ctx.simplex),
-            None => solve_lp_scaled(&solve_lp_view, ctx.sb, ctx.simplex),
-        },
+        // The only node solved cold is the root. Prefer the root-cut loop's own
+        // optimal basis (extended over any cuts added after its last solve): the
+        // augmented LP is already solved there, so the root node just pivots in the
+        // few trailing cut rows instead of re-deriving it. Failing that, try the
+        // dual simplex from the slack basis (built from the unscaled working matrix
+        // — scaling-invariant, dual feasibility preserved) before the cold primal,
+        // the same covering-LP speedup the root-cut loop gets. `solve_lp_warm_scaled`
+        // re-verifies the start basis and cold-solves on any difficulty, so the
+        // optimal objective — hence the node's bound — is identical either way; only
+        // which optimal vertex is reached (and thus branching) can differ, exactly
+        // as the existing slack-basis path already does.
+        None => {
+            if let Some(rb) = ctx.root_warm_basis {
+                let basis = extend_basis(rb.clone(), ctx.n_w);
+                solve_lp_warm_scaled(&solve_lp_view, ctx.sb, &basis, ctx.simplex)
+            } else {
+                match dual_slack_basis(
+                    ctx.a_w,
+                    ctx.m_w,
+                    ctx.n_w,
+                    ctx.c_w,
+                    &full_l,
+                    &full_u,
+                    ctx.simplex.tol,
+                ) {
+                    Some(basis) => {
+                        solve_lp_warm_scaled(&solve_lp_view, ctx.sb, &basis, ctx.simplex)
+                    }
+                    None => solve_lp_scaled(&solve_lp_view, ctx.sb, ctx.simplex),
+                }
+            }
+        }
     };
     if let Some(s) = ctx.scaling {
         s.unscale_x(&mut sol.x);
