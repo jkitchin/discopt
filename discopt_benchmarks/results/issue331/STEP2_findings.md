@@ -1,5 +1,11 @@
 # Issue #331 — Step 2: deepening bounds (cuts / presolve / probing)
 
+> ⚠️ **Premise corrected in `STEP3_correction_branching.md`.** This step assumed
+> the node gap was a weak-bounds problem (the "2–3× less root gap" below was a
+> measurement artifact — see Step 3). The cut/presolve dead-ends documented here
+> are still valid findings, but the *reason they don't help* is that bounds were
+> never the bottleneck: **branching is.** Read Step 3 for the corrected diagnosis.
+
 Step 1 attributed the node gap to **weak bounds** (discopt closes 2–3× less root
 integrality gap than SCIP). Step 2 set out to deepen the weakest lever. This
 documents what was tried, measured, and concluded. **Net result: on the current

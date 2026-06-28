@@ -292,43 +292,65 @@ class ScipRun:
     status: str = "?"
 
 
+def _build_scip(inst: MdkInstance):
+    """Construct the SCIP model for `inst` (max valueᵀx s.t. W x ≤ cap, binary)."""
+    import pyscipopt
+    from pyscipopt import quicksum
+
+    model = pyscipopt.Model(inst.name)
+    model.hideOutput()
+    x = [model.addVar(vtype="B", name=f"x{i}") for i in range(inst.n)]
+    model.setObjective(quicksum(float(inst.values[i]) * x[i] for i in range(inst.n)), "maximize")
+    for j in range(inst.m):
+        model.addCons(
+            quicksum(float(inst.weights[j, i]) * x[i] for i in range(inst.n)) <= float(inst.cap[j])
+        )
+    return model
+
+
+def _scip_root_bound(inst: MdkInstance) -> float | None:
+    """SCIP's dual bound after processing **only the root node** (no restarts).
+
+    Measured apples-to-apples with discopt's root bound: cap the search at one
+    node and disable restarts, so the value is the bound SCIP's root presolve +
+    cut rounds achieve *before branching* — not the post-restart, post-branching
+    figure ``getDualboundRoot()`` reports on a full solve (which re-strengthens
+    the root and inflates the apparent root gap closed).
+    """
+    try:
+        model = _build_scip(inst)
+        model.setParam("presolving/maxrestarts", 0)
+        model.setParam("limits/nodes", 1)
+        model.optimize()
+        return float(model.getDualbound())
+    except Exception:
+        return None
+
+
 def solve_scip(inst: MdkInstance, *, time_limit_s: float = 0.0) -> ScipRun | None:
     """Solve the identical instance with SCIP at default settings.
 
     Built directly from the same ``(W, values, cap)`` data the discopt path uses
     (a literal MPS round-trip would yield the same model), so node counts and
     objectives are an apples-to-apples reference. ``root_dualbound`` is SCIP's
-    dual bound at the root after its own presolve+cuts.
+    *true* root bound (one node, no restarts) — see :func:`_scip_root_bound`.
     """
     try:
-        import pyscipopt
-        from pyscipopt import quicksum
+        import pyscipopt  # noqa: F401
     except Exception:
         return None
 
-    model = pyscipopt.Model(inst.name)
-    model.hideOutput()
+    model = _build_scip(inst)
     if time_limit_s > 0:
         model.setParam("limits/time", float(time_limit_s))
-    x = [model.addVar(vtype="B", name=f"x{i}") for i in range(inst.n)]
-    # SCIP maximizes value (matches the knapsack); we convert signs when comparing.
-    model.setObjective(quicksum(float(inst.values[i]) * x[i] for i in range(inst.n)), "maximize")
-    for j in range(inst.m):
-        model.addCons(
-            quicksum(float(inst.weights[j, i]) * x[i] for i in range(inst.n)) <= float(inst.cap[j])
-        )
     t0 = time.perf_counter()
     model.optimize()
     wall = time.perf_counter() - t0
-    try:
-        root_db = float(model.getDualboundRoot())
-    except Exception:
-        root_db = None
     obj = float(model.getObjVal()) if model.getNSols() > 0 else None
     return ScipRun(
         nodes=int(model.getNNodes()),
         obj=obj,
-        root_dualbound=root_db,
+        root_dualbound=_scip_root_bound(inst),
         wall_s=wall,
         version=_scip_version(),
         status=str(model.getStatus()),

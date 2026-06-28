@@ -1,5 +1,14 @@
 # Issue #331 — Step 1: reproduce & attribute the MILP node gap
 
+> ⚠️ **Superseded conclusion — read `STEP3_correction_branching.md`.** This Step 1
+> writeup attributed the node gap to *weak bounds*, based on a SCIP root-gap number
+> measured with `getDualboundRoot()` on a full solve — which includes SCIP's
+> restarts and so overstated SCIP's root strength ~2×. Corrected, apples-to-apples:
+> discopt's root bound is close to SCIP's, closing the residual difference does not
+> reduce discopt's node count, and **the node gap is driven by branching, not
+> bounds.** The reproduction (node counts, objectives) below is still valid; the
+> *attribution* is corrected in Step 3.
+
 This directory holds the committed output of the node-efficiency micro-bench for
 the pure-MILP simplex engine (`nlp_solver="simplex"` →
 `crates/discopt-core/src/bnb/milp_driver.rs`, exposed as
