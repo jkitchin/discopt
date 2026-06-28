@@ -20,6 +20,7 @@ use crate::bnb::tree_manager::{NodeResult, TreeManager};
 use crate::lp::basis::{Basis, AT_LOWER, AT_UPPER, BASIC};
 use crate::lp::cover::separate_cover;
 use crate::lp::crossover::LpView;
+use crate::lp::cut_select::select_cuts;
 use crate::lp::gomory::{separate_gomory, solve_dense, GomoryCut};
 use crate::lp::simplex::sparse::SparseCols;
 use crate::lp::simplex::{
@@ -30,6 +31,13 @@ use crate::lp::simplex::{
 const INF: f64 = 1e20;
 const INFEAS_SENTINEL: f64 = 1e30;
 const INT_TOL: f64 = 1e-5;
+
+/// Minimum efficacy (normalized violation) for a cut to be worth adding under
+/// cut selection — below this it barely separates the point and only bloats the LP.
+const CUT_MIN_EFFICACY: f64 = 1e-4;
+/// Drop a candidate cut whose direction is more than this parallel (|cos|) to an
+/// already-selected cut — keeps the kept set spanning diverse faces.
+const CUT_MAX_PARALLEL: f64 = 0.99;
 
 /// Terminal status of a MILP solve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +93,13 @@ pub struct MilpOptions {
     pub root_cuts: usize,
     /// Max root cut rounds (separate → re-solve → separate). 1 = single pass.
     pub cut_rounds: usize,
+    /// Apply efficacy + orthogonality cut selection ([`crate::lp::cut_select`])
+    /// to each round's candidate cuts: keep only the strongest, most diverse few
+    /// (up to the remaining `root_cuts` budget) instead of every cut found. With
+    /// a small `root_cuts` cap and many `cut_rounds`, this keeps the active cut
+    /// set small while still iterating — the win on sparse-row MILPs, where cuts
+    /// close the node gap but carrying all of them is too expensive per node.
+    pub cut_select: bool,
     /// Separate globally-valid cover cuts at fractional nodes into a shared pool.
     pub node_cuts: bool,
     /// Cap on the total number of pooled cuts (root + node).
@@ -288,8 +303,16 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
                     1e7,
                 ));
             }
-            cuts.truncate(opts.root_cuts - total_cuts);
-            let new_cuts = dedup_new_cuts(cuts, &mut pool_sigs, usize::MAX);
+            // Keep the strongest, most diverse few (efficacy + orthogonality)
+            // up to the remaining root-cut budget; otherwise add first-come.
+            let remaining = opts.root_cuts - total_cuts;
+            let selected = if opts.cut_select {
+                select_cuts(cuts, &root.x, remaining, CUT_MIN_EFFICACY, CUT_MAX_PARALLEL)
+            } else {
+                cuts.truncate(remaining);
+                cuts
+            };
+            let new_cuts = dedup_new_cuts(selected, &mut pool_sigs, usize::MAX);
             if new_cuts.is_empty() {
                 break;
             }
@@ -1647,6 +1670,7 @@ mod tests {
             gap_tol: 1e-9,
             root_cuts: 16,
             cut_rounds: 3,
+            cut_select: true,
             node_cuts: true,
             max_pool_cuts: 500,
             heuristics: true,
