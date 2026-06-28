@@ -17,13 +17,14 @@ use crate::bnb::branching::VarBranchInfo;
 use crate::bnb::node::NodeId;
 use crate::bnb::pool::SelectionStrategy;
 use crate::bnb::tree_manager::{NodeResult, TreeManager};
-use crate::lp::basis::{Basis, BASIC};
+use crate::lp::basis::{Basis, AT_LOWER, AT_UPPER, BASIC};
 use crate::lp::cover::separate_cover;
 use crate::lp::crossover::LpView;
 use crate::lp::gomory::{separate_gomory, GomoryCut};
+use crate::lp::simplex::sparse::SparseCols;
 use crate::lp::simplex::{
-    solve_lp, solve_lp_scaled, solve_lp_warm_scaled, tighten_bounds, LpStatus, PreparedDual,
-    Scaling, SimplexOptions,
+    solve_lp, solve_lp_scaled, solve_lp_warm, solve_lp_warm_scaled, tighten_bounds, LpStatus,
+    PreparedDual, Scaling, SimplexOptions,
 };
 
 const INF: f64 = 1e20;
@@ -215,7 +216,7 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
                 l: &l_w,
                 u: &u_w,
             };
-            let root = solve_lp(&root_lp, &b_w, &node_simplex);
+            let root = solve_lp_root(&root_lp, &b_w, &node_simplex);
             lp_iters += root.iters;
             if root.status != LpStatus::Optimal {
                 break;
@@ -649,7 +650,23 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
             let basis = extend_basis(basis, ctx.n_w);
             solve_lp_warm_scaled(&solve_lp_view, ctx.sb, &basis, ctx.simplex)
         }
-        None => solve_lp_scaled(&solve_lp_view, ctx.sb, ctx.simplex),
+        // The only node solved cold is the root. Try the dual simplex from the
+        // slack basis (built from the unscaled working matrix — scaling-invariant,
+        // dual feasibility preserved) before the cold primal, the same covering-LP
+        // speedup the root-cut loop gets. `solve_lp_warm_scaled` cold-solves if the
+        // slack basis is unavailable or not dual-feasible, so the result is unchanged.
+        None => match dual_slack_basis(
+            ctx.a_w,
+            ctx.m_w,
+            ctx.n_w,
+            ctx.c_w,
+            &full_l,
+            &full_u,
+            ctx.simplex.tol,
+        ) {
+            Some(basis) => solve_lp_warm_scaled(&solve_lp_view, ctx.sb, &basis, ctx.simplex),
+            None => solve_lp_scaled(&solve_lp_view, ctx.sb, ctx.simplex),
+        },
     };
     if let Some(s) = ctx.scaling {
         s.unscale_x(&mut sol.x);
@@ -716,7 +733,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                 // only at the root (when rounding found nothing) so its cost is
                 // bounded; the warm-started search + cuts take over thereafter.
                 if out.incumbent.is_none() && is_root {
-                    out.incumbent = try_dive_repair(ctx, lb_k, ub_k, &sol.x);
+                    out.incumbent = try_dive_repair(ctx, lb_k, ub_k, &sol.x, &sol.basis);
                 }
             }
             // Node-level cover separation: a fractional node exposes violated
@@ -1102,12 +1119,24 @@ fn try_dive_repair(
     lb_k: &[f64],
     ub_k: &[f64],
     x_start: &[f64],
+    start_basis: &Basis,
 ) -> Option<(Vec<f64>, f64)> {
     let ns = ctx.ns;
     // Structural bounds, progressively fixed; slacks keep their bounds.
     let mut l = lb_k.to_vec();
     let mut u = ub_k.to_vec();
     let mut x = x_start.to_vec();
+    // Warm-start each fix from the previous step's optimal basis: fixing one
+    // integer is a single bound change, exactly the dual-simplex re-optimization
+    // case (a few pivots), versus a cold phase-1/phase-2 solve from scratch per
+    // step. `solve_lp_warm_scaled` falls back to a cold solve on *any* difficulty
+    // (a dual-infeasible/over-updated basis, the iteration cap, the wall-clock
+    // deadline), so the big-M robustness the cold-per-step recipe gave is retained
+    // — the warm path only ever saves time, never changes a result. The dive is a
+    // heuristic, so a (possibly different) warm optimum is just as valid an
+    // incumbent; `inject_incumbent` still enforces strict improvement and the
+    // Python feasibility gate re-checks the point.
+    let mut cur_basis = start_basis.clone();
     let max_steps = ctx.is_int.iter().filter(|&&it| it).count() + 1;
     for _ in 0..max_steps {
         // Most-fractional unfixed integer column.
@@ -1161,9 +1190,11 @@ fn try_dive_repair(
             }
             tried.push(v.to_bits());
             // Re-solve on the batch's shared (pre-scaled, when ill-conditioned)
-            // matrix — the same robust recipe as the node LP solve — then
-            // unscale. Cold per step (≤ n_int total, root-only) is robust on the
-            // ill-conditioned big-M LPs where a warm re-solve can stall.
+            // matrix — the same robust recipe as the node LP solve. Warm-start
+            // from the running basis (one fixed bound → a few dual pivots); the
+            // warm path cold-solves on any difficulty, so this is never less
+            // robust than the old cold-per-step solve, only faster on the common
+            // well-conditioned case.
             let mut full_l = vec![0.0; ctx.n_w];
             let mut full_u = vec![0.0; ctx.n_w];
             full_l[..ns].copy_from_slice(&l);
@@ -1184,13 +1215,15 @@ fn try_dive_repair(
                 l: &sl,
                 u: &su,
             };
-            let mut sol = solve_lp_scaled(&view, ctx.sb, ctx.simplex);
+            let mut sol = solve_lp_warm_scaled(&view, ctx.sb, &cur_basis, ctx.simplex);
             if sol.status == LpStatus::Optimal {
                 if let Some(s) = ctx.scaling {
                     s.unscale_x(&mut sol.x);
                 }
                 l[j] = v;
                 u[j] = v;
+                // Carry this step's optimal basis into the next fix's warm start.
+                cur_basis = sol.basis;
                 next_x = Some(sol.x);
                 break;
             }
@@ -1213,6 +1246,92 @@ fn midpoint(lb: &[f64], ub: &[f64]) -> Vec<f64> {
         .zip(ub)
         .map(|(&l, &u)| 0.5 * (l.clamp(-INF, INF) + u.clamp(-INF, INF)))
         .collect()
+}
+
+/// Build the **slack starting basis** for a standard-form LP: one zero-cost
+/// singleton (slack) column per row, basic; every other column nonbasic at the
+/// bound that makes its `y = 0` reduced cost `d_j = c_j` dual-feasible (lower if
+/// `c_j ≥ 0`, upper if `c_j < 0`). On a covering/packing-style LP this basis is
+/// dual-feasible and primal-infeasible — the dual simplex's home turf, solving it
+/// in a fraction of the cold primal's phase-1+phase-2 pivots.
+///
+/// Returns `None` when a row has no available zero-cost singleton, or a nonbasic
+/// variable can't be made dual-feasible at a *finite* bound (a free variable with
+/// nonzero cost) — the caller then cold-solves. The returned basis is only ever a
+/// *hint*: [`solve_lp_warm`] re-verifies dual feasibility and falls back to the
+/// cold primal if it does not actually hold, so a wrong guess costs one
+/// factorization, never correctness.
+// The nonbasic sweep indexes `c`/`l`/`u`/`col_status` by the same `j`, so a range
+// loop reads clearer than zipping four slices (matches the simplex modules).
+#[allow(clippy::needless_range_loop)]
+fn dual_slack_basis(
+    a: &[f64],
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    tol: f64,
+) -> Option<Basis> {
+    let sp = SparseCols::from_dense(a, m, n);
+    // Assign each row a distinct zero-cost singleton column (a slack).
+    let mut row_basic: Vec<i64> = vec![-1; m];
+    for j in 0..n {
+        if c[j] != 0.0 {
+            continue; // slacks carry no objective cost (keeps y = 0)
+        }
+        let (rows, _vals) = sp.col(j);
+        if rows.len() == 1 {
+            let i = rows[0];
+            if row_basic[i] < 0 {
+                row_basic[i] = j as i64;
+            }
+        }
+    }
+    if row_basic.iter().any(|&x| x < 0) {
+        return None; // some row has no slack (e.g. a pure equality) → cold solve
+    }
+    let mut is_basic = vec![false; n];
+    for &j in &row_basic {
+        is_basic[j as usize] = true;
+    }
+    // Nonbasic columns sit at the dual-feasible bound for d_j = c_j.
+    let mut col_status = vec![AT_LOWER; n];
+    for j in 0..n {
+        if is_basic[j] {
+            col_status[j] = BASIC;
+        } else if c[j] > tol {
+            if l[j] <= -INF {
+                return None; // free var, c_j > 0 → not dual-feasible at a bound
+            }
+            col_status[j] = AT_LOWER;
+        } else if c[j] < -tol {
+            if u[j] >= INF {
+                return None;
+            }
+            col_status[j] = AT_UPPER;
+        } else {
+            // |c_j| ≈ 0: dual-feasible at either bound; prefer a finite one.
+            col_status[j] = if l[j] > -INF { AT_LOWER } else { AT_UPPER };
+        }
+    }
+    let basic_vars: Vec<usize> = row_basic.iter().map(|&j| j as usize).collect();
+    Some(Basis {
+        col_status,
+        basic_vars,
+    })
+}
+
+/// Cold-solve an LP, but try the dual simplex from the [`dual_slack_basis`] first
+/// (a large win on covering/packing relaxations where the cold primal stalls in
+/// degenerate phase-2 pivots). `solve_lp_warm` falls back to the cold primal when
+/// the slack basis is unavailable or not actually dual-feasible, so the result is
+/// always the same optimum — only the path differs.
+fn solve_lp_root(lp: &LpView<'_>, b: &[f64], opts: &SimplexOptions) -> crate::lp::simplex::LpSolve {
+    match dual_slack_basis(lp.a, lp.m, lp.n, lp.c, lp.l, lp.u, opts.tol) {
+        Some(basis) => solve_lp_warm(lp, b, &basis, opts),
+        None => solve_lp(lp, b, opts),
+    }
 }
 
 #[cfg(test)]
