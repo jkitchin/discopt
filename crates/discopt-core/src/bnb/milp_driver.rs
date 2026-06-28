@@ -454,6 +454,13 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
             if let Some(v) = out.branch_hint {
                 tm.set_branch_hint(id, v);
             }
+            // Feed this node's strong-branch probes into the shared pseudocosts,
+            // in batch order, so the reliability mechanism graduates those
+            // variables and stops re-probing them at later nodes. Selection-only:
+            // never affects a bound, so determinism and soundness hold.
+            if !out.sb_observations.is_empty() {
+                tm.record_sb_observations(&out.sb_observations);
+            }
             // Dedup this node's cuts against the shared pool *in order*, with the
             // same room check the serial path applied, so the pool is identical.
             if !out.found_cuts.is_empty() && pool_sigs.len() < opts.max_pool_cuts {
@@ -596,6 +603,12 @@ struct NodeOutput {
     found_cuts: Vec<GomoryCut>,
     /// Strong-branching variable hint.
     branch_hint: Option<usize>,
+    /// Pseudocost samples harvested from the strong-branch probes at this node,
+    /// each `(var, frac, Δobj, is_down)`. Applied to the shared pseudocost tracker
+    /// in the sequential reduce (batch order) so the reliability mechanism can
+    /// graduate these variables and stop re-probing them. Empty when the node did
+    /// no strong branching.
+    sb_observations: Vec<(usize, f64, f64, bool)>,
     /// Simplex pivots spent on this node (LP solve + strong-branch probes).
     iters: usize,
     /// Relaxation was unbounded — the whole search terminates.
@@ -639,6 +652,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
             incumbent: None,
             found_cuts: Vec::new(),
             branch_hint: None,
+            sb_observations: Vec::new(),
             iters: 0,
             unbounded: false,
             uncertified: true,
@@ -742,6 +756,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
         incumbent: None,
         found_cuts: Vec::new(),
         branch_hint: None,
+        sb_observations: Vec::new(),
         iters: sol.iters,
         unbounded: false,
         uncertified: false,
@@ -824,10 +839,11 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                 if !prunable {
                     let _t = crate::profile::Timer::new(crate::profile::Phase::StrongBranch);
                     let cands = ctx.tm.score_candidates(xs);
-                    let (best, piv) =
+                    let (best, piv, sb_obs) =
                         strong_branch(ctx, &full_l, &full_u, &sol.basis, &sol.x, sol.obj, &cands);
                     out.iters += piv;
                     out.branch_hint = best;
+                    out.sb_observations = sb_obs;
                 }
             }
             out.result = NodeResult {
@@ -879,7 +895,7 @@ fn strong_branch(
     x: &[f64],
     node_obj: f64,
     cands: &[(usize, f64, u32, f64)],
-) -> (Option<usize>, usize) {
+) -> (Option<usize>, usize, Vec<(usize, f64, f64, bool)>) {
     let simplex = ctx.simplex;
     // Unreliable candidates, most-fractional (nearest 0.5) first.
     let mut cand: Vec<(usize, f64)> = cands
@@ -888,7 +904,7 @@ fn strong_branch(
         .map(|c| (c.0, c.1))
         .collect();
     if cand.is_empty() {
-        return (None, 0);
+        return (None, 0, Vec::new());
     }
     cand.sort_by(|a, c| {
         (c.1 - 0.5)
@@ -949,9 +965,18 @@ fn strong_branch(
     let mut best: Option<usize> = None;
     let mut best_score = f64::NEG_INFINITY;
     let mut pivots = 0usize;
+    // Exact pseudocost samples harvested from the probes: `(var, frac, Δobj,
+    // is_down)`. Each optimal probe *is* a pseudocost observation (the canonical
+    // reliability-branching feedback); recording them lets a variable reach the
+    // reliability threshold and drop out of strong branching at later nodes,
+    // instead of being re-probed every time it turns up fractional. Infeasible /
+    // non-optimal probes are excluded — a pruned child is a branching signal, not
+    // a finite degradation sample, and feeding it would corrupt the average.
+    let mut obs: Vec<(usize, f64, f64, bool)> = Vec::new();
     for (idx, _f) in cand {
         let xi = x[idx];
         let (lo0, hi0) = (orig_l[idx], orig_u[idx]);
+        let frac = xi - xi.floor();
 
         // Down branch: x_idx ≤ floor(x_idx).
         u[idx] = xi.floor();
@@ -959,7 +984,11 @@ fn strong_branch(
         u[idx] = hi0;
         pivots += dn.iters;
         let d_dn = match dn.status {
-            LpStatus::Optimal => (dn.obj - node_obj).max(0.0),
+            LpStatus::Optimal => {
+                let d = (dn.obj - node_obj).max(0.0);
+                obs.push((idx, frac, d, true));
+                d
+            }
             LpStatus::Infeasible => INFEAS_DELTA,
             _ => 0.0,
         };
@@ -970,7 +999,11 @@ fn strong_branch(
         l[idx] = lo0;
         pivots += up.iters;
         let d_up = match up.status {
-            LpStatus::Optimal => (up.obj - node_obj).max(0.0),
+            LpStatus::Optimal => {
+                let d = (up.obj - node_obj).max(0.0);
+                obs.push((idx, frac, d, false));
+                d
+            }
             LpStatus::Infeasible => INFEAS_DELTA,
             _ => 0.0,
         };
@@ -981,7 +1014,7 @@ fn strong_branch(
             best = Some(idx);
         }
     }
-    (best, pivots)
+    (best, pivots, obs)
 }
 
 /// Append `cuts` (each `coeffs·x ≥ rhs`, coeffs length `n_w`) to the working LP
