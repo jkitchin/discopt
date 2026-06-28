@@ -32,6 +32,8 @@
 
 use super::basis::{Basis, AT_UPPER, BASIC};
 use super::crossover::LpView;
+use super::simplex::linsolve::{FeralLU, LinearSolver};
+use super::simplex::sparse::SparseCols;
 
 /// Tolerance for snapping a refined tableau coefficient to the nearest integer.
 const SNAP_TOL: f64 = 1e-9;
@@ -96,18 +98,36 @@ pub(crate) fn solve_dense(mat: &[f64], n: usize, rhs: &[f64], tol: f64) -> Optio
     Some(x)
 }
 
-/// Solve `mat · x = rhs` with a few rounds of iterative refinement: after an
-/// initial solve, repeatedly solve `mat · δ = rhs − mat·x` and add `δ`, which
-/// drives the residual toward machine precision for a well-conditioned `mat`.
-fn solve_refined(mat: &[f64], n: usize, rhs: &[f64], tol: f64) -> Option<Vec<f64>> {
-    let mut x = solve_dense(mat, n, rhs, tol)?;
+/// Solve `B x = rhs` with iterative refinement, where `B` is the basis whose
+/// columns are `A[:, basis[k]]` (factorized into `lu`) and `sp` is the CSC view
+/// of `A`. The feral factor gives the initial solve; each refinement round
+/// computes the residual `rhs − B x` by a sparse matvec against the basis
+/// columns and corrects with another ftran — the same machine-precision drive
+/// as the dense [`solve_refined`], at O(nnz) per round instead of O(m²). Returns
+/// `None` if the factor solve fails.
+fn ftran_refined(
+    lu: &mut FeralLU,
+    sp: &SparseCols,
+    basis: &[usize],
+    rhs: &[f64],
+    _tol: f64,
+) -> Option<Vec<f64>> {
+    let mut x = rhs.to_vec();
+    lu.ftran(&mut x).ok()?;
     for _ in 0..3 {
+        // r = rhs − B x  (B column k contributes x[k]·A[:, basis[k]]).
         let mut r = rhs.to_vec();
-        for (i, ri) in r.iter_mut().enumerate() {
-            let row: f64 = (0..n).map(|j| mat[i * n + j] * x[j]).sum();
-            *ri -= row;
+        for (k, &bv) in basis.iter().enumerate() {
+            let xk = x[k];
+            if xk != 0.0 {
+                let (rows, vals) = sp.col(bv);
+                for (t, &i) in rows.iter().enumerate() {
+                    r[i] -= vals[t] * xk;
+                }
+            }
         }
-        let dx = solve_dense(mat, n, &r, tol)?;
+        let mut dx = r;
+        lu.ftran(&mut dx).ok()?;
         let mut maxdx = 0.0_f64;
         for (xi, dxi) in x.iter_mut().zip(&dx) {
             *xi += dxi;
@@ -118,6 +138,37 @@ fn solve_refined(mat: &[f64], n: usize, rhs: &[f64], tol: f64) -> Option<Vec<f64
         }
     }
     Some(x)
+}
+
+/// Solve `Bᵀ w = rhs` with iterative refinement (row of `B⁻¹` when `rhs = e_i`).
+/// The residual `rhs − Bᵀ w` is `rhs[k] − w·A[:, basis[k]]`, a sparse column dot
+/// per basis slot. O(nnz) per refinement round; mirrors [`ftran_refined`].
+fn btran_refined(
+    lu: &mut FeralLU,
+    sp: &SparseCols,
+    basis: &[usize],
+    rhs: &[f64],
+    _tol: f64,
+) -> Option<Vec<f64>> {
+    let mut w = rhs.to_vec();
+    lu.btran(&mut w).ok()?;
+    for _ in 0..3 {
+        let mut r = rhs.to_vec();
+        for (k, &bv) in basis.iter().enumerate() {
+            r[k] -= sp.dot(bv, &w);
+        }
+        let mut dw = r;
+        lu.btran(&mut dw).ok()?;
+        let mut maxd = 0.0_f64;
+        for (wi, dwi) in w.iter_mut().zip(&dw) {
+            *wi += dwi;
+            maxd = maxd.max(dwi.abs());
+        }
+        if maxd <= 1e-15 {
+            break;
+        }
+    }
+    Some(w)
 }
 
 /// Separate Gomory mixed-integer cuts from the basis of `lp` (`b` is the
@@ -143,27 +194,34 @@ pub fn separate_gomory(
     if m == 0 {
         return cuts;
     }
+    // A complete row-ordered basis is required to factorize B; a short basis
+    // (degenerate phase-2 artifact the caller could not complete) is unusable —
+    // decline rather than index past it. Matches the old dense path's `None`.
+    if basis.basic_vars.len() != m {
+        return cuts;
+    }
 
-    // B (row-major m×m): column k is basis column basic_vars[k].
-    let bmat: Vec<f64> = {
-        let mut v = vec![0.0_f64; m * m];
-        for i in 0..m {
-            for (k, &bv) in basis.basic_vars.iter().enumerate() {
-                v[i * m + k] = a[i * n + bv];
-            }
-        }
-        v
-    };
-    // Bᵀ (row-major m×m): row r is basis column basic_vars[r].
-    let bt: Vec<f64> = {
-        let mut v = vec![0.0_f64; m * m];
-        for (r, &bv) in basis.basic_vars.iter().enumerate() {
-            for c in 0..m {
-                v[r * m + c] = a[c * n + bv];
-            }
-        }
-        v
-    };
+    // CSC view of the constraint matrix: column access `A[:,j]` in O(nnz_j),
+    // replacing the dense O(m·n) scans the bmat/bt build and the ā_j dot used to
+    // pay per cut. The basis factorization comes from feral's sparse LU
+    // (`B = A[:, basic_vars]`), so `x_B = B⁻¹(b − A_N x_N)` and each tableau row
+    // `B⁻ᵀ e_i` are a single ftran/btran instead of an O(m³) dense Gaussian
+    // solve — the dense `solve_dense`/`solve_refined` path was the dominant root
+    // cost on sparse models. Iterative refinement (the GMI soundness measure) is
+    // preserved exactly, now driven by sparse matvecs against the same factor.
+    let sp = SparseCols::from_dense(a, m, n);
+    let mut lu = FeralLU::new();
+    let bcols: Vec<Vec<(usize, f64)>> = basis
+        .basic_vars
+        .iter()
+        .map(|&bv| {
+            let (rows, vals) = sp.col(bv);
+            rows.iter().zip(vals).map(|(&r, &v)| (r, v)).collect()
+        })
+        .collect();
+    if lu.factorize_sparse(m, &bcols).is_err() {
+        return cuts; // singular basis → no cuts (as the dense solve's None did)
+    }
 
     // Reconstruct the vertex exactly: nonbasic at bounds, x_B = B⁻¹(b − A_N x_N).
     let mut rhs_b = b.to_vec();
@@ -177,12 +235,13 @@ pub fn separate_gomory(
             l[j]
         };
         if val != 0.0 {
-            for (i, ri) in rhs_b.iter_mut().enumerate() {
-                *ri -= a[i * n + j] * val;
+            let (rows, vals) = sp.col(j);
+            for (k, &i) in rows.iter().enumerate() {
+                rhs_b[i] -= vals[k] * val;
             }
         }
     }
-    let xb = match solve_refined(&bmat, m, &rhs_b, tol) {
+    let xb = match ftran_refined(&mut lu, &sp, &basis.basic_vars, &rhs_b, tol) {
         Some(xb) => xb,
         None => return cuts,
     };
@@ -196,10 +255,10 @@ pub fn separate_gomory(
             continue; // integral, or too close to integral for a safe cut
         }
 
-        // Row i of B⁻¹: refined solve of Bᵀ w = e_i.
+        // Row i of B⁻¹: refined solve of Bᵀ w = e_i (one btran + refinement).
         let mut e_i = vec![0.0_f64; m];
         e_i[i] = 1.0;
-        let w = match solve_refined(&bt, m, &e_i, tol) {
+        let w = match btran_refined(&mut lu, &sp, &basis.basic_vars, &e_i, tol) {
             Some(w) => w,
             None => continue,
         };
@@ -216,7 +275,8 @@ pub fn separate_gomory(
             }
             // ā_j = w · A[:,j], snapped to the nearest integer when very close
             // (the refined value is accurate, so this only removes ulp noise).
-            let mut abar: f64 = (0..m).map(|r| w[r] * a[r * n + j]).sum();
+            // Sparse dot over column j's nonzeros (was an O(m) dense scan per j).
+            let mut abar: f64 = sp.dot(j, &w);
             if (abar - abar.round()).abs() < SNAP_TOL {
                 abar = abar.round();
             }
@@ -475,7 +535,10 @@ mod tests {
 
         let cuts = separate_gomory(&lp, &b, &basis, &integrality, 1e-7, 1e9);
         for cut in &cuts {
-            assert!(dot(&cut.coeffs, &x) < cut.rhs - 1e-6, "cut must separate vertex");
+            assert!(
+                dot(&cut.coeffs, &x) < cut.rhs - 1e-6,
+                "cut must separate vertex"
+            );
             // Feasible integer points: x1 integer ≥ 0.5 → x1 ∈ {1, 2}.
             for x0i in 0..=2 {
                 for x1i in 1..=2 {
