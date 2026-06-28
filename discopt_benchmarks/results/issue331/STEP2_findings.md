@@ -8,6 +8,12 @@ criterion (≤3× SCIP nodes *and* wall-time parity) on these instances — the
 payoff is gated on the sparse LP data layer (Regime C).** No solver-core change
 ships from Step 2; the evidence redirects the work.
 
+> **Post-rebase update (§5): Regime C (#334) has since landed and this branch was
+> rebased onto it. Re-evaluated — the dense knapsack picture is unchanged, and on
+> sparse instances cuts now reduce *nodes* but the *wall* trade is still negative.
+> The "gated on Regime C" hope did not flip the wall trade; see §5 for the
+> sharper conclusion.**
+
 All numbers are from `discopt_benchmarks/perf/milp_node_efficiency.py` driving
 `solve_milp_py` directly (SCIP 10.0 via pyscipopt 6.2.1, feral 0.11, single host).
 
@@ -106,3 +112,54 @@ same `gen_mdk` instances (weights `W`, capacities `cap` from
 `milp_node_efficiency.gen_mdk`); they are described here rather than committed as
 scripts because they are throwaway confirmations, not part of the regression
 bench.
+
+## 5. Post-rebase re-evaluation — Regime C (#334) landed
+
+This branch was rebased onto `main` after **#334 (sparse-fast pure-MILP simplex
+engine)** and **#333 (per-solve overhead fix)** merged. Step 2 predicted that
+landing the sparse LP layer would unlock cuts. Re-running on the rebased engine
+**partly confirms and partly refutes that** — the prediction was right that the
+*node* effect of cuts is real, and wrong that it would flip the *wall* trade.
+
+**Dense knapsack bench — unchanged.** Node counts, root gaps, and wall times are
+identical to the pre-rebase tables (e.g. mdk200x25: 27 117 nodes either way).
+#334 targets *sparse* problems; multidimensional knapsack rows are dense, so the
+engine swap is a no-op here. The committed §1–§4 results stand verbatim.
+
+**Sparse-row knapsacks (each row ~25% dense) — the regime that matters for
+scaling.** Here the picture is different and more informative:
+
+* More cut rounds **do** reduce nodes substantially — 26–85% on solvable
+  instances (`n50xm15`: 571 → 83 nodes; `n80xm25`: 74 669 → 55 475). The bound
+  work is real.
+* But to optimality they **still cost ~2–3× wall** (`n70xm20`: 1.58 s → 5.10 s
+  for −38% nodes). The wall trade is negative even with the sparse engine.
+
+**Why — and where the cost actually is (measured):**
+
+* The root cut loop is only **1–3%** of total wall (it cold-re-solves the growing
+  LP each round, but that is negligible), so warm-starting it would not help.
+* The cost is that **every B&B node then carries the extra cut rows**: adding 64
+  cuts makes each node's LP ~5× slower, which outweighs the ~50% node reduction.
+* Sweeping modest budgets (8–24 cuts, 2–3 rounds) gives **noisy, break-even**
+  wall results and sometimes *more* nodes — no configuration robustly beats the
+  1-round production default on both nodes and wall.
+
+**Sharper conclusion.** With Regime C landed, the bottleneck is no longer "LP
+re-solves are slow" — it is **bound-per-cut-row**. Cuts win on wall only if a
+*handful* of cuts closes most of the gap (small per-node bloat), and discopt's
+separators are too weak for that (they plateau at ~65% of SCIP's closed gap; §1).
+So the genuine levers, in order, are now:
+
+1. **Stronger cut *separation*** (match SCIP's lifted-cover / clique / GUB-cover
+   strength) so few rows close much gap — the only path to cuts that pay on wall.
+   Large, uncertain, but it is the real frontier.
+2. **Cheaper carrying of cut rows at nodes** (e.g. only enforce cuts where they
+   bind, or keep them in a separate sparse block) — an engine-architecture change
+   that would flip the wall trade for the cuts discopt already finds.
+3. Cut *quantity* / extra rounds / single-row MIR / FBBT-probing are **not** the
+   lever (measured inert or wall-negative, before and after #334).
+
+Net: even with the sparse layer in, discopt is near its achievable frontier on
+these knapsacks via cheap nodes; closing the remaining gap to SCIP needs
+separation *strength* or cheaper cut-carrying, not more cuts.
