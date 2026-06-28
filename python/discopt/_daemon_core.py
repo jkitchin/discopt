@@ -15,6 +15,7 @@ auto-spawn with in-process fallback -- is generic and lives here.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import signal
@@ -113,6 +114,33 @@ def socket_path_for(env_var: str, basename: str) -> Path:
 
 def _pid_path(socket_path: Path) -> Path:
     return socket_path.with_suffix(socket_path.suffix + ".pid")
+
+
+# AF_UNIX socket paths are limited to ~104 bytes on macOS and ~108 on Linux.
+# A deep ``TMPDIR`` (sandboxed CI runners, scratch dirs, pytest ``tmp_path``
+# nested under a long base) can push a logical socket path past that limit, so
+# ``bind()``/``connect()`` fail with "AF_UNIX path too long". When that happens,
+# fall back to a short, deterministic address under a guaranteed-short base dir,
+# derived from a hash of the absolute logical path so the server and every client
+# resolve to the same address with no coordination. The logical ``socket_path`` is
+# still used for the pid file and existence checks (regular files have no such
+# limit), so the daemon's identity and discovery are unchanged.
+_AF_UNIX_MAX = 100  # conservative headroom below the 104/108 platform limits
+
+
+def _bind_address(socket_path: Path) -> str:
+    """Filesystem address to ``bind``/``connect`` for ``socket_path``.
+
+    Returns the path unchanged when it fits the AF_UNIX limit; otherwise a short
+    hashed path under ``XDG_RUNTIME_DIR`` (or ``/tmp``) that both ends derive
+    identically from the logical path.
+    """
+    p = str(socket_path)
+    if len(p) <= _AF_UNIX_MAX:
+        return p
+    digest = hashlib.sha1(os.fsencode(os.path.abspath(p))).hexdigest()[:16]
+    short_base = os.environ.get("XDG_RUNTIME_DIR") or "/tmp"
+    return os.path.join(short_base, f"dcp-{os.getuid()}-{digest}.sock")
 
 
 def _pid_alive(pid: int) -> bool:
@@ -228,13 +256,16 @@ class DaemonServer:
         self._sock: socket.socket | None = None
 
     def _bind(self) -> None:
+        # The actual bind/connect address (short fallback when the logical path
+        # overflows the AF_UNIX limit); the pid file stays at the logical path.
+        addr = _bind_address(self.socket_path)
         # Remove a stale socket from a dead daemon before binding.
-        if self.socket_path.exists():
-            self.socket_path.unlink()
+        if os.path.exists(addr):
+            os.unlink(addr)
         self.socket_path.parent.mkdir(parents=True, exist_ok=True)
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.bind(str(self.socket_path))
-        os.chmod(self.socket_path, 0o600)
+        s.bind(addr)
+        os.chmod(addr, 0o600)
         s.listen(16)
         self._sock = s
         _pid_path(self.socket_path).write_text(str(os.getpid()))
@@ -324,7 +355,13 @@ class DaemonServer:
     def _cleanup(self) -> None:
         if self._sock is not None:
             self._sock.close()
-        for p in (self.socket_path, _pid_path(self.socket_path)):
+        # Remove the bound socket (possibly the short fallback address), the
+        # logical socket path, and the pid file.
+        for p in (
+            Path(_bind_address(self.socket_path)),
+            self.socket_path,
+            _pid_path(self.socket_path),
+        ):
             try:
                 p.unlink()
             except OSError:
@@ -356,7 +393,7 @@ def request(
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
             s.settimeout(timeout)
-            s.connect(str(socket_path))
+            s.connect(_bind_address(socket_path))
             s.sendall((json.dumps(payload) + "\n").encode())
             s.settimeout(recv_timeout)  # None -> block; else bound the solve wait
             try:
