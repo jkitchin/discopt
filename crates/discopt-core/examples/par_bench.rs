@@ -117,6 +117,8 @@ fn opts(inst: &Instance) -> MilpOptions {
         heuristics: true,
         presolve: true,
         strong_branch: true,
+        seed_pseudocosts: true,
+        node_propagation: true,
         sb_max_cands: 8,
         sb_node_budget: 4096,
         simplex: SimplexOptions {
