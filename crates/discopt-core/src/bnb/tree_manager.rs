@@ -690,6 +690,21 @@ impl TreeManager {
         }
     }
 
+    /// Replace a node's structural variable bounds with node-propagation
+    /// (FBBT) tightened ones, so its children inherit the contracted box. A
+    /// sound contraction (the tightened box is a subset of the original), so no
+    /// feasible integer point is lost. Called in the batch reduce before
+    /// `process_evaluated` branches the node.
+    pub fn set_node_bounds(&mut self, node_id: NodeId, lb: Vec<f64>, ub: Vec<f64>) {
+        let node = self.pool.get_mut(node_id);
+        if lb.len() == node.lb.len() {
+            node.lb = lb;
+        }
+        if ub.len() == node.ub.len() {
+            node.ub = ub;
+        }
+    }
+
     /// Inject an externally-found incumbent (e.g. from a primal heuristic).
     ///
     /// Updates the incumbent only if `obj_val` is strictly better than the

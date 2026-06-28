@@ -20,16 +20,24 @@ use crate::bnb::tree_manager::{NodeResult, TreeManager};
 use crate::lp::basis::{Basis, AT_LOWER, AT_UPPER, BASIC};
 use crate::lp::cover::separate_cover;
 use crate::lp::crossover::LpView;
-use crate::lp::gomory::{separate_gomory, GomoryCut};
+use crate::lp::cut_select::select_cuts;
+use crate::lp::gomory::{separate_gomory, solve_dense, GomoryCut};
 use crate::lp::simplex::sparse::SparseCols;
 use crate::lp::simplex::{
-    solve_lp, solve_lp_scaled, solve_lp_warm, solve_lp_warm_scaled, tighten_bounds, LpStatus,
+    solve_lp, solve_lp_scaled, solve_lp_warm, solve_lp_warm_scaled_csc, tighten_bounds, LpStatus,
     PreparedDual, Scaling, SimplexOptions,
 };
 
 const INF: f64 = 1e20;
 const INFEAS_SENTINEL: f64 = 1e30;
 const INT_TOL: f64 = 1e-5;
+
+/// Minimum efficacy (normalized violation) for a cut to be worth adding under
+/// cut selection — below this it barely separates the point and only bloats the LP.
+const CUT_MIN_EFFICACY: f64 = 1e-4;
+/// Drop a candidate cut whose direction is more than this parallel (|cos|) to an
+/// already-selected cut — keeps the kept set spanning diverse faces.
+const CUT_MAX_PARALLEL: f64 = 0.99;
 
 /// Terminal status of a MILP solve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +93,21 @@ pub struct MilpOptions {
     pub root_cuts: usize,
     /// Max root cut rounds (separate → re-solve → separate). 1 = single pass.
     pub cut_rounds: usize,
+    /// Separate Gomory mixed-integer cuts (off the tableau) in the root loop.
+    /// GMI cuts are typically **dense** (a tableau row `B⁻¹A` mixes all columns),
+    /// so on a sparse-row model they densify the cut-augmented matrix and make
+    /// every node's LP re-solve expensive — erasing the cut benefit in wall time.
+    /// Disable to keep cuts sparse (cover cuts are row-local), preserving the
+    /// sparse-LP fast path. `true` keeps GMI (good on dense models where tableau
+    /// cuts add bound the sparse cover cuts miss).
+    pub gmi_cuts: bool,
+    /// Apply efficacy + orthogonality cut selection ([`crate::lp::cut_select`])
+    /// to each round's candidate cuts: keep only the strongest, most diverse few
+    /// (up to the remaining `root_cuts` budget) instead of every cut found. With
+    /// a small `root_cuts` cap and many `cut_rounds`, this keeps the active cut
+    /// set small while still iterating — the win on sparse-row MILPs, where cuts
+    /// close the node gap but carrying all of them is too expensive per node.
+    pub cut_select: bool,
     /// Separate globally-valid cover cuts at fractional nodes into a shared pool.
     pub node_cuts: bool,
     /// Cap on the total number of pooled cuts (root + node).
@@ -94,7 +117,24 @@ pub struct MilpOptions {
     /// Root feasibility-based bound tightening (sound, dimension-preserving).
     pub presolve: bool,
     /// Limited strong branching on unreliable candidates (reliability branching).
+    /// Probe objective degradations are fed back into the shared pseudocosts (see
+    /// [`TreeManager::record_sb_observations`]) so probed variables graduate and
+    /// stop being re-probed — the reliability-branching feedback loop.
     pub strong_branch: bool,
+    /// Run feasibility-based bound tightening (FBBT) at every node, not just the
+    /// root. Deep in the tree, branching tightens constraint slacks, so FBBT
+    /// fixes/contracts further integer variables that the LP relaxation leaves
+    /// fractional — pruning infeasible subtrees and shrinking children (which
+    /// inherit the tightened bounds). Sound: a pure contraction, no postsolve.
+    pub node_propagation: bool,
+    /// Reduced-cost (objective) fixing at every node: using the node's LP dual
+    /// bound `z`, the incumbent `U`, and each nonbasic integer variable's reduced
+    /// cost `d`, fix the variable's bound when moving it off its current bound
+    /// would push the objective to/past `U` (no improving solution can). This is
+    /// the dominant node lever in the proving phase (where `U − z` is small) and
+    /// is what the LP relaxation alone leaves on the table. Sound: only removes
+    /// solutions no better than the incumbent. Children inherit the fixings.
+    pub reduced_cost_fixing: bool,
     /// Max candidates probed per node when strong branching.
     pub sb_max_cands: usize,
     /// Only strong-branch while the tree is smaller than this many nodes — the
@@ -257,7 +297,7 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
                     opts.simplex.tol,
                 )
             };
-            {
+            if opts.gmi_cuts {
                 let _t = crate::profile::Timer::new(crate::profile::Phase::SepGomory);
                 cuts.extend(separate_gomory(
                     &root_lp,
@@ -268,8 +308,16 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
                     1e7,
                 ));
             }
-            cuts.truncate(opts.root_cuts - total_cuts);
-            let new_cuts = dedup_new_cuts(cuts, &mut pool_sigs, usize::MAX);
+            // Keep the strongest, most diverse few (efficacy + orthogonality)
+            // up to the remaining root-cut budget; otherwise add first-come.
+            let remaining = opts.root_cuts - total_cuts;
+            let selected = if opts.cut_select {
+                select_cuts(cuts, &root.x, remaining, CUT_MIN_EFFICACY, CUT_MAX_PARALLEL)
+            } else {
+                cuts.truncate(remaining);
+                cuts
+            };
+            let new_cuts = dedup_new_cuts(selected, &mut pool_sigs, usize::MAX);
             if new_cuts.is_empty() {
                 break;
             }
@@ -352,6 +400,10 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
             Some(_) => (&a_s, &c_s, &b_s),
             None => (&a_w, &c_w, &b_w),
         };
+        // CSC of the solve-space matrix, built once and shared by every node solve
+        // in this batch (the matrix is constant within a batch). This lifts the
+        // per-node `SparseCols::from_dense` O(m·n) rebuild out of the warm solve.
+        let csc_batch = SparseCols::from_dense(sa, m_w, n_w);
         let sb_active = opts.strong_branch && tm.stats().total_nodes < opts.sb_node_budget;
         let mut results = Vec::with_capacity(batch.node_ids.len());
         let mut pending_cuts: Vec<GomoryCut> = Vec::new();
@@ -378,6 +430,7 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
                 sa,
                 sc,
                 sb,
+                csc: &csc_batch,
                 slack_l: &slack_l,
                 slack_u: &slack_u,
                 is_int: &is_int,
@@ -460,6 +513,10 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
             // never affects a bound, so determinism and soundness hold.
             if !out.sb_observations.is_empty() {
                 tm.record_sb_observations(&out.sb_observations);
+            }
+            // Store node-propagation tightened bounds so children inherit them.
+            if let Some((tl, tu)) = out.tightened {
+                tm.set_node_bounds(id, tl, tu);
             }
             // Dedup this node's cuts against the shared pool *in order*, with the
             // same room check the serial path applied, so the pool is identical.
@@ -555,6 +612,13 @@ struct NodeCtx<'a> {
     sa: &'a [f64],
     sc: &'a [f64],
     sb: &'a [f64],
+    /// CSC view of the solve-space matrix `sa`, built **once per batch** and
+    /// shared by every node/strong-branch/dive LP solve in the batch. The working
+    /// matrix is constant within a batch (cuts fold in only between batches), so
+    /// this removes the per-node `SparseCols::from_dense` rebuild from the warm
+    /// solve. Built from `sa`, so it matches whichever (scaled or raw) matrix the
+    /// node solves see.
+    csc: &'a SparseCols,
     slack_l: &'a [f64],
     slack_u: &'a [f64],
     is_int: &'a [bool],
@@ -614,6 +678,10 @@ struct NodeOutput {
     /// graduate these variables and stop re-probing them. Empty when the node did
     /// no strong branching.
     sb_observations: Vec<SbObservation>,
+    /// Node-propagation result: tightened structural bounds `(lb, ub)` to store
+    /// on the node so its children inherit them. `None` when propagation is off
+    /// or changed nothing.
+    tightened: Option<(Vec<f64>, Vec<f64>)>,
     /// Simplex pivots spent on this node (LP solve + strong-branch probes).
     iters: usize,
     /// Relaxation was unbounded — the whole search terminates.
@@ -658,6 +726,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
             found_cuts: Vec::new(),
             branch_hint: None,
             sb_observations: Vec::new(),
+            tightened: None,
             iters: 0,
             unbounded: false,
             uncertified: true,
@@ -670,6 +739,54 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
     full_u[..ctx.ns].copy_from_slice(ub_k);
     full_l[ctx.ns..].copy_from_slice(ctx.slack_l);
     full_u[ctx.ns..].copy_from_slice(ctx.slack_u);
+
+    // Node-level propagation (FBBT): a sound contraction of this node's bounds.
+    // Deep in the tree branching has tightened the slacks, so FBBT fixes/contracts
+    // further integer variables the LP would leave fractional — proving some
+    // subtrees infeasible outright and shrinking the rest (children inherit the
+    // tightened structural bounds via the reduce). Runs on the working matrix
+    // (including cut rows) with the node's local bounds.
+    let mut tightened: Option<(Vec<f64>, Vec<f64>)> = None;
+    if ctx.opts.node_propagation {
+        let prop_lp = LpView {
+            a: ctx.a_w,
+            m: ctx.m_w,
+            n: ctx.n_w,
+            c: ctx.c_w,
+            l: &full_l,
+            u: &full_u,
+        };
+        let pr = tighten_bounds(&prop_lp, ctx.b_w, ctx.is_int_full, ctx.opts.simplex.tol);
+        if pr.infeasible {
+            // Proven-empty box ⇒ prune this node (a valid fathom, like an
+            // infeasible LP). No incumbent, no basis, nothing to branch.
+            return NodeOutput {
+                result: NodeResult {
+                    node_id: id,
+                    lower_bound: INFEAS_SENTINEL,
+                    solution: vec![0.0; ctx.ns],
+                    is_feasible: false,
+                },
+                basis: None,
+                incumbent: None,
+                found_cuts: Vec::new(),
+                branch_hint: None,
+                sb_observations: Vec::new(),
+                tightened: None,
+                iters: 0,
+                unbounded: false,
+                uncertified: false,
+                deferred: false,
+            };
+        }
+        // Record tightened structural bounds for the children to inherit, only
+        // if propagation actually changed something.
+        if pr.l[..ctx.ns] != full_l[..ctx.ns] || pr.u[..ctx.ns] != full_u[..ctx.ns] {
+            tightened = Some((pr.l[..ctx.ns].to_vec(), pr.u[..ctx.ns].to_vec()));
+        }
+        full_l = pr.l;
+        full_u = pr.u;
+    }
     // Original-space LP, used by the cut separators, rounding, and strong
     // branching (which all reason about the model's true coefficients/values).
     let node_lp = LpView {
@@ -709,7 +826,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
     let mut sol = match ctx.tm.node_basis(id) {
         Some(basis) => {
             let basis = extend_basis(basis, ctx.n_w);
-            solve_lp_warm_scaled(&solve_lp_view, ctx.sb, &basis, ctx.simplex)
+            solve_lp_warm_scaled_csc(&solve_lp_view, ctx.sb, &basis, ctx.simplex, ctx.csc)
         }
         // The only node solved cold is the root. Prefer the root-cut loop's own
         // optimal basis (extended over any cuts added after its last solve): the
@@ -717,15 +834,16 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
         // few trailing cut rows instead of re-deriving it. Failing that, try the
         // dual simplex from the slack basis (built from the unscaled working matrix
         // — scaling-invariant, dual feasibility preserved) before the cold primal,
-        // the same covering-LP speedup the root-cut loop gets. `solve_lp_warm_scaled`
+        // the same covering-LP speedup the root-cut loop gets. The warm solve
         // re-verifies the start basis and cold-solves on any difficulty, so the
         // optimal objective — hence the node's bound — is identical either way; only
         // which optimal vertex is reached (and thus branching) can differ, exactly
-        // as the existing slack-basis path already does.
+        // as the existing slack-basis path already does. The batch CSC (`ctx.csc`)
+        // is reused so this cold-root warm solve also skips the per-solve rebuild.
         None => {
             if let Some(rb) = ctx.root_warm_basis {
                 let basis = extend_basis(rb.clone(), ctx.n_w);
-                solve_lp_warm_scaled(&solve_lp_view, ctx.sb, &basis, ctx.simplex)
+                solve_lp_warm_scaled_csc(&solve_lp_view, ctx.sb, &basis, ctx.simplex, ctx.csc)
             } else {
                 match dual_slack_basis(
                     ctx.a_w,
@@ -736,9 +854,13 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                     &full_u,
                     ctx.simplex.tol,
                 ) {
-                    Some(basis) => {
-                        solve_lp_warm_scaled(&solve_lp_view, ctx.sb, &basis, ctx.simplex)
-                    }
+                    Some(basis) => solve_lp_warm_scaled_csc(
+                        &solve_lp_view,
+                        ctx.sb,
+                        &basis,
+                        ctx.simplex,
+                        ctx.csc,
+                    ),
                     None => solve_lp_scaled(&solve_lp_view, ctx.sb, ctx.simplex),
                 }
             }
@@ -762,6 +884,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
         found_cuts: Vec::new(),
         branch_hint: None,
         sb_observations: Vec::new(),
+        tightened,
         iters: sol.iters,
         unbounded: false,
         uncertified: false,
@@ -785,6 +908,37 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
             // loop-top deadline check can actually fire instead of being
             // overshot by a batch of expensive strong-branch probes.
             let time_up = ctx.deadline.is_some_and(|d| std::time::Instant::now() >= d);
+            // Reduced-cost fixing: contract this node's integer bounds against the
+            // incumbent using the LP duals. Children inherit the fixings (merged
+            // with any FBBT tightening already in `out.tightened`). Pure bound
+            // contraction — never touches the node's own valid LP bound.
+            if ctx.opts.reduced_cost_fixing && !feasible {
+                if let Some((rl, ru)) = reduced_cost_fix(
+                    ctx.a_w,
+                    ctx.m_w,
+                    ctx.n_w,
+                    ctx.c_w,
+                    &sol.basis,
+                    sol.obj + ctx.obj_const,
+                    ctx.inc_snapshot.unwrap_or(f64::INFINITY),
+                    &full_l,
+                    &full_u,
+                    ctx.ns,
+                    ctx.is_int_full,
+                    ctx.opts.simplex.tol,
+                ) {
+                    out.tightened = Some(match out.tightened.take() {
+                        Some((mut tl, mut tu)) => {
+                            for j in 0..ctx.ns {
+                                tl[j] = tl[j].max(rl[j]);
+                                tu[j] = tu[j].min(ru[j]);
+                            }
+                            (tl, tu)
+                        }
+                        None => (rl, ru),
+                    });
+                }
+            }
             // Primal heuristic: round this fractional point so the reduce can
             // inject a feasible incumbent early and prune more of the tree.
             if ctx.opts.heuristics && !feasible && !time_up {
@@ -949,7 +1103,7 @@ fn strong_branch(
         l: &ref_l,
         u: &ref_u,
     };
-    let prepared = PreparedDual::prepare(&prep_view, basis, simplex);
+    let prepared = PreparedDual::prepare(&prep_view, basis, simplex, ctx.csc);
     let probe = |l: &[f64], u: &[f64]| -> crate::lp::simplex::LpSolve {
         let (sl, su) = scale_bounds(l, u);
         match &prepared {
@@ -963,7 +1117,7 @@ fn strong_branch(
                     l: &sl,
                     u: &su,
                 };
-                solve_lp_warm_scaled(&view, ctx.sb, basis, simplex)
+                solve_lp_warm_scaled_csc(&view, ctx.sb, basis, simplex, ctx.csc)
             }
         }
     };
@@ -1020,6 +1174,96 @@ fn strong_branch(
         }
     }
     (best, pivots, obs)
+}
+
+/// Reduced-cost (objective) fixing at a node. Given the node's optimal basis,
+/// its LP dual bound `node_obj` (= `z`), and the incumbent `incumbent` (= `U`,
+/// both in the engine's minimize sense), tighten each nonbasic integer
+/// variable's bound: a variable at its lower bound with reduced cost `d > 0` can
+/// rise at most `⌊(U − z)/d⌋` units before the objective reaches `U`, so any
+/// improving solution keeps it within that — symmetrically at the upper bound.
+///
+/// Duals are recovered from the (scaling-invariant) basis on the **unscaled**
+/// working matrix: solve `Bᵀ y = c_B`, then `d_j = c_j − A_jᵀ y`. Returns the
+/// tightened structural bounds `(l, u)` when anything changed, else `None`.
+///
+/// Sound: it only ever removes solutions whose objective is `≥ U` (no better than
+/// the incumbent). A small positive slack on the gap and an inward integer floor
+/// keep numerical error on the *safe* side (never fixing out an improving point);
+/// a singular/ill-conditioned basis solve returns `None` (no fixing).
+#[allow(clippy::too_many_arguments)]
+fn reduced_cost_fix(
+    a: &[f64],
+    m: usize,
+    n: usize,
+    c: &[f64],
+    basis: &Basis,
+    node_obj: f64,
+    incumbent: f64,
+    l: &[f64],
+    u: &[f64],
+    ns: usize,
+    is_int: &[bool],
+    tol: f64,
+) -> Option<(Vec<f64>, Vec<f64>)> {
+    if !incumbent.is_finite() || m == 0 {
+        return None;
+    }
+    // Gap U − z, with a small positive slack so floating-point noise can only
+    // *loosen* the fixing (never cut an improving solution).
+    let gap = (incumbent - node_obj) + 1e-6 * (1.0 + incumbent.abs());
+    if gap <= 0.0 {
+        return None; // node should be pruned anyway; nothing improving here
+    }
+
+    // Bᵀ (row-major m×m): row k is basis column basic_vars[k]; rhs is c_B.
+    let mut bt = vec![0.0_f64; m * m];
+    let mut c_b = vec![0.0_f64; m];
+    for (k, &bv) in basis.basic_vars.iter().enumerate() {
+        c_b[k] = c[bv];
+        for i in 0..m {
+            bt[k * m + i] = a[i * n + bv];
+        }
+    }
+    let y = solve_dense(&bt, m, &c_b, tol)?;
+    if !y.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+
+    let mut new_l = l[..ns].to_vec();
+    let mut new_u = u[..ns].to_vec();
+    let mut changed = false;
+    for j in 0..ns {
+        if !is_int[j] || basis.col_status[j] == BASIC {
+            continue;
+        }
+        // Reduced cost d_j = c_j − A_jᵀ y.
+        let dj = c[j] - (0..m).map(|i| a[i * n + j] * y[i]).sum::<f64>();
+        match basis.col_status[j] {
+            x if x == AT_LOWER && dj > tol => {
+                let maxk = (gap / dj).floor();
+                let nu = new_l[j] + maxk;
+                if nu < new_u[j] - 0.5 {
+                    new_u[j] = nu;
+                    changed = true;
+                }
+            }
+            x if x == AT_UPPER && dj < -tol => {
+                let maxk = (gap / -dj).floor();
+                let nl = new_u[j] - maxk;
+                if nl > new_l[j] + 0.5 {
+                    new_l[j] = nl;
+                    changed = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    if changed {
+        Some((new_l, new_u))
+    } else {
+        None
+    }
 }
 
 /// Append `cuts` (each `coeffs·x ≥ rhs`, coeffs length `n_w`) to the working LP
@@ -1315,7 +1559,7 @@ fn try_dive_repair(
                 l: &sl,
                 u: &su,
             };
-            let mut sol = solve_lp_warm_scaled(&view, ctx.sb, &cur_basis, ctx.simplex);
+            let mut sol = solve_lp_warm_scaled_csc(&view, ctx.sb, &cur_basis, ctx.simplex, ctx.csc);
             if sol.status == LpStatus::Optimal {
                 if let Some(s) = ctx.scaling {
                     s.unscale_x(&mut sol.x);
@@ -1447,11 +1691,15 @@ mod tests {
             gap_tol: 1e-9,
             root_cuts: 16,
             cut_rounds: 3,
+            gmi_cuts: true,
+            cut_select: true,
             node_cuts: true,
             max_pool_cuts: 500,
             heuristics: true,
             presolve: true,
             strong_branch: true,
+            node_propagation: true,
+            reduced_cost_fixing: true,
             sb_max_cands: 8,
             sb_node_budget: 1024,
             simplex: SimplexOptions::default(),
