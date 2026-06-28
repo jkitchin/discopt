@@ -589,6 +589,11 @@ struct NodeCtx<'a> {
     tm: &'a TreeManager,
 }
 
+/// One strong-branch pseudocost sample harvested from a probe:
+/// `(var_index, frac, Δobj, is_down)`. Fed into the shared pseudocost tracker so
+/// the reliability mechanism can graduate the variable. See [`strong_branch`].
+type SbObservation = (usize, f64, f64, bool);
+
 /// The product of one node's evaluation, applied to the tree later in the
 /// sequential reduce (in batch order). Keeping every tree mutation out of the
 /// parallel region is what preserves determinism: parallelism changes only
@@ -608,7 +613,7 @@ struct NodeOutput {
     /// in the sequential reduce (batch order) so the reliability mechanism can
     /// graduate these variables and stop re-probing them. Empty when the node did
     /// no strong branching.
-    sb_observations: Vec<(usize, f64, f64, bool)>,
+    sb_observations: Vec<SbObservation>,
     /// Simplex pivots spent on this node (LP solve + strong-branch probes).
     iters: usize,
     /// Relaxation was unbounded — the whole search terminates.
@@ -895,7 +900,7 @@ fn strong_branch(
     x: &[f64],
     node_obj: f64,
     cands: &[(usize, f64, u32, f64)],
-) -> (Option<usize>, usize, Vec<(usize, f64, f64, bool)>) {
+) -> (Option<usize>, usize, Vec<SbObservation>) {
     let simplex = ctx.simplex;
     // Unreliable candidates, most-fractional (nearest 0.5) first.
     let mut cand: Vec<(usize, f64)> = cands
@@ -972,7 +977,7 @@ fn strong_branch(
     // instead of being re-probed every time it turns up fractional. Infeasible /
     // non-optimal probes are excluded — a pruned child is a branching signal, not
     // a finite degradation sample, and feeding it would corrupt the average.
-    let mut obs: Vec<(usize, f64, f64, bool)> = Vec::new();
+    let mut obs: Vec<SbObservation> = Vec::new();
     for (idx, _f) in cand {
         let xi = x[idx];
         let (lo0, hi0) = (orig_l[idx], orig_u[idx]);
