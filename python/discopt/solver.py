@@ -2201,7 +2201,7 @@ def solve_model(
         AMP algorithm with Gurobi as the MILP-master subsolver, use
         ``solver="amp", milp_solver="gurobi"``.
         Use ``"mip-nlp"`` to dispatch to the MIP-NLP decomposition family
-        (OA/ECP/FP/GOA now; ROA/LP-NLP-BB are reserved method selectors).
+        (OA/ECP/FP/GOA/LP-NLP-BB now; ROA is a reserved method selector).
         Use ``"gp"`` to dispatch to the geometric-programming fast path:
         the model is checked for GP structure (posynomial/monomial
         objective and constraints over strictly-positive continuous
@@ -2230,8 +2230,8 @@ def solve_model(
     solver="mip-nlp" options
         The MIP-NLP backend accepts ``mip_nlp_method`` and
         ``mip_nlp_options``. Current implemented methods are ``"oa"``,
-        ``"ecp"``, ``"fp"``, and ``"goa"``; ``"roa"`` and ``"lp_nlp_bb"`` raise
-        ``NotImplementedError`` until their dedicated implementations land.
+        ``"ecp"``, ``"fp"``, ``"goa"``, and ``"lp_nlp_bb"``; ``"roa"`` raises
+        ``NotImplementedError`` until its dedicated implementation lands.
         Existing OA options ``equality_relaxation``, ``ecp_mode``,
         ``feasibility_cuts``, ``heuristic_nonconvex``, ``add_slack``,
         ``max_slack``, ``oa_penalty_factor``, ``add_no_good_cuts``,
@@ -2240,7 +2240,10 @@ def solve_model(
         ``num_solution_iteration``, and ``milp_solver`` plus initialization
         option ``init_strategy`` may be passed as top-level aliases and take
         precedence over duplicate keys in ``mip_nlp_options``. ``solution_pool``
-        currently requires ``milp_solver="gurobi"``.
+        currently requires ``milp_solver="gurobi"``. For
+        ``mip_nlp_method="lp_nlp_bb"``, ``milp_solver="gurobi"`` is also
+        required because the single-tree LP/NLP branch-and-bound variant uses
+        lazy master callbacks.
         For ``mip_nlp_method="goa"``, convexity-certified MINLPs use OA's
         valid master bounds and other models use AMP/global relaxations.
         AMP options such as ``rel_gap``, ``abs_tol``, ``max_iter``,

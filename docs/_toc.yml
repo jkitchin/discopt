@@ -20,6 +20,7 @@ parts:
   - caption: "Tutorials \u2014 Solver Backends"
     chapters:
       - file: notebooks/tutorial_oa
+      - file: mip_nlp
       - file: notebooks/tutorial_benders
       - file: notebooks/tutorial_lagrangian
       - file: notebooks/amp_global_minlp
