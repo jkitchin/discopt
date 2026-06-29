@@ -147,6 +147,26 @@ The standalone FP method is an incumbent heuristic. It is useful for finding an
 integer-feasible point quickly, but it is not a proof of global optimality unless
 a later certifying method closes the gap.
 
+MindtPy-style FP controls supported by discopt are intentionally scoped:
+
+| Option | Semantics |
+| --- | --- |
+| `fp_iteration_limit` | Caps FP rounds independently from the OA iteration limit. OA/GOA FP initialization still defaults to `min(max_nodes, 10)` when this is omitted. |
+| `fp_main_norm` | Norm used by the projection MILP distance objective. If omitted, it follows `feasibility_norm`. |
+| `feasibility_norm` | Norm used to score nonlinear constraint violation in fixed-integer feasibility repair subproblems. |
+| `fp_discrete_only` | Controls whether projection distance is computed only over discrete variables (`True`, the default) or over all variables. |
+| `fp_projcuts` | Controls discopt's projection-MILP path with binary no-good cuts. When `False`, FP falls back to direct integer rounding. It does not transfer projection cuts into OA masters. |
+| `fp_projzerotol` | Treats projection targets near zero as zero when zero is within bounds. |
+| `fp_mipgap` | Gap tolerance for FP projection MILPs; defaults to `gap_tolerance`. |
+
+The MindtPy names `fp_transfercuts=True`, `fp_norm_constraint=True`,
+non-default `fp_norm_constraint_coef`, and nonzero `fp_cutoffdecr` are not
+implemented by discopt's FP path yet. Passing them raises `ValueError` instead
+of silently changing neither the projection loop nor OA/GOA certificate state.
+FP-generated cuts are therefore local to the pump; `init_strategy="fp"` may seed
+OA/GOA incumbents and initial cuts at the pump point, but it does not import
+projection no-good cuts into certified OA bounds.
+
 ## Regularized OA
 
 Regularization is selected as an OA option, not as a separate method selector.

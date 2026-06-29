@@ -614,6 +614,48 @@ class TestOARobustnessOptions:
         assert a_rows == []
         assert b_rows == []
 
+    def test_fp_projection_distance_can_include_continuous_variables(self, monkeypatch):
+        import discopt.solvers.lp_backend as lp_backend
+        from discopt.solvers import MILPResult, SolveStatus
+        from discopt.solvers.oa import _decompose_model, _solve_integer_projection_mip
+
+        m = dm.Model("fp_projection_all_vars")
+        x = m.continuous("x", lb=-1.0, ub=2.0)
+        y = m.binary("y")
+        z = m.integer("z", lb=-2, ub=3)
+        m.minimize(x + y + z)
+        decomp = _decompose_model(m)
+        captured = {}
+
+        def fake_solve_milp(**kwargs):
+            captured.update(kwargs)
+            return MILPResult(
+                status=SolveStatus.OPTIMAL,
+                x=np.zeros_like(kwargs["c"]),
+                objective=0.0,
+                bound=0.0,
+            )
+
+        monkeypatch.setattr(lp_backend, "get_milp_solver", lambda backend="auto": fake_solve_milp)
+
+        result = _solve_integer_projection_mip(
+            decomp,
+            target=np.array([5e-9, 0.3, 1.7], dtype=float),
+            seen_assignments=set(),
+            projection_norm="L1",
+            time_limit=10.0,
+            gap_tolerance=0.25,
+            discrete_only=False,
+            projzerotol=1e-8,
+        )
+
+        assert result is not None
+        assert len(captured["c"]) == 6
+        assert captured["c"][:3].tolist() == pytest.approx([0.0, 0.0, 0.0])
+        assert captured["c"][3:].tolist() == pytest.approx([1.0, 1.0, 1.0])
+        assert captured["integrality"][:3].tolist() == decomp.integrality.tolist()
+        assert captured["b_ub"][:2].tolist() == pytest.approx([0.0, 0.0])
+
     @pytest.mark.parametrize(("enabled", "expected_calls"), [(False, 0), (True, 1)])
     def test_no_good_cut_option_controls_infeasible_assignment(
         self,

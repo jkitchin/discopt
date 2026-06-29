@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from discopt.modeling.core import Model, SolveResult
-from discopt.solvers.mip_nlp_options import GOA_OPTION_KEYS
+from discopt.solvers.mip_nlp_options import FP_OPTION_KEYS, GOA_OPTION_KEYS
 
 _IMPLEMENTED_METHODS = frozenset({"oa", "ecp", "fp", "goa", "lp_nlp_bb"})
 _RESERVED_METHOD_ISSUES = {
@@ -34,6 +34,7 @@ _OA_OPTION_KEYS = frozenset(
         "milp_solver",
         "solution_pool",
         "num_solution_iteration",
+        *FP_OPTION_KEYS,
     }
 )
 _OA_OPTION_ALIASES = {
@@ -44,6 +45,7 @@ _FP_OPTION_KEYS = frozenset(
         "add_no_good_cuts",
         "feasibility_norm",
         "init_strategy",
+        *FP_OPTION_KEYS,
     }
 )
 _LP_NLP_BB_OPTION_KEYS = frozenset(
@@ -153,6 +155,16 @@ def solve_mip_nlp(
                 initial_point=initial_point,
                 add_no_good_cuts=bool(options.get("add_no_good_cuts", True)),
                 feasibility_norm=options.get("feasibility_norm", "L_infinity"),
+                fp_iteration_limit=options.get("fp_iteration_limit"),
+                fp_cutoffdecr=options.get("fp_cutoffdecr", 0.0),
+                fp_projcuts=options.get("fp_projcuts"),
+                fp_transfercuts=options.get("fp_transfercuts", False),
+                fp_projzerotol=options.get("fp_projzerotol", 0.0),
+                fp_mipgap=options.get("fp_mipgap"),
+                fp_discrete_only=options.get("fp_discrete_only", True),
+                fp_main_norm=options.get("fp_main_norm"),
+                fp_norm_constraint=options.get("fp_norm_constraint", False),
+                fp_norm_constraint_coef=options.get("fp_norm_constraint_coef", 1.0),
             )
 
         if method == "goa":

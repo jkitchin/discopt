@@ -252,6 +252,12 @@ def test_model_solve_routes_mip_nlp_options(monkeypatch):
             milp_solver="gurobi",
             solution_pool=True,
             num_solution_iteration=7,
+            fp_iteration_limit=4,
+            fp_main_norm="L1",
+            fp_projcuts=False,
+            fp_discrete_only=False,
+            fp_projzerotol=1e-7,
+            fp_mipgap=0.05,
             skip_convex_check=True,
         )
 
@@ -270,6 +276,12 @@ def test_model_solve_routes_mip_nlp_options(monkeypatch):
     assert calls["milp_solver"] == "gurobi"
     assert calls["solution_pool"] is True
     assert calls["num_solution_iteration"] == 7
+    assert calls["fp_iteration_limit"] == 4
+    assert calls["fp_main_norm"] == "L1"
+    assert calls["fp_projcuts"] is False
+    assert calls["fp_discrete_only"] is False
+    assert calls["fp_projzerotol"] == pytest.approx(1e-7)
+    assert calls["fp_mipgap"] == pytest.approx(0.05)
 
 
 def test_model_solve_mip_nlp_path_runs_entropy_canonicalization(monkeypatch):
@@ -843,11 +855,43 @@ def test_mip_nlp_method_fp_routes_to_standalone_feasibility_pump(monkeypatch):
         init_strategy="fp",
         feasibility_norm="L1",
         add_no_good_cuts=False,
+        fp_iteration_limit=3,
+        fp_main_norm="L_infinity",
+        fp_projcuts=True,
+        fp_projzerotol=1e-8,
+        fp_mipgap=0.2,
+        fp_discrete_only=False,
     )
 
     assert result.status == "feasible"
     assert calls["feasibility_norm"] == "L1"
     assert calls["add_no_good_cuts"] is False
+    assert calls["fp_iteration_limit"] == 3
+    assert calls["fp_main_norm"] == "L_infinity"
+    assert calls["fp_projcuts"] is True
+    assert calls["fp_projzerotol"] == pytest.approx(1e-8)
+    assert calls["fp_mipgap"] == pytest.approx(0.2)
+    assert calls["fp_discrete_only"] is False
+
+
+@pytest.mark.parametrize(
+    ("option", "value", "match"),
+    [
+        ("fp_transfercuts", True, "fp_transfercuts=True"),
+        ("fp_norm_constraint", True, "fp_norm_constraint=True"),
+        ("fp_norm_constraint_coef", 0.5, "fp_norm_constraint_coef"),
+        ("fp_cutoffdecr", 0.1, "fp_cutoffdecr"),
+    ],
+)
+def test_mip_nlp_method_fp_rejects_unsupported_mindtpy_options(option, value, match):
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    with pytest.raises(ValueError, match=match):
+        solve_mip_nlp(
+            _binary_model(f"fp_unsupported_{option}"),
+            method="fp",
+            **{option: value},
+        )
 
 
 def test_mip_nlp_method_goa_routes_to_global_relaxation(monkeypatch):
@@ -1790,8 +1834,10 @@ def test_oa_fp_initialization_adds_cuts_at_best_pump_point(monkeypatch):
     model = _mixed_discrete_model("fp_init_point")
     pump_point = np.array([0.5, 1.0, 0.0, 2.0], dtype=float)
     cut_points = []
+    fp_kwargs = {}
 
     def fake_run_fp(*args, **kwargs):
+        fp_kwargs.update(kwargs)
         return oa_module._FeasibilityPumpResult(
             best_x=pump_point,
             best_obj=3.5,
@@ -1811,11 +1857,23 @@ def test_oa_fp_initialization_adds_cuts_at_best_pump_point(monkeypatch):
         model,
         init_strategy="fp",
         max_iterations=0,
+        fp_iteration_limit=3,
+        fp_main_norm="L1",
+        fp_projcuts=False,
+        fp_discrete_only=False,
+        fp_projzerotol=1e-8,
+        fp_mipgap=0.2,
     )
 
     assert result.status == "feasible"
     assert result.objective == pytest.approx(3.5)
     assert cut_points[0].tolist() == pytest.approx(pump_point.tolist())
+    assert fp_kwargs["max_iterations"] == 3
+    assert fp_kwargs["fp_main_norm"] == "L1"
+    assert fp_kwargs["add_no_good_cuts"] is False
+    assert fp_kwargs["fp_discrete_only"] is False
+    assert fp_kwargs["fp_projzerotol"] == pytest.approx(1e-8)
+    assert fp_kwargs["fp_mipgap"] == pytest.approx(0.2)
 
 
 def test_oa_no_discrete_relaxation_uses_initial_point(monkeypatch):
@@ -1949,7 +2007,7 @@ def test_mip_nlp_goa_certifies_mindtpy_minlp5_convex_fixture():
 
 
 @pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
-@pytest.mark.parametrize("feasibility_norm", ["L_infinity", "L1"])
+@pytest.mark.parametrize("feasibility_norm", ["L_infinity", "L1", "L2"])
 def test_mip_nlp_feasibility_pump_solves_mindtpy_baseline(feasibility_norm):
     result = _mindtpy_simple_minlp(f"mindtpy_fp_{feasibility_norm}").solve(
         solver="mip-nlp",

@@ -2422,7 +2422,7 @@ def solve_model(
         import warnings
 
         from discopt.solvers.mip_nlp import solve_mip_nlp
-        from discopt.solvers.mip_nlp_options import GOA_OPTION_KEYS
+        from discopt.solvers.mip_nlp_options import FP_OPTION_KEYS, GOA_OPTION_KEYS
 
         mip_nlp_method = kwargs.pop("mip_nlp_method", None)
         mip_nlp_options = kwargs.pop("mip_nlp_options", None)
@@ -2446,6 +2446,7 @@ def solve_model(
             "milp_solver",
             "solution_pool",
             "num_solution_iteration",
+            *FP_OPTION_KEYS,
         ):
             if key in kwargs:
                 mip_nlp_kwargs[key] = kwargs.pop(key)
@@ -2769,6 +2770,7 @@ def solve_model(
 
         from discopt._jax.gdp_reformulate import reformulate_gdp
         from discopt.solvers.mip_nlp import solve_mip_nlp
+        from discopt.solvers.mip_nlp_options import FP_OPTION_KEYS
 
         warnings.warn(
             "gdp_method='oa' is deprecated for selecting MINLP OA. Use "
@@ -2799,6 +2801,7 @@ def solve_model(
             "milp_solver",
             "solution_pool",
             "num_solution_iteration",
+            *FP_OPTION_KEYS,
         ):
             if key in kwargs:
                 mip_nlp_kwargs[key] = kwargs.pop(key)

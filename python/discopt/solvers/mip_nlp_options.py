@@ -4,11 +4,25 @@ from __future__ import annotations
 
 from typing import Any
 
+FP_OPTION_KEYS = (
+    "fp_iteration_limit",
+    "fp_cutoffdecr",
+    "fp_projcuts",
+    "fp_transfercuts",
+    "fp_projzerotol",
+    "fp_mipgap",
+    "fp_discrete_only",
+    "fp_main_norm",
+    "fp_norm_constraint",
+    "fp_norm_constraint_coef",
+)
+
 GOA_OA_FORWARD_OPTION_KEYS = (
     "rel_gap",
     "max_iter",
     "init_strategy",
     "feasibility_norm",
+    *FP_OPTION_KEYS,
 )
 
 GOA_AMP_OPTION_DEFAULTS: dict[str, Any] = {

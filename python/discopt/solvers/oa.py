@@ -30,7 +30,11 @@ from typing import TYPE_CHECKING, Optional
 import numpy as np
 
 from discopt.modeling.core import Constraint, Model, ObjectiveSense, SolveResult, VarType
-from discopt.solvers.mip_nlp_options import GOA_AMP_ONLY_OPTION_KEYS, GOA_AMP_OPTION_DEFAULTS
+from discopt.solvers.mip_nlp_options import (
+    FP_OPTION_KEYS,
+    GOA_AMP_ONLY_OPTION_KEYS,
+    GOA_AMP_OPTION_DEFAULTS,
+)
 
 if TYPE_CHECKING:
     from discopt._jax.nlp_evaluator import NLPEvaluator
@@ -133,6 +137,14 @@ def _normalize_open_unit_float(name: str, value: float) -> float:
     return out
 
 
+def _normalize_nonnegative_float(name: str, value: float) -> float:
+    """Validate a finite nonnegative float option."""
+    out = float(value)
+    if not np.isfinite(out) or out < 0:
+        raise ValueError(f"{name} must be a finite nonnegative number, got {value!r}.")
+    return out
+
+
 def _normalize_optional_positive_int(name: str, value: Optional[int]) -> Optional[int]:
     """Validate a positive integer option, allowing None to disable it."""
     if value is None:
@@ -149,6 +161,21 @@ def _normalize_positive_int(name: str, value: int) -> int:
     if out <= 0:
         raise ValueError(f"{name} must be a positive integer, got {value!r}.")
     return out
+
+
+def _fp_iteration_count(
+    max_iterations: int,
+    fp_iteration_limit: Optional[int],
+    *,
+    default_cap: Optional[int] = None,
+) -> int:
+    """Resolve the FP loop count from explicit and legacy iteration controls."""
+    if fp_iteration_limit is not None:
+        return _normalize_positive_int("fp_iteration_limit", fp_iteration_limit)
+    limit = int(max_iterations) if int(max_iterations) > 0 else 1
+    if default_cap is not None:
+        limit = min(limit, int(default_cap))
+    return max(1, limit)
 
 
 def _require_solution_pool_backend(milp_solver: str) -> None:
@@ -293,6 +320,83 @@ class OAConfig:
     stalling_limit: Optional[int] = None
     cycling_check: bool = False
     log_iterations: bool = True
+
+
+@dataclass(frozen=True)
+class _FPConfig:
+    """Normalized feasibility-pump option bundle."""
+
+    feasibility_norm: str
+    main_norm: str
+    add_no_good_cuts: bool
+    iteration_limit: Optional[int]
+    projzerotol: float
+    mipgap: Optional[float]
+    discrete_only: bool
+
+
+def _normalize_fp_config(
+    *,
+    feasibility_norm: str,
+    add_no_good_cuts: bool,
+    fp_iteration_limit: Optional[int] = None,
+    fp_cutoffdecr: float = 0.0,
+    fp_projcuts: Optional[bool] = None,
+    fp_transfercuts: bool = False,
+    fp_projzerotol: float = 0.0,
+    fp_mipgap: Optional[float] = None,
+    fp_discrete_only: bool = True,
+    fp_main_norm: Optional[str] = None,
+    fp_norm_constraint: bool = False,
+    fp_norm_constraint_coef: float = 1.0,
+) -> _FPConfig:
+    """Normalize supported MindtPy-style FP controls and reject unsupported ones."""
+    normalized_feasibility_norm = _normalize_feasibility_norm(feasibility_norm)
+    normalized_main_norm = _normalize_feasibility_norm(
+        normalized_feasibility_norm if fp_main_norm is None else fp_main_norm
+    )
+    iteration_limit = _normalize_optional_positive_int("fp_iteration_limit", fp_iteration_limit)
+    projection_cuts = bool(add_no_good_cuts if fp_projcuts is None else fp_projcuts)
+    projzerotol = _normalize_nonnegative_float("fp_projzerotol", fp_projzerotol)
+    mipgap = None if fp_mipgap is None else _normalize_nonnegative_float("fp_mipgap", fp_mipgap)
+    discrete_only = bool(fp_discrete_only)
+
+    cutoffdecr = _normalize_nonnegative_float("fp_cutoffdecr", fp_cutoffdecr)
+    if cutoffdecr > 0.0:
+        raise ValueError(
+            "Unsupported feasibility-pump option fp_cutoffdecr: discopt does not "
+            "currently add improving-objective cutoff constraints during FP. Use "
+            "fp_cutoffdecr=0.0."
+        )
+    if bool(fp_transfercuts):
+        raise ValueError(
+            "Unsupported feasibility-pump option fp_transfercuts=True: FP projection "
+            "cuts are not transferred into OA/GOA master problems. Use "
+            "fp_transfercuts=False."
+        )
+    if bool(fp_norm_constraint):
+        raise ValueError(
+            "Unsupported feasibility-pump option fp_norm_constraint=True: discopt "
+            "does not currently add monotonic norm constraints to FP-NLP subproblems. "
+            "Use fp_norm_constraint=False."
+        )
+    norm_coef = _normalize_positive_float("fp_norm_constraint_coef", fp_norm_constraint_coef)
+    if norm_coef != 1.0:
+        raise ValueError(
+            "Unsupported feasibility-pump option fp_norm_constraint_coef: this option "
+            "has no effect unless fp_norm_constraint=True, which discopt does not "
+            "currently support. Use fp_norm_constraint_coef=1.0."
+        )
+
+    return _FPConfig(
+        feasibility_norm=normalized_feasibility_norm,
+        main_norm=normalized_main_norm,
+        add_no_good_cuts=projection_cuts,
+        iteration_limit=iteration_limit,
+        projzerotol=projzerotol,
+        mipgap=mipgap,
+        discrete_only=discrete_only,
+    )
 
 
 @dataclass
@@ -884,9 +988,11 @@ def _solve_integer_projection_mip(
     decomp: _DecomposedProblem,
     target: np.ndarray,
     seen_assignments: set[tuple[float, ...]],
-    feasibility_norm: str,
+    projection_norm: str,
     time_limit: float,
     gap_tolerance: float,
+    discrete_only: bool = True,
+    projzerotol: float = 0.0,
     milp_solver: str = "auto",
 ) -> Optional[np.ndarray]:
     """Project the current point to a new integer assignment with a small MILP.
@@ -894,6 +1000,9 @@ def _solve_integer_projection_mip(
     The projection objective is L1 for ``L1`` and as a MILP-compatible surrogate
     for ``L2``. The fixed-integer feasibility NLP still scores candidates with
     the requested L2 merit. ``L_infinity`` uses one shared deviation variable.
+    By default the distance is computed over discrete variables only, matching
+    discopt's original FP semantics; ``discrete_only=False`` also penalizes
+    continuous-variable movement in the projection MILP.
     """
     try:
         from discopt.solvers import SolveStatus
@@ -904,8 +1013,15 @@ def _solve_integer_projection_mip(
         return None
 
     target = np.clip(np.asarray(target, dtype=np.float64), decomp.lb, decomp.ub)
+    if projzerotol > 0.0:
+        zeroable = (np.abs(target) <= projzerotol) & (decomp.lb <= 0.0) & (decomp.ub >= 0.0)
+        target = target.copy()
+        target[zeroable] = 0.0
     n_vars = decomp.n_vars
-    use_linf = feasibility_norm == "L_infinity"
+    distance_indices = list(decomp.int_indices if discrete_only else range(n_vars))
+    if not distance_indices:
+        return _snap_integer_assignment(decomp, target)
+    use_linf = projection_norm == "L_infinity"
 
     a_ub_rows: list[np.ndarray] = []
     b_ub_vals: list[float] = []
@@ -920,7 +1036,7 @@ def _solve_integer_projection_mip(
         bounds = list(zip(decomp.lb.tolist(), decomp.ub.tolist()))
         bounds.append((0.0, 1e20))
 
-        for idx in decomp.int_indices:
+        for idx in distance_indices:
             row = np.zeros(n_master, dtype=np.float64)
             row[idx] = 1.0
             row[deviation_index] = -1.0
@@ -933,11 +1049,11 @@ def _solve_integer_projection_mip(
             a_ub_rows.append(row)
             b_ub_vals.append(float(-target[idx]))
     else:
-        n_dev = len(decomp.int_indices)
+        n_dev = len(distance_indices)
         n_master = n_vars + n_dev
         c = np.zeros(n_master, dtype=np.float64)
         bounds = list(zip(decomp.lb.tolist(), decomp.ub.tolist()))
-        for j, idx in enumerate(decomp.int_indices):
+        for j, idx in enumerate(distance_indices):
             dev_idx = n_vars + j
             c[dev_idx] = 1.0
             width = max(float(decomp.ub[idx] - decomp.lb[idx]), 1.0)
@@ -1006,10 +1122,24 @@ def _run_feasibility_pump(
     max_iterations: int,
     feasibility_norm: str,
     add_no_good_cuts: bool,
+    fp_main_norm: Optional[str] = None,
+    fp_mipgap: Optional[float] = None,
+    fp_discrete_only: bool = True,
+    fp_projzerotol: float = 0.0,
     milp_solver: str = "auto",
 ) -> _FeasibilityPumpResult:
     """Run a bounded MindtPy-style feasibility pump."""
     t_start = time.perf_counter()
+    feasibility_norm = _normalize_feasibility_norm(feasibility_norm)
+    projection_norm = _normalize_feasibility_norm(
+        feasibility_norm if fp_main_norm is None else fp_main_norm
+    )
+    projection_gap = (
+        float(gap_tolerance)
+        if fp_mipgap is None
+        else _normalize_nonnegative_float("fp_mipgap", fp_mipgap)
+    )
+    projzerotol = _normalize_nonnegative_float("fp_projzerotol", fp_projzerotol)
     evaluator = decomp.evaluator
     x_relax, obj_relax = _solve_nlp_relaxation(
         evaluator,
@@ -1068,9 +1198,11 @@ def _run_feasibility_pump(
                 decomp,
                 current,
                 seen_assignments,
-                feasibility_norm,
+                projection_norm,
                 remaining,
-                gap_tolerance,
+                projection_gap,
+                discrete_only=bool(fp_discrete_only),
+                projzerotol=projzerotol,
                 milp_solver=milp_solver,
             )
             mip_count += 1
@@ -1882,11 +2014,43 @@ def solve_feasibility_pump(
     initial_point: Optional[np.ndarray] = None,
     feasibility_norm: str = "L_infinity",
     add_no_good_cuts: bool = True,
+    fp_iteration_limit: Optional[int] = None,
+    fp_cutoffdecr: float = 0.0,
+    fp_projcuts: Optional[bool] = None,
+    fp_transfercuts: bool = False,
+    fp_projzerotol: float = 0.0,
+    fp_mipgap: Optional[float] = None,
+    fp_discrete_only: bool = True,
+    fp_main_norm: Optional[str] = None,
+    fp_norm_constraint: bool = False,
+    fp_norm_constraint_coef: float = 1.0,
     **kwargs,
 ) -> SolveResult:
     """Run the MIP-NLP feasibility pump as a standalone heuristic method."""
+    if kwargs:
+        raise ValueError(
+            "Unsupported feasibility-pump option(s): "
+            + ", ".join(sorted(kwargs))
+            + ". Supported FP options are: "
+            + ", ".join(sorted(FP_OPTION_KEYS))
+            + ", add_no_good_cuts, feasibility_norm."
+        )
     t_start = time.perf_counter()
-    feasibility_norm = _normalize_feasibility_norm(feasibility_norm)
+    fp_config = _normalize_fp_config(
+        feasibility_norm=feasibility_norm,
+        add_no_good_cuts=bool(add_no_good_cuts),
+        fp_iteration_limit=fp_iteration_limit,
+        fp_cutoffdecr=fp_cutoffdecr,
+        fp_projcuts=fp_projcuts,
+        fp_transfercuts=fp_transfercuts,
+        fp_projzerotol=fp_projzerotol,
+        fp_mipgap=fp_mipgap,
+        fp_discrete_only=fp_discrete_only,
+        fp_main_norm=fp_main_norm,
+        fp_norm_constraint=fp_norm_constraint,
+        fp_norm_constraint_coef=fp_norm_constraint_coef,
+    )
+    feasibility_norm = fp_config.feasibility_norm
     decomp = _decompose_model(model)
     evaluator = decomp.evaluator
     obj_sign = (
@@ -1931,9 +2095,13 @@ def solve_feasibility_pump(
         initial_point=initial_point,
         time_limit=time_limit,
         gap_tolerance=gap_tolerance,
-        max_iterations=max_iterations,
+        max_iterations=_fp_iteration_count(max_iterations, fp_config.iteration_limit),
         feasibility_norm=feasibility_norm,
-        add_no_good_cuts=bool(add_no_good_cuts),
+        add_no_good_cuts=fp_config.add_no_good_cuts,
+        fp_main_norm=fp_config.main_norm,
+        fp_mipgap=fp_config.mipgap,
+        fp_discrete_only=fp_config.discrete_only,
+        fp_projzerotol=fp_config.projzerotol,
     )
     wall_time = time.perf_counter() - t_start
     if fp.best_x is not None and fp.best_obj is not None:
@@ -2030,6 +2198,10 @@ def solve_lp_nlp_bb(
     t_start = time.perf_counter()
     init_strategy = _normalize_init_strategy(init_strategy)
     feasibility_norm = _normalize_feasibility_norm(feasibility_norm)
+    fp_config = _normalize_fp_config(
+        feasibility_norm=feasibility_norm,
+        add_no_good_cuts=True,
+    )
     max_slack = _normalize_positive_float("max_slack", max_slack)
     oa_penalty_factor = _normalize_positive_float("oa_penalty_factor", oa_penalty_factor)
     heuristic_nonconvex = bool(heuristic_nonconvex)
@@ -2134,7 +2306,11 @@ def solve_lp_nlp_bb(
         else:
             add_oa_cuts_at(_default_nlp_start(decomp.lb, decomp.ub))
     elif init_strategy == "fp":
-        fp_iterations = max(1, min(max_iterations if max_iterations > 0 else 1, 10))
+        fp_iterations = _fp_iteration_count(
+            max_iterations,
+            fp_config.iteration_limit,
+            default_cap=10,
+        )
         fp_result = _run_feasibility_pump(
             model,
             decomp,
@@ -2143,8 +2319,12 @@ def solve_lp_nlp_bb(
             time_limit=max(time_limit - (time.perf_counter() - t_start), 0.0),
             gap_tolerance=gap_tolerance,
             max_iterations=fp_iterations,
-            feasibility_norm=feasibility_norm,
-            add_no_good_cuts=True,
+            feasibility_norm=fp_config.feasibility_norm,
+            add_no_good_cuts=fp_config.add_no_good_cuts,
+            fp_main_norm=fp_config.main_norm,
+            fp_mipgap=fp_config.mipgap,
+            fp_discrete_only=fp_config.discrete_only,
+            fp_projzerotol=fp_config.projzerotol,
             milp_solver=milp_solver,
         )
         x_cut = fp_result.best_x if fp_result.best_x is not None else fp_result.best_near_x
@@ -2352,6 +2532,21 @@ def solve_goa(
     feasibility_norm = _normalize_feasibility_norm(
         amp_options.pop("feasibility_norm", "L_infinity")
     )
+    fp_kwargs = {key: amp_options.pop(key) for key in FP_OPTION_KEYS if key in amp_options}
+    fp_config = _normalize_fp_config(
+        feasibility_norm=feasibility_norm,
+        add_no_good_cuts=bool(add_no_good_cuts),
+        fp_iteration_limit=fp_kwargs.get("fp_iteration_limit"),
+        fp_cutoffdecr=fp_kwargs.get("fp_cutoffdecr", 0.0),
+        fp_projcuts=fp_kwargs.get("fp_projcuts"),
+        fp_transfercuts=fp_kwargs.get("fp_transfercuts", False),
+        fp_projzerotol=fp_kwargs.get("fp_projzerotol", 0.0),
+        fp_mipgap=fp_kwargs.get("fp_mipgap"),
+        fp_discrete_only=fp_kwargs.get("fp_discrete_only", True),
+        fp_main_norm=fp_kwargs.get("fp_main_norm"),
+        fp_norm_constraint=fp_kwargs.get("fp_norm_constraint", False),
+        fp_norm_constraint_coef=fp_kwargs.get("fp_norm_constraint_coef", 1.0),
+    )
     amp_kwargs = dict(GOA_AMP_OPTION_DEFAULTS)
     for key in GOA_AMP_OPTION_DEFAULTS:
         if key in amp_options:
@@ -2388,6 +2583,7 @@ def solve_goa(
             initial_point=initial_point,
             add_no_good_cuts=bool(add_no_good_cuts),
             feasibility_norm=feasibility_norm,
+            **fp_kwargs,
         )
         result.wall_time += elapsed
         return result
@@ -2406,7 +2602,11 @@ def solve_goa(
             pump_budget = min(remaining, max(0.0, 0.1 * float(time_limit)), 10.0)
         else:
             pump_budget = 10.0
-        fp_iterations = max(1, min(int(max_iterations) if max_iterations > 0 else 1, 10))
+        fp_iterations = _fp_iteration_count(
+            max_iterations,
+            fp_config.iteration_limit,
+            default_cap=10,
+        )
         if pump_budget > 0.0:
             fp_result = _run_feasibility_pump(
                 model,
@@ -2416,8 +2616,12 @@ def solve_goa(
                 time_limit=pump_budget,
                 gap_tolerance=gap_tolerance,
                 max_iterations=fp_iterations,
-                feasibility_norm=feasibility_norm,
-                add_no_good_cuts=bool(add_no_good_cuts),
+                feasibility_norm=fp_config.feasibility_norm,
+                add_no_good_cuts=fp_config.add_no_good_cuts,
+                fp_main_norm=fp_config.main_norm,
+                fp_mipgap=fp_config.mipgap,
+                fp_discrete_only=fp_config.discrete_only,
+                fp_projzerotol=fp_config.projzerotol,
             )
             pre_amp_mip_count += fp_result.mip_count
             if fp_result.best_x is not None:
@@ -2503,6 +2707,16 @@ def solve_oa(
     oa_penalty_factor: float = 1000.0,
     add_no_good_cuts: bool = False,
     feasibility_norm: str = "L_infinity",
+    fp_iteration_limit: Optional[int] = None,
+    fp_cutoffdecr: float = 0.0,
+    fp_projcuts: Optional[bool] = None,
+    fp_transfercuts: bool = False,
+    fp_projzerotol: float = 0.0,
+    fp_mipgap: Optional[float] = None,
+    fp_discrete_only: bool = True,
+    fp_main_norm: Optional[str] = None,
+    fp_norm_constraint: bool = False,
+    fp_norm_constraint_coef: float = 1.0,
     add_regularization: Optional[str] = None,
     level_coef: float = 0.5,
     stalling_limit: Optional[int] = None,
@@ -2573,6 +2787,30 @@ def solve_oa(
         Add integer-exclusion cuts after infeasible fixed-integer NLP solves.
     feasibility_norm : {"L1", "L2", "L_infinity"}
         Violation norm minimized by the feasibility subproblem heuristic.
+    fp_iteration_limit : int, optional
+        Iteration cap for the feasibility-pump initializer. When omitted,
+        ``init_strategy="fp"`` keeps the legacy cap of ``min(max_iterations, 10)``.
+    fp_main_norm : {"L1", "L2", "L_infinity"}, optional
+        Distance norm used by the FP projection MILP. When omitted, this follows
+        ``feasibility_norm``. ``L2`` uses the current MILP-compatible L1
+        projection surrogate while the feasibility subproblem still scores
+        nonlinear violation with squared L2 merit.
+    fp_discrete_only : bool
+        When true, the FP projection distance is computed only on discrete
+        variables. When false, continuous-variable deviations are penalized too.
+    fp_projcuts : bool, optional
+        Explicit control for discopt's FP projection-MILP path with binary
+        no-good cuts. When false, FP falls back to direct integer rounding.
+        When omitted, FP initialization enables this path by default.
+    fp_projzerotol : float
+        Projection target entries with absolute value at or below this tolerance
+        are treated as zero when zero lies within that variable's bounds.
+    fp_mipgap : float, optional
+        Gap tolerance for FP projection MILPs. Defaults to ``gap_tolerance``.
+    fp_cutoffdecr, fp_transfercuts, fp_norm_constraint, fp_norm_constraint_coef
+        MindtPy FP controls that are explicitly unsupported in discopt's current
+        FP implementation unless set to their no-op defaults. Non-default values
+        raise ``ValueError`` rather than being silently ignored.
     add_regularization : {None, "level_L1", "level_L2", "level_L_infinity",
             "grad_lag", "hess_lag", "hess_only_lag", "sqp_lag"}
         Optional level-set regularized OA master before fixed-integer NLP solves.
@@ -2606,6 +2844,20 @@ def solve_oa(
     t_start = time.perf_counter()
     init_strategy = _normalize_init_strategy(init_strategy)
     feasibility_norm = _normalize_feasibility_norm(feasibility_norm)
+    fp_config = _normalize_fp_config(
+        feasibility_norm=feasibility_norm,
+        add_no_good_cuts=True,
+        fp_iteration_limit=fp_iteration_limit,
+        fp_cutoffdecr=fp_cutoffdecr,
+        fp_projcuts=fp_projcuts,
+        fp_transfercuts=fp_transfercuts,
+        fp_projzerotol=fp_projzerotol,
+        fp_mipgap=fp_mipgap,
+        fp_discrete_only=fp_discrete_only,
+        fp_main_norm=fp_main_norm,
+        fp_norm_constraint=fp_norm_constraint,
+        fp_norm_constraint_coef=fp_norm_constraint_coef,
+    )
     add_regularization = _normalize_regularization(add_regularization)
     max_slack = _normalize_positive_float("max_slack", max_slack)
     oa_penalty_factor = _normalize_positive_float("oa_penalty_factor", oa_penalty_factor)
@@ -2783,7 +3035,11 @@ def solve_oa(
                 oa_cut_relaxable=oa_cut_relaxable,
             )
     elif init_strategy == "fp":
-        fp_iterations = max(1, min(max_iterations if max_iterations > 0 else 1, 10))
+        fp_iterations = _fp_iteration_count(
+            max_iterations,
+            fp_config.iteration_limit,
+            default_cap=10,
+        )
         fp_result = _run_feasibility_pump(
             model,
             decomp,
@@ -2792,8 +3048,12 @@ def solve_oa(
             time_limit=max(time_limit - (time.perf_counter() - t_start), 0.0),
             gap_tolerance=gap_tolerance,
             max_iterations=fp_iterations,
-            feasibility_norm=feasibility_norm,
-            add_no_good_cuts=True,
+            feasibility_norm=fp_config.feasibility_norm,
+            add_no_good_cuts=fp_config.add_no_good_cuts,
+            fp_main_norm=fp_config.main_norm,
+            fp_mipgap=fp_config.mipgap,
+            fp_discrete_only=fp_config.discrete_only,
+            fp_projzerotol=fp_config.projzerotol,
             milp_solver=milp_solver,
         )
         x_cut = fp_result.best_x if fp_result.best_x is not None else fp_result.best_near_x
