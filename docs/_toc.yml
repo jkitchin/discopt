@@ -58,6 +58,8 @@ parts:
       - file: notebooks/suspect_head_to_head
       - file: notebooks/nlp_bb
       - file: notebooks/export_formats
+      - file: notebooks/pyomo_solver
+      - file: pyomo_solver
       - file: notebooks/callbacks
   - caption: Solver Backends
     chapters:
