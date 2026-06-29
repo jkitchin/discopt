@@ -11,6 +11,17 @@ except ImportError:
     HAS_HIGHS = False
 
 
+def _require_gurobi():
+    gp = pytest.importorskip("gurobipy")
+    try:
+        env = gp.Env(empty=True)
+        env.setParam("OutputFlag", 0)
+        env.start()
+        env.dispose()
+    except Exception as exc:
+        pytest.skip(f"Gurobi is installed but no usable license is available: {exc}")
+
+
 def _binary_model(name="mip_nlp_route"):
     m = dm.Model(name)
     x = m.binary("x")
@@ -524,8 +535,6 @@ def test_mip_nlp_and_deprecated_oa_alias_reformulate_gdp(monkeypatch):
     ("method", "issue"),
     [
         ("roa", "#116/#117"),
-        ("lp_nlp_bb", "#119"),
-        ("lp/nlp-bb", "#119"),
     ],
 )
 def test_mip_nlp_reserved_methods_raise(method, issue):
@@ -533,6 +542,218 @@ def test_mip_nlp_reserved_methods_raise(method, issue):
 
     with pytest.raises(NotImplementedError, match=issue):
         solve_mip_nlp(_binary_model(f"{method}_reserved"), method=method)
+
+
+def test_mip_nlp_method_lp_nlp_bb_requires_gurobi_backend():
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    with pytest.raises(RuntimeError, match="requires milp_solver='gurobi'"):
+        solve_mip_nlp(_binary_model("lp_nlp_bb_backend"), method="lp_nlp_bb", milp_solver="highs")
+
+
+def test_mip_nlp_method_lp_nlp_bb_alias_routes_to_single_tree_solver(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    calls = {}
+
+    def fake_solve_lp_nlp_bb(model, **kwargs):
+        calls.update(kwargs)
+        return SolveResult(status="optimal", objective=0.0, bound=0.0, gap=0.0)
+
+    monkeypatch.setattr(oa_module, "solve_lp_nlp_bb", fake_solve_lp_nlp_bb)
+
+    result = solve_mip_nlp(
+        _binary_model("lp_nlp_bb_route"),
+        method="lp/nlp-bb",
+        milp_solver="gurobi",
+        init_strategy="initial_binary",
+        feasibility_norm="L1",
+    )
+
+    assert result.status == "optimal"
+    assert calls["milp_solver"] == "gurobi"
+    assert calls["init_strategy"] == "initial_binary"
+    assert calls["feasibility_norm"] == "L1"
+
+
+def test_lp_nlp_bb_lazy_callback_solves_fixed_integer_nlp(monkeypatch):
+    import discopt.solvers.gurobi as gurobi_module
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers import MILPResult, SolveStatus
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    calls = {"lazy": 0, "subproblem": 0, "oa": 0}
+
+    def fake_relaxation(*_args, **_kwargs):
+        return None, None
+
+    def fake_subproblem(
+        _evaluator,
+        _lb,
+        _ub,
+        _int_indices,
+        x_master,
+        _nlp_solver,
+        initial_point=None,
+        return_attempt=False,
+    ):
+        assert initial_point is not None
+        calls["subproblem"] += 1
+        x = np.asarray(x_master, dtype=np.float64).copy()
+        return x, 0.0
+
+    def fake_add_oa_cuts(
+        _evaluator,
+        _x_star,
+        n_vars,
+        _n_cons,
+        _constraint_senses,
+        oa_A_rows,
+        oa_b_rows,
+        _obj_is_linear,
+        constraint_convex_mask,
+        _objective_is_convex,
+        equality_relaxation=False,
+        oa_cut_relaxable=None,
+    ):
+        calls["oa"] += 1
+        assert constraint_convex_mask is None or all(
+            isinstance(v, bool) for v in constraint_convex_mask
+        )
+        row = np.zeros(n_vars, dtype=np.float64)
+        row[0] = 1.0
+        oa_A_rows.append(row)
+        oa_b_rows.append(-1.0)
+        if oa_cut_relaxable is not None:
+            oa_cut_relaxable.append(True)
+
+    def fake_lazy_milp(**kwargs):
+        candidate = np.zeros_like(kwargs["c"], dtype=np.float64)
+        cuts = kwargs["lazy_callback"](candidate)
+        calls["lazy"] += 1
+        assert cuts
+        row, rhs = cuts[0]
+        assert row.shape == candidate.shape
+        assert float(row @ candidate) > rhs
+        return MILPResult(
+            status=SolveStatus.OPTIMAL,
+            x=candidate,
+            objective=0.0,
+            bound=0.0,
+            gap=0.0,
+            node_count=1,
+        )
+
+    monkeypatch.setattr(oa_module, "_solve_nlp_relaxation", fake_relaxation)
+    monkeypatch.setattr(oa_module, "_solve_nlp_subproblem", fake_subproblem)
+    monkeypatch.setattr(oa_module, "_add_oa_cuts", fake_add_oa_cuts)
+    monkeypatch.setattr(gurobi_module, "solve_milp_with_lazy_cuts", fake_lazy_milp)
+
+    result = solve_mip_nlp(
+        _binary_model("lp_nlp_bb_lazy"),
+        method="lp_nlp_bb",
+        milp_solver="gurobi",
+    )
+
+    assert result.status == "optimal"
+    assert result.subnlp_calls == 1
+    assert calls["lazy"] == 1
+    assert calls["subproblem"] == 1
+    assert calls["oa"] >= 2
+
+
+def test_lp_nlp_bb_linear_objective_constant_offsets_certified_bound(monkeypatch):
+    import discopt.solvers.gurobi as gurobi_module
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers import MILPResult, SolveStatus
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    m = dm.Model("lp_nlp_bb_constant_bound")
+    y = m.binary("y")
+    m.minimize(y + 100.0)
+
+    def fake_relaxation(*_args, **_kwargs):
+        return None, None
+
+    def fake_subproblem(
+        _evaluator,
+        _lb,
+        _ub,
+        _int_indices,
+        x_master,
+        _nlp_solver,
+        initial_point=None,
+        return_attempt=False,
+    ):
+        return np.asarray(x_master, dtype=np.float64), 100.0
+
+    def fake_lazy_milp(**kwargs):
+        candidate = np.zeros_like(kwargs["c"], dtype=np.float64)
+        kwargs["lazy_callback"](candidate)
+        return MILPResult(
+            status=SolveStatus.OPTIMAL,
+            x=candidate,
+            objective=0.0,
+            bound=0.0,
+            gap=0.0,
+            node_count=1,
+        )
+
+    monkeypatch.setattr(oa_module, "_solve_nlp_relaxation", fake_relaxation)
+    monkeypatch.setattr(oa_module, "_solve_nlp_subproblem", fake_subproblem)
+    monkeypatch.setattr(gurobi_module, "solve_milp_with_lazy_cuts", fake_lazy_milp)
+
+    result = solve_mip_nlp(m, method="lp_nlp_bb", milp_solver="gurobi")
+
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(100.0)
+    assert result.bound == pytest.approx(100.0)
+    assert result.gap == pytest.approx(0.0)
+    assert result.gap_certified is True
+
+
+def test_lp_nlp_bb_gurobi_solves_mindtpy_fixture_if_available():
+    _require_gurobi()
+
+    result = _mindtpy_simple_minlp("lp_nlp_bb_gurobi_mindtpy").solve(
+        solver="mip-nlp",
+        mip_nlp_method="lp_nlp_bb",
+        milp_solver="gurobi",
+        time_limit=30.0,
+        gap_tolerance=1e-5,
+    )
+
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(3.5, abs=1e-3)
+    assert result.bound == pytest.approx(3.5, abs=1e-3)
+    assert result.gap == pytest.approx(0.0, abs=1e-6)
+    assert result.gap_certified is True
+
+
+def test_lp_nlp_bb_gurobi_reports_constant_offset_bound_if_available():
+    _require_gurobi()
+
+    m = dm.Model("lp_nlp_bb_gurobi_constant_bound")
+    x = m.continuous("x", lb=0.0, ub=2.0)
+    y = m.binary("y")
+    m.subject_to((x - 1.0) ** 2 <= 1.0)
+    m.subject_to(x >= y)
+    m.minimize(2.0 * x + 3.0 * y + 100.0)
+
+    result = m.solve(
+        solver="mip-nlp",
+        mip_nlp_method="lp_nlp_bb",
+        milp_solver="gurobi",
+        time_limit=30.0,
+        gap_tolerance=1e-5,
+    )
+
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(100.0, abs=1e-6)
+    assert result.bound == pytest.approx(100.0, abs=1e-6)
+    assert result.gap == pytest.approx(0.0, abs=1e-8)
+    assert result.gap_certified is True
 
 
 def test_mip_nlp_method_gloa_is_reserved_for_gdp_axis():

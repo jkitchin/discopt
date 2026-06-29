@@ -2793,9 +2793,11 @@ class Model:
             ``gurobi_options={...}``.
             Use ``solver="mip-nlp"`` to select the MIP-NLP decomposition
             family. Current implemented ``mip_nlp_method`` values are ``"oa"``,
-            ``"ecp"``, ``"fp"``, and ``"goa"``; ``"roa"`` and
-            ``"lp_nlp_bb"`` are reserved until their dedicated implementations
-            land. Top-level OA/ECP options such as ``equality_relaxation``,
+            ``"ecp"``, ``"fp"``, ``"goa"``, and ``"lp_nlp_bb"``; ``"roa"``
+            is reserved until its dedicated implementation lands. The
+            LP/NLP-BB method uses single-tree lazy OA cuts and currently
+            requires ``milp_solver="gurobi"``. Top-level OA/ECP options such
+            as ``equality_relaxation``,
             ``ecp_mode``, ``feasibility_cuts``, ``heuristic_nonconvex``,
             ``add_slack``, ``max_slack``, ``oa_penalty_factor``,
             ``add_no_good_cuts``, ``feasibility_norm``, ``add_regularization``,

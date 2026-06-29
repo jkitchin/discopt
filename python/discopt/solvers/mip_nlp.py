@@ -7,10 +7,9 @@ from typing import Any, Optional
 from discopt.modeling.core import Model, SolveResult
 from discopt.solvers.mip_nlp_options import GOA_OPTION_KEYS
 
-_IMPLEMENTED_METHODS = frozenset({"oa", "ecp", "fp", "goa"})
+_IMPLEMENTED_METHODS = frozenset({"oa", "ecp", "fp", "goa", "lp_nlp_bb"})
 _RESERVED_METHOD_ISSUES = {
     "roa": "#116/#117",
-    "lp_nlp_bb": "#119",
 }
 SUPPORTED_METHODS = _IMPLEMENTED_METHODS | frozenset(_RESERVED_METHOD_ISSUES)
 _METHOD_ALIASES = {
@@ -45,6 +44,20 @@ _FP_OPTION_KEYS = frozenset(
         "init_strategy",
     }
 )
+_LP_NLP_BB_OPTION_KEYS = frozenset(
+    {
+        "equality_relaxation",
+        "feasibility_cuts",
+        "init_strategy",
+        "heuristic_nonconvex",
+        "add_slack",
+        "max_slack",
+        "oa_penalty_factor",
+        "add_no_good_cuts",
+        "feasibility_norm",
+        "milp_solver",
+    }
+)
 
 
 def _normalize_method(method: Any) -> str:
@@ -61,7 +74,8 @@ def _normalize_method(method: Any) -> str:
     if normalized not in SUPPORTED_METHODS:
         reserved = ", ".join(sorted(_RESERVED_METHOD_ISSUES))
         raise ValueError(
-            f"Unknown mip_nlp_method={method!r}. Choose 'oa', 'ecp', 'fp', or 'goa'. "
+            f"Unknown mip_nlp_method={method!r}. Choose 'oa', 'ecp', 'fp', "
+            "'goa', or 'lp_nlp_bb'. "
             f"Reserved future methods are: {reserved}."
         )
     return normalized
@@ -102,6 +116,8 @@ def solve_mip_nlp(
     if method in _IMPLEMENTED_METHODS:
         if method == "fp":
             supported_keys = _FP_OPTION_KEYS
+        elif method == "lp_nlp_bb":
+            supported_keys = _LP_NLP_BB_OPTION_KEYS
         elif method == "goa":
             supported_keys = GOA_OPTION_KEYS
         else:
@@ -151,6 +167,22 @@ def solve_mip_nlp(
                 **options,
             )
 
+        if method == "lp_nlp_bb":
+            from discopt.solvers.oa import _normalize_init_strategy, solve_lp_nlp_bb
+
+            options["init_strategy"] = _normalize_init_strategy(
+                options.get("init_strategy", "rNLP")
+            )
+            return solve_lp_nlp_bb(
+                model,
+                time_limit=time_limit,
+                gap_tolerance=gap_tolerance,
+                max_iterations=max_iterations,
+                nlp_solver=nlp_solver,
+                initial_point=initial_point,
+                **options,
+            )
+
         from discopt.solvers.oa import _normalize_init_strategy, solve_oa
 
         if "ecp_mode" in kwargs:
@@ -176,5 +208,5 @@ def solve_mip_nlp(
     raise NotImplementedError(
         f"mip_nlp_method={method!r} is reserved for a future MIP-NLP "
         f"implementation tracked in {_RESERVED_METHOD_ISSUES[method]}; currently "
-        "implemented methods are 'oa', 'ecp', 'fp', and 'goa'."
+        "implemented methods are 'oa', 'ecp', 'fp', 'goa', and 'lp_nlp_bb'."
     )

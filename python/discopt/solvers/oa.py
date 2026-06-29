@@ -310,6 +310,21 @@ class _DerivativeRegularizationData:
     hessian: Optional[np.ndarray] = None
 
 
+@dataclass
+class _MasterMILPData:
+    """Matrix data for an OA-style MILP master."""
+
+    c: np.ndarray
+    A_ub: Optional[np.ndarray]
+    b_ub: Optional[np.ndarray]
+    A_eq: Optional[np.ndarray]
+    b_eq: Optional[np.ndarray]
+    bounds: list[tuple[float, float]]
+    integrality: np.ndarray
+    use_objective_epigraph: bool
+    slack_index: Optional[int]
+
+
 # ── Problem Decomposition ─────────────────────────────────────
 
 
@@ -1311,7 +1326,7 @@ def _add_feasibility_cuts(
 # ── MILP Master Problem ──────────────────────────────────────
 
 
-def _solve_master_milp(
+def _build_master_milp_data(
     linear_A_rows,
     linear_b_rows,
     linear_senses,
@@ -1324,26 +1339,13 @@ def _solve_master_milp(
     obj_coeffs,
     obj_is_linear,
     objective_bound_valid,
-    time_limit,
-    gap_tolerance,
     add_slack=False,
     max_slack=1000.0,
     oa_penalty_factor=1000.0,
     oa_cut_relaxable=None,
     use_objective_epigraph=None,
-    milp_solver="auto",
-):
-    """Build and solve the master MILP."""
-    try:
-        from discopt.solvers.lp_backend import get_milp_solver
-
-        solve_milp = get_milp_solver(backend=milp_solver)
-    except ImportError as e:
-        raise ImportError(
-            "OA solver requires a MILP backend for the master. Install one of: "
-            "pip install highspy  |  pip install pounce-solver  |  pip install gurobipy"
-        ) from e
-
+) -> _MasterMILPData:
+    """Build matrix data for an OA-style MILP master."""
     # ``use_objective_epigraph`` controls master layout when supplied; the
     # certification flag remains only as the compatibility fallback.
     if use_objective_epigraph is None:
@@ -1438,7 +1440,7 @@ def _solve_master_milp(
     int_vec = np.zeros(n_master, dtype=np.int32)
     int_vec[:n_vars] = integrality
 
-    return solve_milp(
+    return _MasterMILPData(
         c=c,
         A_ub=A_ub,
         b_ub=b_ub,
@@ -1446,6 +1448,72 @@ def _solve_master_milp(
         b_eq=b_eq,
         bounds=bounds_list,
         integrality=int_vec,
+        use_objective_epigraph=bool(use_objective_epigraph),
+        slack_index=slack_index,
+    )
+
+
+def _solve_master_milp(
+    linear_A_rows,
+    linear_b_rows,
+    linear_senses,
+    oa_A_rows,
+    oa_b_rows,
+    n_vars,
+    integrality,
+    lb,
+    ub,
+    obj_coeffs,
+    obj_is_linear,
+    objective_bound_valid,
+    time_limit,
+    gap_tolerance,
+    add_slack=False,
+    max_slack=1000.0,
+    oa_penalty_factor=1000.0,
+    oa_cut_relaxable=None,
+    use_objective_epigraph=None,
+    milp_solver="auto",
+):
+    """Build and solve the master MILP."""
+    try:
+        from discopt.solvers.lp_backend import get_milp_solver
+
+        solve_milp = get_milp_solver(backend=milp_solver)
+    except ImportError as e:
+        raise ImportError(
+            "OA solver requires a MILP backend for the master. Install one of: "
+            "pip install highspy  |  pip install pounce-solver  |  pip install gurobipy"
+        ) from e
+
+    master = _build_master_milp_data(
+        linear_A_rows,
+        linear_b_rows,
+        linear_senses,
+        oa_A_rows,
+        oa_b_rows,
+        n_vars,
+        integrality,
+        lb,
+        ub,
+        obj_coeffs,
+        obj_is_linear,
+        objective_bound_valid,
+        add_slack=add_slack,
+        max_slack=max_slack,
+        oa_penalty_factor=oa_penalty_factor,
+        oa_cut_relaxable=oa_cut_relaxable,
+        use_objective_epigraph=use_objective_epigraph,
+    )
+
+    return solve_milp(
+        c=master.c,
+        A_ub=master.A_ub,
+        b_ub=master.b_ub,
+        A_eq=master.A_eq,
+        b_eq=master.b_eq,
+        bounds=master.bounds,
+        integrality=master.integrality,
         time_limit=time_limit,
         gap_tolerance=gap_tolerance,
     )
@@ -1808,6 +1876,370 @@ def solve_feasibility_pump(
         wall_time=wall_time,
         mip_count=fp.mip_count,
         gap_certified=False,
+    )
+
+
+def _require_lp_nlp_bb_gurobi_backend(milp_solver: str) -> None:
+    if not isinstance(milp_solver, str) or milp_solver.strip().lower() != "gurobi":
+        raise RuntimeError(
+            "mip_nlp_method='lp_nlp_bb' requires milp_solver='gurobi' because "
+            "LP/NLP branch-and-bound uses single-tree lazy constraint callbacks. "
+            "Backends 'auto', 'highs', 'pounce', and 'simplex' do not expose the "
+            "required persistent lazy-cut capability."
+        )
+
+
+def _format_lazy_master_cut(
+    row,
+    *,
+    n_vars: int,
+    master: _MasterMILPData,
+    relaxable: bool,
+) -> np.ndarray:
+    """Extend an OA cut row to the active master layout for Gurobi cbLazy."""
+    cut = np.asarray(row, dtype=np.float64).ravel()
+    if master.use_objective_epigraph and len(cut) == n_vars:
+        cut = np.append(cut, 0.0)
+    if master.slack_index is not None:
+        cut = np.append(cut, -1.0 if relaxable else 0.0)
+    if len(cut) != len(master.c):
+        raise ValueError(
+            f"lazy OA cut has {len(cut)} coefficients but master has {len(master.c)} variables"
+        )
+    return cut
+
+
+def solve_lp_nlp_bb(
+    model: Model,
+    time_limit: float = 3600.0,
+    gap_tolerance: float = 1e-4,
+    max_iterations: int = 100,
+    nlp_solver: str = "ipm",
+    init_strategy: str = "rNLP",
+    initial_point: Optional[np.ndarray] = None,
+    equality_relaxation: bool = False,
+    feasibility_cuts: bool = True,
+    heuristic_nonconvex: bool = False,
+    add_slack: bool = False,
+    max_slack: float = 1000.0,
+    oa_penalty_factor: float = 1000.0,
+    add_no_good_cuts: bool = False,
+    feasibility_norm: str = "L_infinity",
+    milp_solver: str = "gurobi",
+    **kwargs,
+) -> SolveResult:
+    """Solve a convex MINLP with the LP/NLP branch-and-bound variant.
+
+    This is a single-tree OA method: the MILP master is solved once, and each
+    integer incumbent triggers a fixed-integer NLP solve inside a Gurobi lazy
+    constraint callback. Lazy rows are generated through the same OA and
+    feasibility-cut helpers used by the multi-tree OA method. ``max_iterations``
+    only caps the optional feasibility-pump initializer on this path; the main
+    single-tree search is delegated to Gurobi and is controlled by
+    ``time_limit`` and ``gap_tolerance``.
+    """
+    if kwargs:
+        raise ValueError(
+            "Unsupported LP/NLP BB option(s): "
+            + ", ".join(sorted(kwargs))
+            + ". Supported options are: add_no_good_cuts, add_slack, equality_relaxation, "
+            "feasibility_cuts, feasibility_norm, heuristic_nonconvex, init_strategy, "
+            "max_slack, milp_solver, oa_penalty_factor."
+        )
+    _require_lp_nlp_bb_gurobi_backend(milp_solver)
+    t_start = time.perf_counter()
+    init_strategy = _normalize_init_strategy(init_strategy)
+    feasibility_norm = _normalize_feasibility_norm(feasibility_norm)
+    max_slack = _normalize_positive_float("max_slack", max_slack)
+    oa_penalty_factor = _normalize_positive_float("oa_penalty_factor", oa_penalty_factor)
+    heuristic_nonconvex = bool(heuristic_nonconvex)
+    if heuristic_nonconvex:
+        equality_relaxation = True
+        add_slack = True
+    add_slack = bool(add_slack)
+    add_no_good_cuts = bool(add_no_good_cuts)
+
+    decomp = _decompose_model(model)
+    evaluator = decomp.evaluator
+    n_vars = decomp.n_vars
+    n_cons = decomp.n_cons
+    obj_sign = (
+        -1.0
+        if (model._objective is not None and model._objective.sense == ObjectiveSense.MAXIMIZE)
+        else 1.0
+    )
+    if decomp.oa_constraint_mask is not None and not all(decomp.oa_constraint_mask):
+        logger.warning(
+            "LP/NLP BB: generating OA cuts only for %d of %d constraints classified convex",
+            sum(1 for is_convex in decomp.oa_constraint_mask if is_convex),
+            len(decomp.oa_constraint_mask),
+        )
+    if not decomp.obj_is_linear and not decomp.oa_objective_is_convex:
+        logger.warning(
+            "LP/NLP BB: nonlinear objective is not convex in the optimization sense; "
+            "disabling certified bound/gap reporting and skipping objective OA cuts"
+        )
+    master_bound_valid = decomp.master_bound_valid and not heuristic_nonconvex
+
+    if len(decomp.int_indices) == 0:
+        x_sol, obj = _solve_nlp_relaxation(
+            evaluator,
+            decomp.lb,
+            decomp.ub,
+            nlp_solver,
+            initial_point=initial_point,
+        )
+        wall_time = time.perf_counter() - t_start
+        if x_sol is not None:
+            return SolveResult(
+                status="optimal",
+                objective=obj_sign * obj,
+                bound=obj_sign * obj,
+                gap=0.0,
+                x=_build_x_dict(x_sol, model),
+                wall_time=wall_time,
+                mip_count=0,
+            )
+        return SolveResult(
+            status="infeasible",
+            objective=None,
+            bound=None,
+            gap=None,
+            x={},
+            wall_time=wall_time,
+            mip_count=0,
+        )
+
+    oa_A_rows: list[np.ndarray] = []
+    oa_b_rows: list[float] = []
+    oa_cut_relaxable: list[bool] = []
+    incumbent: Optional[np.ndarray] = None
+    incumbent_obj: Optional[float] = None
+    nlp_subproblem_count = 0
+
+    def accept_incumbent(x: np.ndarray, obj: float) -> None:
+        nonlocal incumbent, incumbent_obj
+        if incumbent_obj is None or obj < incumbent_obj:
+            incumbent = np.asarray(x, dtype=np.float64).copy()
+            incumbent_obj = float(obj)
+
+    def add_oa_cuts_at(x_cut: np.ndarray) -> None:
+        _add_oa_cuts(
+            evaluator,
+            x_cut,
+            n_vars,
+            n_cons,
+            decomp.constraint_senses,
+            oa_A_rows,
+            oa_b_rows,
+            decomp.obj_is_linear,
+            decomp.oa_constraint_mask,
+            decomp.oa_objective_is_convex,
+            equality_relaxation=equality_relaxation,
+            oa_cut_relaxable=oa_cut_relaxable,
+        )
+
+    if init_strategy == "rNLP":
+        x_relax, obj_relax = _solve_nlp_relaxation(
+            evaluator,
+            decomp.lb,
+            decomp.ub,
+            nlp_solver,
+            initial_point=initial_point,
+        )
+        if x_relax is not None:
+            add_oa_cuts_at(x_relax)
+            if _is_integer_feasible(decomp, x_relax) and obj_relax is not None:
+                accept_incumbent(x_relax, obj_relax)
+        else:
+            add_oa_cuts_at(_default_nlp_start(decomp.lb, decomp.ub))
+    elif init_strategy == "fp":
+        fp_iterations = max(1, min(max_iterations if max_iterations > 0 else 1, 10))
+        fp_result = _run_feasibility_pump(
+            model,
+            decomp,
+            nlp_solver=nlp_solver,
+            initial_point=initial_point,
+            time_limit=max(time_limit - (time.perf_counter() - t_start), 0.0),
+            gap_tolerance=gap_tolerance,
+            max_iterations=fp_iterations,
+            feasibility_norm=feasibility_norm,
+            add_no_good_cuts=True,
+            milp_solver=milp_solver,
+        )
+        x_cut = fp_result.best_x if fp_result.best_x is not None else fp_result.best_near_x
+        add_oa_cuts_at(x_cut if x_cut is not None else _default_nlp_start(decomp.lb, decomp.ub))
+        if fp_result.best_x is not None and fp_result.best_obj is not None:
+            accept_incumbent(fp_result.best_x, fp_result.best_obj)
+    else:
+        x_seed = _build_initial_strategy_point(decomp, init_strategy, initial_point)
+        x_init, obj_init = _solve_nlp_subproblem(
+            evaluator,
+            decomp.lb,
+            decomp.ub,
+            decomp.int_indices,
+            x_seed,
+            nlp_solver,
+            initial_point=x_seed,
+        )
+        add_oa_cuts_at(x_init if x_init is not None else x_seed)
+        if x_init is not None and obj_init is not None:
+            accept_incumbent(x_init, obj_init)
+
+    elapsed = time.perf_counter() - t_start
+    remaining = max(float(time_limit) - elapsed, 0.0)
+    master = _build_master_milp_data(
+        decomp.linear_A_rows,
+        decomp.linear_b_rows,
+        decomp.linear_senses,
+        oa_A_rows,
+        oa_b_rows,
+        n_vars,
+        decomp.integrality,
+        decomp.lb,
+        decomp.ub,
+        decomp.obj_coeffs,
+        decomp.obj_is_linear,
+        master_bound_valid,
+        add_slack=add_slack,
+        max_slack=max_slack,
+        oa_penalty_factor=oa_penalty_factor,
+        oa_cut_relaxable=oa_cut_relaxable,
+        use_objective_epigraph=(not decomp.obj_is_linear and decomp.oa_objective_is_convex),
+    )
+
+    def collect_new_lazy_cuts(start: int, master_x: np.ndarray) -> list[tuple[np.ndarray, float]]:
+        rows: list[tuple[np.ndarray, float]] = []
+        for idx in range(start, len(oa_A_rows)):
+            relaxable = bool(oa_cut_relaxable[idx]) if idx < len(oa_cut_relaxable) else True
+            row = _format_lazy_master_cut(
+                oa_A_rows[idx],
+                n_vars=n_vars,
+                master=master,
+                relaxable=relaxable,
+            )
+            rhs = float(oa_b_rows[idx])
+            if float(np.dot(row, master_x)) > rhs + 1e-6:
+                rows.append((row, rhs))
+        return rows
+
+    def lazy_callback(master_x: np.ndarray) -> list[tuple[np.ndarray, float]]:
+        nonlocal nlp_subproblem_count
+        x_master = np.asarray(master_x[:n_vars], dtype=np.float64)
+        start = len(oa_A_rows)
+        nlp_subproblem_count += 1
+        x_nlp, obj_nlp = _solve_nlp_subproblem(
+            evaluator,
+            decomp.lb,
+            decomp.ub,
+            decomp.int_indices,
+            x_master,
+            nlp_solver,
+            initial_point=x_master,
+        )
+        if x_nlp is not None:
+            if obj_nlp is not None:
+                accept_incumbent(x_nlp, obj_nlp)
+            add_oa_cuts_at(x_nlp)
+        else:
+            if feasibility_cuts:
+                x_feas = _solve_feasibility_subproblem(
+                    evaluator,
+                    decomp.lb,
+                    decomp.ub,
+                    decomp.int_indices,
+                    x_master,
+                    nlp_solver,
+                    feasibility_norm,
+                )
+                if x_feas is not None:
+                    _add_feasibility_cuts(
+                        evaluator,
+                        x_feas,
+                        n_vars,
+                        decomp.constraint_senses,
+                        oa_A_rows,
+                        oa_b_rows,
+                        decomp.oa_constraint_mask,
+                        oa_cut_relaxable=oa_cut_relaxable,
+                    )
+            if add_no_good_cuts and not decomp.general_integer_indices:
+                _add_no_good_cut(
+                    x_master,
+                    decomp.int_indices,
+                    oa_A_rows,
+                    oa_b_rows,
+                    n_vars,
+                    oa_cut_relaxable=oa_cut_relaxable,
+                )
+            add_oa_cuts_at(x_master)
+
+        return collect_new_lazy_cuts(start, np.asarray(master_x, dtype=np.float64))
+
+    from discopt.solvers import SolveStatus
+    from discopt.solvers.gurobi import solve_milp_with_lazy_cuts
+
+    master_result = solve_milp_with_lazy_cuts(
+        c=master.c,
+        A_ub=master.A_ub,
+        b_ub=master.b_ub,
+        A_eq=master.A_eq,
+        b_eq=master.b_eq,
+        bounds=master.bounds,
+        integrality=master.integrality,
+        time_limit=remaining,
+        gap_tolerance=gap_tolerance,
+        lazy_callback=lazy_callback,
+    )
+    wall_time = time.perf_counter() - t_start
+
+    bound = None
+    if master_bound_valid and master_result.bound is not None:
+        bound = float(master_result.bound)
+        if decomp.obj_is_linear and decomp.obj_coeffs is not None:
+            bound += float(decomp.obj_coeffs[1])
+    gap = (
+        _compute_gap(bound, incumbent_obj)
+        if bound is not None and incumbent_obj is not None
+        else None
+    )
+    status = "feasible"
+    if master_result.status == SolveStatus.INFEASIBLE:
+        status = "infeasible"
+    elif master_result.status == SolveStatus.TIME_LIMIT:
+        status = "time_limit" if incumbent is None else "feasible"
+    elif master_result.status == SolveStatus.ITERATION_LIMIT:
+        status = "iteration_limit" if incumbent is None else "feasible"
+    elif master_result.status == SolveStatus.OPTIMAL and incumbent is not None:
+        status = "optimal" if gap is not None and gap <= gap_tolerance else "feasible"
+    elif incumbent is None:
+        status = "no_feasible_point"
+
+    if incumbent is not None and incumbent_obj is not None:
+        return SolveResult(
+            status=status,
+            objective=obj_sign * incumbent_obj,
+            bound=(obj_sign * bound if bound is not None else None),
+            gap=gap,
+            x=_build_x_dict(incumbent, model),
+            wall_time=wall_time,
+            node_count=master_result.node_count,
+            mip_count=1,
+            subnlp_calls=nlp_subproblem_count,
+            gap_certified=master_bound_valid,
+        )
+
+    return SolveResult(
+        status=status,
+        objective=None,
+        bound=(obj_sign * bound if bound is not None else None),
+        gap=None,
+        x={},
+        wall_time=wall_time,
+        node_count=master_result.node_count,
+        mip_count=1,
+        subnlp_calls=nlp_subproblem_count,
+        gap_certified=master_bound_valid,
     )
 
 

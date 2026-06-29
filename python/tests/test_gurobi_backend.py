@@ -248,6 +248,103 @@ def test_gurobi_milp_optimal_result_reports_zero_gap(monkeypatch):
     assert result.gap == 0.0
 
 
+def test_gurobi_milp_lazy_callback_adds_lazy_cut(monkeypatch):
+    class FakeCallback:
+        MIPSOL = 1
+
+    class FakeGRB:
+        CONTINUOUS = "C"
+        BINARY = "B"
+        INTEGER = "I"
+        MINIMIZE = 1
+        INFINITY = 1e100
+        OPTIMAL = 2
+        INFEASIBLE = 3
+        UNBOUNDED = 5
+        INF_OR_UNBD = 4
+        ITERATION_LIMIT = 7
+        TIME_LIMIT = 9
+        Callback = FakeCallback
+
+    class FakeEnv:
+        def __init__(self, empty=True):
+            self.empty = empty
+
+        def setParam(self, *_args):
+            pass
+
+        def start(self):
+            pass
+
+        def dispose(self):
+            pass
+
+    class FakeMVar:
+        __array_priority__ = 1000
+        X = np.array([0.0])
+
+        def __rmatmul__(self, _other):
+            return 0.0
+
+    class FakeModel:
+        Status = FakeGRB.OPTIMAL
+        NodeCount = 1
+        Runtime = 0.0
+        SolCount = 1
+        ObjVal = 0.0
+        ObjBound = 0.0
+        MIPGap = 0.0
+        last = None
+
+        def __init__(self, *_args, **_kwargs):
+            self.params = {}
+            self.lazy_constraints = []
+            FakeModel.last = self
+
+        def setParam(self, key, value):
+            self.params[key] = value
+
+        def addMVar(self, **_kwargs):
+            return FakeMVar()
+
+        def setObjective(self, *_args):
+            pass
+
+        def cbGetSolution(self, _x):
+            return np.array([0.0])
+
+        def cbLazy(self, expr):
+            self.lazy_constraints.append(expr)
+
+        def optimize(self, callback=None):
+            if callback is not None:
+                callback(self, FakeGRB.Callback.MIPSOL)
+
+        def dispose(self):
+            pass
+
+    fake_gp = types.SimpleNamespace(Env=FakeEnv, Model=FakeModel)
+    monkeypatch.setattr(gurobi_backend, "_load_gurobi", lambda: (fake_gp, FakeGRB))
+
+    callback_candidates = []
+
+    def lazy_callback(candidate):
+        callback_candidates.append(candidate)
+        return [(np.array([1.0]), -0.5)]
+
+    result = gurobi_backend.solve_milp_with_lazy_cuts(
+        c=np.array([1.0]),
+        bounds=[(0.0, 1.0)],
+        integrality=np.array([1], dtype=np.int32),
+        lazy_callback=lazy_callback,
+    )
+
+    assert result.status == SolveStatus.OPTIMAL
+    assert callback_candidates
+    assert FakeModel.last.params["LazyConstraints"] == 1
+    assert len(FakeModel.last.lazy_constraints) == 1
+
+
 def test_amp_bound_tolerance_closes_small_master_bound_inversion():
     from discopt.solvers import amp as amp_module
 

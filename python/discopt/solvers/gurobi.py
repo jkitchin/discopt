@@ -12,7 +12,7 @@ delegate nonconvex quadratic handling to Gurobi.
 
 from __future__ import annotations
 
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 import numpy as np
 import scipy.sparse as sp
@@ -211,12 +211,18 @@ def _status_map(GRB) -> dict[int, SolveStatus]:
     return mapping
 
 
-def _optimize(model, GRB) -> int:
-    model.optimize()
+def _optimize(model, GRB, callback: Optional[Callable] = None) -> int:
+    if callback is None:
+        model.optimize()
+    else:
+        model.optimize(callback)
     status = int(model.Status)
     if status == GRB.INF_OR_UNBD:
         model.setParam("DualReductions", 0)
-        model.optimize()
+        if callback is None:
+            model.optimize()
+        else:
+            model.optimize(callback)
         status = int(model.Status)
     return status
 
@@ -410,6 +416,108 @@ def solve_milp(
     )
     try:
         status_code = _optimize(model, GRB)
+        status = _status_map(GRB).get(status_code, SolveStatus.ERROR)
+        node_count = int(_safe_attr(model, "NodeCount") or 0)
+        wall_time = float(_safe_attr(model, "Runtime") or 0.0)
+
+        objective = None
+        x_val = None
+        if int(_safe_attr(model, "SolCount") or 0) > 0:
+            objective = float(model.ObjVal)
+            x_val = np.asarray(x.X, dtype=np.float64).ravel()
+
+        bound = _safe_attr(model, "ObjBound")
+        bound = float(bound) if bound is not None and np.isfinite(bound) else None
+        gap = _safe_attr(model, "MIPGap")
+        gap = float(gap) if gap is not None and np.isfinite(gap) else None
+
+        if status == SolveStatus.OPTIMAL:
+            assert objective is not None and x_val is not None
+            return MILPResult(
+                status=status,
+                x=x_val,
+                objective=objective,
+                bound=objective,
+                gap=0.0,
+                node_count=node_count,
+                wall_time=wall_time,
+            )
+
+        return MILPResult(
+            status=status,
+            x=x_val,
+            objective=objective,
+            bound=bound,
+            gap=gap,
+            node_count=node_count,
+            wall_time=wall_time,
+        )
+    finally:
+        model.dispose()
+        env.dispose()
+
+
+def solve_milp_with_lazy_cuts(
+    c: np.ndarray,
+    A_ub: Optional[Union[np.ndarray, sp.spmatrix]] = None,
+    b_ub: Optional[np.ndarray] = None,
+    A_eq: Optional[Union[np.ndarray, sp.spmatrix]] = None,
+    b_eq: Optional[np.ndarray] = None,
+    bounds: Optional[list[tuple[float, float]]] = None,
+    integrality: Optional[np.ndarray] = None,
+    time_limit: Optional[float] = None,
+    gap_tolerance: float = 1e-4,
+    threads: Optional[int] = None,
+    options: Optional[dict] = None,
+    lazy_callback: Optional[Callable[[np.ndarray], object]] = None,
+) -> MILPResult:
+    """Solve a MILP using Gurobi lazy constraints.
+
+    ``lazy_callback`` is called at integer incumbents with the current solution
+    vector. It should return an iterable of ``(coefficients, rhs)`` rows in
+    ``coefficients @ x <= rhs`` form. The callback may return ``None`` or an
+    empty iterable when no lazy rows are violated.
+    """
+    c_arr, _n = _validate_linear_data(c, A_ub, b_ub, A_eq, b_eq, bounds)
+    gp, GRB = _load_gurobi()
+
+    merged_options = dict(options or {})
+    merged_options["LazyConstraints"] = 1
+
+    env, model, x, _ub_con, _eq_con = _build_model(
+        gp,
+        GRB,
+        name="discopt_milp_lazy",
+        c=c_arr,
+        A_ub=A_ub,
+        b_ub=b_ub,
+        A_eq=A_eq,
+        b_eq=b_eq,
+        bounds=bounds,
+        integrality=integrality,
+        time_limit=time_limit,
+        gap_tolerance=gap_tolerance,
+        threads=threads,
+        options=merged_options,
+    )
+
+    def _callback(grb_model, where):
+        if lazy_callback is None or where != GRB.Callback.MIPSOL:
+            return
+        incumbent = np.asarray(grb_model.cbGetSolution(x), dtype=np.float64).ravel()
+        cuts = lazy_callback(incumbent)
+        if cuts is None:
+            return
+        for coeffs, rhs in cuts:
+            row = np.asarray(coeffs, dtype=np.float64).ravel()
+            if row.shape[0] != len(c_arr):
+                raise ValueError(
+                    f"lazy cut has {row.shape[0]} coefficients but model has {len(c_arr)} variables"
+                )
+            grb_model.cbLazy(row @ x <= float(rhs))
+
+    try:
+        status_code = _optimize(model, GRB, _callback if lazy_callback is not None else None)
         status = _status_map(GRB).get(status_code, SolveStatus.ERROR)
         node_count = int(_safe_attr(model, "NodeCount") or 0)
         wall_time = float(_safe_attr(model, "Runtime") or 0.0)
