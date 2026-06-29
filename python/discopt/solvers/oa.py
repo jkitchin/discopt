@@ -143,6 +143,22 @@ def _normalize_optional_positive_int(name: str, value: Optional[int]) -> Optiona
     return out
 
 
+def _normalize_positive_int(name: str, value: int) -> int:
+    """Validate a positive integer option."""
+    out = int(value)
+    if out <= 0:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}.")
+    return out
+
+
+def _require_solution_pool_backend(milp_solver: str) -> None:
+    if not isinstance(milp_solver, str) or milp_solver.strip().lower() != "gurobi":
+        raise RuntimeError(
+            "OA solution_pool=True requires milp_solver='gurobi' because only "
+            "the Gurobi backend currently exposes a MIP solution pool."
+        )
+
+
 def _qp_regularization_backend_error(add_regularization: str) -> RuntimeError:
     return RuntimeError(
         f"OA {add_regularization} regularization requires a QP/MIQP-capable backend "
@@ -1453,6 +1469,46 @@ def _build_master_milp_data(
     )
 
 
+def _master_solution_candidates(
+    master_result,
+    n_vars: int,
+    *,
+    solution_pool: bool,
+    num_solution_iteration: int,
+) -> list[np.ndarray]:
+    """Return original-variable master candidates for one OA iteration."""
+    if master_result.x is None:
+        return []
+
+    incumbent = np.asarray(master_result.x, dtype=np.float64).ravel()
+    if not solution_pool:
+        return [incumbent[:n_vars].copy()]
+
+    raw_pool = list(master_result.solution_pool or [])
+    if not raw_pool:
+        raw_pool = [incumbent]
+    elif not any(
+        np.allclose(np.asarray(candidate, dtype=np.float64).ravel()[:n_vars], incumbent[:n_vars])
+        for candidate in raw_pool
+        if np.asarray(candidate, dtype=np.float64).ravel().size >= n_vars
+    ):
+        raw_pool.insert(0, incumbent)
+
+    candidates: list[np.ndarray] = []
+    for raw_candidate in raw_pool:
+        arr = np.asarray(raw_candidate, dtype=np.float64).ravel()
+        if arr.size < n_vars:
+            continue
+        x_candidate = arr[:n_vars].copy()
+        if any(np.allclose(x_candidate, existing) for existing in candidates):
+            continue
+        candidates.append(x_candidate)
+        if len(candidates) >= num_solution_iteration:
+            break
+
+    return candidates or [incumbent[:n_vars].copy()]
+
+
 def _solve_master_milp(
     linear_A_rows,
     linear_b_rows,
@@ -1474,12 +1530,18 @@ def _solve_master_milp(
     oa_cut_relaxable=None,
     use_objective_epigraph=None,
     milp_solver="auto",
+    solution_pool=False,
+    num_solution_iteration=5,
 ):
     """Build and solve the master MILP."""
     try:
-        from discopt.solvers.lp_backend import get_milp_solver
+        if solution_pool:
+            _require_solution_pool_backend(milp_solver)
+            from discopt.solvers.gurobi import solve_milp
+        else:
+            from discopt.solvers.lp_backend import get_milp_solver
 
-        solve_milp = get_milp_solver(backend=milp_solver)
+            solve_milp = get_milp_solver(backend=milp_solver)
     except ImportError as e:
         raise ImportError(
             "OA solver requires a MILP backend for the master. Install one of: "
@@ -1516,6 +1578,18 @@ def _solve_master_milp(
         integrality=master.integrality,
         time_limit=time_limit,
         gap_tolerance=gap_tolerance,
+        **(
+            {
+                "options": {
+                    "PoolSearchMode": 2,
+                    "PoolSolutions": max(1, int(num_solution_iteration)),
+                },
+                "solution_pool": True,
+                "num_solution_iteration": max(1, int(num_solution_iteration)),
+            }
+            if solution_pool
+            else {}
+        ),
     )
 
 
@@ -2428,6 +2502,8 @@ def solve_oa(
     stalling_limit: Optional[int] = None,
     cycling_check: bool = False,
     milp_solver: str = "auto",
+    solution_pool: bool = False,
+    num_solution_iteration: int = 5,
     **kwargs,
 ) -> SolveResult:
     """Solve a MINLP via Outer Approximation.
@@ -2509,6 +2585,13 @@ def solve_oa(
     milp_solver : str
         MILP backend for OA master problems: ``"auto"``, ``"highs"``,
         ``"pounce"``, ``"simplex"``, or ``"gurobi"``.
+    solution_pool : bool
+        When true, request multiple Gurobi master MILP solutions per OA
+        iteration and solve fixed-NLP subproblems for each selected integer
+        assignment. Currently requires ``milp_solver="gurobi"``.
+    num_solution_iteration : int
+        Maximum number of master solution-pool candidates to process per OA
+        iteration when ``solution_pool=True``.
 
     Returns
     -------
@@ -2522,7 +2605,14 @@ def solve_oa(
     oa_penalty_factor = _normalize_positive_float("oa_penalty_factor", oa_penalty_factor)
     level_coef = _normalize_open_unit_float("level_coef", level_coef)
     stalling_limit = _normalize_optional_positive_int("stalling_limit", stalling_limit)
+    num_solution_iteration = _normalize_positive_int(
+        "num_solution_iteration",
+        num_solution_iteration,
+    )
     heuristic_nonconvex = bool(heuristic_nonconvex)
+    solution_pool = bool(solution_pool)
+    if solution_pool:
+        _require_solution_pool_backend(milp_solver)
     if add_regularization is not None and ecp_mode:
         raise ValueError("add_regularization is only supported for OA, not ECP mode.")
     if heuristic_nonconvex:
@@ -2810,6 +2900,8 @@ def solve_oa(
             oa_cut_relaxable=oa_cut_relaxable,
             use_objective_epigraph=(not decomp.obj_is_linear and decomp.oa_objective_is_convex),
             milp_solver=milp_solver,
+            solution_pool=solution_pool,
+            num_solution_iteration=num_solution_iteration,
         )
 
         from discopt.solvers import SolveStatus
@@ -2844,22 +2936,6 @@ def solve_oa(
                 oa_cut_relaxable=oa_cut_relaxable,
             )
             continue
-
-        x_master = master_result.x[:n_vars]
-        if cycling_check:
-            int_assignment = tuple(
-                _round_integral_to_bounds(x_master[idx], decomp.lb[idx], decomp.ub[idx])
-                for idx in decomp.int_indices
-            )
-            if int_assignment in integer_assignments_seen:
-                logger.info(
-                    "OA: cycling detected at iteration %d for integer assignment %s",
-                    iteration,
-                    int_assignment,
-                )
-                termination_reason = "cycling"
-                break
-            integer_assignments_seen.add(int_assignment)
 
         # The master gives a valid LB only via its dual ``bound`` (never the
         # incumbent ``objective``, which is an upper bound on a limited solve).
@@ -2914,170 +2990,217 @@ def solve_oa(
                     add_regularization,
                 )
 
-        # b. ECP mode: add cuts at master point, skip NLP
-        if ecp_mode:
-            n_violated = _add_ecp_cuts(
-                evaluator,
-                x_master,
-                n_vars,
-                decomp.constraint_senses,
-                oa_A_rows,
-                oa_b_rows,
-                decomp.obj_is_linear,
-                decomp.oa_constraint_mask,
-                decomp.oa_objective_is_convex,
-                equality_relaxation=equality_relaxation,
-                oa_cut_relaxable=oa_cut_relaxable,
-            )
-            # In ECP, use master objective as heuristic UB
-            master_obj = float(evaluator.evaluate_objective(x_master))
-            cons_vals = evaluator.evaluate_constraints(x_master)
-            is_feasible = all(cons_vals[k] <= 1e-6 for k in range(n_cons))
-            if is_feasible and master_obj < UB:
-                UB = master_obj
-                incumbent = x_master.copy()
-                incumbent_obj = master_obj
+        master_candidates = _master_solution_candidates(
+            master_result,
+            n_vars,
+            solution_pool=solution_pool,
+            num_solution_iteration=num_solution_iteration,
+        )
+        stop_after_master_pool = False
+        pool_integer_assignments_seen: set[tuple[float, ...]] = set()
 
-            gap = _compute_gap(LB, UB)
-            logger.info(
-                "OA-ECP iter %d: LB=%.6f UB=%.6f gap=%.4f%% cuts=%d violated=%d",
-                iteration,
-                LB,
-                UB,
-                gap * 100,
-                len(oa_A_rows),
-                n_violated,
-            )
-
-            if n_violated == 0:
-                termination_reason = "ecp_feasible"
+        for candidate_index, x_master in enumerate(master_candidates):
+            elapsed = time.perf_counter() - t_start
+            if elapsed >= time_limit:
+                logger.info("OA: Time limit reached during iteration %d", iteration)
+                stop_after_master_pool = True
                 break
-            if master_bound_valid and gap <= gap_tolerance:
-                termination_reason = "gap"
-                break
-            continue
 
-        # c. Fix integers, solve NLP subproblem
-        nlp_attempt = None
-        if derivative_regularization:
-            nlp_attempt = _solve_nlp_subproblem(
-                evaluator,
-                decomp.lb,
-                decomp.ub,
-                decomp.int_indices,
-                x_master,
-                nlp_solver,
-                initial_point=nlp_initial_point,
-                return_attempt=True,
+            int_assignment = tuple(
+                _round_integral_to_bounds(x_master[idx], decomp.lb[idx], decomp.ub[idx])
+                for idx in decomp.int_indices
             )
-            x_nlp, obj_nlp = nlp_attempt.x, nlp_attempt.objective
-        else:
-            x_nlp, obj_nlp = _solve_nlp_subproblem(
-                evaluator,
-                decomp.lb,
-                decomp.ub,
-                decomp.int_indices,
-                x_master,
-                nlp_solver,
-                initial_point=nlp_initial_point,
-            )
+            if solution_pool:
+                if int_assignment in pool_integer_assignments_seen:
+                    logger.info(
+                        "OA: skipping duplicate pooled integer assignment %s",
+                        int_assignment,
+                    )
+                    continue
+                pool_integer_assignments_seen.add(int_assignment)
+            if cycling_check:
+                if int_assignment in integer_assignments_seen:
+                    logger.info(
+                        "OA: cycling detected at iteration %d for integer assignment %s",
+                        iteration,
+                        int_assignment,
+                    )
+                    termination_reason = "cycling"
+                    stop_after_master_pool = True
+                    break
+                integer_assignments_seen.add(int_assignment)
 
-        if x_nlp is not None:
-            if obj_nlp < UB:
-                multipliers = nlp_attempt.multipliers if nlp_attempt is not None else None
-                accept_incumbent(x_nlp, obj_nlp, multipliers)
+            # b. ECP mode: add cuts at master point, skip NLP
+            if ecp_mode:
+                n_violated = _add_ecp_cuts(
+                    evaluator,
+                    x_master,
+                    n_vars,
+                    decomp.constraint_senses,
+                    oa_A_rows,
+                    oa_b_rows,
+                    decomp.obj_is_linear,
+                    decomp.oa_constraint_mask,
+                    decomp.oa_objective_is_convex,
+                    equality_relaxation=equality_relaxation,
+                    oa_cut_relaxable=oa_cut_relaxable,
+                )
+                # In ECP, use master objective as heuristic UB
+                master_obj = float(evaluator.evaluate_objective(x_master))
+                cons_vals = evaluator.evaluate_constraints(x_master)
+                is_feasible = all(cons_vals[k] <= 1e-6 for k in range(n_cons))
+                if is_feasible and master_obj < UB:
+                    UB = master_obj
+                    incumbent = x_master.copy()
+                    incumbent_obj = master_obj
 
-            # Generate OA cuts at NLP solution
-            _add_oa_cuts(
-                evaluator,
-                x_nlp,
-                n_vars,
-                n_cons,
-                decomp.constraint_senses,
-                oa_A_rows,
-                oa_b_rows,
-                decomp.obj_is_linear,
-                decomp.oa_constraint_mask,
-                decomp.oa_objective_is_convex,
-                equality_relaxation=equality_relaxation,
-                oa_cut_relaxable=oa_cut_relaxable,
-            )
-        else:
-            # NLP infeasible for this integer assignment
-            if feasibility_cuts:
-                x_feas = _solve_feasibility_subproblem(
+                gap = _compute_gap(LB, UB)
+                logger.info(
+                    "OA-ECP iter %d: LB=%.6f UB=%.6f gap=%.4f%% cuts=%d violated=%d",
+                    iteration,
+                    LB,
+                    UB,
+                    gap * 100,
+                    len(oa_A_rows),
+                    n_violated,
+                )
+
+                if n_violated == 0:
+                    termination_reason = "ecp_feasible"
+                    stop_after_master_pool = True
+                    break
+                if master_bound_valid and gap <= gap_tolerance:
+                    termination_reason = "gap"
+                    stop_after_master_pool = True
+                    break
+                continue
+
+            # c. Fix integers, solve NLP subproblem
+            nlp_attempt = None
+            if derivative_regularization:
+                nlp_attempt = _solve_nlp_subproblem(
                     evaluator,
                     decomp.lb,
                     decomp.ub,
                     decomp.int_indices,
                     x_master,
                     nlp_solver,
-                    feasibility_norm,
+                    initial_point=nlp_initial_point,
+                    return_attempt=True,
                 )
-                if x_feas is not None:
-                    _add_feasibility_cuts(
+                x_nlp, obj_nlp = nlp_attempt.x, nlp_attempt.objective
+            else:
+                x_nlp, obj_nlp = _solve_nlp_subproblem(
+                    evaluator,
+                    decomp.lb,
+                    decomp.ub,
+                    decomp.int_indices,
+                    x_master,
+                    nlp_solver,
+                    initial_point=nlp_initial_point,
+                )
+
+            if x_nlp is not None:
+                if obj_nlp < UB:
+                    multipliers = nlp_attempt.multipliers if nlp_attempt is not None else None
+                    accept_incumbent(x_nlp, obj_nlp, multipliers)
+
+                # Generate OA cuts at NLP solution
+                _add_oa_cuts(
+                    evaluator,
+                    x_nlp,
+                    n_vars,
+                    n_cons,
+                    decomp.constraint_senses,
+                    oa_A_rows,
+                    oa_b_rows,
+                    decomp.obj_is_linear,
+                    decomp.oa_constraint_mask,
+                    decomp.oa_objective_is_convex,
+                    equality_relaxation=equality_relaxation,
+                    oa_cut_relaxable=oa_cut_relaxable,
+                )
+            else:
+                # NLP infeasible for this integer assignment
+                if feasibility_cuts:
+                    x_feas = _solve_feasibility_subproblem(
                         evaluator,
-                        x_feas,
-                        n_vars,
-                        decomp.constraint_senses,
+                        decomp.lb,
+                        decomp.ub,
+                        decomp.int_indices,
+                        x_master,
+                        nlp_solver,
+                        feasibility_norm,
+                    )
+                    if x_feas is not None:
+                        _add_feasibility_cuts(
+                            evaluator,
+                            x_feas,
+                            n_vars,
+                            decomp.constraint_senses,
+                            oa_A_rows,
+                            oa_b_rows,
+                            decomp.oa_constraint_mask,
+                            oa_cut_relaxable=oa_cut_relaxable,
+                        )
+
+                if add_no_good_cuts:
+                    _add_no_good_cut(
+                        x_master,
+                        decomp.int_indices,
                         oa_A_rows,
                         oa_b_rows,
-                        decomp.oa_constraint_mask,
+                        n_vars,
                         oa_cut_relaxable=oa_cut_relaxable,
                     )
 
-            if add_no_good_cuts:
-                _add_no_good_cut(
+                # Also add OA cuts at master point
+                _add_oa_cuts(
+                    evaluator,
                     x_master,
-                    decomp.int_indices,
+                    n_vars,
+                    n_cons,
+                    decomp.constraint_senses,
                     oa_A_rows,
                     oa_b_rows,
-                    n_vars,
+                    decomp.obj_is_linear,
+                    decomp.oa_constraint_mask,
+                    decomp.oa_objective_is_convex,
+                    equality_relaxation=equality_relaxation,
                     oa_cut_relaxable=oa_cut_relaxable,
                 )
 
-            # Also add OA cuts at master point
-            _add_oa_cuts(
-                evaluator,
-                x_master,
-                n_vars,
-                n_cons,
-                decomp.constraint_senses,
-                oa_A_rows,
-                oa_b_rows,
-                decomp.obj_is_linear,
-                decomp.oa_constraint_mask,
-                decomp.oa_objective_is_convex,
-                equality_relaxation=equality_relaxation,
-                oa_cut_relaxable=oa_cut_relaxable,
+            # d. Check convergence
+            gap = _compute_gap(LB, UB)
+            logger.info(
+                "OA iter %d: LB=%.6f UB=%.6f gap=%.4f%% cuts=%d",
+                iteration,
+                LB,
+                UB,
+                gap * 100,
+                len(oa_A_rows),
             )
 
-        # d. Check convergence
-        gap = _compute_gap(LB, UB)
-        logger.info(
-            "OA iter %d: LB=%.6f UB=%.6f gap=%.4f%% cuts=%d",
-            iteration,
-            LB,
-            UB,
-            gap * 100,
-            len(oa_A_rows),
-        )
+            if incumbent_obj is not None:
+                incumbent_progress.append(float(UB))
+                if stalling_limit is not None and len(incumbent_progress) >= stalling_limit:
+                    prev = incumbent_progress[-stalling_limit]
+                    if abs(incumbent_progress[-1] - prev) <= 1e-12:
+                        logger.info(
+                            "OA: stalling detected after %d incumbent records; best objective %.6f",
+                            stalling_limit,
+                            UB,
+                        )
+                        termination_reason = "stalling"
+                        stop_after_master_pool = True
+                        break
 
-        if incumbent_obj is not None:
-            incumbent_progress.append(float(UB))
-            if stalling_limit is not None and len(incumbent_progress) >= stalling_limit:
-                prev = incumbent_progress[-stalling_limit]
-                if abs(incumbent_progress[-1] - prev) <= 1e-12:
-                    logger.info(
-                        "OA: stalling detected after %d incumbent records; best objective %.6f",
-                        stalling_limit,
-                        UB,
-                    )
-                    termination_reason = "stalling"
-                    break
+            if master_bound_valid and gap <= gap_tolerance:
+                termination_reason = "gap"
+                stop_after_master_pool = True
+                break
 
-        if master_bound_valid and gap <= gap_tolerance:
-            termination_reason = "gap"
+        if stop_after_master_pool:
             break
 
     # 4. Build result

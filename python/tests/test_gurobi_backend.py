@@ -248,6 +248,109 @@ def test_gurobi_milp_optimal_result_reports_zero_gap(monkeypatch):
     assert result.gap == 0.0
 
 
+def test_gurobi_milp_solution_pool_sets_params_and_returns_candidates(monkeypatch):
+    class FakeGRB:
+        CONTINUOUS = "C"
+        BINARY = "B"
+        INTEGER = "I"
+        MINIMIZE = 1
+        INFINITY = 1e100
+        OPTIMAL = 2
+        INFEASIBLE = 3
+        UNBOUNDED = 5
+        INF_OR_UNBD = 4
+        ITERATION_LIMIT = 7
+        TIME_LIMIT = 9
+
+    class FakeEnv:
+        def __init__(self, empty=True):
+            self.empty = empty
+
+        def setParam(self, *_args):
+            pass
+
+        def start(self):
+            pass
+
+        def dispose(self):
+            pass
+
+    class FakeMVar:
+        __array_priority__ = 1000
+
+        def __init__(self, model):
+            self.model = model
+
+        @property
+        def X(self):
+            return self.model.solutions[0]
+
+        @property
+        def Xn(self):
+            return self.model.solutions[self.model.solution_number]
+
+        def __rmatmul__(self, _other):
+            return 0.0
+
+    class FakeModel:
+        Status = FakeGRB.OPTIMAL
+        NodeCount = 0
+        Runtime = 0.0
+        SolCount = 3
+        ObjVal = 1.0
+        ObjBound = 1.0
+        MIPGap = 0.0
+        last = None
+
+        def __init__(self, *_args, **_kwargs):
+            self.params = {}
+            self.solution_number = 0
+            self.solutions = [
+                np.array([0.0]),
+                np.array([1.0]),
+                np.array([0.5]),
+            ]
+            self.pool_objectives = [1.0, 3.0, 2.0]
+            FakeModel.last = self
+
+        @property
+        def PoolObjVal(self):
+            return self.pool_objectives[self.solution_number]
+
+        def setParam(self, key, value):
+            self.params[key] = value
+            if key == "SolutionNumber":
+                self.solution_number = int(value)
+
+        def addMVar(self, **_kwargs):
+            return FakeMVar(self)
+
+        def setObjective(self, *_args):
+            pass
+
+        def optimize(self):
+            pass
+
+        def dispose(self):
+            pass
+
+    fake_gp = types.SimpleNamespace(Env=FakeEnv, Model=FakeModel)
+    monkeypatch.setattr(gurobi_backend, "_load_gurobi", lambda: (fake_gp, FakeGRB))
+
+    result = gurobi_backend.solve_milp(
+        c=np.array([1.0]),
+        bounds=[(0.0, 1.0)],
+        integrality=np.array([1], dtype=np.int32),
+        solution_pool=True,
+        num_solution_iteration=3,
+    )
+
+    assert FakeModel.last.params["PoolSearchMode"] == 2
+    assert FakeModel.last.params["PoolSolutions"] == 3
+    assert result.solution_pool_objectives == pytest.approx([1.0, 2.0, 3.0])
+    assert [candidate.tolist() for candidate in result.solution_pool] == [[0.0], [0.5], [1.0]]
+
+
 def test_gurobi_milp_lazy_callback_adds_lazy_cut(monkeypatch):
     class FakeCallback:
         MIPSOL = 1

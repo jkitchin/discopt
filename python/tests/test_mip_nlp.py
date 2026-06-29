@@ -250,6 +250,8 @@ def test_model_solve_routes_mip_nlp_options(monkeypatch):
             stalling_limit=3,
             cycling_check=False,
             milp_solver="gurobi",
+            solution_pool=True,
+            num_solution_iteration=7,
             skip_convex_check=True,
         )
 
@@ -266,6 +268,8 @@ def test_model_solve_routes_mip_nlp_options(monkeypatch):
     assert calls["stalling_limit"] == 3
     assert calls["cycling_check"] is False
     assert calls["milp_solver"] == "gurobi"
+    assert calls["solution_pool"] is True
+    assert calls["num_solution_iteration"] == 7
 
 
 def test_model_solve_mip_nlp_path_runs_entropy_canonicalization(monkeypatch):
@@ -399,6 +403,8 @@ def test_mip_nlp_new_oa_options_precedence_and_alias(monkeypatch):
             "add_regularization": "level_L1",
             "level_coef": 0.4,
             "cycling_check": True,
+            "solution_pool": False,
+            "num_solution_iteration": 2,
         },
         add_slack=True,
         oa_penalty_factor=17.0,
@@ -409,6 +415,8 @@ def test_mip_nlp_new_oa_options_precedence_and_alias(monkeypatch):
         stalling_limit=4,
         heuristic_nonconvex=True,
         cycling_check=False,
+        solution_pool=True,
+        num_solution_iteration=4,
     )
 
     assert result.status == "optimal"
@@ -421,6 +429,8 @@ def test_mip_nlp_new_oa_options_precedence_and_alias(monkeypatch):
     assert calls["stalling_limit"] == 4
     assert calls["heuristic_nonconvex"] is True
     assert calls["cycling_check"] is False
+    assert calls["solution_pool"] is True
+    assert calls["num_solution_iteration"] == 4
 
 
 def test_model_solve_passes_initial_solution_to_mip_nlp(monkeypatch):
@@ -983,6 +993,18 @@ def test_mip_nlp_rejects_unsupported_oa_options():
         )
 
 
+def test_oa_solution_pool_requires_gurobi_backend():
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    with pytest.raises(RuntimeError, match="solution_pool=True requires milp_solver='gurobi'"):
+        solve_mip_nlp(
+            _binary_model("solution_pool_non_gurobi"),
+            method="oa",
+            solution_pool=True,
+            milp_solver="highs",
+        )
+
+
 def test_mip_nlp_options_must_be_dict():
     from discopt.solvers.mip_nlp import solve_mip_nlp
 
@@ -992,6 +1014,76 @@ def test_mip_nlp_options_must_be_dict():
             method="oa",
             mip_nlp_options=[("ecp_mode", True)],
         )
+
+
+def test_oa_solution_pool_processes_multiple_master_candidates(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers import MILPResult, SolveStatus
+
+    nlp_master_points = []
+    cut_points = []
+    master_calls = []
+
+    def fake_add_oa_cuts(*args, **kwargs):
+        x_star = np.asarray(args[1], dtype=float).copy()
+        n_vars = int(args[2])
+        oa_A_rows = args[5]
+        oa_b_rows = args[6]
+        cut_points.append(x_star)
+        oa_A_rows.append(np.zeros(n_vars, dtype=float))
+        oa_b_rows.append(0.0)
+        if kwargs.get("oa_cut_relaxable") is not None:
+            kwargs["oa_cut_relaxable"].append(True)
+
+    def fake_solve_nlp_subproblem(
+        _evaluator,
+        _lb,
+        _ub,
+        _int_indices,
+        x_master,
+        _nlp_solver,
+        initial_point=None,
+        return_attempt=False,
+    ):
+        del initial_point
+        x = np.asarray(x_master, dtype=float).copy()
+        nlp_master_points.append(x)
+        obj = 10.0 - float(x[0])
+        if return_attempt:
+            return oa_module._NLPAttempt(x=x, objective=obj, multipliers=None)
+        return x, obj
+
+    def fake_solve_master_milp(*args, **kwargs):
+        master_calls.append(kwargs)
+        return MILPResult(
+            status=SolveStatus.OPTIMAL,
+            x=np.array([0.0]),
+            objective=0.0,
+            bound=-100.0,
+            solution_pool=[np.array([0.0]), np.array([1.0])],
+            solution_pool_objectives=[0.0, 1.0],
+        )
+
+    monkeypatch.setattr(oa_module, "_add_oa_cuts", fake_add_oa_cuts)
+    monkeypatch.setattr(oa_module, "_solve_nlp_subproblem", fake_solve_nlp_subproblem)
+    monkeypatch.setattr(oa_module, "_solve_master_milp", fake_solve_master_milp)
+
+    result = oa_module.solve_oa(
+        _binary_model("solution_pool_rounds"),
+        init_strategy="initial_binary",
+        max_iterations=1,
+        gap_tolerance=0.0,
+        solution_pool=True,
+        num_solution_iteration=2,
+        milp_solver="gurobi",
+    )
+
+    assert result.status == "feasible"
+    assert len(master_calls) == 1
+    assert master_calls[0]["solution_pool"] is True
+    assert master_calls[0]["num_solution_iteration"] == 2
+    assert [point.tolist() for point in nlp_master_points[1:]] == [[0.0], [1.0]]
+    assert len(cut_points) == 3
 
 
 def test_oa_initial_binary_seed_rounds_and_clamps_discrete_values():

@@ -32,6 +32,8 @@ _OA_OPTION_KEYS = frozenset(
         "stalling_limit",
         "cycling_check",
         "milp_solver",
+        "solution_pool",
+        "num_solution_iteration",
     }
 )
 _OA_OPTION_ALIASES = {

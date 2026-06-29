@@ -2801,9 +2801,11 @@ class Model:
             ``ecp_mode``, ``feasibility_cuts``, ``heuristic_nonconvex``,
             ``add_slack``, ``max_slack``, ``oa_penalty_factor``,
             ``add_no_good_cuts``, ``feasibility_norm``, ``add_regularization``,
-            ``level_coef``, ``stalling_limit``, ``cycling_check``, and
-            ``init_strategy`` take precedence over duplicate keys in
-            ``mip_nlp_options``. For ``mip_nlp_method="goa"``,
+            ``level_coef``, ``stalling_limit``, ``cycling_check``,
+            ``solution_pool``, ``num_solution_iteration``, and ``init_strategy``
+            take precedence over duplicate keys in ``mip_nlp_options``.
+            ``solution_pool`` currently requires ``milp_solver="gurobi"``.
+            For ``mip_nlp_method="goa"``,
             convexity-certified MINLPs use OA's valid master bounds and other
             models use AMP/global relaxations. AMP options such as ``rel_gap``,
             ``abs_tol``, ``max_iter``, ``n_init_partitions``,
