@@ -871,13 +871,25 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                     &full_u,
                     ctx.simplex.tol,
                 ) {
-                    Some(basis) => solve_lp_warm_scaled_csc(
-                        &solve_lp_view,
-                        ctx.sb,
-                        &basis,
-                        ctx.simplex,
-                        ctx.csc,
-                    ),
+                    // Same pivot-bounded guard as `solve_lp_root` (#350): a qualifying
+                    // slack basis whose dual solve then stalls on an ill-conditioned
+                    // relaxation must fall back to the cold primal, not grind to the
+                    // deadline.
+                    Some(basis) => {
+                        let warm = solve_lp_warm_scaled_csc(
+                            &solve_lp_view,
+                            ctx.sb,
+                            &basis,
+                            &warm_root_opts(ctx.simplex, ctx.m_w, ctx.n_w),
+                            ctx.csc,
+                        );
+                        match warm.status {
+                            LpStatus::IterLimit | LpStatus::Numerical => {
+                                solve_lp_scaled(&solve_lp_view, ctx.sb, ctx.simplex)
+                            }
+                            _ => warm,
+                        }
+                    }
                     None => solve_lp_scaled(&solve_lp_view, ctx.sb, ctx.simplex),
                 }
             }
@@ -1697,9 +1709,45 @@ fn dual_slack_basis(
 /// always the same optimum — only the path differs.
 fn solve_lp_root(lp: &LpView<'_>, b: &[f64], opts: &SimplexOptions) -> crate::lp::simplex::LpSolve {
     match dual_slack_basis(lp.a, lp.m, lp.n, lp.c, lp.l, lp.u, opts.tol) {
-        Some(basis) => solve_lp_warm(lp, b, &basis, opts),
+        Some(basis) => {
+            // The dual-slack warm start is an *optimization*, not a requirement: on
+            // covering/packing relaxations the dual simplex reaches the optimum in a
+            // handful of pivots (the #334 win). But on an ill-conditioned relaxation
+            // — e.g. nvs06's geometric-mean-equilibrated McCormick LP (#350) — the
+            // dual simplex degenerate-cycles to `max_iter` and burns the whole
+            // enclosing MILP budget, while the cold primal solves it instantly. The
+            // existing fallback only fires when the slack basis does not *qualify*
+            // (`dual_slack_basis` -> None); it does NOT catch a qualifying basis whose
+            // dual solve then stalls. Cap the warm attempt to a small pivot budget and
+            // fall back to the cold primal when it stalls (IterLimit / Numerical).
+            // Optimal/Infeasible/Unbounded warm results are exact and kept.
+            let warm = solve_lp_warm(lp, b, &basis, &warm_root_opts(opts, lp.m, lp.n));
+            match warm.status {
+                LpStatus::IterLimit | LpStatus::Numerical => solve_lp(lp, b, opts),
+                _ => warm,
+            }
+        }
         None => solve_lp(lp, b, opts),
     }
+}
+
+/// Pivot-bounded options for a dual-slack *warm* root attempt. The dual-slack
+/// start only ever pays off when it converges quickly (the covering-LP win is a
+/// few hundred to a low-thousands pivots); past a generous multiple of the problem
+/// size it is stalling, so cap it and let the caller cold-solve. The
+/// size-proportional `8·(m+n)` term sits far above the largest validated
+/// covering-LP win (sc2000 root ≈ 1384 pivots at m+n ≈ 2800 ⇒ cap ≈ 22400), so
+/// that win is untouched; the small absolute floor only affects genuinely tiny LPs.
+fn warm_root_opts(opts: &SimplexOptions, m: usize, n: usize) -> SimplexOptions {
+    // Covering/packing relaxations converge in O(m+n) dual pivots (sc2000 root:
+    // ≈1384 for m+n≈2800), so a generous size-proportional cap preserves that win
+    // by a wide margin while a degenerate stall (nvs06: ~max_iter pivots on a tiny
+    // ill-conditioned LP, #350) trips it almost immediately. The small floor keeps
+    // genuinely tiny LPs from a too-eager bail (their cold solve is cheap anyway).
+    let cap = (8 * (m + n)).max(512);
+    let mut o = opts.clone();
+    o.max_iter = o.max_iter.min(cap);
+    o
 }
 
 #[cfg(test)]
