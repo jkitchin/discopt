@@ -32,6 +32,7 @@ A hybrid Mixed-Integer Nonlinear Programming (MINLP) solver combining a Rust bac
 - **GNN branching policy** -- bipartite graph-neural-network scaffold for learned branching (experimental; ships untrained, see #236)
 - **Differentiable optimization** -- parameter sensitivity via envelope theorem and KKT implicit differentiation, including differentiable MILP/MIQP (fix-and-differentiate)
 - **.nl file import** -- read AMPL-format models via Rust parser
+- **Pyomo solver plugin** -- use discopt from existing Pyomo models via `SolverFactory("discopt")` (`pip install discopt[pyomo]`); see [docs/pyomo_solver.md](docs/pyomo_solver.md)
 - **Dynamic optimization** -- DAE collocation (Radau/Legendre) and finite differences for optimal control, parameter estimation, and PDE-constrained optimization
 - **CUTEst interface** -- NLP benchmarking against the CUTEst test set
 - **LLM integration** (optional) -- conversational model building, diagnostics, and reformulation suggestions
