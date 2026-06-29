@@ -487,25 +487,27 @@ def test_model_solve_amp_forwards_gurobi_milp_solver(monkeypatch):
 
 
 def test_model_solve_oa_forwards_gurobi_milp_solver(monkeypatch):
-    import discopt.solvers.oa as oa_module
+    import discopt.solvers.mip_nlp as mip_nlp_module
 
     calls = {}
 
-    def fake_solve_oa(model, **kwargs):
+    def fake_solve_mip_nlp(model, **kwargs):
         calls["model"] = model
+        calls["method"] = kwargs["method"]
         calls["milp_solver"] = kwargs["milp_solver"]
         return SolveResult(status="optimal", objective=0.0, bound=0.0, gap=0.0)
 
-    monkeypatch.setattr(oa_module, "solve_oa", fake_solve_oa)
+    monkeypatch.setattr(mip_nlp_module, "solve_mip_nlp", fake_solve_mip_nlp)
 
     m = dm.Model("oa_gurobi_milp_solver_forwarding")
     x = m.binary("x")
     m.minimize(x)
 
-    result = m.solve(gdp_method="oa", milp_solver="gurobi", skip_convex_check=True)
+    result = m.solve(solver="mip-nlp", mip_nlp_method="oa", milp_solver="gurobi")
 
     assert result.status == "optimal"
     assert calls["model"] is m
+    assert calls["method"] == "oa"
     assert calls["milp_solver"] == "gurobi"
 
 
@@ -1257,9 +1259,9 @@ def test_oa_gurobi_converges_on_degenerate_convex_minlp_if_available():
     m.minimize((x - 2) ** 2 + (y - 1.5) ** 2)
 
     result = m.solve(
-        gdp_method="oa",
+        solver="mip-nlp",
+        mip_nlp_method="oa",
         milp_solver="gurobi",
-        skip_convex_check=True,
         max_nodes=20,
         time_limit=30,
     )
