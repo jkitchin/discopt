@@ -70,6 +70,36 @@ def test_convex_quadratic_objective_is_detected():
     assert bound <= best + 1e-6
 
 
+def test_large_convex_quadratic_is_handled_without_a_size_cap():
+    """Generality guard: the bound must engage on a convex QP far larger than the
+    old hard-coded 50-variable cap, and stay a valid lower bound. The deterministic
+    projected-gradient bound has no size cap — a regression that reintroduces one
+    would skip this objective entirely."""
+    rng = np.random.default_rng(0)
+    n = 80  # > the old _CONVEX_OBJ_MAX_VARS = 50
+    m = dm.Model("bigcvxq")
+    xs = [m.integer(f"x{i}", lb=0, ub=10) for i in range(n)]
+    # Diagonally-dominant => PSD: sum a_i x_i^2 + small cross terms - linear.
+    expr = 0
+    for i in range(n):
+        expr = expr + (2.0 + (i % 3)) * xs[i] ** 2 - 5.0 * xs[i]
+    for i in range(n - 1):
+        expr = expr + 0.1 * xs[i] * xs[i + 1]
+    m.minimize(expr)
+    m.subject_to(sum(xs) >= 1)
+    ev = _make_evaluator(m)
+    assert _objective_is_convex_quadratic(m, ev, n) is True
+    lb, ub = _flat_bounds(m)
+    bound = _convex_objective_lower_bound(ev, lb, ub)
+    assert np.isfinite(bound)
+    # Valid lower bound: it must not exceed the objective at any feasible point.
+    for _ in range(50):
+        xv = rng.integers(0, 11, size=n).astype(float)
+        if xv.sum() < 1:
+            xv[0] = 1.0
+        assert bound <= float(ev.evaluate_objective(xv)) + 1e-6
+
+
 def test_nonconvex_objective_is_not_flagged():
     """Soundness gate: an indefinite-Hessian objective must NOT be treated as
     convex (its supporting hyperplane would be an unsound over-estimator)."""

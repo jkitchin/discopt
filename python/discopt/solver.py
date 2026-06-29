@@ -222,10 +222,11 @@ _PER_NODE_OBBT_ROUNDS = 3
 # for one node), so it is auto-engaged only at or below this lifted-variable count.
 _AUTO_RLT_LEVEL1_MAX_VARS = 50
 # Convex-objective node bound (the supporting-hyperplane lower bound for a model
-# whose minimized objective is a convex quadratic). Capped to small models — the
-# bound runs a few L-BFGS-B solves per node — and gated on a PSD Hessian with
-# margin so the convexity verdict (and hence bound soundness) is never borderline.
-_CONVEX_OBJ_MAX_VARS = 50
+# whose minimized objective is a convex quadratic). No size cap: the bound is a
+# deterministic projected-gradient solve on the constant Hessian and is valid at
+# any iterate (see ``_convex_objective_lower_bound``). Gated only on a PSD Hessian
+# with this margin, so the convexity verdict (hence bound soundness) is never
+# borderline.
 _CONVEX_OBJ_PSD_TOL = 1e-6
 # Floor on the time budget handed to the end-of-solve root-relaxation fallback
 # bound (issue #138). On a hard nonconvex minimize the B&B loop can consume the
@@ -557,7 +558,7 @@ def _objective_is_convex_quadratic(model: Model, evaluator, n_vars: int) -> bool
     internally-minimized objective (negated for a maximize), so PSD here means the
     minimized objective is convex regardless of the user's sense.
     """
-    if model._objective is None or n_vars == 0 or n_vars > _CONVEX_OBJ_MAX_VARS:
+    if model._objective is None or n_vars == 0:
         return False
     try:
         from discopt._jax.term_classifier import classify_nonlinear_terms
@@ -608,51 +609,95 @@ def _objective_is_convex_quadratic(model: Model, evaluator, n_vars: int) -> bool
 
 
 def _convex_objective_lower_bound(evaluator, node_lb, node_ub) -> float:
-    """Rigorous lower bound on a convex objective over ``[node_lb, node_ub]``.
+    """Rigorous lower bound on a convex quadratic objective over ``[node_lb, node_ub]``.
 
-    For a convex ``f`` and any point ``x0`` in the box, the supporting hyperplane
-    ``f(x0) + grad f(x0) . (x - x0)`` underestimates ``f`` everywhere, so its
-    minimum over the box — separable, each coordinate at ``lb`` or ``ub`` by the
-    sign of the gradient — is a valid lower bound on ``min_box f`` and therefore on
-    the node's optimum (the box contains the node's feasible set). Unlike taking
-    the local optimizer's objective *value* (which can sit just above the true
-    box-minimum and be an unsound, too-high bound), the hyperplane bound is exact
-    arithmetic and sound for ANY ``x0``; a near-minimizing ``x0`` only makes it
-    tight. Caller must have established that ``f`` is convex on the box
-    (:func:`_objective_is_convex_quadratic`). Returns ``-inf`` (abstain) on an
-    open/empty box or a non-finite gradient.
+    For convex ``f`` and ANY ``x0`` in the box, the supporting hyperplane
+    ``f(x0) + grad f(x0) . (x - x0)`` underestimates ``f`` everywhere, so its box
+    minimum (separable: each coordinate at ``lb`` or ``ub`` by the gradient's sign)
+    is a valid lower bound on ``min_box f`` and hence on the node optimum (the box
+    contains the node's feasible set). The bound is *exact* when ``x0 = argmin_box
+    f`` — there KKT complementarity zeroes the box-min of the gradient term — and
+    only loosens, never becomes invalid, for any other ``x0``.
+
+    So the right ``x0`` is not a tuned heuristic and not something to hunt for with
+    random-start local solves: it is the box-constrained minimizer of the *constant*
+    quadratic, which we approach with a deterministic projected-gradient (FISTA)
+    solve. Because every iterate yields a valid bound, the iteration count is a
+    tightness knob, never a soundness one — there is no need for a size cap or a
+    cohort-tuned start (both of which the old random-restart L-BFGS version
+    required). Caller establishes convexity via
+    :func:`_objective_is_convex_quadratic`. Returns ``-inf`` (abstain) on an
+    open/empty box or non-finite data.
     """
     nlb = np.asarray(node_lb, dtype=np.float64)
     nub = np.asarray(node_ub, dtype=np.float64)
     if not (np.all(np.isfinite(nlb)) and np.all(np.isfinite(nub))) or np.any(nub < nlb):
         return -np.inf
+    n = nlb.shape[0]
+    center = 0.5 * (nlb + nub)
 
     def f(x):
         return float(evaluator.evaluate_objective(np.asarray(x, dtype=np.float64)))
 
-    width = nub - nlb
-    best_x = 0.5 * (nlb + nub)
-    best_f = f(best_x)
-    bounds = list(zip(nlb, nub))
-    for x0 in (best_x, nlb + 0.25 * width, nlb + 0.75 * width):
-        try:
-            r = scipy_minimize(f, x0, method="L-BFGS-B", bounds=bounds)
-            if r.fun < best_f:
-                best_f = float(r.fun)
-                best_x = np.clip(np.asarray(r.x, dtype=np.float64), nlb, nub)
-        except (ValueError, ArithmeticError, RuntimeError):
-            continue
+    # Quadratic ==> grad f(x) = H x + g with H *constant*. Recover both from the
+    # evaluator at the box center: H is point-independent; g = grad(center) - H@center.
     try:
-        g = np.asarray(evaluator.evaluate_gradient(best_x), dtype=np.float64)
+        H = np.asarray(evaluator.evaluate_hessian(center), dtype=np.float64)
+        g0 = np.asarray(evaluator.evaluate_gradient(center), dtype=np.float64)
     except (ValueError, ArithmeticError, RuntimeError):
         return -np.inf
-    if not np.all(np.isfinite(g)):
+    if H.shape != (n, n) or not (np.all(np.isfinite(H)) and np.all(np.isfinite(g0))):
         return -np.inf
-    # min over the box of the supporting hyperplane f(x0) + g.(x - x0).
-    tangent_min = f(best_x) + float(
-        np.sum(np.where(g >= 0.0, g * (nlb - best_x), g * (nub - best_x)))
+    H = 0.5 * (H + H.T)  # symmetrize the (symmetric) convex Hessian
+    g = g0 - H @ center
+
+    # Deterministic FISTA projected gradient for argmin over the box of the convex
+    # quadratic. Step 1/L with L an upper bound on the gradient's Lipschitz constant
+    # ||H||_2; for symmetric H, ||H||_2 <= ||H||_inf, so 1/||H||_inf is a valid
+    # (conservative) step. A fixed iteration budget is safe: under-convergence only
+    # loosens the bound. No randomness, no tuned start, no size cap.
+    L = float(np.abs(H).sum(axis=1).max())  # ||H||_inf >= ||H||_2
+    # Warm-start at the box-projected unconstrained minimizer ``clip(H^-1(-g))``:
+    # for a positive-definite H this is the exact ``argmin_box`` whenever it lands
+    # in the box (the common, tightest case) and an excellent start otherwise.
+    # Deterministic; falls back to the box center if H is singular.
+    x_hat = np.clip(center, nlb, nub)
+    try:
+        xstar = np.linalg.solve(H, -g)
+        if np.all(np.isfinite(xstar)):
+            x_hat = np.clip(xstar, nlb, nub)
+    except np.linalg.LinAlgError:
+        pass
+    if np.isfinite(L) and L > 0.0:
+        step = 1.0 / L
+        x = x_hat.copy()
+        y = x_hat.copy()
+        t = 1.0
+        for _ in range(200):
+            x_new = np.clip(y - step * (H @ y + g), nlb, nub)
+            if np.max(np.abs(x_new - x)) <= 1e-12 * (1.0 + np.max(np.abs(x_new))):
+                x = x_new
+                break
+            t_new = 0.5 * (1.0 + float(np.sqrt(1.0 + 4.0 * t * t)))
+            y = x_new + ((t - 1.0) / t_new) * (x_new - x)
+            x, t = x_new, t_new
+        x_hat = np.clip(x, nlb, nub)
+
+    # Supporting hyperplane at x_hat: f(x_hat) + min_box grad.(x - x_hat).
+    grad = H @ x_hat + g
+    if not np.all(np.isfinite(grad)):
+        return -np.inf
+    fx = f(x_hat)
+    tangent_min = fx + float(
+        np.sum(np.where(grad >= 0.0, grad * (nlb - x_hat), grad * (nub - x_hat)))
     )
-    return tangent_min if np.isfinite(tangent_min) else -np.inf
+    if not np.isfinite(tangent_min):
+        return -np.inf
+    # Magnitude-scaled margin so the float64 hyperplane evaluation stays a valid
+    # (never-too-high) lower bound despite rounding — the same safe-bound discipline
+    # as ``obbt._ns_safe_lp_lower_bound``.
+    margin = 1e-9 * (1.0 + abs(fx) + abs(tangent_min))
+    return tangent_min - margin
 
 
 def _compute_interval_bound(model, node_lb, node_ub, negate):
