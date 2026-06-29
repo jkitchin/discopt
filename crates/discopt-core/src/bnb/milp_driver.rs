@@ -222,6 +222,28 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
     // the tree are added once and shared by all nodes.
     let mut pool_sigs: HashSet<Vec<(u32, i64)>> = HashSet::new();
 
+    // Node-cut policy (issue #331 node-count sweep). Separating cover cuts at
+    // fractional nodes closes the integrality gap deep in the tree and cuts the
+    // node count hard (−70–80% on sparse knapsacks, toward SCIP). Two grounded
+    // guardrails make it a *wall* win rather than a 2× regression:
+    //   * Density gate. A cover cut spans the support of its source row, so on
+    //     dense-row models it is itself dense and bloats every node's LP for no
+    //     node benefit (measured: dense knapsacks +2× wall, ~0 node change). Only
+    //     separate when the structural rows are sparse, where cover cuts are
+    //     row-local and cheap. (Set-covering ≥-rows yield no knapsack covers, so
+    //     this is a no-op there regardless.)
+    //   * Tight pool cap ≈ 2× the original row count. The win is at a small active
+    //     set; loose caps (≈8×) drive the per-node LP cost up and erase it. Cuts
+    //     are kept globally valid and never removed, so a tight cap is the cheap
+    //     stand-in for SCIP-style aging.
+    let struct_nnz: usize = (0..m_w)
+        .map(|i| (0..ns).filter(|&j| a_w[i * n_w + j] != 0.0).count())
+        .sum();
+    let row_density = struct_nnz as f64 / (m_w.max(1) * ns.max(1)) as f64;
+    const NODE_CUT_MAX_DENSITY: f64 = 0.5;
+    let node_cuts_on = opts.node_cuts && row_density < NODE_CUT_MAX_DENSITY;
+    let node_cut_cap = (2 * n_orig_rows).min(opts.max_pool_cuts);
+
     // Absolute wall-clock deadline for the whole solve (root cuts + B&B),
     // computed up front so even the root-cut LP solves below honour it. The
     // simplex options carry it into every primal/dual loop, so a single
@@ -455,7 +477,7 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
                 sb_active,
                 inc_snapshot: tm.incumbent().map(|(_, inc)| inc),
                 reliability: tm.get_reliability_threshold(),
-                pool_room: pool_sigs.len() < opts.max_pool_cuts,
+                pool_room: node_cuts_on && pool_sigs.len() < node_cut_cap,
                 root_warm_basis: root_warm_basis.as_ref(),
                 deadline,
                 tm: &tm,
@@ -530,12 +552,8 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
             }
             // Dedup this node's cuts against the shared pool *in order*, with the
             // same room check the serial path applied, so the pool is identical.
-            if !out.found_cuts.is_empty() && pool_sigs.len() < opts.max_pool_cuts {
-                pending_cuts.extend(dedup_new_cuts(
-                    out.found_cuts,
-                    &mut pool_sigs,
-                    opts.max_pool_cuts,
-                ));
+            if !out.found_cuts.is_empty() && pool_sigs.len() < node_cut_cap {
+                pending_cuts.extend(dedup_new_cuts(out.found_cuts, &mut pool_sigs, node_cut_cap));
             }
             results.push(out.result);
         }
@@ -871,13 +889,25 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
                     &full_u,
                     ctx.simplex.tol,
                 ) {
-                    Some(basis) => solve_lp_warm_scaled_csc(
-                        &solve_lp_view,
-                        ctx.sb,
-                        &basis,
-                        ctx.simplex,
-                        ctx.csc,
-                    ),
+                    // Same pivot-bounded guard as `solve_lp_root` (#350): a qualifying
+                    // slack basis whose dual solve then stalls on an ill-conditioned
+                    // relaxation must fall back to the cold primal, not grind to the
+                    // deadline.
+                    Some(basis) => {
+                        let warm = solve_lp_warm_scaled_csc(
+                            &solve_lp_view,
+                            ctx.sb,
+                            &basis,
+                            &warm_root_opts(ctx.simplex, ctx.m_w, ctx.n_w),
+                            ctx.csc,
+                        );
+                        match warm.status {
+                            LpStatus::IterLimit | LpStatus::Numerical => {
+                                solve_lp_scaled(&solve_lp_view, ctx.sb, ctx.simplex)
+                            }
+                            _ => warm,
+                        }
+                    }
                     None => solve_lp_scaled(&solve_lp_view, ctx.sb, ctx.simplex),
                 }
             }
@@ -988,7 +1018,7 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
             // Node-level cover separation: a fractional node exposes violated
             // covers the root never sees. These are globally valid; the reduce
             // dedups them into the shared pool to tighten the whole tree.
-            if ctx.opts.node_cuts && !feasible && ctx.pool_room && !time_up {
+            if !feasible && ctx.pool_room && !time_up {
                 let _t = crate::profile::Timer::new(crate::profile::Phase::SepCover);
                 out.found_cuts = separate_cover(
                     &node_lp,
@@ -1697,9 +1727,45 @@ fn dual_slack_basis(
 /// always the same optimum — only the path differs.
 fn solve_lp_root(lp: &LpView<'_>, b: &[f64], opts: &SimplexOptions) -> crate::lp::simplex::LpSolve {
     match dual_slack_basis(lp.a, lp.m, lp.n, lp.c, lp.l, lp.u, opts.tol) {
-        Some(basis) => solve_lp_warm(lp, b, &basis, opts),
+        Some(basis) => {
+            // The dual-slack warm start is an *optimization*, not a requirement: on
+            // covering/packing relaxations the dual simplex reaches the optimum in a
+            // handful of pivots (the #334 win). But on an ill-conditioned relaxation
+            // — e.g. nvs06's geometric-mean-equilibrated McCormick LP (#350) — the
+            // dual simplex degenerate-cycles to `max_iter` and burns the whole
+            // enclosing MILP budget, while the cold primal solves it instantly. The
+            // existing fallback only fires when the slack basis does not *qualify*
+            // (`dual_slack_basis` -> None); it does NOT catch a qualifying basis whose
+            // dual solve then stalls. Cap the warm attempt to a small pivot budget and
+            // fall back to the cold primal when it stalls (IterLimit / Numerical).
+            // Optimal/Infeasible/Unbounded warm results are exact and kept.
+            let warm = solve_lp_warm(lp, b, &basis, &warm_root_opts(opts, lp.m, lp.n));
+            match warm.status {
+                LpStatus::IterLimit | LpStatus::Numerical => solve_lp(lp, b, opts),
+                _ => warm,
+            }
+        }
         None => solve_lp(lp, b, opts),
     }
+}
+
+/// Pivot-bounded options for a dual-slack *warm* root attempt. The dual-slack
+/// start only ever pays off when it converges quickly (the covering-LP win is a
+/// few hundred to a low-thousands pivots); past a generous multiple of the problem
+/// size it is stalling, so cap it and let the caller cold-solve. The
+/// size-proportional `8·(m+n)` term sits far above the largest validated
+/// covering-LP win (sc2000 root ≈ 1384 pivots at m+n ≈ 2800 ⇒ cap ≈ 22400), so
+/// that win is untouched; the small absolute floor only affects genuinely tiny LPs.
+fn warm_root_opts(opts: &SimplexOptions, m: usize, n: usize) -> SimplexOptions {
+    // Covering/packing relaxations converge in O(m+n) dual pivots (sc2000 root:
+    // ≈1384 for m+n≈2800), so a generous size-proportional cap preserves that win
+    // by a wide margin while a degenerate stall (nvs06: ~max_iter pivots on a tiny
+    // ill-conditioned LP, #350) trips it almost immediately. The small floor keeps
+    // genuinely tiny LPs from a too-eager bail (their cold solve is cheap anyway).
+    let cap = (8 * (m + n)).max(512);
+    let mut o = opts.clone();
+    o.max_iter = o.max_iter.min(cap);
+    o
 }
 
 #[cfg(test)]

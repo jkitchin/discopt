@@ -237,131 +237,125 @@ impl<'a> PreparedDual<'a> {
             }
         };
 
+        // Exact basic values and reduced costs — the soundness anchor. Maintained
+        // incrementally through the loop and refreshed from these (see the doc).
+        let mut xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
+        let mut dvec = recompute_reduced_costs(&mut lu, sp, c, n, &basis)?;
+        // Iterations since the last exact refresh; bound roundoff in the rank-1
+        // updates by refreshing at least this often (still far cheaper than the
+        // per-iteration full recompute it replaces).
+        const REFRESH: usize = 32;
+        let mut since_refresh = 0usize;
+
         let mut updates = 0usize;
-        let mut pivots = 0usize;
         // Dual Devex reference weights γ_i ≥ 1, one per basic slot. The leaving
         // variable maximizes (bound violation)²/γ_i — a cheap steepest-edge
         // approximation that cuts dual iterations versus plain largest-violation
         // pricing. Pricing only chooses *which* primal-infeasible row leaves, never
         // affects correctness (any infeasible basic var is a valid leaving choice).
         let mut gamma = vec![1.0f64; m];
-        for _iter in 0..opts.max_iter {
+        // The loop index is the pivot count: each completed iteration performs one
+        // pivot, and every early return happens at the loop top (before this
+        // iteration's pivot), so `pivots` is exactly the number performed so far.
+        for pivots in 0..opts.max_iter {
             // Poll the wall-clock deadline (see SimplexOptions::deadline). On a
             // timeout we abandon the warm dual re-solve and request the cold
             // fallback by returning None; the cold primal solve re-checks the
             // same deadline on its first iteration and returns IterLimit, which
             // the B&B treats soundly. Polled every 256 pivots to keep the now()
             // cost negligible against a full ftran iteration.
-            if (_iter & 255) == 0
+            if (pivots & 255) == 0
                 && opts
                     .deadline
                     .is_some_and(|d| std::time::Instant::now() >= d)
             {
                 return None;
             }
-            // Basic values x_B = B⁻¹(b − Σ_nonbasic A_j x_j).
-            let mut xb = b.to_vec();
-            for j in 0..n {
-                if stat[j] != BASIC {
-                    let v = nb_value(&stat, j);
-                    if v != 0.0 {
-                        let (rows, vals) = sp.col(j);
-                        for (k, &rr) in rows.iter().enumerate() {
-                            xb[rr] -= vals[k] * v;
+            // Periodic exact refresh to bound increment roundoff.
+            if since_refresh >= REFRESH {
+                xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
+                dvec = recompute_reduced_costs(&mut lu, sp, c, n, &basis)?;
+                since_refresh = 0;
+            }
+
+            // Leaving variable from the *maintained* `xb`. If it shows primal
+            // feasibility, confirm with an *exact* recompute before declaring
+            // optimality, and verify dual feasibility on *exact* reduced costs —
+            // so a drifted increment can never return a wrong optimum.
+            let (r, to_lower, delta) = match select_leaving(m, &basis, l, u, &gamma, &xb, tol) {
+                Some(sel) => sel,
+                None => {
+                    xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
+                    since_refresh = 0;
+                    match select_leaving(m, &basis, l, u, &gamma, &xb, tol) {
+                        Some(sel) => sel,
+                        None => {
+                            dvec = recompute_reduced_costs(&mut lu, sp, c, n, &basis)?;
+                            if dual_feasible(n, &stat, l, u, &dvec, tol) {
+                                return Some(assemble(
+                                    n,
+                                    m,
+                                    &basis,
+                                    &slot_of,
+                                    &stat,
+                                    &xb,
+                                    c,
+                                    l,
+                                    u,
+                                    LpStatus::Optimal,
+                                    pivots,
+                                ));
+                            }
+                            // Exact reduced costs reveal dual infeasibility (a drifted
+                            // pivot): hand off to the robust cold solve.
+                            return None;
                         }
                     }
                 }
-            }
-            if lu.ftran(&mut xb).is_err() {
-                return None;
-            }
-
-            // Leaving variable: most primal-infeasible basic var by Devex score
-            // (violation²/γ_i). `to_lower` = the bound the leaving var is pinned at.
-            let mut r = None;
-            let mut best_score = 0.0f64;
-            let mut to_lower = true;
-            let mut delta = 0.0f64; // bound-violation magnitude of the chosen row
-            for i in 0..m {
-                let bi = basis[i];
-                let viol = if xb[i] < l[bi] - tol {
-                    Some((l[bi] - xb[i], true)) // below lower → pin at lower
-                } else if xb[i] > u[bi] + tol {
-                    Some((xb[i] - u[bi], false)) // above upper → pin at upper
-                } else {
-                    None
-                };
-                if let Some((v, lo)) = viol {
-                    let score = v * v / gamma[i];
-                    if score > best_score {
-                        best_score = score;
-                        r = Some(i);
-                        to_lower = lo;
-                        delta = v;
-                    }
-                }
-            }
-            let r = match r {
-                Some(r) => r,
-                None => {
-                    // primal feasible + dual feasible (maintained) ⇒ optimal
-                    return Some(assemble(
-                        n, m, &basis, &slot_of, &stat, &xb, c, l, u, LpStatus::Optimal, pivots,
-                    ));
-                }
             };
 
-            // Pivot row ρ = e_rᵀ B⁻¹ ; alpha_rj = ρ·A_j for nonbasic j.
+            // Pivot row ρ = e_rᵀ B⁻¹, then α_rj = ρ·A_j for every nonbasic j (kept
+            // for both the ratio test and the incremental reduced-cost update). No
+            // per-iteration `y = B⁻ᵀc_B` btran: the reduced costs are maintained.
             let mut rho = vec![0.0; m];
             rho[r] = 1.0;
             if lu.btran(&mut rho).is_err() {
                 return None;
             }
-
-            // Reduced costs d_j = c_j − yᵀA_j with y = B⁻ᵀ c_B.
-            let mut y: Vec<f64> = basis.iter().map(|&j| c[j]).collect();
-            if lu.btran(&mut y).is_err() {
-                return None;
-            }
-
-            // Bound-flipping (long-step) dual ratio test. Eligible nonbasic columns
-            // are the breakpoints where some d_j would cross zero as the dual step
-            // grows; walking them in increasing |d_j/α_rj| and *flipping* each
-            // finite-bounded one to its opposite bound lets the leaving variable
-            // travel further in a single pivot (each flip closes |α_rj|·(u−l) of the
-            // infeasibility `delta`). The breakpoint that closes the rest — or the
-            // first with an infinite bound gap (can't flip) — is the entering column.
-            // Flips only change which bound a nonbasic sits at (`stat`); the next
-            // iteration's exact x_B/y recompute re-establishes primal values and dual
-            // feasibility, and any difficulty still falls back to the cold solve.
-            let mut cand: Vec<(usize, f64, f64)> = Vec::new(); // (j, ratio, |α_rj|)
-            for j in 0..n {
-                if stat[j] == BASIC || u[j] - l[j] <= tol {
-                    continue; // basic or fixed
-                }
-                let arj = sp.dot(j, &rho);
-                let eligible = if stat[j] == AT_LOWER {
-                    if to_lower {
-                        arj < -tol
-                    } else {
-                        arj > tol
-                    }
-                } else if to_lower {
-                    arj > tol
-                } else {
-                    arj < -tol
-                };
-                if eligible {
-                    let dj = c[j] - sp.dot(j, &y);
-                    cand.push((j, (dj / arj).abs(), arj.abs()));
+            let mut alpha_r = vec![0.0; n];
+            for (j, arj) in alpha_r.iter_mut().enumerate() {
+                if stat[j] != BASIC {
+                    *arj = sp.dot(j, &rho);
                 }
             }
+
+            // Bound-flipping (long-step) dual ratio test on the *maintained*
+            // reduced costs: walk eligible breakpoints in increasing |d_j/α_rj|,
+            // flipping each finite-bounded one to its opposite bound until the
+            // infeasibility `delta` is closed; the last breakpoint enters. If no
+            // column is eligible the LP is primal-infeasible — but confirm on
+            // *exact* reduced costs first, since a drifted `dvec` could spuriously
+            // empty the set. Flips only change which bound a nonbasic sits at.
+            let mut cand = build_candidates(n, &stat, l, u, &alpha_r, &dvec, to_lower, tol);
             if cand.is_empty() {
-                // No eligible entering column: the LP is primal-infeasible.
-                // Trustworthy because the start basis was verified dual-feasible.
-                return Some(assemble(
-                    n, m, &basis, &slot_of, &stat, &xb, c, l, u, LpStatus::Infeasible, pivots,
-                ));
+                dvec = recompute_reduced_costs(&mut lu, sp, c, n, &basis)?;
+                cand = build_candidates(n, &stat, l, u, &alpha_r, &dvec, to_lower, tol);
+                if cand.is_empty() {
+                    xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
+                    return Some(assemble(
+                        n,
+                        m,
+                        &basis,
+                        &slot_of,
+                        &stat,
+                        &xb,
+                        c,
+                        l,
+                        u,
+                        LpStatus::Infeasible,
+                        pivots,
+                    ));
+                }
             }
             cand.sort_by(|x, y| x.1.partial_cmp(&y.1).unwrap_or(std::cmp::Ordering::Equal));
             // Walk breakpoints, flipping finite-bounded ones until `delta` is closed.
@@ -384,7 +378,11 @@ impl<'a> PreparedDual<'a> {
             // Apply the bound flips (no basis change); their effect on x_B and the
             // reduced costs is realized by the next iteration's exact recompute.
             for &j in &flips {
-                stat[j] = if stat[j] == AT_LOWER { AT_UPPER } else { AT_LOWER };
+                stat[j] = if stat[j] == AT_LOWER {
+                    AT_UPPER
+                } else {
+                    AT_LOWER
+                };
             }
 
             // Entering column α = B⁻¹A_q for the Devex weight update (and reused as
@@ -395,7 +393,10 @@ impl<'a> PreparedDual<'a> {
                 return None;
             }
             let piv = alpha[r];
-            if piv.abs() > tol {
+            if piv.abs() <= tol {
+                return None; // unstable (near-zero) pivot → robust cold fallback
+            }
+            {
                 // Goldfarb–Reid dual Devex update (uses the still-current basis).
                 let gamma_r = gamma[r];
                 for i in 0..m {
@@ -417,12 +418,54 @@ impl<'a> PreparedDual<'a> {
 
             // Pivot: q enters at slot r; leaving var pinned at the violated bound.
             let leaving = basis[r];
+
+            // Incremental reduced-cost update (rank-1): d_j −= (d_q/piv)·α_rj for
+            // every nonbasic j; the entering q becomes basic (0) and the leaving
+            // column takes −d_q/piv. Bound flips don't change reduced costs.
+            let theta_d = dvec[q] / piv;
+            for j in 0..n {
+                if stat[j] != BASIC && j != q {
+                    dvec[j] -= theta_d * alpha_r[j];
+                }
+            }
+            dvec[leaving] = -theta_d;
+            dvec[q] = 0.0;
+
+            // Incremental basic-value update. First the bound flips' RHS effect:
+            // x_B −= B⁻¹(Σ_flipped A_j·Δx_j). Then the primal step driving the
+            // leaving variable to its bound: x_B −= t·α_q, with the entering column
+            // taking value v_q + t at slot r. (`stat` already reflects the flips;
+            // q/leaving statuses are set just below, so `nb_value(q)` is its bound.)
+            if !flips.is_empty() {
+                let mut rd = vec![0.0; m];
+                for &j in &flips {
+                    let gap = u[j] - l[j];
+                    let dxj = if stat[j] == AT_UPPER { gap } else { -gap };
+                    let (rows, vals) = sp.col(j);
+                    for (k, &rr) in rows.iter().enumerate() {
+                        rd[rr] += vals[k] * dxj;
+                    }
+                }
+                if lu.ftran(&mut rd).is_err() {
+                    return None;
+                }
+                for (xi, ri) in xb.iter_mut().zip(rd.iter()) {
+                    *xi -= *ri;
+                }
+            }
+            let bound_p = if to_lower { l[leaving] } else { u[leaving] };
+            let t = (xb[r] - bound_p) / piv;
+            let v_q = nb_value(&stat, q);
+            for (xi, ai) in xb.iter_mut().zip(alpha.iter()) {
+                *xi -= t * *ai;
+            }
+            xb[r] = v_q + t;
+
             stat[leaving] = if to_lower { AT_LOWER } else { AT_UPPER };
             slot_of[leaving] = -1;
             basis[r] = q;
             slot_of[q] = r as i64;
             stat[q] = BASIC;
-            pivots += 1;
             let need_refac = lu.update(r, &raw_q).is_err();
             updates += 1;
             if need_refac || updates >= 48 {
@@ -437,10 +480,176 @@ impl<'a> PreparedDual<'a> {
                     return None;
                 }
                 updates = 0;
+                // Fresh factorization → reseed exact values, reset the drift clock.
+                xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
+                dvec = recompute_reduced_costs(&mut lu, sp, c, n, &basis)?;
+                since_refresh = 0;
+            } else {
+                since_refresh += 1;
             }
         }
         None // iteration cap → cold fallback
     }
+}
+
+/// Exact basic values `x_B = B⁻¹(b − Σ_nonbasic A_j x_j)` for the current basis.
+/// The soundness anchor for the incremental dual loop: the maintained `xb` is
+/// refreshed from this on a cadence and whenever optimality/infeasibility is
+/// claimed, so a drifted increment never decides the returned result.
+fn recompute_basic_values(
+    lu: &mut FeralLU,
+    sp: &SparseCols,
+    b: &[f64],
+    n: usize,
+    l: &[f64],
+    u: &[f64],
+    stat: &[i8],
+) -> Option<Vec<f64>> {
+    let mut xb = b.to_vec();
+    for j in 0..n {
+        if stat[j] != BASIC {
+            let v = if stat[j] == AT_UPPER {
+                u[j]
+            } else if l[j] <= -INF {
+                0.0
+            } else {
+                l[j]
+            };
+            if v != 0.0 {
+                let (rows, vals) = sp.col(j);
+                for (k, &rr) in rows.iter().enumerate() {
+                    xb[rr] -= vals[k] * v;
+                }
+            }
+        }
+    }
+    if lu.ftran(&mut xb).is_err() {
+        return None;
+    }
+    Some(xb)
+}
+
+/// Exact reduced costs `d_j = c_j − yᵀA_j` (with `y = B⁻ᵀ c_B`) for every column.
+/// Basic columns get ≈0. Used to seed and periodically refresh the maintained
+/// `dvec`, and to verify dual feasibility before `Optimal` is returned.
+fn recompute_reduced_costs(
+    lu: &mut FeralLU,
+    sp: &SparseCols,
+    c: &[f64],
+    n: usize,
+    basis: &[usize],
+) -> Option<Vec<f64>> {
+    let mut y: Vec<f64> = basis.iter().map(|&j| c[j]).collect();
+    if lu.btran(&mut y).is_err() {
+        return None;
+    }
+    let mut d = vec![0.0; n];
+    for (j, dj) in d.iter_mut().enumerate() {
+        *dj = c[j] - sp.dot(j, &y);
+    }
+    Some(d)
+}
+
+/// Most primal-infeasible basic variable by dual-Devex score `violation²/γ`, or
+/// `None` if every basic variable is within its bounds (primal feasible). Returns
+/// `(slot, to_lower, violation)` where `to_lower` is the bound the leaving
+/// variable is pinned at. Pricing only — choosing any infeasible row is valid.
+fn select_leaving(
+    m: usize,
+    basis: &[usize],
+    l: &[f64],
+    u: &[f64],
+    gamma: &[f64],
+    xb: &[f64],
+    tol: f64,
+) -> Option<(usize, bool, f64)> {
+    let mut r = None;
+    let mut best_score = 0.0f64;
+    let mut to_lower = true;
+    let mut delta = 0.0f64;
+    for i in 0..m {
+        let bi = basis[i];
+        let viol = if xb[i] < l[bi] - tol {
+            Some((l[bi] - xb[i], true))
+        } else if xb[i] > u[bi] + tol {
+            Some((xb[i] - u[bi], false))
+        } else {
+            None
+        };
+        if let Some((v, lo)) = viol {
+            let score = v * v / gamma[i];
+            if score > best_score {
+                best_score = score;
+                r = Some(i);
+                to_lower = lo;
+                delta = v;
+            }
+        }
+    }
+    r.map(|r| (r, to_lower, delta))
+}
+
+/// Eligible entering breakpoints for the bound-flipping dual ratio test, each
+/// `(j, |d_j/α_rj|, |α_rj|)`. `alpha_r[j] = ρ·A_j` (the pivot row) is precomputed
+/// for every nonbasic `j`; `dvec` supplies the reduced costs (maintained, not
+/// recomputed). Eligibility is the usual dual sign test against the leaving bound.
+#[allow(clippy::too_many_arguments)]
+fn build_candidates(
+    n: usize,
+    stat: &[i8],
+    l: &[f64],
+    u: &[f64],
+    alpha_r: &[f64],
+    dvec: &[f64],
+    to_lower: bool,
+    tol: f64,
+) -> Vec<(usize, f64, f64)> {
+    let mut cand = Vec::new();
+    for j in 0..n {
+        if stat[j] == BASIC || u[j] - l[j] <= tol {
+            continue;
+        }
+        let arj = alpha_r[j];
+        let eligible = if stat[j] == AT_LOWER {
+            if to_lower {
+                arj < -tol
+            } else {
+                arj > tol
+            }
+        } else if to_lower {
+            arj > tol
+        } else {
+            arj < -tol
+        };
+        if eligible {
+            cand.push((j, (dvec[j] / arj).abs(), arj.abs()));
+        }
+    }
+    cand
+}
+
+/// Whether every non-fixed nonbasic column is dual-feasible at `dvec`: a column at
+/// its lower bound needs `d ≥ −tol`, at its upper bound `d ≤ tol`, and a free
+/// column `|d| ≤ tol`. Checked (with **exact** `dvec`) before `Optimal` is
+/// returned, so incremental reduced-cost drift can never yield a wrong optimum.
+fn dual_feasible(n: usize, stat: &[i8], l: &[f64], u: &[f64], dvec: &[f64], tol: f64) -> bool {
+    for j in 0..n {
+        if stat[j] == BASIC || u[j] - l[j] <= tol {
+            continue;
+        }
+        let free = l[j] <= -INF && u[j] >= INF;
+        let ok = if free {
+            dvec[j].abs() <= tol
+        } else if stat[j] == AT_UPPER {
+            dvec[j] <= tol
+        } else {
+            dvec[j] >= -tol
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -650,6 +859,86 @@ mod tests {
         }
     }
 
+    // Stress the incremental dual loop: larger LPs with finite bounds (so the
+    // bound-flipping ratio test fires) and perturbations heavy enough to drive
+    // many pivots — crossing the exact-refresh cadence and the LU refactor — so
+    // the maintained `xb`/`dvec` are genuinely exercised, not just seeded. Every
+    // warm re-solve must still reach the cold optimum, and at least some must
+    // actually run the warm dual path (iters > 0), proving it isn't silently
+    // cold-falling-back and hiding increment bugs behind the safe fallback.
+    #[test]
+    fn warm_incremental_matches_cold_under_many_pivots() {
+        let mut state: u64 = 0x0123_4567_89AB_CDEF;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 11) as f64) / ((1u64 << 53) as f64)
+        };
+        let mut warm_ran = 0;
+        for _ in 0..60 {
+            let (m, n) = (8, 22);
+            let a: Vec<f64> = (0..m * n).map(|_| (next() * 6.0 - 3.0).round()).collect();
+            let x0: Vec<f64> = (0..n).map(|_| 0.3 + 3.4 * next()).collect();
+            let b: Vec<f64> = (0..m)
+                .map(|i| (0..n).map(|j| a[i * n + j] * x0[j]).sum())
+                .collect();
+            let c: Vec<f64> = (0..n).map(|_| (next() * 10.0 - 5.0).round()).collect();
+            let l = vec![0.0; n];
+            let u = vec![4.0; n];
+            let lp = LpView {
+                a: &a,
+                m,
+                n,
+                c: &c,
+                l: &l,
+                u: &u,
+            };
+            let cold = solve_lp(&lp, &b, &opts());
+            if cold.status != LpStatus::Optimal {
+                continue;
+            }
+            // Tighten MANY upper bounds well below their current values at once, so
+            // the warm re-solve takes a long sequence of dual pivots + bound flips.
+            let mut u2 = u.clone();
+            for j in 0..n {
+                if next() < 0.6 {
+                    u2[j] = (cold.x[j] - 1.5).max(0.0);
+                }
+            }
+            let lp2 = LpView {
+                a: &a,
+                m,
+                n,
+                c: &c,
+                l: &l,
+                u: &u2,
+            };
+            let warm = solve_lp_warm(&lp2, &b, &cold.basis, &opts());
+            let cold2 = solve_lp(&lp2, &b, &opts());
+            assert_eq!(
+                warm.status, cold2.status,
+                "status mismatch warm {:?} vs cold {:?}",
+                warm.status, cold2.status
+            );
+            if cold2.status == LpStatus::Optimal {
+                assert!(
+                    (warm.obj - cold2.obj).abs() <= 1e-6 * (1.0 + cold2.obj.abs()),
+                    "warm {} vs cold {}",
+                    warm.obj,
+                    cold2.obj
+                );
+                if warm.iters > 0 {
+                    warm_ran += 1;
+                }
+            }
+        }
+        assert!(
+            warm_ran >= 5,
+            "warm dual path almost never ran ({warm_ran}) — incremental path not exercised"
+        );
+    }
+
     // A dual-INFEASIBLE warm start must be rejected by the precondition check
     // and fall back to a cold solve — not silently declared "Optimal" at the
     // wrong point. The all-slack basis for `min -x0 -2x1` has reduced costs
@@ -693,6 +982,9 @@ mod tests {
             cold.obj
         );
         // iters==0 confirms the cold fallback ran (the dual path sets iters>0).
-        assert_eq!(warm.iters, 0, "precondition should have forced cold fallback");
+        assert_eq!(
+            warm.iters, 0,
+            "precondition should have forced cold fallback"
+        );
     }
 }
