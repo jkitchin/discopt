@@ -1933,7 +1933,10 @@ def solve_lp_nlp_bb(
     This is a single-tree OA method: the MILP master is solved once, and each
     integer incumbent triggers a fixed-integer NLP solve inside a Gurobi lazy
     constraint callback. Lazy rows are generated through the same OA and
-    feasibility-cut helpers used by the multi-tree OA method.
+    feasibility-cut helpers used by the multi-tree OA method. ``max_iterations``
+    only caps the optional feasibility-pump initializer on this path; the main
+    single-tree search is delegated to Gurobi and is controlled by
+    ``time_limit`` and ``gap_tolerance``.
     """
     if kwargs:
         raise ValueError(
@@ -2193,6 +2196,8 @@ def solve_lp_nlp_bb(
     bound = None
     if master_bound_valid and master_result.bound is not None:
         bound = float(master_result.bound)
+        if decomp.obj_is_linear and decomp.obj_coeffs is not None:
+            bound += float(decomp.obj_coeffs[1])
     gap = (
         _compute_gap(bound, incumbent_obj)
         if bound is not None and incumbent_obj is not None
