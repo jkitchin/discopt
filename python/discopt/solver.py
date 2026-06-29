@@ -6059,6 +6059,35 @@ def solve_model(
                 if np.isfinite(cvx_lb):
                     result_lbs[i] = max(result_lbs[i], cvx_lb)
 
+        # Completeness guard (soundness). In nonconvex mode the Rust tree never
+        # promotes a node's relaxation bound to the incumbent, and the per-node NLP
+        # that normally injects feasible points is strided — so a node whose
+        # relaxation solution is already an integer- AND constraint-feasible point
+        # (e.g. the true optimum at a fully-branched leaf) can be fathomed without
+        # its objective EVER being recorded. The tree then exhausts while missing
+        # that point and falsely certifies a worse incumbent (nvs19: certified
+        # -1098.0 with -1098.4 feasible). Inject every such verified point here,
+        # ungated: ``inject_incumbent`` accepts only a strictly-improving feasible
+        # point and never touches the dual bound, so this only ever tightens the
+        # incumbent — it cannot make the search unsound, only complete.
+        if not _model_is_convex and int_offsets:
+            _cl = [c[0] for c in constraint_bounds] if constraint_bounds else None
+            _cu = [c[1] for c in constraint_bounds] if constraint_bounds else None
+            for i in range(n_batch):
+                if node_infeasible_mask[i] or result_lbs[i] >= _SENTINEL_THRESHOLD:
+                    continue
+                xi = np.asarray(result_sols[i], dtype=np.float64)
+                if not _is_integer_feasible_solution(xi, int_offsets, int_sizes):
+                    continue
+                xr = xi.copy()
+                for _off, _sz in zip(int_offsets, int_sizes):
+                    xr[_off : _off + _sz] = np.round(xr[_off : _off + _sz])
+                if _cl is not None and not _check_constraint_feasibility(evaluator, xr, _cl, _cu):
+                    continue
+                _obj_i = float(evaluator.evaluate_objective(xr))
+                if np.isfinite(_obj_i) and _obj_i < _SENTINEL_THRESHOLD:
+                    tree.inject_incumbent(xr, _obj_i)
+
         # Import results back to Rust tree
         t_rust_start = time.perf_counter()
         tree.import_results(result_ids, result_lbs, result_sols, result_feas)
