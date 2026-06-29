@@ -245,6 +245,42 @@ def _safe_attr(obj, name: str):
         return None
 
 
+def _safe_solver_attr(obj, name: str):
+    value = _safe_attr(obj, name)
+    if value is not None:
+        return value
+    get_attr = _safe_attr(obj, "getAttr")
+    if get_attr is None:
+        return None
+    try:
+        return get_attr(name)
+    except Exception:
+        return None
+
+
+def _collect_solution_pool(model, x, limit: int) -> tuple[list[np.ndarray], list[float]]:
+    """Return up to ``limit`` Gurobi pool solutions sorted by objective."""
+    sol_count = int(_safe_attr(model, "SolCount") or 0)
+    if sol_count <= 0:
+        return [], []
+
+    candidates: list[tuple[float, np.ndarray]] = []
+    for solution_number in range(min(sol_count, int(limit))):
+        model.setParam("SolutionNumber", solution_number)
+        x_pool = _safe_solver_attr(x, "Xn")
+        if x_pool is None and solution_number == 0:
+            x_pool = _safe_solver_attr(x, "X")
+        obj_pool = _safe_attr(model, "PoolObjVal")
+        if obj_pool is None and solution_number == 0:
+            obj_pool = _safe_attr(model, "ObjVal")
+        if x_pool is None or obj_pool is None:
+            continue
+        candidates.append((float(obj_pool), np.asarray(x_pool, dtype=np.float64).ravel()))
+
+    candidates.sort(key=lambda item: item[0])
+    return [candidate for _obj, candidate in candidates], [obj for obj, _candidate in candidates]
+
+
 def _build_model(
     gp,
     GRB,
@@ -393,10 +429,16 @@ def solve_milp(
     gap_tolerance: float = 1e-4,
     threads: Optional[int] = None,
     options: Optional[dict] = None,
+    solution_pool: bool = False,
+    num_solution_iteration: int = 5,
 ) -> MILPResult:
     """Solve a mixed-integer linear program using Gurobi."""
     c_arr, _n = _validate_linear_data(c, A_ub, b_ub, A_eq, b_eq, bounds)
     gp, GRB = _load_gurobi()
+    merged_options = dict(options or {})
+    if solution_pool:
+        merged_options.setdefault("PoolSearchMode", 2)
+        merged_options.setdefault("PoolSolutions", max(1, int(num_solution_iteration)))
 
     env, model, x, _ub_con, _eq_con = _build_model(
         gp,
@@ -412,7 +454,7 @@ def solve_milp(
         time_limit=time_limit,
         gap_tolerance=gap_tolerance,
         threads=threads,
-        options=options,
+        options=merged_options,
     )
     try:
         status_code = _optimize(model, GRB)
@@ -425,6 +467,15 @@ def solve_milp(
         if int(_safe_attr(model, "SolCount") or 0) > 0:
             objective = float(model.ObjVal)
             x_val = np.asarray(x.X, dtype=np.float64).ravel()
+
+        pool_x = None
+        pool_obj = None
+        if solution_pool:
+            pool_x, pool_obj = _collect_solution_pool(
+                model,
+                x,
+                max(1, int(num_solution_iteration)),
+            )
 
         bound = _safe_attr(model, "ObjBound")
         bound = float(bound) if bound is not None and np.isfinite(bound) else None
@@ -441,6 +492,8 @@ def solve_milp(
                 gap=0.0,
                 node_count=node_count,
                 wall_time=wall_time,
+                solution_pool=pool_x,
+                solution_pool_objectives=pool_obj,
             )
 
         return MILPResult(
@@ -451,6 +504,8 @@ def solve_milp(
             gap=gap,
             node_count=node_count,
             wall_time=wall_time,
+            solution_pool=pool_x,
+            solution_pool_objectives=pool_obj,
         )
     finally:
         model.dispose()

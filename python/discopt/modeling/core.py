@@ -1419,6 +1419,48 @@ class Model:
         self._builder_linear_objective: Optional[tuple] = None
         self._builder_quadratic_objective: Optional[tuple] = None
 
+    # ── Rich representation (LaTeX / HTML in standard PSE form) ──
+
+    def to_latex(self, max_rows: Optional[int] = None) -> str:
+        """Render the model as a LaTeX ``aligned`` block in standard problem form
+        (``minimize f(x)`` / ``subject to g(x) <= 0`` / variable domains).
+
+        Parameters
+        ----------
+        max_rows : int, optional
+            Cap on the number of constraint/variable rows shown; excess is
+            summarised with a ``\\vdots`` row. ``None`` (default) renders everything.
+        """
+        from discopt.modeling import latex
+
+        return latex.model_to_latex(self, max_rows=max_rows)
+
+    def to_html(self, max_rows: Optional[int] = None) -> str:
+        """Render the model as standalone HTML (the PSE LaTeX typeset via MathJax,
+        with a header naming the model and its size). See :meth:`to_latex`."""
+        from discopt.modeling import latex
+
+        return latex.model_to_html(self, max_rows=max_rows)
+
+    def _repr_latex_(self) -> str:
+        from discopt.modeling import latex
+
+        return f"$$\n{latex.model_to_latex(self, max_rows=latex._DEFAULT_MAX_ROWS)}\n$$"
+
+    def _repr_markdown_(self) -> str:
+        # VS Code's notebook renderer typesets ``text/markdown`` outputs with
+        # KaTeX but does not reliably render ``text/latex`` outputs; emit the
+        # same PSE block as fenced display math so it renders there too.
+        # Jupyter/MathJax frontends prefer ``_repr_latex_``/``_repr_html_``.
+        from discopt.modeling import latex
+
+        return f"$$\n{latex.model_to_latex(self, max_rows=latex._DEFAULT_MAX_ROWS)}\n$$"
+
+    def _repr_html_(self) -> str:
+        from discopt.modeling import latex
+
+        return latex.model_to_html(self, max_rows=latex._DEFAULT_MAX_ROWS)
+
     # ── Index sets ──
 
     def set(self, name: str, members, dimen: Optional[int] = None):
@@ -2801,9 +2843,11 @@ class Model:
             ``ecp_mode``, ``feasibility_cuts``, ``heuristic_nonconvex``,
             ``add_slack``, ``max_slack``, ``oa_penalty_factor``,
             ``add_no_good_cuts``, ``feasibility_norm``, ``add_regularization``,
-            ``level_coef``, ``stalling_limit``, ``cycling_check``, and
-            ``init_strategy`` take precedence over duplicate keys in
-            ``mip_nlp_options``. For ``mip_nlp_method="goa"``,
+            ``level_coef``, ``stalling_limit``, ``cycling_check``,
+            ``solution_pool``, ``num_solution_iteration``, and ``init_strategy``
+            take precedence over duplicate keys in ``mip_nlp_options``.
+            ``solution_pool`` currently requires ``milp_solver="gurobi"``.
+            For ``mip_nlp_method="goa"``,
             convexity-certified MINLPs use OA's valid master bounds and other
             models use AMP/global relaxations. AMP options such as ``rel_gap``,
             ``abs_tol``, ``max_iter``, ``n_init_partitions``,
