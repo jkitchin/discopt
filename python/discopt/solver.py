@@ -221,6 +221,12 @@ _PER_NODE_OBBT_ROUNDS = 3
 # per-node LP catastrophically slow on large models (casctanks, 500 vars: 359 s
 # for one node), so it is auto-engaged only at or below this lifted-variable count.
 _AUTO_RLT_LEVEL1_MAX_VARS = 50
+# Convex-objective node bound (the supporting-hyperplane lower bound for a model
+# whose minimized objective is a convex quadratic). Capped to small models — the
+# bound runs a few L-BFGS-B solves per node — and gated on a PSD Hessian with
+# margin so the convexity verdict (and hence bound soundness) is never borderline.
+_CONVEX_OBJ_MAX_VARS = 50
+_CONVEX_OBJ_PSD_TOL = 1e-6
 # Floor on the time budget handed to the end-of-solve root-relaxation fallback
 # bound (issue #138). On a hard nonconvex minimize the B&B loop can consume the
 # entire `time_limit` and exit uncertified, leaving no time for the rigorous
@@ -529,6 +535,124 @@ def _compute_alphabb_bound(evaluator, node_lb, node_ub, alpha):
             continue
 
     return best_val if np.isfinite(best_val) else -np.inf
+
+
+def _objective_is_convex_quadratic(model: Model, evaluator, n_vars: int) -> bool:
+    """Whether the internally-minimized objective is a convex quadratic.
+
+    True iff (a) no term in the model is higher than bilinear/square — so the
+    objective is at most quadratic — and (b) the objective Hessian is PSD. A
+    quadratic has a *constant* Hessian, so a PSD verdict at one point holds on the
+    whole space, hence on every B&B node box; the objective is then convex
+    everywhere and its supporting-hyperplane underestimator (see
+    :func:`_convex_objective_lower_bound`) is a rigorous lower bound.
+
+    This is the structural fact the spatial McCormick relaxation throws away: it
+    linearizes a convex x^2 with two tangents (a gap of width^2/4 at the midpoint —
+    on a [0,200] integer range that is ~10^4 *per square*), so the LP bound is
+    hopelessly loose (nvs17 root -2522 vs the convex bound -1106 ~ the optimum
+    -1100). Keeping the convex objective exact recovers an almost-tight bound.
+
+    The eigenvalue test runs on the *evaluator's* objective Hessian, which is the
+    internally-minimized objective (negated for a maximize), so PSD here means the
+    minimized objective is convex regardless of the user's sense.
+    """
+    if model._objective is None or n_vars == 0 or n_vars > _CONVEX_OBJ_MAX_VARS:
+        return False
+    try:
+        from discopt._jax.term_classifier import classify_nonlinear_terms
+
+        t = classify_nonlinear_terms(model)
+        # Reject anything above degree two anywhere in the model. ``monomial`` maps
+        # ``var -> power``, so a cubic ``x**3`` shows up as power 3 here even though
+        # it leaves ``general_nl`` empty — without this guard it would be mistaken
+        # for a quadratic and the single-point Hessian below would not characterize
+        # the (non-constant) curvature, an unsound over-claim.
+        # ``monomial`` is an iterable of ``(var, power)`` (a list of pairs or a
+        # dict); pull the powers robustly across either shape.
+        _monos = t.monomial.items() if hasattr(t.monomial, "items") else t.monomial
+        if (
+            t.trilinear
+            or t.multilinear
+            or t.fractional_power
+            or t.bilinear_with_fp
+            or t.ratio_of_products
+            or t.general_nl
+            or any(int(deg) > 2 for _, deg in _monos)
+        ):
+            return False
+        lb = np.array([v.lb for v in model._variables for _ in range(v.size)], dtype=np.float64)
+        ub = np.array([v.ub for v in model._variables for _ in range(v.size)], dtype=np.float64)
+        lb_f = np.where(np.isfinite(lb), lb, -1.0)
+        ub_f = np.where(np.isfinite(ub), ub, 1.0)
+        # Evaluate the Hessian at two distinct points: a genuine quadratic has a
+        # CONSTANT Hessian, so a PSD verdict at one point holds on every node box.
+        # Requiring the two to agree is a belt-and-suspenders guard that the
+        # objective really is quadratic (rejecting any non-quadratic that slipped
+        # past the structural check above) before trusting the constant-Hessian
+        # convexity argument.
+        H1 = np.asarray(evaluator.evaluate_hessian(0.5 * (lb_f + ub_f)), dtype=np.float64)
+        H2 = np.asarray(evaluator.evaluate_hessian(0.25 * lb_f + 0.75 * ub_f), dtype=np.float64)
+        if H1.shape != (n_vars, n_vars) or not np.all(np.isfinite(H1)):
+            return False
+        if not np.allclose(H1, H2, atol=1e-7, rtol=1e-7):
+            return False
+        # A pure-linear objective has a (near-)zero Hessian; its box bound is
+        # already exact via interval arithmetic, so only engage on genuine
+        # curvature. The threshold is well above float noise for a well-scaled
+        # Hessian, keeping the PSD verdict (and thus the bound) sound.
+        eig_min = float(np.linalg.eigvalsh(0.5 * (H1 + H1.T)).min())
+        return eig_min >= _CONVEX_OBJ_PSD_TOL
+    except Exception:
+        return False
+
+
+def _convex_objective_lower_bound(evaluator, node_lb, node_ub) -> float:
+    """Rigorous lower bound on a convex objective over ``[node_lb, node_ub]``.
+
+    For a convex ``f`` and any point ``x0`` in the box, the supporting hyperplane
+    ``f(x0) + grad f(x0) . (x - x0)`` underestimates ``f`` everywhere, so its
+    minimum over the box — separable, each coordinate at ``lb`` or ``ub`` by the
+    sign of the gradient — is a valid lower bound on ``min_box f`` and therefore on
+    the node's optimum (the box contains the node's feasible set). Unlike taking
+    the local optimizer's objective *value* (which can sit just above the true
+    box-minimum and be an unsound, too-high bound), the hyperplane bound is exact
+    arithmetic and sound for ANY ``x0``; a near-minimizing ``x0`` only makes it
+    tight. Caller must have established that ``f`` is convex on the box
+    (:func:`_objective_is_convex_quadratic`). Returns ``-inf`` (abstain) on an
+    open/empty box or a non-finite gradient.
+    """
+    nlb = np.asarray(node_lb, dtype=np.float64)
+    nub = np.asarray(node_ub, dtype=np.float64)
+    if not (np.all(np.isfinite(nlb)) and np.all(np.isfinite(nub))) or np.any(nub < nlb):
+        return -np.inf
+
+    def f(x):
+        return float(evaluator.evaluate_objective(np.asarray(x, dtype=np.float64)))
+
+    width = nub - nlb
+    best_x = 0.5 * (nlb + nub)
+    best_f = f(best_x)
+    bounds = list(zip(nlb, nub))
+    for x0 in (best_x, nlb + 0.25 * width, nlb + 0.75 * width):
+        try:
+            r = scipy_minimize(f, x0, method="L-BFGS-B", bounds=bounds)
+            if r.fun < best_f:
+                best_f = float(r.fun)
+                best_x = np.clip(np.asarray(r.x, dtype=np.float64), nlb, nub)
+        except (ValueError, ArithmeticError, RuntimeError):
+            continue
+    try:
+        g = np.asarray(evaluator.evaluate_gradient(best_x), dtype=np.float64)
+    except (ValueError, ArithmeticError, RuntimeError):
+        return -np.inf
+    if not np.all(np.isfinite(g)):
+        return -np.inf
+    # min over the box of the supporting hyperplane f(x0) + g.(x - x0).
+    tangent_min = f(best_x) + float(
+        np.sum(np.where(g >= 0.0, g * (nlb - best_x), g * (nub - best_x)))
+    )
+    return tangent_min if np.isfinite(tangent_min) else -np.inf
 
 
 def _compute_interval_bound(model, node_lb, node_ub, negate):
@@ -3807,6 +3931,19 @@ def solve_model(
     _use_alphabb = False
     _alphabb_eligible = n_vars <= 50 and not _model_is_convex and hasattr(evaluator, "_obj_fn")
 
+    # Convex-objective node bound. When the (minimized) objective is a convex
+    # quadratic but the model is nonconvex (nonconvex constraints), the spatial
+    # path McCormick-linearizes the convex objective and loses a huge amount of
+    # bound (nvs17/19/23/24 span [0,200]: root McCormick -2522 vs convex bound
+    # -1106 ~ optimum -1100). Keeping the objective exact via its supporting
+    # hyperplane recovers an almost-tight, rigorous bound at each node. Engaged
+    # even when a McCormick LP relaxer is present (the LP is the loose source).
+    _use_convex_obj_bound = (not _model_is_convex) and _objective_is_convex_quadratic(
+        model, evaluator, n_vars
+    )
+    if _use_convex_obj_bound:
+        logger.debug("convex-objective node bound enabled (n_vars=%d)", n_vars)
+
     # --- McCormick relaxation bounds ---
     _mc_obj_eval = None  # BatchRelaxationEvaluator for midpoint bounds
     _mc_obj_relax_fn = None  # raw relaxation fn for NLP bounds
@@ -5903,6 +6040,24 @@ def solve_model(
                 incumbent_callback=incumbent_callback,
                 _cut_pool=_cut_pool,
             )
+
+        # Convex-objective node bound (applied at the single point every node's
+        # bound funnels through, so it covers all upstream paths). When the
+        # minimized objective is a convex quadratic, the supporting-hyperplane
+        # lower bound over the node box is rigorous and far tighter than the
+        # McCormick linearization of the convex objective (nvs17 root -2522 LP vs
+        # -1106 convex ~ optimum -1100). max() only tightens, so it is always sound.
+        if _use_convex_obj_bound:
+            for i in range(n_batch):
+                if result_lbs[i] >= _SENTINEL_THRESHOLD or node_infeasible_mask[i]:
+                    continue
+                if time.perf_counter() >= _deadline:
+                    break
+                cvx_lb = _convex_objective_lower_bound(
+                    evaluator, np.asarray(batch_lb[i]), np.asarray(batch_ub[i])
+                )
+                if np.isfinite(cvx_lb):
+                    result_lbs[i] = max(result_lbs[i], cvx_lb)
 
         # Import results back to Rust tree
         t_rust_start = time.perf_counter()
