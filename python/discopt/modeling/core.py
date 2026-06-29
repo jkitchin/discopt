@@ -1447,6 +1447,15 @@ class Model:
 
         return f"$$\n{latex.model_to_latex(self, max_rows=latex._DEFAULT_MAX_ROWS)}\n$$"
 
+    def _repr_markdown_(self) -> str:
+        # VS Code's notebook renderer typesets ``text/markdown`` outputs with
+        # KaTeX but does not reliably render ``text/latex`` outputs; emit the
+        # same PSE block as fenced display math so it renders there too.
+        # Jupyter/MathJax frontends prefer ``_repr_latex_``/``_repr_html_``.
+        from discopt.modeling import latex
+
+        return f"$$\n{latex.model_to_latex(self, max_rows=latex._DEFAULT_MAX_ROWS)}\n$$"
+
     def _repr_html_(self) -> str:
         from discopt.modeling import latex
 
