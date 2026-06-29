@@ -2443,7 +2443,171 @@ class PeriodicVariableBoundRule(NonlinearBoundTighteningRule):
             return np.asarray(flat_lb, dtype=np.float64), np.asarray(flat_ub, dtype=np.float64)
 
 
+_EXPR_CHILD_ATTRS = ("left", "right", "operand", "base")
+_EXPR_CHILD_SEQS = ("args", "operands", "terms")
+
+
+def _collect_expr_flat_indices(expr, metadata: FlatVariableMetadata, out: set) -> None:
+    """Collect the flat variable indices referenced anywhere in ``expr``."""
+    si = metadata.scalar_flat_index(expr)
+    if si is not None:
+        out.add(si)
+        return
+    if isinstance(expr, Variable):
+        off = metadata.base_offsets.get(id(expr))
+        if off is not None:
+            out.update(range(off, off + expr.size))
+        return
+    if isinstance(expr, (Constant, Parameter)):
+        return
+    for attr in _EXPR_CHILD_ATTRS:
+        child = getattr(expr, attr, None)
+        if isinstance(child, _EXPR_TYPES):
+            _collect_expr_flat_indices(child, metadata, out)
+    for attr in _EXPR_CHILD_SEQS:
+        seq = getattr(expr, attr, None)
+        if seq:
+            for child in seq:
+                if isinstance(child, _EXPR_TYPES):
+                    _collect_expr_flat_indices(child, metadata, out)
+
+
+class DefinedVariableForwardRule(NonlinearBoundTighteningRule):
+    """Forward-substitution FBBT for variables *defined* by an equality.
+
+    When a scalar variable appears linearly and in isolation in an equality —
+    ``c·x_def + g(others) == rhs`` with ``x_def`` absent from ``g`` — it is fully
+    determined: ``x_def = (rhs - g)/c``. Bounding ``x_def`` by the interval
+    enclosure of ``(rhs - g)/c`` over the current box turns an *unbounded* auxiliary
+    (e.g. a division/sqrt slack ``x4 = 4243.28/(x0·x1)``, gear4/nvs05-class) into a
+    finite range. That is what lets the McCormick relaxation over the variable's
+    subtree stay bounded, so the spatial dual bound becomes *certifiable* instead of
+    being dropped as un-rigorous on an unbounded node (issue: nvs/gear unbounded
+    auxiliaries). Sound: an interval enclosure of the defining expression is a valid
+    enclosure of the variable; bounds are only ever intersected, never loosened. The
+    fixpoint loop in :func:`tighten_nonlinear_bounds` resolves chained definitions
+    (``x7`` defined via ``x6`` resolves once ``x6`` is bounded).
+    """
+
+    name = "defined_variable_forward"
+
+    def tighten(self, model, flat_lb, flat_ub, metadata):
+        from discopt._jax.convexity.interval import Interval
+        from discopt._jax.convexity.interval_eval import evaluate_interval
+
+        out_lb = flat_lb.copy()
+        out_ub = flat_ub.copy()
+
+        # Reverse map: flat scalar index -> Variable (for in-call box updates).
+        idx_to_var: dict[int, Variable] = {}
+        box: dict = {}
+        for var in model._variables:
+            off = metadata.base_offsets[id(var)]
+            sz = var.size
+            box[var] = Interval(
+                float(np.min(out_lb[off : off + sz])),
+                float(np.max(out_ub[off : off + sz])),
+            )
+            if sz == 1:
+                idx_to_var[off] = var
+
+        for con in model._constraints:
+            if getattr(con, "sense", None) != "==":
+                continue
+            rhs = float(getattr(con, "rhs", 0.0) or 0.0)
+            if not np.isfinite(rhs):
+                continue
+            terms = _cached_flat_terms(model, con.body)
+            if len(terms) < 2:
+                continue
+            iso = self._isolated_defined_var(terms, metadata, out_lb, out_ub)
+            if iso is None:
+                continue
+            iso_pos, iso_idx, c_iso = iso
+
+            # Interval of the rest = sum_{k != iso_pos} c_k * I(leaf_k).
+            rest_lo = 0.0
+            rest_hi = 0.0
+            ok = True
+            for k, (c_k, leaf_k) in enumerate(terms):
+                if k == iso_pos:
+                    continue
+                iv = evaluate_interval(leaf_k, model, box)
+                if iv is None or not (np.isfinite(iv.lo) and np.isfinite(iv.hi)):
+                    ok = False
+                    break
+                a, b = c_k * iv.lo, c_k * iv.hi
+                rest_lo += min(a, b)
+                rest_hi += max(a, b)
+            if not ok:
+                continue
+
+            # x_iso = (rhs - rest) / c_iso.
+            num_lo, num_hi = rhs - rest_hi, rhs - rest_lo
+            if c_iso > 0:
+                new_lo, new_hi = num_lo / c_iso, num_hi / c_iso
+            else:
+                new_lo, new_hi = num_hi / c_iso, num_lo / c_iso
+            if not (np.isfinite(new_lo) and np.isfinite(new_hi)):
+                continue
+
+            upd_lo = max(out_lb[iso_idx], new_lo)
+            upd_hi = min(out_ub[iso_idx], new_hi)
+            tightened = (
+                not np.isfinite(out_lb[iso_idx])
+                or not np.isfinite(out_ub[iso_idx])
+                or upd_lo > out_lb[iso_idx] + 1e-12
+                or upd_hi < out_ub[iso_idx] - 1e-12
+            )
+            if tightened and upd_lo <= upd_hi + _EMPTY_INTERVAL_FEAS_TOL:
+                out_lb[iso_idx] = upd_lo
+                out_ub[iso_idx] = upd_hi
+                var = idx_to_var.get(iso_idx)
+                if var is not None:  # let later constraints in this pass use it
+                    box[var] = Interval(upd_lo, upd_hi)
+        return out_lb, out_ub
+
+    @staticmethod
+    def _isolated_defined_var(terms, metadata, lb, ub):
+        """Find a term whose leaf is a scalar variable that (a) is currently
+        unbounded on a side and (b) appears in no other term. Returns
+        ``(term_pos, flat_idx, coeff)`` or ``None``."""
+        for pos, (coeff, leaf) in enumerate(terms):
+            if abs(coeff) < 1e-12:
+                continue
+            idx = metadata.scalar_flat_index(leaf)
+            if idx is None:
+                continue
+            if np.isfinite(lb[idx]) and np.isfinite(ub[idx]):
+                continue  # already bounded; this rule targets free aux variables
+            others: set = set()
+            for k, (_c, other_leaf) in enumerate(terms):
+                if k == pos:
+                    continue
+                _collect_expr_flat_indices(other_leaf, metadata, others)
+            if idx in others:
+                continue  # not isolated (appears elsewhere) → cannot forward-solve
+            return pos, idx, coeff
+        return None
+
+
+_EXPR_TYPES = (
+    Variable,
+    Constant,
+    Parameter,
+    BinaryOp,
+    UnaryOp,
+    FunctionCall,
+    CustomCall,
+    IndexExpression,
+    MatMulExpression,
+    SumExpression,
+    SumOverExpression,
+)
+
+
 DEFAULT_NONLINEAR_BOUND_RULES: tuple[NonlinearBoundTighteningRule, ...] = (
+    DefinedVariableForwardRule(),
     MonotoneFunctionEqualityRule(),
     QuadraticEqualityBoundsRule(),
     SquareDifferenceLowerBoundRule(),

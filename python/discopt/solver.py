@@ -3583,6 +3583,31 @@ def solve_model(
             python_time=wall_time - rust_time - jax_time,
         )
 
+    # --- Python nonlinear forward-substitution FBBT (on top of the Rust FBBT) ---
+    # The Rust FBBT above does not forward-*define* unbounded auxiliary variables —
+    # division/sqrt slacks of the form ``x = f(others)`` (gear4/nvs05 class). The
+    # DefinedVariableForwardRule in tighten_nonlinear_bounds bounds them by the
+    # interval enclosure of their defining expression. This is what keeps the
+    # per-node McCormick relaxation bounded over the whole tree: an unbounded-
+    # relaxation node is otherwise sentinel-pruned, which taints the spatial dual
+    # bound so the (already-found) optimum cannot be certified. Runs before the root
+    # OBBT below so OBBT's min/max LPs over the relaxation are themselves bounded.
+    lb, ub, _nl_root_infeasible = _apply_nonlinear_tightening_with_status(model, lb, ub)
+    if _nl_root_infeasible:
+        wall_time = time.perf_counter() - t_start
+        return SolveResult(
+            status="infeasible",
+            objective=None,
+            bound=None,
+            gap=None,
+            x=None,
+            wall_time=wall_time,
+            node_count=0,
+            rust_time=rust_time,
+            jax_time=jax_time,
+            python_time=wall_time - rust_time - jax_time,
+        )
+
     # --- Root OBBT over the McCormick relaxation (range reduction) ---
     # For nonconvex models the spatial B&B solves an LP-form McCormick
     # relaxation at every node; tightening the root box here strengthens that
