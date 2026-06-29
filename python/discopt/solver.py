@@ -17,7 +17,6 @@ import time
 from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar, Union, cast
 
 import numpy as np
-from scipy.optimize import minimize as scipy_minimize
 
 # ``flat_variable_bounds`` lives in a JAX-free helper module, so importing it
 # does not pull in JAX. The JAX-dependent helpers (NLPEvaluator, alphaBB,
@@ -488,9 +487,11 @@ def _compute_alphabb_bound(evaluator, node_lb, node_ub, alpha):
     NEGATIVE, which flips L into an over-estimator and yields an invalid
     (too-high) "lower bound".
 
-    Returns the minimum of L over [node_lb, node_ub], or -inf when the box is
-    unbounded / so wide that alphaBB is numerically meaningless (in which case
-    alphaBB abstains and the caller's interval / LP relaxation bounds stand).
+    Returns a valid lower bound on min f over [node_lb, node_ub] (a supporting
+    hyperplane of the convex L; see below), or -inf when the box is unbounded / so
+    wide that alphaBB is numerically meaningless, or the evaluator cannot supply
+    derivatives, or alpha did not convexify L (in which case alphaBB abstains and
+    the caller's interval / LP relaxation bounds stand).
     """
     node_lb = np.asarray(node_lb, dtype=np.float64)
     node_ub = np.asarray(node_ub, dtype=np.float64)
@@ -516,26 +517,85 @@ def _compute_alphabb_bound(evaluator, node_lb, node_ub, alpha):
     if np.any(node_ub < node_lb):
         return -np.inf
 
-    def underestimator(x):
-        f_val = evaluator.evaluate_objective(x)
-        perturbation = np.sum(alpha * (x - node_lb) * (node_ub - x))
-        return f_val - perturbation
+    alpha = np.asarray(alpha, dtype=np.float64)
+    n = node_lb.shape[0]
+    center = 0.5 * (node_lb + node_ub)
 
-    # Multiple starting points for robustness, all strictly inside the box.
-    width = node_ub - node_lb
-    mid = 0.5 * (node_lb + node_ub)
-    bounds = list(zip(node_lb, node_ub))
+    # The bound is a SUPPORTING HYPERPLANE of the convex underestimator
+    #   L(x) = f(x) - sum_i alpha_i (x_i-lb_i)(ub_i-x_i),
+    # which underestimates f on the box and is convex by alphaBB construction.
+    # The hyperplane min over the box is valid at ANY anchor x0 (so this is sound
+    # regardless of how well x0 is optimized), and exact at x0 = argmin_box L. We
+    # find x0 with a deterministic projected-gradient solve on L's own (analytic)
+    # derivatives -- no SciPy optimizer, no random restarts. grad/Hessian of the
+    # *perturbation* are closed form; f's come from the evaluator. If the evaluator
+    # cannot supply them, abstain (sound: the caller's interval/LP bounds stand).
+    grad_f = getattr(evaluator, "evaluate_gradient", None)
+    hess_f = getattr(evaluator, "evaluate_hessian", None)
+    if grad_f is None or hess_f is None:
+        return -np.inf
 
-    best_val = np.inf
-    for x0 in (mid, node_lb + 0.25 * width, node_lb + 0.75 * width):
-        try:
-            result = scipy_minimize(underestimator, x0, method="L-BFGS-B", bounds=bounds)
-            if result.fun < best_val:
-                best_val = result.fun
-        except (ValueError, ArithmeticError, RuntimeError):
-            continue
+    def L(x):
+        x = np.asarray(x, dtype=np.float64)
+        pert = float(np.sum(alpha * (x - node_lb) * (node_ub - x)))
+        return float(evaluator.evaluate_objective(x)) - pert
 
-    return best_val if np.isfinite(best_val) else -np.inf
+    def grad_L(x):
+        # d/dx_i [alpha_i (x_i-lb_i)(ub_i-x_i)] = alpha_i (lb_i + ub_i - 2 x_i).
+        return np.asarray(grad_f(x), dtype=np.float64) - alpha * (node_lb + node_ub - 2.0 * x)
+
+    # alphaBB chooses alpha so L's Hessian Hf + 2 diag(alpha) is PSD on the box.
+    # Confirm at the center; if the perturbation did not convexify L there, abstain
+    # rather than trust a supporting hyperplane that needs convexity to be valid.
+    try:
+        Hf = np.asarray(hess_f(center), dtype=np.float64)
+    except (ValueError, ArithmeticError, RuntimeError):
+        return -np.inf
+    if Hf.shape != (n, n) or not np.all(np.isfinite(Hf)):
+        return -np.inf
+    eigs = np.linalg.eigvalsh(0.5 * (Hf + Hf.T) + 2.0 * np.diag(alpha))
+    if float(eigs.min()) < -1e-7:
+        return -np.inf
+    lipschitz = float(np.abs(eigs).max())  # >= ||Hessian(L)||_2 at the center
+
+    # Deterministic FISTA projected gradient toward argmin_box L (tightness only).
+    x_hat = center.copy()
+    if np.isfinite(lipschitz) and lipschitz > 0.0:
+        step = 1.0 / lipschitz
+        x = center.copy()
+        y = center.copy()
+        t = 1.0
+        for _ in range(200):
+            try:
+                gy = grad_L(y)
+            except (ValueError, ArithmeticError, RuntimeError):
+                break
+            if not np.all(np.isfinite(gy)):
+                break
+            x_new = np.clip(y - step * gy, node_lb, node_ub)
+            if np.max(np.abs(x_new - x)) <= 1e-12 * (1.0 + np.max(np.abs(x_new))):
+                x = x_new
+                break
+            t_new = 0.5 * (1.0 + float(np.sqrt(1.0 + 4.0 * t * t)))
+            y = x_new + ((t - 1.0) / t_new) * (x_new - x)
+            x, t = x_new, t_new
+        x_hat = np.clip(x, node_lb, node_ub)
+
+    # min over the box of L(x_hat) + grad L(x_hat).(x - x_hat) <= L(x) <= f(x).
+    try:
+        g_hat = grad_L(x_hat)
+        L_hat = L(x_hat)
+    except (ValueError, ArithmeticError, RuntimeError):
+        return -np.inf
+    if not (np.all(np.isfinite(g_hat)) and np.isfinite(L_hat)):
+        return -np.inf
+    tangent_min = L_hat + float(
+        np.sum(np.where(g_hat >= 0.0, g_hat * (node_lb - x_hat), g_hat * (node_ub - x_hat)))
+    )
+    if not np.isfinite(tangent_min):
+        return -np.inf
+    # Magnitude-scaled margin so the float64 evaluation stays a valid lower bound.
+    return tangent_min - 1e-9 * (1.0 + abs(L_hat) + abs(tangent_min))
 
 
 def _objective_is_convex_quadratic(model: Model, evaluator, n_vars: int) -> bool:

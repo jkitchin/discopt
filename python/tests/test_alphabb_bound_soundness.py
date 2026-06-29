@@ -28,13 +28,49 @@ from discopt.solver import _compute_alphabb_bound
 
 
 class _StubEvaluator:
-    """Minimal evaluator exposing only ``evaluate_objective`` like the real one."""
+    """Evaluator exposing objective + finite-difference gradient/Hessian, matching
+    the real ``_make_evaluator`` interface the alphaBB bound now relies on."""
 
     def __init__(self, f):
         self._f = f
 
     def evaluate_objective(self, x):
         return float(self._f(np.asarray(x, dtype=np.float64)))
+
+    def evaluate_gradient(self, x):
+        x = np.asarray(x, dtype=np.float64)
+        h = 1e-6
+        g = np.zeros_like(x)
+        for i in range(x.size):
+            xp = x.copy()
+            xp[i] += h
+            xm = x.copy()
+            xm[i] -= h
+            g[i] = (self._f(xp) - self._f(xm)) / (2.0 * h)
+        return g
+
+    def evaluate_hessian(self, x):
+        x = np.asarray(x, dtype=np.float64)
+        n = x.size
+        h = 1e-4
+        H = np.zeros((n, n))
+        for i in range(n):
+            for j in range(n):
+                xpp = x.copy()
+                xpp[i] += h
+                xpp[j] += h
+                xpm = x.copy()
+                xpm[i] += h
+                xpm[j] -= h
+                xmp = x.copy()
+                xmp[i] -= h
+                xmp[j] += h
+                xmm = x.copy()
+                xmm[i] -= h
+                xmm[j] -= h
+                num = self._f(xpp) - self._f(xpm) - self._f(xmp) + self._f(xmm)
+                H[i, j] = num / (4.0 * h * h)
+        return 0.5 * (H + H.T)
 
 
 def test_large_lower_bound_does_not_fabricate_positive_bound():
