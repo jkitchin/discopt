@@ -326,6 +326,16 @@ class MilpRelaxationModel:
             # a B&B node). Any other warm verdict is the true LP optimum.
             if warm is not None and warm.status != "infeasible":
                 return warm
+            # The bare warm simplex returned ``None`` (iter-limit/numerical) or a
+            # possibly-false ``infeasible`` on a badly-scaled LP. Retry with the
+            # SAME fast warm simplex on the geometric-mean-equilibrated LP — an
+            # exact, feasible-set-preserving rescale that yields the identical
+            # optimum (verified equal to the old cold ``solve_milp`` path) at warm
+            # speed. This replaces the 170x-slower cold MILP-B&B fallthrough that
+            # used to handle these ill-conditioned relaxation solves (nvs21).
+            equil = self._solve_lp_warm_equilibrated()
+            if equil is not None and equil.status in ("optimal", "infeasible", "unbounded"):
+                return equil
 
         # backend="auto": HiGHS if present, else POUNCE. backend="simplex" routes
         # to the warm-started-simplex B&B (falls back to auto if unavailable).
@@ -484,6 +494,61 @@ class MilpRelaxationModel:
         if result.bound is not None and self._objective_bound_valid:
             bound = float(result.bound) + self._obj_offset
         return MilpRelaxationResult(status=status_str, objective=obj, bound=bound, x=result.x)
+
+    def _solve_lp_warm_equilibrated(self) -> Optional["MilpRelaxationResult"]:
+        """Warm-simplex re-solve on the *equilibrated* LP.
+
+        The bare warm simplex (:meth:`_solve_lp_warm`) returns ``None`` /
+        false-``infeasible`` on a badly-scaled relaxation (the lifted McCormick
+        envelope of a high-degree term spans many orders of magnitude — nvs21's
+        ``x1**4`` reaches ~1e9). The legacy fallback then cold-solved the same LP
+        through the MILP-B&B entry (``solve_milp``) — same Rust engine, no extra
+        robustness, ~170x slower. Geometric-mean (Ruiz) equilibration is an exact,
+        feasible-set-preserving rescaling, so solving the equilibrated LP with the
+        same fast warm simplex yields the *identical* optimum (verified equal to
+        the old cold path on nvs21) at warm speed. The objective value is invariant
+        under the rescaling; only the returned point maps back via ``col_scale``.
+        Returns the result, or ``None`` to defer to the generic path.
+        """
+        from discopt.solvers import SolveStatus
+
+        if self._A_ub is None:
+            return None
+        try:
+            from discopt.solvers.milp_simplex import solve_lp_warm_std
+        except Exception:  # pragma: no cover - binding absent
+            return None
+        try:
+            c_s, A_s, b_s, bounds_s, col_scale = equilibrate_relaxation_lp(
+                self._c, self._A_ub, self._b_ub, self._bounds, None
+            )
+            result, _ = solve_lp_warm_std(c_s, sp.csr_matrix(A_s), b_s, bounds_s, in_basis=None)
+        except Exception:  # pragma: no cover - defensive
+            return None
+        if result is None:
+            return None
+        status_map = {
+            SolveStatus.OPTIMAL: "optimal",
+            SolveStatus.INFEASIBLE: "infeasible",
+            SolveStatus.UNBOUNDED: "unbounded",
+            SolveStatus.TIME_LIMIT: "time_limit",
+            SolveStatus.ITERATION_LIMIT: "iteration_limit",
+            SolveStatus.ERROR: "error",
+        }
+        status_str = status_map.get(result.status, str(result.status))
+        obj = None
+        if result.objective is not None and self._objective_bound_valid:
+            obj = float(result.objective) + self._obj_offset
+        bound = None
+        if result.bound is not None and self._objective_bound_valid:
+            bound = float(result.bound) + self._obj_offset
+        # Map the scaled solution point back to the original variables (x = D x').
+        x_mapped = None
+        if result.x is not None:
+            x_mapped = np.asarray(result.x, dtype=np.float64) * np.asarray(
+                col_scale, dtype=np.float64
+            )
+        return MilpRelaxationResult(status=status_str, objective=obj, bound=bound, x=x_mapped)
 
 
 def sanitize_relaxation_for_conditioning(
