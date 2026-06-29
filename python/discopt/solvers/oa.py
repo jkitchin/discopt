@@ -859,15 +859,17 @@ def _append_binary_no_good_projection_cut(
     b_rows: list[float],
 ) -> bool:
     """Append a binary assignment exclusion cut to the projection MILP."""
-    if decomp.general_integer_indices:
+    if not decomp.binary_indices:
         # General-integer assignment exclusion needs an orthogonality cut or
         # auxiliary encoding. Keep this projection cut binary-only for now; the
         # pump still detects repeats and returns the best feasible point found.
         return False
 
+    assignment_by_index = dict(zip(decomp.int_indices, assignment))
     coeffs = np.zeros(n_master, dtype=np.float64)
     count_ones = 0
-    for idx, val in zip(decomp.int_indices, assignment):
+    for idx in decomp.binary_indices:
+        val = assignment_by_index[idx]
         if val >= 0.5:
             coeffs[idx] = 1.0
             count_ones += 1
@@ -1270,21 +1272,24 @@ def _add_ecp_cuts(
 
 def _add_no_good_cut(
     x_master,
-    int_indices,
+    binary_indices,
     oa_A_rows,
     oa_b_rows,
     n_vars,
     oa_cut_relaxable=None,
 ):
-    """Add an integer-exclusion (no-good) cut.
+    """Add a binary-assignment exclusion (no-good) cut.
 
     sum_{i: y_i*=1} (1-y_i) + sum_{i: y_i*=0} y_i >= 1
     Equivalently in <= form:
     sum_{y_i*=1} y_i - sum_{y_i*=0} y_i <= count(y_i*=1) - 1
     """
-    coeffs = np.zeros(n_vars)
+    if not binary_indices:
+        return False
+
+    coeffs = np.zeros(n_vars, dtype=np.float64)
     count_ones = 0
-    for idx in int_indices:
+    for idx in binary_indices:
         val = _round_integral_to_bounds(x_master[idx], 0.0, 1.0)
         if val >= 0.5:
             coeffs[idx] = 1.0
@@ -1299,6 +1304,7 @@ def _add_no_good_cut(
         oa_cut_relaxable,
         relaxable=False,
     )
+    return True
 
 
 def _add_feasibility_cuts(
@@ -2237,10 +2243,10 @@ def solve_lp_nlp_bb(
                         decomp.oa_constraint_mask,
                         oa_cut_relaxable=oa_cut_relaxable,
                     )
-            if add_no_good_cuts and not decomp.general_integer_indices:
+            if add_no_good_cuts:
                 _add_no_good_cut(
                     x_master,
-                    decomp.int_indices,
+                    decomp.binary_indices,
                     oa_A_rows,
                     oa_b_rows,
                     n_vars,
@@ -3147,7 +3153,7 @@ def solve_oa(
                 if add_no_good_cuts:
                     _add_no_good_cut(
                         x_master,
-                        decomp.int_indices,
+                        decomp.binary_indices,
                         oa_A_rows,
                         oa_b_rows,
                         n_vars,
