@@ -51,6 +51,9 @@ cutest = ["pycutest>=1.8.0"]
 gams = ["gamsapi[core]>=45", "pyyaml>=6"]
 llm = ["litellm>=1.0"]
 nn = ["onnx>=1.14", "onnxruntime>=1.16"]
+# Use discopt as a Pyomo solver: `SolverFactory("discopt")`. Pure-Python bridge
+# that round-trips through a temporary AMPL .nl file. See docs/pyomo_solver.md.
+pyomo = ["pyomo>=6.7"]
 ml = ["scikit-learn>=1.0"]
 xgboost = ["xgboost>=1.7"]
 lightgbm = ["lightgbm>=4.0"]
@@ -75,13 +78,20 @@ dev = [
     "mypy==2.1.0",
     "highspy",
     "pre-commit",
+    "pyomo>=6.7",
 ]
-all = ["discopt[pounce,ipopt,highs,cutest,llm,gnn,nn,ml,doe,doe-gui,sympy]"]
+all = ["discopt[pounce,ipopt,highs,cutest,llm,gnn,nn,ml,doe,doe-gui,sympy,pyomo]"]
 
 [project.scripts]
 discopt = "discopt.cli:main"
 discopt-dev = "discopt.dev.cli:main"
 discopt-gams = "discopt.gams.link:main"
+
+# Convenience discovery hook for Pyomo. The reliable activation is
+# `import discopt.pyomo` (or `discopt.pyomo.register()`), which registers the
+# 'discopt' solver with Pyomo's SolverFactory.
+[project.entry-points."pyomo.solvers"]
+discopt = "discopt.pyomo.solver"
 
 [tool.maturin]
 manifest-path = "crates/discopt-python/Cargo.toml"
