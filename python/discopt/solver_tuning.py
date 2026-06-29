@@ -79,6 +79,12 @@ class SolverTuning:
     """Use nested bilinear instead of the tight trilinear envelope
     (``DISCOPT_TRILINEAR=nested``, default off)."""
 
+    trilinear_exact: bool = field(
+        default_factory=lambda: os.environ.get("DISCOPT_TRILINEAR") == "exact"
+    )
+    """Use the best-of-three nested trilinear envelope instead of Meyer-Floudas
+    (``DISCOPT_TRILINEAR=exact``, default off)."""
+
     trilinear_rlt: bool = field(
         default_factory=lambda: _env_flag("DISCOPT_TRILINEAR_RLT", default=True)
     )
