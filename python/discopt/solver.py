@@ -4715,8 +4715,12 @@ def solve_model(
                     # false "optimal"; the loop exits at the next batch top.
                     _node_remaining = _deadline - time.perf_counter()
                     if _node_remaining <= 0.0:
-                        if not _model_is_convex:
-                            _gap_certified = False
+                        # Past the per-node deadline: skip this node's relaxation
+                        # solve. It stays OPEN carrying its inherited (valid) parent
+                        # bound — the Rust import floors every node at its parent's
+                        # lower bound — so the tree's dual bound stays valid. Leaving
+                        # a node unbounded never fathoms it, so do NOT decertify (that
+                        # only discarded the bound the parent already proved, #138).
                         continue
                     nlp_failed = result_lbs[i] >= _SENTINEL_THRESHOLD
                     try:
@@ -4754,7 +4758,11 @@ def solve_model(
             if not _model_is_convex:
                 for i in range(n_batch):
                     if result_lbs[i] == -np.inf:
-                        _gap_certified = False
+                        # A node left unbounded (no valid relaxation bound this
+                        # round) stays OPEN and is floored at its inherited parent
+                        # bound on import — still a valid global lower bound. It does
+                        # not fathom anything, so it does NOT taint the tree (#138).
+                        pass
                     elif not np.isfinite(result_lbs[i]):
                         result_lbs[i] = _INFEASIBILITY_SENTINEL
                     elif result_lbs[i] >= _SENTINEL_THRESHOLD and not node_infeasible_mask[i]:
@@ -4803,8 +4811,10 @@ def solve_model(
                     ub_clipped = np.clip(node_ub, -_SPC, _SPC)
                     result_sols[i] = 0.5 * (lb_clipped + ub_clipped)
                     result_feas[i] = False
-                    if not _model_is_convex:
-                        _gap_certified = False
+                    # The node stays OPEN at -inf and is floored at its inherited
+                    # parent bound on import (a valid global lower bound). It fathoms
+                    # nothing, so do NOT decertify — that only discarded the parent's
+                    # proven bound and forced the weak root fallback (#138).
                     continue
                 opts["max_wall_time"] = max(_node_remaining, _DEADLINE_NODE_FLOOR_S)
 
@@ -5029,9 +5039,11 @@ def solve_model(
                 # McCormick, LP relaxer) so a valid relaxation bound is given
                 # the chance to certify optimality before we decide to
                 # decertify the gap.
-                #   * -inf  : no bound source produced a finite lower bound, so
-                #             the node carries only the trivial -inf bound. The
-                #             gap cannot be certified; downgrade to "feasible".
+                #   * -inf  : no bound source produced a finite lower bound this
+                #             round, so the node stays OPEN at -inf and is floored
+                #             at its inherited parent bound on import (still a valid
+                #             global lower bound). It fathoms nothing, so it does NOT
+                #             taint the tree — leave the gap certifiable (#138).
                 #   * non-finite (and not -inf): coerce to the infeasibility
                 #             sentinel so the Rust tree prunes it cleanly.
                 #   * >= sentinel (issue #27a): a node pruned with no rigorous
@@ -5046,7 +5058,7 @@ def solve_model(
                 #             downgrades to "feasible" instead of lying.
                 if not _model_is_convex and not node_infeasible_mask[i]:
                     if result_lbs[i] == -np.inf:
-                        _gap_certified = False
+                        pass  # open node, floored at parent bound — does not taint
                     elif not np.isfinite(result_lbs[i]):
                         result_lbs[i] = _INFEASIBILITY_SENTINEL
                     elif result_lbs[i] >= _SENTINEL_THRESHOLD:
@@ -6140,12 +6152,28 @@ def solve_model(
     # re-earn it below only if a rigorous global bound actually closes the gap.
     # "optimal" already implies a closed certified search; infeasible/limit exits
     # are handled above and keep their own certification semantics.
+    # Separate the two things the validity flag conflates: (1) the tree bound is
+    # *untainted* — no node was fathomed without a soundness proof, so the frontier
+    # minimum is a valid global dual bound — vs (2) the gap is *closed* (optimality).
+    # ``_gap_certified`` here still reflects (1); the feasible-reset below clears it
+    # for (2). A budget/node-limited feasible exit does not close the gap, but its
+    # untainted tree bound is still the best rigorous dual bound we have and must NOT
+    # be dropped to None (which forced the far weaker root-relaxation fallback, #138).
+    _tree_bound_valid = _gap_certified
     if status == "feasible":
         _gap_certified = False
 
     if not _gap_certified:
-        bound_val = None
         gap_val = None
+        # Keep the untainted tree bound on a feasible exit; recompute its gap. Only
+        # a tainted or non-finite tree bound is discarded (then the root fallback
+        # below supplies a sound bound). A bound that meets the incumbent re-earns
+        # certification in the block further down.
+        if _tree_bound_valid and bound_val is not None and np.isfinite(bound_val):
+            if obj_val is not None and np.isfinite(obj_val):
+                gap_val = abs(obj_val - bound_val) / max(1.0, abs(obj_val))
+        else:
+            bound_val = None
 
     # Root cut-pool bound: a rigorous global lower bound the strengthened root
     # relaxation already proved during setup (nvs19: -1156 vs the cut-less tree's
@@ -7292,14 +7320,36 @@ def _solve_nlp_bb(
     # A *feasible* exit never inherits the tree's validity flag as a certificate:
     # the flag attests bound validity, not gap closure, and a node/budget-limited
     # feasible exit leaves the tree gap open. See the spatial-path note above
-    # (max_nodes=1 false-certification regression). This path carries no rigorous
-    # root-relaxation fallback, so a dropped certificate is not re-earned here.
+    # (max_nodes=1 false-certification regression). But the untainted tree bound is
+    # itself a valid global dual bound (every node floored at its valid parent
+    # bound), so keep it and recompute the gap rather than dropping to None (#138).
+    _tree_bound_valid = _gap_certified
     if status == "feasible":
         _gap_certified = False
 
     if not _gap_certified:
-        bound_val = None
         gap_val = None
+        if _tree_bound_valid and bound_val is not None and np.isfinite(bound_val):
+            if obj_val is not None and np.isfinite(obj_val):
+                gap_val = abs(obj_val - bound_val) / max(1.0, abs(obj_val))
+        else:
+            bound_val = None
+
+    # Re-earn certification when the retained valid tree bound meets the incumbent
+    # within tolerance: the incumbent is then provably global and the honest status
+    # is "optimal" (mirrors the spatial path's re-certification).
+    if (
+        status == "feasible"
+        and obj_val is not None
+        and bound_val is not None
+        and np.isfinite(bound_val)
+        and gap_val is not None
+        and gap_val <= gap_tolerance
+    ):
+        _is_max = model._objective.sense == ObjectiveSense.MAXIMIZE
+        if (bound_val >= obj_val - 1e-9) if _is_max else (bound_val <= obj_val + 1e-9):
+            _gap_certified = True
+            status = "optimal"
 
     return SolveResult(
         status=status,
@@ -11287,14 +11337,36 @@ def _solve_miqp_bb(
     # A *feasible* exit never inherits the tree's validity flag as a certificate:
     # the flag attests bound validity, not gap closure, and a node/budget-limited
     # feasible exit leaves the tree gap open. See the spatial-path note above
-    # (max_nodes=1 false-certification regression). This path carries no rigorous
-    # root-relaxation fallback, so a dropped certificate is not re-earned here.
+    # (max_nodes=1 false-certification regression). But the untainted tree bound is
+    # itself a valid global dual bound (every node floored at its valid parent
+    # bound), so keep it and recompute the gap rather than dropping to None (#138).
+    _tree_bound_valid = _gap_certified
     if status == "feasible":
         _gap_certified = False
 
     if not _gap_certified:
-        bound_val = None
         gap_val = None
+        if _tree_bound_valid and bound_val is not None and np.isfinite(bound_val):
+            if obj_val is not None and np.isfinite(obj_val):
+                gap_val = abs(obj_val - bound_val) / max(1.0, abs(obj_val))
+        else:
+            bound_val = None
+
+    # Re-earn certification when the retained valid tree bound meets the incumbent
+    # within tolerance: the incumbent is then provably global and the honest status
+    # is "optimal" (mirrors the spatial path's re-certification).
+    if (
+        status == "feasible"
+        and obj_val is not None
+        and bound_val is not None
+        and np.isfinite(bound_val)
+        and gap_val is not None
+        and gap_val <= gap_tolerance
+    ):
+        _is_max = model._objective.sense == ObjectiveSense.MAXIMIZE
+        if (bound_val >= obj_val - 1e-9) if _is_max else (bound_val <= obj_val + 1e-9):
+            _gap_certified = True
+            status = "optimal"
 
     return SolveResult(
         status=status,
