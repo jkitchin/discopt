@@ -521,6 +521,99 @@ class TestOARobustnessOptions:
         np.testing.assert_allclose(captured["A_ub"], np.array([[1.0, 0.0]]))
         assert captured["b_ub"].tolist() == pytest.approx([0.0])
 
+    def test_no_good_cut_uses_binary_indices_only_for_mixed_assignment(self):
+        from discopt.solvers.oa import _add_no_good_cut
+
+        oa_A_rows = []
+        oa_b_rows = []
+        oa_cut_relaxable = []
+
+        added = _add_no_good_cut(
+            np.array([1.0, 2.0, 0.0]),
+            [0, 2],
+            oa_A_rows,
+            oa_b_rows,
+            n_vars=3,
+            oa_cut_relaxable=oa_cut_relaxable,
+        )
+
+        assert added is True
+        np.testing.assert_allclose(oa_A_rows[0], np.array([1.0, 0.0, -1.0]))
+        assert oa_b_rows == pytest.approx([0.0])
+        assert oa_cut_relaxable == [False]
+
+    def test_no_good_cut_skips_when_no_binary_indices(self):
+        from discopt.solvers.oa import _add_no_good_cut
+
+        oa_A_rows = []
+        oa_b_rows = []
+        oa_cut_relaxable = []
+
+        added = _add_no_good_cut(
+            np.array([2.0]),
+            [],
+            oa_A_rows,
+            oa_b_rows,
+            n_vars=1,
+            oa_cut_relaxable=oa_cut_relaxable,
+        )
+
+        assert added is False
+        assert oa_A_rows == []
+        assert oa_b_rows == []
+        assert oa_cut_relaxable == []
+
+    def test_projection_no_good_cut_uses_binary_indices_for_binary_model(self):
+        from discopt.solvers.oa import (
+            _append_binary_no_good_projection_cut,
+            _decompose_model,
+        )
+
+        m = dm.Model("binary_projection_no_good")
+        y = m.binary("y", shape=(2,))
+        m.minimize(y[0] + y[1])
+        decomp = _decompose_model(m)
+        a_rows = []
+        b_rows = []
+
+        added = _append_binary_no_good_projection_cut(
+            decomp,
+            assignment=(1.0, 0.0),
+            n_master=2,
+            a_rows=a_rows,
+            b_rows=b_rows,
+        )
+
+        assert added is True
+        np.testing.assert_allclose(a_rows[0], np.array([1.0, -1.0]))
+        assert b_rows == pytest.approx([0.0])
+
+    def test_projection_no_good_cut_skips_mixed_integer_model(self):
+        from discopt.solvers.oa import (
+            _append_binary_no_good_projection_cut,
+            _decompose_model,
+        )
+
+        m = dm.Model("mixed_projection_no_good")
+        y = m.binary("y")
+        z = m.integer("z", lb=0, ub=3)
+        m.minimize(y + z)
+        decomp = _decompose_model(m)
+        a_rows = []
+        b_rows = []
+
+        added = _append_binary_no_good_projection_cut(
+            decomp,
+            assignment=(1.0, 2.0),
+            n_master=2,
+            a_rows=a_rows,
+            b_rows=b_rows,
+        )
+
+        assert added is False
+        assert a_rows == []
+        assert b_rows == []
+
     @pytest.mark.parametrize(("enabled", "expected_calls"), [(False, 0), (True, 1)])
     def test_no_good_cut_option_controls_infeasible_assignment(
         self,
@@ -574,6 +667,58 @@ class TestOARobustnessOptions:
 
         assert result.status == "infeasible"
         assert len(no_good_calls) == expected_calls
+
+    def test_multitree_no_good_cut_skips_mixed_integer_model(
+        self,
+        monkeypatch,
+    ):
+        import discopt.solvers.oa as oa_module
+        from discopt.solvers import MILPResult, SolveStatus
+
+        m = dm.Model("mixed_no_good_option")
+        y = m.binary("y")
+        z = m.integer("z", lb=0, ub=3)
+        m.minimize(y + z)
+
+        no_good_calls = []
+
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_nlp_relaxation",
+            lambda *args, **kwargs: (np.array([0.5, 1.5]), 2.0),
+        )
+        monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_master_milp",
+            lambda *args, **kwargs: MILPResult(
+                status=SolveStatus.OPTIMAL,
+                x=np.array([1.0, 2.0]),
+                objective=3.0,
+                bound=0.0,
+            ),
+        )
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_nlp_subproblem",
+            lambda *args, **kwargs: (None, None),
+        )
+        monkeypatch.setattr(
+            oa_module,
+            "_add_no_good_cut",
+            lambda *args, **kwargs: no_good_calls.append(args),
+        )
+
+        result = oa_module.solve_oa(
+            m,
+            max_iterations=1,
+            feasibility_cuts=False,
+            add_no_good_cuts=True,
+            cycling_check=False,
+        )
+
+        assert result.status == "infeasible"
+        assert no_good_calls == []
 
     def test_cycling_check_stops_repeated_integer_assignment(self, monkeypatch):
         import discopt.solvers.oa as oa_module
