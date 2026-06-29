@@ -859,7 +859,7 @@ def _append_binary_no_good_projection_cut(
     b_rows: list[float],
 ) -> bool:
     """Append a binary assignment exclusion cut to the projection MILP."""
-    if not decomp.binary_indices:
+    if decomp.general_integer_indices or not decomp.binary_indices:
         # General-integer assignment exclusion needs an orthogonality cut or
         # auxiliary encoding. Keep this projection cut binary-only for now; the
         # pump still detects repeats and returns the best feasible point found.
@@ -2243,7 +2243,7 @@ def solve_lp_nlp_bb(
                         decomp.oa_constraint_mask,
                         oa_cut_relaxable=oa_cut_relaxable,
                     )
-            if add_no_good_cuts:
+            if add_no_good_cuts and not decomp.general_integer_indices:
                 _add_no_good_cut(
                     x_master,
                     decomp.binary_indices,
@@ -3150,7 +3150,7 @@ def solve_oa(
                             oa_cut_relaxable=oa_cut_relaxable,
                         )
 
-                if add_no_good_cuts:
+                if add_no_good_cuts and not decomp.general_integer_indices:
                     _add_no_good_cut(
                         x_master,
                         decomp.binary_indices,

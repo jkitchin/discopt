@@ -673,6 +673,58 @@ def test_lp_nlp_bb_lazy_callback_solves_fixed_integer_nlp(monkeypatch):
     assert calls["oa"] >= 2
 
 
+def test_lp_nlp_bb_no_good_cut_skips_mixed_integer_model(monkeypatch):
+    import discopt.solvers.gurobi as gurobi_module
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers import MILPResult, SolveStatus
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    no_good_calls = []
+
+    monkeypatch.setattr(oa_module, "_solve_nlp_relaxation", lambda *args, **kwargs: (None, None))
+    monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        oa_module,
+        "_solve_nlp_subproblem",
+        lambda *args, **kwargs: (None, None),
+    )
+    monkeypatch.setattr(
+        oa_module,
+        "_solve_feasibility_subproblem",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        oa_module,
+        "_add_no_good_cut",
+        lambda *args, **kwargs: no_good_calls.append(args),
+    )
+
+    def fake_lazy_milp(**kwargs):
+        candidate = np.zeros_like(kwargs["c"], dtype=np.float64)
+        kwargs["lazy_callback"](candidate)
+        return MILPResult(
+            status=SolveStatus.OPTIMAL,
+            x=candidate,
+            objective=0.0,
+            bound=0.0,
+            gap=0.0,
+            node_count=1,
+        )
+
+    monkeypatch.setattr(gurobi_module, "solve_milp_with_lazy_cuts", fake_lazy_milp)
+
+    result = solve_mip_nlp(
+        _mixed_discrete_model("lp_nlp_bb_mixed_no_good"),
+        method="lp_nlp_bb",
+        milp_solver="gurobi",
+        add_no_good_cuts=True,
+        feasibility_cuts=False,
+    )
+
+    assert result.status == "no_feasible_point"
+    assert no_good_calls == []
+
+
 def test_lp_nlp_bb_linear_objective_constant_offsets_certified_bound(monkeypatch):
     import discopt.solvers.gurobi as gurobi_module
     import discopt.solvers.oa as oa_module

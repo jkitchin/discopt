@@ -563,7 +563,32 @@ class TestOARobustnessOptions:
         assert oa_b_rows == []
         assert oa_cut_relaxable == []
 
-    def test_projection_no_good_cut_uses_binary_indices_in_mixed_model(self):
+    def test_projection_no_good_cut_uses_binary_indices_for_binary_model(self):
+        from discopt.solvers.oa import (
+            _append_binary_no_good_projection_cut,
+            _decompose_model,
+        )
+
+        m = dm.Model("binary_projection_no_good")
+        y = m.binary("y", shape=(2,))
+        m.minimize(y[0] + y[1])
+        decomp = _decompose_model(m)
+        a_rows = []
+        b_rows = []
+
+        added = _append_binary_no_good_projection_cut(
+            decomp,
+            assignment=(1.0, 0.0),
+            n_master=2,
+            a_rows=a_rows,
+            b_rows=b_rows,
+        )
+
+        assert added is True
+        np.testing.assert_allclose(a_rows[0], np.array([1.0, -1.0]))
+        assert b_rows == pytest.approx([0.0])
+
+    def test_projection_no_good_cut_skips_mixed_integer_model(self):
         from discopt.solvers.oa import (
             _append_binary_no_good_projection_cut,
             _decompose_model,
@@ -585,9 +610,9 @@ class TestOARobustnessOptions:
             b_rows=b_rows,
         )
 
-        assert added is True
-        np.testing.assert_allclose(a_rows[0], np.array([1.0, 0.0]))
-        assert b_rows == pytest.approx([0.0])
+        assert added is False
+        assert a_rows == []
+        assert b_rows == []
 
     @pytest.mark.parametrize(("enabled", "expected_calls"), [(False, 0), (True, 1)])
     def test_no_good_cut_option_controls_infeasible_assignment(
@@ -643,7 +668,7 @@ class TestOARobustnessOptions:
         assert result.status == "infeasible"
         assert len(no_good_calls) == expected_calls
 
-    def test_multitree_no_good_cut_passes_only_binary_indices_for_mixed_model(
+    def test_multitree_no_good_cut_skips_mixed_integer_model(
         self,
         monkeypatch,
     ):
@@ -655,7 +680,7 @@ class TestOARobustnessOptions:
         z = m.integer("z", lb=0, ub=3)
         m.minimize(y + z)
 
-        no_good_indices = []
+        no_good_calls = []
 
         monkeypatch.setattr(
             oa_module,
@@ -681,9 +706,7 @@ class TestOARobustnessOptions:
         monkeypatch.setattr(
             oa_module,
             "_add_no_good_cut",
-            lambda _x_master, binary_indices, *args, **kwargs: no_good_indices.append(
-                list(binary_indices)
-            ),
+            lambda *args, **kwargs: no_good_calls.append(args),
         )
 
         result = oa_module.solve_oa(
@@ -695,7 +718,7 @@ class TestOARobustnessOptions:
         )
 
         assert result.status == "infeasible"
-        assert no_good_indices == [[0]]
+        assert no_good_calls == []
 
     def test_cycling_check_stops_repeated_integer_assignment(self, monkeypatch):
         import discopt.solvers.oa as oa_module
