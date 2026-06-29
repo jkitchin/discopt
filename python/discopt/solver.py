@@ -3590,16 +3590,48 @@ def solve_model(
     # below, this min/max-es each variable over the full relaxation polytope,
     # so it reduces ranges even when the only constraints are nonlinear (the LP
     # polytope is a valid outer approximation, so every tightening is sound).
-    # Skipped for known-convex models (handled by the convex/NLP path) and for
-    # pure-integer models (no continuous variable to spatial-branch on).
+    # Skipped only for known-convex models (handled by the convex/NLP path).
+    # Pure-INTEGER models with nonlinear terms still benefit: the McCormick
+    # envelope of a product over a wide integer range (nvs17/19/23/24 span
+    # [0,200]) is catastrophically loose, and integer branching alone cannot close
+    # that relaxation gap in any reasonable node budget (the frontier dual bound
+    # crawls). OBBT range reduction — rounded inward for integers, so still sound —
+    # shrinks the envelope for the whole tree. ``obbt_tighten_root`` self-gates to
+    # a no-op when there is no relaxable nonlinearity, so a pure-linear (MILP)
+    # model pays nothing here.
     _obbt_has_continuous = any(v.var_type == VarType.CONTINUOUS for v in model._variables)
+    _obbt_has_nonlinear = False
+    if not _obbt_has_continuous:
+        try:
+            from discopt._jax.term_classifier import classify_nonlinear_terms as _cnt
+
+            _ot = _cnt(model)
+            _obbt_has_nonlinear = bool(
+                _ot.bilinear
+                or _ot.trilinear
+                or _ot.multilinear
+                or _ot.monomial
+                or _ot.fractional_power
+                or _ot.bilinear_with_fp
+                or _ot.ratio_of_products
+                or _ot.general_nl
+            )
+        except Exception:
+            _obbt_has_nonlinear = False
     _obbt_known_convex = _root_convexity_known and _root_is_convex
     if (
         bool(kwargs.get("obbt_at_root", True))
         and model._objective is not None
-        and _obbt_has_continuous
         and not _obbt_known_convex
-        and n_vars <= 500
+        # Continuous (or mixed) models keep the original ≤500-var reach. The
+        # pure-integer-nonlinear path is newer and capped tighter (≤50 vars, the
+        # ``_AUTO_RLT_LEVEL1_MAX_VARS`` scale): there OBBT reaches a fixpoint in a
+        # fraction of a second, so it cannot burn the root budget on a large model
+        # where the 2·n projection LPs would not pay for themselves.
+        and (
+            (_obbt_has_continuous and n_vars <= 500)
+            or (_obbt_has_nonlinear and n_vars <= _AUTO_RLT_LEVEL1_MAX_VARS)
+        )
     ):
         # OBBT wall time falls into python_time (computed as the remainder at
         # the end of the solve), so no separate timer is tracked here.
