@@ -219,6 +219,34 @@ class IncrementalMcCormickLP:
             return None, None, None
         return float(result.objective), np.asarray(result.x, dtype=float), out_basis
 
+    def solve_assembled_full(self, A, b, bounds, in_basis=None, c_override=None):
+        """Like :meth:`solve_assembled`, but return the terminal *status* too so a
+        caller can tell a (certified) ``infeasible`` apart from any other
+        non-optimal verdict (time limit / numerical error).
+
+        Returns ``(status, bound, x, out_basis)`` where ``status`` is one of
+        ``"optimal"``, ``"infeasible"`` (the LP feasible set is empty over this
+        box — a rigorous fathoming proof, since the McCormick polytope is a valid
+        outer approximation), or ``"other"`` (no certified verdict). ``bound``/``x``
+        are populated only for ``"optimal"``."""
+        from discopt.solvers import SolveStatus
+        from discopt.solvers.milp_simplex import solve_lp_warm_std
+
+        cobj = self.c if c_override is None else np.asarray(c_override, dtype=np.float64)
+        try:
+            result, out_basis = solve_lp_warm_std(
+                cobj, sp.csr_matrix(A), b, bounds, in_basis=in_basis
+            )
+        except Exception:
+            return "other", None, None, None
+        if result is None:
+            return "other", None, None, None
+        if result.status == SolveStatus.INFEASIBLE:
+            return "infeasible", None, None, None
+        if result.status != SolveStatus.OPTIMAL or result.objective is None:
+            return "other", None, None, None
+        return "optimal", float(result.objective), np.asarray(result.x, dtype=float), out_basis
+
     def solve(self, lb, ub, in_basis=None, c_override=None, cut_rows=None):
         """Solve the McCormick LP over [lb,ub] (plus optional cut rows); return
         (bound, x, out_basis) or (None, None, None). Warm-starts from ``in_basis``.
