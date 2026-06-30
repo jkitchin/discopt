@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -267,19 +268,131 @@ def _parse_shot_metric(patterns: Iterable[str], text: str) -> float | None:
     return None
 
 
+_SHOT_NUMBER = r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
+
+
+def _parse_shot_bound_pair(text: str) -> tuple[float | None, float | None]:
+    match = re.search(
+        rf"objective bound\s*\([^)]*\)\s*\[dual,\s*primal\]\s*:\s*"
+        rf"\[\s*{_SHOT_NUMBER}\s*,\s*{_SHOT_NUMBER}\s*\]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None, None
+    return float(match.group(1)), float(match.group(2))
+
+
+def _parse_shot_gap_pair(text: str) -> tuple[float | None, float | None]:
+    match = re.search(
+        rf"objective gap\s+absolute\s*/\s*relative\s*:\s*"
+        rf"{_SHOT_NUMBER}\s*/\s*{_SHOT_NUMBER}",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None, None
+    return float(match.group(1)), float(match.group(2))
+
+
+def _parse_shot_osrl_metrics(path: Path) -> dict[str, float]:
+    if not path.exists():
+        return {}
+    try:
+        root = ET.parse(path).getroot()
+    except ET.ParseError:
+        return {}
+
+    metrics = {}
+    metric_names = {
+        "DualObjectiveBound",
+        "PrimalObjectiveBound",
+        "AbsoluteOptimalityGap",
+        "RelativeOptimalityGap",
+    }
+    for node in root.iter():
+        if node.tag.rsplit("}", maxsplit=1)[-1] != "other":
+            continue
+        name = node.attrib.get("name")
+        if name not in metric_names:
+            continue
+        value = node.attrib.get("value")
+        if value is None:
+            continue
+        try:
+            metrics[name] = float(value)
+        except ValueError:
+            continue
+    return metrics
+
+
+def _shot_output_denies_optimality_proof(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "can not guarantee optimality",
+            "cannot guarantee optimality",
+            "not guarantee optimality",
+            "no guarantee of global optimality",
+        )
+    )
+
+
+def _shot_output_reports_time_limit(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "terminated since time limit",
+            "terminated due to time limit",
+            "time limit reached",
+            "time limit exceeded",
+            "timelimit reached",
+            "timelimit exceeded",
+        )
+    )
+
+
 def _parse_shot_status(text: str, returncode: int) -> str:
     if returncode != 0:
         return "error"
     lowered = text.lower()
-    if "optimal" in lowered:
-        return "optimal"
-    if "infeasible" in lowered:
+    if re.search(r"\binfeasible\b", lowered):
         return "infeasible"
-    if "time limit" in lowered or "timelimit" in lowered:
+    if _shot_output_reports_time_limit(text):
         return "time_limit"
+    if _shot_output_denies_optimality_proof(text):
+        return "feasible"
+    if "globally optimal primal solution found" in lowered:
+        return "optimal"
+    if re.search(r"\boptimal (?:primal )?solution found\b", lowered):
+        return "optimal"
+    if "feasible primal solution found" in lowered:
+        return "feasible"
     if "solution" in lowered:
         return "feasible"
     return "completed"
+
+
+def _parse_shot_gap_certified(text: str, status: str, returncode: int) -> bool | None:
+    if returncode != 0:
+        return False
+    if _shot_output_denies_optimality_proof(text):
+        return False
+    if status == "optimal":
+        return True
+    if status in {"feasible", "infeasible", "time_limit"}:
+        return False
+    return None
+
+
+def _shot_certification_caveat(gap_certified: bool | None) -> str:
+    if gap_certified is True:
+        return "SHOT reports a globally optimal primal solution; parsed from stdout/OSrL"
+    if gap_certified is False:
+        return "SHOT did not report a global optimality guarantee; inspect stdout/OSrL"
+    return "parsed from SHOT stdout/OSrL; inspect OSrL for authoritative details"
 
 
 def run_shot(
@@ -326,6 +439,9 @@ def run_shot(
     if osrl_path.exists():
         combined = "\n".join([combined, osrl_path.read_text(errors="replace")])
 
+    osrl_metrics = _parse_shot_osrl_metrics(osrl_path)
+    stdout_bound, stdout_objective = _parse_shot_bound_pair(combined)
+    stdout_gap, stdout_relative_gap = _parse_shot_gap_pair(combined)
     objective = _parse_shot_metric(
         [
             r"primal bound\s*[:=]\s*([-+0-9.eE]+)",
@@ -334,6 +450,11 @@ def run_shot(
         ],
         combined,
     )
+    if stdout_objective is not None:
+        objective = stdout_objective
+    if "PrimalObjectiveBound" in osrl_metrics:
+        objective = osrl_metrics["PrimalObjectiveBound"]
+
     bound = _parse_shot_metric(
         [
             r"dual bound\s*[:=]\s*([-+0-9.eE]+)",
@@ -341,6 +462,11 @@ def run_shot(
         ],
         combined,
     )
+    if stdout_bound is not None:
+        bound = stdout_bound
+    if "DualObjectiveBound" in osrl_metrics:
+        bound = osrl_metrics["DualObjectiveBound"]
+
     gap = _parse_shot_metric(
         [
             r"absolute objective gap\s*[:=]\s*([-+0-9.eE]+)",
@@ -348,19 +474,28 @@ def run_shot(
         ],
         combined,
     )
+    if stdout_gap is not None:
+        gap = stdout_gap
+    if "AbsoluteOptimalityGap" in osrl_metrics:
+        gap = osrl_metrics["AbsoluteOptimalityGap"]
+    relative_gap = stdout_relative_gap
+    if "RelativeOptimalityGap" in osrl_metrics:
+        relative_gap = osrl_metrics["RelativeOptimalityGap"]
+
+    status = _parse_shot_status(combined, completed.returncode)
+    gap_certified = _parse_shot_gap_certified(combined, status, completed.returncode)
     return {
         "backend": "SHOT",
         "available": True,
-        "status": _parse_shot_status(combined, completed.returncode),
+        "status": status,
         "objective": _json_float(objective),
         "bound": _json_float(bound),
         "gap": _json_float(gap),
+        "relative_gap": _json_float(relative_gap),
         "wall_time_seconds": round(elapsed, 6),
-        "gap_certified": None,
+        "gap_certified": gap_certified,
         "bound_validity": "reported_by_shot",
-        "certification_caveat": (
-            "parsed from SHOT stdout/OSrL; inspect OSrL for authoritative details"
-        ),
+        "certification_caveat": _shot_certification_caveat(gap_certified),
         "returncode": completed.returncode,
         "command": cmd,
         "nl_file": str(nl_path),

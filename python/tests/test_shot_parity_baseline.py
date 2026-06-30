@@ -53,3 +53,63 @@ def test_collect_baseline_empty_selection_has_stable_schema(tmp_path):
     assert baseline["fixtures"] == []
     assert baseline["shot_executable"] is None
     assert baseline["workdir"] == str(tmp_path / "work")
+
+
+def test_shot_status_does_not_treat_optimality_caveat_as_optimal():
+    module = _load_baseline_module()
+    output = """
+    Feasible primal solution found to convex problem.
+    Can not guarantee optimality to the given termination criteria.
+    Objective bound (minimization) [dual, primal]:  [-9.6875, 1.5625].
+    Objective gap absolute / relative:              11.25 / 7.2.
+    """
+
+    status = module._parse_shot_status(output, 0)
+
+    assert status == "feasible"
+    assert module._parse_shot_gap_certified(output, status, 0) is False
+    assert module._parse_shot_bound_pair(output) == (-9.6875, 1.5625)
+    assert module._parse_shot_gap_pair(output) == (11.25, 7.2)
+
+
+def test_shot_status_recognizes_global_optimality_report():
+    module = _load_baseline_module()
+    output = """
+    Terminated since absolute gap met requirements.
+    Globally optimal primal solution found.
+    Objective bound (minimization) [dual, primal]:  [0.0496452, 0.0500009].
+    Objective gap absolute / relative:              0.000355636 / 0.0071126.
+    Unfulfilled termination criteria:
+     - solution time limit (s)                      0.446913 <= 30
+    Termination.TimeLimit = 30
+    """
+
+    status = module._parse_shot_status(output, 0)
+
+    assert status == "optimal"
+    assert module._parse_shot_gap_certified(output, status, 0) is True
+
+
+def test_shot_osrl_metrics_prefer_structured_bounds(tmp_path):
+    module = _load_baseline_module()
+    osrl_path = tmp_path / "result.osrl"
+    osrl_path.write_text(
+        """<osrl xmlns="os.optimizationservices.org">
+  <general>
+    <otherResults>
+      <other name="DualObjectiveBound" value="0.049645244896349541"/>
+      <other name="PrimalObjectiveBound" value="0.050000880952378424"/>
+      <other name="AbsoluteOptimalityGap" value="0.00035563605602888237"/>
+      <other name="RelativeOptimalityGap" value="0.0071125957891889106"/>
+    </otherResults>
+  </general>
+</osrl>
+"""
+    )
+
+    metrics = module._parse_shot_osrl_metrics(osrl_path)
+
+    assert metrics["DualObjectiveBound"] == 0.049645244896349541
+    assert metrics["PrimalObjectiveBound"] == 0.050000880952378424
+    assert metrics["AbsoluteOptimalityGap"] == 0.00035563605602888237
+    assert metrics["RelativeOptimalityGap"] == 0.0071125957891889106

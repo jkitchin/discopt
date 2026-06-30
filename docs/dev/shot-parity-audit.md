@@ -67,6 +67,13 @@ feasibility-pump fixture as `feasible` with `gap_certified=false`. That
 uncertified row is intentional: it is the baseline that later nonconvex
 convex-bounding work must improve without overstating global guarantees.
 
+A local SHOT-enabled run on June 30, 2026 matched the convex MINLP,
+MIQP-style, and nonconvex incumbent rows, and exposed one parser caveat: SHOT
+can report a feasible convex NLP incumbent while also stating that optimality
+is not guaranteed. The benchmark script therefore records SHOT certification
+from explicit global-optimality language and OSrL dual/primal bound fields
+rather than treating any occurrence of the word "optimal" as proof.
+
 ## Certification caveats
 
 - A finite objective without a finite certified bound is a heuristic incumbent,
