@@ -1,0 +1,221 @@
+{
+  "command": "scripts/shot_parity_baseline.py --output docs/dev/data/shot-parity-baseline.json",
+  "fixtures": [
+    {
+      "convexity": "convex",
+      "expected_certification": "global",
+      "intent": "continuous convex NLP routing and KKT-certified objective",
+      "key": "convex_nlp",
+      "problem_class": "NLP",
+      "results": [
+        {
+          "available": true,
+          "backend": "discopt",
+          "bound": 0.0,
+          "bound_validity": "global",
+          "certification_caveat": "none",
+          "convex_fast_path": true,
+          "elapsed_seconds": 0.445793,
+          "gap": null,
+          "gap_certified": true,
+          "mip_count": 0,
+          "nlp_bb": false,
+          "node_count": 0,
+          "objective": 0.0,
+          "solution": {
+            "x": 1.5000000013376102
+          },
+          "solve_options": {
+            "time_limit": 30
+          },
+          "status": "optimal",
+          "trace_summary": null,
+          "wall_time_seconds": 0.185242
+        },
+        {
+          "available": false,
+          "backend": "SHOT",
+          "bound": null,
+          "bound_validity": "not_run",
+          "certification_caveat": "No built SHOT executable found. Set SHOT_EXECUTABLE or build the local checkout.",
+          "gap": null,
+          "gap_certified": false,
+          "objective": null,
+          "shot_root": "/home/bernalde/repos/SHOT",
+          "status": "unavailable",
+          "wall_time_seconds": 0.0
+        }
+      ],
+      "title": "Convex continuous NLP"
+    },
+    {
+      "convexity": "convex",
+      "expected_certification": "global",
+      "intent": "OA baseline with SHOT profile trace and fixed-integer NLP calls",
+      "key": "convex_minlp",
+      "problem_class": "MINLP",
+      "results": [
+        {
+          "available": true,
+          "backend": "discopt",
+          "bound": 0.050000001146704956,
+          "bound_validity": "global",
+          "certification_caveat": "none",
+          "convex_fast_path": false,
+          "elapsed_seconds": 0.779502,
+          "gap": 0.0,
+          "gap_certified": true,
+          "mip_count": 3,
+          "nlp_bb": false,
+          "node_count": 0,
+          "objective": 0.05,
+          "solution": {
+            "x": 1.9999999997133238,
+            "y": 1.0
+          },
+          "solve_options": {
+            "max_nodes": 100,
+            "mip_nlp_method": "oa",
+            "mip_nlp_profile": "shot",
+            "solver": "mip-nlp",
+            "time_limit": 30
+          },
+          "status": "optimal",
+          "trace_summary": {
+            "cut_count": 12,
+            "feasibility_subproblem_count": 0,
+            "mip_count": 3,
+            "nlp_subproblem_count": 3,
+            "solution_pool_candidates": 3
+          },
+          "wall_time_seconds": 0.773626
+        },
+        {
+          "available": false,
+          "backend": "SHOT",
+          "bound": null,
+          "bound_validity": "not_run",
+          "certification_caveat": "No built SHOT executable found. Set SHOT_EXECUTABLE or build the local checkout.",
+          "gap": null,
+          "gap_certified": false,
+          "objective": null,
+          "shot_root": "/home/bernalde/repos/SHOT",
+          "status": "unavailable",
+          "wall_time_seconds": 0.0
+        }
+      ],
+      "title": "Convex binary MINLP"
+    },
+    {
+      "convexity": "convex",
+      "expected_certification": "global",
+      "intent": "quadratic objective with one binary decision and direct routing pressure",
+      "key": "miqp",
+      "problem_class": "MIQP",
+      "results": [
+        {
+          "available": true,
+          "backend": "discopt",
+          "bound": 4.440892098500626e-16,
+          "bound_validity": "global",
+          "certification_caveat": "none",
+          "convex_fast_path": false,
+          "elapsed_seconds": 0.071592,
+          "gap": 0.0,
+          "gap_certified": true,
+          "mip_count": 0,
+          "nlp_bb": false,
+          "node_count": 1,
+          "objective": 4.440892098500626e-16,
+          "solution": {
+            "x": 1.7500000006689258,
+            "y": 0.0
+          },
+          "solve_options": {
+            "max_nodes": 100,
+            "time_limit": 30
+          },
+          "status": "optimal",
+          "trace_summary": null,
+          "wall_time_seconds": 0.029009
+        },
+        {
+          "available": false,
+          "backend": "SHOT",
+          "bound": null,
+          "bound_validity": "not_run",
+          "certification_caveat": "No built SHOT executable found. Set SHOT_EXECUTABLE or build the local checkout.",
+          "gap": null,
+          "gap_certified": false,
+          "objective": null,
+          "shot_root": "/home/bernalde/repos/SHOT",
+          "status": "unavailable",
+          "wall_time_seconds": 0.0
+        }
+      ],
+      "title": "Convex MIQP-style model"
+    },
+    {
+      "convexity": "nonconvex",
+      "expected_certification": "heuristic",
+      "intent": "feasibility-pump incumbent with explicit uncertified bound caveat",
+      "key": "nonconvex_fp",
+      "problem_class": "MINLP",
+      "results": [
+        {
+          "available": true,
+          "backend": "discopt",
+          "bound": null,
+          "bound_validity": "heuristic",
+          "certification_caveat": "reported incumbent is not supported by a certified finite dual bound",
+          "convex_fast_path": false,
+          "elapsed_seconds": 0.13506,
+          "gap": null,
+          "gap_certified": false,
+          "mip_count": 0,
+          "nlp_bb": false,
+          "node_count": 0,
+          "objective": -4.000000054987344,
+          "solution": {
+            "x": 2.0,
+            "y": 0.0
+          },
+          "solve_options": {
+            "max_nodes": 20,
+            "mip_nlp_method": "fp",
+            "solver": "mip-nlp",
+            "time_limit": 30
+          },
+          "status": "feasible",
+          "trace_summary": {
+            "cut_count": null,
+            "mip_count": 0,
+            "nlp_subproblem_count": 0,
+            "solution_pool_candidates": 0
+          },
+          "wall_time_seconds": 0.134431
+        },
+        {
+          "available": false,
+          "backend": "SHOT",
+          "bound": null,
+          "bound_validity": "not_run",
+          "certification_caveat": "No built SHOT executable found. Set SHOT_EXECUTABLE or build the local checkout.",
+          "gap": null,
+          "gap_certified": false,
+          "objective": null,
+          "shot_root": "/home/bernalde/repos/SHOT",
+          "status": "unavailable",
+          "wall_time_seconds": 0.0
+        }
+      ],
+      "title": "Nonconvex heuristic MINLP"
+    }
+  ],
+  "generated_at": "2026-06-30T15:47:28.807049+00:00",
+  "schema_version": 1,
+  "shot_executable": null,
+  "shot_root": "/home/bernalde/repos/SHOT",
+  "workdir": "/tmp/discopt-shot-baseline-7nc1s9dp",
+  "workdir_persistent": false
+}
