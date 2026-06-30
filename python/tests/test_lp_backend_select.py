@@ -15,9 +15,10 @@ import pytest
 from discopt.solvers import lp_backend
 
 
-def test_default_prefers_highs_when_present():
-    pytest.importorskip("highspy")
-    assert lp_backend.get_lp_solver().__module__ == "discopt.solvers.lp_highs"
+def test_default_lp_prefers_simplex():
+    # Issue #356: the matrix-LP default routes to the self-hosted Rust simplex
+    # (which now exposes duals/reduced costs), even when HiGHS is installed.
+    assert lp_backend.get_lp_solver().__module__ == "discopt.solvers.lp_simplex"
 
 
 def test_prefer_pounce_selects_pounce():
@@ -74,10 +75,12 @@ def test_prefer_pounce_milp_uses_self_hosted_bb():
 
 
 class TestPounceOnlyInstall:
-    def test_lp_selector_falls_back_to_pounce(self, monkeypatch):
+    def test_lp_selector_is_highs_free_by_default(self, monkeypatch):
+        # With HiGHS absent the default LP engine is the self-hosted Rust simplex
+        # (issue #356) — HiGHS-free without needing POUNCE either.
         pytest.importorskip("pounce")
         _without_highs(monkeypatch)
-        assert lp_backend.get_lp_solver().__module__ == "discopt.solvers.lp_pounce"
+        assert lp_backend.get_lp_solver().__module__ == "discopt.solvers.lp_simplex"
 
     def test_milp_selector_is_highs_free_by_default(self, monkeypatch):
         # With HiGHS absent the default MILP engine is the self-hosted Rust simplex
@@ -132,9 +135,12 @@ class TestPounceOnlyInstall:
 
     def test_neither_backend_raises(self, monkeypatch):
         real_import = builtins.__import__
+        # Block the Rust simplex too (now the default LP engine) so the selector
+        # genuinely has nothing importable.
+        blocked = ("lp_highs", "lp_pounce", "lp_simplex", "highspy", "pounce")
 
         def no_backend(name, *a, **k):
-            if any(s in name for s in ("lp_highs", "lp_pounce", "highspy", "pounce")):
+            if any(s in name for s in blocked) or name.endswith("._rust"):
                 raise ImportError("no backend")
             return real_import(name, *a, **k)
 

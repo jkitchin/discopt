@@ -7,12 +7,12 @@ OA/GDP/Benders masters, ...) can pick one through this seam and stay agnostic.
 This is what lets discopt run with **only POUNCE installed** (no HiGHS): the
 selector falls back to whichever backend is importable.
 
-The matrix-MILP default routes to the self-hosted Rust simplex B&B first (issue
-#356, part B) — HiGHS-free, exact, and fast on the ill-conditioned lifted
-relaxations — with HiGHS then POUNCE as fallbacks. The matrix-LP default stays
-HiGHS-first (its consumers read backend-exposed duals/reduced costs that the Rust
-LP simplex does not surface). ``prefer_pounce`` flips the preference to
-POUNCE-first (the POUNCE-only mode, ``nlp_solver="pounce"``).
+The matrix-LP and matrix-MILP defaults route to the self-hosted Rust simplex
+first (issue #356) — HiGHS-free, exact, and fast on the ill-conditioned lifted
+relaxations — with HiGHS then POUNCE as fallbacks. The Rust LP simplex now
+surfaces ``dual_values``/``reduced_costs`` in HiGHS's convention, so the
+dual-consuming seams (Benders subproblem, DBBT) run on it too. ``prefer_pounce``
+flips the preference to POUNCE-first (the POUNCE-only mode, ``nlp_solver="pounce"``).
 
 Exception — the **QP** seam (:func:`get_qp_solver`) is POUNCE-only (issue #359):
 the QP path has no HiGHS backend at all (``qp_highs`` was removed). There is no QP
@@ -61,10 +61,18 @@ def _qp_pounce() -> Callable | None:
 def get_lp_solver(prefer_pounce: bool = False) -> Callable:
     """Return a matrix-form ``solve_lp(c, A_ub, b_ub, A_eq, b_eq, bounds, ...)``.
 
-    Order is HiGHS -> POUNCE, flipped when ``prefer_pounce``. Raises
-    :class:`ImportError` only when neither backend is importable.
+    Default order is the self-hosted Rust simplex -> HiGHS -> POUNCE (issue #356):
+    the simplex reaches the exact vertex and now exposes ``dual_values`` /
+    ``reduced_costs`` in HiGHS's convention, so the dual-consuming seams (Benders
+    subproblem, ...) run HiGHS-free. ``prefer_pounce`` keeps the POUNCE-first
+    order (the POUNCE-only mode). Raises :class:`ImportError` only when no backend
+    is importable.
+
+    Note the simplex returns no warm-start basis (``LPResult.basis is None``);
+    callers that warm-start across a cutting-plane loop simply cold-start each
+    round — correct, only a speed difference.
     """
-    order = (_lp_pounce, _lp_highs) if prefer_pounce else (_lp_highs, _lp_pounce)
+    order = (_lp_pounce, _lp_highs) if prefer_pounce else (_lp_simplex, _lp_highs, _lp_pounce)
     for factory in order:
         solver = factory()
         if solver is not None:
@@ -101,13 +109,15 @@ def get_exact_dual_lp_solver() -> Callable | None:
 
     Duality-based bound tightening (DBBT) reads the LP's reduced costs to bound
     how far each variable can move from the bound it is pressed against. That
-    requires an exact (vertex) oracle that *exposes* its duals: HiGHS does
-    (``col_dual``); discopt's pure-Rust simplex reaches the exact vertex but does
-    not expose reduced costs across the binding, and the POUNCE IPM's duals are
-    not rigorous (issue #145). So this returns HiGHS when available, else
-    ``None`` — DBBT then soundly no-ops rather than tighten from inexact duals.
+    requires an exact (vertex) oracle that *exposes* its duals. discopt's
+    pure-Rust simplex now surfaces ``reduced_costs`` (and ``dual_values``) from
+    the optimal basis in HiGHS's convention — exact vertex duals that satisfy
+    strong duality (validated against HiGHS) — so it is preferred here, with HiGHS
+    as the fallback (issue #356). The POUNCE IPM is never used: its analytic-center
+    duals are not rigorous (issue #145). Returns ``None`` only when neither exact
+    oracle is importable, and DBBT then soundly no-ops.
     """
-    return _lp_highs()
+    return _lp_simplex() or _lp_highs()
 
 
 def get_qp_solver(prefer_pounce: bool = False) -> Callable:

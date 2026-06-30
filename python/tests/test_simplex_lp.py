@@ -172,3 +172,69 @@ class TestWarmStartLp:
         st, _x, obj, _i, _cs, _bv, _d, _r = rust.solve_lp_warm_py(c, a, b, lb, ub, bad_cs, bad_bv)
         assert st == "optimal"
         assert abs(obj - (-1.0)) < 1e-9
+
+
+class TestSimplexLpDuals:
+    """``lp_simplex.solve_lp`` exposes vertex duals/reduced costs (issue #356), in
+    HiGHS's convention, so the dual-consuming seams (Benders, DBBT) run on it."""
+
+    @staticmethod
+    def _lp(seed):
+        rng = np.random.default_rng(seed)
+        n = int(rng.integers(2, 6))
+        mub = int(rng.integers(1, 4))
+        meq = int(rng.integers(0, 2))
+        A_ub = rng.integers(-3, 4, size=(mub, n)).astype(float)
+        b_ub = rng.integers(1, 9, size=mub).astype(float)
+        A_eq = rng.integers(-2, 3, size=(meq, n)).astype(float) if meq else None
+        b_eq = (A_eq @ rng.uniform(0, 3, size=n)) if meq else None
+        c = rng.integers(-3, 4, size=n).astype(float)
+        bounds = [(0.0, 5.0)] * n
+        return c, A_ub, b_ub, A_eq, b_eq, bounds
+
+    def test_objective_matches_highs(self):
+        from discopt.solvers.lp_simplex import solve_lp as rust_lp
+
+        for seed in range(40):
+            c, A_ub, b_ub, A_eq, b_eq, bounds = self._lp(seed)
+            h = highs_lp(c, A_ub, b_ub, A_eq, b_eq, bounds)
+            r = rust_lp(c, A_ub, b_ub, A_eq, b_eq, bounds)
+            assert r.status == h.status
+            if r.status == SolveStatus.OPTIMAL:
+                assert abs(r.objective - h.objective) < 1e-6
+
+    def test_duals_are_populated_and_satisfy_strong_duality(self):
+        # The duals need not equal HiGHS's on a degenerate LP, but they must be a
+        # *valid* optimal dual: strong duality g(y) == obj. (Skip LPs whose dual
+        # points along a free direction, where the box term is unbounded.)
+        from discopt.solvers.lp_simplex import solve_lp as rust_lp
+
+        checked = 0
+        for seed in range(60):
+            c, A_ub, b_ub, A_eq, b_eq, bounds = self._lp(seed)
+            r = rust_lp(c, A_ub, b_ub, A_eq, b_eq, bounds)
+            if r.status != SolveStatus.OPTIMAL:
+                continue
+            assert r.dual_values is not None and r.reduced_costs is not None
+            c_arr = np.asarray(c, float)
+            n = len(c_arr)
+            y = np.asarray(r.dual_values, float)
+            rc = np.asarray(r.reduced_costs, float)
+            lo = np.array([b[0] for b in bounds])
+            hi = np.array([b[1] for b in bounds])
+            mub = A_ub.shape[0]
+            rhs = np.concatenate(
+                [np.asarray(b_ub, float), np.asarray(b_eq, float) if b_eq is not None else []]
+            )
+            # g(y) = b·y + Σ_j min_{x∈[lo,hi]} rc_j x_j  == obj at a valid optimum.
+            contrib = np.where(rc > 0, rc * lo, np.where(rc < 0, rc * hi, 0.0))
+            g = float(rhs @ y) + float(contrib.sum())
+            assert abs(g - r.objective) <= 1e-6 * (1.0 + abs(r.objective))
+            # reduced costs are exactly c − Aᵀy.
+            recomputed = c_arr - A_ub.T @ y[:mub]
+            if A_eq is not None:
+                recomputed = recomputed - A_eq.T @ y[mub:]
+            assert np.allclose(rc, recomputed, atol=1e-9)
+            assert len(rc) == n
+            checked += 1
+        assert checked >= 20
