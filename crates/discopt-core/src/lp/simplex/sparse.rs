@@ -53,6 +53,14 @@ impl SparseCols {
         }
     }
 
+    /// Read-only view of the raw CSC arrays (`col_ptr`, `row_idx`, `vals`). Lets
+    /// the equilibration sweeps read every nonzero in storage order (cache-
+    /// friendly) instead of striding the dense row-major matrix per column.
+    #[inline]
+    pub fn raw(&self) -> (&[usize], &[usize], &[f64]) {
+        (&self.col_ptr, &self.row_idx, &self.vals)
+    }
+
     /// Nonzero `(row, value)` pairs of column `j`.
     #[inline]
     pub fn col(&self, j: usize) -> (&[usize], &[f64]) {

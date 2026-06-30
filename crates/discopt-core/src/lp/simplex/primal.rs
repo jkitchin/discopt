@@ -64,7 +64,7 @@ pub fn solve_lp_scaled(lp: &LpView<'_>, b: &[f64], opts: &SimplexOptions) -> LpS
 /// certifying an `Optimal` solve so incremental `x_B` drift (Harris bound
 /// excursions, deferred refactorization) cannot return a wrong optimum.
 fn solution_within_tolerance(
-    a: &[f64],
+    cols: &SparseCols,
     m: usize,
     n: usize,
     b: &[f64],
@@ -85,9 +85,21 @@ fn solution_within_tolerance(
             return false;
         }
     }
+    // Row activity `A x` accumulated over the sparse columns (O(nnz)), not a dense
+    // `m·n` matvec — the lifted relaxations are ~0.3% dense, so this is the
+    // difference between milliseconds and seconds on the per-solve audit.
+    let mut ax = vec![0.0f64; m];
+    for j in 0..n {
+        let xj = x[j];
+        if xj != 0.0 {
+            let (rows, vals) = cols.col(j);
+            for (k, &i) in rows.iter().enumerate() {
+                ax[i] += vals[k] * xj;
+            }
+        }
+    }
     for i in 0..m {
-        let row: f64 = (0..n).map(|j| a[i * n + j] * x[j]).sum();
-        if (row - b[i]).abs() > FEAS * (1.0 + b[i].abs()) {
+        if (ax[i] - b[i]).abs() > FEAS * (1.0 + b[i].abs()) {
             return false;
         }
     }
@@ -95,8 +107,8 @@ fn solution_within_tolerance(
 }
 
 struct Simplex<'a> {
-    a: &'a [f64],     // m×n row-major (structural+slack columns)
-    cols: SparseCols, // CSC view of `a`, built once (pricing hot path)
+    cols: SparseCols, // CSC of the constraint matrix; the sole matrix view (pricing,
+    // residual, audit all go through it — no dense `m×n` copy is kept)
     b: &'a [f64],     // length m
     c: &'a [f64],     // length n
     m: usize,
@@ -128,7 +140,6 @@ impl<'a> Simplex<'a> {
         ub[..n].copy_from_slice(lp.u);
         // Artificials: bounds set per phase (Phase 1 [0,inf], Phase 2 [0,0]).
         Self {
-            a: lp.a,
             cols: SparseCols::from_dense(lp.a, m, n),
             b,
             c: lp.c,
@@ -244,13 +255,18 @@ impl<'a> Simplex<'a> {
                 AT_LOWER // free → treated as at 0
             };
         }
-        // residual r = b − Σ A_j x_j over real nonbasic vars
+        // residual r = b − Σ A_j x_j over real nonbasic vars, accumulated through
+        // the sparse columns (O(nnz of the nonbasic-at-nonzero columns)) instead
+        // of a dense O(m·n) sweep — on the ~0.3%-dense lifted relaxations almost
+        // every nonbasic var sits at 0 (lower bound), so this touches almost
+        // nothing rather than scanning the whole matrix.
         let mut r = self.b.to_vec();
         for j in 0..self.n {
             let v = self.nb_value(j);
             if v != 0.0 {
-                for i in 0..m {
-                    r[i] -= self.a[i * self.n + j] * v;
+                let (rows, vals) = self.cols.col(j);
+                for (k, &i) in rows.iter().enumerate() {
+                    r[i] -= vals[k] * v;
                 }
             }
         }
@@ -652,7 +668,7 @@ impl<'a> Simplex<'a> {
         // warm path's cold fallback, or the MILP driver decertifying the gap and
         // branching) rather than trusting a wrong "Optimal".
         let status = if status == LpStatus::Optimal
-            && !solution_within_tolerance(self.a, self.m, self.n, self.b, &self.lb, &self.ub, &x)
+            && !solution_within_tolerance(&self.cols, self.m, self.n, self.b, &self.lb, &self.ub, &x)
         {
             LpStatus::Numerical
         } else {
@@ -860,14 +876,15 @@ mod tests {
     fn feasibility_audit_accepts_and_rejects() {
         // Row: x0 + x1 = 4, with x0,x1 ∈ [0, 5]. (n real cols = 2)
         let a = [1.0, 1.0];
+        let cols = SparseCols::from_dense(&a, 1, 2);
         let b = [4.0];
         let l = [0.0, 0.0];
         let u = [5.0, 5.0];
         // Exact feasible point passes.
-        assert!(solution_within_tolerance(&a, 1, 2, &b, &l, &u, &[1.0, 3.0]));
+        assert!(solution_within_tolerance(&cols, 1, 2, &b, &l, &u, &[1.0, 3.0]));
         // Ax=b drift beyond tolerance is rejected (would be a false "Optimal").
         assert!(!solution_within_tolerance(
-            &a,
+            &cols,
             1,
             2,
             &b,
@@ -877,7 +894,7 @@ mod tests {
         ));
         // A bound excursion beyond tolerance is rejected.
         assert!(!solution_within_tolerance(
-            &a,
+            &cols,
             1,
             2,
             &b,
@@ -887,7 +904,7 @@ mod tests {
         ));
         // Tiny within-tolerance noise still passes.
         assert!(solution_within_tolerance(
-            &a,
+            &cols,
             1,
             2,
             &b,
@@ -1020,8 +1037,9 @@ mod tests {
         let r = solve(&a, 2, 4, &[4.0, 6.0], &c, &l, &u);
         assert_eq!(r.status, LpStatus::Optimal);
         // The returned optimum genuinely satisfies the audit predicate.
+        let cols = SparseCols::from_dense(&a, 2, 4);
         assert!(solution_within_tolerance(
-            &a,
+            &cols,
             2,
             4,
             &[4.0, 6.0],

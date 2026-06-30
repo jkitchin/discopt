@@ -35,6 +35,7 @@
 #![allow(clippy::needless_range_loop)]
 
 use crate::lp::crossover::LpView;
+use crate::lp::simplex::sparse::SparseCols;
 
 const INF: f64 = 1e20;
 
@@ -228,18 +229,30 @@ impl ScaledLp {
     }
 }
 
-/// Geometric-mean equilibration of the dense row-major `m × n` matrix `a`:
-/// alternating sweeps set each column/row factor to `1/sqrt(min·max)` of the
-/// current scaled magnitudes in that line, snapped to a power of two. Returns
-/// `(row, col)` factor vectors.
+/// Geometric-mean equilibration of the `m × n` matrix `a`: alternating sweeps set
+/// each column/row factor to `1/sqrt(min·max)` of the current scaled magnitudes in
+/// that line, snapped to a power of two. Returns `(row, col)` factor vectors.
+///
+/// The sweeps read the matrix through a CSC view so they visit only the nonzeros,
+/// in cache-friendly storage order, rather than striding the dense row-major
+/// matrix per column — `O(nnz)` instead of `O(m·n)` cache-missing accesses, which
+/// was the dominant cost on the 0.3%-dense lifted McCormick relaxations (a
+/// zero-iteration solve of ex1252's 6908×7799 / 19k-nonzero relaxation spent
+/// seconds here alone). The factors are *bit-identical* to the old dense sweep: a
+/// zero entry never affects a line's significant min/max, so skipping the
+/// structural zeros changes nothing.
 fn equilibrate(a: &[f64], m: usize, n: usize) -> (Vec<f64>, Vec<f64>) {
+    let sp = SparseCols::from_dense(a, m, n);
+    let (col_ptr, row_idx, vals) = sp.raw();
     let mut row = vec![1.0f64; m];
     let mut col = vec![1.0f64; n];
     for _ in 0..MAX_PASSES {
         let mut changed = false;
-        // Column sweep.
+        // Column sweep: column-major storage makes each column's nonzeros contiguous.
         for j in 0..n {
-            let (lo, hi) = line_lo_hi((0..m).map(|i| row[i] * a[i * n + j] * col[j]));
+            let (lo, hi) = line_lo_hi(
+                (col_ptr[j]..col_ptr[j + 1]).map(|k| row[row_idx[k]] * vals[k] * col[j]),
+            );
             if hi > 0.0 {
                 let f = nearest_pow2(1.0 / (lo * hi).sqrt());
                 if f != 1.0 {
@@ -248,12 +261,34 @@ fn equilibrate(a: &[f64], m: usize, n: usize) -> (Vec<f64>, Vec<f64>) {
                 }
             }
         }
-        // Row sweep.
+        // Row sweep: accumulate per-row significant lo/hi over the same nonzeros.
+        // Two O(nnz) passes mirror `line_lo_hi`'s noise floor — the per-row max
+        // first, then the min over entries within `MAX_LINE_RANGE` of it.
+        let mut rhi = vec![0.0f64; m];
+        for j in 0..n {
+            let cj = col[j];
+            for k in col_ptr[j]..col_ptr[j + 1] {
+                let i = row_idx[k];
+                let av = (row[i] * vals[k] * cj).abs();
+                if av > rhi[i] {
+                    rhi[i] = av;
+                }
+            }
+        }
+        let mut rlo = vec![f64::INFINITY; m];
+        for j in 0..n {
+            let cj = col[j];
+            for k in col_ptr[j]..col_ptr[j + 1] {
+                let i = row_idx[k];
+                let av = (row[i] * vals[k] * cj).abs();
+                if av > 0.0 && av >= rhi[i] * MAX_LINE_RANGE && av < rlo[i] {
+                    rlo[i] = av;
+                }
+            }
+        }
         for i in 0..m {
-            let base = i * n;
-            let (lo, hi) = line_lo_hi((0..n).map(|j| row[i] * a[base + j] * col[j]));
-            if hi > 0.0 {
-                let f = nearest_pow2(1.0 / (lo * hi).sqrt());
+            if rhi[i] > 0.0 {
+                let f = nearest_pow2(1.0 / (rlo[i] * rhi[i]).sqrt());
                 if f != 1.0 {
                     row[i] *= f;
                     changed = true;
