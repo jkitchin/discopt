@@ -3352,7 +3352,16 @@ def solve_oa(
     feasibility_subproblem_count = 0
     solution_pool_candidate_count = 0
     initial_poa_trace: Optional[dict[str, object]] = None
+    interior_point_store = None
     if mip_nlp_profile == "shot":
+        from discopt.solvers.mip_nlp_rootsearch import MIPNLPInteriorPointStore
+
+        interior_point_store = MIPNLPInteriorPointStore(
+            n_vars,
+            int_indices=decomp.int_indices,
+            lb=decomp.lb,
+            ub=decomp.ub,
+        )
         phase = mip_nlp_shot_config.relaxation_phase if mip_nlp_shot_config is not None else "off"
         initial_poa_enabled = mip_nlp_shot_config is not None and phase in _INITIAL_POA_PHASES
         initial_poa_trace = {
@@ -3366,6 +3375,7 @@ def solve_oa(
             "objective_bound": None,
             "objective_bound_valid": False,
             "interior_point_candidates": 0,
+            "interior_points_stored": 0,
             "node_count": 0,
         }
 
@@ -3404,6 +3414,12 @@ def solve_oa(
             "cut_source_counts": cut_provenance.source_counts(),
             "solution_pool_candidates": int(solution_pool_candidate_count),
         }
+        if interior_point_store is not None:
+            interior_counts = Counter(record.source for record in interior_point_store.records)
+            summary["interior_point_count"] = int(len(interior_point_store.records))
+            summary["interior_point_source_counts"] = {
+                str(source): int(count) for source, count in sorted(interior_counts.items())
+            }
         if initial_poa_trace is not None:
             poa_cuts = initial_poa_trace.get("cuts_added", 0)
             poa_provenance_cuts = initial_poa_trace.get("provenance_cuts_added", 0)
@@ -3432,6 +3448,23 @@ def solve_oa(
         if initial_poa_trace is not None:
             trace["initial_poa"] = dict(initial_poa_trace)
         return trace
+
+    def _record_interior_point(
+        x: np.ndarray,
+        source: str,
+        metadata: Optional[dict[str, object]] = None,
+    ) -> bool:
+        if interior_point_store is None:
+            return False
+        record = interior_point_store.add(
+            x,
+            source=source,
+            metadata=metadata,
+            evaluator=evaluator,
+            constraint_senses=decomp.constraint_senses,
+            require_feasible=True,
+        )
+        return record is not None
 
     # If no integer variables, just solve the NLP directly
     if len(decomp.int_indices) == 0:
@@ -3482,6 +3515,7 @@ def solve_oa(
                 incumbent,
                 multipliers,
             )
+        _record_interior_point(incumbent, "incumbent", {"objective": float(obj)})
 
     if init_strategy == "rNLP":
         relax_attempt = None
@@ -3521,6 +3555,7 @@ def solve_oa(
                 cut_provenance=cut_provenance,
             )
             # Check if relaxation solution is already integer-feasible.
+            _record_interior_point(x_relax, "nlp_relaxation", {"objective": float(obj_relax)})
             is_int_feasible = all(
                 abs(x_relax[idx] - round(x_relax[idx])) < 1e-5 for idx in decomp.int_indices
             )
@@ -3736,10 +3771,15 @@ def solve_oa(
                         if master_bound_valid and poa_result.bound is not None:
                             objective_bound = float(poa_result.bound)
                             LB = max(LB, objective_bound)
-                        try:
-                            interior_candidates = 1 if _is_primal_feasible(evaluator, x_poa) else 0
-                        except Exception:
-                            interior_candidates = 0
+                        stored_poa_interior = _record_interior_point(
+                            x_poa,
+                            "initial_poa",
+                            {
+                                "objective_bound": _trace_value(objective_bound),
+                                "node_count": int(getattr(poa_result, "node_count", 0) or 0),
+                            },
+                        )
+                        interior_candidates = 1 if stored_poa_interior else 0
                         _add_oa_cuts(
                             evaluator,
                             x_poa,
@@ -3770,6 +3810,7 @@ def solve_oa(
                                 ),
                                 "bound_after": _trace_value(LB),
                                 "interior_point_candidates": int(interior_candidates),
+                                "interior_points_stored": int(interior_candidates),
                                 "node_count": int(getattr(poa_result, "node_count", 0) or 0),
                             }
                         )
@@ -4051,6 +4092,11 @@ def solve_oa(
                     UB = master_obj
                     incumbent = x_master.copy()
                     incumbent_obj = master_obj
+                    _record_interior_point(
+                        incumbent,
+                        "ecp_candidate",
+                        {"objective": float(master_obj)},
+                    )
 
                 gap = _compute_gap(LB, UB)
                 logger.info(
