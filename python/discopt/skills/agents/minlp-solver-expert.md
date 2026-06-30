@@ -52,7 +52,7 @@ result = m.solve(
 
 ### Key files
 - `python/discopt/solver.py` — orchestrator; `solve_model`, node solve loops, warm-start handling, path selection.
-- `python/discopt/solvers/ipopt_wrapper.py`, `qp_highs.py`, `lp_highs.py` — NLP/QP/LP backends.
+- `python/discopt/solvers/ipopt_wrapper.py`, `qp_pounce.py`, `lp_highs.py` — NLP/QP/LP backends (the QP path is POUNCE-only and HiGHS-free, #359).
 - `python/discopt/_jax/ipm.py`, `ipm_iterative.py`, `lp_ipm.py` — pure-JAX IPM, vmap-batched.
 - `crates/discopt-core/src/bnb/` — Rust B&B tree (`branching.rs`, `tree_manager.rs`, `pool.rs`, `node.rs`).
 - `crates/discopt-core/src/presolve/` — Rust FBBT/OBBT/probing/simplify.

@@ -1,19 +1,20 @@
 """POUNCE QP solver: solve a convex quadratic program through the pure-Rust IPM.
 
-Mirrors :func:`discopt.solvers.qp_highs.solve_qp` in signature and return type
-for the *pure-continuous* case, so the two are drop-in interchangeable at QP
-call sites. Differences, all inherent to an interior-point backend:
+This is the QP backend: discopt's QP path is HiGHS-free (issue #359), so
+``solve_qp`` here is the sole matrix-form continuous-QP engine. It follows the
+shared QP contract (signature + ``QPResult`` with HiGHS-convention duals).
+Differences, all inherent to an interior-point backend:
 
 - **No integrality**: POUNCE has no branch & bound, so ``integrality`` with
   any integer entries raises ``ValueError`` (the model-level seam keeps MIQPs
-  on HiGHS / the B&B path).
+  on the self-hosted B&B path).
 - **Convex Q assumed**: an IPM converges to a KKT point; for indefinite ``Q``
   that is only a local solution. The model-level dispatch already gates this
   path on detected convexity.
 - On a degenerate optimal face the primal/dual is the analytic center, not a
   vertex (objective matches); there is no basis.
 
-The objective is ``0.5 * x^T Q x + c^T x`` (the qp_highs convention): the
+The objective is ``0.5 * x^T Q x + c^T x`` (the shared QP convention): the
 callbacks expose gradient ``Q x + c``, the constant linear Jacobian, and the
 constant Hessian ``obj_factor * Q`` (lower triangle).
 
@@ -105,8 +106,8 @@ def solve_qp(
 ) -> QPResult:
     """Solve ``min 0.5 x^T Q x + c^T x`` s.t. linear constraints via POUNCE.
 
-    Same semantics as :func:`discopt.solvers.qp_highs.solve_qp` for the
-    pure-continuous case; ``bounds`` default to ``(-inf, +inf)`` per variable.
+    Follows the shared QP contract for the pure-continuous case; ``bounds``
+    default to ``(-inf, +inf)`` per variable.
 
     Raises:
         ImportError: If POUNCE is not installed.
@@ -129,7 +130,7 @@ def solve_qp(
     if Q_arr.shape != (n, n):
         raise ValueError(f"Q has shape {Q_arr.shape} but c has {n} elements")
 
-    # ---- variable bounds (qp_highs default: free variables) -----------------
+    # ---- variable bounds (shared QP contract default: free variables) -------
     if bounds is not None:
         if len(bounds) != n:
             raise ValueError(f"bounds has {len(bounds)} entries but c has {n} elements")
@@ -318,6 +319,13 @@ def _solve_qp_core(
     mult_l = np.asarray(info.get("mult_x_L", []), dtype=np.float64)
     mult_u = np.asarray(info.get("mult_x_U", []), dtype=np.float64)
     reduced_costs = (mult_l - mult_u) if mult_l.size and mult_u.size else None
+    # Final KKT residual, when POUNCE reports one. Lets a POUNCE-first QP default
+    # detect an unconverged "optimal" (issue #145) and degrade to HiGHS rather
+    # than return a drifted objective. ``final_unscaled_kkt_error`` is preferred
+    # (the M1-fixed unscaled residual, pounce#174) when present; ``final_kkt_error``
+    # (scaled) is the fallback available in released 0.6.0.
+    _kkt = info.get("final_unscaled_kkt_error", info.get("final_kkt_error", None))
+    kkt_error = float(_kkt) if _kkt is not None else None
 
     return QPResult(
         status=status,
@@ -328,4 +336,5 @@ def _solve_qp_core(
         node_count=0,
         iterations=iters,
         wall_time=wall_time,
+        kkt_error=kkt_error,
     )

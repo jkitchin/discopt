@@ -1,13 +1,18 @@
 """Backend selection for matrix-form LP/QP solves (HiGHS or POUNCE).
 
-The two engines are signature- and ``LPResult``/``QPResult``-compatible
-(``lp_highs``/``qp_highs`` vs ``lp_pounce``/``qp_pounce``), so consumers
+The engines are signature- and ``LPResult``/``QPResult``-compatible
+(``lp_highs`` vs ``lp_pounce``; QP is POUNCE-only since #359), so consumers
 (OBBT, relaxation solvers, ...) can pick one through this seam and stay
 agnostic. This is what lets discopt run with **only POUNCE installed**
 (no HiGHS): the selector falls back to whichever backend is importable.
 
 ``prefer_pounce`` flips the preference to POUNCE-first (the POUNCE-only mode,
 ``nlp_solver="pounce"``); otherwise HiGHS is preferred with POUNCE fallback.
+
+Exception — the **QP** seam (:func:`get_qp_solver`) is POUNCE-only (issue #359):
+the LP/MILP routing went HiGHS-free in #356, and the QP path now has no HiGHS
+backend at all (``qp_highs`` was removed). There is no QP fallback — POUNCE is
+the QP engine.
 """
 
 from __future__ import annotations
@@ -39,15 +44,6 @@ def _lp_simplex() -> Callable | None:
     except ImportError:
         return None
     return solve_lp if SIMPLEX_AVAILABLE else None
-
-
-def _qp_highs() -> Callable | None:
-    try:
-        from discopt.solvers.qp_highs import solve_qp
-
-        return solve_qp
-    except ImportError:
-        return None
 
 
 def _qp_pounce() -> Callable | None:
@@ -113,17 +109,20 @@ def get_exact_dual_lp_solver() -> Callable | None:
 def get_qp_solver(prefer_pounce: bool = False) -> Callable:
     """Return a matrix-form ``solve_qp(Q, c, A_ub, ...)``; see
     :func:`get_lp_solver`. POUNCE handles continuous QPs only (MIQPs go
-    through HiGHS or the B&B)."""
-    order = (_qp_pounce, _qp_highs) if prefer_pounce else (_qp_highs, _qp_pounce)
-    for factory in order:
-        solver = factory()
-        if solver is not None:
-            return solver
-    raise ImportError(
-        "No QP backend available. Install one of:\n"
-        "  pip install pounce-solver   (POUNCE)\n"
-        "  pip install highspy         (HiGHS)"
-    )
+    through the self-hosted B&B).
+
+    POUNCE-only and HiGHS-free (issue #359): the LP/MILP routing went HiGHS-free
+    in #356 and the QP path now has no HiGHS backend (``qp_highs`` was removed),
+    so there is no fallback. ``prefer_pounce`` is retained for symmetry with the
+    other selectors but has no effect. QP duals are reported, not consumed for
+    bound tightening, so this carries none of the LP-dual soundness hazards #356
+    guarded against; the top-level ``Model.solve`` QP path adds a
+    primal-feasibility + KKT-residual guard."""
+    del prefer_pounce  # POUNCE is the only QP backend; kept for selector symmetry
+    solver = _qp_pounce()
+    if solver is not None:
+        return solver
+    raise ImportError("No QP backend available. Install POUNCE:\n  pip install pounce-solver")
 
 
 def _milp_highs() -> Callable | None:

@@ -1,24 +1,25 @@
-"""Tests for QP/MIQP dispatch to HiGHS solver.
+"""Tests for QP/MIQP solving via discopt's HiGHS-free QP path.
 
-Covers:
-  1. Simple QP solves correctly via HiGHS
+The QP path is POUNCE-only (issue #359; ``qp_highs`` was removed), so these
+end-to-end ``Model.solve`` checks exercise POUNCE for continuous QPs and the
+self-hosted B&B for MIQPs. Covers:
+
+  1. Simple QP solves correctly
   2. QP with bounds-only constraints
   3. MIQP (QP with integer variables) solves correctly
-  4. QP result matches NLP solver result (within tolerance)
-  5. Falls back gracefully if HiGHS is not installed
-  6. Verify QP dispatch is actually used (not falling through to NLP)
+  4. QP result matches a known analytical solution
+  5. QP dispatch is actually used (classification)
+  6. Equality + inequality and cross-term (off-diagonal Hessian) correctness
 """
 
 from __future__ import annotations
-
-from unittest.mock import patch
 
 import discopt.modeling as dm
 import numpy as np
 import pytest
 
-# Skip entire module if highspy is not installed
-highspy = pytest.importorskip("highspy")
+# The QP path has no HiGHS fallback; POUNCE is the engine.
+pytest.importorskip("pounce")
 
 
 # ---------------------------------------------------------------------------
@@ -101,9 +102,6 @@ class TestMIQP:
         assert result.objective is not None
 
         # With y integer, optimal is y=2, x=1 (obj=1+2=3) or y=3, x=0 (obj=3)
-        # y=2, x=1: obj = 1 + 2 = 3
-        # y=3, x=0: obj = 0 + 3 = 3
-        # Both give obj=3
         np.testing.assert_allclose(result.objective, 3.0, atol=1e-4)
 
     def test_miqp_binary(self):
@@ -124,18 +122,16 @@ class TestMIQP:
 
 
 # ---------------------------------------------------------------------------
-# 4. QP result matches NLP solver (cross-validation)
+# 4. QP result matches a known analytical solution
 # ---------------------------------------------------------------------------
-class TestQPMatchesNLP:
-    """Verify QP via HiGHS matches a known analytical solution."""
+class TestQPMatchesAnalytical:
+    """Verify QP solving matches a known analytical solution."""
 
     def test_results_match_analytical(self):
-        """QP with known analytical solution: cross-validate HiGHS result."""
         m = dm.Model("cross_val")
         x = m.continuous("x", lb=0, ub=10)
         y = m.continuous("y", lb=0, ub=10)
-        # min x^2 + y^2 s.t. x + y = 2
-        # Analytical: x=y=1, obj=2
+        # min x^2 + y^2 s.t. x + y = 2 -> x=y=1, obj=2
         m.minimize(x**2 + y**2)
         m.subject_to(x + y == 2)
 
@@ -165,42 +161,10 @@ class TestQPMatchesNLP:
 
 
 # ---------------------------------------------------------------------------
-# 5. Graceful fallback when HiGHS unavailable
-# ---------------------------------------------------------------------------
-class TestFallback:
-    """QP dispatch falls back to JAX IPM when highspy is not importable."""
-
-    def test_fallback_to_jax(self):
-        m = dm.Model("fallback_qp")
-        x = m.continuous("x", lb=0, ub=10)
-        y = m.continuous("y", lb=0, ub=10)
-        m.minimize(x**2 + y**2)
-        m.subject_to(x + y >= 1)
-
-        # Simulate highspy being unavailable by patching the import inside
-        # _solve_qp_highs. When highspy cannot be imported, the function
-        # should return None, and the solver falls back to the JAX IPM.
-        import discopt.solver as _solver
-
-        original = _solver._solve_qp_highs
-
-        def _mock_highs(model, t_start, time_limit=None):
-            return None
-
-        _solver._solve_qp_highs = _mock_highs
-        try:
-            result = m.solve()
-            # Should still find optimal via JAX fallback
-            assert result.status == "optimal"
-        finally:
-            _solver._solve_qp_highs = original
-
-
-# ---------------------------------------------------------------------------
-# 6. Verify QP dispatch is actually used
+# 5. Verify QP dispatch (classification)
 # ---------------------------------------------------------------------------
 class TestDispatchRouting:
-    """Confirm QP problems are dispatched to the QP path, not NLP."""
+    """Confirm QP/MIQP problems are classified to the QP path, not NLP."""
 
     def test_qp_classified_correctly(self):
         from discopt._jax.problem_classifier import ProblemClass, classify_problem
@@ -222,78 +186,9 @@ class TestDispatchRouting:
         m.subject_to(x + y >= 3)
         assert classify_problem(m) == ProblemClass.MIQP
 
-    def test_qp_ipm_alias_uses_highs_solver(self):
-        """The QP path calls HiGHS solve_qp under the ``"ipm"`` alias.
-
-        POUNCE is now the universal default, so HiGHS is reached only when the
-        user opts back in via ``nlp_solver="ipm"``.
-        """
-        from discopt.solvers.qp_highs import solve_qp as _raw_solve
-
-        m = dm.Model("highs_check")
-        x = m.continuous("x", lb=0, ub=10)
-        m.minimize(x**2)
-
-        with patch("discopt.solvers.qp_highs.solve_qp", wraps=_raw_solve) as mock_solve:
-            result = m.solve(nlp_solver="ipm")
-            assert result.status == "optimal"
-            # If HiGHS path is used, solve_qp should have been called
-            assert mock_solve.call_count >= 1
-
 
 # ---------------------------------------------------------------------------
-# 7. Direct QP HiGHS solver tests (low-level API)
-# ---------------------------------------------------------------------------
-class TestQPHiGHsDirect:
-    """Test the solve_qp function directly."""
-
-    def test_simple_qp(self):
-        from discopt.solvers import SolveStatus
-        from discopt.solvers.qp_highs import solve_qp
-
-        # min 0.5 * x^2 + 0.5 * y^2 s.t. x + y = 1, x,y >= 0
-        Q = np.array([[1.0, 0.0], [0.0, 1.0]])
-        c = np.array([0.0, 0.0])
-        result = solve_qp(
-            Q=Q,
-            c=c,
-            A_eq=np.array([[1.0, 1.0]]),
-            b_eq=np.array([1.0]),
-            bounds=[(0, 10), (0, 10)],
-        )
-        assert result.status == SolveStatus.OPTIMAL
-        np.testing.assert_allclose(result.x, [0.5, 0.5], atol=1e-6)
-        np.testing.assert_allclose(result.objective, 0.25, atol=1e-6)
-
-    def test_qp_inequality(self):
-        from discopt.solvers import SolveStatus
-        from discopt.solvers.qp_highs import solve_qp
-
-        # min x^2 + y^2 s.t. x + y >= 2, x,y >= 0
-        Q = np.array([[2.0, 0.0], [0.0, 2.0]])
-        c = np.array([0.0, 0.0])
-        result = solve_qp(
-            Q=Q,
-            c=c,
-            A_ub=np.array([[-1.0, -1.0]]),  # -x - y <= -2
-            b_ub=np.array([-2.0]),
-            bounds=[(0, 10), (0, 10)],
-        )
-        assert result.status == SolveStatus.OPTIMAL
-        np.testing.assert_allclose(result.x, [1.0, 1.0], atol=1e-6)
-
-    def test_dimension_mismatch(self):
-        from discopt.solvers.qp_highs import solve_qp
-
-        with pytest.raises(ValueError, match="Q has shape"):
-            solve_qp(
-                Q=np.eye(3),
-                c=np.array([1.0, 2.0]),
-            )
-
-
-# ---------------------------------------------------------------------------
-# 8. QP with equality constraints
+# 6. QP with equality constraints
 # ---------------------------------------------------------------------------
 class TestQPEquality:
     """QP with both equality and inequality constraints."""
@@ -307,20 +202,16 @@ class TestQPEquality:
         result = m.solve()
 
         assert result.status == "optimal"
-        # With equality x0+x1+x2=3 and x0-x1<=1,
-        # optimal is x0=x1=x2=1 (satisfies both)
+        # x0+x1+x2=3 and x0-x1<=1 -> optimal x0=x1=x2=1
         np.testing.assert_allclose(result.value(x), [1.0, 1.0, 1.0], atol=1e-4)
 
 
 # ---------------------------------------------------------------------------
-# 9. Cross-term (off-diagonal Hessian) correctness
+# 7. Cross-term (off-diagonal Hessian) correctness
 # ---------------------------------------------------------------------------
 class TestCrossTermObjective:
-    """Verify that QP cross-terms (x_i * x_j) are handled correctly.
-
-    Regression tests for the HiGHS Hessian format bug where off-diagonal
-    entries were dropped due to upper-vs-lower triangle mismatch.
-    """
+    """Verify that QP cross-terms (x_i * x_j) are handled correctly — the
+    reported objective must match the off-diagonal Hessian form."""
 
     def test_2var_cross_term_objective_value(self):
         """min x^2 + x*y + y^2 s.t. x+y=1 => obj = 0.75 at x=y=0.5."""

@@ -1,8 +1,8 @@
 """Regression: a nonconvex MIQP must NOT be solved by the convex MIQP solvers.
 
 A model with a quadratic objective and integer variables is classified ``MIQP``
-and was routed unconditionally to ``_solve_qp_highs`` / ``_solve_miqp_bb`` — both
-of which assume a convex node QP (a convex relaxation solved to global optimality).
+and was routed unconditionally to the convex MIQP B&B (``_solve_miqp_bb``), which
+assumes a convex node QP (a convex relaxation solved to global optimality).
 On an indefinite or concave-maximize objective they return a local stationary
 point and certify it as the global optimum: a *false-optimal*, the worst failure
 class.

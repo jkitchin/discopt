@@ -98,7 +98,7 @@ consumers (by call-site density):
 | Consumer | Role |
 |---|---|
 | `solver.py` | LP/QP/MILP dispatch (`_solve_lp`, `_solve_qp`, MILP hand-off) |
-| `solvers/lp_highs.py`, `solvers/qp_highs.py`, `solvers/milp_highs.py` | The wrappers themselves |
+| `solvers/lp_highs.py`, `solvers/milp_highs.py` | The wrappers themselves (`qp_highs.py` removed, #359) |
 | `solvers/oa.py`, `solvers/gdpopt_loa.py` | MILP master problems for OA / GDP-LOA |
 | `_jax/obbt.py` | LP engine for optimality-based bound tightening |
 | `_jax/mccormick_lp.py`, `_jax/milp_relaxation.py` | McCormick-LP relaxation mode |
@@ -188,7 +188,7 @@ harder road to MILP parity.
 
 | Phase | Goal | HiGHS sites retired | Exit gate |
 |---|---|---|---|
-| **0** | POUNCE as universal continuous engine | `lp_highs`/`qp_highs` internals | LP/QP match HiGHS to tolerance on `test_lp_qp_solvers`; duals + Farkas ray reliable; bound trust-gate in place |
+| **0** | POUNCE as universal continuous engine | `lp_highs` internals; `qp_highs` **removed** (#359) | LP/QP match HiGHS to tolerance on `test_lp_qp_solvers`; duals + Farkas ray reliable; bound trust-gate in place |
 | **1** | Self-hosted integer B&B (cover) | `milp_highs` delegation | `incorrect_count = 0` on all MILP/MIQP suites |
 | **2** | Crossover + root cuts (compete I) | — | Measurable root-gap reduction on MIPLIB subset; zero invalid cuts |
 | **3** | Cut & heuristic suite (compete II) | — | Material node-count reduction vs Phase 1; presolve clique table consumed |
