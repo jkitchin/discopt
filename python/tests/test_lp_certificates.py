@@ -63,11 +63,27 @@ class TestSafeBoundHelper:
             if g is not None:
                 assert g <= -8.0 + 1e-6, f"y={y} gave too-high bound {g}"
 
-    def test_infinite_box_with_nonzero_reduced_cost_is_unusable(self):
-        # An unbounded box side with a nonzero reduced cost → −inf contribution →
-        # None (no usable finite bound), not a spurious large-finite value.
+    def test_infinite_box_side_is_bounded_by_fbbt_and_stays_sound(self):
+        # An unbounded box side whose reduced cost selects it used to collapse the
+        # safe bound to −inf (returned None). Feasibility-based bound tightening now
+        # recovers a finite, *valid* box for that column from the constraint rows,
+        # so the safe bound becomes usable while remaining a rigorous under-estimate
+        # (the lifted relaxations' objective-epigraph / slack columns rely on this).
+        # min -x0 - 2 x1 s.t. x0 + x1 <= 4, x0,x1 >= 0 (no explicit upper bound).
+        # Optimum -8 at (0,4); FBBT derives x0,x1 <= 4 from the row, so y=0 gives a
+        # finite g that never exceeds the true optimum.
         a_std, b, c_std, lb, ub = _std([[1.0, 1.0]], [4.0], [-1.0, -2.0], [(0, 1e20), (0, 1e20)])
-        # y=0 → reduced cost = c = (-1,-2); the −2·(+inf) term is −inf.
+        g = _safe_lp_lower_bound_std(np.array([0.0]), c_std, a_std, b, lb, ub)
+        assert g is not None  # FBBT bounded the open side → usable
+        assert g <= -8.0 + 1e-6, f"unsound bound {g} above the true optimum -8"
+
+    def test_unboundable_open_side_still_returns_none(self):
+        # When the rows cannot bound the reduced-cost-selected open side (the column
+        # is genuinely free in that direction), the helper still abstains rather
+        # than fabricate a value. Here x0 is unbounded above and unconstrained by
+        # the single <= row in the −cost direction, so no finite bound exists.
+        # min -x0 s.t. -x0 <= 0 (i.e. x0 >= 0), x0 in [0, inf): unbounded below obj.
+        a_std, b, c_std, lb, ub = _std([[-1.0]], [0.0], [-1.0], [(0, 1e20)])
         assert _safe_lp_lower_bound_std(np.array([0.0]), c_std, a_std, b, lb, ub) is None
 
 

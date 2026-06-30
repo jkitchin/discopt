@@ -58,6 +58,90 @@ class LpWarmCert(NamedTuple):
     farkas_certified: bool
 
 
+def _fbbt_eq_bounds(
+    a_std: "object",
+    b: np.ndarray,
+    lb: np.ndarray,
+    ub: np.ndarray,
+    *,
+    rounds: int = 3,
+    tol: float = 1e-9,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Feasibility-based bound tightening on the equality system ``A_std z = b``.
+
+    Returns ``(lb, ub)`` tightened so that every derived bound is *implied* by the
+    equalities plus the incoming box — i.e. the result still contains the whole
+    feasible set ``{z : A_std z = b, lb <= z <= ub}``. Used to give the unbounded
+    lifted/slack columns a finite, **valid** box for the Neumaier–Shcherbina safe
+    bound: a superset-preserving tightening keeps ``g(y) <= p*`` sound while making
+    the box-min term finite (an open side whose reduced cost selects it would
+    otherwise collapse the whole bound to ``-inf``).
+
+    Each equality ``Σ_j a_ij z_j = b_i`` bounds column ``k`` two-sidedly from the
+    min/max activity of the *other* columns, with an explicit per-row infinity
+    tally so a single open bound still propagates (vectorised over the sparse
+    matrix; the per-element Python loop is too slow for this per-solve path).
+    """
+    coo = sp.csr_matrix(a_std).tocoo()
+    rows = coo.row
+    cols = coo.col
+    vals = coo.data
+    n_rows = coo.shape[0]
+    lb = np.array(lb, dtype=np.float64)
+    ub = np.array(ub, dtype=np.float64)
+    if vals.size == 0:
+        return lb, ub
+    pos = vals > 0.0
+    b_r = b[rows]
+
+    for _ in range(rounds):
+        # Min activity uses lb where coeff>0, ub where coeff<0; max activity swaps.
+        min_used = np.where(pos, lb[cols], ub[cols])
+        max_used = np.where(pos, ub[cols], lb[cols])
+        min_term = vals * min_used  # may be -inf
+        max_term = vals * max_used  # may be +inf
+        min_inf = ~np.isfinite(min_term)
+        max_inf = ~np.isfinite(max_term)
+        n_min_inf = np.zeros(n_rows)
+        np.add.at(n_min_inf, rows, min_inf.astype(np.float64))
+        n_max_inf = np.zeros(n_rows)
+        np.add.at(n_max_inf, rows, max_inf.astype(np.float64))
+        sum_min = np.zeros(n_rows)
+        np.add.at(sum_min, rows, np.where(min_inf, 0.0, min_term))
+        sum_max = np.zeros(n_rows)
+        np.add.at(sum_max, rows, np.where(max_inf, 0.0, max_term))
+        # Activity of the row excluding column j (finite iff every *other* term is).
+        minrest_finite = (n_min_inf[rows] - min_inf.astype(np.float64)) == 0
+        maxrest_finite = (n_max_inf[rows] - max_inf.astype(np.float64)) == 0
+        minrest = sum_min[rows] - np.where(min_inf, 0.0, min_term)
+        maxrest = sum_max[rows] - np.where(max_inf, 0.0, max_term)
+        # z_j = (b_i - rest)/a_ij; the rest-interval endpoints give z_j's bounds.
+        lo_cand = np.where(pos, (b_r - maxrest) / vals, (b_r - minrest) / vals)
+        lo_valid = np.where(pos, maxrest_finite, minrest_finite)
+        hi_cand = np.where(pos, (b_r - minrest) / vals, (b_r - maxrest) / vals)
+        hi_valid = np.where(pos, minrest_finite, maxrest_finite)
+
+        new_lo = np.full(lb.shape[0], -np.inf)
+        sel = lo_valid & np.isfinite(lo_cand)
+        if sel.any():
+            np.maximum.at(new_lo, cols[sel], lo_cand[sel])
+        upd_lo = new_lo > lb + tol
+        if upd_lo.any():
+            lb = np.where(upd_lo, np.maximum(lb, new_lo), lb)
+
+        new_hi = np.full(ub.shape[0], np.inf)
+        sel = hi_valid & np.isfinite(hi_cand)
+        if sel.any():
+            np.minimum.at(new_hi, cols[sel], hi_cand[sel])
+        upd_hi = new_hi < ub - tol
+        if upd_hi.any():
+            ub = np.where(upd_hi, np.minimum(ub, new_hi), ub)
+
+        if not (upd_lo.any() or upd_hi.any()):
+            break
+    return lb, ub
+
+
 def _safe_lp_lower_bound_std(
     y: np.ndarray,
     c: np.ndarray,
@@ -87,23 +171,35 @@ def _safe_lp_lower_bound_std(
     # large-finite contribution.
     lb = np.where(np.asarray(lb, dtype=np.float64) <= -_INF, -np.inf, lb)
     ub = np.where(np.asarray(ub, dtype=np.float64) >= _INF, np.inf, ub)
-    # Cheap early-out: a *free* variable (both bounds infinite — e.g. a lifted
-    # objective epigraph) makes its box term −inf unless its reduced cost is
-    # exactly 0, which it never is numerically, so the safe bound is unusable.
-    # Detect it from the bounds alone and skip the (possibly large, dense) Aᵀy
-    # matvec entirely — keeping this off the hot path for free-variable LPs.
-    if bool(np.any(~np.isfinite(lb) & ~np.isfinite(ub))):
-        return None
     c = np.asarray(c, dtype=np.float64)
     at_y = a_std.T @ y if not sp.issparse(a_std) else (a_std.T @ y)
     rc = c - np.asarray(at_y).ravel()
+    pos = rc > 0.0
+    neg = rc < 0.0
+    # A box-min term is -inf when the reduced cost selects an open side. The
+    # lifted relaxation's objective-epigraph / sqrt-/division-lift aux columns and
+    # the row slacks carry +/-inf bounds, and a roundoff-flipped tiny reduced cost
+    # on such a column would otherwise collapse the whole safe bound to -inf (the
+    # nvs05/nvs22/st_e36/chance root-bound drop). Recover a finite, *valid* box for
+    # exactly those columns by feasibility-based bound tightening: FBBT bounds still
+    # contain the feasible set, so g(y) stays <= p* (sound) while becoming finite.
+    # Gated on actually needing it, so well-bounded LPs keep the cheap path.
+    if (pos & ~np.isfinite(lb)).any() or (neg & ~np.isfinite(ub)).any():
+        # FBBT's float64 division roundoff (~ulp·|bound|) is dominated by the
+        # magnitude-scaled ``margin`` subtracted from g below, so the derived box
+        # needs no extra outward loosening — and adding one perturbs the (large)
+        # slack/aux bounds enough to break the safe bound's rescaling invariance
+        # without improving soundness. Use the FBBT bounds directly.
+        lb, ub = _fbbt_eq_bounds(a_std, np.asarray(b, dtype=np.float64), lb, ub)
     # min_{z_k∈[lb,ub]} rc_k z_k = lb_k if rc_k>0, ub_k if rc_k<0, else 0 (the
     # rc_k==0 case contributes 0 even when that bound is infinite).
     contrib = np.zeros_like(rc)
-    pos = rc > 0.0
-    neg = rc < 0.0
     contrib[pos] = rc[pos] * lb[pos]
     contrib[neg] = rc[neg] * ub[neg]
+    # Any term still open after FBBT (a genuinely unbounded selected side) leaves
+    # no usable bound — abstain rather than return a spurious value.
+    if not np.all(np.isfinite(contrib)):
+        return None
     by = float(np.asarray(b, dtype=np.float64) @ y)
     g = by + float(contrib.sum())
     if not np.isfinite(g):
