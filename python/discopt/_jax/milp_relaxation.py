@@ -3463,6 +3463,12 @@ class CompositeMultivarRelaxation:
     curvature: str
     lower_lines: tuple[tuple[tuple[tuple[int, float], ...], float], ...]
     upper_lines: tuple[tuple[tuple[tuple[int, float], ...], float], ...]
+    # Dependent original-variable columns and the compiled value/gradient of the
+    # lifted node, so a separator can add the exact supporting hyperplane at the LP
+    # point each round (issue #358 Phase 2). ``None`` disables LP-point separation.
+    idxs: tuple[int, ...] = ()
+    value_fn: Optional[Callable] = None
+    grad_fn: Optional[Callable] = None
 
 
 _COMPOSITE_CURV_TOL = 1e-9
@@ -4257,6 +4263,9 @@ def _collect_composite_multivar_relaxations(
                 curvature=curvature,
                 lower_lines=lower_lines,
                 upper_lines=upper_lines,
+                idxs=tuple(int(j) for j in idxs),
+                value_fn=f,
+                grad_fn=grad_f,
             )
         )
         bounds.append((col_lo, col_hi))
