@@ -22,6 +22,27 @@ discopt-native behavioral parity, not a translation of SHOT C++ internals.
 | Backend support | MIP backends including CPLEX/Gurobi/Cbc/HiGHS, NLP backends including Ipopt/GAMS/SHOT, AMPL/GAMS/OSiL interfaces, NEOS workflows | Partial / deferred | discopt supports HiGHS/POUNCE and optional Gurobi/cyipopt paths plus `.nl`, GAMS-link, and Pyomo interfaces. OSiL, NEOS, CPLEX, and Cbc parity are intentionally deferred by the roadmap. |
 | Trace and diagnostics | Iteration reports, primal/dual bound updates, cut counts, NLP-call counts, solution-pool counts, and certification caveats | Partial | `SolveResult.mip_nlp_trace` records the current stable envelope for MIP-NLP runs. SHOT-equivalent trace fields for rootsearch, repair, external hooks, and convex bounding will be added as those features land. |
 
+## Reformulation parity table
+
+Issue [#141](https://github.com/bernalde/discopt/issues/141) adds the
+validated `mip_nlp_profile="shot"` control surface for SHOT-style
+reformulation policy. Only controls backed by an existing discopt component or
+needed as stable names for later roadmap PRs are exposed.
+
+| SHOT reformulation mode | SHOT-profile control | discopt equivalent or status |
+| --- | --- | --- |
+| Objective epigraph for nonlinear minimization objectives | `objective_epigraph` | Active when the structural objective-defining-equality proof in `discopt._jax.objective_epigraph` applies; otherwise safely abstains. OA masters already use internal objective epigraph columns for convex nonlinear objectives. |
+| Objective anti-epigraph for nonlinear maximization objectives | `anti_epigraph` | Active through the same objective-defining-equality pass for maximization models when the anti-epigraph inequality is convex. |
+| Nonlinear expression partitioning | `nonlinear_partitioning` | Maps to the AMP/piecewise-McCormick partitioning stack (`solver="amp"` / GOA AMP path). Full SHOT MultiTree phase scheduling is deferred to the POA and MultiTree issues. |
+| Quadratic partitioning | `quadratic_partitioning` | Current relaxation infrastructure supports quadratic and edge-concave relaxations; SHOT-style policy scheduling is traced and deferred. |
+| Absolute-value auxiliaries | `absolute_value_auxiliaries` | `abs` has native convexity and relaxation support. Dedicated SHOT-style auxiliary introduction is traced and deferred until a model requires static aux variables. |
+| Monomial extraction | `monomial_extraction` | Native term classification and McCormick/monomial auxiliary columns already extract integer-power monomials for relaxations. The control records whether SHOT policy wants that surface enabled. |
+| Signomial extraction | `signomial_extraction` | Positive-domain monomial/posynomial recognition and signed-signomial DC envelopes exist; full SHOT signomial policy integration is deferred. |
+| Integer-bilinear strategy | `integer_bilinear_strategy`, `integer_bilinear_max_bits` | Existing `integer_product_reform` can binary-expand bounded integer-factor bilinear terms into exact MILP form with a 12-bit default cap. The SHOT profile validates the strategy and limit for later routing. |
+| Quadratic extraction strategy | `quadratic_extraction` | Structural LP/QP/QCP/MIQP/MIQCQP classification exists in `problem_classifier`; MIP-NLP direct-routing policy is deferred to issue #151. |
+| Direct quadratic backend routing | `direct_quadratic_routing` | Existing top-level `solver="gurobi"` and default problem classification can route LP/QP/QCP/MIQP/MIQCQP when selected safely. Automatic SHOT-style routing from `solver="mip-nlp"` is deferred to issue #151. |
+| Reformulated primal NLP source selection | `fixed_nlp_strategy` plus reformulation controls | Current fixed-NLP calls use the active model passed to OA/GOA. Original-vs-reformulated NLP candidate policy is deferred to issue #146. |
+
 ## Benchmark command
 
 Run the committed baseline with:

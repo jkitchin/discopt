@@ -96,9 +96,9 @@ Useful OA options include:
 `mip_nlp_profile="shot"` enables validated SHOT-parity controls and attaches a
 structured `result.mip_nlp_trace` payload. The profile is experimental: the
 options are accepted and traced so later PRs can add SHOT-style ESH,
-rootsearch, repair, convex-bounding, and adaptive master behavior behind a
-stable interface. Default MIP-NLP behavior is unchanged when the profile is not
-set.
+rootsearch, repair, convex-bounding, reformulation policy, and adaptive master
+behavior behind a stable interface. Default MIP-NLP behavior is unchanged when
+the profile is not set.
 
 ```python
 result = model.solve(
@@ -118,6 +118,13 @@ Accepted SHOT-profile controls are:
 | --- | --- |
 | `tree_strategy` | `"auto"`, `"multi_tree"`, `"single_tree"` |
 | `cut_strategy` | `"auto"`, `"oa"`, `"ecp"`, `"esh"` |
+| `objective_epigraph`, `anti_epigraph` | `"auto"`, `"off"`, `"on"` |
+| `nonlinear_partitioning`, `quadratic_partitioning` | `"auto"`, `"off"`, `"static"`, `"adaptive"` |
+| `absolute_value_auxiliaries`, `monomial_extraction`, `signomial_extraction` | `"auto"`, `"off"`, `"on"` |
+| `integer_bilinear_strategy` | `"auto"`, `"off"`, `"binary_expansion"`, `"mccormick"` |
+| `integer_bilinear_max_bits` | Positive integer or `None` |
+| `quadratic_extraction` | `"auto"`, `"off"`, `"native"`, `"relaxation"` |
+| `direct_quadratic_routing` | `"auto"`, `"off"`, `"safe"` |
 | `rootsearch_strategy` | `"auto"`, `"none"`, `"bisection"`, `"toms748"` |
 | `fixed_nlp_strategy` | `"auto"`, `"none"`, `"always"`, `"adaptive"`, `"iteration"`, `"time"`, `"solution_pool"` |
 | `solution_pool_capacity`, `hyperplane_max_per_iter` | Positive integer or `None` |
@@ -128,6 +135,12 @@ Accepted SHOT-profile controls are:
 
 Passing one of these controls without `mip_nlp_profile="shot"` raises a
 `ValueError`, which prevents accidental no-op configuration.
+
+`objective_epigraph` and `anti_epigraph` are wired to discopt's existing
+objective-defining-equality reformulation when the structural proof conditions
+hold. The remaining reformulation controls are validated and traced under the
+SHOT profile so follow-up SHOT parity PRs can attach behavior without changing
+the public option names.
 
 Top-level aliases override duplicate entries in `mip_nlp_options`:
 

@@ -64,6 +64,17 @@ MIP_NLP_PROFILE_OPTION_KEYS = ("mip_nlp_profile",)
 SHOT_OPTION_KEYS = (
     "tree_strategy",
     "cut_strategy",
+    "objective_epigraph",
+    "anti_epigraph",
+    "nonlinear_partitioning",
+    "quadratic_partitioning",
+    "absolute_value_auxiliaries",
+    "monomial_extraction",
+    "signomial_extraction",
+    "integer_bilinear_strategy",
+    "integer_bilinear_max_bits",
+    "quadratic_extraction",
+    "direct_quadratic_routing",
     "rootsearch_strategy",
     "fixed_nlp_strategy",
     "solution_pool_capacity",
@@ -85,6 +96,11 @@ _PROFILE_ALIASES = {
 
 _TREE_STRATEGIES = frozenset({"auto", "multi_tree", "single_tree"})
 _CUT_STRATEGIES = frozenset({"auto", "oa", "ecp", "esh"})
+_AUTO_OFF_ON = frozenset({"auto", "off", "on"})
+_PARTITION_STRATEGIES = frozenset({"auto", "off", "static", "adaptive"})
+_INTEGER_BILINEAR_STRATEGIES = frozenset({"auto", "off", "binary_expansion", "mccormick"})
+_QUADRATIC_EXTRACTION_STRATEGIES = frozenset({"auto", "off", "native", "relaxation"})
+_DIRECT_QUADRATIC_ROUTING = frozenset({"auto", "off", "safe"})
 _ROOTSEARCH_STRATEGIES = frozenset({"auto", "none", "bisection", "toms748"})
 _FIXED_NLP_STRATEGIES = frozenset(
     {"auto", "none", "always", "adaptive", "iteration", "time", "solution_pool"}
@@ -99,6 +115,17 @@ class MIPNLPShotConfig:
 
     tree_strategy: str = "multi_tree"
     cut_strategy: str = "auto"
+    objective_epigraph: str = "auto"
+    anti_epigraph: str = "auto"
+    nonlinear_partitioning: str = "auto"
+    quadratic_partitioning: str = "auto"
+    absolute_value_auxiliaries: str = "auto"
+    monomial_extraction: str = "auto"
+    signomial_extraction: str = "auto"
+    integer_bilinear_strategy: str = "auto"
+    integer_bilinear_max_bits: int | None = 12
+    quadratic_extraction: str = "auto"
+    direct_quadratic_routing: str = "auto"
     rootsearch_strategy: str = "auto"
     fixed_nlp_strategy: str = "adaptive"
     solution_pool_capacity: int | None = None
@@ -186,6 +213,72 @@ def normalize_shot_config(raw_options: dict[str, Any]) -> MIPNLPShotConfig:
             "cut_strategy",
             raw_options.get("cut_strategy", MIPNLPShotConfig.cut_strategy),
             _CUT_STRATEGIES,
+        ),
+        objective_epigraph=_normalize_enum(
+            "objective_epigraph",
+            raw_options.get("objective_epigraph", MIPNLPShotConfig.objective_epigraph),
+            _AUTO_OFF_ON,
+        ),
+        anti_epigraph=_normalize_enum(
+            "anti_epigraph",
+            raw_options.get("anti_epigraph", MIPNLPShotConfig.anti_epigraph),
+            _AUTO_OFF_ON,
+        ),
+        nonlinear_partitioning=_normalize_enum(
+            "nonlinear_partitioning",
+            raw_options.get("nonlinear_partitioning", MIPNLPShotConfig.nonlinear_partitioning),
+            _PARTITION_STRATEGIES,
+        ),
+        quadratic_partitioning=_normalize_enum(
+            "quadratic_partitioning",
+            raw_options.get("quadratic_partitioning", MIPNLPShotConfig.quadratic_partitioning),
+            _PARTITION_STRATEGIES,
+        ),
+        absolute_value_auxiliaries=_normalize_enum(
+            "absolute_value_auxiliaries",
+            raw_options.get(
+                "absolute_value_auxiliaries",
+                MIPNLPShotConfig.absolute_value_auxiliaries,
+            ),
+            _AUTO_OFF_ON,
+        ),
+        monomial_extraction=_normalize_enum(
+            "monomial_extraction",
+            raw_options.get("monomial_extraction", MIPNLPShotConfig.monomial_extraction),
+            _AUTO_OFF_ON,
+        ),
+        signomial_extraction=_normalize_enum(
+            "signomial_extraction",
+            raw_options.get("signomial_extraction", MIPNLPShotConfig.signomial_extraction),
+            _AUTO_OFF_ON,
+        ),
+        integer_bilinear_strategy=_normalize_enum(
+            "integer_bilinear_strategy",
+            raw_options.get(
+                "integer_bilinear_strategy",
+                MIPNLPShotConfig.integer_bilinear_strategy,
+            ),
+            _INTEGER_BILINEAR_STRATEGIES,
+        ),
+        integer_bilinear_max_bits=_normalize_optional_positive_int(
+            "integer_bilinear_max_bits",
+            raw_options.get(
+                "integer_bilinear_max_bits",
+                MIPNLPShotConfig.integer_bilinear_max_bits,
+            ),
+        ),
+        quadratic_extraction=_normalize_enum(
+            "quadratic_extraction",
+            raw_options.get("quadratic_extraction", MIPNLPShotConfig.quadratic_extraction),
+            _QUADRATIC_EXTRACTION_STRATEGIES,
+        ),
+        direct_quadratic_routing=_normalize_enum(
+            "direct_quadratic_routing",
+            raw_options.get(
+                "direct_quadratic_routing",
+                MIPNLPShotConfig.direct_quadratic_routing,
+            ),
+            _DIRECT_QUADRATIC_ROUTING,
         ),
         rootsearch_strategy=_normalize_enum(
             "rootsearch_strategy",

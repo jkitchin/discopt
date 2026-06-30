@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
-from discopt.modeling.core import Model, SolveResult
+from discopt.modeling.core import Model, ObjectiveSense, SolveResult
 from discopt.solvers.mip_nlp_options import (
     FP_OPTION_KEYS,
     GOA_OPTION_KEYS,
+    MIPNLPShotConfig,
     ensure_mip_nlp_trace,
     split_mip_nlp_profile_options,
 )
@@ -69,6 +70,28 @@ _LP_NLP_BB_OPTION_KEYS = frozenset(
 )
 
 
+def _apply_shot_profile_reformulations(
+    model: Model,
+    shot_config: MIPNLPShotConfig | None,
+) -> Model:
+    """Apply SHOT-profile reformulations that already have proven discopt passes."""
+    if shot_config is None:
+        return model
+    objective = getattr(model, "_objective", None)
+    if objective is None:
+        return model
+    if objective.sense == ObjectiveSense.MINIMIZE:
+        if shot_config.objective_epigraph == "off":
+            return model
+    elif shot_config.anti_epigraph == "off":
+        return model
+
+    from discopt._jax.objective_epigraph import relax_objective_defining_equality
+
+    reformulated, _changed = relax_objective_defining_equality(model)
+    return cast(Model, reformulated)
+
+
 def _normalize_method(method: Any) -> str:
     if not isinstance(method, str):
         raise ValueError(f"mip_nlp_method must be a string, got {type(method).__name__}.")
@@ -122,6 +145,7 @@ def solve_mip_nlp(
                 options[canonical] = options[alias]
             del options[alias]
     profile, shot_config, options = split_mip_nlp_profile_options(options)
+    model = _apply_shot_profile_reformulations(model, shot_config)
 
     if method in _IMPLEMENTED_METHODS:
         if method == "fp":
