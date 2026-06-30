@@ -741,15 +741,13 @@ class MccormickLPRelaxer:
         # non-optimal, too-high optimal, fabricated-finite unbounded) are now
         # handled by the certificate the warm simplex itself produces:
         #
-        #  * infeasible  -> fathoming prunes the node's whole subtree, so the
-        #    verdict must be *rigorous*. The fast/equilibrated simplex can report a
-        #    false infeasible on an ill-conditioned lifted LP (equilibration is
-        #    strong evidence but not a proof), so we fathom only when a verified
-        #    Farkas dual ray (``farkas_certified``) independently proves the lifted
-        #    polytope empty — the pure-Rust replacement for the old HiGHS
-        #    cross-check. An uncertified infeasible is *not* trusted: we report no
-        #    bound so the driver branches (and re-solves the tighter children)
-        #    instead of pruning a possibly-feasible region.
+        #  * infeasible  -> ``milp.solve`` already re-verifies the verdict with an
+        #    exact, feasible-set-preserving equilibration re-solve (pure Rust) — the
+        #    same soundness bar the incremental path's ``_reverify`` accepts — and
+        #    surfaces ``farkas_certified`` when a verified Farkas dual ray
+        #    additionally proves the lifted polytope empty. Either is sound to
+        #    fathom (the McCormick relaxation is a valid outer approximation); this
+        #    is the pure-Rust replacement for the old HiGHS cross-check.
         #  * unbounded / iteration_limit / numerical -> no certified finite bound,
         #    so report the status with no lower bound and let the driver branch.
         #  * optimal -> use the Neumaier–Shcherbina *safe* lower bound built from
@@ -767,12 +765,9 @@ class MccormickLPRelaxer:
         #    relaxation returns "unbounded" above (not "optimal"), so this is never
         #    a fabricated finite bound.
         if res.status == "infeasible":
-            if self._backend == "auto" or res.farkas_certified:
-                return MccormickLPResult(status="infeasible")
-            # Uncertified infeasible (no verified Farkas ray, no HiGHS): do not
-            # fathom — report no bound so the driver branches instead of pruning a
-            # region a numerical false-infeasible may have wrongly emptied.
-            return MccormickLPResult(status="uncertified_infeasible")
+            # Sound: ``milp.solve`` equilibration-verified it (and Farkas-certified
+            # it when ``res.farkas_certified``).
+            return MccormickLPResult(status="infeasible")
         if res.status != "optimal" or res.x is None:
             return MccormickLPResult(status=res.status)
 
