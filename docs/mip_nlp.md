@@ -138,9 +138,19 @@ Passing one of these controls without `mip_nlp_profile="shot"` raises a
 
 `objective_epigraph` and `anti_epigraph` are wired to discopt's existing
 objective-defining-equality reformulation when the structural proof conditions
-hold. The remaining reformulation controls are validated and traced under the
-SHOT profile so follow-up SHOT parity PRs can attach behavior without changing
-the public option names.
+hold. `relaxation_phase="auto"` and `"initial"` run a SHOT-style initial
+polyhedral approximation pass after the normal OA/ECP initializer: discopt solves
+the current OA master with integrality relaxed, imports any generated
+linearization cuts through the MIP-NLP cut provenance ledger, and updates the
+initial master bound only when the active convexity certificates make that bound
+globally valid. `relaxation_phase="off"` disables this pass, and failures fall
+back to the existing initialization path with details in
+`result.mip_nlp_trace["initial_poa"]`. `relaxation_phase="periodic"` remains a
+reserved roadmap value and does not schedule periodic POA solves yet.
+
+The remaining reformulation controls are validated and traced under the SHOT
+profile so follow-up SHOT parity PRs can attach behavior without changing the
+public option names.
 
 Top-level aliases override duplicate entries in `mip_nlp_options`:
 
