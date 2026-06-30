@@ -1733,6 +1733,274 @@ def _add_ecp_cuts(
     return n_added
 
 
+def _candidate_cut_violation(coeffs, rhs: float, point) -> float:
+    lhs = float(np.dot(np.asarray(coeffs, dtype=np.float64), np.asarray(point, dtype=np.float64)))
+    return max(0.0, lhs - float(rhs))
+
+
+def _candidate_cut_excludes_point(coeffs, rhs: float, point, *, tol: float = 1e-8) -> bool:
+    lhs = float(np.dot(np.asarray(coeffs, dtype=np.float64), np.asarray(point, dtype=np.float64)))
+    return lhs > float(rhs) + float(tol)
+
+
+@dataclass(frozen=True)
+class _ESHHyperplaneCandidate:
+    coeffs: np.ndarray
+    rhs: float
+    relaxable: bool
+    source: str
+    global_valid: bool
+    local_valid: bool
+    supporting_point: np.ndarray
+    violation: float
+    constraint_id: Optional[int] = None
+    objective_id: Optional[str] = None
+
+
+def _select_hyperplane_candidates(
+    candidates: list[_ESHHyperplaneCandidate],
+    *,
+    max_per_iter: Optional[int],
+    selection_factor: float,
+) -> list[_ESHHyperplaneCandidate]:
+    if not candidates:
+        return []
+    ordered = sorted(candidates, key=lambda item: item.violation, reverse=True)
+    keep_count = max(1, int(np.ceil(len(ordered) * float(selection_factor))))
+    if max_per_iter is not None:
+        keep_count = min(keep_count, int(max_per_iter))
+    return ordered[:keep_count]
+
+
+def _add_esh_cuts(
+    evaluator,
+    x_master,
+    n_vars,
+    constraint_senses,
+    oa_A_rows,
+    oa_b_rows,
+    obj_is_linear,
+    constraint_convex_mask,
+    objective_is_convex,
+    interior_point_store,
+    *,
+    rootsearch_strategy: str,
+    equality_relaxation: bool = False,
+    oa_cut_relaxable=None,
+    cut_provenance: Optional[MIPNLPCutProvenance] = None,
+    incumbent=None,
+    hyperplane_max_per_iter: Optional[int] = None,
+    hyperplane_selection_factor: float = 1.0,
+) -> tuple[int, dict[str, object]]:
+    """Generate SHOT-style extended supporting hyperplanes with ECP fallback."""
+    from discopt._jax.cutting_planes import (
+        generate_oa_cuts_from_evaluator,
+        generate_objective_oa_cut,
+    )
+    from discopt.solvers.mip_nlp_rootsearch import (
+        MIPNLPRootSearchStatus,
+        rootsearch_from_store,
+    )
+
+    x_master = np.asarray(x_master, dtype=np.float64).reshape(-1)
+    trace: dict[str, object] = {
+        "attempted": True,
+        "fallback_used": False,
+        "fallback_reason": None,
+        "rootsearch": None,
+        "candidate_hyperplanes": 0,
+        "selected_hyperplanes": 0,
+        "cuts_added": 0,
+        "local_cuts_added": 0,
+        "local_cuts_rejected": 0,
+    }
+
+    def fallback(reason: str) -> tuple[int, dict[str, object]]:
+        trace["fallback_used"] = True
+        trace["fallback_reason"] = reason
+        added = _add_ecp_cuts(
+            evaluator,
+            x_master,
+            n_vars,
+            constraint_senses,
+            oa_A_rows,
+            oa_b_rows,
+            obj_is_linear,
+            constraint_convex_mask,
+            objective_is_convex,
+            equality_relaxation=equality_relaxation,
+            oa_cut_relaxable=oa_cut_relaxable,
+            cut_provenance=cut_provenance,
+        )
+        trace["cuts_added"] = int(added)
+        return added, trace
+
+    if interior_point_store is None:
+        return fallback("missing_interior_point_store")
+
+    root_result = rootsearch_from_store(
+        evaluator,
+        x_master,
+        interior_point_store,
+        strategy=rootsearch_strategy,
+        fixed_discrete=True,
+        constraint_senses=constraint_senses,
+    )
+    trace["rootsearch"] = root_result.as_trace_dict()
+    if root_result.status is MIPNLPRootSearchStatus.CANDIDATE_FEASIBLE:
+        return 0, trace
+    if root_result.status is not MIPNLPRootSearchStatus.CONVERGED or root_result.point is None:
+        return fallback(root_result.status.value)
+
+    support = np.asarray(root_result.point, dtype=np.float64).reshape(-1)
+    master_violations, _master_signs = _constraint_violation_data(evaluator, x_master)
+    generated = generate_oa_cuts_from_evaluator(
+        evaluator,
+        support,
+        constraint_senses=constraint_senses,
+        convex_mask=None,
+    )
+    constraint_ids = _constraint_ids_for_generated_oa_cuts(
+        evaluator,
+        support,
+        constraint_senses,
+        convex_mask=None,
+        violated_only=False,
+    )
+    candidates: list[_ESHHyperplaneCandidate] = []
+    local_rejected = 0
+
+    def add_constraint_candidate(
+        coeffs,
+        rhs: float,
+        *,
+        constraint_id: int,
+        global_valid: bool,
+    ) -> None:
+        nonlocal local_rejected
+        coeffs_arr = np.asarray(coeffs, dtype=np.float64).copy()
+        if np.linalg.norm(coeffs_arr) < 1e-12:
+            return
+        violation = _candidate_cut_violation(coeffs_arr, rhs, x_master)
+        if violation <= 1e-8:
+            return
+        if (
+            not global_valid
+            and incumbent is not None
+            and _candidate_cut_excludes_point(coeffs_arr, rhs, incumbent)
+        ):
+            local_rejected += 1
+            return
+        candidates.append(
+            _ESHHyperplaneCandidate(
+                coeffs=coeffs_arr,
+                rhs=float(rhs),
+                relaxable=True,
+                source="esh",
+                global_valid=bool(global_valid),
+                local_valid=True,
+                supporting_point=support,
+                violation=float(violation),
+                constraint_id=int(constraint_id),
+            )
+        )
+
+    for constraint_id, cut in zip(constraint_ids, generated):
+        if constraint_id >= len(master_violations) or master_violations[constraint_id] <= 1e-8:
+            continue
+        original_sense = cut.sense
+        sense = "<=" if equality_relaxation and cut.sense == "==" else cut.sense
+        global_valid = _constraint_cut_global_valid(
+            constraint_convex_mask,
+            constraint_id,
+            original_sense,
+            equality_relaxation,
+        )
+        if sense == "<=":
+            add_constraint_candidate(
+                cut.coeffs,
+                cut.rhs,
+                constraint_id=constraint_id,
+                global_valid=global_valid,
+            )
+        elif sense == ">=":
+            add_constraint_candidate(
+                -cut.coeffs,
+                -cut.rhs,
+                constraint_id=constraint_id,
+                global_valid=global_valid,
+            )
+        elif sense == "==":
+            add_constraint_candidate(
+                cut.coeffs,
+                cut.rhs,
+                constraint_id=constraint_id,
+                global_valid=global_valid,
+            )
+            add_constraint_candidate(
+                -cut.coeffs,
+                -cut.rhs,
+                constraint_id=constraint_id,
+                global_valid=global_valid,
+            )
+
+    if not obj_is_linear and objective_is_convex:
+        n_master = n_vars + 1
+        obj_value = float(evaluator.evaluate_objective(support))
+        obj_support = np.concatenate([support, [obj_value]])
+        obj_cut = generate_objective_oa_cut(evaluator, support, n_master, z_index=n_vars)
+        tangent_at_master = float(np.dot(obj_cut.coeffs[:n_vars], x_master) - obj_cut.rhs)
+        objective_gap = max(0.0, float(evaluator.evaluate_objective(x_master)) - tangent_at_master)
+        if np.linalg.norm(obj_cut.coeffs[:n_vars]) >= 1e-12 and objective_gap > 1e-8:
+            candidates.append(
+                _ESHHyperplaneCandidate(
+                    coeffs=obj_cut.coeffs.copy(),
+                    rhs=float(obj_cut.rhs),
+                    relaxable=False,
+                    source="objective_rootsearch",
+                    global_valid=True,
+                    local_valid=True,
+                    supporting_point=obj_support,
+                    violation=float(objective_gap),
+                    objective_id="objective",
+                )
+            )
+
+    trace["candidate_hyperplanes"] = int(len(candidates))
+    trace["local_cuts_rejected"] = int(local_rejected)
+    selected = _select_hyperplane_candidates(
+        candidates,
+        max_per_iter=hyperplane_max_per_iter,
+        selection_factor=hyperplane_selection_factor,
+    )
+    trace["selected_hyperplanes"] = int(len(selected))
+
+    local_added = 0
+    for item in selected:
+        _append_master_cut(
+            oa_A_rows,
+            oa_b_rows,
+            item.coeffs,
+            item.rhs,
+            oa_cut_relaxable,
+            relaxable=item.relaxable,
+            cut_provenance=cut_provenance,
+            source=item.source,
+            global_valid=item.global_valid,
+            local_valid=item.local_valid,
+            supporting_point=item.supporting_point,
+            violation=item.violation,
+            constraint_id=item.constraint_id,
+            objective_id=item.objective_id,
+        )
+        if not item.global_valid:
+            local_added += 1
+
+    trace["cuts_added"] = int(len(selected))
+    trace["local_cuts_added"] = int(local_added)
+    return len(selected), trace
+
+
 def _add_no_good_cut(
     x_master,
     binary_indices,
@@ -3329,6 +3597,7 @@ def solve_oa(
             "disabling master lower-bound updates and skipping objective OA cuts"
         )
     master_bound_valid = decomp.master_bound_valid and not heuristic_nonconvex
+    local_cut_added = False
 
     # 2. Generate initial linearization cuts.
     oa_A_rows: list[np.ndarray] = []
@@ -3353,9 +3622,12 @@ def solve_oa(
     solution_pool_candidate_count = 0
     initial_poa_trace: Optional[dict[str, object]] = None
     interior_point_store = None
+    shot_cut_strategy = "auto"
     if mip_nlp_profile == "shot":
         from discopt.solvers.mip_nlp_rootsearch import MIPNLPInteriorPointStore
 
+        if mip_nlp_shot_config is not None:
+            shot_cut_strategy = mip_nlp_shot_config.cut_strategy
         interior_point_store = MIPNLPInteriorPointStore(
             n_vars,
             int_indices=decomp.int_indices,
@@ -3400,10 +3672,11 @@ def solve_oa(
     def _build_mip_nlp_trace(final_reason: Optional[str]) -> dict[str, object]:
         final_lb = _trace_value(LB)
         final_ub = _trace_value(UB)
-        bound_valid = bool(master_bound_valid and final_lb is not None)
+        bound_valid = bool(master_bound_valid and not local_cut_added and final_lb is not None)
         final_gap = (
             _trace_value(_compute_gap(LB, UB)) if bound_valid and final_ub is not None else None
         )
+        local_cut_count = sum(1 for record in cut_provenance.records if not record.global_valid)
         gap_certified = bool(bound_valid and final_gap is not None)
         summary = {
             "mip_count": int(mip_count),
@@ -3411,6 +3684,7 @@ def solve_oa(
             "feasibility_subproblem_count": int(feasibility_subproblem_count),
             "cut_count": int(len(oa_A_rows)),
             "provenance_cut_count": int(len(cut_provenance.records)),
+            "local_cut_count": int(local_cut_count),
             "cut_source_counts": cut_provenance.source_counts(),
             "solution_pool_candidates": int(solution_pool_candidate_count),
         }
@@ -3438,7 +3712,7 @@ def solve_oa(
             "iterations": trace_iterations,
             "summary": summary,
             "termination_reason": final_reason,
-            "master_bound_valid": bool(master_bound_valid),
+            "master_bound_valid": bool(master_bound_valid and not local_cut_added),
             "gap_certified": gap_certified,
             "bound_validity": "global" if bound_valid else "heuristic",
             "final_lb": final_lb,
@@ -4070,20 +4344,58 @@ def solve_oa(
 
             # b. ECP mode: add cuts at master point, skip NLP
             if ecp_mode:
-                n_violated = _add_ecp_cuts(
-                    evaluator,
-                    x_master,
-                    n_vars,
-                    decomp.constraint_senses,
-                    oa_A_rows,
-                    oa_b_rows,
-                    decomp.obj_is_linear,
-                    decomp.oa_constraint_mask,
-                    decomp.oa_objective_is_convex,
-                    equality_relaxation=equality_relaxation,
-                    oa_cut_relaxable=oa_cut_relaxable,
-                    cut_provenance=cut_provenance,
-                )
+                if (
+                    mip_nlp_profile == "shot"
+                    and mip_nlp_shot_config is not None
+                    and shot_cut_strategy in {"auto", "esh"}
+                ):
+                    n_violated, esh_trace = _add_esh_cuts(
+                        evaluator,
+                        x_master,
+                        n_vars,
+                        decomp.constraint_senses,
+                        oa_A_rows,
+                        oa_b_rows,
+                        decomp.obj_is_linear,
+                        decomp.oa_constraint_mask,
+                        decomp.oa_objective_is_convex,
+                        interior_point_store,
+                        rootsearch_strategy=mip_nlp_shot_config.rootsearch_strategy,
+                        equality_relaxation=equality_relaxation,
+                        oa_cut_relaxable=oa_cut_relaxable,
+                        cut_provenance=cut_provenance,
+                        incumbent=incumbent,
+                        hyperplane_max_per_iter=mip_nlp_shot_config.hyperplane_max_per_iter,
+                        hyperplane_selection_factor=(
+                            mip_nlp_shot_config.hyperplane_selection_factor
+                        ),
+                    )
+                    esh_events = iteration_record.get("esh")
+                    if not isinstance(esh_events, list):
+                        esh_events = []
+                        iteration_record["esh"] = esh_events
+                    esh_events.append(esh_trace)
+                    local_cuts_added_obj = esh_trace.get("local_cuts_added", 0)
+                    if (
+                        isinstance(local_cuts_added_obj, (int, float))
+                        and int(local_cuts_added_obj) > 0
+                    ):
+                        local_cut_added = True
+                else:
+                    n_violated = _add_ecp_cuts(
+                        evaluator,
+                        x_master,
+                        n_vars,
+                        decomp.constraint_senses,
+                        oa_A_rows,
+                        oa_b_rows,
+                        decomp.obj_is_linear,
+                        decomp.oa_constraint_mask,
+                        decomp.oa_objective_is_convex,
+                        equality_relaxation=equality_relaxation,
+                        oa_cut_relaxable=oa_cut_relaxable,
+                        cut_provenance=cut_provenance,
+                    )
                 # In ECP, use master objective as heuristic UB
                 master_obj = float(evaluator.evaluate_objective(x_master))
                 cons_vals = evaluator.evaluate_constraints(x_master)
@@ -4276,7 +4588,7 @@ def solve_oa(
     # 4. Build result
     wall_time = time.perf_counter() - t_start
     gap = _compute_gap(LB, UB)
-    bound_certified = master_bound_valid
+    bound_certified = master_bound_valid and not local_cut_added
     bound = LB if bound_certified and LB > -1e19 else None
     reported_gap = gap if bound is not None and UB < 1e19 else None
     final_reason = termination_reason
