@@ -1,18 +1,22 @@
-"""Backend selection for matrix-form LP/QP solves (HiGHS or POUNCE).
+"""Backend selection for matrix-form LP/QP/MILP solves.
 
-The engines are signature- and ``LPResult``/``QPResult``-compatible
-(``lp_highs`` vs ``lp_pounce``; QP is POUNCE-only since #359), so consumers
-(OBBT, relaxation solvers, ...) can pick one through this seam and stay
-agnostic. This is what lets discopt run with **only POUNCE installed**
-(no HiGHS): the selector falls back to whichever backend is importable.
+The engines are signature- and ``LPResult``/``QPResult``/``MILPResult``-compatible
+(``lp_highs`` vs ``lp_pounce``, ``qp_pounce`` (QP is POUNCE-only since #359), and
+the pure-Rust warm-started simplex), so consumers (OBBT, relaxation solvers,
+OA/GDP/Benders masters, ...) can pick one through this seam and stay agnostic.
+This is what lets discopt run with **only POUNCE installed** (no HiGHS): the
+selector falls back to whichever backend is importable.
 
-``prefer_pounce`` flips the preference to POUNCE-first (the POUNCE-only mode,
-``nlp_solver="pounce"``); otherwise HiGHS is preferred with POUNCE fallback.
+The matrix-MILP default routes to the self-hosted Rust simplex B&B first (issue
+#356, part B) — HiGHS-free, exact, and fast on the ill-conditioned lifted
+relaxations — with HiGHS then POUNCE as fallbacks. The matrix-LP default stays
+HiGHS-first (its consumers read backend-exposed duals/reduced costs that the Rust
+LP simplex does not surface). ``prefer_pounce`` flips the preference to
+POUNCE-first (the POUNCE-only mode, ``nlp_solver="pounce"``).
 
 Exception — the **QP** seam (:func:`get_qp_solver`) is POUNCE-only (issue #359):
-the LP/MILP routing went HiGHS-free in #356, and the QP path now has no HiGHS
-backend at all (``qp_highs`` was removed). There is no QP fallback — POUNCE is
-the QP engine.
+the QP path has no HiGHS backend at all (``qp_highs`` was removed). There is no QP
+fallback — POUNCE is the QP engine.
 """
 
 from __future__ import annotations
@@ -171,20 +175,29 @@ def _milp_gurobi() -> Callable | None:
 def get_milp_solver(prefer_pounce: bool = False, backend: str = "auto") -> Callable:
     """Return a matrix-form ``solve_milp(c, A_ub, ..., integrality, ...)``.
 
-    ``backend`` selects the preferred engine: ``"auto"`` (HiGHS-first, or
-    POUNCE-first under ``prefer_pounce``), ``"highs"``, ``"pounce"``,
-    ``"simplex"`` (the pure-Rust warm-started-simplex B&B), or ``"gurobi"``.
-    The preferred engine is tried first and the call falls back to the standard
-    order if it is unavailable, so selection never fails when *any* backend is
-    importable. An explicit Gurobi selection returns the optional wrapper; a
-    missing ``gurobipy`` installation or license is reported when the wrapper is
-    called.
-    Raises :class:`ImportError` only when none is available.
+    ``backend`` selects the preferred engine: ``"auto"`` (**simplex-first** — the
+    pure-Rust warm-started-simplex B&B — then HiGHS, then POUNCE; or POUNCE-first
+    under ``prefer_pounce``), ``"highs"``, ``"pounce"``, ``"simplex"``, or
+    ``"gurobi"``. The preferred engine is tried first and the call falls back to
+    the standard order if it is unavailable, so selection never fails when *any*
+    backend is importable. An explicit Gurobi selection returns the optional
+    wrapper; a missing ``gurobipy`` installation or license is reported when the
+    wrapper is called. Raises :class:`ImportError` only when none is available.
+
+    Routing the default to the self-hosted Rust simplex (issue #356, part B) makes
+    the matrix-MILP path HiGHS-free without an external dependency: the simplex
+    reaches the exact B&B optimum (a rigorous bound, unlike the POUNCE IPM's
+    analytic-center objective that can drift on ill-conditioned LPs — #145) and is
+    fast on the lifted, ill-conditioned relaxations where the POUNCE IPM is slow.
+    HiGHS/POUNCE remain as fallbacks. ``prefer_pounce`` (the POUNCE-only mode)
+    keeps its POUNCE-first order unchanged.
     """
     valid = {"auto", "highs", "pounce", "simplex", "gurobi"}
     if backend not in valid:
         raise ValueError(f"Unknown MILP backend {backend!r}; choose from {sorted(valid)}.")
-    base = (_milp_pounce, _milp_highs) if prefer_pounce else (_milp_highs, _milp_pounce)
+    base = (
+        (_milp_pounce, _milp_highs) if prefer_pounce else (_milp_simplex, _milp_highs, _milp_pounce)
+    )
     if backend == "simplex":
         order: tuple[Callable[[], Callable | None], ...] = (_milp_simplex, *base)
     elif backend == "gurobi":
