@@ -62,6 +62,85 @@ def _convex_binary_nonlinear_model(name="mip_nlp_cut_trace"):
     return m
 
 
+def _objective_epigraph_model(name="shot_objective_epigraph"):
+    m = dm.Model(name)
+    x = m.continuous("x", lb=-2, ub=2)
+    z = m.continuous("z", lb=-1e20, ub=1e20)
+    m.subject_to(z - (x - 1) ** 2 == 0.0)
+    m.minimize(z)
+    return m
+
+
+def _anti_epigraph_model(name="shot_anti_epigraph"):
+    m = dm.Model(name)
+    x = m.continuous("x", lb=-2, ub=2)
+    z = m.continuous("z", lb=-1e20, ub=1e20)
+    m.subject_to(z + (x - 1) ** 2 == 0.0)
+    m.maximize(z)
+    return m
+
+
+def _bilinear_partition_model(name="shot_bilinear_partition"):
+    m = dm.Model(name)
+    x = m.continuous("x", lb=0, ub=2)
+    y = m.continuous("y", lb=0, ub=2)
+    m.subject_to(x * y <= 1.0)
+    m.minimize(x + y)
+    return m
+
+
+def _quadratic_partition_model(name="shot_quadratic_partition"):
+    m = dm.Model(name)
+    x = m.continuous("x", lb=-2, ub=2)
+    y = m.continuous("y", lb=0, ub=2)
+    m.subject_to(x**2 + y <= 3.0)
+    m.minimize(y)
+    return m
+
+
+def _absolute_value_model(name="shot_abs_aux"):
+    m = dm.Model(name)
+    x = m.continuous("x", lb=-2, ub=2)
+    m.subject_to(dm.abs(x) <= 1.0)
+    m.minimize(x)
+    return m
+
+
+def _monomial_model(name="shot_monomial"):
+    m = dm.Model(name)
+    x = m.continuous("x", lb=0, ub=2)
+    y = m.continuous("y", lb=0, ub=2)
+    m.subject_to(x**3 + y <= 4.0)
+    m.minimize(y)
+    return m
+
+
+def _signomial_model(name="shot_signomial"):
+    m = dm.Model(name)
+    x = m.continuous("x", lb=0.5, ub=3.0)
+    y = m.continuous("y", lb=0.5, ub=3.0)
+    m.subject_to((x**1.5) * (y**-0.5) <= 4.0)
+    m.minimize(x + y)
+    return m
+
+
+def _integer_bilinear_model(name="shot_integer_bilinear"):
+    m = dm.Model(name)
+    x = m.continuous("x", lb=0, ub=4)
+    y = m.integer("y", lb=0, ub=5)
+    m.subject_to(x * y >= 1.0)
+    m.minimize(x + y)
+    return m
+
+
+def _miqp_style_model(name="shot_miqp_style"):
+    m = dm.Model(name)
+    x = m.continuous("x", lb=-2, ub=2)
+    y = m.binary("y")
+    m.minimize((x - 1) ** 2 + y)
+    return m
+
+
 def test_mip_nlp_cut_record_construction_and_dedup():
     from discopt.solvers.oa import MIPNLPCutProvenance, MIPNLPCutRecord, _append_master_cut
 
@@ -556,6 +635,17 @@ def test_mip_nlp_shot_profile_options_validate_and_attach_trace(monkeypatch):
             "mip_nlp_profile": "shot",
             "tree_strategy": "single-tree",
             "cut_strategy": "esh",
+            "objective_epigraph": "on",
+            "anti_epigraph": "off",
+            "nonlinear_partitioning": "adaptive",
+            "quadratic_partitioning": "static",
+            "absolute_value_auxiliaries": "on",
+            "monomial_extraction": "off",
+            "signomial_extraction": "on",
+            "integer_bilinear_strategy": "binary-expansion",
+            "integer_bilinear_max_bits": 8,
+            "quadratic_extraction": "native",
+            "direct_quadratic_routing": "safe",
             "rootsearch_strategy": "toms748",
             "fixed_nlp_strategy": "solution-pool",
             "solution_pool_capacity": 5,
@@ -573,6 +663,17 @@ def test_mip_nlp_shot_profile_options_validate_and_attach_trace(monkeypatch):
     assert calls["mip_nlp_profile"] == "shot"
     assert cfg.tree_strategy == "single_tree"
     assert cfg.cut_strategy == "esh"
+    assert cfg.objective_epigraph == "on"
+    assert cfg.anti_epigraph == "off"
+    assert cfg.nonlinear_partitioning == "adaptive"
+    assert cfg.quadratic_partitioning == "static"
+    assert cfg.absolute_value_auxiliaries == "on"
+    assert cfg.monomial_extraction == "off"
+    assert cfg.signomial_extraction == "on"
+    assert cfg.integer_bilinear_strategy == "binary_expansion"
+    assert cfg.integer_bilinear_max_bits == 8
+    assert cfg.quadratic_extraction == "native"
+    assert cfg.direct_quadratic_routing == "safe"
     assert cfg.rootsearch_strategy == "toms748"
     assert cfg.fixed_nlp_strategy == "solution_pool"
     assert cfg.solution_pool_capacity == 5
@@ -587,6 +688,121 @@ def test_mip_nlp_shot_profile_options_validate_and_attach_trace(monkeypatch):
     assert result.mip_nlp_trace["schema_version"] == 1
     assert result.mip_nlp_trace["profile"] == "shot"
     assert result.mip_nlp_trace["shot_options"]["cut_strategy"] == "esh"
+    assert result.mip_nlp_trace["shot_options"]["integer_bilinear_strategy"] == ("binary_expansion")
+
+
+@pytest.mark.parametrize(
+    ("model_factory", "options", "trace_key", "trace_value"),
+    [
+        (_objective_epigraph_model, {"objective_epigraph": "on"}, "objective_epigraph", "on"),
+        (_anti_epigraph_model, {"anti_epigraph": "on"}, "anti_epigraph", "on"),
+        (
+            _bilinear_partition_model,
+            {"nonlinear_partitioning": "adaptive"},
+            "nonlinear_partitioning",
+            "adaptive",
+        ),
+        (
+            _quadratic_partition_model,
+            {"quadratic_partitioning": "static"},
+            "quadratic_partitioning",
+            "static",
+        ),
+        (
+            _absolute_value_model,
+            {"absolute_value_auxiliaries": "on"},
+            "absolute_value_auxiliaries",
+            "on",
+        ),
+        (_monomial_model, {"monomial_extraction": "off"}, "monomial_extraction", "off"),
+        (_signomial_model, {"signomial_extraction": "on"}, "signomial_extraction", "on"),
+        (
+            _integer_bilinear_model,
+            {"integer_bilinear_strategy": "mccormick", "integer_bilinear_max_bits": 6},
+            "integer_bilinear_strategy",
+            "mccormick",
+        ),
+        (_miqp_style_model, {"quadratic_extraction": "native"}, "quadratic_extraction", "native"),
+        (
+            _miqp_style_model,
+            {"direct_quadratic_routing": "safe"},
+            "direct_quadratic_routing",
+            "safe",
+        ),
+    ],
+)
+def test_mip_nlp_shot_reformulation_controls_validate_targeted_models(
+    monkeypatch,
+    model_factory,
+    options,
+    trace_key,
+    trace_value,
+):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    def fake_solve_oa(model, **kwargs):
+        return SolveResult(status="optimal", objective=0.0, bound=0.0, gap=0.0)
+
+    monkeypatch.setattr(oa_module, "solve_oa", fake_solve_oa)
+
+    result = solve_mip_nlp(
+        model_factory(),
+        method="oa",
+        mip_nlp_options={"mip_nlp_profile": "shot", **options},
+    )
+
+    assert result.mip_nlp_trace["profile"] == "shot"
+    assert result.mip_nlp_trace["shot_options"][trace_key] == trace_value
+    if "integer_bilinear_max_bits" in options:
+        assert result.mip_nlp_trace["shot_options"]["integer_bilinear_max_bits"] == 6
+
+
+def test_mip_nlp_shot_objective_epigraph_reforms_before_oa_and_stays_convex(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt._jax.convexity import classify_oa_cut_convexity
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    calls = {}
+
+    def fake_solve_oa(model, **kwargs):
+        calls["model"] = model
+        return SolveResult(status="optimal", objective=0.0, bound=0.0, gap=0.0)
+
+    monkeypatch.setattr(oa_module, "solve_oa", fake_solve_oa)
+
+    solve_mip_nlp(
+        _objective_epigraph_model(),
+        method="oa",
+        mip_nlp_options={"mip_nlp_profile": "shot", "objective_epigraph": "on"},
+    )
+
+    transformed = calls["model"]
+    assert transformed._constraints[0].sense == ">="
+    convexity = classify_oa_cut_convexity(transformed)
+    assert convexity.objective_is_convex
+    assert convexity.constraint_mask == [True]
+
+
+def test_mip_nlp_shot_objective_epigraph_off_leaves_defining_equality(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    calls = {}
+
+    def fake_solve_oa(model, **kwargs):
+        calls["model"] = model
+        return SolveResult(status="optimal", objective=0.0, bound=0.0, gap=0.0)
+
+    monkeypatch.setattr(oa_module, "solve_oa", fake_solve_oa)
+
+    solve_mip_nlp(
+        _objective_epigraph_model(),
+        method="oa",
+        mip_nlp_options={"mip_nlp_profile": "shot", "objective_epigraph": "off"},
+    )
+
+    assert calls["model"]._constraints[0].sense == "=="
 
 
 def test_mip_nlp_trace_gap_certification_requires_finite_bound():

@@ -2246,12 +2246,17 @@ def solve_model(
         lazy master callbacks.
         Experimental SHOT-parity controls are accepted only with
         ``mip_nlp_profile="shot"`` and include ``tree_strategy``,
-        ``cut_strategy``, ``rootsearch_strategy``, ``fixed_nlp_strategy``,
-        ``solution_pool_capacity``, ``hyperplane_max_per_iter``,
-        ``hyperplane_selection_factor``, ``relaxation_phase``,
-        ``mip_solution_limit_strategy``, ``convex_bounding``,
-        ``master_repair``, and ``reduction_cuts``. MIP-NLP runs attach a
-        structured ``result.mip_nlp_trace`` payload.
+        ``cut_strategy``, ``objective_epigraph``, ``anti_epigraph``,
+        ``nonlinear_partitioning``, ``quadratic_partitioning``,
+        ``absolute_value_auxiliaries``, ``monomial_extraction``,
+        ``signomial_extraction``, ``integer_bilinear_strategy``,
+        ``integer_bilinear_max_bits``, ``quadratic_extraction``,
+        ``direct_quadratic_routing``, ``rootsearch_strategy``,
+        ``fixed_nlp_strategy``, ``solution_pool_capacity``,
+        ``hyperplane_max_per_iter``, ``hyperplane_selection_factor``,
+        ``relaxation_phase``, ``mip_solution_limit_strategy``,
+        ``convex_bounding``, ``master_repair``, and ``reduction_cuts``.
+        MIP-NLP runs attach a structured ``result.mip_nlp_trace`` payload.
         For ``mip_nlp_method="goa"``, convexity-certified MINLPs use OA's
         valid master bounds and other models use AMP/global relaxations.
         AMP options such as ``rel_gap``, ``abs_tol``, ``max_iter``,
