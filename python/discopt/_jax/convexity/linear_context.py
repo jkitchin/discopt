@@ -13,7 +13,7 @@ constraint ``x2 <= x1`` implies the argument is ``>= 1 > 0``.
 This module provides a ``LinearContext`` that holds the model's
 linear relaxation (variable bounds + linear inequality and equality
 constraints) and can answer range queries on affine expressions via
-two scipy ``linprog`` calls. The range is a sound enclosure over the
+two pure-Rust POUNCE LP solves. The range is a sound enclosure over the
 intersection of the box with the linear relaxation, so the resulting
 sign label is mathematically valid as a premise of a DCP rule.
 
@@ -199,9 +199,8 @@ class LinearContext:
         """Sound enclosure of ``coeffs · x + const`` over the relaxation.
 
         Uses the declared variable bounds as a free box-only enclosure;
-        invokes ``scipy.optimize.linprog`` only when linear constraints
-        are present, since the box-only bound is already optimal
-        otherwise.
+        invokes the pure-Rust POUNCE LP only when linear constraints are
+        present, since the box-only bound is already optimal otherwise.
         """
         # Box-only enclosure is optimal when there are no linear rows.
         lo_box, hi_box = _box_range(coeffs, self.lb, self.ub)
