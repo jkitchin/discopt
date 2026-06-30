@@ -1176,6 +1176,14 @@ class MccormickLPRelaxer:
                         j < grad.size and np.isfinite(grad[j]) for j in r.idxs
                     ):
                         continue
+                    # Conditioning guard (#358): a cut whose coefficients have blown
+                    # up (steep gradient on a wide box) fools the fast simplex into a
+                    # garbage bound. Skip it — the static cuts still bound ``d`` and
+                    # the relaxation stays sound, just looser at this point.
+                    if any(
+                        abs(float(grad[j])) > _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE for j in r.idxs
+                    ):
+                        continue
                     # ``slope·x0`` with x0 the LP point restricted to dependent cols.
                     slope_dot_x0 = float(sum(float(grad[j]) * float(x[j]) for j in r.idxs))
                     if r.curvature == "convex":

@@ -4203,6 +4203,13 @@ def _collect_composite_multivar_relaxations(
         col_hi = float(np.asarray(iv.hi).ravel()[0])
         if not (np.isfinite(col_lo) and np.isfinite(col_hi)) or col_hi < col_lo:
             return
+        # Conditioning guard (#358): on a wide/ill-conditioned box the node's value
+        # range — and hence its gradient and the resulting cut coefficients — can
+        # explode, fooling the fast simplex into a garbage dual bound (nvs16 ~1e11).
+        # Abstain above the same magnitude where the cut builders abstain; the node
+        # then stays on the (sound) term-by-term path.
+        if max(abs(col_lo), abs(col_hi)) > _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE:
+            return
 
         try:
             f = compile_expression(expr, model)
