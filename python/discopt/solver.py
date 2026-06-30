@@ -2244,6 +2244,14 @@ def solve_model(
         ``mip_nlp_method="lp_nlp_bb"``, ``milp_solver="gurobi"`` is also
         required because the single-tree LP/NLP branch-and-bound variant uses
         lazy master callbacks.
+        Experimental SHOT-parity controls are accepted only with
+        ``mip_nlp_profile="shot"`` and include ``tree_strategy``,
+        ``cut_strategy``, ``rootsearch_strategy``, ``fixed_nlp_strategy``,
+        ``solution_pool_capacity``, ``hyperplane_max_per_iter``,
+        ``hyperplane_selection_factor``, ``relaxation_phase``,
+        ``mip_solution_limit_strategy``, ``convex_bounding``,
+        ``master_repair``, and ``reduction_cuts``. MIP-NLP runs attach a
+        structured ``result.mip_nlp_trace`` payload.
         For ``mip_nlp_method="goa"``, convexity-certified MINLPs use OA's
         valid master bounds and other models use AMP/global relaxations.
         AMP options such as ``rel_gap``, ``abs_tol``, ``max_iter``,
@@ -2422,7 +2430,12 @@ def solve_model(
         import warnings
 
         from discopt.solvers.mip_nlp import solve_mip_nlp
-        from discopt.solvers.mip_nlp_options import FP_OPTION_KEYS, GOA_OPTION_KEYS
+        from discopt.solvers.mip_nlp_options import (
+            FP_OPTION_KEYS,
+            GOA_OPTION_KEYS,
+            MIP_NLP_PROFILE_OPTION_KEYS,
+            SHOT_OPTION_KEYS,
+        )
 
         mip_nlp_method = kwargs.pop("mip_nlp_method", None)
         mip_nlp_options = kwargs.pop("mip_nlp_options", None)
@@ -2446,6 +2459,8 @@ def solve_model(
             "milp_solver",
             "solution_pool",
             "num_solution_iteration",
+            *MIP_NLP_PROFILE_OPTION_KEYS,
+            *SHOT_OPTION_KEYS,
             *FP_OPTION_KEYS,
         ):
             if key in kwargs:
@@ -2770,7 +2785,11 @@ def solve_model(
 
         from discopt._jax.gdp_reformulate import reformulate_gdp
         from discopt.solvers.mip_nlp import solve_mip_nlp
-        from discopt.solvers.mip_nlp_options import FP_OPTION_KEYS
+        from discopt.solvers.mip_nlp_options import (
+            FP_OPTION_KEYS,
+            MIP_NLP_PROFILE_OPTION_KEYS,
+            SHOT_OPTION_KEYS,
+        )
 
         warnings.warn(
             "gdp_method='oa' is deprecated for selecting MINLP OA. Use "
@@ -2801,6 +2820,8 @@ def solve_model(
             "milp_solver",
             "solution_pool",
             "num_solution_iteration",
+            *MIP_NLP_PROFILE_OPTION_KEYS,
+            *SHOT_OPTION_KEYS,
             *FP_OPTION_KEYS,
         ):
             if key in kwargs:

@@ -91,6 +91,44 @@ Useful OA options include:
 | `feasibility_norm` | Norm used in feasibility-pump style repairs. |
 | `solution_pool`, `num_solution_iteration` | Iterate through a MILP solution pool; currently requires `milp_solver="gurobi"`. |
 
+## Experimental SHOT profile
+
+`mip_nlp_profile="shot"` enables validated SHOT-parity controls and attaches a
+structured `result.mip_nlp_trace` payload. The profile is experimental: the
+options are accepted and traced so later PRs can add SHOT-style ESH,
+rootsearch, repair, convex-bounding, and adaptive master behavior behind a
+stable interface. Default MIP-NLP behavior is unchanged when the profile is not
+set.
+
+```python
+result = model.solve(
+    solver="mip-nlp",
+    mip_nlp_method="oa",
+    mip_nlp_profile="shot",
+    cut_strategy="esh",
+    tree_strategy="multi_tree",
+    fixed_nlp_strategy="adaptive",
+    master_repair=True,
+)
+```
+
+Accepted SHOT-profile controls are:
+
+| Option | Accepted values |
+| --- | --- |
+| `tree_strategy` | `"auto"`, `"multi_tree"`, `"single_tree"` |
+| `cut_strategy` | `"auto"`, `"oa"`, `"ecp"`, `"esh"` |
+| `rootsearch_strategy` | `"auto"`, `"none"`, `"bisection"`, `"toms748"` |
+| `fixed_nlp_strategy` | `"auto"`, `"none"`, `"always"`, `"adaptive"`, `"iteration"`, `"time"`, `"solution_pool"` |
+| `solution_pool_capacity`, `hyperplane_max_per_iter` | Positive integer or `None` |
+| `hyperplane_selection_factor` | Floating-point factor in `(0, 1]` |
+| `relaxation_phase` | `"auto"`, `"off"`, `"initial"`, `"periodic"` |
+| `mip_solution_limit_strategy` | `"auto"`, `"none"`, `"static"`, `"adaptive"`, `"force_optimal"` |
+| `convex_bounding`, `master_repair`, `reduction_cuts` | Boolean |
+
+Passing one of these controls without `mip_nlp_profile="shot"` raises a
+`ValueError`, which prevents accidental no-op configuration.
+
 Top-level aliases override duplicate entries in `mip_nlp_options`:
 
 ```python

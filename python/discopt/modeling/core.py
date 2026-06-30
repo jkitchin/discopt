@@ -1180,6 +1180,10 @@ class SolveResult:
     subnlp_feasible: int = 0
     subnlp_incumbent_updates: int = 0
 
+    # Structured MIP-NLP decomposition trace. Populated by solver="mip-nlp"
+    # paths when iteration/provenance data is available.
+    mip_nlp_trace: Optional[dict[str, object]] = None
+
     # Examiner-style validation report (populated if validate=True).
     validation_report: Optional[object] = None
 
@@ -2847,6 +2851,14 @@ class Model:
             ``solution_pool``, ``num_solution_iteration``, and ``init_strategy``
             take precedence over duplicate keys in ``mip_nlp_options``.
             ``solution_pool`` currently requires ``milp_solver="gurobi"``.
+            Experimental SHOT-parity controls are accepted only with
+            ``mip_nlp_profile="shot"`` and include ``tree_strategy``,
+            ``cut_strategy``, ``rootsearch_strategy``, ``fixed_nlp_strategy``,
+            ``solution_pool_capacity``, ``hyperplane_max_per_iter``,
+            ``hyperplane_selection_factor``, ``relaxation_phase``,
+            ``mip_solution_limit_strategy``, ``convex_bounding``,
+            ``master_repair``, and ``reduction_cuts``. MIP-NLP runs attach a
+            structured ``result.mip_nlp_trace`` payload.
             For ``mip_nlp_method="goa"``,
             convexity-certified MINLPs use OA's valid master bounds and other
             models use AMP/global relaxations. AMP options such as ``rel_gap``,
