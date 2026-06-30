@@ -80,9 +80,22 @@ class TestAmpSimplexCertificationParity:
 
     @pytest.mark.parametrize("build", [_concave_qp, _bilinear])
     def test_same_certificate_as_default(self, build):
-        ref = build().solve(solver="amp", rel_gap=1e-4, time_limit=60)
-        sx = build().solve(solver="amp", rel_gap=1e-4, time_limit=60, milp_solver="simplex")
+        # A short budget is sufficient and keeps the test fast: ``_concave_qp``
+        # certifies optimal in well under a second, and ``_bilinear`` finds its
+        # global incumbent (-6.25) within the first second but its spatial-B&B
+        # bound never closes to ``rel_gap`` (a relaxation-tightness property, not
+        # a backend property — HiGHS, POUNCE and the simplex all return
+        # ``feasible`` here and would otherwise burn the whole budget). The seam
+        # under test is backend *parity*, which holds at any budget; a 60s limit
+        # only wasted wall-clock on the uncertifiable case (and timed out under
+        # parallel load).
+        ref = build().solve(solver="amp", rel_gap=1e-4, time_limit=5)
+        sx = build().solve(solver="amp", rel_gap=1e-4, time_limit=5, milp_solver="simplex")
         assert sx.status == ref.status, f"{sx.status} vs {ref.status}"
         if ref.status == "optimal":
             assert getattr(sx, "gap_certified", True) is True
+        # Objective parity must hold whether the run certified (``optimal``) or
+        # only reached the shared global incumbent (``feasible``): the simplex
+        # relaxation backend must not weaken AMP's result either way.
+        if ref.objective is not None and sx.objective is not None:
             assert abs(sx.objective - ref.objective) <= 1e-3 * (1.0 + abs(ref.objective))
