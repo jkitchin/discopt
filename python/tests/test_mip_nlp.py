@@ -497,6 +497,22 @@ def test_mip_nlp_shot_profile_options_validate_and_attach_trace(monkeypatch):
     assert result.mip_nlp_trace["shot_options"]["cut_strategy"] == "esh"
 
 
+def test_mip_nlp_trace_gap_certification_requires_finite_bound():
+    result = _binary_model("trace_no_bound_time_limit").solve(
+        solver="mip-nlp",
+        mip_nlp_method="oa",
+        time_limit=0.0,
+    )
+
+    assert result.bound is None
+    assert result.gap_certified is False
+    assert result.mip_nlp_trace is not None
+    assert result.mip_nlp_trace["final_lb"] is None
+    assert result.mip_nlp_trace["final_gap"] is None
+    assert result.mip_nlp_trace["gap_certified"] is False
+    assert result.mip_nlp_trace["bound_validity"] == "heuristic"
+
+
 def test_mip_nlp_shot_options_require_shot_profile():
     from discopt.solvers.mip_nlp import solve_mip_nlp
 

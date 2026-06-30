@@ -2953,7 +2953,13 @@ def solve_oa(
         return str(status).lower()
 
     def _build_mip_nlp_trace(final_reason: Optional[str]) -> dict[str, object]:
-        gap_value = _compute_gap(LB, UB)
+        final_lb = _trace_value(LB)
+        final_ub = _trace_value(UB)
+        bound_valid = bool(master_bound_valid and final_lb is not None)
+        final_gap = (
+            _trace_value(_compute_gap(LB, UB)) if bound_valid and final_ub is not None else None
+        )
+        gap_certified = bool(bound_valid and final_gap is not None)
         return {
             "schema_version": 1,
             "solver": "mip-nlp",
@@ -2972,11 +2978,11 @@ def solve_oa(
             },
             "termination_reason": final_reason,
             "master_bound_valid": bool(master_bound_valid),
-            "gap_certified": bool(master_bound_valid),
-            "bound_validity": "global" if master_bound_valid else "heuristic",
-            "final_lb": _trace_value(LB),
-            "final_ub": _trace_value(UB),
-            "final_gap": _trace_value(gap_value),
+            "gap_certified": gap_certified,
+            "bound_validity": "global" if bound_valid else "heuristic",
+            "final_lb": final_lb,
+            "final_ub": final_ub,
+            "final_gap": final_gap,
         }
 
     # If no integer variables, just solve the NLP directly
