@@ -23,7 +23,7 @@ engines.
 
 The requested external solvers fall into three very different buckets:
 
-- **Already in-process pluggable:** HiGHS (LP/QP/MILP/MIQP), IPOPT
+- **Already in-process pluggable:** HiGHS (LP/MILP; QP/MIQP routing removed, #359), IPOPT
   (NLP, via cyipopt). These return solutions directly into discopt data
   structures and participate in `Model.solve()`.
 - **Reachable only for offline benchmarking:** SCIP, Couenne, BARON,
@@ -50,7 +50,7 @@ GAMS at once, built on machinery that already exists (the exporters).
 |---|---|---|---|
 | **POUNCE** | Rust (Ipopt port) | All production LP/QP/NLP relaxation solves; node solves in the self-hosted B&B | **Core dep** (`pounce-solver>=0.3`, `pyproject.toml:31`) |
 | **discopt B&B** | Rust tree + JAX McCormick/relaxations | Integer & spatial branch-and-bound, presolve/FBBT, OBBT, cuts (cover/clique/GMI/MIR), crossover | Core |
-| **HiGHS** | C++ (via `highspy`) | LP/QP/MILP/MIQP matrix solves; CI correctness oracle | Optional extra `highs` (`pyproject.toml:45`) |
+| **HiGHS** | C++ (via `highspy`) | LP/MILP matrix solves; CI correctness oracle (QP/MIQP routing removed, #359) | Optional extra `highs` (`pyproject.toml:45`) |
 | **cyipopt / IPOPT** | C++ | NLP node/continuous solves | Optional extra `ipopt` (`pyproject.toml:44`) |
 | **Rust warm-started simplex** | Rust | Opt-in MILP B&B node LPs (`nlp_solver="simplex"`) | Built with the Rust extension |
 | **JAX** | Python/XLA | Autodiff substrate, McCormick relaxations, differentiable layers — **not** a standalone numerical solver anymore (the JAX IPM was deleted) | Core |
@@ -66,10 +66,10 @@ Classification: `python/discopt/_jax/problem_classifier.py` (`ProblemClass`
 | Problem class | Default engine | POUNCE-only mode (`nlp_solver="pounce"`) | Handler |
 |---|---|---|---|
 | **LP** | HiGHS → POUNCE → JAX-IPM fallback | POUNCE first | `_solve_lp` (`solver.py:6398`), seam `lp_backend.get_lp_solver` |
-| **QP (convex)** | HiGHS → POUNCE | POUNCE first | `_solve_qp` (`solver.py:6603`), `qp_pounce`/`qp_highs` |
+| **QP (convex)** | POUNCE → JAX-IPM fallback (HiGHS-free, #359) | same | `_solve_qp`, `qp_pounce` |
 | **QP (nonconvex)** | spatial B&B + McCormick-LP | same | falls to `_solve_nlp_bb` |
 | **MILP** | HiGHS whole-problem, else self-hosted B&B | self-hosted Rust B&B, HiGHS bypassed | `_solve_milp_highs` / `_solve_milp_bb` / `_solve_milp_simplex` |
-| **MIQP** | HiGHS, else spatial B&B | self-hosted B&B | `_solve_qp_highs` / `_solve_miqp_bb` |
+| **MIQP** | self-hosted B&B (HiGHS-free, #359), else spatial B&B | same | `_solve_miqp_bb` |
 | **NLP (convex)** | POUNCE (cyipopt if requested) | POUNCE | `_solve_continuous` (`solver.py:4863`) |
 | **NLP (nonconvex)** | POUNCE multistart / spatial B&B | POUNCE | `_solve_continuous` / `_solve_nlp_bb` |
 | **MINLP (convex)** | NLP-BB: POUNCE NLP nodes + MILP relaxation | POUNCE | `_solve_nlp_bb` (`solver.py:4995`) |
@@ -148,7 +148,7 @@ integration — but it does **not** let discopt call *out* to GAMS solvers.
 
 | Solver | As a backend for `Model.solve()` | As a benchmark comparator | What's missing for "plug in & get a result" |
 |---|---|---|---|
-| **HiGHS** | ✅ in-process (LP/QP/MILP/MIQP) | ✅ `.nl` subprocess | Nothing for those classes |
+| **HiGHS** | ✅ in-process (LP/MILP; QP/MIQP removed, #359) | ✅ `.nl` subprocess | Nothing for those classes |
 | **IPOPT** | ✅ in-process NLP (cyipopt) | ❌ no CLI comparator | Optional: `.nl`/CLI comparator for parity tests |
 | **SCIP** | ❌ | ✅ `.nl` subprocess | In-process adapter + solution read-back (or `pyscipopt`) |
 | **Couenne** | ❌ | ✅ `.nl` subprocess | Same as SCIP |
