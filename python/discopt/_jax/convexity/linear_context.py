@@ -46,6 +46,17 @@ from discopt.modeling.core import (
 # sound outer bound despite the interior-point optimum's small tolerance (#356).
 _LP_ENCLOSURE_MARGIN = 1e-7
 
+# Per-solve wall-clock cap for the POUNCE affine-range LP. POUNCE's interior-point
+# method is pathologically slow on the ill-conditioned LPs some convexity probes
+# produce (hda's signomial-equilibrium rows), and convexity analysis issues many
+# such probes, so an unbounded solve can hang the whole (CI-visible) analysis.
+# Bounding it is sound: a non-optimal result falls back to the box-only enclosure
+# below, which is a valid (looser) outer bound — convexity then abstains rather
+# than mis-proves, exactly the conservative direction. Well-conditioned probes
+# solve far inside this budget (~milliseconds), so proven-convex detection is
+# unaffected; only the pathological ill-conditioned probes hit the cap and abstain.
+_LP_POUNCE_TIME_LIMIT = 0.5
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Affine coefficient extraction
@@ -221,8 +232,14 @@ class LinearContext:
         b_eq = self.b_eq if self.b_eq.size else None
 
         try:
-            lo_res = solve_lp(coeffs, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds)
-            hi_res = solve_lp(-coeffs, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds)
+            lo_res = solve_lp(
+                coeffs, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds,
+                time_limit=_LP_POUNCE_TIME_LIMIT,
+            )
+            hi_res = solve_lp(
+                -coeffs, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds,
+                time_limit=_LP_POUNCE_TIME_LIMIT,
+            )
         except (ValueError, RuntimeError, ImportError):
             return lo_box, hi_box
 
