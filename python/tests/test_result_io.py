@@ -46,6 +46,24 @@ def test_serialize_round_trip_optimal():
     np.testing.assert_allclose(r2.x["y"], [0.0, 2.0])
 
 
+def test_serialize_round_trip_mip_nlp_trace():
+    r = _optimal_result()
+    r.mip_nlp_trace = {
+        "schema_version": 1,
+        "solver": "mip-nlp",
+        "method": "oa",
+        "profile": "shot",
+        "iterations": [{"index": 0, "cuts_added": 2}],
+        "summary": {"mip_count": 1},
+    }
+
+    d = serialize_result(r)
+    assert d["mip_nlp_trace"]["profile"] == "shot"
+
+    r2 = deserialize_result(d)
+    assert r2.mip_nlp_trace == r.mip_nlp_trace
+
+
 def test_serialize_infeasible_and_no_solution():
     r = SolveResult(status="infeasible", objective=None, bound=None, gap=None, x=None)
     d = serialize_result(r)

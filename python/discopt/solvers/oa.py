@@ -34,6 +34,7 @@ from discopt.solvers.mip_nlp_options import (
     FP_OPTION_KEYS,
     GOA_AMP_ONLY_OPTION_KEYS,
     GOA_AMP_OPTION_DEFAULTS,
+    MIPNLPShotConfig,
 )
 
 if TYPE_CHECKING:
@@ -2724,6 +2725,8 @@ def solve_oa(
     milp_solver: str = "auto",
     solution_pool: bool = False,
     num_solution_iteration: int = 5,
+    mip_nlp_profile: str = "default",
+    mip_nlp_shot_config: Optional[MIPNLPShotConfig] = None,
     **kwargs,
 ) -> SolveResult:
     """Solve a MINLP via Outer Approximation.
@@ -2914,34 +2917,6 @@ def solve_oa(
         )
     master_bound_valid = decomp.master_bound_valid and not heuristic_nonconvex
 
-    # If no integer variables, just solve the NLP directly
-    if len(decomp.int_indices) == 0:
-        x_sol, obj = _solve_nlp_relaxation(
-            evaluator,
-            decomp.lb,
-            decomp.ub,
-            nlp_solver,
-            initial_point=initial_point,
-        )
-        wall_time = time.perf_counter() - t_start
-        if x_sol is not None:
-            return SolveResult(
-                status="optimal",
-                objective=_obj_sign * obj,
-                bound=_obj_sign * obj,
-                gap=0.0,
-                x=_build_x_dict(x_sol, model),
-                wall_time=wall_time,
-            )
-        return SolveResult(
-            status="infeasible",
-            objective=None,
-            bound=None,
-            gap=None,
-            x={},
-            wall_time=wall_time,
-        )
-
     # 2. Generate initial linearization cuts.
     oa_A_rows: list[np.ndarray] = []
     oa_b_rows: list[float] = []
@@ -2955,6 +2930,92 @@ def solve_oa(
     incumbent_progress: list[float] = []
     termination_reason = None
     incumbent_derivative_data: Optional[_DerivativeRegularizationData] = None
+
+    method_name = "ecp" if ecp_mode else "oa"
+    trace_iterations: list[dict[str, object]] = []
+    mip_count = 0
+    nlp_subproblem_count = 0
+    feasibility_subproblem_count = 0
+    solution_pool_candidate_count = 0
+
+    def _trace_value(value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        out = float(value)
+        if not np.isfinite(out) or abs(out) >= 1e19:
+            return None
+        return out
+
+    def _trace_status(status) -> str:
+        name = getattr(status, "name", None)
+        if isinstance(name, str):
+            return name.lower()
+        return str(status).lower()
+
+    def _build_mip_nlp_trace(final_reason: Optional[str]) -> dict[str, object]:
+        final_lb = _trace_value(LB)
+        final_ub = _trace_value(UB)
+        bound_valid = bool(master_bound_valid and final_lb is not None)
+        final_gap = (
+            _trace_value(_compute_gap(LB, UB)) if bound_valid and final_ub is not None else None
+        )
+        gap_certified = bool(bound_valid and final_gap is not None)
+        return {
+            "schema_version": 1,
+            "solver": "mip-nlp",
+            "method": method_name,
+            "profile": mip_nlp_profile,
+            "shot_options": (
+                mip_nlp_shot_config.as_trace_dict() if mip_nlp_shot_config is not None else {}
+            ),
+            "iterations": trace_iterations,
+            "summary": {
+                "mip_count": int(mip_count),
+                "nlp_subproblem_count": int(nlp_subproblem_count),
+                "feasibility_subproblem_count": int(feasibility_subproblem_count),
+                "cut_count": int(len(oa_A_rows)),
+                "solution_pool_candidates": int(solution_pool_candidate_count),
+            },
+            "termination_reason": final_reason,
+            "master_bound_valid": bool(master_bound_valid),
+            "gap_certified": gap_certified,
+            "bound_validity": "global" if bound_valid else "heuristic",
+            "final_lb": final_lb,
+            "final_ub": final_ub,
+            "final_gap": final_gap,
+        }
+
+    # If no integer variables, just solve the NLP directly
+    if len(decomp.int_indices) == 0:
+        x_sol, obj = _solve_nlp_relaxation(
+            evaluator,
+            decomp.lb,
+            decomp.ub,
+            nlp_solver,
+            initial_point=initial_point,
+        )
+        wall_time = time.perf_counter() - t_start
+        if x_sol is not None:
+            LB = float(obj)
+            UB = float(obj)
+            return SolveResult(
+                status="optimal",
+                objective=_obj_sign * obj,
+                bound=_obj_sign * obj,
+                gap=0.0,
+                x=_build_x_dict(x_sol, model),
+                wall_time=wall_time,
+                mip_nlp_trace=_build_mip_nlp_trace("continuous_nlp_optimal"),
+            )
+        return SolveResult(
+            status="infeasible",
+            objective=None,
+            bound=None,
+            gap=None,
+            x={},
+            wall_time=wall_time,
+            mip_nlp_trace=_build_mip_nlp_trace("continuous_nlp_infeasible"),
+        )
 
     def accept_incumbent(
         x: np.ndarray,
@@ -3097,6 +3158,7 @@ def solve_oa(
         else:
             init_attempt = None
             if derivative_regularization:
+                nlp_subproblem_count += 1
                 init_attempt = _solve_nlp_subproblem(
                     evaluator,
                     decomp.lb,
@@ -3109,6 +3171,7 @@ def solve_oa(
                 )
                 x_init, obj_init = init_attempt.x, init_attempt.objective
             else:
+                nlp_subproblem_count += 1
                 x_init, obj_init = _solve_nlp_subproblem(
                     evaluator,
                     decomp.lb,
@@ -3142,9 +3205,15 @@ def solve_oa(
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
             logger.info("OA: Time limit reached at iteration %d", iteration)
+            termination_reason = "time_limit"
             break
 
         # a. Solve master MILP
+        cuts_before = len(oa_A_rows)
+        nlp_before = nlp_subproblem_count
+        feasibility_before = feasibility_subproblem_count
+        lb_before = _trace_value(LB)
+        ub_before = _trace_value(UB)
         master_result = _solve_master_milp(
             decomp.linear_A_rows,
             decomp.linear_b_rows,
@@ -3169,16 +3238,60 @@ def solve_oa(
             solution_pool=solution_pool,
             num_solution_iteration=num_solution_iteration,
         )
+        mip_count += 1
 
         from discopt.solvers import SolveStatus
 
         if master_result is None:
             logger.info("OA: Master MILP failed at iteration %d", iteration)
+            termination_reason = "master_error"
+            trace_iterations.append(
+                {
+                    "index": int(iteration),
+                    "master_status": "error",
+                    "lb_before": lb_before,
+                    "ub_before": ub_before,
+                    "lb": _trace_value(LB),
+                    "ub": _trace_value(UB),
+                    "gap": _trace_value(_compute_gap(LB, UB)),
+                    "cuts_added": int(len(oa_A_rows) - cuts_before),
+                    "cuts_total": int(len(oa_A_rows)),
+                    "nlp_subproblem_count": int(nlp_subproblem_count - nlp_before),
+                    "feasibility_subproblem_count": int(
+                        feasibility_subproblem_count - feasibility_before
+                    ),
+                    "solution_pool_candidates": 0,
+                    "node_count": 0,
+                    "repair_actions": [],
+                    "termination_reason": termination_reason,
+                }
+            )
             break
 
         if master_result.status == SolveStatus.INFEASIBLE:
             logger.info("OA: Master MILP infeasible at iteration %d", iteration)
             termination_reason = "master_infeasible"
+            trace_iterations.append(
+                {
+                    "index": int(iteration),
+                    "master_status": _trace_status(master_result.status),
+                    "lb_before": lb_before,
+                    "ub_before": ub_before,
+                    "lb": _trace_value(LB),
+                    "ub": _trace_value(UB),
+                    "gap": _trace_value(_compute_gap(LB, UB)),
+                    "cuts_added": int(len(oa_A_rows) - cuts_before),
+                    "cuts_total": int(len(oa_A_rows)),
+                    "nlp_subproblem_count": int(nlp_subproblem_count - nlp_before),
+                    "feasibility_subproblem_count": int(
+                        feasibility_subproblem_count - feasibility_before
+                    ),
+                    "solution_pool_candidates": 0,
+                    "node_count": int(getattr(master_result, "node_count", 0) or 0),
+                    "repair_actions": [],
+                    "termination_reason": termination_reason,
+                }
+            )
             break
 
         if master_result.status == SolveStatus.UNBOUNDED or master_result.x is None:
@@ -3200,6 +3313,27 @@ def solve_oa(
                 decomp.oa_objective_is_convex,
                 equality_relaxation=equality_relaxation,
                 oa_cut_relaxable=oa_cut_relaxable,
+            )
+            trace_iterations.append(
+                {
+                    "index": int(iteration),
+                    "master_status": _trace_status(master_result.status),
+                    "lb_before": lb_before,
+                    "ub_before": ub_before,
+                    "lb": _trace_value(LB),
+                    "ub": _trace_value(UB),
+                    "gap": _trace_value(_compute_gap(LB, UB)),
+                    "cuts_added": int(len(oa_A_rows) - cuts_before),
+                    "cuts_total": int(len(oa_A_rows)),
+                    "nlp_subproblem_count": int(nlp_subproblem_count - nlp_before),
+                    "feasibility_subproblem_count": int(
+                        feasibility_subproblem_count - feasibility_before
+                    ),
+                    "solution_pool_candidates": 0,
+                    "node_count": int(getattr(master_result, "node_count", 0) or 0),
+                    "repair_actions": [],
+                    "termination_reason": "master_unbounded",
+                }
             )
             continue
 
@@ -3262,6 +3396,16 @@ def solve_oa(
             solution_pool=solution_pool,
             num_solution_iteration=num_solution_iteration,
         )
+        solution_pool_candidate_count += len(master_candidates)
+        iteration_record: dict[str, object] = {
+            "index": int(iteration),
+            "master_status": _trace_status(master_result.status),
+            "lb_before": lb_before,
+            "ub_before": ub_before,
+            "solution_pool_candidates": int(len(master_candidates)),
+            "node_count": int(getattr(master_result, "node_count", 0) or 0),
+            "repair_actions": [],
+        }
         stop_after_master_pool = False
         pool_integer_assignments_seen: set[tuple[float, ...]] = set()
 
@@ -3269,6 +3413,7 @@ def solve_oa(
             elapsed = time.perf_counter() - t_start
             if elapsed >= time_limit:
                 logger.info("OA: Time limit reached during iteration %d", iteration)
+                termination_reason = "time_limit"
                 stop_after_master_pool = True
                 break
 
@@ -3344,6 +3489,7 @@ def solve_oa(
             # c. Fix integers, solve NLP subproblem
             nlp_attempt = None
             if derivative_regularization:
+                nlp_subproblem_count += 1
                 nlp_attempt = _solve_nlp_subproblem(
                     evaluator,
                     decomp.lb,
@@ -3356,6 +3502,7 @@ def solve_oa(
                 )
                 x_nlp, obj_nlp = nlp_attempt.x, nlp_attempt.objective
             else:
+                nlp_subproblem_count += 1
                 x_nlp, obj_nlp = _solve_nlp_subproblem(
                     evaluator,
                     decomp.lb,
@@ -3389,6 +3536,7 @@ def solve_oa(
             else:
                 # NLP infeasible for this integer assignment
                 if feasibility_cuts:
+                    feasibility_subproblem_count += 1
                     x_feas = _solve_feasibility_subproblem(
                         evaluator,
                         decomp.lb,
@@ -3467,6 +3615,22 @@ def solve_oa(
                 break
 
         if stop_after_master_pool:
+            iteration_record["termination_reason"] = termination_reason
+        iteration_record.update(
+            {
+                "lb": _trace_value(LB),
+                "ub": _trace_value(UB),
+                "gap": _trace_value(_compute_gap(LB, UB)),
+                "cuts_added": int(len(oa_A_rows) - cuts_before),
+                "cuts_total": int(len(oa_A_rows)),
+                "nlp_subproblem_count": int(nlp_subproblem_count - nlp_before),
+                "feasibility_subproblem_count": int(
+                    feasibility_subproblem_count - feasibility_before
+                ),
+            }
+        )
+        trace_iterations.append(iteration_record)
+        if stop_after_master_pool:
             break
 
     # 4. Build result
@@ -3475,6 +3639,14 @@ def solve_oa(
     bound_certified = master_bound_valid
     bound = LB if bound_certified and LB > -1e19 else None
     reported_gap = gap if bound is not None and UB < 1e19 else None
+    final_reason = termination_reason
+    if final_reason is None:
+        if wall_time >= time_limit:
+            final_reason = "time_limit"
+        elif incumbent is not None and bound_certified and gap <= gap_tolerance:
+            final_reason = "gap"
+        else:
+            final_reason = "iteration_limit"
 
     if incumbent is not None and incumbent_obj is not None:
         status = "optimal" if bound_certified and gap <= gap_tolerance else "feasible"
@@ -3487,6 +3659,9 @@ def solve_oa(
             gap=reported_gap,
             x=_build_x_dict(incumbent, model),
             wall_time=wall_time,
+            mip_count=mip_count,
+            subnlp_calls=nlp_subproblem_count,
+            mip_nlp_trace=_build_mip_nlp_trace(final_reason),
         )
 
     return SolveResult(
@@ -3496,4 +3671,7 @@ def solve_oa(
         gap=None,
         x={},
         wall_time=wall_time,
+        mip_count=mip_count,
+        subnlp_calls=nlp_subproblem_count,
+        mip_nlp_trace=_build_mip_nlp_trace(final_reason),
     )

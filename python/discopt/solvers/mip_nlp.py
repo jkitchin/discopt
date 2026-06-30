@@ -5,7 +5,12 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from discopt.modeling.core import Model, SolveResult
-from discopt.solvers.mip_nlp_options import FP_OPTION_KEYS, GOA_OPTION_KEYS
+from discopt.solvers.mip_nlp_options import (
+    FP_OPTION_KEYS,
+    GOA_OPTION_KEYS,
+    ensure_mip_nlp_trace,
+    split_mip_nlp_profile_options,
+)
 
 _IMPLEMENTED_METHODS = frozenset({"oa", "ecp", "fp", "goa", "lp_nlp_bb"})
 _RESERVED_METHOD_ISSUES = {
@@ -116,6 +121,7 @@ def solve_mip_nlp(
             if canonical not in options:
                 options[canonical] = options[alias]
             del options[alias]
+    profile, shot_config, options = split_mip_nlp_profile_options(options)
 
     if method in _IMPLEMENTED_METHODS:
         if method == "fp":
@@ -146,7 +152,7 @@ def solve_mip_nlp(
                         "an initialization strategy is supplied."
                     )
 
-            return solve_feasibility_pump(
+            result = solve_feasibility_pump(
                 model,
                 time_limit=time_limit,
                 gap_tolerance=gap_tolerance,
@@ -166,11 +172,18 @@ def solve_mip_nlp(
                 fp_norm_constraint=options.get("fp_norm_constraint", False),
                 fp_norm_constraint_coef=options.get("fp_norm_constraint_coef", 1.0),
             )
+            ensure_mip_nlp_trace(
+                result,
+                method=method,
+                profile=profile,
+                shot_config=shot_config,
+            )
+            return result
 
         if method == "goa":
             from discopt.solvers.oa import solve_goa
 
-            return solve_goa(
+            result = solve_goa(
                 model,
                 time_limit=time_limit,
                 gap_tolerance=gap_tolerance,
@@ -180,6 +193,13 @@ def solve_mip_nlp(
                 add_no_good_cuts=bool(options.pop("add_no_good_cuts", True)),
                 **options,
             )
+            ensure_mip_nlp_trace(
+                result,
+                method=method,
+                profile=profile,
+                shot_config=shot_config,
+            )
+            return result
 
         if method == "lp_nlp_bb":
             from discopt.solvers.oa import _normalize_init_strategy, solve_lp_nlp_bb
@@ -187,7 +207,7 @@ def solve_mip_nlp(
             options["init_strategy"] = _normalize_init_strategy(
                 options.get("init_strategy", "rNLP")
             )
-            return solve_lp_nlp_bb(
+            result = solve_lp_nlp_bb(
                 model,
                 time_limit=time_limit,
                 gap_tolerance=gap_tolerance,
@@ -196,6 +216,13 @@ def solve_mip_nlp(
                 initial_point=initial_point,
                 **options,
             )
+            ensure_mip_nlp_trace(
+                result,
+                method=method,
+                profile=profile,
+                shot_config=shot_config,
+            )
+            return result
 
         from discopt.solvers.oa import _normalize_init_strategy, solve_oa
 
@@ -209,15 +236,24 @@ def solve_mip_nlp(
         options["ecp_mode"] = method == "ecp"
         options["init_strategy"] = _normalize_init_strategy(options.get("init_strategy", "rNLP"))
 
-        return solve_oa(
+        result = solve_oa(
             model,
             time_limit=time_limit,
             gap_tolerance=gap_tolerance,
             max_iterations=max_iterations,
             nlp_solver=nlp_solver,
             initial_point=initial_point,
+            mip_nlp_profile=profile,
+            mip_nlp_shot_config=shot_config,
             **options,
         )
+        ensure_mip_nlp_trace(
+            result,
+            method=method,
+            profile=profile,
+            shot_config=shot_config,
+        )
+        return result
 
     raise NotImplementedError(
         f"mip_nlp_method={method!r} is reserved for a future MIP-NLP "

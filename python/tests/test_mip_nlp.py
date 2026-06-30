@@ -445,6 +445,112 @@ def test_mip_nlp_new_oa_options_precedence_and_alias(monkeypatch):
     assert calls["num_solution_iteration"] == 4
 
 
+def test_mip_nlp_shot_profile_options_validate_and_attach_trace(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    calls = {}
+
+    def fake_solve_oa(model, **kwargs):
+        calls.update(kwargs)
+        return SolveResult(status="optimal", objective=0.0, bound=0.0, gap=0.0)
+
+    monkeypatch.setattr(oa_module, "solve_oa", fake_solve_oa)
+
+    result = solve_mip_nlp(
+        _binary_model("shot_profile_options"),
+        method="oa",
+        mip_nlp_options={
+            "mip_nlp_profile": "shot",
+            "tree_strategy": "single-tree",
+            "cut_strategy": "esh",
+            "rootsearch_strategy": "toms748",
+            "fixed_nlp_strategy": "solution-pool",
+            "solution_pool_capacity": 5,
+            "hyperplane_max_per_iter": 8,
+            "hyperplane_selection_factor": 0.75,
+            "relaxation_phase": "initial",
+            "mip_solution_limit_strategy": "force-optimal",
+            "convex_bounding": True,
+            "master_repair": "true",
+            "reduction_cuts": False,
+        },
+    )
+
+    cfg = calls["mip_nlp_shot_config"]
+    assert calls["mip_nlp_profile"] == "shot"
+    assert cfg.tree_strategy == "single_tree"
+    assert cfg.cut_strategy == "esh"
+    assert cfg.rootsearch_strategy == "toms748"
+    assert cfg.fixed_nlp_strategy == "solution_pool"
+    assert cfg.solution_pool_capacity == 5
+    assert cfg.hyperplane_max_per_iter == 8
+    assert cfg.hyperplane_selection_factor == pytest.approx(0.75)
+    assert cfg.relaxation_phase == "initial"
+    assert cfg.mip_solution_limit_strategy == "force_optimal"
+    assert cfg.convex_bounding is True
+    assert cfg.master_repair is True
+    assert cfg.reduction_cuts is False
+
+    assert result.mip_nlp_trace["schema_version"] == 1
+    assert result.mip_nlp_trace["profile"] == "shot"
+    assert result.mip_nlp_trace["shot_options"]["cut_strategy"] == "esh"
+
+
+def test_mip_nlp_trace_gap_certification_requires_finite_bound():
+    result = _binary_model("trace_no_bound_time_limit").solve(
+        solver="mip-nlp",
+        mip_nlp_method="oa",
+        time_limit=0.0,
+    )
+
+    assert result.bound is None
+    assert result.gap_certified is False
+    assert result.mip_nlp_trace is not None
+    assert result.mip_nlp_trace["final_lb"] is None
+    assert result.mip_nlp_trace["final_gap"] is None
+    assert result.mip_nlp_trace["gap_certified"] is False
+    assert result.mip_nlp_trace["bound_validity"] == "heuristic"
+
+
+def test_mip_nlp_shot_options_require_shot_profile():
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    with pytest.raises(ValueError, match="require mip_nlp_profile='shot'"):
+        solve_mip_nlp(
+            _binary_model("shot_option_without_profile"),
+            method="oa",
+            mip_nlp_options={"tree_strategy": "single_tree"},
+        )
+
+
+def test_model_solve_forwards_shot_profile_options(monkeypatch):
+    import discopt.solvers.mip_nlp as mip_nlp_module
+
+    calls = {}
+
+    def fake_solve_mip_nlp(model, **kwargs):
+        calls.update(kwargs)
+        return SolveResult(status="optimal", objective=0.0, bound=0.0, gap=0.0)
+
+    monkeypatch.setattr(mip_nlp_module, "solve_mip_nlp", fake_solve_mip_nlp)
+
+    result = _binary_model("model_solve_shot_profile").solve(
+        solver="mip-nlp",
+        mip_nlp_method="oa",
+        mip_nlp_profile="shot",
+        cut_strategy="esh",
+        solution_pool_capacity=3,
+        master_repair=True,
+    )
+
+    assert result.status == "optimal"
+    assert calls["mip_nlp_profile"] == "shot"
+    assert calls["cut_strategy"] == "esh"
+    assert calls["solution_pool_capacity"] == 3
+    assert calls["master_repair"] is True
+
+
 def test_model_solve_passes_initial_solution_to_mip_nlp(monkeypatch):
     import discopt.solvers.mip_nlp as mip_nlp_module
 
@@ -1180,6 +1286,13 @@ def test_oa_solution_pool_processes_multiple_master_candidates(monkeypatch):
     assert master_calls[0]["num_solution_iteration"] == 2
     assert [point.tolist() for point in nlp_master_points[1:]] == [[0.0], [1.0]]
     assert len(cut_points) == 3
+    assert result.mip_nlp_trace is not None
+    assert result.mip_nlp_trace["profile"] == "default"
+    assert result.mip_nlp_trace["summary"]["mip_count"] == 1
+    assert result.mip_nlp_trace["summary"]["nlp_subproblem_count"] == 3
+    assert result.mip_nlp_trace["summary"]["solution_pool_candidates"] == 2
+    assert result.mip_nlp_trace["iterations"][0]["solution_pool_candidates"] == 2
+    assert result.mip_nlp_trace["iterations"][0]["cuts_added"] == 2
 
 
 def test_oa_initial_binary_seed_rounds_and_clamps_discrete_values():
