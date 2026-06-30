@@ -101,8 +101,7 @@ impl SparseCols {
     /// `O(nnz)` — the sparse analogue of `scaling::Scaling::scale_matrix`, with no
     /// dense `m·n` copy.
     pub fn scale_in_place(&mut self, row: &[f64], col: &[f64]) {
-        for j in 0..self.ncols() {
-            let cj = col[j];
+        for (j, &cj) in col.iter().enumerate().take(self.ncols()) {
             for k in self.col_ptr[j]..self.col_ptr[j + 1] {
                 self.vals[k] *= row[self.row_idx[k]] * cj;
             }

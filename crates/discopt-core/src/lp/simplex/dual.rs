@@ -58,6 +58,7 @@ pub fn solve_lp_warm(lp: &LpView<'_>, b: &[f64], start: &Basis, opts: &SimplexOp
 /// dense `m×n` matrix that [`solve_lp_warm`] builds via `from_dense` — the lifted
 /// relaxations are ~0.3% dense, so this is the difference between scanning 54M
 /// entries and touching ~19k per solve. `start` is `(col_status, basic_vars)`.
+#[allow(clippy::too_many_arguments)]
 pub fn solve_lp_warm_csc(
     mut sp: SparseCols,
     m: usize,
