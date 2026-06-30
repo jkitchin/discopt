@@ -224,28 +224,36 @@ class IncrementalMcCormickLP:
         caller can tell a (certified) ``infeasible`` apart from any other
         non-optimal verdict (time limit / numerical error).
 
-        Returns ``(status, bound, x, out_basis)`` where ``status`` is one of
-        ``"optimal"``, ``"infeasible"`` (the LP feasible set is empty over this
-        box — a rigorous fathoming proof, since the McCormick polytope is a valid
-        outer approximation), or ``"other"`` (no certified verdict). ``bound``/``x``
-        are populated only for ``"optimal"``."""
+        Returns ``(status, bound, x, out_basis, farkas_certified)`` where
+        ``status`` is one of ``"optimal"``, ``"infeasible"`` (the LP feasible set
+        is empty over this box — a rigorous fathoming proof, since the McCormick
+        polytope is a valid outer approximation), or ``"other"`` (no certified
+        verdict). ``bound``/``x`` are populated only for ``"optimal"``.
+
+        ``bound`` is the **Neumaier–Shcherbina safe lower bound** built from the
+        simplex's own row duals (issue #356) — sound at any conditioning, so it is
+        never above the true LP optimum even when an ill-conditioned lifted basis
+        makes the raw vertex objective drift high. ``farkas_certified`` is ``True``
+        only when an ``"infeasible"`` verdict was independently proven by a
+        verified Farkas dual ray; a caller can then fathom rigorously without any
+        second (HiGHS/equilibration) solve."""
         from discopt.solvers import SolveStatus
         from discopt.solvers.milp_simplex import solve_lp_warm_std
 
         cobj = self.c if c_override is None else np.asarray(c_override, dtype=np.float64)
         try:
-            result, out_basis = solve_lp_warm_std(
-                cobj, sp.csr_matrix(A), b, bounds, in_basis=in_basis
+            result, out_basis, cert = solve_lp_warm_std(
+                cobj, sp.csr_matrix(A), b, bounds, in_basis=in_basis, return_cert=True
             )
         except Exception:
-            return "other", None, None, None
+            return "other", None, None, None, False
         if result is None:
-            return "other", None, None, None
+            return "other", None, None, None, False
         if result.status == SolveStatus.INFEASIBLE:
-            return "infeasible", None, None, None
-        if result.status != SolveStatus.OPTIMAL or result.objective is None:
-            return "other", None, None, None
-        return "optimal", float(result.objective), np.asarray(result.x, dtype=float), out_basis
+            return "infeasible", None, None, None, bool(cert.farkas_certified)
+        if result.status != SolveStatus.OPTIMAL or result.bound is None:
+            return "other", None, None, None, False
+        return "optimal", float(result.bound), np.asarray(result.x, dtype=float), out_basis, False
 
     def solve(self, lb, ub, in_basis=None, c_override=None, cut_rows=None):
         """Solve the McCormick LP over [lb,ub] (plus optional cut rows); return

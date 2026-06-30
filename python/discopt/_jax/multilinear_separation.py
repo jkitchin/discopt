@@ -33,13 +33,6 @@ from itertools import product
 
 import numpy as np
 
-try:  # SciPy's HiGHS LP gives exact vertex optima and equality marginals.
-    from scipy.optimize import linprog
-
-    _SCIPY = True
-except ImportError:  # pragma: no cover
-    _SCIPY = False
-
 
 @dataclass(frozen=True)
 class EnvelopeCut:
@@ -56,26 +49,48 @@ class EnvelopeCut:
 
 
 def _solve_envelope(verts: np.ndarray, fv: np.ndarray, x_star: np.ndarray, maximize: bool):
-    """Return ``(env_value, a, b)`` of the (concave if maximize) vertex envelope."""
+    """Return ``(env_value, a, b)`` of the (concave if maximize) vertex envelope.
+
+    The supporting-hyperplane LP ``min/max f(v)·λ s.t. Vᵀλ = x*, 1ᵀλ = 1, λ ≥ 0``
+    is solved with the pure-Rust POUNCE IPM (issue #356 — no SciPy/HiGHS). Only
+    the dual *slope* ``a`` (the marginals on the ``Vᵀλ = x*`` rows) is taken from
+    POUNCE; the intercept ``b`` is then recomputed to the exact validity boundary
+    over the box vertices — ``b = minᵥ(f(v) − a·v)`` (under) / ``maxᵥ`` (over).
+    Because a multilinear function attains its box extrema at vertices, the
+    resulting hyperplane ``a·x + b`` under/over-estimates ``f`` *everywhere*, so
+    the cut is rigorously valid for ANY slope — robust to POUNCE's analytic-center
+    dual on a degenerate LP (a different facet, still valid) or any dual sign/scale
+    convention. ``None`` if POUNCE is unavailable or the solve did not converge.
+    """
+    from discopt.solvers import SolveStatus
+    from discopt.solvers.lp_pounce import solve_lp
+
     n = verts.shape[1]
     m = verts.shape[0]
     a_eq = np.vstack([verts.T, np.ones(m)])
     b_eq = np.append(x_star, 1.0)
     c = -fv if maximize else fv
-    res = linprog(c, A_eq=a_eq, b_eq=b_eq, bounds=[(0.0, None)] * m, method="highs")
-    if not res.success:
+    try:
+        res = solve_lp(c, A_eq=a_eq, b_eq=b_eq, bounds=[(0.0, np.inf)] * m)
+    except ImportError:  # pragma: no cover - POUNCE is a core dependency
         return None
-    duals = np.asarray(res.eqlin.marginals, dtype=np.float64)
+    if res.status != SolveStatus.OPTIMAL or res.dual_values is None:
+        return None
+    duals = np.asarray(res.dual_values, dtype=np.float64)
     if duals.shape[0] != n + 1 or not np.all(np.isfinite(duals)):
         return None
-    if maximize:
-        env = -float(res.fun)
-        a = -duals[:n]
-        b = -float(duals[n])
-    else:
-        env = float(res.fun)
-        a = duals[:n]
-        b = float(duals[n])
+    a = -duals[:n] if maximize else duals[:n]
+    if not np.all(np.isfinite(a)):
+        return None
+    # Recompute the intercept to the exact validity boundary over the vertices,
+    # so ``a·v + b`` bounds ``f(v)`` at every vertex (hence everywhere) — this is
+    # what makes the cut sound without trusting POUNCE's reported intercept/scale.
+    resid = fv - verts @ a  # f(v) − a·v
+    if maximize:  # concave overestimator: a·v + b >= f(v)  ->  b = maxᵥ(f(v)−a·v)
+        b = float(np.max(resid))
+    else:  # convex underestimator: a·v + b <= f(v)  ->  b = minᵥ(f(v)−a·v)
+        b = float(np.min(resid))
+    env = float(a @ x_star + b)  # value of this valid hyperplane at x*
     return env, a, b
 
 
@@ -95,10 +110,8 @@ def separate_multilinear_envelope(
     valid relaxation cut (it never excludes a true ``(x, prod x)`` point), so the
     returned list is always sound to add. Returns ``[]`` when the point is
     already inside the hull, the bounds are not finite, the factor count exceeds
-    ``max_factors`` (``2^n`` vertices), or SciPy is unavailable.
+    ``max_factors`` (``2^n`` vertices), or the LP solve did not converge.
     """
-    if not _SCIPY:
-        return []
     lb = np.asarray(lb, dtype=np.float64)
     ub = np.asarray(ub, dtype=np.float64)
     x_star = np.asarray(x_star, dtype=np.float64)

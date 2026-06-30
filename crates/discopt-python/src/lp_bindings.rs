@@ -17,8 +17,8 @@ use discopt_core::lp::crossover::{crossover_to_vertex, LpView};
 use discopt_core::lp::gomory::separate_gomory;
 use discopt_core::lp::mir::separate_mir;
 use discopt_core::lp::simplex::{
-    solve_lp as simplex_solve_lp, solve_lp_batch, solve_lp_warm, LpInstance, LpStatus,
-    SimplexOptions,
+    solve_lp as simplex_solve_lp, solve_lp_batch, solve_lp_warm, solve_lp_warm_csc, LpInstance,
+    LpStatus, SimplexOptions, SparseCols,
 };
 use numpy::{
     PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods,
@@ -316,7 +316,14 @@ fn build_extended_basis(cs: &[i8], bv: &[i64], n: usize, m: usize) -> Option<Bas
 /// (`solve_lp_warm` cold-falls-back internally), and the dual simplex converges
 /// to the LP optimum just like a cold solve — so the returned objective (hence
 /// any relaxation bound built on it) is unchanged; the basis only changes speed.
-/// Returns `(status, x, obj, iters, col_status, basic_vars)`.
+/// Returns `(status, x, obj, iters, col_status, basic_vars, dual, ray)`.
+///
+/// `dual` (length `m`) and `ray` (length `n`) are *certificate candidates* a
+/// caller verifies before trusting (see [`LpSolve::dual`]/[`LpSolve::ray`]): at
+/// `optimal` `dual` is the row duals (feed to a Neumaier–Shcherbina safe bound),
+/// at `infeasible` `dual` is a Farkas ray, at `unbounded` `ray` is a primal ray.
+/// They are mapped back from any internal equilibration, so they are consistent
+/// with the `a`/`b`/`lb`/`ub` passed in. Each is empty when not applicable.
 #[pyfunction]
 #[pyo3(signature = (c, a, b, lb, ub, start_col_status=None, start_basic_vars=None,
                     tol=1e-9, max_iter=100_000))]
@@ -339,6 +346,8 @@ pub fn solve_lp_warm_py<'py>(
     usize,
     Bound<'py, PyArray1<i8>>,
     Bound<'py, PyArray1<i64>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
 )> {
     let dims = a.shape();
     let (m, n) = (dims[0], dims[1]);
@@ -383,6 +392,88 @@ pub fn solve_lp_warm_py<'py>(
         sol.iters,
         PyArray1::from_vec(py, sol.basis.col_status),
         PyArray1::from_vec(py, basic_vars_i64),
+        PyArray1::from_vec(py, sol.dual),
+        PyArray1::from_vec(py, sol.ray),
+    ))
+}
+
+/// Sparse-native counterpart of [`solve_lp_warm_py`]: the constraint matrix is
+/// passed as CSC (`col_ptr`/`row_idx`/`vals`, column-major) instead of a dense
+/// `m × n` array, so the ~0.3%-dense lifted relaxations are never materialized
+/// dense on either side of the boundary. `n` is the total column count (structural
+/// + slacks, matching the CSC). Returns the same
+/// `(status, x, obj, iters, col_status, basic_vars, dual, ray)` 8-tuple as
+/// [`solve_lp_warm_py`], with the certificates mapped back from any equilibration.
+#[pyfunction]
+#[pyo3(signature = (c, m, n, col_ptr, row_idx, vals, b, lb, ub,
+                    start_col_status=None, start_basic_vars=None, tol=1e-9, max_iter=100_000))]
+#[allow(clippy::too_many_arguments)]
+pub fn solve_lp_warm_csc_py<'py>(
+    py: Python<'py>,
+    c: PyReadonlyArray1<'py, f64>,
+    m: usize,
+    n: usize,
+    col_ptr: PyReadonlyArray1<'py, i64>,
+    row_idx: PyReadonlyArray1<'py, i64>,
+    vals: PyReadonlyArray1<'py, f64>,
+    b: PyReadonlyArray1<'py, f64>,
+    lb: PyReadonlyArray1<'py, f64>,
+    ub: PyReadonlyArray1<'py, f64>,
+    start_col_status: Option<PyReadonlyArray1<'py, i8>>,
+    start_basic_vars: Option<PyReadonlyArray1<'py, i64>>,
+    tol: f64,
+    max_iter: usize,
+) -> PyResult<(
+    String,
+    Bound<'py, PyArray1<f64>>,
+    f64,
+    usize,
+    Bound<'py, PyArray1<i8>>,
+    Bound<'py, PyArray1<i64>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
+)> {
+    let col_ptr: Vec<usize> = col_ptr.as_slice()?.iter().map(|&x| x as usize).collect();
+    let row_idx: Vec<usize> = row_idx.as_slice()?.iter().map(|&x| x as usize).collect();
+    let vals_v: Vec<f64> = vals.as_slice()?.to_vec();
+    let sp = SparseCols::from_csc(col_ptr, row_idx, vals_v);
+    let opts = SimplexOptions {
+        tol,
+        max_iter,
+        deadline: None,
+    };
+    let start = match (start_col_status, start_basic_vars) {
+        (Some(cs), Some(bv)) => build_extended_basis(cs.as_slice()?, bv.as_slice()?, n, m),
+        _ => None,
+    };
+    let sol = solve_lp_warm_csc(
+        sp,
+        m,
+        n,
+        c.as_slice()?,
+        lb.as_slice()?,
+        ub.as_slice()?,
+        b.as_slice()?,
+        start.as_ref(),
+        &opts,
+    );
+    let status = match sol.status {
+        LpStatus::Optimal => "optimal",
+        LpStatus::Infeasible => "infeasible",
+        LpStatus::Unbounded => "unbounded",
+        LpStatus::IterLimit => "iter_limit",
+        LpStatus::Numerical => "numerical",
+    };
+    let basic_vars_i64: Vec<i64> = sol.basis.basic_vars.iter().map(|&v| v as i64).collect();
+    Ok((
+        status.to_string(),
+        PyArray1::from_vec(py, sol.x),
+        sol.obj,
+        sol.iters,
+        PyArray1::from_vec(py, sol.basis.col_status),
+        PyArray1::from_vec(py, basic_vars_i64),
+        PyArray1::from_vec(py, sol.dual),
+        PyArray1::from_vec(py, sol.ray),
     ))
 }
 

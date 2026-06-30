@@ -36,13 +36,6 @@ from itertools import product
 
 import numpy as np
 
-try:
-    from scipy.optimize import linprog
-
-    _SCIPY = True
-except ImportError:  # pragma: no cover
-    _SCIPY = False
-
 
 @dataclass(frozen=True)
 class EdgeConcaveQuadratic:
@@ -170,9 +163,17 @@ def separate_edge_concave_quadratic(
     bounds ``q(v)`` at every box vertex (and hence ``q`` everywhere, by
     edge-concavity), so the cut is sound; it is returned only when ``q_star``
     violates it.
+
+    The vertex-hull LP is solved with the pure-Rust POUNCE IPM (issue #356 — no
+    SciPy/HiGHS). Only the dual *slope* ``A`` is taken from POUNCE; the intercept
+    ``B`` is recomputed to the exact validity boundary over the vertices
+    (``minᵥ(q(v)−A·v)`` under / ``maxᵥ`` over), so by edge-concavity the cut
+    bounds ``q`` everywhere for ANY slope — robust to POUNCE's analytic-center
+    dual / sign / scale. ``None`` if POUNCE is unavailable or did not converge.
     """
-    if not _SCIPY:
-        return None
+    from discopt.solvers import SolveStatus
+    from discopt.solvers.lp_pounce import solve_lp
+
     n = len(block.var_idxs)
     if n < 2 or not (np.all(np.isfinite(lb[:n])) and np.all(np.isfinite(ub[:n]))):
         return None
@@ -184,22 +185,28 @@ def separate_edge_concave_quadratic(
     b_eq = np.append(xs, 1.0)
     maximize = block.sense == "over"
     c = -vals if maximize else vals
-    res = linprog(c, A_eq=a_eq, b_eq=b_eq, bounds=[(0.0, None)] * m, method="highs")
-    if not res.success:
+    try:
+        res = solve_lp(c, A_eq=a_eq, b_eq=b_eq, bounds=[(0.0, np.inf)] * m)
+    except ImportError:  # pragma: no cover - POUNCE is a core dependency
         return None
-    duals = np.asarray(res.eqlin.marginals, dtype=np.float64)
+    if res.status != SolveStatus.OPTIMAL or res.dual_values is None:
+        return None
+    duals = np.asarray(res.dual_values, dtype=np.float64)
     if duals.shape[0] != n + 1 or not np.all(np.isfinite(duals)):
         return None
-    if maximize:
-        env = -float(res.fun)
-        A = -duals[:n]
-        B = -float(duals[n])
-        if q_star <= env + tol:
+    A = -duals[:n] if maximize else duals[:n]
+    if not np.all(np.isfinite(A)):
+        return None
+    # Recompute the intercept to the exact validity boundary over the vertices so
+    # the cut bounds q at every vertex (hence everywhere, by edge-concavity)
+    # regardless of POUNCE's reported intercept/scale.
+    resid = vals - verts @ A  # q(v) − A·v
+    if maximize:  # overestimator: A·v + B >= q(v)  ->  B = maxᵥ(q(v)−A·v)
+        B = float(np.max(resid))
+        if q_star <= float(A @ xs + B) + tol:
             return None
-    else:
-        env = float(res.fun)
-        A = duals[:n]
-        B = float(duals[n])
-        if q_star >= env - tol:
+    else:  # underestimator: A·v + B <= q(v)  ->  B = minᵥ(q(v)−A·v)
+        B = float(np.min(resid))
+        if q_star >= float(A @ xs + B) - tol:
             return None
     return A, B

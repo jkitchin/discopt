@@ -37,6 +37,13 @@ pub fn solve_lp(lp: &LpView<'_>, b: &[f64], opts: &SimplexOptions) -> LpSolve {
             let view = scaled.view();
             let mut sol = solve_lp_scaled(&view, scaled.b(), opts);
             scaled.unscale_x(&mut sol.x);
+            // The certificate vectors are produced in scaled space; map them back
+            // so they are consistent with the *original* A/b/bounds the caller
+            // verifies against (a scaled dual against an unscaled matrix would make
+            // the safe bound / Farkas check spuriously fail — exactly on the
+            // ill-scaled LPs where the certificate matters most).
+            scaled.unscale_dual(&mut sol.dual);
+            scaled.unscale_ray(&mut sol.ray);
             sol
         }
         None => solve_lp_scaled(lp, b, opts),
@@ -52,12 +59,29 @@ pub fn solve_lp_scaled(lp: &LpView<'_>, b: &[f64], opts: &SimplexOptions) -> LpS
     Simplex::new(lp, b, opts).run()
 }
 
+/// Cold primal solve from an owned CSC matrix (already scaled by the caller, if at
+/// all) instead of a dense [`LpView`] — the sparse-native cold path used by the
+/// CSC warm entry and the dual fallback. Never materializes the dense `m×n` matrix.
+#[allow(clippy::too_many_arguments)]
+pub fn solve_lp_cols(
+    cols: SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    opts: &SimplexOptions,
+) -> LpSolve {
+    Simplex::new_from_cols(cols, m, n, c, l, u, b, opts).run()
+}
+
 /// Whether `x` satisfies the box `l ≤ x ≤ u` and the equalities `A x = b` to a
 /// small absolute/relative tolerance. Used as the final feasibility audit before
 /// certifying an `Optimal` solve so incremental `x_B` drift (Harris bound
 /// excursions, deferred refactorization) cannot return a wrong optimum.
 fn solution_within_tolerance(
-    a: &[f64],
+    cols: &SparseCols,
     m: usize,
     n: usize,
     b: &[f64],
@@ -78,9 +102,21 @@ fn solution_within_tolerance(
             return false;
         }
     }
+    // Row activity `A x` accumulated over the sparse columns (O(nnz)), not a dense
+    // `m·n` matvec — the lifted relaxations are ~0.3% dense, so this is the
+    // difference between milliseconds and seconds on the per-solve audit.
+    let mut ax = vec![0.0f64; m];
+    for j in 0..n {
+        let xj = x[j];
+        if xj != 0.0 {
+            let (rows, vals) = cols.col(j);
+            for (k, &i) in rows.iter().enumerate() {
+                ax[i] += vals[k] * xj;
+            }
+        }
+    }
     for i in 0..m {
-        let row: f64 = (0..n).map(|j| a[i * n + j] * x[j]).sum();
-        if (row - b[i]).abs() > FEAS * (1.0 + b[i].abs()) {
+        if (ax[i] - b[i]).abs() > FEAS * (1.0 + b[i].abs()) {
             return false;
         }
     }
@@ -88,8 +124,8 @@ fn solution_within_tolerance(
 }
 
 struct Simplex<'a> {
-    a: &'a [f64],     // m×n row-major (structural+slack columns)
-    cols: SparseCols, // CSC view of `a`, built once (pricing hot path)
+    cols: SparseCols, // CSC of the constraint matrix; the sole matrix view (pricing,
+    // residual, audit all go through it — no dense `m×n` copy is kept)
     b: &'a [f64],     // length m
     c: &'a [f64],     // length n
     m: usize,
@@ -106,22 +142,49 @@ struct Simplex<'a> {
     stat: Vec<i8>,     // column -> BASIC/AT_LOWER/AT_UPPER (len na)
     lb: Vec<f64>,      // len na
     ub: Vec<f64>,      // len na
+    /// Primal unbounded ray (length `n`), captured when [`Self::simplex_loop`]
+    /// detects unboundedness so [`Self::assemble`] can export it; empty until then.
+    unbounded_ray: Vec<f64>,
 }
 
 impl<'a> Simplex<'a> {
     fn new(lp: &'a LpView<'a>, b: &'a [f64], opts: &SimplexOptions) -> Self {
-        let (m, n) = (lp.m, lp.n);
+        Self::new_from_cols(
+            SparseCols::from_dense(lp.a, lp.m, lp.n),
+            lp.m,
+            lp.n,
+            lp.c,
+            lp.l,
+            lp.u,
+            b,
+            opts,
+        )
+    }
+
+    /// Build the cold primal solver from an owned CSC matrix instead of a dense
+    /// [`LpView`] — the sparse-native ingestion path (the CSC warm entry and its
+    /// cold fallback), which never materializes the dense `m×n` matrix.
+    #[allow(clippy::too_many_arguments)]
+    fn new_from_cols(
+        cols: SparseCols,
+        m: usize,
+        n: usize,
+        c: &'a [f64],
+        l: &'a [f64],
+        u: &'a [f64],
+        b: &'a [f64],
+        opts: &SimplexOptions,
+    ) -> Self {
         let na = n + m;
         let mut lb = vec![0.0; na];
         let mut ub = vec![0.0; na];
-        lb[..n].copy_from_slice(lp.l);
-        ub[..n].copy_from_slice(lp.u);
+        lb[..n].copy_from_slice(l);
+        ub[..n].copy_from_slice(u);
         // Artificials: bounds set per phase (Phase 1 [0,inf], Phase 2 [0,0]).
         Self {
-            a: lp.a,
-            cols: SparseCols::from_dense(lp.a, m, n),
+            cols,
             b,
-            c: lp.c,
+            c,
             m,
             n,
             na,
@@ -134,6 +197,7 @@ impl<'a> Simplex<'a> {
             stat: vec![AT_LOWER; na],
             lb,
             ub,
+            unbounded_ray: Vec::new(),
         }
     }
 
@@ -233,13 +297,18 @@ impl<'a> Simplex<'a> {
                 AT_LOWER // free → treated as at 0
             };
         }
-        // residual r = b − Σ A_j x_j over real nonbasic vars
+        // residual r = b − Σ A_j x_j over real nonbasic vars, accumulated through
+        // the sparse columns (O(nnz of the nonbasic-at-nonzero columns)) instead
+        // of a dense O(m·n) sweep — on the ~0.3%-dense lifted relaxations almost
+        // every nonbasic var sits at 0 (lower bound), so this touches almost
+        // nothing rather than scanning the whole matrix.
         let mut r = self.b.to_vec();
         for j in 0..self.n {
             let v = self.nb_value(j);
             if v != 0.0 {
-                for i in 0..m {
-                    r[i] -= self.a[i * self.n + j] * v;
+                let (rows, vals) = self.cols.col(j);
+                for (k, &i) in rows.iter().enumerate() {
+                    r[i] -= vals[k] * v;
                 }
             }
         }
@@ -500,6 +569,24 @@ impl<'a> Simplex<'a> {
             }
 
             if t_max >= INF {
+                // Capture the primal unbounded ray over the real columns (length
+                // `n`): entering `q` moves by `dir`, each basic variable follows
+                // `x_B -= dir·α`, and `A d = 0` by construction (α = B⁻¹A_q ⇒
+                // A_q − B·α = 0). A caller verifies `A d = 0`, box-recession, and
+                // `cᵀd < 0` before trusting it, so an artificial leaking in (it is
+                // pinned to [0,0] in phase 2, so its ray entry is 0 anyway) cannot
+                // make the check pass spuriously.
+                let mut ray = vec![0.0; self.n];
+                if q < self.n {
+                    ray[q] = dir;
+                }
+                for i in 0..m {
+                    let bi = self.basis[i];
+                    if bi < self.n {
+                        ray[bi] = -dir * alpha[i];
+                    }
+                }
+                self.unbounded_ray = ray;
                 return Err(LpStatus::Unbounded);
             }
             if t_max <= self.tol {
@@ -623,12 +710,49 @@ impl<'a> Simplex<'a> {
         // warm path's cold fallback, or the MILP driver decertifying the gap and
         // branching) rather than trusting a wrong "Optimal".
         let status = if status == LpStatus::Optimal
-            && !solution_within_tolerance(self.a, self.m, self.n, self.b, &self.lb, &self.ub, &x)
+            && !solution_within_tolerance(&self.cols, self.m, self.n, self.b, &self.lb, &self.ub, &x)
         {
             LpStatus::Numerical
         } else {
             status
         };
+
+        // Certificate vector `y = B⁻ᵀ c_B` (length m). On `Optimal` use the real
+        // objective costs — these are the row duals feeding a safe (never-too-high)
+        // dual bound. On `Infeasible` use the phase-1 costs (1 on artificials, 0
+        // elsewhere): the phase-1 multipliers form a Farkas infeasibility ray. The
+        // btran is a read-only solve against the final factorization, so it neither
+        // perturbs the basis nor the returned `x`/`obj`. Empty on any other status
+        // (no meaningful certificate) — and empty too if the btran fails, so the
+        // caller simply falls back rather than trusting an unsound vector.
+        let dual: Vec<f64> = match status {
+            LpStatus::Optimal | LpStatus::Infeasible => {
+                let mut y: Vec<f64> = self
+                    .basis
+                    .iter()
+                    .map(|&j| {
+                        if status == LpStatus::Optimal {
+                            if j < self.n {
+                                self.c[j]
+                            } else {
+                                0.0
+                            }
+                        } else if j >= self.n {
+                            1.0 // basic artificial: phase-1 cost
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect();
+                if self.lu.btran(&mut y).is_ok() {
+                    y
+                } else {
+                    Vec::new()
+                }
+            }
+            _ => Vec::new(),
+        };
+        let ray = std::mem::take(&mut self.unbounded_ray);
 
         // Export a *complete*, row-ordered basis of real columns (length m).
         //
@@ -684,6 +808,8 @@ impl<'a> Simplex<'a> {
                 basic_vars,
             },
             iters: 0,
+            dual,
+            ray,
         }
     }
 
@@ -698,6 +824,8 @@ impl<'a> Simplex<'a> {
                 basic_vars: Vec::new(),
             },
             iters: 0,
+            dual: Vec::new(),
+            ray: Vec::new(),
         }
     }
 }
@@ -790,14 +918,15 @@ mod tests {
     fn feasibility_audit_accepts_and_rejects() {
         // Row: x0 + x1 = 4, with x0,x1 ∈ [0, 5]. (n real cols = 2)
         let a = [1.0, 1.0];
+        let cols = SparseCols::from_dense(&a, 1, 2);
         let b = [4.0];
         let l = [0.0, 0.0];
         let u = [5.0, 5.0];
         // Exact feasible point passes.
-        assert!(solution_within_tolerance(&a, 1, 2, &b, &l, &u, &[1.0, 3.0]));
+        assert!(solution_within_tolerance(&cols, 1, 2, &b, &l, &u, &[1.0, 3.0]));
         // Ax=b drift beyond tolerance is rejected (would be a false "Optimal").
         assert!(!solution_within_tolerance(
-            &a,
+            &cols,
             1,
             2,
             &b,
@@ -807,7 +936,7 @@ mod tests {
         ));
         // A bound excursion beyond tolerance is rejected.
         assert!(!solution_within_tolerance(
-            &a,
+            &cols,
             1,
             2,
             &b,
@@ -817,7 +946,7 @@ mod tests {
         ));
         // Tiny within-tolerance noise still passes.
         assert!(solution_within_tolerance(
-            &a,
+            &cols,
             1,
             2,
             &b,
@@ -825,6 +954,119 @@ mod tests {
             &u,
             &[1.0, 3.0 + 1e-9]
         ));
+    }
+
+    // --- certificate vectors (issue #356) ------------------------------------
+
+    const CERT_INF: f64 = 1e20;
+
+    /// Safe lower bound `g(y) = bᵀy + Σ_k min_{z_k∈[l,u]} (c−Aᵀy)_k z_k` from
+    /// free-sign multipliers `y`. `<= true optimum` for any `y` (weak duality).
+    fn safe_bound(
+        y: &[f64],
+        c: &[f64],
+        a: &[f64],
+        m: usize,
+        n: usize,
+        b: &[f64],
+        l: &[f64],
+        u: &[f64],
+    ) -> f64 {
+        let mut g = b.iter().zip(y).map(|(bi, yi)| bi * yi).sum::<f64>();
+        for j in 0..n {
+            let aty: f64 = (0..m).map(|i| a[i * n + j] * y[i]).sum();
+            let rc = c[j] - aty;
+            if rc > 0.0 {
+                g += if l[j] <= -CERT_INF {
+                    f64::NEG_INFINITY
+                } else {
+                    rc * l[j]
+                };
+            } else if rc < 0.0 {
+                g += if u[j] >= CERT_INF {
+                    f64::NEG_INFINITY
+                } else {
+                    rc * u[j]
+                };
+            }
+        }
+        g
+    }
+
+    #[test]
+    fn optimal_duals_reproduce_objective_via_safe_bound() {
+        // min -x0 - 2x1 s.t. x0+x1+s=4, x∈[0,5], s∈[0,inf]. Optimum -8.
+        let a = [1.0, 1.0, 1.0];
+        let c = [-1.0, -2.0, 0.0];
+        let l = [0.0, 0.0, 0.0];
+        let u = [5.0, 5.0, CERT_INF];
+        let r = solve(&a, 1, 3, &[4.0], &c, &l, &u);
+        assert_eq!(r.status, LpStatus::Optimal);
+        assert_eq!(r.dual.len(), 1);
+        let g = safe_bound(&r.dual, &c, &a, 1, 3, &[4.0], &l, &u);
+        // Safe bound from the simplex's own duals reproduces the optimum and is
+        // never above it (the soundness property the spatial-B&B relies on).
+        assert!((g - r.obj).abs() < 1e-9, "safe bound {g} vs obj {}", r.obj);
+        assert!(g <= r.obj + 1e-9);
+    }
+
+    #[test]
+    fn infeasible_emits_a_verifiable_farkas_ray() {
+        // x0 + s = 1, s∈[0,inf], x0∈[2,inf): x0≥2 but x0≤1 → infeasible.
+        let a = [1.0, 1.0];
+        let c = [1.0, 0.0];
+        let l = [2.0, 0.0];
+        let u = [CERT_INF, CERT_INF];
+        let r = solve(&a, 1, 2, &[1.0], &c, &l, &u);
+        assert_eq!(r.status, LpStatus::Infeasible);
+        assert_eq!(r.dual.len(), 1);
+        // Farkas: for some sign, the c=0 safe bound g0(±y) > 0 proves emptiness.
+        let zeros = [0.0, 0.0];
+        let pos = safe_bound(&r.dual, &zeros, &a, 1, 2, &[1.0], &l, &u);
+        let neg_y: Vec<f64> = r.dual.iter().map(|v| -v).collect();
+        let neg = safe_bound(&neg_y, &zeros, &a, 1, 2, &[1.0], &l, &u);
+        assert!(
+            pos > 0.0 || neg > 0.0,
+            "neither sign certifies: +{pos} -{neg}"
+        );
+    }
+
+    #[test]
+    fn unbounded_emits_a_valid_primal_ray() {
+        // min -x0 s.t. x0 - s = 0, x0,s∈[0,inf) → unbounded along x0=s growing.
+        let a = [1.0, -1.0];
+        let c = [-1.0, 0.0];
+        let l = [0.0, 0.0];
+        let u = [CERT_INF, CERT_INF];
+        let r = solve(&a, 1, 2, &[0.0], &c, &l, &u);
+        assert_eq!(r.status, LpStatus::Unbounded);
+        assert_eq!(r.ray.len(), 2);
+        // A d = 0 (stays on the constraint), and cᵀd < 0 (objective decreases).
+        let ad: f64 = (0..2).map(|j| a[j] * r.ray[j]).sum();
+        let cd: f64 = (0..2).map(|j| c[j] * r.ray[j]).sum();
+        assert!(ad.abs() < 1e-9, "A·d = {ad} (should be 0)");
+        assert!(cd < -1e-9, "c·d = {cd} (should be < 0)");
+    }
+
+    #[test]
+    fn ill_scaled_optimum_safe_bound_not_above_truth() {
+        // Wide-coefficient LP (range 1e9 → equilibration fires). The duals are
+        // unscaled, so the safe bound stays <= the true optimum.
+        let a = [1e9, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let c = [-1.0, -1.0, 0.0, 0.0];
+        let l = [0.0, 0.0, 0.0, 0.0];
+        let u = [1.0, 10.0, CERT_INF, CERT_INF];
+        let b = [1e9, 5.0];
+        let r = solve(&a, 2, 4, &b, &c, &l, &u);
+        assert_eq!(r.status, LpStatus::Optimal);
+        assert_eq!(r.dual.len(), 2);
+        let g = safe_bound(&r.dual, &c, &a, 2, 4, &b, &l, &u);
+        assert!(g <= r.obj + 1e-6, "safe bound {g} above obj {}", r.obj);
+        assert!(
+            (g - r.obj).abs() < 1e-3,
+            "safe bound {g} too loose vs {}",
+            r.obj
+        );
     }
 
     #[test]
@@ -837,8 +1079,9 @@ mod tests {
         let r = solve(&a, 2, 4, &[4.0, 6.0], &c, &l, &u);
         assert_eq!(r.status, LpStatus::Optimal);
         // The returned optimum genuinely satisfies the audit predicate.
+        let cols = SparseCols::from_dense(&a, 2, 4);
         assert!(solution_within_tolerance(
-            &a,
+            &cols,
             2,
             4,
             &[4.0, 6.0],

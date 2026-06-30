@@ -264,6 +264,15 @@ class MilpRelaxationResult:
     objective: Optional[float] = None
     bound: Optional[float] = None
     x: Optional[np.ndarray] = None
+    # Pure-Rust certificate side-channel (issue #356), populated only on the
+    # warm-started-simplex pure-LP path. ``safe_bound`` is a Neumaier–Shcherbina
+    # safe lower bound from the simplex's own row duals — ``<=`` the true optimum
+    # at any conditioning, so a caller can fathom on it without an independent
+    # (HiGHS) cross-check. ``farkas_certified`` is ``True`` when an ``infeasible``
+    # verdict was independently proven by a verified Farkas dual ray. Both default
+    # to "unavailable" so the generic / MILP-B&B paths are unaffected.
+    safe_bound: Optional[float] = None
+    farkas_certified: bool = False
 
 
 class MilpRelaxationModel:
@@ -461,8 +470,8 @@ class MilpRelaxationModel:
             in_basis = self._warm_basis
 
         try:
-            result, out_basis = solve_lp_warm_std(
-                self._c, self._A_ub, self._b_ub, self._bounds, in_basis=in_basis
+            result, out_basis, cert = solve_lp_warm_std(
+                self._c, self._A_ub, self._b_ub, self._bounds, in_basis=in_basis, return_cert=True
             )
         except Exception:  # pragma: no cover - defensive; fall back to generic path
             return None
@@ -493,7 +502,17 @@ class MilpRelaxationModel:
         bound = None
         if result.bound is not None and self._objective_bound_valid:
             bound = float(result.bound) + self._obj_offset
-        return MilpRelaxationResult(status=status_str, objective=obj, bound=bound, x=result.x)
+        safe_bound = None
+        if cert.safe_bound is not None and self._objective_bound_valid:
+            safe_bound = float(cert.safe_bound) + self._obj_offset
+        return MilpRelaxationResult(
+            status=status_str,
+            objective=obj,
+            bound=bound,
+            x=result.x,
+            safe_bound=safe_bound,
+            farkas_certified=bool(cert.farkas_certified),
+        )
 
     def _solve_lp_warm_equilibrated(self) -> Optional["MilpRelaxationResult"]:
         """Warm-simplex re-solve on the *equilibrated* LP.
@@ -522,7 +541,9 @@ class MilpRelaxationModel:
             c_s, A_s, b_s, bounds_s, col_scale = equilibrate_relaxation_lp(
                 self._c, self._A_ub, self._b_ub, self._bounds, None
             )
-            result, _ = solve_lp_warm_std(c_s, sp.csr_matrix(A_s), b_s, bounds_s, in_basis=None)
+            result, _, cert = solve_lp_warm_std(
+                c_s, sp.csr_matrix(A_s), b_s, bounds_s, in_basis=None, return_cert=True
+            )
         except Exception:  # pragma: no cover - defensive
             return None
         if result is None:
@@ -542,13 +563,25 @@ class MilpRelaxationModel:
         bound = None
         if result.bound is not None and self._objective_bound_valid:
             bound = float(result.bound) + self._obj_offset
+        # Equilibration is objective-invariant, so the safe bound computed on the
+        # rescaled LP is a valid safe bound on the original objective (issue #356).
+        safe_bound = None
+        if cert.safe_bound is not None and self._objective_bound_valid:
+            safe_bound = float(cert.safe_bound) + self._obj_offset
         # Map the scaled solution point back to the original variables (x = D x').
         x_mapped = None
         if result.x is not None:
             x_mapped = np.asarray(result.x, dtype=np.float64) * np.asarray(
                 col_scale, dtype=np.float64
             )
-        return MilpRelaxationResult(status=status_str, objective=obj, bound=bound, x=x_mapped)
+        return MilpRelaxationResult(
+            status=status_str,
+            objective=obj,
+            bound=bound,
+            x=x_mapped,
+            safe_bound=safe_bound,
+            farkas_certified=bool(cert.farkas_certified),
+        )
 
 
 def sanitize_relaxation_for_conditioning(
