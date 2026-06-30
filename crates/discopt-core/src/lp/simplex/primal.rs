@@ -59,6 +59,23 @@ pub fn solve_lp_scaled(lp: &LpView<'_>, b: &[f64], opts: &SimplexOptions) -> LpS
     Simplex::new(lp, b, opts).run()
 }
 
+/// Cold primal solve from an owned CSC matrix (already scaled by the caller, if at
+/// all) instead of a dense [`LpView`] — the sparse-native cold path used by the
+/// CSC warm entry and the dual fallback. Never materializes the dense `m×n` matrix.
+#[allow(clippy::too_many_arguments)]
+pub fn solve_lp_cols(
+    cols: SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    opts: &SimplexOptions,
+) -> LpSolve {
+    Simplex::new_from_cols(cols, m, n, c, l, u, b, opts).run()
+}
+
 /// Whether `x` satisfies the box `l ≤ x ≤ u` and the equalities `A x = b` to a
 /// small absolute/relative tolerance. Used as the final feasibility audit before
 /// certifying an `Optimal` solve so incremental `x_B` drift (Harris bound
@@ -132,17 +149,42 @@ struct Simplex<'a> {
 
 impl<'a> Simplex<'a> {
     fn new(lp: &'a LpView<'a>, b: &'a [f64], opts: &SimplexOptions) -> Self {
-        let (m, n) = (lp.m, lp.n);
+        Self::new_from_cols(
+            SparseCols::from_dense(lp.a, lp.m, lp.n),
+            lp.m,
+            lp.n,
+            lp.c,
+            lp.l,
+            lp.u,
+            b,
+            opts,
+        )
+    }
+
+    /// Build the cold primal solver from an owned CSC matrix instead of a dense
+    /// [`LpView`] — the sparse-native ingestion path (the CSC warm entry and its
+    /// cold fallback), which never materializes the dense `m×n` matrix.
+    #[allow(clippy::too_many_arguments)]
+    fn new_from_cols(
+        cols: SparseCols,
+        m: usize,
+        n: usize,
+        c: &'a [f64],
+        l: &'a [f64],
+        u: &'a [f64],
+        b: &'a [f64],
+        opts: &SimplexOptions,
+    ) -> Self {
         let na = n + m;
         let mut lb = vec![0.0; na];
         let mut ub = vec![0.0; na];
-        lb[..n].copy_from_slice(lp.l);
-        ub[..n].copy_from_slice(lp.u);
+        lb[..n].copy_from_slice(l);
+        ub[..n].copy_from_slice(u);
         // Artificials: bounds set per phase (Phase 1 [0,inf], Phase 2 [0,0]).
         Self {
-            cols: SparseCols::from_dense(lp.a, m, n),
+            cols,
             b,
-            c: lp.c,
+            c,
             m,
             n,
             na,

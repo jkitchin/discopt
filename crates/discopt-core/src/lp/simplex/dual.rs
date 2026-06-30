@@ -16,8 +16,8 @@
 #![allow(clippy::needless_range_loop)]
 
 use super::linsolve::{FeralLU, LinearSolver};
-use super::primal::solve_lp_scaled;
-use super::scaling::ScaledLp;
+use super::primal::{solve_lp_cols, solve_lp_scaled};
+use super::scaling::{ScaledLp, Scaling};
 use super::sparse::SparseCols;
 use super::{LpSolve, LpStatus, SimplexOptions};
 use crate::lp::basis::{Basis, AT_LOWER, AT_UPPER, BASIC};
@@ -48,6 +48,67 @@ pub fn solve_lp_warm(lp: &LpView<'_>, b: &[f64], start: &Basis, opts: &SimplexOp
             sol
         }
         None => solve_lp_warm_scaled(lp, b, start, opts),
+    }
+}
+
+/// Sparse-native warm LP solve from a CSC matrix: equilibrate (sparse factors +
+/// in-place scaling, `O(nnz)`), warm dual-simplex re-optimize from `start` (or
+/// cold-solve when absent / the basis is unusable), then map the solution and
+/// certificates back through the scaling. The whole path avoids materializing the
+/// dense `m×n` matrix that [`solve_lp_warm`] builds via `from_dense` — the lifted
+/// relaxations are ~0.3% dense, so this is the difference between scanning 54M
+/// entries and touching ~19k per solve. `start` is `(col_status, basic_vars)`.
+pub fn solve_lp_warm_csc(
+    mut sp: SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    start: Option<&Basis>,
+    opts: &SimplexOptions,
+) -> LpSolve {
+    match Scaling::from_sparse(&sp, m, n) {
+        Some(scaling) => {
+            scaling.scale_cols(&mut sp);
+            let c_s = scaling.scale_c(c);
+            let b_s = scaling.scale_b(b);
+            let l_s = scaling.scale_lower(l);
+            let u_s = scaling.scale_upper(u);
+            let mut sol = solve_csc_core(&sp, m, n, &c_s, &l_s, &u_s, &b_s, start, opts);
+            // Map x and the dual/Farkas/primal-ray certificates back to the
+            // original space (see the matching note in `solve_lp_warm`).
+            scaling.unscale_x(&mut sol.x);
+            scaling.unscale_dual(&mut sol.dual);
+            scaling.unscale_ray(&mut sol.ray);
+            sol
+        }
+        None => solve_csc_core(&sp, m, n, c, l, u, b, start, opts),
+    }
+}
+
+/// Warm dual (or cold) solve of an already-scaled CSC LP. Shared by the scaled and
+/// unscaled branches of [`solve_lp_warm_csc`].
+#[allow(clippy::too_many_arguments)]
+fn solve_csc_core(
+    sp: &SparseCols,
+    m: usize,
+    n: usize,
+    c: &[f64],
+    l: &[f64],
+    u: &[f64],
+    b: &[f64],
+    start: Option<&Basis>,
+    opts: &SimplexOptions,
+) -> LpSolve {
+    match start {
+        Some(basis) => match PreparedDual::prepare_cols(sp, m, n, c, l, u, basis, opts) {
+            Some(p) => p.reoptimize(l, u, b, opts),
+            // Unusable warm basis (wrong size / singular / dual-infeasible): cold.
+            None => solve_lp_cols(sp.clone(), m, n, c, l, u, b, opts),
+        },
+        None => solve_lp_cols(sp.clone(), m, n, c, l, u, b, opts),
     }
 }
 
@@ -87,9 +148,6 @@ pub fn solve_lp_warm_scaled_csc(
     }
 }
 
-fn col(a: &[f64], m: usize, n: usize, j: usize) -> Vec<f64> {
-    (0..m).map(|i| a[i * n + j]).collect()
-}
 
 /// A basis factorization prepared once for repeated dual re-optimizations that
 /// differ only in their bounds and right-hand side.
@@ -108,7 +166,6 @@ fn col(a: &[f64], m: usize, n: usize, j: usize) -> Vec<f64> {
 /// fractional, hence basic, variable), so the precondition verified at `prepare`
 /// holds for every `reoptimize` from the same basis.
 pub struct PreparedDual<'a> {
-    a: &'a [f64],
     m: usize,
     n: usize,
     c: &'a [f64],
@@ -130,7 +187,7 @@ impl<'a> PreparedDual<'a> {
         opts: &SimplexOptions,
         sp: &'a SparseCols,
     ) -> Option<Self> {
-        let (a, m, n, l, u, c) = (lp.a, lp.m, lp.n, lp.l, lp.u, lp.c);
+        let (m, n, l, u, c) = (lp.m, lp.n, lp.l, lp.u, lp.c);
         if start.basic_vars.len() != m {
             return None;
         }
@@ -190,7 +247,6 @@ impl<'a> PreparedDual<'a> {
         }
 
         Some(PreparedDual {
-            a,
             m,
             n,
             c,
@@ -202,30 +258,47 @@ impl<'a> PreparedDual<'a> {
         })
     }
 
+    /// As [`Self::prepare`] but from a borrowed CSC matrix + bound/cost slices
+    /// instead of a dense [`LpView`] — the sparse-native warm path. Identical
+    /// preconditions and factorization (both already build the basis from `sp`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_cols(
+        sp: &'a SparseCols,
+        m: usize,
+        n: usize,
+        c: &'a [f64],
+        l: &'a [f64],
+        u: &'a [f64],
+        start: &Basis,
+        opts: &SimplexOptions,
+    ) -> Option<Self> {
+        let lp = LpView {
+            a: &[],
+            m,
+            n,
+            c,
+            l,
+            u,
+        };
+        Self::prepare(&lp, start, opts, sp)
+    }
+
     /// Dual re-optimization from the prepared basis for bounds `l`/`u` and rhs
     /// `b`, returning a valid solution. On any numerical difficulty it cold-solves
     /// the same LP, so the result is always correct.
     pub fn reoptimize(&self, l: &[f64], u: &[f64], b: &[f64], opts: &SimplexOptions) -> LpSolve {
         match self.run_dual(l, u, b, opts) {
             Some(sol) => sol,
-            None => {
-                let lp = LpView {
-                    a: self.a,
-                    m: self.m,
-                    n: self.n,
-                    c: self.c,
-                    l,
-                    u,
-                };
-                solve_lp_scaled(&lp, b, opts)
-            }
+            // Cold fallback from the prepared CSC matrix (clone is O(nnz), paid only
+            // on the rare numerical-breakdown path) — no dense matrix is kept.
+            None => solve_lp_cols(self.sp.clone(), self.m, self.n, self.c, l, u, b, opts),
         }
     }
 
     /// The dual pivots, on a fresh clone of the prepared factorization/basis.
     /// `None` requests the cold fallback (numerical breakdown or iteration cap).
     fn run_dual(&self, l: &[f64], u: &[f64], b: &[f64], opts: &SimplexOptions) -> Option<LpSolve> {
-        let (a, m, n, c, sp) = (self.a, self.m, self.n, self.c, &self.sp);
+        let (m, n, c, sp) = (self.m, self.n, self.c, &self.sp);
         let tol = opts.tol;
         // Clone the pristine prepared state; the loop mutates these in place.
         let mut lu = self.lu.clone();
@@ -408,8 +481,10 @@ impl<'a> PreparedDual<'a> {
             }
 
             // Entering column α = B⁻¹A_q for the Devex weight update (and reused as
-            // the raw column for the product-form basis update).
-            let raw_q = col(a, m, n, q);
+            // the raw column for the product-form basis update). Scattered from the
+            // CSC view into a dense buffer (O(nnz_q)), not read from a dense matrix.
+            let mut raw_q = vec![0.0; m];
+            sp.scatter(q, &mut raw_q);
             let mut alpha = raw_q.clone();
             if lu.ftran(&mut alpha).is_err() {
                 return None;

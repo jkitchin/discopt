@@ -387,28 +387,35 @@ def solve_lp_warm_std(
     verified infeasibility proof on an ``infeasible`` one — both without a second
     external solve (issue #356).
     """
-    from discopt._rust import solve_lp_warm_py
+    from discopt._rust import solve_lp_warm_csc_py
 
     c_arr = np.asarray(c, dtype=np.float64).ravel()
     n = c_arr.shape[0]
 
     if A_ub is not None and b_ub is not None and np.size(b_ub) > 0:
-        a = (
-            cast("sp.spmatrix", A_ub).toarray()
+        a_struct = (
+            sp.csc_matrix(A_ub)
             if sp.issparse(A_ub)
-            else np.asarray(A_ub, dtype=np.float64)
+            else sp.csc_matrix(np.asarray(A_ub, dtype=np.float64).reshape(-1, n))
         )
-        a_ub = a.reshape(-1, n)
         b_vec = np.asarray(b_ub, dtype=np.float64).ravel()
     else:
-        a_ub = np.zeros((0, n), dtype=np.float64)
+        a_struct = sp.csc_matrix((0, n), dtype=np.float64)
         b_vec = np.zeros(0, dtype=np.float64)
-    m = a_ub.shape[0]
+    m = a_struct.shape[0]
 
-    a_std = np.zeros((m, n + m), dtype=np.float64)
+    # Standard form ``[A_ub | I_m] z = b`` (one slack per row) assembled directly in
+    # CSC, with the slack identity left implicit-sparse — the lifted relaxations are
+    # ~0.3% dense, so the old dense ``a_std`` (np.zeros((m, n+m)) + np.eye(m)) was a
+    # 431MB / O(m^2) allocation per solve that the Rust side then re-scanned. The
+    # sparse matrix flows straight to the CSC-native simplex and the safe-bound /
+    # Farkas helpers (both accept a SciPy sparse matrix). (issue #356)
     if m > 0:
-        a_std[:, :n] = a_ub
-        a_std[:, n:] = np.eye(m)
+        a_std = sp.hstack(
+            [a_struct, sp.identity(m, format="csc", dtype=np.float64)], format="csc"
+        ).tocsc()
+    else:
+        a_std = a_struct.tocsc()
 
     if bounds is not None:
         lb = np.array([lo for lo, _ in bounds], dtype=np.float64)
@@ -423,9 +430,13 @@ def solve_lp_warm_std(
     cs0 = None if in_basis is None else np.ascontiguousarray(in_basis[0], dtype=np.int8)
     bv0 = None if in_basis is None else np.ascontiguousarray(in_basis[1], dtype=np.int64)
 
-    status, x_full, obj, _iters, cs, bv, dual, ray = solve_lp_warm_py(
+    status, x_full, obj, _iters, cs, bv, dual, ray = solve_lp_warm_csc_py(
         np.ascontiguousarray(c_std),
-        np.ascontiguousarray(a_std),
+        m,
+        n + m,
+        np.ascontiguousarray(a_std.indptr, dtype=np.int64),
+        np.ascontiguousarray(a_std.indices, dtype=np.int64),
+        np.ascontiguousarray(a_std.data, dtype=np.float64),
         np.ascontiguousarray(b_vec),
         np.ascontiguousarray(lb_std),
         np.ascontiguousarray(ub_std),

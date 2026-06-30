@@ -95,8 +95,27 @@ impl Scaling {
         if hi == 0.0 || hi / lo <= SCALE_TRIGGER {
             return None;
         }
-        let (row, col) = equilibrate(a, m, n);
+        let (row, col) = equilibrate(&SparseCols::from_dense(a, m, n), m, n);
         Some(Scaling { row, col, m, n })
+    }
+
+    /// Equilibration factors for an already-CSC matrix, or `None` when its dynamic
+    /// range is below [`SCALE_TRIGGER`]. The sparse-native entry: identical factors
+    /// to [`Self::from_matrix`] (zeros never affect a line's significant min/max),
+    /// with no dense `m·n` materialization anywhere on the path.
+    pub fn from_sparse(sp: &SparseCols, m: usize, n: usize) -> Option<Scaling> {
+        let (lo, hi) = sp.value_range();
+        if hi == 0.0 || hi / lo <= SCALE_TRIGGER {
+            return None;
+        }
+        let (row, col) = equilibrate(sp, m, n);
+        Some(Scaling { row, col, m, n })
+    }
+
+    /// Scale a CSC matrix in place by the same `R A C` factors — the sparse
+    /// analogue of [`Self::scale_matrix`], `O(nnz)` with no dense copy.
+    pub fn scale_cols(&self, sp: &mut SparseCols) {
+        sp.scale_in_place(&self.row, &self.col);
     }
 
     /// Scaled matrix `Â = R A C` (owned, row-major `m × n`).
@@ -241,8 +260,7 @@ impl ScaledLp {
 /// seconds here alone). The factors are *bit-identical* to the old dense sweep: a
 /// zero entry never affects a line's significant min/max, so skipping the
 /// structural zeros changes nothing.
-fn equilibrate(a: &[f64], m: usize, n: usize) -> (Vec<f64>, Vec<f64>) {
-    let sp = SparseCols::from_dense(a, m, n);
+fn equilibrate(sp: &SparseCols, m: usize, n: usize) -> (Vec<f64>, Vec<f64>) {
     let (col_ptr, row_idx, vals) = sp.raw();
     let mut row = vec![1.0f64; m];
     let mut col = vec![1.0f64; n];
