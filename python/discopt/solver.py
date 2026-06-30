@@ -17,7 +17,6 @@ import time
 from typing import TYPE_CHECKING, Any, Callable, Optional, TypeVar, Union, cast
 
 import numpy as np
-from scipy.optimize import minimize as scipy_minimize
 
 # ``flat_variable_bounds`` lives in a JAX-free helper module, so importing it
 # does not pull in JAX. The JAX-dependent helpers (NLPEvaluator, alphaBB,
@@ -221,6 +220,13 @@ _PER_NODE_OBBT_ROUNDS = 3
 # per-node LP catastrophically slow on large models (casctanks, 500 vars: 359 s
 # for one node), so it is auto-engaged only at or below this lifted-variable count.
 _AUTO_RLT_LEVEL1_MAX_VARS = 50
+# Convex-objective node bound (the supporting-hyperplane lower bound for a model
+# whose minimized objective is a convex quadratic). No size cap: the bound is a
+# deterministic projected-gradient solve on the constant Hessian and is valid at
+# any iterate (see ``_convex_objective_lower_bound``). Gated only on a PSD Hessian
+# with this margin, so the convexity verdict (hence bound soundness) is never
+# borderline.
+_CONVEX_OBJ_PSD_TOL = 1e-6
 # Floor on the time budget handed to the end-of-solve root-relaxation fallback
 # bound (issue #138). On a hard nonconvex minimize the B&B loop can consume the
 # entire `time_limit` and exit uncertified, leaving no time for the rigorous
@@ -481,9 +487,11 @@ def _compute_alphabb_bound(evaluator, node_lb, node_ub, alpha):
     NEGATIVE, which flips L into an over-estimator and yields an invalid
     (too-high) "lower bound".
 
-    Returns the minimum of L over [node_lb, node_ub], or -inf when the box is
-    unbounded / so wide that alphaBB is numerically meaningless (in which case
-    alphaBB abstains and the caller's interval / LP relaxation bounds stand).
+    Returns a valid lower bound on min f over [node_lb, node_ub] (a supporting
+    hyperplane of the convex L; see below), or -inf when the box is unbounded / so
+    wide that alphaBB is numerically meaningless, or the evaluator cannot supply
+    derivatives, or alpha did not convexify L (in which case alphaBB abstains and
+    the caller's interval / LP relaxation bounds stand).
     """
     node_lb = np.asarray(node_lb, dtype=np.float64)
     node_ub = np.asarray(node_ub, dtype=np.float64)
@@ -509,26 +517,247 @@ def _compute_alphabb_bound(evaluator, node_lb, node_ub, alpha):
     if np.any(node_ub < node_lb):
         return -np.inf
 
-    def underestimator(x):
-        f_val = evaluator.evaluate_objective(x)
-        perturbation = np.sum(alpha * (x - node_lb) * (node_ub - x))
-        return f_val - perturbation
+    alpha = np.asarray(alpha, dtype=np.float64)
+    n = node_lb.shape[0]
+    center = 0.5 * (node_lb + node_ub)
 
-    # Multiple starting points for robustness, all strictly inside the box.
-    width = node_ub - node_lb
-    mid = 0.5 * (node_lb + node_ub)
-    bounds = list(zip(node_lb, node_ub))
+    # The bound is a SUPPORTING HYPERPLANE of the convex underestimator
+    #   L(x) = f(x) - sum_i alpha_i (x_i-lb_i)(ub_i-x_i),
+    # which underestimates f on the box and is convex by alphaBB construction.
+    # The hyperplane min over the box is valid at ANY anchor x0 (so this is sound
+    # regardless of how well x0 is optimized), and exact at x0 = argmin_box L. We
+    # find x0 with a deterministic projected-gradient solve on L's own (analytic)
+    # derivatives -- no SciPy optimizer, no random restarts. grad/Hessian of the
+    # *perturbation* are closed form; f's come from the evaluator. If the evaluator
+    # cannot supply them, abstain (sound: the caller's interval/LP bounds stand).
+    grad_f = getattr(evaluator, "evaluate_gradient", None)
+    hess_f = getattr(evaluator, "evaluate_hessian", None)
+    if grad_f is None or hess_f is None:
+        return -np.inf
 
-    best_val = np.inf
-    for x0 in (mid, node_lb + 0.25 * width, node_lb + 0.75 * width):
-        try:
-            result = scipy_minimize(underestimator, x0, method="L-BFGS-B", bounds=bounds)
-            if result.fun < best_val:
-                best_val = result.fun
-        except (ValueError, ArithmeticError, RuntimeError):
-            continue
+    def L(x):
+        x = np.asarray(x, dtype=np.float64)
+        pert = float(np.sum(alpha * (x - node_lb) * (node_ub - x)))
+        return float(evaluator.evaluate_objective(x)) - pert
 
-    return best_val if np.isfinite(best_val) else -np.inf
+    def grad_L(x):
+        # d/dx_i [alpha_i (x_i-lb_i)(ub_i-x_i)] = alpha_i (lb_i + ub_i - 2 x_i).
+        return np.asarray(grad_f(x), dtype=np.float64) - alpha * (node_lb + node_ub - 2.0 * x)
+
+    # alphaBB chooses alpha so L's Hessian Hf + 2 diag(alpha) is PSD on the box.
+    # Confirm at the center; if the perturbation did not convexify L there, abstain
+    # rather than trust a supporting hyperplane that needs convexity to be valid.
+    try:
+        Hf = np.asarray(hess_f(center), dtype=np.float64)
+    except (ValueError, ArithmeticError, RuntimeError):
+        return -np.inf
+    if Hf.shape != (n, n) or not np.all(np.isfinite(Hf)):
+        return -np.inf
+    eigs = np.linalg.eigvalsh(0.5 * (Hf + Hf.T) + 2.0 * np.diag(alpha))
+    if float(eigs.min()) < -1e-7:
+        return -np.inf
+    lipschitz = float(np.abs(eigs).max())  # >= ||Hessian(L)||_2 at the center
+
+    # Deterministic FISTA projected gradient toward argmin_box L (tightness only).
+    x_hat = center.copy()
+    if np.isfinite(lipschitz) and lipschitz > 0.0:
+        step = 1.0 / lipschitz
+        x = center.copy()
+        y = center.copy()
+        t = 1.0
+        for _ in range(200):
+            try:
+                gy = grad_L(y)
+            except (ValueError, ArithmeticError, RuntimeError):
+                break
+            if not np.all(np.isfinite(gy)):
+                break
+            x_new = np.clip(y - step * gy, node_lb, node_ub)
+            if np.max(np.abs(x_new - x)) <= 1e-12 * (1.0 + np.max(np.abs(x_new))):
+                x = x_new
+                break
+            t_new = 0.5 * (1.0 + float(np.sqrt(1.0 + 4.0 * t * t)))
+            y = x_new + ((t - 1.0) / t_new) * (x_new - x)
+            x, t = x_new, t_new
+        x_hat = np.clip(x, node_lb, node_ub)
+
+    # min over the box of L(x_hat) + grad L(x_hat).(x - x_hat) <= L(x) <= f(x).
+    try:
+        g_hat = grad_L(x_hat)
+        L_hat = L(x_hat)
+    except (ValueError, ArithmeticError, RuntimeError):
+        return -np.inf
+    if not (np.all(np.isfinite(g_hat)) and np.isfinite(L_hat)):
+        return -np.inf
+    tangent_min = L_hat + float(
+        np.sum(np.where(g_hat >= 0.0, g_hat * (node_lb - x_hat), g_hat * (node_ub - x_hat)))
+    )
+    if not np.isfinite(tangent_min):
+        return -np.inf
+    # Magnitude-scaled margin so the float64 evaluation stays a valid lower bound.
+    return float(tangent_min - 1e-9 * (1.0 + abs(L_hat) + abs(tangent_min)))
+
+
+def _objective_is_convex_quadratic(model: Model, evaluator, n_vars: int) -> bool:
+    """Whether the internally-minimized objective is a convex quadratic.
+
+    True iff (a) no term in the model is higher than bilinear/square — so the
+    objective is at most quadratic — and (b) the objective Hessian is PSD. A
+    quadratic has a *constant* Hessian, so a PSD verdict at one point holds on the
+    whole space, hence on every B&B node box; the objective is then convex
+    everywhere and its supporting-hyperplane underestimator (see
+    :func:`_convex_objective_lower_bound`) is a rigorous lower bound.
+
+    This is the structural fact the spatial McCormick relaxation throws away: it
+    linearizes a convex x^2 with two tangents (a gap of width^2/4 at the midpoint —
+    on a [0,200] integer range that is ~10^4 *per square*), so the LP bound is
+    hopelessly loose (nvs17 root -2522 vs the convex bound -1106 ~ the optimum
+    -1100). Keeping the convex objective exact recovers an almost-tight bound.
+
+    The eigenvalue test runs on the *evaluator's* objective Hessian, which is the
+    internally-minimized objective (negated for a maximize), so PSD here means the
+    minimized objective is convex regardless of the user's sense.
+    """
+    if model._objective is None or n_vars == 0:
+        return False
+    try:
+        from discopt._jax.term_classifier import classify_nonlinear_terms
+
+        t = classify_nonlinear_terms(model)
+        # Reject anything above degree two anywhere in the model. ``monomial`` maps
+        # ``var -> power``, so a cubic ``x**3`` shows up as power 3 here even though
+        # it leaves ``general_nl`` empty — without this guard it would be mistaken
+        # for a quadratic and the single-point Hessian below would not characterize
+        # the (non-constant) curvature, an unsound over-claim.
+        # ``monomial`` is an iterable of ``(var, power)`` (a list of pairs or a
+        # dict); pull the powers robustly across either shape.
+        _monos = t.monomial.items() if hasattr(t.monomial, "items") else t.monomial
+        if (
+            t.trilinear
+            or t.multilinear
+            or t.fractional_power
+            or t.bilinear_with_fp
+            or t.ratio_of_products
+            or t.general_nl
+            or any(int(deg) > 2 for _, deg in _monos)
+        ):
+            return False
+        lb = np.array([v.lb for v in model._variables for _ in range(v.size)], dtype=np.float64)
+        ub = np.array([v.ub for v in model._variables for _ in range(v.size)], dtype=np.float64)
+        lb_f = np.where(np.isfinite(lb), lb, -1.0)
+        ub_f = np.where(np.isfinite(ub), ub, 1.0)
+        # Evaluate the Hessian at two distinct points: a genuine quadratic has a
+        # CONSTANT Hessian, so a PSD verdict at one point holds on every node box.
+        # Requiring the two to agree is a belt-and-suspenders guard that the
+        # objective really is quadratic (rejecting any non-quadratic that slipped
+        # past the structural check above) before trusting the constant-Hessian
+        # convexity argument.
+        H1 = np.asarray(evaluator.evaluate_hessian(0.5 * (lb_f + ub_f)), dtype=np.float64)
+        H2 = np.asarray(evaluator.evaluate_hessian(0.25 * lb_f + 0.75 * ub_f), dtype=np.float64)
+        if H1.shape != (n_vars, n_vars) or not np.all(np.isfinite(H1)):
+            return False
+        if not np.allclose(H1, H2, atol=1e-7, rtol=1e-7):
+            return False
+        # A pure-linear objective has a (near-)zero Hessian; its box bound is
+        # already exact via interval arithmetic, so only engage on genuine
+        # curvature. The threshold is well above float noise for a well-scaled
+        # Hessian, keeping the PSD verdict (and thus the bound) sound.
+        eig_min = float(np.linalg.eigvalsh(0.5 * (H1 + H1.T)).min())
+        return eig_min >= _CONVEX_OBJ_PSD_TOL
+    except Exception:
+        return False
+
+
+def _convex_objective_lower_bound(evaluator, node_lb, node_ub) -> float:
+    """Rigorous lower bound on a convex quadratic objective over ``[node_lb, node_ub]``.
+
+    For convex ``f`` and ANY ``x0`` in the box, the supporting hyperplane
+    ``f(x0) + grad f(x0) . (x - x0)`` underestimates ``f`` everywhere, so its box
+    minimum (separable: each coordinate at ``lb`` or ``ub`` by the gradient's sign)
+    is a valid lower bound on ``min_box f`` and hence on the node optimum (the box
+    contains the node's feasible set). The bound is *exact* when ``x0 = argmin_box
+    f`` — there KKT complementarity zeroes the box-min of the gradient term — and
+    only loosens, never becomes invalid, for any other ``x0``.
+
+    So the right ``x0`` is not a tuned heuristic and not something to hunt for with
+    random-start local solves: it is the box-constrained minimizer of the *constant*
+    quadratic, which we approach with a deterministic projected-gradient (FISTA)
+    solve. Because every iterate yields a valid bound, the iteration count is a
+    tightness knob, never a soundness one — there is no need for a size cap or a
+    cohort-tuned start (both of which the old random-restart L-BFGS version
+    required). Caller establishes convexity via
+    :func:`_objective_is_convex_quadratic`. Returns ``-inf`` (abstain) on an
+    open/empty box or non-finite data.
+    """
+    nlb = np.asarray(node_lb, dtype=np.float64)
+    nub = np.asarray(node_ub, dtype=np.float64)
+    if not (np.all(np.isfinite(nlb)) and np.all(np.isfinite(nub))) or np.any(nub < nlb):
+        return -np.inf
+    n = nlb.shape[0]
+    center = 0.5 * (nlb + nub)
+
+    def f(x):
+        return float(evaluator.evaluate_objective(np.asarray(x, dtype=np.float64)))
+
+    # Quadratic ==> grad f(x) = H x + g with H *constant*. Recover both from the
+    # evaluator at the box center: H is point-independent; g = grad(center) - H@center.
+    try:
+        H = np.asarray(evaluator.evaluate_hessian(center), dtype=np.float64)
+        g0 = np.asarray(evaluator.evaluate_gradient(center), dtype=np.float64)
+    except (ValueError, ArithmeticError, RuntimeError):
+        return -np.inf
+    if H.shape != (n, n) or not (np.all(np.isfinite(H)) and np.all(np.isfinite(g0))):
+        return -np.inf
+    H = 0.5 * (H + H.T)  # symmetrize the (symmetric) convex Hessian
+    g = g0 - H @ center
+
+    # Deterministic FISTA projected gradient for argmin over the box of the convex
+    # quadratic. Step 1/L with L an upper bound on the gradient's Lipschitz constant
+    # ||H||_2; for symmetric H, ||H||_2 <= ||H||_inf, so 1/||H||_inf is a valid
+    # (conservative) step. A fixed iteration budget is safe: under-convergence only
+    # loosens the bound. No randomness, no tuned start, no size cap.
+    L = float(np.abs(H).sum(axis=1).max())  # ||H||_inf >= ||H||_2
+    # Warm-start at the box-projected unconstrained minimizer ``clip(H^-1(-g))``:
+    # for a positive-definite H this is the exact ``argmin_box`` whenever it lands
+    # in the box (the common, tightest case) and an excellent start otherwise.
+    # Deterministic; falls back to the box center if H is singular.
+    x_hat = np.clip(center, nlb, nub)
+    try:
+        xstar = np.linalg.solve(H, -g)
+        if np.all(np.isfinite(xstar)):
+            x_hat = np.clip(xstar, nlb, nub)
+    except np.linalg.LinAlgError:
+        pass
+    if np.isfinite(L) and L > 0.0:
+        step = 1.0 / L
+        x = x_hat.copy()
+        y = x_hat.copy()
+        t = 1.0
+        for _ in range(200):
+            x_new = np.clip(y - step * (H @ y + g), nlb, nub)
+            if np.max(np.abs(x_new - x)) <= 1e-12 * (1.0 + np.max(np.abs(x_new))):
+                x = x_new
+                break
+            t_new = 0.5 * (1.0 + float(np.sqrt(1.0 + 4.0 * t * t)))
+            y = x_new + ((t - 1.0) / t_new) * (x_new - x)
+            x, t = x_new, t_new
+        x_hat = np.clip(x, nlb, nub)
+
+    # Supporting hyperplane at x_hat: f(x_hat) + min_box grad.(x - x_hat).
+    grad = H @ x_hat + g
+    if not np.all(np.isfinite(grad)):
+        return -np.inf
+    fx = f(x_hat)
+    tangent_min = fx + float(
+        np.sum(np.where(grad >= 0.0, grad * (nlb - x_hat), grad * (nub - x_hat)))
+    )
+    if not np.isfinite(tangent_min):
+        return -np.inf
+    # Magnitude-scaled margin so the float64 hyperplane evaluation stays a valid
+    # (never-too-high) lower bound despite rounding — the same safe-bound discipline
+    # as ``obbt._ns_safe_lp_lower_bound``.
+    margin = 1e-9 * (1.0 + abs(fx) + abs(tangent_min))
+    return float(tangent_min - margin)
 
 
 def _compute_interval_bound(model, node_lb, node_ub, negate):
@@ -3615,16 +3844,48 @@ def solve_model(
     # below, this min/max-es each variable over the full relaxation polytope,
     # so it reduces ranges even when the only constraints are nonlinear (the LP
     # polytope is a valid outer approximation, so every tightening is sound).
-    # Skipped for known-convex models (handled by the convex/NLP path) and for
-    # pure-integer models (no continuous variable to spatial-branch on).
+    # Skipped only for known-convex models (handled by the convex/NLP path).
+    # Pure-INTEGER models with nonlinear terms still benefit: the McCormick
+    # envelope of a product over a wide integer range (nvs17/19/23/24 span
+    # [0,200]) is catastrophically loose, and integer branching alone cannot close
+    # that relaxation gap in any reasonable node budget (the frontier dual bound
+    # crawls). OBBT range reduction — rounded inward for integers, so still sound —
+    # shrinks the envelope for the whole tree. ``obbt_tighten_root`` self-gates to
+    # a no-op when there is no relaxable nonlinearity, so a pure-linear (MILP)
+    # model pays nothing here.
     _obbt_has_continuous = any(v.var_type == VarType.CONTINUOUS for v in model._variables)
+    _obbt_has_nonlinear = False
+    if not _obbt_has_continuous:
+        try:
+            from discopt._jax.term_classifier import classify_nonlinear_terms as _cnt
+
+            _ot = _cnt(model)
+            _obbt_has_nonlinear = bool(
+                _ot.bilinear
+                or _ot.trilinear
+                or _ot.multilinear
+                or _ot.monomial
+                or _ot.fractional_power
+                or _ot.bilinear_with_fp
+                or _ot.ratio_of_products
+                or _ot.general_nl
+            )
+        except Exception:
+            _obbt_has_nonlinear = False
     _obbt_known_convex = _root_convexity_known and _root_is_convex
     if (
         bool(kwargs.get("obbt_at_root", True))
         and model._objective is not None
-        and _obbt_has_continuous
         and not _obbt_known_convex
-        and n_vars <= 500
+        # Continuous (or mixed) models keep the original ≤500-var reach. The
+        # pure-integer-nonlinear path is newer and capped tighter (≤50 vars, the
+        # ``_AUTO_RLT_LEVEL1_MAX_VARS`` scale): there OBBT reaches a fixpoint in a
+        # fraction of a second, so it cannot burn the root budget on a large model
+        # where the 2·n projection LPs would not pay for themselves.
+        and (
+            (_obbt_has_continuous and n_vars <= 500)
+            or (_obbt_has_nonlinear and n_vars <= _AUTO_RLT_LEVEL1_MAX_VARS)
+        )
     ):
         # OBBT wall time falls into python_time (computed as the remainder at
         # the end of the solve), so no separate timer is tracked here.
@@ -3799,6 +4060,19 @@ def solve_model(
     _alphabb_alpha = None
     _use_alphabb = False
     _alphabb_eligible = n_vars <= 50 and not _model_is_convex and hasattr(evaluator, "_obj_fn")
+
+    # Convex-objective node bound. When the (minimized) objective is a convex
+    # quadratic but the model is nonconvex (nonconvex constraints), the spatial
+    # path McCormick-linearizes the convex objective and loses a huge amount of
+    # bound (nvs17/19/23/24 span [0,200]: root McCormick -2522 vs convex bound
+    # -1106 ~ optimum -1100). Keeping the objective exact via its supporting
+    # hyperplane recovers an almost-tight, rigorous bound at each node. Engaged
+    # even when a McCormick LP relaxer is present (the LP is the loose source).
+    _use_convex_obj_bound = (not _model_is_convex) and _objective_is_convex_quadratic(
+        model, evaluator, n_vars
+    )
+    if _use_convex_obj_bound:
+        logger.debug("convex-objective node bound enabled (n_vars=%d)", n_vars)
 
     # --- McCormick relaxation bounds ---
     _mc_obj_eval = None  # BatchRelaxationEvaluator for midpoint bounds
@@ -4740,8 +5014,12 @@ def solve_model(
                     # false "optimal"; the loop exits at the next batch top.
                     _node_remaining = _deadline - time.perf_counter()
                     if _node_remaining <= 0.0:
-                        if not _model_is_convex:
-                            _gap_certified = False
+                        # Past the per-node deadline: skip this node's relaxation
+                        # solve. It stays OPEN carrying its inherited (valid) parent
+                        # bound — the Rust import floors every node at its parent's
+                        # lower bound — so the tree's dual bound stays valid. Leaving
+                        # a node unbounded never fathoms it, so do NOT decertify (that
+                        # only discarded the bound the parent already proved, #138).
                         continue
                     nlp_failed = result_lbs[i] >= _SENTINEL_THRESHOLD
                     try:
@@ -4779,7 +5057,11 @@ def solve_model(
             if not _model_is_convex:
                 for i in range(n_batch):
                     if result_lbs[i] == -np.inf:
-                        _gap_certified = False
+                        # A node left unbounded (no valid relaxation bound this
+                        # round) stays OPEN and is floored at its inherited parent
+                        # bound on import — still a valid global lower bound. It does
+                        # not fathom anything, so it does NOT taint the tree (#138).
+                        pass
                     elif not np.isfinite(result_lbs[i]):
                         result_lbs[i] = _INFEASIBILITY_SENTINEL
                     elif result_lbs[i] >= _SENTINEL_THRESHOLD and not node_infeasible_mask[i]:
@@ -4828,8 +5110,10 @@ def solve_model(
                     ub_clipped = np.clip(node_ub, -_SPC, _SPC)
                     result_sols[i] = 0.5 * (lb_clipped + ub_clipped)
                     result_feas[i] = False
-                    if not _model_is_convex:
-                        _gap_certified = False
+                    # The node stays OPEN at -inf and is floored at its inherited
+                    # parent bound on import (a valid global lower bound). It fathoms
+                    # nothing, so do NOT decertify — that only discarded the parent's
+                    # proven bound and forced the weak root fallback (#138).
                     continue
                 opts["max_wall_time"] = max(_node_remaining, _DEADLINE_NODE_FLOOR_S)
 
@@ -5054,9 +5338,11 @@ def solve_model(
                 # McCormick, LP relaxer) so a valid relaxation bound is given
                 # the chance to certify optimality before we decide to
                 # decertify the gap.
-                #   * -inf  : no bound source produced a finite lower bound, so
-                #             the node carries only the trivial -inf bound. The
-                #             gap cannot be certified; downgrade to "feasible".
+                #   * -inf  : no bound source produced a finite lower bound this
+                #             round, so the node stays OPEN at -inf and is floored
+                #             at its inherited parent bound on import (still a valid
+                #             global lower bound). It fathoms nothing, so it does NOT
+                #             taint the tree — leave the gap certifiable (#138).
                 #   * non-finite (and not -inf): coerce to the infeasibility
                 #             sentinel so the Rust tree prunes it cleanly.
                 #   * >= sentinel (issue #27a): a node pruned with no rigorous
@@ -5071,7 +5357,7 @@ def solve_model(
                 #             downgrades to "feasible" instead of lying.
                 if not _model_is_convex and not node_infeasible_mask[i]:
                     if result_lbs[i] == -np.inf:
-                        _gap_certified = False
+                        pass  # open node, floored at parent bound — does not taint
                     elif not np.isfinite(result_lbs[i]):
                         result_lbs[i] = _INFEASIBILITY_SENTINEL
                     elif result_lbs[i] >= _SENTINEL_THRESHOLD:
@@ -5885,6 +6171,53 @@ def solve_model(
                 _cut_pool=_cut_pool,
             )
 
+        # Convex-objective node bound (applied at the single point every node's
+        # bound funnels through, so it covers all upstream paths). When the
+        # minimized objective is a convex quadratic, the supporting-hyperplane
+        # lower bound over the node box is rigorous and far tighter than the
+        # McCormick linearization of the convex objective (nvs17 root -2522 LP vs
+        # -1106 convex ~ optimum -1100). max() only tightens, so it is always sound.
+        if _use_convex_obj_bound:
+            for i in range(n_batch):
+                if result_lbs[i] >= _SENTINEL_THRESHOLD or node_infeasible_mask[i]:
+                    continue
+                if time.perf_counter() >= _deadline:
+                    break
+                cvx_lb = _convex_objective_lower_bound(
+                    evaluator, np.asarray(batch_lb[i]), np.asarray(batch_ub[i])
+                )
+                if np.isfinite(cvx_lb):
+                    result_lbs[i] = max(result_lbs[i], cvx_lb)
+
+        # Completeness guard (soundness). In nonconvex mode the Rust tree never
+        # promotes a node's relaxation bound to the incumbent, and the per-node NLP
+        # that normally injects feasible points is strided — so a node whose
+        # relaxation solution is already an integer- AND constraint-feasible point
+        # (e.g. the true optimum at a fully-branched leaf) can be fathomed without
+        # its objective EVER being recorded. The tree then exhausts while missing
+        # that point and falsely certifies a worse incumbent (nvs19: certified
+        # -1098.0 with -1098.4 feasible). Inject every such verified point here,
+        # ungated: ``inject_incumbent`` accepts only a strictly-improving feasible
+        # point and never touches the dual bound, so this only ever tightens the
+        # incumbent — it cannot make the search unsound, only complete.
+        if not _model_is_convex and int_offsets:
+            _cl = [c[0] for c in constraint_bounds] if constraint_bounds else None
+            _cu = [c[1] for c in constraint_bounds] if constraint_bounds else None
+            for i in range(n_batch):
+                if node_infeasible_mask[i] or result_lbs[i] >= _SENTINEL_THRESHOLD:
+                    continue
+                xi = np.asarray(result_sols[i], dtype=np.float64)
+                if not _is_integer_feasible_solution(xi, int_offsets, int_sizes):
+                    continue
+                xr = xi.copy()
+                for _off, _sz in zip(int_offsets, int_sizes):
+                    xr[_off : _off + _sz] = np.round(xr[_off : _off + _sz])
+                if _cl is not None and not _check_constraint_feasibility(evaluator, xr, _cl, _cu):
+                    continue
+                _obj_i = float(evaluator.evaluate_objective(xr))
+                if np.isfinite(_obj_i) and _obj_i < _SENTINEL_THRESHOLD:
+                    tree.inject_incumbent(xr, _obj_i)
+
         # Import results back to Rust tree
         t_rust_start = time.perf_counter()
         tree.import_results(result_ids, result_lbs, result_sols, result_feas)
@@ -6165,12 +6498,28 @@ def solve_model(
     # re-earn it below only if a rigorous global bound actually closes the gap.
     # "optimal" already implies a closed certified search; infeasible/limit exits
     # are handled above and keep their own certification semantics.
+    # Separate the two things the validity flag conflates: (1) the tree bound is
+    # *untainted* — no node was fathomed without a soundness proof, so the frontier
+    # minimum is a valid global dual bound — vs (2) the gap is *closed* (optimality).
+    # ``_gap_certified`` here still reflects (1); the feasible-reset below clears it
+    # for (2). A budget/node-limited feasible exit does not close the gap, but its
+    # untainted tree bound is still the best rigorous dual bound we have and must NOT
+    # be dropped to None (which forced the far weaker root-relaxation fallback, #138).
+    _tree_bound_valid = _gap_certified
     if status == "feasible":
         _gap_certified = False
 
     if not _gap_certified:
-        bound_val = None
         gap_val = None
+        # Keep the untainted tree bound on a feasible exit; recompute its gap. Only
+        # a tainted or non-finite tree bound is discarded (then the root fallback
+        # below supplies a sound bound). A bound that meets the incumbent re-earns
+        # certification in the block further down.
+        if _tree_bound_valid and bound_val is not None and np.isfinite(bound_val):
+            if obj_val is not None and np.isfinite(obj_val):
+                gap_val = abs(obj_val - bound_val) / max(1.0, abs(obj_val))
+        else:
+            bound_val = None
 
     # Root cut-pool bound: a rigorous global lower bound the strengthened root
     # relaxation already proved during setup (nvs19: -1156 vs the cut-less tree's
@@ -7317,14 +7666,36 @@ def _solve_nlp_bb(
     # A *feasible* exit never inherits the tree's validity flag as a certificate:
     # the flag attests bound validity, not gap closure, and a node/budget-limited
     # feasible exit leaves the tree gap open. See the spatial-path note above
-    # (max_nodes=1 false-certification regression). This path carries no rigorous
-    # root-relaxation fallback, so a dropped certificate is not re-earned here.
+    # (max_nodes=1 false-certification regression). But the untainted tree bound is
+    # itself a valid global dual bound (every node floored at its valid parent
+    # bound), so keep it and recompute the gap rather than dropping to None (#138).
+    _tree_bound_valid = _gap_certified
     if status == "feasible":
         _gap_certified = False
 
     if not _gap_certified:
-        bound_val = None
         gap_val = None
+        if _tree_bound_valid and bound_val is not None and np.isfinite(bound_val):
+            if obj_val is not None and np.isfinite(obj_val):
+                gap_val = abs(obj_val - bound_val) / max(1.0, abs(obj_val))
+        else:
+            bound_val = None
+
+    # Re-earn certification when the retained valid tree bound meets the incumbent
+    # within tolerance: the incumbent is then provably global and the honest status
+    # is "optimal" (mirrors the spatial path's re-certification).
+    if (
+        status == "feasible"
+        and obj_val is not None
+        and bound_val is not None
+        and np.isfinite(bound_val)
+        and gap_val is not None
+        and gap_val <= gap_tolerance
+    ):
+        _is_max = model._objective.sense == ObjectiveSense.MAXIMIZE
+        if (bound_val >= obj_val - 1e-9) if _is_max else (bound_val <= obj_val + 1e-9):
+            _gap_certified = True
+            status = "optimal"
 
     return SolveResult(
         status=status,
@@ -11312,14 +11683,36 @@ def _solve_miqp_bb(
     # A *feasible* exit never inherits the tree's validity flag as a certificate:
     # the flag attests bound validity, not gap closure, and a node/budget-limited
     # feasible exit leaves the tree gap open. See the spatial-path note above
-    # (max_nodes=1 false-certification regression). This path carries no rigorous
-    # root-relaxation fallback, so a dropped certificate is not re-earned here.
+    # (max_nodes=1 false-certification regression). But the untainted tree bound is
+    # itself a valid global dual bound (every node floored at its valid parent
+    # bound), so keep it and recompute the gap rather than dropping to None (#138).
+    _tree_bound_valid = _gap_certified
     if status == "feasible":
         _gap_certified = False
 
     if not _gap_certified:
-        bound_val = None
         gap_val = None
+        if _tree_bound_valid and bound_val is not None and np.isfinite(bound_val):
+            if obj_val is not None and np.isfinite(obj_val):
+                gap_val = abs(obj_val - bound_val) / max(1.0, abs(obj_val))
+        else:
+            bound_val = None
+
+    # Re-earn certification when the retained valid tree bound meets the incumbent
+    # within tolerance: the incumbent is then provably global and the honest status
+    # is "optimal" (mirrors the spatial path's re-certification).
+    if (
+        status == "feasible"
+        and obj_val is not None
+        and bound_val is not None
+        and np.isfinite(bound_val)
+        and gap_val is not None
+        and gap_val <= gap_tolerance
+    ):
+        _is_max = model._objective.sense == ObjectiveSense.MAXIMIZE
+        if (bound_val >= obj_val - 1e-9) if _is_max else (bound_val <= obj_val + 1e-9):
+            _gap_certified = True
+            status = "optimal"
 
     return SolveResult(
         status=status,

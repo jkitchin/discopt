@@ -1617,7 +1617,11 @@ def obbt_tighten_root(
             build_milp_relaxation,
         )
 
-        relaxer = MccormickLPRelaxer(model, superposition=superposition)
+        # OBBT uses only the relaxer's model/terms/disc to cold-build the envelope
+        # (it never calls ``solve_at_node``), so skip the incremental fast-path
+        # structure build + its row-for-row validation (a wasted handful of cold
+        # builds — they re-derive the relaxation only to validate it).
+        relaxer = MccormickLPRelaxer(model, superposition=superposition, build_incremental=False)
         if not relaxer.has_relaxable_nonlinearity:
             return RootObbtResult(lb, ub, 0, 0, 0.0)
 
@@ -1960,7 +1964,11 @@ def measure_discarded_aux_tightening(
     try:
         from discopt._jax.mccormick_lp import MccormickLPRelaxer, build_milp_relaxation
 
-        relaxer = MccormickLPRelaxer(model, superposition=superposition)
+        # OBBT uses only the relaxer's model/terms/disc to cold-build the envelope
+        # (it never calls ``solve_at_node``), so skip the incremental fast-path
+        # structure build + its row-for-row validation (a wasted handful of cold
+        # builds — they re-derive the relaxation only to validate it).
+        relaxer = MccormickLPRelaxer(model, superposition=superposition, build_incremental=False)
         if not relaxer.has_relaxable_nonlinearity:
             return None
         milp, _ = build_milp_relaxation(

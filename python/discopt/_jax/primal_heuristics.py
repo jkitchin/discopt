@@ -584,6 +584,57 @@ def integer_local_search(
         return float(np.sum(np.maximum(0.0, cl - g)) + np.sum(np.maximum(0.0, g - cu)))
 
     deadline = time.perf_counter() + max(0.0, time_budget)
+    has_continuous = bool(np.any(~int_mask))
+
+    def _objective_improve(x_feas: np.ndarray, obj_feas: float) -> tuple[np.ndarray, float]:
+        """Descend the OBJECTIVE over feasible integer neighbours from a feasible
+        point. The violation descent above only reaches *a* feasible integer
+        assignment; its objective can sit well above optimal (nvs24: a feasible
+        -1022 vs the optimum -1033, two integer moves away). This first-improvement
+        coordinate search over ±1/±2 integer steps — keeping only feasible,
+        objective-improving moves — bridges that gap. Pure-integer models evaluate
+        the objective directly; mixed models repair the continuous block via
+        ``subnlp`` at each candidate so the returned point stays truly feasible.
+        Sound: every returned point is feasible, so it is only ever an incumbent
+        candidate and never affects the dual bound or certification."""
+        bx = _round_clip(x_feas)
+        best_x, best_obj = np.asarray(x_feas, dtype=np.float64).copy(), float(obj_feas)
+        improved = True
+        while improved and time.perf_counter() < deadline:
+            improved = False
+            for j in int_idx:
+                for d in (-1.0, 1.0, -2.0, 2.0):
+                    if time.perf_counter() >= deadline:
+                        break
+                    nv = bx[j] + d
+                    if nv < lb[j] - 1e-9 or nv > ub[j] + 1e-9:
+                        continue
+                    xt = bx.copy()
+                    xt[j] = nv
+                    if has_continuous:
+                        cand = subnlp(
+                            model,
+                            xt,
+                            backend=backend,
+                            nlp_options=nlp_options,
+                            evaluator=evaluator,
+                            feas_tol=feas_tol,
+                        )
+                        if cand is None:
+                            continue
+                        cx, cobj = np.asarray(cand[0], dtype=np.float64), float(cand[1])
+                    else:
+                        if violation(xt) > feas_tol:
+                            continue
+                        cx, cobj = xt, float(evaluator.evaluate_objective(xt))
+                    if cobj < best_obj - 1e-9:
+                        best_x, best_obj = cx.copy(), cobj
+                        bx = _round_clip(best_x)
+                        improved = True
+                        break
+                if improved:
+                    break
+        return best_x, best_obj
 
     def _round_clip(x: np.ndarray) -> np.ndarray:
         y = np.asarray(x, dtype=np.float64).copy()
@@ -704,6 +755,11 @@ def integer_local_search(
         )
         if repaired is not None:
             x_ok, obj_ok = repaired
+            # Turn "a feasible point" into "the locally objective-best feasible
+            # point" before recording it (and before perturbed restarts dive from
+            # it), so the heuristic returns the strong incumbent the dual bound is
+            # already tight enough to certify (nvs24: -1022 -> the optimum -1033).
+            x_ok, obj_ok = _objective_improve(np.asarray(x_ok), float(obj_ok))
             if best is None or obj_ok < best[1]:
                 best = (np.asarray(x_ok).copy(), float(obj_ok))
             # Once feasible, later perturbed restarts dive from this point's

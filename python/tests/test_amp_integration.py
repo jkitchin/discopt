@@ -3509,7 +3509,6 @@ class TestCurrentCodeWeaknesses:
 
     def test_amp_time_limit_with_incumbent_returns_feasible(self, monkeypatch):
         """Timing out after finding an incumbent should not hide the feasible point."""
-        import itertools
 
         from discopt._jax.milp_relaxation import MilpRelaxationResult
         from discopt.solvers import amp as amp_mod

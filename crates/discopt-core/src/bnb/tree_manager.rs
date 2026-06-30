@@ -256,7 +256,19 @@ impl TreeManager {
                 "import_results: node {:?} not in Evaluated status",
                 result.node_id
             );
-            node.local_lower_bound = result.lower_bound;
+            // Floor the imported bound at the node's inherited (parent) lower
+            // bound rather than overwriting it. A child's box is a subset of its
+            // parent's, so the parent's lower bound is itself a valid lower bound
+            // for the child (parent_lb <= min over parent box <= min over child
+            // box). Both `result.lower_bound` and the inherited value are therefore
+            // valid lower bounds, and the tighter (larger) one is the sound choice.
+            // This is what keeps the tree's `global_lower_bound` a usable dual
+            // bound: when the Python orchestrator cannot bound a node (the NLP
+            // objective is not a valid bound on a nonconvex node, or the per-node
+            // relaxation hit the deadline) it imports `-inf`; without this floor a
+            // single such open node would drag `global_lower_bound` to `-inf` and
+            // discard the bound the parent already proved.
+            node.local_lower_bound = result.lower_bound.max(node.local_lower_bound);
             // Store solution for warm-starting children.
             node.parent_solution = Some(result.solution.clone());
         }

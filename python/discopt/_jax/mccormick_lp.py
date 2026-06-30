@@ -17,6 +17,7 @@ that fits the per-node call shape in :mod:`discopt.solver`.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -210,6 +211,7 @@ class MccormickLPRelaxer:
         psd_cuts: bool = False,
         rlt_cuts: bool = False,
         rlt_level1: bool = False,
+        build_incremental: bool = True,
     ) -> None:
         self._model = model
         self._terms: NonlinearTerms = classify_nonlinear_terms(model)
@@ -305,6 +307,41 @@ class MccormickLPRelaxer:
             nl_cols.add(int(base))
         self._nonlinear_cols = nl_cols
 
+        # Incremental McCormick fast path (Phase B throughput). The default
+        # ``solve_at_node`` cold-rebuilds the relaxation (``build_milp_relaxation``)
+        # and re-equilibrates it every node — together ~half the spatial-B&B wall
+        # clock. ``IncrementalMcCormickLP`` builds the LP *structure* once and per
+        # node patches only the box-dependent product rows in closed form (numpy),
+        # then warm-starts the Rust simplex (no equilibration). Its patched matrix
+        # is validated row-for-row against the cold build at construction
+        # (``IncrementalMcCormickLP._validate``), so the LP bound is sound; the fast
+        # path is a strict valid relaxation and ``solve_at_node`` falls back to the
+        # cold build for any node out of scope (near-unbounded box, unsupported
+        # term, build/solve failure). Disable with ``DISCOPT_INCREMENTAL_MC=0``.
+        self._inc = None
+        self._inc_warm_basis = None
+        self._inc_basis_nrows = -1
+        # ``build_incremental=False`` skips this (the structure build + its
+        # row-for-row validation cold-build the relaxation a handful of times) for
+        # callers that only want the relaxer's model/terms/disc and never invoke
+        # ``solve_at_node`` (e.g. structural OBBT), avoiding wasted cold builds.
+        if build_incremental and os.environ.get("DISCOPT_INCREMENTAL_MC", "1") != "0":
+            try:
+                from discopt._jax.incremental_mccormick import IncrementalMcCormickLP
+                from discopt._jax.lp_spatial_bb import _is_in_scope as _inc_in_scope
+
+                # Restrict to the lp_spatial engine's *validated-safe* domain
+                # (pure-integer, minimize): there the incremental patch is the same
+                # construction the opt-in LP-node engine ships and trusts. Outside
+                # it (e.g. mixed-integer NN/tree embeddings), the dense patch can be
+                # an unsound relaxation, so we keep those on the cold build.
+                if _inc_in_scope(model):
+                    _inc = IncrementalMcCormickLP(model, self._terms)
+                    if _inc.ok:
+                        self._inc = _inc
+            except Exception:
+                self._inc = None
+
     @property
     def nonlinear_columns(self) -> frozenset[int]:
         """Original-variable flat columns in any nonlinear term (product,
@@ -344,6 +381,136 @@ class MccormickLPRelaxer:
             or self._has_affine_power
         )
 
+    def _try_incremental_node(
+        self,
+        node_lb: np.ndarray,
+        node_ub: np.ndarray,
+        inherited_cuts: Optional[tuple],
+    ) -> Optional["MccormickLPResult"]:
+        """Incremental McCormick node solve: patch the cached structure + warm-start,
+        instead of a cold ``build_milp_relaxation`` + equilibration. Returns a
+        :class:`MccormickLPResult` on success or ``None`` to fall back to the cold
+        build. Sound: the patched matrix is validated equal to the cold build at
+        construction, so the pure-LP value is a valid lower bound (integrality is
+        branched by the outer tree); the inherited root cut pool is appended only
+        when its column layout matches exactly (a mismatch is skipped — sound)."""
+        inc = self._inc
+        if inc is None:
+            return None
+        lb = np.asarray(node_lb, dtype=np.float64).ravel()
+        ub = np.asarray(node_ub, dtype=np.float64).ravel()
+        if lb.size != inc.n or ub.size != inc.n:
+            return None
+        # No valid finite McCormick envelope over a near-unbounded box on a
+        # nonlinear column: route to the cold path (clamp + HiGHS unboundedness
+        # cross-check). Mirrors the cold-path conditioning guard.
+        if self._nonlinear_cols:
+            idx = np.fromiter(self._nonlinear_cols, dtype=int)
+            if np.any(np.abs(lb[idx]) >= _RELAX_NUMERIC_CAP) or np.any(
+                np.abs(ub[idx]) >= _RELAX_NUMERIC_CAP
+            ):
+                return None
+        try:
+            cut_rows = None
+            if inherited_cuts is not None:
+                a_rows, b_rows = inherited_cuts
+                if a_rows is not None and len(a_rows) > 0:
+                    a_rows = np.asarray(a_rows, dtype=np.float64)
+                    b_rows = np.asarray(b_rows, dtype=np.float64).ravel()
+                    # Apply the root cut pool only when its column layout matches the
+                    # incremental structure exactly; a mismatch would address the
+                    # wrong columns (skipping is sound — fewer cuts only loosen).
+                    if (
+                        a_rows.ndim == 2
+                        and a_rows.shape[1] == inc.ncol
+                        and len(b_rows) == a_rows.shape[0]
+                    ):
+                        cut_rows = list(zip(a_rows, b_rows))
+            A, b, bounds = inc.assemble(lb, ub, cut_rows=cut_rows)
+            nrows = int(A.shape[0])
+            in_basis = (
+                self._inc_warm_basis
+                if (self._inc_warm_basis is not None and self._inc_basis_nrows == nrows)
+                else None
+            )
+            status, bound, x_full, basis = inc.solve_assembled_full(A, b, bounds, in_basis=in_basis)
+        except Exception:
+            logger.debug("incremental McCormick node failed; cold fallback", exc_info=True)
+            return None
+
+        if status == "optimal" and bound is not None and np.isfinite(bound):
+            self._inc_warm_basis = basis
+            self._inc_basis_nrows = nrows
+            x_orig = np.asarray(x_full, dtype=np.float64)[: self._n_orig]
+            return MccormickLPResult(status="optimal", lower_bound=float(bound), x=x_orig)
+
+        if status == "infeasible":
+            # An empty McCormick polytope over a FINITE box is a rigorous
+            # infeasibility proof for this node's subtree (the relaxation is a valid
+            # outer approximation), so the node is fathomed WITHOUT a cold rebuild —
+            # the cold path was previously re-derived only to re-confirm exactly
+            # this verdict (the dominant remaining per-node cost). Sound, but the
+            # Rust simplex can report a *false* infeasible on an ill-conditioned
+            # lifted relaxation, so this mirrors the cold path's guard
+            # (``milp_relaxation`` solve): trust a raw infeasible only on a
+            # well-conditioned matrix, else re-verify once with exact equilibration.
+            return self._reverify_incremental_infeasible(inc, A, b, bounds)
+
+        # time_limit / unbounded / numerical error: no certified verdict — fall back
+        # to the trusted cold build.
+        return None
+
+    def _reverify_incremental_infeasible(
+        self, inc, A: np.ndarray, b: np.ndarray, bounds: np.ndarray
+    ) -> Optional["MccormickLPResult"]:
+        """Confirm an incremental ``infeasible`` verdict soundly, without a cold
+        rebuild. Mirrors the cold path's false-infeasible guard: a well-scaled LP's
+        infeasible verdict is trusted directly; an ill-conditioned one (coefficient
+        spread ``> _RELAX_FALSE_INFEAS_TRIGGER``) is re-solved once with exact
+        geometric-mean equilibration (feasible-set-preserving) before being accepted.
+
+        Returns ``MccormickLPResult(status="infeasible")`` to fathom, an
+        ``"optimal"`` result if equilibration recovers a feasible point (a false
+        infeasible), or ``None`` (cold fallback) if the re-verify itself fails."""
+        import scipy.sparse as sp
+
+        from discopt._jax.milp_relaxation import (
+            _RELAX_FALSE_INFEAS_TRIGGER,
+            equilibrate_relaxation_lp,
+        )
+
+        try:
+            a_csr = sp.csr_matrix(A)
+            nz = np.abs(a_csr.data)
+            nz = nz[nz != 0.0]
+            ill = bool(
+                nz.size
+                and np.isfinite(nz).all()
+                and nz.max() / nz.min() > _RELAX_FALSE_INFEAS_TRIGGER
+            )
+        except Exception:
+            ill = True  # be conservative: re-verify rather than trust
+        if not ill:
+            return MccormickLPResult(status="infeasible")
+
+        try:
+            bl = [(float(bounds[i, 0]), float(bounds[i, 1])) for i in range(bounds.shape[0])]
+            c2, a2, b2, bd2, col_scale = equilibrate_relaxation_lp(inc.c, a_csr, b, bl, None)
+            status, bound, x_s, _ = inc.solve_assembled_full(
+                a2, b2, np.asarray(bd2, dtype=np.float64), in_basis=None, c_override=c2
+            )
+        except Exception:
+            return None  # re-verify failed -> trusted cold rebuild
+        if status == "infeasible":
+            return MccormickLPResult(status="infeasible")
+        if status == "optimal" and bound is not None and np.isfinite(bound):
+            # False infeasible recovered: map the scaled point back (x = D·x'). The
+            # equilibrated basis has different scaling, so don't carry it as a warm
+            # start (the ``nrows`` guard would reject it anyway).
+            x_orig = (np.asarray(x_s, dtype=np.float64) * col_scale)[: self._n_orig]
+            return MccormickLPResult(status="optimal", lower_bound=float(bound), x=x_orig)
+        return None
+
     def solve_at_node(
         self,
         node_lb: np.ndarray,
@@ -375,6 +542,16 @@ class MccormickLPRelaxer:
           appended at THIS call are pushed onto it as ``(A_rows, b_rows)`` — used
           to capture the root pool once and replay it at every node.
         """
+        # Phase-B fast path: incremental patch + warm-started solve, reusing the
+        # structure built once at construction instead of a per-node cold rebuild +
+        # equilibration. Sound (validated patch == cold build; a valid relaxation),
+        # and it carries the inherited (root RLT/PSD) cut pool so it keeps the
+        # default path's bound strength. Returns ``None`` for any out-of-scope node,
+        # falling through to the trusted cold build below.
+        _fast = self._try_incremental_node(node_lb, node_ub, inherited_cuts)
+        if _fast is not None:
+            return _fast
+
         try:
             milp, varmap = build_milp_relaxation(
                 self._model,
