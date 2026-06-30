@@ -1,6 +1,6 @@
 """Exact LP solver backed by the pure-Rust warm-started simplex.
 
-Mirrors :func:`discopt.solvers.lp_highs.solve_lp` and
+Mirrors :func:`discopt.solvers.lp_pounce.solve_lp` and
 :func:`discopt.solvers.lp_pounce.solve_lp` in signature and return type, so it
 is a drop-in alternative at call sites that need an LP solved to its **true
 vertex optimum** (OBBT, issue #145).
@@ -70,7 +70,7 @@ def solve_lp(
     Returns an :class:`LPResult` whose ``objective`` is the simplex vertex
     optimum (a rigorous bound) **with the vertex duals**: ``dual_values`` are the
     row duals and ``reduced_costs`` the per-variable reduced costs, in the same
-    sign/order convention as :func:`discopt.solvers.lp_highs.solve_lp` (validated
+    sign/order convention as :func:`discopt.solvers.lp_pounce.solve_lp` (validated
     equal to HiGHS to machine precision). Exposing them is what lets the
     dual-consuming seams (Benders subproblem, DBBT) run on the pure-Rust simplex
     instead of HiGHS (issue #356). On any non-optimal exit the status is

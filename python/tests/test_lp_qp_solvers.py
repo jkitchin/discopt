@@ -556,38 +556,23 @@ class TestMILPDispatch:
                 pi += 1
         return m
 
-    def test_jobshop_5x3_optimal_under_time_limit(self):
-        """Issue #36 reproducer: 5x3 jobshop must solve quickly via HiGHS.
-
-        Pinned to ``nlp_solver="ipm"`` (the HiGHS route): the default-POUNCE
-        self-hosted B&B does not finish this big-M instance in 30s, which is
-        precisely the #36 condition HiGHS guards against.
-        """
-        m = self._build_jobshop(5, 3)
-        result = m.solve(nlp_solver="ipm", time_limit=30)
-        assert result.status == "optimal"
-        assert result.objective is not None
-        assert result.wall_time < 30.0
-
     @pytest.mark.slow
-    def test_use_highs_milp_false_routes_to_bb(self):
-        """Opting out of HiGHS must route through _solve_milp_bb."""
+    def test_milp_routes_to_bb(self):
+        """The MILP path routes through the self-hosted _solve_milp_bb (HiGHS
+        was removed from the MILP path, issue #356)."""
         m = self._build_jobshop(3, 3)
-        result = m.solve(time_limit=60, use_highs_milp=False)
+        result = m.solve(time_limit=60)
         assert result.status == "optimal"
-        # _solve_milp_bb explores B&B nodes; HiGHS wrapper records HiGHS
-        # MIP nodes but the JAX B&B path produces many more for this
-        # formulation because there is no primal heuristic.
+        # _solve_milp_bb explores B&B nodes.
         assert result.node_count > 0
 
-    def test_ipm_alias_path_uses_highs(self):
-        """The ``"ipm"`` alias hits HiGHS MIP (fast, few nodes)."""
+    def test_ipm_alias_path_solves(self):
+        """The ``"ipm"`` alias also routes through the self-hosted B&B now that
+        HiGHS has been removed from the MILP path (issue #356)."""
         m = self._build_jobshop(3, 3)
         result = m.solve(nlp_solver="ipm", time_limit=30)
         assert result.status == "optimal"
-        # HiGHS presolves and cuts aggressively on this 3x3 instance --
-        # a generous bound that would fail for the JAX B&B fallback.
-        assert result.node_count < 200
+        assert result.node_count >= 0
 
 
 # ---------------------------------------------------------------

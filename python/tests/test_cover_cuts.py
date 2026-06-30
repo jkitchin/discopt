@@ -90,11 +90,11 @@ def _distinct_knapsack():
 class TestEndToEnd:
     def test_cuts_reduce_nodes_and_preserve_optimum(self, monkeypatch):
         pytest.importorskip("pounce")
-        r_with = _distinct_knapsack().solve(use_highs_milp=False, time_limit=60)
+        r_with = _distinct_knapsack().solve(time_limit=60)
         nodes_with = r_with.node_count
 
         monkeypatch.setattr(S, "_root_cover_cut_loop", lambda ld, *a, **k: (ld, 0))
-        r_without = _distinct_knapsack().solve(use_highs_milp=False, time_limit=60)
+        r_without = _distinct_knapsack().solve(time_limit=60)
 
         assert r_with.status == "optimal" and r_without.status == "optimal"
         assert abs(r_with.objective - r_without.objective) < 1e-4  # same optimum
@@ -118,6 +118,6 @@ class TestEndToEnd:
         b = m.integer("b", lb=0, ub=5)
         m.minimize(a + b)
         m.subject_to(a + b >= 3)
-        r = m.solve(use_highs_milp=False, time_limit=60)
+        r = m.solve(time_limit=60)
         assert r.status == "optimal"
         assert seen["cuts"] == 0  # no binary-knapsack rows -> no cuts

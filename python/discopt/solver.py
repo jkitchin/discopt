@@ -2289,7 +2289,6 @@ def solve_model(
     incumbent_callback=None,
     node_callback=None,
     solver: Optional[str] = None,
-    use_highs_milp: bool = True,
     presolve: bool = True,
     presolve_polynomial: bool = False,
     presolve_reverse_ad: bool = False,
@@ -2346,13 +2345,12 @@ def solve_model(
         Numerical engine for every problem class. The default ``"pounce"``
         (POUNCE — pure-Rust Ipopt port) is now the universal default: it
         routes LP/QP/MILP/MIQP/NLP/MINLP through POUNCE (and the self-hosted
-        B&B for the integer classes), bypassing HiGHS entirely. Other values:
-        ``"ipopt"`` (cyipopt for the NLP node/continuous solves), or ``"ipm"``
-        / ``"sparse_ipm"`` (back-compat aliases — these now *prefer HiGHS* for
-        the matrix classes LP/QP/MILP/MIQP when ``highspy`` is installed, and
-        resolve to POUNCE for NLP/MINLP; pass one of these to opt back into the
-        HiGHS-first routing). ``"simplex"`` selects the pure-Rust
-        warm-started-simplex MILP B&B.
+        B&B for the integer classes). HiGHS has been removed entirely from the
+        LP/MILP path (issue #356). Other values: ``"ipopt"`` (cyipopt for the
+        NLP node/continuous solves), or ``"ipm"`` / ``"sparse_ipm"`` (back-compat
+        aliases — these select the simplex-first matrix routing for LP/MILP
+        and resolve to POUNCE for NLP/MINLP). ``"simplex"`` selects the
+        pure-Rust warm-started-simplex MILP B&B.
     sparse : bool or None, default None
         Force sparse (True) or dense (False) Jacobian evaluation.
         If None, auto-selects based on problem size and density.
@@ -2454,8 +2452,8 @@ def solve_model(
         ``disc_abs_width_tol``, ``convhull_formulation``, ``convhull_ebd``,
         ``convhull_ebd_encoding``, ``use_start_as_incumbent``, ``obbt_at_root``,
         ``obbt_with_cutoff``, ``alphabb_cutoff_obbt``, ``obbt_time_limit``, and
-        ``milp_solver``. ``milp_solver`` accepts ``"auto"``, ``"highs"``,
-        ``"pounce"``, ``"simplex"``, or ``"gurobi"``.
+        ``milp_solver``. ``milp_solver`` accepts ``"auto"``, ``"pounce"``,
+        ``"simplex"``, or ``"gurobi"`` (HiGHS was removed, issue #356).
     solver="mip-nlp" options
         The MIP-NLP backend accepts ``mip_nlp_method`` and
         ``mip_nlp_options``. Current implemented methods are ``"oa"`` and
@@ -2683,7 +2681,6 @@ def solve_model(
         _note_ignored_mip_nlp("lazy_constraints", lazy_constraints is not None)
         _note_ignored_mip_nlp("incumbent_callback", incumbent_callback is not None)
         _note_ignored_mip_nlp("node_callback", node_callback is not None)
-        _note_ignored_mip_nlp("use_highs_milp", use_highs_milp is not True)
         _note_ignored_mip_nlp("presolve", presolve is not True)
         _note_ignored_mip_nlp("presolve_polynomial", presolve_polynomial is not False)
         _note_ignored_mip_nlp("presolve_reverse_ad", presolve_reverse_ad is not False)
@@ -2785,7 +2782,6 @@ def solve_model(
         _note_ignored("lazy_constraints", lazy_constraints is not None)
         _note_ignored("incumbent_callback", incumbent_callback is not None)
         _note_ignored("node_callback", node_callback is not None)
-        _note_ignored("use_highs_milp", use_highs_milp is not True)
         amp_gdp_methods = {"big-m", "hull", "mbigm", "auto"}
         amp_gdp_method = gdp_method if gdp_method in amp_gdp_methods else "big-m"
         _note_ignored("gdp_method", gdp_method not in amp_gdp_methods)
@@ -3584,10 +3580,6 @@ def solve_model(
             # The B&B itself is sound, runs the continuous-repair root dive for
             # an early incumbent, recovers stalled nodes, and reduced-cost-fixes.
             _pounce_only = nlp_solver == "pounce"
-            if use_highs_milp and not _pounce_only:
-                highs_result = _solve_milp_highs(model, t_start, time_limit, gap_tolerance)
-                if highs_result is not None:
-                    return highs_result
             return _solve_milp_bb(
                 model,
                 time_limit,
@@ -8380,9 +8372,12 @@ def _mip_recover_relaxation_duals(
 
     Pass ``Q_orig`` for QP-style relaxations; omit it for LP-style. QP/MIQP
     recovery is HiGHS-free and always uses POUNCE (issue #359); LP/MILP recovery
-    uses POUNCE under ``prefer_pounce`` and HiGHS otherwise. Returns
-    ``(None, None, None)`` if recovery is unavailable (solver missing, the
-    fix-and-resolve LP/QP itself fails, or layout mismatch).
+    uses POUNCE under ``prefer_pounce`` and the pure-Rust simplex otherwise
+    (issue #356) — both expose HiGHS-convention duals. This is reporting only:
+    the recovered duals populate SolveResult sensitivity, they are not consumed
+    for bound tightening. Returns ``(None, None, None)`` if recovery is
+    unavailable (solver missing, the fix-and-resolve LP/QP itself fails, or
+    layout mismatch).
 
     Bound multipliers on the fixing bounds for integer columns are zeroed in
     the returned dicts — they reflect the act of fixing, not feasibility of
@@ -8395,7 +8390,7 @@ def _mip_recover_relaxation_duals(
         elif prefer_pounce:
             from discopt.solvers.lp_pounce import solve_lp as _recover_lp
         else:
-            from discopt.solvers.lp_highs import (  # type: ignore[assignment]
+            from discopt.solvers.lp_simplex import (  # type: ignore[assignment]
                 solve_lp as _recover_lp,
             )
     except ImportError:
@@ -8540,14 +8535,14 @@ def _solve_lp(
 ) -> SolveResult:
     """Solve an LP through the first available engine, then the JAX LP IPM.
 
-    Engine order is HiGHS -> POUNCE -> JAX IPM, or POUNCE -> HiGHS -> JAX IPM
-    when ``prefer_pounce`` is set (the user passed ``nlp_solver="pounce"``,
-    i.e. asked for POUNCE everywhere; roadmap P0.4). The pure-JAX IPM
-    struggles on problems whose declared bounds exceed ~1e15 (it returns NaN
-    via Newton blow-up on unbounded variables); HiGHS and POUNCE both handle
-    unbounded columns natively, so the IPM is the last resort.
+    Engine order is Rust simplex -> POUNCE -> JAX IPM, or POUNCE -> Rust simplex
+    -> JAX IPM when ``prefer_pounce`` is set (the user passed
+    ``nlp_solver="pounce"``, i.e. asked for POUNCE everywhere; roadmap P0.4). The
+    pure-JAX IPM struggles on problems whose declared bounds exceed ~1e15 (it
+    returns NaN via Newton blow-up on unbounded variables); the simplex and
+    POUNCE both handle unbounded columns natively, so the IPM is the last resort.
     """
-    engines = [_solve_lp_highs, _solve_lp_pounce]
+    engines = [_solve_lp_simplex, _solve_lp_pounce]
     if prefer_pounce:
         engines.reverse()
     for engine in engines:
@@ -8600,18 +8595,20 @@ def _solve_lp(
     return sr
 
 
-def _solve_lp_highs(
+def _solve_lp_simplex(
     model: Model,
     t_start: float,
     time_limit: float | None = None,
 ) -> SolveResult | None:
-    """Solve an LP using HiGHS. Returns None when HiGHS is unavailable or
-    the HiGHS wrapper fails, so the caller can fall back to another engine."""
-    try:
-        from discopt.solvers.lp_highs import solve_lp as _highs_solve_lp
-    except ImportError:
+    """Solve an LP using the pure-Rust warm-started simplex. Returns None when
+    the simplex binding is unavailable or fails, so the caller can fall back to
+    another engine."""
+    from discopt.solvers.lp_simplex import SIMPLEX_AVAILABLE
+    from discopt.solvers.lp_simplex import solve_lp as _simplex_solve_lp
+
+    if not SIMPLEX_AVAILABLE:
         return None
-    return _solve_lp_matrix(model, t_start, time_limit, _highs_solve_lp, "HiGHS")
+    return _solve_lp_matrix(model, t_start, time_limit, _simplex_solve_lp, "simplex")
 
 
 def _solve_lp_pounce(
@@ -8670,7 +8667,7 @@ def _solve_lp_matrix(
 ) -> SolveResult | None:
     """Solve a pure LP through a matrix-form ``solve_lp`` backend.
 
-    ``solve_lp_fn`` must follow the shared LP contract (lp_highs / lp_pounce):
+    ``solve_lp_fn`` must follow the shared LP contract (lp_simplex / lp_pounce):
     same signature, same ``LPResult`` with HiGHS-convention duals.
     """
     from discopt._jax.problem_classifier import extract_lp_data
@@ -9223,119 +9220,6 @@ def _solve_qp_matrix(
             wall_time=wall_time,
             node_count=result.node_count,
         )
-
-    return None
-
-
-def _solve_milp_highs(
-    model: Model,
-    t_start: float,
-    time_limit: float | None = None,
-    gap_tolerance: float = 1e-4,
-) -> SolveResult | None:
-    """Solve a MILP using HiGHS MIP. Returns None if HiGHS is unavailable."""
-    try:
-        from discopt.solvers.milp_highs import solve_milp as _highs_solve_milp
-    except ImportError:
-        return None
-
-    from discopt._jax.problem_classifier import extract_lp_data
-    from discopt.modeling.core import ObjectiveSense
-    from discopt.solvers import SolveStatus
-
-    lp_data = extract_lp_data(model)
-    n_orig = sum(v.size for v in model._variables)
-
-    bounds = list(
-        zip(
-            np.asarray(lp_data.x_l[:n_orig]).tolist(),
-            np.asarray(lp_data.x_u[:n_orig]).tolist(),
-        )
-    )
-
-    n_total = lp_data.A_eq.shape[1] if lp_data.A_eq.shape[0] > 0 else n_orig
-    n_slack = n_total - n_orig
-    A_eq_full = np.asarray(lp_data.A_eq)
-    b_eq_full = np.asarray(lp_data.b_eq)
-    A_ub, b_ub, A_eq, b_eq = _decompose_eq_slack_form(A_eq_full, b_eq_full, n_orig, n_slack)
-
-    int_arr = np.zeros(n_orig, dtype=np.int32)
-    offset = 0
-    for v in model._variables:
-        if v.var_type in (VarType.BINARY, VarType.INTEGER):
-            int_arr[offset : offset + v.size] = 1
-        offset += v.size
-
-    c_orig = np.asarray(lp_data.c[:n_orig])
-
-    # Charge already-elapsed time against the budget so HiGHS finishes by the
-    # SHARED deadline (t_start + time_limit), not a fresh full time_limit. A
-    # deferred upstream MILP attempt (e.g. _solve_milp_simplex burning its ~10 s
-    # slice before returning None) otherwise stacks on top of HiGHS's full
-    # budget, overrunning the user's time_limit by the upstream cost: tln6 /
-    # rsyn0810m03hfsg ran ~40 s on a 30 s limit (10 s simplex + a *fresh* 30 s
-    # HiGHS). Floor at a small positive value so HiGHS still returns its best
-    # incumbent rather than 0.0 (which HiGHS reads as "stop immediately").
-    if time_limit is not None:
-        time_limit = max(0.5, time_limit - (time.perf_counter() - t_start))
-
-    try:
-        result = _highs_solve_milp(
-            c=c_orig,
-            A_ub=A_ub,
-            b_ub=b_ub,
-            A_eq=A_eq,
-            b_eq=b_eq,
-            bounds=bounds,
-            integrality=int_arr,
-            time_limit=time_limit,
-            gap_tolerance=gap_tolerance,
-        )
-    except Exception as e:
-        logger.debug("HiGHS MILP solve failed: %s", e)
-        return None
-
-    wall_time = time.perf_counter() - t_start
-
-    assert model._objective is not None
-    sense = model._objective.sense
-
-    if result.status == SolveStatus.OPTIMAL:
-        assert result.x is not None and result.objective is not None
-        x_flat = result.x[:n_orig]
-        obj_val = result.objective + lp_data.obj_const
-        if sense == ObjectiveSense.MAXIMIZE:
-            obj_val = -obj_val
-        cd, bdl, bdu = _mip_recover_relaxation_duals(
-            model,
-            lp_data=lp_data,
-            x_flat=np.asarray(x_flat, dtype=float),
-            n_orig=n_orig,
-            A_ub=A_ub,
-            b_ub=b_ub,
-            A_eq=A_eq,
-            b_eq=b_eq,
-            time_limit=time_limit,
-        )
-        return SolveResult(
-            status="optimal",
-            objective=obj_val,
-            bound=obj_val,
-            gap=result.gap if result.gap is not None else 0.0,
-            x=_unpack_solution(model, x_flat),
-            wall_time=wall_time,
-            node_count=result.node_count,
-            rust_time=0.0,
-            jax_time=0.0,
-            python_time=wall_time,
-            constraint_duals=cd,
-            bound_duals_lower=bdl,
-            bound_duals_upper=bdu,
-        )
-    elif result.status == SolveStatus.INFEASIBLE:
-        return SolveResult(status="infeasible", wall_time=wall_time, node_count=result.node_count)
-    elif result.status == SolveStatus.TIME_LIMIT:
-        return SolveResult(status="time_limit", wall_time=wall_time, node_count=result.node_count)
 
     return None
 
@@ -10842,7 +10726,8 @@ def _solve_milp_bb(
     """Solve a MILP via B&B with LP relaxation solves at each node.
 
     ``prefer_pounce`` (POUNCE-only mode) routes the incumbent dual recovery
-    through POUNCE instead of HiGHS so the whole solve is HiGHS-free.
+    through POUNCE instead of the Rust simplex; either way the solve is
+    HiGHS-free (HiGHS was removed, issue #356).
 
     ``node_engine`` selects the per-node LP relaxation engine in POUNCE-only
     mode: ``"simplex"`` (the default for pure MILP — exact-vertex warm-started
@@ -11395,7 +11280,8 @@ def _solve_miqp_bb(
     """Solve a MIQP via B&B with QP relaxation solves at each node.
 
     ``prefer_pounce`` (POUNCE-only mode) routes the incumbent dual recovery
-    through POUNCE instead of HiGHS so the whole solve is HiGHS-free.
+    through POUNCE instead of the Rust simplex; either way the solve is
+    HiGHS-free (HiGHS was removed, issue #356).
     """
     from discopt._jax.problem_classifier import extract_qp_data
 

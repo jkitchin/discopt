@@ -1,8 +1,9 @@
 """AMP with the warm-started-simplex MILP backend (milp_solver="simplex").
 
 Two gates:
-1. The simplex `solve_milp` adapter matches HiGHS on small binary MILPs and
-   reports a sound (lower-bound) objective.
+1. The simplex `solve_milp` adapter matches the POUNCE B&B reference on small
+   binary MILPs (HiGHS was removed, issue #356) and reports a sound
+   (lower-bound) objective.
 2. End-to-end AMP with ``milp_solver="simplex"`` produces the *same* certified
    result (status, objective within rel_gap, gap_certified) as the default
    backend on representative nonconvex models — the relaxation backend must not
@@ -22,13 +23,13 @@ import discopt.modeling as dm  # noqa: E402
 from discopt.solvers import SolveStatus  # noqa: E402
 from discopt.solvers.milp_simplex import solve_milp as simplex_milp  # noqa: E402
 
-highs = pytest.importorskip("discopt.solvers.milp_highs")
-highs_milp = highs.solve_milp
 
-
-class TestSimplexAdapterVsHighs:
+class TestSimplexAdapterVsPounce:
     @pytest.mark.parametrize("seed", list(range(8)))
-    def test_matches_highs(self, seed):
+    def test_matches_pounce(self, seed):
+        pytest.importorskip("pounce")
+        from discopt.solvers.milp_pounce import solve_milp as ref_milp
+
         rng = np.random.default_rng(seed)
         n = 5
         c = -rng.integers(1, 10, n).astype(float)
@@ -37,11 +38,13 @@ class TestSimplexAdapterVsHighs:
         bounds = [(0.0, 1.0)] * n
         integ = np.ones(n)
         rs = simplex_milp(c=c, A_ub=A, b_ub=b, bounds=bounds, integrality=integ)
-        rh = highs_milp(c=c, A_ub=A, b_ub=b, bounds=bounds, integrality=integ)
+        rh = ref_milp(c=c, A_ub=A, b_ub=b, bounds=bounds, integrality=integ)
         if rh.status != SolveStatus.OPTIMAL:
             return
         assert rs.status == SolveStatus.OPTIMAL
-        assert abs(rs.objective - rh.objective) < 1e-6, f"seed={seed}"
+        # POUNCE is an interior-point reference, so allow the project rel
+        # tolerance rather than the exact-vs-exact 1e-6 the HiGHS oracle gave.
+        assert abs(rs.objective - rh.objective) < 1e-4, f"seed={seed}"
 
     def test_equality_rows_supported(self):
         # x0 + x1 == 1, binary, minimize -x0 - 2 x1 → x1=1, obj -2.

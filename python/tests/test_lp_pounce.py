@@ -1,7 +1,7 @@
 """Validation of the POUNCE LP path (roadmap P0.1).
 
-Mirrors ``test_lp_highs.py`` and additionally pins the interior-point-specific
-behaviours that matter when POUNCE replaces HiGHS as the LP engine for OBBT,
+Mirrors the legacy LP-oracle tests and additionally pins the interior-point-specific
+behaviours that matter when POUNCE replaces the simplex as the LP engine for OBBT,
 McCormick-LP, and OA/GDP masters:
 
   - Correct objective and status across inequality / equality / mixed /
@@ -11,7 +11,7 @@ McCormick-LP, and OA/GDP masters:
   - On degenerate / dual-degenerate LPs the IPM returns an interior point of
     the optimal face (not a simplex vertex): the objective matches but the
     primal does not, so those cases assert objective + feasibility only.
-  - HiGHS is used as a cross-check oracle (roadmap P0.5).
+  - The exact Rust simplex is used as a cross-check oracle (HiGHS removed, #356).
   - No simplex basis / warm-start (basis is None; warm_basis is ignored).
 
 Skipped entirely when POUNCE is not importable.
@@ -33,10 +33,13 @@ from discopt.solvers.lp_pounce import (  # noqa: E402
     solve_lp,
 )
 
+# Cross-check oracle: the exact Rust simplex (HiGHS was removed, issue #356).
+# It exposes objective/duals/reduced-costs in HiGHS's convention.
 try:
-    from discopt.solvers.lp_highs import solve_lp as solve_lp_highs
+    from discopt.solvers.lp_simplex import SIMPLEX_AVAILABLE
+    from discopt.solvers.lp_simplex import solve_lp as ref_lp
 
-    _HIGHS = True
+    _HIGHS = SIMPLEX_AVAILABLE
 except ImportError:  # pragma: no cover
     _HIGHS = False
 
@@ -128,7 +131,7 @@ class TestMixedConstraints:
     def test_objective_matches_highs(self):
         c, A_ub, b_ub, A_eq, b_eq = self._data()
         r = solve_lp(c=c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq)
-        ref = solve_lp_highs(c=c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq)
+        ref = ref_lp(c=c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq)
         assert abs(r.objective - ref.objective) < 1e-4
 
 
@@ -280,7 +283,7 @@ class TestDualConvention:
         # min x1+x2 s.t. x1+x2 = 5: unique dual y = 1.
         kw = dict(c=np.array([1.0, 1.0]), A_eq=np.array([[1.0, 1.0]]), b_eq=np.array([5.0]))
         rp = solve_lp(**kw)
-        rh = solve_lp_highs(**kw)
+        rh = ref_lp(**kw)
         np.testing.assert_allclose(rp.dual_values, rh.dual_values, atol=1e-5)
 
     def test_inequality_duals_match_highs(self):
@@ -292,7 +295,7 @@ class TestDualConvention:
             b_ub=np.array([4.0, 12.0, 25.0]),
         )
         rp = solve_lp(**kw)
-        rh = solve_lp_highs(**kw)
+        rh = ref_lp(**kw)
         np.testing.assert_allclose(rp.dual_values, rh.dual_values, atol=1e-5)
         np.testing.assert_allclose(rp.reduced_costs, rh.reduced_costs, atol=1e-5)
 
@@ -317,7 +320,7 @@ class TestSparse:
 
 
 # ---------------------------------------------------------------------------
-# 13. Dimension-mismatch errors (parity with lp_highs)
+# 13. Dimension-mismatch errors (parity with lp_simplex)
 # ---------------------------------------------------------------------------
 class TestDimensionMismatch:
     def test_A_ub_wrong_cols(self):
@@ -453,7 +456,7 @@ class TestHighsOracle:
         b_ub = A_ub @ x_feas + rng.uniform(0.5, 1.5, m)  # keep feasible
         bounds = [(0.0, 10.0)] * n  # bounded => finite optimum
         rp = solve_lp(c=c, A_ub=A_ub, b_ub=b_ub, bounds=bounds)
-        rh = solve_lp_highs(c=c, A_ub=A_ub, b_ub=b_ub, bounds=bounds)
+        rh = ref_lp(c=c, A_ub=A_ub, b_ub=b_ub, bounds=bounds)
         assert rp.status == SolveStatus.OPTIMAL
         assert rh.status == SolveStatus.OPTIMAL
         assert abs(rp.objective - rh.objective) < 1e-4, (

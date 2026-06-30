@@ -465,11 +465,11 @@ def test_rlt_wide_box_lp_not_false_infeasible(monkeypatch):
         f"RLT wide-box LP false-infeasible from the simplex (status={simplex.status}); "
         "the equilibration re-verify did not engage"
     )
-    # The recovered bound must match the HiGHS reference (a valid, sound relaxation
-    # bound — far below the -1100 optimum, but finite and correct).
-    highs = milp.solve(backend="highs")
-    assert highs.status == "optimal"
-    assert abs(float(simplex.bound) - float(highs.bound)) <= 1e-3 + 1e-6 * abs(float(highs.bound))
+    # The recovered bound must be finite and a valid, sound relaxation bound
+    # (HiGHS solved this same LP to ~-553676; the cross-check oracle was removed
+    # with HiGHS in issue #356, so pin finiteness + the known sound value).
+    assert np.isfinite(float(simplex.bound))
+    assert float(simplex.bound) == pytest.approx(-553676.0, rel=1e-3)
 
 
 # ---------------------------------------------------------------------------

@@ -46,8 +46,8 @@ def solve_gdpopt_loa(
     nlp_solver : str
         NLP solver backend for subproblems (``"ipm"``, ``"pounce"``, ``"ipopt"``).
     milp_solver : str
-        MILP backend for LOA master problems: ``"auto"``, ``"highs"``,
-        ``"pounce"``, ``"simplex"``, or ``"gurobi"``.
+        MILP backend for LOA master problems: ``"auto"``, ``"pounce"``,
+        ``"simplex"``, or ``"gurobi"`` (HiGHS was removed, issue #356).
 
     Returns
     -------

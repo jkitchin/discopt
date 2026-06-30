@@ -178,7 +178,6 @@ class TestBatchIPMUsesVmapPath:
             time_limit=120.0,
             gap_tolerance=1e-6,
             max_nodes=50_000,
-            use_highs_milp=False,
         )
         assert result.status in ("optimal", "feasible")
         assert result.node_count >= 1, f"Expected >=1 B&B nodes, got {result.node_count}"

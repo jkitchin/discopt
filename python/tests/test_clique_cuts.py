@@ -89,9 +89,9 @@ def _triangle_set_packing():
 class TestEndToEnd:
     def test_clique_cut_reduces_nodes_and_preserves_optimum(self, monkeypatch):
         pytest.importorskip("pounce")
-        r_with = _triangle_set_packing().solve(use_highs_milp=False, time_limit=60)
+        r_with = _triangle_set_packing().solve(time_limit=60)
         monkeypatch.setattr(S, "_root_cover_cut_loop", lambda ld, *a, **k: (ld, 0))
-        r_without = _triangle_set_packing().solve(use_highs_milp=False, time_limit=60)
+        r_without = _triangle_set_packing().solve(time_limit=60)
 
         assert r_with.status == "optimal" and r_without.status == "optimal"
         assert abs(r_with.objective - r_without.objective) < 1e-4

@@ -57,7 +57,7 @@ def _cmd_about(_args):
     print(f"  Executable:   {sys.executable}")
 
     deps = ["jax", "jaxlib", "numpy", "scipy"]
-    optional_deps = ["cyipopt", "highspy", "litellm", "pycutest", "onnx", "onnxruntime"]
+    optional_deps = ["cyipopt", "litellm", "pycutest", "onnx", "onnxruntime"]
     for name in deps:
         try:
             ver = importlib.metadata.version(name)

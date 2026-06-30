@@ -2,12 +2,14 @@
 
 ``_solve_lp`` tries matrix-form engines in POUNCE-first order by default
 (``nlp_solver`` now defaults to ``"pounce"`` — POUNCE everywhere), and flips
-to HiGHS-first when the user opts into the back-compat ``nlp_solver="ipm"``
-alias. These tests pin:
+to simplex-first when the user opts into the back-compat ``nlp_solver="ipm"``
+alias. HiGHS has been removed from the LP path entirely (issue #356); the
+HiGHS-free engines are the pure-Rust warm-started simplex and POUNCE. These
+tests pin:
 
   - default LP solves route to POUNCE (the universal default),
-  - ``nlp_solver="ipm"`` opts back into the HiGHS-first route,
-  - when HiGHS is unavailable the LP falls back to POUNCE (not the JAX IPM),
+  - ``nlp_solver="ipm"`` opts into the simplex-first route,
+  - when the simplex is unavailable the LP falls back to POUNCE (not the JAX IPM),
   - all routes agree on the optimum, and duals are exposed either way.
 """
 
@@ -49,25 +51,24 @@ def _spy(monkeypatch, name):
 class TestLPBackendSeam:
     def test_default_routes_to_pounce(self, monkeypatch):
         # POUNCE is now the universal default: the default solve must route to
-        # the POUNCE engine and must NOT consult HiGHS.
-        highs_calls = _spy(monkeypatch, "_solve_lp_highs")
+        # the POUNCE engine and must NOT consult the simplex.
+        simplex_calls = _spy(monkeypatch, "_solve_lp_simplex")
         pounce_calls = _spy(monkeypatch, "_solve_lp_pounce")
         res = _build_lp().solve(time_limit=30)
         assert res.status == "optimal"
         assert abs(res.objective - 12.0) < 1e-5
         assert pounce_calls == [True]
-        assert highs_calls == []  # POUNCE is default; HiGHS never consulted
+        assert simplex_calls == []  # POUNCE is default; simplex never consulted
 
-    def test_ipm_alias_routes_to_highs(self, monkeypatch):
-        # The "ipm" back-compat alias opts back into the HiGHS-first route.
-        pytest.importorskip("highspy")
-        highs_calls = _spy(monkeypatch, "_solve_lp_highs")
+    def test_ipm_alias_routes_to_simplex(self, monkeypatch):
+        # The "ipm" back-compat alias opts into the simplex-first route.
+        simplex_calls = _spy(monkeypatch, "_solve_lp_simplex")
         pounce_calls = _spy(monkeypatch, "_solve_lp_pounce")
         res = _build_lp().solve(nlp_solver="ipm", time_limit=30)
         assert res.status == "optimal"
         assert abs(res.objective - 12.0) < 1e-5
-        assert highs_calls == [True]
-        assert pounce_calls == []  # HiGHS succeeded; POUNCE never consulted
+        assert simplex_calls == [True]
+        assert pounce_calls == []  # simplex succeeded; POUNCE never consulted
 
     def test_pounce_request_routes_to_pounce(self, monkeypatch):
         pounce_calls = _spy(monkeypatch, "_solve_lp_pounce")
@@ -76,10 +77,12 @@ class TestLPBackendSeam:
         assert abs(res.objective - 12.0) < 1e-5
         assert pounce_calls == [True]
 
-    def test_fallback_to_pounce_when_highs_unavailable(self, monkeypatch):
-        monkeypatch.setattr(S, "_solve_lp_highs", lambda *a, **k: None)
+    def test_fallback_to_pounce_when_simplex_unavailable(self, monkeypatch):
+        # In the simplex-first ("ipm") route, a missing simplex falls back to
+        # POUNCE (not the JAX IPM).
+        monkeypatch.setattr(S, "_solve_lp_simplex", lambda *a, **k: None)
         pounce_calls = _spy(monkeypatch, "_solve_lp_pounce")
-        res = _build_lp().solve(time_limit=30)
+        res = _build_lp().solve(nlp_solver="ipm", time_limit=30)
         assert res.status == "optimal"
         assert abs(res.objective - 12.0) < 1e-5
         assert pounce_calls == [True]
@@ -90,12 +93,11 @@ class TestLPBackendSeam:
         assert res.constraint_duals is not None
 
     def test_routes_agree_with_each_other(self):
-        pytest.importorskip("highspy")
-        r_h = _build_lp().solve(nlp_solver="ipm", time_limit=30)  # HiGHS route
+        r_s = _build_lp().solve(nlp_solver="ipm", time_limit=30)  # simplex route
         r_p = _build_lp().solve(nlp_solver="pounce", time_limit=30)
-        assert abs(r_h.objective - r_p.objective) < 1e-5
+        assert abs(r_s.objective - r_p.objective) < 1e-5
         for name in ("x", "y"):
-            np.testing.assert_allclose(r_h.x[name], r_p.x[name], atol=1e-4)
+            np.testing.assert_allclose(r_s.x[name], r_p.x[name], atol=1e-4)
 
 
 def _build_infeasible_lp() -> dm.Model:
@@ -130,11 +132,10 @@ class TestInfeasibilityCertificateExposed:
         # Gap between x+y<=1 and x+y>=10 forces total violation ~9.
         assert cert.total_violation > 1.0
 
-    def test_highs_engine_has_no_certificate(self):
-        pytest.importorskip("highspy")
+    def test_simplex_engine_has_no_certificate(self):
         import time
 
-        res = S._solve_lp_highs(_build_infeasible_lp(), time.perf_counter())
+        res = S._solve_lp_simplex(_build_infeasible_lp(), time.perf_counter())
         assert res is not None and res.status == "infeasible"
-        # HiGHS path does not compute the elastic Phase-1 witness.
+        # The simplex path does not compute the elastic Phase-1 witness.
         assert res.infeasibility_certificate is None

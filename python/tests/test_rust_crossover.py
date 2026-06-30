@@ -108,20 +108,19 @@ class TestRustCrossover:
         status, basic = np.asarray(res[0]), np.asarray(res[1])
         _assert_valid_basis(status, basic, xv, a, b, lo, up)
 
-    def test_reconstructs_highs_optimum(self):
-        pytest.importorskip("highspy")
-        # Solve the LP relaxation with HiGHS; the recovered basis must
-        # reconstruct an optimum with the same objective HiGHS reports.
+    def test_reconstructs_simplex_optimum(self):
+        # Solve the LP relaxation with the exact Rust simplex; the recovered
+        # basis must reconstruct an optimum with the same objective.
         a, b, c, lo, up, x_int = _lp_interior_optimum(_sym_knapsack())
         from discopt.solvers import SolveStatus
-        from discopt.solvers.lp_highs import solve_lp
+        from discopt.solvers.lp_simplex import solve_lp
 
         bounds = list(zip(lo.tolist(), up.tolist()))
         hi = solve_lp(c=c, A_eq=a, b_eq=b, bounds=bounds)
         assert hi.status == SolveStatus.OPTIMAL
 
         xv = np.asarray(rust.crossover_to_vertex_py(x_int, a, c, lo, up))
-        assert abs(c @ xv - hi.objective) < 1e-5  # same optimum as HiGHS
+        assert abs(c @ xv - hi.objective) < 1e-5  # same optimum as the simplex
         res = rust.recover_basis_py(xv, a, c, lo, up)
         assert res is not None
         status, basic = np.asarray(res[0]), np.asarray(res[1])
@@ -218,9 +217,9 @@ class TestGomoryWiring:
             m.subject_to(5 * xs[0] + 5 * xs[1] + 5 * xs[2] + 5 * xs[3] <= 9)
             return m
 
-        r_gmi = _knap().solve(use_highs_milp=False, time_limit=60)
+        r_gmi = _knap().solve(time_limit=60)
         monkeypatch.setattr(S, "_separate_gomory_cuts", lambda *a, **k: None)
-        r_nogmi = _knap().solve(use_highs_milp=False, time_limit=60)
+        r_nogmi = _knap().solve(time_limit=60)
 
         assert r_gmi.status == "optimal" and r_nogmi.status == "optimal"
         assert abs(r_gmi.objective - (-10.0)) < 1e-4  # correct optimum (was -8)
@@ -297,12 +296,11 @@ class TestMirCuts:
 
     def test_mir_in_pounce_solve_stays_correct(self):
         # solve_milp runs prefer_pounce=True, so MIR (and GMI) are auto-on;
-        # confirm a general-integer MILP matches the HiGHS optimum.
+        # confirm a general-integer MILP matches the Rust simplex B&B optimum.
         pytest.importorskip("pounce")
-        pytest.importorskip("highspy")
         from discopt.solvers import SolveStatus
-        from discopt.solvers.milp_highs import solve_milp as highs
         from discopt.solvers.milp_pounce import solve_milp
+        from discopt.solvers.milp_simplex import solve_milp as ref_milp
 
         rng = np.random.default_rng(7)
         c = rng.integers(-5, 6, 4).astype(float)
@@ -310,6 +308,6 @@ class TestMirCuts:
         b = (A @ rng.integers(0, 4, 4) + rng.integers(1, 5, 3)).astype(float)
         kw = dict(c=c, A_ub=A, b_ub=b, bounds=[(0, 5)] * 4, integrality=np.ones(4))
         rp = solve_milp(**kw)
-        rh = highs(**kw)
+        rh = ref_milp(**kw)
         assert rp.status == SolveStatus.OPTIMAL
         assert abs(rp.objective - rh.objective) < 1e-3

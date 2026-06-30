@@ -42,7 +42,6 @@ Issues = "https://github.com/jkitchin/discopt/issues"
 # kept as a no-op alias for back-compat with `pip install discopt[pounce]`.
 pounce = ["pounce-solver>=0.6"]
 ipopt = ["cyipopt>=1.4"]
-highs = ["highspy"]
 cutest = ["pycutest>=1.8.0"]
 # GAMS solver link: the expert-level GAMS Python API (GMO/GEV). Ships with a
 # GAMS system; also on PyPI. Required only to run discopt *as* a GAMS solver.
@@ -76,11 +75,10 @@ dev = [
     # local `pip install -e .[dev]` cannot drift from CI.
     "ruff==0.14.6",
     "mypy==2.1.0",
-    "highspy",
     "pre-commit",
     "pyomo>=6.7",
 ]
-all = ["discopt[pounce,ipopt,highs,cutest,llm,gnn,nn,ml,doe,doe-gui,sympy,pyomo]"]
+all = ["discopt[pounce,ipopt,cutest,llm,gnn,nn,ml,doe,doe-gui,sympy,pyomo]"]
 
 [project.scripts]
 discopt = "discopt.cli:main"
