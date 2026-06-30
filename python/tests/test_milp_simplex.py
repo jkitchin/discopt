@@ -1,11 +1,11 @@
-"""Rust-internal warm-started-simplex MILP solver vs HiGHS (roadmap P4).
+"""Rust-internal warm-started-simplex MILP solver vs POUNCE (roadmap P4).
 
 ``discopt._rust.solve_milp_py`` runs the whole pure-MILP branch-and-bound in
 Rust: the existing tree manager, with each node's LP solved by the bounded
 simplex — root cold, children warm-started (dual simplex) from the basis they
 inherit from their parent. This is the B&B correctness gate: on random MILPs its
-optimum must match HiGHS (``incorrect_count == 0``, within 1e-4), and it must
-detect infeasibility.
+optimum must match the POUNCE B&B reference (``incorrect_count == 0``, within
+1e-4; HiGHS was removed, issue #356), and it must detect infeasibility.
 
 The solver consumes standard form ``A x = b`` with explicit slack columns; the
 helper here slacks a ``≤`` MILP so the same instance can be sent to both
@@ -22,7 +22,6 @@ if not hasattr(rust, "solve_milp_py"):
     pytest.skip("simplex MILP binding not built", allow_module_level=True)
 
 from discopt.solvers import SolveStatus  # noqa: E402
-from discopt.solvers.milp_highs import solve_milp as highs_milp  # noqa: E402
 
 
 def _slack_standard_form(c, A_ub, b_ub, lb, ub):
@@ -51,9 +50,12 @@ def _solve_simplex(c, A_ub, b_ub, lb, ub, integer_cols):
     )
 
 
-class TestMilpSimplexVsHighs:
+class TestMilpSimplexVsPounce:
     @pytest.mark.parametrize("seed", list(range(30)))
-    def test_matches_highs(self, seed):
+    def test_matches_pounce(self, seed):
+        pytest.importorskip("pounce")
+        from discopt.solvers.milp_pounce import solve_milp as ref_milp
+
         rng = np.random.default_rng(seed)
         n, m = 4, 3
         c = rng.integers(-5, 6, n).astype(float)
@@ -64,11 +66,13 @@ class TestMilpSimplexVsHighs:
         integer_cols = list(range(n))
 
         status, x, obj, _bound, _nodes, _it = _solve_simplex(c, A, b, lb, ub, integer_cols)
-        hi = highs_milp(c=c, A_ub=A, b_ub=b, bounds=[(0, 5)] * n, integrality=np.ones(n))
+        hi = ref_milp(c=c, A_ub=A, b_ub=b, bounds=[(0, 5)] * n, integrality=np.ones(n))
         if hi.status != SolveStatus.OPTIMAL:
             return
         assert status in ("optimal", "feasible"), f"seed={seed}: {status}"
-        assert abs(obj - hi.objective) < 1e-4, f"seed={seed}: simplex {obj} vs HiGHS {hi.objective}"
+        assert abs(obj - hi.objective) < 1e-4, (
+            f"seed={seed}: simplex {obj} vs POUNCE {hi.objective}"
+        )
 
     def test_binary_knapsack(self):
         c = np.array([-10.0, -9.0, -8.0, -1.0])
@@ -91,7 +95,7 @@ class TestMilpSimplexVsHighs:
 
 class TestModelSolveSimplex:
     """End-to-end: Model.solve(nlp_solver="simplex") routes a pure MILP to the
-    Rust warm-started-simplex engine and matches HiGHS."""
+    Rust warm-started-simplex engine and matches the POUNCE default."""
 
     def _knapsack(self):
         import discopt.modeling as dm
@@ -126,7 +130,7 @@ class TestModelSolveSimplex:
             ys = [m2.binary(f"x{i}") for i in range(n)]
             m2.minimize(-sum(int(v[i]) * ys[i] for i in range(n)))
             m2.subject_to(sum(int(w[i]) * ys[i] for i in range(n)) <= cap)
-            r_h = m2.solve(use_highs_milp=True, time_limit=30)
+            r_h = m2.solve(nlp_solver="pounce", time_limit=30)
 
             assert r_s.status == "optimal"
             if r_h.status == "optimal":

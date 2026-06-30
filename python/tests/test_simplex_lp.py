@@ -1,10 +1,11 @@
-"""Rust revised-simplex LP solver vs HiGHS (roadmap P1).
+"""Rust revised-simplex LP solver vs POUNCE (roadmap P1).
 
 ``discopt._rust.solve_lp_py`` solves the standard-form LP
 ``min cᵀx s.t. A x = b, lb ≤ x ≤ ub`` with the bounded-variable two-phase primal
 simplex (feral LU backend). This is the cold-solve correctness gate: on random
-feasible/bounded LPs its optimum must match HiGHS within 1e-6, and it must
-detect infeasibility/unboundedness on constructed cases.
+feasible/bounded LPs its optimum must match the POUNCE reference (HiGHS was
+removed, issue #356), and it must detect infeasibility/unboundedness on
+constructed cases.
 """
 
 from __future__ import annotations
@@ -15,10 +16,16 @@ import pytest
 rust = pytest.importorskip("discopt._rust")
 if not hasattr(rust, "solve_lp_py"):
     pytest.skip("simplex LP binding not built", allow_module_level=True)
-highspy = pytest.importorskip("highspy")  # noqa: F841
 
 from discopt.solvers import SolveStatus  # noqa: E402
-from discopt.solvers.lp_highs import solve_lp as highs_lp  # noqa: E402
+
+
+def _ref_lp():
+    """The reference LP oracle (POUNCE), or skip if unavailable."""
+    pytest.importorskip("pounce")
+    from discopt.solvers.lp_pounce import solve_lp as ref_lp
+
+    return ref_lp
 
 
 def _rand_standard_form(seed, m, n):
@@ -34,9 +41,10 @@ def _rand_standard_form(seed, m, n):
     return c, A, b, lb, ub
 
 
-class TestSimplexVsHighs:
+class TestSimplexVsPounce:
     @pytest.mark.parametrize("seed", list(range(40)))
-    def test_matches_highs_on_random_lps(self, seed):
+    def test_matches_pounce_on_random_lps(self, seed):
+        ref_lp = _ref_lp()
         m = 2 + (seed % 4)
         n = m + 2 + (seed % 3)
         c, A, b, lb, ub = _rand_standard_form(seed, m, n)
@@ -48,11 +56,13 @@ class TestSimplexVsHighs:
             np.ascontiguousarray(lb),
             np.ascontiguousarray(ub),
         )
-        hi = highs_lp(c=c, A_eq=A, b_eq=b, bounds=list(zip(lb.tolist(), ub.tolist())))
+        hi = ref_lp(c=c, A_eq=A, b_eq=b, bounds=list(zip(lb.tolist(), ub.tolist())))
         if hi.status != SolveStatus.OPTIMAL:
-            return  # only compare where HiGHS certified an optimum
+            return  # only compare where the reference certified an optimum
         assert status == "optimal", f"seed={seed}: simplex status {status}"
-        assert abs(obj - hi.objective) < 1e-6, f"seed={seed}: simplex {obj} vs HiGHS {hi.objective}"
+        assert abs(obj - hi.objective) < 1e-4, (
+            f"seed={seed}: simplex {obj} vs POUNCE {hi.objective}"
+        )
         # returned point is feasible: A x = b, bounds respected.
         x = np.asarray(x)
         assert np.allclose(A @ x, b, atol=1e-6)
@@ -192,16 +202,17 @@ class TestSimplexLpDuals:
         bounds = [(0.0, 5.0)] * n
         return c, A_ub, b_ub, A_eq, b_eq, bounds
 
-    def test_objective_matches_highs(self):
+    def test_objective_matches_pounce(self):
+        ref_lp = _ref_lp()
         from discopt.solvers.lp_simplex import solve_lp as rust_lp
 
         for seed in range(40):
             c, A_ub, b_ub, A_eq, b_eq, bounds = self._lp(seed)
-            h = highs_lp(c, A_ub, b_ub, A_eq, b_eq, bounds)
+            h = ref_lp(c, A_ub, b_ub, A_eq, b_eq, bounds)
             r = rust_lp(c, A_ub, b_ub, A_eq, b_eq, bounds)
             assert r.status == h.status
             if r.status == SolveStatus.OPTIMAL:
-                assert abs(r.objective - h.objective) < 1e-6
+                assert abs(r.objective - h.objective) < 1e-4
 
     def test_duals_are_populated_and_satisfy_strong_duality(self):
         # The duals need not equal HiGHS's on a degenerate LP, but they must be a

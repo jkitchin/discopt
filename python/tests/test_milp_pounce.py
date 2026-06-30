@@ -1,7 +1,7 @@
 """Matrix-form MILP via the self-hosted B&B (roadmap P4).
 
 ``milp_pounce.solve_milp`` exposes the discopt Rust-tree B&B (POUNCE LP
-relaxations) behind the ``milp_highs.solve_milp`` signature/``MILPResult``
+relaxations) behind the ``milp_simplex.solve_milp`` signature/``MILPResult``
 contract, by building a Model from the matrices and running
 ``_solve_milp_bb(prefer_pounce=True)``. This is what lets the matrix-form
 MILP consumers (OA/GDP-LOA masters, milp_relaxation) run with only POUNCE.
@@ -17,8 +17,9 @@ pytest.importorskip("pounce")
 from discopt.solvers import SolveStatus  # noqa: E402
 from discopt.solvers.milp_pounce import solve_milp  # noqa: E402
 
+# Cross-check oracle: the exact Rust simplex B&B (HiGHS was removed, issue #356).
 try:
-    from discopt.solvers.milp_highs import solve_milp as solve_milp_highs
+    from discopt.solvers.milp_simplex import solve_milp as ref_milp
 
     _HIGHS = True
 except ImportError:  # pragma: no cover
@@ -84,7 +85,7 @@ class TestHighsAgreement:
         b = (A @ rng.integers(0, 4, n) + rng.integers(1, 5, m)).astype(float)
         kw = dict(c=c, A_ub=A, b_ub=b, bounds=[(0, 5)] * n, integrality=np.ones(n))
         rp = solve_milp(**kw)
-        rh = solve_milp_highs(**kw)
+        rh = ref_milp(**kw)
         if rh.status != SolveStatus.OPTIMAL:
             return  # only compare where HiGHS certified an optimum
         assert rp.status in (SolveStatus.OPTIMAL, SolveStatus.ITERATION_LIMIT)

@@ -16,36 +16,12 @@ Two modes:
 
 from __future__ import annotations
 
-import os
 import time
 from typing import Callable, Optional
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-
-# Default n_vars threshold below which the numpy/scipy backend is used
-# when caller supplies a numpy-compiled relaxation. Overridable via
-# DISCOPT_MCCORMICK_NUMPY_THRESHOLD.
-#
-# Default is 0 (disabled). The numpy backend bypasses JAX trace/compile
-# entirely via scipy.optimize.minimize(SLSQP); on small instances it is
-# competitive on short solves and more robust at the root node (returns
-# finite bounds where the JAX IPM may return -inf), but produces looser
-# relaxation bounds than the JAX IPM, so on long solves it explores more
-# B&B nodes. Set the env var to N to opt in for problems with <= N vars.
-_NUMPY_THRESHOLD_DEFAULT = 0
-
-
-def _numpy_threshold() -> int:
-    raw = os.environ.get("DISCOPT_MCCORMICK_NUMPY_THRESHOLD")
-    if raw is None:
-        return _NUMPY_THRESHOLD_DEFAULT
-    try:
-        return int(raw)
-    except ValueError:
-        return _NUMPY_THRESHOLD_DEFAULT
-
 
 # Per-(relaxation, options) jit caches. Keyed by Python id() of the
 # relaxation functions plus negate/max_iter so repeat B&B nodes hit the
@@ -288,24 +264,6 @@ def solve_mccormick_relaxation_nlp(
     """
     if _deadline_expired(deadline):
         return -np.inf
-
-    # Dispatch to numpy/scipy backend when caller supplied numpy fns and
-    # problem is small enough that JAX trace/compile would dominate.
-    if obj_relax_fn_numpy is not None:
-        n_vars = int(np.asarray(node_lb).size)
-        if n_vars <= _numpy_threshold():
-            from discopt._numpy.nlp_solver import solve_mccormick_relaxation_nlp_numpy
-
-            return solve_mccormick_relaxation_nlp_numpy(
-                obj_relax_fn_numpy,
-                con_relax_fns_numpy,
-                con_senses,
-                np.asarray(node_lb, dtype=np.float64),
-                np.asarray(node_ub, dtype=np.float64),
-                negate=negate,
-                max_iter=max(max_iter, 100),
-                deadline=deadline,
-            )
 
     lb = jnp.asarray(node_lb, dtype=jnp.float64)
     ub = jnp.asarray(node_ub, dtype=jnp.float64)

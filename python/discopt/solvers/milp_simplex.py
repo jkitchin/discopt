@@ -1,7 +1,7 @@
 """Warm-started-simplex MILP backend (Rust ``solve_milp_py``).
 
 A ``solve_milp(c, A_ub, b_ub, ..., integrality, ...)`` adapter, signature- and
-``MILPResult``-compatible with :mod:`discopt.solvers.milp_highs` and
+``MILPResult``-compatible with :mod:`discopt.solvers.milp_pounce` and
 :mod:`discopt.solvers.milp_pounce`, so it can be selected through
 :func:`discopt.solvers.lp_backend.get_milp_solver`. It marshals the ``A_ub x <= b_ub``
 form into the engine's standard form ``A_eq z = b`` (one explicit slack per row) and runs
@@ -249,7 +249,7 @@ def solve_milp(
     """Solve ``min c^T x  s.t.  A_ub x <= b_ub, A_eq x == b_eq, bounds, integrality``
     with the Rust warm-started-simplex B&B.
 
-    Mirrors :func:`discopt.solvers.milp_highs.solve_milp`. The returned
+    Mirrors :func:`discopt.solvers.milp_pounce.solve_milp`. The returned
     ``objective`` is the engine's dual lower bound (see module docstring).
     """
     try:

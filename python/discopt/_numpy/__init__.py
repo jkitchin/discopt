@@ -1,10 +1,11 @@
-"""Pure-numpy McCormick relaxation backend.
+"""Pure-numpy McCormick relaxation compilation backend.
 
-A drop-in alternative to the JAX McCormick path. Avoids JAX trace/compile
-overhead on small B&B nodes by evaluating relaxations directly in numpy
-and solving the convex NLP via scipy.optimize.minimize.
+Compiles a Model's McCormick relaxation to plain numpy callables
+(``discopt._numpy.relaxation_compiler``), avoiding JAX trace/compile overhead.
+Unsupported ops raise ``NotImplementedError`` and the caller falls back to the
+JAX path.
 
-The dispatcher in ``discopt._jax.mccormick_nlp`` routes small instances
-here when all expression ops are supported. Unsupported ops raise
-``NotImplementedError`` and the caller falls back to the JAX path.
+The former scipy/SLSQP relaxation NLP solver (``nlp_solver.py``) and its
+dispatch from ``discopt._jax.mccormick_nlp`` were removed with HiGHS in issue
+#356; the default relaxation NLP path is POUNCE.
 """

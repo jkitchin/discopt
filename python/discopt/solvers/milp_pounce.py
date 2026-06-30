@@ -3,7 +3,7 @@
 POUNCE has no *matrix* MILP solver — "POUNCE MILP" is the discopt Rust-tree
 B&B with POUNCE LP relaxations (Phase 1). This adapter exposes that B&B behind
 the same signature/``MILPResult`` contract as
-:func:`discopt.solvers.milp_highs.solve_milp` by building a ``Model`` from the
+:func:`discopt.solvers.milp_simplex.solve_milp` by building a ``Model`` from the
 matrix data, running ``_solve_milp_bb(prefer_pounce=True)``, and mapping the
 result back. It lets the matrix-form MILP consumers (the OA / GDP-LOA masters
 and ``milp_relaxation``) run with **only POUNCE installed** (no HiGHS).
@@ -80,7 +80,7 @@ def solve_milp(
 ) -> MILPResult:
     """Solve ``min c^T x`` over the MILP via the self-hosted B&B (POUNCE).
 
-    Same signature/semantics as :func:`discopt.solvers.milp_highs.solve_milp`.
+    Same signature/semantics as :func:`discopt.solvers.milp_simplex.solve_milp`.
     ``bounds`` default to ``(0, +inf)`` per variable when ``None``;
     ``integrality[j] == 1`` marks variable ``j`` integer (all continuous when
     ``None``).

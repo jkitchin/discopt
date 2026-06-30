@@ -651,8 +651,8 @@ def solve_oa(
         Use gradient-based feasibility cuts (Fletcher & Leyffer 1994)
         when the NLP subproblem is infeasible. Stronger than no-good cuts.
     milp_solver : str
-        MILP backend for OA master problems: ``"auto"``, ``"highs"``,
-        ``"pounce"``, ``"simplex"``, or ``"gurobi"``.
+        MILP backend for OA master problems: ``"auto"``, ``"pounce"``,
+        ``"simplex"``, or ``"gurobi"`` (HiGHS was removed, issue #356).
 
     Returns
     -------

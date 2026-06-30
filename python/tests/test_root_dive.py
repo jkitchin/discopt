@@ -53,11 +53,11 @@ class TestRootDive:
 class TestEndToEnd:
     def test_optimum_preserved_and_nodes_not_worse(self, monkeypatch):
         pytest.importorskip("pounce")
-        r_with = _knapsack().solve(use_highs_milp=False, time_limit=60)
+        r_with = _knapsack().solve(time_limit=60)
         nodes_with = r_with.node_count
 
         monkeypatch.setattr(S, "_root_dive", lambda *a, **k: None)
-        r_without = _knapsack().solve(use_highs_milp=False, time_limit=60)
+        r_without = _knapsack().solve(time_limit=60)
 
         assert r_with.status == "optimal" and r_without.status == "optimal"
         assert abs(r_with.objective - r_without.objective) < 1e-4
@@ -67,7 +67,7 @@ class TestEndToEnd:
     def test_dive_incumbent_is_feasible_via_solve(self):
         pytest.importorskip("pounce")
         # The injected dive incumbent must be a genuine feasible solution.
-        r = _knapsack().solve(use_highs_milp=False, time_limit=60)
+        r = _knapsack().solve(time_limit=60)
         assert r.status == "optimal"
         x = np.array([float(r.x[f"x{i}"]) for i in range(5)])
         assert np.allclose(x, np.round(x), atol=1e-5)

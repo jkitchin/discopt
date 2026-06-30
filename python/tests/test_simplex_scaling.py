@@ -10,21 +10,20 @@ floor could in principle drop. Validated against HiGHS as the oracle.
 import numpy as np
 import pytest
 from discopt.solvers import SolveStatus
-from discopt.solvers.lp_simplex import SIMPLEX_AVAILABLE
 from discopt.solvers.lp_simplex import solve_lp as simplex_lp
 
-try:
-    import highspy  # noqa: F401
-    from discopt.solvers.lp_highs import solve_lp as highs_lp
-
-    HAS_HIGHS = True
-except ImportError:
-    HAS_HIGHS = False
-
-pytestmark = pytest.mark.skipif(
-    not (SIMPLEX_AVAILABLE and HAS_HIGHS),
-    reason="needs the Rust simplex and highspy oracle",
+# This robustness gate validated the simplex on *ill-conditioned* LPs against an
+# independent exact oracle. HiGHS was that oracle and has been removed (issue
+# #356); the POUNCE IPM is unsuitable here — its analytic-center objective can
+# drift on exactly these wide-coefficient LPs (#145), so it cannot serve as the
+# exact reference. Skip until an independent exact oracle is wired back in.
+pytest.skip(
+    "exact external LP oracle (HiGHS) removed in issue #356; the ill-conditioned "
+    "simplex-scaling cross-check needs an independent exact oracle",
+    allow_module_level=True,
 )
+
+highs_lp = None  # unreachable; retained so static references below resolve.
 
 
 def _agree(rs, rh, tol=1e-4):
