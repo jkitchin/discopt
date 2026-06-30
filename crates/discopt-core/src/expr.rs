@@ -1043,9 +1043,7 @@ impl ExprArena {
                         a0.max(a1)
                     }
                     MathFunc::Prod => self.reduction_values(args, x).iter().product(),
-                    MathFunc::Norm1 => {
-                        self.reduction_values(args, x).iter().map(|t| t.abs()).sum()
-                    }
+                    MathFunc::Norm1 => self.reduction_values(args, x).iter().map(|t| t.abs()).sum(),
                     MathFunc::Norm2 => self
                         .reduction_values(args, x)
                         .iter()
@@ -1451,9 +1449,7 @@ impl ModelRepr {
                         a0.max(a1)
                     }
                     MathFunc::Prod => self.reduction_values(args, x).iter().product(),
-                    MathFunc::Norm1 => {
-                        self.reduction_values(args, x).iter().map(|t| t.abs()).sum()
-                    }
+                    MathFunc::Norm1 => self.reduction_values(args, x).iter().map(|t| t.abs()).sum(),
                     MathFunc::Norm2 => self
                         .reduction_values(args, x)
                         .iter()

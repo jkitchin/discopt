@@ -233,11 +233,21 @@ class LinearContext:
 
         try:
             lo_res = solve_lp(
-                coeffs, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds,
+                coeffs,
+                A_ub=A_ub,
+                b_ub=b_ub,
+                A_eq=A_eq,
+                b_eq=b_eq,
+                bounds=bounds,
                 time_limit=_LP_POUNCE_TIME_LIMIT,
             )
             hi_res = solve_lp(
-                -coeffs, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds,
+                -coeffs,
+                A_ub=A_ub,
+                b_ub=b_ub,
+                A_eq=A_eq,
+                b_eq=b_eq,
+                bounds=bounds,
                 time_limit=_LP_POUNCE_TIME_LIMIT,
             )
         except (ValueError, RuntimeError, ImportError):
