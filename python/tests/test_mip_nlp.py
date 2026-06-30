@@ -53,6 +53,98 @@ def _mixed_discrete_model(name="mip_nlp_init_strategy"):
     return m
 
 
+def _convex_binary_nonlinear_model(name="mip_nlp_cut_trace"):
+    m = dm.Model(name)
+    x = m.continuous("x", lb=0, ub=4)
+    y = m.binary("y")
+    m.subject_to((x - 2) ** 2 + y - 1 <= 0)
+    m.minimize((x - 1) ** 2 + y)
+    return m
+
+
+def test_mip_nlp_cut_record_construction_and_dedup():
+    from discopt.solvers.oa import MIPNLPCutProvenance, MIPNLPCutRecord, _append_master_cut
+
+    record = MIPNLPCutRecord.from_row(
+        "oa",
+        np.array([1.0, -1.0]),
+        0.5,
+        global_valid=True,
+        supporting_point=np.array([2.0, 1.0]),
+        constraint_id=3,
+    )
+
+    assert record.source == "oa"
+    assert record.coefficients == (1.0, -1.0)
+    assert record.rhs == pytest.approx(0.5)
+    assert record.violation == pytest.approx(0.5)
+    assert record.constraint_id == 3
+
+    provenance = MIPNLPCutProvenance()
+    oa_A_rows = []
+    oa_b_rows = []
+    _append_master_cut(
+        oa_A_rows,
+        oa_b_rows,
+        np.array([1.0, -1.0]),
+        0.5,
+        cut_provenance=provenance,
+        source="oa",
+        global_valid=True,
+    )
+    _append_master_cut(
+        oa_A_rows,
+        oa_b_rows,
+        np.array([1.0, -1.0]),
+        0.5,
+        cut_provenance=provenance,
+        source="ecp",
+        global_valid=True,
+    )
+    _append_master_cut(
+        oa_A_rows,
+        oa_b_rows,
+        np.array([1.0, 1.0]),
+        1.0,
+        cut_provenance=provenance,
+        source="integer",
+        global_valid=True,
+    )
+
+    assert len(oa_A_rows) == 3
+    assert len(provenance.records) == 2
+    assert provenance.source_counts()["oa"] == 1
+    assert provenance.source_counts()["ecp"] == 0
+    assert provenance.source_counts()["integer"] == 1
+
+
+def test_mip_nlp_trace_exposes_cut_source_counts(monkeypatch):
+    import discopt.solvers.oa as oa_module
+
+    monkeypatch.setattr(
+        oa_module,
+        "_solve_nlp_relaxation",
+        lambda *args, **kwargs: (np.array([1.5, 0.0]), 0.25),
+    )
+
+    result = oa_module.solve_oa(
+        _convex_binary_nonlinear_model(),
+        max_iterations=0,
+        init_strategy="rNLP",
+    )
+
+    assert result.mip_nlp_trace is not None
+    summary = result.mip_nlp_trace["summary"]
+    counts = summary["cut_source_counts"]
+    assert summary["cut_count"] == 2
+    assert summary["provenance_cut_count"] == 2
+    assert counts["oa"] == 1
+    assert counts["objective"] == 1
+    assert counts["ecp"] == 0
+    assert counts["feasibility"] == 0
+    assert counts["integer"] == 0
+
+
 def _mindtpy_simple_minlp(name="mindtpy_init_strategy"):
     m = dm.Model(name)
     x = m.continuous("x", shape=(2,), lb=0, ub=4)

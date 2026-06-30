@@ -24,7 +24,8 @@ from __future__ import annotations
 import logging
 import time
 import warnings
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 import numpy as np
@@ -68,6 +69,131 @@ _FEASIBILITY_NORMS = {
     "l_inf": "L_infinity",
 }
 _START_BOUND_CLIP = 1e8
+_CUT_SOURCE_ORDER = (
+    "oa",
+    "ecp",
+    "objective",
+    "objective_rootsearch",
+    "esh",
+    "feasibility",
+    "integer",
+    "external",
+)
+
+
+def _float_tuple(values) -> tuple[float, ...]:
+    return tuple(float(v) for v in np.asarray(values, dtype=np.float64).reshape(-1))
+
+
+def _row_violation(
+    coeffs: tuple[float, ...],
+    rhs: float,
+    supporting_point: Optional[tuple[float, ...]],
+) -> Optional[float]:
+    if supporting_point is None or len(supporting_point) != len(coeffs):
+        return None
+    lhs = float(np.dot(np.asarray(coeffs, dtype=np.float64), np.asarray(supporting_point)))
+    return max(0.0, lhs - float(rhs))
+
+
+@dataclass(frozen=True)
+class MIPNLPCutRecord:
+    """Structured provenance for one generated MIP-NLP master cut."""
+
+    source: str
+    global_valid: bool
+    local_valid: bool
+    supporting_point: Optional[tuple[float, ...]]
+    violation: Optional[float]
+    constraint_id: Optional[int]
+    objective_id: Optional[str]
+    coefficients: tuple[float, ...]
+    rhs: float
+    dedup_key: tuple[tuple[float, ...], float]
+
+    @classmethod
+    def from_row(
+        cls,
+        source: str,
+        coeffs,
+        rhs: float,
+        *,
+        global_valid: bool,
+        local_valid: bool = True,
+        supporting_point=None,
+        violation: Optional[float] = None,
+        constraint_id: Optional[int] = None,
+        objective_id: Optional[str] = None,
+    ) -> "MIPNLPCutRecord":
+        coeff_tuple = _float_tuple(coeffs)
+        rhs_float = float(rhs)
+        point_tuple = None if supporting_point is None else _float_tuple(supporting_point)
+        violation_float = (
+            _row_violation(coeff_tuple, rhs_float, point_tuple)
+            if violation is None
+            else float(violation)
+        )
+        return cls(
+            source=str(source),
+            global_valid=bool(global_valid),
+            local_valid=bool(local_valid),
+            supporting_point=point_tuple,
+            violation=violation_float,
+            constraint_id=constraint_id,
+            objective_id=objective_id,
+            coefficients=coeff_tuple,
+            rhs=rhs_float,
+            dedup_key=(coeff_tuple, rhs_float),
+        )
+
+
+@dataclass
+class MIPNLPCutProvenance:
+    """Deduplicated provenance ledger for MIP-NLP master cuts."""
+
+    records: list[MIPNLPCutRecord] = field(default_factory=list)
+    _dedup_keys: set[tuple[tuple[float, ...], float]] = field(default_factory=set)
+
+    def add(self, record: MIPNLPCutRecord) -> bool:
+        if record.dedup_key in self._dedup_keys:
+            return False
+        self._dedup_keys.add(record.dedup_key)
+        self.records.append(record)
+        return True
+
+    def add_row(
+        self,
+        source: str,
+        coeffs,
+        rhs: float,
+        *,
+        global_valid: bool,
+        local_valid: bool = True,
+        supporting_point=None,
+        violation: Optional[float] = None,
+        constraint_id: Optional[int] = None,
+        objective_id: Optional[str] = None,
+    ) -> bool:
+        return self.add(
+            MIPNLPCutRecord.from_row(
+                source,
+                coeffs,
+                rhs,
+                global_valid=global_valid,
+                local_valid=local_valid,
+                supporting_point=supporting_point,
+                violation=violation,
+                constraint_id=constraint_id,
+                objective_id=objective_id,
+            )
+        )
+
+    def source_counts(self) -> dict[str, int]:
+        counts = Counter(record.source for record in self.records)
+        out = {source: int(counts.get(source, 0)) for source in _CUT_SOURCE_ORDER}
+        for source, count in sorted(counts.items()):
+            out.setdefault(str(source), int(count))
+        return out
 
 
 def _normalize_init_strategy(init_strategy: str) -> str:
@@ -1260,6 +1386,54 @@ def _run_feasibility_pump(
 # ── Cut Generation ────────────────────────────────────────────
 
 
+def _constraint_ids_for_generated_oa_cuts(
+    evaluator,
+    x_point,
+    constraint_senses,
+    convex_mask,
+    *,
+    violated_only: bool,
+    tol: float = 1e-8,
+) -> list[int]:
+    """Return constraint ids in the same order as the OA cut generator emits cuts."""
+    m = evaluator.n_constraints
+    if m == 0:
+        return []
+    if constraint_senses is None:
+        constraint_senses = ["<="] * m
+    if not violated_only:
+        return [k for k in range(m) if convex_mask is None or bool(convex_mask[k])]
+
+    cons_vals = evaluator.evaluate_constraints(x_point)
+    ids: list[int] = []
+    for k in range(m):
+        if convex_mask is not None and not bool(convex_mask[k]):
+            continue
+        g_k = float(cons_vals[k])
+        sense = constraint_senses[k]
+        violated = (
+            (sense == "<=" and g_k > tol)
+            or (sense == ">=" and g_k < -tol)
+            or (sense == "==" and abs(g_k) > tol)
+        )
+        if violated:
+            ids.append(k)
+    return ids
+
+
+def _constraint_cut_global_valid(
+    constraint_convex_mask,
+    constraint_id: Optional[int],
+    original_sense: str,
+    equality_relaxation: bool,
+) -> bool:
+    if equality_relaxation and original_sense == "==":
+        return False
+    if constraint_convex_mask is None or constraint_id is None:
+        return True
+    return bool(constraint_convex_mask[constraint_id])
+
+
 def _append_master_cut(
     oa_A_rows,
     oa_b_rows,
@@ -1267,12 +1441,32 @@ def _append_master_cut(
     rhs,
     oa_cut_relaxable=None,
     relaxable=True,
+    cut_provenance: Optional[MIPNLPCutProvenance] = None,
+    source: Optional[str] = None,
+    global_valid: bool = True,
+    local_valid: bool = True,
+    supporting_point=None,
+    violation: Optional[float] = None,
+    constraint_id: Optional[int] = None,
+    objective_id: Optional[str] = None,
 ):
     """Append a master cut and optional slack-relaxability metadata."""
     oa_A_rows.append(coeffs)
     oa_b_rows.append(rhs)
     if oa_cut_relaxable is not None:
         oa_cut_relaxable.append(bool(relaxable))
+    if cut_provenance is not None and source is not None:
+        cut_provenance.add_row(
+            source,
+            coeffs,
+            rhs,
+            global_valid=global_valid,
+            local_valid=local_valid,
+            supporting_point=supporting_point,
+            violation=violation,
+            constraint_id=constraint_id,
+            objective_id=objective_id,
+        )
 
 
 def _add_oa_cuts(
@@ -1288,6 +1482,7 @@ def _add_oa_cuts(
     objective_is_convex,
     equality_relaxation=False,
     oa_cut_relaxable=None,
+    cut_provenance: Optional[MIPNLPCutProvenance] = None,
 ):
     """Generate OA cuts at x_star and append to cut lists.
 
@@ -1307,28 +1502,88 @@ def _add_oa_cuts(
             constraint_senses=constraint_senses,
             convex_mask=constraint_convex_mask,
         )
-        for cut in cuts:
+        constraint_ids = _constraint_ids_for_generated_oa_cuts(
+            evaluator,
+            x_star,
+            constraint_senses,
+            constraint_convex_mask,
+            violated_only=False,
+        )
+        for constraint_id, cut in zip(constraint_ids, cuts):
             coeffs = cut.coeffs.copy()
             # Filter degenerate cuts
             if np.linalg.norm(coeffs) < 1e-12:
                 continue
 
             sense = cut.sense
+            original_sense = sense
             if equality_relaxation and sense == "==":
                 sense = "<="
+            global_valid = _constraint_cut_global_valid(
+                constraint_convex_mask,
+                constraint_id,
+                original_sense,
+                equality_relaxation,
+            )
 
             if sense == "<=":
-                _append_master_cut(oa_A_rows, oa_b_rows, coeffs, cut.rhs, oa_cut_relaxable)
+                _append_master_cut(
+                    oa_A_rows,
+                    oa_b_rows,
+                    coeffs,
+                    cut.rhs,
+                    oa_cut_relaxable,
+                    cut_provenance=cut_provenance,
+                    source="oa",
+                    global_valid=global_valid,
+                    supporting_point=x_star,
+                    constraint_id=constraint_id,
+                )
             elif sense == ">=":
-                _append_master_cut(oa_A_rows, oa_b_rows, -coeffs, -cut.rhs, oa_cut_relaxable)
+                _append_master_cut(
+                    oa_A_rows,
+                    oa_b_rows,
+                    -coeffs,
+                    -cut.rhs,
+                    oa_cut_relaxable,
+                    cut_provenance=cut_provenance,
+                    source="oa",
+                    global_valid=global_valid,
+                    supporting_point=x_star,
+                    constraint_id=constraint_id,
+                )
             elif sense == "==":
                 # Equality: add both <= and >= cuts
-                _append_master_cut(oa_A_rows, oa_b_rows, coeffs, cut.rhs, oa_cut_relaxable)
-                _append_master_cut(oa_A_rows, oa_b_rows, -coeffs, -cut.rhs, oa_cut_relaxable)
+                _append_master_cut(
+                    oa_A_rows,
+                    oa_b_rows,
+                    coeffs,
+                    cut.rhs,
+                    oa_cut_relaxable,
+                    cut_provenance=cut_provenance,
+                    source="oa",
+                    global_valid=global_valid,
+                    supporting_point=x_star,
+                    constraint_id=constraint_id,
+                )
+                _append_master_cut(
+                    oa_A_rows,
+                    oa_b_rows,
+                    -coeffs,
+                    -cut.rhs,
+                    oa_cut_relaxable,
+                    cut_provenance=cut_provenance,
+                    source="oa",
+                    global_valid=global_valid,
+                    supporting_point=x_star,
+                    constraint_id=constraint_id,
+                )
 
     # Objective OA cut (only if nonlinear): grad^T x - eta <= rhs
     if not obj_is_linear and objective_is_convex:
         n_master = n_vars + 1
+        obj_value = float(evaluator.evaluate_objective(x_star))
+        obj_support = np.concatenate([np.asarray(x_star, dtype=np.float64), [obj_value]])
         obj_cut = generate_objective_oa_cut(evaluator, x_star, n_master, z_index=n_vars)
         _append_master_cut(
             oa_A_rows,
@@ -1337,6 +1592,11 @@ def _add_oa_cuts(
             obj_cut.rhs,
             oa_cut_relaxable,
             relaxable=False,
+            cut_provenance=cut_provenance,
+            source="objective",
+            global_valid=True,
+            supporting_point=obj_support,
+            objective_id="objective",
         )
 
 
@@ -1352,6 +1612,7 @@ def _add_ecp_cuts(
     objective_is_convex,
     equality_relaxation=False,
     oa_cut_relaxable=None,
+    cut_provenance: Optional[MIPNLPCutProvenance] = None,
 ):
     """Generate ECP cuts: OA cuts only for violated constraints at x_master."""
     from discopt._jax.cutting_planes import (
@@ -1367,28 +1628,88 @@ def _add_ecp_cuts(
             constraint_senses=constraint_senses,
             convex_mask=constraint_convex_mask,
         )
-        for cut in cuts:
+        constraint_ids = _constraint_ids_for_generated_oa_cuts(
+            evaluator,
+            x_master,
+            constraint_senses,
+            constraint_convex_mask,
+            violated_only=True,
+        )
+        for constraint_id, cut in zip(constraint_ids, cuts):
             coeffs = cut.coeffs.copy()
             if np.linalg.norm(coeffs) < 1e-12:
                 continue
 
             sense = cut.sense
+            original_sense = sense
             if equality_relaxation and sense == "==":
                 sense = "<="
+            global_valid = _constraint_cut_global_valid(
+                constraint_convex_mask,
+                constraint_id,
+                original_sense,
+                equality_relaxation,
+            )
 
             if sense == "<=":
-                _append_master_cut(oa_A_rows, oa_b_rows, coeffs, cut.rhs, oa_cut_relaxable)
+                _append_master_cut(
+                    oa_A_rows,
+                    oa_b_rows,
+                    coeffs,
+                    cut.rhs,
+                    oa_cut_relaxable,
+                    cut_provenance=cut_provenance,
+                    source="ecp",
+                    global_valid=global_valid,
+                    supporting_point=x_master,
+                    constraint_id=constraint_id,
+                )
                 n_added += 1
             elif sense == ">=":
-                _append_master_cut(oa_A_rows, oa_b_rows, -coeffs, -cut.rhs, oa_cut_relaxable)
+                _append_master_cut(
+                    oa_A_rows,
+                    oa_b_rows,
+                    -coeffs,
+                    -cut.rhs,
+                    oa_cut_relaxable,
+                    cut_provenance=cut_provenance,
+                    source="ecp",
+                    global_valid=global_valid,
+                    supporting_point=x_master,
+                    constraint_id=constraint_id,
+                )
                 n_added += 1
             elif sense == "==":
-                _append_master_cut(oa_A_rows, oa_b_rows, coeffs, cut.rhs, oa_cut_relaxable)
-                _append_master_cut(oa_A_rows, oa_b_rows, -coeffs, -cut.rhs, oa_cut_relaxable)
+                _append_master_cut(
+                    oa_A_rows,
+                    oa_b_rows,
+                    coeffs,
+                    cut.rhs,
+                    oa_cut_relaxable,
+                    cut_provenance=cut_provenance,
+                    source="ecp",
+                    global_valid=global_valid,
+                    supporting_point=x_master,
+                    constraint_id=constraint_id,
+                )
+                _append_master_cut(
+                    oa_A_rows,
+                    oa_b_rows,
+                    -coeffs,
+                    -cut.rhs,
+                    oa_cut_relaxable,
+                    cut_provenance=cut_provenance,
+                    source="ecp",
+                    global_valid=global_valid,
+                    supporting_point=x_master,
+                    constraint_id=constraint_id,
+                )
                 n_added += 2
 
     if not obj_is_linear and objective_is_convex:
         n_master = n_vars + 1
+        obj_value = float(evaluator.evaluate_objective(x_master))
+        obj_support = np.concatenate([np.asarray(x_master, dtype=np.float64), [obj_value]])
         obj_cut = generate_objective_oa_cut(evaluator, x_master, n_master, z_index=n_vars)
         _append_master_cut(
             oa_A_rows,
@@ -1397,6 +1718,11 @@ def _add_ecp_cuts(
             obj_cut.rhs,
             oa_cut_relaxable,
             relaxable=False,
+            cut_provenance=cut_provenance,
+            source="objective",
+            global_valid=True,
+            supporting_point=obj_support,
+            objective_id="objective",
         )
         n_added += 1
 
@@ -1410,6 +1736,7 @@ def _add_no_good_cut(
     oa_b_rows,
     n_vars,
     oa_cut_relaxable=None,
+    cut_provenance: Optional[MIPNLPCutProvenance] = None,
 ):
     """Add a binary-assignment exclusion (no-good) cut.
 
@@ -1436,6 +1763,10 @@ def _add_no_good_cut(
         float(count_ones - 1),
         oa_cut_relaxable,
         relaxable=False,
+        cut_provenance=cut_provenance,
+        source="integer",
+        global_valid=True,
+        supporting_point=x_master,
     )
     return True
 
@@ -1449,6 +1780,7 @@ def _add_feasibility_cuts(
     oa_b_rows,
     constraint_convex_mask,
     oa_cut_relaxable=None,
+    cut_provenance: Optional[MIPNLPCutProvenance] = None,
 ):
     """Add gradient-based feasibility cuts (Fletcher-Leyffer 1994).
 
@@ -1466,16 +1798,51 @@ def _add_feasibility_cuts(
         constraint_senses=constraint_senses,
         convex_mask=constraint_convex_mask,
     )
-    for cut in cuts:
+    constraint_ids = _constraint_ids_for_generated_oa_cuts(
+        evaluator,
+        x_feas,
+        constraint_senses,
+        constraint_convex_mask,
+        violated_only=True,
+    )
+    for constraint_id, cut in zip(constraint_ids, cuts):
         coeffs = cut.coeffs.copy()
         if np.linalg.norm(coeffs) < 1e-12:
             continue
+        global_valid = _constraint_cut_global_valid(
+            constraint_convex_mask,
+            constraint_id,
+            cut.sense,
+            equality_relaxation=False,
+        )
         # Feasibility cuts are gradient cuts, not hard integer exclusions, so
         # the shared OA slack may relax them to keep the heuristic master robust.
         if cut.sense == "<=":
-            _append_master_cut(oa_A_rows, oa_b_rows, coeffs, cut.rhs, oa_cut_relaxable)
+            _append_master_cut(
+                oa_A_rows,
+                oa_b_rows,
+                coeffs,
+                cut.rhs,
+                oa_cut_relaxable,
+                cut_provenance=cut_provenance,
+                source="feasibility",
+                global_valid=global_valid,
+                supporting_point=x_feas,
+                constraint_id=constraint_id,
+            )
         elif cut.sense == ">=":
-            _append_master_cut(oa_A_rows, oa_b_rows, -coeffs, -cut.rhs, oa_cut_relaxable)
+            _append_master_cut(
+                oa_A_rows,
+                oa_b_rows,
+                -coeffs,
+                -cut.rhs,
+                oa_cut_relaxable,
+                cut_provenance=cut_provenance,
+                source="feasibility",
+                global_valid=global_valid,
+                supporting_point=x_feas,
+                constraint_id=constraint_id,
+            )
 
 
 # ── MILP Master Problem ──────────────────────────────────────
@@ -2921,6 +3288,7 @@ def solve_oa(
     oa_A_rows: list[np.ndarray] = []
     oa_b_rows: list[float] = []
     oa_cut_relaxable: list[bool] = []
+    cut_provenance = MIPNLPCutProvenance()
 
     UB = 1e20
     LB = -1e20
@@ -2952,6 +3320,10 @@ def solve_oa(
             return name.lower()
         return str(status).lower()
 
+    def _cut_source_delta(before: dict[str, int]) -> dict[str, int]:
+        after = cut_provenance.source_counts()
+        return {source: int(after.get(source, 0) - before.get(source, 0)) for source in after}
+
     def _build_mip_nlp_trace(final_reason: Optional[str]) -> dict[str, object]:
         final_lb = _trace_value(LB)
         final_ub = _trace_value(UB)
@@ -2974,6 +3346,8 @@ def solve_oa(
                 "nlp_subproblem_count": int(nlp_subproblem_count),
                 "feasibility_subproblem_count": int(feasibility_subproblem_count),
                 "cut_count": int(len(oa_A_rows)),
+                "provenance_cut_count": int(len(cut_provenance.records)),
+                "cut_source_counts": cut_provenance.source_counts(),
                 "solution_pool_candidates": int(solution_pool_candidate_count),
             },
             "termination_reason": final_reason,
@@ -3070,6 +3444,7 @@ def solve_oa(
                 decomp.oa_objective_is_convex,
                 equality_relaxation=equality_relaxation,
                 oa_cut_relaxable=oa_cut_relaxable,
+                cut_provenance=cut_provenance,
             )
             # Check if relaxation solution is already integer-feasible.
             is_int_feasible = all(
@@ -3094,6 +3469,7 @@ def solve_oa(
                 decomp.oa_objective_is_convex,
                 equality_relaxation=equality_relaxation,
                 oa_cut_relaxable=oa_cut_relaxable,
+                cut_provenance=cut_provenance,
             )
     elif init_strategy == "fp":
         fp_iterations = _fp_iteration_count(
@@ -3133,6 +3509,7 @@ def solve_oa(
             decomp.oa_objective_is_convex,
             equality_relaxation=equality_relaxation,
             oa_cut_relaxable=oa_cut_relaxable,
+            cut_provenance=cut_provenance,
         )
         if fp_result.best_x is not None and fp_result.best_obj is not None:
             accept_incumbent(fp_result.best_x, fp_result.best_obj, None)
@@ -3152,6 +3529,7 @@ def solve_oa(
                 decomp.oa_objective_is_convex,
                 equality_relaxation=equality_relaxation,
                 oa_cut_relaxable=oa_cut_relaxable,
+                cut_provenance=cut_provenance,
             )
             if _is_primal_feasible(evaluator, x_seed):
                 accept_incumbent(x_seed, float(evaluator.evaluate_objective(x_seed)), None)
@@ -3195,6 +3573,7 @@ def solve_oa(
                 decomp.oa_objective_is_convex,
                 equality_relaxation=equality_relaxation,
                 oa_cut_relaxable=oa_cut_relaxable,
+                cut_provenance=cut_provenance,
             )
             if x_init is not None and obj_init is not None:
                 multipliers = init_attempt.multipliers if init_attempt is not None else None
@@ -3210,6 +3589,8 @@ def solve_oa(
 
         # a. Solve master MILP
         cuts_before = len(oa_A_rows)
+        provenance_before = len(cut_provenance.records)
+        cut_source_counts_before = cut_provenance.source_counts()
         nlp_before = nlp_subproblem_count
         feasibility_before = feasibility_subproblem_count
         lb_before = _trace_value(LB)
@@ -3256,6 +3637,9 @@ def solve_oa(
                     "gap": _trace_value(_compute_gap(LB, UB)),
                     "cuts_added": int(len(oa_A_rows) - cuts_before),
                     "cuts_total": int(len(oa_A_rows)),
+                    "provenance_cuts_added": int(len(cut_provenance.records) - provenance_before),
+                    "provenance_cuts_total": int(len(cut_provenance.records)),
+                    "cuts_added_by_source": _cut_source_delta(cut_source_counts_before),
                     "nlp_subproblem_count": int(nlp_subproblem_count - nlp_before),
                     "feasibility_subproblem_count": int(
                         feasibility_subproblem_count - feasibility_before
@@ -3282,6 +3666,9 @@ def solve_oa(
                     "gap": _trace_value(_compute_gap(LB, UB)),
                     "cuts_added": int(len(oa_A_rows) - cuts_before),
                     "cuts_total": int(len(oa_A_rows)),
+                    "provenance_cuts_added": int(len(cut_provenance.records) - provenance_before),
+                    "provenance_cuts_total": int(len(cut_provenance.records)),
+                    "cuts_added_by_source": _cut_source_delta(cut_source_counts_before),
                     "nlp_subproblem_count": int(nlp_subproblem_count - nlp_before),
                     "feasibility_subproblem_count": int(
                         feasibility_subproblem_count - feasibility_before
@@ -3313,6 +3700,7 @@ def solve_oa(
                 decomp.oa_objective_is_convex,
                 equality_relaxation=equality_relaxation,
                 oa_cut_relaxable=oa_cut_relaxable,
+                cut_provenance=cut_provenance,
             )
             trace_iterations.append(
                 {
@@ -3325,6 +3713,9 @@ def solve_oa(
                     "gap": _trace_value(_compute_gap(LB, UB)),
                     "cuts_added": int(len(oa_A_rows) - cuts_before),
                     "cuts_total": int(len(oa_A_rows)),
+                    "provenance_cuts_added": int(len(cut_provenance.records) - provenance_before),
+                    "provenance_cuts_total": int(len(cut_provenance.records)),
+                    "cuts_added_by_source": _cut_source_delta(cut_source_counts_before),
                     "nlp_subproblem_count": int(nlp_subproblem_count - nlp_before),
                     "feasibility_subproblem_count": int(
                         feasibility_subproblem_count - feasibility_before
@@ -3455,6 +3846,7 @@ def solve_oa(
                     decomp.oa_objective_is_convex,
                     equality_relaxation=equality_relaxation,
                     oa_cut_relaxable=oa_cut_relaxable,
+                    cut_provenance=cut_provenance,
                 )
                 # In ECP, use master objective as heuristic UB
                 master_obj = float(evaluator.evaluate_objective(x_master))
@@ -3532,6 +3924,7 @@ def solve_oa(
                     decomp.oa_objective_is_convex,
                     equality_relaxation=equality_relaxation,
                     oa_cut_relaxable=oa_cut_relaxable,
+                    cut_provenance=cut_provenance,
                 )
             else:
                 # NLP infeasible for this integer assignment
@@ -3556,6 +3949,7 @@ def solve_oa(
                             oa_b_rows,
                             decomp.oa_constraint_mask,
                             oa_cut_relaxable=oa_cut_relaxable,
+                            cut_provenance=cut_provenance,
                         )
 
                 if add_no_good_cuts and not decomp.general_integer_indices:
@@ -3566,6 +3960,7 @@ def solve_oa(
                         oa_b_rows,
                         n_vars,
                         oa_cut_relaxable=oa_cut_relaxable,
+                        cut_provenance=cut_provenance,
                     )
 
                 # Also add OA cuts at master point
@@ -3582,6 +3977,7 @@ def solve_oa(
                     decomp.oa_objective_is_convex,
                     equality_relaxation=equality_relaxation,
                     oa_cut_relaxable=oa_cut_relaxable,
+                    cut_provenance=cut_provenance,
                 )
 
             # d. Check convergence
@@ -3623,6 +4019,9 @@ def solve_oa(
                 "gap": _trace_value(_compute_gap(LB, UB)),
                 "cuts_added": int(len(oa_A_rows) - cuts_before),
                 "cuts_total": int(len(oa_A_rows)),
+                "provenance_cuts_added": int(len(cut_provenance.records) - provenance_before),
+                "provenance_cuts_total": int(len(cut_provenance.records)),
+                "cuts_added_by_source": _cut_source_delta(cut_source_counts_before),
                 "nlp_subproblem_count": int(nlp_subproblem_count - nlp_before),
                 "feasibility_subproblem_count": int(
                     feasibility_subproblem_count - feasibility_before
