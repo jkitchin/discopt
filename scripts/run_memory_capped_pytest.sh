@@ -6,7 +6,7 @@ if [[ "$#" -eq 0 ]]; then
     exit 2
 fi
 
-memory_mb="${PYTEST_MEMORY_LIMIT_MB:-16384}"
+memory_mb="${PYTEST_MEMORY_LIMIT_MB:-32768}"
 cpu_seconds="${PYTEST_CPU_LIMIT_SECONDS:-0}"
 dry_run="${RUN_MEMORY_CAPPED_PYTEST_DRY_RUN:-0}"
 
