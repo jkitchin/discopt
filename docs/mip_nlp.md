@@ -148,6 +148,14 @@ back to the existing initialization path with details in
 `result.mip_nlp_trace["initial_poa"]`. `relaxation_phase="periodic"` remains a
 reserved roadmap value and does not schedule periodic POA solves yet.
 
+SHOT-profile runs also maintain an internal provenance-aware interior-point
+store for feasible relaxation, incumbent, and initial-POA points. Reusable
+rootsearch helpers in `discopt.solvers.mip_nlp_rootsearch` support bisection and
+optional TOMS748-compatible segment searches between stored interior points and
+candidate MIP/NLP points, including fixed-discrete compatibility checks and
+structured fallback statuses. ESH and objective-rootsearch cut generation remain
+separate roadmap work.
+
 The remaining reformulation controls are validated and traced under the SHOT
 profile so follow-up SHOT parity PRs can attach behavior without changing the
 public option names.
