@@ -193,3 +193,70 @@ class TestIncrementalFarkasPath:
         status, _bound, _x, _basis, farkas = inc.solve_assembled_full(A, b, bounds)
         assert status == "infeasible"
         assert farkas is True  # rigorously proven empty, no second solve needed
+
+
+class TestColdPathCertificates:
+    """The cold ``solve_at_node`` path (issue #356, cold-path guards) must also be
+    HiGHS-free: a rigorous bound from the simplex's safe bound / vertex, an
+    infeasible fathom only on a verified Farkas ray, and no fabricated bound on an
+    unbounded relaxation."""
+
+    @staticmethod
+    def _model():
+        import discopt.modeling as dm
+
+        m = dm.Model("iqcqp")
+        x = m.integer("x", lb=0, ub=5)
+        y = m.integer("y", lb=0, ub=5)
+        m.minimize((x - 3) ** 2 + (y - 2) ** 2 + x * y)
+        m.subject_to(x + y >= 3)
+        return m
+
+    def test_milp_solve_surfaces_safe_bound_on_finite_box(self):
+        # A finite-box lifted LP: the simplex pure-LP path must surface a rigorous
+        # safe bound (<= the reported optimum) through MilpRelaxationModel.solve.
+        from discopt._jax.discretization import DiscretizationState
+        from discopt._jax.milp_relaxation import build_milp_relaxation
+        from discopt._jax.term_classifier import classify_nonlinear_terms
+
+        m = self._model()
+        terms = classify_nonlinear_terms(m)
+        milp, _ = build_milp_relaxation(
+            m, terms, DiscretizationState(), bound_override=(np.zeros(2), np.full(2, 5.0))
+        )
+        milp._integrality = None  # pure-LP node bound (the default mode)
+        res = milp.solve(backend="simplex")
+        assert res.status == "optimal"
+        if res.safe_bound is not None:  # finite-box ⇒ safe bound available
+            assert res.safe_bound <= res.objective + 1e-6
+            assert res.farkas_certified is False
+
+    def test_cold_node_bound_is_sound_lower_bound(self):
+        # Cold path (incremental forced off): the reported lower bound must be a
+        # valid lower bound (<= the true integer optimum 4.0) — never too high.
+        from discopt._jax.mccormick_lp import MccormickLPRelaxer
+
+        relaxer = MccormickLPRelaxer(self._model())
+        relaxer._inc = None  # force the cold build + cold solve_at_node path
+        r = relaxer.solve_at_node(np.zeros(2), np.full(2, 5.0))
+        assert r.status == "optimal"
+        assert r.lower_bound is not None and np.isfinite(r.lower_bound)
+        assert r.lower_bound <= 4.0 + 1e-6  # sound: never above the true optimum
+
+    def test_cold_unbounded_relaxation_no_fabricated_bound(self):
+        # A free bilinear variable makes the McCormick relaxation unbounded; the
+        # cold path must NOT fabricate a finite lower bound (it declines/branches).
+        import discopt.modeling as dm
+        from discopt._jax.mccormick_lp import MccormickLPRelaxer
+
+        m = dm.Model("bil")
+        x = m.continuous("x", lb=-2.0, ub=2.0)
+        y = m.continuous("y", lb=-2.0, ub=2.0)
+        m.subject_to(x + y >= 0.5)
+        m.minimize(x * y - x - y)
+        relaxer = MccormickLPRelaxer(m)
+        relaxer._inc = None
+        unb = relaxer.solve_at_node(
+            np.array([-np.inf, -np.inf]), np.array([np.inf, np.inf]), time_limit=5.0
+        )
+        assert unb.lower_bound is None

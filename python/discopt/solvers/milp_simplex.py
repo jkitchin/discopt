@@ -82,14 +82,21 @@ def _safe_lp_lower_bound_std(
     y = np.asarray(y, dtype=np.float64)
     if y.size == 0 or not np.all(np.isfinite(y)):
         return None
-    c = np.asarray(c, dtype=np.float64)
-    at_y = a_std.T @ y if not sp.issparse(a_std) else (a_std.T @ y)
-    rc = c - np.asarray(at_y).ravel()
     # Map the ±1e20 sentinels to true infinities so an infinite box side with a
     # nonzero reduced cost yields −inf (an unusable bound → None), not a spurious
     # large-finite contribution.
     lb = np.where(np.asarray(lb, dtype=np.float64) <= -_INF, -np.inf, lb)
     ub = np.where(np.asarray(ub, dtype=np.float64) >= _INF, np.inf, ub)
+    # Cheap early-out: a *free* variable (both bounds infinite — e.g. a lifted
+    # objective epigraph) makes its box term −inf unless its reduced cost is
+    # exactly 0, which it never is numerically, so the safe bound is unusable.
+    # Detect it from the bounds alone and skip the (possibly large, dense) Aᵀy
+    # matvec entirely — keeping this off the hot path for free-variable LPs.
+    if bool(np.any(~np.isfinite(lb) & ~np.isfinite(ub))):
+        return None
+    c = np.asarray(c, dtype=np.float64)
+    at_y = a_std.T @ y if not sp.issparse(a_std) else (a_std.T @ y)
+    rc = c - np.asarray(at_y).ravel()
     # min_{z_k∈[lb,ub]} rc_k z_k = lb_k if rc_k>0, ub_k if rc_k<0, else 0 (the
     # rc_k==0 case contributes 0 even when that bound is infinite).
     contrib = np.zeros_like(rc)
