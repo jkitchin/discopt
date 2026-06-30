@@ -595,7 +595,7 @@ def _compute_alphabb_bound(evaluator, node_lb, node_ub, alpha):
     if not np.isfinite(tangent_min):
         return -np.inf
     # Magnitude-scaled margin so the float64 evaluation stays a valid lower bound.
-    return tangent_min - 1e-9 * (1.0 + abs(L_hat) + abs(tangent_min))
+    return float(tangent_min - 1e-9 * (1.0 + abs(L_hat) + abs(tangent_min)))
 
 
 def _objective_is_convex_quadratic(model: Model, evaluator, n_vars: int) -> bool:
@@ -757,7 +757,7 @@ def _convex_objective_lower_bound(evaluator, node_lb, node_ub) -> float:
     # (never-too-high) lower bound despite rounding — the same safe-bound discipline
     # as ``obbt._ns_safe_lp_lower_bound``.
     margin = 1e-9 * (1.0 + abs(fx) + abs(tangent_min))
-    return tangent_min - margin
+    return float(tangent_min - margin)
 
 
 def _compute_interval_bound(model, node_lb, node_ub, negate):
