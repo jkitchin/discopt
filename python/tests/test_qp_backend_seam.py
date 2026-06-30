@@ -142,6 +142,15 @@ class TestQPBackendSeam:
         out = S._solve_qp_matrix(_build_qp(), time.perf_counter(), None, drifting_engine, "POUNCE")
         assert out is None
 
+    def test_pounce_no_result_logs_tracking_marker(self, monkeypatch, caplog):
+        """When POUNCE yields no usable result, the HiGHS-free path logs the
+        'qp-pounce-no-result' marker (issue #359 no-rescue tracking) before
+        dropping to the JAX last resort."""
+        monkeypatch.setattr(S, "_solve_qp_pounce", lambda *a, **k: None)
+        with caplog.at_level("WARNING", logger="discopt.solver"):
+            S._solve_qp(_build_qp(), time.perf_counter())
+        assert any("qp-pounce-no-result" in r.message for r in caplog.records)
+
     def test_convergence_guard_accepts_converged_optimal(self):
         """A small KKT residual (normal converged POUNCE solve) passes the guard
         and the result is returned."""

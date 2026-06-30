@@ -8786,11 +8786,32 @@ def _solve_qp(model: Model, t_start: float, prefer_pounce: bool = False) -> Solv
     objective on an unconverged solve (#145). ``_solve_qp_matrix`` guards it — the
     returned point is re-checked for primal feasibility and for a stationary KKT
     residual, degrading to the next engine (the JAX IPM) on failure.
+
+    No-rescue tracking: with HiGHS gone the JAX IPM is a weak last resort (it can
+    return ``iteration_limit`` even on easy QPs). A POUNCE non-result is therefore
+    logged at WARNING with the marker ``qp-pounce-no-result`` so we can measure how
+    often the HiGHS-free path has no working engine and decide later whether a
+    pure-Rust drift-rescue is warranted (issue #359).
     """
     del prefer_pounce  # no HiGHS fallback to order against; kept for signature compat
     result = _solve_qp_pounce(model, t_start)
     if result is not None:
         return result
+    from discopt.solvers.qp_pounce import POUNCE_AVAILABLE
+
+    if POUNCE_AVAILABLE:
+        logger.warning(
+            "HiGHS-free QP [qp-pounce-no-result]: POUNCE was available but returned "
+            "no usable result (solve failure or feasibility/convergence guard "
+            "rejection); falling back to the JAX QP IPM last resort, which has no "
+            "robust rescue. Track how often this fires (issue #359)."
+        )
+    else:
+        logger.warning(
+            "HiGHS-free QP [qp-pounce-unavailable]: pounce-solver is not installed, "
+            "so the QP path has no primary engine and will use the JAX QP IPM last "
+            "resort. Install pounce-solver for a working QP solver."
+        )
     return _solve_qp_jax(model, t_start)
 
 
