@@ -124,7 +124,7 @@ jobs:
         env:
           JAX_PLATFORMS: cpu
           JAX_ENABLE_X64: "1"
-          PYTEST_MEMORY_LIMIT_MB: "16384"
+          PYTEST_MEMORY_LIMIT_MB: "32768"
           PYTEST_XDIST_WORKERS: "2"
 
   python-coverage:
@@ -186,7 +186,7 @@ jobs:
         env:
           JAX_PLATFORMS: cpu
           JAX_ENABLE_X64: "1"
-          PYTEST_MEMORY_LIMIT_MB: "16384"
+          PYTEST_MEMORY_LIMIT_MB: "32768"
           PYTEST_XDIST_WORKERS: "2"
       - name: Upload to Codecov
         if: always()
@@ -219,7 +219,7 @@ jobs:
         env:
           JAX_PLATFORMS: cpu
           JAX_ENABLE_X64: "1"
-          PYTEST_MEMORY_LIMIT_MB: "16384"
+          PYTEST_MEMORY_LIMIT_MB: "32768"
       - name: Upload AMP coverage to Codecov
         if: always()
         uses: codecov/codecov-action@v5

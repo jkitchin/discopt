@@ -202,7 +202,7 @@ Routine AMP development uses a fast default regression battery. The fast
 environment uses solver-independent checks plus HiGHS-backed MILP relaxations,
 and excludes optional cyipopt, longer Alpine, MINLPTests, and incidence-style
 AMP benchmark coverage. AMP and PR-fast Make targets run pytest through
-`scripts/run_memory_capped_pytest.sh`, which applies a 16 GB address-space cap
+`scripts/run_memory_capped_pytest.sh`, which applies a 32 GB address-space cap
 with `prlimit` when available. Override with `PYTEST_MEMORY_LIMIT_MB=...`, or
 set `PYTEST_MEMORY_LIMIT_MB=0` to disable the cap. The broad `make test-quick`
 dev-loop target remains uncapped and excludes `memory_heavy` tests.
@@ -225,12 +225,14 @@ maturin develop
 make test-amp-integration
 ```
 
-For WSL or memory-constrained machines, keep broad AMP/JAX runs capped and use a
-bounded xdist worker count rather than `-n auto`:
+For WSL or memory-constrained machines, keep PR-fast AMP/JAX runs capped and
+use a bounded xdist worker count rather than `-n auto`. For the single-process
+AMP integration suite, disable the virtual-address cap to avoid XLA
+`std::bad_alloc` aborts from address-space reservations:
 
 ```bash
-PYTEST_MEMORY_LIMIT_MB=16384 PYTEST_XDIST_WORKERS=2 make test
-PYTEST_MEMORY_LIMIT_MB=16384 make test-amp-integration
+PYTEST_MEMORY_LIMIT_MB=32768 PYTEST_XDIST_WORKERS=2 make test
+PYTEST_MEMORY_LIMIT_MB=0 make test-amp-integration
 ```
 
 WSL users should also set explicit memory and swap limits in `.wslconfig` so a
