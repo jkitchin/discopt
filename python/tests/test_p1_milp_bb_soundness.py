@@ -44,7 +44,6 @@ class TestControlsCertify:
         assert abs(r.objective - (-8.0)) < 1e-4
 
     def test_miqp_bb_certifies(self, monkeypatch):
-        monkeypatch.setattr(S, "_solve_qp_highs", lambda *a, **k: None)
         r = _miqp().solve(time_limit=60)
         assert r.status == "optimal"
         assert r.gap_certified is True
@@ -115,7 +114,6 @@ class TestNonKKTRecoveredByPounce:
         _pytest.importorskip("pounce")
         import discopt._jax.qp_ipm as qp_ipm
 
-        monkeypatch.setattr(S, "_solve_qp_highs", lambda *a, **k: None)
         _force_code3(monkeypatch, qp_ipm, "qp_ipm_solve_batch")
         r = _miqp().solve(time_limit=60, batch_size=8)
         assert r.status == "optimal"
@@ -172,7 +170,6 @@ class TestNonKKTDecertifiesWhenUnrecoverable:
             clean, infeasible, obj_vals, x_vals = _real_nodes(*a, **k)
             return np.zeros_like(clean), infeasible, obj_vals, x_vals
 
-        monkeypatch.setattr(S, "_solve_qp_highs", lambda *a, **k: None)
         monkeypatch.setattr(S, "_pounce_qp_relaxation_nodes", _untrusted)
         monkeypatch.setattr(S, "_pounce_recover_node_bound", lambda *a, **k: None)
         r = _miqp().solve(time_limit=60, batch_size=8)
@@ -374,13 +371,12 @@ class TestPounceOnlyRouting:
         def boom(*a, **k):
             raise AssertionError("HiGHS must not be used in pounce-only mode")
 
+        # The QP HiGHS engine was removed (issue #359); only the MILP/LP HiGHS
+        # paths remain to guard here.
         monkeypatch.setattr(S, "_solve_milp_highs", boom)
-        monkeypatch.setattr(S, "_solve_qp_highs", boom)
         import discopt.solvers.lp_highs as lph
-        import discopt.solvers.qp_highs as qph
 
         monkeypatch.setattr(lph, "solve_lp", boom)
-        monkeypatch.setattr(qph, "solve_qp", boom)
 
     def test_milp_pounce_only_is_highs_free(self, monkeypatch):
         import pytest as _pytest

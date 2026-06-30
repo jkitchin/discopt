@@ -45,38 +45,35 @@ def _spy(monkeypatch, name):
 
 
 class TestQPBackendSeam:
+    def test_no_highs_qp_engine_exists(self):
+        # qp_highs was removed (issue #359): there is no HiGHS QP engine to route
+        # to, on any path.
+        assert not hasattr(S, "_solve_qp_highs")
+        import importlib
+
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module("discopt.solvers.qp_highs")
+
     def test_default_routes_to_pounce(self, monkeypatch):
-        # POUNCE is now the universal default.
-        highs_calls = _spy(monkeypatch, "_solve_qp_highs")
+        # POUNCE is the universal default QP engine.
         pounce_calls = _spy(monkeypatch, "_solve_qp_pounce")
         res = _build_qp().solve(time_limit=30)
         assert res.status == "optimal"
         assert abs(res.objective - 0.5) < 1e-4
         assert pounce_calls == [True]
-        assert highs_calls == []  # POUNCE is default; HiGHS never consulted
 
-    def test_ipm_alias_routes_to_pounce_not_highs(self, monkeypatch):
+    def test_ipm_alias_routes_to_pounce(self, monkeypatch):
         # The deprecated "ipm" alias no longer opts into HiGHS — the QP path is
         # HiGHS-free, so it routes to POUNCE like the default.
-        highs_calls = _spy(monkeypatch, "_solve_qp_highs")
         pounce_calls = _spy(monkeypatch, "_solve_qp_pounce")
         res = _build_qp().solve(nlp_solver="ipm", time_limit=30)
         assert res.status == "optimal"
         assert abs(res.objective - 0.5) < 1e-4
         assert pounce_calls == [True]
-        assert highs_calls == []  # HiGHS is never consulted on any QP route
 
     def test_pounce_request_routes_to_pounce(self, monkeypatch):
         pounce_calls = _spy(monkeypatch, "_solve_qp_pounce")
         res = _build_qp().solve(nlp_solver="pounce", time_limit=30)
-        assert res.status == "optimal"
-        assert abs(res.objective - 0.5) < 1e-4
-        assert pounce_calls == [True]
-
-    def test_fallback_to_pounce_when_highs_unavailable(self, monkeypatch):
-        monkeypatch.setattr(S, "_solve_qp_highs", lambda *a, **k: None)
-        pounce_calls = _spy(monkeypatch, "_solve_qp_pounce")
-        res = _build_qp().solve(time_limit=30)
         assert res.status == "optimal"
         assert abs(res.objective - 0.5) < 1e-4
         assert pounce_calls == [True]

@@ -19,13 +19,6 @@ pytest.importorskip("pounce")
 from discopt.solvers import SolveStatus  # noqa: E402
 from discopt.solvers.qp_pounce import solve_qp  # noqa: E402
 
-try:
-    from discopt.solvers.qp_highs import solve_qp as solve_qp_highs
-
-    _HIGHS = True
-except ImportError:  # pragma: no cover
-    _HIGHS = False
-
 _OBJ_TOL = 1e-5
 
 
@@ -49,13 +42,6 @@ class TestBasicQP:
         assert r.status == SolveStatus.OPTIMAL
         assert abs(r.objective - (-4.5)) < _OBJ_TOL
         np.testing.assert_allclose(r.x, [0.5, 1.5], atol=1e-4)
-
-    @pytest.mark.skipif(not _HIGHS, reason="HiGHS oracle unavailable")
-    def test_duals_match_highs(self):
-        rp = solve_qp(**self._KW)
-        rh = solve_qp_highs(**self._KW)
-        np.testing.assert_allclose(rp.dual_values, rh.dual_values, atol=1e-5)
-        np.testing.assert_allclose(rp.reduced_costs, rh.reduced_costs, atol=1e-5)
 
 
 class TestEqualityFreeVars:
@@ -159,18 +145,16 @@ class TestDimensionMismatch:
             solve_qp(Q=2 * np.eye(2), c=np.zeros(2), bounds=[(0.0, 1.0)])
 
 
-@pytest.mark.skipif(not _HIGHS, reason="HiGHS oracle unavailable")
-class TestHighsOracle:
-    """Cross-check on random strictly convex QPs — with independent
-    verification, because the oracle itself can fail: on seed=1 HiGHS returns
-    a constraint-violating point labeled kOptimal (max violation ~7.5, obj
-    83.18 vs the true 1.672 confirmed by SLSQP). POUNCE's point is therefore
-    verified feasible directly, and objectives are only compared on instances
-    where HiGHS's own point is feasible.
+class TestConvexOracle:
+    """Cross-check on random strictly convex QPs against an independent SLSQP
+    oracle (scipy), with direct feasibility verification of POUNCE's point.
+    (Replaces the former HiGHS cross-check; the QP path is HiGHS-free, #359.)
     """
 
     @pytest.mark.parametrize("seed", list(range(8)))
-    def test_pounce_feasible_and_matches_feasible_highs(self, seed):
+    def test_pounce_feasible_and_matches_oracle(self, seed):
+        from scipy.optimize import minimize
+
         rng = np.random.default_rng(seed)
         n, m = 4, 5
         M = rng.standard_normal((n, n))
@@ -187,14 +171,23 @@ class TestHighsOracle:
         assert np.max(A_ub @ rp.x - b_ub) < 1e-6
         assert np.all(np.abs(rp.x) <= 5.0 + 1e-6)
 
-        rh = solve_qp_highs(Q=Q, c=c, A_ub=A_ub, b_ub=b_ub, bounds=bounds)
-        if rh.status != SolveStatus.OPTIMAL or np.max(A_ub @ rh.x - b_ub) > 1e-6:
-            return  # oracle failed on this instance (e.g. seed=1); nothing to compare
-        assert abs(rp.objective - rh.objective) < 1e-4, (
-            f"seed={seed}: POUNCE {rp.objective} vs HiGHS {rh.objective}"
+        # Independent SLSQP oracle (strictly convex -> unique global optimum).
+        ref = minimize(
+            lambda x: 0.5 * x @ Q @ x + c @ x,
+            x0=x_feas,
+            jac=lambda x: Q @ x + c,
+            bounds=bounds,
+            constraints=[{"type": "ineq", "fun": lambda x: b_ub - A_ub @ x}],
+            method="SLSQP",
+            options={"maxiter": 500, "ftol": 1e-12},
+        )
+        if not ref.success or np.max(A_ub @ ref.x - b_ub) > 1e-6:
+            return  # oracle failed on this instance; nothing to compare
+        assert abs(rp.objective - float(ref.fun)) < 1e-4, (
+            f"seed={seed}: POUNCE {rp.objective} vs SLSQP {ref.fun}"
         )
         # Strictly convex -> unique optimum: primals agree too.
-        np.testing.assert_allclose(rp.x, rh.x, atol=1e-3)
+        np.testing.assert_allclose(rp.x, ref.x, atol=1e-3)
 
     def test_seed1_highs_failure_is_caught_by_pounce(self):
         """The known oracle-failure instance: POUNCE finds the true optimum

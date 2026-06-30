@@ -33,12 +33,27 @@ def test_default_qp_prefers_pounce():
     assert lp_backend.get_qp_solver().__module__ == "discopt.solvers.qp_pounce"
 
 
+def test_qp_selector_is_pounce_only_no_highs_fallback(monkeypatch):
+    """Issue #359: ``qp_highs`` was removed, so the QP seam is POUNCE-only — with
+    POUNCE unavailable it raises rather than falling back to HiGHS."""
+    real_import = builtins.__import__
+
+    def no_pounce(name, *a, **k):
+        if "qp_pounce" in name or name == "pounce":
+            raise ImportError("POUNCE unavailable (simulated)")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", no_pounce)
+    with pytest.raises(ImportError, match="No QP backend"):
+        lp_backend.get_qp_solver()
+
+
 def _without_highs(monkeypatch):
     """Make any HiGHS import raise, simulating a POUNCE-only install."""
     real_import = builtins.__import__
 
     def fake_import(name, *a, **k):
-        if any(s in name for s in ("lp_highs", "qp_highs", "milp_highs")) or name == "highspy":
+        if any(s in name for s in ("lp_highs", "milp_highs")) or name == "highspy":
             raise ImportError("HiGHS unavailable (simulated POUNCE-only install)")
         return real_import(name, *a, **k)
 

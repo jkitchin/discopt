@@ -3602,9 +3602,9 @@ def solve_model(
                 lagrangian_frequency=lagrangian_frequency,
             )
         elif problem_class == ProblemClass.MIQP:
-            # A convex MIQP may use the fast convex QP/MIQP solvers; a NONCONVEX
-            # one must NOT. Both `_solve_qp_highs` and `_solve_miqp_bb` assume a
-            # convex node QP (a convex relaxation solved to global optimality), so
+            # A convex MIQP may use the convex MIQP B&B; a NONCONVEX one must
+            # NOT. `_solve_miqp_bb` assumes a convex node QP (a convex relaxation
+            # solved to global optimality), so
             # on an indefinite or concave-maximize objective they return a local
             # stationary point and certify it as global — a false-optimal (e.g.
             # `max x**2` over integer [-3,3] returned 0 instead of 9). The
@@ -8378,29 +8378,25 @@ def _mip_recover_relaxation_duals(
     incumbent so the LP/QP solver returns row duals + reduced costs we can map
     back to discopt's named-dual convention.
 
-    Pass ``Q_orig`` for QP-style relaxations; omit it for LP-style. With
-    ``prefer_pounce`` the fix-and-resolve uses POUNCE (HiGHS-free path);
-    otherwise HiGHS. Returns ``(None, None, None)`` if recovery is unavailable
-    (solver missing, the fix-and-resolve LP/QP itself fails, or layout
-    mismatch).
+    Pass ``Q_orig`` for QP-style relaxations; omit it for LP-style. QP/MIQP
+    recovery is HiGHS-free and always uses POUNCE (issue #359); LP/MILP recovery
+    uses POUNCE under ``prefer_pounce`` and HiGHS otherwise. Returns
+    ``(None, None, None)`` if recovery is unavailable (solver missing, the
+    fix-and-resolve LP/QP itself fails, or layout mismatch).
 
     Bound multipliers on the fixing bounds for integer columns are zeroed in
     the returned dicts — they reflect the act of fixing, not feasibility of
     the original integer-feasible point.
     """
     try:
-        if prefer_pounce:
-            if Q_orig is None:
-                from discopt.solvers.lp_pounce import solve_lp as _highs_solve_lp
-            else:
-                from discopt.solvers.qp_pounce import solve_qp as _highs_solve_qp
-        elif Q_orig is None:
-            from discopt.solvers.lp_highs import (  # type: ignore[assignment]
-                solve_lp as _highs_solve_lp,
-            )
+        if Q_orig is not None:
+            # QP/MIQP dual recovery is HiGHS-free (issue #359): always POUNCE.
+            from discopt.solvers.qp_pounce import solve_qp as _recover_qp
+        elif prefer_pounce:
+            from discopt.solvers.lp_pounce import solve_lp as _recover_lp
         else:
-            from discopt.solvers.qp_highs import (  # type: ignore[assignment]
-                solve_qp as _highs_solve_qp,
+            from discopt.solvers.lp_highs import (  # type: ignore[assignment]
+                solve_lp as _recover_lp,
             )
     except ImportError:
         return None, None, None
@@ -8429,7 +8425,7 @@ def _mip_recover_relaxation_duals(
     try:
         relax: Any
         if Q_orig is None:
-            relax = _highs_solve_lp(
+            relax = _recover_lp(
                 c=c_orig,
                 A_ub=A_ub,
                 b_ub=b_ub,
@@ -8439,7 +8435,7 @@ def _mip_recover_relaxation_duals(
                 time_limit=time_limit,
             )
         else:
-            relax = _highs_solve_qp(
+            relax = _recover_qp(
                 Q=Q_orig,
                 c=c_orig,
                 A_ub=A_ub,
@@ -8815,19 +8811,6 @@ def _solve_qp(model: Model, t_start: float, prefer_pounce: bool = False) -> Solv
     return _solve_qp_jax(model, t_start)
 
 
-def _solve_qp_highs(
-    model: Model,
-    t_start: float,
-    time_limit: float | None = None,
-) -> SolveResult | None:
-    """Solve a QP/MIQP using HiGHS. Returns None if HiGHS is unavailable."""
-    try:
-        from discopt.solvers.qp_highs import solve_qp as _highs_solve_qp
-    except ImportError:
-        return None
-    return _solve_qp_matrix(model, t_start, time_limit, _highs_solve_qp, "HiGHS")
-
-
 def _solve_qp_pounce(
     model: Model,
     t_start: float,
@@ -9060,8 +9043,9 @@ def _solve_qp_matrix(
 ) -> SolveResult | None:
     """Solve a QP/MIQP through a matrix-form ``solve_qp`` backend.
 
-    ``solve_qp_fn`` must follow the shared QP contract (qp_highs / qp_pounce):
-    same signature, same ``QPResult`` with HiGHS-convention duals.
+    ``solve_qp_fn`` must follow the shared QP contract (qp_pounce, or the
+    optional Gurobi wrapper): same signature, same ``QPResult`` with
+    HiGHS-convention duals.
     """
     from discopt._jax.problem_classifier import extract_qp_data
     from discopt.modeling.core import ObjectiveSense

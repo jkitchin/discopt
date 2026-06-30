@@ -286,7 +286,7 @@ TEST_SOLVERS := \
     python/tests/test_obbt.py \
     python/tests/test_orchestrator.py \
     python/tests/test_primal_heuristics.py \
-    python/tests/test_qp_highs.py \
+    python/tests/test_qp_solve.py \
     python/tests/test_sparse_ipm.py \
     python/tests/test_t24_batch_ipm.py \
     python/tests/test_tree.py \
