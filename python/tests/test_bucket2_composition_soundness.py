@@ -132,15 +132,20 @@ def test_affected_instance_sound_on_both_backends_and_bound_sets(instance, optim
 
 @pytest.mark.parametrize("instance, optimum", _AFFECTED)
 def test_affected_instance_backends_agree_on_finite_bound(instance, optimum):
-    """The fast simplex and HiGHS must not disagree on a *finite* root bound by
-    more than a tolerance — on either bound set. A disagreement is the fingerprint
-    of an ill-conditioned lifted LP that the fast backend mis-solved (the #158
-    wrong-"optimal" hazard the conditioning guards exist to prevent).
+    """The fast simplex must never report a *finite* root bound **above** the
+    reference ``auto``/HiGHS bound — on either bound set. A fast bound that
+    exceeds the reference is the fingerprint of an ill-conditioned lifted LP the
+    fast backend mis-solved (the #158 wrong-"optimal" hazard the conditioning
+    guards prevent).
 
-    Where a backend returns no finite bound (an abstaining lift, or an
-    ``iteration_limit`` with no objective), there is nothing to compare — the
-    soundness direction is locked by the companion test above. We only assert
-    agreement when *both* backends produce a finite bound."""
+    The fast path reports the Neumaier–Shcherbina *safe* bound (issue #356), a
+    rigorous under-estimate of the LP optimum that the reference path reports
+    directly, so the two need not be equal: the fast bound may legitimately be
+    *lower* (a conservative safe bound), and on free/unbounded lifted columns the
+    safe bound's FBBT-bounded box makes it looser still. Only the unsound
+    direction — fast above reference — is forbidden. Where a backend returns no
+    finite bound there is nothing to compare; the ``<= optimum`` direction is
+    locked by the companion test above."""
     nl = _DATA / f"{instance}.nl"
     assert nl.exists(), f"missing {nl}"
     m = dm.from_nl(str(nl))
@@ -157,12 +162,13 @@ def test_affected_instance_backends_agree_on_finite_bound(instance, optimum):
         r_ok = ref.lower_bound is not None and math.isfinite(ref.lower_bound)
         if not (f_ok and r_ok):
             continue
-        # Both finite: they must agree (relative tolerance for large optima like
-        # ex1252's ~1.3e5) and both stay sound.
+        # The fast simplex's safe bound must not exceed the reference LP optimum
+        # (relative tolerance for large optima like ex1252's ~1.3e5). Being
+        # conservatively lower is the safe bound working as designed.
         scale = max(1.0, abs(fast.lower_bound), abs(ref.lower_bound))
-        assert abs(fast.lower_bound - ref.lower_bound) <= 1e-4 * scale, (
-            f"[{instance}/{tag}] backend disagreement on finite bound: "
-            f"simplex={fast.lower_bound} auto={ref.lower_bound} — fast bound unreliable"
+        assert fast.lower_bound <= ref.lower_bound + 1e-4 * scale, (
+            f"[{instance}/{tag}] fast simplex bound {fast.lower_bound} exceeds "
+            f"reference auto bound {ref.lower_bound} — fast bound unreliable (too high)"
         )
         assert fast.lower_bound <= optimum + 1e-3 and ref.lower_bound <= optimum + 1e-3, (
             f"[{instance}/{tag}] UNSOUND: simplex={fast.lower_bound} "
