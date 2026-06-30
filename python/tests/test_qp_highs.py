@@ -222,23 +222,22 @@ class TestDispatchRouting:
         m.subject_to(x + y >= 3)
         assert classify_problem(m) == ProblemClass.MIQP
 
-    def test_qp_ipm_alias_uses_highs_solver(self):
-        """The QP path calls HiGHS solve_qp under the ``"ipm"`` alias.
-
-        POUNCE is now the universal default, so HiGHS is reached only when the
-        user opts back in via ``nlp_solver="ipm"``.
+    def test_qp_ipm_alias_is_highs_free(self):
+        """The QP path is HiGHS-free (issue #359): even the deprecated ``"ipm"``
+        alias never calls HiGHS ``solve_qp`` — it routes to POUNCE like the
+        default. HiGHS is no longer reachable on any QP route.
         """
         from discopt.solvers.qp_highs import solve_qp as _raw_solve
 
-        m = dm.Model("highs_check")
+        m = dm.Model("highs_free_check")
         x = m.continuous("x", lb=0, ub=10)
         m.minimize(x**2)
 
         with patch("discopt.solvers.qp_highs.solve_qp", wraps=_raw_solve) as mock_solve:
             result = m.solve(nlp_solver="ipm")
             assert result.status == "optimal"
-            # If HiGHS path is used, solve_qp should have been called
-            assert mock_solve.call_count >= 1
+            # HiGHS QP solver must NOT be consulted on any route.
+            assert mock_solve.call_count == 0
 
 
 # ---------------------------------------------------------------------------

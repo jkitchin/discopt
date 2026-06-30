@@ -3621,11 +3621,10 @@ def solve_model(
                 _root_constraint_mask,
             ) = _classify_model_convexity(model, failure_label="MIQP convexity detection failed")
             if _root_convexity_known and _root_is_convex:
-                _pounce_only = nlp_solver == "pounce"
-                if not _pounce_only:
-                    highs_result = _solve_qp_highs(model, t_start, time_limit)
-                    if highs_result is not None:
-                        return highs_result
+                # Convex MIQP via discopt's own self-hosted B&B (POUNCE node QP
+                # relaxations) — HiGHS-free by design (issue #359 / pure-Rust
+                # goal). The convex node QP is solved to global optimality, so the
+                # B&B bound is valid.
                 return _solve_miqp_bb(
                     model,
                     time_limit,
@@ -3634,7 +3633,7 @@ def solve_model(
                     strategy,
                     max_nodes,
                     t_start,
-                    prefer_pounce=_pounce_only,
+                    prefer_pounce=True,
                 )
             logger.info(
                 "Nonconvex MIQP detected — routing to spatial Branch-and-Bound "
@@ -8229,6 +8228,13 @@ def _solve_node_nlp_kkt(
 # Specialized LP/QP solvers
 # ---------------------------------------------------------------------------
 
+# Reject an interior-point QP "optimal" whose reported final KKT residual exceeds
+# this (issue #145 drift guard for the POUNCE-first default). Loose enough to pass
+# a normally-converged IPM solve (observed ~1e-9, even on a 1e6-conditioned Q),
+# tight enough to catch a stalled one; the caller then degrades to the next
+# engine. A backend that reports no residual skips the check.
+_QP_KKT_RESIDUAL_TOL = 1e-6
+
 
 def _scalar_constraint_layout(
     model: Model,
@@ -8765,20 +8771,26 @@ def _solve_lp_matrix(
 
 
 def _solve_qp(model: Model, t_start: float, prefer_pounce: bool = False) -> SolveResult:
-    """Solve a QP through the first available engine, then the JAX QP IPM.
+    """Solve a QP with discopt's own engines — POUNCE, then the JAX QP IPM.
 
-    Engine order is HiGHS -> POUNCE, or POUNCE -> HiGHS when ``prefer_pounce``
-    is set (the user passed ``nlp_solver="pounce"``; roadmap P0.4). The POUNCE
-    engine handles pure-continuous QPs only — MIQPs stay on HiGHS or fall
-    through to the JAX path / B&B.
+    HiGHS-free by design (issue #359 / pure-Rust goal): a continuous QP is solved
+    by POUNCE (the pure-Rust Ipopt port), and a POUNCE failure or a non-converged
+    solve degrades to discopt's JAX QP interior-point method — never to HiGHS. The
+    POUNCE engine handles pure-continuous QPs only; MIQPs return ``None`` from it
+    and route to the self-hosted B&B path. ``prefer_pounce`` is retained for
+    call-site compatibility but no longer selects between backends (there is only
+    one default backend now).
+
+    Soundness: QP duals/reduced costs are reported, never consumed for bound
+    tightening (OBBT/DBBT read the LP oracles), so the only hazard is a drifted
+    objective on an unconverged solve (#145). ``_solve_qp_matrix`` guards it — the
+    returned point is re-checked for primal feasibility and for a stationary KKT
+    residual, degrading to the next engine (the JAX IPM) on failure.
     """
-    engines = [_solve_qp_highs, _solve_qp_pounce]
-    if prefer_pounce:
-        engines.reverse()
-    for engine in engines:
-        result = engine(model, t_start)
-        if result is not None:
-            return result
+    del prefer_pounce  # no HiGHS fallback to order against; kept for signature compat
+    result = _solve_qp_pounce(model, t_start)
+    if result is not None:
+        return result
     return _solve_qp_jax(model, t_start)
 
 
@@ -9112,6 +9124,20 @@ def _solve_qp_matrix(
                 "%s QP returned an infeasible point labeled optimal; "
                 "falling back to the next engine.",
                 engine,
+            )
+            return None
+        # Convergence guard for the POUNCE-first default: an interior-point
+        # backend can label a stalled, drifted point "optimal" (issue #145). When
+        # it reports a final KKT residual, reject a non-stationary "optimal" and
+        # degrade to the next engine (the JAX QP IPM) rather than trust a drifted
+        # objective. ``None`` (a backend that reports no residual) skips the check.
+        if result.kkt_error is not None and result.kkt_error > _QP_KKT_RESIDUAL_TOL:
+            logger.warning(
+                "%s QP reported a non-stationary 'optimal' (KKT residual %.2e > %.0e); "
+                "falling back to the next engine.",
+                engine,
+                result.kkt_error,
+                _QP_KKT_RESIDUAL_TOL,
             )
             return None
         x_flat = result.x[:n_orig]

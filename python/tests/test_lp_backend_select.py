@@ -26,6 +26,13 @@ def test_prefer_pounce_selects_pounce():
     assert lp_backend.get_qp_solver(prefer_pounce=True).__module__ == "discopt.solvers.qp_pounce"
 
 
+def test_default_qp_prefers_pounce():
+    """Issue #359: the QP seam is HiGHS-free by default — POUNCE-first even when
+    HiGHS is installed (unlike the LP/MILP selectors, which stay HiGHS-first)."""
+    pytest.importorskip("pounce")
+    assert lp_backend.get_qp_solver().__module__ == "discopt.solvers.qp_pounce"
+
+
 def _without_highs(monkeypatch):
     """Make any HiGHS import raise, simulating a POUNCE-only install."""
     real_import = builtins.__import__

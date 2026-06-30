@@ -8,6 +8,10 @@ agnostic. This is what lets discopt run with **only POUNCE installed**
 
 ``prefer_pounce`` flips the preference to POUNCE-first (the POUNCE-only mode,
 ``nlp_solver="pounce"``); otherwise HiGHS is preferred with POUNCE fallback.
+
+Exception — the **QP** seam (:func:`get_qp_solver`) defaults POUNCE-first
+regardless of ``prefer_pounce`` (issue #359): the LP/MILP routing went
+HiGHS-free in #356, and the QP seam follows. HiGHS stays as the QP fallback.
 """
 
 from __future__ import annotations
@@ -113,8 +117,16 @@ def get_exact_dual_lp_solver() -> Callable | None:
 def get_qp_solver(prefer_pounce: bool = False) -> Callable:
     """Return a matrix-form ``solve_qp(Q, c, A_ub, ...)``; see
     :func:`get_lp_solver`. POUNCE handles continuous QPs only (MIQPs go
-    through HiGHS or the B&B)."""
-    order = (_qp_pounce, _qp_highs) if prefer_pounce else (_qp_highs, _qp_pounce)
+    through HiGHS or the B&B).
+
+    Order is POUNCE -> HiGHS by default (issue #359: the QP seam is HiGHS-free by
+    default, matching the LP/MILP routing of #356); HiGHS is the fallback when
+    POUNCE is unavailable. ``prefer_pounce`` is retained for symmetry with the
+    other selectors but no longer changes the (already POUNCE-first) order. QP
+    duals are reported, not consumed for bound tightening, so this flip carries
+    none of the LP-dual soundness hazards #356 guarded against; the top-level
+    ``Model.solve`` QP path adds a primal-feasibility + KKT-residual guard."""
+    order = (_qp_pounce, _qp_highs)
     for factory in order:
         solver = factory()
         if solver is not None:

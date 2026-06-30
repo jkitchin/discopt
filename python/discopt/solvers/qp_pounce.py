@@ -318,6 +318,13 @@ def _solve_qp_core(
     mult_l = np.asarray(info.get("mult_x_L", []), dtype=np.float64)
     mult_u = np.asarray(info.get("mult_x_U", []), dtype=np.float64)
     reduced_costs = (mult_l - mult_u) if mult_l.size and mult_u.size else None
+    # Final KKT residual, when POUNCE reports one. Lets a POUNCE-first QP default
+    # detect an unconverged "optimal" (issue #145) and degrade to HiGHS rather
+    # than return a drifted objective. ``final_unscaled_kkt_error`` is preferred
+    # (the M1-fixed unscaled residual, pounce#174) when present; ``final_kkt_error``
+    # (scaled) is the fallback available in released 0.6.0.
+    _kkt = info.get("final_unscaled_kkt_error", info.get("final_kkt_error", None))
+    kkt_error = float(_kkt) if _kkt is not None else None
 
     return QPResult(
         status=status,
@@ -328,4 +335,5 @@ def _solve_qp_core(
         node_count=0,
         iterations=iters,
         wall_time=wall_time,
+        kkt_error=kkt_error,
     )
