@@ -72,6 +72,7 @@ _START_BOUND_CLIP = 1e8
 _CUT_SOURCE_ORDER = (
     "oa",
     "ecp",
+    "initial_poa",
     "objective",
     "objective_rootsearch",
     "esh",
@@ -79,6 +80,7 @@ _CUT_SOURCE_ORDER = (
     "integer",
     "external",
 )
+_INITIAL_POA_PHASES = frozenset({"auto", "initial"})
 
 
 def _float_tuple(values) -> tuple[float, ...]:
@@ -1483,6 +1485,8 @@ def _add_oa_cuts(
     equality_relaxation=False,
     oa_cut_relaxable=None,
     cut_provenance: Optional[MIPNLPCutProvenance] = None,
+    constraint_source: str = "oa",
+    objective_source: str = "objective",
 ):
     """Generate OA cuts at x_star and append to cut lists.
 
@@ -1534,7 +1538,7 @@ def _add_oa_cuts(
                     cut.rhs,
                     oa_cut_relaxable,
                     cut_provenance=cut_provenance,
-                    source="oa",
+                    source=constraint_source,
                     global_valid=global_valid,
                     supporting_point=x_star,
                     constraint_id=constraint_id,
@@ -1547,7 +1551,7 @@ def _add_oa_cuts(
                     -cut.rhs,
                     oa_cut_relaxable,
                     cut_provenance=cut_provenance,
-                    source="oa",
+                    source=constraint_source,
                     global_valid=global_valid,
                     supporting_point=x_star,
                     constraint_id=constraint_id,
@@ -1561,7 +1565,7 @@ def _add_oa_cuts(
                     cut.rhs,
                     oa_cut_relaxable,
                     cut_provenance=cut_provenance,
-                    source="oa",
+                    source=constraint_source,
                     global_valid=global_valid,
                     supporting_point=x_star,
                     constraint_id=constraint_id,
@@ -1573,7 +1577,7 @@ def _add_oa_cuts(
                     -cut.rhs,
                     oa_cut_relaxable,
                     cut_provenance=cut_provenance,
-                    source="oa",
+                    source=constraint_source,
                     global_valid=global_valid,
                     supporting_point=x_star,
                     constraint_id=constraint_id,
@@ -1593,7 +1597,7 @@ def _add_oa_cuts(
             oa_cut_relaxable,
             relaxable=False,
             cut_provenance=cut_provenance,
-            source="objective",
+            source=objective_source,
             global_valid=True,
             supporting_point=obj_support,
             objective_id="objective",
@@ -2096,6 +2100,48 @@ def _solve_master_milp(
             if solution_pool
             else {}
         ),
+    )
+
+
+def _solve_initial_poa_master(
+    decomp: _DecomposedProblem,
+    oa_A_rows,
+    oa_b_rows,
+    *,
+    master_bound_valid: bool,
+    time_limit: float,
+    gap_tolerance: float,
+    add_slack: bool,
+    max_slack: float,
+    oa_penalty_factor: float,
+    oa_cut_relaxable,
+    milp_solver: str,
+):
+    """Solve the current OA master with integrality relaxed for initial POA seeding."""
+    relaxed_integrality = np.zeros_like(decomp.integrality, dtype=np.int32)
+    return _solve_master_milp(
+        decomp.linear_A_rows,
+        decomp.linear_b_rows,
+        decomp.linear_senses,
+        oa_A_rows,
+        oa_b_rows,
+        decomp.n_vars,
+        relaxed_integrality,
+        decomp.lb,
+        decomp.ub,
+        decomp.obj_coeffs,
+        decomp.obj_is_linear,
+        master_bound_valid,
+        time_limit=time_limit,
+        gap_tolerance=gap_tolerance,
+        add_slack=add_slack,
+        max_slack=max_slack,
+        oa_penalty_factor=oa_penalty_factor,
+        oa_cut_relaxable=oa_cut_relaxable,
+        use_objective_epigraph=(not decomp.obj_is_linear and decomp.oa_objective_is_convex),
+        milp_solver=milp_solver,
+        solution_pool=False,
+        num_solution_iteration=1,
     )
 
 
@@ -3305,6 +3351,23 @@ def solve_oa(
     nlp_subproblem_count = 0
     feasibility_subproblem_count = 0
     solution_pool_candidate_count = 0
+    initial_poa_trace: Optional[dict[str, object]] = None
+    if mip_nlp_profile == "shot":
+        phase = mip_nlp_shot_config.relaxation_phase if mip_nlp_shot_config is not None else "off"
+        initial_poa_enabled = mip_nlp_shot_config is not None and phase in _INITIAL_POA_PHASES
+        initial_poa_trace = {
+            "enabled": bool(initial_poa_enabled),
+            "phase": phase,
+            "attempted": False,
+            "status": "pending" if initial_poa_enabled else "disabled",
+            "fallback_reason": None if initial_poa_enabled else f"relaxation_phase={phase}",
+            "cuts_added": 0,
+            "provenance_cuts_added": 0,
+            "objective_bound": None,
+            "objective_bound_valid": False,
+            "interior_point_candidates": 0,
+            "node_count": 0,
+        }
 
     def _trace_value(value: Optional[float]) -> Optional[float]:
         if value is None:
@@ -3332,7 +3395,23 @@ def solve_oa(
             _trace_value(_compute_gap(LB, UB)) if bound_valid and final_ub is not None else None
         )
         gap_certified = bool(bound_valid and final_gap is not None)
-        return {
+        summary = {
+            "mip_count": int(mip_count),
+            "nlp_subproblem_count": int(nlp_subproblem_count),
+            "feasibility_subproblem_count": int(feasibility_subproblem_count),
+            "cut_count": int(len(oa_A_rows)),
+            "provenance_cut_count": int(len(cut_provenance.records)),
+            "cut_source_counts": cut_provenance.source_counts(),
+            "solution_pool_candidates": int(solution_pool_candidate_count),
+        }
+        if initial_poa_trace is not None:
+            poa_cuts = initial_poa_trace.get("cuts_added", 0)
+            poa_provenance_cuts = initial_poa_trace.get("provenance_cuts_added", 0)
+            summary["initial_poa_cuts"] = int(poa_cuts) if isinstance(poa_cuts, int) else 0
+            summary["initial_poa_provenance_cuts"] = (
+                int(poa_provenance_cuts) if isinstance(poa_provenance_cuts, int) else 0
+            )
+        trace = {
             "schema_version": 1,
             "solver": "mip-nlp",
             "method": method_name,
@@ -3341,15 +3420,7 @@ def solve_oa(
                 mip_nlp_shot_config.as_trace_dict() if mip_nlp_shot_config is not None else {}
             ),
             "iterations": trace_iterations,
-            "summary": {
-                "mip_count": int(mip_count),
-                "nlp_subproblem_count": int(nlp_subproblem_count),
-                "feasibility_subproblem_count": int(feasibility_subproblem_count),
-                "cut_count": int(len(oa_A_rows)),
-                "provenance_cut_count": int(len(cut_provenance.records)),
-                "cut_source_counts": cut_provenance.source_counts(),
-                "solution_pool_candidates": int(solution_pool_candidate_count),
-            },
+            "summary": summary,
             "termination_reason": final_reason,
             "master_bound_valid": bool(master_bound_valid),
             "gap_certified": gap_certified,
@@ -3358,6 +3429,9 @@ def solve_oa(
             "final_ub": final_ub,
             "final_gap": final_gap,
         }
+        if initial_poa_trace is not None:
+            trace["initial_poa"] = dict(initial_poa_trace)
+        return trace
 
     # If no integer variables, just solve the NLP directly
     if len(decomp.int_indices) == 0:
@@ -3578,6 +3652,127 @@ def solve_oa(
             if x_init is not None and obj_init is not None:
                 multipliers = init_attempt.multipliers if init_attempt is not None else None
                 accept_incumbent(x_init, obj_init, multipliers)
+
+    if initial_poa_trace is not None and initial_poa_trace["enabled"]:
+        if not oa_A_rows:
+            initial_poa_trace.update(
+                {
+                    "status": "skipped",
+                    "fallback_reason": "no_initial_polyhedral_cuts",
+                }
+            )
+        else:
+            cuts_before = len(oa_A_rows)
+            provenance_before = len(cut_provenance.records)
+            bound_before = _trace_value(LB)
+            initial_poa_trace.update(
+                {
+                    "attempted": True,
+                    "status": "running",
+                    "fallback_reason": None,
+                    "bound_before": bound_before,
+                }
+            )
+            try:
+                poa_result = _solve_initial_poa_master(
+                    decomp,
+                    oa_A_rows,
+                    oa_b_rows,
+                    master_bound_valid=master_bound_valid,
+                    time_limit=max(time_limit - (time.perf_counter() - t_start), 0.0),
+                    gap_tolerance=gap_tolerance,
+                    add_slack=add_slack,
+                    max_slack=max_slack,
+                    oa_penalty_factor=oa_penalty_factor,
+                    oa_cut_relaxable=oa_cut_relaxable,
+                    milp_solver=milp_solver,
+                )
+                mip_count += 1
+            except Exception as exc:
+                initial_poa_trace.update(
+                    {
+                        "status": "fallback",
+                        "fallback_reason": f"{type(exc).__name__}: {exc}",
+                        "bound_after": _trace_value(LB),
+                    }
+                )
+            else:
+                status_name = "none" if poa_result is None else _trace_status(poa_result.status)
+                if poa_result is None or poa_result.x is None:
+                    initial_poa_trace.update(
+                        {
+                            "status": "fallback",
+                            "fallback_reason": f"master_status={status_name}",
+                            "bound_after": _trace_value(LB),
+                        }
+                    )
+                elif status_name not in {"optimal", "iteration_limit"}:
+                    initial_poa_trace.update(
+                        {
+                            "status": "fallback",
+                            "fallback_reason": f"master_status={status_name}",
+                            "node_count": int(getattr(poa_result, "node_count", 0) or 0),
+                            "bound_after": _trace_value(LB),
+                        }
+                    )
+                else:
+                    poa_x = np.asarray(poa_result.x, dtype=np.float64).reshape(-1)
+                    if poa_x.size < n_vars:
+                        initial_poa_trace.update(
+                            {
+                                "status": "fallback",
+                                "fallback_reason": f"master_solution_size={poa_x.size}",
+                                "node_count": int(getattr(poa_result, "node_count", 0) or 0),
+                                "bound_after": _trace_value(LB),
+                            }
+                        )
+                    else:
+                        x_poa = np.clip(
+                            poa_x[:n_vars],
+                            decomp.lb,
+                            decomp.ub,
+                        )
+                        objective_bound = None
+                        if master_bound_valid and poa_result.bound is not None:
+                            objective_bound = float(poa_result.bound)
+                            LB = max(LB, objective_bound)
+                        try:
+                            interior_candidates = 1 if _is_primal_feasible(evaluator, x_poa) else 0
+                        except Exception:
+                            interior_candidates = 0
+                        _add_oa_cuts(
+                            evaluator,
+                            x_poa,
+                            n_vars,
+                            n_cons,
+                            decomp.constraint_senses,
+                            oa_A_rows,
+                            oa_b_rows,
+                            decomp.obj_is_linear,
+                            decomp.oa_constraint_mask,
+                            decomp.oa_objective_is_convex,
+                            equality_relaxation=equality_relaxation,
+                            oa_cut_relaxable=oa_cut_relaxable,
+                            cut_provenance=cut_provenance,
+                            constraint_source="initial_poa",
+                        )
+                        cuts_added = int(len(oa_A_rows) - cuts_before)
+                        provenance_added = int(len(cut_provenance.records) - provenance_before)
+                        initial_poa_trace.update(
+                            {
+                                "status": "seeded" if cuts_added else "no_new_cuts",
+                                "fallback_reason": None,
+                                "cuts_added": cuts_added,
+                                "provenance_cuts_added": provenance_added,
+                                "objective_bound": _trace_value(objective_bound),
+                                "objective_bound_valid": bool(
+                                    master_bound_valid and objective_bound is not None
+                                ),
+                                "bound_after": _trace_value(LB),
+                                "interior_point_candidates": int(interior_candidates),
+                                "node_count": int(getattr(poa_result, "node_count", 0) or 0),
+                            }
+                        )
 
     # 3. Main OA loop
     for iteration in range(max_iterations):

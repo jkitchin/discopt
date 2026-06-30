@@ -141,6 +141,15 @@ def _miqp_style_model(name="shot_miqp_style"):
     return m
 
 
+def _initial_poa_fixture(name="shot_initial_poa_seed"):
+    m = dm.Model(name)
+    x = m.continuous("x", lb=0.0, ub=4.0)
+    y = m.binary("y")
+    m.subject_to((x - 2.0) ** 2 - y <= 0.0)
+    m.minimize(x + y)
+    return m
+
+
 def test_mip_nlp_cut_record_construction_and_dedup():
     from discopt.solvers.oa import MIPNLPCutProvenance, MIPNLPCutRecord, _append_master_cut
 
@@ -222,6 +231,159 @@ def test_mip_nlp_trace_exposes_cut_source_counts(monkeypatch):
     assert counts["ecp"] == 0
     assert counts["feasibility"] == 0
     assert counts["integer"] == 0
+
+
+def test_mip_nlp_shot_initial_poa_imports_cuts_with_provenance(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers import MILPResult, SolveStatus
+
+    cut_sources = []
+
+    def fake_solve_nlp_subproblem(*args, **kwargs):
+        x_master = np.asarray(args[4], dtype=float)
+        return x_master, 0.0
+
+    def fake_solve_initial_poa_master(*args, **kwargs):
+        return MILPResult(
+            status=SolveStatus.OPTIMAL,
+            x=np.array([0.0, 0.0], dtype=float),
+            objective=-2.0,
+            bound=-2.0,
+            node_count=3,
+        )
+
+    def fake_add_oa_cuts(
+        evaluator,
+        x_star,
+        n_vars,
+        n_cons,
+        constraint_senses,
+        oa_A_rows,
+        oa_b_rows,
+        *args,
+        **kwargs,
+    ):
+        source = kwargs.get("constraint_source", "oa")
+        cut_sources.append(source)
+        coeffs = np.zeros(n_vars, dtype=float)
+        coeffs[0] = -1.0 if source == "initial_poa" else 1.0
+        rhs = -1.0 if source == "initial_poa" else 10.0
+        oa_module._append_master_cut(
+            oa_A_rows,
+            oa_b_rows,
+            coeffs,
+            rhs,
+            kwargs.get("oa_cut_relaxable"),
+            cut_provenance=kwargs.get("cut_provenance"),
+            source=source,
+            global_valid=True,
+            supporting_point=x_star,
+        )
+
+    monkeypatch.setattr(oa_module, "_solve_nlp_subproblem", fake_solve_nlp_subproblem)
+    monkeypatch.setattr(oa_module, "_solve_initial_poa_master", fake_solve_initial_poa_master)
+    monkeypatch.setattr(oa_module, "_add_oa_cuts", fake_add_oa_cuts)
+
+    result = oa_module.solve_oa(
+        _initial_poa_fixture("initial_poa_unit_import"),
+        init_strategy="initial_binary",
+        max_iterations=0,
+        mip_nlp_profile="shot",
+        mip_nlp_shot_config=oa_module.MIPNLPShotConfig(relaxation_phase="initial"),
+    )
+
+    trace = result.mip_nlp_trace
+    assert "initial_poa" in cut_sources
+    assert trace["initial_poa"]["status"] == "seeded"
+    assert trace["initial_poa"]["objective_bound"] == pytest.approx(-2.0)
+    assert trace["initial_poa"]["objective_bound_valid"] is True
+    assert trace["initial_poa"]["node_count"] == 3
+    assert trace["summary"]["initial_poa_cuts"] == 1
+    assert trace["summary"]["cut_source_counts"]["initial_poa"] == 1
+
+
+def test_mip_nlp_shot_initial_poa_fallback_preserves_initialization(monkeypatch):
+    import discopt.solvers.oa as oa_module
+
+    def fake_solve_nlp_subproblem(*args, **kwargs):
+        x_master = np.asarray(args[4], dtype=float)
+        return x_master, 0.0
+
+    def fake_solve_initial_poa_master(*args, **kwargs):
+        raise RuntimeError("poa unavailable")
+
+    def fake_add_oa_cuts(
+        evaluator,
+        x_star,
+        n_vars,
+        n_cons,
+        constraint_senses,
+        oa_A_rows,
+        oa_b_rows,
+        *args,
+        **kwargs,
+    ):
+        coeffs = np.zeros(n_vars, dtype=float)
+        coeffs[0] = 1.0
+        oa_module._append_master_cut(
+            oa_A_rows,
+            oa_b_rows,
+            coeffs,
+            10.0,
+            kwargs.get("oa_cut_relaxable"),
+            cut_provenance=kwargs.get("cut_provenance"),
+            source=kwargs.get("constraint_source", "oa"),
+            global_valid=True,
+            supporting_point=x_star,
+        )
+
+    monkeypatch.setattr(oa_module, "_solve_nlp_subproblem", fake_solve_nlp_subproblem)
+    monkeypatch.setattr(oa_module, "_solve_initial_poa_master", fake_solve_initial_poa_master)
+    monkeypatch.setattr(oa_module, "_add_oa_cuts", fake_add_oa_cuts)
+
+    result = oa_module.solve_oa(
+        _initial_poa_fixture("initial_poa_unit_fallback"),
+        init_strategy="initial_binary",
+        max_iterations=0,
+        mip_nlp_profile="shot",
+        mip_nlp_shot_config=oa_module.MIPNLPShotConfig(relaxation_phase="initial"),
+    )
+
+    assert result.status == "feasible"
+    trace = result.mip_nlp_trace
+    assert trace["initial_poa"]["attempted"] is True
+    assert trace["initial_poa"]["status"] == "fallback"
+    assert "RuntimeError: poa unavailable" in trace["initial_poa"]["fallback_reason"]
+    assert trace["summary"]["cut_source_counts"]["initial_poa"] == 0
+
+
+@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
+def test_mip_nlp_shot_initial_poa_adds_initial_cuts_integration():
+    import discopt.solvers.oa as oa_module
+
+    disabled = oa_module.solve_oa(
+        _initial_poa_fixture("initial_poa_disabled"),
+        init_strategy="initial_binary",
+        ecp_mode=True,
+        max_iterations=0,
+        mip_nlp_profile="shot",
+        mip_nlp_shot_config=oa_module.MIPNLPShotConfig(relaxation_phase="off"),
+    )
+    enabled = oa_module.solve_oa(
+        _initial_poa_fixture("initial_poa_enabled"),
+        init_strategy="initial_binary",
+        ecp_mode=True,
+        max_iterations=0,
+        mip_nlp_profile="shot",
+        mip_nlp_shot_config=oa_module.MIPNLPShotConfig(relaxation_phase="initial"),
+    )
+
+    disabled_trace = disabled.mip_nlp_trace
+    enabled_trace = enabled.mip_nlp_trace
+    assert disabled_trace["initial_poa"]["status"] == "disabled"
+    assert enabled_trace["initial_poa"]["status"] == "seeded"
+    assert enabled_trace["summary"]["cut_count"] > disabled_trace["summary"]["cut_count"]
+    assert enabled_trace["summary"]["cut_source_counts"]["initial_poa"] >= 1
 
 
 def _mindtpy_simple_minlp(name="mindtpy_init_strategy"):
