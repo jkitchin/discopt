@@ -316,7 +316,14 @@ fn build_extended_basis(cs: &[i8], bv: &[i64], n: usize, m: usize) -> Option<Bas
 /// (`solve_lp_warm` cold-falls-back internally), and the dual simplex converges
 /// to the LP optimum just like a cold solve — so the returned objective (hence
 /// any relaxation bound built on it) is unchanged; the basis only changes speed.
-/// Returns `(status, x, obj, iters, col_status, basic_vars)`.
+/// Returns `(status, x, obj, iters, col_status, basic_vars, dual, ray)`.
+///
+/// `dual` (length `m`) and `ray` (length `n`) are *certificate candidates* a
+/// caller verifies before trusting (see [`LpSolve::dual`]/[`LpSolve::ray`]): at
+/// `optimal` `dual` is the row duals (feed to a Neumaier–Shcherbina safe bound),
+/// at `infeasible` `dual` is a Farkas ray, at `unbounded` `ray` is a primal ray.
+/// They are mapped back from any internal equilibration, so they are consistent
+/// with the `a`/`b`/`lb`/`ub` passed in. Each is empty when not applicable.
 #[pyfunction]
 #[pyo3(signature = (c, a, b, lb, ub, start_col_status=None, start_basic_vars=None,
                     tol=1e-9, max_iter=100_000))]
@@ -339,6 +346,8 @@ pub fn solve_lp_warm_py<'py>(
     usize,
     Bound<'py, PyArray1<i8>>,
     Bound<'py, PyArray1<i64>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
 )> {
     let dims = a.shape();
     let (m, n) = (dims[0], dims[1]);
@@ -383,6 +392,8 @@ pub fn solve_lp_warm_py<'py>(
         sol.iters,
         PyArray1::from_vec(py, sol.basis.col_status),
         PyArray1::from_vec(py, basic_vars_i64),
+        PyArray1::from_vec(py, sol.dual),
+        PyArray1::from_vec(py, sol.ray),
     ))
 }
 

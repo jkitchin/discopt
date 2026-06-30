@@ -146,6 +146,26 @@ impl Scaling {
             x[j] *= *c;
         }
     }
+
+    /// Map scaled row duals (or a scaled Farkas ray) back to the original space in
+    /// place: `y_i ← r_i ŷ_i`. The scaled constraint `i` was multiplied by `r_i`,
+    /// so its multiplier scales by the same factor (equivalently, the safe dual
+    /// bound `bᵀy + Σⱼ min_box((c−Aᵀy)ⱼ zⱼ)` is invariant under this map — see the
+    /// module identity `b̂ᵀŷ = bᵀ(Rŷ)` and `ĉ − Âᵀŷ = C(c − Aᵀ(Rŷ))`).
+    pub fn unscale_dual(&self, y: &mut [f64]) {
+        for (i, r) in self.row.iter().enumerate() {
+            if i >= y.len() {
+                break;
+            }
+            y[i] *= *r;
+        }
+    }
+
+    /// Map a scaled primal ray back to the original space: identical column
+    /// transform to [`Self::unscale_x`] (the ray lives in the primal `x` space).
+    pub fn unscale_ray(&self, d: &mut [f64]) {
+        self.unscale_x(d);
+    }
 }
 
 /// An owned, equilibrated copy of an [`LpView`] together with its RHS, for a
@@ -195,6 +215,16 @@ impl ScaledLp {
     /// Map a scaled primal point back to the original space in place.
     pub fn unscale_x(&self, x: &mut [f64]) {
         self.scaling.unscale_x(x);
+    }
+
+    /// Map scaled row duals / a scaled Farkas ray back to the original space.
+    pub fn unscale_dual(&self, y: &mut [f64]) {
+        self.scaling.unscale_dual(y);
+    }
+
+    /// Map a scaled primal ray back to the original space.
+    pub fn unscale_ray(&self, d: &mut [f64]) {
+        self.scaling.unscale_ray(d);
     }
 }
 

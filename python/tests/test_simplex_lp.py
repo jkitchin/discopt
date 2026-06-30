@@ -132,7 +132,7 @@ class TestWarmStartLp:
             np.ascontiguousarray(lb),
             np.ascontiguousarray(ub),
         )
-        s1, x1, o1, _i, cs, bv = rust.solve_lp_warm_py(
+        s1, x1, o1, _i, cs, bv, _d, _r = rust.solve_lp_warm_py(
             np.ascontiguousarray(c),
             np.ascontiguousarray(A),
             np.ascontiguousarray(b),
@@ -147,17 +147,17 @@ class TestWarmStartLp:
     def test_rowappend_warmstart_matches_cold(self):
         # min -x0 - x1 s.t. x0 + x1 <= 1, x in [0,1]; then append cut x0 <= 0.5.
         c, a, b, lb, ub = self._std([[1.0, 1.0]], [1.0], [-1.0, -1.0], [0, 0], [1, 1])
-        st, _x, obj, _i, cs, bv = rust.solve_lp_warm_py(c, a, b, lb, ub)
+        st, _x, obj, _i, cs, bv, _d, _r = rust.solve_lp_warm_py(c, a, b, lb, ub)
         assert st == "optimal" and abs(obj - (-1.0)) < 1e-9
 
         c2, a2, b2, lb2, ub2 = self._std(
             [[1.0, 1.0], [1.0, 0.0]], [1.0, 0.5], [-1.0, -1.0], [0, 0], [1, 1]
         )
         # warm-start from the 1-row basis (Rust extends it with the new slack basic)
-        sw, xw, ow, _iw, _csw, _bvw = rust.solve_lp_warm_py(
+        sw, xw, ow, _iw, _csw, _bvw, _dw, _rw = rust.solve_lp_warm_py(
             c2, a2, b2, lb2, ub2, cs.astype(np.int8), bv.astype(np.int64)
         )
-        sc, _xc, oc, _ic, _csc, _bvc = rust.solve_lp_warm_py(c2, a2, b2, lb2, ub2)
+        sc, _xc, oc, _ic, _csc, _bvc, _dc, _rc = rust.solve_lp_warm_py(c2, a2, b2, lb2, ub2)
         assert sw == "optimal" == sc
         assert abs(ow - oc) < 1e-9
         assert abs(ow - (-1.0)) < 1e-9  # x0 = x1 = 0.5
@@ -169,6 +169,6 @@ class TestWarmStartLp:
         c, a, b, lb, ub = self._std([[1.0, 1.0]], [1.0], [-1.0, -1.0], [0, 0], [1, 1])
         bad_cs = np.array([9, 9, 9, 9, 9], dtype=np.int8)  # wrong length & values
         bad_bv = np.array([7, 7, 7], dtype=np.int64)  # out-of-range indices
-        st, _x, obj, _i, _cs, _bv = rust.solve_lp_warm_py(c, a, b, lb, ub, bad_cs, bad_bv)
+        st, _x, obj, _i, _cs, _bv, _d, _r = rust.solve_lp_warm_py(c, a, b, lb, ub, bad_cs, bad_bv)
         assert st == "optimal"
         assert abs(obj - (-1.0)) < 1e-9

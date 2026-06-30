@@ -17,7 +17,7 @@ can fall back.
 
 from __future__ import annotations
 
-from typing import Optional, Union, cast
+from typing import NamedTuple, Optional, Union, cast
 
 import numpy as np
 import scipy.sparse as sp
@@ -27,6 +27,108 @@ from discopt.solvers import MILPResult, SolveStatus
 
 class SimplexBackendUnavailable(RuntimeError):
     """Raised when the Rust ``solve_milp_py`` binding cannot be imported."""
+
+
+_NS_MARGIN_REL = 1e-9
+"""Magnitude-scaled relative margin for the safe-bound / Farkas-ray evaluations.
+
+The two dot products below run in plain float64 (not directed-rounding interval
+arithmetic), so a margin proportional to the operands' magnitude is subtracted to
+dominate their rounding error and keep the returned bound a *rigorous*
+under-estimate (and the Farkas test a rigorous proof). Mirrors the constant in
+:func:`discopt._jax.obbt._ns_safe_lp_lower_bound`."""
+
+_INF = 1e20  # discopt's effective-infinity sentinel for free variable bounds.
+
+
+class LpWarmCert(NamedTuple):
+    """Verified-certificate side-channel from :func:`solve_lp_warm_std`.
+
+    * ``safe_bound`` — on an ``optimal`` solve, a Neumaier–Shcherbina safe lower
+      bound computed from the simplex's own row duals: ``<=`` the true LP optimum
+      at *any* conditioning, so a caller can use it as a rigorous bound without an
+      independent second solve. ``None`` when unavailable.
+    * ``farkas_certified`` — on an ``infeasible`` solve, ``True`` iff the
+      simplex's Farkas dual-ray candidate was independently verified to prove the
+      feasible set empty (a rigorous fathoming proof). ``False`` otherwise — the
+      caller must then fall back rather than trust the bare verdict.
+    """
+
+    safe_bound: Optional[float]
+    farkas_certified: bool
+
+
+def _safe_lp_lower_bound_std(
+    y: np.ndarray,
+    c: np.ndarray,
+    a_std: np.ndarray,
+    b: np.ndarray,
+    lb: np.ndarray,
+    ub: np.ndarray,
+) -> Optional[float]:
+    """Neumaier–Shcherbina safe lower bound on ``min cᵀz s.t. A z = b, lb<=z<=ub``
+    from *free-sign* equality multipliers ``y`` (length m).
+
+    Weak duality gives, for ANY ``y``,
+
+        g(y) = bᵀy + Σ_k min_{z_k∈[lb_k,ub_k]} (c − Aᵀy)_k z_k  ≤  min cᵀz,
+
+    so ``g(y)`` is a valid lower bound regardless of how ``y`` was obtained — it
+    stays sound even when an ill-conditioned basis makes the reported vertex
+    objective drift *above* the true optimum (the nvs22 false-certificate class).
+    A magnitude-scaled margin is subtracted so the float64 evaluation error cannot
+    push ``g`` above the true optimum. Returns ``None`` when no usable (finite)
+    bound exists (e.g. an unbounded box term)."""
+    y = np.asarray(y, dtype=np.float64)
+    if y.size == 0 or not np.all(np.isfinite(y)):
+        return None
+    c = np.asarray(c, dtype=np.float64)
+    at_y = a_std.T @ y if not sp.issparse(a_std) else (a_std.T @ y)
+    rc = c - np.asarray(at_y).ravel()
+    # Map the ±1e20 sentinels to true infinities so an infinite box side with a
+    # nonzero reduced cost yields −inf (an unusable bound → None), not a spurious
+    # large-finite contribution.
+    lb = np.where(np.asarray(lb, dtype=np.float64) <= -_INF, -np.inf, lb)
+    ub = np.where(np.asarray(ub, dtype=np.float64) >= _INF, np.inf, ub)
+    # min_{z_k∈[lb,ub]} rc_k z_k = lb_k if rc_k>0, ub_k if rc_k<0, else 0 (the
+    # rc_k==0 case contributes 0 even when that bound is infinite).
+    contrib = np.zeros_like(rc)
+    pos = rc > 0.0
+    neg = rc < 0.0
+    contrib[pos] = rc[pos] * lb[pos]
+    contrib[neg] = rc[neg] * ub[neg]
+    by = float(np.asarray(b, dtype=np.float64) @ y)
+    g = by + float(contrib.sum())
+    if not np.isfinite(g):
+        return None
+    margin = _NS_MARGIN_REL * (1.0 + abs(by) + float(np.abs(contrib).sum()))
+    return g - margin
+
+
+def _farkas_certified_std(
+    ray: np.ndarray,
+    a_std: np.ndarray,
+    b: np.ndarray,
+    lb: np.ndarray,
+    ub: np.ndarray,
+) -> bool:
+    """Verify a Farkas dual-ray candidate proves ``A z = b, lb<=z<=ub`` is empty.
+
+    The system is infeasible iff some free-sign ``y`` has ``bᵀy`` exceeding the
+    box-maximum of ``(Aᵀy)ᵀz`` — i.e. the ``c=0`` safe bound ``g₀(y) > 0`` (the
+    margin inside :func:`_safe_lp_lower_bound_std` already makes the strict
+    inequality rigorous). The simplex hands us a ray up to an overall sign, so we
+    try ``±ray``; a candidate that fails to verify simply returns ``False`` and
+    the caller falls back — it can never produce an unsound fathom."""
+    ray = np.asarray(ray, dtype=np.float64)
+    if ray.size == 0 or not np.all(np.isfinite(ray)):
+        return False
+    zeros_c = np.zeros(a_std.shape[1], dtype=np.float64)
+    for sign in (1.0, -1.0):
+        g0 = _safe_lp_lower_bound_std(sign * ray, zeros_c, a_std, b, lb, ub)
+        if g0 is not None and g0 > 0.0:
+            return True
+    return False
 
 
 def solve_milp(
@@ -158,7 +260,9 @@ def solve_lp_warm_std(
     b_ub: Optional[np.ndarray],
     bounds: Optional[list[tuple[float, float]]],
     in_basis: Optional[tuple[np.ndarray, np.ndarray]] = None,
-) -> tuple[Optional[MILPResult], Optional[tuple[np.ndarray, np.ndarray]]]:
+    *,
+    return_cert: bool = False,
+):
     """Warm-startable **pure-LP** solve of ``min c^T x s.t. A_ub x <= b_ub, bounds``.
 
     Marshals the ``A_ub x <= b_ub`` form into standard form ``[A_ub | I] z = b_ub``
@@ -173,6 +277,12 @@ def solve_lp_warm_std(
     caller can fall back to a cold/HiGHS path. Soundness: the dual simplex
     converges to the LP optimum exactly as a cold solve (a bad basis is ignored
     inside Rust), so the returned objective/bound is unchanged — only the speed is.
+
+    When ``return_cert`` is set, returns ``(result, out_basis, cert)`` with a
+    :class:`LpWarmCert` built from the simplex's own duals / Farkas ray: a
+    rigorous safe lower bound on an ``optimal`` solve, and an independently
+    verified infeasibility proof on an ``infeasible`` one — both without a second
+    external solve (issue #356).
     """
     from discopt._rust import solve_lp_warm_py
 
@@ -210,7 +320,7 @@ def solve_lp_warm_std(
     cs0 = None if in_basis is None else np.ascontiguousarray(in_basis[0], dtype=np.int8)
     bv0 = None if in_basis is None else np.ascontiguousarray(in_basis[1], dtype=np.int64)
 
-    status, x_full, obj, _iters, cs, bv = solve_lp_warm_py(
+    status, x_full, obj, _iters, cs, bv, dual, ray = solve_lp_warm_py(
         np.ascontiguousarray(c_std),
         np.ascontiguousarray(a_std),
         np.ascontiguousarray(b_vec),
@@ -220,21 +330,47 @@ def solve_lp_warm_std(
         bv0,
     )
 
-    x_struct = np.asarray(x_full, dtype=np.float64)[:n]
-    if status == "optimal":
-        return (
-            MILPResult(
-                status=SolveStatus.OPTIMAL,
-                x=x_struct,
-                objective=float(obj),
-                bound=float(obj),
-                node_count=0,
-            ),
-            (np.asarray(cs), np.asarray(bv)),
-        )
-    if status == "infeasible":
-        return MILPResult(status=SolveStatus.INFEASIBLE, node_count=0), None
-    if status == "unbounded":
-        return MILPResult(status=SolveStatus.UNBOUNDED, node_count=0), None
-    # iter_limit / numerical: signal the caller to fall back to the generic path.
-    return None, None
+    def _result_basis_cert():
+        x_struct = np.asarray(x_full, dtype=np.float64)[:n]
+        if status == "optimal":
+            # Rigorous safe lower bound from the simplex's own row duals (sound at
+            # any conditioning — never above the true optimum), reported as the
+            # ``bound`` so a caller can fathom on it without an independent solve.
+            # ``objective`` stays the raw vertex value; ``bound`` is the certified
+            # one (the safe bound, clamped to never exceed the raw value, since a
+            # well-conditioned raw value <= safe bound is itself sound and tighter).
+            safe = _safe_lp_lower_bound_std(dual, c_std, a_std, b_vec, lb_std, ub_std)
+            bound = float(obj) if safe is None else min(float(obj), float(safe))
+            return (
+                MILPResult(
+                    status=SolveStatus.OPTIMAL,
+                    x=x_struct,
+                    objective=float(obj),
+                    bound=bound,
+                    node_count=0,
+                ),
+                (np.asarray(cs), np.asarray(bv)),
+                LpWarmCert(
+                    safe_bound=(None if safe is None else float(safe)), farkas_certified=False
+                ),
+            )
+        if status == "infeasible":
+            certified = _farkas_certified_std(dual, a_std, b_vec, lb_std, ub_std)
+            return (
+                MILPResult(status=SolveStatus.INFEASIBLE, node_count=0),
+                None,
+                LpWarmCert(safe_bound=None, farkas_certified=certified),
+            )
+        if status == "unbounded":
+            return (
+                MILPResult(status=SolveStatus.UNBOUNDED, node_count=0),
+                None,
+                LpWarmCert(safe_bound=None, farkas_certified=False),
+            )
+        # iter_limit / numerical: signal the caller to fall back to the generic path.
+        return None, None, LpWarmCert(safe_bound=None, farkas_certified=False)
+
+    result, out_basis, cert = _result_basis_cert()
+    if return_cert:
+        return result, out_basis, cert
+    return result, out_basis

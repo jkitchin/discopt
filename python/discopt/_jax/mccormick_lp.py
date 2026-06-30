@@ -433,7 +433,9 @@ class MccormickLPRelaxer:
                 if (self._inc_warm_basis is not None and self._inc_basis_nrows == nrows)
                 else None
             )
-            status, bound, x_full, basis = inc.solve_assembled_full(A, b, bounds, in_basis=in_basis)
+            status, bound, x_full, basis, farkas_certified = inc.solve_assembled_full(
+                A, b, bounds, in_basis=in_basis
+            )
         except Exception:
             logger.debug("incremental McCormick node failed; cold fallback", exc_info=True)
             return None
@@ -447,13 +449,18 @@ class MccormickLPRelaxer:
         if status == "infeasible":
             # An empty McCormick polytope over a FINITE box is a rigorous
             # infeasibility proof for this node's subtree (the relaxation is a valid
-            # outer approximation), so the node is fathomed WITHOUT a cold rebuild —
-            # the cold path was previously re-derived only to re-confirm exactly
-            # this verdict (the dominant remaining per-node cost). Sound, but the
-            # Rust simplex can report a *false* infeasible on an ill-conditioned
-            # lifted relaxation, so this mirrors the cold path's guard
-            # (``milp_relaxation`` solve): trust a raw infeasible only on a
-            # well-conditioned matrix, else re-verify once with exact equilibration.
+            # outer approximation), so the node is fathomed WITHOUT a cold rebuild.
+            # A *verified Farkas dual ray* (issue #356) makes that verdict rigorous
+            # with no second solve at all: the ray is an independent certificate
+            # that the lifted LP's feasible set is empty, so when it checks out we
+            # fathom directly — closing the #355-review gap where the incremental
+            # infeasible-trust path dropped the cold path's independent cross-check.
+            if farkas_certified:
+                return MccormickLPResult(status="infeasible")
+            # The ray did not verify (an ill-conditioned candidate): fall back to
+            # the equilibration re-verify, mirroring the cold path's
+            # false-infeasible guard (trust a raw infeasible only after an exact,
+            # feasible-set-preserving rescale recovers no feasible point).
             return self._reverify_incremental_infeasible(inc, A, b, bounds)
 
         # time_limit / unbounded / numerical error: no certified verdict — fall back
@@ -464,10 +471,13 @@ class MccormickLPRelaxer:
         self, inc, A: np.ndarray, b: np.ndarray, bounds: np.ndarray
     ) -> Optional["MccormickLPResult"]:
         """Confirm an incremental ``infeasible`` verdict soundly, without a cold
-        rebuild. Mirrors the cold path's false-infeasible guard: a well-scaled LP's
-        infeasible verdict is trusted directly; an ill-conditioned one (coefficient
-        spread ``> _RELAX_FALSE_INFEAS_TRIGGER``) is re-solved once with exact
-        geometric-mean equilibration (feasible-set-preserving) before being accepted.
+        rebuild, when the simplex's Farkas ray did not already certify it. Mirrors
+        the cold path's false-infeasible guard: a well-scaled LP's infeasible
+        verdict is trusted directly; an ill-conditioned one (coefficient spread
+        ``> _RELAX_FALSE_INFEAS_TRIGGER``) is re-solved once with exact
+        geometric-mean equilibration (feasible-set-preserving) before being
+        accepted. The equilibrated re-solve also yields a fresh Farkas ray, so a
+        recovered infeasible is preferentially confirmed by that certificate.
 
         Returns ``MccormickLPResult(status="infeasible")`` to fathom, an
         ``"optimal"`` result if equilibration recovers a feasible point (a false
@@ -496,7 +506,7 @@ class MccormickLPRelaxer:
         try:
             bl = [(float(bounds[i, 0]), float(bounds[i, 1])) for i in range(bounds.shape[0])]
             c2, a2, b2, bd2, col_scale = equilibrate_relaxation_lp(inc.c, a_csr, b, bl, None)
-            status, bound, x_s, _ = inc.solve_assembled_full(
+            status, bound, x_s, _, _farkas = inc.solve_assembled_full(
                 a2, b2, np.asarray(bd2, dtype=np.float64), in_basis=None, c_override=c2
             )
         except Exception:

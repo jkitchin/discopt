@@ -37,6 +37,13 @@ pub fn solve_lp(lp: &LpView<'_>, b: &[f64], opts: &SimplexOptions) -> LpSolve {
             let view = scaled.view();
             let mut sol = solve_lp_scaled(&view, scaled.b(), opts);
             scaled.unscale_x(&mut sol.x);
+            // The certificate vectors are produced in scaled space; map them back
+            // so they are consistent with the *original* A/b/bounds the caller
+            // verifies against (a scaled dual against an unscaled matrix would make
+            // the safe bound / Farkas check spuriously fail — exactly on the
+            // ill-scaled LPs where the certificate matters most).
+            scaled.unscale_dual(&mut sol.dual);
+            scaled.unscale_ray(&mut sol.ray);
             sol
         }
         None => solve_lp_scaled(lp, b, opts),
@@ -106,6 +113,9 @@ struct Simplex<'a> {
     stat: Vec<i8>,     // column -> BASIC/AT_LOWER/AT_UPPER (len na)
     lb: Vec<f64>,      // len na
     ub: Vec<f64>,      // len na
+    /// Primal unbounded ray (length `n`), captured when [`Self::simplex_loop`]
+    /// detects unboundedness so [`Self::assemble`] can export it; empty until then.
+    unbounded_ray: Vec<f64>,
 }
 
 impl<'a> Simplex<'a> {
@@ -134,6 +144,7 @@ impl<'a> Simplex<'a> {
             stat: vec![AT_LOWER; na],
             lb,
             ub,
+            unbounded_ray: Vec::new(),
         }
     }
 
@@ -500,6 +511,24 @@ impl<'a> Simplex<'a> {
             }
 
             if t_max >= INF {
+                // Capture the primal unbounded ray over the real columns (length
+                // `n`): entering `q` moves by `dir`, each basic variable follows
+                // `x_B -= dir·α`, and `A d = 0` by construction (α = B⁻¹A_q ⇒
+                // A_q − B·α = 0). A caller verifies `A d = 0`, box-recession, and
+                // `cᵀd < 0` before trusting it, so an artificial leaking in (it is
+                // pinned to [0,0] in phase 2, so its ray entry is 0 anyway) cannot
+                // make the check pass spuriously.
+                let mut ray = vec![0.0; self.n];
+                if q < self.n {
+                    ray[q] = dir;
+                }
+                for i in 0..m {
+                    let bi = self.basis[i];
+                    if bi < self.n {
+                        ray[bi] = -dir * alpha[i];
+                    }
+                }
+                self.unbounded_ray = ray;
                 return Err(LpStatus::Unbounded);
             }
             if t_max <= self.tol {
@@ -630,6 +659,43 @@ impl<'a> Simplex<'a> {
             status
         };
 
+        // Certificate vector `y = B⁻ᵀ c_B` (length m). On `Optimal` use the real
+        // objective costs — these are the row duals feeding a safe (never-too-high)
+        // dual bound. On `Infeasible` use the phase-1 costs (1 on artificials, 0
+        // elsewhere): the phase-1 multipliers form a Farkas infeasibility ray. The
+        // btran is a read-only solve against the final factorization, so it neither
+        // perturbs the basis nor the returned `x`/`obj`. Empty on any other status
+        // (no meaningful certificate) — and empty too if the btran fails, so the
+        // caller simply falls back rather than trusting an unsound vector.
+        let dual: Vec<f64> = match status {
+            LpStatus::Optimal | LpStatus::Infeasible => {
+                let mut y: Vec<f64> = self
+                    .basis
+                    .iter()
+                    .map(|&j| {
+                        if status == LpStatus::Optimal {
+                            if j < self.n {
+                                self.c[j]
+                            } else {
+                                0.0
+                            }
+                        } else if j >= self.n {
+                            1.0 // basic artificial: phase-1 cost
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect();
+                if self.lu.btran(&mut y).is_ok() {
+                    y
+                } else {
+                    Vec::new()
+                }
+            }
+            _ => Vec::new(),
+        };
+        let ray = std::mem::take(&mut self.unbounded_ray);
+
         // Export a *complete*, row-ordered basis of real columns (length m).
         //
         // Phase 2 can leave an artificial (column ≥ self.n) basic at value 0 on a
@@ -684,6 +750,8 @@ impl<'a> Simplex<'a> {
                 basic_vars,
             },
             iters: 0,
+            dual,
+            ray,
         }
     }
 
@@ -698,6 +766,8 @@ impl<'a> Simplex<'a> {
                 basic_vars: Vec::new(),
             },
             iters: 0,
+            dual: Vec::new(),
+            ray: Vec::new(),
         }
     }
 }
@@ -825,6 +895,119 @@ mod tests {
             &u,
             &[1.0, 3.0 + 1e-9]
         ));
+    }
+
+    // --- certificate vectors (issue #356) ------------------------------------
+
+    const CERT_INF: f64 = 1e20;
+
+    /// Safe lower bound `g(y) = bᵀy + Σ_k min_{z_k∈[l,u]} (c−Aᵀy)_k z_k` from
+    /// free-sign multipliers `y`. `<= true optimum` for any `y` (weak duality).
+    fn safe_bound(
+        y: &[f64],
+        c: &[f64],
+        a: &[f64],
+        m: usize,
+        n: usize,
+        b: &[f64],
+        l: &[f64],
+        u: &[f64],
+    ) -> f64 {
+        let mut g = b.iter().zip(y).map(|(bi, yi)| bi * yi).sum::<f64>();
+        for j in 0..n {
+            let aty: f64 = (0..m).map(|i| a[i * n + j] * y[i]).sum();
+            let rc = c[j] - aty;
+            if rc > 0.0 {
+                g += if l[j] <= -CERT_INF {
+                    f64::NEG_INFINITY
+                } else {
+                    rc * l[j]
+                };
+            } else if rc < 0.0 {
+                g += if u[j] >= CERT_INF {
+                    f64::NEG_INFINITY
+                } else {
+                    rc * u[j]
+                };
+            }
+        }
+        g
+    }
+
+    #[test]
+    fn optimal_duals_reproduce_objective_via_safe_bound() {
+        // min -x0 - 2x1 s.t. x0+x1+s=4, x∈[0,5], s∈[0,inf]. Optimum -8.
+        let a = [1.0, 1.0, 1.0];
+        let c = [-1.0, -2.0, 0.0];
+        let l = [0.0, 0.0, 0.0];
+        let u = [5.0, 5.0, CERT_INF];
+        let r = solve(&a, 1, 3, &[4.0], &c, &l, &u);
+        assert_eq!(r.status, LpStatus::Optimal);
+        assert_eq!(r.dual.len(), 1);
+        let g = safe_bound(&r.dual, &c, &a, 1, 3, &[4.0], &l, &u);
+        // Safe bound from the simplex's own duals reproduces the optimum and is
+        // never above it (the soundness property the spatial-B&B relies on).
+        assert!((g - r.obj).abs() < 1e-9, "safe bound {g} vs obj {}", r.obj);
+        assert!(g <= r.obj + 1e-9);
+    }
+
+    #[test]
+    fn infeasible_emits_a_verifiable_farkas_ray() {
+        // x0 + s = 1, s∈[0,inf], x0∈[2,inf): x0≥2 but x0≤1 → infeasible.
+        let a = [1.0, 1.0];
+        let c = [1.0, 0.0];
+        let l = [2.0, 0.0];
+        let u = [CERT_INF, CERT_INF];
+        let r = solve(&a, 1, 2, &[1.0], &c, &l, &u);
+        assert_eq!(r.status, LpStatus::Infeasible);
+        assert_eq!(r.dual.len(), 1);
+        // Farkas: for some sign, the c=0 safe bound g0(±y) > 0 proves emptiness.
+        let zeros = [0.0, 0.0];
+        let pos = safe_bound(&r.dual, &zeros, &a, 1, 2, &[1.0], &l, &u);
+        let neg_y: Vec<f64> = r.dual.iter().map(|v| -v).collect();
+        let neg = safe_bound(&neg_y, &zeros, &a, 1, 2, &[1.0], &l, &u);
+        assert!(
+            pos > 0.0 || neg > 0.0,
+            "neither sign certifies: +{pos} -{neg}"
+        );
+    }
+
+    #[test]
+    fn unbounded_emits_a_valid_primal_ray() {
+        // min -x0 s.t. x0 - s = 0, x0,s∈[0,inf) → unbounded along x0=s growing.
+        let a = [1.0, -1.0];
+        let c = [-1.0, 0.0];
+        let l = [0.0, 0.0];
+        let u = [CERT_INF, CERT_INF];
+        let r = solve(&a, 1, 2, &[0.0], &c, &l, &u);
+        assert_eq!(r.status, LpStatus::Unbounded);
+        assert_eq!(r.ray.len(), 2);
+        // A d = 0 (stays on the constraint), and cᵀd < 0 (objective decreases).
+        let ad: f64 = (0..2).map(|j| a[j] * r.ray[j]).sum();
+        let cd: f64 = (0..2).map(|j| c[j] * r.ray[j]).sum();
+        assert!(ad.abs() < 1e-9, "A·d = {ad} (should be 0)");
+        assert!(cd < -1e-9, "c·d = {cd} (should be < 0)");
+    }
+
+    #[test]
+    fn ill_scaled_optimum_safe_bound_not_above_truth() {
+        // Wide-coefficient LP (range 1e9 → equilibration fires). The duals are
+        // unscaled, so the safe bound stays <= the true optimum.
+        let a = [1e9, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+        let c = [-1.0, -1.0, 0.0, 0.0];
+        let l = [0.0, 0.0, 0.0, 0.0];
+        let u = [1.0, 10.0, CERT_INF, CERT_INF];
+        let b = [1e9, 5.0];
+        let r = solve(&a, 2, 4, &b, &c, &l, &u);
+        assert_eq!(r.status, LpStatus::Optimal);
+        assert_eq!(r.dual.len(), 2);
+        let g = safe_bound(&r.dual, &c, &a, 2, 4, &b, &l, &u);
+        assert!(g <= r.obj + 1e-6, "safe bound {g} above obj {}", r.obj);
+        assert!(
+            (g - r.obj).abs() < 1e-3,
+            "safe bound {g} too loose vs {}",
+            r.obj
+        );
     }
 
     #[test]

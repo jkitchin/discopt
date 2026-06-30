@@ -39,6 +39,12 @@ pub fn solve_lp_warm(lp: &LpView<'_>, b: &[f64], start: &Basis, opts: &SimplexOp
             let view = scaled.view();
             let mut sol = solve_lp_warm_scaled(&view, scaled.b(), start, opts);
             scaled.unscale_x(&mut sol.x);
+            // Map the certificate vectors back to the original space too (see the
+            // matching note in `primal::solve_lp`): the duals/Farkas ray are in
+            // scaled coordinates and must align with the unscaled A/b the caller
+            // checks against.
+            scaled.unscale_dual(&mut sol.dual);
+            scaled.unscale_ray(&mut sol.ray);
             sol
         }
         None => solve_lp_warm_scaled(lp, b, start, opts),
@@ -292,6 +298,14 @@ impl<'a> PreparedDual<'a> {
                         None => {
                             dvec = recompute_reduced_costs(&mut lu, sp, c, n, &basis)?;
                             if dual_feasible(n, &stat, l, u, &dvec, tol) {
+                                // Row duals `y = B⁻ᵀ c_B` for the safe dual bound;
+                                // empty (caller falls back) if the btran fails.
+                                let mut y: Vec<f64> = basis.iter().map(|&j| c[j]).collect();
+                                let dual = if lu.btran(&mut y).is_ok() {
+                                    y
+                                } else {
+                                    Vec::new()
+                                };
                                 return Some(assemble(
                                     n,
                                     m,
@@ -304,6 +318,8 @@ impl<'a> PreparedDual<'a> {
                                     u,
                                     LpStatus::Optimal,
                                     pivots,
+                                    dual,
+                                    Vec::new(),
                                 ));
                             }
                             // Exact reduced costs reveal dual infeasibility (a drifted
@@ -342,6 +358,10 @@ impl<'a> PreparedDual<'a> {
                 cand = build_candidates(n, &stat, l, u, &alpha_r, &dvec, to_lower, tol);
                 if cand.is_empty() {
                     xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
+                    // Farkas dual ray: the leaving row's `ρ = eᵣᵀ B⁻¹`. With the
+                    // ratio test finding no entering column, `ρ` (or `−ρ`) is a
+                    // direction along which `bᵀy` beats the box-max of `(Aᵀy)ᵀz`,
+                    // certifying primal infeasibility — the caller verifies it.
                     return Some(assemble(
                         n,
                         m,
@@ -354,6 +374,8 @@ impl<'a> PreparedDual<'a> {
                         u,
                         LpStatus::Infeasible,
                         pivots,
+                        rho.clone(),
+                        Vec::new(),
                     ));
                 }
             }
@@ -665,6 +687,8 @@ fn assemble(
     u: &[f64],
     status: LpStatus,
     pivots: usize,
+    dual: Vec<f64>,
+    ray: Vec<f64>,
 ) -> LpSolve {
     let mut x = vec![0.0; n];
     for j in 0..n {
@@ -690,6 +714,8 @@ fn assemble(
             basic_vars,
         },
         iters: pivots,
+        dual,
+        ray,
     }
 }
 
@@ -750,6 +776,63 @@ mod tests {
         assert!(
             warm.iters >= 1,
             "dual warm-start did not run (fell back to cold)"
+        );
+    }
+
+    // After a warm dual re-optimization the exported row duals must still satisfy
+    // the safe-bound identity `bᵀy + Σ min_box((c−Aᵀy)z) ≈ obj` — i.e. the dual
+    // path populates `LpSolve::dual` correctly, not just the primal cold path.
+    #[test]
+    fn warm_optimal_exports_duals_matching_objective() {
+        let a = [1.0, 1.0, 1.0, 0.0, 1.0, 3.0, 0.0, 1.0];
+        let (m, n) = (2, 4);
+        let b = [4.0, 6.0];
+        let c = [-1.0, -2.0, 0.0, 0.0];
+        let l = [0.0; 4];
+        let u = [5.0, 5.0, INF, INF];
+        let lp = LpView {
+            a: &a,
+            m,
+            n,
+            c: &c,
+            l: &l,
+            u: &u,
+        };
+        let cold = solve_lp(&lp, &b, &opts());
+        assert_eq!(cold.status, LpStatus::Optimal);
+
+        // Tighten x1 ≤ 0.5 and re-solve warm from the cold basis (dual pivots run).
+        let u2 = [5.0, 0.5, INF, INF];
+        let lp2 = LpView {
+            a: &a,
+            m,
+            n,
+            c: &c,
+            l: &l,
+            u: &u2,
+        };
+        let warm = solve_lp_warm(&lp2, &b, &cold.basis, &opts());
+        assert_eq!(warm.status, LpStatus::Optimal);
+        assert_eq!(warm.dual.len(), m);
+        // Safe bound from the warm-path duals reproduces the warm objective.
+        let mut g = b
+            .iter()
+            .zip(&warm.dual)
+            .map(|(bi, yi)| bi * yi)
+            .sum::<f64>();
+        for j in 0..n {
+            let aty: f64 = (0..m).map(|i| a[i * n + j] * warm.dual[i]).sum();
+            let rc = c[j] - aty;
+            if rc > 0.0 {
+                g += rc * l[j];
+            } else if rc < 0.0 && u2[j] < INF {
+                g += rc * u2[j];
+            }
+        }
+        assert!(
+            (g - warm.obj).abs() < 1e-7,
+            "safe bound {g} vs warm obj {}",
+            warm.obj
         );
     }
 

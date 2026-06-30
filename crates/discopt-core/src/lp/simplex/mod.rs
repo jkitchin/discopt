@@ -91,4 +91,25 @@ pub struct LpSolve {
     pub basis: Basis,
     /// Simplex pivots performed.
     pub iters: usize,
+    /// Certificate vector of length `m` (one per row), interpreted by `status`:
+    ///
+    /// * [`LpStatus::Optimal`] — the row duals `y = B⁻ᵀ c_B`. Feeding these to a
+    ///   Neumaier–Shcherbina safe-bound evaluation yields a *rigorous* lower
+    ///   bound that holds at any conditioning (it never over-estimates even when
+    ///   the reported vertex objective drifts on an ill-conditioned basis), so a
+    ///   caller can certify the bound without a second independent solve.
+    /// * [`LpStatus::Infeasible`] — a **Farkas dual ray** candidate: a free-sign
+    ///   `y` such that `bᵀy` exceeds the box-maximum of `(Aᵀy)ᵀz`, a verifiable
+    ///   proof the feasible set is empty. The caller verifies it (trying ±y, with
+    ///   a magnitude-scaled margin) before trusting the infeasible verdict — so
+    ///   an imperfect candidate only forces a fallback, never an unsound fathom.
+    ///
+    /// Empty for every other status. Verification is the caller's job; this is a
+    /// *candidate*, sound only once independently checked.
+    pub dual: Vec<f64>,
+    /// Primal unbounded ray candidate of length `n`, populated only for
+    /// [`LpStatus::Unbounded`]: a direction `d` with `A d = 0`, box-feasible, and
+    /// `cᵀd < 0` along which the objective decreases without bound. Empty
+    /// otherwise. Like [`Self::dual`] it is a candidate for the caller to verify.
+    pub ray: Vec<f64>,
 }
