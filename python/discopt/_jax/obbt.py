@@ -52,7 +52,7 @@ _OBBT_COND_LIMIT = 1e10
 _OBBT_NS_GUARD = 1e-6
 
 
-def _ns_safe_lp_lower_bound(c, dual_values, A_ub, b_ub, lo, hi):
+def _ns_safe_lp_lower_bound(c, dual_values, A_ub, b_ub, lo, hi, *, rc_snap_tol=0.0):
     """Neumaier-Shcherbina rigorous lower bound on ``min c^T x`` over the box LP.
 
     The LP is ``min c^T x  s.t.  A_ub x <= b_ub,  lo <= x <= hi``. For *any*
@@ -76,6 +76,24 @@ def _ns_safe_lp_lower_bound(c, dual_values, A_ub, b_ub, lo, hi):
     A magnitude-scaled margin is subtracted to dominate the floating-point error
     of the dual evaluation itself (done in plain float64, not directed-rounding
     interval arithmetic). Returns ``None`` when no usable lower bound exists.
+
+    ``rc_snap_tol`` (default ``0.0`` -> disabled, exact legacy behaviour) enables
+    the reduced-cost snap needed to consume an *interior-point* dual (POUNCE)
+    instead of a vertex dual. A column whose binding bound is infinite must have
+    ``rc == 0`` in any dual-feasible point (otherwise the LP is unbounded in that
+    direction), so a vertex solver reports exactly 0 there and this term drops
+    out. An IPM reports a small convergence *residual* instead, and ``rc * inf``
+    then blows ``g`` to ``-inf`` -> the whole bound is discarded as ``None`` (seen
+    on nvs05 / nvs22 / st_e36, whose lifted LPs carry free columns). When
+    ``rc_snap_tol > 0`` we snap ``|rc| <= rc_snap_tol`` to 0 **only** where the
+    binding bound is infinite, recovering the KKT value the residual masks. This
+    is rigorous iff ``rc_snap_tol`` dominates the solver's dual-infeasibility
+    residual: tie it to POUNCE's reported ``final_unscaled_dual_inf``
+    (pounce#174) for a certificate; a fixed tol is a well-motivated heuristic
+    (same epistemic class as the float margin above) until that lands. A genuine
+    nonzero reduced cost on an infinite-bound column exceeds the tol, is NOT
+    snapped, and correctly yields ``None`` -- so the tol also guards against
+    masking real unboundedness.
     """
     import scipy.sparse as sp
 
@@ -103,6 +121,16 @@ def _ns_safe_lp_lower_bound(c, dual_values, A_ub, b_ub, lo, hi):
     contrib = np.zeros_like(rc)
     pos = rc > 0.0
     neg = rc < 0.0
+    if rc_snap_tol > 0.0:
+        # Snap a near-zero reduced cost to 0 only where the binding bound is
+        # infinite (a finite-bound column never traps), recovering the KKT value
+        # an interior-point residual masks. See the docstring for the rigor
+        # argument and the pounce#174 dependency.
+        snap = (pos & (rc <= rc_snap_tol) & ~np.isfinite(lo)) | (
+            neg & (-rc <= rc_snap_tol) & ~np.isfinite(hi)
+        )
+        pos = pos & ~snap
+        neg = neg & ~snap
     contrib[pos] = rc[pos] * lo[pos]
     contrib[neg] = rc[neg] * hi[neg]
     g = const + float(contrib.sum())
