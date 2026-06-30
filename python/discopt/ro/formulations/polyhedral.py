@@ -239,21 +239,25 @@ def _eval_constant_expr(expr) -> float:
 
 
 def _support_function_lp(coeff: np.ndarray, A: np.ndarray, b: np.ndarray, maximize: bool) -> float:
-    """Compute max (or min) coeff^T xi subject to A*xi <= b via LP."""
+    """Compute max (or min) coeff^T xi subject to A*xi <= b via the POUNCE LP.
+
+    Pure-Rust (issue #356 — no SciPy/HiGHS). POUNCE is an interior-point method,
+    so a small magnitude-scaled margin is applied in the *conservative* direction
+    (larger support on a max, smaller on a min) to keep the robust-optimization
+    constraint it feeds an outer (never optimistic) approximation.
+    """
     try:
-        from scipy.optimize import linprog
+        from discopt.solvers import SolveStatus
+        from discopt.solvers.lp_pounce import solve_lp
 
         k = len(coeff)
         c_obj = -coeff if maximize else coeff
-        res = linprog(
-            c_obj,
-            A_ub=A,
-            b_ub=b,
-            bounds=[(None, None)] * k,
-            method="highs",
-        )
-        if res.success:
-            return float(-res.fun if maximize else res.fun)
+        # Free decision variables (the uncertainty ξ), bounded only by A ξ <= b.
+        res = solve_lp(c_obj, A_ub=A, b_ub=b, bounds=[(-np.inf, np.inf)] * k)
+        if res.status == SolveStatus.OPTIMAL and res.objective is not None:
+            val = float(-res.objective if maximize else res.objective)
+            margin = 1e-7 * (1.0 + abs(val))
+            return val + margin if maximize else val - margin
     except ImportError:
         pass
     # Conservative fallback: use component-wise bounds.

@@ -42,6 +42,11 @@ from discopt.modeling.core import (
     Variable,
 )
 
+# Relative margin widening the POUNCE-IPM affine-range enclosure so it stays a
+# sound outer bound despite the interior-point optimum's small tolerance (#356).
+_LP_ENCLOSURE_MARGIN = 1e-7
+
+
 # ──────────────────────────────────────────────────────────────────────
 # Affine coefficient extraction
 # ──────────────────────────────────────────────────────────────────────
@@ -205,13 +210,11 @@ class LinearContext:
         if self.A_ub.size == 0 and self.A_eq.size == 0:
             return lo_box, hi_box
 
-        from scipy.optimize import linprog
+        from discopt.solvers import SolveStatus
+        from discopt.solvers.lp_pounce import solve_lp
 
-        # Replace ±inf in variable bounds with None for linprog's API.
-        bounds = [
-            (None if not np.isfinite(lo) else float(lo), None if not np.isfinite(hi) else float(hi))
-            for lo, hi in zip(self.lb, self.ub)
-        ]
+        # ``bounds`` as (lo, hi) tuples; POUNCE maps ±inf via its own sentinel.
+        bounds = [(float(lo), float(hi)) for lo, hi in zip(self.lb, self.ub)]
 
         A_ub = self.A_ub if self.A_ub.size else None
         b_ub = self.b_ub if self.b_ub.size else None
@@ -219,30 +222,24 @@ class LinearContext:
         b_eq = self.b_eq if self.b_eq.size else None
 
         try:
-            lo_res = linprog(
-                coeffs,
-                A_ub=A_ub,
-                b_ub=b_ub,
-                A_eq=A_eq,
-                b_eq=b_eq,
-                bounds=bounds,
-                method="highs",
-            )
-            hi_res = linprog(
-                -coeffs,
-                A_ub=A_ub,
-                b_ub=b_ub,
-                A_eq=A_eq,
-                b_eq=b_eq,
-                bounds=bounds,
-                method="highs",
-            )
-        except (ValueError, RuntimeError):
+            lo_res = solve_lp(coeffs, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds)
+            hi_res = solve_lp(-coeffs, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq, bounds=bounds)
+        except (ValueError, RuntimeError, ImportError):
             return lo_box, hi_box
 
-        lo = float(lo_res.fun) + const if lo_res.success else lo_box
-        hi = -float(hi_res.fun) + const if hi_res.success else hi_box
-        # Intersect with the box-only enclosure; linprog errors only widen.
+        # POUNCE is an interior-point method, so the reported optimum carries a
+        # small tolerance; widen each side by a magnitude-scaled margin so the
+        # range stays a *sound* enclosure (lo ≤ true min, hi ≥ true max) rather
+        # than risk an over-tight one that would misclassify convexity (#356).
+        lo = lo_box
+        if lo_res.status == SolveStatus.OPTIMAL and lo_res.objective is not None:
+            f = float(lo_res.objective)
+            lo = f - _LP_ENCLOSURE_MARGIN * (1.0 + abs(f)) + const
+        hi = hi_box
+        if hi_res.status == SolveStatus.OPTIMAL and hi_res.objective is not None:
+            f = -float(hi_res.objective)
+            hi = f + _LP_ENCLOSURE_MARGIN * (1.0 + abs(f)) + const
+        # Intersect with the box-only enclosure; LP errors / margins only widen.
         return max(lo, lo_box), min(hi, hi_box)
 
 
