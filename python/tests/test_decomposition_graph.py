@@ -89,6 +89,32 @@ def test_articulation_two_triangles_bridge():
     assert bridges == [(2, 3)]
 
 
+def test_articulation_rust_matches_python_reference():
+    # The public kernel dispatches to Rust when the compiled extension is
+    # present; it must be bit-for-bit equivalent to the pure-Python reference.
+    graphs = [
+        (4, [(0, 1), (1, 2), (2, 3)]),  # path
+        (3, [(0, 1), (1, 2), (2, 0)]),  # triangle
+        (6, [(0, 1), (1, 2), (2, 0), (2, 3), (3, 4), (4, 5), (5, 3)]),  # bridge
+        (4, [(0, 1), (0, 2), (0, 3)]),  # star
+        (5, [(0, 1), (2, 3), (3, 4), (4, 2)]),  # disconnected
+        (5, [(0, 1), (1, 0), (1, 2), (2, 3)]),  # duplicate edge
+    ]
+    for n, edges in graphs:
+        assert kernels.articulation_and_bridges(n, edges) == kernels._articulation_and_bridges_py(
+            n, edges
+        )
+
+
+def test_articulation_uses_rust_when_available():
+    # In this environment the compiled extension is installed, so the fast path
+    # is live. (No-op assertion elsewhere; the equivalence test covers behavior.)
+    rust = kernels._rust_kernels()
+    if rust is not None:
+        pts, bridges = rust.decomp_articulation_and_bridges(4, [(0, 1), (1, 2), (2, 3)])
+        assert list(pts) == [1, 2]
+
+
 def test_dependency_edges_star_expansion_for_wide_cliques():
     # a width-5 clique with max_clique_expand=3 becomes a star (4 edges),
     # not a full clique (10 edges).

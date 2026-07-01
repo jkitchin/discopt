@@ -127,16 +127,49 @@ def dependency_edges(
     return edges
 
 
+def _rust_kernels():
+    """The compiled Rust kernels module, or ``None`` if the extension is absent.
+
+    Probed once. The Python reference kernels are the fallback and the
+    correctness oracle, so the graph layer works with or without the extension.
+    """
+    global _RUST
+    if _RUST is _UNSET:
+        try:
+            import discopt._rust as _r
+
+            _RUST = _r if hasattr(_r, "decomp_articulation_and_bridges") else None
+        except Exception:
+            _RUST = None
+    return _RUST
+
+
+_UNSET = object()
+_RUST = _UNSET
+
+
 def articulation_and_bridges(
     n: int, edges: list[tuple[int, int]]
 ) -> tuple[list[int], list[tuple[int, int]]]:
     """Articulation points and bridges of an undirected simple graph.
 
-    Mirrors ``crates/discopt-core/src/decomp/mincut.rs``. Input edges are
-    de-duplicated into a simple graph first. Returns
-    ``(articulation_points, bridges)`` where bridges are ``(min, max)`` pairs.
-    Iterative DFS (safe for deep graphs), ``O(n + E)``.
+    Dispatches to the Rust kernel (``crates/discopt-core/src/decomp/mincut.rs``)
+    when the compiled extension is available, and to the pure-Python reference
+    otherwise; both are bit-for-bit equivalent (articulation points ascending,
+    bridges sorted ``(min, max)``). Input edges are de-duplicated into a simple
+    graph first. Iterative DFS (safe for deep graphs), ``O(n + E)``.
     """
+    rust = _rust_kernels()
+    if rust is not None:
+        pts, bridges = rust.decomp_articulation_and_bridges(n, [(int(a), int(b)) for a, b in edges])
+        return [int(p) for p in pts], sorted((int(a), int(b)) for a, b in bridges)
+    return _articulation_and_bridges_py(n, edges)
+
+
+def _articulation_and_bridges_py(
+    n: int, edges: list[tuple[int, int]]
+) -> tuple[list[int], list[tuple[int, int]]]:
+    """Pure-Python reference for :func:`articulation_and_bridges` (and its oracle)."""
     # Build a simple undirected adjacency.
     adj: list[list[int]] = [[] for _ in range(n)]
     seen: set[tuple[int, int]] = set()
