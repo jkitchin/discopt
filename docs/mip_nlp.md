@@ -182,6 +182,16 @@ limit, and `"force_optimal"` leaves the master uncapped. Unsupported backends do
 not receive silent no-op parameters; the trace records degraded features under
 `master_controls` and `summary["unsupported_backend_features"]`.
 
+When `master_repair=True`, an infeasible SHOT-profile master triggers one native
+repair retry with objective-cutoff and solution-limit controls reset and shared
+master cut slacks enabled. The retry outcome is recorded in each iteration's
+`repair_actions`; repeated repaired integer assignments are reported as repair
+loops rather than cycled indefinitely. With `reduction_cuts=True`, nonconvex
+heuristic runs with a known incumbent can add a strict linear objective cutoff
+row when the master objective row is exact. These reduction cuts are traced as
+local, non-global cuts, so reported bounds remain heuristic unless a separate
+certified bounding path is active.
+
 `fixed_nlp_strategy="solution_pool"` or an explicit `solution_pool_capacity`
 uses the Gurobi solution-pool candidate ingestion path when
 `milp_solver="gurobi"`. Fixed-NLP candidates are ordered deterministically from
@@ -192,9 +202,9 @@ status, objective, warm-start source, and whether it improved the incumbent.
 Other backends keep the single incumbent candidate and record the degradation in
 the trace.
 
-The remaining reformulation controls are validated and traced under the SHOT
-profile so follow-up SHOT parity PRs can attach behavior without changing the
-public option names.
+The remaining reformulation and convex-bounding controls are validated and
+traced under the SHOT profile so follow-up SHOT parity PRs can attach behavior
+without changing the public option names.
 
 Top-level aliases override duplicate entries in `mip_nlp_options`:
 

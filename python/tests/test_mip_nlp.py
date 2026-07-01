@@ -560,6 +560,244 @@ def test_mip_nlp_shot_objective_cutoff_uses_master_objective_units(monkeypatch):
     assert result.bound == pytest.approx(-99.0)
 
 
+def test_mip_nlp_shot_master_repair_resets_controls_and_continues(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers import MILPResult, SolveStatus
+
+    master_calls = []
+
+    def fake_relaxation(*args, **kwargs):
+        del args, kwargs
+        return np.array([0.0], dtype=float), 0.0
+
+    def fake_master(*args, **kwargs):
+        del args
+        master_calls.append(kwargs)
+        if len(master_calls) == 1:
+            return MILPResult(status=SolveStatus.INFEASIBLE, node_count=2)
+        return MILPResult(
+            status=SolveStatus.OPTIMAL,
+            x=np.array([0.0], dtype=float),
+            objective=0.0,
+            bound=0.0,
+            node_count=3,
+        )
+
+    monkeypatch.setattr(oa_module, "_solve_nlp_relaxation", fake_relaxation)
+    monkeypatch.setattr(oa_module, "_solve_master_milp", fake_master)
+    monkeypatch.setattr(
+        oa_module,
+        "_solve_fixed_nlp_subproblem_attempt",
+        lambda *args, **kwargs: oa_module._NLPAttempt(
+            x=np.array([0.0], dtype=float),
+            objective=0.0,
+            multipliers=None,
+            status=SolveStatus.OPTIMAL,
+        ),
+    )
+    monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+
+    result = oa_module.solve_oa(
+        _binary_model("shot_master_repair_success"),
+        init_strategy="rNLP",
+        max_iterations=1,
+        milp_solver="gurobi",
+        mip_nlp_profile="shot",
+        mip_nlp_shot_config=oa_module.MIPNLPShotConfig(
+            master_repair=True,
+            relaxation_phase="off",
+        ),
+    )
+
+    assert result.status == "optimal"
+    assert master_calls[0]["objective_cutoff"] is not None
+    assert master_calls[0]["mip_solution_limit"] == 1
+    assert master_calls[1]["objective_cutoff"] is None
+    assert master_calls[1]["mip_solution_limit"] is None
+    assert master_calls[1]["add_slack"] is True
+
+    repair = result.mip_nlp_trace["iterations"][0]["repair_actions"][0]
+    assert repair["status"] == "repaired"
+    assert repair["reset_objective_cutoff"] is True
+    assert repair["reset_mip_solution_limit"] is True
+    assert repair["master_status"] == "optimal"
+    assert result.mip_nlp_trace["summary"]["master_repair_success_count"] == 1
+
+
+def test_mip_nlp_shot_master_repair_failure_records_diagnostic(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers import MILPResult, SolveStatus
+
+    def fake_master(*args, **kwargs):
+        del args, kwargs
+        return MILPResult(status=SolveStatus.INFEASIBLE, node_count=4)
+
+    monkeypatch.setattr(
+        oa_module,
+        "_solve_nlp_relaxation",
+        lambda *args, **kwargs: (None, None),
+    )
+    monkeypatch.setattr(oa_module, "_solve_master_milp", fake_master)
+    monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+
+    result = oa_module.solve_oa(
+        _binary_model("shot_master_repair_failure"),
+        init_strategy="rNLP",
+        max_iterations=1,
+        milp_solver="gurobi",
+        mip_nlp_profile="shot",
+        mip_nlp_shot_config=oa_module.MIPNLPShotConfig(
+            master_repair=True,
+            relaxation_phase="off",
+        ),
+    )
+
+    assert result.status == "infeasible"
+    assert result.mip_nlp_trace["termination_reason"] == "master_infeasible_unrepaired"
+    repair = result.mip_nlp_trace["iterations"][0]["repair_actions"][0]
+    assert repair["status"] == "failed"
+    assert repair["reason"] == "master_status=infeasible"
+    assert repair["reset_mip_solution_limit"] is True
+    assert result.mip_nlp_trace["summary"]["master_repair_failure_count"] == 1
+
+
+def test_mip_nlp_shot_master_repair_loop_is_detected(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers import MILPResult, SolveStatus
+
+    master_calls = []
+
+    def fake_master(*args, **kwargs):
+        del args
+        master_calls.append(kwargs)
+        if kwargs["add_slack"]:
+            return MILPResult(
+                status=SolveStatus.OPTIMAL,
+                x=np.array([0.0], dtype=float),
+                objective=0.0,
+                bound=None,
+            )
+        return MILPResult(status=SolveStatus.INFEASIBLE)
+
+    monkeypatch.setattr(
+        oa_module,
+        "_solve_nlp_relaxation",
+        lambda *args, **kwargs: (None, None),
+    )
+    monkeypatch.setattr(oa_module, "_solve_master_milp", fake_master)
+    monkeypatch.setattr(
+        oa_module,
+        "_solve_fixed_nlp_subproblem_attempt",
+        lambda *args, **kwargs: oa_module._NLPAttempt(
+            x=None,
+            objective=None,
+            multipliers=None,
+            status=SolveStatus.INFEASIBLE,
+        ),
+    )
+    monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+    monkeypatch.setattr(oa_module, "_solve_feasibility_subproblem", lambda *args, **kwargs: None)
+
+    result = oa_module.solve_oa(
+        _binary_model("shot_master_repair_loop"),
+        init_strategy="rNLP",
+        max_iterations=2,
+        milp_solver="gurobi",
+        mip_nlp_profile="shot",
+        mip_nlp_shot_config=oa_module.MIPNLPShotConfig(
+            master_repair=True,
+            relaxation_phase="off",
+        ),
+    )
+
+    assert len(master_calls) == 4
+    assert result.mip_nlp_trace["termination_reason"] == "master_repair_loop"
+    repair = result.mip_nlp_trace["iterations"][1]["repair_actions"][0]
+    assert repair["status"] == "loop_detected"
+    assert repair["reason"] == "repaired_integer_assignment_repeated"
+    assert result.mip_nlp_trace["summary"]["master_repair_loop_count"] == 1
+
+
+def test_mip_nlp_shot_reduction_cut_is_local_only_for_nonconvex_heuristic(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers import MILPResult, SolveStatus
+
+    captured_rows = []
+    captured_rhs = []
+
+    def fake_master(*args, **kwargs):
+        del kwargs
+        captured_rows.extend(np.asarray(row, dtype=float).copy() for row in args[3])
+        captured_rhs.extend(float(rhs) for rhs in args[4])
+        return MILPResult(status=SolveStatus.INFEASIBLE)
+
+    monkeypatch.setattr(
+        oa_module,
+        "_solve_nlp_relaxation",
+        lambda *args, **kwargs: (np.array([0.0], dtype=float), 0.0),
+    )
+    monkeypatch.setattr(oa_module, "_solve_master_milp", fake_master)
+    monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+
+    result = oa_module.solve_oa(
+        _binary_model("shot_reduction_cut_local_only"),
+        init_strategy="rNLP",
+        max_iterations=1,
+        heuristic_nonconvex=True,
+        mip_nlp_profile="shot",
+        mip_nlp_shot_config=oa_module.MIPNLPShotConfig(
+            reduction_cuts=True,
+            relaxation_phase="off",
+        ),
+    )
+
+    assert len(captured_rows) == 1
+    np.testing.assert_allclose(captured_rows[0], np.array([1.0]))
+    assert captured_rhs[0] < 0.0
+
+    event = result.mip_nlp_trace["iterations"][0]["reduction_cuts"][0]
+    assert event["status"] == "added"
+    assert event["global_valid"] is False
+    assert result.mip_nlp_trace["summary"]["cut_source_counts"]["reduction"] == 1
+    assert result.mip_nlp_trace["summary"]["local_cut_count"] == 1
+    assert result.mip_nlp_trace["gap_certified"] is False
+    assert result.mip_nlp_trace["bound_validity"] == "heuristic"
+
+
+@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
+def test_mip_nlp_shot_reduction_cut_infeasible_master_repairs_integration():
+    import discopt.solvers.oa as oa_module
+
+    m = dm.Model("shot_reduction_cut_repair_integration")
+    x = m.binary("x")
+    m.subject_to(x >= 1.0)
+    m.minimize(1000.0 * x)
+
+    result = oa_module.solve_oa(
+        m,
+        init_strategy="initial_binary",
+        initial_point=np.array([1.0], dtype=float),
+        max_iterations=1,
+        heuristic_nonconvex=True,
+        milp_solver="highs",
+        mip_nlp_profile="shot",
+        mip_nlp_shot_config=oa_module.MIPNLPShotConfig(
+            master_repair=True,
+            reduction_cuts=True,
+            relaxation_phase="off",
+            mip_solution_limit_strategy="none",
+        ),
+    )
+
+    assert result.status == "feasible"
+    iteration = result.mip_nlp_trace["iterations"][0]
+    assert iteration["reduction_cuts"][0]["status"] == "added"
+    repair = iteration["repair_actions"][0]
+    assert repair["status"] == "repaired"
+    assert repair["dropped_reduction_cuts"] == 1
+    assert result.mip_nlp_trace["termination_reason"] != "master_infeasible"
+
+
 def test_mip_nlp_shot_master_controls_trace_unsupported_backend(monkeypatch):
     import discopt.solvers.oa as oa_module
     from discopt.solvers import MILPResult, SolveStatus
