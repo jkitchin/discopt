@@ -4447,25 +4447,62 @@ def _collect_univariate_square_relaxations(
     all_bounds: list[tuple[float, float]],
     start_col: int,
 ) -> tuple[list[UnivariateSquareRelaxation], dict[tuple[int, int], int], list[tuple[float, float]]]:
-    """Collect squares of lifted trig calls and assign auxiliary columns."""
+    """Collect squares of lifted univariate calls and assign auxiliary columns.
+
+    Matches ``f(affine)**2`` for *any* univariate ``f`` already lifted into
+    ``univariate_var_map`` — ``log``, ``exp``, ``sqrt`` and the inverse-trig calls
+    as well as the ``sin``/``cos``/``tan`` this collector originally handled. The
+    square is bounded by the generic convex tangent/secant envelope emitted for
+    every ``UnivariateSquareRelaxation`` (``w = base**2`` over ``[base_lb,
+    base_ub]``), which is function-agnostic and sound for any lifted base; only
+    trig calls additionally get the tighter finite-domain / piecewise refinements
+    downstream. Without this, a ``log(.)**2`` (or ``exp(.)**2``) objective — e.g.
+    nvs09's ``Σ log(x-2)**2 + log(10-x)**2`` — left ``(base_col, 2)`` out of the
+    monomial map, so the whole objective failed to linearize and AMP fell back to
+    a feasibility objective, producing no lower bound (issue #369).
+    """
     relaxations: list[UnivariateSquareRelaxation] = []
     var_map: dict[tuple[int, int], int] = {}
     bounds: list[tuple[float, float]] = []
     col_idx = start_col
 
-    def maybe_add(expr: Expression) -> None:
-        nonlocal col_idx
-        if not (
-            isinstance(expr, BinaryOp)
-            and expr.op == "**"
+    def _square_base_col(expr: Expression) -> Optional[int]:
+        """Lifted-univariate base column if *expr* is a square of a lifted call.
+
+        Recognizes both the authored ``f(affine)**2`` and the distributed product
+        ``f(affine)*f(affine)`` — ``distribute_products`` rewrites ``f**2`` into
+        ``f*f``, which is the form the objective arrives in whenever a sibling term
+        triggers ``factorable_reform`` (nvs09's ``-(Πx)**0.2`` does), so matching
+        only the power form would miss ``log(.)**2`` there. Any univariate call
+        already lifted into ``univariate_var_map`` (trig, ``log``, ``exp``,
+        ``sqrt``, inverse-trig, ...) is eligible; an unlifted call has no
+        ``base_col`` and is skipped, so the generic square envelope only ever fires
+        over a base with a valid interval enclosure.
+        """
+        if not isinstance(expr, BinaryOp):
+            return None
+        if (
+            expr.op == "**"
             and isinstance(expr.left, FunctionCall)
-            and expr.left.func_name in {"sin", "cos", "tan"}
             and isinstance(expr.right, Constant)
             and float(expr.right.value) == 2.0
         ):
-            return
+            return univariate_var_map.get(id(expr.left))
+        if (
+            expr.op == "*"
+            and isinstance(expr.left, FunctionCall)
+            and isinstance(expr.right, FunctionCall)
+        ):
+            left_col = univariate_var_map.get(id(expr.left))
+            # Both factors must lift to the *same* aux column — a genuine square,
+            # not a bilinear ``log(a)*log(b)`` of two distinct univariate auxes.
+            if left_col is not None and univariate_var_map.get(id(expr.right)) == left_col:
+                return left_col
+        return None
 
-        base_col = univariate_var_map.get(id(expr.left))
+    def maybe_add(expr: Expression) -> None:
+        nonlocal col_idx
+        base_col = _square_base_col(expr)
         if base_col is None:
             return
         key = (base_col, 2)
