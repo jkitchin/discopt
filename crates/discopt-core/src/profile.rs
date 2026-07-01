@@ -80,12 +80,22 @@ counters!(
     BoundFlips,
     BlandActivations,
     Refactorizations,
-    // Numeric-focus iterative-refinement recovery (discopt#364): a drifted
-    // "Optimal" that failed the feasibility audit triggered a fresh refined
-    // refactorization (Attempts); of those, how many the refined point rescued
-    // back to a sound Optimal (Rescues). Attempts − Rescues stayed Numerical.
-    RefinedRecoveryAttempts,
-    RefinedRecoveryRescues,
+    // Numeric-focus iterative-refinement recovery (discopt#364), split by path so
+    // the two very different triggers can be told apart when measuring.
+    //
+    // Primal (audit-failure driven): a drifted "Optimal" failed the feasibility
+    // audit and triggered a fresh refined refactorization (Attempts); Rescues =
+    // how many the refined point pulled back to a sound Optimal (the rest stayed
+    // Numerical and fell back to cold, as before).
+    RefinedRecoveryAttemptsPrimal,
+    RefinedRecoveryRescuesPrimal,
+    // Dual (growth-gated): the working factor's growth signal flagged possible
+    // digit loss at the optimality gate, triggering a fresh refined recompute
+    // (Attempts); Rescues = how many revealed a hidden infeasibility and so
+    // *prevented* a wrong "Optimal" (returning None → cold solve). A non-rescue
+    // Attempt still certified Optimal, but with the sharper x_B values.
+    RefinedRecoveryAttemptsDual,
+    RefinedRecoveryRescuesDual,
 );
 
 #[inline(always)]

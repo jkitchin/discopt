@@ -387,7 +387,7 @@ impl<'a> PreparedDual<'a> {
                                     .is_some_and(|g| g > GROWTH_REFINE_TRIGGER)
                                 {
                                     crate::profile::incr(
-                                        crate::profile::Ctr::RefinedRecoveryAttempts,
+                                        crate::profile::Ctr::RefinedRecoveryAttemptsDual,
                                     );
                                     match refined_basic_values(sp, b, n, m, l, u, &basis, &stat) {
                                         Some(xb_r) => {
@@ -395,7 +395,7 @@ impl<'a> PreparedDual<'a> {
                                                 .is_some()
                                             {
                                                 crate::profile::incr(
-                                                    crate::profile::Ctr::RefinedRecoveryRescues,
+                                                    crate::profile::Ctr::RefinedRecoveryRescuesDual,
                                                 );
                                                 return None; // sharper x_B infeasible → cold fallback
                                             }

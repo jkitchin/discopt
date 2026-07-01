@@ -80,7 +80,29 @@ pub fn solve_lp_cols(
 /// small absolute/relative tolerance. Used as the final feasibility audit before
 /// certifying an `Optimal` solve so incremental `x_B` drift (Harris bound
 /// excursions, deferred refactorization) cannot return a wrong optimum.
-fn solution_within_tolerance(
+/// Why the final feasibility audit rejected a point — the distinction that
+/// decides whether iterative refinement can help (discopt#364).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Feasibility {
+    /// Within tolerance on both bounds and `Ax=b`.
+    Ok,
+    /// A variable sits outside `[l, u]` beyond tolerance. On the degenerate lifted
+    /// relaxations this is typically a Harris ratio-test bound *excursion* (the
+    /// `delta_tol` δ-expansion letting a basic var settle just past a bound), not a
+    /// solve-accuracy problem — so recomputing `x_B` more accurately does **not**
+    /// fix it. Refinement is skipped for this kind.
+    Bounds,
+    /// The `Ax=b` row residual exceeds tolerance — a genuine linear-solve
+    /// inaccuracy (accumulated Forrest–Tomlin update error / ill-conditioning),
+    /// which a fresh refinement-polished factorization *can* recover.
+    Rows,
+}
+
+/// Classify a candidate point against its bounds and `Ax=b`. Bounds are checked
+/// first, so a point violating *both* reports [`Feasibility::Bounds`] — correct
+/// for the recovery decision, since refinement cannot repair a bound excursion
+/// even when it repairs the residual.
+fn audit_feasibility(
     cols: &SparseCols,
     m: usize,
     n: usize,
@@ -88,7 +110,7 @@ fn solution_within_tolerance(
     l: &[f64],
     u: &[f64],
     x: &[f64],
-) -> bool {
+) -> Feasibility {
     const FEAS: f64 = 1e-6;
     for j in 0..n {
         // Relative bound tolerance: a variable whose bound (and hence value) is
@@ -99,7 +121,7 @@ fn solution_within_tolerance(
         let lo_tol = FEAS * (1.0 + l[j].abs().min(INF));
         let hi_tol = FEAS * (1.0 + u[j].abs().min(INF));
         if x[j] < l[j] - lo_tol || x[j] > u[j] + hi_tol {
-            return false;
+            return Feasibility::Bounds;
         }
     }
     // Row activity `A x` accumulated over the sparse columns (O(nnz)), not a dense
@@ -117,10 +139,25 @@ fn solution_within_tolerance(
     }
     for i in 0..m {
         if (ax[i] - b[i]).abs() > FEAS * (1.0 + b[i].abs()) {
-            return false;
+            return Feasibility::Rows;
         }
     }
-    true
+    Feasibility::Ok
+}
+
+/// Bool convenience over [`audit_feasibility`] used by the unit tests (production
+/// code switches on the [`Feasibility`] reason to decide whether to refine).
+#[cfg(test)]
+fn solution_within_tolerance(
+    cols: &SparseCols,
+    m: usize,
+    n: usize,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+    x: &[f64],
+) -> bool {
+    audit_feasibility(cols, m, n, b, l, u, x) == Feasibility::Ok
 }
 
 struct Simplex<'a> {
@@ -740,32 +777,49 @@ impl<'a> Simplex<'a> {
         // Final feasibility audit before certifying Optimal. x_B is maintained
         // incrementally between the ~48-pivot refactorizations and the Harris
         // ratio test permits small bound excursions, so the returned point can
-        // drift. Verify it actually satisfies its bounds and Ax=b; on violation,
-        // first attempt an in-engine refined recovery (a fresh, refinement-polished
-        // refactorization of the same basis — no accumulated update error), and
-        // only downgrade to Numerical if that still fails the audit. The re-audit
-        // is the same soundness gate, so recovery can only rescue a solve that
-        // would otherwise be declared Numerical — never certify a wrong "Optimal".
-        // A genuine Numerical then flows to the caller as before (the warm path's
-        // cold fallback, or the MILP driver decertifying the gap and branching).
+        // drift. Verify it actually satisfies its bounds and Ax=b.
+        //
+        // On a *row-residual* failure (Ax=b drift — accumulated update error /
+        // ill-conditioning), attempt an in-engine refined recovery: recompute x_B
+        // from a fresh, refinement-polished factorization of the same basis and
+        // re-audit; only downgrade to Numerical if it still fails. The re-audit is
+        // the same soundness gate, so recovery can only rescue a solve that would
+        // otherwise be Numerical — never certify a wrong "Optimal".
+        //
+        // A *bounds* excursion is NOT retried: it is a Harris ratio-test artefact,
+        // not a solve-accuracy problem, so a sharper x_B cannot pull the variable
+        // back inside its bound (measured: on the lifted corpus every audit failure
+        // was a bounds excursion, so refining them was pure wasted work — discopt#364).
+        // Either way a genuine Numerical flows to the caller as before (the warm
+        // path's cold fallback, or the MILP driver decertifying the gap and branching).
         let audit = |slf: &Simplex, x: &[f64]| {
-            solution_within_tolerance(&slf.cols, slf.m, slf.n, slf.b, &slf.lb, &slf.ub, x)
+            audit_feasibility(&slf.cols, slf.m, slf.n, slf.b, &slf.lb, &slf.ub, x)
         };
-        let status = if status == LpStatus::Optimal && !audit(&self, &x) {
-            crate::profile::incr(crate::profile::Ctr::RefinedRecoveryAttempts);
-            match self.refined_basic_values(art_sign) {
-                Some(xb_r) => {
-                    let x_r = self.assemble_x(&xb_r);
-                    if audit(&self, &x_r) {
-                        crate::profile::incr(crate::profile::Ctr::RefinedRecoveryRescues);
-                        x = x_r;
-                        obj = (0..self.n).map(|j| self.c[j] * x[j]).sum();
-                        LpStatus::Optimal
-                    } else {
-                        LpStatus::Numerical
+        let status = if status == LpStatus::Optimal {
+            match audit(&self, &x) {
+                Feasibility::Ok => LpStatus::Optimal,
+                // Bound excursion: refinement can't help — downgrade directly.
+                Feasibility::Bounds => LpStatus::Numerical,
+                // Row residual: the failure mode iterative refinement can recover.
+                Feasibility::Rows => {
+                    crate::profile::incr(crate::profile::Ctr::RefinedRecoveryAttemptsPrimal);
+                    match self.refined_basic_values(art_sign) {
+                        Some(xb_r) => {
+                            let x_r = self.assemble_x(&xb_r);
+                            if audit(&self, &x_r) == Feasibility::Ok {
+                                crate::profile::incr(
+                                    crate::profile::Ctr::RefinedRecoveryRescuesPrimal,
+                                );
+                                x = x_r;
+                                obj = (0..self.n).map(|j| self.c[j] * x[j]).sum();
+                                LpStatus::Optimal
+                            } else {
+                                LpStatus::Numerical
+                            }
+                        }
+                        None => LpStatus::Numerical,
                     }
                 }
-                None => LpStatus::Numerical,
             }
         } else {
             status
