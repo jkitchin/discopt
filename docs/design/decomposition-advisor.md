@@ -1601,16 +1601,16 @@ Phases 1–7 of §17 are implemented on the initial branch. The subsystem lives 
 
 **What was verified where.** Once `feral` was repinned to a crates.io release
 (main #375), `discopt-core` and the `_rust` extension build in the dev
-environment, so most of what was previously CI-only is now verified here. The one
-remaining gap is an end-to-end *solve*, which needs the POUNCE node-LP engine (a
-separate GitHub package the egress policy blocks):
+environment, and with `pip install pounce-solver` the full solver stack runs — so
+every surface, including an end-to-end decomposed *solve*, is now verified here:
 
 | Surface | Verified in the dev environment | Deferred to CI |
 |---|---|---|
 | Python advisor (graph/advisor/ir/parallel/learning) | ✅ full pytest + ruff + mypy (118 tests) | — |
 | Rust graph kernels (`decomp/`) | ✅ in-crate `cargo test -p discopt-core` (15 tests), plus `clippy` + `rustfmt`, edition 2021 / `#![deny(missing_docs)]` | — |
 | PyO3 FFI for the kernels (`decomp_bindings`) | ✅ built with maturin; callable from Python via `discopt._rust`, and the Python `articulation_and_bridges` fast path is asserted bit-for-bit equal to the pure-Python reference | — |
-| `DecomposedModel.solve()` dispatch | ✅ verified by monkeypatching the drivers (right driver, right `structure`, kwargs threaded) | end-to-end solve equivalence vs the monolith (base MILP solve needs POUNCE, unavailable here) |
+| `DecomposedModel.solve()` dispatch | ✅ verified by monkeypatching the drivers (right driver, right `structure`, kwargs threaded) | — |
+| End-to-end solve equivalence | ✅ `decompose().solve()` reproduces the monolithic optimum on a two-stage MILP (Benders and forced-`NONE`), guarded by `requires_pounce` (`test_decomposition_solve_equivalence.py`) | broader benchmark-suite equivalence sweep under `incorrect_count ≤ 0` |
 | Docs notebook | ✅ every code cell executed during authoring (pure analysis, no solve); citations resolve | `jupyter-book build` (executes all notebooks, needs the full stack) |
 
 **Correctness gate for the remainder.** Per §17, the correctness-critical
