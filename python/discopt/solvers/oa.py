@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, Optional
 import numpy as np
 
 from discopt.modeling.core import Constraint, Model, ObjectiveSense, SolveResult, VarType
+from discopt.solvers.mip_nlp_candidates import FixedNLPCandidate, FixedNLPCandidateManager
 from discopt.solvers.mip_nlp_options import (
     FP_OPTION_KEYS,
     GOA_AMP_ONLY_OPTION_KEYS,
@@ -938,6 +939,14 @@ def _maybe_return_nlp_attempt(attempt: _NLPAttempt, return_attempt: bool):
     return attempt.x, attempt.objective
 
 
+def _coerce_nlp_attempt(result) -> _NLPAttempt:
+    if isinstance(result, _NLPAttempt):
+        return result
+    if isinstance(result, tuple) and len(result) >= 2:
+        return _NLPAttempt(x=result[0], objective=result[1], multipliers=None)
+    raise TypeError(f"Expected _NLPAttempt or (x, objective), got {type(result).__name__}.")
+
+
 def _solve_nlp_relaxation(
     evaluator,
     lb,
@@ -972,6 +981,43 @@ def _solve_nlp_subproblem(
     proxy = _BoundsProxy(evaluator, sub_lb, sub_ub)
     attempt = _solve_nlp_attempt(proxy, sub_lb, sub_ub, nlp_solver, x0=initial_point)
     return _maybe_return_nlp_attempt(attempt, return_attempt)
+
+
+def _solve_fixed_nlp_subproblem_attempt(
+    evaluator,
+    lb,
+    ub,
+    int_indices,
+    x_master,
+    nlp_solver,
+    *,
+    initial_point=None,
+) -> _NLPAttempt:
+    """Call the fixed-NLP helper and retain status when the implementation supports it."""
+    try:
+        result = _solve_nlp_subproblem(
+            evaluator,
+            lb,
+            ub,
+            int_indices,
+            x_master,
+            nlp_solver,
+            initial_point=initial_point,
+            return_attempt=True,
+        )
+    except TypeError as exc:
+        if "return_attempt" not in str(exc):
+            raise
+        result = _solve_nlp_subproblem(
+            evaluator,
+            lb,
+            ub,
+            int_indices,
+            x_master,
+            nlp_solver,
+            initial_point=initial_point,
+        )
+    return _coerce_nlp_attempt(result)
 
 
 def _regularization_requires_derivatives(add_regularization: Optional[str]) -> bool:
@@ -3832,6 +3878,21 @@ def solve_oa(
             "interior_points_stored": 0,
             "node_count": 0,
         }
+    fixed_nlp_strategy = "always"
+    if mip_nlp_profile == "shot" and mip_nlp_shot_config is not None:
+        fixed_nlp_strategy = mip_nlp_shot_config.fixed_nlp_strategy
+    fixed_nlp_manager = FixedNLPCandidateManager(
+        n_vars=n_vars,
+        int_indices=decomp.int_indices,
+        lb=decomp.lb,
+        ub=decomp.ub,
+        strategy=fixed_nlp_strategy,
+        candidate_limit=num_solution_iteration,
+        deduplicate_used_assignments=(mip_nlp_profile == "shot"),
+    )
+    fixed_nlp_call_count = 0
+    fixed_nlp_call_source_counts: Counter[str] = Counter()
+    fixed_nlp_call_status_counts: Counter[str] = Counter()
 
     def _trace_value(value: Optional[float]) -> Optional[float]:
         if value is None:
@@ -3889,6 +3950,22 @@ def solve_oa(
             summary["mip_solution_limit"] = shot_solution_limit_state.as_trace_dict()
         if shot_unsupported_backend_features:
             summary["unsupported_backend_features"] = sorted(shot_unsupported_backend_features)
+        fixed_nlp_candidates_added = sum(fixed_nlp_manager.added_source_counts.values())
+        summary["fixed_nlp_candidate_count"] = int(fixed_nlp_candidates_added)
+        summary["fixed_nlp_candidate_source_counts"] = {
+            str(source): int(count)
+            for source, count in sorted(fixed_nlp_manager.added_source_counts.items())
+        }
+        summary["fixed_nlp_call_count"] = int(fixed_nlp_call_count)
+        summary["fixed_nlp_call_source_counts"] = {
+            str(source): int(count)
+            for source, count in sorted(fixed_nlp_call_source_counts.items())
+        }
+        summary["fixed_nlp_call_status_counts"] = {
+            str(status): int(count)
+            for status, count in sorted(fixed_nlp_call_status_counts.items())
+        }
+        summary["fixed_nlp_scheduler"] = fixed_nlp_manager.scheduler_trace()
         if interior_point_store is not None:
             interior_counts = Counter(record.source for record in interior_point_store.records)
             summary["interior_point_count"] = int(len(interior_point_store.records))
@@ -3925,6 +4002,46 @@ def solve_oa(
         if initial_poa_trace is not None:
             trace["initial_poa"] = dict(initial_poa_trace)
         return trace
+
+    def _fixed_nlp_status_name(attempt: _NLPAttempt) -> str:
+        status = attempt.status
+        if status is not None:
+            return _trace_status(status)
+        if attempt.x is not None:
+            return "feasible"
+        return "failed"
+
+    def _fixed_nlp_warm_start(
+        candidate: FixedNLPCandidate,
+        preferred_start: Optional[np.ndarray],
+    ) -> tuple[np.ndarray, str]:
+        if preferred_start is not None:
+            return np.asarray(preferred_start, dtype=np.float64), "regularized_master"
+        return candidate.point.copy(), candidate.source
+
+    def _record_fixed_nlp_trace(
+        iteration_record: dict[str, object],
+        candidate: FixedNLPCandidate,
+        *,
+        status: str,
+        objective: Optional[float],
+        incumbent_update: str,
+        warm_start_source: str,
+    ) -> None:
+        calls = iteration_record.get("fixed_nlp_calls")
+        if not isinstance(calls, list):
+            calls = []
+            iteration_record["fixed_nlp_calls"] = calls
+        trace = candidate.trace_dict()
+        trace.update(
+            {
+                "status": status,
+                "objective": _trace_value(objective),
+                "incumbent_update": incumbent_update,
+                "warm_start_source": warm_start_source,
+            }
+        )
+        calls.append(trace)
 
     def _record_interior_point(
         x: np.ndarray,
@@ -4115,6 +4232,13 @@ def solve_oa(
             )
             # Check if relaxation solution is already integer-feasible.
             _record_interior_point(x_relax, "nlp_relaxation", {"objective": float(obj_relax)})
+            if mip_nlp_profile == "shot":
+                fixed_nlp_manager.add(
+                    x_relax,
+                    source="lp_relaxation",
+                    objective=obj_relax,
+                    iteration=-1,
+                )
             is_int_feasible = all(
                 abs(x_relax[idx] - round(x_relax[idx])) < 1e-5 for idx in decomp.int_indices
             )
@@ -4339,6 +4463,12 @@ def solve_oa(
                                 "node_count": int(getattr(poa_result, "node_count", 0) or 0),
                             },
                         )
+                        fixed_nlp_manager.add(
+                            x_poa,
+                            source="lp_relaxation",
+                            objective=objective_bound,
+                            iteration=-1,
+                        )
                         interior_candidates = 1 if stored_poa_interior else 0
                         _add_oa_cuts(
                             evaluator,
@@ -4482,6 +4612,12 @@ def solve_oa(
                                 "iteration": int(iteration),
                                 "node_count": int(getattr(relax_result, "node_count", 0) or 0),
                             },
+                        )
+                        fixed_nlp_manager.add(
+                            x_relax_phase,
+                            source="lp_relaxation",
+                            objective=objective_bound,
+                            iteration=int(iteration),
                         )
                         _add_oa_cuts(
                             evaluator,
@@ -4795,20 +4931,50 @@ def solve_oa(
                     add_regularization,
                 )
 
-        master_candidates = _master_solution_candidates(
-            master_result,
-            n_vars,
-            solution_pool=solution_pool,
-            num_solution_iteration=num_solution_iteration,
+        if ecp_mode:
+            fixed_nlp_candidates = [
+                FixedNLPCandidate(
+                    point=point,
+                    source="mip_optimum" if idx == 0 else "solution_pool",
+                    objective=None,
+                    iteration=int(iteration),
+                    sequence=idx,
+                    integer_assignment=fixed_nlp_manager.assignment_key(point),
+                )
+                for idx, point in enumerate(
+                    _master_solution_candidates(
+                        master_result,
+                        n_vars,
+                        solution_pool=solution_pool,
+                        num_solution_iteration=num_solution_iteration,
+                    )
+                )
+            ]
+        else:
+            fixed_nlp_manager.add_master_result(
+                master_result,
+                iteration=int(iteration),
+                solution_pool=solution_pool,
+                limit=num_solution_iteration,
+            )
+            fixed_nlp_candidates = fixed_nlp_manager.take_ready(
+                iteration=int(iteration),
+                elapsed=time.perf_counter() - t_start,
+                has_solution_pool_candidate=bool(solution_pool),
+            )
+        processed_master_candidates = sum(
+            1 for cand in fixed_nlp_candidates if cand.source in {"mip_optimum", "solution_pool"}
         )
-        solution_pool_candidate_count += len(master_candidates)
+        solution_pool_candidate_count += processed_master_candidates
         incumbent_obj_before_iteration = incumbent_obj
         iteration_record: dict[str, object] = {
             "index": int(iteration),
             "master_status": _trace_status(master_result.status),
             "lb_before": lb_before,
             "ub_before": ub_before,
-            "solution_pool_candidates": int(len(master_candidates)),
+            "solution_pool_candidates": int(processed_master_candidates),
+            "fixed_nlp_candidates": int(len(fixed_nlp_candidates)),
+            "fixed_nlp_scheduler": fixed_nlp_manager.scheduler_trace(),
             "node_count": int(getattr(master_result, "node_count", 0) or 0),
             "repair_actions": [],
             "relaxation_phase": relaxation_phase_record,
@@ -4817,7 +4983,29 @@ def solve_oa(
         stop_after_master_pool = False
         pool_integer_assignments_seen: set[tuple[float, ...]] = set()
 
-        for candidate_index, x_master in enumerate(master_candidates):
+        if not ecp_mode and not fixed_nlp_candidates:
+            x_master = np.asarray(master_result.x, dtype=np.float64).reshape(-1)[:n_vars].copy()
+            n_violated = _add_ecp_cuts(
+                evaluator,
+                x_master,
+                n_vars,
+                decomp.constraint_senses,
+                oa_A_rows,
+                oa_b_rows,
+                decomp.obj_is_linear,
+                decomp.oa_constraint_mask,
+                decomp.oa_objective_is_convex,
+                equality_relaxation=equality_relaxation,
+                oa_cut_relaxable=oa_cut_relaxable,
+                cut_provenance=cut_provenance,
+            )
+            iteration_record["fixed_nlp_skipped"] = {
+                "reason": f"fixed_nlp_strategy={fixed_nlp_strategy}",
+                "ecp_cuts_added": int(n_violated),
+            }
+
+        for candidate_index, candidate in enumerate(fixed_nlp_candidates):
+            x_master = candidate.point
             elapsed = time.perf_counter() - t_start
             if elapsed >= time_limit:
                 logger.info("OA: Time limit reached during iteration %d", iteration)
@@ -4825,10 +5013,7 @@ def solve_oa(
                 stop_after_master_pool = True
                 break
 
-            int_assignment = tuple(
-                _round_integral_to_bounds(x_master[idx], decomp.lb[idx], decomp.ub[idx])
-                for idx in decomp.int_indices
-            )
+            int_assignment = candidate.integer_assignment
             if solution_pool:
                 if int_assignment in pool_integer_assignments_seen:
                     logger.info(
@@ -4939,36 +5124,31 @@ def solve_oa(
                 continue
 
             # c. Fix integers, solve NLP subproblem
-            nlp_attempt = None
-            if derivative_regularization:
-                nlp_subproblem_count += 1
-                nlp_attempt = _solve_nlp_subproblem(
-                    evaluator,
-                    decomp.lb,
-                    decomp.ub,
-                    decomp.int_indices,
-                    x_master,
-                    nlp_solver,
-                    initial_point=nlp_initial_point,
-                    return_attempt=True,
-                )
-                x_nlp, obj_nlp = nlp_attempt.x, nlp_attempt.objective
-            else:
-                nlp_subproblem_count += 1
-                x_nlp, obj_nlp = _solve_nlp_subproblem(
-                    evaluator,
-                    decomp.lb,
-                    decomp.ub,
-                    decomp.int_indices,
-                    x_master,
-                    nlp_solver,
-                    initial_point=nlp_initial_point,
-                )
+            warm_start, warm_start_source = _fixed_nlp_warm_start(candidate, nlp_initial_point)
+            nlp_subproblem_count += 1
+            fixed_nlp_call_count += 1
+            fixed_nlp_call_source_counts[candidate.source] += 1
+            nlp_attempt = _solve_fixed_nlp_subproblem_attempt(
+                evaluator,
+                decomp.lb,
+                decomp.ub,
+                decomp.int_indices,
+                x_master,
+                nlp_solver,
+                initial_point=warm_start,
+            )
+            x_nlp, obj_nlp = nlp_attempt.x, nlp_attempt.objective
+            nlp_status_name = _fixed_nlp_status_name(nlp_attempt)
+            fixed_nlp_call_status_counts[nlp_status_name] += 1
+            incumbent_update = "not_feasible"
 
             if x_nlp is not None:
-                if obj_nlp < UB:
-                    multipliers = nlp_attempt.multipliers if nlp_attempt is not None else None
+                if obj_nlp is not None and obj_nlp < UB:
+                    multipliers = nlp_attempt.multipliers
                     accept_incumbent(x_nlp, obj_nlp, multipliers)
+                    incumbent_update = "improved"
+                else:
+                    incumbent_update = "not_improved"
 
                 # Generate OA cuts at NLP solution
                 _add_oa_cuts(
@@ -5012,7 +5192,17 @@ def solve_oa(
                             cut_provenance=cut_provenance,
                         )
 
-                if add_no_good_cuts and not decomp.general_integer_indices:
+                safe_integer_cut_status = nlp_status_name in {
+                    "failed",
+                    "infeasible",
+                    "unbounded",
+                    "error",
+                }
+                if (
+                    safe_integer_cut_status
+                    and add_no_good_cuts
+                    and not decomp.general_integer_indices
+                ):
                     _add_no_good_cut(
                         x_master,
                         decomp.binary_indices,
@@ -5039,6 +5229,21 @@ def solve_oa(
                     oa_cut_relaxable=oa_cut_relaxable,
                     cut_provenance=cut_provenance,
                 )
+
+            fixed_nlp_manager.record_call_result(
+                candidate,
+                iteration=int(iteration),
+                elapsed=time.perf_counter() - t_start,
+                success=x_nlp is not None,
+            )
+            _record_fixed_nlp_trace(
+                iteration_record,
+                candidate,
+                status=nlp_status_name,
+                objective=obj_nlp,
+                incumbent_update=incumbent_update,
+                warm_start_source=warm_start_source,
+            )
 
             # d. Check convergence
             gap = _compute_gap(LB, UB)
