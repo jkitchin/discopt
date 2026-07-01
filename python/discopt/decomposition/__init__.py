@@ -56,6 +56,18 @@ from discopt.decomposition.lagrangian import (
 from discopt.decomposition.lagrangian import (
     solve_lagrangian as solve_lagrangian,
 )
+from discopt.decomposition.learning import (
+    InstanceBasedPolicy as InstanceBasedPolicy,
+)
+from discopt.decomposition.learning import (
+    RecordStore as RecordStore,
+)
+from discopt.decomposition.learning import (
+    SolveRecord as SolveRecord,
+)
+from discopt.decomposition.learning import (
+    record_outcome as record_outcome,
+)
 from discopt.decomposition.structure import (
     DecompositionStructure as DecompositionStructure,
 )
@@ -75,14 +87,18 @@ __all__ = [
     "DecompositionAdvisor",
     "DecompositionStructure",
     "Explanation",
+    "InstanceBasedPolicy",
     "LagrangianConfig",
     "MethodKind",
+    "RecordStore",
     "ScoreVector",
+    "SolveRecord",
     "Soundness",
     "StructureReport",
     "analyze_decomposition",
     "detect_decomposition",
     "flat_bounds",
+    "record_outcome",
     "restricted_bounds",
     "solve_benders",
     "solve_gbd",

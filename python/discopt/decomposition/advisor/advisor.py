@@ -92,6 +92,17 @@ class DecompositionAdvisor:
         """Return the resolved block/coupling partition (the existing contract)."""
         return detect_decomposition(self._model)
 
+    def features(self):
+        """Return the instance's learning feature vector (design §10.3).
+
+        A :class:`~discopt.decomposition.learning.record.InstanceFeatures`
+        derived from the structure report — the input to instance-based
+        recommendation and the telemetry store.
+        """
+        from discopt.decomposition.learning.features import extract_features
+
+        return extract_features(self.structure())
+
     def graph(self, kind: GraphKind | str = GraphKind.VARIABLE_CONSTRAINT) -> ModelGraph:
         """Return a Phase 1 :class:`ModelGraph` view of the requested kind."""
         if isinstance(kind, str):
