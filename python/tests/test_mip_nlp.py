@@ -1,3 +1,5 @@
+import logging
+
 import discopt.modeling as dm
 import numpy as np
 import pytest
@@ -2458,6 +2460,60 @@ def test_mip_nlp_shot_solution_pool_strategy_uses_candidate_pool(monkeypatch):
     assert [point.tolist() for point in nlp_master_points[1:]] == [[0.0], [1.0]]
     assert result.mip_nlp_trace["iterations"][0]["solution_pool_candidates"] == 2
     assert result.mip_nlp_trace["summary"]["solution_pool_candidates"] == 2
+
+
+def test_mip_nlp_shot_solution_pool_capacity_warns_on_unsupported_backend(
+    monkeypatch,
+    caplog,
+):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers import MILPResult, SolveStatus
+
+    master_calls = []
+
+    monkeypatch.setattr(
+        oa_module,
+        "_solve_nlp_relaxation",
+        lambda *args, **kwargs: (np.array([0.0]), 0.0),
+    )
+    monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        oa_module,
+        "_solve_nlp_subproblem",
+        lambda *args, **kwargs: (np.array([0.0]), 0.0),
+    )
+
+    def fake_solve_master_milp(*args, **kwargs):
+        master_calls.append(kwargs)
+        return MILPResult(
+            status=SolveStatus.OPTIMAL,
+            x=np.array([0.0]),
+            objective=0.0,
+            bound=0.0,
+            gap=0.0,
+        )
+
+    monkeypatch.setattr(oa_module, "_solve_master_milp", fake_solve_master_milp)
+
+    with caplog.at_level(logging.WARNING, logger="discopt.solvers.oa"):
+        result = oa_module.solve_oa(
+            _binary_model("shot_solution_pool_unsupported_backend"),
+            init_strategy="rNLP",
+            max_iterations=1,
+            gap_tolerance=0.0,
+            milp_solver="highs",
+            mip_nlp_profile="shot",
+            mip_nlp_shot_config=oa_module.MIPNLPShotConfig(
+                solution_pool_capacity=2,
+                relaxation_phase="off",
+                mip_solution_limit_strategy="none",
+            ),
+        )
+
+    assert master_calls[0]["solution_pool"] is False
+    assert master_calls[0]["num_solution_iteration"] == 2
+    assert "SHOT solution-pool request ignored" in caplog.text
+    assert "solution_pool" in result.mip_nlp_trace["summary"]["unsupported_backend_features"]
 
 
 def test_fixed_nlp_candidate_manager_orders_and_deduplicates_assignments():

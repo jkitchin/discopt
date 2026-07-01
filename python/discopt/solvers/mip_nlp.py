@@ -32,6 +32,7 @@ _OA_OPTION_KEYS = frozenset(
         "max_slack",
         "oa_penalty_factor",
         "add_no_good_cuts",
+        "integer_to_binary",
         "feasibility_norm",
         "add_regularization",
         "level_coef",
@@ -64,6 +65,7 @@ _LP_NLP_BB_OPTION_KEYS = frozenset(
         "max_slack",
         "oa_penalty_factor",
         "add_no_good_cuts",
+        "integer_to_binary",
         "feasibility_norm",
         "milp_solver",
     }

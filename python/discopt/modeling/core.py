@@ -2846,9 +2846,10 @@ class Model:
             as ``equality_relaxation``,
             ``ecp_mode``, ``feasibility_cuts``, ``heuristic_nonconvex``,
             ``add_slack``, ``max_slack``, ``oa_penalty_factor``,
-            ``add_no_good_cuts``, ``feasibility_norm``, ``add_regularization``,
-            ``level_coef``, ``stalling_limit``, ``cycling_check``,
-            ``solution_pool``, ``num_solution_iteration``, and ``init_strategy``
+            ``add_no_good_cuts``, ``integer_to_binary``, ``feasibility_norm``,
+            ``add_regularization``, ``level_coef``, ``stalling_limit``,
+            ``cycling_check``, ``solution_pool``, ``num_solution_iteration``,
+            and ``init_strategy``
             take precedence over duplicate keys in ``mip_nlp_options``.
             ``solution_pool`` currently requires ``milp_solver="gurobi"``.
             Experimental SHOT-parity controls are accepted only with

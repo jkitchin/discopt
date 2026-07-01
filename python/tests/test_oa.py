@@ -563,6 +563,99 @@ class TestOARobustnessOptions:
         assert oa_b_rows == []
         assert oa_cut_relaxable == []
 
+    def test_no_good_cut_uses_integer_binary_expansion_for_bounded_integer(self):
+        from discopt.solvers.oa import (
+            _add_no_good_cut,
+            _build_integer_binary_expansion,
+            _decompose_model,
+        )
+
+        m = dm.Model("integer_binary_no_good")
+        y = m.binary("y")
+        z = m.integer("z", lb=0, ub=3)
+        m.minimize(y + z)
+        decomp = _decompose_model(m)
+        expansion = _build_integer_binary_expansion(decomp, enabled=True)
+        oa_A_rows = []
+        oa_b_rows = []
+        oa_cut_relaxable = []
+
+        added = _add_no_good_cut(
+            np.array([1.0, 2.0]),
+            decomp.binary_indices,
+            oa_A_rows,
+            oa_b_rows,
+            n_vars=decomp.n_vars,
+            oa_cut_relaxable=oa_cut_relaxable,
+            integer_binary_expansion=expansion,
+        )
+
+        assert added is True
+        np.testing.assert_allclose(oa_A_rows[0], np.array([1.0, 0.0, 0.0, -1.0, 1.0]))
+        assert oa_b_rows == pytest.approx([1.0])
+        assert oa_cut_relaxable == [False]
+
+    def test_master_data_links_integer_binary_expansion_columns(self):
+        from discopt.solvers.oa import (
+            _add_no_good_cut,
+            _build_integer_binary_expansion,
+            _build_master_milp_data,
+            _decompose_model,
+        )
+
+        m = dm.Model("integer_binary_master")
+        y = m.binary("y")
+        z = m.integer("z", lb=0, ub=3)
+        m.minimize(y + z)
+        decomp = _decompose_model(m)
+        expansion = _build_integer_binary_expansion(decomp, enabled=True)
+        oa_A_rows = []
+        oa_b_rows = []
+        _add_no_good_cut(
+            np.array([1.0, 2.0]),
+            decomp.binary_indices,
+            oa_A_rows,
+            oa_b_rows,
+            n_vars=decomp.n_vars,
+            integer_binary_expansion=expansion,
+        )
+
+        master = _build_master_milp_data(
+            decomp.linear_A_rows,
+            decomp.linear_b_rows,
+            decomp.linear_senses,
+            oa_A_rows,
+            oa_b_rows,
+            decomp.n_vars,
+            decomp.integrality,
+            decomp.lb,
+            decomp.ub,
+            decomp.obj_coeffs,
+            decomp.obj_is_linear,
+            decomp.master_bound_valid,
+            integer_binary_expansion=expansion,
+        )
+
+        assert len(master.c) == 4
+        assert master.bounds[2:] == [(0.0, 1.0), (0.0, 1.0)]
+        assert master.integrality.tolist() == [1, 1, 1, 1]
+        np.testing.assert_allclose(master.A_ub, np.array([[1.0, 0.0, -1.0, 1.0]]))
+        assert master.b_ub.tolist() == pytest.approx([1.0])
+        np.testing.assert_allclose(master.A_eq, np.array([[0.0, 1.0, -1.0, -2.0]]))
+        assert master.b_eq.tolist() == pytest.approx([0.0])
+
+    def test_integer_binary_expansion_rejects_unbounded_integer(self):
+        from discopt.solvers.oa import _build_integer_binary_expansion, _decompose_model
+
+        m = dm.Model("integer_binary_unbounded")
+        z = m.integer("z", lb=0, ub=3)
+        m.minimize(z)
+        decomp = _decompose_model(m)
+        decomp.ub[0] = 1e20
+
+        with pytest.raises(ValueError, match="requires finite practical bounds"):
+            _build_integer_binary_expansion(decomp, enabled=True)
+
     def test_projection_no_good_cut_uses_binary_indices_for_binary_model(self):
         from discopt.solvers.oa import (
             _append_binary_no_good_projection_cut,
@@ -761,6 +854,63 @@ class TestOARobustnessOptions:
 
         assert result.status == "infeasible"
         assert no_good_calls == []
+
+    def test_multitree_no_good_cut_uses_integer_binary_expansion_when_enabled(
+        self,
+        monkeypatch,
+    ):
+        import discopt.solvers.oa as oa_module
+        from discopt.solvers import MILPResult, SolveStatus
+
+        m = dm.Model("mixed_no_good_integer_binary")
+        y = m.binary("y")
+        z = m.integer("z", lb=0, ub=3)
+        m.minimize(y + z)
+
+        no_good_expansions = []
+
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_nlp_relaxation",
+            lambda *args, **kwargs: (np.array([0.5, 1.5]), 2.0),
+        )
+        monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_master_milp",
+            lambda *args, **kwargs: MILPResult(
+                status=SolveStatus.OPTIMAL,
+                x=np.array([1.0, 2.0]),
+                objective=3.0,
+                bound=0.0,
+            ),
+        )
+        monkeypatch.setattr(
+            oa_module,
+            "_solve_nlp_subproblem",
+            lambda *args, **kwargs: (None, None),
+        )
+        monkeypatch.setattr(
+            oa_module,
+            "_add_no_good_cut",
+            lambda *args, **kwargs: no_good_expansions.append(
+                kwargs.get("integer_binary_expansion")
+            ),
+        )
+
+        result = oa_module.solve_oa(
+            m,
+            max_iterations=1,
+            feasibility_cuts=False,
+            add_no_good_cuts=True,
+            integer_to_binary=True,
+            cycling_check=False,
+        )
+
+        assert result.status == "infeasible"
+        assert len(no_good_expansions) == 1
+        assert no_good_expansions[0] is not None
+        assert no_good_expansions[0].bit_count == 2
 
     def test_cycling_check_stops_repeated_integer_assignment(self, monkeypatch):
         import discopt.solvers.oa as oa_module
