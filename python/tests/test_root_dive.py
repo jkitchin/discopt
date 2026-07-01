@@ -32,7 +32,19 @@ class TestRootDive:
     def test_finds_integer_feasible_incumbent(self):
         m = _knapsack()
         ld = extract_lp_data(m)
-        dive = _root_dive(ld, 5, list(range(5)), time.perf_counter(), 30.0)
+        # The structured dive (exact-vertex Rust simplex) is the only engine after
+        # #370 retired the JAX-IPM dive; it needs the structural node bounds.
+        dive = _root_dive(
+            ld,
+            5,
+            list(range(5)),
+            time.perf_counter(),
+            30.0,
+            n_vars=5,
+            lb=np.zeros(5),
+            ub=np.ones(5),
+            node_engine="simplex",
+        )
         assert dive is not None
         obj, x = dive
         # All integer columns are exactly integral.
