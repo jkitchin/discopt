@@ -1848,7 +1848,7 @@ def _add_esh_cuts(
     )
     trace["rootsearch"] = root_result.as_trace_dict()
     if root_result.status is MIPNLPRootSearchStatus.CANDIDATE_FEASIBLE:
-        return 0, trace
+        return fallback(root_result.status.value)
     if root_result.status is not MIPNLPRootSearchStatus.CONVERGED or root_result.point is None:
         return fallback(root_result.status.value)
 

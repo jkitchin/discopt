@@ -168,6 +168,15 @@ def _esh_objective_fixture(name="shot_esh_objective"):
     return m
 
 
+def _esh_candidate_feasible_objective_fixture(name="shot_esh_candidate_feasible_objective"):
+    m = dm.Model(name)
+    x = m.continuous("x", lb=-2.0, ub=2.0)
+    y = m.binary("y")
+    m.subject_to(x**2 - 4.0 <= 0.0)
+    m.minimize(x**2 + x - 0.1 * y)
+    return m
+
+
 def _esh_nonconvex_fixture(name="shot_esh_nonconvex"):
     m = dm.Model(name)
     x = m.continuous("x", lb=-3.0, ub=3.0)
@@ -550,6 +559,57 @@ def test_mip_nlp_shot_esh_adds_objective_rootsearch_hyperplane():
     assert provenance.records[1].objective_id == "objective"
     assert provenance.records[1].global_valid is True
     assert len(rows[1]) == decomp.n_vars + 1
+
+
+def test_mip_nlp_shot_esh_candidate_feasible_adds_objective_fallback_cut():
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers.mip_nlp_rootsearch import MIPNLPInteriorPointStore
+
+    decomp = oa_module._decompose_model(
+        _esh_candidate_feasible_objective_fixture("esh_unit_candidate_feasible_objective")
+    )
+    store = MIPNLPInteriorPointStore(
+        decomp.n_vars,
+        int_indices=decomp.int_indices,
+        lb=decomp.lb,
+        ub=decomp.ub,
+    )
+    store.add(
+        np.array([0.0, 1.0]),
+        source="unit",
+        evaluator=decomp.evaluator,
+        constraint_senses=decomp.constraint_senses,
+        require_feasible=True,
+    )
+    provenance = oa_module.MIPNLPCutProvenance()
+    rows: list[np.ndarray] = []
+    rhs: list[float] = []
+    relaxable: list[bool] = []
+
+    added, trace = oa_module._add_esh_cuts(
+        decomp.evaluator,
+        np.array([0.0, 1.0]),
+        decomp.n_vars,
+        decomp.constraint_senses,
+        rows,
+        rhs,
+        decomp.obj_is_linear,
+        decomp.oa_constraint_mask,
+        decomp.oa_objective_is_convex,
+        store,
+        rootsearch_strategy="bisection",
+        oa_cut_relaxable=relaxable,
+        cut_provenance=provenance,
+    )
+
+    assert added == 1
+    assert trace["rootsearch"]["status"] == "candidate_feasible"
+    assert trace["fallback_used"] is True
+    assert trace["fallback_reason"] == "candidate_feasible"
+    assert relaxable == [False]
+    assert provenance.records[0].source == "objective"
+    assert provenance.records[0].objective_id == "objective"
+    assert len(rows[0]) == decomp.n_vars + 1
 
 
 def test_mip_nlp_shot_esh_respects_hyperplane_selection_controls():
