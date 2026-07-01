@@ -150,6 +150,42 @@ def _initial_poa_fixture(name="shot_initial_poa_seed"):
     return m
 
 
+def _esh_convex_fixture(name="shot_esh_convex"):
+    m = dm.Model(name)
+    x = m.continuous("x", lb=-2.0, ub=2.0)
+    y = m.binary("y")
+    m.subject_to(x**2 - 1.0 <= 0.0)
+    m.minimize(-x - 0.1 * y)
+    return m
+
+
+def _esh_objective_fixture(name="shot_esh_objective"):
+    m = dm.Model(name)
+    x = m.continuous("x", lb=-2.0, ub=2.0)
+    y = m.binary("y")
+    m.subject_to(x**2 - 1.0 <= 0.0)
+    m.minimize(x**2 - 0.1 * y)
+    return m
+
+
+def _esh_candidate_feasible_objective_fixture(name="shot_esh_candidate_feasible_objective"):
+    m = dm.Model(name)
+    x = m.continuous("x", lb=-2.0, ub=2.0)
+    y = m.binary("y")
+    m.subject_to(x**2 - 4.0 <= 0.0)
+    m.minimize(x**2 + x - 0.1 * y)
+    return m
+
+
+def _esh_nonconvex_fixture(name="shot_esh_nonconvex"):
+    m = dm.Model(name)
+    x = m.continuous("x", lb=-3.0, ub=3.0)
+    y = m.binary("y")
+    m.subject_to(1.0 - x**2 <= 0.0)
+    m.minimize(y)
+    return m
+
+
 def test_mip_nlp_cut_record_construction_and_dedup():
     from discopt.solvers.oa import MIPNLPCutProvenance, MIPNLPCutRecord, _append_master_cut
 
@@ -384,6 +420,307 @@ def test_mip_nlp_shot_initial_poa_adds_initial_cuts_integration():
     assert enabled_trace["initial_poa"]["status"] == "seeded"
     assert enabled_trace["summary"]["cut_count"] > disabled_trace["summary"]["cut_count"]
     assert enabled_trace["summary"]["cut_source_counts"]["initial_poa"] >= 1
+
+
+def test_mip_nlp_shot_esh_generates_rootsearch_cut_with_provenance():
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers.mip_nlp_rootsearch import MIPNLPInteriorPointStore
+
+    decomp = oa_module._decompose_model(_esh_convex_fixture("esh_unit_convex"))
+    store = MIPNLPInteriorPointStore(
+        decomp.n_vars,
+        int_indices=decomp.int_indices,
+        lb=decomp.lb,
+        ub=decomp.ub,
+    )
+    store.add(
+        np.array([0.0, 1.0]),
+        source="unit",
+        evaluator=decomp.evaluator,
+        constraint_senses=decomp.constraint_senses,
+        require_feasible=True,
+    )
+    provenance = oa_module.MIPNLPCutProvenance()
+    rows: list[np.ndarray] = []
+    rhs: list[float] = []
+    relaxable: list[bool] = []
+
+    added, trace = oa_module._add_esh_cuts(
+        decomp.evaluator,
+        np.array([2.0, 1.0]),
+        decomp.n_vars,
+        decomp.constraint_senses,
+        rows,
+        rhs,
+        decomp.obj_is_linear,
+        decomp.oa_constraint_mask,
+        decomp.oa_objective_is_convex,
+        store,
+        rootsearch_strategy="bisection",
+        oa_cut_relaxable=relaxable,
+        cut_provenance=provenance,
+    )
+
+    assert added == 1
+    assert trace["fallback_used"] is False
+    assert trace["rootsearch"]["status"] == "converged"
+    assert rows[0] == pytest.approx(np.array([2.0, 0.0]), abs=1e-6)
+    assert rhs[0] == pytest.approx(2.0, abs=1e-6)
+    assert relaxable == [True]
+    record = provenance.records[0]
+    assert record.source == "esh"
+    assert record.global_valid is True
+    assert record.local_valid is True
+    assert record.supporting_point == pytest.approx((1.0, 1.0), abs=1e-6)
+
+
+def test_mip_nlp_shot_esh_falls_back_to_ecp_without_interior_point():
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers.mip_nlp_rootsearch import MIPNLPInteriorPointStore
+
+    decomp = oa_module._decompose_model(_esh_convex_fixture("esh_unit_fallback"))
+    store = MIPNLPInteriorPointStore(
+        decomp.n_vars,
+        int_indices=decomp.int_indices,
+        lb=decomp.lb,
+        ub=decomp.ub,
+    )
+    provenance = oa_module.MIPNLPCutProvenance()
+    rows: list[np.ndarray] = []
+    rhs: list[float] = []
+
+    added, trace = oa_module._add_esh_cuts(
+        decomp.evaluator,
+        np.array([2.0, 1.0]),
+        decomp.n_vars,
+        decomp.constraint_senses,
+        rows,
+        rhs,
+        decomp.obj_is_linear,
+        decomp.oa_constraint_mask,
+        decomp.oa_objective_is_convex,
+        store,
+        rootsearch_strategy="bisection",
+        cut_provenance=provenance,
+    )
+
+    assert added == 1
+    assert trace["fallback_used"] is True
+    assert trace["fallback_reason"] == "missing_interior_point"
+    assert provenance.records[0].source == "ecp"
+    assert rows[0] == pytest.approx(np.array([4.0, 0.0]), abs=1e-6)
+    assert rhs[0] == pytest.approx(5.0, abs=1e-6)
+
+
+def test_mip_nlp_shot_esh_adds_objective_rootsearch_hyperplane():
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers.mip_nlp_rootsearch import MIPNLPInteriorPointStore
+
+    decomp = oa_module._decompose_model(_esh_objective_fixture("esh_unit_objective"))
+    store = MIPNLPInteriorPointStore(
+        decomp.n_vars,
+        int_indices=decomp.int_indices,
+        lb=decomp.lb,
+        ub=decomp.ub,
+    )
+    store.add(
+        np.array([0.0, 1.0]),
+        source="unit",
+        evaluator=decomp.evaluator,
+        constraint_senses=decomp.constraint_senses,
+        require_feasible=True,
+    )
+    provenance = oa_module.MIPNLPCutProvenance()
+    rows: list[np.ndarray] = []
+    rhs: list[float] = []
+    relaxable: list[bool] = []
+
+    added, trace = oa_module._add_esh_cuts(
+        decomp.evaluator,
+        np.array([2.0, 1.0]),
+        decomp.n_vars,
+        decomp.constraint_senses,
+        rows,
+        rhs,
+        decomp.obj_is_linear,
+        decomp.oa_constraint_mask,
+        decomp.oa_objective_is_convex,
+        store,
+        rootsearch_strategy="bisection",
+        oa_cut_relaxable=relaxable,
+        cut_provenance=provenance,
+    )
+
+    assert added == 2
+    assert trace["candidate_hyperplanes"] == 2
+    assert relaxable == [True, False]
+    sources = [record.source for record in provenance.records]
+    assert sources == ["esh", "objective_rootsearch"]
+    assert provenance.records[1].objective_id == "objective"
+    assert provenance.records[1].global_valid is True
+    assert len(rows[1]) == decomp.n_vars + 1
+
+
+def test_mip_nlp_shot_esh_candidate_feasible_adds_objective_fallback_cut():
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers.mip_nlp_rootsearch import MIPNLPInteriorPointStore
+
+    decomp = oa_module._decompose_model(
+        _esh_candidate_feasible_objective_fixture("esh_unit_candidate_feasible_objective")
+    )
+    store = MIPNLPInteriorPointStore(
+        decomp.n_vars,
+        int_indices=decomp.int_indices,
+        lb=decomp.lb,
+        ub=decomp.ub,
+    )
+    store.add(
+        np.array([0.0, 1.0]),
+        source="unit",
+        evaluator=decomp.evaluator,
+        constraint_senses=decomp.constraint_senses,
+        require_feasible=True,
+    )
+    provenance = oa_module.MIPNLPCutProvenance()
+    rows: list[np.ndarray] = []
+    rhs: list[float] = []
+    relaxable: list[bool] = []
+
+    added, trace = oa_module._add_esh_cuts(
+        decomp.evaluator,
+        np.array([0.0, 1.0]),
+        decomp.n_vars,
+        decomp.constraint_senses,
+        rows,
+        rhs,
+        decomp.obj_is_linear,
+        decomp.oa_constraint_mask,
+        decomp.oa_objective_is_convex,
+        store,
+        rootsearch_strategy="bisection",
+        oa_cut_relaxable=relaxable,
+        cut_provenance=provenance,
+    )
+
+    assert added == 1
+    assert trace["rootsearch"]["status"] == "candidate_feasible"
+    assert trace["fallback_used"] is True
+    assert trace["fallback_reason"] == "candidate_feasible"
+    assert relaxable == [False]
+    assert provenance.records[0].source == "objective"
+    assert provenance.records[0].objective_id == "objective"
+    assert len(rows[0]) == decomp.n_vars + 1
+
+
+def test_mip_nlp_shot_esh_respects_hyperplane_selection_controls():
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers.mip_nlp_rootsearch import MIPNLPInteriorPointStore
+
+    decomp = oa_module._decompose_model(_esh_objective_fixture("esh_unit_selection"))
+    store = MIPNLPInteriorPointStore(
+        decomp.n_vars,
+        int_indices=decomp.int_indices,
+        lb=decomp.lb,
+        ub=decomp.ub,
+    )
+    store.add(
+        np.array([0.0, 1.0]),
+        source="unit",
+        evaluator=decomp.evaluator,
+        constraint_senses=decomp.constraint_senses,
+        require_feasible=True,
+    )
+    provenance = oa_module.MIPNLPCutProvenance()
+
+    added, trace = oa_module._add_esh_cuts(
+        decomp.evaluator,
+        np.array([2.0, 1.0]),
+        decomp.n_vars,
+        decomp.constraint_senses,
+        [],
+        [],
+        decomp.obj_is_linear,
+        decomp.oa_constraint_mask,
+        decomp.oa_objective_is_convex,
+        store,
+        rootsearch_strategy="bisection",
+        cut_provenance=provenance,
+        hyperplane_max_per_iter=1,
+        hyperplane_selection_factor=0.5,
+    )
+
+    assert added == 1
+    assert trace["candidate_hyperplanes"] == 2
+    assert trace["selected_hyperplanes"] == 1
+    assert [record.source for record in provenance.records] == ["esh"]
+
+
+def test_mip_nlp_shot_esh_protects_incumbent_from_local_cut():
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers.mip_nlp_rootsearch import MIPNLPInteriorPointStore
+
+    decomp = oa_module._decompose_model(_esh_nonconvex_fixture("esh_unit_local"))
+    store = MIPNLPInteriorPointStore(
+        decomp.n_vars,
+        int_indices=decomp.int_indices,
+        lb=decomp.lb,
+        ub=decomp.ub,
+    )
+    store.add(
+        np.array([2.0, 1.0]),
+        source="unit",
+        evaluator=decomp.evaluator,
+        constraint_senses=decomp.constraint_senses,
+        require_feasible=True,
+    )
+    provenance = oa_module.MIPNLPCutProvenance()
+
+    added, trace = oa_module._add_esh_cuts(
+        decomp.evaluator,
+        np.array([0.0, 1.0]),
+        decomp.n_vars,
+        decomp.constraint_senses,
+        [],
+        [],
+        decomp.obj_is_linear,
+        decomp.oa_constraint_mask,
+        decomp.oa_objective_is_convex,
+        store,
+        rootsearch_strategy="bisection",
+        cut_provenance=provenance,
+        incumbent=np.array([-2.0, 1.0]),
+    )
+
+    assert added == 0
+    assert trace["fallback_used"] is False
+    assert trace["local_cuts_rejected"] == 1
+    assert provenance.records == []
+
+
+@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
+def test_mip_nlp_shot_esh_integration_uses_rootsearch_cuts():
+    import discopt.solvers.oa as oa_module
+
+    result = oa_module.solve_oa(
+        _esh_convex_fixture("esh_integration"),
+        init_strategy="initial_binary",
+        initial_point=np.array([0.0, 1.0]),
+        ecp_mode=True,
+        max_iterations=1,
+        milp_solver="highs",
+        mip_nlp_profile="shot",
+        mip_nlp_shot_config=oa_module.MIPNLPShotConfig(
+            cut_strategy="esh",
+            rootsearch_strategy="bisection",
+            relaxation_phase="off",
+        ),
+    )
+
+    trace = result.mip_nlp_trace
+    assert trace["summary"]["cut_source_counts"]["esh"] >= 1
+    assert trace["summary"]["cut_source_counts"]["ecp"] == 0
+    assert trace["iterations"][0]["esh"][0]["fallback_used"] is False
+    assert trace["iterations"][0]["esh"][0]["rootsearch"]["status"] == "converged"
 
 
 def _mindtpy_simple_minlp(name="mindtpy_init_strategy"):

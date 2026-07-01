@@ -94,11 +94,12 @@ Useful OA options include:
 ## Experimental SHOT profile
 
 `mip_nlp_profile="shot"` enables validated SHOT-parity controls and attaches a
-structured `result.mip_nlp_trace` payload. The profile is experimental: the
-options are accepted and traced so later PRs can add SHOT-style ESH,
-rootsearch, repair, convex-bounding, reformulation policy, and adaptive master
-behavior behind a stable interface. Default MIP-NLP behavior is unchanged when
-the profile is not set.
+structured `result.mip_nlp_trace` payload. The profile is experimental: some
+controls already attach SHOT-style initialization, rootsearch, and ESH cut
+behavior, while others are validated and traced so later PRs can add repair,
+convex-bounding, reformulation policy, and adaptive master behavior behind a
+stable interface. Default MIP-NLP behavior is unchanged when the profile is not
+set.
 
 ```python
 result = model.solve(
@@ -153,8 +154,18 @@ store for feasible relaxation, incumbent, and initial-POA points. Reusable
 rootsearch helpers in `discopt.solvers.mip_nlp_rootsearch` support bisection and
 optional TOMS748-compatible segment searches between stored interior points and
 candidate MIP/NLP points, including fixed-discrete compatibility checks and
-structured fallback statuses. ESH and objective-rootsearch cut generation remain
-separate roadmap work.
+structured fallback statuses.
+
+When ECP-style separation runs with `cut_strategy="esh"` or `"auto"`, discopt
+first tries extended supporting hyperplanes from a compatible stored interior
+point to the violated master candidate. Missing or incompatible interiors fall
+back to ordinary ECP cuts, and the trace records the rootsearch status and
+fallback reason. `hyperplane_selection_factor` ranks candidate hyperplanes by
+violation and keeps that top fraction, while `hyperplane_max_per_iter` caps the
+selected cuts. Convex nonlinear objective epigraphs can also receive
+`objective_rootsearch` hyperplanes. Non-global local cuts are marked in cut
+provenance, guarded so they do not cut off the known incumbent, and make reported
+master bounds heuristic rather than certified.
 
 The remaining reformulation controls are validated and traced under the SHOT
 profile so follow-up SHOT parity PRs can attach behavior without changing the
