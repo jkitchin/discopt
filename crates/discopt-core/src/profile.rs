@@ -80,6 +80,12 @@ counters!(
     BoundFlips,
     BlandActivations,
     Refactorizations,
+    // Numeric-focus iterative-refinement recovery (discopt#364): a drifted
+    // "Optimal" that failed the feasibility audit triggered a fresh refined
+    // refactorization (Attempts); of those, how many the refined point rescued
+    // back to a sound Optimal (Rescues). Attempts − Rescues stayed Numerical.
+    RefinedRecoveryAttempts,
+    RefinedRecoveryRescues,
 );
 
 #[inline(always)]

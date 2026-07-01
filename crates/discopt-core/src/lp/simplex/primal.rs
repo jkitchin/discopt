@@ -242,8 +242,9 @@ impl<'a> Simplex<'a> {
         }
     }
 
-    /// Recompute basic-variable values: x_B = B⁻¹ (b − Σ_{nonbasic} A_j x_j).
-    fn basic_values(&mut self, art_sign: &[f64]) -> Result<Vec<f64>, ()> {
+    /// The right-hand side the basic-variable solve runs against:
+    /// `b − Σ_{nonbasic} A_j x_j` (so that `B x_B = rhs`).
+    fn reduced_rhs(&self, art_sign: &[f64]) -> Vec<f64> {
         let mut rhs = self.b.to_vec();
         for j in 0..self.na {
             if self.stat[j] != BASIC {
@@ -260,8 +261,49 @@ impl<'a> Simplex<'a> {
                 }
             }
         }
+        rhs
+    }
+
+    /// Recompute basic-variable values: x_B = B⁻¹ (b − Σ_{nonbasic} A_j x_j).
+    fn basic_values(&mut self, art_sign: &[f64]) -> Result<Vec<f64>, ()> {
+        let mut rhs = self.reduced_rhs(art_sign);
         self.lu.ftran(&mut rhs).map_err(|_| ())?;
         Ok(rhs)
+    }
+
+    /// Recover `x_B` for the final basis via a **fresh** numeric-focus
+    /// factorization with iterative refinement (discopt#364). Used only when the
+    /// incremental factor's `x_B` fails the feasibility audit: a fresh factor
+    /// carries none of the accumulated Forrest–Tomlin update error, and
+    /// refinement then polishes the residual `b − B·x`, so an ill-conditioned or
+    /// update-drifted basis is recovered *inside the engine* rather than by
+    /// falling back to another solver. Returns `None` if the fresh factorization
+    /// or refined solve fails (the caller keeps the Numerical verdict).
+    fn refined_basic_values(&self, art_sign: &[f64]) -> Option<Vec<f64>> {
+        let cols: Vec<Vec<f64>> = self
+            .basis
+            .iter()
+            .map(|&j| self.column(j, art_sign))
+            .collect();
+        let mut lu = FeralLU::new().with_numeric_focus();
+        lu.factorize(self.m, &cols).ok()?;
+        let mut rhs = self.reduced_rhs(art_sign);
+        lu.ftran_refined(&mut rhs).ok()?;
+        Some(rhs)
+    }
+
+    /// Scatter a basic-values vector `x_B` into the full primal point `x`
+    /// (basic vars take their `x_B` slot, nonbasic vars sit at their bound).
+    fn assemble_x(&self, xb: &[f64]) -> Vec<f64> {
+        let mut x = vec![0.0; self.n];
+        for j in 0..self.n {
+            x[j] = if self.stat[j] == BASIC {
+                xb[self.slot_of[j] as usize]
+            } else {
+                self.nb_value(j)
+            };
+        }
+        x
     }
 
     fn refactorize(&mut self, art_sign: &[f64]) -> Result<(), ()> {
@@ -692,27 +734,39 @@ impl<'a> Simplex<'a> {
         let xb = self
             .basic_values(art_sign)
             .unwrap_or_else(|_| vec![0.0; self.m]);
-        let mut x = vec![0.0; self.n];
-        for j in 0..self.n {
-            x[j] = if self.stat[j] == BASIC {
-                xb[self.slot_of[j] as usize]
-            } else {
-                self.nb_value(j)
-            };
-        }
-        let obj: f64 = (0..self.n).map(|j| self.c[j] * x[j]).sum();
+        let mut x = self.assemble_x(&xb);
+        let mut obj: f64 = (0..self.n).map(|j| self.c[j] * x[j]).sum();
 
         // Final feasibility audit before certifying Optimal. x_B is maintained
         // incrementally between the ~48-pivot refactorizations and the Harris
         // ratio test permits small bound excursions, so the returned point can
-        // drift. Verify it actually satisfies its bounds and Ax=b; on violation
-        // downgrade to Numerical so the caller treats it as a failed solve (the
-        // warm path's cold fallback, or the MILP driver decertifying the gap and
-        // branching) rather than trusting a wrong "Optimal".
-        let status = if status == LpStatus::Optimal
-            && !solution_within_tolerance(&self.cols, self.m, self.n, self.b, &self.lb, &self.ub, &x)
-        {
-            LpStatus::Numerical
+        // drift. Verify it actually satisfies its bounds and Ax=b; on violation,
+        // first attempt an in-engine refined recovery (a fresh, refinement-polished
+        // refactorization of the same basis — no accumulated update error), and
+        // only downgrade to Numerical if that still fails the audit. The re-audit
+        // is the same soundness gate, so recovery can only rescue a solve that
+        // would otherwise be declared Numerical — never certify a wrong "Optimal".
+        // A genuine Numerical then flows to the caller as before (the warm path's
+        // cold fallback, or the MILP driver decertifying the gap and branching).
+        let audit = |slf: &Simplex, x: &[f64]| {
+            solution_within_tolerance(&slf.cols, slf.m, slf.n, slf.b, &slf.lb, &slf.ub, x)
+        };
+        let status = if status == LpStatus::Optimal && !audit(&self, &x) {
+            crate::profile::incr(crate::profile::Ctr::RefinedRecoveryAttempts);
+            match self.refined_basic_values(art_sign) {
+                Some(xb_r) => {
+                    let x_r = self.assemble_x(&xb_r);
+                    if audit(&self, &x_r) {
+                        crate::profile::incr(crate::profile::Ctr::RefinedRecoveryRescues);
+                        x = x_r;
+                        obj = (0..self.n).map(|j| self.c[j] * x[j]).sum();
+                        LpStatus::Optimal
+                    } else {
+                        LpStatus::Numerical
+                    }
+                }
+                None => LpStatus::Numerical,
+            }
         } else {
             status
         };
