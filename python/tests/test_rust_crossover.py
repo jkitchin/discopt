@@ -20,9 +20,7 @@ if not hasattr(rust, "crossover_to_vertex_py"):  # older prebuilt extension
     pytest.skip("Rust crossover bindings not built", allow_module_level=True)
 
 import discopt.modeling as dm  # noqa: E402
-import jax.numpy as jnp  # noqa: E402
 from discopt._jax.crossover import crossover_to_vertex as np_crossover  # noqa: E402
-from discopt._jax.lp_ipm import lp_ipm_solve  # noqa: E402
 from discopt._jax.problem_classifier import extract_lp_data  # noqa: E402
 
 
@@ -35,14 +33,21 @@ def _sym_knapsack():
 
 
 def _lp_interior_optimum(model):
-    """Standard-form LP data + the IPM (interior) optimum of its relaxation."""
+    """Standard-form LP data + the IPM (interior) optimum of its relaxation.
+
+    Uses POUNCE's interior-point KKT solve (analytic center) — the JAX LP-IPM
+    this used was retired in #370. Crossover needs an interior point to cross.
+    """
+    pytest.importorskip("pounce")
+    from discopt.solvers.lp_pounce import solve_lp_kkt
+
     ld = extract_lp_data(model)
-    st = lp_ipm_solve(
-        jnp.asarray(ld.c),
-        jnp.asarray(ld.A_eq),
-        jnp.asarray(ld.b_eq),
-        jnp.asarray(ld.x_l),
-        jnp.asarray(ld.x_u),
+    _, x, *_ = solve_lp_kkt(
+        np.asarray(ld.c),
+        np.asarray(ld.A_eq),
+        np.asarray(ld.b_eq),
+        np.asarray(ld.x_l),
+        np.asarray(ld.x_u),
     )
     a = np.ascontiguousarray(ld.A_eq, dtype=np.float64)
     return (
@@ -51,7 +56,7 @@ def _lp_interior_optimum(model):
         np.asarray(ld.c, np.float64),
         np.asarray(ld.x_l, np.float64),
         np.asarray(ld.x_u, np.float64),
-        np.asarray(st.x, np.float64),
+        np.asarray(x, np.float64),
     )
 
 
