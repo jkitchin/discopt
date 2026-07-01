@@ -15,6 +15,7 @@ POUNCE_AVAILABLE = pytest.importorskip("discopt.solvers.lp_pounce").POUNCE_AVAIL
 
 pytestmark = pytest.mark.skipif(not POUNCE_AVAILABLE, reason="POUNCE not installed")
 
+
 def test_pounce_milp_seeds_finite_root_bound():
     """A POUNCE MILP solve must return a finite, sound lower bound even when it
     cannot finish in the time budget — the root LP relaxation bound is seeded so
