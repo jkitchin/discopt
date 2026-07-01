@@ -24,6 +24,12 @@ from discopt.decomposition.advisor.candidates import (
     CandidateGenerator,
     generate_candidates,
 )
+from discopt.decomposition.advisor.scoring import (
+    PerformanceEstimate,
+    Scorer,
+    ScoreVector,
+    ScoringWeights,
+)
 from discopt.decomposition.advisor.types import Candidate, MethodKind, Soundness
 
 __all__ = [
@@ -32,6 +38,10 @@ __all__ = [
     "CandidateGenerator",
     "DecompositionAdvisor",
     "MethodKind",
+    "PerformanceEstimate",
+    "ScoreVector",
+    "Scorer",
+    "ScoringWeights",
     "Soundness",
     "StructureAnalyzer",
     "StructureReport",
