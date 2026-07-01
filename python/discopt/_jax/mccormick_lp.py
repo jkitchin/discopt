@@ -719,6 +719,10 @@ class MccormickLPRelaxer:
             # box endpoints, so deep inside a wide box the convex underestimator is
             # slack. Add the exact supporting tangent at the LP point each round.
             res = self._separate_univariate_square(milp, varmap, res, _deadline)
+            # Convex/concave composite lifts (#358): add the exact supporting
+            # hyperplane at the LP point, closing the gap the fixed reference-point
+            # gradient cuts leave. Inert unless the convex claimer lifted a node.
+            res = self._separate_convex(milp, varmap, res, _deadline)
             # PSD (moment) cuts: enforce M = [[1,x^T],[x,X]] >= 0 over fully-lifted
             # cliques. Each cut v^T M v >= 0 is valid for every feasible point
             # (X = x x^T), so adding them only tightens the bound.
@@ -1087,6 +1091,119 @@ class MccormickLPRelaxer:
                         row[aux] += -1.0
                         rows.append(row)
                         rhs.append(x0 * x0)
+                if not rows:
+                    break
+                _append(rows, rhs)
+                _tl = (
+                    None
+                    if deadline is None
+                    else max(deadline - time.perf_counter(), _SOLVE_DEADLINE_FLOOR_S)
+                )
+                new_res = milp.solve(time_limit=_tl, backend=self._backend)
+                if new_res.status != "optimal" or new_res.objective is None:
+                    break
+                res = new_res
+            return res
+        except Exception:
+            return res
+
+    def _separate_convex(self, milp, varmap, res, deadline):
+        """Tighten lifted convex/concave composite nodes by supporting-hyperplane
+        separation at the LP point (issue #358 Phase 2).
+
+        A convex subexpression ``g`` lifted to aux ``d`` (the #358 claimer) carries
+        only a few static gradient cuts at fixed reference points, so deep inside
+        the box ``d >= g(x)`` is slack. Each round add the EXACT supporting tangent
+        at the current LP point ``x0``:
+
+            convex:  d >= g(x0) + ∇g(x0)·(x − x0)
+            concave: d <= g(x0) + ∇g(x0)·(x − x0)
+
+        A tangent of a convex (resp. secant-free concave) function is a global
+        under- (over-) estimator, so no feasible point is ever cut — the bound
+        stays sound at every round. Sound no-op on any failure.
+        """
+        relaxations = varmap.get("composite_multivar_relaxations") or []
+        specs = [
+            r
+            for r in relaxations
+            if getattr(r, "value_fn", None) is not None
+            and getattr(r, "grad_fn", None) is not None
+            and r.idxs
+        ]
+        if not specs:
+            return res
+        if res is None or res.status != "optimal" or res.x is None:
+            return res
+        try:
+            import jax.numpy as jnp
+            import scipy.sparse as sp
+
+            n_total = len(milp._c)
+            n_orig = self._n_orig
+
+            def _append(rows: list[np.ndarray], rhs: list[float]) -> None:
+                R = np.asarray(rows, dtype=np.float64)
+                b = np.asarray(rhs, dtype=np.float64)
+                if milp._A_ub is None:
+                    milp._A_ub, milp._b_ub = R, b
+                elif sp.issparse(milp._A_ub):
+                    milp._A_ub = sp.vstack([milp._A_ub, sp.csr_matrix(R)], format="csr")
+                    milp._b_ub = np.concatenate([milp._b_ub, b])
+                else:
+                    milp._A_ub = np.vstack([np.asarray(milp._A_ub), R])
+                    milp._b_ub = np.concatenate([milp._b_ub, b])
+
+            tol = 1e-7
+            for _round in range(8):
+                if deadline is not None and time.perf_counter() >= deadline:
+                    break
+                x = np.asarray(res.x, dtype=np.float64)
+                xv = jnp.asarray(x[:n_orig], dtype=jnp.float64)
+                rows: list[np.ndarray] = []
+                rhs: list[float] = []
+                for r in specs:
+                    aux = r.aux_col
+                    if aux >= x.size:
+                        continue
+                    d = float(x[aux])
+                    try:
+                        gval = float(jnp.reshape(r.value_fn(xv), ()))
+                        grad = np.asarray(r.grad_fn(xv), dtype=np.float64).ravel()
+                    except Exception:
+                        continue
+                    if not np.isfinite(gval) or not all(
+                        j < grad.size and np.isfinite(grad[j]) for j in r.idxs
+                    ):
+                        continue
+                    # Conditioning guard (#358): a cut whose coefficients have blown
+                    # up (steep gradient on a wide box) fools the fast simplex into a
+                    # garbage bound. Skip it — the static cuts still bound ``d`` and
+                    # the relaxation stays sound, just looser at this point.
+                    if any(
+                        abs(float(grad[j])) > _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE for j in r.idxs
+                    ):
+                        continue
+                    # ``slope·x0`` with x0 the LP point restricted to dependent cols.
+                    slope_dot_x0 = float(sum(float(grad[j]) * float(x[j]) for j in r.idxs))
+                    if r.curvature == "convex":
+                        # slack iff the LP put d below g at x0; cut d >= g(x0)+∇g·(x−x0)
+                        # i.e. ∇g·x − d <= ∇g·x0 − g(x0).
+                        if gval - d > tol * max(1.0, abs(gval)):
+                            row = np.zeros(n_total)
+                            for j in r.idxs:
+                                row[j] += float(grad[j])
+                            row[aux] += -1.0
+                            rows.append(row)
+                            rhs.append(slope_dot_x0 - gval)
+                    else:  # concave: d <= g(x0)+∇g·(x−x0)  ->  −∇g·x + d <= g(x0)−∇g·x0
+                        if d - gval > tol * max(1.0, abs(gval)):
+                            row = np.zeros(n_total)
+                            for j in r.idxs:
+                                row[j] += -float(grad[j])
+                            row[aux] += 1.0
+                            rows.append(row)
+                            rhs.append(gval - slope_dot_x0)
                 if not rows:
                     break
                 _append(rows, rhs)

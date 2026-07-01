@@ -23,6 +23,7 @@ from __future__ import annotations
 import itertools
 import logging
 import math
+import os
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Union
@@ -3462,6 +3463,12 @@ class CompositeMultivarRelaxation:
     curvature: str
     lower_lines: tuple[tuple[tuple[tuple[int, float], ...], float], ...]
     upper_lines: tuple[tuple[tuple[tuple[int, float], ...], float], ...]
+    # Dependent original-variable columns and the compiled value/gradient of the
+    # lifted node, so a separator can add the exact supporting hyperplane at the LP
+    # point each round (issue #358 Phase 2). ``None`` disables LP-point separation.
+    idxs: tuple[int, ...] = ()
+    value_fn: Optional[Callable] = None
+    grad_fn: Optional[Callable] = None
 
 
 _COMPOSITE_CURV_TOL = 1e-9
@@ -3969,7 +3976,28 @@ def _should_claim_composite_multivar(expr: Expression, model: Model, n_orig: int
         if _get_flat_index(expr.left, model) is not None:
             return False  # bare-variable base → fractional-power path
         return len(_referenced_flat_indices(expr.left, model)) >= 2
+    # Convex polynomial subexpression claimer (issue #358): a sum/difference
+    # spanning >=2 variables. McCormick-decomposing a convex sum like
+    # ``3x**2 + 2y**2 + x*y`` term-by-term injects bilinear envelope slack on the
+    # cross terms; lifting the whole node and gradient-cutting it keeps it exact.
+    # This is only the STRUCTURAL pre-filter — the collector's classify_expr /
+    # interval-Hessian gate is the sound curvature filter, so a non-convex sum is
+    # certified UNKNOWN there and falls back to the term-by-term path. Gated by
+    # DISCOPT_CONVEX_CLAIMER while it is validated (issue #358 Phase 1).
+    if _convex_claimer_enabled() and isinstance(expr, BinaryOp) and expr.op in ("+", "-"):
+        return len(_referenced_flat_indices(expr, model)) >= 2
     return False
+
+
+def _convex_claimer_enabled() -> bool:
+    """Whether the convex polynomial subexpression claimer (#358) is on.
+
+    Default OFF while the vertical slice is validated; set ``DISCOPT_CONVEX_CLAIMER``
+    to a non-``0`` value to enable. The claim is sound regardless (the collector
+    only lifts a node it certifies CONVEX/CONCAVE), so the flag gates *tightness*
+    behaviour, not correctness.
+    """
+    return os.environ.get("DISCOPT_CONVEX_CLAIMER", "0") != "0"
 
 
 def _multivar_box_curvature(
@@ -4175,6 +4203,13 @@ def _collect_composite_multivar_relaxations(
         col_hi = float(np.asarray(iv.hi).ravel()[0])
         if not (np.isfinite(col_lo) and np.isfinite(col_hi)) or col_hi < col_lo:
             return
+        # Conditioning guard (#358): on a wide/ill-conditioned box the node's value
+        # range — and hence its gradient and the resulting cut coefficients — can
+        # explode, fooling the fast simplex into a garbage dual bound (nvs16 ~1e11).
+        # Abstain above the same magnitude where the cut builders abstain; the node
+        # then stays on the (sound) term-by-term path.
+        if max(abs(col_lo), abs(col_hi)) > _LIFT_MAX_CROSS_TERM_ARG_MAGNITUDE:
+            return
 
         try:
             f = compile_expression(expr, model)
@@ -4235,6 +4270,9 @@ def _collect_composite_multivar_relaxations(
                 curvature=curvature,
                 lower_lines=lower_lines,
                 upper_lines=upper_lines,
+                idxs=tuple(int(j) for j in idxs),
+                value_fn=f,
+                grad_fn=grad_f,
             )
         )
         bounds.append((col_lo, col_hi))
@@ -4242,6 +4280,11 @@ def _collect_composite_multivar_relaxations(
 
     def visit(expr: Expression) -> None:
         maybe_add(expr)
+        # A claimed node is a maximal convex/concave unit lifted whole; do not
+        # descend into its subtree (that would redundantly re-claim nested convex
+        # sums, e.g. the nested ``+``/``-`` tree of a convex quadratic objective).
+        if id(expr) in var_map:
+            return
         if isinstance(expr, BinaryOp):
             visit(expr.left)
             visit(expr.right)
@@ -6454,9 +6497,13 @@ def build_milp_relaxation(
     # ``**2`` intact (the affine-square envelope resolves them through
     # ``composite_var_map`` by original node id); every other ``(a+b)**2`` still
     # expands so the #154 sqrt/reciprocal lift can envelope each product term.
-    protected_squares = (
-        frozenset(affine_square_protected_ids) if affine_square_protected_ids else None
-    )
+    # Protect every composite-claimed node id (affine-square/power lifts AND the
+    # convex-subexpression lifts from #358) from `distribute_products`: the
+    # linearizer resolves a claimed node to its aux column by id, so the node must
+    # keep its identity through distribution or the claim is silently lost and the
+    # relaxation falls back to the loose term-by-term path.
+    _protected = set(affine_square_protected_ids) | set(composite_var_map)
+    protected_squares = frozenset(_protected) if _protected else None
     distributed_objective = (
         distribute_products(model._objective.expression, protected_squares)
         if model._objective is not None
