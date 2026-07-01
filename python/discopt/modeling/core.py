@@ -2067,6 +2067,18 @@ class Model:
                 self._coupling_keys.add(cname)
         return self
 
+    def analyze_decomposition(self):
+        """Analyze this model's decomposition structure (does not solve or modify).
+
+        Returns a
+        :class:`~discopt.decomposition.advisor.DecompositionAdvisor` exposing the
+        structure report, discovered decomposition candidates, block partition,
+        and graph views/exports. See ``docs/design/decomposition-advisor.md``.
+        """
+        from discopt.decomposition import analyze_decomposition
+
+        return analyze_decomposition(self)
+
     # ── Fast construction API (direct arena building) ──
 
     def _get_builder(self):
