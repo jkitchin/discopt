@@ -372,6 +372,41 @@ impl<'a> PreparedDual<'a> {
                         None => {
                             dvec = recompute_reduced_costs(&mut lu, sp, c, n, &basis)?;
                             if dual_feasible(n, &stat, l, u, &dvec, tol) {
+                                // In-engine refined recovery (discopt#364): if the
+                                // working factor's growth signal flags possible digit
+                                // loss, recompute x_B from a fresh, refinement-polished
+                                // factorization and re-verify primal feasibility on the
+                                // sharper values. If the sharper x_B reveals an
+                                // infeasibility the drifted one hid, hand to the robust
+                                // cold solve rather than certify a wrong optimum;
+                                // otherwise certify with the sharper x_B. Sound either
+                                // way — the decision is only ever made *more* accurate,
+                                // and the common (benign-growth) path is untouched.
+                                let refined_xb: Option<Vec<f64>> = if lu
+                                    .growth()
+                                    .is_some_and(|g| g > GROWTH_REFINE_TRIGGER)
+                                {
+                                    crate::profile::incr(
+                                        crate::profile::Ctr::RefinedRecoveryAttempts,
+                                    );
+                                    match refined_basic_values(sp, b, n, m, l, u, &basis, &stat) {
+                                        Some(xb_r) => {
+                                            if select_leaving(m, &basis, l, u, &gamma, &xb_r, tol)
+                                                .is_some()
+                                            {
+                                                crate::profile::incr(
+                                                    crate::profile::Ctr::RefinedRecoveryRescues,
+                                                );
+                                                return None; // sharper x_B infeasible → cold fallback
+                                            }
+                                            Some(xb_r)
+                                        }
+                                        None => None, // fresh factor failed; keep the exact x_B
+                                    }
+                                } else {
+                                    None
+                                };
+                                let xb_final: &[f64] = refined_xb.as_deref().unwrap_or(&xb);
                                 // Row duals `y = B⁻ᵀ c_B` for the safe dual bound;
                                 // empty (caller falls back) if the btran fails.
                                 let mut y: Vec<f64> = basis.iter().map(|&j| c[j]).collect();
@@ -386,7 +421,7 @@ impl<'a> PreparedDual<'a> {
                                     &basis,
                                     &slot_of,
                                     &stat,
-                                    &xb,
+                                    xb_final,
                                     c,
                                     l,
                                     u,
@@ -594,15 +629,16 @@ impl<'a> PreparedDual<'a> {
 /// The soundness anchor for the incremental dual loop: the maintained `xb` is
 /// refreshed from this on a cadence and whenever optimality/infeasibility is
 /// claimed, so a drifted increment never decides the returned result.
-fn recompute_basic_values(
-    lu: &mut FeralLU,
+/// The right-hand side the basic-variable solve runs against:
+/// `b − Σ_{nonbasic} A_j x_j` (so that `B x_B = rhs`).
+fn reduced_rhs(
     sp: &SparseCols,
     b: &[f64],
     n: usize,
     l: &[f64],
     u: &[f64],
     stat: &[i8],
-) -> Option<Vec<f64>> {
+) -> Vec<f64> {
     let mut xb = b.to_vec();
     for j in 0..n {
         if stat[j] != BASIC {
@@ -621,9 +657,62 @@ fn recompute_basic_values(
             }
         }
     }
+    xb
+}
+
+fn recompute_basic_values(
+    lu: &mut FeralLU,
+    sp: &SparseCols,
+    b: &[f64],
+    n: usize,
+    l: &[f64],
+    u: &[f64],
+    stat: &[i8],
+) -> Option<Vec<f64>> {
+    let mut xb = reduced_rhs(sp, b, n, l, u, stat);
     if lu.ftran(&mut xb).is_err() {
         return None;
     }
+    Some(xb)
+}
+
+/// Growth high-water ratio (feral#93) above which the optimality gate re-solves
+/// `x_B` with a fresh refinement-polished factorization before certifying. A
+/// benign basis has growth ≈ 1; only a factor that lost digits (≫ 1) pays for the
+/// refined recompute, so well-conditioned nodes — the overwhelming majority — are
+/// untouched.
+const GROWTH_REFINE_TRIGGER: f64 = 1e4;
+
+/// Recompute `x_B` for the final basis via a **fresh** numeric-focus factorization
+/// with iterative refinement (discopt#364). The dual's working factor accumulates
+/// Forrest–Tomlin update error across pivots; a fresh factor of the same basis
+/// carries none of it, and refinement then polishes the residual `b − B·x`, so the
+/// optimality decision is made on the sharpest `x_B` available — recovered *inside*
+/// the engine rather than by handing off to another solver. Returns `None` if the
+/// fresh factorization or refined solve fails (the caller keeps its existing `x_B`).
+#[allow(clippy::too_many_arguments)]
+fn refined_basic_values(
+    sp: &SparseCols,
+    b: &[f64],
+    n: usize,
+    m: usize,
+    l: &[f64],
+    u: &[f64],
+    basis: &[usize],
+    stat: &[i8],
+) -> Option<Vec<f64>> {
+    let cols: Vec<Vec<f64>> = basis
+        .iter()
+        .map(|&j| {
+            let mut col = vec![0.0; m];
+            sp.scatter(j, &mut col);
+            col
+        })
+        .collect();
+    let mut lu = FeralLU::new().with_numeric_focus();
+    lu.factorize(m, &cols).ok()?;
+    let mut xb = reduced_rhs(sp, b, n, l, u, stat);
+    lu.ftran_refined(&mut xb).ok()?;
     Some(xb)
 }
 
