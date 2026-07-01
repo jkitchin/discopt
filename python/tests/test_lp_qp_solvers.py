@@ -196,99 +196,6 @@ class TestLPExtraction:
 # ---------------------------------------------------------------
 
 
-class TestLPIPM:
-    """Test LP IPM solver correctness."""
-
-    def test_simple_2var_lp(self):
-        """min -3x - 2y s.t. x+y <= 5, x,y >= 0 -> x=5, y=0, obj=-15."""
-        from discopt._jax.lp_ipm import lp_ipm_solve
-
-        # Standard form: min c'x s.t. [1,1,1]x = 5, x >= 0
-        # (inequality x+y<=5 converted to equality with slack: x+y+s=5)
-        c = jnp.array([-3.0, -2.0, 0.0])  # [x, y, slack]
-        A = jnp.array([[1.0, 1.0, 1.0]])  # x + y + s = 5
-        b = jnp.array([5.0])
-        x_l = jnp.array([0.0, 0.0, 0.0])
-        x_u = jnp.array([1e20, 1e20, 1e20])
-
-        state = lp_ipm_solve(c, A, b, x_l, x_u)
-        assert int(state.converged) in (1, 2)
-        assert jnp.allclose(state.obj, -15.0, atol=1e-4)
-        assert jnp.allclose(state.x[0], 5.0, atol=1e-3)
-        assert jnp.allclose(state.x[1], 0.0, atol=1e-3)
-
-    def test_bounded_lp(self):
-        """min -x - 2y s.t. x+y=3, 0<=x<=2, 0<=y<=2 -> x=1, y=2, obj=-5."""
-        from discopt._jax.lp_ipm import lp_ipm_solve
-
-        c = jnp.array([-1.0, -2.0])
-        A = jnp.array([[1.0, 1.0]])
-        b = jnp.array([3.0])
-        x_l = jnp.array([0.0, 0.0])
-        x_u = jnp.array([2.0, 2.0])
-
-        state = lp_ipm_solve(c, A, b, x_l, x_u)
-        assert int(state.converged) in (1, 2)
-        assert jnp.allclose(state.obj, -5.0, atol=1e-4)
-        assert jnp.allclose(state.x[0], 1.0, atol=1e-2)
-        assert jnp.allclose(state.x[1], 2.0, atol=1e-2)
-
-    def test_equality_lp(self):
-        """min x + 2y s.t. x+y=1, x,y >= 0 -> x=1, y=0, obj=1."""
-        from discopt._jax.lp_ipm import lp_ipm_solve
-
-        c = jnp.array([1.0, 2.0])
-        A = jnp.array([[1.0, 1.0]])
-        b = jnp.array([1.0])
-        x_l = jnp.array([0.0, 0.0])
-        x_u = jnp.array([1e20, 1e20])
-
-        state = lp_ipm_solve(c, A, b, x_l, x_u)
-        assert int(state.converged) in (1, 2)
-        assert jnp.allclose(state.obj, 1.0, atol=1e-4)
-
-    def test_3var_lp(self):
-        """min -2x1 - 3x2 - x3 s.t. x1+x2+x3=10, 2x1+x2<=14, x>=0."""
-        from discopt._jax.lp_ipm import lp_ipm_solve
-
-        c = jnp.array([-2.0, -3.0, -1.0, 0.0])  # 3 orig + 1 slack
-        A = jnp.array(
-            [
-                [1.0, 1.0, 1.0, 0.0],  # x1+x2+x3 = 10
-                [2.0, 1.0, 0.0, 1.0],  # 2x1+x2+s = 14
-            ]
-        )
-        b = jnp.array([10.0, 14.0])
-        x_l = jnp.array([0.0, 0.0, 0.0, 0.0])
-        x_u = jnp.full(4, 1e20)
-
-        state = lp_ipm_solve(c, A, b, x_l, x_u)
-        assert int(state.converged) in (1, 2, 3)
-        # Optimal: x2=10, obj=-30 (or close)
-        assert state.obj < -28.0  # should be near -30
-
-    def test_unconstrained_lp(self):
-        """LP with no equality constraints: min c'x with bounds."""
-        from discopt._jax.lp_ipm import lp_ipm_solve
-
-        c = jnp.array([1.0, -1.0])  # min x1 - x2
-        A = jnp.zeros((0, 2))
-        b = jnp.zeros(0)
-        x_l = jnp.array([0.0, 0.0])
-        x_u = jnp.array([5.0, 5.0])
-
-        state = lp_ipm_solve(c, A, b, x_l, x_u)
-        assert int(state.converged) == 1  # unconstrained is solved directly
-        assert jnp.allclose(state.obj, -5.0, atol=1e-4)
-        assert jnp.allclose(state.x[0], 0.0, atol=1e-4)
-        assert jnp.allclose(state.x[1], 5.0, atol=1e-4)
-
-
-# ---------------------------------------------------------------
-# 4. QP IPM Correctness Tests
-# ---------------------------------------------------------------
-
-
 class TestQPIPM:
     """Test QP IPM solver correctness."""
 
@@ -630,32 +537,6 @@ class TestUnifiedDiffSolve:
 
 class TestBatchSolve:
     """Test batch LP/QP solving via vmap."""
-
-    def test_lp_batch(self):
-        """Batch LP solve with varying bounds."""
-        from discopt._jax.lp_ipm import lp_ipm_solve_batch
-
-        c = jnp.array([1.0, -1.0])
-        A = jnp.array([[1.0, 1.0]])
-        b = jnp.array([1.0])
-
-        xl_batch = jnp.array(
-            [
-                [0.0, 0.0],
-                [0.0, 0.0],
-                [0.2, 0.0],
-            ]
-        )
-        xu_batch = jnp.array(
-            [
-                [1e20, 1e20],
-                [0.5, 1e20],
-                [1e20, 1e20],
-            ]
-        )
-
-        states = lp_ipm_solve_batch(c, A, b, xl_batch, xu_batch)
-        assert jnp.all(states.converged > 0)
 
     def test_qp_batch(self):
         """Batch QP solve with varying bounds."""

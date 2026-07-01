@@ -15,7 +15,7 @@ import numpy as np
 
 if TYPE_CHECKING:
     # Annotation-only: ``LPData``/``QPData`` are typed as jnp arrays to match the
-    # JAX IPM consumers (``lp_ipm_solve`` etc.); at runtime they hold numpy from
+    # JAX IPM consumers (``qp_ipm_solve`` etc.); at runtime they hold numpy from
     # the JAX-free extractors. ``from __future__ import annotations`` keeps these
     # strings, so no JAX import happens at module load.
     import jax.numpy as jnp
@@ -156,7 +156,7 @@ def _get_variable_bounds(model: Model):
     """Extract flat lower and upper bounds from model variables.
 
     Returns numpy arrays to avoid JAX device-transfer overhead during
-    extraction.  The caller (lp_ipm_solve / qp_ipm_solve) converts to
+    extraction.  The caller (``qp_ipm_solve`` etc.) converts to
     jnp.array at solve time.
     """
     lb_parts = []

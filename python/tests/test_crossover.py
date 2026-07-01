@@ -13,26 +13,30 @@ from __future__ import annotations
 
 import discopt.modeling as dm
 import discopt.solver as S
-import jax.numpy as jnp
 import numpy as np
 import pytest
 from discopt._jax.cover_cuts import separate_cover_cuts
 from discopt._jax.crossover import _MAX_CROSSOVER_VARS, _null_direction, crossover_to_vertex
-from discopt._jax.lp_ipm import lp_ipm_solve
 from discopt._jax.problem_classifier import extract_lp_data
 from discopt.solver import _decompose_eq_slack_form
 
 
 def _lp_optimum(model):
+    # POUNCE's interior-point KKT solve returns the analytic center of the optimal
+    # face — an interior point crossover can cross to a vertex (the JAX LP-IPM this
+    # replaced was retired in #370).
+    pytest.importorskip("pounce")
+    from discopt.solvers.lp_pounce import solve_lp_kkt
+
     ld = extract_lp_data(model)
-    st = lp_ipm_solve(
-        jnp.asarray(ld.c),
-        jnp.asarray(ld.A_eq),
-        jnp.asarray(ld.b_eq),
-        jnp.asarray(ld.x_l),
-        jnp.asarray(ld.x_u),
+    _, x, *_ = solve_lp_kkt(
+        np.asarray(ld.c),
+        np.asarray(ld.A_eq),
+        np.asarray(ld.b_eq),
+        np.asarray(ld.x_l),
+        np.asarray(ld.x_u),
     )
-    return ld, np.asarray(st.x)
+    return ld, np.asarray(x)
 
 
 def _is_vertex(x, A, c, xl, xu, tol=1e-6):
