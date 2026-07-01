@@ -10223,49 +10223,38 @@ def _cut_loop_relaxation_x(lp_data, prefer_pounce: bool):
     """Solve the (cut-augmented) root relaxation for the cut loop, returning the
     optimum ``x`` or ``None``.
 
-    In POUNCE mode the solve goes through POUNCE so the cut-augmented shape costs
-    no JAX recompile (consistent with the Path-B node engine); otherwise the JAX
-    IPM is used. Either way the returned point is just a separation seed —
-    crossover and cut validity do not depend on which engine produced it."""
-    if prefer_pounce:
-        try:
-            from discopt.solvers.lp_pounce import POUNCE_AVAILABLE
-            from discopt.solvers.lp_pounce import solve_lp as _pounce_solve
-        except ImportError:
-            POUNCE_AVAILABLE = False
-        if POUNCE_AVAILABLE:
-            try:
-                res = _pounce_solve(
-                    c=np.asarray(lp_data.c, dtype=np.float64),
-                    A_eq=np.asarray(lp_data.A_eq, dtype=np.float64),
-                    b_eq=np.asarray(lp_data.b_eq, dtype=np.float64),
-                    bounds=list(
-                        zip(
-                            np.asarray(lp_data.x_l, dtype=np.float64).tolist(),
-                            np.asarray(lp_data.x_u, dtype=np.float64).tolist(),
-                        )
-                    ),
-                )
-            except Exception as exc:
-                logger.debug("cut-loop POUNCE solve failed: %s", exc)
-                return None
-            if res.status == SolveStatus.OPTIMAL and res.x is not None:
-                return np.asarray(res.x, dtype=np.float64)
-            return None
-    import jax.numpy as jnp
-
-    from discopt._jax.lp_ipm import lp_ipm_solve
-
-    state = lp_ipm_solve(
-        jnp.asarray(lp_data.c),
-        jnp.asarray(lp_data.A_eq),
-        jnp.asarray(lp_data.b_eq),
-        jnp.asarray(lp_data.x_l),
-        jnp.asarray(lp_data.x_u),
-    )
-    if int(state.converged) != 1:
+    The seed always goes through POUNCE so the cut-augmented shape costs no JAX
+    recompile (consistent with the Path-B node engine); the JAX-IPM seed was
+    retired in #370. The returned point is just a separation seed — crossover and
+    cut validity do not depend on which engine produced it — so if POUNCE is
+    unavailable the cut loop is simply skipped (``None``). ``prefer_pounce`` is
+    kept for call-site symmetry."""
+    del prefer_pounce
+    try:
+        from discopt.solvers.lp_pounce import POUNCE_AVAILABLE
+        from discopt.solvers.lp_pounce import solve_lp as _pounce_solve
+    except ImportError:
         return None
-    return np.asarray(state.x, dtype=np.float64)
+    if not POUNCE_AVAILABLE:
+        return None
+    try:
+        res = _pounce_solve(
+            c=np.asarray(lp_data.c, dtype=np.float64),
+            A_eq=np.asarray(lp_data.A_eq, dtype=np.float64),
+            b_eq=np.asarray(lp_data.b_eq, dtype=np.float64),
+            bounds=list(
+                zip(
+                    np.asarray(lp_data.x_l, dtype=np.float64).tolist(),
+                    np.asarray(lp_data.x_u, dtype=np.float64).tolist(),
+                )
+            ),
+        )
+    except Exception as exc:
+        logger.debug("cut-loop POUNCE solve failed: %s", exc)
+        return None
+    if res.status == SolveStatus.OPTIMAL and res.x is not None:
+        return np.asarray(res.x, dtype=np.float64)
+    return None
 
 
 def _root_cover_cut_loop(
@@ -10470,34 +10459,10 @@ def _root_dive(
             xu[j] = v
         return None
 
-    import jax.numpy as jnp
-
-    from discopt._jax.lp_ipm import lp_ipm_solve
-
-    xl = np.asarray(lp_data.x_l, dtype=np.float64).copy()
-    xu = np.asarray(lp_data.x_u, dtype=np.float64).copy()
-    c = jnp.asarray(lp_data.c)
-    A = jnp.asarray(lp_data.A_eq)
-    b = jnp.asarray(lp_data.b_eq)
-    steps = max_steps if max_steps is not None else len(int_idx) + 1
-    for _ in range(steps):
-        if time.perf_counter() - t_start >= time_limit:
-            return None
-        state = lp_ipm_solve(c, A, b, jnp.asarray(xl), jnp.asarray(xu))
-        if int(state.converged) != 1:
-            return None  # infeasible/stalled fix -> abandon the dive
-        x = np.asarray(state.x)
-        fracs = [
-            (j, abs(x[j] - round(x[j])))
-            for j in int_idx
-            if xl[j] != xu[j] and abs(x[j] - round(x[j])) > 1e-6
-        ]
-        if not fracs:
-            return float(state.obj) + float(lp_data.obj_const), x[:n_orig]
-        j = max(fracs, key=lambda t: t[1])[0]
-        v = float(round(x[j]))
-        xl[j] = v
-        xu[j] = v
+    # No structured node engine selected: the root dive (an optional
+    # early-incumbent heuristic) is skipped. The JAX-IPM dive was retired (#370);
+    # on the default path this branch is unreachable — node_engine is always
+    # "simplex" (or prefer_pounce is set), so the structured dive above runs.
     return None
 
 
