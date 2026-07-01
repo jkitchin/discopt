@@ -50,6 +50,15 @@ from discopt.decomposition.benders import (
 from discopt.decomposition.benders import (
     solve_gbd as solve_gbd,
 )
+from discopt.decomposition.ir import (
+    DecomposedModel as DecomposedModel,
+)
+from discopt.decomposition.ir import (
+    SoundnessCertificate as SoundnessCertificate,
+)
+from discopt.decomposition.ir import (
+    build_decomposition as build_decomposition,
+)
 from discopt.decomposition.lagrangian import (
     LagrangianConfig as LagrangianConfig,
 )
@@ -86,6 +95,7 @@ __all__ = [
     "Candidate",
     "DecompositionAdvisor",
     "DecompositionStructure",
+    "DecomposedModel",
     "Explanation",
     "InstanceBasedPolicy",
     "LagrangianConfig",
@@ -94,8 +104,10 @@ __all__ = [
     "ScoreVector",
     "SolveRecord",
     "Soundness",
+    "SoundnessCertificate",
     "StructureReport",
     "analyze_decomposition",
+    "build_decomposition",
     "detect_decomposition",
     "flat_bounds",
     "record_outcome",
