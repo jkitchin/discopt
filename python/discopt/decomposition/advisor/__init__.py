@@ -24,11 +24,25 @@ from discopt.decomposition.advisor.candidates import (
     CandidateGenerator,
     generate_candidates,
 )
+from discopt.decomposition.advisor.explain import (
+    Concern,
+    Explainer,
+    Explanation,
+    RankedAlternative,
+    Rationale,
+    Severity,
+)
 from discopt.decomposition.advisor.scoring import (
     PerformanceEstimate,
     Scorer,
     ScoreVector,
     ScoringWeights,
+)
+from discopt.decomposition.advisor.selection import (
+    Policy,
+    Ranked,
+    RuleBasedPolicy,
+    SelectionContext,
 )
 from discopt.decomposition.advisor.types import Candidate, MethodKind, Soundness
 
@@ -36,12 +50,22 @@ __all__ = [
     "DEFAULT_GENERATORS",
     "Candidate",
     "CandidateGenerator",
+    "Concern",
     "DecompositionAdvisor",
+    "Explainer",
+    "Explanation",
     "MethodKind",
     "PerformanceEstimate",
+    "Policy",
+    "Ranked",
+    "RankedAlternative",
+    "Rationale",
+    "RuleBasedPolicy",
     "ScoreVector",
     "Scorer",
     "ScoringWeights",
+    "SelectionContext",
+    "Severity",
     "Soundness",
     "StructureAnalyzer",
     "StructureReport",
