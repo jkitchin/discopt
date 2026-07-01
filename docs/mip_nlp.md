@@ -182,9 +182,14 @@ not receive silent no-op parameters; the trace records degraded features under
 `master_controls` and `summary["unsupported_backend_features"]`.
 
 `fixed_nlp_strategy="solution_pool"` or an explicit `solution_pool_capacity`
-uses the existing Gurobi solution-pool candidate ingestion path when
-`milp_solver="gurobi"`. Other backends keep the single incumbent candidate and
-record the degradation in the trace.
+uses the Gurobi solution-pool candidate ingestion path when
+`milp_solver="gurobi"`. Fixed-NLP candidates are ordered deterministically from
+the master optimum, relaxation candidates, solution pool points, rootsearch
+points, and external providers, with duplicate integer assignments removed
+before NLP solves. The per-iteration trace records each fixed-NLP call source,
+status, objective, warm-start source, and whether it improved the incumbent.
+Other backends keep the single incumbent candidate and record the degradation in
+the trace.
 
 The remaining reformulation controls are validated and traced under the SHOT
 profile so follow-up SHOT parity PRs can attach behavior without changing the

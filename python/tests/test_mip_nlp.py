@@ -2369,6 +2369,208 @@ def test_mip_nlp_shot_solution_pool_strategy_uses_candidate_pool(monkeypatch):
     assert result.mip_nlp_trace["summary"]["solution_pool_candidates"] == 2
 
 
+def test_fixed_nlp_candidate_manager_orders_and_deduplicates_assignments():
+    from discopt.solvers.mip_nlp_candidates import FixedNLPCandidateManager
+
+    manager = FixedNLPCandidateManager(
+        n_vars=3,
+        int_indices=[1],
+        lb=np.array([0.0, 0.0, 0.0]),
+        ub=np.array([10.0, 4.0, 10.0]),
+        strategy="always",
+    )
+
+    manager.add([0.0, 2.0, 0.0], source="solution_pool", objective=20.0, iteration=0)
+    manager.add([0.0, 2.1, 0.0], source="solution_pool", objective=10.0, iteration=0)
+    manager.add([0.0, 0.0, 0.0], source="mip_optimum", objective=5.0, iteration=0)
+    manager.add([0.0, 1.0, 0.0], source="lp_relaxation", objective=3.0, iteration=0)
+    manager.add([0.0, 3.0, 0.0], source="rootsearch", objective=1.0, iteration=0)
+    manager.add_external_candidates(
+        [{"point": [0.0, 4.0, 0.0], "objective": 0.5, "provider": "unit"}],
+        iteration=0,
+    )
+
+    ready = manager.take_ready(iteration=0, elapsed=0.0)
+
+    assert [candidate.source for candidate in ready] == [
+        "mip_optimum",
+        "lp_relaxation",
+        "solution_pool",
+        "rootsearch",
+        "external",
+    ]
+    assert [candidate.integer_assignment for candidate in ready] == [
+        (0.0,),
+        (1.0,),
+        (2.0,),
+        (3.0,),
+        (4.0,),
+    ]
+    assert ready[2].objective == pytest.approx(10.0)
+
+
+def test_fixed_nlp_candidate_manager_scheduling_modes():
+    from discopt.solvers.mip_nlp_candidates import FixedNLPCandidateManager
+
+    kwargs = {
+        "n_vars": 1,
+        "int_indices": [0],
+        "lb": np.array([0.0]),
+        "ub": np.array([5.0]),
+    }
+    by_iteration = FixedNLPCandidateManager(
+        **kwargs,
+        strategy="iteration",
+        iteration_frequency=2,
+    )
+    by_iteration.add([0.0], source="mip_optimum", iteration=0)
+    first = by_iteration.take_ready(iteration=0, elapsed=0.0)
+    assert first
+    by_iteration.record_call_result(
+        first[0],
+        iteration=0,
+        elapsed=0.0,
+        success=False,
+    )
+
+    by_iteration.add([1.0], source="mip_optimum", iteration=1)
+    assert by_iteration.take_ready(iteration=1, elapsed=0.1) == []
+    assert by_iteration.take_ready(iteration=2, elapsed=0.2)
+
+    by_time = FixedNLPCandidateManager(**kwargs, strategy="time", time_frequency=5.0)
+    by_time.add([0.0], source="mip_optimum", iteration=0)
+    first = by_time.take_ready(iteration=0, elapsed=0.0)
+    assert first
+    by_time.record_call_result(first[0], iteration=0, elapsed=0.0, success=False)
+    by_time.add([1.0], source="mip_optimum", iteration=1)
+    assert by_time.take_ready(iteration=1, elapsed=4.9) == []
+    assert by_time.take_ready(iteration=1, elapsed=5.0)
+
+    pool_driven = FixedNLPCandidateManager(**kwargs, strategy="solution_pool")
+    pool_driven.add([0.0], source="mip_optimum", iteration=0)
+    assert pool_driven.take_ready(iteration=0, elapsed=0.0) == []
+    assert pool_driven.take_ready(
+        iteration=0,
+        elapsed=0.0,
+        has_solution_pool_candidate=True,
+    )
+
+
+def test_oa_fixed_nlp_candidate_trace_and_safe_failed_cuts(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers import MILPResult, SolveStatus
+
+    m = dm.Model("fixed_nlp_candidate_trace")
+    x = m.continuous("x", lb=0, ub=5)
+    y = m.binary("y", shape=(2,))
+    m.minimize(x + y[0] + y[1])
+
+    warm_starts = []
+    no_good_points = []
+
+    def fake_relaxation(*args, **kwargs):
+        if kwargs.get("return_attempt"):
+            return oa_module._NLPAttempt(x=None, objective=None, multipliers=None)
+        return None, None
+
+    def fake_master(*args, **kwargs):
+        return MILPResult(
+            status=SolveStatus.OPTIMAL,
+            x=np.array([0.0, 0.0, 0.0], dtype=float),
+            objective=0.0,
+            bound=-100.0,
+            solution_pool=[
+                np.array([0.0, 0.0, 0.0], dtype=float),
+                np.array([1.0, 1.0, 0.0], dtype=float),
+                np.array([2.0, 0.0, 1.0], dtype=float),
+                np.array([3.0, 1.0, 0.0], dtype=float),
+            ],
+            solution_pool_objectives=[0.0, 1.0, 2.0, 3.0],
+        )
+
+    def fake_nlp_subproblem(
+        evaluator,
+        lb,
+        ub,
+        int_indices,
+        x_master,
+        nlp_solver,
+        initial_point=None,
+        return_attempt=False,
+    ):
+        del evaluator, lb, ub, int_indices, nlp_solver
+        warm_starts.append(np.asarray(initial_point, dtype=float).copy())
+        key = tuple(np.asarray(x_master, dtype=float)[1:].astype(int).tolist())
+        if key == (0, 0):
+            attempt = oa_module._NLPAttempt(
+                x=np.asarray(x_master, dtype=float).copy(),
+                objective=10.0,
+                multipliers=None,
+                status=SolveStatus.OPTIMAL,
+            )
+        elif key == (1, 0):
+            attempt = oa_module._NLPAttempt(
+                x=None,
+                objective=None,
+                multipliers=None,
+                status=SolveStatus.INFEASIBLE,
+            )
+        else:
+            attempt = oa_module._NLPAttempt(
+                x=None,
+                objective=None,
+                multipliers=None,
+                status=SolveStatus.TIME_LIMIT,
+            )
+        if return_attempt:
+            return attempt
+        return attempt.x, attempt.objective
+
+    def fake_no_good(x_master, *args, **kwargs):
+        del args, kwargs
+        no_good_points.append(np.asarray(x_master, dtype=float).copy())
+        return True
+
+    monkeypatch.setattr(oa_module, "_solve_nlp_relaxation", fake_relaxation)
+    monkeypatch.setattr(oa_module, "_solve_master_milp", fake_master)
+    monkeypatch.setattr(oa_module, "_solve_nlp_subproblem", fake_nlp_subproblem)
+    monkeypatch.setattr(oa_module, "_solve_feasibility_subproblem", lambda *args, **kwargs: None)
+    monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+    monkeypatch.setattr(oa_module, "_add_no_good_cut", fake_no_good)
+
+    result = oa_module.solve_oa(
+        m,
+        init_strategy="rNLP",
+        max_iterations=1,
+        solution_pool=True,
+        num_solution_iteration=3,
+        milp_solver="gurobi",
+        add_no_good_cuts=True,
+        gap_tolerance=0.0,
+    )
+
+    calls = result.mip_nlp_trace["iterations"][0]["fixed_nlp_calls"]
+    assert [call["source"] for call in calls] == [
+        "mip_optimum",
+        "solution_pool",
+        "solution_pool",
+    ]
+    assert [call["status"] for call in calls] == ["optimal", "infeasible", "time_limit"]
+    assert [call["incumbent_update"] for call in calls] == [
+        "improved",
+        "not_feasible",
+        "not_feasible",
+    ]
+    assert [point.tolist() for point in warm_starts] == [
+        [0.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [2.0, 0.0, 1.0],
+    ]
+    assert [point.tolist() for point in no_good_points] == [[1.0, 1.0, 0.0]]
+    assert result.mip_nlp_trace["summary"]["fixed_nlp_call_count"] == 3
+    assert result.mip_nlp_trace["summary"]["solution_pool_candidates"] == 3
+
+
 def test_oa_initial_binary_seed_rounds_and_clamps_discrete_values():
     from discopt.solvers.oa import _build_initial_strategy_point, _decompose_model
 
