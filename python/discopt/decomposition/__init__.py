@@ -17,6 +17,24 @@ which resolves user annotations (``model.first_stage(...)``,
 
 from __future__ import annotations
 
+from discopt.decomposition.advisor import (
+    Candidate as Candidate,
+)
+from discopt.decomposition.advisor import (
+    DecompositionAdvisor as DecompositionAdvisor,
+)
+from discopt.decomposition.advisor import (
+    MethodKind as MethodKind,
+)
+from discopt.decomposition.advisor import (
+    Soundness as Soundness,
+)
+from discopt.decomposition.advisor import (
+    StructureReport as StructureReport,
+)
+from discopt.decomposition.advisor import (
+    analyze_decomposition as analyze_decomposition,
+)
 from discopt.decomposition.benders import (
     BendersConfig as BendersConfig,
 )
@@ -47,8 +65,14 @@ from discopt.decomposition.structure import (
 
 __all__ = [
     "BendersConfig",
+    "Candidate",
+    "DecompositionAdvisor",
     "DecompositionStructure",
     "LagrangianConfig",
+    "MethodKind",
+    "Soundness",
+    "StructureReport",
+    "analyze_decomposition",
     "detect_decomposition",
     "flat_bounds",
     "restricted_bounds",
