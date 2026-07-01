@@ -26,7 +26,7 @@ import time
 import warnings
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import numpy as np
 
@@ -73,6 +73,7 @@ _CUT_SOURCE_ORDER = (
     "oa",
     "ecp",
     "initial_poa",
+    "relaxation_phase",
     "objective",
     "objective_rootsearch",
     "esh",
@@ -81,6 +82,8 @@ _CUT_SOURCE_ORDER = (
     "external",
 )
 _INITIAL_POA_PHASES = frozenset({"auto", "initial"})
+_PERIODIC_RELAXATION_PHASES = frozenset({"periodic"})
+_SHOT_MASTER_FEATURE_BACKEND = "gurobi"
 
 
 def _float_tuple(values) -> tuple[float, ...]:
@@ -572,6 +575,131 @@ class _MasterMILPData:
     integrality: np.ndarray
     use_objective_epigraph: bool
     slack_index: Optional[int]
+
+
+@dataclass
+class _ShotMIPSolutionLimitState:
+    """Small state machine for SHOT-style early MIP incumbent limits."""
+
+    strategy: str
+    capacity: int
+    backend: str
+    current_limit: Optional[int] = None
+    updates: int = 0
+    last_update_reason: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        self.capacity = max(1, int(self.capacity))
+        if self.strategy in {"auto", "adaptive"}:
+            self.current_limit = 1
+            self.last_update_reason = "initial"
+        elif self.strategy == "static":
+            self.current_limit = self.capacity
+            self.last_update_reason = "static"
+        else:
+            self.current_limit = None
+            self.last_update_reason = "disabled"
+
+    @property
+    def enabled(self) -> bool:
+        return self.strategy in {"auto", "adaptive", "static"}
+
+    @property
+    def supported(self) -> bool:
+        return self.backend == _SHOT_MASTER_FEATURE_BACKEND
+
+    @property
+    def requested_limit(self) -> Optional[int]:
+        if not self.enabled or not self.supported or self.current_limit is None:
+            return None
+        return max(1, int(self.current_limit))
+
+    @property
+    def degraded_reason(self) -> Optional[str]:
+        if self.enabled and not self.supported:
+            return "mip_solution_limit_strategy requires milp_solver='gurobi'"
+        return None
+
+    def as_trace_dict(self) -> dict[str, object]:
+        return {
+            "strategy": self.strategy,
+            "enabled": bool(self.enabled),
+            "supported": bool(self.supported),
+            "limit": self.requested_limit,
+            "raw_limit": self.current_limit,
+            "capacity": int(self.capacity),
+            "updates": int(self.updates),
+            "last_update_reason": self.last_update_reason,
+            "degraded_reason": self.degraded_reason,
+        }
+
+    def observe_iteration(
+        self,
+        *,
+        incumbent_improved: bool,
+        cuts_added: int,
+        master_status: str,
+    ) -> dict[str, object]:
+        before = self.current_limit
+        reason = "unchanged"
+        if self.strategy in {"auto", "adaptive"}:
+            if incumbent_improved:
+                self.current_limit = 1
+                reason = "incumbent_improved"
+            elif master_status in {"optimal", "iteration_limit", "time_limit"} and cuts_added <= 0:
+                self.current_limit = min(self.capacity, max(1, int(self.current_limit or 1) + 1))
+                reason = "no_new_cuts"
+            else:
+                reason = "cuts_added"
+        elif self.strategy == "static":
+            self.current_limit = self.capacity
+            reason = "static"
+        elif self.strategy == "force_optimal":
+            self.current_limit = None
+            reason = "force_optimal"
+        else:
+            self.current_limit = None
+            reason = "disabled"
+
+        if before != self.current_limit:
+            self.updates += 1
+        self.last_update_reason = reason
+        out = self.as_trace_dict()
+        out["previous_raw_limit"] = before
+        out["update_reason"] = reason
+        return out
+
+
+def _shot_master_feature_supported(milp_solver: str) -> bool:
+    return str(milp_solver).lower() == _SHOT_MASTER_FEATURE_BACKEND
+
+
+def _extend_master_mip_start(
+    master: _MasterMILPData,
+    *,
+    n_vars: int,
+    mip_start,
+    mip_start_objective: Optional[float],
+) -> Optional[np.ndarray]:
+    if mip_start is None:
+        return None
+    start = np.asarray(mip_start, dtype=np.float64).ravel()
+    if start.size < n_vars:
+        return None
+    full = np.zeros(len(master.c), dtype=np.float64)
+    for idx in range(n_vars):
+        lo, hi = master.bounds[idx]
+        full[idx] = min(max(float(start[idx]), float(lo)), float(hi))
+    next_index = n_vars
+    if master.use_objective_epigraph:
+        if mip_start_objective is None or not np.isfinite(float(mip_start_objective)):
+            return None
+        lo, hi = master.bounds[next_index]
+        full[next_index] = min(max(float(mip_start_objective), float(lo)), float(hi))
+    if master.slack_index is not None:
+        lo, hi = master.bounds[master.slack_index]
+        full[master.slack_index] = min(max(0.0, float(lo)), float(hi))
+    return full
 
 
 # ── Problem Decomposition ─────────────────────────────────────
@@ -2310,10 +2438,17 @@ def _solve_master_milp(
     milp_solver="auto",
     solution_pool=False,
     num_solution_iteration=5,
+    mip_start=None,
+    mip_start_objective: Optional[float] = None,
+    objective_cutoff: Optional[float] = None,
+    mip_solution_limit: Optional[int] = None,
 ):
     """Build and solve the master MILP."""
     try:
-        if solution_pool:
+        gurobi_controls = (
+            objective_cutoff is not None or mip_solution_limit is not None or mip_start is not None
+        )
+        if solution_pool or (gurobi_controls and _shot_master_feature_supported(milp_solver)):
             _require_solution_pool_backend(milp_solver)
             from discopt.solvers.gurobi import solve_milp
         else:
@@ -2346,29 +2481,49 @@ def _solve_master_milp(
         use_objective_epigraph=use_objective_epigraph,
     )
 
-    return solve_milp(
-        c=master.c,
-        A_ub=master.A_ub,
-        b_ub=master.b_ub,
-        A_eq=master.A_eq,
-        b_eq=master.b_eq,
-        bounds=master.bounds,
-        integrality=master.integrality,
-        time_limit=time_limit,
-        gap_tolerance=gap_tolerance,
-        **(
-            {
-                "options": {
+    full_mip_start = None
+    if _shot_master_feature_supported(milp_solver):
+        full_mip_start = _extend_master_mip_start(
+            master,
+            n_vars=n_vars,
+            mip_start=mip_start,
+            mip_start_objective=mip_start_objective,
+        )
+    gurobi_options: dict[str, object] = {}
+    if _shot_master_feature_supported(milp_solver):
+        if objective_cutoff is not None:
+            gurobi_options["Cutoff"] = float(objective_cutoff)
+        if mip_solution_limit is not None:
+            gurobi_options["SolutionLimit"] = max(1, int(mip_solution_limit))
+        if solution_pool:
+            gurobi_options.update(
+                {
                     "PoolSearchMode": 2,
                     "PoolSolutions": max(1, int(num_solution_iteration)),
-                },
-                "solution_pool": True,
-                "num_solution_iteration": max(1, int(num_solution_iteration)),
-            }
-            if solution_pool
-            else {}
-        ),
-    )
+                }
+            )
+
+    solve_kwargs: dict[str, Any] = {
+        "c": master.c,
+        "A_ub": master.A_ub,
+        "b_ub": master.b_ub,
+        "A_eq": master.A_eq,
+        "b_eq": master.b_eq,
+        "bounds": master.bounds,
+        "integrality": master.integrality,
+        "time_limit": time_limit,
+        "gap_tolerance": gap_tolerance,
+    }
+    if gurobi_options:
+        solve_kwargs["options"] = gurobi_options
+    if full_mip_start is not None:
+        solve_kwargs["mip_start"] = full_mip_start
+    if solution_pool:
+        solve_kwargs["solution_pool"] = True
+        solve_kwargs["num_solution_iteration"] = max(1, int(num_solution_iteration))
+
+    solve_milp_any: Any = solve_milp
+    return solve_milp_any(**solve_kwargs)
 
 
 def _solve_initial_poa_master(
@@ -3553,6 +3708,21 @@ def solve_oa(
     )
     heuristic_nonconvex = bool(heuristic_nonconvex)
     solution_pool = bool(solution_pool)
+    shot_solution_pool_degraded_reason: Optional[str] = None
+    if mip_nlp_profile == "shot" and mip_nlp_shot_config is not None:
+        if mip_nlp_shot_config.solution_pool_capacity is not None:
+            num_solution_iteration = int(mip_nlp_shot_config.solution_pool_capacity)
+        shot_pool_requested = (
+            mip_nlp_shot_config.fixed_nlp_strategy == "solution_pool"
+            or mip_nlp_shot_config.solution_pool_capacity is not None
+        )
+        if shot_pool_requested and not solution_pool:
+            if _shot_master_feature_supported(milp_solver):
+                solution_pool = True
+            else:
+                shot_solution_pool_degraded_reason = (
+                    "fixed_nlp_strategy='solution_pool' requires milp_solver='gurobi'"
+                )
     if solution_pool:
         _require_solution_pool_backend(milp_solver)
     if add_regularization is not None and ecp_mode:
@@ -3623,11 +3793,23 @@ def solve_oa(
     initial_poa_trace: Optional[dict[str, object]] = None
     interior_point_store = None
     shot_cut_strategy = "auto"
+    shot_solution_limit_state: Optional[_ShotMIPSolutionLimitState] = None
+    shot_unsupported_backend_features: set[str] = set()
+    shot_master_backend_supported = _shot_master_feature_supported(milp_solver)
+    if shot_solution_pool_degraded_reason is not None:
+        shot_unsupported_backend_features.add("solution_pool")
     if mip_nlp_profile == "shot":
         from discopt.solvers.mip_nlp_rootsearch import MIPNLPInteriorPointStore
 
         if mip_nlp_shot_config is not None:
             shot_cut_strategy = mip_nlp_shot_config.cut_strategy
+            shot_solution_limit_state = _ShotMIPSolutionLimitState(
+                strategy=mip_nlp_shot_config.mip_solution_limit_strategy,
+                capacity=num_solution_iteration,
+                backend=str(milp_solver).lower(),
+            )
+            if shot_solution_limit_state.degraded_reason is not None:
+                shot_unsupported_backend_features.add("mip_solution_limit")
         interior_point_store = MIPNLPInteriorPointStore(
             n_vars,
             int_indices=decomp.int_indices,
@@ -3688,6 +3870,10 @@ def solve_oa(
             "cut_source_counts": cut_provenance.source_counts(),
             "solution_pool_candidates": int(solution_pool_candidate_count),
         }
+        if shot_solution_limit_state is not None:
+            summary["mip_solution_limit"] = shot_solution_limit_state.as_trace_dict()
+        if shot_unsupported_backend_features:
+            summary["unsupported_backend_features"] = sorted(shot_unsupported_backend_features)
         if interior_point_store is not None:
             interior_counts = Counter(record.source for record in interior_point_store.records)
             summary["interior_point_count"] = int(len(interior_point_store.records))
@@ -3719,6 +3905,8 @@ def solve_oa(
             "final_ub": final_ub,
             "final_gap": final_gap,
         }
+        if shot_solution_pool_degraded_reason is not None:
+            trace["solution_pool_degraded_reason"] = shot_solution_pool_degraded_reason
         if initial_poa_trace is not None:
             trace["initial_poa"] = dict(initial_poa_trace)
         return trace
@@ -3739,6 +3927,85 @@ def solve_oa(
             require_feasible=True,
         )
         return record is not None
+
+    def _shot_disabled_relaxation_trace() -> Optional[dict[str, object]]:
+        if mip_nlp_profile != "shot" or mip_nlp_shot_config is None:
+            return None
+        phase = mip_nlp_shot_config.relaxation_phase
+        return {
+            "phase": phase,
+            "enabled": False,
+            "attempted": False,
+            "status": "disabled",
+            "fallback_reason": f"relaxation_phase={phase}",
+            "cuts_added": 0,
+            "provenance_cuts_added": 0,
+            "objective_bound": None,
+            "objective_bound_valid": False,
+            "node_count": 0,
+        }
+
+    def _shot_objective_cutoff() -> Optional[float]:
+        if incumbent_obj is None or not master_bound_valid:
+            return None
+        cutoff = float(incumbent_obj)
+        if not np.isfinite(cutoff):
+            return None
+        return cutoff + 1e-8 * (1.0 + abs(cutoff))
+
+    def _shot_master_controls() -> tuple[
+        dict[str, object], Optional[np.ndarray], Optional[float], Optional[int]
+    ]:
+        if mip_nlp_profile != "shot" or mip_nlp_shot_config is None:
+            return {}, None, None, None
+
+        start_requested = incumbent is not None
+        cutoff_requested = _shot_objective_cutoff() is not None
+        objective_cutoff = _shot_objective_cutoff() if shot_master_backend_supported else None
+        mip_start = incumbent if start_requested and shot_master_backend_supported else None
+        limit = shot_solution_limit_state.requested_limit if shot_solution_limit_state else None
+
+        if start_requested and not shot_master_backend_supported:
+            shot_unsupported_backend_features.add("mip_start")
+        if cutoff_requested and not shot_master_backend_supported:
+            shot_unsupported_backend_features.add("objective_cutoff")
+
+        unsupported_reason = None
+        if not shot_master_backend_supported:
+            unsupported_reason = "requires milp_solver='gurobi'"
+        trace = {
+            "backend": str(milp_solver),
+            "backend_supported": bool(shot_master_backend_supported),
+            "mip_start": {
+                "requested": bool(start_requested),
+                "supported": bool(shot_master_backend_supported),
+                "applied": bool(mip_start is not None),
+                "degraded_reason": unsupported_reason if start_requested else None,
+            },
+            "objective_cutoff": {
+                "requested": bool(cutoff_requested),
+                "supported": bool(shot_master_backend_supported),
+                "applied": bool(objective_cutoff is not None),
+                "value": _trace_value(objective_cutoff),
+                "degraded_reason": unsupported_reason if cutoff_requested else None,
+            },
+            "mip_solution_limit": (
+                shot_solution_limit_state.as_trace_dict()
+                if shot_solution_limit_state is not None
+                else {
+                    "strategy": "none",
+                    "enabled": False,
+                    "supported": bool(shot_master_backend_supported),
+                    "limit": None,
+                    "raw_limit": None,
+                    "capacity": 0,
+                    "updates": 0,
+                    "last_update_reason": "disabled",
+                    "degraded_reason": None,
+                }
+            ),
+        }
+        return trace, mip_start, objective_cutoff, limit
 
     # If no integer variables, just solve the NLP directly
     if len(decomp.int_indices) == 0:
@@ -4105,6 +4372,169 @@ def solve_oa(
         feasibility_before = feasibility_subproblem_count
         lb_before = _trace_value(LB)
         ub_before = _trace_value(UB)
+        relaxation_phase_record = _shot_disabled_relaxation_trace()
+        if (
+            mip_nlp_profile == "shot"
+            and mip_nlp_shot_config is not None
+            and mip_nlp_shot_config.relaxation_phase in _PERIODIC_RELAXATION_PHASES
+        ):
+            relaxation_phase_record = {
+                "phase": mip_nlp_shot_config.relaxation_phase,
+                "enabled": True,
+                "attempted": True,
+                "status": "running",
+                "fallback_reason": None,
+                "bound_before": _trace_value(LB),
+                "cuts_added": 0,
+                "provenance_cuts_added": 0,
+                "objective_bound": None,
+                "objective_bound_valid": False,
+                "interior_point_candidates": 0,
+                "interior_points_stored": 0,
+                "node_count": 0,
+            }
+            relax_cuts_before = len(oa_A_rows)
+            relax_provenance_before = len(cut_provenance.records)
+            try:
+                relax_result = _solve_initial_poa_master(
+                    decomp,
+                    oa_A_rows,
+                    oa_b_rows,
+                    master_bound_valid=master_bound_valid,
+                    time_limit=max(time_limit - elapsed, 0.0),
+                    gap_tolerance=gap_tolerance,
+                    add_slack=add_slack,
+                    max_slack=max_slack,
+                    oa_penalty_factor=oa_penalty_factor,
+                    oa_cut_relaxable=oa_cut_relaxable,
+                    milp_solver=milp_solver,
+                )
+                mip_count += 1
+            except Exception as exc:
+                relaxation_phase_record.update(
+                    {
+                        "status": "fallback",
+                        "fallback_reason": f"{type(exc).__name__}: {exc}",
+                        "bound_after": _trace_value(LB),
+                    }
+                )
+            else:
+                status_name = "none" if relax_result is None else _trace_status(relax_result.status)
+                if relax_result is None or relax_result.x is None:
+                    relaxation_phase_record.update(
+                        {
+                            "status": "fallback",
+                            "fallback_reason": f"master_status={status_name}",
+                            "bound_after": _trace_value(LB),
+                        }
+                    )
+                elif status_name not in {"optimal", "iteration_limit"}:
+                    relaxation_phase_record.update(
+                        {
+                            "status": "fallback",
+                            "fallback_reason": f"master_status={status_name}",
+                            "node_count": int(getattr(relax_result, "node_count", 0) or 0),
+                            "bound_after": _trace_value(LB),
+                        }
+                    )
+                else:
+                    relax_x_raw = np.asarray(relax_result.x, dtype=np.float64).reshape(-1)
+                    if relax_x_raw.size < n_vars:
+                        relaxation_phase_record.update(
+                            {
+                                "status": "fallback",
+                                "fallback_reason": f"master_solution_size={relax_x_raw.size}",
+                                "node_count": int(getattr(relax_result, "node_count", 0) or 0),
+                                "bound_after": _trace_value(LB),
+                            }
+                        )
+                    else:
+                        x_relax_phase = np.clip(relax_x_raw[:n_vars], decomp.lb, decomp.ub)
+                        objective_bound = None
+                        if master_bound_valid and relax_result.bound is not None:
+                            objective_bound = float(relax_result.bound)
+                            LB = max(LB, objective_bound)
+                        stored_relax_interior = _record_interior_point(
+                            x_relax_phase,
+                            "relaxation_phase",
+                            {
+                                "objective_bound": _trace_value(objective_bound),
+                                "iteration": int(iteration),
+                                "node_count": int(getattr(relax_result, "node_count", 0) or 0),
+                            },
+                        )
+                        _add_oa_cuts(
+                            evaluator,
+                            x_relax_phase,
+                            n_vars,
+                            n_cons,
+                            decomp.constraint_senses,
+                            oa_A_rows,
+                            oa_b_rows,
+                            decomp.obj_is_linear,
+                            decomp.oa_constraint_mask,
+                            decomp.oa_objective_is_convex,
+                            equality_relaxation=equality_relaxation,
+                            oa_cut_relaxable=oa_cut_relaxable,
+                            cut_provenance=cut_provenance,
+                            constraint_source="relaxation_phase",
+                        )
+                        cuts_added = int(len(oa_A_rows) - relax_cuts_before)
+                        provenance_added = int(
+                            len(cut_provenance.records) - relax_provenance_before
+                        )
+                        relaxation_phase_record.update(
+                            {
+                                "status": "seeded" if cuts_added else "no_new_cuts",
+                                "fallback_reason": None,
+                                "cuts_added": cuts_added,
+                                "provenance_cuts_added": provenance_added,
+                                "objective_bound": _trace_value(objective_bound),
+                                "objective_bound_valid": bool(
+                                    master_bound_valid and objective_bound is not None
+                                ),
+                                "bound_after": _trace_value(LB),
+                                "interior_point_candidates": int(1 if stored_relax_interior else 0),
+                                "interior_points_stored": int(1 if stored_relax_interior else 0),
+                                "node_count": int(getattr(relax_result, "node_count", 0) or 0),
+                            }
+                        )
+
+        elapsed = time.perf_counter() - t_start
+        if elapsed >= time_limit:
+            logger.info("OA: Time limit reached after relaxation phase at iteration %d", iteration)
+            termination_reason = "time_limit"
+            trace_iterations.append(
+                {
+                    "index": int(iteration),
+                    "master_status": "not_run",
+                    "lb_before": lb_before,
+                    "ub_before": ub_before,
+                    "lb": _trace_value(LB),
+                    "ub": _trace_value(UB),
+                    "gap": _trace_value(_compute_gap(LB, UB)),
+                    "cuts_added": int(len(oa_A_rows) - cuts_before),
+                    "cuts_total": int(len(oa_A_rows)),
+                    "provenance_cuts_added": int(len(cut_provenance.records) - provenance_before),
+                    "provenance_cuts_total": int(len(cut_provenance.records)),
+                    "cuts_added_by_source": _cut_source_delta(cut_source_counts_before),
+                    "nlp_subproblem_count": int(nlp_subproblem_count - nlp_before),
+                    "feasibility_subproblem_count": int(
+                        feasibility_subproblem_count - feasibility_before
+                    ),
+                    "solution_pool_candidates": 0,
+                    "node_count": 0,
+                    "repair_actions": [],
+                    "relaxation_phase": relaxation_phase_record,
+                    "master_controls": {},
+                    "termination_reason": termination_reason,
+                }
+            )
+            break
+
+        master_control_trace, master_mip_start, master_objective_cutoff, master_solution_limit = (
+            _shot_master_controls()
+        )
         master_result = _solve_master_milp(
             decomp.linear_A_rows,
             decomp.linear_b_rows,
@@ -4128,6 +4558,10 @@ def solve_oa(
             milp_solver=milp_solver,
             solution_pool=solution_pool,
             num_solution_iteration=num_solution_iteration,
+            mip_start=master_mip_start,
+            mip_start_objective=incumbent_obj,
+            objective_cutoff=master_objective_cutoff,
+            mip_solution_limit=master_solution_limit,
         )
         mip_count += 1
 
@@ -4157,6 +4591,46 @@ def solve_oa(
                     "solution_pool_candidates": 0,
                     "node_count": 0,
                     "repair_actions": [],
+                    "relaxation_phase": relaxation_phase_record,
+                    "master_controls": master_control_trace,
+                    "termination_reason": termination_reason,
+                }
+            )
+            break
+
+        if master_result.status == SolveStatus.CUTOFF:
+            cutoff_bound = master_result.bound
+            if cutoff_bound is None:
+                cutoff_bound = master_objective_cutoff
+            if master_bound_valid and cutoff_bound is not None:
+                LB = max(LB, float(cutoff_bound))
+            gap = _compute_gap(LB, UB)
+            termination_reason = (
+                "gap" if master_bound_valid and gap <= gap_tolerance else "master_cutoff"
+            )
+            trace_iterations.append(
+                {
+                    "index": int(iteration),
+                    "master_status": _trace_status(master_result.status),
+                    "lb_before": lb_before,
+                    "ub_before": ub_before,
+                    "lb": _trace_value(LB),
+                    "ub": _trace_value(UB),
+                    "gap": _trace_value(gap),
+                    "cuts_added": int(len(oa_A_rows) - cuts_before),
+                    "cuts_total": int(len(oa_A_rows)),
+                    "provenance_cuts_added": int(len(cut_provenance.records) - provenance_before),
+                    "provenance_cuts_total": int(len(cut_provenance.records)),
+                    "cuts_added_by_source": _cut_source_delta(cut_source_counts_before),
+                    "nlp_subproblem_count": int(nlp_subproblem_count - nlp_before),
+                    "feasibility_subproblem_count": int(
+                        feasibility_subproblem_count - feasibility_before
+                    ),
+                    "solution_pool_candidates": 0,
+                    "node_count": int(getattr(master_result, "node_count", 0) or 0),
+                    "repair_actions": [],
+                    "relaxation_phase": relaxation_phase_record,
+                    "master_controls": master_control_trace,
                     "termination_reason": termination_reason,
                 }
             )
@@ -4186,6 +4660,8 @@ def solve_oa(
                     "solution_pool_candidates": 0,
                     "node_count": int(getattr(master_result, "node_count", 0) or 0),
                     "repair_actions": [],
+                    "relaxation_phase": relaxation_phase_record,
+                    "master_controls": master_control_trace,
                     "termination_reason": termination_reason,
                 }
             )
@@ -4233,6 +4709,8 @@ def solve_oa(
                     "solution_pool_candidates": 0,
                     "node_count": int(getattr(master_result, "node_count", 0) or 0),
                     "repair_actions": [],
+                    "relaxation_phase": relaxation_phase_record,
+                    "master_controls": master_control_trace,
                     "termination_reason": "master_unbounded",
                 }
             )
@@ -4298,6 +4776,7 @@ def solve_oa(
             num_solution_iteration=num_solution_iteration,
         )
         solution_pool_candidate_count += len(master_candidates)
+        incumbent_obj_before_iteration = incumbent_obj
         iteration_record: dict[str, object] = {
             "index": int(iteration),
             "master_status": _trace_status(master_result.status),
@@ -4306,6 +4785,8 @@ def solve_oa(
             "solution_pool_candidates": int(len(master_candidates)),
             "node_count": int(getattr(master_result, "node_count", 0) or 0),
             "repair_actions": [],
+            "relaxation_phase": relaxation_phase_record,
+            "master_controls": master_control_trace,
         }
         stop_after_master_pool = False
         pool_integer_assignments_seen: set[tuple[float, ...]] = set()
@@ -4565,12 +5046,25 @@ def solve_oa(
 
         if stop_after_master_pool:
             iteration_record["termination_reason"] = termination_reason
+        iteration_cuts_added = int(len(oa_A_rows) - cuts_before)
+        incumbent_improved = incumbent_obj is not None and (
+            incumbent_obj_before_iteration is None
+            or float(incumbent_obj) < float(incumbent_obj_before_iteration) - 1e-12
+        )
+        if shot_solution_limit_state is not None:
+            iteration_record["mip_solution_limit_update"] = (
+                shot_solution_limit_state.observe_iteration(
+                    incumbent_improved=incumbent_improved,
+                    cuts_added=iteration_cuts_added,
+                    master_status=str(iteration_record["master_status"]),
+                )
+            )
         iteration_record.update(
             {
                 "lb": _trace_value(LB),
                 "ub": _trace_value(UB),
                 "gap": _trace_value(_compute_gap(LB, UB)),
-                "cuts_added": int(len(oa_A_rows) - cuts_before),
+                "cuts_added": iteration_cuts_added,
                 "cuts_total": int(len(oa_A_rows)),
                 "provenance_cuts_added": int(len(cut_provenance.records) - provenance_before),
                 "provenance_cuts_total": int(len(cut_provenance.records)),

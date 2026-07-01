@@ -146,8 +146,11 @@ linearization cuts through the MIP-NLP cut provenance ledger, and updates the
 initial master bound only when the active convexity certificates make that bound
 globally valid. `relaxation_phase="off"` disables this pass, and failures fall
 back to the existing initialization path with details in
-`result.mip_nlp_trace["initial_poa"]`. `relaxation_phase="periodic"` remains a
-reserved roadmap value and does not schedule periodic POA solves yet.
+`result.mip_nlp_trace["initial_poa"]`. `relaxation_phase="periodic"` also
+solves an integrality-relaxed master before each integer master iteration and
+records the phase state under each iteration's `relaxation_phase` trace entry.
+Failures fall back to the existing OA/ECP path with details in the iteration
+trace.
 
 SHOT-profile runs also maintain an internal provenance-aware interior-point
 store for feasible relaxation, incumbent, and initial-POA points. Reusable
@@ -166,6 +169,22 @@ selected cuts. Convex nonlinear objective epigraphs can also receive
 `objective_rootsearch` hyperplanes. Non-global local cuts are marked in cut
 provenance, guarded so they do not cut off the known incumbent, and make reported
 master bounds heuristic rather than certified.
+
+The SHOT multi-tree loop also traces per-master orchestration controls. With
+`milp_solver="gurobi"`, incumbent points are passed back to the master as MIP
+starts, incumbent objectives become objective cutoffs when the active master
+bound is globally valid, and `mip_solution_limit_strategy` can request native
+Gurobi `SolutionLimit` behavior. `"static"` uses the configured
+`solution_pool_capacity`/candidate cap, `"adaptive"` and `"auto"` start at one
+solution and increase after nonproductive iterations, `"none"` disables the
+limit, and `"force_optimal"` leaves the master uncapped. Unsupported backends do
+not receive silent no-op parameters; the trace records degraded features under
+`master_controls` and `summary["unsupported_backend_features"]`.
+
+`fixed_nlp_strategy="solution_pool"` or an explicit `solution_pool_capacity`
+uses the existing Gurobi solution-pool candidate ingestion path when
+`milp_solver="gurobi"`. Other backends keep the single incumbent candidate and
+record the degradation in the trace.
 
 The remaining reformulation controls are validated and traced under the SHOT
 profile so follow-up SHOT parity PRs can attach behavior without changing the

@@ -204,6 +204,9 @@ def _status_map(GRB) -> dict[int, SolveStatus]:
         GRB.ITERATION_LIMIT: SolveStatus.ITERATION_LIMIT,
         GRB.TIME_LIMIT: SolveStatus.TIME_LIMIT,
     }
+    cutoff = getattr(GRB, "CUTOFF", None)
+    if cutoff is not None:
+        mapping[cutoff] = SolveStatus.CUTOFF
     for name in ("NODE_LIMIT", "SOLUTION_LIMIT"):
         code = getattr(GRB, name, None)
         if code is not None:
@@ -431,6 +434,7 @@ def solve_milp(
     options: Optional[dict] = None,
     solution_pool: bool = False,
     num_solution_iteration: int = 5,
+    mip_start: Optional[np.ndarray] = None,
 ) -> MILPResult:
     """Solve a mixed-integer linear program using Gurobi."""
     c_arr, _n = _validate_linear_data(c, A_ub, b_ub, A_eq, b_eq, bounds)
@@ -457,6 +461,13 @@ def solve_milp(
         options=merged_options,
     )
     try:
+        if mip_start is not None:
+            start = np.asarray(mip_start, dtype=np.float64).ravel()
+            if start.shape[0] != c_arr.shape[0]:
+                raise ValueError(
+                    f"mip_start has {start.shape[0]} entries but c has {c_arr.shape[0]}"
+                )
+            x.Start = start
         status_code = _optimize(model, GRB)
         status = _status_map(GRB).get(status_code, SolveStatus.ERROR)
         node_count = int(_safe_attr(model, "NodeCount") or 0)

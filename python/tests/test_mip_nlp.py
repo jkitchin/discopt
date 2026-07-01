@@ -422,6 +422,157 @@ def test_mip_nlp_shot_initial_poa_adds_initial_cuts_integration():
     assert enabled_trace["summary"]["cut_source_counts"]["initial_poa"] >= 1
 
 
+def test_mip_nlp_shot_adaptive_solution_limit_state_transitions():
+    import discopt.solvers.oa as oa_module
+
+    state = oa_module._ShotMIPSolutionLimitState(
+        strategy="adaptive",
+        capacity=3,
+        backend="gurobi",
+    )
+
+    assert state.as_trace_dict()["limit"] == 1
+    update = state.observe_iteration(
+        incumbent_improved=False,
+        cuts_added=0,
+        master_status="optimal",
+    )
+    assert update["raw_limit"] == 2
+    assert update["update_reason"] == "no_new_cuts"
+
+    update = state.observe_iteration(
+        incumbent_improved=False,
+        cuts_added=0,
+        master_status="optimal",
+    )
+    assert update["raw_limit"] == 3
+
+    update = state.observe_iteration(
+        incumbent_improved=True,
+        cuts_added=0,
+        master_status="optimal",
+    )
+    assert update["raw_limit"] == 1
+    assert update["update_reason"] == "incumbent_improved"
+
+    unsupported = oa_module._ShotMIPSolutionLimitState(
+        strategy="static",
+        capacity=2,
+        backend="highs",
+    )
+    assert unsupported.as_trace_dict()["limit"] is None
+    assert "gurobi" in unsupported.as_trace_dict()["degraded_reason"]
+
+
+def test_mip_nlp_shot_master_controls_forward_to_gurobi(monkeypatch):
+    import discopt.solvers.gurobi as gurobi_module
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers import MILPResult, SolveStatus
+
+    captured = {}
+
+    def fake_solve_milp(**kwargs):
+        captured.update(kwargs)
+        return MILPResult(status=SolveStatus.OPTIMAL, x=np.array([1.0]), bound=1.0)
+
+    monkeypatch.setattr(gurobi_module, "solve_milp", fake_solve_milp)
+
+    oa_module._solve_master_milp(
+        linear_A_rows=[],
+        linear_b_rows=[],
+        linear_senses=[],
+        oa_A_rows=[],
+        oa_b_rows=[],
+        n_vars=1,
+        integrality=np.array([1], dtype=np.int32),
+        lb=np.array([0.0]),
+        ub=np.array([1.0]),
+        obj_coeffs=(np.array([1.0]), 0.0),
+        obj_is_linear=True,
+        objective_bound_valid=True,
+        time_limit=10.0,
+        gap_tolerance=1e-4,
+        milp_solver="gurobi",
+        mip_start=np.array([1.0]),
+        mip_start_objective=1.0,
+        objective_cutoff=1.1,
+        mip_solution_limit=2,
+    )
+
+    assert captured["options"]["Cutoff"] == pytest.approx(1.1)
+    assert captured["options"]["SolutionLimit"] == 2
+    assert captured["mip_start"].tolist() == pytest.approx([1.0])
+
+
+def test_mip_nlp_shot_master_controls_trace_unsupported_backend(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers import MILPResult, SolveStatus
+
+    master_calls = []
+
+    def fake_master(*args, **kwargs):
+        master_calls.append(kwargs)
+        return MILPResult(
+            status=SolveStatus.OPTIMAL,
+            x=np.array([0.0]),
+            objective=0.0,
+            bound=0.0,
+        )
+
+    def fake_nlp(*args, **kwargs):
+        x_master = np.asarray(args[4], dtype=float)
+        return x_master.copy(), float(x_master[0])
+
+    monkeypatch.setattr(oa_module, "_solve_master_milp", fake_master)
+    monkeypatch.setattr(oa_module, "_solve_nlp_subproblem", fake_nlp)
+    monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+
+    result = oa_module.solve_oa(
+        _binary_model("shot_unsupported_master_controls"),
+        init_strategy="initial_binary",
+        max_iterations=1,
+        milp_solver="highs",
+        mip_nlp_profile="shot",
+        mip_nlp_shot_config=oa_module.MIPNLPShotConfig(
+            relaxation_phase="off",
+            mip_solution_limit_strategy="static",
+        ),
+    )
+
+    assert result.status == "optimal"
+    assert master_calls[0]["mip_start"] is None
+    assert master_calls[0]["objective_cutoff"] is None
+    assert master_calls[0]["mip_solution_limit"] is None
+    controls = result.mip_nlp_trace["iterations"][0]["master_controls"]
+    assert controls["backend_supported"] is False
+    assert controls["mip_start"]["requested"] is True
+    assert "gurobi" in controls["mip_start"]["degraded_reason"]
+    assert "mip_solution_limit" in result.mip_nlp_trace["summary"]["unsupported_backend_features"]
+
+
+@pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
+def test_mip_nlp_shot_periodic_relaxation_phase_runs_before_integer_master():
+    import discopt.solvers.oa as oa_module
+
+    result = oa_module.solve_oa(
+        _initial_poa_fixture("shot_periodic_relaxation_phase"),
+        init_strategy="initial_binary",
+        ecp_mode=True,
+        max_iterations=1,
+        milp_solver="highs",
+        mip_nlp_profile="shot",
+        mip_nlp_shot_config=oa_module.MIPNLPShotConfig(relaxation_phase="periodic"),
+    )
+
+    trace = result.mip_nlp_trace
+    phase = trace["iterations"][0]["relaxation_phase"]
+    assert phase["enabled"] is True
+    assert phase["attempted"] is True
+    assert phase["status"] in {"seeded", "no_new_cuts"}
+    assert trace["summary"]["mip_count"] == 2
+    assert trace["summary"]["cut_source_counts"]["relaxation_phase"] >= 0
+
+
 def test_mip_nlp_shot_esh_generates_rootsearch_cut_with_provenance():
     import discopt.solvers.oa as oa_module
     from discopt.solvers.mip_nlp_rootsearch import MIPNLPInteriorPointStore
@@ -2100,6 +2251,77 @@ def test_oa_solution_pool_processes_multiple_master_candidates(monkeypatch):
     assert result.mip_nlp_trace["summary"]["solution_pool_candidates"] == 2
     assert result.mip_nlp_trace["iterations"][0]["solution_pool_candidates"] == 2
     assert result.mip_nlp_trace["iterations"][0]["cuts_added"] == 2
+
+
+def test_mip_nlp_shot_solution_pool_strategy_uses_candidate_pool(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers import MILPResult, SolveStatus
+
+    nlp_master_points = []
+    master_calls = []
+
+    def fake_add_oa_cuts(*args, **kwargs):
+        n_vars = int(args[2])
+        oa_A_rows = args[5]
+        oa_b_rows = args[6]
+        oa_A_rows.append(np.zeros(n_vars, dtype=float))
+        oa_b_rows.append(0.0)
+        if kwargs.get("oa_cut_relaxable") is not None:
+            kwargs["oa_cut_relaxable"].append(True)
+
+    def fake_solve_nlp_subproblem(
+        _evaluator,
+        _lb,
+        _ub,
+        _int_indices,
+        x_master,
+        _nlp_solver,
+        initial_point=None,
+        return_attempt=False,
+    ):
+        del initial_point
+        x = np.asarray(x_master, dtype=float).copy()
+        nlp_master_points.append(x)
+        obj = 10.0 - float(x[0])
+        if return_attempt:
+            return oa_module._NLPAttempt(x=x, objective=obj, multipliers=None)
+        return x, obj
+
+    def fake_solve_master_milp(*args, **kwargs):
+        master_calls.append(kwargs)
+        return MILPResult(
+            status=SolveStatus.OPTIMAL,
+            x=np.array([0.0]),
+            objective=0.0,
+            bound=-100.0,
+            solution_pool=[np.array([0.0]), np.array([1.0])],
+            solution_pool_objectives=[0.0, 1.0],
+        )
+
+    monkeypatch.setattr(oa_module, "_add_oa_cuts", fake_add_oa_cuts)
+    monkeypatch.setattr(oa_module, "_solve_nlp_subproblem", fake_solve_nlp_subproblem)
+    monkeypatch.setattr(oa_module, "_solve_master_milp", fake_solve_master_milp)
+
+    result = oa_module.solve_oa(
+        _binary_model("shot_solution_pool_strategy"),
+        init_strategy="initial_binary",
+        max_iterations=1,
+        gap_tolerance=0.0,
+        milp_solver="gurobi",
+        mip_nlp_profile="shot",
+        mip_nlp_shot_config=oa_module.MIPNLPShotConfig(
+            fixed_nlp_strategy="solution_pool",
+            solution_pool_capacity=2,
+            relaxation_phase="off",
+            mip_solution_limit_strategy="none",
+        ),
+    )
+
+    assert master_calls[0]["solution_pool"] is True
+    assert master_calls[0]["num_solution_iteration"] == 2
+    assert [point.tolist() for point in nlp_master_points[1:]] == [[0.0], [1.0]]
+    assert result.mip_nlp_trace["iterations"][0]["solution_pool_candidates"] == 2
+    assert result.mip_nlp_trace["summary"]["solution_pool_candidates"] == 2
 
 
 def test_oa_initial_binary_seed_rounds_and_clamps_discrete_values():

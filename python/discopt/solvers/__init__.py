@@ -13,6 +13,7 @@ class SolveStatus(Enum):
     UNBOUNDED = "unbounded"
     ITERATION_LIMIT = "iteration_limit"
     TIME_LIMIT = "time_limit"
+    CUTOFF = "cutoff"
     ERROR = "error"
 
 
