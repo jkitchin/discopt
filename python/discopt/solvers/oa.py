@@ -685,6 +685,20 @@ def _build_integer_binary_expansion(
     )
 
 
+def _warn_integer_to_binary_noop(
+    solver_name: str,
+    *,
+    integer_to_binary: bool,
+    add_no_good_cuts: bool,
+) -> None:
+    if integer_to_binary and not add_no_good_cuts:
+        logger.warning(
+            "%s: integer_to_binary=True ignored because add_no_good_cuts=False; "
+            "integer-to-binary expansion is only used for no-good cuts.",
+            solver_name,
+        )
+
+
 def _stored_row_uses_integer_binary_expansion(
     row: np.ndarray,
     n_vars: int,
@@ -3451,6 +3465,11 @@ def solve_lp_nlp_bb(
     add_slack = bool(add_slack)
     add_no_good_cuts = bool(add_no_good_cuts)
     integer_to_binary = bool(integer_to_binary)
+    _warn_integer_to_binary_noop(
+        "LP/NLP BB",
+        integer_to_binary=integer_to_binary,
+        add_no_good_cuts=add_no_good_cuts,
+    )
 
     decomp = _decompose_model(model)
     integer_binary_expansion = _build_integer_binary_expansion(
@@ -4158,6 +4177,11 @@ def solve_oa(
     add_no_good_cuts = bool(add_no_good_cuts)
     cycling_check = bool(cycling_check)
     integer_to_binary = bool(integer_to_binary)
+    _warn_integer_to_binary_noop(
+        "OA",
+        integer_to_binary=integer_to_binary,
+        add_no_good_cuts=add_no_good_cuts,
+    )
 
     # 1. Decompose model
     decomp = _decompose_model(model)

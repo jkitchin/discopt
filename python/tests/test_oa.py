@@ -3,6 +3,8 @@
 Requires highspy for the MILP master problem.
 """
 
+import logging
+
 import discopt.modeling as dm
 import numpy as np
 import pytest
@@ -656,6 +658,25 @@ class TestOARobustnessOptions:
         with pytest.raises(ValueError, match="requires finite practical bounds"):
             _build_integer_binary_expansion(decomp, enabled=True)
 
+    def test_integer_to_binary_warns_when_no_good_cuts_disabled(self, caplog):
+        from discopt.solvers.mip_nlp import solve_mip_nlp
+
+        caplog.set_level(logging.WARNING, logger="discopt.solvers.oa")
+        m = dm.Model("integer_to_binary_noop_warning")
+        z = m.integer("z", lb=0, ub=3)
+        m.minimize(z)
+
+        result = solve_mip_nlp(
+            m,
+            method="oa",
+            add_no_good_cuts=False,
+            integer_to_binary=True,
+            max_iterations=1,
+        )
+
+        assert result.status == "optimal"
+        assert "integer_to_binary=True ignored because add_no_good_cuts=False" in caplog.text
+
     def test_projection_no_good_cut_uses_binary_indices_for_binary_model(self):
         from discopt.solvers.oa import (
             _append_binary_no_good_projection_cut,
@@ -1174,3 +1195,30 @@ def test_oa_maximize_scalar_reaches_true_max():
     m.subject_to(x**2 <= 9)  # x <= 3
     r = _solve_oa(m)
     assert r.objective == pytest.approx(9.0, abs=ABS_TOL)
+
+
+def test_integer_to_binary_no_good_cuts_preserve_general_integer_optimum():
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    m = dm.Model("integer_to_binary_no_good_optimality")
+    z = m.integer("z", lb=0, ub=3)
+    m.minimize(z)
+    m.subject_to((z - 2) ** 2 <= 0.25)
+
+    result = solve_mip_nlp(
+        m,
+        method="oa",
+        init_strategy="initial_binary",
+        initial_point=np.array([0.0]),
+        add_no_good_cuts=True,
+        integer_to_binary=True,
+        max_iterations=8,
+        time_limit=60,
+    )
+
+    assert result.status == "optimal"
+    assert result.objective == pytest.approx(2.0, abs=ABS_TOL)
+    assert result.bound == pytest.approx(2.0, abs=ABS_TOL)
+    assert result.gap == pytest.approx(0.0, abs=1e-9)
+    assert result.x["z"] == pytest.approx(2.0, abs=INTEGRALITY_TOL)
+    assert result.mip_nlp_trace["summary"]["cut_source_counts"]["integer"] >= 1
