@@ -86,20 +86,22 @@ def test_amp_integration_suite_is_opt_in():
 def _make_dry_run(target: str, env_overrides: dict[str, str] | None = None) -> str:
     repo = Path(__file__).resolve().parents[2]
     env = os.environ.copy()
+    make_args = [
+        "make",
+        "-n",
+        target,
+        "PYTHON=python",
+        "PYTEST=python -m pytest",
+        "MATURIN=python -m maturin",
+        "RUFF=python -m ruff",
+    ]
     if env_overrides is None:
         env.pop("PYTEST_XDIST_WORKERS", None)
+        make_args.append("PYTEST_XDIST_WORKERS=")
     else:
         env.update(env_overrides)
     result = subprocess.run(
-        [
-            "make",
-            "-n",
-            target,
-            "PYTHON=python",
-            "PYTEST=python -m pytest",
-            "MATURIN=python -m maturin",
-            "RUFF=python -m ruff",
-        ],
+        make_args,
         cwd=repo,
         check=True,
         text=True,
@@ -221,6 +223,30 @@ def test_memory_capped_pytest_wrapper_dry_run():
     if "prlimit" in result.stdout:
         assert "--as=67108864" in result.stdout
         assert "--cpu=5" in result.stdout
+
+
+def test_memory_capped_pytest_wrapper_default_allows_jax_virtual_memory():
+    """The default cap must leave enough virtual address space for XLA."""
+    repo = Path(__file__).resolve().parents[2]
+    script = repo / "scripts" / "run_memory_capped_pytest.sh"
+    env = {
+        **os.environ,
+        "RUN_MEMORY_CAPPED_PYTEST_DRY_RUN": "1",
+    }
+    env.pop("PYTEST_MEMORY_LIMIT_MB", None)
+    env.pop("PYTEST_CPU_LIMIT_SECONDS", None)
+
+    result = subprocess.run(
+        [str(script), "python", "-m", "pytest", "python/tests/test_amp.py", "-q"],
+        cwd=repo,
+        check=True,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    if "prlimit" in result.stdout:
+        assert "--as=34359738368" in result.stdout
 
 
 def test_memory_capped_pytest_warns_when_prlimit_missing():
