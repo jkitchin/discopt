@@ -3589,7 +3589,11 @@ def solve_model(
                 max_nodes,
                 t_start,
                 prefer_pounce=_pounce_only,
-                node_engine="simplex" if _pounce_only else "pounce",
+                # Node LP relaxations are linear — always solve them with the
+                # structured engine (exact-vertex Rust simplex, degrading to
+                # POUNCE), regardless of nlp_solver. nlp_solver governs only the
+                # NLP subproblem solver. The JAX LP-IPM node path was retired (#370).
+                node_engine="simplex",
                 lagrangian_bound=lagrangian_bound,
                 lagrangian_frequency=lagrangian_frequency,
             )
@@ -10219,49 +10223,38 @@ def _cut_loop_relaxation_x(lp_data, prefer_pounce: bool):
     """Solve the (cut-augmented) root relaxation for the cut loop, returning the
     optimum ``x`` or ``None``.
 
-    In POUNCE mode the solve goes through POUNCE so the cut-augmented shape costs
-    no JAX recompile (consistent with the Path-B node engine); otherwise the JAX
-    IPM is used. Either way the returned point is just a separation seed —
-    crossover and cut validity do not depend on which engine produced it."""
-    if prefer_pounce:
-        try:
-            from discopt.solvers.lp_pounce import POUNCE_AVAILABLE
-            from discopt.solvers.lp_pounce import solve_lp as _pounce_solve
-        except ImportError:
-            POUNCE_AVAILABLE = False
-        if POUNCE_AVAILABLE:
-            try:
-                res = _pounce_solve(
-                    c=np.asarray(lp_data.c, dtype=np.float64),
-                    A_eq=np.asarray(lp_data.A_eq, dtype=np.float64),
-                    b_eq=np.asarray(lp_data.b_eq, dtype=np.float64),
-                    bounds=list(
-                        zip(
-                            np.asarray(lp_data.x_l, dtype=np.float64).tolist(),
-                            np.asarray(lp_data.x_u, dtype=np.float64).tolist(),
-                        )
-                    ),
-                )
-            except Exception as exc:
-                logger.debug("cut-loop POUNCE solve failed: %s", exc)
-                return None
-            if res.status == SolveStatus.OPTIMAL and res.x is not None:
-                return np.asarray(res.x, dtype=np.float64)
-            return None
-    import jax.numpy as jnp
-
-    from discopt._jax.lp_ipm import lp_ipm_solve
-
-    state = lp_ipm_solve(
-        jnp.asarray(lp_data.c),
-        jnp.asarray(lp_data.A_eq),
-        jnp.asarray(lp_data.b_eq),
-        jnp.asarray(lp_data.x_l),
-        jnp.asarray(lp_data.x_u),
-    )
-    if int(state.converged) != 1:
+    The seed always goes through POUNCE so the cut-augmented shape costs no JAX
+    recompile (consistent with the Path-B node engine); the JAX-IPM seed was
+    retired in #370. The returned point is just a separation seed — crossover and
+    cut validity do not depend on which engine produced it — so if POUNCE is
+    unavailable the cut loop is simply skipped (``None``). ``prefer_pounce`` is
+    kept for call-site symmetry."""
+    del prefer_pounce
+    try:
+        from discopt.solvers.lp_pounce import POUNCE_AVAILABLE
+        from discopt.solvers.lp_pounce import solve_lp as _pounce_solve
+    except ImportError:
         return None
-    return np.asarray(state.x, dtype=np.float64)
+    if not POUNCE_AVAILABLE:
+        return None
+    try:
+        res = _pounce_solve(
+            c=np.asarray(lp_data.c, dtype=np.float64),
+            A_eq=np.asarray(lp_data.A_eq, dtype=np.float64),
+            b_eq=np.asarray(lp_data.b_eq, dtype=np.float64),
+            bounds=list(
+                zip(
+                    np.asarray(lp_data.x_l, dtype=np.float64).tolist(),
+                    np.asarray(lp_data.x_u, dtype=np.float64).tolist(),
+                )
+            ),
+        )
+    except Exception as exc:
+        logger.debug("cut-loop POUNCE solve failed: %s", exc)
+        return None
+    if res.status == SolveStatus.OPTIMAL and res.x is not None:
+        return np.asarray(res.x, dtype=np.float64)
+    return None
 
 
 def _root_cover_cut_loop(
@@ -10466,34 +10459,10 @@ def _root_dive(
             xu[j] = v
         return None
 
-    import jax.numpy as jnp
-
-    from discopt._jax.lp_ipm import lp_ipm_solve
-
-    xl = np.asarray(lp_data.x_l, dtype=np.float64).copy()
-    xu = np.asarray(lp_data.x_u, dtype=np.float64).copy()
-    c = jnp.asarray(lp_data.c)
-    A = jnp.asarray(lp_data.A_eq)
-    b = jnp.asarray(lp_data.b_eq)
-    steps = max_steps if max_steps is not None else len(int_idx) + 1
-    for _ in range(steps):
-        if time.perf_counter() - t_start >= time_limit:
-            return None
-        state = lp_ipm_solve(c, A, b, jnp.asarray(xl), jnp.asarray(xu))
-        if int(state.converged) != 1:
-            return None  # infeasible/stalled fix -> abandon the dive
-        x = np.asarray(state.x)
-        fracs = [
-            (j, abs(x[j] - round(x[j])))
-            for j in int_idx
-            if xl[j] != xu[j] and abs(x[j] - round(x[j])) > 1e-6
-        ]
-        if not fracs:
-            return float(state.obj) + float(lp_data.obj_const), x[:n_orig]
-        j = max(fracs, key=lambda t: t[1])[0]
-        v = float(round(x[j]))
-        xl[j] = v
-        xu[j] = v
+    # No structured node engine selected: the root dive (an optional
+    # early-incumbent heuristic) is skipped. The JAX-IPM dive was retired (#370);
+    # on the default path this branch is unreachable — node_engine is always
+    # "simplex" (or prefer_pounce is set), so the structured dive above runs.
     return None
 
 
@@ -10709,9 +10678,7 @@ def _solve_milp_bb(
     auxiliary root cut-loop / dual recovery stay on POUNCE either way; only the
     hot per-node solve changes.
     """
-    import jax.numpy as jnp
 
-    from discopt._jax.lp_ipm import lp_ipm_solve
     from discopt._jax.problem_classifier import extract_lp_data
 
     rust_time = 0.0
@@ -10930,14 +10897,17 @@ def _solve_milp_bb(
     # simplex by default, or the POUNCE IPM. Checked once here. POUNCE
     # availability is still tracked because the dual recovery path uses it.
     _pounce_nodes_avail = False
-    if prefer_pounce:
-        try:
-            from discopt.solvers.lp_pounce import POUNCE_AVAILABLE as _PNA
+    try:
+        from discopt.solvers.lp_pounce import POUNCE_AVAILABLE as _PNA
 
-            _pounce_nodes_avail = bool(_PNA)
-        except ImportError:
-            _pounce_nodes_avail = False
-    _structured_avail = _simplex_nodes or (prefer_pounce and _pounce_nodes_avail)
+        _pounce_nodes_avail = bool(_PNA)
+    except ImportError:
+        _pounce_nodes_avail = False
+    # The structured engine (Rust simplex, or POUNCE as fallback) is the only node
+    # LP engine — the JAX LP-IPM node path was retired (#370). POUNCE now counts as
+    # a structured fallback regardless of prefer_pounce, so a no-Rust install still
+    # solves nodes with an exact/KKT-valid engine instead of the retired IPM.
+    _structured_avail = _simplex_nodes or _pounce_nodes_avail
 
     iteration = 0
     while True:
@@ -10955,7 +10925,6 @@ def _solve_milp_bb(
 
         t_jax_start = time.perf_counter()
         result_ids = np.array(batch_ids, dtype=np.int64)
-        n_slack = lp_data.x_l.shape[0] - n_orig
 
         if _structured_avail:
             # Path B: solve each node's relaxation with the structured engine
@@ -10983,112 +10952,15 @@ def _solve_milp_bb(
                     result_lbs[i] = _INFEASIBILITY_SENTINEL
                     result_sols[i] = _mid
                     _recover_or_decertify(i, result_lbs, result_sols, node_lb, node_ub)
-        elif n_batch > 1:
-            # Batch LP solve via vmap
-            from discopt._jax.lp_ipm import lp_ipm_solve_batch
-
-            xl_arr = jnp.array(batch_lb, dtype=jnp.float64)
-            xu_arr = jnp.array(batch_ub, dtype=jnp.float64)
-            slack_l = jnp.zeros((n_batch, n_slack), dtype=jnp.float64)
-            slack_u = jnp.full((n_batch, n_slack), 1e20, dtype=jnp.float64)
-            xl_full = jnp.concatenate([xl_arr, slack_l], axis=1)
-            xu_full = jnp.concatenate([xu_arr, slack_u], axis=1)
-
-            try:
-                state = lp_ipm_solve_batch(lp_data.c, lp_data.A_eq, lp_data.b_eq, xl_full, xu_full)
-                converged = np.asarray(state.converged)
-                obj_vals = np.asarray(state.obj)
-                x_vals = np.asarray(state.x)
-
-                ok = (converged == 1) | (converged == 2) | (converged == 3)
-                result_lbs = np.asarray(
-                    np.where(ok, obj_vals + float(lp_data.obj_const), _INFEASIBILITY_SENTINEL),
-                    dtype=np.float64,
-                )
-                result_sols = np.empty((n_batch, n_vars), dtype=np.float64)
-                for i in range(n_batch):
-                    if ok[i]:
-                        result_sols[i] = x_vals[i, :n_vars]
-                        # Reject LP solutions that violate constraints
-                        if not _check_lp_solution_feasibility(
-                            lp_data.A_eq, lp_data.b_eq, x_vals[i]
-                        ):
-                            result_lbs[i] = _INFEASIBILITY_SENTINEL
-                            lb_c = np.clip(np.array(batch_lb[i]), -_SPC, _SPC)
-                            ub_c = np.clip(np.array(batch_ub[i]), -_SPC, _SPC)
-                            result_sols[i] = 0.5 * (lb_c + ub_c)
-                        else:
-                            _maybe_inject_snapped(
-                                result_sols[i],
-                                np.array(batch_lb[i]),
-                                np.array(batch_ub[i]),
-                            )
-                    else:
-                        lb_c = np.clip(np.array(batch_lb[i]), -_SPC, _SPC)
-                        ub_c = np.clip(np.array(batch_ub[i]), -_SPC, _SPC)
-                        result_sols[i] = 0.5 * (lb_c + ub_c)
-                # Non-KKT (max-iter) LP bounds are recovered via POUNCE;
-                # unrecoverable ones decertify the gap.
-                for i in np.where((converged == 3) & (result_lbs < _SENTINEL_THRESHOLD))[0]:
-                    _recover_or_decertify(
-                        int(i),
-                        result_lbs,
-                        result_sols,
-                        np.array(batch_lb[i]),
-                        np.array(batch_ub[i]),
-                    )
-            except Exception as e:
-                logger.debug("Batch LP solve failed: %s", e)
-                result_lbs = np.full(n_batch, _INFEASIBILITY_SENTINEL, dtype=np.float64)
-                result_sols = np.empty((n_batch, n_vars), dtype=np.float64)
-                for i in range(n_batch):
-                    lb_c = np.clip(np.array(batch_lb[i]), -_SPC, _SPC)
-                    ub_c = np.clip(np.array(batch_ub[i]), -_SPC, _SPC)
-                    result_sols[i] = 0.5 * (lb_c + ub_c)
-            result_feas = np.zeros(n_batch, dtype=bool)
         else:
-            result_lbs = np.empty(n_batch, dtype=np.float64)
-            result_sols = np.empty((n_batch, n_vars), dtype=np.float64)
-            result_feas = np.zeros(n_batch, dtype=bool)
-
-            for i in range(n_batch):
-                node_lb = np.array(batch_lb[i])
-                node_ub = np.array(batch_ub[i])
-
-                x_l_node = jnp.array(node_lb, dtype=jnp.float64)
-                x_u_node = jnp.array(node_ub, dtype=jnp.float64)
-
-                x_l_full = jnp.concatenate([x_l_node, jnp.zeros(n_slack)])
-                x_u_full = jnp.concatenate([x_u_node, jnp.full(n_slack, 1e20)])
-
-                try:
-                    state = lp_ipm_solve(lp_data.c, lp_data.A_eq, lp_data.b_eq, x_l_full, x_u_full)
-                    conv = int(state.converged)
-                    if conv in (1, 2, 3):
-                        # Reject LP solutions that violate constraints
-                        if _check_lp_solution_feasibility(lp_data.A_eq, lp_data.b_eq, state.x):
-                            result_lbs[i] = float(state.obj) + lp_data.obj_const
-                            result_sols[i] = np.asarray(state.x[:n_vars])
-                            if conv == 3:  # non-KKT: recover via POUNCE
-                                _recover_or_decertify(i, result_lbs, result_sols, node_lb, node_ub)
-                            if result_lbs[i] < _SENTINEL_THRESHOLD:
-                                _maybe_inject_snapped(result_sols[i], node_lb, node_ub)
-                        else:
-                            result_lbs[i] = _INFEASIBILITY_SENTINEL
-                            lb_c = np.clip(node_lb, -_SPC, _SPC)
-                            ub_c = np.clip(node_ub, -_SPC, _SPC)
-                            result_sols[i] = 0.5 * (lb_c + ub_c)
-                    else:
-                        result_lbs[i] = _INFEASIBILITY_SENTINEL
-                        lb_c = np.clip(node_lb, -_SPC, _SPC)
-                        ub_c = np.clip(node_ub, -_SPC, _SPC)
-                        result_sols[i] = 0.5 * (lb_c + ub_c)
-                except Exception as e:
-                    logger.debug("Per-node LP/QP solve failed: %s", e)
-                    result_lbs[i] = _INFEASIBILITY_SENTINEL
-                    lb_c = np.clip(node_lb, -_SPC, _SPC)
-                    ub_c = np.clip(node_ub, -_SPC, _SPC)
-                    result_sols[i] = 0.5 * (lb_c + ub_c)
+            # The JAX LP-IPM node path was retired (#370). Node LP relaxations
+            # use the structured engine (Rust simplex, or POUNCE); reaching here
+            # means neither is available — an unsupported configuration.
+            raise RuntimeError(
+                "No structured node LP engine available (Rust simplex or POUNCE). "
+                "The JAX LP-IPM node fallback was retired in #370; build the Rust "
+                "extension or install POUNCE."
+            )
 
         # Lagrangian node bounds: combine a valid dual lower bound with each
         # node's LP relaxation bound. Gated by cadence and applied only to nodes
