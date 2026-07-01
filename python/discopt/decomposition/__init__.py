@@ -24,6 +24,9 @@ from discopt.decomposition.advisor import (
     DecompositionAdvisor as DecompositionAdvisor,
 )
 from discopt.decomposition.advisor import (
+    Explanation as Explanation,
+)
+from discopt.decomposition.advisor import (
     MethodKind as MethodKind,
 )
 from discopt.decomposition.advisor import (
@@ -71,6 +74,7 @@ __all__ = [
     "Candidate",
     "DecompositionAdvisor",
     "DecompositionStructure",
+    "Explanation",
     "LagrangianConfig",
     "MethodKind",
     "ScoreVector",

@@ -191,11 +191,8 @@ def test_advisor_summary_lists_candidates():
     assert "Benders" in s
 
 
-def test_later_phase_methods_raise_not_implemented():
+def test_reformulation_method_raises_not_implemented():
+    # decompose() (Phase 5) is still a stub; recommendation()/explain() are live.
     adv = analyze_decomposition(_benders_model())
-    with pytest.raises(NotImplementedError):
-        adv.recommendation()
-    with pytest.raises(NotImplementedError):
-        adv.explain()
     with pytest.raises(NotImplementedError):
         adv.decompose()

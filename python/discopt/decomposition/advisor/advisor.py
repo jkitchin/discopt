@@ -2,10 +2,11 @@
 
 This is the user-facing object of the Decomposition Advisor. It exposes the
 *analysis* surface — structure report, discovered candidates, scored/ranked
-candidates (:meth:`scores`), blocks, and the Phase 1 graph views/exports.
-Recommendation- and reformulation-facing methods (``recommendation``,
-``explain``, ``decompose``) are stubbed to raise a clear "not yet" error until
-their phases land, so the public API shape is stable from the start.
+candidates (:meth:`scores`), blocks, and the Phase 1 graph views/exports — plus
+the *recommendation* surface: :meth:`recommendation` (an explained single pick)
+and :meth:`explain` (rendered rationale / counterfactual "why not X?"). The
+reformulation-facing :meth:`decompose` is stubbed until Phase 5, so the public
+API shape is stable from the start.
 
 Entry point::
 
@@ -20,8 +21,15 @@ from __future__ import annotations
 
 from discopt.decomposition.advisor.analyzer import StructureAnalyzer, StructureReport
 from discopt.decomposition.advisor.candidates import generate_candidates
+from discopt.decomposition.advisor.explain import Explainer, Explanation
 from discopt.decomposition.advisor.scoring import Scorer, ScoreVector
-from discopt.decomposition.advisor.types import Candidate
+from discopt.decomposition.advisor.selection import (
+    Policy,
+    Ranked,
+    RuleBasedPolicy,
+    SelectionContext,
+)
+from discopt.decomposition.advisor.types import Candidate, MethodKind
 from discopt.decomposition.graph.base import GraphKind, ModelGraph, build_graph
 from discopt.decomposition.graph.export import export_graph as _export_graph
 from discopt.decomposition.structure import DecompositionStructure, detect_decomposition
@@ -42,10 +50,13 @@ class DecompositionAdvisor:
         *,
         analyzer: StructureAnalyzer | None = None,
         scorer: Scorer | None = None,
+        policy: Policy | None = None,
     ) -> None:
         self._model = model
         self._analyzer = analyzer or StructureAnalyzer()
         self._scorer = scorer or Scorer()
+        self._policy = policy or RuleBasedPolicy()
+        self._explainer = Explainer(self._policy)
         self._report: StructureReport | None = None
         self._candidates: list[Candidate] | None = None
         self._scores: list[tuple[Candidate, ScoreVector]] | None = None
@@ -104,23 +115,34 @@ class DecompositionAdvisor:
             lines.append(f"        {sv.summary()}")
         return "\n".join(lines)
 
-    # ── later-phase surface (stable shape, not yet implemented) ──
+    def ranked(self) -> list[Ranked]:
+        """Return the policy's ranking (score + rank + recommended flag)."""
+        return self._policy.rank(self.scores(), SelectionContext(self.structure()))
 
-    def recommendation(self):
-        """Ranked recommendation with rationale. Requires the selection stage.
+    def recommendation(self) -> Explanation:
+        """Return the explained single-pick recommendation (design §9).
 
-        Scoring (Phase 3) is available via :meth:`scores`; the explained
-        single-pick recommendation lands with the selection/explanation engine
-        (Phase 4).
+        Applies the selection policy to the scored candidates and builds an
+        evidence-backed :class:`Explanation` (reasons, concerns, alternatives,
+        performance estimate). Recommends no-decomposition when nothing beats the
+        monolith.
         """
-        raise NotImplementedError(
-            "recommendation() needs the selection + explanation stage (Phase 4); "
-            "today use scores() for the ranked candidate list."
-        )
+        return self._explainer.explain(self.scores(), self.structure())
 
-    def explain(self, *args, **kwargs):
-        """Explain the recommendation. Requires the explanation stage (Phase 4)."""
-        raise NotImplementedError("explain() lands with the recommendation engine (Phase 4).")
+    def explain(self, fmt: str = "text", *, method: MethodKind | str | None = None) -> str:
+        """Render the recommendation, or answer a counterfactual 'why (not) X?'.
+
+        With *method* set, explains why that specific method was (not) chosen
+        (design §9.3); otherwise renders the recommendation in *fmt*
+        (``"text"`` | ``"markdown"`` | ``"json"``).
+        """
+        if method is not None:
+            if isinstance(method, str):
+                method = MethodKind(method)
+            return self._explainer.explain_counterfactual(method, self.scores(), self.structure())
+        return self.recommendation().render(fmt)
+
+    # ── later-phase surface (stable shape, not yet implemented) ──
 
     def decompose(self, *args, **kwargs):
         """Build a solvable decomposed model. Requires reformulation (Phase 5)."""
