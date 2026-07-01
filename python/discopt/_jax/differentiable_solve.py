@@ -122,8 +122,8 @@ def _solve_objective(model: Model, problem_class: ProblemClass) -> float | None:
     try:
         if problem_class == ProblemClass.LP:
             lp_data = extract_lp_data(model)
-            obj, _ = _lp_forward(lp_data)
-            return obj + lp_data.obj_const
+            lp_obj, _ = _lp_forward(lp_data)
+            return lp_obj + lp_data.obj_const
         elif problem_class == ProblemClass.QP:
             qp_data = extract_qp_data(model)
             from discopt._jax.qp_ipm import qp_ipm_solve
