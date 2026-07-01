@@ -288,11 +288,15 @@ impl<'a> PreparedDual<'a> {
     /// `b`, returning a valid solution. On any numerical difficulty it cold-solves
     /// the same LP, so the result is always correct.
     pub fn reoptimize(&self, l: &[f64], u: &[f64], b: &[f64], opts: &SimplexOptions) -> LpSolve {
+        crate::profile::incr(crate::profile::Ctr::DualWarmSolves);
         match self.run_dual(l, u, b, opts) {
             Some(sol) => sol,
             // Cold fallback from the prepared CSC matrix (clone is O(nnz), paid only
             // on the rare numerical-breakdown path) — no dense matrix is kept.
-            None => solve_lp_cols(self.sp.clone(), self.m, self.n, self.c, l, u, b, opts),
+            None => {
+                crate::profile::incr(crate::profile::Ctr::DualColdFallbacks);
+                solve_lp_cols(self.sp.clone(), self.m, self.n, self.c, l, u, b, opts)
+            }
         }
     }
 

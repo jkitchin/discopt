@@ -106,6 +106,13 @@ counters!(
     // were bumped up to the guaranteed EXPAND minimum step (breaking the stall in
     // place instead of accumulating toward the Bland switch).
     ExpandMinSteps,
+    // Warm dual-simplex reoptimizations (DualWarmSolves) and how many of them the
+    // dual could not solve and fell back to a cold primal re-solve (DualColdFallbacks
+    // — numerical breakdown / iteration cap on a *valid* warm start, i.e. the
+    // "engine swap" the framework-LP-error-handling policy of #376 would try to
+    // pre-empt by escalating in place). The ratio is the escalation headroom.
+    DualWarmSolves,
+    DualColdFallbacks,
 );
 
 #[inline(always)]
