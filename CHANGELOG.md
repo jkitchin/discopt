@@ -199,6 +199,9 @@ The release procedure that produces these entries is documented in
   carrying the LU-hardening APIs (element-growth getters, unsymmetric-LU
   condition estimate, richer `update()` instability signal) the numeric-focus
   simplex consumes; replaces the temporary git-rev pin.
+- **Minimum `pounce-solver` bumped to 0.7** (`chore(deps)`). The interior-point
+  KKT solve (`solve_lp_kkt`) the differentiable LP/QP layers and crossover use
+  after the JAX LP-IPM retirement requires POUNCE ≥ 0.7.
 - **POUNCE is now the default single-solve NLP backend** (`feat(solvers)`).
   For single continuous solves the `ipm` default is promoted to a KKT-valid
   backend via `_default_nlp_solver()`, resolving to POUNCE when installed and
