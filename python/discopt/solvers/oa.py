@@ -2029,6 +2029,9 @@ def _add_esh_cuts(
 
     x_master = np.asarray(x_master, dtype=np.float64).reshape(-1)
     if objective_epigraph_available is None:
+        # Production masters only carry an objective epigraph for convex objectives.
+        # Tests and future heuristic masters may explicitly opt in to exercise the
+        # local-objective guard without changing the current master layout.
         objective_epigraph_available = bool(objective_is_convex)
     trace: dict[str, object] = {
         "attempted": True,
