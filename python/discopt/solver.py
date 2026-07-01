@@ -2235,11 +2235,12 @@ def solve_model(
         Existing OA options ``equality_relaxation``, ``ecp_mode``,
         ``feasibility_cuts``, ``heuristic_nonconvex``, ``add_slack``,
         ``max_slack``, ``oa_penalty_factor``, ``add_no_good_cuts``,
-        ``feasibility_norm``, ``add_regularization``, ``level_coef``,
-        ``stalling_limit``, ``cycling_check``, ``solution_pool``,
-        ``num_solution_iteration``, and ``milp_solver`` plus initialization
-        option ``init_strategy`` may be passed as top-level aliases and take
-        precedence over duplicate keys in ``mip_nlp_options``. ``solution_pool``
+        ``integer_to_binary``, ``feasibility_norm``, ``add_regularization``,
+        ``level_coef``, ``stalling_limit``, ``cycling_check``,
+        ``solution_pool``, ``num_solution_iteration``, and ``milp_solver``
+        plus initialization option ``init_strategy`` may be passed as top-level
+        aliases and take precedence over duplicate keys in ``mip_nlp_options``.
+        ``solution_pool``
         currently requires ``milp_solver="gurobi"``. For
         ``mip_nlp_method="lp_nlp_bb"``, ``milp_solver="gurobi"`` is also
         required because the single-tree LP/NLP branch-and-bound variant uses
@@ -2456,6 +2457,7 @@ def solve_model(
             "oa_penalty_factor",
             "OA_penalty_factor",
             "add_no_good_cuts",
+            "integer_to_binary",
             "feasibility_norm",
             "add_regularization",
             "level_coef",

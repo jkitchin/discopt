@@ -87,6 +87,7 @@ Useful OA options include:
 | `init_strategy` | Initial incumbent strategy: `"rNLP"`, `"initial_binary"`, `"max_binary"`, or `"fp"`. |
 | `equality_relaxation` | Relax nonlinear equalities into paired inequalities when supported. |
 | `feasibility_cuts` | Add feasibility cuts when fixed-integer NLP subproblems fail. |
+| `integer_to_binary` | Opt into linked binary expansions for bounded general integers so no-good cuts can exclude those assignments safely. |
 | `add_slack`, `max_slack`, `oa_penalty_factor` | Allow penalized master slacks for robustness. |
 | `feasibility_norm` | Norm used in feasibility-pump style repairs. |
 | `solution_pool`, `num_solution_iteration` | Iterate through a MILP solution pool; currently requires `milp_solver="gurobi"`. |

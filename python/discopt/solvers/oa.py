@@ -26,7 +26,7 @@ import time
 import warnings
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, cast
 
 import numpy as np
 
@@ -576,6 +576,202 @@ class _MasterMILPData:
     integrality: np.ndarray
     use_objective_epigraph: bool
     slack_index: Optional[int]
+    integer_binary_expansion: Optional["_IntegerBinaryExpansion"] = None
+    integer_binary_start: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class _IntegerBinaryVariable:
+    """Binary expansion metadata for one original general-integer variable."""
+
+    index: int
+    lower: int
+    upper: int
+    bit_start: int
+    bit_count: int
+
+
+@dataclass(frozen=True)
+class _IntegerBinaryExpansion:
+    """Logical binary tail used by OA master no-good cuts.
+
+    Stored cut rows use ``[original variables, eta-slot, expansion bits]``. The
+    eta slot disambiguates expanded rows from legacy objective-epigraph rows.
+    """
+
+    n_vars: int
+    variables: tuple[_IntegerBinaryVariable, ...]
+    bit_count: int
+
+    @property
+    def logical_width(self) -> int:
+        return self.n_vars + 1 + self.bit_count
+
+    @property
+    def logical_binary_indices(self) -> list[int]:
+        return [self.n_vars + 1 + idx for idx in range(self.bit_count)]
+
+    def bit_values_for_point(self, point) -> np.ndarray:
+        x = np.asarray(point, dtype=np.float64).ravel()
+        values = np.zeros(self.bit_count, dtype=np.float64)
+        for spec in self.variables:
+            if spec.bit_count <= 0:
+                continue
+            val = _round_integral_to_bounds(x[spec.index], spec.lower, spec.upper)
+            offset = int(round(val)) - spec.lower
+            for bit in range(spec.bit_count):
+                values[spec.bit_start + bit] = 1.0 if (offset & (1 << bit)) else 0.0
+        return values
+
+    def logical_point(self, point) -> np.ndarray:
+        x = np.asarray(point, dtype=np.float64).ravel()
+        if self.bit_count <= 0:
+            return cast(np.ndarray, x[: self.n_vars].copy())
+        return cast(
+            np.ndarray,
+            np.concatenate([x[: self.n_vars], np.array([0.0]), self.bit_values_for_point(x)]),
+        )
+
+
+def _build_integer_binary_expansion(
+    decomp: "_DecomposedProblem",
+    *,
+    enabled: bool,
+) -> Optional[_IntegerBinaryExpansion]:
+    """Return binary expansion metadata for bounded general-integer variables."""
+    if not enabled or not decomp.general_integer_indices:
+        return None
+
+    variables: list[_IntegerBinaryVariable] = []
+    bit_start = 0
+    for idx in decomp.general_integer_indices:
+        raw_lb = float(decomp.lb[idx])
+        raw_ub = float(decomp.ub[idx])
+        if (
+            not np.isfinite(raw_lb)
+            or not np.isfinite(raw_ub)
+            or abs(raw_lb) >= _START_BOUND_CLIP
+            or abs(raw_ub) >= _START_BOUND_CLIP
+        ):
+            raise ValueError(
+                "integer_to_binary=True requires finite practical bounds for every "
+                f"general-integer variable; variable index {idx} has bounds "
+                f"({raw_lb}, {raw_ub})."
+            )
+        lower = int(np.ceil(raw_lb))
+        upper = int(np.floor(raw_ub))
+        if lower > upper:
+            raise ValueError(
+                "integer_to_binary=True found no integer value inside bounds for "
+                f"general-integer variable index {idx}: ({raw_lb}, {raw_ub})."
+            )
+        domain_width = upper - lower
+        bit_count = int(domain_width).bit_length()
+        variables.append(
+            _IntegerBinaryVariable(
+                index=int(idx),
+                lower=lower,
+                upper=upper,
+                bit_start=bit_start,
+                bit_count=bit_count,
+            )
+        )
+        bit_start += bit_count
+
+    return _IntegerBinaryExpansion(
+        n_vars=int(decomp.n_vars),
+        variables=tuple(variables),
+        bit_count=int(bit_start),
+    )
+
+
+def _warn_integer_to_binary_noop(
+    solver_name: str,
+    *,
+    integer_to_binary: bool,
+    add_no_good_cuts: bool,
+) -> None:
+    if integer_to_binary and not add_no_good_cuts:
+        logger.warning(
+            "%s: integer_to_binary=True ignored because add_no_good_cuts=False; "
+            "integer-to-binary expansion is only used for no-good cuts.",
+            solver_name,
+        )
+
+
+def _stored_row_uses_integer_binary_expansion(
+    row: np.ndarray,
+    n_vars: int,
+    integer_binary_expansion: Optional[_IntegerBinaryExpansion],
+) -> bool:
+    return (
+        integer_binary_expansion is not None
+        and integer_binary_expansion.bit_count > 0
+        and len(row) == n_vars + 1 + integer_binary_expansion.bit_count
+    )
+
+
+def _stored_row_to_master_layout(
+    row,
+    *,
+    n_vars: int,
+    n_master: int,
+    use_objective_epigraph: bool,
+    slack_index: Optional[int],
+    relaxable: bool,
+    integer_binary_expansion: Optional[_IntegerBinaryExpansion] = None,
+    integer_binary_start: Optional[int] = None,
+) -> np.ndarray:
+    """Copy a stored OA row into the active MILP master column layout."""
+    raw = np.asarray(row, dtype=np.float64).ravel()
+    out = np.zeros(n_master, dtype=np.float64)
+    if _stored_row_uses_integer_binary_expansion(raw, n_vars, integer_binary_expansion):
+        assert integer_binary_expansion is not None
+        if integer_binary_start is None:
+            raise ValueError("integer-binary cut row requires expansion columns in master")
+        out[:n_vars] = raw[:n_vars]
+        if use_objective_epigraph:
+            out[n_vars] = raw[n_vars]
+        out[integer_binary_start : integer_binary_start + integer_binary_expansion.bit_count] = raw[
+            n_vars + 1 :
+        ]
+    else:
+        if use_objective_epigraph and len(raw) == n_vars:
+            out[:n_vars] = raw
+        else:
+            if len(raw) > n_master:
+                raise ValueError(
+                    f"OA cut has {len(raw)} coefficients but master has {n_master} variables"
+                )
+            out[: len(raw)] = raw
+    if slack_index is not None:
+        out[slack_index] = -1.0 if relaxable else 0.0
+    return out
+
+
+def _append_integer_binary_link_rows(
+    a_eq_rows: list[np.ndarray],
+    b_eq_vals: list[float],
+    *,
+    n_master: int,
+    integer_binary_expansion: Optional[_IntegerBinaryExpansion],
+    integer_binary_start: Optional[int],
+) -> None:
+    if (
+        integer_binary_expansion is None
+        or integer_binary_expansion.bit_count <= 0
+        or integer_binary_start is None
+    ):
+        return
+    for spec in integer_binary_expansion.variables:
+        if spec.bit_count <= 0:
+            continue
+        row = np.zeros(n_master, dtype=np.float64)
+        row[spec.index] = 1.0
+        for bit in range(spec.bit_count):
+            row[integer_binary_start + spec.bit_start + bit] = -float(1 << bit)
+        a_eq_rows.append(row)
+        b_eq_vals.append(float(spec.lower))
 
 
 @dataclass
@@ -700,6 +896,16 @@ def _extend_master_mip_start(
     if master.slack_index is not None:
         lo, hi = master.bounds[master.slack_index]
         full[master.slack_index] = min(max(0.0, float(lo)), float(hi))
+    if (
+        master.integer_binary_expansion is not None
+        and master.integer_binary_expansion.bit_count > 0
+        and master.integer_binary_start is not None
+    ):
+        bits = master.integer_binary_expansion.bit_values_for_point(start[:n_vars])
+        full[
+            master.integer_binary_start : master.integer_binary_start
+            + master.integer_binary_expansion.bit_count
+        ] = bits
     return full
 
 
@@ -2259,6 +2465,7 @@ def _add_no_good_cut(
     n_vars,
     oa_cut_relaxable=None,
     cut_provenance: Optional[MIPNLPCutProvenance] = None,
+    integer_binary_expansion: Optional[_IntegerBinaryExpansion] = None,
 ):
     """Add a binary-assignment exclusion (no-good) cut.
 
@@ -2266,13 +2473,24 @@ def _add_no_good_cut(
     Equivalently in <= form:
     sum_{y_i*=1} y_i - sum_{y_i*=0} y_i <= count(y_i*=1) - 1
     """
-    if not binary_indices:
+    if integer_binary_expansion is not None and integer_binary_expansion.bit_count > 0:
+        cut_point = integer_binary_expansion.logical_point(x_master)
+        encoded_binary_indices = (
+            list(binary_indices) + integer_binary_expansion.logical_binary_indices
+        )
+        n_cut_vars = integer_binary_expansion.logical_width
+    else:
+        cut_point = np.asarray(x_master, dtype=np.float64).ravel()
+        encoded_binary_indices = list(binary_indices)
+        n_cut_vars = n_vars
+
+    if not encoded_binary_indices:
         return False
 
-    coeffs = np.zeros(n_vars, dtype=np.float64)
+    coeffs = np.zeros(n_cut_vars, dtype=np.float64)
     count_ones = 0
-    for idx in binary_indices:
-        val = _round_integral_to_bounds(x_master[idx], 0.0, 1.0)
+    for idx in encoded_binary_indices:
+        val = _round_integral_to_bounds(cut_point[idx], 0.0, 1.0)
         if val >= 0.5:
             coeffs[idx] = 1.0
             count_ones += 1
@@ -2288,7 +2506,7 @@ def _add_no_good_cut(
         cut_provenance=cut_provenance,
         source="integer",
         global_valid=True,
-        supporting_point=x_master,
+        supporting_point=cut_point,
     )
     return True
 
@@ -2388,6 +2606,7 @@ def _build_master_milp_data(
     oa_penalty_factor=1000.0,
     oa_cut_relaxable=None,
     use_objective_epigraph=None,
+    integer_binary_expansion: Optional[_IntegerBinaryExpansion] = None,
 ) -> _MasterMILPData:
     """Build matrix data for an OA-style MILP master."""
     # ``use_objective_epigraph`` controls master layout when supplied; the
@@ -2408,17 +2627,26 @@ def _build_master_milp_data(
         # MindtPy-inspired heuristic simplification, not a per-cut slack model.
         slack_index = n_master
         n_master += 1
+    integer_binary_start = None
+    if integer_binary_expansion is not None and integer_binary_expansion.bit_count > 0:
+        integer_binary_start = n_master
+        n_master += integer_binary_expansion.bit_count
 
     # Build A_ub, b_ub from linear <= constraints + OA cuts
     A_ub_rows = []
     b_ub_vals = []
 
     for i, sense in enumerate(linear_senses):
-        row = linear_A_rows[i]
-        if use_objective_epigraph:
-            row = np.append(row, 0.0)
-        if add_slack:
-            row = np.append(row, 0.0)
+        row = _stored_row_to_master_layout(
+            linear_A_rows[i],
+            n_vars=n_vars,
+            n_master=n_master,
+            use_objective_epigraph=bool(use_objective_epigraph),
+            slack_index=None,
+            relaxable=False,
+            integer_binary_expansion=integer_binary_expansion,
+            integer_binary_start=integer_binary_start,
+        )
         if sense == "<=":
             A_ub_rows.append(row)
             b_ub_vals.append(linear_b_rows[i])
@@ -2429,19 +2657,23 @@ def _build_master_milp_data(
     # OA cuts (all in <= form already)
     # Constraint cuts have length n_vars; objective cuts carry the eta column.
     for i in range(len(oa_A_rows)):
-        row = np.asarray(oa_A_rows[i], dtype=np.float64)
-        original_len = len(row)
-        if use_objective_epigraph and len(row) == n_vars:
-            row = np.append(row, 0.0)  # extend constraint cuts with 0 for eta
-        if add_slack:
-            # Relax only constraint OA/feasibility cuts. Objective epigraph cuts
-            # and hard integer-exclusion cuts must remain unrelaxed.
-            if oa_cut_relaxable is None:
-                relax_cut = original_len == n_vars
-            else:
-                relax_cut = bool(oa_cut_relaxable[i])
-            slack_coeff = -1.0 if relax_cut else 0.0
-            row = np.append(row, slack_coeff)
+        original_len = len(np.asarray(oa_A_rows[i], dtype=np.float64).ravel())
+        # Relax only constraint OA/feasibility cuts. Objective epigraph cuts and
+        # hard integer-exclusion cuts must remain unrelaxed.
+        if oa_cut_relaxable is None:
+            relax_cut = original_len == n_vars
+        else:
+            relax_cut = bool(oa_cut_relaxable[i])
+        row = _stored_row_to_master_layout(
+            oa_A_rows[i],
+            n_vars=n_vars,
+            n_master=n_master,
+            use_objective_epigraph=bool(use_objective_epigraph),
+            slack_index=slack_index,
+            relaxable=relax_cut,
+            integer_binary_expansion=integer_binary_expansion,
+            integer_binary_start=integer_binary_start,
+        )
         A_ub_rows.append(row)
         b_ub_vals.append(oa_b_rows[i])
 
@@ -2450,13 +2682,25 @@ def _build_master_milp_data(
     b_eq_vals = []
     for i, sense in enumerate(linear_senses):
         if sense == "==":
-            row = linear_A_rows[i]
-            if use_objective_epigraph:
-                row = np.append(row, 0.0)
-            if add_slack:
-                row = np.append(row, 0.0)
+            row = _stored_row_to_master_layout(
+                linear_A_rows[i],
+                n_vars=n_vars,
+                n_master=n_master,
+                use_objective_epigraph=bool(use_objective_epigraph),
+                slack_index=None,
+                relaxable=False,
+                integer_binary_expansion=integer_binary_expansion,
+                integer_binary_start=integer_binary_start,
+            )
             A_eq_rows.append(row)
             b_eq_vals.append(linear_b_rows[i])
+    _append_integer_binary_link_rows(
+        A_eq_rows,
+        b_eq_vals,
+        n_master=n_master,
+        integer_binary_expansion=integer_binary_expansion,
+        integer_binary_start=integer_binary_start,
+    )
 
     A_ub = np.array(A_ub_rows) if A_ub_rows else None
     b_ub = np.array(b_ub_vals) if b_ub_vals else None
@@ -2479,10 +2723,24 @@ def _build_master_milp_data(
         bounds_list.append((-1e20, 1e20))  # eta unbounded
     if slack_index is not None:
         bounds_list.append((0.0, max_slack))
+    if integer_binary_expansion is not None and integer_binary_expansion.bit_count > 0:
+        bounds_list.extend((0.0, 1.0) for _ in range(integer_binary_expansion.bit_count))
 
     # Integrality
     int_vec = np.zeros(n_master, dtype=np.int32)
     int_vec[:n_vars] = integrality
+    if (
+        integer_binary_expansion is not None
+        and integer_binary_expansion.bit_count > 0
+        and integer_binary_start is not None
+    ):
+        for spec in integer_binary_expansion.variables:
+            bit_integrality = int(integrality[spec.index])
+            int_vec[
+                integer_binary_start + spec.bit_start : integer_binary_start
+                + spec.bit_start
+                + spec.bit_count
+            ] = bit_integrality
 
     return _MasterMILPData(
         c=c,
@@ -2494,6 +2752,8 @@ def _build_master_milp_data(
         integrality=int_vec,
         use_objective_epigraph=bool(use_objective_epigraph),
         slack_index=slack_index,
+        integer_binary_expansion=integer_binary_expansion,
+        integer_binary_start=integer_binary_start,
     )
 
 
@@ -2564,6 +2824,7 @@ def _solve_master_milp(
     mip_start_objective: Optional[float] = None,
     objective_cutoff: Optional[float] = None,
     mip_solution_limit: Optional[int] = None,
+    integer_binary_expansion: Optional[_IntegerBinaryExpansion] = None,
 ):
     """Build and solve the master MILP."""
     try:
@@ -2601,6 +2862,7 @@ def _solve_master_milp(
         oa_penalty_factor=oa_penalty_factor,
         oa_cut_relaxable=oa_cut_relaxable,
         use_objective_epigraph=use_objective_epigraph,
+        integer_binary_expansion=integer_binary_expansion,
     )
 
     full_mip_start = None
@@ -2661,6 +2923,7 @@ def _solve_initial_poa_master(
     oa_penalty_factor: float,
     oa_cut_relaxable,
     milp_solver: str,
+    integer_binary_expansion: Optional[_IntegerBinaryExpansion] = None,
 ):
     """Solve the current OA master with integrality relaxed for initial POA seeding."""
     relaxed_integrality = np.zeros_like(decomp.integrality, dtype=np.int32)
@@ -2687,6 +2950,7 @@ def _solve_initial_poa_master(
         milp_solver=milp_solver,
         solution_pool=False,
         num_solution_iteration=1,
+        integer_binary_expansion=integer_binary_expansion,
     )
 
 
@@ -2707,6 +2971,7 @@ def _solve_regularized_master(
     use_objective_epigraph: Optional[bool] = None,
     derivative_data: Optional[_DerivativeRegularizationData] = None,
     milp_solver: str = "auto",
+    integer_binary_expansion: Optional[_IntegerBinaryExpansion] = None,
 ) -> Optional[np.ndarray]:
     """Solve the ROA level-set master and return its original-variable point.
 
@@ -2740,6 +3005,10 @@ def _solve_regularized_master(
     if add_slack:
         slack_index = n_base
         n_base += 1
+    integer_binary_start = None
+    if integer_binary_expansion is not None and integer_binary_expansion.bit_count > 0:
+        integer_binary_start = n_base
+        n_base += integer_binary_expansion.bit_count
 
     aux_start = None
     if add_regularization == "level_L1":
@@ -2758,17 +3027,24 @@ def _solve_regularized_master(
     a_eq_rows: list[np.ndarray] = []
     b_eq_vals: list[float] = []
 
-    def base_row(coeffs: np.ndarray) -> np.ndarray:
-        row = np.zeros(n_master, dtype=np.float64)
-        row[: len(coeffs)] = coeffs
-        return row
+    def base_row(coeffs, *, relaxable: bool = False, slack: bool = False) -> np.ndarray:
+        return _stored_row_to_master_layout(
+            coeffs,
+            n_vars=n_vars,
+            n_master=n_master,
+            use_objective_epigraph=bool(use_objective_epigraph),
+            slack_index=slack_index if slack else None,
+            relaxable=relaxable,
+            integer_binary_expansion=integer_binary_expansion,
+            integer_binary_start=integer_binary_start,
+        )
 
     for row, rhs, sense in zip(
         decomp.linear_A_rows,
         decomp.linear_b_rows,
         decomp.linear_senses,
     ):
-        master_row = base_row(np.asarray(row, dtype=np.float64))
+        master_row = base_row(row)
         if sense == "<=":
             a_ub_rows.append(master_row)
             b_ub_vals.append(float(rhs))
@@ -2780,19 +3056,22 @@ def _solve_regularized_master(
             b_eq_vals.append(float(rhs))
 
     for i, cut_row in enumerate(oa_A_rows):
-        row = np.asarray(cut_row, dtype=np.float64)
-        original_len = len(row)
-        if use_objective_epigraph and original_len == n_vars:
-            row = np.append(row, 0.0)
-        master_row = base_row(row)
-        if slack_index is not None:
-            if oa_cut_relaxable is None:
-                relax_cut = original_len == n_vars
-            else:
-                relax_cut = bool(oa_cut_relaxable[i])
-            master_row[slack_index] = -1.0 if relax_cut else 0.0
+        original_len = len(np.asarray(cut_row, dtype=np.float64).ravel())
+        if oa_cut_relaxable is None:
+            relax_cut = original_len == n_vars
+        else:
+            relax_cut = bool(oa_cut_relaxable[i])
+        master_row = base_row(cut_row, relaxable=relax_cut, slack=True)
         a_ub_rows.append(master_row)
         b_ub_vals.append(float(oa_b_rows[i]))
+
+    _append_integer_binary_link_rows(
+        a_eq_rows,
+        b_eq_vals,
+        n_master=n_master,
+        integer_binary_expansion=integer_binary_expansion,
+        integer_binary_start=integer_binary_start,
+    )
 
     level_row = np.zeros(n_master, dtype=np.float64)
     level_rhs = float(objective_level)
@@ -2843,6 +3122,8 @@ def _solve_regularized_master(
         bounds.append((-1e20, 1e20))
     if slack_index is not None:
         bounds.append((0.0, max_slack))
+    if integer_binary_expansion is not None and integer_binary_expansion.bit_count > 0:
+        bounds.extend((0.0, 1.0) for _ in range(integer_binary_expansion.bit_count))
     if add_regularization == "level_L1":
         bounds.extend((0.0, 1e20) for _ in range(n_vars))
     elif add_regularization == "level_L_infinity":
@@ -2850,6 +3131,18 @@ def _solve_regularized_master(
 
     integrality = np.zeros(n_master, dtype=np.int32)
     integrality[:n_vars] = decomp.integrality
+    if (
+        integer_binary_expansion is not None
+        and integer_binary_expansion.bit_count > 0
+        and integer_binary_start is not None
+    ):
+        for spec in integer_binary_expansion.variables:
+            bit_integrality = int(decomp.integrality[spec.index])
+            integrality[
+                integer_binary_start + spec.bit_start : integer_binary_start
+                + spec.bit_start
+                + spec.bit_count
+            ] = bit_integrality
     A_ub = np.asarray(a_ub_rows, dtype=np.float64) if a_ub_rows else None
     b_ub = np.asarray(b_ub_vals, dtype=np.float64) if b_ub_vals else None
     A_eq = np.asarray(a_eq_rows, dtype=np.float64) if a_eq_rows else None
@@ -3104,16 +3397,16 @@ def _format_lazy_master_cut(
     relaxable: bool,
 ) -> np.ndarray:
     """Extend an OA cut row to the active master layout for Gurobi cbLazy."""
-    cut = np.asarray(row, dtype=np.float64).ravel()
-    if master.use_objective_epigraph and len(cut) == n_vars:
-        cut = np.append(cut, 0.0)
-    if master.slack_index is not None:
-        cut = np.append(cut, -1.0 if relaxable else 0.0)
-    if len(cut) != len(master.c):
-        raise ValueError(
-            f"lazy OA cut has {len(cut)} coefficients but master has {len(master.c)} variables"
-        )
-    return cut
+    return _stored_row_to_master_layout(
+        row,
+        n_vars=n_vars,
+        n_master=len(master.c),
+        use_objective_epigraph=master.use_objective_epigraph,
+        slack_index=master.slack_index,
+        relaxable=relaxable,
+        integer_binary_expansion=master.integer_binary_expansion,
+        integer_binary_start=master.integer_binary_start,
+    )
 
 
 def solve_lp_nlp_bb(
@@ -3133,6 +3426,7 @@ def solve_lp_nlp_bb(
     add_no_good_cuts: bool = False,
     feasibility_norm: str = "L_infinity",
     milp_solver: str = "gurobi",
+    integer_to_binary: bool = False,
     **kwargs,
 ) -> SolveResult:
     """Solve a convex MINLP with the LP/NLP branch-and-bound variant.
@@ -3151,6 +3445,7 @@ def solve_lp_nlp_bb(
             + ", ".join(sorted(kwargs))
             + ". Supported options are: add_no_good_cuts, add_slack, equality_relaxation, "
             "feasibility_cuts, feasibility_norm, heuristic_nonconvex, init_strategy, "
+            "integer_to_binary, "
             "max_slack, milp_solver, oa_penalty_factor."
         )
     _require_lp_nlp_bb_gurobi_backend(milp_solver)
@@ -3169,8 +3464,18 @@ def solve_lp_nlp_bb(
         add_slack = True
     add_slack = bool(add_slack)
     add_no_good_cuts = bool(add_no_good_cuts)
+    integer_to_binary = bool(integer_to_binary)
+    _warn_integer_to_binary_noop(
+        "LP/NLP BB",
+        integer_to_binary=integer_to_binary,
+        add_no_good_cuts=add_no_good_cuts,
+    )
 
     decomp = _decompose_model(model)
+    integer_binary_expansion = _build_integer_binary_expansion(
+        decomp,
+        enabled=bool(integer_to_binary and add_no_good_cuts),
+    )
     evaluator = decomp.evaluator
     n_vars = decomp.n_vars
     n_cons = decomp.n_cons
@@ -3325,6 +3630,7 @@ def solve_lp_nlp_bb(
         oa_penalty_factor=oa_penalty_factor,
         oa_cut_relaxable=oa_cut_relaxable,
         use_objective_epigraph=(not decomp.obj_is_linear and decomp.oa_objective_is_convex),
+        integer_binary_expansion=integer_binary_expansion,
     )
 
     def collect_new_lazy_cuts(start: int, master_x: np.ndarray) -> list[tuple[np.ndarray, float]]:
@@ -3382,7 +3688,9 @@ def solve_lp_nlp_bb(
                         decomp.oa_constraint_mask,
                         oa_cut_relaxable=oa_cut_relaxable,
                     )
-            if add_no_good_cuts and not decomp.general_integer_indices:
+            if add_no_good_cuts and (
+                not decomp.general_integer_indices or integer_binary_expansion is not None
+            ):
                 _add_no_good_cut(
                     x_master,
                     decomp.binary_indices,
@@ -3390,6 +3698,7 @@ def solve_lp_nlp_bb(
                     oa_b_rows,
                     n_vars,
                     oa_cut_relaxable=oa_cut_relaxable,
+                    integer_binary_expansion=integer_binary_expansion,
                 )
             add_oa_cuts_at(x_master)
 
@@ -3683,6 +3992,7 @@ def solve_oa(
     milp_solver: str = "auto",
     solution_pool: bool = False,
     num_solution_iteration: int = 5,
+    integer_to_binary: bool = False,
     mip_nlp_profile: str = "default",
     mip_nlp_shot_config: Optional[MIPNLPShotConfig] = None,
     **kwargs,
@@ -3797,6 +4107,12 @@ def solve_oa(
     num_solution_iteration : int
         Maximum number of master solution-pool candidates to process per OA
         iteration when ``solution_pool=True``.
+    integer_to_binary : bool
+        When true, bounded general-integer variables get a linked binary
+        expansion in the OA master so no-good cuts can exclude assignments over
+        generated binary variables. Unbounded or impractically bounded general
+        integers raise a diagnostic when this option is combined with
+        ``add_no_good_cuts``.
 
     Returns
     -------
@@ -3845,6 +4161,11 @@ def solve_oa(
                 shot_solution_pool_degraded_reason = (
                     "fixed_nlp_strategy='solution_pool' requires milp_solver='gurobi'"
                 )
+                logger.warning(
+                    "OA: SHOT solution-pool request ignored for milp_solver=%r; "
+                    "only the Gurobi backend exposes solution-pool candidates.",
+                    milp_solver,
+                )
     if solution_pool:
         _require_solution_pool_backend(milp_solver)
     if add_regularization is not None and ecp_mode:
@@ -3855,9 +4176,19 @@ def solve_oa(
     add_slack = bool(add_slack)
     add_no_good_cuts = bool(add_no_good_cuts)
     cycling_check = bool(cycling_check)
+    integer_to_binary = bool(integer_to_binary)
+    _warn_integer_to_binary_noop(
+        "OA",
+        integer_to_binary=integer_to_binary,
+        add_no_good_cuts=add_no_good_cuts,
+    )
 
     # 1. Decompose model
     decomp = _decompose_model(model)
+    integer_binary_expansion = _build_integer_binary_expansion(
+        decomp,
+        enabled=bool(integer_to_binary and add_no_good_cuts),
+    )
     evaluator = decomp.evaluator
     n_vars = decomp.n_vars
     n_cons = decomp.n_cons
@@ -4480,6 +4811,7 @@ def solve_oa(
                     oa_penalty_factor=oa_penalty_factor,
                     oa_cut_relaxable=oa_cut_relaxable,
                     milp_solver=milp_solver,
+                    integer_binary_expansion=integer_binary_expansion,
                 )
                 mip_count += 1
             except Exception as exc:
@@ -4633,6 +4965,7 @@ def solve_oa(
                     oa_penalty_factor=oa_penalty_factor,
                     oa_cut_relaxable=oa_cut_relaxable,
                     milp_solver=milp_solver,
+                    integer_binary_expansion=integer_binary_expansion,
                 )
                 mip_count += 1
             except Exception as exc:
@@ -4798,6 +5131,7 @@ def solve_oa(
             mip_start_objective=master_mip_start_objective,
             objective_cutoff=master_objective_cutoff,
             mip_solution_limit=master_solution_limit,
+            integer_binary_expansion=integer_binary_expansion,
         )
         mip_count += 1
 
@@ -4999,6 +5333,7 @@ def solve_oa(
                 use_objective_epigraph=(not decomp.obj_is_linear and decomp.oa_objective_is_convex),
                 derivative_data=derivative_data,
                 milp_solver=milp_solver,
+                integer_binary_expansion=integer_binary_expansion,
             )
             if x_regularized is not None:
                 nlp_initial_point = x_regularized
@@ -5278,7 +5613,7 @@ def solve_oa(
                 if (
                     safe_integer_cut_status
                     and add_no_good_cuts
-                    and not decomp.general_integer_indices
+                    and (not decomp.general_integer_indices or integer_binary_expansion is not None)
                 ):
                     _add_no_good_cut(
                         x_master,
@@ -5288,6 +5623,7 @@ def solve_oa(
                         n_vars,
                         oa_cut_relaxable=oa_cut_relaxable,
                         cut_provenance=cut_provenance,
+                        integer_binary_expansion=integer_binary_expansion,
                     )
 
                 # Also add OA cuts at master point
