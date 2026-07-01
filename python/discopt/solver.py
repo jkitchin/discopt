@@ -8533,14 +8533,16 @@ def _solve_lp(
     time_limit: float | None = None,
     prefer_pounce: bool = False,
 ) -> SolveResult:
-    """Solve an LP through the first available engine, then the JAX LP IPM.
+    """Solve an LP through the pure-Rust simplex (then POUNCE if installed).
 
-    Engine order is Rust simplex -> POUNCE -> JAX IPM, or POUNCE -> Rust simplex
-    -> JAX IPM when ``prefer_pounce`` is set (the user passed
-    ``nlp_solver="pounce"``, i.e. asked for POUNCE everywhere; roadmap P0.4). The
-    pure-JAX IPM struggles on problems whose declared bounds exceed ~1e15 (it
-    returns NaN via Newton blow-up on unbounded variables); the simplex and
-    POUNCE both handle unbounded columns natively, so the IPM is the last resort.
+    Engine order is Rust simplex -> POUNCE, or POUNCE -> Rust simplex when
+    ``prefer_pounce`` is set (the user passed ``nlp_solver="pounce"``). The
+    fragile JAX LP-IPM last resort was **retired** in issue #364: the hardened
+    pure-Rust simplex (iterative refinement, condition/growth signals, dual
+    anti-cycling, EXPAND anti-degeneracy) is the single robust LP engine, so a
+    genuine simplex(+POUNCE) failure now reports an honest ``error`` rather than
+    falling to the IPM — which returned NaN via Newton blow-up on declared bounds
+    exceeding ~1e15, i.e. was never a sound last resort.
     """
     engines = [_solve_lp_simplex, _solve_lp_pounce]
     if prefer_pounce:
@@ -8550,49 +8552,19 @@ def _solve_lp(
         if result is not None:
             return result
 
-    from discopt._jax.lp_ipm import lp_ipm_solve
-    from discopt._jax.problem_classifier import extract_lp_data
-
-    t_jax_start = time.perf_counter()
-    lp_data = extract_lp_data(model)
-    state = lp_ipm_solve(lp_data.c, lp_data.A_eq, lp_data.b_eq, lp_data.x_l, lp_data.x_u)
-    jax_time = time.perf_counter() - t_jax_start
+    # Single robust engine (issue #364): no JAX LP-IPM fallback. Both the simplex
+    # and POUNCE (if installed) returned None — a binding that is unavailable or a
+    # genuine numerical failure — so report it honestly instead of trusting the
+    # IPM's large-bound NaN. The Rust simplex is always built in, so in practice
+    # this is only reached on a true solve failure the IPM could not have fixed.
     wall_time = time.perf_counter() - t_start
-
-    from discopt.modeling.core import ObjectiveSense
-
-    n_orig = sum(v.size for v in model._variables)
-    x_flat = np.asarray(state.x[:n_orig])
-    obj_val = float(state.obj) + lp_data.obj_const
-
-    # Negate objective back for maximization (LP solver always minimizes)
-    assert model._objective is not None
-    if model._objective.sense == ObjectiveSense.MAXIMIZE:
-        obj_val = -obj_val
-
-    conv = int(state.converged)
-    if conv in (1, 2):
-        status = "optimal"
-    elif conv == 3:
-        status = "iteration_limit"
-    else:
-        status = "error"
-
-    sr = SolveResult(
-        status=status,
-        objective=obj_val,
-        bound=obj_val if status == "optimal" else None,
-        gap=_optimal_relative_gap(obj_val) if status == "optimal" else None,
-        x=_unpack_solution(model, x_flat),
+    return SolveResult(
+        status="error",
+        objective=None,
+        bound=None,
         wall_time=wall_time,
         node_count=0,
-        rust_time=0.0,
-        jax_time=jax_time,
-        python_time=wall_time - jax_time,
     )
-    # LPs are convex by definition; mark for parity with the QP/NLP fast paths.
-    sr.convex_fast_path = True
-    return sr
 
 
 def _solve_lp_simplex(
