@@ -104,6 +104,33 @@ class DecomposedModel:
             return solve_lagrangian(model, structure=self.structure, **config)
         raise NotImplementedError(f"no reformulation driver for {self.method.label}")
 
+    def schedule(self):
+        """Return the :class:`SchedulingGraph` over this decomposition's blocks."""
+        from discopt.decomposition.parallel.schedule import build_schedule
+
+        return build_schedule(self)
+
+    def map_subproblems(self, solve_block, backend="sequential"):
+        """Run *solve_block* over every subproblem on a parallel *backend*.
+
+        Blocks execute biggest-first (straggler avoidance) on the chosen
+        :class:`~discopt.decomposition.parallel.comm.CommunicationLayer`
+        (``"sequential"`` | ``"threads"`` | an instance), but results are reduced
+        back into **block order** — deterministic regardless of backend or
+        schedule (design §13.4). Returns ``[solve_block(sp) for sp in
+        subproblems]`` in block order.
+        """
+        from discopt.decomposition.parallel.comm import select_backend
+
+        comm = select_backend(backend)
+        order = self.schedule().execution_order()
+        reordered = [self.subproblems[i] for i in order]
+        exec_results = comm.map(reordered, solve_block)
+        results: list = [None] * len(self.subproblems)
+        for k, i in enumerate(order):
+            results[i] = exec_results[k]
+        return results
+
     def summary(self) -> str:
         """Human-readable multi-line description of the decomposition."""
         lines = [
