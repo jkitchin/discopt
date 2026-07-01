@@ -1599,17 +1599,18 @@ Phases 1–7 of §17 are implemented on the initial branch. The subsystem lives 
 → recommendation → reformulation → parallel-plan → record flow is exercised in
 `docs/notebooks/decomposition_advisor.ipynb`.
 
-**What was verified where.** The development environment cannot build
-`discopt-core` (its `feral` dependency is pinned to a GitHub git revision, and
-`github.com` is blocked by the egress policy) or the `_rust` extension, so the two
-compiled surfaces are verified differently from the pure-Python layer:
+**What was verified where.** Once `feral` was repinned to a crates.io release
+(main #375), `discopt-core` and the `_rust` extension build in the dev
+environment, so most of what was previously CI-only is now verified here. The one
+remaining gap is an end-to-end *solve*, which needs the POUNCE node-LP engine (a
+separate GitHub package the egress policy blocks):
 
 | Surface | Verified in the dev environment | Deferred to CI |
 |---|---|---|
-| Python advisor (graph/advisor/ir/parallel/learning) | ✅ full pytest + ruff + mypy (116+ tests) | — |
-| Rust graph kernels (`decomp/`) | ✅ compiled + unit-tested in an isolated std-only crate under the same compiler, edition (2021), and `#![deny(missing_docs)]` (15 tests); `clippy` + `rustfmt` clean | in-crate `cargo test` (needs the full `discopt-core` build) |
-| PyO3 FFI for the kernels | — (not yet written) | build + import once the crate builds |
-| `DecomposedModel.solve()` dispatch | ✅ verified by monkeypatching the drivers (right driver, right `structure`, kwargs threaded) | end-to-end solve equivalence vs the monolith (needs `_rust`/POUNCE) |
+| Python advisor (graph/advisor/ir/parallel/learning) | ✅ full pytest + ruff + mypy (118 tests) | — |
+| Rust graph kernels (`decomp/`) | ✅ in-crate `cargo test -p discopt-core` (15 tests), plus `clippy` + `rustfmt`, edition 2021 / `#![deny(missing_docs)]` | — |
+| PyO3 FFI for the kernels (`decomp_bindings`) | ✅ built with maturin; callable from Python via `discopt._rust`, and the Python `articulation_and_bridges` fast path is asserted bit-for-bit equal to the pure-Python reference | — |
+| `DecomposedModel.solve()` dispatch | ✅ verified by monkeypatching the drivers (right driver, right `structure`, kwargs threaded) | end-to-end solve equivalence vs the monolith (base MILP solve needs POUNCE, unavailable here) |
 | Docs notebook | ✅ every code cell executed during authoring (pure analysis, no solve); citations resolve | `jupyter-book build` (executes all notebooks, needs the full stack) |
 
 **Correctness gate for the remainder.** Per §17, the correctness-critical
