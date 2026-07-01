@@ -163,8 +163,8 @@ fn solution_within_tolerance(
 struct Simplex<'a> {
     cols: SparseCols, // CSC of the constraint matrix; the sole matrix view (pricing,
     // residual, audit all go through it — no dense `m×n` copy is kept)
-    b: &'a [f64],     // length m
-    c: &'a [f64],     // length n
+    b: &'a [f64], // length m
+    c: &'a [f64], // length n
     m: usize,
     n: usize,  // real columns
     na: usize, // n + m (with artificials appended)
@@ -1066,7 +1066,15 @@ mod tests {
         let l = [0.0, 0.0];
         let u = [5.0, 5.0];
         // Exact feasible point passes.
-        assert!(solution_within_tolerance(&cols, 1, 2, &b, &l, &u, &[1.0, 3.0]));
+        assert!(solution_within_tolerance(
+            &cols,
+            1,
+            2,
+            &b,
+            &l,
+            &u,
+            &[1.0, 3.0]
+        ));
         // Ax=b drift beyond tolerance is rejected (would be a false "Optimal").
         assert!(!solution_within_tolerance(
             &cols,
