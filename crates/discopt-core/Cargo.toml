@@ -18,7 +18,15 @@ description = "Core MINLP solver: B&B engine, expression IR, presolve"
 # (sc2000/sc4000) — the LU refactor went quadratic→cubic in the row count,
 # invisible on few-row knapsacks but catastrophic on 800–1500-row covering LPs.
 # `test_setcover_lp_regression.py` guards against a re-downgrade.
-feral = "0.11.3"
+#
+# TEMPORARY git-rev pin (not a crates.io release). HEAD carries the discopt#364
+# LU-hardening APIs merged as feral #96/#98/#97 but NOT yet published: the
+# element-growth getters (growth()/u_max0()), the unsymmetric-LU condition
+# estimate (condition_estimate_1), and the richer update() instability signal
+# (RefactorCause + last_refactor() + growth-aware/dense-parity should_refactor).
+# feral HEAD still reports version 0.11.3, so crates.io can't carry these yet.
+# SWAP BACK to `feral = "0.11.4"` once that release is published.
+feral = { git = "https://github.com/jkitchin/feral", rev = "a17fb7a33427b2b08a8f1777c28b576b260532cd" }
 # rayon: data-parallel iterators. Used (behind the `parallel` feature) to solve
 # the independent per-node LP relaxations of a B&B batch concurrently. Pinned to
 # 1.10 to keep the crate's MSRV (1.75); 1.12+ requires rustc 1.80.

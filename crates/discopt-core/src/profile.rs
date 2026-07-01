@@ -80,6 +80,32 @@ counters!(
     BoundFlips,
     BlandActivations,
     Refactorizations,
+    // Numeric-focus iterative-refinement recovery (discopt#364), split by path so
+    // the two very different triggers can be told apart when measuring.
+    //
+    // Primal (audit-failure driven): a drifted "Optimal" failed the feasibility
+    // audit and triggered a fresh refined refactorization (Attempts); Rescues =
+    // how many the refined point pulled back to a sound Optimal (the rest stayed
+    // Numerical and fell back to cold, as before).
+    RefinedRecoveryAttemptsPrimal,
+    RefinedRecoveryRescuesPrimal,
+    // Dual (growth-gated): the working factor's growth signal flagged possible
+    // digit loss at the optimality gate, triggering a fresh refined recompute
+    // (Attempts); Rescues = how many revealed a hidden infeasibility and so
+    // *prevented* a wrong "Optimal" (returning None → cold solve). A non-rescue
+    // Attempt still certified Optimal, but with the sharper x_B values.
+    RefinedRecoveryAttemptsDual,
+    RefinedRecoveryRescuesDual,
+    // Dual-simplex anti-cycling (discopt#364): degenerate dual pivots (entering
+    // reduced cost ≈ 0 → no dual-objective progress) that accumulate the stall
+    // count, and how often that stall crossed the threshold and switched the dual
+    // to Bland's smallest-index rule to break a potential cycle.
+    DualDegeneratePivots,
+    DualBlandActivations,
+    // Primal EXPAND anti-degeneracy (discopt#364): degenerate blocking steps that
+    // were bumped up to the guaranteed EXPAND minimum step (breaking the stall in
+    // place instead of accumulating toward the Bland switch).
+    ExpandMinSteps,
 );
 
 #[inline(always)]

@@ -80,7 +80,29 @@ pub fn solve_lp_cols(
 /// small absolute/relative tolerance. Used as the final feasibility audit before
 /// certifying an `Optimal` solve so incremental `x_B` drift (Harris bound
 /// excursions, deferred refactorization) cannot return a wrong optimum.
-fn solution_within_tolerance(
+/// Why the final feasibility audit rejected a point — the distinction that
+/// decides whether iterative refinement can help (discopt#364).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Feasibility {
+    /// Within tolerance on both bounds and `Ax=b`.
+    Ok,
+    /// A variable sits outside `[l, u]` beyond tolerance. On the degenerate lifted
+    /// relaxations this is typically a Harris ratio-test bound *excursion* (the
+    /// `delta_tol` δ-expansion letting a basic var settle just past a bound), not a
+    /// solve-accuracy problem — so recomputing `x_B` more accurately does **not**
+    /// fix it. Refinement is skipped for this kind.
+    Bounds,
+    /// The `Ax=b` row residual exceeds tolerance — a genuine linear-solve
+    /// inaccuracy (accumulated Forrest–Tomlin update error / ill-conditioning),
+    /// which a fresh refinement-polished factorization *can* recover.
+    Rows,
+}
+
+/// Classify a candidate point against its bounds and `Ax=b`. Bounds are checked
+/// first, so a point violating *both* reports [`Feasibility::Bounds`] — correct
+/// for the recovery decision, since refinement cannot repair a bound excursion
+/// even when it repairs the residual.
+fn audit_feasibility(
     cols: &SparseCols,
     m: usize,
     n: usize,
@@ -88,7 +110,7 @@ fn solution_within_tolerance(
     l: &[f64],
     u: &[f64],
     x: &[f64],
-) -> bool {
+) -> Feasibility {
     const FEAS: f64 = 1e-6;
     for j in 0..n {
         // Relative bound tolerance: a variable whose bound (and hence value) is
@@ -99,7 +121,7 @@ fn solution_within_tolerance(
         let lo_tol = FEAS * (1.0 + l[j].abs().min(INF));
         let hi_tol = FEAS * (1.0 + u[j].abs().min(INF));
         if x[j] < l[j] - lo_tol || x[j] > u[j] + hi_tol {
-            return false;
+            return Feasibility::Bounds;
         }
     }
     // Row activity `A x` accumulated over the sparse columns (O(nnz)), not a dense
@@ -117,10 +139,25 @@ fn solution_within_tolerance(
     }
     for i in 0..m {
         if (ax[i] - b[i]).abs() > FEAS * (1.0 + b[i].abs()) {
-            return false;
+            return Feasibility::Rows;
         }
     }
-    true
+    Feasibility::Ok
+}
+
+/// Bool convenience over [`audit_feasibility`] used by the unit tests (production
+/// code switches on the [`Feasibility`] reason to decide whether to refine).
+#[cfg(test)]
+fn solution_within_tolerance(
+    cols: &SparseCols,
+    m: usize,
+    n: usize,
+    b: &[f64],
+    l: &[f64],
+    u: &[f64],
+    x: &[f64],
+) -> bool {
+    audit_feasibility(cols, m, n, b, l, u, x) == Feasibility::Ok
 }
 
 struct Simplex<'a> {
@@ -242,8 +279,9 @@ impl<'a> Simplex<'a> {
         }
     }
 
-    /// Recompute basic-variable values: x_B = B⁻¹ (b − Σ_{nonbasic} A_j x_j).
-    fn basic_values(&mut self, art_sign: &[f64]) -> Result<Vec<f64>, ()> {
+    /// The right-hand side the basic-variable solve runs against:
+    /// `b − Σ_{nonbasic} A_j x_j` (so that `B x_B = rhs`).
+    fn reduced_rhs(&self, art_sign: &[f64]) -> Vec<f64> {
         let mut rhs = self.b.to_vec();
         for j in 0..self.na {
             if self.stat[j] != BASIC {
@@ -260,8 +298,49 @@ impl<'a> Simplex<'a> {
                 }
             }
         }
+        rhs
+    }
+
+    /// Recompute basic-variable values: x_B = B⁻¹ (b − Σ_{nonbasic} A_j x_j).
+    fn basic_values(&mut self, art_sign: &[f64]) -> Result<Vec<f64>, ()> {
+        let mut rhs = self.reduced_rhs(art_sign);
         self.lu.ftran(&mut rhs).map_err(|_| ())?;
         Ok(rhs)
+    }
+
+    /// Recover `x_B` for the final basis via a **fresh** numeric-focus
+    /// factorization with iterative refinement (discopt#364). Used only when the
+    /// incremental factor's `x_B` fails the feasibility audit: a fresh factor
+    /// carries none of the accumulated Forrest–Tomlin update error, and
+    /// refinement then polishes the residual `b − B·x`, so an ill-conditioned or
+    /// update-drifted basis is recovered *inside the engine* rather than by
+    /// falling back to another solver. Returns `None` if the fresh factorization
+    /// or refined solve fails (the caller keeps the Numerical verdict).
+    fn refined_basic_values(&self, art_sign: &[f64]) -> Option<Vec<f64>> {
+        let cols: Vec<Vec<f64>> = self
+            .basis
+            .iter()
+            .map(|&j| self.column(j, art_sign))
+            .collect();
+        let mut lu = FeralLU::new().with_numeric_focus();
+        lu.factorize(self.m, &cols).ok()?;
+        let mut rhs = self.reduced_rhs(art_sign);
+        lu.ftran_refined(&mut rhs).ok()?;
+        Some(rhs)
+    }
+
+    /// Scatter a basic-values vector `x_B` into the full primal point `x`
+    /// (basic vars take their `x_B` slot, nonbasic vars sit at their bound).
+    fn assemble_x(&self, xb: &[f64]) -> Vec<f64> {
+        let mut x = vec![0.0; self.n];
+        for j in 0..self.n {
+            x[j] = if self.stat[j] == BASIC {
+                xb[self.slot_of[j] as usize]
+            } else {
+                self.nb_value(j)
+            };
+        }
+        x
     }
 
     fn refactorize(&mut self, art_sign: &[f64]) -> Result<(), ()> {
@@ -432,6 +511,19 @@ impl<'a> Simplex<'a> {
         let mut xb = self
             .basic_values(art_sign)
             .map_err(|_| LpStatus::Numerical)?;
+        // EXPAND anti-degeneracy (Gill et al.): the Harris ratio-test feasibility
+        // tolerance grows slowly from δ_min to δ_max, and a guaranteed minimum step
+        // keeps every pivot strictly progressing — breaking the degenerate zero-step
+        // stalls that dominate the lifted relaxations, more cheaply than falling into
+        // Bland. δ resets to δ_min every EXPAND_RESET iterations (the incremental x_B
+        // is refreshed exactly on the ≤48-update refactorizations, so the sub-δ
+        // excursions never accumulate). δ_max stays at the pre-existing 1e-7 ceiling
+        // — 10× under the 1e-6 feasibility audit — so soundness is unchanged.
+        const EXPAND_MIN: f64 = 1e-8;
+        const EXPAND_MAX: f64 = 1e-7;
+        const EXPAND_RESET: usize = 10_000;
+        let expand_incr = (EXPAND_MAX - EXPAND_MIN) / EXPAND_RESET as f64;
+        let mut expand_tol = EXPAND_MIN;
         for _iter in 0..self.max_iter {
             // Poll the wall-clock deadline every 256 pivots (cheap relative to a
             // pricing+ftran iteration). A dense, degenerate lifted-McCormick LP
@@ -502,8 +594,9 @@ impl<'a> Simplex<'a> {
             // its bound; pass 2 picks, among columns that truly block within that
             // step, the one with the largest pivot |α_i| (numerical stability),
             // which may push others up to δ past a bound — the accepted Harris
-            // trade, with δ ≪ the 1e-6 feasibility tolerance used elsewhere.
-            let delta_tol = 1e-7;
+            // trade, with δ ≪ the 1e-6 feasibility tolerance used elsewhere. δ is
+            // the EXPAND tolerance for this iteration (grows toward EXPAND_MAX).
+            let delta_tol = expand_tol;
             // entering's own bound-flip cap (the step at which q hits its far bound)
             let cap = if self.ub[q] < INF && self.lb[q] > -INF {
                 self.ub[q] - self.lb[q]
@@ -568,6 +661,20 @@ impl<'a> Simplex<'a> {
                 t_max = cap; // no basic blocks → pure bound flip (or unbounded)
             }
 
+            // EXPAND minimum step: on a degenerate (≈zero) blocking step, advance by
+            // a guaranteed positive amount so the pivot strictly improves the
+            // objective and the search cannot stall. The excursion introduced is
+            // ≤ expand_tol (≤ 1e-7); the leaving variable is pinned exactly at its
+            // bound as it exits, so nothing persists past the next exact refresh.
+            // Bounded by the entering variable's own bound-flip distance `cap`.
+            if leave_slot.is_some() {
+                let t_min = (expand_tol / best_pivot.max(self.tol)).min(cap);
+                if t_max < t_min {
+                    t_max = t_min;
+                    crate::profile::incr(crate::profile::Ctr::ExpandMinSteps);
+                }
+            }
+
             if t_max >= INF {
                 // Capture the primal unbounded ray over the real columns (length
                 // `n`): entering `q` moves by `dir`, each basic variable follows
@@ -594,6 +701,13 @@ impl<'a> Simplex<'a> {
                 crate::profile::incr(crate::profile::Ctr::DegeneratePivots);
             } else {
                 stall = 0;
+            }
+            // Grow the EXPAND tolerance for the next iteration; reset periodically so
+            // it never exceeds EXPAND_MAX (the excursions are cleared by the exact
+            // x_B refresh on each refactorization, so the reset never loses ground).
+            expand_tol += expand_incr;
+            if expand_tol >= EXPAND_MAX {
+                expand_tol = EXPAND_MIN;
             }
             crate::profile::incr(if is_phase1 {
                 crate::profile::Ctr::Phase1Pivots
@@ -692,27 +806,56 @@ impl<'a> Simplex<'a> {
         let xb = self
             .basic_values(art_sign)
             .unwrap_or_else(|_| vec![0.0; self.m]);
-        let mut x = vec![0.0; self.n];
-        for j in 0..self.n {
-            x[j] = if self.stat[j] == BASIC {
-                xb[self.slot_of[j] as usize]
-            } else {
-                self.nb_value(j)
-            };
-        }
-        let obj: f64 = (0..self.n).map(|j| self.c[j] * x[j]).sum();
+        let mut x = self.assemble_x(&xb);
+        let mut obj: f64 = (0..self.n).map(|j| self.c[j] * x[j]).sum();
 
         // Final feasibility audit before certifying Optimal. x_B is maintained
         // incrementally between the ~48-pivot refactorizations and the Harris
         // ratio test permits small bound excursions, so the returned point can
-        // drift. Verify it actually satisfies its bounds and Ax=b; on violation
-        // downgrade to Numerical so the caller treats it as a failed solve (the
-        // warm path's cold fallback, or the MILP driver decertifying the gap and
-        // branching) rather than trusting a wrong "Optimal".
-        let status = if status == LpStatus::Optimal
-            && !solution_within_tolerance(&self.cols, self.m, self.n, self.b, &self.lb, &self.ub, &x)
-        {
-            LpStatus::Numerical
+        // drift. Verify it actually satisfies its bounds and Ax=b.
+        //
+        // On a *row-residual* failure (Ax=b drift — accumulated update error /
+        // ill-conditioning), attempt an in-engine refined recovery: recompute x_B
+        // from a fresh, refinement-polished factorization of the same basis and
+        // re-audit; only downgrade to Numerical if it still fails. The re-audit is
+        // the same soundness gate, so recovery can only rescue a solve that would
+        // otherwise be Numerical — never certify a wrong "Optimal".
+        //
+        // A *bounds* excursion is NOT retried: it is a Harris ratio-test artefact,
+        // not a solve-accuracy problem, so a sharper x_B cannot pull the variable
+        // back inside its bound (measured: on the lifted corpus every audit failure
+        // was a bounds excursion, so refining them was pure wasted work — discopt#364).
+        // Either way a genuine Numerical flows to the caller as before (the warm
+        // path's cold fallback, or the MILP driver decertifying the gap and branching).
+        let audit = |slf: &Simplex, x: &[f64]| {
+            audit_feasibility(&slf.cols, slf.m, slf.n, slf.b, &slf.lb, &slf.ub, x)
+        };
+        let status = if status == LpStatus::Optimal {
+            match audit(&self, &x) {
+                Feasibility::Ok => LpStatus::Optimal,
+                // Bound excursion: refinement can't help — downgrade directly.
+                Feasibility::Bounds => LpStatus::Numerical,
+                // Row residual: the failure mode iterative refinement can recover.
+                Feasibility::Rows => {
+                    crate::profile::incr(crate::profile::Ctr::RefinedRecoveryAttemptsPrimal);
+                    match self.refined_basic_values(art_sign) {
+                        Some(xb_r) => {
+                            let x_r = self.assemble_x(&xb_r);
+                            if audit(&self, &x_r) == Feasibility::Ok {
+                                crate::profile::incr(
+                                    crate::profile::Ctr::RefinedRecoveryRescuesPrimal,
+                                );
+                                x = x_r;
+                                obj = (0..self.n).map(|j| self.c[j] * x[j]).sum();
+                                LpStatus::Optimal
+                            } else {
+                                LpStatus::Numerical
+                            }
+                        }
+                        None => LpStatus::Numerical,
+                    }
+                }
+            }
         } else {
             status
         };
