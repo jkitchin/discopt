@@ -4,9 +4,9 @@ This is the user-facing object of the Decomposition Advisor. It exposes the
 *analysis* surface — structure report, discovered candidates, scored/ranked
 candidates (:meth:`scores`), blocks, and the Phase 1 graph views/exports — plus
 the *recommendation* surface: :meth:`recommendation` (an explained single pick)
-and :meth:`explain` (rendered rationale / counterfactual "why not X?"). The
-reformulation-facing :meth:`decompose` is stubbed until Phase 5, so the public
-API shape is stable from the start.
+and :meth:`explain` (rendered rationale / counterfactual "why not X?") — and the
+*reformulation* surface :meth:`decompose`, which builds a solvable
+:class:`~discopt.decomposition.ir.reformulation.DecomposedModel`.
 
 Entry point::
 
@@ -153,15 +153,33 @@ class DecompositionAdvisor:
             return self._explainer.explain_counterfactual(method, self.scores(), self.structure())
         return self.recommendation().render(fmt)
 
-    # ── later-phase surface (stable shape, not yet implemented) ──
+    def decompose(self, method: MethodKind | str | None = None):
+        """Build a solvable :class:`DecomposedModel` (design §8, Phase 5).
 
-    def decompose(self, *args, **kwargs):
-        """Build a solvable decomposed model. Requires reformulation (Phase 5)."""
-        raise NotImplementedError(
-            "decompose() lands with automatic reformulation (Phase 5); today the "
-            "shipping solve_benders / solve_lagrangian drivers consume a candidate's "
-            ".structure directly."
-        )
+        With *method* omitted, decomposes using the recommended method; otherwise
+        uses the named method's candidate (raising if it was not generated for
+        this model). The returned object's ``solve()`` runs the coordinated solve
+        via the shipping drivers. Does not solve here.
+        """
+        from discopt.decomposition.ir.reformulation import build_decomposition
+
+        if method is not None and isinstance(method, str):
+            method = MethodKind(method)
+
+        cand = self._candidate_for(method)
+        if cand is None:
+            raise ValueError(
+                f"no {method.label if method else 'recommended'} candidate for this "
+                "model; call candidates() to see what is available"
+            )
+        return build_decomposition(self._model, cand)
+
+    def _candidate_for(self, method: MethodKind | None) -> Candidate | None:
+        """The candidate to reformulate: a named method's, or the recommendation's."""
+        cands = self.candidates()
+        if method is None:
+            method = self.recommendation().recommendation
+        return next((c for c in cands if c.method is method), None)
 
 
 def analyze_decomposition(model) -> DecompositionAdvisor:

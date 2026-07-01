@@ -5,7 +5,6 @@ Covers ``StructureAnalyzer``/``StructureReport``, the candidate generators, the
 """
 
 import discopt.modeling as dm
-import pytest
 from discopt.decomposition import (
     Candidate,
     DecompositionAdvisor,
@@ -191,8 +190,9 @@ def test_advisor_summary_lists_candidates():
     assert "Benders" in s
 
 
-def test_reformulation_method_raises_not_implemented():
-    # decompose() (Phase 5) is still a stub; recommendation()/explain() are live.
+def test_decompose_returns_decomposed_model():
+    # decompose() (Phase 5) is now live and builds a reformulation.
     adv = analyze_decomposition(_benders_model())
-    with pytest.raises(NotImplementedError):
-        adv.decompose()
+    dcmp = adv.decompose()
+    assert dcmp.method is MethodKind.BENDERS
+    assert dcmp.num_blocks == 2
