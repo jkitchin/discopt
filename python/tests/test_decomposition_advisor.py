@@ -187,7 +187,7 @@ def test_advisor_graph_and_export():
 def test_advisor_summary_lists_candidates():
     adv = analyze_decomposition(_benders_model())
     s = adv.summary()
-    assert "Candidates" in s
+    assert "Ranked candidates" in s
     assert "Benders" in s
 
 

@@ -27,6 +27,9 @@ from discopt.decomposition.advisor import (
     MethodKind as MethodKind,
 )
 from discopt.decomposition.advisor import (
+    ScoreVector as ScoreVector,
+)
+from discopt.decomposition.advisor import (
     Soundness as Soundness,
 )
 from discopt.decomposition.advisor import (
@@ -70,6 +73,7 @@ __all__ = [
     "DecompositionStructure",
     "LagrangianConfig",
     "MethodKind",
+    "ScoreVector",
     "Soundness",
     "StructureReport",
     "analyze_decomposition",
