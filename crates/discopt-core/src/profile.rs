@@ -102,6 +102,10 @@ counters!(
     // to Bland's smallest-index rule to break a potential cycle.
     DualDegeneratePivots,
     DualBlandActivations,
+    // Primal EXPAND anti-degeneracy (discopt#364): degenerate blocking steps that
+    // were bumped up to the guaranteed EXPAND minimum step (breaking the stall in
+    // place instead of accumulating toward the Bland switch).
+    ExpandMinSteps,
 );
 
 #[inline(always)]

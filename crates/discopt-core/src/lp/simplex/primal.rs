@@ -511,6 +511,19 @@ impl<'a> Simplex<'a> {
         let mut xb = self
             .basic_values(art_sign)
             .map_err(|_| LpStatus::Numerical)?;
+        // EXPAND anti-degeneracy (Gill et al.): the Harris ratio-test feasibility
+        // tolerance grows slowly from δ_min to δ_max, and a guaranteed minimum step
+        // keeps every pivot strictly progressing — breaking the degenerate zero-step
+        // stalls that dominate the lifted relaxations, more cheaply than falling into
+        // Bland. δ resets to δ_min every EXPAND_RESET iterations (the incremental x_B
+        // is refreshed exactly on the ≤48-update refactorizations, so the sub-δ
+        // excursions never accumulate). δ_max stays at the pre-existing 1e-7 ceiling
+        // — 10× under the 1e-6 feasibility audit — so soundness is unchanged.
+        const EXPAND_MIN: f64 = 1e-8;
+        const EXPAND_MAX: f64 = 1e-7;
+        const EXPAND_RESET: usize = 10_000;
+        let expand_incr = (EXPAND_MAX - EXPAND_MIN) / EXPAND_RESET as f64;
+        let mut expand_tol = EXPAND_MIN;
         for _iter in 0..self.max_iter {
             // Poll the wall-clock deadline every 256 pivots (cheap relative to a
             // pricing+ftran iteration). A dense, degenerate lifted-McCormick LP
@@ -581,8 +594,9 @@ impl<'a> Simplex<'a> {
             // its bound; pass 2 picks, among columns that truly block within that
             // step, the one with the largest pivot |α_i| (numerical stability),
             // which may push others up to δ past a bound — the accepted Harris
-            // trade, with δ ≪ the 1e-6 feasibility tolerance used elsewhere.
-            let delta_tol = 1e-7;
+            // trade, with δ ≪ the 1e-6 feasibility tolerance used elsewhere. δ is
+            // the EXPAND tolerance for this iteration (grows toward EXPAND_MAX).
+            let delta_tol = expand_tol;
             // entering's own bound-flip cap (the step at which q hits its far bound)
             let cap = if self.ub[q] < INF && self.lb[q] > -INF {
                 self.ub[q] - self.lb[q]
@@ -647,6 +661,20 @@ impl<'a> Simplex<'a> {
                 t_max = cap; // no basic blocks → pure bound flip (or unbounded)
             }
 
+            // EXPAND minimum step: on a degenerate (≈zero) blocking step, advance by
+            // a guaranteed positive amount so the pivot strictly improves the
+            // objective and the search cannot stall. The excursion introduced is
+            // ≤ expand_tol (≤ 1e-7); the leaving variable is pinned exactly at its
+            // bound as it exits, so nothing persists past the next exact refresh.
+            // Bounded by the entering variable's own bound-flip distance `cap`.
+            if leave_slot.is_some() {
+                let t_min = (expand_tol / best_pivot.max(self.tol)).min(cap);
+                if t_max < t_min {
+                    t_max = t_min;
+                    crate::profile::incr(crate::profile::Ctr::ExpandMinSteps);
+                }
+            }
+
             if t_max >= INF {
                 // Capture the primal unbounded ray over the real columns (length
                 // `n`): entering `q` moves by `dir`, each basic variable follows
@@ -673,6 +701,13 @@ impl<'a> Simplex<'a> {
                 crate::profile::incr(crate::profile::Ctr::DegeneratePivots);
             } else {
                 stall = 0;
+            }
+            // Grow the EXPAND tolerance for the next iteration; reset periodically so
+            // it never exceeds EXPAND_MAX (the excursions are cleared by the exact
+            // x_B refresh on each refactorization, so the reset never loses ground).
+            expand_tol += expand_incr;
+            if expand_tol >= EXPAND_MAX {
+                expand_tol = EXPAND_MIN;
             }
             crate::profile::incr(if is_phase1 {
                 crate::profile::Ctr::Phase1Pivots
