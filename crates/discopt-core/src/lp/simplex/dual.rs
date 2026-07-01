@@ -334,10 +334,19 @@ impl<'a> PreparedDual<'a> {
         // pricing. Pricing only chooses *which* primal-infeasible row leaves, never
         // affects correctness (any infeasible basic var is a valid leaving choice).
         let mut gamma = vec![1.0f64; m];
+        // Anti-cycling: consecutive degenerate dual pivots (entering reduced cost
+        // ≈ 0 → no dual-objective progress) accumulate `stall`; once it crosses the
+        // threshold the pivot rules switch to Bland's smallest-index selection
+        // (both leaving row and entering column), which is guaranteed cycle-free.
+        // A productive pivot resets the count. Without this the only cycle escape
+        // was the iteration cap → cold fallback; Bland resolves it in place.
+        let mut stall = 0usize;
+        let bland_threshold = 2 * (n + 1);
         // The loop index is the pivot count: each completed iteration performs one
         // pivot, and every early return happens at the loop top (before this
         // iteration's pivot), so `pivots` is exactly the number performed so far.
         for pivots in 0..opts.max_iter {
+            let bland = stall > bland_threshold;
             // Poll the wall-clock deadline (see SimplexOptions::deadline). On a
             // timeout we abandon the warm dual re-solve and request the cold
             // fallback by returning None; the cold primal solve re-checks the
@@ -362,82 +371,85 @@ impl<'a> PreparedDual<'a> {
             // feasibility, confirm with an *exact* recompute before declaring
             // optimality, and verify dual feasibility on *exact* reduced costs —
             // so a drifted increment can never return a wrong optimum.
-            let (r, to_lower, delta) = match select_leaving(m, &basis, l, u, &gamma, &xb, tol) {
-                Some(sel) => sel,
-                None => {
-                    xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
-                    since_refresh = 0;
-                    match select_leaving(m, &basis, l, u, &gamma, &xb, tol) {
-                        Some(sel) => sel,
-                        None => {
-                            dvec = recompute_reduced_costs(&mut lu, sp, c, n, &basis)?;
-                            if dual_feasible(n, &stat, l, u, &dvec, tol) {
-                                // In-engine refined recovery (discopt#364): if the
-                                // working factor's growth signal flags possible digit
-                                // loss, recompute x_B from a fresh, refinement-polished
-                                // factorization and re-verify primal feasibility on the
-                                // sharper values. If the sharper x_B reveals an
-                                // infeasibility the drifted one hid, hand to the robust
-                                // cold solve rather than certify a wrong optimum;
-                                // otherwise certify with the sharper x_B. Sound either
-                                // way — the decision is only ever made *more* accurate,
-                                // and the common (benign-growth) path is untouched.
-                                let refined_xb: Option<Vec<f64>> = if lu
-                                    .growth()
-                                    .is_some_and(|g| g > GROWTH_REFINE_TRIGGER)
-                                {
-                                    crate::profile::incr(
-                                        crate::profile::Ctr::RefinedRecoveryAttemptsDual,
-                                    );
-                                    match refined_basic_values(sp, b, n, m, l, u, &basis, &stat) {
-                                        Some(xb_r) => {
-                                            if select_leaving(m, &basis, l, u, &gamma, &xb_r, tol)
-                                                .is_some()
-                                            {
-                                                crate::profile::incr(
+            let (r, to_lower, delta) =
+                match select_leaving(m, &basis, l, u, &gamma, &xb, tol, bland) {
+                    Some(sel) => sel,
+                    None => {
+                        xb = recompute_basic_values(&mut lu, sp, b, n, l, u, &stat)?;
+                        since_refresh = 0;
+                        match select_leaving(m, &basis, l, u, &gamma, &xb, tol, bland) {
+                            Some(sel) => sel,
+                            None => {
+                                dvec = recompute_reduced_costs(&mut lu, sp, c, n, &basis)?;
+                                if dual_feasible(n, &stat, l, u, &dvec, tol) {
+                                    // In-engine refined recovery (discopt#364): if the
+                                    // working factor's growth signal flags possible digit
+                                    // loss, recompute x_B from a fresh, refinement-polished
+                                    // factorization and re-verify primal feasibility on the
+                                    // sharper values. If the sharper x_B reveals an
+                                    // infeasibility the drifted one hid, hand to the robust
+                                    // cold solve rather than certify a wrong optimum;
+                                    // otherwise certify with the sharper x_B. Sound either
+                                    // way — the decision is only ever made *more* accurate,
+                                    // and the common (benign-growth) path is untouched.
+                                    let refined_xb: Option<Vec<f64>> =
+                                        if lu.growth().is_some_and(|g| g > GROWTH_REFINE_TRIGGER) {
+                                            crate::profile::incr(
+                                                crate::profile::Ctr::RefinedRecoveryAttemptsDual,
+                                            );
+                                            match refined_basic_values(
+                                                sp, b, n, m, l, u, &basis, &stat,
+                                            ) {
+                                                Some(xb_r) => {
+                                                    if select_leaving(
+                                                        m, &basis, l, u, &gamma, &xb_r, tol, bland,
+                                                    )
+                                                    .is_some()
+                                                    {
+                                                        crate::profile::incr(
                                                     crate::profile::Ctr::RefinedRecoveryRescuesDual,
                                                 );
-                                                return None; // sharper x_B infeasible → cold fallback
+                                                        return None; // sharper x_B infeasible → cold fallback
+                                                    }
+                                                    Some(xb_r)
+                                                }
+                                                None => None, // fresh factor failed; keep the exact x_B
                                             }
-                                            Some(xb_r)
-                                        }
-                                        None => None, // fresh factor failed; keep the exact x_B
-                                    }
-                                } else {
-                                    None
-                                };
-                                let xb_final: &[f64] = refined_xb.as_deref().unwrap_or(&xb);
-                                // Row duals `y = B⁻ᵀ c_B` for the safe dual bound;
-                                // empty (caller falls back) if the btran fails.
-                                let mut y: Vec<f64> = basis.iter().map(|&j| c[j]).collect();
-                                let dual = if lu.btran(&mut y).is_ok() {
-                                    y
-                                } else {
-                                    Vec::new()
-                                };
-                                return Some(assemble(
-                                    n,
-                                    m,
-                                    &basis,
-                                    &slot_of,
-                                    &stat,
-                                    xb_final,
-                                    c,
-                                    l,
-                                    u,
-                                    LpStatus::Optimal,
-                                    pivots,
-                                    dual,
-                                    Vec::new(),
-                                ));
+                                        } else {
+                                            None
+                                        };
+                                    let xb_final: &[f64] = refined_xb.as_deref().unwrap_or(&xb);
+                                    // Row duals `y = B⁻ᵀ c_B` for the safe dual bound;
+                                    // empty (caller falls back) if the btran fails.
+                                    let mut y: Vec<f64> = basis.iter().map(|&j| c[j]).collect();
+                                    let dual = if lu.btran(&mut y).is_ok() {
+                                        y
+                                    } else {
+                                        Vec::new()
+                                    };
+                                    return Some(assemble(
+                                        n,
+                                        m,
+                                        &basis,
+                                        &slot_of,
+                                        &stat,
+                                        xb_final,
+                                        c,
+                                        l,
+                                        u,
+                                        LpStatus::Optimal,
+                                        pivots,
+                                        dual,
+                                        Vec::new(),
+                                    ));
+                                }
+                                // Exact reduced costs reveal dual infeasibility (a drifted
+                                // pivot): hand off to the robust cold solve.
+                                return None;
                             }
-                            // Exact reduced costs reveal dual infeasibility (a drifted
-                            // pivot): hand off to the robust cold solve.
-                            return None;
                         }
                     }
-                }
-            };
+                };
 
             // Pivot row ρ = e_rᵀ B⁻¹, then α_rj = ρ·A_j for every nonbasic j (kept
             // for both the ratio test and the incremental reduced-cost update). No
@@ -489,23 +501,39 @@ impl<'a> PreparedDual<'a> {
                 }
             }
             cand.sort_by(|x, y| x.1.partial_cmp(&y.1).unwrap_or(std::cmp::Ordering::Equal));
-            // Walk breakpoints, flipping finite-bounded ones until `delta` is closed.
-            // The last candidate is always taken as the entering column (never
-            // flipped), so even if the bound gaps can't fully close `delta` the step
-            // is a valid dual pivot and the search makes progress.
-            let mut slope = 0.0f64;
-            let mut q = cand[cand.len() - 1].0;
-            let mut flips: Vec<usize> = Vec::new();
-            let last = cand.len() - 1;
-            for (idx, &(j, _ratio, aj)) in cand.iter().enumerate() {
-                let gap = u[j] - l[j];
-                slope += aj * gap;
-                if idx == last || gap >= INF || slope >= delta - tol {
-                    q = j; // this breakpoint enters the basis; stop flipping
-                    break;
+            let (q, flips): (usize, Vec<usize>) = if bland {
+                // Bland (anti-cycling): the plain min-ratio dual pivot with the
+                // smallest-index tie-break and NO bound flips (a short step). The
+                // long-step bound-flipping below can revisit a basis under
+                // degeneracy; the smallest-index rule provably cannot cycle.
+                let min_ratio = cand[0].1;
+                let q = cand
+                    .iter()
+                    .filter(|&&(_, ratio, _)| ratio <= min_ratio + tol)
+                    .map(|&(j, _, _)| j)
+                    .min()
+                    .expect("cand is non-empty");
+                (q, Vec::new())
+            } else {
+                // Walk breakpoints, flipping finite-bounded ones until `delta` is
+                // closed. The last candidate is always taken as the entering column
+                // (never flipped), so even if the bound gaps can't fully close
+                // `delta` the step is a valid dual pivot and the search progresses.
+                let mut slope = 0.0f64;
+                let mut q = cand[cand.len() - 1].0;
+                let mut flips: Vec<usize> = Vec::new();
+                let last = cand.len() - 1;
+                for (idx, &(j, _ratio, aj)) in cand.iter().enumerate() {
+                    let gap = u[j] - l[j];
+                    slope += aj * gap;
+                    if idx == last || gap >= INF || slope >= delta - tol {
+                        q = j; // this breakpoint enters the basis; stop flipping
+                        break;
+                    }
+                    flips.push(j); // fully traversed → flip to the opposite bound
                 }
-                flips.push(j); // fully traversed → flip to the opposite bound
-            }
+                (q, flips)
+            };
             // Apply the bound flips (no basis change); their effect on x_B and the
             // reduced costs is realized by the next iteration's exact recompute.
             for &j in &flips {
@@ -551,6 +579,12 @@ impl<'a> PreparedDual<'a> {
 
             // Pivot: q enters at slot r; leaving var pinned at the violated bound.
             let leaving = basis[r];
+
+            // Degeneracy for anti-cycling: a dual pivot makes no dual-objective
+            // progress when the entering variable's reduced cost is ≈ 0 (a
+            // zero-length dual step). Consecutive such pivots are what cycle;
+            // captured here (before `dvec[q]` is zeroed) and fed to `stall` below.
+            let degenerate = dvec[q].abs() <= tol;
 
             // Incremental reduced-cost update (rank-1): d_j −= (d_q/piv)·α_rj for
             // every nonbasic j; the entering q becomes basic (0) and the leaving
@@ -619,6 +653,19 @@ impl<'a> PreparedDual<'a> {
                 since_refresh = 0;
             } else {
                 since_refresh += 1;
+            }
+
+            // Anti-cycling bookkeeping: a degenerate pivot advances the stall count
+            // (and, once over the threshold, keeps Bland engaged); any productive
+            // pivot resets it. Count Bland-mode pivots for observability.
+            if bland {
+                crate::profile::incr(crate::profile::Ctr::DualBlandActivations);
+            }
+            if degenerate {
+                stall += 1;
+                crate::profile::incr(crate::profile::Ctr::DualDegeneratePivots);
+            } else {
+                stall = 0;
             }
         }
         None // iteration cap → cold fallback
@@ -741,6 +788,7 @@ fn recompute_reduced_costs(
 /// `None` if every basic variable is within its bounds (primal feasible). Returns
 /// `(slot, to_lower, violation)` where `to_lower` is the bound the leaving
 /// variable is pinned at. Pricing only — choosing any infeasible row is valid.
+#[allow(clippy::too_many_arguments)]
 fn select_leaving(
     m: usize,
     basis: &[usize],
@@ -749,9 +797,12 @@ fn select_leaving(
     gamma: &[f64],
     xb: &[f64],
     tol: f64,
+    bland: bool,
 ) -> Option<(usize, bool, f64)> {
     let mut r = None;
     let mut best_score = 0.0f64;
+    // Bland's rule tracks the smallest *variable* index among infeasible rows.
+    let mut best_var = usize::MAX;
     let mut to_lower = true;
     let mut delta = 0.0f64;
     for i in 0..m {
@@ -764,9 +815,18 @@ fn select_leaving(
             None
         };
         if let Some((v, lo)) = viol {
-            let score = v * v / gamma[i];
-            if score > best_score {
-                best_score = score;
+            // Bland (anti-cycling): smallest variable index. Devex (default):
+            // largest bound-violation steepest-edge score. Either choice is a
+            // *valid* leaving row — any primal-infeasible basic var may leave — so
+            // this only affects the pivot path, never correctness.
+            let take = if bland {
+                bi < best_var
+            } else {
+                v * v / gamma[i] > best_score
+            };
+            if take {
+                best_score = v * v / gamma[i];
+                best_var = bi;
                 r = Some(i);
                 to_lower = lo;
                 delta = v;
@@ -891,6 +951,32 @@ mod tests {
 
     fn opts() -> SimplexOptions {
         SimplexOptions::default()
+    }
+
+    #[test]
+    fn bland_leaving_selects_smallest_variable_index() {
+        // Two primal-infeasible basic rows with equal Devex scores: slot 0 holds
+        // variable 5, slot 1 holds variable 2, both 1 below their lower bound.
+        let m = 2;
+        let basis = [5usize, 2usize];
+        let l = vec![0.0; 6];
+        let u = vec![10.0; 6];
+        let gamma = [1.0, 1.0];
+        let xb = [-1.0, -1.0];
+
+        // Devex: equal scores, so the first infeasible slot (0) wins.
+        let dev = select_leaving(m, &basis, &l, &u, &gamma, &xb, 1e-7, false).unwrap();
+        assert_eq!(dev.0, 0, "Devex should take the first equal-score slot");
+        assert!(dev.1, "both violate the lower bound → leave toward lower");
+
+        // Bland: the smallest *variable* index wins — variable 2 sits in slot 1.
+        let bl = select_leaving(m, &basis, &l, &u, &gamma, &xb, 1e-7, true).unwrap();
+        assert_eq!(bl.0, 1, "Bland must pick slot 1 (variable 2 < variable 5)");
+
+        // Both modes agree there is no leaving row once feasible.
+        let feasible = [1.0, 1.0];
+        assert!(select_leaving(m, &basis, &l, &u, &gamma, &feasible, 1e-7, false).is_none());
+        assert!(select_leaving(m, &basis, &l, &u, &gamma, &feasible, 1e-7, true).is_none());
     }
 
     // Solve cold, then perturb one bound and re-solve warm from the cold basis;

@@ -96,6 +96,12 @@ counters!(
     // Attempt still certified Optimal, but with the sharper x_B values.
     RefinedRecoveryAttemptsDual,
     RefinedRecoveryRescuesDual,
+    // Dual-simplex anti-cycling (discopt#364): degenerate dual pivots (entering
+    // reduced cost ≈ 0 → no dual-objective progress) that accumulate the stall
+    // count, and how often that stall crossed the threshold and switched the dual
+    // to Bland's smallest-index rule to break a potential cycle.
+    DualDegeneratePivots,
+    DualBlandActivations,
 );
 
 #[inline(always)]
