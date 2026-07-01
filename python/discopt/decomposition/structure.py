@@ -31,10 +31,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from discopt.decomposition.graph import kernels
 from discopt.modeling.core import Model, VarType
 
 # Guard for the O(m·(V+E)) bridge scan; above this, skip auto coupling
-# detection and rely on annotations instead of burning time.
+# detection and rely on annotations instead of burning time. Kept in sync with
+# ``graph.base._BRIDGE_SCAN_BUDGET``.
 _BRIDGE_SCAN_BUDGET = 200_000
 
 
@@ -105,37 +107,12 @@ def _components(
 ) -> tuple[list[int], int]:
     """Union-find connected components over variable-index *cliques*.
 
-    Returns ``(root_block_id_per_var, num_blocks)`` with block ids assigned in
-    ascending variable order for determinism.
+    Delegates to :func:`discopt.decomposition.graph.kernels.connected_components`
+    (the shared, Rust-mirrored kernel). Returns
+    ``(root_block_id_per_var, num_blocks)`` with block ids assigned in ascending
+    variable order for determinism.
     """
-    parent = list(range(n))
-
-    def find(i: int) -> int:
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    def union(i: int, j: int) -> None:
-        ri, rj = find(i), find(j)
-        if ri != rj:
-            parent[ri] = rj
-
-    for clique in cliques:
-        if len(clique) <= 1:
-            continue
-        anchor = clique[0]
-        for i in clique[1:]:
-            union(anchor, i)
-
-    root_to_block: dict[int, int] = {}
-    block_of = [0] * n
-    for i in range(n):
-        r = find(i)
-        if r not in root_to_block:
-            root_to_block[r] = len(root_to_block)
-        block_of[i] = root_to_block[r]
-    return block_of, len(root_to_block)
+    return kernels.connected_components(n, cliques)
 
 
 def _annotated_coupling(model: Model) -> set[int]:
@@ -154,14 +131,13 @@ def _annotated_coupling(model: Model) -> set[int]:
 def _bearing_blocks(n: int, cliques: list[list[int]]) -> int:
     """Number of connected components that contain at least one constraint.
 
+    Delegates to :func:`discopt.decomposition.graph.kernels.bearing_blocks`.
     Counting *constraint-bearing* components (rather than raw variable
     components) avoids spurious singletons: a variable that appears in only one
     constraint becomes isolated when that constraint is dropped, which must not
     be mistaken for a genuine block split.
     """
-    block_of, _ = _components(n, cliques)
-    bearing = {block_of[c[0]] for c in cliques if c}
-    return len(bearing)
+    return kernels.bearing_blocks(n, cliques)
 
 
 def _detect_bridge_coupling(
@@ -172,26 +148,12 @@ def _detect_bridge_coupling(
     """Bridge-constraint heuristic: a constraint whose sole removal disconnects.
 
     A constraint is coupling when dropping it raises the number of
-    constraint-bearing components. Guarded by ``_BRIDGE_SCAN_BUDGET``; returns
-    ``set()`` when the model is already separable, when nothing qualifies, or
-    when the scan is too large.
+    constraint-bearing components. Delegates the graph scan to
+    :func:`discopt.decomposition.graph.kernels.bridge_cliques`, guarded by
+    ``_BRIDGE_SCAN_BUDGET``; returns ``set()`` when the model is already
+    separable, when nothing qualifies, or when the scan is too large.
     """
-    nontrivial = [c for c in constraint_cliques if len(c) >= 2]
-    base = _bearing_blocks(n, constraint_cliques)
-    if base >= 2:
-        # Already separable with no coupling rows needed.
-        return set()
-    budget = len(nontrivial) * (n + sum(len(c) for c in nontrivial))
-    if budget > _BRIDGE_SCAN_BUDGET:
-        return set()
-    coupling: set[int] = set()
-    for i, clique in enumerate(constraint_cliques):
-        if len(clique) < 2:
-            continue
-        without = [c for j, c in enumerate(constraint_cliques) if j != i]
-        if _bearing_blocks(n, without) > base:
-            coupling.add(i)
-    return coupling
+    return kernels.bridge_cliques(constraint_cliques, n, _BRIDGE_SCAN_BUDGET)
 
 
 def detect_decomposition(
