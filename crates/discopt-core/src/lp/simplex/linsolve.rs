@@ -14,7 +14,10 @@
 //!   it refactorizes on every solve, so it is for bring-up, tiny bases, and
 //!   cross-checking `FeralLU` in tests — not performance.
 
-use feral::{should_use_dense_lu, DenseLu, LuParams, SparseColMatrix, SparseLu, SparseLuSymbolic};
+use feral::{
+    should_use_dense_lu, DenseLu, GeneralMatrix, LuParams, RefactorCause, SparseColMatrix,
+    SparseLu, SparseLuSymbolic,
+};
 
 /// Error from a basis factorization/solve.
 #[derive(Debug, Clone)]
@@ -61,6 +64,22 @@ pub trait LinearSolver {
     /// Replace the basic column in slot `leaving_slot` with `entering_col`
     /// (product-form update; the caller refactorizes when updates accumulate).
     fn update(&mut self, leaving_slot: usize, entering_col: &[f64]) -> Result<(), LinError>;
+
+    /// Solve `B x = rhs` in place, with iterative refinement when the backend
+    /// supports it and it is enabled. The default is a plain [`ftran`](Self::ftran)
+    /// — refinement is opt-in and backend-specific (see [`FeralLU::with_refine_steps`]),
+    /// so a backend that does not implement it (or has it disabled) degrades to the
+    /// unrefined solve with no behavior change.
+    fn ftran_refined(&mut self, rhs: &mut [f64]) -> Result<(), LinError> {
+        self.ftran(rhs)
+    }
+
+    /// Solve `Bᵀ y = rhs` in place, with iterative refinement when available
+    /// (see [`ftran_refined`](Self::ftran_refined)). Defaults to plain
+    /// [`btran`](Self::btran).
+    fn btran_refined(&mut self, rhs: &mut [f64]) -> Result<(), LinError> {
+        self.btran(rhs)
+    }
 
     /// Solve `B X = RHS` for several right-hand sides at once, each `rhs[k]` an
     /// `m`-vector solved in place. The point is to reuse the single existing
@@ -118,17 +137,140 @@ enum Factored {
 /// also gates on sparsity, would not. Above it we defer to feral's heuristic.
 const FORCE_DENSE_M: usize = 256;
 
+/// The retained basis matrix, in dense-column form, kept **in sync** with every
+/// [`update`](LinearSolver::update) so a refined solve or condition estimate can
+/// form the residual `r = b − B·x` against the matrix the factor *currently*
+/// represents — not the one it was originally factorized from. Only populated in
+/// numeric-focus mode (`refine_steps > 0`); off by default it stays empty, so the
+/// hot path pays no retention cost. Dense columns are the canonical form because
+/// [`update`](LinearSolver::update) hands us a dense `entering_col`, so keeping it
+/// in sync is a trivial `cols[slot] = entering_col` — the sparse/dense feral
+/// matrix is rebuilt lazily, only when a refined solve is actually requested.
+#[derive(Debug, Clone, Default)]
+struct RetainedBasis {
+    m: usize,
+    cols: Vec<Vec<f64>>,
+}
+
+/// A feral basis matrix in whichever form the current factor consumes.
+enum BasisMat {
+    Sparse(SparseColMatrix),
+    Dense(GeneralMatrix),
+}
+
+/// Number of iterative-refinement steps used in numeric-focus mode. feral's own
+/// refined solve caps at this many `r = b − B·x; B δ = r; x += δ` rounds and
+/// early-exits once `‖r‖/‖b‖ < refine_tol`, so 2 is a cheap, effective default
+/// (matches feral's internal refined-path default and the hand-rolled 3-round
+/// loop the root Gomory solve already used).
+const NUMERIC_FOCUS_REFINE_STEPS: usize = 2;
+
 /// Basis factorization backend: feral's LU, dispatched dense-or-sparse per
 /// basis at factorize time (see the [`Factored`] docs for the rationale).
 #[derive(Default, Clone)]
 pub struct FeralLU {
     lu: Option<Factored>,
+    /// Iterative-refinement steps baked into the factor's [`LuParams`] at
+    /// factorize time. `0` (default) → refinement is a no-op and no basis is
+    /// retained, i.e. byte-for-byte the pre-numeric-focus behavior.
+    refine_steps: usize,
+    /// The in-sync basis, populated iff `refine_steps > 0` (see [`RetainedBasis`]).
+    retained: Option<RetainedBasis>,
 }
 
 impl FeralLU {
     /// A new, unfactorized solver.
     pub fn new() -> Self {
-        Self { lu: None }
+        Self::default()
+    }
+
+    /// Enable numeric-focus mode with the default refinement depth: refined
+    /// [`ftran`](LinearSolver::ftran_refined)/[`btran`](LinearSolver::btran_refined)
+    /// solves and [`condition_estimate`](Self::condition_estimate)/[`growth`](Self::growth)
+    /// signals become available. The in-engine analogue of Gurobi's `NumericFocus`
+    /// — the principled alternative to falling back to a different solver on an
+    /// ill-conditioned basis (discopt#364).
+    pub fn with_numeric_focus(self) -> Self {
+        self.with_refine_steps(NUMERIC_FOCUS_REFINE_STEPS)
+    }
+
+    /// Set the iterative-refinement depth (0 disables; see [`with_numeric_focus`]).
+    /// Takes effect at the next factorization (the depth is baked into the
+    /// factor's [`LuParams`]). A positive depth turns on basis retention.
+    pub fn with_refine_steps(mut self, steps: usize) -> Self {
+        self.refine_steps = steps;
+        self
+    }
+
+    /// Whether refinement / signal queries are active (a positive refine depth).
+    fn refine_enabled(&self) -> bool {
+        self.refine_steps > 0
+    }
+
+    /// The [`LuParams`] for this solver's factorizations, carrying the configured
+    /// refinement depth. All other fields are feral's defaults (strict partial
+    /// pivoting, `zero_pivot_tol = 1e-13`, etc.).
+    fn params(&self) -> LuParams {
+        LuParams {
+            refine_steps: self.refine_steps,
+            ..LuParams::default()
+        }
+    }
+
+    /// Rebuild the retained basis as the feral matrix the current factor consumes
+    /// (sparse for a `SparseLu`, dense for a `DenseLu`). Returns `None` when not in
+    /// numeric-focus mode / unfactorized; propagates a construction error otherwise.
+    fn build_basis_matrix(&self) -> Option<Result<BasisMat, LinError>> {
+        let rb = self.retained.as_ref()?;
+        Some(match self.lu.as_ref()? {
+            Factored::Sparse(_) => SparseColMatrix::from_dense_columns(rb.m, &rb.cols)
+                .map(BasisMat::Sparse)
+                .map_err(feral_err),
+            Factored::Dense(_) => GeneralMatrix::from_columns(rb.m, &rb.cols)
+                .map(BasisMat::Dense)
+                .map_err(feral_err),
+        })
+    }
+
+    /// One-norm condition estimate `κ₁ ≈ ‖B‖₁·‖B⁻¹‖₁` of the current basis
+    /// (Hager–Higham, via feral#94). `None` unless in numeric-focus mode and
+    /// factorized. A large value flags an ill-conditioned node — the signal that
+    /// drives in-engine recovery (refine / perturb / branch) instead of a solver
+    /// swap (discopt#364).
+    pub fn condition_estimate(&mut self) -> Option<f64> {
+        let mat = self.build_basis_matrix()?.ok()?;
+        match (self.lu.as_mut()?, mat) {
+            (Factored::Sparse(lu), BasisMat::Sparse(b)) => lu.condition_estimate_1(&b).ok(),
+            (Factored::Dense(lu), BasisMat::Dense(b)) => lu.condition_estimate_1(&b).ok(),
+            // build_basis_matrix builds to match the live factor kind, so the
+            // cross arms are unreachable; degrade to None rather than panic.
+            _ => None,
+        }
+    }
+
+    /// The factor's element-growth high-water ratio `‖U‖∞ / ‖U₀‖∞` (feral#93), or
+    /// `None` when unfactorized. A cheap conditioning proxy: growth ≫ 1 signals a
+    /// factorization that lost digits. Available regardless of numeric-focus mode
+    /// (it is read straight off the factor, needing no retained basis).
+    pub fn growth(&self) -> Option<f64> {
+        match &self.lu {
+            Some(Factored::Sparse(lu)) => Some(lu.growth()),
+            Some(Factored::Dense(lu)) => Some(lu.growth()),
+            None => None,
+        }
+    }
+
+    /// Why the last [`update`](LinearSolver::update) demanded a refactorization,
+    /// with a cause-specific magnitude (feral#95): `Growth`/`TinyPivot` mean
+    /// *ill-conditioning* (refine-and-retry is the right response), `UpdateBudget`
+    /// is mere bookkeeping (a plain refactor suffices). `None` if the last update
+    /// succeeded or the solver is unfactorized.
+    pub fn last_refactor(&self) -> Option<(RefactorCause, f64)> {
+        match &self.lu {
+            Some(Factored::Sparse(lu)) => lu.last_refactor(),
+            Some(Factored::Dense(lu)) => lu.last_refactor(),
+            None => None,
+        }
     }
 
     /// Cumulative Forrest–Tomlin bump-update work (feral's `eta_ops`) accumulated
@@ -161,49 +303,67 @@ fn feral_err(e: feral::FeralError) -> LinError {
 impl LinearSolver for FeralLU {
     fn factorize(&mut self, m: usize, cols: &[Vec<f64>]) -> Result<(), LinError> {
         debug_assert_eq!(cols.len(), m);
-        let params = LuParams::default();
+        let params = self.params();
         let nnz: usize = cols
             .iter()
             .map(|c| c.iter().filter(|&&v| v != 0.0).count())
             .sum();
         self.lu = Some(
             if m <= FORCE_DENSE_M || should_use_dense_lu(m, nnz, &params) {
-                Factored::Dense(Box::new(DenseLu::factor(cols, m, params).map_err(feral_err)?))
+                Factored::Dense(Box::new(
+                    DenseLu::factor(cols, m, params).map_err(feral_err)?,
+                ))
             } else {
                 let a = SparseColMatrix::from_dense_columns(m, cols).map_err(feral_err)?;
                 let sym = SparseLuSymbolic::analyze(&a).map_err(feral_err)?;
-                Factored::Sparse(Box::new(SparseLu::factor(&a, &sym, params).map_err(feral_err)?))
+                Factored::Sparse(Box::new(
+                    SparseLu::factor(&a, &sym, params).map_err(feral_err)?,
+                ))
             },
         );
+        self.retained = self.refine_enabled().then(|| RetainedBasis {
+            m,
+            cols: cols.to_vec(),
+        });
         Ok(())
     }
 
     fn factorize_sparse(&mut self, m: usize, cols: &[Vec<(usize, f64)>]) -> Result<(), LinError> {
-        let params = LuParams::default();
+        let params = self.params();
         // nnz is the sum of column lengths — O(m), not the O(m²) dense scan the
         // `Vec<Vec<f64>>` path pays.
         let nnz: usize = cols.iter().map(|c| c.len()).sum();
-        self.lu = Some(
-            if m <= FORCE_DENSE_M || should_use_dense_lu(m, nnz, &params) {
-                // Small/dense basis: feral's dense LU wins and there is no symbolic
-                // phase. Densifying is O(m² + nnz), affordable only because this
-                // branch is gated to small `m` (<= FORCE_DENSE_M) or feral-judged-
-                // dense bases.
-                let mut dense = vec![vec![0.0; m]; m];
-                for (slot, col) in cols.iter().enumerate() {
-                    for &(row, v) in col {
-                        dense[slot][row] = v;
-                    }
+        // Densify once if either the dense LU branch needs it or numeric-focus
+        // retention does; reuse the single dense copy for both.
+        let want_dense = m <= FORCE_DENSE_M || should_use_dense_lu(m, nnz, &params);
+        let dense = (want_dense || self.refine_enabled()).then(|| {
+            let mut d = vec![vec![0.0; m]; m];
+            for (slot, col) in cols.iter().enumerate() {
+                for &(row, v) in col {
+                    d[slot][row] = v;
                 }
-                Factored::Dense(Box::new(DenseLu::factor(&dense, m, params).map_err(feral_err)?))
-            } else {
-                // Build feral's sparse matrix directly from the sparse columns —
-                // O(nnz), no dense m×m intermediate.
-                let a = SparseColMatrix::from_sparse_columns(m, cols).map_err(feral_err)?;
-                let sym = SparseLuSymbolic::analyze(&a).map_err(feral_err)?;
-                Factored::Sparse(Box::new(SparseLu::factor(&a, &sym, params).map_err(feral_err)?))
-            },
-        );
+            }
+            d
+        });
+        self.lu = Some(if want_dense {
+            // Small/dense basis: feral's dense LU wins and there is no symbolic
+            // phase.
+            let dense = dense.as_ref().expect("densified for the dense branch");
+            Factored::Dense(Box::new(
+                DenseLu::factor(dense, m, params).map_err(feral_err)?,
+            ))
+        } else {
+            // Build feral's sparse matrix directly from the sparse columns —
+            // O(nnz), no dense m×m intermediate.
+            let a = SparseColMatrix::from_sparse_columns(m, cols).map_err(feral_err)?;
+            let sym = SparseLuSymbolic::analyze(&a).map_err(feral_err)?;
+            Factored::Sparse(Box::new(
+                SparseLu::factor(&a, &sym, params).map_err(feral_err)?,
+            ))
+        });
+        self.retained = dense
+            .filter(|_| self.refine_enabled())
+            .map(|cols| RetainedBasis { m, cols });
         Ok(())
     }
 
@@ -222,9 +382,55 @@ impl LinearSolver for FeralLU {
     }
 
     fn update(&mut self, leaving_slot: usize, entering_col: &[f64]) -> Result<(), LinError> {
-        match self.lu.as_mut().ok_or(LinError::NotFactorized)? {
+        let res = match self.lu.as_mut().ok_or(LinError::NotFactorized)? {
             Factored::Sparse(lu) => lu.update(leaving_slot, entering_col).map_err(feral_err),
             Factored::Dense(lu) => lu.update(leaving_slot, entering_col).map_err(feral_err),
+        };
+        // Keep the retained basis in lock-step with the factor: only on a
+        // successful update (a failed one rolls the factor back and the caller
+        // refactorizes, which rebuilds `retained` from scratch). Without this the
+        // residual `b − B·x` in a refined solve would be formed against the stale
+        // pre-update basis and silently corrupt the correction.
+        if res.is_ok() {
+            if let Some(rb) = self.retained.as_mut() {
+                rb.cols[leaving_slot].clear();
+                rb.cols[leaving_slot].extend_from_slice(entering_col);
+            }
+        }
+        res
+    }
+
+    fn ftran_refined(&mut self, rhs: &mut [f64]) -> Result<(), LinError> {
+        // Build the basis matrix first (immutable borrow, produces an owned
+        // matrix), then solve (mutable borrow) — the two borrows don't overlap.
+        let mat = match self.build_basis_matrix() {
+            Some(m) => m?,
+            None => return self.ftran(rhs), // not in numeric-focus mode
+        };
+        match (self.lu.as_mut().ok_or(LinError::NotFactorized)?, mat) {
+            (Factored::Sparse(lu), BasisMat::Sparse(b)) => {
+                lu.ftran_refined(&b, rhs).map_err(feral_err)
+            }
+            (Factored::Dense(lu), BasisMat::Dense(b)) => {
+                lu.ftran_refined(&b, rhs).map_err(feral_err)
+            }
+            _ => self.ftran(rhs),
+        }
+    }
+
+    fn btran_refined(&mut self, rhs: &mut [f64]) -> Result<(), LinError> {
+        let mat = match self.build_basis_matrix() {
+            Some(m) => m?,
+            None => return self.btran(rhs),
+        };
+        match (self.lu.as_mut().ok_or(LinError::NotFactorized)?, mat) {
+            (Factored::Sparse(lu), BasisMat::Sparse(b)) => {
+                lu.btran_refined(&b, rhs).map_err(feral_err)
+            }
+            (Factored::Dense(lu), BasisMat::Dense(b)) => {
+                lu.btran_refined(&b, rhs).map_err(feral_err)
+            }
+            _ => self.btran(rhs),
         }
     }
 }
@@ -403,5 +609,164 @@ mod tests {
             fl.btran_multi(&mut batch).unwrap();
         }
         assert!(close(&c0, &y0, 1e-12) && close(&c1, &y1, 1e-12));
+    }
+
+    // ---- numeric-focus: iterative refinement + condition/growth signals ----
+
+    // Residual ‖B·x − rhs‖∞ of a candidate solution.
+    fn residual_inf(cols: &[Vec<f64>], x: &[f64], rhs: &[f64]) -> f64 {
+        bmatvec(cols, x)
+            .iter()
+            .zip(rhs)
+            .map(|(bx, r)| (bx - r).abs())
+            .fold(0.0, f64::max)
+    }
+
+    #[test]
+    fn refined_solve_matches_plain_on_well_conditioned() {
+        // On a benign basis, refinement must not perturb an already-accurate
+        // solution: refined == plain, both exact.
+        let cols = vec![
+            vec![2.0, 1.0, 0.0],
+            vec![1.0, 2.0, 1.0],
+            vec![0.0, 1.0, 2.0],
+        ];
+        let m = 3;
+        let mut fl = FeralLU::new().with_numeric_focus();
+        fl.factorize(m, &cols).unwrap();
+        let rhs = [1.0, 2.0, 3.0];
+        let (mut xr, mut xp) = (rhs, rhs);
+        fl.ftran_refined(&mut xr).unwrap();
+        fl.ftran(&mut xp).unwrap();
+        assert!(close(&xr, &xp, 1e-12), "refined {xr:?} vs plain {xp:?}");
+        assert!(residual_inf(&cols, &xr, &rhs) < 1e-9);
+    }
+
+    #[test]
+    fn refined_solve_valid_after_update_syncs_basis() {
+        // The stale-`b` trap: after a product-form update the factor represents
+        // the *updated* basis. If the retained basis is not kept in sync, the
+        // refined solve forms its residual against the old matrix and corrupts
+        // the answer. This asserts the refined solve satisfies the UPDATED system.
+        let cols = vec![
+            vec![2.0, 1.0, 0.0],
+            vec![1.0, 2.0, 1.0],
+            vec![0.0, 1.0, 2.0],
+        ];
+        let m = 3;
+        let mut fl = FeralLU::new().with_numeric_focus();
+        fl.factorize(m, &cols).unwrap();
+
+        let newcol = [0.0, 0.0, 1.0]; // keeps B nonsingular
+        fl.update(1, &newcol).unwrap();
+        let mut updated = cols.clone();
+        updated[1] = newcol.to_vec();
+
+        let rhs = [1.0, 2.0, 3.0];
+        let mut x = rhs;
+        fl.ftran_refined(&mut x).unwrap();
+        assert!(
+            residual_inf(&updated, &x, &rhs) < 1e-9,
+            "refined ftran must satisfy the UPDATED basis; residual too large (stale-b?)"
+        );
+
+        // btran against the updated basis transpose likewise.
+        let mut y = rhs;
+        fl.btran_refined(&mut y).unwrap();
+        // Bᵀ y = rhs  ⇔  residual of Bᵀ against y.
+        let mut byt = vec![0.0; m];
+        for (i, col) in updated.iter().enumerate() {
+            byt[i] = col.iter().zip(&y).map(|(a, yj)| a * yj).sum();
+        }
+        let rt = byt
+            .iter()
+            .zip(&rhs)
+            .map(|(a, r)| (a - r).abs())
+            .fold(0.0, f64::max);
+        assert!(rt < 1e-9, "refined btran must satisfy updated Bᵀ");
+    }
+
+    #[test]
+    fn refinement_does_not_worsen_residual_ill_conditioned() {
+        // A basis with a large dynamic range across columns. Refinement can only
+        // reduce (or leave) the residual, never worsen it — the safety property
+        // that makes it a sound in-engine recovery step.
+        // Moderate dynamic range: ill-conditioned enough to be a meaningful test,
+        // but the smallest pivot (~1e-3) stays well above feral's relative
+        // singular floor (zero_pivot_tol · ‖U₀‖∞ ≈ 1e-13 · 1e6), so both paths
+        // factorize.
+        let cols = vec![
+            vec![1.0, 0.0, 0.0],
+            vec![1.0, 1e6, 0.0],
+            vec![1.0, 1.0, 1e-3],
+        ];
+        let m = 3;
+        let rhs = [1.0, 1.0, 1.0];
+
+        let mut plain = FeralLU::new();
+        plain.factorize(m, &cols).unwrap();
+        let mut xp = rhs;
+        plain.ftran(&mut xp).unwrap();
+
+        let mut nf = FeralLU::new().with_numeric_focus();
+        nf.factorize(m, &cols).unwrap();
+        let mut xr = rhs;
+        nf.ftran_refined(&mut xr).unwrap();
+
+        let rp = residual_inf(&cols, &xp, &rhs);
+        let rr = residual_inf(&cols, &xr, &rhs);
+        assert!(
+            rr <= rp + 1e-18,
+            "refined residual {rr:e} must not exceed plain {rp:e}"
+        );
+    }
+
+    #[test]
+    fn condition_estimate_tracks_conditioning() {
+        // Identity → κ₁ ≈ 1; a diagonal with a 1e10 dynamic range → κ₁ ≈ 1e10.
+        let ident = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+        let mut fi = FeralLU::new().with_numeric_focus();
+        fi.factorize(2, &ident).unwrap();
+        let ki = fi.condition_estimate().expect("numeric-focus + factorized");
+        assert!((ki - 1.0).abs() < 1e-6, "κ₁(I) ≈ 1, got {ki}");
+
+        let ill = vec![vec![1.0, 0.0], vec![0.0, 1e-10]];
+        let mut fx = FeralLU::new().with_numeric_focus();
+        fx.factorize(2, &ill).unwrap();
+        let kx = fx.condition_estimate().expect("numeric-focus + factorized");
+        assert!(kx > 1e9, "κ₁(diag(1,1e-10)) ≈ 1e10, got {kx}");
+
+        // Off by default: no retained basis, so no estimate.
+        let mut plain = FeralLU::new();
+        plain.factorize(2, &ident).unwrap();
+        assert!(plain.condition_estimate().is_none());
+    }
+
+    #[test]
+    fn growth_signal_available_after_factorize() {
+        let cols = vec![vec![2.0, 1.0], vec![1.0, 2.0]];
+        let mut fl = FeralLU::new();
+        assert!(fl.growth().is_none(), "unfactorized → no growth");
+        fl.factorize(2, &cols).unwrap();
+        let g = fl.growth().expect("factorized");
+        assert!(
+            g.is_finite() && g >= 1.0,
+            "growth is a ≥1 high-water ratio, got {g}"
+        );
+    }
+
+    #[test]
+    fn numeric_focus_off_retains_nothing() {
+        // The default path must not pay retention cost or change behavior.
+        let cols = vec![vec![2.0, 1.0], vec![1.0, 2.0]];
+        let mut fl = FeralLU::new();
+        fl.factorize(2, &cols).unwrap();
+        assert!(fl.retained.is_none());
+        // ftran_refined with refinement off is exactly ftran.
+        let rhs = [1.0, 1.0];
+        let (mut a, mut b) = (rhs, rhs);
+        fl.ftran_refined(&mut a).unwrap();
+        fl.ftran(&mut b).unwrap();
+        assert_eq!(a, b);
     }
 }
