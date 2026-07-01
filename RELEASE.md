@@ -10,7 +10,7 @@ For each release, fill in:
 - `vX.Y.Z` -- the target version
 - `vA.B.C` -- the previous released version
 
-The next planned release is **`v0.3.0`** (minor bump on top of `v0.2.5`; skips the never-tagged `v0.2.6`).
+The next planned release is **`v0.5.0`** (minor bump on top of `v0.4.0`).
 
 ---
 

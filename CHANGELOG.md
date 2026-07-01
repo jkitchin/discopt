@@ -10,8 +10,17 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-01
+
 ### Added
 
+- **Hardened pure-Rust LP engine** (`feat(lp)`, #368). Numeric-focus LU with
+  in-engine iterative refinement and condition/growth signals (via `feral`
+  0.12.0), primal + dual refined recovery on a drifted-Optimal, dual-simplex
+  anti-cycling (Bland + stall counter), and **EXPAND anti-degeneracy** (Gill et
+  al.) in the Harris ratio test — ~15× fewer degenerate pivots on the
+  lifted-relaxation corpus, validated soundness-neutral against the gauntlet and
+  a BARON head-to-head.
 - **Set & index abstractions** (`feat(modeling)`). A Pyomo/JuMP-style named-set
   layer for sparse models, implemented as a pure-Python desugaring over the
   existing flat model (no solver/backend changes). Completes the Phase 7
@@ -186,6 +195,10 @@ The release procedure that produces these entries is documented in
 
 ### Changed
 
+- **`feral` pinned to the crates.io 0.12.0 release** (`chore(deps)`, #375),
+  carrying the LU-hardening APIs (element-growth getters, unsymmetric-LU
+  condition estimate, richer `update()` instability signal) the numeric-focus
+  simplex consumes; replaces the temporary git-rev pin.
 - **POUNCE is now the default single-solve NLP backend** (`feat(solvers)`).
   For single continuous solves the `ipm` default is promoted to a KKT-valid
   backend via `_default_nlp_solver()`, resolving to POUNCE when installed and
@@ -201,6 +214,14 @@ The release procedure that produces these entries is documented in
 
 ### Removed
 
+- **BREAKING: the JAX LP interior-point method is retired** (`refactor(lp)!`,
+  #368, #371, #373). The MILP/MINLP node LP relaxations and the standalone LP
+  path now use the pure-Rust simplex (degrading to POUNCE); `nlp_solver` governs
+  only the NLP subproblem solver. `discopt._jax.lp_ipm` was deleted. This
+  completes retirement of the LP fallback chain (`Rust simplex → HiGHS → POUNCE
+  → JAX-IPM`).
+- **HiGHS removed from the LP/MILP path** (`feat(solvers)`, #356) and the QP path
+  (`qp_highs`, #359) — the pure-Rust core is the sole LP/MILP engine.
 - **BREAKING: removed the deprecated `ripopt` aliases** (`feat(solvers)!`). The
   old in-repo Rust IPM crate `ripopt` was already superseded by POUNCE; the
   remaining compatibility shims are gone: the `discopt.solvers.nlp_ripopt`
@@ -210,6 +231,13 @@ The release procedure that produces these entries is documented in
 
 ### Fixed
 
+- **Sound lower bounds for `log²`/`exp²` objectives** (`fix(relax)`, #372, closes
+  #369). The objective linearizer now registers squares of *any* lifted
+  univariate call (not just trig), so a mixed objective like nvs09's
+  `Σ log(·)² − (∏x)^0.2` produces a sound lower bound instead of falling back to
+  a feasibility objective with no bound.
+- **Pytest virtual-address cap raised 16 → 32 GB** (`ci`, #360) so JAX/XLA
+  compilation no longer aborts with `std::bad_alloc` / exit 134 in CI.
 - **Decomposition stage annotation on indexed variables** (`fix(decomposition)`).
   `model.first_stage(y[i])` / `set_stage` / `set_block` on an indexed element
   (`y[i]`) stringified to a stray key (`"y[3][0]"`) that never matched the
@@ -359,6 +387,7 @@ git log v0.2.0..v0.2.1
 
 Going forward, every release will have a section above with curated entries.
 
-[Unreleased]: https://github.com/jkitchin/discopt/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/jkitchin/discopt/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/jkitchin/discopt/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jkitchin/discopt/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jkitchin/discopt/compare/v0.2.5...v0.3.0
