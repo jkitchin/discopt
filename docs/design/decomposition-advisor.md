@@ -1,7 +1,7 @@
 # The Decomposition Advisor — architecture and design specification
 
 **Date:** 2026-07-01
-**Status:** design specification (no code committed beyond this document)
+**Status:** design specification — Phases 1–7 implemented (see §20 for status & verification)
 **Scope:** A new subsystem, the **Decomposition Advisor**, that analyzes an
 optimization model, discovers exploitable structure, scores and recommends
 decomposition strategies, explains its reasoning, and — when profitable —
@@ -1588,6 +1588,36 @@ def score(model, cand, report) -> ScoreVector:
     agg = benefit - cost
     return ScoreVector(m, aggregate=agg, confidence=estimate_confidence(m, cand))
 ```
+
+---
+
+## 20. Implementation status & verification (living section)
+
+Phases 1–7 of §17 are implemented on the initial branch. The subsystem lives in
+`python/discopt/decomposition/` (`graph/`, `advisor/`, `ir/`, `parallel/`,
+`learning/`) with Rust kernels in `crates/discopt-core/src/decomp/`. The analysis
+→ recommendation → reformulation → parallel-plan → record flow is exercised in
+`docs/notebooks/decomposition_advisor.ipynb`.
+
+**What was verified where.** The development environment cannot build
+`discopt-core` (its `feral` dependency is pinned to a GitHub git revision, and
+`github.com` is blocked by the egress policy) or the `_rust` extension, so the two
+compiled surfaces are verified differently from the pure-Python layer:
+
+| Surface | Verified in the dev environment | Deferred to CI |
+|---|---|---|
+| Python advisor (graph/advisor/ir/parallel/learning) | ✅ full pytest + ruff + mypy (116+ tests) | — |
+| Rust graph kernels (`decomp/`) | ✅ compiled + unit-tested in an isolated std-only crate under the same compiler, edition (2021), and `#![deny(missing_docs)]` (15 tests); `clippy` + `rustfmt` clean | in-crate `cargo test` (needs the full `discopt-core` build) |
+| PyO3 FFI for the kernels | — (not yet written) | build + import once the crate builds |
+| `DecomposedModel.solve()` dispatch | ✅ verified by monkeypatching the drivers (right driver, right `structure`, kwargs threaded) | end-to-end solve equivalence vs the monolith (needs `_rust`/POUNCE) |
+| Docs notebook | ✅ every code cell executed during authoring (pure analysis, no solve); citations resolve | `jupyter-book build` (executes all notebooks, needs the full stack) |
+
+**Correctness gate for the remainder.** Per §17, the correctness-critical
+equivalence work — proving each reformulation's `solve()` reproduces the
+monolithic optimum — must be gated by the benchmark harness's
+`incorrect_count ≤ 0` criterion in CI before `solve(decomposition="auto")` becomes
+a default. The `SoundnessCertificate` (§8.2) is the in-code guard until then: it
+refuses to run a merely-heuristic reformulation.
 
 ---
 
