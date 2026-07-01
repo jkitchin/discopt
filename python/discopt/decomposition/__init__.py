@@ -77,6 +77,15 @@ from discopt.decomposition.learning import (
 from discopt.decomposition.learning import (
     record_outcome as record_outcome,
 )
+from discopt.decomposition.parallel import (
+    SchedulingGraph as SchedulingGraph,
+)
+from discopt.decomposition.parallel import (
+    SequentialComm as SequentialComm,
+)
+from discopt.decomposition.parallel import (
+    ThreadPoolComm as ThreadPoolComm,
+)
 from discopt.decomposition.structure import (
     DecompositionStructure as DecompositionStructure,
 )
@@ -102,10 +111,13 @@ __all__ = [
     "MethodKind",
     "RecordStore",
     "ScoreVector",
+    "SchedulingGraph",
+    "SequentialComm",
     "SolveRecord",
     "Soundness",
     "SoundnessCertificate",
     "StructureReport",
+    "ThreadPoolComm",
     "analyze_decomposition",
     "build_decomposition",
     "detect_decomposition",
