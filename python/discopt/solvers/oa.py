@@ -3847,6 +3847,21 @@ def solve_oa(
             return name.lower()
         return str(status).lower()
 
+    def _linear_objective_offset() -> float:
+        if decomp.obj_is_linear and decomp.obj_coeffs is not None:
+            return float(decomp.obj_coeffs[1])
+        return 0.0
+
+    def _master_objective_from_evaluator(value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        return float(value) - _linear_objective_offset()
+
+    def _evaluator_objective_from_master(value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        return float(value) + _linear_objective_offset()
+
     def _cut_source_delta(before: dict[str, int]) -> dict[str, int]:
         after = cut_provenance.source_counts()
         return {source: int(after.get(source, 0) - before.get(source, 0)) for source in after}
@@ -3948,21 +3963,24 @@ def solve_oa(
     def _shot_objective_cutoff() -> Optional[float]:
         if incumbent_obj is None or not master_bound_valid:
             return None
-        cutoff = float(incumbent_obj)
+        cutoff = _master_objective_from_evaluator(incumbent_obj)
+        if cutoff is None:
+            return None
         if not np.isfinite(cutoff):
             return None
         return cutoff + 1e-8 * (1.0 + abs(cutoff))
 
     def _shot_master_controls() -> tuple[
-        dict[str, object], Optional[np.ndarray], Optional[float], Optional[int]
+        dict[str, object], Optional[np.ndarray], Optional[float], Optional[int], Optional[float]
     ]:
         if mip_nlp_profile != "shot" or mip_nlp_shot_config is None:
-            return {}, None, None, None
+            return {}, None, None, None, None
 
         start_requested = incumbent is not None
         cutoff_requested = _shot_objective_cutoff() is not None
         objective_cutoff = _shot_objective_cutoff() if shot_master_backend_supported else None
         mip_start = incumbent if start_requested and shot_master_backend_supported else None
+        mip_start_objective = _master_objective_from_evaluator(incumbent_obj)
         limit = shot_solution_limit_state.requested_limit if shot_solution_limit_state else None
 
         if start_requested and not shot_master_backend_supported:
@@ -4005,7 +4023,7 @@ def solve_oa(
                 }
             ),
         }
-        return trace, mip_start, objective_cutoff, limit
+        return trace, mip_start, objective_cutoff, limit, mip_start_objective
 
     # If no integer variables, just solve the NLP directly
     if len(decomp.int_indices) == 0:
@@ -4310,8 +4328,9 @@ def solve_oa(
                         )
                         objective_bound = None
                         if master_bound_valid and poa_result.bound is not None:
-                            objective_bound = float(poa_result.bound)
-                            LB = max(LB, objective_bound)
+                            objective_bound = _evaluator_objective_from_master(poa_result.bound)
+                            if objective_bound is not None:
+                                LB = max(LB, objective_bound)
                         stored_poa_interior = _record_interior_point(
                             x_poa,
                             "initial_poa",
@@ -4452,8 +4471,9 @@ def solve_oa(
                         x_relax_phase = np.clip(relax_x_raw[:n_vars], decomp.lb, decomp.ub)
                         objective_bound = None
                         if master_bound_valid and relax_result.bound is not None:
-                            objective_bound = float(relax_result.bound)
-                            LB = max(LB, objective_bound)
+                            objective_bound = _evaluator_objective_from_master(relax_result.bound)
+                            if objective_bound is not None:
+                                LB = max(LB, objective_bound)
                         stored_relax_interior = _record_interior_point(
                             x_relax_phase,
                             "relaxation_phase",
@@ -4532,9 +4552,13 @@ def solve_oa(
             )
             break
 
-        master_control_trace, master_mip_start, master_objective_cutoff, master_solution_limit = (
-            _shot_master_controls()
-        )
+        (
+            master_control_trace,
+            master_mip_start,
+            master_objective_cutoff,
+            master_solution_limit,
+            master_mip_start_objective,
+        ) = _shot_master_controls()
         master_result = _solve_master_milp(
             decomp.linear_A_rows,
             decomp.linear_b_rows,
@@ -4559,7 +4583,7 @@ def solve_oa(
             solution_pool=solution_pool,
             num_solution_iteration=num_solution_iteration,
             mip_start=master_mip_start,
-            mip_start_objective=incumbent_obj,
+            mip_start_objective=master_mip_start_objective,
             objective_cutoff=master_objective_cutoff,
             mip_solution_limit=master_solution_limit,
         )
@@ -4603,7 +4627,9 @@ def solve_oa(
             if cutoff_bound is None:
                 cutoff_bound = master_objective_cutoff
             if master_bound_valid and cutoff_bound is not None:
-                LB = max(LB, float(cutoff_bound))
+                evaluator_cutoff_bound = _evaluator_objective_from_master(cutoff_bound)
+                if evaluator_cutoff_bound is not None:
+                    LB = max(LB, evaluator_cutoff_bound)
             gap = _compute_gap(LB, UB)
             termination_reason = (
                 "gap" if master_bound_valid and gap <= gap_tolerance else "master_cutoff"
@@ -4719,7 +4745,9 @@ def solve_oa(
         # The master gives a valid LB only via its dual ``bound`` (never the
         # incumbent ``objective``, which is an upper bound on a limited solve).
         if master_bound_valid and master_result.bound is not None:
-            LB = max(LB, master_result.bound)
+            master_bound = _evaluator_objective_from_master(master_result.bound)
+            if master_bound is not None:
+                LB = max(LB, master_bound)
 
         nlp_initial_point = None
         if (
@@ -4733,8 +4761,6 @@ def solve_oa(
             and UB < 1e19
         ):
             regularization_lb = LB
-            if decomp.obj_is_linear and decomp.obj_coeffs is not None:
-                regularization_lb += float(decomp.obj_coeffs[1])
             objective_level = (1.0 - level_coef) * float(UB) + level_coef * float(regularization_lb)
             remaining_time = max(0.0, time_limit - (time.perf_counter() - t_start))
             derivative_data = None

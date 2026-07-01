@@ -504,6 +504,51 @@ def test_mip_nlp_shot_master_controls_forward_to_gurobi(monkeypatch):
     assert captured["mip_start"].tolist() == pytest.approx([1.0])
 
 
+def test_mip_nlp_shot_objective_cutoff_uses_master_objective_units(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers import MILPResult, SolveStatus
+
+    m = dm.Model("shot_cutoff_linear_offset")
+    y = m.binary("y")
+    m.minimize(y - 100.0)
+
+    master_calls = []
+
+    def fake_master(*args, **kwargs):
+        master_calls.append(kwargs)
+        return MILPResult(
+            status=SolveStatus.CUTOFF,
+            x=None,
+            objective=None,
+            bound=1.0,
+        )
+
+    def fake_nlp(*args, **kwargs):
+        x_master = np.asarray(args[4], dtype=float)
+        return x_master.copy(), float(x_master[0] - 100.0)
+
+    monkeypatch.setattr(oa_module, "_solve_master_milp", fake_master)
+    monkeypatch.setattr(oa_module, "_solve_nlp_subproblem", fake_nlp)
+    monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+
+    result = oa_module.solve_oa(
+        m,
+        init_strategy="initial_binary",
+        max_iterations=1,
+        milp_solver="gurobi",
+        mip_nlp_profile="shot",
+        mip_nlp_shot_config=oa_module.MIPNLPShotConfig(
+            relaxation_phase="off",
+            mip_solution_limit_strategy="none",
+        ),
+    )
+
+    assert master_calls[0]["objective_cutoff"] == pytest.approx(1.0 + 2e-8)
+    assert master_calls[0]["mip_start_objective"] == pytest.approx(1.0)
+    assert result.objective == pytest.approx(-99.0)
+    assert result.bound == pytest.approx(-99.0)
+
+
 def test_mip_nlp_shot_master_controls_trace_unsupported_backend(monkeypatch):
     import discopt.solvers.oa as oa_module
     from discopt.solvers import MILPResult, SolveStatus
