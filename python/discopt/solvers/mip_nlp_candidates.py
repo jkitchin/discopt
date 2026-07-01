@@ -136,9 +136,10 @@ class FixedNLPCandidateManager:
             return False
         x = np.clip(x[: self.n_vars].copy(), self.lb, self.ub)
         key = self.assignment_key(x)
+        source_name = str(source)
         candidate = FixedNLPCandidate(
             point=x,
-            source=str(source),
+            source=source_name,
             objective=None if objective is None else float(objective),
             iteration=iteration,
             nlp_source=str(nlp_source),
@@ -150,9 +151,13 @@ class FixedNLPCandidateManager:
             for idx, existing in enumerate(self._pending):
                 if existing.integer_assignment == key:
                     if self._sort_key(candidate) < self._sort_key(existing):
+                        existing_source = str(existing.source)
+                        self.added_source_counts[existing_source] -= 1
+                        if self.added_source_counts[existing_source] <= 0:
+                            del self.added_source_counts[existing_source]
                         self._pending[idx] = candidate
                         self._sequence += 1
-                        self.added_source_counts[str(source)] += 1
+                        self.added_source_counts[source_name] += 1
                         return True
                     break
             self.skipped_duplicate_count += 1
@@ -163,7 +168,7 @@ class FixedNLPCandidateManager:
         self._sequence += 1
         self._pending.append(candidate)
         self._pending_keys.add(key)
-        self.added_source_counts[str(source)] += 1
+        self.added_source_counts[source_name] += 1
         return True
 
     def add_external_candidates(
@@ -179,12 +184,14 @@ class FixedNLPCandidateManager:
             objective = None
             point = candidate
             source = "external"
+            candidate_provider = provider
+            candidate_nlp_source = nlp_source
             if isinstance(candidate, dict):
                 point = candidate.get("point")
                 objective = candidate.get("objective")
                 source = str(candidate.get("source", "external"))
-                provider = candidate.get("provider", provider)
-                nlp_source = str(candidate.get("nlp_source", nlp_source))
+                candidate_provider = candidate.get("provider", provider)
+                candidate_nlp_source = str(candidate.get("nlp_source", nlp_source))
             if point is None:
                 continue
             if self.add(
@@ -192,8 +199,8 @@ class FixedNLPCandidateManager:
                 source=source,
                 objective=objective,
                 iteration=iteration,
-                nlp_source=nlp_source,
-                provider=provider,
+                nlp_source=candidate_nlp_source,
+                provider=candidate_provider,
             ):
                 added += 1
         return added

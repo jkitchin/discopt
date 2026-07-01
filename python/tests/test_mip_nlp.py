@@ -2409,6 +2409,46 @@ def test_fixed_nlp_candidate_manager_orders_and_deduplicates_assignments():
     assert ready[2].objective == pytest.approx(10.0)
 
 
+def test_fixed_nlp_candidate_manager_trace_counts_and_external_defaults():
+    from discopt.solvers.mip_nlp_candidates import FixedNLPCandidateManager
+
+    kwargs = {
+        "n_vars": 2,
+        "int_indices": [1],
+        "lb": np.array([0.0, 0.0]),
+        "ub": np.array([10.0, 5.0]),
+        "strategy": "always",
+    }
+
+    replaced = FixedNLPCandidateManager(**kwargs)
+    replaced.add([0.0, 2.0], source="solution_pool", objective=20.0, iteration=0)
+    replaced.add([0.0, 2.1], source="mip_optimum", objective=5.0, iteration=0)
+
+    assert replaced.scheduler_trace()["added_source_counts"] == {"mip_optimum": 1}
+    assert replaced.scheduler_trace()["pending"] == 1
+
+    external = FixedNLPCandidateManager(**kwargs)
+    external.add_external_candidates(
+        [
+            {
+                "point": [0.0, 1.0],
+                "provider": "candidate-provider",
+                "nlp_source": "original",
+            },
+            {"point": [0.0, 2.0]},
+        ],
+        iteration=0,
+        provider="default-provider",
+        nlp_source="active",
+    )
+
+    ready = external.take_ready(iteration=0, elapsed=0.0)
+    assert [(candidate.provider, candidate.nlp_source) for candidate in ready] == [
+        ("candidate-provider", "original"),
+        ("default-provider", "active"),
+    ]
+
+
 def test_fixed_nlp_candidate_manager_scheduling_modes():
     from discopt.solvers.mip_nlp_candidates import FixedNLPCandidateManager
 
