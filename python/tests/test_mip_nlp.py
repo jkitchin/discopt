@@ -186,6 +186,15 @@ def _esh_nonconvex_fixture(name="shot_esh_nonconvex"):
     return m
 
 
+def _esh_nonconvex_objective_fixture(name="shot_esh_nonconvex_objective"):
+    m = dm.Model(name)
+    x = m.continuous("x", lb=-2.0, ub=2.0)
+    y = m.binary("y")
+    m.subject_to(x**2 - 1.0 <= 0.0)
+    m.minimize((x - 1.0) ** 3 - 0.1 * y)
+    return m
+
+
 def test_mip_nlp_cut_record_construction_and_dedup():
     from discopt.solvers.oa import MIPNLPCutProvenance, MIPNLPCutRecord, _append_master_cut
 
@@ -891,6 +900,88 @@ def test_mip_nlp_shot_esh_protects_incumbent_from_local_cut():
     assert trace["fallback_used"] is False
     assert trace["local_cuts_rejected"] == 1
     assert provenance.records == []
+
+
+def test_mip_nlp_shot_esh_ecp_fallback_protects_incumbent_from_local_cut():
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers.mip_nlp_rootsearch import MIPNLPInteriorPointStore
+
+    decomp = oa_module._decompose_model(_esh_nonconvex_fixture("esh_unit_fallback_local"))
+    store = MIPNLPInteriorPointStore(
+        decomp.n_vars,
+        int_indices=decomp.int_indices,
+        lb=decomp.lb,
+        ub=decomp.ub,
+    )
+    provenance = oa_module.MIPNLPCutProvenance()
+
+    added, trace = oa_module._add_esh_cuts(
+        decomp.evaluator,
+        np.array([0.5, 1.0]),
+        decomp.n_vars,
+        decomp.constraint_senses,
+        [],
+        [],
+        decomp.obj_is_linear,
+        decomp.oa_constraint_mask,
+        decomp.oa_objective_is_convex,
+        store,
+        rootsearch_strategy="bisection",
+        cut_provenance=provenance,
+        incumbent=np.array([-2.0, 1.0]),
+    )
+
+    assert added == 0
+    assert trace["fallback_used"] is True
+    assert trace["fallback_reason"] == "missing_interior_point"
+    assert trace["local_cuts_rejected"] == 1
+    assert provenance.records == []
+
+
+def test_mip_nlp_shot_esh_objective_rootsearch_protects_incumbent_from_local_cut():
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers.mip_nlp_rootsearch import MIPNLPInteriorPointStore
+
+    decomp = oa_module._decompose_model(
+        _esh_nonconvex_objective_fixture("esh_unit_objective_local")
+    )
+    store = MIPNLPInteriorPointStore(
+        decomp.n_vars,
+        int_indices=decomp.int_indices,
+        lb=decomp.lb,
+        ub=decomp.ub,
+    )
+    store.add(
+        np.array([0.0, 1.0]),
+        source="unit",
+        evaluator=decomp.evaluator,
+        constraint_senses=decomp.constraint_senses,
+        require_feasible=True,
+    )
+    provenance = oa_module.MIPNLPCutProvenance()
+
+    added, trace = oa_module._add_esh_cuts(
+        decomp.evaluator,
+        np.array([2.0, 1.0]),
+        decomp.n_vars,
+        decomp.constraint_senses,
+        [],
+        [],
+        decomp.obj_is_linear,
+        decomp.oa_constraint_mask,
+        decomp.oa_objective_is_convex,
+        store,
+        rootsearch_strategy="bisection",
+        cut_provenance=provenance,
+        incumbent=np.array([0.0, 1.0]),
+        objective_epigraph_available=True,
+    )
+
+    assert decomp.oa_objective_is_convex is False
+    assert added == 1
+    assert trace["fallback_used"] is False
+    assert trace["local_cuts_rejected"] == 1
+    assert [record.source for record in provenance.records] == ["esh"]
 
 
 @pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")

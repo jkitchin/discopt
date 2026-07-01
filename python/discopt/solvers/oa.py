@@ -1791,6 +1791,9 @@ def _add_ecp_cuts(
     equality_relaxation=False,
     oa_cut_relaxable=None,
     cut_provenance: Optional[MIPNLPCutProvenance] = None,
+    include_local_cuts: bool = False,
+    incumbent=None,
+    local_cut_trace: Optional[dict[str, object]] = None,
 ):
     """Generate ECP cuts: OA cuts only for violated constraints at x_master."""
     from discopt._jax.cutting_planes import (
@@ -1799,18 +1802,41 @@ def _add_ecp_cuts(
     )
 
     n_added = 0
+    local_added = 0
+    local_rejected = 0
+
+    def reject_if_incumbent_excluded(coeffs, rhs: float, global_valid: bool) -> bool:
+        nonlocal local_rejected
+        if (
+            not global_valid
+            and incumbent is not None
+            and _candidate_cut_excludes_point(coeffs, rhs, incumbent)
+        ):
+            local_rejected += 1
+            return True
+        return False
+
+    def trace_counter_value(key: str) -> int:
+        if local_cut_trace is None:
+            return 0
+        value = local_cut_trace.get(key, 0)
+        if isinstance(value, (int, float)):
+            return int(value)
+        return 0
+
     if evaluator.n_constraints > 0:
+        ecp_convex_mask = None if include_local_cuts else constraint_convex_mask
         cuts = separate_oa_cuts(
             evaluator,
             x_master,
             constraint_senses=constraint_senses,
-            convex_mask=constraint_convex_mask,
+            convex_mask=ecp_convex_mask,
         )
         constraint_ids = _constraint_ids_for_generated_oa_cuts(
             evaluator,
             x_master,
             constraint_senses,
-            constraint_convex_mask,
+            ecp_convex_mask,
             violated_only=True,
         )
         for constraint_id, cut in zip(constraint_ids, cuts):
@@ -1830,6 +1856,8 @@ def _add_ecp_cuts(
             )
 
             if sense == "<=":
+                if reject_if_incumbent_excluded(coeffs, cut.rhs, global_valid):
+                    continue
                 _append_master_cut(
                     oa_A_rows,
                     oa_b_rows,
@@ -1842,8 +1870,12 @@ def _add_ecp_cuts(
                     supporting_point=x_master,
                     constraint_id=constraint_id,
                 )
+                if not global_valid:
+                    local_added += 1
                 n_added += 1
             elif sense == ">=":
+                if reject_if_incumbent_excluded(-coeffs, -cut.rhs, global_valid):
+                    continue
                 _append_master_cut(
                     oa_A_rows,
                     oa_b_rows,
@@ -1856,20 +1888,28 @@ def _add_ecp_cuts(
                     supporting_point=x_master,
                     constraint_id=constraint_id,
                 )
+                if not global_valid:
+                    local_added += 1
                 n_added += 1
             elif sense == "==":
-                _append_master_cut(
-                    oa_A_rows,
-                    oa_b_rows,
-                    coeffs,
-                    cut.rhs,
-                    oa_cut_relaxable,
-                    cut_provenance=cut_provenance,
-                    source="ecp",
-                    global_valid=global_valid,
-                    supporting_point=x_master,
-                    constraint_id=constraint_id,
-                )
+                if not reject_if_incumbent_excluded(coeffs, cut.rhs, global_valid):
+                    _append_master_cut(
+                        oa_A_rows,
+                        oa_b_rows,
+                        coeffs,
+                        cut.rhs,
+                        oa_cut_relaxable,
+                        cut_provenance=cut_provenance,
+                        source="ecp",
+                        global_valid=global_valid,
+                        supporting_point=x_master,
+                        constraint_id=constraint_id,
+                    )
+                    if not global_valid:
+                        local_added += 1
+                    n_added += 1
+                if reject_if_incumbent_excluded(-coeffs, -cut.rhs, global_valid):
+                    continue
                 _append_master_cut(
                     oa_A_rows,
                     oa_b_rows,
@@ -1882,7 +1922,9 @@ def _add_ecp_cuts(
                     supporting_point=x_master,
                     constraint_id=constraint_id,
                 )
-                n_added += 2
+                if not global_valid:
+                    local_added += 1
+                n_added += 1
 
     if not obj_is_linear and objective_is_convex:
         n_master = n_vars + 1
@@ -1903,6 +1945,13 @@ def _add_ecp_cuts(
             objective_id="objective",
         )
         n_added += 1
+
+    if local_cut_trace is not None and local_rejected:
+        previous = trace_counter_value("local_cuts_rejected")
+        local_cut_trace["local_cuts_rejected"] = previous + int(local_rejected)
+    if local_cut_trace is not None and local_added:
+        previous = trace_counter_value("local_cuts_added")
+        local_cut_trace["local_cuts_added"] = previous + int(local_added)
 
     return n_added
 
@@ -1963,6 +2012,8 @@ def _add_esh_cuts(
     oa_cut_relaxable=None,
     cut_provenance: Optional[MIPNLPCutProvenance] = None,
     incumbent=None,
+    incumbent_obj=None,
+    objective_epigraph_available: Optional[bool] = None,
     hyperplane_max_per_iter: Optional[int] = None,
     hyperplane_selection_factor: float = 1.0,
 ) -> tuple[int, dict[str, object]]:
@@ -1977,6 +2028,8 @@ def _add_esh_cuts(
     )
 
     x_master = np.asarray(x_master, dtype=np.float64).reshape(-1)
+    if objective_epigraph_available is None:
+        objective_epigraph_available = bool(objective_is_convex)
     trace: dict[str, object] = {
         "attempted": True,
         "fallback_used": False,
@@ -2005,6 +2058,9 @@ def _add_esh_cuts(
             equality_relaxation=equality_relaxation,
             oa_cut_relaxable=oa_cut_relaxable,
             cut_provenance=cut_provenance,
+            include_local_cuts=True,
+            incumbent=incumbent,
+            local_cut_trace=trace,
         )
         trace["cuts_added"] = int(added)
         return added, trace
@@ -2118,27 +2174,44 @@ def _add_esh_cuts(
                 global_valid=global_valid,
             )
 
-    if not obj_is_linear and objective_is_convex:
+    if not obj_is_linear and objective_epigraph_available:
         n_master = n_vars + 1
+        objective_global_valid = bool(objective_is_convex)
         obj_value = float(evaluator.evaluate_objective(support))
         obj_support = np.concatenate([support, [obj_value]])
         obj_cut = generate_objective_oa_cut(evaluator, support, n_master, z_index=n_vars)
         tangent_at_master = float(np.dot(obj_cut.coeffs[:n_vars], x_master) - obj_cut.rhs)
         objective_gap = max(0.0, float(evaluator.evaluate_objective(x_master)) - tangent_at_master)
         if np.linalg.norm(obj_cut.coeffs[:n_vars]) >= 1e-12 and objective_gap > 1e-8:
-            candidates.append(
-                _ESHHyperplaneCandidate(
-                    coeffs=obj_cut.coeffs.copy(),
-                    rhs=float(obj_cut.rhs),
-                    relaxable=False,
-                    source="objective_rootsearch",
-                    global_valid=True,
-                    local_valid=True,
-                    supporting_point=obj_support,
-                    violation=float(objective_gap),
-                    objective_id="objective",
+            incumbent_point = None
+            if not objective_global_valid and incumbent is not None:
+                incumbent_arr = np.asarray(incumbent, dtype=np.float64).reshape(-1)
+                if incumbent_arr.size == n_vars:
+                    if incumbent_obj is None:
+                        incumbent_obj_value = float(evaluator.evaluate_objective(incumbent_arr))
+                    else:
+                        incumbent_obj_value = float(incumbent_obj)
+                    incumbent_point = np.concatenate([incumbent_arr, [incumbent_obj_value]])
+            if (
+                not objective_global_valid
+                and incumbent_point is not None
+                and _candidate_cut_excludes_point(obj_cut.coeffs, obj_cut.rhs, incumbent_point)
+            ):
+                local_rejected += 1
+            else:
+                candidates.append(
+                    _ESHHyperplaneCandidate(
+                        coeffs=obj_cut.coeffs.copy(),
+                        rhs=float(obj_cut.rhs),
+                        relaxable=False,
+                        source="objective_rootsearch",
+                        global_valid=objective_global_valid,
+                        local_valid=True,
+                        supporting_point=obj_support,
+                        violation=float(objective_gap),
+                        objective_id="objective",
+                    )
                 )
-            )
 
     trace["candidate_hyperplanes"] = int(len(candidates))
     trace["local_cuts_rejected"] = int(local_rejected)
@@ -5057,6 +5130,7 @@ def solve_oa(
                         oa_cut_relaxable=oa_cut_relaxable,
                         cut_provenance=cut_provenance,
                         incumbent=incumbent,
+                        incumbent_obj=incumbent_obj,
                         hyperplane_max_per_iter=mip_nlp_shot_config.hyperplane_max_per_iter,
                         hyperplane_selection_factor=(
                             mip_nlp_shot_config.hyperplane_selection_factor
