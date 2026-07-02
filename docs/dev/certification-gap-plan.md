@@ -117,7 +117,7 @@ experiment may run.
 | T0.5 baseline + cert0 gate | done | (this PR) | cert-baseline.jsonl (global50+panel, 55 rows); [gates.cert0] passes: coverage 0.909 ≥ 0.90, incorrect 0. Phase 0 complete |
 | T1.1 entry experiment (kill criterion) | done (kill did NOT fire) | (this PR) | All uncovered families are closed-form box-affine → proceed to T1.2. Bonus: engine already validates on mixed int+cont (ex1263) and maximize |
 | T1.2 patch-table term coverage | in progress — monomial family landed | (this PR) | Dir. (a) differential neutrality. Steps 0–1 done: 42-row robust baseline + differential-neutrality checker + monomial p≥2 coverage (NEUTRAL: sound on all 42, node-improving; nvs17 perf-gated pending T1.4). Remaining families (trilinear/univariate/fractional) + T1.4 warm-start under parallel derivation |
-| T1.3 scope-gate widening | **BLOCKED — re-scope (§14)** | — | Gate flip is sound but explodes separation-reliant spatial models (dispatch 3→9843); fast path skips per-node separation. Reverted. Needs refreshed-inherited-pool design (option b). Neutrality infra caught it |
+| T1.3 scope-gate widening | done | (this PR) | Widened gate to `ok` + general root-cut-pool (built whenever engine active) + skip fast path during pool capture. dispatch 9843→3 restored; nvs13 55→19, nvs17 205→61. NEUTRAL / adversarial 10 / smoke 211. Fast engine now on the general spatial path |
 | T1.4 basis inheritance | root cause found; elevated priority | — | Warm-start rejected because coefficient-patch makes parent basis dual-infeasible (dual.rs:225-247→cold). Fix scoped (§14); caveat: dual-infeasible start likely needs phase-1/bound-flip, not a straight run_dual hand-off — verify before coding. Gates T1.2 wall benefit |
 | T1.5 evaluator-cache routing | already realized (PR #316) | #316 | primal_heuristics diving already routed through cached_evaluator (the −22% gear4 win); remaining sites are one-time (convex fast path) or autodiff-unsafe. Low residual value |
 | T1.6 bookkeeping → Rust | not started | — | blocked by T1.5 profile |
@@ -970,6 +970,20 @@ when `ok=False`.
 > gate. Only escalate to the periodic/refreshed pool if some instance genuinely
 > needs *in-tree* re-separation (none observed yet). Verify per instance with the
 > differential-neutrality check.
+>
+> **DONE (2026-07-02) — the targeted fix works; T1.3 landed.** Three coordinated
+> changes: (1) `solve_at_node` skips the fast path when capturing a pool
+> (`out_cuts` set) so the pool actually separates (`mccormick_lp.py`); (2) a
+> **general root-cut-pool** branch in `solver.py` builds the pool whenever the
+> incremental engine is active (not just the PSD path), capturing the root
+> separation chain once for the fast path to inherit; (3) the scope gate widened
+> to gate on `ok` for any model. Result: `dispatch` **9843 → 3 nodes** (restored),
+> and the fast engine now extends to the general spatial path **node-improving**:
+> nvs13 55 → 19, nvs17 205 → 61. Verified: differential neutrality **NEUTRAL**
+> across all 42 (objective correct, still optimal, node one-directional; nvs17
+> perf-gated, objective correct); adversarial 10 / smoke 211 green; ruff clean.
+> No refreshed/periodic re-separation needed. Sound by construction — root-box
+> cuts are valid for every sub-box, and `_validate` still guards the base rows.
 
 **T1.4 — Basis inheritance on the general path.**
 Thread the parent basis through node solves (the Rust side already supports it:
