@@ -116,7 +116,7 @@ experiment may run.
 | T0.4 soundness harness | done | (this PR) | utils/soundness.py: assert_bound_sound + assert_cut_valid; flags planted-invalid cut, passes McCormick envelope sweep |
 | T0.5 baseline + cert0 gate | done | (this PR) | cert-baseline.jsonl (global50+panel, 55 rows); [gates.cert0] passes: coverage 0.909 ≥ 0.90, incorrect 0. Phase 0 complete |
 | T1.1 entry experiment (kill criterion) | done (kill did NOT fire) | (this PR) | All uncovered families are closed-form box-affine → proceed to T1.2. Bonus: engine already validates on mixed int+cont (ex1263) and maximize |
-| T1.2 patch-table term coverage | **BLOCKED — escalated (§0.6)** | (this PR) | §0.2.5 exact-node-count gate is unsatisfiable: incremental engine is not tree-neutral vs cold (safe-bound + warm-start), and cert-baseline has non-reproducible rows. Needs maintainer re-scope. Monomial derivation parked in docs/dev/data/t12-monomial-patch.diff |
+| T1.2 patch-table term coverage | in progress (dir. (a) approved) | (this PR) | Neutrality redefined to differential form (§14). Step 0 done: cert-baseline rebuilt to 44-row deterministic-certifying subset. Next: wire checker + land parked monomial patch |
 | T1.3 scope-gate widening | not started | — | blocked by T1.2 |
 | T1.4 basis inheritance | not started | — | |
 | T1.5 evaluator-cache routing | not started | — | |
@@ -860,6 +860,30 @@ convexity across zero.
 > only artifacts are this note, the reproducible probes
 > (`discopt_benchmarks/scripts/t11_entry_experiment.py`, `.../t12_probe.py`), and
 > the parked patch.
+
+**Resolution — maintainer approved direction (a) (2026-07-02).** Phase 1
+bound-neutrality is redefined to the *differential* form: (1) `_validate` row-set
+equality per box (incremental LP == cold LP — the direct "identical relaxation
+math" proof, never softened); (2) the T0.4 differential-bound test at runtime
+(every incremental bound ≤ the true box optimum, never crosses the oracle);
+(3) certified objective unchanged **to tolerance** (a certified optimum
+reproduces only to ~1e-10 across runs — bit-exact objective equality is not a
+meaningful invariant, mirroring node_count); (4) node_count kept as a
+**one-directional** performance guard (must not get materially worse), not an
+equality gate. All §0.3 safety mechanisms (NS safe bound, warm start, `ok=False`
+fallback) stay intact — the tree is allowed to differ because it differs *safely*.
+
+- **Step 0 (done).** Rebuilt `cert-baseline.jsonl` as the **deterministic
+  certifying subset**: `gen_cert_baseline.py` now solves each instance twice and
+  keeps it only if both runs reach OPTIMAL with a bit-identical node_count and an
+  objective agreeing to `_OBJ_TOL`/`_OBJ_RTOL`. Result: **44 rows** (dropped 11,
+  all `time_limit`/`feasible` — incl. the non-reproducible nvs05; nvs22 now
+  carries the *correct* optimum 6.05822). Full-panel cert0 gate still green
+  (coverage 0.927, incorrect 0). This subset is the neutrality reference for
+  T1.2–T1.6.
+- **Next:** Step 1 — wire the differential-neutrality checker (1–4 above) and land
+  the parked monomial patch behind it (behind the `ok=False` fallback), then the
+  one-directional node guard; no default-on without 3 green nightlies.
 
 **T1.3 — Widen the scope gate.**
 Replace `_is_in_scope`'s all-integer+minimize test with: objective sense normalized
