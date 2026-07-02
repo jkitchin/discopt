@@ -118,7 +118,7 @@ experiment may run.
 | T1.1 entry experiment (kill criterion) | done (kill did NOT fire) | (this PR) | All uncovered families are closed-form box-affine → proceed to T1.2. Bonus: engine already validates on mixed int+cont (ex1263) and maximize |
 | T1.2 patch-table term coverage | in progress — monomial family landed | (this PR) | Dir. (a) differential neutrality. Steps 0–1 done: 42-row robust baseline + differential-neutrality checker + monomial p≥2 coverage (NEUTRAL: sound on all 42, node-improving; nvs17 perf-gated pending T1.4). Remaining families (trilinear/univariate/fractional) + T1.4 warm-start under parallel derivation |
 | T1.3 scope-gate widening | not started | — | blocked by T1.2 |
-| T1.4 basis inheritance | not started | — | |
+| T1.4 basis inheritance | root cause found; elevated priority | — | Warm-start rejected because coefficient-patch makes parent basis dual-infeasible (dual.rs:225-247→cold). Fix scoped (§14); caveat: dual-infeasible start likely needs phase-1/bound-flip, not a straight run_dual hand-off — verify before coding. Gates T1.2 wall benefit |
 | T1.5 evaluator-cache routing | not started | — | |
 | T1.6 bookkeeping → Rust | not started | — | blocked by T1.5 profile |
 | Phase 2 entry experiment | **locked** (§0.1.2) | — | unlocks on Phase 1 done |
@@ -881,9 +881,34 @@ fallback) stay intact — the tree is allowed to differ because it differs *safe
   carries the *correct* optimum 6.05822). Full-panel cert0 gate still green
   (coverage 0.927, incorrect 0). This subset is the neutrality reference for
   T1.2–T1.6.
-- **Next:** Step 1 — wire the differential-neutrality checker (1–4 above) and land
-  the parked monomial patch behind it (behind the `ok=False` fallback), then the
-  one-directional node guard; no default-on without 3 green nightlies.
+- **Step 1 (done).** Differential-neutrality checker wired
+  (`discopt_benchmarks/utils/cert_neutrality.py` + `scripts/check_cert_neutrality.py`)
+  and the **monomial p≥2** family landed behind the `ok=False` fallback. Baseline
+  determinism hardened (K=3 runs + `≤0.6·budget` margin guard → 42-row subset).
+  Result: **NEUTRAL** — sound on all 42, node one-directional on 41; nvs17
+  perf-gated (T1.4, objective still verified). smoke 211 / adversarial 10 / 11
+  property tests green.
+
+**Family derivation results (2026-07-02, via 3 parallel derivation agents; verified
+to 1e-9 vs `build_milp_relaxation`; reproducible probes in
+`discopt_benchmarks/scripts/t12_{multilinear,univariate,frac}.py`).** All remaining
+patchable families are now derived; integration is mechanical (detection + `_patch`
++ property test), each behind the `ok=False` fallback and perf-gated for T1.4.
+
+| Family | Structure | Sign/regime stability | Verdict |
+|---|---|---|---|
+| bilinear | 4 McCormick rows | sign-independent | **done** |
+| monomial `x^p`, p≥2 | 2 tangent + 1 secant | sign-*dependent* → gate on sign-definite root box | **done (Step 1)** |
+| **trilinear / multilinear** (distinct factors) | recursive-bilinear + RLT hull (24×7, 92×15…); RLT cap 4 then loose chain | **fully sign-independent** (no gating) | derived, 780/780; **ready to integrate** |
+| **univariate** exp/log/sqrt | 4 rows (endpoints + **midpoint** tangent) | stable 4 rows; →3 only at `lb==0` for log/sqrt → gate on root `lb>0` | derived, 1200/1200; **ready to integrate** |
+| **fractional_power** `x^p`, non-integer/negative | 3 rows (endpoint tangents + secant) | row-count drops near 0 via `_envelope_slope_ok` (|slope|≤1e6) | derived, 287/287; **integrate with the slope guard + cold fallback** |
+| `1.0/x` (syntactic reciprocal) | reciprocal-univariate (4 rows, +bilinear aux) | box-affine | **separate** generator from `x**-1` |
+| trig (sin/cos/tan), asin/acos, entropy, abs-on-spanning | piecewise / binary-selector structure | box-dependent *structure* | **stay on cold fallback** (not fixed-structure) |
+
+Integration prerequisites for the product family: gate on an **empty
+`DiscretizationState`** (partitions route to SOS2/λ machinery — different
+structure) and match the cold path's `rlt_level1` flag; repeated-factor products
+(`x·x·y`) are already covered by monomial+bilinear.
 
 **T1.3 — Widen the scope gate.**
 Replace `_is_in_scope`'s all-integer+minimize test with: objective sense normalized
