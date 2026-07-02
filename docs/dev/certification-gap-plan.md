@@ -112,7 +112,7 @@ experiment may run.
 |---|---|---|---|
 | T0.1 root_gap/root_time producer | done | (this PR) | Populated on all in-house B&B + convex-fast paths; bound-neutral (0 drift on 12 instances) |
 | T0.2 bound trajectory | done | (this PR) | Opt-in recorder (default OFF — node_callback disables GP fast path); downsampled ≤500; monotone-t, bound-non-decreasing |
-| T0.3 reduction/separation timers | not started | — | |
+| T0.3 reduction/separation timers | done | (this PR) | Rust Fbbt/NodeReduce phases (stderr profile); Python per-family timers on solver_stats; bound-neutral (0 drift, Rust rebuilt) |
 | T0.4 soundness harness | not started | — | |
 | T0.5 baseline + cert0 gate | not started | — | |
 | T1.1 entry experiment (kill criterion) | not started | — | |
@@ -598,6 +598,26 @@ bound non-decreasing. Tests in
   OBBT/nonlinear-FBBT calls (`solver.py:4756-4765`) with the existing perf-counter
   budget pattern; surface per-family totals on `SolveResult.solver_stats`.
 - **Test:** on one spatial instance, the new timers sum to ≤ wall and are non-zero.
+
+*Implementation note (done, this PR).* **Rust:** added `Fbbt` and `NodeReduce`
+to the `timed_phases!` macro in `profile.rs`; wrapped the per-node
+`tighten_bounds` (`milp_driver.rs` node loop) under `Fbbt` and the root presolve
+`tighten_bounds` under `NodeReduce`, using the existing zero-overhead
+`Timer::new(Phase::…)` RAII (same pattern as `NodeLpSolve`/`StrongBranch`).
+These surface through the existing `DISCOPT_PROFILE` stderr dump — verified both
+fire and record (`NodeReduce` on any MILP presolve; `Fbbt` on a branching MILP
+with `node_propagation=True`). Because the phase-count `NP` is derived from the
+macro variant list, adding variants is self-consistent — no hardcoded count.
+**Python:** per-family separation timers accumulate on
+`MccormickLPRelaxer._sep_timers` (multilinear/edge_concave/univariate_square/
+convex/psd/rlt); FBBT time in the spatial loop's `_reduce_timers`; OBBT reuses
+the existing `_pn_obbt_spent` accumulator. All are surfaced as a flat
+`reduce/…` / `separate/…` dict on the new public `SolveResult.solver_stats`
+field, mapped to nothing external (Python-only). Verified on `gear`/`ex1221`/
+`ex8_1_1`: timers non-zero and summing to ≤ wall. **Bound-neutral:** the Rust
+Timer is inert unless `DISCOPT_PROFILE` is set and never alters math; after the
+`--release` rebuild, node_count and objective are bit-identical to `main` on 12
+instances (0 drift).
 
 **T0.4 — Reusable soundness harness.**
 - New module `discopt_benchmarks/utils/soundness.py`:

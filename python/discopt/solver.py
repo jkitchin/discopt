@@ -4663,6 +4663,10 @@ def solve_model(
     _root_time: Optional[float] = None
     _root_glb_internal: Optional[float] = None
 
+    # Per-node reduction timers (cert:T0.3). Accumulated across the spatial B&B
+    # loop and surfaced on SolveResult.solver_stats. Pure instrumentation.
+    _reduce_timers = {"fbbt": 0.0, "obbt": 0.0}
+
     # Objective-gating priority branching (issue #184). Opt-in via
     # ``DISCOPT_OBJ_BRANCH_PRIORITY=1``: branch the binaries that gate the
     # objective's nonlinear terms first so the global bound can climb off a
@@ -4756,6 +4760,7 @@ def solve_model(
 
         # Tighten node bounds via constraint propagation (FBBT).
         if cl_list:
+            _t_fbbt = time.perf_counter()
             for i in range(n_batch):
                 if node_infeasible_mask[i]:
                     continue
@@ -4769,6 +4774,7 @@ def solve_model(
                     continue
                 batch_lb[i] = t_lb.tolist()
                 batch_ub[i] = t_ub.tolist()
+            _reduce_timers["fbbt"] += time.perf_counter() - _t_fbbt
 
         # --- Per-node OBBT (Lever A) ---
         # Tighten each surviving node's box against its own McCormick relaxation
@@ -6637,6 +6643,19 @@ def solve_model(
         if obj_val is not None and np.isfinite(obj_val):
             root_gap_val = abs(obj_val - root_bound_val) / max(1.0, abs(obj_val))
 
+    # Per-family reduction/separation timers (cert:T0.3). OBBT time is already
+    # accumulated in ``_pn_obbt_spent``; FBBT in ``_reduce_timers``; the
+    # separation families on the relaxer instance. Only non-zero families are
+    # surfaced; an all-zero result reports None.
+    _reduce_timers["obbt"] = _pn_obbt_spent
+    _solver_stats: dict[str, float] = {
+        f"reduce/{_k}": float(_v) for _k, _v in _reduce_timers.items() if _v > 0.0
+    }
+    if _mc_lp_relaxer is not None and getattr(_mc_lp_relaxer, "_sep_timers", None):
+        for _k, _v in _mc_lp_relaxer._sep_timers.items():
+            if _v > 0.0:
+                _solver_stats[f"separate/{_k}"] = float(_v)
+
     return SolveResult(
         status=status,
         objective=obj_val,
@@ -6651,6 +6670,7 @@ def solve_model(
         root_bound=root_bound_val,
         root_gap=root_gap_val,
         root_time=_root_time,
+        solver_stats=_solver_stats or None,
         gap_certified=_gap_certified,
         subnlp_calls=_subnlp_calls,
         subnlp_feasible=_subnlp_feasible,
