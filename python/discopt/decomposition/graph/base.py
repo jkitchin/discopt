@@ -24,7 +24,7 @@ from enum import Enum
 from discopt.decomposition.graph import kernels
 
 # Guard for the O(m·(n+E)) bridge scan; above this, skip it and rely on
-# annotations. Mirrors ``structure._BRIDGE_SCAN_BUDGET`` (kept in sync).
+# annotations. Single source of truth — ``structure.py`` imports this value.
 _BRIDGE_SCAN_BUDGET = 200_000
 
 

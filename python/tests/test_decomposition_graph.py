@@ -115,6 +115,21 @@ def test_articulation_uses_rust_when_available():
         assert list(pts) == [1, 2]
 
 
+def test_rust_kernels_reject_out_of_range_vertices():
+    # An edge referencing a vertex >= n must raise a clean ValueError, not panic
+    # across the PyO3 boundary (PanicException). Guards the bindings' validation.
+    rust = kernels._rust_kernels()
+    if rust is None:
+        return
+    for fn in (
+        rust.decomp_connected_components,
+        rust.decomp_strongly_connected_components,
+        rust.decomp_articulation_and_bridges,
+    ):
+        with pytest.raises(ValueError):
+            fn(3, [(0, 5)])  # vertex 5 is out of range for n=3
+
+
 def test_dependency_edges_star_expansion_for_wide_cliques():
     # a width-5 clique with max_clique_expand=3 becomes a star (4 edges),
     # not a full clique (10 edges).

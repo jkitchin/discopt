@@ -11,23 +11,40 @@
 use discopt_core::decomp::{
     articulation_and_bridges, connected_components, strongly_connected_components, CsrGraph,
 };
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+
+/// Reject any edge whose endpoints fall outside `0..n`. The CSR builders index a
+/// `vec![0; n]` degree array directly, so an out-of-range vertex would panic and
+/// unwind into Python as a `PanicException`; surface a clean `ValueError` instead.
+fn validate_edges(n: usize, edges: &[(u32, u32)]) -> PyResult<()> {
+    for &(a, b) in edges {
+        if a as usize >= n || b as usize >= n {
+            return Err(PyValueError::new_err(format!(
+                "edge vertex out of range: ({a}, {b}) with n={n}"
+            )));
+        }
+    }
+    Ok(())
+}
 
 /// Connected-component label per vertex of an undirected graph on `n` vertices
 /// with the given `edges`. Labels are assigned in ascending first-seen vertex
 /// order (matching the pure-Python reference and the block-ordering convention).
 #[pyfunction]
-pub fn decomp_connected_components(n: usize, edges: Vec<(u32, u32)>) -> Vec<u32> {
+pub fn decomp_connected_components(n: usize, edges: Vec<(u32, u32)>) -> PyResult<Vec<u32>> {
+    validate_edges(n, &edges)?;
     let g = CsrGraph::from_edges_undirected(n, &edges);
-    connected_components(&g).0
+    Ok(connected_components(&g).0)
 }
 
 /// Strongly-connected-component id per vertex of a directed graph on `n`
 /// vertices with the given `arcs` (`from -> to`).
 #[pyfunction]
-pub fn decomp_strongly_connected_components(n: usize, arcs: Vec<(u32, u32)>) -> Vec<u32> {
+pub fn decomp_strongly_connected_components(n: usize, arcs: Vec<(u32, u32)>) -> PyResult<Vec<u32>> {
+    validate_edges(n, &arcs)?;
     let g = CsrGraph::from_edges_directed(n, &arcs);
-    strongly_connected_components(&g).0
+    Ok(strongly_connected_components(&g).0)
 }
 
 /// Articulation points and bridges of an undirected simple graph on `n`
@@ -37,8 +54,9 @@ pub fn decomp_strongly_connected_components(n: usize, arcs: Vec<(u32, u32)>) -> 
 pub fn decomp_articulation_and_bridges(
     n: usize,
     edges: Vec<(u32, u32)>,
-) -> (Vec<u32>, Vec<(u32, u32)>) {
+) -> PyResult<(Vec<u32>, Vec<(u32, u32)>)> {
+    validate_edges(n, &edges)?;
     let g = CsrGraph::from_edges_undirected(n, &edges);
     let r = articulation_and_bridges(&g);
-    (r.articulation_points(), r.bridges)
+    Ok((r.articulation_points(), r.bridges))
 }

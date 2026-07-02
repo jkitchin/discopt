@@ -32,12 +32,11 @@ from dataclasses import dataclass
 import numpy as np
 
 from discopt.decomposition.graph import kernels
+from discopt.decomposition.graph.base import _BRIDGE_SCAN_BUDGET
 from discopt.modeling.core import Model, VarType
 
-# Guard for the O(m·(V+E)) bridge scan; above this, skip auto coupling
-# detection and rely on annotations instead of burning time. Kept in sync with
-# ``graph.base._BRIDGE_SCAN_BUDGET``.
-_BRIDGE_SCAN_BUDGET = 200_000
+# ``_BRIDGE_SCAN_BUDGET`` (the guard for the O(m·(V+E)) bridge scan) is defined
+# once in ``graph.base`` and imported here so the two paths cannot drift.
 
 
 @dataclass(frozen=True)
