@@ -3527,6 +3527,8 @@ def solve_lp_nlp_bb(
     feasibility_norm: str = "L_infinity",
     milp_solver: str = "gurobi",
     integer_to_binary: bool = False,
+    mip_nlp_profile: str = "default",
+    mip_nlp_shot_config: Optional[MIPNLPShotConfig] = None,
     **kwargs,
 ) -> SolveResult:
     """Solve a convex MINLP with the LP/NLP branch-and-bound variant.
@@ -3546,7 +3548,8 @@ def solve_lp_nlp_bb(
             + ". Supported options are: add_no_good_cuts, add_slack, equality_relaxation, "
             "feasibility_cuts, feasibility_norm, heuristic_nonconvex, init_strategy, "
             "integer_to_binary, "
-            "max_slack, milp_solver, oa_penalty_factor."
+            "max_slack, milp_solver, mip_nlp_profile, mip_nlp_shot_config, "
+            "oa_penalty_factor."
         )
     _require_lp_nlp_bb_gurobi_backend(milp_solver)
     t_start = time.perf_counter()
@@ -3596,6 +3599,89 @@ def solve_lp_nlp_bb(
             "disabling certified bound/gap reporting and skipping objective OA cuts"
         )
     master_bound_valid = decomp.master_bound_valid and not heuristic_nonconvex
+    shot_config = mip_nlp_shot_config if mip_nlp_profile == "shot" else None
+    shot_profile = shot_config is not None
+    shot_cut_strategy = shot_config.cut_strategy if shot_config is not None else "oa"
+    cut_provenance = MIPNLPCutProvenance()
+    callback_events: list[dict[str, object]] = []
+
+    if shot_profile:
+        from discopt.solvers.mip_nlp_rootsearch import MIPNLPInteriorPointStore
+
+        interior_point_store = MIPNLPInteriorPointStore(
+            n_vars,
+            int_indices=decomp.int_indices,
+            lb=decomp.lb,
+            ub=decomp.ub,
+        )
+    else:
+        interior_point_store = None
+
+    def _trace_value(value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        out = float(value)
+        if not np.isfinite(out) or abs(out) >= 1e19:
+            return None
+        return out
+
+    def _trace_status(status) -> str:
+        name = getattr(status, "name", None)
+        if isinstance(name, str):
+            return name.lower()
+        return str(status).lower()
+
+    def _linear_objective_offset() -> float:
+        if decomp.obj_is_linear and decomp.obj_coeffs is not None:
+            return float(decomp.obj_coeffs[1])
+        return 0.0
+
+    def _master_objective_from_evaluator(value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        return float(value) - _linear_objective_offset()
+
+    def _record_interior_point(
+        point,
+        source: str,
+        metadata: Optional[dict[str, object]] = None,
+        *,
+        require_feasible: bool = False,
+    ) -> None:
+        if interior_point_store is None:
+            return
+        interior_point_store.add(
+            point,
+            source=source,
+            metadata=metadata,
+            evaluator=evaluator,
+            constraint_senses=decomp.constraint_senses,
+            require_feasible=require_feasible,
+        )
+
+    def _record_callback_event(
+        *,
+        context: str,
+        cuts_start: int,
+        provenance_start: int,
+        cuts_returned: int,
+        fixed_nlp_status: Optional[str] = None,
+        rootsearch_trace: Optional[dict[str, object]] = None,
+        integer_cut_added: bool = False,
+    ) -> None:
+        event: dict[str, object] = {
+            "context": context,
+            "cuts_generated": int(len(oa_A_rows) - cuts_start),
+            "cuts_returned": int(cuts_returned),
+            "provenance_cuts_added": int(len(cut_provenance.records) - provenance_start),
+            "provenance_cuts_total": int(len(cut_provenance.records)),
+            "fixed_nlp_status": fixed_nlp_status,
+            "integer_cut_added": bool(integer_cut_added),
+            "cut_source_counts": cut_provenance.source_counts(),
+        }
+        if rootsearch_trace is not None:
+            event["rootsearch"] = rootsearch_trace
+        callback_events.append(event)
 
     if len(decomp.int_indices) == 0:
         x_sol, obj = _solve_nlp_relaxation(
@@ -3638,6 +3724,12 @@ def solve_lp_nlp_bb(
         if incumbent_obj is None or obj < incumbent_obj:
             incumbent = np.asarray(x, dtype=np.float64).copy()
             incumbent_obj = float(obj)
+            _record_interior_point(
+                incumbent,
+                "callback_incumbent",
+                {"objective": float(obj)},
+                require_feasible=True,
+            )
 
     def add_oa_cuts_at(x_cut: np.ndarray) -> None:
         _add_oa_cuts(
@@ -3653,6 +3745,7 @@ def solve_lp_nlp_bb(
             decomp.oa_objective_is_convex,
             equality_relaxation=equality_relaxation,
             oa_cut_relaxable=oa_cut_relaxable,
+            cut_provenance=cut_provenance,
         )
 
     if init_strategy == "rNLP":
@@ -3664,6 +3757,13 @@ def solve_lp_nlp_bb(
             initial_point=initial_point,
         )
         if x_relax is not None:
+            if obj_relax is not None:
+                _record_interior_point(
+                    x_relax,
+                    "nlp_relaxation",
+                    {"objective": float(obj_relax)},
+                    require_feasible=True,
+                )
             add_oa_cuts_at(x_relax)
             if _is_integer_feasible(decomp, x_relax) and obj_relax is not None:
                 accept_incumbent(x_relax, obj_relax)
@@ -3708,6 +3808,12 @@ def solve_lp_nlp_bb(
         )
         add_oa_cuts_at(x_init if x_init is not None else x_seed)
         if x_init is not None and obj_init is not None:
+            _record_interior_point(
+                x_init,
+                "initial_fixed_nlp",
+                {"objective": float(obj_init)},
+                require_feasible=True,
+            )
             accept_incumbent(x_init, obj_init)
 
     elapsed = time.perf_counter() - t_start
@@ -3751,8 +3857,39 @@ def solve_lp_nlp_bb(
     def lazy_callback(master_x: np.ndarray) -> list[tuple[np.ndarray, float]]:
         nonlocal nlp_subproblem_count
         x_master = np.asarray(master_x[:n_vars], dtype=np.float64)
+        cuts_start = len(oa_A_rows)
+        provenance_start = len(cut_provenance.records)
         start = len(oa_A_rows)
+        rootsearch_trace = None
+        if (
+            shot_profile
+            and shot_cut_strategy in {"auto", "esh"}
+            and interior_point_store is not None
+        ):
+            assert shot_config is not None
+            _esh_added, rootsearch_trace = _add_esh_cuts(
+                evaluator,
+                x_master,
+                n_vars,
+                decomp.constraint_senses,
+                oa_A_rows,
+                oa_b_rows,
+                decomp.obj_is_linear,
+                decomp.oa_constraint_mask,
+                decomp.oa_objective_is_convex,
+                interior_point_store,
+                rootsearch_strategy=shot_config.rootsearch_strategy,
+                equality_relaxation=equality_relaxation,
+                oa_cut_relaxable=oa_cut_relaxable,
+                cut_provenance=cut_provenance,
+                incumbent=incumbent,
+                incumbent_obj=incumbent_obj,
+                hyperplane_max_per_iter=shot_config.hyperplane_max_per_iter,
+                hyperplane_selection_factor=shot_config.hyperplane_selection_factor,
+            )
         nlp_subproblem_count += 1
+        fixed_nlp_status = "failed"
+        integer_cut_added = False
         x_nlp, obj_nlp = _solve_nlp_subproblem(
             evaluator,
             decomp.lb,
@@ -3763,8 +3900,15 @@ def solve_lp_nlp_bb(
             initial_point=x_master,
         )
         if x_nlp is not None:
+            fixed_nlp_status = "feasible"
             if obj_nlp is not None:
                 accept_incumbent(x_nlp, obj_nlp)
+                _record_interior_point(
+                    x_nlp,
+                    "callback_fixed_nlp",
+                    {"objective": float(obj_nlp)},
+                    require_feasible=True,
+                )
             add_oa_cuts_at(x_nlp)
         else:
             if feasibility_cuts:
@@ -3787,11 +3931,12 @@ def solve_lp_nlp_bb(
                         oa_b_rows,
                         decomp.oa_constraint_mask,
                         oa_cut_relaxable=oa_cut_relaxable,
+                        cut_provenance=cut_provenance,
                     )
             if add_no_good_cuts and (
                 not decomp.general_integer_indices or integer_binary_expansion is not None
             ):
-                _add_no_good_cut(
+                integer_cut_added = _add_no_good_cut(
                     x_master,
                     decomp.binary_indices,
                     oa_A_rows,
@@ -3799,13 +3944,65 @@ def solve_lp_nlp_bb(
                     n_vars,
                     oa_cut_relaxable=oa_cut_relaxable,
                     integer_binary_expansion=integer_binary_expansion,
+                    cut_provenance=cut_provenance,
                 )
             add_oa_cuts_at(x_master)
 
-        return collect_new_lazy_cuts(start, np.asarray(master_x, dtype=np.float64))
+        rows = collect_new_lazy_cuts(start, np.asarray(master_x, dtype=np.float64))
+        _record_callback_event(
+            context="mipsol",
+            cuts_start=cuts_start,
+            provenance_start=provenance_start,
+            cuts_returned=len(rows),
+            fixed_nlp_status=fixed_nlp_status,
+            rootsearch_trace=rootsearch_trace,
+            integer_cut_added=integer_cut_added,
+        )
+        return rows
+
+    def node_callback(master_x: np.ndarray) -> list[tuple[np.ndarray, float]]:
+        full_master_x = np.asarray(master_x, dtype=np.float64)
+        x_master = full_master_x[:n_vars]
+        cuts_start = len(oa_A_rows)
+        provenance_start = len(cut_provenance.records)
+        start = len(oa_A_rows)
+        _add_ecp_cuts(
+            evaluator,
+            x_master,
+            n_vars,
+            decomp.constraint_senses,
+            oa_A_rows,
+            oa_b_rows,
+            decomp.obj_is_linear,
+            decomp.oa_constraint_mask,
+            decomp.oa_objective_is_convex,
+            equality_relaxation=equality_relaxation,
+            oa_cut_relaxable=oa_cut_relaxable,
+            cut_provenance=cut_provenance,
+        )
+        rows = collect_new_lazy_cuts(start, full_master_x)
+        _record_callback_event(
+            context="mipnode",
+            cuts_start=cuts_start,
+            provenance_start=provenance_start,
+            cuts_returned=len(rows),
+        )
+        return rows
 
     from discopt.solvers import SolveStatus
     from discopt.solvers.gurobi import solve_milp_with_lazy_cuts
+
+    master_mip_start = None
+    if shot_profile and incumbent is not None:
+        master_mip_start = _extend_master_mip_start(
+            master,
+            n_vars=n_vars,
+            mip_start=incumbent,
+            mip_start_objective=_master_objective_from_evaluator(incumbent_obj),
+        )
+
+    def callback_terminate(_snapshot: dict[str, object]) -> bool:
+        return (time.perf_counter() - t_start) >= float(time_limit)
 
     master_result = solve_milp_with_lazy_cuts(
         c=master.c,
@@ -3818,6 +4015,9 @@ def solve_lp_nlp_bb(
         time_limit=remaining,
         gap_tolerance=gap_tolerance,
         lazy_callback=lazy_callback,
+        node_callback=node_callback if shot_profile else None,
+        terminate_callback=callback_terminate,
+        mip_start=master_mip_start,
     )
     wall_time = time.perf_counter() - t_start
 
@@ -3831,8 +4031,14 @@ def solve_lp_nlp_bb(
         if bound is not None and incumbent_obj is not None
         else None
     )
+    callback_stats = dict(master_result.callback_stats or {})
+    callback_terminated = bool(callback_stats.get("terminated"))
     status = "feasible"
-    if master_result.status == SolveStatus.INFEASIBLE:
+    termination_reason: Optional[str] = None
+    if callback_terminated:
+        termination_reason = "time_limit"
+        status = "time_limit" if incumbent is None else "feasible"
+    elif master_result.status == SolveStatus.INFEASIBLE:
         status = "infeasible"
     elif master_result.status == SolveStatus.TIME_LIMIT:
         status = "time_limit" if incumbent is None else "feasible"
@@ -3842,6 +4048,56 @@ def solve_lp_nlp_bb(
         status = "optimal" if gap is not None and gap <= gap_tolerance else "feasible"
     elif incumbent is None:
         status = "no_feasible_point"
+    if termination_reason is None:
+        termination_reason = status
+
+    trace_bound_validity = (
+        "global"
+        if master_bound_valid and bound is not None
+        else ("heuristic" if bound is not None else "unavailable")
+    )
+    single_tree_trace: dict[str, object] = {
+        "schema_version": 1,
+        "solver": "mip-nlp",
+        "method": "lp_nlp_bb",
+        "profile": mip_nlp_profile,
+        "shot_options": (
+            mip_nlp_shot_config.as_trace_dict() if mip_nlp_shot_config is not None else {}
+        ),
+        "iterations": [
+            {
+                "index": 0,
+                "master_status": _trace_status(master_result.status),
+                "lb": _trace_value(bound),
+                "ub": _trace_value(incumbent_obj),
+                "gap": _trace_value(gap),
+                "cuts_total": int(len(oa_A_rows)),
+                "provenance_cuts_total": int(len(cut_provenance.records)),
+                "cut_source_counts": cut_provenance.source_counts(),
+                "callback_events": callback_events,
+                "callback_stats": callback_stats,
+                "node_count": int(master_result.node_count),
+                "mip_start_applied": bool(master_mip_start is not None),
+            }
+        ],
+        "summary": {
+            "mip_count": 1,
+            "nlp_subproblem_count": int(nlp_subproblem_count),
+            "cut_count": int(len(oa_A_rows)),
+            "provenance_cut_count": int(len(cut_provenance.records)),
+            "cut_source_counts": cut_provenance.source_counts(),
+            "callback_event_count": int(len(callback_events)),
+            "callback_stats": callback_stats,
+            "node_count": int(master_result.node_count),
+        },
+        "termination_reason": termination_reason,
+        "master_bound_valid": bool(master_bound_valid),
+        "gap_certified": bool(master_bound_valid),
+        "bound_validity": trace_bound_validity,
+        "final_lb": _trace_value(bound),
+        "final_ub": _trace_value(incumbent_obj),
+        "final_gap": _trace_value(gap),
+    }
 
     if incumbent is not None and incumbent_obj is not None:
         return SolveResult(
@@ -3855,6 +4111,7 @@ def solve_lp_nlp_bb(
             mip_count=1,
             subnlp_calls=nlp_subproblem_count,
             gap_certified=master_bound_valid,
+            mip_nlp_trace=single_tree_trace,
         )
 
     return SolveResult(
@@ -3868,6 +4125,7 @@ def solve_lp_nlp_bb(
         mip_count=1,
         subnlp_calls=nlp_subproblem_count,
         gap_certified=master_bound_valid,
+        mip_nlp_trace=single_tree_trace,
     )
 
 

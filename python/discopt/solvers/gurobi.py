@@ -536,19 +536,30 @@ def solve_milp_with_lazy_cuts(
     threads: Optional[int] = None,
     options: Optional[dict] = None,
     lazy_callback: Optional[Callable[[np.ndarray], object]] = None,
+    node_callback: Optional[Callable[[np.ndarray], object]] = None,
+    terminate_callback: Optional[Callable[[dict[str, object]], bool]] = None,
+    mip_start: Optional[np.ndarray] = None,
 ) -> MILPResult:
-    """Solve a MILP using Gurobi lazy constraints.
+    """Solve a MILP using Gurobi lazy constraints and optional node cuts.
 
     ``lazy_callback`` is called at integer incumbents with the current solution
     vector. It should return an iterable of ``(coefficients, rhs)`` rows in
     ``coefficients @ x <= rhs`` form. The callback may return ``None`` or an
     empty iterable when no lazy rows are violated.
+
+    ``node_callback`` is called at MIPNODE relaxation points when Gurobi exposes
+    an optimal node relaxation. Returned rows are added as user cuts with
+    ``cbCut``. ``terminate_callback`` receives a mutable callback-stat snapshot
+    and may request early model termination.
     """
     c_arr, _n = _validate_linear_data(c, A_ub, b_ub, A_eq, b_eq, bounds)
     gp, GRB = _load_gurobi()
 
     merged_options = dict(options or {})
-    merged_options["LazyConstraints"] = 1
+    if lazy_callback is not None:
+        merged_options["LazyConstraints"] = 1
+    if node_callback is not None:
+        merged_options.setdefault("PreCrush", 1)
 
     env, model, x, _ub_con, _eq_con = _build_model(
         gp,
@@ -566,24 +577,100 @@ def solve_milp_with_lazy_cuts(
         threads=threads,
         options=merged_options,
     )
+    callback_stats: dict[str, object] = {
+        "mipsol_calls": 0,
+        "mipnode_calls": 0,
+        "lazy_cuts": 0,
+        "node_cuts": 0,
+        "terminated": False,
+        "terminate_context": None,
+    }
+
+    def _validate_callback_cut(coeffs, rhs) -> np.ndarray:
+        row = np.asarray(coeffs, dtype=np.float64).ravel()
+        if row.shape[0] != len(c_arr):
+            raise ValueError(
+                f"callback cut has {row.shape[0]} coefficients but model has {len(c_arr)} variables"
+            )
+        return row
+
+    def _maybe_terminate(grb_model, context: str) -> bool:
+        if terminate_callback is None:
+            return False
+        snapshot = dict(callback_stats)
+        snapshot["context"] = context
+        if not bool(terminate_callback(snapshot)):
+            return False
+        callback_stats["terminated"] = True
+        callback_stats["terminate_context"] = context
+        terminate = getattr(grb_model, "terminate", None)
+        if terminate is not None:
+            terminate()
+        return True
+
+    def _mipnode_relaxation_is_available(grb_model) -> bool:
+        status_attr = getattr(GRB.Callback, "MIPNODE_STATUS", None)
+        if status_attr is None:
+            return True
+        cb_get = getattr(grb_model, "cbGet", None)
+        if cb_get is None:
+            return False
+        try:
+            return int(cb_get(status_attr)) == int(GRB.OPTIMAL)
+        except Exception:
+            return False
 
     def _callback(grb_model, where):
-        if lazy_callback is None or where != GRB.Callback.MIPSOL:
+        if _maybe_terminate(grb_model, "callback"):
             return
-        incumbent = np.asarray(grb_model.cbGetSolution(x), dtype=np.float64).ravel()
-        cuts = lazy_callback(incumbent)
-        if cuts is None:
+        if lazy_callback is not None and where == GRB.Callback.MIPSOL:
+            callback_stats["mipsol_calls"] = int(callback_stats["mipsol_calls"]) + 1
+            incumbent = np.asarray(grb_model.cbGetSolution(x), dtype=np.float64).ravel()
+            cuts = lazy_callback(incumbent)
+            if cuts is None:
+                return
+            for coeffs, rhs in cuts:
+                row = _validate_callback_cut(coeffs, rhs)
+                grb_model.cbLazy(row @ x <= float(rhs))
+                callback_stats["lazy_cuts"] = int(callback_stats["lazy_cuts"]) + 1
             return
-        for coeffs, rhs in cuts:
-            row = np.asarray(coeffs, dtype=np.float64).ravel()
-            if row.shape[0] != len(c_arr):
-                raise ValueError(
-                    f"lazy cut has {row.shape[0]} coefficients but model has {len(c_arr)} variables"
-                )
-            grb_model.cbLazy(row @ x <= float(rhs))
+
+        mipnode_where = getattr(GRB.Callback, "MIPNODE", None)
+        if node_callback is not None and mipnode_where is not None and where == mipnode_where:
+            callback_stats["mipnode_calls"] = int(callback_stats["mipnode_calls"]) + 1
+            if not _mipnode_relaxation_is_available(grb_model):
+                return
+            cb_get_node_rel = getattr(grb_model, "cbGetNodeRel", None)
+            cb_cut = getattr(grb_model, "cbCut", None)
+            if cb_get_node_rel is None or cb_cut is None:
+                return
+            relaxation = np.asarray(cb_get_node_rel(x), dtype=np.float64).ravel()
+            cuts = node_callback(relaxation)
+            if cuts is None:
+                return
+            for coeffs, rhs in cuts:
+                row = _validate_callback_cut(coeffs, rhs)
+                cb_cut(row @ x <= float(rhs))
+                callback_stats["node_cuts"] = int(callback_stats["node_cuts"]) + 1
 
     try:
-        status_code = _optimize(model, GRB, _callback if lazy_callback is not None else None)
+        if mip_start is not None:
+            start = np.asarray(mip_start, dtype=np.float64).ravel()
+            if start.shape[0] != c_arr.shape[0]:
+                raise ValueError(
+                    f"mip_start has {start.shape[0]} entries but c has {c_arr.shape[0]}"
+                )
+            x.Start = start
+        active_callback = (
+            _callback
+            if (
+                lazy_callback is not None
+                or node_callback is not None
+                or terminate_callback is not None
+            )
+            else None
+        )
+        status_code = _optimize(model, GRB, active_callback)
         status = _status_map(GRB).get(status_code, SolveStatus.ERROR)
         node_count = int(_safe_attr(model, "NodeCount") or 0)
         wall_time = float(_safe_attr(model, "Runtime") or 0.0)
@@ -609,6 +696,7 @@ def solve_milp_with_lazy_cuts(
                 gap=0.0,
                 node_count=node_count,
                 wall_time=wall_time,
+                callback_stats=callback_stats,
             )
 
         return MILPResult(
@@ -619,6 +707,7 @@ def solve_milp_with_lazy_cuts(
             gap=gap,
             node_count=node_count,
             wall_time=wall_time,
+            callback_stats=callback_stats,
         )
     finally:
         model.dispose()
