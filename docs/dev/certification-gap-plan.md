@@ -115,7 +115,7 @@ experiment may run.
 | T0.3 reduction/separation timers | done | (this PR) | Rust Fbbt/NodeReduce phases (stderr profile); Python per-family timers on solver_stats; bound-neutral (0 drift, Rust rebuilt) |
 | T0.4 soundness harness | done | (this PR) | utils/soundness.py: assert_bound_sound + assert_cut_valid; flags planted-invalid cut, passes McCormick envelope sweep |
 | T0.5 baseline + cert0 gate | done | (this PR) | cert-baseline.jsonl (global50+panel, 55 rows); [gates.cert0] passes: coverage 0.909 ≥ 0.90, incorrect 0. Phase 0 complete |
-| T1.1 entry experiment (kill criterion) | not started | — | |
+| T1.1 entry experiment (kill criterion) | done (kill did NOT fire) | (this PR) | All uncovered families are closed-form box-affine → proceed to T1.2. Bonus: engine already validates on mixed int+cont (ex1263) and maximize |
 | T1.2 patch-table term coverage | not started | — | blocked by T1.1 |
 | T1.3 scope-gate widening | not started | — | blocked by T1.2 |
 | T1.4 basis inheritance | not started | — | |
@@ -717,6 +717,44 @@ rows-per-term → closed-form available yes/no) appended to this section. Kill: 
 worst instances' lifted LPs are dominated by term types with no closed-form
 box-dependence (unlikely — all envelope rows are functions of the box by
 construction), re-scope Phase 1 to structure caching without row patching.
+
+*Result (done, this PR — kill criterion did NOT fire; proceed to T1.2).* Ran the
+incremental engine (`IncrementalMcCormickLP(model, terms)`, which self-gates on
+`_validate` independently of `_is_in_scope`) on the three shapes. The engine
+covers exactly **bilinear** (4 McCormick rows) and **monomial²/integer-square**
+(2 tangents + 1 secant) today; everything else trips `_validate` → cold-path
+fallback. Coverage table (families observed across the probes):
+
+| Term family | rows/term | envelope | closed-form in the box? | covered today | seen in |
+|---|---|---|---|---|---|
+| bilinear `x_i·x_j` | 4 | McCormick | yes (bilinear in `l,u`) | ✅ | ex1263, st_e38 |
+| monomial² `x_i²` | 3 | 2 tangent + secant | yes (quadratic in `l,u`) | ✅ | st_e38 |
+| monomial ≥3 `x_i^p` | tangents + secant | power envelope | yes (polynomial in `l,u`) | ❌ | st_e38 |
+| trilinear `x_i·x_j·x_k` | RLT bound-factor | recursive McCormick | yes (polynomial in `l,u`) | ❌ | st_e38 |
+| univariate (exp/log/…) | secant + tangent(s) | convex/concave OA | yes (secant = box corners; tangents at endpoints) | ❌ | syn05m |
+| multilinear ≥4, fractional_power | RLT / power | — | yes | ❌ | — (not in probe set) |
+
+Per-instance verdicts (cold `build_milp_relaxation` cost in parens):
+- **ex1263** — mixed **72 int/bin + 20 continuous**, MINIMIZE, pure bilinear (16
+  products): **`ok=True`** (4.95 ms/call). The engine *already validates on a
+  mixed integer+continuous model* — the `_is_in_scope` all-integer restriction is
+  over-conservative, directly de-risking T1.3.
+- **syn05m** — MAXIMIZE, 5 int + 15 continuous: `ok=False`, tripped by
+  `univariate` terms (1.80 ms/call). The **maximize sense is not the blocker** —
+  `_validate` compares only the box-dependent rows/aux-bounds, which are
+  sense-independent; a synthetic maximize *bilinear-only* model validates
+  `ok=True`. So T1.3's "normalize sense" is a non-issue for the engine.
+- **st_e38** — general-NL, MINIMIZE: `ok=False`, tripped by `trilinear` +
+  `monomial³` (0.83 ms/call) — the intended negative control.
+
+**Kill-criterion verdict: did NOT fire.** Every uncovered family observed
+(univariate, monomial³, trilinear) is a closed-form function of the box (all
+McCormick/secant/tangent/RLT rows are polynomial in `[l,u]`); none is
+box-independent. Row-patching (T1.2) is therefore viable, and T1.3's scope gate
+should become simply "`_validate` passed (`ok=True`)" for any var mix / any sense
+— not a per-class fork. Reproduce with
+`discopt_benchmarks/scripts/t11_entry_experiment.py` (probes syn05m / ex1263 /
+st_e38).
 
 **T1.2 — Extend the patch table.**
 For each term family in `milp_relaxation.py`'s lifted LP, add the closed-form row
