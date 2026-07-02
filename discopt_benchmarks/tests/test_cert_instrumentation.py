@@ -20,9 +20,11 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
 from benchmarks.metrics import (  # noqa: E402
+    BenchmarkResults,
     SolveResult,
     SolveStatus,
     evaluate_phase_gate,
+    root_gap_populated_fraction,
     root_gap_ratio,
 )
 from benchmarks.runner import (  # noqa: E402
@@ -179,3 +181,78 @@ def test_reduction_separation_timers_present_and_bounded():
     assert any(v > 0.0 for v in stats.values())
     # The instrumented phases are a subset of the wall clock.
     assert sum(stats.values()) <= result.wall_time + 1e-6
+
+
+# ─────────────────────────── T0.5 ───────────────────────────
+
+
+def test_root_gap_populated_fraction():
+    rows = [
+        SolveResult(instance="a", solver="discopt", status=SolveStatus.OPTIMAL, root_gap=0.1),
+        SolveResult(instance="b", solver="discopt", status=SolveStatus.OPTIMAL, root_gap=0.0),
+        SolveResult(instance="c", solver="discopt", status=SolveStatus.TIME_LIMIT, root_gap=None),
+    ]
+    assert root_gap_populated_fraction(rows) == pytest.approx(2 / 3)
+    assert root_gap_populated_fraction([]) == 0.0
+
+
+def _load_cert0_gate_config():
+    import tomllib
+    from pathlib import Path
+
+    toml = Path(__file__).resolve().parents[1] / "config" / "benchmarks.toml"
+    with open(toml, "rb") as fh:
+        return tomllib.load(fh)["gates"]["cert0"]
+
+
+def test_cert0_gate_config_present_and_evaluates():
+    """The [gates.cert0] criteria wire the T0.5 metric + the zero-slack
+    correctness guard, and evaluate green on a synthetic all-covered, all-correct
+    panel."""
+    gate = _load_cert0_gate_config()
+    crit = gate["criteria"]
+    assert crit["root_gap_coverage"]["metric"] == "root_gap_populated_fraction"
+    assert crit["root_gap_coverage"]["min"] == 0.9
+    # Correctness stays a zero-slack gate.
+    assert crit["zero_incorrect"]["metric"] == "incorrect_count"
+    assert crit["zero_incorrect"]["max"] == 0
+
+    rows = [
+        SolveResult(
+            instance=f"i{i}", solver="discopt", status=SolveStatus.OPTIMAL,
+            objective=float(i), root_gap=0.01 * i,
+        )
+        for i in range(10)
+    ]
+    bench = BenchmarkResults(suite="cert0", timestamp="t")
+    for r in rows:
+        bench.add_result(r)
+    optima = {f"i{i}": float(i) for i in range(10)}
+
+    ok, crits = evaluate_phase_gate("cert0", bench, gate, known_optima=optima)
+    by = {c.name: c for c in crits}
+    assert by["root_gap_coverage"].actual == pytest.approx(1.0)
+    assert by["root_gap_coverage"].passed
+    assert by["zero_incorrect"].actual == 0
+    assert by["zero_incorrect"].passed
+    assert ok
+
+
+def test_cert0_gate_fails_on_incorrect():
+    """zero_incorrect must fail when an OPTIMAL row disagrees with the oracle —
+    the check is never weakened."""
+    gate = _load_cert0_gate_config()
+    rows = [
+        SolveResult(
+            instance="i0", solver="discopt", status=SolveStatus.OPTIMAL,
+            objective=99.0, root_gap=0.0,
+        )
+    ]
+    bench = BenchmarkResults(suite="cert0", timestamp="t")
+    for r in rows:
+        bench.add_result(r)
+    ok, crits = evaluate_phase_gate("cert0", bench, gate, known_optima={"i0": 0.0})
+    by = {c.name: c for c in crits}
+    assert by["zero_incorrect"].actual >= 1
+    assert not by["zero_incorrect"].passed
+    assert not ok
