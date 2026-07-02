@@ -54,6 +54,10 @@ _CERT_OPTIMA = _REPO_ROOT / "docs" / "dev" / "data" / "cert-optima.json"
 # §0.2.5 neutrality check compares objectives at (node_count stays bit-exact).
 _OBJ_TOL = 1e-8
 _OBJ_RTOL = 1e-9
+# Determinism filter: solve each instance this many times, and require it to
+# certify within this fraction of its budget (margin against boundary-flakiness).
+_N_DET = 3
+_MARGIN_FRAC = 0.6
 
 
 def _instance_budgets(default_tl: float) -> dict[str, float]:
@@ -94,45 +98,47 @@ def main() -> int:
         if BenchmarkRunner(cfg)._find_nl_file(name) is None:
             print(f"  [{i}/{len(order)}] SKIP {name} (not vendored)", flush=True)
             continue
-        # Solve twice: an instance qualifies for the neutrality reference only if
-        # it certifies to OPTIMAL both times with a bit-identical node_count and
-        # objective. Time-limited / non-deterministic rows (which made the old
-        # baseline unusable — nvs05 feasible, nvs22 stale) are excluded.
-        r1 = _solve(name)
-        r2 = _solve(name)
-        results.add_result(r1)  # full panel = first run
-        # node_count must be bit-identical (it is stable at fixed conditions);
-        # the objective is compared to a tolerance because a certified optimum
-        # jitters at the ~1e-10 level across independent runs (JAX/BLAS
-        # non-determinism) — bit-exact objective equality is not a meaningful
-        # invariant. This is also the tolerance the §0.2.5 neutrality check uses.
-        obj_ok = (
-            r1.objective is not None
-            and r2.objective is not None
-            and abs(r1.objective - r2.objective) <= _OBJ_TOL + _OBJ_RTOL * abs(r1.objective)
+        # Solve _N_DET times. An instance qualifies for the neutrality reference
+        # only if EVERY run certifies to OPTIMAL with a bit-identical node_count
+        # and an objective agreeing to tolerance, AND it certifies with a
+        # comfortable time margin (max wall <= _MARGIN_FRAC * budget). The margin
+        # guard excludes *boundary-flaky* instances — ones that certify right at
+        # the time limit and flip to `feasible` under tiny timing differences
+        # (nvs17 at 60s), which the twice-solve check let slip through. The
+        # objective uses a tolerance because a certified optimum jitters ~1e-10
+        # across runs (JAX/BLAS) — bit-exact equality is not meaningful; this is
+        # the same tolerance the §0.2.5 neutrality check uses.
+        runs = [_solve(name) for _ in range(_N_DET)]
+        results.add_result(runs[0])  # full panel = first run
+        r0 = runs[0]
+        budget = float(budgets[name])
+        all_opt = all(r.status == SolveStatus.OPTIMAL for r in runs)
+        nodes_same = all(r.node_count == r0.node_count for r in runs)
+        objs = [r.objective for r in runs]
+        obj_ok = all(o is not None for o in objs) and all(
+            abs(o - objs[0]) <= _OBJ_TOL + _OBJ_RTOL * abs(objs[0]) for o in objs
         )
-        det = (
-            r1.status == SolveStatus.OPTIMAL
-            and r2.status == SolveStatus.OPTIMAL
-            and r1.node_count == r2.node_count
-            and obj_ok
-        )
+        max_wall = max(r.wall_time for r in runs)
+        margin_ok = max_wall <= _MARGIN_FRAC * budget
+        det = all_opt and nodes_same and obj_ok and margin_ok
         if det:
-            certifying.append(r1)
+            certifying.append(r0)
             tag = "CERTIFY"
         else:
-            if r1.status != SolveStatus.OPTIMAL or r2.status != SolveStatus.OPTIMAL:
-                reason = f"not-optimal({r1.status.value}/{r2.status.value})"
-            elif r1.node_count != r2.node_count:
-                reason = f"node_count {r1.node_count}!={r2.node_count}"
+            if not all_opt:
+                reason = "not-optimal(" + "/".join(r.status.value for r in runs) + ")"
+            elif not nodes_same:
+                reason = "node_count " + "/".join(str(r.node_count) for r in runs)
+            elif not obj_ok:
+                reason = "obj drift"
             else:
-                reason = f"obj drift {abs(r1.objective - r2.objective):.2e}"
+                reason = f"near-limit(wall {max_wall:.0f}s/{budget:.0f}s)"
             dropped.append((name, reason))
             tag = f"drop:{reason}"
-        rg = "None" if r1.root_gap is None else f"{r1.root_gap:.3g}"
+        rg = "None" if r0.root_gap is None else f"{r0.root_gap:.3g}"
         print(
-            f"  [{i}/{len(order)}] {name:20s} {r1.status.value:10s} "
-            f"nodes={r1.node_count} root_gap={rg} {tag}",
+            f"  [{i}/{len(order)}] {name:20s} {r0.status.value:10s} "
+            f"nodes={r0.node_count} root_gap={rg} {tag}",
             flush=True,
         )
 

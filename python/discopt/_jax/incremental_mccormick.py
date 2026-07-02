@@ -65,6 +65,41 @@ def _square_aux_bounds(li, ui):
     return 0.0, max(li * li, ui * ui)
 
 
+def _monomial_rows(li, ui, p):
+    """The 3 envelope rows for ``s = x**p`` over a *sign-definite* box ``[li,ui]``
+    (2 endpoint tangents + 1 secant), each ``(coeff_on_x, coeff_on_s, rhs)`` of an
+    ``... <= rhs`` row. Generalizes :func:`_square_rows` (p=2) to any integer
+    power ``p >= 2``.
+
+    On a sign-definite box ``x**p`` is monotone and single-convexity: convex when
+    ``p`` is even or ``li >= 0``; concave when ``p`` is odd and ``ui <= 0``. In the
+    convex case the two endpoint tangents underestimate and the secant
+    overestimates (exactly the ``x**2`` pattern); in the concave case the roles
+    flip. Reproduces ``build_milp_relaxation`` row-for-row (validated).
+    """
+    fl, fu = li**p, ui**p
+    dfl, dfu = p * li ** (p - 1), p * ui ** (p - 1)
+    slope = (fu - fl) / (ui - li)
+    convex = (p % 2 == 0) or (li >= 0.0)
+    if convex:
+        return [
+            (dfl, -1.0, dfl * li - fl),  # s >= f'(li)*x - (f'(li)*li - f(li))  tangent at li
+            (dfu, -1.0, dfu * ui - fu),  # tangent at ui
+            (-slope, 1.0, fl - slope * li),  # s <= secant  (overestimator)
+        ]
+    return [
+        (-dfl, 1.0, fl - dfl * li),  # s <= tangent at li  (overestimator)
+        (-dfu, 1.0, fu - dfu * ui),  # tangent at ui
+        (slope, -1.0, slope * li - fl),  # s >= secant  (underestimator)
+    ]
+
+
+def _monomial_aux_bounds(li, ui, p):
+    """min/max of ``x**p`` over a sign-definite ``[li,ui]`` (monotone there)."""
+    a, b = li**p, ui**p
+    return (a, b) if a <= b else (b, a)
+
+
 class IncrementalMcCormickLP:
     """Build the McCormick LP structure once; patch box-dependent rows per node."""
 
@@ -97,10 +132,25 @@ class IncrementalMcCormickLP:
 
     def _build_structure(self):
         n = len(self.model._variables)
-        # probe box: distinct, strictly positive bounds so every McCormick
-        # coefficient is nonzero -> row support reveals {factors, aux} cleanly.
-        lb_p = np.array([1.0 + 0.0 * k for k in range(n)])
-        ub_p = np.array([7.0 + 1.0 * k for k in range(n)])
+        # Per-variable ROOT sign regime (cert:T1.2). A monomial ``x**p`` has a
+        # box-*sign*-dependent row structure (3 rows on a sign-definite box, 4/2
+        # when the box strictly spans zero), so it can be patched only when the
+        # variable's root box is sign-definite — which branching preserves, since
+        # it only shrinks boxes. ``+1`` = ``lb>=0``, ``-1`` = ``ub<=0``, ``0`` =
+        # spans zero (any monomial on such a var is unmappable below).
+        root_lb = np.array([float(np.min(v.lb)) for v in self.model._variables])
+        root_ub = np.array([float(np.max(v.ub)) for v in self.model._variables])
+        self._root_sign = np.where(root_lb >= 0.0, 1, np.where(root_ub <= 0.0, -1, 0))
+        # probe box: distinct, strictly *sign-matched* bounds so every McCormick
+        # coefficient is nonzero (row support reveals {factors, aux} cleanly) and
+        # the cached convex/concave power rows match the cold build's regime.
+        lb_p = np.empty(n)
+        ub_p = np.empty(n)
+        for k in range(n):
+            if self._root_sign[k] < 0:
+                lb_p[k], ub_p[k] = -(7.0 + k), -1.0
+            else:
+                lb_p[k], ub_p[k] = 1.0, 7.0 + k
         A, b, bnds, c, info, _ = self._full_build(lb_p, ub_p)
         self.n = n
         self.ncol = A.shape[1]
@@ -109,7 +159,7 @@ class IncrementalMcCormickLP:
         self.base_b = b.copy()
         self.base_bounds = bnds.copy()
         self.bilinear = dict(info.get("bilinear", {}))
-        self.monomial = {k: v for k, v in info.get("monomial", {}).items() if k[1] == 2}
+        self.monomial = dict(info.get("monomial", {}))  # any integer power p >= 2
 
         # map each product to its row indices (support subset of {factors, aux})
         supp = [set(np.nonzero(np.abs(A[k]) > _TOL)[0]) for k in range(A.shape[0])]
@@ -119,17 +169,20 @@ class IncrementalMcCormickLP:
             if len(rows) != 4:
                 raise ValueError(f"bilinear ({i},{j}) -> {len(rows)} rows, expected 4")
             self.bilin_rows[(i, j, a)] = rows
-        self.sq_rows = {}
-        for (i, _p), a in self.monomial.items():
+        # monomial x_i**p, any p >= 2, gated on a sign-definite root box.
+        self.mono_rows = {}
+        for (i, p), a in self.monomial.items():
+            if self._root_sign[i] == 0:
+                raise ValueError(f"monomial x_{i}^{p}: root box spans zero (unmappable)")
             rows = [k for k in range(A.shape[0]) if a in supp[k] and supp[k] <= {i, a}]
             if len(rows) != 3:
-                raise ValueError(f"square x_{i}^2 -> {len(rows)} rows, expected 3")
-            self.sq_rows[(i, a)] = rows
+                raise ValueError(f"monomial x_{i}^{p} -> {len(rows)} rows, expected 3")
+            self.mono_rows[(i, a, p)] = rows
         # the union of all product rows must be exactly the box-dependent rows
         self._prod_rows = set()
         for rs in self.bilin_rows.values():
             self._prod_rows |= set(rs)
-        for rs in self.sq_rows.values():
+        for rs in self.mono_rows.values():
             self._prod_rows |= set(rs)
 
     # -- per-node patch ---------------------------------------------------- #
@@ -150,14 +203,14 @@ class IncrementalMcCormickLP:
                 A[k, a] = cw
                 b[k] = rhs
             bounds[a, 0], bounds[a, 1] = _bilinear_aux_bounds(li, ui, lj, uj)
-        for (i, a), rows in self.sq_rows.items():
+        for (i, a, p), rows in self.mono_rows.items():
             li, ui = lb[i], ub[i]
-            for k, (ci, cs, rhs) in zip(rows, _square_rows(i, a, li, ui)):
+            for k, (ci, cs, rhs) in zip(rows, _monomial_rows(li, ui, p)):
                 A[k] = 0.0
                 A[k, i] = ci
                 A[k, a] = cs
                 b[k] = rhs
-            bounds[a, 0], bounds[a, 1] = _square_aux_bounds(li, ui)
+            bounds[a, 0], bounds[a, 1] = _monomial_aux_bounds(li, ui, p)
         return A, b, bounds
 
     # -- soundness gate ---------------------------------------------------- #
@@ -168,12 +221,25 @@ class IncrementalMcCormickLP:
         rows = np.hstack([np.round(A, 6), np.round(b, 6).reshape(-1, 1)])
         return sorted(map(tuple, rows.tolist()))
 
-    def _validate(self, trials=4):
-        rng_boxes = [
-            (np.array([0.0] * self.n), np.array([3.0 + (k % 3)] * self.n)) for k in range(trials)
-        ]
-        # a couple of asymmetric boxes too
-        rng_boxes.append((np.arange(self.n, dtype=float), np.arange(self.n, dtype=float) + 5))
+    def _validate(self, trials=6):
+        # Sign-matched validation boxes (cert:T1.2): each variable's box must stay
+        # in its root sign regime (positive/spanning vars → ``lb >= 0``; negative
+        # vars → ``ub <= 0``), so the patched convex/concave power rows are
+        # compared against a cold build in the *same* regime. Widths and offsets
+        # vary per trial; even trials touch the ``lb == 0`` boundary.
+        rng_boxes = []
+        for t in range(trials):
+            w = 2.0 + (t % 4)
+            lo = np.empty(self.n)
+            hi = np.empty(self.n)
+            for i in range(self.n):
+                if self._root_sign[i] < 0:
+                    hi[i] = -0.5 - 0.3 * i
+                    lo[i] = hi[i] - w
+                else:
+                    lo[i] = (0.5 + 0.3 * i) if (t % 2) else 0.0
+                    hi[i] = lo[i] + w
+            rng_boxes.append((lo, hi))
         for lb, ub in rng_boxes:
             Ap, bp, bdp = self._patch(lb, ub)
             Af, bf, bdf, _, _, _ = self._full_build(lb, ub)
