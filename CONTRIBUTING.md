@@ -1,6 +1,57 @@
 # Contributing to discopt
 
-Thank you for your interest in contributing to discopt. This document explains how to set up your development environment, run tests, and submit changes.
+Thank you for your interest in contributing to discopt. This document explains how contributions are scoped and reviewed, how to set up your development environment, run tests, and submit changes.
+
+All participation is governed by the [Code of Conduct](CODE_OF_CONDUCT.md).
+
+## Before You Start: Propose First
+
+Before taking on a contribution, please file a feature request / proposal
+issue on the [issue tracker](https://github.com/jkitchin/discopt/issues) so
+we can track and discuss it. This avoids duplicated or misdirected effort:
+it lets us agree on whether the idea is a good fit, where it belongs (see
+[Scope](#scope-core-vs-plugins) below), and what the best way to build it is
+— before you invest time in code.
+
+Small, well-formed projects are quite easy to implement, and if a proposal
+is a good fit, the maintainer is happy to collaborate on it as time and
+resources allow.
+
+## Scope: Core vs. Plugins
+
+There is a dividing line between core contributions and plugin / contrib
+contributions:
+
+- **Core contributions** are expected to be of general utility to MINLP
+  modeling and solving — for example, the GDP, DAE, and NN embedding type
+  modules.
+- **Plugin / contrib contributions** are more domain-specific tools built on
+  top of discopt — for example, something like the DOE module, or a
+  microkinetic modeling language. These should probably be externally
+  maintained as their own packages that depend on discopt.
+
+The line is not always obvious, and we are open to discussion on where a
+contribution might fall and what the best way to build it is. Raise this in
+your proposal issue.
+
+## LLM-Assisted Development
+
+The maintainer almost exclusively uses Claude for development and for review
+of issues and PRs. The project has a [CLAUDE.md](CLAUDE.md) that is used for
+development; if you use Claude Code (or a similar tool), it will pick up the
+project conventions from there.
+
+LLM-generated code is welcome and will be considered, with the same bar as
+any other contribution:
+
+- It will be reviewed for consistency with the codebase and for correctness.
+- It will be adversarially tested.
+- Tests are expected for all contributions — LLM-generated or not. See
+  [Running Tests](#running-tests) for the marker conventions and coverage
+  requirements.
+
+You remain responsible for the code you submit: review it yourself before
+opening a PR, and be prepared to discuss and revise it.
 
 ## Development Setup
 
@@ -101,13 +152,15 @@ pre-commit install
 
 ## Pull Request Process
 
-1. Create a feature branch from `main`.
-2. Write tests for new functionality.
-3. Ensure all tests pass and coverage stays >= 85%.
-4. Run `ruff check` and `ruff format` before committing.
-5. Keep commits focused; use descriptive commit messages.
-6. Open a PR against `main` with a clear description.
-7. Add a one-line entry to the `## [Unreleased]` section of `CHANGELOG.md` under the appropriate group (Added / Changed / Fixed / etc.).
+1. File (or link to) a proposal issue describing the change (see
+   [Before You Start](#before-you-start-propose-first)).
+2. Create a feature branch from `main`.
+3. Write tests for new functionality.
+4. Ensure all tests pass and coverage stays >= 85%.
+5. Run `ruff check` and `ruff format` before committing.
+6. Keep commits focused; use descriptive commit messages.
+7. Open a PR against `main` with a clear description that links the proposal issue.
+8. Add a one-line entry to the `## [Unreleased]` section of `CHANGELOG.md` under the appropriate group (Added / Changed / Fixed / etc.).
 
 ## Releasing
 
