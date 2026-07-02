@@ -116,7 +116,7 @@ experiment may run.
 | T0.4 soundness harness | done | (this PR) | utils/soundness.py: assert_bound_sound + assert_cut_valid; flags planted-invalid cut, passes McCormick envelope sweep |
 | T0.5 baseline + cert0 gate | done | (this PR) | cert-baseline.jsonl (global50+panel, 55 rows); [gates.cert0] passes: coverage 0.909 ≥ 0.90, incorrect 0. Phase 0 complete |
 | T1.1 entry experiment (kill criterion) | done (kill did NOT fire) | (this PR) | All uncovered families are closed-form box-affine → proceed to T1.2. Bonus: engine already validates on mixed int+cont (ex1263) and maximize |
-| T1.2 patch-table term coverage | not started | — | blocked by T1.1 |
+| T1.2 patch-table term coverage | **BLOCKED — escalated (§0.6)** | (this PR) | §0.2.5 exact-node-count gate is unsatisfiable: incremental engine is not tree-neutral vs cold (safe-bound + warm-start), and cert-baseline has non-reproducible rows. Needs maintainer re-scope. Monomial derivation parked in docs/dev/data/t12-monomial-patch.diff |
 | T1.3 scope-gate widening | not started | — | blocked by T1.2 |
 | T1.4 basis inheritance | not started | — | |
 | T1.5 evaluator-cache routing | not started | — | |
@@ -768,6 +768,98 @@ strictly positive — extend `_build_structure`'s probe to exercise sign regimes
 `incremental_mccormick.py:100-104`).
 - **Test per family:** property test — patched (A,b,bounds) equals the cold builder's
   to 1e-9 on 200 random boxes; plus the existing construction-time validation.
+
+*Falsification recorded (2026-07-02, per §0.4 — pre-implementation row probe;
+reproduce with `discopt_benchmarks/scripts/t12_probe.py`).* The task premise
+"coefficients are closed-form in `[li,ui]`" with a **fixed** row structure holds
+for the **product families** but not the **power/univariate families**: the
+envelope row *count* is sign-regime-dependent for anything that can change
+convexity across zero.
+- Measured: `x²` → **3 rows** on a sign-definite box, **4 rows** when the box
+  strictly spans zero (an extra `s ≥ 0`); `x³` → **3 rows** on `[l,u]⊂ℝ₊`, **2**
+  when spanning; `x⁴` → 3 vs 4. **bilinear is always 4 rows**; **trilinear is
+  24×7 rows on every sign regime**. So products are structurally stable;
+  powers/univariates are not.
+- Consequence for the fixed-structure engine (it caches one structure at
+  construction and patches coefficients): a monomial variable whose **root box
+  spans zero cannot be patched** — the structure differs before vs after a
+  zero-crossing branch. But branching only *shrinks* boxes, so a **sign-definite
+  root box stays sign-definite in every descendant** — those *are* patchable.
+- This also means the *current* `x²` coverage is only sound because `_validate`'s
+  boxes are all `lb ≥ 0`; extending validation to strictly-spanning boxes (as the
+  task text asks) would break it. That instruction is wrong for powers.
+
+**Re-scope (supersedes the task text above for the power/univariate families):**
+  1. **Product families — bilinear (done), trilinear, multilinear:** structure is
+     sign-independent; add the closed-form RLT/recursive-McCormick generators;
+     `_validate` on all sign regimes (including spanning).
+  2. **Power/univariate families — monomial p≥2 (generalize `x²`), univariate,
+     fractional:** cover a term **only when its variable's root box is
+     sign-definite** (`lb ≥ 0` or `ub ≤ 0`); a spanning root box makes that term
+     unmappable → the model falls back (`ok=False`), which is sound. The
+     `_build_structure` probe must be **sign-matched to each variable's real root
+     regime** (not the uniform strictly-positive `[1,7+]`), so the cached
+     convex/concave rows match the cold build; `_validate` uses sign-definite
+     boxes that respect each variable's regime.
+  3. The per-family 200-box property test stands, drawing boxes from the family's
+     admissible sign regime.
+
+> **STOP / ESCALATED (2026-07-02, §0.4 + §0.6) — Phase 1's bound-neutrality
+> premise is falsified; needs a maintainer decision before any T1.2 code lands.**
+>
+> I implemented the re-scoped monomial coverage above (generalized `_square_rows`
+> to `_monomial_rows` for any p≥2, sign-matched probe, sign-definite gating; the
+> closed-form rows reproduce `build_milp_relaxation` to 1e-9 for p=2..5 on both
+> regimes — the derivation is correct and parked in
+> `docs/dev/data/t12-monomial-patch.diff`). It **validates and stays sound**
+> (`ok=True` only when the patched LP matches the cold build row-for-row), but it
+> **fails the §0.2.5 exact-node-count gate**, and the cause is a §0.3 safety
+> mechanism, so per §0.3/§0.6 the gate loses and I stopped. Two measured facts:
+>
+> 1. **The incremental engine is NOT node-count-neutral vs the cold path.** On
+>    `nvs17` (deterministic; both certify the same optimum −1100.4): cold path =
+>    **205 nodes**, incremental path = **117 nodes** (`DISCOPT_INCREMENTAL_MC=0`
+>    vs `1`, same time limit, both `gap_certified`). The incremental path solves
+>    each node LP with the **Neumaier–Shcherbina safe dual bound + a warm-started
+>    parent basis** (both §0.3 safety mechanisms) — a *valid but different* node
+>    bound sequence → different fathoming/branching → a different (equally sound)
+>    tree. T1.2 only changes *which* terms the engine covers, so it moves
+>    instances from the cold tree onto the incremental tree and node_count drifts
+>    (nvs17 205→117, nvs13 55→41, nvs05, …). Making node_count reproduce cold
+>    exactly would require the raw (unsafe) LP objective and/or no warm start —
+>    i.e. **weakening the §0.3 safe-bound mechanism**, which §0.3 forbids.
+>    Node_count is also *timing-non-deterministic* within a single mode (nvs17:
+>    111/59 at 30 s, 117/91 at 120 s), so exact equality is not even well-defined
+>    for instances that don't certify in a few nodes.
+>
+> 2. **`cert-baseline.jsonl` is not a valid "certifying panel."** On *clean main*
+>    (no T1.2 change) re-solving the baseline drifts anyway: `nvs05` is `feasible`
+>    (time-limited → non-deterministic node_count, 493 vs baseline 473), and
+>    `nvs22`'s baseline objective **7.40348 is non-reproducible** — clean main now
+>    returns the *correct* optimum **6.05822**. §0.2.5 says "on the *certifying*
+>    panel"; T0.5 froze the *whole* global50∪panel, including non-certifying and
+>    non-deterministic rows, so exact-equality there is unsatisfiable by a no-op.
+>
+> **Decision needed from the maintainer (I did not improvise a fix):**
+> - (a) **Re-define Phase 1 bound-neutrality** from "exact node_count vs baseline"
+>   to the *differential* form already in the plan's toolbox: the incremental LP
+>   must give the **same per-box bound as cold** (the T0.4 `assert_bound_sound`
+>   harness / `_validate`'s row-set equality — already enforced) **and the same
+>   certified objective**, accepting that the safe-bound tree differs in
+>   node_count. This matches how the engine was actually designed ("never change
+>   a *result*, only its speed") and keeps §0.3 intact. If chosen, replace the
+>   `[gates.cert1] node_count_drift` criterion with a per-box bound-equality +
+>   objective-equality check, and rebuild `cert-baseline.jsonl` over a
+>   **deterministically-certifying subset** (drop `feasible`/time-limited rows).
+> - (b) Keep exact-node-count neutrality and **re-scope Phase 1 away from the
+>   incremental engine** (it inherently changes the tree), pursuing the per-node
+>   cost win by other means. This contradicts §5's approach and is the larger
+>   pivot.
+>
+> Until this is decided, T1.2–T1.6 are paused. No solver code was committed; the
+> only artifacts are this note, the reproducible probes
+> (`discopt_benchmarks/scripts/t11_entry_experiment.py`, `.../t12_probe.py`), and
+> the parked patch.
 
 **T1.3 — Widen the scope gate.**
 Replace `_is_in_scope`'s all-integer+minimize test with: objective sense normalized
