@@ -57,6 +57,7 @@ parts:
       - file: notebooks/symbolic_envelopes
       - file: notebooks/suspect_head_to_head
       - file: notebooks/nlp_bb
+      - file: notebooks/implicit_function_node
       - file: notebooks/export_formats
       - file: notebooks/model_representations
       - file: notebooks/pyomo_solver

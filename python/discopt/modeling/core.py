@@ -1815,6 +1815,39 @@ class Model:
         """
         self._objective = Objective(_wrap(expr), ObjectiveSense.MAXIMIZE)
 
+    def implicit(
+        self,
+        residual: Callable,
+        u_inputs: Sequence,
+        n_unknowns: int,
+        x0=None,
+        *,
+        tol: float = 1e-10,
+        max_iter: int = 50,
+        name: str = "implicit",
+    ) -> Expression:
+        """Define a vector ``v`` implicitly by ``residual(u, v) = 0`` (issue #379).
+
+        ``v`` (length ``n_unknowns``) is compiled to a differentiable JAX inner
+        solve (Newton forward, implicit-function-theorem derivatives), returned
+        as an expression node you index (``v[i]``) and use like any other. It
+        rides on :func:`custom`, so a model containing it is solved on the
+        **local NLP path only** (no global certificate) and integers are
+        rejected. ``u_inputs`` are the model expressions the block depends on
+        (the DAG edges into the solve); they are required, not inferred.
+
+        See :func:`discopt.modeling.implicit` for parameter details.
+
+        Examples
+        --------
+        >>> u = m.continuous("u", lb=0.1, ub=100.0)
+        >>> v = m.implicit(lambda U, V: [V[0] ** 2 - U[0]], [u], n_unknowns=1)
+        >>> m.minimize((v[0] - 3.0) ** 2)   # v = sqrt(u); optimum at u = 9
+        """
+        from discopt.modeling.implicit import implicit as _implicit
+
+        return _implicit(residual, u_inputs, n_unknowns, x0, tol=tol, max_iter=max_iter, name=name)
+
     # ── Constraints ──
 
     def subject_to(
