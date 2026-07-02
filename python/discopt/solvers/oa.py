@@ -2991,24 +2991,23 @@ def _solve_master_milp(
 
 def _global_valid_master_cut_rows(
     cut_provenance: MIPNLPCutProvenance,
-    *,
-    n_vars: int,
-) -> tuple[list[np.ndarray], list[float], list[bool], int]:
+) -> tuple[list[np.ndarray], list[float], int, int]:
     """Return globally valid provenance rows for the certified-bound master."""
     rows: list[np.ndarray] = []
     rhs: list[float] = []
-    relaxable: list[bool] = []
     local_excluded = 0
-    hard_sources = {"integer", "objective", "objective_rootsearch", "reduction"}
+    integer_excluded = 0
     for record in cut_provenance.records:
         if not record.global_valid:
             local_excluded += 1
             continue
+        if record.source == "integer":
+            integer_excluded += 1
+            continue
         coeffs = np.asarray(record.coefficients, dtype=np.float64)
         rows.append(coeffs)
         rhs.append(float(record.rhs))
-        relaxable.append(bool(record.source not in hard_sources and coeffs.size == n_vars))
-    return rows, rhs, relaxable, local_excluded
+    return rows, rhs, local_excluded, integer_excluded
 
 
 def _solve_initial_poa_master(
@@ -4757,10 +4756,7 @@ def solve_oa(
         enabled = bool(
             mip_nlp_profile == "shot" and not (master_bound_valid and not local_cut_added)
         )
-        rows, rhs, relaxable, local_excluded = _global_valid_master_cut_rows(
-            cut_provenance,
-            n_vars=n_vars,
-        )
+        rows, rhs, local_excluded, integer_excluded = _global_valid_master_cut_rows(cut_provenance)
         trace: dict[str, object] = {
             "iteration": int(iteration),
             "enabled": enabled,
@@ -4769,6 +4765,7 @@ def solve_oa(
             "reason": "primary_master_certified" if not enabled else None,
             "global_cut_count": int(len(rows)),
             "local_cut_excluded_count": int(local_excluded),
+            "integer_cut_excluded_count": int(integer_excluded),
             "bound_before": _trace_value(certified_LB),
             "objective_bound": None,
             "bound_after": _trace_value(certified_LB),
@@ -4810,7 +4807,7 @@ def solve_oa(
                 add_slack=False,
                 max_slack=max_slack,
                 oa_penalty_factor=oa_penalty_factor,
-                oa_cut_relaxable=relaxable,
+                oa_cut_relaxable=None,
                 use_objective_epigraph=(not decomp.obj_is_linear and decomp.oa_objective_is_convex),
                 milp_solver=milp_solver,
                 solution_pool=False,
