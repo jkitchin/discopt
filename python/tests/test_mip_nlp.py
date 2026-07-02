@@ -761,7 +761,274 @@ def test_mip_nlp_shot_reduction_cut_is_local_only_for_nonconvex_heuristic(monkey
     assert result.mip_nlp_trace["summary"]["cut_source_counts"]["reduction"] == 1
     assert result.mip_nlp_trace["summary"]["local_cut_count"] == 1
     assert result.mip_nlp_trace["gap_certified"] is False
-    assert result.mip_nlp_trace["bound_validity"] == "heuristic"
+    assert result.mip_nlp_trace["bound_validity"] == "unavailable"
+
+
+def test_mip_nlp_shot_convex_bounding_filters_local_cuts(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers import MILPResult, SolveStatus
+
+    master_calls = []
+
+    def fake_master(*args, **kwargs):
+        rows = [np.asarray(row, dtype=float).copy() for row in args[3]]
+        master_calls.append({"rows": rows, "kwargs": kwargs})
+        if kwargs["add_slack"]:
+            return MILPResult(
+                status=SolveStatus.OPTIMAL,
+                x=np.array([0.0], dtype=float),
+                objective=0.0,
+                bound=-1.0,
+                node_count=2,
+            )
+        return MILPResult(
+            status=SolveStatus.OPTIMAL,
+            x=np.array([0.0], dtype=float),
+            objective=-2.0,
+            bound=-2.0,
+            node_count=3,
+        )
+
+    def fake_add_oa_cuts(
+        evaluator,
+        x_star,
+        n_vars,
+        n_cons,
+        constraint_senses,
+        oa_A_rows,
+        oa_b_rows,
+        *args,
+        **kwargs,
+    ):
+        del evaluator, x_star, n_cons, constraint_senses, args
+        oa_module._append_master_cut(
+            oa_A_rows,
+            oa_b_rows,
+            np.ones(n_vars),
+            10.0,
+            kwargs.get("oa_cut_relaxable"),
+            cut_provenance=kwargs.get("cut_provenance"),
+            source="oa",
+            global_valid=True,
+        )
+        oa_module._append_master_cut(
+            oa_A_rows,
+            oa_b_rows,
+            -np.ones(n_vars),
+            -1.0,
+            kwargs.get("oa_cut_relaxable"),
+            cut_provenance=kwargs.get("cut_provenance"),
+            source="ecp",
+            global_valid=False,
+        )
+
+    monkeypatch.setattr(
+        oa_module,
+        "_solve_nlp_relaxation",
+        lambda *args, **kwargs: (np.array([0.0], dtype=float), 0.0),
+    )
+    monkeypatch.setattr(oa_module, "_solve_master_milp", fake_master)
+    monkeypatch.setattr(oa_module, "_add_oa_cuts", fake_add_oa_cuts)
+    monkeypatch.setattr(
+        oa_module,
+        "_solve_fixed_nlp_subproblem_attempt",
+        lambda *args, **kwargs: oa_module._NLPAttempt(
+            x=np.array([0.0], dtype=float),
+            objective=0.0,
+            multipliers=None,
+            status=SolveStatus.OPTIMAL,
+        ),
+    )
+
+    result = oa_module.solve_oa(
+        _binary_model("shot_convex_bounding_filters_local"),
+        init_strategy="rNLP",
+        max_iterations=1,
+        heuristic_nonconvex=True,
+        mip_nlp_profile="shot",
+        mip_nlp_shot_config=oa_module.MIPNLPShotConfig(
+            relaxation_phase="off",
+            mip_solution_limit_strategy="none",
+        ),
+    )
+
+    convex_calls = [call for call in master_calls if not call["kwargs"]["add_slack"]]
+    assert len(convex_calls) == 1
+    assert len(convex_calls[0]["rows"]) == 1
+    np.testing.assert_allclose(convex_calls[0]["rows"][0], np.array([1.0]))
+
+    trace = result.mip_nlp_trace
+    convex_trace = trace["iterations"][0]["convex_bounding"]
+    assert convex_trace["status"] == "bound_updated"
+    assert convex_trace["global_cut_count"] == 1
+    assert convex_trace["local_cut_excluded_count"] == 1
+    assert trace["summary"]["convex_bounding_solve_count"] == 1
+    assert trace["summary"]["convex_bounding_bound_update_count"] == 1
+    assert trace["bound_validity"] == "global"
+    assert trace["final_lb"] == pytest.approx(-2.0)
+    assert trace["heuristic_lb"] == pytest.approx(-1.0)
+    assert result.bound == pytest.approx(-2.0)
+    assert result.gap_certified is True
+
+
+def test_mip_nlp_shot_convex_bounding_excludes_integer_no_good_cuts(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers import MILPResult, SolveStatus
+
+    primary_calls = 0
+    convex_rows_by_call = []
+
+    def has_no_good_for_y_zero(rows):
+        return any(
+            np.asarray(row, dtype=float).shape == (2,)
+            and np.allclose(np.asarray(row, dtype=float), np.array([0.0, -1.0]))
+            for row in rows
+        )
+
+    def fake_master(*args, **kwargs):
+        nonlocal primary_calls
+        rows = [np.asarray(row, dtype=float).copy() for row in args[3]]
+        if kwargs["add_slack"]:
+            primary_calls += 1
+            if has_no_good_for_y_zero(rows):
+                return MILPResult(
+                    status=SolveStatus.OPTIMAL,
+                    x=np.array([1.0, 1.0], dtype=float),
+                    objective=1.0,
+                    bound=1.0,
+                    node_count=2,
+                )
+            return MILPResult(
+                status=SolveStatus.OPTIMAL,
+                x=np.array([1.0, 0.0], dtype=float),
+                objective=0.0,
+                bound=0.0,
+                node_count=1,
+            )
+
+        convex_rows_by_call.append(rows)
+        bound = 1.0 if has_no_good_for_y_zero(rows) else 0.0
+        return MILPResult(
+            status=SolveStatus.OPTIMAL,
+            x=np.array([1.0, 1.0], dtype=float),
+            objective=bound,
+            bound=bound,
+            node_count=3,
+        )
+
+    def fake_fixed_nlp_attempt(*args, **kwargs):
+        x_master = np.asarray(args[4], dtype=float)
+        if x_master[1] < 0.5:
+            return oa_module._NLPAttempt(
+                x=None,
+                objective=None,
+                multipliers=None,
+                status=SolveStatus.INFEASIBLE,
+            )
+        return oa_module._NLPAttempt(
+            x=x_master.copy(),
+            objective=1.0,
+            multipliers=None,
+            status=SolveStatus.OPTIMAL,
+        )
+
+    monkeypatch.setattr(oa_module, "_solve_master_milp", fake_master)
+    monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        oa_module,
+        "_solve_nlp_subproblem",
+        lambda *args, **kwargs: (np.array([1.0, 0.0], dtype=float), 1.0),
+    )
+    monkeypatch.setattr(oa_module, "_solve_fixed_nlp_subproblem_attempt", fake_fixed_nlp_attempt)
+
+    result = oa_module.solve_oa(
+        _esh_nonconvex_fixture("shot_convex_bounding_excludes_no_good"),
+        init_strategy="initial_binary",
+        initial_point=np.array([1.0, 0.0], dtype=float),
+        max_iterations=2,
+        heuristic_nonconvex=True,
+        add_no_good_cuts=True,
+        feasibility_cuts=False,
+        mip_nlp_profile="shot",
+        mip_nlp_shot_config=oa_module.MIPNLPShotConfig(
+            relaxation_phase="off",
+            mip_solution_limit_strategy="none",
+        ),
+    )
+
+    assert primary_calls == 2
+    assert len(convex_rows_by_call) == 2
+    assert not any(has_no_good_for_y_zero(rows) for rows in convex_rows_by_call)
+
+    trace = result.mip_nlp_trace
+    assert trace["iterations"][1]["convex_bounding"]["integer_cut_excluded_count"] == 1
+    assert trace["iterations"][1]["convex_bounding"]["global_cut_count"] == 0
+    assert trace["bound_validity"] == "global"
+    assert trace["final_lb"] == pytest.approx(0.0)
+    assert trace["heuristic_lb"] == pytest.approx(1.0)
+    assert result.status == "feasible"
+    assert result.bound == pytest.approx(0.0)
+    assert result.objective == pytest.approx(1.0)
+
+
+def test_mip_nlp_shot_nonconvex_objective_keeps_heuristic_bound_uncertified(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers import MILPResult, SolveStatus
+
+    master_calls = []
+
+    def fake_master(*args, **kwargs):
+        del args, kwargs
+        master_calls.append(True)
+        return MILPResult(
+            status=SolveStatus.OPTIMAL,
+            x=np.array([0.0, 0.0], dtype=float),
+            objective=-4.0,
+            bound=-4.0,
+            node_count=2,
+        )
+
+    monkeypatch.setattr(oa_module, "_solve_master_milp", fake_master)
+    monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        oa_module,
+        "_solve_nlp_subproblem",
+        lambda *args, **kwargs: (np.asarray(args[4], dtype=float), 0.0),
+    )
+    monkeypatch.setattr(
+        oa_module,
+        "_solve_fixed_nlp_subproblem_attempt",
+        lambda *args, **kwargs: oa_module._NLPAttempt(
+            x=np.array([0.0, 0.0], dtype=float),
+            objective=0.0,
+            multipliers=None,
+            status=SolveStatus.OPTIMAL,
+        ),
+    )
+
+    result = oa_module.solve_oa(
+        _esh_nonconvex_objective_fixture("shot_convex_bounding_unavailable"),
+        init_strategy="initial_binary",
+        max_iterations=1,
+        mip_nlp_profile="shot",
+        mip_nlp_shot_config=oa_module.MIPNLPShotConfig(
+            relaxation_phase="off",
+            mip_solution_limit_strategy="none",
+        ),
+    )
+
+    assert len(master_calls) == 1
+    assert result.bound is None
+    assert result.gap is None
+    assert result.gap_certified is False
+
+    trace = result.mip_nlp_trace
+    assert trace["bound_validity"] == "heuristic"
+    assert trace["final_lb"] is None
+    assert trace["heuristic_lb"] == pytest.approx(-4.0)
+    assert trace["summary"]["convex_bounding_solve_count"] == 0
+    assert trace["iterations"][0]["convex_bounding"]["status"] == "unavailable"
+    assert trace["iterations"][0]["convex_bounding"]["reason"] == "objective_not_globally_boundable"
 
 
 @pytest.mark.skipif(not HAS_HIGHS, reason="highspy not installed")
@@ -789,12 +1056,16 @@ def test_mip_nlp_shot_reduction_cut_infeasible_master_repairs_integration():
         ),
     )
 
-    assert result.status == "feasible"
+    assert result.status == "optimal"
+    assert result.bound == pytest.approx(1000.0)
+    assert result.gap_certified is True
     iteration = result.mip_nlp_trace["iterations"][0]
     assert iteration["reduction_cuts"][0]["status"] == "added"
     repair = iteration["repair_actions"][0]
     assert repair["status"] == "repaired"
     assert repair["dropped_reduction_cuts"] == 1
+    assert iteration["convex_bounding"]["status"] == "bound_updated"
+    assert result.mip_nlp_trace["bound_validity"] == "global"
     assert result.mip_nlp_trace["termination_reason"] != "master_infeasible"
 
 
@@ -1844,7 +2115,7 @@ def test_mip_nlp_trace_gap_certification_requires_finite_bound():
     assert result.mip_nlp_trace["final_lb"] is None
     assert result.mip_nlp_trace["final_gap"] is None
     assert result.mip_nlp_trace["gap_certified"] is False
-    assert result.mip_nlp_trace["bound_validity"] == "heuristic"
+    assert result.mip_nlp_trace["bound_validity"] == "unavailable"
 
 
 def test_mip_nlp_shot_options_require_shot_profile():
