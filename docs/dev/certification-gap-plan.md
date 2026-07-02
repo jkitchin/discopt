@@ -118,7 +118,7 @@ experiment may run.
 | T1.1 entry experiment (kill criterion) | done (kill did NOT fire) | (this PR) | All uncovered families are closed-form box-affine → proceed to T1.2. Bonus: engine already validates on mixed int+cont (ex1263) and maximize |
 | T1.2 patch-table term coverage | in progress — monomial family landed | (this PR) | Dir. (a) differential neutrality. Steps 0–1 done: 42-row robust baseline + differential-neutrality checker + monomial p≥2 coverage (NEUTRAL: sound on all 42, node-improving; nvs17 perf-gated pending T1.4). Remaining families (trilinear/univariate/fractional) + T1.4 warm-start under parallel derivation |
 | T1.3 scope-gate widening | done | (this PR) | Widened gate to `ok` + general root-cut-pool (built whenever engine active) + skip fast path during pool capture. dispatch 9843→3 restored; nvs13 55→19, nvs17 205→61. NEUTRAL / adversarial 10 / smoke 211. Fast engine now on the general spatial path |
-| T1.4 basis inheritance | root cause found; elevated priority | — | Warm-start rejected because coefficient-patch makes parent basis dual-infeasible (dual.rs:225-247→cold). Fix scoped (§14); caveat: dual-infeasible start likely needs phase-1/bound-flip, not a straight run_dual hand-off — verify before coding. Gates T1.2 wall benefit |
+| T1.4 basis inheritance | **ESCALATED — decision needed (§14)** | — | Quick fix (route into run_dual) is UNSOUND (would miscertify; regression test forbids it). Real fix = warm-start ingestion in primal.rs (medium effort, soundness-critical). T1.3 already gave the engine on the spatial path node-neutral; T1.4 is the wall-time lever. Invest now or defer? |
 | T1.5 evaluator-cache routing | already realized (PR #316) | #316 | primal_heuristics diving already routed through cached_evaluator (the −22% gear4 win); remaining sites are one-time (convex fast path) or autodiff-unsafe. Low residual value |
 | T1.6 bookkeeping → Rust | not started | — | blocked by T1.5 profile |
 | Phase 2 entry experiment | **locked** (§0.1.2) | — | unlocks on Phase 1 done |
@@ -1014,6 +1014,37 @@ construction — `run_dual` converges to the true optimum or cold-falls-back
 `in_basis`/`out_basis` plumbing. **Sequencing note:** T1.4 should likely land
 *before* widening T1.2 coverage by default, since coverage without it regresses
 per-node wall on the instances it newly moves onto the incremental path.
+
+> **Tractability verdict (2026-07-02, read-only dual-simplex investigation) —
+> ESCALATED: the quick fix is UNSOUND; the real fix is medium-effort simplex-core
+> work.** The earlier proposal ("route the dual-infeasible warm basis into
+> `run_dual` to repair it") is **wrong and unsafe**: `run_dual`
+> (`crates/discopt-core/src/lp/simplex/dual.rs:304-451`) *hard-assumes* dual
+> feasibility — it chooses the leaving variable only by primal infeasibility and
+> declares Optimal when none exists, so a dual-infeasible start either aborts to
+> cold (no gain) or **silently certifies a wrong optimum**. There is a regression
+> test, `dual_infeasible_warm_start_falls_back_to_cold` (`dual.rs:1285-1326`),
+> that exists precisely to forbid this. No dual phase-1 exists; the bound-flipping
+> is the ratio test (maintains, doesn't establish, dual feasibility). The
+> `prepare` dual-feasibility guard (`dual.rs:225-247`) that rejects the warm basis
+> is **load-bearing (§0.3) and must not be weakened.**
+>
+> The *correct* repair is a **primal** warm re-solve: a branch tightens only the
+> branched variable's box, so the child box ⊂ parent and the parent's primal
+> point is usually still primal-feasible for the child — a few *primal* phase-2
+> pivots re-optimize. But the primal engine (`primal.rs`) is **cold-start-only**:
+> `run()` overwrites any incoming basis with its own crash/artificial basis
+> (`primal.rs:406`); there is no warm-basis ingestion API (module doc:
+> "Warm-start (dual simplex) comes later"). So T1.4 = **add `solve_lp_cols_warm`
+> to `primal.rs`** (ingest `basic_vars`/`col_status`, factorize via the existing
+> `refactorize`, skip phase-1 to phase-2 when the warm basis is primal-feasible,
+> else fall into phase-1 = the genuine cold solve) and route `prepare`'s
+> dual-infeasible rejection (`dual.rs:106-113`) there. Medium effort, new
+> soundness-critical surface in the simplex core; the parent LU **cannot** be
+> reused (child columns differ numerically), so the strong-branch factorization
+> amortization does not transfer. **Decision needed** (see §0.8): invest in the
+> warm-primal now, or defer T1.4 — Phase 1's *wall-time* win is gated on it, but
+> T1.3 already delivered the engine on the spatial path with node-neutrality.
 
 **T1.5 — Evaluator-cache routing (perf-plan Stage 1, validated).**
 Route the ~18 direct `NLPEvaluator(model)` sites (list in performance-plan §3;
