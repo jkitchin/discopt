@@ -21,6 +21,10 @@ The release procedure that produces these entries is documented in
   al.) in the Harris ratio test — ~15× fewer degenerate pivots on the
   lifted-relaxation corpus, validated soundness-neutral against the gauntlet and
   a BARON head-to-head.
+- **Namespace-package support** (`feat(packaging)`). `discopt` now extends its
+  `__path__` via `pkgutil.extend_path`, so external distributions (e.g. a
+  `discopt-aggregation` plugin) can contribute submodules under the `discopt.*`
+  namespace from a separate location on `sys.path` without modifying the core.
 - **Set & index abstractions** (`feat(modeling)`). A Pyomo/JuMP-style named-set
   layer for sparse models, implemented as a pure-Python desugaring over the
   existing flat model (no solver/backend changes). Completes the Phase 7
