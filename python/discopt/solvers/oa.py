@@ -2989,6 +2989,28 @@ def _solve_master_milp(
     return solve_milp_any(**solve_kwargs)
 
 
+def _global_valid_master_cut_rows(
+    cut_provenance: MIPNLPCutProvenance,
+    *,
+    n_vars: int,
+) -> tuple[list[np.ndarray], list[float], list[bool], int]:
+    """Return globally valid provenance rows for the certified-bound master."""
+    rows: list[np.ndarray] = []
+    rhs: list[float] = []
+    relaxable: list[bool] = []
+    local_excluded = 0
+    hard_sources = {"integer", "objective", "objective_rootsearch", "reduction"}
+    for record in cut_provenance.records:
+        if not record.global_valid:
+            local_excluded += 1
+            continue
+        coeffs = np.asarray(record.coefficients, dtype=np.float64)
+        rows.append(coeffs)
+        rhs.append(float(record.rhs))
+        relaxable.append(bool(record.source not in hard_sources and coeffs.size == n_vars))
+    return rows, rhs, relaxable, local_excluded
+
+
 def _solve_initial_poa_master(
     decomp: _DecomposedProblem,
     oa_A_rows,
@@ -4309,6 +4331,10 @@ def solve_oa(
 
     UB = 1e20
     LB = -1e20
+    certified_LB = -1e20
+    heuristic_LB = -1e20
+    certified_bound_source: Optional[str] = None
+    heuristic_bound_source: Optional[str] = None
     incumbent = None
     incumbent_obj = None
     integer_assignments_seen: set[tuple[float, ...]] = set()
@@ -4412,16 +4438,59 @@ def solve_oa(
             return None
         return float(value) + _linear_objective_offset()
 
+    def _promote_certified_bound(value: Optional[float], source: str) -> bool:
+        nonlocal LB, certified_LB, certified_bound_source
+        traced = _trace_value(value)
+        if traced is None:
+            return False
+        previous = certified_LB
+        if traced > certified_LB:
+            certified_LB = float(traced)
+            certified_bound_source = str(source)
+        if traced > LB:
+            LB = float(traced)
+        return certified_LB > previous + 1e-12
+
+    def _record_heuristic_bound(value: Optional[float], source: str) -> bool:
+        nonlocal LB, heuristic_LB, heuristic_bound_source
+        traced = _trace_value(value)
+        if traced is None:
+            return False
+        previous = heuristic_LB
+        if traced > heuristic_LB:
+            heuristic_LB = float(traced)
+            heuristic_bound_source = str(source)
+        if traced > LB:
+            LB = float(traced)
+        return heuristic_LB > previous + 1e-12
+
+    def _certified_gap_value() -> Optional[float]:
+        if _trace_value(certified_LB) is None or _trace_value(UB) is None:
+            return None
+        return _compute_gap(certified_LB, UB)
+
+    def _certified_gap_converged() -> bool:
+        gap_value = _certified_gap_value()
+        return bool(gap_value is not None and gap_value <= gap_tolerance)
+
     def _cut_source_delta(before: dict[str, int]) -> dict[str, int]:
         after = cut_provenance.source_counts()
         return {source: int(after.get(source, 0) - before.get(source, 0)) for source in after}
 
     def _build_mip_nlp_trace(final_reason: Optional[str]) -> dict[str, object]:
-        final_lb = _trace_value(LB)
+        final_lb = _trace_value(certified_LB)
+        final_heuristic_lb = _trace_value(heuristic_LB)
         final_ub = _trace_value(UB)
-        bound_valid = bool(master_bound_valid and not local_cut_added and final_lb is not None)
+        bound_valid = bool(final_lb is not None)
         final_gap = (
-            _trace_value(_compute_gap(LB, UB)) if bound_valid and final_ub is not None else None
+            _trace_value(_compute_gap(certified_LB, UB))
+            if bound_valid and final_ub is not None
+            else None
+        )
+        heuristic_gap = (
+            _trace_value(_compute_gap(heuristic_LB, UB))
+            if final_heuristic_lb is not None and final_ub is not None
+            else None
         )
         local_cut_count = sum(1 for record in cut_provenance.records if not record.global_valid)
         gap_certified = bool(bound_valid and final_gap is not None)
@@ -4499,6 +4568,23 @@ def solve_oa(
         summary["reduction_cut_skipped_count"] = sum(
             1 for event in reduction_events if event.get("status") == "skipped"
         )
+        convex_bounding_records: list[dict[str, object]] = []
+        for iteration_record in trace_iterations:
+            raw_convex_bounding = iteration_record.get("convex_bounding")
+            if isinstance(raw_convex_bounding, dict):
+                convex_bounding_records.append(cast(dict[str, object], raw_convex_bounding))
+        summary["convex_bounding_solve_count"] = sum(
+            1 for record in convex_bounding_records if bool(record.get("attempted"))
+        )
+        summary["convex_bounding_bound_update_count"] = sum(
+            1 for record in convex_bounding_records if bool(record.get("bound_updated"))
+        )
+        if final_lb is not None:
+            bound_validity = "global"
+        elif final_heuristic_lb is not None:
+            bound_validity = "heuristic"
+        else:
+            bound_validity = "unavailable"
         trace = {
             "schema_version": 1,
             "solver": "mip-nlp",
@@ -4510,12 +4596,16 @@ def solve_oa(
             "iterations": trace_iterations,
             "summary": summary,
             "termination_reason": final_reason,
-            "master_bound_valid": bool(master_bound_valid and not local_cut_added),
+            "master_bound_valid": bound_valid,
             "gap_certified": gap_certified,
-            "bound_validity": "global" if bound_valid else "heuristic",
+            "bound_validity": bound_validity,
             "final_lb": final_lb,
             "final_ub": final_ub,
             "final_gap": final_gap,
+            "heuristic_lb": final_heuristic_lb,
+            "heuristic_gap": heuristic_gap,
+            "certified_bound_source": certified_bound_source,
+            "heuristic_bound_source": heuristic_bound_source,
         }
         if shot_solution_pool_degraded_reason is not None:
             trace["solution_pool_degraded_reason"] = shot_solution_pool_degraded_reason
@@ -4661,6 +4751,112 @@ def solve_oa(
             ),
         }
         return trace, mip_start, objective_cutoff, limit, mip_start_objective
+
+    def _maybe_update_convex_bounding_bound(iteration: int, elapsed: float) -> dict[str, object]:
+        nonlocal mip_count
+        enabled = bool(
+            mip_nlp_profile == "shot" and not (master_bound_valid and not local_cut_added)
+        )
+        rows, rhs, relaxable, local_excluded = _global_valid_master_cut_rows(
+            cut_provenance,
+            n_vars=n_vars,
+        )
+        trace: dict[str, object] = {
+            "iteration": int(iteration),
+            "enabled": enabled,
+            "attempted": False,
+            "status": "disabled" if not enabled else "pending",
+            "reason": "primary_master_certified" if not enabled else None,
+            "global_cut_count": int(len(rows)),
+            "local_cut_excluded_count": int(local_excluded),
+            "bound_before": _trace_value(certified_LB),
+            "objective_bound": None,
+            "bound_after": _trace_value(certified_LB),
+            "bound_updated": False,
+            "master_status": None,
+            "node_count": 0,
+        }
+        if not enabled:
+            return trace
+        if not decomp.master_bound_valid:
+            trace.update(
+                {
+                    "status": "unavailable",
+                    "reason": "objective_not_globally_boundable",
+                }
+            )
+            return trace
+        remaining = max(float(time_limit) - float(elapsed), 0.0)
+        if remaining <= 0.0:
+            trace.update({"status": "skipped", "reason": "time_limit"})
+            return trace
+        trace.update({"attempted": True, "status": "running"})
+        try:
+            result = _solve_master_milp(
+                decomp.linear_A_rows,
+                decomp.linear_b_rows,
+                decomp.linear_senses,
+                rows,
+                rhs,
+                n_vars,
+                decomp.integrality,
+                decomp.lb,
+                decomp.ub,
+                decomp.obj_coeffs,
+                decomp.obj_is_linear,
+                decomp.master_bound_valid,
+                time_limit=remaining,
+                gap_tolerance=gap_tolerance,
+                add_slack=False,
+                max_slack=max_slack,
+                oa_penalty_factor=oa_penalty_factor,
+                oa_cut_relaxable=relaxable,
+                use_objective_epigraph=(not decomp.obj_is_linear and decomp.oa_objective_is_convex),
+                milp_solver=milp_solver,
+                solution_pool=False,
+                num_solution_iteration=1,
+                mip_start=None,
+                mip_start_objective=None,
+                objective_cutoff=None,
+                mip_solution_limit=None,
+                integer_binary_expansion=integer_binary_expansion,
+            )
+            mip_count += 1
+        except Exception as exc:
+            trace.update(
+                {
+                    "status": "failed",
+                    "reason": f"{type(exc).__name__}: {exc}",
+                    "bound_after": _trace_value(certified_LB),
+                }
+            )
+            return trace
+
+        status_name = "none" if result is None else _trace_status(result.status)
+        trace["master_status"] = status_name
+        trace["node_count"] = int(getattr(result, "node_count", 0) or 0)
+        if result is None or result.bound is None:
+            trace.update(
+                {
+                    "status": "no_bound",
+                    "reason": f"master_status={status_name}",
+                    "bound_after": _trace_value(certified_LB),
+                }
+            )
+            return trace
+
+        objective_bound = _evaluator_objective_from_master(result.bound)
+        updated = _promote_certified_bound(objective_bound, "convex_bounding")
+        trace.update(
+            {
+                "status": "bound_updated" if updated else "no_bound_update",
+                "reason": None,
+                "objective_bound": _trace_value(objective_bound),
+                "bound_after": _trace_value(certified_LB),
+                "bound_updated": bool(updated),
+            }
+        )
+        return trace
 
     def _shot_reduction_cuts_enabled() -> bool:
         return bool(
@@ -4867,6 +5063,7 @@ def solve_oa(
         if x_sol is not None:
             LB = float(obj)
             UB = float(obj)
+            _promote_certified_bound(obj, "continuous_nlp")
             return SolveResult(
                 status="optimal",
                 objective=_obj_sign * obj,
@@ -5167,7 +5364,10 @@ def solve_oa(
                         if master_bound_valid and poa_result.bound is not None:
                             objective_bound = _evaluator_objective_from_master(poa_result.bound)
                             if objective_bound is not None:
-                                LB = max(LB, objective_bound)
+                                if not local_cut_added:
+                                    _promote_certified_bound(objective_bound, "initial_poa")
+                                else:
+                                    _record_heuristic_bound(objective_bound, "initial_poa")
                         stored_poa_interior = _record_interior_point(
                             x_poa,
                             "initial_poa",
@@ -5321,7 +5521,10 @@ def solve_oa(
                         if master_bound_valid and relax_result.bound is not None:
                             objective_bound = _evaluator_objective_from_master(relax_result.bound)
                             if objective_bound is not None:
-                                LB = max(LB, objective_bound)
+                                if not local_cut_added:
+                                    _promote_certified_bound(objective_bound, "relaxation_phase")
+                                else:
+                                    _record_heuristic_bound(objective_bound, "relaxation_phase")
                         stored_relax_interior = _record_interior_point(
                             x_relax_phase,
                             "relaxation_phase",
@@ -5444,6 +5647,10 @@ def solve_oa(
             integer_binary_expansion=integer_binary_expansion,
         )
         mip_count += 1
+        convex_bounding_record = _maybe_update_convex_bounding_bound(
+            iteration,
+            time.perf_counter() - t_start,
+        )
 
         from discopt.solvers import SolveStatus
 
@@ -5474,6 +5681,7 @@ def solve_oa(
                     "repair_actions": [],
                     "reduction_cuts": reduction_cut_events,
                     "relaxation_phase": relaxation_phase_record,
+                    "convex_bounding": convex_bounding_record,
                     "master_controls": master_control_trace,
                     "termination_reason": termination_reason,
                 }
@@ -5487,11 +5695,12 @@ def solve_oa(
             if master_bound_valid and cutoff_bound is not None:
                 evaluator_cutoff_bound = _evaluator_objective_from_master(cutoff_bound)
                 if evaluator_cutoff_bound is not None:
-                    LB = max(LB, evaluator_cutoff_bound)
+                    if not local_cut_added:
+                        _promote_certified_bound(evaluator_cutoff_bound, "primary_master_cutoff")
+                    else:
+                        _record_heuristic_bound(evaluator_cutoff_bound, "primary_master_cutoff")
             gap = _compute_gap(LB, UB)
-            termination_reason = (
-                "gap" if master_bound_valid and gap <= gap_tolerance else "master_cutoff"
-            )
+            termination_reason = "gap" if _certified_gap_converged() else "master_cutoff"
             trace_iterations.append(
                 {
                     "index": int(iteration),
@@ -5515,6 +5724,7 @@ def solve_oa(
                     "repair_actions": [],
                     "reduction_cuts": reduction_cut_events,
                     "relaxation_phase": relaxation_phase_record,
+                    "convex_bounding": convex_bounding_record,
                     "master_controls": master_control_trace,
                     "termination_reason": termination_reason,
                 }
@@ -5565,6 +5775,7 @@ def solve_oa(
                         "repair_actions": repair_actions,
                         "reduction_cuts": reduction_cut_events,
                         "relaxation_phase": relaxation_phase_record,
+                        "convex_bounding": convex_bounding_record,
                         "master_controls": master_control_trace,
                         "termination_reason": termination_reason,
                     }
@@ -5616,6 +5827,7 @@ def solve_oa(
                     "repair_actions": [],
                     "reduction_cuts": reduction_cut_events,
                     "relaxation_phase": relaxation_phase_record,
+                    "convex_bounding": convex_bounding_record,
                     "master_controls": master_control_trace,
                     "termination_reason": "master_unbounded",
                 }
@@ -5624,10 +5836,13 @@ def solve_oa(
 
         # The master gives a valid LB only via its dual ``bound`` (never the
         # incumbent ``objective``, which is an upper bound on a limited solve).
-        if master_bound_valid and master_result.bound is not None:
+        if master_result.bound is not None:
             master_bound = _evaluator_objective_from_master(master_result.bound)
             if master_bound is not None:
-                LB = max(LB, master_bound)
+                if master_bound_valid and not local_cut_added:
+                    _promote_certified_bound(master_bound, "primary_master")
+                else:
+                    _record_heuristic_bound(master_bound, "primary_master")
 
         nlp_initial_point = None
         if (
@@ -5724,6 +5939,7 @@ def solve_oa(
             "repair_actions": repair_actions,
             "reduction_cuts": reduction_cut_events,
             "relaxation_phase": relaxation_phase_record,
+            "convex_bounding": convex_bounding_record,
             "master_controls": master_control_trace,
         }
         stop_after_master_pool = False
@@ -5864,7 +6080,7 @@ def solve_oa(
                     termination_reason = "ecp_feasible"
                     stop_after_master_pool = True
                     break
-                if master_bound_valid and gap <= gap_tolerance:
+                if _certified_gap_converged():
                     termination_reason = "gap"
                     stop_after_master_pool = True
                     break
@@ -6018,7 +6234,7 @@ def solve_oa(
                         stop_after_master_pool = True
                         break
 
-            if master_bound_valid and gap <= gap_tolerance:
+            if _certified_gap_converged():
                 termination_reason = "gap"
                 stop_after_master_pool = True
                 break
@@ -6060,21 +6276,20 @@ def solve_oa(
 
     # 4. Build result
     wall_time = time.perf_counter() - t_start
-    gap = _compute_gap(LB, UB)
-    bound_certified = master_bound_valid and not local_cut_added
-    bound = LB if bound_certified and LB > -1e19 else None
-    reported_gap = gap if bound is not None and UB < 1e19 else None
+    certified_gap = _certified_gap_value()
+    bound = certified_LB if _trace_value(certified_LB) is not None else None
+    reported_gap = certified_gap if bound is not None and UB < 1e19 else None
     final_reason = termination_reason
     if final_reason is None:
         if wall_time >= time_limit:
             final_reason = "time_limit"
-        elif incumbent is not None and bound_certified and gap <= gap_tolerance:
+        elif incumbent is not None and _certified_gap_converged():
             final_reason = "gap"
         else:
             final_reason = "iteration_limit"
 
     if incumbent is not None and incumbent_obj is not None:
-        status = "optimal" if bound_certified and gap <= gap_tolerance else "feasible"
+        status = "optimal" if _certified_gap_converged() else "feasible"
         if termination_reason in {"cycling", "stalling"}:
             status = "feasible"
         return SolveResult(
@@ -6087,6 +6302,7 @@ def solve_oa(
             mip_count=mip_count,
             subnlp_calls=nlp_subproblem_count,
             mip_nlp_trace=_build_mip_nlp_trace(final_reason),
+            gap_certified=bool(reported_gap is not None),
         )
 
     return SolveResult(
@@ -6099,4 +6315,5 @@ def solve_oa(
         mip_count=mip_count,
         subnlp_calls=nlp_subproblem_count,
         mip_nlp_trace=_build_mip_nlp_trace(final_reason),
+        gap_certified=False,
     )
