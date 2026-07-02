@@ -113,7 +113,7 @@ experiment may run.
 | T0.1 root_gap/root_time producer | done | (this PR) | Populated on all in-house B&B + convex-fast paths; bound-neutral (0 drift on 12 instances) |
 | T0.2 bound trajectory | done | (this PR) | Opt-in recorder (default OFF — node_callback disables GP fast path); downsampled ≤500; monotone-t, bound-non-decreasing |
 | T0.3 reduction/separation timers | done | (this PR) | Rust Fbbt/NodeReduce phases (stderr profile); Python per-family timers on solver_stats; bound-neutral (0 drift, Rust rebuilt) |
-| T0.4 soundness harness | not started | — | |
+| T0.4 soundness harness | done | (this PR) | utils/soundness.py: assert_bound_sound + assert_cut_valid; flags planted-invalid cut, passes McCormick envelope sweep |
 | T0.5 baseline + cert0 gate | not started | — | |
 | T1.1 entry experiment (kill criterion) | not started | — | |
 | T1.2 patch-table term coverage | not started | — | blocked by T1.1 |
@@ -629,6 +629,21 @@ instances (0 drift).
   oracle file used by `incorrect_count`.
 - **Test:** harness flags a deliberately-invalid cut (unit fixture) and passes the
   existing multilinear-separation soundness sweep.
+
+*Implementation note (done, this PR).* New module
+`discopt_benchmarks/utils/soundness.py` with `assert_bound_sound(relaxer_fn,
+boxes, oracle_fn, tol, *, baseline_fn=None, sense="min")` — validity
+(`bound ≤ oracle + tol`, the false-certificate guard) plus optional
+non-regression vs a baseline relaxer (the §3 differential test), both senses —
+and `assert_cut_valid(cut, feasible_points, tol)` for cut validity (no feasible
+point removed). Plus a `known_optimum_oracle` convenience for the stored
+global50 optima. Deliberately solver-internal-free (callers pass callables/
+arrays) so it is cheap to unit-test and Phases 2–4 can import it anywhere.
+Tests (`discopt_benchmarks/tests/test_soundness_harness.py`, 8 passed): the
+harness flags a planted invalid cut and a planted bound-crossing, and passes a
+200-box sweep of the McCormick bilinear envelope against sampled feasible points
+(the multilinear-separation soundness sweep). Bound-neutral by construction — no
+solver-path or Rust change.
 
 **T0.5 — Baseline.** Run global50 + perf panel with T0.1–T0.3 on; commit JSONL next
 to `docs/dev/data/perf-baseline.jsonl` as `cert-baseline.jsonl`. Add `[gates.cert0]`
