@@ -116,7 +116,7 @@ experiment may run.
 | T0.4 soundness harness | done | (this PR) | utils/soundness.py: assert_bound_sound + assert_cut_valid; flags planted-invalid cut, passes McCormick envelope sweep |
 | T0.5 baseline + cert0 gate | done | (this PR) | cert-baseline.jsonl (global50+panel, 55 rows); [gates.cert0] passes: coverage 0.909 ≥ 0.90, incorrect 0. Phase 0 complete |
 | T1.1 entry experiment (kill criterion) | done (kill did NOT fire) | (this PR) | All uncovered families are closed-form box-affine → proceed to T1.2. Bonus: engine already validates on mixed int+cont (ex1263) and maximize |
-| T1.2 patch-table term coverage | in progress (dir. (a) approved) | (this PR) | Neutrality redefined to differential form (§14). Step 0 done: cert-baseline rebuilt to 44-row deterministic-certifying subset. Next: wire checker + land parked monomial patch |
+| T1.2 patch-table term coverage | in progress — monomial family landed | (this PR) | Dir. (a) differential neutrality. Steps 0–1 done: 42-row robust baseline + differential-neutrality checker + monomial p≥2 coverage (NEUTRAL: sound on all 42, node-improving; nvs17 perf-gated pending T1.4). Remaining families (trilinear/univariate/fractional) + T1.4 warm-start under parallel derivation |
 | T1.3 scope-gate widening | not started | — | blocked by T1.2 |
 | T1.4 basis inheritance | not started | — | |
 | T1.5 evaluator-cache routing | not started | — | |
@@ -904,6 +904,27 @@ payload in the tree manager and pass it to the warm dual solve. Cold-start fallb
 on soundness-guard rejection already exists.
 - **Test:** LP iterations per node drop vs baseline; results bit-identical in
   objective/node_count on the certifying panel.
+
+*Root cause found (2026-07-02) — this is the wall-time lever, and the T1.2
+monomial finding elevated its priority.* The incremental engine reuses the
+parent's **column-partition** basis, but `_patch` rewrites the McCormick row
+**coefficients** and aux bounds every node — so the parent vertex is usually
+**dual-infeasible** on the child LP. Rust's `PreparedDual::prepare`
+(`crates/discopt-core/src/lp/simplex/dual.rs:225-247`) rejects a dual-infeasible
+start (`return None`) → `solve_csc_core` (`dual.rs:95-115`) cold-refactorizes.
+That is exactly the "cold refactorizations from rejected warm starts" cost, and
+why T1.2's monomial coverage traded nvs17 205→~110 nodes for a *slower* per-node
+wall (36s→45s). The Python guard (`mccormick_lp.py:443-447`) only checks row
+count, so it can't help. **Minimal sound fix:** when `prepare` fails *only* the
+dual-feasibility scan (factorization OK, sizes match), route the basis into
+`run_dual` to restore dual feasibility in a few pivots instead of cold-solving;
+fall back to cold only on singular factorization / iteration cap. Sound by
+construction — `run_dual` converges to the true optimum or cold-falls-back
+(`dual.rs:9-14`), and the §0.3 cold-start fallback is untouched. Seam:
+`dual.rs:95-115` + `225-247`; no change to `Basis` (already `Clone`) or the
+`in_basis`/`out_basis` plumbing. **Sequencing note:** T1.4 should likely land
+*before* widening T1.2 coverage by default, since coverage without it regresses
+per-node wall on the instances it newly moves onto the incremental path.
 
 **T1.5 — Evaluator-cache routing (perf-plan Stage 1, validated).**
 Route the ~18 direct `NLPEvaluator(model)` sites (list in performance-plan §3;
