@@ -4402,6 +4402,54 @@ def solve_model(
                         except Exception as _pool_exc:  # pragma: no cover - defensive
                             logger.debug("root cut pool separation skipped: %s", _pool_exc)
                             _root_cut_pool = None
+                    elif getattr(_mc_lp_relaxer, "_inc", None) is not None:
+                        # Root cut pool for the GENERAL spatial path (cert:T1.3).
+                        # When the incremental engine is active but PSD cuts are
+                        # off, the fast path (which skips per-node separation) would
+                        # otherwise solve base McCormick only, collapsing the bound
+                        # on separation-reliant models (measured: dispatch 3 → 9843
+                        # nodes). Capture the general root separation chain ONCE
+                        # (multilinear / edge-concave / univariate-square / convex /
+                        # RLT) — ``out_cuts`` forces the cold, separating path (see
+                        # ``solve_at_node``) — and inherit it at every fast-path
+                        # node. Sound: a cut valid over the root box is valid over
+                        # every sub-box, so an inherited row never removes a
+                        # feasible point.
+                        try:
+                            _pool_chunks = []
+                            _root_remaining = time_limit - (time.perf_counter() - t_start)
+                            _pool_budget = min(
+                                max(time_limit * 0.25, 5.0),
+                                max(_root_remaining, _DEADLINE_NODE_FLOOR_S),
+                            )
+                            _pool_res = _mc_lp_relaxer.solve_at_node(
+                                _probe_lb,
+                                _probe_ub,
+                                time_limit=_pool_budget,
+                                out_cuts=_pool_chunks,
+                            )
+                            if _pool_chunks and _pool_chunks[0] is not None:
+                                _A_pool, _b_pool = _pool_chunks[0]
+                                _n_pool = _A_pool.shape[0]
+                                if _n_pool > _root_cut_max:
+                                    _A_pool = _A_pool[-_root_cut_max:]
+                                    _b_pool = _b_pool[-_root_cut_max:]
+                                _root_cut_pool = (_A_pool, _b_pool)
+                                if (
+                                    _pool_res is not None
+                                    and _pool_res.lower_bound is not None
+                                    and np.isfinite(_pool_res.lower_bound)
+                                ):
+                                    _root_pool_bound = float(_pool_res.lower_bound)
+                                logger.info(
+                                    "Root cut pool (general spatial): %d cuts (of %d "
+                                    "separated), inherited at every fast-path node",
+                                    _A_pool.shape[0],
+                                    _n_pool,
+                                )
+                        except Exception as _pool_exc:  # pragma: no cover - defensive
+                            logger.debug("general root cut pool skipped: %s", _pool_exc)
+                            _root_cut_pool = None
 
     # AlphaBB alpha estimate (lever 3, issue #194), deferred from above: compute
     # it only when the LP relaxer is NOT the bound source. When the LP relaxer is

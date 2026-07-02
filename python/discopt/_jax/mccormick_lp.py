@@ -340,28 +340,30 @@ class MccormickLPRelaxer:
         if build_incremental and os.environ.get("DISCOPT_INCREMENTAL_MC", "1") != "0":
             try:
                 from discopt._jax.incremental_mccormick import IncrementalMcCormickLP
-                from discopt._jax.lp_spatial_bb import _is_in_scope as _inc_in_scope
 
-                # Restrict to the lp_spatial engine's *validated-safe* domain
-                # (pure-integer, minimize): there the incremental patch is the same
-                # construction the opt-in LP-node engine ships and trusts. Outside
-                # it (e.g. mixed-integer NN/tree embeddings), the dense patch can be
-                # an unsound relaxation, so we keep those on the cold build.
+                # Scope gate (cert:T1.3): gate ONLY on the constructor's row-for-row
+                # self-validation (`ok`), for ANY model — any variable mix, any
+                # objective sense. The prior `_is_in_scope` (pure-integer, minimize)
+                # was a conservative rollout limit inherited from the opt-in
+                # lp_spatial engine (#355), not a soundness boundary: the fast path
+                # solves the *McCormick LP relaxation* (a valid lower bound for
+                # continuous, mixed, and integer models alike), and `_validate`
+                # proves the patched rows reproduce the cold `build_milp_relaxation`
+                # exactly; any uncovered term (univariate/NN-embedding smooth
+                # activations, RLT-lifted rows, …) makes `_validate` fail → `ok=False`
+                # → the trusted cold build runs unchanged.
                 #
-                # cert:T1.3 attempted to widen this to gate only on ``ok`` for any
-                # model. That is *sound* (the fast path is a valid ≤-cold McCormick
-                # bound) but NOT viable for the general spatial class: the fast path
-                # returns before the per-node separation chain (multilinear/
-                # edge-concave/PSD/RLT cuts), so a separation-reliant model's bound
-                # collapses and the tree explodes (measured: ``dispatch`` 3 → 9843
-                # nodes, feasible not optimal). The differential-neutrality check
-                # caught it. Re-scoping the fast path to carry per-node separation
-                # (or a refreshed inherited pool) is tracked under T1.3 in
-                # docs/dev/certification-gap-plan.md before widening this gate.
-                if _inc_in_scope(model):
-                    _inc = IncrementalMcCormickLP(model, self._terms)
-                    if _inc.ok:
-                        self._inc = _inc
+                # A first attempt at this widening collapsed the spatial bound
+                # (``dispatch`` 3 → 9843 nodes) because the fast path returns before
+                # the per-node separation chain and no root cut pool was built off
+                # the PSD path. That is fixed by the *general* root-cut-pool capture
+                # in solver.py (built whenever ``_inc`` is set) which the fast path
+                # inherits; and by skipping the fast path during pool capture
+                # (``out_cuts``) so the pool actually separates. Bound-changing
+                # behaviour is verified by the differential-neutrality check.
+                _inc = IncrementalMcCormickLP(model, self._terms)
+                if _inc.ok:
+                    self._inc = _inc
             except Exception:
                 self._inc = None
 
@@ -581,9 +583,18 @@ class MccormickLPRelaxer:
         # and it carries the inherited (root RLT/PSD) cut pool so it keeps the
         # default path's bound strength. Returns ``None`` for any out-of-scope node,
         # falling through to the trusted cold build below.
-        _fast = self._try_incremental_node(node_lb, node_ub, inherited_cuts)
-        if _fast is not None:
-            return _fast
+        #
+        # cert:T1.3: skip the fast path when *capturing* a cut pool (``out_cuts``
+        # set). The fast path returns before the per-node separation chain, so it
+        # would capture nothing; a pool-building call must run the cold, separating
+        # path. Regular nodes (``out_cuts is None``) still take the fast path and
+        # inherit the pool this captures. Without this, the root cut pool is never
+        # populated once the incremental engine is active — exactly why the T1.3
+        # gate flip collapsed the spatial bound (dispatch 3 → 9843).
+        if out_cuts is None:
+            _fast = self._try_incremental_node(node_lb, node_ub, inherited_cuts)
+            if _fast is not None:
+                return _fast
 
         try:
             milp, varmap = build_milp_relaxation(
