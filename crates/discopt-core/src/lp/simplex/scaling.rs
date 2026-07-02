@@ -144,14 +144,26 @@ impl Scaling {
     /// Scaled lower bounds `l̂ = C⁻¹ l` (infinite bounds preserved).
     pub fn scale_lower(&self, l: &[f64]) -> Vec<f64> {
         (0..self.n)
-            .map(|j| if l[j] <= -INF { l[j] } else { l[j] / self.col[j] })
+            .map(|j| {
+                if l[j] <= -INF {
+                    l[j]
+                } else {
+                    l[j] / self.col[j]
+                }
+            })
             .collect()
     }
 
     /// Scaled upper bounds `û = C⁻¹ u` (infinite bounds preserved).
     pub fn scale_upper(&self, u: &[f64]) -> Vec<f64> {
         (0..self.n)
-            .map(|j| if u[j] >= INF { u[j] } else { u[j] / self.col[j] })
+            .map(|j| {
+                if u[j] >= INF {
+                    u[j]
+                } else {
+                    u[j] / self.col[j]
+                }
+            })
             .collect()
     }
 

@@ -1154,16 +1154,14 @@ fn convert_expr(
                 "norm1" => MathFunc::Norm1,
                 "norminf" => MathFunc::NormInf,
                 // General integer-order p-norm "norm{p}" (p != 1, 2, inf).
-                other if other.starts_with("norm") => {
-                    match other["norm".len()..].parse::<u32>() {
-                        Ok(p) if p >= 1 => MathFunc::NormP(p),
-                        _ => {
-                            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                                "Unknown MathFunc: {func_str}"
-                            )));
-                        }
+                other if other.starts_with("norm") => match other["norm".len()..].parse::<u32>() {
+                    Ok(p) if p >= 1 => MathFunc::NormP(p),
+                    _ => {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Unknown MathFunc: {func_str}"
+                        )));
                     }
-                }
+                },
                 _ => {
                     return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                         "Unknown MathFunc: {func_str}"

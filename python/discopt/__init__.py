@@ -25,7 +25,14 @@ solvers
     NLP solver backends: POUNCE (pure-Rust Ipopt port), pure-JAX IPM (vmap batch), cyipopt (Ipopt).
 """
 
-__version__ = "0.4.1.dev0"
+__version__ = "0.5.0"
+
+# Allow external distributions (e.g. the ``discopt-aggregation`` plugin) to
+# contribute submodules under the ``discopt`` namespace from a separate location
+# on ``sys.path``.  This extends the package's search path (so ``import
+# discopt.aggregation`` can resolve to a plugin) without changing anything the
+# regular package itself provides.
+__path__ = __import__("pkgutil").extend_path(__path__, __name__)
 
 # Enable JAX 64-bit mode before any downstream discopt import triggers a
 # jax import. IPOPT tolerances (default tol=1e-6, bound_relax_factor=1e-8)

@@ -1806,10 +1806,22 @@ mod tests {
             shape: vec![2],
         });
         let pt = [3.0_f64, -4.0_f64];
-        let n1 = arena.add(ExprNode::FunctionCall { func: MathFunc::Norm1, args: vec![x] });
-        let n2 = arena.add(ExprNode::FunctionCall { func: MathFunc::Norm2, args: vec![x] });
-        let ninf = arena.add(ExprNode::FunctionCall { func: MathFunc::NormInf, args: vec![x] });
-        let pr = arena.add(ExprNode::FunctionCall { func: MathFunc::Prod, args: vec![x] });
+        let n1 = arena.add(ExprNode::FunctionCall {
+            func: MathFunc::Norm1,
+            args: vec![x],
+        });
+        let n2 = arena.add(ExprNode::FunctionCall {
+            func: MathFunc::Norm2,
+            args: vec![x],
+        });
+        let ninf = arena.add(ExprNode::FunctionCall {
+            func: MathFunc::NormInf,
+            args: vec![x],
+        });
+        let pr = arena.add(ExprNode::FunctionCall {
+            func: MathFunc::Prod,
+            args: vec![x],
+        });
         assert!((arena.evaluate(n1, &pt) - 7.0).abs() < 1e-12);
         assert!((arena.evaluate(n2, &pt) - 5.0).abs() < 1e-12);
         assert!((arena.evaluate(ninf, &pt) - 4.0).abs() < 1e-12);

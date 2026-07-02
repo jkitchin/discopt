@@ -237,7 +237,11 @@ pub fn crossover_to_vertex(x: &[f64], lp: &LpView<'_>, tol: f64, max_iter: usize
             // Clamp into the well-ordered interval instead — identical to the
             // direct clamp when bounds are ordered, and collapses to the degenerate
             // (ULP-wide) box when they cross, which is the correct projection.
-            let (lo, hi) = if l[j] <= u[j] { (l[j], u[j]) } else { (u[j], l[j]) };
+            let (lo, hi) = if l[j] <= u[j] {
+                (l[j], u[j])
+            } else {
+                (u[j], l[j])
+            };
             x[j] = xj.clamp(lo, hi);
         }
     }

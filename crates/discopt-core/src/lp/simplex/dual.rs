@@ -149,7 +149,6 @@ pub fn solve_lp_warm_scaled_csc(
     }
 }
 
-
 /// A basis factorization prepared once for repeated dual re-optimizations that
 /// differ only in their bounds and right-hand side.
 ///
