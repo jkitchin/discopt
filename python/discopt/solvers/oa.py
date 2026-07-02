@@ -77,6 +77,7 @@ _CUT_SOURCE_ORDER = (
     "relaxation_phase",
     "objective",
     "objective_rootsearch",
+    "reduction",
     "esh",
     "feasibility",
     "integer",
@@ -200,6 +201,20 @@ class MIPNLPCutProvenance:
         for source, count in sorted(counts.items()):
             out.setdefault(str(source), int(count))
         return out
+
+    def remove_source(self, source: str) -> int:
+        """Drop records for an inactive cut source and rebuild dedup state."""
+        keep: list[MIPNLPCutRecord] = []
+        removed = 0
+        for record in self.records:
+            if record.source == source:
+                removed += 1
+            else:
+                keep.append(record)
+        if removed:
+            self.records = keep
+            self._dedup_keys = {record.dedup_key for record in keep}
+        return removed
 
 
 def _normalize_init_strategy(init_strategy: str) -> str:
@@ -2585,6 +2600,70 @@ def _add_feasibility_cuts(
             )
 
 
+def _primal_reduction_cutoff(value: float) -> float:
+    """Return a strict improvement cutoff in the internal minimization convention."""
+    return float(value) - 1e-6 * (1.0 + abs(float(value)))
+
+
+def _add_primal_reduction_cut(
+    decomp: "_DecomposedProblem",
+    incumbent,
+    incumbent_obj: Optional[float],
+    oa_A_rows,
+    oa_b_rows,
+    oa_cut_relaxable=None,
+    cut_provenance: Optional[MIPNLPCutProvenance] = None,
+) -> dict[str, object]:
+    """Add a SHOT-style objective reduction cut when the master row is exact."""
+    trace: dict[str, object] = {
+        "status": "skipped",
+        "reason": None,
+        "source": "reduction",
+        "global_valid": False,
+        "local_valid": True,
+        "cutoff": None,
+        "incumbent_objective": None,
+    }
+    if incumbent is None or incumbent_obj is None:
+        trace["reason"] = "no_incumbent"
+        return trace
+    if not decomp.obj_is_linear or decomp.obj_coeffs is None:
+        trace["reason"] = "nonlinear_objective_without_certified_epigraph"
+        return trace
+
+    c_vec, obj_offset = decomp.obj_coeffs
+    coeffs = np.asarray(c_vec, dtype=np.float64).reshape(-1).copy()
+    if coeffs.size != decomp.n_vars or np.linalg.norm(coeffs) < 1e-12:
+        trace["reason"] = "missing_linear_objective_row"
+        return trace
+
+    incumbent_master_obj = float(incumbent_obj) - float(obj_offset)
+    cutoff = _primal_reduction_cutoff(incumbent_master_obj)
+    _append_master_cut(
+        oa_A_rows,
+        oa_b_rows,
+        coeffs,
+        cutoff,
+        oa_cut_relaxable,
+        relaxable=False,
+        cut_provenance=cut_provenance,
+        source="reduction",
+        global_valid=False,
+        local_valid=True,
+        supporting_point=np.asarray(incumbent, dtype=np.float64).reshape(-1)[: decomp.n_vars],
+        objective_id="objective_cutoff",
+    )
+    trace.update(
+        {
+            "status": "added",
+            "reason": None,
+            "cutoff": float(cutoff),
+            "incumbent_objective": float(incumbent_master_obj),
+        }
+    )
+    return trace
+
+
 # ── MILP Master Problem ──────────────────────────────────────
 
 
@@ -4300,6 +4379,9 @@ def solve_oa(
     fixed_nlp_call_count = 0
     fixed_nlp_call_source_counts: Counter[str] = Counter()
     fixed_nlp_call_status_counts: Counter[str] = Counter()
+    repaired_assignment_keys: set[tuple[float, ...]] = set()
+    active_reduction_cut_indices: set[int] = set()
+    reduction_cut_incumbent_key: Optional[float] = None
 
     def _trace_value(value: Optional[float]) -> Optional[float]:
         if value is None:
@@ -4386,6 +4468,37 @@ def solve_oa(
             summary["initial_poa_provenance_cuts"] = (
                 int(poa_provenance_cuts) if isinstance(poa_provenance_cuts, int) else 0
             )
+        repair_actions: list[dict[str, object]] = []
+        reduction_events: list[dict[str, object]] = []
+        for iteration_record in trace_iterations:
+            raw_repair_actions = iteration_record.get("repair_actions", [])
+            if isinstance(raw_repair_actions, list):
+                repair_actions.extend(
+                    action for action in raw_repair_actions if isinstance(action, dict)
+                )
+            raw_reduction_events = iteration_record.get("reduction_cuts", [])
+            if isinstance(raw_reduction_events, list):
+                reduction_events.extend(
+                    event for event in raw_reduction_events if isinstance(event, dict)
+                )
+        summary["master_repair_attempt_count"] = sum(
+            1 for action in repair_actions if action.get("attempted")
+        )
+        summary["master_repair_success_count"] = sum(
+            1 for action in repair_actions if action.get("status") == "repaired"
+        )
+        summary["master_repair_failure_count"] = sum(
+            1 for action in repair_actions if action.get("status") == "failed"
+        )
+        summary["master_repair_loop_count"] = sum(
+            1 for action in repair_actions if action.get("status") == "loop_detected"
+        )
+        summary["reduction_cut_added_count"] = sum(
+            1 for event in reduction_events if event.get("status") == "added"
+        )
+        summary["reduction_cut_skipped_count"] = sum(
+            1 for event in reduction_events if event.get("status") == "skipped"
+        )
         trace = {
             "schema_version": 1,
             "solver": "mip-nlp",
@@ -4548,6 +4661,198 @@ def solve_oa(
             ),
         }
         return trace, mip_start, objective_cutoff, limit, mip_start_objective
+
+    def _shot_reduction_cuts_enabled() -> bool:
+        return bool(
+            mip_nlp_profile == "shot"
+            and mip_nlp_shot_config is not None
+            and mip_nlp_shot_config.reduction_cuts
+            and not master_bound_valid
+        )
+
+    def _drop_active_reduction_cuts(reason: str) -> int:
+        nonlocal reduction_cut_incumbent_key
+        if not active_reduction_cut_indices:
+            return 0
+        keep_indices = [
+            idx for idx in range(len(oa_A_rows)) if idx not in active_reduction_cut_indices
+        ]
+        removed = len(oa_A_rows) - len(keep_indices)
+        oa_A_rows[:] = [oa_A_rows[idx] for idx in keep_indices]
+        oa_b_rows[:] = [oa_b_rows[idx] for idx in keep_indices]
+        if oa_cut_relaxable:
+            oa_cut_relaxable[:] = [oa_cut_relaxable[idx] for idx in keep_indices]
+        cut_provenance.remove_source("reduction")
+        active_reduction_cut_indices.clear()
+        reduction_cut_incumbent_key = None
+        logger.info("OA: dropped %d active primal reduction cut(s): %s", removed, reason)
+        return removed
+
+    def _maybe_add_primal_reduction_cut(iteration: int) -> Optional[dict[str, object]]:
+        nonlocal local_cut_added, reduction_cut_incumbent_key
+        if not _shot_reduction_cuts_enabled():
+            return None
+        event = {
+            "iteration": int(iteration),
+            "enabled": True,
+        }
+        if incumbent_obj is None:
+            trace = _add_primal_reduction_cut(
+                decomp,
+                incumbent,
+                incumbent_obj,
+                oa_A_rows,
+                oa_b_rows,
+                oa_cut_relaxable=oa_cut_relaxable,
+                cut_provenance=cut_provenance,
+            )
+            trace.update(event)
+            return trace
+
+        incumbent_key = float(incumbent_obj)
+        if reduction_cut_incumbent_key is not None and abs(
+            reduction_cut_incumbent_key - incumbent_key
+        ) <= 1e-9 * (1.0 + abs(incumbent_key)):
+            return {
+                **event,
+                "status": "skipped",
+                "reason": "already_active_for_incumbent",
+                "source": "reduction",
+                "global_valid": False,
+                "local_valid": True,
+                "cutoff": None,
+                "incumbent_objective": _trace_value(incumbent_key),
+            }
+
+        dropped = _drop_active_reduction_cuts("incumbent_changed")
+        row_index = len(oa_A_rows)
+        trace = _add_primal_reduction_cut(
+            decomp,
+            incumbent,
+            incumbent_obj,
+            oa_A_rows,
+            oa_b_rows,
+            oa_cut_relaxable=oa_cut_relaxable,
+            cut_provenance=cut_provenance,
+        )
+        trace.update(event)
+        trace["dropped_previous"] = int(dropped)
+        if trace.get("status") == "added":
+            active_reduction_cut_indices.add(row_index)
+            reduction_cut_incumbent_key = incumbent_key
+            local_cut_added = True
+        return trace
+
+    def _attempt_master_repair(
+        *,
+        iteration: int,
+        master_objective_cutoff: Optional[float],
+        master_solution_limit: Optional[int],
+        elapsed: float,
+    ):
+        nonlocal mip_count
+        action: dict[str, object] = {
+            "iteration": int(iteration),
+            "attempted": False,
+            "status": "disabled",
+            "reason": "master_repair_disabled",
+            "reset_objective_cutoff": False,
+            "reset_mip_solution_limit": False,
+            "dropped_reduction_cuts": 0,
+            "master_status": None,
+            "node_count": 0,
+        }
+        if not (
+            mip_nlp_profile == "shot"
+            and mip_nlp_shot_config is not None
+            and mip_nlp_shot_config.master_repair
+        ):
+            return None, action
+
+        action.update(
+            {
+                "attempted": True,
+                "status": "running",
+                "reason": None,
+                "reset_objective_cutoff": bool(master_objective_cutoff is not None),
+                "reset_mip_solution_limit": bool(master_solution_limit is not None),
+                "dropped_reduction_cuts": int(_drop_active_reduction_cuts("master_infeasible")),
+            }
+        )
+        try:
+            repaired = _solve_master_milp(
+                decomp.linear_A_rows,
+                decomp.linear_b_rows,
+                decomp.linear_senses,
+                oa_A_rows,
+                oa_b_rows,
+                n_vars,
+                decomp.integrality,
+                decomp.lb,
+                decomp.ub,
+                decomp.obj_coeffs,
+                decomp.obj_is_linear,
+                master_bound_valid,
+                time_limit=max(time_limit - elapsed, 0.0),
+                gap_tolerance=gap_tolerance,
+                add_slack=True,
+                max_slack=max_slack,
+                oa_penalty_factor=oa_penalty_factor,
+                oa_cut_relaxable=oa_cut_relaxable,
+                use_objective_epigraph=(not decomp.obj_is_linear and decomp.oa_objective_is_convex),
+                milp_solver=milp_solver,
+                solution_pool=False,
+                num_solution_iteration=1,
+                mip_start=None,
+                mip_start_objective=None,
+                objective_cutoff=None,
+                mip_solution_limit=None,
+                integer_binary_expansion=integer_binary_expansion,
+            )
+            mip_count += 1
+        except Exception as exc:
+            action.update(
+                {
+                    "status": "failed",
+                    "reason": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            return None, action
+
+        status_name = "none" if repaired is None else _trace_status(repaired.status)
+        action["master_status"] = status_name
+        action["node_count"] = int(getattr(repaired, "node_count", 0) or 0)
+        if repaired is None or repaired.x is None:
+            action.update({"status": "failed", "reason": f"master_status={status_name}"})
+            return None, action
+        if status_name not in {"optimal", "iteration_limit", "time_limit"}:
+            action.update({"status": "failed", "reason": f"master_status={status_name}"})
+            return None, action
+
+        repaired_x = np.asarray(repaired.x, dtype=np.float64).reshape(-1)
+        if repaired_x.size < n_vars:
+            action.update(
+                {
+                    "status": "failed",
+                    "reason": f"master_solution_size={repaired_x.size}",
+                }
+            )
+            return None, action
+
+        assignment_key = _integer_assignment_key(decomp, repaired_x[:n_vars])
+        action["integer_assignment"] = list(assignment_key)
+        if assignment_key in repaired_assignment_keys:
+            action.update(
+                {
+                    "status": "loop_detected",
+                    "reason": "repaired_integer_assignment_repeated",
+                }
+            )
+            return None, action
+
+        repaired_assignment_keys.add(assignment_key)
+        action.update({"status": "repaired", "reason": None})
+        return repaired, action
 
     # If no integer variables, just solve the NLP directly
     if len(decomp.int_indices) == 0:
@@ -4929,6 +5234,10 @@ def solve_oa(
         feasibility_before = feasibility_subproblem_count
         lb_before = _trace_value(LB)
         ub_before = _trace_value(UB)
+        reduction_cut_events: list[dict[str, object]] = []
+        reduction_cut_event = _maybe_add_primal_reduction_cut(iteration)
+        if reduction_cut_event is not None:
+            reduction_cut_events.append(reduction_cut_event)
         relaxation_phase_record = _shot_disabled_relaxation_trace()
         if (
             mip_nlp_profile == "shot"
@@ -5090,6 +5399,7 @@ def solve_oa(
                     "solution_pool_candidates": 0,
                     "node_count": 0,
                     "repair_actions": [],
+                    "reduction_cuts": reduction_cut_events,
                     "relaxation_phase": relaxation_phase_record,
                     "master_controls": {},
                     "termination_reason": termination_reason,
@@ -5137,6 +5447,7 @@ def solve_oa(
 
         from discopt.solvers import SolveStatus
 
+        repair_actions: list[dict[str, object]] = []
         if master_result is None:
             logger.info("OA: Master MILP failed at iteration %d", iteration)
             termination_reason = "master_error"
@@ -5161,6 +5472,7 @@ def solve_oa(
                     "solution_pool_candidates": 0,
                     "node_count": 0,
                     "repair_actions": [],
+                    "reduction_cuts": reduction_cut_events,
                     "relaxation_phase": relaxation_phase_record,
                     "master_controls": master_control_trace,
                     "termination_reason": termination_reason,
@@ -5201,6 +5513,7 @@ def solve_oa(
                     "solution_pool_candidates": 0,
                     "node_count": int(getattr(master_result, "node_count", 0) or 0),
                     "repair_actions": [],
+                    "reduction_cuts": reduction_cut_events,
                     "relaxation_phase": relaxation_phase_record,
                     "master_controls": master_control_trace,
                     "termination_reason": termination_reason,
@@ -5210,34 +5523,54 @@ def solve_oa(
 
         if master_result.status == SolveStatus.INFEASIBLE:
             logger.info("OA: Master MILP infeasible at iteration %d", iteration)
-            termination_reason = "master_infeasible"
-            trace_iterations.append(
-                {
-                    "index": int(iteration),
-                    "master_status": _trace_status(master_result.status),
-                    "lb_before": lb_before,
-                    "ub_before": ub_before,
-                    "lb": _trace_value(LB),
-                    "ub": _trace_value(UB),
-                    "gap": _trace_value(_compute_gap(LB, UB)),
-                    "cuts_added": int(len(oa_A_rows) - cuts_before),
-                    "cuts_total": int(len(oa_A_rows)),
-                    "provenance_cuts_added": int(len(cut_provenance.records) - provenance_before),
-                    "provenance_cuts_total": int(len(cut_provenance.records)),
-                    "cuts_added_by_source": _cut_source_delta(cut_source_counts_before),
-                    "nlp_subproblem_count": int(nlp_subproblem_count - nlp_before),
-                    "feasibility_subproblem_count": int(
-                        feasibility_subproblem_count - feasibility_before
-                    ),
-                    "solution_pool_candidates": 0,
-                    "node_count": int(getattr(master_result, "node_count", 0) or 0),
-                    "repair_actions": [],
-                    "relaxation_phase": relaxation_phase_record,
-                    "master_controls": master_control_trace,
-                    "termination_reason": termination_reason,
-                }
+            repaired_result, repair_action = _attempt_master_repair(
+                iteration=iteration,
+                master_objective_cutoff=master_objective_cutoff,
+                master_solution_limit=master_solution_limit,
+                elapsed=time.perf_counter() - t_start,
             )
-            break
+            repair_actions = [repair_action] if repair_action.get("attempted") else []
+            if repaired_result is None:
+                termination_reason = (
+                    "master_repair_loop"
+                    if repair_action.get("status") == "loop_detected"
+                    else (
+                        "master_infeasible_unrepaired"
+                        if repair_action.get("attempted")
+                        else "master_infeasible"
+                    )
+                )
+                trace_iterations.append(
+                    {
+                        "index": int(iteration),
+                        "master_status": _trace_status(master_result.status),
+                        "lb_before": lb_before,
+                        "ub_before": ub_before,
+                        "lb": _trace_value(LB),
+                        "ub": _trace_value(UB),
+                        "gap": _trace_value(_compute_gap(LB, UB)),
+                        "cuts_added": int(len(oa_A_rows) - cuts_before),
+                        "cuts_total": int(len(oa_A_rows)),
+                        "provenance_cuts_added": int(
+                            len(cut_provenance.records) - provenance_before
+                        ),
+                        "provenance_cuts_total": int(len(cut_provenance.records)),
+                        "cuts_added_by_source": _cut_source_delta(cut_source_counts_before),
+                        "nlp_subproblem_count": int(nlp_subproblem_count - nlp_before),
+                        "feasibility_subproblem_count": int(
+                            feasibility_subproblem_count - feasibility_before
+                        ),
+                        "solution_pool_candidates": 0,
+                        "node_count": int(getattr(master_result, "node_count", 0) or 0),
+                        "repair_actions": repair_actions,
+                        "reduction_cuts": reduction_cut_events,
+                        "relaxation_phase": relaxation_phase_record,
+                        "master_controls": master_control_trace,
+                        "termination_reason": termination_reason,
+                    }
+                )
+                break
+            master_result = repaired_result
 
         if master_result.status == SolveStatus.UNBOUNDED or master_result.x is None:
             # Master unbounded → need more OA cuts. Generate at midpoint.
@@ -5281,6 +5614,7 @@ def solve_oa(
                     "solution_pool_candidates": 0,
                     "node_count": int(getattr(master_result, "node_count", 0) or 0),
                     "repair_actions": [],
+                    "reduction_cuts": reduction_cut_events,
                     "relaxation_phase": relaxation_phase_record,
                     "master_controls": master_control_trace,
                     "termination_reason": "master_unbounded",
@@ -5387,7 +5721,8 @@ def solve_oa(
             "fixed_nlp_candidates": int(len(fixed_nlp_candidates)),
             "fixed_nlp_scheduler": fixed_nlp_manager.scheduler_trace(),
             "node_count": int(getattr(master_result, "node_count", 0) or 0),
-            "repair_actions": [],
+            "repair_actions": repair_actions,
+            "reduction_cuts": reduction_cut_events,
             "relaxation_phase": relaxation_phase_record,
             "master_controls": master_control_trace,
         }
