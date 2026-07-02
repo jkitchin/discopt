@@ -48,6 +48,13 @@ class SolveResult:
     root_gap: Optional[float] = None        # (UB - LB_root) / |UB| at root
     root_time: Optional[float] = None       # Time spent at root node
 
+    # Bound trajectory (cert:T0.2): downsampled (t, node, bound, incumbent)
+    # tuples recorded during the solve when trajectory recording is opted in.
+    # None when not recorded. ``t`` is elapsed seconds; ``bound`` is the best
+    # dual bound (non-decreasing for min sense); ``incumbent`` the best
+    # objective (None until the first incumbent is found).
+    trajectory: Optional[list[list[float]]] = None
+
     # Layer profiling (discopt-specific)
     rust_time_fraction: Optional[float] = None
     jax_time_fraction: Optional[float] = None

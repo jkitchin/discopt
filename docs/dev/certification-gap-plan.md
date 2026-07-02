@@ -111,7 +111,7 @@ experiment may run.
 | Task | Status | PR | Notes |
 |---|---|---|---|
 | T0.1 root_gap/root_time producer | done | (this PR) | Populated on all in-house B&B + convex-fast paths; bound-neutral (0 drift on 12 instances) |
-| T0.2 bound trajectory | not started | — | |
+| T0.2 bound trajectory | done | (this PR) | Opt-in recorder (default OFF — node_callback disables GP fast path); downsampled ≤500; monotone-t, bound-non-decreasing |
 | T0.3 reduction/separation timers | not started | — | |
 | T0.4 soundness harness | not started | — | |
 | T0.5 baseline + cert0 gate | not started | — | |
@@ -574,6 +574,21 @@ ratio metric skips nulls and no benchmark smoke row currently takes that path.
   `discopt_benchmarks/benchmarks/runner.py` that stores `(t, node, bound, incumbent)`
   tuples (downsampled, ≤ 500 points) into the result JSON under `trajectory`.
 - **Test:** trajectory present and monotone in `t`; bound non-decreasing (min sense).
+
+*Implementation note (done, this PR).* Added `record_trajectory` /
+`trajectory_max_points` to `BenchmarkConfig` and a `trajectory` field to
+`benchmarks.SolveResult`. When opted in, `_run_discopt` attaches a
+`node_callback` recording `[t, node, bound, incumbent]` per B&B iteration
+(`ctx.best_bound` is the tree's internal-min `global_lower_bound`, hence
+non-decreasing), then `_downsample_trajectory` caps it to ≤ `max_points`
+preserving both endpoints. **Default OFF**, and this is load-bearing for
+neutrality: attaching *any* `node_callback` disables discopt's auto-GP fast path
+(`solver.py` GP probe requires `not _has_bb_callbacks`), which would change
+`node_count` on geometric-program instances. Verified: `--suite smoke` node
+counts bit-identical to the T0.1 run with the recorder off (trajectory `null` on
+all rows); with it on, `gear` yields a 7-point trajectory, monotone in `t`,
+bound non-decreasing. Tests in
+`discopt_benchmarks/tests/test_cert_instrumentation.py`.
 
 **T0.3 — Reduction/separation timers.**
 - Rust: add `Fbbt` and `NodeReduce` phases to the `Phase` enum in

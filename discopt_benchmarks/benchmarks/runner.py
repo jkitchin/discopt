@@ -22,6 +22,21 @@ from benchmarks.metrics import (
 )
 
 
+def _downsample_trajectory(points: list, max_points: int) -> list:
+    """Downsample a bound trajectory to at most ``max_points`` entries.
+
+    Preserves the first and last points and takes a uniform stride over the
+    interior, so the time axis stays monotone and the endpoints (root bound,
+    final bound) are always retained.
+    """
+    n = len(points)
+    if max_points <= 0 or n <= max_points:
+        return list(points)
+    # Uniform indices across [0, n-1], inclusive of both endpoints.
+    idx = sorted({round(i * (n - 1) / (max_points - 1)) for i in range(max_points)})
+    return [points[i] for i in idx]
+
+
 @dataclass
 class SolverConfig:
     """Configuration for a solver executable."""
@@ -48,6 +63,12 @@ class BenchmarkConfig:
     solvers: list[SolverConfig] = None
     instance_filter: dict | None = None
     output_dir: Path = Path("reports")
+    # Opt-in bound-trajectory recording (cert:T0.2). Default OFF: attaching a
+    # node_callback disables discopt's GP fast path (solver.py auto-GP probe),
+    # which would change node_count on geometric-program instances — so the
+    # default (and every bound-neutrality baseline) runs without it.
+    record_trajectory: bool = False
+    trajectory_max_points: int = 500
 
     def __post_init__(self):
         if self.solvers is None:
@@ -251,6 +272,28 @@ class BenchmarkRunner:
             max_nodes = opts.pop("max_nodes", 100_000)
             opts.pop("gpu", None)  # legacy option, ignored
 
+            # Opt-in bound-trajectory recorder (cert:T0.2). Records
+            # (t, node, bound, incumbent) per B&B iteration into a list, then
+            # downsamples to <= trajectory_max_points after the solve. Off by
+            # default so the standard (bound-neutral) path is unchanged.
+            _traj: list[list] = []
+            if getattr(self.config, "record_trajectory", False):
+
+                def _traj_cb(ctx, _model, _sink=_traj) -> None:
+                    try:
+                        _sink.append(
+                            [
+                                float(ctx.elapsed_time),
+                                int(ctx.node_count),
+                                float(ctx.best_bound),
+                                (None if ctx.incumbent_obj is None else float(ctx.incumbent_obj)),
+                            ]
+                        )
+                    except Exception:
+                        pass
+
+                opts["node_callback"] = _traj_cb
+
             box: dict = {}
 
             def _do_solve() -> None:
@@ -303,6 +346,14 @@ class BenchmarkRunner:
             jax_frac = result.jax_time / wt if result.jax_time else None
             py_frac = result.python_time / wt if result.python_time else None
 
+            traj = (
+                _downsample_trajectory(
+                    _traj, getattr(self.config, "trajectory_max_points", 500)
+                )
+                if _traj
+                else None
+            )
+
             return SolveResult(
                 instance=instance,
                 solver=solver.name,
@@ -313,6 +364,7 @@ class BenchmarkRunner:
                 node_count=result.node_count or 0,
                 root_gap=getattr(result, "root_gap", None),
                 root_time=getattr(result, "root_time", None),
+                trajectory=traj,
                 rust_time_fraction=rust_frac,
                 jax_time_fraction=jax_frac,
                 python_time_fraction=py_frac,
