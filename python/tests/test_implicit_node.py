@@ -109,3 +109,26 @@ def test_nonconvergence_fails_model_solve():
     m.minimize((v[0] - 3.0) ** 2)
     r = m.solve(initial_solution={u: 4.0})
     assert r.status not in ("optimal", "feasible") or not bool(jnp.isfinite(r.objective))
+
+
+def test_model_method_form():
+    # m.implicit(...) (the Model-method form) matches the module-level builder.
+    m = dm.Model()
+    u = m.continuous("u", lb=0.1, ub=100.0)
+    v = m.implicit(_sqrt_residual, [u], n_unknowns=1, x0=jnp.array([1.0]))
+    m.minimize((v[0] - 3.0) ** 2)
+    r = m.solve(initial_solution={u: 4.0})
+    assert r.status in ("optimal", "feasible")
+    assert float(r.x["u"]) == pytest.approx(9.0, rel=1e-3)
+
+
+def test_multiple_u_inputs():
+    # Two scalar inputs feeding a block: v = u0 + u1 (u concatenated flat).
+    m = dm.Model()
+    a = m.continuous("a", lb=0.0, ub=10.0)
+    b = m.continuous("b", lb=0.0, ub=10.0)
+    v = m.implicit(lambda U, V: jnp.array([V[0] - (U[0] + U[1])]), [a, b], n_unknowns=1)
+    m.minimize((v[0] - 5.0) ** 2 + a**2)  # want a+b=5 with a small -> a~0, b~5
+    r = m.solve(initial_solution={a: 1.0, b: 1.0})
+    assert r.status in ("optimal", "feasible")
+    assert float(r.x["a"]) + float(r.x["b"]) == pytest.approx(5.0, abs=1e-2)

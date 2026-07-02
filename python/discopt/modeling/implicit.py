@@ -156,7 +156,14 @@ def implicit(
     phi = _implicit_solver(residual, x0, tol=tol, max_iter=max_iter)
 
     def solve_fn(*u_vals):
-        u = jnp.stack([jnp.asarray(x, dtype=float) for x in u_vals]) if u_vals else jnp.zeros(0)
+        # Flatten each input (scalar -> length 1, vector -> raveled) and
+        # concatenate, so ``u`` is a flat 1-D array of all dependency values.
+        if u_vals:
+            u = jnp.concatenate(
+                [jnp.atleast_1d(jnp.asarray(x, dtype=float)).ravel() for x in u_vals]
+            )
+        else:
+            u = jnp.zeros(0)
         return phi(u)
 
     return custom(solve_fn, name=name)(*u_inputs)
