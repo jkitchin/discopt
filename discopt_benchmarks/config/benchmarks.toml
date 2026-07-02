@@ -210,6 +210,16 @@ description = "Release gate (Month 48)"
   beats_bonmin = { min = 1.0, suite = "comparison", metric = "solve_count_ratio_vs_bonmin" }
   zero_incorrect = { max = 0, suite = "full", metric = "incorrect_count" }
 
+# Certification-gap plan (docs/dev/certification-gap-plan.md) phase gates.
+[gates.cert0]
+description = "Phase 0 → Phase 1 gate: certification observability (cert:T0.5)"
+
+  [gates.cert0.criteria]
+  # root_gap must be populated on >= 90% of rows so root_gap_ratio_vs_baron is
+  # evaluable (the T0.1 producer). Correctness stays a zero-slack gate.
+  root_gap_coverage = { min = 0.9, suite = "global50", metric = "root_gap_populated_fraction" }
+  zero_incorrect = { max = 0, suite = "global50", metric = "incorrect_count" }
+
 # ─────────────────────────────────────────────────────────────
 # SOLVER CONFIGURATIONS
 # ─────────────────────────────────────────────────────────────

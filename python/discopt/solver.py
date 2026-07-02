@@ -10725,6 +10725,43 @@ def _solve_milp_simplex(
         if np.isfinite(bound):
             bound_val = -bound if maximize else bound
             gap_val = abs(obj_val - bound_val) / (abs(obj_val) + 1e-10)
+
+        # Root-node certification metrics (cert:T0.1/T0.5). The one-shot Rust MILP
+        # driver runs the whole B&B internally, so there is no per-iteration root
+        # snapshot to read. Recover the root bound by solving the continuous
+        # relaxation (integers relaxed) over the root box — one extra LP solve,
+        # cheap on this fast path. Pure instrumentation: the returned incumbent /
+        # node_count are untouched, so the solve stays bound-neutral.
+        root_bound_val = None
+        root_gap_val = None
+        root_time_val = None
+        try:
+            _t_root = time.perf_counter()
+            _lp_status, _, _lp_obj, _lp_bound, _, _ = solve_milp_py(
+                np.ascontiguousarray(lp_data.c, dtype=np.float64),
+                A,
+                np.ascontiguousarray(lp_data.b_eq, dtype=np.float64),
+                np.ascontiguousarray(lp_data.x_l, dtype=np.float64),
+                np.ascontiguousarray(lp_data.x_u, dtype=np.float64),
+                np.ascontiguousarray(np.empty(0, dtype=np.int64)),  # integers relaxed
+                n_orig,
+                float(lp_data.obj_const),
+                1000,  # a relaxed (integer-free) LP solves at the root; headroom to finalize
+                float(gap_tolerance),
+                time_limit_s=float(max(0.1, min(_milp_budget, 5.0))),
+            )
+            root_time_val = time.perf_counter() - _t_root
+            if (
+                _lp_status in ("optimal", "feasible")
+                and _lp_obj is not None
+                and np.isfinite(_lp_obj)
+            ):
+                root_bound_val = -_lp_obj if maximize else _lp_obj
+                if obj_val is not None and np.isfinite(obj_val):
+                    root_gap_val = abs(obj_val - root_bound_val) / max(1.0, abs(obj_val))
+        except Exception as _e:  # pragma: no cover - defensive
+            logger.debug("root LP relaxation bound failed: %s", _e)
+
         return SolveResult(
             status=status,
             objective=obj_val,
@@ -10733,6 +10770,9 @@ def _solve_milp_simplex(
             x=x_dict,
             wall_time=wall_time,
             node_count=nodes,
+            root_bound=root_bound_val,
+            root_gap=root_gap_val,
+            root_time=root_time_val,
             gap_certified=status == "optimal",
         )
     if status == "unbounded":

@@ -420,6 +420,20 @@ def root_gap_analysis(
     }
 
 
+def root_gap_populated_fraction(results: list[SolveResult]) -> float:
+    """Fraction of discopt rows carrying a non-null ``root_gap`` (cert:T0.5).
+
+    The Phase 0 exit metric: with the T0.1 producer wired, ``root_gap`` must be
+    populated on ≥ 90% of rows so ``root_gap_ratio_vs_baron`` is evaluable. The
+    denominator is every row (so an unpopulated timeout/error counts against
+    coverage); returns 0.0 for an empty set.
+    """
+    if not results:
+        return 0.0
+    populated = sum(1 for r in results if r.root_gap is not None)
+    return populated / len(results)
+
+
 def root_gap_ratio(
     results_a: list[SolveResult],
     results_b: list[SolveResult],
@@ -730,6 +744,8 @@ def evaluate_phase_gate(
             ref_solver = metric.replace("geomean_ratio_vs_", "")
             if reference_solvers and ref_solver in reference_solvers:
                 actual = geometric_mean_ratio(discopt_results, reference_solvers[ref_solver])
+        elif metric == "root_gap_populated_fraction":
+            actual = root_gap_populated_fraction(discopt_results)
         elif metric.startswith("root_gap_ratio_vs_"):
             ref_solver = metric.replace("root_gap_ratio_vs_", "")
             if reference_solvers and ref_solver in reference_solvers:
