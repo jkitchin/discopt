@@ -186,7 +186,11 @@ When `master_repair=True`, an infeasible SHOT-profile master triggers one native
 repair retry with objective-cutoff and solution-limit controls reset and shared
 master cut slacks enabled. The retry outcome is recorded in each iteration's
 `repair_actions`; repeated repaired integer assignments are reported as repair
-loops rather than cycled indefinitely. With `reduction_cuts=True`, nonconvex
+loops rather than cycled indefinitely. Repair is intentionally not restricted to
+nonconvex heuristic masters: in convex runs it only relaxes relaxable OA cuts
+through penalized slacks, and repaired integer assignments are still validated by
+fixed-NLP subproblems before they can become incumbents. With
+`reduction_cuts=True`, nonconvex
 heuristic runs with a known incumbent can add a strict linear objective cutoff
 row when the master objective row is exact. These reduction cuts are traced as
 local, non-global cuts, so reported bounds remain heuristic unless a separate
