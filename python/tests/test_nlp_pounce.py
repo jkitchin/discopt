@@ -315,3 +315,105 @@ class TestMaximize:
         result = solve_nlp_from_model(m)
         assert result.status == SolveStatus.OPTIMAL
         assert abs(result.x[0] - 5.0) < 1e-5
+
+
+# ─────────────────────────────────────────────────────────────
+# Test 10: Structure-aware KKT passthroughs (kkt_schur_block / ordering)
+# ─────────────────────────────────────────────────────────────
+
+
+class TestSchurPassthrough:
+    def _eq_model(self):
+        """min x^2 + y^2 s.t. x + y == 2 => optimal at (1, 1). n=2, m=1."""
+        m = Model("schur_eq")
+        x = m.continuous("x", lb=-10, ub=10)
+        y = m.continuous("y", lb=-10, ub=10)
+        m.minimize(x**2 + y**2)
+        m.subject_to(x + y == 2)
+        return m
+
+    def test_kkt_schur_block_forwarded_to_problem(self, monkeypatch):
+        """The block reaches pounce.Problem.set_kkt_schur_block verbatim."""
+        captured = {}
+        original_problem = pounce.Problem
+
+        def make_problem(*args, **kwargs):
+            prob = original_problem(*args, **kwargs)
+            if hasattr(prob, "set_kkt_schur_block"):
+                orig = prob.set_kkt_schur_block
+
+                def spy(block):
+                    captured["block"] = list(block)
+                    return orig(block)
+
+                monkeypatch.setattr(prob, "set_kkt_schur_block", spy, raising=False)
+            else:
+                captured["no_method"] = True
+            return prob
+
+        monkeypatch.setattr(pounce, "Problem", make_problem)
+
+        m = self._eq_model()
+        # KKT dim = n + m = 3; all-duals block [n, n+m) = [2].
+        result = solve_nlp_from_model(m, x0=np.array([3.0, 1.0]), kkt_schur_block=[2])
+
+        assert result.status == SolveStatus.OPTIMAL
+        assert np.allclose(result.x, [1.0, 1.0], atol=1e-5)
+        if "no_method" not in captured:
+            assert captured.get("block") == [2]
+
+    def test_solution_unchanged_with_schur_block(self):
+        """Installing a Schur block must not change the solution (fallback-safe)."""
+        m = self._eq_model()
+        baseline = solve_nlp_from_model(m, x0=np.array([3.0, 1.0]))
+        schur = solve_nlp_from_model(m, x0=np.array([3.0, 1.0]), kkt_schur_block=[2])
+
+        assert schur.status == baseline.status == SolveStatus.OPTIMAL
+        assert np.allclose(schur.x, baseline.x, atol=1e-6)
+        assert abs(schur.objective - baseline.objective) < 1e-8
+
+    def test_none_block_is_noop(self):
+        """kkt_schur_block=None behaves exactly like omitting it."""
+        m = self._eq_model()
+        result = solve_nlp_from_model(
+            m, x0=np.array([3.0, 1.0]), kkt_schur_block=None, ordering=None
+        )
+        assert result.status == SolveStatus.OPTIMAL
+        assert np.allclose(result.x, [1.0, 1.0], atol=1e-5)
+
+    def test_unsuitable_block_falls_back(self):
+        """A nonsensical block must not corrupt the solve (pounce fallback)."""
+        m = self._eq_model()
+        # Out-of-range / garbage indices: pounce should reject or ignore and
+        # still return the correct solution via the full-space path.
+        result = solve_nlp_from_model(m, x0=np.array([3.0, 1.0]), kkt_schur_block=[999])
+        assert result.status == SolveStatus.OPTIMAL
+        assert np.allclose(result.x, [1.0, 1.0], atol=1e-5)
+
+    def test_ordering_forwarded(self, monkeypatch):
+        """ordering reaches pounce.Problem.set_ordering when supported."""
+        captured = {}
+        original_problem = pounce.Problem
+
+        def make_problem(*args, **kwargs):
+            prob = original_problem(*args, **kwargs)
+            if hasattr(prob, "set_ordering"):
+                orig = prob.set_ordering
+
+                def spy(order):
+                    captured["order"] = list(order)
+                    return orig(order)
+
+                monkeypatch.setattr(prob, "set_ordering", spy, raising=False)
+            else:
+                captured["no_method"] = True
+            return prob
+
+        monkeypatch.setattr(pounce, "Problem", make_problem)
+
+        m = self._eq_model()
+        result = solve_nlp_from_model(m, x0=np.array([3.0, 1.0]), ordering=[0, 1, 2])
+
+        assert result.status == SolveStatus.OPTIMAL
+        if "no_method" not in captured:
+            assert captured.get("order") == [0, 1, 2]
