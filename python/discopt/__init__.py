@@ -25,7 +25,7 @@ solvers
     NLP solver backends: POUNCE (pure-Rust Ipopt port), pure-JAX IPM (vmap batch), cyipopt (Ipopt).
 """
 
-__version__ = "0.5.0"
+__version__ = "0.5.1.dev0"
 
 # Allow external distributions (e.g. the ``discopt-aggregation`` plugin) to
 # contribute submodules under the ``discopt`` namespace from a separate location
