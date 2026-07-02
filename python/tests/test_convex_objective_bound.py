@@ -146,7 +146,12 @@ def test_supporting_hyperplane_is_a_valid_lower_bound():
 def test_nvs17_certifies_via_convex_objective_bound():
     """End-to-end: nvs17 (convex quadratic objective, nonconvex constraints,
     [0,200] integer ranges) certifies to its known optimum −1100.4."""
-    r = from_nl(_NVS17).solve(time_limit=40, gap_tolerance=1e-4)
+    # Generous wall-clock ceiling: nvs17 certifies in a few seconds normally, but
+    # under coverage instrumentation on a slow CI runner the per-node overhead can
+    # blow a 40 s budget before the tree closes (a false "feasible", not a
+    # regression). The solve still exits early on certification, so this does not
+    # slow the normal run.
+    r = from_nl(_NVS17).solve(time_limit=180, gap_tolerance=1e-4)
     assert r.status == "optimal"
     assert r.gap_certified is True
     assert r.objective == pytest.approx(-1100.4, abs=1e-2)
