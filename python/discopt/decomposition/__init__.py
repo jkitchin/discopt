@@ -17,6 +17,30 @@ which resolves user annotations (``model.first_stage(...)``,
 
 from __future__ import annotations
 
+from discopt.decomposition.advisor import (
+    Candidate as Candidate,
+)
+from discopt.decomposition.advisor import (
+    DecompositionAdvisor as DecompositionAdvisor,
+)
+from discopt.decomposition.advisor import (
+    Explanation as Explanation,
+)
+from discopt.decomposition.advisor import (
+    MethodKind as MethodKind,
+)
+from discopt.decomposition.advisor import (
+    ScoreVector as ScoreVector,
+)
+from discopt.decomposition.advisor import (
+    Soundness as Soundness,
+)
+from discopt.decomposition.advisor import (
+    StructureReport as StructureReport,
+)
+from discopt.decomposition.advisor import (
+    analyze_decomposition as analyze_decomposition,
+)
 from discopt.decomposition.benders import (
     BendersConfig as BendersConfig,
 )
@@ -26,11 +50,41 @@ from discopt.decomposition.benders import (
 from discopt.decomposition.benders import (
     solve_gbd as solve_gbd,
 )
+from discopt.decomposition.ir import (
+    DecomposedModel as DecomposedModel,
+)
+from discopt.decomposition.ir import (
+    SoundnessCertificate as SoundnessCertificate,
+)
+from discopt.decomposition.ir import (
+    build_decomposition as build_decomposition,
+)
 from discopt.decomposition.lagrangian import (
     LagrangianConfig as LagrangianConfig,
 )
 from discopt.decomposition.lagrangian import (
     solve_lagrangian as solve_lagrangian,
+)
+from discopt.decomposition.learning import (
+    InstanceBasedPolicy as InstanceBasedPolicy,
+)
+from discopt.decomposition.learning import (
+    RecordStore as RecordStore,
+)
+from discopt.decomposition.learning import (
+    SolveRecord as SolveRecord,
+)
+from discopt.decomposition.learning import (
+    record_outcome as record_outcome,
+)
+from discopt.decomposition.parallel import (
+    SchedulingGraph as SchedulingGraph,
+)
+from discopt.decomposition.parallel import (
+    SequentialComm as SequentialComm,
+)
+from discopt.decomposition.parallel import (
+    ThreadPoolComm as ThreadPoolComm,
 )
 from discopt.decomposition.structure import (
     DecompositionStructure as DecompositionStructure,
@@ -47,10 +101,28 @@ from discopt.decomposition.structure import (
 
 __all__ = [
     "BendersConfig",
+    "Candidate",
+    "DecompositionAdvisor",
     "DecompositionStructure",
+    "DecomposedModel",
+    "Explanation",
+    "InstanceBasedPolicy",
     "LagrangianConfig",
+    "MethodKind",
+    "RecordStore",
+    "ScoreVector",
+    "SchedulingGraph",
+    "SequentialComm",
+    "SolveRecord",
+    "Soundness",
+    "SoundnessCertificate",
+    "StructureReport",
+    "ThreadPoolComm",
+    "analyze_decomposition",
+    "build_decomposition",
     "detect_decomposition",
     "flat_bounds",
+    "record_outcome",
     "restricted_bounds",
     "solve_benders",
     "solve_gbd",
