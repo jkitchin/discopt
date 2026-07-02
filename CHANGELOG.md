@@ -14,6 +14,14 @@ The release procedure that produces these entries is documented in
 
 ### Added
 
+- **Implicit-function expression node** (`feat(modeling)`, #379). `m.implicit(
+  residual, u_inputs, n_unknowns, x0=)` defines a vector `v` by a square system
+  `g(u, v) = 0`, compiled to a differentiable JAX inner solve (Newton forward;
+  implicit-function-theorem derivatives via `jax.lax.custom_root`, which supports
+  the higher-order AD the NLP Hessian needs). Rides on `CustomCall`, so it is
+  **local-NLP-only** (no global certificate) and rejects integers. The core-side
+  primitive for implicit variable-aggregation of irreducible cyclic blocks;
+  documented in `docs/notebooks/implicit_function_node.ipynb`.
 - **Hardened pure-Rust LP engine** (`feat(lp)`, #368). Numeric-focus LU with
   in-engine iterative refinement and condition/growth signals (via `feral`
   0.12.0), primal + dual refined recovery on a drifted-Optimal, dual-simplex
