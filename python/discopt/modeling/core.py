@@ -3483,10 +3483,12 @@ class SolveUpdate:
 
 def from_pyomo(pyomo_model) -> Model:
     """
-    Import a Pyomo ConcreteModel as a discopt Model.
+    Import a Pyomo ``ConcreteModel`` as a discopt :class:`Model`.
 
-    Supports Var, Constraint, Objective, Param, Set.
-    GDP (Disjunct/Disjunction) is mapped to :meth:`Model.either_or`.
+    The bridge round-trips the Pyomo model through a temporary AMPL ``.nl`` file
+    (the same translation the ``SolverFactory('discopt')`` plugin uses) and reads
+    it back with :func:`from_nl`. Continuous, integer and binary variables,
+    linear/nonlinear constraints, and the objective are supported.
 
     Parameters
     ----------
@@ -3496,13 +3498,50 @@ def from_pyomo(pyomo_model) -> Model:
     Returns
     -------
     Model
+        A discopt ``Model`` ready to ``.solve()``. Its variables/constraints are
+        in the ``.nl`` column/row order, which may differ from the Pyomo model's
+        declaration order.
 
     Raises
     ------
-    NotImplementedError
-        Pyomo import is a Phase 4 feature.
+    ImportError
+        If Pyomo is not installed (``pip install discopt[pyomo]``).
+    ValueError
+        If the Pyomo model has no variables to import.
+
+    Examples
+    --------
+    >>> import pyomo.environ as pyo
+    >>> m = pyo.ConcreteModel()
+    >>> m.x = pyo.Var(bounds=(0, 10))
+    >>> m.obj = pyo.Objective(expr=(m.x - 3) ** 2)
+    >>> dmodel = dm.from_pyomo(m)  # doctest: +SKIP
+    >>> dmodel.solve().objective  # doctest: +SKIP
+    0.0
     """
-    raise NotImplementedError("Pyomo import requires pyomo bridge (Phase 4)")
+    try:
+        import pyomo.environ  # noqa: F401
+    except ImportError as exc:  # pragma: no cover - exercised only without pyomo
+        raise ImportError(
+            "from_pyomo requires Pyomo. Install it with 'pip install discopt[pyomo]'."
+        ) from exc
+
+    import os
+    import tempfile
+
+    from discopt.pyomo import _writer
+
+    # Round-trip through a temporary .nl file. write_nl disables presolve/scaling so
+    # the emitted columns are exactly the model's variables in the original space,
+    # which is what from_nl reconstructs into a discopt Model.
+    with tempfile.TemporaryDirectory(prefix="discopt_from_pyomo_") as workdir:
+        nl_path = os.path.join(workdir, "model.nl")
+        cols, _rows, _eliminated = _writer.write_nl(pyomo_model, nl_path)
+        if not cols:
+            raise ValueError(
+                "from_pyomo: the Pyomo model has no variables to import (nothing to solve)."
+            )
+        return from_nl(nl_path)
 
 
 def from_nl(path: str) -> Model:

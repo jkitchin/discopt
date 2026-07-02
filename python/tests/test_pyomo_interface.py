@@ -135,6 +135,64 @@ def test_duals_when_exposed(opt):
     assert d == pytest.approx(2.0, abs=1e-3)
 
 
+def test_from_pyomo_matches_solver_plugin(opt):
+    """`from_pyomo(m).solve()` must reach the same optimum as `SolverFactory('discopt')`
+    on the same model (the issue #381 round-trip acceptance test)."""
+    import discopt.modeling as dm
+
+    # Reference: solve via the registered Pyomo solver plugin.
+    m_ref = _tiny_minlp()
+    res = opt.solve(m_ref)
+    assert res.solver.termination_condition == pyo.TerminationCondition.optimal
+    ref_obj = pyo.value(m_ref.obj)
+
+    # Import the same model into a discopt Model and solve natively.
+    m_imp = _tiny_minlp()
+    dmodel = dm.from_pyomo(m_imp)
+    assert isinstance(dmodel, dm.Model)
+    r = dmodel.solve(time_limit=30, gap_tolerance=1e-4)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(ref_obj, rel=1e-4, abs=1e-6)
+    assert r.objective == pytest.approx(1.0, abs=1e-3)
+
+
+def test_from_pyomo_indexed_transportation():
+    """A small indexed (Var/Constraint over sets) LP imports and solves correctly."""
+    import discopt.modeling as dm
+
+    supply = {0: 20.0, 1: 30.0}
+    demand = {0: 10.0, 1: 25.0, 2: 15.0}
+    cost = {(0, 0): 2.0, (0, 1): 3.0, (0, 2): 1.0, (1, 0): 5.0, (1, 1): 4.0, (1, 2): 8.0}
+
+    m = pyo.ConcreteModel()
+    m.P = pyo.RangeSet(0, 1)
+    m.K = pyo.RangeSet(0, 2)
+    m.ship = pyo.Var(m.P, m.K, domain=pyo.NonNegativeReals)
+    m.obj = pyo.Objective(expr=sum(cost[i, j] * m.ship[i, j] for i in m.P for j in m.K))
+    m.sup = pyo.Constraint(m.P, rule=lambda mm, i: sum(mm.ship[i, j] for j in mm.K) <= supply[i])
+    m.dem = pyo.Constraint(m.K, rule=lambda mm, j: sum(mm.ship[i, j] for i in mm.P) >= demand[j])
+
+    dmodel = dm.from_pyomo(m)
+    r = dmodel.solve(time_limit=30, gap_tolerance=1e-4)
+    assert r.status == "optimal"
+
+    # Independent reference via the registered plugin.
+    opt = pyo.SolverFactory("discopt")
+    m2 = m.clone()
+    opt.solve(m2)
+    assert r.objective == pytest.approx(pyo.value(m2.obj), rel=1e-4, abs=1e-6)
+
+
+def test_from_pyomo_no_variables_raises():
+    """A variable-free Pyomo model has nothing to import -> ValueError."""
+    import discopt.modeling as dm
+
+    m = pyo.ConcreteModel()
+    m.o = pyo.Objective(expr=1.0)
+    with pytest.raises(ValueError, match="no variables"):
+        dm.from_pyomo(m)
+
+
 def test_duals_graceful_for_integer_model(opt):
     """Solving an integer model with a `dual` Suffix declared must not error,
     whether or not discopt exposes multipliers (it may surface relaxation duals).
