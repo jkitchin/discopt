@@ -85,6 +85,9 @@ from discopt.modeling.core import (
 from discopt.modeling.core import (
     abs_ as abs,
 )
+from discopt.modeling.implicit import (
+    implicit,
+)
 from discopt.modeling.indexed import (
     IndexedConstraint,
     IndexedParam,
@@ -127,6 +130,7 @@ __all__ = [
     "if_else",
     "udf",
     "custom",
+    "implicit",
     "CustomCall",
     "sum",
     "prod",
