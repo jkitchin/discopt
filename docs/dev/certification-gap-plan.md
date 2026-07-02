@@ -117,7 +117,7 @@ experiment may run.
 | T0.5 baseline + cert0 gate | done | (this PR) | cert-baseline.jsonl (global50+panel, 55 rows); [gates.cert0] passes: coverage 0.909 ≥ 0.90, incorrect 0. Phase 0 complete |
 | T1.1 entry experiment (kill criterion) | done (kill did NOT fire) | (this PR) | All uncovered families are closed-form box-affine → proceed to T1.2. Bonus: engine already validates on mixed int+cont (ex1263) and maximize |
 | T1.2 patch-table term coverage | in progress — monomial family landed | (this PR) | Dir. (a) differential neutrality. Steps 0–1 done: 42-row robust baseline + differential-neutrality checker + monomial p≥2 coverage (NEUTRAL: sound on all 42, node-improving; nvs17 perf-gated pending T1.4). Remaining families (trilinear/univariate/fractional) + T1.4 warm-start under parallel derivation |
-| T1.3 scope-gate widening | not started | — | blocked by T1.2 |
+| T1.3 scope-gate widening | **BLOCKED — re-scope (§14)** | — | Gate flip is sound but explodes separation-reliant spatial models (dispatch 3→9843); fast path skips per-node separation. Reverted. Needs refreshed-inherited-pool design (option b). Neutrality infra caught it |
 | T1.4 basis inheritance | root cause found; elevated priority | — | Warm-start rejected because coefficient-patch makes parent basis dual-infeasible (dual.rs:225-247→cold). Fix scoped (§14); caveat: dual-infeasible start likely needs phase-1/bound-flip, not a straight run_dual hand-off — verify before coding. Gates T1.2 wall benefit |
 | T1.5 evaluator-cache routing | not started | — | |
 | T1.6 bookkeeping → Rust | not started | — | blocked by T1.5 profile |
@@ -920,6 +920,40 @@ when `ok=False`.
 - **Test:** the certifying panel solves with *exactly unchanged* node_count and
   objective vs `cert-baseline.jsonl` (bound-neutral regime, §3); wall ↓ on the
   spatial class.
+
+> **BLOCKED — re-scope required (2026-07-02, §0.4). The gate flip is sound but
+> not viable as written; the differential-neutrality check caught why.** I
+> widened the gate to `ok`-only for any model (`mccormick_lp.py` incremental
+> probe). It is *sound* — the fast path is a valid `≤`-cold McCormick LP bound,
+> and uncovered terms → `ok=False` → cold fallback — and it correctly activated
+> on continuous/mixed/maximize bilinear models while falling back on univariate.
+> But the neutrality check flagged a **catastrophic bound-weakening regression**:
+> `dispatch` went **3 → 9843 nodes** (feasible, not optimal; objective still
+> correct to 4.6e-13). Root cause: `solve_at_node` returns the fast-path result
+> *before* the per-node **separation chain** (multilinear / edge-concave /
+> univariate-square / convex / PSD / RLT cuts, `mccormick_lp.py:708-731`) — see
+> the early `return _fast` at `:574`. `_try_incremental_node` assembles and solves
+> the LP directly and never builds the `milp`/`varmap` object the `_separate_*`
+> methods require, so it **cannot cheaply carry per-node separation** (that is the
+> whole point of skipping the cold build). The pure-integer class (#355) tolerated
+> this because the inherited root cut pool sufficed; the **spatial class relies on
+> per-node separation**, so its bound collapses without it. Bilinear-dominated
+> models that don't need separation (ex1221/ex8_1_1/ex1226) were node-identical —
+> the failure is specifically separation-reliant models.
+>
+> Gate reverted to pure-integer/minimize. **Re-scope options (needs a design
+> decision — architectural, higher risk than the gate flip):**
+> (a) give the fast path per-node separation by exposing a separation-compatible
+> view of the patched LP (partially defeats the no-cold-build speedup);
+> (b) a **refreshed inherited pool** — cold-build + separate every K nodes, replay
+> the captured cut pool on the incremental nodes in between (amortizes separation;
+> the `out_cuts`/`inherited_cuts` plumbing already exists);
+> (c) a per-model gate that engages the fast path only for separation-light models
+> (bilinear-dominated, no edge-concave/PSD/multilinear structure). (b) looks most
+> promising and keeps soundness (fewer/stale cuts only loosen the bound, and
+> `_validate` still guards the base rows). Positive: **the direction-(a)
+> differential-neutrality infra worked as designed** — it caught a
+> would-have-shipped regression before commit.
 
 **T1.4 — Basis inheritance on the general path.**
 Thread the parent basis through node solves (the Rust side already supports it:

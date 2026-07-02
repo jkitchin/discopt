@@ -347,6 +347,17 @@ class MccormickLPRelaxer:
                 # construction the opt-in LP-node engine ships and trusts. Outside
                 # it (e.g. mixed-integer NN/tree embeddings), the dense patch can be
                 # an unsound relaxation, so we keep those on the cold build.
+                #
+                # cert:T1.3 attempted to widen this to gate only on ``ok`` for any
+                # model. That is *sound* (the fast path is a valid ≤-cold McCormick
+                # bound) but NOT viable for the general spatial class: the fast path
+                # returns before the per-node separation chain (multilinear/
+                # edge-concave/PSD/RLT cuts), so a separation-reliant model's bound
+                # collapses and the tree explodes (measured: ``dispatch`` 3 → 9843
+                # nodes, feasible not optimal). The differential-neutrality check
+                # caught it. Re-scoping the fast path to carry per-node separation
+                # (or a refreshed inherited pool) is tracked under T1.3 in
+                # docs/dev/certification-gap-plan.md before widening this gate.
                 if _inc_in_scope(model):
                     _inc = IncrementalMcCormickLP(model, self._terms)
                     if _inc.ok:
