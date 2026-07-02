@@ -29,17 +29,26 @@ from discopt.modeling.core import Expression, custom
 def _implicit_solver(
     residual: Callable,
     x0,
-    newton_iters: int = 30,
+    *,
+    tol: float = 1e-10,
+    max_iter: int = 50,
 ) -> Callable:
     """Build the JAX callable ``phi(u) -> v`` solving ``residual(u, v) = 0``.
 
-    Forward: fixed-iteration Newton from ``x0``.  Derivatives w.r.t. ``u`` come
-    from :func:`jax.lax.custom_root`, which differentiates the root through the
-    implicit-function theorem (one linear solve with the block Jacobian) *and*
-    supports higher-order AD -- so the NLP solver's Hessian (forward-over-reverse
-    through this node) works, which a hand-rolled ``custom_vjp`` (reverse only)
-    would break.  Exposed separately from :func:`implicit` so the numerics are
-    unit-testable without building a full model.
+    Forward: convergence-based Newton from ``x0`` with two gates the issue
+    requires -- a **nonsingular-Jacobian** gate (a non-finite Newton step means a
+    singular/ill-conditioned block) and a **convergence** gate (residual must
+    reach ``tol`` within ``max_iter``).  On either failure the solve returns
+    ``NaN``: we cannot raise inside a JAX-traced solve, so the failure propagates
+    into the objective/constraint value and the NLP solver reports it as a failed
+    evaluation rather than silently returning a wrong root.
+
+    Derivatives w.r.t. ``u`` come from :func:`jax.lax.custom_root`, which
+    differentiates the root through the implicit-function theorem (one linear
+    solve with the block Jacobian) *and* supports higher-order AD -- so the NLP
+    solver's Hessian (forward-over-reverse through this node) works, which a
+    hand-rolled ``custom_vjp`` (reverse only) would break.  Exposed separately
+    from :func:`implicit` so the numerics are unit-testable without a full model.
     """
     import jax
     import jax.numpy as jnp
@@ -51,10 +60,21 @@ def _implicit_solver(
             return jnp.asarray(residual(u, v), dtype=float)
 
         def solve(f, y0):
-            def body(_, v):
-                return v - jnp.linalg.solve(jax.jacobian(f)(v), f(v))
+            def cond(state):
+                _, it, rnorm, ok = state
+                return (rnorm > tol) & (it < max_iter) & ok
 
-            return jax.lax.fori_loop(0, newton_iters, body, y0)
+            def body(state):
+                v, it, _, _ = state
+                step = jnp.linalg.solve(jax.jacobian(f)(v), f(v))
+                ok = jnp.all(jnp.isfinite(step))  # nonsingular-Jacobian gate
+                v_new = v - step
+                return (v_new, it + 1, jnp.linalg.norm(f(v_new)), ok)
+
+            state0 = (y0, 0, jnp.linalg.norm(f(y0)), jnp.bool_(True))
+            v, _, rnorm, ok = jax.lax.while_loop(cond, body, state0)
+            converged = ok & jnp.isfinite(rnorm) & (rnorm <= tol)
+            return jnp.where(converged, v, jnp.full_like(v, jnp.nan))
 
         def tangent_solve(g, y):  # g is the (linear) JVP of f; solve J z = y
             jac = jax.jacobian(g)(jnp.zeros_like(y))
@@ -71,7 +91,8 @@ def implicit(
     n_unknowns: int,
     x0=None,
     *,
-    newton_iters: int = 30,
+    tol: float = 1e-10,
+    max_iter: int = 50,
     name: str = "implicit",
 ) -> Expression:
     """Define ``v`` (length ``n_unknowns``) implicitly by ``residual(u, v) = 0``.
@@ -90,8 +111,11 @@ def implicit(
     x0 : array-like, optional
         Initial guess for the Newton solve (default zeros of length
         ``n_unknowns``).
-    newton_iters : int
-        Fixed Newton iterations for the forward solve.
+    tol : float
+        Residual tolerance for the forward Newton solve.
+    max_iter : int
+        Maximum Newton iterations; exceeding it without reaching ``tol`` is a
+        non-convergence failure (propagated as ``NaN``).
     name : str
         Display name used in reprs/errors.
 
@@ -100,12 +124,36 @@ def implicit(
     Expression
         A :class:`CustomCall` node evaluating to the solved ``v`` vector; index
         it (``node[i]``) for components.  Local-NLP-only, no global certificate.
+
+    Raises
+    ------
+    ValueError
+        If ``n_unknowns < 1``, ``x0`` has the wrong length, or ``residual``
+        probed at a dummy point does not return exactly ``n_unknowns`` entries.
     """
     import jax.numpy as jnp
 
+    if n_unknowns < 1:
+        raise ValueError(f"n_unknowns must be >= 1, got {n_unknowns}")
     if x0 is None:
         x0 = jnp.zeros(n_unknowns, dtype=float)
-    phi = _implicit_solver(residual, x0, newton_iters=newton_iters)
+    x0 = jnp.asarray(x0, dtype=float)
+    if x0.shape != (n_unknowns,):
+        raise ValueError(f"x0 must have shape ({n_unknowns},), got {tuple(x0.shape)}")
+
+    # Best-effort build-time shape check: the residual must return n_unknowns
+    # entries.  Probe at a dummy point; if the probe itself errors (residual not
+    # defined there) defer to runtime rather than false-failing.
+    try:
+        probe = jnp.asarray(residual(jnp.zeros(len(u_inputs)), x0), dtype=float)
+    except Exception:
+        probe = None
+    if probe is not None and probe.shape != (n_unknowns,):
+        raise ValueError(
+            f"residual must return {n_unknowns} entries, got shape {tuple(probe.shape)}"
+        )
+
+    phi = _implicit_solver(residual, x0, tol=tol, max_iter=max_iter)
 
     def solve_fn(*u_vals):
         u = jnp.stack([jnp.asarray(x, dtype=float) for x in u_vals]) if u_vals else jnp.zeros(0)

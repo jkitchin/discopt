@@ -71,3 +71,41 @@ def test_integers_are_rejected():
     m.minimize((v[0] - 3.0) ** 2)
     with pytest.raises(Exception):
         m.solve()
+
+
+def test_nonconvergence_returns_nan():
+    # v**2 + u = 0 has no real root for u > 0 -> Newton cannot converge -> NaN,
+    # so the failure propagates instead of returning a wrong finite root.
+    phi = _implicit_solver(lambda u, v: jnp.array([v[0] ** 2 + u[0]]), x0=jnp.array([1.0]))
+    v = phi(jnp.array([4.0]))
+    assert not bool(jnp.isfinite(v[0]))
+
+
+def test_singular_jacobian_returns_nan():
+    # residual independent of v -> dg/dv = 0 (singular block) -> non-finite step
+    # -> nonsingular-Jacobian gate trips -> NaN.
+    phi = _implicit_solver(lambda u, v: jnp.array([u[0] - 1.0]), x0=jnp.array([1.0]))
+    v = phi(jnp.array([4.0]))
+    assert not bool(jnp.isfinite(v[0]))
+
+
+def test_build_time_shape_check():
+    # residual returns 2 entries but n_unknowns=1 -> caught at build time.
+    with pytest.raises(ValueError):
+        dm.implicit(lambda u, v: jnp.array([v[0] - 1.0, v[0]]), [], n_unknowns=1)
+    # bad x0 length
+    with pytest.raises(ValueError):
+        dm.implicit(_sqrt_residual, [], n_unknowns=1, x0=jnp.zeros(2))
+
+
+def test_nonconvergence_fails_model_solve():
+    # A model whose implicit block cannot converge should not report a clean
+    # optimum with a bogus value; the NaN poisons the objective.
+    m = dm.Model()
+    u = m.continuous("u", lb=1.0, ub=10.0)
+    v = dm.implicit(
+        lambda U, V: jnp.array([V[0] ** 2 + U[0]]), [u], n_unknowns=1, x0=jnp.array([1.0])
+    )
+    m.minimize((v[0] - 3.0) ** 2)
+    r = m.solve(initial_solution={u: 4.0})
+    assert r.status not in ("optimal", "feasible") or not bool(jnp.isfinite(r.objective))
