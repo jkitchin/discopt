@@ -119,7 +119,7 @@ experiment may run.
 | T1.2 patch-table term coverage | in progress — monomial family landed | (this PR) | Dir. (a) differential neutrality. Steps 0–1 done: 42-row robust baseline + differential-neutrality checker + monomial p≥2 coverage (NEUTRAL: sound on all 42, node-improving; nvs17 perf-gated pending T1.4). Remaining families (trilinear/univariate/fractional) + T1.4 warm-start under parallel derivation |
 | T1.3 scope-gate widening | **BLOCKED — re-scope (§14)** | — | Gate flip is sound but explodes separation-reliant spatial models (dispatch 3→9843); fast path skips per-node separation. Reverted. Needs refreshed-inherited-pool design (option b). Neutrality infra caught it |
 | T1.4 basis inheritance | root cause found; elevated priority | — | Warm-start rejected because coefficient-patch makes parent basis dual-infeasible (dual.rs:225-247→cold). Fix scoped (§14); caveat: dual-infeasible start likely needs phase-1/bound-flip, not a straight run_dual hand-off — verify before coding. Gates T1.2 wall benefit |
-| T1.5 evaluator-cache routing | not started | — | |
+| T1.5 evaluator-cache routing | already realized (PR #316) | #316 | primal_heuristics diving already routed through cached_evaluator (the −22% gear4 win); remaining sites are one-time (convex fast path) or autodiff-unsafe. Low residual value |
 | T1.6 bookkeeping → Rust | not started | — | blocked by T1.5 profile |
 | Phase 2 entry experiment | **locked** (§0.1.2) | — | unlocks on Phase 1 done |
 | Phase 3 entry experiment (0b) | **locked** (§0.1.2) | — | unlocks on Phase 0 done |
@@ -954,6 +954,22 @@ when `ok=False`.
 > `_validate` still guards the base rows). Positive: **the direction-(a)
 > differential-neutrality infra worked as designed** — it caught a
 > would-have-shipped regression before commit.
+>
+> **Refinement (2026-07-02, bounded spike — the fix is cheaper than the full
+> refreshed pool).** A viability spike (gate cold-path separation to every-K
+> nodes, `DISCOPT_SEP_EVERY_K`) **disproved the "needs per-node separation"
+> theory**: `dispatch` stays at **3 nodes for every K up to 100** (separation only
+> at the root iteration). So the spatial class needs separation at the *root*, not
+> at every node. Root cause of the fast-path explosion: `solver.py:4342` builds the
+> inherited `_root_cut_pool` **only when `_psd_cuts` is on**; for a default spatial
+> model it is `None`, so the fast path (which returns before `separate=True`) runs
+> with **no cuts at all**. Targeted fix (cheaper, uses the existing
+> `out_cuts`/`inherited_cuts` machinery, sound — root-box cuts are valid for all
+> sub-boxes): **capture a root cut pool for the general spatial path (not just the
+> PSD case)** so the fast path inherits the root separation, then widen the T1.3
+> gate. Only escalate to the periodic/refreshed pool if some instance genuinely
+> needs *in-tree* re-separation (none observed yet). Verify per instance with the
+> differential-neutrality check.
 
 **T1.4 — Basis inheritance on the general path.**
 Thread the parent basis through node solves (the Rust side already supports it:
