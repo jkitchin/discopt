@@ -16,11 +16,19 @@ Two entry-point families are provided:
   depends only on shapes, so mutating ``Parameter.value`` between calls hits
   the XLA cache instead of forcing a recompile. Use this for reusable
   evaluators (e.g., NMPC closed-loop solves).
+
+Common-subexpression handling: the Expression object graph is a DAG — a node may
+be shared by many parents. Lowering memoizes both *compilation* (each distinct
+node builds one closure, via ``memo`` keyed by ``id(expr)``) and *evaluation*
+(each distinct node computes one value per call, via a per-call ``cache`` keyed
+by ``id(expr)``). A node reachable by k references is therefore traced and run
+once, not k times. Without this a linear DAG lowered in time exponential in its
+sharing depth (issue #383).
 """
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, cast
 
 import jax.numpy as jnp
 
@@ -51,17 +59,52 @@ def _compute_var_offset(var: Variable, model: Model) -> int:
     return offset
 
 
-def _compile_node(expr: Expression, model: Model, param_index: dict) -> Callable:
-    """
-    Recursively compile an Expression node into a function f(x_flat, params) -> value.
+_CACHE_MISS = object()
 
-    ``params`` is a tuple of jax arrays aligned with ``model._parameters``;
-    ``param_index`` maps ``id(parameter)`` to its position in that tuple.
+
+def _compile_node(
+    expr: Expression, model: Model, param_index: dict, memo: dict | None = None
+) -> Callable:
+    """Compile an Expression node into ``f(x_flat, params, cache) -> value``.
+
+    The expression is a DAG: a node may be shared by many parents. ``memo`` (keyed
+    by ``id(expr)``) ensures each distinct node is *compiled* once; the per-call
+    ``cache`` (also keyed by ``id(expr)``) ensures it is *evaluated* once per call.
+    So a node reachable by k references is traced and run a single time — without
+    this a linear DAG lowered in time exponential in its sharing depth (#383).
+    ``cache`` is a fresh dict supplied per top-level evaluation by the ``compile_*``
+    wrappers.
+    """
+    if memo is None:
+        memo = {}
+    key = id(expr)
+    existing = memo.get(key)
+    if existing is not None:
+        return cast(Callable, existing)
+
+    raw = _raw_node(expr, model, param_index, memo)
+
+    def node(x_flat, params, cache, _k=key, _raw=raw):
+        v = cache.get(_k, _CACHE_MISS)
+        if v is _CACHE_MISS:
+            v = _raw(x_flat, params, cache)
+            cache[_k] = v
+        return v
+
+    memo[key] = node
+    return node
+
+
+def _raw_node(expr: Expression, model: Model, param_index: dict, memo: dict) -> Callable:
+    """Build the uncached compute closure ``f(x_flat, params, cache)`` for one node.
+
+    Children are compiled via :func:`_compile_node` (sharing ``memo``) and called
+    with the same ``cache`` so their values memoize across references.
     """
     if isinstance(expr, Constant):
         val = jnp.array(expr.value)
 
-        def fn(x_flat, params):
+        def fn(x_flat, params, cache):
             return val
 
         return fn
@@ -72,13 +115,13 @@ def _compile_node(expr: Expression, model: Model, param_index: dict) -> Callable
         shape = expr.shape
         if shape == () or (len(shape) == 1 and shape[0] == 1 and shape == ()):
             # Scalar variable: single slot
-            def fn(x_flat, params):
+            def fn(x_flat, params, cache):
                 return x_flat[offset]
 
             return fn
         else:
             # Array variable: slice and reshape
-            def fn(x_flat, params, _offset=offset, _size=size, _shape=shape):
+            def fn(x_flat, params, cache, _offset=offset, _size=size, _shape=shape):
                 return x_flat[_offset : _offset + _size].reshape(_shape)
 
             return fn
@@ -86,56 +129,56 @@ def _compile_node(expr: Expression, model: Model, param_index: dict) -> Callable
     if isinstance(expr, Parameter):
         idx = param_index[id(expr)]
 
-        def fn(x_flat, params, _i=idx):
+        def fn(x_flat, params, cache, _i=idx):
             return params[_i]
 
         return fn
 
     if isinstance(expr, BinaryOp):
-        left_fn = _compile_node(expr.left, model, param_index)
-        right_fn = _compile_node(expr.right, model, param_index)
+        left_fn = _compile_node(expr.left, model, param_index, memo)
+        right_fn = _compile_node(expr.right, model, param_index, memo)
         op = expr.op
         if op == "+":
 
-            def fn(x_flat, params):
-                return left_fn(x_flat, params) + right_fn(x_flat, params)
+            def fn(x_flat, params, cache):
+                return left_fn(x_flat, params, cache) + right_fn(x_flat, params, cache)
         elif op == "-":
 
-            def fn(x_flat, params):
-                return left_fn(x_flat, params) - right_fn(x_flat, params)
+            def fn(x_flat, params, cache):
+                return left_fn(x_flat, params, cache) - right_fn(x_flat, params, cache)
         elif op == "*":
 
-            def fn(x_flat, params):
-                return left_fn(x_flat, params) * right_fn(x_flat, params)
+            def fn(x_flat, params, cache):
+                return left_fn(x_flat, params, cache) * right_fn(x_flat, params, cache)
         elif op == "/":
 
-            def fn(x_flat, params):
-                return left_fn(x_flat, params) / right_fn(x_flat, params)
+            def fn(x_flat, params, cache):
+                return left_fn(x_flat, params, cache) / right_fn(x_flat, params, cache)
         elif op == "**":
 
-            def fn(x_flat, params):
-                return left_fn(x_flat, params) ** right_fn(x_flat, params)
+            def fn(x_flat, params, cache):
+                return left_fn(x_flat, params, cache) ** right_fn(x_flat, params, cache)
         else:
             raise ValueError(f"Unknown binary operator: {op!r}")
         return fn
 
     if isinstance(expr, UnaryOp):
-        operand_fn = _compile_node(expr.operand, model, param_index)
+        operand_fn = _compile_node(expr.operand, model, param_index, memo)
         op = expr.op
         if op == "neg":
 
-            def fn(x_flat, params):
-                return -operand_fn(x_flat, params)
+            def fn(x_flat, params, cache):
+                return -operand_fn(x_flat, params, cache)
         elif op == "abs":
 
-            def fn(x_flat, params):
-                return jnp.abs(operand_fn(x_flat, params))
+            def fn(x_flat, params, cache):
+                return jnp.abs(operand_fn(x_flat, params, cache))
         else:
             raise ValueError(f"Unknown unary operator: {op!r}")
         return fn
 
     if isinstance(expr, FunctionCall):
-        arg_fns = [_compile_node(a, model, param_index) for a in expr.args]
+        arg_fns = [_compile_node(a, model, param_index, memo) for a in expr.args]
         name = expr.func_name
 
         # Single-argument functions
@@ -170,24 +213,24 @@ def _compile_node(expr: Expression, model: Model, param_index: dict) -> Callable
             jax_fn = _unary_funcs[name]
             a_fn = arg_fns[0]
 
-            def fn(x_flat, params, _jax_fn=jax_fn, _a_fn=a_fn):
-                return _jax_fn(_a_fn(x_flat, params))
+            def fn(x_flat, params, cache, _jax_fn=jax_fn, _a_fn=a_fn):
+                return _jax_fn(_a_fn(x_flat, params, cache))
 
             return fn
 
         if name == "min":
             a_fn, b_fn = arg_fns[0], arg_fns[1]
 
-            def fn(x_flat, params):
-                return jnp.minimum(a_fn(x_flat, params), b_fn(x_flat, params))
+            def fn(x_flat, params, cache):
+                return jnp.minimum(a_fn(x_flat, params, cache), b_fn(x_flat, params, cache))
 
             return fn
 
         if name == "atan2":
             a_fn, b_fn = arg_fns[0], arg_fns[1]
 
-            def fn(x_flat, params):
-                return jnp.arctan2(a_fn(x_flat, params), b_fn(x_flat, params))
+            def fn(x_flat, params, cache):
+                return jnp.arctan2(a_fn(x_flat, params, cache), b_fn(x_flat, params, cache))
 
             return fn
 
@@ -195,9 +238,9 @@ def _compile_node(expr: Expression, model: Model, param_index: dict) -> Callable
             # GAMS signpower(x, a) = sign(x) * |x|**a.
             a_fn, b_fn = arg_fns[0], arg_fns[1]
 
-            def fn(x_flat, params):
-                xv = a_fn(x_flat, params)
-                return jnp.sign(xv) * jnp.abs(xv) ** b_fn(x_flat, params)
+            def fn(x_flat, params, cache):
+                xv = a_fn(x_flat, params, cache)
+                return jnp.sign(xv) * jnp.abs(xv) ** b_fn(x_flat, params, cache)
 
             return fn
 
@@ -205,9 +248,9 @@ def _compile_node(expr: Expression, model: Model, param_index: dict) -> Callable
             # GAMS centropy(x, y) = x * log(x / y), with the x -> 0+ limit 0.
             a_fn, b_fn = arg_fns[0], arg_fns[1]
 
-            def fn(x_flat, params):
-                xv = a_fn(x_flat, params)
-                yv = b_fn(x_flat, params)
+            def fn(x_flat, params, cache):
+                xv = a_fn(x_flat, params, cache)
+                yv = b_fn(x_flat, params, cache)
                 return xv * jnp.log(jnp.maximum(xv, 1e-300) / yv)
 
             return fn
@@ -215,16 +258,16 @@ def _compile_node(expr: Expression, model: Model, param_index: dict) -> Callable
         if name == "max":
             a_fn, b_fn = arg_fns[0], arg_fns[1]
 
-            def fn(x_flat, params):
-                return jnp.maximum(a_fn(x_flat, params), b_fn(x_flat, params))
+            def fn(x_flat, params, cache):
+                return jnp.maximum(a_fn(x_flat, params, cache), b_fn(x_flat, params, cache))
 
             return fn
 
         if name == "prod":
             a_fn = arg_fns[0]
 
-            def fn(x_flat, params):
-                return jnp.prod(a_fn(x_flat, params))
+            def fn(x_flat, params, cache):
+                return jnp.prod(a_fn(x_flat, params, cache))
 
             return fn
 
@@ -241,8 +284,8 @@ def _compile_node(expr: Expression, model: Model, param_index: dict) -> Callable
             except ValueError as exc:
                 raise ValueError(f"Unsupported norm order: {name!r}") from exc
 
-            def fn(x_flat, params, _ord=ord_p):
-                return jnp.linalg.norm(a_fn(x_flat, params), ord=_ord)
+            def fn(x_flat, params, cache, _ord=ord_p):
+                return jnp.linalg.norm(a_fn(x_flat, params, cache), ord=_ord)
 
             return fn
 
@@ -253,48 +296,48 @@ def _compile_node(expr: Expression, model: Model, param_index: dict) -> Callable
         # value + autodiff gradients/Hessians come for free on the local NLP
         # path. No relaxation rule exists (see relaxation_compiler / solver
         # guards), so this branch is only reached on the continuous NLP path.
-        custom_arg_fns = tuple(_compile_node(a, model, param_index) for a in expr.args)
+        custom_arg_fns = tuple(_compile_node(a, model, param_index, memo) for a in expr.args)
         user_fn = expr.fn
 
-        def fn(x_flat, params, _user_fn=user_fn, _arg_fns=custom_arg_fns):
-            return _user_fn(*[a(x_flat, params) for a in _arg_fns])
+        def fn(x_flat, params, cache, _user_fn=user_fn, _arg_fns=custom_arg_fns):
+            return _user_fn(*[a(x_flat, params, cache) for a in _arg_fns])
 
         return fn
 
     if isinstance(expr, IndexExpression):
-        base_fn = _compile_node(expr.base, model, param_index)
+        base_fn = _compile_node(expr.base, model, param_index, memo)
         idx = expr.index
 
-        def fn(x_flat, params, _idx=idx):
-            return base_fn(x_flat, params)[_idx]
+        def fn(x_flat, params, cache, _idx=idx):
+            return base_fn(x_flat, params, cache)[_idx]
 
         return fn
 
     if isinstance(expr, MatMulExpression):
-        left_fn = _compile_node(expr.left, model, param_index)
-        right_fn = _compile_node(expr.right, model, param_index)
+        left_fn = _compile_node(expr.left, model, param_index, memo)
+        right_fn = _compile_node(expr.right, model, param_index, memo)
 
-        def fn(x_flat, params):
-            return left_fn(x_flat, params) @ right_fn(x_flat, params)
+        def fn(x_flat, params, cache):
+            return left_fn(x_flat, params, cache) @ right_fn(x_flat, params, cache)
 
         return fn
 
     if isinstance(expr, SumExpression):
-        operand_fn = _compile_node(expr.operand, model, param_index)
+        operand_fn = _compile_node(expr.operand, model, param_index, memo)
         axis = expr.axis
 
-        def fn(x_flat, params, _axis=axis):
-            return jnp.sum(operand_fn(x_flat, params), axis=_axis)
+        def fn(x_flat, params, cache, _axis=axis):
+            return jnp.sum(operand_fn(x_flat, params, cache), axis=_axis)
 
         return fn
 
     if isinstance(expr, SumOverExpression):
-        term_fns = [_compile_node(t, model, param_index) for t in expr.terms]
+        term_fns = [_compile_node(t, model, param_index, memo) for t in expr.terms]
 
-        def fn(x_flat, params):
-            result = term_fns[0](x_flat, params)
+        def fn(x_flat, params, cache):
+            result = term_fns[0](x_flat, params, cache)
             for t_fn in term_fns[1:]:
-                result = result + t_fn(x_flat, params)
+                result = result + t_fn(x_flat, params, cache)
             return result
 
         return fn
@@ -328,7 +371,13 @@ def compile_expression_params(
     """
     if param_index is None:
         param_index = _build_param_index(model)
-    return _compile_node(expr, model, param_index)
+    root = _compile_node(expr, model, param_index)
+
+    def fn(x_flat, params):
+        # Fresh per-call value cache so shared DAG nodes evaluate once (#383).
+        return root(x_flat, params, {})
+
+    return fn
 
 
 def compile_objective_params(model: Model, param_index: dict | None = None) -> Callable:
