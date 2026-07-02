@@ -132,13 +132,7 @@ class TestNlRoundTrip:
 
 
 class TestPyomoCrossCheck:
-    @pytest.mark.xfail(
-        raises=NotImplementedError,
-        reason="from_pyomo is a Phase 4 stub (not yet implemented); see ROADMAP",
-    )
     def test_transportation_matches_pyomo(self):
-        # importorskip only guards pyomo's *absence*; from_pyomo itself is an
-        # unimplemented stub, so the xfail above covers the pyomo-installed path.
         pyo = pytest.importorskip("pyomo.environ")
         model = pyo.ConcreteModel()
         model.P = pyo.RangeSet(0, 1)
