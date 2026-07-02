@@ -351,9 +351,11 @@ def test_gurobi_milp_solution_pool_sets_params_and_returns_candidates(monkeypatc
     assert [candidate.tolist() for candidate in result.solution_pool] == [[0.0], [0.5], [1.0]]
 
 
-def test_gurobi_milp_lazy_callback_adds_lazy_cut(monkeypatch):
+def test_gurobi_milp_callbacks_add_lazy_and_node_cuts(monkeypatch):
     class FakeCallback:
         MIPSOL = 1
+        MIPNODE = 2
+        MIPNODE_STATUS = 3
 
     class FakeGRB:
         CONTINUOUS = "C"
@@ -402,6 +404,7 @@ def test_gurobi_milp_lazy_callback_adds_lazy_cut(monkeypatch):
         def __init__(self, *_args, **_kwargs):
             self.params = {}
             self.lazy_constraints = []
+            self.node_cuts = []
             FakeModel.last = self
 
         def setParam(self, key, value):
@@ -416,11 +419,22 @@ def test_gurobi_milp_lazy_callback_adds_lazy_cut(monkeypatch):
         def cbGetSolution(self, _x):
             return np.array([0.0])
 
+        def cbGet(self, attr):
+            assert attr == FakeGRB.Callback.MIPNODE_STATUS
+            return FakeGRB.OPTIMAL
+
+        def cbGetNodeRel(self, _x):
+            return np.array([0.25])
+
         def cbLazy(self, expr):
             self.lazy_constraints.append(expr)
 
+        def cbCut(self, expr):
+            self.node_cuts.append(expr)
+
         def optimize(self, callback=None):
             if callback is not None:
+                callback(self, FakeGRB.Callback.MIPNODE)
                 callback(self, FakeGRB.Callback.MIPSOL)
 
         def dispose(self):
@@ -435,17 +449,31 @@ def test_gurobi_milp_lazy_callback_adds_lazy_cut(monkeypatch):
         callback_candidates.append(candidate)
         return [(np.array([1.0]), -0.5)]
 
+    node_candidates = []
+
+    def node_callback(candidate):
+        node_candidates.append(candidate)
+        return [(np.array([1.0]), 0.0)]
+
     result = gurobi_backend.solve_milp_with_lazy_cuts(
         c=np.array([1.0]),
         bounds=[(0.0, 1.0)],
         integrality=np.array([1], dtype=np.int32),
         lazy_callback=lazy_callback,
+        node_callback=node_callback,
     )
 
     assert result.status == SolveStatus.OPTIMAL
     assert callback_candidates
+    assert node_candidates
     assert FakeModel.last.params["LazyConstraints"] == 1
+    assert FakeModel.last.params["PreCrush"] == 1
     assert len(FakeModel.last.lazy_constraints) == 1
+    assert len(FakeModel.last.node_cuts) == 1
+    assert result.callback_stats["mipsol_calls"] == 1
+    assert result.callback_stats["mipnode_calls"] == 1
+    assert result.callback_stats["lazy_cuts"] == 1
+    assert result.callback_stats["node_cuts"] == 1
 
 
 def test_amp_bound_tolerance_closes_small_master_bound_inversion():

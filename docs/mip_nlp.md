@@ -206,6 +206,16 @@ status, objective, warm-start source, and whether it improved the incumbent.
 Other backends keep the single incumbent candidate and record the degradation in
 the trace.
 
+`tree_strategy="single_tree"` routes SHOT-profile OA/ECP requests to the
+Gurobi-backed LP/NLP-BB callback solver. In that mode, discopt keeps the MIP
+tree open, separates MIPNODE relaxation cuts where Gurobi exposes an optimal
+node relaxation, and runs fixed-NLP incumbent handling from MIPSOL callbacks.
+Callback-generated OA/ECP/feasibility/integer rows enter the same MIP-NLP cut
+provenance ledger as MultiTree runs, and the result trace records callback
+events, source counts, node counts, and whether an incumbent MIP start was
+applied. Non-Gurobi MILP backends are explicitly MultiTree-only for this profile
+until they expose equivalent persistent callback support.
+
 The remaining reformulation and convex-bounding controls are validated and
 traced under the SHOT profile so follow-up SHOT parity PRs can attach behavior
 without changing the public option names.

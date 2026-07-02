@@ -1930,7 +1930,7 @@ def test_mip_nlp_shot_profile_options_validate_and_attach_trace(monkeypatch):
         method="oa",
         mip_nlp_options={
             "mip_nlp_profile": "shot",
-            "tree_strategy": "single-tree",
+            "tree_strategy": "multi-tree",
             "cut_strategy": "esh",
             "objective_epigraph": "on",
             "anti_epigraph": "off",
@@ -1958,7 +1958,7 @@ def test_mip_nlp_shot_profile_options_validate_and_attach_trace(monkeypatch):
 
     cfg = calls["mip_nlp_shot_config"]
     assert calls["mip_nlp_profile"] == "shot"
-    assert cfg.tree_strategy == "single_tree"
+    assert cfg.tree_strategy == "multi_tree"
     assert cfg.cut_strategy == "esh"
     assert cfg.objective_epigraph == "on"
     assert cfg.anti_epigraph == "off"
@@ -1986,6 +1986,50 @@ def test_mip_nlp_shot_profile_options_validate_and_attach_trace(monkeypatch):
     assert result.mip_nlp_trace["profile"] == "shot"
     assert result.mip_nlp_trace["shot_options"]["cut_strategy"] == "esh"
     assert result.mip_nlp_trace["shot_options"]["integer_bilinear_strategy"] == ("binary_expansion")
+
+
+def test_mip_nlp_shot_single_tree_routes_to_callback_solver(monkeypatch):
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    calls = {}
+
+    def fake_solve_lp_nlp_bb(model, **kwargs):
+        calls.update(kwargs)
+        return SolveResult(status="optimal", objective=0.0, bound=0.0, gap=0.0)
+
+    monkeypatch.setattr(oa_module, "solve_lp_nlp_bb", fake_solve_lp_nlp_bb)
+
+    result = solve_mip_nlp(
+        _binary_model("shot_single_tree_route"),
+        method="oa",
+        mip_nlp_options={
+            "mip_nlp_profile": "shot",
+            "tree_strategy": "single_tree",
+        },
+    )
+
+    assert result.status == "optimal"
+    assert calls["milp_solver"] == "gurobi"
+    assert calls["mip_nlp_profile"] == "shot"
+    assert calls["mip_nlp_shot_config"].tree_strategy == "single_tree"
+    assert calls["add_no_good_cuts"] is True
+    assert result.mip_nlp_trace["method"] == "lp_nlp_bb"
+
+
+def test_mip_nlp_shot_single_tree_rejects_non_gurobi_backend():
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    with pytest.raises(RuntimeError, match="tree_strategy='single_tree'.*milp_solver='gurobi'"):
+        solve_mip_nlp(
+            _binary_model("shot_single_tree_highs"),
+            method="oa",
+            mip_nlp_options={
+                "mip_nlp_profile": "shot",
+                "tree_strategy": "single_tree",
+                "milp_solver": "highs",
+            },
+        )
 
 
 @pytest.mark.parametrize(
@@ -2349,6 +2393,7 @@ def test_lp_nlp_bb_lazy_callback_solves_fixed_integer_nlp(monkeypatch):
         _objective_is_convex,
         equality_relaxation=False,
         oa_cut_relaxable=None,
+        cut_provenance=None,
     ):
         calls["oa"] += 1
         assert constraint_convex_mask is None or all(
@@ -2394,6 +2439,137 @@ def test_lp_nlp_bb_lazy_callback_solves_fixed_integer_nlp(monkeypatch):
     assert calls["lazy"] == 1
     assert calls["subproblem"] == 1
     assert calls["oa"] >= 2
+
+
+def test_lp_nlp_bb_shot_callback_trace_records_node_and_incumbent_cuts(monkeypatch):
+    import discopt.solvers.gurobi as gurobi_module
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers import MILPResult, SolveStatus
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    calls = {"lazy": 0, "node": 0, "subproblem": 0}
+
+    def fake_relaxation(*_args, **_kwargs):
+        return None, None
+
+    def fake_subproblem(
+        _evaluator,
+        _lb,
+        _ub,
+        _int_indices,
+        x_master,
+        _nlp_solver,
+        initial_point=None,
+        return_attempt=False,
+    ):
+        assert initial_point is not None
+        calls["subproblem"] += 1
+        return np.asarray(x_master, dtype=np.float64), 0.0
+
+    def fake_add_oa_cuts(
+        _evaluator,
+        _x_star,
+        n_vars,
+        _n_cons,
+        _constraint_senses,
+        oa_A_rows,
+        oa_b_rows,
+        *_args,
+        oa_cut_relaxable=None,
+        cut_provenance=None,
+        **_kwargs,
+    ):
+        row = np.zeros(n_vars, dtype=np.float64)
+        row[0] = 1.0
+        oa_module._append_master_cut(
+            oa_A_rows,
+            oa_b_rows,
+            row,
+            -0.5,
+            oa_cut_relaxable,
+            cut_provenance=cut_provenance,
+            source="oa",
+            global_valid=True,
+            supporting_point=np.zeros(n_vars, dtype=np.float64),
+        )
+
+    def fake_add_ecp_cuts(
+        _evaluator,
+        _x_master,
+        n_vars,
+        _constraint_senses,
+        oa_A_rows,
+        oa_b_rows,
+        *_args,
+        oa_cut_relaxable=None,
+        cut_provenance=None,
+        **_kwargs,
+    ):
+        row = np.zeros(n_vars, dtype=np.float64)
+        row[0] = 1.0
+        oa_module._append_master_cut(
+            oa_A_rows,
+            oa_b_rows,
+            row,
+            -0.25,
+            oa_cut_relaxable,
+            cut_provenance=cut_provenance,
+            source="ecp",
+            global_valid=True,
+            supporting_point=np.zeros(n_vars, dtype=np.float64),
+        )
+        return 1
+
+    def fake_lazy_milp(**kwargs):
+        candidate = np.zeros_like(kwargs["c"], dtype=np.float64)
+        node_cuts = kwargs["node_callback"](candidate)
+        calls["node"] += 1
+        lazy_cuts = kwargs["lazy_callback"](candidate)
+        calls["lazy"] += 1
+        assert node_cuts
+        assert lazy_cuts
+        return MILPResult(
+            status=SolveStatus.OPTIMAL,
+            x=candidate,
+            objective=0.0,
+            bound=0.0,
+            gap=0.0,
+            node_count=2,
+            callback_stats={
+                "mipsol_calls": 1,
+                "mipnode_calls": 1,
+                "lazy_cuts": len(lazy_cuts),
+                "node_cuts": len(node_cuts),
+            },
+        )
+
+    monkeypatch.setattr(oa_module, "_solve_nlp_relaxation", fake_relaxation)
+    monkeypatch.setattr(oa_module, "_solve_nlp_subproblem", fake_subproblem)
+    monkeypatch.setattr(oa_module, "_add_oa_cuts", fake_add_oa_cuts)
+    monkeypatch.setattr(oa_module, "_add_ecp_cuts", fake_add_ecp_cuts)
+    monkeypatch.setattr(gurobi_module, "solve_milp_with_lazy_cuts", fake_lazy_milp)
+
+    result = solve_mip_nlp(
+        _binary_model("lp_nlp_bb_shot_callback_trace"),
+        method="lp_nlp_bb",
+        mip_nlp_options={
+            "mip_nlp_profile": "shot",
+            "tree_strategy": "single_tree",
+            "cut_strategy": "oa",
+        },
+        milp_solver="gurobi",
+    )
+
+    assert result.status == "optimal"
+    assert calls == {"lazy": 1, "node": 1, "subproblem": 1}
+    trace = result.mip_nlp_trace
+    assert trace["profile"] == "shot"
+    assert trace["summary"]["callback_stats"]["mipnode_calls"] == 1
+    assert trace["summary"]["callback_stats"]["mipsol_calls"] == 1
+    assert trace["summary"]["cut_source_counts"]["oa"] >= 1
+    assert trace["summary"]["cut_source_counts"]["ecp"] >= 1
+    contexts = [event["context"] for event in trace["iterations"][0]["callback_events"]]
+    assert contexts == ["mipnode", "mipsol"]
 
 
 def test_lp_nlp_bb_no_good_cut_skips_mixed_integer_model(monkeypatch):

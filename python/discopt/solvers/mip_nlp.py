@@ -167,6 +167,57 @@ def solve_mip_nlp(
                 + ", ".join(sorted(supported_keys))
             )
 
+        if (
+            profile == "shot"
+            and shot_config is not None
+            and shot_config.tree_strategy == "single_tree"
+            and method in {"oa", "ecp"}
+        ):
+            milp_solver = str(options.get("milp_solver", "gurobi")).strip().lower()
+            if milp_solver != "gurobi":
+                raise RuntimeError(
+                    "SHOT tree_strategy='single_tree' requires milp_solver='gurobi' "
+                    "because the current single-tree implementation depends on "
+                    "Gurobi MIPSOL/MIPNODE callbacks. Use tree_strategy='multi_tree' "
+                    "for non-Gurobi MILP backends."
+                )
+            unsupported_single_tree = sorted(set(options) - _LP_NLP_BB_OPTION_KEYS)
+            if unsupported_single_tree:
+                raise ValueError(
+                    "SHOT tree_strategy='single_tree' routes to the LP/NLP-BB "
+                    "callback solver and does not support option(s): "
+                    + ", ".join(unsupported_single_tree)
+                    + ". Supported single-tree options are: "
+                    + ", ".join(sorted(_LP_NLP_BB_OPTION_KEYS))
+                )
+            from discopt.solvers.oa import _normalize_init_strategy, solve_lp_nlp_bb
+
+            options["milp_solver"] = "gurobi"
+            options["init_strategy"] = _normalize_init_strategy(
+                options.get("init_strategy", "rNLP")
+            )
+            options.setdefault("add_no_good_cuts", True)
+            if shot_config.integer_bilinear_strategy == "binary_expansion":
+                options.setdefault("integer_to_binary", True)
+            result = solve_lp_nlp_bb(
+                model,
+                time_limit=time_limit,
+                gap_tolerance=gap_tolerance,
+                max_iterations=max_iterations,
+                nlp_solver=nlp_solver,
+                initial_point=initial_point,
+                mip_nlp_profile=profile,
+                mip_nlp_shot_config=shot_config,
+                **options,
+            )
+            ensure_mip_nlp_trace(
+                result,
+                method="lp_nlp_bb",
+                profile=profile,
+                shot_config=shot_config,
+            )
+            return result
+
         if method == "fp":
             from discopt.solvers.oa import _normalize_init_strategy, solve_feasibility_pump
 
@@ -233,6 +284,10 @@ def solve_mip_nlp(
             options["init_strategy"] = _normalize_init_strategy(
                 options.get("init_strategy", "rNLP")
             )
+            if profile == "shot" and shot_config is not None:
+                options.setdefault("add_no_good_cuts", True)
+                if shot_config.integer_bilinear_strategy == "binary_expansion":
+                    options.setdefault("integer_to_binary", True)
             result = solve_lp_nlp_bb(
                 model,
                 time_limit=time_limit,
@@ -240,6 +295,8 @@ def solve_mip_nlp(
                 max_iterations=max_iterations,
                 nlp_solver=nlp_solver,
                 initial_point=initial_point,
+                mip_nlp_profile=profile,
+                mip_nlp_shot_config=shot_config,
                 **options,
             )
             ensure_mip_nlp_trace(

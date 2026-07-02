@@ -87,6 +87,7 @@ class MILPResult:
     wall_time: float = 0.0
     solution_pool: Optional[list[np.ndarray]] = None
     solution_pool_objectives: Optional[list[float]] = None
+    callback_stats: Optional[dict[str, object]] = None
 
 
 @dataclass
