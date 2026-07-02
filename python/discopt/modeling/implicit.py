@@ -166,4 +166,5 @@ def implicit(
             u = jnp.zeros(0)
         return phi(u)
 
-    return custom(solve_fn, name=name)(*u_inputs)
+    node: Expression = custom(solve_fn, name=name)(*u_inputs)
+    return node
