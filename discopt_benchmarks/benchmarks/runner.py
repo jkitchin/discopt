@@ -311,6 +311,8 @@ class BenchmarkRunner:
                 bound=result.bound,
                 wall_time=result.wall_time,
                 node_count=result.node_count or 0,
+                root_gap=getattr(result, "root_gap", None),
+                root_time=getattr(result, "root_time", None),
                 rust_time_fraction=rust_frac,
                 jax_time_fraction=jax_frac,
                 python_time_fraction=py_frac,
