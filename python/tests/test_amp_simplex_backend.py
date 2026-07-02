@@ -81,19 +81,17 @@ class TestAmpSimplexCertificationParity:
     """AMP must reach the same certified optimum with the simplex relaxation
     backend as with the default (HiGHS/POUNCE) backend."""
 
-    @pytest.mark.parametrize("build", [_concave_qp, _bilinear])
-    def test_same_certificate_as_default(self, build):
-        # A short budget is sufficient and keeps the test fast: ``_concave_qp``
-        # certifies optimal in well under a second, and ``_bilinear`` finds its
-        # global incumbent (-6.25) within the first second but its spatial-B&B
-        # bound never closes to ``rel_gap`` (a relaxation-tightness property, not
-        # a backend property — HiGHS, POUNCE and the simplex all return
-        # ``feasible`` here and would otherwise burn the whole budget). The seam
-        # under test is backend *parity*, which holds at any budget; a 60s limit
-        # only wasted wall-clock on the uncertifiable case (and timed out under
-        # parallel load).
-        ref = build().solve(solver="amp", rel_gap=1e-4, time_limit=5)
-        sx = build().solve(solver="amp", rel_gap=1e-4, time_limit=5, milp_solver="simplex")
+    # Per-case budget: ``_concave_qp`` *certifies* (its status is time-sensitive),
+    # so it needs enough wall-clock that both backends reach ``optimal`` even on a
+    # slow CI runner under parallel load — a 5s budget flaked as
+    # ``optimal vs feasible`` when only one backend certified in time. ``_bilinear``
+    # never certifies (``feasible`` at any budget — a relaxation-tightness property,
+    # not a backend property), so it stays short to avoid burning wall-clock. The
+    # seam under test is backend *parity*, which holds at any budget.
+    @pytest.mark.parametrize("build,time_limit", [(_concave_qp, 60), (_bilinear, 5)])
+    def test_same_certificate_as_default(self, build, time_limit):
+        ref = build().solve(solver="amp", rel_gap=1e-4, time_limit=time_limit)
+        sx = build().solve(solver="amp", rel_gap=1e-4, time_limit=time_limit, milp_solver="simplex")
         assert sx.status == ref.status, f"{sx.status} vs {ref.status}"
         if ref.status == "optimal":
             assert getattr(sx, "gap_certified", True) is True
