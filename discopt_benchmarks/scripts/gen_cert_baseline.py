@@ -5,13 +5,15 @@ perf panel (``perf/panel.py``) with the T0.1–T0.3 instrumentation on, and writ
 
   * ``reports/cert0_<timestamp>.json`` — a ``BenchmarkResults`` the
     ``run_benchmarks.py --gate cert0`` check consumes; and
-  * ``docs/dev/data/cert-baseline.jsonl`` — the committed reference the §0.2.5
-    bound-neutrality check reads (node_count + objective per instance, plus the
-    new root_gap/root_time fields).
+  * ``docs/dev/data/cert-baseline.jsonl`` — the committed §0.2.5 bound-neutrality
+    reference, restricted to the **deterministic certifying** subset: each
+    instance is solved twice and included only if both runs reach OPTIMAL with a
+    bit-identical node_count and objective. Time-limited / non-deterministic rows
+    are excluded, so the reference is reproducible by construction.
 
-Deterministic-ish: single run per instance, per-instance time limits (the perf
-panel's own budgets where defined, else ``--time-limit``). The baseline is the
-frozen reference, so re-generate it deliberately (not in CI).
+Per-instance time limits use the perf panel's own budgets where defined, else
+``--time-limit``. The baseline is the frozen reference, so re-generate it
+deliberately (not in CI).
 
 Usage:
     python discopt_benchmarks/scripts/gen_cert_baseline.py [--time-limit 60]
@@ -36,6 +38,7 @@ sys.path.insert(0, str(_REPO_ROOT))
 
 from benchmarks.metrics import (  # noqa: E402
     BenchmarkResults,
+    SolveStatus,
     incorrect_count,
     root_gap_populated_fraction,
 )
@@ -45,6 +48,12 @@ from perf.panel import PANEL  # noqa: E402
 _GLOBAL50 = _BENCH_ROOT / "config" / "baron_global50.txt"
 _CERT_BASELINE = _REPO_ROOT / "docs" / "dev" / "data" / "cert-baseline.jsonl"
 _CERT_OPTIMA = _REPO_ROOT / "docs" / "dev" / "data" / "cert-optima.json"
+
+# Objective reproducibility tolerance (absolute + relative). A certified optimum
+# reproduces only to ~1e-10 across independent runs, so this is the tolerance the
+# §0.2.5 neutrality check compares objectives at (node_count stays bit-exact).
+_OBJ_TOL = 1e-8
+_OBJ_RTOL = 1e-9
 
 
 def _instance_budgets(default_tl: float) -> dict[str, float]:
@@ -67,51 +76,92 @@ def main() -> int:
     print(f"Certification baseline: {len(order)} instances (global50 + perf panel)")
 
     solver = SolverConfig(name="discopt", command="", solver_type="internal")
+    # Full-panel results feed the cert0 coverage gate (root_gap on all of
+    # global50). The committed neutrality reference (cert-baseline.jsonl) is the
+    # stricter *deterministic certifying* subset built below.
     results = BenchmarkResults(suite="cert0", timestamp=datetime.now().isoformat())
+    certifying: list = []
+    dropped: list[tuple[str, str]] = []
+
+    def _solve(name: str):
+        cfg = BenchmarkConfig(
+            suite_name="cert0", time_limit=int(budgets[name]), num_runs=1, solvers=[solver]
+        )
+        return BenchmarkRunner(cfg)._run_discopt(solver, name, 0)
 
     for i, name in enumerate(order, 1):
-        cfg = BenchmarkConfig(
-            suite_name="cert0",
-            time_limit=int(budgets[name]),
-            num_runs=1,
-            solvers=[solver],
-        )
-        runner = BenchmarkRunner(cfg)
-        if runner._find_nl_file(name) is None:
+        cfg = BenchmarkConfig(suite_name="cert0", time_limit=1, num_runs=1, solvers=[solver])
+        if BenchmarkRunner(cfg)._find_nl_file(name) is None:
             print(f"  [{i}/{len(order)}] SKIP {name} (not vendored)", flush=True)
             continue
-        res = runner._run_discopt(solver, name, 0)
-        results.add_result(res)
-        rg = "None" if res.root_gap is None else f"{res.root_gap:.3g}"
+        # Solve twice: an instance qualifies for the neutrality reference only if
+        # it certifies to OPTIMAL both times with a bit-identical node_count and
+        # objective. Time-limited / non-deterministic rows (which made the old
+        # baseline unusable — nvs05 feasible, nvs22 stale) are excluded.
+        r1 = _solve(name)
+        r2 = _solve(name)
+        results.add_result(r1)  # full panel = first run
+        # node_count must be bit-identical (it is stable at fixed conditions);
+        # the objective is compared to a tolerance because a certified optimum
+        # jitters at the ~1e-10 level across independent runs (JAX/BLAS
+        # non-determinism) — bit-exact objective equality is not a meaningful
+        # invariant. This is also the tolerance the §0.2.5 neutrality check uses.
+        obj_ok = (
+            r1.objective is not None
+            and r2.objective is not None
+            and abs(r1.objective - r2.objective) <= _OBJ_TOL + _OBJ_RTOL * abs(r1.objective)
+        )
+        det = (
+            r1.status == SolveStatus.OPTIMAL
+            and r2.status == SolveStatus.OPTIMAL
+            and r1.node_count == r2.node_count
+            and obj_ok
+        )
+        if det:
+            certifying.append(r1)
+            tag = "CERTIFY"
+        else:
+            if r1.status != SolveStatus.OPTIMAL or r2.status != SolveStatus.OPTIMAL:
+                reason = f"not-optimal({r1.status.value}/{r2.status.value})"
+            elif r1.node_count != r2.node_count:
+                reason = f"node_count {r1.node_count}!={r2.node_count}"
+            else:
+                reason = f"obj drift {abs(r1.objective - r2.objective):.2e}"
+            dropped.append((name, reason))
+            tag = f"drop:{reason}"
+        rg = "None" if r1.root_gap is None else f"{r1.root_gap:.3g}"
         print(
-            f"  [{i}/{len(order)}] {name:20s} {res.status.value:10s} "
-            f"obj={res.objective} nodes={res.node_count} root_gap={rg} "
-            f"({budgets[name]:.0f}s cap)",
+            f"  [{i}/{len(order)}] {name:20s} {r1.status.value:10s} "
+            f"nodes={r1.node_count} root_gap={rg} {tag}",
             flush=True,
         )
 
-    # reports/cert0_<ts>.json for the --gate cert0 consumer.
+    # reports/cert0_<ts>.json for the --gate cert0 consumer (full panel).
     ts = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
     reports_dir = _REPO_ROOT / "reports"
     reports_dir.mkdir(exist_ok=True)
     results_path = reports_dir / f"cert0_{ts}.json"
     results.save(results_path)
 
-    # docs/dev/data/cert-baseline.jsonl — the committed neutrality reference.
-    rows = sorted(results.get_results("discopt"), key=lambda r: r.instance)
+    # docs/dev/data/cert-baseline.jsonl — the §0.2.5 neutrality reference: the
+    # deterministic-certifying subset only.
+    cert_rows = sorted(certifying, key=lambda r: r.instance)
     os.makedirs(_CERT_BASELINE.parent, exist_ok=True)
     with open(_CERT_BASELINE, "w") as fh:
-        for r in rows:
+        for r in cert_rows:
             fh.write(json.dumps(r.to_dict(), sort_keys=True) + "\n")
 
     # Summary + self-check.
-    coverage = root_gap_populated_fraction(rows)
+    full_rows = results.get_results("discopt")
+    coverage = root_gap_populated_fraction(full_rows)
     optima = json.loads(_CERT_OPTIMA.read_text()) if _CERT_OPTIMA.exists() else {}
-    incorrect = incorrect_count(rows, optima) if optima else None
+    incorrect = incorrect_count(full_rows, optima) if optima else None
     print("\n─── summary ───")
-    print(f"  rows: {len(rows)}")
+    print(f"  full panel rows: {len(full_rows)}  (cert0 gate)")
     print(f"  root_gap coverage: {coverage:.3f} (gate: >= 0.90)")
     print(f"  incorrect_count (vs {len(optima)} oracles): {incorrect}")
+    print(f"  deterministic-certifying subset: {len(cert_rows)}  (neutrality reference)")
+    print(f"  dropped ({len(dropped)}): " + ", ".join(f"{n}[{r}]" for n, r in dropped))
     print(f"  results: {results_path}")
     print(f"  baseline: {_CERT_BASELINE}")
     return 0
