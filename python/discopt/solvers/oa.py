@@ -4031,8 +4031,14 @@ def solve_lp_nlp_bb(
         if bound is not None and incumbent_obj is not None
         else None
     )
+    callback_stats = dict(master_result.callback_stats or {})
+    callback_terminated = bool(callback_stats.get("terminated"))
     status = "feasible"
-    if master_result.status == SolveStatus.INFEASIBLE:
+    termination_reason: Optional[str] = None
+    if callback_terminated:
+        termination_reason = "time_limit"
+        status = "time_limit" if incumbent is None else "feasible"
+    elif master_result.status == SolveStatus.INFEASIBLE:
         status = "infeasible"
     elif master_result.status == SolveStatus.TIME_LIMIT:
         status = "time_limit" if incumbent is None else "feasible"
@@ -4042,8 +4048,9 @@ def solve_lp_nlp_bb(
         status = "optimal" if gap is not None and gap <= gap_tolerance else "feasible"
     elif incumbent is None:
         status = "no_feasible_point"
+    if termination_reason is None:
+        termination_reason = status
 
-    callback_stats = dict(master_result.callback_stats or {})
     trace_bound_validity = (
         "global"
         if master_bound_valid and bound is not None
@@ -4083,7 +4090,7 @@ def solve_lp_nlp_bb(
             "callback_stats": callback_stats,
             "node_count": int(master_result.node_count),
         },
-        "termination_reason": status,
+        "termination_reason": termination_reason,
         "master_bound_valid": bool(master_bound_valid),
         "gap_certified": bool(master_bound_valid),
         "bound_validity": trace_bound_validity,

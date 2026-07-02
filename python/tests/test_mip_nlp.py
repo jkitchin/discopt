@@ -2572,6 +2572,48 @@ def test_lp_nlp_bb_shot_callback_trace_records_node_and_incumbent_cuts(monkeypat
     assert contexts == ["mipnode", "mipsol"]
 
 
+def test_lp_nlp_bb_callback_termination_reports_time_limit(monkeypatch):
+    import discopt.solvers.gurobi as gurobi_module
+    import discopt.solvers.oa as oa_module
+    from discopt.solvers import MILPResult, SolveStatus
+    from discopt.solvers.mip_nlp import solve_mip_nlp
+
+    monkeypatch.setattr(oa_module, "_solve_nlp_relaxation", lambda *args, **kwargs: (None, None))
+    monkeypatch.setattr(oa_module, "_add_oa_cuts", lambda *args, **kwargs: None)
+
+    def fake_lazy_milp(**kwargs):
+        assert kwargs["terminate_callback"]({}) is True
+        return MILPResult(
+            status=SolveStatus.ERROR,
+            x=None,
+            objective=None,
+            bound=None,
+            gap=None,
+            node_count=0,
+            callback_stats={
+                "terminated": True,
+                "terminate_context": "callback",
+                "mipsol_calls": 0,
+                "mipnode_calls": 0,
+                "lazy_cuts": 0,
+                "node_cuts": 0,
+            },
+        )
+
+    monkeypatch.setattr(gurobi_module, "solve_milp_with_lazy_cuts", fake_lazy_milp)
+
+    result = solve_mip_nlp(
+        _binary_model("lp_nlp_bb_callback_timeout"),
+        method="lp_nlp_bb",
+        milp_solver="gurobi",
+        time_limit=0.0,
+    )
+
+    assert result.status == "time_limit"
+    assert result.mip_nlp_trace["termination_reason"] == "time_limit"
+    assert result.mip_nlp_trace["summary"]["callback_stats"]["terminated"] is True
+
+
 def test_lp_nlp_bb_no_good_cut_skips_mixed_integer_model(monkeypatch):
     import discopt.solvers.gurobi as gurobi_module
     import discopt.solvers.oa as oa_module
