@@ -65,6 +65,10 @@ timed_phases!(
     NodeLpSolve,
     StrongBranch,
     SearchLoop,
+    // Bound-reduction phases (cert:T0.3): FBBT/constraint-propagation at the
+    // node (`Fbbt`) and at the root presolve (`NodeReduce`).
+    Fbbt,
+    NodeReduce,
     PriceBtran,
     PriceSweep,
     AlphaFtran,

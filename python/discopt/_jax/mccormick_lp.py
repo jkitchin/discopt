@@ -230,6 +230,18 @@ class MccormickLPRelaxer:
         # path); "auto" keeps HiGHS->POUNCE. Falls back automatically if the
         # Rust binding is unavailable.
         self._backend = backend
+        # Per-family separation timers (cert:T0.3). Accumulated across every
+        # ``solve_at_node`` call for this relaxer instance; surfaced on the final
+        # SolveResult.solver_stats. Pure instrumentation — never affects control
+        # flow or the emitted cuts.
+        self._sep_timers: dict[str, float] = {
+            "multilinear": 0.0,
+            "edge_concave": 0.0,
+            "univariate_square": 0.0,
+            "convex": 0.0,
+            "psd": 0.0,
+            "rlt": 0.0,
+        }
         # Spatial-BB uses standard McCormick globally — no partitioning here.
         self._disc = DiscretizationState(partitions={})
         self._n_orig = sum(v.size for v in model._variables)
@@ -706,29 +718,42 @@ class MccormickLPRelaxer:
         res = milp.solve(time_limit=_remaining(), backend=self._backend)
 
         if separate:
+            _st = self._sep_timers  # cert:T0.3 per-family separation timers
             # On-demand separation of the exact multilinear hull for products with
             # more factors than the dense RLT cap (those carry only the loose
             # recursive chain). Every separated cut is a supporting hyperplane of
             # the convex/concave envelope, hence valid; adding them only tightens
             # the bound, so the loop is sound at any round.
+            _t = time.perf_counter()
             res = self._separate_multilinear(milp, varmap, res, _deadline)
+            _st["multilinear"] += time.perf_counter() - _t
             # Edge-concave / edge-convex quadratic blocks: tighten the joint
             # vertex-polyhedral envelope (cuts on bilinear/square auxes).
+            _t = time.perf_counter()
             res = self._separate_edge_concave(milp, varmap, res, _deadline)
+            _st["edge_concave"] += time.perf_counter() - _t
             # Univariate squares ``s = x**2``: the static envelope cuts only at the
             # box endpoints, so deep inside a wide box the convex underestimator is
             # slack. Add the exact supporting tangent at the LP point each round.
+            _t = time.perf_counter()
             res = self._separate_univariate_square(milp, varmap, res, _deadline)
+            _st["univariate_square"] += time.perf_counter() - _t
             # Convex/concave composite lifts (#358): add the exact supporting
             # hyperplane at the LP point, closing the gap the fixed reference-point
             # gradient cuts leave. Inert unless the convex claimer lifted a node.
+            _t = time.perf_counter()
             res = self._separate_convex(milp, varmap, res, _deadline)
+            _st["convex"] += time.perf_counter() - _t
             # PSD (moment) cuts: enforce M = [[1,x^T],[x,X]] >= 0 over fully-lifted
             # cliques. Each cut v^T M v >= 0 is valid for every feasible point
             # (X = x x^T), so adding them only tightens the bound.
+            _t = time.perf_counter()
             res = self._separate_psd(milp, varmap, res, _deadline, max_rounds=psd_max_rounds)
+            _st["psd"] += time.perf_counter() - _t
             # Targeted RLT (constraint-factor x bound-factor) cuts.
+            _t = time.perf_counter()
             res = self._separate_rlt(milp, varmap, res, _deadline)
+            _st["rlt"] += time.perf_counter() - _t
 
         # Capture the rows the separation chain just appended, for the root cut
         # pool. Stated over this node's lifted column space (``n_total`` columns).

@@ -1134,6 +1134,8 @@ class SolveResult:
         the root bound or the incumbent is unavailable.
     root_time : float or None
         Wall-clock seconds elapsed when the root node was fathomed/branched.
+    solver_stats : dict of str to float, or None
+        Per-family reduction/separation timers (cumulative seconds), or None.
     convex_fast_path : bool
         True if the problem was detected as convex and solved with a
         single NLP call (no Branch & Bound), guaranteeing global optimality.
@@ -1175,6 +1177,12 @@ class SolveResult:
     root_bound: Optional[float] = None
     root_gap: Optional[float] = None
     root_time: Optional[float] = None
+
+    # Per-family reduction/separation timers (cert:T0.3). A flat dict of
+    # phase-name -> cumulative seconds across the solve, e.g.
+    # ``{"reduce/fbbt": .., "reduce/obbt": .., "separate/psd": .., ...}``. Pure
+    # instrumentation (never affects solver math); None when nothing was timed.
+    solver_stats: Optional[dict[str, float]] = None
 
     # KKT duals at the returned point, when the underlying solver exposes them.
     # ``constraint_duals`` is keyed by Constraint.name; entries with a vector

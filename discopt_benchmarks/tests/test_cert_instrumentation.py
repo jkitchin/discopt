@@ -152,3 +152,30 @@ def test_trajectory_off_by_default():
     """Default config records no trajectory (keeps the default path bound-neutral)."""
     res = _run(_SPATIAL_INSTANCE)
     assert res.trajectory is None
+
+
+# ─────────────────────────── T0.3 ───────────────────────────
+
+
+@pytest.mark.smoke
+def test_reduction_separation_timers_present_and_bounded():
+    """On a spatial instance the per-family reduction/separation timers are
+    populated, non-negative, individually non-zero somewhere, and sum to no
+    more than the wall time (cert:T0.3)."""
+    import discopt.modeling as dm
+
+    runner, _ = _make_runner()
+    nl = runner._find_nl_file(_SPATIAL_INSTANCE)
+    if nl is None:
+        pytest.skip(f"{_SPATIAL_INSTANCE}.nl not vendored")
+    result = dm.from_nl(nl).solve(time_limit=30, gap_tolerance=1e-4, max_nodes=100_000)
+
+    stats = result.solver_stats
+    assert stats is not None and len(stats) > 0
+    # Every entry is a non-negative float keyed under a reduce/ or separate/ family.
+    assert all(isinstance(v, float) and v >= 0.0 for v in stats.values())
+    assert all(k.startswith(("reduce/", "separate/")) for k in stats)
+    # At least one timer is strictly positive (the solve did some separation).
+    assert any(v > 0.0 for v in stats.values())
+    # The instrumented phases are a subset of the wall clock.
+    assert sum(stats.values()) <= result.wall_time + 1e-6
