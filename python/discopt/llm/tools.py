@@ -8,6 +8,7 @@ code execution.
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 from typing import Any
@@ -17,6 +18,100 @@ import numpy as np
 from discopt.modeling.core import Model
 
 logger = logging.getLogger(__name__)
+
+
+# --- Safe expression evaluation (LLM-1) -------------------------------------
+#
+# Tool-call arguments (`lhs`, `rhs`, `expression`, `value`) are attacker-
+# influenced: anyone who can steer the LLM's output — a prompt-injected problem
+# description, a hostile model endpoint — controls these strings. They must NEVER
+# reach `eval()`: an emptied `__builtins__` is not a sandbox (any in-scope object
+# bridges back to builtins via `().__class__.__…__` or a module's
+# `__loader__.__globals__`). Instead we parse to an AST and walk an explicit
+# allowlist of node types. Attribute access is the escape vector, so it is
+# rejected outright — which also means expressions use bare math-function names
+# (`exp(x)`, not `dm.exp(x)`), matching the tool-schema grammar.
+
+_ALLOWED_BINOPS = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow)
+_ALLOWED_UNARYOPS = (ast.UAdd, ast.USub)
+
+
+def _safe_eval_node(node: ast.AST, names: dict[str, Any], allowed_calls: set[int]) -> Any:
+    """Recursively evaluate a whitelisted-AST arithmetic expression.
+
+    ``names`` resolves ``Name`` nodes (model variables/params + math functions);
+    ``allowed_calls`` is the set of ``id()`` of callables a ``Call`` may invoke.
+    Any node type outside the allowlist raises ``ValueError`` — in particular
+    ``Attribute``, ``Lambda``, comprehensions, and starred args, which are the
+    routes back to arbitrary code.
+    """
+    if isinstance(node, ast.Expression):
+        return _safe_eval_node(node.body, names, allowed_calls)
+    if isinstance(node, ast.Constant):
+        # int/float/complex/str/bool/None — inert without a call or attribute.
+        return node.value
+    if isinstance(node, ast.Name):
+        if node.id not in names:
+            raise ValueError(f"unknown name '{node.id}'")
+        return names[node.id]
+    if isinstance(node, ast.BinOp):
+        if not isinstance(node.op, _ALLOWED_BINOPS):
+            raise ValueError(f"operator {type(node.op).__name__} not allowed")
+        left = _safe_eval_node(node.left, names, allowed_calls)
+        right = _safe_eval_node(node.right, names, allowed_calls)
+        return _apply_binop(node.op, left, right)
+    if isinstance(node, ast.UnaryOp):
+        if not isinstance(node.op, _ALLOWED_UNARYOPS):
+            raise ValueError(f"unary operator {type(node.op).__name__} not allowed")
+        operand = _safe_eval_node(node.operand, names, allowed_calls)
+        return +operand if isinstance(node.op, ast.UAdd) else -operand
+    if isinstance(node, ast.Call):
+        # The callee must be a bare Name resolving to a whitelisted callable —
+        # never an Attribute (no `x.__class__(...)`) and never an arbitrary object.
+        if node.keywords or any(isinstance(a, ast.Starred) for a in node.args):
+            raise ValueError("keyword and starred arguments are not allowed")
+        if not isinstance(node.func, ast.Name):
+            raise ValueError("only direct calls to allowed functions are permitted")
+        func = _safe_eval_node(node.func, names, allowed_calls)
+        if id(func) not in allowed_calls:
+            raise ValueError(f"call to '{node.func.id}' is not allowed")
+        args = [_safe_eval_node(a, names, allowed_calls) for a in node.args]
+        return func(*args)
+    if isinstance(node, ast.Subscript):
+        value = _safe_eval_node(node.value, names, allowed_calls)
+        key = _safe_eval_slice(node.slice, names, allowed_calls)
+        return value[key]
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return [_safe_eval_node(e, names, allowed_calls) for e in node.elts]
+    raise ValueError(f"expression element {type(node).__name__} is not allowed")
+
+
+def _safe_eval_slice(node: ast.AST, names: dict[str, Any], allowed_calls: set[int]) -> Any:
+    if isinstance(node, ast.Slice):
+        lower = None if node.lower is None else _safe_eval_node(node.lower, names, allowed_calls)
+        upper = None if node.upper is None else _safe_eval_node(node.upper, names, allowed_calls)
+        step = None if node.step is None else _safe_eval_node(node.step, names, allowed_calls)
+        return slice(lower, upper, step)
+    return _safe_eval_node(node, names, allowed_calls)
+
+
+def _apply_binop(op: ast.operator, left: Any, right: Any) -> Any:
+    if isinstance(op, ast.Add):
+        return left + right
+    if isinstance(op, ast.Sub):
+        return left - right
+    if isinstance(op, ast.Mult):
+        return left * right
+    if isinstance(op, ast.Div):
+        return left / right
+    if isinstance(op, ast.FloorDiv):
+        return left // right
+    if isinstance(op, ast.Mod):
+        return left % right
+    if isinstance(op, ast.Pow):
+        return left**right
+    raise ValueError(f"operator {type(op).__name__} not allowed")  # unreachable
+
 
 # ─────────────────────────────────────────────────────────────
 # Tool definitions (OpenAI function-calling format)
@@ -544,25 +639,54 @@ class ModelBuilder:
         return f"Added at_least({args['k']}) constraint '{args.get('name')}'"
 
     def _eval_expression(self, expr_str: str) -> Any:
-        """Safely evaluate an expression string in the model namespace.
+        """Evaluate an arithmetic expression string in the model namespace.
 
-        Only allows access to model variables, parameters, numpy, and dm
-        math functions. No builtins or arbitrary code execution.
+        The string is parsed to an AST and walked against an explicit allowlist
+        (arithmetic, indexing, and calls to a fixed set of math functions);
+        anything else — attribute access, lambdas, comprehensions — is rejected.
+        This is NOT ``eval`` and cannot execute arbitrary code, even though the
+        model's variables and numpy are in scope (LLM-1). See ``_safe_eval_node``.
         """
-        # Build a restricted namespace
-        safe_ns = {
-            "__builtins__": {},
-            "sum": sum,
-            "range": range,
-            "abs": abs,
-            "min": min,
-            "max": max,
+        import discopt.modeling as dm
+
+        # Bare math-function names (grammar: `exp(x)`, not `dm.exp(x)`), plus the
+        # reductions the tool schema advertises. These resolve to the *modeling*
+        # (`dm`) functions, not Python builtins: `sum`/`abs` must operate on the
+        # expression DAG (builtin `sum(var)` would iterate a Variable forever via
+        # the sequence protocol). Model variables/params from the builder
+        # namespace resolve for `Name` nodes but are NOT callable here.
+        _math = {
+            fn: getattr(dm, fn)
+            for fn in (
+                "sum",
+                "abs",
+                "exp",
+                "log",
+                "log2",
+                "log10",
+                "sqrt",
+                "sin",
+                "cos",
+                "tan",
+                "sinh",
+                "cosh",
+                "tanh",
+            )
+            if hasattr(dm, fn)
         }
-        safe_ns.update(self._namespace)
+        safe_funcs = dict(_math)
+        names: dict[str, Any] = {**safe_funcs, **self._namespace}
+        # Only the fixed math/reduction functions may be *called* — resolved by
+        # object identity so a variable named like a function cannot be invoked.
+        allowed_calls = {id(f) for f in safe_funcs.values()}
 
         try:
-            return eval(expr_str, safe_ns)  # noqa: S307
-        except Exception as e:
+            tree = ast.parse(expr_str, mode="eval")
+        except SyntaxError as e:
+            raise ValueError(f"Cannot parse expression '{expr_str}': {e}") from e
+        try:
+            return _safe_eval_node(tree, names, allowed_calls)
+        except ValueError as e:
             raise ValueError(f"Cannot evaluate expression '{expr_str}': {e}") from e
 
 

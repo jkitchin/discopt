@@ -18,9 +18,20 @@ math bug: it is a remote-code-execution vulnerability.
 
 ## 1. Summary of findings
 
+> **✅ RESOLVED LLM-1** — `python/tests/test_llm_eval_safety.py` (this PR). The
+> `eval()` path is replaced by a whitelisted-AST evaluator (`_safe_eval_node` in
+> `tools.py`): only arithmetic, indexing, and calls to a fixed set of `dm` math /
+> reduction functions are permitted; `Attribute`, `Lambda`, comprehensions, starred
+> args, and calls to non-whitelisted callables are rejected — closing the escape
+> class. RCE repro (`os.system` via `np.__loader__…__globals__`) now raises
+> `ValueError` and runs no code; verified fails-before/passes-after (9 escape tests
+> fail on the pre-fix `eval`). `sum`/`abs` now resolve to the modeling reductions,
+> fixing a latent hang where builtin `sum(var)` iterated a Variable forever. The
+> full finding text is preserved below.
+
 | # | Severity | Component | Finding |
 |---|----------|-----------|---------|
-| LLM-1 | **P0 SECURITY (RCE)** | `tools.py:546-566` | `ModelBuilder._eval_expression` runs `eval(expr_str, {"__builtins__": {}, ...np, dm...})` — the classic incomplete sandbox. With `np` in scope it is trivially escaped to **arbitrary code execution** (`os.system` confirmed). Reachable through the public `discopt.chat()` and `discopt.from_description()`, i.e. any LLM (or a prompt-injected one) can run shell commands on the user's machine. Docstring falsely claims "No builtins or arbitrary code execution" [CONFIRMED with working RCE] |
+| LLM-1 | **P0 SECURITY (RCE)** — ✅ RESOLVED | `tools.py:546-566` | `ModelBuilder._eval_expression` runs `eval(expr_str, {"__builtins__": {}, ...np, dm...})` — the classic incomplete sandbox. With `np` in scope it is trivially escaped to **arbitrary code execution** (`os.system` confirmed). Reachable through the public `discopt.chat()` and `discopt.from_description()`, i.e. any LLM (or a prompt-injected one) can run shell commands on the user's machine. Docstring falsely claims "No builtins or arbitrary code execution" [CONFIRMED with working RCE] |
 | LLM-2 | **P1 false-assurance** | `safety.py:92-146` | `sanitize_tool_args` sanitizes only the `name` field; the **eval'd fields** (`lhs`, `rhs`, `expression`, `value`) pass through raw. The function's presence in the pipeline reads as "inputs are sanitized" while the injection surface is untouched [CONFIRMED] |
 | LLM-3 | P1 invariant | `advisor.py:51-59, 259-302` | `suggest_solver_params(llm=True)` does `params.update(llm_suggestion)` on **unvalidated LLM JSON** — no key whitelist despite the prompt naming one. An LLM-returned `gap_tolerance`/`nlp_solver`/`time_limit` flows straight into the returned params dict; if the user forwards it to `solve(**params)` (the documented use), LLM output *has* affected the solve. Violates the invariant's spirit [CONFIRMED mechanism] |
 | LLM-4 | P2 dead capability | `reformulation.py:85-121` | `apply_bound_tightening` documents "Number of bounds tightened" and "modified in place" but the body only `logger.debug`s and **always returns 0** — a stub masquerading as a working, model-mutating function [CONFIRMED] |
