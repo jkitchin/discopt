@@ -200,6 +200,27 @@ def build_decomposition(model, candidate: Candidate) -> DecomposedModel:
     level, rationale, caveats = _CERTIFICATE.get(
         method, (Soundness.HEURISTIC, "no certified reformulation", ())
     )
+    # T5.3: for the convexity-dependent methods, actually *run* the convexity
+    # classifier so the certificate records a check that happened rather than a
+    # static string. GBD stays UNKNOWN when the recourse is not verified convex
+    # (its driver then withholds the bound); OA is only proven-equivalent when
+    # convex (else it is not applied as an exact method).
+    if method in (MethodKind.GENERALIZED_BENDERS, MethodKind.OUTER_APPROXIMATION):
+        try:
+            from discopt._jax.convexity import classify_oa_cut_convexity
+
+            conv = classify_oa_cut_convexity(model)
+            is_convex = conv.objective_is_convex and all(conv.constraint_mask)
+        except Exception:  # noqa: BLE001 - a classifier failure is treated as unknown
+            is_convex = False
+        if is_convex:
+            level = Soundness.PROVEN_EQUIVALENT
+            rationale = f"recourse verified convex (classifier); {rationale}"
+            caveats = ()
+        else:
+            level = Soundness.UNKNOWN
+            rationale = "recourse not verified convex; " + rationale
+            caveats = ("bound withheld unless the recourse is convex",)
     certificate = SoundnessCertificate(method, level, rationale, caveats)
 
     if method in (

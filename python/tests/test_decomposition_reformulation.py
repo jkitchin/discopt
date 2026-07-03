@@ -170,3 +170,26 @@ def test_solve_independent_blocks_falls_back_to_model_solve(monkeypatch):
     monkeypatch.setattr(type(m), "solve", lambda self, **kw: "MONO_RESULT", raising=False)
     dcmp = analyze_decomposition(m).decompose()
     assert dcmp.solve() == "MONO_RESULT"
+
+
+# ── Phase 5 (T5.3): the certificate records a real convexity check ──
+
+
+def test_gbd_certificate_reflects_convexity():
+    import discopt.modeling as dm
+    from discopt.decomposition import MethodKind, analyze_decomposition, build_decomposition
+    from discopt.decomposition.advisor.types import Soundness
+
+    # Convex MINLP: GBD/OA certificate becomes proven-equivalent.
+    m = dm.Model("cvx")
+    b = [m.binary(f"b{i}") for i in range(2)]
+    x = [m.continuous(f"x{i}", lb=0, ub=5) for i in range(2)]
+    for i in range(2):
+        m.subject_to(x[i] * x[i] <= 4 * b[i])
+    m.subject_to(b[0] + b[1] >= 1)
+    m.minimize(sum(x) + 2 * sum(b))
+    adv = analyze_decomposition(m)
+    gbd = next(c for c in adv.candidates() if c.method is MethodKind.GENERALIZED_BENDERS)
+    cert = build_decomposition(m, gbd).certificate
+    assert cert.level is Soundness.PROVEN_EQUIVALENT
+    assert "convex" in cert.rationale.lower()

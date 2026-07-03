@@ -189,3 +189,22 @@ def test_instance_policy_promotes_viable_neighbor_winner():
     ranked = adv.ranked()
     rec = next(r for r in ranked if r.recommended)
     assert rec.candidate.method is MethodKind.BENDERS
+
+
+# ── Phase 5 (T5.2): store auto-wires the learned policy ───────
+
+
+def test_store_autowires_instance_based_policy():
+    from discopt.decomposition import analyze_decomposition
+    from discopt.decomposition.learning.policies import InstanceBasedPolicy
+    from discopt.decomposition.learning.store import RecordStore
+
+    m = dm.Model("m")
+    x = m.continuous("x", lb=0, ub=1)
+    m.subject_to(x <= 1)
+    m.minimize(x)
+    # No store -> rule-based; with a store -> instance-based (learned) policy.
+    plain = analyze_decomposition(m)
+    assert type(plain._policy).__name__ == "RuleBasedPolicy"
+    learned = analyze_decomposition(m, store=RecordStore(path=None))
+    assert isinstance(learned._policy, InstanceBasedPolicy)

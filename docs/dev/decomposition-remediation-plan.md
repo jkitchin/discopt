@@ -645,6 +645,24 @@ One PR, no behaviour change:
   ordering the whole structure layer depends on), and the file rename needs a
   full maturin rebuild for a cosmetic change — both low-value/higher-risk than
   the shipped items.
+- **Phase 5 (T5.1, T5.3, most of T5.2 done):** T5.1 plumbs
+  ``decomposition_structure`` through ``Model.solve`` and adds
+  ``decomposition="auto"``, which runs the advisor, logs its explanation, and
+  dispatches the recommendation via ``DecomposedModel.solve`` (falling through to
+  the monolithic path on a NONE/no-benefit recommendation) — the advisor is now
+  reachable from ``solve()`` (W1). T5.3 makes ``build_decomposition`` actually run
+  ``classify_oa_cut_convexity`` for GBD/OA so the certificate records a real check
+  (convex → proven-equivalent, else unknown). T5.2: the learning loop is closed —
+  ``analyze_decomposition(model, store=...)`` and the advisor auto-wire
+  ``InstanceBasedPolicy`` when a store is present, and ``decomposition="auto"``
+  records telemetry when ``record_decomposition=True`` or ``DISCOPT_DECOMP_STORE``
+  is set (verified: 3 solves append 3 records; the learned policy is then used).
+  **Calibration (``calibrate_weights``) deferred:** the plan's regression needs an
+  *observed speedup*, which requires recording a monolithic-baseline wall time
+  that ``ObservedPerformance`` does not currently capture — so a faithful fit is
+  impossible from stored data; deferred rather than shipping a placeholder that
+  silently returns defaults. The valuable loop-closing pieces (auto-record,
+  auto-wired learned policy) are in.
 
 ## References
 

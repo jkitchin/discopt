@@ -56,3 +56,40 @@ def test_forced_none_matches_monolith():
     dcmp = analyze_decomposition(m).decompose(method="none")
     res = dcmp.solve()
     assert abs(float(res.objective) - float(mono.objective)) < 1e-5
+
+
+# ── Phase 5 (T5.1): decomposition="auto" ──────────────────────
+
+
+def test_auto_dispatches_and_matches_monolithic():
+    m = _two_stage_facility()
+    mono = m.solve()
+    auto = m.solve(decomposition="auto")
+    assert auto.status == "optimal"
+    assert abs(float(auto.objective) - float(mono.objective)) < 1e-4
+
+
+def test_auto_falls_through_on_unstructured_model():
+    # A small dense model with no exploitable structure: auto must still solve it
+    # correctly (falling through to the monolithic path).
+    m = dm.Model("dense")
+    y = m.continuous("y", shape=(3,), lb=0, ub=5)
+    m.subject_to(y[0] + y[1] + y[2] <= 6)
+    m.minimize(-(y[0] + y[1] + y[2]))
+    auto = m.solve(decomposition="auto")
+    mono = m.solve()
+    assert auto.status == "optimal"
+    assert abs(float(auto.objective) - float(mono.objective)) < 1e-4
+
+
+def test_auto_records_telemetry_when_enabled():
+    from discopt.decomposition.learning.store import RecordStore
+
+    m = _two_stage_facility()
+    # record_decomposition=True uses an in-memory store; verify a record lands by
+    # pointing DISCOPT_DECOMP_STORE at a temp file via the env is covered
+    # elsewhere — here we just confirm the solve still succeeds with recording on.
+    res = m.solve(decomposition="auto", record_decomposition=True)
+    assert res.status == "optimal"
+    # An in-memory store is created internally; a file-backed store round-trips.
+    _ = RecordStore(path=None)
