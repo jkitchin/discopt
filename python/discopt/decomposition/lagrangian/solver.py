@@ -13,9 +13,13 @@ For every ``λ >= 0`` this is a **valid lower bound** on the optimum (the dualiz
 term is ``<= 0`` at any feasible point). The Lagrangian dual ``max_{λ>=0} L(λ)``
 is maximized by:
 
-- **subgradient** ascent (Polyak step with target-level halving), or
-- a **bundle** / cutting-plane method (Kelley): a piecewise-linear model of the
-  concave ``L`` maximized over a box.
+- **subgradient** ascent (Polyak step with target-level halving),
+- a **level bundle** method (``method="bundle"``; de Oliveira & Sagastizábal): the
+  next iterate is the projection of the stability centre onto a level set of the
+  cutting-plane model, solved as a small QP. Stabilized, with a reliable
+  stopping test (``L̂* - L_best`` small) that plain subgradient lacks, or
+- the plain **Kelley** cutting-plane (``method="kelley"``): the unstabilized
+  piecewise-linear model maximized over a box (kept for comparison; it oscillates).
 
 A Lagrangian heuristic recovers a primal incumbent by fixing the integer
 variables at the relaxed solution and re-solving the full LP. The reported
@@ -60,6 +64,8 @@ class LagrangianConfig:
     patience: int = 8  # non-improving iters before halving alpha
     recover_every: int = 1  # run primal recovery every k iterations
     backend: str = "sequential"  # per-block execution: "sequential" | "threads"
+    level_gamma: float = 0.5  # level parameter for the bundle method (T2.1)
+    lambda_max0: float = 1e4  # initial multiplier box; grows x10 when hit
 
 
 def solve_lagrangian(
@@ -98,7 +104,7 @@ def solve_lagrangian(
         ``bound`` is the rigorous Lagrangian dual lower bound; ``objective`` is
         the best feasible value found by the recovery heuristic (if any).
     """
-    from discopt.solvers.lp_backend import get_lp_solver, get_milp_solver
+    from discopt.solvers.lp_backend import get_lp_solver, get_milp_solver, get_qp_solver
 
     cfg = config or LagrangianConfig(
         time_limit=time_limit,
@@ -108,12 +114,25 @@ def solve_lagrangian(
         prefer_pounce=(nlp_solver == "pounce"),
         backend=backend,
     )
-    if cfg.method not in ("subgradient", "bundle"):
-        raise ValueError(f"Unknown method={cfg.method!r}; choose 'subgradient' or 'bundle'.")
+    if cfg.method not in ("subgradient", "bundle", "kelley"):
+        raise ValueError(
+            f"Unknown method={cfg.method!r}; choose 'subgradient', 'bundle', or 'kelley'."
+        )
     t0 = time.time()
 
     milp = get_milp_solver(prefer_pounce=cfg.prefer_pounce)
     lp = get_lp_solver(prefer_pounce=cfg.prefer_pounce)
+    # The level-bundle projection is a small QP; fall back to Kelley if no QP
+    # backend is installed (T2.1).
+    qp = None
+    if cfg.method == "bundle":
+        try:
+            qp = get_qp_solver(prefer_pounce=cfg.prefer_pounce)
+        except ImportError:
+            logger.warning(
+                "method='bundle' needs a QP backend for the level projection; "
+                "none available, falling back to the Kelley cutting-plane step."
+            )
 
     if structure is None:
         structure = detect_decomposition(model)
@@ -292,8 +311,11 @@ def solve_lagrangian(
     incumbent: np.ndarray | None = None
     alpha = cfg.initial_step
     stall = 0
-    # Bundle model: list of (L_k, g_k, lam_k).
+    # Bundle model: list of (L_k, g_k, lam_k). Level bundle also tracks a
+    # stability centre and an adaptive multiplier box.
     cuts: list[tuple[float, np.ndarray, np.ndarray]] = []
+    lam_center = np.zeros(m_coup)
+    lam_max = cfg.lambda_max0
     status = "iteration_limit"
 
     for it in range(cfg.max_iterations):
@@ -306,6 +328,7 @@ def solve_lagrangian(
             break
         if L > best_L:
             best_L = L
+            lam_center = lam.copy()  # serious step: move the stability centre
             stall = 0
         else:
             stall += 1
@@ -340,9 +363,21 @@ def solve_lagrangian(
             if stall >= cfg.patience:
                 alpha *= 0.5
                 stall = 0
-        else:  # bundle / cutting-plane (Kelley)
+        elif cfg.method == "kelley" or qp is None:
+            # Plain Kelley cutting-plane (explicit, or bundle without a QP backend).
             cuts.append((L, residual.copy(), lam.copy()))
             lam = _bundle_step(lp, cuts, m_coup, free_mask)
+        else:  # level bundle (T2.1)
+            cuts.append((L, residual.copy(), lam.copy()))
+            lam, L_hat, hit_box = _level_bundle_step(
+                lp, qp, cuts, m_coup, free_mask, best_L, lam_center, lam_max, cfg.level_gamma
+            )
+            if hit_box and lam_max < 1e12:
+                lam_max *= 10.0  # adaptive box growth
+            # Reliable dual stopping test: the cutting-plane upper model L̂* is
+            # within tolerance of the best dual value, so the dual is maximized.
+            if np.isfinite(L_hat) and L_hat - best_L <= cfg.gap_tolerance * max(1.0, abs(best_L)):
+                break
 
     # Promote to optimal if bounds already met.
     if status == "iteration_limit" and np.isfinite(best_UB) and best_L > -np.inf:
@@ -408,3 +443,75 @@ def _bundle_step(
     lam = np.asarray(res.x[:m_coup], dtype=np.float64)
     lam[~free_mask] = np.maximum(0.0, lam[~free_mask])
     return lam
+
+
+def _kelley_max(
+    lp,
+    cuts: list[tuple[float, np.ndarray, np.ndarray]],
+    m_coup: int,
+    free_mask: np.ndarray,
+    lam_max: float,
+) -> tuple[np.ndarray | None, float]:
+    """Maximize the cutting-plane model ``L̂`` over the box; return
+    ``(argmax λ, L̂*)`` (``(None, -inf)`` if the LP fails)."""
+    ncol = m_coup + 1
+    c = np.zeros(ncol)
+    c[-1] = -1.0
+    rows, rhs = [], []
+    for L_k, g_k, lam_k in cuts:
+        row = np.zeros(ncol)
+        row[:m_coup] = -g_k
+        row[-1] = 1.0
+        rows.append(row)
+        rhs.append(float(L_k - g_k @ lam_k))
+    bounds = [
+        (-lam_max, lam_max) if free_mask[i] else (0.0, lam_max) for i in range(m_coup)
+    ] + [(-_BIG, _BIG)]
+    res = lp(np.asarray(c), A_ub=np.array(rows), b_ub=np.array(rhs), bounds=bounds)
+    if res.x is None:
+        return None, -np.inf
+    return np.asarray(res.x[:m_coup], dtype=np.float64), float(res.x[m_coup])
+
+
+def _level_bundle_step(
+    lp,
+    qp,
+    cuts: list[tuple[float, np.ndarray, np.ndarray]],
+    m_coup: int,
+    free_mask: np.ndarray,
+    best_L: float,
+    lam_center: np.ndarray,
+    lam_max: float,
+    gamma: float,
+) -> tuple[np.ndarray, float, bool]:
+    """One level-bundle iterate: project the stability centre onto the level set
+    ``{λ : L̂(λ) >= ℓ}`` with ``ℓ = best_L + γ(L̂* - best_L)``.
+
+    Returns ``(next_λ, L̂*, hit_box)``. Falls back to the Kelley maximizer when no
+    QP backend is available or the projection QP fails.
+    """
+    lam_kelley, L_hat = _kelley_max(lp, cuts, m_coup, free_mask, lam_max)
+    if lam_kelley is None:
+        return cuts[-1][2], -np.inf, False
+    hit_box = bool(np.any(np.abs(lam_kelley) > 0.99 * lam_max))
+    if qp is None or not np.isfinite(best_L):
+        return lam_kelley, L_hat, hit_box
+
+    ell = best_L + gamma * (L_hat - best_L)
+    # Projection QP: min ||λ - λ_c||^2  s.t.  L_k + g_k·(λ-λ_k) >= ℓ,  λ in box.
+    Q = 2.0 * np.eye(m_coup)
+    c = -2.0 * np.asarray(lam_center, dtype=np.float64)
+    rows, rhs = [], []
+    for L_k, g_k, lam_k in cuts:
+        rows.append(-g_k)  # -g_k·λ <= L_k - g_k·λ_k - ℓ
+        rhs.append(float(L_k - g_k @ lam_k - ell))
+    bounds = [(-lam_max, lam_max) if free_mask[i] else (0.0, lam_max) for i in range(m_coup)]
+    try:
+        qres = qp(Q, c, A_ub=np.array(rows), b_ub=np.array(rhs), bounds=bounds)
+    except Exception:  # noqa: BLE001 - a failed projection falls back to Kelley
+        return lam_kelley, L_hat, hit_box
+    if qres.x is None:
+        return lam_kelley, L_hat, hit_box
+    lam = np.asarray(qres.x[:m_coup], dtype=np.float64)
+    lam[~free_mask] = np.maximum(0.0, lam[~free_mask])
+    return lam, L_hat, hit_box

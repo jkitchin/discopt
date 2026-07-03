@@ -79,6 +79,17 @@ class BendersConfig:
     # sequentially or on a thread pool.
     multicut: bool = True
     backend: str = "sequential"
+    # Separation-point stabilization (T2.2): "inout" separates cuts at an
+    # interior point x_sep = alpha*x* + (1-alpha)*x_center in addition to the
+    # cut at x* (which still drives the incumbent and guarantees progress), so
+    # correctness is unchanged and only the cut set is enriched. "none" is the
+    # classic Kelley separation.
+    stabilization: str = "none"
+    stab_alpha: float = 0.5
+    # Cut management (T2.3): drop an optimality cut whose slack has stayed large
+    # for this many consecutive master solves (feasibility cuts are kept forever).
+    cut_purge_after: int = 20
+    cut_slack_tol: float = 1e-3
 
 
 def _model_is_linear(model: Model) -> bool:
@@ -488,6 +499,50 @@ def solve_benders(
     incumbent_full: np.ndarray | None = None
     status = "iteration_limit"
     stall = 0  # consecutive non-separating iterations (T0.4 progress guard)
+    x_center: np.ndarray | None = None  # in-out stabilization centre (T2.2)
+    cut_streak: list[int] = [0] * len(cut_x)  # per-cut large-slack streak (T2.3)
+
+    def _add_inout_cuts(x_star: np.ndarray):
+        """Separate additional cuts at the interior point
+        ``x_sep = alpha*x* + (1-alpha)*x_center`` (T2.2). These are extra valid
+        global underestimators; the x* cuts already added drive the incumbent and
+        guarantee progress, so this only enriches the master."""
+        if cfg.stabilization != "inout" or x_center is None or cfg.stab_alpha >= 1.0:
+            return
+        x_sep = cfg.stab_alpha * x_star + (1.0 - cfg.stab_alpha) * x_center
+        sep_results = _recourse_all(x_sep)
+        for blk, res in zip(blocks, sep_results):
+            if res is None or res[0] in ("recourse_fail", "unbounded"):
+                continue  # a fractional x_sep block issue: just skip stabilization
+            if res[0] == "opt":
+                _add_opt_cut(blk, res[3], res[4], res[5])
+            elif res[0] == "infeas":
+                _add_feas_cut(blk, res[3], res[4], res[5])
+
+    def _purge_stale_cuts(x_star: np.ndarray, eta_vec: np.ndarray) -> None:
+        """Drop optimality cuts whose slack has stayed large for many master
+        solves (T2.3); feasibility cuts (eta_coef 0) are kept forever."""
+        while len(cut_streak) < len(cut_x):
+            cut_streak.append(0)
+        keep_idx = []
+        for k in range(len(cut_x)):
+            slack = cut_rhs[k] - (
+                float(cut_x[k] @ x_star) + cut_eta[k] * float(eta_vec[cut_block[k]])
+            )
+            if slack > cfg.cut_slack_tol:
+                cut_streak[k] += 1
+            else:
+                cut_streak[k] = 0
+            drop = cut_eta[k] == -1.0 and cut_streak[k] >= cfg.cut_purge_after
+            if not drop:
+                keep_idx.append(k)
+        if len(keep_idx) != len(cut_x):
+            logger.debug("Benders purged %d stale cuts", len(cut_x) - len(keep_idx))
+            cut_block[:] = [cut_block[k] for k in keep_idx]
+            cut_x[:] = [cut_x[k] for k in keep_idx]
+            cut_eta[:] = [cut_eta[k] for k in keep_idx]
+            cut_rhs[:] = [cut_rhs[k] for k in keep_idx]
+            cut_streak[:] = [cut_streak[k] for k in keep_idx]
 
     for _it in range(cfg.max_iterations):
         if time.time() - t0 > cfg.time_limit:
@@ -504,6 +559,8 @@ def solve_benders(
             break
         x_hat = np.asarray(mres.x[:n_master], dtype=np.float64)
         eta_vec = np.asarray(mres.x[n_master : n_master + n_blocks], dtype=np.float64)
+        if x_center is None:
+            x_center = x_hat.copy()  # first stabilization centre (T2.2)
         lb = mres.bound if mres.bound is not None else mres.objective
         lower_bound = (float(lb) + lin.c_offset) if lb is not None else None
 
@@ -529,6 +586,7 @@ def solve_benders(
             if total < best_ub:
                 best_ub = total
                 incumbent_full = x_full
+                x_center = x_hat.copy()  # move stabilization centre to incumbent
 
         # Per-block cuts; track whether any of them separates the master point.
         separated = False
@@ -539,6 +597,11 @@ def solve_benders(
                 cut = _add_feas_cut(blk, res[3], res[4], res[5])
             if _cut_separates(cut, x_hat, eta_vec):
                 separated = True
+
+        # In-out: enrich the master with cuts separated at the interior point.
+        _add_inout_cuts(x_hat)
+        # Cut management: drop long-stale optimality cuts.
+        _purge_stale_cuts(x_hat, eta_vec)
 
         if separated:
             stall = 0

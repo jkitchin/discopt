@@ -595,7 +595,23 @@ One PR, no behaviour change:
   performance-only win, since the current ``INDEPENDENT_BLOCKS`` path already
   solves the model correctly (monolithically). Revisit once a safe
   ``Model.subset(vars, constraints)`` primitive exists in the modeling layer.
-- *(pending: T3.3 NGBD spike result; T2.3 warm-start backend capability.)*
+- **Phase 2 (done):** T2.1 replaced the mislabeled Kelley loop with a real level
+  bundle method (QP projection of the stability centre onto a level set, via the
+  POUNCE QP backend; Kelley fallback when no QP is available), added the reliable
+  ``L̂* - best_L`` dual stopping test and an adaptive multiplier box; ``method``
+  now means ``"bundle"`` = level bundle, ``"kelley"`` = the old cutting plane.
+  T2.2 in-out separation is implemented as *additive* interior cuts
+  (``x_sep = α x* + (1-α) x_center``) layered on top of the x* cuts, so the
+  incumbent and progress guarantees still come from x* and correctness is
+  trivially preserved; **defaulted to ``stabilization="none"``** (opt-in) rather
+  than the plan's ``"inout"`` default, because the additive variant costs an
+  extra recourse solve per iteration and the iteration-count win is
+  instance-dependent — flip the default once benchmarked on larger instances.
+  T2.3 cut management purges long-stale optimality cuts (feasibility cuts kept).
+- **T2.3 warm-start:** the MILP backend selector (``get_milp_solver``) exposes no
+  MIP-start parameter, so master warm-starting is left as a documented TODO
+  (a backend feature, per the plan's own scoping) rather than built here.
+- *(pending: T3.3 NGBD spike result.)*
 
 ## References
 

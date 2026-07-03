@@ -188,3 +188,28 @@ def test_threads_backend_matches_optimum():
     assert r.status == "optimal"
     assert r.objective == pytest.approx(5.0, abs=ABS_TOL)
     assert r.bound <= r.objective + ABS_TOL
+
+
+# ── Phase 2 (T2.1): level bundle method ───────────────────────
+
+
+def test_level_bundle_reaches_optimum():
+    """method='bundle' is now a stabilized level-bundle method with a QP
+    projection; it must still reach the certified optimum."""
+    r = solve_lagrangian(_two_block_conflict(), method="bundle", time_limit=30)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(5.0, abs=ABS_TOL)
+    assert r.bound <= r.objective + ABS_TOL
+
+
+def test_kelley_alias_preserved():
+    """The old unstabilized Kelley cutting-plane remains available as
+    method='kelley' for comparison."""
+    r = solve_lagrangian(_two_block_conflict(), method="kelley", time_limit=30)
+    assert r.status == "optimal"
+    assert r.objective == pytest.approx(5.0, abs=ABS_TOL)
+
+
+def test_unknown_method_still_rejected():
+    with pytest.raises(ValueError, match="Unknown method"):
+        solve_lagrangian(_two_block_conflict(), method="nope")

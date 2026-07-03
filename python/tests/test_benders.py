@@ -275,3 +275,19 @@ def test_multicut_backend_determinism():
     assert seq.objective == thr.objective
     assert seq.bound == thr.bound
     assert seq.status == thr.status
+
+
+# ── Phase 2 (T2.2): in-out separation ─────────────────────────
+
+
+def test_inout_stabilization_matches_optimum():
+    """In-out separation adds interior cuts on top of the x* cuts, so the
+    certified optimum is unchanged."""
+    from discopt.decomposition.benders.solver import BendersConfig
+
+    none = solve_benders(_two_block_facility(), config=BendersConfig(stabilization="none"))
+    inout = solve_benders(_two_block_facility(), config=BendersConfig(stabilization="inout"))
+    assert none.status == inout.status == "optimal"
+    assert none.objective == pytest.approx(inout.objective, abs=1e-3)
+    assert inout.objective == pytest.approx(15.0, abs=1e-3)
+    assert inout.bound is not None and inout.bound <= inout.objective + 1e-3
