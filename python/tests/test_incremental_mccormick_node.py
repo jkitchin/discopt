@@ -5,10 +5,15 @@ The default spatial-B&B path rebuilt and re-equilibrated the McCormick LP at eve
 node — together ~half the wall clock (gear4: ``equilibrate`` 29% + ``build`` 19%).
 ``MccormickLPRelaxer`` now builds the structure once and per node patches only the
 box-dependent product rows (numpy) + warm-starts the Rust simplex, giving ~19x more
-nodes/s on the pure-integer QCQP class (nvs17). It is gated to the lp_spatial
-engine's validated-safe domain (pure-integer, minimize) and is sound: the patched
-matrix is validated row-for-row against the cold build, so the LP value is a valid
-lower bound; out-of-scope models fall back to the cold build unchanged.
+nodes/s on the pure-integer QCQP class (nvs17). Since cert:T1.3 the engine is gated
+ONLY on the constructor's row-for-row self-validation (``IncrementalMcCormickLP.ok``)
+— for any variable mix and any objective sense — because the fast path solves the
+McCormick LP *relaxation* (a valid lower bound for continuous, mixed, and integer
+models alike) and ``_validate`` proves the patched rows reproduce the cold
+``build_milp_relaxation`` exactly. The earlier pure-integer/minimize gate was a
+conservative rollout limit (#355), not a soundness boundary. Any uncovered term
+(e.g. division, NN-embedding smooth activations) makes ``_validate`` fail →
+``ok=False`` → the trusted cold build runs unchanged.
 """
 
 from __future__ import annotations
@@ -38,14 +43,38 @@ def test_incremental_active_for_integer_qcqp():
     assert MccormickLPRelaxer(_int_qcqp())._inc is not None
 
 
-def test_incremental_inactive_for_mixed_or_division():
-    # Mixed-integer (continuous var) -> out of the pure-integer scope.
+def test_incremental_sound_for_mixed_and_division():
+    # cert:T1.3 widened the gate beyond pure-integer: the engine now activates for
+    # any model whose McCormick rows self-validate against the cold build. The
+    # invariant is no longer "inactive off the pure-integer path" but "never an
+    # UNSOUND activation" — where it engages, the fast bound must be a valid lower
+    # bound (<= the true optimum) and never tighter than the cold McCormick bound.
+
+    # Mixed-integer bilinear: covered by McCormick -> engine engages, soundly.
     m = dm.Model("mixed")
     x = m.continuous("x", lb=0, ub=5)
     y = m.integer("y", lb=0, ub=5)
-    m.minimize(x * y)
+    m.minimize(x * y)  # true min 0 (x=0,y>=3) subject to x+y>=3
     m.subject_to(x + y >= 3)
-    assert MccormickLPRelaxer(m)._inc is None
+    fast = MccormickLPRelaxer(m)
+    assert fast._inc is not None, "T1.3: McCormick-covered mixed model should engage"
+    lb, ub = np.array([0.0, 0.0]), np.array([5.0, 5.0])
+    r_fast = fast.solve_at_node(lb.copy(), ub.copy())
+    cold = MccormickLPRelaxer(m)
+    cold._inc = None
+    r_cold = cold.solve_at_node(lb.copy(), ub.copy())
+    assert r_fast.status == "optimal" and r_cold.status == "optimal"
+    assert r_fast.lower_bound <= 0.0 + 1e-6  # valid lower bound (<= true optimum)
+    assert r_fast.lower_bound <= r_cold.lower_bound + 1e-6  # never over-tightens cold
+
+    # Division is an uncovered term -> _validate fails -> ok=False -> cold fallback,
+    # so the engine stays inactive (the sound degradation path is preserved).
+    md = dm.Model("div")
+    a = md.continuous("a", lb=1, ub=5)
+    b = md.continuous("b", lb=1, ub=5)
+    md.minimize(a / b)
+    md.subject_to(a + b >= 3)
+    assert MccormickLPRelaxer(md)._inc is None, "uncovered division must fall back to cold"
 
 
 def test_incremental_disabled_by_env(monkeypatch):

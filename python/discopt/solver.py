@@ -4402,6 +4402,54 @@ def solve_model(
                         except Exception as _pool_exc:  # pragma: no cover - defensive
                             logger.debug("root cut pool separation skipped: %s", _pool_exc)
                             _root_cut_pool = None
+                    elif getattr(_mc_lp_relaxer, "_inc", None) is not None:
+                        # Root cut pool for the GENERAL spatial path (cert:T1.3).
+                        # When the incremental engine is active but PSD cuts are
+                        # off, the fast path (which skips per-node separation) would
+                        # otherwise solve base McCormick only, collapsing the bound
+                        # on separation-reliant models (measured: dispatch 3 → 9843
+                        # nodes). Capture the general root separation chain ONCE
+                        # (multilinear / edge-concave / univariate-square / convex /
+                        # RLT) — ``out_cuts`` forces the cold, separating path (see
+                        # ``solve_at_node``) — and inherit it at every fast-path
+                        # node. Sound: a cut valid over the root box is valid over
+                        # every sub-box, so an inherited row never removes a
+                        # feasible point.
+                        try:
+                            _pool_chunks = []
+                            _root_remaining = time_limit - (time.perf_counter() - t_start)
+                            _pool_budget = min(
+                                max(time_limit * 0.25, 5.0),
+                                max(_root_remaining, _DEADLINE_NODE_FLOOR_S),
+                            )
+                            _pool_res = _mc_lp_relaxer.solve_at_node(
+                                _probe_lb,
+                                _probe_ub,
+                                time_limit=_pool_budget,
+                                out_cuts=_pool_chunks,
+                            )
+                            if _pool_chunks and _pool_chunks[0] is not None:
+                                _A_pool, _b_pool = _pool_chunks[0]
+                                _n_pool = _A_pool.shape[0]
+                                if _n_pool > _root_cut_max:
+                                    _A_pool = _A_pool[-_root_cut_max:]
+                                    _b_pool = _b_pool[-_root_cut_max:]
+                                _root_cut_pool = (_A_pool, _b_pool)
+                                if (
+                                    _pool_res is not None
+                                    and _pool_res.lower_bound is not None
+                                    and np.isfinite(_pool_res.lower_bound)
+                                ):
+                                    _root_pool_bound = float(_pool_res.lower_bound)
+                                logger.info(
+                                    "Root cut pool (general spatial): %d cuts (of %d "
+                                    "separated), inherited at every fast-path node",
+                                    _A_pool.shape[0],
+                                    _n_pool,
+                                )
+                        except Exception as _pool_exc:  # pragma: no cover - defensive
+                            logger.debug("general root cut pool skipped: %s", _pool_exc)
+                            _root_cut_pool = None
 
     # AlphaBB alpha estimate (lever 3, issue #194), deferred from above: compute
     # it only when the LP relaxer is NOT the bound source. When the LP relaxer is
@@ -4655,6 +4703,18 @@ def solve_model(
     iteration = 0
     _deadline = t_start + time_limit
 
+    # Root-node certification instrumentation (cert:T0.1). Snapshot the tree's
+    # global lower bound (internal minimization sense) and the elapsed wall
+    # clock at the moment the root node has been fully processed (end of
+    # iteration 0), before any branching lifts the frontier. ``root_gap`` is
+    # derived from these at result-build time against the final incumbent.
+    _root_time: Optional[float] = None
+    _root_glb_internal: Optional[float] = None
+
+    # Per-node reduction timers (cert:T0.3). Accumulated across the spatial B&B
+    # loop and surfaced on SolveResult.solver_stats. Pure instrumentation.
+    _reduce_timers = {"fbbt": 0.0, "obbt": 0.0}
+
     # Objective-gating priority branching (issue #184). Opt-in via
     # ``DISCOPT_OBJ_BRANCH_PRIORITY=1``: branch the binaries that gate the
     # objective's nonlinear terms first so the global bound can climb off a
@@ -4748,6 +4808,7 @@ def solve_model(
 
         # Tighten node bounds via constraint propagation (FBBT).
         if cl_list:
+            _t_fbbt = time.perf_counter()
             for i in range(n_batch):
                 if node_infeasible_mask[i]:
                     continue
@@ -4761,6 +4822,7 @@ def solve_model(
                     continue
                 batch_lb[i] = t_lb.tolist()
                 batch_ub[i] = t_ub.tolist()
+            _reduce_timers["fbbt"] += time.perf_counter() - _t_fbbt
 
         # --- Per-node OBBT (Lever A) ---
         # Tighten each surviving node's box against its own McCormick relaxation
@@ -6344,6 +6406,16 @@ def solve_model(
             except Exception as e:
                 logger.warning("Node callback raised an exception: %s", e)
 
+        # Root-node certification snapshot (cert:T0.1). After the root batch has
+        # been processed but before the first branch, the tree's global lower
+        # bound reflects the root relaxation alone. Record it and the elapsed
+        # wall clock; ``root_gap`` is finalized against the incumbent below.
+        if iteration == 0:
+            _root_time = time.perf_counter() - t_start
+            _root_glb_snap = tree.stats().get("global_lower_bound")
+            if _root_glb_snap is not None and np.isfinite(_root_glb_snap):
+                _root_glb_internal = float(_root_glb_snap)
+
         iteration += 1
 
         # Check termination
@@ -6598,6 +6670,40 @@ def solve_model(
         _gap_certified = True
         status = "optimal"
 
+    # Root-node certification metrics (cert:T0.1). Convert the root snapshot to
+    # the reported objective sense (mirroring ``bound_val``'s negation for
+    # MAXIMIZE) and adopt the strengthened root cut-pool bound when it is the
+    # tighter rigorous lower bound (MINIMIZE only, matching the pool-bound
+    # adoption above). ``root_gap`` is the relative gap of that bound against
+    # the final incumbent, using the same floored abs/rel convention as ``gap``.
+    root_bound_val: Optional[float] = None
+    root_gap_val: Optional[float] = None
+    _root_internal = _root_glb_internal
+    if (
+        _root_pool_bound is not None
+        and np.isfinite(_root_pool_bound)
+        and model._objective.sense == ObjectiveSense.MINIMIZE
+        and (_root_internal is None or _root_pool_bound > _root_internal)
+    ):
+        _root_internal = _root_pool_bound
+    if _root_internal is not None and np.isfinite(_root_internal):
+        root_bound_val = -_root_internal if _is_max else _root_internal
+        if obj_val is not None and np.isfinite(obj_val):
+            root_gap_val = abs(obj_val - root_bound_val) / max(1.0, abs(obj_val))
+
+    # Per-family reduction/separation timers (cert:T0.3). OBBT time is already
+    # accumulated in ``_pn_obbt_spent``; FBBT in ``_reduce_timers``; the
+    # separation families on the relaxer instance. Only non-zero families are
+    # surfaced; an all-zero result reports None.
+    _reduce_timers["obbt"] = _pn_obbt_spent
+    _solver_stats: dict[str, float] = {
+        f"reduce/{_rfam}": float(_rt) for _rfam, _rt in _reduce_timers.items() if _rt > 0.0
+    }
+    if _mc_lp_relaxer is not None and getattr(_mc_lp_relaxer, "_sep_timers", None):
+        for _sfam, _stime in _mc_lp_relaxer._sep_timers.items():
+            if _stime > 0.0:
+                _solver_stats[f"separate/{_sfam}"] = float(_stime)
+
     return SolveResult(
         status=status,
         objective=obj_val,
@@ -6609,6 +6715,10 @@ def solve_model(
         rust_time=rust_time,
         jax_time=jax_time,
         python_time=python_time,
+        root_bound=root_bound_val,
+        root_gap=root_gap_val,
+        root_time=_root_time,
+        solver_stats=_solver_stats or None,
         gap_certified=_gap_certified,
         subnlp_calls=_subnlp_calls,
         subnlp_feasible=_subnlp_feasible,
@@ -6773,11 +6883,17 @@ def _solve_continuous(
     bound_duals_lower = _unpack_bound_duals(model, nlp_result.bound_multipliers_lower)
     bound_duals_upper = _unpack_bound_duals(model, nlp_result.bound_multipliers_upper)
 
+    # Root-node certification metrics (cert:T0.1). This path has no B&B tree —
+    # the single NLP solve at the root box is the whole solve, so the root
+    # bound/gap/time equal the reported ones.
+    _c_bound = obj_val if status == "optimal" else None
+    _c_gap = _optimal_relative_gap(obj_val) if status == "optimal" and obj_val is not None else None
+
     return SolveResult(
         status=status,
         objective=obj_val,
-        bound=obj_val if status == "optimal" else None,
-        gap=_optimal_relative_gap(obj_val) if status == "optimal" and obj_val is not None else None,
+        bound=_c_bound,
+        gap=_c_gap,
         x=x_dict,
         constraint_duals=constraint_duals,
         bound_duals_lower=bound_duals_lower,
@@ -6787,6 +6903,9 @@ def _solve_continuous(
         rust_time=0.0,
         jax_time=jax_time,
         python_time=python_time,
+        root_bound=_c_bound,
+        root_gap=_c_gap,
+        root_time=wall_time,
     )
 
 
@@ -6944,6 +7063,11 @@ def _solve_nlp_bb(
     # serial path.
     _use_pounce_batch = nlp_solver == "pounce" and n_vars >= _POUNCE_BATCH_MIN_VARS
     iteration = 0
+
+    # Root-node certification instrumentation (cert:T0.1); see solve_model's
+    # spatial-path snapshot for the rationale.
+    _root_time: Optional[float] = None
+    _root_glb_internal: Optional[float] = None
     # Adaptive LNS primal-improvement state (RINS + local branching). These
     # improvers existed only in solve_model's loop; syn/rsyn/clay take THIS path,
     # so they never got polished past the root incumbent (issue #267/#282). Wire
@@ -7508,6 +7632,13 @@ def _solve_nlp_bb(
                             logger.debug("NLP-BB LNS local-branching failed: %s", _e)
                         _record_improver(_HEUR_COST["lbranch"], _lb_improved)
 
+        # Root-node certification snapshot (cert:T0.1).
+        if iteration == 0:
+            _root_time = time.perf_counter() - t_start
+            _root_glb_snap = tree.stats().get("global_lower_bound")
+            if _root_glb_snap is not None and np.isfinite(_root_glb_snap):
+                _root_glb_internal = float(_root_glb_snap)
+
         iteration += 1
 
         # Check termination
@@ -7692,6 +7823,16 @@ def _solve_nlp_bb(
             _gap_certified = True
             status = "optimal"
 
+    # Root-node certification metrics (cert:T0.1); see solve_model for the
+    # sense conversion and gap convention.
+    _nlpbb_is_max = model._objective.sense == ObjectiveSense.MAXIMIZE
+    root_bound_val: Optional[float] = None
+    root_gap_val: Optional[float] = None
+    if _root_glb_internal is not None and np.isfinite(_root_glb_internal):
+        root_bound_val = -_root_glb_internal if _nlpbb_is_max else _root_glb_internal
+        if obj_val is not None and np.isfinite(obj_val):
+            root_gap_val = abs(obj_val - root_bound_val) / max(1.0, abs(obj_val))
+
     return SolveResult(
         status=status,
         objective=obj_val,
@@ -7703,6 +7844,9 @@ def _solve_nlp_bb(
         rust_time=rust_time,
         jax_time=jax_time,
         python_time=python_time,
+        root_bound=root_bound_val,
+        root_gap=root_gap_val,
+        root_time=_root_time,
         nlp_bb=True,
         gap_certified=_gap_certified,
         constraint_duals=constraint_duals,
@@ -10627,6 +10771,43 @@ def _solve_milp_simplex(
         if np.isfinite(bound):
             bound_val = -bound if maximize else bound
             gap_val = abs(obj_val - bound_val) / (abs(obj_val) + 1e-10)
+
+        # Root-node certification metrics (cert:T0.1/T0.5). The one-shot Rust MILP
+        # driver runs the whole B&B internally, so there is no per-iteration root
+        # snapshot to read. Recover the root bound by solving the continuous
+        # relaxation (integers relaxed) over the root box — one extra LP solve,
+        # cheap on this fast path. Pure instrumentation: the returned incumbent /
+        # node_count are untouched, so the solve stays bound-neutral.
+        root_bound_val = None
+        root_gap_val = None
+        root_time_val = None
+        try:
+            _t_root = time.perf_counter()
+            _lp_status, _, _lp_obj, _lp_bound, _, _ = solve_milp_py(
+                np.ascontiguousarray(lp_data.c, dtype=np.float64),
+                A,
+                np.ascontiguousarray(lp_data.b_eq, dtype=np.float64),
+                np.ascontiguousarray(lp_data.x_l, dtype=np.float64),
+                np.ascontiguousarray(lp_data.x_u, dtype=np.float64),
+                np.ascontiguousarray(np.empty(0, dtype=np.int64)),  # integers relaxed
+                n_orig,
+                float(lp_data.obj_const),
+                1000,  # a relaxed (integer-free) LP solves at the root; headroom to finalize
+                float(gap_tolerance),
+                time_limit_s=float(max(0.1, min(_milp_budget, 5.0))),
+            )
+            root_time_val = time.perf_counter() - _t_root
+            if (
+                _lp_status in ("optimal", "feasible")
+                and _lp_obj is not None
+                and np.isfinite(_lp_obj)
+            ):
+                root_bound_val = -_lp_obj if maximize else _lp_obj
+                if obj_val is not None and np.isfinite(obj_val):
+                    root_gap_val = abs(obj_val - root_bound_val) / max(1.0, abs(obj_val))
+        except Exception as _e:  # pragma: no cover - defensive
+            logger.debug("root LP relaxation bound failed: %s", _e)
+
         return SolveResult(
             status=status,
             objective=obj_val,
@@ -10635,6 +10816,9 @@ def _solve_milp_simplex(
             x=x_dict,
             wall_time=wall_time,
             node_count=nodes,
+            root_bound=root_bound_val,
+            root_gap=root_gap_val,
+            root_time=root_time_val,
             gap_certified=status == "optimal",
         )
     if status == "unbounded":
@@ -10910,6 +11094,9 @@ def _solve_milp_bb(
     _structured_avail = _simplex_nodes or _pounce_nodes_avail
 
     iteration = 0
+    # Root-node certification instrumentation (cert:T0.1).
+    _root_time: Optional[float] = None
+    _root_glb_internal: Optional[float] = None
     while True:
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
@@ -10981,6 +11168,13 @@ def _solve_milp_bb(
         tree.import_results(result_ids, result_lbs, result_sols, result_feas)
         tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
+
+        # Root-node certification snapshot (cert:T0.1).
+        if iteration == 0:
+            _root_time = time.perf_counter() - t_start
+            _root_glb_snap = tree.stats().get("global_lower_bound")
+            if _root_glb_snap is not None and np.isfinite(_root_glb_snap):
+                _root_glb_internal = float(_root_glb_snap)
 
         iteration += 1
         if tree.is_finished():
@@ -11093,6 +11287,19 @@ def _solve_milp_bb(
     if (bound_val is None or not np.isfinite(bound_val)) and np.isfinite(_root_lp_bound):
         bound_val = -_root_lp_bound if _maximize else _root_lp_bound
 
+    # Root-node certification metrics (cert:T0.1). Prefer the tree's global
+    # lower bound snapshot at the end of the root batch; fall back to the root
+    # LP relaxation bound. Both are in the internal minimization sense.
+    _root_internal = _root_glb_internal
+    if _root_internal is None and np.isfinite(_root_lp_bound):
+        _root_internal = float(_root_lp_bound)
+    root_bound_val: Optional[float] = None
+    root_gap_val: Optional[float] = None
+    if _root_internal is not None and np.isfinite(_root_internal):
+        root_bound_val = -_root_internal if _maximize else _root_internal
+        if obj_val is not None and np.isfinite(obj_val):
+            root_gap_val = abs(obj_val - root_bound_val) / max(1.0, abs(obj_val))
+
     return SolveResult(
         status=status,
         objective=obj_val,
@@ -11104,6 +11311,9 @@ def _solve_milp_bb(
         rust_time=rust_time,
         jax_time=jax_time,
         python_time=python_time,
+        root_bound=root_bound_val,
+        root_gap=root_gap_val,
+        root_time=_root_time,
         constraint_duals=constraint_duals,
         bound_duals_lower=bound_duals_lower,
         bound_duals_upper=bound_duals_upper,
@@ -11287,6 +11497,9 @@ def _solve_miqp_bb(
             _gap_certified = False
 
     iteration = 0
+    # Root-node certification instrumentation (cert:T0.1).
+    _root_time: Optional[float] = None
+    _root_glb_internal: Optional[float] = None
     while True:
         elapsed = time.perf_counter() - t_start
         if elapsed >= time_limit:
@@ -11343,6 +11556,13 @@ def _solve_miqp_bb(
         tree.import_results(result_ids, result_lbs, result_sols, result_feas)
         tree.process_evaluated()
         rust_time += time.perf_counter() - t_rust_start
+
+        # Root-node certification snapshot (cert:T0.1).
+        if iteration == 0:
+            _root_time = time.perf_counter() - t_start
+            _root_glb_snap = tree.stats().get("global_lower_bound")
+            if _root_glb_snap is not None and np.isfinite(_root_glb_snap):
+                _root_glb_internal = float(_root_glb_snap)
 
         iteration += 1
         if tree.is_finished():
@@ -11475,6 +11695,15 @@ def _solve_miqp_bb(
             _gap_certified = True
             status = "optimal"
 
+    # Root-node certification metrics (cert:T0.1).
+    _miqp_is_max = model._objective.sense == ObjectiveSense.MAXIMIZE
+    root_bound_val: Optional[float] = None
+    root_gap_val: Optional[float] = None
+    if _root_glb_internal is not None and np.isfinite(_root_glb_internal):
+        root_bound_val = -_root_glb_internal if _miqp_is_max else _root_glb_internal
+        if obj_val is not None and np.isfinite(obj_val):
+            root_gap_val = abs(obj_val - root_bound_val) / max(1.0, abs(obj_val))
+
     return SolveResult(
         status=status,
         objective=obj_val,
@@ -11486,6 +11715,9 @@ def _solve_miqp_bb(
         rust_time=rust_time,
         jax_time=jax_time,
         python_time=python_time,
+        root_bound=root_bound_val,
+        root_gap=root_gap_val,
+        root_time=_root_time,
         constraint_duals=constraint_duals,
         bound_duals_lower=bound_duals_lower,
         bound_duals_upper=bound_duals_upper,

@@ -230,6 +230,18 @@ class MccormickLPRelaxer:
         # path); "auto" keeps HiGHS->POUNCE. Falls back automatically if the
         # Rust binding is unavailable.
         self._backend = backend
+        # Per-family separation timers (cert:T0.3). Accumulated across every
+        # ``solve_at_node`` call for this relaxer instance; surfaced on the final
+        # SolveResult.solver_stats. Pure instrumentation — never affects control
+        # flow or the emitted cuts.
+        self._sep_timers: dict[str, float] = {
+            "multilinear": 0.0,
+            "edge_concave": 0.0,
+            "univariate_square": 0.0,
+            "convex": 0.0,
+            "psd": 0.0,
+            "rlt": 0.0,
+        }
         # Spatial-BB uses standard McCormick globally — no partitioning here.
         self._disc = DiscretizationState(partitions={})
         self._n_orig = sum(v.size for v in model._variables)
@@ -328,17 +340,30 @@ class MccormickLPRelaxer:
         if build_incremental and os.environ.get("DISCOPT_INCREMENTAL_MC", "1") != "0":
             try:
                 from discopt._jax.incremental_mccormick import IncrementalMcCormickLP
-                from discopt._jax.lp_spatial_bb import _is_in_scope as _inc_in_scope
 
-                # Restrict to the lp_spatial engine's *validated-safe* domain
-                # (pure-integer, minimize): there the incremental patch is the same
-                # construction the opt-in LP-node engine ships and trusts. Outside
-                # it (e.g. mixed-integer NN/tree embeddings), the dense patch can be
-                # an unsound relaxation, so we keep those on the cold build.
-                if _inc_in_scope(model):
-                    _inc = IncrementalMcCormickLP(model, self._terms)
-                    if _inc.ok:
-                        self._inc = _inc
+                # Scope gate (cert:T1.3): gate ONLY on the constructor's row-for-row
+                # self-validation (`ok`), for ANY model — any variable mix, any
+                # objective sense. The prior `_is_in_scope` (pure-integer, minimize)
+                # was a conservative rollout limit inherited from the opt-in
+                # lp_spatial engine (#355), not a soundness boundary: the fast path
+                # solves the *McCormick LP relaxation* (a valid lower bound for
+                # continuous, mixed, and integer models alike), and `_validate`
+                # proves the patched rows reproduce the cold `build_milp_relaxation`
+                # exactly; any uncovered term (univariate/NN-embedding smooth
+                # activations, RLT-lifted rows, …) makes `_validate` fail → `ok=False`
+                # → the trusted cold build runs unchanged.
+                #
+                # A first attempt at this widening collapsed the spatial bound
+                # (``dispatch`` 3 → 9843 nodes) because the fast path returns before
+                # the per-node separation chain and no root cut pool was built off
+                # the PSD path. That is fixed by the *general* root-cut-pool capture
+                # in solver.py (built whenever ``_inc`` is set) which the fast path
+                # inherits; and by skipping the fast path during pool capture
+                # (``out_cuts``) so the pool actually separates. Bound-changing
+                # behaviour is verified by the differential-neutrality check.
+                _inc = IncrementalMcCormickLP(model, self._terms)
+                if _inc.ok:
+                    self._inc = _inc
             except Exception:
                 self._inc = None
 
@@ -428,6 +453,15 @@ class MccormickLPRelaxer:
                         cut_rows = list(zip(a_rows, b_rows))
             A, b, bounds = inc.assemble(lb, ub, cut_rows=cut_rows)
             nrows = int(A.shape[0])
+            # Densification guard (Issue #20), same cap as the cold path below.
+            # T1.3 widened the fast path to any model, so a large multilinear lift
+            # can now reach it; decline an oversize node here too rather than force
+            # a multi-GB dense solve. Sound: no bound is returned, so the caller
+            # keeps the rigorous alphaBB/interval underestimator (identical to the
+            # cold-path decline). Falling back to the cold build would only hit the
+            # same guard, so return the oversize verdict directly.
+            if (inc.ncol + nrows) * nrows > _MAX_RELAX_DENSE_CELLS:
+                return MccormickLPResult(status="skipped_oversize")
             in_basis = (
                 self._inc_warm_basis
                 if (self._inc_warm_basis is not None and self._inc_basis_nrows == nrows)
@@ -558,9 +592,18 @@ class MccormickLPRelaxer:
         # and it carries the inherited (root RLT/PSD) cut pool so it keeps the
         # default path's bound strength. Returns ``None`` for any out-of-scope node,
         # falling through to the trusted cold build below.
-        _fast = self._try_incremental_node(node_lb, node_ub, inherited_cuts)
-        if _fast is not None:
-            return _fast
+        #
+        # cert:T1.3: skip the fast path when *capturing* a cut pool (``out_cuts``
+        # set). The fast path returns before the per-node separation chain, so it
+        # would capture nothing; a pool-building call must run the cold, separating
+        # path. Regular nodes (``out_cuts is None``) still take the fast path and
+        # inherit the pool this captures. Without this, the root cut pool is never
+        # populated once the incremental engine is active — exactly why the T1.3
+        # gate flip collapsed the spatial bound (dispatch 3 → 9843).
+        if out_cuts is None:
+            _fast = self._try_incremental_node(node_lb, node_ub, inherited_cuts)
+            if _fast is not None:
+                return _fast
 
         try:
             milp, varmap = build_milp_relaxation(
@@ -706,29 +749,42 @@ class MccormickLPRelaxer:
         res = milp.solve(time_limit=_remaining(), backend=self._backend)
 
         if separate:
+            _st = self._sep_timers  # cert:T0.3 per-family separation timers
             # On-demand separation of the exact multilinear hull for products with
             # more factors than the dense RLT cap (those carry only the loose
             # recursive chain). Every separated cut is a supporting hyperplane of
             # the convex/concave envelope, hence valid; adding them only tightens
             # the bound, so the loop is sound at any round.
+            _t = time.perf_counter()
             res = self._separate_multilinear(milp, varmap, res, _deadline)
+            _st["multilinear"] += time.perf_counter() - _t
             # Edge-concave / edge-convex quadratic blocks: tighten the joint
             # vertex-polyhedral envelope (cuts on bilinear/square auxes).
+            _t = time.perf_counter()
             res = self._separate_edge_concave(milp, varmap, res, _deadline)
+            _st["edge_concave"] += time.perf_counter() - _t
             # Univariate squares ``s = x**2``: the static envelope cuts only at the
             # box endpoints, so deep inside a wide box the convex underestimator is
             # slack. Add the exact supporting tangent at the LP point each round.
+            _t = time.perf_counter()
             res = self._separate_univariate_square(milp, varmap, res, _deadline)
+            _st["univariate_square"] += time.perf_counter() - _t
             # Convex/concave composite lifts (#358): add the exact supporting
             # hyperplane at the LP point, closing the gap the fixed reference-point
             # gradient cuts leave. Inert unless the convex claimer lifted a node.
+            _t = time.perf_counter()
             res = self._separate_convex(milp, varmap, res, _deadline)
+            _st["convex"] += time.perf_counter() - _t
             # PSD (moment) cuts: enforce M = [[1,x^T],[x,X]] >= 0 over fully-lifted
             # cliques. Each cut v^T M v >= 0 is valid for every feasible point
             # (X = x x^T), so adding them only tightens the bound.
+            _t = time.perf_counter()
             res = self._separate_psd(milp, varmap, res, _deadline, max_rounds=psd_max_rounds)
+            _st["psd"] += time.perf_counter() - _t
             # Targeted RLT (constraint-factor x bound-factor) cuts.
+            _t = time.perf_counter()
             res = self._separate_rlt(milp, varmap, res, _deadline)
+            _st["rlt"] += time.perf_counter() - _t
 
         # Capture the rows the separation chain just appended, for the root cut
         # pool. Stated over this node's lifted column space (``n_total`` columns).

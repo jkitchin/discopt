@@ -48,6 +48,13 @@ class SolveResult:
     root_gap: Optional[float] = None        # (UB - LB_root) / |UB| at root
     root_time: Optional[float] = None       # Time spent at root node
 
+    # Bound trajectory (cert:T0.2): downsampled (t, node, bound, incumbent)
+    # tuples recorded during the solve when trajectory recording is opted in.
+    # None when not recorded. ``t`` is elapsed seconds; ``bound`` is the best
+    # dual bound (non-decreasing for min sense); ``incumbent`` the best
+    # objective (None until the first incumbent is found).
+    trajectory: Optional[list[list[float]]] = None
+
     # Layer profiling (discopt-specific)
     rust_time_fraction: Optional[float] = None
     jax_time_fraction: Optional[float] = None
@@ -413,6 +420,20 @@ def root_gap_analysis(
     }
 
 
+def root_gap_populated_fraction(results: list[SolveResult]) -> float:
+    """Fraction of discopt rows carrying a non-null ``root_gap`` (cert:T0.5).
+
+    The Phase 0 exit metric: with the T0.1 producer wired, ``root_gap`` must be
+    populated on ≥ 90% of rows so ``root_gap_ratio_vs_baron`` is evaluable. The
+    denominator is every row (so an unpopulated timeout/error counts against
+    coverage); returns 0.0 for an empty set.
+    """
+    if not results:
+        return 0.0
+    populated = sum(1 for r in results if r.root_gap is not None)
+    return populated / len(results)
+
+
 def root_gap_ratio(
     results_a: list[SolveResult],
     results_b: list[SolveResult],
@@ -723,6 +744,8 @@ def evaluate_phase_gate(
             ref_solver = metric.replace("geomean_ratio_vs_", "")
             if reference_solvers and ref_solver in reference_solvers:
                 actual = geometric_mean_ratio(discopt_results, reference_solvers[ref_solver])
+        elif metric == "root_gap_populated_fraction":
+            actual = root_gap_populated_fraction(discopt_results)
         elif metric.startswith("root_gap_ratio_vs_"):
             ref_solver = metric.replace("root_gap_ratio_vs_", "")
             if reference_solvers and ref_solver in reference_solvers:
@@ -735,6 +758,15 @@ def evaluate_phase_gate(
         elif metric == "median_nodes_per_second":
             nps = [r.nodes_per_second for r in discopt_results if r.nodes_per_second is not None]
             actual = float(np.median(nps)) if nps else 0.0
+        elif metric == "median_seconds_per_node":
+            # Median wall seconds per B&B node over rows that opened a tree
+            # (cert:T1.x performance exit). Lower is better.
+            spn = [
+                r.wall_time / r.node_count
+                for r in discopt_results
+                if r.node_count > 0 and r.wall_time not in (None, float("inf"))
+            ]
+            actual = float(np.median(spn)) if spn else float("nan")
         elif metric == "python_orchestration_fraction" or metric == "rust_tree_overhead_fraction":
             profile = layer_profiling_summary(discopt_results)
             if metric == "python_orchestration_fraction":

@@ -1125,6 +1125,17 @@ class SolveResult:
         Time spent in JAX (NLP evaluations, autodiff).
     python_time : float
         Time spent in Python orchestration.
+    root_bound : float or None
+        Strongest rigorous dual bound proved at the root box, in the reported
+        objective sense. None if no root relaxation was built.
+    root_gap : float or None
+        Relative gap of ``root_bound`` against the final incumbent
+        (``|objective - root_bound| / max(1, |objective|)``). None when either
+        the root bound or the incumbent is unavailable.
+    root_time : float or None
+        Wall-clock seconds elapsed when the root node was fathomed/branched.
+    solver_stats : dict of str to float, or None
+        Per-family reduction/separation timers (cumulative seconds), or None.
     convex_fast_path : bool
         True if the problem was detected as convex and solved with a
         single NLP call (no Branch & Bound), guaranteeing global optimality.
@@ -1151,6 +1162,27 @@ class SolveResult:
     rust_time: float = 0.0
     jax_time: float = 0.0
     python_time: float = 0.0
+
+    # Root-node certification instrumentation (Phase 0 / cert:T0.1). These
+    # describe the state of the search at the moment the root node is fathomed
+    # or branched — the point that governs whether the solver certifies at the
+    # root (like BARON) or opens a tree. ``root_bound`` is the strongest
+    # rigorous dual bound proved at the root box, in the *reported* objective
+    # sense (already negated for MAXIMIZE, mirroring ``bound``). ``root_gap`` is
+    # the relative gap ``|objective - root_bound| / max(1, |objective|)`` of
+    # that bound against the final incumbent, using the same floored abs/rel
+    # convention as ``gap``. ``root_time`` is the wall-clock seconds elapsed
+    # from the whole-solve clock to that moment. All three are ``None`` when
+    # the path never builds a root relaxation (e.g. an early infeasibility exit).
+    root_bound: Optional[float] = None
+    root_gap: Optional[float] = None
+    root_time: Optional[float] = None
+
+    # Per-family reduction/separation timers (cert:T0.3). A flat dict of
+    # phase-name -> cumulative seconds across the solve, e.g.
+    # ``{"reduce/fbbt": .., "reduce/obbt": .., "separate/psd": .., ...}``. Pure
+    # instrumentation (never affects solver math); None when nothing was timed.
+    solver_stats: Optional[dict[str, float]] = None
 
     # KKT duals at the returned point, when the underlying solver exposes them.
     # ``constraint_duals`` is keyed by Constraint.name; entries with a vector

@@ -22,6 +22,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -241,7 +242,7 @@ def _run_gate_check(args):
         sys.exit(1)
 
     all_passed, criteria = evaluate_phase_gate(
-        args.gate, benchmark, gate_config
+        args.gate, benchmark, gate_config, known_optima=_known_optima_for_gate(args)
     )
 
     # Display results
@@ -264,19 +265,39 @@ def _run_gate_check(args):
 
 
 def _known_optima_for_gate(args) -> dict[str, float]:
-    """Best-effort: pull known optima from the MINLPLib cache index if present."""
+    """Best-effort known optima for gate correctness checks.
+
+    Merges two self-contained sources with the (optional) MINLPLib cache:
+      * the committed certification oracle file
+        ``docs/dev/data/cert-optima.json`` (global50 BARON optima + perf-panel
+        oracles) — always available, no external fetch (cert:T0.5);
+      * the MINLPLib cache index, when present, which the cache values override
+        the committed file with (fresher, larger).
+    """
+    optima: dict[str, float] = {}
+    # Committed oracle file (repo-relative), so the cert0 gate is evaluable
+    # without a MINLPLib checkout.
+    cert_optima = (
+        Path(__file__).resolve().parent.parent / "docs" / "dev" / "data" / "cert-optima.json"
+    )
+    try:
+        if cert_optima.exists():
+            with open(cert_optima) as fh:
+                optima.update({k: float(v) for k, v in json.load(fh).items()})
+    except Exception:
+        pass
     try:
         from scripts.fetch_minlplib import get_cache_dir, get_instancedata_path
         from utils.minlplib_data import known_optima_from_index, load_instance_data
 
         cache = Path(args.minlplib_cache).expanduser() if args.minlplib_cache else get_cache_dir()
         csv = get_instancedata_path(cache, args.minlplib_version)
-        if not csv.exists():
-            return {}
-        index = load_instance_data(csv)
-        return known_optima_from_index(index)
+        if csv.exists():
+            index = load_instance_data(csv)
+            optima.update(known_optima_from_index(index))
     except Exception:
-        return {}
+        pass
+    return optima
 
 
 def _load_minlplib_from_cache(

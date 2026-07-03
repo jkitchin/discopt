@@ -179,7 +179,11 @@ pub fn solve_milp(lp: &LpView<'_>, b: &[f64], obj_const: f64, opts: &MilpOptions
     // feasible solution and needs no postsolve; the tightened bounds seed both
     // the tree's global bounds and the node LPs. A proven-empty box ⇒ infeasible.
     let (base_l, base_u) = if opts.presolve {
-        let pr = tighten_bounds(lp, b, &is_int_full, opts.simplex.tol);
+        // cert:T0.3 — time root presolve bound reduction.
+        let pr = {
+            let _t = crate::profile::Timer::new(crate::profile::Phase::NodeReduce);
+            tighten_bounds(lp, b, &is_int_full, opts.simplex.tol)
+        };
         if pr.infeasible {
             return MilpResult {
                 status: MilpStatus::Infeasible,
@@ -791,7 +795,11 @@ fn solve_node(id: NodeId, lb_k: &[f64], ub_k: &[f64], ctx: &NodeCtx<'_>) -> Node
             l: &full_l,
             u: &full_u,
         };
-        let pr = tighten_bounds(&prop_lp, ctx.b_w, ctx.is_int_full, ctx.opts.simplex.tol);
+        let pr = {
+            // cert:T0.3 — time per-node FBBT/constraint propagation.
+            let _t = crate::profile::Timer::new(crate::profile::Phase::Fbbt);
+            tighten_bounds(&prop_lp, ctx.b_w, ctx.is_int_full, ctx.opts.simplex.tol)
+        };
         if pr.infeasible {
             // Proven-empty box ⇒ prune this node (a valid fathom, like an
             // infeasible LP). No incumbent, no basis, nothing to branch.

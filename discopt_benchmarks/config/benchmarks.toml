@@ -210,6 +210,36 @@ description = "Release gate (Month 48)"
   beats_bonmin = { min = 1.0, suite = "comparison", metric = "solve_count_ratio_vs_bonmin" }
   zero_incorrect = { max = 0, suite = "full", metric = "incorrect_count" }
 
+# Certification-gap plan (docs/dev/certification-gap-plan.md) phase gates.
+[gates.cert0]
+description = "Phase 0 → Phase 1 gate: certification observability (cert:T0.5)"
+
+  [gates.cert0.criteria]
+  # root_gap must be populated on >= 90% of rows so root_gap_ratio_vs_baron is
+  # evaluable (the T0.1 producer). Correctness stays a zero-slack gate.
+  root_gap_coverage = { min = 0.9, suite = "global50", metric = "root_gap_populated_fraction" }
+  zero_incorrect = { max = 0, suite = "global50", metric = "incorrect_count" }
+
+[gates.cert1]
+description = "Phase 1 gate: general node engine (cert:T1.x). Direction-(a) neutrality."
+# NOTE (2026-07-02): the §11 bound-neutrality criterion is verified out-of-band by
+# the DIFFERENTIAL check `discopt_benchmarks/scripts/check_cert_neutrality.py`
+# (objective correct + still-optimal + node one-directional vs cert-baseline.jsonl),
+# NOT by an exact node_count_drift metric — under direction (a) T1.3 legitimately
+# *improves* node_count on some instances (e.g. nvs13 55→19), so exact equality is
+# the wrong test. That check currently passes (NEUTRAL). The performance criteria
+# below (per §5/§11) are the Phase-1 wall-time exit and are NOT yet met: the
+# incremental engine is on the general spatial path node-neutral (T1.3), but the
+# dominant per-node cost is OBBT's inner LP loop (~10 cold-built probe solves/node),
+# a bound-neutral follow-on (warm-start OBBT probes) that this plan flags rather
+# than lands. Correctness criteria (below) DO pass.
+
+  [gates.cert1.criteria]
+  zero_incorrect = { max = 0, suite = "global50", metric = "incorrect_count" }
+  # Performance exit (§5) — pending the OBBT follow-on; informational until then.
+  interop_overhead = { max = 0.10, suite = "global50", metric = "python_orchestration_fraction" }
+  sec_per_node = { max = 0.018, suite = "global50", metric = "median_seconds_per_node" }
+
 # ─────────────────────────────────────────────────────────────
 # SOLVER CONFIGURATIONS
 # ─────────────────────────────────────────────────────────────
