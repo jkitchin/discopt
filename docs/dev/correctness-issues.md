@@ -1997,7 +1997,7 @@ checks per §0.
 
 ## C-35 (P1) — OA/LOA emits an unconditional no-good cut on non-rigorous NLP failure (opt-in) — **FIXED**
 
-**Status:** fixed (PR: see Log).
+**Status:** fixed (PR #451).
 **Origin:** solver-core review (OA-1).
 **Area:** `python/discopt/oa.py:209-236, 893-931, 916` and
 `python/discopt/gdpopt_loa.py:314-370, 225`.
@@ -2083,7 +2083,7 @@ unchanged; standing gates pass.
 
   **Gates:** smoke 197 passed / 1 skipped; adversarial 10 passed; OA/LOA/gdpopt/
   nogood/benders 165 passed / 2 skipped; ruff clean; mypy clean on changed files;
-  no Rust touched. PR: (filled at PR creation).
+  no Rust touched. PR: #451.
 
 ---
 
