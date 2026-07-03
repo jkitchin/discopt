@@ -260,11 +260,11 @@ def solve_benders(
     if cfg.multicut and ny:
         from discopt.decomposition.graph import kernels
 
-        row_positions = [list(np.nonzero(np.abs(ay) > 0)[0]) for ay in Ay_rows]
+        row_positions = [[int(i) for i in np.nonzero(np.abs(ay) > 0)[0]] for ay in Ay_rows]
         sub_cliques = [pos for pos in row_positions if pos]
         block_of_pos, n_blocks = kernels.connected_components(ny, sub_cliques)
     else:
-        row_positions = [list(np.nonzero(np.abs(ay) > 0)[0]) for ay in Ay_rows]
+        row_positions = [[int(i) for i in np.nonzero(np.abs(ay) > 0)[0]] for ay in Ay_rows]
         block_of_pos = [0] * ny
         n_blocks = 1
     n_blocks = max(1, n_blocks)

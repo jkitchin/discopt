@@ -73,7 +73,7 @@ class LinearModel:
         if hasattr(A, "tocsr"):
             if rows.size == 0 or cols.size == 0:
                 return np.zeros((rows.size, cols.size), dtype=np.float64)
-            return A[rows][:, cols].toarray()
+            return np.asarray(A[rows][:, cols].toarray(), dtype=np.float64)
         A = np.asarray(A, dtype=np.float64)
         if rows.size == 0 or cols.size == 0:
             return np.zeros((rows.size, cols.size), dtype=np.float64)

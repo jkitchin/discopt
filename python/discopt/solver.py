@@ -2953,6 +2953,7 @@ def solve_model(
                         record_outcome(advisor, _store, chosen=decomposed.method)
                     except Exception as exc:  # noqa: BLE001 - telemetry is best-effort
                         logger.debug("decomposition telemetry failed: %s", exc)
+                assert isinstance(result, SolveResult)
                 return result
             # else: fall through to the monolithic solve path.
         elif decomposition not in ("benders", "lagrangian"):

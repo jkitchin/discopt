@@ -452,12 +452,12 @@ def solve_gbd(
     def _pinned_bounds(x_hat: np.ndarray) -> np.ndarray:
         b = lb_all.copy()
         b[mcols] = x_hat
-        return b
+        return np.asarray(b)
 
     def _pinned_upper(x_hat: np.ndarray) -> np.ndarray:
         b = ub_all.copy()
         b[mcols] = x_hat
-        return b
+        return np.asarray(b)
 
     def _add_opt_cut(x_hat, anchor, s):
         # eta >= anchor + s^T (x - x̂)  ->  s^T x - eta <= s^T x̂ - anchor
