@@ -6697,12 +6697,12 @@ def solve_model(
     # surfaced; an all-zero result reports None.
     _reduce_timers["obbt"] = _pn_obbt_spent
     _solver_stats: dict[str, float] = {
-        f"reduce/{_k}": float(_v) for _k, _v in _reduce_timers.items() if _v > 0.0
+        f"reduce/{_rfam}": float(_rt) for _rfam, _rt in _reduce_timers.items() if _rt > 0.0
     }
     if _mc_lp_relaxer is not None and getattr(_mc_lp_relaxer, "_sep_timers", None):
-        for _k, _v in _mc_lp_relaxer._sep_timers.items():
-            if _v > 0.0:
-                _solver_stats[f"separate/{_k}"] = float(_v)
+        for _sfam, _stime in _mc_lp_relaxer._sep_timers.items():
+            if _stime > 0.0:
+                _solver_stats[f"separate/{_sfam}"] = float(_stime)
 
     return SolveResult(
         status=status,
