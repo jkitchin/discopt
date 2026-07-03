@@ -31,6 +31,17 @@ pub enum NlParseError {
     InvalidHeader(String),
     /// An expression opcode was not recognised.
     UnknownOpcode(i32),
+    /// A recognised opcode maps to an operator that has no sound representation
+    /// in the IR (e.g. floor/ceil/round/trunc/intdiv). Carries the operator name
+    /// and the numeric opcode. We refuse loudly rather than silently substituting
+    /// a different operator (identity / real division), which would solve a
+    /// different problem than the user posed. See correctness issue C-5.
+    UnsupportedOpcode {
+        /// Human-readable operator name (e.g. "floor").
+        name: &'static str,
+        /// The numeric .nl opcode (e.g. 13 for `o13`).
+        opcode: i32,
+    },
     /// The file uses the binary (`b`) .nl encoding, which is not supported.
     BinaryUnsupported,
     /// General parse error with a human-readable message.
@@ -43,6 +54,15 @@ impl fmt::Display for NlParseError {
             NlParseError::UnexpectedEof => write!(f, "unexpected end of .nl input"),
             NlParseError::InvalidHeader(msg) => write!(f, "invalid .nl header: {msg}"),
             NlParseError::UnknownOpcode(op) => write!(f, "unknown .nl opcode: o{op}"),
+            NlParseError::UnsupportedOpcode { name, opcode } => write!(
+                f,
+                "unsupported .nl operator '{name}' (opcode o{opcode}): this operator has no \
+                 sound representation in the solver IR. Parsing is refused rather than \
+                 silently substituting a different operator (e.g. identity or real division), \
+                 which would solve a different problem than the one posed. Reformulate the \
+                 model without '{name}', or file a feature request for real IR + relaxation \
+                 support for it."
+            ),
             NlParseError::BinaryUnsupported => write!(
                 f,
                 "binary .nl format not supported: file uses the binary ('b') encoding, \
@@ -575,40 +595,34 @@ fn parse_opcode(
             Ok(arena.add(ExprNode::SumOver { terms }))
         }
         // ── Binary operators (class 2) ──
-        55 => {
-            // o55: intdiv — approximate as Div
-            let left = parse_expr(reader, arena, var_nodes)?;
-            let right = parse_expr(reader, arena, var_nodes)?;
-            Ok(arena.add(ExprNode::BinaryOp {
-                op: BinOp::Div,
-                left,
-                right,
-            }))
-        }
-        57 => {
-            // o57: round (binary: round left to right decimal places)
-            // Approximate as identity (return left operand)
-            let left = parse_expr(reader, arena, var_nodes)?;
-            let _right = parse_expr(reader, arena, var_nodes)?;
-            Ok(left)
-        }
-        58 => {
-            // o58: trunc (binary: truncate left to right decimal places)
-            // Approximate as identity (return left operand)
-            let left = parse_expr(reader, arena, var_nodes)?;
-            let _right = parse_expr(reader, arena, var_nodes)?;
-            Ok(left)
-        }
-        13 => {
-            // o13: floor — not in IR, approximate as identity
-            let arg = parse_expr(reader, arena, var_nodes)?;
-            Ok(arg)
-        }
-        14 => {
-            // o14: ceil — not in IR, approximate as identity
-            let arg = parse_expr(reader, arena, var_nodes)?;
-            Ok(arg)
-        }
+        //
+        // C-5: floor/ceil/round/trunc/intdiv have NO sound representation in the IR.
+        // Previously each of these was silently rewritten to a *different* operator
+        // (identity for floor/ceil/round/trunc; real Div for intdiv), which makes the
+        // solver certify the optimum of a different problem than the user posed. We now
+        // refuse loudly (UnsupportedOpcode) so the solve errors instead of returning a
+        // false certificate. Real support would require IR + relaxation work (out of
+        // scope). The error aborts the parse, so we deliberately do NOT consume operands.
+        55 => Err(NlParseError::UnsupportedOpcode {
+            name: "intdiv",
+            opcode: 55,
+        }),
+        57 => Err(NlParseError::UnsupportedOpcode {
+            name: "round",
+            opcode: 57,
+        }),
+        58 => Err(NlParseError::UnsupportedOpcode {
+            name: "trunc",
+            opcode: 58,
+        }),
+        13 => Err(NlParseError::UnsupportedOpcode {
+            name: "floor",
+            opcode: 13,
+        }),
+        14 => Err(NlParseError::UnsupportedOpcode {
+            name: "ceil",
+            opcode: 14,
+        }),
         15 => {
             // o15: abs
             let arg = parse_expr(reader, arena, var_nodes)?;
@@ -2207,5 +2221,108 @@ mod tests {
         let model = parse_nl(&s).unwrap();
         let val = model.evaluate_objective(&[10.0, 3.0]);
         assert!((val - 7.0).abs() < 1e-12);
+    }
+
+    // ─── C-5: floor/ceil/round/trunc/intdiv must REFUSE, not silently misparse ───
+    //
+    // Before this fix each of these opcodes was silently rewritten to a different
+    // operator: floor/ceil/round/trunc → identity, intdiv → real division. That made
+    // the parser accept a *different* problem than the file encoded, and the solver
+    // then certified the wrong optimum. The sound behavior (no IR/relaxation support
+    // exists) is a loud refusal. These tests fail on the pre-fix code (parse_nl
+    // returns Ok with a wrong expression) and pass after (parse_nl returns the
+    // UnsupportedOpcode error naming the operator).
+
+    /// Build a single-objective .nl whose objective is `<unary-op>(v0)`.
+    fn nl_with_unary_obj(opcode_line: &str) -> String {
+        let mut s = String::new();
+        s.push_str("g3 1 1 0\n");
+        s.push_str(" 1 0 1 0 0\n");
+        s.push_str(" 0 1\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 1 0\n");
+        s.push_str(" 0 0 0 1\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 0 0 0 0\n");
+        s.push_str("O0 0\n");
+        s.push_str(opcode_line);
+        s.push_str("v0\n");
+        s.push_str("b\n");
+        s.push_str("3\n");
+        s
+    }
+
+    /// Build a single-objective .nl whose objective is `<binary-op>(v0, v1)`.
+    fn nl_with_binary_obj(opcode_line: &str) -> String {
+        let mut s = String::new();
+        s.push_str("g3 1 1 0\n");
+        s.push_str(" 2 0 1 0 0\n");
+        s.push_str(" 0 1\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 2 0\n");
+        s.push_str(" 0 0 0 1\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 0\n");
+        s.push_str(" 0 0 0 0 0\n");
+        s.push_str("O0 0\n");
+        s.push_str(opcode_line);
+        s.push_str("v0\n");
+        s.push_str("v1\n");
+        s.push_str("b\n");
+        s.push_str("3\n");
+        s.push_str("3\n");
+        s
+    }
+
+    fn assert_unsupported(content: &str, expect_name: &str, expect_opcode: i32) {
+        let err = parse_nl(content)
+            .err()
+            .unwrap_or_else(|| panic!("expected UnsupportedOpcode for o{expect_opcode}, got Ok"));
+        match err {
+            NlParseError::UnsupportedOpcode { name, opcode } => {
+                assert_eq!(name, expect_name, "operator name");
+                assert_eq!(opcode, expect_opcode, "opcode number");
+            }
+            other => panic!("expected UnsupportedOpcode({expect_name}), got {other:?}"),
+        }
+        // The Display message must name the operator so the failure is actionable.
+        let msg = parse_nl(content).unwrap_err().to_string();
+        assert!(
+            msg.contains(expect_name) && msg.contains("unsupported"),
+            "message should name '{expect_name}' and say unsupported, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_floor_opcode_refused_not_identity() {
+        // o13 floor: pre-fix parsed to identity (floor(v0) == v0 == 1.7 at v0=1.7).
+        assert_unsupported(&nl_with_unary_obj("o13\n"), "floor", 13);
+    }
+
+    #[test]
+    fn test_ceil_opcode_refused_not_identity() {
+        // o14 ceil: pre-fix parsed to identity.
+        assert_unsupported(&nl_with_unary_obj("o14\n"), "ceil", 14);
+    }
+
+    #[test]
+    fn test_round_opcode_refused_not_identity() {
+        // o57 round (binary): pre-fix returned the left operand (identity).
+        assert_unsupported(&nl_with_binary_obj("o57\n"), "round", 57);
+    }
+
+    #[test]
+    fn test_trunc_opcode_refused_not_identity() {
+        // o58 trunc (binary): pre-fix returned the left operand (identity).
+        assert_unsupported(&nl_with_binary_obj("o58\n"), "trunc", 58);
+    }
+
+    #[test]
+    fn test_intdiv_opcode_refused_not_real_div() {
+        // o55 intdiv: pre-fix rewrote to real Div (7 intdiv 2 -> 3.5 instead of 3).
+        assert_unsupported(&nl_with_binary_obj("o55\n"), "intdiv", 55);
     }
 }

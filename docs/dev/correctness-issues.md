@@ -93,7 +93,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-4 | P1 | mir.rs cuts | integer-MIR applied with fractional integer lower bound → invalid cut | fixed |
 | C-2 | P1 | milp_driver status | false "Infeasible" when deadline orphans deferred nodes | fixed |
 | C-19 | P1 | relax_tan | pole-straddling interval classified as one branch → secant across a pole, invalid envelope | open |
-| C-5 | P1 | .nl parser | floor/ceil/round/trunc→identity, intdiv→div, all silent | open |
+| C-5 | P1 | .nl parser | floor/ceil/round/trunc→identity, intdiv→div, all silent | fixed |
 | C-6 | P1 | modeling API | integer vars silently clamped to [0, 1e6] | open |
 | C-18 | P1 | midpoint bound | `mccormick_bounds="midpoint"` returns u(mid), not a lower bound (opt-in mode) | open |
 | C-20 | P2 | fbbt_fp.rs | watch-list FBBT declares infeasibility with zero tolerance (opt-in engine) | fixed |
@@ -678,6 +678,8 @@ known optimum; standing gates pass.
 
 ## C-5 (P1) — `.nl` parser silently rewrites floor/ceil/round/trunc to identity and intdiv to real division
 
+**Status:** fixed (PR #447).
+
 **Area:** `crates/discopt-core/src/nl_parser.rs:578-611` (`parse_opcode`):
 `o13` floor → arg unchanged (`:602-606`); `o14` ceil → arg unchanged (`:607-611`);
 `o57` round → left operand (`:588-594`); `o58` trunc → left operand (`:595-601`);
@@ -707,7 +709,31 @@ would need IR + relaxation work — out of scope here; the fix is the refusal.)
 - The 61-file corpus still parses (confirms zero regression).
 - Standing gates pass.
 
-**Log:** —
+**Log:**
+- 2026-07-03 — **Confirmed** then **fixed**. Added five Rust unit tests
+  (`test_{floor,ceil,round,trunc,intdiv}_opcode_refused*` in `nl_parser.rs`) that
+  feed a hand-built text `.nl` whose objective is the bare opcode over `v0`/`v1`.
+  Fail-before: on the pre-fix silent-rewrite code all five return `Ok` with the wrong
+  expression (floor/ceil/round/trunc → identity, intdiv → real `Div`); proven red by
+  temporarily reverting only the five `parse_opcode` branches (5 failed, "got Ok").
+  Fix: added `NlParseError::UnsupportedOpcode { name, opcode }` with a Display message
+  that names the operator and states the parse is refused rather than substituting a
+  different operator; replaced the five silent branches (`o13`/`o14`/`o55`/`o57`/`o58`)
+  with that error (the error aborts the parse, so operands are deliberately not
+  consumed). No IR/relaxation support was added — the sound fix per CLAUDE.md §3 is the
+  loud refusal. Pass-after: all five tests green.
+- Verified end-to-end via the Python binding path (`discopt.modeling.core.from_nl` →
+  `_rust.parse_nl_file` → `parse_nl`): a floor `.nl` now raises
+  `ValueError: unsupported .nl operator 'floor' (opcode o13) …` instead of parsing
+  silently. (Note: the shared dev venv's `discopt.pth` resolves the package to a
+  different worktree; the Python gates were re-run with `PYTHONPATH` pinned to this
+  worktree so they exercise this fix's freshly-built `_rust.so`.)
+- Gates: `cargo test -p discopt-core` 386 lib + 4 integration + 1 doctest pass,
+  no warnings; `cargo clippy -p discopt-core --lib` clean; `maturin develop --release`
+  builds; `pytest -m smoke` 193 passed / 1 skipped; adversarial suite
+  (`test_adversarial_recent_fixes.py`) 10 passed; all 61 corpus files still parse.
+- Regression tests named above are committed and fast (sub-millisecond, direct
+  `parse_nl` calls; no `Model.solve()`).
 
 ---
 
