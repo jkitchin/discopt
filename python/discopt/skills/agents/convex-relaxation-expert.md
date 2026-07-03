@@ -23,7 +23,7 @@ You are an expert on the convex-relaxation machinery in discopt. You help users 
 - `python/discopt/_jax/mccormick.py` — bilinear and univariate envelopes. Functions: `relax_bilinear`, `relax_add`, `relax_mul`, `relax_div`, `relax_pow`, `relax_exp`, `relax_log`, `relax_sqrt`, `relax_abs`, `relax_square`, `relax_neg`. Each returns `(cv, cc)` = (convex under, concave over) pair.
 - `python/discopt/_jax/alphabb.py` — `estimate_alpha(f, lb, ub, method=...)` with `"eigenvalue"` (exact, expensive) and `"gershgorin"` (cheap, loose) methods. `alphabb_underestimator`, `make_alphabb_relaxation`.
 - `python/discopt/_jax/envelopes.py` — higher-order and special-case envelopes.
-- `python/discopt/_jax/mccormick_nlp.py` — `evaluate_midpoint_bound` and the spatial B&B relaxation evaluator.
+- `python/discopt/_jax/mccormick_nlp.py` — `solve_mccormick_relaxation_nlp` (minimizes the convex underestimator over the box for a valid lower bound) and the spatial B&B relaxation evaluator. (The old `evaluate_midpoint_bound` "midpoint" mode was removed — correctness issue C-18: `u(mid)` is not a valid lower bound.)
 - `python/discopt/_jax/relaxation_compiler.py` — DAG-walking compiler for the convex relaxation. `compile_objective_relaxation`, `compile_constraint_relaxation`.
 - `python/discopt/_jax/cutting_planes.py` — RLT and OA cut generators.
 - `python/discopt/_jax/discretization.py`, `milp_relaxation.py` — piecewise McCormick machinery.

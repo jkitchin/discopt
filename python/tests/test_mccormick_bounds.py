@@ -32,14 +32,6 @@ def _simple_minimize_model():
     return m
 
 
-def _maximize_model():
-    """max -(x^2)  s.t. x in [0,4], x integer => optimal x=0, obj=0."""
-    m = Model()
-    x = m.integer("x", lb=0, ub=4)
-    m.maximize(-(x**2))
-    return m
-
-
 def _convex_quadratic_model():
     """min (x-1)^2 + (y-2)^2  s.t. x in [0,3], y in [0,3], x integer."""
     m = Model()
@@ -70,102 +62,68 @@ def _eq_constrained_model():
 
 
 # ===========================================================================
-# Option A: Midpoint bounds
+# C-18: the removed "midpoint" mode returned a non-bound
 # ===========================================================================
 
 
-class TestMidpointBounds:
-    """Tests for McCormick midpoint evaluation (Option A)."""
+class TestC18MidpointNotABound:
+    """Correctness issue C-18.
 
-    def test_cv_at_midpoint_underestimates_f(self):
-        """cv(midpoint) <= f(midpoint) by McCormick validity."""
-        from discopt._jax.mccormick_nlp import evaluate_midpoint_bound
+    ``mccormick_bounds="midpoint"`` returned the convex underestimator's VALUE
+    at the box midpoint, ``u(mid)``, and fed it into the node lower bound. But
+    ``u(mid) <= f(mid)`` does NOT imply ``u(mid) <= min_box f``: the value can sit
+    ABOVE the true box minimum, so it is not a valid lower bound and could fathom
+    the node holding the true optimum -> false "optimal". The mode is removed and
+    now rejected loudly.
+    """
+
+    def test_midpoint_value_exceeds_true_box_minimum(self):
+        """Documents the non-bound: for x**2 on [1,3], u(mid=2) > min_box x**2 = 1.
+
+        This is the mechanism that made the old ``evaluate_midpoint_bound`` return
+        an invalid lower bound. We reconstruct the exact value the removed helper
+        produced (cv at the midpoint) directly from the compiled relaxation and
+        show it exceeds the true box minimum.
+        """
         from discopt._jax.relaxation_compiler import compile_objective_relaxation
 
-        model = _simple_minimize_model()
-        relax_fn = compile_objective_relaxation(model)
+        m = Model()
+        x = m.continuous("x", lb=1.0, ub=3.0)
+        m.minimize(x * x)
 
-        lb = jnp.array([0.0, 0.0])
-        ub = jnp.array([4.0, 4.0])
-        mc_lb = evaluate_midpoint_bound(relax_fn, lb, ub, negate=False)
+        relax_fn = compile_objective_relaxation(m)
+        lb = jnp.array([1.0])
+        ub = jnp.array([3.0])
+        mid = 0.5 * (lb + ub)
+        cv, _cc = relax_fn(mid, mid, lb, ub)
+        u_mid = float(cv)  # exactly what evaluate_midpoint_bound(...) returned
 
-        # Midpoint = [2, 2], f(2,2) = 4 + 4 = 8
-        # cv(midpoint) should be <= f(midpoint)
-        assert mc_lb <= 8.0 + 1e-6
-        assert np.isfinite(mc_lb)
+        true_box_min = 1.0  # min of x**2 on [1, 3] at x=1
+        # The old "bound" is strictly ABOVE the true minimum -> NOT a valid bound.
+        assert u_mid > true_box_min + 1e-6
 
-    def test_narrower_bounds_tighter_cv(self):
-        """Narrower bounds should give tighter (higher) cv."""
-        from discopt._jax.mccormick_nlp import evaluate_midpoint_bound
-        from discopt._jax.relaxation_compiler import compile_objective_relaxation
-
-        model = _simple_minimize_model()
-        relax_fn = compile_objective_relaxation(model)
-
-        lb_wide = jnp.array([0.0, 0.0])
-        ub_wide = jnp.array([4.0, 4.0])
-        lb_narrow = jnp.array([1.0, 1.0])
-        ub_narrow = jnp.array([3.0, 3.0])
-
-        cv_wide = evaluate_midpoint_bound(relax_fn, lb_wide, ub_wide)
-        cv_narrow = evaluate_midpoint_bound(relax_fn, lb_narrow, ub_narrow)
-
-        # Both evaluate at their respective midpoints
-        # Wide: mid=[2,2], Narrow: mid=[2,2] (same midpoint!)
-        # But McCormick relaxation quality improves with narrower bounds
-        # cv_narrow should be >= cv_wide (tighter underestimator)
-        assert cv_narrow >= cv_wide - 1e-8
-
-    def test_batch_evaluation(self):
-        """Batch midpoint evaluation matches serial."""
-        from discopt._jax.mccormick_nlp import (
-            evaluate_midpoint_bound,
-            evaluate_midpoint_bound_batch,
-        )
-        from discopt._jax.relaxation_compiler import compile_objective_relaxation
+    def test_midpoint_mode_is_rejected_loudly(self):
+        """Selecting the removed mode raises ValueError (never returns a non-bound)."""
+        import pytest
 
         model = _simple_minimize_model()
-        relax_fn = compile_objective_relaxation(model)
+        with pytest.raises(ValueError, match="C-18"):
+            model.solve(mccormick_bounds="midpoint", max_nodes=1000)
 
-        lb_batch = jnp.array([[0.0, 0.0], [0.0, 0.0], [1.0, 1.0]])
-        ub_batch = jnp.array([[4.0, 4.0], [2.0, 2.0], [3.0, 3.0]])
+    def test_unknown_mccormick_bounds_rejected(self):
+        """A typo/unknown value is rejected rather than silently ignored."""
+        import pytest
 
-        batch_result = np.asarray(evaluate_midpoint_bound_batch(relax_fn, lb_batch, ub_batch))
-
-        for i in range(3):
-            serial = evaluate_midpoint_bound(relax_fn, lb_batch[i], ub_batch[i])
-            np.testing.assert_allclose(batch_result[i], serial, atol=1e-10)
-
-    def test_maximize_sign_handling(self):
-        """For maximize, lower bound uses -cc."""
-        from discopt._jax.mccormick_nlp import evaluate_midpoint_bound
-        from discopt._jax.relaxation_compiler import compile_objective_relaxation
-
-        model = _maximize_model()
-        relax_fn = compile_objective_relaxation(model)
-
-        lb = jnp.array([0.0])
-        ub = jnp.array([4.0])
-
-        # For max -(x^2), the objective expression is -(x^2).
-        # negate=True means we want bound for minimizing the negated obj.
-        mc_lb = evaluate_midpoint_bound(relax_fn, lb, ub, negate=True)
-        assert np.isfinite(mc_lb)
-
-        # Without negate, we get cv of -(x^2) at midpoint
-        mc_cv = evaluate_midpoint_bound(relax_fn, lb, ub, negate=False)
-        # cv of -(x^2) at midpoint=2 should be <= -(2^2) = -4
-        assert mc_cv <= -4.0 + 1e-6
-
-    def test_end_to_end_minlp_midpoint(self):
-        """Full solve with mccormick_bounds='midpoint'."""
         model = _simple_minimize_model()
-        result = model.solve(mccormick_bounds="midpoint", max_nodes=1000)
-        assert result.status in ("optimal", "feasible")
-        if result.status == "optimal":
-            # x integer in [0,4], y continuous [0,4]: optimal at x=0, y=0
-            assert result.objective is not None
-            assert result.objective <= 0.0 + 1e-4
+        with pytest.raises(ValueError, match="Unknown mccormick_bounds"):
+            model.solve(mccormick_bounds="bogus", max_nodes=1000)
+
+    def test_evaluate_midpoint_helpers_are_gone(self):
+        """The unsound helpers were deleted, not just left unwired."""
+        import discopt._jax.mccormick_nlp as mn
+
+        assert not hasattr(mn, "evaluate_midpoint_bound")
+        assert not hasattr(mn, "evaluate_midpoint_bound_batch")
 
 
 # ===========================================================================
@@ -194,11 +152,14 @@ class TestNLPBounds:
         assert nlp_lb <= 0.0 + 1e-4
 
     def test_nlp_bound_finds_minimum_of_underestimator(self):
-        """NLP solving finds the global min of the convex underestimator."""
-        from discopt._jax.mccormick_nlp import (
-            evaluate_midpoint_bound,
-            solve_mccormick_relaxation_nlp,
-        )
+        """NLP solving finds the global min of the convex underestimator.
+
+        The NLP mode minimizes cv over the box, so its bound must be <= the value
+        of cv at any interior point (here the box midpoint). This is exactly why
+        it is sound where the removed "midpoint" mode was not: it returns
+        ``min_box cv`` rather than ``cv(mid)``.
+        """
+        from discopt._jax.mccormick_nlp import solve_mccormick_relaxation_nlp
         from discopt._jax.relaxation_compiler import compile_objective_relaxation
 
         model = _simple_minimize_model()
@@ -207,11 +168,15 @@ class TestNLPBounds:
         lb = jnp.array([0.0, 0.0])
         ub = jnp.array([4.0, 4.0])
 
-        mp_lb = evaluate_midpoint_bound(relax_fn, lb, ub)
+        # cv evaluated at the box midpoint (what the removed midpoint mode used).
+        mid = 0.5 * (lb + ub)
+        cv_mid, _cc = relax_fn(mid, mid, lb, ub)
+        cv_mid = float(cv_mid)
+
         nlp_lb = solve_mccormick_relaxation_nlp(relax_fn, None, None, lb, ub)
 
         # NLP minimizes cv over the domain, should give <= cv(midpoint)
-        assert nlp_lb <= mp_lb + 1e-6
+        assert nlp_lb <= cv_mid + 1e-6
 
     def test_handles_ge_constraint(self):
         """NLP relaxation with >= constraints (binding)."""
@@ -331,11 +296,11 @@ class TestIntegration:
     def test_coexists_with_alphabb(self):
         """McCormick bounds + alphaBB both active, takes max."""
         model = _simple_nonconvex_model()
-        result = model.solve(mccormick_bounds="midpoint", max_nodes=500)
+        result = model.solve(mccormick_bounds="nlp", max_nodes=500)
         assert result.status in ("optimal", "feasible", "node_limit")
 
     def test_auto_activates_for_dag_models(self):
-        """'auto' mode should activate midpoint for DAG models."""
+        """'auto' mode should activate a valid bound path for DAG models."""
         model = _simple_minimize_model()
         result = model.solve(mccormick_bounds="auto", max_nodes=100)
         assert result.status in ("optimal", "feasible", "node_limit")
@@ -349,7 +314,7 @@ class TestIntegration:
     def test_global_optimality_with_bounds(self):
         """McCormick bounds should help prove global optimality."""
         model = _convex_quadratic_model()
-        result = model.solve(mccormick_bounds="midpoint", max_nodes=500)
+        result = model.solve(mccormick_bounds="nlp", max_nodes=500)
         assert result.status in ("optimal", "feasible")
         if result.status == "optimal":
             # (x-1)^2 + (y-2)^2, x integer: optimal x=1, y=2, obj=0

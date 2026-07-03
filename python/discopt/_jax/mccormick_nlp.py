@@ -7,11 +7,16 @@ convex relaxation is a valid lower bound on the original nonconvex problem over 
 node's domain. (The JAX IPM previously used here is retired; the relaxation
 *functions* remain JAX-built.)
 
-Two modes:
-  - **midpoint**: Evaluate the McCormick convex underestimator at the midpoint
-    of the node bounds. Nearly free but provides a weak bound.
+Mode:
   - **nlp**: Solve a convex NLP minimizing the McCormick underestimator subject
-    to McCormick-relaxed constraints. Tighter but costs one IPM solve per node.
+    to McCormick-relaxed constraints. Its optimum is a valid lower bound.
+
+The former **midpoint** mode — evaluate the underestimator at the box midpoint
+and return that value — was removed (correctness issue C-18): ``u(midpoint)`` is
+not a valid lower bound on ``min_box u`` (e.g. for ``x**2`` on ``[1, 3]`` it
+returns 3.0 while the true minimum is 1.0), so it could certify a wrong optimum.
+The only sound cheap bound is the minimum of the (convex) underestimator over the
+box, which is precisely what the ``nlp`` mode computes.
 """
 
 from __future__ import annotations
@@ -19,7 +24,6 @@ from __future__ import annotations
 import time
 from typing import Callable, Optional
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -28,69 +32,11 @@ import numpy as np
 # XLA cache instead of recompiling. Without these caches each call built
 # fresh closures over (lb, ub), forcing JAX to retrace+recompile per node
 # (the dominant cost on small instances).
-_midpoint_batch_cache: dict = {}
 _pounce_evaluator_cache: dict = {}
 
 
 def _deadline_expired(deadline: float | None) -> bool:
     return deadline is not None and time.perf_counter() >= deadline
-
-
-def evaluate_midpoint_bound(
-    obj_relax_fn: Callable,
-    node_lb: jnp.ndarray,
-    node_ub: jnp.ndarray,
-    negate: bool = False,
-) -> float:
-    """Evaluate McCormick objective relaxation at the node midpoint.
-
-    Args:
-        obj_relax_fn: Compiled relaxation fn(x_cv, x_cc, lb, ub) -> (cv, cc).
-        node_lb: Lower bounds for this B&B node, shape (n,).
-        node_ub: Upper bounds for this B&B node, shape (n,).
-        negate: If True, the original problem is maximization.
-            Return -cc as the lower bound on the negated objective.
-
-    Returns:
-        A valid lower bound (float), or -inf on failure.
-    """
-    try:
-        mid = 0.5 * (node_lb + node_ub)
-        cv, cc = obj_relax_fn(mid, mid, node_lb, node_ub)
-        if negate:
-            return -float(cc)
-        return float(cv)
-    except Exception:
-        return -np.inf
-
-
-def evaluate_midpoint_bound_batch(
-    obj_relax_fn: Callable,
-    lb_batch: jnp.ndarray,
-    ub_batch: jnp.ndarray,
-    negate: bool = False,
-) -> jnp.ndarray:
-    """Evaluate McCormick midpoint bounds for a batch of nodes.
-
-    Args:
-        obj_relax_fn: Compiled relaxation fn(x_cv, x_cc, lb, ub) -> (cv, cc).
-        lb_batch: Lower bounds, shape (N, n_vars).
-        ub_batch: Upper bounds, shape (N, n_vars).
-        negate: If True, maximization problem.
-
-    Returns:
-        Array of lower bounds, shape (N,).
-    """
-    key = id(obj_relax_fn)
-    vmapped_fn = _midpoint_batch_cache.get(key)
-    if vmapped_fn is None:
-        vmapped_fn = jax.jit(jax.vmap(obj_relax_fn))
-        _midpoint_batch_cache[key] = vmapped_fn
-    mid = 0.5 * (lb_batch + ub_batch)
-    cv_batch, cc_batch = vmapped_fn(mid, mid, lb_batch, ub_batch)
-    if negate:
-        return jnp.asarray(-cc_batch)
-    return jnp.asarray(cv_batch)
 
 
 def _filter_well_behaved_constraints(

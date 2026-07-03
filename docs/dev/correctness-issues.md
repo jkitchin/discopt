@@ -95,7 +95,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-19 | P1 | relax_tan | pole-straddling interval classified as one branch → secant across a pole, invalid envelope | open |
 | C-5 | P1 | .nl parser | floor/ceil/round/trunc→identity, intdiv→div, all silent | fixed |
 | C-6 | P1 | modeling API | integer vars silently clamped to [0, 1e6] | fixed |
-| C-18 | P1 | midpoint bound | `mccormick_bounds="midpoint"` returns u(mid), not a lower bound (opt-in mode) | open |
+| C-18 | P1 | midpoint bound | `mccormick_bounds="midpoint"` returns u(mid), not a lower bound (opt-in mode) | fixed |
 | C-20 | P2 | fbbt_fp.rs | watch-list FBBT declares infeasibility with zero tolerance (opt-in engine) | fixed |
 | C-15 | P2 | obbt.py | `run_obbt` variant tightens to raw LP vertex, no NS safe-bound clamp | fixed |
 | C-14 | P2 | milp_driver | LP-infeasible fathom trusts status alone; Farkas ray never verified | open |
@@ -939,7 +939,56 @@ must never return a non-bound.
 end-to-end model certifies the true optimum or refuses the mode; docs updated;
 standing gates pass.
 
-**Log:** —
+**Log:**
+- 2026-07-03 — **CONFIRMED then FIXED.** Confirmed the non-bound directly: for
+  objective `x²` on `[1,3]`, `evaluate_midpoint_bound(...)` returned **3.0**
+  (the compiled McCormick secant envelope's `cv` at the midpoint x=2), while the
+  true box minimum is **1.0** (at x=1). 3.0 > 1.0, so the returned value is NOT a
+  valid lower bound — it can fathom the node holding the true optimum → false
+  "optimal" for any user who selected the documented mode. (The card predicted 4.0
+  under the assumption `cv = x²`; the compiler's actual secant envelope gives 3.0,
+  but the class is identical: `u(mid) > min_box f`.) The value was consumed as a
+  bound at the two McCormick objective-bound seams (`solver.py` batch ~5136 and
+  serial ~5361) via `max()` into `result_lbs`/`convex_lb`/`nlp_lb`.
+- **Fix — option (c), remove the mode and refuse loudly.** The only sound cheap
+  way to turn the convex underestimator into a bound is to MINIMIZE it over the
+  box, which is exactly what `mccormick_bounds="nlp"` already does
+  (`solve_mccormick_relaxation_nlp`). A sound "midpoint" mode would just duplicate
+  "nlp", so the mode was removed rather than reimplemented:
+  - `solver.py` now validates `mccormick_bounds ∈ {auto, nlp, lp, none}` at the
+    top of `solve_model` (next to the `nlp_solver` check); `"midpoint"` raises a
+    `ValueError` naming C-18 and the worked counterexample, and any other unknown
+    value is also rejected (previously an unknown value silently fell through).
+  - `evaluate_midpoint_bound` / `evaluate_midpoint_bound_batch` (the non-bound
+    helpers) and the `_midpoint_batch_cache` were **deleted** from
+    `mccormick_nlp.py`; the two now-dead consumer branches in `solver.py` and the
+    `_mc_mode in ("midpoint","nlp")` guard were collapsed to `"nlp"`-only.
+  - Docstrings updated (`solve_model` `mccormick_bounds` param, `mccormick_nlp`
+    module header, `convex-relaxation-expert` skill doc).
+- **Regression tests** (`python/tests/test_mccormick_bounds.py::TestC18MidpointNotABound`,
+  fail-before/pass-after verified by stashing the fix — the rejection and
+  helpers-gone tests fail on pre-fix source): `test_midpoint_value_exceeds_true_box_minimum`
+  (reconstructs `u(mid)=3.0 > 1.0` for x² on [1,3] straight from the compiled
+  relaxation — the mechanism, fix-agnostic), `test_midpoint_mode_is_rejected_loudly`
+  (`solve(mccormick_bounds="midpoint")` raises `ValueError` matching "C-18"),
+  `test_unknown_mccormick_bounds_rejected` (typos rejected), and
+  `test_evaluate_midpoint_helpers_are_gone` (the unsound helpers are deleted, not
+  just unwired). The pre-existing `TestMidpointBounds` class (which exercised the
+  removed non-bound and even asserted an end-to-end "optimal") was removed; the
+  three integration tests that passed `"midpoint"` were repointed to the sound
+  `"nlp"`/`"none"` modes; `test_nlp_bound_finds_minimum_of_underestimator` now
+  derives its `cv(mid)` reference directly instead of via the deleted helper.
+- **Gates:** `test_mccormick_bounds.py` 15 passed; `pytest -m smoke` 193 passed /
+  1 skipped; adversarial `test_adversarial_recent_fixes.py -m slow` 10 passed; `ruff check` +
+  `ruff format --check` clean on all touched files; `pre-commit run mypy` passed.
+  No Rust touched (no `cargo test`). The broad `-k "midpoint or mccormick or bound
+  or nlp"` filter showed 39 failures that are **pre-existing and unrelated** —
+  `TestSchurPassthrough` (POUNCE Schur-block) fails identically with this fix
+  stashed, and the `test_relaxation_coverage`/`test_qp_pounce` cases pass in
+  isolation (test-ordering artifacts); `incorrect_count` unaffected (no correctness
+  assertion weakened — the fix strictly REMOVES a false-bound path). PR: <PR>.
+
+**Status:** open → fixed.
 
 ---
 
