@@ -464,9 +464,9 @@ def _kelley_max(
         row[-1] = 1.0
         rows.append(row)
         rhs.append(float(L_k - g_k @ lam_k))
-    bounds = [
-        (-lam_max, lam_max) if free_mask[i] else (0.0, lam_max) for i in range(m_coup)
-    ] + [(-_BIG, _BIG)]
+    bounds = [(-lam_max, lam_max) if free_mask[i] else (0.0, lam_max) for i in range(m_coup)] + [
+        (-_BIG, _BIG)
+    ]
     res = lp(np.asarray(c), A_ub=np.array(rows), b_ub=np.array(rhs), bounds=bounds)
     if res.x is None:
         return None, -np.inf
