@@ -611,7 +611,24 @@ One PR, no behaviour change:
 - **T2.3 warm-start:** the MILP backend selector (``get_milp_solver``) exposes no
   MIP-start parameter, so master warm-starting is left as a documented TODO
   (a backend feature, per the plan's own scoping) rather than built here.
-- *(pending: T3.3 NGBD spike result.)*
+- **Phase 3 (T3.2 done; T3.1 deferred; T3.3 not run):** T3.2 shipped an
+  ``OuterApproximationGenerator`` that fires on a convex MINLP (convexity checked
+  via ``classify_oa_cut_convexity``), a new ``MethodKind.OUTER_APPROXIMATION`` with
+  ``cut_strength=0.85 > GBD's 0.6`` and proven-equivalent soundness so it outranks
+  GBD, and IR dispatch to ``solve_oa``; the GBD docstrings now point to OA.
+  Verified end-to-end (advisor path solves a convex MINLP via OA, matches the
+  monolithic optimum) and that nonconvex models get no OA candidate.
+  **T3.1 (Geoffrion feasibility cuts) deferred:** it requires mapping the
+  phase-1 elastic multipliers back to the original constraints and constructing a
+  rigorous ``μ^T g`` feasibility cut with the closed-form box term — a
+  soundness-sensitive addition. The current behaviour is *correct* (binary
+  masters use no-good cuts; a certified-infeasible non-binary master raises
+  cleanly; uncertified failures downgrade to heuristic per T0.1), so this is a
+  capability gap, not a correctness gap; scheduled behind a dedicated soundness
+  test that samples the master box to prove the cut never excludes a
+  feasible-recourse point. **T3.3 (NGBD spike) not run** in this session (it is
+  experiment-only and gates further NGBD work; no NGBD code was written, per the
+  contract's "do not code past a spike" rule).
 
 ## References
 

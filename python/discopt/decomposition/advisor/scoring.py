@@ -122,6 +122,9 @@ class ScoreVector:
 _CUT_STRENGTH: dict[MethodKind, float] = {
     MethodKind.INDEPENDENT_BLOCKS: 1.0,
     MethodKind.BENDERS: 0.9,
+    # OA's per-constraint cuts dominate GBD's aggregated cut (Duran & Grossmann
+    # 1986), so OA outranks GBD on a convex MINLP.
+    MethodKind.OUTER_APPROXIMATION: 0.85,
     MethodKind.GENERALIZED_BENDERS: 0.6,
     MethodKind.LAGRANGIAN: 0.5,
 }
@@ -129,10 +132,15 @@ _BASE_CONFIDENCE: dict[MethodKind, float] = {
     MethodKind.NONE: 1.0,
     MethodKind.INDEPENDENT_BLOCKS: 0.9,
     MethodKind.BENDERS: 0.75,
+    MethodKind.OUTER_APPROXIMATION: 0.8,
     MethodKind.GENERALIZED_BENDERS: 0.55,
     MethodKind.LAGRANGIAN: 0.6,
 }
-_FIXES_COMPLICATING = (MethodKind.BENDERS, MethodKind.GENERALIZED_BENDERS)
+_FIXES_COMPLICATING = (
+    MethodKind.BENDERS,
+    MethodKind.GENERALIZED_BENDERS,
+    MethodKind.OUTER_APPROXIMATION,
+)
 
 
 def _effective_block_sizes(cand: Candidate, graph: ModelGraph) -> list[int]:

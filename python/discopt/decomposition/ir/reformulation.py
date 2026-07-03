@@ -53,6 +53,12 @@ _CERTIFICATE = {
         "GBD reproduces the optimum only when the recourse is convex",
         ("verify convexity of the recourse subproblems",),
     ),
+    MethodKind.OUTER_APPROXIMATION: (
+        Soundness.PROVEN_EQUIVALENT,
+        "outer approximation reproduces the optimum on a convex MINLP "
+        "(Duran & Grossmann 1986); OA cuts dominate GBD's aggregated cut",
+        ("exact only for convex models; recourse convexity is checked",),
+    ),
     MethodKind.LAGRANGIAN: (
         Soundness.RELAXATION,
         "Lagrangian relaxation yields a valid dual bound",
@@ -100,6 +106,11 @@ class DecomposedModel:
             return solve_benders(model, structure=self.structure, **config)
         if self.method is MethodKind.GENERALIZED_BENDERS:
             return solve_gbd(model, structure=self.structure, **config)
+        if self.method is MethodKind.OUTER_APPROXIMATION:
+            # OA operates on the whole model (no structure needed).
+            from discopt.solvers.oa import solve_oa
+
+            return solve_oa(model, **config)
         if self.method is MethodKind.LAGRANGIAN:
             return solve_lagrangian(model, structure=self.structure, **config)
         raise NotImplementedError(f"no reformulation driver for {self.method.label}")
@@ -191,7 +202,11 @@ def build_decomposition(model, candidate: Candidate) -> DecomposedModel:
     )
     certificate = SoundnessCertificate(method, level, rationale, caveats)
 
-    if method in (MethodKind.BENDERS, MethodKind.GENERALIZED_BENDERS):
+    if method in (
+        MethodKind.BENDERS,
+        MethodKind.GENERALIZED_BENDERS,
+        MethodKind.OUTER_APPROXIMATION,
+    ):
         complicating = list(structure.complicating_vars)
         blocks, block_of_var = _recourse_blocks(model, complicating)
         master = MasterModel(method, tuple(complicating), tuple(structure.coupling_constraints))

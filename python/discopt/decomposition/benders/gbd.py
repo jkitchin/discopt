@@ -1,5 +1,12 @@
 """Generalized Benders Decomposition (Geoffrion 1972): convex-NLP recourse.
 
+On a **convex** MINLP, prefer **Outer Approximation**
+(:func:`discopt.solvers.oa.solve_oa`): its per-constraint linearizations dominate
+GBD's single aggregated cut (Duran & Grossmann 1986), so OA usually needs fewer
+major iterations. GBD is preferable only when the per-iteration master must stay
+small. The Decomposition Advisor ranks OA above GBD automatically for convex
+models.
+
 Where classical Benders (``solver.py``) handles a *linear* recourse LP, GBD
 handles a **convex nonlinear** recourse subproblem. The two-stage problem
 (internally minimizing) is
