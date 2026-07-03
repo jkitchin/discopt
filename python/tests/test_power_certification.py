@@ -101,6 +101,65 @@ def test_product_base_fractional_power_certifies():
 
 @pytest.mark.correctness
 @pytest.mark.parametrize(
+    "p, expected",
+    [
+        (2, (0.0, 4.0)),  # already handled on main; pin it
+        (4, (0.0, 16.0)),  # C-34/FR-1: was (16.0, 16.0) pre-fix
+        (6, (0.0, 64.0)),  # C-34/FR-1: was (64.0, 64.0) pre-fix
+        (8, (0.0, 256.0)),
+    ],
+)
+def test_even_power_straddle_bound_includes_interior_min(p, expected):
+    """C-34/FR-1: for an even power over a base straddling 0, the interval
+    bound must include the interior minimum at 0. Endpoint-only bounds omit
+    it, under-approximating the range → invalid aux box → false optimum."""
+    from discopt._jax.gdp_reformulate import _bound_expression
+
+    m = dm.Model()
+    x = m.continuous("x", lb=-2.0, ub=2.0)
+    assert _bound_expression(x**p, m) == expected
+
+
+@pytest.mark.correctness
+@pytest.mark.parametrize(
+    "lb, ub, p, expected",
+    [
+        (1.0, 3.0, 4, (1.0, 81.0)),  # positive base: monotone endpoints
+        (-3.0, -1.0, 4, (1.0, 81.0)),  # negative base: monotone endpoints
+        (-2.0, 2.0, 3, (-8.0, 8.0)),  # odd power: monotone endpoints (unchanged)
+    ],
+)
+def test_power_bound_non_straddling_and_odd_unchanged(lb, ub, p, expected):
+    """The fix must not perturb one-signed even powers or odd powers, which
+    are monotone on the interval and correctly bounded by their endpoints."""
+    from discopt._jax.gdp_reformulate import _bound_expression
+
+    m = dm.Model()
+    x = m.continuous("x", lb=lb, ub=ub)
+    assert _bound_expression(x**p, m) == expected
+
+
+@pytest.mark.correctness
+def test_c34_even_power_straddle_no_false_optimum():
+    """C-34/FR-1 end-to-end: ``x**4 * y`` on a box where x straddles 0. The
+    buggy [16,16] aux box for x**4 forced x=+-2, cutting off the true optimum
+    at (0.5, 1) and returning a false certified obj ~= 3.13. The true optimum
+    is 0."""
+    m = dm.Model()
+    x = m.continuous("x", lb=-2.0, ub=2.0)
+    y = m.continuous("y", lb=-2.0, ub=2.0)
+    m.minimize((x - 0.5) ** 2 + (y - 1.0) ** 2)
+    m.subject_to(x**4 * y <= 1.0)
+    r = m.solve(time_limit=60, gap_tolerance=1e-4)
+
+    assert r.objective is not None and r.bound is not None
+    # (0.5, 1) is feasible: 0.5**4 * 1 = 0.0625 <= 1, obj = 0.
+    assert r.objective <= 1e-3, f"false optimum: obj={r.objective} (true optimum is 0)"
+    assert r.bound <= r.objective + 1e-4, "dual bound must not exceed the optimum"
+
+
+@pytest.mark.correctness
+@pytest.mark.parametrize(
     "instance, optimum",
     [
         ("st_e11", 189.3292),  # x**0.6 fractional-power terms

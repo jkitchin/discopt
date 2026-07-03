@@ -494,14 +494,23 @@ def _bound_expression(
             # Conservative: could be tightened for integer exponents
             if isinstance(expr.right, Constant):
                 p = float(expr.right.value)
-                if p == 2.0:
-                    # x^2 is always >= 0
-                    vals = [left_lo**2, left_hi**2]
-                    if left_lo <= 0 <= left_hi:
-                        return 0.0, max(vals)
-                    return min(vals), max(vals)
                 if p == int(p) and p > 0:
-                    vals = [left_lo**p, left_hi**p]
+                    p_int = int(p)
+                    vals = [left_lo**p_int, left_hi**p_int]
+                    if p_int % 2 == 0 and left_lo < 0 < left_hi:
+                        # Even power over a base that straddles 0: x^p is not
+                        # monotone here — its interior minimum is at x=0
+                        # (value 0), which the endpoint evaluations miss.
+                        # The rigorous range is [0, max(lb^p, ub^p)]
+                        # (C-34/FR-1). This generalizes the p==2 case that
+                        # previously handled only the quadratic straddle;
+                        # p>=4 formerly fell to the endpoint-only path below
+                        # and under-approximated the range → invalid box →
+                        # false certified optimum.
+                        return 0.0, max(vals)
+                    # Odd power (monotone on any interval) or one-signed even
+                    # power (monotone on that interval): the range is spanned
+                    # by the endpoints.
                     return min(vals), max(vals)
             return -np.inf, np.inf
 

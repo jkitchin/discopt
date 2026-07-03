@@ -119,7 +119,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-31 | P0 | presolve/FBBT | FBBT collapses an array-variable block to element-0's bounds and stamps them on every element → cuts feasible points AND false "infeasible"; chains into invalid conflict cuts AND (broadened) into the certified LP dual bound via `_fbbt_argument_box` (= TG-1) | fixed |
 | C-32 | P0 | relaxation/mccormick | `relax_asin`/`relax_acos` inverted curvature regime → unsound convex envelope (cv > f) in the LIVE JAX layer → invalid dual bound (= NM-1) | confirmed |
 | C-33 | P0 | solver.py fallback | pure-continuous fallback certifies a nonconvex model's local optimum with `gap_certified=True` (= SC-1), DEFAULT path | fixed |
-| C-34 | P0 | gdp_reformulate | even-power bound over a zero-straddling base uses endpoint-only bounds (omits interior min at 0) → invalid aux box → false optimal (= FR-1), DEFAULT path | confirmed |
+| C-34 | P0 | gdp_reformulate | even-power bound over a zero-straddling base uses endpoint-only bounds (omits interior min at 0) → invalid aux box → false optimal (= FR-1), DEFAULT path | fixed |
 | C-35 | P1 | oa.py / gdpopt_loa | non-rigorous NLP failure → unconditional no-good cut → possible false infeasible/optimal (= OA-1, opt-in OA/LOA path) | open |
 
 ---
@@ -1528,7 +1528,33 @@ even powers over zero-straddling bases; the e2e repro returns 0 at x=0.5;
 non-straddling and odd-power cases unchanged; standing gates + differential-bound
 checks per §0.
 
-**Log:** 2026-07-03 — VERIFIED new default-path P0 (solver-core review §1).
+**Log:**
+- 2026-07-03 — VERIFIED new default-path P0 (solver-core review §1).
+- 2026-07-03 — **FIXED** (PR #425). Confirmed fails-before: direct
+  `_bound_expression(x**4)` on `[−2,2]` returned `(16.0, 16.0)` (true `(0.0,
+  16.0)`); `x**6` → `(64.0, 64.0)`. E2e `min (x−0.5)²+(y−1)² s.t. x**4·y ≤ 1`
+  with `x,y ∈ [−2,2]` returned a false certified `objective≈3.13` at
+  `x=2, y=0.0625` (aux `x**4` pinned to the bogus `[16,16]` box), true optimum
+  is `0` at `x=0.5, y=1`. (Observed 3.13 rather than the review's 0.25 because
+  y's box differs; either way it is a false certified optimum vs the true 0.)
+  **Fix:** in the `**` arm of `_bound_expression`
+  (`gdp_reformulate.py`), generalized the `p==2` straddle handling to ALL even
+  integer powers: for any even `p` with base interval straddling 0
+  (`lb < 0 < ub`), return `[0, max(lb**p, ub**p)]` (interior min at 0);
+  otherwise (one-signed even, or odd) keep the monotone endpoint bounds. No
+  `p==2` vs `p>=4` special-casing remains. After: `x**4→(0,16)`,
+  `x**6→(0,64)`, `x**8→(0,256)`; one-signed even (`[1,3]**4→(1,81)`,
+  `[−3,−1]**4→(1,81)`) and odd (`[−2,2]**3→(−8,8)`) unchanged; e2e returns
+  `≈0` at `x=0.5, y=1`.
+  **Regression tests** (`python/tests/test_power_certification.py`):
+  `test_even_power_straddle_bound_includes_interior_min` (p=2,4,6,8),
+  `test_power_bound_non_straddling_and_odd_unchanged`,
+  `test_c34_even_power_straddle_no_false_optimum` (e2e). Fail-before /
+  pass-after verified by stashing the fix.
+  **Gates:** smoke 193 passed/1 skipped; adversarial suite 10 passed; targeted
+  power/reform/mccormick/monomial/gdp sweep 210 passed (only pre-existing
+  `st_e11` tolerance flake, proven independent by reverting the fix); ruff
+  clean; mypy env-stub error only (pre-existing, hits any file).
 
 ---
 
