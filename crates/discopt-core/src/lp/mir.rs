@@ -23,6 +23,13 @@
 //! - integer `j`: `γ_j = ⌊ã_j⌋ + max(0, f_j − f)/(1 − f)`;
 //! - continuous `j`: `γ_j = min(ã_j, 0)/(1 − f)`.
 //!
+//! The integer branch is valid only when the shifted `y_j` is integer-valued,
+//! which requires the *active substitution bound* to be integral (`l_j` for a
+//! lower shift, `u_j` for an upper complement). Presolve can leave an integer
+//! column with a fractional bound; there the integer branch would cut feasible
+//! points, so such a column falls back to the continuous coefficient (C-4) —
+//! the same premise the GMI separator guards in `super::gomory`.
+//!
 //! Single-row MIR is only as strong as the row's scaling, so each row is tried
 //! at several scalings `δ` (1, and `1/|a_j|` for each integer column) and — for
 //! both the all-lower substitution and the near-bound (per-column upper-vs-lower)
@@ -45,9 +52,15 @@ const FRAC_MIN: f64 = 1e-3;
 /// Absolute cap on a cut coefficient; larger ones are numerically unsafe.
 const MAX_ABS_COEFF: f64 = 1e7;
 
-/// Apply the MIR function to one (scaled, lower-shifted) row, returning the
-/// cut over the shifted variables `x'` as `(coeffs', rhs')` or `None`.
-fn mir_row(a: &[f64], b: f64, integrality: &[bool]) -> Option<(Vec<f64>, f64)> {
+/// Apply the MIR function to one (scaled, bound-shifted) row, returning the
+/// cut over the shifted variables `y` as `(coeffs', rhs')` or `None`.
+///
+/// The integer-MIR rounding is only valid when the shifted variable `y_j` is a
+/// nonnegative *integer*, which requires the substitution bound to be integral.
+/// `int_shift[j]` records that premise (integer column AND integral active
+/// bound); when it is false the column takes the always-valid continuous
+/// coefficient instead — mirroring the `use_integer` guard in `gomory.rs`.
+fn mir_row(a: &[f64], b: f64, int_shift: &[bool]) -> Option<(Vec<f64>, f64)> {
     let f = b - b.floor();
     if !(FRAC_MIN..=1.0 - FRAC_MIN).contains(&f) {
         return None;
@@ -55,7 +68,7 @@ fn mir_row(a: &[f64], b: f64, integrality: &[bool]) -> Option<(Vec<f64>, f64)> {
     let n = a.len();
     let mut g = vec![0.0_f64; n];
     for j in 0..n {
-        if integrality[j] {
+        if int_shift[j] {
             let fj = a[j] - a[j].floor();
             g[j] = a[j].floor() + (fj - f).max(0.0) / (1.0 - f);
         } else {
@@ -65,9 +78,12 @@ fn mir_row(a: &[f64], b: f64, integrality: &[bool]) -> Option<(Vec<f64>, f64)> {
     Some((g, b.floor()))
 }
 
-/// Tolerance within which an integer column's upper bound must sit to an
-/// integer for its complement `u_j − x_j` to remain integer-valued.
-const INT_UB_TOL: f64 = 1e-6;
+/// Tolerance within which the active substitution bound of an integer column
+/// must sit to an integer for the shifted variable to remain integer-valued:
+/// the lower bound `l_j` for `y_j = x_j − l_j`, or the upper bound `u_j` for the
+/// complement `y_j = u_j − x_j`. When the bound is fractional the integer-MIR
+/// rounding is unsound and the column falls back to the continuous coefficient.
+const INT_BOUND_TOL: f64 = 1e-6;
 
 /// Whether the LP point is within `frac` of the way up the `[l, u]` box, i.e.
 /// close enough to the upper bound that complementing there is worth trying.
@@ -90,9 +106,12 @@ fn near_upper(xj: f64, lj: f64, uj: f64) -> bool {
 /// `ã_j = −a_j` (complemented) or `a_j`, and `b̃ = b − Σ_{comp} a_j u_j −
 /// Σ_{not comp} a_j l_j`. MIR is valid for this nonnegative row, and mapping the
 /// cut `Σ γ_j y_j ≤ r` back through the (affine, invertible) substitution yields
-/// a valid inequality in `x`. Any integer-feasible `x` maps to a feasible `y`
-/// (integer when `x_j` and, for complemented integer columns, `u_j` are), so the
-/// cut removes no integer-feasible point of the row.
+/// a valid inequality in `x`. Any integer-feasible `x` maps to a feasible `y`,
+/// but `y_j` is *integer-valued* only when the active substitution bound is
+/// integral (`l_j` for a lower shift, `u_j` for a complement). The integer-MIR
+/// rounding is therefore requested (`int_shift[j]`) only for integer columns
+/// whose active bound is integral; a fractional bound falls back to the
+/// continuous coefficient so the cut removes no integer-feasible point (C-4).
 #[allow(clippy::too_many_arguments)]
 fn mir_under_substitution(
     row: &[f64],
@@ -107,21 +126,32 @@ fn mir_under_substitution(
     max_dynamism: f64,
 ) -> Option<(Vec<f64>, f64, f64)> {
     let n = row.len();
-    // Reformulated coefficients ã_j and the shift folded into the rhs.
+    // Reformulated coefficients ã_j and the shift folded into the rhs. Also record
+    // per column whether the integer-MIR branch is admissible: the shifted
+    // `y_j = x_j − l_j` (or `u_j − x_j` when complemented) stays integer-valued
+    // only when the *active* substitution bound is itself integral. Presolve
+    // (coefficient strengthening / implied bounds) can leave an integer column
+    // with a fractional bound; applying the integer rounding there yields a cut
+    // that can exclude a feasible integer point (C-4). Mirrors the `use_integer`
+    // guard in `gomory.rs`.
     let mut a_ref = vec![0.0_f64; n];
+    let mut int_shift = vec![false; n];
     let mut b_ref = b;
     for j in 0..n {
-        if comp[j] {
+        let pinned = if comp[j] {
             a_ref[j] = -row[j];
             b_ref -= row[j] * u[j];
+            u[j]
         } else {
             a_ref[j] = row[j];
             b_ref -= row[j] * l[j];
-        }
+            l[j]
+        };
+        int_shift[j] = integrality[j] && (pinned - pinned.round()).abs() <= INT_BOUND_TOL;
     }
     // Scale, then apply the MIR function in the nonnegative y-space.
     let a_scaled: Vec<f64> = a_ref.iter().map(|&aj| aj * d).collect();
-    let (g, r) = mir_row(&a_scaled, b_ref * d, integrality)?;
+    let (g, r) = mir_row(&a_scaled, b_ref * d, &int_shift)?;
 
     // Point value of y_j and violation of `Σ g_j y_j ≤ r` at x.
     let yj = |j: usize| if comp[j] { u[j] - x[j] } else { x[j] - l[j] };
@@ -215,7 +245,7 @@ pub fn separate_mir(
             if !near_upper(x[j], l[j], u[j]) {
                 continue;
             }
-            if integrality[j] && (u[j] - u[j].round()).abs() > INT_UB_TOL {
+            if integrality[j] && (u[j] - u[j].round()).abs() > INT_BOUND_TOL {
                 continue;
             }
             comp_near[j] = true;
@@ -458,6 +488,96 @@ mod tests {
             comp_viol >= base_viol - 1e-9,
             "complemented cut ({comp_viol}) weaker than all-lower ({base_viol})"
         );
+    }
+
+    /// C-4 property test: random rows with integer columns carrying *fractional*
+    /// lower and/or upper bounds (the state presolve coefficient-strengthening can
+    /// produce). Every emitted cut must exclude no integer-feasible point of the
+    /// row over the integer box. This locks the class: if the fractional-bound
+    /// guard is removed, the buggy integer rounding cuts a feasible integer point
+    /// on some draw and the assertion trips. Fails before the fix.
+    #[test]
+    fn c4_mir_validity_random_fractional_int_bounds() {
+        let mut state: u64 = 0xc4c4_dead_beef_0004;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 11) as f64) / ((1u64 << 53) as f64)
+        };
+        let mut n_cuts_checked = 0usize;
+        for _ in 0..1000 {
+            let n = 3;
+            let a: Vec<f64> = (0..n)
+                .map(|_| (next() * 8.0 - 4.0).round() + (next() - 0.5))
+                .collect();
+            // Fractional offsets in (0,1) added to integer endpoints, so the
+            // active substitution bounds are often non-integral for integer cols.
+            let frac_l: Vec<f64> = (0..n)
+                .map(|_| if next() > 0.4 { next() } else { 0.0 })
+                .collect();
+            let frac_u: Vec<f64> = (0..n)
+                .map(|_| if next() > 0.4 { next() } else { 0.0 })
+                .collect();
+            let lo_i: Vec<i64> = (0..n).map(|_| (next() * 4.0).floor() as i64 - 2).collect();
+            let hi_i: Vec<i64> = (0..n)
+                .map(|k| lo_i[k] + 1 + (next() * 4.0).floor() as i64)
+                .collect();
+            let l: Vec<f64> = (0..n).map(|k| lo_i[k] as f64 + frac_l[k]).collect();
+            let u: Vec<f64> = (0..n).map(|k| hi_i[k] as f64 + frac_u[k]).collect();
+            let integ: Vec<bool> = (0..n).map(|_| next() > 0.3).collect();
+            let b = next() * 14.0 - 6.0;
+            let x: Vec<f64> = (0..n)
+                .map(|k| {
+                    let t = if next() > 0.25 { 0.6 + 0.4 * next() } else { next() };
+                    l[k] + t * (u[k] - l[k]).max(0.0)
+                })
+                .collect();
+            // Integer-feasible box: integers within [l, u] → [ceil(l), floor(u)].
+            let lo_feas: Vec<i64> = (0..n).map(|k| l[k].ceil() as i64).collect();
+            let hi_feas: Vec<i64> = (0..n).map(|k| u[k].floor() as i64).collect();
+            if (0..n).any(|k| lo_feas[k] > hi_feas[k]) {
+                continue;
+            }
+            for cut in separate_mir(&a, &[b], &l, &u, &integ, &x, 1e-7, 1e9) {
+                assert_valid_le_box(&cut.coeffs, cut.rhs, &a, b, &lo_feas, &hi_feas);
+                n_cuts_checked += 1;
+            }
+        }
+        assert!(
+            n_cuts_checked > 20,
+            "expected many cuts to validate, got {n_cuts_checked}"
+        );
+    }
+
+    /// C-4 regression: an integer column with a *fractional* lower bound (as
+    /// presolve coefficient-strengthening / implied bounds can produce) must NOT
+    /// receive the integer-MIR rounding, because the bound substitution
+    /// `y_j = x_j − l_j` is non-integer there and the integer γ can cut a feasible
+    /// integer point. Mirrors `gomory.rs`'s
+    /// `gmi_cut_valid_when_integer_var_has_fractional_bound`.
+    ///
+    /// Row `−x0 − 2·x1 ≤ −2`, x0 integer in [0.5, 4] (fractional lower bound),
+    /// x1 integer in [0, 2]. Feasible integer points include (2, 0)
+    /// (`−2 − 0 = −2 ≤ −2`). At the LP point (0.8, 0.1) the *buggy* integer-MIR
+    /// cut is `−x0 − 2·x1 ≤ −2.5`, which excludes (2, 0) (`−2 > −2.5`). With the
+    /// fractional-lower-bound guard, column 0 falls back to the continuous
+    /// coefficient and every emitted cut stays valid for the whole integer box.
+    #[test]
+    fn c4_mir_valid_when_integer_var_has_fractional_lower_bound() {
+        let a = [-1.0, -2.0];
+        let b = -2.0;
+        let l = [0.5, 0.0]; // x0 has a fractional lower bound
+        let u = [4.0, 2.0];
+        let integ = [true, true];
+        let x = [0.8, 0.1]; // LP point that selects the (buggy) integer-MIR cut
+
+        let cuts = separate_mir(&a, &[b], &l, &u, &integ, &x, 1e-7, 1e9);
+        // Every emitted cut must exclude no integer-feasible point of the row over
+        // the integer box x0 ∈ {1,2,3,4} (integer ≥ 0.5), x1 ∈ {0,1,2}.
+        for cut in &cuts {
+            assert_valid_le_box(&cut.coeffs, cut.rhs, &a, b, &[1, 0], &[4, 2]);
+        }
     }
 
     #[test]

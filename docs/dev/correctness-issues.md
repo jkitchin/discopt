@@ -90,7 +90,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-17 | P0 | alphaBB bound | node bound uses sampled (non-rigorous) α + center-only PSD check → false "optimal", default path for small nonconvex; deterministic repro confirms (spike width ≤ 0.006 → α=0, bound 0.0, true min −3.5) | fixed |
 | C-13 | P0 | solver.py bounds | serial convex path trusts under-converged NLP objective as node lower bound → false "optimal" | fixed |
 | C-1 | P0 | solver.py status | false "infeasible" from non-rigorous NLP fathoms (solve_model path) | fixed |
-| C-4 | P1 | mir.rs cuts | integer-MIR applied with fractional integer lower bound → invalid cut | open |
+| C-4 | P1 | mir.rs cuts | integer-MIR applied with fractional integer lower bound → invalid cut | fixed |
 | C-2 | P1 | milp_driver status | false "Infeasible" when deadline orphans deferred nodes | fixed |
 | C-19 | P1 | relax_tan | pole-straddling interval classified as one branch → secant across a pole, invalid envelope | open |
 | C-5 | P1 | .nl parser | floor/ceil/round/trunc→identity, intdiv→div, all silent | open |
@@ -520,7 +520,49 @@ only when `(l_j − l_j.round()).abs() <= tol`, else use the continuous coeffici
   known-good instance (no silent disable).
 - Standing gates pass.
 
-**Log:** —
+**Status:** open → fixed.
+
+**Log:**
+- 2026-07-03 — **CONFIRMED then FIXED.** Confirmed with a decisive repro ported to
+  the MIR separator: row `−x0 − 2·x1 ≤ −2`, x0 integer in **[0.5, 4]** (fractional
+  lower bound, exactly the presolve-produced state the GMI guard defends against),
+  x1 integer in [0, 2]; at LP point (0.8, 0.1) the pre-fix separator emits
+  `−x0 − 2·x1 ≤ −2.5`, which **excludes the feasible integer point (2, 0)**
+  (`−2 > −2.5`) — a cut that removes a feasible integer point of the row. Test
+  fails on the pre-fix code with exactly that message.
+- **Root cause.** `mir_row` applied the integer-MIR rounding
+  `γ_j = ⌊ã_j⌋ + max(0, f_j − f)/(1 − f)` whenever `integrality[j]`, with no check
+  on the *active substitution bound*. The bound substitution `y_j = x_j − l_j`
+  (lower shift) / `y_j = u_j − x_j` (upper complement) makes `y_j` integer-valued
+  only when that bound is integral; a fractional bound breaks the premise and the
+  integer γ can cut feasible integer points.
+- **Fix (mirrors `gomory.rs:294-295`'s `use_integer` guard).** `mir_under_substitution`
+  now computes `int_shift[j] = integrality[j] && (pinned − pinned.round()).abs() ≤
+  INT_BOUND_TOL`, where `pinned` is the active bound (`u[j]` when complemented, else
+  `l[j]`), and passes `int_shift` (not raw `integrality`) into `mir_row`. When the
+  premise fails the column falls back to the always-valid continuous coefficient
+  `min(ã_j, 0)/(1 − f)`. Reused/renamed the existing `INT_UB_TOL` (1e-6) as
+  `INT_BOUND_TOL` since it is the same integral-bound premise the near-bound
+  complementation eligibility check already used for `u_j`. Module + soundness
+  docstrings updated. Fix is confined to `crates/discopt-core/src/lp/mir.rs`
+  (`mir_row` signature + `mir_under_substitution` + one constant) — no wider than
+  the card; no other file touched.
+- **Regression tests** (`lp::mir::tests`, both **fail-before / pass-after**, verified
+  by temporarily reverting the guard — the 6 pre-existing MIR tests still pass on the
+  buggy code, so the new tests isolate specifically the fractional-bound class):
+  `c4_mir_valid_when_integer_var_has_fractional_lower_bound` (the deterministic repro
+  above; enumerates the integer box and asserts no feasible point is cut) and
+  `c4_mir_validity_random_fractional_int_bounds` (1000 random rows with integer
+  columns carrying fractional lower AND upper bounds, mixed integer/continuous,
+  LP points near bounds so complementation fires; every emitted cut validated over
+  the integer box, ≥20 cuts exercised). The pre-existing
+  `mir_validity_random_complemented_rows` / `mir_cut_*` tests still pass (no silent
+  disable; the root cut path still produces cuts on integral-bound rows).
+- **Gates:** `cargo test -p discopt-core` 383 lib + 4 determinism + 1 doctest green,
+  no warnings; `cargo clippy -p discopt-core --lib` clean; extension rebuilt via
+  `maturin develop --release`; `pytest -m smoke` 339 passed / 1 skipped / 0 failed;
+  adversarial `test_adversarial_recent_fixes.py -m slow` 10 passed. `incorrect_count`
+  unchanged (0 failures; no correctness assertion weakened). PR: #TBD.
 
 ---
 
