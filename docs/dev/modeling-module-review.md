@@ -32,7 +32,7 @@ unambiguous from control flow.
 | M7 | P2 perf | `core.py:3213` | `_check_name` rebuilds the full name set per declaration → **O(n²)** model build; measured 37→94→170 µs/var at n=1k/2k/4k [CONFIRMED] |
 | M8–M12 | P2 | various | Robustness/API gaps (§4) |
 | G1–G15 | **P0–P2** | `gams_parser.py` | Fifteen verified defect classes; the five worst silently build a *different model* than the GAMS source and let the solver certify it (§6.1) |
-| E1–E3 | **P0/P1** | `examples.py` | Haverly pooling example is mathematically wrong (certified optimum 1390 vs the classic 400); `example_logical_constraints` crashes (never built by any test); `example_reactor_design` is provably infeasible (§6.2) |
+| E1–E3 | **P0/P1** — ✅ RESOLVED | `examples.py` | Haverly pooling example is mathematically wrong (certified optimum 1390 vs the classic 400); `example_logical_constraints` crashes (never built by any test); `example_reactor_design` is provably infeasible (§6.2) |
 | L1–L8 | P1–P3 | `latex.py` | `to_latex`/Jupyter `_repr_` **crashes** on any model with `if_then`/`either_or`/`logical`; fast-path constraint families render as zero constraints; several precedence/escaping defects (§6.3) |
 | I1–I2 | P2 | `implicit.py` | Absolute-only Newton tolerance falsely NaN-fails well-posed scaled residuals; build-time probe uses wrong `u` length for vector inputs (§6.4) |
 
@@ -325,6 +325,28 @@ bug above is untested** (all fixtures use `model /all/`, dense positive alphabet
 tables, comma'd data, unquoted labels, lowercase-consistent names).
 
 ### 6.2 `examples.py` — the gallery contains wrong and broken models
+
+> **✅ RESOLVED E1, E2, E3** — `python/tests/test_examples_gallery.py` (this PR).
+> - **E1**: reformulated `example_pooling_haverly` with the pool **concentration**
+>   `p` (not sulfur mass) so the product specs bind even at zero pool flow. The
+>   review's suggested "scale `2z` by `(y0+y1)`" was itself wrong — multiplying the
+>   spec through by the pool flow makes it vacuous (`0 ≤ 0`) when the pool is
+>   bypassed, and the model then certified 500 shipping 2 %-sulfur product against
+>   the 1.5 % spec. The concentration form certifies the classic Haverly-I optimum
+>   **400** with the product-1 spec binding at exactly 1.5 %.
+> - **E2**: `example_logical_constraints` now uses `m.logical()` (not `subject_to`)
+>   for the propositional constraints, `m.make_disjunct()` (not `m.disjunct`), and
+>   encodes "project 3 requires project 0" as the implication `lor(~a3, a0)` (not the
+>   `land` conjunction that forced both). Also fixed `Disjunct`'s docstring
+>   (`Model.make_disjunct`). Builds and `validate()`s.
+> - **E3**: `example_reactor_design`'s heat balance dropped the needless `F/(Cp·F)`
+>   and reduced the exotherm so the adiabatic cascade stays within the 750 K limit
+>   (`T=[400,520,640]`); the model is now feasible (was provably infeasible). The
+>   `test_nlp_ipopt.py` "hard example" carve-out that accepted `INFEASIBLE` is
+>   removed — reactor takes the real `OPTIMAL/ITERATION_LIMIT` check.
+>
+> A whole-gallery smoke test now builds and `validate()`s every pure-modeling
+> `example_*`. Verified fails-before/passes-after. The full finding text is below.
 
 | ID | Loc | Finding |
 |----|-----|---------|

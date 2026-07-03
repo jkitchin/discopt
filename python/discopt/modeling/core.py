@@ -3427,7 +3427,7 @@ def exactly(k: int, *args: LogicalExpression) -> LogicalExactly:
 class Disjunct:
     """A named block of constraints activated by a boolean indicator.
 
-    Created via :meth:`Model.disjunct`, not directly.
+    Created via :meth:`Model.make_disjunct`, not directly.
 
     Parameters
     ----------
