@@ -160,20 +160,47 @@ def tighten_complementarity_bounds(model: Model, pairs: list[Complementarity]) -
     (``lb > 0``), the other side must be zero. Applied only to single-variable
     sides, where the implication is sound and exact. Returns the number of
     variables fixed to zero.
+
+    The partner is fixed by *intersecting* its upper bound with 0 — the lower
+    bound is never overwritten. If the partner already carries a strictly
+    positive lower bound the complementarity is genuinely infeasible (both sides
+    would be > 0); that is surfaced as a ``ValueError`` rather than silently
+    collapsing the box to ``[0, 0]`` and hiding the infeasibility (MP-1).
+
+    Raises
+    ------
+    ValueError
+        If a fixed-to-zero partner has a strictly positive declared lower bound,
+        i.e. the complementarity pair is infeasible.
     """
     fixed = 0
     for p in pairs:
         f_var = p.f if isinstance(p.f, Variable) and p.f.size == 1 else None
         g_var = p.g if isinstance(p.g, Variable) and p.g.size == 1 else None
         if f_var is not None and float(f_var.lb) > 0.0 and g_var is not None:
-            g_var.ub = np.zeros_like(np.array(g_var.ub))
-            g_var.lb = np.zeros_like(np.array(g_var.lb))
+            _fix_partner_to_zero(g_var, driver=f_var, tag=p.name)
             fixed += 1
         elif g_var is not None and float(g_var.lb) > 0.0 and f_var is not None:
-            f_var.ub = np.zeros_like(np.array(f_var.ub))
-            f_var.lb = np.zeros_like(np.array(f_var.lb))
+            _fix_partner_to_zero(f_var, driver=g_var, tag=p.name)
             fixed += 1
     return fixed
+
+
+def _fix_partner_to_zero(partner: Variable, *, driver: Variable, tag: str | None) -> None:
+    """Force a complementarity partner to 0 by intersecting its ub with 0.
+
+    ``driver`` is strictly positive (``lb > 0``), so ``0 <= f ⊥ g >= 0`` forces
+    ``partner == 0``. Intersect ``partner.ub`` with 0 without touching
+    ``partner.lb``; if that lower bound is itself positive the box is empty and
+    the pair is infeasible — raise rather than overwrite ``lb`` (MP-1).
+    """
+    if float(partner.lb) > 0.0:
+        raise ValueError(
+            f"Complementarity {tag or '<unnamed>'} is infeasible: one side has "
+            f"lb={float(driver.lb):g} > 0, forcing the partner to 0, but the partner "
+            f"has lb={float(partner.lb):g} > 0 — 0 <= f _|_ g >= 0 cannot hold."
+        )
+    partner.ub = np.minimum(np.array(partner.ub, dtype=np.float64), 0.0)
 
 
 # ─────────────────────────────── solve ───────────────────────────────
@@ -251,7 +278,14 @@ def solve_mpec(
         evaluator = NLPEvaluator(model)
         try:
             result = backend(evaluator, x_cur, options=opts)
-        except BaseException:
+        except Exception as e:
+            # MP-2: never swallow silently. A first-iteration failure has no
+            # result to fall back on — surface it; a later continuation failure
+            # keeps the best point found so far (valid at a larger t).
+            if result is None:
+                raise RuntimeError(
+                    f"MPEC NLP solve failed on the first homotopy iteration (t={tv:g}): {e}"
+                ) from e
             break
         if result.x is not None:
             x_cur = np.asarray(result.x, dtype=np.float64)
