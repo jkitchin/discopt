@@ -162,17 +162,20 @@ pub fn gomory_cuts_py<'py>(
 
 /// Separate MIR cuts from the `≤` rows `a_ub · x ≤ b_ub` at point `x`.
 ///
-/// `a_ub` is C-contiguous `m × n`; `lb` the length-`n` lower bounds;
-/// `integrality` a length-`n` bool array. Returns `(coeffs, rhs)` — a `k × n`
-/// array and length-`k` rhs, the cuts `coeffs[i] · x ≤ rhs[i]` over the
-/// structural variables — or `None` when no cut is produced.
+/// `a_ub` is C-contiguous `m × n`; `lb`/`ub` the length-`n` lower/upper bounds
+/// (used for the lower-shift / upper-complement bound substitution — pass `+inf`
+/// in `ub[j]` to disable complementation for column `j`); `integrality` a
+/// length-`n` bool array. Returns `(coeffs, rhs)` — a `k × n` array and length-`k`
+/// rhs, the cuts `coeffs[i] · x ≤ rhs[i]` over the structural variables — or
+/// `None` when no cut is produced.
 #[pyfunction]
-#[pyo3(signature = (a_ub, b_ub, lb, integrality, x, tol=1e-7, max_dynamism=1e7))]
+#[pyo3(signature = (a_ub, b_ub, lb, ub, integrality, x, tol=1e-7, max_dynamism=1e7))]
 pub fn mir_cuts_py<'py>(
     py: Python<'py>,
     a_ub: PyReadonlyArray2<'py, f64>,
     b_ub: PyReadonlyArray1<'py, f64>,
     lb: PyReadonlyArray1<'py, f64>,
+    ub: PyReadonlyArray1<'py, f64>,
     integrality: PyReadonlyArray1<'py, bool>,
     x: PyReadonlyArray1<'py, f64>,
     tol: f64,
@@ -187,6 +190,7 @@ pub fn mir_cuts_py<'py>(
         a_flat,
         b_ub.as_slice()?,
         lb.as_slice()?,
+        ub.as_slice()?,
         integrality.as_slice()?,
         x.as_slice()?,
         tol,
