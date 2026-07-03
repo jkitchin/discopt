@@ -735,7 +735,7 @@ def run_obbt(
         if g is None:
             return None if require_ns else raw
         if raw > g + _OBBT_NS_GUARD * (1.0 + abs(raw)):
-            return g
+            return float(g)
         return raw
 
     for var_idx in candidates:
