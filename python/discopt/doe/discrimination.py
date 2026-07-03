@@ -385,9 +385,8 @@ def _predict_with_covariance(
     read the predicted response values from the same solve, avoiding a
     second model build per design point.
     """
-    from discopt._jax.differentiable import _compile_parametric_node
-    from discopt._jax.parametric import extract_x_flat
-    from discopt.doe.fim import _build_p_flat, _compute_jacobian_autodiff, _get_param_indices
+    from discopt.doe.fim import _compute_jacobian_autodiff, _get_param_indices
+    from discopt.parametric import compile_expression, extract_x_flat, flatten_params
 
     em = experiment.create_model(**param_values)
 
@@ -411,8 +410,8 @@ def _predict_with_covariance(
     x_flat = extract_x_flat(result, em.model)
 
     # Compile response functions and compute predicted means.
-    response_fns = [_compile_parametric_node(em.responses[n], em.model) for n in em.response_names]
-    p_flat = _build_p_flat(em.model)
+    response_fns = [compile_expression(em.responses[n], em.model) for n in em.response_names]
+    p_flat = flatten_params(em.model)
     y_hat = np.array([float(np.asarray(fn(x_flat, p_flat)).flat[0]) for fn in response_fns])
 
     # Jacobian of responses w.r.t. unknown parameters.
