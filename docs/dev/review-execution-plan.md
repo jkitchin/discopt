@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-03
 **Status:** master plan for resolving the findings in the `docs/dev/*-review.md`
-series (19 module reviews). This document is the entry point for the fix loop; it
+series (20 module reviews). This document is the entry point for the fix loop; it
 defines **what order to fix in**, **how to fix each finding**, and **how to record
 completion** so a later reader knows exactly what is done.
 
@@ -13,16 +13,35 @@ completion** so a later reader knows exactly what is done.
 
 ---
 
+## 0.5 Reconciliation with `correctness-issues.md` (the core backlog, #396)
+
+`docs/dev/correctness-issues.md` is the solver-core soundness audit (relaxation math,
+presolve/FBBT, B&B status, cuts, `.nl` parser, LP/dual). The two documents are
+complementary and, as of 2026-07-03, reconciled with **stable C-IDs**:
+
+- The four core-soundness P0s these submodule reviews surfaced (that the core audit
+  missed) are carded there as **C-29 (=CORE-1), C-30 (=CORE-2), C-31 (=TG-1),
+  C-32 (=NM-1)**. The solver-core review adds **C-33 (=SC-1), C-34 (=FR-1),
+  C-35 (=OA-1)**, confirms **C-17**, broadens **C-31**, and escalates **C-23** (=DIV-1).
+  *(The C-25..C-28 range belongs to the NN backlog — embedded-NN scaling, tree big-M,
+  ONNX, sklearn — do not confuse with the CORE findings.)*
+- Overlaps cross-linked to avoid double-work: C-6 (integer clamp) ↔ gams CD-1;
+  C-11 (`__ne__`) ↔ modeling M4; C-19 (`relax_tan` pole) = NM-4.
+- Same protocol both boards (§0 there = §3 here); one loop can run both. Fix each
+  finding once, by its C-ID; do not double-track.
+
 ## 0. The reviews and where the findings live
 
-Nineteen review documents under `docs/dev/`, each ending in an "Implementation
+Twenty review documents under `docs/dev/`, each ending in an "Implementation
 plan" section with per-finding IDs, repros, and acceptance criteria:
 
 `dae`, `modeling`, `mo`, `gp`, `ro`, `tutor`, `export`, `llm`, `validation`,
 `solver-core-extraction`, `nn`, `mpec-estimate-pooling-opf`,
 `tightening-conflict-warmstart-iis`, `doe`, `cli-daemon-gamslink-benchmarks`,
-`infra-interop`, `decomposition`, `_numpy` McCormick (this file references its ID
-prefix `NM-` once landed).
+`infra-interop`, `decomposition`, `numpy-mccormick` (ID prefix `NM-`), and
+`solver-core` (the B&B core proper — convexity certifier, node bounds, cutting
+planes, reformulation, OA; IDs `SC-1`=C-33, `FR-1`=C-34, `FR-2`, `OA-1`=C-35,
+`DIV-1`=C-23, plus confirmations of `C-17`/`C-31`/`C-23`).
 
 Every finding has a stable ID (e.g. `CORE-1`, `NN-1`, `TG-1`, `RO-2`, `EX-1`,
 `LLM-1`). Fix and track by ID.
@@ -89,19 +108,37 @@ last.** "Default path" = a plain `m.solve()` on an idiomatic model.
   *Independent of everything else — can proceed in parallel.*
 
 ### Tier 1 — Wrong certified answer on the DEFAULT path (idiomatic models)
-- **CORE-1** / **CORE-2** (solver-core = modeling M1, ro ADJ-1) — vector-body row
-  collapse; maximize-sense loss on `sum(c·x)`. *Part of X-2.*
-- **TG-1** (tightening) + **CF-1** (conflict) — FBBT array collapse; invalid conflict
-  cuts. *Part of X-2.*
+- **CORE-1=C-29** / **CORE-2=C-30** (solver-core = modeling M1, ro ADJ-1) — vector-body
+  row collapse; maximize-sense loss on `sum(c·x)`. *Part of X-2.*
+- **TG-1=C-31** (tightening) + **CF-1** (conflict) — FBBT array collapse; invalid
+  conflict cuts; broadened to reach the certified LP dual bound via
+  `_fbbt_argument_box`. *Part of X-2.*
+- **SC-1=C-33** (solver-core) — pure-continuous **fallback** certifies a nonconvex
+  model's local optimum with `gap_certified=True` (`solver.py:3716`). Verified:
+  double-well bound −37, cert True; true −64. Withhold the certificate unless
+  convexity is rigorously known.
+- **FR-1=C-34** (solver-core) — even-power bound over a zero-straddling base is
+  endpoint-only (`gdp_reformulate.py:493`) → `x**4` on `[−2,2]` → `[16,16]` (true
+  `[0,16]`) → invalid aux box → false optimal. Verified e2e (`x**4·y ≤ 1` → 0.25,
+  true 0).
+- **C-17** (solver-core, was open now **confirmed**) — alphaBB node bound uses sampled
+  α + center-only PSD check; deterministic spike repro (width ≤ 0.006 → α=0, bound
+  0.0, true min −3.5). Route through `rigorous_alpha`.
+- **DIV-1=C-23 (escalated P3→P1)** (solver-core) — `relax_div` invalid convex
+  underestimator for **nonlinear** denominators (`1/(x*y)` cv=1.334 > 1.0). Opt-in
+  `mccormick_bounds="nlp"` only, but the relaxation math is unsound and must be fixed
+  at the math level. Extend the containment harness to nonlinear denominators.
 - **NN-1** (nn) — scaling ignored in bound propagation → unsound big-M → wrong optimum.
-- **NM-1** (`_numpy`/`_jax` McCormick) — `relax_asin`/`relax_acos` inverted curvature
-  → **unsound convex envelope in the LIVE JAX relaxation layer** (cv sits above the
-  function) → invalid dual bound. Fix both `mccormick.py` files + docstrings; extend
-  the soundness harness to sample off-diagonal (diagonal-only masking is what hid it).
+- **NM-1=C-32** (`_numpy`/`_jax` McCormick) — `relax_asin`/`relax_acos` inverted
+  curvature → **unsound convex envelope in the LIVE JAX relaxation layer** (cv sits
+  above the function) → invalid dual bound. Fix both `mccormick.py` files + docstrings;
+  extend the soundness harness to sample off-diagonal (diagonal-only masking hid it).
 - **NM-2** (`_numpy` McCormick) — compiler leaf drops the box → numpy relaxation
   collapses to the exact nonconvex function (latent: numpy backend compiled-but-
   unused). Keep the numpy backend disabled until NM-1+NM-2 are green.
 - **GP-1** (gp), **VAL-1** (validation) — *closed by X-1.*
+- *The convexity certifier + convex fast-path were audited and verified **SOUND**
+  (901-certificate fuzz, 0 false) — see `solver-core-review.md`. Not a finding.*
 
 ### Tier 2 — Wrong answer on OPT-IN paths / specialized builders
 - **RO-1/RO-2/RO-3** (ro) — robust counterpart silently not robust (box sign-tracking,
@@ -115,6 +152,10 @@ last.** "Default path" = a plain `m.solve()` on an idiomatic model.
 - **MP-1** (mpec) — `tighten_complementarity_bounds` overwrites a positive lb → hides
   infeasibility.
 - **DC-S1** (decomposition) — unbounded recourse populates an invalid `bound`.
+- **OA-1=C-35** (solver-core) — OA/LOA emits an unconditional no-good cut on
+  non-rigorous NLP failure → false infeasible/optimal (opt-in OA/ECP/LOA paths).
+- **FR-2** (solver-core) — `nlp_evaluator` built from `model._constraints` only, blind
+  to builder-resident rows (X-1 extension; live for `nlp_ipopt.py:254` + examiner).
 - **M3** (modeling) — cross-model expression aliasing.
 
 ### Tier 3 — Display / examples / method-fidelity (visible-wrong, not certificate)
@@ -150,9 +191,30 @@ gate, or fallback to make a test pass. For a shared-root finding, fix the shared
 primitive (§1) and let the dependent findings close.
 
 **(3) VALIDATE — the fix must be proven, not asserted.**
-- Write a **regression test that fails before the fix and passes after.** Confirm it
-  fails on the pre-fix code (stash the fix, run the test, see red) — a test that was
-  never red proves nothing.
+- Write a **fast regression test that fails before the fix and passes after — this is
+  mandatory for every fix, no exceptions.** Requirements:
+  - **Fails-before / passes-after:** confirm it goes red on the pre-fix code (stash
+    the fix, run the test, see red) — a test that was never red proves nothing.
+    Prefer landing the test first (red), then the fix (green).
+  - **Fast:** a `@pytest.mark.smoke` unit test (or a Rust `#[test]` unit test) that
+    runs **sub-second** and therefore runs in CI on *every* PR, not just nightly.
+    Call the buggy primitive/relaxation/bound/extractor **directly** on the repro
+    input wherever a direct call reproduces the defect — do not spin up a full
+    `Model.solve()` when a one-line call to `_compute_alphabb_bound`,
+    `_bound_expression`, `relax_div`, `fbbt_box`, etc. exhibits it. (A short
+    end-to-end `solve()` assertion is fine *in addition* when the defect is only
+    visible end-to-end, e.g. C-33's `gap_certified` flag.)
+  - **Tests the class, not the instance** (CLAUDE.md §2): encode the
+    false-certificate *class* so any future reintroduction trips it — off-diagonal
+    soundness harness (C-32/NM-1), nonlinear-denominator containment sweep (C-23),
+    whole-box α validity (C-17), heterogeneous-block FBBT (C-31/TG-1) — not just the
+    one named repro value.
+  - **Named in the Log and the ✅ RESOLVED marker** (step 4).
+  - Where the review doc already carries a repro (C-17 spike table, C-23 `1/(x*y)`,
+    C-31 Rust characterization tests, C-33 double-well, C-34 `x**4`), port it verbatim
+    into the fast test — the verification work is already done.
+  - **Do not close a finding without this test committed.** "Fixed but no fast
+    regression test" is not done.
 - Run the module's suite + `pytest -m smoke` + the adversarial suite
   (`test_adversarial_recent_fixes.py`); `cargo test -p discopt-core` if Rust changed.
 - **Bound-changing fixes** (relaxations, cuts, tightening, big-M, extraction that
@@ -189,30 +251,40 @@ without the accompanying code change.
 
 ## 4. Status ledger (update as findings resolve)
 
-Legend: ⬜ open · �her in-progress · ✅ resolved · ◻︎ not-reproduced.
+Legend: ⬜ open · ◧ in-progress · ✅ resolved · ◻︎ not-reproduced.
 
 | Tier | ID(s) | Module | Status |
 |------|-------|--------|--------|
-| root X-1 | GP-1, VAL-1, EX-2, M12, classifier | gp/validation/export/modeling/core | ⬜ |
-| root X-2 | CORE-1, TG-1, CF-1, GAMS bounds | solver-core/tightening/conflict/export | ⬜ |
+| root X-1 | GP-1, VAL-1, EX-2, M12, classifier, FR-2 | gp/validation/export/modeling/solver-core | ⬜ |
+| root X-2 | CORE-1=C-29, TG-1=C-31, CF-1, GAMS bounds | solver-core/tightening/conflict/export | ⬜ |
 | root X-3 | M2 = INT-2 | modeling/infra | ⬜ |
 | 0 | LLM-1 | llm | ⬜ |
-| 1 | CORE-2 | solver-core | ⬜ |
+| 1 | CORE-2=C-30 | solver-core | ⬜ |
+| 1 | SC-1=C-33, FR-1=C-34 (DEFAULT-path P0s) | solver-core | ⬜ |
+| 1 | C-17 (confirmed), DIV-1=C-23 | solver-core | ⬜ |
 | 1 | NN-1, NN-2 | nn | ⬜ |
-| 1 | NM-1 (live JAX + numpy), NM-2 | _numpy/_jax McCormick | ⬜ |
+| 1 | NM-1=C-32 (live JAX + numpy), NM-2 | _numpy/_jax McCormick | ⬜ |
 | 2 | RO-1, RO-2, RO-3 | ro | ⬜ |
 | 2 | C1, C2, C3 | dae | ⬜ |
 | 2 | EX-1 | export | ⬜ |
 | 2 | INT-1 | infra/solver | ⬜ |
 | 2 | MP-1 | mpec | ⬜ |
 | 2 | DC-S1 | decomposition | ⬜ |
+| 2 | OA-1=C-35 | solver-core | ⬜ |
 | 2 | M3 | modeling | ⬜ |
 | 3 | MO1–MO4 | mo | ⬜ |
 | 3 | E1–E3, L1–L8, M4–M8 | modeling/examples/latex | ⬜ |
-| 4 | (P2/P3 across all) | all | ⬜ |
+| 4 | Rust-1 (dual/ray unscale), Rust-2 (numpy panic), P2/P3 across all | all | ⬜ |
 
 *(Expand per-finding as the loop proceeds; the authoritative per-finding detail
-stays in each module's review doc.)*
+stays in each module's review doc. Solver-core findings: `solver-core-review.md`;
+the C-IDs are also carded in `correctness-issues.md`.)*
+
+**Verified SOUND (not findings, do not re-audit without new evidence):** the
+convexity certifier + convex fast-path (901-certificate fuzz, 0 false), the JAX
+relaxation-compiler Variable leaf, primal/dual simplex, tree manager, PyO3 boundary,
+Gurobi/AMP nonconvex gating, and the RLT/PSD/SOC/edge-concave cut families — all
+verified in the solver-core review.
 
 ---
 

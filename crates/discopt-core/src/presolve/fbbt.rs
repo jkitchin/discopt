@@ -2383,4 +2383,119 @@ mod tests {
             bounds[1]
         );
     }
+
+    // ── C-31 (=TG-1) — FBBT collapses an array-variable block to element-0's ──
+    //
+    // `fbbt()` seeds ONE `Interval` per variable *block* from `v.lb.first()` /
+    // `v.ub.first()` (fbbt.rs:1204-1208), and `eval_node_interval` resolves every
+    // `Index{base,col}` node to that single block interval (fbbt.rs:513-516 —
+    // the column is ignored). So an array variable with heterogeneous per-element
+    // bounds has element 0's (tighter) bounds illegally propagated onto every
+    // other element. The card C-31 documents two failure modes; both are pinned
+    // here. These assert the *current buggy behaviour* so the bug is captured in
+    // Rust; when C-31 is fixed (element-aware FBBT), INVERT these assertions.
+
+    /// Build a single continuous array variable block `x` of `size` with the given
+    /// element-wise bounds, plus a constraint on element `col`: `x[col] {sense} rhs`.
+    fn array_var_model(
+        lb: Vec<f64>,
+        ub: Vec<f64>,
+        col: usize,
+        sense: ConstraintSense,
+        rhs: f64,
+    ) -> ModelRepr {
+        let size = lb.len();
+        let mut arena = ExprArena::new();
+        let xvar = arena.add(ExprNode::Variable {
+            name: "x".into(),
+            index: 0,
+            size,
+            shape: vec![size],
+        });
+        let idx = arena.add(ExprNode::Index {
+            base: xvar,
+            index: IndexSpec::Scalar(col),
+        });
+        ModelRepr {
+            arena,
+            objective: idx,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![ConstraintRepr {
+                body: idx,
+                sense,
+                rhs,
+                name: Some("c".into()),
+            }],
+            variables: vec![VarInfo {
+                name: "x".into(),
+                var_type: VarType::Continuous,
+                offset: 0,
+                size,
+                shape: vec![size],
+                lb,
+                ub,
+            }],
+            n_vars: size,
+        }
+    }
+
+    #[test]
+    fn c31_array_block_collapses_to_element0_bounds() {
+        // x is a length-2 continuous array with element 0 fixed near element 1's
+        // feasible interval but DIFFERENT bounds: lb=[8,0], ub=[10,10]. Element 1
+        // is genuinely free in [0,10]. Constraint touches element 1 trivially:
+        // `x[1] >= 0` (always satisfiable). Element-aware FBBT would leave
+        // x[1] ∈ [0,10]. The buggy collapse seeds the whole block from element 0
+        // → the returned block interval is element-0's [8,10], erasing the
+        // feasible region x[1] ∈ [0,8).
+        let model = array_var_model(
+            vec![8.0, 0.0],
+            vec![10.0, 10.0],
+            1,
+            ConstraintSense::Ge,
+            0.0,
+        );
+        let bounds = fbbt(&model, 8, 1e-9);
+        // One interval per BLOCK (n_vars here = variables.len() == 1), NOT per
+        // scalar element — itself a symptom of the collapse.
+        assert_eq!(
+            bounds.len(),
+            1,
+            "fbbt returns one interval per block, not per element"
+        );
+        // BUG (C-31): element 1's lower bound is stamped as 8.0 (element 0's),
+        // not its true 0.0. When fixed, this must become `bounds[0].lo <= 0.0`.
+        assert!(
+            (bounds[0].lo - 8.0).abs() < 1e-9,
+            "C-31: block collapsed to element-0 lb=8, got {:?} (invert when fixed)",
+            bounds[0]
+        );
+    }
+
+    #[test]
+    fn c31_heterogeneous_block_yields_false_infeasible() {
+        // x length-2: lb=[5,0], ub=[5,3]. Element 0 is fixed at 5; element 1 is
+        // free in [0,3]. Constraint `x[1] <= 3` is trivially satisfiable
+        // (x=[5, 0..3] is feasible), so FBBT must NOT report infeasible.
+        // The collapse seeds the block from element 0 → [5,5]; the Index on
+        // element 1 resolves to [5,5]; intersecting with the constraint output
+        // (-inf, 3] is empty → FBBT falsely declares the whole model infeasible.
+        let model = array_var_model(
+            vec![5.0, 0.0],
+            vec![5.0, 3.0],
+            1,
+            ConstraintSense::Le,
+            3.0,
+        );
+        let bounds = fbbt(&model, 8, 1e-9);
+        // BUG (C-31): a feasible model is reported infeasible (all-empty bounds).
+        // "FBBT never reports feasible as infeasible" is violated. When C-31 is
+        // fixed this must become `assert!(!bounds.iter().any(|b| b.is_empty()))`.
+        assert!(
+            bounds.iter().all(|b| b.is_empty()),
+            "C-31: expected the buggy false-infeasible (all-empty) collapse, got {:?} \
+             (invert this assertion when C-31 is fixed)",
+            bounds
+        );
+    }
 }
