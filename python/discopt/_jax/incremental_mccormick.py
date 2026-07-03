@@ -107,6 +107,7 @@ class IncrementalMcCormickLP:
         self.ok = False
         self.model = model
         self.terms = terms
+        self._validated_regimes = frozenset()  # sign regimes _validate exercised
         try:
             self._build_structure()
             self._validate()
@@ -221,26 +222,85 @@ class IncrementalMcCormickLP:
         rows = np.hstack([np.round(A, 6), np.round(b, 6).reshape(-1, 1)])
         return sorted(map(tuple, rows.tolist()))
 
-    def _validate(self, trials=6):
-        # Sign-matched validation boxes (cert:T1.2): each variable's box must stay
-        # in its root sign regime (positive/spanning vars → ``lb >= 0``; negative
-        # vars → ``ub <= 0``), so the patched convex/concave power rows are
-        # compared against a cold build in the *same* regime. Widths and offsets
-        # vary per trial; even trials touch the ``lb == 0`` boundary.
-        rng_boxes = []
-        for t in range(trials):
-            w = 2.0 + (t % 4)
+    @staticmethod
+    def _box_sign_regime(lo, hi):
+        """Classify a single variable's box ``[lo,hi]`` into a sign regime label so
+        the validation set can prove it spans several. ``"pos"`` (``lo>0``),
+        ``"neg"`` (``hi<0``), ``"span"`` (``lo<0<hi``, strictly crosses zero),
+        ``"degen"`` (``lo==hi``), ``"zero_lb"`` (``lo==0<hi``, the boundary)."""
+        if lo == hi:
+            return "degen"
+        if lo == 0.0:
+            return "zero_lb"
+        if lo > 0.0:
+            return "pos"
+        if hi <= 0.0:
+            return "neg"
+        return "span"
+
+    def _validation_boxes(self):
+        """The validation boxes fed to :meth:`_validate`, as ``(lo, hi)`` pairs.
+
+        Every box is a *reachable* B&B sub-box of the root: branching only shrinks a
+        box, so a var that is sign-definite at the root (``_root_sign != 0``) keeps
+        that sign — a positive var never gets ``lb<0``, a negative var never gets
+        ``ub>0``. A **spanning** var (``_root_sign==0``), however, carries no
+        monomial (gated out in :meth:`_build_structure`) and its real nodes DO carry
+        negative / zero-spanning bounds, so the boxes below deliberately drive those
+        vars through negative-lb, zero-spanning (``lb<0<ub``), mixed-sign and
+        degenerate (``lb==ub``) regimes — exactly the sign regimes that dominate
+        real nodes and that the earlier ``lb>=0``-only set never exercised (C-21).
+        """
+        # Per trial, ``kind`` says how each spanning var sits relative to zero;
+        # sign-definite vars follow their root sign with a varying width/offset.
+        kinds = ["shift_pos", "zero_lb", "span", "neg", "span_wide", "degen"]
+        boxes = []
+        for t, kind in enumerate(kinds):
+            w = 2.0 + (t % 3)
             lo = np.empty(self.n)
             hi = np.empty(self.n)
             for i in range(self.n):
                 if self._root_sign[i] < 0:
+                    # Negative-definite root: stay ub<=0 (reachable sub-box).
                     hi[i] = -0.5 - 0.3 * i
                     lo[i] = hi[i] - w
-                else:
+                elif self._root_sign[i] > 0:
+                    # Positive-definite root: stay lb>=0 (reachable sub-box). Even
+                    # trials touch the lb==0 boundary.
                     lo[i] = (0.5 + 0.3 * i) if (t % 2) else 0.0
                     hi[i] = lo[i] + w
-            rng_boxes.append((lo, hi))
+                else:
+                    # Spanning root: exercise the negative / zero-spanning regimes
+                    # that real nodes reach and the old validation set never did.
+                    off = 0.2 * i
+                    if kind == "shift_pos":
+                        lo[i], hi[i] = 0.5 + off, 0.5 + off + w
+                    elif kind == "zero_lb":
+                        lo[i], hi[i] = 0.0, w
+                    elif kind == "span":
+                        lo[i], hi[i] = -(1.0 + off), 1.0 + off
+                    elif kind == "neg":
+                        hi[i] = -0.5 - off
+                        lo[i] = hi[i] - w
+                    elif kind == "span_wide":
+                        lo[i], hi[i] = -(2.0 + off + w), 1.5 + off
+                    else:  # degen
+                        lo[i] = hi[i] = -0.5 - off
+            boxes.append((lo, hi))
+        return boxes
+
+    def _validate(self):
+        # Reachable, sign-diverse validation boxes (C-21 / cert:T1.2): each box is a
+        # sub-box of the root (so the patched convex/concave power rows are compared
+        # against a cold build in the *same* regime), but spanning vars are driven
+        # through negative-lb, zero-spanning, mixed-sign and degenerate boxes — the
+        # sign regimes real nodes reach. The patched row-set + aux bounds must
+        # reproduce the cold ``build_milp_relaxation`` exactly on every one.
+        rng_boxes = self._validation_boxes()
+        regimes = set()
         for lb, ub in rng_boxes:
+            for i in range(self.n):
+                regimes.add(self._box_sign_regime(float(lb[i]), float(ub[i])))
             Ap, bp, bdp = self._patch(lb, ub)
             Af, bf, bdf, _, _, _ = self._full_build(lb, ub)
             if Ap.shape != Af.shape:
@@ -249,6 +309,7 @@ class IncrementalMcCormickLP:
                 raise ValueError("row-set mismatch")
             if not np.allclose(bdp, bdf, atol=1e-6, rtol=1e-6):
                 raise ValueError("bounds mismatch")
+        self._validated_regimes = frozenset(regimes)
         self.ok = True
 
     # -- solve ------------------------------------------------------------- #

@@ -63,7 +63,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-20 | P2 | fbbt_fp.rs | watch-list FBBT declares infeasibility with zero tolerance (opt-in engine) | fixed |
 | C-15 | P2 | obbt.py | `run_obbt` variant tightens to raw LP vertex, no NS safe-bound clamp | fixed |
 | C-14 | P2 | milp_driver | LP-infeasible fathom trusts status alone; Farkas ray never verified | open |
-| C-21 | P2 | incremental MC | soundness-gate validation boxes never exercise negative/zero-spanning bounds | open |
+| C-21 | P2 | incremental MC | soundness-gate validation boxes never exercise negative/zero-spanning bounds | fixed |
 | C-7 | P2 | .nl parser | defined variables (V segments) discarded → hard parse error | open |
 | C-8 | P2 | .nl parser | common opcodes unhandled (o76/o77/o78/o48/o11/o12/o35) | open |
 | C-9 | P2 | .nl parser | nlvo>nlvc integer-block classification unverified | open |
@@ -674,7 +674,41 @@ lb==ub box) to the validation set; keep the count small (construction-time cost)
 `_bilinear_rows` sign flip is caught by the gate (mutation test); standing gates
 pass.
 
-**Log:** —
+**Log:**
+- 2026-07-03 — **CONFIRMED (not unsound), then HARDENED.** Static confirm of
+  `_validate`'s box construction: for every variable with `_root_sign >= 0`
+  (positive *and* zero-spanning), each validation box used `lb >= 0` (`lo = 0.0`
+  or `lo = 0.5+0.3*i`); negative-definite vars used `ub <= 0`. So a variable whose
+  root box **strictly spans zero** — which is what dominates real bilinear nodes —
+  was only ever probed on its nonnegative sub-boxes. No box was zero-spanning
+  (`lb<0<ub`), negative-lb-for-a-spanning-var, or degenerate (`lb==ub`). The
+  closed forms themselves ARE sound on those regimes (verified: the hardened gate
+  passes on all of them), so this was a **gate-coverage** gap, not a live
+  soundness bug — no P0 escalation.
+- **Fix** (`incremental_mccormick.py`): split the old `>= 0` branch so
+  *sign-definite* vars still stay in their reachable root regime, but **spanning**
+  vars (`_root_sign==0`, which carry no monomial — only bilinear rows) are now
+  driven through six per-trial profiles: `shift_pos`, `zero_lb` (`lb==0<ub`),
+  `span` (`lb<0<ub`), `neg` (`ub<0`), `span_wide`, and `degen` (`lb==ub`). Box
+  count unchanged at 6 (construction-time cost neutral). Added `_box_sign_regime`
+  + `_validated_regimes` so the gate records which regimes it exercised; no solver
+  math changed (row builders, patch, aux bounds untouched). On a two-spanning-var
+  bilinear model the set now covers 5 regimes {pos, zero_lb, span, neg, degen}.
+- **Regression tests** (`python/tests/test_incremental_mccormick_node.py`):
+  `test_validate_exercises_at_least_four_sign_regimes` (asserts span/neg/degen/
+  zero_lb all present, ≥4 total) and the **mutation test**
+  `test_validate_catches_negative_box_sign_flip_mutation` — monkeypatches
+  `_bilinear_rows` to clip negative lower bounds to 0 (identity on `lb>=0`,
+  wrong on negative/spanning boxes); the hardened gate rejects it (`_inc is None`).
+  Verified FAIL-before/PASS-after by stashing the `_validate` change: both new
+  tests fail (mutation slips through the old `lb>=0`-only set), pass with the fix.
+- **Gates:** `test_incremental_mccormick_node.py` 9 passed; `-m smoke` 211 passed /
+  1 skipped / 0 failed; adversarial `test_adversarial_recent_fixes.py -m slow` 10
+  passed; `ruff check` + `ruff format --check` clean; `pre-commit run mypy` passed.
+  No Rust touched (no `cargo test`). `incorrect_count` unchanged (0 failures across
+  all suites; no correctness assertion weakened). PR #404.
+
+**Status:** open → fixed.
 
 ---
 
