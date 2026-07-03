@@ -38,7 +38,7 @@ def _quasi_normal(phi: np.ndarray) -> np.ndarray:
     which only coincides with the correct direction when ``phi`` is symmetric
     (i.e. ``k = 2``); for ``k >= 3`` it deviates from the cited formula (MO1).
     """
-    return -phi.sum(axis=0)
+    return np.asarray(-phi.sum(axis=0))
 
 
 def _payoff_matrix(
