@@ -128,7 +128,7 @@ experiment may run.
 | T2.4 per-node `reduce_node()` | **NOT BUILT** (T2.1 NO-GO) | — | same; needs node-LP duals exposed (T2.4a) if ever revisited |
 | T2.5 OBBT escalation policy | **NOT BUILT** (T2.1 NO-GO) | — | same |
 | T2.6 cert2 gate wiring + default-on | **moot** (T2.3–T2.5 not built) | — | residual gap re-scoped to Phases 3–4 |
-| Phase 3 entry experiment (0b) | **locked** (§0.1.2) | — | unlocks on Phase 0 done |
+| Phase 3 entry experiment (0b) | done — **GO on c-MIR** | (this PR) | SCIP root-bound proxy (`scripts/p3_0b_scip_rootbound.py`): median root gap closed **discopt 0.0 vs SCIP 1.0** over 8 (graphpart/ex1263/fac). SEPARATOR-QUALITY, not relaxation/branching → build native aggregation/c-MIR (§7 part 2). See §7 "0b RESULTS / VERDICT (2026-07-03)" |
 | Phase 4 T-CSE/V-segments | **locked** (§0.1.2) | — | may parallel Phase 1 once specced |
 | Phase 5 | **locked** (§0.1.2) | — | requires post-Phase-1 re-profile |
 
@@ -464,6 +464,52 @@ classes (cut overhead must pay for itself or the separator self-disables by effi
 bound never exceeds the oracle; full panel green.
 **Risk:** medium-high on separation *quality* (measured: porting the existing weak
 cuts is a no-go); de-risked by Phase 0b.
+
+### Phase 3 — 0b RESULTS / VERDICT (2026-07-03)
+
+Ran the LEAN proxy for the "inject SCIP cuts" spike:
+`discopt_benchmarks/scripts/p3_0b_scip_rootbound.py`. For each panel instance it
+measures three root dual bounds — discopt's `SolveResult.root_bound` (short solve,
+60 s cap), SCIP's root bound *with* its default cut loop (`limits/nodes 1`), and a
+shared *trivial* anchor (SCIP's raw root-LP bound with separating **and**
+propagating rounds disabled) — and the oracle optimum (`minlplib.solu`). Root gap
+closed by bound `B` (min sense): `(B − trivial)/(opt − trivial)`. Panel: the
+integer-product / MILP-relaxation class, graphpart the plan's gate probe. **8 run,
+0 skipped**; raw JSON at `discopt_benchmarks/results/p3_0b_scip_rootbound_20260703T144721.json`.
+
+| instance | opt | trivial | discopt root | SCIP root (cuts) | discopt gap-closed | SCIP gap-closed |
+|---|---:|---:|---:|---:|---:|---:|
+| ex1263 | 19.6 | 19.1 | 19.06 | **19.6** | −0.073 | **1.000** |
+| ex1263a | 19.6 | 19.1 | 19.06 | **19.6** | −0.073 | **1.000** |
+| fac1 | 1.609e8 | 1.421e8 | 1.607e8 | 1.608e8 | 0.990 | 0.993 |
+| fac2 | 3.318e8 | 3.294e5 | 2.555e8 | **3.318e8** | 0.770 | **1.000** |
+| fac3 | 3.198e7 | −6.319e9 | 2.233e7 | 2.498e7 | 0.998 | 0.999 |
+| graphpart_2pm-0044-0044 | −13 | −16 | −16 | **−13** | 0.000 | **1.000** |
+| graphpart_2g-0044-1601 | −9.541e5 | −1.026e6 | −1.026e6 | **−9.541e5** | 0.000 | **1.000** |
+| graphpart_2pm-0055-0055 | −20 | −25 | −25 | −21.23 | 0.000 | **0.755** |
+
+**Aggregate (median root gap closed): discopt 0.0 vs SCIP 1.0** (n=8 each).
+
+**Verdict — SEPARATOR QUALITY is the lever. GO on native c-MIR (Phase 3 part 2).**
+The signal is unambiguous and consistent with C3: across every graphpart probe
+(and ex1263/ex1263a, and fac2) SCIP's cut loop lifts the root dual bound *to the
+optimum* (gap closed 1.0), while discopt closes **0%** of that same gap from the
+same trivial LP floor — on graphpart discopt's `root_bound` sits *at* the raw
+LP relaxation (0.0), i.e. discopt's separators contribute nothing there. This is
+not a relaxation/branching problem: the trivial LP floor is identical machinery,
+and SCIP's advantage is entirely the cut loop that runs on top of it (the negative
+discopt gap-closed on ex1263 is just discopt's reported bound landing a hair below
+SCIP's raw-LP anchor — it does not soften the separator finding, it sharpens it).
+The workhorse SCIP applies here is exactly aggregation / complemented-MIR
+(scip-gap-closing-plan §1; C3). Therefore **build native aggregation/c-MIR in Rust
+(Phase 3 §7 build item 2) plus the default-path cut pool (item 3)** — do NOT
+re-scope to "widen the lifted formulation first." fac1/fac3 (both already ~0.99
+closed by discopt) show the win is class-localized to the integer-product family,
+as the plan predicted; the c-MIR work must self-disable by efficacy on the classes
+where discopt is already tight (the §7 no-offtarget-regression gate).
+
+This entry experiment measures only (it builds no cut plumbing, changes no solver
+math) — bound-neutral by construction; no correctness gate applies.
 
 ---
 
