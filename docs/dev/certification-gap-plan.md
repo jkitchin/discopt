@@ -569,6 +569,77 @@ LP-spatial engine) where 0b measured the 0% root-gap, and re-run the ON/OFF pane
 including ex1263/fac1–3 there. Cut-pool aging/efficacy on the default path (build
 item 3) remains as originally scoped.
 
+### Phase 3 1b — default-path measurement (2026-07-03)
+
+Measured the aggregation c-MIR separator on the **default MILP path** (no
+`lp_spatial`), the path where 0b measured the 0% root gap. Added a lightweight,
+math-neutral per-source root-cut counter to `_root_cover_cut_loop` /
+`_solve_milp_bb`, surfaced on `SolveResult.solver_stats` as `cuts/{cover_clique,
+gomory,mir,aggregation}`, plus a solve-path probe. Harness:
+`discopt_benchmarks/scripts/p3_1b_default_path_aggregation.py`; raw JSON
+`results/p3_1b_default_path_aggregation_20260703T163611.json`. Equal 2000-node
+budget, 90 s cap, full 0b panel (8 instances, 0 skipped).
+
+| instance | opt | bound OFF | bound ON | gap-closed OFF | gap-closed ON | nodes OFF | nodes ON | agg cuts | solve path |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| ex1263 | 19.6 | 19.06 | 19.06 | 0.973 | 0.973 | 2015 | 2015 | **0** | milp_bb+milp_simplex |
+| ex1263a | 19.6 | 19.06 | 19.06 | 0.973 | 0.973 | 2015 | 2015 | **0** | milp_bb+milp_simplex |
+| fac1 | 1.609e8 | 1.609e8 | 1.609e8 | 1.000 | 1.000 | 9 | 9 | **0** | spatial-McCormick |
+| fac2 | 3.318e8 | 3.318e8 | 3.318e8 | 1.000 | 1.000 | 69 | 69 | **0** | spatial-McCormick |
+| fac3 | 3.198e7 | 3.198e7 | 3.198e7 | 1.000 | 1.000 | 103 | 103 | **0** | spatial-McCormick |
+| graphpart_2pm-0044-0044 | −13 | −13 | −13 | 1.000 | 1.000 | 63 | 63 | **0** | milp_simplex |
+| graphpart_2g-0044-1601 | −9.541e5 | −9.541e5 | −9.541e5 | 1.000 | 1.000 | 13 | 13 | **0** | milp_simplex |
+| graphpart_2pm-0055-0055 | −20 | −20 | −20 | 1.000 | 1.000 | 235 | 235 | **0** | milp_simplex |
+
+`incorrect_count = 0` on every row (uncapped ON solve certifies the oracle; dual
+bound never crosses opt). ON == OFF bit-for-bit (bound, nodes) on all 8.
+
+**Verdict — (c) IT DOES NOT FIRE. This is a wiring/scoping gap, not a
+cut-strength result.** `agg cuts = 0` for all 8 instances; the separator's branch
+is never executed on the default path. Root cause, from the solve-path probe (two
+distinct mechanisms):
+
+1. **graphpart_\*** (miqp) and the primary route of **ex1263/ex1263a** (miqcp):
+   the default dispatch detects the integer-product/bilinear structure, applies
+   the integer-bilinear big-M reformulation (`solver.py:3314`), and — crucially —
+   **rewrites `nlp_solver` from the default `"pounce"` to `"simplex"`**
+   (`solver.py:3327`), routing to the **monolithic Rust `_solve_milp_simplex`**
+   engine. That engine has **no Python per-node/root cut loop** (the dispatch
+   comment at :3628 says so), so `_root_cover_cut_loop` — the only place the
+   aggregation separator is wired — is never called.
+2. **ex1263/ex1263a's fallback into `_solve_milp_bb`**: when the model does reach
+   `_solve_milp_bb`, it arrives with `prefer_pounce=False` (a consequence of the
+   simplex reroute). `_gomory_enabled(False)` is then False, so `_cut_int_idx` is
+   set to `[]` (`solver.py:11076-11080`), which makes `has_gomory=False` and gates
+   **all** integer cuts off — GMI, single-row MIR, and aggregation alike
+   (observed: `int_idx_len=0` at the cut loop, `by_source` all zero).
+3. **fac1–3** (minlp/miqp): route to the **spatial-McCormick** path, which also
+   has no `_root_cover_cut_loop` hook (and is already ~1.0 gap-closed here — the
+   0b `disc_gc≈0.99` class where discopt is tight).
+
+So the bound-moving lever the 0b verdict identified (SCIP closing ~100% on this
+class) sits on engines discopt's default dispatch routes the integer-product
+class *away from* the aggregation hook — the c-MIR separator never gets a chance
+to separate. The build-1 note's premise ("wire `aggregation_mir_cuts_py` into the
+default-path McCormick cut hook") is contradicted by the measurement: for this
+class the default path is the **Rust `_solve_milp_simplex` engine**, not a
+McCormick cut hook.
+
+**Re-scope (measurement wins, §0.4) — next build (2 or the reordered 3):** the
+correct scope is *reaching* the class with cuts, not deepening the 2-row slice.
+Two candidate levers, to be pinned by a follow-on entry experiment:
+(i) add a root/in-tree cut-callback seam to the monolithic Rust MILP engine
+(`_solve_milp_simplex`) so cover/clique/GMI/MIR/aggregation separate there — this
+is where the graphpart class actually solves; or (ii) stop the
+`nlp_solver→"simplex"` reroute for models in this class *and* keep `prefer_pounce`
+true into `_solve_milp_bb` so its existing cut loop (including aggregation) runs —
+but only if the `_solve_milp_bb` path is not a wall-clock regression vs the Rust
+engine (the :3323 note flags it as ~60 s vs ~1 s on ex1263, so (i) is the likely
+right answer). Either way the aggregation separator built in #416 is *sound and
+ready*; it is simply unreachable on the class that needs it until the cut seam
+exists. Build 1b ships the instrumentation (the per-source cut counter +
+solve-path visibility) that made this diagnosable and will verify the fix.
+
 ---
 
 ## 8. Phase 4 — Stop losing structure (~3–5 EW, medium risk)

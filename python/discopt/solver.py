@@ -10550,8 +10550,10 @@ def _root_cover_cut_loop(
     clique cuts (from the presolve conflict-graph edges), and structurally
     projected Gomory mixed-integer cuts (from the iteratively-refined basis at
     the vertex), augments ``lp_data``, and repeats. Returns the (possibly
-    augmented) ``lp_data`` and the number of cuts added. A no-op when there are
-    no binary-knapsack rows, clique edges, or integer variables."""
+    augmented) ``lp_data``, the total number of cuts added, and a per-source
+    count dict (``cover_clique``/``gomory``/``mir``/``aggregation``) for
+    instrumentation. A no-op when there are no binary-knapsack rows, clique
+    edges, or integer variables."""
     from discopt._jax.cover_cuts import (
         has_binary_knapsack_rows,
         separate_clique_cuts,
@@ -10562,9 +10564,15 @@ def _root_cover_cut_loop(
     has_clique = bool(clique_edges)
     has_gomory = bool(len(int_idx))
     if not has_cover and not has_clique and not has_gomory:
-        return lp_data, 0
+        return lp_data, 0, {"cover_clique": 0, "gomory": 0, "mir": 0, "aggregation": 0}
 
     total = 0
+    # Per-source cut counts (cert:P3.1b instrumentation). Surfaced on the MILP
+    # SolveResult's ``solver_stats`` so ON/OFF measurements can confirm the
+    # aggregation c-MIR separator actually *fired* on the default path (a cut
+    # count of 0 with the flag on means the branch never separated — a wiring or
+    # scoping finding, not a bound result). Pure instrumentation; no math change.
+    by_source = {"cover_clique": 0, "gomory": 0, "mir": 0, "aggregation": 0}
     for _round in range(max_rounds):
         if time.perf_counter() - t_start >= time_limit:
             break
@@ -10636,6 +10644,7 @@ def _root_cover_cut_loop(
                 gc, gr = gom
                 lp_data = _augment_lpdata_with_gomory_cuts(lp_data, gc, gr)
                 round_added += int(gc.shape[0])
+                by_source["gomory"] += int(gc.shape[0])
         # MIR cuts from the original <= rows (basis-free; complements GMI). Same
         # POUNCE-mode gate (has_gomory) and round-0-only policy.
         if has_gomory and _round == 0:
@@ -10648,6 +10657,7 @@ def _root_cover_cut_loop(
                 mc, mr = mir
                 lp_data = _augment_lpdata_with_mir_cuts(lp_data, mc, mr)
                 round_added += int(mc.shape[0])
+                by_source["mir"] += int(mc.shape[0])
         # Aggregation c-MIR (cert:P3): DEFAULT-OFF, gated by
         # DISCOPT_CMIR_AGGREGATION. Combines pairs of <= rows to cancel a
         # continuous variable, then applies the same complemented MIR as above —
@@ -10665,9 +10675,11 @@ def _root_cover_cut_loop(
                 ac, ar = agg
                 lp_data = _augment_lpdata_with_mir_cuts(lp_data, ac, ar)
                 round_added += int(ac.shape[0])
+                by_source["aggregation"] += int(ac.shape[0])
         if cuts:  # cover/clique reference original columns (< n_orig), still valid
             lp_data = _augment_lpdata_with_cover_cuts(lp_data, n_orig, cuts)
             round_added += len(cuts)
+            by_source["cover_clique"] += len(cuts)
 
         if round_added == 0:
             break
@@ -10678,7 +10690,7 @@ def _root_cover_cut_loop(
         # rounds would just re-solve the LP for nothing.
         if not has_cover and not has_clique:
             break
-    return lp_data, total
+    return lp_data, total, by_source
 
 
 def _root_dive(
@@ -11064,6 +11076,7 @@ def _solve_milp_bb(
     _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m = _decompose_eq_slack_form(
         np.asarray(lp_data.A_eq), np.asarray(lp_data.b_eq), n_orig, _n_total0 - n_orig
     )
+    _cut_by_source = {"cover_clique": 0, "gomory": 0, "mir": 0, "aggregation": 0}
     try:
         _is_bin = _binary_mask(model, n_orig)
         # Conflict-graph clique edges (only worth extracting if binaries exist).
@@ -11078,7 +11091,7 @@ def _solve_milp_bb(
             if _gomory_enabled(prefer_pounce)
             else []
         )
-        lp_data, _n_cuts = _root_cover_cut_loop(
+        lp_data, _n_cuts, _cut_by_source = _root_cover_cut_loop(
             lp_data,
             n_orig,
             _is_bin,
@@ -11091,7 +11104,15 @@ def _solve_milp_bb(
             prefer_pounce=prefer_pounce,
         )
         if _n_cuts:
-            logger.info("root cuts added %d valid inequalities (cover + clique + gomory)", _n_cuts)
+            logger.info(
+                "root cuts added %d valid inequalities "
+                "(cover/clique=%d gomory=%d mir=%d aggregation=%d)",
+                _n_cuts,
+                _cut_by_source.get("cover_clique", 0),
+                _cut_by_source.get("gomory", 0),
+                _cut_by_source.get("mir", 0),
+                _cut_by_source.get("aggregation", 0),
+            )
     except Exception as _cc_exc:
         logger.debug("root cuts skipped: %s", _cc_exc)
 
@@ -11445,6 +11466,14 @@ def _solve_milp_bb(
         if obj_val is not None and np.isfinite(obj_val):
             root_gap_val = abs(obj_val - root_bound_val) / max(1.0, abs(obj_val))
 
+    # Root cut counts by source (cert:P3.1b instrumentation): lets an ON/OFF
+    # measurement confirm the aggregation c-MIR separator actually fired on this
+    # default MILP path (a zero count with the flag on is a wiring/scoping
+    # finding). Only non-zero sources are surfaced.
+    _milp_solver_stats = {
+        f"cuts/{_src}": float(_cnt) for _src, _cnt in _cut_by_source.items() if _cnt > 0
+    }
+
     return SolveResult(
         status=status,
         objective=obj_val,
@@ -11463,6 +11492,7 @@ def _solve_milp_bb(
         bound_duals_lower=bound_duals_lower,
         bound_duals_upper=bound_duals_upper,
         gap_certified=_gap_certified,
+        solver_stats=_milp_solver_stats or None,
     )
 
 
