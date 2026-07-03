@@ -76,18 +76,8 @@ parts:
       - file: notebooks/nn_embedding
       - file: notebooks/ac_opf
       - file: notebooks/decision_focused_learning
-      - file: notebooks/estimation_and_doe
+      - file: notebooks/estimation
       - file: notebooks/tutorial_estimation
-      - file: notebooks/tutorial_doe
-      - file: notebooks/doe_cli
-      - file: notebooks/tutorial_batch_doe
-      - file: notebooks/mixture-designs
-      - file: notebooks/latin-designs
-      - file: notebooks/factor-screening
-      - file: notebooks/active-learning
-      - file: notebooks/model-based-active-learning
-      - file: notebooks/identifiability-estimability
-      - file: notebooks/model-discrimination
   - caption: API Reference
     chapters:
       - file: api

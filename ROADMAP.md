@@ -122,7 +122,7 @@ gates, and risk register: [docs/design/pounce-only-roadmap.md](docs/design/pounc
 | P1 Self-hosted integer B&B             | Done        | MILP/MIQP via Rust B&B + POUNCE relaxations; incumbent purification; root reduced-cost fixing; HiGHS-free in POUNCE-only mode |
 | P2 Crossover + root cuts               | Done        | Pure-Rust IPM-to-basis crossover + basis recovery; GMI/MIR cuts wired and correct. Open: c-MIR aggregation + upper-bound complementation; cross-round re-separation |
 | P3 Cut and heuristic suite             | Mostly done | Cover/lifted-cover/clique cuts, diving/RINS/local-branching/feasibility-pump, conflict analysis all shipped. Open: flow-cover and implied-bound cuts |
-| P4 Retire remaining HiGHS consumers    | Done        | OA/GDP masters, OBBT, McCormick-LP, partition-selection, DOE, RO → selector/POUNCE; `[pounce]`-only install fully functional. End state: HiGHS-optional at runtime (kept as default-when-installed + CI oracle) |
+| P4 Retire remaining HiGHS consumers    | Done        | OA/GDP masters, OBBT, McCormick-LP, partition-selection, DOE (now the discopt-doe plugin), RO → selector/POUNCE; `[pounce]`-only install fully functional. End state: HiGHS-optional at runtime (kept as default-when-installed + CI oracle) |
 | P5 Parity push + differentiable MILP   | Mostly done | Differentiable MILP/MIQP shipped (KKT implicit diff through fixed-integer relaxation); warm-started Rust simplex closed the MILP gap to ~1–4× HiGHS on knapsack-class. Open: benchmark-gated parity at MIPLIB/MINLPLib scale |
 
 Detailed status, increment-level history, and the remaining open items for each

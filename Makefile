@@ -23,7 +23,7 @@
 #   make test-correctness    # known-optima validation suite
 #   make test-modeling       # modeling layer slice (PR-fast)
 #   make test-solvers        # solver/B&B/OA slice (PR-fast)
-#   make test-amp            # AMP / DOE / discrimination slice (PR-fast)
+#   make test-amp            # AMP slice (PR-fast)
 #   make test-amp-fast       # Run fast AMP regression battery
 #   make test-amp-integration # Run opt-in AMP Alpine/incidence suite
 #   make test-nn             # NN embedding slice (PR-fast)
@@ -110,7 +110,7 @@ help:
 	@echo "  make test-correctness   Known-optima validation suite"
 	@echo "  make test-modeling      Modeling layer slice"
 	@echo "  make test-solvers       Solver/B&B/OA slice"
-	@echo "  make test-amp           AMP / DOE / discrimination slice"
+	@echo "  make test-amp           AMP slice"
 	@echo "  make test-amp-fast      Run fast AMP regression battery"
 	@echo "  make test-amp-integration Run opt-in AMP Alpine/incidence suite"
 	@echo "  make test-nn            NN embedding slice"
@@ -296,21 +296,11 @@ TEST_AMP := \
     python/tests/test_affine_decision_rule.py \
     python/tests/test_amp.py \
     python/tests/test_batch_dispatch.py \
-    python/tests/test_batch_doe.py \
     python/tests/test_batch_evaluator.py \
-    python/tests/test_discrimination_criteria.py \
-    python/tests/test_discrimination_examples.py \
-    python/tests/test_discrimination_sequential.py \
-    python/tests/test_doe.py \
-    python/tests/test_estimability.py \
     python/tests/test_estimate.py \
-    python/tests/test_fim.py \
-    python/tests/test_identifiability.py \
-    python/tests/test_identifiability_edge_cases.py \
     python/tests/test_robust_counterpart.py \
     python/tests/test_robust_solve.py \
-    python/tests/test_robust_uncertainty.py \
-    python/tests/test_sequential_doe.py
+    python/tests/test_robust_uncertainty.py
 
 TEST_NN := \
     python/tests/test_gnn_branching.py \
