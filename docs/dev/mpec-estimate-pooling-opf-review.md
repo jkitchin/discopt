@@ -13,10 +13,26 @@ forms.** The exception is one verified edge-case soundness gap in `mpec.py`.
 
 ## 1. Summary
 
+> **✅ RESOLVED MP-1, MP-2** — `python/tests/test_mpec_mp1_mp2.py` (this PR).
+> - **MP-1** (`tighten_complementarity_bounds`): fixing a partner to 0 now
+>   *intersects* only its upper bound (`ub = min(ub, 0)`) via the new
+>   `_fix_partner_to_zero` helper and never overwrites `lb`. When the partner
+>   carries a strictly positive lower bound the pair is genuinely infeasible, so it
+>   raises `ValueError` instead of silently collapsing to `[0, 0]`. The repro
+>   (`a, b` both `lb=0.5`) now raises; the blessed case (`b.lb=0`) still fixes to
+>   `[0, 0]` with `n_fixed=1`.
+> - **MP-2** (`solve_mpec`): the `except BaseException: break` is narrowed to
+>   `except Exception`; a first-iteration NLP failure now raises a `RuntimeError`
+>   with the iteration/`t` context instead of returning `None` silently (a later
+>   continuation failure still keeps the best point found so far).
+>
+> Verified fails-before/passes-after (2 tests fail on the pre-fix code); existing
+> mpec suite (9 tests) still passes. The full finding text is preserved below.
+
 | # | Severity | Module | Finding |
 |---|----------|--------|---------|
-| MP-1 | **P1 soundness** | `mpec.py:168-175` | `tighten_complementarity_bounds` overwrites a variable's **positive lower bound** with 0 when fixing the complementary partner, silently **hiding infeasibility** [CONFIRMED] |
-| MP-2 | P2 | `mpec.py:254` | `solve_mpec` Scholtes loop `except BaseException: break` swallows every solver error with no diagnostic [CONFIRMED by inspection] |
+| MP-1 | **P1 soundness** — ✅ RESOLVED | `mpec.py:168-175` | `tighten_complementarity_bounds` overwrites a variable's **positive lower bound** with 0 when fixing the complementary partner, silently **hiding infeasibility** [CONFIRMED] |
+| MP-2 | P2 — ✅ RESOLVED | `mpec.py:254` | `solve_mpec` Scholtes loop `except BaseException: break` swallows every solver error with no diagnostic [CONFIRMED by inspection] |
 | ES-1 | P3 stat | `estimate.py:199-208` | `confidence_intervals` uses Student-t with `dof = n_obs − n_params` while σ is *known/fixed* (cov not rescaled by reduced χ²) — with known σ the consistent interval is normal(z)-based; the t/z mix is statistically inconsistent (slightly conservative) [SUSPECTED] |
 
 Verified **correct** (with the evidence):
