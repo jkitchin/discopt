@@ -118,7 +118,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-30 | P0 | classify/extract | maximize sense lost on `sum(const·var)` bodies (raises `ValueError` not `_NotLinearError`, mis-routes to sense-dropping fallback) → returns 0 instead of true max (= CORE-2, ro ADJ-1) | confirmed |
 | C-31 | P0 | presolve/FBBT | FBBT collapses an array-variable block to element-0's bounds and stamps them on every element → cuts feasible points AND false "infeasible"; chains into invalid conflict cuts AND (broadened) into the certified LP dual bound via `_fbbt_argument_box` (= TG-1) | confirmed |
 | C-32 | P0 | relaxation/mccormick | `relax_asin`/`relax_acos` inverted curvature regime → unsound convex envelope (cv > f) in the LIVE JAX layer → invalid dual bound (= NM-1) | confirmed |
-| C-33 | P0 | solver.py fallback | pure-continuous fallback certifies a nonconvex model's local optimum with `gap_certified=True` (= SC-1), DEFAULT path | confirmed |
+| C-33 | P0 | solver.py fallback | pure-continuous fallback certifies a nonconvex model's local optimum with `gap_certified=True` (= SC-1), DEFAULT path | fixed |
 | C-34 | P0 | gdp_reformulate | even-power bound over a zero-straddling base uses endpoint-only bounds (omits interior min at 0) → invalid aux box → false optimal (= FR-1), DEFAULT path | confirmed |
 | C-35 | P1 | oa.py / gdpopt_loa | non-rigorous NLP failure → unconditional no-good cut → possible false infeasible/optimal (= OA-1, opt-in OA/LOA path) | open |
 
@@ -1418,7 +1418,47 @@ false `gap_certified=True` to pin the bug.
 control still certifies; no node-count/objective drift on the certifying panel for
 models that were already convex; standing gates pass.
 
-**Log:** 2026-07-03 — VERIFIED new default-path P0 (solver-core review §1).
+**Log:**
+- 2026-07-03 — VERIFIED new default-path P0 (solver-core review §1).
+- 2026-07-03 — **CONFIRMED then FIXED.** Confirmed the false certificate with the
+  nonconvex asymmetric quartic double-well `f(x)=x**4-16x**2+5x` on `[-4, 6]`
+  (midpoint start x=1 sits in the shallow well's basin): the pure-continuous
+  fallback returned `objective=-50.06, bound=-50.06, gap_certified=True` while the
+  true global minimum is `-78.33` at x≈-2.90 — a false optimality certificate. The
+  trigger used was `skip_convex_check=True` (one of the two documented triggers,
+  the other being classifier abstention → `not _pure_continuous_convexity_known`);
+  both reach the same fallback with convexity **not established**. Verified
+  fail-before/pass-after by stashing the fix.
+- **Fix** (`solver.py`, pure-continuous fallback at the `if _pure_continuous and
+  not _pure_continuous_force_spatial and (skip_convex_check or not
+  _pure_continuous_convexity_known)` block): reaching this branch means convexity
+  was never established — the KNOWN-convex case already returned via the convex
+  fast path above, so **no convex certificate can be lost here**. On any
+  non-error, non-infeasible fallback result the code now **withholds the
+  certificate**: keeps the feasible incumbent (`objective`, `x`, `status`) but
+  sets `gap_certified=False` and drops the fabricated dual bound/gap
+  (`bound=None, root_bound=None, gap=None, root_gap=None`). The local NLP
+  objective is no longer emitted as a proven bound. No safety mechanism was
+  weakened — the gate was made stricter (refuse to certify per CLAUDE.md §1/§3).
+  Rigorous `status="infeasible"` (from nonlinear tightening / NLP infeasibility)
+  is left untouched. The DEFAULT non-skip path on a *known*-nonconvex model is
+  unaffected (it routes to spatial B&B, which finds the true global -78.33 with a
+  valid bound and legitimately certifies).
+- **Regression test** (`python/tests/test_c33_nonconvex_fallback_cert.py`, all
+  `@pytest.mark.smoke`, fail-before/pass-after verified):
+  `test_c33_nonconvex_fallback_not_certified_optimal` (the double-well repro —
+  asserts `gap_certified is False` and `bound is None`; fails before the fix with
+  the -50.06-certified-as-optimal assertion),
+  `test_c33_convex_control_still_certifies` (convex `exp(x)+x**2` still certifies
+  via the convex fast path — guards against over-correction), and
+  `test_c33_default_path_nonconvex_uses_spatial_bb` (default path on the same
+  nonconvex model finds the true global via spatial B&B — guards the sound path).
+- **Gates:** new test 3 passed; `pytest -k "convex or certif or gap"` 635 passed /
+  1 skipped / 2 xfailed; `pytest -m smoke` 246 passed / 1 skipped; adversarial
+  `test_adversarial_recent_fixes.py -m slow` green; `ruff check` + `ruff
+  format --check` clean; `pre-commit run mypy` passed. No Rust touched. PR: #422.
+
+**Status:** confirmed → fixed.
 
 ---
 
