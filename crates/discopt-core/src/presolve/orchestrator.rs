@@ -213,4 +213,267 @@ mod tests {
         assert_eq!(result.iterations, 3);
         assert_eq!(result.deltas.len(), 3);
     }
+
+    // ── cert:C-16 regression tests ────────────────────────────────────
+    //
+    // A variable-removing (shrinking) pass renumbers later variables
+    // down. Before the fix, `resync_bounds_after_rewrite` intersected
+    // `ctx.bounds[i]` (OLD variable i) with NEW variable i's declared
+    // bounds *positionally* — fusing two unrelated variables' intervals.
+    // An empty intersection surfaced as a false `Infeasible`; a tighter
+    // non-empty one silently cut an unrelated survivor. Both models below
+    // aggregate x1 (index 1, source = x0) while an *unrelated* x2 sits at
+    // index 2 and slides into new index 1, colliding with old x1's bounds.
+
+    fn scalar_var(arena: &mut ExprArena, name: &str, idx: usize) -> ExprId {
+        arena.add(ExprNode::Variable {
+            name: name.to_string(),
+            index: idx,
+            size: 1,
+            shape: vec![],
+        })
+    }
+
+    fn vinfo(name: &str, lb: f64, ub: f64) -> VarInfo {
+        VarInfo {
+            name: name.to_string(),
+            var_type: VarType::Continuous,
+            offset: 0,
+            size: 1,
+            shape: vec![],
+            lb: vec![lb],
+            ub: vec![ub],
+        }
+    }
+
+    /// Build `cx·x + cy·y == rhs`; leaves must already be in `arena`.
+    fn affine_eq(
+        arena: &mut ExprArena,
+        cx: f64,
+        x: ExprId,
+        cy: f64,
+        y: ExprId,
+        rhs: f64,
+    ) -> ConstraintRepr {
+        let cx_node = arena.add(ExprNode::Constant(cx));
+        let cy_node = arena.add(ExprNode::Constant(cy));
+        let cxx = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: cx_node,
+            right: x,
+        });
+        let cyy = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Mul,
+            left: cy_node,
+            right: y,
+        });
+        let body = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Add,
+            left: cxx,
+            right: cyy,
+        });
+        ConstraintRepr {
+            body,
+            sense: ConstraintSense::Eq,
+            rhs,
+            name: None,
+        }
+    }
+
+    #[test]
+    fn c16_shrink_does_not_report_feasible_model_infeasible() {
+        // x0 ∈ [0, 300] (objective + eq partner), x1 ∈ [100, 200]
+        // (eq-only, eliminable), x2 ∈ [0, 10] (objective, unrelated).
+        // Equality x1 − x0 == 0 ⇒ x0 = x1 ∈ [100, 200] — feasible.
+        // Aggregation removes x1; x2 slides to new index 1. The buggy
+        // resync fuses old x1's [100, 200] with x2's [0, 10] → empty →
+        // false Infeasible. The fix rebuilds bounds from the new model.
+        let mut arena = ExprArena::new();
+        let x0 = scalar_var(&mut arena, "x0", 0);
+        let x1 = scalar_var(&mut arena, "x1", 1);
+        let x2 = scalar_var(&mut arena, "x2", 2);
+        let eq = affine_eq(&mut arena, 1.0, x1, -1.0, x0, 0.0);
+        let obj = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Add,
+            left: x0,
+            right: x2,
+        });
+        let model = ModelRepr {
+            arena,
+            objective: obj,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![eq],
+            variables: vec![
+                vinfo("x0", 0.0, 300.0),
+                vinfo("x1", 100.0, 200.0),
+                vinfo("x2", 0.0, 10.0),
+            ],
+            n_vars: 3,
+        };
+
+        let opts = OrchestratorOptions::with_passes(vec![Box::new(passes::AggregatePass)]);
+        let result = run(model, opts);
+
+        assert_ne!(
+            result.terminated_by,
+            TerminationReason::Infeasible,
+            "C-16: feasible model reported infeasible after aggregation shrink"
+        );
+        // x1 removed → 2 survivors; x2 keeps its true [0, 10] bounds.
+        assert_eq!(result.bounds.len(), 2);
+        let x2_bounds = result.bounds[1];
+        assert!(
+            (x2_bounds.lo - 0.0).abs() < 1e-9 && (x2_bounds.hi - 10.0).abs() < 1e-9,
+            "C-16: unrelated survivor x2 bounds fused, got [{}, {}]",
+            x2_bounds.lo,
+            x2_bounds.hi
+        );
+    }
+
+    #[test]
+    fn c16_shrink_does_not_silently_tighten_unrelated_survivor() {
+        // Same shape but x1 ∈ [3, 7] overlaps x2 ∈ [0, 10]. The buggy
+        // resync fuses old x1's [3, 7] into x2 (non-empty but WRONG),
+        // silently cutting x2's feasible region [0, 3) ∪ (7, 10].
+        let mut arena = ExprArena::new();
+        let x0 = scalar_var(&mut arena, "x0", 0);
+        let x1 = scalar_var(&mut arena, "x1", 1);
+        let x2 = scalar_var(&mut arena, "x2", 2);
+        let eq = affine_eq(&mut arena, 1.0, x1, -1.0, x0, 0.0);
+        let obj = arena.add(ExprNode::BinaryOp {
+            op: BinOp::Add,
+            left: x0,
+            right: x2,
+        });
+        let model = ModelRepr {
+            arena,
+            objective: obj,
+            objective_sense: ObjectiveSense::Minimize,
+            constraints: vec![eq],
+            variables: vec![
+                vinfo("x0", 0.0, 100.0),
+                vinfo("x1", 3.0, 7.0),
+                vinfo("x2", 0.0, 10.0),
+            ],
+            n_vars: 3,
+        };
+
+        let opts = OrchestratorOptions::with_passes(vec![Box::new(passes::AggregatePass)]);
+        let result = run(model, opts);
+
+        assert_ne!(result.terminated_by, TerminationReason::Infeasible);
+        assert_eq!(result.bounds.len(), 2);
+        let x2_bounds = result.bounds[1];
+        assert!(
+            (x2_bounds.lo - 0.0).abs() < 1e-9 && (x2_bounds.hi - 10.0).abs() < 1e-9,
+            "C-16: unrelated survivor x2 silently tightened to [{}, {}] (true [0, 10])",
+            x2_bounds.lo,
+            x2_bounds.hi
+        );
+    }
+
+    #[test]
+    fn c16_property_survivor_bounds_contain_feasible_point() {
+        // Randomized oracle: build aggregation-eliminable models around a
+        // *known feasible point*, run presolve, and assert every survivor's
+        // post-presolve bounds still contain its feasible coordinate. A
+        // sound presolve may only tighten toward feasibility, so excluding
+        // a known-feasible point is a bug — this catches the C-16 fusion
+        // class over many random shapes without needing a dense solver.
+        //
+        // Layout per model: index 0 = `s` (eq partner, in objective),
+        // index 1 = `x_e` (eq-only, eliminable), indices 2.. = unrelated
+        // survivors (in objective). Removing x_e slides the unrelated
+        // survivors down into x_e's old slot — the collision the bug hits.
+        let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut unit = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((seed >> 33) as f64) / ((1u64 << 31) as f64) // [0, 1)
+        };
+        // Nonzero coefficient in [-3, 3] \ {~0}.
+        let nonzero_coeff = |u: &mut dyn FnMut() -> f64| {
+            let mut c = (u() * 6.0) - 3.0;
+            if c.abs() < 0.5 {
+                c += if c >= 0.0 { 0.5 } else { -0.5 };
+            }
+            c
+        };
+
+        for trial in 0..300 {
+            let n_surv = 2 + (unit() * 4.0) as usize; // survivors: 2..=5
+            let n_others = n_surv - 1; // ≥ 1 unrelated survivor at index ≥ 2
+
+            // Feasible coordinates for s and the unrelated survivors.
+            let s_val = (unit() * 20.0) - 10.0;
+            let other_vals: Vec<f64> = (0..n_others).map(|_| (unit() * 20.0) - 10.0).collect();
+            let x_e_val = (unit() * 20.0) - 10.0;
+            let c = nonzero_coeff(&mut unit);
+            // Equality: 1·x_e + c·s == rhs, satisfied at the feasible point.
+            let rhs = x_e_val + c * s_val;
+
+            // Bounds are random intervals that *contain* each coordinate.
+            let mut vinfo_at = |name: &str, v: f64| {
+                let lo = v - (unit() * 5.0 + 0.1);
+                let hi = v + (unit() * 5.0 + 0.1);
+                vinfo(name, lo, hi)
+            };
+
+            let mut arena = ExprArena::new();
+            let s = scalar_var(&mut arena, "s", 0);
+            let x_e = scalar_var(&mut arena, "x_e", 1);
+            let others: Vec<ExprId> = (0..n_others)
+                .map(|k| scalar_var(&mut arena, &format!("o{k}"), 2 + k))
+                .collect();
+            let eq = affine_eq(&mut arena, 1.0, x_e, c, s, rhs);
+            // Objective = s + Σ others (x_e absent → x_e is the target).
+            let mut obj = s;
+            for &o in &others {
+                obj = arena.add(ExprNode::BinaryOp {
+                    op: BinOp::Add,
+                    left: obj,
+                    right: o,
+                });
+            }
+
+            let mut variables = vec![vinfo_at("s", s_val), vinfo_at("x_e", x_e_val)];
+            for (k, ov) in other_vals.iter().enumerate() {
+                variables.push(vinfo_at(&format!("o{k}"), *ov));
+            }
+            let model = ModelRepr {
+                arena,
+                objective: obj,
+                objective_sense: ObjectiveSense::Minimize,
+                constraints: vec![eq],
+                variables,
+                n_vars: n_surv + 1,
+            };
+
+            let opts = OrchestratorOptions::with_passes(vec![Box::new(passes::AggregatePass)]);
+            let result = run(model, opts);
+
+            assert_ne!(
+                result.terminated_by,
+                TerminationReason::Infeasible,
+                "C-16 trial {trial}: feasible model reported infeasible"
+            );
+            assert_eq!(
+                result.bounds.len(),
+                n_surv,
+                "C-16 trial {trial}: expected {n_surv} survivors"
+            );
+            // Survivor order after removing x_e: [s, o0, o1, ...].
+            let feasible: Vec<f64> = std::iter::once(s_val).chain(other_vals).collect();
+            for (k, &fv) in feasible.iter().enumerate() {
+                let b = result.bounds[k];
+                assert!(
+                    b.lo <= fv + 1e-9 && fv - 1e-9 <= b.hi,
+                    "C-16 trial {trial}: survivor {k} bounds [{}, {}] exclude feasible {fv}",
+                    b.lo,
+                    b.hi
+                );
+            }
+        }
+    }
 }
