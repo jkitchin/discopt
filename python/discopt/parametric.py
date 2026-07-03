@@ -62,7 +62,8 @@ def compile_expression(expr: Expression, model: Model) -> Callable:
     """
     from discopt._jax.differentiable import _compile_parametric_node
 
-    return _compile_parametric_node(expr, model)
+    fn: Callable = _compile_parametric_node(expr, model)
+    return fn
 
 
 def compile_response_function(
