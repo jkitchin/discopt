@@ -35,7 +35,10 @@ Example
 
 from __future__ import annotations
 
+import numpy as np
+
 from discopt.bilevel import kkt as _kkt
+from discopt.bilevel import strong_duality as _sd
 from discopt.bilevel.symbolic_diff import diff
 from discopt.modeling.core import Constant, Constraint, Expression, Model, Variable, VarType
 from discopt.mpec import reformulate_gdp, reformulate_sos1
@@ -43,28 +46,49 @@ from discopt.mpec import reformulate_gdp, reformulate_sos1
 __all__ = ["BilevelProblem"]
 
 
-def _is_structural_zero(expr: Expression) -> bool:
-    return isinstance(expr, Constant) and expr.value.ndim == 0 and float(expr.value) == 0.0
+def _is_const(expr: Expression) -> bool:
+    return isinstance(expr, Constant) and expr.value.ndim == 0
 
 
-def _is_affine_in(expr: Expression, variables: list[Variable]) -> Variable | None:
-    """Return a variable witnessing nonlinearity in ``variables``, or None if affine.
+def _hessian_in_y(expr: Expression, ys: list[Variable]):
+    """Constant Hessian ``∂²expr/∂y_j∂y_k`` if ``expr`` is (at most) quadratic in ``ys``.
 
-    ``expr`` is affine in ``variables`` iff ``∂expr/∂y_k`` is independent of every
-    ``y_j`` — i.e. the second partials ``∂²expr/∂y_j∂y_k`` all vanish. Uses the
-    symbolic differentiator, so bilinear coupling ``x·y`` (a *coefficient* ``x`` on
-    ``y``) is correctly recognized as affine in ``y``.
+    Uses the symbolic differentiator twice. Returns ``(H, None)`` with ``H`` an
+    ``n×n`` numpy matrix when every second partial is a *constant* (so ``expr`` is
+    affine or quadratic in ``ys`` with data-constant curvature); returns
+    ``(None, witness)`` when some second partial still depends on a variable — i.e.
+    ``expr`` is non-quadratic in ``y`` (or has a variable-dependent curvature such as
+    ``x·y²``) and needs the full convexity certifier rather than a constant-Hessian
+    test.
     """
-    for yk in variables:
-        d = diff(expr, yk)
-        for yj in variables:
-            if not _is_structural_zero(diff(d, yj)):
-                return yk
-    return None
+    n = len(ys)
+    H = np.zeros((n, n))
+    grads = [diff(expr, yk) for yk in ys]
+    for k, gk in enumerate(grads):
+        for j in range(k, n):
+            hjk = diff(gk, ys[j])
+            if not _is_const(hjk):
+                return None, ys[j]
+            val = float(hjk.value)
+            H[k, j] = val
+            H[j, k] = val
+    return H, None
+
+
+def _convexity_status(expr: Expression, ys: list[Variable]):
+    """Classify curvature of ``expr`` in ``ys``: affine / convex / nonconvex / nonquadratic."""
+    H, witness = _hessian_in_y(expr, ys)
+    if H is None:
+        return "nonquadratic", witness
+    if np.allclose(H, 0.0, atol=1e-12):
+        return "affine", None
+    if np.linalg.eigvalsh(H).min() >= -1e-9:  # PSD -> convex
+        return "convex", None
+    return "nonconvex", None
 
 
 class BilevelProblem:
-    """Optimistic bilevel program with a convex (Phase 1: LP) lower level."""
+    """Optimistic bilevel program with a convex lower level (LP or convex-QP)."""
 
     def __init__(
         self,
@@ -86,6 +110,7 @@ class BilevelProblem:
         self.prefix = prefix
         self._formulated = False
         self.kkt: _kkt.KKTSystem | None = None
+        self.strong_duality: _sd.StrongDualitySystem | None = None
 
         self._validate_inputs()
 
@@ -119,22 +144,50 @@ class BilevelProblem:
                 raise ValueError(f"variable '{v.name}' is in both upper_vars and lower_vars")
 
     def _gate_convexity(self) -> None:
-        """Phase 1 LP gate: lower objective + constraints must be affine in ``y``."""
-        witness = _is_affine_in(self.lower_objective, self.lower_vars)
-        if witness is not None:
-            raise NotImplementedError(
-                f"lower objective is nonlinear in follower variable '{witness.name}'. "
-                f"Phase 1 handles LP (affine-in-y) lower levels; convex QP/NLP lower "
-                f"levels are Phase 2. (A nonconvex lower level would make the KKT "
-                f"reduction unsound and is refused outright.)"
-            )
+        """Gate: the lower level must be **convex in y** (LP or convex-QP).
+
+        KKT / strong-duality characterize follower optimality only when the lower
+        problem is convex in the follower variables. We require the (sign-adjusted)
+        objective and every inequality body to be convex in ``y`` (PSD constant
+        Hessian), and every equality body to be affine in ``y`` (a nonlinear equality
+        makes the lower feasible set nonconvex). A nonconvex lower level is refused
+        outright; a non-quadratic curvature is refused pending the convexity
+        certifier (rather than assuming convexity).
+        """
+        # Follower minimizes f (or maximizes f == minimizes -f): the *minimized*
+        # objective must be convex in y.
+        signed = self.lower_objective if self.lower_sense == "min" else -self.lower_objective
+        self._require_convex(signed, "lower objective")
         for i, con in enumerate(self.lower_constraints):
-            witness = _is_affine_in(con.body, self.lower_vars)
-            if witness is not None:
-                raise NotImplementedError(
-                    f"lower constraint {i} is nonlinear in follower variable "
-                    f"'{witness.name}'. Phase 1 handles affine-in-y (LP) lower levels."
-                )
+            if con.sense == "==":
+                self._require_affine(con.body, f"lower equality constraint {i}")
+            else:
+                self._require_convex(con.body, f"lower inequality constraint {i}")
+
+    def _require_convex(self, expr: Expression, what: str) -> None:
+        status, info = _convexity_status(expr, self.lower_vars)
+        if status in ("affine", "convex"):
+            return
+        if status == "nonquadratic":
+            raise NotImplementedError(
+                f"{what} is nonlinear-but-not-quadratic in the follower variables "
+                f"(witness '{info.name}'); the KKT reduction needs a certified-convex "
+                f"lower level. LP and convex-QP lower levels are supported; general "
+                f"convex-NLP lower levels await the convexity-certifier hook. Refusing "
+                f"rather than assuming convexity."
+            )
+        raise NotImplementedError(  # nonconvex
+            f"{what} is nonconvex in the follower variables (indefinite Hessian in y). "
+            f"The KKT reduction is unsound for a nonconvex lower level; refusing."
+        )
+
+    def _require_affine(self, expr: Expression, what: str) -> None:
+        status, _ = _convexity_status(expr, self.lower_vars)
+        if status != "affine":
+            raise NotImplementedError(
+                f"{what} must be affine in the follower variables (a nonlinear equality "
+                f"makes the lower feasible set nonconvex); got curvature '{status}'."
+            )
 
     # ── build ─────────────────────────────────────────────────────────
 
@@ -143,52 +196,61 @@ class BilevelProblem:
 
         Parameters
         ----------
-        method : {"kkt"}
+        method : {"kkt", "strong_duality"}
             The single-level reduction. ``"kkt"`` replaces the follower by its KKT
-            conditions (Phase 1). ``"strong_duality"`` (LP strong-duality, no
-            complementarity) is Phase 2. ``"pessimistic"`` is out of scope.
+            conditions with per-row complementarity handed to :mod:`discopt.mpec`.
+            ``"strong_duality"`` keeps stationarity/primal/dual feasibility but uses
+            the single aggregate equality ``Σ μ_i g_i == 0`` (one bilinear equality,
+            no disjunctive branching). Both are exact for a convex lower level and
+            agree on the optimum. ``"pessimistic"`` is out of scope.
         mpec_method : {"gdp", "sos1"}
-            How the complementarity conditions are encoded for the **global**
-            solve. ``"gdp"`` (disjunction) typically branches least; ``"sos1"`` uses
-            a Special Ordered Set. (The local ``"scholtes"`` homotopy is driven at
-            solve time via :func:`discopt.mpec.solve_mpec`, not here.)
+            For ``method="kkt"``: how the complementarity conditions are encoded for
+            the **global** solve. ``"gdp"`` (disjunction) typically branches least;
+            ``"sos1"`` uses a Special Ordered Set. (The local ``"scholtes"`` homotopy
+            is driven at solve time via :func:`discopt.mpec.solve_mpec`.) Ignored for
+            ``method="strong_duality"``.
         """
         if self._formulated:
             raise RuntimeError("formulate() has already been called on this BilevelProblem")
         if method == "pessimistic":
             raise NotImplementedError(
                 "pessimistic bilevel (leader hedges against adversarial follower ties) "
-                "is out of scope; Phase 1 is optimistic."
+                "is out of scope; the reduction is optimistic."
             )
-        if method == "strong_duality":
-            raise NotImplementedError(
-                "the LP strong-duality reformulation is Phase 2; use method='kkt'."
-            )
-        if method != "kkt":
-            raise ValueError(f"unknown method {method!r}; use 'kkt'")
-        if mpec_method not in ("gdp", "sos1"):
-            raise ValueError(
-                f"mpec_method must be 'gdp' or 'sos1' for a global certificate, got "
-                f"{mpec_method!r}. (For the local Scholtes homotopy, call "
-                f"discopt.mpec.solve_mpec on the formulated pairs.)"
-            )
+        if method not in ("kkt", "strong_duality"):
+            raise ValueError(f"unknown method {method!r}; use 'kkt' or 'strong_duality'")
 
         self._gate_convexity()
 
-        self.kkt = _kkt.build_kkt(
-            self.model,
-            lower_vars=self.lower_vars,
-            lower_objective=self.lower_objective,
-            lower_constraints=self.lower_constraints,
-            lower_sense=self.lower_sense,
-            prefix=self.prefix,
-        )
-
-        if self.kkt.comp_pairs:
-            if mpec_method == "gdp":
-                reformulate_gdp(self.model, self.kkt.comp_pairs)
-            else:
-                reformulate_sos1(self.model, self.kkt.comp_pairs)
+        if method == "kkt":
+            if mpec_method not in ("gdp", "sos1"):
+                raise ValueError(
+                    f"mpec_method must be 'gdp' or 'sos1' for a global certificate, got "
+                    f"{mpec_method!r}. (For the local Scholtes homotopy, call "
+                    f"discopt.mpec.solve_mpec on the formulated pairs.)"
+                )
+            self.kkt = _kkt.build_kkt(
+                self.model,
+                lower_vars=self.lower_vars,
+                lower_objective=self.lower_objective,
+                lower_constraints=self.lower_constraints,
+                lower_sense=self.lower_sense,
+                prefix=self.prefix,
+            )
+            if self.kkt.comp_pairs:
+                if mpec_method == "gdp":
+                    reformulate_gdp(self.model, self.kkt.comp_pairs)
+                else:
+                    reformulate_sos1(self.model, self.kkt.comp_pairs)
+        else:  # strong_duality
+            self.strong_duality = _sd.build_strong_duality(
+                self.model,
+                lower_vars=self.lower_vars,
+                lower_objective=self.lower_objective,
+                lower_constraints=self.lower_constraints,
+                lower_sense=self.lower_sense,
+                prefix=self.prefix,
+            )
 
         self._formulated = True
 

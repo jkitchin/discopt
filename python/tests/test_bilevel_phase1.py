@@ -237,7 +237,9 @@ def test_integer_lower_variable_refused():
         )
 
 
-def test_nonlinear_in_y_refused_phase1():
+def test_nonconvex_lower_objective_refused():
+    # A concave objective for a *minimizing* follower is a nonconvex lower level:
+    # KKT is not sufficient -> must refuse (convex-QP y*y is accepted, see Phase 2).
     m = Model("nl")
     x = m.continuous("x", lb=0, ub=10)
     y = m.continuous("y", lb=0, ub=10)
@@ -246,10 +248,10 @@ def test_nonlinear_in_y_refused_phase1():
         m,
         upper_vars=[x],
         lower_vars=[y],
-        lower_objective=y * y,  # convex QP in y -> Phase 2
+        lower_objective=-(y * y),  # concave -> nonconvex for min
         lower_constraints=[x + y >= 3],
     )
-    with pytest.raises(NotImplementedError, match="nonlinear in follower"):
+    with pytest.raises(NotImplementedError, match="nonconvex"):
         bl.formulate(method="kkt")
 
 
@@ -270,7 +272,7 @@ def test_bilinear_xy_is_allowed_affine_in_y():
     assert bl._formulated
 
 
-def test_pessimistic_and_strong_duality_refused():
+def test_pessimistic_refused():
     m = Model("p")
     x = m.continuous("x", lb=0, ub=10)
     y = m.continuous("y", lb=0, ub=10)
@@ -280,11 +282,6 @@ def test_pessimistic_and_strong_duality_refused():
     )
     with pytest.raises(NotImplementedError, match="pessimistic"):
         bl.formulate(method="pessimistic")
-    bl2 = BilevelProblem(
-        m, upper_vars=[x], lower_vars=[y], lower_objective=y, lower_constraints=[x + y >= 3]
-    )
-    with pytest.raises(NotImplementedError, match="strong-duality"):
-        bl2.formulate(method="strong_duality")
 
 
 def test_overlapping_upper_lower_refused():
