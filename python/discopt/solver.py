@@ -6887,9 +6887,7 @@ def _solve_continuous(
     # the single NLP solve at the root box is the whole solve, so the root
     # bound/gap/time equal the reported ones.
     _c_bound = obj_val if status == "optimal" else None
-    _c_gap = (
-        _optimal_relative_gap(obj_val) if status == "optimal" and obj_val is not None else None
-    )
+    _c_gap = _optimal_relative_gap(obj_val) if status == "optimal" and obj_val is not None else None
 
     return SolveResult(
         status=status,
