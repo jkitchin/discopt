@@ -717,7 +717,7 @@ function is removed; standing gates pass.
   seam.
 - **Gates:** `test_obbt.py` 48 passed; `test_amp` 135, `test_amp_integration` +
   `test_lp_backend_select` 17; `pytest -m smoke` 211 passed / 1 skipped;
-  adversarial suite 10 passed; ruff clean. PR: (pending).
+  adversarial suite 10 passed; ruff clean. PR: #401 (stacked on #399).
 
 ---
 
