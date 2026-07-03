@@ -92,7 +92,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-1 | P0 | solver.py status | false "infeasible" from non-rigorous NLP fathoms (solve_model path) | fixed |
 | C-4 | P1 | mir.rs cuts | integer-MIR applied with fractional integer lower bound → invalid cut | fixed |
 | C-2 | P1 | milp_driver status | false "Infeasible" when deadline orphans deferred nodes | fixed |
-| C-19 | P1 | relax_tan | pole-straddling interval classified as one branch → secant across a pole, invalid envelope | open |
+| C-19 | P1 | relax_tan | pole-straddling interval classified as one branch → secant across a pole, invalid envelope | fixed |
 | C-5 | P1 | .nl parser | floor/ceil/round/trunc→identity, intdiv→div, all silent | fixed |
 | C-6 | P1 | modeling API | integer vars silently clamped to [0, 1e6] | fixed |
 | C-18 | P1 | midpoint bound | `mccormick_bounds="midpoint"` returns u(mid), not a lower bound (opt-in mode) | fixed |
@@ -107,7 +107,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-3 | P2 | solver.py incumbent | unrounded integer incumbent survives if terminal polish throws | open |
 | C-11 | P2 | modeling API | missing `__ne__` → `x != y` silently evaluates False | open |
 | C-22 | P3 | fbbt.rs interval | `interval_mul` NaN endpoints on 0·∞ (lost tightening, not unsound) | open |
-| C-23 | P1 | mccormick.py | ESCALATED (was P3): `relax_div` produces an invalid convex underestimator (cv > f) for **nonlinear** denominators (`1/(x*y)` cv=1.334 > true 1.0) — the "harmless" label held only for variable/affine denominators; `_relax_reciprocal` also mislabels concavity for negative denominators (= DIV-1) | confirmed |
+| C-23 | P1 | mccormick.py | ESCALATED (was P3): `relax_div` produces an invalid convex underestimator (cv > f) for **nonlinear** denominators (`1/(x*y)` cv=1.334 > true 1.0) — the "harmless" label held only for variable/affine denominators; `_relax_reciprocal` also mislabels concavity for negative denominators (= DIV-1) | fixed |
 | C-24 | P3 | mccormick.py | secants produce NaN on infinite bounds; soundness leans on downstream filters | open |
 | C-12 | P3 | .nl parser | range-split renumbers constraints vs source indices | open |
 | C-25 | P1 | nn/formulations | scaling + bound-propagation domain mismatch cuts the true optimum on scaled embedded NNs | in progress (nn-module-plan T-N0.2) |
