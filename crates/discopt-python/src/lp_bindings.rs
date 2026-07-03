@@ -21,6 +21,7 @@ use discopt_core::lp::simplex::{
     solve_lp as simplex_solve_lp, solve_lp_batch, solve_lp_warm, solve_lp_warm_csc, LpInstance,
     LpStatus, SimplexOptions, SparseCols,
 };
+use discopt_core::lp::zerohalf::separate_zerohalf;
 use numpy::{
     PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods,
 };
@@ -266,6 +267,72 @@ pub fn aggregation_mir_cuts_py<'py>(
     for ac in &cuts {
         flat.extend_from_slice(&ac.cut.coeffs);
         rhs.push(ac.cut.rhs);
+    }
+    let coeffs = PyArray1::from_vec(py, flat).reshape([k, n])?;
+    Ok(Some((coeffs, PyArray1::from_vec(py, rhs))))
+}
+
+/// Separate {0,½}-Chvátal–Gomory ("zero-half") cuts from the `≤` rows
+/// `a_ub · x ≤ b_ub` at point `x`.
+///
+/// Scales rows to integer data, reduces every column to a nonnegative variable
+/// (lower-shift / upper-complement bound substitution — same as [`mir_cuts_py`],
+/// required for the CG round to be valid on signed variables), builds the mod-2
+/// parity system, runs GF(2) elimination to find subsets `S` whose `½`-sum
+/// CG-rounds to a violated cut, and maps each back to `x`. Every emitted cut is
+/// valid for the original integer hull *by construction* — a `½`-weighted
+/// nonnegative combination of `≤` rows followed by Chvátal–Gomory rounding — for
+/// any subset `S` the heuristic finds (proven by the Rust
+/// `zerohalf_validity_random_systems` property test); the heuristic affects only
+/// strength, never validity. `a_ub` is C-contiguous `m × n`; `lb`/`ub` are
+/// length-`n` bounds (`+inf` in `ub[j]` disables complementation for column `j`);
+/// `integrality` a length-`n` bool array. Returns `(coeffs, rhs)` — a `k × n`
+/// array and length-`k` rhs, the cuts `coeffs[i] · x ≤ rhs[i]` over the
+/// structural variables, ordered most-violated-first — or `None` when no cut is
+/// produced.
+#[pyfunction]
+#[pyo3(signature = (a_ub, b_ub, lb, ub, integrality, x, tol=1e-7, max_dynamism=1e7))]
+pub fn zerohalf_cuts_py<'py>(
+    py: Python<'py>,
+    a_ub: PyReadonlyArray2<'py, f64>,
+    b_ub: PyReadonlyArray1<'py, f64>,
+    lb: PyReadonlyArray1<'py, f64>,
+    ub: PyReadonlyArray1<'py, f64>,
+    integrality: PyReadonlyArray1<'py, bool>,
+    x: PyReadonlyArray1<'py, f64>,
+    tol: f64,
+    max_dynamism: f64,
+) -> PyResult<Option<(Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>)>> {
+    let dims = a_ub.shape();
+    let n = dims[1];
+    let a_flat = a_ub
+        .as_slice()
+        .map_err(|_| PyValueError::new_err("`a_ub` must be C-contiguous"))?;
+    let mut cuts = separate_zerohalf(
+        a_flat,
+        b_ub.as_slice()?,
+        lb.as_slice()?,
+        ub.as_slice()?,
+        integrality.as_slice()?,
+        x.as_slice()?,
+        tol,
+        max_dynamism,
+    );
+    if cuts.is_empty() {
+        return Ok(None);
+    }
+    // Most-violated first, deterministic tie-break by insertion order.
+    cuts.sort_by(|p, q| {
+        q.violation
+            .partial_cmp(&p.violation)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let k = cuts.len();
+    let mut flat = Vec::with_capacity(k * n);
+    let mut rhs = Vec::with_capacity(k);
+    for c in &cuts {
+        flat.extend_from_slice(&c.coeffs);
+        rhs.push(c.rhs);
     }
     let coeffs = PyArray1::from_vec(py, flat).reshape([k, n])?;
     Ok(Some((coeffs, PyArray1::from_vec(py, rhs))))

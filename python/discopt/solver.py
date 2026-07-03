@@ -2078,6 +2078,30 @@ def _cmir_aggregation_enabled() -> bool:
     return val.lower() not in ("0", "", "false", "no", "off")
 
 
+_ZEROHALF_ENV_DEFAULT = os.environ.get("DISCOPT_ZEROHALF", "0").lower() not in (
+    "0",
+    "",
+    "false",
+    "no",
+    "off",
+)
+
+
+def _zerohalf_enabled() -> bool:
+    """Whether the native {0,½}-Chvátal–Gomory (zero-half) separator is enabled
+    for this solve (cert:P3, ``certification-gap-plan.md`` §7 "Phase 3 1d").
+
+    Re-reads ``DISCOPT_ZEROHALF`` each call (**default-off**) so tests and
+    callers can toggle it after import; falls back to the import-time default.
+    The 1d SCIP per-separator attribution found zerohalf alone closes 60–86% of
+    the reachable root gap on the graphpart class (every other cut family closes
+    0), which is why this — not more c-MIR — is the built target."""
+    val = os.environ.get("DISCOPT_ZEROHALF")
+    if val is None:
+        return _ZEROHALF_ENV_DEFAULT
+    return val.lower() not in ("0", "", "false", "no", "off")
+
+
 def _p3_force_cut_path_enabled() -> bool:
     """cert:P3.1c experiment toggle (``DISCOPT_P3_FORCE_CUT_PATH``, default-OFF).
 
@@ -10492,6 +10516,57 @@ def _separate_aggregation_mir_cuts(
     return embedded[:max_cuts], rhs[:max_cuts]
 
 
+def _separate_zerohalf_cuts(
+    lp_data, x_vertex, n_orig, int_idx, a_ub_orig, b_ub_orig, max_cuts: int = 8
+):
+    """Separate {0,½}-Chvátal–Gomory (zero-half) cuts from the original ``<=``
+    rows at the crossover vertex, via the Rust ``zerohalf_cuts_py`` binding.
+
+    Picks subsets ``S`` of the integer ``<=`` rows, sums them with weight ``½``,
+    and CG-rounds. A ``½``-weighted nonnegative combination of ``<=`` rows
+    followed by Chvátal–Gomory rounding is valid for the integer hull for **any**
+    subset ``S``, so every emitted cut removes no integer-feasible point —
+    validity is by construction, independent of the (heuristic) subset choice
+    (proven by the Rust ``zerohalf_validity_random_systems`` property test). This
+    is the ``certification-gap-plan.md`` §7 "Phase 3 1d" target: on the graphpart
+    (odd-cycle / parity) class, zerohalf alone closes 60–86% of the reachable root
+    gap where single-row MIR / Gomory close nothing.
+
+    **Default-off**: the ``DISCOPT_ZEROHALF`` feature-flagged path; the caller
+    gates the call, this helper only separates. Same contract as
+    :func:`_separate_mir_cuts`: returns ``(coeffs, rhs)`` embedded into the current
+    standard-form columns, or ``None`` when the binding is unavailable, lower
+    bounds are non-finite, or no cut is produced."""
+    if a_ub_orig is None or np.asarray(a_ub_orig).shape[0] == 0:
+        return None
+    try:
+        from discopt._rust import zerohalf_cuts_py
+    except ImportError:
+        return None
+    lo = np.asarray(lp_data.x_l, dtype=np.float64)[:n_orig]
+    if not np.all(np.isfinite(lo)):
+        return None  # the nonnegative-y shift requires finite lower bounds
+    hi = np.asarray(lp_data.x_u, dtype=np.float64)[:n_orig].copy()
+    hi[~np.isfinite(hi)] = np.inf
+    integ = np.zeros(n_orig, dtype=bool)
+    integ[[j for j in int_idx if j < n_orig]] = True
+    res = zerohalf_cuts_py(
+        np.ascontiguousarray(a_ub_orig, dtype=np.float64),
+        np.ascontiguousarray(b_ub_orig, dtype=np.float64),
+        np.ascontiguousarray(lo),
+        np.ascontiguousarray(hi),
+        integ,
+        np.ascontiguousarray(np.asarray(x_vertex, dtype=np.float64)[:n_orig]),
+    )
+    if res is None:
+        return None
+    coeffs, rhs = np.asarray(res[0], dtype=np.float64), np.asarray(res[1], dtype=np.float64)
+    n_cur = int(np.asarray(lp_data.A_eq).shape[1])
+    embedded = np.zeros((coeffs.shape[0], n_cur), dtype=np.float64)
+    embedded[:, :n_orig] = coeffs[:, :n_orig]
+    return embedded[:max_cuts], rhs[:max_cuts]
+
+
 def _extract_clique_edges(model: Model) -> list[tuple[int, int]]:
     """Conflict-graph 2-clique edges from the Rust presolve clique pass.
 
@@ -10582,8 +10657,8 @@ def _root_cover_cut_loop(
     projected Gomory mixed-integer cuts (from the iteratively-refined basis at
     the vertex), augments ``lp_data``, and repeats. Returns the (possibly
     augmented) ``lp_data``, the total number of cuts added, and a per-source
-    count dict (``cover_clique``/``gomory``/``mir``/``aggregation``) for
-    instrumentation. A no-op when there are no binary-knapsack rows, clique
+    count dict (``cover_clique``/``gomory``/``mir``/``aggregation``/``zerohalf``)
+    for instrumentation. A no-op when there are no binary-knapsack rows, clique
     edges, or integer variables."""
     from discopt._jax.cover_cuts import (
         has_binary_knapsack_rows,
@@ -10595,7 +10670,8 @@ def _root_cover_cut_loop(
     has_clique = bool(clique_edges)
     has_gomory = bool(len(int_idx))
     if not has_cover and not has_clique and not has_gomory:
-        return lp_data, 0, {"cover_clique": 0, "gomory": 0, "mir": 0, "aggregation": 0}
+        empty = {"cover_clique": 0, "gomory": 0, "mir": 0, "aggregation": 0, "zerohalf": 0}
+        return lp_data, 0, empty
 
     total = 0
     # Per-source cut counts (cert:P3.1b instrumentation). Surfaced on the MILP
@@ -10603,7 +10679,7 @@ def _root_cover_cut_loop(
     # aggregation c-MIR separator actually *fired* on the default path (a cut
     # count of 0 with the flag on means the branch never separated — a wiring or
     # scoping finding, not a bound result). Pure instrumentation; no math change.
-    by_source = {"cover_clique": 0, "gomory": 0, "mir": 0, "aggregation": 0}
+    by_source = {"cover_clique": 0, "gomory": 0, "mir": 0, "aggregation": 0, "zerohalf": 0}
     for _round in range(max_rounds):
         if time.perf_counter() - t_start >= time_limit:
             break
@@ -10707,6 +10783,27 @@ def _root_cover_cut_loop(
                 lp_data = _augment_lpdata_with_mir_cuts(lp_data, ac, ar)
                 round_added += int(ac.shape[0])
                 by_source["aggregation"] += int(ac.shape[0])
+        # {0,½}-Chvátal–Gomory (zero-half) cuts (cert:P3.1d): DEFAULT-OFF, gated by
+        # DISCOPT_ZEROHALF. Sums subsets of the integer <= rows with weight ½ and
+        # CG-rounds — valid by construction (½-weighted nonnegative row combo +
+        # Chvátal–Gomory round, for ANY subset). Captures the odd-cycle / parity
+        # structure single-row MIR/Gomory miss, which the 1d SCIP attribution
+        # identified as the sole load-bearing family on the graphpart class. Same
+        # round-0 / POUNCE-mode gate as MIR; reuses the MIR augmentation (it emits
+        # the same coeffs·x ≤ rhs shape over the structural columns).
+        if has_gomory and _round == 0 and _zerohalf_enabled():
+            try:
+                zh = _separate_zerohalf_cuts(
+                    lp_data, x_vertex, n_orig, int_idx, A_ub_orig, b_ub_orig
+                )
+            except Exception as _zh_exc:
+                logger.debug("zerohalf separation skipped: %s", _zh_exc)
+                zh = None
+            if zh is not None:
+                zc, zr = zh
+                lp_data = _augment_lpdata_with_mir_cuts(lp_data, zc, zr)
+                round_added += int(zc.shape[0])
+                by_source["zerohalf"] += int(zc.shape[0])
         if cuts:  # cover/clique reference original columns (< n_orig), still valid
             lp_data = _augment_lpdata_with_cover_cuts(lp_data, n_orig, cuts)
             round_added += len(cuts)
@@ -11107,7 +11204,7 @@ def _solve_milp_bb(
     _A_ub_m, _b_ub_m, _A_eq_m, _b_eq_m = _decompose_eq_slack_form(
         np.asarray(lp_data.A_eq), np.asarray(lp_data.b_eq), n_orig, _n_total0 - n_orig
     )
-    _cut_by_source = {"cover_clique": 0, "gomory": 0, "mir": 0, "aggregation": 0}
+    _cut_by_source = {"cover_clique": 0, "gomory": 0, "mir": 0, "aggregation": 0, "zerohalf": 0}
     try:
         _is_bin = _binary_mask(model, n_orig)
         # Conflict-graph clique edges (only worth extracting if binaries exist).
@@ -11137,12 +11234,13 @@ def _solve_milp_bb(
         if _n_cuts:
             logger.info(
                 "root cuts added %d valid inequalities "
-                "(cover/clique=%d gomory=%d mir=%d aggregation=%d)",
+                "(cover/clique=%d gomory=%d mir=%d aggregation=%d zerohalf=%d)",
                 _n_cuts,
                 _cut_by_source.get("cover_clique", 0),
                 _cut_by_source.get("gomory", 0),
                 _cut_by_source.get("mir", 0),
                 _cut_by_source.get("aggregation", 0),
+                _cut_by_source.get("zerohalf", 0),
             )
     except Exception as _cc_exc:
         logger.debug("root cuts skipped: %s", _cc_exc)

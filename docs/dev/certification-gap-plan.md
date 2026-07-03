@@ -131,6 +131,7 @@ experiment may run.
 | Phase 3 entry experiment (0b) | done — **GO on c-MIR** | (this PR) | SCIP root-bound proxy (`scripts/p3_0b_scip_rootbound.py`): median root gap closed **discopt 0.0 vs SCIP 1.0** over 8 (graphpart/ex1263/fac). SEPARATOR-QUALITY, not relaxation/branching → build native aggregation/c-MIR (§7 part 2). See §7 "0b RESULTS / VERDICT (2026-07-03)" |
 | Phase 3 1c reachability entry experiment | done — **NO-GO / re-scope** | #(prior) | Cuts made reachable+armed close ~0% (median gap-closed 0.000, best +0.55% on ex1263a) vs SCIP ~1.0. Residual is separator DEPTH, not plumbing. Do NOT build the Rust cut-callback seam yet. See §7 "Phase 3 1c" |
 | Phase 3 1d separator-family attribution | done — **build zerohalf** | (this PR) | SCIP per-separator attribution (`scripts/p3_1d_separator_attribution.py`): on graphpart `zerohalf` alone closes 60–86% of the reachable root gap and is the sole load-bearing family (leave-one-out 15–53%); every other cut family (flowcover/aggregation/cmir/clique/…) closes 0. Build target = native zero-half separator; expected ~0.6–0.9 root-gap close. See §7 "Phase 3 1d" |
+| Phase 3 zerohalf build (native {0,½}-CG separator, flagged) | done — **sound; lever INERT on graphpart (measured)** | (this PR) | Native heuristic zero-half separator (`lp/zerohalf.rs` + `zerohalf_cuts_py`), wired behind `DISCOPT_ZEROHALF` (default-OFF) into the `_solve_milp_bb` root cut loop. Validity GREEN (400-system + binary-dense property tests: no feasible point cut, >20 cuts validated; odd-cycle regression where MIR misses). ON/OFF on graphpart: **gap_closed 0.000, `incorrect_count=0`** — predicted 0.6–0.9 did NOT land: discopt's root LP optimum is a ⅓-partition vertex where every {0,½} combo is *tight, not violated* (exhaustive GF(2) nullspace search: even/odd combo exists, viol=0.0000), and `root_off` already sits at SCIP's separators-off floor. Root cause = LP vertex geometry (½-cuttable vs ⅓), not cut depth. Separator sound+reachable+ready; follow-on = separate at a ½-valued/pre-crossover point. See §7 "Phase 3 zerohalf — build results" |
 | Phase 4 T-CSE/V-segments | **locked** (§0.1.2) | — | may parallel Phase 1 once specced |
 | Phase 5 | **locked** (§0.1.2) | — | requires post-Phase-1 re-profile |
 
@@ -772,6 +773,100 @@ finding the incumbent, not a cut. So the zerohalf build's measurable target is
 the pure-integer graphpart subset, exactly where 0b/1c measured the 0% discopt
 close. Measurement-only spike: touches no discopt solver code, so no correctness
 gate applies.
+
+---
+
+### Phase 3 zerohalf — build results (2026-07-03)
+
+Built the native {0,½}-Chvátal–Gomory (zero-half) separator the 1d attribution
+named as the sole load-bearing family on graphpart. **HEURISTIC** separation
+(GF(2) Gaussian elimination on the mod-2 parity system over the active support),
+not exact/optimal — exact separation (min-weight T-join / Caprara–Fischetti
+auxiliary-graph shortest odd path) is scoped as the follow-on below.
+
+**What shipped**
+- `crates/discopt-core/src/lp/zerohalf.rs` — `separate_zerohalf(a_ub, b_ub, l, u,
+  integrality, x, tol, max_dynamism) -> Vec<ZeroHalfCut>`: scales rows to integer
+  data, reduces every column to a nonnegative variable (lower-shift /
+  upper-complement, same bound substitution as `mir.rs`), builds the mod-2 parity
+  system **over the active support only** (columns with shifted value > 0 — the
+  Caprara–Fischetti reduction; inactive columns are parity don't-cares), runs
+  GF(2) elimination to find even-coef-parity / odd-rhs-parity subsets, CG-rounds,
+  and maps back to `x`. Numeric-dynamism / max-coeff guards mirror `mir.rs`.
+- PyO3 `zerohalf_cuts_py` (`lp_bindings.rs`), registered in `lib.rs`; wired into
+  the `_solve_milp_bb` root cut loop (`_root_cover_cut_loop` → new
+  `_separate_zerohalf_cuts`) behind env `DISCOPT_ZEROHALF` (**default-OFF**), with
+  a `zerohalf` entry in the per-source cut counter (surfaced as `cuts/zerohalf`).
+
+**Soundness (the non-negotiable gate) — GREEN.** A {0,½} row combination followed
+by CG rounding is valid for the integer hull by construction, for *any* subset the
+heuristic picks; the heuristic affects only strength. Verified empirically:
+`zerohalf_validity_random_systems` (400 random integer `≤` systems, mixed
+int/continuous columns, mixed-sign finite bounds, cuttable LP points) asserts **no
+integer-feasible point of the original system is ever cut** and that **>20
+non-vacuous cuts were validated** (passes); plus `zerohalf_validity_binary_dense`
+(200 set-packing systems) and the two constructive tests. The odd-cycle regression
+`zerohalf_two_row_parity_cut` finds the triangle cut `x0+x1+x2 ≤ 1` at (½,½,½) and
+asserts single-row **MIR finds nothing** on it (the fails-before/passes-after
+differential isolating the {0,½}-only structure). `cargo test -p discopt-core`:
+383 passed; clippy 0 warnings; fmt clean.
+
+**Lever measurement (the whole point) — MEASURED SHORTFALL, reported honestly.**
+`scripts/p3_zerohalf_onoff.py`, graphpart panel routed through the cut path
+(`DISCOPT_P3_FORCE_CUT_PATH=1`), root bound at `max_nodes=1`, ON vs OFF:
+
+| instance | opt | scip_all_off | root_off | root_on | zh cuts | gap_closed |
+|---|---:|---:|---:|---:|---:|---:|
+| graphpart_2pm-0044-0044 | −13 | −16 | −16 | −16 | 0 | 0.000 |
+| graphpart_2g-0044-1601 | −9.541e5 | −1.026e6 | −1.026e6 | −1.026e6 | 0 | 0.000 |
+| graphpart_2pm-0055-0055 | −20 | −25 | −25 | −25 | 0 | 0.000 |
+| ex1263a | 19.6 | — | 19.07 | 19.07 | 0 | 0.000 |
+
+**`incorrect_count = 0`.** The predicted 0.6–0.9 root-gap close **did NOT
+materialize on discopt**: the separator fires the code path (verified: the loop is
+entered with the 384 integer `≤` rows and 93 integer cols; `_separate_zerohalf_cuts`
+is called) but emits **0 cuts** because it finds no violated {0,½} combination at
+discopt's root LP optimum.
+
+**Root cause (measured, per §0.4).** discopt's root LP optimum for graphpart is a
+**partition vertex with x_j ∈ {0, ⅓}** (a 3-partition polytope; the interior
+POUNCE point is on the same optimal face at {0, ⅓, ⅔}). At x = ⅓ every {0,½}
+combination of the tight rows is **exactly tight, not violated**: an exhaustive
+GF(2) nullspace search confirms an even-coef / odd-rhs combination of the tight
+rows *exists* (4 members) but its violation at x = ⅓ is `0.0000`. So there is
+genuinely nothing to separate. Crucially, discopt's `root_off` **already equals
+SCIP's separators-OFF LP floor** (−16 / −1.026e6 / −25, column `scip_all_off`);
+SCIP's zerohalf closes 60–86% *because SCIP's simplex lands on a ½-valued vertex
+that IS {0,½}-cuttable*, whereas discopt's LP optimum (via its own presolve/FBBT +
+crossover) sits on the ⅓ face where those same inequalities are tight. The gap is
+therefore **not separator strength** — it is *which LP vertex the relaxation
+optimum occupies*. A working, sound zero-half separator does not move discopt's
+graphpart root bound as long as the relaxation optimum is the ⅓-partition face.
+
+**What this falsifies / re-scopes.** The 1d premise "discopt gains ~0.6–0.9 of the
+root gap *if* it gains a zerohalf separator" is falsified for discopt's current
+formulation: the separator is necessary but **not sufficient** — it also needs the
+LP optimum to be zerohalf-cuttable (½-valued), which discopt's tighter
+presolve+crossover currently precludes on this class. The separator is sound,
+reachable, and ready; it is inert on graphpart until one of the following lands
+(Phase 3 follow-on, in priority order):
+1. **Separate at a ½-valued point, not the ⅓ crossover vertex.** Either
+   (a) separate zerohalf at the *pre-crossover* fractional relaxation point before
+   discopt's presolve pins the ⅓ face, or (b) inject the odd-cycle rows into a
+   *weaker* (edge-only) LP whose optimum is ½-valued, matching SCIP's separation
+   context. This is the likely lever and is a cut-*context* change, not a stronger
+   separator.
+2. **Exact/optimal zero-half separation** (min-weight T-join / Caprara–Fischetti
+   auxiliary-graph shortest odd path) replacing the GF(2) heuristic — *would not
+   help here* (the exhaustive nullspace search already proves no violated cut
+   exists at x = ⅓), so it is deprioritized behind (1) for the graphpart class,
+   but is the right build for classes whose LP optimum *is* cuttable and whose
+   heuristic-vs-exact gap is the limiter.
+
+A measured shortfall, not a failure: the separator is correct and the lever's
+non-movement is now *explained and localized* (vertex geometry, not cut depth),
+which redirects the next Phase-3 step from "build a stronger cut" to "separate at
+a cuttable point."
 
 ---
 

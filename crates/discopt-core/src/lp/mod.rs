@@ -19,3 +19,4 @@ pub mod cut_select;
 pub mod gomory;
 pub mod mir;
 pub mod simplex;
+pub mod zerohalf;

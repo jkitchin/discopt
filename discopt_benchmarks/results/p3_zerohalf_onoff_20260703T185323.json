@@ -1,0 +1,161 @@
+{
+  "cap_seconds": 45.0,
+  "rows": [
+    {
+      "instance": "graphpart_2pm-0044-0044",
+      "status": "run",
+      "oracle": -13.0,
+      "scip_all_off": -16.0,
+      "off": {
+        "status": "feasible",
+        "objective": -13.0,
+        "bound": -16.0,
+        "root_bound": -16.0,
+        "root_gap": 0.23076923076923078,
+        "node_count": 3,
+        "zerohalf_cuts": 0.0,
+        "wall": 25.572015415877104
+      },
+      "on": {
+        "status": "feasible",
+        "objective": -13.0,
+        "bound": -16.0,
+        "root_bound": -16.0,
+        "root_gap": 0.23076923076923078,
+        "node_count": 3,
+        "zerohalf_cuts": 0.0,
+        "wall": 25.13259349996224
+      },
+      "on_full": {
+        "status": "optimal",
+        "objective": -13.000000766798689,
+        "bound": -13.000000766798689,
+        "root_bound": -16.0,
+        "root_gap": 0.23076915817290952,
+        "node_count": 37,
+        "zerohalf_cuts": 0.0,
+        "wall": 32.61857995809987
+      },
+      "gap_closed": 0.0,
+      "incorrect_on": false,
+      "bad_bound": false
+    },
+    {
+      "instance": "graphpart_2g-0044-1601",
+      "status": "run",
+      "oracle": -954077.0,
+      "scip_all_off": -1025886.0,
+      "off": {
+        "status": "feasible",
+        "objective": -837480.0,
+        "bound": -1025886.0,
+        "root_bound": -1025886.0,
+        "root_gap": 0.22496776042412953,
+        "node_count": 3,
+        "zerohalf_cuts": 0.0,
+        "wall": 45.027203041128814
+      },
+      "on": {
+        "status": "feasible",
+        "objective": -837480.0,
+        "bound": -1025886.0,
+        "root_bound": -1025886.0,
+        "root_gap": 0.22496776042412953,
+        "node_count": 3,
+        "zerohalf_cuts": 0.0,
+        "wall": 45.0790478750132
+      },
+      "on_full": {
+        "status": "feasible",
+        "objective": -954077.0,
+        "bound": -1025886.0,
+        "root_bound": -1025886.0,
+        "root_gap": 0.07526541358821143,
+        "node_count": 27,
+        "zerohalf_cuts": 0.0,
+        "wall": 46.385004417039454
+      },
+      "gap_closed": 0.0,
+      "incorrect_on": false,
+      "bad_bound": false
+    },
+    {
+      "instance": "graphpart_2pm-0055-0055",
+      "status": "run",
+      "oracle": -20.0,
+      "scip_all_off": -24.999999999999996,
+      "off": {
+        "status": "node_limit",
+        "objective": null,
+        "bound": -25.0,
+        "root_bound": -25.0,
+        "root_gap": null,
+        "node_count": 1,
+        "zerohalf_cuts": 0.0,
+        "wall": 66.56567691685632
+      },
+      "on": {
+        "status": "node_limit",
+        "objective": null,
+        "bound": -25.0,
+        "root_bound": -25.0,
+        "root_gap": null,
+        "node_count": 1,
+        "zerohalf_cuts": 0.0,
+        "wall": 65.28690595831722
+      },
+      "on_full": {
+        "status": "time_limit",
+        "objective": null,
+        "bound": -25.0,
+        "root_bound": -25.0,
+        "root_gap": null,
+        "node_count": 1,
+        "zerohalf_cuts": 0.0,
+        "wall": 65.14244629070163
+      },
+      "gap_closed": 0.0,
+      "incorrect_on": false,
+      "bad_bound": false
+    },
+    {
+      "instance": "ex1263a",
+      "status": "run",
+      "oracle": 19.6,
+      "scip_all_off": null,
+      "off": {
+        "status": "node_limit",
+        "objective": null,
+        "bound": 19.066310674461867,
+        "root_bound": 19.066310674461867,
+        "root_gap": null,
+        "node_count": 3,
+        "zerohalf_cuts": 0.0,
+        "wall": 22.01276204176247
+      },
+      "on": {
+        "status": "node_limit",
+        "objective": null,
+        "bound": 19.066310674461867,
+        "root_bound": 19.066310674461867,
+        "root_gap": null,
+        "node_count": 3,
+        "zerohalf_cuts": 0.0,
+        "wall": 22.32306300010532
+      },
+      "on_full": {
+        "status": "time_limit",
+        "objective": null,
+        "bound": 19.066310674461867,
+        "root_bound": 19.066310674461867,
+        "root_gap": null,
+        "node_count": 863,
+        "zerohalf_cuts": 0.0,
+        "wall": 45.607123125344515
+      },
+      "gap_closed": 0.0,
+      "incorrect_on": false,
+      "bad_bound": false
+    }
+  ]
+}
