@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import discopt
 import discopt._jax.mccormick_lp as mc
 import numpy as np
+import pytest
 
 
 def _bilinear_obj():
@@ -84,6 +85,7 @@ def test_has_unbounded_nonlinear_col_flags_free_bilinear_var():
     assert relaxer._has_unbounded_nonlinear_col(free)
 
 
+@pytest.mark.slow
 def test_himmel16_no_false_certification():
     """End-to-end: the largest-small-hexagon model with only pairwise-diameter
     constraints has a feasible self-intersecting solution at objvar=-0.866. The

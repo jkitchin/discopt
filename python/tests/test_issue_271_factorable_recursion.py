@@ -154,6 +154,7 @@ def test_factorable_walk_under_lowered_limit(monkeypatch):
     assert isinstance(out, dm.Model)
 
 
+@pytest.mark.slow
 def test_deep_division_solve_does_not_crash(monkeypatch):
     """A deep-body model solves to a sound status, not a ``RecursionError``.
 

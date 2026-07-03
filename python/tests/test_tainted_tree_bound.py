@@ -45,6 +45,7 @@ def _has(path: str) -> bool:
     return os.path.exists(path)
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(not _has(_NVS17), reason="nvs17.nl not vendored")
 def test_uncertified_feasible_exit_reports_valid_finite_dual_bound():
     """A budget-limited nonconvex feasible exit surfaces the valid tree bound.
@@ -69,6 +70,7 @@ def test_uncertified_feasible_exit_reports_valid_finite_dual_bound():
         assert r.gap is not None and np.isfinite(r.gap)
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(not _has(_NVS17), reason="nvs17.nl not vendored")
 def test_reported_bound_is_a_valid_lower_bound_not_a_false_certificate():
     """Whatever the exit status, a reported bound never exceeds the optimum and a

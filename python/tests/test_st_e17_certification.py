@@ -52,6 +52,7 @@ def test_st_e17_certifies_to_optimum():
     assert r.bound <= r.objective + 1e-2, f"invalid dual bound {r.bound} > obj {r.objective}"
 
 
+@pytest.mark.slow
 def test_st_e17_returned_point_is_feasible():
     """The certified incumbent satisfies the original ratio constraint."""
     r = dm.from_nl(str(_NL)).solve(time_limit=90, gap_tolerance=1e-4)

@@ -88,6 +88,7 @@ class TestAmpSimplexCertificationParity:
     # never certifies (``feasible`` at any budget — a relaxation-tightness property,
     # not a backend property), so it stays short to avoid burning wall-clock. The
     # seam under test is backend *parity*, which holds at any budget.
+    @pytest.mark.slow
     @pytest.mark.parametrize("build,time_limit", [(_concave_qp, 60), (_bilinear, 5)])
     def test_same_certificate_as_default(self, build, time_limit):
         ref = build().solve(solver="amp", rel_gap=1e-4, time_limit=time_limit)

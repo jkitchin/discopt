@@ -192,6 +192,7 @@ def test_gear4_relaxation_retains_constraint_and_is_exact_at_optimum():
     assert n >= 6
 
 
+@pytest.mark.slow
 def test_gear4_solve_stays_sound():
     """End-to-end gear4 must never be certified infeasible (soundness must-gate)."""
     r = from_nl(str(_DATA / "gear4.nl")).solve(time_limit=20, max_nodes=500)

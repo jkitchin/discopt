@@ -100,6 +100,7 @@ def test_clearing_skipped_for_unbounded_slack_product():
     )
 
 
+@pytest.mark.slow
 def test_gear4_not_false_infeasible():
     """gear4 must never be reported certified-infeasible; bounds stay sound."""
     r = from_nl(str(_DATA / "gear4.nl")).solve(time_limit=10, max_nodes=200)
@@ -121,6 +122,7 @@ def test_gear4_not_false_infeasible():
         )
 
 
+@pytest.mark.slow
 def test_synthetic_unbounded_slack_quotient_not_false_infeasible():
     """Self-contained gear4-class model (issue #145): a large-coefficient quotient
     equality with unbounded continuous slacks must not be certified infeasible."""
