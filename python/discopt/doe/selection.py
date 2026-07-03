@@ -329,9 +329,7 @@ def _per_obs_loglik(experiment: Experiment, result: EstimationResult, data: dict
     response, and applies the Gaussian log-pdf ``-0.5 * [log(2πσ²) +
     ((y − ŷ)/σ)²]`` per observation.
     """
-    from discopt._jax.differentiable import _compile_parametric_node
-    from discopt._jax.parametric import extract_x_flat
-    from discopt.doe.fim import _build_p_flat
+    from discopt.parametric import compile_expression, extract_x_flat, flatten_params
 
     em = experiment.create_model(**result.parameters)
     # Pin every parameter at the fitted value so the solve is trivial.
@@ -348,7 +346,7 @@ def _per_obs_loglik(experiment: Experiment, result: EstimationResult, data: dict
     )
     solve = em.model.solve()
     x_flat = extract_x_flat(solve, em.model)
-    p_flat = _build_p_flat(em.model)
+    p_flat = flatten_params(em.model)
 
     y_hat: list[float] = []
     sigma: list[float] = []
@@ -356,7 +354,7 @@ def _per_obs_loglik(experiment: Experiment, result: EstimationResult, data: dict
     for name in em.response_names:
         if name not in data:
             continue
-        fn = _compile_parametric_node(em.responses[name], em.model)
+        fn = compile_expression(em.responses[name], em.model)
         y_hat.append(float(np.asarray(fn(x_flat, p_flat)).flat[0]))
         sigma.append(float(em.measurement_error[name]))
         y_obs.append(float(np.asarray(data[name]).flat[0]))

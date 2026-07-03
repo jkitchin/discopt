@@ -205,7 +205,7 @@ class ParametricSurrogate:
         import jax
         import jax.numpy as jnp
 
-        from discopt._jax.differentiable import _compile_parametric_node
+        from discopt.parametric import compile_expression, flatten_params, variable_slices
 
         em = self.experiment.create_model(**self.initial_guess)
         if self.response_name not in em.responses:
@@ -222,26 +222,16 @@ class ParametricSurrogate:
         self.parameter_names_ = list(em.unknown_parameters.keys())
 
         # Flat offsets for every variable in the model.
-        offsets: dict[int, int] = {}
-        offset = 0
-        for v in em.model._variables:
-            offsets[id(v)] = offset
-            offset += v.size
-        n_x = offset
+        slices = variable_slices(em.model)
+        n_x = max((sl.stop for sl in slices.values()), default=0)
 
-        design_idx = [offsets[id(em.design_inputs[n])] for n in self.input_names]
-        param_idx = [offsets[id(em.unknown_parameters[n])] for n in self.parameter_names_]
+        design_idx = [slices[em.design_inputs[n].name].start for n in self.input_names]
+        param_idx = [slices[em.unknown_parameters[n].name].start for n in self.parameter_names_]
 
         # p_flat for any model Parameters (distinct from unknown parameters).
-        p_parts: list[np.ndarray] = []
-        for p in em.model._parameters:
-            p_parts.append(np.asarray(p.value, dtype=np.float64).ravel())
-        if p_parts:
-            p_flat_const = jnp.array(np.concatenate(p_parts), dtype=jnp.float64)
-        else:
-            p_flat_const = jnp.zeros(0, dtype=jnp.float64)
+        p_flat_const = flatten_params(em.model)
 
-        response_fn = _compile_parametric_node(em.responses[self.response_name], em.model)
+        response_fn = compile_expression(em.responses[self.response_name], em.model)
         d_idx = jnp.asarray(design_idx, dtype=jnp.int32)
         p_idx = jnp.asarray(param_idx, dtype=jnp.int32)
 

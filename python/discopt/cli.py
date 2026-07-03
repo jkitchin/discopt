@@ -12,6 +12,21 @@ Usage:
 Developer-only commands (``lit-scan``, ``adversary``, ``search-arxiv``,
 ``search-openalex``, ``write-report``) live under ``discopt-dev`` in
 :mod:`discopt.dev.cli`.
+
+Plugin subcommands
+------------------
+External packages can add subcommands through the ``"discopt.cli"``
+entry-point group. The entry-point *name* is the subcommand name; the value
+must resolve to a module exposing ``add_subparser(subparsers) -> None``
+(which registers a subparser with exactly that name) and
+``run(args) -> int | None``. Example::
+
+    [project.entry-points."discopt.cli"]
+    doe = "discopt.doe.cli"
+
+Plugin modules are imported lazily: only for their own subcommand or when
+full help is requested, never on the built-in command paths. Built-in names
+cannot be shadowed.
 """
 
 import argparse
@@ -449,6 +464,31 @@ def _cmd_solve(args):
     sys.exit(0 if result.status in ("optimal", "feasible") else 1)
 
 
+_BUILTIN_COMMANDS = frozenset(
+    {
+        "about",
+        "test",
+        "convert",
+        "gams-register",
+        "solve",
+        "daemon",
+        "gams-daemon",
+        "gams-verify",
+        "install-skills",
+        "tutor",
+        "help",
+    }
+)
+
+
+def _cli_plugin_entry_points():
+    """``discopt.cli`` entry points, sorted by name. Separate function = test seam."""
+    try:
+        return sorted(importlib.metadata.entry_points(group="discopt.cli"), key=lambda ep: ep.name)
+    except Exception:
+        return []
+
+
 def main():
     parser = argparse.ArgumentParser(prog="discopt", description="discopt CLI")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -583,20 +623,40 @@ def main():
     )
     p_skills.set_defaults(func=_cmd_install_skills)
 
-    # The tutor and (especially) DOE subparsers pull heavy optional deps
-    # (``discopt.doe.cli`` ~0.4 s: streamlit/pandas), so register them lazily --
-    # only for their own command or when full help is requested. This keeps every
-    # other command (notably ``discopt solve``) at the light CLI floor.
+    # The tutor subparser and plugin subcommands can pull heavy optional deps
+    # (e.g. ``discopt.doe.cli`` ~0.4 s: streamlit/pandas), so register them
+    # lazily -- only for their own command or when full help is requested. This
+    # keeps every other command (notably ``discopt solve``) at the light CLI
+    # floor; built-in commands never even scan the entry-point metadata.
     _argv1 = sys.argv[1] if len(sys.argv) > 1 else None
     _want_all = _argv1 in (None, "help", "-h", "--help")
     if _want_all or _argv1 == "tutor":
         from discopt.tutor import add_subparser as _add_tutor_subparser
 
         _add_tutor_subparser(subparsers)
-    if _want_all or _argv1 == "doe":
-        from discopt.doe.cli import add_subparser as _add_doe_subparser
 
-        _add_doe_subparser(subparsers)
+    plugin_runners = {}
+    if _want_all or _argv1 not in _BUILTIN_COMMANDS:
+        for ep in _cli_plugin_entry_points():
+            if ep.name in _BUILTIN_COMMANDS or ep.name in plugin_runners:
+                print(
+                    f"warning: ignoring discopt.cli plugin {ep.name!r} "
+                    f"({ep.value}): name already taken",
+                    file=sys.stderr,
+                )
+                continue
+            if not (_want_all or _argv1 == ep.name):
+                continue
+            try:
+                mod = ep.load()
+                mod.add_subparser(subparsers)
+                plugin_runners[ep.name] = mod.run
+            except Exception as exc:
+                msg = f"discopt.cli plugin {ep.name!r} ({ep.value}) failed to load: {exc}"
+                if _argv1 == ep.name:
+                    print(f"Error: {msg}", file=sys.stderr)
+                    sys.exit(1)
+                print(f"warning: {msg} (skipped)", file=sys.stderr)
 
     p_help = subparsers.add_parser("help", help="Show this help message and exit")
     p_help.set_defaults(func=lambda _args: parser.print_help())
@@ -609,10 +669,9 @@ def main():
         from discopt.tutor import run as _run_tutor
 
         sys.exit(_run_tutor(args) or 0)
-    if args.command == "doe":
-        from discopt.doe.cli import run as _run_doe
-
-        sys.exit(_run_doe(args) or 0)
+    runner = plugin_runners.get(args.command)
+    if runner is not None:
+        sys.exit(runner(args) or 0)
     args.func(args)
 
 

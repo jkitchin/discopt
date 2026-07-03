@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "discopt"
-version = "0.5.1.dev0"
+version = "0.6.0.dev0"
 description = "Hybrid MINLP solver combining Rust and JAX"
 requires-python = ">=3.10"
 authors = [{name = "John Kitchin"}]
@@ -95,6 +95,12 @@ discopt-gams = "discopt.gams.link:main"
 # 'discopt' solver with Pyomo's SolverFactory.
 [project.entry-points."pyomo.solvers"]
 discopt = "discopt.pyomo.solver"
+
+# CLI plugin subcommands (see the protocol in discopt/cli.py). The doe entry
+# will move to the standalone discopt-doe package when the module is extracted
+# (#389); registering the in-tree module here exercises the same mechanism.
+[project.entry-points."discopt.cli"]
+doe = "discopt.doe.cli"
 
 [tool.maturin]
 manifest-path = "crates/discopt-python/Cargo.toml"

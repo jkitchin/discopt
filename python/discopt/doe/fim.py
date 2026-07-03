@@ -106,15 +106,17 @@ def _design_source_map(em: ExperimentModel) -> dict | None:
     Returns ``None`` when the model has constraints or any other variable (an
     implicit state that genuinely requires a solve).
     """
+    from discopt.parametric import variable_slices
+
     if getattr(em.model, "_constraints", None):
         return None
-    src: dict[int, tuple[str, str, Any]] = {}
+    src: dict[str, tuple[str, str, Any]] = {}
     for name, var in em.unknown_parameters.items():
-        src[id(var)] = ("param", name, var)
+        src[var.name] = ("param", name, var)
     for name, var in em.design_inputs.items():
-        src[id(var)] = ("design", name, var)
-    for v in em.model._variables:
-        if id(v) not in src:
+        src[var.name] = ("design", name, var)
+    for vname in variable_slices(em.model):
+        if vname not in src:
             return None
     return src
 
@@ -163,12 +165,14 @@ def _assemble_x_flat_direct(em, param_values, design_values):
     :func:`_design_source_map`). The result is identical to solving
     ``min Σ(θ - θ_nom)²`` with the design fixed, but with no solver call.
     """
+    from discopt.parametric import variable_slices
+
     src = _design_source_map(em)
     if src is None:
         return None
     parts = []
-    for v in em.model._variables:
-        arr = _direct_var_values(src[id(v)], param_values, design_values)
+    for vname in variable_slices(em.model):
+        arr = _direct_var_values(src[vname], param_values, design_values)
         if arr is None:
             return None
         parts.append(arr)
@@ -179,14 +183,17 @@ def _assemble_x_flat_direct(em, param_values, design_values):
 
 def _assemble_x_flat_batch_direct(em, param_values, design_points):
     """Stack ``x*`` for many design points into one ``(B, n)`` array, or ``None``."""
+    from discopt.parametric import variable_slices
+
     src = _design_source_map(em)
     if src is None:
         return None
+    var_names = list(variable_slices(em.model))
     rows = []
     for dp in design_points:
         parts = []
-        for v in em.model._variables:
-            arr = _direct_var_values(src[id(v)], param_values, dp)
+        for vname in var_names:
+            arr = _direct_var_values(src[vname], param_values, dp)
             if arr is None:
                 return None
             parts.append(arr)
@@ -236,8 +243,7 @@ def compute_fim(
         FIM, Jacobian, and optimality metrics.
     """
 
-    from discopt._jax.differentiable import _compile_parametric_node
-    from discopt._jax.parametric import extract_x_flat
+    from discopt.parametric import compile_expression, extract_x_flat, flatten_params
 
     # Build the model at nominal parameter values
     em = experiment.create_model(**param_values)
@@ -274,14 +280,14 @@ def compute_fim(
     # Compile response functions
     response_fns = []
     for name in em.response_names:
-        fn = _compile_parametric_node(em.responses[name], em.model)
+        fn = compile_expression(em.responses[name], em.model)
         response_fns.append(fn)
 
     # Find indices of unknown parameter variables in x_flat
     param_indices = _get_param_indices(em)
 
     # Build p_flat for any model Parameters (distinct from unknown_parameters)
-    p_flat = _build_p_flat(em.model)
+    p_flat = flatten_params(em.model)
 
     if method == "autodiff":
         J = _compute_jacobian_autodiff(response_fns, x_flat, p_flat, param_indices)
@@ -331,7 +337,7 @@ def compute_fim_batch(
     a non-autodiff ``method``, so the result is always identical to calling
     :func:`compute_fim` on each point.
     """
-    from discopt._jax.differentiable import _compile_parametric_node
+    from discopt.parametric import compile_expression, flatten_params
 
     if not design_points:
         return []
@@ -352,9 +358,9 @@ def compute_fim_batch(
     import jax
     import jax.numpy as jnp
 
-    response_fns = [_compile_parametric_node(em.responses[n], em.model) for n in em.response_names]
+    response_fns = [compile_expression(em.responses[n], em.model) for n in em.response_names]
     param_indices = _get_param_indices(em)
-    p_flat = _build_p_flat(em.model)
+    p_flat = flatten_params(em.model)
 
     def response_vector(x_flat_arg):
         return jnp.stack([fn(x_flat_arg, p_flat) for fn in response_fns])
@@ -409,15 +415,15 @@ def _make_direct_fim_evaluator(
     import jax
     import jax.numpy as jnp
 
-    from discopt._jax.differentiable import _compile_parametric_node
+    from discopt.parametric import compile_expression, flatten_params
 
     em = experiment.create_model(**param_values)
     if _design_source_map(em) is None:
         return None
 
-    response_fns = [_compile_parametric_node(em.responses[n], em.model) for n in em.response_names]
+    response_fns = [compile_expression(em.responses[n], em.model) for n in em.response_names]
     param_indices = _get_param_indices(em)
-    p_flat = _build_p_flat(em.model)
+    p_flat = flatten_params(em.model)
 
     def response_vector(x_flat_arg):
         return jnp.stack([fn(x_flat_arg, p_flat) for fn in response_fns])
@@ -866,28 +872,14 @@ def check_identifiability(
 
 def _get_param_indices(em: ExperimentModel) -> list[int]:
     """Find indices of unknown parameter variables in the flat x vector."""
-    param_indices = []
-    for name, var in em.unknown_parameters.items():
-        offset = 0
-        for v in em.model._variables:
-            if v is var:
-                for i in range(v.size):
-                    param_indices.append(offset + i)
-                break
-            offset += v.size
+    from discopt.parametric import variable_slices
+
+    slices = variable_slices(em.model)
+    param_indices: list[int] = []
+    for var in em.unknown_parameters.values():
+        sl = slices[var.name]
+        param_indices.extend(range(sl.start, sl.stop))
     return param_indices
-
-
-def _build_p_flat(model):
-    """Build parameter flat vector for any model Parameters."""
-    import jax.numpy as jnp
-
-    p_parts = []
-    for p in model._parameters:
-        p_parts.append(np.asarray(p.value, dtype=np.float64).ravel())
-    if p_parts:
-        return jnp.array(np.concatenate(p_parts), dtype=jnp.float64)
-    return jnp.zeros(0, dtype=jnp.float64)
 
 
 def _compute_jacobian_autodiff(response_fns, x_flat, p_flat, param_indices):

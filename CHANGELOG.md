@@ -10,6 +10,29 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Added
+
+- **Public parametric-compilation API** (`feat(api)`, #389). New
+  `discopt.parametric` module — the stable contract for external plugins
+  (discopt-doe, discopt-mkm, ...) that compile model expressions into
+  JAX-differentiable functions of `(x_flat, p_flat)`: `compile_expression`,
+  `compile_response_function`, `extract_x_flat`, `flatten_params`,
+  `param_total_size`, `variable_total_size`, `variable_slices`. The in-tree
+  DOE module and `discopt.estimate` now consume this API instead of reaching
+  into `discopt._jax` internals.
+- **Generic CLI plugin subcommands** (`feat(cli)`, #389). External packages
+  can register subcommands via the `"discopt.cli"` entry-point group (name =
+  subcommand; value = module exposing `add_subparser(subparsers)` and
+  `run(args)`). Plugin modules load lazily — only for their own subcommand or
+  full help — and built-in names cannot be shadowed. The in-tree `discopt doe`
+  subcommand now registers through this mechanism, ahead of its extraction to
+  the standalone `discopt-doe` package (#389).
+
+### Changed
+
+- Version bumped to 0.6.0.dev0; 0.6.0 will be the first release with the DOE
+  module extracted to the `discopt-doe` plugin package.
+
 ## [0.5.0] - 2026-07-01
 
 ### Added
