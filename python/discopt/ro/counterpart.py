@@ -158,6 +158,17 @@ class RobustCounterpart:
 
         strategy = self._build_strategy()
         strategy.build()
+
+        # Universal soundness guard (RO-2): a correct counterpart eliminates every
+        # uncertain parameter. If any survived, the pattern was silently left at
+        # nominal — refuse loudly rather than return a non-robust model.
+        from discopt.ro.formulations._common import assert_no_uncertain_params_remain
+
+        assert_no_uncertain_params_remain(
+            self._model,
+            {u.parameter.name for u in self._uncertainty_sets},
+            kind=self.kind,
+        )
         self._formulated = True
 
     def _build_strategy(self):

@@ -322,6 +322,22 @@ def _contains_variable(expr) -> bool:
     return False
 
 
+def _var_provably_nonneg(expr) -> bool:
+    """True only if *expr* is a Variable expression provably >= 0 (lb >= 0).
+
+    Conservative: returns False for anything but a bare ``Variable`` with a
+    non-negative lower bound (index expressions, sums, products, etc. resolve to
+    False and are routed through the sign-safe |coeff| linearization). Used to
+    keep the sign-tracking fast path only where it is sound (RO-1).
+    """
+    from discopt.modeling.core import Variable
+
+    if isinstance(expr, Variable):
+        lb = getattr(expr, "lb", None)
+        return lb is not None and bool(np.all(np.asarray(lb) >= 0))
+    return False
+
+
 def _has_bilinear_param_var(expr, param_names: set[str]) -> bool:
     """Check whether expr has a true bilinear product: Variable * f(Parameter).
 
@@ -364,11 +380,25 @@ def _has_bilinear_param_var(expr, param_names: set[str]) -> bool:
                     return True  # left has var, right has both var and param
                 if r_var and l_param and l_var:
                     return True  # right has var, left has both var and param
-                # Also: variable-only * param-containing (but not a bare Parameter)
+                # Variable-only * param-containing expression, e.g. Y*(p - p_bar).
                 if l_var and not l_param and r_param and not isinstance(expr.right, Parameter):
                     return True
                 if r_var and not r_param and l_param and not isinstance(expr.left, Parameter):
                     return True
+                # RO-1: bare Parameter * Variable (`p * x`). Sign-tracking treats
+                # the parameter AS the coefficient and picks its worst-case value
+                # by sign — correct ONLY when the variable factor is provably
+                # nonnegative. For a sign-indefinite variable the worst-case
+                # parameter sign depends on the (unknown) sign of the variable, so
+                # sign-tracking under-protects (returns a non-counterpart). Route
+                # such terms through the |coeff| linearization path, which is
+                # correct for any sign; keep sign-tracking only for x >= 0.
+                if l_var and not l_param and isinstance(expr.right, Parameter):
+                    if not _var_provably_nonneg(expr.left):
+                        return True
+                if r_var and not r_param and isinstance(expr.left, Parameter):
+                    if not _var_provably_nonneg(expr.right):
+                        return True
         return _has_bilinear_param_var(expr.left, param_names) or _has_bilinear_param_var(
             expr.right, param_names
         )

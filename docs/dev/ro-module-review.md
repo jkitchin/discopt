@@ -20,10 +20,33 @@ wrong bound in the global solver.
 
 ## 1. Summary of findings
 
+> **✅ RESOLVED RO-1, RO-2** — `python/tests/test_ro_soundness.py` (this PR).
+> - **RO-1** (`box.py`): `_has_bilinear_param_var` now routes a bare
+>   `Parameter * Variable` through the `|coeff|` linearization path whenever the
+>   variable factor is not provably non-negative (new `_var_provably_nonneg`
+>   helper); sign-tracking is kept only for `x ≥ 0`, where it is sound and
+>   result-neutral. The repro (`max x s.t. p·x ≤ −1`) now returns the true robust
+>   `x = −2` (was −0.667, which violated the constraint at `p = 0.5`).
+> - **RO-2** (universal guard): `RobustCounterpart.formulate()` now calls
+>   `assert_no_uncertain_params_remain()` after every strategy build — if any
+>   uncertain parameter survives (an unsupported pattern was silently left at
+>   nominal), it raises `NotImplementedError` instead of returning a non-robust
+>   model. This converts the whole silent-non-robust class (RO-2 and the
+>   leftover-parameter cases of RO-4/RO-5/RO-6/RO-8) from silent to loud in one
+>   place. Scalar `p·x` and elementwise `dm.sum(p·x)` ellipsoidal now refuse
+>   loudly; the blessed `p @ x` / constant-coeff patterns still formulate cleanly.
+>
+> Verified fails-before/passes-after (4 tests fail on the pre-fix code); 96 ro
+> tests pass. **Still open:** RO-3 is *sound but over-conservative* (protects a
+> superset — not a false certificate), and RO-4/RO-5/RO-6 cases that silently
+> *substitute the wrong value* (rather than leaving a parameter) are not caught by
+> the guard; both are follow-ups, not blocking soundness holes. The full finding
+> text is preserved below.
+
 | # | Severity | Component | Finding |
 |---|----------|-----------|---------|
-| RO-1 | **P0 soundness** | `formulations/_common.py` (box path) | Sign-tracking assumes the parameter's variable coefficient is **nonnegative**; with a variable that can be negative the "robust" counterpart **under-protects** — returned solution violates the constraint at in-set realizations [CONFIRMED] |
-| RO-2 | **P0 soundness** | `formulations/ellipsoidal.py` | Only the literal `p @ x` / `x @ p` MatMul pattern is robustified; every other appearance of the parameter (`p * x`, `dm.sum(p*x)`, RHS `h(x) <= p`) is **left at nominal with zero penalty — silently non-robust** [CONFIRMED: constraint object provably unchanged; scalar case returns the nominal optimum] |
+| RO-1 | **P0 soundness** — ✅ RESOLVED | `formulations/_common.py` (box path) | Sign-tracking assumes the parameter's variable coefficient is **nonnegative**; with a variable that can be negative the "robust" counterpart **under-protects** — returned solution violates the constraint at in-set realizations [CONFIRMED] |
+| RO-2 | **P0 soundness** — ✅ RESOLVED | `formulations/ellipsoidal.py` | Only the literal `p @ x` / `x @ p` MatMul pattern is robustified; every other appearance of the parameter (`p * x`, `dm.sum(p*x)`, RHS `h(x) <= p`) is **left at nominal with zero penalty — silently non-robust** [CONFIRMED: constraint object provably unchanged; scalar case returns the nominal optimum] |
 | RO-3 | **P0 method** | `uncertainty.py:budget_uncertainty_set` + `polyhedral.py` | The stored `A,b` has only the all-plus/all-minus budget facets (2 of the 2^k needed); the compact `_is_budget/_delta/_gamma` attributes are **never read** by any formulation — the "Bertsimas–Sim" counterpart protects against a strict superset, **2× over-conservative** in mixed-sign directions at k=2 [CONFIRMED: support of [1,−1] = 2.0 vs true 1.0] |
 | RO-4 | **P1 soundness** | `_common.py` | Division/power propagate sign **without flipping**: `c/p` substitutes the wrong bound (non-conservative); non-monotone dependence (`p**2` on a straddling interval) picks the wrong endpoint [BY INSPECTION — mechanism unambiguous] |
 | RO-5 | P1 soundness | `polyhedral.py:_eval_constant_expr` | Unknown node types (SumExpression, MatMul, FunctionCall, IndexExpression) **evaluate to 0.0 silently** — a constant-coefficient constraint written with any of those shapes gets **zero protection** [BY INSPECTION] |
