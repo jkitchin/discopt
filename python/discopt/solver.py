@@ -4191,6 +4191,21 @@ def solve_model(
         tree.set_nonconvex(True)
     _gap_certified = True
 
+    # --- Soundness (C-1): distinguish a PROVEN-infeasible fathom from a merely
+    # non-rigorous one, exactly as ``_solve_nlp_bb`` does with
+    # ``_unconverged_fathom``. A node fathomed on an empty McCormick/LP
+    # relaxation over a finite box (``node_infeasible_mask``) or on a
+    # ``SolveStatus.INFEASIBLE`` certificate is a valid infeasibility proof. A
+    # node that merely carries the failure sentinel because its local NLP failed
+    # / diverged / returned a constraint-violating iterate is NON-rigorous — it
+    # does not prove the subtree empty. If the tree later exhausts with no
+    # incumbent, an "infeasible" verdict is only sound when NO node was fathomed
+    # non-rigorously; otherwise feasibility is genuinely UNKNOWN and reporting
+    # "infeasible" would be a false certificate (the worst-class error). Set by a
+    # single authoritative per-batch sweep below (any sentinel-without-proof node)
+    # and consumed in the finalize else-branch.
+    _nonrigorous_fathom = False
+
     # Sense-derived negation flag for the internal (minimization) B&B. Unlike
     # ``_mc_negate`` below — which is only assigned correctly inside the
     # McCormick "nlp"/"midpoint" setup — this is valid in every relaxation
@@ -5631,6 +5646,21 @@ def solve_model(
                     _gap_certified = False
         jax_time += time.perf_counter() - t_jax_start
 
+        # C-1 (path-agnostic, covers convex + nonconvex, batch + serial): any node
+        # entering the tree with the failure sentinel but WITHOUT a rigorous
+        # infeasibility certificate (``node_infeasible_mask`` — an empty McCormick/
+        # LP relaxation over the finite box) is being fathomed non-rigorously. Its
+        # subtree is not proven empty, so if the tree later exhausts with no
+        # incumbent we must not declare the model "infeasible". The per-site flags
+        # above already cover the nonconvex decertify branches; this final sweep is
+        # the authoritative guard and also catches the convex path (whose local NLP
+        # objective is a valid bound but whose constraint-violating / failed nodes
+        # still get sentinelled with no proof).
+        for i in range(n_batch):
+            if result_lbs[i] >= _SENTINEL_THRESHOLD and not node_infeasible_mask[i]:
+                _nonrigorous_fathom = True
+                break
+
         if np.any(node_infeasible_mask):
             for idx in np.flatnonzero(node_infeasible_mask):
                 i = int(idx)
@@ -6752,9 +6782,24 @@ def solve_model(
         elif wall_time >= time_limit:
             status = "time_limit"
             _gap_certified = False
+        elif _nonrigorous_fathom:
+            # C-1: the tree exhausted with no incumbent, but at least one node was
+            # fathomed on a NON-rigorous failure (its local NLP failed / diverged /
+            # returned a constraint-violating iterate and it was sentinelled with no
+            # empty-relaxation or SolveStatus.INFEASIBLE certificate). A non-rigorous
+            # failure does NOT prove a subtree empty, so we cannot soundly claim the
+            # model is infeasible — its feasibility is genuinely UNDETERMINED.
+            # Reporting "infeasible" here would be a false certificate (the
+            # worst-class error: a feasible model declared infeasible). Report
+            # "unknown" instead, exactly as the _solve_nlp_bb path does with
+            # _unconverged_fathom. Conservative by design: soundness over capability.
+            status = "unknown"
+            _gap_certified = False
         else:
-            # Tree exhausted with no feasible node: infeasibility *is* a certified
-            # conclusion, so leave _gap_certified untouched.
+            # Tree exhausted with no feasible node and every fathom was a valid
+            # certificate (empty McCormick/LP relaxation over a finite box or
+            # SolveStatus.INFEASIBLE): infeasibility *is* a certified conclusion, so
+            # leave _gap_certified untouched.
             status = "infeasible"
 
     from discopt.modeling.core import ObjectiveSense
