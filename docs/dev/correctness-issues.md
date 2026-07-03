@@ -763,7 +763,7 @@ warn visibly (option b), or raise (option c); a test locks the chosen behavior;
 docs updated; standing gates pass.
 
 **Log:** 2026-07-03, status open→fixed (branch `fix-c6-integer-var-silent-clamp`,
-PR #<TBD>). **Confirmed** the mechanism precisely: user-provided `lb`/`ub` were
+PR #448). **Confirmed** the mechanism precisely: user-provided `lb`/`ub` were
 *already* honored exactly (a repro with `integer("n", lb=-5, ub=10)` → stored
 `[-5, 10]`; `ub=5e6` → stored `5e6`) — the bug was the *silent* substitution of
 the finite default `[0, 1e6]` whenever a bound was left unspecified, so a model
