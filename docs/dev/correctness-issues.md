@@ -149,7 +149,7 @@ instead of intersecting with stale positional entries.
   sound "never cut a feasible point" oracle, no dense solver needed).
 - **Gates:** `cargo test -p discopt-core` 371 lib + 4 determinism + 1 doctest
   green, no warnings; `pytest -m smoke` 211 passed / 1 skipped (extension rebuilt
-  via `maturin develop --release`); adversarial suite 10 passed. PR: (pending).
+  via `maturin develop --release`); adversarial suite 10 passed. PR: #399.
 
 ---
 
