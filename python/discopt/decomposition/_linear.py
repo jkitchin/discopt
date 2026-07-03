@@ -110,6 +110,18 @@ def extract_linear(model: Model) -> LinearModel:
     return LinearModel(n, rows_coeff, rows_rhs, rows_source, c_vec, c_off, minimize)
 
 
+def relative_gap(ub: float, lb: float) -> float:
+    """Relative optimality gap ``(ub - lb) / max(1, |ub|, |lb|)``.
+
+    The ``max(1, ...)`` denominator (rather than ``|ub| + eps``) keeps the gap
+    well-scaled when the objective is near zero: a tiny ``|ub|`` would otherwise
+    inflate the relative gap and prevent convergence on problems whose optimum is
+    close to 0 (T0.5).
+    """
+    denom = max(1.0, abs(ub), abs(lb))
+    return (ub - lb) / denom
+
+
 def solution_dict(model: Model, x_full: np.ndarray) -> dict[str, np.ndarray]:
     """Split a flat solution vector into a name -> reshaped-array dict."""
     out: dict[str, np.ndarray] = {}
@@ -121,4 +133,4 @@ def solution_dict(model: Model, x_full: np.ndarray) -> dict[str, np.ndarray]:
     return out
 
 
-__all__ = ["LinearModel", "extract_linear", "solution_dict"]
+__all__ = ["LinearModel", "extract_linear", "relative_gap", "solution_dict"]

@@ -40,6 +40,16 @@ at a converged KKT point (``anchor = v(x̂)``, tight). The master
 therefore yields a rigorous lower bound. When the recourse is *infeasible* at a
 0/1 first-stage point we exclude that point with a **no-good cut** (rigorous: a
 point whose recourse is infeasible cannot be part of any feasible solution).
+Infeasibility is **certified by a feasibility-phase NLP** before any point is
+excluded (:mod:`._feasibility`): the recourse NLP failing is not proof of
+infeasibility (the backend reports a local infeasibility verdict as an error,
+indistinguishable from a numerical failure), so a transient solver failure at the
+optimum must never trigger an excluding cut. A recourse solve that fails without
+the phase-1 NLP certifying infeasibility is retried once from a perturbed start;
+if it still fails, the solve downgrades to heuristic mode (``bound=None``) rather
+than risk cutting off the optimum. A *master-only nonlinear* constraint is
+rejected up front (it cannot be enforced by the recourse NLP, which sees the
+master variables fixed).
 
 Soundness is gated on convexity: the reported ``bound`` is valid only when the
 objective and all constraints are convex (checked with
@@ -63,7 +73,8 @@ import time
 
 import numpy as np
 
-from discopt.decomposition._linear import solution_dict
+from discopt.decomposition._linear import relative_gap, solution_dict
+from discopt.decomposition.benders._feasibility import certify_recourse_feasibility
 from discopt.decomposition.structure import (
     DecompositionStructure,
     detect_decomposition,
@@ -208,6 +219,12 @@ def solve_gbd(
     b_m_rows: list[float] = []  # A_m x <= b_m
     sub_mask = np.zeros(n_vars, dtype=bool)
     sub_mask[scols] = True
+    # An all-0/1 master can enforce a master-only nonlinear constraint rigorously
+    # via no-good cuts (finitely many points); a non-binary master cannot, so
+    # such a constraint is rejected up front rather than failing mid-solve (C2).
+    all_binary_master = bool(
+        np.all(master_int) and all(lb_all[i] >= -1e-9 and ub_all[i] <= 1 + 1e-9 for i in mcols)
+    )
     for c in model._constraints:
         if not isinstance(c, Constraint):
             raise NotImplementedError(
@@ -215,7 +232,24 @@ def solve_gbd(
             )
         coeffs = _extract_body_coeffs(c.body, model, n_vars) if _is_linear(c.body) else None
         if coeffs is None:
-            continue  # nonlinear: handled inside the recourse NLP
+            # Nonlinear constraint. It is handled inside the recourse NLP only if
+            # it actually touches a recourse variable; a *master-only* nonlinear
+            # constraint would silently degrade to a per-point feasibility check
+            # (one no-good cut at a time, or a mid-solve error). Reject it up
+            # front (C2) — the module docstring documents this restriction.
+            from discopt._jax.gdp_reformulate import _collect_variables
+
+            support_names = set(_collect_variables(c.body))
+            complicating_names = set(structure.complicating_vars)
+            if support_names and support_names <= complicating_names and not all_binary_master:
+                raise NotImplementedError(
+                    "GBD v1 does not support a master-only nonlinear constraint "
+                    f"({getattr(c, 'name', None) or 'unnamed'!r}) with a non-binary "
+                    "first-stage: it references only first-stage variables and cannot "
+                    "be enforced by the recourse NLP. Model it so it also involves a "
+                    "recourse variable, or solve the model with Model.solve()."
+                )
+            continue  # nonlinear, touches recourse: handled inside the recourse NLP
         vec = np.asarray(coeffs[0], dtype=np.float64)
         if np.any(np.abs(vec[sub_mask]) > 0):
             continue  # touches a recourse variable: handled inside the recourse NLP
@@ -238,9 +272,6 @@ def solve_gbd(
     b_m = np.array(b_m_rows) if b_m_rows else np.zeros(0)
 
     master_bounds = [(float(lb_all[i]), float(ub_all[i])) for i in mcols]
-    all_binary_master = bool(
-        np.all(master_int) and all(lb_all[i] >= -1e-9 and ub_all[i] <= 1 + 1e-9 for i in mcols)
-    )
 
     # Accumulated cuts on (x, eta): coeff_x (n_master,), coeff_eta, rhs (<=).
     cut_x: list[np.ndarray] = []
@@ -283,31 +314,10 @@ def solve_gbd(
             gap_tolerance=gap_tolerance,
         )
 
-    def _recourse(x_hat: np.ndarray):
-        """Fix master vars at x̂, solve the recourse NLP.
-
-        Returns ('opt', v, x_full, anchor, s) where ``v`` is the recourse primal
-        value (a real feasible cost, used for the incumbent), and ``(anchor, s)``
-        define the **rigorous Lagrangian-dual cut** ``eta >= anchor + s^T(x-x̂)``;
-        or ('infeas', None, None, None, None).
-
-        Cut soundness — the Lagrangian dual value, not the primal. With
-        sign-projected (dual-feasible) multipliers ``mu`` and the Lagrangian
-        ``L(x,y) = f(x,y) + mu^T g(x,y)`` (jointly convex on a convex model), the
-        joint-subgradient inequality at the returned point ``(x̂, y*)`` gives, for
-        *every* master point x,
-
-            v_true(x) >= min_y L(x,y) >= [L(x̂,y*) + m_y] + grad_x L^T (x - x̂),
-
-        where ``m_y = min over the recourse box of grad_y L^T (y - y*)`` is the
-        closed-form box minimum. So ``anchor = L(x̂,y*) + m_y`` is a valid lower
-        bound on the recourse value for any *approximate* recourse solution —
-        robust to an inexact NLP primal/multipliers, the analogue of the
-        complete-dual cut used by classical Benders. ``L(x̂,y*) <= f(x̂,y*)`` (the
-        penalty ``mu^T g <= 0`` on the feasible point) and ``m_y <= 0``, so the
-        anchor never exceeds the primal; at a converged KKT point both terms
-        vanish and ``anchor = v``.
-        """
+    def _attempt_recourse(x_hat: np.ndarray, perturb: bool):
+        """One recourse-NLP solve at the fixed x̂. Returns an ``('opt', ...)`` tuple
+        (see :func:`_recourse` for the anchor derivation) or ``('nofeas', ...)``
+        when the solve produced no primal-feasible recourse point."""
         sub_lb = lb_all.copy()
         sub_ub = ub_all.copy()
         sub_lb[mcols] = x_hat
@@ -321,16 +331,22 @@ def solve_gbd(
 
         proxy = _BoundsProxy(evaluator, sub_lb, sub_ub)
         x0 = np.clip(0.5 * (sub_lb + sub_ub), -1e8, 1e8)
+        if perturb:
+            # Deterministic interior perturbation of the recourse start (fixed h).
+            span = np.where(np.isfinite(sub_ub - sub_lb), sub_ub - sub_lb, 0.0)
+            span = np.clip(span, 0.0, 2e8)
+            h = np.cos(np.arange(n_vars, dtype=np.float64) + 1.0)
+            x0 = np.clip(x0 + 0.1 * span * h, sub_lb, sub_ub)
         try:
             res = solve_nlp(proxy, x0, options={"print_level": 0, "max_iter": 300})  # type: ignore[arg-type]
         except Exception:
-            return "infeas", None, None, None, None, True
+            return ("nofeas", None, None, None, None, True)
 
         feasible = res.x is not None and (
             res.status == SolveStatus.OPTIMAL or _is_primal_feasible(evaluator, res.x)
         )
         if not feasible:
-            return "infeas", None, None, None, None, True
+            return ("nofeas", None, None, None, None, True)
 
         x_full = np.asarray(res.x, dtype=np.float64)
         v = float(evaluator.evaluate_objective(x_full))
@@ -378,6 +394,64 @@ def solve_gbd(
         anchor = (l0 + m_y) if finite_anchor else v
         return "opt", v, x_full, anchor, s, finite_anchor
 
+    def _recourse(x_hat: np.ndarray):
+        """Fix master vars at x̂ and classify the recourse (C1-safe).
+
+        Returns one of:
+
+        - ``('opt', v, x_full, anchor, s, finite_anchor)`` — a primal-feasible
+          recourse point ``x_full`` with value ``v`` and the rigorous
+          Lagrangian-dual cut data ``(anchor, s)``. With sign-projected
+          (dual-feasible) multipliers ``mu`` and ``L(x,y) = f + mu^T g`` (jointly
+          convex on a convex model), the joint-subgradient inequality at
+          ``(x̂, y*)`` gives, for every master point x,
+          ``v_true(x) >= [L(x̂,y*) + m_y] + grad_x L^T (x - x̂)`` where
+          ``m_y = min over the recourse box of grad_y L^T (y - y*)`` is the
+          closed-form box minimum. So the anchor is a valid lower bound for any
+          approximate recourse solution.
+        - ``('infeas_certified', ...)`` — a **feasibility-phase NLP** certified
+          that no recourse point exists at x̂ (``t* > feas_tol`` at phase-1
+          optimality). Only then may the master exclude x̂.
+        - ``('fail', ...)`` — the recourse solve failed *and* the phase-1 NLP did
+          not certify infeasibility (it reported feasible, or itself failed to
+          converge). x̂ must **not** be excluded; the caller downgrades to
+          heuristic mode. This is the C1 fix: a transient NLP failure at the
+          optimum can no longer be mistaken for infeasibility.
+        """
+        kind = _attempt_recourse(x_hat, perturb=False)
+        if kind[0] == "opt":
+            return kind
+        # The recourse solve found no feasible point. Certify *why* before
+        # excluding x̂: distinguish genuine infeasibility from a solver failure.
+        verdict, _info = certify_recourse_feasibility(
+            evaluator,
+            _cl,
+            _cu,
+            _pinned_bounds(x_hat),
+            _pinned_upper(x_hat),
+            nlp_solver=nlp_solver,
+            feas_tol=1e-6,
+        )
+        if verdict == "infeasible":
+            return ("infeas_certified", None, None, None, None, True)
+        # Phase-1 says the recourse is (probably) feasible, or gave no verdict:
+        # the first solve failed for another reason. Retry once from a perturbed
+        # start before giving up.
+        kind2 = _attempt_recourse(x_hat, perturb=True)
+        if kind2[0] == "opt":
+            return kind2
+        return ("fail", None, None, None, None, False)
+
+    def _pinned_bounds(x_hat: np.ndarray) -> np.ndarray:
+        b = lb_all.copy()
+        b[mcols] = x_hat
+        return b
+
+    def _pinned_upper(x_hat: np.ndarray) -> np.ndarray:
+        b = ub_all.copy()
+        b[mcols] = x_hat
+        return b
+
     def _add_opt_cut(x_hat, anchor, s):
         # eta >= anchor + s^T (x - x̂)  ->  s^T x - eta <= s^T x̂ - anchor
         cut_x.append(s.copy())
@@ -413,20 +487,35 @@ def solve_gbd(
     # anchor downgrades the solve to heuristic mode (bound withheld).
     bound_rigorous = True
 
+    # Set when a recourse solve fails without the phase-1 NLP certifying
+    # infeasibility (C1): x̂ is not excluded, and the reported bound is withheld.
+    heuristic_fail = False
+
     kind, v, x_full, anchor, s, rigorous = _recourse(x_hat)
     if kind == "opt":
         _add_opt_cut(x_hat, anchor, s)
         bound_rigorous = bound_rigorous and rigorous
         best_ub = v
         incumbent_full = x_full
-    elif not _add_nogood_cut(x_hat):
-        raise NotImplementedError(
-            "GBD recourse is infeasible at a non-binary first-stage point and no "
-            "feasibility cut is available; GBD v1 supports infeasible recourse only "
-            "for 0/1 first-stage variables (relatively complete recourse otherwise)."
+    elif kind == "infeas_certified":
+        if not _add_nogood_cut(x_hat):
+            raise NotImplementedError(
+                "GBD recourse is certified infeasible at a non-binary first-stage "
+                "point and no feasibility cut is available; GBD v1 supports "
+                "infeasible recourse only for 0/1 first-stage variables "
+                "(relatively complete recourse otherwise)."
+            )
+    else:  # "fail": recourse unsolved, infeasibility NOT certified — do not cut.
+        logger.warning(
+            "GBD recourse solve failed at the initial master point without "
+            "certifying infeasibility; downgrading to heuristic mode (bound withheld)."
         )
+        bound_rigorous = False
+        heuristic_fail = True
 
     for _it in range(max_iterations):
+        if heuristic_fail:
+            break
         if time.time() - t0 > time_limit:
             status = "time_limit"
             break
@@ -450,20 +539,35 @@ def solve_gbd(
                 incumbent_full = x_full
             _add_opt_cut(x_hat, anchor, s)
             bound_rigorous = bound_rigorous and rigorous
-        elif not _add_nogood_cut(x_hat):
-            raise NotImplementedError(
-                "GBD recourse infeasible at a non-binary first-stage point; "
-                "no feasibility cut available (GBD v1)."
+        elif kind == "infeas_certified":
+            if not _add_nogood_cut(x_hat):
+                raise NotImplementedError(
+                    "GBD recourse certified infeasible at a non-binary first-stage "
+                    "point; no feasibility cut available (GBD v1)."
+                )
+        else:  # "fail": do not exclude x̂; stop and report heuristically.
+            logger.warning(
+                "GBD recourse solve failed at a master point without certifying "
+                "infeasibility; stopping in heuristic mode (bound withheld)."
             )
+            bound_rigorous = False
+            heuristic_fail = True
+            break
 
         # Certify optimality from the gap only when the master bound is rigorous
         # (convex model, no primal-anchor fallback) — otherwise the lower bound
         # may be contaminated and could prematurely certify a suboptimal point.
         if is_convex and bound_rigorous and np.isfinite(best_ub) and lower_bound is not None:
-            gap = (best_ub - lower_bound) / (abs(best_ub) + 1e-10)
+            gap = relative_gap(best_ub, lower_bound)
             if gap <= gap_tolerance:
                 status = "optimal"
                 break
+
+    # A recourse solve that failed without a feasibility verdict leaves the
+    # search unable to progress: report the incumbent heuristically, or error
+    # out when there is none. The bound is already withheld (bound_rigorous=False).
+    if heuristic_fail and incumbent_full is None:
+        return SolveResult(status="error", wall_time=time.time() - t0)
 
     # Final master lower bound — reported only when rigorous.
     bound: float | None = None
@@ -479,14 +583,14 @@ def solve_gbd(
 
     objective = None if not np.isfinite(best_ub) else best_ub
     if status == "iteration_limit" and objective is not None and bound is not None:
-        if (objective - bound) / (abs(objective) + 1e-10) <= gap_tolerance:
+        if relative_gap(objective, bound) <= gap_tolerance:
             status = "optimal"
 
     reported_obj = None if objective is None else objective * sense_flip
     reported_bound = None if bound is None else bound * sense_flip
     reported_gap: float | None = None
     if reported_obj is not None and reported_bound is not None:
-        reported_gap = abs(reported_obj - reported_bound) / (abs(reported_obj) + 1e-10)
+        reported_gap = abs(relative_gap(reported_obj, reported_bound))
 
     x_dict = solution_dict(model, incumbent_full) if incumbent_full is not None else None
 

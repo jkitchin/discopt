@@ -31,7 +31,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from discopt.decomposition._linear import extract_linear, solution_dict
+from discopt.decomposition._linear import extract_linear, relative_gap, solution_dict
 from discopt.decomposition.structure import (
     DecompositionStructure,
     detect_decomposition,
@@ -224,7 +224,7 @@ def solve_lagrangian(
                 incumbent = z_full
 
         if np.isfinite(best_UB) and best_L > -np.inf:
-            gap = (best_UB - best_L) / (abs(best_UB) + 1e-10)
+            gap = relative_gap(best_UB, best_L)
             if gap <= cfg.gap_tolerance:
                 status = "optimal"
                 break
@@ -250,7 +250,7 @@ def solve_lagrangian(
 
     # Promote to optimal if bounds already met.
     if status == "iteration_limit" and np.isfinite(best_UB) and best_L > -np.inf:
-        if (best_UB - best_L) / (abs(best_UB) + 1e-10) <= cfg.gap_tolerance:
+        if relative_gap(best_UB, best_L) <= cfg.gap_tolerance:
             status = "optimal"
 
     sense_flip = 1.0 if lin.minimize else -1.0
@@ -260,7 +260,7 @@ def solve_lagrangian(
     reported_bound = None if bound is None else bound * sense_flip
     reported_gap: float | None = None
     if reported_obj is not None and reported_bound is not None:
-        reported_gap = abs(reported_obj - reported_bound) / (abs(reported_obj) + 1e-10)
+        reported_gap = abs(relative_gap(reported_obj, reported_bound))
     x_dict = solution_dict(model, incumbent) if incumbent is not None else None
     if x_dict is None and objective is not None:
         status = "iteration_limit"  # have a bound but no recovered primal

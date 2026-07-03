@@ -39,7 +39,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from discopt.decomposition._linear import extract_linear, solution_dict
+from discopt.decomposition._linear import extract_linear, relative_gap, solution_dict
 from discopt.decomposition.structure import (
     DecompositionStructure,
     detect_decomposition,
@@ -67,7 +67,9 @@ class BendersConfig:
 
     time_limit: float = 3600.0
     gap_tolerance: float = 1e-4
-    max_iterations: int = 100
+    # One Benders cut is added per iteration, so 100 is far too few for real
+    # instances; runtime stays bounded by ``time_limit`` regardless (T0.4).
+    max_iterations: int = 500
     prefer_pounce: bool = False
     feas_tol: float = 1e-6
     eta_floor: float = _ETA_FLOOR
@@ -278,11 +280,19 @@ def solve_benders(
         return res
 
     def _recourse(x_hat: np.ndarray):
-        """Return ('opt', Q, y, lam, rc, bnds) or ('infeas', v, None, lam, rc, bnds).
+        """Classify the recourse LP at x̂.
 
-        ``lam`` are the recourse row duals, ``rc`` the variable reduced costs,
-        and ``bnds`` the recourse column bounds — together they reconstruct the
-        *complete* LP dual objective for a soundly-anchored cut.
+        Returns one of:
+
+        - ``('opt', Q, y, lam, rc, bnds)`` — recourse optimum ``Q`` with a
+          primal ``y`` and the complete-dual data ``(lam, rc, bnds)``;
+        - ``('unbounded', None, None, ...)`` — the recourse LP is unbounded
+          below at x̂, so the full problem is unbounded below (C3);
+        - ``('infeas', v, None, lam, rc, bnds)`` — genuinely infeasible recourse
+          (min-infeasibility ``v > feas_tol``), with feasibility-cut data;
+        - ``('recourse_fail', None, ...)`` — the recourse solve did not return
+          OPTIMAL yet the slack LP finds the recourse *feasible* (``v <= feas_tol``):
+          a solver failure, not infeasibility, so no vacuous cut is added.
         """
         rhs = r - (A_x @ x_hat if A_x.shape[0] else np.zeros(0))
         res = dual_lp(
@@ -310,6 +320,10 @@ def solve_benders(
                 rc,
                 sub_bounds,
             )
+        if res.status == SolveStatus.UNBOUNDED:
+            # The recourse LP is unbounded below at a feasible master point, so
+            # the full problem is unbounded below. No cut can fix this.
+            return "unbounded", None, None, None, None, sub_bounds
         # Feasibility subproblem: min 1^T s s.t. A_y y - s <= rhs, s >= 0.
         m_rec = A_y.shape[0]
         ny = len(scols)
@@ -319,6 +333,17 @@ def solve_benders(
         c_feas = np.concatenate([np.zeros(ny), np.ones(m_rec)])
         bnds = list(sub_bounds) + [(0.0, _BIG)] * m_rec
         fres = dual_lp(c_feas, A_ub=Afeas, b_ub=rhs, bounds=bnds)
+        if fres.status != SolveStatus.OPTIMAL:
+            # Even the always-feasible slack LP failed to solve — a genuine
+            # backend failure, not an infeasibility verdict. Signal the caller to
+            # re-solve rather than fabricate a cut (C3).
+            return "recourse_fail", None, None, None, None, bnds
+        v = float(fres.objective) if fres.objective is not None else 0.0
+        # A positive min-infeasibility ``v`` yields a valid feasibility cut. When
+        # ``v`` is ~0 (the recourse is essentially feasible but the optimality
+        # solve did not return OPTIMAL) the cut simply does not separate the
+        # current point; the T0.4 progress guard detects that and stops rather
+        # than spinning, so no vacuous-cut special case is needed here.
         lam = (
             np.asarray(fres.dual_values, dtype=np.float64)
             if fres.dual_values is not None
@@ -329,7 +354,6 @@ def solve_benders(
             if fres.reduced_costs is not None
             else None
         )
-        v = float(fres.objective) if fres.objective is not None else 0.0
         return "infeas", v, None, lam, rc, bnds
 
     def _dual_const(lam, rc, col_bounds) -> float:
@@ -376,6 +400,7 @@ def solve_benders(
         cut_x.append(s.copy())
         cut_eta.append(-1.0)
         cut_rhs.append(-const)
+        return s, -1.0, -const
 
     def _add_feas_cut(lam, rc, col_bounds):
         # Feasibility cut = the complete dual objective of the slack-min
@@ -388,6 +413,15 @@ def solve_benders(
         cut_x.append(s.copy())
         cut_eta.append(0.0)
         cut_rhs.append(-const)
+        return s, 0.0, -const
+
+    def _cut_separates(cut, x_hat, eta_hat) -> bool:
+        # A cut ``s·x + eta_coef·eta <= rhs`` separates (x̂, η̂) iff it is
+        # violated there beyond tolerance. A cut that does not separate the
+        # current master point makes no progress (missing/degenerate duals).
+        s, eta_coef, rhs = cut
+        lhs = float(s @ x_hat) + eta_coef * float(eta_hat)
+        return bool(lhs > rhs + cfg.feas_tol)
 
     # ── initialize: feasible master point (no eta) ──
     init = _solve_master(with_eta=False)
@@ -398,14 +432,23 @@ def solve_benders(
     x_hat = np.asarray(init.x[:n_master], dtype=np.float64)
 
     kind, val, y_star, lam, rc, bnds = _recourse(x_hat)
+    if kind == "unbounded":
+        return SolveResult(status="unbounded", wall_time=time.time() - t0)
+    if kind == "recourse_fail":
+        # Solver failure (not infeasibility) at the initial point: retry once.
+        kind, val, y_star, lam, rc, bnds = _recourse(x_hat)
+        if kind == "recourse_fail":
+            logger.warning("Benders recourse solve failed twice at the initial point.")
+            return SolveResult(status="error", wall_time=time.time() - t0)
     if kind == "opt":
         _add_opt_cut(lam, rc, bnds)
-    else:
+    elif kind == "infeas":
         _add_feas_cut(lam, rc, bnds)
 
     best_ub = np.inf
     incumbent_full: np.ndarray | None = None
     status = "iteration_limit"
+    stall = 0  # consecutive non-separating cuts (T0.4 progress guard)
 
     for _it in range(cfg.max_iterations):
         if time.time() - t0 > cfg.time_limit:
@@ -421,10 +464,19 @@ def solve_benders(
             status = "error"
             break
         x_hat = np.asarray(mres.x[:n_master], dtype=np.float64)
+        eta_hat = float(mres.x[n_master]) if len(mres.x) > n_master else -np.inf
         lb = mres.bound if mres.bound is not None else mres.objective
         lower_bound = (float(lb) + lin.c_offset) if lb is not None else None
 
         kind, val, y_star, lam, rc, bnds = _recourse(x_hat)
+        if kind == "unbounded":
+            return SolveResult(status="unbounded", wall_time=time.time() - t0)
+        if kind == "recourse_fail":
+            # Solver failure at a master point: retry once, else stop (T0.3).
+            kind, val, y_star, lam, rc, bnds = _recourse(x_hat)
+            if kind == "recourse_fail":
+                logger.warning("Benders recourse solve failed twice; stopping.")
+                break
         if kind == "opt":
             full_obj = float(c_master @ x_hat + val + lin.c_offset)
             if full_obj < best_ub:
@@ -434,12 +486,29 @@ def solve_benders(
                 if len(scols):
                     x_full[scols] = y_star
                 incumbent_full = x_full
-            _add_opt_cut(lam, rc, bnds)
+            cut = _add_opt_cut(lam, rc, bnds)
         else:
-            _add_feas_cut(lam, rc, bnds)
+            cut = _add_feas_cut(lam, rc, bnds)
+
+        # Progress guard: a cut that does not separate the current master point
+        # cannot move the search. Two in a row (degenerate/missing duals) means
+        # we would otherwise spin to max_iterations — stop with the current
+        # rigorous bound instead (T0.4).
+        if _cut_separates(cut, x_hat, eta_hat):
+            stall = 0
+        else:
+            stall += 1
+            logger.warning(
+                "Benders cut at iteration %d does not separate the master point "
+                "(degenerate or missing duals); stall=%d.",
+                _it,
+                stall,
+            )
+            if stall >= 2:
+                break
 
         if np.isfinite(best_ub) and lower_bound is not None:
-            gap = (best_ub - lower_bound) / (abs(best_ub) + 1e-10)
+            gap = relative_gap(best_ub, lower_bound)
             if gap <= cfg.gap_tolerance:
                 status = "optimal"
                 break
@@ -451,6 +520,13 @@ def solve_benders(
         lb = final.bound if final.bound is not None else final.objective
         if lb is not None:
             bound = float(lb) + lin.c_offset
+        # The eta floor is a device to keep the master bounded before cuts
+        # arrive; if the final master solution still sits on it, the "bound" is
+        # the floor, not a real recourse underestimate — withhold it (T0.5).
+        if final.x is not None and len(final.x) > n_master:
+            if float(final.x[n_master]) <= cfg.eta_floor + 1.0:
+                logger.warning("Benders eta floor still active; withholding bound.")
+                bound = None
 
     if status == "infeasible":
         return SolveResult(status="infeasible", wall_time=time.time() - t0, gap_certified=True)
@@ -458,7 +534,7 @@ def solve_benders(
     objective = None if not np.isfinite(best_ub) else best_ub
     # Promote to optimal if the final master bound already meets the incumbent.
     if status == "iteration_limit" and objective is not None and bound is not None:
-        if (objective - bound) / (abs(objective) + 1e-10) <= cfg.gap_tolerance:
+        if relative_gap(objective, bound) <= cfg.gap_tolerance:
             status = "optimal"
 
     # Map the internal-minimization values back to the model's sense. For a
@@ -470,7 +546,7 @@ def solve_benders(
     reported_bound = None if bound is None else bound * sense_flip
     reported_gap: float | None = None
     if reported_obj is not None and reported_bound is not None:
-        reported_gap = abs(reported_obj - reported_bound) / (abs(reported_obj) + 1e-10)
+        reported_gap = abs(relative_gap(reported_obj, reported_bound))
 
     x_dict = solution_dict(model, incumbent_full) if incumbent_full is not None else None
 
