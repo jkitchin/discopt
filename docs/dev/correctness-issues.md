@@ -74,6 +74,10 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-23 | P3 | mccormick.py | `_relax_reciprocal` wrong concavity label for negative denominators (latent) | open |
 | C-24 | P3 | mccormick.py | secants produce NaN on infinite bounds; soundness leans on downstream filters | open |
 | C-12 | P3 | .nl parser | range-split renumbers constraints vs source indices | open |
+| C-25 | P1 | nn/formulations | scaling + bound-propagation domain mismatch cuts the true optimum on scaled embedded NNs | in progress (nn-module-plan T-N0.2) |
+| C-26 | P1 | nn/tree_ensemble | tree big-M invalid for out-of-box thresholds → cuts feasible points | in progress (nn-module-plan T-N0.3) |
+| C-27 | P2 | nn/readers/onnx | ONNX reader silently mis-reads Gemm attrs / residual Add / branched graphs | in progress (nn-module-plan T-N1.1) |
+| C-28 | P2 | nn/readers/sklearn | sklearn classifier semantics silently embed logits / wrong base_score | in progress (nn-module-plan T-N1.2) |
 
 ---
 
@@ -916,6 +920,192 @@ external mappings survive. No urgency; document until then.
 parser module header; standing gates pass.
 
 **Log:** —
+
+---
+
+## C-25 (P1) — Embedded-NN scaling propagates bounds in the wrong (unscaled) domain → infeasible or true optimum cut
+
+**Area:** `python/discopt/nn/formulations/full_space.py:72`,
+`python/discopt/nn/formulations/relu_bigm.py:73`. `propagate_bounds(net)` runs on
+`net.input_bounds` (the user/unscaled domain — those bounds are applied to the
+unscaled `inputs` var) while layer 1 actually consumes
+`scaled_in = (inputs − x_offset)/x_factor`. Every `zhat`/`z` variable bound and
+every ReLU big-M constant is therefore computed from the wrong box.
+**Reachability:** default path for any embedded NN carrying a non-identity
+`OffsetScaling` (nonzero `x_offset` or `x_factor ≠ 1`) — `add_predictor` /
+`NNFormulation(..., scaling=…)`. Every existing scaling test uses offset 0 /
+factor 1, so the module's own suite cannot catch it.
+
+**Mechanism:** with `x_offset`/`x_factor` nontrivial, the propagated interval on
+each hidden pre-activation is derived from the wrong input box. A big-M sized
+from the wrong box can be too small, making a valid ReLU state infeasible
+(spuriously infeasible model), or the `zhat`/`z` variable bounds can exclude the
+scaled activation's true range, cutting the true optimum → a wrong surrogate
+optimum reported as certified. This is certificate-class for the modeling layer:
+"the global optimum over the embedded surrogate" can be wrong.
+
+**Why P1:** wrong answer / infeasible on a reachable, realistic configuration
+(scaled inputs are the norm for trained models), but confined to the NN modeling
+layer (no solver-core certificate is implicated).
+
+**Reproduce/confirm:** build a small net with
+`OffsetScaling(x_offset=[100,…], x_factor=[0.5,…])` (and a negative-`x_factor`
+variant); run the T-N0.1 equivalence harness
+(`python/tests/test_nn_equivalence.py`,
+`assert_embedding_matches` + `assert_optimum_matches`) on `full_space` (sigmoid
+net) and `relu_bigm` (relu net). Before the fix these are infeasible or certify a
+wrong optimum.
+
+**Fix:** implemented under `docs/dev/nn-module-plan.md` **T-N0.2**. Add an
+optional `input_bounds` override to `propagate_bounds(network, input_bounds=None)`
+and, when `self._scaling is not None`, compute the scaled box `(s_lo, s_hi)`
+*before* propagation and call `propagate_bounds(net, input_bounds=(s_lo, s_hi))`.
+No behavior change when scaling is None/identity.
+
+**Done criteria:**
+- `assert_embedding_matches` and `assert_optimum_matches` pass with nontrivial
+  positive and negative `x_factor` for both `full_space` and `relu_bigm`
+  (fail-before / pass-after).
+- Identity-scaling equivalence unchanged (T-N0.1 green baseline).
+- Standing gates pass.
+
+**Log:**
+- 2026-07-03 — Filed from the 2026-07-03 nn-module review (finding F1). Fix owned
+  by nn-module-plan T-N0.2 (same effort); status tracked there.
+
+---
+
+## C-26 (P1) — Tree-ensemble big-M is invalid for thresholds outside the declared feature box → cuts feasible points
+
+**Area:** `python/discopt/nn/formulations/tree_ensemble.py:79,98-111`. The per-leaf
+constraints use `M_j = ub_j − lb_j`, which keeps a non-selected leaf's constraint
+inert only when `lb_j ≤ thr ≤ ub_j − eps`.
+**Reachability:** default path for any embedded tree ensemble whose optimization
+bounds are tighter than the training-data range — a common case (a threshold then
+falls outside the declared feature box).
+
+**Mechanism:** for a split threshold outside `[lb_j, ub_j]`, `M_j = ub_j − lb_j`
+is too small to relax the leaf's split constraint when the leaf is *not* selected
+(`z=0`), so the constraint stays active and cuts otherwise-feasible input points.
+The embedded MILP then optimizes over a strict subset of the true feasible region
+→ can report a wrong surrogate optimum as certified. Certificate-class for the
+modeling layer.
+
+**Why P1:** wrong answer on a reachable, realistic configuration (tightened
+optimization bounds vs training range), confined to the NN/tree modeling layer.
+
+**Reproduce/confirm:** an ensemble with one threshold `> ub_j − eps` and one
+`< lb_j`; run `assert_embedding_matches` + `assert_optimum_matches` vs dense
+enumeration (T-N0.1 harness). Before the fix, feasible points are cut / the
+certified optimum disagrees with enumeration.
+
+**Fix:** implemented under `docs/dev/nn-module-plan.md` **T-N0.3**. Replace the
+per-feature `M_j` with per-constraint coefficients: left split →
+`x_j ≤ thr + max(ub_j − thr, 0)·(1 − z)`; right split →
+`x_j ≥ (thr + eps) − max(thr + eps − lb_j, 0)·(1 − z)`. These are inert for
+`z=0` at any threshold position, correctly make box-unreachable leaves infeasible
+when selected, and are strictly tighter LP relaxations. Drop the unused
+`feat_range`.
+
+**Done criteria:**
+- Out-of-box-threshold ensemble: `assert_embedding_matches` +
+  `assert_optimum_matches` pass (fail-before / pass-after).
+- No-behavior-change check on the in-box `_make_tree_ensemble` fixture.
+- Standing gates pass.
+
+**Log:**
+- 2026-07-03 — Filed from the 2026-07-03 nn-module review (finding F2). Fix owned
+  by nn-module-plan T-N0.3 (same effort); status tracked there.
+
+---
+
+## C-27 (P2) — ONNX reader silently mis-reads Gemm attributes, residual Adds, and branched graphs
+
+**Area:** `python/discopt/nn/readers/onnx_reader.py`. (a) Gemm `alpha`/`beta`/
+`transA` ignored (`:104-121`); (b) a `MatMul → Add` where the `Add` is not an
+initializer (e.g. a residual connection) is consumed and zero biases substituted
+(`:74-79`); (c) no dataflow verification — a branched graph of individually
+supported ops parses into a wrong sequential net.
+**Reachability:** any model loaded via `add_predictor(model, inputs, "model.onnx")`
+/ `load_onnx` that uses `alpha≠1`/`beta≠1`/`transA=1` Gemm, a residual Add, or a
+non-sequential topology. Silent substitution class (like C-5): the solver then
+faithfully embeds the *wrong* network and labels the result optimal.
+
+**Mechanism:** each path drops or mis-orients structure without raising — scaled
+Gemm coefficients ignored, a residual Add mistaken for a bias node then replaced
+by zeros, or a branch/join topology flattened into a sequence — so the embedded
+constraints encode a different function than the ONNX file. No user-visible error.
+
+**Why P2:** silent problem substitution requiring a non-default ONNX structure
+(scaled/residual/branched graphs); loud-refusal class, no certificate of the
+*solver* is implicated (mirrors the C-5 `.nl`-opcode silent-rewrite severity).
+
+**Reproduce/confirm:** load a Gemm graph with `alpha=2.0, beta=0.5` and diff the
+reconstructed `forward` against `onnxruntime` inference on random points; load a
+two-branch graph with a joining Add. Before the fix the values disagree / the
+branched graph parses without error.
+
+**Fix:** implemented under `docs/dev/nn-module-plan.md` **T-N1.1**. Apply Gemm
+`alpha`/`beta`, raise `ValueError` on `transA=1`; verify the MatMul initializer is
+`input[1]`; add dataflow tracking from `graph.input[0]` so any residual/branch
+topology raises `ValueError("non-sequential graph")` (which also removes the
+residual-Add-as-zero-bias path).
+
+**Done criteria:**
+- Gemm `alpha`/`beta` graph loads and matches `onnxruntime`; `transA=1` and a
+  two-branch joining-Add graph both raise; `transB=1` still round-trips.
+- Coverage omit for `onnx_reader.py` removed once these tests exist (T-N4.1).
+- Standing gates pass.
+
+**Log:**
+- 2026-07-03 — Filed from the 2026-07-03 nn-module review (finding F3). Fix owned
+  by nn-module-plan T-N1.1 (same effort); status tracked there.
+
+---
+
+## C-28 (P2) — sklearn classifier readers silently embed logits / wrong base_score
+
+**Area:** `python/discopt/nn/readers/sklearn_reader.py`. `load_sklearn_mlp`
+ignores `model.out_activation_`, so an `MLPClassifier` embeds pre-activation
+logits while the docstring claims classifier support; `load_sklearn_ensemble` on a
+`GradientBoostingClassifier` reads `base_score` wrong (a classifier's `init_` has
+no `constant_`).
+**Reachability:** any classifier passed to `add_predictor` / the sklearn reader.
+Silent substitution class (like C-5): the embedded surrogate is not the trained
+classifier's decision function, but no error is raised.
+
+**Mechanism:** the readers assume regressor semantics. For `MLPClassifier` the
+final `out_activation_` (logistic/softmax) is dropped, so the embedding predicts
+logits, not probabilities; for `GradientBoostingClassifier` the log-odds `init_`
+offset is silently mis-read → the additive intercept is wrong. Both produce a
+formulation whose optimum answers a different question than the user posed.
+
+**Why P2:** silent problem substitution on a non-default (classifier) input;
+loud-refusal class, no solver certificate implicated (same severity rationale as
+C-5 / C-27).
+
+**Reproduce/confirm:** load a binary `MLPClassifier` and compare the embedded
+output to `predict_proba[:, 1]` through the T-N0.1 harness; load a
+`GradientBoostingClassifier` and check the intercept. Before the fix they
+disagree with no error.
+
+**Fix:** implemented under `docs/dev/nn-module-plan.md` **T-N1.2**. In
+`load_sklearn_mlp` read `out_activation_` (`identity`→LINEAR, `logistic`→SIGMOID
+final layer, `softmax`→`ValueError`); in `load_sklearn_tree`/`load_sklearn_ensemble`
+raise `TypeError` on classifiers (`sklearn.base.is_classifier`) with a
+regressor-only message; update docstrings to regressors-only. (Also fixes the
+single-leaf 0-d `squeeze()` crash via `value.reshape(len(feature), -1)`.)
+
+**Done criteria:**
+- Binary `MLPClassifier` loads with a SIGMOID final layer and matches
+  `predict_proba[:, 1]` through the harness; `GradientBoostingClassifier` and
+  `DecisionTreeClassifier` raise `TypeError`; a constant-target
+  `DecisionTreeRegressor` loads and predicts.
+- Standing gates pass.
+
+**Log:**
+- 2026-07-03 — Filed from the 2026-07-03 nn-module review (finding F4). Fix owned
+  by nn-module-plan T-N1.2 (same effort); status tracked there.
 
 ---
 

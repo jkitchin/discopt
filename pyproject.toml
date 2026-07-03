@@ -77,6 +77,11 @@ dev = [
     "mypy==2.1.0",
     "pre-commit",
     "pyomo>=6.7",
+    # NN-embedding readers are covered by test_nn_reader_fixes.py (T-N4.1 removed
+    # onnx_reader.py from the coverage omit), so the ONNX toolchain must be present
+    # for `pip install -e .[dev]` and CI to exercise it.
+    "onnx>=1.14",
+    "onnxruntime>=1.16",
 ]
 all = ["discopt[pounce,ipopt,cutest,llm,gnn,nn,ml,doe,doe-gui,sympy,pyomo]"]
 
@@ -260,7 +265,6 @@ source = ["discopt"]
 branch = true
 omit = [
     "python/discopt/solvers/sipopt.py",
-    "python/discopt/nn/readers/onnx_reader.py",
 ]
 
 [tool.coverage.report]

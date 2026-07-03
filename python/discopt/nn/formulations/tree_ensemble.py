@@ -75,10 +75,12 @@ class TreeEnsembleFormulation:
             ub=ub,
         )
 
-        # Per-feature big-M values
-        feat_range = np.asarray(ub, dtype=np.float64) - np.asarray(lb, dtype=np.float64)
+        lb_arr = np.asarray(lb, dtype=np.float64)
+        ub_arr = np.asarray(ub, dtype=np.float64)
 
         tree_output_exprs = []
+        out_lb = float(ens.base_score)
+        out_ub = float(ens.base_score)
         for t, tree in enumerate(ens.trees):
             leaves = tree.leaves
             n_leaves = len(leaves)
@@ -95,18 +97,27 @@ class TreeEnsembleFormulation:
                 for node, direction in tree.leaf_ancestors(leaf):
                     j = int(tree.feature[node])
                     thr = float(tree.threshold[node])
-                    M_j = float(feat_range[j])
 
                     if direction == "left":
-                        # x[j] <= threshold when this leaf is selected
+                        # x[j] <= threshold when this leaf is selected. The
+                        # per-constraint big-M `max(ub_j - thr, 0)` is exactly
+                        # the slack needed to reach the feature's upper bound
+                        # when z=0, and inert (clamped to 0) for out-of-box
+                        # thresholds, so it never cuts a feasible point (F2).
+                        M_j = max(float(ub_arr[j]) - thr, 0.0)
                         m.subject_to(
                             inputs[j] <= thr + M_j * (1 - z[l_idx]),
                             name=f"{pfx}_t{t}_sL_{node}_{l_idx}",
                         )
                     else:
-                        # x[j] > threshold when this leaf is selected
+                        # x[j] > threshold when this leaf is selected. Big-M
+                        # `max(thr + eps - lb_j, 0)` reaches the feature's lower
+                        # bound when z=0 and clamps to 0 for out-of-box
+                        # thresholds (F2).
+                        rhs_thr = thr + self._split_eps
+                        M_j = max(rhs_thr - float(lb_arr[j]), 0.0)
                         m.subject_to(
-                            inputs[j] >= thr + self._split_eps - M_j * (1 - z[l_idx]),
+                            inputs[j] >= rhs_thr - M_j * (1 - z[l_idx]),
                             name=f"{pfx}_t{t}_sR_{node}_{l_idx}",
                         )
 
@@ -120,9 +131,13 @@ class TreeEnsembleFormulation:
                 over=range(n_leaves),
             )
             tree_output_exprs.append(y_t)
+            # Free output bounds (T-N0.4): exactly one leaf fires per tree, so
+            # each tree contributes a value in [min leaf, max leaf].
+            out_lb += float(leaf_vals.min())
+            out_ub += float(leaf_vals.max())
 
         # Ensemble output: sum of trees + base_score
-        outputs = m.continuous(f"{pfx}_output", shape=(1,))
+        outputs = m.continuous(f"{pfx}_output", shape=(1,), lb=out_lb, ub=out_ub)
         total = tree_output_exprs[0]
         for expr in tree_output_exprs[1:]:
             total = total + expr

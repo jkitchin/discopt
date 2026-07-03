@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 import discopt.modeling as dm
-from discopt.nn.bounds import propagate_bounds
+from discopt.nn.bounds import propagate_bounds, scaled_output_bounds
 from discopt.nn.network import Activation, NetworkDefinition
 from discopt.nn.scaling import OffsetScaling
 
@@ -70,19 +70,20 @@ class ReluBigMFormulation:
         net = self._network
         pfx = self._prefix
 
-        layer_bounds = propagate_bounds(net)
-
         # Create input variables
         lb, ub = net.input_bounds  # type: ignore[misc]
         inputs = m.continuous(f"{pfx}_input", shape=(net.input_size,), lb=lb, ub=ub)
 
-        # Handle input scaling
+        # Handle input scaling. The ReLU big-M constants must come from the box
+        # the layers actually consume: the *scaled* input when a scaling is
+        # applied, else the raw input box (F1 / T-N0.2).
         if self._scaling is not None:
             sc = self._scaling
             s_lb = (lb - sc.x_offset) / sc.x_factor
             s_ub = (ub - sc.x_offset) / sc.x_factor
             s_lo = np.minimum(s_lb, s_ub)
             s_hi = np.maximum(s_lb, s_ub)
+            layer_bounds = propagate_bounds(net, input_bounds=(s_lo, s_hi))
             scaled_in = m.continuous(
                 f"{pfx}_scaled_input", shape=(net.input_size,), lb=s_lo, ub=s_hi
             )
@@ -93,6 +94,7 @@ class ReluBigMFormulation:
                 )
             prev_z = scaled_in
         else:
+            layer_bounds = propagate_bounds(net)
             prev_z = inputs
 
         for k, layer in enumerate(net.layers):
@@ -140,10 +142,15 @@ class ReluBigMFormulation:
 
         # Handle output scaling
         if self._scaling is not None:
-            outputs = m.continuous(f"{pfx}_output", shape=(net.output_size,))
+            sc = self._scaling
+            # Free output bounds (T-N0.4) from the last layer's post-activation.
+            out_lb, out_ub = scaled_output_bounds(
+                layer_bounds, sc.y_offset, sc.y_factor, net.output_size
+            )
+            outputs = m.continuous(f"{pfx}_output", shape=(net.output_size,), lb=out_lb, ub=out_ub)
             for j in range(net.output_size):
                 m.subject_to(
-                    outputs[j] == prev_z[j] * self._scaling.y_factor[j] + self._scaling.y_offset[j],
+                    outputs[j] == prev_z[j] * sc.y_factor[j] + sc.y_offset[j],
                     name=f"{pfx}_scale_out_{j}",
                 )
         else:

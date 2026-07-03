@@ -14,6 +14,13 @@ _SKLEARN_ACTIVATION_MAP = {
     "identity": Activation.LINEAR,
 }
 
+# Final-layer activation implied by an MLP's ``out_activation_``. ``softmax``
+# (multi-class) has no scalar-map embedding and is refused.
+_SKLEARN_OUT_ACTIVATION_MAP = {
+    "identity": Activation.LINEAR,
+    "logistic": Activation.SIGMOID,
+}
+
 
 def load_sklearn_mlp(
     model,
@@ -21,10 +28,16 @@ def load_sklearn_mlp(
 ) -> NetworkDefinition:
     """Convert a trained sklearn MLP to a NetworkDefinition.
 
+    Regressors embed with a LINEAR output. Classifier support is **binary
+    only**: the final-layer activation is taken from ``model.out_activation_``
+    (``identity`` → LINEAR, ``logistic`` → SIGMOID). Multi-class
+    (``softmax``) classifiers have no scalar-map embedding and raise
+    ``ValueError``.
+
     Parameters
     ----------
     model : sklearn.neural_network.MLPRegressor or MLPClassifier
-        Trained sklearn MLP model.
+        Trained sklearn MLP model. Classifiers must be binary.
     input_bounds : tuple of np.ndarray, optional
         ``(lower, upper)`` bounds on input features.
 
@@ -39,10 +52,22 @@ def load_sklearn_mlp(
     if activation is None:
         raise ValueError(f"Unsupported sklearn activation: {model.activation!r}")
 
+    # Final-layer activation. MLPRegressor uses out_activation_ == "identity";
+    # MLPClassifier sets it from the loss ("logistic" binary, "softmax" multi).
+    out_activation_name = getattr(model, "out_activation_", "identity")
+    out_activation = _SKLEARN_OUT_ACTIVATION_MAP.get(out_activation_name)
+    if out_activation is None:
+        raise ValueError(
+            f"Unsupported sklearn MLP out_activation_: {out_activation_name!r}. "
+            f"Multi-class (softmax) classifiers are not embeddable as a scalar "
+            f"map; only regressors (identity) and binary classifiers (logistic) "
+            f"are supported."
+        )
+
     layers = []
     for i, (W, b) in enumerate(zip(model.coefs_, model.intercepts_)):
         is_last = i == len(model.coefs_) - 1
-        act = Activation.LINEAR if is_last else activation
+        act = out_activation if is_last else activation
         layers.append(DenseLayer(W.astype(np.float64), b.astype(np.float64), act))
 
     return NetworkDefinition(layers, input_bounds=input_bounds)
@@ -61,12 +86,13 @@ def _sklearn_tree_to_decision_tree(tree, n_features: int) -> DecisionTree:
     left_child = np.where(left_child == -1, -1, left_child)
     right_child = np.where(right_child == -1, -1, right_child)
 
-    # value shape: (n_nodes, n_outputs, max_n_classes) for classifiers,
-    # (n_nodes, 1, 1) for regressors
-    raw_value = t.value.squeeze()
-    if raw_value.ndim > 1:
+    # value shape: (n_nodes, n_outputs, max_n_classes). For a single-output
+    # regressor n_outputs == 1; reshape (not squeeze) so a single-leaf tree
+    # keeps a 2-D (n_nodes, 1) shape instead of collapsing to a 0-d scalar.
+    value = t.value.reshape(t.node_count, -1)
+    if value.shape[1] != 1:
         raise ValueError("Multi-output trees are not supported; use single-output models")
-    value = raw_value.astype(np.float64)
+    value = value[:, 0].astype(np.float64)
 
     return DecisionTree(
         n_features=n_features,
@@ -82,12 +108,16 @@ def load_sklearn_tree(
     model,
     input_bounds: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> TreeEnsembleDefinition:
-    """Convert a trained sklearn DecisionTree to a TreeEnsembleDefinition.
+    """Convert a trained sklearn DecisionTree **regressor** to a TreeEnsembleDefinition.
+
+    Regressors only: a ``DecisionTreeClassifier`` stores class counts / log-odds
+    in its leaves rather than a scalar target, so embedding it would encode the
+    wrong quantity. Classifiers raise ``TypeError``.
 
     Parameters
     ----------
-    model : sklearn.tree.DecisionTreeRegressor or DecisionTreeClassifier
-        Trained sklearn decision tree.
+    model : sklearn.tree.DecisionTreeRegressor
+        Trained sklearn decision tree regressor.
     input_bounds : tuple of np.ndarray, optional
         ``(lower, upper)`` bounds on input features.
 
@@ -95,6 +125,13 @@ def load_sklearn_tree(
     -------
     TreeEnsembleDefinition
     """
+    from sklearn.base import is_classifier
+
+    if is_classifier(model):
+        raise TypeError(
+            "Only regressor trees are supported; a DecisionTreeClassifier stores "
+            "class counts / log-odds in its leaves, not an embeddable scalar target."
+        )
     if not hasattr(model, "tree_"):
         raise TypeError("Expected a fitted sklearn DecisionTree with tree_ attribute")
 
@@ -110,15 +147,17 @@ def load_sklearn_ensemble(
     model,
     input_bounds: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> TreeEnsembleDefinition:
-    """Convert a trained sklearn ensemble to a TreeEnsembleDefinition.
+    """Convert a trained sklearn **regressor** ensemble to a TreeEnsembleDefinition.
 
-    Supports GradientBoostingRegressor, RandomForestRegressor, and their
-    classifier counterparts.
+    Supports GradientBoostingRegressor and RandomForestRegressor. Regressors
+    only: classifier ensembles accumulate log-odds and (for gradient boosting)
+    a ``base_score`` that is not the regressor ``init_.constant_``, so embedding
+    them would encode the wrong quantity. Classifiers raise ``TypeError``.
 
     Parameters
     ----------
-    model : sklearn ensemble estimator
-        Trained sklearn ensemble with ``estimators_`` attribute.
+    model : sklearn regressor ensemble
+        Trained sklearn regressor ensemble with ``estimators_`` attribute.
     input_bounds : tuple of np.ndarray, optional
         ``(lower, upper)`` bounds on input features.
 
@@ -126,6 +165,14 @@ def load_sklearn_ensemble(
     -------
     TreeEnsembleDefinition
     """
+    from sklearn.base import is_classifier
+
+    if is_classifier(model):
+        raise TypeError(
+            "Only regressor ensembles are supported; classifier ensembles "
+            "accumulate log-odds (and a base_score that is not the regressor "
+            "init_.constant_), which is not an embeddable scalar target."
+        )
     if not hasattr(model, "estimators_"):
         raise TypeError("Expected a fitted sklearn ensemble with estimators_ attribute")
 
