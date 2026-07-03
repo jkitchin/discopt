@@ -39,8 +39,59 @@ def _int_qcqp():
     return m
 
 
+def _span_bilinear():
+    """Bilinear model whose BOTH factors span zero at the root, so real B&B nodes
+    (and the validation set) carry negative / zero-spanning boxes for those vars."""
+    m = dm.Model("span")
+    x = m.continuous("x", lb=-3, ub=4)  # root box spans zero
+    y = m.continuous("y", lb=-2, ub=5)  # root box spans zero
+    m.minimize(x * y)
+    m.subject_to(x + y >= 1)
+    return m
+
+
 def test_incremental_active_for_integer_qcqp():
     assert MccormickLPRelaxer(_int_qcqp())._inc is not None
+
+
+def test_validate_exercises_at_least_four_sign_regimes():
+    """C-21: the soundness gate must probe negative-lb / zero-spanning / mixed-sign
+    / degenerate boxes, not just ``lb>=0``. On a model with zero-spanning root
+    factors the validation set covers >= 4 distinct sign regimes."""
+    inc = MccormickLPRelaxer(_span_bilinear())._inc
+    assert inc is not None and inc.ok
+    regimes = inc._validated_regimes
+    # span (lb<0<ub), zero_lb (lb==0<ub), neg (ub<=0), degen (lb==ub), pos (lb>0)
+    for needed in ("span", "neg", "degen", "zero_lb"):
+        assert needed in regimes, f"validation set never exercised the {needed!r} regime"
+    assert len(regimes) >= 4, f"only {len(regimes)} sign regimes: {sorted(regimes)}"
+
+
+def test_validate_catches_negative_box_sign_flip_mutation(monkeypatch):
+    """C-21 mutation test. A ``_bilinear_rows`` that clips negative lower bounds to
+    zero is the IDENTITY on ``lb>=0`` boxes (so the pre-C-21 validation set, which
+    only used such boxes, would have accepted it — a silent divergence in exactly
+    the sign regimes that dominate real nodes) but WRONG on negative / zero-spanning
+    boxes. The hardened gate now includes such boxes, so the mutation must make
+    ``_validate`` reject the fast path (``ok`` False / ``_inc`` None).
+
+    Reverting the box set to ``lb>=0``-only makes this assertion fail (verified
+    manually during C-21): the mutation then slips through undetected.
+    """
+    import discopt._jax.incremental_mccormick as ic
+
+    # Sanity: the unmutated engine engages on this model.
+    assert MccormickLPRelaxer(_span_bilinear())._inc is not None
+
+    _orig_rows = ic._bilinear_rows
+
+    def _clip_negative_lb(i, j, a, li, ui, lj, uj):
+        # Identity when li,lj >= 0; diverges once a lower bound goes negative.
+        return _orig_rows(i, j, a, max(li, 0.0), ui, max(lj, 0.0), uj)
+
+    monkeypatch.setattr(ic, "_bilinear_rows", _clip_negative_lb)
+    inc = MccormickLPRelaxer(_span_bilinear())._inc
+    assert inc is None, "sign-flip mutation must be caught by the hardened validation gate"
 
 
 def test_incremental_sound_for_mixed_and_division():
