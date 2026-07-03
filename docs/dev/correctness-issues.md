@@ -60,7 +60,7 @@ in non-default configs; loud ingestion gaps. **P3** = hygiene.
 | C-5 | P1 | .nl parser | floor/ceil/round/trunc→identity, intdiv→div, all silent | open |
 | C-6 | P1 | modeling API | integer vars silently clamped to [0, 1e6] | open |
 | C-18 | P1 | midpoint bound | `mccormick_bounds="midpoint"` returns u(mid), not a lower bound (opt-in mode) | open |
-| C-20 | P2 | fbbt_fp.rs | watch-list FBBT declares infeasibility with zero tolerance (opt-in engine) | open |
+| C-20 | P2 | fbbt_fp.rs | watch-list FBBT declares infeasibility with zero tolerance (opt-in engine) | fixed |
 | C-15 | P2 | obbt.py | `run_obbt` variant tightens to raw LP vertex, no NS safe-bound clamp | fixed |
 | C-14 | P2 | milp_driver | LP-infeasible fathom trusts status alone; Farkas ray never verified | open |
 | C-21 | P2 | incremental MC | soundness-gate validation boxes never exercise negative/zero-spanning bounds | open |
@@ -633,7 +633,23 @@ present), matching `fbbt.rs`.
 **Done criteria:** the differential test passes (both engines agree feasible);
 existing fbbt_fp tests green; standing gates pass.
 
-**Log:** —
+**Log:**
+- 2026-07-03 — **CONFIRMED then FIXED.** Confirmed via a new differential test:
+  an eps-residual equality (body forward-props to a point 5e-7 < FEAS_TOL off the
+  rhs) is feasible in the main engine (`fbbt`) but the watch-list engine reported
+  it infeasible (strict `lo > hi`). Verified fail-before by reverting the guards.
+- **Fix.** Both infeasibility-declaring sites in `presolve/fbbt_fp.rs` now use
+  `.is_empty_beyond(FEAS_TOL)` instead of `.is_empty()`: the constraint-body check
+  (`:148`) — matching `fbbt.rs:1138-1140/:1229-1231` exactly — and the per-variable
+  post-backprop check (`:181`), which the main engine doesn't even have (so it was
+  strictly harsher). Added `FEAS_TOL` to the `super::fbbt` import.
+- **Regression tests** (`presolve::fbbt_fp::tests`):
+  `c20_eps_residual_equality_matches_main_engine_feasible` (differential vs `fbbt`;
+  fails before the fix) and `c20_real_infeasibility_still_detected` (a residual
+  4.0 ≫ FEAS_TOL is still caught — guards against over-loosening).
+- **Gates:** `cargo test -p discopt-core` 373 lib + 4 + 1 doctest green, no
+  warnings. Python default path is unaffected (`fbbt_fixed_point` is off by
+  default); smoke 211 + adversarial 10 green locally. PR: #403.
 
 ---
 
