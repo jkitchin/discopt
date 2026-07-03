@@ -189,12 +189,12 @@ appropriate `SoundnessCertificate` (`PROVEN_EQUIVALENT` for extensive form,
 
 ## 5. Phased plan
 
-| Phase | Deliverable | Acceptance |
-|---|---|---|
-| **0** | `scenario.py` + `risk.py` + `extensive_form.py` (deterministic equivalent) | newsvendor (closed form) and the classic **farmer problem** (known optimum) certified correct; CVaR/chance math matches a brute-force oracle on small scenario sets |
-| **1** | `lshaped.py` — probability-weighted multicut Benders; the weighting primitive in the engine | L-shaped optimum **== extensive-form optimum** on the same scenarios (bound-neutral, certified objective); weighted cuts reproduce `Σ p_s Q_s`; scales to ≫ scenarios the extensive form can hold |
-| **2** | `ph.py` (progressive hedging) + convex-nonlinear recourse via `solve_gbd`; advisor `SCENARIO` generator + wire `MethodKind.PROGRESSIVE_HEDGING` into `ir/reformulation.py` | PH primal converges to the extensive-form optimum on convex instances; GBD bound withheld correctly on nonconvex recourse |
-| **3** | multistage (nested Benders / SDDP slot), integer L-shaped (Laporte–Louveaux), SAA confidence intervals, DRO bridge to `ro/` | multistage farmer/energy instances; integer-recourse instances certified; SAA lower/upper statistical bounds reported |
+| Phase | Deliverable | Acceptance | Docs |
+|---|---|---|---|
+| **0** | `scenario.py` + `risk.py` + `extensive_form.py` (deterministic equivalent) | newsvendor (closed form) and the classic **farmer problem** (known optimum) certified correct; CVaR/chance math matches a brute-force oracle on small scenario sets | module/API docstrings with runnable examples; `docs/notebooks/stochastic_programming.ipynb` skeleton + worked newsvendor with `{cite:p}` citations |
+| **1** | `lshaped.py` — probability-weighted multicut Benders; the weighting primitive in the engine | L-shaped optimum **== extensive-form optimum** on the same scenarios (bound-neutral, certified objective); weighted cuts reproduce `Σ p_s Q_s`; scales to ≫ scenarios the extensive form can hold | notebook: farmer problem solved both ways (extensive form + L-shaped), scaling plot; `example_farmer_*` added to the modeling gallery |
+| **2** | `ph.py` (progressive hedging) + convex-nonlinear recourse via `solve_gbd`; advisor `SCENARIO` generator + wire `MethodKind.PROGRESSIVE_HEDGING` into `ir/reformulation.py` | PH primal converges to the extensive-form optimum on convex instances; GBD bound withheld correctly on nonconvex recourse | notebook: CVaR risk-averse example + chance-constraint example; `_toc.yml` entry |
+| **3** | multistage (nested Benders / SDDP slot), integer L-shaped (Laporte–Louveaux), SAA confidence intervals, DRO bridge to `ro/` | multistage farmer/energy instances; integer-recourse instances certified; SAA lower/upper statistical bounds reported | multistage notebook section; `docs/references.bib` entries; **`jupyter-book build docs/` zero warnings** |
 
 Every phase ships fails-before/passes-after tests per the merged loop protocol
 (fast, class-not-instance). Each decomposition method is validated **bound-neutrally**
@@ -215,7 +215,39 @@ engine change carries a dedicated differential test.
   refused with a clear message; multistage in v1 → refuse; probabilities not summing
   to 1 → refuse.
 
-## 7. SOTA positioning
+## 7. Documentation & examples
+
+Per the repo's Jupyter Book policy (CLAUDE.md → *Documentation*), the module ships
+user-facing docs, worked examples, and citations that build with **zero warnings**,
+and the examples are pinned by a test so they cannot rot.
+
+- **Notebook** `docs/notebooks/stochastic_programming.ipynb` (single source of truth):
+  two-stage SP with recourse, scenarios vs SAA sampling, the **newsvendor** (closed
+  form, to build intuition) and the **Birge–Louveaux farmer problem** solved end-to-end
+  — first as the extensive form, then via the L-shaped method, showing the *identical*
+  certified optimum (the "extensive form is the oracle" story made visual) and a
+  scaling comparison. Further cells: a risk-averse **CVaR** variant and a
+  **chance-constrained** variant, each contrasted with the risk-neutral plan. Every
+  markdown cell carries `{cite:p}`/`{cite:t}` MyST citations.
+- **Bibliography** — add to `docs/references.bib`: Birge & Louveaux (2011),
+  Kall & Wallace (1994), Van Slyke & Wets (1969, L-shaped), Rockafellar & Uryasev
+  (2000, CVaR), Rockafellar & Wets (1991, progressive hedging), and Shapiro–Dentcheva–
+  Ruszczyński (2021).
+- **TOC** — register the notebook in `docs/_toc.yml` under the appropriate part.
+- **Gallery examples** — runnable `example_farmer_*` / `example_newsvendor_*` models
+  added to the pure-modeling gallery, covered by the whole-gallery `validate()` smoke
+  test (the E1–E3 pattern from PR #439) so the documented examples are built and
+  validated on every CI run.
+- **API docstrings** — `TwoStageProblem`, `ScenarioSet`, `expectation`, `cvar`,
+  `chance_constraint` carry runnable, doctest-style examples (the §3.4 snippet is the
+  seed).
+- **Build gate** — `jupyter-book build docs/` completes with zero warnings.
+
+Documentation is incremental across the phases (the "Docs" column in §5): Phase 0
+ships the notebook skeleton + newsvendor; Phase 1 adds the farmer problem solved both
+ways; Phase 3 completes it and enforces the zero-warning build.
+
+## 8. SOTA positioning
 
 Comparable tools: **mpi-sppy / PySP** (Pyomo two-/multistage, PH + L-shaped),
 **SDDP.jl** (multistage SDDP), **StochasticPrograms.jl**. discopt's differentiators:

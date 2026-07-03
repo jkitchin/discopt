@@ -196,12 +196,12 @@ already uses.
 
 ## 6. Phased plan
 
-| Phase | Deliverable | Acceptance |
-|---|---|---|
-| **0** | `symbolic_diff.py` + differential-test harness | symbolic ∂/∂x matches `jax.grad` to 1e-9 over a fuzz of random DAGs (all node types); nonsmooth points documented/excluded |
-| **1** | `strong_duality.py` + `BilevelProblem` for **LP–LP** bilevel; convexity/integer gates | Bard's linear bilevel examples and the classic linear bilevel (known optima) certified correct; KKT and strong-duality agree on LP lower levels |
-| **2** | `kkt.py` for **convex-QP / convex-NLP** lower level | Toy convex-lower-level instances certified against a brute-force/analytic follower response; `mpec` `gdp` path gives `gap_certified=True` |
-| **3** | Advisor hook + docs notebook; MI-upper-level examples (facility interdiction, toll-setting) | end-to-end gallery examples with `validate()` + pinned optima; refusal tests for nonconvex/integer/pessimistic |
+| Phase | Deliverable | Acceptance | Docs |
+|---|---|---|---|
+| **0 ✅ DONE** | `symbolic_diff.py` + differential-test harness (`test_bilevel_symbolic_diff.py`) | symbolic ∂/∂x matches `jax.grad` to 1e-9 over a fuzz of random DAGs (all node types); nonsmooth points documented/excluded — **29 tests pass, ruff clean** | module + function docstrings with runnable examples; the differential test as executable documentation |
+| **1** | `strong_duality.py` + `BilevelProblem` for **LP–LP** bilevel; convexity/integer gates | Bard's linear bilevel examples and the classic linear bilevel (known optima) certified correct; KKT and strong-duality agree on LP lower levels | `docs/notebooks/bilevel.ipynb` skeleton + first worked LP-bilevel example with `{cite:p}` citations |
+| **2** | `kkt.py` for **convex-QP / convex-NLP** lower level | Toy convex-lower-level instances certified against a brute-force/analytic follower response; `mpec` `gdp` path gives `gap_certified=True` | notebook: convex-lower-level example; `example_bilevel_*` added to the modeling gallery |
+| **3** | Advisor hook; MI-upper-level examples (facility interdiction, toll-setting) | end-to-end gallery examples with `validate()` + pinned optima; refusal tests for nonconvex/integer/pessimistic | notebook complete; `_toc.yml` entry; `docs/references.bib` entries; **`jupyter-book build docs/` zero warnings** |
 
 Each phase ships with fails-before/passes-after tests per the merged loop protocol
 (fast, class-not-instance), and each reformulation is a **bound-changing** change, so
@@ -222,7 +222,39 @@ cut a true bilevel-feasible leader point.
   → refuse; `method="pessimistic"` → refuse. Each a fast test.
 - **KKT ≡ strong-duality** on LP lower levels (same optimum, both methods).
 
-## 8. SOTA positioning
+## 8. Documentation & examples
+
+Per the repo's Jupyter Book policy (CLAUDE.md → *Documentation*), the module is not
+"done" until it ships user-facing docs, worked examples, and citations that build
+with **zero warnings** — and the examples are pinned by a test so they cannot rot.
+
+- **Notebook** `docs/notebooks/bilevel.ipynb` (the single source of truth for the
+  content): motivation (Stackelberg leader–follower games), the KKT reduction and its
+  convexity precondition, the optimistic-vs-pessimistic distinction, then a worked
+  **toll-setting / network-interdiction** model solved end-to-end with
+  `BilevelProblem(...).formulate()` → `model.solve()`, showing the recovered leader
+  decision *and* a check that the follower response is genuinely lower-level-optimal.
+  A second cell demonstrates the `symbolic_diff` engine directly (`diff`/`grad`) and
+  the differential-test idea. Every markdown cell carries `{cite:p}`/`{cite:t}` MyST
+  citations.
+- **Bibliography** — add entries to `docs/references.bib`: Bard (1998), Dempe (2002),
+  Colson–Marcotte–Savard (2007), and the Kleinert–Labbé–Ljubić–Schmidt (2021) survey.
+- **TOC** — register the notebook in `docs/_toc.yml` under the advanced-topics part.
+- **Gallery example** — a runnable `example_bilevel_*` model added to the pure-modeling
+  gallery, covered by the whole-gallery `validate()` smoke test (the E1–E3 pattern from
+  PR #439) so the documented example is built and validated on every CI run.
+- **API docstrings** — `BilevelProblem`, `diff`, `grad`, and each reformulation carry
+  runnable, doctest-style usage examples (the API snippets in §3–§4 are the seed). The
+  Phase 0 `symbolic_diff` module already ships this.
+- **Build gate** — `jupyter-book build docs/` completes with zero warnings.
+
+Documentation is incremental across the phases, not a Phase-3 afterthought (the "Docs"
+column in §6): Phase 0 already ships full `symbolic_diff` docstrings + the differential
+test as executable documentation; Phase 1 adds the notebook skeleton with the first
+worked LP-bilevel example; Phase 3 completes the notebook, the gallery example, and the
+zero-warning build.
+
+## 9. SOTA positioning
 
 Comparable tools: **Pyomo.PAO** (linear/quadratic bilevel, KKT + strong-duality),
 **YALMIP** (KKT via `solvebilevel`), **MibS** (mixed-integer bilevel, branch-and-cut),
