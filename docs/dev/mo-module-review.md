@@ -21,9 +21,15 @@ and test blind spots.
 
 ## 1. Summary of findings
 
+> **✅ RESOLVED MO1** — `python/tests/test_display_cluster.py` (this PR). The
+> quasi-normal is extracted into a `_quasi_normal(phi)` helper computing the
+> Das–Dennis `n̂ = -Φe = -phi.sum(axis=0)` (negated sum of the anchor rows), fixing
+> the `axis=1` slip. Verified fails-before/passes-after; the k=2 case is unchanged
+> (symmetric payoff). The full finding text is preserved below.
+
 | # | Severity | Component | Finding |
 |---|----------|-----------|---------|
-| MO1 | **P1 method-correctness** | `nbi.py:128` | NBI quasi-normal computed with the **wrong axis** (`phi.sum(axis=1)` instead of `axis=0`) — deviates from the cited Das–Dennis (1998) formula for k ≥ 3; invisible at k = 2 by symmetry [CONFIRMED] |
+| MO1 | **P1 method-correctness** — ✅ RESOLVED | `nbi.py:128` | NBI quasi-normal computed with the **wrong axis** (`phi.sum(axis=1)` instead of `axis=0`) — deviates from the cited Das–Dennis (1998) formula for k ≥ 3; invisible at k = 2 by symmetry [CONFIRMED] |
 | MO2 | P2 method-fidelity | `scalarization.py` | The `epsilon_constraint` implementation is **AUGMECON, not AUGMECON2**: the bypass/jump acceleration that defines AUGMECON2 is absent, and the payoff table is not built lexicographically as Mavrotas prescribes [BY INSPECTION] |
 | MO3 | P2 | `pareto.py` | `filtered()` keeps **duplicate points** (identical objective vectors from different scalarization parameters survive weak-dominance filtering) [CONFIRMED] |
 | MO4 | P2 (doc/API) | `indicators.py` | Default hypervolume reference is **front-dependent** — comparing two fronts via `front.hypervolume()` silently compares against different references [CONFIRMED: 2.16 vs 0.08 for nested fronts] |

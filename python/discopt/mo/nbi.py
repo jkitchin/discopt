@@ -29,6 +29,18 @@ from discopt.mo.utils import (
 )
 
 
+def _quasi_normal(phi: np.ndarray) -> np.ndarray:
+    """Das-Dennis quasi-normal direction ``n̂ = -Φe``.
+
+    ``phi[i, j]`` is objective ``j`` at anchor ``i`` (row layout), so ``Φe`` — the
+    sum of the anchor payoff vectors (the rows) — is ``phi.sum(axis=0)``. Summing
+    ``axis=1`` instead collapses the objective components *within* each anchor,
+    which only coincides with the correct direction when ``phi`` is symmetric
+    (i.e. ``k = 2``); for ``k >= 3`` it deviates from the cited formula (MO1).
+    """
+    return -phi.sum(axis=0)
+
+
 def _payoff_matrix(
     model,
     objectives: list,
@@ -123,9 +135,7 @@ def normal_boundary_intersection(
         for i in range(k):
             for j in range(k):
                 phi[i, j] = signs[j] * (raw_payoff[i, j] - ideal_arr[j]) / span[j]
-        # Quasi-normal direction: negative of column-sum (points inward from
-        # the CHIM into the dominated region).
-        n_hat = -phi.sum(axis=1)  # shape (k,)
+        n_hat = _quasi_normal(phi)  # shape (k,)
 
         # Weight grid on simplex (convex combinations of anchors).
         weights = _simplex_lattice(k, n_points)

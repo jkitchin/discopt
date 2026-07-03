@@ -334,9 +334,24 @@ tables, comma'd data, unquoted labels, lowercase-consistent names).
 
 ### 6.3 `latex.py`
 
+> **✅ RESOLVED L1, L5, L6, L8** — `python/tests/test_display_cluster.py` (display-cluster PR).
+> - **L1**: `_constraint_to_latex` now renders a `\text{[Type: name]}` placeholder
+>   for non-arithmetic constraint types (indicator/disjunctive/SOS/logical) instead
+>   of raising `AttributeError` — GDP models display without crashing.
+> - **L5**: indexed digit-suffixed variables merge into a single subscript
+>   (`y1[0]` → `y_{1,0}`, not the invalid `y_{1}_{0}`); other bases are brace-wrapped.
+> - **L6**: `_fmt_num` guards non-finite input (`\infty`/`-\infty`/`\mathrm{nan}`)
+>   instead of `int(inf)` raising `OverflowError`.
+> - **L8**: `Expression._repr_latex_` now renders the DAG via `expr_to_latex`.
+>
+> Verified fails-before/passes-after. **Still open** (this PR did not touch them):
+> L2 (fast-path rows invisible — part of the X-1 builder-rows root), L3
+> (`SumOverExpression`/`Parameter`), L4 (precedence on non-BinaryOp nodes), L6's
+> slice rendering, L7 (HTML vs LaTeX escaping).
+
 | ID | Loc | Finding |
 |----|-----|---------|
-| L1 | `:152-161` | **`to_latex`/`_repr_latex_`/`_repr_html_` crash on any model containing `if_then`/`either_or`/`m.logical` constraints** [VERIFIED]: `_constraint_to_latex` reads `.sense`/`.body` on `_IndicatorConstraint` et al. Merely *displaying* such a model in Jupyter raises `AttributeError`. |
+| L1 | `:152-161` — ✅ RESOLVED | **`to_latex`/`_repr_latex_`/`_repr_html_` crash on any model containing `if_then`/`either_or`/`m.logical` constraints** [VERIFIED]: `_constraint_to_latex` reads `.sense`/`.body` on `_IndicatorConstraint` et al. Merely *displaying* such a model in Jupyter raises `AttributeError`. |
 | L2 | `:200-209` | **Fast-path constraint families are invisible** [VERIFIED]: renderer reads only `_constraints`, so a `m.constraint(...)` model renders "(1 variable, 0 constraints)" — a display that misrepresents the model. |
 | L3 | `:26-37` | **`SumOverExpression` and `Parameter` unhandled** [VERIFIED]: the dominant `dm.sum(..., over=...)` pattern renders as literal `Σ[6 terms]`; `Parameter` as `param(price_A)` with a bare `_` in math mode. |
 | L4 | `:109-127` | **Precedence bugs on non-BinaryOp nodes** [VERIFIED]: `(-x)**2` → `-x^{2}`; `dm.sum(x)**2` → `\sum x^{2}`; `(A@x)**2` → `A\,x^{2}` — all mathematically wrong renderings (UnaryOp/Sum/MatMul ignore `parent_prec`). |
