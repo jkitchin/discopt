@@ -244,6 +244,7 @@ def test_monod_detector_guards_and_no_misfire():
     assert _try_extract_monod(xn / (2.0 + xn), mn) is None
 
 
+@pytest.mark.slow
 def test_compiler_routes_arrhenius_pattern():
     """The compiler detects exp(-c/T) on a positive-domain variable and routes it
     to the dedicated single-inflection envelope; sound across the inflection."""

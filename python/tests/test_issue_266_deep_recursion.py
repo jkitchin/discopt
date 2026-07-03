@@ -157,6 +157,7 @@ def test_quadratic_fallback_runs_once_per_maximal_region(monkeypatch):
     assert calls["n"] <= 8, f"quadratic_curvature called {calls['n']} times for n={n}"
 
 
+@pytest.mark.slow
 def test_deep_pure_continuous_solve_does_not_return_error():
     """A convexity-unknown deep continuous model returns a sound status, not error.
 

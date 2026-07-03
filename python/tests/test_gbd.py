@@ -191,6 +191,7 @@ def test_project_mu_sign_convention():
             assert out[k] == pytest.approx(mu[k])
 
 
+@pytest.mark.slow
 def test_lagrangian_anchor_sound_under_inexact_recourse(monkeypatch):
     """The GBD cut anchors at the Lagrangian dual value, not the NLP primal, so a
     *suboptimal* recourse solve cannot produce an unsound bound.
@@ -235,6 +236,7 @@ def test_lagrangian_anchor_sound_under_inexact_recourse(monkeypatch):
     assert not (r.status == "optimal" and r.objective is not None and r.objective > true_opt + 1e-2)
 
 
+@pytest.mark.slow
 def test_nonconvex_reports_no_bound():
     """A nonconvex (concave) objective must not produce a numeric lower bound;
     soundness gate -> bound is None even though a heuristic incumbent is found."""

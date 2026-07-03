@@ -159,6 +159,7 @@ def test_signed_power_panhandle_sound(beta):
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("beta", [1.5, 1.85, 1.95])
 def test_compiler_routes_signed_power_pattern(beta):
     """The compiler detects ``f * |f|**(beta-1)`` and routes it to the tight

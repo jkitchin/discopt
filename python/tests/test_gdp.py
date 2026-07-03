@@ -1313,6 +1313,7 @@ class TestIfElse:
         with pytest.raises(TypeError):
             dm.udf(123)
 
+    @pytest.mark.slow
     def test_solve_piecewise_reaches_global_optimum(self):
         """End-to-end: minimize a piecewise function with a unique optimum.
 

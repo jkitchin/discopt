@@ -142,6 +142,7 @@ def test_supporting_hyperplane_is_a_valid_lower_bound():
             assert bound <= f(xs) + 1e-6
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(not os.path.exists(_NVS17), reason="nvs17.nl not vendored")
 def test_nvs17_certifies_via_convex_objective_bound():
     """End-to-end: nvs17 (convex quadratic objective, nonconvex constraints,

@@ -36,6 +36,7 @@ _SUBOPTIMAL_SEEDS = [
 ]
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(not os.path.exists(_NVS19), reason="nvs19.nl not vendored")
 @pytest.mark.parametrize("seed", _SUBOPTIMAL_SEEDS)
 def test_suboptimal_warm_start_never_false_certifies(seed):
