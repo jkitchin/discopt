@@ -26,7 +26,8 @@ class TestSkillsPackage:
         names = [p.name for p in skills.iter_commands()]
         assert len(names) >= 5
         assert "formulate.md" in names
-        assert "doe.md" in names
+        # doe.md moved to the discopt-doe plugin (#389).
+        assert "doe.md" not in names
         # Dev-only commands (discoptbot, adversary) intentionally don't ship
         # in the bundled skills; they live in `.claude/commands/` only.
         assert "discoptbot.md" not in names

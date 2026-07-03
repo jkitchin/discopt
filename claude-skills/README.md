@@ -37,20 +37,20 @@ compatibility and simply forwards to `discopt install-skills --project-scope`.
 | `/explain-model`    | Generate a formal math write-up of a model |
 | `/convert`          | Translate a model to/from Pyomo, GAMS, AMPL, JuMP (and file formats) |
 | `/estimate`         | Fit model parameters to experimental data |
-| `/doe`              | Design optimal experiments (identifiability, D/A/E-optimal, active learning) |
 | `/benchmark-report` | Narrative performance report from benchmark JSON |
 
 (The dev-only `/adversary` and `/discoptbot` commands ship separately via
-`discopt-dev`, not in the package bundle.)
+`discopt-dev`, not in the package bundle. The `/discopt-doe` skill and the
+DoE expert agents are provided by the [discopt-doe](https://github.com/jkitchin/discopt-doe)
+plugin: `discopt-doe-install-skill`.)
 
 ### Agents (`~/.claude/agents/`)
 
-22 domain-expert subagents covering modeling and the solver stack:
+18 domain-expert subagents covering modeling and the solver stack:
 `amp-expert`, `benchmarking-expert`, `convex-relaxation-expert`,
-`convexity-detection-expert`, `differentiability-expert`, `doe-expert`,
-`estimability-expert`, `estimation-expert`, `heuristics-expert`,
-`highs-expert`, `identifiability-expert`, `ipopt-expert`, `jax-ipm-expert`,
-`llm-feature-expert`, `minlp-solver-expert`, `model-discrimination-expert`,
+`convexity-detection-expert`, `differentiability-expert`, `estimation-expert`, `heuristics-expert`,
+`highs-expert`, `ipopt-expert`, `jax-ipm-expert`,
+`llm-feature-expert`, `minlp-solver-expert`,
 `modeling-expert`, `multiobjective-expert`, `nn-embedding-expert`,
 `presolve-expert`, `robust-opt-expert`, `scip-expert`.
 

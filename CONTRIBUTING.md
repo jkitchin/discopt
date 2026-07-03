@@ -26,9 +26,15 @@ contributions:
   modeling and solving — for example, the GDP, DAE, and NN embedding type
   modules.
 - **Plugin / contrib contributions** are more domain-specific tools built on
-  top of discopt — for example, something like the DOE module, or a
-  microkinetic modeling language. These should probably be externally
-  maintained as their own packages that depend on discopt.
+  top of discopt — for example, the DOE package
+  ([discopt-doe](https://github.com/jkitchin/discopt-doe)) or a
+  microkinetic modeling language. These should be externally maintained as
+  their own packages that depend on discopt: publish a namespace subpackage
+  (`discopt.<name>`, see discopt-doe/discopt-mkm for the pattern) and, for CLI
+  surface, register a subcommand in the `"discopt.cli"` entry-point group —
+  the entry-point name is the subcommand and the value is a module exposing
+  `add_subparser(subparsers)` and `run(args)` (protocol documented in
+  `python/discopt/cli.py`).
 
 The line is not always obvious, and we are open to discussion on where a
 contribution might fall and what the best way to build it is. Raise this in
@@ -121,7 +127,7 @@ pytest python/tests/ --cov=discopt
 | `slow` | Backend cross-product, mid-size instances, ML training | nightly |
 | `correctness` | Known-optima validation; usually also `slow` | nightly / pre-release |
 | `pr_correctness` | Curated 5-instance correctness subset; <30 s total | yes |
-| `integration` | End-to-end workflows (DOE, discrimination, CUTEst) | nightly / manual |
+| `integration` | End-to-end workflows (CUTEst, GAMS) | nightly / manual |
 | `amp_benchmark` | AMP Alpine, MINLPTests, or incidence benchmark coverage | manual |
 | `requires_cyipopt` | Requires the optional cyipopt/Ipopt solver stack | manual |
 | `requires_pounce` | Requires the optional POUNCE (pure-Rust Ipopt port) solver | manual |

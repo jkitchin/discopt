@@ -10,6 +10,18 @@ The release procedure that produces these entries is documented in
 
 ## [Unreleased]
 
+### Removed
+
+- **DOE module extracted to the `discopt-doe` plugin** (`refactor!`, #389).
+  `python/discopt/doe/` (design, screening, FIM, identifiability,
+  discrimination, workbook CLI, Streamlit GUI), its 19 test files, 11 doc
+  notebooks, notebook build scripts, and the doe skill/agents now live in the
+  standalone [discopt-doe](https://github.com/jkitchin/discopt-doe) package.
+  Because discopt is a namespace package, `pip install discopt-doe` restores
+  `discopt.doe` imports and the `discopt doe` subcommand unchanged. The
+  `doe`/`doe-gui` extras are gone — use `discopt-doe[gui,ml]`. discopt ≤0.5.x
+  is the last line with DOE built in.
+
 ### Added
 
 - **Public parametric-compilation API** (`feat(api)`, #389). New

@@ -13,7 +13,9 @@ Quick Start
 
 See Also
 --------
-discopt.doe : Optimal design of experiments using the same Experiment interface.
+discopt.doe : Optimal design of experiments using the same Experiment
+    interface, provided by the standalone ``discopt-doe`` plugin
+    (``pip install discopt-doe``).
 """
 
 from __future__ import annotations
@@ -273,7 +275,7 @@ def estimate_parameters(
         Parameters to hold fixed during the estimation. After
         ``create_model``, the variable's lower and upper bounds are both
         set to the supplied value so the solver cannot move it. Used
-        internally by :func:`discopt.doe.profile_likelihood` and useful
+        by ``discopt.doe.profile_likelihood`` (discopt-doe plugin) and useful
         standalone for sub-model fits and one-at-a-time sensitivity
         studies.
     solver_options : dict, optional

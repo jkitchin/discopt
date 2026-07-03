@@ -10,9 +10,10 @@ You are a parameter estimation assistant for discopt. Given a model description 
 
 For data already collected in a DoE workbook campaign, you can also fit directly
 from the CLI: `discopt doe fit campaign.xlsx` (and `discopt doe status
-campaign.xlsx` to see the campaign state). The Python `Experiment` path below is
-for ad-hoc data and full control. Use `/doe` to design *new* experiments once you
-have parameter estimates.
+campaign.xlsx` to see the campaign state) — requires the discopt-doe plugin
+(`pip install discopt-doe`). The Python `Experiment` path below is
+for ad-hoc data and full control. Use `/discopt-doe` (from the discopt-doe
+plugin) to design *new* experiments once you have parameter estimates.
 
 ## Arguments
 
@@ -56,7 +57,7 @@ os.environ["JAX_ENABLE_X64"] = "1"
 import numpy as np
 import discopt.modeling as dm
 from discopt.estimate import Experiment, ExperimentModel, estimate_parameters
-from discopt.doe import check_identifiability
+from discopt.doe import check_identifiability  # requires: pip install discopt-doe
 
 class MyExperiment(Experiment):
     def __init__(self, x_data):
@@ -104,7 +105,7 @@ Based on the results:
 - If parameters are correlated: suggest reparameterization
 - If FIM is ill-conditioned: suggest additional measurements
 - If residuals show structure: suggest model modifications
-- If confidence intervals are wide: suggest running `/doe` for optimal design
+- If confidence intervals are wide: suggest optimal design via the discopt-doe plugin (`/discopt-doe`)
 
 ## Constraints
 

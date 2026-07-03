@@ -24,7 +24,7 @@ A hybrid Mixed-Integer Nonlinear Programming (MINLP) solver combining a Rust bac
 - **Complementarity / MPEC** -- `Model.complementarity(x, y)` reformulated via GDP disjunction (default), Scholtes regularization, or SOS1
 - **Specialized problem classes** -- pooling problem (pq-formulation), geometric programming (posynomial detection + log-space convex reformulation), AC optimal power flow (rectangular QCQP)
 - **Robust & multi-objective optimization** -- uncertainty sets with affine decision rules; scalarization (weighted-sum, ε-constraint, Tchebycheff, NBI, NNC) with Pareto-front analysis
-- **Parameter estimation & MBDoE** -- weighted-least-squares estimation and model-based design of experiments (D/A/E-optimality, identifiability, model discrimination) with exact JAX Fisher-information Jacobians
+- **Parameter estimation** -- weighted-least-squares estimation with exact JAX Fisher-information Jacobians; model-based design of experiments (D/A/E-optimality, identifiability, model discrimination) is available via the [discopt-doe](https://github.com/jkitchin/discopt-doe) plugin
 - **Presolve** -- FBBT (interval arithmetic, probing, Big-M simplification, integrality-aware snapping, periodic-variable reduction), OBBT with LP warm-start
 - **Cutting planes** -- reformulation-linearization (RLT, a first-class `rlt_cuts=True` option), PSD/SOC cuts for QCQP, and outer approximation (OA); `cuts='auto'` by default
 - **Primal heuristics** -- multi-start NLP, feasibility pump, diving, RINS, local branching
@@ -252,52 +252,14 @@ discopt about            # Version and installation info
 discopt test             # Smoke-test the install
 discopt convert in.gms out.nl
 discopt install-skills   # Install Claude Code slash commands and agents
-discopt doe ...          # Model-based design of experiments (5-verb loop)
 ```
 
-### DoE from the command line
-
-`discopt doe` drives a model-based design-of-experiments loop around a
-single `.xlsx` workbook that travels between the lab bench and the CLI.
-Five verbs cover the full cycle:
-
-```bash
-# 1. List the built-in templates (linear, polynomial-1d,
-#    response-surface-2d, response-surface-3d).
-discopt doe templates
-
-# 2. Generate an initial optimal design.
-discopt doe new response-surface-2d \
-    --input temp:50:100 --input ph:3:9 \
-    --response yield --error 0.5 --n 6 -o campaign.xlsx
-
-# 3. (Run the experiments; fill the `yield` column in campaign.xlsx; save.)
-discopt doe status campaign.xlsx
-
-# 4. Fit parameters from the completed runs (writes parameters + FIM sheets).
-discopt doe fit campaign.xlsx
-
-# 5. Append a next batch of D-optimal runs that reuse the fitted FIM.
-discopt doe extend campaign.xlsx --n 4
-```
-
-Every verb also takes `--json` for LLM agent or GUI consumption. The
-workbook is the single source of truth — `status`, `fit`, and
-`extend` only need the file path. An `--module pkg.mod:MyExperiment`
-escape hatch on `new` swaps the template for any custom `Experiment`
-subclass. Install the optional dependency with
-`pip install discopt[doe]`.
-
-A Streamlit GUI over the same workflow ships under
-`pip install 'discopt[doe-gui]'`:
-
-```bash
-discopt doe gui                # blank slate; create or open from sidebar
-discopt doe gui campaign.xlsx  # drop straight into an existing campaign
-```
-
-The GUI binds directly to the same `do_*` functions the CLI uses, so
-both surfaces stay in lockstep automatically.
+External packages can add subcommands through the `"discopt.cli"` entry-point
+group (see the protocol notes in `python/discopt/cli.py`). For example, the
+[discopt-doe](https://github.com/jkitchin/discopt-doe) plugin
+(`pip install discopt-doe`) adds `discopt doe ...` — a model-based
+design-of-experiments loop (templates/new/status/fit/extend/gui) around an
+`.xlsx` workbook, with an optional Streamlit GUI.
 
 A separate `discopt-dev` script ships developer-only commands used from inside
 a discopt source checkout (literature scanner, adversary tester, the arXiv /
