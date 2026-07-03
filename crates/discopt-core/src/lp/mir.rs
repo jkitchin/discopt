@@ -228,18 +228,9 @@ pub fn separate_mir(
         let mut best: Option<(Vec<f64>, f64, f64)> = None; // (coeffs, rhs, violation)
         for &comp in &patterns {
             for &d in &deltas {
-                if let Some((coeffs, rhs, viol)) = mir_under_substitution(
-                    row,
-                    b,
-                    l,
-                    u,
-                    integrality,
-                    comp,
-                    x,
-                    d,
-                    tol,
-                    max_dynamism,
-                ) {
+                if let Some((coeffs, rhs, viol)) =
+                    mir_under_substitution(row, b, l, u, integrality, comp, x, d, tol, max_dynamism)
+                {
                     if best.as_ref().map(|bst| viol > bst.2).unwrap_or(true) {
                         best = Some((coeffs, rhs, viol));
                     }

@@ -567,10 +567,14 @@ impl<'a> Simplex<'a> {
             v >= self.lb[j] - ftol && v <= self.ub[j] + ftol
         });
         if !feasible {
-            if std::env::var("DISCOPT_T14_DBG").is_ok() { eprintln!("T14 REJECT primal-infeasible"); }
+            if std::env::var("DISCOPT_T14_DBG").is_ok() {
+                eprintln!("T14 REJECT primal-infeasible");
+            }
             return Err(self.cols);
         }
-        if std::env::var("DISCOPT_T14_DBG").is_ok() { eprintln!("T14 ACCEPT"); }
+        if std::env::var("DISCOPT_T14_DBG").is_ok() {
+            eprintln!("T14 ACCEPT");
+        }
         // Warm basis is nonsingular + primal-feasible → primal phase 2 only.
         let mut cost2 = vec![0.0; self.na];
         cost2[..n].copy_from_slice(self.c);

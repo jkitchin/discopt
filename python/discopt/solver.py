@@ -2052,6 +2052,31 @@ _RENS_BUDGET_CAP_S = 8.0
 _ROOT_CUT_POOL_ROUNDS_ENV = int(os.environ.get("DISCOPT_ROOT_CUT_ROUNDS", "0"))
 _ROOT_CUT_POOL_MAX_ENV = int(os.environ.get("DISCOPT_ROOT_CUT_MAX", "200"))
 
+# Marchand-Wolsey aggregation c-MIR separator (cert:P3). DEFAULT-OFF, bound-
+# changing per CLAUDE.md §5: it ships dark behind this flag until proven on
+# nightlies. Read per-solve (below) so it can be toggled after ``import discopt``.
+# The separator is validity-gated (nonnegative row combination + valid MIR ⇒
+# valid cut; Rust ``aggregation_validity_random_systems`` property test), so
+# enabling it can only add valid cuts, never a false certificate.
+_CMIR_AGGREGATION_ENV_DEFAULT = os.environ.get("DISCOPT_CMIR_AGGREGATION", "0").lower() not in (
+    "0",
+    "",
+    "false",
+    "no",
+    "off",
+)
+
+
+def _cmir_aggregation_enabled() -> bool:
+    """Whether the aggregation c-MIR separator is enabled for this solve.
+
+    Re-reads ``DISCOPT_CMIR_AGGREGATION`` each call (default-off) so tests and
+    callers can toggle it after import; falls back to the import-time default."""
+    val = os.environ.get("DISCOPT_CMIR_AGGREGATION")
+    if val is None:
+        return _CMIR_AGGREGATION_ENV_DEFAULT
+    return val.lower() not in ("0", "", "false", "no", "off")
+
 
 def _apply_auto_cut_policy(model: "Model", relaxer) -> None:
     """Choose at most one QCQP cut family by structure + size, in place.
@@ -10387,6 +10412,55 @@ def _separate_mir_cuts(lp_data, x_vertex, n_orig, int_idx, a_ub_orig, b_ub_orig,
     return embedded[:max_cuts], rhs[:max_cuts]
 
 
+def _separate_aggregation_mir_cuts(
+    lp_data, x_vertex, n_orig, int_idx, a_ub_orig, b_ub_orig, max_cuts: int = 8
+):
+    """Separate Marchand-Wolsey aggregation c-MIR cuts from the original ``<=``
+    rows at the crossover vertex, via the Rust ``aggregation_mir_cuts_py`` binding.
+
+    Pairs ``<=`` rows with nonnegative weights to cancel a continuous variable,
+    forms the valid implied aggregate row, and applies the same complemented MIR
+    (bound substitution + delta-scan) as :func:`_separate_mir_cuts` to it. A
+    nonnegative combination of ``<=`` rows is a valid ``<=`` inequality, and MIR
+    on it is valid for the integer hull, so every emitted cut is valid for the
+    original feasible set — no integer-feasible point is ever removed (proven by
+    the Rust ``aggregation_validity_random_systems`` property test).
+
+    **Default-off**: this is the ``DISCOPT_CMIR_AGGREGATION`` feature-flagged
+    path; the caller gates the call, this helper only does the separation. Same
+    contract as :func:`_separate_mir_cuts`: returns ``(coeffs, rhs)`` embedded
+    into the current standard-form columns, or ``None`` when the binding is
+    unavailable, lower bounds are non-finite, or no cut is produced."""
+    if a_ub_orig is None or np.asarray(a_ub_orig).shape[0] < 2:
+        return None  # aggregation needs at least two rows to combine
+    try:
+        from discopt._rust import aggregation_mir_cuts_py
+    except ImportError:
+        return None
+    lo = np.asarray(lp_data.x_l, dtype=np.float64)[:n_orig]
+    if not np.all(np.isfinite(lo)):
+        return None  # the MIR lower-bound shift requires finite lower bounds
+    hi = np.asarray(lp_data.x_u, dtype=np.float64)[:n_orig].copy()
+    hi[~np.isfinite(hi)] = np.inf
+    integ = np.zeros(n_orig, dtype=bool)
+    integ[[j for j in int_idx if j < n_orig]] = True
+    res = aggregation_mir_cuts_py(
+        np.ascontiguousarray(a_ub_orig, dtype=np.float64),
+        np.ascontiguousarray(b_ub_orig, dtype=np.float64),
+        np.ascontiguousarray(lo),
+        np.ascontiguousarray(hi),
+        integ,
+        np.ascontiguousarray(np.asarray(x_vertex, dtype=np.float64)[:n_orig]),
+    )
+    if res is None:
+        return None
+    coeffs, rhs = np.asarray(res[0], dtype=np.float64), np.asarray(res[1], dtype=np.float64)
+    n_cur = int(np.asarray(lp_data.A_eq).shape[1])
+    embedded = np.zeros((coeffs.shape[0], n_cur), dtype=np.float64)
+    embedded[:, :n_orig] = coeffs[:, :n_orig]
+    return embedded[:max_cuts], rhs[:max_cuts]
+
+
 def _extract_clique_edges(model: Model) -> list[tuple[int, int]]:
     """Conflict-graph 2-clique edges from the Rust presolve clique pass.
 
@@ -10574,6 +10648,23 @@ def _root_cover_cut_loop(
                 mc, mr = mir
                 lp_data = _augment_lpdata_with_mir_cuts(lp_data, mc, mr)
                 round_added += int(mc.shape[0])
+        # Aggregation c-MIR (cert:P3): DEFAULT-OFF, gated by
+        # DISCOPT_CMIR_AGGREGATION. Combines pairs of <= rows to cancel a
+        # continuous variable, then applies the same complemented MIR as above —
+        # valid by construction (nonnegative row combo + valid MIR). Same round-0
+        # / POUNCE-mode gate as single-row MIR; reuses the MIR augmentation.
+        if has_gomory and _round == 0 and _cmir_aggregation_enabled():
+            try:
+                agg = _separate_aggregation_mir_cuts(
+                    lp_data, x_vertex, n_orig, int_idx, A_ub_orig, b_ub_orig
+                )
+            except Exception as _agg_exc:
+                logger.debug("aggregation c-MIR separation skipped: %s", _agg_exc)
+                agg = None
+            if agg is not None:
+                ac, ar = agg
+                lp_data = _augment_lpdata_with_mir_cuts(lp_data, ac, ar)
+                round_added += int(ac.shape[0])
         if cuts:  # cover/clique reference original columns (< n_orig), still valid
             lp_data = _augment_lpdata_with_cover_cuts(lp_data, n_orig, cuts)
             round_added += len(cuts)
